@@ -193,8 +193,6 @@ def test_quality_role_contracts_use_template_defaults(tmp_path):
         "read_artifact",
         "web_search",
         "web_fetch",
-        "web_extract",
-        "http_request",
         "write_file",
         "apply_patch",
         "capability_request",
@@ -258,8 +256,7 @@ def test_coordinator_template_says_parent_authority_covers_children_without_disa
     assert "需要多人视角" in detail
     assert "child_coordinator" in detail
     assert "worker/writer/leaf_worker" in detail
-    assert "subagent_message" in detail
-    assert "平级讨论" in detail
+    assert "send_guidance" in detail
 
 
 # LLM: test_all_builtin_role_templates_are_visible_in_main_index covers role selection discovery.

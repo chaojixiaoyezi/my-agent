@@ -14,7 +14,8 @@ from html.parser import HTMLParser
 from typing import Any
 
 from .models import BaseTool, ToolExecutionResult, ToolSpec
-from .web import _has_control_chars, _normalize_url, _scalar_text
+from .web import _has_control_chars, _normalize_url
+from .web_http_helpers import scalar_text
 
 _MAX_QUERY_CHARS = 512
 _MAX_SEARCH_RESULTS = 10
@@ -135,7 +136,7 @@ class _DuckDuckGoHtmlResultParser(HTMLParser):
 
 
 def _normalize_query(value: Any) -> str:
-    query = _scalar_text(value, name="query", max_chars=_MAX_QUERY_CHARS)
+    query = scalar_text(value, name="query", max_chars=_MAX_QUERY_CHARS)
     if _has_control_chars(query):
         raise ValueError("query 包含不支持的控制字符")
     return query
@@ -155,7 +156,7 @@ def _normalize_domain_filter(value: Any, *, name: str) -> list[str]:
     raw_items = value if isinstance(value, list) else [value]
     domains: list[str] = []
     for raw in raw_items:
-        domain = _scalar_text(raw, name=name, max_chars=253).lower()
+        domain = scalar_text(raw, name=name, max_chars=253).lower()
         if _has_control_chars(domain):
             raise ValueError(f"{name} 包含不支持的控制字符")
         if "://" in domain:
@@ -240,11 +241,11 @@ class WebSearchTool(BaseTool):
             effect="read_only",
             description="按关键词搜索公开网页，返回结构化候选来源 URL、标题和摘要。",
             use_cases=[
-                "不知道具体 URL 时，先搜索公开来源候选，再用 web_fetch/web_extract 读取",
+                "不知道具体 URL 时，先搜索公开来源候选，再用 web_fetch 读取",
                 "研究论文、项目资料、文档和新闻入口时获取可核验链接",
             ],
             avoid_when=[
-                "已经有确定 URL 时，直接用 web_fetch；需要调 API 时用 http_request",
+                "已经有确定 URL 或 API 地址时，直接用 web_fetch",
             ],
             keywords=["搜索", "网页搜索", "查找来源", "search", "web_search", "公开来源", "候选链接"],
             parameters={"query": "搜索关键词", "limit": "可选，最多返回多少条候选结果", "allowed_domains": "可选，只保留这些域名及其子域名的结果", "blocked_domains": "可选，排除这些域名及其子域名的结果"},

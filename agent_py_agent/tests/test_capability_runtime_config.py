@@ -1,13 +1,12 @@
 """Focused tests for runtime capability config patching and hot reload.
 
-函数/模块用途: 验证 agent 可以通过正式补丁服务安全调整 capability_config，并让后续调度读取新配置。
+函数/模块用途: 验证后台补丁服务可以安全调整 capability_config，并让后续调度读取新配置。
 """
 
 from __future__ import annotations
 
 import json
 
-from agent_py_agent.agent.agent_core.capability_config_patch_tool import CapabilityConfigPatchTool
 from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import _dispatch_capability_config
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability.runtime_config import (
@@ -143,43 +142,40 @@ def test_reload_updates_router_config_when_file_changes(tmp_path):
     assert router.config.subagent_run_timeout == 1500
 
 
-# LLM: test_capability_config_patch_tool_applies_safe_patch proves the model has a formal self-heal lane.
-# 函数用途: SimpleAgent 注册 capability_config_patch 后，模型可通过工具请求安全配置变更。
-def test_capability_config_patch_tool_applies_safe_patch(tmp_path):
+# LLM: test_capability_config_patch_service_applies_safe_patch keeps config changes on the admin/runtime path.
+# 函数用途: 后台补丁服务仍可安全调整 capability_config；普通模型工具入口不负责这件事。
+def test_capability_config_patch_service_applies_safe_patch(tmp_path):
     config_path = tmp_path / "capability_config.yaml"
     _write_config(config_path, run_timeout=900)
-    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    agent.capability_config_path = config_path
 
-    result = CapabilityConfigPatchTool(agent).execute(
-        {
-            "apply": True,
-            "patches": [
-                {
-                    "field": "subagent_run_timeout",
-                    "value": 1800,
-                    "reason": "真实 E2E runner 需要更长时间。",
-                }
+    result = apply_capability_config_patch(
+        CapabilityConfigPatchRequest(
+            config_path=config_path,
+            apply=True,
+            patches=[
+                CapabilityConfigPatch(
+                    field="subagent_run_timeout",
+                    value=1800,
+                    reason="真实 E2E runner 需要更长时间。",
+                )
             ],
-        }
+        )
     )
 
     assert result.ok is True
-    payload = json.loads(result.output)
-    assert payload["applied"] is True
-    assert payload["changed_fields"] == ["subagent_run_timeout"]
+    assert result.applied is True
+    assert result.changed_fields == ["subagent_run_timeout"]
     assert "subagent_run_timeout: 1800" in config_path.read_text(encoding="utf-8")
 
 
-# LLM: test_capability_config_patch_tool_is_registered keeps tool discovery automatic.
-# 函数用途: 主代理初始化后能在 Tool Catalog 看到配置补丁工具，用户不用手写 YAML。
-def test_capability_config_patch_tool_is_registered(tmp_path):
+# LLM: test_capability_config_patch_tool_is_not_model_visible keeps config mutation off ordinary task surfaces.
+# 函数用途: 主代理普通工具列表不暴露配置补丁入口；配置调整走后台、CLI 或显式管理入口。
+def test_capability_config_patch_tool_is_not_model_visible(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
 
     specs = {spec.name: spec for spec in agent.tools.specs(include_orchestration=True)}
 
-    assert "capability_config_patch" in specs
-    assert specs["capability_config_patch"].category == "orchestration"
+    assert "capability_config_patch" not in specs
 
 
 # LLM: test_dispatch_tool_reads_runtime_capability_config proves future dispatch sees patched config.

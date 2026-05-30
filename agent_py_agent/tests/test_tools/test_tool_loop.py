@@ -412,20 +412,20 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
 
         result = agent.run("请创建两个子代理做隔离 coding 场景测试", save=False)
         tasks = agent.subagents.list_runs()
-        board = agent.tools.execute_call({"tool": "subagent_board", "limit": 5})
-        dry_dispatch = agent.tools.execute_call({"tool": "dispatch_subagents", "apply": False, "max_runners": 1})
-        blocked_dispatch = agent.tools.execute_call({"tool": "dispatch_subagents", "execute_runners": True, "apply": False})
+        tree = agent.tools.execute_call({"tool": "inspect_agent_tree", "scope": "all"})
+        dry_dispatch = agent.tools.execute_call({"tool": "dispatch_subagents", "dry_run": True, "max_runners": 1})
+        legacy_dispatch = agent.tools.execute_call({"tool": "dispatch_subagents", "execute_runners": True, "dry_run": True})
 
         assert result.response == "已创建子代理任务并等待调度。"
         assert result.tool_rounds == 1
         assert len(tasks) == 2
         assert all("write_file" in task.allowed_tools for task in tasks)
-        assert board.ok
-        assert tasks[0].id in board.output
+        assert tree.ok
+        assert any(task.id in tree.output for task in tasks)
         assert dry_dispatch.ok
         assert '"dry_run": true' in dry_dispatch.output
-        assert not blocked_dispatch.ok
-        assert "必须配合 apply=true" in blocked_dispatch.output
+        assert not legacy_dispatch.ok
+        assert "只接受 dry_run" in legacy_dispatch.output
 
 
 def test_create_subagents_accepts_explicit_external_write_target_without_starting():
@@ -506,7 +506,7 @@ def test_non_mutating_schedule_result_does_not_consume_one_shot_key():
     )
     agent = _OneShotHarnessAgent(_BlockedScheduleTools())
     service = ToolLoopService(agent)
-    payload = {"tool": "schedule_child_subagents", "apply": True, "children": [{"goal": "cart"}]}
+    payload = {"tool": "schedule_child_subagents", "dry_run": False, "children": [{"goal": "cart"}]}
 
     first = service._execute_one_tool_call(ToolCallExecuteParams(params, 1, 1, payload))
     second = service._execute_one_tool_call(ToolCallExecuteParams(params, 2, 1, payload))

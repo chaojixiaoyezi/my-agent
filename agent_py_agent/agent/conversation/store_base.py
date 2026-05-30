@@ -17,9 +17,11 @@ class ConversationBaseStore:
         self.tasks_dir = self.root / "tasks"
         self.policies_dir = self.root / "progress_policies"
         self.observations_dir = self.root / "observations"
+        self.guidance_dir = self.root / "guidance"
         self.wake_queue_dir = self.root / "wake_queue"
         self.wake_handled_dir = self.wake_queue_dir / "handled"
         self.observation_handled_path = self.root / "observation_handled.json"
+        self.guidance_delivered_path = self.root / "guidance_delivered.json"
         self.bindings_path = self.root / "channel_bindings.json"
         self.user_latest_path = self.root / "user_latest_threads.json"
         self.background_claims_dir = self.root / "background_claims"
@@ -37,6 +39,7 @@ class ConversationBaseStore:
             self.tasks_dir,
             self.policies_dir,
             self.observations_dir,
+            self.guidance_dir,
             self.background_claims_dir,
             self.wake_dedupe_dir,
             self.wake_queue_dir / "urgent",
@@ -61,6 +64,11 @@ class ConversationBaseStore:
 
     def _observation_path(self, thread_id: str) -> Path:
         return self.observations_dir / f"{thread_id}.jsonl"
+
+    # LLM: _guidance_path stores soft runtime hints per target without mixing them into messages.
+    # 函数用途: 根据 target_type/target_id 定位 guidance JSONL 文件，文件名做安全归一。
+    def _guidance_path(self, target_type: str, target_id: str) -> Path:
+        return self.guidance_dir / f"{safe_file_stem(target_type)}.{safe_file_stem(target_id)}.jsonl"
 
     def _wake_signal_path(self, signal: WakeSignal) -> Path:
         return self.wake_queue_dir / wake_urgency(signal.urgency) / f"{signal.wake_signal_id}.json"

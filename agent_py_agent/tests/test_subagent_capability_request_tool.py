@@ -42,17 +42,14 @@ def test_capability_request_tool_records_open_request(tmp_path):
 
     result = CapabilityRequestTool(agent).execute(
         {
-            "orchestration": {
-                "problem": "需要执行 pwd 和 python3 生成真实环境证据。",
-                "needed_capability": "controlled_exec",
-                "capability_type": "shell",
-                "requested_tools": ["controlled_exec"],
-                "requested_commands": ["pwd", "python3"],
-                "path_scope": [str(tmp_path)],
-                "output_budget": {"stdout_bytes": 1024, "stderr_bytes": 512},
-                "risk_level": "low",
-            },
-            "filesystem": {"write_root": str(tmp_path)},
+            "problem": "需要执行 pwd 和 python3 生成真实环境证据。",
+            "needed_capability": "controlled_exec",
+            "capability_type": "shell",
+            "requested_tools": ["controlled_exec"],
+            "requested_commands": ["pwd", "python3"],
+            "path_scope": [str(tmp_path)],
+            "output_budget": {"stdout_bytes": 1024, "stderr_bytes": 512},
+            "risk_level": "low",
         }
     )
 
@@ -131,14 +128,14 @@ def test_top_level_worker_can_request_capability(tmp_path):
 
     result = CapabilityRequestTool(agent).execute(
         {
-            "problem": "需要 fetch_url 核验网页。",
+            "problem": "需要 web_fetch 核验网页。",
             "needed_capability": "network",
-            "requested_tools": ["fetch_url"],
+            "requested_tools": ["web_fetch"],
         }
     )
 
     assert result.ok is True
-    assert manager.load(task.id).capability_requests[0].requested_tools == ["fetch_url"]
+    assert manager.load(task.id).capability_requests[0].requested_tools == ["web_fetch"]
 
 
 # LLM: test_capability_request_tool_is_registered_for_simple_agent proves runners can see the tool.
@@ -162,7 +159,7 @@ def test_capability_request_tool_is_available_to_role_and_leaf_defaults(tmp_path
         goal="parent",
         thought="split",
         plan=["delegate"],
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
         extra_write_roots=[str(deliverables)],
     )
 

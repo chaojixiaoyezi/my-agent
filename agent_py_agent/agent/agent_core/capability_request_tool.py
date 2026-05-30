@@ -164,18 +164,10 @@ def _record_params(params: dict[str, object], problem: str) -> RecordCapabilityR
     )
 
 
-# LLM: _capability_params accepts flat calls plus orchestration/capability_request bundles.
-# 函数用途: 兼容模型按 bundle 规范传参；top-level 字段优先，wrapper 字段补齐缺省。
+# LLM: _capability_params keeps capability_request parameters flat.
+# 函数用途: 不再展开 request/orchestration 包装；模型可见协议只接受顶层字段。
 def _capability_params(params: dict[str, object]) -> dict[str, object]:
-    normalized: dict[str, object] = {}
-    for key in ("orchestration", "capability_request", "request"):
-        value = params.get(key)
-        if isinstance(value, dict):
-            normalized.update(value)
-    for key, value in params.items():
-        if key not in {"orchestration", "capability_request", "request", "filesystem"}:
-            normalized[key] = value
-    return normalized
+    return dict(params)
 
 
 # LLM: _needed_capability infers a conservative name when the model supplies only scoped tool details.

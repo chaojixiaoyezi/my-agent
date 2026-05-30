@@ -34,7 +34,7 @@ def test_hierarchy_schedule_infers_coordinator_role_from_tools(tmp_path):
                     goal="创建三个 leaf worker 并调度执行。",
                     agent_name="child-01-grandchild-01",
                     role="worker",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
                 )
             ],
             apply=True,
@@ -159,7 +159,7 @@ def test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools(tmp_
                     allowed_tools=[
                         "schedule_child_subagents",
                         "dispatch_subagents",
-                        "subagent_board",
+                        "inspect_agent_tree",
                         "read_file",
                         "write_file",
                     ],
@@ -187,7 +187,7 @@ def test_hierarchy_schedule_keeps_write_intent_as_leaf_role(tmp_path):
         parent_id=root.id,
         root_id=root.id,
         depth=1,
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
         extra_write_roots=[str(deliverables)],
     )
 
@@ -199,7 +199,7 @@ def test_hierarchy_schedule_keeps_write_intent_as_leaf_role(tmp_path):
                     goal=f"实现 normalize_text 并写入 {deliverables}/leaf_outputs/leaf_normalize/solution.py。",
                     agent_name="leaf-normalize",
                     role="worker",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
                 )
             ],
             apply=True,
@@ -222,7 +222,7 @@ def test_hierarchy_schedule_keeps_orchestration_tools_for_leaf_write_tasks(tmp_p
         goal="child coordinator",
         thought="coordinate",
         plan=["plan"],
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
         extra_write_roots=[str(deliverables)],
     )
 
@@ -234,7 +234,7 @@ def test_hierarchy_schedule_keeps_orchestration_tools_for_leaf_write_tasks(tmp_p
                     goal=f"写入 {deliverables}/leaf_outputs/leaf_text/solution.py 和 test_solution.py。",
                     agent_name="leaf-text",
                     role="worker",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board", "write"],
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree", "write"],
                 )
             ],
             apply=True,
@@ -246,7 +246,7 @@ def test_hierarchy_schedule_keeps_orchestration_tools_for_leaf_write_tasks(tmp_p
     assert "write_file" in leaf.allowed_tools
     assert "schedule_child_subagents" in leaf.allowed_tools
     assert "dispatch_subagents" in leaf.allowed_tools
-    assert "subagent_board" in leaf.allowed_tools
+    assert "inspect_agent_tree" in leaf.allowed_tools
 
 
 # LLM: test_hierarchy_schedule_preserves_report_write_tools_for_coordinators covers coordinator report output.
@@ -258,7 +258,7 @@ def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_pa
         goal="root",
         thought="split",
         plan=["plan"],
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
         extra_write_roots=[str(deliverables)],
     )
 
@@ -273,7 +273,7 @@ def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_pa
                     allowed_tools=[
                         "schedule_child_subagents",
                         "dispatch_subagents",
-                        "subagent_board",
+                        "inspect_agent_tree",
                         "read_file",
                         "write_file",
                     ],

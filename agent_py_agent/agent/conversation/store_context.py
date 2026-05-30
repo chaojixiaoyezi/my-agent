@@ -17,4 +17,5 @@ class ConversationContextStore(ConversationClaimStore):
             "tasks": [item.to_dict() for item in self.task_links(thread_id)],
             "channel_bindings": [item.to_dict() for item in thread.channel_bindings],
             "observations": [item.to_dict() for item in self.recent_observations(thread_id, limit=recent_limit)],
+            "guidance": [item.to_dict() for item in self.pending_guidance("thread", thread_id, limit=recent_limit)],
         }

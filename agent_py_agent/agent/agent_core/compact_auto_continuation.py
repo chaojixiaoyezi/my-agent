@@ -1,5 +1,5 @@
-# LLM: Compact auto continuation bridges a ready continue packet into one guarded next model turn.
-# 模块用途: 把自动 compact/resume 生成的继续包渲染成 prompt 注入块，并控制只续跑一次。
+# LLM: Compact auto continuation bridges a ready continue packet into the next guarded model turn.
+# 模块用途: 把自动 compact/resume 生成的继续包渲染成 prompt 注入块；空转续接会返回，有进展时可继续多轮 compact。
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ def build_compact_auto_continue_injection(packet: dict[str, Any]) -> str:
         str(work_state.get("current_phase") or ""),
         "",
         "## Next Step",
-        str(work_state.get("next_step") or ""),
+        str(work_state.get("next_step") or "继续当前任务目标；先核对推荐引用和最近产物，再从未完成部分推进。"),
         "",
         _items_section("## Acceptance", work_state.get("acceptance")),
         _items_section("## Constraints", work_state.get("constraints")),
@@ -63,7 +63,7 @@ def build_compact_auto_continue_injection(packet: dict[str, Any]) -> str:
         "- Continue only from the Next Step above.",
         "- Do not redo completed work.",
         "- Read recommended refs only when needed for the next action.",
-        "- If any required field or ref is missing, stop and report the blocker.",
+        "- If optional notes are missing, continue from the captured goal and refs; only stop when source refs are broken.",
     ]
     return "\n".join(section for section in sections if section is not None).strip()
 

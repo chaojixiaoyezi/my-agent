@@ -30,7 +30,7 @@ class StructuredSubagentBackend(BaseBackend):
                 '    {"kind": "note", "summary": "已确认需要接口健康检查", "ok": true}\n'
                 "  ],\n"
                 '  "capability_requests": [\n'
-                '    {"problem": "需要请求接口确认状态码", "needed_capability": "http_request", "expected_output": "接口状态码", "tried": ["read_file"], "evidence": ["代码阅读不足以确认线上状态"], "constraints": {"method": "GET"}}\n'
+                '    {"problem": "需要请求接口确认状态码", "needed_capability": "web_fetch", "expected_output": "接口状态码", "tried": ["read_file"], "evidence": ["代码阅读不足以确认线上状态"], "constraints": {"method": "GET"}}\n'
                 "  ],\n"
                 '  "artifacts": [\n'
                 '    {"path": "reports/api_notes.md", "kind": "report", "summary": "接口检查前置阅读记录"}\n'
@@ -343,14 +343,14 @@ def _hierarchical_schedule_tool_call_response(backend: str) -> ModelResponse:
             "[TOOL_CALL]\n"
             "{"
             '"tool":"schedule_child_subagents",'
-            '"apply":true,'
+            '"dry_run":false,'
             '"max_depth":3,'
             '"max_children":4,'
             '"children":[{'
             '"role":"child_coordinator",'
             '"agent_name":"child-catalog",'
             '"goal":"作为主节点的下一层，继续拆分目录和条目列表实现任务",'
-            '"allowed_tools":["schedule_child_subagents","dispatch_subagents","subagent_board","read_file","write_file"],'
+            '"allowed_tools":["schedule_child_subagents","dispatch_subagents","inspect_agent_tree","read_file","write_file"],'
             '"acceptance_checks":["必须只通过父节点汇报 refs 和状态"]'
             "}]"
             "}\n"

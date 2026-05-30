@@ -69,7 +69,7 @@ def test_tool_loop_closes_out_after_delivery_contract_passes():
         )
 
         assert backend.calls == 2
-        assert result.tool_rounds == 1
+        assert result.tool_rounds == 2
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert (workspace / "outputs/html_report/index.html").exists()
         assert (workspace / ".agent_delivery/closeout.json").exists()
@@ -243,9 +243,9 @@ def test_tool_loop_rejects_incomplete_delivery_contract_artifact():
 
 # LLM: Delivery closeout must not pass while any chunked write session remains open.
 # 函数用途: 有 open file_write_session manifest 时，即使目录已存在也不能输出完成标记。
-# LLM: Repeated identical delivery failures must stop the current no-tool spin without pretending completion.
-# 函数用途: 验证 closeout 返工提示被模型连续忽略时，本轮停止空转，但不再输出硬 blocked 门。
-def test_tool_loop_stops_after_repeated_unchanged_delivery_failure_without_hard_block():
+# LLM: Repeated explicit failed submissions must not reintroduce the old delivery rework marker.
+# 函数用途: 验证模型反复提交同一个坏产物时，只按普通工具轮预算停住，不输出旧的隐式返工硬标记。
+def test_tool_loop_repeated_failed_submissions_do_not_emit_rework_marker():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         backend = NoProgressDeliveryBackend()
@@ -259,8 +259,8 @@ def test_tool_loop_stops_after_repeated_unchanged_delivery_failure_without_hard_
         )
         report = _closeout_report(workspace)
 
-        assert backend.calls == 4
-        assert "[MAIN_AGENT_DELIVERY_REWORK_REQUIRED]" in result.response
+        assert backend.calls == 7
+        assert "已达到最大工具轮数限制" in result.response
         assert "[MAIN_AGENT_DELIVERY_BLOCKED]" not in result.response
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
         assert report["ok"] is False
@@ -398,7 +398,10 @@ class MalformedDeliveryContractBackend:
                 backend=self.name,
             )
         if self.calls == 2:
-            return ModelResponse(text="草稿已写入，请系统验收。", backend=self.name)
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"submit_for_acceptance","note":"草稿已写入，请系统验收。"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
         assert "delivery-contract-doctor" in prompt
         assert "DELIVERY_CONTRACT_ARTIFACTS_NOT_LIST" in prompt
         assert "rematerialize_delivery_contract" in prompt
@@ -423,7 +426,10 @@ class ValidationContractStringListBackend:
                 backend=self.name,
             )
         if self.calls == 2:
-            return ModelResponse(text="表格已生成，请系统验收。", backend=self.name)
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"submit_for_acceptance","note":"表格已生成，请系统验收。"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
         assert "delivery-contract-doctor" in prompt
         assert "VALIDATION_CONTRACT_STRING_LIST_INVALID" in prompt
         self.saw_contract_doctor = True

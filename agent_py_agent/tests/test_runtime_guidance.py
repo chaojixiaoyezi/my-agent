@@ -1,0 +1,170 @@
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
+from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import DispatchSubagentsTool
+from agent_py_agent.agent.agent_core.runtime_guidance import (
+    inject_pending_guidance,
+    render_subagent_guidance_section,
+)
+from agent_py_agent.agent.agent_core.runtime_guidance_tool import SendGuidanceTool
+from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.conversation import ConversationStore
+from agent_py_agent.agent.core import SimpleAgent
+
+
+def _tool_loop_params(**overrides) -> ToolLoopExecuteParams:
+    params = ToolLoopExecuteParams(
+        user_prompt="继续完成任务",
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=None,
+        granted_capabilities=None,
+        write_boundary=None,
+        task_attributes={},
+        request_id="req-1",
+        run_id="main-run-1",
+        task_id="task-1",
+        one_shot_tool_calls=set(),
+        executed_tools=[],
+        archive_tool_calls=[],
+    )
+    for key, value in overrides.items():
+        params = replace(params, **{key: value})
+    return params
+
+
+def test_conversation_guidance_can_be_delivered_once(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+
+    entry = store.append_guidance(
+        {
+            "target_type": "thread",
+            "target_id": thread.thread_id,
+            "message": "请先汇总已有产物，再继续补缺口。",
+            "sender": "user",
+            "now": 2.0,
+        }
+    )
+
+    pending = store.pending_guidance("thread", thread.thread_id)
+    assert [item.guidance_id for item in pending] == [entry.guidance_id]
+    assert pending[0].message == "请先汇总已有产物，再继续补缺口。"
+
+    store.mark_guidance_delivered([entry.guidance_id], now=3.0)
+
+    assert store.pending_guidance("thread", thread.thread_id) == []
+    delivered = store.recent_guidance("thread", thread.thread_id)
+    assert delivered[0].delivered_at == 3.0
+
+
+def test_send_guidance_tool_writes_run_guidance(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    result = SendGuidanceTool(agent).execute(
+        {
+            "target": {"type": "agent_run", "id": "child-1"},
+            "message": "换一个数据来源核对，不要重复查同一个页面。",
+            "priority": "high",
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["target"]["type"] == "agent_run"
+    assert payload["target"]["id"] == "child-1"
+    pending = agent.conversation_store.pending_guidance("agent_run", "child-1")
+    assert pending[0].message == "换一个数据来源核对，不要重复查同一个页面。"
+    assert pending[0].priority == "high"
+
+
+def test_tool_loop_injects_pending_guidance_and_marks_delivered(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "agent_run",
+            "target_id": "main-run-1",
+            "message": "先写一个可打开的草稿，再继续完善。",
+            "now": 10.0,
+        }
+    )
+    params = _tool_loop_params(run_id="main-run-1")
+
+    updated = inject_pending_guidance(agent, params, now=11.0)
+
+    assert updated is True
+    assert any("先写一个可打开的草稿" in str(item) for item in params.tool_context)
+    assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
+
+
+def test_subagent_runner_prompt_can_render_pending_guidance(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    store.append_guidance(
+        {
+            "target_type": "agent_run",
+            "target_id": "child-1",
+            "message": "上级补充：把命中和未命中都写清楚。",
+            "now": 20.0,
+        }
+    )
+
+    section = render_subagent_guidance_section(store, "child-1", now=21.0)
+
+    assert "上级补充：把命中和未命中都写清楚。" in section
+    assert store.pending_guidance("agent_run", "child-1") == []
+
+
+def test_real_subagent_runner_prompt_includes_guidance(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    child = agent.subagents.create_run(goal="child", thought="", plan=["child"])
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "agent_run",
+            "target_id": child.id,
+            "message": "先写阶段文件，再继续扩展。",
+        }
+    )
+
+    _, prompt = agent._build_subagent_prompt(child.id, 0, "")
+
+    assert "Runtime Guidance" in prompt
+    assert "先写阶段文件，再继续扩展。" in prompt
+    assert agent.conversation_store.pending_guidance("agent_run", child.id) == []
+
+
+def test_dispatch_runner_instruction_writes_guidance_for_explicit_run(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    child = agent.subagents.create_run(goal="child", thought="", plan=["child"])
+    agent.dispatch_subagents = MagicMock(
+        return_value=SimpleNamespace(dry_run=False, summary={"ok": True}, records=[])
+    )
+
+    result = DispatchSubagentsTool(agent).execute(
+        {
+            "run_ids": [child.id],
+            "dry_run": False,
+            "runner_instruction": "先汇总已有文件，再继续补缺口。",
+        }
+    )
+
+    assert result.ok is True
+    pending = agent.conversation_store.pending_guidance("agent_run", child.id)
+    assert pending[0].message == "先汇总已有文件，再继续补缺口。"
+    assert pending[0].metadata["legacy_tool"] == "dispatch_subagents"

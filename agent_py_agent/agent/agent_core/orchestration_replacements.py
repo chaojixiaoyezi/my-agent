@@ -26,9 +26,7 @@ def _replacement_source_ids(task: object) -> list[str]:
     attrs = getattr(task, "attributes", {}) or {}
     if not isinstance(attrs, dict):
         return []
-    values: list[str] = []
-    for key in ("replacement_for_run_ids", "replaces_run_ids", "supersedes_run_ids"):
-        values.extend(_string_list(attrs.get(key)))
+    values = _string_list(attrs.get("replacement_for_run_ids"))
     task_id = str(getattr(task, "id", "") or "").strip()
     unique: list[str] = []
     for value in values:

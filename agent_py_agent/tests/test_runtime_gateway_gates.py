@@ -95,8 +95,8 @@ def test_path_url_command_gate_blocks_escape_private_url_and_shell_operators(tmp
     workspace = _workspace_with_symlink_escape(tmp_path)
 
     path_escape = _path_gate({"tool": "read_file", "path": "link"}, workspace)
-    private_url = _path_gate({"tool": "fetch_url", "url": "http://127.1/admin"}, workspace)
-    file_url = _path_gate({"tool": "fetch_url", "url": "file:///etc/passwd"}, workspace)
+    private_url = _path_gate({"tool": "web_fetch", "url": "http://127.1/admin"}, workspace)
+    file_url = _path_gate({"tool": "web_fetch", "url": "file:///etc/passwd"}, workspace)
     command_operator = _path_gate({"tool": "run_command", "command": "python build.py && python test.py"}, workspace)
     passed = _path_gate({"tool": "run_command", "command": ["python3", "--version"], "working_dir": "."}, workspace)
 

@@ -58,5 +58,8 @@ class _MaterializingDeliveryBackend:
                 backend=self.name,
             )
         if self.calls == 3:
-            return ModelResponse(text="产物已写好，提交最终验收。", backend=self.name)
-        raise AssertionError("delivery contract should close out after the final no-tool answer")
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"submit_for_acceptance","note":"产物已写好，提交最终验收。"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        raise AssertionError("delivery contract should close out after explicit submit_for_acceptance")

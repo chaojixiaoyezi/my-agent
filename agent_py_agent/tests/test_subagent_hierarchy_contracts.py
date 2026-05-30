@@ -39,7 +39,7 @@ def test_hierarchy_schedule_preserves_shopping_file_contract_when_child_goal_onl
                     goal=f"创建页面架构 coordinator，产物目录 {build}",
                     role="child_coordinator",
                     agent_name="shop-lead",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
                 )
             ],
             apply=True,

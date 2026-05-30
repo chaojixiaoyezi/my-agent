@@ -1,4 +1,4 @@
-"""Focused tests for create_subagents items/tasks batch mode."""
+"""Focused tests for create_subagents items batch mode."""
 from __future__ import annotations
 
 import json
@@ -37,7 +37,7 @@ def _create_run_sequence():
 
 
 class TestCreateSubagentsItemsMode:
-    """测试 create_subagents 的 items/tasks 结构化批量入口。"""
+    """测试 create_subagents 的 items 结构化批量入口。"""
 
     def test_items_create_distinct_goals_without_top_level_goal(self):
         """items[] 批量模式应创建不同目标，不能复制同一个 goal。"""
@@ -74,7 +74,7 @@ class TestCreateSubagentsItemsMode:
         assert payload["created"] == 3
         assert payload["auto_start"]["status"] == "started"
         assert payload["auto_start"]["run_ids"] == ["run_1", "run_2", "run_3"]
-        assert payload["next_action"]["tool"] == "subagent_board"
+        assert payload["next_action"]["tool"] == "inspect_agent_tree"
 
     def test_items_are_capped_by_max_subagents(self):
         """items[] 也应遵守 max_subagents，避免模型一次性撒太多任务。"""
@@ -127,7 +127,7 @@ class TestCreateSubagentsItemsMode:
         assert "second item invalid" in result.output
         assert mock_agent.subagents.create_run.call_count == 0
 
-    def test_items_do_not_inherit_global_plan_but_keep_nested_tasks(self):
+    def test_items_do_not_inherit_global_plan_but_keep_nested_children(self):
         """items[] 不应把顶层全局计划误当成每个 child 自己的计划。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -139,7 +139,7 @@ class TestCreateSubagentsItemsMode:
             "items": [
                 {
                     "goal": "研究市场环境",
-                    "tasks": [{"goal": "分析越南市场", "agent_name": "小小傻妞-越南"}],
+                    "children": [{"goal": "分析越南市场", "agent_name": "小小傻妞-越南"}],
                 }
             ],
         })
@@ -201,19 +201,18 @@ class TestCreateSubagentsItemsMode:
         assert params.context_manifest["task_pack_refs"] == ["packs/brief.json"]
         assert params.context_packs == [{"kind": "context_ref", "path": "packs/brief.json"}]
 
-    def test_items_and_tasks_cannot_be_mixed(self):
-        """create_subagents 不能同时传 items 和 tasks，避免模型把两套批量协议混成一坨。"""
+    def test_tasks_alias_is_rejected(self):
+        """create_subagents 不再接受 tasks 批量别名，避免模型看到两套入口。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
         result = CreateSubagentsTool(mock_agent).execute({
-            "items": [{"goal": "研究市场", "role": "worker"}],
             "tasks": [{"goal": "整合市场", "role": "coordinator"}],
             "count": 3,
         })
 
         assert result.ok is False
-        assert "不要同时传 items 和 tasks" in result.output
+        assert "只接受 items" in result.output
         mock_agent.subagents.create_run.assert_not_called()
 
     def test_create_subagents_keeps_grandchild_like_names_as_display_text(self):

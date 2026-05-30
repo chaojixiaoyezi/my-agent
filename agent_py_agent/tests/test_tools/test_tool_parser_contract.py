@@ -35,7 +35,7 @@ def test_tool_catalog_and_recommended_sections():
     """LLM: verify that catalog and recommended-tools sections render correctly.
 
     新手说明:
-    检查工具目录里有 http_request，推荐工具区能根据自然语言选到 http_request。
+    检查 API/HTTP 场景也统一推荐 web_fetch，避免模型看到重复网络入口。
     """
     registry = _registry()
 
@@ -43,9 +43,11 @@ def test_tool_catalog_and_recommended_sections():
     recommended = registry.render_recommended_tools_section("帮我测试一个 REST API 接口并查看返回")
 
     assert "# Tool Catalog" in catalog
-    assert "http_request [api]" in catalog
+    assert "web_fetch [web]" in catalog
+    assert "http_request [api]" not in catalog
+    assert "web_extract [web]" not in catalog
     assert "适用场景" in catalog
-    assert "## http_request" in recommended
+    assert "## web_fetch" in recommended
     assert "推荐理由" in recommended
 
 
@@ -180,15 +182,15 @@ def test_tool_executor_unwraps_model_param_name_bundle(tmp_path: Path):
     assert "bundle recovered" in result.output
 
 
-def test_tool_call_parser_unwraps_model_category_bundle():
-    """LLM: tolerate models that wrap params by tool category such as orchestration or filesystem."""
+def test_tool_call_parser_keeps_orchestration_params_flat():
+    """LLM: orchestration tools no longer unwrap a second category bundle."""
     registry = make_tool_registry(Path.cwd())
 
     calls = registry.parse_tool_calls(
-        '[TOOL_CALL]\n{"tool":"subagent_board","orchestration":{"limit":20,"status":"running"}}\n[/TOOL_CALL]'
+        '[TOOL_CALL]\n{"tool":"inspect_agent_tree","scope":"root_tree"}\n[/TOOL_CALL]'
     )
 
-    assert calls == [{"tool": "subagent_board", "limit": 20, "status": "running"}]
+    assert calls == [{"tool": "inspect_agent_tree", "scope": "root_tree"}]
 
 
 def test_tool_executor_unwraps_model_filesystem_bundle(tmp_path: Path):
@@ -434,7 +436,7 @@ def test_tool_spec_catalog_entry_includes_first_example():
         avoid_when=[],
         keywords=[],
         parameters={"children": "child specs", "apply": "write"},
-        examples=['{"tool":"schedule_child_subagents","apply":true,"children":[]}'],
+        examples=['{"tool":"schedule_child_subagents","dry_run":false,"children":[]}'],
     )
 
     entry = spec.render_catalog_entry()

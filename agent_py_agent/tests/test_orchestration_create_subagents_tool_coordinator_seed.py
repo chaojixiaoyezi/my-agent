@@ -204,10 +204,10 @@ class TestCreateSubagentsToolCoordinatorSeed:
 
 
 class TestCreateSubagentsToolCoordinatorPlan:
-    """测试 coordinator plan 和 lineage 名称兼容。"""
+    """测试 coordinator plan 和 lineage 名称处理。"""
 
-    def test_items_count_and_nested_tasks_are_tolerated_as_coordinator_plan(self):
-        """模型自然传 items+count+tasks 时，不应报错逼它丢掉多层计划。"""
+    def test_items_count_and_nested_children_become_coordinator_plan(self):
+        """items 内显式 children 会让当前 item 成为 coordinator 计划。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -230,7 +230,7 @@ class TestCreateSubagentsToolCoordinatorPlan:
                 "goal": "研究印尼、泰国、越南市场环境，汇总评分。",
                 "role": "worker",
                 "agent_name": "小傻妞-市场",
-                "tasks": [
+                "children": [
                     {"goal": "分析印尼市场", "role": "grandchild", "agent_name": "印尼研究员"},
                     {"goal": "分析泰国和越南市场", "role": "grandchild", "agent_name": "泰越研究员"},
                 ],

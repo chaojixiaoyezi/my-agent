@@ -28,7 +28,6 @@ from .orchestration_dispatch_scope import (
     dispatch_workflow_mode,
 )
 from .orchestration_dispatch_state_contract import dispatch_state_contract_payload
-from .orchestration_dispatch_tool_helpers import _run_ids_from_dispatch
 from .orchestration_progress_payload import direct_children_progress_payload
 from .orchestration_run_scope import (
     remember_dispatched_orchestration_run_ids,
@@ -44,6 +43,16 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
+def _legacy_execution_param_error(params: dict[str, object]) -> str:
+    legacy = [key for key in ("apply", "execute_runners") if key in (params or {})]
+    if not legacy:
+        return ""
+    return (
+        "dispatch_subagents 模型入口只接受 dry_run 作为执行开关；"
+        f"请移除 {', '.join(legacy)}，用 dry_run=true 预览，dry_run=false 真实推进。"
+    )
+
+
 # LLM: DispatchSubagentsTool must keep dispatch params, runner execution, and recovery payloads stable.
 # 类用途: 提供 dispatch_subagents 模型工具入口，按父子作用域推进可运行的子代理，并把错误 run id 的恢复线索放到顶层。
 class DispatchSubagentsTool(BaseTool):
@@ -55,8 +64,11 @@ class DispatchSubagentsTool(BaseTool):
         self.spec = build_dispatch_subagents_spec()
 
     # LLM: execute runs dispatch planning or runner execution through the manager-owned service.
-    # 函数用途: 解析调度参数、校验 execute/apply 组合、调用 agent.dispatch_subagents，并返回 JSON 报告。
+    # 函数用途: 解析调度参数、把 dry_run 换算为内部执行开关、调用 agent.dispatch_subagents，并返回 JSON 报告。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+        legacy_error = _legacy_execution_param_error(params)
+        if legacy_error:
+            return ToolExecutionResult("dispatch_subagents", False, legacy_error)
         params = _normalized_dispatch_params(params)
         apply = dispatch_apply_default(self.agent, params)
         execute_runners = dispatch_execute_runners_default(self.agent, params, apply=apply)
@@ -64,10 +76,11 @@ class DispatchSubagentsTool(BaseTool):
             return ToolExecutionResult(
                 "dispatch_subagents",
                 False,
-                "execute_runners=true 必须配合 apply=true，避免误触发真实 API runner。",
+                "内部执行参数不一致；模型调用 dispatch_subagents 时只需要传 dry_run。",
             )
 
         dispatch_params = self._dispatch_params(params, apply, execute_runners)
+        guidance_ids = _persist_dispatch_guidance(self.agent, dispatch_params)
         cfg, router = self._router()
         report = self.agent.dispatch_subagents(
             router,
@@ -79,6 +92,8 @@ class DispatchSubagentsTool(BaseTool):
         remember_orchestration_run_ids(self.agent, scoped_run_ids)
         remember_dispatched_orchestration_run_ids(self.agent, dispatched_run_ids)
         payload = self._report_payload(report, params=params, dispatch_params=dispatch_params)
+        if guidance_ids:
+            payload["guidance_ids"] = guidance_ids
         return ToolExecutionResult("dispatch_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
     # LLM: _router builds the non-orchestration capability router used by dispatch planning.
@@ -107,11 +122,7 @@ class DispatchSubagentsTool(BaseTool):
             note=str(params.get("note") or "triggered by dispatch_subagents tool").strip(),
             runner_instruction=resolved_runner_instruction(
                 self.agent,
-                params.get("runner_instruction")
-                or params.get("instruction")
-                or params.get("prompt")
-                or params.get("message")
-                or params.get("guidance"),
+                params.get("runner_instruction"),
             ),
             max_cards=_non_negative_int(params.get("max_cards"), default=0),
             probe=not _bool_param(params.get("no_probe"), default=False),
@@ -189,3 +200,33 @@ def _model_facing_dispatch_summary(summary: object) -> dict[str, object]:
     if "applied" in rendered:
         rendered["record_applied_count"] = rendered.pop("applied")
     return rendered
+
+
+# LLM: _persist_dispatch_guidance makes old runner_instruction a compatibility layer over send_guidance.
+# 函数用途: 显式 run_id 补充提示写入统一 guidance 账本，dispatch 自身仍只负责推进/恢复。
+def _persist_dispatch_guidance(agent: object, params: DispatchParams) -> list[str]:
+    instruction = str(getattr(params, "runner_instruction", "") or "").strip()
+    run_ids = [str(item).strip() for item in (getattr(params, "include_run_ids", None) or []) if str(item or "").strip()]
+    if not instruction or not run_ids:
+        return []
+    store = getattr(agent, "conversation_store", None)
+    if store is None:
+        return []
+    guidance_ids: list[str] = []
+    for run_id in run_ids:
+        try:
+            entry = store.append_guidance(
+                {
+                    "target_type": "agent_run",
+                    "target_id": run_id,
+                    "message": instruction,
+                    "sender": "dispatch_subagents",
+                    "metadata": {"legacy_tool": "dispatch_subagents"},
+                }
+            )
+        except Exception:
+            continue
+        guidance_id = getattr(entry, "guidance_id", "")
+        if isinstance(guidance_id, str) and guidance_id:
+            guidance_ids.append(guidance_id)
+    return guidance_ids

@@ -170,8 +170,8 @@ def test_dispatch_payload_suggests_apply_for_dry_run_recovery_actions():
 
     hint = payload["dispatch_no_progress_hint"]
     assert hint["recommended_next_action"] == "rerun_dispatch_with_apply_for_recovery"
-    assert hint["suggested_tool_call"]["apply"] is True
-    assert hint["suggested_tool_call"]["execute_runners"] is False
+    assert hint["suggested_tool_call"]["dry_run"] is False
+    assert hint["suggested_tool_call"]["max_runners"] == 0
 
 
 # LLM: test_dispatch_payload_exposes_recovery_valid_run_ids covers model retry ergonomics.
@@ -211,7 +211,7 @@ def test_dispatch_payload_tells_runner_to_continue_unfinished_children():
     assert direct["unfinished_run_ids"] == ["child-a", "child-b"]
     assert direct["next_action"] == "continue_dispatch_direct_children"
     assert direct["suggested_tool_call"]["tool"] == "dispatch_subagents"
-    assert direct["suggested_tool_call"]["execute_runners"] is True
+    assert direct["suggested_tool_call"]["dry_run"] is False
     assert direct["suggested_tool_call"]["run_ids"] == ["child-a", "child-b"]
     assert direct["suggested_tool_call"]["workflow_mode"] == "off"
 

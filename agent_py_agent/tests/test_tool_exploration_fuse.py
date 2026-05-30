@@ -64,7 +64,7 @@ def test_exploration_fuse_uses_configured_budget_ratio_hints(tmp_path: Path):
     )
 
     agent = SimpleNamespace(root=tmp_path)
-    calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
+    calls = [{"tool": "web_fetch", "url": "https://example.test/data.json"}]
 
     for _ in range(59):
         assert has_required_exploration_fuse(agent, calls) is False
@@ -113,7 +113,7 @@ def test_exploration_fuse_zero_threshold_uses_fixed_hints_without_blocking(tmp_p
     )
 
     agent = SimpleNamespace(root=tmp_path, _exploration_fuse_config=ExplorationFuseConfig(round_threshold=0))
-    calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
+    calls = [{"tool": "web_fetch", "url": "https://example.test/data.json"}]
 
     for _ in range(49):
         assert has_required_exploration_fuse(agent, calls) is False
@@ -167,7 +167,7 @@ def test_exploration_fuse_resets_on_structured_writer_and_document_builder(tmp_p
     )
 
     agent = SimpleNamespace(root=tmp_path)
-    calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
+    calls = [{"tool": "web_fetch", "url": "https://example.test/data.json"}]
     for _ in range(300):
         has_required_exploration_fuse(agent, calls)
     assert has_pending_exploration_fuse(agent) is True
@@ -202,7 +202,7 @@ def test_tool_loop_decision_redirects_and_blocks_exploration_fuse(tmp_path: Path
     from agent_py_agent.agent.backend import ModelResponse
 
     agent = _agent(tmp_path)
-    calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
+    calls = [{"tool": "web_fetch", "url": "https://example.test/data.json"}]
     for _ in range(59):
         assert has_required_exploration_fuse(agent, calls) is False
 
@@ -242,7 +242,7 @@ def _agent(root: Path):
 
         def parse_tool_calls(self, text: str):
             if text == "CALL_FETCH":
-                return [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
+                return [{"tool": "web_fetch", "url": "https://example.test/data.json"}]
             return []
 
     return SimpleNamespace(

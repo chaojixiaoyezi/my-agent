@@ -63,9 +63,9 @@ def test_tool_round_with_acceptance_submit_runs_delivery_closeout(tmp_path: Path
     assert (tmp_path / ".agent_delivery" / "closeout.json").exists()
 
 
-# LLM: final text without tool calls is an implicit acceptance submission, so it cannot bypass gates.
-# 函数用途: 验证模型直接说完成时会触发隐式验收，验收失败则继续返工而不是口头完成。
-def test_no_tool_final_answer_implicitly_submits_for_acceptance_and_reworks(tmp_path: Path):
+# LLM: final text without tool calls must remain ordinary text, not delivery acceptance.
+# 函数用途: 验证模型直接说完成不会触发交付验收；只有 submit_for_acceptance 才能提交验收。
+def test_no_tool_final_answer_does_not_submit_delivery_acceptance(tmp_path: Path):
     params = _delivery_params(archive_tool_calls=[])
     agent = _agent(tmp_path)
 
@@ -78,15 +78,40 @@ def test_no_tool_final_answer_implicitly_submits_for_acceptance_and_reworks(tmp_
         )
     )
 
-    assert decision.action == "continue"
-    assert (tmp_path / ".agent_delivery" / "closeout.json").exists()
-    assert params.tool_context
-    assert "[delivery-contract-check]" in params.tool_context[-1]
+    assert decision.action == "break"
+    assert decision.response.text == "任务完成，文件已经生成。"
+    assert not (tmp_path / ".agent_delivery" / "closeout.json").exists()
+    assert not params.tool_context
 
 
 # LLM: closeout is the single source of delivery rework guidance.
 # 函数用途: 验证验收失败后的返工建议直接由 closeout 上下文提供，不依赖独立 delivery repair 运行门。
 def test_failed_closeout_context_includes_unified_repair_guidance(tmp_path: Path):
+    params = _delivery_params(archive_tool_calls=[])
+    params.executed_tools.append("submit_for_acceptance")
+    agent = _agent(tmp_path)
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="任务完成。", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+    payload = _last_tool_context_payload(params)
+
+    assert response is None
+    assert payload["ok"] is False
+    assert payload["repair_guidance"]["mode"] == "closeout_rework"
+    assert payload["repair_guidance"]["required_actions"]
+    assert "如果还需要读取或搜索" in payload["repair_guidance"]["message_zh"]
+
+
+# LLM: Work-in-progress narration is indistinguishable from final prose for delivery purposes.
+# 函数用途: 覆盖长任务中任何无工具文本都不会触发 closeout，避免系统从字面意思猜验收时机。
+def test_no_tool_working_text_does_not_submit_delivery(tmp_path: Path):
     params = _delivery_params(archive_tool_calls=[])
     agent = _agent(tmp_path)
 
@@ -94,17 +119,35 @@ def test_failed_closeout_context_includes_unified_repair_guidance(tmp_path: Path
         ToolLoopResponseDecisionRequest(
             agent=agent,
             params=params,
-            response=ModelResponse(text="任务完成。", backend="test"),
+            response=ModelResponse(text="我继续阅读更多项目，然后再汇总写报告。", backend="test"),
             counters=ToolLoopRepairCounters(),
         )
     )
-    payload = _last_tool_context_payload(params)
 
-    assert decision.action == "continue"
-    assert payload["ok"] is False
-    assert payload["repair_guidance"]["mode"] == "closeout_rework"
-    assert payload["repair_guidance"]["required_actions"]
-    assert "如果还需要读取或搜索" in payload["repair_guidance"]["message_zh"]
+    assert decision.action == "break"
+    assert not (tmp_path / ".agent_delivery" / "closeout.json").exists()
+    assert not params.tool_context
+
+
+# LLM: Existing closeout context should not turn later plain text into another acceptance attempt.
+# 函数用途: 验证已有 closeout 返工上下文时，无工具文本仍只是普通回复，不再二次提交验收。
+def test_existing_closeout_context_does_not_make_plain_text_submit(tmp_path: Path):
+    params = _delivery_params(archive_tool_calls=[])
+    params.tool_context.append("[delivery-contract-check]\n{}")
+    agent = _agent(tmp_path)
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="任务完成，文件已经生成。", backend="test"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "break"
+    assert decision.response.text == "任务完成，文件已经生成。"
+    assert params.tool_context == ["[delivery-contract-check]\n{}"]
 
 
 # LLM: delivery rework should not add a separate tool-loop gate over normal read/list choices.
@@ -128,9 +171,9 @@ def test_failed_closeout_does_not_intercept_read_tools_with_delivery_repair_gate
     assert not any("delivery-required-repair" in item for item in params.tool_context)
 
 
-# LLM: successful implicit submission should close the run through the same machine closeout path.
-# 函数用途: 验证无工具最终回复在产物合格时会被系统验收替换为确定性成功回复。
-def test_no_tool_final_answer_implicitly_submits_and_closes_when_valid(tmp_path: Path):
+# LLM: valid artifacts still require explicit submit_for_acceptance before machine closeout.
+# 函数用途: 验证即使产物合格，普通最终回复也不会被系统替换成验收成功回复。
+def test_no_tool_final_answer_does_not_close_when_valid_without_submit(tmp_path: Path):
     _write_valid_artifact(tmp_path)
     params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
     agent = _agent(tmp_path)
@@ -145,26 +188,29 @@ def test_no_tool_final_answer_implicitly_submits_and_closes_when_valid(tmp_path:
     )
 
     assert decision.action == "break"
-    assert "交付验收通过" in decision.response.text
+    assert decision.response.text == "任务完成，文件在 out.txt。"
+    assert not (tmp_path / ".agent_delivery" / "closeout.json").exists()
 
 
 # LLM: Some legitimate tasks finish in the answer/channel rather than a file.
 # 函数用途: 验证显式 message delivery 不会被产物 ref 门误判成缺文件。
 def test_message_delivery_contract_closes_without_artifact_ref_failure(tmp_path: Path):
     params = _message_delivery_params(archive_tool_calls=[])
+    params.executed_tools.append("submit_for_acceptance")
     agent = _agent(tmp_path)
 
-    decision = tool_loop_response_decision(
-        ToolLoopResponseDecisionRequest(
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
             agent=agent,
             params=params,
             response=ModelResponse(text="已经检查完，结论直接回复给你。", backend="test"),
-            counters=ToolLoopRepairCounters(),
+            before_executed_count=0,
+            subagent_output_written=False,
         )
     )
 
-    assert decision.action == "break"
-    assert "交付验收通过" in decision.response.text
+    assert response is not None
+    assert "交付验收通过" in response.text
     report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
     assert report["delivery_mode"] == "message"
     assert report["artifacts"] == []
@@ -175,19 +221,21 @@ def test_message_delivery_contract_closes_without_artifact_ref_failure(tmp_path:
 # 函数用途: 验证无需落盘任务即使没有 artifacts 字段，也不会被合同 doctor 误杀。
 def test_requires_artifact_false_contract_closes_without_artifacts_field(tmp_path: Path):
     params = _message_delivery_params(archive_tool_calls=[], contract={"case_id": "answer-only", "requires_artifact": False})
+    params.executed_tools.append("submit_for_acceptance")
     agent = _agent(tmp_path)
 
-    decision = tool_loop_response_decision(
-        ToolLoopResponseDecisionRequest(
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
             agent=agent,
             params=params,
             response=ModelResponse(text="检查完成，不需要生成文件。", backend="test"),
-            counters=ToolLoopRepairCounters(),
+            before_executed_count=0,
+            subagent_output_written=False,
         )
     )
 
-    assert decision.action == "break"
-    assert "交付验收通过" in decision.response.text
+    assert response is not None
+    assert "交付验收通过" in response.text
 
 
 def _agent(root: Path):

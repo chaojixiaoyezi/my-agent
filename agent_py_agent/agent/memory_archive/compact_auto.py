@@ -1,9 +1,9 @@
-# LLM: Compact auto cycle coordinates suggestion/apply/resume but never continues tool execution.
-# 模块用途: 生成自动 compact/resume 的安全计划；可选执行非破坏性 apply，并在 action guard 前停住。
+# LLM: Compact auto cycle coordinates suggestion/apply/resume but never runs task tools itself.
+# 模块用途: 生成自动 compact/resume 的安全计划；调用方允许持久化时执行非破坏性 apply，并把是否可续接交给 action guard。
 
 from __future__ import annotations
 
-"""safe coordinator for the first automated compact/resume cycle."""
+"""safe coordinator for an automated compact/resume cycle."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,8 +22,8 @@ from .schema import (
 COMPACT_AUTO_CYCLE_SCHEMA = RuntimeMemorySchemaOptions("compact_auto_cycle")
 
 
-# LLM: MemoryCompactAutoCycleOptions keeps automated compact behavior explicit and opt-in.
-# 类用途: 描述自动 compact/resume 协调器输入；默认只生成计划，不写 apply 产物。
+# LLM: MemoryCompactAutoCycleOptions keeps persistence boundaries explicit.
+# 类用途: 描述自动 compact/resume 协调器输入；allow_apply 由运行层的 save 边界决定，不再暴露为用户开关。
 @dataclass(frozen=True)
 class MemoryCompactAutoCycleOptions:
     current_tokens: int
@@ -51,8 +51,8 @@ class _AutoCyclePayloadOptions:
     resume: dict[str, Any] | None = None
 
 
-# LLM: run_memory_compact_auto_cycle is the safe automation coordinator and stops before continuing work.
-# 函数用途: 串起半自动提示、可选非破坏性 apply、auto resume 和 action guard；不会执行工具或改代码。
+# LLM: run_memory_compact_auto_cycle is the safe automation coordinator and never runs task tools.
+# 函数用途: 串起提示、非破坏性 apply、auto resume 和 action guard；不会执行工具或改代码。
 def run_memory_compact_auto_cycle(root: str | Path, options: MemoryCompactAutoCycleOptions) -> dict[str, Any]:
     workspace = Path(root)
     suggestion = _suggestion(workspace, options)

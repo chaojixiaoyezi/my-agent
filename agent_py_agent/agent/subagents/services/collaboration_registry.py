@@ -71,7 +71,7 @@ def _capability_aliases_for_tool(tool: str) -> list[str]:
     # LLM: Generic write aliases keep collaboration routing independent of retired special writer names.
     if any(token in name for token in ("read", "search", "query", "fetch", "list", "get", "http", "browser")):
         aliases.append("query")
-    if "submit_evidence" in name or ("evidence" in name and any(token in name for token in ("submit", "add", "record"))):
+    if "submit_collaboration_result" in name or ("evidence" in name and any(token in name for token in ("submit", "add", "record"))):
         aliases.extend(["evidence", "evidence_submission"])
     if any(token in name for token in ("write", "append", "replace", "save", "create", "structured data")):
         aliases.extend(["write", "artifact_write"])

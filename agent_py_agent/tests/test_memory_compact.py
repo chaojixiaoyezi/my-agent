@@ -243,8 +243,9 @@ def test_memory_compact_apply_reads_hook_recovery_state_without_snapshot_file(tm
     )
     assert "验收条件" in resume["completion_prompt"]["prompt_template"]
     assert "Completion Prompt" in resume["context_block"]
-    assert auto_resume["action_guard"]["status"] == "blocked_missing_work_state_fields"
-    assert auto_resume["action_guard"]["allowed_to_continue"] is False
+    assert auto_resume["action_guard"]["status"] == "allow_automated_continue"
+    assert auto_resume["action_guard"]["allowed_to_continue"] is True
+    assert auto_resume["action_guard"]["missing_fields"] == ["acceptance", "constraints", "latest_tests"]
 
 
 # LLM: _load_apply_artifacts keeps compact apply tests focused on behavior instead of path-reading boilerplate.
@@ -447,7 +448,7 @@ def test_memory_resume_from_compact_builds_manual_context(tmp_path: Path) -> Non
     assert Path(apply_result["refs"]["metadata"]).exists()
 
 
-def test_memory_resume_from_compact_auto_guard_blocks_missing_work_state(tmp_path: Path) -> None:
+def test_memory_resume_from_compact_auto_guard_allows_optional_notes_missing(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     _write_compact_fixture(root)
     apply_result = apply_memory_compact(
@@ -463,9 +464,9 @@ def test_memory_resume_from_compact_auto_guard_blocks_missing_work_state(tmp_pat
     )
 
     assert resume["ok"] is True
-    assert resume["action_guard"]["ok"] is False
-    assert resume["action_guard"]["status"] == "blocked_missing_work_state_fields"
-    assert resume["action_guard"]["allowed_next_action"] == "stop_and_request_review"
+    assert resume["action_guard"]["ok"] is True
+    assert resume["action_guard"]["status"] == "allow_automated_continue"
+    assert resume["action_guard"]["allowed_next_action"] == "continue_after_guard"
     assert resume["action_guard"]["missing_fields"] == ["acceptance", "constraints", "latest_tests"]
 
 
@@ -496,13 +497,13 @@ def test_memory_resume_from_compact_cli_outputs_context_only(tmp_path: Path, cap
     code = args.func(args)
     captured = capsys.readouterr()
 
-    assert code == 2
+    assert code == 0
     assert "# Compact Resume Context" in captured.out
     assert apply_result["apply_id"] in captured.out
 
 
 # LLM: test_memory_fact_write_closes_compact_missing_fields verifies the semi-auto manual fact loop.
-# 函数用途: 先让 compact resume 因缺字段阻断，再写入用户确认事实并重新 apply，确认 auto guard 放行。
+# 函数用途: 先确认 compact resume 会暴露缺失备注，再写入用户确认事实并重新 apply，确认 auto guard 仍放行。
 def test_memory_compact_suggestion_prompts_without_applying(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     _write_compact_fixture(root)

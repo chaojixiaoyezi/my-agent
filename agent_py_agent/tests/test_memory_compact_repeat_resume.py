@@ -275,3 +275,37 @@ def test_compact_apply_uses_live_raw_assistant_round_as_continuation_hint(tmp_pa
     work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
     assert work_state["goal"] == "找最近几周 GitHub 项目并生成表格。"
     assert work_state["next_actions"] == ["已查到前三周，下一步继续查剩余周并汇总 workbook。"]
+
+
+# LLM: Tool-call-only assistant rounds are too low-level to become compact next steps.
+# 函数用途: 防止 compact 交接把单个 read_file/tool_call 当作任务级路线图，导致续跑反复读同一文件。
+def test_compact_apply_ignores_raw_tool_call_as_continuation_hint(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _append_live_raw_message(
+        root,
+        speaker="user",
+        action="message",
+        content="看几个项目并写一份中文报告。",
+    )
+    _append_live_raw_message(
+        root,
+        speaker="assistant",
+        action="assistant_tool_round",
+        content='[TOOL_CALL]\n{"tool": "read_file", "filesystem": {"path": "README.md"}}\n[/TOOL_CALL]\ntools: read_file',
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-live",
+                request_id="request-live",
+                run_id="run-live",
+                task_id="task-live",
+            )
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+    assert work_state["goal"] == "看几个项目并写一份中文报告。"
+    assert work_state["next_actions"] == []

@@ -46,7 +46,7 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         assert payload["auto_start"]["status"] == "started"
         assert payload["auto_start"]["run_ids"] == ["run_0", "run_1"]
         assert payload["dispatch_run_ids"] == []
-        assert payload["next_action"]["tool"] == "subagent_board"
+        assert payload["next_action"]["tool"] == "inspect_agent_tree"
 
     def test_items_mode_does_not_infer_sibling_output_dependencies(self):
         """items 不再根据 sibling 输出自动制造等待；显式读线索原样保留。"""

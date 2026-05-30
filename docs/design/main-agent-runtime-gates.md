@@ -24,10 +24,44 @@
 - 会话运行时 更强调事件流和结构化工具调用；工具结果、状态、上下文恢复都应该能通过 refs 和事件解释。
 - 通道运行时 的 run/event envelope 思路要落到每次工具调用和状态记录：每条工具结果、状态事件都应该自带 `run_id`、`parent_run_id`、`root_run_id`，而不是从共享对象上的 current 字段反推。
 - 通道运行时 的 TUI 和 task registry 允许 `activeRun` 这类显示缓存存在，但状态更新按 `runId + session/runtime scope` 落账；同一个 runId 在不同 scope 下冲突时不猜。本项目对应做法是：工具响应里输出 `scope_resolution`，当前 runner 只能收窄到自己的子树，不能把外部显式 parent/root 静默当真。
-- 当前清理范围已经覆盖 tree/dispatch 之外的写账入口。`subagent_message`、`capability_request`、`open_case/request_collaboration/update_*`、`submit_evidence` 在 runner 内都以当前 run 为有效身份；模型传入的其它 sender/source/requester/actor 只会进入 `ignored_explicit` 和 `scope_warnings`，不会替别的 run 写消息、能力申请或证据。
+- 当前清理范围已经覆盖 tree/dispatch 之外的写账入口。`send_guidance`、`capability_request`、`raise_collaboration/raise_collaboration/update_*`、`submit_collaboration_result` 在 runner 内都以当前 run 为有效身份；模型传入的其它 sender/source/requester/actor 只会进入 `ignored_explicit` 和 `scope_warnings`，不会替别的 run 写消息、能力申请或证据。
 - 终端交互 的可借鉴点主要是路径、权限、只读/写入边界，适合放到工具入口硬门。
+- 代理运行时/长期助手/工具运行时 都支持“运行中继续补充一句话”：它们不是把补充话术变成新的验收门，而是排队或注入到下一轮模型上下文里。my-agent 对应收敛为 `send_guidance` + guidance 账本：主代理、子代理、孙代理都从同一入口读取补充提示。
 
 本仓库吸收的是这些通用底座，不复制它们的业务任务模板。
+
+### 运行中补充提示收敛
+
+文件：
+
+- `agent_py_agent/agent/conversation/store_guidance.py`
+- `agent_py_agent/agent/agent_core/runtime_guidance.py`
+- `agent_py_agent/agent/agent_core/runtime_guidance_tool.py`
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_tool.py`
+
+新的统一入口是 `send_guidance`。它只做一件事：把“用户/父代理临时补充的一句话”写进 guidance 账本，让目标主代理、子代理或孙代理下一轮看到。
+
+这不是 hard gate：
+
+- 不验收。
+- 不推进 runner。
+- 不终止任务。
+- 不把提示当成必须完成的模板。
+
+旧入口收敛：
+
+- 旧 `subagent_message` 工具已移除，运行中补充提示只走 `send_guidance`。
+- `dispatch_subagents.runner_instruction` 只保留“补充一句并立刻推进这个 run”的窄用途；不推进时只用 `send_guidance`。
+- `dispatch_subagents` 的职责回到“推进、恢复、重跑、查状态”，不再承担主要消息通道。
+
+目标效果：
+
+```text
+用户运行中补一句话
+  -> send_guidance 写 guidance 账本
+  -> 目标 agent 下一轮 prompt 看到 Runtime Guidance
+  -> 模型自己决定怎么调整，不被系统硬卡
+```
 
 ## 当前运行门分层
 
@@ -128,7 +162,7 @@ last_7_days_range
 - 要读取、参考、搜索、对比的文件，不进入 `artifacts`。
 - 只有用户明确说“结果保存到某个文件 / 生成某个文件 / 修改某个文件”时，入口物化才可以写 `preferred_path`。
 - 如果外部结构化合同已经把某个 artifact 标成 `input/source/reference/read_only/evidence/search`，closeout 会把它当输入类引用跳过，不再按交付物验收。
-- 批量 `items/tasks` 派工时，顶层 `required_read_paths` 不再自动复制给每个子代理。每个子代理自己的输入文件写在自己的 `item.required_read_paths`；所有子代理都需要读的公共小资料可以放在顶层或 `context_packs`。
+- 批量 `items` 派工时，顶层 `required_read_paths` 不再自动复制给每个子代理。每个子代理自己的输入文件写在自己的 `item.required_read_paths`；所有子代理都需要读的公共小资料可以放在顶层或 `context_packs`。
 
 这不是新增硬门，而是删除错误自动推断。目标是回到 长期助手/通道运行时/终端交互 更朴素的模式：父代理把任务说清楚，子代理按自己的任务读输入、写结果、回报。
 
@@ -273,7 +307,7 @@ same_run_redispatch_limit: 1
 工具上限和最终回答的子代理事实收口只在“runner 真实跨过 dispatch”后接管。也就是说：
 
 - `create_subagents` 只创建任务，不算执行。
-- `dispatch_subagents apply=false`、dry-run、状态检查不算 runner 执行。
+- `dispatch_subagents dry_run=true` 和状态检查不算 runner 执行。
 - 旧的“输入依赖检查 + materialize_subagent_inputs”启动修补路径已经删除。`required_read_paths` 是给 runner 的上下文/读授权提示，不再作为启动前硬依赖。
 - 一旦某个 run 真正进入 runner 执行或重试，后续即使主代理又读文件、查状态、搜索，最终回答仍要按真实 `task.json` 防假完成。
 - `DONE/VERIFIED` 表示 runner 已写出结果但还没通过最终收口。它仍然不算严格完成，但不再自动触发最终回答状态摘要抢答；主代理可以如实汇报“已运行、结果路径、等待收口”。只有 `FAILED/BLOCKED/TIMEOUT/CHANNEL_ERROR` 或最终收口明确 `REJECT` 这类需要修复的事实，才返回子代理状态摘要，避免口头完成掩盖落盘失败。
@@ -281,9 +315,9 @@ same_run_redispatch_limit: 1
 - `dispatch_subagents` 跑完一批子代理后，不再因为所有子代理 `DONE/VERIFIED` 就立刻替主代理收口。原因是多代理任务经常需要主代理继续读取子代理产物、发现新线索、发起下一轮协作或写最终交付物。系统仍会在工具轮数耗尽、模型空响应、明确 `FAILED/BLOCKED/TIMEOUT/CHANNEL_ERROR`、最终收口 `REJECT` 等场景用真实 task 状态兜底；正常完成的一批子代理结果要先交回主代理继续判断。
 - 协作意图不再作为最终收口硬门。子代理写了“需要协作 / 需要别人确认 / 跨来源验证”等内容时，系统只通过协作账本、工具调用记录和调试日志观察流程是否跑通；不能因为它没有留下 case/request/evidence ref 就直接判验收失败。
 - 协作修复不再由最终收口自动补洞。协作应该在运行时由发现者发起：发现问题、请求同级/上级/匹配能力代理响应、到 deadline 汇总命中/未命中/未回复，再上报父级检查层只负责产物和安全边界，不替模型判断“此刻必须协作”。
-- `list_collaboration_requests` 是只读控制面能力，默认进入子/孙代理基础工具包。响应者即使不知道 case_id/request_id，也可以按自身 `run_id/agent_name/role` 查到待响应请求；这不是业务专项工具，也不会替模型判断某个线索该怎么查。
+- `inspect_collaboration` 是只读控制面能力，默认进入子/孙代理基础工具包。响应者即使不知道 case_id/request_id，也可以按自身 `run_id/agent_name/role` 查到待响应请求；这不是业务专项工具，也不会替模型判断某个线索该怎么查。
 - `collaboration://case/...`、`collaboration://request/...` 和 `collaboration://evidence/...` 是逻辑控制面引用，不是本地文件路径。最终收口会把它们当作协作证据入口，不会用文件存在性检查把它们误判成“产物路径不存在”。
-- 如果 runner 已经真实调用 `raise_collaboration_event`、`request_collaboration` 或 `submit_evidence` 这类协作账本工具，父级和主代理会在 dispatch 输出、case 状态、日志和最终产物里看到这些事实；它们不再变成最终 closeout 的硬阻断。
+- 如果 runner 已经真实调用 `raise_collaboration`、`raise_collaboration` 或 `submit_collaboration_result` 这类协作账本工具，父级和主代理会在 dispatch 输出、case 状态、日志和最终产物里看到这些事实；它们不再变成最终 closeout 的硬阻断。
 - 已废弃方向：`collaboration_closeout`、`collaboration_intent_resolved` 和“只开 case 不算完成所以打回验收”曾经把协作当成交付验收门，导致流程里出现多层卡点。现在协作账本只记录谁发现、问了谁、谁回、谁没回、证据在哪、汇总是什么；到点带部分结果继续推进。
 
 ### 3.1 协作请求按开放世界能力路由
@@ -298,7 +332,7 @@ same_run_redispatch_limit: 1
 
 - 显式 `attributes.capabilities / collaboration_capabilities / provided_capabilities` 原样保留。
 - `role`、`agent_name` 和 `allowed_tools` 原样保留，方便已有系统按自己的命名体系路由。
-- 对常见工具只补通用别名：read/search/fetch/list 这类补 `query`，`submit_evidence` 补 `evidence_submission`，write/append/save 这类补 `write`。
+- 对常见工具只补通用别名：read/search/fetch/list 这类补 `query`，`submit_collaboration_result` 补 `evidence_submission`，write/append/save 这类补 `write`。
 
 这不是专项模板，也不是封闭枚举。未知工具名仍会作为能力原值登记；别名只是让普通协作请求可以写 `required_capabilities=["query","evidence_submission"]`，不用提前知道具体工具名。
 
@@ -310,14 +344,14 @@ same_run_redispatch_limit: 1
 
 系统会按能力注册表找到合适的已有子代理 B。如果 A 明确知道目标，也仍然可以写 `target_agent_ids`；显式 target 优先。
 
-`open_case` 的 thread 解析也遵守同一条原则：已有外部/长期会话 thread 优先；如果本地 runner 只有已知 `task_id/run_id`，没有飞书、微信或 CLI thread，系统会用结构化任务记录自动物化一个 `internal` thread 并绑定任务。模型猜错 `thread_id` 或 `task_id` 时，只要当前确实处在子代理 runner 内，系统会退回当前 runner 的真实 run_id；不会因为一个坏 thread/task 字段把整个协作 case 打断。
+`raise_collaboration` 的 thread 解析也遵守同一条原则：已有外部/长期会话 thread 优先；如果本地 runner 只有已知 `task_id/run_id`，没有飞书、微信或 CLI thread，系统会用结构化任务记录自动物化一个 `internal` thread 并绑定任务。模型猜错 `thread_id` 或 `task_id` 时，只要当前确实处在子代理 runner 内，系统会退回当前 runner 的真实 run_id；不会因为一个坏 thread/task 字段把整个协作 case 打断。
 
 ### 3.2 通用线索协作请求
 
 新增语义：
 
 ```text
-request_collaboration
+raise_collaboration
   problem_statement
   observed_facts
   query_intent
@@ -326,7 +360,7 @@ request_collaboration
   response_contract
   context_refs
 
-submit_evidence
+submit_collaboration_result
   queried_scopes
   used_query_hints
   miss_reason
@@ -350,7 +384,7 @@ submit_evidence
 
 ### 3.2.1 多目标请求按 responder 单独闭环
 
-一个 `request_collaboration` 可以同时发给多个目标代理。机器语义是：
+一个 `raise_collaboration` 可以同时发给多个目标代理。机器语义是：
 
 ```text
 request_id 一样
@@ -361,8 +395,8 @@ target_agent_ids 有多个
 因此不能因为第一个目标代理提交了 evidence，就把整个 request 当成 completed。当前规则：
 
 - `pending_requests_for_agent()` 只会跳过“当前代理自己已经响应过”的 request。
-- 多目标 request 在所有目标都有 evidence 之前，`case_status.pending_request_count` 仍会保留缺口。
-- 某个 responder 提前调用 `update_collaboration_request(status=completed)` 时，如果其他目标还没响应，系统只记录 partial completion，并把 request 保持为 pending。
+- 多目标 request 在所有目标都有 evidence 之前，`inspect_collaboration.pending_request_count` 仍会保留缺口。
+- 某个 responder 提前调用 `update_collaboration(status=completed)` 时，如果其他目标还没响应，系统只记录 partial completion，并把 request 保持为 pending。
 - 所有目标都提交 evidence 后，request 才进入 completed 计数。
 
 这条规则解决的是通用协作账本问题，不是 IP/日志专项：无论线索是 IP、文件 hash、订单号、用户 ID、异常指标、自然语言片段还是一组开放字段，只要一个请求点名多个响应方，就必须按响应方身份闭环。
@@ -389,23 +423,23 @@ context_refs
 
 ```text
 任意子/孙代理发现需要协作
-  -> raise_collaboration_event 一步打开 case 并创建 request
+  -> raise_collaboration 一步打开 case 并创建 request
   -> target_agent_ids 明确点名，或 required_capabilities 自动匹配候选
-  -> 响应代理用 list_collaboration_requests / case_status 找到待办
-  -> 响应代理查询自己的数据源，submit_evidence 提交 refs-first 证据
-  -> update_collaboration_request 标记完成、阻塞或需要换路
-  -> 主代理或上级读取 case_status / inspect_agent_tree 后判断收口、改派或升级
+  -> 响应代理用 inspect_collaboration / inspect_collaboration 找到待办
+  -> 响应代理查询自己的数据源，submit_collaboration_result 提交 refs-first 证据
+  -> update_collaboration 标记完成、阻塞或需要换路
+  -> 主代理或上级读取 inspect_collaboration / inspect_agent_tree 后判断收口、改派或升级
 ```
 
 阶段落点：
 
 - 阶段 0：批量创建子代理时，顶层 `output_files/output_refs/artifact_refs` 不再自动继承到每个子任务。它们是父级最终交付目标，不是每个 worker 的输出路径。item 自己显式声明的输出仍然保留。
-- 阶段 1：新增 `raise_collaboration_event`，把“发现协作事件”压成一个通用工具动作，避免模型只在 `output.json` 写 `collaboration_required` 却没有 case/request。
-- 阶段 2：`request_collaboration` 继续支持显式 `target_agent_ids` 和按 `required_capabilities` 匹配，不写 IP、日志、API、数据库等专项字段。
-- 阶段 3：响应者已经有 `list_collaboration_requests` 和 runner targeted request 注入；它可以不知道 case_id，也能发现点名给自己的请求。
-- 阶段 4：不知道目标时先按能力路由；路由错了用 `reroute_collaboration_request`，不在自然语言里说“我觉得应该找谁”。
+- 阶段 1：新增 `raise_collaboration`，把“发现协作事件”压成一个通用工具动作，避免模型只在 `output.json` 写 `collaboration_required` 却没有 case/request。
+- 阶段 2：`raise_collaboration` 继续支持显式 `target_agent_ids` 和按 `required_capabilities` 匹配，不写 IP、日志、API、数据库等专项字段。
+- 阶段 3：响应者已经有 `inspect_collaboration` 和 runner targeted request 注入；它可以不知道 case_id，也能发现点名给自己的请求。
+- 阶段 4：不知道目标时先按能力路由；路由错了用 `update_collaboration`，不在自然语言里说“我觉得应该找谁”。
 - 阶段 5：临时查询 worker 不需要新专项协议。上级或响应代理可以继续用 `schedule_child_subagents` 派短生命周期 worker，并把 `case_id/request_id/context_refs` 放进普通结构化上下文；worker 完成后提交 evidence refs。
-- 阶段 6：后台主代理和长期会话只读 `case_status`、`inspect_agent_tree`、wake signals 和线程消息来判断是否需要 LLM 汇报/升级，不把 watch 巡逻变成默认 dispatch。
+- 阶段 6：后台主代理和长期会话只读 `inspect_collaboration`、`inspect_agent_tree`、wake signals 和线程消息来判断是否需要 LLM 汇报/升级，不把 watch 巡逻变成默认 dispatch。
 - 阶段 7：协作 request 已经点名多个响应者时，隐式 dispatch 可以按 `collaboration_auto_dispatch_max_runners` 一次唤醒多名 responder。普通 dispatch 仍保持默认宽度；只有待响应协作账本触发这个放宽，避免协作证据串行排队。
 - 阶段 8：`create_subagents` 会把父级原始任务摘要作为有界 `parent_task_directive` context pack 传给直接子代理。这不是专项模板，也不是硬门；它只是防止主代理把 item goal 写短以后，子代理忘记“任意发现者要发起协作、输出放哪、用户限制是什么”等父级要求。
 - 阶段 9：规模测试按 5/10/20 子代理逐级放大；没通过小规模前不跑大规模，避免把偶然成功当成架构成功。
@@ -418,24 +452,24 @@ context_refs
 - repair contract 的通用要求是：读取 failure refs、保留原始完整验收目标、必要时修复产物。它不再要求在 repair run 内补 collaboration refs。
 - `current_turn_run_state` 会把最终收口 REJECT 的 run 单独放进 `final_closeout_rejected_run_ids`，并把 `next_action` 改成 `resolve_final_closeout_rejected_refs`，真实动作以 `final_closeout_repair_advice.suggested_tool_call` 为准。这样不会同时提示“再跑一次 acceptance”，也不会把所有 REJECT 都强行导向 repair worker。
 - 协作意图识别不再作为硬验收逻辑存在。运行时可以保留日志或观察指标，帮助复盘“模型是否该发起协作却没有发起”，但这些指标不能卡住子代理验收或主代理 closeout。
-- `dispatch_subagents` 接受 `dispatch_run_ids`/`subagent_run_ids`/`dispatch_subagent_ids`/`dispatch_subagent_run_ids` 作为 `run_ids` 的兼容别名。真实模型经常直接照抄 `create_subagents` 返回的 `dispatch_run_ids` 字段，或把目标放进 `orchestration.subagent_run_ids`；这属于工具协议自描述一致性问题，不是专项任务逻辑。
+- `dispatch_subagents` 的模型可见目标字段只保留 `run_ids`；`direct_children=true` 表示当前作用域的直接孩子。旧的 `dispatch_run_ids`/`subagent_ids` 等别名不再作为工具入口，避免同一动作出现多套名字。
 - `create_subagents` 的 `output_files/output_refs/artifact_refs` 可以是字符串列表，也可以是对象列表，例如 `{"output_path": "...", "description": "..."}`。系统只把对象里的路径字段持久化为文件合同，不会把整个对象字符串当成“必须存在的文件名”。这也是开放世界协议容错：对象可以带描述、来源、用途等扩展字段，验收层只硬查明确的本地路径。
 - `context_manifest` 如果是普通说明文本，例如“请仔细阅读 source_01.txt”，不会被输入依赖门当成启动前必须存在的文件路径。只有 `required_read_paths/input_refs/input_files` 等结构化字段、对象里的输入语义字段、列表形式 refs，或整段就是纯路径列表的字符串，才会变成硬输入依赖。这样模型可以把自然语言 brief 放进 context_manifest，而不会因为一句中文说明生成 `阅读source_01.txt` 这种假缺失路径。
-- 顶层 dispatch 不再把“协作未落账”提升成 `raise_collaboration_event` suggested tool。发现者需要协作时，应该在自己的运行中直接发起；如果没发起，测试和日志应指出 runtime/prompt/工具暴露问题，而不是通过验收补开 case。
+- 顶层 dispatch 不再把“协作未落账”提升成 `raise_collaboration` suggested tool。发现者需要协作时，应该在自己的运行中直接发起；如果没发起，测试和日志应指出 runtime/prompt/工具暴露问题，而不是通过验收补开 case。
 - `requires_collab=true`、`collaboration_request={...}`、`coordination_request={...}` 这类字段只能作为运行时观察信号，不能变成“没有 case/request/evidence ref 就不能完成”的硬门。
 - 瘦身 runner prompt 会展示短版 `context_packs`，包括 `parent_task_directive` 和 sibling roster。完整包仍保存在 `context_bundle.json`，prompt 里只放摘要，避免上下文膨胀。
-- 父级共享 brief 只来自读取类工具结果，例如 `read_file/read_artifact/web_search/web_fetch/web_extract/http_request/search_text/list_files`。`write_file` 这类写入回声不会再传给新 child，避免主代理误写的草稿最终报告污染子代理判断。
-- `open_case` 只是开协作房间，`request_collaboration` 才是发请求，`submit_evidence` 才是回证据；这只是账本语义，不再作为验收卡点。空 case 可以被日志标注为“可能没推进”，但不能挡住任务流程。
-- `open_case` 工具结果可以给下一步建议，帮助模型少走弯路；建议是软提示，不是必须按这一路走的硬约束。
+- 父级共享 brief 只来自读取类工具结果，例如 `read_file/read_artifact/web_search/web_fetch/search_text/list_files`。`write_file` 这类写入回声不会再传给新 child，避免主代理误写的草稿最终报告污染子代理判断。
+- `raise_collaboration` 只是开协作房间，`raise_collaboration` 才是发请求，`submit_collaboration_result` 才是回证据；这只是账本语义，不再作为验收卡点。空 case 可以被日志标注为“可能没推进”，但不能挡住任务流程。
+- `raise_collaboration` 工具结果可以给下一步建议，帮助模型少走弯路；建议是软提示，不是必须按这一路走的硬约束。
 - 当前轮次内仍为 open 的空 case 不再触发 closeout 打回。case 状态用于复盘和继续调度：谁没回、谁超时、是否要部分收口，由模型和上级根据任务上下文判断。
 - 协作窗口对外只推荐两种基础状态：`open` 表示仍在收集，`close` 表示窗口到点或上级已决定带已有材料继续推进。`close` 不是“任务成功”，只是“这轮协作收集结束，可以带部分证据、未回复名单和不可达目标继续”。
-- `request_collaboration` / `raise_collaboration_event` 会把模型可见名字解析成真实 `run_id`。目标可用时，工具结果给出 `suggested_dispatch_tool_call`，并明确使用 `dry_run=false` 唤醒响应者；目标不可达时，工具结果和 `case_status` 都会列入 `unavailable_targets`，不再让发现者一直等。
+- `raise_collaboration` / `raise_collaboration` 会把模型可见名字解析成真实 `run_id`。目标可用时，工具结果给出 `suggested_dispatch_tool_call`，并明确使用 `dry_run=false` 唤醒响应者；目标不可达时，工具结果和 `inspect_collaboration` 都会列入 `unavailable_targets`，不再让发现者一直等。
 - 多目标 request 的完成判断按“每个显式目标都有响应证据”计算。代理名、run_id 可以互相映射，但共享角色（例如 worker）和过宽基名（例如 Agent-1 退化成 Agent）不能拿来证明所有目标都已响应；否则一个代理提交 evidence 会把同类代理全都误算成完成。
 - 多目标 request 不允许无限等全员。`deadline_at/deadline_seconds` 到期后，未响应目标会进入 `timed_out_request_ids` 和 `missing_responder_agent_ids_by_request`，但不再算硬 `blocked_request`。主代理可以基于已有 positive/negative evidence 形成部分结论，明确列出未响应者、缺失证据和限制，再决定继续补派、换路、升级或收口。
-- `request_collaboration` / `raise_collaboration_event` 没有显式 deadline 时，会使用 `collaboration_default_deadline_seconds` 自动补一个相对截止时间。默认 120 秒；配置 0 表示不自动补。这样普通协作不会因为模型忘写 deadline 而永久等待。
+- `raise_collaboration` / `raise_collaboration` 没有显式 deadline 时，会使用 `collaboration_default_deadline_seconds` 自动补一个相对截止时间。默认 120 秒；配置 0 表示不自动补。这样普通协作不会因为模型忘写 deadline 而永久等待。
 - 当多目标证据已经齐了但 case 仍为 open，系统可以在 case 状态里提示“可汇总/可标 resolved”，但不再通过 closeout 强制要求先更新 case 状态。
-- 当 deadline 已到但仍有 responder 未回，`case_status` 读取时就能看到 timed out/missing responder；后台 `CollaborationCoordinator.tick()` 会把 case 状态推进为 `close` 并写 observation/wake。模型可以按部分证据推进，不能无限等待，也不能因为有人未回就让流程死卡。
-- `dispatch_subagents` 对模型公开的首选执行开关是 `dry_run`：`dry_run=true` 只预览，`dry_run=false` 才真实推进 runner。旧的 `apply/execute_runners` 继续兼容，但新 prompt、工具建议和协作唤醒都不再让模型同时猜三套开关。
+- 当 deadline 已到但仍有 responder 未回，`inspect_collaboration` 读取时就能看到 timed out/missing responder；后台 `CollaborationCoordinator.tick()` 会把 case 状态推进为 `close` 并写 observation/wake。模型可以按部分证据推进，不能无限等待，也不能因为有人未回就让流程死卡。
+- `dispatch_subagents` 对模型公开的执行开关只保留 `dry_run`：`dry_run=true` 只预览，`dry_run=false` 才真实推进 runner。内部服务仍用 `apply/execute_runners` 表达写回和 runner 执行，但不再作为模型工具协议的第二套名字。
 - `dispatch_subagents` 的顶层响应不再优先展示 `collaboration_closeout` 或把 `next_action` 改成 `continue_collaboration_or_dispatch_pending_requests`。协作信息如果需要展示，应作为只读状态/日志/账本摘要，不覆盖普通 dispatch 结果。
 - 最终收口不再把“需要协作但没调用协作工具”提升为顶层 `suggested_tool_call`。如果测试发现模型漏协作，应修 runtime 工具暴露、prompt 简化或自动协作触发，而不是在验收阶段补开 case。
 - `dispatch_subagents` 会把 `final_closeout_repair_advice`、`suggested_tool_call`、`next_action` 放在长 `records` 前面。真实模型或 live prompt 只读工具结果前段时，也能先看到普通修复或继续调度建议，不会因为建议埋在几万字记录后面而误走慢路。协作 case 不再由 closeout 兜底补开；发现者需要协作时，应在自己的运行中直接记录 case/request。
@@ -506,7 +540,7 @@ main_agent_auto_resume_attempt_limit: 3
 - 默认每 10 轮提示一次。
 - 它只提醒，不阻断。
 
-这条门的定位是“提醒模型别只读不修”，不是“替 closeout 判死刑”。真正的交付结果仍由 closeout 在模型提交验收或最终回复时判断。
+这条门的定位是“提醒模型别只读不修”，不是“替 closeout 判死刑”。真正的交付结果只由 closeout 在模型显式提交验收或外部显式验收入口触发时判断。
 
 ### 6. 显式提交验收工具
 
@@ -520,19 +554,19 @@ main_agent_auto_resume_attempt_limit: 3
 
 它不是专项工具，不知道 GitHub、论文、PDF、XLSX 或购物站是什么。
 
-### 7. 隐式最终回复验收
+### 7. 显式提交验收
 
 文件：
 
 - `agent_py_agent/agent/agent_core/tool_loop_response_decision.py`
 
-如果模型没有调用工具、准备直接最终回复，而当前 run 有 delivery contract，系统会把这次最终回复视为隐式提交验收：
+如果模型认为产物已经准备好，必须调用 `submit_for_acceptance` 才会触发 delivery closeout。普通无工具最终回复只当作自然语言回复，不再被系统猜成“交卷”：
 
-- 验收通过：返回完成。
-- 验收失败：把结构化返工单放回下一轮，让模型继续修。
-- 没有 delivery contract：保持普通回复行为。
+- `submit_for_acceptance` 后验收通过：返回完成。
+- `submit_for_acceptance` 后验收失败：把结构化返工单放回下一轮，让模型继续修。
+- 无工具最终回复：保持普通回复行为，不创建 closeout 报告。
 
-这样既支持显式 `submit_for_acceptance`，也兼容其他项目常见的“模型最终回答触发系统验收”模式。
+这样可以避免长任务还在调研、整理、阅读时，因为一句“我稍后汇总”或“我准备写报告”被系统按字面提前截断。
 
 ### 8. closeout 返工预算配置化
 
@@ -655,7 +689,7 @@ main_agent_auto_resume_attempt_limit: 3
 
 bootstrap 开工物化门不是安全门，也不是最终收口门。它会把普通任务变成“必须先写某个中间 JSON / checkpoint 才能继续”，这会把 LLM 从会做事的人降成跑模板的人。
 
-现在保留的只有 delivery contract prompt 里的软参考，例如建议尽早留下草稿或阶段产物；它不会拦截 `web_search`、`web_fetch`、`web_extract`、`read_file`、`list_files`，也不会因为还没写中间文件就停任务。
+现在保留的只有 delivery contract prompt 里的软参考，例如建议尽早留下草稿或阶段产物；它不会拦截 `web_search`、`web_fetch`、`read_file`、`list_files`，也不会因为还没写中间文件就停任务。
 
 ### 12. 废弃 open write session，统一到通用写入工具
 
@@ -714,11 +748,11 @@ blockers
 
 语义边界：
 
-- `inspect_agent_tree` / `subagent_board`：查看状态，读事实，不推进。
+- `inspect_agent_tree`：查看状态，读事实，不推进。
 - `dispatch_subagents` / `dispatch_loop`：推进任务，可能创建、恢复、重派、验收。
 - `DispatchNoProgressTracker`：只判断 dispatch 里的重复空转，不判断普通状态查看。
 
-这样用户问“看看子代理在干啥”时，主代理应该调用 `inspect_agent_tree` 或 `subagent_board` 汇报状态；只有用户要求“继续推进/恢复/重派/验收”时，才调用 `dispatch_subagents`。
+这样用户问“看看子代理在干啥”时，主代理应该调用 `inspect_agent_tree` 汇报状态；只有用户要求“继续推进/恢复/重派/验收”时，才调用 `dispatch_subagents`。
 
 ### 14. watch 默认观察，不默认推进
 
@@ -745,7 +779,7 @@ subagents-dispatch --watch --advance
 
 watch 才会进入旧的推进路径，调用 `dispatch_subagents`。
 
-这条边界是为了防止“看一眼子代理状态”误变成“推进/重派/验收子代理”。`planner`、`execute_runners`、`execute_runners` 都属于推进语义；在 `--watch` 下使用这些开关时必须同时显式给 `--advance`。
+这条边界是为了防止“看一眼子代理状态”误变成“推进/重派/验收子代理”。`planner`、`execute_runners` 都属于内部推进语义；在 `--watch` 下使用推进入口时必须同时显式给 `--advance`。
 
 例外边界：`gateway run` 和 `daemon` 是明确的常驻运行器入口，不是“看一眼状态”的入口。它们会显式传 `advance=True`，保持后台任务队列可以继续推进。换句话说，默认只读的是 watch 能力本身；真正名字和职责就是“运行器”的入口必须显式声明推进。
 
@@ -800,7 +834,7 @@ ProgressPolicy      = 定时汇报策略
 - 进程重启后重新创建 `SimpleAgent + ConversationStore + Scheduler`，仍能按旧 policy 继续汇报。
 - 长后台运行期间会续租 background claim；已有未过期 claim 时，同 thread 的下一次 tick 不会重复唤醒。
 - 后台 runtime 抛异常时 claim 不再伪装成 `finished`，而是记录为 `failed` 并携带可接手事实；下一次唤醒 prompt 会包含非阻断的 `Recovery Snapshot`。
-- 真实本地子代理协作链路：主代理创建两个子代理，一个通过自己的 `run_id` 打开 collaboration case 并发请求，另一个提交 refs-first 证据并更新请求状态；重启后后台主代理被 case escalation 唤醒，先读 `case_status`，再读 `inspect_agent_tree`，最后把回复投回原 thread。
+- 真实本地子代理协作链路：主代理创建两个子代理，一个通过自己的 `run_id` 打开 collaboration case 并发请求，另一个提交 refs-first 证据并更新请求状态；重启后后台主代理被 case escalation 唤醒，先读 `inspect_collaboration`，再读 `inspect_agent_tree`，最后把回复投回原 thread。
 
 本地 CLI 入口：
 
@@ -868,8 +902,8 @@ WakeSignal       = 需要叫醒主代理的持久信号
 
 语义：
 
-- `raise_observation`：写一条观察事实。普通观察不会自己推进任务；如果标记 `requires_main_agent`，下一次后台 tick 会把它交给主代理判断。
-- `raise_main_event`：写观察事实并创建 wake signal。`urgency=urgent` 会进入 urgent wake queue，后台 service 不必等完整 interval 结束就能醒来处理。
+- `raise_event`：写一条观察事实。普通观察不会自己推进任务；如果标记 `requires_main_agent`，下一次后台 tick 会把它交给主代理判断。
+- `raise_event`：写观察事实并创建 wake signal。`urgency=urgent` 会进入 urgent wake queue，后台 service 不必等完整 interval 结束就能醒来处理。
 - `background-main-agent observe`：本地 CLI 调试入口，等价于外部通道或子代理写入一条 observation。
 - `BackgroundMainAgentScheduler.tick()` 现在先处理 pending wake signal，再处理未处理的 `requires_main_agent` observation，最后才处理到期 `ProgressPolicy`。
 - `BackgroundMainAgentRuntime` 会把 `Recent Observations` 和 `Pending Wake Signals` 放进后台主代理上下文，由 LLM 决定二次分析、调度或用用户习惯语言汇报。
@@ -886,8 +920,8 @@ WakeSignal       = 需要叫醒主代理的持久信号
 ```text
 孙代理每 10 秒读一次 API
   -> 没异常：只写自己的心跳/进展，主代理不醒
-  -> 非紧急待复核：raise_observation(requires_main_agent=true)，下次 tick 让主代理判断
-  -> 紧急事件：raise_main_event(urgency=urgent)，主代理立即醒来分析/调度/汇报
+  -> 非紧急待复核：raise_event(requires_main_agent=true)，下次 tick 让主代理判断
+  -> 紧急事件：raise_event(urgency=urgent)，主代理立即醒来分析/调度/汇报
 ```
 
 这吸收了 长期助手 cron wake gate 的思路：调度器只判断是否该叫醒，真正怎么说、怎么分析、是否调度，仍交给主代理 LLM。
@@ -921,15 +955,15 @@ CaseDecision         = coordinator 的控制面决策
 新增模型工具：
 
 ```text
-open_case              打开协作 case
-request_collaboration  请求其他代理围绕实体/问题补充证据
-submit_evidence        提交证据 refs 和摘要
-update_collaboration_request
+raise_collaboration              打开协作 case
+raise_collaboration  请求其他代理围绕实体/问题补充证据
+submit_collaboration_result        提交证据 refs 和摘要
+update_collaboration
                        更新协作请求生命周期，如 working/completed/blocked
-reroute_collaboration_request
+update_collaboration
                        把阻塞或不合适的协作请求结构化改派到新目标代理
-update_case_status     推进 case 生命周期并写入决策摘要
-case_status            只读查看 case 状态
+update_collaboration     推进 case 生命周期并写入决策摘要
+inspect_collaboration            只读查看 case 状态
 ```
 
 语义边界：
@@ -940,32 +974,32 @@ case_status            只读查看 case 状态
 - `BackgroundMainAgentScheduler.tick()` 会先处理协作 case，再处理 wake/observation/progress policy。这样紧急协作事件可以复用现有后台主代理唤醒链路。
 - 子代理默认获得协作工具，可以参与 case；但它们提交的是证据和请求，不直接替主代理对用户收口。
 - case 的基础窗口状态是 `open/close`：`open` 表示还在收集响应，`close` 表示本轮收集结束。关闭窗口不等于交付成功，也不会替代普通任务 closeout。
-- `CollaborationRequest` 现在有独立生命周期。响应者可以把请求更新为进行中、已完成、阻塞或自定义状态；`case_status` 会折叠同一 `request_id` 的 append-only 快照，返回当前状态，同时保留 `request_history_count` 方便回放。
-- `case_status` 会给出 `pending/blocked/timed_out/completed/declined` 请求计数、`missing_evidence_request_ids`、`missing_responder_agent_ids_by_request`、`unavailable_target_agent_ids_by_request`、`ready_for_main_agent` 和 `requires_main_agent`。这些都是机器字段，主代理和 watcher 不需要从普通问题文本里猜。
+- `CollaborationRequest` 现在有独立生命周期。响应者可以把请求更新为进行中、已完成、阻塞或自定义状态；`inspect_collaboration` 会折叠同一 `request_id` 的 append-only 快照，返回当前状态，同时保留 `request_history_count` 方便回放。
+- `inspect_collaboration` 会给出 `pending/blocked/timed_out/completed/declined` 请求计数、`missing_evidence_request_ids`、`missing_responder_agent_ids_by_request`、`unavailable_target_agent_ids_by_request`、`ready_for_main_agent` 和 `requires_main_agent`。这些都是机器字段，主代理和 watcher 不需要从普通问题文本里猜。
 - `status` 是开放世界字段，系统不限制只能用 open/triaged/closed 这几个值。唯一硬约束是：如果状态表达关闭、解决、完成这类终态语义，必须留下 `summary`、`decision_type` 或已有 `CaseDecision`，避免 case 无声消失。
-- `case_status` 和 `update_collaboration_request` / `reroute_collaboration_request` 的工具结果进入 live prompt 时，会保留 request/evidence/ready 等高信号摘要。完整 JSON 仍可外置，但不能把关键控制字段压缩没，让模型只看到一句模糊自然语言。
-- `case_status` 现在带 `rework` 和 `rework_targets`。这不是专项规则，而是从阻塞请求、缺证据请求和结构化 `request_id/status/evidence.request_id` 生成的返工目标，告诉主代理该换来源、换参数、询问响应者、补交证据或标记真实阻塞。
-- `rework_targets` 会从结构化 metadata 读取 `alternate_sources_available`、`candidate_target_agent_ids` 或 `alternate_target_agent_ids`，输出 `candidate_target_agent_ids` 和 `primary_tool=reroute_collaboration_request`。这只读机器字段，不解析普通自然语言摘要。
-- `reroute_collaboration_request` 是明确的换路动作：必须传 `case_id`、`request_id` 和新的 `target_agent_ids`。系统会把新目标写进 `CollaborationRequest.target_agent_ids`，并记录 `original_target_agent_ids`、`rerouted_from`、`rerouted_to` 和审计 decision，避免模型只在 metadata 或最终回复里说“已换路”。
+- `inspect_collaboration` 和 `update_collaboration` / `update_collaboration` 的工具结果进入 live prompt 时，会保留 request/evidence/ready 等高信号摘要。完整 JSON 仍可外置，但不能把关键控制字段压缩没，让模型只看到一句模糊自然语言。
+- `inspect_collaboration` 现在带 `rework` 和 `rework_targets`。这不是专项规则，而是从阻塞请求、缺证据请求和结构化 `request_id/status/evidence.request_id` 生成的返工目标，告诉主代理该换来源、换参数、询问响应者、补交证据或标记真实阻塞。
+- `rework_targets` 会从结构化 metadata 读取 `alternate_sources_available`、`candidate_target_agent_ids` 或 `alternate_target_agent_ids`，输出 `candidate_target_agent_ids` 和 `primary_tool=update_collaboration`。这只读机器字段，不解析普通自然语言摘要。
+- `update_collaboration` 是明确的换路动作：必须传 `case_id`、`request_id` 和新的 `target_agent_ids`。系统会把新目标写进 `CollaborationRequest.target_agent_ids`，并记录 `original_target_agent_ids`、`rerouted_from`、`rerouted_to` 和审计 decision，避免模型只在 metadata 或最终回复里说“已换路”。
 - `CollaborationStore.overview()` 汇总所有 case 的 ready、blocked、missing evidence、evidence、participant 和 decision 计数，给真实任务前的控制面体检使用。它只输出结构化计数和 bounded `ready_cases/blockers`，不展开大证据正文。
 - `BackgroundMainAgentScheduler.tick()` 对同一个 thread 的多条 pending wake signal 做批处理：同一轮只唤醒一次后台主代理，其他同 thread wake 标记为已处理，避免一个 case 的多个证据/阻塞事件把主代理重复烧多次。
-- 后台主代理上下文里的可用控制动作加入 `update_collaboration_request`、`reroute_collaboration_request` 和 `update_case_status`。LLM 不只是看状态，也能在研判后把协作请求改成完成、阻塞、结构化换策略，或推进 case 生命周期。
-- `tool_protocol_v2.normalize_tool_call()` 保持开放世界：旧式 flat tool call 里的业务参数 `status` 不再被误当成协议状态枚举。比如 `{"tool": "update_case_status", "status": "needs_replan"}` 会归一化为协议 `status=pending`，而把 `needs_replan` 留在工具 input 里。
+- 后台主代理上下文里的可用控制动作加入 `update_collaboration`、`update_collaboration` 和 `update_collaboration`。LLM 不只是看状态，也能在研判后把协作请求改成完成、阻塞、结构化换策略，或推进 case 生命周期。
+- `tool_protocol_v2.normalize_tool_call()` 保持开放世界：旧式 flat tool call 里的业务参数 `status` 不再被误当成协议状态枚举。比如 `{"tool": "update_collaboration", "status": "needs_replan"}` 会归一化为协议 `status=pending`，而把 `needs_replan` 留在工具 input 里。
 
 对应到用户提的联动场景：
 
 ```text
 某个代理发现线索
-  -> open_case
-  -> request_collaboration 给其他来源/能力代理
+  -> raise_collaboration
+  -> raise_collaboration 给其他来源/能力代理
 其他代理并行查询或分析
-  -> submit_evidence 交 refs-first 证据包
-  -> update_collaboration_request 标记完成、阻塞或继续处理中
+  -> submit_collaboration_result 交 refs-first 证据包
+  -> update_collaboration 标记完成、阻塞或继续处理中
 coordinator 发现证据够了、deadline 到了、请求阻塞或请求可收口
   -> 写 observation / urgent wake
 后台主代理醒来
-  -> case_status + inspect_agent_tree
-  -> 必要时 reroute_collaboration_request / update_collaboration_request
+  -> inspect_collaboration + inspect_agent_tree
+  -> 必要时 update_collaboration / update_collaboration
   -> 判断是否二次分析、继续派工、汇报用户或触发审批动作
 ```
 
@@ -980,7 +1014,7 @@ coordinator 发现证据够了、deadline 到了、请求阻塞或请求可收�
 - 一个普通 thread 绑定一个任务。
 - 两个来源代理注册能力并围绕同一 case 提交 refs-first 证据。
 - coordinator 在后台 tick 中把 urgent case 升级为 wake signal。
-- 后台主代理被唤醒后，真实走工具循环调用 `case_status` 读取两个证据包，再调用 `inspect_agent_tree` 查看代理树。
+- 后台主代理被唤醒后，真实走工具循环调用 `inspect_collaboration` 读取两个证据包，再调用 `inspect_agent_tree` 查看代理树。
 - 长期 watcher 场景里，响应者把 request 标为 `blocked` 后，normal priority case 也会写入 normal wake，主代理下一次醒来能看到 `blocked_request_count` 和 `ready_for_main_agent`，而不是等人工催。
 - 最终回复通过 fake internal channel 投递；整个过程不依赖真实 LLM、真实飞书、真实日志平台或业务专项模板。
 
@@ -1002,7 +1036,7 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
 - `list` 只读列出 case 摘要：状态、优先级、请求数、待响应请求数、证据数、决策数。
 - `status` 只读展示单个 case 的请求、证据、参与者和决策。
 - `update-request` 只更新某个协作请求的生命周期，并追加审计决策；如果传入结构化 `target_agent_ids`，也可以同时改派请求目标；不会关闭 case，也不会触发 dispatch。
-- `reroute_collaboration_request` 是模型工具，不是当前 CLI 子命令；它用于后台主代理或子代理在工具循环中把阻塞请求改派到新目标。人工 CLI 侧如果需要同类操作，后续应补独立 `reroute-request` 子命令，不要让操作者手改 JSONL。
+- `update_collaboration` 是模型工具，不是当前 CLI 子命令；它用于后台主代理或子代理在工具循环中把阻塞请求改派到新目标。人工 CLI 侧如果需要同类操作，后续应补独立 `reroute-request` 子命令，不要让操作者手改 JSONL。
 - `update-status` 会更新 case 状态并追加一条 `CaseDecision`，用于主代理或人工把 case 标记为已研判、已解决或已关闭。
 - 待响应、阻塞、完成和缺证据请求只根据结构化 `request_id/status/evidence.request_id` 计算，不从自然语言问题里猜。
 - `list/status` 只是看板，不会调用 LLM、不会 dispatch、不会改变 case 状态。
@@ -1030,7 +1064,7 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
 
 - 主代理在带 `RunParams.task_id` 的长期 thread 内调用 `create_subagents` 时，创建出的子代理会自动继承 `conversation_thread_id` 和 `conversation_task_id`。
 - 继承字段会通过 hierarchy context 继续传给孙代理；孙代理不需要知道飞书/微信/internal 通道细节，只需要带自己的 `run_id/task_id` 上报。
-- `raise_main_event`、`raise_observation`、`open_case` 支持用子/孙代理自己的 `task_id/run_id` 反查 thread。系统先查 conversation task binding，再查 subagent attributes；`open_case` 在本地任务无外部绑定时可创建 internal thread，不从自然语言里猜线程。
+- `raise_event`、`raise_event`、`raise_collaboration` 支持用子/孙代理自己的 `task_id/run_id` 反查 thread。系统先查 conversation task binding，再查 subagent attributes；`raise_collaboration` 在本地任务无外部绑定时可创建 internal thread，不从自然语言里猜线程。
 - 子代理 runner 写出终态结果时，也会通过 task binding 给父 thread 写 observation 和 wake signal。父代理下一轮醒来后仍自己决定是否派测试、找茬、补派或汇报；系统不因为 DONE/VERIFIED 自动替父代理收口。
 - 子/孙代理 context bundle 和 runner prompt summary 会带上最小 conversation refs：`thread_id`、`root_task_id`。这些是机器 refs，不是要求用户在 prompt 里填写工程字段。
 - `background-main-agent status` 提供只读控制面体检：会话数、绑定任务数、待处理 wake、未处理 observation、progress policy、协作 case 和代理树 schema 都能一次看到。
@@ -1041,7 +1075,7 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
 普通用户消息绑定 root task
   -> 主代理用普通自然语言目标创建本地子代理
   -> 子代理通过真实 runner 执行
-  -> 子代理调用 raise_main_event
+  -> 子代理调用 raise_event
   -> 进程重启后重新创建 SimpleAgent / ConversationStore / Scheduler
   -> 后台主代理 tick 读取持久 wake signal
   -> 调用同一个 SimpleAgent.run()
@@ -1075,7 +1109,7 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
 ```text
 只要当前 runner 的 allowed_tools 里有协作工具
   -> prompt 才追加“协作控制面”段落
-  -> 按实际授权工具解释 open_case / request_collaboration / submit_evidence / update_collaboration_request / reroute_collaboration_request / case_status
+  -> 按实际授权工具解释 raise_collaboration / raise_collaboration / submit_collaboration_result / update_collaboration / update_collaboration / inspect_collaboration
   -> 要求最终 evidence_packets 或 next_actions 引用 collaboration://case/<id>、collaboration://request/<id> 或真实 artifact/evidence refs
 ```
 
@@ -1084,11 +1118,11 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
 - 工具没授权时不注入这段，普通子代理 prompt 不变厚。
 - 这段不解析用户自然语言，也不判断某个业务任务必须协作。
 - 它只把已有结构化工具权限变成模型能理解的动作入口，避免“有工具但不会自然用”。
-- 如果同一个 runner 同时有 `open_case` 和 `request_collaboration`，提示会说明：开 case 后如果还需要其他代理回应或补证据，建议继续创建 request；如果只是记录事件，可以停在 open case。
-- 如果协作账本里已有 `target_agent_ids` 点名当前 runner 的未响应 request，`SubAgentManager` 会把它写进 `context_bundle.collaboration.targeted_requests`。runner prompt 会明确告诉响应者优先复用已有 `case/request`，按 `case_status -> submit_evidence -> update_collaboration_request` 处理，除非发现全新问题，不要再开第二个 `open_case`。
+- 如果同一个 runner 同时有 `raise_collaboration` 和 `raise_collaboration`，提示会说明：开 case 后如果还需要其他代理回应或补证据，建议继续创建 request；如果只是记录事件，可以停在 open case。
+- 如果协作账本里已有 `target_agent_ids` 点名当前 runner 的未响应 request，`SubAgentManager` 会把它写进 `context_bundle.collaboration.targeted_requests`。runner prompt 会明确告诉响应者优先复用已有 `case/request`，按 `inspect_collaboration -> submit_collaboration_result -> update_collaboration` 处理，除非发现全新问题，不要再开第二个 `raise_collaboration`。
 - `pending_requests_for_agent()` 只读结构化 `agent_id/agent_name/agent_role/target_agent_ids/request_id/evidence.request_id/status`，不会从 goal 或 question 自然语言里猜目标。它会兼容系统给展示名追加的数字后缀，例如 `Agent-B-2` 可响应发给 `Agent-B` 的请求；也支持发给结构化 role 的请求，例如 `target_agent_ids=["agent-b"]`。已有证据或已完成/拒绝的请求不会再塞给响应者。
 - `dispatch_subagents` 会把“新协作请求点名某个空闲/已完成代理”视为新的待办。也就是说，B 如果先跑完了，而 A 后来才创建 request，下一轮 dispatch 会在当前 scoped / include_run_ids 范围内优先把 B 作为 responder 再跑一轮；这不是重试失败任务，而是处理新的协作输入。
-- 协作结果走 collaboration store、conversation wake、case_status、evidence refs 和上级/主代理汇报；
+- 协作结果走 collaboration store、conversation wake、inspect_collaboration、evidence refs 和上级/主代理汇报；
   不再进入专门的 collaboration closeout/acceptance 硬门。不能只靠 summary 说“我已经协作”，
   但缺协作账本事实只作为日志/观察问题暴露，由父级按任务目标继续推进。
 
@@ -1105,7 +1139,7 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
 - 系统不再替主代理生成“未完成/已完成”的本地结论，也不再用协作合同挡最终回答。
 - 如果任务确实需要继续协作，由主代理/父代理根据 tree/refs/dispatch 状态继续派工、查询、汇总或向用户说明阻塞。
 
-调度工具的参数容错也挂在这里：`dispatch_subagents` 的显式目标可以写 `run_ids`、`include_run_ids`、`subagent_ids`、`target_subagent_ids`、`target_run_ids`、`agent_ids`、`child_run_ids`、`children`，也可以写 `items:[{"run_id":"..."}]`。这些字段都归一成同一组 run id。`direct_children=true` 是范围意图，不是 run id；顶层会使用本轮已经创建/触碰的子代理，runner 内部会使用当前节点的直接孩子。顶层 root 如果显式给了目标 ID，省略 `apply/execute_runners` 时默认真实推进；如果只是想 dry-run，必须显式写 `apply=false`。
+调度工具的参数收敛也挂在这里：`dispatch_subagents` 的显式目标只写 `run_ids`。`direct_children=true` 是范围意图，不是 run id；顶层会使用本轮已经创建/触碰的子代理，runner 内部会使用当前节点的直接孩子。顶层 root 如果显式给了目标 ID，默认真实推进；如果只是想预览，显式写 `dry_run=true`。
 
 历史上这里曾经按 worker/coordinator 自动拆成两波执行，后来证明这是隐藏流水线，会让父级以为“我一次指定了这些 run”，但运行时偷偷改了顺序。当前规则已经删除这层隐性拆波：`dispatch_subagents` 按父级显式 `run_ids` 顺序和并发配置推进候选。若任务确实需要“先收集再汇总”，由父级 prompt/计划明确先 dispatch 收集者，查看 tree/board/产物后再 dispatch 汇总者。
 
@@ -1115,25 +1149,24 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
 
 ## 当前 create / dispatch 触发方式
 
-主代理现在支持两种交卷方式：
+主代理现在只支持一种正常交卷方式：
 
 1. 显式交卷：模型调用 `submit_for_acceptance`。
-2. 隐式交卷：模型没有工具调用，准备最终回复。
 
-两种方式最后都会走同一套 delivery closeout。模型不能只靠自然语言说“完成了”绕过验收。
+这条路会走 delivery closeout。模型不能只靠自然语言说“完成了”绕过验收；同时系统也不会再从自然语言字面猜测交卷时机。
 
 ## 仍需注意的测试影响
 
-旧测试里有一批 fake backend 默认“写完文件后系统每轮自动 closeout”。现在 closeout 已改成显式/隐式提交触发，所以这批测试需要后续统一迁移：
+旧测试里有一批 fake backend 默认“写完文件后系统每轮自动 closeout”。现在 closeout 已改成显式提交触发，所以这批测试需要后续统一迁移：
 
-- 写完产物后 fake backend 应该调用 `submit_for_acceptance`，或者返回无工具最终回答触发隐式验收。
+- 写完产物后 fake backend 应该调用 `submit_for_acceptance`。
 - 不应该继续期待“任意工具执行后系统立刻 closeout”。
 
 这个迁移是测试语义更新，不是重新引入 bootstrap 硬门。
 
 ## 下一步建议
 
-1. 把旧 closeout 集成测试迁移到“显式/隐式提交验收”语义。
+1. 把旧 closeout 集成测试迁移到“显式提交验收”语义。
 2. 用普通用户 prompt 重跑单周 GitHub 任务，观察模型是否能自由检索、写阶段材料、生成最终产物并提交验收。
 3. 如果产物内容仍有幻觉，不加新的前置硬门；改为事实声明、来源引用、事实核对、closeout 返工单这类后置质量闭环。
 
@@ -1217,21 +1250,30 @@ create_subagents 写清楚 goal / refs
 
 `defer_start` 也可以写在单个 `items[]` 子任务上：例如同批创建“开发 worker + 测试 tester + 找错 bug_finder”时，开发可以默认启动，测试/找错可以 `defer_start=true`，等开发产物 refs 出现后再启动。系统会在 `create_subagents` 返回里给 `scheduling_advice` 软提醒，但不会因为测试提前启动而硬拦；父代理仍按任务目标自己决定调度节奏。
 
-如果父代理派了新的修复/接管子代理来替换旧 run，应在 `create_subagents` 参数里写 `replacement_for_run_ids`（兼容 `replaces_run_ids` / `supersedes_run_ids`）。系统会把旧 run 结构化标记为 `TAKEN_OVER` 并写 `takeover_by`，后续状态树和普通 dispatch 不再把旧 run 当成活跃候选。这学习的是 通道运行时/长期助手 一类项目的共同模式：接管是机器状态，不靠父代理自然语言记住“旧的不用管了”。
+如果父代理派了新的修复/接管子代理来替换旧 run，应在 `create_subagents` 参数里写 `replacement_for_run_ids`。系统会把旧 run 结构化标记为 `TAKEN_OVER` 并写 `takeover_by`，后续状态树和普通 dispatch 不再把旧 run 当成活跃候选。这学习的是 通道运行时/长期助手 一类项目的共同模式：接管是机器状态，不靠父代理自然语言记住“旧的不用管了”。
 
 同一轮还废弃了 workflow 自动套娃：全局 `subagent_workflow_mode=auto` 不再静默作用到普通 `create_subagents` / `dispatch_subagents`。只有本次工具参数明确写 `workflow_mode=plan` 或 `workflow_mode=auto` 才会启用 workflow；未知值如 `parallel` 一律当 `off`，避免普通 worker 被拆成 implement/verify 孙代理。
 
-`dispatch_subagents` 现在更像“运行中的引导/推进工具”：它可以带 `runner_instruction`，也接受 `prompt`、`message`、`guidance` 这类别名，作为给目标子代理/孙代理的本轮补充提示。它同时保留人工催办、推进卡住项、重跑指定 run、查一轮状态并尝试恢复这些能力。
+`dispatch_subagents` 现在是“推进/恢复工具”：它负责人工催办、推进卡住项、重跑指定 run、查一轮状态并尝试恢复。`runner_instruction` 只保留“补充一句并立刻推进这个 run”的窄用途；新调用如果只是给目标子代理/孙代理补一句话，应直接用 `send_guidance`。
 
 模型可见的 `dispatch_subagents` 返回里，顶层 `dry_run` 才是整次调用是否真实推进的事实。逐记录统计统一叫 `record_dry_run_count` / `record_applied_count`，逐条记录也统一叫 `record_dry_run` / `record_applied`，避免主代理看到嵌套 `dry_run=true` 后误以为整次 dispatch 都只是预览。
 
 ```json
 {
   "tool": "dispatch_subagents",
-  "apply": true,
-  "execute_runners": true,
+  "dry_run": false,
   "run_ids": ["subagent-..."],
-  "prompt": "继续检查遗漏，查完把结果写到自己的产物里并汇报给上级。"
+  "runner_instruction": "继续推进这几个 run；如果仍缺资料，请先读已有 refs 再补。"
+}
+```
+
+只补充提示但不立刻推进时，用：
+
+```json
+{
+  "tool": "send_guidance",
+  "target": {"type": "agent_run", "id": "subagent-..."},
+  "message": "继续检查遗漏，查完把结果写到自己的产物里并汇报给上级。"
 }
 ```
 
@@ -1246,9 +1288,9 @@ create_subagents 写清楚 goal / refs
 }
 ```
 
-如果模型只想查看状态，不需要 dispatch，可以调用 `subagent_board` / `inspect_agent_tree` 读取 tree/status。系统不再本地抢答“已完成/未完成”，也不再用额外父级验收专用门替代统一 closeout。
+如果模型只想查看状态，不需要 dispatch，可以调用 `inspect_agent_tree` 读取 tree/status。系统不再本地抢答“已完成/未完成”，也不再用额外父级验收专用门替代统一 closeout。
 
-`subagent_board` 会额外给父级两个观察字段：`running_seconds` 表示这个子代理从最近心跳/创建到现在大概跑了多久，`seconds_since_progress` 表示距离最近一次真实进展大概过了多久。这两个字段只帮助父级判断“要不要查看、提醒、补救”，不触发自动阻断。
+`inspect_agent_tree` 会给父级两个观察字段：`running_seconds` 表示这个子代理从最近心跳/创建到现在大概跑了多久，`seconds_since_progress` 表示距离最近一次真实进展大概过了多久。这两个字段只帮助父级判断“要不要查看、提醒、补救”，不触发自动阻断。
 
 看板还会返回 `aggregation_readiness`：子代理总数、已完成数、可读产物数、未完成 run id。它的作用是提醒父级汇总前先读已完成 refs、继续推进未完成项；不是新的验收门，也不替代统一 closeout。
 
@@ -1310,7 +1352,7 @@ auto_apply_result_followup = true
 - 顶层主代理拿到这些索引后，必须自己进入下一轮模型判断：是否汇总、是否继续调度、是否读某个 ref、是否写最终报告。
 - 系统不再因为“子代理都 DONE/VERIFIED”就在工具轮后直接生成 `未再发起额外模型请求` 的本地收口回答。
 - 如果没有显式 run scope，`dispatch_subagents` 会退回列出当前可见子代理的紧凑状态索引，支持父代理“按一下查状态”。
-- `inspect_agent_tree` / `subagent_board` 仍是只读状态工具；`dispatch_subagents` 可以推进 runner，也会返回本次推进后的索引状态。
+- `inspect_agent_tree` 仍是只读状态工具；`dispatch_subagents` 可以推进 runner，也会返回本次推进后的索引状态。
 
 仍保留的兜底：
 

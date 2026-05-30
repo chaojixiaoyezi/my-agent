@@ -238,7 +238,7 @@ type ConfigSchema = {
 | `auth` | 认证与 API Key | `api_key_env`, `auth_enabled`, `admin_user_id`, `user_id` |
 | `tools` | 工具配置 | `enable_tools`, `max_tool_rounds`, `tool_read_max_chars`, `tool_write_inline_max_chars` |
 | `memory` | 记忆配置 | `memory_path`, `memory_top_k`, `auto_save_memory`, `memory_archive_level` |
-| `compact_resume` | 压缩与恢复 | `memory_compact_auto_allow_apply`, `memory_resume_auto_context_enabled`, `memory_resume_auto_context_mode` |
+| `compact_resume` | 压缩与恢复 | `memory_compact_auto_trigger_percent`, `memory_resume_auto_context_enabled`, `memory_resume_auto_context_mode` |
 | `local_store` | 本地事实源 | `local_store_path`, `local_store_fts_enabled` |
 | `subagent` | 子代理 | `enable_subagents`, `subagent_mode`, `max_subagents`, `subagent_workspace`, `subagent_debug_trace_level` |
 | `role_template` | 角色模板 | `subagent_role_template_dirs` |
@@ -1646,7 +1646,7 @@ const configSchemaExample: ConfigSchema = {
         {
           key: "tool_web_max_chars",
           label: "网页/API 返回字符上限",
-          description: "fetch_url / http_request 工具最多返回多少字符",
+          description: "web_fetch 工具最多返回多少字符",
           type: "number",
           defaultValue: 100000,
           min: 0,
@@ -1663,7 +1663,7 @@ const configSchemaExample: ConfigSchema = {
         {
           key: "tool_http_timeout",
           label: "HTTP 工具超时（秒）",
-          description: "fetch_url / http_request 工具默认超时秒数",
+          description: "web_fetch 工具默认超时秒数",
           type: "number",
           defaultValue: 30,
           min: 1,
@@ -1835,19 +1835,17 @@ const configSchemaExample: ConfigSchema = {
           order: 7,
         },
         {
-          key: "memory_compact_auto_allow_apply",
-          label: "允许自动 Compact Apply",
+          key: "memory_compact_auto_trigger_percent",
+          label: "自动 Compact 阈值",
           description:
-            "默认关闭；开启后也只允许非破坏性 apply + auto resume + guard，不自动跑工具",
-          type: "boolean",
-          defaultValue: false,
+            "上下文使用到多少百分比时自动 compact；默认 90，0 表示 100，小于 50 会按 50 处理",
+          type: "number",
+          defaultValue: 90,
           category: "memory",
           advanced: true,
           restartRequired: false,
-          riskLevel: "high",
-          riskWarning:
-            "开启后系统会自动执行 compact apply 操作。虽然已有限制，但仍建议在有监督的情况下使用。",
-          confirmationRequired: true,
+          riskLevel: "low",
+          confirmationRequired: false,
           order: 8,
         },
       ],

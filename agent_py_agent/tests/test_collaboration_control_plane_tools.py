@@ -13,25 +13,21 @@ def test_collaboration_tools_are_registered_and_write_case_flow(tmp_path) -> Non
     registered = {spec.name for spec in agent.tools.specs(include_orchestration=True)}
 
     assert {
-        "open_case",
-        "request_collaboration",
-        "list_collaboration_requests",
-        "submit_evidence",
-        "update_collaboration_request",
-        "reroute_collaboration_request",
-        "update_case_status",
-        "case_status",
+        "raise_collaboration",
+        "inspect_collaboration",
+        "submit_collaboration_result",
+        "update_collaboration",
     }.issubset(registered)
 
-    open_result = agent.tools.tools["open_case"].execute(_open_case_params())
+    open_result = agent.tools.tools["raise_collaboration"].execute(_raise_collaboration_params())
     case_id = json.loads(open_result.output)["case_id"]
-    request_result = agent.tools.tools["request_collaboration"].execute(_request_params(case_id))
+    request_result = agent.tools.tools["raise_collaboration"].execute(_request_params(case_id))
     request_id = json.loads(request_result.output)["request_id"]
-    evidence_result = agent.tools.tools["submit_evidence"].execute(_evidence_params(case_id, request_id))
-    request_update_result = agent.tools.tools["update_collaboration_request"].execute(
+    evidence_result = agent.tools.tools["submit_collaboration_result"].execute(_evidence_params(case_id, request_id))
+    request_update_result = agent.tools.tools["update_collaboration"].execute(
         _request_update_params(case_id, request_id)
     )
-    status_result = agent.tools.tools["case_status"].execute({"case_id": case_id})
+    status_result = agent.tools.tools["inspect_collaboration"].execute({"case_id": case_id})
 
     assert open_result.ok is True
     assert request_result.ok is True
@@ -48,7 +44,7 @@ def _agent_with_task(tmp_path) -> SimpleAgent:
     return agent
 
 
-def _open_case_params() -> dict[str, object]:
+def _raise_collaboration_params() -> dict[str, object]:
     return {
         "task_id": "task-1",
         "title": "通用协作 case",
@@ -90,12 +86,12 @@ def _request_update_params(case_id: str, request_id: str) -> dict[str, object]:
     }
 
 
-def test_list_collaboration_requests_finds_targeted_request_without_case_id(tmp_path) -> None:
+def test_inspect_collaboration_finds_targeted_request_without_case_id(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
     agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "协作任务", 'now': 2.0})
     case_id = json.loads(
-        agent.tools.tools["open_case"].execute(
+        agent.tools.tools["raise_collaboration"].execute(
             {
                 "task_id": "task-1",
                 "title": "待发现协作请求",
@@ -105,7 +101,7 @@ def test_list_collaboration_requests_finds_targeted_request_without_case_id(tmp_
         ).output
     )["case_id"]
     request_id = json.loads(
-        agent.tools.tools["request_collaboration"].execute(
+        agent.tools.tools["raise_collaboration"].execute(
             {
                 "case_id": case_id,
                 "requester_agent_id": "source-a",
@@ -116,7 +112,7 @@ def test_list_collaboration_requests_finds_targeted_request_without_case_id(tmp_
         ).output
     )["request_id"]
 
-    result = agent.tools.tools["list_collaboration_requests"].execute({"agent_id": "source-b"})
+    result = agent.tools.tools["inspect_collaboration"].execute({"agent_id": "source-b"})
     payload = json.loads(result.output)
 
     assert result.ok is True
@@ -126,15 +122,15 @@ def test_list_collaboration_requests_finds_targeted_request_without_case_id(tmp_
     assert payload["requests"][0]["observed_facts"][0]["value"] == "opaque-clue"
 
 
-def test_open_case_materializes_internal_thread_for_known_local_task(tmp_path) -> None:
+def test_raise_collaboration_materializes_internal_thread_for_known_local_task(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     child = agent.subagents.create_run(
         goal="本地协作子代理需要打开一个 case。",
-        allowed_tools=["open_case", "request_collaboration"],
+        allowed_tools=["raise_collaboration", "raise_collaboration"],
         agent_name="local-source-a",
     )
 
-    open_result = agent.tools.tools["open_case"].execute(
+    open_result = agent.tools.tools["raise_collaboration"].execute(
         {
             "thread_id": "guessed-thread-id",
             "task_id": child.id,
@@ -171,7 +167,7 @@ def _targeted_clue_request(tmp_path):
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     responder = agent.subagents.create_run(
         goal="响应开放世界线索协作请求。",
-        allowed_tools=["case_status", "submit_evidence", "update_collaboration_request"],
+        allowed_tools=["inspect_collaboration", "submit_collaboration_result", "update_collaboration"],
         agent_name="source-b",
         role="responder",
     )
@@ -196,10 +192,10 @@ def _targeted_clue_request(tmp_path):
     return agent, responder, request
 
 
-def test_reroute_collaboration_request_tool_updates_targets_and_audit(tmp_path) -> None:
+def test_update_collaboration_tool_updates_targets_and_audit(tmp_path) -> None:
     agent, case_id, request_id = _reroute_tool_fixture(tmp_path)
 
-    reroute_result = agent.tools.tools["reroute_collaboration_request"].execute(
+    reroute_result = agent.tools.tools["update_collaboration"].execute(
         {
             "case_id": case_id,
             "request_id": request_id,
@@ -210,7 +206,7 @@ def test_reroute_collaboration_request_tool_updates_targets_and_audit(tmp_path) 
         }
     )
     payload = json.loads(reroute_result.output)
-    status = json.loads(agent.tools.tools["case_status"].execute({"case_id": case_id}).output)
+    status = json.loads(agent.tools.tools["inspect_collaboration"].execute({"case_id": case_id}).output)
 
     assert reroute_result.ok is True
     assert payload["request"]["target_agent_ids"] == ["source-b"]
@@ -222,9 +218,9 @@ def test_reroute_collaboration_request_tool_updates_targets_and_audit(tmp_path) 
 
 def _reroute_tool_fixture(tmp_path) -> tuple[SimpleAgent, str, str]:
     agent = _agent_with_task(tmp_path)
-    case_id = json.loads(agent.tools.tools["open_case"].execute(_reroute_case_params()).output)["case_id"]
+    case_id = json.loads(agent.tools.tools["raise_collaboration"].execute(_reroute_case_params()).output)["case_id"]
     request_id = json.loads(
-        agent.tools.tools["request_collaboration"].execute({
+        agent.tools.tools["raise_collaboration"].execute({
             "case_id": case_id,
             "requester_agent_id": "source-a",
             "target_agent_ids": ["source-a"],
@@ -272,11 +268,11 @@ def _assert_empty_close_rejected(store, case_id: str) -> None:
         raise AssertionError("closing a case without summary or decision should fail")
 
 
-def test_update_case_status_tool_records_decision_and_case_status(tmp_path) -> None:
+def test_update_collaboration_tool_records_decision_and_inspect_collaboration(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
     agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "协作任务", 'now': 2.0})
-    open_result = agent.tools.tools["open_case"].execute(
+    open_result = agent.tools.tools["raise_collaboration"].execute(
         {
             "task_id": "task-1",
             "title": "状态工具 case",
@@ -286,7 +282,7 @@ def test_update_case_status_tool_records_decision_and_case_status(tmp_path) -> N
     )
     case_id = json.loads(open_result.output)["case_id"]
 
-    update_result = agent.tools.tools["update_case_status"].execute(
+    update_result = agent.tools.tools["update_collaboration"].execute(
         {
             "case_id": case_id,
             "status": "resolved",
@@ -295,7 +291,7 @@ def test_update_case_status_tool_records_decision_and_case_status(tmp_path) -> N
             "decision_type": "resolved_by_main_agent",
         }
     )
-    status = json.loads(agent.tools.tools["case_status"].execute({"case_id": case_id}).output)
+    status = json.loads(agent.tools.tools["inspect_collaboration"].execute({"case_id": case_id}).output)
 
     assert update_result.ok is True
     assert json.loads(update_result.output)["case"]["status"] == "resolved"

@@ -84,7 +84,7 @@ def test_dispatch_payload_prefers_packet_recovery_over_qa_repair(tmp_path: Path)
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents = manager
 
-    direct = json.loads(DispatchSubagentsTool(mock_agent).execute({"apply": True}).output)["direct_children"]
+    direct = json.loads(DispatchSubagentsTool(mock_agent).execute({"dry_run": False}).output)["direct_children"]
 
     assert direct["needs_recovery"] is True
     assert direct["needs_repair_wave"] is True

@@ -144,7 +144,7 @@ def test_legacy_fields_convert_to_v2_envelopes():
 def test_legacy_flat_tool_status_argument_does_not_become_protocol_status():
     call = normalize_tool_call(
         {
-            "tool": "update_case_status",
+            "tool": "update_collaboration",
             "case_id": "case-1",
             "status": "needs_replan",
         }

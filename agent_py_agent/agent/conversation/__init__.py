@@ -14,6 +14,7 @@ from .models import (
     ThreadTaskLink,
     WakeSignal,
 )
+from .models_guidance import GuidanceEntry
 from .runtime import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
@@ -34,6 +35,7 @@ __all__ = [
     "ConversationThread",
     "FakeChannelAdapter",
     "FakeChannelHub",
+    "GuidanceEntry",
     "MessageLogEntry",
     "ObservationEvent",
     "ProgressPolicy",

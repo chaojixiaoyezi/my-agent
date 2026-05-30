@@ -297,7 +297,7 @@ def test_hierarchy_schedule_preserves_coordinator_orchestration_tools(tmp_path):
         thought="delegate",
         plan=["plan"],
         role="coordinator",
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
     )
 
     result = manager.schedule_child_runs(

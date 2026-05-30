@@ -221,7 +221,7 @@
 - 探索熔断改成配置化；本地进展门改成只提醒不阻断，默认 `0` 表示只按固定间隔给软提示。
 - closeout 返工预算只分“产物齐全但不合格”和“必交产物缺失/无法定位”两类，默认都是 `0`，表示持续返工不按次数停；如果显式配置成 `10`，失败报告会记录并使用 `10`。
 - delivery repair 独立运行门已删除；closeout 失败后统一通过 `[delivery-contract-check]` 的 `repair_guidance`、failed artifacts、failed gates 和 recovery actions 指导模型返工，读/搜空转由探索熔断和本地进展门统一处理。
-- 新增显式 `submit_for_acceptance`，并保留“无工具最终回复触发隐式验收”。
+- 新增显式 `submit_for_acceptance`；无工具最终回复不再触发交付验收，避免长任务调研阶段被系统按字面意思提前收口。
 - delivery contract Doctor 只返回结构化诊断提示；同一坏机器合同不会再输出 `DELIVERY_CONTRACT_DOCTOR_BLOCKED`，也不会阻断普通交付。
 - 删除 bootstrap 开工物化硬门，避免普通任务被迫先写系统指定中间文件。
 
@@ -242,7 +242,7 @@
 同日下午复验继续暴露一个收口层问题：父级调度返回里已经有每个 child 的摘要和 `output_json`，但这些信息排在庞大的 `records` 后面，模型读取外置 artifact 时可能先被 records 截断，导致协调汇总漏掉某个 child 的发现。修复方向仍是通用的 refs-first 控制面：
 
 - `dispatch_subagents` 顶层先返回 `child_result_index`，再返回详细 `records`。
-- `subagent_board` 顶层也返回 `child_result_index`，让父级“只看状态”时同样能先看到 child 摘要和 refs。
+- `inspect_agent_tree` 顶层返回 `child_result_index`，让父级“只看状态”时同样能先看到 child 摘要和 refs。
 - 子代理状态摘要在未完成时附带 child 摘要和 refs，作为返工提示，而不是只列 run_id/status。
 - 同批创建的子代理会拿到 `sibling_roster` context pack，里面只有 peer 的 `run_id/name/role/goal` 等控制面身份事实，不包含未来产物路径。这样 coordinator 不必靠父级自然语言记住 10 个兄弟是谁，也不会把 peer 的未来 `output_refs/output_files` 当成当前可读资料。
 
@@ -252,7 +252,7 @@
 
 当前规则改为：协作链路只保留 tree/refs/dispatch 状态事实和日志观察，系统不再用专门 orchestration 合同阻断 root 最终回答。主代理或父代理需要继续推进时，应读取代理树、dispatch 返回索引和子代理产物引用，再自行判断下一步。
 
-同轮复验还显示模型会把 dispatch 参数写成 `{"orchestration": {"run_ids": [...], "concurrency": 5, "mode": "parallel"}}`。这是通用工具协议漂移，不是业务专项问题。`dispatch_subagents` 现在会展开 `orchestration` wrapper，并把 `concurrency` 映射到 `max_runners`、把 `mode=parallel/async/execute/run/real` 映射到真实执行开关；dry-run/plan/preview 仍保留为预览语义。
+同轮复验还显示模型会把 dispatch 参数写成 `{"orchestration": {"run_ids": [...], "concurrency": 5, "mode": "parallel"}}`。这是通用工具协议漂移，不是业务专项问题。当前工具协议已经收敛：`dispatch_subagents` 只接受顶层字段，推进开关只看 `dry_run`，并会明确拒绝 `orchestration` wrapper、`apply`、`execute_runners` 等旧写法。这样可以让错误尽快暴露，而不是长期保留第二套入口。
 
 ### 运行硬门阶段 0-6
 
@@ -308,7 +308,7 @@
 
 阶段 6：非真实环境补测。新增 focused tests 覆盖 Doctor、工具韧性、物化器接线、closeout 接线，并回归 bootstrap、repair、collection、staged writer 等现有入口门。当前仍坚持：真实任务只做最终收口，日常开发以离线合同、fake tool、fake model 和 replay 为主。
 
-阶段 6 补充：子代理状态面路径收敛。`subagent_board` 和 `inspect_agent_tree` 这类模型可见状态工具只暴露当前 task workspace、agent run workspace、artifact refs、recovery refs，不再把旧式 work-order 目录作为主路径字段返回。旧路径仍可留在兼容恢复文件中供系统迁移使用，但不能作为父代理接管/读取产物时的默认候选，避免模型从 `data/subagents/<run_id>/...` 这类旧布局误读到不存在路径。
+阶段 6 补充：子代理状态面路径收敛。`inspect_agent_tree` 这个模型可见状态工具只暴露当前 task workspace、agent run workspace、artifact refs、recovery refs，不再把旧式 work-order 目录作为主路径字段返回。旧路径仍可留在兼容恢复文件中供系统迁移使用，但不能作为父代理接管/读取产物时的默认候选，避免模型从 `data/subagents/<run_id>/...` 这类旧布局误读到不存在路径。
 
 阶段 6 补充：路径不存在恢复。参考 工具运行时/终端交互/长期助手 的 file read / grep / glob 行为，缺失路径应返回可行动候选，而不是只抛“不存在”。`read_file`、`list_files`、`search_text` 现在共享同一层 `path_not_found` 恢复面：候选只从允许的 workspace roots 中找，结果包含 `candidate_paths` 和建议动作；系统不会自动读取候选，也不会因为路径缺失终止任务。通道运行时 的路径边界经验也保留：越界、symlink 逃逸和权限问题仍走边界错误，不能被包装成普通缺文件。
 

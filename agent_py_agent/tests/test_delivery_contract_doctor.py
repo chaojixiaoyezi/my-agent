@@ -37,6 +37,35 @@ def test_delivery_contract_doctor_accepts_unknown_kind_with_explicit_extension(t
     assert report.to_dict()["normalized_contract"]["artifacts"][0]["kind"] == "gguf"
 
 
+def test_delivery_contract_doctor_normalizes_structured_required_columns(tmp_path: Path) -> None:
+    from agent_py_agent.agent.contracts.delivery_contract_doctor import validate_delivery_contract
+
+    report = validate_delivery_contract(
+        {
+            "schema_version": "delivery_contract.v1",
+            "artifacts": [
+                {
+                    "artifact_id": "summary",
+                    "kind": "markdown",
+                    "preferred_path": "outputs/report.md",
+                    "validation_contract": {
+                        "required_columns": [
+                            {"column_name": "来源文件", "description": "文件路径"},
+                            {"column_name": "行号", "description": "行号"},
+                            {"name": "编号"},
+                        ],
+                    },
+                }
+            ],
+        },
+        workspace_root=tmp_path,
+    )
+
+    assert report.ok is True
+    validation = report.to_dict()["normalized_contract"]["artifacts"][0]["validation_contract"]
+    assert validation["required_columns"] == ["来源文件", "行号", "编号"]
+
+
 # LLM: delivery contract doctor should make unrepairable malformed contracts machine-visible.
 # 函数用途: 验证 artifact 缺少 path/kind 时返回 hard finding 和可执行的重新物化建议。
 def test_delivery_contract_doctor_returns_repair_action_for_missing_target(tmp_path: Path) -> None:

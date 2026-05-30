@@ -21,35 +21,76 @@ class ToolContextWindowRequest:
     max_chars: int = _DEFAULT_MAX_CHARS
 
 
+# LLM: ToolContextWindowResult reports whether live tool context was compacted for the prompt.
+# 类用途: 保存窗口化结果、原始字符数和保留条数，供运行时决定是否记录 compact 溢出事实。
+@dataclass(frozen=True)
+class ToolContextWindowResult:
+    windowed: bool = False
+    omitted_count: int = 0
+    original_chars: int = 0
+    preserved_count: int = 0
+
+
 # LLM: window_tool_context_for_live_prompt trims old tool transcript entries but keeps archive refs recoverable.
 # 函数用途: 长任务工具上下文过大时，原地替换为窗口摘要加最近记录，避免 prompt 随工具轮数无限膨胀。
-def window_tool_context_for_live_prompt(request: ToolContextWindowRequest) -> None:
+def window_tool_context_for_live_prompt(request: ToolContextWindowRequest) -> ToolContextWindowResult:
     entries = request.tool_context
     if not isinstance(entries, list) or not entries:
-        return
+        return ToolContextWindowResult()
     max_chars = _positive_max_chars(request.max_chars)
-    if _context_chars(entries) <= max_chars:
-        return
+    original_chars = _context_chars(entries)
+    if original_chars <= max_chars:
+        return ToolContextWindowResult(original_chars=original_chars)
     active_entries = _non_window_entries(entries)
     recent_entries = _recent_entries_within_budget(active_entries, max_chars)
     omitted_count = max(0, len(active_entries) - len(recent_entries))
     if omitted_count <= 0:
-        return
+        return ToolContextWindowResult(original_chars=original_chars, preserved_count=len(recent_entries))
     entries[:] = [
         _window_summary(omitted_count, recent_entries, request.archive_tool_calls),
         *recent_entries,
     ]
+    return ToolContextWindowResult(
+        windowed=True,
+        omitted_count=omitted_count,
+        original_chars=original_chars,
+        preserved_count=len(recent_entries),
+    )
 
 
 # LLM: window_tool_context_params is the thin ToolLoopService adapter for windowing mutable params.
 # 函数用途: 从 ToolLoopExecuteParams 取 live tool_context 和归档记录，避免核心循环文件展开构造细节。
-def window_tool_context_params(params: object) -> None:
-    window_tool_context_for_live_prompt(
+def window_tool_context_params(agent: object, params: object) -> None:
+    result = window_tool_context_for_live_prompt(
         ToolContextWindowRequest(
             tool_context=getattr(params, "tool_context", []),
             archive_tool_calls=getattr(params, "archive_tool_calls", []),
         )
     )
+    if result.windowed and _persistent_compact_enabled(agent, params):
+        _record_tool_context_window_overflow(params, result)
+
+
+# LLM: _persistent_compact_enabled mirrors live archive save boundaries before requesting auto compact.
+# 函数用途: 只有保存型运行把 tool-context 裁剪升级为正式 compact；临时测试 run 仍只做窗口裁剪。
+def _persistent_compact_enabled(agent: object, params: object) -> bool:
+    save = getattr(params, "save", None)
+    if save is not None:
+        return bool(save)
+    return bool(getattr(getattr(agent, "config", None), "auto_save_memory", True))
+
+
+# LLM: _record_tool_context_window_overflow lets preflight compact see hidden tool-context trimming.
+# 函数用途: 把工具上下文窗口裁剪写到本轮状态，下一次模型调用前会走同一套 compact/resume。
+def _record_tool_context_window_overflow(params: object, result: ToolContextWindowResult) -> None:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return
+    state["tool_context_window_overflow"] = {
+        "omitted_count": result.omitted_count,
+        "original_chars": result.original_chars,
+        "preserved_count": result.preserved_count,
+    }
 
 
 # LLM: _positive_max_chars keeps pathological caller values from deleting all live context.

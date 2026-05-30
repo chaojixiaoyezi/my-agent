@@ -46,8 +46,7 @@
 - `defer_start` 可以写在单个 `items[]` 子任务上。生产 worker 仍默认创建即启动；
   测试、找错、验收、汇总这类依赖前置产物的子代理可以单独挂起，等产物 refs 出现后
   再由父代理显式启动。系统只给调度建议，不用硬门替模型判断。
-- `create_subagents` 支持 `replacement_for_run_ids` / `replaces_run_ids` /
-  `supersedes_run_ids`。父代理派接管/修复子代理时，把被替换的旧 run 写进去；
+- `create_subagents` 只支持 `replacement_for_run_ids`。父代理派接管/修复子代理时，把被替换的旧 run 写进去；
   系统会把旧 run 标记为 `TAKEN_OVER` 并记录 `takeover_by`，后续 tree/board/dispatch
   默认不再把旧 run 当成活跃任务。旧 run 的记录和证据仍保留，方便审计和恢复。
 - 子代理 runner 完成或失败后，会把状态更新写入绑定的长期会话，并投递一条普通
@@ -56,7 +55,7 @@
 
 ## 2026-05-28 模型可见路径收敛
 
-- `inspect_agent_tree` 和 `subagent_board` 的模型可见输出只暴露当前 `task_workspace`、`agent_run_workspace`、artifact refs、evidence refs 和 recovery refs。
+- `inspect_agent_tree` 的模型可见输出只暴露当前 `task_workspace`、`agent_run_workspace`、artifact refs、evidence refs 和 recovery refs。
 - 旧式 work-order 目录仍留在兼容恢复文件中，但不再作为状态面主路径返回，避免父代理接管时按 `data/subagents/<run_id>/...` 猜旧路径。
 - 父级读取子代理结果时，应优先用 `agent_run_workspace`、`final_report_ref`、`artifact_refs` 和 `evidence_refs`，不要自己拼子代理目录。
 - 如果模型仍然拿旧路径或抄错路径去读，`read_file/list_files/search_text`
@@ -69,7 +68,7 @@
   重建或修复时更新同一个 `artifact_id` 的最新记录。
 - `write_file` 等工具结果会暴露机器路径，工具归档会把真实存在的输出文件登记进
   registry；子代理结构化结果里的 `artifacts/file_path/output_path` 也会登记。
-- `dispatch_subagents`、`subagent_board`、`inspect_agent_tree` 和 closeout
+- `dispatch_subagents`、`inspect_agent_tree` 和 closeout
   都优先返回 registry 的 `artifact_id/path/registry_ref`。旧路径字段还保留，
   但只作为兼容投影。
 - closeout 支持 file group，但 file group 必须先进入统一 artifact registry。
@@ -84,7 +83,7 @@
 
 ## 2026-05-28 看板秒数和汇总准备度
 
-- `subagent_board` 行里新增 `running_seconds` 和 `seconds_since_progress`。它们只是观察字段：
+- `inspect_agent_tree` 节点里新增 `running_seconds` 和 `seconds_since_progress`。它们只是观察字段：
   一个表示子代理大概跑了多久，一个表示距离最近真实进展多久。
 - 父代理可以据此判断要不要查看、提醒、补派或接手，但系统不会因为秒数自动阻断任务。
 - 看板顶层新增 `aggregation_readiness`，列出子代理总数、已完成数、registry 中可读产物数量、
@@ -97,3 +96,12 @@
 - 当前子代理进展只认真实任务账本、refs、artifact registry、工具轨迹和 closeout
   结果；不再通过这些旧 helper 生成额外能力继承文本或 repair 目标猜测。
 - 这次是删死代码和假信号，不改变正常子代理创建、启动、看树、写产物和汇报流程。
+
+## 2026-05-29 运行中补充提示
+
+- 新增统一 `send_guidance` 账本入口。父代理、用户或兼容工具给某个 run 补一句话时，
+  子代理下一轮 runner prompt 会在 `Runtime Guidance` 中看到。
+- 旧 `subagent_message` 工具已移除；纯补充提示统一用 `send_guidance`。
+  `dispatch_subagents.runner_instruction` 只用于“补一句并立刻推进该 run”，并同步写入同一份 guidance 账本。
+- guidance 是软提示，不是验收条件：不会阻断、不会替父代理做结论、不会改变原任务目标。
+  子代理看到后由模型自己决定换来源、补证据、写阶段文件或上报。

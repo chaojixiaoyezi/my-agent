@@ -47,11 +47,11 @@ def test_subagent_capability_records():
             ),
         )
         grant = agent.subagents.record_capability_grant(child.id, RecordCapabilityGrantParams(
-            request_id=request.id, tools=["fetch_url"], reason="允许低风险 GET 检查。",
+            request_id=request.id, tools=["web_fetch"], reason="允许低风险 GET 检查。",
         ))
         gap = agent.subagents.record_capability_gap(child.id, RecordCapabilityGapParams(
             missing_capability="authenticated_api_check", why_failed="缺少登录态和安全授权。",
-            attempted_tools=["fetch_url"], suggested_skill="api-auth-debugging",
+            attempted_tools=["web_fetch"], suggested_skill="api-auth-debugging",
         ))
 
         loaded_child = agent.subagents.load(child.id)
@@ -62,7 +62,7 @@ def test_subagent_capability_records():
         assert loaded_child.capability_requests[0].id == request.id
         assert loaded_child.capability_grants[0].id == grant.id
         assert loaded_child.capability_gaps[0].id == gap.id
-        assert "fetch_url" in loaded_child.allowed_tools
+        assert "web_fetch" in loaded_child.allowed_tools
 
 
 def test_subagent_fake_done_requires_evidence():

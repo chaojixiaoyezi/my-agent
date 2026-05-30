@@ -7,17 +7,17 @@ from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
 
 
-def test_open_case_uses_current_subagent_run_when_model_invents_task_id(tmp_path) -> None:
+def test_raise_collaboration_uses_current_subagent_run_when_model_invents_task_id(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     child = agent.subagents.create_run(
         goal="发现线索后打开协作 case。",
         agent_name="clue-requester",
-        allowed_tools=["open_case"],
+        allowed_tools=["raise_collaboration"],
     )
     agent._current_subagent_run_id = child.id
     try:
         payload = json.loads(
-            agent.tools.tools["open_case"].execute(
+            agent.tools.tools["raise_collaboration"].execute(
                 {
                     "thread_id": "thread-clue-requester",
                     "task_id": "task-clue-1",
@@ -31,7 +31,7 @@ def test_open_case_uses_current_subagent_run_when_model_invents_task_id(tmp_path
         delattr(agent, "_current_subagent_run_id")
 
     thread = agent.conversation_store.thread_for_task(child.id)
-    status = json.loads(agent.tools.tools["case_status"].execute({"case_id": payload["case_id"]}).output)
+    status = json.loads(agent.tools.tools["inspect_collaboration"].execute({"case_id": payload["case_id"]}).output)
 
     assert payload["task_id"] == child.id
     assert payload["scope_resolution"]["effective"]["agent_id"] == child.id
@@ -44,13 +44,13 @@ def test_collaboration_tools_scope_actor_to_current_runner_when_explicit_id_conf
     child = agent.subagents.create_run(
         goal="发起协作并提交证据。",
         agent_name="real-runner",
-        allowed_tools=["open_case", "request_collaboration", "submit_evidence"],
+        allowed_tools=["raise_collaboration", "raise_collaboration", "submit_collaboration_result"],
     )
     target = agent.subagents.create_run(goal="响应协作。", agent_name="target-runner")
     agent._current_subagent_run_id = child.id
     try:
         case_payload = json.loads(
-            agent.tools.tools["open_case"].execute(
+            agent.tools.tools["raise_collaboration"].execute(
                 {
                     "task_id": child.id,
                     "title": "身份冲突 case",
@@ -60,7 +60,7 @@ def test_collaboration_tools_scope_actor_to_current_runner_when_explicit_id_conf
             ).output
         )
         request_payload = json.loads(
-            agent.tools.tools["request_collaboration"].execute(
+            agent.tools.tools["raise_collaboration"].execute(
                 {
                     "case_id": case_payload["case_id"],
                     "requester_agent_id": "invented-agent",
@@ -70,7 +70,7 @@ def test_collaboration_tools_scope_actor_to_current_runner_when_explicit_id_conf
             ).output
         )
         evidence_payload = json.loads(
-            agent.tools.tools["submit_evidence"].execute(
+            agent.tools.tools["submit_collaboration_result"].execute(
                 {
                     "case_id": case_payload["case_id"],
                     "request_id": request_payload["request_id"],
@@ -83,7 +83,7 @@ def test_collaboration_tools_scope_actor_to_current_runner_when_explicit_id_conf
     finally:
         delattr(agent, "_current_subagent_run_id")
 
-    status = json.loads(agent.tools.tools["case_status"].execute({"case_id": case_payload["case_id"]}).output)
+    status = json.loads(agent.tools.tools["inspect_collaboration"].execute({"case_id": case_payload["case_id"]}).output)
     assert status["case"]["created_by"] == child.id
     assert status["requests"][0]["requester_agent_id"] == child.id
     assert status["evidence"][0]["source_agent_id"] == child.id
@@ -128,9 +128,9 @@ def test_pending_requests_for_agent_returns_targeted_unanswered_request_refs(tmp
     assert requests[0]["case_ref"] == f"collaboration://case/{case.case_id}"
     assert requests[0]["request_ref"] == f"collaboration://request/{pending.request_id}"
     assert requests[0]["recommended_tools"] == [
-        "case_status",
-        "submit_evidence",
-        "update_collaboration_request",
+        "inspect_collaboration",
+        "submit_collaboration_result",
+        "update_collaboration",
     ]
 
 
@@ -175,7 +175,7 @@ def test_pending_requests_for_agent_ignores_closed_cases(tmp_path) -> None:
 
 # LLM: Multi-target collaboration requests stay pending for unresponsive targets.
 # 函数用途: 一个请求发给多个代理时，单个代理提交证据不能让其它目标丢失 inbox 请求。
-def test_multi_target_request_tracks_each_responder_until_all_submit_evidence(tmp_path) -> None:
+def test_multi_target_request_tracks_each_responder_until_all_submit_collaboration_result(tmp_path) -> None:
     from agent_py_agent.agent.collaboration import CollaborationStore
 
     store = CollaborationStore(tmp_path / "collaboration")

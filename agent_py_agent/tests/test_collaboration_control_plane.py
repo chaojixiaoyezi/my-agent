@@ -16,7 +16,7 @@ def _agent_with_thread(tmp_path, *, goal: str = "线索协作"):
 
 def _open_tool_case(agent: SimpleAgent, *, title: str = "通用线索 case") -> str:
     return json.loads(
-        agent.tools.tools["open_case"].execute(
+        agent.tools.tools["raise_collaboration"].execute(
             {
                 "task_id": "task-1",
                 "title": title,
@@ -154,7 +154,7 @@ def test_collaboration_tools_accept_generic_clue_request_and_evidence_response(t
     case_id = _open_tool_case(agent)
 
     request_payload = json.loads(
-        agent.tools.tools["request_collaboration"].execute(
+        agent.tools.tools["raise_collaboration"].execute(
             {
                 "case_id": case_id,
                 "requester_agent_id": "source-a",
@@ -183,7 +183,7 @@ def test_collaboration_tools_accept_generic_clue_request_and_evidence_response(t
         ).output
     )
     evidence_payload = _submit_generic_miss_evidence(agent, case_id, request_payload["request_id"])
-    status = json.loads(agent.tools.tools["case_status"].execute({"case_id": case_id}).output)
+    status = json.loads(agent.tools.tools["inspect_collaboration"].execute({"case_id": case_id}).output)
 
     assert request_payload["target_agent_ids"] == ["source-b"]
     assert evidence_payload["evidence_id"]
@@ -200,7 +200,7 @@ def _mark_request(store, request_ref: tuple[str, str, str], status: str, now: fl
 
 def _submit_generic_miss_evidence(agent: SimpleAgent, case_id: str, request_id: str) -> dict[str, object]:
     return json.loads(
-        agent.tools.tools["submit_evidence"].execute(
+        agent.tools.tools["submit_collaboration_result"].execute(
             {
                 "case_id": case_id,
                 "request_id": request_id,
@@ -219,13 +219,13 @@ def _submit_generic_miss_evidence(agent: SimpleAgent, case_id: str, request_id: 
 
 
 # LLM: Relative collaboration deadlines let agents express short waits without hard-coding wall-clock timestamps.
-# 函数用途: request_collaboration 支持 deadline_seconds，coordinator 仍按结构化 deadline_at 升级。
-def test_request_collaboration_tool_accepts_relative_deadline_seconds(tmp_path, monkeypatch) -> None:
+# 函数用途: raise_collaboration 支持 deadline_seconds，coordinator 仍按结构化 deadline_at 升级。
+def test_raise_collaboration_tool_accepts_relative_deadline_seconds(tmp_path, monkeypatch) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
     agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "短等待协作", 'now': 2.0})
     case_id = json.loads(
-        agent.tools.tools["open_case"].execute(
+        agent.tools.tools["raise_collaboration"].execute(
             {
                 "task_id": "task-1",
                 "title": "短等待协作 case",
@@ -235,7 +235,7 @@ def test_request_collaboration_tool_accepts_relative_deadline_seconds(tmp_path, 
     )["case_id"]
     monkeypatch.setattr("agent_py_agent.agent.collaboration.tools.time.time", lambda: 100.0)
 
-    result = agent.tools.tools["request_collaboration"].execute(
+    result = agent.tools.tools["raise_collaboration"].execute(
         {
             "case_id": case_id,
             "requester_agent_id": "source-a",

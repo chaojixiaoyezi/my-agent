@@ -9,8 +9,8 @@ from unittest.mock import MagicMock
 class TestDispatchSubagentsToolExecute:
     """测试 DispatchSubagentsTool.execute() 方法。"""
 
-    def test_execute_runners_requires_apply(self):
-        """execute_runners=true 必须配合 apply=true。"""
+    def test_legacy_execution_params_are_rejected(self):
+        """模型入口不再接受旧 apply/execute_runners 执行开关。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_agent = MagicMock()
@@ -21,10 +21,10 @@ class TestDispatchSubagentsToolExecute:
         result = tool.execute({"execute_runners": True, "apply": False})
 
         assert result.ok is False
-        assert "apply" in result.output.lower()
+        assert "只接受 dry_run" in result.output
 
-    def test_dispatch_without_apply(self):
-        """apply=false 时执行 dry-run。"""
+    def test_dispatch_dry_run_true_previews(self):
+        """dry_run=true 时执行预览。"""
         from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
@@ -40,7 +40,7 @@ class TestDispatchSubagentsToolExecute:
         mock_agent.subagents.workspace = Path("/tmp/workspace")
 
         tool = DispatchSubagentsTool(mock_agent)
-        result = tool.execute({"apply": False})
+        result = tool.execute({"dry_run": True})
 
         assert result.ok is True
         mock_agent.dispatch_subagents.assert_called_once()
@@ -48,8 +48,8 @@ class TestDispatchSubagentsToolExecute:
         assert isinstance(call_kwargs["params"], DispatchParams)
         assert "apply" not in call_kwargs
 
-    def test_dispatch_with_apply_and_execute_runners(self):
-        """apply=true 且 execute_runners=true 时执行真实 runner。"""
+    def test_dispatch_dry_run_false_executes_runners(self):
+        """dry_run=false 时执行真实 runner。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_report = MagicMock()
@@ -64,7 +64,7 @@ class TestDispatchSubagentsToolExecute:
         mock_agent.subagents.workspace = Path("/tmp/workspace")
 
         tool = DispatchSubagentsTool(mock_agent)
-        result = tool.execute({"apply": True, "execute_runners": True})
+        result = tool.execute({"dry_run": False})
 
         assert result.ok is True
 
@@ -85,7 +85,7 @@ class TestDispatchSubagentsToolExecute:
         mock_agent.subagents.workspace = Path("/tmp/workspace")
         mock_agent.subagents.list_runs.return_value = []
 
-        result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "execute_runners": True})
+        result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False})
 
         assert result.ok is True
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
@@ -108,8 +108,7 @@ class TestDispatchSubagentsToolExecute:
 
         tool = DispatchSubagentsTool(mock_agent)
         result = tool.execute({
-            "apply": True,
-            "execute_runners": True,
+            "dry_run": False,
             "run_ids": ["child-auth", "child-catalog"],
         })
 
@@ -133,8 +132,7 @@ class TestDispatchSubagentsToolExecute:
         mock_agent.subagents.workspace = Path("/tmp/workspace")
 
         result = DispatchSubagentsTool(mock_agent).execute({
-            "apply": True,
-            "execute_runners": True,
+            "dry_run": False,
             "run_ids": ["child-auth", "child-catalog", "child-cart"],
         })
 
@@ -144,8 +142,8 @@ class TestDispatchSubagentsToolExecute:
 
     def test_dispatch_scope_memory_ignores_non_runner_report_records(self):
         """当前轮作用域只记本轮显式/runner run_id，不把旧验收记录写进最终收口范围。"""
-        from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import (
-            _run_ids_from_dispatch,
+        from agent_py_agent.agent.agent_core.orchestration_dispatch_tool_helpers import (
+            _run_ids_for_scope,
         )
 
         report = SimpleNamespace(
@@ -155,7 +153,7 @@ class TestDispatchSubagentsToolExecute:
             ]
         )
 
-        ids = _run_ids_from_dispatch({"run_ids": ["current-worker"]}, report)
+        ids = _run_ids_for_scope({"run_ids": ["current-worker"]}, report)
 
         assert ids == ["current-worker"]
 
@@ -196,8 +194,7 @@ class TestDispatchSubagentsToolRunnerInstruction:
         mock_agent.subagents.workspace_root = Path("/tmp/project")
 
         result = DispatchSubagentsTool(mock_agent).execute({
-            "apply": True,
-            "execute_runners": True,
+            "dry_run": False,
             "run_ids": ["child-report"],
             "runner_instruction": "请把研究结果写入 {workspace_root}/data/subagents/report.md",
         })
@@ -206,33 +203,6 @@ class TestDispatchSubagentsToolRunnerInstruction:
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
         root = Path("/tmp/project").resolve(strict=False)
         assert call_kwargs["params"].runner_instruction == f"请把研究结果写入 {root}/data/subagents/report.md"
-
-    def test_prompt_alias_becomes_runner_instruction(self):
-        """dispatch_subagents 的 prompt/message 别名应作为运行中提示注入给目标子代理。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
-
-        mock_report = MagicMock()
-        mock_report.dry_run = False
-        mock_report.summary = {}
-        mock_report.records = []
-
-        mock_agent = MagicMock()
-        mock_agent.config.subagent_workflow_mode = "off"
-        mock_agent.tools.specs.return_value = []
-        mock_agent.dispatch_subagents.return_value = mock_report
-        mock_agent.subagents.workspace = Path("/tmp/workspace")
-
-        result = DispatchSubagentsTool(mock_agent).execute({
-            "apply": True,
-            "execute_runners": True,
-            "run_ids": ["child-1"],
-            "prompt": "继续查一下有没有遗漏，查完直接写结论。",
-        })
-
-        assert result.ok is True
-        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
-        assert call_kwargs["params"].runner_instruction == "继续查一下有没有遗漏，查完直接写结论。"
-
 
 class TestDispatchSubagentsToolTopLevelWorkflow:
     """测试顶层 dispatch 不会绕过 root coordinator 层级。"""
@@ -263,14 +233,14 @@ class TestDispatchSubagentsToolTopLevelWorkflow:
         ]
 
         tool = DispatchSubagentsTool(mock_agent)
-        result = tool.execute({"apply": True, "execute_runners": True, "workflow_mode": "auto"})
+        result = tool.execute({"dry_run": False, "workflow_mode": "auto"})
 
         assert result.ok is True
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
         assert call_kwargs["params"].workflow_mode == "off"
 
-    def test_top_level_apply_dispatch_does_not_spawn_workflow_for_active_root_coordinator(self):
-        """只 apply workflow 计划也不能给 active root/coordinator 套 producer/critic/repair。"""
+    def test_top_level_real_dispatch_does_not_spawn_workflow_for_active_root_coordinator(self):
+        """真实推进时也不能给 active root/coordinator 套 producer/critic/repair。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_report = MagicMock()
@@ -294,7 +264,7 @@ class TestDispatchSubagentsToolTopLevelWorkflow:
             )
         ]
 
-        result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "workflow_mode": "auto"})
+        result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False, "workflow_mode": "auto"})
 
         assert result.ok is True
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
@@ -325,7 +295,7 @@ class TestDispatchSubagentsToolTopLevelWorkflow:
             )
         ]
 
-        result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "execute_runners": True, "workflow_mode": "auto"})
+        result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False, "workflow_mode": "auto"})
 
         assert result.ok is True
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
@@ -353,7 +323,7 @@ class TestDispatchSubagentsToolRunnerContext:
         mock_agent.subagents.workspace = Path("/tmp/workspace")
 
         tool = DispatchSubagentsTool(mock_agent)
-        result = tool.execute({"apply": True})
+        result = tool.execute({"dry_run": False})
 
         assert result.ok is True
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
@@ -441,8 +411,8 @@ class TestDispatchSubagentsToolRunnerContext:
         assert payload["scope_resolution"]["effective"]["parent_run_id"] == "current-child"
         assert payload["scope_resolution"]["ignored_explicit"]["parent_run_id"] == "sibling-parent"
 
-    def test_execute_limit_aliases_runner_count_when_max_runners_missing(self):
-        """真实执行时，模型只写 limit 也应按 runner 数量推进，避免误退回单线程。"""
+    def test_max_runners_controls_runner_count(self):
+        """真实执行时，runner 数量只由 max_runners 控制，limit 只管记录条数。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_report = MagicMock()
@@ -459,14 +429,14 @@ class TestDispatchSubagentsToolRunnerContext:
         mock_agent.subagents.list_runs.return_value = []
 
         result = DispatchSubagentsTool(mock_agent).execute({
-            "apply": True,
-            "execute_runners": True,
+            "dry_run": False,
+            "max_runners": 3,
             "limit": 10,
         })
 
         assert result.ok is True
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
-        assert call_kwargs["params"].max_runners == 10
+        assert call_kwargs["params"].max_runners == 3
         assert call_kwargs["params"].limit == 10
 
     def test_nested_dispatch_excludes_active_ancestors(self):
@@ -525,7 +495,7 @@ class TestDispatchSubagentsToolRunnerContext:
         mock_agent.subagents.workspace = Path("/tmp/workspace")
         mock_agent.subagents.list_runs.return_value = []
 
-        result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "execute_runners": True})
+        result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False})
 
         assert result.ok is True
         capability_config = mock_agent.dispatch_subagents.call_args.args[1]

@@ -21,6 +21,7 @@ from ..capability_config import CapabilityConfig
 from ..file_io import append_jsonl
 from .controlled_exec_gateway import controlled_exec_grant_refs
 from .manager_collaboration_context import collaboration_context_payload
+from .manager_runtime_guidance import attach_runtime_guidance, runtime_guidance_context
 from .models import SubAgentExecutionContext
 from .parsing import (
     _dict_list,
@@ -194,6 +195,8 @@ class SubAgentRunnerContextMixin:
         collaboration = collaboration_context_payload(self, task)
         if collaboration:
             context_bundle["collaboration"] = collaboration
+        # 函数用途: 子代理执行上下文只挂载未投递 guidance；实际提示渲染由 runner prompt 统一处理。
+        attach_runtime_guidance(context_bundle, runtime_guidance_context(self, task.id))
         return SubAgentExecutionContext(
             **_execution_context_task_fields(task),
             allowed_skills=request.allowed_skills,

@@ -71,7 +71,6 @@ _FIELDS = (
     _FieldSpec("memory_resume_auto_context_enabled", "bool"),
     _FieldSpec("memory_resume_auto_context_mode", "choice", choices={"off", "trigger", "always"}),
     _FieldSpec("memory_resume_auto_context_limit", "int", 1, 50),
-    _FieldSpec("memory_compact_auto_allow_apply", "bool"),
     _FieldSpec("memory_compact_auto_trigger_percent", "compact_trigger_percent"),
 )
 

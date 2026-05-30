@@ -161,8 +161,8 @@ def test_tool_specs_become_capability_cards():
     hits = router.search("需要请求 REST API 并检查返回")
     names = [hit.card.name for hit in hits]
 
-    assert "http_request" in names
-    http_card = next(hit.card for hit in hits if hit.card.name == "http_request")
+    assert "web_fetch" in names
+    http_card = next(hit.card for hit in hits if hit.card.name == "web_fetch")
     assert http_card.kind == "tool"
     assert http_card.risk_level == "medium"
     assert "network_request" in http_card.side_effects

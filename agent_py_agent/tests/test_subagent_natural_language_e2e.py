@@ -45,7 +45,7 @@ class NaturalFurnitureRootBackend(BaseBackend):
     def _create_payload(self) -> dict[str, object]:
         return {
             "tool": "create_subagents",
-            "apply": True,
+            "dry_run": False,
             "count": 1,
             "role": "coordinator",
             "agent_name": "小傻妞-家具总控",
@@ -113,7 +113,7 @@ class NaturalFurnitureRunnerBackend(BaseBackend):
     def _schedule_leaf_payload(self) -> dict[str, object]:
         return {
             "tool": "schedule_child_subagents",
-            "apply": True,
+            "dry_run": False,
             "children": [
                 {
                     "role": "worker",
@@ -148,13 +148,13 @@ def _tool_call(payload: dict[str, object]) -> str:
 # LLM: _root_dispatch_payload asks root to execute the direct child through the normal dispatch tool.
 # 函数用途: 构造主代理第二轮工具调用，只推进自己创建的直接 child。
 def _root_dispatch_payload() -> dict[str, object]:
-    return {"tool": "dispatch_subagents", "apply": True, "execute_runners": True, "max_runners": 1}
+    return {"tool": "dispatch_subagents", "dry_run": False, "max_runners": 1}
 
 
 # LLM: _child_dispatch_payload asks a coordinator to execute its own direct child.
 # 函数用途: 构造小傻妞第二轮工具调用，验证下级派工由当前父节点继续推进。
 def _child_dispatch_payload() -> dict[str, object]:
-    return {"tool": "dispatch_subagents", "apply": True, "execute_runners": True, "max_runners": 1}
+    return {"tool": "dispatch_subagents", "dry_run": False, "max_runners": 1}
 
 
 # LLM: _subagent_result produces a minimal accepted runner result with refs-friendly evidence.

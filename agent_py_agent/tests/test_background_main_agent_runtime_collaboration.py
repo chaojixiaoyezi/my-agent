@@ -39,7 +39,7 @@ class _CollaborationRehearsalBackend:
             assert "collaboration_case_closed" in prompt
             assert self.case_id in prompt
             return ModelResponse(
-                text=f'[TOOL_CALL]\n{{"tool":"case_status","case_id":"{self.case_id}"}}\n[/TOOL_CALL]',
+                text=f'[TOOL_CALL]\n{{"tool":"inspect_collaboration","case_id":"{self.case_id}"}}\n[/TOOL_CALL]',
                 backend=self.name,
             )
         if self.calls == 2:
@@ -68,7 +68,7 @@ class _BlockedCollaborationBackend:
             assert "collaboration_case_closed" in prompt
             assert "阻塞=1" in prompt
             return ModelResponse(
-                text=f'[TOOL_CALL]\n{{"tool":"case_status","case_id":"{self.case_id}"}}\n[/TOOL_CALL]',
+                text=f'[TOOL_CALL]\n{{"tool":"inspect_collaboration","case_id":"{self.case_id}"}}\n[/TOOL_CALL]',
                 backend=self.name,
             )
         assert "blocked_request_count" in prompt
@@ -90,7 +90,7 @@ class _PlainLanguageCollaborationBackend:
         if self.calls == 1:
             assert "帮我协调几个后台代理，有阻塞就继续安排或告诉我" in prompt
             return ModelResponse(
-                text=f'[TOOL_CALL]\n{{"tool":"case_status","case_id":"{self.case_id}"}}\n[/TOOL_CALL]',
+                text=f'[TOOL_CALL]\n{{"tool":"inspect_collaboration","case_id":"{self.case_id}"}}\n[/TOOL_CALL]',
                 backend=self.name,
             )
         if self.calls == 2:
@@ -99,7 +99,7 @@ class _PlainLanguageCollaborationBackend:
             return ModelResponse(
                 text=(
                     '[TOOL_CALL]\n'
-                    f'{{"tool":"update_case_status","case_id":"{self.case_id}",'
+                    f'{{"tool":"update_collaboration","case_id":"{self.case_id}",'
                     '"status":"needs_replan","summary":"已看到阻塞请求，下一步需要换来源或补派代理。"}'
                     "\n[/TOOL_CALL]"
                 ),
@@ -165,11 +165,11 @@ def test_scheduler_processes_collaboration_cases_before_waking_agent(tmp_path) -
     assert len(reports) == 1
     assert reports[0].reason == "urgent_wake_signal"
     assert "collaboration_case_closed" in backend.prompts[0]
-    assert "case_status" in backend.prompts[0]
+    assert "inspect_collaboration" in backend.prompts[0]
     assert agent.collaboration_store.load_case(case.case_id).status == "close"
 
 
-def test_offline_collaboration_rehearsal_uses_case_status_and_tree_tools(tmp_path) -> None:
+def test_offline_collaboration_rehearsal_uses_inspect_collaboration_and_tree_tools(tmp_path) -> None:
     from agent_py_agent.agent.collaboration import AgentCapability
 
     agent, _store, channels, scheduler = _runtime_parts(tmp_path, enable_tools=True)

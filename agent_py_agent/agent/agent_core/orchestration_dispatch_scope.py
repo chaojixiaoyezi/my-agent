@@ -12,7 +12,7 @@ _DISPATCH_FINAL_STATUSES = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN
 
 
 # LLM: dispatch_apply_default keeps top-level dispatch safe while runner-context dispatch can actually advance children.
-# 函数用途: 顶层工具省略 apply 时继续 dry-run；runner 内部省略 apply 时默认推进当前节点直接孩子。
+# 函数用途: 顶层工具省略 dry_run 时继续预览；runner 内部省略 dry_run 时默认推进当前节点直接孩子。
 def dispatch_apply_default(agent, params: dict[str, object]) -> bool:
     if "apply" in params:
         return _bool_param(params.get("apply"), default=False)
@@ -21,8 +21,8 @@ def dispatch_apply_default(agent, params: dict[str, object]) -> bool:
     return bool(current_subagent_run_id(agent))
 
 
-# LLM: dispatch_execute_runners_default matches runner-context apply default without overriding explicit false.
-# 函数用途: runner 内部未显式设置 execute_runners 时默认真实执行直接 child；顶层仍保持不执行。
+# LLM: dispatch_execute_runners_default maps the single dry_run model flag onto internal runner execution.
+# 函数用途: runner 内部未显式设置 dry_run 时默认真实执行直接 child；顶层仍保持不执行。
 def dispatch_execute_runners_default(agent, params: dict[str, object], *, apply: bool) -> bool:
     if "execute_runners" in params:
         return _bool_param(params.get("execute_runners"), default=False)
@@ -36,10 +36,6 @@ def dispatch_execute_runners_default(agent, params: dict[str, object], *, apply:
 def dispatch_max_runners_default(agent, params: dict[str, object], *, execute_runners: bool | None = None) -> int:
     if "max_runners" in params:
         return _non_negative_int(params.get("max_runners"), default=1)
-    if "runner_limit" in params:
-        return _non_negative_int(params.get("runner_limit"), default=1)
-    if execute_runners and "limit" in params:
-        return _non_negative_int(params.get("limit"), default=1)
     explicit_run_ids = dispatch_include_run_ids_param(params, agent=agent)
     if execute_runners and explicit_run_ids:
         return len(explicit_run_ids)

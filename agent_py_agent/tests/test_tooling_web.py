@@ -133,7 +133,7 @@ class TestWebSearchTool:
         ]
 
     def test_registry_exposes_web_search_for_source_discovery(self, tmp_path: Path):
-        """主工具注册表应能注册新网络四件套，并把旧 fetch_url 作为兼容入口隐藏。"""
+        """主工具注册表应只暴露统一网络四件套。"""
         from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 
         registry = ToolRegistry(
@@ -153,10 +153,8 @@ class TestWebSearchTool:
         specs_by_name = {spec.name: spec for spec in registry.specs(include_orchestration=True)}
         assert specs_by_name["web_search"].effect == "read_only"
         assert specs_by_name["web_fetch"].effect == "read_only"
-        assert specs_by_name["web_extract"].effect == "read_only"
-        assert specs_by_name["http_request"].category == "api"
-        assert "fetch_url" not in specs_by_name
-
+        assert "web_extract" not in specs_by_name
+        assert "http_request" not in specs_by_name
         hits = registry.find_relevant_specs("需要搜索公开来源和候选链接")
         assert "web_search" in {spec.name for spec in hits}
 
@@ -166,9 +164,9 @@ class TestUrlValidation:
 
     def test_url_without_hostname_rejected(self, tmp_path: Path):
         """无主机名的 URL 被拒绝。"""
-        from agent_py_agent.agent.tooling.web import FetchUrlTool
+        from agent_py_agent.agent.tooling.web import WebFetchTool
 
-        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_public_resolver)
+        tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://"})
 
         assert result.ok is False
@@ -176,9 +174,9 @@ class TestUrlValidation:
 
     def test_url_localhost_allowed(self, tmp_path: Path):
         """localhost 应该是有效的。"""
-        from agent_py_agent.agent.tooling.web import FetchUrlTool
+        from agent_py_agent.agent.tooling.web import WebFetchTool
 
-        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_public_resolver)
+        tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "http://localhost:8080/"})
 
         # localhost 应该有有效主机名
@@ -186,9 +184,9 @@ class TestUrlValidation:
 
     def test_response_truncation(self, tmp_path: Path):
         """响应内容过长时被截断。"""
-        from agent_py_agent.agent.tooling.web import FetchUrlTool
+        from agent_py_agent.agent.tooling.web import WebFetchTool
 
-        tool = FetchUrlTool(max_chars=100, timeout=10, resolver=_public_resolver)
+        tool = WebFetchTool(max_chars=100, timeout=10, resolver=_public_resolver)
 
         # 通过 mock 验证截断行为
         # 由于这个测试需要真实的网络调用，我们跳过

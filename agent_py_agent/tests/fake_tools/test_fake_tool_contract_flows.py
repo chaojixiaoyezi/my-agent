@@ -36,7 +36,7 @@ def test_fake_tool_runner_covers_fetch_workbook_fixture_dangerous_and_timeout(tm
     runner = FakeToolRunner(
         tmp_path,
         fixtures={
-            "fetch_url": {
+            "web_fetch": {
                 "https://example.com/data.json": {"ok": True, "body": '{"rows":[{"项目":"demo"}]}'},
                 "https://example.com/timeout": {"ok": False, "error_code": "TOOL_TIMEOUT"},
             }
@@ -45,8 +45,8 @@ def test_fake_tool_runner_covers_fetch_workbook_fixture_dangerous_and_timeout(tm
     source = tmp_path / "source.json"
     source.write_text('{"sheets":[{"name":"Sheet1","rows":[{"项目":"demo"}]}]}', encoding="utf-8")
 
-    ok_fetch = runner.execute("fetch_url", {"url": "https://example.com/data.json"})
-    timeout_fetch = runner.execute("fetch_url", {"url": "https://example.com/timeout"})
+    ok_fetch = runner.execute("web_fetch", {"url": "https://example.com/data.json"})
+    timeout_fetch = runner.execute("web_fetch", {"url": "https://example.com/timeout"})
     workbook = runner.execute("write_workbook_fixture", {"source_json_path": "source.json", "path": "report.xlsx"})
     dangerous = runner.execute("dangerous_command", {"command": "rm -rf /"})
 

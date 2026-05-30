@@ -8,10 +8,6 @@ from typing import ClassVar
 
 from ..backends import ModelResponse
 from ._runtime_params import ToolLoopExecuteParams
-from .main_agent_delivery_closeout import (
-    MainAgentDeliveryCloseoutRequest,
-    main_agent_delivery_closeout_response,
-)
 from .tool_local_progress_guard import (
     has_required_local_progress_guard,
     local_progress_guard_context,
@@ -130,9 +126,6 @@ def _tool_calls_decision(
 # LLM: _no_tool_calls_decision prevents spoof-only reserved records from becoming final answers.
 # 函数用途: 无真实工具调用时，普通回复直接收口；伪造工具回执先纠偏一次，再重复就阻断。
 def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:
-    delivery_closeout_decision = _implicit_delivery_closeout_decision(request)
-    if delivery_closeout_decision is not None:
-        return delivery_closeout_decision
     local_progress_decision = _local_progress_no_tool_call_decision(request)
     if local_progress_decision is not None:
         return local_progress_decision
@@ -150,48 +143,6 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         return ToolLoopResponseDecision("continue", None, [], _inc_reserved(request.counters))
     final = reserved_tool_record_block_response(request.response.backend)
     return ToolLoopResponseDecision("break", final, [], request.counters)
-
-
-# LLM: no-tool final text is an implicit delivery submission when a delivery contract exists.
-# 函数用途: 模型准备最终回答时先跑机器验收；通过才完成，失败则把返工单放回下一轮。
-def _implicit_delivery_closeout_decision(
-    request: _NoToolCallsRequest,
-) -> ToolLoopResponseDecision | None:
-    before_context_count = len(request.params.tool_context)
-    already_had_rework_context = _has_delivery_rework_context(request.params)
-    response = main_agent_delivery_closeout_response(
-        MainAgentDeliveryCloseoutRequest(
-            agent=request.agent,
-            params=request.params,
-            backend=request.response.backend,
-        )
-    )
-    if response is not None:
-        return ToolLoopResponseDecision("break", response, [], request.counters)
-    if len(request.params.tool_context) > before_context_count:
-        if already_had_rework_context:
-            return ToolLoopResponseDecision(
-                "break",
-                _delivery_rework_still_required_response(request.response),
-                [],
-                request.counters,
-            )
-        return ToolLoopResponseDecision("continue", None, [], request.counters)
-    return None
-
-
-def _has_delivery_rework_context(params: ToolLoopExecuteParams) -> bool:
-    return any(str(item).startswith("[delivery-contract-check]") for item in params.tool_context)
-
-
-def _delivery_rework_still_required_response(response) -> ModelResponse:
-    return ModelResponse(
-        text=(
-            "[MAIN_AGENT_DELIVERY_REWORK_REQUIRED]\n"
-            "交付物仍未通过客观 closeout 检查；本轮没有新的修复工具调用，已停止继续空转。"
-        ),
-        backend=response.backend,
-    )
 
 
 # LLM: _local_progress_no_tool_call_decision gives a soft rework hint after repeated exploration without new local work.
@@ -235,10 +186,14 @@ def _exploration_decision(decision: ExplorationFuseDecision) -> ToolLoopResponse
     return ToolLoopResponseDecision(decision.action, decision.response, decision.calls, decision.counters)
 
 
+# LLM: _unresolved_runtime_issue_decision adapts unresolved tool issue handling into the public decision type.
+# 函数用途: 把运行时未解决工具问题模块的 continue/break 结果转成 tool_loop_response_decision 的统一返回。
 def _unresolved_runtime_issue_decision(decision: UnresolvedRuntimeIssueDecision) -> ToolLoopResponseDecision:
     return ToolLoopResponseDecision(decision.action, decision.response, decision.calls, decision.counters)
 
 
+# LLM: _unresolved_runtime_issue_request packages no-tool response state for unresolved issue checks.
+# 函数用途: 复用当前 agent、params、response 和计数器，判断模型是否试图在工具问题未解决时收口。
 def _unresolved_runtime_issue_request(
     request: _NoToolCallsRequest,
 ) -> UnresolvedRuntimeIssueDecisionRequest:

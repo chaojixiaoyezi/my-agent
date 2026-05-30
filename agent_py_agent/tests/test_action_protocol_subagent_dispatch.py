@@ -37,7 +37,7 @@ def test_dispatch_subagents_output_contains_typed_envelope():
     agent.subagents.workspace = Path("/tmp/subagents")
     agent.subagents.list_runs.return_value = []
 
-    result = DispatchSubagentsTool(agent).execute({"apply": True})
+    result = DispatchSubagentsTool(agent).execute({"dry_run": False})
     payload = json.loads(result.output)
     envelope = decode_action_envelope(payload["typed_envelope"])
 

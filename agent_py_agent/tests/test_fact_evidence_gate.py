@@ -72,7 +72,7 @@ def test_fact_evidence_gate_accepts_verified_claims_with_archive_backing() -> No
             },
             "require_tool_backed_sources": True,
         },
-        archive_tool_calls=[{"scoped_call_id": "call-fetch-1", "tool": "fetch_url", "ok": True}],
+        archive_tool_calls=[{"scoped_call_id": "call-fetch-1", "tool": "web_fetch", "ok": True}],
     )
 
     assert decision.allowed is True

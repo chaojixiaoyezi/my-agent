@@ -77,7 +77,6 @@ def test_default_tool_examples_do_not_contain_shop_specific_terms() -> None:
             for relative_path in (
                 "agent_py_agent/agent/capability/router.py",
                 "agent_py_agent/agent/agent_core/orchestration_tool_specs.py",
-                "agent_py_agent/agent/agent_core/subagent_message_tool.py",
             )
         ],
     )

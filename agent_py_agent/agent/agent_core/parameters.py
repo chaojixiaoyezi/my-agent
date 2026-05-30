@@ -14,7 +14,6 @@ import time
 from pathlib import Path
 
 ONE_SHOT_TOOL_NAMES = {
-    "capability_config_patch",
     "create_subagents",
     "schedule_child_subagents",
 }

@@ -212,8 +212,6 @@ apply_patch
 list_tools
 web_search
 web_fetch
-web_extract
-http_request
 run_command
 ```
 

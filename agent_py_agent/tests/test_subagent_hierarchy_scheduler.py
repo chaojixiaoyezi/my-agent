@@ -241,7 +241,7 @@ def test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables(t
         parent_id=root.id,
         root_id=root.id,
         depth=1,
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
         extra_write_roots=[str(deliverables)],
     )
 
@@ -276,7 +276,7 @@ def test_hierarchy_schedule_normalizes_model_write_alias_for_leaf_tasks(tmp_path
         goal="child coordinator",
         thought="split",
         plan=["plan"],
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
         extra_write_roots=[str(deliverables)],
     )
 
@@ -373,7 +373,7 @@ def test_hierarchy_schedule_keeps_sibling_scope_out_of_child_handoff(tmp_path):
                     goal="arithmetic领域：创建leaf_worker_arithmetic，写入solution.py",
                     role="child_coordinator",
                     agent_name="arithmetic-lead",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
                 )
             ],
             apply=True,
@@ -414,7 +414,7 @@ def test_hierarchy_schedule_keeps_exact_file_contract_when_child_goal_only_has_d
                     goal=f"创建 arithmetic leaf_worker，产物写至 {deliverables}/leaf_outputs/leaf_worker_arithmetic/",
                     role="child_coordinator",
                     agent_name="arithmetic-lead",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
                 )
             ],
             apply=True,
@@ -499,7 +499,7 @@ def _schedule_controlled_exec_contract_leaf(manager: SubAgentManager, child_id: 
                     goal="继续创建 depth=3 leaf_worker，保留 controlled_exec 合同。",
                     role="child_coordinator",
                     agent_name="grand-lead",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
                 )
             ],
             apply=True,
@@ -533,7 +533,7 @@ def _schedule_vague_child(manager: SubAgentManager, parent_id: str):
                     goal="创建 leaf worker，实现 add(a,b) 并写测试",
                     role="child_coordinator",
                     agent_name="child",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
                 )
             ],
             apply=True,

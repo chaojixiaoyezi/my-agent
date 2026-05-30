@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.runtime_live_archive import (
+    archive_assistant_tool_round_if_enabled,
     update_runtime_fact_progress_if_enabled,
 )
 from agent_py_agent.agent.memory_archive import archive_run_turn
@@ -217,6 +218,34 @@ def test_archive_live_tool_round_writes_before_turn_finalization():
         assert tool.event_count == 1
 
 
+def test_live_archive_respects_archive_level_zero(tmp_path: Path) -> None:
+    config = AgentConfig()
+    config.memory_archive_level = 0
+    config.memory_archive_preview_level_0_chars = 1000
+    config.memory_archive_preview_level_3_chars = 20
+    agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
+    params = SimpleNamespace(
+        request_id="req-live",
+        run_id="run-live",
+        task_id="task-live",
+        save=True,
+    )
+
+    archive_assistant_tool_round_if_enabled(
+        agent,
+        params,
+        tool_round=1,
+        response_text="长内容-" + ("abcdef" * 30),
+        tool_calls=[],
+    )
+
+    raw_files = list((tmp_path / "memory" / "raw").glob("*.jsonl"))
+    assert len(raw_files) == 1
+    records = _read_jsonl(raw_files[0])
+    assert records[0]["archive_level"] == 0
+    assert "abcdefabcdefabcdef" in records[0]["content_preview"]
+
+
 def test_archive_run_turn_skips_tool_records_already_written_live():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -279,3 +308,27 @@ def test_runtime_fact_progress_updates_without_raw_checkpoint(tmp_path: Path) ->
     assert payload["runtime_progress"]["executed_tools"] == ["web_search"]
     assert any(ref.endswith("outputs/report.md") for ref in payload["runtime_progress"]["artifact_refs"])
     assert not (tmp_path / "memory" / "raw").exists()
+
+
+# LLM: Continuation runs should update progress without replacing the original task goal.
+# 函数用途: 验证 compact 续跑轮写 runtime_fact 时保留 root_user_prompt，不把“继续执行”提示当用户目标。
+def test_runtime_fact_progress_preserves_root_user_prompt(tmp_path: Path) -> None:
+    config = AgentConfig()
+    agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
+    params = SimpleNamespace(
+        request_id="req-live-root",
+        run_id="run-live-root",
+        task_id="task-live-root",
+        user_prompt="继续执行 Compact Auto Continuation 包里的 Next Step。",
+        root_user_prompt="请整理 all-agent 下面的项目并写中文报告。",
+        executed_tools=["read_file"],
+        tool_context=["[TOOL_CALL]\n{\"tool\":\"read_file\"}\n[/TOOL_CALL]\ntools: read_file"],
+        archive_tool_calls=[],
+        live_archive_state={},
+    )
+
+    update_runtime_fact_progress_if_enabled(agent, params, tool_round=2)
+
+    fact_path = tmp_path / "memory_archive" / "runtime_facts" / "req-live-root" / "task.json"
+    payload = json.loads(fact_path.read_text(encoding="utf-8"))
+    assert payload["goal"] == "请整理 all-agent 下面的项目并写中文报告。"

@@ -21,6 +21,7 @@ from .runner_prompt_contract_lines import (
     required_product_contract_lines,
 )
 from .runner_prompt_coordinator_policy import coordinator_execution_policy_lines
+from .runner_prompt_guidance import runtime_guidance_prompt_block
 from .runner_prompt_templates import (
     COLLABORATION_CONTROL_PLANE_TOOLS,
     COLLABORATION_TOOL_HINTS,
@@ -49,6 +50,7 @@ def _build_subagent_runner_prompt(
         subagent_compact_continuation.SubagentCompactContinuationRequest(context=context)
     )
     compact_block = f"{compact_continuation}\n\n" if compact_continuation else ""
+    guidance_block = runtime_guidance_prompt_block(context)
     return (
         "# SubAgent Runner Task\n\n"
         "你是一个被父代理授权的子代理，只能依据下面的执行上下文工作。\n"
@@ -59,6 +61,7 @@ def _build_subagent_runner_prompt(
         f"{execution_contract}\n\n"
         "## Context Bundle Gate\n\n"
         f"{context_gate}\n\n"
+        f"{guidance_block}"
         f"{compact_block}"
         "## Execution Context JSON\n\n"
         "下面是瘦身后的执行摘要；完整上下文请按 refs 读取，不要让模型一次吞完整大 JSON。\n\n"
@@ -92,7 +95,9 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- 写 Python 测试时必须保证从 working_dir 运行能导入被测模块；优先把测试文件和模块放同一目录，或显式处理 import path。",
         "- 如果用户要求按钮、链接或图片不能失效，不要用 href=\"#\"、空锚点或不存在的 #id 假装可点击；"
         "页面内跳转必须指向真实存在的元素 id，按钮必须有真实交互或真实本地目标。",
-        "- 生成长 CSS/JS/HTML、大段代码或长报告时，优先用 WRITE_FILE_RAW 一次提交完整文本文件；"
+        "- 生成普通报告或中等长度文本时，优先用 write_file 的 content 字段完整写入。"
+        "生成长 CSS/JS/HTML、大段代码或长报告时，可在 [TOOL_CALL] 外使用 "
+        "[WRITE_FILE_RAW path=\"...\"]...[/WRITE_FILE_RAW] 原文块；不要把 WRITE_FILE_RAW 写进 JSON 的 tool 字段。"
         "局部修改已有文件用 apply_patch。PDF、XLSX、图片等二进制产物可用授权命令/脚本生成，再用 write_file.data_base64 写入。",
         "- write_file 会自动创建父目录；不要因为目标目录尚未创建就标记 BLOCKED。"
         "普通输出路径按 workspace_root/path_access_mode 解析，只有危险目录或显式禁止路径才会被拒绝。",
@@ -154,8 +159,8 @@ def _targeted_request_lines(context: SubAgentExecutionContext) -> list[str]:
         return []
     lines = [
         "- 点名给你的协作请求：优先复用已有 case/request；"
-        "处理顺序是 case_status -> submit_evidence -> update_collaboration_request。"
-        "除非发现全新问题，不要另开 open_case。"
+        "处理顺序是 inspect_collaboration -> submit_collaboration_result -> update_collaboration。"
+        "除非发现全新问题，不要另开 raise_collaboration。"
     ]
     for request in requests[:3]:
         lines.extend(_single_targeted_request_lines(request))
@@ -195,8 +200,6 @@ def _collaboration_tool_lines(tools: set[str]) -> list[str]:
     for name, message in COLLABORATION_TOOL_HINTS:
         if name in tools:
             lines.append(message)
-    if {"open_case", "request_collaboration"}.issubset(tools) and "raise_collaboration_event" not in tools:
-        lines.append("- 如果 open_case 后还需要其他代理回应、补证据或确认同一实体，建议继续调用 request_collaboration 留下明确 request；只记录事件时可以停在 open_case。")
     return lines
 
 

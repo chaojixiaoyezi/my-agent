@@ -33,7 +33,7 @@ class _CreateChildBackend:
                             "goal": "本地子代理观察一条线索，并在需要主代理处理时上报。",
                             "count": 1,
                             "defer_start": True,
-                            "allowed_tools": ["raise_main_event", "submit_evidence", "case_status"],
+                            "allowed_tools": ["raise_event", "submit_collaboration_result", "inspect_collaboration"],
                         },
                         ensure_ascii=False,
                     )
@@ -56,8 +56,8 @@ class _ChildRaisesMainEventBackend:
         self.seen_prompts.append(prompt)
         run_id = _run_id_from_prompt(prompt)
         if self.calls == 1:
-            return _tool_call_response(self.name, _raise_main_event_call(run_id))
-        return _subagent_result_response(self.name, _raise_main_event_result())
+            return _tool_call_response(self.name, _raise_event_call(run_id))
+        return _subagent_result_response(self.name, _raise_event_result())
 
 
 class _BackgroundWakeBackend:
@@ -96,13 +96,13 @@ class _ChildOpensCollaborationCaseBackend:
         self.calls += 1
         run_id = _run_id_from_prompt(prompt)
         if self.calls == 1:
-            return _tool_call_response(self.name, _open_case_call(run_id))
+            return _tool_call_response(self.name, _open_collaboration_call(run_id))
         if self.calls == 2:
             case_id = _json_field_from_prompt(prompt, "case_id")
             return _tool_call_response(self.name, _request_collaboration_call(case_id, run_id))
         case_id = _json_field_from_prompt(prompt, "case_id")
         request_id = _json_field_from_prompt(prompt, "request_id")
-        return _subagent_result_response(self.name, _open_case_result(case_id, request_id))
+        return _subagent_result_response(self.name, _raise_collaboration_result(case_id, request_id))
 
 
 class _ChildSubmitsCollaborationEvidenceBackend:
@@ -117,7 +117,7 @@ class _ChildSubmitsCollaborationEvidenceBackend:
         self.calls += 1
         run_id = _run_id_from_prompt(prompt)
         if self.calls == 1:
-            return _tool_call_response(self.name, _submit_evidence_call(self.case_id, self.request_id, run_id))
+            return _tool_call_response(self.name, _submit_collaboration_result_call(self.case_id, self.request_id, run_id))
         if self.calls == 2:
             return _tool_call_response(self.name, _update_request_call(self.case_id, self.request_id, run_id))
         return _subagent_result_response(self.name, _evidence_result())
@@ -140,7 +140,7 @@ class _BackgroundCollaborationWakeBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    + json.dumps({"tool": "case_status", "case_id": self.case_id}, ensure_ascii=False)
+                    + json.dumps({"tool": "inspect_collaboration", "case_id": self.case_id}, ensure_ascii=False)
                     + "\n[/TOOL_CALL]"
                 ),
                 backend=self.name,
@@ -168,20 +168,20 @@ def _create_collaboration_children_call() -> dict[str, object]:
             {
                 "goal": "观察一条线索，打开协作 case，并请求另一个代理补证据。",
                 "agent_name": "local-source-a",
-                "allowed_tools": ["open_case", "request_collaboration", "case_status"],
+                "allowed_tools": ["raise_collaboration", "raise_collaboration", "inspect_collaboration"],
             },
             {
                 "goal": "收到协作请求后提交 refs-first 证据，并更新请求状态。",
                 "agent_name": "local-source-b",
-                "allowed_tools": ["submit_evidence", "update_collaboration_request", "case_status"],
+                "allowed_tools": ["submit_collaboration_result", "update_collaboration", "inspect_collaboration"],
             },
         ],
     }
 
 
-def _raise_main_event_call(run_id: str) -> dict[str, object]:
+def _raise_event_call(run_id: str) -> dict[str, object]:
     return {
-        "tool": "raise_main_event",
+        "tool": "raise_event",
         "task_id": run_id,
         "event_type": "local_child_signal",
         "summary": "本地子代理发现需要主代理马上处理的协作事件。",
@@ -191,19 +191,19 @@ def _raise_main_event_call(run_id: str) -> dict[str, object]:
     }
 
 
-def _raise_main_event_result() -> dict[str, object]:
+def _raise_event_result() -> dict[str, object]:
     return {
         "status": "DONE",
-        "summary": "已通过 raise_main_event 上报主代理。",
-        "used_tools": ["raise_main_event"],
-        "evidence_packets": [_raise_main_event_packet()],
+        "summary": "已通过 raise_event 上报主代理。",
+        "used_tools": ["raise_event"],
+        "evidence_packets": [_raise_event_packet()],
         "artifacts": [],
         "tests": [],
         "next_actions": ["等待后台主代理处理 wake signal"],
     }
 
 
-def _raise_main_event_packet() -> dict[str, object]:
+def _raise_event_packet() -> dict[str, object]:
     return {
         "id": "evpkt-child-signal",
         "claim": "子代理已经写入主代理唤醒事件。",
@@ -219,9 +219,9 @@ def _subagent_result_response(backend: str, payload: dict[str, object]) -> Model
     return ModelResponse(text=text, backend=backend)
 
 
-def _open_case_call(run_id: str) -> dict[str, object]:
+def _open_collaboration_call(run_id: str) -> dict[str, object]:
     return {
-        "tool": "open_case",
+        "tool": "raise_collaboration",
         "task_id": run_id,
         "title": "本地多代理协作 case",
         "summary": "一个子代理发现线索，需要另一个子代理补充证据。",
@@ -234,7 +234,7 @@ def _open_case_call(run_id: str) -> dict[str, object]:
 
 def _request_collaboration_call(case_id: str, run_id: str) -> dict[str, object]:
     return {
-        "tool": "request_collaboration",
+        "tool": "raise_collaboration",
         "case_id": case_id,
         "requester_agent_id": run_id,
         "required_capabilities": ["query"],
@@ -243,11 +243,11 @@ def _request_collaboration_call(case_id: str, run_id: str) -> dict[str, object]:
     }
 
 
-def _open_case_result(case_id: str, request_id: str) -> dict[str, object]:
+def _raise_collaboration_result(case_id: str, request_id: str) -> dict[str, object]:
     return {
         "status": "DONE",
         "summary": "已打开协作 case 并发起补证据请求。",
-        "used_tools": ["open_case", "request_collaboration"],
+        "used_tools": ["raise_collaboration", "raise_collaboration"],
         "evidence_packets": [_case_request_packet(case_id, request_id)],
         "artifacts": [],
         "tests": [],
@@ -265,9 +265,9 @@ def _case_request_packet(case_id: str, request_id: str) -> dict[str, object]:
     }
 
 
-def _submit_evidence_call(case_id: str, request_id: str, run_id: str) -> dict[str, object]:
+def _submit_collaboration_result_call(case_id: str, request_id: str, run_id: str) -> dict[str, object]:
     return {
-        "tool": "submit_evidence",
+        "tool": "submit_collaboration_result",
         "case_id": case_id,
         "request_id": request_id,
         "source_agent_id": run_id,
@@ -280,7 +280,7 @@ def _submit_evidence_call(case_id: str, request_id: str, run_id: str) -> dict[st
 
 def _update_request_call(case_id: str, request_id: str, run_id: str) -> dict[str, object]:
     return {
-        "tool": "update_collaboration_request",
+        "tool": "update_collaboration",
         "case_id": case_id,
         "request_id": request_id,
         "status": "completed",
@@ -293,7 +293,7 @@ def _evidence_result() -> dict[str, object]:
     return {
         "status": "DONE",
         "summary": "已提交协作证据并更新请求状态。",
-        "used_tools": ["submit_evidence", "update_collaboration_request"],
+        "used_tools": ["submit_collaboration_result", "update_collaboration"],
         "evidence_packets": [_local_source_b_packet()],
         "artifacts": [],
         "tests": [],

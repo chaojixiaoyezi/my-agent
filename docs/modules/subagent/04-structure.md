@@ -1,6 +1,6 @@
 # Subagent Structure
 
-当前结构不再包含独立父验收层。`create_subagents` 默认创建并立即启动任务节点；只有显式 `defer_start=true` 才只建不跑。`dispatch_subagents` 用于运行中追加提示、人工催办、推进卡住项、重跑指定 run、查状态并尝试恢复；任务完成后的产物检查统一由普通 closeout / 交付检查处理。
+当前结构不再包含独立父验收层。`create_subagents` 默认创建并立即启动任务节点；只有显式 `defer_start=true` 才只建不跑。运行中只想给某个代理补一句话时用 `send_guidance`；`dispatch_subagents` 用于人工催办、推进卡住项、重跑指定 run、查状态并尝试恢复；任务完成后的产物检查统一由普通 closeout / 交付检查处理。
 
 `defer_start` 支持单个 `items[]` 子任务。开发、研究、写作这类生产 worker 可以默认开跑；
 测试、找错、验收、汇总这类依赖前置产物的子代理，可以在自己的 item 上写
@@ -8,11 +8,11 @@
 做成硬门。
 
 当父代理派新的修复/接管子代理替换旧 run 时，`create_subagents` 可以传
-`replacement_for_run_ids`（兼容 `replaces_run_ids` / `supersedes_run_ids`）。
+`replacement_for_run_ids`。
 旧 run 会进入 `TAKEN_OVER`，并写 `takeover_by` 指向新 run；后续普通调度不再把旧 run
 当活跃候选，但旧记录、证据和日志仍保留给审计和恢复。
 
-`create_subagents` 的“立即启动”是后台启动：工具调用本身只负责创建 run、写入 `background_start` 标记、拉起 runner 调度后台进程，然后立刻把 `run_ids`、启动状态和任务树快照返回给父代理。父代理不会同步等待所有子代理完成，因此可以继续和用户对话、继续规划，或稍后用 `inspect_agent_tree` / `subagent_board` 查看进展。
+`create_subagents` 的“立即启动”是后台启动：工具调用本身只负责创建 run、写入 `background_start` 标记、拉起 runner 调度后台进程，然后立刻把 `run_ids`、启动状态和任务树快照返回给父代理。父代理不会同步等待所有子代理完成，因此可以继续和用户对话、继续规划，或稍后用 `inspect_agent_tree` 查看进展。
 
 真实模型后端的后台启动会调用独立 `subagents-dispatch --apply --execute-runners --run-id ... --background-launch-id ...` 进程。这个进程启动时把任务树里的 `background_start.status` 更新为 `running`，结束时更新为 `finished`，异常时更新为 `failed` 并写错误摘要；日志用无缓冲 Python 进程输出，方便父代理或人工快速看到后台 runner 是否真的启动。
 
@@ -30,7 +30,7 @@
 
 真正的运行事实源是显式 run 账本：`agent_runs` 记录当前状态，`agent_events` 记录每次 run 保存和工具完成。工具完成事件会带 `run_id`、`parent_run_id`、`root_run_id`、`root_task_id` 和操作号。父级看 tree 时只是在读这些事实的投影，不再靠“当前子代理是谁”猜来源。
 
-子代理应该做的是写自己的结果、证据引用和必要的工作文件；父级或主代理通过 `inspect_agent_tree`、`subagent_board`、`output_json` 和 refs 看状态，不要求子代理手动维护树。
+子代理应该做的是写自己的结果、证据引用和必要的工作文件；父级或主代理通过 `inspect_agent_tree`、`output_json` 和 refs 看状态，不要求子代理手动维护树。
 
 调度层只创建和推进任务节点，不再用额外 scope/duplicate/QA 硬门替父级做流程裁决。需要流水线、去重或重试时，由父级根据树状态和任务目标显式安排下一步。
 
@@ -63,9 +63,9 @@
 
 状态面只返回当前布局路径。`workspace_refs.task_workspace` 指向任务级目录，`workspace_refs.agent_run_workspace` 指向具体代理运行目录；旧式 `data/subagents/<run_id>` work-order 路径只作为系统兼容恢复材料存在，不放进模型可见的 `workspace_refs`。这样父代理接管或汇总时会按 refs 读取真实产物，而不是自己拼旧目录。
 
-`subagent_board` 是树状态的轻量汇总视图。它会暴露 `running_seconds`、`seconds_since_progress`
-和 `aggregation_readiness`，让父代理知道谁还在跑、谁久未推进、汇总前还有哪些 run 没完成。
-这些字段和 `progress_layer` 一样只读，不创建新状态机，也不会把子任务卡进额外验收阶段。
+旧模型工具 `subagent_board` 已撤掉，避免和 `inspect_agent_tree` 形成两个状态入口。底层仍可写
+`subagent_board.json` / `SUBAGENT_BOARD.md` 给 CLI 或人工排查，但模型看状态只走
+`inspect_agent_tree`。
 
 ## Closeout
 
@@ -77,7 +77,7 @@
 
 子代理默认继承一套能正常干活的基础工具，包括读文件、列文件、搜索、读 artifact、联网检索、写文件、打补丁、受控命令执行、只读树状态、协作和能力申请工具。角色模板只追加职责重点，不应该把基础工具拿掉。`inspect_agent_tree` 是按身份裁剪的只读工具：主代理可以看全树；子代理/孙代理只能看当前 run 的 `own_subtree`，即自己和自己的后代。
 
-层级工具分两类：顶层主代理第一次派工用 `create_subagents`；已经运行中的子代理要创建下一层，用 `schedule_child_subagents`。两者体验保持一致：默认创建后后台启动，并返回 `run_ids`、启动状态和树状态；只有显式 `defer_start=true` / `apply=false` 才只建或预览。真实模型后端会把启动动作交给独立 `subagents-dispatch` 进程，避免一次性 CLI 退出后把子代理线程一起带死；离线 `echo` 后端仍可用进程内线程快速跑测试。区别只在身份边界：`schedule_child_subagents` 会从当前 runner 上下文自动绑定 `parent_id`，因此孙代理挂在当前子代理名下，而不是凭模型传一个父 id。运行中的 `dispatch_subagents` 同样默认只推进当前节点的直接孩子；即使模型显式传了别的 `parent_run_id`，runner 内也会压回当前 run，并在 `scope_warnings` 里说明，避免误催平行子代理。
+层级工具分两类：顶层主代理第一次派工用 `create_subagents`；已经运行中的子代理要创建下一层，用 `schedule_child_subagents`。两者体验保持一致：默认创建后后台启动，并返回 `run_ids`、启动状态和树状态；只有显式 `defer_start=true` 或 `schedule_child_subagents.dry_run=true` 才只建或预览。真实模型后端会把启动动作交给独立 `subagents-dispatch` 进程，避免一次性 CLI 退出后把子代理线程一起带死；离线 `echo` 后端仍可用进程内线程快速跑测试。区别只在身份边界：`schedule_child_subagents` 会从当前 runner 上下文自动绑定 `parent_id`，因此孙代理挂在当前子代理名下，而不是凭模型传一个父 id。运行中的 `dispatch_subagents` 同样默认只推进当前节点的直接孩子；即使模型显式传了别的 `parent_run_id`，runner 内也会压回当前 run，并在 `scope_warnings` 里说明，避免误催平行子代理。
 
 shell 权限按“不能比父级更大”派生：
 
@@ -113,7 +113,21 @@ runner 结构化结果只负责把状态、summary、artifacts、evidence packet
 capability contract 文本片段辅助文件已删除。当前结构保持一套事实源：
 
 - 创建和身份：`create_subagents` / `schedule_child_subagents` 写真实 run 账本。
-- 观察和汇总：`inspect_agent_tree` / `subagent_board` 读树、refs 和 registry。
+- 观察和汇总：`inspect_agent_tree` 读树、refs 和 registry。
 - 质量和返工：统一走普通 closeout，不再另造父验收、repair contract 或自然语言继承合同。
 
 以后如果确实需要恢复某类旧兼容能力，应先把它接入这三条事实源，而不是重新增加一套平行 helper。
+
+## Guidance 账本
+
+运行中补充提示统一落在 conversation guidance 账本：
+
+- `send_guidance` 是新入口，目标可以是 `agent_run`、`thread`、`task` 或 `case`。
+- 主代理工具循环会读取自己 run/task/thread 的未投递 guidance。
+- 子代理执行上下文会把点名给当前 run 的 guidance 放进 `context_bundle.reserved.runtime_guidance`，
+  runner prompt 再渲染成 `Runtime Guidance`。
+- 旧 `subagent_message` 工具已移除；纯补充提示统一用 `send_guidance`。
+  `dispatch_subagents.runner_instruction` 只表示“补一句并立刻推进该 run”，会同时写入 guidance 账本。
+
+这套结构只负责“下一轮让模型看见补充提示”。真正推进仍靠 `create_subagents`、
+`schedule_child_subagents`、`dispatch_subagents` 和任务树状态；真正验收仍靠普通 closeout。

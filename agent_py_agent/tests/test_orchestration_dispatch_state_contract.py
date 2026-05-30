@@ -50,8 +50,7 @@ def test_dispatch_execute_payload_includes_current_turn_run_state():
         "done": SimpleNamespace(id="done", status="DONE", verification_status="VERIFIED"),
     }
     payload = json.loads(DispatchSubagentsTool(_dispatch_agent_with_state(tasks)).execute({
-        "apply": True,
-        "execute_runners": True,
+        "dry_run": False,
         "run_ids": ["planning", "running", "blocked", "done"],
     }).output)
 
@@ -94,7 +93,7 @@ def test_create_payload_includes_current_turn_run_state(tmp_path):
         state["running_run_ids"] == payload["created_run_ids"]
         or state["verified_run_ids"] == payload["created_run_ids"]
     )
-    assert state["next_action"] in {"wait_or_check_subagent_board", "summarize_or_report_verified_runs"}
+    assert state["next_action"] in {"wait_or_inspect_agent_tree", "summarize_or_report_verified_runs"}
     envelope = decode_action_envelope(payload["typed_envelope"])
     assert envelope.current_turn_run_state["dispatchable_run_ids"] == []
     assert envelope.dispatch_run_ids == []
@@ -124,7 +123,7 @@ def test_schedule_child_payload_includes_current_turn_run_state(tmp_path):
     agent._current_subagent_run_id = parent.id
 
     payload = json.loads(ScheduleChildSubagentsTool(agent).execute({
-        "apply": True,
+        "dry_run": False,
         "children": [{"goal": "写条目卡片组件", "role": "worker"}],
     }).output)
 
@@ -134,7 +133,7 @@ def test_schedule_child_payload_includes_current_turn_run_state(tmp_path):
         state["running_run_ids"] == payload["created_run_ids"]
         or state["verified_run_ids"] == payload["created_run_ids"]
     )
-    assert state["next_action"] in {"wait_or_check_subagent_board", "summarize_or_report_verified_runs"}
+    assert state["next_action"] in {"wait_or_inspect_agent_tree", "summarize_or_report_verified_runs"}
     envelope = decode_action_envelope(payload["typed_envelope"])
     assert envelope.current_turn_run_state["dispatchable_run_ids"] == []
     assert envelope.dispatch_run_ids == payload["dispatch_run_ids"]

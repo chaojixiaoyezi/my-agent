@@ -66,52 +66,48 @@ SUBAGENT_REPAIR_RESULT_TEMPLATE = (
 )
 
 COLLABORATION_CONTROL_PLANE_TOOLS = (
-    "case_status",
-    "list_collaboration_requests",
-    "raise_collaboration_event",
-    "open_case",
-    "request_collaboration",
-    "submit_evidence",
-    "update_collaboration_request",
-    "reroute_collaboration_request",
+    "inspect_collaboration",
+    "raise_collaboration",
+    "submit_collaboration_result",
+    "update_collaboration",
 )
 
 COLLABORATION_TOOL_HINTS = (
-    ("case_status", "- case_status：先读取已有 case/request 状态，避免重复开 case 或重复提交同一份证据。"),
+    ("inspect_collaboration", "- inspect_collaboration：先读取已有 case/request 状态，避免重复开 case 或重复提交同一份证据。"),
     (
-        "list_collaboration_requests",
-        "- list_collaboration_requests：如果你知道自己被要求协作、但不知道 case_id/request_id，"
+        "inspect_collaboration",
+        "- inspect_collaboration：如果你知道自己被要求协作、但不知道 case_id/request_id，"
         "先用它按自己的 agent_id/agent_name/role 查询待响应请求；不要因为缺 case_id 就新开重复 case。",
     ),
     (
-        "raise_collaboration_event",
-        "- raise_collaboration_event：如果你发现需要其他代理、其他数据源或上级共同补证据，"
+        "raise_collaboration",
+        "- raise_collaboration：如果你发现需要其他代理、其他数据源或上级共同补证据，"
         "优先用这个单步工具打开 case 并发出 request；不要只在 output.json 里写 collaboration_required。"
         "它接受 observed_facts/query_hints/response_contract 等开放世界字段，不要求业务专项格式。",
     ),
     (
-        "open_case",
-        "- open_case：发现需要多代理共同研判、补证据、换数据源或跟踪阻塞时，"
+        "raise_collaboration",
+        "- raise_collaboration：发现需要多代理共同研判、补证据、换数据源或跟踪阻塞时，"
         "打开通用协作 case，写清 title、summary、entities 和 required_capabilities。",
     ),
     (
-        "request_collaboration",
-        "- request_collaboration：需要其他代理补证据时发起请求，写清 question、target_agent_ids 或 required_capabilities；"
+        "raise_collaboration",
+        "- raise_collaboration：需要其他代理补证据时发起请求，写清 question、target_agent_ids 或 required_capabilities；"
         "如果发现的是可被多方查证的线索，把 observed_facts、query_intent、query_hints、response_contract 和 context_refs 一起交出去。"
         "query_hints 是软提示，响应代理可自行拆分或改写。请求引用形如 collaboration://request/<id>。",
     ),
     (
-        "submit_evidence",
-        "- submit_evidence：回应协作请求时提交 refs-first 证据，优先给 evidence_refs/artifact_refs、matched、confidence 和简短 summary，"
+        "submit_collaboration_result",
+        "- submit_collaboration_result：回应协作请求时提交 refs-first 证据，优先给 evidence_refs/artifact_refs、matched、confidence 和简短 summary，"
         "不要把长正文塞进消息。",
     ),
     (
-        "update_collaboration_request",
-        "- update_collaboration_request：完成、阻塞或需要返工时更新 request 状态，把 actor_agent_id、summary 和必要的 request 引用写清楚。",
+        "update_collaboration",
+        "- update_collaboration：完成、阻塞或需要返工时更新 request 状态，把 actor_agent_id、summary 和必要的 request 引用写清楚。",
     ),
     (
-        "reroute_collaboration_request",
-        "- reroute_collaboration_request：原目标没有证据、不可用或更合适的来源已出现时，用结构化 target_agent_ids 改派；"
+        "update_collaboration",
+        "- update_collaboration：原目标没有证据、不可用或更合适的来源已出现时，用结构化 target_agent_ids 改派；"
         "不要只在 summary 里说已经协作或已经转派。",
     ),
 )

@@ -76,7 +76,7 @@
 - 中文说明：`create_subagents` 和 `schedule_child_subagents` 已经有 `typed_envelope`；本轮把 `dispatch_subagents` 也补成 `subagent_dispatch` typed envelope。
 - envelope 只放稳定控制字段：`dry_run`、`summary`、`actionable_run_ids`、`recovery_run_ids`、`dispatch_json`、`dispatch_md`、`record_count` 和 scope。父级要继续推进或恢复时读这些字段，不从自然语言 `message` 里猜 run id。
 - `dry_run` 只表示本次工具调用是否真实推进 runner。`summary` 里的逐记录计数使用 `record_dry_run_count` / `record_applied_count`，`records[]` 里的逐条状态使用 `record_dry_run` / `record_applied`，避免模型把“有几条记录是预览”误读成“这次整体没有执行”。
-- `subagent_board` 会返回 `running_seconds`、`seconds_since_progress` 和 `aggregation_readiness`。这些都是父级观察字段，只帮助判断谁还在跑、谁太久没进展、汇总前还缺哪些 run，不新增子代理专用验收门。
+- `inspect_agent_tree` 会返回 `running_seconds`、`seconds_since_progress` 和 `aggregation_readiness`。这些都是父级观察字段，只帮助判断谁还在跑、谁太久没进展、汇总前还缺哪些 run，不新增子代理专用验收门。
 - 旧报告里 `summary` 可能是字符串；新桥接会把它包成 `{"text": "..."}`，保持兼容。
 - 这一步的目的不是增加流程，而是减少“模型把摘要当工具/把路径说错/把 run id 读漏”的机会。结构化字段是事实来源，自然语言只负责让人看懂。
 
@@ -127,7 +127,7 @@
 - 中文说明：子代理恢复链路不能被旧状态拖死。旧 worker 被 takeover 后，如果接管者已经 DONE/VERIFIED，旧 worker 应该显示为被覆盖，而不是继续当 blocker。
 - 已调整：dispatch final/limit closeout 使用 `DONE/VERIFIED` 或 `TAKEN_OVER -> verified replacement` 作为 resolved 判定。
 - 已调整：模型写出的“无空 href”这类负向证据，如果 `ok=false` 表示坏模式没有命中，会在结构化结果入口规范成“需求通过”。
-- 已调整：真实执行 dispatch 时，`limit` 可作为 `max_runners` 的模型友好别名，减少父级因为字段名不熟而意外串行。
+- 已收敛：真实执行 dispatch 时，`max_runners` 才控制 runner 数量，`limit` 只控制报告/记录条数，避免一个数字两个含义。
 - 迁移原则：继续把专业字段变成容错的机器接口，不让小白用户或父级 LLM 被内部字段名绊倒。
 
 ## Group 3e-3g Board And Target Semantics Pre-Fix
@@ -157,7 +157,7 @@
 
 ## Stage 3 Board Kernel Envelope Slice
 
-- 中文说明：继续第 3 阶段协议结构化，`subagent_board` 输出现在会在可确定单棵 root tree 时附带 `kernel_snapshot`。
+- 中文说明：继续第 3 阶段协议结构化，`inspect_agent_tree` 输出现在会在可确定单棵 root tree 时附带 `kernel_snapshot`。
 - `kernel_snapshot` 只包含状态桶、run rows、workspace refs、recovery refs、artifact/evidence refs 和 blockers，不读取业务产物正文。父级模型要判断“谁还在跑、谁失败、谁可接管、恢复入口在哪里”时，可以先读机器字段，不再从看板自然语言摘要里猜。
 - 如果看板混入多棵 root tree，或 manager 没有 kernel 入口，则不附加该字段，避免把无关任务树混到当前决策里。
 - 验收：`test_orchestration_board_payload.py` 和 `test_subagent_kernel.py` focused tests 通过；strict code-size 仍为 `hard=0 high-risk=0 soft=0`。
@@ -166,7 +166,7 @@
 
 - 中文说明：继续第 4 阶段工具网关统一化的前置工作。kernel run row 现在带 `tool_contract`，把 allowed tools、used tools、open capability request count、grant count、gap count 和 controlled exec grant ids 变成机器字段。
 - 这一步不授予新权限，也不引入新的限制；它只是让父级和接管者知道“这个 run 手里有什么工具、用过什么工具、还缺什么工具”。后续受控 exec、大输出分片和 tool/skill 申请可以基于这些字段继续做。
-- `subagent_board.kernel_snapshot.rows[].tool_contract` 会把这组字段带给父级模型，减少从 prompt 或 summary 里猜工具状态。
+- `inspect_agent_tree.kernel_snapshot.rows[].tool_contract` 会把这组字段带给父级模型，减少从 prompt 或 summary 里猜工具状态。
 
 ## Stages 1-6 Protocol Contract Slice
 
@@ -193,7 +193,7 @@
 - runner prompt 现在只带 slim execution context summary。完整 context bundle、TaskEnvelope、tool preflight、output refs 仍落盘，prompt 只放短摘要和 refs，避免真实模型因 30K+ 开场提示词超时。
 - `required_file_contract()` 会从文件级 product write root 推导 required files。这样 `/.../deliverables/furniture-home/index.html` 既是写权限事实，也是验收合同事实。
 - 质量角色判断收窄：普通“主代理验收 / 汇报验收结果”不再强制 checker；只有显式 `checker`、`验收子代理`、`验收代理`、`派验收` 才要求独立验收角色。
-- 模型面对的 `dispatch_subagents` 在 `apply=true && execute_runners=true` 时固定执行父级检查。
+- 模型面对的 `dispatch_subagents` 在 `dry_run=false` 时固定执行父级检查。
 - 迁移原则：不是加新 guard，而是把“启动轻、事实硬、验收必须机器可证”收进协议边界。下一步做允许 repair 的真实 E2E，让 root 基于失败报告重新派修复 worker。
 
 ## Repair Loop / Tool Gateway Hardening Slice

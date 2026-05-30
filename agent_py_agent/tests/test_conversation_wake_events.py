@@ -92,14 +92,14 @@ def test_nonurgent_observation_requiring_main_agent_is_processed_on_next_tick(tm
     assert "非紧急但需要主代理二次判断" in backend.prompts[0]
 
 
-def test_raise_main_event_tool_resolves_thread_from_task(tmp_path) -> None:
-    from agent_py_agent.agent.agent_core.orchestration_tools import RaiseMainEventTool
+def test_raise_event_tool_resolves_thread_from_task(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
 
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     store = agent.conversation_store
     thread = _thread(store)
     store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "监控任务", 'now': 11.0})
-    result = RaiseMainEventTool(agent).execute(
+    result = RaiseEventTool(agent).execute(
         {
             "task_id": "task-1",
             "event_type": "runtime_alert",
@@ -122,5 +122,5 @@ def test_main_event_tools_are_registered_for_subagent_contexts(tmp_path) -> None
 
     registered = {spec.name for spec in agent.tools.specs(include_orchestration=True)}
 
-    assert "raise_observation" in registered
-    assert "raise_main_event" in registered
+    assert "raise_event" in registered
+    assert "raise_event" in registered

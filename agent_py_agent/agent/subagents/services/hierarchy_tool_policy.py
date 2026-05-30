@@ -11,7 +11,7 @@ from typing import Any, ClassVar
 from ..role_templates import COORDINATOR_TOOLS
 
 # LLM: Leaf defaults mirror main-agent basics: read/write/search/web plus orchestration, with no role-specific handcuffs.
-# LLM: Network defaults use web_search/web_fetch/web_extract/http_request; fetch_url is normalized to web_fetch.
+# LLM: Network defaults use web_search for discovery and web_fetch for URL/API reads.
 # 函数用途: 给调度出来的小傻妞默认补齐读写、网页证据和继续派工能力，减少因模板或自然语言误差导致的“有任务但没工具”。
 _DEFAULT_LEAF_CODING_TOOLS = [
     "list_files",
@@ -20,8 +20,6 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "read_artifact",
     "web_search",
     "web_fetch",
-    "web_extract",
-    "http_request",
     "write_file",
     "apply_patch",
     # LLM: Special writer/builder tools are intentionally absent; children use generic write tools.
@@ -29,19 +27,12 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "dispatch_subagents",
     # LLM: Nested agents inherit the read-only tree inspector so status checks do not become dispatch loops.
     "inspect_agent_tree",
-    "subagent_board",
-    "subagent_message",
-    "raise_observation",
-    "raise_main_event",
-    "raise_collaboration_event",
-    "open_case",
-    "request_collaboration",
-    "list_collaboration_requests",
-    "submit_evidence",
-    "update_collaboration_request",
-    "reroute_collaboration_request",
-    "update_case_status",
-    "case_status",
+    "send_guidance",
+    "raise_event",
+    "raise_collaboration",
+    "inspect_collaboration",
+    "submit_collaboration_result",
+    "update_collaboration",
     "capability_request",
 ]
 # LLM: Leaf defaults intentionally include coordination tools; role changes prompt style, not basic capability.
@@ -51,8 +42,6 @@ _TOOL_NAME_ALIASES = {
     "patch": "apply_patch",
     "replace": "apply_patch",
     "search": "search_text",
-    "fetch": "web_fetch",
-    "fetch_url": "web_fetch",
     "write": "write_file",
 }
 # LLM: LeafWriteIntentRequest bundles the signals used to infer concrete file-writing intent.

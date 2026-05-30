@@ -69,14 +69,14 @@ class FakeToolRunner:
             return {"tool": "read_file", "ok": False, "error_code": "PATH_NOT_FOUND"}
         return {"tool": "read_file", "ok": True, "content": path.read_text(encoding="utf-8")}
 
-    def _tool_fetch_url(self, params: dict[str, object]) -> dict[str, object]:
+    def _tool_web_fetch(self, params: dict[str, object]) -> dict[str, object]:
         url = str(params.get("url") or "")
-        fixtures = self.fixtures.get("fetch_url")
+        fixtures = self.fixtures.get("web_fetch")
         mapping = fixtures if isinstance(fixtures, dict) else {}
         value = mapping.get(url)
         if isinstance(value, dict):
-            return {"tool": "fetch_url", **value}
-        return {"tool": "fetch_url", "ok": False, "error_code": "NETWORK_UNAVAILABLE"}
+            return {"tool": "web_fetch", **value}
+        return {"tool": "web_fetch", "ok": False, "error_code": "NETWORK_UNAVAILABLE"}
 
     def _tool_write_workbook_fixture(self, params: dict[str, object]) -> dict[str, object]:
         target = write_xlsx_fixture(self.run_dir, dict(params))

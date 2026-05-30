@@ -4,12 +4,12 @@
     {
       "id": "agent_config",
       "path": "agent_py_agent/config/agent_config.yaml",
-      "fieldCount": 189
+      "fieldCount": 211
     },
     {
       "id": "capability_config",
       "path": "agent_py_agent/config/capability_config.yaml",
-      "fieldCount": 19
+      "fieldCount": 2
     },
     {
       "id": "log_analysis_config",
@@ -80,7 +80,7 @@
           {
             "key": "workspace_root",
             "label": "workspace_root（workspace root）",
-            "description": "工作区根目录： - 留空时使用项目默认根目录，保持普通开发体验。 - 场景测试、外部聊天工具或未来多项目模式可以把它指向某个独立目录。 - memory_path、subagent_workspace、gateway_workspace、prompt_files 和文件工具都会以这个目录为基础。 - 这就是“测试不能影响当前开发仓库”的关键开关。",
+            "description": "工作区根目录： - 留空时使用当前启动 my-agent 的目录，和 Codex/OpenClaw 这类工具一样把“你在哪个任务目录启动”视为本轮工作区。 - 场景测试、外部聊天工具或未来多项目模式可以把它指向某个独立目录。 - memory_path、subagent_workspace、gateway_workspace、prompt_files 和文件工具都会以这个目录为基础。 - 这就是“测试不能影响当前开发仓库”的关键开关。",
             "type": "string_list",
             "defaultValue": [
               "",
@@ -103,6 +103,195 @@
             "order": 4
           },
           {
+            "key": "my_agent_home",
+            "label": "my_agent_home（my agent home）",
+            "description": "my-agent 家目录： - 默认 ~/.my-agent，类比 Claude Code / Codex / Hermes 的本机 profile 目录。 - 这里放配置、全局脚本、长期记忆、模板、provider 空间和运行缓存。 - MY_AGENT_HOME 环境变量优先级更高，适合测试或多 profile 隔离。",
+            "type": "string",
+            "defaultValue": "~/.my-agent",
+            "currentValue": "~/.my-agent",
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 5
+          },
+          {
+            "key": "home_runtime_bootstrap_enabled",
+            "label": "home_runtime_bootstrap_enabled（home runtime bootstrap enabled）",
+            "description": "家目录运行时开关： - home_runtime_bootstrap_enabled: 启动 SimpleAgent 时自动创建 ~/.my-agent 基础目录和 SOUL/USER/AGENTS/memory 入口文件。 - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。 - home_lesson_auto_read_limit: 每轮最多自动读取多少个匹配 lesson 文件；0 表示不自动读 lesson。 - daily_memory_mirror_enabled: 写旧 memory_path 的同时，镜像一份到 memory/daily/YYYY-MM-DD.jsonl。 - run_task_workspace_enabled: 保存 run 时自动创建 workspace/tasks/date/task_slug/outputs 和 runtime 等目录。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 6
+          },
+          {
+            "key": "home_context_enabled",
+            "label": "home_context_enabled（home context enabled）",
+            "description": "agent_config.yaml 中的 home_context_enabled 配置项。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 7
+          },
+          {
+            "key": "home_lesson_auto_read_limit",
+            "label": "home_lesson_auto_read_limit（home lesson auto read limit）",
+            "description": "agent_config.yaml 中的 home_lesson_auto_read_limit 配置项。",
+            "type": "number",
+            "defaultValue": 3,
+            "currentValue": 3,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 8,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "daily_memory_mirror_enabled",
+            "label": "daily_memory_mirror_enabled（daily memory mirror enabled）",
+            "description": "agent_config.yaml 中的 daily_memory_mirror_enabled 配置项。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 9
+          },
+          {
+            "key": "run_task_workspace_enabled",
+            "label": "run_task_workspace_enabled（run task workspace enabled）",
+            "description": "agent_config.yaml 中的 run_task_workspace_enabled 配置项。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 10
+          },
+          {
+            "key": "workspace_task_path_template",
+            "label": "workspace_task_path_template（workspace task path template）",
+            "description": "任务工作区路径模板： - {date} 是任务创建日期，例如 2026-05-13。 - {task_slug} 是从任务名生成的安全目录名，例如 “示例任务 / main” -> “示例任务-main”。 - 默认结果形如 ~/.my-agent/workspace/tasks/2026-05-13/示例任务-main/。",
+            "type": "string",
+            "defaultValue": "workspace/tasks/{date}/{task_slug}",
+            "currentValue": "workspace/tasks/{date}/{task_slug}",
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 11
+          },
+          {
+            "key": "external_knowledge_index_file_name",
+            "label": "external_knowledge_index_file_name（external knowledge index file name）",
+            "description": "外部知识库配置： - 默认全部为空，不会额外扫描，也不会拖慢普通聊天。 - index_file_name 是每个外部知识库目录里优先读取的索引文件名。 - directory_roots 是本地/挂载目录；api_sources 是查询接口；database_sources 是数据库连接或命名来源。 - 查询顺序固定为：目录 -> API -> 数据库，用户不需要再维护 query_order。",
+            "type": "string",
+            "defaultValue": "MY_AGENT_INDEX.md",
+            "currentValue": "MY_AGENT_INDEX.md",
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 45
+          },
+          {
+            "key": "external_knowledge_directory_roots",
+            "label": "external_knowledge_directory_roots（external knowledge directory roots）",
+            "description": "agent_config.yaml 中的 external_knowledge_directory_roots 配置项。",
+            "type": "string_list",
+            "defaultValue": [],
+            "currentValue": [],
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 46
+          },
+          {
+            "key": "external_knowledge_api_sources",
+            "label": "external_knowledge_api_sources（external knowledge api sources）",
+            "description": "agent_config.yaml 中的 external_knowledge_api_sources 配置项。",
+            "type": "string_list",
+            "defaultValue": [],
+            "currentValue": [],
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 47
+          },
+          {
+            "key": "external_knowledge_database_sources",
+            "label": "external_knowledge_database_sources（external knowledge database sources）",
+            "description": "agent_config.yaml 中的 external_knowledge_database_sources 配置项。",
+            "type": "string_list",
+            "defaultValue": [],
+            "currentValue": [],
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 48
+          },
+          {
             "key": "enable_self_learning",
             "label": "enable_self_learning（enable self learning）",
             "description": "是否启用自学习功能 - false: 默认关闭，只按已有 prompt、记忆、工具和 skill 工作，不自动沉淀新经验 - true: 允许后续自学习模块在任务结束后生成“学习候选” - 注意：开启后也不应该直接改正式 skill；应先生成草稿，再由用户确认",
@@ -117,7 +306,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 38
+            "order": 49
           },
           {
             "key": "prompt_files",
@@ -138,12 +327,84 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 39
+            "order": 50
           },
           {
             "key": "max_subagents",
             "label": "max_subagents（max subagents）",
-            "description": "单次最多拆出多少个子任务 - 默认 1000，表示用户层基本不限制；真实并发仍由 runner/scheduler 控制。 - 如果你明确想限制规模，可以改小，例如 20。",
+            "description": "单个任务最多允许登记多少个子代理。 这个值只限制“最多能登记多少个同级子代理”，不强制主代理一定创建这么多。 真实并发仍由调度器按机器和模型情况自动控制；复杂任务可让主代理自行规划拆分方式。",
+            "type": "number",
+            "defaultValue": 50,
+            "currentValue": 50,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 53,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "result_check_execute_tests",
+            "label": "result_check_execute_tests（result check execute tests）",
+            "description": "结果检查是否默认真实执行 runner 输出里的 tests： - false: 保守默认，只检查 runner 填写的 tests 字段和证据，不自动跑命令。 - true: 普通收口默认执行 allowlist 内的 command/file/content 验证。 - 单次命令可用 `--execute-tests` / `--no-execute-tests` 覆盖这里。",
+            "type": "boolean",
+            "defaultValue": false,
+            "currentValue": false,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 64
+          },
+          {
+            "key": "result_check_timeout_seconds",
+            "label": "result_check_timeout_seconds（result check timeout seconds）",
+            "description": "结果检查真实执行 tests 时的单条测试超时秒数： - 1 到 300 秒；超过范围会回退默认值。 - `subagents-tests --timeout` 可覆盖单次调用。",
+            "type": "number",
+            "defaultValue": 120,
+            "currentValue": 120,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 65,
+            "min": 0,
+            "max": 3600
+          },
+          {
+            "key": "closeout_for_all_task_nodes",
+            "label": "closeout_for_all_task_nodes（closeout for all task nodes）",
+            "description": "是否把同一套 closeout 反馈扩展到每一个任务节点： - false: 默认只对主/root 交付做 closeout；子代理结果只更新 refs、状态和任务树。 - true: 子代理、孙代理等每个任务节点完成时也写 task-node closeout 反馈。 这个开关不引入父代理验收、acceptance 状态或阻断门；失败只作为返工提示/状态事实交给当前代理判断。",
+            "type": "boolean",
+            "defaultValue": false,
+            "currentValue": false,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 66
+          },
+          {
+            "key": "contract_status_max_scan_files",
+            "label": "contract_status_max_scan_files（contract status max scan files）",
+            "description": "合同/skill/小型真实验收的只读扫描预算： - contract_status_* 只影响 `contracts status` 这类看板/汇总扫描，不会阻断任务。 - skill_guard_* 只影响单个 skill 目录扫描时的结构检查预算。 - small_real_acceptance_max_runtime_seconds 是小型真实验收 case 的最大声明运行时间；0 表示不做这个上限判断。 - real_run_review_* 只影响真实运行复盘时读取多大的 report/log 文件；0 表示不读取对应大文件。",
             "type": "number",
             "defaultValue": 1000,
             "currentValue": 1000,
@@ -155,9 +416,497 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 49,
+            "order": 67,
             "min": 0,
             "max": 1000000
+          },
+          {
+            "key": "contract_status_max_report_bytes",
+            "label": "contract_status_max_report_bytes（contract status max report bytes）",
+            "description": "agent_config.yaml 中的 contract_status_max_report_bytes 配置项。",
+            "type": "number",
+            "defaultValue": 2000000,
+            "currentValue": 2000000,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 68,
+            "min": 0,
+            "max": 65535
+          },
+          {
+            "key": "contract_status_recent_findings_limit",
+            "label": "contract_status_recent_findings_limit（contract status recent findings limit）",
+            "description": "agent_config.yaml 中的 contract_status_recent_findings_limit 配置项。",
+            "type": "number",
+            "defaultValue": 20,
+            "currentValue": 20,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 69,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "skill_guard_max_files",
+            "label": "skill_guard_max_files（skill guard max files）",
+            "description": "agent_config.yaml 中的 skill_guard_max_files 配置项。",
+            "type": "number",
+            "defaultValue": 50,
+            "currentValue": 50,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 70,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "skill_guard_max_size_kb",
+            "label": "skill_guard_max_size_kb（skill guard max size kb）",
+            "description": "agent_config.yaml 中的 skill_guard_max_size_kb 配置项。",
+            "type": "number",
+            "defaultValue": 1024,
+            "currentValue": 1024,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 71,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "small_real_acceptance_max_runtime_seconds",
+            "label": "small_real_acceptance_max_runtime_seconds（small real acceptance max runtime seconds）",
+            "description": "agent_config.yaml 中的 small_real_acceptance_max_runtime_seconds 配置项。",
+            "type": "number",
+            "defaultValue": 900,
+            "currentValue": 900,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 72,
+            "min": 0,
+            "max": 3600
+          },
+          {
+            "key": "real_run_review_max_report_bytes",
+            "label": "real_run_review_max_report_bytes（real run review max report bytes）",
+            "description": "agent_config.yaml 中的 real_run_review_max_report_bytes 配置项。",
+            "type": "number",
+            "defaultValue": 5000000,
+            "currentValue": 5000000,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 73,
+            "min": 0,
+            "max": 65535
+          },
+          {
+            "key": "real_run_review_max_log_bytes",
+            "label": "real_run_review_max_log_bytes（real run review max log bytes）",
+            "description": "agent_config.yaml 中的 real_run_review_max_log_bytes 配置项。",
+            "type": "number",
+            "defaultValue": 1000000,
+            "currentValue": 1000000,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 74,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "provider_space_default_max_storage_mb",
+            "label": "provider_space_default_max_storage_mb（provider space default max storage mb）",
+            "description": "外部平台用户/群空间配置： - provider_space_default_max_storage_mb 是每个外部用户/群空间默认容量，单位 MiB。 - provider_space_max_download_file_mb 是单个下载/导入文件的建议上限，单位 MiB。 - provider_space_trash_retention_days 是 trash 保留天数，默认 30 天。 - provider_space_destructive_actions_use_trash=true 表示删除先移动到该用户/群自己的 trash。 - 外部用户只能写自己的空间；群主/群管理员只能管理自己群空间，不能碰主账号家目录或别的群。",
+            "type": "number",
+            "defaultValue": 2048,
+            "currentValue": 2048,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 99,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "provider_space_max_download_file_mb",
+            "label": "provider_space_max_download_file_mb（provider space max download file mb）",
+            "description": "agent_config.yaml 中的 provider_space_max_download_file_mb 配置项。",
+            "type": "number",
+            "defaultValue": 200,
+            "currentValue": 200,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 100,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "provider_space_trash_retention_days",
+            "label": "provider_space_trash_retention_days（provider space trash retention days）",
+            "description": "agent_config.yaml 中的 provider_space_trash_retention_days 配置项。",
+            "type": "number",
+            "defaultValue": 30,
+            "currentValue": 30,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 101,
+            "min": 0,
+            "max": 3650
+          },
+          {
+            "key": "provider_space_destructive_actions_use_trash",
+            "label": "provider_space_destructive_actions_use_trash（provider space destructive actions use trash）",
+            "description": "agent_config.yaml 中的 provider_space_destructive_actions_use_trash 配置项。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 102
+          },
+          {
+            "key": "conversation_workspace",
+            "label": "conversation_workspace（conversation workspace）",
+            "description": "长期主代理线程工作区： - 保存 ConversationThread、MessageLog、ChannelBinding、ThreadTaskLink 和 ProgressPolicy。 - 这是后台主代理恢复/定时汇报/跨渠道继续上下文的机器账本。 - 不保存真实飞书/微信凭证，也不要求用户按工程字段写任务 prompt。",
+            "type": "path",
+            "defaultValue": "data/conversations",
+            "currentValue": "data/conversations",
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 104
+          },
+          {
+            "key": "conversation_thread_list_limit",
+            "label": "conversation_thread_list_limit（conversation thread list limit）",
+            "description": "长期会话读取和后台唤醒 prompt 预算： - thread/pending/context/recent 这些 limit 只控制一次读取多少条账本记录，不删除原始文件。 - background_context_* 只裁剪注入后台主代理 prompt 的副本，不改消息、observation、case 或 agent tree 原文。 - background_claim_ttl_seconds 是后台主代理一次唤醒的 lease 有效期；运行中会 heartbeat 续约。 - background_claim_heartbeat_interval_seconds=0 表示按 TTL 自动取安全间隔。",
+            "type": "number",
+            "defaultValue": 100,
+            "currentValue": 100,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 105,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "conversation_pending_wake_limit",
+            "label": "conversation_pending_wake_limit（conversation pending wake limit）",
+            "description": "agent_config.yaml 中的 conversation_pending_wake_limit 配置项。",
+            "type": "number",
+            "defaultValue": 100,
+            "currentValue": 100,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 106,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "conversation_context_recent_limit",
+            "label": "conversation_context_recent_limit（conversation context recent limit）",
+            "description": "agent_config.yaml 中的 conversation_context_recent_limit 配置项。",
+            "type": "number",
+            "defaultValue": 20,
+            "currentValue": 20,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 107,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "conversation_unhandled_observation_limit",
+            "label": "conversation_unhandled_observation_limit（conversation unhandled observation limit）",
+            "description": "agent_config.yaml 中的 conversation_unhandled_observation_limit 配置项。",
+            "type": "number",
+            "defaultValue": 20,
+            "currentValue": 20,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 108,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "background_pending_wake_prompt_limit",
+            "label": "background_pending_wake_prompt_limit（background pending wake prompt limit）",
+            "description": "agent_config.yaml 中的 background_pending_wake_prompt_limit 配置项。",
+            "type": "number",
+            "defaultValue": 20,
+            "currentValue": 20,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 109,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "background_context_max_string_chars",
+            "label": "background_context_max_string_chars（background context max string chars）",
+            "description": "agent_config.yaml 中的 background_context_max_string_chars 配置项。",
+            "type": "number",
+            "defaultValue": 1200,
+            "currentValue": 1200,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 110,
+            "min": 0,
+            "max": 2000000
+          },
+          {
+            "key": "background_context_max_list_items",
+            "label": "background_context_max_list_items（background context max list items）",
+            "description": "agent_config.yaml 中的 background_context_max_list_items 配置项。",
+            "type": "number",
+            "defaultValue": 20,
+            "currentValue": 20,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 111,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "background_context_max_dict_items",
+            "label": "background_context_max_dict_items（background context max dict items）",
+            "description": "agent_config.yaml 中的 background_context_max_dict_items 配置项。",
+            "type": "number",
+            "defaultValue": 80,
+            "currentValue": 80,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 112,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "background_context_max_depth",
+            "label": "background_context_max_depth（background context max depth）",
+            "description": "agent_config.yaml 中的 background_context_max_depth 配置项。",
+            "type": "number",
+            "defaultValue": 6,
+            "currentValue": 6,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 113,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "background_claim_ttl_seconds",
+            "label": "background_claim_ttl_seconds（background claim ttl seconds）",
+            "description": "agent_config.yaml 中的 background_claim_ttl_seconds 配置项。",
+            "type": "number",
+            "defaultValue": 900,
+            "currentValue": 900,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 114,
+            "min": 0,
+            "max": 3600
+          },
+          {
+            "key": "background_claim_heartbeat_interval_seconds",
+            "label": "background_claim_heartbeat_interval_seconds（background claim heartbeat interval seconds）",
+            "description": "agent_config.yaml 中的 background_claim_heartbeat_interval_seconds 配置项。",
+            "type": "number",
+            "defaultValue": 0,
+            "currentValue": 0,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 115,
+            "min": 0,
+            "max": 3600
+          },
+          {
+            "key": "collaboration_workspace",
+            "label": "collaboration_workspace（collaboration workspace）",
+            "description": "多代理协作控制面工作区： - 保存通用 case/request/evidence/decision 账本。 - 只保存轻量机器事实；大文件、日志、API 返回和截图必须用 evidence_refs 指向外部产物。 - 不把日志分析、GitHub 研究、文档生成等任务写成内置专项模板。",
+            "type": "path",
+            "defaultValue": "data/collaboration",
+            "currentValue": "data/collaboration",
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 116
+          },
+          {
+            "key": "collaboration_auto_dispatch_max_runners",
+            "label": "collaboration_auto_dispatch_max_runners（collaboration auto dispatch max runners）",
+            "description": "协作请求自动唤醒 responder 的最大并发数。 普通 dispatch 仍按 dispatch_default_max_runners；只有已有 collaboration request 等待多个代理响应时，才按这个上限一次推进多个 responder，避免协作证据串行排队。 0 表示关闭自动放宽，完全按本轮 max_runners 执行。",
+            "type": "number",
+            "defaultValue": 8,
+            "currentValue": 8,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 117,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "collaboration_default_deadline_seconds",
+            "label": "collaboration_default_deadline_seconds（collaboration default deadline seconds）",
+            "description": "协作请求默认截止时间（秒）。 request_collaboration / raise_collaboration_event 如果没有显式传 deadline_at 或 deadline_seconds， 系统会自动补这个相对 deadline，避免大规模协作因为少数 responder 慢/断网而无限等待。 0 表示不自动补截止时间，只使用用户或模型显式给出的 deadline。",
+            "type": "number",
+            "defaultValue": 120,
+            "currentValue": 120,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 118,
+            "min": 0,
+            "max": 3600
           },
           {
             "key": "task_lock_timeout_seconds",
@@ -174,7 +923,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 108,
+            "order": 123,
             "min": 0,
             "max": 3600
           },
@@ -193,7 +942,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 124,
+            "order": 139,
             "choices": [
               "debug",
               "info",
@@ -217,7 +966,90 @@
             "riskWarning": "会改变运行边界或加载来源，建议只在明确知道影响时修改。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 125
+            "order": 140
+          },
+          {
+            "key": "path_access_mode",
+            "label": "path_access_mode（path access mode）",
+            "description": "路径访问策略，主代理和所有子代理共用： - normal：默认模式。不再要求所有文件都在 workspace_root 里，只拒绝下面 path_dangerous_roots 里的危险目录。 用户在 prompt 里明确说“写到某个目录”时，只要不落入危险目录，文件工具和子代理都可以使用。 - full：路径全开，不按危险目录拒绝。只建议在完全信任本机任务时使用。 说明：workspace_root 仍是默认工作目录和相对路径基准，不再是普通产物写入的唯一白名单。",
+            "type": "string",
+            "defaultValue": "normal",
+            "currentValue": "normal",
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 165
+          },
+          {
+            "key": "path_dangerous_roots",
+            "label": "path_dangerous_roots（path dangerous roots）",
+            "description": "normal 模式下默认拒绝访问/写入的危险目录。可以按机器环境调整。 这里放的是系统目录和常见密钥目录，不包含用户项目目录、桌面、下载目录或 live-agent-runs。",
+            "type": "string_list",
+            "defaultValue": [
+              "/etc",
+              "/private/etc",
+              "/System",
+              "/bin",
+              "/sbin",
+              "/usr/bin",
+              "/usr/sbin",
+              "/var/db",
+              "/var/root",
+              "/root",
+              "~/.ssh",
+              "~/.gnupg",
+              "~/.aws",
+              "~/.kube",
+              "~/.docker"
+            ],
+            "currentValue": [
+              "/etc",
+              "/private/etc",
+              "/System",
+              "/bin",
+              "/sbin",
+              "/usr/bin",
+              "/usr/sbin",
+              "/var/db",
+              "/var/root",
+              "/root",
+              "~/.ssh",
+              "~/.gnupg",
+              "~/.aws",
+              "~/.kube",
+              "~/.docker"
+            ],
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 166
+          },
+          {
+            "key": "access_mode",
+            "label": "access_mode（access mode）",
+            "description": "命令运行权限档位。这里只暴露一个总开关，其他命令安全策略由运行时派生： - restricted：保守模式，命令只能在配置工作区内执行，适合不信任任务。 - workspace-write：默认开发模式，命令可以在当前工作区内跑测试、构建、脚本和普通清理。 - full-access：完全访问模式，允许显式切到系统其他目录；rm -rf /、删除系统/家目录、格式化磁盘、关机等最后保护仍会拒绝。 普通 rm/rmdir/chmod/sudo 不因名字本身被拒绝；真正的边界来自 access_mode、path_access_mode 和灾难命令保护。 模型不需要知道 grant/path_scope/apply 之类内部字段；它只调用 run_command。",
+            "type": "string",
+            "defaultValue": "workspace-write",
+            "currentValue": "workspace-write",
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 167
           }
         ]
       },
@@ -242,46 +1074,12 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 5,
+            "order": 12,
             "choices": [
               "echo",
               "openai_compatible",
               "anthropic_compatible"
             ]
-          },
-          {
-            "key": "model_speed_profile_path",
-            "label": "model_speed_profile_path（model speed profile path）",
-            "description": "model_speed_profile_path 表示模型速度样本文件路径，动态超时会用它估算任务耗时。",
-            "type": "path",
-            "defaultValue": "data/model_speed_profile.json",
-            "currentValue": "data/model_speed_profile.json",
-            "category": "model",
-            "categoryLabel": "模型配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 78
-          },
-          {
-            "key": "auto_bench_model_on_first_use",
-            "label": "auto_bench_model_on_first_use（auto bench model on first use）",
-            "description": "auto_bench_model_on_first_use 表示首次使用时是否自动跑速度测试，给后续动态超时提供样本。",
-            "type": "boolean",
-            "defaultValue": true,
-            "currentValue": true,
-            "category": "model",
-            "categoryLabel": "模型配置",
-            "advanced": false,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 79
           },
           {
             "key": "api_base",
@@ -298,7 +1096,7 @@
             "riskWarning": "会改变运行边界或加载来源，建议只在明确知道影响时修改。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 126
+            "order": 141
           },
           {
             "key": "api_key",
@@ -315,7 +1113,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 127
+            "order": 142
           },
           {
             "key": "api_key_env",
@@ -332,7 +1130,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 128
+            "order": 143
           },
           {
             "key": "model_name",
@@ -349,15 +1147,15 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 129
+            "order": 144
           },
           {
             "key": "request_timeout",
             "label": "request_timeout（request timeout）",
-            "description": "HTTP 请求总超时秒数；超时会记录为 provider_timeout，CLI 会给恢复提示。",
+            "description": "HTTP 请求总超时秒数；超时会记录为 provider_timeout，runner 会按有上限的失败策略重试。",
             "type": "number",
-            "defaultValue": 60,
-            "currentValue": 60,
+            "defaultValue": 240,
+            "currentValue": 240,
             "category": "model",
             "categoryLabel": "模型配置",
             "advanced": true,
@@ -366,7 +1164,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 130,
+            "order": 145,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -386,7 +1184,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 131,
+            "order": 146,
             "unit": "tokens",
             "min": 0,
             "max": 200000
@@ -406,7 +1204,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 132,
+            "order": 147,
             "min": 0,
             "max": 2
           },
@@ -425,7 +1223,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 133
+            "order": 148
           }
         ]
       },
@@ -450,7 +1248,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 134
+            "order": 149
           },
           {
             "key": "stream_enabled",
@@ -467,70 +1265,12 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 135
-          },
-          {
-            "key": "max_tool_rounds",
-            "label": "max_tool_rounds（max tool rounds）",
-            "description": "单轮请求里，最多允许几次“模型调用工具再继续推理”；0 表示不限制",
-            "type": "number",
-            "defaultValue": 0,
-            "currentValue": 0,
-            "category": "tools",
-            "categoryLabel": "工具配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 136,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "tool_agent_budget_window_seconds",
-            "label": "tool_agent_budget_window_seconds（tool agent budget window seconds）",
-            "description": "单个代理滚动工具预算；只按 subagent run_id 生效，普通主代理聊天默认不限制",
-            "type": "number",
-            "defaultValue": 600,
-            "currentValue": 600,
-            "category": "tools",
-            "categoryLabel": "工具配置",
-            "advanced": false,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 137,
-            "unit": "秒",
-            "min": 0,
-            "max": 3600
-          },
-          {
-            "key": "tool_agent_budget_max_calls",
-            "label": "tool_agent_budget_max_calls（tool agent budget max calls）",
-            "description": "agent_config.yaml 中的 tool_agent_budget_max_calls 配置项。",
-            "type": "number",
-            "defaultValue": 50,
-            "currentValue": 50,
-            "category": "tools",
-            "categoryLabel": "工具配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 138,
-            "min": 0,
-            "max": 1000000
+            "order": 150
           },
           {
             "key": "tool_artifact_read_budget_window_seconds",
             "label": "tool_artifact_read_budget_window_seconds（tool artifact read budget window seconds）",
-            "description": "单个代理滚动 artifact 正文读取预算（下面两个参数必须一起看）： - window_seconds=600 + max_chars=240000 表示单个 run_id 最近 10 分钟最多读取 240000 字符正文。 - 任一配置为 0 表示关闭这个 artifact 正文读取预算。",
+            "description": "工具轮数、runner 重试、单代理工具预算集中在 runtime_guard_config.yaml， 避免同一默认值散落多处。需要单任务临时覆盖时，由任务属性显式传入。 单个代理滚动 artifact 正文读取预算（下面两个参数必须一起看）： - window_seconds=600 + max_chars=240000 表示单个 run_id 最近 10 分钟最多读取 240000 字符正文。 - 任一配置为 0 表示关闭这个 artifact 正文读取预算。",
             "type": "number",
             "defaultValue": 600,
             "currentValue": 600,
@@ -542,7 +1282,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 139,
+            "order": 151,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -562,7 +1302,121 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 140,
+            "order": 152,
+            "min": 0,
+            "max": 2000000
+          },
+          {
+            "key": "tool_output_externalize_min_chars",
+            "label": "tool_output_externalize_min_chars（tool output externalize min chars）",
+            "description": "工具输出归档和工具调用解析预算： - tool_output_externalize_min_chars: 工具输出达到多少字符后外置为 artifact；0 表示所有工具输出都外置。 - tool_output_preview_chars: archive 记录里保留多少字符预览；完整内容走 artifact 引用读取。 - tool_payload_*: 只限制模型发来的单次工具调用 JSON 形状，防止坏 payload 撑爆上下文；不是业务字段枚举。",
+            "type": "number",
+            "defaultValue": 1200,
+            "currentValue": 1200,
+            "category": "tools",
+            "categoryLabel": "工具配置",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 153,
+            "min": 0,
+            "max": 2000000
+          },
+          {
+            "key": "tool_output_preview_chars",
+            "label": "tool_output_preview_chars（tool output preview chars）",
+            "description": "agent_config.yaml 中的 tool_output_preview_chars 配置项。",
+            "type": "number",
+            "defaultValue": 500,
+            "currentValue": 500,
+            "category": "tools",
+            "categoryLabel": "工具配置",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 154,
+            "min": 0,
+            "max": 2000000
+          },
+          {
+            "key": "tool_payload_max_fields",
+            "label": "tool_payload_max_fields（tool payload max fields）",
+            "description": "agent_config.yaml 中的 tool_payload_max_fields 配置项。",
+            "type": "number",
+            "defaultValue": 64,
+            "currentValue": 64,
+            "category": "tools",
+            "categoryLabel": "工具配置",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 155,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "tool_payload_max_field_name_chars",
+            "label": "tool_payload_max_field_name_chars（tool payload max field name chars）",
+            "description": "agent_config.yaml 中的 tool_payload_max_field_name_chars 配置项。",
+            "type": "number",
+            "defaultValue": 128,
+            "currentValue": 128,
+            "category": "tools",
+            "categoryLabel": "工具配置",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 156,
+            "min": 0,
+            "max": 2000000
+          },
+          {
+            "key": "tool_payload_max_name_chars",
+            "label": "tool_payload_max_name_chars（tool payload max name chars）",
+            "description": "agent_config.yaml 中的 tool_payload_max_name_chars 配置项。",
+            "type": "number",
+            "defaultValue": 128,
+            "currentValue": 128,
+            "category": "tools",
+            "categoryLabel": "工具配置",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 157,
+            "min": 0,
+            "max": 2000000
+          },
+          {
+            "key": "tool_payload_parse_error_raw_chars",
+            "label": "tool_payload_parse_error_raw_chars（tool payload parse error raw chars）",
+            "description": "agent_config.yaml 中的 tool_payload_parse_error_raw_chars 配置项。",
+            "type": "number",
+            "defaultValue": 1000,
+            "currentValue": 1000,
+            "category": "tools",
+            "categoryLabel": "工具配置",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 158,
             "min": 0,
             "max": 2000000
           },
@@ -581,14 +1435,14 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 141,
+            "order": 159,
             "min": 0,
             "max": 2000000
           },
           {
             "key": "tool_write_inline_max_chars",
             "label": "tool_write_inline_max_chars（tool write inline max chars）",
-            "description": "write_file / append_file 单次 inline content 硬上限 默认 12000；调大可以减少分块次数，但过大更容易让工具 JSON 被模型截断。",
+            "description": "write_file 单次 inline content 推荐值 默认 12000；超过推荐值的合法工具调用仍会落盘，但工具会提示后续改用 WRITE_FILE_RAW/data_base64，避免模型反复长写。",
             "type": "number",
             "defaultValue": 12000,
             "currentValue": 12000,
@@ -600,7 +1454,7 @@
             "riskWarning": "放宽工具边界会影响模型调用成本和执行风险。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 142,
+            "order": 160,
             "min": 0,
             "max": 2000000
           },
@@ -619,7 +1473,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 143,
+            "order": 161,
             "min": 0,
             "max": 1000000
           },
@@ -638,14 +1492,14 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 144,
+            "order": 162,
             "min": 0,
             "max": 1000000
           },
           {
             "key": "tool_web_max_chars",
             "label": "tool_web_max_chars（tool web max chars）",
-            "description": "网页抓取和接口响应最多保留多少字符",
+            "description": "web_fetch / web_extract / http_request 返回给模型的默认预览字符上限。 全文或二进制内容应保存为 artifact 引用，不要直接塞进上下文。",
             "type": "number",
             "defaultValue": 100000,
             "currentValue": 100000,
@@ -657,14 +1511,14 @@
             "riskWarning": "放宽工具边界会影响模型调用成本和执行风险。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 145,
+            "order": 163,
             "min": 0,
             "max": 2000000
           },
           {
             "key": "tool_http_timeout",
             "label": "tool_http_timeout（tool http timeout）",
-            "description": "fetch_url / http_request 工具默认超时秒数",
+            "description": "web_search / web_fetch / web_extract / http_request 工具默认超时秒数",
             "type": "number",
             "defaultValue": 30,
             "currentValue": 30,
@@ -676,7 +1530,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 146,
+            "order": 164,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -696,10 +1550,29 @@
             "riskWarning": "放宽工具边界会影响模型调用成本和执行风险。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 147,
+            "order": 168,
             "unit": "秒",
             "min": 0,
             "max": 3600
+          },
+          {
+            "key": "tool_shell_output_max_chars",
+            "label": "tool_shell_output_max_chars（tool shell output max chars）",
+            "description": "run_command 的 stdout/stderr 分别最多回显多少字符 超出时只回显预览、总字符数和截断标记，完整大输出后续应走 artifact/日志引用",
+            "type": "number",
+            "defaultValue": 12000,
+            "currentValue": 12000,
+            "category": "tools",
+            "categoryLabel": "工具配置",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "medium",
+            "riskWarning": "放宽工具边界会影响模型调用成本和执行风险。",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 169,
+            "min": 0,
+            "max": 2000000
           },
           {
             "key": "tool_catalog_limit",
@@ -716,7 +1589,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 148,
+            "order": 170,
             "min": 0,
             "max": 1000000
           },
@@ -735,7 +1608,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 149,
+            "order": 171,
             "choices": [
               "compact",
               "full",
@@ -758,7 +1631,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 150
+            "order": 172
           },
           {
             "key": "tool_catalog_categories",
@@ -775,7 +1648,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 151
+            "order": 173
           },
           {
             "key": "tool_catalog_include_examples",
@@ -792,7 +1665,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 152
+            "order": 174
           },
           {
             "key": "tool_catalog_entry_max_chars",
@@ -809,7 +1682,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 153,
+            "order": 175,
             "min": 0,
             "max": 2000000
           },
@@ -828,7 +1701,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 154
+            "order": 176
           },
           {
             "key": "tool_detail_max_chars",
@@ -845,7 +1718,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 155,
+            "order": 177,
             "min": 0,
             "max": 2000000
           },
@@ -864,7 +1737,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 156,
+            "order": 178,
             "min": 0,
             "max": 1000000
           },
@@ -883,7 +1756,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 157
+            "order": 179
           }
         ]
       },
@@ -908,7 +1781,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 6
+            "order": 13
           },
           {
             "key": "local_store_path",
@@ -925,7 +1798,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 7
+            "order": 14
           },
           {
             "key": "local_store_files_dir",
@@ -942,7 +1815,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 8
+            "order": 15
           },
           {
             "key": "local_store_events_path",
@@ -959,7 +1832,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 9
+            "order": 16
           },
           {
             "key": "local_store_fts_enabled",
@@ -976,7 +1849,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 10
+            "order": 17
           },
           {
             "key": "memory_top_k",
@@ -993,7 +1866,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 11
+            "order": 18
           },
           {
             "key": "auto_save_memory",
@@ -1010,12 +1883,12 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 12
+            "order": 19
           },
           {
             "key": "memory_archive_level",
             "label": "memory_archive_level（memory archive level）",
-            "description": "- memory_rule_routing_mode: off: 不做长期规则路由；soft: 命中后提示/自动读少量规则；strict: 强规则场景必须读权威文件。 - memory_rule_auto_read_limit 表示每轮最多自动读取多少条规则正文；0 表示不自动读取。 - memory_resume_auto_context_enabled 默认关闭，避免普通请求因为恢复检索变慢。 - memory_resume_auto_context_mode: off: 不注入恢复块；trigger: 只有“继续/恢复/刚刚/run_id”等场景触发；always: 每轮都尝试。 - memory_resume_auto_context_limit 表示自动恢复最多拿多少条线索，范围 1-50。 - memory_compact_auto_allow_apply 默认关闭；开启后也只允许非破坏性 apply + auto resume + guard，不自动跑工具。",
+            "description": "“继续往下做/继续整理/继续完成”这类当前任务内部表达不会触发旧任务恢复；always: 每轮都尝试。 - memory_resume_auto_context_limit 表示自动恢复最多拿多少条线索，范围 1-50。 - compact 提前提示优先读取当前模型后端暴露的真实上下文窗口；拿不到时按 128K 通用窗口兜底。 - memory_compact_auto_trigger_percent 控制上下文使用到多少百分比时自动 compact： 不写默认 90；0 表示 100；乱填回默认；大于100 => 100；小于50 => 50；50-100 => 按填写值。 - 保存型运行默认执行非破坏性 apply + auto resume + guard；save=false 时只生成计划，不写入 compact apply。 - 自动 compact 续接不再设最大深度；只要 compact 包可恢复，系统会继续同一个任务，不会因为普通任务缺少验收/测试备注而停车。 - 运行中 raw archive 和 runtime_fact 是 compact/resume 的基础事实源，随持久化运行默认启用，不提供单独关闭开关。",
             "type": "number",
             "defaultValue": 3,
             "currentValue": 3,
@@ -1027,7 +1900,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 13
+            "order": 20
           },
           {
             "key": "memory_hook_enabled",
@@ -1044,7 +1917,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 14
+            "order": 21
           },
           {
             "key": "memory_hook_archive_level",
@@ -1061,7 +1934,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 15
+            "order": 22
           },
           {
             "key": "memory_hook_retention_days",
@@ -1078,7 +1951,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 16,
+            "order": 23,
             "unit": "天",
             "min": 0,
             "max": 3650
@@ -1098,7 +1971,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 17
+            "order": 24
           },
           {
             "key": "memory_rule_routing_mode",
@@ -1115,7 +1988,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 18,
+            "order": 25,
             "choices": [
               "off",
               "soft",
@@ -1137,7 +2010,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 19,
+            "order": 26,
             "min": 0,
             "max": 1000000
           },
@@ -1156,7 +2029,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 20
+            "order": 27
           },
           {
             "key": "memory_resume_auto_context_enabled",
@@ -1173,7 +2046,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 21
+            "order": 28
           },
           {
             "key": "memory_resume_auto_context_mode",
@@ -1190,7 +2063,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 22,
+            "order": 29,
             "choices": [
               "off",
               "trigger",
@@ -1212,17 +2085,17 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 23,
+            "order": 30,
             "min": 0,
             "max": 1000000
           },
           {
-            "key": "memory_compact_auto_allow_apply",
-            "label": "memory_compact_auto_allow_apply（memory compact auto allow apply）",
-            "description": "agent_config.yaml 中的 memory_compact_auto_allow_apply 配置项。",
-            "type": "boolean",
-            "defaultValue": false,
-            "currentValue": false,
+            "key": "memory_compact_auto_trigger_percent",
+            "label": "memory_compact_auto_trigger_percent（memory compact auto trigger percent）",
+            "description": "agent_config.yaml 中的 memory_compact_auto_trigger_percent 配置项。",
+            "type": "number",
+            "defaultValue": 90,
+            "currentValue": 90,
             "category": "memory",
             "categoryLabel": "记忆配置",
             "advanced": false,
@@ -1231,7 +2104,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 24
+            "order": 31
           },
           {
             "key": "memory_artifact_default_read_chars",
@@ -1248,7 +2121,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 25,
+            "order": 32,
             "min": 0,
             "max": 2000000
           },
@@ -1267,7 +2140,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 26,
+            "order": 33,
             "min": 0,
             "max": 2000000
           },
@@ -1286,7 +2159,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 27,
+            "order": 34,
             "min": 0,
             "max": 2000000
           },
@@ -1305,7 +2178,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 28,
+            "order": 35,
             "min": 0,
             "max": 2000000
           },
@@ -1324,7 +2197,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 29,
+            "order": 36,
             "min": 0,
             "max": 2000000
           },
@@ -1343,7 +2216,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 30,
+            "order": 37,
             "min": 0,
             "max": 2000000
           },
@@ -1362,7 +2235,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 31,
+            "order": 38,
             "min": 0,
             "max": 1000000
           },
@@ -1381,7 +2254,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 32,
+            "order": 39,
             "min": 0,
             "max": 1000000
           },
@@ -1400,7 +2273,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 33
+            "order": 40
           },
           {
             "key": "memory_query_content_preview_chars",
@@ -1417,7 +2290,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 34,
+            "order": 41,
             "min": 0,
             "max": 2000000
           },
@@ -1436,7 +2309,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 35,
+            "order": 42,
             "min": 0,
             "max": 1000000
           },
@@ -1455,7 +2328,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 36,
+            "order": 43,
             "min": 0,
             "max": 1000000
           },
@@ -1474,7 +2347,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 37,
+            "order": 44,
             "min": 0,
             "max": 1000000
           }
@@ -1489,7 +2362,7 @@
           {
             "key": "enable_subagents",
             "label": "enable_subagents（enable subagents）",
-            "description": "是否启用子任务记录",
+            "description": "子代理配置 - 子代理默认应该像“不同记忆/权限的主代理”一样能独立干活。 - 角色模板只追加职责，不应该拿掉基础读写、汇报和任务目录内执行能力。 - 这里保留少量用户能理解的开关；更细的调度/上下文/runner 参数由系统内部自动处理。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
@@ -1501,123 +2374,15 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 40
-          },
-          {
-            "key": "subagent_automation_level",
-            "label": "subagent_automation_level（subagent automation level）",
-            "description": "子代理自动化级别 - 1: 极大优先子代理。预估 >= 2 轮的任务都派子代理。 - 2: 中等优先。预估 >= 4 轮的任务派子代理。 - 3: 保守优先。预估 >= 8 轮或用户明确指定才派子代理。",
-            "type": "number",
-            "defaultValue": 2,
-            "currentValue": 2,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": false,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 41
-          },
-          {
-            "key": "subagent_debug_trace_level",
-            "label": "subagent_debug_trace_level（subagent debug trace level）",
-            "description": "子代理调试追踪等级 - 0: 默认关闭，不写额外调试日志 - 1: 只记录关键生命周期事件，比如任务创建、runner 收束 - 2: 记录调度/验收/runner 结果的更多 refs-only 字段 - 3: 记录模型请求/响应、工具调用开始/结束的 refs-only 阶段日志 - 4: 在 JSONL 里追加短 prompt/response/tool 预览，方便 tail 实时观察 - 5: 额外把完整 prompt、response、tool 参数和工具输出写到 debug_traces/details；仅建议真实 E2E 排障时开启",
-            "type": "number",
-            "defaultValue": 0,
-            "currentValue": 0,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 42
-          },
-          {
-            "key": "max_auto_split_depth",
-            "label": "max_auto_split_depth（max auto split depth）",
-            "description": "失败后最大自动拆分次数 - 避免无限拆分 - 0 表示不自动拆分",
-            "type": "number",
-            "defaultValue": 2,
-            "currentValue": 2,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 43,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "max_auto_retry_attempts",
-            "label": "max_auto_retry_attempts（max auto retry attempts）",
-            "description": "失败后最大自动重试次数 - 每次重试会引入 LLM 分析失败原因，根据分析结果调整策略 - 超过此次数后放弃自动重试，通知用户介入 - 默认 3 次",
-            "type": "number",
-            "defaultValue": 3,
-            "currentValue": 3,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 44,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "subagent_board_limit",
-            "label": "subagent_board_limit（subagent board limit）",
-            "description": "status/startup 等轻量路径展示多少条子代理看板摘要；完整报告仍可读取详细记录。",
-            "type": "number",
-            "defaultValue": 5,
-            "currentValue": 5,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 50,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "subagent_workspace",
-            "label": "subagent_workspace（subagent workspace）",
-            "description": "子任务记录输出目录",
-            "type": "path",
-            "defaultValue": "data/subagents",
-            "currentValue": "data/subagents",
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": true,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
             "order": 51
           },
           {
-            "key": "subagent_allowed_tools",
-            "label": "subagent_allowed_tools（subagent allowed tools）",
-            "description": "子代理 runner 默认工具白名单： - [] 表示自动：让角色模板、任务目标和 LLM/调度器共同判断工具。 - 用户一般不需要填；只有特别受限的测试环境才建议显式填工具名。",
-            "type": "string_list",
-            "defaultValue": [],
-            "currentValue": [],
+            "key": "subagent_mode",
+            "label": "subagent_mode（subagent mode）",
+            "description": "子代理运行模式 - trusted_local_hardening: 默认本地硬化模式。保留系统安全底线，放宽流程型限制，优先把活干好。 - balanced: 后续用于更保守的日常默认。 - strict: 后续用于外部用户/高风险环境。",
+            "type": "string",
+            "defaultValue": "trusted_local_hardening",
+            "currentValue": "trusted_local_hardening",
             "category": "subagent",
             "categoryLabel": "子代理配置",
             "advanced": false,
@@ -1629,9 +2394,26 @@
             "order": 52
           },
           {
+            "key": "subagent_workspace",
+            "label": "subagent_workspace（subagent workspace）",
+            "description": "子任务记录输出目录。",
+            "type": "path",
+            "defaultValue": "data/subagents",
+            "currentValue": "data/subagents",
+            "category": "subagent",
+            "categoryLabel": "子代理配置",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
+            "requiresUnlock": true,
+            "source": "agent_config.yaml",
+            "order": 54
+          },
+          {
             "key": "subagent_role_template_dirs",
             "label": "subagent_role_template_dirs（subagent role template dirs）",
-            "description": "子代理角色模板目录： - [] 表示自动使用工作区 .agent/subagents/roles（如果存在）+ 内置模板。 - 用户要新增角色模板时，优先放到 .agent/subagents/roles/*.json。",
+            "description": "子代理角色模板目录。 - [] 表示自动使用工作区 .agent/subagents/roles（如果存在）+ 内置模板。 - 模板只影响职责和检查重点，不应让代理失去基础读写/汇报能力。",
             "type": "string_list",
             "defaultValue": [],
             "currentValue": [],
@@ -1643,58 +2425,15 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 53
-          },
-          {
-            "key": "subagent_workflow_mode",
-            "label": "subagent_workflow_mode（subagent workflow mode）",
-            "description": "Subagent Workflow 工作流开关（第一阶段配置骨架）： - auto: 由主代理按任务复杂度自动选择是否套用工作流模板。 - manual: 只在用户或上层调度明确指定时使用工作流。 - off: 关闭工作流选择与模板套用，只保留普通 subagent 能力。",
-            "type": "choice",
-            "defaultValue": "auto",
-            "currentValue": "auto",
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": false,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 54,
-            "choices": [
-              "auto",
-              "manual",
-              "off"
-            ]
-          },
-          {
-            "key": "subagent_builtin_workflows",
-            "label": "subagent_builtin_workflows（subagent builtin workflows）",
-            "description": "是否启用内置工作流模板；关闭后只会考虑用户模板目录。",
-            "type": "boolean",
-            "defaultValue": true,
-            "currentValue": true,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": false,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
             "order": 55
           },
           {
-            "key": "subagent_user_workflow_dirs",
-            "label": "subagent_user_workflow_dirs（subagent user workflow dirs）",
-            "description": "用户自定义工作流模板目录；可配置多个目录，按列表顺序扫描。",
-            "type": "string_list",
-            "defaultValue": [
-              ".agent/workflows/user"
-            ],
-            "currentValue": [
-              ".agent/workflows/user"
-            ],
+            "key": "subagent_debug_trace_level",
+            "label": "subagent_debug_trace_level（subagent debug trace level）",
+            "description": "子代理调试追踪等级。 - 0: 默认关闭 - 1-2: 记录生命周期、调度、验收等 refs-only 信息 - 3-5: 逐步增加 prompt/tool/response 预览或完整细节，建议只在真实 E2E 排障时开启",
+            "type": "number",
+            "defaultValue": 0,
+            "currentValue": 0,
             "category": "subagent",
             "categoryLabel": "子代理配置",
             "advanced": true,
@@ -1706,12 +2445,12 @@
             "order": 56
           },
           {
-            "key": "subagent_workflow_review_rounds",
-            "label": "subagent_workflow_review_rounds（subagent workflow review rounds）",
-            "description": "工作流结果复核轮数上限；0 表示不额外复核，默认保持保守。",
-            "type": "number",
-            "defaultValue": 1,
-            "currentValue": 1,
+            "key": "subagent_memory_retention_policy",
+            "label": "subagent_memory_retention_policy（subagent memory retention policy）",
+            "description": "子代理记忆保留策略： - subagent_memory_retention_policy 只是机器记录里的策略名，不做封闭枚举硬卡。 默认 parent_review_or_cleanup 表示：子代理结束前写总结，是否提升到父级/长期记忆由父级或用户复核。 也可以写 delete_after_days、keep_forever 或你自己的策略名，运行时会原样记录，方便后续清理器识别。 - subagent_memory_delete_after_days 只有清理器/后续维护任务会用；0 表示不按天数自动删除。 - subagent_destroy_summary_required 控制子代理销毁/归档前是否要求留下最终总结事实。",
+            "type": "string",
+            "defaultValue": "parent_review_or_cleanup",
+            "currentValue": "parent_review_or_cleanup",
             "category": "subagent",
             "categoryLabel": "子代理配置",
             "advanced": false,
@@ -1723,15 +2462,15 @@
             "order": 57
           },
           {
-            "key": "task_max_subagents",
-            "label": "task_max_subagents（task max subagents）",
-            "description": "任务规模策略（用户层）： - 这是你和主代理聊天时“最多开多少子代理/孙代理”的默认边界。 - 0 表示不设硬上限，让主代理按任务复杂度决定；如果用户在聊天里明确说“最多 20 个子代理”，那条任务可以覆盖这里。 - 这些是任务规模，不是模型调用并发。并发由下面 scheduler/runner 策略控制。",
+            "key": "subagent_memory_delete_after_days",
+            "label": "subagent_memory_delete_after_days（subagent memory delete after days）",
+            "description": "agent_config.yaml 中的 subagent_memory_delete_after_days 配置项。",
             "type": "number",
             "defaultValue": 0,
             "currentValue": 0,
             "category": "subagent",
             "categoryLabel": "子代理配置",
-            "advanced": true,
+            "advanced": false,
             "restartRequired": false,
             "riskLevel": "medium",
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
@@ -1739,205 +2478,15 @@
             "source": "agent_config.yaml",
             "order": 58,
             "min": 0,
-            "max": 1000000
+            "max": 3650
           },
           {
-            "key": "task_max_grandchildren",
-            "label": "task_max_grandchildren（task max grandchildren）",
-            "description": "agent_config.yaml 中的 task_max_grandchildren 配置项。",
-            "type": "number",
-            "defaultValue": 0,
-            "currentValue": 0,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 59,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "subagent_spawn_default_count",
-            "label": "subagent_spawn_default_count（subagent spawn default count）",
-            "description": "子代理运行默认值： - 这些是 CLI 和内部调度的默认数量/摘要长度，不是用户需求的硬规则。 - 0 通常表示不限制或交给上层决策；具体含义以旁边注释为准。",
-            "type": "number",
-            "defaultValue": 3,
-            "currentValue": 3,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": false,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 60,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "subagent_cli_default_limit",
-            "label": "subagent_cli_default_limit（subagent cli default limit）",
-            "description": "agent_config.yaml 中的 subagent_cli_default_limit 配置项。",
-            "type": "number",
-            "defaultValue": 20,
-            "currentValue": 20,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 61,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "subagent_probe_default_limit",
-            "label": "subagent_probe_default_limit（subagent probe default limit）",
-            "description": "agent_config.yaml 中的 subagent_probe_default_limit 配置项。",
-            "type": "number",
-            "defaultValue": 20,
-            "currentValue": 20,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 62,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "subagent_hierarchy_default_max_depth",
-            "label": "subagent_hierarchy_default_max_depth（subagent hierarchy default max depth）",
-            "description": "agent_config.yaml 中的 subagent_hierarchy_default_max_depth 配置项。",
-            "type": "number",
-            "defaultValue": 2,
-            "currentValue": 2,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 63,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "subagent_hierarchy_recovery_max_nodes",
-            "label": "subagent_hierarchy_recovery_max_nodes（subagent hierarchy recovery max nodes）",
-            "description": "agent_config.yaml 中的 subagent_hierarchy_recovery_max_nodes 配置项。",
-            "type": "number",
-            "defaultValue": 200,
-            "currentValue": 200,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 64,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "subagent_hierarchy_max_children_per_tool_call",
-            "label": "subagent_hierarchy_max_children_per_tool_call（subagent hierarchy max children per tool call）",
-            "description": "agent_config.yaml 中的 subagent_hierarchy_max_children_per_tool_call 配置项。",
-            "type": "number",
-            "defaultValue": 2,
-            "currentValue": 2,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 65,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "subagent_descendant_scan_limit",
-            "label": "subagent_descendant_scan_limit（subagent descendant scan limit）",
-            "description": "agent_config.yaml 中的 subagent_descendant_scan_limit 配置项。",
-            "type": "number",
-            "defaultValue": 128,
-            "currentValue": 128,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 66,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "subagent_context_summary_inline_json_chars",
-            "label": "subagent_context_summary_inline_json_chars（subagent context summary inline json chars）",
-            "description": "agent_config.yaml 中的 subagent_context_summary_inline_json_chars 配置项。",
-            "type": "number",
-            "defaultValue": 900,
-            "currentValue": 900,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": false,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 67,
-            "min": 0,
-            "max": 2000000
-          },
-          {
-            "key": "subagent_context_summary_inline_text_chars",
-            "label": "subagent_context_summary_inline_text_chars（subagent context summary inline text chars）",
-            "description": "agent_config.yaml 中的 subagent_context_summary_inline_text_chars 配置项。",
-            "type": "number",
-            "defaultValue": 500,
-            "currentValue": 500,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": false,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 68,
-            "min": 0,
-            "max": 2000000
-          },
-          {
-            "key": "acceptance_execute_tests",
-            "label": "acceptance_execute_tests（acceptance execute tests）",
-            "description": "父级验收是否默认真实执行 runner 输出里的 tests： - false: 保守默认，只检查 runner 填写的 tests 字段和证据，不自动跑命令。 - true: `subagents-acceptance` 默认执行 allowlist 内的 command/file/content 验证。 - 单次命令可用 `--execute-tests` / `--no-execute-tests` 覆盖这里。",
+            "key": "subagent_destroy_summary_required",
+            "label": "subagent_destroy_summary_required（subagent destroy summary required）",
+            "description": "agent_config.yaml 中的 subagent_destroy_summary_required 配置项。",
             "type": "boolean",
-            "defaultValue": false,
-            "currentValue": false,
+            "defaultValue": true,
+            "currentValue": true,
             "category": "subagent",
             "categoryLabel": "子代理配置",
             "advanced": false,
@@ -1946,26 +2495,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 69
-          },
-          {
-            "key": "acceptance_test_timeout_seconds",
-            "label": "acceptance_test_timeout_seconds（acceptance test timeout seconds）",
-            "description": "父级验收真实执行 tests 时的单条测试超时秒数： - 1 到 300 秒；超过范围会回退默认值。 - `subagents-acceptance --test-timeout` 和 `subagents-tests --timeout` 可覆盖单次调用。",
-            "type": "number",
-            "defaultValue": 120,
-            "currentValue": 120,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 70,
-            "min": 0,
-            "max": 3600
+            "order": 59
           }
         ]
       },
@@ -1976,157 +2506,35 @@
         "order": 6,
         "fields": [
           {
-            "key": "scheduler_mode",
-            "label": "scheduler_mode（scheduler mode）",
-            "description": "调度模式（scheduler_mode）： - \"auto\": 默认值。未来 gateway/调度器会自动判断怎么派 runner、怎么排队、怎么处理卡住任务。 - \"manual\": 预留给“只在用户或上层 workflow 明确要求时才调度”的模式。 - \"off\" / \"none\" / \"disabled\": 预留给“关闭自动调度”的模式。 - 当前状态：这个字段已经作为配置位和前端字段保留，但核心调度暂时还没有真正读取它； 所以现在改 scheduler_mode 不会直接改变 runner 行为。当前真正生效的是下面几个字段： runner_concurrency、runner_start_rate、runner_timeout_seconds、runner_failure_policy。 - 给用户的建议：普通使用保持 \"auto\"；等 gateway 调度策略正式接入后，再按 UI/文档选择 manual/off。",
+            "key": "runner_failure_policy",
+            "label": "runner_failure_policy（runner failure policy）",
+            "description": "runner_failure_policy 控制 runner 临时失败后的总尝试次数： - \"auto\": 当前等价于最多 2 次，也就是首次失败后下一轮 dispatch 再试一次 - \"off\" / \"none\" / \"disabled\": 不自动重试，总尝试次数为 1 - \"3\" 这类数字字符串：最多尝试 3 次 只重试 runner_error、structured_output_parse_error、tool_result_missing、provider_timeout 这类“执行通道/格式/临时工具结果/模型服务临时超时”问题；能力缺口、验收失败、通道 BROKEN 不自动重跑。",
             "type": "choice",
             "defaultValue": "auto",
             "currentValue": "auto",
             "category": "gateway",
             "categoryLabel": "Gateway / 调度",
             "advanced": false,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 71,
-            "choices": [
-              "auto",
-              "manual",
-              "off"
-            ]
-          },
-          {
-            "key": "runner_concurrency",
-            "label": "runner_concurrency（runner concurrency）",
-            "description": "agent_config.yaml 中的 runner_concurrency 配置项。",
-            "type": "choice",
-            "defaultValue": "auto",
-            "currentValue": "auto",
-            "category": "gateway",
-            "categoryLabel": "Gateway / 调度",
-            "advanced": false,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 72,
-            "choices": [
-              "auto"
-            ]
-          },
-          {
-            "key": "runner_start_rate",
-            "label": "runner_start_rate（runner start rate）",
-            "description": "agent_config.yaml 中的 runner_start_rate 配置项。",
-            "type": "choice",
-            "defaultValue": "auto",
-            "currentValue": "auto",
-            "category": "gateway",
-            "categoryLabel": "Gateway / 调度",
-            "advanced": false,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 73,
-            "choices": [
-              "auto"
-            ]
-          },
-          {
-            "key": "runner_timeout_seconds",
-            "label": "runner_timeout_seconds（runner timeout seconds）",
-            "description": "Runner 超时开关和动态超时参数；这三项必须放一起看。 runner_timeout_seconds 表示 runner 超时模式：\"off\"/0 是不限制；\"auto\" 是启用动态超时；数字字符串表示固定秒数。",
-            "type": "choice",
-            "defaultValue": "off",
-            "currentValue": "off",
-            "category": "gateway",
-            "categoryLabel": "Gateway / 调度",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 74,
-            "choices": [
-              "off",
-              "auto"
-            ],
-            "min": 0,
-            "max": 3600
-          },
-          {
-            "key": "dynamic_timeout_min",
-            "label": "dynamic_timeout_min（dynamic timeout min）",
-            "description": "dynamic_timeout_min 表示动态超时下限：auto 模式算出来再短，也至少给这么多秒，避免小任务被误杀。",
-            "type": "number",
-            "defaultValue": 30,
-            "currentValue": 30,
-            "category": "gateway",
-            "categoryLabel": "Gateway / 调度",
-            "advanced": true,
             "restartRequired": false,
             "riskLevel": "low",
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
             "order": 75,
-            "unit": "秒",
-            "min": 0,
-            "max": 3600
+            "choices": [
+              "auto",
+              "off",
+              "none",
+              "disabled"
+            ]
           },
           {
-            "key": "dynamic_timeout_max",
-            "label": "dynamic_timeout_max（dynamic timeout max）",
-            "description": "dynamic_timeout_max 表示动态超时上限：auto 模式算出来再长，也最多给这么多秒，避免子代理长期卡住。",
+            "key": "runner_auto_concurrency",
+            "label": "runner_auto_concurrency（runner auto concurrency）",
+            "description": "runner_concurrency 为 auto 时的并发上限。 - 这个值适用于当前 dispatch 批次里要跑的 runner：子代理、孙代理或更深层代理都走同一套 runner。 - 0 表示 auto 不额外设上限，直接按本批 job 数跑；一般本地机器建议 4-12。",
             "type": "number",
-            "defaultValue": 600,
-            "currentValue": 600,
-            "category": "gateway",
-            "categoryLabel": "Gateway / 调度",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 76,
-            "unit": "秒",
-            "min": 0,
-            "max": 3600
-          },
-          {
-            "key": "dynamic_timeout_safety_margin",
-            "label": "dynamic_timeout_safety_margin（dynamic timeout safety margin）",
-            "description": "动态超时估算辅助参数；这些字段服务于 runner_timeout_seconds=\"auto\"。 dynamic_timeout_safety_margin 表示安全倍率：实际超时 = 预估耗时 * 这个倍率。",
-            "type": "number",
-            "defaultValue": 2,
-            "currentValue": 2,
-            "category": "gateway",
-            "categoryLabel": "Gateway / 调度",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 77,
-            "unit": "倍",
-            "min": 0,
-            "max": 3600
-          },
-          {
-            "key": "runner_failure_policy",
-            "label": "runner_failure_policy（runner failure policy）",
-            "description": "runner_failure_policy 控制 runner 临时失败后的总尝试次数： - \"auto\": 当前等价于最多 2 次，也就是首次失败后下一轮 dispatch 再试一次 - \"off\" / \"none\" / \"disabled\": 不自动重试，总尝试次数为 1 - \"3\" 这类数字字符串：最多尝试 3 次 第一版只重试 runner_error、structured_output_parse_error、tool_result_missing 这类“执行通道/格式/临时工具结果”问题；能力缺口、验收失败、通道 BROKEN 不自动重跑。",
-            "type": "choice",
-            "defaultValue": "auto",
-            "currentValue": "auto",
+            "defaultValue": 8,
+            "currentValue": 8,
             "category": "gateway",
             "categoryLabel": "Gateway / 调度",
             "advanced": false,
@@ -2135,13 +2543,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 80,
-            "choices": [
-              "auto",
-              "off",
-              "none",
-              "disabled"
-            ]
+            "order": 76
           },
           {
             "key": "gateway_workspace",
@@ -2158,7 +2560,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 81
+            "order": 77
           },
           {
             "key": "gateway_heartbeat_interval",
@@ -2175,7 +2577,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 82,
+            "order": 78,
             "unit": "秒"
           },
           {
@@ -2193,7 +2595,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 83,
+            "order": 79,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -2213,7 +2615,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 84,
+            "order": 80,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -2233,7 +2635,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 85,
+            "order": 81,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -2253,7 +2655,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 86
+            "order": 82
           },
           {
             "key": "gateway_request_workers",
@@ -2270,7 +2672,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 87
+            "order": 83
           },
           {
             "key": "gateway_processing_timeout_seconds",
@@ -2287,7 +2689,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 88,
+            "order": 84,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -2307,7 +2709,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 89,
+            "order": 85,
             "min": 0,
             "max": 1000000
           },
@@ -2326,7 +2728,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 90,
+            "order": 86,
             "min": 0,
             "max": 3600
           },
@@ -2345,7 +2747,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 91,
+            "order": 87,
             "min": 0,
             "max": 3600
           },
@@ -2364,7 +2766,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 92,
+            "order": 88,
             "min": 0,
             "max": 3600
           },
@@ -2383,7 +2785,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 93,
+            "order": 89,
             "min": 0,
             "max": 3600
           },
@@ -2402,7 +2804,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 94,
+            "order": 90,
             "min": 0,
             "max": 65535
           },
@@ -2421,7 +2823,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 111
+            "order": 126
           },
           {
             "key": "daemon_apply",
@@ -2438,7 +2840,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 112
+            "order": 127
           },
           {
             "key": "daemon_execute_runners",
@@ -2455,7 +2857,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 113
+            "order": 128
           },
           {
             "key": "daemon_interval",
@@ -2472,7 +2874,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 114
+            "order": 129
           },
           {
             "key": "daemon_max_runners",
@@ -2489,7 +2891,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 115,
+            "order": 130,
             "choices": [
               "auto"
             ],
@@ -2511,7 +2913,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 116,
+            "order": 131,
             "min": 0,
             "max": 1000000
           },
@@ -2530,7 +2932,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 117,
+            "order": 132,
             "min": 0,
             "max": 1000000
           },
@@ -2549,7 +2951,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 118,
+            "order": 133,
             "min": 0,
             "max": 1000000
           },
@@ -2568,7 +2970,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 119
+            "order": 134
           },
           {
             "key": "daemon_reviewer",
@@ -2585,7 +2987,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 120,
+            "order": 135,
             "choices": [
               "parent-daemon"
             ]
@@ -2605,7 +3007,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 121
+            "order": 136
           },
           {
             "key": "lease_heartbeat_interval_seconds",
@@ -2622,7 +3024,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 122,
+            "order": 137,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -2642,7 +3044,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 123,
+            "order": 138,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -2662,7 +3064,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 179,
+            "order": 201,
             "min": 0,
             "max": 1000000
           },
@@ -2681,7 +3083,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 180
+            "order": 202
           },
           {
             "key": "dispatch_idle_interval",
@@ -2698,7 +3100,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 181
+            "order": 203
           },
           {
             "key": "dispatch_default_max_runners",
@@ -2715,7 +3117,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 182,
+            "order": 204,
             "min": 0,
             "max": 1000000
           },
@@ -2734,7 +3136,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 183,
+            "order": 205,
             "min": 0,
             "max": 1000000
           },
@@ -2753,7 +3155,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 184
+            "order": 206
           },
           {
             "key": "dispatch_pending_runner_scan_limit",
@@ -2770,7 +3172,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 185,
+            "order": 207,
             "min": 0,
             "max": 1000000
           }
@@ -2797,7 +3199,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 95
+            "order": 91
           },
           {
             "key": "feishu_app_id",
@@ -2814,7 +3216,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 96
+            "order": 92
           },
           {
             "key": "feishu_app_secret",
@@ -2831,7 +3233,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 97
+            "order": 93
           },
           {
             "key": "feishu_verification_token",
@@ -2848,7 +3250,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 98
+            "order": 94
           },
           {
             "key": "feishu_encrypt_key",
@@ -2865,7 +3267,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 99
+            "order": 95
           },
           {
             "key": "feishu_callback_port",
@@ -2882,7 +3284,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 100,
+            "order": 96,
             "min": 0,
             "max": 65535
           },
@@ -2901,7 +3303,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 101
+            "order": 97
           },
           {
             "key": "qq_app_secret",
@@ -2918,7 +3320,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 102
+            "order": 98
           },
           {
             "key": "session_workspace",
@@ -2960,7 +3362,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 45
+            "order": 60
           },
           {
             "key": "user_data_root",
@@ -2977,7 +3379,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 46
+            "order": 61
           },
           {
             "key": "auth_enabled",
@@ -2994,7 +3396,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 47
+            "order": 62
           },
           {
             "key": "admin_user_id",
@@ -3011,7 +3413,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 48
+            "order": 63
           },
           {
             "key": "notification_enabled",
@@ -3028,7 +3430,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 104
+            "order": 119
           },
           {
             "key": "notification_store_path",
@@ -3045,7 +3447,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 105
+            "order": 120
           },
           {
             "key": "notification_channel_timeout_seconds",
@@ -3062,7 +3464,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 106,
+            "order": 121,
             "min": 0,
             "max": 3600
           },
@@ -3081,7 +3483,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 107
+            "order": 122
           },
           {
             "key": "audit_enabled",
@@ -3098,7 +3500,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 109
+            "order": 124
           },
           {
             "key": "audit_log_path",
@@ -3115,7 +3517,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 110
+            "order": 125
           },
           {
             "key": "watchdog_enabled",
@@ -3132,7 +3534,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 186
+            "order": 208
           },
           {
             "key": "watchdog_interval",
@@ -3149,7 +3551,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 187
+            "order": 209
           },
           {
             "key": "watchdog_max_restarts",
@@ -3166,7 +3568,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 188,
+            "order": 210,
             "min": 0,
             "max": 1000000
           },
@@ -3185,7 +3587,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 189
+            "order": 211
           }
         ]
       },
@@ -3210,7 +3612,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 158,
+            "order": 180,
             "min": 0,
             "max": 1000000
           },
@@ -3229,7 +3631,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 159,
+            "order": 181,
             "min": 0,
             "max": 2000000
           },
@@ -3248,7 +3650,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 160,
+            "order": 182,
             "min": 0,
             "max": 2000000
           },
@@ -3267,7 +3669,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 161
+            "order": 183
           },
           {
             "key": "chat_collapse_preview_chars",
@@ -3284,7 +3686,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 162,
+            "order": 184,
             "min": 0,
             "max": 2000000
           },
@@ -3303,7 +3705,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 163,
+            "order": 185,
             "min": 0,
             "max": 2000000
           },
@@ -3322,7 +3724,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 164
+            "order": 186
           },
           {
             "key": "cli_status_limit",
@@ -3339,7 +3741,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 165,
+            "order": 187,
             "min": 0,
             "max": 1000000
           },
@@ -3358,7 +3760,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 166,
+            "order": 188,
             "min": 0,
             "max": 1000000
           },
@@ -3377,7 +3779,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 167,
+            "order": 189,
             "min": 0,
             "max": 1000000
           },
@@ -3396,7 +3798,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 168,
+            "order": 190,
             "min": 0,
             "max": 1000000
           },
@@ -3415,7 +3817,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 169,
+            "order": 191,
             "min": 0,
             "max": 1000000
           },
@@ -3434,7 +3836,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 170,
+            "order": 192,
             "min": 0,
             "max": 1000000
           },
@@ -3453,7 +3855,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 171,
+            "order": 193,
             "min": 0,
             "max": 1000000
           },
@@ -3472,7 +3874,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 172,
+            "order": 194,
             "min": 0,
             "max": 1000000
           },
@@ -3491,7 +3893,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 173,
+            "order": 195,
             "min": 0,
             "max": 2000000
           },
@@ -3510,7 +3912,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 174,
+            "order": 196,
             "min": 0,
             "max": 1000000
           },
@@ -3529,7 +3931,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 175,
+            "order": 197,
             "min": 0,
             "max": 1000000
           },
@@ -3548,7 +3950,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 176,
+            "order": 198,
             "min": 0,
             "max": 1000000
           },
@@ -3567,7 +3969,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 177,
+            "order": 199,
             "min": 0,
             "max": 1000000
           },
@@ -3586,7 +3988,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 178,
+            "order": 200,
             "unit": "天",
             "min": 0,
             "max": 3650
@@ -3602,7 +4004,7 @@
           {
             "key": "enable_capability_routing",
             "label": "enable_capability_routing（enable capability routing）",
-            "description": "说明： - 这里放 skill / tool / 子代理授权 / 能力上抛相关参数 - 不和 agent_config.yaml 混在一起，避免主配置越来越臃肿 - 所有数字限制项里，0 都表示“不限制” - 当前主要是为后续 Capability Router 预留，默认不会改变现有 chat 行为 是否启用能力路由 - false: 默认关闭，子代理仍按现有逻辑工作 - true: 后续允许子代理用 capability_request 向父代理申请 skill/tool 能力",
+            "description": "能力路由配置文件 说明： - 这里管的是“子代理/工具/skill 遇到不会做的事时，能不能向上级申请能力”。 - 普通用户不需要配置每个子代理能用什么工具；默认由系统和 LLM 根据任务判断。 - 旧版细碎限制项仍由代码默认值兼容读取，但不再放进默认配置文件里。 是否启用能力路由。 - true: 子代理遇到缺工具、缺 skill 或新问题时，可以写能力请求，让上级判断怎么补。 - false: 关闭能力申请链路，子代理只能使用创建时已有的能力。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
@@ -3617,274 +4019,9 @@
             "order": 1
           },
           {
-            "key": "capability_request_max_tokens",
-            "label": "capability_request_max_tokens（capability request max tokens）",
-            "description": "子代理能力请求的最大 token 数 - 用来限制 problem / needed_capability / tried / evidence 等描述总长度 - 默认 600，避免子代理把失败过程无限展开 - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 600,
-            "currentValue": 600,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 2,
-            "min": 0,
-            "max": 200000
-          },
-          {
-            "key": "capability_escalation_max_hops",
-            "label": "capability_escalation_max_hops（capability escalation max hops）",
-            "description": "能力请求最多向上抛几层 - 用来避免“子代理 -> 父代理 -> 爷代理 -> 更上层”无限上抛 - 默认 4 层，通常足够覆盖子代理、孙子代理、曾孙子代理场景 - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 4,
-            "currentValue": 4,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 3,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "capability_candidate_limit",
-            "label": "capability_candidate_limit（capability candidate limit）",
-            "description": "父代理每次最多返回多少个候选 skill/tool card - 默认 5，避免一次下发太多候选能力导致 token 膨胀和选择混乱 - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 7,
-            "currentValue": 7,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 4,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "capability_bundle_max_tokens",
-            "label": "capability_bundle_max_tokens（capability bundle max tokens）",
-            "description": "一个子代理本轮拿到的能力包最大 token 数 - 能力包包括 skill card、tool card、授权说明和必要约束 - 默认 3000，避免子代理上下文被能力说明淹没 - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 10000,
-            "currentValue": 10000,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 5,
-            "min": 0,
-            "max": 200000
-          },
-          {
-            "key": "capability_fallback_max_attempts",
-            "label": "capability_fallback_max_attempts（capability fallback max attempts）",
-            "description": "同一个能力失败后最多尝试几个替代工具 - 例如 web_search_A 失败后，可以继续尝试 web_search_B / fetch_url 等 - 默认 3，避免同类工具无限重试 - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 5,
-            "currentValue": 5,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 6,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "subagent_heartbeat_timeout",
-            "label": "subagent_heartbeat_timeout（subagent heartbeat timeout）",
-            "description": "子代理心跳超时秒数 - 超过这个时间没有更新 heartbeat，父代理应视为需要 due-check - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 180,
-            "currentValue": 180,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 7,
-            "unit": "秒",
-            "min": 0,
-            "max": 3600
-          },
-          {
-            "key": "subagent_run_timeout",
-            "label": "subagent_run_timeout（subagent run timeout）",
-            "description": "子代理单次运行默认超时秒数 - 用来避免子代理长时间卡在工具调用或写文件上没人接管 - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 900,
-            "currentValue": 900,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 8,
-            "unit": "秒",
-            "min": 0,
-            "max": 3600
-          },
-          {
-            "key": "subagent_due_check_interval",
-            "label": "subagent_due_check_interval（subagent due check interval）",
-            "description": "父代理 due-check 间隔秒数 - 用来提醒父代理定期查看实际产出，而不是 spawn 后放养 - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 120,
-            "currentValue": 120,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 9,
-            "unit": "秒"
-          },
-          {
-            "key": "subagent_min_evidence_for_done",
-            "label": "subagent_min_evidence_for_done（subagent min evidence for done）",
-            "description": "子代理标记 DONE 前最少需要多少条验收证据 - 默认 1，避免纯口头“完成了” - 设为 0 表示不要求证据",
-            "type": "number",
-            "defaultValue": 1,
-            "currentValue": 1,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 10
-          },
-          {
-            "key": "capability_request_max_tried_items",
-            "label": "capability_request_max_tried_items（capability request max tried items）",
-            "description": "子代理一次请求里最多列多少条“已尝试” - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 0,
-            "currentValue": 0,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 11,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "capability_request_max_evidence_items",
-            "label": "capability_request_max_evidence_items（capability request max evidence items）",
-            "description": "子代理一次请求里最多带多少条证据或错误摘要 - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 0,
-            "currentValue": 0,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 12,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "capability_request_max_per_task",
-            "label": "capability_request_max_per_task（capability request max per task）",
-            "description": "单个任务最多发起多少次能力请求 - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 0,
-            "currentValue": 0,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 13,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "capability_grant_max_skills",
-            "label": "capability_grant_max_skills（capability grant max skills）",
-            "description": "一次最多给下级挂多少个 skill - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 0,
-            "currentValue": 0,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 14,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "capability_grant_max_tools",
-            "label": "capability_grant_max_tools（capability grant max tools）",
-            "description": "一次最多给下级挂多少个 tool - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 0,
-            "currentValue": 0,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 15,
-            "min": 0,
-            "max": 1000000
-          },
-          {
             "key": "capability_grant_expires_after_task",
             "label": "capability_grant_expires_after_task（capability grant expires after task）",
-            "description": "下发能力是否默认只在当前任务有效 - true: 默认推荐，任务结束后收回临时授权 - false: 后续可以让授权跨任务保留，但需要更强的审计和用户确认",
+            "description": "下发能力是否只在当前任务有效。 - true: 推荐默认值，任务结束后收回临时授权，避免污染后续任务。 - false: 允许授权跨任务保留，后续需要更强审计。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
@@ -3896,64 +4033,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 16
-          },
-          {
-            "key": "skill_card_max_tokens",
-            "label": "skill_card_max_tokens（skill card max tokens）",
-            "description": "单个 skill card 注入 prompt 的最大 token 数 - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 0,
-            "currentValue": 0,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 17,
-            "min": 0,
-            "max": 200000
-          },
-          {
-            "key": "tool_card_max_tokens",
-            "label": "tool_card_max_tokens（tool card max tokens）",
-            "description": "单个 tool card 注入 prompt 的最大 token 数 - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 0,
-            "currentValue": 0,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 18,
-            "min": 0,
-            "max": 200000
-          },
-          {
-            "key": "skill_body_max_tokens",
-            "label": "skill_body_max_tokens（skill body max tokens）",
-            "description": "真正加载 SKILL.md 正文时的最大 token 数 - 设为 0 表示不限制",
-            "type": "number",
-            "defaultValue": 0,
-            "currentValue": 0,
-            "category": "capability",
-            "categoryLabel": "能力路由",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "capability_config.yaml",
-            "order": 19,
-            "min": 0,
-            "max": 200000
+            "order": 2
           }
         ]
       },

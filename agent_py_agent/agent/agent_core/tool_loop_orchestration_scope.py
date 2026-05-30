@@ -6,12 +6,9 @@ from __future__ import annotations
 from ._runtime_params import ToolLoopExecuteParams
 
 _ORCHESTRATION_TOOLS = {
-    "capability_config_patch",
     "create_subagents",
     "dispatch_subagents",
     "schedule_child_subagents",
-    "subagent_board",
-    "subagent_message",
 }
 
 

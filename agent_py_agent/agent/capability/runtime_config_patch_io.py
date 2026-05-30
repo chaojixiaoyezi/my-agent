@@ -69,7 +69,7 @@ def _append_missing_yaml_fields(rendered: list[str], changes: dict[str, object],
     if missing:
         if rendered and rendered[-1].strip():
             rendered.append("")
-        rendered.append("# Managed by capability_config_patch")
+        rendered.append("# Managed by capability config patch service")
         for key in missing:
             rendered.append(f"{key}: {_serialize_yaml_value(changes[key])}")
     return "\n".join(rendered).rstrip() + "\n"
@@ -105,14 +105,14 @@ def _serialize_yaml_value(value: object) -> str:
 
 
 # LLM: _audit_payload keeps audit JSON shape stable for review and debugging.
-# 函数用途: 生成 capability_config_patch 审计记录，不包含大正文。
+# 函数用途: 生成 capability config patch 服务审计记录，不包含大正文。
 def _audit_payload(
     request: CapabilityConfigPatchRequest,
     result: CapabilityConfigPatchResult,
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
-        "kind": "capability_config_patch",
+        "kind": "capability_config_patch_service",
         "created_at": time.time(),
         "actor": request.actor,
         "reason": request.reason,

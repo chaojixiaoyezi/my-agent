@@ -221,6 +221,8 @@ def _workspace_context_text(builder: PromptBuilder) -> str:
         "如果链接是你从名称推断出来的，先用网页/HTTP 工具验证可访问，不能靠项目名猜仓库地址。",
         "- 做研究、汇总、对比、翻译、审计这类需要引用来源的工作时，给关键结论和表格行保留 source_ref；"
         "搜索片段只能当线索，最终依据优先来自官方页面、原始论文、仓库页面、接口返回或抓取归档。",
+        "- 做长任务、长报告、多文件整理或代码生成时，优先把已确认的阶段成果持续写进草稿、目标文件或阶段笔记；"
+        "不要连续大量读取后才第一次落盘。用户没有要求文件产物时，不要为了落盘强行写文件。",
         "- 相对路径默认相对 primary_workspace_root。",
         "- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。",
         "- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。",
@@ -252,6 +254,8 @@ def _is_task_local_context(value: object) -> bool:
     return str(value or "").strip().lower() in {"task_local", "control_plane"}
 
 
+# LLM: _is_isolated_scope keeps task-local and control-plane prompts out of owner-level context.
+# 函数用途: 判断 prompt scope 是否属于隔离范围，隔离范围不会注入主代理家目录和长期个人上下文。
 def _is_isolated_scope(value: object) -> bool:
     return str(value or "").strip().lower() in {"isolated", "task_local", "control_plane"}
 

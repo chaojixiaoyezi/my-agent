@@ -2,6 +2,10 @@ from __future__ import annotations
 
 """memory 配置安全解析测试。"""
 
+from agent_py_agent.agent.agent_core.runtime_context_compactor import (
+    compact_trigger_percent,
+    compact_trigger_tokens,
+)
 from agent_py_agent.agent.config import load_config
 from agent_py_agent.agent.memory_settings import MemorySettings, normalize_memory_settings
 
@@ -27,7 +31,6 @@ def test_memory_settings_accepts_boundary_values():
             "memory_resume_auto_context_enabled": "true",
             "memory_resume_auto_context_mode": "ALWAYS",
             "memory_resume_auto_context_limit": "1",
-            "memory_compact_auto_allow_apply": "true",
             "memory_compact_auto_trigger_percent": "70",
         }
     )
@@ -44,7 +47,6 @@ def test_memory_settings_accepts_boundary_values():
     assert settings.memory_resume_auto_context_enabled is True
     assert settings.memory_resume_auto_context_mode == "always"
     assert settings.memory_resume_auto_context_limit == 1
-    assert settings.memory_compact_auto_allow_apply is True
     assert settings.memory_compact_auto_trigger_percent == 70
 
 
@@ -62,7 +64,6 @@ def test_memory_settings_invalid_values_fall_back_with_warnings():
             "memory_resume_auto_context_enabled": "maybe",
             "memory_resume_auto_context_mode": "always; rm -rf /",
             "memory_resume_auto_context_limit": 999,
-            "memory_compact_auto_allow_apply": "maybe",
             "memory_compact_auto_trigger_percent": "abc",
         }
     )
@@ -80,7 +81,6 @@ def test_memory_settings_invalid_values_fall_back_with_warnings():
         "memory_resume_auto_context_enabled",
         "memory_resume_auto_context_mode",
         "memory_resume_auto_context_limit",
-        "memory_compact_auto_allow_apply",
         "memory_compact_auto_trigger_percent",
     }
     assert all(warning.fallback_value is not None for warning in warnings)
@@ -103,7 +103,6 @@ def test_load_config_normalizes_memory_values_and_keeps_warning_receipts(tmp_pat
     assert config.memory_resume_auto_context_enabled is True
     assert config.memory_resume_auto_context_mode == "trigger"
     assert config.memory_resume_auto_context_limit == 5
-    assert config.memory_compact_auto_allow_apply is True
     assert config.memory_compact_auto_trigger_percent == 50
     assert [item["field_name"] for item in config.memory_config_warnings] == [
         "memory_archive_level",
@@ -128,7 +127,6 @@ def _memory_config_yaml_lines() -> list[str]:
         "memory_resume_auto_context_enabled: yes",
         "memory_resume_auto_context_mode: trigger",
         "memory_resume_auto_context_limit: 0",
-        "memory_compact_auto_allow_apply: yes",
         "memory_compact_auto_trigger_percent: 40",
     ]
 
@@ -148,3 +146,12 @@ def test_memory_compact_trigger_percent_default_is_90():
 
     assert settings.memory_compact_auto_trigger_percent == 90
     assert warnings == []
+
+
+def test_runtime_compact_policy_percent_parser_matches_config_semantics():
+    assert compact_trigger_percent(None) == 90
+    assert compact_trigger_percent("abc") == 90
+    assert compact_trigger_percent(0) == 100
+    assert compact_trigger_percent(40) == 50
+    assert compact_trigger_percent(120) == 100
+    assert compact_trigger_tokens(200_000, 90) == 180_000

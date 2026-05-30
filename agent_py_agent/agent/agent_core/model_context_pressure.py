@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from ..backends import ModelResponse
 from ..memory_archive import estimate_tokens
-from .model_context_window import resolve_model_context_window_tokens
+from .runtime_context_compactor import runtime_compact_policy
 
 _CONTEXT_ERROR_MARKERS = (
     "context length",
@@ -26,12 +26,24 @@ _CONTEXT_ERROR_MARKERS = (
 def preflight_context_pressure_response(request: object) -> ModelResponse | None:
     if _uses_task_local_compact(request):
         return None
-    window = resolve_model_context_window_tokens(getattr(request, "agent", None))
+    policy = runtime_compact_policy(getattr(request, "agent", None), save=True)
+    window = policy.context_window_tokens
     if window <= 0:
         return None
     prompt = str(getattr(request, "prompt", "") or "")
     prompt_tokens = estimate_tokens(prompt)
-    threshold = _compact_trigger_tokens(getattr(request, "agent", None), window)
+    if overflow := _tool_context_window_overflow(request):
+        return context_pressure_response(
+            request,
+            source="preflight",
+            prompt_tokens=prompt_tokens,
+            detail=(
+                "tool_context_window_overflow=true "
+                f"omitted_count={overflow.get('omitted_count', 0)} "
+                f"original_chars={overflow.get('original_chars', 0)}"
+            ),
+        )
+    threshold = policy.trigger_tokens
     if prompt_tokens < threshold and prompt_tokens < window:
         return None
     return context_pressure_response(
@@ -47,6 +59,16 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
 def _uses_task_local_compact(request: object) -> bool:
     params = getattr(request, "params", None)
     return str(getattr(params, "context_scope", "") or "") == "task_local"
+
+
+# LLM: _tool_context_window_overflow lifts hidden live transcript trimming into the regular compact path.
+# 函数用途: 读取工具上下文窗口裁剪信号，让长任务不靠第二套隐形压缩长期跑下去。
+def _tool_context_window_overflow(request: object) -> dict[str, object]:
+    state = getattr(getattr(request, "params", None), "live_archive_state", None)
+    if not isinstance(state, dict):
+        return {}
+    value = state.pop("tool_context_window_overflow", {})
+    return value if isinstance(value, dict) else {}
 
 
 # LLM: context_pressure_response creates a model-like result that finalization can compact from.
@@ -80,31 +102,6 @@ def context_pressure_response(
 def is_context_window_error(exc: BaseException) -> bool:
     text = str(exc).lower()
     return any(marker in text for marker in _CONTEXT_ERROR_MARKERS)
-
-
-# LLM: _compact_trigger_tokens mirrors the user-facing compact percent in preflight.
-# 函数用途: 把百分比配置转换成 token 阈值；0 表示 100% 窗口。
-def _compact_trigger_tokens(agent: object, window: int) -> int:
-    percent = _compact_trigger_percent(
-        getattr(getattr(agent, "config", None), "memory_compact_auto_trigger_percent", 90)
-    )
-    return max(1, int(window * (percent / 100.0)))
-
-
-# LLM: _compact_trigger_percent bounds compact thresholds without relying on model-name maps.
-# 函数用途: 解析单个自动 compact 百分比配置；坏值回默认 90。
-def _compact_trigger_percent(value: object) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return 90
-    if parsed <= 0:
-        return 100
-    if parsed < 50:
-        return 50
-    if parsed > 100:
-        return 100
-    return parsed
 
 
 # LLM: _input_tokens chooses a caller-supplied estimate or recomputes from prompt text.

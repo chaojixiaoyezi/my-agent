@@ -12,7 +12,7 @@ def test_subagent_execution_context_includes_targeted_collaboration_requests(tmp
     child = agent.subagents.create_run(
         goal="响应已有协作请求，提交证据并更新请求状态。",
         agent_name="Responder B",
-        allowed_tools=["case_status", "submit_evidence", "update_collaboration_request"],
+        allowed_tools=["inspect_collaboration", "submit_collaboration_result", "update_collaboration"],
         acceptance_checks=["复用已有 case/request 完成响应"],
     )
     case = agent.collaboration_store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "需要 B 补证据", 'summary': "A 已打开 case，等待 B 响应。", 'created_by': "agent-a", 'now': 1.0})
@@ -34,7 +34,7 @@ def test_subagent_execution_context_includes_role_targeted_collaboration_request
         goal="响应已有协作请求。",
         agent_name="Responder",
         role="agent-b",
-        allowed_tools=["case_status", "submit_evidence", "update_collaboration_request"],
+        allowed_tools=["inspect_collaboration", "submit_collaboration_result", "update_collaboration"],
     )
     case = agent.collaboration_store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "需要 agent-b 补证据", 'created_by': "agent-a", 'now': 1.0})
     request = agent.collaboration_store.request_collaboration({'case_id': case.case_id, 'requester_agent_id': "agent-a", 'target_agent_ids': ("agent-b",), 'question': "请 agent-b 补一条证据引用。", 'now': 2.0})
@@ -55,7 +55,7 @@ def test_dispatch_candidates_include_done_agent_with_new_collaboration_request(t
         goal="等待协作请求。",
         agent_name="Agent-B",
         role="contributor",
-        allowed_tools=["case_status", "submit_evidence", "update_collaboration_request"],
+        allowed_tools=["inspect_collaboration", "submit_collaboration_result", "update_collaboration"],
     )
     child.status = "DONE"
     child.verification_status = "VERIFIED"
@@ -74,7 +74,7 @@ def test_created_subagent_registers_collaboration_capabilities_for_request_match
         goal="响应协作请求并提交证据。",
         agent_name="Agent-B",
         role="worker",
-        allowed_tools=["read_file", "search_text", "submit_evidence"],
+        allowed_tools=["read_file", "search_text", "submit_collaboration_result"],
         attributes={"capabilities": ["custom-source"]},
     )
     case = agent.collaboration_store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "按能力匹配响应者", 'created_by': "agent-a", 'now': 1.0})
@@ -102,7 +102,7 @@ def test_collaboration_overview_counts_ready_and_blocked_cases(tmp_path) -> None
     assert overview["readiness"]["blockers"][0]["case_id"] == blocked_case.case_id
 
 
-def test_case_status_includes_structured_rework_targets_for_blocked_and_missing_evidence(tmp_path) -> None:
+def test_inspect_collaboration_includes_structured_rework_targets_for_blocked_and_missing_evidence(tmp_path) -> None:
     store, case, blocked_request, missing_request = _rework_target_case(tmp_path)
 
     status = store.case_status(case.case_id)
@@ -114,10 +114,10 @@ def test_case_status_includes_structured_rework_targets_for_blocked_and_missing_
     assert by_request[missing_request.request_id]["reason"] == "missing_evidence"
     assert by_request[blocked_request.request_id]["suggested_actions"] == [
         "inspect_request_context",
-        "reroute_collaboration_request",
+        "update_collaboration",
         "try_alternate_source_or_params",
         "ask_requester_for_clarification_if_needed",
-        "resubmit_evidence_or_mark_true_blocker",
+        "submit_collaboration_result_or_mark_true_blocker",
     ]
 
 
@@ -125,11 +125,11 @@ def _overview_blocked_case(tmp_path):
     from agent_py_agent.agent.collaboration import CollaborationStore
 
     store = CollaborationStore(tmp_path / "collaboration")
-    open_case = store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "待响应 case", 'created_by': "agent-a", 'now': 1.0})
+    raise_collaboration = store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "待响应 case", 'created_by': "agent-a", 'now': 1.0})
     blocked_case = store.open_case({'thread_id': "thread-2", 'task_id': "task-2", 'title': "阻塞 case", 'created_by': "agent-b", 'now': 2.0})
     request = store.request_collaboration({'case_id': blocked_case.case_id, 'requester_agent_id': "agent-b", 'target_agent_ids': ("agent-c",), 'question': "请补充事实。", 'now': 3.0})
     store.update_request_status({'case_id': blocked_case.case_id, 'request_id': request.request_id, 'status': "blocked", 'actor_agent_id': "agent-c", 'summary': "来源不可用。", 'now': 4.0})
-    store.record_case_status({'case_id': open_case.case_id, 'status': "closed", 'actor_agent_id': "agent-a", 'summary': "无需继续协作。", 'now': 5.0})
+    store.record_case_status({'case_id': raise_collaboration.case_id, 'status': "closed", 'actor_agent_id': "agent-a", 'summary': "无需继续协作。", 'now': 5.0})
     return store, blocked_case
 
 
@@ -144,7 +144,7 @@ def _rework_target_case(tmp_path):
     return store, case, blocked, missing
 
 
-def test_case_status_rework_exposes_candidate_targets_from_structured_metadata(tmp_path) -> None:
+def test_inspect_collaboration_rework_exposes_candidate_targets_from_structured_metadata(tmp_path) -> None:
     from agent_py_agent.agent.collaboration import CollaborationStore
 
     store = CollaborationStore(tmp_path / "collaboration")
@@ -155,9 +155,9 @@ def test_case_status_rework_exposes_candidate_targets_from_structured_metadata(t
     target = store.case_status(case.case_id)["rework"]["targets"][0]
 
     assert target["candidate_target_agent_ids"] == ["source-b", "source-c"]
-    assert target["primary_tool"] == "reroute_collaboration_request"
+    assert target["primary_tool"] == "update_collaboration"
     assert target["suggested_actions"][0] == "inspect_request_context"
-    assert target["suggested_actions"][1] == "reroute_collaboration_request"
+    assert target["suggested_actions"][1] == "update_collaboration"
 
 
 def test_many_cases_and_requests_keep_overview_structural_and_bounded(tmp_path) -> None:

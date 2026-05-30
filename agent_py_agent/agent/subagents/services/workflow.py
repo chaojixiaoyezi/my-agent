@@ -32,18 +32,12 @@ _CODING_SUBAGENT_TOOLS = [
     "apply_patch",
     # LLM: Workflow children inherit generic write tools, not retired session/builder tools.
     # LLM: workflow children can report durable observations without being forced into dispatch.
-    "raise_observation",
-    "raise_main_event",
+    "raise_event",
     # LLM: workflow children can join generic collaboration cases without task-specific templates.
-    "raise_collaboration_event",
-    "open_case",
-    "request_collaboration",
-    "list_collaboration_requests",
-    "submit_evidence",
-    "update_collaboration_request",
-    "reroute_collaboration_request",
-    "update_case_status",
-    "case_status",
+    "raise_collaboration",
+    "inspect_collaboration",
+    "submit_collaboration_result",
+    "update_collaboration",
 ]
 _READ_ONLY_SUBAGENT_TOOLS = list(_CODING_SUBAGENT_TOOLS)
 

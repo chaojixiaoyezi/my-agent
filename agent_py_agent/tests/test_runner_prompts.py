@@ -170,7 +170,7 @@ class TestBuildSubagentRunnerPrompt:
             "run_responder",
             "根据收到的协作请求查找相关证据",
             task_dir="/tmp/task",
-            allowed_tools=["case_status", "submit_evidence", "update_collaboration_request"],
+            allowed_tools=["inspect_collaboration", "submit_collaboration_result", "update_collaboration"],
             context_bundle=_targeted_collaboration_bundle(),
         )
 

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 
@@ -32,19 +31,6 @@ class TestOrchestrationToolsSpec:
         assert "writer" in spec.parameter_details["role"]
         assert "最小必要信息" in spec.parameter_details["items"]
         assert "不要由 root 先读完所有正文再派工" in spec.parameter_details["items"]
-
-    def test_subagent_board_spec_defined(self):
-        """SubagentBoardTool 工具规格已定义。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import SubagentBoardTool
-
-        mock_agent = MagicMock()
-        mock_agent.subagents.workspace = Path("/tmp")
-
-        tool = SubagentBoardTool(mock_agent)
-        spec = tool.spec
-
-        assert spec.name == "subagent_board"
-        assert spec.category == "orchestration"
 
     def test_dispatch_subagents_spec_defined(self):
         """DispatchSubagentsTool 工具规格已定义。"""

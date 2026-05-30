@@ -69,7 +69,7 @@ def test_researcher_preset_gets_web_tools_by_default():
     result = CreateSubagentsTool(mock_agent).execute({
         "items": [
             {
-                "goal": "查 代码平台 项目并用 fetch_url 验证页面可访问。",
+                "goal": "查 代码平台 项目并用 web_fetch 验证页面可访问。",
                 "agent_name": "小傻妞-数据收集",
                 "role": "researcher",
                 "tool_preset": "researcher",
@@ -81,5 +81,3 @@ def test_researcher_preset_gets_web_tools_by_default():
     assert result.ok is True
     assert "web_search" in params.allowed_tools
     assert "web_fetch" in params.allowed_tools
-    assert "web_extract" in params.allowed_tools
-    assert "http_request" in params.allowed_tools

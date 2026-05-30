@@ -92,30 +92,34 @@ def _dispatch_next_action(
 ) -> dict[str, object]:
     run_ids = [task.id for task in tasks]
     if not run_ids:
-        return {"tool": "subagent_board", "reason": "create_subagents 没有可调度的新 run；请读取看板/状态后决定是否汇报或进入验收。", "params": {"limit": 20}}
+        return {
+            "tool": "inspect_agent_tree",
+            "reason": "create_subagents 没有可调度的新 run；请读取代理树状态后决定是否汇报或进入验收。",
+            "params": {},
+        }
     if bool(request_params.get("defer_start")):
         return {
             "tool": "dispatch_subagents",
             "reason": "defer_start=true，本次只建任务记录；需要开跑时再显式推进这些 run_id。",
-            "params": {"apply": True, "execute_runners": True, "run_ids": run_ids, "max_runners": len(run_ids)},
+            "params": {"dry_run": False, "run_ids": run_ids, "max_runners": len(run_ids)},
         }
     deferred = _string_items((auto_start or {}).get("deferred_run_ids"))
     if deferred:
         return {
-            "tool": "subagent_board",
+            "tool": "inspect_agent_tree",
             "reason": "部分子代理已自动启动；defer_start=true 的子代理会留在 dispatch_run_ids，等前置产物出现后再显式启动。",
-            "params": {"limit": max(20, len(run_ids))},
+            "params": {},
         }
     if (auto_start or {}).get("status") == "started":
         return {
-            "tool": "subagent_board",
+            "tool": "inspect_agent_tree",
             "reason": "create_subagents 已自动启动这些 run；下一步查看状态、读取产物或按需继续推进。",
-            "params": {"limit": max(20, len(run_ids))},
+            "params": {},
         }
     return {
         "tool": "dispatch_subagents",
         "reason": "create_subagents 自动启动未完成；如需继续推进、恢复或重跑，请调度这些 run_id。",
-        "params": {"apply": True, "execute_runners": True, "run_ids": run_ids, "max_runners": len(run_ids)},
+            "params": {"dry_run": False, "run_ids": run_ids, "max_runners": len(run_ids)},
     }
 
 

@@ -160,7 +160,7 @@ def _status_payload(row: dict[str, str]) -> dict[str, str]:
 
 
 def _dispatch_suggestion(available: list[str]) -> dict[str, object]:
-    return {"tool": "dispatch_subagents", "dry_run": False, "run_ids": available, "max_runners": len(available), "runner_instruction": "处理点名给自己的 collaboration request；查完后用 submit_evidence 提交命中、未命中、证据引用和限制，然后返回自己的原任务。"}
+    return {"tool": "dispatch_subagents", "dry_run": False, "run_ids": available, "max_runners": len(available), "runner_instruction": "处理点名给自己的 collaboration request；查完后用 submit_collaboration_result 提交命中、未命中、证据引用和限制，然后返回自己的原任务。"}
 
 
 def _loaded_task_identity(agent: SimpleAgent, agent_id: str, agent_name: str, agent_role: str) -> tuple[str, str]:

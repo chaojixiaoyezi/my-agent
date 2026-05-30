@@ -71,6 +71,7 @@ def _runtime_loop_params(
 ) -> RuntimeLoopParams:
     return RuntimeLoopParams(
         user_prompt=user_prompt,
+        root_user_prompt=params.root_user_prompt or user_prompt,
         memories=prepared.memories,
         runtime_injections=prepared.runtime_injections,
         routed_context=prepared.routed_context,
@@ -261,7 +262,7 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
 def _execute_runtime_compression(agent, params: RuntimeLoopParams) -> CompressionLoopResult:
     compression_svc = agent._get_services().compression
     compression_ctx = CompressionContext(
-        user_prompt=params.user_prompt,
+        user_prompt=params.root_user_prompt or params.user_prompt,
         memories=params.memories,
         runtime_injections=params.runtime_injections,
         routed_context=params.routed_context,
@@ -319,6 +320,7 @@ def _tool_loop_execute_params(seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParam
     archive_tool_calls: list[dict[str, object]] = []
     return ToolLoopExecuteParams(
         user_prompt=params.user_prompt,
+        root_user_prompt=params.root_user_prompt or params.user_prompt,
         memories=seed.memories,
         runtime_injections=params.runtime_injections,
         prompt_files=params.prompt_files,

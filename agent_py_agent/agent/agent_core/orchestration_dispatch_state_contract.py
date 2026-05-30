@@ -136,12 +136,12 @@ def _attach_state_next_action(state: dict[str, object]) -> None:
         state["suggested_tool_call"] = _dispatch_tool_call(dispatchable, execute_runners=True)
         return
     if running:
-        state["next_action"] = "wait_or_check_subagent_board"
-        state["suggested_tool_call"] = {"tool": "subagent_board", "limit": 20}
+        state["next_action"] = "wait_or_inspect_agent_tree"
+        state["suggested_tool_call"] = {"tool": "inspect_agent_tree"}
         return
     if missing:
-        state["next_action"] = "refresh_subagent_board_for_missing_run_ids"
-        state["suggested_tool_call"] = {"tool": "subagent_board", "limit": 20}
+        state["next_action"] = "refresh_agent_tree_for_missing_run_ids"
+        state["suggested_tool_call"] = {"tool": "inspect_agent_tree"}
         return
     state["next_action"] = "summarize_or_report_verified_runs"
 
@@ -151,8 +151,7 @@ def _attach_state_next_action(state: dict[str, object]) -> None:
 def _dispatch_tool_call(run_ids: list[str], *, execute_runners: bool) -> dict[str, object]:
     return {
         "tool": "dispatch_subagents",
-        "apply": True,
-        "execute_runners": execute_runners,
+        "dry_run": not execute_runners,
         "run_ids": _clean_ids(run_ids),
         "workflow_mode": "off",
     }

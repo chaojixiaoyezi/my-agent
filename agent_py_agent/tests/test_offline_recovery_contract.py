@@ -11,7 +11,7 @@ def test_retryable_tool_failure_allows_bounded_retry() -> None:
             {
                 "type": "tool_result",
                 "operation_id": "op-fetch",
-                "tool": "fetch_url",
+                "tool": "web_fetch",
                 "ok": False,
                 "error_code": "TOOL_TIMEOUT",
                 "retryable": True,
@@ -36,7 +36,7 @@ def test_retryable_tool_failure_zero_retry_limit_is_unlimited() -> None:
             {
                 "type": "tool_result",
                 "operation_id": "op-fetch",
-                "tool": "fetch_url",
+                "tool": "web_fetch",
                 "ok": False,
                 "error_code": "TOOL_TIMEOUT",
                 "retryable": True,

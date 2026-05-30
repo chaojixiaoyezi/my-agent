@@ -10,16 +10,13 @@ from .orchestration_summary_action_lines import top_level_action_lines
 from .tool_context_recovery_summary import strategy_preview
 
 _ORCHESTRATION_TOOLS = {
-    "case_status",
+    "inspect_collaboration",
     "create_subagents",
     "dispatch_subagents",
     "inspect_agent_tree",
-    "list_collaboration_requests",
-    "raise_collaboration_event",
-    "reroute_collaboration_request",
+    "raise_collaboration",
+    "update_collaboration",
     "schedule_child_subagents",
-    "subagent_board",
-    "update_collaboration_request",
 }
 _MAX_INLINE_JSON = 900
 _MAX_INLINE_TEXT = 500

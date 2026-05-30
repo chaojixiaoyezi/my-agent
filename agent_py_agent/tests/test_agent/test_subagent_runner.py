@@ -175,7 +175,7 @@ def test_subagent_runner_parses_structured_output():
         assert loaded.verification_status == "UNVERIFIED"
         assert loaded.failure_type == "capability_request"
         assert loaded.evidence[0].summary == "已确认需要接口健康检查"
-        assert loaded.capability_requests[0].needed_capability == "http_request"
+        assert loaded.capability_requests[0].needed_capability == "web_fetch"
         assert loaded.capability_requests[0].status == "OPEN"
         assert loaded.used_tools == []
         assert "write_file" not in loaded.used_tools

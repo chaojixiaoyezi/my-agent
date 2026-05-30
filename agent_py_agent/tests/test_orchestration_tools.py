@@ -25,90 +25,6 @@ def test_create_subagents_tool_spec_uses_template_index_not_full_prompt():
     assert "你是执行子代理" not in role_detail
     assert "不同工作切片不要用 count" in spec.parameter_details["count"]
 
-class TestSubagentBoardToolExecute:
-    """测试 SubagentBoardTool.execute() 方法。"""
-
-    def test_returns_board_summary(self):
-        """验证返回看板摘要。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import SubagentBoardTool
-
-        mock_agent = MagicMock()
-        mock_agent.subagents.workspace = Path("/tmp/workspace")
-
-        mock_board = MagicMock()
-        mock_board.summary = {"total": 5, "running": 2}
-        mock_item = MagicMock()
-        mock_item.id = "item_1"
-        mock_item.root_id = "item_1"
-        mock_item.parent_id = ""
-        mock_item.depth = 0
-        mock_item.agent_name = "root"
-        mock_item.role = "coordinator"
-        mock_item.goal = "目标"
-        mock_item.status = "RUNNING"
-        mock_item.verification_status = "PENDING"
-        mock_item.channel_status = "OK"
-        mock_item.risk_flags = []
-        mock_item.evidence_count = 0
-        mock_item.child_count = 0
-        mock_item.child_status_counts = {}
-        mock_item.open_request_count = 0
-        mock_item.open_gap_count = 0
-        mock_item.latest_summary = ""
-        mock_item.blocker_count = 0
-        mock_item.target_tokens = []
-        mock_item.task_dir = "/tmp/item"
-        mock_item.output_json = "/tmp/item/output.json"
-        mock_board.items = [mock_item]
-        mock_agent.subagents.write_board.return_value = mock_board
-
-        tool = SubagentBoardTool(mock_agent)
-        result = tool.execute({"limit": 10})
-
-        assert result.ok is True
-        assert "summary" in result.output
-
-    def test_status_filter_works(self):
-        """状态过滤参数生效。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import SubagentBoardTool
-
-        mock_agent = MagicMock()
-        mock_agent.subagents.workspace = Path("/tmp/workspace")
-
-        mock_item = MagicMock()
-        mock_item.id = "run_1"
-        mock_item.root_id = "run_1"
-        mock_item.parent_id = ""
-        mock_item.depth = 0
-        mock_item.agent_name = "root"
-        mock_item.role = "coordinator"
-        mock_item.goal = "测试"
-        mock_item.status = "RUNNING"
-        mock_item.verification_status = "PENDING"
-        mock_item.channel_status = "OK"
-        mock_item.risk_flags = []
-        mock_item.evidence_count = 0
-        mock_item.child_count = 0
-        mock_item.child_status_counts = {}
-        mock_item.open_request_count = 0
-        mock_item.open_gap_count = 0
-        mock_item.latest_summary = ""
-        mock_item.blocker_count = 0
-        mock_item.target_tokens = []
-        mock_item.task_dir = "/tmp"
-        mock_item.output_json = "/tmp/output.json"
-
-        mock_board = MagicMock()
-        mock_board.summary = {"total": 1}
-        mock_board.items = [mock_item]
-        mock_agent.subagents.write_board.return_value = mock_board
-
-        tool = SubagentBoardTool(mock_agent)
-        result = tool.execute({"status": "RUNNING", "limit": 10})
-
-        assert result.ok is True
-
-
 class TestInspectAgentTreeTool:
     """测试只读代理树查看工具。"""
 
@@ -159,13 +75,13 @@ class TestInspectAgentTreeTool:
         assert mock_agent._has_pending_work is True
 
 
-class TestRaiseMainEventTool:
+class TestRaiseEventTool:
     """测试子孙代理事件冒泡。"""
 
     # LLM: Descendant event tools should infer tree lineage from task_id, not require the model to copy ids.
     # 函数用途: 孙代理只传自己的 task_id 时，事件账本仍能记录 source/parent/root，供主代理快速定位子树。
     def test_infers_descendant_lineage_from_task_id(self, tmp_path):
-        from agent_py_agent.agent.agent_core.orchestration_tools import RaiseMainEventTool
+        from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
         from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
 
@@ -190,7 +106,7 @@ class TestRaiseMainEventTool:
             attributes={"conversation_thread_id": thread.thread_id},
         )
 
-        result = RaiseMainEventTool(agent).execute(
+        result = RaiseEventTool(agent).execute(
             {
                 "task_id": grandchild.id,
                 "event_type": "coordination_needed",
@@ -206,10 +122,10 @@ class TestRaiseMainEventTool:
 
 
 class TestDispatchSubagentsTool:
-    """测试 dispatch_subagents 的模型参数容错。"""
+    """测试 dispatch_subagents 的模型参数入口。"""
 
-    def test_top_level_subagent_ids_alias_runs_and_executes(self, tmp_path):
-        """真实模型常写 subagent_ids；顶层显式目标应按 run_ids 推进真实 runner。"""
+    def test_top_level_run_ids_runs_and_executes(self, tmp_path):
+        """顶层显式目标应按 run_ids 推进真实 runner。"""
         from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import (
             DispatchSubagentsTool,
         )
@@ -221,7 +137,7 @@ class TestDispatchSubagentsTool:
         report = SimpleNamespace(dry_run=False, summary={"ok": True}, records=[])
         agent.dispatch_subagents = MagicMock(return_value=report)
 
-        result = DispatchSubagentsTool(agent).execute({"subagent_ids": [task.id]})
+        result = DispatchSubagentsTool(agent).execute({"run_ids": [task.id]})
         params = agent.dispatch_subagents.call_args.kwargs["params"]
 
         assert result.ok is True
@@ -229,31 +145,6 @@ class TestDispatchSubagentsTool:
         assert params.apply is True
         assert params.execute_runners is True
         assert params.max_runners == 1
-
-    def test_top_level_items_run_id_alias_runs_and_executes(self, tmp_path):
-        """真实模型也会写 items:[{run_id:...}]；工具入口应归一成 include_run_ids。"""
-        from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import (
-            DispatchSubagentsTool,
-        )
-        from agent_py_agent.agent.config import AgentConfig
-        from agent_py_agent.agent.core import SimpleAgent
-
-        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-        first = agent.subagents.create_run(goal="child-a", thought="", plan=["do"], role="worker")
-        second = agent.subagents.create_run(goal="child-b", thought="", plan=["do"], role="worker")
-        report = SimpleNamespace(dry_run=False, summary={"ok": True}, records=[])
-        agent.dispatch_subagents = MagicMock(return_value=report)
-
-        result = DispatchSubagentsTool(agent).execute(
-            {"items": [{"run_id": first.id}, {"run_id": second.id}]}
-        )
-        params = agent.dispatch_subagents.call_args.kwargs["params"]
-
-        assert result.ok is True
-        assert params.include_run_ids == [first.id, second.id]
-        assert params.apply is True
-        assert params.execute_runners is True
-        assert params.max_runners == 2
 
     def test_model_facing_summary_renames_record_dry_run_count(self, tmp_path):
         """工具调用不是 dry-run 时，不把单条记录计数渲染成顶层 dry_run 语义。"""
@@ -305,7 +196,7 @@ class TestDispatchSubagentsTool:
             records=[record],
         ))
 
-        payload = json.loads(DispatchSubagentsTool(agent).execute({"apply": True}).output)
+        payload = json.loads(DispatchSubagentsTool(agent).execute({"dry_run": False}).output)
 
         assert payload["dry_run"] is False
         assert "dry_run" not in payload["records"][0]
@@ -323,7 +214,7 @@ class TestScheduleChildSubagentsTool:
         mock_agent._current_subagent_run_id = ""
         tool = ScheduleChildSubagentsTool(mock_agent)
 
-        result = tool.execute({"children": [{"goal": "leaf"}], "apply": True})
+        result = tool.execute({"children": [{"goal": "leaf"}], "dry_run": False})
 
         assert not result.ok
         assert "顶层派工请使用 create_subagents" in result.output
@@ -346,7 +237,7 @@ class TestScheduleChildSubagentsTool:
 
         result = tool.execute(
             {
-                "apply": True,
+                "dry_run": False,
                 "max_depth": 1,
                 "children": [{"goal": "leaf", "role": "leaf", "agent_name": "leaf"}],
             }
@@ -359,7 +250,7 @@ class TestScheduleChildSubagentsTool:
         assert leaf.depth == 2
 
     def test_runner_context_schedule_defaults_to_apply_direct_child(self, tmp_path):
-        """runner 内部省略 apply 时，应真实创建当前节点的直接 child。"""
+        """runner 内部省略 dry_run 时，应真实创建当前节点的直接 child。"""
         import json
 
         from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
@@ -379,8 +270,8 @@ class TestScheduleChildSubagentsTool:
         assert len(payload["created_run_ids"]) == 1
         assert agent.subagents.load(root.id).child_ids == payload["created_run_ids"]
 
-    def test_runner_context_schedule_accepts_orchestration_wrapper(self, tmp_path):
-        """真实模型常把 children 包进 orchestration；工具入口要展开后再调度。"""
+    def test_runner_context_schedule_accepts_flat_params(self, tmp_path):
+        """schedule_child_subagents 只接受顶层 children/dry_run 参数。"""
         import json
 
         from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
@@ -394,10 +285,8 @@ class TestScheduleChildSubagentsTool:
 
         result = tool.execute({
             "tool": "schedule_child_subagents",
-            "orchestration": {
-                "apply": True,
-                "children": [{"goal": "grandchild coordinator", "role": "coordinator", "agent_name": "页面组"}],
-            },
+            "dry_run": False,
+            "children": [{"goal": "grandchild coordinator", "role": "coordinator", "agent_name": "页面组"}],
         })
         payload = json.loads(result.output)
         child = agent.subagents.load(payload["created_run_ids"][0])

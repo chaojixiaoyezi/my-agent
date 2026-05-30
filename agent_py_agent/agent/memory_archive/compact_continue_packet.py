@@ -60,7 +60,7 @@ def build_compact_continue_packet(request: CompactContinuePacketRequest) -> dict
         "main_context_bundle": _main_context_bundle_payload(request.main_context_bundle),
         "compaction_state": _compaction_state_payload(request.compaction_state),
         "handoff_summary": _handoff_summary_payload(request.compaction_state, request.handoff_summary),
-        "semi_auto": _semi_auto_payload(request.handoff, missing),
+        "semi_auto": _semi_auto_payload(request.handoff, missing, guard),
         "subagent": _subagent_payload(request.subagent_owner_refs),
         "consistency_status": str(request.consistency.get("status", "")),
         "resume_instructions": _resume_instructions(guard),
@@ -149,10 +149,13 @@ def _guard_payload(guard: dict[str, Any]) -> dict[str, Any]:
 
 # LLM: _semi_auto_payload points blocked resumes to explicit fact completion rather than guessing.
 # 函数用途: 保留 completion prompt 状态和模板，告诉调用方半自动恢复缺什么、下一步怎么补。
-def _semi_auto_payload(handoff: dict[str, Any], missing: list[str]) -> dict[str, Any]:
+# LLM: _semi_auto_payload keeps manual fact-fill hints without making missing notes look fatal.
+# 函数用途: 缺少可选备注时保留补充提示；自动 guard 已放行时不再标成必须补事实。
+def _semi_auto_payload(handoff: dict[str, Any], missing: list[str], guard: dict[str, Any]) -> dict[str, Any]:
     completion = handoff.get("completion_prompt", {}) if isinstance(handoff.get("completion_prompt"), dict) else {}
+    allowed = bool(guard.get("allowed_to_continue"))
     return {
-        "status": "needs_fact_completion" if missing else "complete",
+        "status": "optional_notes_missing" if missing and allowed else ("needs_fact_completion" if missing else "complete"),
         "missing_fields": missing,
         "completion_prompt": completion,
         "automatic_fact_write": False,
@@ -240,7 +243,8 @@ def _resume_instructions(guard: dict[str, Any]) -> list[str]:
     if guard.get("allowed_to_continue"):
         return [
             "Read the recommended refs before continuing.",
-            "Continue only within the captured goal, constraints, acceptance, and latest test state.",
+            "Continue within the captured goal and any recorded constraints, acceptance, and latest test state.",
+            "If optional notes are missing, continue from the goal instead of stopping.",
             "Do not run tools automatically unless a higher-level policy explicitly allows it.",
         ]
     return [

@@ -40,10 +40,10 @@ def _blocked_targets(requests: list[CollaborationRequest]) -> list[dict[str, Any
             reason="request_blocked",
             suggested_actions=[
                 "inspect_request_context",
-                "reroute_collaboration_request",
+                "update_collaboration",
                 "try_alternate_source_or_params",
                 "ask_requester_for_clarification_if_needed",
-                "resubmit_evidence_or_mark_true_blocker",
+                "submit_collaboration_result_or_mark_true_blocker",
             ],
         )
         for request in requests
@@ -63,7 +63,7 @@ def _timed_out_targets(
                 "summarize_partial_evidence",
                 "list_missing_responders",
                 "decide_continue_or_reroute",
-                "update_case_status_with_limitations",
+                "update_collaboration_with_limitations",
             ],
             missing_responder_agent_ids=missing_responder_agent_ids(
                 request,
@@ -83,9 +83,9 @@ def _pending_targets(requests: list[CollaborationRequest]) -> list[dict[str, Any
             suggested_actions=[
                 "inspect_request_context",
                 "ask_responder_for_evidence_or_status",
-                "reroute_collaboration_request",
+                "update_collaboration",
                 "try_alternate_source_or_params",
-                "submit_evidence_or_update_request_status",
+                "submit_collaboration_result_or_update_status",
             ],
         )
         for request in requests
@@ -110,6 +110,6 @@ def _request_rework_target(
         "candidate_target_agent_ids": candidates,
         "required_capabilities": list(request.required_capabilities),
         "summary": str(request.metadata.get("status_summary") or request.question or ""),
-        "primary_tool": "reroute_collaboration_request" if candidates else "update_collaboration_request",
+        "primary_tool": "update_collaboration",
         "suggested_actions": suggested_actions,
     }

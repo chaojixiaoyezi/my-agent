@@ -128,16 +128,16 @@ def _write_file_archive_record() -> dict[str, object]:
 def _fetch_source_archive_record() -> dict[str, object]:
     return {
         "scoped_call_id": "call-fetch-1",
-        "tool": "fetch_url",
+        "tool": "web_fetch",
         "run_id": "run-1",
         "task_id": "task-1",
         "ok": True,
-        "parameters": {"tool": "fetch_url", "url": "https://example.invalid/data"},
+        "parameters": {"tool": "web_fetch", "url": "https://example.invalid/data"},
         "runtime_gate": {
             "allowed": True,
             "status": "ALLOW",
             "evidence": {
-                "tool_name": "fetch_url",
+                "tool_name": "web_fetch",
                 "operation_id": "call-fetch-1",
                 "idempotency_key": "idem-fetch-1",
             },

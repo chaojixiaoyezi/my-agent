@@ -456,11 +456,11 @@ my-agent memory-resume --from-compact apply-xxx --context-only
 
 compact 恢复输出还会包含 `compact_resume_handoff` 和 `compact_continue_packet`：handoff 稳定展示目标、当前阶段、下一步、验收条件、约束、最近测试、推荐读取路径和 action guard 状态；continue packet 则给手动/半自动/未来自动流程一个机器可读的继续契约。`--context-only` 打印的 `Compact Resume Context` 也会分节包含这些内容，适合复制给新会话或其他 agent 接手。
 
-`--compact-resume-mode auto` 会启用更严格的 Action Guard：缺 acceptance、constraints、latest tests、refs 或 self-check 失败时会返回非 0，防止无人值守状态继续偏航。字段齐全、refs 存在且 self-check 通过时会返回 `allow_automated_continue` / `allowed_to_continue=true`，continue packet 会标记 `ready_to_continue=true`，但仍标记 `automatic_tool_execution=none`，表示只允许后续策略接着判断，不会由 resume 命令直接跑工具。默认 `manual` 只生成恢复材料和人工确认提示。
+`--compact-resume-mode auto` 会启用 Action Guard：refs 或 self-check 这类恢复事实源损坏时会返回非 0，防止无人值守状态继续偏航。字段齐全、refs 存在且 self-check 通过时会返回 `allow_automated_continue` / `allowed_to_continue=true`，continue packet 会标记 `ready_to_continue=true`，但仍标记 `automatic_tool_execution=none`，表示只允许后续策略接着判断，不会由 resume 命令直接跑工具。普通任务缺 acceptance、constraints、latest tests 或 next_step 只作为缺失备注提示，不阻断自动续接。默认 `manual` 只生成恢复材料和人工确认提示。
 
 缺 work state 字段时，compact 恢复输出会包含 `completion_prompt`。这会给出可复制的“验收条件/约束/测试”模板和建议命令；模板本身不会自动写文件。用户确认这些事实后，可以用 `memory-fact-write` 写入 scope 内的 `runtime_facts/<fact_id>/task.json`，再重新按同一个 request/session/task/run scope 执行 `memory-compact --apply`。
 
-普通 `run` 在上下文风险达到阈值时会额外打印 `compact_suggestion` 和 `compact_auto`。`compact_suggestion` 给出 `memory-compact --dry-run`、`memory-compact --apply` 和 `memory-resume --from-compact` 的建议命令；`compact_auto` 显示自动协调器当前停在 `needs_user_confirmation`、`blocked_after_action_guard`、`ready_after_action_guard` 等哪一步，并显示 `apply_id` / `continue_ready`。默认只是 plan-only 提醒；只有显式配置 `memory_compact_auto_allow_apply: true` 才会自动做非破坏性 apply + auto resume + guard/packet 停车，仍不会继续执行工具。
+普通 `run` 在上下文风险达到阈值时会额外打印 `compact_suggestion` 和 `compact_auto`。`compact_suggestion` 给出 `memory-compact --dry-run`、`memory-compact --apply` 和 `memory-resume --from-compact` 的建议命令；`compact_auto` 显示自动协调器当前停在 `needs_user_confirmation`、`blocked_after_action_guard`、`ready_after_action_guard` 等哪一步，并显示 `apply_id` / `continue_ready`。保存型运行默认会自动做非破坏性 apply + auto resume + guard/packet，并在 guard 放行后继续同一个任务；`save=false` 只返回 plan，不写 apply 产物。
 
 JSON 输出里会额外包含 `brief`：
 

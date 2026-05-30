@@ -40,7 +40,7 @@ from .registry_payload_normalize import ToolPayloadNormalizeLimits
 from .registry_prompt import render_tool_catalog_section
 
 _allowed_tool_set = allowed_tool_set
-_DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec", "fetch_url"})
+_DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec"})
 
 
 # LLM: _agent_config_int resolves ToolRegistry default budgets from AgentConfig.

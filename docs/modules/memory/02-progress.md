@@ -3,6 +3,7 @@
 ## 已完成
 
 - 2026-05-29 Live Raw Archive 已接入工具循环：运行中会把助手工具轮可见文字和完成后的工具结果增量写入既有 `memory/raw/YYYY-MM-DD.jsonl`；收尾归档会跳过已 live 写入的工具事件，避免重复记录。运行中进度白板已合并到 `runtime_facts/<request_id>/task.json`，不再维护单独 `run_checkpoint`。`compact_apply_work_state` 在缺少权威 snapshot 时，可从 live `assistant_tool_round` 提取下一步续接提示；这只是恢复提示，不把助手回复升级成验收事实。
+- 2026-05-29 Compact Action Guard 已按普通任务放宽：`acceptance`、`constraints`、`latest_tests` 缺失时只写入 `missing_fields` 提醒，不再阻断自动续接；只有 consistency/self-check/refs/goal/next_step 这类恢复包硬完整性失败时才停车。
 - 2026-05-29 Compact 触发入口已统一：正常 token 阈值触发和上下文溢出兜底触发都走 `compact_suggest -> compact_auto -> compact_apply -> compact_resume -> continue_packet` 同一套链路，只通过 `trigger.reason/source/forced` 区分原因；`runtime_reason=context_overflow` 即使低于普通阈值，也会进入同一个 auto-apply / apply-resume 流程，`save=False` 或 guard 不通过时才退回确认建议。
 - 2026-05-27 Memory 读取预算已回到主配置：artifact 默认读取长度、artifact 读取预算、工具输出外置阈值/预览长度、自动恢复上下文扫描 limit 都从 `agent_config.yaml` / `AgentConfig` 读取；memory 模块不再保留第二份隐藏默认数字。
 - 2026-05-26 Resume trigger public helper 已落地：`memory_archive.has_resume_trigger()` 现在可被 prompt/context 选择逻辑复用，只判断用户是否明确要求继续/恢复旧任务，不读取 archive 正文，也不会自动恢复。
@@ -64,22 +65,22 @@
 - 2026-05-08 手动 Compact Apply 完整化第一片已落地：`memory-compact --apply` 现在会生成稳定 `apply_id/plan_id`，并把同一组 ID 写进 metadata、apply bundle、restore refs、work state snapshot、self-check、失败报告和 ledger；新增 `*.work_state_snapshot.json` 作为后续手动 resume 和无人值守状态锁的对照基线。
 - 2026-05-08 手动 Resume From Compact 第一片已落地：`memory-resume --from-compact <apply_id>` 会只读恢复 compact apply 产物，输出 `Compact Resume Context`、consistency report、推荐读取路径和下一步动作；`owner_type/owner_id` 已预留给未来子代理自动会话压缩，当前不触碰 subagent runner。
 - 2026-05-08 半自动 Compact 提示第一片已落地：`run` 收尾会基于 token ledger 和上下文窗口返回 compact suggestion 字段，CLI 在达到阈值时提示 dry-run/apply/resume 命令；当前 `automatic_action=none`，仍需用户确认。
-- 2026-05-08 自动 Compact/Resume 安全第一片已落地：`memory-resume --from-compact` 现在会输出 `compact_action_guard`；`manual` 要人工确认，`auto` 模式在缺 acceptance/constraints/latest_tests 等 work state 字段时会阻断并返回非零退出码。
+- 2026-05-08 自动 Compact/Resume 安全第一片已落地：`memory-resume --from-compact` 现在会输出 `compact_action_guard`；`manual` 要人工确认，`auto` 模式会检查恢复包硬完整性，缺 acceptance/constraints/latest_tests 等可选 work state 备注时只提示、不阻断。
 - 2026-05-08 自动 Compact/Resume 协调第一片已落地：`run_memory_compact_auto_cycle()` 默认允许非破坏性 apply、auto resume 和 action guard 检查；`save=False` 或 guard 不通过时仍只返回建议，不执行工具、不继续改代码。
 - 2026-05-08 自动 Compact/Resume 触发器第一片已落地：`SimpleAgent.run()` 收尾已经接入 auto cycle 的默认 auto-apply 分支，结果和 CLI 会暴露 `compact_auto` 的 status / next_action / tools 字段；当前仍不会自动写 apply 产物。
 - 2026-05-08 Work State 字段来源第一片已落地：compact apply 会从 workspace 内 task/run 事实源读取 `ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md`、`task.json` 等文件，把 acceptance、constraints、latest_tests 和 read_files 写入 `work_state_snapshot`；找不到时仍显式保留 missing，不猜测。
-- 2026-05-08 真实 run Work State 回填第一片已落地：当没有 `memory_archive/snapshots/*.json` 权威 snapshot 文件时，compact apply 会只读 `restore_refs` 中登记的 hook/raw JSONL，从 hook recovery snapshot 或 raw 用户事件回填 `goal` 和 `next_step`；验收、约束、最近测试仍必须来自明确事实源，缺失时 auto resume 继续阻断。
+- 2026-05-08 真实 run Work State 回填第一片已落地：当没有 `memory_archive/snapshots/*.json` 权威 snapshot 文件时，compact apply 会只读 `restore_refs` 中登记的 hook/raw JSONL，从 hook recovery snapshot 或 raw 用户事件回填 `goal` 和 `next_step`；验收、约束、最近测试仍必须来自明确事实源，缺失时保留 missing 提醒，但不再卡死普通任务自动续接。
 - 2026-05-08 运行时 Fact Source 第一片已落地：真实 `run --save` 会写 `memory_archive/runtime_facts/<request_id>/task.json`，并把目录放入 recovery snapshot 的 `content_paths`；只有用户 prompt 中明确标注的验收、约束、测试条目或真实测试工具命令会进入 work state，普通回复不会被升级成验收事实。
 - 2026-05-08 半自动补全提示第一片已落地：`memory-resume --from-compact` 在缺 work state 字段时会返回 `completion_prompt`，并在 CLI/context block 展示可复制的“验收条件/约束/测试”补全模板；这只是提示，不自动写事实源。
 - 2026-05-08 手动补全事实写入第一片已落地：新增 `memory-fact-write`，只把用户显式传入的 acceptance/constraints/latest_tests 写入 `memory_archive/runtime_facts/<fact_id>/task.json`；后续按同一 request/session/task/run scope 重新 `memory-compact --apply` 时，work state 可以读取这些事实并让 auto guard 放行。
 - 2026-05-08 Resume 交接包增强第一片已落地：`memory-resume --from-compact` 现在返回 `compact_resume_handoff`，并在 context block / CLI 中稳定展示目标、阶段、下一步、验收条件、约束、最近测试、推荐读取路径和 action guard 状态。
-- 2026-05-08 自动 Guard 放行第一片已落地：当 work state 字段齐全、refs 存在、self-check 通过且 `resume_mode=auto` 时，`compact_action_guard` 会返回 `allow_automated_continue` / `allowed_to_continue=true`；报告仍明确 `automatic_tool_execution=none`，不会自动跑工具。
+- 2026-05-08 自动 Guard 放行第一片已落地：当 refs、self-check、goal、next_step 等恢复硬条件通过且 `resume_mode=auto` 时，`compact_action_guard` 会返回 `allow_automated_continue` / `allowed_to_continue=true`；work state 可选备注缺失会进入 `missing_fields`，报告仍明确 `automatic_tool_execution=none`，不会自动跑工具。
 - 2026-05-08 子代理 Compact Owner 预留口第一片已落地：`memory-resume --from-compact --compact-owner-type subagent_run|subagent_session --compact-owner-id <run_id>` 会只读解析 `tasks/*/agents/<run_id>/` 和旧 `subagents/<run_id>/` 引用，返回 run workspace、checkpoint、summary、legacy adapter refs；仍不写主 memory、不改 runner、不自动执行工具。
 - 2026-05-08 Continue Packet 第一片已落地：`memory-resume --from-compact` 现在返回 `compact_continue_packet`，把目标、阶段、下一步、验收、约束、最近测试、推荐读取路径、action guard 和 subagent owner refs 固定成统一继续契约；它只表达恢复上下文是否可继续，不代表业务验收通过。
 - 2026-05-08 半自动 Resume 第二片已落地：`completion_prompt` 新增 `suggested_commands`，给出 `memory-fact-write --from-compact`、同 scope 重新 `memory-compact --apply` 和 `memory-resume --compact-resume-mode auto` 的闭环提示；仍只写用户显式确认事实，不解析助手回复。
 - 2026-05-08 子代理 Compact Hook 预留第二片已落地：subagent owner refs 会带 `reserved_hooks`，预留 run-local `session_compact_ledger.jsonl` 和 `latest_continue_packet.json` 路径；当前 `enabled=false`，不写主 memory、不自动执行工具、不改 runner。
-- 2026-05-08 Auto Compact/Resume 第一版增强已落地：新增 `memory_compact_auto_allow_apply` 配置，默认 true；开启后 `SimpleAgent.run()` 会做非破坏性 apply、auto resume、continue packet 和 guard 检查；guard 放行时主 agent 会把继续包注入下一轮 prompt 并受控续跑一次，阻断时仍停车。
-- 2026-05-08 Auto Compact/Resume 持久化边界修正：即使配置开启 `memory_compact_auto_allow_apply`，`run(..., save=False)` / `--no-save` 仍会阻止自动 apply 写入 `memory_archive/compact_applies/*`，继续只返回人工确认建议。
+- 2026-05-08 Auto Compact/Resume 第一版增强已落地：保存型 `SimpleAgent.run()` 会做非破坏性 apply、auto resume、continue packet 和 guard 检查；guard 放行时主 agent 会把继续包注入下一轮 prompt 并继续同一个任务，阻断时仍停车。
+- 2026-05-08 Auto Compact/Resume 持久化边界修正：`run(..., save=False)` / `--no-save` 会阻止自动 apply 写入 `memory_archive/compact_applies/*`，继续只返回人工确认建议。
 - 2026-05-08 Runtime Fact Source 解析边界修正：显式验收/约束/测试段落遇到未知标题会停止当前桶，避免“实施步骤”等后续段落被误收为 acceptance/constraints/latest_tests。
 - 2026-05-08 Compact work-state scope 安全修正：request/session/task/run id 现在按字面路径解析，`*`、`[]` 等 glob 字符不会扩大扫描 `tasks/*/agents/*`；半自动 completion 命令也会保留原 `--session-id/--request-id/--task-id/--run-id` scope。
 - 2026-05-08 compact + closeout 联调第一片已落地：新增 focused 测试串起 subagent task、compact apply/resume、continue packet、closeout apply 阻断和 auto-policy dry-run；断言 auto-policy 仍 `executed=false`、`mutates_task_state=false`，且 task 状态不被 compact 自动链路改动。
@@ -298,8 +299,8 @@
 - 本轮 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_home_runtime_bootstrap.py agent_py_agent/tests/test_provider_space.py agent_py_agent/tests/test_config_normalize.py::TestNormalizeAgentConfig::test_normalize_home_provider_risk_fields agent_py_agent/tests/test_agent/test_memory_and_basic.py agent_py_agent/tests/test_prompting_builder.py` -> passed；strict code-size 维持 `hard=0 high-risk=0 soft=0`。
 
 ## 2026-05-13 compact auto continuation bridge
-- 中文说明：主 agent 的自动 compact 已从“生成恢复包后停车”推进到“guard 放行后受控续跑一次”。第二轮 prompt 会重新带上 `AGENTS.md`、`SOUL.md`、`USER.md`、`memory.md`，并在 Runtime Injection 放入 `# Compact Auto Continuation`，要求只从 `Next Step` 继续。
-- 防重复边界：续跑轮会跳过再次 compact，避免低阈值测试或长任务中出现 compact -> continue -> compact 的循环。字段缺失、自检失败、refs 异常或 `save=False` 时仍不会续跑。
+- 中文说明：主 agent 的自动 compact 已从“生成恢复包后停车”推进到“guard 放行后自动续接同一个任务”。第二轮 prompt 会重新带上 `AGENTS.md`、`SOUL.md`、`USER.md`、`memory.md`，并在 Runtime Injection 放入 `# Compact Auto Continuation`，要求从 `Next Step` 或当前目标继续，不重做已完成内容。
+- 防重复边界：续跑轮会跳过再次 compact，避免低阈值测试或长任务中出现 compact -> continue -> compact 的循环。自检失败、refs 异常或 `save=False` 时仍不会续跑；可选 work state 备注缺失只提示，不作为普通任务停车条件。
 - 本轮 focused 验收：`python -m pytest -q agent_py_agent/tests/test_memory_runtime_basics.py agent_py_agent/tests/test_memory_compact_auto.py agent_py_agent/tests/test_home_runtime_bootstrap.py agent_py_agent/tests/test_prompting_builder.py` -> passed。
 
 ## 2026-05-13 subagent task-local compact continuation

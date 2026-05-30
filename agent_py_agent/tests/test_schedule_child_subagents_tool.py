@@ -27,11 +27,9 @@ def test_runner_context_schedule_bare_lineage_name_returns_payload_not_index_err
 
     result = tool.execute(
         {
-            "orchestration": {
-                "apply": True,
-                "max_depth": 2,
-                "children": [{"goal": "继续协调页面任务", "role": "coordinator", "agent_name": "小小傻妞"}],
-            },
+            "dry_run": False,
+            "max_depth": 2,
+            "children": [{"goal": "继续协调页面任务", "role": "coordinator", "agent_name": "小小傻妞"}],
         }
     )
     payload = json.loads(result.output)
@@ -153,7 +151,7 @@ def test_runner_context_schedule_without_children_returns_quality_advice(tmp_pat
     agent.subagents.save(worker)
     agent._current_subagent_run_id = root.id
 
-    result = ScheduleChildSubagentsTool(agent).execute({"orchestration": {"apply": True}})
+    result = ScheduleChildSubagentsTool(agent).execute({"dry_run": False})
     payload = json.loads(result.output)
 
     assert result.ok is True

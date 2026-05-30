@@ -123,8 +123,8 @@ def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: 
             params=params,
             tool_rounds=7,
             idx=1,
-            payload={"tool": "subagent_board"},
-            result=ToolExecutionResult("subagent_board", True, large_output),
+            payload={"tool": "inspect_agent_tree"},
+            result=ToolExecutionResult("inspect_agent_tree", True, large_output),
         )
     )
     record = params.archive_tool_calls[0]

@@ -31,6 +31,7 @@ class RunParams:
     on_chunk: object = None
     compact_auto_continue_depth: int = 0
     context_scope: str = "default"
+    root_user_prompt: str = ""
 
 
 # LLM: RuntimeContextRequest bundles runtime context preparation inputs.
@@ -57,6 +58,7 @@ class RuntimeContextRequest:
 @dataclass
 class RuntimeLoopParams:
     user_prompt: str
+    root_user_prompt: str
     memories: list
     runtime_injections: list
     routed_context: Any

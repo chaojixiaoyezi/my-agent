@@ -18,16 +18,13 @@ from .exploration_fuse_config import (
 _STATE_DIR = ".agent_delivery"
 _STATE_FILE = "exploration_fuse.json"
 _EXPLORATION_TOOL_NAMES = {
-    "http_request",
     "list_files",
     "read_artifact",
     "read_file",
     "search",
     "search_text",
-    "fetch_url",
     "web_search",
     "web_fetch",
-    "web_extract",
 }
 _LOCAL_PROGRESS_TOOL_NAMES = {
     "apply_patch",

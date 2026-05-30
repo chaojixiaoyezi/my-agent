@@ -6,6 +6,7 @@ from __future__ import annotations
 from ..prompting_parts.builder import ToolSections
 from ._runtime_params import ToolLoopExecuteParams
 from .delivery_contract_prompting import render_delivery_contract_section
+from .runtime_guidance import inject_pending_guidance
 from .tool_context_window import window_tool_context_params
 from .tool_model_generation import ModelGenerateParams, generate_model_response
 
@@ -13,7 +14,8 @@ from .tool_model_generation import ModelGenerateParams, generate_model_response
 # LLM: build_tool_loop_prompt applies context-window trimming before rendering the prompt.
 # 函数用途: 构建工具循环下一轮 prompt，包含工具目录、推荐工具和工具上下文。
 def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
-    window_tool_context_params(params)
+    inject_pending_guidance(agent, params)
+    window_tool_context_params(agent, params)
     return agent.prompts.build(
         params.user_prompt,
         params.memories,

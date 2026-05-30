@@ -119,7 +119,7 @@ def _quality_wave_payload(advice: dict[str, object]) -> dict[str, object]:
         "next_action": "create_quality_children_from_ready_refs",
         "suggested_tool_call": {
             "tool": "schedule_child_subagents",
-            "apply": True,
+            "dry_run": False,
             "children": list(advice.get("suggested_children") or []),
         },
         "quality_hint": (
@@ -134,8 +134,7 @@ def _quality_wave_payload(advice: dict[str, object]) -> dict[str, object]:
 def _dispatch_tool_call(run_ids: list[str]) -> dict[str, object]:
     return {
         "tool": "dispatch_subagents",
-        "apply": True,
-        "execute_runners": True,
+        "dry_run": False,
         "run_ids": run_ids,
         "workflow_mode": "off",
     }
@@ -292,7 +291,7 @@ def _recovery_child_tool_call(recovery_run_ids: list[str]) -> dict[str, object]:
     joined_ids = ", ".join(ids)
     return {
         "tool": "schedule_child_subagents",
-        "apply": True,
+        "dry_run": False,
         "role_selection_hint": "默认用 worker；只有恢复本身需要继续拆下级任务时，父节点才把 role 改成 coordinator/lead。",
         "children": [
             {
@@ -305,7 +304,7 @@ def _recovery_child_tool_call(recovery_run_ids: list[str]) -> dict[str, object]:
                     "如果确实需要继续拆多层，再由父节点改派 coordinator。"
                 ),
                 "allowed_tools": [
-                    "subagent_board",
+                    "inspect_agent_tree",
                     "read_file",
                     "list_files",
                 ],

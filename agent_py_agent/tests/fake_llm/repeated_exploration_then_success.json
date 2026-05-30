@@ -3,7 +3,7 @@
   "model_steps": [
     {
       "type": "tool_call",
-      "tool": "fetch_url",
+      "tool": "web_fetch",
       "params": {
         "url": "https://example.com/source"
       }

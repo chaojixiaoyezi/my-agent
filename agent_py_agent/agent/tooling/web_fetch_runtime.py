@@ -1,4 +1,4 @@
-# LLM: web_fetch_runtime holds shared fetch formatting helpers for web_fetch and web_extract.
+# LLM: web_fetch_runtime holds shared fetch formatting helpers for URL and API reads.
 # 模块用途: 封装 HTTP 原始读取、正文预览、artifact 保存和轻量 HTML 转 Markdown，保持工具入口文件短小。
 
 from __future__ import annotations
@@ -154,8 +154,8 @@ def page_payload_from_response(
 
 def normalize_fetch_format(value: Any) -> str:
     fmt = str(value or "auto").strip().lower()
-    if fmt not in {"auto", "markdown", "text", "html"}:
-        raise ValueError("format 只支持 auto、markdown、text、html")
+    if fmt not in {"auto", "markdown", "text", "html", "json", "raw"}:
+        raise ValueError("format/mode 只支持 auto、markdown、text、html、json、raw、extract")
     return fmt
 
 
@@ -177,6 +177,8 @@ def content_for_format(output_format: str, body: str, headers: Any) -> str:
         return html_to_markdown(body) if is_html_response(headers) else body
     if output_format == "text":
         return visible_html_text(body) if is_html_response(headers) else body
+    if output_format in {"json", "raw"}:
+        return body
     return body
 
 

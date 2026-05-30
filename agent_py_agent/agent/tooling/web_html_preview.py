@@ -1,4 +1,4 @@
-# LLM: HTML preview helpers keep web.py small and make fetch_url output useful for large pages.
+# LLM: HTML preview helpers keep web.py small and make web_fetch output useful for large pages.
 # 模块用途: 从 HTML 工具结果中提取可见正文预览，并保留短 raw HTML 片段用于排查。
 
 from __future__ import annotations

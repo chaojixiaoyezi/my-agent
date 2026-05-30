@@ -95,7 +95,7 @@ export type SettingsState = {
     resume_auto_context_enabled: boolean;
     resume_auto_context_mode: string;
     resume_auto_context_limit: number;
-    compact_auto_allow_apply: boolean;
+    compact_auto_trigger_percent: number;
   };
   setMemoryAdvanced: (params: Partial<SettingsState["memoryAdvanced"]>) => void;
 

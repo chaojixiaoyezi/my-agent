@@ -74,8 +74,24 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
 
 
 def _run_params(thread_id: str, request: BackgroundRunRequest) -> RunParams:
-    return RunParams(save=False, source="background_main_agent", run_id=f"bg-main-{thread_id}", task_id=request.task_id or thread_id, allowed_tools=_allowed_tools())
+    return RunParams(
+        save=False,
+        source="background_main_agent",
+        run_id=f"bg-main-{thread_id}",
+        task_id=request.task_id or thread_id,
+        allowed_tools=_allowed_tools(),
+    )
 
 
 def _allowed_tools() -> list[str]:
-    return ["inspect_agent_tree", "case_status", "list_collaboration_requests", "raise_collaboration_event", "update_case_status", "update_collaboration_request", "reroute_collaboration_request", "subagent_board", "dispatch_subagents", "send_subagent_message", "create_subagents"]
+    return [
+        "inspect_agent_tree",
+        "raise_event",
+        "raise_collaboration",
+        "inspect_collaboration",
+        "submit_collaboration_result",
+        "update_collaboration",
+        "dispatch_subagents",
+        "send_guidance",
+        "create_subagents",
+    ]

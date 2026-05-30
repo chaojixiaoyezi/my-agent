@@ -316,16 +316,16 @@ def test_subagent_action_apply_repairs_work_order():
 
 
 # LLM: Helper keeps the route grant test focused while preserving scoped request coverage.
-# 函数用途: 创建带 shell/path/network/output budget 范围的 HTTP capability request。
-def _record_scoped_http_request(agent, task_id: str, root: Path):
+# 函数用途: 创建带 shell/path/network/output budget 范围的 web_fetch capability request。
+def _record_scoped_web_fetch(agent, task_id: str, root: Path):
     return agent.subagents.record_capability_request(
         task_id,
         RecordCapabilityRequestParams(
             problem="当前需要请求 REST API 并检查 HTTP 状态码和 JSON 返回。",
-            needed_capability="http_request",
+            needed_capability="web_fetch",
             expected_output="接口状态码和返回体摘要",
             capability_type="shell",
-            requested_tools=["http_request"],
+            requested_tools=["web_fetch"],
             requested_commands=["curl"],
             path_scope=[str(root)],
             network_scope=["https://api.example.test"],
@@ -359,7 +359,7 @@ def test_subagent_capability_route_grants_tool():
             thought="需要 HTTP 工具。",
             plan=["请求能力"],
         )
-        request = _record_scoped_http_request(agent, task.id, root)
+        request = _record_scoped_web_fetch(agent, task.id, root)
         router = CapabilityRouter(
             config=CapabilityConfig(capability_candidate_limit=3, capability_grant_max_tools=1),
             tool_specs=agent.tools.specs(),
@@ -376,7 +376,7 @@ def test_subagent_capability_route_grants_tool():
         assert routed.capability_requests[0].id == request.id
         assert routed.capability_requests[0].status == "GRANTED"
         assert routed.capability_grants
-        assert "http_request" in routed.allowed_tools
+        assert "web_fetch" in routed.allowed_tools
         _assert_scoped_http_grant(routed, applied, root)
         assert (root / "subs" / "subagent_capability_route_report.json").exists()
         assert (root / "subs" / "SUBAGENT_CAPABILITY_ROUTE.md").exists()
@@ -483,11 +483,11 @@ def test_subagent_execution_context_uses_only_grants():
             allowed_tools=["read_file"], acceptance_checks=["必须有接口检查证据"],
         )
         request = agent.subagents.record_capability_request(
-            task.id, RecordCapabilityRequestParams(problem="需要发起 HTTP GET 检查接口状态。", needed_capability="http_request", expected_output="接口状态码和摘要"),
+            task.id, RecordCapabilityRequestParams(problem="需要发起 HTTP GET 检查接口状态。", needed_capability="web_fetch", expected_output="接口状态码和摘要"),
         )
         agent.subagents.record_capability_grant(task.id, RecordCapabilityGrantParams(
-            request_id=request.id, skills=["api-check"], tools=["http_request"],
-            capability_cards=[{"id": "tool:http_request", "kind": "tool", "name": "http_request",
+            request_id=request.id, skills=["api-check"], tools=["web_fetch"],
+            capability_cards=[{"id": "tool:web_fetch", "kind": "tool", "name": "web_fetch",
                                "description": "发起 HTTP 请求并返回状态码和响应摘要", "risk_level": "low", "source": "builtin", "path": ""}],
             reason="父代理授权低风险接口健康检查。",
         ))
@@ -498,10 +498,10 @@ def test_subagent_execution_context_uses_only_grants():
         markdown = Path(context.execution_context_file).read_text(encoding="utf-8")
 
         assert payload["run_id"] == task.id
-        assert payload["allowed_tools"] == ["read_file", "http_request"]
+        assert payload["allowed_tools"] == ["read_file", "web_fetch"]
         assert payload["allowed_skills"] == ["api-check"]
-        assert payload["granted_cards"][0]["name"] == "http_request"
+        assert payload["granted_cards"][0]["name"] == "web_fetch"
         assert "write_file" not in payload["allowed_tools"]
         assert payload["pending_requests"][0]["status"] == "OPEN"
         assert "不要读取或展开全局 skill/tool registry" in "\n".join(payload["instructions"])
-        assert "SUBAGENT EXECUTION CONTEXT" in markdown and "http_request" in markdown
+        assert "SUBAGENT EXECUTION CONTEXT" in markdown and "web_fetch" in markdown

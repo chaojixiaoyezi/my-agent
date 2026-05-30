@@ -1,5 +1,5 @@
-# LLM: Create-subagents item parsing gives top-level delegation a 长期助手 tasks[] path.
-# 模块用途: 解析 create_subagents 的 items/tasks 批量参数，避免 count 复制同一个 goal。
+# LLM: Create-subagents item parsing keeps one public batch field: items[].
+# 模块用途: 解析 create_subagents 的 items 批量参数，避免 count 复制同一个 goal。
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from .runner_ref_fields import (
 _BASE_FIELDS_EXCLUDED_FROM_ITEM = {
     "count",
     "items",
-    "tasks",
     "goal",
     "plan",
     "context_manifest",
@@ -52,17 +51,17 @@ class CreateSubagentItem:
 
 
 # LLM: create_items_from_params parses batch mode without forcing a top-level goal.
-# 函数用途: 从 create_subagents 的 items/tasks 字段解析多个独立子任务；返回字符串表示模型参数错误。
+# 函数用途: 从 create_subagents 的 items 字段解析多个独立子任务；返回字符串表示模型参数错误。
 def create_items_from_params(params: dict[str, object]) -> list[CreateSubagentItem] | str:
     protocol_error = _batch_protocol_error(params)
     if protocol_error:
         return protocol_error
-    raw_items = params.get("items") if "items" in params else params.get("tasks")
+    raw_items = params.get("items")
     if raw_items is None:
         return []
     items = _json_list_param(raw_items)
     if not items:
-        return "items/tasks 必须是包含 goal 的对象列表。"
+        return "items 必须是包含 goal 的对象列表。"
     parsed: list[CreateSubagentItem] = []
     for index, raw in enumerate(items, start=1):
         item = _create_item(params, raw, index)
@@ -73,14 +72,35 @@ def create_items_from_params(params: dict[str, object]) -> list[CreateSubagentIt
 
 
 # LLM: _batch_protocol_error rejects ambiguous top-level batch envelopes before creating runs.
-# 函数用途: 让模型在 create_subagents 入口先修正 items/tasks/count 混用和越层派工，避免创建错误任务树。
+# 函数用途: 拒绝旧批量别名，避免同一入口长期保留两套名字。
 def _batch_protocol_error(params: dict[str, object]) -> str:
-    if "items" in params and "tasks" in params:
-        return "不要同时传 items 和 tasks；二选一即可。"
-    raw_items = params.get("items") if "items" in params else params.get("tasks")
-    if raw_items is None:
-        return ""
-    del raw_items
+    if "tasks" in params:
+        return "create_subagents 批量派工只接受 items；请把 tasks 改成 items。"
+    for key in ("replaces_run_ids", "supersedes_run_ids"):
+        if key in params:
+            return f"create_subagents 接管关系只接受 replacement_for_run_ids；请移除 {key}。"
+    raw_items = params.get("items")
+    item_error = _item_protocol_error(raw_items)
+    if item_error:
+        return item_error
+    return ""
+
+
+def _item_protocol_error(raw_items: object) -> str:
+    items = _json_list_param(raw_items) if raw_items is not None else []
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        bad_key = _old_replacement_key(item)
+        if bad_key:
+            return f"items[{index}] 接管关系只接受 replacement_for_run_ids；请移除 {bad_key}。"
+    return ""
+
+
+def _old_replacement_key(params: dict[str, object]) -> str:
+    for key in ("replaces_run_ids", "supersedes_run_ids"):
+        if key in params:
+            return key
     return ""
 
 
@@ -101,7 +121,7 @@ def _create_item(
 
 
 # LLM: _create_item_params keeps only create-run defaults that make sense per child.
-# 函数用途: 顶层字段做默认值，item 字段优先；全局 plan/count/items/tasks/goal 不带入单个子任务。
+# 函数用途: 顶层字段做默认值，item 字段优先；全局 plan/count/items/goal 不带入单个子任务。
 def _create_item_params(
     base_params: dict[str, object],
     raw: dict[str, object],

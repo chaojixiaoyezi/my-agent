@@ -296,9 +296,9 @@ def classify_tool_risk(spec: ToolSpec) -> tuple[list[str], str]:
     name = spec.name
     if name in {"write_file", "apply_patch"}:
         return ["filesystem_write"], "high"
-    if name == "http_request":
-        return ["network_request"], "medium"
-    if name in {"fetch_url", "web_fetch", "web_extract", "web_search"}:
+    if name == "web_fetch":
+        return ["network_read", "network_request"], "medium"
+    if name == "web_search":
         return ["network_read"], "medium"
     if spec.category == "filesystem":
         return ["filesystem_read"], "low"

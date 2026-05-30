@@ -49,6 +49,7 @@ def test_runner_prompt_tells_leaf_to_chunk_long_file_writes():
 
     assert "长 CSS/JS/HTML" in prompt
     assert "WRITE_FILE_RAW" in prompt
+    assert "不要把 WRITE_FILE_RAW" in prompt
     assert "apply_patch" in prompt
     assert "data_base64" in prompt
 
@@ -92,7 +93,7 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
         thought="",
         plan=[],
         role="child_coordinator",
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board", "read_file"],
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree", "read_file"],
         acceptance_checks=["leaf 必须写出三个文件"],
     )
 
@@ -107,7 +108,7 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
     assert "派工是为了把活做好，不是硬流程" in prompt
     assert "你可以直接完成" in prompt
     assert "不要误以为只能创建 worker" in prompt
-    assert "不要包成" in prompt
+    assert "不要包二级参数对象" in prompt
     assert "创建 child 时" in prompt
     assert "不要替后代提前提交 capability_request" in prompt
     assert "由真正需要该能力的 runner 正式申请" in prompt
@@ -127,9 +128,9 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
     assert "失败 QA refs" in prompt
     assert "模板详情" in prompt
     assert "你是找茬子代理" in prompt
-    assert "subagent_message" in prompt
-    assert "scope=descendants" in prompt
-    assert "scope=peers" in prompt
+    assert "send_guidance" in prompt
+    assert "scope=descendants" not in prompt
+    assert "scope=peers" not in prompt
 
 
 # LLM: test_runner_prompt_tells_root_not_to_request_capability keeps root as the decision node.
@@ -205,12 +206,12 @@ def test_runner_prompt_exposes_generic_collaboration_control_plane_when_tools_ar
         plan=[],
         role="worker",
         allowed_tools=[
-            "open_case",
-            "request_collaboration",
-            "submit_evidence",
-            "update_collaboration_request",
-            "reroute_collaboration_request",
-            "case_status",
+            "raise_collaboration",
+            "raise_collaboration",
+            "submit_collaboration_result",
+            "update_collaboration",
+            "update_collaboration",
+            "inspect_collaboration",
         ],
         acceptance_checks=["有协作需要时留下 case/request/evidence 引用"],
     )
@@ -218,15 +219,13 @@ def test_runner_prompt_exposes_generic_collaboration_control_plane_when_tools_ar
     prompt = _build_subagent_runner_prompt(context)
 
     assert "协作控制面" in prompt
-    assert "open_case" in prompt
-    assert "request_collaboration" in prompt
-    assert "submit_evidence" in prompt
-    assert "update_collaboration_request" in prompt
-    assert "reroute_collaboration_request" in prompt
-    assert "case_status" in prompt
-    assert "open_case 后" in prompt
-    assert "建议继续调用 request_collaboration" in prompt
-    assert "只记录事件时可以停在 open_case" in prompt
+    assert "raise_collaboration" in prompt
+    assert "submit_collaboration_result" in prompt
+    assert "update_collaboration" in prompt
+    assert "inspect_collaboration" in prompt
+    assert "优先用这个单步工具打开 case 并发出 request" in prompt
+    assert "不要因为缺 case_id 就新开重复 case" in prompt
+    assert "query_hints 是软提示" in prompt
     assert "collaboration://case/" in prompt
     assert "collaboration://request/" in prompt
     assert "不要只在 summary 里说已经协作" in prompt
@@ -242,10 +241,10 @@ def test_runner_prompt_tells_targeted_responder_to_reuse_existing_collaboration_
         plan=[],
         role="worker",
         allowed_tools=[
-            "open_case",
-            "case_status",
-            "submit_evidence",
-            "update_collaboration_request",
+            "raise_collaboration",
+            "inspect_collaboration",
+            "submit_collaboration_result",
+            "update_collaboration",
         ],
         context_bundle={
             "collaboration": {
@@ -257,9 +256,9 @@ def test_runner_prompt_tells_targeted_responder_to_reuse_existing_collaboration_
                         "request_ref": "collaboration://request/creq-456",
                         "question": "请补一条证据引用。",
                         "recommended_tools": [
-                            "case_status",
-                            "submit_evidence",
-                            "update_collaboration_request",
+                            "inspect_collaboration",
+                            "submit_collaboration_result",
+                            "update_collaboration",
                         ],
                     }
                 ]
@@ -274,8 +273,8 @@ def test_runner_prompt_tells_targeted_responder_to_reuse_existing_collaboration_
     assert "case-123" in prompt
     assert "creq-456" in prompt
     assert "优先复用已有 case/request" in prompt
-    assert "不要另开 open_case" in prompt
-    assert "case_status -> submit_evidence -> update_collaboration_request" in prompt
+    assert "不要另开 raise_collaboration" in prompt
+    assert "inspect_collaboration -> submit_collaboration_result -> update_collaboration" in prompt
 
 
 # LLM: compacted subagents must resume from their task-local run workspace, not parent long-term memory.

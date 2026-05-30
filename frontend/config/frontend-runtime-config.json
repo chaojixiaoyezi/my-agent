@@ -56,7 +56,7 @@
         "resume_auto_context_enabled": false,
         "resume_auto_context_mode": "trigger",
         "resume_auto_context_limit": 5,
-        "compact_auto_allow_apply": false
+        "compact_auto_trigger_percent": 90
       }
     },
     "gateway": {

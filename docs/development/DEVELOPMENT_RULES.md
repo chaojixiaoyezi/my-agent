@@ -568,9 +568,10 @@ do_write()
 ## 11.5 Runtime Config Self-Healing / 运行期配置自修复
 
 - Agents must not raw-edit `agent_py_agent/config/capability_config.yaml`.
-  Runtime adjustments go through `CapabilityConfigPatchRequest` and the
-  `capability_config_patch` tool so field validation, allowlist policy,
-  version checks, audit, and reload behavior stay centralized.
+  Runtime adjustments go through the admin/runtime `CapabilityConfigPatchRequest`
+  service so field validation, allowlist policy, version checks, audit, and reload
+  behavior stay centralized. Do not expose this as an ordinary model-facing task
+  tool; configuration changes belong to explicit user/admin or system repair paths.
 - Safe capability fields may be auto-applied only when they are listed in the
   runtime config allowlist. Global behavior switches and unknown fields must
   return suggestions such as `manual_approval_required` instead of mutating

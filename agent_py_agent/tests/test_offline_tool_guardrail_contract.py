@@ -48,7 +48,7 @@ def test_failed_tool_retry_budget_stops_after_limit() -> None:
         validate_tool_guardrail_events,
     )
 
-    failure = {"type": "tool_result", "tool": "fetch_url", "args_hash": "same", "retryable": True}
+    failure = {"type": "tool_result", "tool": "web_fetch", "args_hash": "same", "retryable": True}
     result = validate_tool_guardrail_events(
         (
             {**failure, "operation_id": "op-1", "result": {"ok": False}},
@@ -71,7 +71,7 @@ def test_failed_tool_retry_budget_zero_is_unlimited() -> None:
 
     failure = {
         "type": "tool_result",
-        "tool": "fetch_url",
+        "tool": "web_fetch",
         "args_hash": "same",
         "retryable": True,
         "retry_limit": 0,

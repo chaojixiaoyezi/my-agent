@@ -45,10 +45,10 @@ class TestOneShotToolCallKey:
         payload2 = {"tool": "create_subagents", "id": "2"}
         assert _one_shot_tool_call_key(payload1) != _one_shot_tool_call_key(payload2)
 
-    def test_dispatch_and_board_are_not_one_shot_guarded(self):
-        """验证调度和看板允许父节点多轮推进/观察。"""
-        assert _one_shot_tool_call_key({"tool": "dispatch_subagents", "apply": True}) == ""
-        assert _one_shot_tool_call_key({"tool": "subagent_board", "limit": 20}) == ""
+    def test_dispatch_and_tree_inspection_are_not_one_shot_guarded(self):
+        """验证调度和树状态查看允许父节点多轮推进/观察。"""
+        assert _one_shot_tool_call_key({"tool": "dispatch_subagents", "dry_run": False}) == ""
+        assert _one_shot_tool_call_key({"tool": "inspect_agent_tree", "limit": 20}) == ""
 
 
 class TestStringList:

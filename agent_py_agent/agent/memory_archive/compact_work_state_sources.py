@@ -63,7 +63,7 @@ def _candidate_fact_roots(request: WorkStateFieldSourceRequest) -> list[Path]:
         str(scope.get("run_id") or ""),
         *request.source_state["task_refs"],
     ])
-    roots = [workspace, *(_path_root(workspace, item) for item in request.source_state["content_paths"])]
+    roots = [_path_root(workspace, item) for item in request.source_state["content_paths"]]
     for item_id in ids:
         roots.extend(_id_roots(workspace, item_id))
     return _existing_dirs(_dedupe_paths(roots), workspace)

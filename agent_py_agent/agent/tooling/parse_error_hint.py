@@ -20,7 +20,8 @@ _TRUNCATED_PAYLOAD_HINT = (
 )
 _TRUNCATED_WRITE_HINT = (
     "如果上一轮是 write_file 且 content 太长，不要重复输出完整 content；"
-    "优先用 WRITE_FILE_RAW 或 write_file.data_base64 提交完整产物；"
+    "优先用 [WRITE_FILE_RAW path=\"...\"]...[/WRITE_FILE_RAW] 原文块或 write_file.data_base64 提交完整产物；"
+    "不要把 WRITE_FILE_RAW 当 JSON tool 名；"
     f"正常分块时单次 content 建议 {RECOMMENDED_WRITE_CHUNK_CHARS} 字符。"
     "如果已经连续解析失败，下一轮只能输出 1 个 write_file 工具调用，"
     f"content 降到不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符，闭合 [/TOOL_CALL] 后再继续下一块。"

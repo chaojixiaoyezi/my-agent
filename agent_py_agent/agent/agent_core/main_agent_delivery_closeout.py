@@ -251,9 +251,9 @@ def _repair_guidance(report: dict[str, Any]) -> dict[str, Any]:
         "message_zh": (
             "请根据 failed_artifacts、failed_gates 和 required_actions 自主选择下一步修复方式。"
             "如果还需要读取或搜索来确认上下文，可以继续做；但要尽快把结果落成可验收的本地产物，"
-            "然后调用 submit_for_acceptance 或用最终回复触发隐式验收。"
+            "然后调用 submit_for_acceptance 提交验收。"
         ),
-        "submit_when_ready": "submit_for_acceptance 或无工具最终回复",
+        "submit_when_ready": "submit_for_acceptance",
     }
 
 # LLM: _closeout_text makes the final message copyable while keeping the machine payload explicit.

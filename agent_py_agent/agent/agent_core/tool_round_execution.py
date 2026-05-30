@@ -17,18 +17,15 @@ from .runner_context import current_subagent_run_id
 from .tool_round_context_archive import append_assistant_tool_round_context
 
 _STATEFUL_ORCHESTRATION_TOOLS = {
-    "capability_config_patch",
     "create_subagents",
     "schedule_child_subagents",
 }
 _DEPENDENT_ORCHESTRATION_TOOLS = {
-    "capability_config_patch",
     "create_subagents",
     "dispatch_subagents",
     "inspect_agent_tree",
     "schedule_child_subagents",
-    "subagent_board",
-    "subagent_message",
+    "send_guidance",
 }
 
 

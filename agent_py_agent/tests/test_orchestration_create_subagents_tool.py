@@ -152,7 +152,7 @@ class TestCreateSubagentsToolExecute:
         assert payload["auto_start"]["status"] == "started"
         assert payload["auto_start"]["dispatch_mode"] == "background"
         assert payload["auto_start"]["agent_tree"]["schema_version"] == "agent_tree_status.v1"
-        assert payload["next_action"]["tool"] == "subagent_board"
+        assert payload["next_action"]["tool"] == "inspect_agent_tree"
 
     def test_auto_start_process_command_targets_created_run_ids(self):
         """真实后台进程必须显式只推进本轮创建的 run_id，不能靠全局候选猜。"""

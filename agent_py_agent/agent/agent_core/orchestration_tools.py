@@ -34,8 +34,7 @@ from .orchestration_create_policy import (
     create_run_params,
 )
 from .orchestration_dispatch_tool import DispatchSubagentsTool
-from .orchestration_event_tools import RaiseMainEventTool as RaiseMainEventTool
-from .orchestration_event_tools import RaiseObservationTool as RaiseObservationTool
+from .orchestration_event_tools import RaiseEventTool as RaiseEventTool
 from .orchestration_lineage_names import indexed_count_params, indexed_item_params
 from .orchestration_replacements import record_create_replacements
 from .orchestration_run_scope import (
@@ -44,7 +43,6 @@ from .orchestration_run_scope import (
 from .orchestration_shared_context import append_parent_shared_context
 from .orchestration_sibling_roster import attach_sibling_roster
 from .orchestration_status_tools import InspectAgentTreeTool as InspectAgentTreeTool
-from .orchestration_status_tools import SubagentBoardTool as SubagentBoardTool
 from .orchestration_tool_grants import (
     CODING_SUBAGENT_TOOLS,
     READ_ONLY_SUBAGENT_TOOLS,
@@ -54,6 +52,7 @@ from .orchestration_tool_specs import build_create_subagents_spec
 from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mode  # noqa: F401
 from .orchestration_write_guard import ExternalWriteTargetRequest, external_write_target_error
 from .parameters import _positive_int
+from .runtime_guidance_tool import SendGuidanceTool as SendGuidanceTool
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -110,7 +109,7 @@ class CreateSubagentsTool(BaseTool):
         )
 
     # LLM: _items_result routes structured batch mode before count-mode validation.
-    # 函数用途: 解析 items/tasks 入口；返回 None 表示继续单 goal/count 模式。
+    # 函数用途: 解析 items 入口；返回 None 表示继续单 goal/count 模式。
     def _items_result(self, params: dict[str, object]) -> ToolExecutionResult | None:
         items = create_items_from_params(params)
         if isinstance(items, str):
@@ -138,7 +137,7 @@ class CreateSubagentsTool(BaseTool):
         run_params = create_run_params(self.agent, params, goal, allowed_tools)
         return goal, count, allowed_tools, run_params
 
-    # LLM: _execute_items is the structured batch path, equivalent to 长期助手 delegate_task tasks[].
+    # LLM: _execute_items is the structured batch path for independent child goals.
     # 函数用途: 按 items[] 中每个独立 goal 创建子代理，避免 count 复制同一个任务目标。
     def _execute_items(
         self,

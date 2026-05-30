@@ -142,7 +142,11 @@ def _write_payload(params: dict[str, Any]) -> tuple[str | None, bytes]:
     has_text = "content" in params and params.get("content") is not None
     has_base64 = "data_base64" in params and params.get("data_base64") is not None
     if has_text == has_base64:
-        raise ValueError("content 和 data_base64 必须二选一")
+        raise ValueError(
+            "write_file 的 content 和 data_base64 必须二选一，且只能提供其中一个。"
+            "写普通文本报告时用 content；超长文本可在 [TOOL_CALL] 外使用 "
+            "[WRITE_FILE_RAW path=\"...\"]...[/WRITE_FILE_RAW] 原文块，不要把 WRITE_FILE_RAW 当 JSON tool 名。"
+        )
     if has_base64:
         raw = _text_param(params.get("data_base64"), name="data_base64", max_chars=_MAX_WRITE_TEXT_CHARS)
         try:
@@ -192,6 +196,8 @@ def _write_output(
     return "\n".join(notes)
 
 
+# LLM: _atomic_write_bytes protects final artifacts with temp-file writes and post-write validation.
+# 函数用途: 先写临时文件并校验候选产物，再原子替换目标文件。
 def _atomic_write_bytes(target: Path, data: bytes) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=_temp_suffix_for(target), dir=str(target.parent))
@@ -210,6 +216,8 @@ def _atomic_write_bytes(target: Path, data: bytes) -> None:
         raise
 
 
+# LLM: _temp_suffix_for keeps temp filenames compatible with format validators that inspect suffixes.
+# 函数用途: 对需要格式校验的产物保留原后缀，其余临时文件统一使用 .tmp。
 def _temp_suffix_for(target: Path) -> str:
     suffix = target.suffix
     return suffix if suffix in _PREWRITE_VALIDATED_SUFFIXES else ".tmp"
@@ -226,6 +234,8 @@ _PREWRITE_VALIDATED_SUFFIXES = {
 }
 
 
+# LLM: _validate_final_artifact_candidate rejects objectively corrupt common artifacts before replacement.
+# 函数用途: 在替换目标文件前，对支持的产物格式做通用完整性检查。
 def _validate_final_artifact_candidate(candidate: Path, target: Path) -> None:
     if target.suffix.lower() not in _PREWRITE_VALIDATED_SUFFIXES:
         return

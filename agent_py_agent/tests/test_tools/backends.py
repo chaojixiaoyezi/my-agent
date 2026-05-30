@@ -410,7 +410,7 @@ class DispatchCompletionBackend(BaseBackend):
         return ModelResponse(
             text=(
                 "[TOOL_CALL]\n"
-                '{"tool":"dispatch_subagents","apply":true,"execute_runners":false,"no_probe":true}\n'
+                '{"tool":"dispatch_subagents","dry_run":false,"max_runners":0,"no_probe":true}\n'
                 "[/TOOL_CALL]"
             ),
             backend=self.name,
@@ -418,7 +418,7 @@ class DispatchCompletionBackend(BaseBackend):
 
 
 class DemoHandler(BaseHTTPRequestHandler):
-    """LLM: minimal HTTP handler for local integration tests of fetch and http_request tools.
+    """LLM: minimal HTTP handler for local integration tests of fetch and API calls.
 
     新手说明:
     GET /page 返回 "demo page"；POST /echo 把请求体原样回显成 JSON。

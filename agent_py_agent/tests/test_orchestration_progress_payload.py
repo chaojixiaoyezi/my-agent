@@ -28,7 +28,7 @@ def test_runner_context_invalid_workflow_mode_stays_off() -> None:
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents.workspace = Path("/tmp/workspace")
 
-    result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "workflow_mode": "parallel"})
+    result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False, "workflow_mode": "parallel"})
 
     assert result.ok is True
     call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
@@ -55,7 +55,7 @@ def test_runner_context_dispatch_reports_direct_child_progress() -> None:
         SimpleNamespace(id="child-b", parent_id="parent-run", status="PLANNING"),
     ]
 
-    result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "execute_runners": True})
+    result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False})
 
     payload = json.loads(result.output)
     assert payload["direct_children"]["by_status"]["PLANNING"] == 1
@@ -82,7 +82,7 @@ def test_runner_context_dispatch_suggests_recovery_child_for_blocked_direct_chil
         SimpleNamespace(id="child-blocked", parent_id="parent-run", status="BLOCKED"),
     ]
 
-    result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "execute_runners": True})
+    result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False})
 
     payload = json.loads(result.output)
     direct_children = payload["direct_children"]
@@ -124,7 +124,7 @@ def test_runner_context_dispatch_includes_packet_first_recovery_strategy(tmp_pat
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents = manager
 
-    result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "execute_runners": True})
+    result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False})
 
     payload = json.loads(result.output)
     direct = payload["direct_children"]
@@ -171,7 +171,7 @@ def test_runner_context_dispatch_batches_multiple_recovery_strategies_without_sh
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents = manager
 
-    result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "execute_runners": True})
+    result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False})
 
     direct = json.loads(result.output)["direct_children"]
     assert len(direct["recovery_strategies"]) == 2
@@ -217,16 +217,16 @@ def test_runner_context_dispatch_splits_mixed_recovery_batches(tmp_path: Path) -
     mock_agent.dispatch_subagents.return_value = mock_report
     mock_agent.subagents = manager
 
-    result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "execute_runners": True})
+    result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False})
 
     batches = json.loads(result.output)["direct_children"]["recovery_batches"]
     by_action = {item["action"]: item for item in batches}
     rerun = by_action["rerun_original_from_continue_packet"]
     takeover = by_action["create_takeover_run_from_continue_packet"]
     assert rerun["run_ids"] == [blocked_id]
-    assert rerun["suggested_tool_call"]["execute_runners"] is True
+    assert rerun["suggested_tool_call"]["dry_run"] is False
     assert "runner_instruction" in rerun["suggested_tool_call"]
     assert takeover["run_ids"] == [timeout_id]
     assert takeover["execution_mode"] == "takeover_apply"
-    assert takeover["suggested_tool_call"]["execute_runners"] is False
+    assert takeover["suggested_tool_call"]["dry_run"] is True
     assert takeover["suggested_tool_call"]["max_runners"] == 0

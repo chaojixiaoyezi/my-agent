@@ -13,16 +13,16 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-def resolve_thread(agent: SimpleAgent, params: dict[str, object]) -> tuple[str, str] | ToolExecutionResult:
+def resolve_thread(agent: SimpleAgent, params: dict[str, object], *, tool_name: str = "raise_collaboration") -> tuple[str, str] | ToolExecutionResult:
     thread_id = str(params.get("thread_id") or "").strip()
     task_id = str(params.get("task_id") or "").strip()
     if thread_id:
-        return _explicit_thread(agent, thread_id, task_id)
+        return _explicit_thread(agent, thread_id, task_id, tool_name=tool_name)
     if task_id and (resolved := thread_from_task(agent, task_id, materialize=True)):
         return resolved
     if resolved := thread_from_current_runner(agent):
         return resolved
-    return error("open_case", "thread_required", "thread_id is required unless task_id is bound to a thread")
+    return error(tool_name, "thread_required", "thread_id is required unless task_id is bound to a thread")
 
 
 def thread_from_task(agent: SimpleAgent, task_id: str, *, materialize: bool = False) -> tuple[str, str] | None:
@@ -41,13 +41,13 @@ def thread_from_current_runner(agent: SimpleAgent) -> tuple[str, str] | None:
     return thread_from_task(agent, run_id, materialize=True) if run_id else None
 
 
-def _explicit_thread(agent: SimpleAgent, thread_id: str, task_id: str) -> tuple[str, str] | ToolExecutionResult:
+def _explicit_thread(agent: SimpleAgent, thread_id: str, task_id: str, *, tool_name: str) -> tuple[str, str] | ToolExecutionResult:
     if agent.conversation_store.load_thread(thread_id) is not None:
         return thread_id, task_id
     for fallback in (thread_from_task(agent, task_id, materialize=True), thread_from_current_runner(agent)):
         if fallback:
             return fallback
-    return error("open_case", "unknown_thread", f"unknown conversation thread: {thread_id}")
+    return error(tool_name, "unknown_thread", f"unknown conversation thread: {thread_id}")
 
 
 def _materialize_internal_thread_for_task(agent: SimpleAgent, task_id: str) -> tuple[str, str] | None:

@@ -72,7 +72,7 @@ def test_local_progress_guard_unlimited_hint_interval_is_configurable(tmp_path: 
             local_progress_unlimited_hint_interval=7,
         ),
     )
-    exploratory_calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
+    exploratory_calls = [{"tool": "web_fetch", "url": "https://example.test/data.json"}]
 
     for _ in range(6):
         assert has_required_local_progress_guard(agent, params, exploratory_calls) is False

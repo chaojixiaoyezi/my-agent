@@ -35,7 +35,8 @@ def long_content_recovery_context(request: LongContentRecoveryRequest) -> str:
         lines.append(f"target_path: {target_path}")
     lines.extend([
         "rules:",
-        "- 文本完整文件优先用 WRITE_FILE_RAW；二进制产物用 write_file.data_base64。",
+        "- 文本完整文件可用 [WRITE_FILE_RAW path=\"...\"]...[/WRITE_FILE_RAW] 原文块；"
+        "不要把 WRITE_FILE_RAW 当 JSON tool 名。二进制产物用 write_file.data_base64。",
         f"- 如果继续用 write_file.content，每次 content 不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符。",
         "- 修改已有文件优先用 apply_patch。",
         "- 不要在普通回复或 JSON 参数里回传完整大文件正文。",

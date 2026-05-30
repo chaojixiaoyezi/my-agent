@@ -18,14 +18,12 @@ from .store import ConversationStore
 
 CONTROL_ACTION_LINES = [
     "- inspect_agent_tree: 只读查看主/子/孙代理状态树。",
-    "- case_status: 只读查看协作 case 的请求、证据、参与者和决策。",
-    "- list_collaboration_requests: 查看点名给某个代理的待处理协作请求。",
-    "- raise_collaboration_event: 发现需要其他代理/数据源协作时，一步打开 case 并发出 request。",
-    "- update_collaboration_request: 更新协作请求状态，例如完成、阻塞、需要换策略。",
-    "- reroute_collaboration_request: 请求阻塞且有替代目标时，把请求结构化改派给新目标。",
-    "- update_case_status: 主代理研判后推进协作 case 生命周期。",
+    "- raise_event: 记录普通进展、阻塞或需要主代理处理的事件。",
+    "- raise_collaboration: 发起协作；没有 case_id 时开 case，有 question/target 时同步发 request。",
+    "- inspect_collaboration: 只读查看协作 case 或待处理协作请求。",
+    "- submit_collaboration_result: 提交协作命中、未命中、证据引用和限制说明。",
+    "- update_collaboration: 更新协作 case 或 request；带 target_agent_ids 可改派请求。",
     "- dispatch_subagents: 只有需要推进、恢复或调度时才调用。",
-    "- subagent_board: 查看任务看板摘要。",
 ]
 
 

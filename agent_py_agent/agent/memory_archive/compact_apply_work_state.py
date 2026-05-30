@@ -1,5 +1,5 @@
 # LLM: Compact apply work-state helpers; never invent facts that are missing from source files.
-# 模块用途: 生成手动 compact apply 的工作状态快照和摘要，供后续 resume 做一致性对照。
+# 模块用途: 生成 compact apply 的工作状态快照和摘要，供后续 resume 做一致性对照。
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def _base_snapshot(request: WorkStateSnapshotRequest, source_state: dict[str, An
         "scope": request.plan["scope"],
         "created_at": request.now,
         "goal": goal,
-        "phase": "manual_compact_apply",
+        "phase": "compact_apply",
         "next_step": next_actions[0] if next_actions else "",
         "next_actions": next_actions,
         "acceptance": field_sources.acceptance,
@@ -209,9 +209,16 @@ def _archive_next_actions(records: list[dict[str, Any]]) -> list[str]:
         if str(record.get("action") or "") != "assistant_tool_round":
             continue
         hint = str(record.get("content") or record.get("content_preview") or "").strip()
-        if hint:
+        if hint and not _looks_like_raw_tool_step(hint):
             return [hint]
     return []
+
+
+# LLM: _looks_like_raw_tool_step prevents a single tool call from becoming the task-level next step.
+# 函数用途: 压缩交接的下一步应是工作意图，不应把 `[TOOL_CALL] read_file...` 这种低层动作当路线图。
+def _looks_like_raw_tool_step(value: str) -> bool:
+    text = value.strip()
+    return text.startswith("[TOOL_CALL]") or "[/TOOL_CALL]" in text
 
 
 # LLM: _archive_texts collects list-like fields from archive records for bounded fact-source roots.

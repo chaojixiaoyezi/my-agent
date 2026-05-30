@@ -83,8 +83,7 @@ def _takeover_tool_call(run_ids: list[str]) -> dict[str, object]:
 def _dispatch_tool_call(run_ids: list[str], *, execute_runners: bool) -> dict[str, Any]:
     return {
         "tool": "dispatch_subagents",
-        "apply": True,
-        "execute_runners": execute_runners,
+        "dry_run": not execute_runners,
         "run_ids": list(run_ids),
         "workflow_mode": "off",
     }

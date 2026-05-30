@@ -28,7 +28,7 @@ def test_runner_context_dispatch_defaults_takeover_to_current_parent():
 
     mock_agent = _mock_dispatch_agent("subagent-parent")
 
-    result = DispatchSubagentsTool(mock_agent).execute({"apply": True})
+    result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False})
 
     assert result.ok is True
     params = mock_agent.dispatch_subagents.call_args.kwargs["params"]
@@ -41,7 +41,7 @@ def test_runner_context_dispatch_keeps_explicit_takeover_owner():
 
     mock_agent = _mock_dispatch_agent("subagent-parent")
 
-    result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "take_over_by": "subagent-new-leader"})
+    result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False, "take_over_by": "subagent-new-leader"})
 
     assert result.ok is True
     params = mock_agent.dispatch_subagents.call_args.kwargs["params"]

@@ -141,20 +141,9 @@ def _explicit_scope(params: dict[str, object], *, include_parent: bool) -> dict[
 
 def _explicit_run_ids(params: dict[str, object]) -> list[str]:
     ids: list[str] = []
-    for key in (
-        "run_ids",
-        "include_run_ids",
-        "dispatch_run_ids",
-        "subagent_run_ids",
-        "subagent_ids",
-        "target_run_ids",
-        "target_subagent_ids",
-        "agent_ids",
-        "child_run_ids",
-    ):
-        for run_id in _string_list(params.get(key)):
-            if run_id not in ids:
-                ids.append(run_id)
+    for run_id in _string_list(params.get("run_ids")):
+        if run_id not in ids:
+            ids.append(run_id)
     return ids
 
 

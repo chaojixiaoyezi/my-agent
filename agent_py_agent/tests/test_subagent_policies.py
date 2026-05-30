@@ -514,7 +514,7 @@ def test_default_forbidden_write_roots_contains_home():
 
 # ── 边界场景测试 ──────────────────────────────────────────────────────────
 
-def test_filter_board_items_mixed_case_status():
+def test_filter_board_items_mixed_inspect_collaboration():
     """测试状态过滤大小写敏感。"""
     items = [
         SubAgentBoardItem(

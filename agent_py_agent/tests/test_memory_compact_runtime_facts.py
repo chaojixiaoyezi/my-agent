@@ -121,6 +121,37 @@ def test_runtime_fact_source_reads_compact_auto_continuation_injection(tmp_path:
     assert payload["latest_tests"] == ["focused compact continuation test"]
 
 
+# LLM: Compact work-state should not treat repository checklists as this run's task facts.
+# 函数用途: 防止 workspace 根目录 TEST_CHECKLIST.md 污染普通真实任务的 compact 交接。
+def test_compact_work_state_does_not_import_workspace_root_checklist(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "TEST_CHECKLIST.md").write_text("- unrelated repository checklist\n", encoding="utf-8")
+    write_runtime_fact_source(
+        RuntimeFactSourceRequest(
+            root=root,
+            request_id="req-root-checklist",
+            user_prompt="请整理几个项目并写一份报告。",
+            response_text="running",
+            backend="echo",
+            status="running",
+        )
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            MemoryCompactPlanOptions(request_id="req-root-checklist", run_id="req-root-checklist", task_id="req-root-checklist")
+        ),
+    )
+
+    work_state = result["work_state_snapshot"]
+    assert work_state["goal"] == "请整理几个项目并写一份报告。"
+    assert work_state["latest_tests"]["items"] == []
+    assert work_state["latest_tests"]["source_paths"] == []
+    assert work_state["read_files"] == []
+
+
 # LLM: _write_config keeps the real-run test isolated from repository and user config.
 # 函数用途: 写入临时 echo backend 配置，让测试只使用 tmp_path workspace。
 def _write_config(tmp_path: Path) -> Path:

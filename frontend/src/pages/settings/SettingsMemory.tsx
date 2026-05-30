@@ -170,11 +170,14 @@ export default function SettingsMemory() {
             unit="条"
             disabled={!isAdmin}
           />
-          <ToggleField
-            label="memory_compact_auto_allow_apply（自动压缩应用）"
-            description="压缩后是否自动应用结果"
-            checked={adv.compact_auto_allow_apply}
-            onChange={(v) => { setAdv({ compact_auto_allow_apply: v }); markDirty(); }}
+          <NumberField
+            label="memory_compact_auto_trigger_percent（自动压缩阈值）"
+            description="上下文使用到多少百分比时自动压缩，0 表示 100%"
+            value={adv.compact_auto_trigger_percent}
+            onChange={(v) => { setAdv({ compact_auto_trigger_percent: v }); markDirty(); }}
+            min={0}
+            max={100}
+            unit="%"
             disabled={!isAdmin}
           />
         </div>

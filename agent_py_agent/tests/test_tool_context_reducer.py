@@ -57,7 +57,7 @@ def _direct_children_recovery_payload() -> dict:
                 "runner_instruction": "先读 latest_continue_packet.json 再继续当前步骤",
             }
         ],
-        "suggested_tool_call": {"tool": "dispatch_subagents", "run_ids": ["child-1"], "execute_runners": True},
+        "suggested_tool_call": {"tool": "dispatch_subagents", "run_ids": ["child-1"], "dry_run": False},
     }
 
 
@@ -124,8 +124,8 @@ def test_read_artifact_dispatch_content_is_summarized_for_live_prompt():
 
 
 # LLM: Board externalization must keep deliverable refs visible to the root synthesis turn.
-# 函数用途: subagent_board 输出过大时，live prompt 仍给出可读产物 refs，避免模型乱猜 task_dir。
-def test_subagent_board_externalized_result_keeps_deliverable_refs():
+# 函数用途: inspect_agent_tree 输出过大时，live prompt 仍给出可读产物 refs，避免模型乱猜 task_dir。
+def test_inspect_agent_tree_externalized_result_keeps_deliverable_refs():
     output = json.dumps(
         {
             "summary": {"DONE": 2, "VERIFIED": 2},
@@ -144,7 +144,7 @@ def test_subagent_board_externalized_result_keeps_deliverable_refs():
     )
 
     rendered = render_tool_result_for_live_prompt(
-        ToolExecutionResult("subagent_board", True, output),
+        ToolExecutionResult("inspect_agent_tree", True, output),
         _dispatch_externalized_archive_record(output),
     )
 
@@ -157,7 +157,7 @@ def test_subagent_board_externalized_result_keeps_deliverable_refs():
 
 # LLM: Board summaries should preserve artifact IDs when registry-backed refs exist.
 # 函数用途: 大输出外置后，最终汇报提示仍能看到 artifact_id，避免只靠路径文字判断产物事实。
-def test_subagent_board_externalized_result_keeps_deliverable_artifact_ids():
+def test_inspect_agent_tree_externalized_result_keeps_deliverable_artifact_ids():
     output = json.dumps(
         {
             "summary": {"DONE": 1, "VERIFIED": 1},
@@ -182,7 +182,7 @@ def test_subagent_board_externalized_result_keeps_deliverable_artifact_ids():
     )
 
     rendered = render_tool_result_for_live_prompt(
-        ToolExecutionResult("subagent_board", True, output),
+        ToolExecutionResult("inspect_agent_tree", True, output),
         _dispatch_externalized_archive_record(output),
     )
 

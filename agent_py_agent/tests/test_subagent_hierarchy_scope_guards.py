@@ -25,7 +25,7 @@ def test_hierarchy_schedule_allows_forbidden_sibling_scope_hint(tmp_path):
         parent_id=root.id,
         root_id=root.id,
         depth=1,
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
         extra_write_roots=[str(deliverables)],
     )
 
@@ -65,7 +65,7 @@ def test_hierarchy_schedule_allows_depth_limit_text_without_scope_block(tmp_path
         depth=1,
         role="child_coordinator",
         agent_name="小傻妞-A",
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
         extra_write_roots=[str(deliverables)],
     )
 
@@ -80,7 +80,7 @@ def test_hierarchy_schedule_allows_depth_limit_text_without_scope_block(tmp_path
                     ),
                     role="child_coordinator",
                     agent_name="小小傻妞-A",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
                 )
             ],
             apply=True,
@@ -270,7 +270,7 @@ def test_hierarchy_schedule_allows_different_declared_work_topics(tmp_path):
         parent_id=root.id,
         root_id=root.id,
         depth=1,
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
         extra_write_roots=[str(deliverables)],
     )
 

@@ -12,7 +12,7 @@ from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
 )
 from agent_py_agent.agent.subagents.services.qa_role_contract import qa_roles_required_by_task
 
-ORCHESTRATION_TOOLS = ["schedule_child_subagents", "dispatch_subagents", "subagent_board"]
+ORCHESTRATION_TOOLS = ["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"]
 
 
 # LLM: _qa_parent creates a coordinator that explicitly requires all broad QA roles.

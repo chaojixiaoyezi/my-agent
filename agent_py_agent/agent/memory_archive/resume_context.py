@@ -29,11 +29,15 @@ from .query import (
 from .resume_brief import build_resume_brief
 
 _ID_PATTERN = re.compile(r"(subagent-[A-Za-z0-9_.:-]+|gwreq-[A-Za-z0-9_.:-]+|request-[A-Za-z0-9_.:-]+)")
-_TRIGGER_KEYWORDS = (
-    "继续",
-    "接着",
+_EXPLICIT_RESUME_KEYWORDS = (
     "刚刚",
     "上次",
+    "上回",
+    "之前",
+    "昨天",
+    "前面",
+    "旧任务",
+    "历史任务",
     "恢复",
     "找回",
     "断片",
@@ -41,10 +45,40 @@ _TRIGGER_KEYWORDS = (
     "resume",
     "recover",
     "memory-resume",
+    "handoff",
+    "gateway",
     "request_id",
     "run_id",
     "subagent-",
     "gwreq-",
+)
+_CONTINUE_WORDS = ("继续", "接着")
+_CURRENT_TASK_CONTINUE_PHRASES = (
+    "继续往下",
+    "继续向下",
+    "继续看",
+    "继续读",
+    "继续阅读",
+    "继续分析",
+    "继续整理",
+    "继续写",
+    "继续推进",
+    "继续完成",
+    "继续处理",
+    "继续工作",
+    "继续做",
+    "接着往下",
+    "接着看",
+    "接着读",
+    "接着分析",
+    "接着整理",
+    "接着写",
+    "接着做",
+)
+_CONTINUE_WITH_EXPLICIT_TARGET = re.compile(
+    r"(^|[\s,，。.!！?？:：;；/\\])(?:继续|接着)\s*"
+    r"(?:[A-Za-z0-9_.:/-]{3,}|README|上次|上回|刚刚|昨天|之前|前面|那个|这个|旧任务|历史任务|handoff|gateway)",
+    re.IGNORECASE,
 )
 _STOP_TERMS = {
     "继续",
@@ -206,8 +240,17 @@ def _candidate_queries(user_prompt: str) -> list[str]:
 # 函数用途: 完成 has resume trigger 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _has_resume_trigger(user_prompt: str) -> bool:
 
-    lowered = user_prompt.lower()
-    return any(keyword.lower() in lowered for keyword in _TRIGGER_KEYWORDS)
+    text = str(user_prompt or "")
+    lowered = text.lower()
+    if _ID_PATTERN.search(text):
+        return True
+    if any(keyword.lower() in lowered for keyword in _EXPLICIT_RESUME_KEYWORDS):
+        return True
+    if not any(word in text for word in _CONTINUE_WORDS):
+        return False
+    if any(phrase in text for phrase in _CURRENT_TASK_CONTINUE_PHRASES):
+        return False
+    return bool(_CONTINUE_WITH_EXPLICIT_TARGET.search(text))
 
 
 # LLM: has_resume_trigger is the public intent check shared by prompt-memory scoping.

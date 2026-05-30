@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-# LLM: Web roles use the four network tools; fetch_url remains a hidden compatibility alias only.
-WEB_TOOLS = ["web_search", "web_fetch", "web_extract", "http_request"]
+# LLM: Web roles expose only discovery and URL/API reading to avoid duplicate network entrypoints.
+WEB_TOOLS = ["web_search", "web_fetch"]
 READ_ONLY_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", *WEB_TOOLS]
 WORKER_READ_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", *WEB_TOOLS]
 ARTIFACT_BUILDER_TOOLS: list[str] = []
@@ -13,17 +13,12 @@ WORKER_WRITE_TOOLS = ["write_file", "apply_patch"]
 REPORT_WRITE_TOOLS = ["write_file", "apply_patch"]
 SHELL_TOOL = "run_command"
 CAPABILITY_REQUEST_TOOL = "capability_request"
-MAIN_EVENT_TOOLS = ["raise_observation", "raise_main_event"]
+MAIN_EVENT_TOOLS = ["raise_event"]
 COLLABORATION_TOOLS = [
-    "raise_collaboration_event",
-    "open_case",
-    "request_collaboration",
-    "list_collaboration_requests",
-    "submit_evidence",
-    "update_collaboration_request",
-    "reroute_collaboration_request",
-    "update_case_status",
-    "case_status",
+    "raise_collaboration",
+    "inspect_collaboration",
+    "submit_collaboration_result",
+    "update_collaboration",
 ]
 ROLE_BASE_TOOLS = [
     *READ_ONLY_TOOLS,
@@ -39,8 +34,7 @@ COORDINATOR_TOOLS = [
     "dispatch_subagents",
     # LLM: Coordinators can inspect status without entering dispatch, keeping "look only" separate from "advance work".
     "inspect_agent_tree",
-    "subagent_board",
-    "subagent_message",
+    "send_guidance",
     *ROLE_BASE_TOOLS,
 ]
 

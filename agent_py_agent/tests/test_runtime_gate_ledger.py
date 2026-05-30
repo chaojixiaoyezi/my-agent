@@ -260,7 +260,7 @@ def test_write_boundary_injects_tool_rate_limit_records(tmp_path):
             run_id="run-1",
             task_id="task-1",
             operation_id="op-old",
-            tool="fetch_url",
+            tool="web_fetch",
             parameters={"url": "https://example.test/a"},
             runtime_gate={"gate": "tool_execution", "allowed": False},
             args_hash="sha256:fetch-a",
@@ -274,7 +274,7 @@ def test_write_boundary_injects_tool_rate_limit_records(tmp_path):
 
     assert boundary["tool_rate_limit_records"] == (
         {
-            "tool_name": "fetch_url",
+            "tool_name": "web_fetch",
             "args_hash": "sha256:fetch-a",
             "attempt_timestamps": [10.0],
             "consecutive_failures": 1,

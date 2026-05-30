@@ -25,15 +25,12 @@ _LOCAL_PROGRESS_TOOL_NAMES = {
     "write_file",
 }
 _EXPLORATION_TOOL_NAMES = {
-    "http_request",
     "list_files",
     "list_tools",
     "read_artifact",
     "read_file",
     "search",
-    "fetch_url",
     "web_fetch",
-    "web_extract",
     "web_search",
 }
 _RUN_COMMAND_LOCAL_MUTATION_PREFIXES = ("mkdir ", "mkdir -p", "touch ", "cp ", "mv ", "tee ")

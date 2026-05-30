@@ -83,13 +83,14 @@ auto_save_memory: true
 # - memory_rule_auto_read_limit 表示每轮最多自动读取多少条规则正文；0 表示不自动读取。
 # - memory_resume_auto_context_enabled 默认关闭，避免普通请求因为恢复检索变慢。
 # - memory_resume_auto_context_mode:
-#   off: 不注入恢复块；trigger: 只有“继续/恢复/刚刚/run_id”等场景触发；always: 每轮都尝试。
+#   off: 不注入恢复块；trigger: 只有明确旧任务语义（继续 README、继续上次、恢复、run_id 等）才触发；
+#     “继续往下做/继续整理/继续完成”这类当前任务内部表达不会触发旧任务恢复；always: 每轮都尝试。
 # - memory_resume_auto_context_limit 表示自动恢复最多拿多少条线索，范围 1-50。
-# - memory_compact_auto_allow_apply 默认开启；只允许非破坏性 apply + auto resume + guard，不自动乱跑工具。
 # - compact 提前提示优先读取当前模型后端暴露的真实上下文窗口；拿不到时按 128K 通用窗口兜底。
 # - memory_compact_auto_trigger_percent 控制上下文使用到多少百分比时自动 compact：
 #   不写默认 90；0 表示 100；乱填回默认；大于100 => 100；小于50 => 50；50-100 => 按填写值。
-# - 自动 compact 续接不再设最大深度；只要 compact 包可恢复，系统会继续同一个任务。
+# - 保存型运行默认执行非破坏性 apply + auto resume + guard；save=false 时只生成计划，不写入 compact apply。
+# - 自动 compact 续接不再设最大深度；只要 compact 包可恢复，系统会继续同一个任务，不会因为普通任务缺少验收/测试备注而停车。
 # - 运行中 raw archive 和 runtime_fact 是 compact/resume 的基础事实源，随持久化运行默认启用，不提供单独关闭开关。
 memory_archive_level: 3
 memory_hook_enabled: true
@@ -102,7 +103,6 @@ memory_rule_receipt_enabled: true
 memory_resume_auto_context_enabled: false
 memory_resume_auto_context_mode: "trigger"
 memory_resume_auto_context_limit: 5
-memory_compact_auto_allow_apply: true
 memory_compact_auto_trigger_percent: 90
 
 # Memory / compact / artifact 默认预算：
@@ -485,11 +485,11 @@ tool_list_max_entries: 200
 # search_text 工具最多返回多少条匹配
 tool_search_max_matches: 50
 
-# web_fetch / web_extract / http_request 返回给模型的默认预览字符上限。
+# web_fetch 返回给模型的默认预览字符上限。
 # 全文或二进制内容应保存为 artifact 引用，不要直接塞进上下文。
 tool_web_max_chars: 100000
 
-# web_search / web_fetch / web_extract / http_request 工具默认超时秒数
+# web_search / web_fetch 工具默认超时秒数
 tool_http_timeout: 30
 
 # 路径访问策略，主代理和所有子代理共用：

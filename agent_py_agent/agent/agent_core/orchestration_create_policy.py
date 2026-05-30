@@ -64,14 +64,14 @@ def create_run_params(
 
 
 # LLM: _role_from_create_intent repairs structured-argument slips before workflow expansion.
-# 函数用途: 只按 role、agent_name 和 tasks 这类结构化参数纠偏；不从 goal/用户 prompt 的自然语言猜角色。
+# 函数用途: 只按 role、agent_name 和 children 这类结构化参数纠偏；不从 goal/用户 prompt 的自然语言猜角色。
 def _role_from_create_intent(raw_params: dict[str, object], goal: str, agent) -> str:
     role = str(raw_params.get("role") or "worker").strip() or "worker"
     if _role_field_is_lineage_agent_name(role):
         return _role_from_lineage_agent_name(role)
     if is_explicit_root_role(role):
         return role
-    if _json_task_items(raw_params.get("tasks")):
+    if _json_child_items(raw_params.get("children")):
         return "coordinator"
     if role == "worker" and _has_child_dispatch_tool(raw_params) and not _role_identity_is_quality(raw_params):
         return "coordinator"
@@ -245,8 +245,6 @@ _LIST_ATTRIBUTE_FIELDS = (
     "required_qa_roles",
     "required_read_paths",
     "replacement_for_run_ids",
-    "replaces_run_ids",
-    "supersedes_run_ids",
     "workflow_risk_tags",
 )
 _OUTPUT_REF_ATTRIBUTE_FIELDS = frozenset({"artifact_refs", "output_files", "output_refs"})
@@ -302,12 +300,12 @@ def _agent_name_from_role_field(raw_params: dict[str, object]) -> str:
 
 
 # LLM: _create_plan prevents global batch plans from leaking into every item child.
-# 函数用途: 优先用当前 item 自己的 plan；没有 plan 但有下级 tasks 时，把 tasks 变成协调者可读步骤。
+# 函数用途: 优先用当前 item 自己的 plan；没有 plan 但有下级 children 时，把 children 变成协调者可读步骤。
 def _create_plan(raw_params: dict[str, object]) -> list[str]:
     explicit = _string_list(raw_params.get("plan"))
     if explicit:
         return explicit
-    task_hints = _child_task_hint_plan(raw_params.get("tasks"))
+    task_hints = _child_task_hint_plan(raw_params.get("children"))
     if task_hints:
         return [
             "理解父级目标和可用资料",
@@ -318,10 +316,10 @@ def _create_plan(raw_params: dict[str, object]) -> list[str]:
     return ["理解目标", "执行任务", "产出证据", "交回真实结果和证据"]
 
 
-# LLM: _child_task_hint_plan turns 长期助手 nested tasks into readable coordinator steps.
-# 函数用途: 把 item.tasks 的下级任务提示交给 coordinator，而不是丢在未使用参数里。
+# LLM: _child_task_hint_plan turns nested children into readable coordinator steps.
+# 函数用途: 把 item.children 的下级任务提示交给 coordinator，而不是丢在未使用参数里。
 def _child_task_hint_plan(value: object) -> list[str]:
-    items = _json_task_items(value)
+    items = _json_child_items(value)
     lines: list[str] = []
     for index, item in enumerate(items, start=1):
         if not isinstance(item, dict):
@@ -336,9 +334,9 @@ def _child_task_hint_plan(value: object) -> list[str]:
     return lines
 
 
-# LLM: _json_task_items accepts the common nested tasks shapes produced by LLMs.
+# LLM: _json_child_items accepts structured child task hints.
 # 函数用途: 支持 list、单对象和 JSON 字符串形式的下级任务提示；解析失败时返回空列表。
-def _json_task_items(value: object) -> list[object]:
+def _json_child_items(value: object) -> list[object]:
     if isinstance(value, list):
         return value
     if isinstance(value, dict):

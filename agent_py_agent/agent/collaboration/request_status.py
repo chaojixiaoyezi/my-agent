@@ -148,7 +148,7 @@ def pending_request_row(case: CollaborationCase, request: CollaborationRequest) 
         "context_refs": list(request.context_refs),
         "created_at": request.created_at,
         "updated_at": request.updated_at,
-        "recommended_tools": ["case_status", "submit_evidence", "update_collaboration_request"],
+        "recommended_tools": ["inspect_collaboration", "submit_collaboration_result", "update_collaboration"],
     }
 
 

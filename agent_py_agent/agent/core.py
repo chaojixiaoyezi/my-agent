@@ -14,19 +14,16 @@ from pathlib import Path
 
 from .agent_core import (
     AgentRunResult,
-    CapabilityConfigPatchTool,
     CapabilityRequestTool,
     CreateSubagentsTool,
     DispatchSubagentsTool,
     InspectAgentTreeTool,
-    RaiseMainEventTool,
-    RaiseObservationTool,
+    RaiseEventTool,
     ScheduleChildSubagentsTool,
+    SendGuidanceTool,
     SimpleAgentDispatchMixin,
     SimpleAgentRuntimeMixin,
     SimpleAgentSubagentMixin,
-    SubagentBoardTool,
-    SubagentMessageTool,
 )
 from .agent_core.dispatch_lock import _DispatchWatchLock
 from .agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS, READ_ONLY_SUBAGENT_TOOLS
@@ -70,16 +67,11 @@ from .agent_core.runner_prompts import (
 from .backend import get_backend
 from .capability.runtime_config import default_capability_config_path
 from .collaboration import (
-    CaseStatusTool,
     CollaborationStore,
-    ListCollaborationRequestsTool,
-    OpenCaseTool,
-    RaiseCollaborationEventTool,
-    RequestCollaborationTool,
-    RerouteCollaborationRequestTool,
-    SubmitEvidenceTool,
-    UpdateCaseStatusTool,
-    UpdateCollaborationRequestTool,
+    InspectCollaborationTool,
+    RaiseCollaborationTool,
+    SubmitCollaborationResultTool,
+    UpdateCollaborationTool,
 )
 from .config import AgentConfig
 from .conversation import ConversationStore
@@ -266,21 +258,13 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CreateSubagentsTool(agent))
     agent.tools.register(CapabilityRequestTool(agent))
-    agent.tools.register(CapabilityConfigPatchTool(agent))
-    agent.tools.register(SubagentBoardTool(agent))
     agent.tools.register(InspectAgentTreeTool(agent))
-    agent.tools.register(RaiseObservationTool(agent))
-    agent.tools.register(RaiseMainEventTool(agent))
-    agent.tools.register(RaiseCollaborationEventTool(agent))
-    agent.tools.register(OpenCaseTool(agent))
-    agent.tools.register(RequestCollaborationTool(agent))
-    agent.tools.register(SubmitEvidenceTool(agent))
-    agent.tools.register(UpdateCollaborationRequestTool(agent))
-    agent.tools.register(RerouteCollaborationRequestTool(agent))
-    agent.tools.register(UpdateCaseStatusTool(agent))
-    agent.tools.register(CaseStatusTool(agent))
-    agent.tools.register(ListCollaborationRequestsTool(agent))
-    agent.tools.register(SubagentMessageTool(agent))
+    agent.tools.register(RaiseEventTool(agent))
+    agent.tools.register(SendGuidanceTool(agent))
+    agent.tools.register(RaiseCollaborationTool(agent))
+    agent.tools.register(InspectCollaborationTool(agent))
+    agent.tools.register(SubmitCollaborationResultTool(agent))
+    agent.tools.register(UpdateCollaborationTool(agent))
     agent.tools.register(DispatchSubagentsTool(agent))
     agent.tools.register(ScheduleChildSubagentsTool(agent))
 
@@ -288,26 +272,19 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
 __all__ = [
     "AgentRunResult",
     "CapabilityRequestTool",
-    "CapabilityConfigPatchTool",
-    "CaseStatusTool",
     "CODING_SUBAGENT_TOOLS",
     "CreateSubagentsTool",
     "DispatchSubagentsTool",
     "InspectAgentTreeTool",
-    "ListCollaborationRequestsTool",
-    "OpenCaseTool",
-    "RaiseCollaborationEventTool",
-    "RaiseMainEventTool",
-    "RaiseObservationTool",
-    "RequestCollaborationTool",
+    "InspectCollaborationTool",
+    "RaiseCollaborationTool",
+    "RaiseEventTool",
     "ONE_SHOT_TOOL_NAMES",
     "PARENT_PLANNER_READ_TOOLS",
     "READ_ONLY_SUBAGENT_TOOLS",
     "ScheduleChildSubagentsTool",
+    "SendGuidanceTool",
     "SimpleAgent",
-    "SubmitEvidenceTool",
-    "UpdateCaseStatusTool",
-    "UpdateCollaborationRequestTool",
-    "SubagentMessageTool",
-    "SubagentBoardTool",
+    "SubmitCollaborationResultTool",
+    "UpdateCollaborationTool",
 ]

@@ -1,5 +1,5 @@
 # LLM: Collaboration tool specs describe generic case-room actions for models.
-# 模块用途: 构建 open_case/request_collaboration/submit_evidence/case_status 的工具说明。
+# 模块用途: 构建合并后的协作工具说明，只暴露 raise/inspect/submit/update 四个模型入口。
 
 from __future__ import annotations
 
@@ -106,210 +106,110 @@ _REROUTE_REQUEST_PARAMETERS = {
 }
 
 
-# LLM: build_open_case_spec exposes the generic collaboration-room creation contract to ToolRegistry.
-# 函数用途: 构建 open_case 工具说明。
-def build_open_case_spec() -> ToolSpec:
+# LLM: build_raise_collaboration_spec exposes one model action for opening cases and sending requests.
+# 函数用途: 构建 raise_collaboration 工具说明，合并 open_case/request_collaboration/raise_collaboration_event。
+def build_raise_collaboration_spec() -> ToolSpec:
     return ToolSpec(
-        name="open_case",
+        name="raise_collaboration",
         category="orchestration",
         effect="mutating",
         requires_idempotency=True,
         description=(
-            "打开一个通用协作 case，让多个代理围绕同一件事交换请求和证据。"
-            "open_case 只创建协作房间；如果只是记录事件，可以停在这里。"
-            "如果需要其他代理回应，再调用 request_collaboration，"
-            "也可以直接改用 raise_collaboration_event 一步创建 case 和 request。"
+            "发起通用协作：没有 case_id 时打开新 case；有 question/target/capability 时同时发请求；"
+            "已有 case_id 时在该 case 里继续发请求。"
         ),
-        use_cases=["一个代理发现线索，需要多个代理协作研判", "需要把普通 observation 升级成多人协作事件"],
-        avoid_when=["只是记录普通进展时，用 raise_observation 即可"],
-        keywords=["协作", "case", "事件房间", "联合判断", "collaboration"],
-        parameters=_CASE_PARAMETERS,
-        examples=[
-            '{"tool":"open_case","task_id":"task-1","title":"需要多源协作","required_capabilities":["query"]}',
-            '{"tool":"request_collaboration","case_id":"case-1","requester_agent_id":"agent-a",'
-            '"required_capabilities":["query"],"question":"请围绕这条线索补充证据"}',
-        ],
-    )
-
-
-# LLM: build_request_collaboration_spec exposes agent-to-agent evidence requests without task templates.
-# 函数用途: 构建 request_collaboration 工具说明。
-def build_request_collaboration_spec() -> ToolSpec:
-    return ToolSpec(
-        name="request_collaboration",
-        category="orchestration",
-        effect="mutating",
-        requires_idempotency=True,
-        description="在 case 内向具备某些能力的代理发协作请求；可携带开放世界线索包和软查询提示。",
-        use_cases=["需要其他代理按实体、范围或问题补充证据", "需要并行查询多个来源后汇总"],
-        avoid_when=["已经有足够证据、只需要主代理收口时，不再继续发请求"],
-        keywords=["协作请求", "补证据", "关联", "correlation", "request"],
-        parameters=_REQUEST_PARAMETERS,
-        examples=[
-            '{"tool":"request_collaboration","case_id":"case-1","requester_agent_id":"agent-a",'
-            '"required_capabilities":["query"],"question":"请围绕这些线索补充证据",'
-            '"observed_facts":[{"fact_id":"fact-1","kind":"caller-defined","value":"..."}],'
-            '"query_hints":[{"hint_id":"hint-1","purpose":"可完整查、拆分查或换来源"}]}'
-        ],
-    )
-
-
-# LLM: build_raise_collaboration_event_spec gives models a one-step case+request action.
-# 函数用途: 构建 raise_collaboration_event 工具说明，避免模型只把协作意图写进产物。
-def build_raise_collaboration_event_spec() -> ToolSpec:
-    return ToolSpec(
-        name="raise_collaboration_event",
-        category="orchestration",
-        effect="mutating",
-        requires_idempotency=True,
-        description="发现需要多代理协作时，一次性打开 case 并创建协作请求；字段开放世界，不绑定具体业务。",
         use_cases=[
-            "任意子代理发现线索，需要其他代理或数据源补证据",
+            "任意代理发现线索，需要其他代理或数据源补证据",
             "不知道应该找谁，但知道需要 query/analyze/notify 等能力协助",
-            "普通 observation 已升级为需要多人响应的协作事件",
+            "已有协作 case，需要继续向其他代理发协作请求",
         ],
-        avoid_when=[
-            "只是记录普通进展时，用 raise_observation",
-            "已经有 case_id/request_id 时，优先复用 request_collaboration 或 submit_evidence",
-        ],
-        keywords=["协作事件", "raise collaboration", "补证据", "联合研判", "coordination"],
-        parameters=_RAISE_EVENT_PARAMETERS,
+        avoid_when=["只是记录普通进展时，用 raise_event", "只是查看协作进展时，用 inspect_collaboration"],
+        keywords=["协作", "case", "补证据", "联合判断", "collaboration", "coordination"],
+        parameters={**_CASE_PARAMETERS, **_REQUEST_PARAMETERS, **_RAISE_EVENT_PARAMETERS},
         examples=[
-            '{"tool":"raise_collaboration_event","title":"需要多源协作",'
-            '"required_capabilities":["query"],"question":"请围绕这些线索补充证据",'
+            '{"tool":"raise_collaboration","title":"需要多源协作","required_capabilities":["query"],'
+            '"question":"请围绕这些线索补充证据",'
             '"observed_facts":[{"fact_id":"fact-1","kind":"caller-defined","value":"..."}],'
-            '"query_hints":[{"hint_id":"hint-1","purpose":"可完整查、拆分查或换来源"}]}'
+            '"query_hints":[{"hint_id":"hint-1","purpose":"可完整查、拆分查或换来源"}]}',
+            '{"tool":"raise_collaboration","case_id":"case-1","target_agent_ids":["agent-b"],'
+            '"question":"请查你负责的来源里是否有同一线索"}',
         ],
     )
 
 
-# LLM: build_list_collaboration_requests_spec lets responders discover pending work without already knowing case_id.
-# 函数用途: 构建 list_collaboration_requests 工具说明，暴露只读待响应请求发现能力。
-def build_list_collaboration_requests_spec() -> ToolSpec:
+# LLM: build_inspect_collaboration_spec gives one read-only action for case status and pending requests.
+# 函数用途: 构建 inspect_collaboration 工具说明，合并 case_status/list_collaboration_requests。
+def build_inspect_collaboration_spec() -> ToolSpec:
     return ToolSpec(
-        name="list_collaboration_requests",
+        name="inspect_collaboration",
         category="orchestration",
         effect="read_only",
-        description="列出点名给当前代理或指定代理、且尚未被该代理响应的协作请求。",
+        description="只读查看协作：传 case_id 看 case；不传 case_id 时列出当前或指定代理的待处理协作请求。",
         use_cases=[
             "子代理不知道 case_id/request_id，但需要发现是否有协作请求在等自己",
             "协调代理想确认某个响应者是否还有待处理请求",
+            "主代理或 coordinator 想看 case 是否可收口",
         ],
-        avoid_when=["已经拿到明确 case_id 且只想看单个 case 时，用 case_status"],
-        keywords=["协作待办", "pending collaboration", "request discovery", "待响应请求"],
-        parameters=_LIST_REQUESTS_PARAMETERS,
-        examples=['{"tool":"list_collaboration_requests","agent_id":"source-b","limit":10}'],
+        avoid_when=["只是看代理树状态时，用 inspect_agent_tree"],
+        keywords=["协作状态", "协作待办", "pending collaboration", "case status", "request discovery"],
+        parameters={"case_id": "可选协作 case ID；有则查看 case 状态", **_LIST_REQUESTS_PARAMETERS},
+        examples=[
+            '{"tool":"inspect_collaboration","case_id":"case-1"}',
+            '{"tool":"inspect_collaboration","agent_id":"source-b","limit":10}',
+        ],
     )
 
 
-# LLM: build_submit_evidence_spec describes refs-first evidence submission for collaboration cases.
-# 函数用途: 构建 submit_evidence 工具说明。
-def build_submit_evidence_spec() -> ToolSpec:
+# LLM: build_submit_collaboration_result_spec records refs-first collaboration responses.
+# 函数用途: 构建 submit_collaboration_result 工具说明，合并 evidence/result 语义。
+def build_submit_collaboration_result_spec() -> ToolSpec:
     return ToolSpec(
-        name="submit_evidence",
+        name="submit_collaboration_result",
         category="orchestration",
         effect="mutating",
         requires_idempotency=True,
-        description="向 case 提交证据包；只交 refs、查询范围、命中/未命中摘要和限制，不把大正文塞进协作账本。",
+        description="向 case 提交协作结果；只交 refs、查询范围、命中/未命中摘要和限制，不把大正文塞进协作账本。",
         use_cases=["响应协作请求", "把某个工具/文件/API/数据库查询结果作为证据交给 coordinator"],
         avoid_when=["只是临时思路、没有可引用证据时，不要伪造 evidence_refs"],
-        keywords=["证据", "evidence", "refs", "协作响应"],
+        keywords=["证据", "evidence", "refs", "协作响应", "result"],
         parameters=_EVIDENCE_PARAMETERS,
         examples=[
-            '{"tool":"submit_evidence","case_id":"case-1","request_id":"creq-1",'
+            '{"tool":"submit_collaboration_result","case_id":"case-1","request_id":"creq-1",'
             '"source_agent_id":"agent-b","matched":true,"evidence_refs":["artifact://e1"]}'
         ],
     )
 
 
-# LLM: build_update_case_status_spec exposes audited lifecycle updates for collaboration cases.
-# 函数用途: 构建 update_case_status 工具说明。
-def build_update_case_status_spec() -> ToolSpec:
+# LLM: build_update_collaboration_spec gives one lifecycle action for cases and requests.
+# 函数用途: 构建 update_collaboration 工具说明，合并 case/request/reroute 状态推进。
+def build_update_collaboration_spec() -> ToolSpec:
     return ToolSpec(
-        name="update_case_status",
+        name="update_collaboration",
         category="orchestration",
         effect="mutating",
         requires_idempotency=True,
-        description="推进协作 case 生命周期，并在需要时写入决策摘要。",
-        use_cases=["主代理完成研判后标记 case 已处理", "coordinator 或父代理把 case 从 open 推进到 close/closed/resolved"],
-        avoid_when=["只是查看 case 时用 case_status", "还没有任何结论时，不要关闭 case"],
-        keywords=["case update", "case close", "resolved", "关闭协作", "状态推进"],
-        parameters=_UPDATE_STATUS_PARAMETERS,
-        examples=[
-            '{"tool":"update_case_status","case_id":"case-1","status":"close",'
-            '"summary":"证据已收口，结论已同步。"}'
-        ],
-    )
-
-
-# LLM: build_update_collaboration_request_spec exposes request lifecycle updates to responders.
-# 函数用途: 构建 update_collaboration_request 工具说明。
-def build_update_collaboration_request_spec() -> ToolSpec:
-    return ToolSpec(
-        name="update_collaboration_request",
-        category="orchestration",
-        effect="mutating",
-        requires_idempotency=True,
-        description="更新协作请求的生命周期状态，让主代理能看见哪些请求完成、阻塞或仍在等待。",
-        use_cases=["响应者开始处理、完成处理或遇到阻塞时更新请求状态", "父代理查看 case 前先让子代理记录当前请求进展"],
-        avoid_when=["只是查看请求时用 case_status", "还没有实际进展或阻塞事实时不要虚构完成状态"],
-        keywords=["request update", "request status", "协作请求状态", "阻塞", "完成"],
-        parameters=_UPDATE_REQUEST_PARAMETERS,
-        examples=[
-            '{"tool":"update_collaboration_request","case_id":"case-1","request_id":"creq-1",'
-            '"status":"completed","summary":"已完成查询并提交证据。"}'
-        ],
-    )
-
-
-# LLM: build_reroute_collaboration_request_spec gives models a single explicit action for route changes.
-# 函数用途: 构建 reroute_collaboration_request 工具说明，避免模型只把换路写进 metadata。
-def build_reroute_collaboration_request_spec() -> ToolSpec:
-    return ToolSpec(
-        name="reroute_collaboration_request",
-        category="orchestration",
-        effect="mutating",
-        requires_idempotency=True,
-        description="把协作请求从失败或不合适的目标代理结构化换到新的目标代理。",
+        description="更新协作 case 或 request；有 request_id 时更新请求，无 request_id 时更新 case；带 target_agent_ids 可改派请求。",
         use_cases=[
-            "case_status.rework 提示请求阻塞且有替代目标",
-            "某个来源、代理、参数路线失败后，需要改派其他代理继续同一个请求",
+            "主代理完成研判后标记 case 已处理",
+            "响应者开始处理、完成处理或遇到阻塞时更新请求状态",
+            "某个目标不可用时，把同一请求改派给新目标",
         ],
-        avoid_when=["只是备注换路想法时不要调用；没有新目标时先 case_status 或 request_collaboration"],
-        keywords=["reroute", "换路", "改派", "切换目标", "alternate source", "blocked request"],
-        parameters=_REROUTE_REQUEST_PARAMETERS,
+        avoid_when=["只是查看协作时，用 inspect_collaboration", "还没有实际进展或结论时不要虚构完成状态"],
+        keywords=["case update", "request update", "reroute", "换路", "关闭协作", "状态推进"],
+        parameters={**_UPDATE_STATUS_PARAMETERS, **_UPDATE_REQUEST_PARAMETERS},
         examples=[
-            '{"tool":"reroute_collaboration_request","case_id":"case-1","request_id":"creq-1",'
-            '"actor_agent_id":"main","target_agent_ids":["agent-b"],'
-            '"summary":"agent-a 不可用，改由 agent-b 继续。"}'
+            '{"tool":"update_collaboration","case_id":"case-1","status":"close","summary":"证据已收口，结论已同步。"}',
+            '{"tool":"update_collaboration","case_id":"case-1","request_id":"creq-1",'
+            '"status":"completed","summary":"已完成查询并提交证据。"}',
+            '{"tool":"update_collaboration","case_id":"case-1","request_id":"creq-1",'
+            '"target_agent_ids":["agent-b"],"summary":"agent-a 不可用，改由 agent-b 继续。"}',
         ],
-    )
-
-
-# LLM: build_case_status_spec exposes read-only case inspection for main and child agents.
-# 函数用途: 构建 case_status 工具说明。
-def build_case_status_spec() -> ToolSpec:
-    return ToolSpec(
-        name="case_status",
-        category="orchestration",
-        effect="read_only",
-        description="查看协作 case 的请求、证据、参与者和决策摘要。",
-        use_cases=["主代理或 coordinator 想看 case 是否可收口", "用户询问某个协作事件进展"],
-        avoid_when=["只是看代理树状态时，用 inspect_agent_tree"],
-        keywords=["case status", "协作状态", "证据数量", "参与者"],
-        parameters={"case_id": "协作 case ID"},
-        examples=['{"tool":"case_status","case_id":"case-1"}'],
     )
 
 
 __all__ = [
-    "build_case_status_spec",
-    "build_list_collaboration_requests_spec",
-    "build_open_case_spec",
-    "build_raise_collaboration_event_spec",
-    "build_request_collaboration_spec",
-    "build_reroute_collaboration_request_spec",
-    "build_submit_evidence_spec",
-    "build_update_collaboration_request_spec",
-    "build_update_case_status_spec",
+    "build_inspect_collaboration_spec",
+    "build_raise_collaboration_spec",
+    "build_submit_collaboration_result_spec",
+    "build_update_collaboration_spec",
 ]

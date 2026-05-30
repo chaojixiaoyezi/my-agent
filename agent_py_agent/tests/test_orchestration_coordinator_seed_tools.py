@@ -37,7 +37,7 @@ def test_explicit_coordinator_seed_merges_parent_and_coordinator_tools():
     result = tool.execute({
         "goal": "Seed one root coordinator.",
         "role": "coordinator",
-        "allowed_tools": ["schedule_child_subagents", "run_command", "fetch_url", "write_file"],
+        "allowed_tools": ["schedule_child_subagents", "run_command", "web_fetch", "write_file"],
     })
 
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
@@ -45,7 +45,7 @@ def test_explicit_coordinator_seed_merges_parent_and_coordinator_tools():
     for tool_name in COORDINATOR_TOOLS:
         assert tool_name in params.allowed_tools
     assert "run_command" in params.allowed_tools
-    assert "fetch_url" in params.allowed_tools
+    assert "web_fetch" in params.allowed_tools
     assert "write_file" in params.allowed_tools
 
 

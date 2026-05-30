@@ -21,7 +21,7 @@ from agent_py_agent.agent.memory_archive.compact_resume import (
 
 
 # LLM: test_memory_fact_write_closes_compact_missing_fields verifies the semi-auto manual fact loop.
-# 函数用途: 先让 compact resume 因缺字段阻断，再写入用户确认事实并重新 apply，确认 auto guard 放行。
+# 函数用途: 先确认 compact resume 暴露缺失备注，再写入用户确认事实并重新 apply，确认 auto guard 继续放行。
 def test_memory_fact_write_closes_compact_missing_fields(tmp_path: Path, capsys) -> None:
     config_path = _write_config(tmp_path)
     root = _workspace(config_path)

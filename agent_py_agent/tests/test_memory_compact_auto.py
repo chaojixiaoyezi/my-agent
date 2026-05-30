@@ -110,20 +110,25 @@ def test_memory_compact_auto_cycle_forced_fallback_uses_plan_only(tmp_path: Path
     assert not (root / "memory_archive" / "compact_applies").exists()
 
 
-def test_memory_compact_auto_cycle_apply_stops_at_action_guard(tmp_path: Path) -> None:
+def test_memory_compact_auto_cycle_apply_allows_optional_notes_missing(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     _write_compact_fixture(root)
 
     result = run_memory_compact_auto_cycle(root, _auto_cycle_options(allow_apply=True, trigger_percent=70))
 
     _assert_schema_v2(result, "compact_auto_cycle")
-    assert result["ok"] is False
-    assert result["status"] == "blocked_after_action_guard"
+    assert result["ok"] is True
+    assert result["status"] == "ready_after_action_guard"
     assert result["automatic_tool_execution"] == "none"
     assert result["apply_result"]["mode"] == "apply"
-    assert result["resume_result"]["action_guard"]["status"] == "blocked_missing_work_state_fields"
-    assert result["allowed_to_continue"] is False
-    assert result["next_action"] == "stop_and_request_review"
+    assert result["resume_result"]["action_guard"]["status"] == "allow_automated_continue"
+    assert result["resume_result"]["action_guard"]["missing_fields"] == [
+        "acceptance",
+        "constraints",
+        "latest_tests",
+    ]
+    assert result["allowed_to_continue"] is True
+    assert result["next_action"] == "continue_after_guard"
     assert (root / "memory_archive" / "compact_applies").exists()
     _assert_apply_preserved_sources(root)
 

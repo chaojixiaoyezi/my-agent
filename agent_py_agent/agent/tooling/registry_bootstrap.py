@@ -19,7 +19,7 @@ from .filesystem import (
 )
 from .models import HybridToolRetriever, KeywordToolSearchProvider, VectorToolSearchProvider
 from .shell import ShellTool, ShellToolOptions
-from .web import FetchUrlTool, HttpRequestTool, WebExtractTool, WebFetchTool
+from .web import WebFetchTool
 from .web_search import WebSearchTool
 
 
@@ -79,9 +79,6 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
 def _register_network_tools(registry: Any, params: Any) -> None:
     registry.register(WebSearchTool(max_results=params.max_matches, timeout=params.http_timeout))
     registry.register(WebFetchTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
-    registry.register(WebExtractTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
-    registry.register(FetchUrlTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
-    registry.register(HttpRequestTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
     registry.register(
         ShellTool(
             registry.workspace_root,

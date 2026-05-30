@@ -244,6 +244,8 @@ class SimpleAgentRuntimeMixin:
 def _run_with_params(agent, user_prompt: str, params: RunParams):
     current_params = run_params_with_request_id(params)
     current_params = run_params_with_materialized_delivery_contract(agent, user_prompt, current_params)
+    if not current_params.root_user_prompt:
+        current_params = replace(current_params, root_user_prompt=user_prompt)
     result = _run_once_with_params(agent, user_prompt, current_params)
     while True:
         decision = compact_auto_continuation_decision(
@@ -261,6 +263,7 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
 # LLM: _run_once_with_params contains one normal model/tool/finalize pass for reuse by auto continuation.
 # 函数用途: 执行单轮 run，不处理自动 compact 后续跑，避免递归和重复上下文作用域。
 def _run_once_with_params(agent, user_prompt: str, params: RunParams):
+    root_user_prompt = params.root_user_prompt or user_prompt
     with _current_prompt_scope(agent, user_prompt, params):
         prepared = _prepare_runtime_context(
             agent,
@@ -284,7 +287,7 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
             agent,
             _runtime_loop_params(user_prompt, prepared, params),
         )
-        ctx = agent._build_finalize_context(_finalize_params(user_prompt, prepared, loop_result, params))
+        ctx = agent._build_finalize_context(_finalize_params(root_user_prompt, prepared, loop_result, params))
         return agent._get_services().finalization.finalize(ctx)
 
 

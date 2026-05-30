@@ -107,21 +107,14 @@ def _schedule_validation_error_message(exc: Exception) -> str:
     )
 
 
-# LLM: _schedule_tool_params tolerates real-model namespace wrappers without changing the public bundle.
-# 函数用途: 兼容模型把 schedule_child_subagents 参数包进 orchestration 字段；顶层显式字段仍优先生效。
+# LLM: _schedule_tool_params keeps schedule_child_subagents parameters flat.
+# 函数用途: 不再展开 orchestration 包装；模型可见协议只接受顶层 children/dry_run 等字段。
 def _schedule_tool_params(params: dict[str, object]) -> dict[str, object]:
-    nested = params.get("orchestration")
-    if not isinstance(nested, dict):
-        return params
-    merged = dict(nested)
-    for key, value in params.items():
-        if key not in {"tool", "orchestration"}:
-            merged[key] = value
-    return merged
+    return dict(params)
 
 
 # LLM: _schedule_request converts validated tool params into the manager service bundle.
-# 函数用途: 构造 HierarchyScheduleRequest，集中处理 apply、children、depth 和审计请求者。
+# 函数用途: 构造 HierarchyScheduleRequest，集中处理 dry_run、children、depth 和审计请求者。
 def _schedule_request(request: ScheduleRequestBuildParams) -> HierarchyScheduleRequest:
     return HierarchyScheduleRequest(
         parent_run_id=request.parent_run_id,
@@ -134,10 +127,12 @@ def _schedule_request(request: ScheduleRequestBuildParams) -> HierarchyScheduleR
 
 
 # LLM: _schedule_apply_default lets active runners materialize their own direct children by default.
-# 函数用途: runner 内 schedule_child_subagents 省略 apply 时默认创建；显式 false 仍可预览。
+# 函数用途: runner 内 schedule_child_subagents 省略 dry_run 时默认创建；显式 dry_run=true 预览。
 def _schedule_apply_default(params: dict[str, object]) -> bool:
     if "apply" in params:
-        return _bool_param(params.get("apply"), default=False)
+        raise ValueError("schedule_child_subagents 只接受 dry_run；请移除 apply。")
+    if "dry_run" in params:
+        return not _bool_param(params.get("dry_run"), default=True)
     return True
 
 
@@ -209,7 +204,9 @@ def _schedule_item_payload(item) -> dict[str, object]:
 # LLM: _hierarchy_child_specs parses the model-provided children list into strict schedule bundles.
 # 函数用途: 解析 schedule_child_subagents.children，支持 JSON 字符串或对象列表并拒绝空 goal。
 def _hierarchy_child_specs(params: dict[str, object]) -> list[HierarchyChildSpec] | ToolExecutionResult:
-    raw_children = params.get("children") if "children" in params else params.get("child_specs")
+    if "child_specs" in params:
+        return _schedule_error("schedule_child_subagents 只接受 children；请移除 child_specs。")
+    raw_children = params.get("children")
     if raw_children is None:
         return []
     children = _json_list_param(raw_children)

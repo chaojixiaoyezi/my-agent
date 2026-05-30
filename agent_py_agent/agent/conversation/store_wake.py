@@ -10,10 +10,10 @@ from ..gateway_parts.io import read_json_file, update_json_file_atomic, write_js
 from .models import ObservationEvent, WakeSignal, new_id
 from .store_common import now as current_time
 from .store_common import wake_evidence_refs, wake_urgency
-from .store_observations import ConversationObservationStore
+from .store_guidance import ConversationGuidanceStore
 
 
-class ConversationWakeStore(ConversationObservationStore):
+class ConversationWakeStore(ConversationGuidanceStore):
     def raise_wake_signal(self, request: dict) -> WakeSignal:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)

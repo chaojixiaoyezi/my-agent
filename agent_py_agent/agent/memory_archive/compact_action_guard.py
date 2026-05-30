@@ -37,7 +37,7 @@ class CompactActionGuardRequest:
 
 
 # LLM: build_compact_action_guard never runs tools; it only emits a machine-readable go/no-go report.
-# 函数用途: 生成 compact resume 后的动作守门报告，自动模式缺字段或 refs 异常时必须阻断。
+# 函数用途: 生成 compact resume 后的动作守门报告；自动模式只因恢复事实源损坏阻断，普通任务备注缺失只提示。
 def build_compact_action_guard(request: CompactActionGuardRequest) -> dict[str, Any]:
     mode = _mode(request.options.mode)
     checks = _guard_checks(request, mode)
@@ -61,8 +61,8 @@ def build_compact_action_guard(request: CompactActionGuardRequest) -> dict[str, 
     }
 
 
-# LLM: _guard_checks separates manual confirmation from automated continuation requirements.
-# 函数用途: 生成 action guard 检查项；自动模式把缺失工作状态字段作为 hard 阻断。
+# LLM: _guard_checks separates hard restore integrity from optional task notes.
+# 函数用途: 生成 action guard 检查项；普通中文任务可能没有下一步/验收/约束/测试字段，自动续接不能因此被卡死。
 def _guard_checks(request: CompactActionGuardRequest, mode: str) -> list[dict[str, Any]]:
     work_state = request.work_state
     consistency = request.consistency_report
@@ -70,19 +70,18 @@ def _guard_checks(request: CompactActionGuardRequest, mode: str) -> list[dict[st
     return [
         {"name": "consistency_ok", "ok": bool(consistency.get("ok")), "severity": "hard"},
         {"name": "goal_present", "ok": bool(work_state.get("goal")), "severity": "hard"},
-        {"name": "next_step_present", "ok": bool(work_state.get("next_step")), "severity": "hard"},
+        {"name": "next_step_present", "ok": bool(work_state.get("next_step")), "severity": "soft"},
         {"name": "restore_refs_present", "ok": bool(request.refs.get("restore_refs")), "severity": "hard"},
         {"name": "self_check_present", "ok": bool(request.refs.get("post_compact_self_check")), "severity": "hard"},
-        {"name": "auto_missing_fields_clear", "ok": mode != "auto" or not missing, "severity": "hard"},
+        {"name": "optional_work_notes_present", "ok": not missing, "severity": "soft"},
         {"name": "manual_confirmation_required", "ok": mode == "manual", "severity": "soft"},
     ]
 
 
 # LLM: _guard_status is intentionally conservative for unattended compact/resume.
-# 函数用途: 将检查结果映射为明确状态；自动模式缺字段时进入 blocked。
+# 函数用途: 将检查结果映射为明确状态；只有恢复包完整性 hard 检查失败才阻断自动续接。
 def _guard_status(mode: str, hard_ok: bool, missing_fields: list[str]) -> str:
-    if not hard_ok and mode == "auto" and missing_fields:
-        return "blocked_missing_work_state_fields"
+    del missing_fields
     if not hard_ok:
         return "blocked_needs_human_review"
     if mode == "auto":

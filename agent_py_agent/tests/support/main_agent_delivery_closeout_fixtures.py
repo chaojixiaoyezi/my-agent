@@ -8,8 +8,8 @@ from pathlib import Path
 from agent_py_agent.agent.backend import ModelResponse
 
 
-# LLM: DeliveryContractBackend proves valid artifacts close out after the model submits final text.
-# 类用途: 第一轮写出合同要求的 HTML，第二轮用普通最终回复触发隐式验收。
+# LLM: DeliveryContractBackend proves valid artifacts close out after explicit acceptance submission.
+# 类用途: 第一轮写出合同要求的 HTML，第二轮显式调用 submit_for_acceptance 触发验收。
 class DeliveryContractBackend:
     name = "fake_delivery_contract_backend"
 
@@ -33,8 +33,8 @@ class DeliveryContractBackend:
                 backend=self.name,
             )
         if self.calls == 2:
-            return ModelResponse(text="产物已经写好，请系统验收。", backend=self.name)
-        raise AssertionError("delivery contract should close out after implicit acceptance")
+            return _submit_for_acceptance_response("产物已经写好，请系统验收。", self.name)
+        raise AssertionError("delivery contract should close out after explicit acceptance")
 
 
 # LLM: FailedDeliveryContractBackend proves failed machine acceptance feeds repair instead of false closeout.
@@ -59,6 +59,8 @@ class FailedDeliveryContractBackend:
                 ),
                 backend=self.name,
             )
+        if self.calls == 2:
+            return _submit_for_acceptance_response("坏版本已写入，请系统验收。", self.name)
         return ModelResponse(text="已收到结构化修复反馈。", backend=self.name)
 
 
@@ -85,11 +87,13 @@ class IncompleteDeliveryContractBackend:
                 ),
                 backend=self.name,
             )
+        if self.calls == 2:
+            return _submit_for_acceptance_response("半截 HTML 已写入，请系统验收。", self.name)
         return ModelResponse(text="已收到不完整 HTML 的结构化反馈。", backend=self.name)
 
 
 # LLM: ArtifactFindingRepairBackend proves failed artifact findings can be repaired and revalidated.
-# 类用途: 第一轮写出不合格 HTML，第二轮提交验收，第三轮按结构化返工单修复，第四轮隐式验收。
+# 类用途: 第一轮写出不合格 HTML，第二轮提交验收，第三轮按结构化返工单修复，第四轮显式再验收。
 class ArtifactFindingRepairBackend:
     name = "fake_artifact_finding_repair_backend"
 
@@ -110,7 +114,7 @@ class ArtifactFindingRepairBackend:
                 backend=self.name,
             )
         if self.calls == 2:
-            return ModelResponse(text="初版已写好，请系统验收。", backend=self.name)
+            return _submit_for_acceptance_response("初版已写好，请系统验收。", self.name)
         if self.calls == 3:
             assert "delivery-contract-check" in prompt
             assert "HTML_INCOMPLETE_DOCUMENT" in prompt
@@ -122,8 +126,8 @@ class ArtifactFindingRepairBackend:
                 self.name,
             )
         if self.calls == 4:
-            return ModelResponse(text="修复后的产物已经写好，请系统验收。", backend=self.name)
-        raise AssertionError("artifact finding repair should close out after implicit acceptance")
+            return _submit_for_acceptance_response("修复后的产物已经写好，请系统验收。", self.name)
+        raise AssertionError("artifact finding repair should close out after explicit acceptance")
 
 
 # LLM: MissingArtifactRepairBackend proves wrong-path output is repaired through artifact refs.
@@ -143,7 +147,7 @@ class MissingArtifactRepairBackend:
                 self.name,
             )
         if self.calls == 2:
-            return ModelResponse(text="初版已写好，请系统验收。", backend=self.name)
+            return _submit_for_acceptance_response("初版已写好，请系统验收。", self.name)
         if self.calls == 3:
             assert "delivery-contract-check" in prompt
             assert "ARTIFACT_MISSING" in prompt
@@ -154,8 +158,8 @@ class MissingArtifactRepairBackend:
                 self.name,
             )
         if self.calls == 4:
-            return ModelResponse(text="修复后的产物已经写好，请系统验收。", backend=self.name)
-        raise AssertionError("missing artifact repair should close out after implicit acceptance")
+            return _submit_for_acceptance_response("修复后的产物已经写好，请系统验收。", self.name)
+        raise AssertionError("missing artifact repair should close out after explicit acceptance")
 
 
 # LLM: OpenWriteSessionDeliveryBackend creates a valid-looking artifact while leaving staged writes open.
@@ -177,7 +181,7 @@ class OpenWriteSessionDeliveryBackend:
                 backend=self.name,
             )
         if self.calls == 2:
-            return ModelResponse(text="当前站点文件已准备验收。", backend=self.name)
+            return _submit_for_acceptance_response("当前站点文件已准备验收。", self.name)
         if self.calls == 3:
             self.saw_open_session_context = True
             assert "open-file-write-session" in prompt
@@ -185,7 +189,7 @@ class OpenWriteSessionDeliveryBackend:
             self.session_id = session_id
             return _session_append_finish_response(session_id, 'console.log("shop ready");', self.name)
         if self.calls == 4:
-            return ModelResponse(text="open session 已关闭，请系统验收。", backend=self.name)
+            return _submit_for_acceptance_response("open session 已关闭，请系统验收。", self.name)
         raise AssertionError("delivery should close out after open session is finished")
 
 
@@ -210,7 +214,7 @@ class NoProgressDeliveryBackend:
                 backend=self.name,
             )
         if self.calls in {2, 4, 6, 8}:
-            return ModelResponse(text="坏版本已写入，请系统验收。", backend=self.name)
+            return _submit_for_acceptance_response("坏版本已写入，请系统验收。", self.name)
         raise AssertionError("delivery should block after repeated unchanged failure")
 
 
@@ -227,7 +231,7 @@ class PendingTargetsDeliveryBackend:
         if self.calls == 1:
             return _write_file_response("outputs/static_site/index.html", '<!doctype html><html><body><script src="app.js"></script></body></html>', self.name)
         if self.calls == 2:
-            return ModelResponse(text="站点初版已写入，请系统验收。", backend=self.name)
+            return _submit_for_acceptance_response("站点初版已写入，请系统验收。", self.name)
         if self.calls == 3:
             assert "pending_materialization_targets" in prompt
             assert "outputs/static_site/app.js" in prompt
@@ -236,7 +240,7 @@ class PendingTargetsDeliveryBackend:
             assert "no_progress_block_threshold" in prompt
             return _write_file_response("outputs/static_site/app.js", 'console.log("shop ready");', self.name)
         if self.calls == 5:
-            return ModelResponse(text="缺失文件已补齐，请系统验收。", backend=self.name)
+            return _submit_for_acceptance_response("缺失文件已补齐，请系统验收。", self.name)
         raise AssertionError("pending targets should complete before any blocked closeout")
 
 
@@ -277,7 +281,7 @@ class CloseoutReworkBackend:
         if self.calls == 5:
             return _workbook_builder_response(self.name)
         if self.calls == 6:
-            return ModelResponse(text="产物已经修复并生成完毕，请系统验收。", backend=self.name)
+            return _submit_for_acceptance_response("产物已经修复并生成完毕，请系统验收。", self.name)
         raise AssertionError("closeout rework should let the agent repair and then complete")
 
 
@@ -295,7 +299,7 @@ class LocalProgressRedirectBackend:
         if self.calls == 1:
             return _write_file_response("outputs/table_report/source_data.json", _empty_workbook_source_json(), self.name)
         if self.calls == 2:
-            return ModelResponse(text="阶段数据已写入，请系统验收。", backend=self.name)
+            return _submit_for_acceptance_response("阶段数据已写入，请系统验收。", self.name)
         if self.calls == 3:
             return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"read_artifact","artifact_ref":"{artifact_ref}","offset":0,"max_chars":2000}}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 4:
@@ -308,7 +312,7 @@ class LocalProgressRedirectBackend:
         if self.calls == 5:
             return _workbook_builder_response(self.name)
         if self.calls == 6:
-            return ModelResponse(text="表格产物已生成，请系统验收。", backend=self.name)
+            return _submit_for_acceptance_response("表格产物已生成，请系统验收。", self.name)
         raise AssertionError("local-progress guard should redirect remote exploration back to local staged work")
 
 
@@ -336,7 +340,7 @@ class RecoveryAttemptRepairBackend:
         if self.calls == 3:
             return _workbook_builder_response(self.name)
         if self.calls == 4:
-            return ModelResponse(text="恢复产物已经生成完毕，请系统验收。", backend=self.name)
+            return _submit_for_acceptance_response("恢复产物已经生成完毕，请系统验收。", self.name)
         raise AssertionError("fresh recovery attempt should repair before local-progress block")
 
 
@@ -363,7 +367,7 @@ class WrongToolDuringOpenSessionBackend:
         if self.calls == 4:
             return _session_finish_response(session_id or self.session_id, self.name)
         if self.calls == 5:
-            return ModelResponse(text="open session 已关闭，请系统验收。", backend=self.name)
+            return _submit_for_acceptance_response("open session 已关闭，请系统验收。", self.name)
         raise AssertionError("open session should finish before any unrelated write executes")
 
 
@@ -499,7 +503,7 @@ def _session_append_response(session_id: str, content: str, backend: str) -> Mod
 
 
 # LLM: _session_append_finish_response appends and finishes in one model turn.
-# 函数用途: 让隐式验收测试先关闭 open session，再由下一轮最终回复触发 closeout。
+# 函数用途: 让测试先关闭 open session，再由下一轮 submit_for_acceptance 触发 closeout。
 def _session_append_finish_response(session_id: str, content: str, backend: str) -> ModelResponse:
     escaped = content.replace("\\", "\\\\").replace('"', '\\"')
     return ModelResponse(
@@ -519,6 +523,13 @@ def _session_append_finish_response(session_id: str, content: str, backend: str)
 # 函数用途: 完成 open write session，允许后续 closeout 验收通过。
 def _session_finish_response(session_id: str, backend: str) -> ModelResponse:
     return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"write_file","action":"finish","session_id":"{session_id}"}}\n[/TOOL_CALL]', backend=backend)
+
+
+# LLM: _submit_for_acceptance_response builds the explicit delivery closeout tool call.
+# 函数用途: 测试交付验收必须由 submit_for_acceptance 明确触发，不能靠无工具文本猜测。
+def _submit_for_acceptance_response(note: str, backend: str) -> ModelResponse:
+    escaped = note.replace("\\", "\\\\").replace('"', '\\"')
+    return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"submit_for_acceptance","note":"{escaped}"}}\n[/TOOL_CALL]', backend=backend)
 
 
 # LLM: _workbook_builder_response builds the data_to_workbook call for staged xlsx tests.

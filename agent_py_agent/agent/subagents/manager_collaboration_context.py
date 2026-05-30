@@ -25,8 +25,8 @@ def collaboration_context_payload(manager: object, task: object) -> dict[str, ob
         "targeted_request_count": len(requests),
         "targeted_requests": _bounded_targeted_requests(requests),
         "responder_policy": (
-            "优先复用已有 case/request，按 case_status -> submit_evidence -> "
-            "update_collaboration_request 处理；除非发现全新问题，不要另开 open_case。"
+            "优先复用已有 case/request，按 inspect_collaboration -> submit_collaboration_result -> "
+            "update_collaboration 处理；除非发现全新问题，不要另开 raise_collaboration。"
         ),
     }
 

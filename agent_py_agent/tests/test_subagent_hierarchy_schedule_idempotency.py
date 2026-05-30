@@ -96,7 +96,7 @@ def test_schedule_child_tool_payload_exposes_reused_and_dispatch_ids(tmp_path):
     agent._current_subagent_run_id = parent.id
     tool = ScheduleChildSubagentsTool(agent)
     params = {
-        "apply": True,
+        "dry_run": False,
         "children": [{"goal": "写条目列表页面", "role": "worker", "context_packs": _packs("product-list")}],
     }
 

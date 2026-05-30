@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .delivery_contract_fields import string_items
+
 SCHEMA_VERSION = "delivery_contract.v1"
 DOCTOR_SCHEMA_VERSION = "delivery_contract_doctor.v1"
 _ARTIFACT_PATH_KEYS = ("preferred_path", "path")
@@ -107,6 +109,8 @@ def validate_delivery_contract(payload: object, *, workspace_root: Path | None =
     return _report(normalized, findings)
 
 
+# LLM: _allows_no_artifact_delivery keeps answer-only tasks from requiring files.
+# 函数用途: 识别显式声明“不需要落盘产物”的交付合同，避免普通问答被 artifacts 硬卡。
 def _allows_no_artifact_delivery(payload: dict[str, Any]) -> bool:
     for key in ("requires_artifact", "artifact_required", "requires_disk_artifact", "disk_artifact_required"):
         if payload.get(key) is False:
@@ -162,31 +166,40 @@ def _validate_artifact_contract(
     findings.extend(_validate_root_lists(artifact, location))
     findings.extend(_validate_extension_fields(artifact, location))
     findings.extend(_validate_artifact_intent(artifact.get("artifact_intent"), location))
-    findings.extend(_validate_validation_contract(artifact.get("validation_contract"), location))
+    validation_contract, validation_findings = _validate_validation_contract(artifact.get("validation_contract"), location)
+    findings.extend(validation_findings)
+    if validation_contract is not None:
+        normalized["validation_contract"] = validation_contract
     findings.extend(_path_findings(artifact, workspace_root, location))
     return normalized, findings
 
 
 # LLM: _validate_validation_contract checks generic artifact validation options.
 # 函数用途: 对 validation_contract 做轻量类型校验，避免字段明显写错才到验收阶段报错。
-def _validate_validation_contract(value: object, artifact_location: str) -> list[ContractFinding]:
+def _validate_validation_contract(value: object, artifact_location: str) -> tuple[dict[str, Any] | None, list[ContractFinding]]:
     if value is None:
-        return []
+        return None, []
     if not isinstance(value, dict):
-        return [_finding("VALIDATION_CONTRACT_NOT_OBJECT", "hard", f"{artifact_location}.validation_contract", value=type(value).__name__)]
+        return None, [_finding("VALIDATION_CONTRACT_NOT_OBJECT", "hard", f"{artifact_location}.validation_contract", value=type(value).__name__)]
+    normalized = dict(value)
     findings: list[ContractFinding] = []
     if "min_size" in value and not _non_negative_int(value.get("min_size")):
         findings.append(_finding("VALIDATION_CONTRACT_MIN_SIZE_INVALID", "hard", f"{artifact_location}.validation_contract.min_size"))
     for key in ("required_sections", "required_files", "required_sheets", "required_columns"):
-        if key in value and not _string_list(value.get(key)):
+        if key not in value:
+            continue
+        items = string_items(value.get(key), allow_named_dict=key == "required_columns")
+        if not items:
             findings.append(_finding("VALIDATION_CONTRACT_STRING_LIST_INVALID", "hard", f"{artifact_location}.validation_contract.{key}"))
+            continue
+        normalized[key] = items
     for key in ("collection_contract", "staging_contract", "quality_contract", "evidence_contract"):
         if key in value and not isinstance(value.get(key), dict):
             findings.append(_finding("VALIDATION_CONTRACT_NESTED_CONTRACT_INVALID", "hard", f"{artifact_location}.validation_contract.{key}"))
     for key in _EXTENSION_KEYS:
         if key in value and not _extension_value(value.get(key)):
             findings.append(_finding("VALIDATION_CONTRACT_EXTENSION_INVALID", "hard", f"{artifact_location}.validation_contract.{key}"))
-    return findings
+    return normalized, findings
 
 
 # LLM: _validate_root_lists keeps locator roots structured and bounded.
@@ -199,6 +212,8 @@ def _validate_root_lists(artifact: dict[str, Any], location: str) -> list[Contra
     return findings
 
 
+# LLM: _validate_extension_fields validates explicit open-world artifact suffix hints.
+# 函数用途: 检查 artifact 上声明的扩展名字段形状，允许未知格式靠合同显式说明。
 def _validate_extension_fields(artifact: dict[str, Any], location: str) -> list[ContractFinding]:
     findings: list[ContractFinding] = []
     for key in _EXTENSION_KEYS:
@@ -207,6 +222,8 @@ def _validate_extension_fields(artifact: dict[str, Any], location: str) -> list[
     return findings
 
 
+# LLM: _validate_artifact_intent checks optional format intent without closed enums.
+# 函数用途: 校验 artifact_intent 里的格式意图字段，供开放世界产物定位使用。
 def _validate_artifact_intent(value: object, location: str) -> list[ContractFinding]:
     if value is None:
         return []
@@ -280,6 +297,8 @@ def _has_explicit_path(artifact: dict[str, Any]) -> bool:
     return any(str(artifact.get(key) or "").strip() for key in _ARTIFACT_PATH_KEYS)
 
 
+# LLM: _has_extension_intent detects explicit suffix hints on artifact contracts.
+# 函数用途: 判断 artifact 或 artifact_intent 是否声明了扩展名，避免只按 kind 白名单找文件。
 def _has_extension_intent(artifact: dict[str, Any]) -> bool:
     if any(_extension_value(artifact.get(key)) for key in _EXTENSION_KEYS if key in artifact):
         return True

@@ -71,6 +71,7 @@ class ToolLoopExecuteParams:
     context_scope: str = "default"
     delivery_contract: dict | None = None
     run_scope: RunScope | None = None
+    root_user_prompt: str = ""
 
 
 # LLM: CompressionContext 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

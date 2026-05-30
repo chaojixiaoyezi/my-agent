@@ -27,7 +27,7 @@ def write_runtime_fact_start_if_enabled(agent: object, params: object) -> None:
             RuntimeFactSourceRequest(
                 root=agent.root,
                 request_id=request_id,
-                user_prompt=str(getattr(params, "user_prompt", "") or ""),
+                user_prompt=_root_user_prompt(params),
                 status="running",
                 runtime_injections=tuple(str(item) for item in getattr(params, "runtime_injections", []) or []),
                 run_id=str(getattr(params, "run_id", "") or ""),
@@ -118,7 +118,7 @@ def update_runtime_fact_progress_if_enabled(agent: object, params: object, *, to
             RuntimeFactSourceRequest(
                 root=agent.root,
                 request_id=request_id,
-                user_prompt=str(getattr(params, "user_prompt", "") or ""),
+                user_prompt=_root_user_prompt(params),
                 status="running",
                 next_actions=_runtime_next_actions(params),
                 archive_tool_calls=list(getattr(params, "archive_tool_calls", []) or []),
@@ -142,6 +142,12 @@ def update_runtime_fact_progress_if_enabled(agent: object, params: object, *, to
 def _runtime_next_actions(params: object) -> list[str]:
     context = [str(item) for item in list(getattr(params, "tool_context", []) or [])[-2:] if str(item).strip()]
     return context[-1:] if context else []
+
+
+# LLM: _root_user_prompt keeps compact continuation prompts from replacing the original task goal.
+# 函数用途: 优先使用 root_user_prompt；没有时退回本轮 user_prompt，保证 runtime_fact 目标不被续接提示覆盖。
+def _root_user_prompt(params: object) -> str:
+    return str(getattr(params, "root_user_prompt", "") or getattr(params, "user_prompt", "") or "")
 
 
 # LLM: _latest_archive_refs exposes only recent archive paths for the runtime fact whiteboard.
@@ -187,7 +193,12 @@ def _session_id(agent: object) -> str:
 # LLM: _archive_level reads the configured raw archive detail level.
 # 函数用途: 统一读取 memory_archive_level，非法或缺失时用 schema 默认值。
 def _archive_level(agent: object) -> int:
-    return int(getattr(getattr(agent, "config", None), "memory_archive_level", 3) or 3)
+    value = getattr(getattr(agent, "config", None), "memory_archive_level", 3)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 3
+    return parsed if 0 <= parsed <= 3 else 3
 
 
 # LLM: _summary_chars reads the configured preview summary length for live archive events.

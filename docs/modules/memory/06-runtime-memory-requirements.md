@@ -126,7 +126,7 @@ Control-plane query 第一片已落地：`query_memory_control_plane()` 会按 d
 
 `memory-resume --from-compact` 会生成 `compact_continue_packet`。它不是工具执行器，而是恢复后继续工作的统一契约：包含目标、阶段、下一步、验收、约束、最近测试、推荐读取路径、action guard、subagent owner refs 和 `automatic_tool_execution=none`。主 agent 自动链路拿到 `ready_to_continue=true` 后，可以把这个 packet 注入下一轮 prompt 并继续一次；这只代表 compact 恢复状态一致，不代表子代理业务验收通过。测试执行、acceptance apply 和 rescue 仍必须走 closeout 链路。
 
-`memory_compact_auto_allow_apply` 是自动 compact apply 的显式配置口子，默认开启。开启后 `SimpleAgent.run()` 允许非破坏性 apply、auto resume、continue packet 和 guard 检查；guard 放行时会受控续跑一次，并在续跑轮重新加载 `AGENTS.md`、`SOUL.md`、`USER.md`、`memory.md`。续跑轮不会再次触发 compact，避免循环；不自动 apply acceptance。
+自动 compact apply 不再提供单独开关：保存型 `SimpleAgent.run()` 允许非破坏性 apply、auto resume、continue packet 和 guard 检查；`save=False` 只生成建议不写 apply。guard 放行时会继续同一个任务，并在续跑轮重新加载 `AGENTS.md`、`SOUL.md`、`USER.md`、`memory.md`。续跑轮如果没有工具进展会返回，避免循环；如果继续推进并再次达到阈值，可以继续 compact。
 
 ## Shared Workspace 要求
 
@@ -248,11 +248,12 @@ Runtime memory 的轻量索引记录必须能长期扩展，但不能把字段�
 - 已新增 `subagents/services/compact_continue_packet.py` 子代理闭环写入第一片：每次保存子代理任务时自动生成 task-local `compactions/session/latest_continue_packet.json` 和去重后的 `session_compact_ledger.jsonl`，让父级后续重新 dispatch 同一 run 时能从 packet/checkpoint/summary/progress 接续，而不是依赖主代理长上下文记住子代理细节。
 - 已新增 `subagents/services/subagent_session_compact.py` 子代理本地 compact package 第一片：runner compact 信号只写到当前 run `compactions/` 下的 metadata/summary/restore refs，并挂回 `latest_continue_packet.json`；不写主 memory、不自动执行工具。
 - 已新增 `memory_archive/compact_resume_completion.py` 半自动补全提示第一片：缺 work_state 字段时返回 `completion_prompt`，展示缺失字段、标签和补全模板；它不自动写 runtime facts，也不把假设变事实。
-- 已新增 `memory_archive/compact_suggest.py` 半自动提示第一片：`run` 收尾会根据 token ledger 和上下文窗口返回 compact suggestion 字段，CLI 只打印建议命令，不自动 apply、不自动 resume。
-- 已新增 `memory_archive/compact_auto.py` 自动 compact/resume 协调第一片，并已接入 `SimpleAgent.run()` 收尾的默认 auto-apply 分支：结果和 CLI 会显示 `compact_auto` 的状态、下一步和工具执行状态；显式允许 apply 时也只做非破坏性 apply、auto resume 和 action guard 检查，随后停住，不执行工具、不继续改代码。
-- 已新增 `memory_archive/compact_work_state_sources.py` Work State 字段来源第一片：compact apply 会只读 workspace 内 task/run 事实源，把 acceptance、constraints、latest_tests 和 read_files 写入 `work_state_snapshot`；当前支持旧 `subagents/<run_id>/`、新 `tasks/*/agents/<run_id>/`、`ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md` 和 `task.json`。
-- 已扩展真实 run Work State 回填：没有 `memory_archive/snapshots/*.json` 权威 snapshot 时，compact apply 会从本次 `restore_refs` 指向的 hook/raw JSONL 回填 goal/next_step；验收、约束和最近测试仍必须来自明确 task/run 事实源，缺失时 auto resume 继续阻断。
-- 已新增 `memory_archive/runtime_fact_source.py` 运行时事实源第一片：真实 `run --save` 会写 `memory_archive/runtime_facts/<request_id>/task.json`，把显式验收、约束、测试条目暴露给 compact work_state；没有明确标签时不会伪造字段，auto resume 仍按 missing 阻断。
+- 已新增 `memory_archive/compact_suggest.py` 提示第一片：`run` 收尾会根据 token ledger 和上下文窗口返回 compact suggestion 字段；保存型运行会继续进入非破坏性 apply/resume，`save=False` 只打印建议命令。
+- 已新增 `memory_archive/compact_auto.py` 自动 compact/resume 协调第一片，并已接入 `SimpleAgent.run()` 收尾的默认 auto-apply 分支：结果和 CLI 会显示 `compact_auto` 的状态、下一步和工具执行状态；保存型运行 guard 放行后会自动续接同一个任务，`save=False` 只生成建议和计划。
+- 已新增 `memory_archive/compact_work_state_sources.py` Work State 字段来源第一片：compact apply 只读当前 run/session/request 对应的 task/run 事实源，把 acceptance、constraints、latest_tests 和 read_files 写入 `work_state_snapshot`；当前支持旧 `subagents/<run_id>/`、新 `tasks/*/agents/<run_id>/`、`memory_archive/runtime_facts/<id>/task.json`、同 scope 下的 `ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md` 和 `task.json`，不会扫描 workspace 根目录清单。
+- 已扩展真实 run Work State 回填：没有 `memory_archive/snapshots/*.json` 权威 snapshot 时，compact apply 会从本次 `restore_refs` 指向的 hook/raw JSONL 回填原始用户目标和工作级 next action；单个 `[TOOL_CALL]` 不会被当作任务路线。验收、约束和最近测试仍必须来自明确 task/run 事实源，缺失时只作为可补充提示，不再卡住普通任务自动续接。
+- 已新增 `memory_archive/runtime_fact_source.py` 运行时事实源第一片：真实 `run --save` 会写 `memory_archive/runtime_facts/<request_id>/task.json`，把原始用户目标、显式验收、约束、测试条目暴露给 compact work_state；没有明确标签时不会伪造字段，普通任务也不会因为 missing fields 被自动续接硬卡。
+- 已收窄 `memory_archive/resume_context.py` 的旧任务恢复触发：只有明确旧任务语义（例如继续 README、继续上次、恢复、run_id/request_id/subagent id）才注入恢复上下文或旧对话记忆；“继续往下做/继续整理/继续完成”这类当前任务内部表达不会触发旧任务恢复，避免长任务压测串入旧 run。
 - 已新增 `memory-fact-write` 手动补全事实入口：只写用户显式传入的 acceptance/constraints/latest_tests 到 `runtime_facts/<fact_id>/task.json`，用于把 `completion_prompt` 的人工确认结果接回下一次 compact apply；不得从助手回复或普通描述中推断这些字段。
 - 已完成 bundle-first 收敛：runtime/subagent/gateway/log-analysis/memory-archive/audit/local-storage/backends 的服务入口已改为 Request/Options/Params 或显式 keyword -> bundle adapter；架构护栏会扫描业务代码中的函数级 var-positional / var-keyword，当前例外仅限透明转发、协议 override、兼容 adapter 和局部字段选择 helper。
 
@@ -260,7 +261,7 @@ Runtime memory 的轻量索引记录必须能长期扩展，但不能把字段�
 
 - 旧 subagent workspace 尚未迁移到 `tasks/<task_id>/agents/<run_id>/`；当前 agent run workspace 是 skeleton + legacy adapter，不是完整替代。
 - task workspace 已有第一版 `task.yaml`、`state.json`、`timeline.jsonl`，run workspace 已有第一版 `agent.yaml`、run-level `state.json/timeline.jsonl` 和 checkpoint-first compact ledger/snapshot 链；全局 `memory-compact --apply` 已有非破坏性 apply、restore refs、apply bundle、work state snapshot、post-compact self-check 和失败阻断，`memory-resume --from-compact` 已能只读生成手动恢复上下文；run-local destructive compact apply 仍未接入。
-- 半自动 compact 提示已接入主代理 `run` 返回值；自动 compact/resume 已能在主代理 guard 放行后续跑一次。子代理侧已有 task-local refs、自动 latest continue packet、runner prompt 接续第一版；完整无人值守接管和失败后自动选择新 leader 仍是后续工作。
+- compact 提示已接入主代理 `run` 返回值；自动 compact/resume 已能在主代理 guard 放行后连续续接同一任务。子代理侧已有 task-local refs、自动 latest continue packet、runner prompt 接续第一版；完整无人值守接管和失败后自动选择新 leader 仍是后续工作。
 - daily ledger 已有 append-only 文件入口和 artifact manifest refs，并已接入 control-plane 只读查询；resume 查询优先级还需要下一步显式改造，run-local gate retention 已有保守 active queue 清理。
 - artifact manifests 已能规范已有 `artifact_refs`，runtime 大工具输出已能外置到 `memory_archive/artifacts/tool_outputs/` 并追加 index，control-plane 已能统一查询全局 tool-output index；但 task/run artifact manifest 与全局 artifact index 的 content-addressed 去重存储还没做。
 - schema v2 已覆盖当前新写的轻量索引记录，但旧 raw/hook/archive 历史记录仍保持原 schema，后续要做迁移只能通过 reader 兼容或显式 migration，不允许原地重写历史事实源。

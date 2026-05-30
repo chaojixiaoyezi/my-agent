@@ -161,7 +161,7 @@ def _repair_child_tool_call(failed_ids: list[str]) -> dict[str, object]:
     joined = ", ".join(failed_ids)
     return {
         "tool": "schedule_child_subagents",
-        "apply": True,
+        "dry_run": False,
         "children": [
             {
                 "role": "worker",
@@ -172,7 +172,7 @@ def _repair_child_tool_call(failed_ids: list[str]) -> dict[str, object]:
                     "只改被证据点名的文件；修复后让 tester 复测。"
                 ),
                 "allowed_tools": [
-                    "subagent_board",
+                    "inspect_agent_tree",
                     "list_files",
                     "read_file",
                     "search_text",

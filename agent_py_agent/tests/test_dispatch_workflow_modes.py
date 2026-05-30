@@ -91,8 +91,7 @@ def test_model_dispatch_run_ids_respects_task_workflow_off(tmp_path):
     )
 
     result = DispatchSubagentsTool(agent).execute({
-        "apply": True,
-        "execute_runners": False,
+        "dry_run": False,
         "max_runners": 0,
         "run_ids": [task.id],
     })

@@ -1,12 +1,12 @@
-# LLM: Evidence submission tool stores refs-first response packets.
-# 模块用途: 实现 submit_evidence 工具，不内联重型日志或业务专项数据。
+# LLM: Collaboration result submission stores refs-first response packets.
+# 模块用途: 实现 submit_collaboration_result 工具，不内联重型日志或业务专项数据。
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from ..tools import BaseTool, ToolExecutionResult
-from .tool_specs import build_submit_evidence_spec
+from .tool_specs import build_submit_collaboration_result_spec
 from .tool_targets import actor_agent_id, collaboration_scope_payload
 from .tool_values import dict_value, dict_values, error, float_value, ok, string_values
 
@@ -14,19 +14,21 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-class SubmitEvidenceTool(BaseTool):
+class SubmitCollaborationResultTool(BaseTool):
+    # LLM: SubmitCollaborationResultTool keeps collaboration response packets behind one model action.
+    # 类用途: 提交命中、未命中、证据引用和限制说明，供 case 汇总使用。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_submit_evidence_spec()
+        self.spec = build_submit_collaboration_result_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         case_id = str(params.get("case_id") or "").strip()
         if not case_id:
-            return error("submit_evidence", "case_id_required", "case_id is required")
+            return error("submit_collaboration_result", "case_id_required", "case_id is required")
         evidence = self.agent.collaboration_store.submit_evidence({"case_id": case_id, **_evidence_kwargs(self.agent, params)})
         payload = _evidence_payload(case_id, evidence.evidence_id, params)
         payload.update(collaboration_scope_payload(self.agent, params, explicit_keys=("source_agent_id", "actor_agent_id", "agent_id", "run_id")))
-        return ok("submit_evidence", payload)
+        return ok("submit_collaboration_result", payload)
 
 
 def _evidence_kwargs(agent: SimpleAgent, params: dict[str, object]) -> dict[str, object]:

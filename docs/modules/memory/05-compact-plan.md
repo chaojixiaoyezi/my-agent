@@ -20,6 +20,8 @@
 - `memory-compact --apply` 第二片已接入为非破坏性 apply：生成 compact context、metadata、apply bundle、restore refs、ledger、self-check 和失败阻断报告，不删除、不重写、不裁剪原始事实源。
 - runtime 工具输出外置第一片已接入：大工具输出会写入 `memory_archive/artifacts/tool_outputs/`，compact 相关记录只读 preview/hash/path/size。
 - live raw archive 已接入工具循环：工具执行中也会往既有 `memory/raw/YYYY-MM-DD.jsonl` 写 `assistant_tool_round` 和 `tool_call`，避免长任务未收尾时完全没有黑匣子线索。运行中进度白板统一写入 `runtime_fact`，不再单独写 `run_checkpoint`。
+- 长任务工具上下文窗口裁剪已接回统一 compact/resume：保存型运行里，旧工具记录超过 live prompt 窗口时不再只做隐形裁剪；系统会把这次裁剪转成同一套 `context_overflow -> compact apply -> resume` 链路。`save=false` 的临时测试仍只裁剪当前 prompt，不落 compact 包。
+- Prompt 层新增长任务软提示：如果用户要求长报告、多文件整理、代码生成或其他文件产物，模型应持续把已确认阶段成果写进草稿、目标文件或阶段笔记；如果用户没有要求文件产物，则不能为了“落盘”强行写文件。
 - `local-rebuild` 已能从 memory/gateway/subagent 文件事实源重建 LocalStore。
 
 ## 核心差距
@@ -41,7 +43,7 @@
 3. task/gateway/subagent 文件事实源优先于 archive/local 摘要。
 4. 大工具输出不能直接塞进模型上下文，应先 artifact 化。
 5. tool call 和 tool result 必须成对保留或成对摘要，不能切断。
-6. live raw archive 是黑匣子和续接提示，不是新账本；compact 可用其中的 `assistant_tool_round` 生成下一步提示，但不能从普通助手文本里猜验收、约束或测试状态。运行中明确状态以 `runtime_fact` 为准。
+6. live raw archive 是黑匣子和续接提示，不是新账本；compact 可用其中的 `assistant_tool_round` 生成工作级下一步提示，但单个 `[TOOL_CALL]` / `read_file` 这类低层工具动作不会被当成任务路线。运行中明确状态以 `runtime_fact` 为准。
 7. compact 失败、空摘要、非法摘要、自检失败都必须 abort 或 retry，不能继续丢中间上下文。
 8. 用户明确 `--no-save` 时不能偷偷写 raw archive。
 9. 任何删除、清理、重写历史的行为都必须先有 dry-run 和备份策略。
@@ -619,10 +621,10 @@ compact、resume 和 memory runtime 应该同步推进，但要分清职责，�
 - 新增 `*.work_state_snapshot.json`，记录 goal、phase、next step、acceptance、constraints、changed/read files、artifact refs、restore refs、latest tests、git state、missing fields 和 source quality。
 - 新增 `*.compaction_state.json` 和 `*.handoff.md`。前者是机器交接包，记录 compact 链路、上一轮 compact、source refs、artifact refs、work state、next actions 和 summary 引用；后者是给模型看的续接说明，明确“summary 不是事实账本，事实以 refs/work_state/registry/tree 为准”。
 - 多轮 compact 时，新一轮 `compaction_state` 会引用上一轮 `previous_compact_id` 和 `previous_handoff_summary_ref`。这一步借鉴 工具运行时/长期助手 的滚动 summary 思路，但不让 LLM 摘要成为唯一事实源。
-- work state 优先从 `memory_archive/snapshots/*.json` 权威 snapshot 读取 goal/next action；如果真实 `run --save` 只留下 hook recovery snapshot 和 raw archive，apply 会从本次 `restore_refs` 指向的 hook/raw JSONL 回填 goal/next_step，仍不从普通对话里猜验收、约束或测试状态。
+- work state 优先从 `memory_archive/snapshots/*.json` 权威 snapshot 读取 goal/next action；如果真实 `run --save` 只留下 hook recovery snapshot 和 raw archive，apply 会从本次 `restore_refs` 指向的 hook/raw JSONL 回填 goal/next action，仍不从普通对话里猜验收、约束或测试状态。
 - 真实 `run --save` 会额外写 `memory_archive/runtime_facts/<request_id>/task.json`，并通过 hook snapshot `content_paths` 暴露给 compact apply；其中 acceptance/constraints/latest_tests 只来自用户 prompt 的显式标签或真实测试工具命令。
 - `memory-fact-write` 可把用户确认后的补全事实写入 `memory_archive/runtime_facts/<fact_id>/task.json`；后续用同一 request/session/task/run scope 重新 `memory-compact --apply` 时，work state 会只读扫描这个 fact source。
-- work state 字段来源第一片已接入：只读 workspace 内 task/run 事实源，例如 `ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md`、`task.json`、旧 `subagents/<run_id>/` 和新 `tasks/*/agents/<run_id>/`；找不到字段时仍写 `missing_fields`，不会猜测或伪造。
+- work state 字段来源第一片已接入：只读当前 run/session/request 对应的 task/run 事实源，例如 `ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md`、`task.json`、旧 `subagents/<run_id>/` 和新 `tasks/*/agents/<run_id>/`；不会扫描仓库根目录清单。找不到字段时仍写 `missing_fields`，不会猜测或伪造。
 - self-check 已检查 context、restore refs、apply bundle、work state snapshot 是否写入，restore refs 是否存在，以及 goal / next actions / acceptance / constraints / test state / risks 是否被带出。
 - 当前仍保持非破坏性：不删除、不重写、不裁剪 raw/hook/snapshot/token/task/run 文件。
 
@@ -708,16 +710,16 @@ my-agent memory-resume --from-compact <apply_id> --context-only
 
 - 新增 `compact_action_guard.py`，每次 `memory-resume --from-compact` 都会带 `action_guard`。
 - 默认 `manual` 模式输出 `requires_user_confirmation`，表示恢复材料可读，但不能无人值守继续。
-- `--compact-resume-mode auto` 会启用严格守门：consistency/self-check/refs/goal/next_step 必须通过，且 `missing_fields` 必须为空。
-- 如果 work state 缺 acceptance、constraints、latest_tests 等字段，自动模式会返回 `blocked_missing_work_state_fields`，CLI 退出码为 2。
+- `--compact-resume-mode auto` 会启用恢复包守门：consistency/self-check/refs/goal/next_step 必须通过；`missing_fields` 会记录为提示，但普通任务不会因为缺 acceptance、constraints、latest_tests 被卡死。
+- 如果 work state 缺 acceptance、constraints、latest_tests 等字段，自动模式仍可返回 `allow_automated_continue`；这些字段只作为续接提醒保留在 `missing_fields`。
 - 如果 work state 字段齐全、refs 存在、self-check 通过且 `resume_mode=auto`，action guard 会返回 `allow_automated_continue`、`allowed_to_continue=true` 和 `allowed_next_action=continue_after_guard`。
 - action guard 和 auto cycle 都显式写 `automatic_tool_execution=none`：这一步只给出 go/no-go 机器判断，本身不运行工具或修改代码。
-- 新增 `compact_auto.py`，提供 `run_memory_compact_auto_cycle()`：配置 `allow_apply=false` 时只返回 compact 建议和 `needs_user_confirmation`，不会写 apply 产物；运行默认配置会允许非破坏性 apply。
-- 显式 `allow_apply=true` 时，auto cycle 执行非破坏性 apply 和 `resume_mode=auto` 的 action guard 检查；如果字段不完整会停在 `blocked_after_action_guard`。
-- `SimpleAgent.run()` 收尾已经接入 auto cycle 的默认 auto-apply 分支；达到 compact 阈值时，CLI 会显示 `compact_suggestion` 和 `compact_auto`。当配置 `memory_compact_auto_allow_apply=true` 且 guard 放行时，主 agent 会把 `compact_continue_packet` 注入下一轮 prompt 并受控续跑。
+- `compact_auto.py` 提供 `run_memory_compact_auto_cycle()`：保存型运行会写非破坏性 apply 产物；`save=False` 时只返回 compact 建议和 `needs_user_confirmation`，不会写 apply 产物。
+- auto cycle 执行非破坏性 apply 和 `resume_mode=auto` 的 action guard 检查；只有恢复包完整性、自检或 refs 这类硬恢复条件失败时才会停在 `blocked_after_action_guard`。普通任务缺少验收、约束、测试或下一步备注时只提示，不阻断。
+- `SimpleAgent.run()` 收尾已经接入 auto cycle 的默认 auto-apply 分支；达到 compact 阈值时，CLI 会显示 `compact_suggestion` 和 `compact_auto`。保存型运行且 guard 放行时，主 agent 会把 `compact_continue_packet` 注入下一轮 prompt 继续同一个任务；如果续接轮继续有工具进展并再次达到阈值，可以继续压缩，不设最大续接深度。
 - 自动续跑不再由次数参数截断；每一轮都必须重新通过 work-state/self-check/refs/action guard，能恢复就继续同一任务，恢复包不完整或保存边界不允许时才停下并报告。
 - 自动 compact 在没有显式 request id 的 CLI run 中，会使用当前真实 per-run request id 写入 scope；后续打开 shared raw/hook JSONL 时会再次按 `session_id/request_id/run_id/task_id` 过滤，避免旧任务事实污染新 compact。
-- `# Compact Auto Continuation` 注入里的显式 `Acceptance`、`Constraints`、`Latest Tests` 会被 runtime fact source 读取；这样第二轮、第三轮 compact 仍能继承已确认工作状态，而不是从恢复提示里丢字段。
+- `# Compact Auto Continuation` 注入里的显式 `Acceptance`、`Constraints`、`Latest Tests` 会被 runtime fact source 读取；这样第二轮、第三轮 compact 仍能继承已确认工作状态。续接轮自身不会覆盖原始用户目标，runtime_fact 的 `goal` 继续指向最初任务。
 - `compact_subagent_owner.py` 已接入 `memory-resume --from-compact`：指定 `subagent_run` / `subagent_session` owner 后，会返回 `linked_run_workspace`、`legacy_only` 或 `owner_refs_not_found` 状态，以及 task-local refs；它会使用配置里的 `subagent_workspace`，并把 owner id 当作字面路径段处理。
 - 子代理 owner resume 的 `recommended_read_paths` 只推荐 agent-run workspace 内的 `latest_continue_packet.json`、checkpoint、summary、task、timeline、findings 等 refs；当前仍不自动执行工具、不改 runner、不污染主 memory。
 - 当前仍不会自动继续工具调用或代码修改；这一步只是把“提示、可选 apply、恢复、自检、停住”的无人值守安全骨架做出来。

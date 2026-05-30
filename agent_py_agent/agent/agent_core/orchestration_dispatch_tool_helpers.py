@@ -63,12 +63,6 @@ def _run_ids_for_scope(params: dict[str, object], report, agent: object | None =
     return ids
 
 
-# LLM: _run_ids_from_dispatch is a compatibility alias for older tests and callers.
-# 函数用途: 兼容旧 helper 名；真实逻辑继续集中在 _run_ids_for_scope，避免双轨实现。
-def _run_ids_from_dispatch(params: dict[str, object], report) -> list[str]:
-    return _run_ids_for_scope(params, report)
-
-
 # LLM: _run_ids_actually_dispatched only records per-run runner attempts that really crossed dispatch.
 # 函数用途: 区分“模型请求了这个 run”和“这个 run 真的被执行/重试过”；被 max_runners 跳过的 PLANNING run 不能误记为已调度。
 def _run_ids_actually_dispatched(report) -> list[str]:
@@ -82,19 +76,11 @@ def _run_ids_actually_dispatched(report) -> list[str]:
     return ids
 
 
-# LLM: _normalized_dispatch_params accepts common model namespace wrappers without changing the public tool schema.
-# 函数用途: 真实模型常把 run_ids/apply/max_runners 包进 orchestration/dispatch；这里只展开机器字段并兼容并发别名。
+# LLM: _normalized_dispatch_params keeps only dry_run-to-internal execution mapping.
+# 函数用途: 模型可见协议保持扁平；这里只把 dry_run 映射成内部 apply/execute_runners。
 def _normalized_dispatch_params(params: dict[str, object]) -> dict[str, object]:
     normalized = dict(params or {})
-    for wrapper_key in ("orchestration", "dispatch"):
-        wrapper = normalized.pop(wrapper_key, None)
-        if isinstance(wrapper, dict):
-            merged = dict(wrapper)
-            merged.update(normalized)
-            normalized = merged
     _promote_dry_run_param(normalized)
-    _promote_concurrency_alias(normalized)
-    _promote_mode_alias(normalized)
     return normalized
 
 
@@ -108,30 +94,6 @@ def _promote_dry_run_param(params: dict[str, object]) -> None:
         params.setdefault("workflow_mode", "plan")
     else:
         params.setdefault("workflow_mode", "off")
-
-
-def _promote_concurrency_alias(params: dict[str, object]) -> None:
-    if "max_runners" in params:
-        return
-    for key in ("concurrency", "parallelism", "runner_concurrency"):
-        if key in params:
-            params["max_runners"] = params[key]
-            return
-
-
-def _promote_mode_alias(params: dict[str, object]) -> None:
-    mode = str(params.get("mode") or "").strip().lower()
-    if not mode:
-        return
-    if mode in {"parallel", "async", "execute", "run", "real", "real_run"}:
-        params.setdefault("apply", True)
-        params.setdefault("execute_runners", True)
-        params.setdefault("workflow_mode", "off")
-        return
-    if mode in {"dry_run", "preview", "plan"}:
-        params.setdefault("apply", False)
-        params.setdefault("execute_runners", False)
-        params.setdefault("workflow_mode", "plan")
 
 
 # LLM: _record_touches_run_scope keeps old acceptance rows out of current-turn memory.

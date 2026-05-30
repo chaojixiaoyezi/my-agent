@@ -28,17 +28,17 @@ def coordinator_execution_policy_lines() -> list[str]:
         "- 当生产 child/leaf 已完成，但父级合同仍缺 tester/bug_finder 时，"
         "不要直接输出最终 SUBAGENT_RESULT；先调用 schedule_child_subagents 获取或执行 quality_advice，"
         "再由你按 ready refs、风险和 scope 选择 QA 数量、顺序和是否需要 repair。",
-        '- schedule_child_subagents 的参数必须放在顶层，例如 {"tool":"schedule_child_subagents","apply":true,"children":[...]}；'
-        '不要包成 {"orchestration": {...}}，长目标请分多次调用，每次 1-2 个 child。',
+        '- schedule_child_subagents 的参数必须放在顶层，例如 {"tool":"schedule_child_subagents","dry_run":false,"children":[...]}；'
+        "不要包二级参数对象，长目标请分多次调用，每次 1-2 个 child。",
         "- 不要让 worker/writer 代写 coordinator 自己的协调证据；需要共享时引用 artifact_refs/evidence_refs。",
         "- 创建 child/leaf 时必须原样传递父级指定的文件名、目录和质量要求，不要把 solution.py 改成别的模块名。",
         "- 同一次 schedule_child_subagents 可以混建 coordinator、worker 或 tester；调度层只返回创建、复用和待 dispatch 的状态，是否继续拆分或修正由你根据 tree/refs 判断。",
-        "- 创建 leaf 后使用 dispatch_subagents(apply=true, execute_runners=true) 推进直接 child，并汇总 leaf 的产物 refs。",
+        "- 创建 leaf 后使用 dispatch_subagents(dry_run=false, run_ids=[...]) 推进直接 child，并汇总 leaf 的产物 refs。",
         "- 多个 child 同轮 dispatch 时不要写子任务专属 runner_instruction；需要专属补充就按单个 run_id 分多次 dispatch。",
         "- dispatch_subagents 返回 child test_failed 或 followup_action=plan_rescue 时，不要宣称完成；先汇报失败 refs 或安排修复。",
         "- dispatch_subagents 返回 direct_children.qa_repair_advice 或 needs_repair_wave 时，不要直接报完成；"
         "先按失败 QA refs 创建 scoped repair worker，修复后再让 tester 复测。",
-        "- 少数下属需要不同纠偏、路径修正或需求变更时，用 subagent_message mode=direct scope=descendants 发给具体 run_id；"
-        "大量下属需要同一通知时，用 mode=broadcast scope=descendants 写 scoped shared board。"
-        "平级讨论只能用 mode=direct scope=peers，不能广播到兄弟分支的子孙。",
+        "- 少数下属需要不同纠偏、路径修正或需求变更时，优先用 send_guidance 点名具体 run_id；"
+        "dispatch_subagents 只在需要立刻推进、恢复或重跑时使用。"
+        "平级讨论要走允许的定向通道，不能广播到兄弟分支的子孙。",
     ]

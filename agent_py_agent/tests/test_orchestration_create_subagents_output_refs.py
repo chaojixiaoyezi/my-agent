@@ -318,7 +318,7 @@ def test_schedule_child_repair_contract_fields_are_persisted_to_child_context(tm
     parent = agent.subagents.create_run(goal="parent", thought="parent", plan=["parent"], parent_id=root.id, root_id=root.id)
     agent._current_subagent_run_id = parent.id
     result = ScheduleChildSubagentsTool(agent).execute({
-        "apply": True,
+        "dry_run": False,
         "children": [_repair_create_params("child-a", "a.xlsx")],
     })
     payload = json.loads(result.output)
@@ -342,9 +342,9 @@ def test_schedule_child_repair_contract_reuses_same_scope_with_reworded_goal(tmp
     agent._current_subagent_run_id = parent.id
     tool = ScheduleChildSubagentsTool(agent)
 
-    first = json.loads(tool.execute({"apply": True, "children": [_repair_create_params("child-a", "a.xlsx")]}).output)
+    first = json.loads(tool.execute({"dry_run": False, "children": [_repair_create_params("child-a", "a.xlsx")]}).output)
     second = json.loads(tool.execute({
-        "apply": True,
+        "dry_run": False,
         "children": [_repair_create_params("child-a", "a.xlsx", goal="继续修复并执行 xlsx 生成")],
     }).output)
 
@@ -367,11 +367,11 @@ def test_schedule_child_without_idempotency_contract_does_not_reuse_by_goal_text
     tool = ScheduleChildSubagentsTool(agent)
 
     first = json.loads(tool.execute({
-        "apply": True,
+        "dry_run": False,
         "children": [{"goal": "写一个家具品牌首页", "role": "worker", "agent_name": "小小傻妞-worker"}],
     }).output)
     second = json.loads(tool.execute({
-        "apply": True,
+        "dry_run": False,
         "children": [{"goal": "写一个家具品牌首页", "role": "worker", "agent_name": "小小傻妞-worker"}],
     }).output)
 

@@ -191,21 +191,20 @@ def _record_run_ids(records: list[object]) -> list[str]:
 
 
 # LLM: _dry_run_recovery_tool_call turns a non-mutating recovery preview into a safe exact next call.
-# 函数用途: 当父模型误把恢复接管跑成 dry-run 时，返回可复制的 apply 调度参数，避免继续空转或误新建 repair。
+# 函数用途: 当父模型误把恢复接管跑成 dry-run 时，返回可复制的真实推进参数，避免继续空转或误新建 repair。
 def _dry_run_recovery_tool_call(records: list[object]) -> dict[str, object]:
     if not any(_is_dry_run_recovery_apply(record) for record in records):
         return {}
     return {
         "tool": "dispatch_subagents",
-        "apply": True,
-        "execute_runners": False,
+        "dry_run": False,
         "workflow_mode": "off",
         "max_runners": 0,
         "limit": max(len(records), 1),
     }
 
 
-# LLM: _is_dry_run_recovery_apply recognizes safe recovery actions that need apply=true to mutate state.
+# LLM: _is_dry_run_recovery_apply recognizes safe recovery actions that need a real dispatch pass to mutate state.
 # 函数用途: 只对接管/领导权恢复这类恢复写回给建议，普通 classify dry-run 仍按阻塞项汇报。
 def _is_dry_run_recovery_apply(record: object) -> bool:
     return (

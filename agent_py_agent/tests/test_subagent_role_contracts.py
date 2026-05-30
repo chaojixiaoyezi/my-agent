@@ -51,7 +51,7 @@ def test_create_run_uses_template_defaults_after_natural_role_resolution(tmp_pat
 
     assert task.role == "child_coordinator"
     assert "schedule_child_subagents" in task.allowed_tools
-    assert "subagent_message" in task.allowed_tools
+    assert "send_guidance" in task.allowed_tools
     assert any("协调子代理" in check for check in task.acceptance_checks)
 
 
