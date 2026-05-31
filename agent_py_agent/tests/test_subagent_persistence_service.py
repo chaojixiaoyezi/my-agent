@@ -111,6 +111,10 @@ def test_subagent_persistence_creates_task_workspace_skeleton(tmp_path) -> None:
     assert (task_workspace / "artifacts" / "log_samples").is_dir()
     assert (task_workspace / "artifacts" / "code_snapshots").is_dir()
     assert (task_workspace / "artifacts" / "reports").is_dir()
+    assert (task_workspace / "compact" / "task_rollup.json").exists()
+    rollup = json.loads((task_workspace / "compact" / "task_rollup.json").read_text(encoding="utf-8"))
+    assert rollup["child_count"] == 1
+    assert rollup["child_runs"][0]["run_id"] == task.id
     assert state["task_id"] == task.root_id
     assert state["primary_run_id"] == task.id
     assert state["status"] == "RUNNING"

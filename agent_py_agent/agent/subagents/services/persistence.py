@@ -16,6 +16,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from ...user_space.home_indexes import AgentIndexRef, register_agent_ref
+from ...user_space.task_compact_rollup import sync_task_compact_rollup
 from ..models import (
     CapabilityGap,
     CapabilityGrant,
@@ -152,6 +154,7 @@ class SubAgentPersistenceService:
         checkpoint_artifacts = build_checkpoint_artifact_payloads(task, output_payload)
         # LLM: 任务工作区是增量运行记忆适配层，旧路径暂时仍是权威来源。
         sync_task_workspace_fields(self.workspace, task)
+        _sync_task_rollup_if_possible(task)
         write_inheritance_manifest(task)
         write_failure_handoff(task)
         write_recovery_output_files(task, checkpoint_artifacts)
@@ -165,6 +168,7 @@ class SubAgentPersistenceService:
             )
         (task_dir / "thought.md").write_text(render_thought_markdown(task), encoding="utf-8")
         _write_owner_agent_projection(self.manager, task, payload)
+        _register_owner_agent_index(self.manager, task)
         self.manager._index_task(task)
         if self.manager.local_store:
             # LLM: 控制面投影只给父级查询和 rollup 用，旧工单目录与 runtime workspace 仍是事实源。
@@ -197,6 +201,43 @@ def _write_owner_agent_projection(manager: Any, task: SubAgentTask, payload: str
         "updated_at": task.updated_at,
     }
     (root / "refs.json").write_text(json.dumps(refs, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _register_owner_agent_index(manager: Any, task: SubAgentTask) -> None:
+    # LLM: owner active_agents index is a lookup map only; detailed subagent facts stay in task/run workspaces.
+    # 函数用途: 保存子代理时登记 owner 级 agent 引用，便于恢复和 doctor 检查悬空索引。
+    home_paths = getattr(manager, "home_paths", None)
+    if home_paths is None:
+        return
+    try:
+        register_agent_ref(
+            home_paths,
+            AgentIndexRef(
+                owner_id=str(getattr(home_paths, "owner_id", "") or task.owner or ""),
+                agent_id=task.id,
+                task_id=task.root_id or task.id,
+                run_path=task.agent_run_workspace_dir or task.task_dir,
+                status=task.status,
+            ),
+        )
+    except OSError:
+        return
+
+
+def _sync_task_rollup_if_possible(task: SubAgentTask) -> None:
+    # LLM: task compact rollup summarizes child run refs so parents do not scan every child compact package first.
+    # 函数用途: 子代理保存时同步任务级 compact rollup，给父代理恢复和汇总提供入口摘要。
+    task_workspace = str(getattr(task, "task_workspace_dir", "") or "").strip()
+    if not task_workspace:
+        return
+    result = sync_task_compact_rollup(task_workspace)
+    task.attributes = dict(getattr(task, "attributes", {}) or {})
+    task.attributes["task_compact_rollup"] = {
+        "rollup_json": str(result.rollup_json),
+        "rollup_markdown": str(result.rollup_markdown),
+        "compact_package_dir": str(result.compact_package_dir),
+        "child_count": result.child_count,
+    }
 
 
 # LLM: _merge_existing_child_links protects hierarchy edges from stale full-object saves.

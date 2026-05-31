@@ -16,10 +16,14 @@ agent_py_agent/agent/
 |-- user_space/identity_store.py       # provider identity 分片索引和 canonical user profile 目录
 |-- user_space/home_indexes.py         # global_index 的 owner/task 轻量引用写入
 |-- user_space/home_migration.py       # 旧 daily/raw/task workspace 到 owner home 的非破坏性复制计划
+|-- user_space/home_doctor.py          # owner home 迁移、索引、schema、retention 的非阻断体检报告
+|-- user_space/home_retention.py       # owner retention.json 驱动的过期文件计划和显式清理
 |-- user_space/home_backup.py          # owner home 迁移前 manifest-only 备份清单
 |-- user_space/owner_policy.py         # owner permissions/quota/retention/policy 读取和磁盘用量统计
 |-- user_space/compact_layout.py       # task/run/agent 共享 compact 包基础文件布局
 |-- user_space/compact_injection.py    # compact_context + continue_packet 的统一续接提示渲染
+|-- user_space/task_compact_rollup.py  # task 级 compact rollup，汇总子代理 run refs 和最新恢复入口
+|-- user_space/capability_resolver.py  # owner/shared/builtin 能力短名解析和 run 内缓存
 |-- user_space/capability_requests.py  # owner 级能力/工具/权限申请账本，不阻断普通任务
 |-- user_space/temporary_grants.py     # owner 级临时授权账本，过期只改状态不删审计
 |-- user_space/skill_candidates.py     # owner 私有 skill 候选草稿账本，不自动提升
@@ -90,18 +94,22 @@ agent_py_agent/cli/
 ## 核心文件
 
 - `memory_archive/resume_context.py`：除恢复上下文构造外，公开 `has_resume_trigger()` 作为轻量意图判断 helper；它只看当前用户 prompt 是否明确继续旧任务、恢复上次、或点名 run/request/subagent 等恢复目标，不加载历史正文。普通任务里说“继续往下做/继续整理/继续完成”不会触发旧任务恢复，避免一次性 CLI 任务串入历史工作。
-- `memory_store/jsonl.py`：读写长期记忆 JSONL，是最朴素的事实落盘层；LocalStore 只是索引，不替代 JSONL。`SimpleAgent` 传入 home daily mirror 后，同一条记录也会追加到 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl`，便于以后按天恢复和查询；读取侧现在也会把 daily mirror 作为旧 `memory_path` 的补充事实源并去重。
+- `memory_store/jsonl.py`：读写长期记忆 JSONL，是最朴素的事实落盘层；LocalStore 只是索引，不替代 JSONL。owner-home agent 的新写入会落到 `owner_home/memory/long_term/memory.jsonl`，旧 `memory_path` 只作为 fallback read path 保留，避免 CLI 主账号、飞书用户、微信群或子代理记忆继续混到一个大锅里。`SimpleAgent` 传入 home daily mirror 后，同一条记录也会追加到 `owner_home/memory/daily/YYYY-MM-DD.jsonl`，便于以后按天恢复和查询；读取侧现在也会把 daily mirror 和旧 memory_path 作为补充事实源并去重。
 - `memory_store/daily.py`：提供 `DailyMemoryEvent`、`append_daily_memory_event()` 和 `daily_memory_path()`；这一层面向 通道运行时 式每日工作记忆，记录进展摘要、引用、教训和下一步。它不是新硬门，也不取代 raw archive，只让 owner memory 除了黑盒流水外还有可读工作日记。
 - `contracts/error_taxonomy.py`、`contracts/state_machine.py`、`contracts/idempotency.py`、`contracts/tool_protocol_v2.py`、`contracts/model_call_ledger.py`、`contracts/e2e_matrix.py`、`contracts/e2e_matrix_runner.py`：主代理执行合同层。它们分别定义稳定错误代码/恢复建议、运行状态事实判断、幂等键/操作编号、工具调用/工具结果 envelope、模型调用 started/first-token/finished/timeout 账本、真实端到端测试矩阵和 deterministic runner；这些模块只输出机器可读事实，不直接阻断工具或固定工作流。当前 `create_subagents` 已写 `operation_contract`，`current_turn_run_state` 已写 `state_machine_contract` 和 `recovery_recommendations`，`ToolExecutionResult` 已带错误合同字段，registry 会同步镜像 `tool_protocol_v2` 结构化结果。
 - `user_space/home_runtime_query.py`：提供 `DailyMemoryQuery`、`TaskWorkspaceQuery`、`read_daily_memory_records()`、`list_task_workspaces()`、`home_task_workspace_payload()` 和 `home_runtime_status()`；CLI、doctor 和 resume 通过这一层读取 home runtime，不在各自模块里散扫目录。
 - `user_space/owner_resolver.py`：把 local CLI、provider user、provider group 解析到 V2 owner home。它会按需初始化 owner 的入口文件、memory、tasks/runs/agents、compact、workspace、capability_requests 和策略文件；这是运行时进入 owner 隔离的第一层桥。
 - `user_space/identity_store.py`：把外部 provider 身份写入 `identity/provider_identity/<provider>.jsonl`，查询时按 provider 分片读取，不全局扫一个大文件；canonical user profile 使用目录 `identity/canonical_users/<id>/profile.json`，避免文件和目录同名冲突。
-- `user_space/home_indexes.py`：写入并读取 `global_index/owners.jsonl` 和 `global_index/active_tasks.jsonl` 这类轻量地图。它只记录 owner/task 的路径和状态摘要，真实事实仍在 owner/task/run/agent 目录里。
-- `user_space/home_migration.py`：生成和执行 V1 到 V2 owner home 的迁移计划。当前只复制 legacy daily/raw/task workspace 到 owner home，目标已存在就跳过，不删除旧文件，也不改任务状态。
+- `user_space/home_indexes.py`：写入并读取 `global_index/owners.jsonl`、`active_tasks.jsonl`、`active_runs.jsonl`、`active_agents.jsonl` 这类轻量地图。它只记录 owner/task/run/agent 的路径和状态摘要，真实事实仍在 owner/task/run/agent 目录里；doctor 可以用它检查悬空引用。
+- `user_space/home_migration.py`：生成和执行 V1 到 V2 owner home 的迁移计划。当前复制 legacy long-term `data/memory.jsonl`、daily、raw、hooks 和 task workspace 到 owner home，目标已存在就跳过，不删除旧文件，也不改任务状态。
+- `user_space/home_doctor.py`：汇总 home runtime 状态、schema version、迁移待办、悬空 global index 和 retention 候选。它只给报告和建议，不改变退出码，不阻断普通任务。
+- `user_space/home_retention.py`：读取 owner `retention.json`，对 raw/daily/hooks/compact/cache/tmp/trash 生成过期文件计划；显式 apply 时只删除过期文件，不删目录，配置为 0 表示无限保留。
 - `user_space/home_backup.py`：为 schema 迁移或大规模 owner 调整生成 manifest-only 备份清单，列出 owner memory/tasks/runs/agents/identity/index 等保护范围；当前不复制大文件。
 - `user_space/owner_policy.py`：读取 owner 级 `permissions.json`、`quota.json`、`retention.json`、`skill_policy.json` 和 `tool_policy.json`，并统计 owner 关键目录磁盘用量。它供 doctor/状态页使用，不给普通任务新增硬门。
 - `user_space/compact_layout.py`：创建 `compact_0001/` 这类基础恢复包，task/run/agent 三层共享同一组文件名，避免以后压缩恢复时出现三套格式。
 - `user_space/compact_injection.py`：把 `compact_context.md` 和 `continue_packet.json` 渲染成同一份续接提示；它不读 raw archive 正文、不自动执行工具。
+- `user_space/task_compact_rollup.py`：在 `tasks/<root_id>/compact/` 写任务级 `task_rollup.json`、`task_rollup.md`、`rollup_ledger.jsonl` 和一份共享 compact 包。它只收集子 run 的 refs、状态和摘要，不复制子代理大产物；父代理恢复大任务时先读这里，再按需打开某个子代理细节。
+- `user_space/capability_resolver.py`：按 owner/private draft/shared/builtin 的优先级解析 skill/tool/workflow 短名，并把同一 run 的解析结果缓存到 `owner_home/memory/runtime_refs/capability_resolver/`。缓存只减少反复查目录，不绕过后续权限检查。
 - `user_space/capability_requests.py`：写 owner 私有 `capability_requests/<id>.json`，记录能力、工具或权限申请的生命周期和过期状态；子代理结束后请求仍留在 owner home 里，后续由父代理、用户或管理员处理。它不自动授权，也不作为 closeout 硬门。
 - `user_space/temporary_grants.py`：写 owner 私有 `temporary_grants/<id>.json`，记录本次临时授权的对象、能力、路径前缀、过期时间和理由；过期后保留记录，只把状态改成 `expired`。
 - `user_space/skill_candidates.py`：写 owner 私有 `skills/.drafts/skill_candidates.jsonl`。它只登记可学习经验、来源任务和证据引用，不安装正式 skill，也不写 shared 能力库。
@@ -189,8 +197,8 @@ agent_py_agent/cli/
 
 ## 数据流
 
-1. 用户对话或命令触发记忆写入，基础事实先落到旧 `memory_path` JSONL；home-backed agent 同时镜像到 `memory/daily/YYYY-MM-DD.jsonl`。
-2. LocalStore 可以为旧 memory 补建索引，让搜索和 timeline 能看到它；daily mirror 现在也是读取侧补充事实源：`memory-search` / `agent.recall()` 在旧 JSONL 缺失或索引命中不足时会回到 daily mirror。
+1. 用户对话或命令触发记忆写入。owner-backed agent 的长期记忆先落到 `owner_home/memory/long_term/memory.jsonl`；旧 `memory_path` 不再作为新写入目标，只作为 fallback read path 保证旧数据可读。
+2. LocalStore 可以为 memory JSONL 补建索引，让搜索和 timeline 能看到它；daily mirror 和旧 memory_path 现在都是读取侧补充事实源：`memory-search` / `agent.recall()` 在主 JSONL 缺失或索引命中不足时会回到这些 fallback 事实源。
 3. `memory-daily-list` 直接读 `memory/daily/YYYY-MM-DD.jsonl`，可按 date/role/kind/query 查当天流水；它是调试入口，不会调用模型、不改记忆。
 4. 当新任务需要规则时，memory routing 根据 query 匹配 route index。
 5. 匹配到的 authority path 会被安全读取成上下文片段。
@@ -199,14 +207,14 @@ agent_py_agent/cli/
 8. raw event、hook snapshot 和权威快照写完后都会读回校验，确保恢复线索真实落盘；live raw archive 写入失败只进入工具记录提示，不中断当前任务。
 9. subagent 保存时会同步 `tasks/<root_id>/` 的 `state.json`、`timeline.jsonl`、`summaries/current_summary.md` 和 legacy run adapter；旧 `subagents/<run_id>/` 仍是当前兼容事实源。
 10. 主代理普通 run 会创建 `~/.my-agent/tasks/{date}/{task_slug}/`；根目录只有 `output/` 和 `work/` 两块。`task-workspace-list` 可直接列出这些目录，`memory-resume --task-id/--run-id` 在旧 subagent 工单不存在时会回退读取其 `work/state.json` 和 `work/timeline.jsonl`。
-11. 同一保存流程会同步 `tasks/<root_id>/agents/<run_id>/` 的 agent run workspace skeleton，先写恢复和接管需要的最小 run 文件，不搬迁旧工单目录。
+11. 同一保存流程会同步 `tasks/<root_id>/agents/<run_id>/` 的 agent run workspace skeleton，先写恢复和接管需要的最小 run 文件，不搬迁旧工单目录；随后更新 `tasks/<root_id>/compact/task_rollup.json`，让父代理恢复时先看任务级总摘要，而不是乱翻每个子代理 compact。
 12. 同一保存流程会追加 `daily/YYYY-MM-DD/events.jsonl`，作为主代理按天查 task/run/event/artifact refs 的轻量索引。
 13. 同一保存流程会写 task/run artifact manifest，并让 daily ledger refs 指向 manifest；需要正文时再读 workspace 边界内的 artifact 文件本身，越界路径只保留 blocked manifest 记录。
 14. 同一保存流程会追加 run `compactions/compaction_ledger.jsonl`，写 checkpoint snapshot summary/metadata，并让 run `checkpoint.json` 指向最新 compact refs；这不是删除上下文的 compact apply。
 15. 同一保存流程会同步 `shared/blackboard.md`、`messages.jsonl`、`findings.jsonl` 和 `evidence_packets/`，让 sibling 子代理共享任务局部 facts；其中 messages 追加，findings/evidence 按 id 合并，避免最后一次保存覆盖其他 sibling 事实。这仍然不是主 memory 写入。
 16. `subagents-memory-gate` 默认只列出候选或写 `decisions.jsonl`；只有显式 `--export-memory` 才写主 JSONL memory，只有显式 `--export-skill` 才写 skill draft，`--retention-apply` 也只压缩 active queue，不删除审计日志。
 17. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore、daily ledger、旧 subagent 工单和 home task workspace 生成恢复块；跨天时会同时扫描最近 raw/hook 文件。subagent 任务会先推荐 `reports/checkpoint.json`、`status_report.json`、`progress.md` 等 compact recovery artifacts，再推荐 `STATUS.md`、`HANDOFF.md` 和 `output.json`。主代理 task workspace 会推荐 `work/state.json`、`work/timeline.jsonl` 和 `work/task.yaml`。`memory-resume --from-compact` 会从某次 compact apply 产物生成恢复块、consistency report 和 action guard。这只是恢复入口推荐，不代表把子代理内容写入主代理长期 memory。
-18. doctor 命令检查 home runtime、配置、route index、hook/raw/snapshot 目录和层级一致性 warning。
+18. doctor 命令检查 home runtime、配置、route index、hook/raw/snapshot 目录和层级一致性 warning；`memory-doctor` 还会嵌入 `home_doctor`，报告 owner home 迁移待办、悬空 task/run/agent index、schema version 和 retention 候选。这些都只是体检信息，不在普通任务里硬挡。
 19. runtime 工具循环遇到大工具输出时，会先写 metadata-only recovery snapshot，再把完整输出外置到 `memory_archive/artifacts/tool_outputs/`，并在 archive_tool_calls / raw tool event 中保存 preview/hash/path/size。
 20. tool context reducer 会在下一轮 live prompt 注入前再次检查 archive record：如果输出已外置，只注入 preview、artifact path、hash、size 和 fail-safe checkpoint；完整正文必须通过 artifact 文件显式读取。
 21. recovery snapshot 的工具调用 metadata 会保留 output hash、size 和 externalized 状态，方便接管代理知道大输出存在且需要读 artifact；snapshot 不保存完整工具输出正文。

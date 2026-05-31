@@ -16,6 +16,11 @@ from .capability_requests import (
     expire_capability_requests,
     list_capability_requests,
 )
+from .capability_resolver import (
+    CapabilityResolveOptions,
+    CapabilityResolveResult,
+    resolve_owner_capability,
+)
 from .compact_injection import render_compact_injection
 from .compact_layout import CompactPackagePaths, compact_package_paths, ensure_compact_package
 from .context_bundle import (
@@ -25,11 +30,19 @@ from .context_bundle import (
     latest_main_context_bundle_path,
 )
 from .home_backup import HomeBackupManifest, create_home_backup_manifest
+from .home_doctor import build_home_doctor_report
 from .home_indexes import (
+    AgentIndexRef,
+    RunIndexRef,
     TaskIndexRef,
+    dangling_index_refs,
+    latest_agent_refs,
     latest_owner_refs,
+    latest_run_refs,
     latest_task_refs,
+    register_agent_ref,
     register_owner_ref,
+    register_run_ref,
     register_task_ref,
 )
 from .home_layout import ensure_my_agent_home, home_paths, resolve_my_agent_home
@@ -38,6 +51,12 @@ from .home_migration import (
     HomeMigrationResult,
     apply_home_migration,
     plan_home_migration,
+)
+from .home_retention import (
+    OwnerRetentionPlan,
+    RetentionAction,
+    apply_owner_retention,
+    plan_owner_retention,
 )
 from .identity_store import (
     ProviderIdentityRecord,
@@ -71,6 +90,7 @@ from .skill_candidates import (
     SkillCandidateAppendResult,
     append_owner_skill_candidate,
 )
+from .task_compact_rollup import TaskCompactRollupResult, sync_task_compact_rollup
 from .temporary_grants import (
     CreateTemporaryGrant,
     OwnerTemporaryGrant,
@@ -83,6 +103,8 @@ __all__ = [
     "ProviderSpaceIdentity",
     "ProviderSpacePaths",
     "CompactPackagePaths",
+    "CapabilityResolveOptions",
+    "CapabilityResolveResult",
     "CreateCapabilityRequest",
     "CreateTemporaryGrant",
     "HomeBackupManifest",
@@ -93,6 +115,7 @@ __all__ = [
     "OwnerDiskUsage",
     "OwnerIdentity",
     "OwnerPolicyBundle",
+    "OwnerRetentionPlan",
     "OwnerTemporaryGrant",
     "EffectiveOwnerPolicy",
     "ProviderIdentityRecord",
@@ -102,17 +125,24 @@ __all__ = [
     "MainContextBundleRequest",
     "MainContextBundleResult",
     "RunWorkspacePaths",
+    "AgentIndexRef",
+    "RunIndexRef",
+    "RetentionAction",
     "SkillCandidate",
     "SkillCandidateAppendResult",
     "TaskIndexRef",
+    "TaskCompactRollupResult",
     "append_owner_skill_candidate",
+    "apply_owner_retention",
     "apply_home_migration",
+    "build_home_doctor_report",
     "build_main_context_bundle",
     "close_capability_request",
     "compact_package_paths",
     "create_capability_request",
     "create_home_backup_manifest",
     "create_temporary_grant",
+    "dangling_index_refs",
     "ensure_canonical_user_profile",
     "ensure_compact_package",
     "ensure_owner_home",
@@ -126,6 +156,8 @@ __all__ = [
     "home_paths_with_owner",
     "latest_main_context_bundle_path",
     "latest_owner_refs",
+    "latest_agent_refs",
+    "latest_run_refs",
     "latest_task_refs",
     "link_provider_identity",
     "list_capability_requests",
@@ -135,11 +167,16 @@ __all__ = [
     "owner_identity_from_config",
     "owner_disk_usage",
     "plan_home_migration",
+    "plan_owner_retention",
     "read_owner_policy_bundle",
     "register_owner_ref",
+    "register_agent_ref",
+    "register_run_ref",
     "register_task_ref",
     "render_compact_injection",
     "resolve_effective_owner_policy",
+    "resolve_owner_capability",
     "resolve_my_agent_home",
     "resolve_owner_home",
+    "sync_task_compact_rollup",
 ]

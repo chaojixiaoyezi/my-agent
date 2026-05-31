@@ -177,9 +177,10 @@ class SimpleAgent(
             enable_fts=config.local_store_fts_enabled,
         )
         self.memory = JsonlMemory(
-            paths["memory_path"],
+            _owner_memory_jsonl_path(self.home_paths, fallback=paths["memory_path"]),
             local_store=self.local_store,
             daily_mirror_dir=_daily_memory_dir(config, self.home_paths),
+            fallback_read_paths=(paths["memory_path"],),
         )
         self.prompts = PromptBuilder(config, self.root, home_paths=self.home_paths)
         self.backend = get_backend(config.model_backend, config)
@@ -217,17 +218,21 @@ def _register_owner_ref_if_possible(paths, owner) -> None:
 def _daily_memory_dir(config: AgentConfig, paths):
     if not bool(getattr(config, "daily_memory_mirror_enabled", True)):
         return None
-    daily_dirs = [paths.memory_daily_dir]
     owner_daily = getattr(paths, "owner_memory_daily_dir", None)
-    if owner_daily and owner_daily not in daily_dirs:
-        daily_dirs.append(owner_daily)
-    return tuple(daily_dirs)
+    return (owner_daily,) if owner_daily else None
+
+
+def _owner_memory_jsonl_path(paths, *, fallback: Path) -> Path:
+    owner_long_term = getattr(paths, "owner_memory_long_term_dir", None)
+    if owner_long_term:
+        return Path(owner_long_term) / "memory.jsonl"
+    return Path(fallback)
 
 
 # LLM: _build_subagent_manager 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
 # 函数用途: 用代理依赖和路径配置创建 SubAgentManager。
 def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
-    return SubAgentManager(
+    manager = SubAgentManager(
         paths["subagent_workspace"],
         local_store=agent.local_store,
         collaboration_store=agent.collaboration_store,
@@ -243,6 +248,8 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
         owner_home_dir=str(getattr(agent.home_paths, "owner_home_dir", "") or ""),
         owner_policy_snapshot=agent.owner_policy.to_dict(),
     )
+    manager.home_paths = agent.home_paths
+    return manager
 
 
 # LLM: _build_tool_registry 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。

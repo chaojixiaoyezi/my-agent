@@ -32,6 +32,8 @@
 
 子代理应该做的是写自己的结果、证据引用和必要的工作文件；父级或主代理通过 `inspect_agent_tree`、`output_json` 和 refs 看状态，不要求子代理手动维护树。
 
+每次子代理保存时，系统会同步 `tasks/<root_id>/compact/task_rollup.json` 和 `task_rollup.md`。这个 rollup 是父级恢复和汇总的入口摘要：它列出子 run 状态、refs 和最近 compact 包位置，不复制大产物正文，也不替代具体子代理的 `task.json` / artifact registry。
+
 调度层只创建和推进任务节点，不再用额外 scope/duplicate/QA 硬门替父级做流程裁决。需要流水线、去重或重试时，由父级根据树状态和任务目标显式安排下一步。
 
 ## Artifact Registry
@@ -94,6 +96,7 @@ owner 归属现在也会随子代理落账：
 - 子代理默认继承创建它的主代理/父代理 owner_id，不再空着靠路径猜是谁的任务。
 - `effective_permissions` 会记录 owner_id、owner_home、owner policy 的工具禁用列表、max_subagents 和 max_depth 等机器事实。
 - 子代理保存时会在 `owner_home/agents/<run_id>/` 写一份 refs-only projection：只放 state/refs，不复制大产物正文。父代理、tree、compact 或后台恢复要找子代理时，优先用这些 refs 定位。
+- 同一保存流程还会把子代理写进 owner 的 `global_index/active_agents.jsonl`。这只是轻量地图，方便 doctor 和恢复入口找到 run；真实状态仍以任务工作区和 run 账本为准。
 - 旧 `subagent_workspace` 仍是运行兼容入口，避免破坏现有 runner；owner projection 是同一份任务事实的索引，不是第二套任务账本。
 
 ## 记忆和压缩

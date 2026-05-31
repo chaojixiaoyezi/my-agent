@@ -23,6 +23,7 @@ from ..agent.memory_routing import (
     load_routes,
     validate_routes,
 )
+from ..agent.user_space.home_doctor import build_home_doctor_report
 from ..agent.user_space.home_runtime_query import home_runtime_status
 from .common import make_agent
 
@@ -39,10 +40,12 @@ def cmd_memory_doctor(args) -> int:
     warnings = _config_warnings(agent.config)
     routing = _build_routing_doctor(agent.root, index_path)
     archive = _build_archive_doctor(agent.root, agent.config)
+    home_doctor = build_home_doctor_report(agent.home_paths)
     payload = {
         "ok": routing["load_error"] == "",
         "workspace_root": str(agent.root),
         "home": home_runtime_status(agent.home_paths),
+        "home_doctor": home_doctor,
         "config": _memory_config_payload(agent.config),
         "warnings": warnings,
         "routing": routing,
@@ -223,6 +226,7 @@ def _print_memory_doctor_report(payload: dict[str, Any], *, json_output: bool) -
     print(f"ok={payload['ok']}")
     print(f"workspace={payload['workspace_root']}")
     _print_home_report(payload["home"])
+    _print_home_doctor_summary(payload["home_doctor"])
     print("Config")
     for key, value in payload["config"].items():
         print(f"- {key}={value}")
@@ -263,3 +267,12 @@ def _print_home_report(home: dict[str, Any]) -> None:
     print(f"- daily_files={home['counts']['daily_files']} task_workspaces={home['counts']['task_workspaces']}")
     for name, state in home["directories"].items():
         print(f"- {name}: exists={state['exists']}")
+
+
+def _print_home_doctor_summary(report: dict[str, Any]) -> None:
+    print("Home Doctor")
+    print(
+        f"- migration_pending={report['migration']['pending_count']} "
+        f"dangling_refs={report['indexes']['dangling_count']} "
+        f"retention_candidates={report['retention']['planned_count']}"
+    )

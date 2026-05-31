@@ -50,10 +50,22 @@ def apply_home_migration(home: MyAgentHomePaths) -> HomeMigrationResult:
 
 def _legacy_copy_actions(home: MyAgentHomePaths) -> list[HomeMigrationAction]:
     return [
+        *_legacy_long_term_memory_actions(home),
         *_file_copy_actions("copy_daily_memory", home.memory_daily_dir, home.owner_memory_daily_dir, "*.jsonl"),
         *_file_copy_actions("copy_raw_memory", home.memory_raw_dir, home.owner_memory_raw_dir, "*.jsonl"),
+        *_file_copy_actions("copy_hook_memory", home.memory_hooks_dir, home.owner_memory_hooks_dir, "*.jsonl"),
         *_task_workspace_copy_actions(home.workspace_tasks_dir, home.owner_tasks_dir),
     ]
+
+
+def _legacy_long_term_memory_actions(home: MyAgentHomePaths) -> list[HomeMigrationAction]:
+    # LLM: long-term migration keeps the first legacy memory JSONL as a copy source and never merges in place.
+    # 函数用途: 找到旧全局 memory.jsonl，复制到 owner 长期记忆主文件；目标存在时 apply 阶段跳过。
+    target = home.owner_memory_long_term_dir / "memory.jsonl"
+    for source in (home.data_dir / "memory.jsonl", home.root / "memory.jsonl"):
+        if source.is_file():
+            return [HomeMigrationAction(action="copy_long_term_memory", source=source, target=target)]
+    return []
 
 
 def _file_copy_actions(action: str, source_dir: Path, target_dir: Path, pattern: str) -> list[HomeMigrationAction]:

@@ -222,6 +222,7 @@ def test_memory_doctor_reports_legacy_migration_advice(tmp_path: Path, capsys):
 
     assert code == 0
     assert payload["home"]["migration"]["legacy_daily_memory"]["record_count"] == 1
+    assert payload["home_doctor"]["migration"]["pending_count"] >= 1
     assert payload["home"]["migration"]["legacy_daily_memory"]["target"] == str(
         home.resolve() / "owners" / "local" / "main" / "memory" / "daily"
     )

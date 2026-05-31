@@ -92,6 +92,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         path: str | Path,
         local_store: LocalStore | None = None,
         daily_mirror_dir: str | Path | None = None,
+        fallback_read_paths: tuple[str | Path, ...] | list[str | Path] | None = None,
     ):
         """初始化 JSONL 记忆文件位置，并确保父目录存在。
 
@@ -108,6 +109,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         self.local_store = local_store
         self.daily_mirror_dirs = _daily_mirror_dirs(daily_mirror_dir)
         self.daily_mirror_dir = self.daily_mirror_dirs[0] if self.daily_mirror_dirs else None
+        self.fallback_read_paths = _fallback_read_paths(fallback_read_paths, primary=self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     # LLM: memory store 以 JSONL 记录和本地索引作为事实来源；修改 add 时同步检查返回值、异常处理和读写副作用。
@@ -176,7 +178,12 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         异常说明:
         如果某一行不是合法 JSON，目前会由 json.loads 抛错；后续如需容错可加 read audit。"""
 
-        return self._read_memory_file(self.path)
+        return _dedupe_memory_records(
+            [
+                *self._read_memory_file(self.path),
+                *self._read_fallback_memory_files(),
+            ]
+        )
 
     # LLM: memory store 以 JSONL 记录和本地索引作为事实来源；修改 search 时同步检查返回值、异常处理和读写副作用。
     # 函数用途: 完成 search 在当前模块中的核心转换或协调步骤，衔接 memory store 以 JSONL 记录和本地索引作为事实来源。
@@ -199,6 +206,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
             return indexed[:top_k]
         fallback = _merge_search_results(
             self._search_jsonl(query, top_k),
+            self._search_fallback_memory(query, top_k),
             self._search_daily_mirror(query, top_k),
             top_k,
         )
@@ -260,6 +268,19 @@ class JsonlMemory(JsonlMemoryIndexMixin):
             records.extend(self._read_memory_file(path))
         return _search_memory_records(records, query, top_k)
 
+    # LLM: fallback_read_paths lets owner-home memory become primary without losing old legacy memory_path records.
+    # 函数用途: 读取旧 memory_path 等兼容记忆文件，只作为 owner memory 的补充读源，不再作为新写入目标。
+    def _read_fallback_memory_files(self) -> list[MemoryRecord]:
+        records: list[MemoryRecord] = []
+        for path in self.fallback_read_paths:
+            records.extend(self._read_memory_file(path))
+        return records
+
+    # LLM: fallback search keeps migrated owner memory compatible with older global JSONL memories.
+    # 函数用途: 在兼容读源中做轻量关键词搜索，保证迁移后旧记忆仍可召回。
+    def _search_fallback_memory(self, query: str, top_k: int) -> list[MemoryRecord]:
+        return _search_memory_records(self._read_fallback_memory_files(), query, top_k)
+
 
 # LLM: _memory_record_key dedupes legacy memory and daily mirror copies without relying on line numbers.
 # 函数用途: 生成记忆记录去重 key，避免同一条写入同时从两个文件返回。
@@ -292,22 +313,45 @@ def _memory_search_score(record: MemoryRecord, query: str, query_terms: set[str]
 
 # LLM: _merge_search_results preserves LocalStore priority while filling gaps from JSONL/daily facts.
 # 函数用途: 合并索引搜索和 JSONL fallback 结果，并按 MemoryRecord 语义去重。
-def _merge_search_results(
-    indexed: list[MemoryRecord],
-    fallback: list[MemoryRecord],
-    top_k: int,
-) -> list[MemoryRecord]:
+def _merge_search_results(*groups: list[MemoryRecord] | int) -> list[MemoryRecord]:
+    top_k = int(groups[-1])
+    record_groups = [group for group in groups[:-1] if isinstance(group, list)]
     records: list[MemoryRecord] = []
     seen: set[tuple[str, str, str, float]] = set()
-    for record in [*indexed, *fallback]:
+    for group in record_groups:
+        _append_unique_records(records, seen, group, top_k=top_k)
+        if len(records) >= top_k:
+            return records
+    return records
+
+
+def _append_unique_records(
+    records: list[MemoryRecord],
+    seen: set[tuple[str, str, str, float]],
+    group: list[MemoryRecord],
+    *,
+    top_k: int,
+) -> None:
+    for record in group:
         key = _memory_record_key(record)
         if key in seen:
             continue
         seen.add(key)
         records.append(record)
         if len(records) >= top_k:
-            break
-    return records
+            return
+
+
+def _dedupe_memory_records(records: list[MemoryRecord]) -> list[MemoryRecord]:
+    deduped: list[MemoryRecord] = []
+    seen: set[tuple[str, str, str, float]] = set()
+    for record in records:
+        key = _memory_record_key(record)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(record)
+    return deduped
 
 
 def _daily_mirror_dirs(value: object) -> tuple[Path, ...]:
@@ -320,3 +364,16 @@ def _daily_mirror_dirs(value: object) -> tuple[Path, ...]:
         if path not in dirs:
             dirs.append(path)
     return tuple(dirs)
+
+
+def _fallback_read_paths(value: object, *, primary: Path) -> tuple[Path, ...]:
+    if not value:
+        return ()
+    raw_items = value if isinstance(value, (list, tuple, set)) else (value,)
+    paths: list[Path] = []
+    for item in raw_items:
+        path = Path(item)
+        if path == primary or path in paths:
+            continue
+        paths.append(path)
+    return tuple(paths)

@@ -15,11 +15,10 @@ def runtime_owner_root(agent: object) -> Path:
 
 
 def runtime_archive_roots(agent: object) -> tuple[Path, ...]:
-    roots: list[Path] = [Path(agent.root)]
     owner = runtime_owner_root(agent)
-    if owner not in roots:
-        roots.append(owner)
-    return tuple(roots)
+    if owner:
+        return (owner,)
+    return (Path(agent.root),)
 
 
 __all__ = ["runtime_archive_roots", "runtime_owner_root"]

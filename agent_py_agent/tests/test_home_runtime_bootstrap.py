@@ -172,25 +172,43 @@ def test_no_save_run_does_not_create_task_workspace_or_daily_memory(tmp_path: Pa
     assert not daily_path.exists()
 
 
-# LLM: daily memory mirror keeps long-term memory day-sharded without removing legacy memory.jsonl yet.
-# 函数用途: 验证每次写入旧 memory_path 时，也会镜像到 home/memory/daily/YYYY-MM-DD.jsonl。
-def test_memory_add_mirrors_to_daily_home_ledger(tmp_path: Path):
+# LLM: owner memory is the primary write target; legacy memory_path remains read-only fallback.
+# 函数用途: 验证 remember 写入 owner 私有 memory，并且旧 memory_path 只作为兼容读取源。
+def test_memory_add_writes_owner_memory_and_keeps_legacy_read_fallback(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
     agent = SimpleAgent(cfg, repo)
+    legacy_path = repo / "memory.jsonl"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "role": "user",
+                "content": "旧记忆仍可搜索",
+                "kind": "preference",
+                "tags": [],
+                "created_at": 1.0,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     agent.remember("用户喜欢表格", kind="preference")
 
-    legacy_records = (repo / "memory.jsonl").read_text(encoding="utf-8").splitlines()
-    daily_path = home / "memory" / "daily" / f"{date.today().isoformat()}.jsonl"
+    owner_memory = home / "owners" / "local" / "main" / "memory" / "long_term" / "memory.jsonl"
+    owner_records = owner_memory.read_text(encoding="utf-8").splitlines()
+    daily_path = home / "owners" / "local" / "main" / "memory" / "daily" / f"{date.today().isoformat()}.jsonl"
     daily_records = daily_path.read_text(encoding="utf-8").splitlines()
     payload = json.loads(daily_records[-1])
 
-    assert legacy_records
+    assert "用户喜欢表格" in owner_records[-1]
     assert payload["kind"] == "preference"
     assert payload["role"] == "user"
     assert payload["content"] == "用户喜欢表格"
+    assert agent.memory.search("旧记忆", top_k=1)[0].content == "旧记忆仍可搜索"
 
 
 # LLM: home prompt context should read key memory every time and only matching lessons by simple filename signal.

@@ -11,6 +11,11 @@
 - 2026-05-31 Home V2 第七片已落地：新增 effective owner policy 快照，汇总 permissions/quota/skill_policy/tool_policy/temporary_grants；工具注册表会隐藏并拒绝 owner 显式禁用工具，network.enabled=false 时会禁用内置网络工具。这是 owner 策略边界，不是任务质量硬门。
 - 2026-05-31 Home V2 第八片已落地：保存型主代理 run 的 task.yaml/state/timeline/artifact manifest 会写入 owner_id/owner_home，并同步 owner_home/tasks 下任务工作区；ConversationThread 也可记录 owner_id/owner_home，外部通道创建线程时从当前主代理 owner 注入归属。
 - 2026-05-31 Home V2 第九片已落地：子代理创建时默认继承当前 owner_id 和 owner policy 快照，父级 full-access 不直接下放给子代理；子代理保存时在 owner_home/agents/<run_id>/ 写 refs-only projection，供 tree、恢复、compact 和跨 session 检索定位。
+- 2026-05-31 Home V2 阶段 3 接实：`remember()` 的主写入已切到 `owner_home/memory/long_term/memory.jsonl`，daily mirror 只写当前 owner 的 `memory/daily/`；旧 `memory_path` 不再作为新写入目标，只保留为只读 fallback，避免 provider 用户和本地主账号记忆混写。
+- 2026-05-31 Home V2 阶段 5 接实：新增 `task_compact_rollup.py`，子代理保存时会同步 `tasks/<root_id>/compact/task_rollup.json` 和同形 compact package。父代理恢复大任务时可先读 task rollup，再按 child run refs 读取单个子代理细节。
+- 2026-05-31 Home V2 阶段 7 接实：`home_indexes.py` 增加 run/agent refs 和 dangling index doctor helper；保存型主代理 run 会登记 task/run，子代理保存会登记 agent。global index 仍是可重建地图，不替代 owner/task/run 正文。
+- 2026-05-31 Home V2 阶段 8 接实：新增 owner capability resolver，按 owner -> shared -> builtin 优先级解析 skill/tool/workflow 短名，同一 run 内把解析结果缓存到 `owner_home/memory/runtime_refs/capability_resolver/`，避免多处同名时反复确认。
+- 2026-05-31 Home V2 迁移/doctor/retention 闭环接实：`home-migrate` 现在覆盖旧 long-term `data/memory.jsonl`、daily、raw、hooks 和 task workspace，仍然只复制、不覆盖、不删除；新增 `home_doctor.py` 汇总迁移建议、悬空 global index、schema 和 retention 候选；新增 `home_retention.py` 按 owner `retention.json` 生成/执行过期文件清理计划，0 天表示不清理。
 - 2026-05-30 `task_progress` 增加软质量提示：如果模型把条目标成 `done` 但没有 evidence，系统只在 `quality_hints` 里提醒补文件、产物或工具结果引用；这不会影响 closeout，不会阻断任务。compact / tree 会带着这个提示，帮助长任务压缩后继续把证据补扎实。
 - 2026-05-31 `task_progress` 的软提示进一步细化：覆盖账本里还有对象或检查点没完成时，会给 `next_suggestions` 和 `soft_prompt`，提醒模型继续选一个未完成对象、读核心文件或可靠来源、补 evidence、再写进报告。它仍然只是提示，不改状态、不触发 closeout、不阻断任务。
 - 2026-05-30 compact work state 增加通用 `runtime_handoff`：压缩前会收集同 scope 下最近 guidance 和可见下级 agent 状态，写入 `work_state_snapshot`、handoff context 和 continue packet。它不是聊天专项，也不是子代理专项，只是一份“运行中交接摘要”；API 监控、长报告、多人协作和普通聊天续接都复用同一字段。

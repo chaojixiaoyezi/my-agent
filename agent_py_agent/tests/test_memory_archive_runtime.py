@@ -338,8 +338,8 @@ def test_live_archive_and_runtime_fact_use_owner_home(tmp_path: Path) -> None:
 
     assert list((owner_home / "memory" / "raw").glob("*.jsonl"))
     assert (owner_home / "memory_archive" / "runtime_facts" / "req-owner" / "task.json").exists()
-    assert list((agent.root / "memory" / "raw").glob("*.jsonl"))
-    assert (agent.root / "memory_archive" / "runtime_facts" / "req-owner" / "task.json").exists()
+    assert not (agent.root / "memory" / "raw").exists()
+    assert not (agent.root / "memory_archive" / "runtime_facts" / "req-owner" / "task.json").exists()
 
 
 # LLM: Continuation runs should update progress without replacing the original task goal.
