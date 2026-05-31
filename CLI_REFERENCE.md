@@ -156,7 +156,7 @@ Ctrl+C
 | `memory-archive-list` | 列出 raw/hook 归档记录 | 否 | 否 |
 | `memory-archive-search` | 按字段搜索 raw/hook 归档 | 否 | 否 |
 | `memory-resume` | 从归档、LocalStore 和任务目录生成恢复线索 | 否 | 否 |
-| `task-workspace-list` | 查看 home workspace/tasks 任务工作区 | 否 | 否 |
+| `task-workspace-list` | 查看 home tasks 任务工作区 | 否 | 否 |
 | `context-bundle` | 查看最新主代理上下文包、scope、自检和工具/运行合同 | 否 | 否 |
 | `contracts` | 查看合同 finding 状态或迁移旧合同 JSON | status 只读；migrate 仅在 `--output` 或 `--in-place` 时写 | 否 |
 | `real-e2e` | 运行主代理基础 E2E 矩阵，并可验收真实产物 | 写报告 JSON | 否；当前不会自动调用模型 |
@@ -331,7 +331,7 @@ my-agent home-status
 my-agent home-status --json
 ```
 
-查看当前配置解析出的 `~/.my-agent` 家目录状态，包括 `SOUL.md`、`USER.md`、`AGENTS.md`、`memory.md` 是否存在，`memory/daily`、`workspace/tasks`、`scripts`、`role_templates`、`workflows` 等关键目录是否存在，以及 daily 文件数和 task workspace 数量。它只读目录结构，不调用模型、不扫描产物正文。
+查看当前配置解析出的 `~/.my-agent` 家目录状态，包括 `SOUL.md`、`USER.md`、`AGENTS.md`、`memory.md` 是否存在，`memory/daily`、`tasks`、`scripts`、`role_templates`、`workflows` 等关键目录是否存在，以及 daily 文件数和 task workspace 数量。它只读目录结构，不调用模型、不扫描产物正文。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -344,7 +344,7 @@ my-agent home-migrate
 my-agent home-migrate --apply --json
 ```
 
-预览或执行旧 home 数据到当前 owner home 的非破坏性迁移。默认只列计划；`--apply` 只复制旧 `memory/daily`、`memory/raw` 和 `workspace/tasks` 到 owner home，目标已存在就跳过，不删除、不覆盖旧文件。
+预览或执行旧 home 数据到当前 owner home 的非破坏性迁移。默认只列计划；`--apply` 只复制旧 `memory/daily`、`memory/raw` 和 `tasks` 到 owner home，目标已存在就跳过，不删除、不覆盖旧文件。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -487,7 +487,7 @@ my-agent memory-resume "继续" --context-only
 my-agent memory-resume --from-compact apply-xxx --context-only
 ```
 
-从归档线索、LocalStore 检索结果、旧 subagent 任务目录和 home task workspace 中生成恢复简报。它会列出 archive clues、LocalStore clues、任务事实源路径和下一步建议，提醒你先读 `STATUS.md`、`WORK_LOG.md`、`HANDOFF.md`、`TEST_CHECKLIST.md`，或 `~/.my-agent/workspace/tasks/<date>/<task>/state.json` / `timeline.jsonl` 等权威文件后再继续。
+从归档线索、LocalStore 检索结果、旧 subagent 任务目录和 home task workspace 中生成恢复简报。它会列出 archive clues、LocalStore clues、任务事实源路径和下一步建议，提醒你先读 `STATUS.md`、`WORK_LOG.md`、`HANDOFF.md`、`TEST_CHECKLIST.md`，或 `~/.my-agent/tasks/<date>/<task>/work/state.json` / `work/timeline.jsonl` 等权威文件后再继续。
 
 `--context-only` 只打印稳定格式的 `Recovery Brief` 文本块，不打印外层说明。这个输出适合复制给真实环境测试、人工 handoff，后续也可以作为自动上下文注入的复用入口。
 
@@ -545,7 +545,7 @@ my-agent task-workspace-list --date 2026-05-13
 my-agent task-workspace-list "购物网站" --json
 ```
 
-列出 `~/.my-agent/workspace/tasks/{date}/{task_slug}/` 下的主代理任务工作区。它会展示 `state.json`、`timeline.jsonl`、`task.yaml`、`outputs/`、`runtime/`、`agents/` 等引用，帮助恢复和前端调试；不会读取产物正文，也不会调用模型。
+列出 `~/.my-agent/tasks/{date}/{task_slug}/` 下的主代理任务工作区。任务根目录只分两块：`output/` 是可复制走的最终交付物，`work/` 是状态、日志、compact、子代理账本和草稿等过程材料。命令会展示 `work/state.json`、`work/timeline.jsonl`、`work/task.yaml`、`output/`、`work/runtime/`、`work/agents/` 等引用，帮助恢复和前端调试；不会读取产物正文，也不会调用模型。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |

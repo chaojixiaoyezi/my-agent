@@ -102,7 +102,7 @@
 - 2026-05-08 Compact work-state scope 安全修正：request/session/task/run id 现在按字面路径解析，`*`、`[]` 等 glob 字符不会扩大扫描 `tasks/*/agents/*`；半自动 completion 命令也会保留原 `--session-id/--request-id/--task-id/--run-id` scope。
 - 2026-05-08 compact + closeout 联调第一片已落地：新增 focused 测试串起 subagent task、compact apply/resume、continue packet、closeout apply 阻断和 auto-policy dry-run；断言 auto-policy 仍 `executed=false`、`mutates_task_state=false`，且 task 状态不被 compact 自动链路改动。
 - 2026-05-13 Code-size high-risk 清零第一片已落地：`memory_archive/query/resume_guidance.py` 承接 `ResumeGuidanceRequest` bundle，CLI/runtime 恢复建议不再用散装参数；相关 focused tests、ruff、strict code-size 已验证 `hard=0 high-risk=0 soft=0`。
-- 2026-05-13 Home Runtime 读取侧迁移第一片已落地：`memory_store/jsonl.py` 的搜索/recall 会把 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl` 作为旧 `memory_path` 的补充事实源并去重，`all()` / `index_all()` 仍保持旧 memory_path 语义；新增 `home_runtime_query.py`，统一读取 daily memory、`workspace/tasks/{date}/{task_slug}` 和 home status。
+- 2026-05-13 Home Runtime 读取侧迁移第一片已落地：`memory_store/jsonl.py` 的搜索/recall 会把 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl` 作为旧 `memory_path` 的补充事实源并去重，`all()` / `index_all()` 仍保持旧 memory_path 语义；新增 `home_runtime_query.py`，统一读取 daily memory、`tasks/{date}/{task_slug}` 和 home status。
 - 2026-05-13 Home Runtime CLI/Doctor 第一片已落地：新增 `home-status`、`memory-daily-list`、`task-workspace-list`；`memory-doctor --json` 会报告 home 入口文件、关键目录和计数；`memory-resume --task-id/--run-id` 在旧 subagent 工单不存在时可回退到主代理 task workspace 的 `state.json` / `timeline.jsonl`。
 - **记忆推模式** (`memory_push.py`)：在关键决策点自动查询并注入相关记忆，实现"推模式"记忆系统。
   - `MemoryType` 枚举：`LESSON_GENERAL`、`LESSON_TASK`、`LESSON_TEMP`、`CONTEXT`、`FACT`
@@ -309,7 +309,7 @@
 - 这轮不改变现有归档文件格式，不删除旧数据，不把 artifact 正文自动塞回 prompt；只是把运行默认值抽到后端配置层。
 
 ## 2026-05-13 home runtime bootstrap
-- 中文说明：单用户 `~/.my-agent` 暂不接飞书/QQ，但已经接入主代理本地运行时。`SimpleAgent` 启动会初始化 `my_agent_home`，普通保存型 run 会创建 `workspace/tasks/{date}/{task_slug}/outputs`、`runtime`、`agents`、`logs` 和 refs-only 状态文件。
+- 中文说明：单用户 `~/.my-agent` 暂不接飞书/QQ，但已经接入主代理本地运行时。`SimpleAgent` 启动会初始化 `my_agent_home`，普通保存型 run 会创建 `tasks/{date}/{task_slug}/output` 和 `work` 两个顶层目录；`output/` 是最终交付物，`work/` 保存日志、状态、compact、子代理账本和 refs-only 过程文件。
 - `JsonlMemory` 保留旧 `memory_path` 兼容，同时按配置镜像到 `memory/daily/YYYY-MM-DD.jsonl`，后续 query/resume 可以逐步迁移到按天流水。
 - `PromptBuilder` 对 home-backed root 每轮按 `AGENTS.md`、`SOUL.md`、`USER.md`、`memory.md` 顺序读取四个家目录入口文件，并用 lesson 文件名和当前任务文本做轻量匹配；不会每轮全量读取整个 lessons 目录。
 - provider trash 从 `provider_space.py` 拆到 `provider_trash.py`，新增按配置保留天数清理旧 trash 日期目录；破坏性操作仍默认走同空间 trash 和审计。

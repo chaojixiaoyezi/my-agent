@@ -18,7 +18,7 @@ def test_simple_agent_initializes_my_agent_home(tmp_path: Path):
 
     assert agent.home_paths.root == home.resolve()
     assert agent.home_paths.config_dir.is_dir()
-    assert agent.home_paths.workspace_tasks_dir.is_dir()
+    assert not agent.home_paths.workspace_tasks_dir.exists()
     assert agent.home_paths.memory_daily_dir.is_dir()
     assert agent.home_paths.memory_lessons_dir.is_dir()
     assert agent.home_paths.soul_md.exists()
@@ -26,7 +26,7 @@ def test_simple_agent_initializes_my_agent_home(tmp_path: Path):
 
 
 # LLM: saved runs should get a clean task workspace while old repo-relative memory paths keep working.
-# 函数用途: 验证普通 run 保存后，会在 home/workspace/tasks/date/task 下创建干净产物区和运行区。
+# 函数用途: 验证普通 run 保存后，会在 home/tasks/date/task 下创建 output 交付区和 work 过程区。
 def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
@@ -35,16 +35,17 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
 
     agent.run("做一个示例网站", request_id="req-1", run_id="run-1", task_id="示例网站 E2E")
 
-    task_root = home / "workspace" / "tasks" / date.today().isoformat() / "示例网站-e2e"
-    assert (task_root / "outputs").is_dir()
-    assert (task_root / "runtime").is_dir()
-    assert (task_root / "agents").is_dir()
-    assert (task_root / "task.yaml").exists()
-    state = json.loads((task_root / "state.json").read_text(encoding="utf-8"))
+    task_root = home / "tasks" / date.today().isoformat() / "示例网站-e2e"
+    assert (task_root / "output").is_dir()
+    assert (task_root / "work").is_dir()
+    assert (task_root / "work" / "runtime").is_dir()
+    assert (task_root / "work" / "agents").is_dir()
+    assert (task_root / "work" / "task.yaml").exists()
+    state = json.loads((task_root / "work" / "state.json").read_text(encoding="utf-8"))
     assert state["request_id"] == "req-1"
     assert state["run_id"] == "run-1"
     assert state["task_id"] == "示例网站 E2E"
-    assert (task_root / "timeline.jsonl").read_text(encoding="utf-8").strip()
+    assert (task_root / "work" / "timeline.jsonl").read_text(encoding="utf-8").strip()
 
 
 # LLM: main context bundle tests pin the root-agent prompt contract before implementation.
@@ -121,7 +122,7 @@ def test_no_save_run_does_not_create_task_workspace_or_daily_memory(tmp_path: Pa
 
     agent.run("临时诊断", save=False, request_id="req-nosave", run_id="run-nosave", task_id="诊断")
 
-    task_root = home / "workspace" / "tasks" / date.today().isoformat() / "诊断"
+    task_root = home / "tasks" / date.today().isoformat() / "诊断"
     daily_path = home / "memory" / "daily" / f"{date.today().isoformat()}.jsonl"
     assert not task_root.exists()
     assert not (repo / "memory.jsonl").exists()

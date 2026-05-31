@@ -150,7 +150,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         self._try_index_record(record)
         return record
 
-    # LLM: daily mirror keeps the future ~/.my-agent/memory/daily ledger populated while legacy memory_path stays readable.
+    # LLM: daily mirror keeps the future ~/my-agent/memory/daily ledger populated while legacy memory_path stays readable.
     # 函数用途: 把同一条记忆追加到按天分片的 home memory JSONL；未配置时保持旧行为。
     def _append_daily_mirror(self, record: MemoryRecord) -> None:
         if not self.daily_mirror_dirs:

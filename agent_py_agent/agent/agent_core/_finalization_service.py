@@ -240,7 +240,7 @@ def _estimate_token_params(ctx: FinalizeContext, run_request_id: str) -> Estimat
 
 
 # LLM: _write_run_task_workspace_if_needed gives saved runs a clean home task folder without changing legacy archive paths.
-# 函数用途: 在主代理 run 保存时创建 home/workspace/tasks/date/task 的产物区、运行区和 refs-only 状态文件。
+# 函数用途: 在主代理 run 保存时创建 home/tasks/date/task 的 output 交付区、work 过程区和 refs-only 状态文件。
 def _write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
     if not bool(getattr(agent.config, "run_task_workspace_enabled", True)):
         return ""

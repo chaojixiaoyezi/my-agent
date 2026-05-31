@@ -127,7 +127,7 @@ def test_memory_daily_list_uses_configured_provider_owner(tmp_path: Path, capsys
 
 
 # LLM: memory-resume should use home task workspace when the task is not a legacy subagent.
-# 函数用途: 验证 memory-resume 能从 workspace/tasks 读取主代理任务工作区状态。
+# 函数用途: 验证 memory-resume 能从 home tasks 读取主代理任务工作区状态。
 def test_memory_resume_reads_home_task_workspace_by_task_id(tmp_path: Path, capsys):
     home = tmp_path / "home"
     config_path = _write_config(tmp_path, home)
@@ -167,7 +167,8 @@ def test_memory_doctor_reports_home_runtime_status(tmp_path: Path, capsys):
     assert payload["home"]["root"] == str(home.resolve())
     assert payload["home"]["entry_files"]["memory_md"]["exists"] is True
     assert payload["home"]["directories"]["memory_daily"]["exists"] is True
-    assert payload["home"]["directories"]["workspace_tasks"]["exists"] is True
+    assert payload["home"]["owner"]["tasks"]["exists"] is True
+    assert payload["home"]["directories"]["workspace_tasks"]["exists"] is False
 
 
 # LLM: memory doctor should expose V2 owner/shared/system health without auto-migrating anything.
@@ -245,7 +246,7 @@ def test_home_migrate_apply_copies_legacy_daily_to_owner_home(tmp_path: Path, ca
 
 
 # LLM: task-workspace-list is the direct debug surface for owner task folders.
-# 函数用途: 验证 CLI 能列出 home task workspace，并展示 state/timeline/outputs 引用。
+# 函数用途: 验证 CLI 能列出 home task workspace，并展示 work/state、work/timeline 和 output 引用。
 def test_task_workspace_list_cli_shows_home_tasks(tmp_path: Path, capsys):
     home = tmp_path / "home"
     config_path = _write_config(tmp_path, home)
@@ -277,7 +278,7 @@ def test_run_workspace_creates_v2_task_ledgers(tmp_path: Path):
     paths = ensure_run_workspace(
         EnsureRunWorkspaceRequest(
             home=home,
-            template="workspace/tasks/{date}/{task_slug}",
+            template="tasks/{date}/{task_slug}",
             task_name="长任务分析",
             user_prompt="分析多个项目",
             request_id="req-v2",
@@ -291,5 +292,7 @@ def test_run_workspace_creates_v2_task_ledgers(tmp_path: Path):
     assert paths.collab_messages_jsonl.exists()
     assert paths.collab_evidence_packets_dir.is_dir()
     assert paths.artifact_manifest_json.exists()
+    assert paths.outputs_dir == home / "tasks" / "2026-05-13" / "task-v2" / "output"
+    assert paths.work_dir == home / "tasks" / "2026-05-13" / "task-v2" / "work"
     assert paths.compact_dir.is_dir()
     assert paths.summaries_dir.is_dir()

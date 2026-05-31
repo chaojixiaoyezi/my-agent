@@ -183,7 +183,6 @@ def _HOME_DIRECTORIES(paths: MyAgentHomePaths) -> tuple[Path, ...]:
     return (
         paths.config_dir,
         paths.scripts_dir,
-        paths.workspace_tasks_dir,
         paths.memory_daily_dir,
         paths.memory_raw_dir,
         paths.memory_hooks_dir,
@@ -250,7 +249,7 @@ def _trim_slug(slug: str, *, max_chars: int) -> str:
 
 
 # LLM: task_workspace_path expands the admin-configured template while keeping task names sanitized.
-# 函数用途: 根据 workspace/tasks/{date}/{task_slug} 这类模板计算任务工作区路径。
+# 函数用途: 根据 tasks/{date}/{task_slug} 这类模板计算任务工作区路径。
 def task_workspace_path(
     home: str | Path,
     template: str,
@@ -259,7 +258,7 @@ def task_workspace_path(
     task_name: str,
 ) -> Path:
     task_slug = safe_task_slug(task_name)
-    rendered = str(template or "workspace/tasks/{date}/{task_slug}").format(
+    rendered = str(template or "tasks/{date}/{task_slug}").format(
         date=date,
         task_slug=task_slug,
         task_name=task_slug,

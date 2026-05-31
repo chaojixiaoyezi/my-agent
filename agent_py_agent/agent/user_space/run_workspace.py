@@ -1,5 +1,5 @@
-# LLM: Run workspace helpers materialize per-task owner workspaces under ~/.my-agent without replacing legacy storage.
-# 模块用途: 为普通主代理 run 创建 outputs/runtime/agents 分区、状态文件和时间线记录。
+# LLM: Run workspace helpers materialize per-task owner workspaces with output/work split.
+# 模块用途: 为普通主代理 run 创建 output 交付区和 work 过程区、状态文件和时间线记录。
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from .home_layout import task_workspace_path
 @dataclass(frozen=True)
 class RunWorkspacePaths:
     root: Path
+    work_dir: Path
     outputs_dir: Path
     runtime_dir: Path
     agents_dir: Path
@@ -56,6 +57,7 @@ def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePath
     paths = run_workspace_paths(request)
     for directory in (
         paths.root,
+        paths.work_dir,
         paths.outputs_dir,
         paths.runtime_dir,
         paths.agents_dir,
@@ -80,8 +82,8 @@ def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePath
     return paths
 
 
-# LLM: run_workspace_paths expands the admin-configured task template into the owner home.
-# 函数用途: 根据 home、任务模板和任务名计算本次 run 的任务目录和标准子目录。
+# LLM: run_workspace_paths expands the task template into an output/work task folder.
+# 函数用途: 根据 home、任务模板和任务名计算本次 run 的任务目录、交付目录和过程目录。
 def run_workspace_paths(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths:
     root = task_workspace_path(
         request.home,
@@ -89,24 +91,26 @@ def run_workspace_paths(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths
         date=_date_key(request.created_at),
         task_name=request.task_id or request.task_name or request.user_prompt,
     )
+    work = root / "work"
     return RunWorkspacePaths(
         root=root,
-        outputs_dir=root / "outputs",
-        runtime_dir=root / "runtime",
-        agents_dir=root / "agents",
-        logs_dir=root / "logs",
-        collab_dir=root / "collab",
-        collab_blackboard_md=root / "collab" / "blackboard.md",
-        collab_messages_jsonl=root / "collab" / "messages.jsonl",
-        collab_findings_jsonl=root / "collab" / "findings.jsonl",
-        collab_evidence_packets_dir=root / "collab" / "evidence_packets",
-        artifacts_dir=root / "artifacts",
-        artifact_manifest_json=root / "artifacts" / "manifest.json",
-        compact_dir=root / "compact",
-        summaries_dir=root / "summaries",
-        task_yaml=root / "task.yaml",
-        state_json=root / "state.json",
-        timeline_jsonl=root / "timeline.jsonl",
+        work_dir=work,
+        outputs_dir=root / "output",
+        runtime_dir=work / "runtime",
+        agents_dir=work / "agents",
+        logs_dir=work / "logs",
+        collab_dir=work / "collab",
+        collab_blackboard_md=work / "collab" / "blackboard.md",
+        collab_messages_jsonl=work / "collab" / "messages.jsonl",
+        collab_findings_jsonl=work / "collab" / "findings.jsonl",
+        collab_evidence_packets_dir=work / "collab" / "evidence_packets",
+        artifacts_dir=work / "refs" / "artifacts",
+        artifact_manifest_json=work / "refs" / "artifacts" / "manifest.json",
+        compact_dir=work / "compact",
+        summaries_dir=work / "summaries",
+        task_yaml=work / "task.yaml",
+        state_json=work / "state.json",
+        timeline_jsonl=work / "timeline.jsonl",
     )
 
 

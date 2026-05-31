@@ -23,7 +23,7 @@ auto_detect_work_on_startup: true
 workspace_root: ["", "C:/Users/41542/Desktop/2026年工作/5月","/Users/xiaoyezi/my-claude-code"]
 
 # my-agent 家目录：
-# - 默认 ~/.my-agent，类比 模型助手 Code / 会话运行时 / 长期助手 的本机 profile 目录。
+# - 默认 ~/.my-agent，作为本机固定 profile/home 目录。
 # - 这里放配置、全局脚本、长期记忆、模板、provider 空间和运行缓存。
 # - MY_AGENT_HOME 环境变量优先级更高，适合测试或多 profile 隔离。
 my_agent_home: "~/.my-agent"
@@ -41,7 +41,7 @@ my_agent_owner_id: "main"
 # - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。
 # - home_lesson_auto_read_limit: 每轮最多自动读取多少个匹配 lesson 文件；0 表示不自动读 lesson。
 # - daily_memory_mirror_enabled: 写旧 memory_path 的同时，镜像一份到 memory/daily/YYYY-MM-DD.jsonl。
-# - run_task_workspace_enabled: 保存 run 时自动创建 workspace/tasks/date/task_slug/outputs 和 runtime 等目录。
+# - run_task_workspace_enabled: 保存 run 时自动创建 tasks/date/task_slug/output 和 work 等目录。
 home_runtime_bootstrap_enabled: true
 home_context_enabled: true
 home_lesson_auto_read_limit: 3
@@ -51,8 +51,10 @@ run_task_workspace_enabled: true
 # 任务工作区路径模板：
 # - {date} 是任务创建日期，例如 2026-05-13。
 # - {task_slug} 是从任务名生成的安全目录名，例如 “示例任务 / main” -> “示例任务-main”。
-# - 默认结果形如 ~/.my-agent/workspace/tasks/2026-05-13/示例任务-main/。
-workspace_task_path_template: "workspace/tasks/{date}/{task_slug}"
+# - 默认结果形如 ~/.my-agent/tasks/2026-05-13/示例任务-main/。
+# - 每个任务目录只保留两块顶层内容：
+#   output/ 是可以复制走的最终交付物；work/ 是日志、状态、compact、草稿、子代理账本等过程材料。
+workspace_task_path_template: "tasks/{date}/{task_slug}"
 
 # 默认模型后端：
 # - echo: 本地离线调试

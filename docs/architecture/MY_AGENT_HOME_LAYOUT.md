@@ -14,7 +14,7 @@ updated_at: 2026-05-31
 - 本地 CLI 主 owner 默认落在 owners/local/main。
 - owner 级 permissions / quota / retention / skill_policy / tool_policy 会生成种子文件。
 - system/schema_version.json 会写入 my-agent-home.v2 元信息。
-- task workspace 会创建 collab / artifacts / compact / summaries。
+- task workspace 会创建 `output/` 和 `work/` 两块；`output/` 只放最终交付物，`work/` 放状态、日志、compact、协作、草稿和子代理账本。
 - daily memory 增加了独立的每日工作记忆事件 API，raw archive 仍保留黑盒流水。
 - owner resolver 已有第一片：local/main、provider user、provider group 都能解析到 V2 owner home。
 - prompt 家目录上下文优先读取 owner_home 下的 AGENTS/SOUL/USER/memory，旧顶层文件只做兼容。
@@ -877,45 +877,53 @@ doctor 可以从正文事实源重建 runtime_refs。
 ## 9. Task Workspace
 
 ```text
-tasks/task_001/
-  task.yaml
-  state.json
-  timeline.jsonl
-  agent_tree.json
-  summaries/
-    current_summary.md
-  collab/
-    blackboard.md
-    messages.jsonl
-    findings.jsonl
-    evidence_packets/
-      index.jsonl
-  artifacts/
-    manifest.jsonl
-  compact/
-    compact_ledger.jsonl
-    latest -> compact_0003/
-    compact_0001/
-      compact_context.md
-      handoff_summary.md
-      work_state_snapshot.json
-      continue_packet.json
-      refs.json
-      metadata.json
-    rollups/
-      task_rollup.json
+tasks/2026-05-31/task_slug/
+  output/
+    # 最终交付物；复制走这个目录就拿到全部成果。
+  work/
+    task.yaml
+    state.json
+    timeline.jsonl
+    agent_tree.json
+    logs/
+    runtime/
+    scratch/
+    refs/
+      artifacts/
+        manifest.jsonl
+    summaries/
+      current_summary.md
+    collab/
+      blackboard.md
+      messages.jsonl
+      findings.jsonl
+      evidence_packets/
+        index.jsonl
+    compact/
+      compact_ledger.jsonl
+      latest -> compact_0003/
+      compact_0001/
+        compact_context.md
+        handoff_summary.md
+        work_state_snapshot.json
+        continue_packet.json
+        refs.json
+        metadata.json
+      rollups/
+        task_rollup.json
 ```
 
 说明：
 
 ```text
-task.yaml：任务目标、范围、约束、预算、retention。
-state.json：任务当前状态。
-timeline.jsonl：任务级事件流水。
-agent_tree.json：主/子/孙代理树。
-collab/：任务内协作白板和证据流水。
-artifacts/manifest.jsonl：任务级产物索引。
-compact/：统一 compact 包 + task 级 rollup。
+output/：最终交付区，代码、PDF、表格、报告等用户要拿走的东西都放这里。
+work/task.yaml：任务目标、范围、约束、预算、retention。
+work/state.json：任务当前状态。
+work/timeline.jsonl：任务级事件流水。
+work/agent_tree.json：主/子/孙代理树。
+work/collab/：任务内协作白板和证据流水。
+work/refs/artifacts/manifest.jsonl：任务级产物索引和引用账本，不替代 output/ 里的交付物。
+work/compact/：统一 compact 包 + task 级 rollup。
 ```
 
 ## 10. Task Collaboration Workspace 的边界

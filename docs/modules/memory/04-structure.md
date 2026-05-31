@@ -11,7 +11,7 @@ agent_py_agent/agent/
 |   `-- daily.py                      # 每日工作记忆事件，记录摘要、引用、教训和下一步，不替代 raw archive
 |-- memory_routing/                   # route index、匹配、required/candidate path、read receipt
 |-- contracts/                        # 错误分类、状态机、幂等键和真实 E2E 矩阵合同
-|-- user_space/home_runtime_query.py   # home daily memory、workspace/tasks 和 home status 只读查询入口
+|-- user_space/home_runtime_query.py   # home daily memory、tasks 和 home status 只读查询入口
 |-- user_space/owner_resolver.py       # V2 owner home 解析，支持 local/main、provider user/group
 |-- user_space/identity_store.py       # provider identity 分片索引和 canonical user profile 目录
 |-- user_space/home_indexes.py         # global_index 的 owner/task 轻量引用写入
@@ -122,7 +122,7 @@ agent_py_agent/cli/
 - `memory_archive/runtime.py`：把 run turn 的用户、助手、工具元数据写成 raw archive 事件；收尾时会跳过已经带 `raw_archive_event_id/raw_archive_path` 的 live 工具事件，避免重复。
 - `memory_archive/runtime/live_archiver.py` 与 `agent_core/runtime_live_archive.py`：在工具循环运行中增量写既有 raw archive。它记录助手工具轮可见文字和完成后的工具结果，写失败不阻断模型继续工作。运行中“当前进度/最近工具/产物引用”统一写到 `runtime_facts/<request_id>/task.json`，不再另建 `run_checkpoint`。
 - `memory_archive/snapshots.py`：在 run/gateway/subagent 完成点写轻量恢复 snapshot，并提供压缩前必须成功的 `write_compression_snapshot()` hook。
-- `memory_archive/query.py`：把 raw/hook JSONL 读成统一可搜索记录，并整理 resume 线索；旧 subagent 工单找不到时，会通过 home runtime query 回退到 `~/.my-agent/workspace/tasks/{date}/{task_slug}/state.json` 和 `timeline.jsonl`。
+- `memory_archive/query.py`：把 raw/hook JSONL 读成统一可搜索记录，并整理 resume 线索；旧 subagent 工单找不到时，会通过 home runtime query 回退到 `~/.my-agent/tasks/{date}/{task_slug}/work/state.json` 和 `work/timeline.jsonl`。
 - `memory_archive/query/resume_guidance.py`：把 archive/local/task/gateway 线索整理成 `ResumeGuidanceRequest` bundle，输出推荐读取路径和下一步动作，避免恢复建议接口继续用散装参数。
 - `memory_archive/query/task_sources.py`：集中维护 subagent 恢复事实源优先级；checkpoint artifacts 优先，传统 `STATUS.md` / `HANDOFF.md` 继续保留。
 - `memory_archive/task_workspace.py`：创建文件系统版 task workspace 的最小骨架，并写 `agents/<run_id>/legacy_run_ref.json` 指向旧 subagent work-order 目录；这是 adapter，不迁移历史目录。
@@ -198,14 +198,14 @@ agent_py_agent/cli/
 7. 长任务和普通保存路径都会继续写 raw event / hook snapshot，方便恢复和审计；工具循环还会在运行中把助手工具轮、工具结果和周期 checkpoint 增量写入同一个 raw archive。
 8. raw event、hook snapshot 和权威快照写完后都会读回校验，确保恢复线索真实落盘；live raw archive 写入失败只进入工具记录提示，不中断当前任务。
 9. subagent 保存时会同步 `tasks/<root_id>/` 的 `state.json`、`timeline.jsonl`、`summaries/current_summary.md` 和 legacy run adapter；旧 `subagents/<run_id>/` 仍是当前兼容事实源。
-10. 主代理普通 run 会创建 `~/.my-agent/workspace/tasks/{date}/{task_slug}/`；`task-workspace-list` 可直接列出这些目录，`memory-resume --task-id/--run-id` 在旧 subagent 工单不存在时会回退读取其 `state.json` 和 `timeline.jsonl`。
+10. 主代理普通 run 会创建 `~/.my-agent/tasks/{date}/{task_slug}/`；根目录只有 `output/` 和 `work/` 两块。`task-workspace-list` 可直接列出这些目录，`memory-resume --task-id/--run-id` 在旧 subagent 工单不存在时会回退读取其 `work/state.json` 和 `work/timeline.jsonl`。
 11. 同一保存流程会同步 `tasks/<root_id>/agents/<run_id>/` 的 agent run workspace skeleton，先写恢复和接管需要的最小 run 文件，不搬迁旧工单目录。
 12. 同一保存流程会追加 `daily/YYYY-MM-DD/events.jsonl`，作为主代理按天查 task/run/event/artifact refs 的轻量索引。
 13. 同一保存流程会写 task/run artifact manifest，并让 daily ledger refs 指向 manifest；需要正文时再读 workspace 边界内的 artifact 文件本身，越界路径只保留 blocked manifest 记录。
 14. 同一保存流程会追加 run `compactions/compaction_ledger.jsonl`，写 checkpoint snapshot summary/metadata，并让 run `checkpoint.json` 指向最新 compact refs；这不是删除上下文的 compact apply。
 15. 同一保存流程会同步 `shared/blackboard.md`、`messages.jsonl`、`findings.jsonl` 和 `evidence_packets/`，让 sibling 子代理共享任务局部 facts；其中 messages 追加，findings/evidence 按 id 合并，避免最后一次保存覆盖其他 sibling 事实。这仍然不是主 memory 写入。
 16. `subagents-memory-gate` 默认只列出候选或写 `decisions.jsonl`；只有显式 `--export-memory` 才写主 JSONL memory，只有显式 `--export-skill` 才写 skill draft，`--retention-apply` 也只压缩 active queue，不删除审计日志。
-17. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore、daily ledger、旧 subagent 工单和 home task workspace 生成恢复块；跨天时会同时扫描最近 raw/hook 文件。subagent 任务会先推荐 `reports/checkpoint.json`、`status_report.json`、`progress.md` 等 compact recovery artifacts，再推荐 `STATUS.md`、`HANDOFF.md` 和 `output.json`。主代理 task workspace 会推荐 `state.json`、`timeline.jsonl` 和 `task.yaml`。`memory-resume --from-compact` 会从某次 compact apply 产物生成恢复块、consistency report 和 action guard。这只是恢复入口推荐，不代表把子代理内容写入主代理长期 memory。
+17. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore、daily ledger、旧 subagent 工单和 home task workspace 生成恢复块；跨天时会同时扫描最近 raw/hook 文件。subagent 任务会先推荐 `reports/checkpoint.json`、`status_report.json`、`progress.md` 等 compact recovery artifacts，再推荐 `STATUS.md`、`HANDOFF.md` 和 `output.json`。主代理 task workspace 会推荐 `work/state.json`、`work/timeline.jsonl` 和 `work/task.yaml`。`memory-resume --from-compact` 会从某次 compact apply 产物生成恢复块、consistency report 和 action guard。这只是恢复入口推荐，不代表把子代理内容写入主代理长期 memory。
 18. doctor 命令检查 home runtime、配置、route index、hook/raw/snapshot 目录和层级一致性 warning。
 19. runtime 工具循环遇到大工具输出时，会先写 metadata-only recovery snapshot，再把完整输出外置到 `memory_archive/artifacts/tool_outputs/`，并在 archive_tool_calls / raw tool event 中保存 preview/hash/path/size。
 20. tool context reducer 会在下一轮 live prompt 注入前再次检查 archive record：如果输出已外置，只注入 preview、artifact path、hash、size 和 fail-safe checkpoint；完整正文必须通过 artifact 文件显式读取。
@@ -269,7 +269,7 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 
 ## My-Agent Home / Provider 空间
 
-新的家目录约定记录在 `docs/architecture/MY_AGENT_HOME_LAYOUT.md`。大白话说：主账号住在 `~/.my-agent/`，每天记忆放 `memory/daily/`，教训放 `memory/lessons/`，任务放 `workspace/tasks/{date}/{task_slug}/`；普通保存型 run 现在已经会创建任务目录里的 `outputs/`、`runtime/`、`agents/`、`logs/`、`state.json` 和 `timeline.jsonl`。`PromptBuilder` 会每轮按 `AGENTS.md`、`SOUL.md`、`USER.md`、`memory.md` 顺序读取四个入口文件，并只按文件名匹配少量 lesson，不会每轮全量读教训库。QQ/飞书这类外部平台接入后，才在 `providers/<provider>/users|groups/<id>/` 下给对应用户或群开独立空间。外部用户/群可以有自己的 tools、skills、role_templates、workflows、workspace、memory、trash，但不能写主账号家目录，也不能越权碰别人的空间。
+新的家目录约定记录在 `docs/architecture/MY_AGENT_HOME_LAYOUT.md`。大白话说：主账号住在 `~/.my-agent/`，每天记忆放 `memory/daily/`，教训放 `memory/lessons/`，任务放 `tasks/{date}/{task_slug}/`；普通保存型 run 现在只在任务根目录创建 `output/` 和 `work/` 两块，`output/` 是可以复制走的最终交付物，`work/` 保存 `state.json`、`timeline.jsonl`、日志、compact、草稿和子代理账本。`PromptBuilder` 会每轮按 `AGENTS.md`、`SOUL.md`、`USER.md`、`memory.md` 顺序读取四个入口文件，并只按文件名匹配少量 lesson，不会每轮全量读教训库。QQ/飞书这类外部平台接入后，才在 `providers/<provider>/users|groups/<id>/` 下给对应用户或群开独立空间。外部用户/群可以有自己的 tools、skills、role_templates、workflows、workspace、memory、trash，但不能写主账号家目录，也不能越权碰别人的空间。
 
 日期窗口说明：`--since YYYY-MM-DD` 从当天 00:00 开始；`--until YYYY-MM-DD` 包含当天全天。这样用户按自然日期查跨天交接时，不会漏掉当天白天的 hook snapshot。
 

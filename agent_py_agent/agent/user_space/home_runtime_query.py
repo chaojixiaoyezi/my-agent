@@ -1,5 +1,5 @@
 # LLM: Home runtime query helpers are the read-side contract for ~/.my-agent memory and task workspaces.
-# 模块用途: 读取 home daily memory、workspace/tasks、家目录健康状态，并给 resume/CLI/doctor 复用。
+# 模块用途: 读取 home daily memory、tasks、家目录健康状态，并给 resume/CLI/doctor 复用。
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class DailyMemoryQuery:
 
 
 # LLM: TaskWorkspaceQuery keeps task workspace list reads stable and extensible.
-# 类用途: 打包 workspace/tasks 查询条件，按日期、关键词和数量限制列出任务目录。
+# 类用途: 打包 tasks 查询条件，按日期、关键词和数量限制列出任务目录。
 @dataclass(frozen=True)
 class TaskWorkspaceQuery:
     query: str = ""
@@ -44,8 +44,8 @@ def read_daily_memory_records(paths: MyAgentHomePaths | str | Path, request: Dai
     return _apply_limit(records, request.limit)
 
 
-# LLM: list_task_workspaces is the canonical read side for ~/.my-agent/workspace/tasks.
-# 函数用途: 列出主代理任务工作区，并附带 state、timeline、outputs/runtime/agents 路径。
+# LLM: list_task_workspaces is the canonical read side for ~/.my-agent/tasks.
+# 函数用途: 列出主代理任务工作区，并附带 work/state、work/timeline、output/work 路径。
 def list_task_workspaces(paths: MyAgentHomePaths | str | Path, request: TaskWorkspaceQuery) -> list[dict[str, Any]]:
     home = _coerce_home_paths(paths)
     items: list[dict[str, Any]] = []
@@ -158,7 +158,7 @@ def _daily_record_matches(record: dict[str, Any], request: DailyMemoryQuery) -> 
 
 
 # LLM: _task_state_files enumerates task state files without reading outputs or agent artifacts.
-# 函数用途: 找到 workspace/tasks 下的 state.json 文件；可按日期目录收窄。
+# 函数用途: 找到 tasks 下的 work/state.json 文件；可按日期目录收窄。
 def _task_state_files(paths: MyAgentHomePaths, date_key: str | None) -> list[Path]:
     files: list[Path] = []
     for root in _task_workspace_roots(paths):
@@ -167,10 +167,11 @@ def _task_state_files(paths: MyAgentHomePaths, date_key: str | None) -> list[Pat
 
 
 # LLM: _task_workspace_roots reads V2 owner task workspaces before legacy top-level workspaces.
-# 函数用途: 返回任务工作区扫描根目录，兼容 owner/workspace/tasks 和旧 workspace/tasks。
+# 函数用途: 返回任务工作区扫描根目录，兼容 owner/tasks、新顶层 tasks 和旧 workspace/tasks。
 def _task_workspace_roots(paths: MyAgentHomePaths) -> tuple[Path, ...]:
-    owner_workspace = getattr(paths, "owner_workspace_dir", None)
-    roots = [Path(owner_workspace) / "tasks"] if owner_workspace else []
+    owner_tasks = getattr(paths, "owner_tasks_dir", None)
+    roots = [Path(owner_tasks)] if owner_tasks else []
+    roots.append(paths.root / "tasks")
     roots.append(paths.workspace_tasks_dir)
     return tuple(dict.fromkeys(roots))
 
@@ -203,7 +204,7 @@ def _all_jsonl_files(directory: Path) -> list[Path]:
 
 
 # LLM: _task_state_files_under keeps per-root task discovery small and refs-only.
-# 函数用途: 在一个 workspace/tasks 根目录下查找 state.json，不读取产物或子代理正文。
+# 函数用途: 在一个 tasks 根目录下查找 work/state.json，不读取产物或子代理正文。
 def _task_state_files_under(root: Path, date_key: str | None) -> list[Path]:
     if not root.exists():
         return []
@@ -212,6 +213,7 @@ def _task_state_files_under(root: Path, date_key: str | None) -> list[Path]:
     for date_dir in date_dirs:
         if not date_dir.exists():
             continue
+        state_files.extend(sorted(date_dir.glob("*/work/state.json"), reverse=True))
         state_files.extend(sorted(date_dir.glob("*/state.json"), reverse=True))
     return state_files
 
@@ -219,9 +221,10 @@ def _task_state_files_under(root: Path, date_key: str | None) -> list[Path]:
 # LLM: _task_workspace_payload keeps CLI/debug output small and points readers to authority files.
 # 函数用途: 把一个 state.json 所在任务目录组装成结构化任务工作区摘要。
 def _task_workspace_payload(state_path: Path) -> dict[str, Any]:
-    root = state_path.parent
+    root = state_path.parent.parent if state_path.parent.name == "work" else state_path.parent
+    work = root / "work"
     state = _read_json_object(state_path)
-    timeline = root / "timeline.jsonl"
+    timeline = work / "timeline.jsonl" if (work / "timeline.jsonl").exists() else root / "timeline.jsonl"
     return {
         "root": str(root),
         "date": root.parent.name,
@@ -229,11 +232,13 @@ def _task_workspace_payload(state_path: Path) -> dict[str, Any]:
         "exists": root.exists(),
         "state_path": str(state_path),
         "timeline_path": str(timeline),
-        "task_yaml_path": str(root / "task.yaml"),
-        "outputs_dir": str(root / "outputs"),
-        "runtime_dir": str(root / "runtime"),
-        "agents_dir": str(root / "agents"),
-        "logs_dir": str(root / "logs"),
+        "task_yaml_path": str(work / "task.yaml" if (work / "task.yaml").exists() else root / "task.yaml"),
+        "output_dir": str(root / "output"),
+        "work_dir": str(work),
+        "outputs_dir": str(root / "output"),
+        "runtime_dir": str(work / "runtime"),
+        "agents_dir": str(work / "agents"),
+        "logs_dir": str(work / "logs"),
         "state": state,
     }
 

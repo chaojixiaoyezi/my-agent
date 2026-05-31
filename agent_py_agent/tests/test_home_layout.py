@@ -37,18 +37,18 @@ def test_my_agent_home_env_beats_config_value(tmp_path: Path):
 
 
 # LLM: task paths should be date/task scoped and sanitize model-provided task names.
-# 函数用途: 验证 workspace/tasks/{date}/{task_slug} 模板生成稳定安全的任务目录。
+# 函数用途: 验证 tasks/{date}/{task_slug} 模板生成稳定安全的任务目录。
 def test_task_workspace_path_template_sanitizes_task_name(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import task_workspace_path
 
     path = task_workspace_path(
         tmp_path,
-        "workspace/tasks/{date}/{task_slug}",
+        "tasks/{date}/{task_slug}",
         date="2026-05-13",
         task_name="示例网站 E2E / main",
     )
 
-    assert path == tmp_path / "workspace" / "tasks" / "2026-05-13" / "示例网站-e2e-main"
+    assert path == tmp_path / "tasks" / "2026-05-13" / "示例网站-e2e-main"
 
 
 # LLM: home paths are a stable map for docs, setup, doctor, and later migration commands.
@@ -81,7 +81,7 @@ def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Pa
 
     assert paths.config_dir.is_dir()
     assert paths.scripts_dir.is_dir()
-    assert paths.workspace_tasks_dir.is_dir()
+    assert not paths.workspace_tasks_dir.exists()
     assert paths.memory_daily_dir.is_dir()
     assert paths.memory_lessons_dir.is_dir()
     assert paths.providers_dir.is_dir()

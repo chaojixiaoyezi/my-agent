@@ -114,7 +114,7 @@ def collect_task_payloads(agent, task_ids: list[str], *, limit: int) -> list[dic
 
 
 # LLM: _missing_or_home_task_payload upgrades resume from legacy-only subagents to home task workspace refs.
-# 函数用途: 旧 subagent 工单不存在时，尝试从 ~/.my-agent/workspace/tasks 找主代理任务事实源。
+# 函数用途: 旧 subagent 工单不存在时，尝试从 ~/my-agent/tasks 找主代理任务事实源。
 def _missing_or_home_task_payload(agent, run_id: str) -> dict[str, Any]:
     payload = home_task_workspace_payload(agent.home_paths, run_id)
     if payload is not None:

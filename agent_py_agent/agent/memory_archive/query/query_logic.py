@@ -313,7 +313,7 @@ def _task_payload(agent, run_id: str) -> dict[str, Any]:
 
 
 # LLM: _missing_or_home_task_payload preserves legacy query behavior while adding home task workspace fallback.
-# 函数用途: 旧 subagent 事实源不存在时，从 home workspace/tasks 补充主代理任务事实源。
+# 函数用途: 旧 subagent 事实源不存在时，从 home tasks 补充主代理任务事实源。
 def _missing_or_home_task_payload(agent, run_id: str) -> dict[str, Any]:
     payload = home_task_workspace_payload(agent.home_paths, run_id)
     if payload is not None:

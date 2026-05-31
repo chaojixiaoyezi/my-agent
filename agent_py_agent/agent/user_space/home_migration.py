@@ -52,7 +52,7 @@ def _legacy_copy_actions(home: MyAgentHomePaths) -> list[HomeMigrationAction]:
     return [
         *_file_copy_actions("copy_daily_memory", home.memory_daily_dir, home.owner_memory_daily_dir, "*.jsonl"),
         *_file_copy_actions("copy_raw_memory", home.memory_raw_dir, home.owner_memory_raw_dir, "*.jsonl"),
-        *_task_workspace_copy_actions(home.workspace_tasks_dir, home.owner_workspace_dir / "tasks"),
+        *_task_workspace_copy_actions(home.workspace_tasks_dir, home.owner_tasks_dir),
     ]
 
 

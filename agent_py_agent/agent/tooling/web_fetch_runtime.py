@@ -197,13 +197,19 @@ def effective_fetch_format(fmt: str, headers: Any) -> str:
     return "markdown" if is_html_response(headers) else "text"
 
 
+# LLM: default_artifact_root follows the configured my-agent home without requiring shell expansion in prompts.
+# 函数用途: 返回 web 工具默认 artifact 目录，优先使用显式环境变量，其次使用 MY_AGENT_HOME 或 ~/.my-agent。
 def default_artifact_root() -> Path:
     raw = os.environ.get("MY_AGENT_WEB_ARTIFACT_ROOT", "")
     if raw.strip():
         return Path(raw).expanduser()
-    return Path.home() / ".my-agent" / "artifacts" / "web"
+    home = os.environ.get("MY_AGENT_HOME", "").strip()
+    root = Path(home).expanduser() if home else Path.home() / ".my-agent"
+    return root / "artifacts" / "web"
 
 
+# LLM: save_web_artifact writes fetched binary payloads under the controlled web artifact root.
+# 函数用途: 保存 web 响应正文并返回路径、hash、大小和类型等可恢复引用。
 def save_web_artifact(root: Path, *, url: str, body: bytes, content_type: str) -> dict[str, Any]:
     digest = sha256(body).hexdigest()
     root.mkdir(parents=True, exist_ok=True)
