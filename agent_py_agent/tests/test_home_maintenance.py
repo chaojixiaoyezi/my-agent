@@ -86,6 +86,13 @@ def test_owner_retention_plan_and_apply_delete_only_expired_files(tmp_path: Path
     assert applied.applied is True
     assert not old_raw.exists()
     assert fresh_raw.exists()
+    audit_rows = [
+        json.loads(line)
+        for line in home.owner_audit_log_jsonl.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert audit_rows[-1]["event_type"] == "owner_retention_applied"
+    assert audit_rows[-1]["actions"][0]["path"] == str(old_raw)
 
 
 def _set_mtime(path: Path, iso: str) -> None:

@@ -61,6 +61,7 @@
 - 子代理保存时会在 `owner_home/agents/<run_id>/` 写 refs-only projection，里面只放 state 和 refs，不复制大正文、不制造第二套事实源。
 - 子代理保存还会刷新 `tasks/<root_id>/compact/task_rollup.json`。父代理恢复时先看任务级 rollup，就能知道哪些 child run 完成、卡住、产物在哪里，再决定是否深入某个 child compact。
 - 如果 manager 持有 `home_paths`，子代理保存会登记 `global_index/active_agents.jsonl`；这只是发现索引，不替代 task/run/agent 工作区正文。
+- 如果 manager 持有 `home_paths`，子代理保存会同时登记 `global_index/active_tasks.jsonl`、`active_runs.jsonl` 和 `active_agents.jsonl`。父代理、tree、doctor 和 compact 恢复共用这套轻量发现入口；真实正文仍然在 task workspace、agent run workspace 和旧兼容工单目录。
 - 旧 `subagent_workspace` 继续作为 runner 工作目录兼容入口；owner projection 只是统一查找、恢复、tree 和 compact 的索引视图。
 
 ## 2026-05-28 模型可见路径收敛

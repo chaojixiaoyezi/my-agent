@@ -57,7 +57,7 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
     registry.register(SearchTextTool(registry.workspace_root, params.max_matches, workspace_roots, access_options))
     registry.register(
         ReadArtifactTool(
-            registry.workspace_root,
+            getattr(params, "artifact_root", None) or registry.workspace_root,
             artifact_read_budget_window_seconds=params.artifact_read_budget_window_seconds,
             artifact_read_budget_max_chars=params.artifact_read_budget_max_chars,
             default_read_chars=params.artifact_default_read_chars,

@@ -16,7 +16,6 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from ...user_space.home_indexes import AgentIndexRef, register_agent_ref
 from ...user_space.task_compact_rollup import sync_task_compact_rollup
 from ..models import (
     CapabilityGap,
@@ -31,6 +30,7 @@ from ..utils import _apply_missing_paths, _read_json_object
 from .checkpoint_artifacts import build_checkpoint_artifact_payloads
 from .control_plane_projection import sync_subagent_control_plane_projection
 from .failure_handoff import refresh_failure_handoff
+from .owner_indexes import register_owner_runtime_indexes
 from .persistence_failure_handoff import normalize_failure_handoff, write_failure_handoff
 from .persistence_identity import normalize_runtime_identity
 from .persistence_inheritance import normalize_inheritance_manifest, write_inheritance_manifest
@@ -168,7 +168,7 @@ class SubAgentPersistenceService:
             )
         (task_dir / "thought.md").write_text(render_thought_markdown(task), encoding="utf-8")
         _write_owner_agent_projection(self.manager, task, payload)
-        _register_owner_agent_index(self.manager, task)
+        register_owner_runtime_indexes(self.manager, task)
         self.manager._index_task(task)
         if self.manager.local_store:
             # LLM: 控制面投影只给父级查询和 rollup 用，旧工单目录与 runtime workspace 仍是事实源。
@@ -201,27 +201,6 @@ def _write_owner_agent_projection(manager: Any, task: SubAgentTask, payload: str
         "updated_at": task.updated_at,
     }
     (root / "refs.json").write_text(json.dumps(refs, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-
-
-def _register_owner_agent_index(manager: Any, task: SubAgentTask) -> None:
-    # LLM: owner active_agents index is a lookup map only; detailed subagent facts stay in task/run workspaces.
-    # 函数用途: 保存子代理时登记 owner 级 agent 引用，便于恢复和 doctor 检查悬空索引。
-    home_paths = getattr(manager, "home_paths", None)
-    if home_paths is None:
-        return
-    try:
-        register_agent_ref(
-            home_paths,
-            AgentIndexRef(
-                owner_id=str(getattr(home_paths, "owner_id", "") or task.owner or ""),
-                agent_id=task.id,
-                task_id=task.root_id or task.id,
-                run_path=task.agent_run_workspace_dir or task.task_dir,
-                status=task.status,
-            ),
-        )
-    except OSError:
-        return
 
 
 def _sync_task_rollup_if_possible(task: SubAgentTask) -> None:

@@ -101,10 +101,10 @@ agent_py_agent/cli/
 - `user_space/home_runtime_query.py`：提供 `DailyMemoryQuery`、`TaskWorkspaceQuery`、`read_daily_memory_records()`、`list_task_workspaces()`、`home_task_workspace_payload()` 和 `home_runtime_status()`；CLI、doctor 和 resume 通过这一层读取 home runtime，不在各自模块里散扫目录。它会按当前 owner 过滤 daily/task workspace：local/main 可看旧顶层兼容目录，provider user/group 只看自己的 owner home。
 - `user_space/owner_resolver.py`：把 local CLI、provider user、provider group 解析到 V2 owner home。它会按需初始化 owner 的入口文件、memory、tasks/runs/agents、compact、workspace、capability_requests 和策略文件；这是运行时进入 owner 隔离的第一层桥。
 - `user_space/identity_store.py`：把外部 provider 身份写入 `identity/provider_identity/<provider>.jsonl`，查询时按 provider 分片读取，不全局扫一个大文件；canonical user profile 使用目录 `identity/canonical_users/<id>/profile.json`，避免文件和目录同名冲突。
-- `user_space/home_indexes.py`：写入并读取 `global_index/owners.jsonl`、`active_tasks.jsonl`、`active_runs.jsonl`、`active_agents.jsonl` 这类轻量地图。它只记录 owner/task/run/agent 的路径和状态摘要，真实事实仍在 owner/task/run/agent 目录里；doctor 可以用它检查悬空引用。
+- `user_space/home_indexes.py`：写入并读取 `global_index/owners.jsonl`、`active_tasks.jsonl`、`active_runs.jsonl`、`active_agents.jsonl` 这类轻量地图。它只记录 owner/task/run/agent 的路径和状态摘要，真实事实仍在 owner/task/run/agent 目录里；读取时按身份返回最新一条引用，旧 append-only 历史行不会继续误导恢复或 doctor。
 - `user_space/home_migration.py`：生成和执行 V1 到 V2 owner home 的迁移计划。当前复制 legacy long-term `data/memory.jsonl`、daily、raw、hooks 和 task workspace 到 owner home，目标已存在就跳过，不删除旧文件，也不改任务状态。
 - `user_space/home_doctor.py`：汇总 home runtime 状态、schema version、迁移待办、悬空 global index 和 retention 候选。它只给报告和建议，不改变退出码，不阻断普通任务。
-- `user_space/home_retention.py`：读取 owner `retention.json`，对 raw/daily/hooks/compact/cache/tmp/trash 生成过期文件计划；显式 apply 时只删除过期文件，不删目录，配置为 0 表示无限保留。
+- `user_space/home_retention.py`：读取 owner `retention.json`，对 raw/daily/hooks/compact/cache/tmp/trash 生成过期文件计划；显式 apply 时只删除过期文件，不删目录，配置为 0 表示无限保留，并把实际删除动作写入 owner audit log 方便复盘。
 - `user_space/home_backup.py`：为 schema 迁移或大规模 owner 调整生成 manifest-only 备份清单，列出 owner memory/tasks/runs/agents/identity/index 等保护范围；当前不复制大文件。
 - `user_space/home_memory_notes.py`：提供 `append_hot_note()` 和 `upsert_lesson_note()`。前者把一条短教训去重追加到当前 owner 的 `memory-hot.md`，后者写入当前 owner 的 `memory/lessons/<lesson_id>.md` 并补齐同一 owner 的 `memory/routing/INDEX.md`。local/main 继续兼容旧顶层入口；provider owner 不写本地主账号入口。它只是统一写入入口，不做任务验收、不提升 skill、不阻断普通任务。
 - `user_space/owner_policy.py`：读取 owner 级 `permissions.json`、`quota.json`、`retention.json`、`skill_policy.json` 和 `tool_policy.json`，并统计 owner 关键目录磁盘用量。它供 doctor/状态页使用，不给普通任务新增硬门。
@@ -173,7 +173,7 @@ agent_py_agent/cli/
 - `subagents/services/session_progress.py`：子代理 runner 的 task-local 工具进度层。成功写文件后会在 `agents/<run_id>/progress/` 写 `latest_tool_progress.json` 和 `tool_progress.jsonl`，让 compact/retry 能看到最近写入路径、章节标题和下一步，避免重复写已完成部分。
 - `subagents/services/subagent_session_compact.py`：子代理本地 session compact package 写入层。子代理 runner 的 compact 信号会写进当前 run workspace 的 `compactions/session/`、package refs、`latest_metadata.json` 和 `latest_summary.md`，不写主代理 `memory_archive/compact_applies`；continue packet 会引用这些 task-local refs。
 - `agent_core/finalization_compact_auto.py`：从 finalization 主文件拆出的 compact auto 字段投影层；负责 run 收尾触发 auto cycle、把 continue packet 暴露到 `AgentRunResult`，以及续跑轮跳过再次 compact 的固定字段。
-- `memory_archive/tool_output_externalizer.py`：在工具循环归档时把超过阈值的大工具输出写成 `memory_archive/artifacts/tool_outputs/<tool>-<call>-<hash>.json`，并追加 `index.jsonl`；外置阈值和 preview 长度来自 `AgentConfig`，archive/tool event 只保存 preview/hash/path/size。
+- `memory_archive/tool_output_externalizer.py`：在工具循环归档时把超过阈值的大工具输出写成当前 owner home 下的 `memory_archive/artifacts/tool_outputs/<tool>-<call>-<hash>.json`，并追加 `index.jsonl`；外置阈值和 preview 长度来自 `AgentConfig`，archive/tool event 只保存 preview/hash/path/size。旧 workspace 根下的 `memory_archive/` 不再作为新工具输出归档目标。
 - `memory_archive/artifact_reader.py`、`memory_archive/artifact_read_modes.py` 和 `tooling/artifact.py`：`read_artifact` 只读已登记 artifact，默认读取长度和滚动读取预算来自 `AgentConfig`；调用方显式传 `max_chars=0` 才读取完整正文。
 - `agent_core/tool_output_failsafe.py`：在调用 tool output externalizer 前写 recovery snapshot，保留工具名、hash、大小、run/task/request id 和下一步建议；完整输出正文仍只在 artifact 文件里。
 - `agent_core/tool_context_reducer.py`：控制工具结果进入下一轮 live prompt 的形态；大输出只注入 preview、artifact path、hash、size 和 fail-safe checkpoint，小输出仍保留原始工具结果文本。
@@ -209,14 +209,14 @@ agent_py_agent/cli/
 8. raw event、hook snapshot 和权威快照写完后都会读回校验，确保恢复线索真实落盘；live raw archive 写入失败只进入工具记录提示，不中断当前任务。
 9. subagent 保存时会同步 `tasks/<root_id>/` 的 `state.json`、`timeline.jsonl`、`summaries/current_summary.md` 和 legacy run adapter；旧 `subagents/<run_id>/` 仍是当前兼容事实源。
 10. 主代理普通 run 会创建 `tasks/{date}/{task_slug}/`；provider owner 的权威位置是 `owner_home/tasks/...`，local/main 继续兼容旧顶层 `~/.my-agent/tasks/...`。根目录只有 `output/` 和 `work/` 两块。`task-workspace-list` 可直接列出当前 owner 的这些目录，`memory-resume --task-id/--run-id` 在旧 subagent 工单不存在时会回退读取其 `work/state.json` 和 `work/timeline.jsonl`。
-11. 同一保存流程会同步 `tasks/<root_id>/agents/<run_id>/` 的 agent run workspace skeleton，先写恢复和接管需要的最小 run 文件，不搬迁旧工单目录；随后更新 `tasks/<root_id>/compact/task_rollup.json`，让父代理恢复时先看任务级总摘要，而不是乱翻每个子代理 compact。
+11. 同一保存流程会同步 `tasks/<root_id>/agents/<run_id>/` 的 agent run workspace skeleton，先写恢复和接管需要的最小 run 文件，不搬迁旧工单目录；随后更新 `tasks/<root_id>/compact/task_rollup.json`，让父代理恢复时先看任务级总摘要，而不是乱翻每个子代理 compact。子代理保存时还会把 task/run/agent 三层 refs 写进 owner global index，父代理、tree、doctor 只靠这套轻量索引发现入口，不再另建一套事实账本。
 12. 同一保存流程会追加 `daily/YYYY-MM-DD/events.jsonl`，作为主代理按天查 task/run/event/artifact refs 的轻量索引。
 13. 同一保存流程会写 task/run artifact manifest，并让 daily ledger refs 指向 manifest；需要正文时再读 workspace 边界内的 artifact 文件本身，越界路径只保留 blocked manifest 记录。
 14. 同一保存流程会追加 run `compactions/compaction_ledger.jsonl`，写 checkpoint snapshot summary/metadata，并让 run `checkpoint.json` 指向最新 compact refs；这不是删除上下文的 compact apply。
 15. 同一保存流程会同步 `shared/blackboard.md`、`messages.jsonl`、`findings.jsonl` 和 `evidence_packets/`，让 sibling 子代理共享任务局部 facts；其中 messages 追加，findings/evidence 按 id 合并，避免最后一次保存覆盖其他 sibling 事实。这仍然不是主 memory 写入。
 16. `subagents-memory-gate` 默认只列出候选或写 `decisions.jsonl`；只有显式 `--export-memory` 才写主 JSONL memory，只有显式 `--export-skill` 才写 skill draft，`--retention-apply` 也只压缩 active queue，不删除审计日志。
 17. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore、daily ledger、旧 subagent 工单和 home task workspace 生成恢复块；跨天时会同时扫描最近 raw/hook 文件。subagent 任务会先推荐 `reports/checkpoint.json`、`status_report.json`、`progress.md` 等 compact recovery artifacts，再推荐 `STATUS.md`、`HANDOFF.md` 和 `output.json`。主代理 task workspace 会推荐 `work/state.json`、`work/timeline.jsonl` 和 `work/task.yaml`。`memory-resume --from-compact` 会从某次 compact apply 产物生成恢复块、consistency report 和 action guard。这只是恢复入口推荐，不代表把子代理内容写入主代理长期 memory。
-18. doctor 命令检查 home runtime、配置、route index、hook/raw/snapshot 目录和层级一致性 warning；`memory-doctor` 还会嵌入 `home_doctor`，报告 owner home 迁移待办、悬空 task/run/agent index、schema version 和 retention 候选。这些都只是体检信息，不在普通任务里硬挡。
+18. doctor 命令检查 home runtime、配置、route index、hook/raw/snapshot 目录和层级一致性 warning；`memory-doctor` 还会嵌入 `home_doctor`，报告 owner home 迁移待办、悬空 task/run/agent index、schema version 和 retention 候选。悬空 index 只看每个 owner/task/run/agent 身份的最新引用，历史旧路径不会把当前健康状态误报成坏。这些都只是体检信息，不在普通任务里硬挡。
 19. runtime 工具循环遇到大工具输出时，会先写 metadata-only recovery snapshot，再把完整输出外置到 `memory_archive/artifacts/tool_outputs/`，并在 archive_tool_calls / raw tool event 中保存 preview/hash/path/size。
 20. tool context reducer 会在下一轮 live prompt 注入前再次检查 archive record：如果输出已外置，只注入 preview、artifact path、hash、size 和 fail-safe checkpoint；完整正文必须通过 artifact 文件显式读取。
 21. recovery snapshot 的工具调用 metadata 会保留 output hash、size 和 externalized 状态，方便接管代理知道大输出存在且需要读 artifact；snapshot 不保存完整工具输出正文。

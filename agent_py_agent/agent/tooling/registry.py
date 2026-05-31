@@ -90,6 +90,7 @@ class ToolRegistryParams:
     )
     payload_limits: ToolPayloadNormalizeLimits | None = None
     disabled_tools: list[str] = field(default_factory=list)
+    artifact_root: Path | None = None
 
 # LLM: ToolRegistry 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: ToolRegistry 数据模型，集中保存 工具系统 的结构化状态。

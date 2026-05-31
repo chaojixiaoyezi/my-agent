@@ -127,6 +127,39 @@ def test_subagent_persistence_creates_task_workspace_skeleton(tmp_path) -> None:
     assert "已创建 task workspace 骨架。" in summary_md
 
 
+def test_subagent_persistence_registers_owner_task_run_agent_indexes(tmp_path) -> None:
+    from agent_py_agent.agent.user_space.home_indexes import (
+        latest_agent_refs,
+        latest_run_refs,
+        latest_task_refs,
+    )
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    manager = SubAgentManager(tmp_path / "subagents")
+    manager.home_paths = home
+
+    task = manager.create_run(
+        goal="登记 owner 索引",
+        thought="保存时把 task/run/agent 三层引用都写进全局索引。",
+        plan=["创建任务", "保存索引"],
+    )
+    task.status = "RUNNING"
+    manager.save(task)
+
+    tasks = latest_task_refs(home, owner_id=home.owner_id)
+    runs = latest_run_refs(home, owner_id=home.owner_id, task_id=task.root_id)
+    agents = latest_agent_refs(home, owner_id=home.owner_id, task_id=task.root_id)
+
+    assert [item["task_id"] for item in tasks] == [task.root_id]
+    assert Path(tasks[0]["task_path"]) == Path(task.task_workspace_dir)
+    assert tasks[0]["title"] == "登记 owner 索引"
+    assert [item["run_id"] for item in runs] == [task.id]
+    assert Path(runs[0]["run_path"]) == Path(task.agent_run_workspace_dir)
+    assert [item["agent_id"] for item in agents] == [task.id]
+    assert Path(agents[0]["run_path"]) == Path(task.agent_run_workspace_dir)
+
+
 def _assert_runtime_workspace_paths(loaded, task_workspace, run_id: str) -> None:
     run_workspace = task_workspace / "agents" / run_id
     assert loaded.task_workspace_dir == str(task_workspace)

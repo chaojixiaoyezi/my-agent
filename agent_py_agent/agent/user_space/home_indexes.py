@@ -41,6 +41,20 @@ class AgentIndexRef:
     status: str
 
 
+@dataclass(frozen=True)
+class _IndexSpec:
+    kind: str
+    path: Path
+    path_field: str
+    key_fields: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _ScopeFilter:
+    owner_id: str = ""
+    task_id: str = ""
+
+
 def register_owner_ref(home: MyAgentHomePaths, owner: OwnerHomeResult) -> dict[str, Any]:
     payload = {
         "schema_version": "global-owner-index.v1",
@@ -97,14 +111,14 @@ def register_agent_ref(home: MyAgentHomePaths, ref: AgentIndexRef) -> dict[str, 
 
 
 def latest_owner_refs(home: MyAgentHomePaths, *, limit: int = 20) -> list[dict[str, Any]]:
-    return _latest_jsonl_records(home.global_index_owners_jsonl, limit=limit)
+    return _latest_unique_refs(home.global_index_owners_jsonl, key_fields=("owner_id",), limit=limit)
 
 
 def latest_task_refs(home: MyAgentHomePaths, *, owner_id: str = "", status: str = "", limit: int = 20) -> list[dict[str, Any]]:
     owner = str(owner_id or "")
     wanted_status = str(status or "")
     rows = []
-    for record in _latest_jsonl_records(home.global_index_active_tasks_jsonl, limit=0):
+    for record in _latest_unique_refs(home.global_index_active_tasks_jsonl, key_fields=("owner_id", "task_id"), limit=0):
         if owner and str(record.get("owner_id") or "") != owner:
             continue
         if wanted_status and str(record.get("status") or "") != wanted_status:
@@ -116,50 +130,86 @@ def latest_task_refs(home: MyAgentHomePaths, *, owner_id: str = "", status: str 
 
 
 def latest_run_refs(home: MyAgentHomePaths, *, owner_id: str = "", task_id: str = "", limit: int = 20) -> list[dict[str, Any]]:
-    return _latest_scoped_refs(home.global_index_active_runs_jsonl, owner_id=owner_id, task_id=task_id, limit=limit)
+    return _latest_scoped_refs(
+        home.global_index_active_runs_jsonl,
+        filters=_ScopeFilter(owner_id=owner_id, task_id=task_id),
+        key_fields=("owner_id", "run_id"),
+        limit=limit,
+    )
 
 
 def latest_agent_refs(home: MyAgentHomePaths, *, owner_id: str = "", task_id: str = "", limit: int = 20) -> list[dict[str, Any]]:
-    return _latest_scoped_refs(home.global_index_active_agents_jsonl, owner_id=owner_id, task_id=task_id, limit=limit)
+    return _latest_scoped_refs(
+        home.global_index_active_agents_jsonl,
+        filters=_ScopeFilter(owner_id=owner_id, task_id=task_id),
+        key_fields=("owner_id", "agent_id"),
+        limit=limit,
+    )
 
 
 def dangling_index_refs(home: MyAgentHomePaths, *, limit: int = 100) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     specs = (
-        ("task", home.global_index_active_tasks_jsonl, "task_path"),
-        ("run", home.global_index_active_runs_jsonl, "run_path"),
-        ("agent", home.global_index_active_agents_jsonl, "run_path"),
+        _IndexSpec("task", home.global_index_active_tasks_jsonl, "task_path", ("owner_id", "task_id")),
+        _IndexSpec("run", home.global_index_active_runs_jsonl, "run_path", ("owner_id", "run_id")),
+        _IndexSpec("agent", home.global_index_active_agents_jsonl, "run_path", ("owner_id", "agent_id")),
     )
-    for kind, path, field in specs:
-        findings.extend(_dangling_refs_for(kind, path, field, remaining=limit - len(findings)))
+    for spec in specs:
+        findings.extend(_dangling_refs_for(spec, remaining=limit - len(findings)))
         if len(findings) >= limit:
             return findings[:limit]
     return findings
 
 
-def _dangling_refs_for(kind: str, path: Path, field: str, *, remaining: int) -> list[dict[str, Any]]:
+def _dangling_refs_for(
+    spec: _IndexSpec,
+    *,
+    remaining: int,
+) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     if remaining <= 0:
         return findings
-    for record in _latest_jsonl_records(path, limit=0):
-        target = Path(str(record.get(field) or ""))
+    for record in _latest_unique_refs(spec.path, key_fields=spec.key_fields, limit=0):
+        target = Path(str(record.get(spec.path_field) or ""))
         if target.exists():
             continue
-        findings.append({"kind": kind, "missing_path": str(target), "record": record})
+        findings.append({"kind": spec.kind, "missing_path": str(target), "record": record})
         if len(findings) >= remaining:
             break
     return findings
 
 
-def _latest_scoped_refs(path: Path, *, owner_id: str = "", task_id: str = "", limit: int) -> list[dict[str, Any]]:
-    owner = str(owner_id or "")
-    task = str(task_id or "")
+def _latest_scoped_refs(
+    path: Path,
+    *,
+    filters: _ScopeFilter,
+    key_fields: tuple[str, ...],
+    limit: int,
+) -> list[dict[str, Any]]:
+    owner = str(filters.owner_id or "")
+    task = str(filters.task_id or "")
     rows = []
-    for record in _latest_jsonl_records(path, limit=0):
+    for record in _latest_unique_refs(path, key_fields=key_fields, limit=0):
         if owner and str(record.get("owner_id") or "") != owner:
             continue
         if task and str(record.get("task_id") or "") != task:
             continue
+        rows.append(record)
+        if limit > 0 and len(rows) >= limit:
+            break
+    return rows
+
+
+# LLM: _latest_unique_refs treats append-only indexes as history and returns one current row per identity.
+# 函数用途: 从索引尾部倒读并按 owner/task/run/agent key 去重，避免旧路径继续影响恢复和 doctor。
+def _latest_unique_refs(path: Path, *, key_fields: tuple[str, ...], limit: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    for record in _latest_jsonl_records(path, limit=0):
+        key = tuple(str(record.get(field) or "") for field in key_fields)
+        if key in seen:
+            continue
+        seen.add(key)
         rows.append(record)
         if limit > 0 and len(rows) >= limit:
             break

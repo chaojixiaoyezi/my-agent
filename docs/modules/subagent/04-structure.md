@@ -96,7 +96,9 @@ owner 归属现在也会随子代理落账：
 - 子代理默认继承创建它的主代理/父代理 owner_id，不再空着靠路径猜是谁的任务。
 - `effective_permissions` 会记录 owner_id、owner_home、owner policy 的工具禁用列表、max_subagents 和 max_depth 等机器事实。
 - 子代理保存时会在 `owner_home/agents/<run_id>/` 写一份 refs-only projection：只放 state/refs，不复制大产物正文。父代理、tree、compact 或后台恢复要找子代理时，优先用这些 refs 定位。
-- 同一保存流程还会把子代理写进 owner 的 `global_index/active_agents.jsonl`。这只是轻量地图，方便 doctor 和恢复入口找到 run；真实状态仍以任务工作区和 run 账本为准。
+- 同一保存流程还会把子代理对应的 task/run/agent 三层引用写进 owner 的
+  `global_index/active_tasks.jsonl`、`active_runs.jsonl` 和 `active_agents.jsonl`。
+  这只是轻量地图，方便 doctor、tree 和恢复入口找到最新 task/run/agent；真实状态仍以任务工作区和 run 账本为准。
 - 旧 `subagent_workspace` 仍是运行兼容入口，避免破坏现有 runner；owner projection 是同一份任务事实的索引，不是第二套任务账本。
 
 ## 记忆和压缩

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..io import append_jsonl
 from .home_layout import MyAgentHomePaths
 from .owner_policy import read_owner_policy_bundle
 
@@ -63,7 +64,24 @@ def apply_owner_retention(home: MyAgentHomePaths, *, now: datetime | None = None
     applied: list[RetentionAction] = []
     for action in plan_owner_retention(home, now=now).actions:
         applied.append(_apply_retention_action(action))
+    _append_retention_audit(home, applied, now=_normalize_now(now))
     return OwnerRetentionPlan(applied=True, actions=tuple(applied))
+
+
+# LLM: _append_retention_audit records cleanup decisions without making retention a runtime gate.
+# 函数用途: 把 owner retention 的删除/失败结果写入 owner 审计日志，方便 doctor 和人工追踪。
+def _append_retention_audit(home: MyAgentHomePaths, actions: list[RetentionAction], *, now: datetime) -> None:
+    append_jsonl(
+        home.owner_audit_log_jsonl,
+        {
+            "schema_version": "owner-audit.v1",
+            "event_type": "owner_retention_applied",
+            "owner_id": str(getattr(home, "owner_id", "") or ""),
+            "actions": [action.to_dict() for action in actions],
+            "updated_at": now.isoformat(),
+        },
+        sort_keys=True,
+    )
 
 
 def _retention_specs(home: MyAgentHomePaths) -> tuple[_RetentionSpec, ...]:

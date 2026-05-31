@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..artifacts.registry import ArtifactRegistration, register_artifact
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
+from .runtime_owner_roots import runtime_owner_root
 from .tool_loop_recovery import runtime_run_id, runtime_run_scope
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 from .tool_round_execution import ToolCallRecordParams
@@ -17,7 +18,7 @@ from .tool_round_execution import ToolCallRecordParams
 def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dict[str, object]:
     call_id = f"{record.tool_rounds}-{record.idx}"
     request = ExternalizeToolOutputRequest(
-        root=agent.root,
+        root=runtime_owner_root(agent),
         tool=record.result.tool,
         call_id=call_id,
         output=record.result.output,

@@ -65,6 +65,7 @@ from .agent_core.runner_prompts import (
     _build_subagent_runner_prompt,
     _build_subagent_runner_repair_prompt,
 )
+from .agent_core.runtime_owner_roots import runtime_owner_root
 from .backend import get_backend
 from .capability.runtime_config import default_capability_config_path
 from .collaboration import (
@@ -301,6 +302,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             artifact_default_read_chars=config.memory_artifact_default_read_chars,
             payload_limits=tool_payload_limits_from_config(config),
             disabled_tools=list(getattr(agent.owner_policy, "disabled_tools", ())),
+            artifact_root=runtime_owner_root(agent),
         )
     )
 
