@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+from .home_layout_v2 import v2_home_directories, v2_home_path_fields, v2_seed_files, v2_seed_jsons
 
 
 # LLM: MyAgentHomePaths is the stable path map used by setup, docs, doctor, and later migrations.
@@ -38,6 +41,71 @@ class MyAgentHomePaths:
     logs_dir: Path
     cache_dir: Path
     tmp_dir: Path
+    shared_dir: Path
+    shared_builtin_dir: Path
+    shared_tools_dir: Path
+    shared_skills_dir: Path
+    shared_optional_skills_dir: Path
+    shared_workflows_dir: Path
+    shared_role_templates_dir: Path
+    shared_policy_templates_dir: Path
+    shared_scripts_dir: Path
+    shared_indexes_dir: Path
+    shared_indexes_tools_jsonl: Path
+    shared_indexes_skills_jsonl: Path
+    shared_indexes_workflows_jsonl: Path
+    shared_indexes_role_templates_jsonl: Path
+    owners_dir: Path
+    local_owners_dir: Path
+    owner_home_dir: Path
+    owner_soul_md: Path
+    owner_user_md: Path
+    owner_agents_md: Path
+    owner_memory_md: Path
+    owner_permissions_json: Path
+    owner_quota_json: Path
+    owner_retention_json: Path
+    owner_skill_policy_json: Path
+    owner_tool_policy_json: Path
+    owner_sessions_dir: Path
+    owner_memory_dir: Path
+    owner_memory_daily_dir: Path
+    owner_memory_raw_dir: Path
+    owner_memory_hooks_dir: Path
+    owner_memory_indexes_dir: Path
+    owner_memory_long_term_dir: Path
+    owner_memory_runtime_refs_dir: Path
+    owner_tasks_dir: Path
+    owner_runs_dir: Path
+    owner_agents_dir: Path
+    owner_compact_dir: Path
+    owner_workspace_dir: Path
+    owner_artifacts_dir: Path
+    owner_data_dir: Path
+    owner_logs_dir: Path
+    owner_cache_dir: Path
+    owner_tmp_dir: Path
+    owner_trash_dir: Path
+    owner_capability_requests_dir: Path
+    owner_temporary_grants_dir: Path
+    owner_audit_log_jsonl: Path
+    identity_dir: Path
+    canonical_users_dir: Path
+    linked_identities_jsonl: Path
+    provider_identity_dir: Path
+    global_index_dir: Path
+    global_index_owners_jsonl: Path
+    global_index_active_tasks_jsonl: Path
+    global_index_active_runs_jsonl: Path
+    global_index_active_agents_jsonl: Path
+    system_dir: Path
+    system_schema_version_json: Path
+    system_config_dir: Path
+    system_audit_dir: Path
+    system_metrics_dir: Path
+    system_doctor_dir: Path
+    system_backups_dir: Path
+    system_migrations_dir: Path
 
 
 # LLM: resolve_my_agent_home centralizes MY_AGENT_HOME precedence without creating directories.
@@ -53,35 +121,42 @@ def resolve_my_agent_home(value: str | Path | None = None, env: Mapping[str, str
 # 函数用途: 返回 my-agent 家目录下的标准文件和目录路径。
 def home_paths(root: str | Path | None = None) -> MyAgentHomePaths:
     home = resolve_my_agent_home(root)
-    memory_dir = home / "memory"
-    workspace_dir = home / "workspace"
     return MyAgentHomePaths(
         root=home,
-        soul_md=home / "SOUL.md",
-        user_md=home / "USER.md",
-        agents_md=home / "AGENTS.md",
-        memory_md=home / "memory.md",
-        config_dir=home / "config",
-        scripts_dir=home / "scripts",
-        workspace_dir=workspace_dir,
-        workspace_tasks_dir=workspace_dir / "tasks",
-        memory_dir=memory_dir,
-        memory_daily_dir=memory_dir / "daily",
-        memory_raw_dir=memory_dir / "raw",
-        memory_hooks_dir=memory_dir / "hooks",
-        memory_lessons_dir=memory_dir / "lessons",
-        memory_indexes_dir=memory_dir / "indexes",
-        data_dir=home / "data",
-        providers_dir=home / "providers",
-        memory_archive_dir=home / "memory_archive",
-        skills_dir=home / "skills",
-        tools_dir=home / "tools",
-        role_templates_dir=home / "role_templates",
-        workflows_dir=home / "workflows",
-        logs_dir=home / "logs",
-        cache_dir=home / "cache",
-        tmp_dir=home / "tmp",
+        **_legacy_home_path_fields(home),
+        **v2_home_path_fields(home),
     )
+
+
+def _legacy_home_path_fields(home: Path) -> dict[str, Path]:
+    memory_dir = home / "memory"
+    workspace_dir = home / "workspace"
+    return {
+        "soul_md": home / "SOUL.md",
+        "user_md": home / "USER.md",
+        "agents_md": home / "AGENTS.md",
+        "memory_md": home / "memory.md",
+        "config_dir": home / "config",
+        "scripts_dir": home / "scripts",
+        "workspace_dir": workspace_dir,
+        "workspace_tasks_dir": workspace_dir / "tasks",
+        "memory_dir": memory_dir,
+        "memory_daily_dir": memory_dir / "daily",
+        "memory_raw_dir": memory_dir / "raw",
+        "memory_hooks_dir": memory_dir / "hooks",
+        "memory_lessons_dir": memory_dir / "lessons",
+        "memory_indexes_dir": memory_dir / "indexes",
+        "data_dir": home / "data",
+        "providers_dir": home / "providers",
+        "memory_archive_dir": home / "memory_archive",
+        "skills_dir": home / "skills",
+        "tools_dir": home / "tools",
+        "role_templates_dir": home / "role_templates",
+        "workflows_dir": home / "workflows",
+        "logs_dir": home / "logs",
+        "cache_dir": home / "cache",
+        "tmp_dir": home / "tmp",
+    }
 
 
 # LLM: ensure_my_agent_home materializes the owner profile without overwriting human-maintained files.
@@ -95,6 +170,10 @@ def ensure_my_agent_home(root: str | Path | None = None) -> MyAgentHomePaths:
     _write_seed_file(paths.user_md, "# USER\n\n")
     _write_seed_file(paths.agents_md, "# AGENTS\n\n")
     _write_seed_file(paths.memory_md, "# Memory\n\n")
+    for path, content in v2_seed_files(paths):
+        _write_seed_file(path, content)
+    for path, payload in v2_seed_jsons(paths):
+        _write_seed_json(path, payload)
     return paths
 
 
@@ -123,6 +202,7 @@ def _HOME_DIRECTORIES(paths: MyAgentHomePaths) -> tuple[Path, ...]:
         paths.logs_dir,
         paths.cache_dir,
         paths.tmp_dir,
+        *v2_home_directories(paths),
     )
 
 
@@ -131,6 +211,12 @@ def _HOME_DIRECTORIES(paths: MyAgentHomePaths) -> tuple[Path, ...]:
 def _write_seed_file(path: Path, content: str) -> None:
     if not path.exists():
         path.write_text(content, encoding="utf-8")
+
+
+def _write_seed_json(path: Path, payload: Mapping[str, object]) -> None:
+    if path.exists():
+        return
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 # LLM: safe_task_slug accepts multilingual task names and removes path-control characters.

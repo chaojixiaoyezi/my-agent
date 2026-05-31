@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..agent.user_space.home_migration import apply_home_migration, plan_home_migration
 from ..agent.user_space.home_runtime_query import (
     DailyMemoryQuery,
     TaskWorkspaceQuery,
@@ -71,6 +72,19 @@ def cmd_home_status(args) -> int:
     return 0
 
 
+# LLM: cmd_home_migrate exposes a non-destructive V1-to-owner-home migration path.
+# 函数用途: 预览或复制旧 daily/raw/task workspace 到当前 owner home；默认 dry-run。
+def cmd_home_migrate(args) -> int:
+    agent = make_agent(args)
+    result = apply_home_migration(agent.home_paths) if bool(getattr(args, "apply", False)) else plan_home_migration(agent.home_paths)
+    payload = {"ok": True, "home": str(agent.home_paths.root), "migration": result.to_dict()}
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        _print_home_migrate(payload)
+    return 0
+
+
 # LLM: _limit_from_args keeps home runtime CLI defaults tied to AgentConfig.
 # 函数用途: 读取命令行 limit；未传时使用 cli_task_list_limit 配置。
 def _limit_from_args(agent, args) -> int:
@@ -122,8 +136,18 @@ def _print_home_status(payload: dict[str, Any], *, json_output: bool) -> None:
     print("Directories")
     for name, state in home["directories"].items():
         print(f"- {name}: exists={state['exists']} path={state['path']}")
+    print("Identity")
+    print(json.dumps(home.get("identity", {}), ensure_ascii=False, sort_keys=True))
     print("Counts")
     print(json.dumps(home["counts"], ensure_ascii=False, sort_keys=True))
 
 
-__all__ = ["cmd_home_status", "cmd_memory_daily_list", "cmd_task_workspace_list"]
+def _print_home_migrate(payload: dict[str, Any]) -> None:
+    migration = payload["migration"]
+    print("MY-AGENT HOME MIGRATE")
+    print(f"home={payload['home']} applied={migration['applied']} actions={len(migration['actions'])}")
+    for action in migration["actions"]:
+        print(f"- {action['status']} {action['action']}: {action['source']} -> {action['target']}")
+
+
+__all__ = ["cmd_home_migrate", "cmd_home_status", "cmd_memory_daily_list", "cmd_task_workspace_list"]

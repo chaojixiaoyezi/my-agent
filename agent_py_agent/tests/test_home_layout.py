@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 
@@ -61,6 +62,11 @@ def test_home_paths_exposes_core_dirs_without_creating(tmp_path: Path):
     assert paths.scripts_dir == tmp_path / "scripts"
     assert paths.memory_daily_dir == tmp_path / "memory" / "daily"
     assert paths.providers_dir == tmp_path / "providers"
+    assert paths.shared_skills_dir == tmp_path / "shared" / "skills"
+    assert paths.owner_home_dir == tmp_path / "owners" / "local" / "main"
+    assert paths.owner_memory_daily_dir == paths.owner_home_dir / "memory" / "daily"
+    assert paths.global_index_active_tasks_jsonl == tmp_path / "global_index" / "active_tasks.jsonl"
+    assert paths.system_schema_version_json == tmp_path / "system" / "schema_version.json"
     assert not paths.config_dir.exists()
 
 
@@ -79,5 +85,33 @@ def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Pa
     assert paths.memory_daily_dir.is_dir()
     assert paths.memory_lessons_dir.is_dir()
     assert paths.providers_dir.is_dir()
+    assert paths.shared_indexes_dir.is_dir()
+    assert paths.owner_tasks_dir.is_dir()
+    assert paths.owner_memory_long_term_dir.is_dir()
+    assert paths.owner_capability_requests_dir.is_dir()
+    assert paths.global_index_dir.is_dir()
+    assert paths.system_migrations_dir.is_dir()
     assert paths.soul_md.read_text(encoding="utf-8") == "custom soul\n"
     assert paths.agents_md.exists()
+
+
+# LLM: V2 home initialization must create owner-local policy files without taking over existing legacy files.
+# 函数用途: 验证 V2 owner home、公共能力层、身份索引和 schema 版本文件都能被初始化。
+def test_ensure_my_agent_home_creates_v2_owner_and_system_files(tmp_path: Path):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    paths = ensure_my_agent_home(tmp_path)
+
+    schema = json.loads(paths.system_schema_version_json.read_text(encoding="utf-8"))
+    permissions = json.loads(paths.owner_permissions_json.read_text(encoding="utf-8"))
+    quota = json.loads(paths.owner_quota_json.read_text(encoding="utf-8"))
+
+    assert schema["schema_version"] == "my-agent-home.v2"
+    assert "my-agent-home.v1" in schema["compatible_read_versions"]
+    assert permissions["filesystem"]["access_mode"] == "workspace-write"
+    assert quota["max_subagents"] == 50
+    assert paths.owner_skill_policy_json.exists()
+    assert paths.owner_tool_policy_json.exists()
+    assert paths.shared_indexes_skills_jsonl.exists()
+    assert paths.linked_identities_jsonl.exists()
+    assert paths.global_index_active_agents_jsonl.exists()

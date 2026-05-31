@@ -38,6 +38,7 @@ from .compact_apply_payloads import (
     restore_refs_payload as _restore_refs_payload,
 )
 from .compact_apply_rendering import render_compact_context_markdown
+from .compact_apply_self_check import COMPACT_SELF_CHECK_SCHEMA
 from .compact_apply_validation import (
     CompactApplyFinalizeRequest,
     finalize_apply_payload,

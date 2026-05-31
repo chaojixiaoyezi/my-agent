@@ -207,7 +207,7 @@ def test_run_auto_compact_apply_returns_after_no_tool_continuation(tmp_path):
         recovery_next_actions=["continue from compact packet"],
     )
 
-    apply_dir = tmp_path / "memory_archive" / "compact_applies"
+    apply_dir = tmp_path / "memory_archive" / "runs" / "run-auto-return-compact" / "compact_applies"
     metadata_files = [
         path
         for path in apply_dir.glob("apply-*.json")
@@ -233,7 +233,7 @@ def test_run_auto_compact_apply_can_repeat_when_continuation_makes_tool_progress
         task_id="run-repeat-compact",
     )
 
-    apply_dir = tmp_path / "memory_archive" / "compact_applies"
+    apply_dir = tmp_path / "memory_archive" / "runs" / "run-repeat-compact" / "compact_applies"
     metadata_files = [
         path
         for path in apply_dir.glob("apply-*.json")

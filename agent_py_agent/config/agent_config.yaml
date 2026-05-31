@@ -28,6 +28,14 @@ workspace_root: ["", "C:/Users/41542/Desktop/2026年工作/5月","/Users/xiaoyez
 # - MY_AGENT_HOME 环境变量优先级更高，适合测试或多 profile 隔离。
 my_agent_home: "~/.my-agent"
 
+# 当前 owner 身份：
+# - 默认 local/main，表示本机 CLI 主用户。
+# - 接飞书/微信/QQ 等 provider 时，适配器可以把它改成 provider/user/id 或 provider/group/id。
+# - 这只决定 memory/raw/compact/task 等 owner home 归属，不给子代理额外权限。
+my_agent_owner_provider: "local"
+my_agent_owner_kind: "main"
+my_agent_owner_id: "main"
+
 # 家目录运行时开关：
 # - home_runtime_bootstrap_enabled: 启动 SimpleAgent 时自动创建 ~/.my-agent 基础目录和 SOUL/USER/AGENTS/memory 入口文件。
 # - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。

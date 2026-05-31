@@ -21,6 +21,15 @@ class RunWorkspacePaths:
     runtime_dir: Path
     agents_dir: Path
     logs_dir: Path
+    collab_dir: Path
+    collab_blackboard_md: Path
+    collab_messages_jsonl: Path
+    collab_findings_jsonl: Path
+    collab_evidence_packets_dir: Path
+    artifacts_dir: Path
+    artifact_manifest_json: Path
+    compact_dir: Path
+    summaries_dir: Path
     task_yaml: Path
     state_json: Path
     timeline_jsonl: Path
@@ -45,9 +54,24 @@ class EnsureRunWorkspaceRequest:
 # 函数用途: 创建或更新主代理任务工作区，并追加一条运行时间线事件。
 def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths:
     paths = run_workspace_paths(request)
-    for directory in (paths.root, paths.outputs_dir, paths.runtime_dir, paths.agents_dir, paths.logs_dir):
+    for directory in (
+        paths.root,
+        paths.outputs_dir,
+        paths.runtime_dir,
+        paths.agents_dir,
+        paths.logs_dir,
+        paths.collab_dir,
+        paths.collab_evidence_packets_dir,
+        paths.artifacts_dir,
+        paths.compact_dir,
+        paths.summaries_dir,
+    ):
         directory.mkdir(parents=True, exist_ok=True)
     _write_task_yaml_if_missing(paths.task_yaml, request)
+    _write_seed_file(paths.collab_blackboard_md, "# Blackboard\n\n")
+    _write_seed_file(paths.collab_messages_jsonl, "")
+    _write_seed_file(paths.collab_findings_jsonl, "")
+    _write_seed_json(paths.artifact_manifest_json, _artifact_manifest_payload(request))
     paths.state_json.write_text(
         json.dumps(_state_payload(request), ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -71,6 +95,15 @@ def run_workspace_paths(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths
         runtime_dir=root / "runtime",
         agents_dir=root / "agents",
         logs_dir=root / "logs",
+        collab_dir=root / "collab",
+        collab_blackboard_md=root / "collab" / "blackboard.md",
+        collab_messages_jsonl=root / "collab" / "messages.jsonl",
+        collab_findings_jsonl=root / "collab" / "findings.jsonl",
+        collab_evidence_packets_dir=root / "collab" / "evidence_packets",
+        artifacts_dir=root / "artifacts",
+        artifact_manifest_json=root / "artifacts" / "manifest.json",
+        compact_dir=root / "compact",
+        summaries_dir=root / "summaries",
         task_yaml=root / "task.yaml",
         state_json=root / "state.json",
         timeline_jsonl=root / "timeline.jsonl",
@@ -104,6 +137,17 @@ def _state_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
         "source": request.source,
         "updated_at": _now_iso(),
         "reserved": {},
+    }
+
+
+def _artifact_manifest_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
+    return {
+        "version": 1,
+        "request_id": request.request_id,
+        "run_id": request.run_id,
+        "task_id": request.task_id,
+        "artifacts": [],
+        "updated_at": _now_iso(),
     }
 
 
@@ -141,6 +185,17 @@ def _now_iso() -> str:
 # 函数用途: 转义任务元数据里的双引号。
 def _yaml_escape(value: object) -> str:
     return str(value or "").replace('"', '\\"')
+
+
+def _write_seed_file(path: Path, content: str) -> None:
+    if not path.exists():
+        path.write_text(content, encoding="utf-8")
+
+
+def _write_seed_json(path: Path, payload: dict[str, object]) -> None:
+    if path.exists():
+        return
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
 __all__ = ["EnsureRunWorkspaceRequest", "RunWorkspacePaths", "ensure_run_workspace", "run_workspace_paths"]

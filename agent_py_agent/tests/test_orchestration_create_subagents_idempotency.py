@@ -152,12 +152,14 @@ def test_generic_worker_reuses_system_derived_output_ref_contract(tmp_path):
     first = json.loads(tool.execute({
         "goal": "写一个现代家具品牌首页。",
         "role": "worker",
+        "input_refs": ["brief.md"],
         "output_files": ["artifacts/index.html"],
         "extra_write_roots": [str(tmp_path / "artifacts")],
     }).output)
     second = json.loads(tool.execute({
         "goal": "把首页做得更高级，仍然输出同一个文件。",
         "role": "worker",
+        "input_refs": ["brief.md"],
         "output_files": ["artifacts/index.html"],
         "extra_write_roots": [str(tmp_path / "artifacts")],
     }).output)

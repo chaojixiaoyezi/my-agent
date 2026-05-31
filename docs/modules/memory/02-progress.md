@@ -2,6 +2,12 @@
 
 ## 已完成
 
+- 2026-05-31 Home V2 第一片已落地：`ensure_my_agent_home()` 会创建 `shared/`、`owners/local/main/`、`identity/`、`global_index/` 和 `system/schema_version.json`，并给本地主 owner 写入 `permissions.json`、`quota.json`、`retention.json`、`skill_policy.json`、`tool_policy.json` 种子文件；任务工作区会创建 `collab/`、`artifacts/manifest.json`、`compact/` 和 `summaries/`。新增 `memory_store.daily`，把每日工作记忆作为可读事件写入 `memory/daily/YYYY-MM-DD.jsonl`，raw archive 继续保留黑盒流水。
+- 2026-05-31 Home V2 第二片已落地：新增 owner resolver，`local/main`、provider user、provider group 都能解析到 V2 owner home；PromptBuilder 优先读取 owner entry files，SimpleAgent daily mirror 默认写 owner memory/daily；home doctor 暴露 owner/shared/system/schema 状态；新增 owner-private skill candidate 草稿账本，只记录候选，不自动提升。
+- 2026-05-31 Home V2 第三片已落地：`AgentConfig` 增加 `my_agent_owner_provider/kind/id`，运行时可直接切到指定 provider owner；live raw archive、runtime_fact、最终 archive 和 token ledger 都优先写当前 owner home；`memory-doctor` 会报告 legacy daily/raw/task workspace 的迁移建议，`home-migrate --apply` 只做非破坏性复制，不删除、不覆盖旧数据。
+- 2026-05-31 Home V2 第四片已落地：新增 provider identity store，身份索引按 provider 分片到 `identity/provider_identity/<provider>.jsonl`，canonical user profile 使用目录结构；新增 shared compact package layout helper，让 task/run/agent 三层 compact 包保持相同基础文件形状。
+- 2026-05-31 Home V2 第五片已落地：新增 owner 级 capability request 账本，能力/工具/权限申请写到当前 owner 的 `capability_requests/`，支持 open/approved/denied/expired/cancelled/closed 状态；它只是待处理工作项，不是任务硬门。
+- 2026-05-31 Home V2 第六片已落地：新增 global index 写入 helper，owner/task 索引只保存轻量引用，正文事实仍以 owner home、task workspace、run/agent 目录为准；索引坏了可重建，不作为最终事实。
 - 2026-05-30 `task_progress` 增加软质量提示：如果模型把条目标成 `done` 但没有 evidence，系统只在 `quality_hints` 里提醒补文件、产物或工具结果引用；这不会影响 closeout，不会阻断任务。compact / tree 会带着这个提示，帮助长任务压缩后继续把证据补扎实。
 - 2026-05-31 `task_progress` 的软提示进一步细化：覆盖账本里还有对象或检查点没完成时，会给 `next_suggestions` 和 `soft_prompt`，提醒模型继续选一个未完成对象、读核心文件或可靠来源、补 evidence、再写进报告。它仍然只是提示，不改状态、不触发 closeout、不阻断任务。
 - 2026-05-30 compact work state 增加通用 `runtime_handoff`：压缩前会收集同 scope 下最近 guidance 和可见下级 agent 状态，写入 `work_state_snapshot`、handoff context 和 continue packet。它不是聊天专项，也不是子代理专项，只是一份“运行中交接摘要”；API 监控、长报告、多人协作和普通聊天续接都复用同一字段。
@@ -356,6 +362,14 @@
 - 2026-05-29 补齐 compact 本体交接包：每次 apply 现在会额外写 `*.compaction_state.json` 和 `*.handoff.md`。`compaction_state` 是机器事实包，记录 compact id、上一轮 compact id、source refs、artifact refs、work state、next actions 和 handoff summary 路径；`handoff.md` 只给模型续接阅读，明确不是事实账本。
 - 多轮 compact 会把上一轮 handoff summary ref 带进新一轮 `compaction_state`、resume handoff 和 continue packet。这样后续接运行时压缩时，可以按机器字段续接同一任务，而不是只靠自然语言摘要猜“上一轮做到哪”。
 - 行为边界：新增 summary 不调用 LLM、不删除原始文件、不自动执行工具；旧 compact 包缺少 `compaction_state` 时只作为 soft 缺口展示，不破坏旧 resume。
+
+## 2026-05-31 owner home V2 lifecycle services
+- 中文说明：owner home V2 不再只是目录设计。新增 owner policy bundle、temporary grants、capability request expiry、compact injection、global index 读取和 manifest-only backup，覆盖阶段 9-23 中“策略可读、申请可追踪、压缩可续接、索引可发现、迁移前可留痕”的底座。
+- `owner_policy.py` 只读取 `permissions/quota/retention/skill_policy/tool_policy` 并统计磁盘用量，不让普通任务因为策略文件缺字段而断掉。
+- `temporary_grants.py` 和 `capability_requests.py` 都是账本，不是硬门。过期只更新状态，保留记录给父代理、用户或 doctor 看。
+- `compact_injection.py` 统一 task/run/agent compact 的续接提示：先给 `compact_context.md`，再渲染 `continue_packet.json` 的下一步、已完成、未完成、不要重复、目标产物和用户补充要求。
+- `home_indexes.py` 增加最新 owner/task refs 读取；`home_backup.py` 先做 manifest-only 备份清单，避免开发期复制大目录拖慢迁移。
+- 新增 focused 验收：owner policy/grants、capability expiry/compact injection、home backup/index 三组测试均通过。
 
 ## 2026-05-18 main-agent foundation and artifact acceptance
 - 中文说明：主代理基础测试新增固定入口 `main_agent_foundation_runner.py`。默认只跑不调用模型的确定性测试：工具失败分类、大输出 artifact refs、确定性 E2E matrix；真实模型用例明确 `SKIPPED`，不把未测试说成通过。

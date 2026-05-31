@@ -106,7 +106,8 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         会创建 path 的父目录；不会创建 LocalStore，也不会调用模型。"""
         self.path = Path(path)
         self.local_store = local_store
-        self.daily_mirror_dir = Path(daily_mirror_dir) if daily_mirror_dir is not None else None
+        self.daily_mirror_dirs = _daily_mirror_dirs(daily_mirror_dir)
+        self.daily_mirror_dir = self.daily_mirror_dirs[0] if self.daily_mirror_dirs else None
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     # LLM: memory store 以 JSONL 记录和本地索引作为事实来源；修改 add 时同步检查返回值、异常处理和读写副作用。
@@ -152,10 +153,11 @@ class JsonlMemory(JsonlMemoryIndexMixin):
     # LLM: daily mirror keeps the future ~/.my-agent/memory/daily ledger populated while legacy memory_path stays readable.
     # 函数用途: 把同一条记忆追加到按天分片的 home memory JSONL；未配置时保持旧行为。
     def _append_daily_mirror(self, record: MemoryRecord) -> None:
-        if self.daily_mirror_dir is None:
+        if not self.daily_mirror_dirs:
             return
-        path = self.daily_mirror_dir / f"{date.fromtimestamp(record.created_at).isoformat()}.jsonl"
-        append_jsonl(path, asdict(record))
+        for daily_dir in self.daily_mirror_dirs:
+            path = daily_dir / f"{date.fromtimestamp(record.created_at).isoformat()}.jsonl"
+            append_jsonl(path, asdict(record))
 
     # LLM: memory store 以 JSONL 记录和本地索引作为事实来源；修改 all 时同步检查返回值、异常处理和读写副作用。
     # 函数用途: 读取 all 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
@@ -231,9 +233,11 @@ class JsonlMemory(JsonlMemoryIndexMixin):
     # LLM: _daily_mirror_files exposes daily mirror reads without changing the append path.
     # 函数用途: 返回按天镜像 JSONL 文件列表；未配置或目录不存在时返回空列表。
     def _daily_mirror_files(self) -> list[Path]:
-        if self.daily_mirror_dir is None or not self.daily_mirror_dir.exists():
-            return []
-        return sorted(path for path in self.daily_mirror_dir.glob("*.jsonl") if path.is_file())
+        files: list[Path] = []
+        for daily_dir in self.daily_mirror_dirs:
+            if daily_dir.exists():
+                files.extend(path for path in daily_dir.glob("*.jsonl") if path.is_file())
+        return sorted(set(files))
 
     # LLM: _read_memory_file is shared by legacy memory_path and daily mirror reads.
     # 函数用途: 读取一个 JSONL 文件并转换成 MemoryRecord；文件不存在时返回空列表。
@@ -304,3 +308,15 @@ def _merge_search_results(
         if len(records) >= top_k:
             break
     return records
+
+
+def _daily_mirror_dirs(value: object) -> tuple[Path, ...]:
+    if value is None:
+        return ()
+    raw_items = value if isinstance(value, (list, tuple, set)) else (value,)
+    dirs: list[Path] = []
+    for item in raw_items:
+        path = Path(item)
+        if path not in dirs:
+            dirs.append(path)
+    return tuple(dirs)

@@ -83,6 +83,11 @@ from .subagent import SubAgentManager
 from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .tooling.registry_payload_normalize import tool_payload_limits_from_config
 from .user_space.home_layout import ensure_my_agent_home, home_paths
+from .user_space.owner_resolver import (
+    ensure_owner_home,
+    home_paths_with_owner,
+    owner_identity_from_config,
+)
 from .user_space.paths import get_user_paths
 
 
@@ -185,9 +190,14 @@ class SimpleAgent(
 # LLM: _resolve_home_paths is the single owner-home bootstrap point for SimpleAgent startup.
 # 函数用途: 根据配置初始化或解析 my-agent 家目录，并把路径对象交给运行时复用。
 def _resolve_home_paths(config: AgentConfig):
+    root = getattr(config, "my_agent_home", None)
     if bool(getattr(config, "home_runtime_bootstrap_enabled", True)):
-        return ensure_my_agent_home(getattr(config, "my_agent_home", None))
-    return home_paths(getattr(config, "my_agent_home", None))
+        paths = ensure_my_agent_home(root)
+        owner = ensure_owner_home(paths.root, owner_identity_from_config(config))
+        return home_paths_with_owner(paths, owner)
+    paths = home_paths(root)
+    owner = ensure_owner_home(paths.root, owner_identity_from_config(config))
+    return home_paths_with_owner(paths, owner)
 
 
 # LLM: _daily_memory_dir keeps daily mirroring opt-in/out through config while preserving legacy memory_path.
@@ -195,7 +205,11 @@ def _resolve_home_paths(config: AgentConfig):
 def _daily_memory_dir(config: AgentConfig, paths):
     if not bool(getattr(config, "daily_memory_mirror_enabled", True)):
         return None
-    return paths.memory_daily_dir
+    daily_dirs = [paths.memory_daily_dir]
+    owner_daily = getattr(paths, "owner_memory_daily_dir", None)
+    if owner_daily and owner_daily not in daily_dirs:
+        daily_dirs.append(owner_daily)
+    return tuple(daily_dirs)
 
 
 # LLM: _build_subagent_manager 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。

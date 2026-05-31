@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 @dataclass
 class HomeProviderConfigFields:
     my_agent_home: str = "~/.my-agent"
+    my_agent_owner_provider: str = "local"
+    my_agent_owner_kind: str = "main"
+    my_agent_owner_id: str = "main"
     workspace_task_path_template: str = "workspace/tasks/{date}/{task_slug}"
     home_runtime_bootstrap_enabled: bool = True
     home_context_enabled: bool = True

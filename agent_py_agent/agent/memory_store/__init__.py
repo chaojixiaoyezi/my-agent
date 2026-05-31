@@ -10,6 +10,14 @@ from __future__ import annotations
 remote sync、compact、embedding index，但不要和普通配置或 prompt 混在一起。
 """
 
+# LLM: daily memory exports expose the readable work journal beside raw JSONL.
+from .daily import DailyMemoryEvent, append_daily_memory_event, daily_memory_path
 from .jsonl import JsonlMemory, MemoryRecord
 
-__all__ = ["JsonlMemory", "MemoryRecord"]
+__all__ = [
+    "DailyMemoryEvent",
+    "JsonlMemory",
+    "MemoryRecord",
+    "append_daily_memory_event",
+    "daily_memory_path",
+]

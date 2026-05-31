@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import agent_py_agent.agent.memory_archive.compact_apply as compact_apply_module
+import agent_py_agent.agent.memory_archive.compact_apply_validation as compact_apply_validation_module
 from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.memory_archive.compact import (
     MemoryCompactPlanOptions,
@@ -282,7 +283,7 @@ def test_apply_memory_compact_uses_stable_plan_id_and_unique_apply_id(tmp_path: 
 def test_apply_memory_compact_records_self_check_failure_without_rewriting_sources(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "workspace"
     write_compact_fixture(root)
-    monkeypatch.setattr(compact_apply_module, "_self_check_payload", failed_self_check)
+    monkeypatch.setattr(compact_apply_validation_module, "_self_check_payload", failed_self_check)
 
     result = apply_memory_compact(
         root,

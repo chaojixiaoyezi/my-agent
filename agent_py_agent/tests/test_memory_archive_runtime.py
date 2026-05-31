@@ -310,6 +310,38 @@ def test_runtime_fact_progress_updates_without_raw_checkpoint(tmp_path: Path) ->
     assert not (tmp_path / "memory" / "raw").exists()
 
 
+# LLM: Runtime live archive should follow the resolved owner home when available.
+# 函数用途: 验证运行中 raw archive 和 runtime_fact 优先写入 owner 私有目录，不再默认写到 workspace 根。
+def test_live_archive_and_runtime_fact_use_owner_home(tmp_path: Path) -> None:
+    config = AgentConfig()
+    owner_home = tmp_path / "home" / "owners" / "providers" / "feishu" / "users" / "ou_123"
+    agent = SimpleNamespace(
+        root=tmp_path / "workspace",
+        home_paths=SimpleNamespace(owner_home_dir=owner_home),
+        config=config,
+        session_id="session-live",
+    )
+    params = SimpleNamespace(
+        request_id="req-owner",
+        run_id="run-owner",
+        task_id="task-owner",
+        user_prompt="记录到 owner home",
+        executed_tools=["read_file"],
+        tool_context=[],
+        archive_tool_calls=[],
+        live_archive_state={},
+        save=True,
+    )
+
+    archive_assistant_tool_round_if_enabled(agent, params, tool_round=1, response_text="准备读取资料。", tool_calls=[])
+    update_runtime_fact_progress_if_enabled(agent, params, tool_round=1)
+
+    assert list((owner_home / "memory" / "raw").glob("*.jsonl"))
+    assert (owner_home / "memory_archive" / "runtime_facts" / "req-owner" / "task.json").exists()
+    assert list((agent.root / "memory" / "raw").glob("*.jsonl"))
+    assert (agent.root / "memory_archive" / "runtime_facts" / "req-owner" / "task.json").exists()
+
+
 # LLM: Continuation runs should update progress without replacing the original task goal.
 # 函数用途: 验证 compact 续跑轮写 runtime_fact 时保留 root_user_prompt，不把“继续执行”提示当用户目标。
 def test_runtime_fact_progress_preserves_root_user_prompt(tmp_path: Path) -> None:

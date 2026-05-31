@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .home_layout import MyAgentHomePaths, home_paths, safe_task_slug
+from .home_runtime_status import home_runtime_status_payload
 
 
 # LLM: DailyMemoryQuery keeps daily ledger reads bundle-based as filters grow.
@@ -100,29 +101,11 @@ def home_task_workspace_payload(paths: MyAgentHomePaths | str | Path, task_ref: 
 # 函数用途: 返回 home 根目录、入口文件、关键目录和轻量计数，供 memory-doctor 展示。
 def home_runtime_status(paths: MyAgentHomePaths | str | Path) -> dict[str, Any]:
     home = _coerce_home_paths(paths)
-    return {
-        "root": str(home.root),
-        "entry_files": {
-            "soul_md": _path_status(home.soul_md),
-            "user_md": _path_status(home.user_md),
-            "agents_md": _path_status(home.agents_md),
-            "memory_md": _path_status(home.memory_md),
-        },
-        "directories": {
-            "memory_daily": _path_status(home.memory_daily_dir),
-            "memory_raw": _path_status(home.memory_raw_dir),
-            "memory_hooks": _path_status(home.memory_hooks_dir),
-            "memory_indexes": _path_status(home.memory_indexes_dir),
-            "workspace_tasks": _path_status(home.workspace_tasks_dir),
-            "scripts": _path_status(home.scripts_dir),
-            "role_templates": _path_status(home.role_templates_dir),
-            "workflows": _path_status(home.workflows_dir),
-        },
-        "counts": {
-            "daily_files": len(_daily_memory_files(home, None)),
-            "task_workspaces": len(_task_state_files(home, None)),
-        },
-    }
+    return home_runtime_status_payload(
+        home,
+        daily_files=len(_daily_memory_files(home, None)),
+        task_workspaces=len(_task_state_files(home, None)),
+    )
 
 
 # LLM: _coerce_home_paths accepts either the frozen path map or a root path for small tests and CLI helpers.
@@ -136,13 +119,16 @@ def _coerce_home_paths(paths: MyAgentHomePaths | str | Path) -> MyAgentHomePaths
 # LLM: _daily_memory_files keeps daily scans deterministic and date-filterable.
 # 函数用途: 找到 daily JSONL 文件；传日期时只读当天，不传时按文件名倒序读取。
 def _daily_memory_files(paths: MyAgentHomePaths, date_key: str | None) -> list[Path]:
-    directory = paths.memory_daily_dir
-    if date_key:
-        path = directory / f"{date_key}.jsonl"
-        return [path] if path.exists() and path.is_file() else []
-    if not directory.exists():
-        return []
-    return sorted((path for path in directory.glob("*.jsonl") if path.is_file()), reverse=True)
+    return _jsonl_files_from_dirs(_daily_memory_dirs(paths), date_key)
+
+
+# LLM: _daily_memory_dirs preserves old daily records while making owner daily the first-class location.
+# 函数用途: 返回 daily memory 查询目录，优先 V2 owner memory/daily，再兼容旧 home/memory/daily。
+def _daily_memory_dirs(paths: MyAgentHomePaths) -> tuple[Path, ...]:
+    owner_daily = getattr(paths, "owner_memory_daily_dir", None)
+    dirs = [Path(owner_daily)] if owner_daily else []
+    dirs.append(paths.memory_daily_dir)
+    return tuple(dict.fromkeys(dirs))
 
 
 # LLM: _read_daily_file tolerates bad lines so one corrupt record does not hide the rest of the day.
@@ -174,7 +160,51 @@ def _daily_record_matches(record: dict[str, Any], request: DailyMemoryQuery) -> 
 # LLM: _task_state_files enumerates task state files without reading outputs or agent artifacts.
 # 函数用途: 找到 workspace/tasks 下的 state.json 文件；可按日期目录收窄。
 def _task_state_files(paths: MyAgentHomePaths, date_key: str | None) -> list[Path]:
-    root = paths.workspace_tasks_dir
+    files: list[Path] = []
+    for root in _task_workspace_roots(paths):
+        files.extend(_task_state_files_under(root, date_key))
+    return sorted(dict.fromkeys(files), reverse=True)
+
+
+# LLM: _task_workspace_roots reads V2 owner task workspaces before legacy top-level workspaces.
+# 函数用途: 返回任务工作区扫描根目录，兼容 owner/workspace/tasks 和旧 workspace/tasks。
+def _task_workspace_roots(paths: MyAgentHomePaths) -> tuple[Path, ...]:
+    owner_workspace = getattr(paths, "owner_workspace_dir", None)
+    roots = [Path(owner_workspace) / "tasks"] if owner_workspace else []
+    roots.append(paths.workspace_tasks_dir)
+    return tuple(dict.fromkeys(roots))
+
+
+# LLM: _jsonl_files_from_dirs prefers V2 owner daily files while still reading legacy daily files.
+# 函数用途: 从多个 daily 目录中按日期收集 JSONL 文件，并去重排序。
+def _jsonl_files_from_dirs(directories: tuple[Path, ...], date_key: str | None) -> list[Path]:
+    files: list[Path] = []
+    for directory in directories:
+        if date_key:
+            files.extend(_dated_jsonl_file(directory, date_key))
+            continue
+        files.extend(_all_jsonl_files(directory))
+    return sorted(dict.fromkeys(files), reverse=True)
+
+
+# LLM: _dated_jsonl_file is the single-date branch for daily memory discovery.
+# 函数用途: 返回某个目录下指定日期的 JSONL 文件，不存在时返回空列表。
+def _dated_jsonl_file(directory: Path, date_key: str) -> list[Path]:
+    path = directory / f"{date_key}.jsonl"
+    return [path] if path.exists() and path.is_file() else []
+
+
+# LLM: _all_jsonl_files keeps daily discovery shallow and file-only.
+# 函数用途: 返回目录下一层 JSONL 文件，不递归扫描。
+def _all_jsonl_files(directory: Path) -> list[Path]:
+    if not directory.exists():
+        return []
+    return [path for path in directory.glob("*.jsonl") if path.is_file()]
+
+
+# LLM: _task_state_files_under keeps per-root task discovery small and refs-only.
+# 函数用途: 在一个 workspace/tasks 根目录下查找 state.json，不读取产物或子代理正文。
+def _task_state_files_under(root: Path, date_key: str | None) -> list[Path]:
     if not root.exists():
         return []
     date_dirs = [root / date_key] if date_key else sorted((path for path in root.iterdir() if path.is_dir()), reverse=True)
@@ -239,18 +269,6 @@ def _recommended_task_reads(item: dict[str, Any]) -> list[str]:
 def _validate_paths(paths: list[str]) -> dict[str, Any]:
     missing = [path for path in paths if path and not Path(path).exists()]
     return {"ok": not missing, "missing_paths": missing}
-
-
-# LLM: _path_status is the common doctor shape for files and directories.
-# 函数用途: 返回路径存在性、类型和大小，避免 doctor 输出格式分叉。
-def _path_status(path: Path) -> dict[str, Any]:
-    return {
-        "path": str(path),
-        "exists": path.exists(),
-        "is_file": path.is_file(),
-        "is_dir": path.is_dir(),
-        "size_bytes": path.stat().st_size if path.exists() and path.is_file() else 0,
-    }
 
 
 # LLM: _read_json_object keeps corrupt state files visible as empty payloads instead of crashing list commands.

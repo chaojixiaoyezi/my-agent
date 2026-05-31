@@ -7,10 +7,22 @@ agent_py_agent/agent/
 |-- memory.py                         # 旧兼容入口，真实存储已拆到 memory_store/
 |-- memory_settings.py                # 旧兼容入口，真实配置解析在 settings/memory.py
 |-- settings/memory.py                # memory 配置、默认值、warning、安全归一化和参数边界
-|-- memory_store/                     # 长期记忆 JSONL 事实流水，可选同步索引到 LocalStore，并可镜像到 home daily
+|-- memory_store/                     # 长期记忆 JSONL 事实流水，可选同步索引到 LocalStore，并提供 daily work journal API
+|   `-- daily.py                      # 每日工作记忆事件，记录摘要、引用、教训和下一步，不替代 raw archive
 |-- memory_routing/                   # route index、匹配、required/candidate path、read receipt
 |-- contracts/                        # 错误分类、状态机、幂等键和真实 E2E 矩阵合同
 |-- user_space/home_runtime_query.py   # home daily memory、workspace/tasks 和 home status 只读查询入口
+|-- user_space/owner_resolver.py       # V2 owner home 解析，支持 local/main、provider user/group
+|-- user_space/identity_store.py       # provider identity 分片索引和 canonical user profile 目录
+|-- user_space/home_indexes.py         # global_index 的 owner/task 轻量引用写入
+|-- user_space/home_migration.py       # 旧 daily/raw/task workspace 到 owner home 的非破坏性复制计划
+|-- user_space/home_backup.py          # owner home 迁移前 manifest-only 备份清单
+|-- user_space/owner_policy.py         # owner permissions/quota/retention/policy 读取和磁盘用量统计
+|-- user_space/compact_layout.py       # task/run/agent 共享 compact 包基础文件布局
+|-- user_space/compact_injection.py    # compact_context + continue_packet 的统一续接提示渲染
+|-- user_space/capability_requests.py  # owner 级能力/工具/权限申请账本，不阻断普通任务
+|-- user_space/temporary_grants.py     # owner 级临时授权账本，过期只改状态不删审计
+|-- user_space/skill_candidates.py     # owner 私有 skill 候选草稿账本，不自动提升
 |-- user_space/context_bundle.py       # 主代理 Main Agent Context Bundle v1 生成和 prompt 摘要
 |-- user_space/context_bundle_contracts.py # RunScope/ToolManifest/Acceptance/self-check 等合同字段
 |-- user_space/context_bundle_artifacts.py # 保存型 run 收尾后按 scope 回填 artifact refs
@@ -79,8 +91,20 @@ agent_py_agent/cli/
 
 - `memory_archive/resume_context.py`：除恢复上下文构造外，公开 `has_resume_trigger()` 作为轻量意图判断 helper；它只看当前用户 prompt 是否明确继续旧任务、恢复上次、或点名 run/request/subagent 等恢复目标，不加载历史正文。普通任务里说“继续往下做/继续整理/继续完成”不会触发旧任务恢复，避免一次性 CLI 任务串入历史工作。
 - `memory_store/jsonl.py`：读写长期记忆 JSONL，是最朴素的事实落盘层；LocalStore 只是索引，不替代 JSONL。`SimpleAgent` 传入 home daily mirror 后，同一条记录也会追加到 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl`，便于以后按天恢复和查询；读取侧现在也会把 daily mirror 作为旧 `memory_path` 的补充事实源并去重。
+- `memory_store/daily.py`：提供 `DailyMemoryEvent`、`append_daily_memory_event()` 和 `daily_memory_path()`；这一层面向 通道运行时 式每日工作记忆，记录进展摘要、引用、教训和下一步。它不是新硬门，也不取代 raw archive，只让 owner memory 除了黑盒流水外还有可读工作日记。
 - `contracts/error_taxonomy.py`、`contracts/state_machine.py`、`contracts/idempotency.py`、`contracts/tool_protocol_v2.py`、`contracts/model_call_ledger.py`、`contracts/e2e_matrix.py`、`contracts/e2e_matrix_runner.py`：主代理执行合同层。它们分别定义稳定错误代码/恢复建议、运行状态事实判断、幂等键/操作编号、工具调用/工具结果 envelope、模型调用 started/first-token/finished/timeout 账本、真实端到端测试矩阵和 deterministic runner；这些模块只输出机器可读事实，不直接阻断工具或固定工作流。当前 `create_subagents` 已写 `operation_contract`，`current_turn_run_state` 已写 `state_machine_contract` 和 `recovery_recommendations`，`ToolExecutionResult` 已带错误合同字段，registry 会同步镜像 `tool_protocol_v2` 结构化结果。
 - `user_space/home_runtime_query.py`：提供 `DailyMemoryQuery`、`TaskWorkspaceQuery`、`read_daily_memory_records()`、`list_task_workspaces()`、`home_task_workspace_payload()` 和 `home_runtime_status()`；CLI、doctor 和 resume 通过这一层读取 home runtime，不在各自模块里散扫目录。
+- `user_space/owner_resolver.py`：把 local CLI、provider user、provider group 解析到 V2 owner home。它会按需初始化 owner 的入口文件、memory、tasks/runs/agents、compact、workspace、capability_requests 和策略文件；这是运行时进入 owner 隔离的第一层桥。
+- `user_space/identity_store.py`：把外部 provider 身份写入 `identity/provider_identity/<provider>.jsonl`，查询时按 provider 分片读取，不全局扫一个大文件；canonical user profile 使用目录 `identity/canonical_users/<id>/profile.json`，避免文件和目录同名冲突。
+- `user_space/home_indexes.py`：写入并读取 `global_index/owners.jsonl` 和 `global_index/active_tasks.jsonl` 这类轻量地图。它只记录 owner/task 的路径和状态摘要，真实事实仍在 owner/task/run/agent 目录里。
+- `user_space/home_migration.py`：生成和执行 V1 到 V2 owner home 的迁移计划。当前只复制 legacy daily/raw/task workspace 到 owner home，目标已存在就跳过，不删除旧文件，也不改任务状态。
+- `user_space/home_backup.py`：为 schema 迁移或大规模 owner 调整生成 manifest-only 备份清单，列出 owner memory/tasks/runs/agents/identity/index 等保护范围；当前不复制大文件。
+- `user_space/owner_policy.py`：读取 owner 级 `permissions.json`、`quota.json`、`retention.json`、`skill_policy.json` 和 `tool_policy.json`，并统计 owner 关键目录磁盘用量。它供 doctor/状态页使用，不给普通任务新增硬门。
+- `user_space/compact_layout.py`：创建 `compact_0001/` 这类基础恢复包，task/run/agent 三层共享同一组文件名，避免以后压缩恢复时出现三套格式。
+- `user_space/compact_injection.py`：把 `compact_context.md` 和 `continue_packet.json` 渲染成同一份续接提示；它不读 raw archive 正文、不自动执行工具。
+- `user_space/capability_requests.py`：写 owner 私有 `capability_requests/<id>.json`，记录能力、工具或权限申请的生命周期和过期状态；子代理结束后请求仍留在 owner home 里，后续由父代理、用户或管理员处理。它不自动授权，也不作为 closeout 硬门。
+- `user_space/temporary_grants.py`：写 owner 私有 `temporary_grants/<id>.json`，记录本次临时授权的对象、能力、路径前缀、过期时间和理由；过期后保留记录，只把状态改成 `expired`。
+- `user_space/skill_candidates.py`：写 owner 私有 `skills/.drafts/skill_candidates.jsonl`。它只登记可学习经验、来源任务和证据引用，不安装正式 skill，也不写 shared 能力库。
 - `user_space/context_bundle.py`：为主代理保存型 run 生成 `Main Agent Context Bundle v1` JSON/Markdown 和 bounded prompt 摘要；它只写结构化 refs，不复制大正文。
 - `user_space/context_bundle_contracts.py`：集中生成 context bundle 的合同字段，包括 schema policy、owner model、RunScope、ToolManifest、ArtifactRef、Acceptance Contract、prompt budget 和 self-check。后续字段扩展优先落在这里，避免各处散拼 JSON。
 - `user_space/context_bundle_artifacts.py`：run 收尾后按 request/run/task scope 从 tool-output index 回填 artifact refs 到本轮 context bundle；只登记 ref/hash/size/call id，不读取 artifact 正文。

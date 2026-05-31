@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import time as time_module
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..memory_archive import (
     archive_run_turn,
@@ -27,6 +28,7 @@ from ._runtime_params import (
 from .finalization_compact_auto import compact_auto_cycle_fields
 from .model_usage import input_token_usage, output_token_usage
 from .models import AgentRunResult
+from .runtime_owner_roots import runtime_archive_roots
 
 
 # LLM: BuildAgentRunResultParams keeps final AgentRunResult assembly inputs bundled and extensible.
@@ -78,27 +80,30 @@ class FinalizationService:
     def _write_runtime_fact_source_if_needed(self, ctx: FinalizeContext, run_request_id: str) -> str:
         if not ctx.do_save:
             return ""
-        return write_runtime_fact_source(
-            RuntimeFactSourceRequest(
-                root=self._agent.root,
-                request_id=run_request_id,
-                user_prompt=ctx.user_prompt,
-                response_text=ctx.final_response.text,
-                backend=ctx.final_response.backend,
-                status="ok",
-                next_actions=ctx.recovery_next_actions or [],
-                archive_tool_calls=ctx.archive_tool_calls or [],
-                runtime_injections=tuple(str(item) for item in ctx.runtime_injections or []),
-                run_id=ctx.run_id,
-                task_id=ctx.task_id,
-                source=ctx.source,
-                phase="final",
-                tool_rounds=ctx.tool_rounds,
-                executed_tools=list(ctx.executed_tools or []),
-                latest_archive_refs=_latest_archive_refs(ctx.archive_tool_calls or []),
-                artifact_refs=_artifact_refs(ctx.archive_tool_calls or []),
+        written = ""
+        for root in runtime_archive_roots(self._agent):
+            written = write_runtime_fact_source(
+                RuntimeFactSourceRequest(
+                    root=root,
+                    request_id=run_request_id,
+                    user_prompt=ctx.user_prompt,
+                    response_text=ctx.final_response.text,
+                    backend=ctx.final_response.backend,
+                    status="ok",
+                    next_actions=ctx.recovery_next_actions or [],
+                    archive_tool_calls=ctx.archive_tool_calls or [],
+                    runtime_injections=tuple(str(item) for item in ctx.runtime_injections or []),
+                    run_id=ctx.run_id,
+                    task_id=ctx.task_id,
+                    source=ctx.source,
+                    phase="final",
+                    tool_rounds=ctx.tool_rounds,
+                    executed_tools=list(ctx.executed_tools or []),
+                    latest_archive_refs=_latest_archive_refs(ctx.archive_tool_calls or []),
+                    artifact_refs=_artifact_refs(ctx.archive_tool_calls or []),
+                )
             )
-        )
+        return written
 
     # LLM: _update_main_context_bundle_artifacts links post-tool artifact refs back to the root run card.
     # 函数用途: run 收尾时把同 scope 的工具输出 artifact refs 写回 context bundle；失败不阻断主流程。
@@ -125,25 +130,28 @@ class FinalizationService:
         self._agent.memory.add(
             "agent", params.final_response.text, tags=[params.final_response.backend]
         )
-        return archive_run_turn(
-            ArchiveRunTurnParams(
-                root=self._agent.root,
-                ctx=ArchiveTurnContext(
-                    session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
-                    request_id=params.run_request_id,
-                    run_id=params.run_id,
-                    task_id=params.task_id,
-                    user_prompt=params.user_prompt,
-                    response_text=params.final_response.text,
-                    backend=params.final_response.backend,
-                    tool_calls=params.archive_tool_calls or [],
-                    source=params.source,
-                    archive_level=int(getattr(self._agent.config, "memory_archive_level", 3)),
-                    preview_limits=_memory_archive_preview_limits(self._agent.config),
-                    summary_chars=int(getattr(self._agent.config, "memory_archive_summary_chars", 96) or 96),
+        result = None
+        for root in runtime_archive_roots(self._agent):
+            result = archive_run_turn(
+                ArchiveRunTurnParams(
+                    root=root,
+                    ctx=ArchiveTurnContext(
+                        session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
+                        request_id=params.run_request_id,
+                        run_id=params.run_id,
+                        task_id=params.task_id,
+                        user_prompt=params.user_prompt,
+                        response_text=params.final_response.text,
+                        backend=params.final_response.backend,
+                        tool_calls=params.archive_tool_calls or [],
+                        source=params.source,
+                        archive_level=int(getattr(self._agent.config, "memory_archive_level", 3)),
+                        preview_limits=_memory_archive_preview_limits(self._agent.config),
+                        summary_chars=int(getattr(self._agent.config, "memory_archive_summary_chars", 96) or 96),
+                    ),
                 ),
             )
-        )
+        return result
 
     # LLM: _estimate_token_usage 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 计算令牌usage的预算、数量或限制，影响后续调度节奏；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
@@ -159,17 +167,19 @@ class FinalizationService:
         if output_tokens is None:
             output_tokens = estimate_tokens(params.final_response.text)
         tool_tokens = estimate_tokens(params.archive_tool_calls)
-        ledger = append_session_token_usage(
-            self._agent.root,
-            usage=TurnTokenUsage(
-                session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
-                turn_id=params.turn_id,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                tool_tokens=tool_tokens,
-                created_at=str(time_module.time()),
-            ),
-        )
+        ledger = {}
+        for root in runtime_archive_roots(self._agent):
+            ledger = append_session_token_usage(
+                root,
+                usage=TurnTokenUsage(
+                    session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
+                    turn_id=params.turn_id,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    tool_tokens=tool_tokens,
+                    created_at=str(time_module.time()),
+                ),
+            )
         return {
             "turn": int(ledger["turn_total"]),
             "cumulative": int(ledger["cumulative_tokens"]),
@@ -249,6 +259,20 @@ def _write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
             source=params.source,
         )
     )
+    owner_home = getattr(home_paths, "owner_home_dir", None)
+    if owner_home and Path(owner_home) != Path(home_paths.root):
+        ensure_run_workspace(
+            EnsureRunWorkspaceRequest(
+                home=owner_home,
+                template=str(getattr(agent.config, "workspace_task_path_template", "")),
+                task_name=params.task_id or params.run_id or params.run_request_id or params.user_prompt,
+                user_prompt=params.user_prompt,
+                request_id=params.run_request_id,
+                run_id=params.run_id,
+                task_id=params.task_id,
+                source=params.source,
+            )
+        )
     return str(result.root)
 
 

@@ -148,6 +148,7 @@ Ctrl+C
 | `memory-list` | 列出最近记忆 | 否 | 否 |
 | `memory-search` | 搜索记忆 | 否 | 否 |
 | `home-status` | 查看 `~/.my-agent` 入口文件、关键目录和轻量计数 | 否 | 否 |
+| `home-migrate` | 预览或复制旧 home 数据到当前 owner home | `--apply` 时写 | 否 |
 | `memory-daily-list` | 直接查看 home daily memory 按天流水 | 否 | 否 |
 | `memory-route` | 按长期规则索引预览 memory 路由命中 | 否 | 否 |
 | `guidance-send` | 给运行中的主代理、子代理、任务或协作 case 追加一条软提示 | 是，只写 guidance 账本 | 否 |
@@ -334,6 +335,20 @@ my-agent home-status --json
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `home-migrate`
+
+```powershell
+my-agent home-migrate
+my-agent home-migrate --apply --json
+```
+
+预览或执行旧 home 数据到当前 owner home 的非破坏性迁移。默认只列计划；`--apply` 只复制旧 `memory/daily`、`memory/raw` 和 `workspace/tasks` 到 owner home，目标已存在就跳过，不删除、不覆盖旧文件。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--apply` | `false` | 执行复制；不传时只 dry-run 预览。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `memory-daily-list`

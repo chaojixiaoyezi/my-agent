@@ -50,6 +50,9 @@ def _normalize_external_knowledge_lists(out: dict[str, object], defaults: object
 
 _HOME_STRING_FIELDS = (
     "my_agent_home",
+    "my_agent_owner_provider",
+    "my_agent_owner_kind",
+    "my_agent_owner_id",
     "workspace_task_path_template",
     "external_knowledge_index_file_name",
 )

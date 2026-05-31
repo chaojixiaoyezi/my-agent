@@ -130,7 +130,7 @@ class TestConnection:
         with store._connection() as conn:
             cursor = conn.execute("PRAGMA busy_timeout")
             row = cursor.fetchone()
-            assert row[0] == 5000
+            assert row[0] == 30000
 
     def test_connection_enables_foreign_keys(self, tmp_path):
         store = MinimalSchemaStore(tmp_path)

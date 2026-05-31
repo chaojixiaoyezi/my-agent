@@ -264,17 +264,33 @@ def _is_isolated_scope(value: object) -> bool:
 # 函数用途: 读取 SOUL/USER/AGENTS/memory 四个家目录关键文件；文件为空或不存在时跳过。
 def _home_entry_context_chunks(home_paths: Any) -> list[str]:
     entries = (
-        ("AGENTS.md", Path(home_paths.agents_md)),
-        ("SOUL.md", Path(home_paths.soul_md)),
-        ("USER.md", Path(home_paths.user_md)),
-        ("memory.md", Path(home_paths.memory_md)),
+        ("AGENTS.md", _owner_and_legacy_paths(home_paths, "owner_agents_md", "agents_md")),
+        ("SOUL.md", _owner_and_legacy_paths(home_paths, "owner_soul_md", "soul_md")),
+        ("USER.md", _owner_and_legacy_paths(home_paths, "owner_user_md", "user_md")),
+        ("memory.md", _owner_and_legacy_paths(home_paths, "owner_memory_md", "memory_md")),
     )
     chunks: list[str] = []
-    for label, path in entries:
-        content = _read_text_if_nonempty(path)
-        if content:
-            chunks.append(f"# Home Entry: {label}\nPath: {path}\n{content}")
+    for label, paths in entries:
+        for path in paths:
+            chunks.extend(_home_entry_chunk(label, path))
     return chunks
+
+
+def _home_entry_chunk(label: str, path: Path) -> list[str]:
+    content = _read_text_if_nonempty(path)
+    if not content:
+        return []
+    return [f"# Home Entry: {label}\nPath: {path}\n{content}"]
+
+
+def _owner_and_legacy_paths(home_paths: Any, owner_attr: str, legacy_attr: str) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    owner_path = Path(getattr(home_paths, owner_attr, "") or "")
+    legacy_path = Path(getattr(home_paths, legacy_attr, "") or "")
+    for path in (owner_path, legacy_path):
+        if path and path not in paths:
+            paths.append(path)
+    return tuple(paths)
 
 
 # LLM: _matching_lesson_chunks uses simple filename matching until semantic lesson routing is added.
