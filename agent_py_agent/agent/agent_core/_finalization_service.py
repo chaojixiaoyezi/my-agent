@@ -28,6 +28,7 @@ from ._runtime_params import (
 from .finalization_compact_auto import compact_auto_cycle_fields
 from .model_usage import input_token_usage, output_token_usage
 from .models import AgentRunResult
+from .run_task_workspace_index import register_saved_run_task_ref
 from .runtime_owner_roots import runtime_archive_roots
 
 
@@ -256,6 +257,8 @@ def _write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
             request_id=params.run_request_id,
             run_id=params.run_id,
             task_id=params.task_id,
+            owner_id=str(getattr(home_paths, "owner_id", "") or ""),
+            owner_home=str(getattr(home_paths, "owner_home_dir", "") or ""),
             source=params.source,
         )
     )
@@ -270,9 +273,12 @@ def _write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
                 request_id=params.run_request_id,
                 run_id=params.run_id,
                 task_id=params.task_id,
+                owner_id=str(getattr(home_paths, "owner_id", "") or ""),
+                owner_home=str(owner_home),
                 source=params.source,
             )
         )
+    register_saved_run_task_ref(agent, result, params)
     return str(result.root)
 
 

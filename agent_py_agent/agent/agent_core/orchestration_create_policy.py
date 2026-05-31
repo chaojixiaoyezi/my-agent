@@ -45,7 +45,7 @@ def create_run_params(
         agent_name=_root_agent_name(raw_params, role),
         role=role,
         allowed_tools=allowed_tools,
-        owner=str(raw_params.get("owner") or "").strip(),
+        owner=str(raw_params.get("owner") or _default_owner_id(agent)).strip(),
         supervisor=str(raw_params.get("supervisor") or "parent").strip(),
         final_owner=str(raw_params.get("final_owner") or "").strip(),
         acceptance_checks=_string_list(raw_params.get("acceptance_checks")),
@@ -182,6 +182,17 @@ _LIST_ATTRIBUTE_FIELDS = (
     "replacement_for_run_ids",
     "workflow_risk_tags",
 )
+
+
+def _default_owner_id(agent) -> str:
+    home_paths = getattr(agent, "home_paths", None)
+    owner_id = str(getattr(home_paths, "owner_id", "") or "").strip()
+    if owner_id:
+        return owner_id
+    policy = getattr(agent, "owner_policy", None)
+    return str(getattr(policy, "owner_id", "") or "").strip()
+
+
 _OUTPUT_REF_ATTRIBUTE_FIELDS = frozenset({"artifact_refs", "output_files", "output_refs"})
 _INPUT_REF_ATTRIBUTE_FIELDS = frozenset({"input_files", "input_refs", "required_read_paths"})
 _MAPPING_ATTRIBUTE_FIELDS = ("required_content_files",)

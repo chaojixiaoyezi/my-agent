@@ -34,7 +34,14 @@ class ConversationThreadStore(ConversationBaseStore):
         thread = self._require_thread(thread_id)
         current = current_time(request.get("now"))
         binding = _channel_binding(thread.thread_id, current, request)
-        updated = replace(thread, canonical_user_id=request.get("canonical_user_id") or thread.canonical_user_id, channel_bindings=_replace_binding(thread, binding), updated_at=current)
+        updated = replace(
+            thread,
+            canonical_user_id=request.get("canonical_user_id") or thread.canonical_user_id,
+            owner_id=str(request.get("owner_id") or thread.owner_id or ""),
+            owner_home=str(request.get("owner_home") or thread.owner_home or ""),
+            channel_bindings=_replace_binding(thread, binding),
+            updated_at=current,
+        )
         self._write_thread(updated)
         self._write_binding_indexes(binding)
         return updated
@@ -73,7 +80,15 @@ class ConversationThreadStore(ConversationBaseStore):
 
     def _create_thread(self, kwargs: dict) -> ConversationThread:
         current = current_time(kwargs.get("now"))
-        thread = ConversationThread(thread_id=new_id("thread"), canonical_user_id=kwargs.get("canonical_user_id", ""), title=kwargs.get("title", ""), created_at=current, updated_at=current)
+        thread = ConversationThread(
+            thread_id=new_id("thread"),
+            canonical_user_id=kwargs.get("canonical_user_id", ""),
+            owner_id=str(kwargs.get("owner_id") or ""),
+            owner_home=str(kwargs.get("owner_home") or ""),
+            title=kwargs.get("title", ""),
+            created_at=current,
+            updated_at=current,
+        )
         self._write_thread(thread)
         return self._bind_existing(thread.thread_id, {**kwargs, "now": current})
 

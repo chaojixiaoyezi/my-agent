@@ -106,6 +106,9 @@ class MyAgentHomePaths:
     system_doctor_dir: Path
     system_backups_dir: Path
     system_migrations_dir: Path
+    owner_provider: str = ""
+    owner_kind: str = ""
+    owner_id: str = ""
 
 
 # LLM: resolve_my_agent_home centralizes MY_AGENT_HOME precedence without creating directories.

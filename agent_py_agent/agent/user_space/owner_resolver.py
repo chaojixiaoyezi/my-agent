@@ -97,6 +97,9 @@ def owner_identity_from_config(config: Any) -> OwnerIdentity:
 def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> MyAgentHomePaths:
     return replace(
         paths,
+        owner_provider=owner.identity.provider,
+        owner_kind=owner.identity.owner_kind,
+        owner_id=owner.owner_id,
         owner_home_dir=owner.home_dir,
         owner_soul_md=owner.soul_md,
         owner_user_md=owner.user_md,

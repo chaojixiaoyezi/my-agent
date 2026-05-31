@@ -69,6 +69,7 @@ class ExecuteRegistryCallParams:
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
     allowed_tools: list[str] | None = None
+    disabled_tools: list[str] | None = None
     granted_capabilities: list[str] | None = None
     write_boundary: dict[str, object] | None = None
     payload_limits: ToolPayloadNormalizeLimits | None = None
@@ -302,6 +303,7 @@ def _registry_auth_error(tool_name: str, call: ExecuteRegistryCallParams) -> str
         tool_name,
         ToolAuthContext(
             allowed=allowed_tool_set(call.allowed_tools),
+            disabled=allowed_tool_set(call.disabled_tools) or set(),
             granted_capabilities=call.granted_capabilities,
             expose_security_tools=call.expose_security_tools,
             security_tool_names=call.security_tool_names,

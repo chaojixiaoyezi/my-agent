@@ -47,6 +47,8 @@ class EnsureRunWorkspaceRequest:
     request_id: str = ""
     run_id: str = ""
     task_id: str = ""
+    owner_id: str = ""
+    owner_home: str = ""
     source: str = "run"
     created_at: str | None = None
 
@@ -124,6 +126,8 @@ def _write_task_yaml_if_missing(path: Path, request: EnsureRunWorkspaceRequest) 
         f'task_id: "{_yaml_escape(task_id)}"\n'
         f'request_id: "{_yaml_escape(request.request_id)}"\n'
         f'run_id: "{_yaml_escape(request.run_id)}"\n'
+        f'owner_id: "{_yaml_escape(request.owner_id)}"\n'
+        f'owner_home: "{_yaml_escape(request.owner_home)}"\n'
         f'source: "{_yaml_escape(request.source)}"\n'
     )
     path.write_text(text, encoding="utf-8")
@@ -137,6 +141,8 @@ def _state_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
         "request_id": request.request_id,
         "run_id": request.run_id,
         "task_id": request.task_id,
+        "owner_id": request.owner_id,
+        "owner_home": request.owner_home,
         "task_name": request.task_name,
         "source": request.source,
         "updated_at": _now_iso(),
@@ -150,6 +156,8 @@ def _artifact_manifest_payload(request: EnsureRunWorkspaceRequest) -> dict[str, 
         "request_id": request.request_id,
         "run_id": request.run_id,
         "task_id": request.task_id,
+        "owner_id": request.owner_id,
+        "owner_home": request.owner_home,
         "artifacts": [],
         "updated_at": _now_iso(),
     }
@@ -163,6 +171,8 @@ def _timeline_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
         "request_id": request.request_id,
         "run_id": request.run_id,
         "task_id": request.task_id,
+        "owner_id": request.owner_id,
+        "owner_home": request.owner_home,
         "source": request.source,
         "created_at": _now_iso(),
     }

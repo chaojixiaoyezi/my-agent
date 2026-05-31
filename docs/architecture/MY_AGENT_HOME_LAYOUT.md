@@ -25,16 +25,19 @@ updated_at: 2026-05-31
 - provider identity 已有按 provider 分片的 JSONL 索引；canonical user profile 使用目录，不和绑定记录文件混用。
 - task/run/agent compact 包已有共享基础布局 helper，基础文件统一为 compact_context、handoff_summary、work_state_snapshot、continue_packet、refs、metadata。
 - compact 注入模板已有代码入口，会把 compact_context 和 continue_packet 渲染成同一份续接提示，避免三层 compact 各自拼 prompt。
-- owner policy / quota / retention 已有只读 bundle 和磁盘用量统计；它们先用于 doctor/状态展示，不新增普通任务硬门。
+- owner policy / quota / retention 已有 bundle、磁盘用量统计和 effective policy 快照；工具注册表会尊重 owner 显式禁用工具和网络开关。
 - temporary_grants 已有 owner 级账本，过期只改状态保留审计，不直接改永久 permissions。
 - capability_requests 已有过期生命周期，子代理结束后请求仍留在 owner 账本，后续由父代理/用户处理。
 - global_index 已有 owner/task 最新引用读取；索引仍是可重建地图，不替代 task 正文。
+- SimpleAgent 启动会登记 owner 轻量索引；保存型 run 会把 owner_id、owner_home 写进 task.yaml/state/timeline/artifact manifest，并同步 owner_home/tasks 下的任务工作区。
+- ConversationThread 已可记录 owner_id/owner_home；外部通道创建 thread 时会从当前主代理 owner 注入 owner 归属。
+- 子代理任务会继承当前 owner_id、owner policy 快照和父级 shell 权限上限；owner_home/agents/<run_id>/ 会保存 refs-only projection，方便跨 session/tree/compact 查找。
 - system/backups 已有 manifest-only 备份清单入口，先记录迁移前要保护的根目录，不急着复制大文件。
 - owner 私有 skill candidate 已有草稿账本，只记录候选，不自动安装、不自动提升。
 
 未完全接入：
 - provider 身份合并的冲突仲裁、能力提升审核仍是后续迁移阶段。
-- 部分旧路径兼容字段仍保留，但新增运行时写入已开始优先走 owner_home。
+- 部分旧路径兼容字段仍保留；新增状态/索引/投影已经写 owner_home，旧路径只作为兼容镜像或历史查找入口。
 ```
 
 上面是本文档版本。真实落盘的家目录 schema 版本应另存为：

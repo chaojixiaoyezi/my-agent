@@ -78,6 +78,10 @@ class SubAgentManager(
         debug_trace_level=0,
         takeover_chain_max_depth=0,
         closeout_for_all_task_nodes=False,
+        # LLM: owner fields are passed through params so manager internals do not guess tenant scope.
+        owner_id="",
+        owner_home_dir="",
+        owner_policy_snapshot=None,
     ):
         # LLM: role_template_dirs lets runtime load user JSON role templates while keeping built-ins external.
         # 函数用途: 当调用方不传目录时，底层会自动使用工作区 .agent/subagents/roles。
@@ -94,6 +98,9 @@ class SubAgentManager(
             debug_trace_level=debug_trace_level,
             takeover_chain_max_depth=takeover_chain_max_depth,
             closeout_for_all_task_nodes=closeout_for_all_task_nodes,
+            owner_id=owner_id,
+            owner_home_dir=owner_home_dir,
+            owner_policy_snapshot=owner_policy_snapshot,
         )
         super().__init__(
             workspace,

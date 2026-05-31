@@ -45,7 +45,48 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     assert state["request_id"] == "req-1"
     assert state["run_id"] == "run-1"
     assert state["task_id"] == "示例网站 E2E"
+    assert state["owner_id"] == "local/main"
+    assert state["owner_home"] == str((home / "owners" / "local" / "main").resolve())
     assert (task_root / "work" / "timeline.jsonl").read_text(encoding="utf-8").strip()
+    owner_task_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "示例网站-e2e"
+    assert (owner_task_root / "output").is_dir()
+
+
+def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    feishu = SimpleAgent(
+        AgentConfig(
+            my_agent_home=str(home),
+            my_agent_owner_provider="feishu",
+            my_agent_owner_kind="user",
+            my_agent_owner_id="u001",
+            memory_path="memory-feishu.jsonl",
+            prompt_files=[],
+        ),
+        repo,
+    )
+    wechat = SimpleAgent(
+        AgentConfig(
+            my_agent_home=str(home),
+            my_agent_owner_provider="wechat",
+            my_agent_owner_kind="user",
+            my_agent_owner_id="u001",
+            memory_path="memory-wechat.jsonl",
+            prompt_files=[],
+        ),
+        repo,
+    )
+
+    feishu.run("整理飞书任务", request_id="req-f", run_id="run-f", task_id="任务A")
+    wechat.run("整理微信任务", request_id="req-w", run_id="run-w", task_id="任务A")
+
+    feishu_root = home / "owners" / "providers" / "feishu" / "users" / "u001" / "tasks"
+    wechat_root = home / "owners" / "providers" / "wechat" / "users" / "u001" / "tasks"
+    assert (feishu_root / date.today().isoformat() / "任务a" / "work" / "state.json").exists()
+    assert (wechat_root / date.today().isoformat() / "任务a" / "work" / "state.json").exists()
+    assert feishu.home_paths.owner_id == "providers/feishu/users/u001"
+    assert wechat.home_paths.owner_id == "providers/wechat/users/u001"
 
 
 # LLM: main context bundle tests pin the root-agent prompt contract before implementation.
@@ -70,6 +111,8 @@ def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
     assert payload["scope"]["task_id"] == "主代理任务"
     assert payload["workspace_refs"]["primary_workspace_root"] == str(repo.resolve())
     assert payload["workspace_refs"]["my_agent_home"] == str(home.resolve())
+    assert payload["workspace_refs"]["owner_home"] == str((home / "owners" / "local" / "main").resolve())
+    assert payload["workspace_refs"]["owner_tasks_root"] == str((home / "owners" / "local" / "main" / "tasks").resolve())
     assert payload["task"]["user_prompt_preview"] == "做一个示例网站"
     assert result.main_context_bundle_markdown_path
     assert Path(result.main_context_bundle_markdown_path).exists()

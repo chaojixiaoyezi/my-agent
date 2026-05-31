@@ -47,6 +47,10 @@ class SubAgentManagerInitParams:
     debug_trace_level: int = 0
     takeover_chain_max_depth: int = 0
     closeout_for_all_task_nodes: bool = False
+    # LLM: owner scope travels with the manager as machine facts, not as model-written prompt text.
+    owner_id: str = ""
+    owner_home_dir: str = ""
+    owner_policy_snapshot: dict[str, object] | None = None
 
 
 # LLM: SubAgentBaseMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -93,6 +97,7 @@ class SubAgentBaseMixin:
         self.debug_trace_level = _normalize_debug_trace_level(params.debug_trace_level)
         self.takeover_chain_max_depth = max(0, int(params.takeover_chain_max_depth or 0))
         self.closeout_for_all_task_nodes = bool(params.closeout_for_all_task_nodes)
+        _apply_owner_scope(self, params)
 
         from .services.base import SubAgentBaseService
         from .services.lifecycle import SubAgentLifecycleService
@@ -247,6 +252,14 @@ def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -
         if path not in resolved:
             resolved.append(path)
     return resolved
+
+
+# LLM: _apply_owner_scope keeps manager init shorter while preserving owner machine facts.
+# 函数用途: 保存 owner_id、owner_home 和 owner policy 快照，供子代理创建/投影/权限过滤复用。
+def _apply_owner_scope(manager, params: SubAgentManagerInitParams) -> None:
+    manager.owner_id = str(params.owner_id or "")
+    manager.owner_home_dir = str(params.owner_home_dir or "")
+    manager.owner_policy_snapshot = dict(params.owner_policy_snapshot or {})
 
 
 # LLM: _normalized_template_dirs adds the standard user role-template directory when config is empty.

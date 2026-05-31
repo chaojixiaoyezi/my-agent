@@ -164,6 +164,7 @@ class SubAgentPersistenceService:
                 encoding="utf-8",
             )
         (task_dir / "thought.md").write_text(render_thought_markdown(task), encoding="utf-8")
+        _write_owner_agent_projection(self.manager, task, payload)
         self.manager._index_task(task)
         if self.manager.local_store:
             # LLM: 控制面投影只给父级查询和 rollup 用，旧工单目录与 runtime workspace 仍是事实源。
@@ -175,6 +176,27 @@ class SubAgentPersistenceService:
                 status=task.status,
                 goal=task.goal,
             )
+
+
+def _write_owner_agent_projection(manager: Any, task: SubAgentTask, payload: str) -> None:
+    # LLM: owner projection is a refs-only lookup mirror; task.json remains the detailed run record.
+    owner_home = str(getattr(manager, "owner_home_dir", "") or "").strip()
+    if not owner_home:
+        return
+    root = Path(owner_home) / "agents" / task.id
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "state.json").write_text(payload, encoding="utf-8")
+    refs = {
+        "schema_version": "owner-agent-projection.v1",
+        "run_id": task.id,
+        "owner_id": task.owner,
+        "task_workspace_dir": task.task_workspace_dir,
+        "agent_run_workspace_dir": task.agent_run_workspace_dir,
+        "compact_dir": task.agent_run_compactions_dir,
+        "final_report": task.agent_run_final_report_md,
+        "updated_at": task.updated_at,
+    }
+    (root / "refs.json").write_text(json.dumps(refs, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
 # LLM: _merge_existing_child_links protects hierarchy edges from stale full-object saves.
@@ -215,6 +237,7 @@ def _refresh_system_tree_snapshot(task: SubAgentTask) -> None:
         "updated_by": "system",
         "source": "persistence.save",
         "run_id": task.id,
+        "owner_id": task.owner,
         "root_id": task.root_id or task.id,
         "parent_id": task.parent_id,
         "depth": _safe_int(task.depth),

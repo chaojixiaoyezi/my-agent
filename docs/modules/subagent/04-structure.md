@@ -89,6 +89,13 @@ shell 权限按“不能比父级更大”派生：
 
 外部插件、额外系统工具和未来 skill 不默认自授。父级可以在派工时显式给 `allowed_skills`，子代理也可以通过能力申请链路请求更多工具或 skill；批准和授予仍由上级/系统决定。
 
+owner 归属现在也会随子代理落账：
+
+- 子代理默认继承创建它的主代理/父代理 owner_id，不再空着靠路径猜是谁的任务。
+- `effective_permissions` 会记录 owner_id、owner_home、owner policy 的工具禁用列表、max_subagents 和 max_depth 等机器事实。
+- 子代理保存时会在 `owner_home/agents/<run_id>/` 写一份 refs-only projection：只放 state/refs，不复制大产物正文。父代理、tree、compact 或后台恢复要找子代理时，优先用这些 refs 定位。
+- 旧 `subagent_workspace` 仍是运行兼容入口，避免破坏现有 runner；owner projection 是同一份任务事实的索引，不是第二套任务账本。
+
 ## 记忆和压缩
 
 子代理有自己的任务级记忆命名空间，格式为 `subagent:{root_run_id}:{run_id}`。这和主代理长期记忆是隔离的：子代理工作时可以保留本轮恢复线索、compact 包和阶段总结，但不会自动写入父级长期记忆。

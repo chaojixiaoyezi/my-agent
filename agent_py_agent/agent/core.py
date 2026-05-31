@@ -82,7 +82,9 @@ from .prompting import PromptBuilder
 from .subagent import SubAgentManager
 from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .tooling.registry_payload_normalize import tool_payload_limits_from_config
+from .user_space.home_indexes import register_owner_ref
 from .user_space.home_layout import ensure_my_agent_home, home_paths
+from .user_space.owner_policy import resolve_effective_owner_policy
 from .user_space.owner_resolver import (
     ensure_owner_home,
     home_paths_with_owner,
@@ -166,6 +168,7 @@ class SimpleAgent(
         self.workspace_roots = _normalized_workspace_roots(self.root, workspace_roots)
 
         self.home_paths = _resolve_home_paths(config)
+        self.owner_policy = resolve_effective_owner_policy(self.home_paths)
         paths = _resolve_paths(config, self.root)
         self.local_store = LocalStore(
             paths["local_store_path"],
@@ -194,10 +197,19 @@ def _resolve_home_paths(config: AgentConfig):
     if bool(getattr(config, "home_runtime_bootstrap_enabled", True)):
         paths = ensure_my_agent_home(root)
         owner = ensure_owner_home(paths.root, owner_identity_from_config(config))
+        _register_owner_ref_if_possible(paths, owner)
         return home_paths_with_owner(paths, owner)
     paths = home_paths(root)
     owner = ensure_owner_home(paths.root, owner_identity_from_config(config))
+    _register_owner_ref_if_possible(paths, owner)
     return home_paths_with_owner(paths, owner)
+
+
+def _register_owner_ref_if_possible(paths, owner) -> None:
+    try:
+        register_owner_ref(paths, owner)
+    except OSError:
+        return
 
 
 # LLM: _daily_memory_dir keeps daily mirroring opt-in/out through config while preserving legacy memory_path.
@@ -227,6 +239,9 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
         debug_trace_level=agent.config.subagent_debug_trace_level,
         takeover_chain_max_depth=agent.config.subagent_takeover_chain_max_depth,
         closeout_for_all_task_nodes=agent.config.closeout_for_all_task_nodes,
+        owner_id=str(getattr(agent.home_paths, "owner_id", "") or ""),
+        owner_home_dir=str(getattr(agent.home_paths, "owner_home_dir", "") or ""),
+        owner_policy_snapshot=agent.owner_policy.to_dict(),
     )
 
 
@@ -264,6 +279,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             artifact_read_budget_max_chars=config.tool_artifact_read_budget_max_chars,
             artifact_default_read_chars=config.memory_artifact_default_read_chars,
             payload_limits=tool_payload_limits_from_config(config),
+            disabled_tools=list(getattr(agent.owner_policy, "disabled_tools", ())),
         )
     )
 

@@ -155,9 +155,14 @@ def _workspace_refs(request: MainContextBundleRequest, home_paths: Any | None) -
     return {
         "primary_workspace_root": root,
         "my_agent_home": str(Path(home_paths.root).resolve()),
+        "owner_id": str(getattr(home_paths, "owner_id", "") or ""),
+        "owner_home": str(Path(getattr(home_paths, "owner_home_dir", home_paths.root)).resolve()),
         "workspace_tasks_root": str(Path(home_paths.workspace_tasks_dir).resolve()),
+        "owner_tasks_root": str(Path(getattr(home_paths, "owner_tasks_dir", home_paths.workspace_tasks_dir)).resolve()),
         "memory_root": str(Path(home_paths.memory_dir).resolve()),
+        "owner_memory_root": str(Path(getattr(home_paths, "owner_memory_dir", home_paths.memory_dir)).resolve()),
         "artifacts_root": str((Path(home_paths.memory_archive_dir) / "artifacts").resolve()),
+        "owner_artifacts_root": str(Path(getattr(home_paths, "owner_artifacts_dir", home_paths.memory_archive_dir)).resolve()),
         "reserved": {},
     }
 
@@ -185,7 +190,11 @@ def _memory_refs(request: MainContextBundleRequest, home_paths: Any | None) -> d
         payload.update(
             {
                 "daily_memory_root": str(Path(home_paths.memory_daily_dir).resolve()),
+                "owner_daily_memory_root": str(
+                    Path(getattr(home_paths, "owner_memory_daily_dir", home_paths.memory_daily_dir)).resolve()
+                ),
                 "key_memory_path": str(Path(home_paths.memory_md).resolve()),
+                "owner_key_memory_path": str(Path(getattr(home_paths, "owner_memory_md", home_paths.memory_md)).resolve()),
                 "lessons_root": str(Path(home_paths.memory_lessons_dir).resolve()),
                 "indexes_root": str(Path(home_paths.memory_indexes_dir).resolve()),
             }

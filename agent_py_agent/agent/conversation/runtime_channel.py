@@ -23,6 +23,8 @@ class ChannelMessageRuntime:
                 "channel_conversation_id": request.get("channel_conversation_id", ""),
                 "channel_user_id": request.get("channel_user_id", ""),
                 "reuse_latest_for_user": True,
+                "owner_id": _agent_owner_id(self.runtime.agent),
+                "owner_home": _agent_owner_home(self.runtime.agent),
                 "now": current,
             }
         )
@@ -33,3 +35,13 @@ class ChannelMessageRuntime:
         if latest is None:
             raise KeyError(f"unknown conversation thread: {thread.thread_id}")
         return latest
+
+
+def _agent_owner_id(agent: object) -> str:
+    home_paths = getattr(agent, "home_paths", None)
+    return str(getattr(home_paths, "owner_id", "") or "")
+
+
+def _agent_owner_home(agent: object) -> str:
+    home_paths = getattr(agent, "home_paths", None)
+    return str(getattr(home_paths, "owner_home_dir", "") or "")

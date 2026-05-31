@@ -48,10 +48,12 @@ from .identity_store import (
 from .manager import UserSpaceManager
 from .migration import migrate_to_user_space
 from .owner_policy import (
+    EffectiveOwnerPolicy,
     OwnerDiskUsage,
     OwnerPolicyBundle,
     owner_disk_usage,
     read_owner_policy_bundle,
+    resolve_effective_owner_policy,
 )
 from .owner_resolver import (
     OwnerHomeResult,
@@ -92,6 +94,7 @@ __all__ = [
     "OwnerIdentity",
     "OwnerPolicyBundle",
     "OwnerTemporaryGrant",
+    "EffectiveOwnerPolicy",
     "ProviderIdentityRecord",
     "UserPaths",
     "UserSpaceManager",
@@ -136,6 +139,7 @@ __all__ = [
     "register_owner_ref",
     "register_task_ref",
     "render_compact_injection",
+    "resolve_effective_owner_policy",
     "resolve_my_agent_home",
     "resolve_owner_home",
 ]

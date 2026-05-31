@@ -53,6 +53,14 @@
   wake signal。这个信号只负责叫醒父代理继续看树、派测试、找茬、补派或汇报；
   不做本地验收、不替父代理抢答，也不把任务卡进新的等待态。
 
+## 2026-05-31 owner-bound 子代理收敛
+
+- 子代理创建时默认继承当前 owner_id；外部平台用户、CLI 主账号和后续群空间的子代理不会再靠路径猜归属。
+- `effective_permissions` 增加 owner_id、owner_home、owner policy 派生的 disabled_tools、max_subagents、max_depth。它是系统派生快照，不接受模型自己提权。
+- 工具上下文会过滤 owner policy 显式禁用的工具；父级没有的工具/权限不会因为子代理层级变深而突然出现。
+- 子代理保存时会在 `owner_home/agents/<run_id>/` 写 refs-only projection，里面只放 state 和 refs，不复制大正文、不制造第二套事实源。
+- 旧 `subagent_workspace` 继续作为 runner 工作目录兼容入口；owner projection 只是统一查找、恢复、tree 和 compact 的索引视图。
+
 ## 2026-05-28 模型可见路径收敛
 
 - `inspect_agent_tree` 的模型可见输出只暴露当前 `task_workspace`、`agent_run_workspace`、artifact refs、evidence refs 和 recovery refs。

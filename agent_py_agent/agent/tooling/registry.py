@@ -89,6 +89,7 @@ class ToolRegistryParams:
         default_factory=lambda: _agent_config_int("memory_artifact_default_read_chars")
     )
     payload_limits: ToolPayloadNormalizeLimits | None = None
+    disabled_tools: list[str] = field(default_factory=list)
 
 # LLM: ToolRegistry 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: ToolRegistry 数据模型，集中保存 工具系统 的结构化状态。
@@ -106,6 +107,7 @@ class ToolRegistry:
         self.path_dangerous_roots = params.path_dangerous_roots or []
         self.tools: dict[str, BaseTool] = {}
         self.default_hidden_tool_names = set(_DEFAULT_HIDDEN_TOOL_NAMES)
+        self.disabled_tool_names = {str(item).strip() for item in params.disabled_tools if str(item).strip()}
         self.expose_security_tools = params.expose_security_tools
         self.security_tool_names = set(SECURITY_TOOL_NAMES)
         self.catalog_limit = params.catalog_limit
@@ -140,6 +142,8 @@ class ToolRegistry:
 
         allowed = allowed_tool_set(allowed_tools)
         specs = [tool.spec for tool in self.tools.values()]
+        if self.disabled_tool_names:
+            specs = [spec for spec in specs if spec.name not in self.disabled_tool_names]
         if allowed is None:
             specs = [spec for spec in specs if spec.name not in self.default_hidden_tool_names]
         if not security_tools_visible(
@@ -282,6 +286,7 @@ class ToolRegistry:
                 security_tool_names=self.security_tool_names,
                 allowed_tools=allowed_tools,
                 granted_capabilities=granted_capabilities,
+                disabled_tools=list(self.disabled_tool_names),
                 write_boundary=write_boundary,
                 payload_limits=self.payload_limits,
             )

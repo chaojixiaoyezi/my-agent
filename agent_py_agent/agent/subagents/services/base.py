@@ -118,7 +118,11 @@ def _nonnegative_int(value: object) -> int:
 # LLM: _apply_runtime_identity_and_memory_scope writes system-derived run identity facts.
 # 函数用途: 给子代理设置 root/conversation/memory namespace，并写入 memory_scope 账本。
 def _apply_runtime_identity_and_memory_scope(task: Any, params: CreateRunParams) -> None:
+    # LLM: runtime identity records who owns the child run without promoting child memory globally.
+    owner_id = str(task.owner or params.owner or "").strip()
     task.runtime_identity.root_run_id = task.root_id or task.id
+    task.runtime_identity.service_owner_id = owner_id
+    task.runtime_identity.effective_principal_id = owner_id
     task.runtime_identity.conversation_id = task.root_subagent_session_id or task.subagent_session_id
     task.runtime_identity.memory_namespace = f"subagent:{task.root_id or task.id}:{task.id}"
     task.runtime_identity.conversation_memory_policy = "task_scoped"
@@ -272,7 +276,7 @@ class SubAgentBaseService:
             plan=params.plan,
             agent_name=params.agent_name,
             role=params.role,
-            owner=params.owner,
+            owner=str(params.owner or getattr(self.manager, "owner_id", "") or "").strip(),
             supervisor=params.supervisor,
             final_owner=params.final_owner,
             parent_id=params.parent_id,
@@ -288,6 +292,7 @@ class SubAgentBaseService:
             effective_permissions=effective_permission_snapshot(
                 parent_task=parent_task,
                 parent_access_mode=params.parent_access_mode,
+                owner_policy=getattr(self.manager, "owner_policy_snapshot", {}),
             ),
             created_at=now,
             updated_at=now,

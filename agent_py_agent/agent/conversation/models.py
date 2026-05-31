@@ -130,6 +130,8 @@ class ProgressPolicy:
 class ConversationThread:
     thread_id: str
     canonical_user_id: str
+    owner_id: str = ""
+    owner_home: str = ""
     title: str = ""
     status: str = "active"
     summary: str = ""
@@ -154,6 +156,8 @@ class ConversationThread:
         return cls(
             thread_id=str(data.get("thread_id") or ""),
             canonical_user_id=str(data.get("canonical_user_id") or ""),
+            owner_id=str(data.get("owner_id") or ""),
+            owner_home=str(data.get("owner_home") or ""),
             title=str(data.get("title") or ""),
             status=str(data.get("status") or "active"),
             summary=str(data.get("summary") or ""),

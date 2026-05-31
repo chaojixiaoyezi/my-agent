@@ -56,9 +56,9 @@ from .probe import (
     _probe_ok,
     _probe_writable_dir,
 )
-from .root_task_policy import is_self_authorized_root_task
 from .runner_context_bundle_files import execution_context_bundle, write_context_bundle_files
 from .runner_rendering import _render_runner_item_line, render_execution_context_markdown
+from .runner_tool_policy import runner_allowed_tools
 from .utils import (
     _apply_missing_paths,
     _apply_paths,
@@ -175,7 +175,7 @@ class SubAgentRunnerContextMixin:
         _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
         granted_skills, granted_tools, grants = self._extract_granted_caps(task)
         allowed_skills = _merge_list(task.allowed_skills, granted_skills)
-        allowed_tools = _runner_allowed_tools(task, _merge_list(task.allowed_tools, granted_tools))
+        allowed_tools = runner_allowed_tools(task, _merge_list(task.allowed_tools, granted_tools))
         return self._make_execution_context(
             ExecutionContextBuildRequest(
                 task=task,
@@ -327,14 +327,6 @@ def _task_required_read_roots(task: object) -> list[str]:
         path = Path(text).expanduser()
         roots.append(str(path if path.is_absolute() else path))
     return _merge_list([], roots)
-
-
-# LLM: _runner_allowed_tools removes parent-only request lanes only from self-authorized roots.
-# 函数用途: 显式 root/coordinator seed 不展示 capability_request；主代理直接创建的一层 worker 仍可向主代理申请。
-def _runner_allowed_tools(task: SubAgentTask, tools: list[str]) -> list[str]:
-    if not is_self_authorized_root_task(task):
-        return tools
-    return [item for item in tools if item != "capability_request"]
 
 
 # LLM: _task_report_write_roots grants runners only their internal report workspace, not product roots.

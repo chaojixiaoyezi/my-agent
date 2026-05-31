@@ -13,6 +13,7 @@ from ..log_analysis.capabilities import SECURITY_TOOL_NAMES, has_security_tool_c
 @dataclass(frozen=True)
 class ToolAuthContext:
     allowed: set[str] | None
+    disabled: set[str]
     granted_capabilities: list[str] | None
     expose_security_tools: bool
     security_tool_names: set[str]
@@ -53,6 +54,8 @@ def security_tools_visible(
 # LLM: _tool_auth_error applies the concrete registry authorization rules.
 # 函数用途: allowed_tools 先收窄普通工具，安全工具再额外要求可见性或 capability。
 def _tool_auth_error(tool_name: str, context: ToolAuthContext) -> str:
+    if tool_name in context.disabled:
+        return f"工具被当前 owner 策略禁用: {tool_name}"
     if context.allowed is not None and tool_name not in context.allowed:
         return f"工具未授权: {tool_name}"
     if tool_name not in context.security_tool_names:

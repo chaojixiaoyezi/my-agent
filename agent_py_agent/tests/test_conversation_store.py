@@ -31,6 +31,25 @@ def test_thread_messages_and_channel_bindings_survive_restart(tmp_path) -> None:
     assert bundle["channel_bindings"][1]["channel"] == "wechat"
 
 
+def test_thread_records_owner_identity_when_provided(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+
+    thread = store.get_or_create_thread({
+        'canonical_user_id': "user-1",
+        'owner_id': "providers/feishu/users/u001",
+        'owner_home': "/tmp/home/owners/providers/feishu/users/u001",
+        'channel': "feishu",
+        'channel_conversation_id': "chat-1",
+        'channel_user_id': "user-1",
+        'now': 100.0,
+    })
+
+    loaded = store.load_thread(thread.thread_id)
+    assert loaded is not None
+    assert loaded.owner_id == "providers/feishu/users/u001"
+    assert loaded.owner_home.endswith("/owners/providers/feishu/users/u001")
+
+
 def test_progress_policy_due_and_mark_reported(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "local-thread", 'channel_user_id': "local-user", 'now': 10.0})
