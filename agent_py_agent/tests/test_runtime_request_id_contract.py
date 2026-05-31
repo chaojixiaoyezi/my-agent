@@ -50,7 +50,7 @@ def test_saved_run_generates_request_id_before_externalized_tool_outputs(tmp_pat
     index_path = tmp_path / "memory_archive" / "artifacts" / "tool_outputs" / "index.jsonl"
     index_rows = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines()]
     request_id = index_rows[-1]["request_id"]
-    fact_path = tmp_path / "memory_archive" / "runtime_facts" / request_id / "task.json"
+    fact_path = agent.home_paths.owner_home_dir / "memory_archive" / "runtime_facts" / request_id / "task.json"
     bundle = json.loads(Path(result.main_context_bundle_path).read_text(encoding="utf-8"))
 
     assert request_id.startswith("run-")

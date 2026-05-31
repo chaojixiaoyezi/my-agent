@@ -61,8 +61,8 @@ def test_prompt_home_context_reads_owner_entry_files(tmp_path: Path):
     assert "legacy agents" in rendered
 
 
-# LLM: SimpleAgent mirrors daily memory to owner home and legacy home during migration.
-# 函数用途: 验证主代理运行时 daily memory 写入 owner 目录，并兼容旧的顶层 daily 读取路径。
+# LLM: SimpleAgent mirrors daily memory to the current owner home.
+# 函数用途: 验证主代理运行时 daily memory 写入 owner 目录，不再额外写旧顶层 daily。
 def test_simple_agent_daily_memory_mirror_uses_owner_home(tmp_path: Path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings.config import AgentConfig
@@ -75,7 +75,7 @@ def test_simple_agent_daily_memory_mirror_uses_owner_home(tmp_path: Path):
     owner_daily = list((home / "owners" / "local" / "main" / "memory" / "daily").glob("*.jsonl"))
     legacy_daily = list((home / "memory" / "daily").glob("*.jsonl"))
     assert owner_daily
-    assert legacy_daily
+    assert legacy_daily == []
 
 
 # LLM: Runtime owner config should switch all owner-backed writes to the provider user home.

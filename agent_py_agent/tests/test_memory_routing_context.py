@@ -220,6 +220,34 @@ def test_build_routed_memory_context_valid_index(tmp_path):
     assert context.matches[0]["route_id"] == "route-1"
 
 
+def test_runtime_memory_routing_uses_home_index_when_project_index_missing(tmp_path):
+    """普通用户主代理没有项目索引时，也能读 home 里的 HOT/lessons 路由。"""
+    from agent_py_agent.agent.agent_core.runtime_loop_models import RuntimeContextRequest
+    from agent_py_agent.agent.agent_core.runtime_loop_support import (
+        _routed_memory_context_for_request,
+    )
+    from agent_py_agent.agent.config import AgentConfig
+    from agent_py_agent.agent.core import SimpleAgent
+
+    home = tmp_path / "home"
+    root = tmp_path / "project"
+    root.mkdir()
+    agent = SimpleAgent(
+        AgentConfig(my_agent_home=str(home), memory_rule_routing_enabled=True, prompt_files=[]),
+        root,
+    )
+
+    context = _routed_memory_context_for_request(
+        agent,
+        RuntimeContextRequest("真实测试失败后要用普通中文提示词，不要写专项模板", [], True),
+        task_local=False,
+    )
+
+    assert context.routes_count >= 1
+    assert context.matches
+    assert any("real-tests.md" in path for path in context.candidate_paths)
+
+
 def test_build_routed_memory_context_auto_read_limit_zero(tmp_path):
     """测试 auto_read_limit=0 时不读取文件。"""
     rules_dir = tmp_path / "rules"

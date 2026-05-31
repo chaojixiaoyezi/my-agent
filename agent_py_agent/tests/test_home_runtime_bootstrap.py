@@ -49,7 +49,7 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     assert state["owner_home"] == str((home / "owners" / "local" / "main").resolve())
     assert (task_root / "work" / "timeline.jsonl").read_text(encoding="utf-8").strip()
     owner_task_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "示例网站-e2e"
-    assert (owner_task_root / "output").is_dir()
+    assert not owner_task_root.exists()
 
 
 def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):

@@ -299,7 +299,7 @@ def test_gateway_request_writes_runtime_fact_when_saved():
         response = _handle_gateway_request(agent, request_path)
 
         assert response["ok"] is True
-        fact_path = root / "memory_archive" / "runtime_facts" / request_id / "task.json"
+        fact_path = agent.home_paths.owner_home_dir / "memory_archive" / "runtime_facts" / request_id / "task.json"
         assert fact_path.exists()
         payload = json.loads(fact_path.read_text(encoding="utf-8"))
         assert payload["request_id"] == request_id

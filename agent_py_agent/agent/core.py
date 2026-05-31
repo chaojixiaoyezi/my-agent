@@ -180,7 +180,7 @@ class SimpleAgent(
             _owner_memory_jsonl_path(self.home_paths, fallback=paths["memory_path"]),
             local_store=self.local_store,
             daily_mirror_dir=_daily_memory_dir(config, self.home_paths),
-            fallback_read_paths=(paths["memory_path"],),
+            fallback_read_paths=_legacy_memory_fallbacks(self.home_paths, paths["memory_path"]),
         )
         self.prompts = PromptBuilder(config, self.root, home_paths=self.home_paths)
         self.backend = get_backend(config.model_backend, config)
@@ -227,6 +227,20 @@ def _owner_memory_jsonl_path(paths, *, fallback: Path) -> Path:
     if owner_long_term:
         return Path(owner_long_term) / "memory.jsonl"
     return Path(fallback)
+
+
+def _legacy_memory_fallbacks(paths, fallback: Path) -> tuple[Path, ...]:
+    if _is_local_main_owner(paths):
+        return (Path(fallback),)
+    return ()
+
+
+def _is_local_main_owner(paths) -> bool:
+    return (
+        str(getattr(paths, "owner_provider", "") or "local") == "local"
+        and str(getattr(paths, "owner_kind", "") or "main") == "main"
+        and str(getattr(paths, "owner_id", "") or "local/main") == "local/main"
+    )
 
 
 # LLM: _build_subagent_manager 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。

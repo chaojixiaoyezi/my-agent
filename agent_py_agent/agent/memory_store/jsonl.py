@@ -204,13 +204,15 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         indexed = self._search_local_store(query, top_k)
         if len(indexed) >= top_k:
             return indexed[:top_k]
-        fallback = _merge_search_results(
-            self._search_jsonl(query, top_k),
-            self._search_fallback_memory(query, top_k),
-            self._search_daily_mirror(query, top_k),
-            top_k,
+        fallback = _merge_search_result_groups(
+            (
+                self._search_jsonl(query, top_k),
+                self._search_fallback_memory(query, top_k),
+                self._search_daily_mirror(query, top_k),
+            ),
+            top_k=top_k,
         )
-        return _merge_search_results(indexed, fallback, top_k)
+        return _merge_search_result_groups((indexed, fallback), top_k=top_k)
 
     # LLM: memory store 以 JSONL 记录和本地索引作为事实来源；修改 index_all 时同步检查返回值、异常处理和读写副作用。
     # 函数用途: 写入或登记 index all 相关记录，集中处理目标路径、格式化和状态更新。
@@ -311,14 +313,12 @@ def _memory_search_score(record: MemoryRecord, query: str, query_terms: set[str]
     return score
 
 
-# LLM: _merge_search_results preserves LocalStore priority while filling gaps from JSONL/daily facts.
+# LLM: _merge_search_result_groups preserves LocalStore priority while filling gaps from JSONL/daily facts.
 # 函数用途: 合并索引搜索和 JSONL fallback 结果，并按 MemoryRecord 语义去重。
-def _merge_search_results(*groups: list[MemoryRecord] | int) -> list[MemoryRecord]:
-    top_k = int(groups[-1])
-    record_groups = [group for group in groups[:-1] if isinstance(group, list)]
+def _merge_search_result_groups(groups: tuple[list[MemoryRecord], ...], *, top_k: int) -> list[MemoryRecord]:
     records: list[MemoryRecord] = []
     seen: set[tuple[str, str, str, float]] = set()
-    for group in record_groups:
+    for group in groups:
         _append_unique_records(records, seen, group, top_k=top_k)
         if len(records) >= top_k:
             return records

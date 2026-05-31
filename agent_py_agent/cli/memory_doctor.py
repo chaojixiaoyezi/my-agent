@@ -24,10 +24,10 @@ from ..agent.memory_routing import (
     validate_routes,
 )
 from ..agent.user_space.home_doctor import build_home_doctor_report
+from ..agent.user_space.home_memory_routes import DEFAULT_ROUTE_INDEX, resolve_route_index_target
 from ..agent.user_space.home_runtime_query import home_runtime_status
 from .common import make_agent
 
-DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
 RECENT_ARCHIVE_FILE_LIMIT = 5
 
 
@@ -36,9 +36,10 @@ RECENT_ARCHIVE_FILE_LIMIT = 5
 def cmd_memory_doctor(args) -> int:
 
     agent = make_agent(args)
-    index_path = _resolve_index_path(agent.root, args.index)
+    index_target = resolve_route_index_target(agent.root, args.index, home_paths=agent.home_paths)
+    index_path = index_target.path
     warnings = _config_warnings(agent.config)
-    routing = _build_routing_doctor(agent.root, index_path)
+    routing = _build_routing_doctor(index_target.authority_root, index_path)
     archive = _build_archive_doctor(agent.root, agent.config)
     home_doctor = build_home_doctor_report(agent.home_paths)
     payload = {
@@ -57,12 +58,9 @@ def cmd_memory_doctor(args) -> int:
 
 # LLM: _resolve_index_path 属于memory CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
-def _resolve_index_path(root: Path, raw_index: str | None) -> Path:
+def _resolve_index_path(root: Path, raw_index: str | None, *, home_paths: object | None = None) -> Path:
 
-    candidate = Path(raw_index).expanduser() if raw_index else DEFAULT_ROUTE_INDEX
-    if candidate.is_absolute():
-        return candidate.resolve()
-    return (root / candidate).resolve()
+    return resolve_route_index_target(root, raw_index, home_paths=home_paths).path
 
 
 # LLM: _build_routing_doctor 属于memory CLI；改行为前先对齐调用方和快照/单测。

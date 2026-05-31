@@ -38,6 +38,7 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
         root = Path(td)
         cfg = AgentConfig(
             model_backend="echo",
+            my_agent_home=str(root / "home"),
             memory_path="memory.jsonl",
             gateway_workspace="gateway",
             subagent_workspace="subs",

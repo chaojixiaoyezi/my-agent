@@ -7,6 +7,7 @@ from dataclasses import fields, replace
 
 from ..memory_archive import build_auto_resume_context, has_resume_trigger
 from ..memory_routing import RouteContextOptions, build_routed_memory_context
+from ..user_space.home_memory_routes import runtime_route_root_and_index
 from .runtime_capabilities import resolve_runtime_capabilities
 from .runtime_context_bundle import build_runtime_main_context_bundle
 from .runtime_live_archive import write_runtime_fact_start_if_enabled
@@ -180,17 +181,18 @@ def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *,
         not task_local and bool(getattr(agent.config, "memory_rule_routing_enabled", True)) and route_mode != "off"
     )
     route_auto_read_limit = int(getattr(agent.config, "memory_rule_auto_read_limit", 3))
+    route_root, route_index = runtime_route_root_and_index(agent)
     return build_routed_memory_context(
-        agent.root,
+        route_root,
         request.user_prompt,
         options=RouteContextOptions(
             enabled=route_enabled,
+            index_path=route_index,
             mode=route_mode if route_mode != "off" else "soft",
             auto_read_limit=route_auto_read_limit,
             limit=max(route_auto_read_limit, 5),
         ),
     )
-
 
 # LLM: _resume_context_for_request keeps auto-resume injection shape consistent for context bundles.
 # 函数用途: 构造自动恢复上下文和对应 prompt 片段；task-local 运行不读主代理恢复上下文。

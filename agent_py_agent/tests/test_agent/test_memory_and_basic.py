@@ -22,7 +22,9 @@ def test_memory_and_run():
         agent = SimpleAgent(cfg, root)
         result = agent.run("记住我喜欢表格", inject=["回答要短"])
         assert "echo 后端" in result.response
-        assert (root / "memory.jsonl").exists()
+        assert agent.memory.path.exists()
+        assert agent.memory.path == agent.home_paths.owner_memory_long_term_dir / "memory.jsonl"
+        assert not (root / "memory.jsonl").exists()
         assert len(agent.recall("表格")) >= 1
 
 

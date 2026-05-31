@@ -57,7 +57,14 @@ def _run_cli_json(capsys, config_path: Path, *argv: str) -> tuple[int, dict]:
 def test_memory_route_missing_index_does_not_crash(tmp_path, capsys):
     config_path = _write_config(tmp_path)
 
-    code, payload = _run_cli_json(capsys, config_path, "memory-route", "memory index")
+    code, payload = _run_cli_json(
+        capsys,
+        config_path,
+        "memory-route",
+        "memory index",
+        "--index",
+        "memory/routing/NOTFOUND.md",
+    )
 
     assert code == 0
     assert payload["ok"] is False

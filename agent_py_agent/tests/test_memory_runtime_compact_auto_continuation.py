@@ -137,7 +137,7 @@ def test_preflight_continuation_returns_when_no_tool_progress() -> None:
 
 def test_run_auto_compact_apply_continues_once_after_continue_packet(tmp_path):
     """LLM: Tests saved auto compact apply performs one guarded continuation turn."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     agent.backend.context_window_tokens = 20
 
     result = agent.run(
@@ -157,7 +157,7 @@ def test_run_auto_compact_apply_continues_once_after_continue_packet(tmp_path):
     assert result.memory_compact_auto_continued is True
     assert result.memory_compact_auto_continued_from_apply_id
     assert "# Compact Auto Continuation" in result.prompt
-    assert (tmp_path / "memory_archive" / "compact_applies").exists()
+    assert (agent.home_paths.owner_home_dir / "memory_archive" / "compact_applies").exists()
 
 
 def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path):
@@ -194,7 +194,7 @@ def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path)
 
 
 def test_run_auto_compact_apply_returns_after_no_tool_continuation(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     backend = ContextOverflowThenCaptureBackend()
     agent.backend = backend
 
@@ -207,7 +207,7 @@ def test_run_auto_compact_apply_returns_after_no_tool_continuation(tmp_path):
         recovery_next_actions=["continue from compact packet"],
     )
 
-    apply_dir = tmp_path / "memory_archive" / "runs" / "run-auto-return-compact" / "compact_applies"
+    apply_dir = agent.home_paths.owner_home_dir / "memory_archive" / "runs" / "run-auto-return-compact" / "compact_applies"
     metadata_files = [
         path
         for path in apply_dir.glob("apply-*.json")
@@ -221,7 +221,7 @@ def test_run_auto_compact_apply_returns_after_no_tool_continuation(tmp_path):
 
 
 def test_run_auto_compact_apply_can_repeat_when_continuation_makes_tool_progress(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", enable_tools=True), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", enable_tools=True, my_agent_home=str(tmp_path / "home")), tmp_path)
     backend = RepeatingContextOverflowBackend()
     agent.backend = backend
 
@@ -233,7 +233,7 @@ def test_run_auto_compact_apply_can_repeat_when_continuation_makes_tool_progress
         task_id="run-repeat-compact",
     )
 
-    apply_dir = tmp_path / "memory_archive" / "runs" / "run-repeat-compact" / "compact_applies"
+    apply_dir = agent.home_paths.owner_home_dir / "memory_archive" / "runs" / "run-repeat-compact" / "compact_applies"
     metadata_files = [
         path
         for path in apply_dir.glob("apply-*.json")
@@ -354,7 +354,7 @@ def test_default_run_recovery_next_actions_are_action_first() -> None:
 
 
 def test_run_auto_compact_apply_continues_with_optional_work_notes_missing(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     backend = ContextOverflowThenCaptureBackend()
     agent.backend = backend
 
@@ -367,7 +367,7 @@ def test_run_auto_compact_apply_continues_with_optional_work_notes_missing(tmp_p
 
 
 def test_run_auto_compact_normal_final_returns_without_auto_continuation(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     backend = CaptureBackend()
     agent.backend = backend
     agent.backend.context_window_tokens = 20_000

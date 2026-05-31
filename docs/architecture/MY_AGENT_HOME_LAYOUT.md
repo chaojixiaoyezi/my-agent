@@ -38,6 +38,8 @@ updated_at: 2026-05-31
 - owner capability resolver 已有第一版：按 owner/shared/builtin 优先级解析能力短名，同一 run 内缓存解析结果，避免重复确认。
 - system/backups 已有 manifest-only 备份清单入口，先记录迁移前要保护的根目录，不急着复制大文件。
 - owner 私有 skill candidate 已有草稿账本，只记录候选，不自动安装、不自动提升。
+- HOT/路由/lessons 已有第二片：`ensure_my_agent_home()` 会创建 `memory-hot.md`、`memory/routing/INDEX.md` 和 `memory/lessons/*.md`；普通主代理 prompt 会读取 `memory-hot.md`，task-local/control-plane 隔离；`home_memory_notes.py` 提供 HOT 去重追加和 lesson + route index 同步写入；`memory-doctor`、`memory-route`、运行时路由和 auto resume 在项目没有显式 route index 或旧 workspace archive 时，会回退读取当前 home 的索引/owner archive。
+- owner 隔离已接到记忆和任务读取面：local/main 继续兼容旧顶层 memory/tasks，provider user/group 默认只读写自己的 owner home；保存型 provider run 只登记 owner_home/tasks，HOT、lesson 和 route index 也优先落当前 owner。
 
 未完全接入：
 - provider 身份合并的冲突仲裁、能力提升审核仍是后续迁移阶段。
@@ -249,6 +251,7 @@ shared/role_templates/：管理员批准的公共角色模板。
   SOUL.md
   USER.md
   memory.md
+  memory-hot.md
   permissions.json
   quota.json
   retention.json
@@ -260,6 +263,14 @@ shared/role_templates/：管理员批准的公共角色模板。
   role_templates/
   sessions/
   memory/
+    routing/
+      INDEX.md
+    lessons/
+      real-tests.md
+      compact.md
+      subagents.md
+      artifacts.md
+      open-world.md
   workspace/
   tasks/
   runs/
@@ -272,6 +283,8 @@ shared/role_templates/：管理员批准的公共角色模板。
   tmp/
   trash/
 ```
+
+`memory-hot.md` 只放最高频、最短的提醒；详细教训放 `memory/lessons/`，再由 `memory/routing/INDEX.md` 用关键词指向。普通用户主代理可以复用这一套 owner 记忆入口；主代理创建的子代理不另开长期用户记忆，它继承所属 owner 的入口，并把自己的运行记忆、compact 和交付摘要写到自己的 task/run/agent 目录。写入时优先走 `home_memory_notes.py`：短教训去重追加到 HOT，长教训写 lesson 并同步 route index。
 
 公共能力放这里：
 

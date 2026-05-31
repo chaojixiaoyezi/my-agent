@@ -31,6 +31,8 @@ def _entry_file_status(home: MyAgentHomePaths) -> dict[str, dict[str, Any]]:
         "user_md": _path_status(home.user_md),
         "agents_md": _path_status(home.agents_md),
         "memory_md": _path_status(home.memory_md),
+        "memory_hot_md": _path_status(home.memory_hot_md),
+        "memory_route_index": _path_status(home.memory_routing_index_md),
     }
 
 
@@ -39,6 +41,8 @@ def _legacy_directory_status(home: MyAgentHomePaths) -> dict[str, dict[str, Any]
         "memory_daily": _path_status(home.memory_daily_dir),
         "memory_raw": _path_status(home.memory_raw_dir),
         "memory_hooks": _path_status(home.memory_hooks_dir),
+        "memory_lessons": _path_status(home.memory_lessons_dir),
+        "memory_routing": _path_status(home.memory_routing_dir),
         "memory_indexes": _path_status(home.memory_indexes_dir),
         "workspace_tasks": _path_status(home.workspace_tasks_dir),
         "scripts": _path_status(home.scripts_dir),
@@ -52,6 +56,8 @@ def _owner_status(home: MyAgentHomePaths) -> dict[str, dict[str, Any]]:
         "home_dir": _path_status(home.owner_home_dir),
         "agents_md": _path_status(home.owner_agents_md),
         "memory_md": _path_status(home.owner_memory_md),
+        "memory_hot_md": _path_status(home.owner_memory_hot_md),
+        "memory_route_index": _path_status(home.owner_memory_routing_index_md),
         "daily_memory": _path_status(home.owner_memory_daily_dir),
         "tasks": _path_status(home.owner_tasks_dir),
         "runs": _path_status(home.owner_runs_dir),

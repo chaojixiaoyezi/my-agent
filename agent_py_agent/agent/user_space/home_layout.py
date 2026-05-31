@@ -10,6 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .home_layout_v2 import v2_home_directories, v2_home_path_fields, v2_seed_files, v2_seed_jsons
+from .home_memory_seeds import (
+    default_memory_hot_md,
+    default_memory_lessons,
+    default_memory_md,
+    default_memory_route_index_md,
+)
 
 
 # LLM: MyAgentHomePaths is the stable path map used by setup, docs, doctor, and later migrations.
@@ -21,6 +27,7 @@ class MyAgentHomePaths:
     user_md: Path
     agents_md: Path
     memory_md: Path
+    memory_hot_md: Path
     config_dir: Path
     scripts_dir: Path
     workspace_dir: Path
@@ -30,6 +37,8 @@ class MyAgentHomePaths:
     memory_raw_dir: Path
     memory_hooks_dir: Path
     memory_lessons_dir: Path
+    memory_routing_dir: Path
+    memory_routing_index_md: Path
     memory_indexes_dir: Path
     data_dir: Path
     providers_dir: Path
@@ -62,6 +71,7 @@ class MyAgentHomePaths:
     owner_user_md: Path
     owner_agents_md: Path
     owner_memory_md: Path
+    owner_memory_hot_md: Path
     owner_permissions_json: Path
     owner_quota_json: Path
     owner_retention_json: Path
@@ -72,6 +82,9 @@ class MyAgentHomePaths:
     owner_memory_daily_dir: Path
     owner_memory_raw_dir: Path
     owner_memory_hooks_dir: Path
+    owner_memory_lessons_dir: Path
+    owner_memory_routing_dir: Path
+    owner_memory_routing_index_md: Path
     owner_memory_indexes_dir: Path
     owner_memory_long_term_dir: Path
     owner_memory_runtime_refs_dir: Path
@@ -139,6 +152,7 @@ def _legacy_home_path_fields(home: Path) -> dict[str, Path]:
         "user_md": home / "USER.md",
         "agents_md": home / "AGENTS.md",
         "memory_md": home / "memory.md",
+        "memory_hot_md": home / "memory-hot.md",
         "config_dir": home / "config",
         "scripts_dir": home / "scripts",
         "workspace_dir": workspace_dir,
@@ -148,6 +162,8 @@ def _legacy_home_path_fields(home: Path) -> dict[str, Path]:
         "memory_raw_dir": memory_dir / "raw",
         "memory_hooks_dir": memory_dir / "hooks",
         "memory_lessons_dir": memory_dir / "lessons",
+        "memory_routing_dir": memory_dir / "routing",
+        "memory_routing_index_md": memory_dir / "routing" / "INDEX.md",
         "memory_indexes_dir": memory_dir / "indexes",
         "data_dir": home / "data",
         "providers_dir": home / "providers",
@@ -172,7 +188,11 @@ def ensure_my_agent_home(root: str | Path | None = None) -> MyAgentHomePaths:
     _write_seed_file(paths.soul_md, "# SOUL\n\n")
     _write_seed_file(paths.user_md, "# USER\n\n")
     _write_seed_file(paths.agents_md, "# AGENTS\n\n")
-    _write_seed_file(paths.memory_md, "# Memory\n\n")
+    _write_seed_file(paths.memory_md, default_memory_md())
+    _write_seed_file(paths.memory_hot_md, default_memory_hot_md())
+    _write_seed_file(paths.memory_routing_index_md, default_memory_route_index_md())
+    for lesson_name, lesson_content in default_memory_lessons().items():
+        _write_seed_file(paths.memory_lessons_dir / lesson_name, lesson_content)
     for path, content in v2_seed_files(paths):
         _write_seed_file(path, content)
     for path, payload in v2_seed_jsons(paths):
@@ -190,6 +210,7 @@ def _HOME_DIRECTORIES(paths: MyAgentHomePaths) -> tuple[Path, ...]:
         paths.memory_raw_dir,
         paths.memory_hooks_dir,
         paths.memory_lessons_dir,
+        paths.memory_routing_dir,
         paths.memory_indexes_dir,
         paths.data_dir,
         paths.providers_dir,

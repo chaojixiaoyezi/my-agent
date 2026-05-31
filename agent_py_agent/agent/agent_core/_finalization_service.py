@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import time as time_module
 from dataclasses import dataclass
-from pathlib import Path
 
 from ..memory_archive import (
     archive_run_turn,
@@ -19,7 +18,6 @@ from ..user_space.context_bundle_artifacts import (
     MainContextBundleArtifactUpdateRequest,
     update_main_context_bundle_artifacts,
 )
-from ..user_space.run_workspace import EnsureRunWorkspaceRequest, ensure_run_workspace
 from ._runtime_params import (
     ArchiveRunParams,
     EstimateTokenParams,
@@ -28,7 +26,7 @@ from ._runtime_params import (
 from .finalization_compact_auto import compact_auto_cycle_fields
 from .model_usage import input_token_usage, output_token_usage
 from .models import AgentRunResult
-from .run_task_workspace_index import register_saved_run_task_ref
+from .run_task_workspace_writer import write_run_task_workspace_if_needed
 from .runtime_owner_roots import runtime_archive_roots
 
 
@@ -126,7 +124,7 @@ class FinalizationService:
     def _archive_run_if_needed(self, params: ArchiveRunParams):
         if not params.do_save:
             return None
-        _write_run_task_workspace_if_needed(self._agent, params)
+        write_run_task_workspace_if_needed(self._agent, params)
         self._agent.memory.add("user", params.user_prompt)
         self._agent.memory.add(
             "agent", params.final_response.text, tags=[params.final_response.backend]
@@ -238,48 +236,6 @@ def _estimate_token_params(ctx: FinalizeContext, run_request_id: str) -> Estimat
         run_request_id=run_request_id,
         turn_id=turn_id,
     )
-
-
-# LLM: _write_run_task_workspace_if_needed gives saved runs a clean home task folder without changing legacy archive paths.
-# 函数用途: 在主代理 run 保存时创建 home/tasks/date/task 的 output 交付区、work 过程区和 refs-only 状态文件。
-def _write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
-    if not bool(getattr(agent.config, "run_task_workspace_enabled", True)):
-        return ""
-    home_paths = getattr(agent, "home_paths", None)
-    if home_paths is None:
-        return ""
-    result = ensure_run_workspace(
-        EnsureRunWorkspaceRequest(
-            home=home_paths.root,
-            template=str(getattr(agent.config, "workspace_task_path_template", "")),
-            task_name=params.task_id or params.run_id or params.run_request_id or params.user_prompt,
-            user_prompt=params.user_prompt,
-            request_id=params.run_request_id,
-            run_id=params.run_id,
-            task_id=params.task_id,
-            owner_id=str(getattr(home_paths, "owner_id", "") or ""),
-            owner_home=str(getattr(home_paths, "owner_home_dir", "") or ""),
-            source=params.source,
-        )
-    )
-    owner_home = getattr(home_paths, "owner_home_dir", None)
-    if owner_home and Path(owner_home) != Path(home_paths.root):
-        ensure_run_workspace(
-            EnsureRunWorkspaceRequest(
-                home=owner_home,
-                template=str(getattr(agent.config, "workspace_task_path_template", "")),
-                task_name=params.task_id or params.run_id or params.run_request_id or params.user_prompt,
-                user_prompt=params.user_prompt,
-                request_id=params.run_request_id,
-                run_id=params.run_id,
-                task_id=params.task_id,
-                owner_id=str(getattr(home_paths, "owner_id", "") or ""),
-                owner_home=str(owner_home),
-                source=params.source,
-            )
-        )
-    register_saved_run_task_ref(agent, result, params)
-    return str(result.root)
 
 
 # LLM: _snapshot_result_fields 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

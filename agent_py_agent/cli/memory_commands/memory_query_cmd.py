@@ -17,8 +17,7 @@ from ...agent.memory_routing import (
     resolve_required_paths,
     validate_routes,
 )
-
-DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
+from ...agent.user_space.home_memory_routes import DEFAULT_ROUTE_INDEX, resolve_route_index_target
 
 
 # LLM: RouteLogicRequest 是 memory route 命令的内部请求契约。
@@ -28,6 +27,7 @@ class RouteLogicRequest:
     args: Any
     agent: Any
     index_path: Path
+    authority_root: Path
     mode: str
     auto_read_limit: int
 
@@ -78,6 +78,15 @@ def _try_validate_routes(index_path: Path, agent) -> tuple[bool, list[MemoryRout
         return False, [], [], [f"memory route index could not be loaded: {type(exc).__name__}: {exc}"]
 
 
+def _try_validate_routes_for_root(index_path: Path, authority_root: Path) -> tuple[bool, list[MemoryRoute], list[str], list[str]]:
+    try:
+        routes = load_routes(index_path)
+        route_warnings = validate_routes(routes, authority_root)
+        return True, routes, route_warnings, ["memory route validation completed."]
+    except Exception as exc:
+        return False, [], [], [f"memory route index could not be loaded: {type(exc).__name__}: {exc}"]
+
+
 # LLM: _try_match_routes 属于memory CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _try_match_routes(index_path: Path, agent, args) -> tuple[bool, list[MemoryRoute], list[MemoryRouteMatch], list[str], list[str], list[str]]:
@@ -107,7 +116,10 @@ def _execute_route_logic(request: RouteLogicRequest):
         return ok, routes, matches, required_read_paths, candidate_paths, diagnostics
 
     if bool(getattr(args, "validate", False)):
-        ok, routes, diagnostics["route_warnings"], msgs = _try_validate_routes(request.index_path, agent)
+        ok, routes, diagnostics["route_warnings"], msgs = _try_validate_routes_for_root(
+            request.index_path,
+            request.authority_root,
+        )
         diagnostics["messages"].extend(msgs)
         return ok, routes, matches, required_read_paths, candidate_paths, diagnostics
 
@@ -128,9 +140,10 @@ def cmd_memory_route(args) -> int:
         args.limit = int(getattr(agent.config, "cli_memory_route_limit", 5) or 0)
     mode = _resolve_route_mode(args.mode, agent.config)
     auto_read_limit = _resolve_auto_read_limit(args.auto_read_limit, agent.config)
-    index_path = _resolve_index_path(agent.root, args.index)
+    index_target = resolve_route_index_target(agent.root, args.index, home_paths=agent.home_paths)
+    index_path = index_target.path
     ok, routes, matches, req_paths, cand_paths, diagnostics = _execute_route_logic(
-        RouteLogicRequest(args, agent, index_path, mode, auto_read_limit),
+        RouteLogicRequest(args, agent, index_path, index_target.authority_root, mode, auto_read_limit),
     )
     payload = {
         "ok": ok, "workspace_root": str(agent.root), "query": args.query,
@@ -150,11 +163,8 @@ def cmd_memory_route(args) -> int:
 
 # LLM: _resolve_index_path 属于memory CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
-def _resolve_index_path(root: Path, raw_index: str | None) -> Path:
-    candidate = Path(raw_index).expanduser() if raw_index else DEFAULT_ROUTE_INDEX
-    if candidate.is_absolute():
-        return candidate.resolve()
-    return (root / candidate).resolve()
+def _resolve_index_path(root: Path, raw_index: str | None, *, home_paths: object | None = None) -> Path:
+    return resolve_route_index_target(root, raw_index, home_paths=home_paths).path
 
 
 # LLM: _resolve_route_mode 属于memory CLI；改行为前先对齐调用方和快照/单测。

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -148,13 +149,7 @@ def build_auto_resume_context(
 def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
 
     limit = _config_int(agent, "memory_resume_auto_context_limit")
-    records = collect_archive_records(
-        agent.root,
-        layer="all",
-        date_key=None,
-        limit=_config_int(agent, "memory_resume_archive_scan_limit"),
-        file_limit=_config_int(agent, "memory_archive_search_file_limit"),
-    )
+    records = _collect_resume_archive_records(agent)
     archive_matches, query = _first_archive_matches(records, user_prompt, limit=limit)
     args = _resume_args(query)
     local_query = resume_local_query(args, archive_matches)
@@ -191,6 +186,50 @@ def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
         task_fact_source_count=len(task_payloads),
         reason="matched",
     )
+
+
+# LLM: resume context reads the owner archive first, with legacy workspace archive only as fallback.
+# 函数用途: 从 owner-home 和旧工作区归档收集恢复候选，避免 owner 迁移后“继续”找不到刚写入的 raw archive。
+def _collect_resume_archive_records(agent: Any) -> list[dict[str, Any]]:
+    roots = _resume_archive_roots(agent)
+    scan_limit = _config_int(agent, "memory_resume_archive_scan_limit")
+    file_limit = _config_int(agent, "memory_archive_search_file_limit")
+    records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int]] = set()
+    for root in roots:
+        records.extend(_new_archive_records(root, seen, scan_limit, file_limit))
+    records.sort(key=lambda item: (item["created_at_sort"], item["file_path"], item["line_no"]), reverse=True)
+    return records[:scan_limit] if scan_limit > 0 else records
+
+
+def _new_archive_records(
+    root: Path,
+    seen: set[tuple[str, str, int]],
+    scan_limit: int,
+    file_limit: int,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for record in collect_archive_records(root, layer="all", date_key=None, limit=scan_limit, file_limit=file_limit):
+        key = _archive_record_key(record)
+        if key not in seen:
+            seen.add(key)
+            records.append(record)
+    return records
+
+
+def _archive_record_key(record: dict[str, Any]) -> tuple[str, str, int]:
+    return (str(record.get("file_path") or ""), str(record.get("id") or ""), int(record.get("line_no") or 0))
+
+
+def _resume_archive_roots(agent: Any) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+    if owner_home:
+        roots.append(Path(owner_home))
+    legacy_root = Path(getattr(agent, "root", "."))
+    if legacy_root not in roots:
+        roots.append(legacy_root)
+    return tuple(roots)
 
 
 # LLM: _resume_local_payloads keeps resume context assembly shallow and preview-size config-backed.

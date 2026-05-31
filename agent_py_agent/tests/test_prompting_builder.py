@@ -378,6 +378,8 @@ class TestBuildPromptFilesParam:
         home.mkdir()
         agents = home / "AGENTS.md"
         agents.write_text("HOME SECRET", encoding="utf-8")
+        hot = home / "memory-hot.md"
+        hot.write_text("HOT SECRET", encoding="utf-8")
         lessons = home / "lessons"
         lessons.mkdir()
         home_paths = SimpleNamespace(
@@ -385,6 +387,7 @@ class TestBuildPromptFilesParam:
             soul_md=home / "SOUL.md",
             user_md=home / "USER.md",
             memory_md=home / "memory.md",
+            memory_hot_md=hot,
             memory_lessons_dir=lessons,
         )
         config = AgentConfig(system_prompt="System", prompt_files=[str(global_prompt)], home_context_enabled=True)
@@ -400,7 +403,29 @@ class TestBuildPromptFilesParam:
         assert "MEMORY SECRET" not in result
         assert "GLOBAL SECRET" not in result
         assert "HOME SECRET" not in result
+        assert "HOT SECRET" not in result
         assert "（无相关记忆）" in result
+
+    def test_home_context_injects_memory_hot_entry(self, tmp_path):
+        """普通主代理上下文每轮读取 memory-hot.md，保证高频教训不用扫长记忆。"""
+        home = tmp_path / "home"
+        home.mkdir()
+        hot = home / "memory-hot.md"
+        hot.write_text("不要把测试失败改成硬门。", encoding="utf-8")
+        home_paths = SimpleNamespace(
+            agents_md=home / "AGENTS.md",
+            soul_md=home / "SOUL.md",
+            user_md=home / "USER.md",
+            memory_md=home / "memory.md",
+            memory_hot_md=hot,
+            memory_lessons_dir=home / "lessons",
+        )
+        builder = PromptBuilder(AgentConfig(system_prompt="System"), tmp_path, home_paths=home_paths)
+
+        result = builder.build("普通开发任务", [])
+
+        assert "# Home Entry: memory-hot.md" in result
+        assert "不要把测试失败改成硬门。" in result
 
     def test_control_plane_context_suppresses_owner_memory_and_home_files(self, tmp_path):
         """控制面调用也不能混入主代理长期记忆、家目录制度或全局 prompt 文件。"""
@@ -410,11 +435,14 @@ class TestBuildPromptFilesParam:
         home.mkdir()
         agents = home / "AGENTS.md"
         agents.write_text("HOME SECRET", encoding="utf-8")
+        hot = home / "memory-hot.md"
+        hot.write_text("HOT SECRET", encoding="utf-8")
         home_paths = SimpleNamespace(
             agents_md=agents,
             soul_md=home / "SOUL.md",
             user_md=home / "USER.md",
             memory_md=home / "memory.md",
+            memory_hot_md=hot,
             memory_lessons_dir=home / "lessons",
         )
         config = AgentConfig(system_prompt="System", prompt_files=[str(global_prompt)], home_context_enabled=True)
@@ -430,6 +458,7 @@ class TestBuildPromptFilesParam:
         assert "MEMORY SECRET" not in result
         assert "GLOBAL SECRET" not in result
         assert "HOME SECRET" not in result
+        assert "HOT SECRET" not in result
 
 
 class TestBuildFullPrompt:

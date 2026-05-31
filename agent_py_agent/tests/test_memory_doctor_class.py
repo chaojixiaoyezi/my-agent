@@ -55,6 +55,39 @@ def test_resolve_index_path_expands_user():
     assert str(result).startswith(str(Path.home()))
 
 
+def test_resolve_index_path_falls_back_to_home_route_index(tmp_path):
+    """项目没有路由索引时，默认使用 ~/.my-agent 里的 HOT/lessons 路由索引。"""
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    root = tmp_path / "project"
+    root.mkdir()
+    home = ensure_my_agent_home(tmp_path / "home")
+
+    result = _resolve_index_path(root, None, home_paths=home)
+
+    assert result == home.memory_routing_index_md
+
+
+def test_resolve_index_path_falls_back_to_provider_owner_route_index(tmp_path):
+    """外部 owner 默认使用自己的 memory/routing/INDEX.md，不读取本地主账号索引。"""
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        OwnerIdentity,
+        ensure_owner_home,
+        home_paths_with_owner,
+    )
+
+    root = tmp_path / "project"
+    root.mkdir()
+    home = ensure_my_agent_home(tmp_path / "home")
+    owner = ensure_owner_home(home.root, OwnerIdentity.provider_user("feishu", "ou_123"))
+    owner_home = home_paths_with_owner(home, owner)
+
+    result = _resolve_index_path(root, None, home_paths=owner_home)
+
+    assert result == owner_home.owner_memory_routing_index_md
+
+
 # ── _build_routing_doctor 测试 ───────────────────────────────────────────────
 
 def test_build_routing_doctor_missing_index(tmp_path):

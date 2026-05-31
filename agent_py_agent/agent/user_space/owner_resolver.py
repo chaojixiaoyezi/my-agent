@@ -44,6 +44,7 @@ class OwnerHomeResult:
     soul_md: Path
     user_md: Path
     memory_md: Path
+    memory_hot_md: Path
     permissions_json: Path
     quota_json: Path
     retention_json: Path
@@ -52,6 +53,9 @@ class OwnerHomeResult:
     daily_memory_dir: Path
     raw_memory_dir: Path
     hooks_memory_dir: Path
+    lessons_memory_dir: Path
+    routing_memory_dir: Path
+    routing_index_md: Path
     indexes_dir: Path
     long_term_dir: Path
     runtime_refs_dir: Path
@@ -105,6 +109,7 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
         owner_user_md=owner.user_md,
         owner_agents_md=owner.agents_md,
         owner_memory_md=owner.memory_md,
+        owner_memory_hot_md=owner.memory_hot_md,
         owner_permissions_json=owner.permissions_json,
         owner_quota_json=owner.quota_json,
         owner_retention_json=owner.retention_json,
@@ -113,6 +118,9 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
         owner_memory_daily_dir=owner.daily_memory_dir,
         owner_memory_raw_dir=owner.raw_memory_dir,
         owner_memory_hooks_dir=owner.hooks_memory_dir,
+        owner_memory_lessons_dir=owner.lessons_memory_dir,
+        owner_memory_routing_dir=owner.routing_memory_dir,
+        owner_memory_routing_index_md=owner.routing_index_md,
         owner_memory_indexes_dir=owner.indexes_dir,
         owner_memory_long_term_dir=owner.long_term_dir,
         owner_memory_runtime_refs_dir=owner.runtime_refs_dir,
@@ -145,6 +153,7 @@ def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> O
         soul_md=home_dir / "SOUL.md",
         user_md=home_dir / "USER.md",
         memory_md=home_dir / "memory.md",
+        memory_hot_md=home_dir / "memory-hot.md",
         permissions_json=home_dir / "permissions.json",
         quota_json=home_dir / "quota.json",
         retention_json=home_dir / "retention.json",
@@ -153,6 +162,9 @@ def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> O
         daily_memory_dir=memory / "daily",
         raw_memory_dir=memory / "raw",
         hooks_memory_dir=memory / "hooks",
+        lessons_memory_dir=memory / "lessons",
+        routing_memory_dir=memory / "routing",
+        routing_index_md=memory / "routing" / "INDEX.md",
         indexes_dir=memory / "indexes",
         long_term_dir=memory / "long_term",
         runtime_refs_dir=memory / "runtime_refs",
@@ -173,6 +185,8 @@ def _owner_directories(result: OwnerHomeResult) -> tuple[Path, ...]:
         result.daily_memory_dir,
         result.raw_memory_dir,
         result.hooks_memory_dir,
+        result.lessons_memory_dir,
+        result.routing_memory_dir,
         result.indexes_dir,
         result.long_term_dir,
         result.runtime_refs_dir,
@@ -197,6 +211,8 @@ def _owner_seed_files(result: OwnerHomeResult) -> tuple[tuple[Path, str], ...]:
         (result.user_md, "# USER\n\n"),
         (result.agents_md, "# AGENTS\n\n"),
         (result.memory_md, "# Memory\n\n"),
+        (result.memory_hot_md, "# Memory HOT\n\n"),
+        (result.routing_index_md, "# Owner Memory Routing Index\n\n"),
     )
 
 

@@ -168,13 +168,14 @@ def _append_gateway_archive_events(root: Path, request_id: str, request_path: Pa
 
 
 def _write_cross_day_gateway_archive(agent: SimpleAgent, request_id: str = "gwreq-runtime-cross-day") -> Path:
-    root = agent.root
-    response_path = root / "gateway" / "responses" / f"{request_id}.json"
-    request_path = root / "gateway" / "requests" / "done" / f"{request_id}.json"
+    workspace_root = agent.root
+    archive_root = agent.home_paths.owner_home_dir
+    response_path = workspace_root / "gateway" / "responses" / f"{request_id}.json"
+    request_path = workspace_root / "gateway" / "requests" / "done" / f"{request_id}.json"
     _write_gateway_response_file(response_path, request_id)
     _write_gateway_request_file(request_path, request_id)
     _log_gateway_request_to_local_store(agent, request_id, request_path, response_path)
-    _append_gateway_archive_events(root, request_id, request_path, response_path)
+    _append_gateway_archive_events(archive_root, request_id, request_path, response_path)
     return response_path
 
 
@@ -183,6 +184,7 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
             memory_resume_auto_context_enabled=True,
             memory_resume_auto_context_limit=5,
         ),
@@ -201,7 +203,7 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
         "# HANDOFF\n\n## Next Step\n\n- 继续跨天 worker 验收。\n",
         encoding="utf-8",
     )
-    _write_cross_day_handoff_archive(tmp_path, task.id)
+    _write_cross_day_handoff_archive(agent.home_paths.owner_home_dir, task.id)
 
     result = agent.run("继续跨天 handoff runtime", save=False)
 
@@ -219,6 +221,7 @@ def test_auto_resume_context_recovers_cross_day_gateway_request(tmp_path):
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
             memory_resume_auto_context_enabled=True,
             memory_resume_auto_context_limit=5,
         ),

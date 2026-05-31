@@ -127,7 +127,8 @@ def _daily_memory_files(paths: MyAgentHomePaths, date_key: str | None) -> list[P
 def _daily_memory_dirs(paths: MyAgentHomePaths) -> tuple[Path, ...]:
     owner_daily = getattr(paths, "owner_memory_daily_dir", None)
     dirs = [Path(owner_daily)] if owner_daily else []
-    dirs.append(paths.memory_daily_dir)
+    if _is_local_main_owner(paths):
+        dirs.append(paths.memory_daily_dir)
     return tuple(dict.fromkeys(dirs))
 
 
@@ -171,9 +172,18 @@ def _task_state_files(paths: MyAgentHomePaths, date_key: str | None) -> list[Pat
 def _task_workspace_roots(paths: MyAgentHomePaths) -> tuple[Path, ...]:
     owner_tasks = getattr(paths, "owner_tasks_dir", None)
     roots = [Path(owner_tasks)] if owner_tasks else []
-    roots.append(paths.root / "tasks")
-    roots.append(paths.workspace_tasks_dir)
+    if _is_local_main_owner(paths):
+        roots.append(paths.root / "tasks")
+        roots.append(paths.workspace_tasks_dir)
     return tuple(dict.fromkeys(roots))
+
+
+def _is_local_main_owner(paths: MyAgentHomePaths) -> bool:
+    return (
+        str(getattr(paths, "owner_provider", "") or "local") == "local"
+        and str(getattr(paths, "owner_kind", "") or "main") == "main"
+        and str(getattr(paths, "owner_id", "") or "local/main") == "local/main"
+    )
 
 
 # LLM: _jsonl_files_from_dirs prefers V2 owner daily files while still reading legacy daily files.

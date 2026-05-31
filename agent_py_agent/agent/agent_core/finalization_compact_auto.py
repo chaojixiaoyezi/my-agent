@@ -8,6 +8,7 @@ from ..memory_archive.compact import MemoryCompactPlanOptions
 from ..memory_archive.compact_auto import MemoryCompactAutoCycleOptions
 from ._runtime_params import FinalizeContext
 from .runtime_context_compactor import runtime_compact_policy
+from .runtime_owner_roots import runtime_owner_root
 
 _CONTEXT_OVERFLOW_REASONS = {
     "blackbox_output_overflow",
@@ -26,7 +27,7 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
         return _compact_auto_continuation_return_fields()
     policy = runtime_compact_policy(agent, save=ctx.do_save)
     cycle = run_memory_compact_auto_cycle(
-        agent.root,
+        runtime_owner_root(agent),
         MemoryCompactAutoCycleOptions(
             current_tokens=int(token_ledger.get("active", token_ledger["turn"])),
             max_context_tokens=policy.context_window_tokens,

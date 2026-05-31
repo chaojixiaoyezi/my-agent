@@ -82,6 +82,34 @@ def test_memory_search_reads_daily_when_legacy_memory_missing(tmp_path: Path):
     assert [record.content for record in results] == ["用户喜欢表格和干净目录"]
 
 
+# LLM: provider owners must not inherit the CLI/local legacy memory file.
+# 函数用途: 验证外部用户主代理不会默认读取本地 CLI 主账号旧 memory_path。
+def test_provider_memory_search_does_not_read_legacy_memory_path(tmp_path: Path):
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    legacy = repo / "memory.jsonl"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(
+        '{"role":"user","content":"local legacy secret","kind":"note","tags":[],"created_at":1}\n',
+        encoding="utf-8",
+    )
+    agent = SimpleAgent(
+        AgentConfig(
+            my_agent_home=str(home),
+            memory_path="memory.jsonl",
+            prompt_files=[],
+            my_agent_owner_provider="feishu",
+            my_agent_owner_kind="user",
+            my_agent_owner_id="ou_123",
+        ),
+        repo,
+    )
+
+    results = agent.recall("legacy secret", top_k=3)
+
+    assert results == []
+
+
 # LLM: memory-daily-list gives humans and frontend a small direct view into daily memory.
 # 函数用途: 验证 CLI 能按日期、角色、类型和关键词筛选 daily 记忆。
 def test_memory_daily_list_cli_filters_home_daily_records(tmp_path: Path, capsys):
@@ -124,6 +152,103 @@ def test_memory_daily_list_uses_configured_provider_owner(tmp_path: Path, capsys
 
     assert code == 0
     assert [record["content"] for record in payload["records"]] == ["provider only"]
+
+
+# LLM: provider owner task listings stay inside that owner's task ledger.
+# 函数用途: 验证外部用户主代理不会从 local/main 或旧顶层 tasks 看到别人的任务目录。
+def test_task_workspace_list_uses_configured_provider_owner_only(tmp_path: Path, capsys):
+    home = tmp_path / "home"
+    config_path = _write_provider_config(tmp_path, home)
+    provider_root = home / "owners" / "providers" / "feishu" / "users" / "ou_123"
+    local_root = home / "owners" / "local" / "main"
+    provider_paths = ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=provider_root,
+            template="tasks/{date}/{task_slug}",
+            task_name="provider-task",
+            user_prompt="provider",
+            request_id="req-provider",
+            run_id="run-provider",
+            task_id="provider-task",
+            created_at="2026-05-13T01:00:00+00:00",
+        )
+    )
+    ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=local_root,
+            template="tasks/{date}/{task_slug}",
+            task_name="local-task",
+            user_prompt="local",
+            request_id="req-local",
+            run_id="run-local",
+            task_id="local-task",
+            created_at="2026-05-13T01:00:00+00:00",
+        )
+    )
+    ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=home,
+            template="tasks/{date}/{task_slug}",
+            task_name="legacy-task",
+            user_prompt="legacy",
+            request_id="req-legacy",
+            run_id="run-legacy",
+            task_id="legacy-task",
+            created_at="2026-05-13T01:00:00+00:00",
+        )
+    )
+
+    code, payload = _run_cli_json(capsys, config_path, "task-workspace-list", "--date", "2026-05-13")
+
+    assert code == 0
+    assert [task["state"]["task_id"] for task in payload["tasks"]] == ["provider-task"]
+    assert payload["tasks"][0]["root"] == str(provider_paths.root)
+
+
+# LLM: owner tool policy is per-owner, not a global process setting.
+# 函数用途: 验证不同用户主代理各自读取自己的 tool_policy，不互相污染工具权限。
+def test_owner_tool_policy_isolated_per_provider_user(tmp_path: Path):
+    home = tmp_path / "home"
+    user_a = SimpleAgent(
+        AgentConfig(
+            my_agent_home=str(home),
+            prompt_files=[],
+            my_agent_owner_provider="feishu",
+            my_agent_owner_kind="user",
+            my_agent_owner_id="ou_a",
+        ),
+        tmp_path / "repo-a",
+    )
+    user_b = SimpleAgent(
+        AgentConfig(
+            my_agent_home=str(home),
+            prompt_files=[],
+            my_agent_owner_provider="feishu",
+            my_agent_owner_kind="user",
+            my_agent_owner_id="ou_b",
+        ),
+        tmp_path / "repo-b",
+    )
+    policy_path = Path(user_a.home_paths.owner_tool_policy_json)
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    policy["disabled_tools"] = ["web_search"]
+    policy_path.write_text(json.dumps(policy, ensure_ascii=False), encoding="utf-8")
+
+    refreshed_a = SimpleAgent(
+        AgentConfig(
+            my_agent_home=str(home),
+            prompt_files=[],
+            my_agent_owner_provider="feishu",
+            my_agent_owner_kind="user",
+            my_agent_owner_id="ou_a",
+        ),
+        tmp_path / "repo-a",
+    )
+
+    assert "web_search" in refreshed_a.owner_policy.disabled_tools
+    assert "web_search" in refreshed_a.tools.disabled_tool_names
+    assert "web_search" not in user_b.owner_policy.disabled_tools
+    assert "web_search" not in user_b.tools.disabled_tool_names
 
 
 # LLM: memory-resume should use home task workspace when the task is not a legacy subagent.
@@ -169,6 +294,9 @@ def test_memory_doctor_reports_home_runtime_status(tmp_path: Path, capsys):
     assert payload["home"]["directories"]["memory_daily"]["exists"] is True
     assert payload["home"]["owner"]["tasks"]["exists"] is True
     assert payload["home"]["directories"]["workspace_tasks"]["exists"] is False
+    assert payload["routing"]["index"]["path"] == str(home.resolve() / "memory" / "routing" / "INDEX.md")
+    assert payload["routing"]["route_count"] >= 1
+    assert payload["ok"] is True
 
 
 # LLM: memory doctor should expose V2 owner/shared/system health without auto-migrating anything.

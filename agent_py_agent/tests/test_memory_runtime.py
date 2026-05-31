@@ -41,6 +41,10 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def _test_config(tmp_path: Path, **kwargs) -> AgentConfig:
+    return AgentConfig(my_agent_home=str(tmp_path / "home"), **kwargs)
+
+
 def _write_cross_day_handoff_archive(root: Path, run_id: str) -> None:
     append_raw_event(
         root,
@@ -225,12 +229,12 @@ def test_run_injects_routed_memory_authority_context(tmp_path):
 
 
 def test_run_writes_raw_archive_when_saved(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
 
     result = agent.run("请归档这轮对话", save=True, request_id="req-archive-save")
 
-    raw_dir = tmp_path / "memory" / "raw"
-    fact_path = tmp_path / "memory_archive" / "runtime_facts" / "req-archive-save" / "task.json"
+    raw_dir = Path(agent.home_paths.owner_memory_raw_dir)
+    fact_path = Path(agent.home_paths.owner_home_dir) / "memory_archive" / "runtime_facts" / "req-archive-save" / "task.json"
     files = sorted(raw_dir.glob("*.jsonl"))
     assert result.archive_events == 2
     assert result.archive_token_estimate > 0
@@ -279,7 +283,7 @@ def test_run_no_save_does_not_write_runtime_fact(tmp_path):
 
 
 def test_auto_resume_context_is_disabled_by_default(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     agent.run("README 恢复上下文任务", save=True)
 
     result = agent.run("继续 README", save=False)
@@ -290,7 +294,8 @@ def test_auto_resume_context_is_disabled_by_default(tmp_path):
 
 def test_auto_resume_context_injects_on_trigger_when_enabled(tmp_path):
     agent = SimpleAgent(
-        AgentConfig(
+        _test_config(
+            tmp_path,
             model_backend="echo",
             memory_resume_auto_context_enabled=True,
             memory_resume_auto_context_limit=3,
@@ -311,7 +316,7 @@ def test_auto_resume_context_injects_on_trigger_when_enabled(tmp_path):
 
 
 def test_auto_resume_context_can_be_enabled_per_run(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     agent.run("README 临时恢复开关任务", save=True, request_id="request-auto-override")
 
     result = agent.run("继续 README", save=False, resume_context=True)
@@ -323,7 +328,7 @@ def test_auto_resume_context_can_be_enabled_per_run(tmp_path):
 
 def test_auto_resume_context_can_be_disabled_per_run(tmp_path):
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", memory_resume_auto_context_enabled=True),
+        _test_config(tmp_path, model_backend="echo", memory_resume_auto_context_enabled=True),
         tmp_path,
     )
     agent.run("README 禁用恢复开关任务", save=True)
@@ -336,7 +341,8 @@ def test_auto_resume_context_can_be_disabled_per_run(tmp_path):
 
 def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
     agent = SimpleAgent(
-        AgentConfig(
+        _test_config(
+            tmp_path,
             model_backend="echo",
             memory_resume_auto_context_enabled=True,
             memory_resume_auto_context_limit=5,
@@ -356,7 +362,7 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
         "# HANDOFF\n\n## Next Step\n\n- 继续跨天 worker 验收。\n",
         encoding="utf-8",
     )
-    _write_cross_day_handoff_archive(tmp_path, task.id)
+    _write_cross_day_handoff_archive(agent.home_paths.owner_home_dir, task.id)
 
     result = agent.run("继续跨天 handoff runtime", save=False)
 
@@ -372,7 +378,8 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
 
 def test_auto_resume_context_recovers_cross_day_gateway_request(tmp_path):
     agent = SimpleAgent(
-        AgentConfig(
+        _test_config(
+            tmp_path,
             model_backend="echo",
             memory_resume_auto_context_enabled=True,
             memory_resume_auto_context_limit=5,

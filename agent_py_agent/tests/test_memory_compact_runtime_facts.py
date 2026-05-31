@@ -30,13 +30,13 @@ def test_real_run_runtime_fact_source_allows_complete_compact_resume(tmp_path: P
 
     assert run_args.func(run_args) == 0
     capsys.readouterr()
-    result = apply_memory_compact(_workspace(config_path), MemoryCompactApplyOptions(MemoryCompactPlanOptions()))
+    result = apply_memory_compact(_owner_home(config_path), MemoryCompactApplyOptions(MemoryCompactPlanOptions()))
     resume = build_memory_compact_resume(
-        _workspace(config_path),
+        _owner_home(config_path),
         MemoryCompactResumeOptions(apply_ref=result["apply_id"], resume_mode="auto"),
     )
 
-    assert list((_workspace(config_path) / "memory_archive" / "runtime_facts").glob("*"))
+    assert list((_owner_home(config_path) / "memory_archive" / "runtime_facts").glob("*"))
     assert result["work_state_snapshot"]["acceptance"]["items"] == ["compact resume can restore explicit facts"]
     assert result["work_state_snapshot"]["constraints"]["items"] == ["do not touch user config"]
     assert result["work_state_snapshot"]["latest_tests"]["items"] == [
@@ -158,6 +158,7 @@ def _write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
         'workspace_root: "workspace"\n'
+        f'my_agent_home: "{(tmp_path / "home").as_posix()}"\n'
         'model_backend: "echo"\n'
         'subagent_workspace: "subagents"\n'
         'local_store_path: "local_store/local.db"\n'
@@ -172,6 +173,12 @@ def _write_config(tmp_path: Path) -> Path:
 # 函数用途: 返回临时配置对应的 workspace 路径，供 compact apply/resume 直接读取。
 def _workspace(config_path: Path) -> Path:
     return config_path.parent / "workspace"
+
+
+# LLM: _owner_home mirrors the default local/main owner home under the temp config.
+# 函数用途: 返回临时配置的 owner home，用于断言 V2 runtime facts 不再写 workspace 根。
+def _owner_home(config_path: Path) -> Path:
+    return config_path.parent / "home" / "owners" / "local" / "main"
 
 
 # LLM: _explicit_prompt includes labeled fields that runtime_fact_source is allowed to persist.

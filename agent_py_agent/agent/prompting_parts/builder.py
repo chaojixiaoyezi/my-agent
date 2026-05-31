@@ -261,13 +261,14 @@ def _is_isolated_scope(value: object) -> bool:
 
 
 # LLM: _home_entry_context_chunks loads stable owner entry files with AGENTS.md first as the boot contract.
-# 函数用途: 读取 SOUL/USER/AGENTS/memory 四个家目录关键文件；文件为空或不存在时跳过。
+# 函数用途: 读取 AGENTS/SOUL/USER/memory/memory-hot 五类家目录关键文件；文件为空或不存在时跳过。
 def _home_entry_context_chunks(home_paths: Any) -> list[str]:
     entries = (
         ("AGENTS.md", _owner_and_legacy_paths(home_paths, "owner_agents_md", "agents_md")),
         ("SOUL.md", _owner_and_legacy_paths(home_paths, "owner_soul_md", "soul_md")),
         ("USER.md", _owner_and_legacy_paths(home_paths, "owner_user_md", "user_md")),
         ("memory.md", _owner_and_legacy_paths(home_paths, "owner_memory_md", "memory_md")),
+        ("memory-hot.md", _owner_and_legacy_paths(home_paths, "owner_memory_hot_md", "memory_hot_md")),
     )
     chunks: list[str] = []
     for label, paths in entries:
@@ -298,20 +299,23 @@ def _owner_and_legacy_paths(home_paths: Any, owner_attr: str, legacy_attr: str) 
 def _matching_lesson_chunks(home_paths: Any, user_prompt: str, limit: int) -> list[str]:
     if limit <= 0:
         return []
-    lessons_dir = Path(home_paths.memory_lessons_dir)
-    if not lessons_dir.exists():
-        return []
     prompt_text = str(user_prompt or "").casefold()
     chunks: list[str] = []
-    for path in sorted(lessons_dir.glob("*.md")):
+    for path in _matching_lesson_paths(home_paths, prompt_text):
         if len(chunks) >= limit:
-            break
-        if path.stem.casefold() not in prompt_text:
-            continue
+            return chunks
         content = _read_text_if_nonempty(path)
         if content:
             chunks.append(f"# Home Lesson: {path}\n{content}")
     return chunks
+
+
+def _matching_lesson_paths(home_paths: Any, prompt_text: str) -> list[Path]:
+    paths: list[Path] = []
+    for lessons_dir in _owner_and_legacy_paths(home_paths, "owner_memory_lessons_dir", "memory_lessons_dir"):
+        if lessons_dir.exists():
+            paths.extend(path for path in sorted(lessons_dir.glob("*.md")) if path.stem.casefold() in prompt_text)
+    return paths
 
 
 # LLM: _lesson_limit centralizes config coercion for home lesson reads.

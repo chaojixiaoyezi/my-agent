@@ -84,6 +84,7 @@ def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Pa
     assert not paths.workspace_tasks_dir.exists()
     assert paths.memory_daily_dir.is_dir()
     assert paths.memory_lessons_dir.is_dir()
+    assert paths.memory_routing_dir.is_dir()
     assert paths.providers_dir.is_dir()
     assert paths.shared_indexes_dir.is_dir()
     assert paths.owner_tasks_dir.is_dir()
@@ -93,6 +94,10 @@ def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Pa
     assert paths.system_migrations_dir.is_dir()
     assert paths.soul_md.read_text(encoding="utf-8") == "custom soul\n"
     assert paths.agents_md.exists()
+    assert paths.memory_hot_md.exists()
+    assert paths.memory_routing_index_md.exists()
+    assert (paths.memory_lessons_dir / "real-tests.md").exists()
+    assert (paths.memory_lessons_dir / "compact.md").exists()
 
 
 # LLM: V2 home initialization must create owner-local policy files without taking over existing legacy files.

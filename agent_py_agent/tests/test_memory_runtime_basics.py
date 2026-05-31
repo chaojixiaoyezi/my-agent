@@ -44,6 +44,10 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def _test_config(tmp_path: Path, **kwargs) -> AgentConfig:
+    return AgentConfig(my_agent_home=str(tmp_path / "home"), **kwargs)
+
+
 class RuntimeOverflowBackend:
     name = "runtime-overflow"
 
@@ -118,12 +122,12 @@ def test_run_injects_routed_memory_authority_context(tmp_path):
 
 def test_run_writes_raw_archive_when_saved(tmp_path):
     """LLM: Tests that agent.run() writes raw archive events when save=True."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
 
     result = agent.run("请归档这轮对话", save=True, request_id="req-archive-save")
 
-    raw_dir = tmp_path / "memory" / "raw"
-    fact_path = tmp_path / "memory_archive" / "runtime_facts" / "req-archive-save" / "task.json"
+    raw_dir = Path(agent.home_paths.owner_memory_raw_dir)
+    fact_path = Path(agent.home_paths.owner_home_dir) / "memory_archive" / "runtime_facts" / "req-archive-save" / "task.json"
     files = sorted(raw_dir.glob("*.jsonl"))
     assert result.archive_events == 2
     assert result.archive_token_estimate > 0
@@ -137,6 +141,31 @@ def test_run_writes_raw_archive_when_saved(tmp_path):
     facts = json.loads(fact_path.read_text(encoding="utf-8"))
     assert facts["goal"] == "请归档这轮对话"
     assert facts["runtime_progress"]["phase"] == "final"
+
+
+# LLM: provider owners should get one authoritative task workspace under their owner home.
+# 函数用途: 验证外部用户保存任务时，不再额外写顶层 legacy tasks 造成双账本。
+def test_provider_saved_run_writes_only_owner_task_workspace(tmp_path):
+    agent = SimpleAgent(
+        _test_config(
+            tmp_path,
+            model_backend="echo",
+            my_agent_owner_provider="feishu",
+            my_agent_owner_kind="user",
+            my_agent_owner_id="ou_123",
+        ),
+        tmp_path / "workspace",
+    )
+
+    agent.run("请保存 provider 任务", save=True, request_id="req-provider-task", run_id="run-provider-task")
+
+    owner_states = sorted((Path(agent.home_paths.owner_home_dir) / "tasks").glob("*/run-provider-task/work/state.json"))
+    owner_task_state = owner_states[0]
+    assert owner_task_state.exists()
+    assert not (Path(agent.home_paths.root) / "tasks").exists()
+    index_path = Path(agent.home_paths.global_index_active_tasks_jsonl)
+    records = _read_jsonl(index_path)
+    assert records[-1]["task_path"] == str(owner_task_state.parents[1])
 
 
 def test_run_surfaces_compact_suggestion_without_persistence(tmp_path):
@@ -279,7 +308,7 @@ def test_run_no_save_does_not_write_runtime_fact(tmp_path):
 
 def test_auto_resume_context_is_disabled_by_default(tmp_path):
     """LLM: Tests that auto resume context is disabled by default in agent config."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     agent.run("README 恢复上下文任务", save=True)
 
     result = agent.run("继续 README", save=False)
@@ -291,7 +320,7 @@ def test_auto_resume_context_is_disabled_by_default(tmp_path):
 def test_continue_inside_new_cli_task_does_not_resume_old_task(tmp_path):
     """LLM: Tests that ordinary 'continue working' phrasing does not leak old CLI task memory."""
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", memory_resume_auto_context_enabled=True),
+        _test_config(tmp_path, model_backend="echo", memory_resume_auto_context_enabled=True),
         tmp_path,
     )
     agent.run(
@@ -310,7 +339,8 @@ def test_continue_inside_new_cli_task_does_not_resume_old_task(tmp_path):
 def test_auto_resume_context_injects_on_trigger_when_enabled(tmp_path):
     """LLM: Tests that auto resume context injects recovery context when enabled and triggered."""
     agent = SimpleAgent(
-        AgentConfig(
+        _test_config(
+            tmp_path,
             model_backend="echo",
             memory_resume_auto_context_enabled=True,
             memory_resume_auto_context_limit=3,
@@ -332,7 +362,7 @@ def test_auto_resume_context_injects_on_trigger_when_enabled(tmp_path):
 
 def test_auto_resume_context_can_be_enabled_per_run(tmp_path):
     """LLM: Tests that auto resume context can be enabled per-run with resume_context=True."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     agent.run("README 临时恢复开关任务", save=True, request_id="request-auto-override")
 
     result = agent.run("继续 README", save=False, resume_context=True)
@@ -345,7 +375,7 @@ def test_auto_resume_context_can_be_enabled_per_run(tmp_path):
 def test_auto_resume_context_can_be_disabled_per_run(tmp_path):
     """LLM: Tests that auto resume context can be disabled per-run with resume_context=False override."""
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", memory_resume_auto_context_enabled=True),
+        _test_config(tmp_path, model_backend="echo", memory_resume_auto_context_enabled=True),
         tmp_path,
     )
     agent.run("README 禁用恢复开关任务", save=True)

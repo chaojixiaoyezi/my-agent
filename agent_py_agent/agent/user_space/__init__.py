@@ -46,6 +46,12 @@ from .home_indexes import (
     register_task_ref,
 )
 from .home_layout import ensure_my_agent_home, home_paths, resolve_my_agent_home
+from .home_memory_notes import (
+    HomeMemoryWriteResult,
+    LessonNoteRequest,
+    append_hot_note,
+    upsert_lesson_note,
+)
 from .home_migration import (
     HomeMigrationAction,
     HomeMigrationResult,
@@ -110,6 +116,8 @@ __all__ = [
     "HomeBackupManifest",
     "HomeMigrationAction",
     "HomeMigrationResult",
+    "HomeMemoryWriteResult",
+    "LessonNoteRequest",
     "OwnerHomeResult",
     "OwnerCapabilityRequest",
     "OwnerDiskUsage",
@@ -133,6 +141,7 @@ __all__ = [
     "TaskIndexRef",
     "TaskCompactRollupResult",
     "append_owner_skill_candidate",
+    "append_hot_note",
     "apply_owner_retention",
     "apply_home_migration",
     "build_home_doctor_report",
@@ -179,4 +188,5 @@ __all__ = [
     "resolve_my_agent_home",
     "resolve_owner_home",
     "sync_task_compact_rollup",
+    "upsert_lesson_note",
 ]
