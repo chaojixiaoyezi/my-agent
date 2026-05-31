@@ -49,20 +49,20 @@ def _input_refs(task: object) -> list[str]:
 # 函数用途: 从 required_read_paths/input_refs/input_files 等工具参数读取输入 refs，不解析 goal。
 def params_input_refs(params: dict[str, object]) -> list[str]:
     manifest = params.get("context_manifest")
-    manifest_refs = _manifest_input_refs(manifest)
-    refs = [manifest_refs, *(params.get(field) for field in _INPUT_REF_FIELDS)]
-    return _unique_refs([item for value in refs for item in _string_refs(value)])
+    refs = list(_manifest_input_refs(manifest))
+    for field in _INPUT_REF_FIELDS:
+        refs.extend(_explicit_field_refs(params.get(field)))
+    return _unique_refs(refs)
 
 
 # LLM: params_output_refs reads create/schedule tool parameters before task persistence.
 # 函数用途: 从 output_refs/output_files/artifact_refs 等工具参数读取产物 refs，不解析 goal。
 def params_output_refs(params: dict[str, object]) -> list[str]:
     manifest = params.get("context_manifest")
-    refs = [
-        _manifest_output_refs(manifest),
-        *(params.get(field) for field in _OUTPUT_REF_FIELDS),
-    ]
-    return _unique_refs([item for value in refs for item in _string_refs(value)])
+    refs = list(_manifest_output_refs(manifest))
+    for field in _OUTPUT_REF_FIELDS:
+        refs.extend(_explicit_field_refs(params.get(field)))
+    return _unique_refs(refs)
 
 
 # LLM: task_output_refs reads persisted output refs from task attributes.
@@ -182,7 +182,23 @@ def _attributes_refs(task: object, fields: frozenset[str]) -> list[str]:
     attrs = getattr(task, "attributes", {}) or {}
     if not isinstance(attrs, dict):
         return []
-    return _unique_refs([item for field in fields for item in _string_refs(attrs.get(field))])
+    return _unique_refs([item for field in fields for item in _explicit_field_refs(attrs.get(field))])
+
+
+# LLM: explicit create/schedule fields are machine refs, so extensionless dirs remain valid.
+# 函数用途: input_refs/output_files/required_read_paths 这类字段不靠后缀白名单判断；普通 prompt 不走这里。
+def _explicit_field_refs(value: object) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, (list, tuple, set)):
+        return [item for raw in value for item in _explicit_field_refs(raw)]
+    if isinstance(value, dict):
+        refs: list[str] = []
+        for raw in value.values():
+            refs.extend(_explicit_field_refs(raw))
+        return refs
+    return []
 
 
 # LLM: _string_refs normalizes ref parameter values that are already structured fields.

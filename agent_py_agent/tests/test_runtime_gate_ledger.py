@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from types import SimpleNamespace
 
 from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
@@ -11,7 +12,10 @@ from agent_py_agent.agent.agent_core.tool_call_runtime import (
     execute_traced_tool_call,
 )
 from agent_py_agent.agent.agent_core.tool_round_execution import ToolCallRecordParams
-from agent_py_agent.agent.agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
+from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
+    persist_tool_runtime_ledger,
+    write_boundary_with_runtime_ledger,
+)
 from agent_py_agent.agent.local_storage import RuntimeGateLedgerRecord
 from agent_py_agent.agent.local_store import LocalStore
 from agent_py_agent.agent.tooling.models import ToolExecutionResult
@@ -213,6 +217,28 @@ def test_tool_loop_record_appends_agent_event_with_explicit_scope(tmp_path):
     assert event.payload["operation_id"] == "op-1"
 
 
+def test_runtime_ledger_locked_control_plane_does_not_crash_tool_loop():
+    """控制面 SQLite 忙时不能让真实工具轮直接崩掉。"""
+
+    _LockedStore.calls = 0
+    agent = SimpleNamespace(local_store=_LockedStore())
+
+    persist_tool_runtime_ledger(
+        agent,
+        {
+            "run_id": "run-1",
+            "task_id": "task-1",
+            "tool": "write_file",
+            "ok": True,
+            "result_ref": "artifact://run-1/op-1",
+            "runtime_gate": {"gate": "tool_execution", "allowed": True},
+            "tool_protocol_v2": {"operation_id": "op-1"},
+        },
+    )
+
+    assert _LockedStore.calls >= 1
+
+
 # LLM: Tool execution should feed persisted idempotency rows back into the runtime gate.
 # 函数用途: 验证同一 run 的历史副作用账本会注入 write_boundary.idempotency_ledger。
 def test_execute_traced_tool_call_injects_persisted_idempotency_ledger(tmp_path):
@@ -294,6 +320,18 @@ class _CapturingTools:
         self.captured_payload = payload
         self.captured_write_boundary = write_boundary
         return ToolExecutionResult("write_file", True, "ok")
+
+
+class _LockedStore:
+    calls = 0
+
+    def record_agent_event(self, event):
+        type(self).calls += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    def record_runtime_gate_ledger(self, record):
+        type(self).calls += 1
+        raise sqlite3.OperationalError("database is locked")
 
 
 def _loop_params(

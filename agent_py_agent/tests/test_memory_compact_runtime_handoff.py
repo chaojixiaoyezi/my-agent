@@ -44,6 +44,37 @@ def test_memory_compact_work_state_reads_runtime_handoff(tmp_path: Path) -> None
     assert "写报告时逐个对象收口" in resume["context_block"]
 
 
+def test_memory_compact_runtime_guidance_overrides_stale_progress_next_step(tmp_path: Path) -> None:
+    """compact 后续接应优先最近运行中提示，避免旧进度 next_step 把任务带回旧方向。"""
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    _write_runtime_handoff_sources(root)
+    write_task_progress(
+        root,
+        "request-compact",
+        {
+            "summary": "旧任务摘要",
+            "next_action": "继续读取已经过期的旧目录。",
+            "items": [{"id": "old", "title": "旧方向", "status": "in_progress"}],
+        },
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+
+    assert work_state["next_step"].startswith("按最近运行中提示继续：")
+    assert "写报告时逐个对象收口" in work_state["next_step"]
+    assert "旧目录" not in work_state["next_step"]
+
+
 def test_runtime_handoff_treats_scope_ids_as_literal_paths(tmp_path: Path) -> None:
     """run_id 里的 * 等字符必须按字面值处理，不能扩大扫描其它任务的状态。"""
     root = tmp_path / "workspace"

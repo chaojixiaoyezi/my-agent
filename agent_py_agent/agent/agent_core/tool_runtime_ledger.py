@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Mapping
 from typing import Any
 
@@ -16,13 +17,23 @@ from ..local_storage.control_plane_models import AgentEventInput
 # 函数用途: 将工具入口 runtime_gate 和参数事实写入 LocalStore；缺少 local_store 时静默跳过。
 def persist_tool_runtime_ledger(agent: object, archive_record: dict[str, object]) -> None:
     store = getattr(agent, "local_store", None)
-    _record_tool_agent_event(store, archive_record)
+    _best_effort_control_plane_write(lambda: _record_tool_agent_event(store, archive_record))
     if not hasattr(store, "record_runtime_gate_ledger"):
         return
     record = runtime_gate_ledger_record_from_archive(archive_record)
     if record is None:
         return
-    store.record_runtime_gate_ledger(record)
+    _best_effort_control_plane_write(lambda: store.record_runtime_gate_ledger(record))
+
+
+def _best_effort_control_plane_write(write_fn) -> None:
+    try:
+        write_fn()
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc).lower():
+            raise
+    except OSError:
+        return
 
 
 # LLM: _record_tool_agent_event appends 通道运行时 per-run tool events for tree/replay queries.

@@ -36,12 +36,14 @@ agent_py_agent/memory_archive/
 /.agent_tool_outputs/
 /data/collaboration/
 /data/conversations/
+/data/gateway/
 /data/local_store/
 /data/memory.jsonl
 /data/memory.jsonl.lock
 /data/subagents/
 /memory/
 /memory_archive/
+/outputs/
 /workspace/
 data/notifications/
 data/sessions/

@@ -335,6 +335,31 @@ def test_main_run_created_child_is_bound_to_conversation_thread(tmp_path) -> Non
     assert child.attributes["conversation_task_id"] == "root-task-1"
 
 
+def test_plain_local_run_materializes_thread_for_child_completion_wake(tmp_path) -> None:
+    agent = _agent(tmp_path)
+    agent.backend = _CreateChildBackend()
+
+    agent.run(
+        "请派一个本地子代理观察任务进展，有事叫醒你。",
+        params=RunParams(
+            task_id="root-task-local",
+            allowed_tools=["create_subagents"],
+            save=False,
+            source="test",
+        ),
+    )
+    child = agent.subagents.list_runs()[0]
+
+    linked_parent = agent.conversation_store.thread_for_task("root-task-local")
+    linked_child = agent.conversation_store.thread_for_task(child.id)
+
+    assert linked_parent is not None
+    assert linked_child is not None
+    assert linked_child.thread_id == linked_parent.thread_id
+    assert child.attributes["conversation_thread_id"] == linked_parent.thread_id
+    assert child.attributes["conversation_task_id"] == "root-task-local"
+
+
 def test_real_local_child_runner_event_wakes_background_main_agent_after_restart(tmp_path) -> None:
     agent = _agent(tmp_path)
     _bind_thread(agent)

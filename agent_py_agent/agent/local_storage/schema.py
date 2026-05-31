@@ -207,9 +207,9 @@ class LocalStoreSchemaMixin:
     # LLM: LocalStoreSchemaMixin._connect 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 完成 LocalStore 本地事实索引 中的 connect 步骤，并保持调用方依赖的数据形状。
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA busy_timeout=30000")
         try:
             conn.execute("PRAGMA journal_mode=WAL")
         except sqlite3.OperationalError:

@@ -49,6 +49,8 @@ def context_markdown(*, agent: object, store: ConversationStore, thread: Convers
 
 def _bounded_context(agent: object, store: ConversationStore, thread_id: str) -> dict[str, Any]:
     config = getattr(agent, "config", None)
+    visible_run_ids = _thread_active_task_ids(store, thread_id)
+    agent_tree = agent_tree_status_payload(agent, {"visible_run_ids": visible_run_ids})
     return bounded_background_context_payload(
         BackgroundContextPayloadRequest(
             bundle=store.context_bundle(thread_id, recent_limit=_config_int(config, "conversation_context_recent_limit")),
@@ -57,8 +59,8 @@ def _bounded_context(agent: object, store: ConversationStore, thread_id: str) ->
                 thread_id,
                 limit=_config_int(config, "background_pending_wake_prompt_limit"),
             ),
-            agent_tree=agent_tree_status_payload(agent, {}),
-            recovery_snapshot=_recovery_snapshot(agent, store, thread_id),
+            agent_tree=agent_tree,
+            recovery_snapshot=_recovery_snapshot(agent, store, thread_id, visible_run_ids),
             budget=background_context_budget_from_config(config),
         )
     )
@@ -90,10 +92,17 @@ def _context_header(request, thread: ConversationThread) -> list[str]:
 
 # LLM: _recovery_snapshot is a non-blocking handoff summary for background takeover.
 # 函数用途: 对 claim、任务树和产物登记做轻量对账，只生成提示事实，不阻断后台运行。
-def _recovery_snapshot(agent: object, store: ConversationStore, thread_id: str) -> dict[str, Any]:
+def _thread_active_task_ids(store: ConversationStore, thread_id: str) -> list[str]:
+    thread = store.load_thread(thread_id)
+    if thread is None:
+        return []
+    return [str(item or "").strip() for item in thread.active_task_ids if str(item or "").strip()]
+
+
+def _recovery_snapshot(agent: object, store: ConversationStore, thread_id: str, visible_run_ids: list[str]) -> dict[str, Any]:
     claim = store.load_background_run_claim(thread_id)
     previous = claim.get("previous_claim") if isinstance(claim.get("previous_claim"), dict) else {}
-    tree = agent_tree_status_payload(agent, {})
+    tree = agent_tree_status_payload(agent, {"visible_run_ids": visible_run_ids})
     records = latest_artifact_records(getattr(agent, "root", "."))
     return {
         "schema_version": "background_recovery_snapshot.v1",

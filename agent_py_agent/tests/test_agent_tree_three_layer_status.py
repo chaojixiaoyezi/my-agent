@@ -126,6 +126,30 @@ def test_agent_tree_exposes_artifact_registry_refs():
     assert node["evidence_layer"]["artifact_registry_refs"] == [registry_record]
 
 
+def test_agent_tree_visible_run_ids_filters_prompt_copy_only():
+    """后台唤醒只应把当前 thread 相关的 run 放进 prompt 副本。"""
+
+    class _Manager:
+        def kernel_snapshot(self, query):
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                scope=query.scope,
+                runs=[
+                    SubagentKernelRun(run_id="child-current", status="DONE"),
+                    SubagentKernelRun(run_id="child-old", status="BLOCKED"),
+                ],
+            )
+
+    class _Agent:
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent(), {"visible_run_ids": ["child-current"]})
+
+    assert [node["run_id"] for node in payload["nodes"]] == ["child-current"]
+    assert payload["main"]["child_run_ids"] == ["child-current"]
+    assert payload["status_buckets"]["blocked"] == []
+
+
 def test_subagent_runner_can_only_inspect_own_subtree_even_with_root_params():
     """子代理只读查树时，即使传 root_id，也应被限制到自己的子树。"""
 
@@ -264,3 +288,61 @@ def test_cli_style_main_run_id_falls_back_to_visible_tree_without_agent_attribut
     assert len(_Agent.subagents.queries) == 2
     assert payload["child_result_index"][0]["run_id"] == "subagent-1"
     assert payload["child_result_index"][0]["primary_artifact_refs"] == ["result.md"]
+
+
+def test_cli_main_run_fallback_is_limited_to_current_orchestration_ids():
+    """主代理 run-* 回退不能把旧任务树混进当前 run。"""
+
+    class _Manager:
+        def kernel_snapshot(self, query):
+            if query.root_id == "run-1780172303447861000":
+                return SubagentKernelSnapshot(schema_version="subagent_kernel_snapshot.v1", scope=query.scope, runs=[])
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                scope=query.scope,
+                runs=[
+                    SubagentKernelRun(run_id="old-child", status="DONE", artifact_refs=["old.md"]),
+                    SubagentKernelRun(run_id="current-child", status="RUNNING", artifact_refs=["current.md"]),
+                    SubagentKernelRun(run_id="current-grandchild", parent_run_id="current-child", status="DONE", artifact_refs=["leaf.md"]),
+                ],
+            )
+
+    class _Agent:
+        _orchestration_run_ids_seen = {"current-child"}
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent(), {"root_id": "run-1780172303447861000"})
+    run_ids = [row["run_id"] for row in payload["child_result_index"]]
+
+    assert run_ids == ["current-child", "current-grandchild"]
+    assert payload["status_buckets"]["completed"] == ["current-grandchild"]
+    assert "old-child" not in str(payload)
+
+
+def test_agent_tree_soft_advice_does_not_treat_running_children_as_failed_outputs():
+    """父代理查树时，应得到软提示：运行中的子代理缺产物不是失败。"""
+
+    class _Manager:
+        def kernel_snapshot(self, query):
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                scope=query.scope,
+                runs=[
+                    SubagentKernelRun(run_id="child-running", status="RUNNING"),
+                    SubagentKernelRun(run_id="child-planning", status="PLANNING"),
+                    SubagentKernelRun(run_id="child-done", status="DONE", artifact_refs=["done.md"]),
+                ],
+            )
+
+    class _Agent:
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent())
+    advice = payload["coordination_advice"]
+
+    assert advice["soft_only"] is True
+    assert advice["pending_child_run_ids"] == ["child-running", "child-planning"]
+    assert advice["completed_child_run_ids"] == ["child-done"]
+    assert advice["missing_outputs_while_running_is_failure"] is False
+    assert advice["should_take_over_running_children"] is False
+    assert "不要把目标目录暂时为空或占位报告当失败" in payload["policy"]["next_step"]

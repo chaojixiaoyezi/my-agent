@@ -258,8 +258,8 @@ def test_generic_worker_reuses_structured_idempotency_contract_despite_reworded_
     assert second["reused_run_ids"] == first["created_run_ids"]
 
 
-def test_generic_worker_reuses_same_structured_output_scope_without_goal_text_key(tmp_path):
-    """同一父级同一 output_files 范围复用已有 child；这不是按 goal 文案合并。"""
+def test_generic_worker_reuses_same_structured_io_scope_without_goal_text_key(tmp_path):
+    """同一父级同一 input/output 范围复用已有 child；这不是按 goal 文案合并。"""
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _mock_workspace_agent(tmp_path)
@@ -268,11 +268,13 @@ def test_generic_worker_reuses_same_structured_output_scope_without_goal_text_ke
     first = json.loads(tool.execute({
         "goal": "整理第一批项目。",
         "role": "worker",
+        "input_refs": [str(tmp_path / "inputs" / "batch4")],
         "output_files": [str(tmp_path / "outputs" / "batch4.md")],
     }).output)
     second = json.loads(tool.execute({
         "goal": "继续处理那一批资料并写报告。",
         "role": "worker",
+        "input_refs": [str(tmp_path / "inputs" / "batch4")],
         "output_files": [str(tmp_path / "outputs" / "batch4.md")],
     }).output)
 
@@ -281,6 +283,30 @@ def test_generic_worker_reuses_same_structured_output_scope_without_goal_text_ke
     assert second["reused_run_ids"] == first["created_run_ids"]
     assert second["child_result_index"][0]["expected_outputs"] == [str(tmp_path / "outputs" / "batch4.md")]
     assert second["tasks"][0]["attributes"]["work_scope_key"]
+
+
+def test_same_output_without_structured_inputs_does_not_reuse_different_work(tmp_path):
+    """只有同一个输出文件不代表同一任务，避免多个子代理共写总报告时被误合并。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+
+    first = json.loads(tool.execute({
+        "goal": "分析项目 A 并追加到总报告。",
+        "role": "worker",
+        "output_files": [str(tmp_path / "outputs" / "summary.md")],
+    }).output)
+    second = json.loads(tool.execute({
+        "goal": "分析项目 B 并追加到总报告。",
+        "role": "worker",
+        "output_files": [str(tmp_path / "outputs" / "summary.md")],
+    }).output)
+
+    assert first["created_run_ids"]
+    assert second["created_run_ids"]
+    assert second["reused_run_ids"] == []
+    assert "work_scope_key" not in second["tasks"][0]["attributes"]
 
 
 # LLM: repair identity no longer guesses scope from natural goals without repair_contract.

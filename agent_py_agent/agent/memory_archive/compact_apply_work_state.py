@@ -71,8 +71,14 @@ def restore_refs_summary(restore_refs: dict[str, Any]) -> dict[str, int]:
 def _base_snapshot(request: WorkStateSnapshotRequest, source_state: dict[str, Any]) -> dict[str, Any]:
     field_sources = build_work_state_field_sources(WorkStateFieldSourceRequest(request.plan, source_state))
     goal = source_state["goal"] or field_sources.goal
+    guidance_next = _runtime_guidance_next_action(field_sources.runtime_handoff)
     progress_next = _task_progress_next_action(field_sources.task_progress)
-    next_actions = ([progress_next] if progress_next else []) or source_state["next_actions"] or field_sources.next_actions
+    next_actions = (
+        ([guidance_next] if guidance_next else [])
+        or ([progress_next] if progress_next else [])
+        or source_state["next_actions"]
+        or field_sources.next_actions
+    )
     return {
         "version": COMPACT_WORK_STATE_SNAPSHOT_SCHEMA.version,
         "schema": runtime_memory_schema_payload(COMPACT_WORK_STATE_SNAPSHOT_SCHEMA),
@@ -106,6 +112,19 @@ def _base_snapshot(request: WorkStateSnapshotRequest, source_state: dict[str, An
 
 def _task_progress_next_action(progress: dict[str, Any]) -> str:
     return str(progress.get("next_action") or "").strip() if isinstance(progress, dict) else ""
+
+
+# LLM: recent runtime guidance outranks stale progress when compact resumes an active task.
+# 函数用途: 如果运行中有新 guidance，续接包优先提示新指导，避免 compact 后继续执行旧 next_step。
+def _runtime_guidance_next_action(handoff: dict[str, Any]) -> str:
+    if not isinstance(handoff, dict):
+        return ""
+    rows = handoff.get("recent_guidance")
+    if not isinstance(rows, list) or not rows:
+        return ""
+    first = rows[0] if isinstance(rows[0], dict) else {}
+    message = str(first.get("message") or "").strip()
+    return f"按最近运行中提示继续：{message}" if message else ""
 
 
 # LLM: _work_state_restore_refs keeps source path existence checks close to work-state capture.

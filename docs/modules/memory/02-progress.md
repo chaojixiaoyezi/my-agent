@@ -5,6 +5,7 @@
 - 2026-05-30 `task_progress` 增加软质量提示：如果模型把条目标成 `done` 但没有 evidence，系统只在 `quality_hints` 里提醒补文件、产物或工具结果引用；这不会影响 closeout，不会阻断任务。compact / tree 会带着这个提示，帮助长任务压缩后继续把证据补扎实。
 - 2026-05-31 `task_progress` 的软提示进一步细化：覆盖账本里还有对象或检查点没完成时，会给 `next_suggestions` 和 `soft_prompt`，提醒模型继续选一个未完成对象、读核心文件或可靠来源、补 evidence、再写进报告。它仍然只是提示，不改状态、不触发 closeout、不阻断任务。
 - 2026-05-30 compact work state 增加通用 `runtime_handoff`：压缩前会收集同 scope 下最近 guidance 和可见下级 agent 状态，写入 `work_state_snapshot`、handoff context 和 continue packet。它不是聊天专项，也不是子代理专项，只是一份“运行中交接摘要”；API 监控、长报告、多人协作和普通聊天续接都复用同一字段。
+- 2026-05-31 compact 续接优先级调整：如果运行中 guidance 或后台唤醒已经明确给出新的下一步，`compact_apply_work_state` 会优先使用这条最新运行提示，而不是沿用压缩前旧的 `task_progress.next_action`。这样父代理在子代理完成后被叫醒时，会先按“去汇总/去检查最新结果”继续，不会被早前的旧进度提示带偏。
 - 2026-05-29 Live Raw Archive 已接入工具循环：运行中会把助手工具轮可见文字和完成后的工具结果增量写入既有 `memory/raw/YYYY-MM-DD.jsonl`；收尾归档会跳过已 live 写入的工具事件，避免重复记录。运行中进度白板已合并到 `runtime_facts/<request_id>/task.json`，不再维护单独 `run_checkpoint`。`compact_apply_work_state` 在缺少权威 snapshot 时，可从 live `assistant_tool_round` 提取下一步续接提示；这只是恢复提示，不把助手回复升级成验收事实。
 - 2026-05-30 Compact Continue Packet 已改成 action-first 续接：`continue_packet.resume_focus.next_action` 表示压缩后优先继续的动作，`work_state_snapshot.captured_refs` 记录已读、已写和外置 artifact refs。自动续接 prompt 会先展示这些字段，避免模型每次 compact 后重新读 compact 文件或重复派工；推荐恢复文件只在缺事实、要验证或引用损坏时读取。
 - 2026-05-30 工具输出外置索引补充 `parameters/source_input/source_path`：compact 后展示的 artifact refs 会带出原始读写目标，帮助模型知道“这个 artifact 是哪个源文件/URL/查询的结果”，避免压缩后只看到旧 artifact 编号而重新扫目录。

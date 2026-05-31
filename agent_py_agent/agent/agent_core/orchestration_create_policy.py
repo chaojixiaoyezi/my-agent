@@ -5,15 +5,16 @@ from __future__ import annotations
 
 import json
 
-from ..settings.tool_config import DEFAULT_COMMAND_ACCESS_MODE
 from ..subagents.role_templates import role_template_id_for_role
 from ..subagents.services.base import CreateRunParams
 from .coordinator_seed_tools import explicit_root_allowed_tools
+from .orchestration_create_config import config_access_mode, config_bool, config_int, config_string
 from .orchestration_create_constraints import (
     resolved_extra_write_roots,
     role_allows_direct_product_work,
 )
 from .orchestration_create_context import create_context_manifest, create_context_packs
+from .orchestration_create_conversation import add_current_conversation_attrs
 from .orchestration_work_scope import add_work_scope_key
 from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mode
 from .parameters import _bool_param, _positive_int, _string_list
@@ -53,14 +54,14 @@ def create_run_params(
         context_packs=create_context_packs(raw_params),
         workflow_mode=workflow_mode,
         attributes=_create_attributes(raw_params, agent),
-        parent_access_mode=_config_access_mode(agent),
-        memory_retention_policy=_config_string(
+        parent_access_mode=config_access_mode(agent),
+        memory_retention_policy=config_string(
             agent,
             "subagent_memory_retention_policy",
             "parent_review_or_cleanup",
         ),
-        memory_delete_after_days=_config_int(agent, "subagent_memory_delete_after_days", 0),
-        destroy_summary_required=_config_bool(agent, "subagent_destroy_summary_required", True),
+        memory_delete_after_days=config_int(agent, "subagent_memory_delete_after_days", 0),
+        destroy_summary_required=config_bool(agent, "subagent_destroy_summary_required", True),
     )
 
 
@@ -77,48 +78,6 @@ def _role_from_create_intent(raw_params: dict[str, object], goal: str, agent) ->
     if role == "worker" and _has_child_dispatch_tool(raw_params) and not _role_identity_is_quality(raw_params):
         return "coordinator"
     return role
-
-
-# LLM: MagicMock or missing config values must not become persisted access modes.
-# 函数用途: 只从真实字符串配置读取 access_mode，缺失时回退统一命令权限默认值。
-def _config_access_mode(agent) -> str:
-    value = getattr(getattr(agent, "config", None), "access_mode", DEFAULT_COMMAND_ACCESS_MODE)
-    text = str(value).strip() if isinstance(value, str) else ""
-    return text or DEFAULT_COMMAND_ACCESS_MODE
-
-
-# LLM: _config_string reads optional config strings without persisting test doubles.
-# 函数用途: 只接受真实字符串，缺失或空值回退默认值。
-def _config_string(agent, key: str, default: str) -> str:
-    value = getattr(getattr(agent, "config", None), key, default)
-    text = str(value).strip() if isinstance(value, str) else ""
-    return text or default
-
-
-# LLM: _config_int reads optional non-negative config integers.
-# 函数用途: 将配置值转成非负整数，无法解析时回退默认值。
-def _config_int(agent, key: str, default: int) -> int:
-    value = getattr(getattr(agent, "config", None), key, default)
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(0, parsed)
-
-
-# LLM: _config_bool reads optional config booleans from bool or common strings.
-# 函数用途: 支持 true/false 字符串，其他类型回退默认值。
-def _config_bool(agent, key: str, default: bool) -> bool:
-    value = getattr(getattr(agent, "config", None), key, default)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "yes", "on"}:
-            return True
-        if lowered in {"0", "false", "no", "off"}:
-            return False
-    return default
 
 
 # LLM: _has_child_dispatch_tool treats explicit tool grants as role intent, not prose.
@@ -175,7 +134,7 @@ def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, o
             attrs[key] = _bool_param(raw_params.get(key), default=False)
     _add_derived_output_refs(attrs, raw_params)
     add_work_scope_key(attrs)
-    _add_current_conversation_attrs(attrs, agent)
+    add_current_conversation_attrs(attrs, agent)
     return attrs
 
 
@@ -203,32 +162,6 @@ def _list_attribute_values(key: str, raw_params: dict[str, object]) -> list[str]
     if key in _INPUT_REF_ATTRIBUTE_FIELDS:
         return params_input_refs({key: value})
     return _string_list(value)
-
-
-# LLM: _add_current_conversation_attrs propagates durable thread binding to spawned agents.
-# 函数用途: create_subagents 在长期会话 run 内调用时，把 thread/task 绑定写入 task.attributes；
-# 后续子/孙代理可用自己的 run_id 反查会话，不要求模型手填 thread_id。
-def _add_current_conversation_attrs(attrs: dict[str, object], agent) -> None:
-    if agent is None:
-        return
-    current = getattr(agent, "_current_run_params", None)
-    raw_task_id = getattr(current, "task_id", "") if current is not None else ""
-    if not isinstance(raw_task_id, str):
-        return
-    task_id = raw_task_id.strip()
-    if not task_id:
-        return
-    try:
-        thread = agent.conversation_store.thread_for_task(task_id)
-    except Exception:
-        thread = None
-    if thread is None:
-        return
-    thread_id = getattr(thread, "thread_id", "")
-    if not isinstance(thread_id, str) or not thread_id.strip():
-        return
-    attrs.setdefault("conversation_thread_id", thread_id.strip())
-    attrs.setdefault("conversation_task_id", task_id)
 
 
 _LIST_ATTRIBUTE_FIELDS = (

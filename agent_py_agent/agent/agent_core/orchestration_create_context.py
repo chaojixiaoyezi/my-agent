@@ -13,6 +13,7 @@ from .runner_ref_fields import (
     _file_refs_from_value,
     _manifest_input_refs,
     _normalize_file_ref,
+    params_input_refs,
     params_output_refs,
 )
 
@@ -45,16 +46,20 @@ def create_context_packs(raw_params: dict[str, object]) -> list[dict[str, object
 def _append_system_idempotency_pack(packs: list[dict[str, object]], raw_params: dict[str, object]) -> None:
     if idempotency_contract_identity_from_context_packs(packs):
         return
-    refs = params_output_refs(raw_params)
-    if not refs:
+    input_refs = params_input_refs(raw_params)
+    output_refs = params_output_refs(raw_params)
+    if not input_refs or not output_refs:
         return
     packs.append({
         "kind": "idempotency_contract",
         "contract": {
             "schema": "subagent_idempotency_contract.v1",
-            "kind": "system_derived_output_scope",
-            "idempotency_key": "create_subagents.output_refs",
-            "scope_refs": refs,
+            "kind": "system_derived_io_scope",
+            "idempotency_key": "create_subagents.io_refs",
+            "scope_refs": [
+                *(f"input:{ref}" for ref in input_refs),
+                *(f"output:{ref}" for ref in output_refs),
+            ],
         },
     })
 
