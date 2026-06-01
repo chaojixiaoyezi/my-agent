@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 dependencies = [
+  "openpyxl>=3.1",
   "prompt_toolkit>=3.0",
 ]
 
