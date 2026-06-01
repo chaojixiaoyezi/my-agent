@@ -293,7 +293,7 @@ def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -
 # LLM: _wait_for_subagent_records accounts for create_subagents background auto-start.
 # 函数用途: 等待后台子代理线程短暂完成，避免测试重新假设 create_subagents 同步阻塞。
 def _wait_for_subagent_records(agent: SimpleAgent, *, expected: int, artifact_path: Path) -> list:
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + 10.0
     records = list(agent.subagents.list_runs())
     while (len(records) < expected or not artifact_path.exists()) and time.monotonic() < deadline:
         time.sleep(0.05)

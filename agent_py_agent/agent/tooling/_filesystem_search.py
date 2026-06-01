@@ -151,6 +151,8 @@ class SearchTextTool(FileSystemTool):
         raw_path = Path(path_text)
         if not raw_path.is_absolute():
             raw_path = self.workspace_root / raw_path
+        if raw_path.is_symlink():
+            return None
         try:
             safe_item = self.resolve_path(raw_path)
         except ValueError:
@@ -175,6 +177,7 @@ class SearchTextTool(FileSystemTool):
             filenames.sort()
             self._filter_search_dirs(dirnames, request)
             items = [Path(root) / filename for filename in filenames]
+            items = [item for item in items if not item.is_symlink()]
             if not request.include_ignored:
                 items = [item for item in items if not path_has_ignored_part(item, target)]
             candidates.extend(items)

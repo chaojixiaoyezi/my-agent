@@ -138,7 +138,16 @@ def path_has_ignored_part(item: Path, root: Path) -> bool:
 # LLM: rg_args builds a subprocess argv list, never a shell string.
 # 函数用途: 根据 search_text 参数生成受控 rg 命令参数。
 def rg_args(rg_path: str, target: Path, request: SearchRequest) -> list[str]:
-    args = [rg_path, "--json", "--line-number", "--color=never", "--hidden", "--no-config", "--no-messages"]
+    args = [
+        rg_path,
+        "--json",
+        "--line-number",
+        "--color=never",
+        "--hidden",
+        "--no-config",
+        "--no-messages",
+        "--no-follow",
+    ]
     if request.literal:
         args.append("--fixed-strings")
     if request.ignore_case:
