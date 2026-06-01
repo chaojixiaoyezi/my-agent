@@ -17,7 +17,7 @@ def test_kernel_snapshot_returns_root_tree_with_status_buckets(tmp_path) -> None
     assert snapshot.running_run_ids == [root.id]
     assert snapshot.completed_run_ids == [worker.id]
     assert snapshot.runs[1].parent_id == root.id
-    assert snapshot.runs[1].workspace_refs["agent_run_workspace"].endswith(f"agents/{worker.id}")
+    assert snapshot.runs[1].workspace_refs["agent_work_dir"].endswith(f"agents/{worker.id}")
     assert snapshot.runs[1].recovery_refs["checkpoint"].endswith("checkpoint.json")
     assert snapshot.runs[1].tool_contract["allowed_tools"] == ["read_file", "write_file", "controlled_exec"]
     assert snapshot.runs[1].tool_contract["used_tools"] == ["write_file"]

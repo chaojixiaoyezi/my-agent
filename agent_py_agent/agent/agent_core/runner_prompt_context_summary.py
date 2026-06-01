@@ -42,7 +42,7 @@ def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[st
                 "required_file_refs",
                 "final_report_ref",
                 "agent_run_final_report_ref",
-                "output_json_ref",
+                "run_closeout_ref",
                 "file_contract",
             ],
         ),
@@ -161,21 +161,22 @@ def _context_packs_prompt_payload(value: object) -> list[dict[str, object]]:
     return packs
 
 
-# LLM: _runner_ref_payload gives the model exact files to read when summary fields are insufficient.
-# 函数用途: 暴露完整 execution/context bundle、任务目录和 workspace refs，不展开大 JSON。
+# LLM: _runner_ref_payload gives the model exact bundle/workspace refs without legacy work-order paths.
+# 函数用途: 暴露完整 execution/context bundle 和当前 workspace refs，不展开大 JSON。
 def _runner_ref_payload(context: SubAgentExecutionContext, bundle: dict[str, object]) -> dict[str, object]:
     workspace_refs = _dict_prompt_subset(
         bundle.get("workspace_refs"),
         [
-            "agent_run_workspace",
+            "agent_work_dir",
             "own_context_bundle_ref",
-            "own_legacy_context_bundle_ref",
             "parent_context_bundle_ref",
-            "task_workspace",
+            "task_root",
+            "task_work_dir",
+            "task_output_dir",
         ],
     )
     return {
-        "task_dir": context.task_dir,
+        "task_root": workspace_refs.get("task_root") or context.task_dir,
         "execution_context_json": context.execution_context_json,
         "execution_context_file": context.execution_context_file,
         "context_bundle_json": context.context_bundle_json,
@@ -256,6 +257,8 @@ def _bounded_object(value: object) -> dict[str, object]:
     return result
 
 
+# LLM: _bounded_value keeps prompt context summaries small without changing source artifacts.
+# 函数用途: 将任意值裁剪成适合放进 runner summary 的安全大小。
 def _bounded_value(item: object) -> object:
     if isinstance(item, str):
         return item[:300]
@@ -268,6 +271,8 @@ def _bounded_value(item: object) -> object:
     return str(item)[:160] if item is not None else None
 
 
+# LLM: _bounded_child_dict is the nested-dict limiter used only inside bounded summary payloads.
+# 函数用途: 裁剪子字典的键值数量和长度，防止 context summary 变成完整 artifact dump。
 def _bounded_child_dict(item: dict[object, object]) -> dict[str, str]:
     return {
         str(child_key): str(child_value)[:160]

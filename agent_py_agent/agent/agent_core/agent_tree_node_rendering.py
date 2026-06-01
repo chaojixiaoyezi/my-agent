@@ -111,11 +111,29 @@ def _progress_layer(agent: object, payload: dict[str, object]) -> dict[str, obje
     return layer
 
 
-# LLM: _workspace_refs hides legacy paths from model-visible tree payloads.
-# 函数用途: 过滤旧 subagent 路径，只保留当前任务工作区和 run 工作区引用。
+# LLM: _workspace_refs normalizes old row keys into the single model-facing path vocabulary.
+# 函数用途: 只返回 task_root/task_work_dir/task_output_dir/agent_work_dir 等当前路径名；旧字段不继续外传。
 def _workspace_refs(value: object) -> dict[str, object]:
     refs = _dict(value)
-    return {key: item for key, item in refs.items() if key not in {"legacy_task_dir", "legacy_output_json"}}
+    task_root = str(refs.get("task_root") or refs.get("task_workspace") or refs.get("task_dir") or "").strip()
+    task_work_dir = str(refs.get("task_work_dir") or "").strip()
+    task_output_dir = str(refs.get("task_output_dir") or "").strip()
+    if task_root:
+        from pathlib import Path
+
+        task_work_dir = task_work_dir or str(Path(task_root) / "work")
+        task_output_dir = task_output_dir or str(Path(task_root) / "output")
+    normalized = {
+        "task_root": task_root,
+        "task_work_dir": task_work_dir,
+        "task_output_dir": task_output_dir,
+        "agent_work_dir": refs.get("agent_work_dir") or refs.get("agent_run_workspace"),
+        "shared_blackboard": refs.get("shared_blackboard"),
+        "inbox": refs.get("agent_run_inbox") or refs.get("inbox"),
+        "outbox": refs.get("agent_run_outbox") or refs.get("outbox"),
+        "final_report": refs.get("agent_run_final_report") or refs.get("final_report"),
+    }
+    return {key: item for key, item in normalized.items() if item}
 
 
 # LLM: _evidence_layer groups refs and blockers without reading their bodies.

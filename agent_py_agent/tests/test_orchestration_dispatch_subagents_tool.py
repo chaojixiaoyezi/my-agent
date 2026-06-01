@@ -106,7 +106,7 @@ class TestDispatchSubagentsToolExecute:
         mock_agent.subagents.workspace = Path("/tmp/workspace")
         mock_agent.subagents.list_runs.return_value = []
 
-        result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False})
+        result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False, "run_ids": ["child-1"]})
 
         assert result.ok is True
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs

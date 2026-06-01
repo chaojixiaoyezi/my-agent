@@ -69,7 +69,7 @@
 - `inspect_agent_tree`、`create_subagents`、`dispatch_subagents`、`schedule_child_subagents` 和 CLI/人工看板这类模型可见状态输出，会统一净化旧式 `data/subagents/...` 路径；旧路径仍留在内部兼容恢复文件中，但不会作为模型可读地址返回。
 - 当前内部编排/状态工具的 tool-output 归档也会写入同一份净化后的模型可见内容；更早生成的旧归档在经 `read_artifact` 展开时会按来源工具再净化一次，避免历史 `create_subagents` / `inspect_agent_tree` 结果把旧路径重新带回上下文。普通 `read_file`、网页、命令输出和用户产物正文保持原文。
 - 旧式 work-order 目录不再作为状态面主路径返回，避免父代理接管时按 `data/subagents/<run_id>/...` 猜旧路径或直接 `read_file` 旧账本。
-- 父级读取子代理结果时，应优先用 `agent_run_workspace`、`final_report_ref`、`artifact_refs` 和 `evidence_refs`，不要自己拼子代理目录。
+- 父级读取子代理结果时，应优先用 `agent_work_dir`、`final_report_ref`、`artifact_refs` 和 `evidence_refs`，不要自己拼子代理目录。
 - 如果模型仍然拿旧路径或抄错路径去读，`read_file/list_files/search_text`
   会返回 `path_not_found=true`、`candidate_paths` 和下一步建议；这只是恢复提示，
   不会自动读取候选、不会申请新权限，也不会把任务改成失败。

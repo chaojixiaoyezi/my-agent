@@ -61,13 +61,13 @@ def build_subagent_compact_continuation_section(request: SubagentCompactContinua
     return "\n".join(lines).rstrip()
 
 
-# LLM: _workspace_refs tolerates older context bundles and derives missing run-workspace refs.
-# 函数用途: 从 context_bundle.workspace_refs 中取路径；缺少细分字段时从 agent_run_workspace 补出标准文件名。
+# LLM: _workspace_refs tolerates older context bundles while preferring the canonical agent_work_dir key.
+# 函数用途: 从 context_bundle.workspace_refs 中取路径；缺少细分字段时从 agent_work_dir 补出标准文件名。
 def _workspace_refs(context: SubAgentExecutionContext) -> dict[str, str]:
     bundle = context.context_bundle if isinstance(context.context_bundle, dict) else {}
     refs = bundle.get("workspace_refs") if isinstance(bundle.get("workspace_refs"), dict) else {}
     values = {str(key): str(value) for key, value in refs.items() if str(value or "").strip()}
-    run_workspace = values.get("agent_run_workspace", "")
+    run_workspace = values.get("agent_work_dir") or values.get("agent_run_workspace", "")
     if run_workspace:
         base = Path(run_workspace)
         values.setdefault("agent_run_task", str(base / "task.md"))

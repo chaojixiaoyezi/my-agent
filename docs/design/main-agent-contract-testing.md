@@ -239,7 +239,7 @@
 
 这层只负责上下文穿透，不负责替模型判断业务结论；最终质量仍由子代理执行、证据 refs 和 closeout 验收负责。
 
-同日下午复验继续暴露一个收口层问题：父级调度返回里已经有每个 child 的摘要和 `output_json`，但这些信息排在庞大的 `records` 后面，模型读取外置 artifact 时可能先被 records 截断，导致协调汇总漏掉某个 child 的发现。修复方向仍是通用的 refs-first 控制面：
+同日下午复验继续暴露一个收口层问题：父级调度返回里已经有每个 child 的摘要和 `run_closeout_ref`，但这些信息排在庞大的 `records` 后面，模型读取外置 artifact 时可能先被 records 截断，导致协调汇总漏掉某个 child 的发现。修复方向仍是通用的 refs-first 控制面：
 
 - `dispatch_subagents` 顶层先返回 `child_result_index`，再返回详细 `records`。
 - `inspect_agent_tree` 顶层返回 `child_result_index`，让父级“只看状态”时同样能先看到 child 摘要和 refs。

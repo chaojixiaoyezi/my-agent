@@ -17,7 +17,7 @@ def test_context_bundle_is_mirrored_into_agent_run_workspace(tmp_path) -> None:
     manager.save(task)
 
     context = manager.write_execution_context(task.id)
-    agent_workspace = Path(context.context_bundle["workspace_refs"]["agent_run_workspace"])
+    agent_workspace = Path(context.context_bundle["workspace_refs"]["agent_work_dir"])
     workspace_json = agent_workspace / "context_bundle.json"
     workspace_md = agent_workspace / "CONTEXT_BUNDLE.md"
     execution_context_md = Path(context.execution_context_file).read_text(encoding="utf-8")

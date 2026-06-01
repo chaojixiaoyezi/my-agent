@@ -11,11 +11,11 @@ from .spawn_role_seed import is_explicit_root_role
 _DISPATCH_FINAL_STATUSES = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
 
 
-# LLM: dispatch_apply_default keeps top-level dispatch safe while runner-context dispatch can actually advance children.
-# 函数用途: 顶层工具省略 dry_run 时继续预览；runner 内部省略 dry_run 时默认推进当前节点直接孩子。
-def dispatch_apply_default(agent, params: dict[str, object]) -> bool:
-    if "apply" in params:
-        return _bool_param(params.get("apply"), default=False)
+# LLM: dispatch_apply_default maps the public dry_run flag to internal apply once at the tool boundary.
+# 函数用途: 顶层省略 dry_run 时继续预览；显式 run_ids 和 runner 内部省略时可推进当前作用域。
+def dispatch_apply_default(agent, params: dict[str, object], *, dry_run: bool | None = None) -> bool:
+    if dry_run is not None and "dry_run" in params:
+        return not dry_run
     if dispatch_include_run_ids_param(params, agent=agent):
         return True
     return bool(current_subagent_run_id(agent))
@@ -24,8 +24,6 @@ def dispatch_apply_default(agent, params: dict[str, object]) -> bool:
 # LLM: dispatch_execute_runners_default maps the single dry_run model flag onto internal runner execution.
 # 函数用途: runner 内部未显式设置 dry_run 时默认真实执行直接 child；顶层仍保持不执行。
 def dispatch_execute_runners_default(agent, params: dict[str, object], *, apply: bool) -> bool:
-    if "execute_runners" in params:
-        return _bool_param(params.get("execute_runners"), default=False)
     if apply and dispatch_include_run_ids_param(params, agent=agent):
         return True
     return bool(apply and current_subagent_run_id(agent))
@@ -63,7 +61,7 @@ def dispatch_workflow_mode(agent, params: dict[str, object], parser) -> str:
 def _explicit_workflow_off_target_dispatch(agent, params: dict[str, object]) -> bool:
     if current_subagent_run_id(agent):
         return False
-    if not _bool_param(params.get("apply"), default=False):
+    if "dry_run" in params and _bool_param(params.get("dry_run"), default=True):
         return False
     run_ids = dispatch_include_run_ids_param(params, agent=agent)
     if not run_ids:
@@ -86,7 +84,7 @@ def _target_workflow_mode(agent, run_id: str) -> str:
 def _top_level_root_role_dispatch(agent, params: dict[str, object]) -> bool:
     if current_subagent_run_id(agent):
         return False
-    if not _bool_param(params.get("apply"), default=False):
+    if "dry_run" in params and _bool_param(params.get("dry_run"), default=True):
         return False
     requested_mode = str(params.get("workflow_mode") or agent.config.subagent_workflow_mode or "").strip().lower()
     if requested_mode not in {"plan", "auto", "manual"}:

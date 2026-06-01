@@ -85,7 +85,8 @@ def test_agent_tree_workspace_refs_hide_legacy_task_dir():
     payload = agent_tree_status_payload(_Agent())
     node = payload["nodes"][0]
 
-    assert node["workspace_refs"]["agent_run_workspace"].endswith("/root-1/work/agents/child-1")
+    assert node["workspace_refs"]["agent_work_dir"].endswith("/root-1/work/agents/child-1")
+    assert node["workspace_refs"]["task_root"].endswith("/root-1")
     assert "legacy_task_dir" not in node["workspace_refs"]
     assert "/data/subagents/" not in str(payload)
 

@@ -50,13 +50,13 @@ def write_context_bundle_files(context: SubAgentExecutionContext) -> None:
     _mirror_context_bundle_to_run_workspace(context)
 
 
-# LLM: _mirror_context_bundle_to_run_workspace gives takeover/resume readers a stable task-local ref.
-# 函数用途: 把 context bundle 同步到 agent run workspace；旧 task_dir 文件仍保留兼容。
+# LLM: _mirror_context_bundle_to_run_workspace writes the bundle to the canonical agent_work_dir.
+# 函数用途: 把 context bundle 同步到当前 agent 工作目录，供接管和 compact 读取。
 def _mirror_context_bundle_to_run_workspace(context: SubAgentExecutionContext) -> None:
     refs = context.context_bundle.get("workspace_refs") if isinstance(context.context_bundle, dict) else {}
     if not isinstance(refs, dict):
         return
-    run_workspace = str(refs.get("agent_run_workspace") or "").strip()
+    run_workspace = str(refs.get("agent_work_dir") or refs.get("agent_run_workspace") or "").strip()
     if not run_workspace:
         return
     target_dir = Path(run_workspace)

@@ -13,7 +13,6 @@ from ..capability_config import CapabilityConfig
 from .orchestration_dispatch_refs import related_task_refs
 from .orchestration_dispatch_scope import dispatch_include_run_ids_param
 from .orchestration_run_scope import remembered_orchestration_run_ids
-from .parameters import _bool_param
 
 
 # LLM: _dispatch_capability_config aligns model-facing due-check with runner timeout policy.
@@ -76,26 +75,6 @@ def _run_ids_actually_dispatched(report) -> list[str]:
     return ids
 
 
-# LLM: _normalized_dispatch_params keeps only dry_run-to-internal execution mapping.
-# 函数用途: 模型可见协议保持扁平；这里只把 dry_run 映射成内部 apply/execute_runners。
-def _normalized_dispatch_params(params: dict[str, object]) -> dict[str, object]:
-    normalized = dict(params or {})
-    _promote_dry_run_param(normalized)
-    return normalized
-
-
-def _promote_dry_run_param(params: dict[str, object]) -> None:
-    if "dry_run" not in params:
-        return
-    dry_run = _bool_param(params.get("dry_run"), default=True)
-    params["apply"] = not dry_run
-    params["execute_runners"] = not dry_run
-    if dry_run:
-        params.setdefault("workflow_mode", "plan")
-    else:
-        params.setdefault("workflow_mode", "off")
-
-
 # LLM: _record_touches_run_scope keeps old acceptance rows out of current-turn memory.
 # 函数用途: dispatch 报告可能包含全局/历史记录；只有本轮 runner/修复动作能扩展范围，旧验收记录不能污染收口。
 def _record_touches_run_scope(record: object) -> bool:
@@ -153,17 +132,19 @@ def _dispatch_top_level_guidance(agent: object, report: object, records: list[di
     return payload
 
 
+# LLM: _dispatch_next_action gives the model one stable next-action label from dispatch blockers.
+# 函数用途: 根据是否存在阻塞项生成继续推进或先修复阻塞 run 的提示动作。
 def _dispatch_next_action(blockers: list[str]) -> str:
     return "repair_or_continue_blocking_run_ids" if blockers else "continue_dispatch_unfinished_run_ids"
 
 
 # LLM: _child_result_index_hint is a soft rework hint, not a delivery gate.
-# 函数用途: 提醒父级优先核对 child 摘要和 output_json refs，避免协调结果漏掉已产出的 child 发现。
+# 函数用途: 提醒父级优先核对 child 摘要和 refs，避免协调结果漏掉已产出的 child 发现。
 def _child_result_index_hint(rows: list[dict[str, object]]) -> str:
     if not rows:
         return ""
     return (
-        "先核对 child_result_index 中每个 child 的 summary、output_json 和 artifact refs；"
+        "先核对 child_result_index 中每个 child 的 summary、final_report_ref 和 artifact refs；"
         "如果协调汇总和 child 摘要冲突，先修复汇总或继续调度，不要只看输出目录或单个协调产物。"
     )
 

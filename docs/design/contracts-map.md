@@ -30,7 +30,7 @@
 - `agent_py_agent/agent/contracts/contract_trace.py`：finding 调试链。
 - `agent_py_agent/agent/agent_core/delivery_requirement_materializer.py`：从普通用户需求物化开放世界 delivery 合同；不再生成 orchestration 硬合同。
 - `agent_py_agent/agent/agent_core/orchestration_shared_context.py`：父级小型读取 brief 进入子代理 `context_packs` 的通用桥接层；工具刚成功返回时可直接缓存，归档扫描作为补充，只传摘要和 refs，不写业务专项字段。
-- `agent_py_agent/agent/agent_core/orchestration_dispatch_refs.py`：父级调度结果索引层；从本轮 touched run 和 runner-created child 汇总状态、摘要、`output_json` 和产物 refs，供 `dispatch_subagents` / `inspect_agent_tree` 在长记录前先展示关键机器事实。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_refs.py`：父级调度结果索引层；从本轮 touched run 和 runner-created child 汇总状态、摘要、`run_closeout_ref` 和产物 refs，供 `dispatch_subagents` / `inspect_agent_tree` 在长记录前先展示关键机器事实。
 - `agent_py_agent/agent/agent_core/orchestration_scope_resolution.py`：编排身份裁决层；`inspect_agent_tree` / `dispatch_subagents` 在显式 run/root/parent 参数与当前 runner 上下文冲突时输出 `scope_resolution/scope_warnings`，让权限收窄可见，不靠线程 current 静默猜身份。
 - `agent_py_agent/agent/agent_core/orchestration_sibling_roster.py`：同批子代理身份索引层；批量创建后把 peer `run_id/name/role/goal` 写入 `sibling_roster` context pack，解决同批兄弟彼此不可见的问题。它只提供索引，不发布未来产物路径，也不制造等待关系。
 - `agent_py_agent/agent/agent_core/orchestration_create_items.py`：批量子代理参数解析层；只把 `items` 解析成独立任务 bundle，不再拒绝 sibling 共享输出，也不再从输入/输出路径推断批次依赖。父级显式给 item 的 read refs 会原样保留为读线索；路径不存在不会卡启动。

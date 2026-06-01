@@ -86,11 +86,11 @@ def _compactions_dir(task: SubAgentTask) -> Path | None:
     return Path(value) if value else None
 
 
-# LLM: _restore_refs maps every stable resume file without checking artifact bodies.
-# 函数用途: 输出父级/接管代理可读取的 run workspace、旧工单和共享工作区路径引用。
+# LLM: _restore_refs maps stable resume files without exposing legacy work-order paths.
+# 函数用途: 输出父级/接管代理可读取的当前 agent 工作目录、compact 和共享工作区路径引用。
 def _restore_refs(task: SubAgentTask) -> dict[str, str]:
     pairs = {
-        "agent_run_workspace": task.agent_run_workspace_dir,
+        "agent_work_dir": task.agent_run_workspace_dir,
         "agent_run_task": task.agent_run_task_md,
         "agent_run_checkpoint": task.agent_run_checkpoint_json,
         "agent_run_summary": task.agent_run_summary_md,
@@ -106,8 +106,6 @@ def _restore_refs(task: SubAgentTask) -> dict[str, str]:
         "agent_run_latest_session_continue_packet": task.agent_run_latest_session_continue_packet_json,
         "agent_run_tool_progress": _tool_progress_ref(task),
         "agent_run_latest_tool_progress": _latest_tool_progress_ref(task),
-        "legacy_task_dir": task.task_dir,
-        "legacy_checkpoint": task.checkpoint_json or task.checkpoint_ref,
         "runner_result": task.runner_result_json,
         "output_json": task.output_json,
         "takeover_readiness": task.takeover_readiness_json,

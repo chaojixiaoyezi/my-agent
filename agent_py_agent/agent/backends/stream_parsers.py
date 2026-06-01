@@ -19,9 +19,10 @@ class StreamEvent:
     usage: dict[str, Any] | None = None
 
 
-# LLM: openai_stream_contents 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 函数用途: 处理openai流式contents相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+# LLM: openai_stream_contents is the compatibility view for callers that only need visible text.
+# 函数用途: 从 OpenAI-compatible SSE 中只产出文本内容，usage 由 stream_events 入口处理。
 def openai_stream_contents(lines: Iterable[str]) -> Iterator[str]:
+    """Yield visible text chunks from OpenAI-compatible SSE data lines."""
     for event in openai_stream_events(lines):
         if event.content:
             yield event.content
@@ -43,9 +44,10 @@ def openai_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
             yield StreamEvent(content=str(content or ""), usage=usage or None)
 
 
-# LLM: anthropic_stream_contents 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 函数用途: 处理anthropic流式contents相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+# LLM: anthropic_stream_contents is the compatibility view for callers that only need visible text.
+# 函数用途: 从 Anthropic-compatible SSE 中只产出文本内容，usage 由 stream_events 入口处理。
 def anthropic_stream_contents(lines: Iterable[str]) -> Iterator[str]:
+    """Yield visible text chunks from Anthropic-compatible SSE data lines."""
     for event in anthropic_stream_events(lines):
         if event.content:
             yield event.content
@@ -67,9 +69,10 @@ def anthropic_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
             yield StreamEvent(content=str(text or ""), usage=usage or None)
 
 
-# LLM: json_object_or_none 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 函数用途: 处理JSONobjectnone相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模型请求参数、流式解析和错误传播上的返回值和副作用边界稳定。
+# LLM: json_object_or_none is the tolerant JSON boundary for SSE data frames.
+# 函数用途: 解析单行 JSON 对象；空心跳、坏 JSON 和非对象值都返回 None 让调用方跳过。
 def json_object_or_none(line: str) -> dict[str, Any] | None:
+    """Parse one SSE data line as a JSON object, ignoring malformed keepalives."""
     try:
         obj = json.loads(line)
     except json.JSONDecodeError:

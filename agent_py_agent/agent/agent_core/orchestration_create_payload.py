@@ -134,7 +134,8 @@ def _task_payload(task: object) -> dict[str, object]:
         "goal": _task_text(task, "goal"),
         "status": _task_text(task, "status"),
         "verification_status": _task_text(task, "verification_status"),
-        "task_dir": _task_text(task, "task_dir"),
+        "task_root": _task_text(task, "task_workspace_dir") or _task_text(task, "task_dir"),
+        "agent_work_dir": _task_text(task, "agent_run_workspace_dir"),
         "attributes": _task_attributes(task),
     }
 

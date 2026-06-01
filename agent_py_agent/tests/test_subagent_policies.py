@@ -47,7 +47,7 @@ def test_filter_board_items_by_status():
             updated_at=0, heartbeat_at=0, evidence_count=0,
             open_request_count=0, open_gap_count=0, child_count=0,
             takeover_by="", locked_file_count=0, risk_flags=[],
-            task_dir="", output_json="",
+            task_root="", final_report_ref="",
         ),
         SubAgentBoardItem(
             id="r2", root_id="root1", parent_id="", depth=0,
@@ -56,7 +56,7 @@ def test_filter_board_items_by_status():
             updated_at=0, heartbeat_at=0, evidence_count=0,
             open_request_count=0, open_gap_count=0, child_count=0,
             takeover_by="", locked_file_count=0, risk_flags=[],
-            task_dir="", output_json="",
+            task_root="", final_report_ref="",
         ),
     ]
     filtered = filter_board_items(items, status="running")
@@ -74,7 +74,7 @@ def test_filter_board_items_by_owner():
             updated_at=0, heartbeat_at=0, evidence_count=0,
             open_request_count=0, open_gap_count=0, child_count=0,
             takeover_by="", locked_file_count=0, risk_flags=[],
-            task_dir="", output_json="",
+            task_root="", final_report_ref="",
         ),
         SubAgentBoardItem(
             id="r2", root_id="root1", parent_id="", depth=0,
@@ -83,7 +83,7 @@ def test_filter_board_items_by_owner():
             updated_at=0, heartbeat_at=0, evidence_count=0,
             open_request_count=0, open_gap_count=0, child_count=0,
             takeover_by="", locked_file_count=0, risk_flags=[],
-            task_dir="", output_json="",
+            task_root="", final_report_ref="",
         ),
     ]
     filtered = filter_board_items(items, owner="alice")
@@ -100,7 +100,7 @@ def test_filter_board_items_by_root_id():
             updated_at=0, heartbeat_at=0, evidence_count=0,
             open_request_count=0, open_gap_count=0, child_count=0,
             takeover_by="", locked_file_count=0, risk_flags=[],
-            task_dir="", output_json="",
+            task_root="", final_report_ref="",
         ),
         SubAgentBoardItem(
             id="r2", root_id="root-b", parent_id="", depth=0,
@@ -109,7 +109,7 @@ def test_filter_board_items_by_root_id():
             updated_at=0, heartbeat_at=0, evidence_count=0,
             open_request_count=0, open_gap_count=0, child_count=0,
             takeover_by="", locked_file_count=0, risk_flags=[],
-            task_dir="", output_json="",
+            task_root="", final_report_ref="",
         ),
     ]
     filtered = filter_board_items(items, root_id="root-a")
@@ -127,7 +127,7 @@ def test_filter_board_items_no_filter():
             updated_at=0, heartbeat_at=0, evidence_count=0,
             open_request_count=0, open_gap_count=0, child_count=0,
             takeover_by="", locked_file_count=0, risk_flags=[],
-            task_dir="", output_json="",
+            task_root="", final_report_ref="",
         ),
         SubAgentBoardItem(
             id="r2", root_id="root1", parent_id="", depth=0,
@@ -136,7 +136,7 @@ def test_filter_board_items_no_filter():
             updated_at=0, heartbeat_at=0, evidence_count=0,
             open_request_count=0, open_gap_count=0, child_count=0,
             takeover_by="", locked_file_count=0, risk_flags=[],
-            task_dir="", output_json="",
+            task_root="", final_report_ref="",
         ),
     ]
     filtered = filter_board_items(items)
@@ -524,7 +524,7 @@ def test_filter_board_items_mixed_inspect_collaboration():
             updated_at=0, heartbeat_at=0, evidence_count=0,
             open_request_count=0, open_gap_count=0, child_count=0,
             takeover_by="", locked_file_count=0, risk_flags=[],
-            task_dir="", output_json="",
+            task_root="", final_report_ref="",
         ),
     ]
     filtered = filter_board_items(items, status="running")

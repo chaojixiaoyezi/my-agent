@@ -14,6 +14,8 @@ control-plane 已有字段整理成一个稳定快照，后续恢复、QA、验�
 from pathlib import Path
 from typing import Any
 
+# LLM: Kernel snapshots reuse the same canonical workspace_refs helper as context bundles.
+from .context_bundle_refs import workspace_refs as model_workspace_refs
 from .kernel_models import SubagentKernelQuery, SubagentKernelRun, SubagentKernelSnapshot
 from .models import SubAgentTask
 from .protocol import build_task_address, build_task_envelope
@@ -154,7 +156,7 @@ def _task_to_kernel_run(
         child_ids=list(task.child_ids),
         address=build_task_address(task, all_tasks=all_tasks).to_dict() if include_refs else {},
         task_envelope=build_task_envelope(task, all_tasks=all_tasks).to_dict() if include_refs else {},
-        workspace_refs=_workspace_refs(task) if include_refs else {},
+        workspace_refs=model_workspace_refs(task) if include_refs else {},
         recovery_refs=_recovery_refs(task) if include_refs else {},
         tool_contract=_tool_contract(task) if include_refs else {},
         artifact_refs=list(task.artifact_refs),
@@ -163,23 +165,6 @@ def _task_to_kernel_run(
         blockers=list(task.blockers),
         reserved=_task_reserved(task) if include_refs else {},
     )
-
-
-# LLM: _workspace_refs centralizes task/run workspace refs used by upper agents.
-# 函数用途: 返回任务目录、runtime task workspace 和 agent run workspace 路径引用。
-def _workspace_refs(task: SubAgentTask) -> dict[str, str]:
-    # LLM: prefer runtime task workspace; legacy work-order dirs stay in recovery/debug files, not model-facing status refs.
-    current_task_dir = task.task_workspace_dir or task.task_dir
-    refs = {
-        "task_dir": current_task_dir,
-        "task_workspace": task.task_workspace_dir,
-        "agent_run_workspace": task.agent_run_workspace_dir,
-        "shared_blackboard": task.task_workspace_shared_blackboard,
-        "inbox": task.agent_run_inbox_dir,
-        "outbox": task.agent_run_outbox_dir,
-        "final_report": task.agent_run_final_report_md,
-    }
-    return {key: value for key, value in refs.items() if value}
 
 
 # LLM: _recovery_refs groups checkpoint, compact, handoff, and continue packet refs.
@@ -214,6 +199,8 @@ def _tool_contract(task: SubAgentTask) -> dict[str, object]:
     }
 
 
+# LLM: _artifact_registry_refs exposes registered artifacts as refs without trusting free-text paths.
+# 函数用途: 从 task attributes 读取 artifact registry 记录，去重并限制数量后给 tree/kernel 使用。
 def _artifact_registry_refs(task: SubAgentTask, *, limit: int = 12) -> list[dict[str, object]]:
     attrs = dict(getattr(task, "attributes", {}) or {})
     value = attrs.get("artifact_registry_refs")
@@ -302,7 +289,7 @@ def _snapshot_root_id(tasks: list[SubAgentTask], query: SubagentKernelQuery) -> 
     return ""
 
 
-# LLM: _snapshot_source_refs reports where the kernel view came from.
+# LLM: _snapshot_source_refs reports canonical task/work/output roots, not legacy work-order dirs.
 # 函数用途: 给调试和后续接管说明当前快照基于哪些 workspace 文件。
 def _snapshot_source_refs(tasks: list[SubAgentTask]) -> dict[str, str]:
     if not tasks:
@@ -311,9 +298,10 @@ def _snapshot_source_refs(tasks: list[SubAgentTask]) -> dict[str, str]:
     return {
         key: value
         for key, value in {
-            "root_task_dir": root.task_workspace_dir or root.task_dir,
-            "root_task_workspace": root.task_workspace_dir,
-            "root_agent_run_workspace": root.agent_run_workspace_dir,
+            "root_task": root.task_workspace_dir,
+            "root_work": str(Path(root.task_workspace_dir) / "work") if root.task_workspace_dir else "",
+            "root_output": str(Path(root.task_workspace_dir) / "output") if root.task_workspace_dir else "",
+            "root_agent_work": root.agent_run_workspace_dir,
         }.items()
         if value
     }

@@ -35,8 +35,8 @@ def _child_result_row(task: object) -> dict[str, object]:
         "expected_outputs": expected_outputs,
         "primary_artifact_refs": primary_artifact_refs,
         "artifact_registry_refs": artifacts,
-        "output_json": _task_text(task, "output_json"),
-        "task_dir": _task_text(task, "task_dir"),
+        "final_report_ref": _task_text(task, "agent_run_final_report_md") or _task_text(task, "output_json"),
+        "task_root": _task_text(task, "task_workspace_dir"),
     }
 
 
@@ -58,8 +58,8 @@ def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
         "expected_outputs": [],
         "primary_artifact_refs": list(dict.fromkeys(primary_refs)),
         "artifact_registry_refs": registry_refs,
-        "output_json": "",
-        "task_dir": str(workspace_refs.get("task_workspace") or workspace_refs.get("task_dir") or "").strip(),
+        "final_report_ref": "",
+        "task_root": str(workspace_refs.get("task_root") or "").strip(),
     }
 
 

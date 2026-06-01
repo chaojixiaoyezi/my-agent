@@ -145,8 +145,8 @@ def _task_result_ref_row(task: object, *, per_run_artifact_limit: int) -> dict[s
         "primary_artifact_registry_refs": registry_records,
         "primary_artifact_summaries": _output_artifact_summaries(output_payload, limit=per_run_artifact_limit),
         "evidence_refs": evidence,
-        "output_json": str(getattr(task, "output_json", "") or ""),
-        "runner_result_json": str(getattr(task, "runner_result_json", "") or ""),
+        "run_closeout_ref": str(getattr(task, "output_json", "") or ""),
+        "runner_result_ref": str(getattr(task, "runner_result_json", "") or ""),
     }
 
 

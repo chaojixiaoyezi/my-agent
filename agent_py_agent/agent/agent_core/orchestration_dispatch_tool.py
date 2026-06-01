@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..action_protocol import subagent_dispatch_envelope_from_payload
@@ -56,45 +57,49 @@ def _legacy_execution_param_error(params: dict[str, object]) -> str:
     )
 
 
-# LLM: DispatchSubagentsTool must keep dispatch params, runner execution, and recovery payloads stable.
-# 类用途: 提供 dispatch_subagents 模型工具入口，按父子作用域推进可运行的子代理，并把错误 run id 的恢复线索放到顶层。
+# LLM: DispatchToolRequest is the sole boundary conversion result for dispatch_subagents.
+# 类用途: 保存原始模型参数和内部 DispatchParams，避免后续层继续读取散字段。
+@dataclass(frozen=True)
+class DispatchToolRequest:
+    """Boundary object for one model-visible dispatch_subagents call."""
+
+    model_params: dict[str, object]
+    dispatch_params: DispatchParams
+
+
+# LLM: DispatchSubagentsTool is the only model-visible dispatch boundary.
+# 类用途: 把模型的一次 dispatch_subagents 调用转成 DispatchParams，然后交给内部 dispatch 服务；模型只看到 dry_run 一个执行开关。
 class DispatchSubagentsTool(BaseTool):
 
-    # LLM: __init__ wires a SimpleAgent facade to the dispatch tool spec.
-    # 函数用途: 初始化调度工具依赖和模型可见 spec，后续 execute 会使用同一个 agent 状态。
+    # LLM: __init__ only binds the owning agent and static tool schema.
+    # 函数用途: 初始化 dispatch_subagents 工具实例，不解析任何运行时参数。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.spec = build_dispatch_subagents_spec()
 
-    # LLM: execute runs dispatch planning or runner execution through the manager-owned service.
-    # 函数用途: 解析调度参数、把 dry_run 换算为内部执行开关、调用 agent.dispatch_subagents，并返回 JSON 报告。
+    # LLM: execute parses model params once and never lets legacy execution aliases leak further.
+    # 函数用途: 解析调度参数、调用 agent.dispatch_subagents，并返回 refs-first JSON 报告。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         legacy_error = _legacy_execution_param_error(params)
         if legacy_error:
             return ToolExecutionResult("dispatch_subagents", False, legacy_error)
-        params = _normalized_dispatch_params(params)
-        apply = dispatch_apply_default(self.agent, params)
-        execute_runners = dispatch_execute_runners_default(self.agent, params, apply=apply)
-        if execute_runners and not apply:
-            return ToolExecutionResult(
-                "dispatch_subagents",
-                False,
-                "内部执行参数不一致；模型调用 dispatch_subagents 时只需要传 dry_run。",
-            )
-
-        dispatch_params = self._dispatch_params(params, apply, execute_runners)
-        guidance_ids = _persist_dispatch_guidance(self.agent, dispatch_params)
+        request = self._request(params)
+        guidance_ids = _persist_dispatch_guidance(self.agent, request.dispatch_params)
         cfg, router = self._router()
         report = self.agent.dispatch_subagents(
             router,
             cfg,
-            params=dispatch_params,
+            params=request.dispatch_params,
         )
-        scoped_run_ids = _run_ids_for_scope(params, report, agent=self.agent)
+        scoped_run_ids = _run_ids_for_scope(request.model_params, report, agent=self.agent)
         dispatched_run_ids = _run_ids_actually_dispatched(report)
         remember_orchestration_run_ids(self.agent, scoped_run_ids)
         remember_dispatched_orchestration_run_ids(self.agent, dispatched_run_ids)
-        payload = self._report_payload(report, params=params, dispatch_params=dispatch_params)
+        payload = self._report_payload(
+            report,
+            params=request.model_params,
+            dispatch_params=request.dispatch_params,
+        )
         if guidance_ids:
             payload["guidance_ids"] = guidance_ids
         return ToolExecutionResult("dispatch_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
@@ -106,8 +111,22 @@ class DispatchSubagentsTool(BaseTool):
         tool_specs = [spec for spec in self.agent.tools.specs() if spec.category != "orchestration"]
         return cfg, CapabilityRouter(config=cfg, tool_specs=tool_specs)
 
-    # LLM: _dispatch_params is the bundle boundary from model params into dispatch service params.
-# 函数用途: 把模型传入的散字段收敛成 DispatchParams，集中处理父级作用域、执行开关和 run id 过滤。
+    # LLM: _request is the only conversion point from model JSON into dispatch internals.
+    # 函数用途: 把模型参数收敛成 DispatchToolRequest；内部只继续传 DispatchParams。
+    def _request(self, params: dict[str, object]) -> DispatchToolRequest:
+        model_params = dict(params or {})
+        dry_run = _bool_param(model_params.get("dry_run"), default=True)
+        apply = dispatch_apply_default(self.agent, model_params, dry_run=dry_run)
+        execute_runners = dispatch_execute_runners_default(self.agent, model_params, apply=apply)
+        if execute_runners and not apply:
+            raise ValueError("dispatch_subagents internal execution mode is inconsistent")
+        return DispatchToolRequest(
+            model_params=model_params,
+            dispatch_params=self._dispatch_params(model_params, apply, execute_runners),
+        )
+
+    # LLM: _dispatch_params builds the one internal parameter object passed through dispatch layers.
+    # 函数用途: 集中处理父级作用域、执行开关和 run id 过滤；调用后不再重新解析模型散字段。
     def _dispatch_params(
         self,
         params: dict[str, object],
@@ -182,7 +201,6 @@ from .orchestration_dispatch_tool_helpers import (
     _child_result_index_hint,
     _dispatch_capability_config,
     _dispatch_top_level_guidance,
-    _normalized_dispatch_params,
     _run_ids_actually_dispatched,
     _run_ids_for_scope,
 )

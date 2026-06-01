@@ -20,10 +20,13 @@ from .base import (
     get_backend,
 )
 from .errors import (
+    ProviderRecoverableError,
     ProviderTimeoutError,
     ProviderTransientError,
+    is_provider_recoverable_error,
     is_provider_timeout_error,
     is_provider_transient_error,
+    provider_recoverable_report,
     provider_timeout_report,
     provider_transient_report,
 )
@@ -36,11 +39,14 @@ __all__ = [
     "HttpBackend",
     "ModelResponse",
     "OpenAICompatibleBackend",
+    "ProviderRecoverableError",
     "ProviderTimeoutError",
     "ProviderTransientError",
     "get_backend",
+    "is_provider_recoverable_error",
     "is_provider_timeout_error",
     "is_provider_transient_error",
+    "provider_recoverable_report",
     "provider_timeout_report",
     "provider_transient_report",
 ]

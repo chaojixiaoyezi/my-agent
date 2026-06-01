@@ -38,7 +38,7 @@ def output_contract(task: SubAgentTask) -> dict[str, object]:
         "final_report_ref": _preferred_final_report_ref(task, components.required_file_refs),
         "agent_run_final_report_ref": safe_string_ref(task, "agent_run_final_report_md") or safe_string_ref(task, "debrief_file"),
         "runner_result_ref": safe_string_ref(task, "runner_result_json"),
-        "output_json_ref": safe_string_ref(task, "output_json"),
+        "run_closeout_ref": safe_string_ref(task, "output_json"),
         "declared_output_refs": declared_output_refs(task),
         "required_files": components.required_files,
         "forbidden_files": components.forbidden_files,
@@ -86,11 +86,11 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
             "allowed_skills": list(task.allowed_skills or []),
             "canonical_tool_names": True,
             "path_argument": "path",
-            "output_json_ref": safe_string_ref(task, "output_json"),
+            "run_closeout_ref": safe_string_ref(task, "output_json"),
         },
         "workspace_refs": {
-            "task_dir": refs.get("task_dir", ""),
-            "agent_run_workspace": refs.get("agent_run_workspace", ""),
+            "task_root": refs.get("task_root", ""),
+            "agent_work_dir": refs.get("agent_work_dir", ""),
             "context_bundle_json": _context_bundle_json_ref(refs),
             "latest_continue_packet": refs.get("agent_run_latest_continue_packet", ""),
         },
@@ -257,10 +257,10 @@ def render_task_packet_lines(packet: dict[str, object]) -> list[str]:
     ]
 
 
-# LLM: _context_bundle_json_ref derives the standard context bundle path from agent_run_workspace.
+# LLM: _context_bundle_json_ref derives the standard context bundle path from agent_work_dir.
 # 函数用途: 只从 refs 构造路径字符串，不访问文件系统。
 def _context_bundle_json_ref(refs: dict[str, str]) -> str:
-    workspace = refs.get("agent_run_workspace", "")
+    workspace = refs.get("agent_work_dir", "") or refs.get("agent_run_workspace", "")
     return str(Path(workspace) / "context_bundle.json") if workspace else ""
 
 

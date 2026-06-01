@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import time
 
-from ..agent.backends import ProviderTimeoutError, ProviderTransientError
+from ..agent.backends import ProviderRecoverableError
 from ..agent.gateway import (
     gateway_paths,
     gateway_request_counts,
@@ -42,8 +42,7 @@ from .models import LocalSearchOptions, TimelineOptions
 from .run_output import (
     make_run_chunk_writer,
     print_run_result,
-    provider_timeout_cli_report,
-    provider_transient_cli_report,
+    provider_recoverable_cli_report,
     run_exit_code,
 )
 from .thinking_spinner import ThinkingSpinner
@@ -154,11 +153,8 @@ def cmd_run(args) -> int:
             recovery_next_actions=_default_run_recovery_next_actions(),
             on_chunk=on_chunk,
         )
-    except ProviderTimeoutError as exc:
-        print(provider_timeout_cli_report(agent, exc))
-        return 2
-    except ProviderTransientError as exc:
-        print(provider_transient_cli_report(exc))
+    except ProviderRecoverableError as exc:
+        print(provider_recoverable_cli_report(agent, exc))
         return 2
     finally:
         spinner.stop()

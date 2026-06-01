@@ -6,10 +6,8 @@ from __future__ import annotations
 import sys
 
 from ..agent.backends import (
-    ProviderTimeoutError,
-    ProviderTransientError,
-    provider_timeout_report,
-    provider_transient_report,
+    ProviderRecoverableError,
+    provider_recoverable_report,
 )
 from .thinking_spinner import ThinkingSpinner
 
@@ -59,19 +57,13 @@ def run_exit_code(result) -> int:
     return 0 if status in {"", "ok", "succeeded"} else 2
 
 
-# LLM: provider_timeout_cli_report converts backend timeout exceptions into a readable command result.
-# 函数用途: 顶层 run 超时时输出恢复提示并退出，不让用户面对长堆栈或沉默等待。
-def provider_timeout_cli_report(agent, exc: ProviderTimeoutError) -> str:
-    return provider_timeout_report(
+# LLM: provider_recoverable_cli_report converts typed provider failures into one readable CLI result.
+# 函数用途: 顶层 run 遇到 timeout/429/5xx/断线时，用统一恢复提示退出，避免各入口重复分类。
+def provider_recoverable_cli_report(agent, exc: ProviderRecoverableError) -> str:
+    return provider_recoverable_report(
         exc,
         timeout_seconds=getattr(getattr(agent, "config", None), "request_timeout", ""),
     )
-
-
-# LLM: provider_transient_cli_report keeps rate-limit/network flake messages readable at the CLI boundary.
-# 函数用途: 顶层 run 遇到 provider 临时失败时，输出可恢复说明而不是 Python 堆栈。
-def provider_transient_cli_report(exc: ProviderTransientError) -> str:
-    return provider_transient_report(exc)
 
 
 # LLM: _should_print_final_response separates streamed-visible text from hidden post-tool final responses.

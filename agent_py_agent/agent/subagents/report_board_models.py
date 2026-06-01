@@ -8,11 +8,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-# LLM: SubAgentBoardItem 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存subagent看板条目字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
+# LLM: SubAgentBoardItem is an operator-facing row; model tools should prefer inspect_agent_tree.
+# 类用途: 保存看板行的当前状态、进度、产物引用和时间信息；不携带旧 work-order 路径。
 @dataclass
 class SubAgentBoardItem:
-    """瀛愪唬鐞嗙湅鏉块噷鐨勪竴琛屾満鍣ㄤ簨瀹炪€?"""
+    """One subagent status row for dashboards and startup recovery."""
 
     id: str
     root_id: str
@@ -34,16 +34,14 @@ class SubAgentBoardItem:
     takeover_by: str
     locked_file_count: int
     risk_flags: list[str]
-    task_dir: str
-    output_json: str
-    # LLM: workspace refs let board/tree users inspect current paths without guessing from legacy task_dir.
-    task_workspace: str = ""
-    agent_run_workspace: str = ""
-    legacy_task_dir: str = ""
-    legacy_output_json: str = ""
+    task_root: str
+    final_report_ref: str
+    # Current-layout workspace refs; old work-order paths are intentionally omitted.
+    task_work_dir: str = ""
+    task_output_dir: str = ""
+    agent_work_dir: str = ""
     checkpoint_ref: str = ""
     summary_ref: str = ""
-    final_report_ref: str = ""
     latest_tool_progress_ref: str = ""
     agent_name: str = ""
     role: str = ""
@@ -68,11 +66,11 @@ class SubAgentBoardItem:
     seconds_since_progress: float = 0.0
 
 
-# LLM: SubAgentBoard 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存subagent看板字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
+# LLM: SubAgentBoard is a compact dashboard snapshot, not the task tree authority.
+# 类用途: 保存看板摘要、风险行和最近行；真实层级状态以 kernel/inspect_agent_tree 为准。
 @dataclass
 class SubAgentBoard:
-    """瀛愪唬鐞嗙湅鏉匡紝鍏奸【鏈哄櫒璇诲彇鍜屼汉绫绘壂瑙嗐€?"""
+    """Subagent dashboard snapshot for humans and startup recovery."""
 
     generated_at: float
     summary: dict[str, int]
@@ -81,11 +79,11 @@ class SubAgentBoard:
     items: list[SubAgentBoardItem]
 
 
-# LLM: DueCheckIssue 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存到期检查issue字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
+# LLM: DueCheckIssue is one stale/blocking signal surfaced to humans and recovery tools.
+# 类用途: 保存一个子代理看板问题的状态、建议动作和相关 refs。
 @dataclass
 class DueCheckIssue:
-    """鐖朵唬鐞嗗贰妫€鍙戠幇鐨勪竴鏉″緟澶勭悊闂銆?"""
+    """One due-check issue for a stale, blocked, or risky subagent run."""
 
     run_id: str
     severity: str
@@ -109,22 +107,22 @@ class DueCheckIssue:
     created_at: float = 0.0
 
 
-# LLM: DueCheckReport 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存到期检查报告字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+# LLM: DueCheckReport groups due-check issues without mutating subagent state.
+# 类用途: 保存一次 due-check 扫描的摘要和问题列表。
 @dataclass
 class DueCheckReport:
-    """鐖朵唬鐞?due-check 鎶ュ憡銆?"""
+    """Due-check summary plus issue rows."""
 
     generated_at: float
     summary: dict[str, int]
     issues: list[DueCheckIssue]
 
 
-# LLM: ActionPlanItem 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存动作计划条目字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
+# LLM: ActionPlanItem is a proposed action, not permission to execute it.
+# 类用途: 描述一个可审核的恢复/推进动作及其理由、范围和确认要求。
 @dataclass
 class ActionPlanItem:
-    """鐢?due-check 杞嚭鏉ョ殑涓€鏉?dry-run 鍔ㄤ綔銆?"""
+    """One proposed recovery/action item derived from due-check findings."""
 
     id: str
     run_id: str
@@ -150,22 +148,22 @@ class ActionPlanItem:
     created_at: float = 0.0
 
 
-# LLM: ActionPlanReport 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存动作计划报告字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+# LLM: ActionPlanReport packages proposed actions for review before any apply step.
+# 类用途: 保存一次 action planning 的摘要和候选动作。
 @dataclass
 class ActionPlanReport:
-    """鐖朵唬鐞嗗姩浣滆鍒掓姤鍛娿€?"""
+    """Action-plan report for dry-run review or explicit apply."""
 
     generated_at: float
     summary: dict[str, int]
     actions: list[ActionPlanItem]
 
 
-# LLM: ActionApplyRecord 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存动作应用记录字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+# LLM: ActionApplyRecord is the audit row for one previewed or applied action.
+# 类用途: 记录单个恢复动作是否 dry-run、是否实际应用以及状态变化。
 @dataclass
 class ActionApplyRecord:
-    """涓€娆?action apply 鐨勫璁¤褰曘€?"""
+    """Audit row for one applied or previewed action-plan item."""
 
     id: str
     action_id: str
@@ -189,11 +187,11 @@ class ActionApplyRecord:
     created_at: float = 0.0
 
 
-# LLM: ActionApplyReport 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存动作应用报告字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+# LLM: ActionApplyReport is the aggregate audit result for action application.
+# 类用途: 保存一次 apply/dry-run 的总体摘要和每条动作记录。
 @dataclass
 class ActionApplyReport:
-    """action apply 鎶ュ憡銆?"""
+    """Action-apply report for recovery audit and dashboard display."""
 
     generated_at: float
     dry_run: bool
@@ -201,11 +199,11 @@ class ActionApplyReport:
     records: list[ActionApplyRecord]
 
 
-# LLM: CapabilityRouteRecord 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存能力route记录字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+# LLM: CapabilityRouteRecord records one capability request routing decision.
+# 类用途: 保存能力请求匹配、授予、缺口和 dry-run 边界信息。
 @dataclass
 class CapabilityRouteRecord:
-    """涓€娆?capability request 璺敱璁板綍銆?"""
+    """One capability-request routing decision."""
 
     id: str
     run_id: str
@@ -227,11 +225,11 @@ class CapabilityRouteRecord:
     created_at: float = 0.0
 
 
-# LLM: CapabilityRouteReport 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存能力route报告字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+# LLM: CapabilityRouteReport aggregates capability routing decisions for the board.
+# 类用途: 保存一次能力路由扫描的摘要和多条路由记录。
 @dataclass
 class CapabilityRouteReport:
-    """鑳藉姏璇锋眰璺敱鎶ュ憡銆?"""
+    """Capability routing summary plus selected grants."""
 
     generated_at: float
     dry_run: bool

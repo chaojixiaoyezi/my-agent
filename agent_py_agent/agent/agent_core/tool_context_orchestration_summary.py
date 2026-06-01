@@ -162,7 +162,7 @@ def _result_refs_by_run_lines(value: object) -> list[str]:
         artifact_ids = _json_inline(item.get("primary_artifact_ids") or [])
         artifacts = _json_inline(item.get("primary_artifact_refs") or [])
         artifact_summaries = item.get("primary_artifact_summaries") or []
-        output_json = item.get("output_json", "")
+        run_closeout_ref = item.get("run_closeout_ref") or item.get("output_json", "")
         summary = _clip(item.get("summary", ""), limit=220)
         lines.append(
             f"  - run_id={run_id} status={status} "
@@ -170,11 +170,14 @@ def _result_refs_by_run_lines(value: object) -> list[str]:
         )
         if artifact_summaries:
             lines.append(f"    artifact_summaries={_json_inline(artifact_summaries)}")
-        if output_json:
-            lines.append(f"    output_json={output_json}")
+        if run_closeout_ref:
+            lines.append(f"    run_closeout_ref={run_closeout_ref}")
         if summary:
             lines.append(f"    summary={summary}")
-    lines.append("- result_ref_policy: read primary_artifact_refs or output_json from result_refs_by_run; do not guess child filenames.")
+    lines.append(
+        "- result_ref_policy: read primary_artifact_refs or run_closeout_ref from result_refs_by_run; "
+        "do not guess child filenames."
+    )
     return lines
 
 

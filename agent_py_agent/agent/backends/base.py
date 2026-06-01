@@ -25,10 +25,11 @@ from .usage_metadata import (
 )
 
 
-# LLM: ModelResponse 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 类用途: 集中保存模型响应字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+# LLM: ModelResponse is the stable return envelope from all backend adapters.
+# 类用途: 保存模型文本、后端名、运行状态和 usage 元数据，供运行循环统一消费。
 @dataclass
 class ModelResponse:
+    """Normalized model response returned to the agent runtime."""
 
     text: str
     backend: str
@@ -37,9 +38,8 @@ class ModelResponse:
     runtime_source: str = ""
     usage: dict[str, Any] = field(default_factory=dict)
 
-
-# LLM: BackendOptions 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 类用途: 集中保存后端选项字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+# LLM: BackendOptions is the one config bundle passed into HTTP backends.
+# 类用途: 保存 provider 连接、模型名、超时、生成参数和流式开关。
 @dataclass(frozen=True)
 class BackendOptions:
     """Connection and generation options shared by HTTP model backends."""
@@ -53,29 +53,31 @@ class BackendOptions:
     stream_enabled: bool = True
 
 
-# LLM: BaseBackend 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 类用途: 适配基础后端协议，把模型请求响应归一到内部后端契约；关键副作用: 方法可能触发模型请求参数、流式解析和错误传播相关副作用，需保持公开契约稳定。
+# LLM: BaseBackend is the adapter protocol implemented by every model backend.
+# 类用途: 规定 generate() 返回 ModelResponse，避免核心运行循环知道各厂商协议。
 class BaseBackend:
     """所有后端适配器都要实现的基类接口。"""
 
     name = "base"
 
-    # LLM: generate 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-    # 函数用途: 提交提示词并返回归一化模型响应，供运行循环继续消费；关键副作用: 需保持模型请求参数、流式解析和错误传播上的返回值和副作用边界稳定。
+    # LLM: BaseBackend.generate is the single generation method used by the runtime.
+    # 函数用途: 子类实现一次模型请求；返回统一响应对象，错误走 provider typed exceptions。
     def generate(
         self, prompt: str, on_chunk: Callable[[str], None] | None = None
     ) -> ModelResponse:
+        """Generate one assistant response for the supplied prompt."""
         raise NotImplementedError
 
 
-# LLM: EchoBackend 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 类用途: 适配 echo 本地后端协议，把模型请求响应归一到内部后端契约；关键副作用: 方法可能触发模型请求参数、流式解析和错误传播相关副作用，需保持公开契约稳定。
+# LLM: EchoBackend provides deterministic local responses for tests and offline smoke runs.
+# 类用途: 不访问网络，按 prompt 生成固定结构文本，方便验证运行循环。
 class EchoBackend(BaseBackend):
+    """Local deterministic backend used by tests and dry development."""
 
     name = "echo"
 
-    # LLM: generate 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-    # 函数用途: 提交提示词并返回归一化模型响应，供运行循环继续消费；关键副作用: 需保持模型请求参数、流式解析和错误传播上的返回值和副作用边界稳定。
+    # LLM: EchoBackend.generate creates a local response without provider side effects.
+    # 函数用途: 从 prompt 提取用户任务摘要，并返回可预测的 ModelResponse。
     def generate(
         self, prompt: str, on_chunk: Callable[[str], None] | None = None
     ) -> ModelResponse:
@@ -100,13 +102,13 @@ class EchoBackend(BaseBackend):
         return ModelResponse(text=text, backend=self.name)
 
 
-# LLM: HttpBackend 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 类用途: 适配HTTP后端协议，把模型请求响应归一到内部后端契约；关键副作用: 方法可能触发模型请求参数、流式解析和错误传播相关副作用，需保持公开契约稳定。
+# LLM: HttpBackend owns the common HTTP provider configuration and gateway helper calls.
+# 类用途: 将 api_base/api_key/timeout 等配置统一传给 post_json/post_stream。
 class HttpBackend(BaseBackend):
     """真实模型后端共用的 HTTP 请求基础逻辑。"""
 
-    # LLM: __init__ 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持模型请求参数、流式解析和错误传播上的返回值和副作用边界稳定。
+    # LLM: HttpBackend.__init__ normalizes config values once at backend construction.
+    # 函数用途: 把外部配置转成稳定类型，后续请求不再重复清洗这些字段。
     def __init__(
         self,
         options: BackendOptions,
@@ -119,34 +121,38 @@ class HttpBackend(BaseBackend):
         self.temperature = float(options.temperature)
         self.stream_enabled = bool(options.stream_enabled)
 
-    # LLM: request_json 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-    # 函数用途: 发送 JSON 模型请求并解析响应对象，供后端生成流程使用；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+    # LLM: request_json is the synchronous provider JSON boundary.
+    # 函数用途: 发送非流式请求，并让 gateway_helpers 统一处理 provider/network 错误。
     def request_json(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
     ) -> dict[str, Any]:
+        """Send a JSON request through the shared gateway helper."""
 
         if not self.api_key:
             raise ValueError("api_key 为空：请在配置文件中填写 API Key。")
 
         return post_json(self._gateway_request(path, payload, headers))
 
-    # LLM: request_stream 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-    # 函数用途: 发送流式模型请求并收集响应片段，供后端拼接完整文本；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+    # LLM: request_stream is the collected streaming provider boundary.
+    # 函数用途: 发送流式请求并收集 data 行，供不需要实时输出的调用方使用。
     def request_stream(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
     ) -> list[str]:
+        """Send a streaming request and collect all data lines."""
         return post_stream(self._gateway_request(path, payload, headers))
 
-    # LLM: request_stream_iter 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-    # 函数用途: 发送流式模型请求并逐段产出内容，支持调用方实时消费；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+    # LLM: request_stream_iter is the live streaming provider boundary.
+    # 函数用途: 逐段产出 data 行，让 CLI 或日志能实时显示模型输出。
     def request_stream_iter(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
     ):
+        """Send a streaming request and yield data lines as they arrive."""
         yield from post_stream_iter(self._gateway_request(path, payload, headers))
 
-    # LLM: _gateway_request 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-    # 函数用途: 组装网关请求对象，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+    # LLM: _gateway_request builds the transport-neutral HTTP request envelope.
+    # 函数用途: 将当前 backend 配置和一次请求 payload 合并成 GatewayRequest。
     def _gateway_request(self, path: str, payload: dict[str, Any], headers: dict[str, str]) -> GatewayRequest:
+        """Build the immutable gateway request envelope used by all HTTP calls."""
         return GatewayRequest(
             api_base=self.api_base,
             api_key=self.api_key,
@@ -157,18 +163,19 @@ class HttpBackend(BaseBackend):
         )
 
 
-# LLM: OpenAICompatibleBackend 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 类用途: 适配 OpenAI 兼容后端协议，把模型请求响应归一到内部后端契约；关键副作用: 方法可能触发模型请求参数、流式解析和错误传播相关副作用，需保持公开契约稳定。
+# LLM: OpenAICompatibleBackend adapts chat/completions providers to ModelResponse.
+# 类用途: 负责 OpenAI-compatible 请求体、响应解析和流式 usage 收集。
 class OpenAICompatibleBackend(HttpBackend):
     """适配 OpenAI-compatible `/chat/completions` 接口。"""
 
     name = "openai_compatible"
 
-    # LLM: generate 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-    # 函数用途: 提交提示词并返回归一化模型响应，供运行循环继续消费；关键副作用: 需保持模型请求参数、流式解析和错误传播上的返回值和副作用边界稳定。
+    # LLM: OpenAICompatibleBackend.generate sends one chat/completions request.
+    # 函数用途: 构造 messages payload，按配置选择流式或非流式解析。
     def generate(
         self, prompt: str, on_chunk: Callable[[str], None] | None = None
     ) -> ModelResponse:
+        """Call the OpenAI-compatible chat completion endpoint."""
         payload = {
             "model": self.model_name,
             "messages": [{"role": "user", "content": prompt}],
@@ -188,15 +195,15 @@ class OpenAICompatibleBackend(HttpBackend):
             raise RuntimeError(f"无法解析 OpenAI-compatible 响应: {obj}") from exc
         return ModelResponse(text=text, backend=self.name, usage=usage_dict(obj.get("usage")))
 
-    # LLM: _generate_stream 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-    # 函数用途: 处理流式生成响应的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+    # LLM: _generate_stream parses OpenAI-compatible SSE into text and usage.
+    # 函数用途: 选择实时迭代或收集模式，并把 delta.content 合并成 ModelResponse。
     def _generate_stream(
         self,
         payload: dict[str, Any],
         headers: dict[str, str],
         on_chunk: Callable[[str], None] | None = None,
     ) -> ModelResponse:
-        """流式解析 OpenAI SSE：逐行拼接 delta.content。"""
+        """Parse OpenAI SSE and concatenate delta.content chunks."""
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
         text, usage = collect_openai_stream(
             lines("/chat/completions", openai_stream_payload(payload), headers),
@@ -205,15 +212,15 @@ class OpenAICompatibleBackend(HttpBackend):
         return ModelResponse(text=text, backend=self.name, usage=usage)
 
 
-# LLM: AnthropicCompatibleBackend 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 类用途: 适配 Anthropic 兼容后端协议，把模型请求响应归一到内部后端契约；关键副作用: 方法可能触发模型请求参数、流式解析和错误传播相关副作用，需保持公开契约稳定。
+# LLM: AnthropicCompatibleBackend adapts messages-style providers to ModelResponse.
+# 类用途: 负责 Anthropic-compatible 请求体、版本头、响应解析和空流兜底。
 class AnthropicCompatibleBackend(HttpBackend):
     """适配 Anthropic 风格的 `/v1/messages` 接口。"""
 
     name = "anthropic_compatible"
 
-    # LLM: __init__ 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持模型请求参数、流式解析和错误传播上的返回值和副作用边界稳定。
+    # LLM: AnthropicCompatibleBackend.__init__ records the required anthropic-version header.
+    # 函数用途: 保存通用 HTTP 配置和 Anthropic-compatible 版本标识。
     def __init__(
         self,
         options: BackendOptions,
@@ -222,11 +229,12 @@ class AnthropicCompatibleBackend(HttpBackend):
         super().__init__(options)
         self.anthropic_version = anthropic_version
 
-    # LLM: generate 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-    # 函数用途: 提交提示词并返回归一化模型响应，供运行循环继续消费；关键副作用: 需保持模型请求参数、流式解析和错误传播上的返回值和副作用边界稳定。
+    # LLM: AnthropicCompatibleBackend.generate sends one messages request.
+    # 函数用途: 构造 messages payload，处理 thinking-only 响应的一次非流式重试。
     def generate(
         self, prompt: str, on_chunk: Callable[[str], None] | None = None
     ) -> ModelResponse:
+        """Call the Anthropic-compatible messages endpoint."""
         payload = {
             "model": self.model_name,
             "max_tokens": self.max_tokens,
@@ -254,17 +262,15 @@ class AnthropicCompatibleBackend(HttpBackend):
             raise RuntimeError(f"Anthropic-compatible 响应没有文本内容: {obj}")
         return ModelResponse(text=text, backend=self.name, usage=usage_dict(obj.get("usage")))
 
-    # LLM: _generate_stream 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-    # 函数用途: 处理流式生成响应的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+    # LLM: _generate_stream parses Anthropic-compatible SSE and falls back on empty text.
+    # 函数用途: 流式拼接正文；若只收到 thinking/空正文，再用非流式请求恢复一次。
     def _generate_stream(
         self,
         payload: dict[str, Any],
         headers: dict[str, str],
         on_chunk: Callable[[str], None] | None = None,
     ) -> ModelResponse:
-        """流式解析 Anthropic SSE：监听 content_block_delta 事件拼接文本。"""
-        # LLM: Anthropic SSE 用事件行区分类型，数据行携带 JSON 片段。
-        # request_stream 已过滤 event 行，需从 data 行的 type 字段恢复事件类型。
+        """Parse Anthropic SSE and fall back once when the stream has no visible text."""
         for attempt in range(2):
             text, usage = self._stream_text_once(payload, headers, on_chunk)
             if text or attempt > 0:
@@ -323,9 +329,10 @@ def _anthropic_has_thinking_without_text(obj: dict[str, Any]) -> bool:
     return any(isinstance(part, dict) and "thinking" in part for part in parts)
 
 
-# LLM: get_backend 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 函数用途: 按名称选择模型后端实现，并用配置构造可调用实例；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
+# LLM: get_backend is the only public backend-name resolver.
+# 函数用途: 根据配置名称构造 backend adapter，未知名称明确报错。
 def get_backend(name: str, config: Any | None = None) -> BaseBackend:
+    """Resolve a configured backend name to a backend adapter instance."""
 
     if name == "echo":
         return EchoBackend()

@@ -1353,7 +1353,7 @@ auto_apply_result_followup = true
 
 当前语义：
 
-- 工具执行后返回紧凑的 `result_refs_by_run` / `child_result_index`、状态摘要、`output_json`、产物 refs 和调度报告 refs。
+- 工具执行后返回紧凑的 `result_refs_by_run` / `child_result_index`、状态摘要、`run_closeout_ref`、产物 refs 和调度报告 refs。
 - 顶层主代理拿到这些索引后，必须自己进入下一轮模型判断：是否汇总、是否继续调度、是否读某个 ref、是否写最终报告。
 - 系统不再因为“子代理都 DONE/VERIFIED”就在工具轮后直接生成 `未再发起额外模型请求` 的本地收口回答。
 - 如果没有显式 run scope，`dispatch_subagents` 会退回列出当前可见子代理的紧凑状态索引，支持父代理“按一下查状态”。

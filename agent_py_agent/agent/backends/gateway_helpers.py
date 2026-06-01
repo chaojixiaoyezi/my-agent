@@ -11,6 +11,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 from .errors import ProviderTimeoutError, ProviderTransientError
 
@@ -36,11 +37,11 @@ _RETRYABLE_NETWORK_ERROR_MARKERS = frozenset(
 )
 
 
-# LLM: GatewayRequest 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 类用途: 集中保存网关请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模型请求参数、流式解析和错误传播相关副作用，需保持公开契约稳定。
+# LLM: GatewayRequest is the immutable provider-call boundary object.
+# 类用途: 保存一次 gateway HTTP 调用所需的 URL、鉴权、payload、header 和超时配置。
 @dataclass(frozen=True)
 class GatewayRequest:
-    """bundle for HTTP gateway model requests."""
+    """Immutable request envelope for one provider HTTP call."""
 
     api_base: str
     api_key: str
@@ -49,18 +50,20 @@ class GatewayRequest:
     headers: dict[str, str]
     timeout: int
 
-    # LLM: url 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-    # 函数用途: 处理url相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模型请求参数、流式解析和错误传播上的返回值和副作用边界稳定。
+    # LLM: url is derived from the validated base and path instead of being supplied separately.
+    # 函数用途: 拼出最终 provider endpoint，避免调用方同时传 base/path/url 三套入口。
     @property
     def url(self) -> str:
+        """Return the final endpoint after joining provider base URL and API path."""
         return self.api_base + self.path
 
 
-# LLM: post_json 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 函数用途: 发送JSON请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+# LLM: post_json is the non-streaming gateway entry used by provider adapters.
+# 函数用途: 发送 JSON 请求并把 provider/http/network 错误归一成可恢复或普通运行时错误。
 def post_json(
     request: GatewayRequest,
 ) -> dict[str, Any]:
+    """POST JSON and normalize provider/network failures into typed exceptions."""
     _require_api_key(request.api_key)
     try:
         with _open_gateway_request(request) as resp:
@@ -71,25 +74,28 @@ def post_json(
         raise _runtime_network_error(exc, request) from exc
 
 
-# LLM: post_stream 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 函数用途: 发送流式请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+# LLM: post_stream is the list-returning streaming helper for callers that need buffered output.
+# 函数用途: 发起流式请求并收集 SSE data 行，复用同一套错误分类和超时逻辑。
 def post_stream(
     request: GatewayRequest,
 ) -> list[str]:
+    """POST a streaming request and collect SSE data lines."""
     return list(_post_stream_lines(request))
 
 
-# LLM: post_stream_iter 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 函数用途: 发送流式迭代请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+# LLM: post_stream_iter is the iterator streaming helper for incremental model output.
+# 函数用途: 发起流式请求并逐条产出 SSE data 行，供 CLI/TUI 边读边显示。
 def post_stream_iter(
     request: GatewayRequest,
 ):
+    """POST a streaming request and yield normalized SSE data lines."""
     yield from _post_stream_lines(request)
 
 
-# LLM: _post_stream_lines 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 函数用途: 发送流式lines请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+# LLM: _post_stream_lines is the single implementation behind buffered and iterator streaming.
+# 函数用途: 强制打开 stream 模式、设置总时限，并统一处理 HTTP/network/provider 错误。
 def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
+    """Shared streaming implementation used by list and iterator callers."""
     request.payload["stream"] = True
     _require_api_key(request.api_key)
     deadline = _stream_deadline(request.timeout)
@@ -102,9 +108,10 @@ def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
         raise _runtime_network_error(exc, request) from exc
 
 
-# LLM: _urllib_request 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 函数用途: 处理urllib请求相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+# LLM: _urllib_request keeps gateway transport structured and avoids shell/string execution paths.
+# 函数用途: 将 GatewayRequest 转成 urllib Request，集中编码 JSON 和 headers。
 def _urllib_request(request: GatewayRequest) -> urllib.request.Request:
+    """Build the urllib request without exposing shell/string transport paths."""
     return urllib.request.Request(
         request.url,
         data=json.dumps(request.payload).encode("utf-8"),
@@ -185,16 +192,18 @@ def _retry_after_header_seconds(exc: urllib.error.HTTPError) -> float | None:
     return max(0.0, value)
 
 
-# LLM: _require_api_key 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 函数用途: 校验apikey需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
+# LLM: _require_api_key fails before network IO so missing credentials are never retried as provider flake.
+# 函数用途: 在发起 HTTP 请求前校验 API key 是否存在，并给出明确配置错误。
 def _require_api_key(api_key: str) -> None:
+    """Fail fast for missing credentials before opening a network connection."""
     if not api_key:
         raise ValueError("api_key 为空：请在配置文件中填写 API Key。")
 
 
-# LLM: _runtime_http_error 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 函数用途: 推进运行时HTTPerror的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+# LLM: _runtime_http_error is the authoritative HTTP status classifier for provider calls.
+# 函数用途: 把 5xx/429 等临时错误归为可恢复 provider 错误，其余保留为普通运行时错误。
 def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
+    """Classify provider HTTP errors at the backend boundary."""
     detail = exc.read().decode("utf-8", "replace")
     code = int(getattr(exc, "code", 0) or 0)
     if code in _RETRYABLE_HTTP_STATUS_CODES or code >= 500:
@@ -202,9 +211,10 @@ def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
     return RuntimeError(f"HTTP {exc.code}: {detail}")
 
 
-# LLM: _runtime_network_error 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 函数用途: 推进运行时networkerror的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响模型请求参数、流式解析和错误传播，需保持重试、超时和状态迁移语义。
+# LLM: _runtime_network_error is the authoritative network exception classifier for provider calls.
+# 函数用途: 区分 timeout、临时断连和配置/DNS 类失败，并生成可读错误信息。
 def _runtime_network_error(exc: BaseException, request: GatewayRequest) -> RuntimeError:
+    """Classify network exceptions into timeout, transient provider flake, or config failure."""
     parsed = urllib.parse.urlparse(request.url)
     host = parsed.netloc or parsed.path.split("/", 1)[0] or request.api_base
     reason = _network_error_text(exc)
@@ -260,9 +270,10 @@ def _network_error_text(exc: BaseException) -> str:
     return " ".join(part for part in parts if part).strip() or exc.__class__.__name__
 
 
-# LLM: _iter_sse_data_lines 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 函数用途: 处理迭代SSEdatalines相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模型请求参数、流式解析和错误传播上的返回值和副作用边界稳定。
+# LLM: _stream_deadline turns request timeout into an absolute wall-clock bound for streaming.
+# 函数用途: 计算流式响应的总截止时间，防止 socket 一直有心跳但任务永不结束。
 def _stream_deadline(timeout: int) -> float:
+    """Convert request timeout seconds into a monotonic streaming deadline."""
     return time.monotonic() + max(1, int(timeout or 0))
 
 
@@ -280,7 +291,8 @@ def _iter_sse_data_lines(response, *, deadline: float, timeout: int, url: str) -
             yield line[5:].strip()
 
 
-# LLM: _is_sse_data_line 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
-# 函数用途: 判断SSEdataline条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
+# LLM: _is_sse_data_line keeps SSE parsing narrow to data lines only.
+# 函数用途: 判断一行是否为可交给上层解析的 SSE data 行，注释/空行直接跳过。
 def _is_sse_data_line(line: str) -> bool:
+    """Return True for SSE data lines; the caller handles terminal markers."""
     return bool(line and line.startswith("data:"))

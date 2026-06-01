@@ -8,17 +8,17 @@ from pathlib import Path
 from .models import SubAgentTask
 
 
-# LLM: workspace_refs gives models current runtime paths first; legacy refs stay labeled for compatibility.
-# 函数用途: 生成当前 runtime workspace 的关键文件引用；旧工单目录只作为 legacy 字段，避免模型把旧路径当主路径。
+# LLM: workspace_refs is the only model-facing path vocabulary for subagent workspaces.
+# 函数用途: 生成当前任务根、交付目录、工作目录和当前 agent 工作目录；旧工单目录只留给恢复文件，不再进入模型提示。
 def workspace_refs(task: SubAgentTask) -> dict[str, str]:
-    legacy_task_dir = safe_string_ref(task, "task_dir")
     task_workspace = safe_string_ref(task, "task_workspace_dir")
-    current_task_dir = task_workspace or legacy_task_dir
+    work_dir = str(Path(task_workspace) / "work") if task_workspace else ""
+    output_dir = str(Path(task_workspace) / "output") if task_workspace else ""
     return {
-        "task_dir": current_task_dir,
-        "task_workspace": task_workspace,
-        "legacy_task_dir": legacy_task_dir if legacy_task_dir != current_task_dir else "",
-        "agent_run_workspace": safe_string_ref(task, "agent_run_workspace_dir"),
+        "task_root": task_workspace,
+        "task_work_dir": work_dir,
+        "task_output_dir": output_dir,
+        "agent_work_dir": safe_string_ref(task, "agent_run_workspace_dir"),
         "agent_run_task": safe_string_ref(task, "agent_run_task_md"),
         "agent_run_checkpoint": safe_string_ref(task, "agent_run_checkpoint_json"),
         "agent_run_summary": safe_string_ref(task, "agent_run_summary_md"),
@@ -42,7 +42,7 @@ def workspace_refs(task: SubAgentTask) -> dict[str, str]:
         "shared_evidence_index": safe_string_ref(task, "task_workspace_shared_evidence_index_jsonl"),
         "agent_run_inbox": safe_string_ref(task, "agent_run_inbox_dir"),
         "agent_run_outbox": safe_string_ref(task, "agent_run_outbox_dir"),
-        "artifacts_dir": safe_string_ref(task, "agent_run_artifacts_dir") or safe_string_ref(task, "output_dir"),
+        "artifacts_dir": safe_string_ref(task, "agent_run_artifacts_dir") or output_dir,
         "execution_context_json": safe_string_ref(task, "execution_context_json"),
         "execution_context_file": safe_string_ref(task, "execution_context_file"),
     }
@@ -62,22 +62,9 @@ def latest_continue_packet_ref(task: SubAgentTask) -> str:
 # 函数用途: 记录当前子代理在任务树中的位置，以及直接父级 context bundle 的可读路径。
 def lineage(task: SubAgentTask) -> dict[str, object]:
     parent_id = str(task.parent_id or "")
-    legacy_task_dir_ref = safe_string_ref(task, "task_dir")
     task_workspace_ref = safe_string_ref(task, "task_workspace_dir")
     agent_run_ref = safe_string_ref(task, "agent_run_workspace_dir")
-    legacy_task_dir = Path(legacy_task_dir_ref) if legacy_task_dir_ref else Path("")
     task_workspace = Path(task_workspace_ref) if task_workspace_ref else Path("")
-    parent_legacy_ref = (
-        str(legacy_task_dir.parent / parent_id / "context_bundle.json")
-        if parent_id and legacy_task_dir_ref
-        else ""
-    )
-    own_legacy_ref = (
-        str(Path(legacy_task_dir_ref) / "context_bundle.json")
-        if legacy_task_dir_ref and legacy_task_dir_ref != task_workspace_ref
-        else ""
-    )
-    # LLM: Parent context refs follow the current task-local work/agents layout.
     parent_agent_ref = (
         str(task_workspace / "work" / "agents" / parent_id / "context_bundle.json")
         if parent_id and task_workspace_ref
@@ -88,9 +75,7 @@ def lineage(task: SubAgentTask) -> dict[str, object]:
         "parent_id": parent_id,
         "depth": int(task.depth or 0),
         "own_context_bundle_ref": str(Path(agent_run_ref) / "context_bundle.json") if agent_run_ref else "",
-        "own_legacy_context_bundle_ref": own_legacy_ref,
         "parent_context_bundle_ref": parent_agent_ref,
-        "parent_legacy_context_bundle_ref": parent_legacy_ref,
         "inheritance_manifest_ref": safe_string_ref(task, "inheritance_manifest_json"),
     }
 

@@ -19,7 +19,7 @@ def render_context_bundle_section(context: SubAgentExecutionContext) -> list[str
         "",
         f"- context_bundle_json: {context.context_bundle_json or 'none'}",
         f"- context_bundle_file: {context.context_bundle_file or 'none'}",
-        f"- agent_run_workspace: {refs.get('agent_run_workspace') or 'none'}",
+        f"- agent_work_dir: {refs.get('agent_work_dir') or 'none'}",
         f"- agent_run_context_bundle_json: {_run_workspace_bundle_ref(refs, 'context_bundle.json')}",
         f"- agent_run_context_bundle_file: {_run_workspace_bundle_ref(refs, 'CONTEXT_BUNDLE.md')}",
     ]
@@ -27,10 +27,10 @@ def render_context_bundle_section(context: SubAgentExecutionContext) -> list[str
     return lines
 
 
-# LLM: _run_workspace_bundle_ref derives the mirrored bundle path from the workspace ref.
+# LLM: _run_workspace_bundle_ref accepts the canonical agent_work_dir and only falls back for old bundles.
 # 函数用途: 给 Markdown 展示 agent run workspace 内的 context bundle 镜像路径，不读取文件。
 def _run_workspace_bundle_ref(refs: dict[str, object], name: str) -> str:
-    workspace = str(refs.get("agent_run_workspace") or "").strip()
+    workspace = str(refs.get("agent_work_dir") or refs.get("agent_run_workspace") or "").strip()
     if not workspace:
         return "none"
     return f"{workspace.rstrip('/')}/{name}"

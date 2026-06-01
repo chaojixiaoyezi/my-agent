@@ -3,7 +3,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from agent_py_agent.agent.backends.errors import ProviderTimeoutError, ProviderTransientError
+from agent_py_agent.agent.backends.errors import (
+    ProviderRecoverableError,
+    ProviderTimeoutError,
+    ProviderTransientError,
+    is_provider_recoverable_error,
+)
 from agent_py_agent.cli.local_commands import cmd_run
 
 
@@ -75,3 +80,10 @@ def test_cmd_run_reports_provider_transient(capsys) -> None:
     assert "provider_transient" in output
     assert "HTTP 429" in output
     assert "稍后重试" in output
+
+
+def test_provider_timeout_and_transient_share_recoverable_base() -> None:
+    assert issubclass(ProviderTimeoutError, ProviderRecoverableError)
+    assert issubclass(ProviderTransientError, ProviderRecoverableError)
+    assert is_provider_recoverable_error(ProviderTimeoutError("timeout"))
+    assert is_provider_recoverable_error(ProviderTransientError("429"))

@@ -207,6 +207,6 @@ def _expected_child_row() -> dict[str, object]:
         "primary_artifact_registry_refs": [],
         "primary_artifact_summaries": [],
         "evidence_refs": ["/tmp/market/output.json"],
-        "output_json": "/tmp/market/output.json",
-        "runner_result_json": "/tmp/market/runner_result.json",
+        "run_closeout_ref": "/tmp/market/output.json",
+        "runner_result_ref": "/tmp/market/runner_result.json",
     }
