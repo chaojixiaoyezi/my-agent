@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from .recovery_envelope import RecoveryEnvelopeRequest, recovery_envelope_from_gate_payload
+
+UTC = timezone.utc
 
 
 # LLM: ApprovalRequest carries the exact structured action binding that needs approval.

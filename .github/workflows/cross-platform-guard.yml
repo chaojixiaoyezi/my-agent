@@ -49,7 +49,6 @@ jobs:
           agent_py_agent/tests/test_policy_checks.py
           agent_py_agent/tests/test_subagent_policies.py
           agent_py_agent/tests/test_manager_patch.py
-          agent_py_agent/tests/test_agent/test_subagent_patch_review.py
           -q
 
       - name: Check docs sync

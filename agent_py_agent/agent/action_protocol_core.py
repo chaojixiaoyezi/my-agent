@@ -11,10 +11,11 @@ scope 和 refs。自然语言 summary 不会在这里被解析成事实。
 """
 
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 ACTION_PROTOCOL_SCHEMA_VERSION = 1
+UTC = timezone.utc
 
 
 # LLM: _now_iso keeps created_at deterministic in shape and timezone-aware.
