@@ -25,8 +25,8 @@ def test_simple_agent_initializes_my_agent_home(tmp_path: Path):
     assert agent.home_paths.memory_md.exists()
 
 
-# LLM: saved runs should get a clean task workspace while old repo-relative memory paths keep working.
-# 函数用途: 验证普通 run 保存后，会在 home/tasks/date/task 下创建 output 交付区和 work 过程区。
+# LLM: saved runs should get a clean owner task workspace while old repo-relative memory paths keep working.
+# 函数用途: 验证普通 run 保存后，会在 owner_home/tasks/date/task 下创建 output 交付区和 work 过程区。
 def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
@@ -35,7 +35,7 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
 
     agent.run("做一个示例网站", request_id="req-1", run_id="run-1", task_id="示例网站 E2E")
 
-    task_root = home / "tasks" / date.today().isoformat() / "示例网站-e2e"
+    task_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "示例网站-e2e"
     assert (task_root / "output").is_dir()
     assert (task_root / "work").is_dir()
     assert (task_root / "work" / "runtime").is_dir()
@@ -48,8 +48,7 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     assert state["owner_id"] == "local/main"
     assert state["owner_home"] == str((home / "owners" / "local" / "main").resolve())
     assert (task_root / "work" / "timeline.jsonl").read_text(encoding="utf-8").strip()
-    owner_task_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "示例网站-e2e"
-    assert not owner_task_root.exists()
+    assert not (home / "tasks").exists()
 
 
 def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):

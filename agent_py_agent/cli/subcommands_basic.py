@@ -15,13 +15,7 @@ import argparse
 from .chat import cmd_chat
 from .common import DEFAULT_CAPABILITY_CONFIG, add_resume_context_switches
 from .context_bundle_commands import cmd_context_bundle
-from .home_runtime_commands import (
-    cmd_home_migrate,
-    cmd_home_retention,
-    cmd_home_status,
-    cmd_memory_daily_list,
-    cmd_task_workspace_list,
-)
+from .home_runtime_subcommands import add_home_runtime_subcommands
 from .local_commands import (
     cmd_local_index_memory,
     cmd_local_search,
@@ -219,7 +213,7 @@ def _add_memory_compact_args(parser) -> None:
 # LLM: add_memory_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
-    _add_home_runtime_subcommands(sub)
+    add_home_runtime_subcommands(sub)
     memory_route = sub.add_parser("memory-route", help="按长期规则索引预览 memory 路由命中")
     memory_route.add_argument("query", nargs="?", default="", help="要路由的查询或用户任务")
     memory_route.add_argument("--index", help="路由索引文件；相对路径按 workspace root 解析")
@@ -236,40 +230,6 @@ def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
     memory_doctor.set_defaults(func=cmd_memory_doctor)
 
     _add_memory_archive_subcommands(sub)
-
-
-# LLM: _add_home_runtime_subcommands keeps owner-home debug commands separate from archive command registration.
-# 函数用途: 注册 home-status、memory-daily-list 和 task-workspace-list 只读调试命令。
-def _add_home_runtime_subcommands(sub: argparse._SubParsersAction) -> None:
-    home_status = sub.add_parser("home-status", help="查看 my-agent 家目录入口文件和关键目录")
-    home_status.add_argument("--json", action="store_true", help="输出机器可读 JSON")
-    home_status.set_defaults(func=cmd_home_status)
-
-    home_migrate = sub.add_parser("home-migrate", help="预览或执行旧 home 数据到 owner home 的非破坏性迁移")
-    home_migrate.add_argument("--apply", action="store_true", help="实际复制；不传时只预览")
-    home_migrate.add_argument("--json", action="store_true", help="输出机器可读 JSON")
-    home_migrate.set_defaults(func=cmd_home_migrate)
-
-    home_retention = sub.add_parser("home-retention", help="预览或执行当前 owner home 的 retention 清理")
-    home_retention.add_argument("--apply", action="store_true", help="实际删除过期文件；不传时只预览")
-    home_retention.add_argument("--json", action="store_true", help="输出机器可读 JSON")
-    home_retention.set_defaults(func=cmd_home_retention)
-
-    memory_daily_list = sub.add_parser("memory-daily-list", help="列出 home/memory/daily 按天记忆")
-    memory_daily_list.add_argument("query", nargs="?", default="", help="搜索关键词；为空时列出匹配日期的记录")
-    memory_daily_list.add_argument("--date", help="只查看某一天，格式 YYYY-MM-DD")
-    memory_daily_list.add_argument("--role", default="", help="按 role 过滤，如 user/assistant/tool")
-    memory_daily_list.add_argument("--kind", default="", help="按 kind 过滤，如 dialogue/preference/note")
-    memory_daily_list.add_argument("--limit", type=int, default=None, help="最多显示多少条记录；默认读配置")
-    memory_daily_list.add_argument("--json", action="store_true", help="输出机器可读 JSON")
-    memory_daily_list.set_defaults(func=cmd_memory_daily_list)
-
-    task_workspace_list = sub.add_parser("task-workspace-list", help="列出 home workspace/tasks 任务工作区")
-    task_workspace_list.add_argument("query", nargs="?", default="", help="搜索 task_id/run_id/request_id/任务名")
-    task_workspace_list.add_argument("--date", help="只查看某一天，格式 YYYY-MM-DD")
-    task_workspace_list.add_argument("--limit", type=int, default=None, help="最多显示多少个任务；默认读配置")
-    task_workspace_list.add_argument("--json", action="store_true", help="输出机器可读 JSON")
-    task_workspace_list.set_defaults(func=cmd_task_workspace_list)
 
 
 # LLM: _add_memory_archive_subcommands keeps archive/compact CLI registration grouped and size-safe.

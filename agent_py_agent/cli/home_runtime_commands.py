@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..agent.user_space.home_index_rebuild import rebuild_home_indexes
 from ..agent.user_space.home_migration import apply_home_migration, plan_home_migration
 from ..agent.user_space.home_retention import apply_owner_retention, plan_owner_retention
 from ..agent.user_space.home_runtime_query import (
@@ -99,6 +100,19 @@ def cmd_home_retention(args) -> int:
     return 0
 
 
+# LLM: cmd_home_index_rebuild repairs lightweight global maps only when explicitly applied.
+# 函数用途: 预览或执行 owner/task/run/agent 全局索引重建；默认不写文件。
+def cmd_home_index_rebuild(args) -> int:
+    agent = make_agent(args)
+    result = rebuild_home_indexes(agent.home_paths, apply=bool(getattr(args, "apply", False)))
+    payload = {"ok": True, "home": str(agent.home_paths.root), "index_rebuild": result.to_dict()}
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        _print_home_index_rebuild(payload)
+    return 0
+
+
 # LLM: _limit_from_args keeps home runtime CLI defaults tied to AgentConfig.
 # 函数用途: 读取命令行 limit；未传时使用 cli_task_list_limit 配置。
 def _limit_from_args(agent, args) -> int:
@@ -176,7 +190,20 @@ def _print_home_retention(payload: dict[str, Any]) -> None:
         print(f"- {action['status']} {action['category']}: {action['path']} ({action['reason']})")
 
 
+# LLM: _print_home_index_rebuild keeps index repairs observable before apply.
+# 函数用途: 输出 home-index-rebuild 的预览或执行数量。
+def _print_home_index_rebuild(payload: dict[str, Any]) -> None:
+    rebuild = payload["index_rebuild"]
+    print("MY-AGENT HOME INDEX REBUILD")
+    print(
+        f"home={payload['home']} applied={rebuild['applied']} "
+        f"owners={rebuild['owner_count']} tasks={rebuild['task_count']} "
+        f"runs={rebuild['run_count']} agents={rebuild['agent_count']}"
+    )
+
+
 __all__ = [
+    "cmd_home_index_rebuild",
     "cmd_home_migrate",
     "cmd_home_retention",
     "cmd_home_status",

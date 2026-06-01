@@ -11,6 +11,7 @@ from typing import Any
 
 from ..io import append_jsonl
 from .compact_layout import ensure_compact_package
+from .owner_compact_indexes import sync_owner_compact_indexes
 
 
 # LLM: TaskCompactRollupResult returns the files produced by a task-level compact rollup.
@@ -54,6 +55,7 @@ def sync_task_compact_rollup(task_workspace: str | Path, *, compact_index: int |
         },
         sort_keys=True,
     )
+    sync_owner_compact_indexes(task_root, rollup)
     return TaskCompactRollupResult(
         task_workspace=task_root,
         compact_root=compact_root,
@@ -62,7 +64,6 @@ def sync_task_compact_rollup(task_workspace: str | Path, *, compact_index: int |
         compact_package_dir=package.package_dir,
         child_count=len(child_runs),
     )
-
 
 # LLM: _child_run_records collects lightweight child state rows from agent state files.
 # 函数用途: 从 task/agents/*/state.json 提取状态、进度、摘要、产物引用和阻塞原因。

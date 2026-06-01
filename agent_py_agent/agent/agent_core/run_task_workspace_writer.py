@@ -19,7 +19,7 @@ def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
     if home_paths is None:
         return ""
     owner_home = getattr(home_paths, "owner_home_dir", None)
-    target_home = Path(owner_home) if owner_home and not _is_local_main_owner(home_paths) else Path(home_paths.root)
+    target_home = Path(owner_home) if owner_home else Path(home_paths.root)
     result = ensure_run_workspace(
         EnsureRunWorkspaceRequest(
             home=target_home,
@@ -36,16 +36,6 @@ def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
     )
     register_saved_run_task_ref(agent, result, params)
     return str(result.root)
-
-
-# LLM: _is_local_main_owner keeps local CLI compatibility separate from provider owner isolation.
-# 函数用途: 判断当前 owner 是否是本地默认主账号，只有该账号继续使用 legacy 任务工作区。
-def _is_local_main_owner(home_paths) -> bool:
-    return (
-        str(getattr(home_paths, "owner_provider", "") or "local") == "local"
-        and str(getattr(home_paths, "owner_kind", "") or "main") == "main"
-        and str(getattr(home_paths, "owner_id", "") or "local/main") == "local/main"
-    )
 
 
 __all__ = ["write_run_task_workspace_if_needed"]

@@ -4,6 +4,10 @@ import json
 from pathlib import Path
 
 from agent_py_agent.__main__ import build_parser
+from agent_py_agent.agent.agent_core._runtime_params import ArchiveRunParams
+from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+    write_run_task_workspace_if_needed,
+)
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive import RawMemoryEvent, append_raw_event
@@ -279,6 +283,33 @@ def test_memory_resume_reads_home_task_workspace_by_task_id(tmp_path: Path, caps
     assert payload["task_fact_sources"][0]["source"] == "home_task_workspace"
     assert payload["task_fact_sources"][0]["state_path"] == str(paths.state_json)
     assert str(paths.timeline_jsonl) in payload["resume"]["recommended_read_paths"]
+
+
+# LLM: saved root runs should now use the owner home even for the local/main owner.
+# 函数用途: 验证主账号新写入任务工作区不再回落到旧顶层 tasks，旧路径只作为读取兼容存在。
+def test_saved_run_workspace_writer_uses_local_main_owner_home(tmp_path: Path):
+    home = tmp_path / "home"
+    agent = SimpleAgent(AgentConfig(my_agent_home=str(home), prompt_files=[]), tmp_path / "workspace")
+
+    root = Path(
+        write_run_task_workspace_if_needed(
+            agent,
+            ArchiveRunParams(
+                do_save=True,
+                user_prompt="写一份报告",
+                final_response="完成",
+                archive_tool_calls=[],
+                run_request_id="req-owner",
+                run_id="run-owner",
+                task_id="owner-task",
+                source="run",
+            ),
+        )
+    )
+
+    assert root.is_relative_to(agent.home_paths.owner_home_dir)
+    assert not (agent.home_paths.root / "tasks").exists()
+    assert (agent.home_paths.owner_home_dir / "tasks").exists()
 
 
 # LLM: provider memory-resume must recover from the provider owner's archive, not local/main legacy archives.

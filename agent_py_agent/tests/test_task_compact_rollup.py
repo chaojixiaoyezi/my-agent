@@ -32,6 +32,31 @@ def test_task_compact_rollup_exposes_status_counts_and_actionable_refs(tmp_path:
     assert continue_packet["active_refs"][0] == str(result.rollup_json)
 
 
+def test_task_compact_rollup_writes_owner_level_compact_indexes(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.task_compact_rollup import sync_task_compact_rollup
+
+    owner_home = tmp_path / "home" / "owners" / "local" / "main"
+    task_root = owner_home / "tasks" / "2026-05-13" / "task-root"
+    (task_root / "agents" / "agent-a").mkdir(parents=True)
+    (task_root / "state.json").write_text(
+        json.dumps({"task_id": "task-root", "status": "RUNNING", "primary_run_id": "run-root"}),
+        encoding="utf-8",
+    )
+    _write_agent_state(
+        task_root / "agents" / "agent-a" / "state.json",
+        {"id": "agent-a", "task_id": "task-root", "status": "DONE", "artifact_refs": ["/tmp/out-a.md"]},
+    )
+
+    result = sync_task_compact_rollup(task_root)
+
+    by_task = json.loads((owner_home / "compact" / "by_task" / "task-root.json").read_text(encoding="utf-8"))
+    by_run = json.loads((owner_home / "compact" / "by_run" / "agent-a.json").read_text(encoding="utf-8"))
+    by_agent = json.loads((owner_home / "compact" / "by_agent" / "agent-a.json").read_text(encoding="utf-8"))
+    assert by_task["rollup_json"] == str(result.rollup_json)
+    assert by_run["task_id"] == "task-root"
+    assert by_agent["compact_package"] == str(result.compact_package_dir)
+
+
 def _write_agent_state(path: Path, overrides: dict) -> None:
     run_id = str(overrides.get("id") or path.parent.name)
     payload = {

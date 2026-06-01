@@ -31,6 +31,7 @@ from .context_bundle import (
 )
 from .home_backup import HomeBackupManifest, create_home_backup_manifest
 from .home_doctor import build_home_doctor_report
+from .home_index_rebuild import HomeIndexRebuildResult, rebuild_home_indexes
 from .home_indexes import (
     AgentIndexRef,
     RunIndexRef,
@@ -117,6 +118,7 @@ __all__ = [
     "HomeMigrationAction",
     "HomeMigrationResult",
     "HomeMemoryWriteResult",
+    "HomeIndexRebuildResult",
     "LessonNoteRequest",
     "OwnerHomeResult",
     "OwnerCapabilityRequest",
@@ -182,6 +184,7 @@ __all__ = [
     "register_agent_ref",
     "register_run_ref",
     "register_task_ref",
+    "rebuild_home_indexes",
     "render_compact_injection",
     "resolve_effective_owner_policy",
     "resolve_owner_capability",

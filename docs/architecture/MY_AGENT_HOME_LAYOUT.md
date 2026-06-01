@@ -2722,11 +2722,11 @@ conversation / wake signal
 仍然不足：
 
 ```text
-1. owner home 已进入主要新写入和恢复读取链路，但仍需继续审计少数旧入口，避免未来新增功能绕过 owner resolver。
+1. owner home 已进入主要新写入和恢复读取链路；保存型 local/main run 也写入 `owner_home/tasks/...`，旧顶层 task 目录只作为读取/迁移兼容。仍需继续审计少数旧入口，避免未来新增功能绕过 owner resolver。
 2. 旧 raw/archive 数据已有迁移计划；local/main 仍保留兼容读取，provider user/group 默认只读自己的 owner archive。
 3. provider users/groups 的 memory/task 读取面已有隔离测试；session/runs/agents 的外部通道真实接入还没完整验收。
-4. task-level compact rollup 已能聚合 child status/artifact refs，后续要补更完整的 branch/归档/父级展示。
-5. global_index 已有悬空引用 doctor helper，后续要补重建命令和更完整一致性修复。
+4. task-level compact rollup 已能聚合 child status/artifact refs，并同步 owner 级 `compact/by_task|by_run|by_agent` 指针；后续要补更完整的 branch/归档/父级展示。
+5. global_index 已有悬空引用 doctor helper 和显式 `home-index-rebuild` 维护命令；后续要补更完整一致性修复和指标展示。
 6. 权限临时授权和 capability request 已有 owner 账本，后续要接更多真实工具审批入口。
 7. retention 已有 owner 过期文件计划/显式清理；加密和 restore 仍主要是设计层，backup 先有 manifest-only 入口。
 8. owner 私有 skills/tools/workflows 和 shared 公共能力已有 resolver 第一版，后续要接 usage、archive、promotion。
@@ -2741,7 +2741,7 @@ conversation / wake signal
 | --- | --- | --- |
 | owner home / provider space | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/user_space/home_layout.py`、`provider_space.py`、`owner_resolver.py` | provider space 和 owner resolver 已接主要新写入/读取链路，后续继续查旧入口 |
 | memory daily/raw/hooks | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/memory_store/jsonl.py`、`memory_archive/`、`agent/user_space/home_migration.py`、`cli/memory_archive_commands.py` | 新写入和 archive resume/list/search 已 owner 分层；local/main 仍保留旧 archive 兼容读取 |
-| compact / continue packet | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/memory_archive/compact.py`、`agent/user_space/task_compact_rollup.py` | task/run/agent 基础包和 task rollup 已有第一版；rollup 已有 status/artifact 聚合，compact branch/归档还未完整 |
+| compact / continue packet | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/memory_archive/compact.py`、`agent/user_space/task_compact_rollup.py` | task/run/agent 基础包和 task rollup 已有第一版；rollup 已有 status/artifact 聚合，并写 owner 级 compact 指针；compact branch/归档还未完整 |
 | session | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/session/manager.py`、`conversation/` | session/thread 有管理能力，但 provider owner/session/task/run 映射还要收敛 |
 | task registry | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/task_registry/` | 需要与 owner home、task workspace、artifact registry 完整挂接 |
 | agent tree / subagents | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/subagents/`、`subagent.py` | 子代理运行状态已存在，但 agent workspace/compact/cleanup 策略还未完全统一 |
@@ -2749,7 +2749,7 @@ conversation / wake signal
 | capability / skill routing | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/capability/`、`agent_py_agent/config/capability_config.yaml`、`agent/user_space/capability_resolver.py` | owner/shared/builtin 解析和 run 内缓存已有第一版，workspace/optional/promotion 仍需继续 |
 | collaboration / wake | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/collaboration/`、`conversation/store_wake.py` | 有协作/唤醒底座，仍需 owner/task/agent 权限边界统一 |
 | config / runtime guard | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/config.py`、`agent_py_agent/config/runtime_guard_config.yaml` | 需继续清理配置外写死默认值 |
-| doctor / observability | `/Users/example/my_agent/my-agent-main/agent_py_agent/cli/memory_doctor.py`、`agent/user_space/home_doctor.py`、`home_runtime_status.py` | owner 迁移/index/schema/retention doctor 已接入，home-status 已显示当前 owner identity，后续补自动修复建议和指标展示 |
+| doctor / observability | `/Users/example/my_agent/my-agent-main/agent_py_agent/cli/memory_doctor.py`、`agent/user_space/home_doctor.py`、`home_runtime_status.py`、`home_index_rebuild.py` | owner 迁移/index/schema/retention doctor 已接入，home-status 已显示当前 owner identity，home-index-rebuild 可显式重建索引；后续补更完整修复策略和指标展示 |
 | permissions / quota / retention | `agent_py_agent/agent/user_space/owner_policy.py`、`agent/user_space/home_retention.py`、`cli/home_runtime_commands.py` | owner policy bundle、retention 计划和显式 home-retention 命令已有，quota enforcement/加密仍待补 |
 | temporary grants | `agent_py_agent/agent/user_space/temporary_grants.py` | owner 级账本已有，后续接更多工具执行前提示和审批入口 |
 | capability requests | `agent_py_agent/agent/user_space/capability_requests.py` | owner 级生命周期已有，后续接父代理/用户审批界面 |

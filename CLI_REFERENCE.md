@@ -150,6 +150,7 @@ Ctrl+C
 | `home-status` | 查看 `~/.my-agent` 入口文件、关键目录和轻量计数 | 否 | 否 |
 | `home-migrate` | 预览或复制旧 home 数据到当前 owner home | `--apply` 时写 | 否 |
 | `home-retention` | 预览或执行当前 owner home 的过期文件清理 | `--apply` 时删除过期文件并写审计 | 否 |
+| `home-index-rebuild` | 预览或重建 owner/task/run/agent 全局轻量索引 | `--apply` 时追加索引行 | 否 |
 | `memory-daily-list` | 直接查看 home daily memory 按天流水 | 否 | 否 |
 | `memory-route` | 按长期规则索引预览 memory 路由命中 | 否 | 否 |
 | `guidance-send` | 给运行中的主代理、子代理、任务或协作 case 追加一条软提示 | 是，只写 guidance 账本 | 否 |
@@ -364,6 +365,20 @@ my-agent home-retention --apply --json
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--apply` | `false` | 实际删除过期文件；不传时只 dry-run 预览。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `home-index-rebuild`
+
+```powershell
+my-agent home-index-rebuild
+my-agent home-index-rebuild --apply --json
+```
+
+预览或执行 owner/task/run/agent 全局轻量索引重建。默认只扫描 owner home 正文并输出计划；`--apply` 才追加新的 global index 行。它不删除旧索引、不修改任务正文、不调用模型。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--apply` | `false` | 实际追加重建索引行；不传时只 dry-run 预览。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `memory-daily-list`

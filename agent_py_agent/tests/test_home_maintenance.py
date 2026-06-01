@@ -140,6 +140,105 @@ def test_home_retention_cli_plans_and_applies_owner_cleanup(tmp_path: Path, caps
     assert not old_cache.exists()
 
 
+# LLM: home index rebuild should recreate lightweight maps from owner task and agent bodies.
+# 函数用途: 验证全局 index 丢失时，显式重建命令能从 owner home 正文恢复 task/run/agent 引用。
+def test_home_index_rebuild_recreates_task_run_and_agent_refs(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.home_index_rebuild import rebuild_home_indexes
+    from agent_py_agent.agent.user_space.home_indexes import (
+        latest_agent_refs,
+        latest_run_refs,
+        latest_task_refs,
+    )
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.run_workspace import (
+        EnsureRunWorkspaceRequest,
+        ensure_run_workspace,
+    )
+
+    home = ensure_my_agent_home(tmp_path)
+    ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=home.owner_home_dir,
+            template="tasks/{date}/{task_slug}",
+            task_name="索引恢复任务",
+            user_prompt="恢复索引",
+            request_id="req-rebuild",
+            run_id="run-rebuild",
+            task_id="task-rebuild",
+            owner_id=home.owner_id,
+            owner_home=str(home.owner_home_dir),
+            created_at="2026-05-13T01:00:00+00:00",
+        )
+    )
+    agent_dir = home.owner_agents_dir / "agent-rebuild"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "state.json").write_text(
+        json.dumps({"id": "agent-rebuild", "task_id": "task-rebuild", "status": "RUNNING"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    dry = rebuild_home_indexes(home, apply=False)
+
+    assert dry.applied is False
+    assert len(dry.task_refs) == 1
+    assert latest_task_refs(home, owner_id=home.owner_id) == []
+
+    applied = rebuild_home_indexes(home, apply=True)
+
+    assert applied.applied is True
+    assert [ref["task_id"] for ref in latest_task_refs(home, owner_id=home.owner_id)] == ["task-rebuild"]
+    assert [ref["run_id"] for ref in latest_run_refs(home, owner_id=home.owner_id)] == ["run-rebuild"]
+    assert [ref["agent_id"] for ref in latest_agent_refs(home, owner_id=home.owner_id)] == ["agent-rebuild"]
+
+
+def test_home_index_rebuild_cli_defaults_to_dry_run(tmp_path: Path, capsys) -> None:
+    config_path = _write_config(tmp_path, tmp_path / "home")
+
+    code, payload = _run_cli_json(capsys, config_path, "home-index-rebuild")
+
+    assert code == 0
+    assert payload["index_rebuild"]["applied"] is False
+
+
+# LLM: rebuilt indexes must preserve owner boundaries for same-named tasks.
+# 函数用途: 验证重建全局索引后，同名任务仍按 owner_id 过滤，避免不同用户主代理互相看到任务。
+def test_home_index_rebuild_keeps_provider_task_refs_isolated(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.home_index_rebuild import rebuild_home_indexes
+    from agent_py_agent.agent.user_space.home_indexes import latest_run_refs, latest_task_refs
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, ensure_owner_home
+    from agent_py_agent.agent.user_space.run_workspace import (
+        EnsureRunWorkspaceRequest,
+        ensure_run_workspace,
+    )
+
+    home = ensure_my_agent_home(tmp_path)
+    owner_a = ensure_owner_home(home.root, OwnerIdentity.provider_user("feishu", "ou_a"))
+    owner_b = ensure_owner_home(home.root, OwnerIdentity.provider_user("feishu", "ou_b"))
+    for owner, run_id in ((owner_a, "run-a"), (owner_b, "run-b")):
+        ensure_run_workspace(
+            EnsureRunWorkspaceRequest(
+                home=owner.home_dir,
+                template="tasks/{date}/{task_slug}",
+                task_name="同名任务",
+                user_prompt="同名",
+                request_id=f"req-{run_id}",
+                run_id=run_id,
+                task_id="shared-task",
+                owner_id=owner.owner_id,
+                owner_home=str(owner.home_dir),
+                created_at="2026-05-13T01:00:00+00:00",
+            )
+        )
+
+    rebuild_home_indexes(home, apply=True)
+
+    assert [ref["task_id"] for ref in latest_task_refs(home, owner_id=owner_a.owner_id)] == ["shared-task"]
+    assert [ref["task_id"] for ref in latest_task_refs(home, owner_id=owner_b.owner_id)] == ["shared-task"]
+    assert [ref["run_id"] for ref in latest_run_refs(home, owner_id=owner_a.owner_id)] == ["run-a"]
+    assert [ref["run_id"] for ref in latest_run_refs(home, owner_id=owner_b.owner_id)] == ["run-b"]
+
+
 def _set_mtime(path: Path, iso: str) -> None:
     timestamp = datetime.fromisoformat(iso).timestamp()
     os.utime(path, (timestamp, timestamp))
