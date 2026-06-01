@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ...settings.defaults import default_agent_config
 from .models import GateDecision, GateFinding
 
 # Trust levels sorted by privilege desc
@@ -216,9 +217,7 @@ class _SkillGuardLimits:
 # 函数用途: 从配置对象读取 skill guard 扫描预算；未传配置时只回退到 schema 默认。
 def _skill_guard_limits(config: object | None) -> _SkillGuardLimits:
     if config is None:
-        from ...settings.config import AgentConfig
-
-        config = AgentConfig()
+        config = default_agent_config()
     return _SkillGuardLimits(
         max_files=_config_int(config, "skill_guard_max_files"),
         max_size_kb=_config_int(config, "skill_guard_max_size_kb"),

@@ -177,6 +177,36 @@ def test_many_cases_and_requests_keep_overview_structural_and_bounded(tmp_path) 
     assert overview["evidence_count"] == 40
     assert len(first_status["requests"]) == 10
     assert first_status["request_history_count"] == 20
+    assert first_status["response_coverage"]["request_count"] == 10
+    assert first_status["response_coverage"]["target_count"] == 10
+    assert len(first_status["response_coverage"]["requests"]) == 10
+
+
+def test_case_status_includes_response_coverage_without_blocking_case(tmp_path) -> None:
+    from agent_py_agent.agent.collaboration import CollaborationStore
+
+    store = CollaborationStore(tmp_path / "collaboration")
+    case = store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "覆盖率账本", 'created_by': "agent-a", 'now': 1.0})
+    request = store.request_collaboration({
+        'case_id': case.case_id,
+        'requester_agent_id': "agent-a",
+        'target_agent_ids': ("agent-b", "agent-c", "agent-d"),
+        'question': "请各自确认。",
+        'now': 2.0,
+        'metadata': {"unavailable_targets": [{"agent_id": "agent-d"}]},
+    })
+    store.submit_evidence({'case_id': case.case_id, 'request_id': request.request_id, 'source_agent_id': "agent-b", 'summary': "命中。", 'evidence_refs': ("artifact://b/evidence",), 'now': 3.0})
+
+    coverage = store.case_status(case.case_id)["response_coverage"]
+    row = coverage["requests"][0]
+
+    assert coverage["target_count"] == 3
+    assert coverage["responded_target_count"] == 1
+    assert coverage["missing_target_count"] == 2
+    assert coverage["unavailable_target_count"] == 1
+    assert row["responded_target_sample"] == ["agent-b"]
+    assert row["missing_target_sample"] == ["agent-c", "agent-d"]
+    assert row["unavailable_target_sample"] == ["agent-d"]
 
 
 def _populate_overview_case(store, case_index: int) -> None:

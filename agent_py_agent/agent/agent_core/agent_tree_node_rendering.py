@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
+from ..model_visible_refs import current_model_ref, current_model_ref_list
 from .agent_tree_progress import attach_task_progress
 
 
@@ -29,9 +30,9 @@ def _node_ref_values(payload: dict[str, object]) -> dict[str, list[object]]:
     tool_contract = _dict(payload.get("tool_contract"))
     reserved = _dict(payload.get("reserved"))
     return {
-        "artifact_refs": _list(payload.get("artifact_refs")),
-        "artifact_registry_refs": _dict_list(payload.get("artifact_registry_refs")),
-        "evidence_refs": _list(payload.get("evidence_refs")),
+        "artifact_refs": current_model_ref_list(_list(payload.get("artifact_refs"))),
+        "artifact_registry_refs": _current_registry_refs(payload.get("artifact_registry_refs")),
+        "evidence_refs": current_model_ref_list(_list(payload.get("evidence_refs"))),
         "blockers": _list(payload.get("blockers")),
         "needs_capability": _needs_capability(tool_contract, reserved),
         "recent_tool_trace": _recent_tool_trace(reserved),
@@ -77,7 +78,7 @@ def _node_status(payload: dict[str, object], refs: dict[str, list[object]]) -> d
         "evidence_refs": refs["evidence_refs"],
         "blockers": refs["blockers"],
         "workspace_refs": _workspace_refs(payload.get("workspace_refs")),
-        "recovery_refs": payload.get("recovery_refs", {}),
+        "recovery_refs": _recovery_refs(payload.get("recovery_refs")),
         "tool_contract": _dict(payload.get("tool_contract")),
         "needs_capability": refs["needs_capability"],
         "recent_tool_trace": refs["recent_tool_trace"],
@@ -115,9 +116,9 @@ def _progress_layer(agent: object, payload: dict[str, object]) -> dict[str, obje
 # 函数用途: 只返回 task_root/task_work_dir/task_output_dir/agent_work_dir 等当前路径名；旧字段不继续外传。
 def _workspace_refs(value: object) -> dict[str, object]:
     refs = _dict(value)
-    task_root = str(refs.get("task_root") or refs.get("task_workspace") or refs.get("task_dir") or "").strip()
-    task_work_dir = str(refs.get("task_work_dir") or "").strip()
-    task_output_dir = str(refs.get("task_output_dir") or "").strip()
+    task_root = current_model_ref(refs.get("task_root") or refs.get("task_workspace") or "")
+    task_work_dir = current_model_ref(refs.get("task_work_dir") or "")
+    task_output_dir = current_model_ref(refs.get("task_output_dir") or "")
     if task_root:
         from pathlib import Path
 
@@ -127,13 +128,53 @@ def _workspace_refs(value: object) -> dict[str, object]:
         "task_root": task_root,
         "task_work_dir": task_work_dir,
         "task_output_dir": task_output_dir,
-        "agent_work_dir": refs.get("agent_work_dir") or refs.get("agent_run_workspace"),
-        "shared_blackboard": refs.get("shared_blackboard"),
-        "inbox": refs.get("agent_run_inbox") or refs.get("inbox"),
-        "outbox": refs.get("agent_run_outbox") or refs.get("outbox"),
-        "final_report": refs.get("agent_run_final_report") or refs.get("final_report"),
+        "agent_work_dir": current_model_ref(refs.get("agent_work_dir") or refs.get("agent_run_workspace")),
+        "shared_blackboard": current_model_ref(refs.get("shared_blackboard")),
+        "inbox": current_model_ref(refs.get("agent_run_inbox") or refs.get("inbox")),
+        "outbox": current_model_ref(refs.get("agent_run_outbox") or refs.get("outbox")),
+        "final_report": current_model_ref(refs.get("agent_run_final_report") or refs.get("final_report")),
     }
     return {key: item for key, item in normalized.items() if item}
+
+
+# LLM: _recovery_refs keeps only current-layout recovery pointers in tree output.
+# 函数用途: 过滤 recovery_refs 里的旧 data/subagents 路径，旧路径只留给系统迁移读取。
+def _recovery_refs(value: object) -> dict[str, object]:
+    refs = _dict(value)
+    return {
+        str(key): projected
+        for key, item in refs.items()
+        if (projected := _recovery_ref_value(item))
+    }
+
+
+# LLM: _recovery_ref_value handles scalar/list recovery refs through the same current-path projection.
+# 函数用途: 把 recovery_refs 的列表和字符串统一过滤为当前模型可见路径。
+def _recovery_ref_value(value: object) -> object:
+    if isinstance(value, list | tuple | set):
+        return current_model_ref_list(value)
+    return current_model_ref(value)
+
+
+# LLM: _current_registry_refs filters artifact registry rows without changing their IDs.
+# 函数用途: 保留 artifact_id/status/kind 等账本字段，但不把旧路径作为可读产物 ref 交给模型。
+def _current_registry_refs(value: object) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for item in _dict_list(value):
+        rows.append(_current_registry_ref(item))
+    return rows
+
+
+# LLM: _current_registry_ref preserves registry metadata while removing stale legacy paths.
+# 函数用途: artifact registry 行保留 artifact_id/status/kind，旧 path 字段从模型可见输出里移除。
+def _current_registry_ref(item: dict[str, object]) -> dict[str, object]:
+    row = dict(item)
+    if "path" not in row:
+        return row
+    projected = current_model_ref(row.get("path"))
+    if projected:
+        return {**row, "path": projected}
+    return {key: value for key, value in row.items() if key != "path"}
 
 
 # LLM: _evidence_layer groups refs and blockers without reading their bodies.

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..settings.defaults import default_agent_config
 from .real_run_review_rules import TAG_RULES
 
 _MARKER_RE = re.compile(r"\[([A-Z][A-Z0-9_]+)\]")
@@ -37,9 +38,7 @@ class ReviewScanLimits:
 # 函数用途: 从配置对象读取复盘扫描预算；未传配置时只使用 schema 默认。
 def review_scan_limits(config: object | None) -> ReviewScanLimits:
     if config is None:
-        from ..settings.config import AgentConfig
-
-        config = AgentConfig()
+        config = default_agent_config()
     return ReviewScanLimits(
         max_report_bytes=_config_int(config, "real_run_review_max_report_bytes"),
         max_log_bytes=_config_int(config, "real_run_review_max_log_bytes"),

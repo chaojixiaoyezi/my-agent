@@ -94,6 +94,7 @@ class _DispatchCollectionBase:
             max_cards=params.max_cards,
             probe=params.probe,
             records=list(params.existing_records),
+            execution_plan=params.ctx.execution_plan,
         )
         records = execute_runner_jobs(self, params.ctx, batch_ctx)
         params.ctx.runner_instruction = batch_ctx.effective_runner_instruction
@@ -237,13 +238,14 @@ def _dispatch_context_from_params(
     capability_config: CapabilityConfig | None,
     params: DispatchParams,
 ) -> DispatchContext:
+    plan = params.execution_plan
     return DispatchContext(
         cfg=capability_config or CapabilityConfig(),
         normalized_workflow_mode=str(params.workflow_mode or "off").strip().lower(),
-        apply=params.apply,
+        apply=plan.mutate_state,
         planner=params.planner,
         runner_instruction=params.runner_instruction,
-        max_runners=params.max_runners,
+        max_runners=plan.max_runners,
         limit=params.limit,
         reviewer=params.reviewer,
         note=params.note,
@@ -255,6 +257,7 @@ def _dispatch_context_from_params(
         exclude_run_ids=params.exclude_run_ids,
         background_launch_id=params.background_launch_id,
         router=router,
+        execution_plan=plan,
     )
 
 

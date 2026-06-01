@@ -13,6 +13,14 @@ import json
 import time
 from pathlib import Path
 
+from ..common.value_parsing import (
+    TOOL_TEXT_LIST_OPTIONS,
+    bool_value,
+    non_negative_int,
+    positive_int,
+    string_list,
+)
+
 ONE_SHOT_TOOL_NAMES = {
     "create_subagents",
     "schedule_child_subagents",
@@ -35,65 +43,25 @@ def _one_shot_tool_call_key(payload: dict[str, object]) -> str:
 # LLM: _string_list 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 处理stringlist相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _string_list(value: object) -> list[str]:
-
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, tuple):
-        return [str(item).strip() for item in value if str(item).strip()]
-    text = str(value).strip()
-    if not text:
-        return []
-    if text.startswith("["):
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, list):
-            return [str(item).strip() for item in parsed if str(item).strip()]
-    if "\n" in text:
-        return [line.strip("- ").strip() for line in text.splitlines() if line.strip("- ").strip()]
-    if "," in text:
-        return [item.strip() for item in text.split(",") if item.strip()]
-    return [text]
+    return string_list(value, TOOL_TEXT_LIST_OPTIONS)
 
 
 # LLM: _bool_param 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 处理boolparam相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _bool_param(value: object, *, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "y", "on", "apply"}:
-        return True
-    if text in {"0", "false", "no", "n", "off", "dry-run", "dry_run"}:
-        return False
-    return default
+    return bool_value(value, default=default)
 
 
 # LLM: _positive_int 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 处理positiveint相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _positive_int(value: object, *, default: int) -> int:
-    try:
-        parsed = int(value) if value is not None else default
-    except (TypeError, ValueError):
-        return default
-    return max(0, parsed)
+    return positive_int(value, default=default)
 
 
 # LLM: _non_negative_int 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 处理nonnegativeint相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _non_negative_int(value: object, *, default: int) -> int:
-    try:
-        parsed = int(value) if value is not None else default
-    except (TypeError, ValueError):
-        return default
-    return max(0, parsed)
+    return non_negative_int(value, default=default)
 
 
 # LLM: _sleep_with_stop 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

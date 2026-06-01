@@ -109,6 +109,8 @@ pending/<id>.json
 
 lease heartbeat 间隔和 processing timeout 来自 `AgentConfig`。如果配置非法，lease helper 只回退到配置 schema 默认；不要在 `gateway_parts/lease.py` 或 `gateway_parts/lease_service.py` 里再写一套隐藏数字。
 
+这层 schema 默认只允许通过 `settings/defaults.py` 读取。gateway lease 模块本身不再裸建 `AgentConfig()`，这样配置权威只剩“运行时 agent.config 优先，schema 默认兜底”一条线。
+
 ### stale lease 恢复
 
 如果 worker 中断，`processing/<id>.json` 里的 `lease_heartbeat_at` 会停住。恢复逻辑按 lease 新鲜度判断下一步：

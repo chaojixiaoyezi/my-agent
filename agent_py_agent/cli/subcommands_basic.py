@@ -151,8 +151,17 @@ def _add_archive_search_args(parser) -> None:
 # LLM: _add_archive_resume_args 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_archive_resume_args(parser) -> None:
-    parser.add_argument("--from-compact", dest="from_compact", help="从 memory-compact --apply 的 apply_id 或产物路径恢复")
-    parser.add_argument("--compact-resume-mode", choices=["manual", "auto"], default="manual", help="compact 恢复模式；auto 会启用严格 action guard")
+    parser.add_argument(
+        "--from-compact",
+        dest="from_compact",
+        help="调试/救援：从 memory-compact --apply 的 apply_id 或产物路径生成恢复上下文",
+    )
+    parser.add_argument(
+        "--compact-resume-mode",
+        choices=["manual", "auto"],
+        default="manual",
+        help="调试/救援 compact 恢复模式；auto 只检查 action guard，不代表普通运行要手动调用",
+    )
     parser.add_argument("--compact-owner-type", default="main_agent", help="compact owner 类型；预留 subagent_run/subagent_session")
     parser.add_argument("--compact-owner-id", default="", help="compact owner 标识；预留给子代理会话压缩")
     parser.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="从哪一层归档找线索")
@@ -195,7 +204,11 @@ def _add_memory_compact_args(parser) -> None:
     """参数说明: memory compact 支持只读 dry-run 和非破坏性 apply 产物生成。"""
 
     parser.add_argument("--dry-run", action="store_true", default=True, help="只生成计划，不修改文件")
-    parser.add_argument("--apply", action="store_true", help="生成非破坏性 compact context、自检和 apply ledger")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="调试/救援：生成非破坏性 compact context、自检和 apply ledger；普通运行优先走自动 runtime compact",
+    )
     parser.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="扫描哪一层归档")
     parser.add_argument("--date", help="只扫描某一天，格式 YYYY-MM-DD")
     parser.add_argument("--since", help="只看此时间之后的归档线索")
@@ -248,7 +261,7 @@ def _add_memory_archive_subcommands(sub: argparse._SubParsersAction) -> None:
     _add_archive_search_args(memory_archive_search)
     memory_archive_search.set_defaults(func=cmd_memory_archive_search)
 
-    memory_resume = sub.add_parser("memory-resume", help="从归档和事实源生成恢复线索")
+    memory_resume = sub.add_parser("memory-resume", help="从归档和事实源生成恢复线索；--from-compact 属于调试/救援入口")
     memory_resume.add_argument("query", nargs="?", default="", help="恢复关键词；也可只传 request/run/session 过滤")
     _add_archive_resume_args(memory_resume)
     memory_resume.set_defaults(func=cmd_memory_resume)
@@ -266,7 +279,7 @@ def _add_memory_archive_subcommands(sub: argparse._SubParsersAction) -> None:
     _add_memory_fact_write_args(memory_fact_write)
     memory_fact_write.set_defaults(func=cmd_memory_fact_write)
 
-    memory_compact = sub.add_parser("memory-compact", help="预演 memory compact 计划")
+    memory_compact = sub.add_parser("memory-compact", help="手动/救援：预演 memory compact 计划；普通运行默认走自动 runtime compact")
     _add_memory_compact_args(memory_compact)
     memory_compact.set_defaults(func=cmd_memory_compact)
 

@@ -122,7 +122,7 @@ def test_agent_tree_redacts_legacy_subagent_paths_everywhere():
     payload = agent_tree_status_payload(_Agent())
 
     assert "/data/subagents/" not in str(payload)
-    assert "[internal_legacy_subagent_path_hidden]" in str(payload)
+    assert "[internal_legacy_subagent_path_hidden]" not in str(payload)
 
 
 # LLM: Tree status should expose registry records beside legacy path refs.

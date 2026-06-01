@@ -101,7 +101,7 @@ def test_runner_context_schedule_hides_legacy_subagent_paths(tmp_path, monkeypat
 
     assert result.ok is True
     assert "/data/subagents/" not in result.output
-    assert "[internal_legacy_subagent_path_hidden]" in result.output
+    assert "[internal_legacy_subagent_path_hidden]" not in result.output
 
 
 def test_auto_start_dispatch_keeps_current_runner_parent_scope(tmp_path):

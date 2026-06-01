@@ -364,6 +364,10 @@ class TestDispatchSubagentsTool:
         assert params.apply is True
         assert params.execute_runners is True
         assert params.max_runners == 1
+        assert params.execution_plan.preview_only is False
+        assert params.execution_plan.mutate_state is True
+        assert params.execution_plan.start_runners is True
+        assert params.execution_plan.max_runners == 1
 
     def test_model_facing_summary_renames_record_dry_run_count(self, tmp_path):
         """工具调用不是 dry-run 时，不把单条记录计数渲染成顶层 dry_run 语义。"""

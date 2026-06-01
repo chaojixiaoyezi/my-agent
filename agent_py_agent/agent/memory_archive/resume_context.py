@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from ..settings.defaults import default_config_int
 from .query import (
     ResumeGuidanceRequest,
     build_resume_guidance,
@@ -326,6 +327,4 @@ def _config_int(agent: Any, key: str) -> int:
     try:
         return max(0, int(getattr(agent.config, key)))
     except (AttributeError, TypeError, ValueError):
-        from ..settings.config import AgentConfig
-
-        return max(0, int(getattr(AgentConfig(), key)))
+        return default_config_int(key, minimum=0)

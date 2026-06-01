@@ -10,6 +10,7 @@ from ..agent_core.runtime_loop_models import RunParams
 from .channels import ChannelSendRequest, FakeChannelHub
 from .models import BackgroundMainAgentReport, WakeSignal
 from .runtime_context import context_markdown
+from .runtime_tool_policy import background_allowed_tools
 from .runtime_utils import background_prompt, default_route_target, now, wake_signal_payload
 from .store import ConversationStore
 
@@ -44,7 +45,7 @@ class BackgroundMainAgentRuntime:
     def _run_agent(self, thread, request: BackgroundRunRequest) -> str:
         result = self.agent.run(
             background_prompt(request.reason),
-            params=_run_params(thread.thread_id, request),
+            params=_run_params(thread.thread_id, request, getattr(self.agent, "config", None)),
             inject=[context_markdown(agent=self.agent, store=self.store, thread=thread, request=request)],
         )
         return str(getattr(result, "response", "") or "")
@@ -73,25 +74,11 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
     )
 
 
-def _run_params(thread_id: str, request: BackgroundRunRequest) -> RunParams:
+def _run_params(thread_id: str, request: BackgroundRunRequest, config: object | None = None) -> RunParams:
     return RunParams(
         save=False,
         source="background_main_agent",
         run_id=f"bg-main-{thread_id}",
         task_id=request.task_id or thread_id,
-        allowed_tools=_allowed_tools(),
+        allowed_tools=background_allowed_tools(config),
     )
-
-
-def _allowed_tools() -> list[str]:
-    return [
-        "inspect_agent_tree",
-        "raise_event",
-        "raise_collaboration",
-        "inspect_collaboration",
-        "submit_collaboration_result",
-        "update_collaboration",
-        "dispatch_subagents",
-        "send_guidance",
-        "create_subagents",
-    ]

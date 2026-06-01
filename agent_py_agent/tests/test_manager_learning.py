@@ -44,7 +44,8 @@ class TestLearningTokens:
         from agent_py_agent.agent.subagents.manager_learning import _learning_tokens
 
         tokens = _learning_tokens("hello world")
-        assert "hello" in tokens or "hw" in tokens
+        assert "w:hello" in tokens
+        assert "c2:he" in tokens
 
     def test_tokens_empty(self):
         """测试空字符串。"""
@@ -84,6 +85,30 @@ class TestLearningSimilarity:
 
         result = _learning_similarity("hello", "hello world")
         assert result >= 0.9
+
+    def test_similarity_long_context_containment_is_not_duplicate(self):
+        """短教训出现在长报告里时，不应只靠包含关系当成同一条学习。"""
+        from agent_py_agent.agent.subagents.manager_learning import _learning_similarity
+
+        short_lesson = "先确认真实路径再读文件"
+        long_report = (
+            "本轮复盘记录了很多互不相关的问题，包括模型网关错误、子代理状态树延迟、"
+            "路径提示不稳定、产物注册表缺失、上下文压缩后的恢复顺序、日志归档策略、"
+            "以及某个局部教训：先确认真实路径再读文件。后续还要继续观察其他模块。"
+        )
+
+        result = _learning_similarity(short_lesson, long_report)
+        assert result < 0.45
+
+    def test_similarity_near_duplicate_lesson_stays_high(self):
+        """真正相近的学习条目仍应能合并。"""
+        from agent_py_agent.agent.subagents.manager_learning import _learning_similarity
+
+        result = _learning_similarity(
+            "先确认真实路径再读文件",
+            "执行前先确认真实路径，再读取文件",
+        )
+        assert result >= 0.45
 
     def test_similarity_different(self):
         """测试完全不同字符串。"""

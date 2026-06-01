@@ -18,6 +18,8 @@ from .models import LearningCandidate, SubAgentTask
 from .utils import _new_id
 
 _LEARNING_STATUSES = {"draft", "accepted", "rejected"}
+_SHORT_CONTAINMENT_CHARS = 80
+_CONTAINMENT_RATIO_FOR_MATCH = 0.55
 
 
 # LLM: UpdateLearningCandidateParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -43,16 +45,44 @@ def _normalize_learning_text(text: str) -> str:
     return normalized
 # LLM: _learning_tokens 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 处理learning令牌数相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
+def _word_shingles(words: list[str], size: int) -> set[str]:
+    if len(words) < size:
+        return set()
+    return {" ".join(words[index : index + size]) for index in range(len(words) - size + 1)}
+
+
+def _char_learning_tokens(compact: str) -> set[str]:
+    if not compact:
+        return set()
+    if len(compact) == 1:
+        return {f"c:{compact}"}
+    size = 2 if len(compact) <= _SHORT_CONTAINMENT_CHARS else 3
+    if len(compact) < size:
+        return {f"c:{compact}"}
+    return {f"c{size}:{compact[index : index + size]}" for index in range(len(compact) - size + 1)}
+
+
 def _learning_tokens(text: str) -> set[str]:
     normalized = _normalize_learning_text(text)
-    tokens = {item for item in normalized.split(" ") if item}
-    compact = normalized.replace(" ", "")
-    if compact:
-        if len(compact) == 1:
-            tokens.add(compact)
-        else:
-            tokens.update(compact[index : index + 2] for index in range(len(compact) - 1))
+    words = [item for item in normalized.split(" ") if item]
+    tokens = {f"w:{item}" for item in words}
+    tokens.update(f"s3:{item}" for item in _word_shingles(words, 3))
+    tokens.update(_char_learning_tokens(normalized.replace(" ", "")))
     return tokens
+
+
+def _contained_learning_similarity(left: str, right: str) -> float | None:
+    if left not in right and right not in left:
+        return None
+    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+    if not shorter:
+        return None
+    length_ratio = len(shorter) / max(1, len(longer))
+    if len(longer) <= _SHORT_CONTAINMENT_CHARS:
+        return 0.92
+    if length_ratio >= _CONTAINMENT_RATIO_FOR_MATCH:
+        return 0.92
+    return None
 # LLM: _learning_similarity 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 处理learningsimilarity相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _learning_similarity(left: str, right: str) -> float:
@@ -60,8 +90,9 @@ def _learning_similarity(left: str, right: str) -> float:
         return 0.0
     if left == right:
         return 1.0
-    if left in right or right in left:
-        return 0.92
+    contained_score = _contained_learning_similarity(left, right)
+    if contained_score is not None:
+        return contained_score
     left_tokens = _learning_tokens(left)
     right_tokens = _learning_tokens(right)
     if not left_tokens or not right_tokens:

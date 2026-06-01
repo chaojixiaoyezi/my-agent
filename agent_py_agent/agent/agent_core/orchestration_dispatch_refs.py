@@ -6,6 +6,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..model_visible_refs import current_model_ref, current_model_ref_list
+from .orchestration_dispatch_load_errors import load_task_result, task_load_error_row
+
 
 # LLM: related_task_refs exposes product refs from the runs touched by this dispatch report.
 # 函数用途: 收集本轮 run 和 runner 新建 child 的 artifact/evidence refs，不读取文件正文。
@@ -25,14 +28,16 @@ def related_task_refs(agent: object, report: object, attr: str, *, limit: int = 
 def related_task_result_refs(agent: object, report: object, *, per_run_artifact_limit: int = 3) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for run_id in _related_run_ids(report) or _visible_run_ids(agent):
-        task = _safe_load_task(agent, run_id)
-        if not _has_task_identity(task, run_id):
+        loaded = load_task_result(agent, run_id)
+        if loaded.error:
+            rows.append(task_load_error_row(run_id, loaded.error))
             continue
-        row = _task_result_ref_row(task, per_run_artifact_limit=per_run_artifact_limit)
+        if not _has_task_identity(loaded.task, run_id):
+            continue
+        row = _task_result_ref_row(loaded.task, per_run_artifact_limit=per_run_artifact_limit)
         if row:
             rows.append(row)
     return rows
-
 
 # LLM: _related_run_ids includes explicit runner targets without flattening entire descendant trees.
 # 函数用途: 调度索引只列本轮直接相关 run；孙代理通过对应父代理 output/tree 追踪，避免大型代理树撑爆上下文。
@@ -145,8 +150,8 @@ def _task_result_ref_row(task: object, *, per_run_artifact_limit: int) -> dict[s
         "primary_artifact_registry_refs": registry_records,
         "primary_artifact_summaries": _output_artifact_summaries(output_payload, limit=per_run_artifact_limit),
         "evidence_refs": evidence,
-        "run_closeout_ref": str(getattr(task, "output_json", "") or ""),
-        "runner_result_ref": str(getattr(task, "runner_result_json", "") or ""),
+        "run_closeout_ref": current_model_ref(getattr(task, "output_json", "")),
+        "runner_result_ref": current_model_ref(getattr(task, "runner_result_json", "")),
     }
 
 
@@ -217,7 +222,7 @@ def _output_artifact_summaries(payload: dict[str, object], *, limit: int) -> lis
     for item in artifacts:
         if not isinstance(item, dict):
             continue
-        path = str(item.get("path") or "").strip()
+        path = current_model_ref(item.get("path"))
         if not path:
             continue
         rows.append({
@@ -241,16 +246,32 @@ def _task_registry_records(
     deduped: list[dict[str, object]] = []
     seen: set[str] = set()
     for row in rows:
-        artifact_id = str(row.get("artifact_id") or "").strip()
-        path = str(row.get("path") or "").strip()
-        key = artifact_id or path
+        projected = _current_registry_record(row)
+        key = _registry_record_key(projected)
         if not key or key in seen:
             continue
         seen.add(key)
-        deduped.append(row)
+        deduped.append(projected)
         if len(deduped) >= limit:
             break
     return deduped
+
+
+# LLM: _current_registry_record keeps registry rows refs-only and current-layout safe.
+# 函数用途: 过滤 registry row 的旧 path，同时保留 artifact_id、kind、status 等可用元数据。
+def _current_registry_record(row: dict[str, object]) -> dict[str, object]:
+    if "path" not in row:
+        return dict(row)
+    path = current_model_ref(row.get("path"))
+    if path:
+        return {**row, "path": path}
+    return {key: value for key, value in row.items() if key != "path"}
+
+
+# LLM: _registry_record_key de-duplicates registry rows by stable id first, path second.
+# 函数用途: 为 artifact registry refs 生成去重键，避免同一产物重复进入父级结果索引。
+def _registry_record_key(row: dict[str, object]) -> str:
+    return str(row.get("artifact_id") or row.get("path") or "").strip()
 
 
 def _registry_records_from_attrs(value: object) -> list[dict[str, object]]:
@@ -276,7 +297,7 @@ def _registry_records_from_output(value: object) -> list[dict[str, object]]:
 
 
 def _registry_paths(records: list[dict[str, object]], *, limit: int) -> list[str]:
-    return _unique_strings([str(item.get("path") or "").strip() for item in records])[:limit]
+    return _unique_strings([current_model_ref(item.get("path")) for item in records])[:limit]
 
 
 def _registry_ids(records: list[dict[str, object]], *, limit: int) -> list[str]:
@@ -291,7 +312,7 @@ def _artifact_entry_paths(value: object) -> list[str]:
     refs: list[str] = []
     for item in value:
         if isinstance(item, dict):
-            refs.append(str(item.get("path") or "").strip())
+            refs.append(current_model_ref(item.get("path")))
     return [ref for ref in refs if ref]
 
 
@@ -303,7 +324,7 @@ def _packet_artifact_refs(value: object) -> list[str]:
     refs: list[str] = []
     for item in value:
         if isinstance(item, dict):
-            refs.extend(str(ref or "").strip() for ref in item.get("artifact_refs") or [])
+            refs.extend(current_model_ref_list(item.get("artifact_refs") or []))
     return [ref for ref in refs if ref]
 
 
@@ -312,7 +333,7 @@ def _packet_artifact_refs(value: object) -> list[str]:
 def _string_refs(value: object, *, limit: int) -> list[str]:
     if not isinstance(value, list | tuple | set):
         return []
-    return _unique_strings([str(item or "").strip() for item in value if str(item or "").strip()])[:limit]
+    return current_model_ref_list(value, limit=limit)
 
 
 # LLM: _unique_strings preserves first occurrence order for small model-facing lists.

@@ -59,7 +59,7 @@ def test_create_subagents_payload_hides_legacy_subagent_paths(monkeypatch):
 
     assert result.ok is True
     assert "/data/subagents/" not in result.output
-    assert "[internal_legacy_subagent_path_hidden]" in result.output
+    assert "[internal_legacy_subagent_path_hidden]" not in result.output
 
 
 def test_sanitizer_keeps_output_filename_without_legacy_path():

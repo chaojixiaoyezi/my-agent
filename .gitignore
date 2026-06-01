@@ -41,6 +41,8 @@ agent_py_agent/memory_archive/
 /data/memory.jsonl
 /data/memory.jsonl.lock
 /data/subagents/
+/gateway/
+/local_store/
 /memory/
 /memory_archive/
 /outputs/

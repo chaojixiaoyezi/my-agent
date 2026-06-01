@@ -102,6 +102,25 @@ def test_record_runner_result_generates_and_dedupes_learning_candidates(tmp_path
     assert (tmp_path / "data" / "learning_drafts" / f"{candidate.id}.json").exists()
 
 
+def test_learning_candidate_does_not_merge_short_lesson_into_long_report(tmp_path):
+    agent = _create_agent_with_learning(tmp_path)
+    first = _run_and_record_lesson(agent, "记录具体教训", "记录经验。", "先确认真实路径再读文件")
+    second = _run_and_record_lesson(
+        agent,
+        "记录长复盘",
+        "记录经验。",
+        (
+            "本轮复盘包含模型网关错误、子代理状态树延迟、产物注册、上下文压缩、"
+            "日志归档、路径提示和多用户记忆隔离等多个主题。其中一个局部教训是："
+            "先确认真实路径再读文件。这个局部教训不能代表整篇复盘。"
+        ),
+    )
+
+    candidates = agent.subagents.list_learning_candidates()
+    assert len(candidates) == 2
+    assert sorted(run for item in candidates for run in item.source_runs) == sorted([first.id, second.id])
+
+
 def test_learn_cli_lists_accepts_rejects_and_reports_stats(tmp_path, capsys):
     config_path = _write_config(tmp_path, enable_self_learning=True)
     agent = _create_agent_with_learning(tmp_path)

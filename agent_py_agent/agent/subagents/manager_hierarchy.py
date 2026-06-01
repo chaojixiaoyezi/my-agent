@@ -24,6 +24,11 @@ from .services.leadership_recovery_apply import (
     LeadershipRecoveryApplyReport,
     SubAgentLeadershipRecoveryApplier,
 )
+from .services.recovery_orchestrator import (
+    RecoveryOrchestrationReport,
+    RecoveryOrchestrationRequest,
+    SubAgentRecoveryOrchestrator,
+)
 
 
 # LLM: SubAgentHierarchyMixin keeps hierarchy scheduling as a small manager capability.
@@ -44,6 +49,15 @@ class SubAgentHierarchyMixin:
         from .debug_trace_reports import trace_hierarchy_recovery_result
 
         return trace_hierarchy_recovery_result(self, result)
+
+    # LLM: orchestrate_recovery is the single ledgered entry for applying recovery strategies.
+    # 函数用途: 将 refs-only 策略统一转成 dispatch/takeover/人工处理步骤；默认 dry-run，只在 apply=True 时调用既有安全执行器。
+    def orchestrate_recovery(
+        self,
+        *,
+        params: RecoveryOrchestrationRequest,
+    ) -> RecoveryOrchestrationReport:
+        return SubAgentRecoveryOrchestrator(self).orchestrate(params)
 
     # LLM: plan_leadership_recovery previews batch handoffs for stale coordinators without mutating the tree.
     # 函数用途: 为批量 coordinator 挂掉场景生成 leader 分摊计划，当前只读不执行。

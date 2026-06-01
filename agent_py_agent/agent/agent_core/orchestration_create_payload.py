@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from ..action_protocol import subagent_schedule_envelope_from_payload
 from ..contracts.idempotency import idempotency_key, operation_id
-from ..model_visible_ref_sanitizer import sanitize_model_visible_refs
+from ..model_visible_refs import current_model_ref, current_model_ref_list
 from .orchestration_child_result_index import child_result_index
 from .orchestration_create_idempotency import created_tasks, dispatchable_tasks, reused_tasks
 from .orchestration_dispatch_state_contract import dispatch_state_contract_payload
@@ -43,19 +43,37 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
         "created_run_ids": [task.id for task in created],
         "reused_run_ids": [task.id for task in reused],
         "dispatch_run_ids": [task.id for task in pending_dispatch],
-        "auto_start": auto_start or {"status": "not_attempted"},
+        "auto_start": _auto_start_payload(auto_start),
         "next_action": _dispatch_next_action(dispatchable, request_params, auto_start),
         "allowed_tools": request.allowed_tools or "automatic",
         "operation_contract": _operation_contract(request_params, created, reused, pending_dispatch),
         "replacement_records": request.replacement_records or [],
         "scheduling_advice": _scheduling_advice(tasks, request_params, auto_start),
         "child_result_index": child_result_index(agent, tasks),
-        "subagent_workspace": str(agent.subagents.workspace),
+        "subagent_workspace": current_model_ref(getattr(agent.subagents, "workspace", "")),
         "tasks": [_task_payload(task) for task in tasks],
     }
     payload.update(dispatch_state_contract_payload(agent))
     payload["typed_envelope"] = subagent_schedule_envelope_from_payload(payload, tool="create_subagents").to_dict()
-    return sanitize_model_visible_refs(payload)
+    return payload
+
+
+# LLM: _auto_start_payload keeps create_subagents output compact and current-ref only.
+# 函数用途: 自动启动结果只保留状态和 run id；树状态请用 inspect_agent_tree 查询，避免嵌套旧路径流入模型。
+def _auto_start_payload(auto_start: dict[str, object] | None) -> dict[str, object]:
+    if not isinstance(auto_start, dict):
+        return {"status": "not_attempted"}
+    allowed = {
+        "status",
+        "dispatch_mode",
+        "run_ids",
+        "deferred_run_ids",
+        "started_run_ids",
+        "failed_run_ids",
+        "warnings",
+    }
+    payload = {key: auto_start[key] for key in allowed if key in auto_start}
+    return payload or {"status": str(auto_start.get("status") or "unknown")}
 
 
 # LLM: _pending_dispatch_tasks separates explicit deferred starts from already auto-started runs.
@@ -134,8 +152,8 @@ def _task_payload(task: object) -> dict[str, object]:
         "goal": _task_text(task, "goal"),
         "status": _task_text(task, "status"),
         "verification_status": _task_text(task, "verification_status"),
-        "task_root": _task_text(task, "task_workspace_dir") or _task_text(task, "task_dir"),
-        "agent_work_dir": _task_text(task, "agent_run_workspace_dir"),
+        "task_root": current_model_ref(_task_text(task, "task_workspace_dir")),
+        "agent_work_dir": current_model_ref(_task_text(task, "agent_run_workspace_dir")),
         "attributes": _task_attributes(task),
     }
 
@@ -151,7 +169,24 @@ def _task_text(task: object, field: str) -> str:
 # 函数用途: create_subagents 返回 output/input/QA 等机器字段，避免父级下一轮再从 goal 文字里猜。
 def _task_attributes(task: object) -> dict[str, object]:
     attrs = getattr(task, "attributes", {}) or {}
-    return dict(attrs) if isinstance(attrs, dict) else {}
+    if not isinstance(attrs, dict):
+        return {}
+    return {
+        str(key): projected
+        for key, value in attrs.items()
+        if (projected := _task_attribute_value(str(key), value)) not in ("", [], None)
+    }
+
+
+# LLM: _task_attribute_value keeps structured task refs current while leaving non-ref metadata intact.
+# 函数用途: 对 input/output/artifact 等 ref 字段做当前路径投影，其他属性原样传递。
+def _task_attribute_value(key: str, value: object) -> object:
+    ref_keys = {"input_refs", "output_refs", "output_files", "artifact_refs", "required_read_paths"}
+    if key in ref_keys:
+        return current_model_ref_list(value, basename_for_legacy=True)
+    if isinstance(value, str):
+        return current_model_ref(value)
+    return value
 
 
 # LLM: _scheduling_advice is a soft create_subagents hint, not a dispatch blocker.

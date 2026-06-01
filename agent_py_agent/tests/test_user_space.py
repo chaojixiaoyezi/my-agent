@@ -8,14 +8,14 @@ from pathlib import Path
 import pytest
 
 
-class TestUserPaths:
-    """Test UserPaths and get_user_paths."""
+class TestLegacyUserPaths:
+    """Test LegacyUserPaths and get_legacy_user_paths."""
 
-    def test_get_user_paths_basic(self, tmp_path: Path):
-        """get_user_paths returns correct paths for a user."""
-        from agent_py_agent.agent.user_space.paths import get_user_paths
+    def test_get_legacy_user_paths_basic(self, tmp_path: Path):
+        """get_legacy_user_paths returns old data/users paths for a user."""
+        from agent_py_agent.agent.user_space.legacy_user_paths import get_legacy_user_paths
 
-        paths = get_user_paths("alice", tmp_path / "data" / "users")
+        paths = get_legacy_user_paths("alice", tmp_path / "data" / "users")
 
         assert paths.user_id == "alice"
         assert paths.root_dir == tmp_path / "data" / "users" / "alice"
@@ -25,20 +25,20 @@ class TestUserPaths:
         assert paths.sessions_dir == tmp_path / "data" / "users" / "alice" / "sessions"
         assert paths.local_store_path == tmp_path / "data" / "users" / "alice" / "local_store" / "local.db"
 
-    def test_get_user_paths_admin(self, tmp_path: Path):
+    def test_get_legacy_user_paths_admin(self, tmp_path: Path):
         """admin user gets expected paths."""
-        from agent_py_agent.agent.user_space.paths import get_user_paths
+        from agent_py_agent.agent.user_space.legacy_user_paths import get_legacy_user_paths
 
-        paths = get_user_paths("admin", tmp_path / "data" / "users")
+        paths = get_legacy_user_paths("admin", tmp_path / "data" / "users")
 
         assert paths.user_id == "admin"
         assert paths.root_dir == tmp_path / "data" / "users" / "admin"
 
-    def test_get_user_paths_with_string(self, tmp_path: Path):
-        """get_user_paths accepts string path."""
-        from agent_py_agent.agent.user_space.paths import get_user_paths
+    def test_get_legacy_user_paths_with_string(self, tmp_path: Path):
+        """get_legacy_user_paths accepts string path."""
+        from agent_py_agent.agent.user_space.legacy_user_paths import get_legacy_user_paths
 
-        paths = get_user_paths("bob", str(tmp_path / "users"))
+        paths = get_legacy_user_paths("bob", str(tmp_path / "users"))
 
         assert paths.user_id == "bob"
         assert paths.root_dir == tmp_path / "users" / "bob"
@@ -60,12 +60,12 @@ class TestUserSpaceManager:
         assert paths.sessions_dir.exists()
         assert (paths.root_dir / "local_store").exists()
 
-    def test_get_user_paths_no_create(self, tmp_path: Path):
-        """get_user_paths does not create directories."""
+    def test_get_legacy_user_paths_no_create(self, tmp_path: Path):
+        """get_legacy_user_paths does not create directories."""
         from agent_py_agent.agent.user_space.manager import UserSpaceManager
 
         manager = UserSpaceManager(tmp_path / "data" / "users")
-        paths = manager.get_user_paths("alice")
+        paths = manager.get_legacy_user_paths("alice")
 
         # Should not create directory
         assert not paths.root_dir.exists()
@@ -209,10 +209,10 @@ class TestIntegration:
         assert config.user_id == "alice"
         assert config.user_data_root == "data/users"
 
-    def test_get_user_paths_integration(self, tmp_path: Path):
-        """get_user_paths works with config values."""
+    def test_get_legacy_user_paths_integration(self, tmp_path: Path):
+        """get_legacy_user_paths works with legacy config values."""
         from agent_py_agent.agent.settings.config import AgentConfig
-        from agent_py_agent.agent.user_space.paths import get_user_paths
+        from agent_py_agent.agent.user_space.legacy_user_paths import get_legacy_user_paths
 
         config = AgentConfig()
         user_id = config.user_data_root.split("/")[0]  # "data"
@@ -220,7 +220,7 @@ class TestIntegration:
 
         # This mimics what SimpleAgent does
         user_data_root = base / config.user_data_root
-        paths = get_user_paths(config.user_id, user_data_root)
+        paths = get_legacy_user_paths(config.user_id, user_data_root)
 
         assert paths.user_id == "admin"
         assert paths.root_dir == tmp_path / "data" / "users" / "admin"

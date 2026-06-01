@@ -24,9 +24,10 @@ class ToolAgentBudgetRequest:
 # 函数用途: 检查单个代理是否超过滚动工具预算；未超过时登记本次调用，超过时返回自检提示。
 def check_tool_agent_budget(request: ToolAgentBudgetRequest) -> ToolExecutionResult | None:
     config = getattr(request.agent, "config", None)
+    policy = getattr(request.agent, "runtime_guard_policy", None)
     run_id = str(request.run_id or "").strip()
-    max_calls = _budget_int(config, "tool_agent_budget_max_calls")
-    window_seconds = _budget_int(config, "tool_agent_budget_window_seconds")
+    max_calls = _budget_int(config, "tool_agent_budget_max_calls", policy=policy)
+    window_seconds = _budget_int(config, "tool_agent_budget_window_seconds", policy=policy)
     if not run_id or max_calls <= 0 or window_seconds <= 0:
         return None
 
@@ -54,9 +55,11 @@ def _events_by_run(agent: object) -> dict[str, list[float]]:
 
 # LLM: _budget_int reads explicit runtime config first, then the shared runtime guard file.
 # 函数用途: 显式传入的配置优先；AgentConfig 默认不再写死预算数字，缺省时集中读取 runtime_guard_config.yaml。
-def _budget_int(config: object, key: str) -> int:
+def _budget_int(config: object, key: str, *, policy: object = None) -> int:
     value = getattr(config, key, None)
     if value is None:
+        if hasattr(policy, "int_value"):
+            return policy.int_value(key, 0)
         return runtime_guard_int(key, 0)
     try:
         return max(0, int(value or 0))

@@ -56,3 +56,23 @@ def test_load_exploration_fuse_config_local_progress_defaults():
     config = load_exploration_fuse_config(Path("/missing/runtime_guard_config.yaml"))
 
     assert config.local_progress_unlimited_hint_interval == 10
+
+
+def test_runtime_guard_policy_records_values_and_sources(tmp_path: Path):
+    from agent_py_agent.agent.settings.runtime_guard_config import runtime_guard_policy
+
+    path = tmp_path / "runtime_guard_config.yaml"
+    path.write_text(
+        "repeat_fail_threshold: 14\nterminal_block_enabled: true\n",
+        encoding="utf-8",
+    )
+
+    policy = runtime_guard_policy(path, overrides={"repeat_fail_threshold": 18})
+    snapshot = policy.snapshot(task_id="task-1", run_id="run-1")
+
+    assert policy.int_value("repeat_fail_threshold", 10) == 18
+    assert policy.bool_value("terminal_block_enabled", False) is True
+    assert snapshot["task_id"] == "task-1"
+    assert snapshot["run_id"] == "run-1"
+    assert snapshot["sources"]["terminal_block_enabled"] == str(path)
+    assert snapshot["sources"]["repeat_fail_threshold"] == "runtime_override"

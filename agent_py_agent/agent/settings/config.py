@@ -84,6 +84,7 @@ class RuntimeBudgetConfigFields:
     background_context_max_depth: int = 6
     background_claim_ttl_seconds: int = 900
     background_claim_heartbeat_interval_seconds: int = 0
+    background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 
 # LLM: AgentConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。

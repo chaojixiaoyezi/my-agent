@@ -13,6 +13,7 @@ from ..memory_archive.artifact_reader import (
     estimate_tool_output_artifact_size,
     read_tool_output_artifact,
 )
+from ..settings.defaults import default_config_int
 from .artifact_read_budget import (
     ArtifactReadBudget,
     ArtifactReadBudgetRequest,
@@ -119,9 +120,7 @@ def _config_int(key: str, value: int | None) -> int:
             return max(0, int(value))
         except (TypeError, ValueError):
             pass
-    from ..settings.config import AgentConfig
-
-    return max(0, int(getattr(AgentConfig(), key)))
+    return default_config_int(key, minimum=0)
 
 
 # LLM: _budget_requested_chars estimates unbounded reads from the index before loading artifact bodies.

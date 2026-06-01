@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..settings.defaults import default_agent_config
+
 
 # LLM: ContractStatusReport keeps this contract helper structure-first and stable.
 # 类用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
@@ -125,9 +127,7 @@ def _status_scan_limits(request: ContractStatusScanRequest) -> _StatusScanLimits
 def _contract_status_config_defaults(config: object | None) -> object:
     if config is not None:
         return config
-    from ..settings.config import AgentConfig
-
-    return AgentConfig()
+    return default_agent_config()
 
 
 # LLM: _provided_or_config_int applies an explicit override before falling back to config.

@@ -20,9 +20,13 @@
 - `agent_py_agent/agent/contracts/error_taxonomy.py`：错误分类和错误合同。
 - `agent_py_agent/agent/contracts/error_classification_rules.py`：错误分类规则集合。
 - `agent_py_agent/agent/contracts/state_machine.py`：任务状态、dispatch、repair、recovery 决策。
-- `agent_py_agent/agent/contracts/recovery_actions.py`：恢复动作枚举。
+- `agent_py_agent/agent/contracts/recovery_actions.py`：恢复动作枚举和统一词表。粗动作使用 `RecoveryAction`；细修复动作来自 `error_taxonomy` 的 `recommended_action`，通过 `known_recovery_action_values()` 汇总校验，避免状态机和恢复包各自随手造动作字符串。
 - `agent_py_agent/agent/contracts/tool_protocol_v2.py`：工具调用归一化；旧 flat tool call 里的业务字段保持开放世界，不把 input 里的 `status` 误判成协议状态枚举。
 - `agent_py_agent/agent/contracts/gates/`：工具、路径、审批、幂等、交付质量等运行门。
+  所有 runtime gate 统一返回 `GateDecision`，序列化时必须包含
+  `allow_action`、`block_task`、`severity`、`model_message`、`operator_message`
+  和 `evidence_refs`。`DENY/BLOCKED` 不能靠调用方自己猜语义；普通工具换路只是不放行本次动作，
+  只有显式 `terminal_block` 或 evidence 标记时才算阻断整个任务。
 - `agent_py_agent/agent/contracts/delivery_contract_doctor.py`：入口级 delivery_contract 自检，负责 schema、路径边界、开放世界扩展声明和返工动作。
 - `agent_py_agent/agent/contracts/effective_contract_snapshot.py`：最终生效合同快照。
 - `agent_py_agent/agent/contracts/run_trace_contract.py`：运行 trace 结构。
@@ -101,6 +105,17 @@
 - `agent_py_agent/agent/subagents/context_bundle_contracts.py`
 - `agent_py_agent/agent/contracts/task_tree_ledger_contract.py`
 - `agent_py_agent/agent/agent_core/orchestration_*`
+
+### 通用解析 helper
+
+`agent_py_agent/agent/common/value_parsing.py` 是模型/工具参数解析的薄入口：
+
+- `string_list()` 通过 `StringListOptions` 支持 JSON list 字符串、多行列表、逗号列表和普通字符串。
+- `bool_value()`、`positive_int()`、`non_negative_int()` 统一布尔和数字解析。
+- `dict_value()`、`dict_values()` 统一开放世界 payload 的 dict/list[dict] 解析。
+
+新增控制面或工具模块不要再各自复制 `_string_list`、`_bool_param`、`_positive_int` 这类 helper。
+旧模块可以在被修改时逐步迁移，不做全仓机械替换，避免把合同语义一起改乱。
 
 ## 读代码顺序
 

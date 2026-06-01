@@ -308,7 +308,7 @@
 
 阶段 6：非真实环境补测。新增 focused tests 覆盖 Doctor、工具韧性、物化器接线、closeout 接线，并回归 bootstrap、repair、collection、staged writer 等现有入口门。当前仍坚持：真实任务只做最终收口，日常开发以离线合同、fake tool、fake model 和 replay 为主。
 
-阶段 6 补充：子代理状态面路径收敛。`inspect_agent_tree` 这个模型可见状态工具只暴露当前 task workspace、agent run workspace、artifact refs、recovery refs，不再把旧式 work-order 目录作为主路径字段返回。`create_subagents`、`dispatch_subagents`、`schedule_child_subagents` 和看板输出也共享同一层模型可见路径净化，避免嵌套 `agent_tree` / `child_result_index` 重新泄漏 `data/subagents/...`。旧路径仍可留在兼容恢复文件中供系统迁移使用，但不能作为父代理接管/读取产物时的默认候选。
+阶段 6 补充：子代理状态面路径收敛。`inspect_agent_tree` 这个模型可见状态工具只暴露当前 task workspace、agent run workspace、artifact refs、recovery refs，不再把旧式 work-order 目录作为主路径字段返回。`create_subagents`、`dispatch_subagents`、`schedule_child_subagents` 和看板输出现在从源头只投影当前布局字段；旧路径仍可留在兼容恢复文件中供系统迁移使用，但不能作为父代理接管/读取产物时的默认候选，也不会以占位符形式混进 live payload。
 
 阶段 6 补充：tool-output 归档二次读取。状态/调度类工具的新归档保存模型可见的净化正文；早期已经落盘的旧 `create_subagents`、`dispatch_subagents`、`inspect_agent_tree`、`schedule_child_subagents` 和看板归档，在 `read_artifact` 展开时按来源工具做展示层净化。这个规则只作用于内部编排/状态工具的输出，不改普通 `read_file`、网页、命令输出或用户交付物正文。
 

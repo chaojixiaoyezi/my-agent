@@ -20,6 +20,8 @@ from .recovery_actions import (
     ACTION_WAIT_FOR_ACCEPTANCE,
     ACTION_WAIT_FOR_LOCAL_PROGRESS,
     ACTION_WAIT_OR_OBSERVE,
+    RecoveryAction,
+    recovery_action_value,
 )
 
 SCHEMA_VERSION = "state_machine.v1"
@@ -49,9 +51,12 @@ class RunStateFacts:
 # 类用途: 表达状态机给调度层的下一步建议；它不直接执行工具或创建新 run。
 @dataclass(frozen=True)
 class RecoveryDecision:
-    action: str
+    action: RecoveryAction | str
     allow_new_run: bool
     reason: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "action", recovery_action_value(self.action))
 
 
 # LLM: normalize_status keeps legacy status strings compatible with the shared state machine.

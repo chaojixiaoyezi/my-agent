@@ -54,9 +54,11 @@ def test_coordinator_marks_expired_request_timeout_before_escalation(tmp_path) -
     assert status["blocked_request_count"] == 0
     assert status["timed_out_request_count"] == 1
     assert status["timed_out_request_ids"] == [request.request_id]
+    assert status["response_coverage"]["missing_target_count"] == 1
     assert status["missing_responder_agent_ids_by_request"] == {
         request.request_id: ["source-b"],
     }
+    assert decisions[0].metadata["response_coverage"]["missing_target_count"] == 1
 
 
 def _conversation_with_task(tmp_path, *, goal: str):

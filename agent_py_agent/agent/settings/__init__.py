@@ -11,10 +11,22 @@ from __future__ import annotations
 """
 
 from .config import AgentConfig, load_config, load_simple_yaml, parse_scalar
+from .defaults import (
+    default_agent_config,
+    default_config_bool,
+    default_config_float,
+    default_config_int,
+    default_config_value,
+)
 from .normalize import normalize_agent_config, normalize_subagent_workflow_config
 
 __all__ = [
     "AgentConfig",
+    "default_agent_config",
+    "default_config_bool",
+    "default_config_float",
+    "default_config_int",
+    "default_config_value",
     "load_config",
     "load_simple_yaml",
     "parse_scalar",

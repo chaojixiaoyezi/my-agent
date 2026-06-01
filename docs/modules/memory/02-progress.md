@@ -20,7 +20,7 @@
 - 2026-05-31 HOT/路由/lessons 第二片接实：`PromptBuilder` 普通主代理上下文会读取 `memory-hot.md`，task-local/control-plane 仍隔离；新增 `home_memory_notes.py`，提供 HOT 去重追加和 lesson + route index 同步写入入口；auto resume 读取 owner raw archive 优先、旧 workspace archive 兜底，避免 owner-home 迁移后“继续”找不到刚写入的归档。
 - 2026-05-31 Owner 隔离补强：provider user/group 不再读取本地 CLI 旧 `memory_path`、旧顶层 daily/task workspace；保存型 provider run 只写入并登记自己的 `owner_home/tasks`；HOT、lesson 和 route index 写入也改为非 local/main owner 优先自己的 owner home。local/main 仍保留旧顶层入口兼容历史数据。
 - 2026-06-01 Owner 记忆闭环补强：工具输出外置归档改为写入当前 `owner_home/memory_archive/artifacts/tool_outputs/`，旧 workspace 根 `memory_archive/` 不再接收新工具输出；global index 读取和 doctor 悬空检查按 owner/task/run/agent 身份只看最新 append-only 引用；retention 显式清理会写 owner audit log；子代理保存会同时登记 task/run/agent 三层 refs，父代理、tree、doctor 共用这一套发现入口。
-- 2026-06-01 tool-output 模型可见路径补强：内部编排/状态工具的新外置归档会保存净化后的模型可见正文；更早的旧归档在 `read_artifact` 展开时按来源工具再净化一次，避免历史 `data/subagents/...` 路径重新进入上下文。普通 `read_file`、网页、shell/controlled_exec 输出和用户产物正文保持原文，不做展示替换。
+- 2026-06-01 tool-output 模型可见路径补强：内部编排/状态工具的 live 输出从源头只投影当前布局 refs；新外置归档会保存当前模型可见正文。更早的旧归档在 `read_artifact` 展开时按来源工具再净化一次，避免历史 `data/subagents/...` 路径重新进入上下文。普通 `read_file`、网页、shell/controlled_exec 输出和用户产物正文保持原文，不做展示替换。
 - 2026-06-01 Owner home 主链路继续收敛：保存型 local/main run 的新任务工作区也写入 `owner_home/tasks/...`，旧顶层 `tasks/...` 只保留读取/迁移兼容；新增 `home-index-rebuild` 显式维护命令，默认 dry-run，`--apply` 才从 owner 正文重建 owner/task/run/agent 全局索引；task compact rollup 会同步 `owner_home/compact/by_task|by_run|by_agent/` 轻量指针，父代理恢复时可先读 owner 级索引再打开具体 rollup。
 - 2026-05-30 `task_progress` 增加软质量提示：如果模型把条目标成 `done` 但没有 evidence，系统只在 `quality_hints` 里提醒补文件、产物或工具结果引用；这不会影响 closeout，不会阻断任务。compact / tree 会带着这个提示，帮助长任务压缩后继续把证据补扎实。
 - 2026-06-01 `task_progress` 更新工具返回：模型一写完成、结果、结论但没 evidence，`task_progress` 会在本次工具结果里返回
@@ -28,6 +28,7 @@
 - 2026-05-31 `task_progress` 的软提示进一步细化：覆盖账本里还有对象或检查点没完成时，会给 `next_suggestions` 和 `soft_prompt`，提醒模型继续选一个未完成对象、读核心文件或可靠来源、补 evidence、再写进报告。它仍然只是提示，不改状态、不触发 closeout、不阻断任务。
 - 2026-05-30 compact work state 增加通用 `runtime_handoff`：压缩前会收集同 scope 下最近 guidance 和可见下级 agent 状态，写入 `work_state_snapshot`、handoff context 和 continue packet。它不是聊天专项，也不是子代理专项，只是一份“运行中交接摘要”；API 监控、长报告、多人协作和普通聊天续接都复用同一字段。
 - 2026-05-31 compact 续接优先级调整：如果运行中 guidance 或后台唤醒已经明确给出新的下一步，`compact_apply_work_state` 会优先使用这条最新运行提示，而不是沿用压缩前旧的 `task_progress.next_action`。这样父代理在子代理完成后被叫醒时，会先按“去汇总/去检查最新结果”继续，不会被早前的旧进度提示带偏。
+- 2026-06-02 compact runtime handoff 路径收敛：运行中 guidance 只从当前 owner/runtime conversation guidance 和 task-local `work/guidance` 读取；下级状态只从任务本地 `work/agents/<run_id>/canonical_state.json` 读取。旧 `data/conversations/guidance`、旧 `tasks/<id>/agents/<run_id>/state.json` 不再进入模型可见 handoff。
 - 2026-05-29 Live Raw Archive 已接入工具循环：运行中会把助手工具轮可见文字和完成后的工具结果增量写入既有 `memory/raw/YYYY-MM-DD.jsonl`；收尾归档会跳过已 live 写入的工具事件，避免重复记录。运行中进度白板已合并到 `runtime_facts/<request_id>/task.json`，不再维护单独 `run_checkpoint`。`compact_apply_work_state` 在缺少权威 snapshot 时，可从 live `assistant_tool_round` 提取下一步续接提示；这只是恢复提示，不把助手回复升级成验收事实。
 - 2026-05-30 Compact Continue Packet 已改成 action-first 续接：`continue_packet.resume_focus.next_action` 表示压缩后优先继续的动作，`work_state_snapshot.captured_refs` 记录已读、已写和外置 artifact refs。自动续接 prompt 会先展示这些字段，避免模型每次 compact 后重新读 compact 文件或重复派工；推荐恢复文件只在缺事实、要验证或引用损坏时读取。
 - 2026-05-30 工具输出外置索引补充 `parameters/source_input/source_path`：compact 后展示的 artifact refs 会带出原始读写目标，帮助模型知道“这个 artifact 是哪个源文件/URL/查询的结果”，避免压缩后只看到旧 artifact 编号而重新扫目录。
@@ -380,6 +381,11 @@
 - 2026-05-29 补齐 compact 本体交接包：每次 apply 现在会额外写 `*.compaction_state.json` 和 `*.handoff.md`。`compaction_state` 是机器事实包，记录 compact id、上一轮 compact id、source refs、artifact refs、work state、next actions 和 handoff summary 路径；`handoff.md` 只给模型续接阅读，明确不是事实账本。
 - 多轮 compact 会把上一轮 handoff summary ref 带进新一轮 `compaction_state`、resume handoff 和 continue packet。这样后续接运行时压缩时，可以按机器字段续接同一任务，而不是只靠自然语言摘要猜“上一轮做到哪”。
 - 行为边界：新增 summary 不调用 LLM、不删除原始文件、不自动执行工具；旧 compact 包缺少 `compaction_state` 时只作为 soft 缺口展示，不破坏旧 resume。
+
+## 2026-06-02 compact CLI 主路/救援路区分
+- 中文说明：普通长任务上下文压缩的主路是 automatic runtime compact；`memory-compact --apply` 和 `memory-resume --from-compact` 是调试/救援入口，用来检查、生成或读取非破坏性恢复包。
+- CLI help 和文本输出已明确标注 `manual_rescue_plan` / `manual_rescue_non_destructive`，避免把手动命令误看成普通任务必须执行的流程。
+- 行为边界不变：这些命令仍然不删除 raw archive、snapshot、token ledger、task/run 文件，也不自动执行工具。
 
 ## 2026-05-31 owner home V2 lifecycle services
 - 中文说明：owner home V2 不再只是目录设计。新增 owner policy bundle、temporary grants、capability request expiry、compact injection、global index 读取和 manifest-only backup，覆盖阶段 9-23 中“策略可读、申请可追踪、压缩可续接、索引可发现、迁移前可留痕”的底座。

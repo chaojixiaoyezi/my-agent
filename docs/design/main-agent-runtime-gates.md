@@ -79,6 +79,16 @@
 - delivery closeout：模型交卷后机器验收不通过，不能假完成。
 - delivery contract doctor：合同本身不是对象、`artifacts` 结构坏、路径越界这类入口合同错误不能继续执行到假完成。
 
+所有运行门都必须通过统一 `GateDecision` 暴露语义：
+
+- `allow_action`：当前这一次工具/收口/恢复动作能不能继续。
+- `block_task`：是否真的要把整个任务打停；默认不是，只有显式 terminal block 才是。
+- `severity`：`safety / engineering / quality / info`，给看板和日志区分安全边界、工程预算和质量返工。
+- `model_message` / `operator_message`：一个给模型换路或返工，一个给人排查。
+- `evidence_refs`：本次 gate 关联的路径或证据引用。
+
+这层语义是为了防止“某处看到 DENY 就杀任务”或“warning 被当硬门”。它不增加新的阻断条件。
+
 ### 软提醒 / 可配置次数门
 
 这些门不应该默认把研究类长任务卡死。它们只提醒模型“该留下阶段进展了”，或在极端情况下根据用户配置阻断。
@@ -820,6 +830,7 @@ ProgressPolicy      = 定时汇报策略
 - background claim 是“执行权账本”，不是验收门。运行失败时 claim 会写成 `failed`，并保留 `last_error`、`task_id`、最近工具/进展和任务树状态桶；下一次同 thread 唤醒会把上一任 claim 摘要带进 `Recovery Snapshot`，让接手主代理先对账，而不是从自然语言里猜“上次做到哪”。
 - `Recovery Snapshot` 只读 claim、agent tree 和 artifact registry，给出恢复提示，不阻断任务、不替代 closeout、不把普通质量问题变成硬门。真正的事实优先级仍是 artifact registry、agent tree、claim ledger、run/tool trace；模型文本里的路径和完成声明只能当线索。
 - 默认 heartbeat 间隔按 TTL 的安全比例计算。生产默认 TTL 900 秒时约 300 秒续约一次；小 TTL 测试场景会保持间隔小于 TTL，避免第一次续约前 claim 已经过期。
+- 后台主代理可用控制工具由 `background_main_agent_allowed_tools` 决定。留空时使用默认 profile；显式配置后，执行参数和 prompt 里的 `Available Control Actions` 共用同一份列表，避免模型看到一个工具集、运行时又用另一套。
 - fake Feishu / fake WeChat 只用于离线验证跨渠道恢复；真实适配器以后只需要接入同一套 `ChannelBinding` 和发送接口。
 - 后台主代理 prompt 仍是普通任务上下文 + 结构化事实，不要求用户写工程字段。
 - 新渠道默认不会自动混入“同用户最近 thread”，避免同一个人在新群/新私聊开新任务时串上下文；只有消息入口明确走继续上下文时，才用 `reuse_latest_for_user` 恢复最近 thread。
@@ -1247,6 +1258,20 @@ create_subagents 写清楚 goal / refs
 
 ## 已废弃：创建阶段 pending dispatch 拦截
 
+## Runtime Guard Policy 快照
+
+`runtime_guard_config.yaml` 仍是运行门数字的默认配置文件，但运行时代码不再只能看散落的 helper 返回值。
+`RuntimeGuardPolicy` 会把当前 YAML 和显式覆盖合成一个只读快照，并记录每个字段的来源。
+
+当前三层口径：
+
+- 默认配置文件：`agent_py_agent/config/runtime_guard_config.yaml`，用户可看可改。
+- 加载后的 `RuntimeGuardPolicy`：SimpleAgent 启动时持有 `runtime_guard_policy`，可输出 `values/sources/source_path/loaded_at`。
+- task/run snapshot：需要排查某个任务时，用 `runtime_guard_policy.snapshot(task_id=..., run_id=...)` 固化当时的运行门值和来源。
+
+旧 `runtime_guard_int/bool/float_tuple` 仍保留兼容，但内部走同一个 policy 解析口径。后续新增运行门参数必须先进入
+`runtime_guard_config.yaml` 和 `RuntimeGuardPolicy`，再由具体模块读取，不能在工具、runner、closeout 或 scheduler 里再写一份隐藏默认值。
+
 `pending_dispatch_redirect.v1` 曾经用于阻止 root 在已有 run 尚未 dispatch 时继续创建子代理。协作场景证明这会误伤临时加派和事件响应：发现者需要能继续找帮手，不能因为上一批 run 还没推进就被 create 阶段拦下。
 
 当前规则是：`create_subagents` 默认创建后直接启动新 run，不再要求主代理再手动催一次。只有显式传 `defer_start=true` 时，才只创建/复用任务记录。父代理后续要看状态、追加提示、推进卡住项、重跑某几个 run 或尝试恢复时，再使用 `dispatch_subagents`。
@@ -1346,6 +1371,17 @@ auto_apply_result_followup = true
 接管层只重写 `takeover_source_run_id`、`takeover_source_refs`、`takeover_chain_depth` 这类审计字段。这样 coordinator 或 repair worker 被接管后，仍知道要读哪些资料、有哪些兄弟/子任务、最终应该写到哪里。
 
 如果旧代码已经创建过一个缺字段的 takeover run，后续复用它时会自动补齐源 run 的缺失交接字段；已有 takeover 自己新增的字段不被覆盖。这是恢复链一致性修复，不是 IP、日志、GitHub、论文等专项规则。
+
+## 恢复编排账本
+
+`recovery_strategy` 只负责判断“建议怎么恢复”，不会直接跑模型或改任务树。`SubAgentRecoveryOrchestrator`
+是统一编排入口：它读取这些策略，把每个 run 转成 `dispatch_original_run`、`create_takeover_run`、
+`plan_leadership_recovery`、`manual_review` 或 `none`，并写入 `subagent_recovery_ledger.jsonl`。
+
+默认编排是 dry-run，只生成父代理/调度器可读的下一步和 refs。只有调用方显式 `apply=True`，
+才会复用已有的幂等 `create_takeover_run()` 创建或复用接管 run。原 run 续跑仍通过
+`dispatch_subagents` 建议交给父代理或调度器执行；leadership recovery 需要明确新 leader，
+不会在编排器里自动重挂整棵子树。
 
 ## dispatch_subagents 只返回索引和状态，不替父代理抢答
 

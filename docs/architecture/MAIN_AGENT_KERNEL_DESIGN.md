@@ -73,6 +73,10 @@
 
    运行中人类或父代理可以通过 `send_guidance` 或 CLI `guidance-send` 给某个 run/thread/task/case 追加自然语言提示。提示只进入下一轮 prompt，不会直接 dispatch、closeout 或修改任务状态。需要同步提醒一批下级时，`send_guidance` 可以用 `run_ids` 或 `target_scope=children/descendants` 批量写入同一条软提示；`inspect_agent_tree` 会展示未读提示数量。
 
+   `dispatch_subagents` 的模型入口只保留 `dry_run` 一个执行开关。工具边界会把它转换成内部 `DispatchExecutionPlan`，后续 dispatch loop、runner batch 和 watch 都读取同一份执行计划；旧 `apply/execute_runners` 只作为代码兼容投影，不再让模型填写。
+
+   `create_subagents` 和 `schedule_child_subagents` 入口不同，但创建后的生命周期相同：写入真实 run、绑定会话、登记 run_id、默认后台启动，并把启动状态放回任务树。区别只在权限边界：顶层主代理用 `create_subagents`，运行中的子/孙代理用 `schedule_child_subagents`，后者只能在自己的子树下面创建下一层。`dispatch_subagents` 不再是普通启动入口，它用于推进、恢复、重跑或诊断已有 run。
+
 6. 收尾保存。
 
    `FinalizationService`（收尾服务）负责：

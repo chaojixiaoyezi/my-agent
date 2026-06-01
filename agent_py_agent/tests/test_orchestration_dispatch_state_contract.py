@@ -74,6 +74,23 @@ def test_dispatch_execute_payload_includes_current_turn_run_state():
     }]
 
 
+def test_dispatch_state_reports_load_errors_instead_of_empty_state():
+    agent = _dispatch_agent_with_state({})
+    agent.subagents.load.side_effect = ValueError("state json broken")
+
+    payload = json.loads(DispatchSubagentsTool(agent).execute({
+        "dry_run": False,
+        "run_ids": ["broken-run"],
+    }).output)
+
+    state = payload["current_turn_run_state"]
+    assert state["missing_run_ids"] == ["broken-run"]
+    assert state["task_load_errors"][0]["run_id"] == "broken-run"
+    assert state["task_load_errors"][0]["category"] == "data_parse"
+    assert "不要把它当成子代理没产物" in state["task_load_errors"][0]["model_message"]
+    assert state["next_action"] == "refresh_agent_tree_or_rebuild_state_index"
+
+
 # LLM: create_subagents should expose current-turn state immediately after default auto-start.
 # 函数用途: root 创建小傻妞后，不必再手动催跑，应直接看到已启动/已完成状态和看板建议。
 def test_create_payload_includes_current_turn_run_state(tmp_path):

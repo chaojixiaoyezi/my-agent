@@ -224,11 +224,10 @@ def test_subagent_board_hides_legacy_subagent_paths():
         agent.subagents.create_run(goal="整理材料", thought="测试旧路径净化", plan=["执行"])
 
         board = agent.subagents.write_board(recent_limit=10)
-        board_text = (root / "data" / "subagents" / "subagent_board.json").read_text(encoding="utf-8")
+        board_text = (agent.subagents.workspace / "subagent_board.json").read_text(encoding="utf-8")
 
         assert board.summary["total"] == 1
         assert "/data/subagents/" not in board_text
-        assert "[internal_legacy_subagent_path_hidden]" in board_text
 
 
 def _make_due_check_stale_active_run(agent):

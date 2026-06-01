@@ -10,6 +10,7 @@ from __future__ import annotations
 现在真实逻辑按职责拆到 `agent_core/`，这里只负责组装 SimpleAgent，并保留旧公开导入路径。
 """
 
+import logging
 from pathlib import Path
 
 from .agent_core import (
@@ -80,6 +81,7 @@ from .conversation import ConversationStore
 from .local_store import LocalStore
 from .memory import JsonlMemory
 from .prompting import PromptBuilder
+from .settings.runtime_guard_config import runtime_guard_policy
 from .subagent import SubAgentManager
 from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .tooling.registry_payload_normalize import tool_payload_limits_from_config
@@ -91,40 +93,13 @@ from .user_space.owner_resolver import (
     home_paths_with_owner,
     owner_identity_from_config,
 )
-from .user_space.paths import get_user_paths
+from .user_space.runtime_paths import (
+    apply_runtime_paths_to_config,
+    legacy_memory_path,
+    resolve_runtime_paths_for_agent,
+)
 
-
-# LLM: _resolve_paths 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 根据配置和用户空间选择 LocalStore、memory、subagent 与 gateway 的落盘路径。
-def _resolve_paths(config, root: Path):
-    """解析所有存储路径（支持用户空间隔离）。"""
-    user_id = getattr(config, "user_id", "admin") or "admin"
-    user_data_root = getattr(config, "user_data_root", "data/users") or "data/users"
-    root = Path(root)
-
-    if user_id != "admin":
-        user_paths = get_user_paths(user_id, root / user_data_root)
-        return {
-            "local_store_path": user_paths.local_store_path,
-            "local_store_files_dir": user_paths.local_store_files_dir,
-            "local_store_events_path": user_paths.local_store_events_path,
-            "memory_path": user_paths.memory_path,
-            "subagent_workspace": user_paths.subagent_workspace,
-            "gateway_workspace": root / config.gateway_workspace,
-            "conversation_workspace": root / config.conversation_workspace,
-            "collaboration_workspace": root / config.collaboration_workspace,
-        }
-
-    return {
-        "local_store_path": root / config.local_store_path,
-        "local_store_files_dir": root / config.local_store_files_dir,
-        "local_store_events_path": root / config.local_store_events_path,
-        "memory_path": root / config.memory_path,
-        "subagent_workspace": root / config.subagent_workspace,
-        "gateway_workspace": root / config.gateway_workspace,
-        "conversation_workspace": root / config.conversation_workspace,
-        "collaboration_workspace": root / config.collaboration_workspace,
-    }
+logger = logging.getLogger(__name__)
 
 
 # LLM: _normalized_workspace_roots 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -162,7 +137,9 @@ class SimpleAgent(
         最后把"创建子代理、看板、dispatch"这三个编排工具也注册进去。
         """
         self.config = config
+        self.runtime_guard_policy = runtime_guard_policy()
         self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
         self.capability_config_path = default_capability_config_path(self.root)
         self._capability_config_runtime_snapshot = None
         self._orchestration_run_ids_seen: set[str] = set()
@@ -170,7 +147,13 @@ class SimpleAgent(
 
         self.home_paths = _resolve_home_paths(config)
         self.owner_policy = resolve_effective_owner_policy(self.home_paths)
-        paths = _resolve_paths(config, self.root)
+        self.runtime_path_resolution = resolve_runtime_paths_for_agent(config, self.root, self.home_paths)
+        self.using_legacy_paths = self.runtime_path_resolution.using_legacy_paths
+        if self.using_legacy_paths:
+            logger.warning("using legacy runtime paths: reason=%s root=%s", self.runtime_path_resolution.reason, self.root)
+        paths = self.runtime_path_resolution.paths
+        legacy_memory_fallback = legacy_memory_path(config, self.root)
+        apply_runtime_paths_to_config(config, self.runtime_path_resolution)
         self.local_store = LocalStore(
             paths["local_store_path"],
             files_dir=paths["local_store_files_dir"],
@@ -181,7 +164,7 @@ class SimpleAgent(
             _owner_memory_jsonl_path(self.home_paths, fallback=paths["memory_path"]),
             local_store=self.local_store,
             daily_mirror_dir=_daily_memory_dir(config, self.home_paths),
-            fallback_read_paths=_legacy_memory_fallbacks(self.home_paths, paths["memory_path"]),
+            fallback_read_paths=_legacy_memory_fallbacks(self.home_paths, legacy_memory_fallback),
         )
         self.prompts = PromptBuilder(config, self.root, home_paths=self.home_paths)
         self.backend = get_backend(config.model_backend, config)
@@ -207,6 +190,8 @@ def _resolve_home_paths(config: AgentConfig):
     return home_paths_with_owner(paths, owner)
 
 
+# LLM: _register_owner_ref_if_possible keeps owner indexes best-effort during startup.
+# 函数用途: 将 owner 写入全局索引；索引不可写时不影响代理启动。
 def _register_owner_ref_if_possible(paths, owner) -> None:
     try:
         register_owner_ref(paths, owner)
@@ -223,6 +208,8 @@ def _daily_memory_dir(config: AgentConfig, paths):
     return (owner_daily,) if owner_daily else None
 
 
+# LLM: _owner_memory_jsonl_path is the one write target for long-term memory.
+# 函数用途: 优先返回 owner long_term/memory.jsonl，缺少 owner home 时才回退旧路径。
 def _owner_memory_jsonl_path(paths, *, fallback: Path) -> Path:
     owner_long_term = getattr(paths, "owner_memory_long_term_dir", None)
     if owner_long_term:
@@ -230,12 +217,16 @@ def _owner_memory_jsonl_path(paths, *, fallback: Path) -> Path:
     return Path(fallback)
 
 
+# LLM: _legacy_memory_fallbacks is read-only migration support for local/main.
+# 函数用途: 只给本地主账号补读旧 memory_path，避免 provider owner 误读管理员记忆。
 def _legacy_memory_fallbacks(paths, fallback: Path) -> tuple[Path, ...]:
     if _is_local_main_owner(paths):
         return (Path(fallback),)
     return ()
 
 
+# LLM: _is_local_main_owner gates compatibility reads to the CLI main owner only.
+# 函数用途: 判断当前 owner 是否是本地主账号，供旧记忆和旧 task 扫描兼容使用。
 def _is_local_main_owner(paths) -> bool:
     return (
         str(getattr(paths, "owner_provider", "") or "local") == "local"

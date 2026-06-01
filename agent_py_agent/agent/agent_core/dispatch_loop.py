@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from ..subagent import SubAgent
 
 from .dispatch_no_progress import DispatchNoProgressTracker
-from .dispatch_params import DispatchParams
+from .dispatch_params import DispatchExecutionPlan, DispatchParams
 
 
 # LLM: DispatchLoopParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -24,6 +24,7 @@ class DispatchLoopParams:
     max_consecutive_rounds: int = 20
     apply: bool = False
     execute_runners: bool = False
+    execution_plan: DispatchExecutionPlan | None = None
     planner: bool = False
     workflow_mode: str = "off"
     max_runners: int = 1
@@ -35,6 +36,20 @@ class DispatchLoopParams:
     probe: bool = True
     take_over_by: str = ""
     locked_files: list[str] | None = None
+
+    # LLM: DispatchLoopParams mirrors DispatchParams so loops cannot drift from one-shot dispatch semantics.
+    # 函数用途: 让 loop 内部也只以 execution_plan 为权威，apply/execute_runners 保留为兼容投影。
+    def __post_init__(self) -> None:
+        if self.execution_plan is None:
+            self.execution_plan = DispatchExecutionPlan.from_internal_flags(
+                apply=self.apply,
+                execute_runners=self.execute_runners,
+                max_runners=self.max_runners,
+            )
+            return
+        self.apply = bool(self.execution_plan.mutate_state)
+        self.execute_runners = bool(self.execution_plan.start_runners)
+        self.max_runners = int(self.execution_plan.max_runners)
 
 
 # LLM: DispatchLoopReport 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -71,6 +86,7 @@ def _coerce_dispatch_loop_params(
     max_consecutive_rounds: int = 20,
     apply: bool = False,
     execute_runners: bool = False,
+    execution_plan: DispatchExecutionPlan | None = None,
     planner: bool = False,
     workflow_mode: str = "off",
     max_runners: int = 1,
@@ -92,6 +108,7 @@ def _coerce_dispatch_loop_params(
         max_consecutive_rounds=max_consecutive_rounds,
         apply=apply,
         execute_runners=execute_runners,
+        execution_plan=execution_plan,
         planner=planner,
         workflow_mode=workflow_mode,
         max_runners=max_runners,
@@ -121,11 +138,9 @@ def _run_single_dispatch(request: SingleDispatchRequest):
 # 函数用途: 推进来自参数循环的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _dispatch_params_from_loop(params: DispatchLoopParams) -> DispatchParams:
     return DispatchParams(
-        apply=params.apply,
-        execute_runners=params.execute_runners,
+        execution_plan=params.execution_plan,
         planner=params.planner,
         workflow_mode=params.workflow_mode,
-        max_runners=params.max_runners,
         limit=params.limit,
         reviewer=params.reviewer,
         note=params.note,
@@ -159,7 +174,7 @@ def _dispatch_loop_params_from_locals(values: dict) -> DispatchLoopParams:
         **{
             key: values[key]
             for key in _DISPATCH_LOOP_PARAM_KEYS
-            if key != "locked_files" or values[key] is not None
+            if key in values and (key != "locked_files" or values[key] is not None)
         },
     )
 

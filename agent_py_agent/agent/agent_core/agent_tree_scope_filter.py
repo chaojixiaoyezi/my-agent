@@ -33,10 +33,11 @@ def visible_nodes(nodes: list[dict[str, object]], raw_run_ids: object) -> list[d
 
 # LLM: coordination_advice is soft parent guidance; it never gates or mutates children.
 # 函数用途: 告诉父代理哪些下级仍在运行，避免把“暂时没产物”误判为失败或立即接手。
-def coordination_advice(nodes: list[dict[str, object]]) -> dict[str, object]:
+def coordination_advice(nodes: list[dict[str, object]], allowed_tools: object = None) -> dict[str, object]:
     pending = _run_ids_with_status(nodes, {"CREATED", "QUEUED", "PENDING", "PLANNING", "RUNNING", "AWAITING_ACCEPTANCE"})
     completed = _run_ids_with_status(nodes, {"DONE", "COMPLETED", "ACCEPTED", "VERIFIED", "SUCCEEDED"})
     blocked = _run_ids_with_status(nodes, {"BLOCKED", "FAILED", "ERROR", "TIMEOUT"})
+    allowed = _allowed_tool_set(allowed_tools)
     return {
         "schema_version": "agent_tree_coordination_advice.v1",
         "soft_only": True,
@@ -45,7 +46,7 @@ def coordination_advice(nodes: list[dict[str, object]]) -> dict[str, object]:
         "blocked_child_run_ids": blocked,
         "missing_outputs_while_running_is_failure": False,
         "should_take_over_running_children": False,
-        "next_step_zh": _coordination_next_step(bool(pending)),
+        "next_step_zh": _coordination_next_step(bool(pending), allowed),
     }
 
 
@@ -95,13 +96,36 @@ def _run_ids_with_status(nodes: list[dict[str, object]], statuses: set[str]) -> 
     ]
 
 
-def _coordination_next_step(has_pending: bool) -> str:
+def _allowed_tool_set(raw_tools: object) -> set[str] | None:
+    if raw_tools is None:
+        return None
+    if not isinstance(raw_tools, (list, tuple, set)):
+        return set()
+    return {str(tool).strip() for tool in raw_tools if str(tool).strip()}
+
+
+def _tool_allowed(allowed_tools: set[str] | None, tool: str) -> bool:
+    return allowed_tools is None or tool in allowed_tools
+
+
+def _coordination_next_step(has_pending: bool, allowed_tools: set[str] | None = None) -> str:
     if not has_pending:
-        return "如果只是查看状态，直接向用户汇报；只有用户要推进或恢复时才调用 dispatch_subagents。"
+        if _tool_allowed(allowed_tools, "dispatch_subagents"):
+            return "如果只是查看状态，直接向用户汇报；只有用户要推进或恢复时才调用 dispatch_subagents。"
+        return "如果只是查看状态，直接向用户汇报；本轮没有调度工具时，不要声称已经推进下级代理。"
+    guidance = (
+        "先等待下一轮、稍后再次 inspect_agent_tree，或只给具体 run_id 发 send_guidance。"
+        if _tool_allowed(allowed_tools, "send_guidance")
+        else "先等待下一轮或汇报当前仍有下级代理在运行。"
+    )
+    dispatch = (
+        "只有下级 BLOCKED/FAILED/TIMEOUT、用户明确要求接手，或超过任务约定等待时间时，才考虑补派或接手。"
+        if _tool_allowed(allowed_tools, "dispatch_subagents")
+        else "本轮没有调度工具时，只做状态观察，不要安排补派或接手。"
+    )
     return (
         "还有下级代理在运行、规划或等待验收时，不要把目标目录暂时为空或占位报告当失败；"
-        "先等待下一轮、稍后再次 inspect_agent_tree，或只给具体 run_id 发 send_guidance。"
-        "只有下级 BLOCKED/FAILED/TIMEOUT、用户明确要求接手，或超过任务约定等待时间时，才考虑补派或接手。"
+        f"{guidance}{dispatch}"
     )
 
 

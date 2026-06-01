@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from ..model_visible_ref_sanitizer import sanitize_model_visible_refs
+from ..model_visible_refs import current_model_ref
 from ..subagents.kernel import SubagentKernelQuery
 from .agent_tree_node_rendering import node_from_kernel_run
 from .agent_tree_progress import attach_task_progress
@@ -42,7 +42,7 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
     nodes = [node_from_kernel_run(agent, row) for row in snapshot.runs]
     nodes = visible_nodes(nodes, params.get("visible_run_ids"))
     main = _main_agent_node(agent, nodes)
-    advice = coordination_advice(nodes)
+    advice = coordination_advice(nodes, params.get("allowed_tools"))
     payload = {
         "schema_version": _SCHEMA_VERSION,
         "effect": "read_only",
@@ -54,7 +54,7 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
         "child_result_index": child_result_index_from_nodes(nodes),
         "status_buckets": status_buckets(nodes),
         "coordination_advice": advice,
-        "source_refs": dict(snapshot.source_refs),
+        "source_refs": _current_source_refs(snapshot.source_refs),
         "warnings": [*warnings, *resolution.warnings],
         "policy": {
             "read_only": True,
@@ -65,7 +65,27 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
         },
     }
     payload.update(scope_resolution_payload(resolution))
-    return sanitize_model_visible_refs(payload)
+    return payload
+
+
+# LLM: _current_source_refs keeps tree diagnostics from surfacing old runtime paths.
+# 函数用途: source_refs 只保留当前布局引用；旧 data/subagents 兼容路径不再返回给模型。
+def _current_source_refs(source_refs: object) -> dict[str, object]:
+    if not isinstance(source_refs, dict):
+        return {}
+    return {
+        str(key): projected
+        for key, value in source_refs.items()
+        if (projected := _current_source_ref_value(value))
+    }
+
+
+# LLM: _current_source_ref_value projects one diagnostic ref without leaking old runtime paths.
+# 函数用途: 支持 source_refs 的字符串和列表两种形态，过滤旧 data/subagents 引用。
+def _current_source_ref_value(value: object) -> object:
+    if isinstance(value, list | tuple | set):
+        return [ref for item in value if (ref := current_model_ref(item))]
+    return current_model_ref(value)
 
 # LLM: _kernel_snapshot keeps query derivation structural and free of natural-language parsing.
 # 函数用途: 从显式 run/root 参数或当前轮已知 run_ids 选择状态树；缺省返回 manager 可见 run。

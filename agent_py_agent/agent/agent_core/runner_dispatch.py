@@ -11,6 +11,7 @@ dispatch 阶段不应该把"谁能跑、能不能重试、并发 worker 怎么�
 
 from typing import TYPE_CHECKING
 
+from ..settings.defaults import default_config_int
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagent import SubAgentTask
 from .runner_candidate_policy import (
@@ -131,9 +132,7 @@ def _resolve_runner_concurrency(value: object, job_count: int, *, auto_limit: ob
 # 函数用途: 读取 runner_auto_concurrency；0 表示按本批 job 数执行，不在调度层另藏默认并发。
 def _runner_auto_concurrency_limit(value: object, job_count: int) -> int:
     if value is None:
-        from ..settings.config import AgentConfig
-
-        value = AgentConfig().runner_auto_concurrency
+        value = default_config_int("runner_auto_concurrency")
     try:
         limit = int(value)
     except (TypeError, ValueError):

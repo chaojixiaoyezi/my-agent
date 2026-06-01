@@ -98,7 +98,7 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
             config=getattr(agent, "config", None),
             requested_limit=ctx.max_runners,
             candidates=collaboration_candidates,
-            execute_runners=batch.execute_runners,
+            execute_runners=batch.execution_plan.start_runners,
             has_explicit_run_ids=bool(requested_include_ids(ctx)),
         )
     )
@@ -139,7 +139,7 @@ def collect_runner_candidates(agent, ctx: DispatchContext, runner_max_attempts: 
     for task in runner_candidates:
         before = agent.subagents.load(task.id)
         retry_reason = _runner_retry_reason(before, runner_max_attempts)
-        if ctx.apply:
+        if ctx.execution_plan.mutate_state:
             pending_runner_jobs.append((task.id, before, retry_reason))
             continue
         dry_records.append(
@@ -203,7 +203,7 @@ def run_runner_batch(agent, ctx: RunnerBatchContext) -> list:
         agent.config, len(ctx.pending_runner_jobs)
     )
     ctx.runner_timeout_seconds = runner_timeout_seconds
-    if runner_concurrency > 1 and ctx.execute_runners:
+    if runner_concurrency > 1 and ctx.execution_plan.start_runners:
         ctx.runner_concurrency = runner_concurrency
         return _run_concurrent_batch(agent, ctx)
     return _run_sequential_batch(agent, ctx)
@@ -219,10 +219,10 @@ def _run_concurrent_batch(agent, ctx: RunnerBatchContext) -> list:
             runner_concurrency=ctx.runner_concurrency,
             runner_timeout_seconds=ctx.runner_timeout_seconds,
             instruction=ctx.effective_runner_instruction,
-            execute_runners=ctx.execute_runners,
-            max_cards=ctx.max_cards,
-            probe=ctx.probe,
-        )
+                execute_runners=ctx.execution_plan.start_runners,
+                max_cards=ctx.max_cards,
+                probe=ctx.probe,
+            )
     )
     for run_id, before, retry_reason in ctx.pending_runner_jobs:
         result, after = completed[run_id]
@@ -240,7 +240,7 @@ def _run_sequential_batch(agent, ctx: RunnerBatchContext) -> list:
                 run_id=run_id,
                 task_timeout=get_task_timeout(before, ctx.runner_timeout_seconds, agent.config),
                 instruction=ctx.effective_runner_instruction,
-                execute_runners=ctx.execute_runners,
+                execute_runners=ctx.execution_plan.start_runners,
                 max_cards=ctx.max_cards,
                 probe=ctx.probe,
                 retry_reason=retry_reason,
@@ -266,11 +266,11 @@ def _append_runner_record(agent, ctx: RunnerBatchContext, item: RunnerRecordInpu
                 after=item.after,
                 result=item.result,
                 retry_reason=item.retry_reason,
-                execute_runners=ctx.execute_runners,
+                execute_runners=ctx.execution_plan.start_runners,
             )
         )
     )
-    if not item.result.ok and ctx.execute_runners:
+    if not item.result.ok and ctx.execution_plan.start_runners:
         ctx.effective_runner_instruction = handle_runner_failure(
             RunnerFailureParams(
                 agent=agent,

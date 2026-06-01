@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from ..model_visible_ref_sanitizer import sanitize_model_visible_tool_output
+from ..settings.defaults import default_agent_config
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_reserved_fields,
@@ -82,9 +83,7 @@ class _ResolvedOutputLimits:
 # LLM: _resolved_request_limits merges per-call overrides with AgentConfig archive defaults.
 # 函数用途: 解析工具输出归档预算；调用方未显式传值时使用主配置，不在本模块写死阈值。
 def _resolved_request_limits(request: ExternalizeToolOutputRequest) -> _ResolvedOutputLimits:
-    from ..settings.config import AgentConfig
-
-    defaults = AgentConfig()
+    defaults = default_agent_config()
     return _ResolvedOutputLimits(
         min_chars=_request_limit(request.min_chars, defaults.tool_output_externalize_min_chars),
         preview_chars=_request_limit(request.preview_chars, defaults.tool_output_preview_chars),

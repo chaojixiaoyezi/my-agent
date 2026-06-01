@@ -67,7 +67,7 @@ class TestDispatchSubagentsToolExecute:
 
         assert result.ok is True
         assert "/data/subagents/" not in result.output
-        assert "[internal_legacy_subagent_path_hidden]" in result.output
+        assert "[internal_legacy_subagent_path_hidden]" not in result.output
 
     def test_dispatch_dry_run_false_executes_runners(self):
         """dry_run=false 时执行真实 runner。"""

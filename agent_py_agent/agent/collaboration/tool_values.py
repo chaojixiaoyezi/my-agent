@@ -7,6 +7,13 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
+from ..common.value_parsing import (
+    dict_value,
+    dict_values,
+    float_value,
+    non_negative_int,
+    string_list,
+)
 from ..tools import ToolExecutionResult
 
 if TYPE_CHECKING:
@@ -22,28 +29,8 @@ def error(tool: str, code: str, message: str) -> ToolExecutionResult:
     return ToolExecutionResult(tool, False, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def dict_value(value: object) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def dict_values(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, (list, tuple)):
-        return []
-    return [dict(item) for item in value if isinstance(item, dict)]
-
-
 def string_values(value: object) -> list[str]:
-    if isinstance(value, (list, tuple)):
-        return [str(item) for item in value if str(item or "").strip()]
-    text = str(value or "").strip()
-    return [text] if text else []
-
-
-def float_value(value: object) -> float:
-    try:
-        return float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
+    return string_list(value)
 
 
 def deadline_at(agent: SimpleAgent, params: dict[str, object]) -> float:
@@ -63,7 +50,4 @@ def default_deadline_seconds(agent: SimpleAgent) -> float:
 
 
 def limit_param(value: object, *, default: int) -> int:
-    try:
-        return max(0, int(value if value is not None else default))
-    except (TypeError, ValueError):
-        return default
+    return non_negative_int(value, default=default)

@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .paths import UserPaths, get_user_paths
+from .legacy_user_paths import LegacyUserPaths, get_legacy_user_paths
 
 if TYPE_CHECKING:
     pass
@@ -40,15 +40,15 @@ class UserSpaceManager:
 
     # LLM: UserSpaceManager.ensure_user_space belongs to 用户空间隔离; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 确保用户目录存在，不存在则创建。；会写入或调整文件，改动时要确认路径、安全边界和失败恢复。
-    def ensure_user_space(self, user_id: str) -> UserPaths:
+    def ensure_user_space(self, user_id: str) -> LegacyUserPaths:
         """确保用户目录存在，不存在则创建。
 
         Args:
             user_id: 用户标识符
 
         Returns:
-            UserPaths: 用户路径对象"""
-        paths = get_user_paths(user_id, self.user_data_root)
+            LegacyUserPaths: 旧 data/users 路径对象"""
+        paths = get_legacy_user_paths(user_id, self.user_data_root)
 
         # 创建必要的目录
         paths.root_dir.mkdir(parents=True, exist_ok=True)
@@ -59,17 +59,17 @@ class UserSpaceManager:
 
         return paths
 
-    # LLM: UserSpaceManager.get_user_paths belongs to 用户空间隔离; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 获取用户路径，不自动创建目录。。
-    def get_user_paths(self, user_id: str) -> UserPaths:
-        """获取用户路径，不自动创建目录。
+    # LLM: UserSpaceManager.get_legacy_user_paths belongs to old data/users compatibility.
+    # 函数用途: 获取旧 data/users 用户路径，不自动创建目录。
+    def get_legacy_user_paths(self, user_id: str) -> LegacyUserPaths:
+        """获取旧 data/users 用户路径，不自动创建目录。
 
         Args:
             user_id: 用户标识符
 
         Returns:
-            UserPaths: 用户路径对象"""
-        return get_user_paths(user_id, self.user_data_root)
+            LegacyUserPaths: 旧 data/users 路径对象"""
+        return get_legacy_user_paths(user_id, self.user_data_root)
 
     # LLM: UserSpaceManager.list_users belongs to 用户空间隔离; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 列出所有已创建的用户。。
@@ -97,7 +97,7 @@ class UserSpaceManager:
 
         Returns:
             bool: 用户目录是否存在"""
-        paths = get_user_paths(user_id, self.user_data_root)
+        paths = get_legacy_user_paths(user_id, self.user_data_root)
         return paths.root_dir.exists() and paths.root_dir.is_dir()
 
     # LLM: UserSpaceManager.is_admin belongs to 用户空间隔离; keep caller-visible returns, errors, and side effects aligned with focused tests.

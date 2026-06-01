@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..settings.defaults import default_config_int
+
 
 # LLM: ArtifactContentReadRequest bundles mode-specific read fields without importing artifact_reader.
 # 类用途: 保存 artifact 正文窄读所需的 mode、offset、max_chars 和 query。
@@ -71,9 +73,7 @@ def _read_chars_limit(value: object) -> int:
         parsed = -1
     if parsed >= 0:
         return parsed
-    from ..settings.config import AgentConfig
-
-    return max(0, int(AgentConfig().memory_artifact_default_read_chars))
+    return default_config_int("memory_artifact_default_read_chars", minimum=0)
 
 
 # LLM: _slice_result is the common implementation for slice and head modes.

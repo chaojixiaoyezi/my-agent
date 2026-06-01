@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..artifacts.registry import ArtifactRegistration, register_artifact
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
+from ..settings.defaults import default_config_int
 from .runtime_owner_roots import runtime_owner_root
 from .tool_loop_recovery import runtime_run_id, runtime_run_scope
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
@@ -45,9 +46,7 @@ def _config_int(agent: object, key: str) -> int:
     try:
         return int(getattr(agent.config, key))
     except (AttributeError, TypeError, ValueError):
-        from ..settings.config import AgentConfig
-
-        return int(getattr(AgentConfig(), key))
+        return default_config_int(key)
 
 
 # LLM: _attach_gate_and_refs copies small structured result facts into the archive row.

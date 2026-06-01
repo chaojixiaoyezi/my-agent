@@ -18,9 +18,9 @@ _CREATE_PARAMETERS = {
     "allowed_tools": "工具偏好提示；一般省略。系统会自动补齐基础读写工具，模型少填工具不能把子代理变成无写入能力。",
     "acceptance_checks": "验收标准列表",
     "plan": "每个子代理的初始步骤列表",
-    "context_manifest": "refs-first 上下文清单；可放 read refs/task_pack_refs/omitted_context",
+    "input_refs": "子代理需要读取的资料、文件、URL 或 artifact refs；批量 items 里建议写在对应 item 上",
+    "context_manifest": "refs-first 上下文清单；可放 input refs/task_pack_refs/omitted_context",
     "context_packs": "refs-only 上下文包列表；每项只放摘要和 path/ref，不放大正文",
-    "required_read_paths": "兼容旧字段名的可读资料线索；批量 items 里建议写在对应 item 上，顶层只放所有子代理都可能需要的公共资料",
     "output_files": "子代理必须写出的目标文件路径列表；知道文件名时必须填，系统会把它写入机器合同",
     "output_refs": "output_files 的语义别名，用于引用交付物路径或产物 ref",
     "artifact_refs": "交付物 refs 列表；适合引用已经存在或后续要验收的产物",
@@ -44,18 +44,24 @@ _CREATE_PARAMETER_DETAILS = {
         "{\"goal\":\"研究竞争\",\"role\":\"worker\",\"agent_name\":\"小傻妞-竞争\"}]。"
         "create_subagents 默认创建后立刻启动子代理；只有传 defer_start=true 才只建任务记录。"
         "如果任务材料很多，不要由 root 先读完所有正文再派工；root 只读最小必要信息，"
-        "把具体正文、数据表和长报告的读取分析写进各 item 的 goal 或 item.required_read_paths。"
-        "例如“子代理1读文件1、子代理2读文件2”时，必须把文件路径分别写进各自 item，"
-        "不要放到顶层 required_read_paths。"
+        "把具体正文、数据表和长报告的读取分析写进各 item 的 goal 或 item.input_refs。"
+        "例如“子代理1读文件1、子代理2读文件2”时，把文件路径分别写进各自 item，"
+        "不要放到顶层。"
     ),
     "role": "优先用模板角色，而不是临时造小角色。可用角色模板索引：\n{role_template_index}",
     "tool_preset": "省略时自动：由 role template、任务目标和调度器决定工具；角色模板默认保留基础读写/汇报能力。`none` 只表示不覆盖自动策略。",
     "allowed_tools": "一般省略。若模型写了 [\"read_file\"] 这类不完整列表，系统仍会补齐基础读写工具；不要把它当安全限制。",
     "acceptance_checks": "JSON 数组或多行文本，说明父代理后续怎样判断任务完成。",
     "plan": "JSON 数组或多行文本，给子代理的初始执行步骤。",
+    "input_refs": (
+        "输入资料线索，例如 [\"README.md\",\"data/market.md\"] 或 artifact ref。"
+        "这不是 root 要立刻读取的清单，也不是 runner 启动硬门，而是交给对应小傻妞读取和分析的线索。"
+        "批量模式下，顶层 input_refs 只表示每个子代理都需要的公共资料；"
+        "单个子代理自己的输入文件要放在对应 item.input_refs。"
+    ),
     "context_manifest": (
-        "结构化资料索引，可写 required_read_paths 这个兼容字段来表达 read refs。"
-        "这些路径会出现在子代理 runner prompt 的 Context Manifest 中，子代理自己读正文；"
+        "结构化资料索引，用来放 input refs、task pack refs 和 omitted context。"
+        "这些引用会出现在子代理 runner prompt 的 Context Manifest 中，子代理自己读正文；"
         "root 不必先把所有材料正文读进自己的上下文。"
     ),
     "context_packs": (
@@ -63,12 +69,6 @@ _CREATE_PARAMETER_DETAILS = {
         "只放摘要和路径，不放长正文。它不是实时共享内存或消息队列，不要用空的 shared_context、"
         "previous_discoveries 之类字段假装以后会自动同步；需要其他代理协助时，让发现者在运行时使用 "
         "raise_collaboration，响应者用 inspect_collaboration/submit_collaboration_result。"
-    ),
-    "required_read_paths": (
-        "当资料路径很多时用这个简写，例如 [\"README.md\",\"data/market.md\"]。"
-        "这不是 root 要立刻读取的清单，也不是 runner 启动硬门，而是交给对应小傻妞读取和分析的线索。"
-        "批量模式下，顶层 required_read_paths 只表示每个子代理都需要的公共资料；"
-        "单个子代理自己的输入文件要放在对应 item.required_read_paths。"
     ),
     "output_files": (
         "只要用户给了明确保存路径，就把路径放进这里，例如 [\"outputs/page/index.html\"]。"
@@ -105,9 +105,9 @@ _CREATE_EXAMPLES = [
     (
         '{"tool":"create_subagents","items":['
         '{"goal":"读取并分析 data/a.md，输出证据摘要","role":"worker",'
-        '"agent_name":"小傻妞-资料A","required_read_paths":["data/a.md","rubric.md"]},'
+        '"agent_name":"小傻妞-资料A","input_refs":["data/a.md","rubric.md"]},'
         '{"goal":"读取并分析 data/b.md，输出证据摘要","role":"worker",'
-        '"agent_name":"小傻妞-资料B","required_read_paths":["data/b.md","rubric.md"]}]}'
+        '"agent_name":"小傻妞-资料B","input_refs":["data/b.md","rubric.md"]}]}'
     ),
     '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"role":"worker","workflow_mode":"off","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
     '{"tool":"create_subagents","goal":"实现用户指定项目的 HTML 骨架和 data.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构","output_files":["/workspace/deliverables/app/build/index.html","/workspace/deliverables/app/build/data.json"]}',

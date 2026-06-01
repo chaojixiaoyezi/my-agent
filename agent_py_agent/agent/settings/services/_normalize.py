@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from ..defaults import default_agent_config
 from ._normalize_core_fields import DaemonFieldsService, GatewayFieldsService, ModelFieldsService
 from ._normalize_home_fields import HomeLayoutFieldsService
 from ._normalize_identity_fields import AdapterFieldsService, UserFieldsService
@@ -41,11 +42,9 @@ class AgentConfigNormalizer:
     @staticmethod
     def normalize(data: dict[str, object]) -> tuple[dict[str, object], list[str]]:
         """Validate and coerce all non-memory AgentConfig fields with safe fallbacks."""
-        from ..config import AgentConfig
-
         warnings: list[str] = []
         out: dict[str, object] = dict(data)
-        defaults = AgentConfig()
+        defaults = default_agent_config()
 
         for service in _NORMALIZE_SERVICES:
             out, service_warnings = service.normalize(out, defaults)

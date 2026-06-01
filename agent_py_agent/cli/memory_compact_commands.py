@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
-"""CLI entrypoint for memory compact planning and non-destructive apply.
+"""CLI entrypoint for manual memory compact planning and rescue apply.
 
 新手说明:
-这个命令先做 dry-run 计划；显式 --apply 时只生成 compact context、自检和 ledger，
-不会删除 raw archive、snapshot、token ledger 或 task/run 文件。
+普通运行里的上下文压缩走 automatic runtime compact，不需要用户手动调用这里。
+这个命令是调试/救援入口：先做 dry-run 计划；显式 --apply 时只生成 compact
+context、自检和 ledger，不会删除 raw archive、snapshot、token ledger 或 task/run 文件。
 """
 
 import json
@@ -92,6 +93,7 @@ def _main_context_bundle_ref_for_args(args, agent) -> str:
 # 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_memory_compact_plan(plan: dict) -> None:
     print("MY-AGENT MEMORY COMPACT DRY-RUN")
+    print("mode=manual_rescue_plan")
     print(f"workspace={plan['workspace_root']}")
     print("scope=" + json.dumps(plan["scope"], ensure_ascii=False, sort_keys=True))
     _print_json_line("archive", _archive_report_payload(plan["archive"]))
@@ -110,6 +112,7 @@ def _print_memory_compact_plan(plan: dict) -> None:
 # 函数用途: 展示非破坏性 compact apply 的结果、产物路径和 self-check 状态。
 def _print_memory_compact_apply(result: dict) -> None:
     print("MY-AGENT MEMORY COMPACT APPLY")
+    print("mode=manual_rescue_non_destructive")
     print(f"workspace={result['workspace_root']}")
     print(f"event_id={result['event_id']}")
     print(f"compact_status={result['compact_status']}")

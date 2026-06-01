@@ -7,13 +7,13 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from ..settings import AgentConfig
+from ..settings.defaults import default_config_int
 
 if TYPE_CHECKING:
     from ..settings.config import AgentConfig as AgentConfigType
 
 
-_DEFAULT_TASK_LOCK_TIMEOUT_SECONDS = AgentConfig().task_lock_timeout_seconds
+_DEFAULT_TASK_LOCK_TIMEOUT_SECONDS = default_config_int("task_lock_timeout_seconds")
 
 
 # LLM: TaskLockManager is a 并发和冲突重试 boundary object; coordinate field or method changes with callers, docs, and focused tests.
@@ -22,7 +22,7 @@ class TaskLockManager:
 
     # LLM: TaskLockManager.__init__ belongs to 并发和冲突重试; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 初始化实例依赖和字段，不应在构造阶段做难以回滚的重副作用；它是 TaskLockManager 的方法，通常依赖实例字段。
-    def __init__(self, config: AgentConfig | None = None):
+    def __init__(self, config: AgentConfigType | None = None):
         self.enabled = _lock_enabled(config)
         self._read_locks: dict[str, threading.RLock] = {}
         self._write_lock = threading.RLock()

@@ -154,6 +154,34 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     assert "后台主代理已检查任务树" in sent[0].content
 
 
+def test_background_runtime_uses_configured_allowed_tools(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            background_main_agent_allowed_tools=["inspect_agent_tree", "send_guidance"],
+        ),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = ConversationStore(tmp_path / "conversations")
+    channels = FakeChannelHub()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "长期后台任务", 'now': 10.0})
+    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "只读看树并提醒", 'now': 12.0})
+    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 13.0})
+
+    scheduler.tick(now=73.0)
+    prompt = backend.prompts[0]
+
+    assert "inspect_agent_tree" in prompt
+    assert "send_guidance" in prompt
+    assert "dispatch_subagents" not in prompt
+    assert "create_subagents" not in prompt
+
+
 def test_background_context_budget_truncates_large_messages(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()

@@ -1,7 +1,7 @@
 # LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
 # 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
 
-"""LLM contract: subagent state machine with 8 states and 12 transitions.
+"""LLM contract: subagent state machine with structural transitions only.
 
 Human version:
 这个模块定义子代理状态机，确保状态转换的合法性和一致性。
@@ -10,7 +10,6 @@ Human version:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -33,31 +32,31 @@ class SubAgentState(str, Enum):
     BLOCKED = "BLOCKED"  # Blocked by external condition
 
 
-# LLM: 12 state transitions
-# Each tuple is (from_state, to_state, trigger, guard, description)
+# LLM: State transitions are structural only; quality/artifact checks stay in closeout.
+# Each tuple is (from_state, to_state, trigger, description)
 _SUBAGENT_TRANSITIONS = [
     # From PLANNING
-    ("PLANNING", "RUNNING", "start", None, "Begin task execution"),
-    ("PLANNING", "PAUSED", "pause", None, "User pauses before start"),
-    ("PLANNING", "ABANDONED", "abandon", None, "User abandons before start"),
+    ("PLANNING", "RUNNING", "start", "Begin task execution"),
+    ("PLANNING", "PAUSED", "pause", "User pauses before start"),
+    ("PLANNING", "ABANDONED", "abandon", "User abandons before start"),
     # From RUNNING
-    ("RUNNING", "WAIT_CHILD", "wait_child", None, "Dispatched subagent, waiting"),
-    ("RUNNING", "DONE", "complete", None, "Task succeeded with evidence"),
-    ("RUNNING", "FAILED", "fail", None, "All strategies exhausted"),
-    ("RUNNING", "BLOCKED", "block", None, "External dependency not met"),
-    ("RUNNING", "PAUSED", "pause", None, "User pauses mid-execution"),
+    ("RUNNING", "WAIT_CHILD", "wait_child", "Dispatched subagent, waiting"),
+    ("RUNNING", "DONE", "complete", "Task execution reached a done state"),
+    ("RUNNING", "FAILED", "fail", "All strategies exhausted"),
+    ("RUNNING", "BLOCKED", "block", "External dependency not met"),
+    ("RUNNING", "PAUSED", "pause", "User pauses mid-execution"),
     # From WAIT_CHILD
-    ("WAIT_CHILD", "RUNNING", "child_done", None, "Child tasks completed"),
-    ("WAIT_CHILD", "FAILED", "child_failed", None, "Child task failed"),
-    ("WAIT_CHILD", "BLOCKED", "block", None, "Child blocked or timeout"),
+    ("WAIT_CHILD", "RUNNING", "child_done", "Child tasks completed"),
+    ("WAIT_CHILD", "FAILED", "child_failed", "Child task failed"),
+    ("WAIT_CHILD", "BLOCKED", "block", "Child blocked or timeout"),
     # From PENDING
-    ("PENDING", "RUNNING", "dispatch", None, "Resources available, dispatch"),
+    ("PENDING", "RUNNING", "dispatch", "Resources available, dispatch"),
     # Terminal states
-    ("DONE", "RUNNING", "retry", None, "Retry after done (exceptional)"),
-    ("FAILED", "RUNNING", "retry", None, "Retry after failure"),
-    ("BLOCKED", "RUNNING", "unblock", None, "Blocked condition resolved"),
-    ("PAUSED", "RUNNING", "resume", None, "User resumes task"),
-    ("PAUSED", "FAILED", "abandon", None, "User abandons paused task"),
+    ("DONE", "RUNNING", "retry", "Retry after done (exceptional)"),
+    ("FAILED", "RUNNING", "retry", "Retry after failure"),
+    ("BLOCKED", "RUNNING", "unblock", "Blocked condition resolved"),
+    ("PAUSED", "RUNNING", "resume", "User resumes task"),
+    ("PAUSED", "FAILED", "abandon", "User abandons paused task"),
 ]
 
 
@@ -83,15 +82,6 @@ _TRANSITIONS_BY_TRIGGER = {
 }
 
 
-# LLM: StateTransitionParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存状态transition参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
-@dataclass(frozen=True)
-class StateTransitionParams:
-    """Params bundle for future guarded state transitions."""
-
-    guard_context: object | None = None
-
-
 # LLM: SubAgentStateMachine 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 类用途: 封装subagent状态machine相关状态和行为，维持当前模块的职责边界；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class SubAgentStateMachine:
@@ -111,13 +101,12 @@ class SubAgentStateMachine:
         """Get all valid transitions from a given state."""
 
         valid = []
-        for from_s, to_s, trigger, guard, description in _SUBAGENT_TRANSITIONS:
+        for from_s, to_s, trigger, description in _SUBAGENT_TRANSITIONS:
             if from_s == from_state:
                 valid.append({
                     "from": from_s,
                     "to": to_s,
                     "trigger": trigger,
-                    "guard": guard,
                     "description": description,
                 })
         return valid
@@ -137,7 +126,7 @@ class SubAgentStateMachine:
         run_id: str,
         trigger: str,
         *,
-        params: StateTransitionParams | None = None,
+        params: object | None = None,
     ) -> SubAgentTask:
         """Execute a state transition on a task.
 
@@ -157,11 +146,9 @@ class SubAgentStateMachine:
         trans = _SUBAGENT_STATE_INDEX[key]
         new_state = trans[1]
 
-        # Execute pre-transition guard if any
-        guard_func = trans[3]
-        transition_params = params or StateTransitionParams()
-        if guard_func and not guard_func(task, transition_params):
-            raise ValueError(f"Transition guard failed for {current} --{trigger_lower}--> {new_state}")
+        # Keep this machine structural. Quality/artifact acceptance is handled
+        # by the shared closeout path so every task depth uses one mechanism.
+        _ = params
 
         old_state = self._apply_transition_state(task, new_state, trigger_lower, run_id)
         self.manager.save(task)

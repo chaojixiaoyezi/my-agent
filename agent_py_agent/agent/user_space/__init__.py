@@ -71,6 +71,7 @@ from .identity_store import (
     link_provider_identity,
     lookup_provider_identity,
 )
+from .legacy_user_paths import LegacyUserPaths, get_legacy_admin_paths, get_legacy_user_paths
 from .manager import UserSpaceManager
 from .migration import migrate_to_user_space
 from .owner_policy import (
@@ -89,7 +90,6 @@ from .owner_resolver import (
     owner_identity_from_config,
     resolve_owner_home,
 )
-from .paths import UserPaths, get_user_paths
 from .provider_space import ProviderSpaceIdentity, ProviderSpacePaths, ensure_provider_space
 from .run_workspace import EnsureRunWorkspaceRequest, RunWorkspacePaths, ensure_run_workspace
 from .skill_candidates import (
@@ -129,7 +129,7 @@ __all__ = [
     "OwnerTemporaryGrant",
     "EffectiveOwnerPolicy",
     "ProviderIdentityRecord",
-    "UserPaths",
+    "LegacyUserPaths",
     "UserSpaceManager",
     "EnsureRunWorkspaceRequest",
     "MainContextBundleRequest",
@@ -162,7 +162,8 @@ __all__ = [
     "ensure_run_workspace",
     "expire_capability_requests",
     "expire_temporary_grants",
-    "get_user_paths",
+    "get_legacy_admin_paths",
+    "get_legacy_user_paths",
     "home_paths",
     "home_paths_with_owner",
     "latest_main_context_bundle_path",

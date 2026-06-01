@@ -78,10 +78,10 @@ def test_memory_compact_runtime_guidance_overrides_stale_progress_next_step(tmp_
 def test_runtime_handoff_treats_scope_ids_as_literal_paths(tmp_path: Path) -> None:
     """run_id 里的 * 等字符必须按字面值处理，不能扩大扫描其它任务的状态。"""
     root = tmp_path / "workspace"
-    leak_dir = root / "tasks" / "unrelated-task" / "agents" / "run-leak"
+    leak_dir = root / "tasks" / "2026-06-01" / "unrelated-task" / "work" / "agents" / "run-leak"
     leak_dir.mkdir(parents=True)
     (leak_dir / "ACCEPTANCE.md").write_text("- leaked acceptance should not be imported\n", encoding="utf-8")
-    (leak_dir / "state.json").write_text(
+    (leak_dir / "canonical_state.json").write_text(
         json.dumps({"run_id": "run-leak", "status": "running"}),
         encoding="utf-8",
     )
@@ -130,7 +130,7 @@ def test_runtime_fact_preserves_task_output_root_from_workspace_prompt(tmp_path:
 
 
 def _write_runtime_handoff_sources(root: Path) -> None:
-    guidance_dir = root / "data" / "conversations" / "guidance"
+    guidance_dir = root / "workspace" / "runtime" / "workspaces" / "project-1" / "conversations" / "guidance"
     guidance_dir.mkdir(parents=True, exist_ok=True)
     (guidance_dir / "thread.session-compact.jsonl").write_text(
         json.dumps(
@@ -149,9 +149,9 @@ def _write_runtime_handoff_sources(root: Path) -> None:
         encoding="utf-8",
     )
     for run_id, status in (("run-child-a", "running"), ("run-child-b", "completed")):
-        run_dir = root / "tasks" / "run-compact" / "agents" / run_id
+        run_dir = root / "tasks" / "2026-06-01" / "run-compact" / "work" / "agents" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "state.json").write_text(
+        (run_dir / "canonical_state.json").write_text(
             json.dumps(
                 {
                     "run_id": run_id,

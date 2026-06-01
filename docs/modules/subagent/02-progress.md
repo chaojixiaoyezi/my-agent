@@ -2,6 +2,12 @@
 
 父验收旧链路已经移除。子代理只负责执行自己的任务、写结果和证据引用；上级通过任务树、状态、refs 和普通 closeout 继续推进。
 
+## 2026-06-02 自学习候选去重收敛
+
+- learning draft 去重不再把“短教训出现在长复盘里”直接当成同一条候选。精确相同仍直接合并；短文本之间的合理包含仍保留高相似度；长文本改走词元和短语片段相似度。
+- 这样保留了“相同经验多次出现就提高置信度”的能力，同时避免一篇长报告因为包含某句局部经验，就把多个不同 lesson 误合并成一个候选。
+- 参考 通道运行时 的短文本不靠 substring 误判重复、终端交互 的明确来源/索引去重思路后，当前实现仍保持自学习草稿层，不提升正式 skill、不新增硬门。
+
 ## 2026-05-27 子代理权限和记忆配置
 
 - 子代理新增有效权限快照 `effective_permissions`：父级 `restricted` 会继续下传 `restricted`，父级 `workspace-write/full-access` 下的子代理最多拿 `workspace-write`，不会自动继承全盘 shell 权限。
@@ -61,13 +67,42 @@
 - 子代理保存时会在 `owner_home/agents/<run_id>/` 写 refs-only projection，里面只放 state 和 refs，不复制大正文、不制造第二套事实源。
 - 子代理保存还会刷新当前任务目录的 `work/compact/task_rollup.json`。父代理恢复时先看任务级 rollup，就能知道哪些 child run 完成、卡住、产物在哪里，再决定是否深入某个 child compact；旧 `tasks/<root_id>/compact/...` 只作为迁移期读取兼容。
 - 如果 manager 持有 `home_paths`，子代理保存会登记 `global_index/active_agents.jsonl`；这只是发现索引，不替代 task/run/agent 工作区正文。
-- 如果 manager 持有 `home_paths`，子代理保存会同时登记 `global_index/active_tasks.jsonl`、`active_runs.jsonl` 和 `active_agents.jsonl`。父代理、tree、doctor 和 compact 恢复共用这套轻量发现入口；真实正文仍然在 task workspace、agent run workspace 和旧兼容工单目录。
+- 如果 manager 持有 `home_paths`，子代理保存会同时登记 `global_index/active_tasks.jsonl`、`active_runs.jsonl` 和 `active_agents.jsonl`。父代理、tree、doctor 和 compact 恢复共用这套轻量发现入口；完整权威状态在 task-local `work/agents/<run_id>/canonical_state.json`，旧工单目录只保留同 payload 镜像和兼容定位。
 - 旧 `subagent_workspace` 继续作为 runner 工作目录兼容入口；owner projection 只是统一查找、恢复、tree 和 compact 的索引视图。
+
+## 2026-06-02 子代理账本读取错误可见化
+
+- 新增统一运行时错误报告 `runtime_error_report()`。本地 IO、解析、编码和账本损坏类错误会被压成小的结构化 payload，
+  给模型/父代理看；代码 bug 仍标成不可恢复，不能伪装成“没有数据”。
+- `dispatch_subagents` 生成 `current_turn_run_state` 或 `child_result_index` 时，如果 `subagents.load(run_id)`
+  失败，会返回 `task_load_errors` / `load_error`，状态为 `LOAD_FAILED`。
+- 父代理现在能区分“子代理没有产物”和“子代理状态账本读取失败”。前者按任务继续催产物或补派；
+  后者应刷新 tree、重建索引或接管恢复，而不是误判子代理没干活。
+- 这不是新硬门。它只把原来被吞掉的异常暴露出来，不会因为某个读取失败直接终止任务。
+
+## 2026-06-02 协作 case 响应覆盖账本
+
+- `inspect_collaboration` 的 case 状态新增 `response_coverage`。它按 request 汇总目标数量、已响应数量、
+  未响应数量、不可达数量，以及每类目标的短样本。
+- 这个字段解决的是大规模协作时的可读性：父代理不用展开上千个 request/evidence 行，也能知道“哪些目标回了、
+  哪些没回、是否有不可达目标”。
+- `CollaborationCoordinator` 关闭收集窗口时，也会把 `response_coverage` 写进 decision/wake metadata。
+  主代理醒来后看到的是结构化覆盖账本，而不是只看到自然语言摘要。
+- 这不是验收门，也不会因为未响应目标阻断任务。到 deadline 后，case 可以带着已回、未回、不可达信息继续推进，
+  由发现者、父代理或主代理判断下一步。
+
+## 2026-06-02 子代理恢复编排账本
+
+- 新增 `SubAgentRecoveryOrchestrator`，统一消费 `SubagentRecoveryStrategy` 输出的 refs-only 策略。
+- 编排结果只分成几类通用步骤：续跑原 run 的 dispatch 建议、幂等 takeover、leadership recovery 计划、人工检查、无动作。
+- 每一步写入 `subagent_recovery_ledger.jsonl`，记录建议动作、实际编排动作、是否 dry-run、是否 applied、是否还需要父代理 dispatch 或人工裁决。
+- 默认不自动改变任务树；只有调用方显式 `apply=True` 时才会复用已有 `create_takeover_run()`，避免恢复建议散落在多个模块里又互相看不见。
 
 ## 2026-05-28 模型可见路径收敛
 
-- `inspect_agent_tree`、`create_subagents`、`dispatch_subagents`、`schedule_child_subagents` 和 CLI/人工看板这类模型可见状态输出，会统一净化旧式 `data/subagents/...` 路径；旧路径仍留在内部兼容恢复文件中，但不会作为模型可读地址返回。
-- 当前内部编排/状态工具的 tool-output 归档也会写入同一份净化后的模型可见内容；更早生成的旧归档在经 `read_artifact` 展开时会按来源工具再净化一次，避免历史 `create_subagents` / `inspect_agent_tree` 结果把旧路径重新带回上下文。普通 `read_file`、网页、命令输出和用户产物正文保持原文。
+- `inspect_agent_tree`、`create_subagents`、`dispatch_subagents`、`schedule_child_subagents` 和 CLI/人工看板这类模型可见状态输出，只投影当前布局的 `task_root`、`work/agents/<agent_id>`、artifact/evidence refs；旧式 `data/subagents/...` 路径仍留在内部兼容恢复文件中，但不会被占位符遮住后继续返回给模型。
+- 当前内部编排/状态工具的 tool-output 归档也会写入当前模型可见正文；更早生成的旧归档在经 `read_artifact` 展开时会按来源工具再净化一次，避免历史 `create_subagents` / `inspect_agent_tree` 结果把旧路径重新带回上下文。普通 `read_file`、网页、命令输出和用户产物正文保持原文。
+- `create_subagents` 的模型可见输入统一使用 `input_refs` / `context_manifest` 描述“交给子代理自己读的资料线索”。旧 `required_read_paths` 只保留在解析兼容层，避免继续把旧字段教给模型。
 - 旧式 work-order 目录不再作为状态面主路径返回，避免父代理接管时按 `data/subagents/<run_id>/...` 猜旧路径或直接 `read_file` 旧账本。
 - 父级读取子代理结果时，应优先用 `agent_work_dir`、`final_report_ref`、`artifact_refs` 和 `evidence_refs`，不要自己拼子代理目录。
 - 如果模型仍然拿旧路径或抄错路径去读，`read_file/list_files/search_text`

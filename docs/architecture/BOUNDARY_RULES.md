@@ -134,15 +134,31 @@ modules = ["agent_py_agent"]
 
 | 模块 | 可写入位置 | 不可写入位置 |
 |---|---|---|
-| `memory_store/` | `data/memory.jsonl`, `data/memory/` | 任何其他路径 |
-| `subagents/services/persistence.py` | `data/subagents/` | 任何其他路径 |
-| `memory_archive/` | `data/memory_archive/` | 任何其他路径 |
-| `audit/` | `data/audit.jsonl` | 任何其他路径 |
-| `local_storage/` | `data/local_store/` | 任何其他路径 |
-| `gateway_parts/` | `data/gateway/` | 任何其他路径 |
-| `notification/` | `data/notifications/` | 任何其他路径 |
+| `memory_store/` | `owner_home/memory/long_term/`, `owner_home/memory/daily/`；旧 `memory_path` 只做 local/main 兼容读取 | 任何其他路径 |
+| `subagents/services/persistence.py` | 保存型 root run 下的子代理详细状态写 task-local `work/agents/<run_id>/canonical_state.json`；默认 locator 写 `owner_home/workspace/runtime/workspaces/<workspace-scope>/subagents/`，显式非默认 `subagent_workspace` 可覆盖；旧 `task.json/run.json` 只镜像同一 payload 供兼容定位；refs-only 投影写 `owner_home/agents/` | 任何其他路径 |
+| `memory_archive/` | `owner_home/memory/`, `owner_home/memory_archive/`, task-local `work/compact/` | 任何其他路径 |
+| `audit/` | 默认 `owner_home/logs/audit/`；显式非默认 audit 路径可覆盖 | 任何其他路径 |
+| `local_storage/` | 默认 `owner_home/workspace/runtime/workspaces/<workspace-scope>/local_store/`；显式非默认 local_store 路径可覆盖 | 任何其他路径 |
+| `gateway_parts/` | 默认 `owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/`；显式非默认 gateway 路径可覆盖 | 任何其他路径 |
+| `notification/` | 默认 `owner_home/workspace/runtime/workspaces/<workspace-scope>/notifications/`；显式非默认 notification 路径可覆盖 | 任何其他路径 |
 | `tooling/` | 经 `write_boundary` 校验后的路径 | 未校验的路径 |
 | `tests/` | `tmp_path`, 临时目录, 显式 fixture 沙箱 | 任何持久化路径 |
+
+如果 `home_runtime_bootstrap_enabled=false` 或 owner home 缺失导致运行时回退到旧 `data/*`
+路径，启动对象必须暴露 `using_legacy_paths=true` 和原因，并写 warning。旧路径回退是迁移/测试状态，
+不能静默伪装成 owner-home 活跃事实源。
+
+SimpleAgent 启动时会把 runtime resolver 得出的 owner-home 路径回写到 `AgentConfig`。
+这是临时兼容边界：还没完全改造的 session/gateway/notification 代码可以继续读 config 字段，
+但读到的已经是同一套 owner-home 路径。
+
+配置默认值也只有一个兜底入口：`agent/settings/defaults.py`。正常运行链路必须使用已经加载并
+归一化后的 `agent.config`；底层模块如果处在兼容路径、测试边界或静态 dataclass 默认值里，不能
+直接 `AgentConfig()`，只能通过 `default_agent_config()` / `default_config_value()` 等 helper
+读取 schema 默认值。这样用户改配置时，活跃运行路径不会被某个底层模块偷偷 new 出来的默认对象覆盖。
+
+旧 `data/users/<user_id>` 路径只能通过 `user_space/legacy_user_paths.py` 访问。正常运行代码不应新增
+`data/users` 路径模型调用；需要迁移旧数据时走明确的 migration/fallback 入口。
 
 ### 2.4 Gitignore Enforcement / Gitignore 强制规则
 
@@ -154,6 +170,11 @@ data/subagents/
 data/local_store/
 data/gateway/
 data/notifications/
+owners/*/*/data/
+owners/*/*/agents/
+owners/*/*/tasks/
+owners/*/*/runs/
+owners/*/*/memory/
 data/log_fixtures/
 
 # 记忆文件
@@ -228,7 +249,7 @@ config/local*.json
 # 错误: 硬编码其他模块的文件路径
 path = "data/subagents/" + task_id + ".json"
 
-# 正确: 通过仓库接口
+# 正确: 通过 owner/task/run 仓库接口
 repo.save_task(task_id, task_data)
 
 # ---- 禁止: 通过约定的键名耦合 ----
@@ -306,7 +327,7 @@ class DispatchMixin:
 
 | 边界 | 说明 |
 |---|---|
-| 文件系统 | 子代理只能写入 `data/subagents/{task_id}/` 目录 |
+| 文件系统 | 子代理默认写入当前 owner/workspace 范围内的 `owner_home/data/workspaces/<workspace-scope>/subagents/{run_id}/`；父级可通过 `owner_home/agents/{run_id}/` refs-only 投影和 task-local `work/agents/{run_id}/` 查看 |
 | 工具访问 | 子代理只能使用白名单中的工具 |
 | 模型访问 | 子代理使用受限的 runner prompt，不能访问系统提示词 |
 | 网络访问 | 子代理的 Web 工具受 `allowed_domains` 限制 |

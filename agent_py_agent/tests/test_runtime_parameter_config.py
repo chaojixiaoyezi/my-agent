@@ -52,6 +52,29 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
     assert normalized["background_claim_ttl_seconds"] == 120
 
 
+def test_background_main_agent_allowed_tools_are_normalized() -> None:
+    from agent_py_agent.agent.settings.config import normalize_agent_config
+
+    normalized, warnings = normalize_agent_config(
+        {"background_main_agent_allowed_tools": "inspect_agent_tree, send_guidance"}
+    )
+
+    assert warnings == []
+    assert normalized["background_main_agent_allowed_tools"] == ["inspect_agent_tree", "send_guidance"]
+
+
+def test_simple_agent_keeps_runtime_guard_policy_snapshot(tmp_path: Path) -> None:
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+
+    snapshot = agent.runtime_guard_policy.snapshot(task_id="task-1", run_id="run-1")
+    assert snapshot["schema_version"] == "runtime_guard_policy.v1"
+    assert snapshot["task_id"] == "task-1"
+    assert "values" in snapshot
+
+
 # LLM: runner_concurrency=auto must not hide a second hard-coded max worker count.
 # 函数用途: 验证 auto 并发上限可由配置字段控制。
 def test_runner_auto_concurrency_uses_configured_limit() -> None:

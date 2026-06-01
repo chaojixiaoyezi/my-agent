@@ -30,6 +30,8 @@
 
 真正的运行事实源是显式 run 账本：`agent_runs` 记录当前状态，`agent_events` 记录每次 run 保存和工具完成。工具完成事件会带 `run_id`、`parent_run_id`、`root_run_id`、`root_task_id` 和操作号。父级看 tree 时只是在读这些事实的投影，不再靠“当前子代理是谁”猜来源。
 
+每次保存会把完整详细状态写进 `work/agents/<run_id>/canonical_state.json`。旧工单目录里的 `task.json` / `run.json` 仍会保留，但只镜像同一份 payload，用来给旧入口定位；读取时如果 canonical state 存在，以它为准。这样 tree、owner projection、board 和 index 都是同一份状态的投影，不再各自维护一套事实。
+
 子代理应该做的是写自己的结果、证据引用和必要的工作文件；父级或主代理通过 `inspect_agent_tree`、`run_closeout_ref` 和 refs 看状态，不要求子代理手动维护树。
 
 每次子代理保存时，系统会同步当前任务目录的 `work/compact/task_rollup.json` 和 `task_rollup.md`。这个 rollup 是父级恢复和汇总的入口摘要：它列出子 run 状态、refs 和最近 compact 包位置，不复制大产物正文，也不替代具体子代理的 `task.json` / artifact registry。旧 `tasks/<root_id>/compact/...` 只作为迁移期读取兼容。
@@ -81,7 +83,7 @@
 
 子代理默认继承一套能正常干活的基础工具，包括读文件、列文件、搜索、读 artifact、联网检索、写文件、打补丁、受控命令执行、只读树状态、协作和能力申请工具。角色模板只追加职责重点，不应该把基础工具拿掉。`inspect_agent_tree` 是按身份裁剪的只读工具：主代理可以看全树；子代理/孙代理只能看当前 run 的 `own_subtree`，即自己和自己的后代。
 
-层级工具分两类：顶层主代理第一次派工用 `create_subagents`；已经运行中的子代理要创建下一层，用 `schedule_child_subagents`。两者体验保持一致：默认创建后后台启动，并返回 `run_ids`、启动状态和树状态；只有显式 `defer_start=true` 或 `schedule_child_subagents.dry_run=true` 才只建或预览。真实模型后端会把启动动作交给独立 `subagents-dispatch` 进程，避免一次性 CLI 退出后把子代理线程一起带死；离线 `echo` 后端仍可用进程内线程快速跑测试。区别只在身份边界：`schedule_child_subagents` 会从当前 runner 上下文自动绑定 `parent_id`，因此孙代理挂在当前子代理名下，而不是凭模型传一个父 id。运行中的 `dispatch_subagents` 同样默认只推进当前节点的直接孩子；即使模型显式传了别的 `parent_run_id`，runner 内也会压回当前 run，并在 `scope_warnings` 里说明，避免误催平行子代理。
+层级工具分两类：顶层主代理第一次派工用 `create_subagents`；已经运行中的子代理要创建下一层，用 `schedule_child_subagents`。两者体验保持一致：默认创建后后台启动，并返回 `run_ids`、启动状态和树状态；只有显式 `defer_start=true` 或 `schedule_child_subagents.dry_run=true` 才只建或预览。真实模型后端会把启动动作交给独立 `subagents-dispatch` 进程，避免一次性 CLI 退出后把子代理线程一起带死；离线 `echo` 后端仍可用进程内线程快速跑测试。两条入口创建后的登记和启动复用同一套 lifecycle：绑定会话、登记 run_id、启动 runner、回写树状态。区别只在身份边界：`schedule_child_subagents` 会从当前 runner 上下文自动绑定 `parent_id`，因此孙代理挂在当前子代理名下，而不是凭模型传一个父 id。运行中的 `dispatch_subagents` 同样默认只推进当前节点的直接孩子；即使模型显式传了别的 `parent_run_id`，runner 内也会压回当前 run，并在 `scope_warnings` 里说明，避免误催平行子代理。
 
 shell 权限按“不能比父级更大”派生：
 
@@ -101,7 +103,11 @@ owner 归属现在也会随子代理落账：
 - 同一保存流程还会把子代理对应的 task/run/agent 三层引用写进 owner 的
   `global_index/active_tasks.jsonl`、`active_runs.jsonl` 和 `active_agents.jsonl`。
   这只是轻量地图，方便 doctor、tree 和恢复入口找到最新 task/run/agent；真实状态仍以任务工作区和 run 账本为准。
-- 旧 `subagent_workspace` 仍是运行兼容入口，避免破坏现有 runner；owner projection 是同一份任务事实的索引，不是第二套任务账本。
+- 默认 `subagent_workspace` 会在 SimpleAgent 启动时解析成
+  `owner_home/workspace/runtime/workspaces/<workspace-scope>/subagents/`；
+  保存型主任务创建的子代理详细状态仍会同步到当前任务的 `work/agents/<run_id>/`。
+  只有用户/测试显式配置了非默认 `subagent_workspace`，或关闭 owner-home runtime，才走兼容路径。
+  owner projection 是同一份任务事实的索引，不是第二套任务账本。
 
 ## 记忆和压缩
 
@@ -146,3 +152,8 @@ capability contract 文本片段辅助文件已删除。当前结构保持一套
 
 这套结构只负责“下一轮让模型看见补充提示”。真正推进仍靠 `create_subagents`、
 `schedule_child_subagents`、`dispatch_subagents` 和任务树状态；真正验收仍靠普通 closeout。
+
+子代理状态机只做生命周期形状校验，例如 `PLANNING -> RUNNING -> DONE/FAILED/BLOCKED`。
+它不再保留一组空的“未来 guard”参数，也不在 `RUNNING -> DONE`
+里偷偷加产物门。产物质量、缺文件、坏文件、证据不足这类判断统一走普通
+closeout/交付检查，避免主代理、子代理、孙代理各有一套验收规则。

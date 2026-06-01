@@ -6,12 +6,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ...settings import AgentConfig
+from ...settings.defaults import default_config_bool
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
-_DEFAULT_NOTIFICATION_ENABLED = AgentConfig().notification_enabled
+_DEFAULT_NOTIFICATION_ENABLED = default_config_bool("notification_enabled")
 
 
 # LLM: notify_completed_tasks 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

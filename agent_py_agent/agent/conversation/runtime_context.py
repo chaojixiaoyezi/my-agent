@@ -7,24 +7,16 @@ from typing import Any
 
 from ..agent_core.agent_tree_status import agent_tree_status_payload
 from ..artifacts.registry import latest_artifact_records
+from ..settings.defaults import default_config_value
 from .context_budget import (
     BackgroundContextPayloadRequest,
     background_context_budget_from_config,
     bounded_background_context_payload,
 )
 from .models import ConversationThread
+from .runtime_tool_policy import background_allowed_tools, background_control_action_lines
 from .runtime_utils import json_block, pending_wake_payload
 from .store import ConversationStore
-
-CONTROL_ACTION_LINES = [
-    "- inspect_agent_tree: 只读查看主/子/孙代理状态树。",
-    "- raise_event: 记录普通进展、阻塞或需要主代理处理的事件。",
-    "- raise_collaboration: 发起协作；没有 case_id 时开 case，有 question/target 时同步发 request。",
-    "- inspect_collaboration: 只读查看协作 case 或待处理协作请求。",
-    "- submit_collaboration_result: 提交协作命中、未命中、证据引用和限制说明。",
-    "- update_collaboration: 更新协作 case 或 request；带 target_agent_ids 可改派请求。",
-    "- dispatch_subagents: 只有需要推进、恢复或调度时才调用。",
-]
 
 
 def context_markdown(*, agent: object, store: ConversationStore, thread: ConversationThread, request) -> str:
@@ -43,14 +35,22 @@ def context_markdown(*, agent: object, store: ConversationStore, thread: Convers
     lines = _context_header(request, thread)
     for title, payload in sections:
         lines.extend(["", f"## {title}", json_block(payload)])
-    lines.extend(["", "## Available Control Actions", *CONTROL_ACTION_LINES, "[/background-main-agent-context]"])
+    lines.extend([
+        "",
+        "## Available Control Actions",
+        *background_control_action_lines(getattr(agent, "config", None)),
+        "[/background-main-agent-context]",
+    ])
     return "\n".join(lines)
 
 
 def _bounded_context(agent: object, store: ConversationStore, thread_id: str) -> dict[str, Any]:
     config = getattr(agent, "config", None)
     visible_run_ids = _thread_active_task_ids(store, thread_id)
-    agent_tree = agent_tree_status_payload(agent, {"visible_run_ids": visible_run_ids})
+    agent_tree = agent_tree_status_payload(
+        agent,
+        {"visible_run_ids": visible_run_ids, "allowed_tools": background_allowed_tools(config)},
+    )
     return bounded_background_context_payload(
         BackgroundContextPayloadRequest(
             bundle=store.context_bundle(thread_id, recent_limit=_config_int(config, "conversation_context_recent_limit")),
@@ -70,15 +70,11 @@ def _bounded_context(agent: object, store: ConversationStore, thread_id: str) ->
 # 函数用途: 读取长期会话 prompt 预算；非法值只回退到配置 schema 默认。
 def _config_int(config: object | None, key: str) -> int:
     if config is None:
-        from ..settings.config import AgentConfig
-
-        config = AgentConfig()
+        return max(0, int(default_config_value(key)))
     try:
         return max(0, int(getattr(config, key)))
     except (TypeError, ValueError):
-        from ..settings.config import AgentConfig
-
-        return max(0, int(getattr(AgentConfig(), key)))
+        return max(0, int(default_config_value(key)))
 
 
 def _context_header(request, thread: ConversationThread) -> list[str]:

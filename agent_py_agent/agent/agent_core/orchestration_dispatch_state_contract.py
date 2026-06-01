@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from ..contracts.error_taxonomy import error_contract
 from ..contracts.state_machine import run_state_snapshot_from_task
+from ..runtime_errors import runtime_error_report
 from .orchestration_run_scope import remembered_orchestration_run_ids
 
 _RUNNING_STATUSES = {"RUNNING"}
@@ -14,35 +15,41 @@ _BLOCKED_STATUSES = {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}
 # LLM: dispatch_state_contract_payload is refs-first status guidance for top-level dispatch.
 # 函数用途: 返回本轮已创建/调度 run 的状态桶、下一步建议和可复制工具调用；不读取产物正文。
 def dispatch_state_contract_payload(agent: object) -> dict[str, object]:
-    tasks, missing = _remembered_tasks(agent)
-    if not tasks and not missing:
+    tasks, missing, load_errors = _remembered_tasks(agent)
+    if not tasks and not missing and not load_errors:
         return {}
-    state = _state_payload(tasks, missing)
+    state = _state_payload(tasks, missing, load_errors)
     _attach_state_next_action(state)
     return {"current_turn_run_state": state}
 
 
 # LLM: _remembered_tasks loads only explicit current-turn ids, never scans old workspaces broadly.
 # 函数用途: 根据 memory 中的当前轮 run ids 读取任务状态；缺失 id 进入 missing_run_ids。
-def _remembered_tasks(agent: object) -> tuple[list[object], list[str]]:
+def _remembered_tasks(agent: object) -> tuple[list[object], list[str], list[dict[str, object]]]:
     load = getattr(getattr(agent, "subagents", None), "load", None)
     if not callable(load):
-        return [], []
+        return [], [], []
     tasks: list[object] = []
     missing: list[str] = []
+    load_errors: list[dict[str, object]] = []
     for run_id in sorted(remembered_orchestration_run_ids(agent)):
         try:
             task = load(run_id)
-        except Exception:
+        except Exception as exc:
             missing.append(run_id)
+            load_errors.append({"run_id": run_id, **runtime_error_report(exc, context="subagents.load")})
             continue
         tasks.append(task)
-    return tasks, missing
+    return tasks, missing, load_errors
 
 
 # LLM: _state_payload folds task lifecycle fields into stable buckets.
 # 函数用途: 生成 status 计数和 dispatchable/running/blocked/verified 等 run_id 列表。
-def _state_payload(tasks: list[object], missing_run_ids: list[str]) -> dict[str, object]:
+def _state_payload(
+    tasks: list[object],
+    missing_run_ids: list[str],
+    load_errors: list[dict[str, object]],
+) -> dict[str, object]:
     buckets = _empty_state_buckets()
     for task in tasks:
         _append_task_state(buckets, task)
@@ -56,6 +63,7 @@ def _state_payload(tasks: list[object], missing_run_ids: list[str]) -> dict[str,
         "verified_run_ids": _clean_ids(buckets["verified"]),
         "unfinished_run_ids": _clean_ids(buckets["unfinished"]),
         "missing_run_ids": _clean_ids(missing_run_ids),
+        "task_load_errors": load_errors,
         "recovery_recommendations": buckets["recovery_recommendations"],
     }
 
@@ -127,6 +135,7 @@ def _attach_state_next_action(state: dict[str, object]) -> None:
     dispatchable = list(state.get("dispatchable_run_ids") or [])
     running = list(state.get("running_run_ids") or [])
     missing = list(state.get("missing_run_ids") or [])
+    load_errors = list(state.get("task_load_errors") or [])
     if blocked:
         state["next_action"] = "inspect_or_rescue_blocked_run_ids"
         state["suggested_tool_call"] = _dispatch_tool_call(blocked, execute_runners=False)
@@ -137,6 +146,10 @@ def _attach_state_next_action(state: dict[str, object]) -> None:
         return
     if running:
         state["next_action"] = "wait_or_inspect_agent_tree"
+        state["suggested_tool_call"] = {"tool": "inspect_agent_tree"}
+        return
+    if load_errors:
+        state["next_action"] = "refresh_agent_tree_or_rebuild_state_index"
         state["suggested_tool_call"] = {"tool": "inspect_agent_tree"}
         return
     if missing:

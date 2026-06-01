@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..defaults import default_agent_config
+
 
 # LLM: SubagentWorkflowWarningParams 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: SubagentWorkflowWarningParams 参数包，把相关输入集中传给 配置系统 的服务函数。
@@ -51,9 +53,8 @@ class SubagentWorkflowConfigService:
     @staticmethod
     def normalize(config: object) -> list[dict[str, object]]:
         """Validate and coerce subagent workflow config fields on an AgentConfig instance."""
-        from ..config import AgentConfig
         warnings: list[dict[str, object]] = []
-        defaults = AgentConfig()
+        defaults = default_agent_config()
 
         SubagentWorkflowConfigService._normalize_mode(config, defaults, warnings)
         SubagentWorkflowConfigService._normalize_builtin(config, defaults, warnings)

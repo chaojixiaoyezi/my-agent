@@ -101,5 +101,61 @@ def test_simple_agent_uses_configured_provider_owner_home(tmp_path: Path):
     provider_daily = list((home / "owners" / "providers" / "feishu" / "users" / "ou_123" / "memory" / "daily").glob("*.jsonl"))
     local_daily = list((home / "owners" / "local" / "main" / "memory" / "daily").glob("*.jsonl"))
     assert agent.home_paths.owner_home_dir == home / "owners" / "providers" / "feishu" / "users" / "ou_123"
+    runtime_root = agent.home_paths.owner_home_dir / "workspace" / "runtime" / "workspaces"
+    assert agent.local_store.db_path.is_relative_to(runtime_root)
+    assert agent.local_store.db_path.name == "local.db"
+    assert agent.subagents.workspace.is_relative_to(runtime_root)
+    assert agent.subagents.workspace.name == "subagents"
+    assert agent.conversation_store.root.is_relative_to(runtime_root)
+    assert agent.conversation_store.root.name == "conversations"
+    assert agent.collaboration_store.root.is_relative_to(runtime_root)
+    assert agent.collaboration_store.root.name == "collaboration"
     assert provider_daily
     assert not local_daily
+
+
+def test_simple_agent_active_runtime_paths_use_owner_home_for_fresh_install(tmp_path: Path):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+
+    agent = SimpleAgent(AgentConfig(my_agent_home=str(home), prompt_files=[]), repo)
+
+    owner_home = home / "owners" / "local" / "main"
+    runtime_root = owner_home / "workspace" / "runtime" / "workspaces"
+    assert agent.local_store.db_path.is_relative_to(runtime_root)
+    assert agent.local_store.db_path.name == "local.db"
+    assert agent.local_store.files_dir == agent.local_store.db_path.parent / "files"
+    assert agent.local_store.events_path == agent.local_store.db_path.parent / "events.jsonl"
+    assert agent.subagents.workspace.is_relative_to(runtime_root)
+    assert agent.subagents.workspace.name == "subagents"
+    assert agent.conversation_store.root.is_relative_to(runtime_root)
+    assert agent.conversation_store.root.name == "conversations"
+    assert agent.collaboration_store.root.is_relative_to(runtime_root)
+    assert agent.collaboration_store.root.name == "collaboration"
+    assert str(agent.memory.path).startswith(str(owner_home / "memory" / "long_term"))
+    assert not (repo / "data").exists()
+
+
+def test_simple_agent_reports_legacy_runtime_when_home_runtime_disabled(tmp_path: Path, caplog):
+    import logging
+
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    caplog.set_level(logging.WARNING)
+
+    agent = SimpleAgent(
+        AgentConfig(my_agent_home=str(home), home_runtime_bootstrap_enabled=False, prompt_files=[]),
+        workspace,
+    )
+
+    assert agent.using_legacy_paths is True
+    assert agent.runtime_path_resolution.using_legacy_paths is True
+    assert agent.runtime_path_resolution.reason == "home_runtime_disabled"
+    assert agent.local_store.db_path == workspace / "data" / "local_store" / "local.db"
+    assert "legacy runtime paths" in caplog.text

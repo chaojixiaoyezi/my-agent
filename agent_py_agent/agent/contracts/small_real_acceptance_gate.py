@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..settings.defaults import default_agent_config
 from .offline_contract_report import (
     OfflineContractValidation,
     dict_items,
@@ -78,9 +79,7 @@ def _validate_case(
 # 函数用途: 读取小型真实验收声明运行时长上限；0 表示关闭这个上限 finding。
 def _max_runtime_seconds(config: object | None) -> int:
     if config is None:
-        from ..settings.config import AgentConfig
-
-        config = AgentConfig()
+        config = default_agent_config()
     try:
         return max(0, int(config.small_real_acceptance_max_runtime_seconds))
     except (TypeError, ValueError):

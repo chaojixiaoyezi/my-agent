@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ..settings.defaults import default_agent_config
 from .json_repair import load_tool_block_json
 
 
@@ -24,9 +25,7 @@ class ToolPayloadNormalizeLimits:
 # 函数用途: 从配置对象读取工具调用 payload 解析预算；缺失时使用 AgentConfig schema 默认。
 def tool_payload_limits_from_config(config: object | None) -> ToolPayloadNormalizeLimits:
     if config is None:
-        from ..settings.config import AgentConfig
-
-        config = AgentConfig()
+        config = default_agent_config()
     defaults = _default_tool_payload_limits()
     return ToolPayloadNormalizeLimits(
         max_fields=_config_int(config, "tool_payload_max_fields", defaults.max_fields),
@@ -47,9 +46,7 @@ def tool_payload_limits_from_config(config: object | None) -> ToolPayloadNormali
 # LLM: _default_tool_payload_limits reads schema defaults for payload parsing.
 # 函数用途: 构造默认工具调用 payload 预算，不在解析器里写第二套数字。
 def _default_tool_payload_limits() -> ToolPayloadNormalizeLimits:
-    from ..settings.config import AgentConfig
-
-    defaults = AgentConfig()
+    defaults = default_agent_config()
     return ToolPayloadNormalizeLimits(
         max_fields=defaults.tool_payload_max_fields,
         max_field_name_chars=defaults.tool_payload_max_field_name_chars,

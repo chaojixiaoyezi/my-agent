@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ..log_analysis.capabilities import SECURITY_TOOL_NAMES
+from ..settings.defaults import default_config_int
 from .artifact import ReadArtifactTool
 from .content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
@@ -46,9 +47,7 @@ _DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec"})
 # LLM: _agent_config_int resolves ToolRegistry default budgets from AgentConfig.
 # 函数用途: 读取 artifact 读取预算等工具注册表默认值，避免注册层保留隐藏数字。
 def _agent_config_int(key: str) -> int:
-    from ..settings.config import AgentConfig
-
-    return int(getattr(AgentConfig(), key))
+    return default_config_int(key)
 
 
 # LLM: ToolRegistryParams 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。

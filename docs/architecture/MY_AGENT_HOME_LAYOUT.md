@@ -17,8 +17,10 @@ updated_at: 2026-06-01
 - 保存型主代理 run 在第一轮模型调用前就会创建 task workspace，并把当前 `output/` / `work/` 作为软运行状态注入 prompt；`output/` 只放最终交付物，`work/` 放任务状态、日志、任务级 compact、协作、草稿和下级代理账本。主代理自己的 memory/compact/logs 仍归当前 owner，不进入 `work/agents`。
 - daily memory 增加了独立的每日工作记忆事件 API，raw archive 仍保留黑盒流水。
 - owner resolver 已有第一片：local/main、provider user、provider group 都能解析到 V2 owner home。
+- 旧 `data/users` 路径推导已收敛到 `legacy_user_paths.py`，只服务迁移和关闭 owner-home runtime 后的兼容模式；正常运行入口不再暴露 `user_space.paths` 这种容易误解成新模型的名字。
 - prompt 家目录上下文优先读取 owner_home 下的 AGENTS/SOUL/USER/memory，旧顶层文件只做兼容。
 - SimpleAgent 的 daily memory mirror 默认写入 owner memory/daily。
+- fresh install 下，SimpleAgent 的活跃运行事实源默认使用当前 owner home。任务交付和过程文件进入 `owner_home/tasks/<date>/<task-slug>/{output,work}/`；workspace 级运行账本按当前 checkout 分区到 `owner_home/workspace/runtime/workspaces/<workspace-scope>/`，例如 LocalStore、gateway、conversation、collaboration、adapter 和默认 subagent locator。SimpleAgent 启动后会把这些解析后的 owner-home 路径回写到 `AgentConfig`，让旧 session/gateway/notification 入口也读取同一套事实源，而不是继续使用 `data/*` 默认值。`owner_home/agents/<run_id>/` 只保存 refs-only projection，方便 tree/compact/跨 session 查找，不作为全局活跃工单池。repo 内默认 `data/*` 不再是活跃事实源，只作为关闭 home runtime 或历史迁移时的兼容入口；如果用户/测试显式配置成非默认运行路径，则按显式配置落盘。运行时如果回退到旧路径，`SimpleAgent.using_legacy_paths` 和 `runtime_path_resolution.reason` 必须可见，并写 warning。
 - live raw archive、runtime_fact、收尾归档和 token ledger 已优先写入当前 owner home。
 - memory-doctor / home-status 会报告 V2 owner、shared、identity、system、schema、legacy 迁移提示、悬空 index 和 retention 候选。
 - home-status 会直接显示当前 owner identity；memory-resume / memory-archive-list / memory-archive-search 会按当前 owner home 查 archive，provider user/group 不读 local/main 归档。
@@ -42,6 +44,7 @@ updated_at: 2026-06-01
 - owner 私有 skill candidate 已有草稿账本，只记录候选，不自动安装、不自动提升。
 - HOT/路由/lessons 已有第二片：`ensure_my_agent_home()` 会创建 `memory-hot.md`、`memory/routing/INDEX.md` 和 `memory/lessons/*.md`；普通主代理 prompt 会读取 `memory-hot.md`，task-local/control-plane 隔离；`home_memory_notes.py` 提供 HOT 去重追加和 lesson + route index 同步写入；`memory-doctor`、`memory-route`、运行时路由和 auto resume 在项目没有显式 route index 或旧 workspace archive 时，会回退读取当前 home 的索引/owner archive。
 - owner 隔离已接到记忆和任务读取面：local/main 继续兼容旧顶层 memory/tasks，provider user/group 默认只读写自己的 owner home；保存型 provider run 只登记 owner_home/tasks，HOT、lesson 和 route index 也优先落当前 owner。
+- 配置默认值入口已收敛：只有 `agent/settings/defaults.py` 构造 schema 默认 `AgentConfig()`；其它运行模块必须优先使用加载后的 `agent.config`，兼容兜底只能通过 defaults helper 取默认值。
 
 未完全接入：
 - provider 身份合并的冲突仲裁、能力提升审核仍是后续迁移阶段。

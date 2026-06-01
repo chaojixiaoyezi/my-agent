@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .model_visible_refs import is_legacy_subagent_path
+
 _HIDDEN_LEGACY_SUBAGENT_REF = "[internal_legacy_subagent_path_hidden]"
 _INTERNAL_MODEL_VISIBLE_TOOLS = frozenset(
     {
@@ -75,13 +77,6 @@ def sanitize_model_visible_tool_output(tool: str, output: str) -> str:
 # 函数用途: 判断一个工具是否属于内部编排/状态展示面；这个列表不是业务文件类型白名单。
 def is_model_visible_internal_tool(tool: str) -> bool:
     return str(tool or "").strip() in _INTERNAL_MODEL_VISIBLE_TOOLS
-
-
-# LLM: is_legacy_subagent_path recognizes old work-order refs without blocking current home paths.
-# 函数用途: 判断字符串是否指向旧式 data/subagents 运行目录；普通业务文本和新 ~/.my-agent 路径不受影响。
-def is_legacy_subagent_path(value: str) -> bool:
-    text = str(value or "").replace("\\", "/")
-    return "/data/subagents/" in text or text.startswith("data/subagents/")
 
 
 __all__ = [

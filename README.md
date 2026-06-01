@@ -268,6 +268,22 @@ my-agent gateway stop --kill
 
 ### 本地记忆和事实源
 
+fresh install 下，长期记忆和本地事实源默认属于当前 owner：
+
+```text
+~/.my-agent/owners/local/main/memory/long_term/memory.jsonl
+~/.my-agent/owners/local/main/workspace/runtime/workspaces/<workspace-scope>/local_store/
+~/.my-agent/owners/local/main/tasks/<yyyy-mm-dd>/<task-slug>/{output,work}/
+```
+
+repo 内 `data/*` 只作为历史迁移、测试 fixture 或关闭 home runtime 时的兼容入口。
+如果配置里显式把 `local_store_path`、`subagent_workspace`、`gateway_workspace`
+等改成非默认路径，这些显式路径仍会生效；默认 `data/*` 不再代表新安装的活跃事实源。
+SimpleAgent 启动后会把解析好的 owner-home 路径回写到 `AgentConfig`，让还没完成重构的
+gateway/session/notification 等旧入口也读取同一套路径。
+如果运行时因为 `home_runtime_bootstrap_enabled=false` 或 owner home 缺失回退到旧路径，
+`SimpleAgent.using_legacy_paths` 会变成 `true`，并写出 warning，排查时不再静默混用两套账本。
+
 ```bash
 my-agent memory-list --limit 20
 # 查看最近 20 条长期记忆；不调用模型。
@@ -441,7 +457,7 @@ agent_py_agent/config/agent_config.yaml
 它负责：
 
 - 模型后端、API 地址、模型名、key 环境变量名。
-- 记忆路径和本地事实源路径。
+- owner home、记忆路径和本地事实源路径。
 - memory raw/hook 归档、长期规则路由和可选恢复上下文注入开关。
 - gateway 工作区和请求超时。
 - daemon / runner / 调度策略。

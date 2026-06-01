@@ -7,6 +7,7 @@ import threading
 from typing import TYPE_CHECKING
 
 from ..agent_core.agent_tree_status import agent_tree_status_payload
+from ..settings.defaults import default_config_int
 from .models import BackgroundMainAgentReport, ObservationEvent, ProgressPolicy, WakeSignal
 from .runtime_utils import (
     claim_heartbeat_interval_seconds as compute_claim_heartbeat_interval_seconds,
@@ -180,15 +181,11 @@ class BackgroundMainAgentScheduler:
 # 函数用途: 读取后台 claim 和会话扫描预算；非法值回退到 AgentConfig 默认值。
 def _agent_config_int(config: object | None, key: str) -> int:
     if config is None:
-        from ..settings.config import AgentConfig
-
-        config = AgentConfig()
+        return default_config_int(key, minimum=0)
     try:
         return max(0, int(getattr(config, key)))
     except (TypeError, ValueError):
-        from ..settings.config import AgentConfig
-
-        return max(0, int(getattr(AgentConfig(), key)))
+        return default_config_int(key, minimum=0)
 
 
 class _BackgroundClaimHeartbeat(threading.Thread):

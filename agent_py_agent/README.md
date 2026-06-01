@@ -84,7 +84,7 @@ python3 -m agent_py_agent scenario-test
 这条命令会创建临时 fixture 项目，把 `workspace_root` 指过去，然后走：
 
 ```text
-gateway ask -> 主代理 create_subagents -> dispatch runner -> tree/refs -> 主代理收口
+gateway ask -> 主代理 create_subagents 创建并后台启动 -> tree/refs -> 按需 dispatch 恢复/重跑 -> 主代理收口
 ```
 
 所有 memory、subagent、gateway 和文件工具写入都在临时目录里，不会碰当前开发仓库。
@@ -168,16 +168,16 @@ python3 -m agent_py_agent memory-search "表格" --limit 5
 记忆默认保存在：
 
 ```text
-agent_py_agent/data/memory.jsonl
+~/.my-agent/owners/local/main/memory/long_term/memory.jsonl
 ```
 
 本地事实源默认保存在：
 
 ```text
-agent_py_agent/data/local_store/
+~/.my-agent/owners/local/main/data/workspaces/<workspace-scope>/local_store/
 ```
 
-它包含 SQLite 数据库、正文文件目录和追加式审计 JSONL。新记忆会继续写 `memory.jsonl`，同时索引到本地事实源。旧记忆可以补建：
+它包含 SQLite 数据库、正文文件目录和追加式审计 JSONL。fresh install 下，新记忆、会话、协作和子代理账本都优先写当前 owner home；repo 内 `data/*` 只作为历史迁移或关闭 home runtime 时的兼容入口。配置里显式改成非默认运行路径时会按配置落盘；默认 `data/*` 不再作为新安装的活跃事实源。运行时如果确实回退到旧路径，会暴露 `using_legacy_paths=true` 并写 warning，避免排查时误以为仍在 owner home。旧记忆可以补建：
 
 ```bash
 python3 -m agent_py_agent local-store-status

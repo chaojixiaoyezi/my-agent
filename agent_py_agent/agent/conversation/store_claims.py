@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..gateway_parts.io import read_json_file, update_json_file_atomic
+from ..settings.defaults import default_config_value
 from .models import new_id
 from .store_common import float_value
 from .store_common import now as current_time
@@ -128,15 +129,11 @@ def _new_claim(payload: BackgroundClaimPayload) -> dict[str, Any]:
 # 函数用途: 解析一次后台 claim 的租约秒数；缺失或非法时使用配置 schema 默认。
 def _claim_lease_seconds(value: object) -> int:
     if value is None or value == "":
-        from ..settings.config import AgentConfig
-
-        value = AgentConfig().background_claim_ttl_seconds
+        value = default_config_value("background_claim_ttl_seconds")
     try:
         return max(1, int(value))
     except (TypeError, ValueError):
-        from ..settings.config import AgentConfig
-
-        return max(1, int(AgentConfig().background_claim_ttl_seconds))
+        return max(1, int(default_config_value("background_claim_ttl_seconds")))
 
 
 def _finish_status(value: object) -> str:

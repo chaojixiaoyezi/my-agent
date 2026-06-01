@@ -69,6 +69,7 @@ class ToolFieldsService:
         warnings.extend(_normalize_path_access_fields(out, defaults))
         warnings.extend(_normalize_command_access_mode(out, defaults))
         warnings.extend(_normalize_dispatch_watch_interval(out, defaults))
+        warnings.extend(_normalize_background_tool_fields(out, defaults))
         return out, warnings
 
 
@@ -104,6 +105,13 @@ def _normalize_tool_catalog_fields(out: dict[str, object], defaults: object) -> 
         out.get("tool_catalog_categories", defaults.tool_catalog_categories)
     )
     return warnings
+
+
+def _normalize_background_tool_fields(out: dict[str, object], defaults: object) -> list[str]:
+    out["background_main_agent_allowed_tools"] = _normalize_string_list(
+        out.get("background_main_agent_allowed_tools", defaults.background_main_agent_allowed_tools)
+    )
+    return []
 
 
 # LLM: path_access_mode is shared by main agents, subagents, and filesystem/shell tools.

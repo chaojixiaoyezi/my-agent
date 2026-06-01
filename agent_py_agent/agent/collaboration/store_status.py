@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .coverage import case_response_coverage
 from .request_status import (
     case_overview_row,
     case_status_text,
@@ -100,6 +101,11 @@ def _request_groups(snapshot: _CaseSnapshot) -> dict[str, list[Any]]:
 
 def _status_payload(snapshot: _CaseSnapshot, groups: dict[str, list[Any]], rework: dict[str, Any]) -> dict[str, Any]:
     ready = bool(groups["blocked"] or groups["timed_out"] or (not groups["pending"] and (groups["completed"] or snapshot.evidence)))
+    coverage = case_response_coverage(
+        snapshot.requests,
+        snapshot.evidence_sources_by_request,
+        target_aliases=snapshot.aliases,
+    )
     return {
         "case": snapshot.case.to_dict(),
         "request_count": len(snapshot.requests),
@@ -116,6 +122,7 @@ def _status_payload(snapshot: _CaseSnapshot, groups: dict[str, list[Any]], rewor
         "timed_out_request_ids": [item.request_id for item in groups["timed_out"] if item.request_id],
         "missing_responder_agent_ids_by_request": missing_responder_agent_ids_by_request(snapshot.requests, snapshot.evidence_sources_by_request, target_aliases=snapshot.aliases),
         "unavailable_target_agent_ids_by_request": unavailable_target_agent_ids_by_request(snapshot.requests),
+        "response_coverage": coverage,
         "ready_for_main_agent": ready,
         "requires_main_agent": ready,
         "rework": rework,

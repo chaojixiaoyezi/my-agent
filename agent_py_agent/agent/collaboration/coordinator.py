@@ -225,6 +225,7 @@ def _case_close_metadata(request: _CloseMetadataRequest) -> dict:
     return {
         "case_id": request.case_id,
         "evidence_ids": list(request.evidence_ids),
+        "response_coverage": request.status.get("response_coverage") or {},
         "missing_responder_agent_ids_by_request": request.missing,
         "unavailable_target_agent_ids_by_request": request.unavailable,
         "case_window_status": "close",
@@ -235,6 +236,7 @@ def _case_close_metadata(request: _CloseMetadataRequest) -> dict:
 def _wake_metadata(case_id: str, status: dict, missing: dict, unavailable: dict) -> dict:
     return {
         "case_id": case_id,
+        "response_coverage": status.get("response_coverage") or {},
         "missing_responder_agent_ids_by_request": missing,
         "unavailable_target_agent_ids_by_request": unavailable,
         **_status_counts(status),

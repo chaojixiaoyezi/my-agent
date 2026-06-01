@@ -118,6 +118,22 @@ def test_related_task_result_refs_prefers_registry_over_stale_task_ref(tmp_path)
     assert refs[0]["primary_artifact_registry_refs"] == [registry_record]
 
 
+def test_related_task_result_refs_reports_load_failure():
+    def _broken_load(run_id: str):
+        raise ValueError(f"{run_id} state json broken")
+
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=_broken_load))
+    dispatch_report = SimpleNamespace(records=[SimpleNamespace(run_id="child-1", runner_created_child_ids=[])])
+
+    refs = related_task_result_refs(agent, dispatch_report, per_run_artifact_limit=2)
+
+    assert refs[0]["run_id"] == "child-1"
+    assert refs[0]["status"] == "LOAD_FAILED"
+    assert refs[0]["primary_artifact_refs"] == []
+    assert refs[0]["load_error"]["category"] == "data_parse"
+    assert "不是子代理无产物" in refs[0]["summary"]
+
+
 # LLM: Flat deliverable refs should also follow the registry when it exists.
 # 函数用途: dispatch 顶层 deliverable_artifact_refs 不能再把模型写过的旧路径当最终事实。
 def test_related_task_refs_prefers_registry_for_artifact_refs(tmp_path):

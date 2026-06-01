@@ -9,11 +9,41 @@ from pathlib import Path
 from typing import Any
 
 
+# LLM: DispatchExecutionPlan is the canonical internal meaning of dry-run/execute mode.
+# 类用途: 把预览、写状态、启动 runner 和 runner 上限收成一个执行计划，避免 apply/execute_runners/max_runners 散字段各处猜语义。
+@dataclass(frozen=True)
+class DispatchExecutionPlan:
+    """Execution intent for one dispatch call."""
+
+    preview_only: bool = True
+    mutate_state: bool = False
+    start_runners: bool = False
+    max_runners: int = 1
+
+    # LLM: from_internal_flags is the only compatibility adapter from legacy dispatch booleans.
+    # 函数用途: 将 apply/execute_runners/max_runners 投影为统一执行计划，供旧 CLI 和新工具边界共用。
+    @classmethod
+    def from_internal_flags(
+        cls,
+        *,
+        apply: bool,
+        execute_runners: bool,
+        max_runners: int,
+    ) -> DispatchExecutionPlan:
+        mutate_state = bool(apply)
+        start_runners = bool(execute_runners and mutate_state)
+        return cls(
+            preview_only=not mutate_state,
+            mutate_state=mutate_state,
+            start_runners=start_runners,
+            max_runners=max(0, int(max_runners or 0)),
+        )
+
+
 # LLM: DispatchParams is the single internal dispatch request object.
 # 类用途: 保存一次调度推进所需的执行开关、作用域、runner 数量和补充指令；模型散字段只在工具边界转成这个对象。
 @dataclass
 class DispatchParams:
-
     apply: bool = False
     execute_runners: bool = False
     planner: bool = False
@@ -32,6 +62,21 @@ class DispatchParams:
     include_run_ids: list[str] | None = None
     exclude_run_ids: list[str] | None = None
     background_launch_id: str = ""
+    execution_plan: DispatchExecutionPlan | None = None
+
+    # LLM: DispatchParams.__post_init__ keeps legacy flags synchronized with the canonical execution plan.
+    # 函数用途: 兼容旧 apply/execute_runners 调用，同时给新代码一个稳定 execution_plan 读取入口。
+    def __post_init__(self) -> None:
+        if self.execution_plan is None:
+            self.execution_plan = DispatchExecutionPlan.from_internal_flags(
+                apply=self.apply,
+                execute_runners=self.execute_runners,
+                max_runners=self.max_runners,
+            )
+            return
+        self.apply = bool(self.execution_plan.mutate_state)
+        self.execute_runners = bool(self.execution_plan.start_runners)
+        self.max_runners = int(self.execution_plan.max_runners)
 
 
 # LLM: WatchParams extends DispatchParams instead of duplicating dispatch fields.
@@ -60,7 +105,10 @@ def merge_dispatch_params(
         params = DispatchParams()
     elif not isinstance(params, DispatchParams):
         raise TypeError("dispatch_subagents() requires params: DispatchParams keyword argument")
-    return _replace_bundle(params, DISPATCH_PARAM_KEYS, overrides or {})
+    updates = dict(overrides or {})
+    if {"apply", "execute_runners", "max_runners"} & set(updates) and "execution_plan" not in updates:
+        updates["execution_plan"] = None
+    return _replace_bundle(params, DISPATCH_PARAM_KEYS, updates)
 
 
 # LLM: merge_watch_params mirrors merge_dispatch_params for watch-only fields.
@@ -117,6 +165,7 @@ class DispatchContext:
     exclude_run_ids: list[str] | None = None
     background_launch_id: str = ""
     records: list = field(default_factory=list)
+    execution_plan: DispatchExecutionPlan = field(default_factory=DispatchExecutionPlan)
 
 
 # LLM: RunnerBatchContext carries runner execution controls after candidate selection.
@@ -133,3 +182,4 @@ class RunnerBatchContext:
     max_cards: int
     probe: bool
     records: list
+    execution_plan: DispatchExecutionPlan = field(default_factory=DispatchExecutionPlan)

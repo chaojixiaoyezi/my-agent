@@ -54,6 +54,35 @@ def test_gate_decision_serializes_recovery_envelope_with_chinese_message():
     assert "请" in recovery["message_zh"]
 
 
+def test_gate_decision_exposes_action_and_operator_semantics():
+    warning = GateDecision(
+        "tool_guardrail",
+        "ALLOW",
+        True,
+        (GateFinding("TOOL_GUARDRAIL_REPEAT_FAILURE_HINT", "P1", "换个查询方式", {"path": "logs/a.json"}),),
+        "change_strategy",
+        {"artifact_refs": ["reports/a.md"], "nested": {"path": "logs/a.json"}},
+    )
+    terminal = GateDecision(
+        "tool_guardrail",
+        "DENY",
+        False,
+        (GateFinding("TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED"),),
+        "terminal_block",
+        {},
+    )
+
+    payload = warning.to_dict()
+
+    assert payload["allow_action"] is True
+    assert payload["block_task"] is False
+    assert payload["severity"] == "engineering"
+    assert payload["model_message"] == "换个查询方式"
+    assert payload["operator_message"] == "tool_guardrail:ALLOW:TOOL_GUARDRAIL_REPEAT_FAILURE_HINT"
+    assert payload["evidence_refs"] == ["reports/a.md", "logs/a.json"]
+    assert terminal.to_dict()["block_task"] is True
+
+
 def test_contract_recovery_exposes_rework_loop_for_repairable_gate_failure():
     from agent_py_agent.agent.agent_core.main_agent_delivery_closeout_gate_recovery import (
         attach_contract_recovery,

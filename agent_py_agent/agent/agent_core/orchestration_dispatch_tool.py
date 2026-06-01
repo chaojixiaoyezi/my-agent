@@ -10,10 +10,10 @@ from typing import TYPE_CHECKING
 from ..action_protocol import subagent_dispatch_envelope_from_payload
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
-from ..model_visible_ref_sanitizer import sanitize_model_visible_refs
+from ..model_visible_refs import current_model_ref
 from ..tools import BaseTool, ToolExecutionResult
 from .dispatch_no_progress import dispatch_no_progress_payload
-from .dispatch_params import DispatchParams
+from .dispatch_params import DispatchExecutionPlan, DispatchParams
 from .orchestration_dispatch_payload import (
     dispatch_record_payload,
     dispatch_recovery_payload,
@@ -120,9 +120,14 @@ class DispatchSubagentsTool(BaseTool):
         execute_runners = dispatch_execute_runners_default(self.agent, model_params, apply=apply)
         if execute_runners and not apply:
             raise ValueError("dispatch_subagents internal execution mode is inconsistent")
+        plan = DispatchExecutionPlan.from_internal_flags(
+            apply=apply,
+            execute_runners=execute_runners,
+            max_runners=dispatch_max_runners_default(self.agent, model_params, execute_runners=execute_runners),
+        )
         return DispatchToolRequest(
             model_params=model_params,
-            dispatch_params=self._dispatch_params(model_params, apply, execute_runners),
+            dispatch_params=self._dispatch_params(model_params, plan),
         )
 
     # LLM: _dispatch_params builds the one internal parameter object passed through dispatch layers.
@@ -130,15 +135,12 @@ class DispatchSubagentsTool(BaseTool):
     def _dispatch_params(
         self,
         params: dict[str, object],
-        apply: bool,
-        execute_runners: bool,
+        execution_plan: DispatchExecutionPlan,
     ) -> DispatchParams:
         return DispatchParams(
-            apply=apply,
-            execute_runners=execute_runners,
+            execution_plan=execution_plan,
             planner=_bool_param(params.get("planner"), default=False),
             workflow_mode=dispatch_workflow_mode(self.agent, params, tool_workflow_mode),
-            max_runners=dispatch_max_runners_default(self.agent, params, execute_runners=execute_runners),
             limit=_non_negative_int(params.get("limit"), default=20),
             reviewer=str(params.get("reviewer") or "chat-tool").strip(),
             note=str(params.get("note") or "triggered by dispatch_subagents tool").strip(),
@@ -190,11 +192,11 @@ class DispatchSubagentsTool(BaseTool):
             "child_result_index_hint": _child_result_index_hint(result_index),
             "result_refs_by_run": result_index,
             "records": record_payloads,
-            "dispatch_json": str(self.agent.subagents.workspace / "subagent_dispatch_report.json"),
-            "dispatch_md": str(self.agent.subagents.workspace / "SUBAGENT_DISPATCH.md"),
+            "dispatch_json": current_model_ref(self.agent.subagents.workspace / "subagent_dispatch_report.json"),
+            "dispatch_md": current_model_ref(self.agent.subagents.workspace / "SUBAGENT_DISPATCH.md"),
         })
         payload["typed_envelope"] = subagent_dispatch_envelope_from_payload(payload).to_dict()
-        return sanitize_model_visible_refs(payload)
+        return payload
 
 
 from .orchestration_dispatch_tool_helpers import (

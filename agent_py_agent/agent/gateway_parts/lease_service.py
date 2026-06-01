@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..settings.defaults import default_config_float
 from .audit_service import audit_heartbeat_abandoned
 from .io import read_json_file, write_json_file_atomic
 from .logging import _report_gateway_side_effect_error
@@ -94,8 +95,8 @@ def _lease_interval(agent: SimpleAgent) -> float:
     return max(0.2, gateway_interval)
 
 
-# LLM: _config_float keeps gateway lease-service timing aligned with AgentConfig.
-# 函数用途: 读取 gateway heartbeat/processing timeout 配置，避免 lease service 内另藏默认数字。
+# LLM: _config_float keeps gateway lease-service timing behind the shared settings/defaults boundary.
+# 函数用途: 读取 gateway heartbeat/processing timeout 配置，非法值只回退到配置 schema 默认入口，避免 lease service 内另藏默认数字。
 def _config_float(agent: SimpleAgent, key: str) -> float:
     try:
         value = float(getattr(agent.config, key))
@@ -103,9 +104,7 @@ def _config_float(agent: SimpleAgent, key: str) -> float:
             return value
     except (TypeError, ValueError):
         pass
-    from ..settings.config import AgentConfig
-
-    return float(getattr(AgentConfig(), key))
+    return default_config_float(key)
 
 
 # LLM: start_lease_heartbeat 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。

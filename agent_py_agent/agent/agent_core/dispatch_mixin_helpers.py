@@ -79,7 +79,7 @@ def run_dispatch_runner_stage(
     return request.agent._execute_runner_jobs(
         RunnerJobExecutionParams(
             ctx=request.ctx,
-            execute_runners=request.params.execute_runners,
+            execute_runners=request.params.execution_plan.start_runners,
             max_cards=request.params.max_cards,
             probe=request.params.probe,
             existing_records=request.records,

@@ -27,6 +27,11 @@ from ..models import (
     VerificationEvidence,
 )
 from ..utils import _apply_missing_paths, _read_json_object
+from .agent_run_state import (
+    build_agent_run_state,
+    canonical_state_path_from_payload,
+    write_agent_run_state,
+)
 from .checkpoint_artifacts import build_checkpoint_artifact_payloads
 from .control_plane_projection import sync_subagent_control_plane_projection
 from .failure_handoff import refresh_failure_handoff
@@ -75,7 +80,7 @@ class SubAgentPersistenceService:
         path = self.workspace / run_id / "task.json"
         if not path.exists():
             raise FileNotFoundError(f"子代理记录不存在: {run_id}")
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = _read_state_payload(path)
         data = {key: value for key, value in data.items() if key in _field_names(SubAgentTask)}
         data["capability_requests"] = [
             _normalize_nested_model(CapabilityRequest, item)
@@ -141,26 +146,7 @@ class SubAgentPersistenceService:
         if preserve_child_links:
             _merge_existing_child_links(self, task)
             _merge_existing_takeover_state(self, task)
-        task_dir = Path(task.task_dir)
-        task_dir.mkdir(parents=True, exist_ok=True)
-        self.manager._ensure_work_order_files(task)
-        task.updated_at = task.updated_at or time.time()
-        if task.checkpoint_json:
-            task.checkpoint_ref = task.checkpoint_json
-        _refresh_system_tree_snapshot(task)
-        task.latest_status_report = build_status_report(task)
-        refresh_failure_handoff(task)
-        output_payload = _read_json_object(Path(task.output_json)) if task.output_json else {}
-        checkpoint_artifacts = build_checkpoint_artifact_payloads(task, output_payload)
-        # LLM: 任务工作区是增量运行记忆适配层，旧路径暂时仍是权威来源。
-        sync_task_workspace_fields(self.workspace, task)
-        _sync_task_rollup_if_possible(task)
-        write_inheritance_manifest(task)
-        write_failure_handoff(task)
-        write_recovery_output_files(task, checkpoint_artifacts)
-        payload = json.dumps(asdict(task), ensure_ascii=False, indent=2)
-        (task_dir / "task.json").write_text(payload, encoding="utf-8")
-        (task_dir / "run.json").write_text(payload, encoding="utf-8")
+        task_dir, payload = _prepare_and_write_state(self, task)
         if task.status_report_json:
             Path(task.status_report_json).write_text(
                 json.dumps(asdict(task.latest_status_report), ensure_ascii=False, indent=2),
@@ -182,8 +168,63 @@ class SubAgentPersistenceService:
             )
 
 
+# LLM: _prepare_and_write_state is the only save path that writes canonical and legacy mirrors together.
+# 函数用途: 同步 task workspace、canonical_state.json、兼容 task.json/run.json 和恢复输出，避免多账本分叉。
+def _prepare_and_write_state(service: SubAgentPersistenceService, task: SubAgentTask) -> tuple[Path, str]:
+    task_dir = Path(task.task_dir)
+    task_dir.mkdir(parents=True, exist_ok=True)
+    service.manager._ensure_work_order_files(task)
+    task.updated_at = task.updated_at or time.time()
+    if task.checkpoint_json:
+        task.checkpoint_ref = task.checkpoint_json
+    _refresh_system_tree_snapshot(task)
+    task.latest_status_report = build_status_report(task)
+    refresh_failure_handoff(task)
+    output_payload = _read_json_object(Path(task.output_json)) if task.output_json else {}
+    checkpoint_artifacts = build_checkpoint_artifact_payloads(task, output_payload)
+    # LLM: task workspace is now the canonical detailed state target; old work-order JSON is a locator mirror.
+    sync_task_workspace_fields(service.workspace, task)
+    _sync_task_rollup_if_possible(task)
+    _set_canonical_state_ref(task)
+    write_inheritance_manifest(task)
+    write_failure_handoff(task)
+    write_recovery_output_files(task, checkpoint_artifacts)
+    state = build_agent_run_state(task)
+    write_agent_run_state(state)
+    payload = state.to_json()
+    # LLM: task.json/run.json remain compatibility locators and mirror the same canonical payload.
+    (task_dir / "task.json").write_text(payload, encoding="utf-8")
+    (task_dir / "run.json").write_text(payload, encoding="utf-8")
+    return task_dir, payload
+
+
+# LLM: _set_canonical_state_ref records where the authoritative task-local state lives.
+# 函数用途: 把 canonical_state.json 路径写进 attributes，后续 load 可从旧 task.json 自动跳到权威状态。
+def _set_canonical_state_ref(task: SubAgentTask) -> None:
+    task.attributes = dict(getattr(task, "attributes", {}) or {})
+    if task.agent_run_workspace_dir:
+        task.attributes["canonical_state_ref"] = str(
+            Path(task.agent_run_workspace_dir) / "canonical_state.json"
+        )
+
+
+# LLM: _read_state_payload keeps task.json as a locator instead of a competing source of truth.
+# 函数用途: 先读旧 locator，再优先加载 canonical_state.json；缺 canonical 时兼容返回原 payload。
+def _read_state_payload(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise TypeError("subagent task state must be a JSON object")
+    canonical_path = canonical_state_path_from_payload(data)
+    if canonical_path and canonical_path.exists() and canonical_path != path:
+        canonical = json.loads(canonical_path.read_text(encoding="utf-8"))
+        if isinstance(canonical, dict):
+            return canonical
+    return data
+
+
+# LLM: _write_owner_agent_projection writes a refs-only owner lookup mirror.
+# 函数用途: 给 owner_home/agents/<run_id> 写 state/refs，方便 tree、doctor 和恢复找到真实 task-local 状态。
 def _write_owner_agent_projection(manager: Any, task: SubAgentTask, payload: str) -> None:
-    # LLM: owner projection is a refs-only lookup mirror; task.json remains the detailed run record.
     owner_home = str(getattr(manager, "owner_home_dir", "") or "").strip()
     if not owner_home:
         return
@@ -202,10 +243,9 @@ def _write_owner_agent_projection(manager: Any, task: SubAgentTask, payload: str
     }
     (root / "refs.json").write_text(json.dumps(refs, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
-
+# LLM: _sync_task_rollup_if_possible summarizes child run refs when a task workspace exists.
+# 函数用途: 子代理保存时同步任务级 compact rollup，给父代理恢复和汇总提供入口摘要。
 def _sync_task_rollup_if_possible(task: SubAgentTask) -> None:
-    # LLM: task compact rollup summarizes child run refs so parents do not scan every child compact package first.
-    # 函数用途: 子代理保存时同步任务级 compact rollup，给父代理恢复和汇总提供入口摘要。
     task_workspace = str(getattr(task, "task_workspace_dir", "") or "").strip()
     if not task_workspace:
         return
@@ -277,6 +317,8 @@ def _refresh_system_tree_snapshot(task: SubAgentTask) -> None:
     task.attributes = attrs
 
 
+# LLM: _safe_int normalizes loosely typed persisted counters.
+# 函数用途: 从旧 JSON 或模型写入字段里读取整数，坏值回退默认值而不中断保存。
 def _safe_int(value: object, default: int = 0) -> int:
     try:
         return int(value or 0)
@@ -284,6 +326,8 @@ def _safe_int(value: object, default: int = 0) -> int:
         return default
 
 
+# LLM: _safe_float normalizes loosely typed persisted progress and timestamps.
+# 函数用途: 从旧 JSON 或模型写入字段里读取浮点数，坏值回退默认值而不中断保存。
 def _safe_float(value: object, default: float = 0.0) -> float:
     try:
         return float(value or 0.0)
@@ -297,6 +341,8 @@ def _unique_strings(values: list[str]) -> list[str]:
     return list(dict.fromkeys(item for item in values if item))
 
 
+# LLM: _registry_records keeps artifact registry refs compact in status payloads.
+# 函数用途: 从 registry 列表提取去重后的小型记录，避免状态树塞入无限产物明细。
 def _registry_records(value: object, *, limit: int = 12) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []

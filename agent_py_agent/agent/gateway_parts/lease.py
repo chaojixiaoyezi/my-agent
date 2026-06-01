@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
+from ..settings.defaults import default_config_float
 from .io import read_json_file, write_json_file_atomic
 from .logging import _report_gateway_side_effect_error, log_gateway_payload
 
@@ -50,8 +51,8 @@ def _gateway_processing_lease_interval(agent: SimpleAgent) -> float:
     return max(0.2, gateway_interval)
 
 
-# LLM: _config_float keeps gateway lease defaults tied to AgentConfig instead of local constants.
-# 函数用途: 从运行配置读取 gateway 租约时间参数，非法值只回退到配置 schema 默认。
+# LLM: _config_float keeps gateway lease defaults behind the shared settings/defaults boundary.
+# 函数用途: 从运行配置读取 gateway 租约时间参数，非法值只回退到配置 schema 默认入口，避免本文件藏第二套默认数字。
 def _config_float(agent: SimpleAgent, key: str) -> float:
     try:
         value = float(getattr(agent.config, key))
@@ -59,9 +60,7 @@ def _config_float(agent: SimpleAgent, key: str) -> float:
             return value
     except (TypeError, ValueError):
         pass
-    from ..settings.config import AgentConfig
-
-    return float(getattr(AgentConfig(), key))
+    return default_config_float(key)
 
 
 # LLM: _touch_gateway_processing_lease 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。

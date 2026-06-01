@@ -12,11 +12,10 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from ..settings import AgentConfig
+from ..settings.defaults import default_config_int
 from ..subagents.services.base import CreateRunParams
 from ..tools import BaseTool, ToolExecutionResult
 from .hierarchy_tools import ScheduleChildSubagentsTool as ScheduleChildSubagentsTool
-from .orchestration_background_dispatch import auto_start_tasks
 from .orchestration_create_constraints import (
     delegation_constraint_conflict_error,
     explicit_root_missing_write_root_error,
@@ -37,12 +36,13 @@ from .orchestration_dispatch_tool import DispatchSubagentsTool
 from .orchestration_event_tools import RaiseEventTool as RaiseEventTool
 from .orchestration_lineage_names import indexed_count_params, indexed_item_params
 from .orchestration_replacements import record_create_replacements
-from .orchestration_run_scope import (
-    remember_orchestration_run_ids,
-)
 from .orchestration_shared_context import append_parent_shared_context
 from .orchestration_sibling_roster import attach_sibling_roster
 from .orchestration_status_tools import InspectAgentTreeTool as InspectAgentTreeTool
+from .orchestration_subagent_lifecycle import (
+    CreatedSubagentLifecycleRequest,
+    publish_created_subagents,
+)
 from .orchestration_tool_grants import (
     CODING_SUBAGENT_TOOLS,
     READ_ONLY_SUBAGENT_TOOLS,
@@ -58,7 +58,7 @@ from .task_progress_tool import TaskProgressTool as TaskProgressTool
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
-_DEFAULT_MAX_SUBAGENTS = AgentConfig().max_subagents
+_DEFAULT_MAX_SUBAGENTS = default_config_int("max_subagents")
 
 
 # LLM: CreateSubagentsTool 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -89,17 +89,17 @@ class CreateSubagentsTool(BaseTool):
         resolutions = self._resolve_task_params(task_params)
         tasks = [item.task for item in resolutions]
         attach_sibling_roster(self.agent.subagents, tasks)
-        _bind_created_tasks_to_conversation(self.agent, tasks)
-        remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
         replacement_records = record_create_replacements(self.agent, tasks)
-        auto_start = auto_start_tasks(self.agent, tasks, params)
+        lifecycle = publish_created_subagents(
+            CreatedSubagentLifecycleRequest(self.agent, tasks, params)
+        )
         payload = create_subagents_payload(
             CreateSubagentsPayloadInput(
                 agent=self.agent,
                 resolutions=resolutions,
                 allowed_tools=allowed_tools,
                 request_params=params,
-                auto_start=auto_start,
+                auto_start=lifecycle.auto_start,
                 replacement_records=replacement_records,
             )
         )
@@ -156,18 +156,18 @@ class CreateSubagentsTool(BaseTool):
         attach_sibling_roster(self.agent.subagents, tasks, save=False)
         for task in tasks:
             self.agent.subagents.save(task)
-        _bind_created_tasks_to_conversation(self.agent, tasks)
-        remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
         replacement_records = record_create_replacements(self.agent, tasks)
         payload_request = self._items_payload_request(request_params, capped)
-        auto_start = auto_start_tasks(self.agent, tasks, payload_request)
+        lifecycle = publish_created_subagents(
+            CreatedSubagentLifecycleRequest(self.agent, tasks, payload_request)
+        )
         payload = create_subagents_payload(
             CreateSubagentsPayloadInput(
                 agent=self.agent,
                 resolutions=resolutions,
                 allowed_tools=_payload_allowed_tools(allowed_tool_values),
                 request_params=payload_request,
-                auto_start=auto_start,
+                auto_start=lifecycle.auto_start,
                 replacement_records=replacement_records,
             )
         )
@@ -296,20 +296,3 @@ def _configured_max_subagents(agent) -> int:
         return max(0, int(raw_value))
     except (TypeError, ValueError):
         return _DEFAULT_MAX_SUBAGENTS
-
-
-# LLM: _bind_created_tasks_to_conversation makes local subagents addressable by task_id in event tools.
-# 函数用途: 如果 create_run_params 已继承 conversation_thread_id，则把每个 run_id 也绑定到同一 thread；
-# 这样子代理上报事件只需传自己的 run_id，不必知道外部会话 ID。
-def _bind_created_tasks_to_conversation(agent, tasks: list) -> None:
-    for task in tasks:
-        attrs = getattr(task, "attributes", {}) or {}
-        if not isinstance(attrs, dict):
-            continue
-        thread_id = str(attrs.get("conversation_thread_id") or "").strip()
-        if not thread_id:
-            continue
-        try:
-            agent.conversation_store.bind_task({'thread_id': thread_id, 'task_id': str(getattr(task, "id", "") or ""), 'goal': str(getattr(task, "goal", "") or "")})
-        except Exception:
-            continue

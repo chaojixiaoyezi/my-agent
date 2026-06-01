@@ -196,7 +196,7 @@ class TestBuildBasic:
 
         result = builder.build("让小傻妞分别分析这些资料", [])
 
-        assert "required_read_paths/context_manifest" in result
+        assert "input_refs/context_manifest" in result
         assert "不要在派工前把所有长文档" in result
 
     def test_build_single_memory(self, tmp_path):

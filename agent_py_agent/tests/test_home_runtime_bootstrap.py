@@ -25,6 +25,26 @@ def test_simple_agent_initializes_my_agent_home(tmp_path: Path):
     assert agent.home_paths.memory_md.exists()
 
 
+# LLM: legacy config consumers should see resolved owner-home runtime paths after startup.
+# 函数用途: 防止 gateway/session/notification 等旧入口继续从 AgentConfig 读取 repo data/* 默认路径。
+def test_simple_agent_rewrites_runtime_config_paths_to_owner_home(tmp_path: Path):
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+
+    agent = SimpleAgent(AgentConfig(my_agent_home=str(home), prompt_files=[]), repo)
+
+    owner_home = home / "owners" / "local" / "main"
+    assert agent.config.memory_path == str(owner_home / "memory" / "long_term" / "memory.jsonl")
+    assert agent.config.session_workspace == str(owner_home / "sessions")
+    assert "/data/" not in agent.config.subagent_workspace
+    assert "/data/" not in agent.config.gateway_workspace
+    assert "/data/" not in agent.config.local_store_path
+    assert str(owner_home / "workspace" / "runtime" / "workspaces") in agent.config.subagent_workspace
+    assert str(owner_home / "workspace" / "runtime" / "workspaces") in agent.config.gateway_workspace
+    assert str(owner_home / "workspace" / "runtime" / "workspaces") in agent.config.local_store_path
+    assert not (repo / "data").exists()
+
+
 # LLM: saved runs should get a clean owner task workspace while old repo-relative memory paths keep working.
 # 函数用途: 验证普通 run 保存后，会在 owner_home/tasks/date/task 下创建 output 交付区和 work 过程区。
 def test_saved_run_creates_home_task_workspace(tmp_path: Path):

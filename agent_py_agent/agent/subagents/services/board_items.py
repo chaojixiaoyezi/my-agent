@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ...model_visible_ref_sanitizer import sanitize_model_visible_refs
+from ...model_visible_refs import current_model_ref
 from ..models import SubAgentBoardOptions, SubAgentTask
 from ..reports import SubAgentBoardItem
 from .task_target_tokens import task_actual_target_tokens
@@ -125,7 +125,7 @@ def _board_item_payload(
 ) -> dict[str, object]:
     open_request_count, open_gap_count = counts
     timing = _task_timing(task)
-    return sanitize_model_visible_refs({
+    return {
         "id": task.id,
         "root_id": task.root_id,
         "parent_id": task.parent_id,
@@ -158,19 +158,19 @@ def _board_item_payload(
         "locked_file_count": len(task.locked_files),
         "risk_flags": build_risk_flags(task, open_request_count, open_gap_count),
         # LLM: Board rows expose only current-layout refs; legacy work-order refs stay internal.
-        "task_root": task.task_workspace_dir,
-        "final_report_ref": task.agent_run_final_report_md or task.output_json,
-        "task_work_dir": str(Path(task.task_workspace_dir) / "work") if task.task_workspace_dir else "",
-        "task_output_dir": str(Path(task.task_workspace_dir) / "output") if task.task_workspace_dir else "",
-        "agent_work_dir": task.agent_run_workspace_dir,
-        "checkpoint_ref": task.agent_run_checkpoint_json or task.checkpoint_json or task.checkpoint_ref,
-        "summary_ref": task.agent_run_summary_md,
+        "task_root": current_model_ref(task.task_workspace_dir),
+        "final_report_ref": current_model_ref(task.agent_run_final_report_md or task.output_json),
+        "task_work_dir": str(Path(task.task_workspace_dir) / "work") if current_model_ref(task.task_workspace_dir) else "",
+        "task_output_dir": str(Path(task.task_workspace_dir) / "output") if current_model_ref(task.task_workspace_dir) else "",
+        "agent_work_dir": current_model_ref(task.agent_run_workspace_dir),
+        "checkpoint_ref": current_model_ref(task.agent_run_checkpoint_json or task.checkpoint_json or task.checkpoint_ref),
+        "summary_ref": current_model_ref(task.agent_run_summary_md),
         "latest_tool_progress_ref": _latest_tool_progress_ref(task),
         "target_tokens": sorted(task_actual_target_tokens(task))[:20],
         "artifact_refs": _bounded_unique_strings(task.artifact_refs, limit=12),
         "artifact_registry_refs": _registry_records(task.attributes.get("artifact_registry_refs"), limit=12),
         "evidence_refs": _bounded_unique_strings(task.evidence_refs, limit=12),
-    })
+    }
 
 
 # LLM: _task_timing is a parent-facing observation only; it must not change task status.
@@ -212,7 +212,7 @@ def _bounded_unique_strings(value: object, *, limit: int) -> list[str]:
     items: list[str] = []
     seen: set[str] = set()
     for item in value:
-        text = str(item or "").strip()
+        text = current_model_ref(item)
         if not text or text in seen:
             continue
         seen.add(text)
@@ -232,10 +232,8 @@ def _registry_records(value: object, *, limit: int) -> list[dict[str, object]]:
     for item in value:
         if not isinstance(item, dict):
             continue
-        row = dict(item)
-        artifact_id = str(row.get("artifact_id") or "").strip()
-        path = str(row.get("path") or "").strip()
-        key = artifact_id or path
+        row = _registry_record(item)
+        key = _registry_record_key(row)
         if not key or key in seen:
             continue
         seen.add(key)
@@ -245,8 +243,27 @@ def _registry_records(value: object, *, limit: int) -> list[dict[str, object]]:
     return rows
 
 
+# LLM: _registry_record projects one board registry row to current model-visible refs.
+# 函数用途: 看板保留 artifact 元数据，但不把旧 data/subagents path 暴露给父代理。
+def _registry_record(item: dict[str, object]) -> dict[str, object]:
+    row = dict(item)
+    if "path" not in row:
+        return row
+    path = current_model_ref(row.get("path"))
+    if path:
+        return {**row, "path": path}
+    return {key: value for key, value in row.items() if key != "path"}
+
+
+# LLM: _registry_record_key gives board registry rows a stable de-duplication identity.
+# 函数用途: artifact_id 优先、path 兜底，避免同一产物在看板里重复出现。
+def _registry_record_key(row: dict[str, object]) -> str:
+    return str(row.get("artifact_id") or row.get("path") or "").strip()
+
+
 # LLM: _latest_tool_progress_ref points parents at the current run progress snapshot, not legacy reports paths.
 # 函数用途: 根据 agent_run_workspace_dir 派生 progress/latest_tool_progress.json，供看板返回可读进展入口。
 def _latest_tool_progress_ref(task: SubAgentTask) -> str:
     workspace = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
-    return str(Path(workspace) / "progress" / "latest_tool_progress.json") if workspace else ""
+    workspace_ref = current_model_ref(workspace)
+    return str(Path(workspace_ref) / "progress" / "latest_tool_progress.json") if workspace_ref else ""

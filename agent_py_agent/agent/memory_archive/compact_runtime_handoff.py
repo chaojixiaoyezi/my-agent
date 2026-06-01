@@ -68,13 +68,13 @@ def render_runtime_handoff_lines(value: Any, *, title: str = "Runtime Handoff") 
 # LLM: _recent_guidance reads only scoped guidance rows for compact handoff.
 # 函数用途: 从 guidance 账本中取当前 run/thread/task/case 相关的最近软提示。
 def _recent_guidance(workspace: Path, ids: list[str]) -> list[dict[str, Any]]:
-    guidance_dir = workspace / "data" / "conversations" / "guidance"
-    if not guidance_dir.exists():
+    guidance_dirs = _guidance_dirs(workspace)
+    if not guidance_dirs:
         return []
     id_set = set(ids)
     rows = [
         row
-        for path in _guidance_candidate_files(guidance_dir, ids)
+        for path in _guidance_candidate_files(guidance_dirs, ids)
         for row in _read_jsonl_dicts(path)
         if str(row.get("target_id") or "").strip() in id_set
     ]
@@ -84,14 +84,34 @@ def _recent_guidance(workspace: Path, ids: list[str]) -> list[dict[str, Any]]:
 
 # LLM: _guidance_candidate_files limits the guidance files scanned during compact.
 # 函数用途: 优先列出精确匹配的 guidance 文件，再用少量候选兜底。
-def _guidance_candidate_files(guidance_dir: Path, ids: list[str]) -> list[Path]:
+def _guidance_candidate_files(guidance_dirs: list[Path], ids: list[str]) -> list[Path]:
     exact = [
         path
+        for guidance_dir in guidance_dirs
         for item_id in ids
         for path in _guidance_exact_paths(guidance_dir, item_id)
         if path.exists()
     ]
-    return _dedupe_paths([*exact, *sorted(guidance_dir.glob("*.jsonl"))[:32]])
+    fallback = [
+        path
+        for guidance_dir in guidance_dirs
+        for path in sorted(guidance_dir.glob("*.jsonl"))[:32]
+    ]
+    return _dedupe_paths([*exact, *fallback])
+
+
+# LLM: _guidance_dirs finds current owner/task guidance stores, not old repo data paths.
+# 函数用途: compact 续接只读 owner runtime conversations 和 task-local work guidance。
+def _guidance_dirs(workspace: Path) -> list[Path]:
+    candidates = [
+        workspace / "guidance",
+        workspace / "conversations" / "guidance",
+        workspace / "work" / "guidance",
+        *sorted((workspace / "workspace" / "runtime" / "workspaces").glob("*/conversations/guidance")),
+        *sorted((workspace / "tasks").glob("*/work/guidance")),
+        *sorted((workspace / "tasks").glob("*/*/work/guidance")),
+    ]
+    return _dedupe_paths([path for path in candidates if path.exists() and _inside_workspace(path, workspace)])
 
 
 # LLM: _guidance_exact_paths builds literal file candidates without globbing ids.
@@ -133,20 +153,33 @@ def _agent_state_files(workspace: Path, ids: list[str]) -> list[Path]:
     paths: list[Path] = []
     for item_id in ids:
         if item_id:
-            paths.extend(sorted((workspace / "tasks" / item_id / "work" / "agents").glob("*/state.json")))
-            paths.extend(sorted((workspace / "tasks" / item_id / "agents").glob("*/state.json")))
+            paths.extend(_task_agent_state_files_for_task(workspace, item_id))
             paths.extend(_task_agent_state_files_for_id(workspace, item_id))
     return _dedupe_paths([path for path in paths if path.exists() and _inside_workspace(path, workspace)])
 
 
-# LLM: _task_agent_state_files_for_id finds agent state files by exact run id.
-# 函数用途: 在 tasks/*/work/agents/<run_id>/state.json 中查找指定代理状态，并兼容旧路径。
+# LLM: _task_agent_state_files_for_task finds current task-local canonical child states.
+# 函数用途: 当 scope id 是 task slug/id 时，读取该任务 work/agents 下的 canonical_state.json。
+def _task_agent_state_files_for_task(workspace: Path, item_id: str) -> list[Path]:
+    task_dirs = [
+        workspace / "tasks" / item_id,
+        *sorted((workspace / "tasks").glob(f"*/{_safe_file_stem(item_id)}")),
+    ]
+    return [
+        state_path
+        for task_dir in task_dirs
+        for state_path in sorted((task_dir / "work" / "agents").glob("*/canonical_state.json"))
+    ]
+
+
+# LLM: _task_agent_state_files_for_id finds current task-local state files by exact run id.
+# 函数用途: 在 tasks/*/work/agents/<run_id>/canonical_state.json 中查找指定代理状态。
 def _task_agent_state_files_for_id(workspace: Path, item_id: str) -> list[Path]:
     return [
-        path / "state.json"
-        for pattern in ("*/work/agents/*", "*/agents/*")
+        path / "canonical_state.json"
+        for pattern in ("*/work/agents/*", "*/*/work/agents/*")
         for path in sorted((workspace / "tasks").glob(pattern))
-        if path.is_dir() and path.name == item_id and (path / "state.json").exists()
+        if path.is_dir() and path.name == item_id and (path / "canonical_state.json").exists()
     ]
 
 
