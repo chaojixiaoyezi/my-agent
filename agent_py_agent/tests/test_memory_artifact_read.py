@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -283,6 +284,43 @@ def test_read_artifact_short_call_id_without_scope_prefers_latest(tmp_path: Path
     assert payload["run_id"] == "latest-run"
 
 
+# LLM: old internal tool archives can be reread later, so read_artifact must hide legacy refs too.
+# 函数用途: 验证历史 create_subagents 等内部工具归档经 read_artifact 展开时不会重新暴露 data/subagents 路径。
+def test_read_artifact_hides_legacy_paths_from_internal_tool_archives(tmp_path: Path) -> None:
+    legacy_path = "/repo/data/subagents/tasks/run_1/agents/run_1/final_report.md"
+    raw_content = json.dumps({"workspace_refs": {"final_report": legacy_path}}, ensure_ascii=False)
+    artifact_path = _write_internal_tool_output(tmp_path, "create_subagents", raw_content)
+    # Simulate an artifact written before model-visible ref sanitizing existed.
+    artifact_payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact_payload["content"] = raw_content
+    artifact_payload["sha256"] = hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
+    artifact_path.write_text(json.dumps(artifact_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    registry = _registry(tmp_path)
+
+    result = registry.execute_call({"tool": "read_artifact", "artifact_ref": str(artifact_path), "max_chars": 0})
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["content_sanitized"] is True
+    assert "/data/subagents/" not in payload["content"]
+    assert "[internal_legacy_subagent_path_hidden]" in payload["content"]
+
+
+# LLM: read_artifact should not rewrite ordinary user or blackbox tool content.
+# 函数用途: 验证普通工具归档里提到 data/subagents 字样时保持原文，避免隐藏用户要分析的正文。
+def test_read_artifact_preserves_ordinary_tool_archive_content(tmp_path: Path) -> None:
+    text = "用户文档里提到 /repo/data/subagents/tasks/run_1 这个历史路径。"
+    artifact_path = _write_externalized_tool_output(tmp_path, content=text)
+    registry = _registry(tmp_path)
+
+    result = registry.execute_call({"tool": "read_artifact", "artifact_ref": str(artifact_path), "max_chars": 0})
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["content_sanitized"] is False
+    assert payload["content"] == text
+
+
 # LLM: read_file is the normal path for explicit tool-output artifact paths.
 # 函数用途: 验证模型拿到外置工具输出路径后，可以直接用 read_file 读取正文切片。
 def test_read_file_reads_tool_output_artifact_content(tmp_path: Path) -> None:
@@ -426,6 +464,23 @@ def _write_externalized_tool_output(
             ok=True,
             request_id="req-artifact",
             run_id=run_id,
+            task_id="task-artifact",
+            min_chars=10,
+        )
+    )
+    return Path(record["artifact_ref"])
+
+
+def _write_internal_tool_output(root: Path, tool: str, content: str) -> Path:
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=root,
+            tool=tool,
+            call_id="call-artifact",
+            output=content,
+            ok=True,
+            request_id="req-artifact",
+            run_id="run-artifact",
             task_id="task-artifact",
             min_chars=10,
         )

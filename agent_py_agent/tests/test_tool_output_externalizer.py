@@ -135,6 +135,50 @@ def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: 
     assert artifact["run_id"] == "runner-42"
 
 
+# LLM: internal orchestration outputs are archived in the same model-visible form the live prompt sees.
+# 函数用途: 验证外置归档当前内部工具输出时同步隐藏旧 data/subagents 路径，避免未来 read_artifact 读出误导路径。
+def test_externalizer_hides_legacy_paths_for_internal_tool_outputs(tmp_path: Path) -> None:
+    legacy_path = "/repo/data/subagents/tasks/run_1/agents/run_1/final_report.md"
+    output = json.dumps({"workspace_refs": {"final_report": legacy_path}}, ensure_ascii=False)
+
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="inspect_agent_tree",
+            call_id="8-1",
+            output=output,
+            ok=True,
+            run_id="run-tree",
+            min_chars=10,
+        )
+    )
+    artifact = json.loads(Path(record["artifact_ref"]).read_text(encoding="utf-8"))
+
+    assert "/data/subagents/" not in record["output_preview"]
+    assert "/data/subagents/" not in artifact["content"]
+    assert "[internal_legacy_subagent_path_hidden]" in artifact["content"]
+
+
+def test_externalizer_preserves_ordinary_tool_outputs(tmp_path: Path) -> None:
+    output = "用户文档里提到 /repo/data/subagents/tasks/run_1 这个历史路径。"
+
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="read_file",
+            call_id="1-1",
+            output=output,
+            ok=True,
+            run_id="run-file",
+            min_chars=10,
+        )
+    )
+    artifact = json.loads(Path(record["artifact_ref"]).read_text(encoding="utf-8"))
+
+    assert record["output_preview"] == output
+    assert artifact["content"] == output
+
+
 # LLM: read_artifact already returns bounded slices, so archiving it must not create artifact-of-artifact loops.
 # 函数用途: 防止显式读取 artifact 后又生成第二层 tool_output JSON，避免模型继续追套娃引用。
 def test_read_artifact_output_is_not_re_externalized(tmp_path: Path) -> None:

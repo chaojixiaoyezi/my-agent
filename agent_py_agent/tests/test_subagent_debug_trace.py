@@ -515,7 +515,10 @@ def test_subagent_run_failure_classifies_provider_timeout(tmp_path):
 
 # LLM: provider transient errors should stay retryable/recoverable instead of looking like task logic failures.
 # 函数用途: 确认子代理模型接口临时断连会写成 transient_error，便于父级按恢复/重跑策略处理。
-def test_subagent_run_failure_classifies_provider_transient(tmp_path):
+def test_subagent_run_failure_classifies_provider_transient(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core import provider_transient_auto_resume
+
+    monkeypatch.setattr(provider_transient_auto_resume, "provider_transient_retry_delays", lambda: ())
     cfg = AgentConfig(
         enable_tools=True,
         model_backend="echo",

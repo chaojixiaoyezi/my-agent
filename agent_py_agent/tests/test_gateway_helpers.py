@@ -297,16 +297,19 @@ class TestPostStreamIter:
 
     @patch("urllib.request.urlopen")
     def test_iter_handles_http_error(self, mock_urlopen):
-        """验证 HTTP 错误被包装为 RuntimeError。"""
+        """验证 provider 5xx HTTP 错误被包装为可读的临时错误，而不是裸 traceback。"""
         from io import BytesIO
-        body = BytesIO(b"internal error")
+
+        from agent_py_agent.agent.backends.errors import ProviderTransientError
+
+        body = BytesIO(b'{"type":"error","error":{"type":"api_error","message":"input new_sensitive"}}')
         mock_urlopen.side_effect = urllib.error.HTTPError(
             "https://api.example.com", 500, "Server Error",
             {"Content-Type": "application/json"}, body
         )
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
-        with pytest.raises(RuntimeError, match="HTTP 500"):
+        with pytest.raises(ProviderTransientError, match="HTTP 500.*input new_sensitive"):
             list(post_stream_iter(_request()))
 
     @patch("urllib.request.urlopen")

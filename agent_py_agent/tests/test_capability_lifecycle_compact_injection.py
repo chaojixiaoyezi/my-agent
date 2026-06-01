@@ -35,9 +35,12 @@ def test_capability_request_expiry_keeps_request_visible(tmp_path: Path) -> None
 
 def test_compact_injection_renders_context_and_continue_packet(tmp_path: Path) -> None:
     from agent_py_agent.agent.user_space.compact_injection import render_compact_injection
-    from agent_py_agent.agent.user_space.compact_layout import ensure_compact_package
+    from agent_py_agent.agent.user_space.compact_layout import (
+        CompactPackageRequest,
+        ensure_compact_package,
+    )
 
-    paths = ensure_compact_package(tmp_path / "compact", compact_index=3, scope="task")
+    paths = ensure_compact_package(tmp_path / "compact", CompactPackageRequest(3, "task"))
     paths.compact_context_md.write_text("当前已经读完 A 项目。\n", encoding="utf-8")
     paths.continue_packet_json.write_text(
         json.dumps(
@@ -61,3 +64,39 @@ def test_compact_injection_renders_context_and_continue_packet(tmp_path: Path) -
     assert "当前已经读完 A 项目" in rendered
     assert "继续分析 B 项目源码" in rendered
     assert "不要重复读 A 的 README" in rendered
+
+
+# LLM: resolver caches a run's chosen capability version but must not keep using revoked entries.
+# 函数用途: 验证同一 run 内版本解析可复用，安全撤销后缓存会失效并返回 revoked。
+def test_capability_resolver_pins_version_and_invalidates_revoked(tmp_path: Path) -> None:
+    import json
+
+    from agent_py_agent.agent.user_space.capability_resolver import (
+        CapabilityResolveOptions,
+        resolve_owner_capability,
+    )
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path)
+    home.shared_indexes_skills_jsonl.write_text(
+        json.dumps({"id": "shared:weekly@1.0.0", "name": "weekly", "source": "shared", "version": "1.0.0"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    first = resolve_owner_capability(home, "weekly", CapabilityResolveOptions(kind="skill", run_id="run-1"))
+    home.shared_indexes_skills_jsonl.write_text(
+        json.dumps({"id": "shared:weekly@2.0.0", "name": "weekly", "source": "shared", "version": "2.0.0"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    pinned = resolve_owner_capability(home, "weekly", CapabilityResolveOptions(kind="skill", run_id="run-1"))
+    fresh = resolve_owner_capability(home, "weekly", CapabilityResolveOptions(kind="skill", run_id="run-2"))
+    home.shared_indexes_skills_jsonl.write_text(
+        json.dumps({"id": "shared:weekly@2.0.0", "name": "weekly", "source": "shared", "version": "2.0.0", "status": "revoked"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    revoked = resolve_owner_capability(home, "weekly", CapabilityResolveOptions(kind="skill", run_id="run-1"))
+
+    assert first.resolved_id == "shared:weekly@1.0.0"
+    assert pinned.resolved_id == "shared:weekly@1.0.0"
+    assert fresh.resolved_id == "shared:weekly@2.0.0"
+    assert revoked.status == "revoked"

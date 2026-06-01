@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from ..model_visible_ref_sanitizer import sanitize_model_visible_refs
 from ..subagents.kernel import SubagentKernelQuery
 from .agent_tree_node_rendering import node_from_kernel_run
 from .agent_tree_progress import attach_task_progress
@@ -64,7 +65,7 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
         },
     }
     payload.update(scope_resolution_payload(resolution))
-    return payload
+    return sanitize_model_visible_refs(payload)
 
 # LLM: _kernel_snapshot keeps query derivation structural and free of natural-language parsing.
 # 函数用途: 从显式 run/root 参数或当前轮已知 run_ids 选择状态树；缺省返回 manager 可见 run。
@@ -75,6 +76,8 @@ def _kernel_snapshot(agent: object, query: SubagentKernelQuery):
     return manager.kernel_snapshot(query)
 
 
+# LLM: _kernel_query resolves explicit tree scope before falling back to the current subagent subtree.
+# 函数用途: 根据 run/root 参数和当前子代理身份生成状态树查询条件。
 def _kernel_query(agent: object, params: dict[str, object]) -> SubagentKernelQuery:
     current_run_id = current_subagent_run_id(agent)
     if current_run_id:
@@ -85,6 +88,8 @@ def _kernel_query(agent: object, params: dict[str, object]) -> SubagentKernelQue
     return SubagentKernelQuery(root_id=root_id, run_id=run_id, scope=scope)
 
 
+# LLM: _is_main_run_query distinguishes foreground root requests from scoped subagent views.
+# 函数用途: 判断查询是否面向主代理/root 树，避免把子代理局部树误包装成全局树。
 def _is_main_run_query(agent: object, query: SubagentKernelQuery) -> bool:
     main_run_id = str(getattr(agent, "_main_agent_run_id", "") or "").strip()
     query_id = query.run_id or query.root_id

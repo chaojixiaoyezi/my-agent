@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from ..action_protocol import subagent_dispatch_envelope_from_payload
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
+from ..model_visible_ref_sanitizer import sanitize_model_visible_refs
 from ..tools import BaseTool, ToolExecutionResult
 from .dispatch_no_progress import dispatch_no_progress_payload
 from .dispatch_params import DispatchParams
@@ -43,6 +44,8 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
+# LLM: _legacy_execution_param_error keeps old dispatch knobs from creating a second dry-run contract.
+# 函数用途: 发现旧 apply/execute_runners 参数时返回统一迁移提示。
 def _legacy_execution_param_error(params: dict[str, object]) -> str:
     legacy = [key for key in ("apply", "execute_runners") if key in (params or {})]
     if not legacy:
@@ -172,7 +175,7 @@ class DispatchSubagentsTool(BaseTool):
             "dispatch_md": str(self.agent.subagents.workspace / "SUBAGENT_DISPATCH.md"),
         })
         payload["typed_envelope"] = subagent_dispatch_envelope_from_payload(payload).to_dict()
-        return payload
+        return sanitize_model_visible_refs(payload)
 
 
 from .orchestration_dispatch_tool_helpers import (

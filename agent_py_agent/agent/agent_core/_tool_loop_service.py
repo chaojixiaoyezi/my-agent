@@ -10,10 +10,12 @@ from ..backends import ModelResponse
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ._runtime_params import ToolLoopExecuteParams
+from .delivery_completion_soft_hint import maybe_append_delivery_completion_soft_hint
 from .orchestration_shared_context import (
     refresh_parent_shared_context_cache,
     refresh_parent_shared_context_from_tool_record,
 )
+from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
 from .runner_context import current_task_attributes
 from .runtime_live_archive import (
     archive_tool_call_if_enabled,
@@ -140,7 +142,10 @@ class ToolLoopService:
             backend = str(getattr(getattr(self._agent, "backend", None), "name", "") or "")
             return "", ModelResponse(text=stale_message, backend=backend), True, False, empty_response_repairs
         try:
-            prompt, response = next_tool_loop_model_response(self._agent, params, tool_rounds)
+            prompt, response = run_with_provider_transient_auto_resume(
+                lambda: next_tool_loop_model_response(self._agent, params, tool_rounds),
+                on_chunk=params.effective_on_chunk,
+            )
             return prompt, response, False, False, empty_response_repairs
         except Exception as exc:
             if should_retry_empty_model_response(params, exc, empty_response_repairs):
@@ -257,6 +262,12 @@ class ToolLoopService:
         update_runtime_fact_progress_if_enabled(self._agent, record.params, tool_round=record.tool_rounds)
         refresh_parent_shared_context_cache(self._agent, record.params.archive_tool_calls)
         refresh_parent_shared_context_from_tool_record(self._agent, record)
+        maybe_append_delivery_completion_soft_hint(
+            self._agent,
+            record.params,
+            archive_record,
+            tool_ok=bool(record.result.ok),
+        )
         record.params.tool_context.append(
             f"[tool-record round={record.tool_rounds} index={record.idx}]\n"
             f"{render_tool_payload_for_live_prompt(record.payload)}\n"

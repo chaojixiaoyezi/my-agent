@@ -308,7 +308,9 @@
 
 阶段 6：非真实环境补测。新增 focused tests 覆盖 Doctor、工具韧性、物化器接线、closeout 接线，并回归 bootstrap、repair、collection、staged writer 等现有入口门。当前仍坚持：真实任务只做最终收口，日常开发以离线合同、fake tool、fake model 和 replay 为主。
 
-阶段 6 补充：子代理状态面路径收敛。`inspect_agent_tree` 这个模型可见状态工具只暴露当前 task workspace、agent run workspace、artifact refs、recovery refs，不再把旧式 work-order 目录作为主路径字段返回。旧路径仍可留在兼容恢复文件中供系统迁移使用，但不能作为父代理接管/读取产物时的默认候选，避免模型从 `data/subagents/<run_id>/...` 这类旧布局误读到不存在路径。
+阶段 6 补充：子代理状态面路径收敛。`inspect_agent_tree` 这个模型可见状态工具只暴露当前 task workspace、agent run workspace、artifact refs、recovery refs，不再把旧式 work-order 目录作为主路径字段返回。`create_subagents`、`dispatch_subagents`、`schedule_child_subagents` 和看板输出也共享同一层模型可见路径净化，避免嵌套 `agent_tree` / `child_result_index` 重新泄漏 `data/subagents/...`。旧路径仍可留在兼容恢复文件中供系统迁移使用，但不能作为父代理接管/读取产物时的默认候选。
+
+阶段 6 补充：tool-output 归档二次读取。状态/调度类工具的新归档保存模型可见的净化正文；早期已经落盘的旧 `create_subagents`、`dispatch_subagents`、`inspect_agent_tree`、`schedule_child_subagents` 和看板归档，在 `read_artifact` 展开时按来源工具做展示层净化。这个规则只作用于内部编排/状态工具的输出，不改普通 `read_file`、网页、命令输出或用户交付物正文。
 
 阶段 6 补充：路径不存在恢复。参考 工具运行时/终端交互/长期助手 的 file read / grep / glob 行为，缺失路径应返回可行动候选，而不是只抛“不存在”。`read_file`、`list_files`、`search_text` 现在共享同一层 `path_not_found` 恢复面：候选只从允许的 workspace roots 中找，结果包含 `candidate_paths` 和建议动作；系统不会自动读取候选，也不会因为路径缺失终止任务。通道运行时 的路径边界经验也保留：越界、symlink 逃逸和权限问题仍走边界错误，不能被包装成普通缺文件。
 

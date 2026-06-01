@@ -11,6 +11,10 @@ from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive import RawMemoryEvent, append_raw_event
+from agent_py_agent.agent.user_space.home_runtime_query import (
+    TaskWorkspaceQuery,
+    list_task_workspaces,
+)
 from agent_py_agent.agent.user_space.run_workspace import (
     EnsureRunWorkspaceRequest,
     ensure_run_workspace,
@@ -558,7 +562,28 @@ def test_run_workspace_creates_v2_task_ledgers(tmp_path: Path):
     assert paths.collab_messages_jsonl.exists()
     assert paths.collab_evidence_packets_dir.is_dir()
     assert paths.artifact_manifest_json.exists()
-    assert paths.outputs_dir == home / "tasks" / "2026-05-13" / "task-v2" / "output"
+    assert paths.output_dir == home / "tasks" / "2026-05-13" / "task-v2" / "output"
     assert paths.work_dir == home / "tasks" / "2026-05-13" / "task-v2" / "work"
     assert paths.compact_dir.is_dir()
     assert paths.summaries_dir.is_dir()
+
+
+def test_task_workspace_payload_uses_single_output_name(tmp_path: Path):
+    home = tmp_path / "home"
+    paths = ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=home,
+            template="tasks/{date}/{task_slug}",
+            task_name="目录命名",
+            user_prompt="检查目录命名",
+            request_id="req-output",
+            run_id="run-output",
+            task_id="task-output",
+            created_at="2026-05-13T01:00:00+00:00",
+        )
+    )
+
+    items = list_task_workspaces(home, TaskWorkspaceQuery(date_key="2026-05-13"))
+
+    assert items[0]["output_dir"] == str(paths.output_dir)
+    assert "outputs_dir" not in items[0]

@@ -18,7 +18,7 @@ from .home_layout import task_workspace_path
 class RunWorkspacePaths:
     root: Path
     work_dir: Path
-    outputs_dir: Path
+    output_dir: Path
     runtime_dir: Path
     agents_dir: Path
     logs_dir: Path
@@ -60,7 +60,7 @@ def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePath
     for directory in (
         paths.root,
         paths.work_dir,
-        paths.outputs_dir,
+        paths.output_dir,
         paths.runtime_dir,
         paths.agents_dir,
         paths.logs_dir,
@@ -97,7 +97,7 @@ def run_workspace_paths(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths
     return RunWorkspacePaths(
         root=root,
         work_dir=work,
-        outputs_dir=root / "output",
+        output_dir=root / "output",
         runtime_dir=work / "runtime",
         agents_dir=work / "agents",
         logs_dir=work / "logs",

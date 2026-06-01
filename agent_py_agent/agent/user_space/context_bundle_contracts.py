@@ -203,7 +203,12 @@ def _prompt_budget(chars: int) -> dict[str, Any]:
 def _task_workspace_refs(home_paths: Any | None) -> dict[str, str]:
     if home_paths is None:
         return {}
-    return {"workspace_tasks_root": str(Path(home_paths.workspace_tasks_dir).resolve())}
+    owner_tasks = Path(getattr(home_paths, "owner_tasks_dir", home_paths.workspace_tasks_dir)).resolve()
+    legacy_tasks = Path(home_paths.workspace_tasks_dir).resolve()
+    return {
+        "owner_tasks_root": str(owner_tasks),
+        "legacy_workspace_tasks_root": str(legacy_tasks),
+    }
 
 
 # LLM: _exists_check returns diagnostic records instead of raising on missing paths.

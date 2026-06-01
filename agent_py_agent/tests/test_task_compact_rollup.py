@@ -8,21 +8,23 @@ def test_task_compact_rollup_exposes_status_counts_and_actionable_refs(tmp_path:
     from agent_py_agent.agent.user_space.task_compact_rollup import sync_task_compact_rollup
 
     task_root = tmp_path / "tasks" / "task-root"
-    (task_root / "agents" / "agent-a").mkdir(parents=True)
-    (task_root / "agents" / "agent-b").mkdir(parents=True)
-    (task_root / "agents" / "agent-c").mkdir(parents=True)
-    (task_root / "state.json").write_text(
+    work = task_root / "work"
+    (work / "agents" / "agent-a").mkdir(parents=True)
+    (work / "agents" / "agent-b").mkdir(parents=True)
+    (work / "agents" / "agent-c").mkdir(parents=True)
+    (work / "state.json").write_text(
         json.dumps({"task_id": "task-root", "status": "RUNNING", "progress": 0.4}),
         encoding="utf-8",
     )
-    _write_agent_state(task_root / "agents" / "agent-a" / "state.json", {"id": "agent-a", "status": "DONE", "artifact_refs": ["/tmp/out-a.md"]})
-    _write_agent_state(task_root / "agents" / "agent-b" / "state.json", {"id": "agent-b", "status": "RUNNING"})
-    _write_agent_state(task_root / "agents" / "agent-c" / "state.json", {"id": "agent-c", "status": "BLOCKED", "blockers": ["缺少输入文件"]})
+    _write_agent_state(work / "agents" / "agent-a" / "state.json", {"id": "agent-a", "status": "DONE", "artifact_refs": ["/tmp/out-a.md"]})
+    _write_agent_state(work / "agents" / "agent-b" / "state.json", {"id": "agent-b", "status": "RUNNING"})
+    _write_agent_state(work / "agents" / "agent-c" / "state.json", {"id": "agent-c", "status": "BLOCKED", "blockers": ["缺少输入文件"]})
 
     result = sync_task_compact_rollup(task_root)
 
     rollup = json.loads(result.rollup_json.read_text(encoding="utf-8"))
     continue_packet = json.loads((result.compact_package_dir / "continue_packet.json").read_text(encoding="utf-8"))
+    assert result.compact_root == work / "compact"
     assert rollup["status_counts"] == {"blocked": 1, "done": 1, "running": 1}
     assert rollup["completed_run_ids"] == ["agent-a"]
     assert rollup["pending_run_ids"] == ["agent-b", "agent-c"]
@@ -37,13 +39,14 @@ def test_task_compact_rollup_writes_owner_level_compact_indexes(tmp_path: Path) 
 
     owner_home = tmp_path / "home" / "owners" / "local" / "main"
     task_root = owner_home / "tasks" / "2026-05-13" / "task-root"
-    (task_root / "agents" / "agent-a").mkdir(parents=True)
-    (task_root / "state.json").write_text(
+    work = task_root / "work"
+    (work / "agents" / "agent-a").mkdir(parents=True)
+    (work / "state.json").write_text(
         json.dumps({"task_id": "task-root", "status": "RUNNING", "primary_run_id": "run-root"}),
         encoding="utf-8",
     )
     _write_agent_state(
-        task_root / "agents" / "agent-a" / "state.json",
+        work / "agents" / "agent-a" / "state.json",
         {"id": "agent-a", "task_id": "task-root", "status": "DONE", "artifact_refs": ["/tmp/out-a.md"]},
     )
 

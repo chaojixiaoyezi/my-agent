@@ -456,10 +456,12 @@ do_write()
   `failure_type=provider_timeout`, and CLI entry points should print a compact
   recovery handoff rather than exposing a raw traceback or staying silent.
 - Provider rate limits or temporary overloads must also be typed and recoverable.
-  HTTP 429/529/503 should retry with bounded backoff first; if exhausted, surface
-  `ProviderTransientError` and a readable recovery hint. Do not treat these as
-  delivery-quality failures, and do not let raw provider JSON tracebacks become
-  the final user-facing answer.
+  HTTP 429/529/503 and temporary 5xx should retry with bounded backoff first.
+  During a model/tool loop, retry the current model turn with the shared
+  provider transient delay schedule before surfacing `ProviderTransientError`.
+  Do not restart the whole run for this path, do not repeat already completed
+  tool calls, do not treat provider flakes as delivery-quality failures, and do
+  not let raw provider JSON tracebacks become the final user-facing answer.
 - New write-like tools must reuse `content_transport_policy.py` or document a
   reviewed exception. Do not create a second hardcoded chunk-size or parse-error
   hint in a separate module.

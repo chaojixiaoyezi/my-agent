@@ -48,6 +48,27 @@ class TestDispatchSubagentsToolExecute:
         assert isinstance(call_kwargs["params"], DispatchParams)
         assert "apply" not in call_kwargs
 
+    def test_dispatch_payload_hides_legacy_subagent_paths(self):
+        """dispatch_subagents 返回给模型的 payload 不应暴露旧 data/subagents 路径。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = True
+        mock_report.summary = {}
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/project/data/subagents")
+
+        result = DispatchSubagentsTool(mock_agent).execute({"dry_run": True})
+
+        assert result.ok is True
+        assert "/data/subagents/" not in result.output
+        assert "[internal_legacy_subagent_path_hidden]" in result.output
+
     def test_dispatch_dry_run_false_executes_runners(self):
         """dry_run=false 时执行真实 runner。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool

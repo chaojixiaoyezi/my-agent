@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..io import append_jsonl
-from .compact_layout import ensure_compact_package
+from .compact_layout import CompactPackageRequest, ensure_compact_package
 from .owner_compact_indexes import sync_owner_compact_indexes
 
 
@@ -30,14 +30,16 @@ class TaskCompactRollupResult:
 # 函数用途: 汇总 task 下子代理状态、产物引用和恢复入口，并写入标准 compact 包。
 def sync_task_compact_rollup(task_workspace: str | Path, *, compact_index: int | None = None) -> TaskCompactRollupResult:
     task_root = Path(task_workspace)
-    compact_root = task_root / "compact"
+    work_root = _task_work_root(task_root)
+    compact_root = work_root / "compact"
     index = compact_index if compact_index is not None else _next_compact_index(compact_root / "compact_ledger.jsonl")
-    package = ensure_compact_package(compact_root, compact_index=index, scope="task")
+    package = ensure_compact_package(compact_root, CompactPackageRequest(compact_index=index, scope="task"))
     child_runs = _child_run_records(task_root)
     rollup_json = compact_root / "task_rollup.json"
     rollup_md = compact_root / "task_rollup.md"
     rollup = _rollup_payload(task_root, child_runs, package.package_dir, rollup_json=rollup_json)
     _write_json(rollup_json, rollup)
+    _write_branch_rollup(compact_root, rollup, branch_id="main")
     rollup_md.write_text(_rollup_markdown(rollup), encoding="utf-8")
     _write_json(package.work_state_snapshot_json, _work_state_payload(rollup))
     _write_json(package.refs_json, _refs_payload(rollup_json, rollup_md, child_runs))
@@ -65,11 +67,24 @@ def sync_task_compact_rollup(task_workspace: str | Path, *, compact_index: int |
         child_count=len(child_runs),
     )
 
+# LLM: _write_branch_rollup records per-branch task progress without changing the main rollup.
+# 函数用途: 写入 work/compact/rollups/branch_<id>_rollup.json，供分支恢复快速读取。
+def _write_branch_rollup(compact_root: Path, rollup: dict[str, object], *, branch_id: str) -> Path:
+    branch_payload = {
+        **rollup,
+        "schema_version": "task-compact-branch-rollup.v1",
+        "branch_id": _safe_branch_id(branch_id),
+    }
+    path = compact_root / "rollups" / f"branch_{_safe_branch_id(branch_id)}_rollup.json"
+    _write_json(path, branch_payload)
+    return path
+
+
 # LLM: _child_run_records collects lightweight child state rows from agent state files.
-# 函数用途: 从 task/agents/*/state.json 提取状态、进度、摘要、产物引用和阻塞原因。
+# 函数用途: 从 task/work/agents/*/state.json 提取状态、进度、摘要、产物引用和阻塞原因。
 def _child_run_records(task_root: Path) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    agents_root = task_root / "agents"
+    agents_root = _agents_root(task_root)
     for state_path in sorted(agents_root.glob("*/state.json")):
         payload = _read_json(state_path)
         run_id = str(payload.get("id") or payload.get("run_id") or state_path.parent.name)
@@ -104,7 +119,7 @@ def _rollup_payload(
     *,
     rollup_json: Path,
 ) -> dict[str, object]:
-    state = _read_json(task_root / "state.json")
+    state = _read_json(_task_state_path(task_root))
     status_groups = _status_groups(child_runs)
     return {
         "schema_version": "task-compact-rollup.v1",
@@ -128,6 +143,27 @@ def _rollup_payload(
         ),
         "updated_at": _now_iso(),
     }
+
+
+# LLM: _task_work_root resolves the current work/ authority while preserving legacy read compatibility.
+# 函数用途: 返回任务过程区；新目录用 work/，旧 task 根目录只作为迁移读取兜底。
+def _task_work_root(task_root: Path) -> Path:
+    work = task_root / "work"
+    return work if work.exists() else task_root
+
+
+# LLM: _agents_root keeps child-run scans pointed at work/agents for new tasks.
+# 函数用途: 返回子代理状态根目录；新目录优先 work/agents，旧 agents 只作兼容读取。
+def _agents_root(task_root: Path) -> Path:
+    work_agents = task_root / "work" / "agents"
+    return work_agents if work_agents.exists() else task_root / "agents"
+
+
+# LLM: _task_state_path reads work/state.json as the task state authority.
+# 函数用途: 返回任务状态文件；新目录优先 work/state.json，旧 state.json 只作兼容读取。
+def _task_state_path(task_root: Path) -> Path:
+    work_state = task_root / "work" / "state.json"
+    return work_state if work_state.exists() else task_root / "state.json"
 
 
 # LLM: _work_state_payload narrows rollup data to the standard compact work-state snapshot.
@@ -313,6 +349,13 @@ def _safe_float(value: object) -> float:
 # 函数用途: 返回当前 UTC ISO 时间字符串。
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+# LLM: _safe_branch_id normalizes compact branch ids for filenames.
+# 函数用途: 把任意 branch 值转换成可用于文件名的稳定标识。
+def _safe_branch_id(value: object) -> str:
+    text = str(value or "main").strip() or "main"
+    result = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in text)
+    return result.strip("._-") or "main"
 
 
 __all__ = ["TaskCompactRollupResult", "sync_task_compact_rollup"]

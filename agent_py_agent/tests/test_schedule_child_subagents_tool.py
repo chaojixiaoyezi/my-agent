@@ -67,6 +67,43 @@ def test_runner_context_schedule_auto_starts_created_children(tmp_path, monkeypa
     assert payload["auto_start"]["run_ids"] == payload["created_run_ids"]
 
 
+def test_runner_context_schedule_hides_legacy_subagent_paths(tmp_path, monkeypatch):
+    """schedule_child_subagents 返回给模型的 payload 不应暴露旧 data/subagents 路径。"""
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="data/subagents"), tmp_path)
+    root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
+    agent._current_subagent_run_id = root.id
+
+    def fake_start(_agent, run_ids):
+        return {
+            "status": "started",
+            "dispatch_mode": "background",
+            "run_ids": list(run_ids),
+            "agent_tree": {
+                "nodes": [
+                    {
+                        "run_id": run_ids[0],
+                        "workspace_refs": {
+                            "final_report": str(tmp_path / "data" / "subagents" / "tasks" / root.id / "report.md")
+                        },
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.orchestration_background_dispatch._start_background_dispatch",
+        fake_start,
+    )
+
+    result = ScheduleChildSubagentsTool(agent).execute({
+        "children": [{"goal": "查一份文件并写结果", "role": "worker", "agent_name": "reader"}]
+    })
+
+    assert result.ok is True
+    assert "/data/subagents/" not in result.output
+    assert "[internal_legacy_subagent_path_hidden]" in result.output
+
+
 def test_auto_start_dispatch_keeps_current_runner_parent_scope(tmp_path):
     """后台启动参数要保留当前 runner 作用域，避免越过父子边界。"""
     from agent_py_agent.agent.agent_core.orchestration_background_dispatch import (

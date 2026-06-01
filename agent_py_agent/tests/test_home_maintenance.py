@@ -80,6 +80,52 @@ def test_home_doctor_reports_migration_dangling_index_and_retention_advice(tmp_p
     assert any(item["kind"] == "dangling_index" for item in report["findings"])
 
 
+# LLM: doctor should summarize recoverability and pending owner requests without blocking runtime.
+# 函数用途: 验证 home doctor 能看到备份、能力申请和临时授权状态，便于上线前排查闭环缺口。
+def test_home_doctor_reports_backup_requests_and_grants(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from agent_py_agent.agent.user_space.capability_requests import (
+        CreateCapabilityRequest,
+        create_capability_request,
+    )
+    from agent_py_agent.agent.user_space.home_backup import create_home_backup_snapshot
+    from agent_py_agent.agent.user_space.home_doctor import build_home_doctor_report
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.temporary_grants import (
+        CreateTemporaryGrant,
+        create_temporary_grant,
+    )
+
+    home = ensure_my_agent_home(tmp_path)
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    create_home_backup_snapshot(home, reason="doctor")
+    create_capability_request(
+        home,
+        CreateCapabilityRequest(
+            requested_by="agent-1",
+            capability="tool:browser",
+            reason="需要网页检查",
+            expires_at=(now + timedelta(hours=1)).isoformat(),
+        ),
+    )
+    create_temporary_grant(
+        home,
+        CreateTemporaryGrant(
+            granted_to="agent-1",
+            capability="filesystem.write",
+            path_prefix=str(home.owner_workspace_dir),
+            expires_at=(now + timedelta(hours=1)).isoformat(),
+        ),
+    )
+
+    report = build_home_doctor_report(home)
+
+    assert report["backup"]["snapshot_count"] == 1
+    assert report["capability_requests"]["open_count"] == 1
+    assert report["temporary_grants"]["active_count"] == 1
+
+
 def test_owner_retention_plan_and_apply_delete_only_expired_files(tmp_path: Path) -> None:
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.home_retention import (

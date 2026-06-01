@@ -9,7 +9,8 @@ Human version:
 Tool results can be useful evidence, but large bodies do not belong in raw
 archive rows, token ledgers, or compact metadata. This module writes the full
 tool output to an artifact file and returns a compact record with preview,
-hash, size, and path. It does not change what the current model turn sees.
+hash, size, and path. Internal orchestration/status tool outputs are stored in
+their model-visible sanitized form; ordinary file/web/shell outputs stay raw.
 """
 
 import hashlib
@@ -19,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..model_visible_ref_sanitizer import sanitize_model_visible_tool_output
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_reserved_fields,
@@ -48,9 +50,9 @@ class ExternalizeToolOutputRequest:
 
 
 # LLM: externalize_tool_output_record 是 runtime 工具输出进入 memory archive artifact 的唯一入口。
-# 函数用途: 大输出写 artifact 文件，小输出只返回 preview/hash；返回值可直接放入 archive_tool_calls。
+# 函数用途: 大输出写 artifact 文件，小输出只返回 preview/hash；内部状态工具先做展示层路径净化，普通工具保持原文。
 def externalize_tool_output_record(request: ExternalizeToolOutputRequest) -> dict[str, Any]:
-    output = str(request.output or "")
+    output = sanitize_model_visible_tool_output(request.tool, str(request.output or ""))
     digest = _sha256_text(output)
     resolved = _resolved_request_limits(request)
     record = _base_record(request, output, digest, preview_chars=resolved.preview_chars)

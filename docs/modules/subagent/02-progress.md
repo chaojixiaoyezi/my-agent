@@ -59,15 +59,16 @@
 - `effective_permissions` 增加 owner_id、owner_home、owner policy 派生的 disabled_tools、max_subagents、max_depth。它是系统派生快照，不接受模型自己提权。
 - 工具上下文会过滤 owner policy 显式禁用的工具；父级没有的工具/权限不会因为子代理层级变深而突然出现。
 - 子代理保存时会在 `owner_home/agents/<run_id>/` 写 refs-only projection，里面只放 state 和 refs，不复制大正文、不制造第二套事实源。
-- 子代理保存还会刷新 `tasks/<root_id>/compact/task_rollup.json`。父代理恢复时先看任务级 rollup，就能知道哪些 child run 完成、卡住、产物在哪里，再决定是否深入某个 child compact。
+- 子代理保存还会刷新当前任务目录的 `work/compact/task_rollup.json`。父代理恢复时先看任务级 rollup，就能知道哪些 child run 完成、卡住、产物在哪里，再决定是否深入某个 child compact；旧 `tasks/<root_id>/compact/...` 只作为迁移期读取兼容。
 - 如果 manager 持有 `home_paths`，子代理保存会登记 `global_index/active_agents.jsonl`；这只是发现索引，不替代 task/run/agent 工作区正文。
 - 如果 manager 持有 `home_paths`，子代理保存会同时登记 `global_index/active_tasks.jsonl`、`active_runs.jsonl` 和 `active_agents.jsonl`。父代理、tree、doctor 和 compact 恢复共用这套轻量发现入口；真实正文仍然在 task workspace、agent run workspace 和旧兼容工单目录。
 - 旧 `subagent_workspace` 继续作为 runner 工作目录兼容入口；owner projection 只是统一查找、恢复、tree 和 compact 的索引视图。
 
 ## 2026-05-28 模型可见路径收敛
 
-- `inspect_agent_tree` 的模型可见输出只暴露当前 `task_workspace`、`agent_run_workspace`、artifact refs、evidence refs 和 recovery refs。
-- 旧式 work-order 目录仍留在兼容恢复文件中，但不再作为状态面主路径返回，避免父代理接管时按 `data/subagents/<run_id>/...` 猜旧路径。
+- `inspect_agent_tree`、`create_subagents`、`dispatch_subagents`、`schedule_child_subagents` 和 CLI/人工看板这类模型可见状态输出，会统一净化旧式 `data/subagents/...` 路径；旧路径仍留在内部兼容恢复文件中，但不会作为模型可读地址返回。
+- 当前内部编排/状态工具的 tool-output 归档也会写入同一份净化后的模型可见内容；更早生成的旧归档在经 `read_artifact` 展开时会按来源工具再净化一次，避免历史 `create_subagents` / `inspect_agent_tree` 结果把旧路径重新带回上下文。普通 `read_file`、网页、命令输出和用户产物正文保持原文。
+- 旧式 work-order 目录不再作为状态面主路径返回，避免父代理接管时按 `data/subagents/<run_id>/...` 猜旧路径或直接 `read_file` 旧账本。
 - 父级读取子代理结果时，应优先用 `agent_run_workspace`、`final_report_ref`、`artifact_refs` 和 `evidence_refs`，不要自己拼子代理目录。
 - 如果模型仍然拿旧路径或抄错路径去读，`read_file/list_files/search_text`
   会返回 `path_not_found=true`、`candidate_paths` 和下一步建议；这只是恢复提示，

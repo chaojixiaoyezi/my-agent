@@ -99,6 +99,10 @@ def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
     result = agent.run("做一个示例网站", request_id="req-ctx", run_id="run-ctx", task_id="主代理任务")
 
     assert "# Main Agent Context Bundle v1" in result.prompt
+    task_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "主代理任务"
+    assert "# Current Task Workspace" in result.prompt
+    assert f"- output_dir: {task_root / 'output'}" in result.prompt
+    assert f"- work_dir: {task_root / 'work'}" in result.prompt
     assert result.main_context_bundle_path
     bundle_path = Path(result.main_context_bundle_path)
     assert bundle_path.exists()
@@ -112,6 +116,13 @@ def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
     assert payload["workspace_refs"]["my_agent_home"] == str(home.resolve())
     assert payload["workspace_refs"]["owner_home"] == str((home / "owners" / "local" / "main").resolve())
     assert payload["workspace_refs"]["owner_tasks_root"] == str((home / "owners" / "local" / "main" / "tasks").resolve())
+    assert "workspace_tasks_root" not in payload["workspace_refs"]
+    assert payload["owner_model"]["task_workspace_refs"]["owner_tasks_root"] == str(
+        (home / "owners" / "local" / "main" / "tasks").resolve()
+    )
+    assert payload["task"]["attributes"]["run_workspace"]["output_dir"] == str(task_root / "output")
+    assert payload["task"]["attributes"]["run_workspace"]["work_dir"] == str(task_root / "work")
+    assert "workspace_tasks_root" not in payload["owner_model"]["task_workspace_refs"]
     assert payload["task"]["user_prompt_preview"] == "做一个示例网站"
     assert result.main_context_bundle_markdown_path
     assert Path(result.main_context_bundle_markdown_path).exists()

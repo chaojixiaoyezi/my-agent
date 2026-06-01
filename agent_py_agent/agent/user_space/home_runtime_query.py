@@ -245,7 +245,6 @@ def _task_workspace_payload(state_path: Path) -> dict[str, Any]:
         "task_yaml_path": str(work / "task.yaml" if (work / "task.yaml").exists() else root / "task.yaml"),
         "output_dir": str(root / "output"),
         "work_dir": str(work),
-        "outputs_dir": str(root / "output"),
         "runtime_dir": str(work / "runtime"),
         "agents_dir": str(work / "agents"),
         "logs_dir": str(work / "logs"),

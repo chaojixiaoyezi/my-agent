@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..action_protocol import subagent_schedule_envelope_from_payload
+from ..model_visible_ref_sanitizer import sanitize_model_visible_refs
 from ..subagents.services.hierarchy_scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
@@ -158,7 +159,7 @@ def _schedule_payload_json(result: HierarchyScheduleResult, state_payload: dict[
         payload,
         tool="schedule_child_subagents",
     ).to_dict()
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+    return json.dumps(sanitize_model_visible_refs(payload), ensure_ascii=False, indent=2)
 
 
 # LLM: _schedule_auto_start mirrors create_subagents startup while preserving current runner scope.

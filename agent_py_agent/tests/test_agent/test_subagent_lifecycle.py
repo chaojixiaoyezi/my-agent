@@ -214,6 +214,23 @@ def test_subagent_board_scales_and_flags():
         assert (root / "subs" / "SUBAGENT_BOARD.md").exists()
 
 
+# LLM: Board output is model-visible status and must not leak legacy work-order paths.
+# 函数用途: 确认 subagent_board JSON 不把旧 data/subagents 路径递给上级模型。
+def test_subagent_board_hides_legacy_subagent_paths():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(subagent_workspace="data/subagents")
+        agent = SimpleAgent(cfg, root)
+        agent.subagents.create_run(goal="整理材料", thought="测试旧路径净化", plan=["执行"])
+
+        board = agent.subagents.write_board(recent_limit=10)
+        board_text = (root / "data" / "subagents" / "subagent_board.json").read_text(encoding="utf-8")
+
+        assert board.summary["total"] == 1
+        assert "/data/subagents/" not in board_text
+        assert "[internal_legacy_subagent_path_hidden]" in board_text
+
+
 def _make_due_check_stale_active_run(agent):
     active = agent.subagents.create_run(
         goal="实现长任务巡检",

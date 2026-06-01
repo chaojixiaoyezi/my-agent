@@ -20,6 +20,7 @@
 - 2026-05-31 HOT/路由/lessons 第二片接实：`PromptBuilder` 普通主代理上下文会读取 `memory-hot.md`，task-local/control-plane 仍隔离；新增 `home_memory_notes.py`，提供 HOT 去重追加和 lesson + route index 同步写入入口；auto resume 读取 owner raw archive 优先、旧 workspace archive 兜底，避免 owner-home 迁移后“继续”找不到刚写入的归档。
 - 2026-05-31 Owner 隔离补强：provider user/group 不再读取本地 CLI 旧 `memory_path`、旧顶层 daily/task workspace；保存型 provider run 只写入并登记自己的 `owner_home/tasks`；HOT、lesson 和 route index 写入也改为非 local/main owner 优先自己的 owner home。local/main 仍保留旧顶层入口兼容历史数据。
 - 2026-06-01 Owner 记忆闭环补强：工具输出外置归档改为写入当前 `owner_home/memory_archive/artifacts/tool_outputs/`，旧 workspace 根 `memory_archive/` 不再接收新工具输出；global index 读取和 doctor 悬空检查按 owner/task/run/agent 身份只看最新 append-only 引用；retention 显式清理会写 owner audit log；子代理保存会同时登记 task/run/agent 三层 refs，父代理、tree、doctor 共用这一套发现入口。
+- 2026-06-01 tool-output 模型可见路径补强：内部编排/状态工具的新外置归档会保存净化后的模型可见正文；更早的旧归档在 `read_artifact` 展开时按来源工具再净化一次，避免历史 `data/subagents/...` 路径重新进入上下文。普通 `read_file`、网页、shell/controlled_exec 输出和用户产物正文保持原文，不做展示替换。
 - 2026-06-01 Owner home 主链路继续收敛：保存型 local/main run 的新任务工作区也写入 `owner_home/tasks/...`，旧顶层 `tasks/...` 只保留读取/迁移兼容；新增 `home-index-rebuild` 显式维护命令，默认 dry-run，`--apply` 才从 owner 正文重建 owner/task/run/agent 全局索引；task compact rollup 会同步 `owner_home/compact/by_task|by_run|by_agent/` 轻量指针，父代理恢复时可先读 owner 级索引再打开具体 rollup。
 - 2026-05-30 `task_progress` 增加软质量提示：如果模型把条目标成 `done` 但没有 evidence，系统只在 `quality_hints` 里提醒补文件、产物或工具结果引用；这不会影响 closeout，不会阻断任务。compact / tree 会带着这个提示，帮助长任务压缩后继续把证据补扎实。
 - 2026-05-31 `task_progress` 的软提示进一步细化：覆盖账本里还有对象或检查点没完成时，会给 `next_suggestions` 和 `soft_prompt`，提醒模型继续选一个未完成对象、读核心文件或可靠来源、补 evidence、再写进报告。它仍然只是提示，不改状态、不触发 closeout、不阻断任务。
@@ -32,7 +33,7 @@
 - 2026-05-30 `task_progress` 增加通用 coverage 覆盖账本：同一个工具可记录“哪些对象需要覆盖、每个对象有哪些检查点、哪些已写证据”。对象类型完全开放，可以是项目、论文、API、日志源、文件、模块或子代理；coverage 只帮助 compact/tree/父代理看清缺口，不触发验收或阻断。
 - 2026-05-30 外部运行中提示入口已接入同一 guidance inbox：`my-agent guidance-send --run-id <id> "自然语言提示"` 会写入 `ConversationStore` guidance 账本，目标代理下一轮读取；它不推进、不验收、不阻断，只相当于人在运行中补一句话。
 - 2026-05-31 runtime fact 增加通用 `run_intent`：当用户明确要求目标产物路径时，系统会把目标产物和其它显式参考目录带进 compact handoff。`write_file` 写到参考目录时只返回软提醒，不阻断；没有明确落盘目标时不会凭空制造“必须写文件”的要求。
-- 2026-05-30 真实 compact 压力测试命中 provider 429。网关已保持短退避重试；重试耗尽后现在抛 `ProviderTransientError`，CLI 输出 `provider_transient` 可恢复提示，不再把裸 HTTP traceback 当成任务失败正文。
+- 2026-05-30 真实 compact 压力测试命中 provider 429。网关已保持请求前短退避重试；工具循环现在还会在当前模型回合内按 `10/25/45/100/180` 秒等待表自动重试 provider transient，避免整轮 run 重启或重复执行已完成工具。重试耗尽后抛 `ProviderTransientError`，CLI 输出 `provider_transient` 可恢复提示，不再把裸 HTTP traceback 当成任务失败正文。
 - 2026-05-29 Compact Action Guard 已按普通任务放宽：`acceptance`、`constraints`、`latest_tests` 缺失时只写入 `missing_fields` 提醒，不再阻断自动续接；只有 consistency/self-check/refs/goal/next_step 这类恢复包硬完整性失败时才停车。
 - 2026-05-29 Compact 触发入口已统一：正常 token 阈值触发和上下文溢出兜底触发都走 `compact_suggest -> compact_auto -> compact_apply -> compact_resume -> continue_packet` 同一套链路，只通过 `trigger.reason/source/forced` 区分原因；`runtime_reason=context_overflow` 即使低于普通阈值，也会进入同一个 auto-apply / apply-resume 流程，`save=False` 或 guard 不通过时才退回确认建议。
 - 2026-05-27 Memory 读取预算已回到主配置：artifact 默认读取长度、artifact 读取预算、工具输出外置阈值/预览长度、自动恢复上下文扫描 limit 都从 `agent_config.yaml` / `AgentConfig` 读取；memory 模块不再保留第二份隐藏默认数字。

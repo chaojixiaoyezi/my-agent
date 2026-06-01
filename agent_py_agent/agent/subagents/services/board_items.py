@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ...model_visible_ref_sanitizer import sanitize_model_visible_refs
 from ..models import SubAgentBoardOptions, SubAgentTask
 from ..reports import SubAgentBoardItem
 from .task_target_tokens import task_actual_target_tokens
@@ -124,7 +125,7 @@ def _board_item_payload(
 ) -> dict[str, object]:
     open_request_count, open_gap_count = counts
     timing = _task_timing(task)
-    return {
+    return sanitize_model_visible_refs({
         "id": task.id,
         "root_id": task.root_id,
         "parent_id": task.parent_id,
@@ -170,11 +171,12 @@ def _board_item_payload(
         "artifact_refs": _bounded_unique_strings(task.artifact_refs, limit=12),
         "artifact_registry_refs": _registry_records(task.attributes.get("artifact_registry_refs"), limit=12),
         "evidence_refs": _bounded_unique_strings(task.evidence_refs, limit=12),
-    }
+    })
 
 
+# LLM: _task_timing is a parent-facing observation only; it must not change task status.
+# 函数用途: 计算子代理运行时长和距最近进展秒数，供看板展示。
 def _task_timing(task: SubAgentTask) -> dict[str, float]:
-    # LLM: Timing is a parent-facing observation only; it must not change task status.
     now = time.time()
     started = float(task.heartbeat_at or task.created_at or task.updated_at or 0.0)
     progress_at = float(task.last_progress_at or task.heartbeat_at or task.updated_at or task.created_at or 0.0)
@@ -221,6 +223,8 @@ def _bounded_unique_strings(value: object, *, limit: int) -> list[str]:
     return items
 
 
+# LLM: _registry_records exposes bounded artifact registry rows without expanding artifact bodies.
+# 函数用途: 去重并限制返回给父代理看的 artifact registry 引用。
 def _registry_records(value: object, *, limit: int) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []

@@ -77,7 +77,7 @@ Task workspace 是任务事实源。后续开发新增任务级能力时，应�
 - `findings.jsonl`：本 run 产生的结构化发现。
 - `SKILL_SPARKS.md`：本 run 的 skill 学习候选，只是候选，不自动写入长期记忆或正式 skill。
 
-当前 Phase 1 已先落地 agent run workspace skeleton：subagent 保存时会在 `tasks/<root_id>/agents/<run_id>/` 写 `agent.yaml`、run `state.json`、`task.md`、run `timeline.jsonl`、`checkpoint.json`、`summary.md`、`final_report.md`、`findings.jsonl`，并创建 `inbox/`、`outbox/`、`artifacts/`、`compactions/`。旧 work-order 目录仍继续读写，run workspace 先作为恢复、接管和后续 compact 的兼容面。
+当前 Phase 1 已先落地 agent run workspace skeleton：新任务目录使用 `tasks/{date}/{task_slug}/work/agents/<run_id>/` 写 `agent.yaml`、run `state.json`、`task.md`、run `timeline.jsonl`、`checkpoint.json`、`summary.md`、`final_report.md`、`findings.jsonl`，并创建 `inbox/`、`outbox/`、`artifacts/`、`compactions/`。旧 `tasks/<root_id>/agents/<run_id>/` 和旧 work-order 目录仍作为迁移期读取兼容，run workspace 先作为恢复、接管和后续 compact 的兼容面。
 
 ## Daily Event Ledger 要求
 

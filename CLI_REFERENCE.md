@@ -575,7 +575,7 @@ my-agent task-workspace-list --date 2026-05-13
 my-agent task-workspace-list "购物网站" --json
 ```
 
-列出 `~/.my-agent/tasks/{date}/{task_slug}/` 下的主代理任务工作区。任务根目录只分两块：`output/` 是可复制走的最终交付物，`work/` 是状态、日志、compact、子代理账本和草稿等过程材料。命令会展示 `work/state.json`、`work/timeline.jsonl`、`work/task.yaml`、`output/`、`work/runtime/`、`work/agents/` 等引用，帮助恢复和前端调试；不会读取产物正文，也不会调用模型。
+列出当前 `owner_home/tasks/{date}/{task_slug}/` 下的主代理任务目录。任务根目录只分两块：`output/` 是可复制走的最终交付物，`work/` 是状态、日志、compact、子代理账本和草稿等过程材料。命令会展示 `work/state.json`、`work/timeline.jsonl`、`work/task.yaml`、`output/`、`work/runtime/`、`work/agents/` 等引用，帮助恢复和前端调试；不会读取产物正文，也不会调用模型。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |

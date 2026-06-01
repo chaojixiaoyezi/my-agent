@@ -56,3 +56,55 @@ def test_backup_manifest_records_owner_refs_without_copying_large_files(tmp_path
     assert manifest.manifest_path.exists()
     assert manifest.reason == "schema migration"
     assert str(home.owner_memory_dir) in manifest.included_roots
+
+
+# LLM: backup restore must recover owner facts, not only write a manifest saying what would be copied.
+# 函数用途: 验证 owner memory/task/index 可以从真实备份快照恢复。
+def test_home_backup_snapshot_can_restore_owner_files(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.home_backup import (
+        create_home_backup_snapshot,
+        restore_home_backup_snapshot,
+    )
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    memory_file = home.owner_memory_long_term_dir / "memory.jsonl"
+    task_state = home.owner_tasks_dir / "2026-06-01" / "demo" / "work" / "state.json"
+    memory_file.parent.mkdir(parents=True, exist_ok=True)
+    task_state.parent.mkdir(parents=True, exist_ok=True)
+    memory_file.write_text('{"content":"hello"}\n', encoding="utf-8")
+    task_state.write_text('{"task_id":"demo"}\n', encoding="utf-8")
+
+    snapshot = create_home_backup_snapshot(home, reason="restore smoke")
+    memory_file.unlink()
+    task_state.unlink()
+
+    restored = restore_home_backup_snapshot(home, snapshot.backup_dir)
+
+    assert restored.restored_count >= 2
+    assert memory_file.read_text(encoding="utf-8") == '{"content":"hello"}\n'
+    assert task_state.read_text(encoding="utf-8") == '{"task_id":"demo"}\n'
+
+
+# LLM: restore dry-run should show what would be overwritten before copying files back.
+# 函数用途: 验证备份恢复可以先预览覆盖范围，不直接改 owner home。
+def test_home_backup_restore_dry_run_reports_paths_without_copying(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.home_backup import (
+        create_home_backup_snapshot,
+        plan_home_backup_restore,
+    )
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    memory_file = home.owner_memory_long_term_dir / "memory.jsonl"
+    memory_file.parent.mkdir(parents=True, exist_ok=True)
+    memory_file.write_text('{"content":"before"}\n', encoding="utf-8")
+
+    snapshot = create_home_backup_snapshot(home, reason="dry-run")
+    memory_file.write_text('{"content":"after"}\n', encoding="utf-8")
+
+    plan = plan_home_backup_restore(home, snapshot.backup_dir)
+
+    assert plan.restore_count >= 1
+    assert str(memory_file) in plan.restore_paths
+    assert memory_file.read_text(encoding="utf-8") == '{"content":"after"}\n'

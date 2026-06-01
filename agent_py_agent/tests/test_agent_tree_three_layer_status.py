@@ -66,16 +66,16 @@ def test_agent_tree_workspace_refs_hide_legacy_task_dir():
                         task_id="child-1",
                         status="RUNNING",
                         workspace_refs={
-                            "task_dir": "/tmp/workspace/data/subagents/tasks/root-1",
-                            "task_workspace": "/tmp/workspace/data/subagents/tasks/root-1",
-                            "agent_run_workspace": "/tmp/workspace/data/subagents/tasks/root-1/agents/child-1",
+                            "task_dir": "/tmp/home/owners/local/main/tasks/2026-06-01/root-1",
+                            "task_workspace": "/tmp/home/owners/local/main/tasks/2026-06-01/root-1",
+                            "agent_run_workspace": "/tmp/home/owners/local/main/tasks/2026-06-01/root-1/work/agents/child-1",
                             "legacy_task_dir": "/tmp/workspace/data/subagents/child-1",
                         },
                     )
                 ],
                 source_refs={
                     "root_task_dir": "/tmp/workspace/data/subagents/tasks/root-1",
-                    "root_task_workspace": "/tmp/workspace/data/subagents/tasks/root-1",
+                    "root_task_workspace": "/tmp/home/owners/local/main/tasks/2026-06-01/root-1",
                 },
             )
 
@@ -85,9 +85,43 @@ def test_agent_tree_workspace_refs_hide_legacy_task_dir():
     payload = agent_tree_status_payload(_Agent())
     node = payload["nodes"][0]
 
-    assert node["workspace_refs"]["agent_run_workspace"].endswith("/tasks/root-1/agents/child-1")
+    assert node["workspace_refs"]["agent_run_workspace"].endswith("/root-1/work/agents/child-1")
     assert "legacy_task_dir" not in node["workspace_refs"]
-    assert "/data/subagents/child-1" not in str(payload)
+    assert "/data/subagents/" not in str(payload)
+
+
+# LLM: Model-visible status should redact any remaining old subagent paths, including source refs.
+# 函数用途: 防止 inspect_agent_tree 把旧 data/subagents 路径递给模型后被模型 read_file 误读。
+def test_agent_tree_redacts_legacy_subagent_paths_everywhere():
+    class _Manager:
+        def kernel_snapshot(self, query):
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                scope=query.scope,
+                runs=[
+                    SubagentKernelRun(
+                        run_id="child-1",
+                        task_id="child-1",
+                        status="RUNNING",
+                        workspace_refs={
+                            "task_workspace": "/tmp/project/data/subagents/tasks/root-1",
+                            "agent_run_workspace": "/tmp/project/data/subagents/tasks/root-1/agents/child-1",
+                            "final_report": "/tmp/project/data/subagents/tasks/root-1/agents/child-1/final_report.md",
+                        },
+                    )
+                ],
+                source_refs={
+                    "root_agent_run_workspace": "/tmp/project/data/subagents/tasks/root-1/agents/child-1",
+                },
+            )
+
+    class _Agent:
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent())
+
+    assert "/data/subagents/" not in str(payload)
+    assert "[internal_legacy_subagent_path_hidden]" in str(payload)
 
 
 # LLM: Tree status should expose registry records beside legacy path refs.

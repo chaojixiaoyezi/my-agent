@@ -45,7 +45,7 @@ def cmd_memory_daily_list(args) -> int:
 
 
 # LLM: cmd_task_workspace_list is the read-only CLI bridge for home task workspace discovery.
-# 函数用途: 列出 ~/.my-agent/workspace/tasks 下的任务工作区，帮助恢复、调试和前端展示。
+# 函数用途: 列出当前 owner_home/tasks 下的任务目录，帮助恢复、调试和前端展示。
 def cmd_task_workspace_list(args) -> int:
     agent = make_agent(args)
     request = TaskWorkspaceQuery(

@@ -18,6 +18,7 @@ from .compact_auto_continuation import (
     compact_auto_continuation_decision,
     mark_compact_auto_continued,
 )
+from .run_task_workspace_writer import attach_run_task_workspace_context
 from .runtime_loop_models import RuntimeContextRequest
 from .runtime_loop_support import (
     FinalizeParams,
@@ -58,6 +59,8 @@ class _CompressionSnapshotRequest:
     resume_context_section: object
 
 
+# LLM: _PromptScopeSnapshot preserves nested run prompt state while tools inspect current run identity.
+# 类用途: 记录进入 run 作用域前的临时 prompt/params 字段，退出时无损恢复。
 @dataclass(frozen=True)
 class _PromptScopeSnapshot:
     had_prompt: bool
@@ -263,6 +266,7 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
 # LLM: _run_once_with_params contains one normal model/tool/finalize pass for reuse by auto continuation.
 # 函数用途: 执行单轮 run，不处理自动 compact 后续跑，避免递归和重复上下文作用域。
 def _run_once_with_params(agent, user_prompt: str, params: RunParams):
+    params = attach_run_task_workspace_context(agent, params, user_prompt)
     root_user_prompt = params.root_user_prompt or user_prompt
     with _current_prompt_scope(agent, user_prompt, params):
         prepared = _prepare_runtime_context(

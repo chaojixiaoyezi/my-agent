@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..model_visible_ref_sanitizer import sanitize_model_visible_tool_output
 from .artifact_read_modes import (
     ArtifactContentReadRequest,
     ArtifactContentReadResult,
@@ -76,8 +77,8 @@ def estimate_tool_output_artifact_size(request: ReadToolOutputArtifactRequest) -
         return None
 
 
-# LLM: _read_registered_artifact validates artifact JSON and returns only the requested content slice.
-# 函数用途: 读取 artifact JSON 正文，校验 kind/content/hash，再按 offset/max_chars 返回显式读取片段。
+# LLM: _read_registered_artifact validates artifact JSON and returns only the requested model-visible slice.
+# 函数用途: 校验原始正文 hash 后再读取片段；历史内部状态工具归档会先做展示层路径净化，普通工具保持原文。
 def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
     path = read.path
     record = read.record
@@ -94,9 +95,11 @@ def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
     expected = str(payload.get("sha256") or record.get("sha256") or "")
     if expected and digest != expected:
         return _error_payload("artifact_hash_mismatch", artifact_ref, "artifact content hash does not match metadata")
+    tool = str(payload.get("tool") or record.get("tool") or "")
+    model_content = sanitize_model_visible_tool_output(tool, content)
     read_result = read_artifact_content_by_mode(
         ArtifactContentReadRequest(
-            content=content,
+            content=model_content,
             mode=request.mode,
             offset=request.offset,
             max_chars=request.max_chars,
@@ -106,6 +109,7 @@ def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
     if not read_result.ok:
         return _error_payload(read_result.error_code, artifact_ref, read_result.message)
     base = _success_base_payload(read, payload, content, digest)
+    base["content_sanitized"] = model_content != content
     base.update(_success_content_payload(read_result))
     base.update(read_result.metadata or {})
     return base

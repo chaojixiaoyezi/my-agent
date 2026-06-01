@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from ..action_protocol import subagent_schedule_envelope_from_payload
 from ..contracts.idempotency import idempotency_key, operation_id
+from ..model_visible_ref_sanitizer import sanitize_model_visible_refs
 from .orchestration_child_result_index import child_result_index
 from .orchestration_create_idempotency import created_tasks, dispatchable_tasks, reused_tasks
 from .orchestration_dispatch_state_contract import dispatch_state_contract_payload
@@ -54,7 +55,7 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
     }
     payload.update(dispatch_state_contract_payload(agent))
     payload["typed_envelope"] = subagent_schedule_envelope_from_payload(payload, tool="create_subagents").to_dict()
-    return payload
+    return sanitize_model_visible_refs(payload)
 
 
 # LLM: _pending_dispatch_tasks separates explicit deferred starts from already auto-started runs.
@@ -152,6 +153,8 @@ def _task_attributes(task: object) -> dict[str, object]:
     return dict(attrs) if isinstance(attrs, dict) else {}
 
 
+# LLM: _scheduling_advice is a soft create_subagents hint, not a dispatch blocker.
+# 函数用途: 发现测试/验收/汇总类子任务过早启动时返回中文建议。
 def _scheduling_advice(tasks: list, request_params: dict[str, object], auto_start: dict[str, object] | None) -> list[dict[str, object]]:
     del request_params
     advice: list[dict[str, object]] = []
@@ -169,11 +172,15 @@ def _scheduling_advice(tasks: list, request_params: dict[str, object], auto_star
     return advice
 
 
+# LLM: _is_dependent_quality_role uses role labels only to phrase scheduling advice.
+# 函数用途: 判断子任务是否像测试、找错、验收或汇总类依赖后置任务。
 def _is_dependent_quality_role(task: object) -> bool:
     role = f"{_task_text(task, 'role')} {_task_text(task, 'agent_name')}".casefold().replace("-", "_")
     return any(token in role for token in ("tester", "bug_finder", "reviewer", "verifier", "qa", "summary", "汇总", "测试", "找错", "验收"))
 
 
+# LLM: _string_items normalizes optional list-like fields from model payloads.
+# 函数用途: 将列表、元组或集合里的非空项转成字符串列表。
 def _string_items(value: object) -> list[str]:
     if not isinstance(value, list | tuple | set):
         return []

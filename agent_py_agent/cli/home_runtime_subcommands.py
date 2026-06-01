@@ -46,7 +46,7 @@ def add_home_runtime_subcommands(sub: argparse._SubParsersAction) -> None:
     memory_daily_list.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     memory_daily_list.set_defaults(func=cmd_memory_daily_list)
 
-    task_workspace_list = sub.add_parser("task-workspace-list", help="列出 home workspace/tasks 任务工作区")
+    task_workspace_list = sub.add_parser("task-workspace-list", help="列出 home tasks 任务目录")
     task_workspace_list.add_argument("query", nargs="?", default="", help="搜索 task_id/run_id/request_id/任务名")
     task_workspace_list.add_argument("--date", help="只查看某一天，格式 YYYY-MM-DD")
     task_workspace_list.add_argument("--limit", type=int, default=None, help="最多显示多少个任务；默认读配置")

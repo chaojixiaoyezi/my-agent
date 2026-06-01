@@ -32,7 +32,7 @@
 
 子代理应该做的是写自己的结果、证据引用和必要的工作文件；父级或主代理通过 `inspect_agent_tree`、`output_json` 和 refs 看状态，不要求子代理手动维护树。
 
-每次子代理保存时，系统会同步 `tasks/<root_id>/compact/task_rollup.json` 和 `task_rollup.md`。这个 rollup 是父级恢复和汇总的入口摘要：它列出子 run 状态、refs 和最近 compact 包位置，不复制大产物正文，也不替代具体子代理的 `task.json` / artifact registry。
+每次子代理保存时，系统会同步当前任务目录的 `work/compact/task_rollup.json` 和 `task_rollup.md`。这个 rollup 是父级恢复和汇总的入口摘要：它列出子 run 状态、refs 和最近 compact 包位置，不复制大产物正文，也不替代具体子代理的 `task.json` / artifact registry。旧 `tasks/<root_id>/compact/...` 只作为迁移期读取兼容。
 
 调度层只创建和推进任务节点，不再用额外 scope/duplicate/QA 硬门替父级做流程裁决。需要流水线、去重或重试时，由父级根据树状态和任务目标显式安排下一步。
 
@@ -63,7 +63,7 @@
 
 这三层都是观察事实，不触发调度、不执行验收、不阻断任务。父代理看到异常后可以自己决定催办、补派、接手、汇报或等待。
 
-状态面只返回当前布局路径。`workspace_refs.task_workspace` 指向任务级目录，`workspace_refs.agent_run_workspace` 指向具体代理运行目录；旧式 `data/subagents/<run_id>` work-order 路径只作为系统兼容恢复材料存在，不放进模型可见的 `workspace_refs`。这样父代理接管或汇总时会按 refs 读取真实产物，而不是自己拼旧目录。
+状态面只返回当前布局路径。`workspace_refs.task_workspace` 指向任务级目录，`workspace_refs.agent_run_workspace` 指向具体代理运行目录；旧式 `data/subagents/<run_id>` work-order 路径只作为系统兼容恢复材料存在，不放进模型可见的 `workspace_refs`。`create_subagents`、`dispatch_subagents`、`schedule_child_subagents` 和人工/CLI 看板返回前也会走同一层模型可见路径净化，避免嵌套 `agent_tree` 或 `child_result_index` 把旧路径重新吐给模型。当前内部编排/状态工具输出被外置到 tool-output artifact 时同样保存净化后的正文；历史旧 artifact 被 `read_artifact` 展开时也会按来源工具净化一次，但普通文件、网页、命令和用户产物正文不做这种替换。
 
 旧模型工具 `subagent_board` 已撤掉，避免和 `inspect_agent_tree` 形成两个状态入口。底层仍可写
 `subagent_board.json` / `SUBAGENT_BOARD.md` 给 CLI 或人工排查，但模型看状态只走
