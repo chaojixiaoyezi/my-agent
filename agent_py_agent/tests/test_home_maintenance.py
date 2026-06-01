@@ -9,6 +9,28 @@ from pathlib import Path
 # 模块用途: 验证 owner home 的搬家、体检和清理计划都是可审计、非破坏性、按配置工作的。
 
 
+def _write_config(tmp_path: Path, home: Path) -> Path:
+    config_path = tmp_path / "agent_config.yaml"
+    config_path.write_text(
+        f'workspace_root: "{tmp_path / "workspace"}"\n'
+        f'my_agent_home: "{home}"\n'
+        'model_backend: "echo"\n'
+        'prompt_files: []\n',
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _run_cli_json(capsys, config_path: Path, *argv: str) -> tuple[int, dict]:
+    from agent_py_agent.__main__ import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["--config", str(config_path), *argv, "--json"])
+    code = args.func(args)
+    captured = capsys.readouterr()
+    return code, json.loads(captured.out)
+
+
 def test_home_migration_copies_legacy_memory_raw_and_hooks_to_owner(tmp_path: Path) -> None:
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.home_migration import (
@@ -93,6 +115,29 @@ def test_owner_retention_plan_and_apply_delete_only_expired_files(tmp_path: Path
     ]
     assert audit_rows[-1]["event_type"] == "owner_retention_applied"
     assert audit_rows[-1]["actions"][0]["path"] == str(old_raw)
+
+
+def test_home_retention_cli_plans_and_applies_owner_cleanup(tmp_path: Path, capsys) -> None:
+    home = tmp_path / "home"
+    config_path = _write_config(tmp_path, home)
+    old_cache = home / "owners" / "local" / "main" / "cache" / "old.tmp"
+    old_cache.parent.mkdir(parents=True, exist_ok=True)
+    old_cache.write_text("cache", encoding="utf-8")
+    _set_mtime(old_cache, "2025-01-01T00:00:00+00:00")
+
+    code, payload = _run_cli_json(capsys, config_path, "home-retention")
+
+    assert code == 0
+    assert payload["retention"]["applied"] is False
+    assert payload["retention"]["actions"][0]["path"] == str(old_cache)
+    assert old_cache.exists()
+
+    code, applied = _run_cli_json(capsys, config_path, "home-retention", "--apply")
+
+    assert code == 0
+    assert applied["retention"]["applied"] is True
+    assert applied["retention"]["actions"][0]["status"] == "deleted"
+    assert not old_cache.exists()
 
 
 def _set_mtime(path: Path, iso: str) -> None:

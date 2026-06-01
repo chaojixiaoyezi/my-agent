@@ -17,6 +17,7 @@ from .common import DEFAULT_CAPABILITY_CONFIG, add_resume_context_switches
 from .context_bundle_commands import cmd_context_bundle
 from .home_runtime_commands import (
     cmd_home_migrate,
+    cmd_home_retention,
     cmd_home_status,
     cmd_memory_daily_list,
     cmd_task_workspace_list,
@@ -248,6 +249,11 @@ def _add_home_runtime_subcommands(sub: argparse._SubParsersAction) -> None:
     home_migrate.add_argument("--apply", action="store_true", help="实际复制；不传时只预览")
     home_migrate.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     home_migrate.set_defaults(func=cmd_home_migrate)
+
+    home_retention = sub.add_parser("home-retention", help="预览或执行当前 owner home 的 retention 清理")
+    home_retention.add_argument("--apply", action="store_true", help="实际删除过期文件；不传时只预览")
+    home_retention.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    home_retention.set_defaults(func=cmd_home_retention)
 
     memory_daily_list = sub.add_parser("memory-daily-list", help="列出 home/memory/daily 按天记忆")
     memory_daily_list.add_argument("query", nargs="?", default="", help="搜索关键词；为空时列出匹配日期的记录")

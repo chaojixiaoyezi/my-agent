@@ -6,6 +6,7 @@ from pathlib import Path
 from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.memory_archive import RawMemoryEvent, append_raw_event
 from agent_py_agent.agent.user_space.run_workspace import (
     EnsureRunWorkspaceRequest,
     ensure_run_workspace,
@@ -280,6 +281,94 @@ def test_memory_resume_reads_home_task_workspace_by_task_id(tmp_path: Path, caps
     assert str(paths.timeline_jsonl) in payload["resume"]["recommended_read_paths"]
 
 
+# LLM: provider memory-resume must recover from the provider owner's archive, not local/main legacy archives.
+# 函数用途: 验证外部用户主代理恢复时只读取自己的 owner-home raw archive，避免跨用户串记忆。
+def test_memory_resume_reads_configured_provider_owner_archive_only(tmp_path: Path, capsys):
+    home = tmp_path / "home"
+    config_path = _write_provider_config(tmp_path, home)
+    provider_root = home / "owners" / "providers" / "feishu" / "users" / "ou_123"
+    local_root = home / "owners" / "local" / "main"
+    append_raw_event(
+        provider_root,
+        RawMemoryEvent(
+            event_id="provider-archive-1",
+            session_id="provider-session",
+            request_id="provider-request",
+            run_id="provider-run",
+            speaker="user",
+            target="assistant",
+            action="message",
+            status="ok",
+            task_id="provider-task",
+            content_preview="provider handoff：继续这个飞书用户自己的任务。",
+            source="run",
+            created_at="2026-05-13T01:00:00+00:00",
+        ),
+    )
+    append_raw_event(
+        local_root,
+        RawMemoryEvent(
+            event_id="local-archive-should-not-leak",
+            session_id="local-session",
+            request_id="local-request",
+            run_id="local-run",
+            speaker="user",
+            target="assistant",
+            action="message",
+            status="ok",
+            task_id="local-task",
+            content_preview="provider handoff：这是本地 CLI 主账号的同名内容，不能串给飞书用户。",
+            source="run",
+            created_at="2026-05-13T01:00:00+00:00",
+        ),
+    )
+
+    code, payload = _run_cli_json(capsys, config_path, "memory-resume", "provider handoff")
+
+    assert code == 0
+    assert [item["id"] for item in payload["archive_matches"]] == ["provider-archive-1"]
+    assert payload["archive_roots"] == [str(provider_root.resolve())]
+
+
+# LLM: same task ids under different provider owners must resolve to the current owner only.
+# 函数用途: 验证跨用户同名任务恢复不会串到另一个 provider user 的任务工作区。
+def test_memory_resume_task_id_is_scoped_to_configured_provider_owner(tmp_path: Path, capsys):
+    home = tmp_path / "home"
+    config_path = _write_provider_config(tmp_path, home)
+    provider_a = home / "owners" / "providers" / "feishu" / "users" / "ou_123"
+    provider_b = home / "owners" / "providers" / "feishu" / "users" / "ou_456"
+    paths_a = ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=provider_a,
+            template="tasks/{date}/{task_slug}",
+            task_name="shared-task",
+            user_prompt="provider a",
+            request_id="req-a",
+            run_id="run-a",
+            task_id="shared-task",
+            created_at="2026-05-13T01:00:00+00:00",
+        )
+    )
+    ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=provider_b,
+            template="tasks/{date}/{task_slug}",
+            task_name="shared-task",
+            user_prompt="provider b",
+            request_id="req-b",
+            run_id="run-b",
+            task_id="shared-task",
+            created_at="2026-05-13T01:00:00+00:00",
+        )
+    )
+
+    code, payload = _run_cli_json(capsys, config_path, "memory-resume", "--task-id", "shared-task")
+
+    assert code == 0
+    assert payload["task_fact_sources"][0]["state_path"] == str(paths_a.state_json)
+    assert payload["task_fact_sources"][0]["run_id"] == "run-a"
+
+
 # LLM: memory-doctor should report whether the home runtime files and dirs exist.
 # 函数用途: 验证 memory-doctor 的 JSON 输出包含 home runtime 健康状态。
 def test_memory_doctor_reports_home_runtime_status(tmp_path: Path, capsys):
@@ -313,6 +402,23 @@ def test_memory_doctor_reports_v2_owner_shared_and_system_status(tmp_path: Path,
     assert payload["home"]["shared"]["skills"]["exists"] is True
     assert payload["home"]["system"]["schema_version"]["exists"] is True
     assert payload["home"]["schema"]["schema_version"] == "my-agent-home.v2"
+
+
+# LLM: home-status should make the current owner identity visible without opening policy files.
+# 函数用途: 验证 CLI/前端一眼能看到当前 owner 是谁以及 owner home 在哪。
+def test_home_status_reports_current_owner_identity(tmp_path: Path, capsys):
+    home = tmp_path / "home"
+    config_path = _write_provider_config(tmp_path, home)
+
+    code, payload = _run_cli_json(capsys, config_path, "home-status")
+
+    assert code == 0
+    assert payload["home"]["owner_identity"] == {
+        "provider": "feishu",
+        "owner_kind": "user",
+        "owner_id": "providers/feishu/users/ou_123",
+        "owner_home": str(home.resolve() / "owners" / "providers" / "feishu" / "users" / "ou_123"),
+    }
 
 
 # LLM: home status should expose identity index health without scanning provider bodies.

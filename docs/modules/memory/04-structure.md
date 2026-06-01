@@ -87,6 +87,8 @@ agent_py_agent/cli/
 |-- memory_commands.py                # memory-route / memory-doctor 等可见诊断命令
 |-- home_runtime_commands.py          # home-status / memory-daily-list / task-workspace-list 只读调试命令
 |-- memory_archive_commands.py        # memory-archive-list/search/resume 命令
+|-- memory_archive_roots.py           # memory archive CLI 的 owner-scoped archive 根目录解析和多根合并
+|-- memory_archive_rendering.py       # memory archive CLI 的 list/search/resume 输出渲染
 |-- memory_resume_compact_rendering.py # memory-resume --from-compact 人类输出渲染
 |-- memory_compact_commands.py        # memory-compact dry-run 和非破坏性 apply 命令
 `-- context_bundle_commands.py        # context-bundle latest 只读观测命令
@@ -192,7 +194,9 @@ agent_py_agent/cli/
 - `memory_archive/compact.py`：构建只读 compact plan，汇总 raw/hook、权威 snapshot、token ledger、风险和建议动作。
 - `cli/memory_commands.py`：给用户和开发者看 route/doctor 结果。
 - `cli/home_runtime_commands.py`：提供 `home-status`、`memory-daily-list`、`task-workspace-list`，让人和前端直接检查家目录、按天记忆流水和任务工作区。
-- `cli/memory_archive_commands.py`：给用户查看归档列表、搜索归档、生成恢复简报，并提供 `memory-fact-write` 写入用户确认的 compact 补全事实。
+- `cli/memory_archive_commands.py`：给用户查看归档列表、搜索归档、生成恢复简报，并提供 `memory-fact-write` 写入用户确认的 compact 补全事实。命令文件只做参数编排；当前 owner archive 根目录解析已拆到 `cli/memory_archive_roots.py`，输出格式拆到 `cli/memory_archive_rendering.py`。
+- `cli/memory_archive_roots.py`：返回当前 agent 允许查询的 archive roots。provider user/group 只读自己的 owner home；local/main 先读 owner home，并在迁移期保留旧 workspace archive 兼容读取。
+- `cli/memory_archive_rendering.py`：集中渲染 `memory-archive-list`、`memory-archive-search` 和 `memory-resume` 的 JSON/文本输出，避免命令入口因展示逻辑继续膨胀。
 - `cli/memory_resume_compact_rendering.py`：承接 `memory-resume --from-compact` 的 handoff、continue packet、completion prompt 和推荐路径输出，避免 archive CLI 编排继续膨胀。
 - `cli/memory_compact_commands.py`：把 compact plan 暴露为 `memory-compact --dry-run`；显式 `--apply` 时只生成 compact context、metadata、apply bundle、restore refs、work state snapshot、ledger 和 self-check，不做 destructive rewrite。
 - `cli/context_bundle_commands.py`：提供 `context-bundle latest --json`，只读查看最新主代理任务卡、scope、RunScope、ToolManifest、Acceptance Contract、自检和 prompt budget；它不调用模型、不写文件。
@@ -215,7 +219,7 @@ agent_py_agent/cli/
 14. 同一保存流程会追加 run `compactions/compaction_ledger.jsonl`，写 checkpoint snapshot summary/metadata，并让 run `checkpoint.json` 指向最新 compact refs；这不是删除上下文的 compact apply。
 15. 同一保存流程会同步 `shared/blackboard.md`、`messages.jsonl`、`findings.jsonl` 和 `evidence_packets/`，让 sibling 子代理共享任务局部 facts；其中 messages 追加，findings/evidence 按 id 合并，避免最后一次保存覆盖其他 sibling 事实。这仍然不是主 memory 写入。
 16. `subagents-memory-gate` 默认只列出候选或写 `decisions.jsonl`；只有显式 `--export-memory` 才写主 JSONL memory，只有显式 `--export-skill` 才写 skill draft，`--retention-apply` 也只压缩 active queue，不删除审计日志。
-17. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore、daily ledger、旧 subagent 工单和 home task workspace 生成恢复块；跨天时会同时扫描最近 raw/hook 文件。subagent 任务会先推荐 `reports/checkpoint.json`、`status_report.json`、`progress.md` 等 compact recovery artifacts，再推荐 `STATUS.md`、`HANDOFF.md` 和 `output.json`。主代理 task workspace 会推荐 `work/state.json`、`work/timeline.jsonl` 和 `work/task.yaml`。`memory-resume --from-compact` 会从某次 compact apply 产物生成恢复块、consistency report 和 action guard。这只是恢复入口推荐，不代表把子代理内容写入主代理长期 memory。
+17. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore、daily ledger、旧 subagent 工单和 home task workspace 生成恢复块；跨天时会同时扫描最近 raw/hook 文件。archive 扫描按当前 owner home 限定：provider user/group 不读 local/main，local/main 在迁移期可同时读 owner home 和旧 workspace archive。subagent 任务会先推荐 `reports/checkpoint.json`、`status_report.json`、`progress.md` 等 compact recovery artifacts，再推荐 `STATUS.md`、`HANDOFF.md` 和 `output.json`。主代理 task workspace 会推荐 `work/state.json`、`work/timeline.jsonl` 和 `work/task.yaml`。`memory-resume --from-compact` 会从某次 compact apply 产物生成恢复块、consistency report 和 action guard。这只是恢复入口推荐，不代表把子代理内容写入主代理长期 memory。
 18. doctor 命令检查 home runtime、配置、route index、hook/raw/snapshot 目录和层级一致性 warning；`memory-doctor` 还会嵌入 `home_doctor`，报告 owner home 迁移待办、悬空 task/run/agent index、schema version 和 retention 候选。悬空 index 只看每个 owner/task/run/agent 身份的最新引用，历史旧路径不会把当前健康状态误报成坏。这些都只是体检信息，不在普通任务里硬挡。
 19. runtime 工具循环遇到大工具输出时，会先写 metadata-only recovery snapshot，再把完整输出外置到 `memory_archive/artifacts/tool_outputs/`，并在 archive_tool_calls / raw tool event 中保存 preview/hash/path/size。
 20. tool context reducer 会在下一轮 live prompt 注入前再次检查 archive record：如果输出已外置，只注入 preview、artifact path、hash、size 和 fail-safe checkpoint；完整正文必须通过 artifact 文件显式读取。

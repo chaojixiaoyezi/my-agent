@@ -26,6 +26,7 @@ def _write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
         'workspace_root: "workspace"\n'
+        f'my_agent_home: "{tmp_path / "home"}"\n'
         'model_backend: "echo"\n'
         'subagent_workspace: "subagents"\n'
         'local_store_path: "local_store/local.db"\n'
@@ -363,10 +364,11 @@ def test_memory_resume_cross_day_gateway_request_uses_response_fact_source(tmp_p
     )
 
     assert code == 0
-    assert {item["id"] for item in payload["archive_matches"]} == {
+    archive_ids = {item["id"] for item in payload["archive_matches"]}
+    assert {
         "raw-gateway-cross-day-1",
         "snapshot-gateway-cross-day-1",
-    }
+    }.issubset(archive_ids)
     assert payload["task_fact_sources"] == []
     assert payload["gateway_fact_sources"][0]["request_id"] == "gwreq-cross-day"
     assert payload["gateway_fact_sources"][0]["response_path"] == str(response_path)

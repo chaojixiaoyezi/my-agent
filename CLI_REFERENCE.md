@@ -149,6 +149,7 @@ Ctrl+C
 | `memory-search` | 搜索记忆 | 否 | 否 |
 | `home-status` | 查看 `~/.my-agent` 入口文件、关键目录和轻量计数 | 否 | 否 |
 | `home-migrate` | 预览或复制旧 home 数据到当前 owner home | `--apply` 时写 | 否 |
+| `home-retention` | 预览或执行当前 owner home 的过期文件清理 | `--apply` 时删除过期文件并写审计 | 否 |
 | `memory-daily-list` | 直接查看 home daily memory 按天流水 | 否 | 否 |
 | `memory-route` | 按长期规则索引预览 memory 路由命中 | 否 | 否 |
 | `guidance-send` | 给运行中的主代理、子代理、任务或协作 case 追加一条软提示 | 是，只写 guidance 账本 | 否 |
@@ -349,6 +350,20 @@ my-agent home-migrate --apply --json
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--apply` | `false` | 执行复制；不传时只 dry-run 预览。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `home-retention`
+
+```powershell
+my-agent home-retention
+my-agent home-retention --apply --json
+```
+
+预览或执行当前 owner home 的保留策略清理。默认只列出过期候选；`--apply` 才会删除过期文件，并把清理结果写入 owner audit log。0 天保留策略表示不清理。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--apply` | `false` | 实际删除过期文件；不传时只 dry-run 预览。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `memory-daily-list`

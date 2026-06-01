@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from ..agent.user_space.home_migration import apply_home_migration, plan_home_migration
+from ..agent.user_space.home_retention import apply_owner_retention, plan_owner_retention
 from ..agent.user_space.home_runtime_query import (
     DailyMemoryQuery,
     TaskWorkspaceQuery,
@@ -85,6 +86,19 @@ def cmd_home_migrate(args) -> int:
     return 0
 
 
+# LLM: cmd_home_retention is an explicit maintenance command; normal runtime never calls it as a gate.
+# 函数用途: 预览或执行当前 owner home 的 retention 清理计划；默认只读计划。
+def cmd_home_retention(args) -> int:
+    agent = make_agent(args)
+    result = apply_owner_retention(agent.home_paths) if bool(getattr(args, "apply", False)) else plan_owner_retention(agent.home_paths)
+    payload = {"ok": True, "home": str(agent.home_paths.owner_home_dir), "retention": result.to_dict()}
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        _print_home_retention(payload)
+    return 0
+
+
 # LLM: _limit_from_args keeps home runtime CLI defaults tied to AgentConfig.
 # 函数用途: 读取命令行 limit；未传时使用 cli_task_list_limit 配置。
 def _limit_from_args(agent, args) -> int:
@@ -142,6 +156,8 @@ def _print_home_status(payload: dict[str, Any], *, json_output: bool) -> None:
     print(json.dumps(home["counts"], ensure_ascii=False, sort_keys=True))
 
 
+# LLM: _print_home_migrate keeps migration output human-readable and non-destructive.
+# 函数用途: 输出 home-migrate 计划或执行结果。
 def _print_home_migrate(payload: dict[str, Any]) -> None:
     migration = payload["migration"]
     print("MY-AGENT HOME MIGRATE")
@@ -150,4 +166,20 @@ def _print_home_migrate(payload: dict[str, Any]) -> None:
         print(f"- {action['status']} {action['action']}: {action['source']} -> {action['target']}")
 
 
-__all__ = ["cmd_home_migrate", "cmd_home_status", "cmd_memory_daily_list", "cmd_task_workspace_list"]
+# LLM: _print_home_retention makes retention cleanup explicit before destructive apply.
+# 函数用途: 输出 home-retention 候选或删除结果。
+def _print_home_retention(payload: dict[str, Any]) -> None:
+    retention = payload["retention"]
+    print("MY-AGENT HOME RETENTION")
+    print(f"home={payload['home']} applied={retention['applied']} actions={len(retention['actions'])}")
+    for action in retention["actions"]:
+        print(f"- {action['status']} {action['category']}: {action['path']} ({action['reason']})")
+
+
+__all__ = [
+    "cmd_home_migrate",
+    "cmd_home_retention",
+    "cmd_home_status",
+    "cmd_memory_daily_list",
+    "cmd_task_workspace_list",
+]

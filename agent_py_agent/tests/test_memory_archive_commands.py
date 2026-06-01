@@ -29,7 +29,8 @@ class TestCmdMemoryArchiveList:
         mock_agent.root = tmp_path
 
         with patch("agent_py_agent.cli.memory_archive_commands.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.memory_archive_commands.collect_archive_records", return_value=[]):
+             patch("agent_py_agent.cli.memory_archive_commands.archive_roots", return_value=[]), \
+             patch("agent_py_agent.cli.memory_archive_commands.collect_agent_archive_records", return_value=[]):
             result = cmd_memory_archive_list(args)
             assert result == 0
 
@@ -49,7 +50,8 @@ class TestCmdMemoryArchiveList:
         mock_agent.root = tmp_path
 
         with patch("agent_py_agent.cli.memory_archive_commands.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.memory_archive_commands.collect_archive_records", return_value=[]):
+             patch("agent_py_agent.cli.memory_archive_commands.archive_roots", return_value=[]), \
+             patch("agent_py_agent.cli.memory_archive_commands.collect_agent_archive_records", return_value=[]):
             result = cmd_memory_archive_list(args)
             assert result == 0
 
@@ -69,7 +71,8 @@ class TestCmdMemoryArchiveList:
         mock_agent.root = tmp_path
 
         with patch("agent_py_agent.cli.memory_archive_commands.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.memory_archive_commands.collect_archive_records", return_value=[]):
+             patch("agent_py_agent.cli.memory_archive_commands.archive_roots", return_value=[]), \
+             patch("agent_py_agent.cli.memory_archive_commands.collect_agent_archive_records", return_value=[]):
             result = cmd_memory_archive_list(args)
             assert result == 0
 
@@ -89,7 +92,8 @@ class TestCmdMemoryArchiveList:
         mock_agent.root = tmp_path
 
         with patch("agent_py_agent.cli.memory_archive_commands.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.memory_archive_commands.collect_archive_records", return_value=[]):
+             patch("agent_py_agent.cli.memory_archive_commands.archive_roots", return_value=[]), \
+             patch("agent_py_agent.cli.memory_archive_commands.collect_agent_archive_records", return_value=[]):
             result = cmd_memory_archive_list(args)
             assert result == 0
 
@@ -126,7 +130,8 @@ class TestCmdMemoryArchiveSearch:
         mock_agent.root = tmp_path
 
         with patch("agent_py_agent.cli.memory_archive_commands.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.memory_archive_commands.collect_archive_records", return_value=[]), \
+             patch("agent_py_agent.cli.memory_archive_commands.archive_roots", return_value=[]), \
+             patch("agent_py_agent.cli.memory_archive_commands.collect_agent_archive_records", return_value=[]), \
              patch("agent_py_agent.cli.memory_archive_commands.archive_filters_from_args", return_value={}), \
              patch("agent_py_agent.cli.memory_archive_commands.filter_archive_records", return_value=[]):
             result = cmd_memory_archive_search(args)
@@ -161,7 +166,8 @@ class TestCmdMemoryArchiveSearch:
         mock_agent.root = tmp_path
 
         with patch("agent_py_agent.cli.memory_archive_commands.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.memory_archive_commands.collect_archive_records", return_value=[]), \
+             patch("agent_py_agent.cli.memory_archive_commands.archive_roots", return_value=[]), \
+             patch("agent_py_agent.cli.memory_archive_commands.collect_agent_archive_records", return_value=[]), \
              patch("agent_py_agent.cli.memory_archive_commands.archive_filters_from_args", return_value={"speaker": "user"}), \
              patch("agent_py_agent.cli.memory_archive_commands.filter_archive_records", return_value=[]):
             result = cmd_memory_archive_search(args)
@@ -203,7 +209,8 @@ class TestCmdMemoryResume:
         mock_agent.local_store.list_recent.return_value = []
 
         with patch("agent_py_agent.cli.memory_archive_commands.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.memory_archive_commands.collect_archive_records", return_value=[]), \
+             patch("agent_py_agent.cli.memory_archive_commands.archive_roots", return_value=[]), \
+             patch("agent_py_agent.cli.memory_archive_commands.collect_agent_archive_records", return_value=[]), \
              patch("agent_py_agent.cli.memory_archive_commands.archive_filters_from_args", return_value={}), \
              patch("agent_py_agent.cli.memory_archive_commands.filter_archive_records", return_value=[]), \
              patch("agent_py_agent.cli.memory_archive_commands.resume_local_query", return_value=None), \
@@ -247,7 +254,8 @@ class TestCmdMemoryResume:
         mock_agent.local_store.list_recent.return_value = []
 
         with patch("agent_py_agent.cli.memory_archive_commands.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.memory_archive_commands.collect_archive_records", return_value=[]), \
+             patch("agent_py_agent.cli.memory_archive_commands.archive_roots", return_value=[]), \
+             patch("agent_py_agent.cli.memory_archive_commands.collect_agent_archive_records", return_value=[]), \
              patch("agent_py_agent.cli.memory_archive_commands.archive_filters_from_args", return_value={}), \
              patch("agent_py_agent.cli.memory_archive_commands.filter_archive_records", return_value=[]), \
              patch("agent_py_agent.cli.memory_archive_commands.collect_resume_task_ids", return_value=[]), \
@@ -264,16 +272,16 @@ class TestPrintArchiveRecordLines:
 
     def test_print_empty_records(self, capsys):
         """测试空记录列表的打印。"""
-        from agent_py_agent.cli.memory_archive_commands import _print_archive_record_lines
+        from agent_py_agent.cli.memory_archive_rendering import print_archive_record_lines
 
-        _print_archive_record_lines([])
+        print_archive_record_lines([])
 
         captured = capsys.readouterr()
         assert "- none" in captured.out
 
     def test_print_records_with_data(self, capsys):
         """测试有数据时的打印。"""
-        from agent_py_agent.cli.memory_archive_commands import _print_archive_record_lines
+        from agent_py_agent.cli.memory_archive_rendering import print_archive_record_lines
 
         records = [
             {
@@ -288,7 +296,7 @@ class TestPrintArchiveRecordLines:
             }
         ]
 
-        _print_archive_record_lines(records)
+        print_archive_record_lines(records)
 
         captured = capsys.readouterr()
         assert "raw" in captured.out

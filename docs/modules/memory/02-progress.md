@@ -383,6 +383,37 @@
 - `home_indexes.py` 增加最新 owner/task refs 读取；`home_backup.py` 先做 manifest-only 备份清单，避免开发期复制大目录拖慢迁移。
 - 新增 focused 验收：owner policy/grants、capability expiry/compact injection、home backup/index 三组测试均通过。
 
+## 2026-06-01 owner archive resume isolation
+- 中文说明：`memory-resume`、`memory-archive-list` 和 `memory-archive-search` 现在从当前 owner home 读取 archive。provider user/group 只读自己的 owner archive；local/main 先读 owner home，同时保留旧 workspace archive 作为兼容线索。
+- 这次修复的问题：飞书/微信等外部用户恢复任务时，不能从 CLI 主账号或旧 workspace archive 里串到别人的 raw event。local/main 仍能在迁移期读到旧 archive，避免老任务恢复断档。
+- 测试同步：新增 provider owner archive 隔离测试；旧 memory archive CLI 测试补上临时 `my_agent_home`，避免测试时读取开发机真实 `~/.my-agent`。
+- 本轮 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_home_runtime_query.py agent_py_agent/tests/test_memory_archive_cli_query.py --tb=short` -> passed；`ruff check` 对修改文件通过。
+
+## 2026-06-01 owner retention maintenance CLI
+- 中文说明：owner retention 从“只有内部服务”补成显式维护命令 `home-retention`。默认只预览过期文件，传 `--apply` 才删除，并把结果写入 owner audit log。
+- 这不是运行时硬门：普通任务不会因为 retention plan 有候选文件而被阻断。它只是给人、前端或后台维护任务一个明确入口，避免清理策略藏在代码里看不到。
+- 新增 focused 验收：`home-retention` dry-run 保留文件，`home-retention --apply` 删除过期文件并返回 `deleted` 状态；`agent_py_agent/tests/test_home_maintenance.py` -> passed。
+
+## 2026-06-01 task compact rollup aggregation
+- 中文说明：task 级 compact rollup 现在不只列子 run，还会汇总 `status_counts`、已完成 run、待处理 run、阻塞 run 和产物 refs。父代理恢复或汇总时可以先读一个 `task_rollup.json`，再按需打开具体子代理目录。
+- 行为边界：rollup 只是 refs-first 总览，不复制子代理正文，也不替代子代理自己的 state/final_report/compact 包。
+- 新增 focused 验收：三种子 run（done/running/blocked）写入后，rollup 能给出完成、待处理、阻塞和 artifact refs 聚合；`test_task_compact_rollup.py` 与 `test_subagent_persistence_service.py` 均通过。
+
+## 2026-06-01 multi-owner task recovery coverage
+- 中文说明：补了同名任务的跨 provider 恢复测试。飞书用户 A 和飞书用户 B 都有 `shared-task` 时，A 执行 `memory-resume --task-id shared-task` 只能回到 A 的任务工作区。
+- 这条是防串线验收，不新增硬门；恢复读取仍走 owner home 和 task workspace 的确定性本地查询。
+- 新增 focused 验收：`test_memory_resume_task_id_is_scoped_to_configured_provider_owner` -> passed。
+
+## 2026-06-01 home-status owner identity
+- 中文说明：`home-status --json` 现在直接返回 `owner_identity`，包含 provider、owner_kind、owner_id 和 owner_home。多用户排查时不用从一堆目录状态里猜当前进的是谁的家目录。
+- 行为边界：这是只读可观测性字段，不读 memory 正文、不改变权限、不参与任务 gate。
+- 新增 focused 验收：provider owner 配置下 `home-status` 返回 `providers/feishu/users/ou_123` 和对应 owner home 路径。
+
+## 2026-06-01 owner home main/subagent offline regression
+- 中文说明：本轮 owner-home 改动后补跑了主代理和子代理离线回归。主代理侧覆盖 memory runtime/archive、compact runtime facts、runtime request id、global index、foundation runner 和专项硬编码清理；子代理侧覆盖 persistence、context bundle、control-plane tree/rollup、shared progress panel 和 task compact rollup。
+- 结果：这些回归均通过，说明这批 owner archive、retention CLI、task rollup 和 home-status 可观测性改动没有破坏主代理/子代理的基础离线链路。
+- 行为边界：这轮是非真实模型回归，不宣称复杂真实任务已通过；真实任务仍需要单独验收。
+
 ## 2026-05-18 main-agent foundation and artifact acceptance
 - 中文说明：主代理基础测试新增固定入口 `main_agent_foundation_runner.py`。默认只跑不调用模型的确定性测试：工具失败分类、大输出 artifact refs、确定性 E2E matrix；真实模型用例明确 `SKIPPED`，不把未测试说成通过。
 - 真实模型隔离测试跑在 `/Users/example/my-终端应用/main-agent-foundation-20260518_010636/`，使用独立 `home/` 和 `workspace/`，禁用 subagent。主代理独立完成 HTML 产物、路径记错后的 CSV 整理、手动 compact/resume、带 resume context 继续写交接说明。

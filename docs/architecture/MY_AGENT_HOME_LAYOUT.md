@@ -3,7 +3,7 @@
 ```text
 schema_version: my-agent-home.v2
 status: design
-updated_at: 2026-05-31
+updated_at: 2026-06-01
 ```
 
 当前代码落地状态：
@@ -21,7 +21,9 @@ updated_at: 2026-05-31
 - SimpleAgent 的 daily memory mirror 默认写入 owner memory/daily。
 - live raw archive、runtime_fact、收尾归档和 token ledger 已优先写入当前 owner home。
 - memory-doctor / home-status 会报告 V2 owner、shared、identity、system、schema、legacy 迁移提示、悬空 index 和 retention 候选。
+- home-status 会直接显示当前 owner identity；memory-resume / memory-archive-list / memory-archive-search 会按当前 owner home 查 archive，provider user/group 不读 local/main 归档。
 - home-migrate 已有非破坏性复制命令：把旧 long-term `data/memory.jsonl`、daily、raw、hooks、task workspace 复制到 owner home，不删除、不覆盖旧数据。
+- home-retention 已有显式维护命令：默认 dry-run，只列候选；`--apply` 才删除过期文件并写 owner audit log。
 - provider identity 已有按 provider 分片的 JSONL 索引；canonical user profile 使用目录，不和绑定记录文件混用。
 - task/run/agent compact 包已有共享基础布局 helper，基础文件统一为 compact_context、handoff_summary、work_state_snapshot、continue_packet、refs、metadata。
 - compact 注入模板已有代码入口，会把 compact_context 和 continue_packet 渲染成同一份续接提示，避免三层 compact 各自拼 prompt。
@@ -33,7 +35,7 @@ updated_at: 2026-05-31
 - ConversationThread 已可记录 owner_id/owner_home；外部通道创建 thread 时会从当前主代理 owner 注入 owner 归属。
 - 子代理任务会继承当前 owner_id、owner policy 快照和父级 shell 权限上限；owner_home/agents/<run_id>/ 会保存 refs-only projection，方便跨 session/tree/compact 查找。
 - 长期记忆新写入以 owner 为主：主 JSONL 写 `owner_home/memory/long_term/memory.jsonl`，按天摘要写 `owner_home/memory/daily/`；旧 `memory_path` 只作为兼容读取源。
-- task 级 compact rollup 已有落地点：子代理保存会更新 `tasks/<root_id>/compact/task_rollup.json`，父代理恢复时可以先看任务级汇总，再按 child run refs 深入。
+- task 级 compact rollup 已有落地点：子代理保存会更新 `tasks/<root_id>/compact/task_rollup.json`，里面包含 status_counts、pending/completed/blocked run ids 和 artifact refs；父代理恢复时可以先看任务级汇总，再按 child run refs 深入。
 - global index 已覆盖 owner/task/run/agent 轻量 refs，并有 dangling ref 检查 helper；索引只做发现，不替代正文。
 - owner capability resolver 已有第一版：按 owner/shared/builtin 优先级解析能力短名，同一 run 内缓存解析结果，避免重复确认。
 - system/backups 已有 manifest-only 备份清单入口，先记录迁移前要保护的根目录，不急着复制大文件。
@@ -2720,13 +2722,13 @@ conversation / wake signal
 仍然不足：
 
 ```text
-1. owner home 还没有成为所有运行入口的唯一事实源。
-2. 旧 raw/archive 数据已有迁移计划，仍需继续把所有历史入口完全收束到 owner home。
-3. provider users/groups 的 session/memory/task/runs/agents 还没完全接入。
-4. task-level compact rollup 已有第一版，后续要补更完整的分支/归档/父级展示。
+1. owner home 已进入主要新写入和恢复读取链路，但仍需继续审计少数旧入口，避免未来新增功能绕过 owner resolver。
+2. 旧 raw/archive 数据已有迁移计划；local/main 仍保留兼容读取，provider user/group 默认只读自己的 owner archive。
+3. provider users/groups 的 memory/task 读取面已有隔离测试；session/runs/agents 的外部通道真实接入还没完整验收。
+4. task-level compact rollup 已能聚合 child status/artifact refs，后续要补更完整的 branch/归档/父级展示。
 5. global_index 已有悬空引用 doctor helper，后续要补重建命令和更完整一致性修复。
 6. 权限临时授权和 capability request 已有 owner 账本，后续要接更多真实工具审批入口。
-7. retention 已有 owner 过期文件计划/显式清理，加密/备份迁移仍主要是设计层。
+7. retention 已有 owner 过期文件计划/显式清理；加密和 restore 仍主要是设计层，backup 先有 manifest-only 入口。
 8. owner 私有 skills/tools/workflows 和 shared 公共能力已有 resolver 第一版，后续要接 usage、archive、promotion。
 9. skill/tool 的 usage、archive、promotion 流程还没接到 agent 自动管理。
 ```
@@ -2737,9 +2739,9 @@ conversation / wake signal
 
 | 设计概念 | 当前相关代码位置 | 当前差距 |
 | --- | --- | --- |
-| owner home / provider space | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/user_space/home_layout.py`、`provider_space.py` | 有 provider space 骨架，但 owner resolver 还不是所有入口唯一事实源 |
-| memory daily/raw/hooks | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/memory_store/jsonl.py`、`memory_archive/`、`agent/user_space/home_migration.py` | 新写入已 owner 分层，旧 long-term/daily/raw/hooks 有非破坏性迁移计划；还需继续清历史入口 |
-| compact / continue packet | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/memory_archive/compact.py`、`agent/user_space/task_compact_rollup.py` | task/run/agent 基础包和 task rollup 已有第一版；compact branch/归档还未完整 |
+| owner home / provider space | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/user_space/home_layout.py`、`provider_space.py`、`owner_resolver.py` | provider space 和 owner resolver 已接主要新写入/读取链路，后续继续查旧入口 |
+| memory daily/raw/hooks | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/memory_store/jsonl.py`、`memory_archive/`、`agent/user_space/home_migration.py`、`cli/memory_archive_commands.py` | 新写入和 archive resume/list/search 已 owner 分层；local/main 仍保留旧 archive 兼容读取 |
+| compact / continue packet | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/memory_archive/compact.py`、`agent/user_space/task_compact_rollup.py` | task/run/agent 基础包和 task rollup 已有第一版；rollup 已有 status/artifact 聚合，compact branch/归档还未完整 |
 | session | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/session/manager.py`、`conversation/` | session/thread 有管理能力，但 provider owner/session/task/run 映射还要收敛 |
 | task registry | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/task_registry/` | 需要与 owner home、task workspace、artifact registry 完整挂接 |
 | agent tree / subagents | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/subagents/`、`subagent.py` | 子代理运行状态已存在，但 agent workspace/compact/cleanup 策略还未完全统一 |
@@ -2747,14 +2749,14 @@ conversation / wake signal
 | capability / skill routing | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/capability/`、`agent_py_agent/config/capability_config.yaml`、`agent/user_space/capability_resolver.py` | owner/shared/builtin 解析和 run 内缓存已有第一版，workspace/optional/promotion 仍需继续 |
 | collaboration / wake | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/collaboration/`、`conversation/store_wake.py` | 有协作/唤醒底座，仍需 owner/task/agent 权限边界统一 |
 | config / runtime guard | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/config.py`、`agent_py_agent/config/runtime_guard_config.yaml` | 需继续清理配置外写死默认值 |
-| doctor / observability | `/Users/example/my_agent/my-agent-main/agent_py_agent/cli/memory_doctor.py`、`agent/user_space/home_doctor.py` | owner 迁移/index/schema/retention doctor 已接入，后续补自动修复建议和指标展示 |
-| permissions / quota / retention | `agent_py_agent/agent/user_space/owner_policy.py`、`agent/user_space/home_retention.py` | owner policy bundle 和 retention 计划已有，quota enforcement/加密仍待补 |
+| doctor / observability | `/Users/example/my_agent/my-agent-main/agent_py_agent/cli/memory_doctor.py`、`agent/user_space/home_doctor.py`、`home_runtime_status.py` | owner 迁移/index/schema/retention doctor 已接入，home-status 已显示当前 owner identity，后续补自动修复建议和指标展示 |
+| permissions / quota / retention | `agent_py_agent/agent/user_space/owner_policy.py`、`agent/user_space/home_retention.py`、`cli/home_runtime_commands.py` | owner policy bundle、retention 计划和显式 home-retention 命令已有，quota enforcement/加密仍待补 |
 | temporary grants | `agent_py_agent/agent/user_space/temporary_grants.py` | owner 级账本已有，后续接更多工具执行前提示和审批入口 |
 | capability requests | `agent_py_agent/agent/user_space/capability_requests.py` | owner 级生命周期已有，后续接父代理/用户审批界面 |
 | canonical identity | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/user_space/provider_space.py` | 缺 canonical_users 绑定/解绑和冲突 memory 处理 |
 | compact branches | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/memory_archive/` | 缺 branches.json/current_branch/branch rollup 的完整实现 |
 | tree service | `/Users/example/my_agent/my-agent-main/agent_py_agent/agent/subagents/` | 需要从各 agent state/timeline 投影统一生成 agent_tree.json |
-| backup / restore | 暂无完整 owner_home 对应代码 | 需要 system/backups、dry-run restore、doctor 校验链路 |
+| backup / restore | `agent_py_agent/agent/user_space/home_backup.py` | 已有 manifest-only 备份清单入口；仍缺完整 restore、dry-run restore 和 doctor 校验链路 |
 
 ## 34. 从 通道运行时 / 长期助手 借鉴的点
 
