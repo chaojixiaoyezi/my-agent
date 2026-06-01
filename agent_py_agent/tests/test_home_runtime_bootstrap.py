@@ -51,6 +51,26 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     assert not (home / "tasks").exists()
 
 
+# LLM: machine run ids must stay metadata, not become user-visible task folder names.
+# 函数用途: 验证 gw/run/req 这类机器编号不会污染 owner tasks/date 下的任务目录列表。
+def test_saved_run_uses_prompt_slug_when_only_machine_ids_are_available(tmp_path: Path):
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    agent = SimpleAgent(cfg, repo)
+
+    agent.run("分析多个项目源码并写一份中文报告", request_id="gw-123", run_id="run-456")
+
+    date_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat()
+    task_dirs = [item for item in date_root.iterdir() if item.is_dir()]
+    assert len(task_dirs) == 1
+    assert task_dirs[0].name not in {"gw-123", "run-456"}
+    assert not task_dirs[0].name.startswith(("gw-", "run-", "req-"))
+    state = json.loads((task_dirs[0] / "work" / "state.json").read_text(encoding="utf-8"))
+    assert state["request_id"] == "gw-123"
+    assert state["run_id"] == "run-456"
+
+
 def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"

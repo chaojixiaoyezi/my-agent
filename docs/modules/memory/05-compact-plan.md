@@ -624,7 +624,7 @@ compact、resume 和 memory runtime 应该同步推进，但要分清职责，�
 - work state 优先从 `memory_archive/snapshots/*.json` 权威 snapshot 读取 goal/next action；如果真实 `run --save` 只留下 hook recovery snapshot 和 raw archive，apply 会从本次 `restore_refs` 指向的 hook/raw JSONL 回填 goal/next action，仍不从普通对话里猜验收、约束或测试状态。
 - 真实 `run --save` 会额外写 `memory_archive/runtime_facts/<request_id>/task.json`，并通过 hook snapshot `content_paths` 暴露给 compact apply；其中 acceptance/constraints/latest_tests 只来自用户 prompt 的显式标签或真实测试工具命令。
 - `memory-fact-write` 可把用户确认后的补全事实写入 `memory_archive/runtime_facts/<fact_id>/task.json`；后续用同一 request/session/task/run scope 重新 `memory-compact --apply` 时，work state 会只读扫描这个 fact source。
-- work state 字段来源第一片已接入：只读当前 run/session/request 对应的 task/run 事实源，例如 `ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md`、`task.json`、旧 `subagents/<run_id>/` 和新 `tasks/*/agents/<run_id>/`；不会扫描仓库根目录清单。找不到字段时仍写 `missing_fields`，不会猜测或伪造。
+- work state 字段来源第一片已接入：只读当前 run/session/request 对应的 task/run 事实源，例如 `ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md`、`task.json`、旧 `subagents/<run_id>/` 和新 `tasks/*/work/agents/<run_id>/`；旧 `tasks/*/agents/<run_id>/` 仅作迁移兼容。不会扫描仓库根目录清单。找不到字段时仍写 `missing_fields`，不会猜测或伪造。
 - self-check 已检查 context、restore refs、apply bundle、work state snapshot 是否写入，restore refs 是否存在，以及 goal / next actions / acceptance / constraints / test state / risks 是否被带出。
 - 当前仍保持非破坏性：不删除、不重写、不裁剪 raw/hook/snapshot/token/task/run 文件。
 

@@ -133,17 +133,19 @@ def _agent_state_files(workspace: Path, ids: list[str]) -> list[Path]:
     paths: list[Path] = []
     for item_id in ids:
         if item_id:
+            paths.extend(sorted((workspace / "tasks" / item_id / "work" / "agents").glob("*/state.json")))
             paths.extend(sorted((workspace / "tasks" / item_id / "agents").glob("*/state.json")))
             paths.extend(_task_agent_state_files_for_id(workspace, item_id))
     return _dedupe_paths([path for path in paths if path.exists() and _inside_workspace(path, workspace)])
 
 
 # LLM: _task_agent_state_files_for_id finds agent state files by exact run id.
-# 函数用途: 在 tasks/*/agents/<run_id>/state.json 中查找指定代理状态。
+# 函数用途: 在 tasks/*/work/agents/<run_id>/state.json 中查找指定代理状态，并兼容旧路径。
 def _task_agent_state_files_for_id(workspace: Path, item_id: str) -> list[Path]:
     return [
         path / "state.json"
-        for path in sorted((workspace / "tasks").glob("*/agents/*"))
+        for pattern in ("*/work/agents/*", "*/agents/*")
+        for path in sorted((workspace / "tasks").glob(pattern))
         if path.is_dir() and path.name == item_id and (path / "state.json").exists()
     ]
 

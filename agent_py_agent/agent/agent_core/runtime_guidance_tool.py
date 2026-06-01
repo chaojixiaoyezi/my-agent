@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..conversation.store_guidance import normalize_guidance_target_type
+from ..subagents.kernel import SubagentKernelQuery
 from ..tools import BaseTool, ToolExecutionResult, ToolSpec
 from .runner_context import current_subagent_run_id
 
@@ -42,24 +43,29 @@ class SendGuidanceTool(BaseTool):
     # LLM: execute normalizes open-world target aliases and stores guidance refs.
     # 函数用途: 解析 target/message，写入 ConversationStore guidance 账本并返回 guidance_id。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
-        request = _guidance_request(self.agent, params)
-        if isinstance(request, ToolExecutionResult):
-            return request
-        entry = self.agent.conversation_store.append_guidance(
-            {
-                "target_type": request.target_type,
-                "target_id": request.target_id,
-                "message": request.message,
-                "sender": request.sender,
-                "priority": request.priority,
-                "delivery": request.delivery,
-                "metadata": request.metadata,
-            }
-        )
+        requests = _guidance_requests(self.agent, params)
+        if isinstance(requests, ToolExecutionResult):
+            return requests
+        entries = [
+            self.agent.conversation_store.append_guidance(
+                {
+                    "target_type": request.target_type,
+                    "target_id": request.target_id,
+                    "message": request.message,
+                    "sender": request.sender,
+                    "priority": request.priority,
+                    "delivery": request.delivery,
+                    "metadata": request.metadata,
+                }
+            )
+            for request in requests
+        ]
+        entry = entries[0]
         payload = {
             "ok": True,
             "guidance_id": entry.guidance_id,
             "target": {"type": entry.target_type, "id": entry.target_id},
+            "targets": [{"type": item.target_type, "id": item.target_id, "guidance_id": item.guidance_id} for item in entries],
             "delivery": entry.delivery,
             "message": "已写入软提示；目标代理下一轮会读取，不会被强制停止或硬阻断。",
         }
@@ -87,6 +93,8 @@ def build_send_guidance_spec() -> ToolSpec:
             "target_type": "不使用 target 时可直接写 target_type",
             "target_id": "不使用 target 时可直接写 target_id",
             "run_id": "agent_run 目标别名",
+            "run_ids": "多个 agent_run 目标；适合给一批已知子代理同一句补充提示",
+            "target_scope": "批量目标；children/direct_children 表示某 run 的直接孩子，descendants/subtree 表示某 run 的整棵下级",
             "thread_id": "thread 目标别名",
             "task_id": "task 目标别名",
             "case_id": "case 目标别名",
@@ -96,9 +104,38 @@ def build_send_guidance_spec() -> ToolSpec:
         },
         examples=[
             '{"tool":"send_guidance","target":{"type":"agent_run","id":"child-1"},"message":"换一个数据来源核对，不要重复查同一个页面。"}',
+            '{"tool":"send_guidance","target_scope":"children","run_id":"parent-1","message":"按用户补充要求补证据，完成后继续原任务。"}',
             '{"tool":"send_guidance","thread_id":"thread-1","message":"用户补充：最终报告里要把未命中的来源也写清楚。"}',
         ],
     )
+
+
+# LLM: _guidance_requests expands single or batch targets into ledger writes.
+# 函数用途: 支持点名单个目标、run_ids 多目标和 children/descendants 作用域批量提示。
+def _guidance_requests(agent: object, params: dict[str, object]) -> list[GuidanceToolRequest] | ToolExecutionResult:
+    message = str(params.get("message") or "").strip()
+    if not message:
+        return _guidance_error("缺少 message；send_guidance 只记录具体补充提示。")
+    run_ids = _target_run_ids(agent, params)
+    if run_ids:
+        sender = str(params.get("sender") or current_subagent_run_id(agent) or "main_agent").strip()
+        metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+        return [
+            GuidanceToolRequest(
+                target_type="agent_run",
+                target_id=run_id,
+                message=message,
+                sender=sender,
+                priority=str(params.get("priority") or "normal").strip() or "normal",
+                delivery=str(params.get("delivery") or "next_turn").strip() or "next_turn",
+                metadata={**metadata, "target_scope": str(params.get("target_scope") or "").strip()},
+            )
+            for run_id in run_ids
+        ]
+    request = _guidance_request(agent, params)
+    if isinstance(request, ToolExecutionResult):
+        return request
+    return [request]
 
 
 # LLM: _guidance_request validates only target/message shape, not business content.
@@ -121,6 +158,51 @@ def _guidance_request(agent: object, params: dict[str, object]) -> GuidanceToolR
         delivery=str(params.get("delivery") or "next_turn").strip() or "next_turn",
         metadata=metadata,
     )
+
+
+# LLM: _target_run_ids resolves batch agent_run targets from explicit ids or tree scope.
+# 函数用途: 根据 run_ids 或 target_scope 生成要写 guidance 的 run_id 列表，不执行子代理。
+def _target_run_ids(agent: object, params: dict[str, object]) -> list[str]:
+    explicit = _string_list(params.get("run_ids") or params.get("target_run_ids") or params.get("agent_run_ids"))
+    if explicit:
+        return _dedupe(explicit)
+    scope = str(params.get("target_scope") or "").strip().lower()
+    if not scope:
+        return []
+    manager = getattr(agent, "subagents", None)
+    if manager is None or not callable(getattr(type(manager), "kernel_snapshot", None)):
+        return []
+    anchor = (
+        str(params.get("run_id") or params.get("root_id") or "").strip()
+        or current_subagent_run_id(agent)
+        or str(getattr(agent, "_main_agent_run_id", "") or "").strip()
+    )
+    query = SubagentKernelQuery(run_id=anchor, root_id=str(params.get("root_id") or "").strip(), scope="own_subtree" if anchor else "root_tree")
+    try:
+        rows = list(manager.kernel_snapshot(query).runs)
+    except Exception:
+        return []
+    if scope in {"children", "direct_children", "child", "direct"}:
+        return _dedupe(
+            [
+                str(getattr(row, "run_id", "") or "")
+                for row in rows
+                if str(getattr(row, "run_id", "") or "")
+                and (
+                    str(getattr(row, "parent_run_id", "") or "") == anchor
+                    or (not anchor and not str(getattr(row, "parent_run_id", "") or ""))
+                )
+            ]
+        )
+    if scope in {"descendants", "subtree", "all_children", "all_descendants"}:
+        return _dedupe(
+            [
+                str(getattr(row, "run_id", "") or "")
+                for row in rows
+                if str(getattr(row, "run_id", "") or "") and str(getattr(row, "run_id", "") or "") != anchor
+            ]
+        )
+    return []
 
 
 # LLM: _target_from_params accepts open-world target aliases without a closed enum hard gate.
@@ -154,3 +236,21 @@ def _target_from_params(params: dict[str, object]) -> tuple[str, str]:
 def _guidance_error(message: str) -> ToolExecutionResult:
     payload = {"ok": False, "error": "invalid_guidance_request", "message": message}
     return ToolExecutionResult(_TOOL_NAME, False, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+# LLM: _string_list keeps batch target ids explicit and open-world.
+# 函数用途: 从列表参数里提取非空字符串；非列表不猜测。
+def _string_list(value: object) -> list[str]:
+    return [text for item in (value if isinstance(value, list | tuple) else []) if (text := str(item).strip())]
+
+
+# LLM: _dedupe preserves first-seen order for target lists.
+# 函数用途: 去重 run_id，同时保持模型给出的顺序。
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result

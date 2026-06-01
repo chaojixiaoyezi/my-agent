@@ -61,6 +61,7 @@ from .task_workspace_rendering import (
     write_summary,
     write_task_yaml_if_missing,
 )
+from .task_workspace_roots import resolve_task_workspace_root
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 TaskWorkspacePaths 前先核对字段语义、序列化形态和调用方假设。
@@ -70,6 +71,7 @@ class TaskWorkspacePaths:
     """Concrete paths for one task workspace plus one legacy run adapter."""
 
     root: Path
+    work_dir: Path
     task_yaml: Path
     state_json: Path
     timeline_jsonl: Path
@@ -118,7 +120,7 @@ class _RuntimeSyncInputs:
 # 类用途: 承载 _TaskWorkspacePathInputs 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _TaskWorkspacePathInputs:
-    workspace: str | Path
+    root: str | Path
     task_id: str
     run_id: str
 
@@ -155,7 +157,8 @@ def ensure_subagent_task_workspace(
     inputs = _coerce_ensure_request(request, task, workspace=workspace)
     task_id = str(getattr(inputs.task, "root_id", "") or getattr(inputs.task, "id", "task"))
     run_id = str(getattr(inputs.task, "id", "") or task_id)
-    path_inputs = _TaskWorkspacePathInputs(inputs.workspace, task_id, run_id)
+    root = resolve_task_workspace_root(inputs.workspace, inputs.task, task_id)
+    path_inputs = _TaskWorkspacePathInputs(root, task_id, run_id)
     now = float(getattr(inputs.task, "updated_at", 0.0) or time.time())
     paths = _paths_for(path_inputs)
     _ensure_directories(paths)
@@ -165,7 +168,7 @@ def ensure_subagent_task_workspace(
     write_summary(paths.current_summary, task_id, run_id, inputs.task)
     # LLM: shared workspace is task-local collaboration state, not main long-term memory.
     shared = sync_shared_workspace(
-        SyncSharedWorkspaceRequest(task_workspace_root=paths.root, task=inputs.task, now=now)
+        SyncSharedWorkspaceRequest(task_workspace_root=paths.work_dir, task=inputs.task, now=now)
     )
     ensure_agent_run_workspace(
         EnsureAgentRunWorkspaceRequest(
@@ -203,7 +206,7 @@ def _sync_runtime_refs(inputs: _RuntimeSyncInputs) -> _TaskWorkspaceRuntimeRefs:
     artifact_manifest = sync_artifact_manifests(
         SyncArtifactManifestsRequest(
             task=inputs.task,
-            task_workspace_root=inputs.paths.root,
+            task_workspace_root=inputs.paths.work_dir,
             agent_run_workspace_root=inputs.paths.agent_adapter_dir,
             now=inputs.now,
         )
@@ -265,18 +268,20 @@ def _paths_for(
     shared: SharedWorkspaceResult | None = None,
 ) -> TaskWorkspacePaths:
     runtime_refs = runtime_refs or _TaskWorkspaceRuntimeRefs()
-    root = task_workspace_path(path_inputs.workspace, path_inputs.task_id)
-    shared_dir = root / "shared"
-    shared = shared or shared_workspace_paths(root)
-    artifacts_dir = root / "artifacts"
-    agents_dir = root / "agents"
+    root = Path(path_inputs.root)
+    work_dir = root / "work"
+    shared_dir = work_dir / "shared"
+    shared = shared or shared_workspace_paths(work_dir)
+    artifacts_dir = work_dir / "artifacts"
+    agents_dir = work_dir / "agents"
     agent_adapter_dir = agents_dir / _safe_segment(path_inputs.run_id)
     return TaskWorkspacePaths(
         root=root,
-        task_yaml=root / "task.yaml",
-        state_json=root / "state.json",
-        timeline_jsonl=root / "timeline.jsonl",
-        current_summary=root / "summaries" / "current_summary.md",
+        work_dir=work_dir,
+        task_yaml=work_dir / "task.yaml",
+        state_json=work_dir / "state.json",
+        timeline_jsonl=work_dir / "timeline.jsonl",
+        current_summary=work_dir / "summaries" / "current_summary.md",
         shared_dir=shared_dir,
         shared_blackboard=shared.blackboard_md,
         shared_messages=shared.messages_jsonl,
@@ -292,7 +297,7 @@ def _paths_for(
         or _default_artifact_manifest(artifacts_dir, agent_adapter_dir),
         compact_chain=runtime_refs.compact_chain or default_compact_chain_result(agent_adapter_dir),
         memory_gate=runtime_refs.memory_gate or memory_gate_paths(agent_adapter_dir),
-        daily_ledger=runtime_refs.daily_ledger or _default_daily_ledger(path_inputs.workspace),
+        daily_ledger=runtime_refs.daily_ledger or _default_daily_ledger(root),
         legacy_run_ref_json=agent_adapter_dir / "legacy_run_ref.json",
     )
 
@@ -317,6 +322,8 @@ def _default_daily_ledger(workspace: str | Path) -> DailyLedgerAppendResult:
 def _ensure_directories(paths: TaskWorkspacePaths) -> None:
     for directory in [
         paths.root,
+        paths.root / "output",
+        paths.work_dir,
         paths.current_summary.parent,
         paths.shared_dir,
         paths.shared_dir / "evidence_packets",

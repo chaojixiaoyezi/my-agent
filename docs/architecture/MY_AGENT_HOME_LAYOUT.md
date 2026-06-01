@@ -14,7 +14,7 @@ updated_at: 2026-06-01
 - 本地 CLI 主 owner 默认落在 owners/local/main。
 - owner 级 permissions / quota / retention / skill_policy / tool_policy 会生成种子文件。
 - system/schema_version.json 会写入 my-agent-home.v2 元信息。
-- 保存型主代理 run 在第一轮模型调用前就会创建 task workspace，并把当前 `output/` / `work/` 作为软运行状态注入 prompt；`output/` 只放最终交付物，`work/` 放状态、日志、compact、协作、草稿和子代理账本。
+- 保存型主代理 run 在第一轮模型调用前就会创建 task workspace，并把当前 `output/` / `work/` 作为软运行状态注入 prompt；`output/` 只放最终交付物，`work/` 放任务状态、日志、任务级 compact、协作、草稿和下级代理账本。主代理自己的 memory/compact/logs 仍归当前 owner，不进入 `work/agents`。
 - daily memory 增加了独立的每日工作记忆事件 API，raw archive 仍保留黑盒流水。
 - owner resolver 已有第一片：local/main、provider user、provider group 都能解析到 V2 owner home。
 - prompt 家目录上下文优先读取 owner_home 下的 AGENTS/SOUL/USER/memory，旧顶层文件只做兼容。
@@ -1079,37 +1079,40 @@ memory 只能索引到这里。
 
 ## 12. Agent Run Workspace
 
-每个主代理、子代理、孙代理执行体都有自己的 agent run workspace。
+每个子代理、孙代理等下级执行体都有自己的 agent run workspace。主代理不放在任务 `work/agents/` 里；主代理自己的长期 memory、compact 和日志归当前 owner，例如 `owners/local/main/`。
 
 ```text
-agents/agent_sub_001/
-  agent.yaml
-  parent.json
-  state.json
-  task.md
-  timeline.jsonl
-  progress.json
-  checkpoint.json
-  summary.md
-  final_report.md
-  findings.jsonl
-  artifacts/
-    manifest.jsonl
-  compact/
-    compact_ledger.jsonl
-    latest -> compact_0001/
-    compact_0001/
-      compact_context.md
-      handoff_summary.md
-      work_state_snapshot.json
-      continue_packet.json
-      refs.json
-      metadata.json
-  inbox/
-  outbox/
-  memory_gate/
-    candidates.jsonl
-    review_queue.jsonl
+tasks/2026-06-01/example-task/
+  output/
+  work/
+    agents/agent_sub_001/
+      agent.yaml
+      parent.json
+      state.json
+      task.md
+      timeline.jsonl
+      progress.json
+      checkpoint.json
+      summary.md
+      final_report.md
+      findings.jsonl
+      artifacts/
+        manifest.jsonl
+      compact/
+        compact_ledger.jsonl
+        latest -> compact_0001/
+        compact_0001/
+          compact_context.md
+          handoff_summary.md
+          work_state_snapshot.json
+          continue_packet.json
+          refs.json
+          metadata.json
+      inbox/
+      outbox/
+      memory_gate/
+        candidates.jsonl
+        review_queue.jsonl
   SKILL_SPARKS.md
 ```
 

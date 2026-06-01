@@ -19,6 +19,7 @@ def node_from_kernel_run(agent: object, row: object) -> dict[str, object]:
     node["liveness"] = _liveness_layer(payload)
     node["progress_layer"] = _progress_layer(agent, payload)
     node["evidence_layer"] = _evidence_layer(refs)
+    node["guidance_layer"] = _guidance_layer(agent, str(node.get("run_id") or ""))
     return node
 
 
@@ -83,6 +84,8 @@ def _node_status(payload: dict[str, object], refs: dict[str, list[object]]) -> d
     }
 
 
+# LLM: _liveness_layer keeps heartbeat facts separate from progress and evidence.
+# 函数用途: 渲染节点存活状态，供父代理判断运行中、停滞或缺心跳。
 def _liveness_layer(payload: dict[str, object]) -> dict[str, object]:
     heartbeat_at = payload.get("heartbeat_at", 0.0)
     return {
@@ -93,6 +96,8 @@ def _liveness_layer(payload: dict[str, object]) -> dict[str, object]:
     }
 
 
+# LLM: _progress_layer attaches persisted task_progress without expanding artifacts.
+# 函数用途: 给 tree 节点补充进度摘要、当前工具和最近进展。
 def _progress_layer(agent: object, payload: dict[str, object]) -> dict[str, object]:
     layer = {
         "progress": payload.get("progress", 0.0),
@@ -106,11 +111,15 @@ def _progress_layer(agent: object, payload: dict[str, object]) -> dict[str, obje
     return layer
 
 
+# LLM: _workspace_refs hides legacy paths from model-visible tree payloads.
+# 函数用途: 过滤旧 subagent 路径，只保留当前任务工作区和 run 工作区引用。
 def _workspace_refs(value: object) -> dict[str, object]:
     refs = _dict(value)
     return {key: item for key, item in refs.items() if key not in {"legacy_task_dir", "legacy_output_json"}}
 
 
+# LLM: _evidence_layer groups refs and blockers without reading their bodies.
+# 函数用途: 渲染产物、证据、能力缺口和最近工具轨迹层。
 def _evidence_layer(values: dict[str, list[object]]) -> dict[str, object]:
     return {
         "artifact_refs": values["artifact_refs"],
@@ -122,20 +131,55 @@ def _evidence_layer(values: dict[str, list[object]]) -> dict[str, object]:
     }
 
 
+# LLM: _guidance_layer makes pending soft steering visible in inspect_agent_tree.
+# 函数用途: 读取某个 run 的未投递 guidance 摘要；只读展示，不标记已读。
+def _guidance_layer(agent: object, run_id: str) -> dict[str, object]:
+    store = getattr(agent, "conversation_store", None)
+    if store is None or not run_id:
+        return {"pending_count": 0, "recent_pending": []}
+    try:
+        pending = list(store.pending_guidance("agent_run", run_id, limit=5))
+    except Exception:
+        return {"pending_count": 0, "recent_pending": [], "warnings": ["guidance_unavailable"]}
+    return {
+        "pending_count": len(pending),
+        "recent_pending": [_guidance_item(item) for item in pending],
+    }
+
+
+# LLM: _guidance_item renders a bounded guidance row for parent visibility.
+# 函数用途: 将 guidance 账本行裁剪成 id、消息、优先级和发送者。
+def _guidance_item(item: object) -> dict[str, object]:
+    return {
+        "guidance_id": str(getattr(item, "guidance_id", "") or ""),
+        "message": str(getattr(item, "message", "") or ""),
+        "priority": str(getattr(item, "priority", "") or "normal"),
+        "sender": str(getattr(item, "sender", "") or ""),
+    }
+
+
+# LLM: _dict is a defensive projection helper for loose kernel payload fields.
+# 函数用途: 非 dict 值按空字典处理，避免 tree 渲染中断。
 def _dict(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+# LLM: _list keeps list-like payload fields bounded to actual lists.
+# 函数用途: 非 list 值按空列表处理，避免字符串被拆成字符。
 def _list(value: object) -> list:
     return list(value) if isinstance(value, list) else []
 
 
+# LLM: _dict_list filters registry rows to JSON object entries only.
+# 函数用途: 只保留 dict 形式的 artifact registry 引用。
 def _dict_list(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value if isinstance(item, dict)]
 
 
+# LLM: _needs_capability derives visible capability gaps from structured tool facts.
+# 函数用途: 把能力申请、授权缺口和显式 needs_capability 汇总给父代理。
 def _needs_capability(tool_contract: dict[str, object], reserved: dict[str, object]) -> list[str]:
     explicit = reserved.get("needs_capability")
     if isinstance(explicit, list):
@@ -148,6 +192,8 @@ def _needs_capability(tool_contract: dict[str, object], reserved: dict[str, obje
     return needs
 
 
+# LLM: _recent_tool_trace exposes only the latest small tool trace rows.
+# 函数用途: 从 reserved 中裁剪最近工具轨迹，避免 tree 输出膨胀。
 def _recent_tool_trace(reserved: dict[str, object]) -> list[dict[str, object]]:
     value = reserved.get("recent_tool_trace")
     if not isinstance(value, list):
@@ -155,6 +201,8 @@ def _recent_tool_trace(reserved: dict[str, object]) -> list[dict[str, object]]:
     return [dict(item) for item in value[-5:] if isinstance(item, dict)]
 
 
+# LLM: _safe_int keeps malformed counters from breaking status rendering.
+# 函数用途: 将计数字段安全转成 int，坏值按 0 处理。
 def _safe_int(value: object) -> int:
     try:
         return int(value or 0)

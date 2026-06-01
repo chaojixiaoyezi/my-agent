@@ -118,3 +118,6 @@
   `dispatch_subagents.runner_instruction` 只用于“补一句并立刻推进该 run”，并同步写入同一份 guidance 账本。
 - guidance 是软提示，不是验收条件：不会阻断、不会替父代理做结论、不会改变原任务目标。
   子代理看到后由模型自己决定换来源、补证据、写阶段文件或上报。
+- `send_guidance` 也支持批量目标：可以用 `run_ids` 点名多个 run，或用
+  `target_scope=children/descendants` 给某个 run 的直接孩子或整棵下级子树写同一句软提示。
+  `inspect_agent_tree` 会展示每个节点未读 guidance 数量和最近几条提示，方便父代理知道谁还没接到新要求。

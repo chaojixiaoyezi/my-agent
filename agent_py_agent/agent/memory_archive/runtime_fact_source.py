@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..run_intent import build_run_intent
+from ..run_intent import build_run_intent, run_intent_payload
+from .runtime_workspace_outputs import run_intent_has_desired_outputs, runtime_desired_outputs
 
 
 # LLM: RuntimeFactSourceRequest bundles the real run facts that are safe to persist for compact.
@@ -82,6 +83,17 @@ def write_approved_runtime_fact_source(request: ApprovedRuntimeFactSourceRequest
 def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
     sections = _explicit_sections(_fact_source_text(request))
     latest_tests = _dedupe([*sections.tests, *_tool_test_items(request.archive_tool_calls)])
+    desired_outputs = runtime_desired_outputs(request.delivery_contract, request.runtime_injections)
+    run_intent = build_run_intent(
+        user_prompt=request.user_prompt,
+        delivery_contract=request.delivery_contract,
+        workspace_root=request.root,
+    )
+    if desired_outputs and not run_intent_has_desired_outputs(run_intent):
+        run_intent = run_intent_payload(
+            reference_roots=[],
+            desired_outputs=[item["target_path"] for item in desired_outputs if item.get("target_path")],
+        )
     return {
         "version": 1,
         "source": "runtime_fact_source",
@@ -93,12 +105,8 @@ def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
         "acceptance": sections.acceptance,
         "constraints": sections.constraints,
         "latest_tests": latest_tests,
-        "desired_outputs": _desired_outputs(request.delivery_contract),
-        "run_intent": build_run_intent(
-            user_prompt=request.user_prompt,
-            delivery_contract=request.delivery_contract,
-            workspace_root=request.root,
-        ),
+        "desired_outputs": desired_outputs,
+        "run_intent": run_intent,
         "runtime_progress": _runtime_progress_payload(request),
         "run_status": {
             "status": request.status,
@@ -106,32 +114,6 @@ def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
             "response_present": bool(request.response_text.strip()),
         },
     }
-
-
-# LLM: _desired_outputs keeps user-visible target paths in runtime facts for compact/resume reminders.
-# 函数用途: 从 delivery_contract.artifacts 提取目标产物，不做业务验收；模型写错目录时可用它提示回目标路径。
-def _desired_outputs(contract: dict[str, Any] | None) -> list[dict[str, str]]:
-    if not isinstance(contract, dict):
-        return []
-    artifacts = contract.get("artifacts")
-    if not isinstance(artifacts, list | tuple):
-        return []
-    outputs: list[dict[str, str]] = []
-    for artifact in artifacts:
-        if not isinstance(artifact, dict):
-            continue
-        path = str(
-            artifact.get("path")
-            or artifact.get("preferred_path")
-            or artifact.get("target_path")
-            or artifact.get("output_path")
-            or ""
-        ).strip()
-        artifact_id = str(artifact.get("artifact_id") or artifact.get("id") or path).strip()
-        kind = str(artifact.get("kind") or artifact.get("type") or "").strip()
-        if path or artifact_id or kind:
-            outputs.append({"artifact_id": artifact_id, "kind": kind, "target_path": path})
-    return outputs
 
 
 # LLM: _runtime_progress_payload is the live whiteboard for compact/resume, not a second raw archive.

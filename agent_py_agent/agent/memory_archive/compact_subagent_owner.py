@@ -109,7 +109,7 @@ def _owner_refs(request: CompactSubagentOwnerRequest) -> dict[str, Any]:
 
 
 # LLM: _run_workspaces_from_search_roots keeps configured runtime subagent dirs first-class resume sources.
-# 函数用途: 在主 workspace 与配置 subagent_workspace 的 tasks/*/agents/<run_id> 下查找候选 run workspace。
+# 函数用途: 在主 workspace 与配置 subagent_workspace 的 tasks/*/work/agents/<run_id> 下查找候选 run workspace。
 def _run_workspaces_from_search_roots(request: CompactSubagentOwnerRequest, owner_id: str) -> list[str]:
     return _unique_existing_dirs(
         path
@@ -131,17 +131,21 @@ def _configured_subagent_workspace_roots(request: CompactSubagentOwnerRequest) -
 
 
 # LLM: _agent_run_workspaces finds direct child run dirs without globbing owner-controlled text.
-# 函数用途: 查找 tasks/<task>/agents/<run_id> 候选路径，把 owner_id 当普通目录名而不是 glob 表达式。
+# 函数用途: 查找 tasks/<task>/work/agents/<run_id> 候选路径，并兼容旧 tasks/<task>/agents/<run_id>。
 def _agent_run_workspaces(workspace: Path, owner_id: str) -> list[str]:
     tasks_root = workspace / "tasks"
     if not tasks_root.exists():
         return []
     matches: list[str] = []
     for task_dir in sorted(path for path in tasks_root.iterdir() if path.is_dir()):
-        candidate = task_dir / "agents" / owner_id
-        if candidate.is_dir():
-            matches.append(str(candidate))
+        matches.extend(str(path) for path in _agent_run_workspace_candidates(task_dir, owner_id) if path.is_dir())
     return matches
+
+
+# LLM: _agent_run_workspace_candidates prefers the current work/agents layout and keeps legacy second.
+# 函数用途: 为单个 task 目录生成当前与旧版 agent run workspace 候选路径。
+def _agent_run_workspace_candidates(task_dir: Path, owner_id: str) -> tuple[Path, Path]:
+    return (task_dir / "work" / "agents" / owner_id, task_dir / "agents" / owner_id)
 
 
 # LLM: _legacy_task_dirs supports both default root/subagents and configured subagent_workspace/<run_id>.

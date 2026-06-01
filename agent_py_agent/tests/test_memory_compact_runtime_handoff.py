@@ -98,6 +98,37 @@ def test_runtime_handoff_treats_scope_ids_as_literal_paths(tmp_path: Path) -> No
     assert sources.runtime_handoff == {}
 
 
+def test_runtime_fact_preserves_task_output_root_from_workspace_prompt(tmp_path: Path) -> None:
+    from agent_py_agent.agent.memory_archive.runtime_fact_source import (
+        RuntimeFactSourceRequest,
+        write_runtime_fact_source,
+    )
+
+    output_dir = tmp_path / "owners" / "local" / "main" / "tasks" / "2026-06-01" / "demo" / "output"
+    work_dir = output_dir.parent / "work"
+    injection = "\n".join(
+        [
+            "# Current Task Workspace",
+            f"- output_dir: {output_dir}",
+            f"- work_dir: {work_dir}",
+        ]
+    )
+
+    fact_dir = write_runtime_fact_source(
+        RuntimeFactSourceRequest(
+            root=tmp_path,
+            request_id="request-1",
+            user_prompt="分析几个项目并写报告。",
+            runtime_injections=(injection,),
+        )
+    )
+    payload = json.loads((Path(fact_dir) / "task.json").read_text(encoding="utf-8"))
+
+    assert payload["desired_outputs"][0]["artifact_id"] == "task_output_dir"
+    assert payload["desired_outputs"][0]["target_path"] == str(output_dir)
+    assert payload["run_intent"]["desired_outputs"]["items"] == [str(output_dir)]
+
+
 def _write_runtime_handoff_sources(root: Path) -> None:
     guidance_dir = root / "data" / "conversations" / "guidance"
     guidance_dir.mkdir(parents=True, exist_ok=True)

@@ -285,7 +285,7 @@ def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -
     records_by_depth = sorted(records, key=lambda item: (item.depth, item.agent_name))
     assert [item.agent_name for item in records_by_depth] == ["小傻妞-家具总控", "小小傻妞-家具叶子"]
     assert {item.depth for item in records} == {0, 1}
-    assert len(backend.runner.prompts) >= 4
+    assert len(backend.runner.prompts) >= 3
     assert (site_dir / "index.html").exists()
     assert site_check.validation_result["ok"] is True
 

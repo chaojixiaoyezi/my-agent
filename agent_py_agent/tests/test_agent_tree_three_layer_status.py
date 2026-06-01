@@ -160,6 +160,29 @@ def test_agent_tree_exposes_artifact_registry_refs():
     assert node["evidence_layer"]["artifact_registry_refs"] == [registry_record]
 
 
+def test_agent_tree_exposes_pending_guidance_layer(tmp_path):
+    from agent_py_agent.agent.config import AgentConfig
+    from agent_py_agent.agent.core import SimpleAgent
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    child = agent.subagents.create_run(goal="child", thought="", plan=["child"])
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "agent_run",
+            "target_id": child.id,
+            "message": "补读核心源码后再写结论。",
+            "priority": "high",
+        }
+    )
+
+    payload = agent_tree_status_payload(agent, {"root_id": child.id})
+    node = payload["nodes"][0]
+
+    assert node["guidance_layer"]["pending_count"] == 1
+    assert node["guidance_layer"]["recent_pending"][0]["message"] == "补读核心源码后再写结论。"
+    assert node["guidance_layer"]["recent_pending"][0]["priority"] == "high"
+
+
 def test_agent_tree_visible_run_ids_filters_prompt_copy_only():
     """后台唤醒只应把当前 thread 相关的 run 放进 prompt 副本。"""
 

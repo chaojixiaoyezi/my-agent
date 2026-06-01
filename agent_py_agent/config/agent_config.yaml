@@ -24,7 +24,7 @@ workspace_root: ["", "C:/Users/41542/Desktop/2026年工作/5月","/Users/xiaoyez
 
 # my-agent 家目录：
 # - 默认 ~/.my-agent，作为本机固定 profile/home 目录。
-# - 这里放配置、全局脚本、长期记忆、模板、provider 空间和运行缓存。
+# - 这里放配置、共享能力、owner 空间和运行缓存；local/main 的记忆和任务在 owners/local/main/ 下。
 # - MY_AGENT_HOME 环境变量优先级更高，适合测试或多 profile 隔离。
 my_agent_home: "~/.my-agent"
 
@@ -169,7 +169,9 @@ subagent_mode: "trusted_local_hardening"
 # 真实并发仍由调度器按机器和模型情况自动控制；复杂任务可让主代理自行规划拆分方式。
 max_subagents: 50
 
-# 子任务记录输出目录。
+# 子任务旧工单输出目录。
+# - 新的任务级状态和下级代理运行目录会挂到当前 owner task 的 work/agents/。
+# - 这个目录保留给 legacy work-order、兼容恢复和迁移读取，不再作为用户可见任务列表。
 subagent_workspace: "data/subagents"
 
 # 子代理角色模板目录。

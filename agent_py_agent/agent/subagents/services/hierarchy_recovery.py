@@ -220,7 +220,8 @@ def _parent_context_bundle_ref(
     if parent is not None:
         return _context_bundle_ref(parent)
     if task.task_workspace_dir:
-        return str(Path(task.task_workspace_dir) / "agents" / parent_id / "context_bundle.json")
+        # LLM: Parent recovery refs use task/work/agents so task root remains output/work only.
+        return str(Path(task.task_workspace_dir) / "work" / "agents" / parent_id / "context_bundle.json")
     return ""
 
 

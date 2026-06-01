@@ -232,7 +232,7 @@ def _assert_child_control_projection(projected, parent, child) -> None:
     assert projected.latest_summary == "子代理已阻塞，等待证据。"
     assert projected.metadata["system_tree"]["updated_by"] == "system"
     assert projected.metadata["system_tree"]["parent_id"] == parent.id
-    assert projected.workspace_path.replace("\\", "/").endswith(f"tasks/{parent.root_id}/agents/{child.id}")
+    assert projected.workspace_path.replace("\\", "/").endswith(f"tasks/{parent.root_id}/work/agents/{child.id}")
     assert projected.checkpoint_ref.endswith("checkpoint.json")
 
 

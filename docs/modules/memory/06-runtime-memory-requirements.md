@@ -51,7 +51,7 @@ Task workspace 是任务事实源。后续开发新增任务级能力时，应�
 - `shared/findings.jsonl`、`shared/messages.jsonl`、`shared/evidence_packets/`：子代理协作和证据链。
 - `artifacts/`：工具输出、日志样本、报告、临时中间件。
 
-当前 Phase 0 已先落地文件系统 skeleton：subagent 保存时会在 manager workspace 下创建 `tasks/<root_id>/`，写入 `task.yaml`、`state.json`、`timeline.jsonl`、`summaries/current_summary.md`、`shared/blackboard.md`、`shared/messages.jsonl`、`shared/findings.jsonl`、`artifacts/` 和 `agents/<run_id>/legacy_run_ref.json`。这一步只做 adapter，旧 run 目录仍保留原样。
+当前 Phase 0 已先落地文件系统 skeleton，并在 2026-06-01 收敛到任务根 `output/` + `work/`：subagent 保存时会在当前任务根下写入 `work/task.yaml`、`work/state.json`、`work/timeline.jsonl`、`work/summaries/current_summary.md`、`work/shared/blackboard.md`、`work/shared/messages.jsonl`、`work/shared/findings.jsonl`、`work/artifacts/` 和 `work/agents/<run_id>/legacy_run_ref.json`。这一步只做 adapter，旧 run 目录仍保留原样。
 
 ## Agent Run Workspace 要求
 
@@ -77,7 +77,7 @@ Task workspace 是任务事实源。后续开发新增任务级能力时，应�
 - `findings.jsonl`：本 run 产生的结构化发现。
 - `SKILL_SPARKS.md`：本 run 的 skill 学习候选，只是候选，不自动写入长期记忆或正式 skill。
 
-当前 Phase 1 已先落地 agent run workspace skeleton：新任务目录使用 `tasks/{date}/{task_slug}/work/agents/<run_id>/` 写 `agent.yaml`、run `state.json`、`task.md`、run `timeline.jsonl`、`checkpoint.json`、`summary.md`、`final_report.md`、`findings.jsonl`，并创建 `inbox/`、`outbox/`、`artifacts/`、`compactions/`。旧 `tasks/<root_id>/agents/<run_id>/` 和旧 work-order 目录仍作为迁移期读取兼容，run workspace 先作为恢复、接管和后续 compact 的兼容面。
+当前 Phase 1 已先落地下级 agent run workspace skeleton：新任务目录使用 `tasks/{date}/{task_slug}/work/agents/<run_id>/` 写 `agent.yaml`、run `state.json`、`task.md`、run `timeline.jsonl`、`checkpoint.json`、`summary.md`、`final_report.md`、`findings.jsonl`，并创建 `inbox/`、`outbox/`、`artifacts/`、`compactions/`。主代理不写入 `work/agents`；旧 `tasks/<root_id>/agents/<run_id>/` 和旧 work-order 目录仍作为迁移期读取兼容，run workspace 先作为恢复、接管和后续 compact 的兼容面。
 
 ## Daily Event Ledger 要求
 
@@ -250,7 +250,7 @@ Runtime memory 的轻量索引记录必须能长期扩展，但不能把字段�
 - 已新增 `memory_archive/compact_resume_completion.py` 半自动补全提示第一片：缺 work_state 字段时返回 `completion_prompt`，展示缺失字段、标签和补全模板；它不自动写 runtime facts，也不把假设变事实。
 - 已新增 `memory_archive/compact_suggest.py` 提示第一片：`run` 收尾会根据 token ledger 和上下文窗口返回 compact suggestion 字段；保存型运行会继续进入非破坏性 apply/resume，`save=False` 只打印建议命令。
 - 已新增 `memory_archive/compact_auto.py` 自动 compact/resume 协调第一片，并已接入 `SimpleAgent.run()` 收尾的默认 auto-apply 分支：结果和 CLI 会显示 `compact_auto` 的状态、下一步和工具执行状态；保存型运行 guard 放行后会自动续接同一个任务，`save=False` 只生成建议和计划。
-- 已新增 `memory_archive/compact_work_state_sources.py` Work State 字段来源第一片：compact apply 只读当前 run/session/request 对应的 task/run 事实源，把 acceptance、constraints、latest_tests 和 read_files 写入 `work_state_snapshot`；当前支持旧 `subagents/<run_id>/`、新 `tasks/*/agents/<run_id>/`、`memory_archive/runtime_facts/<id>/task.json`、同 scope 下的 `ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md` 和 `task.json`，不会扫描 workspace 根目录清单。
+- 已新增 `memory_archive/compact_work_state_sources.py` Work State 字段来源第一片：compact apply 只读当前 run/session/request 对应的 task/run 事实源，把 acceptance、constraints、latest_tests 和 read_files 写入 `work_state_snapshot`；当前支持旧 `subagents/<run_id>/`、新 `tasks/*/work/agents/<run_id>/`、旧 `tasks/*/agents/<run_id>/`、`memory_archive/runtime_facts/<id>/task.json`、同 scope 下的 `ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md` 和 `task.json`，不会扫描 workspace 根目录清单。
 - 已扩展真实 run Work State 回填：没有 `memory_archive/snapshots/*.json` 权威 snapshot 时，compact apply 会从本次 `restore_refs` 指向的 hook/raw JSONL 回填原始用户目标和工作级 next action；单个 `[TOOL_CALL]` 不会被当作任务路线。验收、约束和最近测试仍必须来自明确 task/run 事实源，缺失时只作为可补充提示，不再卡住普通任务自动续接。
 - 已新增 `memory_archive/runtime_fact_source.py` 运行时事实源第一片：真实 `run --save` 会写 `memory_archive/runtime_facts/<request_id>/task.json`，把原始用户目标、显式验收、约束、测试条目暴露给 compact work_state；没有明确标签时不会伪造字段，普通任务也不会因为 missing fields 被自动续接硬卡。
 - 已收窄 `memory_archive/resume_context.py` 的旧任务恢复触发：只有明确旧任务语义（例如继续 README、继续上次、恢复、run_id/request_id/subagent id）才注入恢复上下文或旧对话记忆；“继续往下做/继续整理/继续完成”这类当前任务内部表达不会触发旧任务恢复，避免长任务压测串入旧 run。
@@ -259,7 +259,7 @@ Runtime memory 的轻量索引记录必须能长期扩展，但不能把字段�
 
 后续主要差距：
 
-- 旧 subagent workspace 尚未迁移到 `tasks/<task_id>/agents/<run_id>/`；当前 agent run workspace 是 skeleton + legacy adapter，不是完整替代。
+- 旧 subagent workspace 尚未完全迁移到 `tasks/<task_id>/work/agents/<run_id>/`；当前 agent run workspace 是 skeleton + legacy adapter，不是完整替代。
 - task workspace 已有第一版 `task.yaml`、`state.json`、`timeline.jsonl`，run workspace 已有第一版 `agent.yaml`、run-level `state.json/timeline.jsonl` 和 checkpoint-first compact ledger/snapshot 链；全局 `memory-compact --apply` 已有非破坏性 apply、restore refs、apply bundle、work state snapshot、post-compact self-check 和失败阻断，`memory-resume --from-compact` 已能只读生成手动恢复上下文；run-local destructive compact apply 仍未接入。
 - compact 提示已接入主代理 `run` 返回值；自动 compact/resume 已能在主代理 guard 放行后连续续接同一任务。子代理侧已有 task-local refs、自动 latest continue packet、runner prompt 接续第一版；完整无人值守接管和失败后自动选择新 leader 仍是后续工作。
 - daily ledger 已有 append-only 文件入口和 artifact manifest refs，并已接入 control-plane 只读查询；resume 查询优先级还需要下一步显式改造，run-local gate retention 已有保守 active queue 清理。

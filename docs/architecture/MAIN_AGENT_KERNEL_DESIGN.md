@@ -68,9 +68,10 @@
 
    如果任务要求覆盖多个对象，例如“每个项目”“每篇论文”“每周数据”“每个 API”“每个文件”，同一个 `task_progress` 也可以写 `coverage` 覆盖账本。它记录目标对象、当前任务自定义的检查点、证据和缺口；主代理、子代理、孙代理都复用同一结构。coverage 不是专项模板，也不参与硬验收，只是让长任务和多轮 compact 后还能知道哪些对象没覆盖完整。
 
-   如果模型把多个条目标成 `done` 但没有 evidence，`task_progress` 会给 `quality_hints` 软提示，提醒补上看过的文件、产物路径或工具结果引用。这个提示不会改变任务状态，也不会阻断 closeout；它只是帮助模型不要最后一次性随便打勾。
+   如果模型把多个条目标成 `done` 或写了结果/结论但没有 evidence，`task_progress` 会给 `quality_hints` 和本次工具结果里的
+   `soft_feedback` 软提示，提醒补上看过的文件、产物路径或工具结果引用。这个提示不会改变任务状态，也不会阻断 closeout；它只是帮助模型不要最后一次性随便打勾。
 
-   运行中人类或父代理可以通过 `send_guidance` 或 CLI `guidance-send` 给某个 run/thread/task/case 追加自然语言提示。提示只进入下一轮 prompt，不会直接 dispatch、closeout 或修改任务状态。
+   运行中人类或父代理可以通过 `send_guidance` 或 CLI `guidance-send` 给某个 run/thread/task/case 追加自然语言提示。提示只进入下一轮 prompt，不会直接 dispatch、closeout 或修改任务状态。需要同步提醒一批下级时，`send_guidance` 可以用 `run_ids` 或 `target_scope=children/descendants` 批量写入同一条软提示；`inspect_agent_tree` 会展示未读提示数量。
 
 6. 收尾保存。
 

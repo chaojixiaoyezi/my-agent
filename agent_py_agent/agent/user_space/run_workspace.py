@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -91,7 +92,7 @@ def run_workspace_paths(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths
         request.home,
         request.template,
         date=_date_key(request.created_at),
-        task_name=request.task_id or request.task_name or request.user_prompt,
+        task_name=_workspace_task_name(request),
     )
     work = root / "work"
     return RunWorkspacePaths(
@@ -150,6 +151,8 @@ def _state_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
     }
 
 
+# LLM: _artifact_manifest_payload seeds an empty manifest; real artifacts register later.
+# 函数用途: 初始化 output/ 交付物登记文件，不把模型口头路径当最终事实。
 def _artifact_manifest_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
     return {
         "version": 1,
@@ -195,17 +198,54 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# LLM: _workspace_task_name keeps machine ids as metadata, not user-visible task folder names.
+# 函数用途: 选择任务目录名；run/gw/req 等机器编号不作为 tasks/date 下的目录名。
+def _workspace_task_name(request: EnsureRunWorkspaceRequest) -> str:
+    candidates = (request.task_id, request.task_name, request.user_prompt)
+    for value in candidates:
+        text = str(value or "").strip()
+        if text and not _looks_like_machine_id(text):
+            return text
+    return str(request.user_prompt or request.task_name or request.task_id or request.run_id or request.request_id or "task")
+
+
+# LLM: _looks_like_machine_id keeps gateway/run/request ids out of visible task folder names.
+# 函数用途: 识别机器编号形态，只作为 metadata 保留，不拿来命名任务目录。
+def _looks_like_machine_id(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    machine_prefixes = (
+        "run-",
+        "gw-",
+        "req-",
+        "session-",
+        "thread-",
+        "subagent-",
+        "capreq-",
+        "capreq_",
+        "auto-compact",
+    )
+    if text.startswith(machine_prefixes):
+        return True
+    return bool(re.fullmatch(r"(run|gw|req|task|session|thread)[_-]?[0-9a-f]{6,}", text))
+
+
 # LLM: _yaml_escape keeps the tiny YAML seed readable without adding a YAML dependency.
 # 函数用途: 转义任务元数据里的双引号。
 def _yaml_escape(value: object) -> str:
     return str(value or "").replace('"', '\\"')
 
 
+# LLM: _write_seed_file is idempotent so reruns do not overwrite user-visible task notes.
+# 函数用途: 仅在缺失时写入小型种子文件。
 def _write_seed_file(path: Path, content: str) -> None:
     if not path.exists():
         path.write_text(content, encoding="utf-8")
 
 
+# LLM: _write_seed_json mirrors _write_seed_file for machine-readable bootstrap files.
+# 函数用途: 仅在缺失时写入 JSON 种子，避免重跑覆盖已有状态。
 def _write_seed_json(path: Path, payload: dict[str, object]) -> None:
     if path.exists():
         return

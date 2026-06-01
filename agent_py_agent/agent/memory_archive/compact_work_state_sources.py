@@ -101,7 +101,7 @@ def _payload_items(value: Any) -> list[str]:
 
 
 # LLM: _candidate_fact_roots scopes work-state reads to current workspace and compact task/run ids.
-# 函数用途: 计算可读取的 task/run 事实源目录，支持旧 subagents 目录和新 tasks/*/agents 目录。
+# 函数用途: 计算可读取的 task/run 事实源目录，支持旧 subagents 目录和新 tasks/*/work/agents 目录。
 def _candidate_fact_roots(request: WorkStateFieldSourceRequest) -> list[Path]:
     workspace = Path(str(request.plan["workspace_root"]))
     ids = _scoped_ids(request)
@@ -131,13 +131,14 @@ def _first_task_progress(workspace: Path, ids: list[str]) -> dict[str, Any]:
 
 
 # LLM: _id_roots maps a task/run id to legacy and task-workspace candidate directories.
-# 函数用途: 根据 run_id/task_id 返回旧 subagents、新 tasks 和 tasks/*/agents 路径。
+# 函数用途: 根据 run_id/task_id 返回旧 subagents、新 tasks 和 tasks/*/work/agents 路径。
 def _id_roots(workspace: Path, item_id: str) -> list[Path]:
     if not item_id:
         return []
     task_agent_roots = [
         path
-        for path in sorted((workspace / "tasks").glob("*/agents/*"))
+        for pattern in ("*/work/agents/*", "*/agents/*")
+        for path in sorted((workspace / "tasks").glob(pattern))
         if path.is_dir() and path.name == item_id
     ]
     return [

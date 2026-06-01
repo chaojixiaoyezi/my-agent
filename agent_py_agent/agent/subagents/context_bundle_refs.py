@@ -77,7 +77,12 @@ def lineage(task: SubAgentTask) -> dict[str, object]:
         if legacy_task_dir_ref and legacy_task_dir_ref != task_workspace_ref
         else ""
     )
-    parent_agent_ref = str(task_workspace / "agents" / parent_id / "context_bundle.json") if parent_id and task_workspace_ref else ""
+    # LLM: Parent context refs follow the current task-local work/agents layout.
+    parent_agent_ref = (
+        str(task_workspace / "work" / "agents" / parent_id / "context_bundle.json")
+        if parent_id and task_workspace_ref
+        else ""
+    )
     return {
         "root_id": task.root_id or task.id,
         "parent_id": parent_id,

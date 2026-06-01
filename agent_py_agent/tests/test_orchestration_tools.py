@@ -26,6 +26,25 @@ def test_create_subagents_tool_spec_uses_template_index_not_full_prompt():
     assert "不同工作切片不要用 count" in spec.parameter_details["count"]
 
 
+# LLM: create_subagents should place child runtime under the current task work tree, not a separate task root.
+# 函数用途: 验证主代理当前任务根会随 create_subagents 参数继承给子代理。
+def test_create_subagents_inherits_current_task_workspace(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_create_policy import create_run_params
+    from agent_py_agent.agent.config import AgentConfig
+    from agent_py_agent.agent.core import SimpleAgent
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    task_root = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-01" / "big-task"
+    agent._current_run_task_workspace = str(task_root)
+
+    params = create_run_params(agent, {"role": "worker"}, "阅读项目 A 并写报告", ["read_file"])
+    task = agent.subagents.create_run(params=params)
+
+    assert task.attributes["run_workspace"]["task_root"] == str(task_root)
+    assert task.task_workspace_dir == str(task_root)
+    assert task.agent_run_workspace_dir == str(task_root / "work" / "agents" / task.id)
+
+
 class TestTaskProgressTool:
     """测试通用任务进度账本。"""
 
@@ -133,6 +152,28 @@ class TestTaskProgressRegistryTool:
         assert result.ok is True
         assert (tmp_path / "memory_archive" / "task_progress" / "run-scoped" / "progress.json").exists()
         assert not (tmp_path / "memory_archive" / "task_progress" / "main" / "progress.json").exists()
+
+    def test_task_progress_soft_feedback_names_missing_evidence_items(self, tmp_path):
+        """模型一写完成/结果但没证据时，工具应立即给可操作软提醒，不等最终验收。"""
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent._main_agent_run_id = "run-main"
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "action": "update",
+                "items": [{"id": "project-a", "title": "项目 A", "status": "完成"}],
+            }
+        )
+        payload = json.loads(result.output)
+
+        assert result.ok is True
+        assert payload["soft_feedback"]["blocking"] is False
+        assert payload["soft_feedback"]["missing_evidence_item_ids"] == ["project-a"]
+        assert "补证据" in payload["soft_feedback"]["message"]
 
 class TestInspectAgentTreeTool:
     """测试只读代理树查看工具。"""

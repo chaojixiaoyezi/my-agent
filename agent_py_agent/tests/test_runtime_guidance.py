@@ -95,6 +95,38 @@ def test_send_guidance_tool_writes_run_guidance(tmp_path) -> None:
     assert pending[0].priority == "high"
 
 
+def test_send_guidance_tool_can_target_direct_child_scope(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    root = agent.subagents.create_run(goal="root", thought="", plan=["root"])
+    child_a = agent.subagents.create_run(goal="a", thought="", plan=["a"], parent_id=root.id, root_id=root.id, depth=1)
+    child_b = agent.subagents.create_run(goal="b", thought="", plan=["b"], parent_id=root.id, root_id=root.id, depth=1)
+    grandchild = agent.subagents.create_run(
+        goal="grandchild",
+        thought="",
+        plan=["grandchild"],
+        parent_id=child_a.id,
+        root_id=root.id,
+        depth=2,
+    )
+
+    result = SendGuidanceTool(agent).execute(
+        {
+            "target_scope": "children",
+            "run_id": root.id,
+            "message": "先按新要求补证据，完成后继续原任务。",
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["target"]["type"] == "agent_run"
+    assert sorted(item["id"] for item in payload["targets"]) == sorted([child_a.id, child_b.id])
+    assert agent.conversation_store.pending_guidance("agent_run", child_a.id)
+    assert agent.conversation_store.pending_guidance("agent_run", child_b.id)
+    assert agent.conversation_store.pending_guidance("agent_run", root.id) == []
+    assert agent.conversation_store.pending_guidance("agent_run", grandchild.id) == []
+
+
 def test_cli_guidance_send_writes_same_guidance_inbox(tmp_path, capsys) -> None:
     from types import SimpleNamespace
     from unittest.mock import patch

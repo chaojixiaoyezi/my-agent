@@ -25,7 +25,7 @@ def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
         EnsureRunWorkspaceRequest(
             home=target_home,
             template=str(getattr(agent.config, "workspace_task_path_template", "")),
-            task_name=params.task_id or params.run_id or params.run_request_id or params.user_prompt,
+            task_name=params.task_id or params.user_prompt,
             user_prompt=params.user_prompt,
             request_id=params.run_request_id,
             run_id=params.run_id,
@@ -74,7 +74,7 @@ def _ensure_workspace_for_run(agent, params, user_prompt: str):
         EnsureRunWorkspaceRequest(
             home=target_home,
             template=str(getattr(agent.config, "workspace_task_path_template", "")),
-            task_name=getattr(params, "task_id", "") or getattr(params, "run_id", "") or user_prompt,
+            task_name=getattr(params, "task_id", "") or user_prompt,
             user_prompt=user_prompt,
             request_id=str(getattr(params, "request_id", "") or ""),
             run_id=str(getattr(params, "run_id", "") or ""),

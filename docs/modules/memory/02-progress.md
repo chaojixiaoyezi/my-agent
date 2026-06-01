@@ -23,6 +23,8 @@
 - 2026-06-01 tool-output 模型可见路径补强：内部编排/状态工具的新外置归档会保存净化后的模型可见正文；更早的旧归档在 `read_artifact` 展开时按来源工具再净化一次，避免历史 `data/subagents/...` 路径重新进入上下文。普通 `read_file`、网页、shell/controlled_exec 输出和用户产物正文保持原文，不做展示替换。
 - 2026-06-01 Owner home 主链路继续收敛：保存型 local/main run 的新任务工作区也写入 `owner_home/tasks/...`，旧顶层 `tasks/...` 只保留读取/迁移兼容；新增 `home-index-rebuild` 显式维护命令，默认 dry-run，`--apply` 才从 owner 正文重建 owner/task/run/agent 全局索引；task compact rollup 会同步 `owner_home/compact/by_task|by_run|by_agent/` 轻量指针，父代理恢复时可先读 owner 级索引再打开具体 rollup。
 - 2026-05-30 `task_progress` 增加软质量提示：如果模型把条目标成 `done` 但没有 evidence，系统只在 `quality_hints` 里提醒补文件、产物或工具结果引用；这不会影响 closeout，不会阻断任务。compact / tree 会带着这个提示，帮助长任务压缩后继续把证据补扎实。
+- 2026-06-01 `task_progress` 更新工具返回：模型一写完成、结果、结论但没 evidence，`task_progress` 会在本次工具结果里返回
+  `soft_feedback.missing_evidence_item_ids` 和建议动作。它仍然只是即时软提醒，不改变任务状态、不触发验收、不阻断任务。
 - 2026-05-31 `task_progress` 的软提示进一步细化：覆盖账本里还有对象或检查点没完成时，会给 `next_suggestions` 和 `soft_prompt`，提醒模型继续选一个未完成对象、读核心文件或可靠来源、补 evidence、再写进报告。它仍然只是提示，不改状态、不触发 closeout、不阻断任务。
 - 2026-05-30 compact work state 增加通用 `runtime_handoff`：压缩前会收集同 scope 下最近 guidance 和可见下级 agent 状态，写入 `work_state_snapshot`、handoff context 和 continue packet。它不是聊天专项，也不是子代理专项，只是一份“运行中交接摘要”；API 监控、长报告、多人协作和普通聊天续接都复用同一字段。
 - 2026-05-31 compact 续接优先级调整：如果运行中 guidance 或后台唤醒已经明确给出新的下一步，`compact_apply_work_state` 会优先使用这条最新运行提示，而不是沿用压缩前旧的 `task_progress.next_action`。这样父代理在子代理完成后被叫醒时，会先按“去汇总/去检查最新结果”继续，不会被早前的旧进度提示带偏。
@@ -32,6 +34,8 @@
 - 2026-05-30 通用 `task_progress` 进度账本已落地：主代理、子代理、孙代理都可用同一个工具记录“哪些小块完成、正在做、下一步是什么”。账本写在 `memory_archive/task_progress/<run_id>/progress.json`，是软进度，不参与硬验收；`inspect_agent_tree` 只展示摘要，compact 会按当前 run_id 把该账本带进 `work_state_snapshot`，让子代理压缩后也能先续接自己的工作清单。
 - 2026-05-30 `task_progress` 增加通用 coverage 覆盖账本：同一个工具可记录“哪些对象需要覆盖、每个对象有哪些检查点、哪些已写证据”。对象类型完全开放，可以是项目、论文、API、日志源、文件、模块或子代理；coverage 只帮助 compact/tree/父代理看清缺口，不触发验收或阻断。
 - 2026-05-30 外部运行中提示入口已接入同一 guidance inbox：`my-agent guidance-send --run-id <id> "自然语言提示"` 会写入 `ConversationStore` guidance 账本，目标代理下一轮读取；它不推进、不验收、不阻断，只相当于人在运行中补一句话。
+- 2026-06-01 保存型 run 的 `Current Task Workspace` 会进入 runtime fact：即使没有显式交付合同，compact/resume 也能看到本轮
+  `output/` 是最终交付区、`work/` 是过程区。这是路径软提示和运行状态，不会强迫纯聊天任务落盘。
 - 2026-05-31 runtime fact 增加通用 `run_intent`：当用户明确要求目标产物路径时，系统会把目标产物和其它显式参考目录带进 compact handoff。`write_file` 写到参考目录时只返回软提醒，不阻断；没有明确落盘目标时不会凭空制造“必须写文件”的要求。
 - 2026-05-30 真实 compact 压力测试命中 provider 429。网关已保持请求前短退避重试；工具循环现在还会在当前模型回合内按 `10/25/45/100/180` 秒等待表自动重试 provider transient，避免整轮 run 重启或重复执行已完成工具。重试耗尽后抛 `ProviderTransientError`，CLI 输出 `provider_transient` 可恢复提示，不再把裸 HTTP traceback 当成任务失败正文。
 - 2026-05-29 Compact Action Guard 已按普通任务放宽：`acceptance`、`constraints`、`latest_tests` 缺失时只写入 `missing_fields` 提醒，不再阻断自动续接；只有 consistency/self-check/refs/goal/next_step 这类恢复包硬完整性失败时才停车。
@@ -75,13 +79,13 @@
 - parent/subagent runner 跨天恢复演练已接入 `scenario-test --case parent-subagent-cross-day-resume`：真实 runner 工具回合写回后，`memory-resume` 能回到任务事实源路径。
 - subagent checkpoint recovery artifacts 已进入 `memory-resume` 推荐路径：恢复简报会优先提示 `reports/checkpoint.json`、`status_report.json`、`progress.md`、`decision_ledger.json`、`failing_tests.json`、`next_actions.json`，再回到 `STATUS.md` / `HANDOFF.md` 等传统事实源。
 - 2026-05-07 runtime memory 新目标边界已记录到 `06-runtime-memory-requirements.md`：memory 定位为运行时档案系统，主代理 memory 只索引任务/run/事件/artifact 引用，subagent 仍留在 task/run workspace，不能默认写主长期记忆。
-- 2026-05-07 Phase 0 Task Workspace 骨架已落地：subagent 保存时会在 manager workspace 下同步 `tasks/<root_id>/task.yaml`、`state.json`、`timeline.jsonl`、`summaries/current_summary.md`、`shared/`、`artifacts/`、`agents/<run_id>/legacy_run_ref.json`；旧 `subagents/<run_id>/task.json` 和工单 Markdown 仍保持兼容事实源。
-- 2026-05-07 Phase 1 Agent Run Workspace 适配已落地：`tasks/<root_id>/agents/<run_id>/` 现在会生成 `agent.yaml`、run `state.json`、`task.md`、run `timeline.jsonl`、`checkpoint.json`、`summary.md`、`final_report.md`、`findings.jsonl`、`inbox/`、`outbox/`、`artifacts/`、`compactions/`，并继续用 `legacy_run_ref.json` 指向旧工单目录。
+- 2026-05-07 Phase 0 Task Workspace 骨架已落地，2026-06-01 收敛到 `output/` + `work/`：subagent 保存时会在当前任务根下同步 `work/task.yaml`、`work/state.json`、`work/timeline.jsonl`、`work/summaries/current_summary.md`、`work/shared/`、`work/artifacts/`、`work/agents/<run_id>/legacy_run_ref.json`；旧 `subagents/<run_id>/task.json` 和工单 Markdown 仍保持兼容事实源。
+- 2026-05-07 Phase 1 Agent Run Workspace 适配已落地，2026-06-01 新写入位置改为 `tasks/<task>/work/agents/<run_id>/`：这里会生成 `agent.yaml`、run `state.json`、`task.md`、run `timeline.jsonl`、`checkpoint.json`、`summary.md`、`final_report.md`、`findings.jsonl`、`inbox/`、`outbox/`、`artifacts/`、`compactions/`，并继续用 `legacy_run_ref.json` 指向旧工单目录。
 - 2026-05-07 Phase 2 Daily Event Ledger 已落地：subagent 保存时会追加 `daily/YYYY-MM-DD/events.jsonl`，只记录 task/run 状态、摘要、duration、artifact/evidence refs、workspace 路径和检索字段，不写入完整 goal、工具输出或子代理上下文。
-- 2026-05-07 Phase 3 Artifact 外置规范已落地：subagent 保存时会写 `tasks/<root_id>/artifacts/manifest.jsonl` 和 `tasks/<root_id>/agents/<run_id>/artifacts/manifest.jsonl`，把 `artifact_refs` 规范化为 summary/hash/path/size/exists 记录，不复制 artifact 正文。
-- 2026-05-07 Phase 4 Checkpoint/Compact Chain 已落地：subagent 保存时会在 `tasks/<root_id>/agents/<run_id>/compactions/` 追加 `compaction_ledger.jsonl`，写每次 checkpoint snapshot 的 summary/metadata，并把最新 compact refs 回写到 run `checkpoint.json`；当前是 checkpoint-first 恢复链，不做 destructive compact apply。
-- 2026-05-07 Phase 5 Shared Workspace 已落地：subagent 保存时会同步 `tasks/<root_id>/shared/blackboard.md`、`messages.jsonl`、`findings.jsonl` 和 `evidence_packets/`，只写任务局部结构化 facts 和引用，不进入主代理长期 memory。
-- 2026-05-07 Phase 6 Memory Gate / Skill Spark 提升链第一片已落地：subagent 保存时会在 `tasks/<root_id>/agents/<run_id>/memory_gate/` 写 `candidates.jsonl`、`review_queue.jsonl` 和 `skill_spark_gate.json`，把 runner lessons / findings 变成带 evidence、scope、review 要求的候选；当前只排队 review，`promotion_status=not_promoted`，不会写主代理长期 memory 或正式 skill。
+- 2026-05-07 Phase 3 Artifact 外置规范已落地：subagent 保存时会写 `tasks/<task>/work/artifacts/manifest.jsonl` 和 `tasks/<task>/work/agents/<run_id>/artifacts/manifest.jsonl`，把 `artifact_refs` 规范化为 summary/hash/path/size/exists 记录，不复制 artifact 正文。
+- 2026-05-07 Phase 4 Checkpoint/Compact Chain 已落地：subagent 保存时会在 `tasks/<task>/work/agents/<run_id>/compactions/` 追加 `compaction_ledger.jsonl`，写每次 checkpoint snapshot 的 summary/metadata，并把最新 compact refs 回写到 run `checkpoint.json`；当前是 checkpoint-first 恢复链，不做 destructive compact apply。
+- 2026-05-07 Phase 5 Shared Workspace 已落地：subagent 保存时会同步 `tasks/<task>/work/shared/blackboard.md`、`messages.jsonl`、`findings.jsonl` 和 `evidence_packets/`，只写任务局部结构化 facts 和引用，不进入主代理长期 memory。
+- 2026-05-07 Phase 6 Memory Gate / Skill Spark 提升链第一片已落地：subagent 保存时会在 `tasks/<task>/work/agents/<run_id>/memory_gate/` 写 `candidates.jsonl`、`review_queue.jsonl` 和 `skill_spark_gate.json`，把 runner lessons / findings 变成带 evidence、scope、review 要求的候选；当前只排队 review，`promotion_status=not_promoted`，不会写主代理长期 memory 或正式 skill。
 - 2026-05-07 Phase 6 review decision 写回已落地：`subagents-memory-gate <run_id> --candidate-id <id> --decision ...` 会把 review 结果写入 `memory_gate/decisions.jsonl`，并更新候选和 checkpoint 的 gate refs；approve 只表示允许后续显式导出流程继续，不会自动写长期 memory 或正式 skill。
 - 2026-05-07 Phase 6 显式收口链已落地：`subagents-memory-gate` 现在支持 `--retention-dry-run/--retention-apply`、`--export-memory`、`--export-skill` 和 `--verify`；retention 只压缩 active queue 并保留审计，memory export 只处理 `approve_memory` 候选，skill export 只生成 draft，verifier 检查无自动提升边界。
 - 2026-05-07 bundle 接口规范已写入 runtime memory 开发要求：复杂业务入口统一 Request/Options/Params，复杂输出统一 Result/Record/Report；CLI args 必须在 CLI 层转换，manager 可保留旧签名作为兼容 wrapper。
@@ -106,14 +110,14 @@
 - 2026-05-08 手动补全事实写入第一片已落地：新增 `memory-fact-write`，只把用户显式传入的 acceptance/constraints/latest_tests 写入 `memory_archive/runtime_facts/<fact_id>/task.json`；后续按同一 request/session/task/run scope 重新 `memory-compact --apply` 时，work state 可以读取这些事实并让 auto guard 放行。
 - 2026-05-08 Resume 交接包增强第一片已落地：`memory-resume --from-compact` 现在返回 `compact_resume_handoff`，并在 context block / CLI 中稳定展示目标、阶段、下一步、验收条件、约束、最近测试、推荐读取路径和 action guard 状态。
 - 2026-05-08 自动 Guard 放行第一片已落地：当 refs、self-check、goal、next_step 等恢复硬条件通过且 `resume_mode=auto` 时，`compact_action_guard` 会返回 `allow_automated_continue` / `allowed_to_continue=true`；work state 可选备注缺失会进入 `missing_fields`，报告仍明确 `automatic_tool_execution=none`，不会自动跑工具。
-- 2026-05-08 子代理 Compact Owner 预留口第一片已落地：`memory-resume --from-compact --compact-owner-type subagent_run|subagent_session --compact-owner-id <run_id>` 会只读解析 `tasks/*/agents/<run_id>/` 和旧 `subagents/<run_id>/` 引用，返回 run workspace、checkpoint、summary、legacy adapter refs；仍不写主 memory、不改 runner、不自动执行工具。
+- 2026-05-08 子代理 Compact Owner 预留口第一片已落地，2026-06-01 已迁到新任务布局：`memory-resume --from-compact --compact-owner-type subagent_run|subagent_session --compact-owner-id <run_id>` 会只读解析 `tasks/*/work/agents/<run_id>/`、旧 `tasks/*/agents/<run_id>/` 和旧 `subagents/<run_id>/` 引用，返回 run workspace、checkpoint、summary、legacy adapter refs；仍不写主 memory、不改 runner、不自动执行工具。
 - 2026-05-08 Continue Packet 第一片已落地：`memory-resume --from-compact` 现在返回 `compact_continue_packet`，把目标、阶段、下一步、验收、约束、最近测试、推荐读取路径、action guard 和 subagent owner refs 固定成统一继续契约；它只表达恢复上下文是否可继续，不代表业务验收通过。
 - 2026-05-08 半自动 Resume 第二片已落地：`completion_prompt` 新增 `suggested_commands`，给出 `memory-fact-write --from-compact`、同 scope 重新 `memory-compact --apply` 和 `memory-resume --compact-resume-mode auto` 的闭环提示；仍只写用户显式确认事实，不解析助手回复。
 - 2026-05-08 子代理 Compact Hook 预留第二片已落地：subagent owner refs 会带 `reserved_hooks`，预留 run-local `session_compact_ledger.jsonl` 和 `latest_continue_packet.json` 路径；当前 `enabled=false`，不写主 memory、不自动执行工具、不改 runner。
 - 2026-05-08 Auto Compact/Resume 第一版增强已落地：保存型 `SimpleAgent.run()` 会做非破坏性 apply、auto resume、continue packet 和 guard 检查；guard 放行时主 agent 会把继续包注入下一轮 prompt 并继续同一个任务，阻断时仍停车。
 - 2026-05-08 Auto Compact/Resume 持久化边界修正：`run(..., save=False)` / `--no-save` 会阻止自动 apply 写入 `memory_archive/compact_applies/*`，继续只返回人工确认建议。
 - 2026-05-08 Runtime Fact Source 解析边界修正：显式验收/约束/测试段落遇到未知标题会停止当前桶，避免“实施步骤”等后续段落被误收为 acceptance/constraints/latest_tests。
-- 2026-05-08 Compact work-state scope 安全修正：request/session/task/run id 现在按字面路径解析，`*`、`[]` 等 glob 字符不会扩大扫描 `tasks/*/agents/*`；半自动 completion 命令也会保留原 `--session-id/--request-id/--task-id/--run-id` scope。
+- 2026-05-08 Compact work-state scope 安全修正：request/session/task/run id 现在按字面路径解析，`*`、`[]` 等 glob 字符不会扩大扫描 `tasks/*/work/agents/*`；半自动 completion 命令也会保留原 `--session-id/--request-id/--task-id/--run-id` scope。
 - 2026-05-08 compact + closeout 联调第一片已落地：新增 focused 测试串起 subagent task、compact apply/resume、continue packet、closeout apply 阻断和 auto-policy dry-run；断言 auto-policy 仍 `executed=false`、`mutates_task_state=false`，且 task 状态不被 compact 自动链路改动。
 - 2026-05-13 Code-size high-risk 清零第一片已落地：`memory_archive/query/resume_guidance.py` 承接 `ResumeGuidanceRequest` bundle，CLI/runtime 恢复建议不再用散装参数；相关 focused tests、ruff、strict code-size 已验证 `hard=0 high-risk=0 soft=0`。
 - 2026-05-13 Home Runtime 读取侧迁移第一片已落地：`memory_store/jsonl.py` 的搜索/recall 会把 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl` 作为旧 `memory_path` 的补充事实源并去重，`all()` / `index_all()` 仍保持旧 memory_path 语义；新增 `home_runtime_query.py`，统一读取 daily memory、`tasks/{date}/{task_slug}` 和 home status。
@@ -335,7 +339,7 @@
 - 本轮 focused 验收：`python -m pytest -q agent_py_agent/tests/test_memory_runtime_basics.py agent_py_agent/tests/test_memory_compact_auto.py agent_py_agent/tests/test_home_runtime_bootstrap.py agent_py_agent/tests/test_prompting_builder.py` -> passed。
 
 ## 2026-05-13 subagent task-local compact continuation
-- 中文说明：子代理 compact/resume 先落地“任务本地接续”第一版。runner prompt 会在有 run workspace refs 时注入 `Task-Local Compact Continuation`，只读取 `tasks/<root>/agents/<run>/` 里的 checkpoint、summary、task、findings 和 `compactions/session/latest_continue_packet.json` 短片段，不读取主代理 `SOUL.md` / `USER.md` / 长期 memory。
+- 中文说明：子代理 compact/resume 先落地“任务本地接续”第一版。runner prompt 会在有 run workspace refs 时注入 `Task-Local Compact Continuation`，只读取 `tasks/<task>/work/agents/<run>/` 里的 checkpoint、summary、task、findings 和 `compactions/session/latest_continue_packet.json` 短片段，不读取主代理 `SOUL.md` / `USER.md` / 长期 memory。
 - `compact_subagent_owner.py` 现在会把已存在的 `latest_continue_packet.json` 作为只读 ref 暴露给 `memory-resume --from-compact owner_type=subagent_run`；`reserved_hooks.continue_packet_ready=true` 只表示父级能看到恢复包，不会自动执行工具，也不会写主 memory。
 - `context_bundle.workspace_refs` 同步补齐 agent run workspace 的 task/checkpoint/summary/final_report/findings/timeline/compactions/shared refs，方便父级、接管代理和 runner 都从同一 refs-first 工单包恢复。
 - 闭环补齐：`SubAgentManager.save()` 现在会在每次保存后自动写 `compactions/session/latest_continue_packet.json` 和去重后的 `session_compact_ledger.jsonl`；父级下一次 runner/dispatch 重新构建 prompt 时，会自动读取这个包继续原任务。

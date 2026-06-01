@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from ..subagents.role_templates import role_template_id_for_role
 from ..subagents.services.base import CreateRunParams
@@ -135,7 +136,32 @@ def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, o
     _add_derived_output_refs(attrs, raw_params)
     add_work_scope_key(attrs)
     add_current_conversation_attrs(attrs, agent)
+    _add_current_task_workspace(attrs, agent)
     return attrs
+
+
+# LLM: _add_current_task_workspace binds child agents to the current task work tree without modeling the main agent as a child.
+# 函数用途: 主代理创建子代理时继承当前任务根，让下级运行目录落到 task/work/agents。
+def _add_current_task_workspace(attrs: dict[str, object], agent=None) -> None:
+    if "run_workspace" in attrs:
+        return
+    task_root = _current_task_root(agent)
+    if not task_root:
+        return
+    attrs["run_workspace"] = {
+        "task_root": task_root,
+        "work_dir": f"{task_root}/work",
+        "output_dir": f"{task_root}/output",
+    }
+
+
+# LLM: _current_task_root ignores mock objects and only accepts explicit path-like runtime state.
+# 函数用途: 从真实 agent 上读取当前任务 root；测试/Mock 自动生成的属性不能变成目录名。
+def _current_task_root(agent) -> str:
+    raw = getattr(agent, "_current_run_task_workspace", "") if agent is not None else ""
+    if not isinstance(raw, (str, Path)):
+        return ""
+    return str(raw).strip()
 
 
 # LLM: _add_derived_output_refs persists output_path-like manifest refs as machine output facts.
@@ -184,6 +210,8 @@ _LIST_ATTRIBUTE_FIELDS = (
 )
 
 
+# LLM: _default_owner_id reads the loaded owner context without inventing another owner.
+# 函数用途: 从 home_paths 或 owner_policy 提取当前 owner_id，供子代理继承权限和家目录。
 def _default_owner_id(agent) -> str:
     home_paths = getattr(agent, "home_paths", None)
     owner_id = str(getattr(home_paths, "owner_id", "") or "").strip()

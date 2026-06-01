@@ -96,23 +96,25 @@ def test_subagent_persistence_creates_task_workspace_skeleton(tmp_path) -> None:
     manager.save(task)
 
     task_workspace = tmp_path / "tasks" / task.root_id
-    state = json.loads((task_workspace / "state.json").read_text(encoding="utf-8"))
+    work = task_workspace / "work"
+    state = json.loads((work / "state.json").read_text(encoding="utf-8"))
     legacy_ref = json.loads(
-        (task_workspace / "agents" / task.id / "legacy_run_ref.json").read_text(encoding="utf-8"),
+        (work / "agents" / task.id / "legacy_run_ref.json").read_text(encoding="utf-8"),
     )
-    timeline_lines = (task_workspace / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
-    summary_md = (task_workspace / "summaries" / "current_summary.md").read_text(encoding="utf-8")
+    timeline_lines = (work / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
+    summary_md = (work / "summaries" / "current_summary.md").read_text(encoding="utf-8")
 
-    assert (task_workspace / "task.yaml").exists()
-    assert (task_workspace / "shared" / "blackboard.md").exists()
-    assert (task_workspace / "shared" / "messages.jsonl").exists()
-    assert (task_workspace / "shared" / "findings.jsonl").exists()
-    assert (task_workspace / "artifacts" / "tool_outputs").is_dir()
-    assert (task_workspace / "artifacts" / "log_samples").is_dir()
-    assert (task_workspace / "artifacts" / "code_snapshots").is_dir()
-    assert (task_workspace / "artifacts" / "reports").is_dir()
-    assert (task_workspace / "compact" / "task_rollup.json").exists()
-    rollup = json.loads((task_workspace / "compact" / "task_rollup.json").read_text(encoding="utf-8"))
+    assert (task_workspace / "output").is_dir()
+    assert (work / "task.yaml").exists()
+    assert (work / "shared" / "blackboard.md").exists()
+    assert (work / "shared" / "messages.jsonl").exists()
+    assert (work / "shared" / "findings.jsonl").exists()
+    for name in ("tool_outputs", "log_samples", "code_snapshots", "reports"):
+        assert (work / "artifacts" / name).is_dir()
+    assert (work / "compact" / "task_rollup.json").exists()
+    assert not (task_workspace / "agents").exists()
+    assert not (task_workspace / "state.json").exists()
+    rollup = json.loads((work / "compact" / "task_rollup.json").read_text(encoding="utf-8"))
     assert rollup["child_count"] == 1
     assert rollup["child_runs"][0]["run_id"] == task.id
     assert state["task_id"] == task.root_id
@@ -161,22 +163,21 @@ def test_subagent_persistence_registers_owner_task_run_agent_indexes(tmp_path) -
 
 
 def _assert_runtime_workspace_paths(loaded, task_workspace, run_id: str) -> None:
-    run_workspace = task_workspace / "agents" / run_id
+    work = task_workspace / "work"
+    run_workspace = work / "agents" / run_id
     assert loaded.task_workspace_dir == str(task_workspace)
-    assert loaded.task_workspace_task_yaml == str(task_workspace / "task.yaml")
-    assert loaded.task_workspace_state_json == str(task_workspace / "state.json")
-    assert loaded.task_workspace_timeline_jsonl == str(task_workspace / "timeline.jsonl")
-    assert loaded.task_workspace_summary_file == str(task_workspace / "summaries" / "current_summary.md")
-    assert loaded.task_workspace_shared_dir == str(task_workspace / "shared")
-    assert loaded.task_workspace_shared_blackboard == str(task_workspace / "shared" / "blackboard.md")
-    assert loaded.task_workspace_shared_messages_jsonl == str(task_workspace / "shared" / "messages.jsonl")
-    assert loaded.task_workspace_shared_findings_jsonl == str(task_workspace / "shared" / "findings.jsonl")
-    assert loaded.task_workspace_shared_evidence_packets_dir == str(task_workspace / "shared" / "evidence_packets")
-    assert loaded.task_workspace_shared_evidence_index_jsonl == str(
-        task_workspace / "shared" / "evidence_packets" / "index.jsonl",
-    )
-    assert loaded.task_workspace_artifacts_dir == str(task_workspace / "artifacts")
-    assert loaded.task_workspace_agents_dir == str(task_workspace / "agents")
+    assert loaded.task_workspace_task_yaml == str(work / "task.yaml")
+    assert loaded.task_workspace_state_json == str(work / "state.json")
+    assert loaded.task_workspace_timeline_jsonl == str(work / "timeline.jsonl")
+    assert loaded.task_workspace_summary_file == str(work / "summaries" / "current_summary.md")
+    assert loaded.task_workspace_shared_dir == str(work / "shared")
+    assert loaded.task_workspace_shared_blackboard == str(work / "shared" / "blackboard.md")
+    assert loaded.task_workspace_shared_messages_jsonl == str(work / "shared" / "messages.jsonl")
+    assert loaded.task_workspace_shared_findings_jsonl == str(work / "shared" / "findings.jsonl")
+    assert loaded.task_workspace_shared_evidence_packets_dir == str(work / "shared" / "evidence_packets")
+    assert loaded.task_workspace_shared_evidence_index_jsonl == str(work / "shared" / "evidence_packets" / "index.jsonl")
+    assert loaded.task_workspace_artifacts_dir == str(work / "artifacts")
+    assert loaded.task_workspace_agents_dir == str(work / "agents")
     assert loaded.agent_run_workspace_dir == str(run_workspace)
     assert loaded.agent_run_agent_yaml == str(run_workspace / "agent.yaml")
     assert loaded.agent_run_state_json == str(run_workspace / "state.json")
@@ -203,7 +204,7 @@ def _assert_runtime_workspace_paths(loaded, task_workspace, run_id: str) -> None
     assert "/daily/" in _path_text(loaded.daily_ledger_file)
     assert _path_text(loaded.daily_ledger_file).endswith("/events.jsonl")
     assert loaded.daily_ledger_last_event_id.startswith(f"evt-{run_id}-{run_id}-")
-    assert loaded.task_artifact_manifest_jsonl == str(task_workspace / "artifacts" / "manifest.jsonl")
+    assert loaded.task_artifact_manifest_jsonl == str(work / "artifacts" / "manifest.jsonl")
     assert loaded.agent_run_artifact_manifest_jsonl == str(run_workspace / "artifacts" / "manifest.jsonl")
 
 
@@ -334,7 +335,7 @@ def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> 
     task.result = "暂未完成"
     manager.save(task)
 
-    run_workspace = tmp_path / "tasks" / task.root_id / "agents" / task.id
+    run_workspace = tmp_path / "tasks" / task.root_id / "work" / "agents" / task.id
     run_state = json.loads((run_workspace / "state.json").read_text(encoding="utf-8"))
     checkpoint = json.loads((run_workspace / "checkpoint.json").read_text(encoding="utf-8"))
     legacy_ref = json.loads((run_workspace / "legacy_run_ref.json").read_text(encoding="utf-8"))
@@ -388,13 +389,13 @@ def test_subagent_persistence_appends_daily_event_ledger(tmp_path) -> None:
     assert latest["artifact_refs"] == ["reports/demo.txt"]
     assert latest["evidence_refs"] == ["logs/demo.log"]
     assert latest["refs"]["task_workspace"] == str(tmp_path / "tasks" / task.root_id)
-    assert latest["refs"]["agent_run_workspace"] == str(tmp_path / "tasks" / task.root_id / "agents" / task.id)
-    assert latest["refs"]["task_artifact_manifest"] == str(tmp_path / "tasks" / task.root_id / "artifacts" / "manifest.jsonl")
+    assert latest["refs"]["agent_run_workspace"] == str(tmp_path / "tasks" / task.root_id / "work" / "agents" / task.id)
+    assert latest["refs"]["task_artifact_manifest"] == str(tmp_path / "tasks" / task.root_id / "work" / "artifacts" / "manifest.jsonl")
     assert latest["refs"]["agent_artifact_manifest"] == str(
-        tmp_path / "tasks" / task.root_id / "agents" / task.id / "artifacts" / "manifest.jsonl",
+        tmp_path / "tasks" / task.root_id / "work" / "agents" / task.id / "artifacts" / "manifest.jsonl",
     )
     assert latest["refs"]["agent_compaction_ledger"] == str(
-        tmp_path / "tasks" / task.root_id / "agents" / task.id / "compactions" / "compaction_ledger.jsonl",
+        tmp_path / "tasks" / task.root_id / "work" / "agents" / task.id / "compactions" / "compaction_ledger.jsonl",
     )
     assert latest["refs"]["legacy_task_dir"] == str(tmp_path / task.id)
     assert "goal" not in latest

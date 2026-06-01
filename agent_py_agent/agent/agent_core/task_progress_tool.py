@@ -78,12 +78,32 @@ def _with_write_feedback(payload: dict[str, object]) -> dict[str, object]:
     hints = payload.get("quality_hints")
     if not isinstance(hints, dict) or not hints.get("messages"):
         return payload
+    missing = _missing_evidence_ids(hints)
     feedback = {
         "severity": "soft",
         "blocking": False,
         "message": str(hints.get("soft_prompt") or "软提醒：有些进度项缺少证据，建议补上文件、来源或产物引用。"),
+        "missing_evidence_item_ids": missing,
+        "next_suggestions": list(hints.get("next_suggestions") or []),
     }
     return {**payload, "soft_feedback": feedback}
+
+
+# LLM: _missing_evidence_ids makes soft progress hints actionable in the tool result.
+# 函数用途: 从 quality_hints 汇总缺证据条目 id，方便模型下一步直接补。
+def _missing_evidence_ids(hints: dict[str, object]) -> list[str]:
+    values: list[str] = []
+    for key in ("done_without_evidence_ids", "result_without_evidence_ids", "coverage_done_without_evidence_ids"):
+        raw = hints.get(key)
+        if isinstance(raw, list):
+            values.extend(str(item) for item in raw if str(item or "").strip())
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
 
 
 __all__ = ["TaskProgressTool"]

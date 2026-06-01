@@ -7,7 +7,7 @@ from __future__ import annotations
 
 Human version:
 Each subagent run now gets a small filesystem workspace under
-`tasks/<task_id>/agents/<run_id>/`. The legacy work-order directory remains the
+`tasks/<task_id>/work/agents/<run_id>/`. The legacy work-order directory remains the
 write-compatible source for existing code; this workspace is the new recovery
 and takeover surface that later phases can grow independently.
 """

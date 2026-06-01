@@ -159,7 +159,7 @@ def test_provider_saved_run_writes_only_owner_task_workspace(tmp_path):
 
     agent.run("请保存 provider 任务", save=True, request_id="req-provider-task", run_id="run-provider-task")
 
-    owner_states = sorted((Path(agent.home_paths.owner_home_dir) / "tasks").glob("*/run-provider-task/work/state.json"))
+    owner_states = sorted((Path(agent.home_paths.owner_home_dir) / "tasks").glob("*/*/work/state.json"))
     owner_task_state = owner_states[0]
     assert owner_task_state.exists()
     assert not (Path(agent.home_paths.root) / "tasks").exists()
