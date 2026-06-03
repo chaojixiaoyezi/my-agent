@@ -1,5 +1,3 @@
-# LLM: 这是运行配置入口，解析规则和默认值变更会扩散到启动、工具和子代理。
-# 模块用途: 主 AgentConfig 模型和轻量 YAML 配置加载。
 
 from __future__ import annotations
 
@@ -14,14 +12,14 @@ from __future__ import annotations
 """
 
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config_compat import HIDDEN_COMPAT_CONFIG_FIELDS
+from .config_compat import HIDDEN_COMPAT_CONFIG_FIELDS, INTERNAL_RUNTIME_CONFIG_FIELDS
 from .config_io import load_simple_yaml, parse_scalar
+from .config_sources import merge_agent_config_sources, public_config_keys
 from .home_config import HomeProviderConfigFields
 from .memory import normalize_agent_memory_config
 from .normalize import (
@@ -32,11 +30,13 @@ from .normalize import (
     normalize_agent_config,
     normalize_subagent_workflow_config,
 )
+from .runtime_budget_config import RuntimeBudgetConfigFields
 from .tool_config import ToolConfig
 
 __all__ = [
     "AgentConfig",
     "HIDDEN_COMPAT_CONFIG_FIELDS",
+    "INTERNAL_RUNTIME_CONFIG_FIELDS",
     "_coerce_bool_config",
     "_coerce_choice_config",
     "_coerce_float_config",
@@ -60,35 +60,6 @@ _LOG_LEVELS = {
 }
 
 
-# LLM: RuntimeBudgetConfigFields groups runtime scan/prompt/budget knobs away from the main config body.
-# 类用途: 保存运行预算字段；这些字段只控制读取、扫描、裁剪和自动并发，不定义任务质量硬门。
-@dataclass
-class RuntimeBudgetConfigFields:
-    contract_status_max_scan_files: int = 1000
-    contract_status_max_report_bytes: int = 2_000_000
-    contract_status_recent_findings_limit: int = 20
-    skill_guard_max_files: int = 50
-    skill_guard_max_size_kb: int = 1024
-    small_real_acceptance_max_runtime_seconds: int = 900
-    real_run_review_max_report_bytes: int = 5_000_000
-    real_run_review_max_log_bytes: int = 1_000_000
-    runner_auto_concurrency: int = 8
-    conversation_thread_list_limit: int = 100
-    conversation_pending_wake_limit: int = 100
-    conversation_context_recent_limit: int = 20
-    conversation_unhandled_observation_limit: int = 20
-    background_pending_wake_prompt_limit: int = 20
-    background_context_max_string_chars: int = 1200
-    background_context_max_list_items: int = 20
-    background_context_max_dict_items: int = 80
-    background_context_max_depth: int = 6
-    background_claim_ttl_seconds: int = 900
-    background_claim_heartbeat_interval_seconds: int = 0
-    background_main_agent_allowed_tools: list[str] = field(default_factory=list)
-
-
-# LLM: AgentConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: 主运行配置对象，汇总模型、gateway、子代理、通知字段；工具、用户空间和运行预算字段由基类承接。
 @dataclass
 class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigFields):
 
@@ -229,8 +200,8 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     audit_enabled: bool = True
     audit_log_path: str = "data/audit"
     daemon_planner: bool = True
-    daemon_apply: bool = True
-    daemon_execute_runners: bool = True
+    daemon_mutate_state: bool = True
+    daemon_start_runners: bool = True
     daemon_interval: int = 30
     daemon_max_runners: str = "auto"
     daemon_limit: int = 0
@@ -286,10 +257,22 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     watchdog_max_restarts: int = 3
     watchdog_restart_delay: int = 10
     config_warnings: list[str] = field(default_factory=list)
+    config_path: str = ""
+    config_sources: dict[str, dict[str, object]] = field(default_factory=dict)
+    config_layers: list[dict[str, object]] = field(default_factory=list)
+
+    def config_source_for(self, key: str) -> dict[str, object]:
+        return dict(self.config_sources.get(key, {}))
+
+    def config_source_snapshot(self) -> dict[str, object]:
+        return {
+            "schema_version": "agent_config_sources.v1",
+            "config_path": self.config_path,
+            "layers": list(self.config_layers),
+            "sources": dict(self.config_sources),
+        }
 
 
-# LLM: load_config 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 读取 load_config 数据并转换成内部对象。
 def load_config(config_path: str | Path) -> AgentConfig:
 
     path = Path(config_path)
@@ -300,33 +283,36 @@ def load_config(config_path: str | Path) -> AgentConfig:
     # 先做类型验证和回退（在过滤未知 key 之前）
     normalized, config_warnings = normalize_agent_config(raw)
 
-    # 过滤未知字段
-    allowed = set(AgentConfig.__dataclass_fields__.keys())
-    unknown_keys = [key for key in normalized if key not in allowed]
+    # 过滤未知字段。运行时诊断字段只由 loader 写入，不能从 YAML 注入。
+    allowed = _public_config_keys()
+    raw_keys = set(raw)
+    unknown_keys = [key for key in raw_keys if key not in allowed]
     for key in unknown_keys:
         config_warnings.append(f"unknown config key: {key!r}; ignored")
-    clean = {key: value for key, value in normalized.items() if key in allowed}
-    config = AgentConfig(**clean)
-    config.config_path = str(path.expanduser().resolve())
+    resolved_path = str(path.expanduser().resolve())
+    effective = merge_agent_config_sources(
+        config_cls=AgentConfig,
+        normalized=normalized,
+        raw_keys=raw_keys,
+        path=path,
+    )
+    config = AgentConfig(**effective.values)
+    config.config_path = resolved_path
     config.config_warnings = config_warnings
+    config.config_sources = effective.sources
+    config.config_layers = list(effective.layers)
 
     normalize_agent_memory_config(config)
     normalize_subagent_workflow_config(config)
-
-    # 优先从环境变量读取密钥。
-    # 大白话解释：仓库里只留"去哪里拿 key"的说明，不再把真 key 写进代码仓库。
-    env_name = str(config.api_key_env).strip()
-    if env_name:
-        env_value = os.environ.get(env_name, "").strip()
-        if env_value:
-            config.api_key = env_value
 
     apply_log_level(config)
     return config
 
 
-# LLM: apply_log_level makes the user-facing log_level config affect package loggers without touching global handlers.
-# 函数用途: 根据 log_level 调整 agent_py_agent 包日志级别；改配置后重新加载配置即可生效。
+def _public_config_keys() -> set[str]:
+    return public_config_keys(AgentConfig)
+
+
 def apply_log_level(config: AgentConfig) -> None:
     level_name = str(getattr(config, "log_level", "info") or "info").strip().lower()
     logging.getLogger("agent_py_agent").setLevel(_LOG_LEVELS.get(level_name, logging.INFO))

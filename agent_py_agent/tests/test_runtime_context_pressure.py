@@ -9,15 +9,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.model_context_pressure import (
+from agent_py_agent.agent.agent_core.model.context_pressure import (
     preflight_context_pressure_response,
 )
-from agent_py_agent.agent.agent_core.tool_context_window import window_tool_context_params
+from agent_py_agent.agent.agent_core.tool_context.window import window_tool_context_params
 from agent_py_agent.agent.config import AgentConfig
 
 
-# LLM: _AgentStub exposes only config/backend fields used by compact policy.
-# 类用途: 测试用最小 agent，不触发真实模型或文件系统。
 class _AgentStub:
     config = AgentConfig(auto_save_memory=True)
     backend = SimpleNamespace(context_window_tokens=128_000, name="fake")

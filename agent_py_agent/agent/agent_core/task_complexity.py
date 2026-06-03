@@ -1,5 +1,3 @@
-# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
-# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
 
 from __future__ import annotations
 
@@ -12,8 +10,6 @@ from dataclasses import dataclass
 from typing import Any
 
 
-# LLM: TaskComplexityEstimate 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存任务complexityestimate字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 @dataclass
 class TaskComplexityEstimate:
 
@@ -24,8 +20,6 @@ class TaskComplexityEstimate:
     factors: dict[str, Any]
 
 
-# LLM: estimate_task_complexity 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 计算任务complexity的预算、数量或限制，影响后续调度节奏；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def estimate_task_complexity(
     goal: str,
     plan: list[str],

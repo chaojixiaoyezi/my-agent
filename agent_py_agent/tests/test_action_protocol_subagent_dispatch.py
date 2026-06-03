@@ -11,8 +11,6 @@ from agent_py_agent.agent.action_protocol import SubagentDispatchEnvelope, decod
 from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
 
-# LLM: test_dispatch_subagents_output_contains_typed_envelope protects refs-first dispatch handoff.
-# 函数用途: 确认 dispatch_subagents 返回机器可读 envelope，父级不用解析自然语言 message。
 def test_dispatch_subagents_output_contains_typed_envelope():
     report = SimpleNamespace(
         dry_run=False,
@@ -49,8 +47,6 @@ def test_dispatch_subagents_output_contains_typed_envelope():
     assert envelope.record_count == 1
 
 
-# LLM: test_dispatch_envelope_carries_gate_and_state_contract prevents prose-only dispatch recovery.
-# 函数用途: 确认 dispatch typed envelope 保留完成闸门、阻塞 ids 和当前轮状态合同。
 def test_dispatch_envelope_carries_gate_and_state_contract():
     from agent_py_agent.agent.action_protocol import subagent_dispatch_envelope_from_payload
 

@@ -1,5 +1,3 @@
-# LLM: read_file execution is isolated so filesystem tool declarations stay small.
-# 模块用途: 执行工作区内文本文件读取、tool-output 正文读取、行号分页和结构化摘要。
 
 from __future__ import annotations
 
@@ -13,8 +11,6 @@ from .filesystem_structured_read import structured_read_summary
 from .models import ToolExecutionResult
 
 
-# LLM: execute_read_file carries the full read_file behavior for FileSystemTool subclasses.
-# 函数用途: 解析 read_file 参数、读取普通文本或 tool-output artifact 正文，并按行号/字符预算返回结果。
 def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecutionResult:
     try:
         raw_path = _required_path(_bundled_filesystem_param(params, "path"))
@@ -49,8 +45,6 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecu
     return _numbered_text_result(content, params, max_chars)
 
 
-# LLM: _numbered_text_result turns raw text into bounded line-aware output.
-# 函数用途: 处理 start_line/end_line、空文件、越界和截断提示。
 def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) -> ToolExecutionResult:
     lines = content.splitlines()
     raw_end_line = _bundled_filesystem_param(params, "end_line")
@@ -90,8 +84,6 @@ def _missing_tool_artifact_typo_hint(tool, raw_path: str) -> str:
     return tool_output_artifact_typo_hint(raw_path, tool.workspace_root, suggested)
 
 
-# LLM: _line_range_error returns actionable range errors without reading more text.
-# 函数用途: 判断空文件、超过文件末尾和 end_line 小于 start_line 的错误提示。
 def _line_range_error(lines: list[str], start_line: int, end_line: int, raw_end_line: object) -> str:
     total_lines = len(lines)
     if not lines and start_line > 1:
@@ -107,8 +99,6 @@ def _line_range_error(lines: list[str], start_line: int, end_line: int, raw_end_
     return ""
 
 
-# LLM: _render_numbered_read_lines keeps long file reads line-aware so agents can continue by line.
-# 函数用途: 按行号输出文件切片；达到字符上限时给出 total_lines 和 next_start_line，避免模型猜尾行。
 def _render_numbered_read_lines(
     *,
     lines: list[str],
@@ -134,8 +124,6 @@ def _render_numbered_read_lines(
     return "\n".join(rendered)
 
 
-# LLM: _truncated_read_footer gives the model a deterministic continuation cursor.
-# 函数用途: 生成 read_file 截断提示，包含总行数、下一次建议 start_line 和当前字符预算。
 def _truncated_read_footer(total_lines: int, next_start_line: int, max_chars: int) -> str:
     return (
         f"... 已截断; total_lines={total_lines}; "
@@ -143,8 +131,6 @@ def _truncated_read_footer(total_lines: int, next_start_line: int, max_chars: in
     )
 
 
-# LLM: _past_eof_line_message turns empty tail reads into actionable line-range guidance.
-# 函数用途: 当模型读到超过文件末尾的行号时，明确告诉它总行数和建议的尾部读取范围。
 def _past_eof_line_message(start_line: int, total_lines: int) -> str:
     suggested_start = max(1, total_lines - 80 + 1)
     return (

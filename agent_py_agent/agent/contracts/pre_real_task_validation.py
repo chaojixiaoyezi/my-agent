@@ -1,12 +1,10 @@
-# LLM: Pre-real task validation orchestrates the six bounded gates before large real tasks.
-# 模块用途: 将小真实、失败样本、任务树、长任务恢复和中型验收串成一个 refs-first 报告。
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..common.json_io import write_json_file
 from .failure_sample_library_contract import validate_failure_sample_library
 from .long_task_recovery_scenario import run_long_task_recovery_scenario
 from .medium_real_acceptance_runner import (
@@ -20,15 +18,11 @@ from .small_real_acceptance_runner import (
 from .task_tree_scenario import run_task_tree_small_scenario
 
 
-# LLM: PreRealTaskValidationRequest keeps the six-phase runner input explicit.
-# 类用途: 描述预真实任务验收的输出工作区。
 @dataclass(frozen=True)
 class PreRealTaskValidationRequest:
     workspace: Path
 
 
-# LLM: PreRealTaskValidationPhase records one phase result.
-# 类用途: 保存阶段 id、状态、证据引用和结构化问题。
 @dataclass(frozen=True)
 class PreRealTaskValidationPhase:
     phase_id: str
@@ -36,8 +30,6 @@ class PreRealTaskValidationPhase:
     evidence_refs: list[str] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
 
-    # LLM: to_dict serializes one phase result.
-    # 函数用途: 输出阶段报告，保持 evidence refs 和 issues 可机器读取。
     def to_dict(self) -> dict[str, object]:
         return {
             "phase_id": self.phase_id,
@@ -47,8 +39,6 @@ class PreRealTaskValidationPhase:
         }
 
 
-# LLM: PreRealTaskValidationReport summarizes the full phase-1-to-6 run.
-# 类用途: 保存预真实任务总报告、摘要和阶段结果列表。
 @dataclass(frozen=True)
 class PreRealTaskValidationReport:
     ok: bool
@@ -56,8 +46,6 @@ class PreRealTaskValidationReport:
     report_ref: str
     phases: tuple[PreRealTaskValidationPhase, ...]
 
-    # LLM: to_dict keeps the orchestration report bounded and refs-first.
-    # 函数用途: 将总报告转成 JSON 友好的结构，不内联任何 artifact 正文。
     def to_dict(self) -> dict[str, object]:
         return {
             "ok": self.ok,
@@ -67,8 +55,6 @@ class PreRealTaskValidationReport:
         }
 
 
-# LLM: run_pre_real_task_validation is the public phase-1-to-6 entrypoint.
-# 函数用途: 顺序执行六个预真实任务阶段，把每步状态和 evidence refs 写入总报告。
 def run_pre_real_task_validation(
     request: PreRealTaskValidationRequest,
 ) -> PreRealTaskValidationReport:
@@ -100,12 +86,10 @@ def run_pre_real_task_validation(
         report_ref="pre_real_task_validation/report.json",
         phases=phases,
     )
-    _write_json(workspace / report.report_ref, report.to_dict())
+    write_json_file(workspace / report.report_ref, report.to_dict())
     return report
 
 
-# LLM: _phase maps a boolean validation result to a stable phase status.
-# 函数用途: 统一生成阶段状态对象，不依赖自然语言摘要判断成败。
 def _phase(
     phase_id: str,
     ok: bool,
@@ -120,8 +104,6 @@ def _phase(
     )
 
 
-# LLM: _synthetic_failure_sample keeps the failure library gate non-empty on all-green runs.
-# 函数用途: 提供一个合成失败样本，证明失败样本合同入口可验收。
 def _synthetic_failure_sample() -> tuple[dict[str, object], ...]:
     return (
         {
@@ -138,21 +120,12 @@ def _synthetic_failure_sample() -> tuple[dict[str, object], ...]:
     )
 
 
-# LLM: _summary counts phase statuses.
-# 函数用途: 生成 passed/failed/total 摘要，只读取结构化 status 字段。
 def _summary(phases: tuple[PreRealTaskValidationPhase, ...]) -> dict[str, int]:
     return {
         "failed": sum(phase.status == "FAILED" for phase in phases),
         "passed": sum(phase.status == "PASSED" for phase in phases),
         "total": len(phases),
     }
-
-
-# LLM: _write_json persists the pre-real validation report.
-# 函数用途: 写入 refs-first JSON 报告，供 CLI、CI 或后续审计读取。
-def _write_json(path: Path, payload: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
 __all__ = [

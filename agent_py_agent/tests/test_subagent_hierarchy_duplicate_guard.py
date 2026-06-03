@@ -9,14 +9,12 @@ import json
 from pathlib import Path
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
 
 
-# LLM: duplicate coordinator domains are left to parent planning.
-# 函数用途: 同一个父节点已有 checkout/quality coordinator 后，再创建同域 coordinator 不再产生硬卡或隐藏调度提示。
 def test_hierarchy_schedule_allows_duplicate_coordinator_domains(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="shopping root", thought="orchestrate", plan=["plan"])
@@ -65,8 +63,6 @@ def test_hierarchy_schedule_allows_duplicate_coordinator_domains(tmp_path):
     assert manager.load(root.id).child_ids == [*first.created_run_ids, *duplicate.created_run_ids]
 
 
-# LLM: test_hierarchy_schedule_allows_generic_numbered_checker_siblings protects recovery trees.
-# 函数用途: `grand-1/grand-2` 这类泛化编号 checker 不是同业务域重复，不能被同域去重误挡。
 def test_hierarchy_schedule_allows_generic_numbered_checker_siblings(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="orchestrate", plan=["split"])
@@ -90,8 +86,6 @@ def test_hierarchy_schedule_allows_generic_numbered_checker_siblings(tmp_path):
     assert len(result.created_run_ids) == 2
 
 
-# LLM: R53 showed duplicate-domain guard must ignore shared workspace paths in child goals.
-# 函数用途: 两个不同 coordinator 都提到 `/Users/.../my-终端应用/...` 时，不能把路径里的 模型助手 当成重复领域。
 def test_hierarchy_schedule_duplicate_domain_ignores_shared_filesystem_paths(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="shopping root", thought="orchestrate", plan=["plan"])
@@ -133,8 +127,6 @@ def test_hierarchy_schedule_duplicate_domain_ignores_shared_filesystem_paths(tmp
     assert len(result.created_run_ids) == 2
 
 
-# LLM: R56 showed Chinese coordinator names can fall back to goal text containing only generic depth words.
-# 函数用途: 两个中文 coordinator 的 goal 都写 depth=3 时，不能把 depth 当成重复业务域。
 def test_hierarchy_schedule_duplicate_domain_ignores_depth_markers(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="shopping root", thought="orchestrate", plan=["plan"])
@@ -170,8 +162,6 @@ def test_hierarchy_schedule_duplicate_domain_ignores_depth_markers(tmp_path):
     assert len(result.created_run_ids) == 2
 
 
-# LLM: duplicate verified leaf targets are left to parent planning.
-# 函数用途: 同父级已有 DONE/VERIFIED leaf 写过同一文件时，调度层仍按父级显式派工创建新任务。
 def test_hierarchy_schedule_allows_duplicate_verified_leaf_targets(tmp_path):
     manager = SubAgentManager(tmp_path)
     parent = _auth_parent_with_verified_leaf(manager)
@@ -212,8 +202,6 @@ def test_hierarchy_schedule_allows_duplicate_verified_leaf_targets(tmp_path):
     assert len(sibling.created_run_ids) == 1
 
 
-# LLM: test_hierarchy_schedule_allows_explicit_repair_leaf_for_existing_target locks R19 repair recovery.
-# 函数用途: 已有 leaf 写过 app.js 后，明确“修复/补齐”任务仍可创建新的修复 leaf，避免 coordinator 卡死。
 def test_hierarchy_schedule_allows_explicit_repair_leaf_for_existing_target(tmp_path):
     manager = SubAgentManager(tmp_path)
     parent = _shared_parent_with_verified_leaf(manager)
@@ -236,8 +224,6 @@ def test_hierarchy_schedule_allows_explicit_repair_leaf_for_existing_target(tmp_
     assert len(repair.created_run_ids) == 1
 
 
-# LLM: active duplicate repair requests are not scheduler hard blockers.
-# 函数用途: 重复 repair worker 不再被 Python 调度层硬阻断，是否继续扩容交给父级模型和 tree 状态判断。
 def test_hierarchy_schedule_allows_active_duplicate_repair_child(tmp_path):
     manager = SubAgentManager(tmp_path)
     parent = _shared_parent_with_verified_leaf(manager)
@@ -259,8 +245,6 @@ def test_hierarchy_schedule_allows_active_duplicate_repair_child(tmp_path):
     assert len(renamed_duplicate.created_run_ids) == 1
 
 
-# LLM: _schedule_repair_worker keeps duplicate-repair tests focused on guard semantics.
-# 函数用途: 创建一个同父级 repair worker 调度请求，复用 goal/name 参数。
 def _schedule_repair_worker(manager: SubAgentManager, parent_id: str, goal: str, agent_name: str):
     return manager.schedule_child_runs(
         params=HierarchyScheduleRequest(
@@ -271,8 +255,6 @@ def _schedule_repair_worker(manager: SubAgentManager, parent_id: str, goal: str,
     )
 
 
-# LLM: Referencing shared assets must not make a page worker claim ownership of those assets.
-# 函数用途: 复现 R38 cart-writer 只“引入 app.js”却被当成 app.js 产物重复的真实 E2E 问题。
 def test_hierarchy_schedule_allows_leaf_referencing_shared_assets(tmp_path):
     manager = SubAgentManager(tmp_path)
     parent = _shared_parent_with_verified_leaf(manager)
@@ -303,8 +285,6 @@ def test_hierarchy_schedule_allows_leaf_referencing_shared_assets(tmp_path):
     assert len(cart.created_run_ids) == 1
 
 
-# LLM: _auth_parent_with_verified_leaf creates a parent with one completed auth leaf fixture.
-# 函数用途: 构造 leaf 目标去重测试用的父节点和已验证子节点，避免测试主体过长。
 def _auth_parent_with_verified_leaf(manager: SubAgentManager):
     root = manager.create_run(goal="shopping root", thought="orchestrate", plan=["plan"])
     parent = manager.create_run(
@@ -335,8 +315,6 @@ def _auth_parent_with_verified_leaf(manager: SubAgentManager):
     return parent
 
 
-# LLM: _shared_parent_with_verified_leaf mirrors the R19 shared-assets coordinator fixture.
-# 函数用途: 构造 app.js 已由同父级 leaf 完成的场景，用来验证后续修复 leaf 不被误拦。
 def _shared_parent_with_verified_leaf(manager: SubAgentManager):
     root = manager.create_run(goal="shopping root", thought="orchestrate", plan=["plan"])
     parent = manager.create_run(
@@ -367,8 +345,6 @@ def _shared_parent_with_verified_leaf(manager: SubAgentManager):
     return parent
 
 
-# LLM: _mark_leaf_verified_with_artifacts writes only structured artifact refs for dedupe tests.
-# 函数用途: 把 leaf fixture 标记为 DONE/VERIFIED，并在 output.json 里写 artifact 路径引用。
 def _mark_leaf_verified_with_artifacts(manager: SubAgentManager, leaf, artifact_paths: list[str]) -> None:
     Path(leaf.output_json).write_text(
         json.dumps({"artifacts": [{"path": item} for item in artifact_paths]}),

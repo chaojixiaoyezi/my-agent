@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 
-# LLM: Deterministic E2E runner should execute local checks and skip real-model cases by default.
-# 函数用途: 验证真实 E2E 矩阵有可执行入口，先跑不花模型调用的用例，并明确跳过真实模型用例。
 def test_e2e_matrix_runner_executes_deterministic_cases_and_skips_real_model(tmp_path):
     from agent_py_agent.agent.contracts.e2e_matrix_runner import E2ERunnerRequest, run_e2e_matrix
 
@@ -21,8 +19,6 @@ def test_e2e_matrix_runner_executes_deterministic_cases_and_skips_real_model(tmp
     assert by_id["compact_resume_continue"].status == "SKIPPED"
 
 
-# LLM: Runner output must be serializable for CLI/frontend/reporting without reading big artifacts.
-# 函数用途: 确认报告输出只包含摘要、证据引用和状态，不把大文件正文塞回 JSON。
 def test_e2e_matrix_report_to_dict_is_refs_first(tmp_path):
     from agent_py_agent.agent.contracts.e2e_matrix_runner import E2ERunnerRequest, run_e2e_matrix
 

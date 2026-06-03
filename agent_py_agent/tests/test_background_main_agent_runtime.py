@@ -12,6 +12,7 @@ from agent_py_agent.agent.conversation import (
     FakeChannelHub,
 )
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.runtime_errors import DataCorruptionError
 
 
 class _CapturingBackend:
@@ -67,13 +68,13 @@ class _BlockedCollaborationBackend:
         self.prompts.append(prompt)
         if self.calls == 1:
             assert "collaboration_case_closed" in prompt
-            assert "阻塞=1" in prompt
+            assert "不可达=1" in prompt
             return ModelResponse(
                 text=f'[TOOL_CALL]\n{{"tool":"inspect_collaboration","case_id":"{self.case_id}"}}\n[/TOOL_CALL]',
                 backend=self.name,
             )
-        assert "blocked_request_count" in prompt
-        assert "ready_for_main_agent: true" in prompt
+        assert "collection_result" in prompt
+        assert "ready_to_report" in prompt
         return ModelResponse(text="协作阻塞已确认：需要主代理调整策略。", backend=self.name)
 
 
@@ -95,8 +96,8 @@ class _PlainLanguageCollaborationBackend:
                 backend=self.name,
             )
         if self.calls == 2:
-            assert "rework_targets" in prompt
-            assert "try_alternate_source_or_params" in prompt
+            assert "collection_result" in prompt
+            assert "ready_to_report" in prompt
             return ModelResponse(
                 text=(
                     '[TOOL_CALL]\n'
@@ -128,6 +129,22 @@ class _FailingBackend:
         raise RuntimeError("backend boom")
 
 
+def test_background_runtime_reports_corrupt_thread_before_running_model(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
+    store._thread_path(thread.thread_id).write_text("{bad-json", encoding="utf-8")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+
+    try:
+        runtime.run_once({"thread_id": thread.thread_id, "reason": "scheduled_progress_report"})
+    except DataCorruptionError as exc:
+        assert "conversation.thread.read" in str(exc)
+        assert thread.thread_id in str(exc)
+    else:
+        raise AssertionError("corrupt thread should be reported as data corruption")
+
+
 def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()
@@ -149,9 +166,60 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     assert "每小时帮我看一次进展" in backend.prompts[0]
     assert "inspect_agent_tree" in backend.prompts[0]
     assert "dispatch_subagents" in backend.prompts[0]
+    assert "create_subagents" not in backend.prompts[0]
     sent = channels.adapter("internal").sent_messages
     assert sent[0].target == "thread-1"
     assert "后台主代理已检查任务树" in sent[0].content
+
+
+def test_scheduler_records_bad_progress_policy_without_blocking_due_policy(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = ConversationStore(tmp_path / "conversations")
+    channels = FakeChannelHub()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
+
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
+    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 13.0})
+    bad_path = store.policies_dir / "broken.json"
+    bad_path.write_text("[]", encoding="utf-8")
+
+    reports = scheduler.tick(now=73.0)
+
+    assert len(reports) == 1
+    assert scheduler.last_progress_policy_load_errors
+    assert scheduler.last_progress_policy_load_errors[0]["context"] == "conversation.progress_policy.read"
+    assert scheduler.last_progress_policy_load_errors[0]["policy_id"] == "broken"
+    assert channels.adapter("internal").sent_messages
+
+
+def test_urgent_wake_uses_full_background_tool_profile(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = ConversationStore(tmp_path / "conversations")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "紧急事件", 'now': 10.0})
+
+    runtime.run_once({
+        "thread_id": thread.thread_id,
+        "task_id": "task-1",
+        "reason": "urgent_wake_signal",
+        "wake_signal": {
+            "wake_signal_id": "wake-1",
+            "thread_id": thread.thread_id,
+            "urgency": "urgent",
+            "summary": "需要主代理马上处理。",
+        },
+        "now": 20.0,
+    })
+    prompt = backend.prompts[0]
+
+    assert "create_subagents" in prompt
+    assert "raise_collaboration" in prompt
+    assert "submit_collaboration_result" in prompt
 
 
 def test_background_runtime_uses_configured_allowed_tools(tmp_path) -> None:
@@ -180,6 +248,58 @@ def test_background_runtime_uses_configured_allowed_tools(tmp_path) -> None:
     assert "send_guidance" in prompt
     assert "dispatch_subagents" not in prompt
     assert "create_subagents" not in prompt
+
+
+def test_background_runtime_applies_owner_disabled_tools(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    agent.owner_policy = type("OwnerPolicy", (), {"disabled_tools": ("create_subagents", "raise_collaboration")})()
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = ConversationStore(tmp_path / "conversations")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "紧急事件", 'now': 10.0})
+
+    runtime.run_once({
+        "thread_id": thread.thread_id,
+        "task_id": "task-1",
+        "reason": "urgent_wake_signal",
+        "wake_signal": {"urgency": "urgent", "summary": "需要处理。"},
+        "now": 20.0,
+    })
+    prompt = backend.prompts[0]
+
+    assert "create_subagents: 创建" not in prompt
+    assert "raise_collaboration: 发起" not in prompt
+    assert "removed_tools" in prompt
+
+
+def test_background_runtime_applies_wake_policy_snapshot(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = ConversationStore(tmp_path / "conversations")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "策略快照", 'now': 10.0})
+
+    runtime.run_once({
+        "thread_id": thread.thread_id,
+        "task_id": "task-1",
+        "reason": "urgent_wake_signal",
+        "wake_signal": {
+            "urgency": "urgent",
+            "summary": "只允许观察。",
+            "policy_snapshot": {"allowed_tools": ["inspect_agent_tree"]},
+        },
+        "now": 20.0,
+    })
+    prompt = backend.prompts[0]
+
+    assert "inspect_agent_tree" in prompt
+    assert "dispatch_subagents: 只有需要推进" not in prompt
+    assert "create_subagents: 创建" not in prompt
 
 
 def test_background_context_budget_truncates_large_messages(tmp_path) -> None:

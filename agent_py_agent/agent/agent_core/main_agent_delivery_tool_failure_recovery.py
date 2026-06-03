@@ -1,5 +1,3 @@
-# LLM: Tool-failure recovery turns failed tool records into reusable delivery repair actions.
-# 模块用途: 将 archive_tool_calls 里的结构化 error_code 转成临时返工动作，并在对应目标修复后自动失效。
 
 from __future__ import annotations
 
@@ -21,8 +19,6 @@ _PATH_KEYS = (
 _JSON_WRITER_TOOLS = {"write_file"}
 
 
-# LLM: tool_failure_recovery_actions reads tool archive machine fields only.
-# 函数用途: 从失败工具记录恢复 code/action/path，给下一轮返工提示和 repair guard 使用；不解析工具输出文案。
 def tool_failure_recovery_actions(
     records: list[Any],
     *,
@@ -50,8 +46,6 @@ def tool_failure_recovery_actions(
     return actions
 
 
-# LLM: attach_tool_failure_recovery_actions adds active failed-tool repairs after normal closeout enrichment.
-# 函数用途: 把工具层结构化错误补进 recovery_actions，供下一轮返工循环继续使用。
 def attach_tool_failure_recovery_actions(
     report: dict[str, Any],
     archive_tool_calls: list[Any],
@@ -69,8 +63,6 @@ def attach_tool_failure_recovery_actions(
     return report
 
 
-# LLM: _action_from_failed_record copies stable error taxonomy and target refs.
-# 函数用途: 将工具错误码映射到统一恢复动作，额外携带 checkpoint/tool/call_id 等机器字段。
 def _action_from_failed_record(
     record: dict[str, Any],
     error_code: str,
@@ -96,8 +88,6 @@ def _action_from_failed_record(
     return action
 
 
-# LLM: _failure_resolved drops stale failed-tool repairs after later success or valid checkpoint state.
-# 函数用途: 如果同一路径后续已经成功写入，或 JSON checkpoint 已经通过结构校验，就不再保留旧失败动作。
 def _failure_resolved(
     record: dict[str, Any],
     later_records: list[dict[str, Any]],
@@ -112,8 +102,6 @@ def _failure_resolved(
     return json_checkpoint_status(target_path)["code"] == "OK"
 
 
-# LLM: _later_success_for_target checks structured archive refs rather than prompt text.
-# 函数用途: 只要后续同目标成功，旧失败就不再作为当前返工动作。
 def _later_success_for_target(
     failed_record: dict[str, Any],
     later_records: list[dict[str, Any]],
@@ -131,15 +119,11 @@ def _later_success_for_target(
     return False
 
 
-# LLM: _is_json_checkpoint_action recognizes staged JSON repairs from tool and target shape.
-# 函数用途: 为 JSON checkpoint 失败补上 writer_tool/write_tools 字段，让 repair guard 能执行。
 def _is_json_checkpoint_action(record: dict[str, Any], target_ref: str) -> bool:
     tool_name = str(record.get("tool") or "").strip()
     return tool_name in _JSON_WRITER_TOOLS or target_ref.lower().endswith(".json")
 
 
-# LLM: _target_ref extracts the model-supplied target path as a stable workspace ref.
-# 函数用途: 优先保留相对路径；绝对路径在工作区内时转成相对 ref，避免提示里泄漏临时目录。
 def _target_ref(record: dict[str, Any], workspace_root: Path) -> str:
     for source in (record, _mapping(record.get("parameters")), _mapping(record.get("tool_result_envelope"))):
         if ref := _source_target_ref(source, workspace_root):
@@ -154,8 +138,6 @@ def _source_target_ref(source: dict[str, Any], workspace_root: Path) -> str:
     return ""
 
 
-# LLM: _target_path resolves one target ref without accepting arbitrary prose.
-# 函数用途: 把归档记录中的路径字段解析回文件系统路径，用于判断旧失败是否已经修复。
 def _target_path(record: dict[str, Any], workspace_root: Path) -> Path | None:
     ref = _target_ref(record, workspace_root)
     if not ref:

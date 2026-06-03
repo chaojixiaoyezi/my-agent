@@ -1,5 +1,3 @@
-# LLM: Tool call policy validates registry intent from machine fields before execution.
-# 模块用途: 校验工具是否存在、是否授权、参数是否满足结构化 schema，以及参数是否命中配置化阻断模式。
 
 from __future__ import annotations
 
@@ -7,12 +5,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .recovery_actions import RecoveryAction
 from .recovery_envelope import RecoveryEnvelopeRequest, recovery_envelope_from_gate_payload
 from .tool_protocol_v2 import normalize_tool_call
 
 
-# LLM: ToolCallPolicy is a compact machine-readable manifest slice for one execution context.
-# 类用途: 保存可用工具、当前允许/禁止工具、必填参数、参数类型和通用参数阻断模式。
 @dataclass(frozen=True)
 class ToolCallPolicy:
     available_tools: tuple[str, ...] = ()
@@ -23,8 +20,6 @@ class ToolCallPolicy:
     blocked_argument_patterns: tuple[str, ...] = ()
 
 
-# LLM: ToolCallPolicyDecision is the structured result consumed by runners and replay tests.
-# 类用途: 返回工具调用是否允许、工具名、错误码和具体机器发现项。
 @dataclass(frozen=True)
 class ToolCallPolicyDecision:
     ok: bool
@@ -32,8 +27,6 @@ class ToolCallPolicyDecision:
     error_code: str = ""
     findings: tuple[str, ...] = ()
 
-    # LLM: to_dict gives tool-policy callers a repair envelope without parsing output prose.
-    # 函数用途: 序列化工具策略结果；失败时附 recovery，机器字段决定返工动作，中文只给模型阅读。
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "ok": self.ok,
@@ -47,7 +40,9 @@ class ToolCallPolicyDecision:
                 status="ALLOW" if self.ok else "NEED_REPAIR",
                 allowed=self.ok,
                 findings=_finding_payloads(self.error_code, self.findings),
-                recommended_action="continue" if self.ok else "repair_tool_call",
+                recommended_action=RecoveryAction.CONTINUE.value
+                if self.ok
+                else RecoveryAction.REPAIR_TOOL_CALL.value,
                 evidence={"tool_name": self.tool_name} if self.tool_name else {},
             )
         )
@@ -56,8 +51,6 @@ class ToolCallPolicyDecision:
         return payload
 
 
-# LLM: validate_tool_call_policy checks one tool call without executing tools or reading prompt prose.
-# 函数用途: 按 policy 校验工具名、授权、必填参数、参数类型和参数阻断模式。
 def validate_tool_call_policy(payload: Any, policy: ToolCallPolicy) -> ToolCallPolicyDecision:
     call = normalize_tool_call(payload)
     tool_name = call.tool_name
@@ -84,8 +77,6 @@ def validate_tool_call_policy(payload: Any, policy: ToolCallPolicy) -> ToolCallP
     return _decision(True, tool_name, "")
 
 
-# LLM: _missing_required_parameters reads required fields from policy only.
-# 函数用途: 返回当前工具缺失的必填参数名，不从工具描述或自然语言里推断。
 def _missing_required_parameters(
     tool_name: str,
     params: dict[str, Any],
@@ -95,8 +86,6 @@ def _missing_required_parameters(
     return tuple(name for name in names if name not in params or params.get(name) is None)
 
 
-# LLM: _parameter_type_errors compares JSON-like params with simple schema type names.
-# 函数用途: 返回类型不匹配的字段，格式为 name:expected_type。
 def _parameter_type_errors(
     tool_name: str,
     params: dict[str, Any],
@@ -109,8 +98,6 @@ def _parameter_type_errors(
     return tuple(errors)
 
 
-# LLM: _blocked_argument_matches scans structured string args against configured patterns.
-# 函数用途: 返回命中阻断模式的参数路径，避免把危险命令形态交给工具执行。
 def _blocked_argument_matches(params: dict[str, Any], patterns: tuple[str, ...]) -> tuple[str, ...]:
     if not patterns:
         return ()
@@ -121,8 +108,6 @@ def _blocked_argument_matches(params: dict[str, Any], patterns: tuple[str, ...])
     return tuple(findings)
 
 
-# LLM: _string_values flattens JSON-like args while preserving field paths.
-# 函数用途: 遍历结构化参数里的字符串值，供阻断模式检查使用。
 def _string_values(value: Any, prefix: str = "") -> tuple[tuple[str, str], ...]:
     if isinstance(value, str):
         return ((prefix or "$", value),)
@@ -139,8 +124,6 @@ def _string_values(value: Any, prefix: str = "") -> tuple[tuple[str, str], ...]:
     return ()
 
 
-# LLM: _matches_type implements the small JSON type vocabulary used by offline tool tests.
-# 函数用途: 校验 string/integer/number/boolean/object/array/any 类型名。
 def _matches_type(value: Any, expected: str) -> bool:
     kind = str(expected or "any").strip().lower()
     if kind in {"", "any"}:
@@ -160,14 +143,10 @@ def _matches_type(value: Any, expected: str) -> bool:
     return False
 
 
-# LLM: _name_set normalizes tool-name policy lists without fuzzy matching.
-# 函数用途: 生成去空白的工具名集合，保持大小写敏感的精确匹配。
 def _name_set(names: tuple[str, ...]) -> set[str]:
     return {str(item).strip() for item in names if str(item).strip()}
 
 
-# LLM: _decision keeps policy result construction stable and short.
-# 函数用途: 统一创建 ToolCallPolicyDecision，确保 findings 永远是 tuple。
 def _decision(
     ok: bool,
     tool_name: str,

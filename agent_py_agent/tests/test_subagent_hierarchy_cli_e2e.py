@@ -13,8 +13,6 @@ from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.cli.parser import build_parser
 
 
-# LLM: _write_config creates a minimal isolated CLI config for hierarchy E2E tests.
-# 函数用途: 写入临时配置，让 CLI 和测试创建的 SimpleAgent 使用同一个 workspace。
 def _write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
@@ -26,8 +24,6 @@ def _write_config(tmp_path: Path) -> Path:
     return config_path
 
 
-# LLM: test_subagent_hierarchy_cli_e2e_creates_and_queries_recovery covers user-visible commands.
-# 函数用途: 通过 CLI 创建 child runs，再把一个 child 标记阻塞，并用恢复树命令查到它。
 def test_subagent_hierarchy_cli_e2e_creates_and_queries_recovery(tmp_path, capsys):
     config_path = _write_config(tmp_path)
     agent = SimpleAgent(load_config(config_path), tmp_path)

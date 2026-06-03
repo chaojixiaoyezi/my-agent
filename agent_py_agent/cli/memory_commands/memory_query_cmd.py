@@ -1,5 +1,3 @@
-# LLM: CLI memory command helper; keep archive/query/doctor option shapes stable.
-# 模块用途: 提供 memory 查询、诊断或归档相关命令入口。
 
 
 from __future__ import annotations
@@ -20,8 +18,6 @@ from ...agent.memory_routing import (
 from ...agent.user_space.home_memory_routes import DEFAULT_ROUTE_INDEX, resolve_route_index_target
 
 
-# LLM: RouteLogicRequest 是 memory route 命令的内部请求契约。
-# 类用途: 保存 args、agent、索引路径、路由模式和自动读取上限。
 @dataclass(frozen=True)
 class RouteLogicRequest:
     args: Any
@@ -32,8 +28,6 @@ class RouteLogicRequest:
     auto_read_limit: int
 
 
-# LLM: _resolve_agent 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _resolve_agent(args):
     import sys
     memory_mod = sys.modules.get("agent_py_agent.cli.memory_commands")
@@ -43,8 +37,6 @@ def _resolve_agent(args):
     return make_agent(args)
 
 
-# LLM: _load_and_validate_routes 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 读取文件、索引或配置，并转换成后续逻辑可直接使用的数据。
 def _load_and_validate_routes(index_path: Path, agent) -> tuple[list[MemoryRoute], list[str]]:
     from ...agent.memory_routing import load_routes, validate_routes
     routes = load_routes(index_path)
@@ -52,8 +44,6 @@ def _load_and_validate_routes(index_path: Path, agent) -> tuple[list[MemoryRoute
     return routes, warnings
 
 
-# LLM: _load_routes_for_matching 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 读取文件、索引或配置，并转换成后续逻辑可直接使用的数据。
 def _load_routes_for_matching(index_path: Path, agent, args) -> tuple[list[MemoryRoute], list[MemoryRouteMatch], list[str], list[str]]:
     from ...agent.memory_routing import load_routes, match_routes, resolve_required_paths
 
@@ -68,8 +58,6 @@ def _load_routes_for_matching(index_path: Path, agent, args) -> tuple[list[Memor
     return routes, matches, resolution.required_read_paths, resolution.candidate_paths
 
 
-# LLM: _try_validate_routes 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _try_validate_routes(index_path: Path, agent) -> tuple[bool, list[MemoryRoute], list[str], list[str]]:
     try:
         routes, route_warnings = _load_and_validate_routes(index_path, agent)
@@ -87,8 +75,6 @@ def _try_validate_routes_for_root(index_path: Path, authority_root: Path) -> tup
         return False, [], [], [f"memory route index could not be loaded: {type(exc).__name__}: {exc}"]
 
 
-# LLM: _try_match_routes 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _try_match_routes(index_path: Path, agent, args) -> tuple[bool, list[MemoryRoute], list[MemoryRouteMatch], list[str], list[str], list[str]]:
     try:
         routes, matches, required_paths, candidate_paths = _load_routes_for_matching(index_path, agent, args)
@@ -97,8 +83,6 @@ def _try_match_routes(index_path: Path, agent, args) -> tuple[bool, list[MemoryR
         return False, [], [], [], [], [f"memory route index could not be loaded: {type(exc).__name__}: {exc}"]
 
 
-# LLM: _execute_route_logic 集中运行 route validate/match 分支；输出 payload 依赖它。
-# 函数用途: 校验索引、处理 off/validate/match 模式，并返回 routes、matches 和诊断。
 def _execute_route_logic(request: RouteLogicRequest):
     args = request.args
     agent = request.agent
@@ -132,8 +116,6 @@ def _execute_route_logic(request: RouteLogicRequest):
     return ok, routes, matches, required_read_paths, candidate_paths, diagnostics
 
 
-# LLM: cmd_memory_route 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_route(args) -> int:
     agent = _resolve_agent(args)
     if getattr(args, "limit", None) is None:
@@ -161,28 +143,20 @@ def cmd_memory_route(args) -> int:
     return 0
 
 
-# LLM: _resolve_index_path 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _resolve_index_path(root: Path, raw_index: str | None, *, home_paths: object | None = None) -> Path:
     return resolve_route_index_target(root, raw_index, home_paths=home_paths).path
 
 
-# LLM: _resolve_route_mode 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _resolve_route_mode(raw_mode: str | None, config: object) -> str:
     return str(raw_mode or getattr(config, "memory_rule_routing_mode", "soft") or "soft").strip().lower()
 
 
-# LLM: _resolve_auto_read_limit 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _resolve_auto_read_limit(raw_limit: int | None, config: object) -> int:
     if raw_limit is not None:
         return raw_limit
     return int(getattr(config, "memory_rule_auto_read_limit", 3))
 
 
-# LLM: _normalize_warning_item 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _normalize_warning_item(item: Any) -> dict[str, Any]:
     if isinstance(item, dict):
         return dict(item)
@@ -194,15 +168,11 @@ def _normalize_warning_item(item: Any) -> dict[str, Any]:
     return {"message": str(item)}
 
 
-# LLM: _config_warnings 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _config_warnings(config: object) -> list[dict[str, Any]]:
     warnings = getattr(config, "memory_config_warnings", []) or []
     return [_normalize_warning_item(item) for item in warnings]
 
 
-# LLM: _index_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _index_payload(index_path: Path) -> dict[str, Any]:
     return {
         "path": str(index_path),
@@ -211,8 +181,6 @@ def _index_payload(index_path: Path) -> dict[str, Any]:
     }
 
 
-# LLM: _match_payload 定义单条 route match 的 CLI/JSON 字段。
-# 函数用途: 提取 route id、topic、authority、scope、score、命中词和原因。
 def _match_payload(match: MemoryRouteMatch) -> dict[str, Any]:
     return {
         "route_id": match.route.route_id,
@@ -226,8 +194,6 @@ def _match_payload(match: MemoryRouteMatch) -> dict[str, Any]:
     }
 
 
-# LLM: _print_memory_route_report 控制 memory route 的人读输出和 JSON 输出。
-# 函数用途: 打印 ok、索引、模式、warnings、必读路径、候选路径和 matches。
 def _print_memory_route_report(payload: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
@@ -261,8 +227,6 @@ def _print_memory_route_report(payload: dict[str, Any], *, json_output: bool) ->
         )
 
 
-# LLM: _print_path_list 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_path_list(paths: list[str]) -> None:
     if not paths:
         print("- none")

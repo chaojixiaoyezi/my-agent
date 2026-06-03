@@ -15,13 +15,11 @@ from agent_py_agent.agent.agent_core.spawn_role_seed import (
     SpawnExplicitRoleRequest,
     spawn_explicit_role_runs,
 )
-from agent_py_agent.agent.agent_core.subagent_params import SpawnSubagentsParams
+from agent_py_agent.agent.agent_core.subagent.params import SpawnSubagentsParams
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import SubAgentTask
 
 
-# LLM: test_cmd_spawn_serializes_dataclass_task keeps legacy spawn JSON output stable.
-# 函数用途: 验证 spawn-subagents 输出可序列化的任务 JSON，并保留 quality contract 字段。
 def test_cmd_spawn_serializes_dataclass_task(tmp_path: Path, capsys):
     from agent_py_agent.cli.subagents import cmd_spawn
 
@@ -46,8 +44,6 @@ def test_cmd_spawn_serializes_dataclass_task(tmp_path: Path, capsys):
     assert "quality_contract" in output
 
 
-# LLM: test_cmd_spawn_passes_explicit_role_bundle verifies CLI args reach the spawn bundle.
-# 函数用途: 确认命令行 role/agent-name 不丢失，后续 SimpleAgent 能创建真正 coordinator seed。
 def test_cmd_spawn_passes_explicit_role_bundle(tmp_path: Path):
     from agent_py_agent.cli.subagents import cmd_spawn
 
@@ -72,8 +68,6 @@ def test_cmd_spawn_passes_explicit_role_bundle(tmp_path: Path):
     assert params.agent_name == "root-coordinator"
 
 
-# LLM: test_explicit_root_spawn_keeps_product_path_and_write_root covers parent authority coverage.
-# 函数用途: 显式 root/coordinator seed 既保留产物目录上下文，也保留覆盖下级的写入权限用于检查/接管/救援。
 def test_explicit_root_spawn_keeps_product_path_and_write_root(tmp_path: Path):
     deliverables = tmp_path / "deliverables" / "product"
     agent = MagicMock()

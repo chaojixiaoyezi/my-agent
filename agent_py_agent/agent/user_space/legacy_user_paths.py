@@ -1,5 +1,3 @@
-# LLM: Legacy data/users path helpers are migration-only compatibility, not the V2 owner-home model.
-# 模块用途: 保留旧 data/users 路径推导，供迁移和关闭 owner-home runtime 的兼容模式使用。
 
 from __future__ import annotations
 
@@ -7,8 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-# LLM: LegacyUserPaths labels old data/users paths so new runtime code does not mistake them for owner-home facts.
-# 类用途: 保存旧 data/users 布局路径，只供迁移、兼容读取和关闭 owner-home runtime 后的 fallback 使用。
 @dataclass
 class LegacyUserPaths:
     """Path bundle for the old data/users layout.
@@ -29,8 +25,6 @@ class LegacyUserPaths:
     local_store_events_path: Path
 
 
-# LLM: get_legacy_user_paths is only for old data/users migration/fallback.
-# 函数用途: 根据 user_id 计算旧 data/users 布局路径，不用于新 owner-home 运行事实源。
 def get_legacy_user_paths(user_id: str, base_dir: Path | str) -> LegacyUserPaths:
     if isinstance(base_dir, str):
         base_dir = Path(base_dir)
@@ -50,8 +44,6 @@ def get_legacy_user_paths(user_id: str, base_dir: Path | str) -> LegacyUserPaths
     )
 
 
-# LLM: get_legacy_admin_paths names the old admin fallback explicitly.
-# 函数用途: 返回旧 data/users/admin 路径集合，仅迁移和兼容使用。
 def get_legacy_admin_paths(base_dir: Path | str) -> LegacyUserPaths:
     return get_legacy_user_paths("admin", base_dir)
 

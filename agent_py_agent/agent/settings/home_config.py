@@ -1,13 +1,9 @@
-# LLM: Home/provider config fields live here to keep AgentConfig small while preserving dataclass construction.
-# 模块用途: 保存 my-agent 家目录、外部知识库和 provider 空间相关配置字段。
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 
-# LLM: HomeProviderConfigFields is inherited by AgentConfig; field names are user-facing config keys.
-# 类用途: 把家目录、外部知识库和外部平台空间配置从主 AgentConfig 类体拆出来。
 @dataclass
 class HomeProviderConfigFields:
     my_agent_home: str = "~/.my-agent"

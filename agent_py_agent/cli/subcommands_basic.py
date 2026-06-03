@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 from __future__ import annotations
 
@@ -40,8 +38,6 @@ from .memory_doctor import cmd_memory_doctor
 from .memory_fact_commands import cmd_memory_fact_write
 
 
-# LLM: _add_capability_config_arg 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--capability-config",
@@ -50,16 +46,12 @@ def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
     )
 
 
-# LLM: add_basic_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def add_basic_subcommands(sub: argparse._SubParsersAction) -> None:
     _add_status_timeline_run_commands(sub)
     _add_memory_chat_commands(sub)
     _add_context_bundle_command(sub)
 
 
-# LLM: _add_context_bundle_command registers refs-only context bundle observability.
-# 函数用途: 增加 `context-bundle latest` 命令，不触发模型调用，只读最新主代理任务卡。
 def _add_context_bundle_command(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("context-bundle", help="查看主代理 context bundle 任务卡")
     nested = parser.add_subparsers(dest="context_bundle_action")
@@ -69,8 +61,6 @@ def _add_context_bundle_command(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=cmd_context_bundle, context_bundle_action="latest")
 
 
-# LLM: _add_status_timeline_run_commands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_status_timeline_run_commands(sub: argparse._SubParsersAction) -> None:
     status = sub.add_parser("status", help="查看 my-agent 全局状态")
     status.add_argument("--limit", type=int, default=None, help="最多显示多少条 hot/recent/timeline 项；默认读配置")
@@ -98,8 +88,6 @@ def _add_status_timeline_run_commands(sub: argparse._SubParsersAction) -> None:
     run.set_defaults(func=cmd_run)
 
 
-# LLM: _add_memory_chat_commands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_memory_chat_commands(sub: argparse._SubParsersAction) -> None:
     remember = sub.add_parser("remember", help="手动写入一条记忆")
     remember.add_argument("content", help="记忆内容")
@@ -127,8 +115,6 @@ def _add_memory_chat_commands(sub: argparse._SubParsersAction) -> None:
     chat.set_defaults(func=cmd_chat)
 
 
-# LLM: _add_archive_search_args 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_archive_search_args(parser) -> None:
     parser.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="搜索哪一层归档")
     parser.add_argument("--date", help="只搜索某一天，格式 YYYY-MM-DD")
@@ -148,8 +134,6 @@ def _add_archive_search_args(parser) -> None:
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
 
 
-# LLM: _add_archive_resume_args 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_archive_resume_args(parser) -> None:
     parser.add_argument(
         "--from-compact",
@@ -183,8 +167,6 @@ def _add_archive_resume_args(parser) -> None:
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
 
 
-# LLM: _add_memory_fact_write_args registers the explicit completion-fact write surface.
-# 函数用途: 配置 memory-fact-write 参数，让用户手动补齐 compact resume 缺失字段。
 def _add_memory_fact_write_args(parser) -> None:
     parser.add_argument("--fact-id", default="", help="事实源目录名；通常使用 request_id/session_id/task_id/run_id")
     parser.add_argument("--from-compact", dest="from_compact", default="", help="可选：从 compact apply 读取目标和下一步")
@@ -198,8 +180,6 @@ def _add_memory_fact_write_args(parser) -> None:
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
 
 
-# LLM: _add_memory_compact_args 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_memory_compact_args(parser) -> None:
     """参数说明: memory compact 支持只读 dry-run 和非破坏性 apply 产物生成。"""
 
@@ -223,8 +203,6 @@ def _add_memory_compact_args(parser) -> None:
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
 
 
-# LLM: add_memory_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
     add_home_runtime_subcommands(sub)
     memory_route = sub.add_parser("memory-route", help="按长期规则索引预览 memory 路由命中")
@@ -245,8 +223,6 @@ def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
     _add_memory_archive_subcommands(sub)
 
 
-# LLM: _add_memory_archive_subcommands keeps archive/compact CLI registration grouped and size-safe.
-# 函数用途: 注册 archive search/resume/artifact/fact/compact 命令，避免主 memory 注册函数继续膨胀。
 def _add_memory_archive_subcommands(sub: argparse._SubParsersAction) -> None:
     memory_archive_list = sub.add_parser("memory-archive-list", help="列出 memory raw/hook 归档记录")
     memory_archive_list.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="查看哪一层归档")
@@ -284,8 +260,6 @@ def _add_memory_archive_subcommands(sub: argparse._SubParsersAction) -> None:
     memory_compact.set_defaults(func=cmd_memory_compact)
 
 
-# LLM: add_local_store_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def add_local_store_subcommands(sub: argparse._SubParsersAction) -> None:
     local_store_status = sub.add_parser("local-store-status", help="查看本地事实源状态")
     local_store_status.set_defaults(func=cmd_local_store_status)

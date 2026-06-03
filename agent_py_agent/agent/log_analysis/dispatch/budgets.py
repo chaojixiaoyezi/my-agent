@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 from __future__ import annotations
 
@@ -10,21 +8,15 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
-# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 BudgetDecision 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 BudgetDecision 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class BudgetDecision:
     allowed: bool
     reason: str
 
-    # LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 DispatchBudget 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 DispatchBudget 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class DispatchBudget:
     """Local dispatch budget.
@@ -39,8 +31,6 @@ class DispatchBudget:
     p1_auto_dispatch_enabled: bool = False
     max_case_rounds: int = 1
 
-    # LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 from_mapping 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 从外部数据还原 from mapping 需要的领域对象，统一缺省值和兼容字段。
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any] | None) -> DispatchBudget:
         if not payload:
@@ -63,13 +53,9 @@ class DispatchBudget:
             max_case_rounds=max(0, int(payload.get("max_case_rounds", 1) or 0)),
         )
 
-    # LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    # LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 auto_dispatch_enabled_for_priority 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 auto dispatch enabled for priority 在当前模块中的核心转换或协调步骤，衔接 dispatch 流程按预算、队列和工单状态分派日志分析任务。
     def auto_dispatch_enabled_for_priority(self, priority: str = "") -> bool:
         normalized = str(priority or "").upper()
         if self.case_auto_dispatch_enabled:
@@ -80,8 +66,6 @@ class DispatchBudget:
             return True
         return False
 
-    # LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 can_dispatch_analyst 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 can dispatch analyst 在当前模块中的核心转换或协调步骤，衔接 dispatch 流程按预算、队列和工单状态分派日志分析任务。
     def can_dispatch_analyst(
         self,
         *,

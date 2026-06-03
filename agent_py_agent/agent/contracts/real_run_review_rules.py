@@ -1,5 +1,3 @@
-# LLM: Real run review rules map stable machine error codes to generic failure tags and priorities.
-# 模块用途: 集中维护真实运行复盘的通用错误码前缀、阶段和 P0/P1 优先级规则。
 
 from __future__ import annotations
 

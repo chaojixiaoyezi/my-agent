@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from agent_py_agent.agent.subagents.execution_executor import TestExecutor
+from agent_py_agent.agent.subagents.execution import TestExecutor
 from agent_py_agent.tests.static_site_validator_fixtures import _write_site
 
 
-# LLM: generated apps often expose window.app methods that inline handlers call.
-# 函数用途: 验证 onclick/app.js 模板调用未导出的 app 方法时，静态验收能拦住假可用流程。
 def test_static_site_check_blocks_missing_window_app_methods(tmp_path):
     _write_site(
         tmp_path,
@@ -33,8 +31,6 @@ def test_static_site_check_blocks_missing_window_app_methods(tmp_path):
     assert record.validation_result["missing_js_api_hits"] == ["app.showCart"]
 
 
-# LLM: inline handlers can reference a top-level lexical app object in normal browser scripts.
-# 函数用途: 验证 validator 不强迫站点必须写 window.app，只要结构化 app 对象导出对应方法即可。
 def test_static_site_check_accepts_top_level_app_object_methods(tmp_path):
     _write_site(
         tmp_path,

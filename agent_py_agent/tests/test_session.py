@@ -194,6 +194,21 @@ class TestSessionManager:
         assert sessions[0].session_id == session2.session_id
         assert sessions[1].session_id == session1.session_id
 
+    def test_list_sessions_report_keeps_good_sessions_when_one_session_file_is_bad(self, manager):
+        """坏 session.json 不能被误判成没有其它会话。"""
+        good = manager.create_session(user_id="test_user")
+        bad_file = manager._session_root / "sess_bad" / "session.json"
+        bad_file.parent.mkdir(parents=True, exist_ok=True)
+        bad_file.write_text("{bad-json", encoding="utf-8")
+
+        sessions, load_errors = manager.list_sessions_report("test_user")
+
+        assert [item.session_id for item in sessions] == [good.session_id]
+        assert load_errors
+        assert load_errors[0]["context"] == "session.manager.session.read"
+        assert load_errors[0]["session_id"] == "sess_bad"
+        assert load_errors[0]["path"] == str(bad_file)
+
     def test_list_sessions_default_user(self, manager):
         """测试使用默认 user_id 列出会话。"""
         session1 = manager.create_session()

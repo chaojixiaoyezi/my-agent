@@ -1,5 +1,3 @@
-# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
-# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
 
 from __future__ import annotations
 
@@ -21,8 +19,6 @@ from .fallback_state import (
 from .history import chat_history_max_turns
 
 
-# LLM: _fallback_process_job 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护非 TUI 聊天路径的命令处理、展示或任务提交。
 def _fallback_process_job(
     cfg: FallbackWorkerConfig,
     job,
@@ -41,8 +37,6 @@ def _fallback_process_job(
     return _fallback_local_handle(job_ctx)
 
 
-# LLM: _fallback_finish_job 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护非 TUI 聊天路径的命令处理、展示或任务提交。
 def _fallback_finish_job(
     cfg: FallbackWorkerConfig,
     job,
@@ -65,8 +59,6 @@ def _fallback_finish_job(
     cfg.jobs.task_done()
 
 
-# LLM: _fallback_worker 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护非 TUI 聊天路径的命令处理、展示或任务提交。
 def _fallback_worker(cfg: FallbackWorkerConfig) -> None:
     while True:
         job = cfg.jobs.get()
@@ -85,8 +77,6 @@ def _fallback_worker(cfg: FallbackWorkerConfig) -> None:
             _fallback_finish_job(cfg, job, agent_response_text, stream_started)
 
 
-# LLM: _make_fallback_worker_cfg 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_fallback_worker_cfg(
     cfg: RunFallbackConfig,
     refs: FallbackInputRefs,
@@ -109,8 +99,6 @@ def _make_fallback_worker_cfg(
     )
 
 
-# LLM: _start_fallback_worker 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护非 TUI 聊天路径的命令处理、展示或任务提交。
 def _start_fallback_worker(cfg: RunFallbackConfig, refs: FallbackInputRefs) -> None:
     worker_cfg = _make_fallback_worker_cfg(cfg, refs)
     threading.Thread(

@@ -10,8 +10,6 @@ from pathlib import Path
 from agent_py_agent.tests.test_tools.backends import make_tool_registry
 
 
-# LLM: orchestration tools use flat parameters so the model sees one contract.
-# 函数用途: schedule_child_subagents 的 children/dry_run 保持顶层字段，不再通过 orchestration 包装。
 def test_tool_call_parser_keeps_flat_orchestration_params():
     registry = make_tool_registry(Path.cwd())
 

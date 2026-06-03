@@ -1,5 +1,3 @@
-# LLM: Collaboration coverage summarizes responder coverage without gating the case.
-# 模块用途: 为协作 case 生成紧凑响应覆盖账本，避免大规模代理协作时把全部响应者塞进模型上下文。
 
 from __future__ import annotations
 

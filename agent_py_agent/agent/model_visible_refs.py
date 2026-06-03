@@ -1,21 +1,20 @@
-# LLM: Model-visible ref helpers keep live tool payloads on current-layout paths.
-# 模块用途: 提供模型可见路径投影；当前工具输出遇到旧 data/subagents 路径时直接省略，不用占位符遮羞。
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
+_LEGACY_SUBAGENT_PATH_PATTERN = re.compile(
+    r"(?P<path>(?:~|[A-Za-z]:|/|\.{1,2}/)?[^\s\"'<>，。；；、,]*data/subagents/[^\s\"'<>，。；；、,]*)"
+)
 
-# LLM: is_legacy_subagent_path recognizes only the old internal subagent runtime layout.
-# 函数用途: 判断字符串是否指向旧式 data/subagents 运行目录；普通用户正文不在这里改写。
+
 def is_legacy_subagent_path(value: str) -> bool:
     text = str(value or "").replace("\\", "/")
-    return "/data/subagents/" in text or text.startswith("data/subagents/")
+    return "data/subagents/" in text
 
 
-# LLM: current_model_ref returns a live model-facing ref only when it is not a legacy runtime path.
-# 函数用途: 当前状态/调度 payload 只暴露新布局路径或普通文件名；旧内部路径返回空字符串。
 def current_model_ref(value: Any, *, basename_for_legacy: bool = False) -> str:
     text = str(value or "").strip()
     if not text:
@@ -27,8 +26,28 @@ def current_model_ref(value: Any, *, basename_for_legacy: bool = False) -> str:
     return ""
 
 
-# LLM: current_model_ref_list keeps refs unique while dropping legacy runtime paths.
-# 函数用途: 过滤模型可见 ref 列表，避免旧路径和空字符串进入状态结果。
+def current_model_text(value: Any, *, basename_for_legacy: bool = True) -> str:
+    """Return model-visible free text with deprecated subagent paths removed."""
+    text = str(value or "")
+    if not text or not is_legacy_subagent_path(text):
+        return text
+    return scrub_legacy_subagent_paths_in_text(text, basename_for_legacy=basename_for_legacy)
+
+
+def scrub_legacy_subagent_paths_in_text(value: str, *, basename_for_legacy: bool = True) -> str:
+    text = str(value or "")
+    if not text or not is_legacy_subagent_path(text):
+        return text
+
+    def repl(match: re.Match[str]) -> str:
+        path = match.group("path").replace("\\", "/")
+        if basename_for_legacy:
+            return Path(path).name or "[internal_legacy_subagent_path_hidden]"
+        return "[internal_legacy_subagent_path_hidden]"
+
+    return _LEGACY_SUBAGENT_PATH_PATTERN.sub(repl, text)
+
+
 def current_model_ref_list(values: Any, *, basename_for_legacy: bool = False, limit: int = 0) -> list[str]:
     if not isinstance(values, list | tuple | set):
         return []
@@ -48,5 +67,7 @@ def current_model_ref_list(values: Any, *, basename_for_legacy: bool = False, li
 __all__ = [
     "current_model_ref",
     "current_model_ref_list",
+    "current_model_text",
     "is_legacy_subagent_path",
+    "scrub_legacy_subagent_paths_in_text",
 ]

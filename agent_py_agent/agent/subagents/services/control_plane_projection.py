@@ -1,11 +1,8 @@
-# LLM: Subagent control-plane projection writes query rows while task/run files stay authoritative.
-# 模块用途: 把子代理任务保存结果同步到 LocalStore 控制面投影。
 
 from __future__ import annotations
 
 """sync subagent task state into LocalStore runtime control-plane tables.
 
-给人看的解释：
 这里不创建新的事实源，只把已经写入 task/run workspace 的状态投影到 SQLite。
 上级代理和接管代理可以靠这些行快速看 agent tree；真正恢复仍回到文件。
 """
@@ -18,8 +15,6 @@ from ..models import SubAgentTask
 _TAKEOVER_READINESS_STATUSES = {"BLOCKED", "FAILED", "TIMEOUT", "ERROR"}
 
 
-# LLM: sync_subagent_control_plane_projection writes run/event/rollup rows for one task save.
-# 函数用途: 将单个子代理任务的最新状态同步到 LocalStore 控制面。
 def sync_subagent_control_plane_projection(local_store: Any, task: SubAgentTask) -> None:
     if local_store is None:
         return
@@ -29,8 +24,6 @@ def sync_subagent_control_plane_projection(local_store: Any, task: SubAgentTask)
     local_store.rebuild_task_rollup(run_record.root_task_id)
 
 
-# LLM: _agent_run_record_from_task keeps projection fields derived from the task dataclass only.
-# 函数用途: 从 SubAgentTask 构造 agent_runs 表的一行记录。
 def _agent_run_record_from_task(task: SubAgentTask) -> AgentRunRecord:
     root_task_id = task.root_id or task.id
     return AgentRunRecord(
@@ -62,8 +55,6 @@ def _agent_run_record_from_task(task: SubAgentTask) -> AgentRunRecord:
     )
 
 
-# LLM: _agent_run_metadata keeps optional panel/security refs out of rows when facts are empty.
-# 函数用途: 构造控制面 metadata，只暴露有意义的继承清单、失败交接和安全预留引用。
 def _agent_run_metadata(task: SubAgentTask) -> dict[str, object]:
     metadata: dict[str, object] = {
         "verification_status": task.verification_status,
@@ -89,8 +80,6 @@ def _agent_run_metadata(task: SubAgentTask) -> dict[str, object]:
     return metadata
 
 
-# LLM: _runtime_scope_metadata projects scope fields without turning them into permissions.
-# 函数用途: 把员工/会话/记忆/配置隔离元数据暴露给控制面，默认不写全局配置。
 def _runtime_scope_metadata(task: SubAgentTask) -> dict[str, object]:
     identity = getattr(task, "runtime_identity", None)
     if not identity:
@@ -119,8 +108,6 @@ def _runtime_scope_metadata(task: SubAgentTask) -> dict[str, object]:
     return {"runtime_identity": runtime_identity, "memory_scope": memory_scope, "config_scope": config_scope}
 
 
-# LLM: _agent_event_from_task appends an audit event for every save projection.
-# 函数用途: 写入运行保存事件；scope 信息保留在 run metadata，事件不复制权限边界。
 def _agent_event_from_task(task: SubAgentTask) -> AgentEventInput:
     root_task_id = task.root_id or task.id
     return AgentEventInput(

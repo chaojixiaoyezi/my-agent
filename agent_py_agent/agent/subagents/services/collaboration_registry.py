@@ -1,5 +1,3 @@
-# LLM: Collaboration registry snapshots subagent routing facts after task creation.
-# 模块用途: 登记子代理开放世界能力和来源提示，供协作请求自动路由。
 
 from __future__ import annotations
 
@@ -68,7 +66,6 @@ def collaboration_sources_for_task(task: Any) -> list[str]:
 def _capability_aliases_for_tool(tool: str) -> list[str]:
     name = tool.lower()
     aliases: list[str] = []
-    # LLM: Generic write aliases keep collaboration routing independent of retired special writer names.
     if any(token in name for token in ("read", "search", "query", "fetch", "list", "get", "http", "browser")):
         aliases.append("query")
     if "submit_collaboration_result" in name or ("evidence" in name and any(token in name for token in ("submit", "add", "record"))):

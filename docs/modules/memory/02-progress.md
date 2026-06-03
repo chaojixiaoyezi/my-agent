@@ -2,6 +2,7 @@
 
 ## 已完成
 
+- 2026-06-02 compact owner/work-state 来源收敛：子代理 compact/resume 会优先读取当前任务本地 `work/agents/<run_id>` 与 canonical state locator；旧 work-order 只作为迁移兼容。`memory_archive/compact_work_state/` 只扫描当前 workspace 和 scope 对应的任务/run/agent 事实源，缺少 acceptance/constraints/latest_tests 时写 `not_recorded`，不再凭空制造验收要求。
 - 2026-05-31 Home V2 第一片已落地：`ensure_my_agent_home()` 会创建 `shared/`、`owners/local/main/`、`identity/`、`global_index/` 和 `system/schema_version.json`，并给本地主 owner 写入 `permissions.json`、`quota.json`、`retention.json`、`skill_policy.json`、`tool_policy.json` 种子文件；任务工作区会创建 `collab/`、`artifacts/manifest.json`、`compact/` 和 `summaries/`。新增 `memory_store.daily`，把每日工作记忆作为可读事件写入 `memory/daily/YYYY-MM-DD.jsonl`，raw archive 继续保留黑盒流水。
 - 2026-05-31 Home V2 第二片已落地：新增 owner resolver，`local/main`、provider user、provider group 都能解析到 V2 owner home；PromptBuilder 优先读取 owner entry files，SimpleAgent daily mirror 默认写 owner memory/daily；home doctor 暴露 owner/shared/system/schema 状态；新增 owner-private skill candidate 草稿账本，只记录候选，不自动提升。
 - 2026-05-31 Home V2 第三片已落地：`AgentConfig` 增加 `my_agent_owner_provider/kind/id`，运行时可直接切到指定 provider owner；live raw archive、runtime_fact、最终 archive 和 token ledger 都优先写当前 owner home；`memory-doctor` 会报告 legacy daily/raw/task workspace 的迁移建议，`home-migrate --apply` 只做非破坏性复制，不删除、不覆盖旧数据。
@@ -38,7 +39,7 @@
 - 2026-06-01 保存型 run 的 `Current Task Workspace` 会进入 runtime fact：即使没有显式交付合同，compact/resume 也能看到本轮
   `output/` 是最终交付区、`work/` 是过程区。这是路径软提示和运行状态，不会强迫纯聊天任务落盘。
 - 2026-05-31 runtime fact 增加通用 `run_intent`：当用户明确要求目标产物路径时，系统会把目标产物和其它显式参考目录带进 compact handoff。`write_file` 写到参考目录时只返回软提醒，不阻断；没有明确落盘目标时不会凭空制造“必须写文件”的要求。
-- 2026-05-30 真实 compact 压力测试命中 provider 429。网关已保持请求前短退避重试；工具循环现在还会在当前模型回合内按 `10/25/45/100/180` 秒等待表自动重试 provider transient，避免整轮 run 重启或重复执行已完成工具。重试耗尽后抛 `ProviderTransientError`，CLI 输出 `provider_transient` 可恢复提示，不再把裸 HTTP traceback 当成任务失败正文。
+- 2026-05-30 真实 compact 压力测试命中 provider 429。网关已保持请求前短退避重试；工具循环、入口 delivery contract 物化、子代理结构化修复调用都会在当前模型回合内按 `10/25/45/100/180` 秒等待表自动重试 provider transient，避免整轮 run 重启或重复执行已完成工具。重试耗尽后抛 `ProviderTransientError`，CLI 输出 `provider_transient` 可恢复提示，不再把裸 HTTP traceback 当成任务失败正文。
 - 2026-05-29 Compact Action Guard 已按普通任务放宽：`acceptance`、`constraints`、`latest_tests` 缺失时只写入 `missing_fields` 提醒，不再阻断自动续接；只有 consistency/self-check/refs/goal/next_step 这类恢复包硬完整性失败时才停车。
 - 2026-05-29 Compact 触发入口已统一：正常 token 阈值触发和上下文溢出兜底触发都走 `compact_suggest -> compact_auto -> compact_apply -> compact_resume -> continue_packet` 同一套链路，只通过 `trigger.reason/source/forced` 区分原因；`runtime_reason=context_overflow` 即使低于普通阈值，也会进入同一个 auto-apply / apply-resume 流程，`save=False` 或 guard 不通过时才退回确认建议。
 - 2026-05-27 Memory 读取预算已回到主配置：artifact 默认读取长度、artifact 读取预算、工具输出外置阈值/预览长度、自动恢复上下文扫描 limit 都从 `agent_config.yaml` / `AgentConfig` 读取；memory 模块不再保留第二份隐藏默认数字。
@@ -46,7 +47,7 @@
 - 2026-05-14 Compact Continue Packet typed envelope 第一片已落地：`memory-resume --from-compact` 返回的 continue packet 仍保留旧字段，同时新增 `typed_envelope.kind=compact_continue_packet`，把 apply/plan、work_state、guard、next_actions 和 recommended_read_paths 转成机器可读恢复包；它仍不执行工具、不改任务状态。
 - 2026-05-17 Main Agent Context Bundle 与手动 compact/resume 对齐已落地：主代理保存型 run 会写 `Main Agent Context Bundle v1`；`memory-compact --apply` 会登记最近一次主代理任务卡，API 可显式传 `main_context_bundle_ref`；`memory-resume --from-compact` 会把这张任务卡放进 `main_context_bundle`、推荐读取路径、handoff/context block 和 continue packet。旧 apply 包没有该字段也可继续恢复。
 - 2026-05-17 Main Agent Context Bundle 合同完整性已落地：context bundle 现在包含 RunScope、ToolManifest、Acceptance Contract、ArtifactRef、自检、schema migration policy、prompt budget 和 subagent-compatible owner model；`memory-compact --apply` 自动绑定最近任务卡前会做 scope match，避免 compact 老任务时误用最新任务卡；新增 `context-bundle latest --json` 只读观测入口。
-- 2026-05-17 Context Bundle / Compact Apply 体积守卫清零：把 context bundle 渲染拆到 `context_bundle_rendering.py`，把 runtime 到 bundle 的桥接拆到 `runtime_context_bundle.py`，把 compact apply restore refs/apply bundle/ledger payload 拆到 `compact_apply_payloads.py`；strict code-size 已回到 `hard=0 high-risk=0 soft=0`。
+- 2026-05-17 Context Bundle / Compact Apply 体积守卫清零：把 context bundle 渲染拆到 `context_bundle_rendering.py`，把 runtime 到 bundle 的桥接拆到 `runtime/context_bundle.py`，把 compact apply restore refs/apply bundle/ledger payload 拆到 `compact_apply_payloads.py`；strict code-size 已回到 `hard=0 high-risk=0 soft=0`。
 - 2026-05-18 主代理内核硬化第一批已落地：公共模型调用路径新增 `model_call_ledger` 和动态首 token / provider wall timeout 记录；工具执行 envelope 增加 `tool_protocol_v2` 镜像；新增 `file_write_session` 大文件分块写入工具，支持 begin/append/finish/abort、chunk 幂等、manifest、sha256 校验和原子提交。focused tests、architecture guardrails、fast tests、ruff、strict code-size 均已通过。
 - 2026-05-18 主代理执行合同层第一片已落地：新增 `agent/contracts/error_taxonomy.py`、`state_machine.py`、`idempotency.py` 和 `e2e_matrix.py`；ToolManifest failure taxonomy 已改用统一错误代码；这四个合同只描述错误、状态、幂等键和真实 E2E 场景，不直接阻断工作流，避免继续堆 prompt guard。
 - 2026-05-18 执行合同层已接入 create/dispatch：`create_subagents` 输出 `operation_contract`，`current_turn_run_state` 输出 `state_machine_contract` 和 `recovery_recommendations`；显式命名的小傻妞按结构化名字复用，默认泛名仍按 goal/write-root 区分，减少重复创建和重复调度。
@@ -259,8 +260,8 @@
 - Verified with memory/archive/routing focused tests, ruff, and the global code-size report.
 
 ## 2026-05-07 high-risk pre-clean
-- 中文说明：这一轮先把 task workspace 的 state/timeline payload 和 JSONL helper 拆到 `task_workspace_payloads.py`，让 `task_workspace.py` 继续只管编排和路径；同时继续把 archive query、resume brief、memory gate、routing receipts 收进 bundle。
-- Split task workspace state/timeline payload and JSONL helpers into `memory_archive/task_workspace_payloads.py` so `task_workspace.py` stays focused on orchestration and path wiring.
+- 中文说明：task workspace 的 state/timeline payload 和 JSONL helper 已进入 `task_workspace/payloads.py`，公开入口 `task_workspace/__init__.py` 继续只管编排和路径；同时继续把 archive query、resume brief、memory gate、routing receipts 收进 bundle。
+- Task workspace state/timeline payload and JSONL helpers now live in `memory_archive/task_workspace/payloads.py` so `task_workspace/__init__.py` stays focused on orchestration and path wiring.
 - Preserved task workspace file shapes, legacy run adapter behavior, and existing focused persistence tests.
 - Continued bundle cleanup in archive query, resume brief, memory gate review, and routing receipts; these changes keep archive/LocalStore records as clues while task/run/gateway files remain the authority.
 ## 2026-05-07 LLM annotation coverage update
@@ -285,7 +286,7 @@
 - artifact reader 会校验路径仍在 `memory_archive/artifacts/tool_outputs/` 下，并校验 artifact content sha256，避免把 artifact ref 变成任意文件读取后门。
 
 ## 2026-05-08 artifact explicit read CI follow-up
-- 补齐 `artifact_reader.py` 私有 helper 的双层用途注释，符合 code-size 脚本对产品代码可维护性的检查要求。
+- 补齐 `memory_archive/artifact/reader.py` 私有 helper 的双层用途注释，符合 code-size 脚本对产品代码可维护性的检查要求。
 - 该修复只补充 reader helper 的边界说明和入口导入排序，不改变 `memory-artifact-read` / `read_artifact` 的 refs-only 读取边界。
 
 ## 2026-05-08 compact/resume safety review follow-up
@@ -306,8 +307,8 @@
 ## 2026-05-11 scoped tool-output artifact refs
 - 中文说明：真实多层子代理 E2E 暴露出 `read_artifact("17-1")` 这类短调用号会撞到旧轮次记录；模型收到的是“短号”，但 memory index 里同名旧记录排在前面，最终就像 prompt/路径被误传。参考 长期助手/通道运行时/会话运行时/模型助手 Code 的共同边界，工具结果引用必须带 session/run/workspace 作用域，不能靠全局短号猜。
 - `tool_output_externalizer` 现在把 `request_id`、`run_id`、`task_id` 和 `scoped_call_id` 写进 archive record、artifact body 和 `index.jsonl`；subagent runner 调用模型时会把当前 `run_id/task_id` 传入 `agent.run()`，工具循环也会在 `read_artifact` 调用缺 scope 时补当前 subagent run scope。
-- `artifact_reader` 现在解析 path/hash/scoped_call_id/call_id 时会优先匹配当前 run/task/request scope；没有显式 scope 时才回退到最新匹配记录，避免旧 run 的 artifact 被当成当前 run 的事实源。
-- `tool_context_reducer` 的 live prompt 提示现在优先展示 artifact path、`output_scoped_call_id` 和 scope flags；模型要读正文时会拿到可复制的 scoped `read_artifact` 参数，而不是只看到全局短号。
+- `memory_archive/artifact/reader.py` 现在解析 path/hash/scoped_call_id/call_id 时会优先匹配当前 run/task/request scope；没有显式 scope 时才回退到最新匹配记录，避免旧 run 的 artifact 被当成当前 run 的事实源。
+- `tool_context/reducer` 的 live prompt 提示现在优先展示 artifact path、`output_scoped_call_id` 和 scope flags；模型要读正文时会拿到可复制的 scoped `read_artifact` 参数，而不是只看到全局短号。
 - 行为边界不变：artifact 正文仍只通过显式 `read_artifact` 读取，仍校验 index、目录边界和 sha256；这次修复只改变“引用怎么定位”，不把大输出重新塞回 prompt，也不开放任意文件读取。
 - 本轮 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_memory_artifact_read.py agent_py_agent/tests/test_tool_output_externalizer.py agent_py_agent/tests/test_failure_introspector.py agent_py_agent/tests/test_tools/test_tool_loop.py` -> `39 passed`。
 

@@ -1,5 +1,3 @@
-# LLM: Tool wrapper for explicit artifact body reads; it must not bypass the memory artifact index.
-# 模块用途: 给模型提供 `read_artifact` 工具，按已登记 artifact ref 读取正文切片。
 from __future__ import annotations
 
 """tool implementation for explicit externalized artifact reads."""
@@ -8,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..memory_archive.artifact_reader import (
+from ..memory_archive.artifact.reader import (
     ReadToolOutputArtifactRequest,
     estimate_tool_output_artifact_size,
     read_tool_output_artifact,
@@ -21,8 +19,6 @@ from .artifact_read_budget import (
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 
-# LLM: ReadArtifactTool exposes controlled body reads for externalized tool-output artifacts.
-# 类用途: 只读取 memory_archive/artifacts/tool_outputs/index.jsonl 已登记 artifact，支持 offset/max_chars 切片。
 class ReadArtifactTool(BaseTool):
     spec = ToolSpec(
         name="read_artifact",
@@ -53,8 +49,6 @@ class ReadArtifactTool(BaseTool):
         ],
     )
 
-    # LLM: ReadArtifactTool.__init__ stores the workspace root used to locate the trusted artifact index.
-    # 函数用途: 保存 workspace root 和 artifact 读取预算；真正的路径边界检查交给 artifact_reader。
     def __init__(
         self,
         root: Path,
@@ -73,8 +67,6 @@ class ReadArtifactTool(BaseTool):
             max_chars=_config_int("tool_artifact_read_budget_max_chars", artifact_read_budget_max_chars),
         )
 
-    # LLM: execute delegates to read_tool_output_artifact and returns JSON so callers can inspect metadata.
-    # 函数用途: 执行显式 artifact 读取；失败时也返回 JSON 错误，不读取任意未登记文件。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         request = _read_request_from_params(self.root, params, default_read_chars=self.default_read_chars)
         budget_error = self.read_budget.preflight(
@@ -91,8 +83,6 @@ class ReadArtifactTool(BaseTool):
         return ToolExecutionResult(self.spec.name, bool(payload.get("ok")), json.dumps(payload, ensure_ascii=False))
 
 
-# LLM: _read_request_from_params keeps tool params converted into the stable memory reader bundle.
-# 函数用途: 把 read_artifact 工具参数转换成 ReadToolOutputArtifactRequest，集中处理默认值和作用域字段。
 def _read_request_from_params(
     root: Path,
     params: dict[str, Any],
@@ -112,8 +102,6 @@ def _read_request_from_params(
     )
 
 
-# LLM: _config_int resolves read_artifact defaults from AgentConfig.
-# 函数用途: 读取 artifact 默认读取长度和预算窗口；调用方显式值优先，非法值回退到配置默认。
 def _config_int(key: str, value: int | None) -> int:
     if value is not None:
         try:
@@ -123,8 +111,6 @@ def _config_int(key: str, value: int | None) -> int:
     return default_config_int(key, minimum=0)
 
 
-# LLM: _budget_requested_chars estimates unbounded reads from the index before loading artifact bodies.
-# 函数用途: max_chars>0 用请求上限计费；max_chars=0 则只读 index 的 size_bytes 做预算预判。
 def _budget_requested_chars(request: ReadToolOutputArtifactRequest) -> int:
     requested = max(0, int(request.max_chars or 0))
     if requested > 0:

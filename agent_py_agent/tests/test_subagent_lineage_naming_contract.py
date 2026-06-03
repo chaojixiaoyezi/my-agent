@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 
 
-# LLM: _create_agent builds the smallest create_subagents facade for name contract tests.
-# 函数用途: 使用真实 SubAgentManager 测试顶层 create_subagents 命名，不依赖模型 prompt。
 def _create_agent(tmp_path):
     from unittest.mock import MagicMock
 
@@ -20,8 +18,6 @@ def _create_agent(tmp_path):
     return agent
 
 
-# LLM: Top-level items should get stable 小傻妞-role/index display names.
-# 函数用途: 顶层批量派工即使模型没传 agent_name，也要落成 小傻妞-worker-1 / 小傻妞-tester-2。
 def test_top_level_items_get_fixed_lineage_names(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -37,8 +33,6 @@ def test_top_level_items_get_fixed_lineage_names(tmp_path):
     assert names == ["小傻妞-worker-1", "小傻妞-tester-2"]
 
 
-# LLM: Count fanout should use one-based stable suffixes instead of duplicating the same display name.
-# 函数用途: count=2 要生成 小傻妞-worker-1 / 小傻妞-worker-2，方便看板和重复 create 幂等。
 def test_count_fanout_gets_fixed_lineage_names(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -53,11 +47,9 @@ def test_count_fanout_gets_fixed_lineage_names(tmp_path):
     assert names == ["小傻妞-worker-1", "小傻妞-worker-2"]
 
 
-# LLM: Child scheduling should advance the lineage prefix and keep sibling indexes.
-# 函数用途: 一层小傻妞创建下一层时，两个 child 应命名为 小小傻妞-worker-1 / 小小傻妞-tester-2。
 def test_scheduled_children_get_next_lineage_prefix_and_index(tmp_path):
     from agent_py_agent.agent.subagents.manager import SubAgentManager
-    from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+    from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
         HierarchyChildSpec,
         HierarchyScheduleRequest,
     )

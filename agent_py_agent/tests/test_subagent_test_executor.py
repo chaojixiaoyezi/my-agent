@@ -132,8 +132,6 @@ def test_test_executor_content_check_matches_literal_pattern(tmp_path):
     assert record.validation_result["matched"] is True
 
 
-# LLM: negative content checks protect repair runs from inverted no-bad-ref assertions.
-# 函数用途: 负向内容检查必须显式写 match_mode=not_contains，不能靠测试名里的自然语言判断。
 def test_test_executor_content_check_supports_explicit_negative_contains(tmp_path):
     (tmp_path / "page.html").write_text("<a href='index1.html'>首页</a>\n", encoding="utf-8")
     executor = TestExecutor(tmp_path)
@@ -152,8 +150,6 @@ def test_test_executor_content_check_supports_explicit_negative_contains(tmp_pat
     assert record.validation_result["expect_absent"] is True
 
 
-# LLM: natural-language test names do not define negative content semantics.
-# 函数用途: 用户或模型把 name 写成“无 xxx”时，执行器仍按默认 contains 处理，避免代码层猜语义。
 def test_test_executor_content_check_does_not_infer_negative_from_name(tmp_path):
     (tmp_path / "page.html").write_text("<a href='index1.html'>首页</a>\n", encoding="utf-8")
     executor = TestExecutor(tmp_path)
@@ -171,8 +167,6 @@ def test_test_executor_content_check_does_not_infer_negative_from_name(tmp_path)
     assert record.validation_result["expect_absent"] is False
 
 
-# LLM: Model-produced negative aliases should not invert no-bad-pattern checks.
-# 函数用途: 子代理常写 `match_mode=not_exists` 表示坏内容不应存在；最终收口必须按 not_contains 处理。
 def test_test_executor_content_check_supports_not_exists_match_mode(tmp_path):
     (tmp_path / "page.html").write_text("<a href='index1.html'>首页</a>\n", encoding="utf-8")
     executor = TestExecutor(tmp_path)
@@ -210,8 +204,6 @@ def test_test_executor_content_check_supports_exact_match(tmp_path):
     assert record.error == "内容不相等"
 
 
-# LLM: artifact_integrity is a native closeout method, not an unknown model checklist item.
-# 函数用途: 确认最终收口能执行通用产物完整性检查，避免真实产物已写出却卡在未知验证方式。
 def test_test_executor_runs_artifact_integrity_check(tmp_path):
     (tmp_path / "index.html").write_text(
         "<!doctype html><html><body><a href='#hero'>首页</a><main id='hero'></main></body></html>",
@@ -233,8 +225,6 @@ def test_test_executor_runs_artifact_integrity_check(tmp_path):
     assert record.validation_result["warning_codes"] == []
 
 
-# LLM: artifact_integrity should fail with structured codes when product HTML is incomplete.
-# 函数用途: 缺闭合标签这类明显坏产物必须被机器验收拦住，不能靠模型总结通过。
 def test_test_executor_artifact_integrity_rejects_incomplete_html(tmp_path):
     (tmp_path / "index.html").write_text("<html><body><main>", encoding="utf-8")
     executor = TestExecutor(tmp_path)

@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 from __future__ import annotations
 
@@ -25,8 +23,6 @@ from ..agent.gateway import (
 from .common import _memory_record_count
 
 
-# LLM: DoctorCheckRequest 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class DoctorCheckRequest:
     name: str
@@ -36,8 +32,6 @@ class DoctorCheckRequest:
     details: dict | None = None
 
 
-# LLM: GatewayQueueCheckContext 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
-# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass(frozen=True)
 class GatewayQueueCheckContext:
     paths: object
@@ -45,8 +39,6 @@ class GatewayQueueCheckContext:
     agent: object
 
 
-# LLM: TaskFactSourceRequest 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class TaskFactSourceRequest:
     agent: SimpleAgent
@@ -56,8 +48,6 @@ class TaskFactSourceRequest:
     source_type: str
 
 
-# LLM: _add_doctor_check 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_doctor_check(checks: list[dict], request: DoctorCheckRequest) -> None:
     checks.append(
         {
@@ -71,8 +61,6 @@ def _add_doctor_check(checks: list[dict], request: DoctorCheckRequest) -> None:
 
 
 
-# LLM: _check_local_store_open 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 判断输入或环境是否满足规则，结果会影响分支、告警或阻断。
 def _check_local_store_open(checks: list[dict], stats: dict) -> None:
     _add_doctor_check(
         checks,
@@ -86,8 +74,6 @@ def _check_local_store_open(checks: list[dict], stats: dict) -> None:
     )
 
 
-# LLM: _check_memory_index 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 判断输入或环境是否满足规则，结果会影响分支、告警或阻断。
 def _check_memory_index(checks: list[dict], suggestions: list[str], memory_count: int, memory_indexed: int) -> None:
     memory_ok = memory_count == memory_indexed
     _add_doctor_check(
@@ -104,8 +90,6 @@ def _check_memory_index(checks: list[dict], suggestions: list[str], memory_count
         suggestions.append("运行 `my-agent local-rebuild --source memory` 补齐记忆索引。")
 
 
-# LLM: _check_content_files 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 判断输入或环境是否满足规则，结果会影响分支、告警或阻断。
 def _check_content_files(checks: list[dict], suggestions: list[str], missing_files: list, limit: int) -> None:
     _add_doctor_check(
         checks,
@@ -121,8 +105,6 @@ def _check_content_files(checks: list[dict], suggestions: list[str], missing_fil
         suggestions.append("运行 `my-agent local-rebuild --reset` 从原始文件事实源重建索引。")
 
 
-# LLM: _check_gateway_queue 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 判断输入或环境是否满足规则，结果会影响分支、告警或阻断。
 def _check_gateway_queue(checks: list[dict], suggestions: list[str], ctx: GatewayQueueCheckContext) -> None:
     stale_processing = gateway_stale_processing(ctx.paths, ctx.agent.config.gateway_processing_timeout_seconds)
     _add_doctor_check(
@@ -139,8 +121,6 @@ def _check_gateway_queue(checks: list[dict], suggestions: list[str], ctx: Gatewa
         suggestions.append("运行 `my-agent gateway restart --force` 或 `my-agent local-doctor --repair` 处理卡住的 processing 请求。")
 
 
-# LLM: _check_work_orders 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 判断输入或环境是否满足规则，结果会影响分支、告警或阻断。
 def _check_work_orders(checks: list[dict], suggestions: list[str], agent, limit: int) -> None:
     invalid_work_orders = _collect_invalid_work_orders(agent, limit)
     _add_doctor_check(
@@ -157,8 +137,6 @@ def _check_work_orders(checks: list[dict], suggestions: list[str], agent, limit:
         suggestions.append("运行 `my-agent subagents-apply-actions --apply --action repair_work_order` 修复缺失工单文件。")
 
 
-# LLM: _collect_invalid_work_orders 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 汇总多个检查来源，并按统一结构返回调用方。
 def _collect_invalid_work_orders(agent, limit: int) -> list[dict]:
     invalid_work_orders = []
     for task in agent.subagents.list_runs():
@@ -171,8 +149,6 @@ def _collect_invalid_work_orders(agent, limit: int) -> list[dict]:
     return invalid_work_orders
 
 
-# LLM: build_local_doctor_report 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def build_local_doctor_report(agent: SimpleAgent, *, limit: int = 20) -> dict:
 
     paths = gateway_paths(agent)
@@ -223,8 +199,6 @@ def build_local_doctor_report(agent: SimpleAgent, *, limit: int = 20) -> dict:
 
 
 
-# LLM: rebuild_subagent_index 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def rebuild_subagent_index(agent: SimpleAgent) -> int:
 
     count = 0
@@ -242,8 +216,6 @@ def rebuild_subagent_index(agent: SimpleAgent) -> int:
     return count
 
 
-# LLM: _log_task_fact_source 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _log_task_fact_source(request: TaskFactSourceRequest) -> int:
     path = request.task_dir / request.rel_path
     if not path.exists():
@@ -261,8 +233,6 @@ def _log_task_fact_source(request: TaskFactSourceRequest) -> int:
     return 1
 
 
-# LLM: rebuild_local_store 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def rebuild_local_store(agent: SimpleAgent, *, sources: set[str], reset: bool = False) -> dict:
 
     if reset:
@@ -288,8 +258,6 @@ def rebuild_local_store(agent: SimpleAgent, *, sources: set[str], reset: bool = 
     return result
 
 
-# LLM: build_status_suggestions 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def build_status_suggestions(agent: SimpleAgent, payload: dict) -> list[str]:
 
     suggestions: list[str] = []

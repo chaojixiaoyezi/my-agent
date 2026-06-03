@@ -135,6 +135,21 @@ def test_get_running_pid_nonexistent(tmp_pid_path):
     assert pid is None
 
 
+def test_get_running_pid_report_bad_json_keeps_pid_file(tmp_pid_path):
+    """坏 PID record 不能被误判成普通未运行并静默删除。"""
+    tmp_pid_path.write_text("{bad pid json", encoding="utf-8")
+
+    report = dc.get_running_pid_report(tmp_pid_path)
+
+    assert report.pid is None
+    assert report.load_error is not None
+    assert report.load_error["context"] == "gateway.pid_record.read"
+    assert report.load_error["path"] == str(tmp_pid_path)
+    assert tmp_pid_path.exists()
+    assert dc.get_running_pid(tmp_pid_path) is None
+    assert tmp_pid_path.exists()
+
+
 @patch.object(dc, "is_pid_alive", return_value=False)
 def test_get_running_pid_invalid_pid_cleanup(mock_alive, tmp_pid_path):
     """测试无效 PID 会清理文件。"""
@@ -179,6 +194,24 @@ def test_acquire_scoped_lock_already_held_by_different_process(mock_lock_dir, tm
         acquired, existing = dc.acquire_scoped_lock("test-scope", "test-identity")
         # 陈旧锁应该被清理，重新获取应该成功
         assert acquired is True
+
+
+@patch.object(dc, "_get_lock_dir")
+def test_acquire_scoped_lock_reports_corrupt_existing_lock(mock_lock_dir, tmp_lock_dir):
+    """坏 scoped lock 文件不能被静默返回成空 existing。"""
+    mock_lock_dir.return_value = tmp_lock_dir
+    lock_path = tmp_lock_dir / f"test-scope-{dc._scope_hash('bad-lock')}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("{bad json", encoding="utf-8")
+
+    with patch("agent_py_agent.agent.gateway_parts.scoped_locks._get_lock_dir", return_value=tmp_lock_dir):
+        acquired, existing = dc.acquire_scoped_lock("test-scope", "bad-lock")
+
+    assert acquired is False
+    assert isinstance(existing, dict)
+    assert existing["lock_load_error"]["context"] == "gateway.scoped_lock.read"
+    assert str(lock_path) == existing["lock_load_error"]["path"]
+    assert lock_path.exists()
 
 
 @patch.object(dc, "_get_lock_dir")

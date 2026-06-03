@@ -14,8 +14,6 @@ from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 
 
-# LLM: test_workflow_plan_mode_persists_plan_only covers dry planning without child creation.
-# 函数用途: workflow_mode=plan 时只给父任务补计划，不创建 worker child。
 def test_workflow_plan_mode_persists_plan_only(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     parent = agent.subagents.create_run(
@@ -42,8 +40,6 @@ def test_workflow_plan_mode_persists_plan_only(tmp_path):
     assert loaded.child_ids == []
 
 
-# LLM: test_workflow_auto_mode_spawns_worker_children covers planned child creation.
-# 函数用途: workflow_mode=auto 时把父任务计划展开成 implementation/tests 等 worker child。
 def test_workflow_auto_mode_spawns_worker_children(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     parent = agent.subagents.create_run(
@@ -75,8 +71,38 @@ def test_workflow_auto_mode_spawns_worker_children(tmp_path):
     assert all(not hasattr(child, "workflow_depends_on") for child in children)
 
 
-# LLM: test_model_dispatch_run_ids_respects_task_workflow_off covers real root-created worker E2E.
-# 函数用途: 模型显式推进某个 workflow=off 的 run 时，不能因为全局 workflow auto 又给它套 implement/verify 子任务。
+def test_workflow_plan_failure_is_model_visible(tmp_path, monkeypatch):
+    from agent_py_agent.agent.subagent_workflows import planner
+
+    def fail_plan(*args, **kwargs):
+        raise RuntimeError("planner exploded")
+
+    monkeypatch.setattr(planner, "plan_workflow_for_goal", fail_plan)
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    parent = agent.subagents.create_run(
+        goal="Fix API bug and add regression tests",
+        thought="等待 workflow 规划。",
+        plan=["等待规划"],
+        attributes={"workflow_task_type": "code_or_bugfix"},
+    )
+
+    report = agent.dispatch_subagents(
+        CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs()),
+        CapabilityConfig(),
+        apply=True,
+        workflow_mode="plan",
+        max_runners=0,
+    )
+    loaded = agent.subagents.load(parent.id)
+    record = next(item for item in report.records if item.step == "workflow")
+
+    assert record.ok is False
+    assert loaded.workflow_plan["ok"] is False
+    assert loaded.workflow_plan["planning_error"]["message"]
+    assert loaded.workflow_child_run_ids == []
+
+
 def test_model_dispatch_run_ids_respects_task_workflow_off(tmp_path):
     config = AgentConfig(model_backend="echo", subagent_workspace="subs")
     config.subagent_workflow_mode = "auto"

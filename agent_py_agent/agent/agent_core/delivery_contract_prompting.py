@@ -1,5 +1,3 @@
-# LLM: Delivery contract prompting renders structured contracts into model-visible execution hints.
-# 模块用途: 把 RunParams.delivery_contract 转成人类可读执行提示；系统事实仍以结构化合同字段为准。
 
 from __future__ import annotations
 
@@ -11,8 +9,6 @@ from .delivery_contract_prompting_recovery import render_recovery_guidance_lines
 DELIVERY_PREFLIGHT_FINDINGS_KEY = "_preflight_findings"
 
 
-# LLM: render_delivery_contract_section keeps delivery instructions derived from JSON fields.
-# 函数用途: 渲染交付合同提示段，帮助模型执行路径/格式/资源约束，不让系统从提示反向取事实。
 def render_delivery_contract_section(contract: dict[str, object]) -> str:
     return "\n".join(
         [
@@ -25,8 +21,6 @@ def render_delivery_contract_section(contract: dict[str, object]) -> str:
     )
 
 
-# LLM: delivery_contract_preflight_findings reports malformed delivery-contract shapes before prompt rendering.
-# 函数用途: 让 CLI/runner 产生机器可读 schema finding，避免 prompt renderer 对坏结构静默降级。
 def delivery_contract_preflight_findings(contract: dict[str, object]) -> list[dict[str, object]]:
     artifacts = contract.get("artifacts")
     if artifacts is not None and not isinstance(artifacts, list):
@@ -40,8 +34,6 @@ def delivery_contract_preflight_findings(contract: dict[str, object]) -> list[di
     return _artifact_preflight_findings(artifacts) if isinstance(artifacts, list) else []
 
 
-# LLM: _artifact_preflight_findings checks artifact object shape item by item.
-# 函数用途: 混入脏 artifact 不会丢掉整段合同，只对具体坏项产出结构化 finding。
 def _artifact_preflight_findings(artifacts: list[object]) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
     for index, item in enumerate(artifacts):
@@ -49,8 +41,6 @@ def _artifact_preflight_findings(artifacts: list[object]) -> list[dict[str, obje
     return findings
 
 
-# LLM: _one_artifact_preflight_findings validates one artifact entry.
-# 函数用途: 只读 artifacts[index] 的结构字段，输出无效对象或目标路径缺失 finding。
 def _one_artifact_preflight_findings(index: int, item: object) -> list[dict[str, object]]:
     location = f"artifacts[{index}]"
     if not isinstance(item, dict):
@@ -72,8 +62,6 @@ def _one_artifact_preflight_findings(index: int, item: object) -> list[dict[str,
     ]
 
 
-# LLM: _preflight_finding keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _preflight_finding(code: str, location: str, message: str) -> dict[str, object]:
     return {
         "code": code,
@@ -86,8 +74,6 @@ def _preflight_finding(code: str, location: str, message: str) -> dict[str, obje
 from .delivery_contract_prompting_bootstrap import _bootstrap_guidance_lines
 
 
-# LLM: _artifact_guidance_lines turns artifact machine fields into concise model guidance.
-# 函数用途: 根据 artifacts.validation_contract 生成执行提示，避免模型忽略单文件和完整文档要求。
 def _artifact_guidance_lines(contract: dict[str, object]) -> list[str]:
     artifacts = _artifact_items(contract)
     if not artifacts:
@@ -106,8 +92,6 @@ def _artifact_guidance_lines(contract: dict[str, object]) -> list[str]:
     return lines
 
 
-# LLM: _bootstrap_targets formats materialization targets for model-visible startup hints.
-# 函数用途: 把 bootstrap_contract.materialization_targets 里的结构化路径压缩成简短提示行。
 def _bootstrap_targets(items: object) -> list[str]:
     if not isinstance(items, list):
         return []
@@ -122,16 +106,12 @@ def _bootstrap_targets(items: object) -> list[str]:
     return lines
 
 
-# LLM: _bootstrap_actions normalizes startup action objects from the generic delivery contract.
-# 函数用途: 读取 bootstrap_contract.startup_actions，过滤非对象项。
 def _bootstrap_actions(items: object) -> list[dict[str, object]]:
     if not isinstance(items, list):
         return []
     return [dict(item) for item in items if isinstance(item, dict)]
 
 
-# LLM: _startup_action_lines keeps startup guidance generic and based on structured action codes only.
-# 函数用途: 渲染 materialize_target / invoke_builder_tool 等开工动作，不靠任务文案推断。
 def _startup_action_lines(actions: list[dict[str, object]]) -> list[str]:
     lines: list[str] = []
     for action in sorted(actions, key=lambda item: int(item.get("priority", 0))):
@@ -139,8 +119,6 @@ def _startup_action_lines(actions: list[dict[str, object]]) -> list[str]:
     return lines
 
 
-# LLM: _startup_action_line_group routes one structured startup action to its rendering helper.
-# 函数用途: 按 action code 分发 materialize_target/checkpoint/builder 行文，保持启动提示仍只读结构化合同。
 def _startup_action_line_group(action: dict[str, object]) -> list[str]:
     code = str(action.get("action") or "").strip()
     if code == "materialize_target":
@@ -152,8 +130,6 @@ def _startup_action_line_group(action: dict[str, object]) -> list[str]:
     return []
 
 
-# LLM: _materialize_checkpoint_lines explains how to start a staged checkpoint from structured refs only.
-# 函数用途: 渲染“先写 checkpoint 再继续整理”的通用提示，不依赖任务名称或自然语言模板。
 def _materialize_checkpoint_lines(action: dict[str, object]) -> list[str]:
     checkpoint_ref = str(action.get("checkpoint_ref") or "").strip()
     if not checkpoint_ref:
@@ -176,8 +152,6 @@ def _materialize_checkpoint_lines(action: dict[str, object]) -> list[str]:
     ]
 
 
-# LLM: _builder_startup_lines turns a structured builder action into the next-step call hint.
-# 函数用途: 当 staged contract 指明 builder_tool/source/output 时，提示模型优先切到构建步骤而不是继续空转。
 def _builder_startup_lines(action: dict[str, object]) -> list[str]:
     builder = str(action.get("builder_tool") or "").strip()
     if not builder:
@@ -189,8 +163,6 @@ def _builder_startup_lines(action: dict[str, object]) -> list[str]:
     return ["- 阶段数据就绪后，用通用写入/命令工具生成后续产物，不要依赖固定 builder 工具。"]
 
 
-# LLM: _one_artifact_lines summarizes one artifact contract without changing validation behavior.
-# 函数用途: 输出单个产物的路径、类型和关键质量要求，供模型更稳地生成可验收文件。
 def _one_artifact_lines(artifact: dict[str, object]) -> list[str]:
     contract = artifact.get("validation_contract") if isinstance(artifact.get("validation_contract"), dict) else {}
     requirements = contract.get("quality_requirements") if isinstance(contract.get("quality_requirements"), dict) else {}
@@ -213,14 +185,10 @@ def _one_artifact_lines(artifact: dict[str, object]) -> list[str]:
     return lines
 
 
-# LLM: _artifact_target_path keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _artifact_target_path(artifact: dict[str, object]) -> str:
     return str(artifact.get("preferred_path") or artifact.get("path") or "").strip()
 
 
-# LLM: _staging_lines renders structured checkpoint refs for long-running deliverables.
-# 函数用途: 把 validation_contract.staging_contract 展示给模型，帮助按数据/脚本/最终产物分段执行。
 def _staging_lines(contract: dict[str, object]) -> list[str]:
     staging = contract.get("staging_contract")
     if not isinstance(staging, dict):
@@ -242,8 +210,6 @@ def _staging_lines(contract: dict[str, object]) -> list[str]:
     return lines
 
 
-# LLM: _builder_source_param maps builder tools to their structured source parameter names.
-# 函数用途: 渲染工具调用提示时使用工具 schema 参数名，而不是固定 source_json_path。
 def _builder_source_param(staging: dict[str, object], builder_tool: str) -> str:
     for key in ("source_param", "source_param_name", "input_param"):
         value = str(staging.get(key) or "").strip()
@@ -252,8 +218,6 @@ def _builder_source_param(staging: dict[str, object], builder_tool: str) -> str:
     return "source_ref"
 
 
-# LLM: _staging_source_ref reads all supported staged source aliases.
-# 函数用途: 同时支持 JSON、Markdown 和未来通用 source_ref。
 def _staging_source_ref(staging: dict[str, object]) -> str:
     keys = [
         str(staging.get("source_ref_key") or "").strip(),
@@ -271,8 +235,6 @@ def _staging_source_ref(staging: dict[str, object]) -> str:
     return ""
 
 
-# LLM: _staging_output_ref reads all supported staged output aliases.
-# 函数用途: 同时支持 workbook、PDF 和未来通用 output_ref。
 def _staging_output_ref(staging: dict[str, object]) -> str:
     keys = [
         str(staging.get("output_ref_key") or "").strip(),
@@ -289,8 +251,6 @@ def _staging_output_ref(staging: dict[str, object]) -> str:
     return ""
 
 
-# LLM: _artifact_items normalizes contract artifacts without reading prompt text.
-# 函数用途: 从结构化合同读取 artifact 列表；非对象条目会被忽略。
 def _artifact_items(contract: dict[str, object]) -> list[dict[str, object]]:
     items = contract.get("artifacts")
     return [dict(item) for item in items if isinstance(item, dict)] if isinstance(items, list) else []

@@ -6,8 +6,6 @@ import argparse
 import json
 
 
-# LLM: real-e2e should materialize a refs-first report without needing model calls in CI.
-# 函数用途: 验证 CLI 能运行主代理基础测试矩阵、写报告文件，并在 JSON 模式输出机器可读摘要。
 def test_cmd_real_e2e_writes_report_and_json_output(tmp_path, capsys):
     from agent_py_agent.cli.real_e2e_commands import cmd_real_e2e
 
@@ -31,8 +29,6 @@ def test_cmd_real_e2e_writes_report_and_json_output(tmp_path, capsys):
     assert printed["foundation"]["summary"]["failed"] == 0
 
 
-# LLM: real-e2e should optionally validate produced artifacts through the same acceptance contract.
-# 函数用途: 验证用户可以把真实模型生成的文件交给 real-e2e 命令做统一产物验收。
 def test_cmd_real_e2e_includes_artifact_acceptance_findings(tmp_path, capsys):
     from agent_py_agent.cli.real_e2e_commands import cmd_real_e2e
 

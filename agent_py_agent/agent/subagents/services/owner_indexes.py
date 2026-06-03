@@ -1,5 +1,3 @@
-# LLM: Owner index projections are refs-only; never duplicate subagent task truth here.
-# 模块用途: 子代理保存时登记 owner 级 task/run/agent 轻量索引，供 tree、doctor 和恢复发现入口。
 
 from __future__ import annotations
 
@@ -17,8 +15,6 @@ from ..models import SubAgentTask
 
 
 def register_owner_runtime_indexes(manager: Any, task: SubAgentTask) -> None:
-    # LLM: index rows are discovery refs; detailed state remains in task/run workspaces.
-    # 函数用途: 保存子代理时登记 task/run/agent 三层引用，避免父代理和 doctor 只看单一 agent 索引。
     home_paths = getattr(manager, "home_paths", None)
     if home_paths is None:
         return

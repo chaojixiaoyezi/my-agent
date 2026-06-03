@@ -4,8 +4,9 @@ import json
 from pathlib import Path
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.services.recovery_orchestrator import (
+from agent_py_agent.agent.subagents.services.recovery.orchestrator import (
     RecoveryOrchestrationRequest,
+    SubAgentRecoveryOrchestrator,
 )
 
 
@@ -26,11 +27,16 @@ def test_recovery_orchestrator_records_dispatch_step_for_continue_packet(tmp_pat
     step = report.steps[0]
     assert step.run_id == task.id
     assert step.orchestration_action == "dispatch_original_run"
+    assert step.next_actor == "dispatcher"
+    assert step.strategy_snapshot["packet_status"] == "ready"
     assert step.suggested_tool_call["tool"] == "dispatch_subagents"
     assert step.suggested_tool_call["run_ids"] == [task.id]
     ledger = _ledger_rows(tmp_path)
     assert ledger[-1]["schema_version"] == "subagent_recovery_orchestration.v1"
+    assert ledger[-1]["step_index"] == 1
     assert ledger[-1]["orchestration_action"] == "dispatch_original_run"
+    assert ledger[-1]["next_actor"] == "dispatcher"
+    assert ledger[-1]["strategy_snapshot"]["uses_continue_packet"] is True
     assert ledger[-1]["dry_run"] is True
 
 
@@ -49,6 +55,7 @@ def test_recovery_orchestrator_can_apply_idempotent_takeover_run(tmp_path: Path)
     step = report.steps[0]
     assert report.dry_run is False
     assert step.orchestration_action == "create_takeover_run"
+    assert step.next_actor == "orchestrator"
     assert step.applied is True
     assert step.ok is True
     takeover_id = str(step.result_refs[0])
@@ -57,6 +64,25 @@ def test_recovery_orchestrator_can_apply_idempotent_takeover_run(tmp_path: Path)
     ledger = _ledger_rows(tmp_path)
     assert ledger[-1]["run_id"] == task.id
     assert ledger[-1]["applied"] is True
+
+
+def test_recovery_orchestrator_reports_recoverable_scan_load_error(tmp_path: Path) -> None:
+    class BrokenManager:
+        workspace = tmp_path
+
+        def list_runs(self):
+            raise ValueError("bad subagent ledger")
+
+    report = SubAgentRecoveryOrchestrator(BrokenManager()).orchestrate(
+        RecoveryOrchestrationRequest(requested_by="parent-test")
+    )
+
+    assert report.steps == []
+    assert report.load_errors
+    assert report.load_errors[0]["context"] == "subagent_recovery_orchestration.list_recoverable_runs"
+    assert report.load_errors[0]["error"]["category"]
+    payload = report.to_dict()
+    assert payload["load_errors"][0]["error"]["message"]
 
 
 def _write_continue_packet(task) -> Path:

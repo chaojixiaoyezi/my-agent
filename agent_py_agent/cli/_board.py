@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 
 from __future__ import annotations
@@ -7,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, is_dataclass
 
-from ..agent.agent_core.subagent_params import SpawnSubagentsParams
+from ..agent.agent_core.subagent import SpawnSubagentsParams
 from ..agent.subagent import filter_board_items
 from ..agent.subagents.models import SubAgentBoardOptions
 from .common import make_agent
@@ -18,24 +16,18 @@ from .shared_progress import (
 )
 
 
-# LLM: _print_takeover_view keeps board takeover guidance visible and refs-only.
-# 函数用途: 在 subagents 看板里展示可接管 run 的 packet/read_order，不读取 artifact 正文。
 def _print_takeover_view(panels: list[dict]) -> None:
     print("Takeover View")
     for line in format_takeover_view_lines(panels):
         print(line)
 
 
-# LLM: _task_jsonable 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _task_jsonable(task):
     if is_dataclass(task):
         return asdict(task)
     return getattr(task, "__dict__", {"value": str(task)})
 
 
-# LLM: cmd_spawn 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_spawn(args) -> int:
 
     agent = make_agent(args)
@@ -52,8 +44,6 @@ def cmd_spawn(args) -> int:
     return 0
 
 
-# LLM: cmd_subagents 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents(args) -> int:
 
     agent = make_agent(args)
@@ -90,16 +80,12 @@ def cmd_subagents(args) -> int:
     return 0
 
 
-# LLM: _print_shared_progress keeps board output refs-only and compact.
-# 函数用途: 在子代理看板里展示共享进度面板摘要和 failure handoff 计数。
 def _print_shared_progress(panels: list[dict]) -> None:
     print("Shared Progress")
     for line in format_shared_progress_lines(panels):
         print(line)
 
 
-# LLM: _subagent_config_int resolves optional subagent CLI defaults from AgentConfig.
-# 函数用途: 子代理 CLI 没有显式传数量/条数时，统一读取 agent_config.yaml。
 def _subagent_config_int(agent, args, arg_name: str, config_name: str) -> int:
     value = getattr(args, arg_name, None)
     if value is not None:
@@ -107,8 +93,6 @@ def _subagent_config_int(agent, args, arg_name: str, config_name: str) -> int:
     return int(getattr(agent.config, config_name, 0) or 0)
 
 
-# LLM: cmd_subagent_detail 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagent_detail(args) -> int:
 
     agent = make_agent(args)

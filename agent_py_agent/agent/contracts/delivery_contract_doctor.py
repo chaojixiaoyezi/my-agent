@@ -1,5 +1,3 @@
-# LLM: Delivery contract doctor validates machine contracts before runtime gates consume them.
-# 模块用途: 对 delivery_contract / recovery_action 做轻量 schema 校验，输出结构化 findings 和返工动作。
 
 from __future__ import annotations
 
@@ -8,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .delivery_contract_fields import string_items
+from .recovery_actions import RecoveryAction
 
 SCHEMA_VERSION = "delivery_contract.v1"
 DOCTOR_SCHEMA_VERSION = "delivery_contract_doctor.v1"
@@ -27,8 +26,6 @@ _EXTENSION_KEYS = (
 )
 
 
-# LLM: ContractFinding is the stable machine finding shape for contract doctor checks.
-# 类用途: 保存合同校验 code/severity/location/value，供 closeout、测试套件和返工循环消费。
 @dataclass(frozen=True)
 class ContractFinding:
     code: str
@@ -37,8 +34,6 @@ class ContractFinding:
     message: str
     value: str = ""
 
-    # LLM: to_dict serializes one finding without exposing dataclass internals.
-    # 函数用途: 把合同 finding 转成 JSON 友好的 dict。
     def to_dict(self) -> dict[str, str]:
         return {
             "code": self.code,
@@ -49,8 +44,6 @@ class ContractFinding:
         }
 
 
-# LLM: ContractDoctorReport is the reusable report shape for schema and doctor gates.
-# 类用途: 汇总合同是否可运行、校验 findings、规范化合同和建议返工动作。
 @dataclass(frozen=True)
 class ContractDoctorReport:
     ok: bool
@@ -59,8 +52,6 @@ class ContractDoctorReport:
     repair_actions: list[dict[str, object]] = field(default_factory=list)
     should_rematerialize: bool = False
 
-    # LLM: to_dict keeps doctor reports stable for prompt injection and JSON snapshots.
-    # 函数用途: 输出结构化 doctor 报告，不依赖自然语言错误文本。
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_version": DOCTOR_SCHEMA_VERSION,
@@ -72,8 +63,6 @@ class ContractDoctorReport:
         }
 
 
-# LLM: validate_delivery_contract checks the delivery contract itself, not the artifact contents.
-# 函数用途: 在运行/验收前校验合同结构、路径边界和基础字段类型。
 def validate_delivery_contract(payload: object, *, workspace_root: Path | None = None) -> ContractDoctorReport:
     if not isinstance(payload, dict):
         findings = [_finding("DELIVERY_CONTRACT_NOT_OBJECT", "hard", "$", value=type(payload).__name__)]
@@ -109,8 +98,6 @@ def validate_delivery_contract(payload: object, *, workspace_root: Path | None =
     return _report(normalized, findings)
 
 
-# LLM: _allows_no_artifact_delivery keeps answer-only tasks from requiring files.
-# 函数用途: 识别显式声明“不需要落盘产物”的交付合同，避免普通问答被 artifacts 硬卡。
 def _allows_no_artifact_delivery(payload: dict[str, Any]) -> bool:
     for key in ("requires_artifact", "artifact_required", "requires_disk_artifact", "disk_artifact_required"):
         if payload.get(key) is False:
@@ -119,8 +106,6 @@ def _allows_no_artifact_delivery(payload: dict[str, Any]) -> bool:
     return mode in {"message", "answer", "summary", "no_artifact", "no-artifact", "none"}
 
 
-# LLM: validate_recovery_action checks repair actions before they re-enter the tool loop.
-# 函数用途: 校验恢复动作必须包含 code 和 recommended_action 等机器字段。
 def validate_recovery_action(payload: object) -> ContractDoctorReport:
     if not isinstance(payload, dict):
         return _report({}, [_finding("RECOVERY_ACTION_NOT_OBJECT", "hard", "$", value=type(payload).__name__)])
@@ -131,21 +116,17 @@ def validate_recovery_action(payload: object) -> ContractDoctorReport:
         findings.append(_finding("RECOVERY_ACTION_RECOMMENDED_ACTION_REQUIRED", "hard", "recommended_action"))
     if "retryable" in payload and not isinstance(payload.get("retryable"), bool):
         findings.append(_finding("RECOVERY_ACTION_RETRYABLE_NOT_BOOL", "hard", "retryable", value=type(payload.get("retryable")).__name__))
-    if "repair_targets" in payload and not _string_list(payload.get("repair_targets")):
+    if "repair_targets" in payload and not _is_nonempty_string_list(payload.get("repair_targets")):
         findings.append(_finding("RECOVERY_ACTION_REPAIR_TARGETS_INVALID", "hard", "repair_targets"))
     return _report(dict(payload), findings)
 
 
-# LLM: _check_schema_version observes version drift without breaking old readable contracts.
-# 函数用途: schema_version 不匹配时给 warning，仍允许后续字段校验继续运行。
 def _check_schema_version(payload: dict[str, Any], findings: list[ContractFinding]) -> None:
     version = str(payload.get("schema_version") or SCHEMA_VERSION).strip()
     if version and version != SCHEMA_VERSION:
         findings.append(_finding("DELIVERY_CONTRACT_SCHEMA_VERSION_MISMATCH", "warning", "schema_version", value=version))
 
 
-# LLM: _validate_artifact_contract checks one artifact's locator and validation fields.
-# 函数用途: 校验 artifact 结构、开放世界定位字段和路径边界。
 def _validate_artifact_contract(
     artifact: object,
     index: int,
@@ -174,8 +155,6 @@ def _validate_artifact_contract(
     return normalized, findings
 
 
-# LLM: _validate_validation_contract checks generic artifact validation options.
-# 函数用途: 对 validation_contract 做轻量类型校验，避免字段明显写错才到验收阶段报错。
 def _validate_validation_contract(value: object, artifact_location: str) -> tuple[dict[str, Any] | None, list[ContractFinding]]:
     if value is None:
         return None, []
@@ -202,18 +181,14 @@ def _validate_validation_contract(value: object, artifact_location: str) -> tupl
     return normalized, findings
 
 
-# LLM: _validate_root_lists keeps locator roots structured and bounded.
-# 函数用途: 校验 allowed/search/artifact roots 必须是非空字符串列表。
 def _validate_root_lists(artifact: dict[str, Any], location: str) -> list[ContractFinding]:
     findings: list[ContractFinding] = []
     for key in _ROOT_LIST_KEYS:
-        if key in artifact and not _string_list(artifact.get(key)):
+        if key in artifact and not _is_nonempty_string_list(artifact.get(key)):
             findings.append(_finding("DELIVERY_CONTRACT_ROOTS_INVALID", "hard", f"{location}.{key}"))
     return findings
 
 
-# LLM: _validate_extension_fields validates explicit open-world artifact suffix hints.
-# 函数用途: 检查 artifact 上声明的扩展名字段形状，允许未知格式靠合同显式说明。
 def _validate_extension_fields(artifact: dict[str, Any], location: str) -> list[ContractFinding]:
     findings: list[ContractFinding] = []
     for key in _EXTENSION_KEYS:
@@ -222,8 +197,6 @@ def _validate_extension_fields(artifact: dict[str, Any], location: str) -> list[
     return findings
 
 
-# LLM: _validate_artifact_intent checks optional format intent without closed enums.
-# 函数用途: 校验 artifact_intent 里的格式意图字段，供开放世界产物定位使用。
 def _validate_artifact_intent(value: object, location: str) -> list[ContractFinding]:
     if value is None:
         return []
@@ -236,16 +209,12 @@ def _validate_artifact_intent(value: object, location: str) -> list[ContractFind
     return findings
 
 
-# LLM: _validate_optional_dict checks optional top-level contract maps.
-# 函数用途: delivery_quality_contract/bootstrap_contract 如果存在必须是对象。
 def _validate_optional_dict(payload: dict[str, Any], key: str) -> list[ContractFinding]:
     if key not in payload or isinstance(payload.get(key), dict):
         return []
     return [_finding("DELIVERY_CONTRACT_OPTIONAL_MAP_INVALID", "hard", key, value=type(payload.get(key)).__name__)]
 
 
-# LLM: _path_findings bounds explicit artifact paths to the workspace when available.
-# 函数用途: 检查 path/preferred_path 不能越过当前工作区。
 def _path_findings(artifact: dict[str, Any], workspace_root: Path | None, location: str) -> list[ContractFinding]:
     if workspace_root is None:
         return []
@@ -264,8 +233,6 @@ def _path_findings(artifact: dict[str, Any], workspace_root: Path | None, locati
     return findings
 
 
-# LLM: _report derives ok and rematerialization hints from machine findings.
-# 函数用途: 生成 doctor 报告和统一返工动作。
 def _report(normalized: dict[str, Any], findings: list[ContractFinding]) -> ContractDoctorReport:
     hard_findings = [finding for finding in findings if finding.severity == "hard"]
     should_rematerialize = bool(hard_findings)
@@ -279,26 +246,20 @@ def _report(normalized: dict[str, Any], findings: list[ContractFinding]) -> Cont
     )
 
 
-# LLM: _rematerialize_action is the generic repair action for malformed delivery contracts.
-# 函数用途: 告诉上层重新生成结构化合同，而不是让模型靠自然语言猜坏字段。
 def _rematerialize_action(findings: list[ContractFinding]) -> dict[str, object]:
     return {
         "code": "DELIVERY_CONTRACT_REMATERIALIZATION_REQUIRED",
         "category": "contract",
         "retryable": True,
-        "recommended_action": "rematerialize_delivery_contract",
+        "recommended_action": RecoveryAction.REPAIR_EFFECTIVE_CONTRACT.value,
         "finding_codes": [finding.code for finding in findings],
     }
 
 
-# LLM: _has_explicit_path distinguishes locator-backed artifacts from direct paths.
-# 函数用途: 判断 artifact 是否声明了 path/preferred_path，开放世界 kind 可作为另一种合法定位方式。
 def _has_explicit_path(artifact: dict[str, Any]) -> bool:
     return any(str(artifact.get(key) or "").strip() for key in _ARTIFACT_PATH_KEYS)
 
 
-# LLM: _has_extension_intent detects explicit suffix hints on artifact contracts.
-# 函数用途: 判断 artifact 或 artifact_intent 是否声明了扩展名，避免只按 kind 白名单找文件。
 def _has_extension_intent(artifact: dict[str, Any]) -> bool:
     if any(_extension_value(artifact.get(key)) for key in _EXTENSION_KEYS if key in artifact):
         return True
@@ -306,28 +267,20 @@ def _has_extension_intent(artifact: dict[str, Any]) -> bool:
     return isinstance(intent, dict) and any(_extension_value(intent.get(key)) for key in _EXTENSION_KEYS if key in intent)
 
 
-# LLM: _string_list validates schema fields without a closed enum of allowed values.
-# 函数用途: 检查列表中的每个值都是非空字符串，供 roots/sections/extensions 等字段复用。
-def _string_list(value: object) -> bool:
+def _is_nonempty_string_list(value: object) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value)
 
 
-# LLM: _extension_value accepts explicit single or multiple artifact extensions.
-# 函数用途: 支持未知文件类型由合同显式声明扩展名，避免格式映射表成为封闭硬门。
 def _extension_value(value: object) -> bool:
     if isinstance(value, str):
         return bool(value.strip())
-    return _string_list(value)
+    return _is_nonempty_string_list(value)
 
 
-# LLM: _non_negative_int validates numeric thresholds used by artifact validators.
-# 函数用途: 检查 min_size 等阈值是非负整数，避免坏合同到运行期才爆错。
 def _non_negative_int(value: object) -> bool:
     return isinstance(value, int) and value >= 0
 
 
-# LLM: _finding creates one stable delivery-contract doctor finding.
-# 函数用途: 统一 finding 的 code/severity/location/message/value 结构，供报告和返工动作消费。
 def _finding(code: str, severity: str, location: str, *, value: str = "") -> ContractFinding:
     return ContractFinding(
         code=code,

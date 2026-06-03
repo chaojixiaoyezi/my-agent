@@ -137,8 +137,6 @@ def test_fake_llm_dry_run_result_cannot_satisfy_real_execution_contract(tmp_path
     assert "FINAL_STATUS_REJECTED" in result.contract_result.error_codes
 
 
-# LLM: complex collection tasks need machine coverage checks even in fake-model regression packs.
-# 函数用途: 验证假模型只写很少分组就声称完成时，离线合同测试也能暴露覆盖范围不足。
 def test_fake_llm_short_collection_coverage_is_rejected(tmp_path: Path):
     from agent_py_agent.tests.support.fake_llm_runner import FakeLLMRunner
 

@@ -10,7 +10,7 @@ class TestDispatchSubagentsToolExecute:
     """测试 DispatchSubagentsTool.execute() 方法。"""
 
     def test_legacy_execution_params_are_rejected(self):
-        """模型入口不再接受旧 apply/execute_runners 执行开关。"""
+        """模型入口不再接受旧 apply/start_runners/execute_runners 执行开关。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_agent = MagicMock()
@@ -18,14 +18,14 @@ class TestDispatchSubagentsToolExecute:
         mock_agent.tools.specs.return_value = []
 
         tool = DispatchSubagentsTool(mock_agent)
-        result = tool.execute({"execute_runners": True, "apply": False})
+        result = tool.execute({"start_runners": True, "execute_runners": True, "apply": False})
 
         assert result.ok is False
         assert "只接受 dry_run" in result.output
 
     def test_dispatch_dry_run_true_previews(self):
         """dry_run=true 时执行预览。"""
-        from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_report = MagicMock()
@@ -89,7 +89,7 @@ class TestDispatchSubagentsToolExecute:
 
         assert result.ok is True
 
-    def test_top_level_execute_runners_dispatches_plain_runner(self):
+    def test_top_level_start_runners_dispatches_plain_runner(self):
         """顶层真实跑 runner 时，只推进 runner，并返回普通调度结果。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
@@ -110,7 +110,7 @@ class TestDispatchSubagentsToolExecute:
 
         assert result.ok is True
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
-        assert call_kwargs["params"].execute_runners is True
+        assert call_kwargs["params"].start_runners is True
 
     def test_dispatch_exact_run_ids_are_passed_to_params(self):
         """run_ids 让父 runner 精确指定本轮孩子执行顺序。"""
@@ -163,7 +163,7 @@ class TestDispatchSubagentsToolExecute:
 
     def test_dispatch_scope_memory_ignores_non_runner_report_records(self):
         """当前轮作用域只记本轮显式/runner run_id，不把旧验收记录写进最终收口范围。"""
-        from agent_py_agent.agent.agent_core.orchestration_dispatch_tool_helpers import (
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.tool_helpers import (
             _run_ids_for_scope,
         )
 
@@ -180,7 +180,7 @@ class TestDispatchSubagentsToolExecute:
 
     def test_runner_timeout_off_removes_default_runtime_thresholds(self):
         """runner 不限时时不再保留隐藏心跳/运行超时墙。"""
-        from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import (
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (
             _dispatch_capability_config,
         )
 
@@ -375,7 +375,7 @@ class TestDispatchSubagentsToolRunnerContext:
         assert result.ok is True
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
         assert call_kwargs["params"].apply is True
-        assert call_kwargs["params"].execute_runners is True
+        assert call_kwargs["params"].start_runners is True
         assert call_kwargs["params"].max_runners == 6
         assert call_kwargs["params"].parent_run_id == "subagent-root"
         assert call_kwargs["params"].exclude_run_ids == ["subagent-root"]

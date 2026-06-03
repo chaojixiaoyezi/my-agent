@@ -10,7 +10,7 @@ from pathlib import Path
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
-from agent_py_agent.agent.agent_core.tool_round_execution import ToolCallExecuteParams
+from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallExecuteParams
 from agent_py_agent.agent.backend import ModelResponse
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
@@ -32,15 +32,11 @@ from .backends import (
 )
 
 
-# LLM: _OneShotHarnessAgent gives ToolLoopService only the attributes needed for private one-shot tests.
-# 函数用途: 避免为一次性调度去重单测启动完整 SimpleAgent，同时保持工具执行路径真实。
 class _OneShotHarnessAgent:
     def __init__(self, tools):
         self.tools = tools
 
 
-# LLM: _BlockedScheduleTools simulates a semantic schedule block with a successful tool envelope.
-# 函数用途: 返回 ok=True 但 JSON 里 blocked=true 的真实 schedule_child_subagents 输出形状。
 class _BlockedScheduleTools:
     def __init__(self):
         self.calls = 0
@@ -54,8 +50,6 @@ class _BlockedScheduleTools:
         )
 
 
-# LLM: _UnlimitedRoundsBackend proves max_tool_rounds=0 disables only the round cap, not normal tool execution.
-# 类用途: 测试专用后端；前两轮都请求读取文件，第三轮自行收口，用来验证 0 表示不限制。
 class _UnlimitedRoundsBackend:
     name = "fake_unlimited_rounds_backend"
 
@@ -81,16 +75,15 @@ class _RepeatedMissingReadBackend:
         if self.calls <= 4:
             if self.calls == 4:
                 assert "tool-loop-guardrail-hint" in prompt
-                assert "换关键词、换参数、换工具或换数据来源" in prompt
             return ModelResponse(
                 text='[TOOL_CALL]\n{"tool":"read_file","path":"missing.txt"}\n[/TOOL_CALL]',
                 backend=self.name,
             )
-        raise AssertionError("guardrail should stop before another model turn")
+        assert "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED" in prompt
+        assert "这一次相同工具调用未执行" in prompt
+        return ModelResponse(text="已看到提示，改用其他路径继续推进。", backend=self.name)
 
 
-# LLM: _EmptyAfterToolBackend reproduces provider empty final text after a successful tool call.
-# 类用途: 第一次请求工具，第二次模拟 MiniMax/Anthropic-compatible 空流式响应，验证工具结果不被异常吞掉。
 class _EmptyAfterToolBackend:
     name = "fake_empty_after_tool_backend"
 
@@ -107,8 +100,6 @@ class _EmptyAfterToolBackend:
         raise RuntimeError("Anthropic-compatible 流式响应没有文本内容")
 
 
-# LLM: _EmptyThenFinalAfterToolBackend verifies blank provider text is recoverable without losing tool facts.
-# 类用途: 第一次请求工具、第二次空响应、第三次根据恢复上下文正常继续收口。
 class _EmptyThenFinalAfterToolBackend:
     name = "fake_empty_then_final_after_tool_backend"
 
@@ -129,8 +120,6 @@ class _EmptyThenFinalAfterToolBackend:
         return ModelResponse(text="已根据工具结果继续完成。", backend=self.name)
 
 
-# LLM: _LongWritePromptWindowBackend reproduces a productive runner whose live tool transcript grows every round.
-# 类用途: 测试专用后端；连续重写同一个产物，确认系统会压缩旧工具上下文而不是让 prompt 无限变大。
 class _LongAppendPromptWindowBackend:
     name = "fake_long_append_prompt_window_backend"
 
@@ -175,8 +164,6 @@ def test_tool_loop_and_prompt_transcript():
         assert "hello tool world" in result.prompt
 
 
-# LLM: provider empty final response after tools should not crash the whole run.
-# 函数用途: 覆盖真实 E2E 中工具都跑完、最终总结模型空响应导致 CLI 异常退出的问题。
 def test_tool_loop_falls_back_when_final_model_response_is_empty_after_tool():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -192,8 +179,6 @@ def test_tool_loop_falls_back_when_final_model_response_is_empty_after_tool():
         assert agent.backend.calls == 3
 
 
-# LLM: provider blank text after tools should get one continuation attempt before deterministic fallback.
-# 函数用途: 覆盖真实 MiniMax 空文本后继续生成的恢复路径，避免读完材料就直接退出。
 def test_tool_loop_retries_once_when_final_model_response_is_empty_after_tool():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -209,8 +194,6 @@ def test_tool_loop_retries_once_when_final_model_response_is_empty_after_tool():
         assert agent.backend.calls == 3
 
 
-# LLM: max_tool_rounds=0 should mean unlimited, while the model can still stop itself.
-# 函数用途: 验证主代理单次请求的工具轮数上限为 0 时不会立刻触发限制提示。
 def test_max_tool_rounds_zero_allows_multiple_tool_rounds():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -227,8 +210,6 @@ def test_max_tool_rounds_zero_allows_multiple_tool_rounds():
         assert "已达到最大工具轮数限制" not in result.prompt
 
 
-# LLM: complete tool JSON should execute even when the closing marker is missing.
-# 函数用途: 覆盖真实 runner 漏写 [/TOOL_CALL] 但 write_file JSON 完整时，不应白跑 parse recovery。
 def test_tool_loop_executes_complete_unclosed_write_file_tool_call():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -246,8 +227,6 @@ def test_tool_loop_executes_complete_unclosed_write_file_tool_call():
         )
 
 
-# LLM: per-agent budget should block repeated tool calls only for the active run id.
-# 函数用途: 验证工具循环里同一 run_id 超过预算后，返回自检提示并停止继续执行工具。
 def test_tool_loop_enforces_per_agent_tool_budget_for_run_id():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -285,14 +264,12 @@ def test_tool_loop_blocks_repeated_identical_tool_failures_before_reexecuting():
             task_attributes={"repeat_fail_threshold": 1, "terminal_block_enabled": True},
         )
 
-        assert "TOOL_GUARD_TERMINAL_BLOCKED" in result.response
+        assert result.response == "已看到提示，改用其他路径继续推进。"
         assert result.tool_rounds == 4
-        assert agent.backend.calls == 4
+        assert agent.backend.calls == 5
         assert result.executed_tools == []
 
 
-# LLM: long-running writers should keep working without making every old tool record part of the live prompt.
-# 函数用途: 覆盖真实 Task18 里单个数据 worker prompt 膨胀到数十万字符的问题。
 def test_tool_loop_windows_long_runner_tool_context():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -311,8 +288,6 @@ def test_tool_loop_windows_long_runner_tool_context():
         assert (workspace / "data" / "weekly_data.json").read_text(encoding="utf-8").count("row-") == 45
 
 
-# LLM: tool-loop should execute real TOOL_CALL blocks but discard model-written tool records.
-# 函数用途: 覆盖 R81 中模型把 `[tool-output-record]` 当成自己可写回执的问题，防止 fake run id 污染下一轮。
 def test_tool_loop_ignores_model_written_reserved_tool_records_after_real_call():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -330,8 +305,6 @@ def test_tool_loop_ignores_model_written_reserved_tool_records_after_real_call()
         assert "第一个完整工具调用" in result.prompt
 
 
-# LLM: streaming tool boundary should stop fake post-call text from becoming control input.
-# 函数用途: 覆盖 R82 中模型流式输出真实工具调用后继续伪造工具回执和第二个工具调用的问题。
 def test_tool_loop_cuts_streaming_response_after_first_complete_tool_call():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -359,8 +332,6 @@ def test_tool_loop_cuts_streaming_response_after_first_complete_tool_call():
         assert "fake-child-run" not in "".join(visible_chunks)
 
 
-# LLM: spoof-only tool records should trigger one correction turn instead of final closeout.
-# 函数用途: 模型没有真实 TOOL_CALL 却自称工具成功时，系统给一次纠偏机会，不直接假绿。
 def test_tool_loop_repairs_spoof_only_reserved_tool_record_once():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -376,8 +347,6 @@ def test_tool_loop_repairs_spoof_only_reserved_tool_record_once():
         assert "系统保留" in result.prompt
 
 
-# LLM: repeated fake records without real calls should produce a deterministic blocked result.
-# 函数用途: 模型连续伪造工具回执时避免无限循环，并明确告诉上层当前结果不可信。
 def test_tool_loop_blocks_repeated_spoof_only_reserved_tool_records():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -414,7 +383,9 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
         tasks = agent.subagents.list_runs()
         tree = agent.tools.execute_call({"tool": "inspect_agent_tree", "scope": "all"})
         dry_dispatch = agent.tools.execute_call({"tool": "dispatch_subagents", "dry_run": True, "max_runners": 1})
-        legacy_dispatch = agent.tools.execute_call({"tool": "dispatch_subagents", "execute_runners": True, "dry_run": True})
+        rejected_internal_switch = agent.tools.execute_call(
+            {"tool": "dispatch_subagents", "start_runners": True, "dry_run": True}
+        )
 
         assert result.response == "已创建子代理任务并等待调度。"
         assert result.tool_rounds == 1
@@ -423,9 +394,9 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
         assert tree.ok
         assert any(task.id in tree.output for task in tasks)
         assert dry_dispatch.ok
+        assert not rejected_internal_switch.ok
+        assert "只接受 dry_run" in rejected_internal_switch.output
         assert '"dry_run": true' in dry_dispatch.output
-        assert not legacy_dispatch.ok
-        assert "只接受 dry_run" in legacy_dispatch.output
 
 
 def test_create_subagents_accepts_explicit_external_write_target_without_starting():
@@ -481,8 +452,6 @@ def test_repeated_orchestration_tool_call_is_not_executed_twice():
         assert len(tasks) == 1
 
 
-# LLM: non-mutating hierarchy schedule attempts must remain retryable after the parent narrows scope.
-# 函数用途: schedule_child_subagents 返回 blocked=true 后，不应被一次性调用去重挡住修正重试。
 def test_non_mutating_schedule_result_does_not_consume_one_shot_key():
     params = ToolLoopExecuteParams(
         user_prompt="",
@@ -561,8 +530,6 @@ def test_max_tool_rounds_generates_final_response():
         assert agent.backend.calls == 3
 
 
-# LLM: tool loop must not return a fresh TOOL_CALL as the final answer after max rounds.
-# 函数用途: 模拟模型不听收口提示仍继续要工具，验证系统返回确定性停止说明而不是继续误导上层。
 def test_max_tool_rounds_hard_stops_when_model_still_requests_tools():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)

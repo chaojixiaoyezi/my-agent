@@ -1,5 +1,3 @@
-# LLM: Background MainAgent CLI bridges durable conversation policies to the local runtime.
-# 模块用途: 提供后台主代理 message、bind-task、tick 和 service 命令，不接真实外部通道。
 
 from __future__ import annotations
 
@@ -8,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..agent.agent_core.agent_tree_status import agent_tree_status_payload
+from ..agent.agent_core.agent_tree.status import agent_tree_status_payload
 from ..agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
@@ -18,8 +16,6 @@ from ..agent.conversation import (
 from .common import make_agent
 
 
-# LLM: cmd_background_main_agent_message belongs to the CLI surface; keep channel/thread side effects explicit.
-# 函数用途: 接收一条本地模拟通道消息，写入持久 thread；可选唤醒后台主代理回复。
 def cmd_background_main_agent_message(args) -> int:
     agent = make_agent(args)
     channels = FakeChannelHub()
@@ -40,8 +36,6 @@ def cmd_background_main_agent_message(args) -> int:
     return 0
 
 
-# LLM: cmd_background_main_agent_bind_task belongs to the CLI surface; it writes task and policy refs only.
-# 函数用途: 把已有 thread 绑定到任务，并按参数创建可选 ProgressPolicy。
 def cmd_background_main_agent_bind_task(args) -> int:
     agent = make_agent(args)
     now = _optional_float(args.now)
@@ -60,8 +54,6 @@ def cmd_background_main_agent_bind_task(args) -> int:
     return 0
 
 
-# LLM: cmd_background_main_agent_tick is a bounded scheduler tick; it can call the LLM through runtime.
-# 函数用途: 执行一次后台主代理 due-policy 检查，命中的策略会唤醒 SimpleAgent.run 并写回消息。
 def cmd_background_main_agent_tick(args) -> int:
     agent = make_agent(args)
     reports = _run_tick(agent, now=_optional_float(args.now))
@@ -77,8 +69,6 @@ def cmd_background_main_agent_tick(args) -> int:
     return 0
 
 
-# LLM: cmd_background_main_agent_status is a read-only local control-plane dashboard.
-# 函数用途: 汇总长期会话、绑定任务、待处理事件、协作 case 和代理树；不调用 LLM、不推进任务。
 def cmd_background_main_agent_status(args) -> int:
     agent = make_agent(args)
     store = agent.conversation_store
@@ -153,8 +143,6 @@ def _observe_payload(thread_id: str, task_id: str, observation, wake_signal_id: 
     }
 
 
-# LLM: cmd_background_main_agent_service keeps ticking locally; stop_file and max_cycles bound the loop.
-# 函数用途: 本地循环执行 tick，用于离线验证长期任务唤醒；不创建守护进程、不接真实通道凭证。
 def cmd_background_main_agent_service(args) -> int:
     agent = make_agent(args)
     interval = max(0.0, float(args.interval or 0.0))

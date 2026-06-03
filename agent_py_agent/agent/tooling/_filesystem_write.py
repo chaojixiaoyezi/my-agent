@@ -1,16 +1,16 @@
 
-# LLM: 写入前必须经过工作区和子代理边界校验，错误文案也服务上层决策。
-# 模块用途: 内部文件写入、追加和替换工具实现。
 
 from __future__ import annotations
 
 import base64
 import os
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..contracts.artifact_format_lint import lint_artifact_format
+from ..contracts.recovery_actions import RecoveryAction
 from ..run_intent import reference_write_feedback
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _required_path, _text_param
 from ._filesystem_read import FileSystemAccessOptions, FileSystemTool
@@ -30,26 +30,29 @@ from .content_transport_policy import (
 from .models import ToolExecutionResult, ToolSpec
 
 
-# LLM: WriteFileTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: WriteFileTool 数据模型，集中保存 工具系统 的结构化状态。
+@dataclass(frozen=True)
+class WriteFileToolOptions:
+    max_inline_content_chars: int | None = None
+    access_options: FileSystemAccessOptions | None = None
+    runtime_fact_roots: list[Path] = field(default_factory=list)
+
+
 class WriteFileTool(FileSystemTool):
 
-    # LLM: WriteFileTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 初始化 WriteFileTool 的依赖、配置和运行期字段。
     def __init__(
         self,
         workspace_root: Path,
         workspace_roots: list[Path] | None = None,
-        *,
-        max_inline_content_chars: int | None = None,
-        access_options: FileSystemAccessOptions | None = None,
+        options: WriteFileToolOptions | None = None,
     ):
+        options = options or WriteFileToolOptions()
         super().__init__(
             workspace_root,
             workspace_roots,
-            access_options,
+            options.access_options,
         )
-        self.max_inline_content_chars = inline_write_content_limit(max_inline_content_chars)
+        self.max_inline_content_chars = inline_write_content_limit(options.max_inline_content_chars)
+        self.runtime_fact_roots = [Path(root).expanduser().resolve(strict=False) for root in options.runtime_fact_roots]
         self.spec = ToolSpec(
             name="write_file",
             category="filesystem",
@@ -81,8 +84,6 @@ class WriteFileTool(FileSystemTool):
             ],
         )
 
-    # LLM: WriteFileTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 执行 WriteFileTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             raw_path = _required_path(params.get("path"))
@@ -104,19 +105,17 @@ class WriteFileTool(FileSystemTool):
                 str(exc),
                 error_code="ARTIFACT_VALIDATION_FAILED",
                 retryable=True,
-                recommended_action="rewrite valid artifact bytes or write a draft to a non-final extension first",
+                recommended_action=RecoveryAction.REWRITE_ARTIFACT_BYTES.value,
             )
         web_decision = check_web_project_post_write(target, self.workspace_root)
         output = _write_output(self.display_path(target), target, content, content_policy)
-        output, feedback = _attach_reference_write_feedback(self.workspace_root, target, output)
+        output, feedback = _attach_reference_write_feedback(self.workspace_root, target, output, self.runtime_fact_roots)
         result = _write_result("write_file", target, output, web_decision)
         if feedback:
             result.result_envelope["soft_feedback"] = feedback
         return result
 
 
-# LLM: _write_result keeps web-project validation attached to every mutating file write.
-# 函数用途: 写入已发生但站点验收失败时返回结构化失败，促使模型修复而不是假完成。
 def _write_result(tool: str, target: Path, output: str, web_decision: Any) -> ToolExecutionResult:
     envelope = _artifact_integrity_envelope(web_decision, target)
     web_note = web_project_post_write_note(web_decision)
@@ -131,11 +130,28 @@ def _write_result(tool: str, target: Path, output: str, web_decision: Any) -> To
     )
 
 
-def _attach_reference_write_feedback(workspace_root: Path, target: Path, output: str) -> tuple[str, dict[str, Any]]:
-    feedback = reference_write_feedback(workspace_root=workspace_root, target=target)
+def _attach_reference_write_feedback(
+    workspace_root: Path,
+    target: Path,
+    output: str,
+    runtime_fact_roots: list[Path] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    feedback = reference_write_feedback(workspace_root=workspace_root, target=target, fact_roots=runtime_fact_roots)
     if not feedback:
         return output, {}
-    return f"{output}\n{feedback['message']}", feedback
+    return f"{output}\n{_feedback_message(feedback)}", feedback
+
+
+def _feedback_message(feedback: dict[str, Any]) -> str:
+    message = str(feedback.get("message") or "").strip()
+    load_errors = feedback.get("run_intent_load_errors")
+    if not isinstance(load_errors, list) or not load_errors:
+        return message
+    first = load_errors[0] if isinstance(load_errors[0], dict) else {}
+    context = str(first.get("context") or "").strip()
+    path = str(first.get("path") or "").strip()
+    detail = "；".join(part for part in (f"context={context}" if context else "", f"path={path}" if path else "") if part)
+    return f"{message}\n软提醒详情：{detail}" if detail else message
 
 
 def _artifact_integrity_envelope(web_decision: Any, target: Path) -> dict[str, object]:
@@ -174,8 +190,6 @@ def _write_payload(params: dict[str, Any]) -> tuple[str | None, bytes]:
     return content, content.encode("utf-8")
 
 
-# LLM: _content_policy isolates inline-size checking from the write side effect.
-# 函数用途: 文本写入前生成长度策略结果；二进制写入不走文本策略。
 def _content_policy(raw_path: str, content: str | None, max_chars: int) -> Any | None:
     if content is None:
         return None
@@ -190,8 +204,6 @@ def _content_policy(raw_path: str, content: str | None, max_chars: int) -> Any |
     )
 
 
-# LLM: _write_output keeps post-write notes assembly small and deterministic.
-# 函数用途: 汇总写入成功、长内容提示和 HTML 完整性提示。
 def _write_output(
     display_path: str,
     target: Path,
@@ -208,8 +220,6 @@ def _write_output(
     return "\n".join(notes)
 
 
-# LLM: _atomic_write_bytes protects final artifacts with temp-file writes and post-write validation.
-# 函数用途: 先写临时文件并校验候选产物，再原子替换目标文件。
 def _atomic_write_bytes(target: Path, data: bytes) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=_temp_suffix_for(target), dir=str(target.parent))
@@ -228,8 +238,6 @@ def _atomic_write_bytes(target: Path, data: bytes) -> None:
         raise
 
 
-# LLM: _temp_suffix_for keeps temp filenames compatible with format validators that inspect suffixes.
-# 函数用途: 对需要格式校验的产物保留原后缀，其余临时文件统一使用 .tmp。
 def _temp_suffix_for(target: Path) -> str:
     suffix = target.suffix
     return suffix if suffix in _PREWRITE_VALIDATED_SUFFIXES else ".tmp"
@@ -246,8 +254,6 @@ _PREWRITE_VALIDATED_SUFFIXES = {
 }
 
 
-# LLM: _validate_final_artifact_candidate rejects objectively corrupt common artifacts before replacement.
-# 函数用途: 在替换目标文件前，对支持的产物格式做通用完整性检查。
 def _validate_final_artifact_candidate(candidate: Path, target: Path) -> None:
     if target.suffix.lower() not in _PREWRITE_VALIDATED_SUFFIXES:
         return

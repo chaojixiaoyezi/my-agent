@@ -1,5 +1,3 @@
-# LLM: Shared manager_runner_results fixtures keep focused tests small.
-# 模块用途: 提供 record_runner_result 测试共享 manager/task 构造，避免单个测试文件重新接近体积高风险线。
 
 from __future__ import annotations
 

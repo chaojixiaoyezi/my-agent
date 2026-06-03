@@ -1,11 +1,8 @@
-# LLM: Compatibility facade for the typed action protocol modules.
-# 模块用途: 统一导出工具、子代理、compact 和 refs envelope，并提供 kind-based decode 入口。
 
 from __future__ import annotations
 
 """Typed action protocol public facade.
 
-给人看的解释：
 业务代码继续从 `agent.action_protocol` 导入即可；真实定义拆到小文件里，
 避免协议层变成超大文件。自然语言回复不在这里获得执行权。
 """
@@ -38,8 +35,6 @@ from .action_protocol_tooling import (
 )
 
 
-# LLM: decode_action_envelope dispatches JSON payloads to the matching typed class.
-# 函数用途: 根据 kind 字段恢复对应 envelope；未知 kind 明确报错，防止静默误执行。
 def decode_action_envelope(
     payload: dict[str, Any],
 ) -> (

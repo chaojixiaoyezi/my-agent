@@ -1,7 +1,5 @@
 """Tool, adapter, user, timeout, and advanced subagent config normalizers."""
 
-# LLM: 这里维护运行期安全上限，新增字段要同步 warning 路径。
-# 模块用途: 工具、适配器、用户空间、超时和高级子代理字段的归一化规则。
 
 from __future__ import annotations
 
@@ -10,15 +8,11 @@ from ._coercion import CoercionService
 from .runtime_tool_field_specs import TOOL_INT_FIELDS
 
 
-# LLM: _append_warning 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 向结果或告警集合加入 append_warning，同时保留调用方依赖的顺序。
 def _append_warning(warnings: list[str], warn: str | None) -> None:
     if warn:
         warnings.append(warn)
 
 
-# LLM: _apply_int_fields 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 把 配置系统 的归一化结果写回配置对象。
 def _apply_int_fields(
     out: dict[str, object],
     defaults: object,
@@ -38,8 +32,6 @@ def _apply_int_fields(
     return warnings
 
 
-# LLM: _apply_bool_fields 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 把 配置系统 的归一化结果写回配置对象。
 def _apply_bool_fields(
     out: dict[str, object],
     defaults: object,
@@ -53,13 +45,9 @@ def _apply_bool_fields(
     return warnings
 
 
-# LLM: ToolFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: ToolFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
 class ToolFieldsService:
     """Normalize tool-related config fields."""
 
-    # LLM: ToolFieldsService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 归一化 ToolFieldsService 负责的配置字段并追加告警。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)
@@ -73,14 +61,10 @@ class ToolFieldsService:
         return out, warnings
 
 
-# LLM: _normalize_tool_int_fields keeps ToolFieldsService.normalize below code-size limits.
-# 函数用途: 归一化工具、聊天和 CLI 展示相关整数配置。
 def _normalize_tool_int_fields(out: dict[str, object], defaults: object) -> list[str]:
     return _apply_int_fields(out, defaults, TOOL_INT_FIELDS)
 
 
-# LLM: _normalize_tool_bool_fields keeps boolean tool prompt switches in one audited list.
-# 函数用途: 归一化工具开关和工具目录展示布尔配置。
 def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> list[str]:
     return _apply_bool_fields(
         out,
@@ -89,8 +73,6 @@ def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> lis
     )
 
 
-# LLM: _normalize_tool_catalog_fields keeps catalog prompt-shaping knobs safe and config-backed.
-# 函数用途: 归一化工具目录展示模式和类别过滤列表。
 def _normalize_tool_catalog_fields(out: dict[str, object], defaults: object) -> list[str]:
     warnings: list[str] = []
     mode, warn = CoercionService.coerce_choice(
@@ -114,8 +96,6 @@ def _normalize_background_tool_fields(out: dict[str, object], defaults: object) 
     return []
 
 
-# LLM: path_access_mode is shared by main agents, subagents, and filesystem/shell tools.
-# 函数用途: 归一化路径访问策略；normal 只挡危险目录，full 表示路径全开。
 def _normalize_path_access_fields(out: dict[str, object], defaults: object) -> list[str]:
     raw_mode = out.get("path_access_mode", defaults.path_access_mode)
     mode = normalize_path_access_mode(raw_mode)
@@ -132,8 +112,6 @@ def _normalize_path_access_fields(out: dict[str, object], defaults: object) -> l
     return warnings
 
 
-# LLM: access_mode is the single user-facing command permission knob.
-# 函数用途: 归一化命令运行权限档位；只暴露一个配置项，其他安全策略由运行时派生。
 def _normalize_command_access_mode(out: dict[str, object], defaults: object) -> list[str]:
     warnings: list[str] = []
     raw = out.get("access_mode", defaults.access_mode)
@@ -149,8 +127,6 @@ def _normalize_command_access_mode(out: dict[str, object], defaults: object) -> 
     return warnings
 
 
-# LLM: _normalize_dispatch_watch_interval handles the one float in the runtime tool slice.
-# 函数用途: 归一化 dispatch 默认 watch 间隔，并返回配置告警。
 def _normalize_dispatch_watch_interval(out: dict[str, object], defaults: object) -> list[str]:
     warnings: list[str] = []
     value, warn = CoercionService.coerce_float(
@@ -165,13 +141,9 @@ def _normalize_dispatch_watch_interval(out: dict[str, object], defaults: object)
     return warnings
 
 
-# LLM: SubagentBasicFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: SubagentBasicFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
 class SubagentBasicFieldsService:
     """Normalize basic subagent config fields (max_subagents, memory_top_k)."""
 
-    # LLM: SubagentBasicFieldsService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 归一化 SubagentBasicFieldsService 负责的配置字段并追加告警。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)
@@ -211,14 +183,10 @@ class SubagentBasicFieldsService:
         return out, warnings
 
 
-# LLM: _string_config_value 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 配置系统 中的 string_config_value 步骤，并保持调用方依赖的数据形状。
 def _string_config_value(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
-# LLM: _normalize_string_list keeps list-like config fields predictable for runtime call sites.
-# 函数用途: 把字符串、列表或元组配置归一成去空白的字符串列表，避免 MagicMock 或坏配置漏进业务接口。
 def _normalize_string_list(value: object) -> list[str]:
     if isinstance(value, str):
         raw_items = value.split(",")
@@ -229,13 +197,9 @@ def _normalize_string_list(value: object) -> list[str]:
     return [str(item).strip() for item in raw_items if item is not None and str(item).strip()]
 
 
-# LLM: SubagentAdvancedFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: SubagentAdvancedFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
 class SubagentAdvancedFieldsService:
     """Normalize advanced subagent config fields."""
 
-    # LLM: SubagentAdvancedFieldsService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 归一化 SubagentAdvancedFieldsService 负责的配置字段并追加告警。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)
@@ -280,8 +244,6 @@ class SubagentAdvancedFieldsService:
         return out, warnings
 
 
-# LLM: runner_timeout_by_role is intentionally permissive because timeout values reuse runner_timeout_seconds grammar.
-# 函数用途: 把角色级 runner 超时配置归一成小写 key 的字典；支持行内 dict 或 ["worker=60"] 列表。
 def _normalize_runner_timeout_by_role(value: object) -> tuple[dict[str, object], str | None]:
     if value in ({}, None, ""):
         return {}, None
@@ -294,8 +256,6 @@ def _normalize_runner_timeout_by_role(value: object) -> tuple[dict[str, object],
     return {}, f"runner_timeout_by_role: expected dict or key=value list, got {value!r}; using default"
 
 
-# LLM: _normalize_runner_timeout_mapping keeps role names stable and leaves value grammar to runner_dispatch.
-# 函数用途: 清理角色名，保留 off/auto/数字等原始超时值，供 runner_gate 按角色取用。
 def _normalize_runner_timeout_mapping(value: dict[object, object]) -> dict[str, object]:
     normalized: dict[str, object] = {}
     for raw_key, raw_value in value.items():
@@ -305,8 +265,6 @@ def _normalize_runner_timeout_mapping(value: dict[object, object]) -> dict[str, 
     return normalized
 
 
-# LLM: _timeout_mapping_from_list supports the repo's simple YAML list syntax without nested maps.
-# 函数用途: 把 ["worker=8", "coordinator=off"] 转成角色超时字典；遇到非法项返回 None。
 def _timeout_mapping_from_list(value: list[object]) -> dict[str, object] | None:
     parsed: dict[object, object] = {}
     for item in value:

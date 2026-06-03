@@ -1,5 +1,3 @@
-# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
-# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
 
 from __future__ import annotations
 
@@ -20,8 +18,6 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-# LLM: _GatewayPayloadRenderContext 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 类用途: 集中保存网关载荷render上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class _GatewayPayloadRenderContext:
 
@@ -33,8 +29,6 @@ class _GatewayPayloadRenderContext:
     response_path: Path | None
 
 
-# LLM: GatewayIndexPayloadOptions 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 类用途: 集中保存网关index载荷选项字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class GatewayIndexPayloadOptions:
     request_path: Path | None = None
@@ -42,8 +36,6 @@ class GatewayIndexPayloadOptions:
     event_type: str = "gateway_request_rebuilt"
 
 
-# LLM: GatewayPayloadLogParams 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 类用途: 集中保存网关载荷log参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class GatewayPayloadLogParams:
     event_type: str
@@ -51,8 +43,6 @@ class GatewayPayloadLogParams:
     response_path: Path | None = None
 
 
-# LLM: log_gateway_payload 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 写入网关载荷的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def log_gateway_payload(
     agent: SimpleAgent,
     payload: dict,
@@ -89,8 +79,6 @@ def log_gateway_payload(
         _report_gateway_side_effect_error("log_gateway_payload", request_id, exc)
 
 
-# LLM: _gateway_payload_content 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理网关载荷内容相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _gateway_payload_content(context: _GatewayPayloadRenderContext) -> str:
     payload = context.payload
     return "\n".join(
@@ -115,8 +103,6 @@ def _gateway_payload_content(context: _GatewayPayloadRenderContext) -> str:
     )
 
 
-# LLM: _gateway_payload_metadata 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理网关载荷metadata相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _gateway_payload_metadata(context: _GatewayPayloadRenderContext) -> dict:
     payload = context.payload
     return {
@@ -135,8 +121,6 @@ def _gateway_payload_metadata(context: _GatewayPayloadRenderContext) -> dict:
     }
 
 
-# LLM: log_gateway_event 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 写入网关event的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def log_gateway_event(agent: SimpleAgent, event_type: str, payload: dict) -> None:
 
     try:
@@ -159,8 +143,6 @@ def log_gateway_event(agent: SimpleAgent, event_type: str, payload: dict) -> Non
         _report_gateway_side_effect_error("log_gateway_event", str(payload.get("id", event_type)), exc)
 
 
-# LLM: _index_gateway_payload 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理index网关载荷相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _index_gateway_payload(
     agent: SimpleAgent,
     payload: dict,
@@ -190,8 +172,6 @@ def _index_gateway_payload(
     return True
 
 
-# LLM: _report_gateway_side_effect_error 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理报告网关sideeffecterror相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _report_gateway_side_effect_error(operation: str, request_id: str, exc: Exception) -> None:
     try:
         print(

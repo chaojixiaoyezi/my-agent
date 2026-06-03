@@ -57,7 +57,7 @@
 
 ### 并行 Worker Pool
 
-解决问题：`subagents-dispatch --apply --execute-runners` 虽然已经能推进 runner，但默认还是串行心智，`runner_concurrency` / `runner_start_rate` / `runner_timeout_seconds` 没有真正接到 dispatch worker pool，单个 worker 卡住时还可能拖垮整轮调度。
+解决问题：`subagents-dispatch --apply --start-runners` 虽然已经能推进 runner，但默认还是串行心智，`runner_concurrency` / `runner_start_rate` / `runner_timeout_seconds` 没有真正接到 dispatch worker pool，单个 worker 卡住时还可能拖垮整轮调度。
 
 落地内容：
 - `dispatch_subagents()` 现在会真实读取 `runner_concurrency` 和 `runner_start_rate`，用 `ThreadPoolExecutor.submit()` / `as_completed()` 执行并行 runner
@@ -429,7 +429,7 @@
 
 ### 配置驱动 daemon 入口
 
-解决问题：`subagents-dispatch --watch --planner --apply --execute-runners` 太长。
+解决问题：`subagents-dispatch --watch --planner --apply --start-runners` 太长。
 
 落地内容：
 - `daemon_*` 配置项

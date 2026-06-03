@@ -12,8 +12,6 @@ from agent_py_agent.agent.subagents.models import (
 )
 
 
-# LLM: _stale_coordinator marks a planning parent as overdue while keeping child links intact.
-# 函数用途: 构造失联 coordinator 测试数据，用于验证批量接管计划不会直接改树。
 def _stale_coordinator(manager: SubAgentManager, root_id: str, child_count: int):
     coordinator = manager.create_run(
         goal="stale coordinator",
@@ -44,8 +42,6 @@ def _stale_coordinator(manager: SubAgentManager, root_id: str, child_count: int)
     return coordinator, children
 
 
-# LLM: _leader creates an available receiver under the same root tree.
-# 函数用途: 构造可接管子树的候选 leader。
 def _leader(manager: SubAgentManager, root_id: str, goal: str):
     leader = manager.create_run(
         goal=goal,
@@ -60,10 +56,6 @@ def _leader(manager: SubAgentManager, root_id: str, goal: str):
     return leader
 
 
-# LLM: _make_child creates one child under a known parent and refreshes the parent's child link.
-# 函数用途: 构造层级测试节点，减少大型树测试里的重复样板。
-# LLM: _make_child creates a worker child under a known parent and refreshes the parent's child link.
-# 函数用途: 构造普通层级测试节点，保持 helper 参数低于 code-size 高风险线。
 def _make_child(manager: SubAgentManager, parent, root_id: str, goal: str):
     return manager.create_run(
         goal=goal,
@@ -76,8 +68,6 @@ def _make_child(manager: SubAgentManager, parent, root_id: str, goal: str):
     )
 
 
-# LLM: _make_coordinator_child creates a coordinator node for large hierarchy recovery tests.
-# 函数用途: 构造 coordinator 子节点，避免 _make_child 暴露 role 参数。
 def _make_coordinator_child(manager: SubAgentManager, parent, root_id: str, goal: str):
     return manager.create_run(
         goal=goal,
@@ -268,8 +258,6 @@ def test_leadership_recovery_apply_large_tree_1_4_16_48(tmp_path):
     _assert_depths_follow_parents(manager, great_grandchildren)
 
 
-# LLM: _large_recovery_tree creates the required 1/4/16/48 hierarchy fixture.
-# 函数用途: 构造大树测试现场，保持测试主体短小并降低嵌套深度。
 def _large_recovery_tree(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="orchestrate", plan=["split"], role="coordinator")
@@ -285,8 +273,6 @@ def _large_recovery_tree(tmp_path):
     return manager, root, coordinators, grandchildren, great_grandchildren, leaders
 
 
-# LLM: _grandchild_group adds four grandchildren and three great-grandchildren under each.
-# 函数用途: 构造大树的一组 4/12 后代，避免大型测试函数出现三层循环。
 def _grandchild_group(manager, root_id: str, coordinator):
     grandchildren = []
     great_grandchildren = []
@@ -300,8 +286,6 @@ def _grandchild_group(manager, root_id: str, coordinator):
     return grandchildren, great_grandchildren
 
 
-# LLM: _mark_stale makes a coordinator eligible for leadership recovery planning.
-# 函数用途: 将 coordinator 设置成无 active attempt 且 heartbeat 超时的 PLANNING 父节点。
 def _mark_stale(manager: SubAgentManager, run_id: str) -> None:
     stale = manager.load(run_id)
     stale.status = "PLANNING"
@@ -310,8 +294,6 @@ def _mark_stale(manager: SubAgentManager, run_id: str) -> None:
     manager.save_hierarchy_links(stale)
 
 
-# LLM: _apply_plan_assignments applies every planned child batch through the public manager bundle API.
-# 函数用途: 用计划报告驱动真实分批 apply，模拟人工逐批确认后的执行路径。
 def _apply_plan_assignments(manager: SubAgentManager, root_id: str, plan) -> None:
     for assignment in plan.assignments:
         manager.apply_leadership_recovery(
@@ -325,8 +307,6 @@ def _apply_plan_assignments(manager: SubAgentManager, root_id: str, plan) -> Non
         )
 
 
-# LLM: _assert_depths_follow_parents verifies recursive depth refresh without caring about exact leader ids.
-# 函数用途: 校验每个节点 depth 都等于父节点 depth + 1。
 def _assert_depths_follow_parents(manager: SubAgentManager, tasks: list) -> None:
     for task in tasks:
         loaded = manager.load(task.id)

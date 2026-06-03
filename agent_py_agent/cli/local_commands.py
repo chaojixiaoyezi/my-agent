@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 from __future__ import annotations
 
@@ -18,9 +16,9 @@ from ..agent.gateway import (
     gateway_paths,
     gateway_request_counts,
     gateway_running,
-    read_json_file,
     recover_gateway_processing_requests,
 )
+from ..agent.gateway_parts.io import read_json_file, read_json_file_report
 from ..agent.subagents.models import SubAgentBoardOptions
 from .common import format_local_time, make_agent, resume_context_override
 from .delivery_contracts import delivery_contract_from_file
@@ -48,8 +46,6 @@ from .run_output import (
 from .thinking_spinner import ThinkingSpinner
 
 
-# LLM: cmd_status 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_status(args) -> int:
 
     agent = make_agent(args)
@@ -64,26 +60,25 @@ def cmd_status(args) -> int:
     )
     timeline = agent.local_store.timeline(limit=limit)
     pid, alive = gateway_running(paths)
-    gateway_state = read_json_file(paths.state)
-    heartbeat = read_json_file(paths.heartbeat)
-    gateway_status, heartbeat_age = resolve_gateway_status(
-        GatewayStatusRequest(
-            alive=alive,
-            gateway_state=gateway_state,
-            heartbeat=heartbeat,
-            stale_seconds=agent.config.gateway_stale_seconds,
-            now=time.time(),
-        )
-    )
+    gateway_status, heartbeat_age, state_load_error, heartbeat_load_error = _gateway_status_from_files(agent, paths, alive)
 
-    # 检测进行中任务
-    active_work_summary = None
-    if agent.config.auto_detect_work_on_startup:
-        from ..agent.startup_recovery import detect_active_work
-        active_work_summary = detect_active_work(agent)
-
+    active_work_summary = _detect_active_work_summary(agent)
     request_counts = gateway_request_counts(paths)
-    payload_ctx = StatusPayloadContext(agent, paths, local_stats, board, timeline, pid, alive, gateway_status, heartbeat_age, active_work_summary, request_counts)
+    payload_ctx = StatusPayloadContext(
+        agent,
+        paths,
+        local_stats,
+        board,
+        timeline,
+        pid,
+        alive,
+        gateway_status,
+        heartbeat_age,
+        active_work_summary,
+        request_counts,
+        state_load_error,
+        heartbeat_load_error,
+    )
     payload = build_status_payload(payload_ctx)
     payload["suggestions"] = build_status_suggestions(agent, payload)
     if args.json:
@@ -92,14 +87,35 @@ def cmd_status(args) -> int:
 
     print_ctx = StatusPrintContext(
         agent, paths, local_stats, board, timeline, gateway_status, pid, alive, heartbeat_age, active_work_summary,
-        request_counts, payload["suggestions"],
+        request_counts, payload["suggestions"], state_load_error, heartbeat_load_error,
     )
     print_status_human(print_ctx)
     return 0
 
 
-# LLM: cmd_timeline 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
+def _gateway_status_from_files(agent, paths, alive: bool) -> tuple[str, float, dict | None, dict | None]:
+    gateway_state_report = read_json_file_report(paths.state, context="cli.status.gateway_state.read")
+    heartbeat_report = read_json_file_report(paths.heartbeat, context="cli.status.gateway_heartbeat.read")
+    gateway_status, heartbeat_age = resolve_gateway_status(
+        GatewayStatusRequest(
+            alive=alive,
+            gateway_state=gateway_state_report.payload,
+            heartbeat=heartbeat_report.payload,
+            stale_seconds=agent.config.gateway_stale_seconds,
+            now=time.time(),
+        )
+    )
+    return gateway_status, heartbeat_age, gateway_state_report.load_error, heartbeat_report.load_error
+
+
+def _detect_active_work_summary(agent):
+    if not agent.config.auto_detect_work_on_startup:
+        return None
+    from ..agent.startup_recovery import detect_active_work
+
+    return detect_active_work(agent)
+
+
 def cmd_timeline(args) -> int:
 
     agent = make_agent(args)
@@ -131,8 +147,6 @@ def cmd_timeline(args) -> int:
     return 0
 
 
-# LLM: cmd_run 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_run(args) -> int:
 
     agent = make_agent(args)
@@ -162,16 +176,12 @@ def cmd_run(args) -> int:
     return run_exit_code(result)
 
 
-# LLM: CLI run recovery hints must be action-first; compact files are backup evidence, not the first task.
-# 函数用途: 给单轮 run 的 compact/resume 写默认下一步，避免恢复后模型先翻恢复文件而不推进用户任务。
 def _default_run_recovery_next_actions() -> list[str]:
     return [
         "继续当前用户请求的未完成部分；优先推进下一步工作，只有缺事实、引用损坏或需要核验时才读取恢复记录。",
     ]
 
 
-# LLM: cmd_remember 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_remember(args) -> int:
 
     agent = make_agent(args)
@@ -180,8 +190,6 @@ def cmd_remember(args) -> int:
     return 0
 
 
-# LLM: cmd_memory_list 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_list(args) -> int:
 
     agent = make_agent(args)
@@ -192,8 +200,6 @@ def cmd_memory_list(args) -> int:
     return 0
 
 
-# LLM: cmd_memory_search 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_search(args) -> int:
 
     agent = make_agent(args)
@@ -203,8 +209,6 @@ def cmd_memory_search(args) -> int:
     return 0
 
 
-# LLM: cmd_local_store_status 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_local_store_status(args) -> int:
 
     agent = make_agent(args)
@@ -212,8 +216,6 @@ def cmd_local_store_status(args) -> int:
     return 0
 
 
-# LLM: cmd_local_search 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_local_search(args) -> int:
 
     agent = make_agent(args)
@@ -235,8 +237,6 @@ def cmd_local_search(args) -> int:
     return 0
 
 
-# LLM: cmd_local_index_memory 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_local_index_memory(args) -> int:
 
     agent = make_agent(args)
@@ -255,8 +255,6 @@ def cmd_local_index_memory(args) -> int:
     return 0
 
 
-# LLM: _timeline_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _timeline_options(args) -> TimelineOptions:
     return TimelineOptions(
         limit=int(args.limit or 0),
@@ -267,8 +265,6 @@ def _timeline_options(args) -> TimelineOptions:
     )
 
 
-# LLM: _config_int resolves CLI optional defaults from AgentConfig after make_agent is available.
-# 函数用途: argparse 无法提前读取配置时，在命令执行层把 None 转为配置文件里的默认值。
 def _config_int(agent, args, arg_name: str, config_name: str) -> int:
     value = getattr(args, arg_name, None)
     if value is not None:
@@ -276,15 +272,11 @@ def _config_int(agent, args, arg_name: str, config_name: str) -> int:
     return int(getattr(agent.config, config_name, 0) or 0)
 
 
-# LLM: _apply_default_arg_limit keeps existing option bundle helpers unchanged while moving defaults to config.
-# 函数用途: 在调用旧 helper 前把 args.limit 补成后端配置值。
 def _apply_default_arg_limit(args, agent, config_name: str) -> None:
     if getattr(args, "limit", None) is None:
         args.limit = int(getattr(agent.config, config_name, 0) or 0)
 
 
-# LLM: _local_search_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _local_search_options(args) -> LocalSearchOptions:
     return LocalSearchOptions(
         query=args.query,

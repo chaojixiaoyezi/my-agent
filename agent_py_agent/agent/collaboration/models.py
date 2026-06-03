@@ -1,5 +1,3 @@
-# LLM: Collaboration models are generic multi-agent control-plane facts.
-# 模块用途: 定义 case、能力、协作请求、证据包和协作决策的数据结构，不绑定日志/API/文件等业务类型。
 
 from __future__ import annotations
 
@@ -19,8 +17,6 @@ from .model_helpers import (
 SCHEMA_VERSION = "collaboration.v1"
 
 
-# LLM: AgentCapability is the registry fact used for structural agent matching; keep it open-world.
-# 类用途: 描述一个代理当前能做什么、负责哪些来源、是否可用，不绑定具体业务类型。
 @dataclass(frozen=True)
 class AgentCapability:
     agent_id: str
@@ -32,8 +28,6 @@ class AgentCapability:
     updated_at: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: AgentCapability.to_dict writes the durable schema version and tuple normalization for the registry.
-    # 函数用途: 把代理能力转换成 JSON 可写结构，供协作账本持久化。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
@@ -41,8 +35,6 @@ class AgentCapability:
         payload["sources"] = list(self.sources)
         return payload
 
-    # LLM: AgentCapability.from_dict accepts older or partial payloads without closing the capability vocabulary.
-    # 函数用途: 从持久化字典恢复代理能力，缺失字段使用保守默认值。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentCapability:
         metadata = data.get("metadata")
@@ -58,8 +50,6 @@ class AgentCapability:
         )
 
 
-# LLM: CollaborationCase is the shared room for cross-agent coordination; keep status and priority free-form.
-# 类用途: 表示一次通用协作事件，多个代理围绕它发请求、交证据、形成决策。
 @dataclass(frozen=True)
 class CollaborationCase:
     case_id: str
@@ -76,16 +66,12 @@ class CollaborationCase:
     updated_at: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: CollaborationCase.to_dict preserves refs and metadata without embedding large payloads.
-    # 函数用途: 把协作 case 转成可落盘结构。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
         payload["required_capabilities"] = list(self.required_capabilities)
         return payload
 
-    # LLM: CollaborationCase.from_dict restores case facts from file-backed storage.
-    # 函数用途: 从 JSON 字典恢复协作 case。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CollaborationCase:
         metadata = data.get("metadata")
@@ -107,8 +93,6 @@ class CollaborationCase:
         )
 
 
-# LLM: CaseParticipant records who was asked or joined without assigning business roles in code.
-# 类用途: 记录某个代理在 case 里的参与身份、请求能力和状态。
 @dataclass(frozen=True)
 class CaseParticipant:
     case_id: str
@@ -119,16 +103,12 @@ class CaseParticipant:
     joined_at: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: CaseParticipant.to_dict serializes participant facts for append-only case history.
-    # 函数用途: 把参与者记录转换成 JSONL 可写结构。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
         payload["requested_capabilities"] = list(self.requested_capabilities)
         return payload
 
-    # LLM: CaseParticipant.from_dict tolerates missing metadata in old ledgers.
-    # 函数用途: 从 JSONL 行恢复参与者记录。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CaseParticipant:
         metadata = data.get("metadata")
@@ -143,8 +123,6 @@ class CaseParticipant:
         )
 
 
-# LLM: CollaborationRequest is an agent-to-agent evidence request; it stores entities structurally.
-# 类用途: 表示一个代理在 case 里向其他代理请求补充事实或证据。
 @dataclass(frozen=True)
 class CollaborationRequest:
     request_id: str
@@ -168,8 +146,6 @@ class CollaborationRequest:
     updated_at: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: CollaborationRequest.to_dict keeps targets and capabilities explicit for replay.
-    # 函数用途: 把协作请求转换成 JSONL 可写结构。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
@@ -180,8 +156,6 @@ class CollaborationRequest:
         payload["context_refs"] = list(self.context_refs)
         return payload
 
-    # LLM: CollaborationRequest.from_dict restores a request without interpreting the natural-language question.
-    # 函数用途: 从 JSONL 行恢复协作请求。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CollaborationRequest:
         metadata = data.get("metadata")
@@ -213,8 +187,6 @@ class CollaborationRequest:
         )
 
 
-# LLM: EvidencePacket is refs-first evidence; never store heavy logs or documents here.
-# 类用途: 保存代理提交的证据摘要和引用，供主代理或 coordinator 判断是否升级。
 @dataclass(frozen=True)
 class EvidencePacket:
     evidence_id: str
@@ -235,8 +207,6 @@ class EvidencePacket:
     created_at: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: EvidencePacket.to_dict persists refs and limitations for audit and wake context.
-    # 函数用途: 把证据包转换成 JSONL 可写结构。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
@@ -249,8 +219,6 @@ class EvidencePacket:
         payload["limitations"] = list(self.limitations)
         return payload
 
-    # LLM: EvidencePacket.from_dict restores submitted evidence without dereferencing refs.
-    # 函数用途: 从 JSONL 行恢复证据包。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvidencePacket:
         metadata = data.get("metadata")
@@ -275,8 +243,6 @@ class EvidencePacket:
         )
 
 
-# LLM: CaseDecision records coordinator outcomes and wake linkage without being a business verdict.
-# 类用途: 记录协作 case 的控制面决策，例如是否需要主代理处理。
 @dataclass(frozen=True)
 class CaseDecision:
     decision_id: str
@@ -289,16 +255,12 @@ class CaseDecision:
     created_at: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: CaseDecision.to_dict keeps wake signal and evidence IDs auditable.
-    # 函数用途: 把协作决策转换成 JSONL 可写结构。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
         payload["evidence_ids"] = list(self.evidence_ids)
         return payload
 
-    # LLM: CaseDecision.from_dict restores prior coordinator decisions for status and replay.
-    # 函数用途: 从 JSONL 行恢复协作决策。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CaseDecision:
         metadata = data.get("metadata")

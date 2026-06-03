@@ -1,11 +1,9 @@
-# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
-# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from ...agent.agent_core.subagent_params import SpawnSubagentsParams
+from ...agent.agent_core.subagent import SpawnSubagentsParams
 from .slash_command_types import SlashCommandContext
 
 CHAT_HELP_TEXT = (
@@ -28,8 +26,6 @@ CHAT_HELP_TEXT = (
 SlashHandler = Callable[[str, SlashCommandContext, bool], bool | None]
 
 
-# LLM: handle_common_slash_command 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 处理用户输入、快捷命令或事件，并分发到对应动作。
 def handle_common_slash_command(
     user: str,
     *,
@@ -51,8 +47,6 @@ def handle_common_slash_command(
     return False
 
 
-# LLM: _handle_help_command 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 处理用户输入、快捷命令或事件，并分发到对应动作。
 def _handle_help_command(
     user: str, ctx: SlashCommandContext, include_fallback_help: bool
 ) -> bool | None:
@@ -63,8 +57,6 @@ def _handle_help_command(
     return True
 
 
-# LLM: _handle_remember_command 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 处理用户输入、快捷命令或事件，并分发到对应动作。
 def _handle_remember_command(
     user: str, ctx: SlashCommandContext, include_fallback_help: bool
 ) -> bool | None:
@@ -76,8 +68,6 @@ def _handle_remember_command(
     return True
 
 
-# LLM: _handle_memory_command 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 处理用户输入、快捷命令或事件，并分发到对应动作。
 def _handle_memory_command(
     user: str, ctx: SlashCommandContext, include_fallback_help: bool
 ) -> bool | None:
@@ -90,14 +80,10 @@ def _handle_memory_command(
     return True
 
 
-# LLM: _recent_memory 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _recent_memory(ctx: SlashCommandContext):
     return ctx.agent.memory.all()[-ctx.memory_limit:]
 
 
-# LLM: _print_memory_records 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_memory_records(ctx: SlashCommandContext, records) -> None:
     if not records:
         ctx.print_line("No memory records found.")
@@ -106,8 +92,6 @@ def _print_memory_records(ctx: SlashCommandContext, records) -> None:
         ctx.print_line(f"- [{rec.kind}] {rec.role}: {rec.content}")
 
 
-# LLM: _handle_btw_command 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 处理用户输入、快捷命令或事件，并分发到对应动作。
 def _handle_btw_command(
     user: str, ctx: SlashCommandContext, include_fallback_help: bool
 ) -> bool | None:
@@ -126,8 +110,6 @@ def _handle_btw_command(
     return None
 
 
-# LLM: _print_runtime_injections 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_runtime_injections(ctx: SlashCommandContext) -> None:
     if not ctx.runtime_inject:
         ctx.print_line("No runtime prompt injections.")
@@ -137,8 +119,6 @@ def _print_runtime_injections(ctx: SlashCommandContext) -> None:
         ctx.print_line(f"{index}. {item}")
 
 
-# LLM: _handle_prompt_file_command 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 处理用户输入、快捷命令或事件，并分发到对应动作。
 def _handle_prompt_file_command(
     user: str, ctx: SlashCommandContext, include_fallback_help: bool
 ) -> bool | None:
@@ -150,8 +130,6 @@ def _handle_prompt_file_command(
     return True
 
 
-# LLM: _handle_subagents_command 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 处理用户输入、快捷命令或事件，并分发到对应动作。
 def _handle_subagents_command(
     user: str, ctx: SlashCommandContext, include_fallback_help: bool
 ) -> bool | None:
@@ -169,14 +147,10 @@ def _handle_subagents_command(
     return True
 
 
-# LLM: is_exit_command 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 判断输入或环境是否满足规则，结果会影响分支、告警或阻断。
 def is_exit_command(user: str) -> bool:
     return user.lower() in {"/exit", "/logout", "/quit", "exit", "logout", "退出"}
 
 
-# LLM: parse_expand_target 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def parse_expand_target(raw: str) -> str | None:
     if raw == "/expand":
         return "last"
@@ -188,8 +162,6 @@ def parse_expand_target(raw: str) -> str | None:
     return None
 
 
-# LLM: is_show_prompt_command 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 判断输入或环境是否满足规则，结果会影响分支、告警或阻断。
 def is_show_prompt_command(user: str) -> tuple[bool, str]:
     if user.startswith("/show-prompt "):
         return True, user[len("/show-prompt "):]

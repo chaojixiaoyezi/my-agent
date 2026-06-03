@@ -54,12 +54,12 @@ python -m agent_py_agent --help
 | 交互聊天 | `my-agent chat` | 前台交互 | 是，用户发送消息时调用 |
 | gateway 客户端聊天 | `my-agent chat --gateway` | 前台客户端，后台 gateway 执行 | 是，由后台 gateway 调用 |
 | 一轮父代理调度 | `my-agent subagents-dispatch` | 否 | 否，默认 dry-run |
-| 持续父代理调度 | `my-agent subagents-dispatch --watch --interval 30` | 前台常驻 | 否，除非加 `--apply --execute-runners` |
+| 持续父代理调度 | `my-agent subagents-dispatch --watch --interval 30` | 前台常驻 | 否，除非加 `--apply --start-runners` |
 | 父代理 LLM planner 调度 | `my-agent subagents-dispatch --watch --planner --interval 30` | 前台常驻 | 是，有待处理事项时调用父代理 planner |
 | 配置驱动前台 daemon | `my-agent daemon` | 前台常驻 | 取决于 `daemon_*` 配置 |
 | 后台 gateway | `my-agent gateway start` | 后台常驻 | 取决于 `daemon_*` 配置 |
 | gateway 客户端请求 | `my-agent gateway ask "任务"` | 否，投递到后台 gateway | 是，由后台 gateway 调用 |
-| 真实 runner 调度 | `my-agent subagents-dispatch --apply --execute-runners` | 否 | 是 |
+| 真实 runner 调度 | `my-agent subagents-dispatch --apply --start-runners` | 否 | 是 |
 | 隔离全流程测试 | `my-agent scenario-test` | 临时启动并停止 gateway | 是，除非加 `--dry-run` |
 | 主代理基础 E2E | `my-agent real-e2e --workspace ./.e2e --json` | 否 | 否；真实模型用例会明确跳过，产物可用 `--artifact` 验收 |
 | 子代理单次执行 | `my-agent subagent-run <run_id> --execute` | 否 | 是 |
@@ -120,7 +120,7 @@ my-agent timeline --source-type gateway_request --details
 持续巡检并允许真实推进 runner：
 
 ```powershell
-my-agent subagents-dispatch --watch --planner --apply --execute-runners --interval 30 --max-runners 1
+my-agent subagents-dispatch --watch --planner --apply --start-runners --interval 30 --max-runners 1
 ```
 
 跑一轮可观察的隔离全流程测试：
@@ -191,7 +191,7 @@ Ctrl+C
 | `subagents-tests` | 查看或显式重跑单个 subagent 的真实测试执行记录 | `--re-run` 时写 `test_execution.json/md` | 否 |
 | `subagents-patches` | 审核或 apply runner 输出的 patch 记录 | 默认 review dry-run；`--review-apply` 只写审核状态；`--apply` 真正落文件 | 否 |
 | `subagents-memory-gate` | 查看或写回子代理 memory/skill 候选 review decision | 传 `--candidate-id` 时写 `memory_gate/decisions.jsonl` 和 gate 状态 | 否 |
-| `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回；`--execute-acceptance-tests` 只跑父级验收 tests | 只有 `--apply --execute-runners` 会调用模型；`--execute-acceptance-tests` 会执行本地验收 tests |
+| `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回；`--execute-acceptance-tests` 只跑父级验收 tests | 只有 `--apply --start-runners` 会调用模型；`--execute-acceptance-tests` 会执行本地验收 tests |
 | `background-main-agent` | 本地长期主代理线程、定时汇报和后台唤醒命令 | message/bind-task/observe 会写长期会话账本；tick/service 会唤醒后台主代理 | tick/service 可能调用模型 |
 | `collaboration` | 查看和推进通用多代理协作 case/request/evidence 状态 | update-status/update-request 会写协作账本 | 否 |
 | `daemon` | 按 `agent_config.yaml` 的 `daemon_*` 配置启动前台常驻调度 | 取决于配置 | 取决于配置 |
@@ -882,7 +882,7 @@ chat 和 gateway 都复用 `SimpleAgent.run()` 的恢复上下文能力。也就
 | `create_subagents` | 创建一个或多个子代理工单，并默认后台启动 | 不同步等待子代理完成；只有 `defer_start=true` 才只登记不启动 |
 | `inspect_agent_tree` | 读取主/子/孙代理树状态 | 只读；返回 liveness、progress、evidence 三层状态，不调度、不验收 |
 | `subagent_board` | 读取当前子代理看板 | 只读 |
-| `dispatch_subagents` | 给运行中的子代理追加提示、推进、补救或指定重跑 | 普通状态查看不需要它；真实执行仍需要 `apply=true` 和 `execute_runners=true` 或明确目标运行参数 |
+| `dispatch_subagents` | 给运行中的子代理追加提示、推进、补救或指定重跑 | 普通状态查看不需要它；真实执行仍需要 `dry_run=false` 或明确目标运行参数 |
 
 因此你可以在 chat 里说“拆给几个子代理分别做这些事”。默认创建后会后台开跑，父代理会先拿到 run_id 和状态，不会等所有子代理完成才继续说话。后续查看用 `inspect_agent_tree` / `subagent_board`；确实要催某几个、补救卡住项或追加提示时再用 `dispatch_subagents`。
 
@@ -1238,7 +1238,7 @@ my-agent subagents-memory-gate <run_id> --verify
 ```powershell
 my-agent subagents-dispatch
 my-agent subagents-dispatch --apply
-my-agent subagents-dispatch --apply --execute-runners
+my-agent subagents-dispatch --apply --start-runners
 my-agent subagents-dispatch --execute-acceptance-tests --max-runners 0
 my-agent subagents-dispatch --watch --planner --interval 30
 ```
@@ -1248,7 +1248,7 @@ my-agent subagents-dispatch --watch --planner --interval 30
 | `--capability-config <path>` | `agent_py_agent/config/capability_config.yaml` | 指定能力路由配置。 |
 | `--dry-run` | 默认模式 | 只生成调度报告，不修改记录。 |
 | `--apply` | `false` | 执行低风险调度动作并写审计日志。 |
-| `--execute-runners` | `false` | 配合 `--apply` 调用真实模型执行 runner；不能单独使用。 |
+| `--start-runners` | `false` | 配合 `--apply` 调用真实模型执行 runner；不能单独使用。 |
 | `--execute-acceptance-tests` | `false` | 显式执行父级验收 auto-policy 允许的 `run_tests`，写 `test_execution.json/md`，但不 apply、不 rescue、不修改 task 状态。 |
 | `--planner` | `false` | 有 active/pending/stalled/needs-intervention 事项时调用父代理 LLM planner；如果模型只回 `HEARTBEAT_OK`，会被 gate 标记为失败。 |
 | `--workflow-mode <off\|plan\|auto>` | `off` | dispatch 前对父任务执行 workflow 规划；`plan` 只写计划，`auto` 还会自动派出 workflow worker 子工单。 |
@@ -1312,7 +1312,7 @@ my-agent daemon
 常用覆盖：
 
 ```powershell
-my-agent daemon --apply --execute-runners
+my-agent daemon --apply --start-runners
 my-agent daemon --max-cycles 1 --interval 0 --no-planner
 ```
 
@@ -1321,8 +1321,8 @@ my-agent daemon --max-cycles 1 --interval 0 --no-planner
 | `--capability-config <path>` | `agent_py_agent/config/capability_config.yaml` | 指定能力路由配置。 |
 | `--dry-run` | 覆盖 `daemon_apply` | 只生成报告，不写回。 |
 | `--apply` | 覆盖 `daemon_apply` | 写回低风险动作和审计日志。 |
-| `--execute-runners` | 覆盖 `daemon_execute_runners` | 配合 apply 调用真实模型执行 runner。 |
-| `--no-execute-runners` | 覆盖 `daemon_execute_runners` | 不调用真实模型执行 runner。 |
+| `--start-runners` | 覆盖 `daemon_start_runners` | 配合 apply 调用真实模型执行 runner。 |
+| `--no-start-runners` | 覆盖 `daemon_start_runners` | 不调用真实模型执行 runner。 |
 | `--planner` | 覆盖 `daemon_planner` | 启用父代理 LLM planner。 |
 | `--no-planner` | 覆盖 `daemon_planner` | 关闭父代理 LLM planner。 |
 | `--interval <seconds>` | `daemon_interval` | 每轮调度结束后的等待秒数；`0` 表示不等待，通常只用于测试或单轮验证。 |
@@ -1365,7 +1365,7 @@ runner_failure_policy: "auto"
 # 前台 daemon 过渡期参数：0 是显式策略值，不表示“未设置”
 daemon_planner: true
 daemon_apply: false
-daemon_execute_runners: false
+daemon_start_runners: false
 daemon_interval: 30
 daemon_max_runners: "auto"
 daemon_limit: 0
@@ -1913,8 +1913,8 @@ my-agent audit-log --cleanup --days 90
 
 - 默认调度命令都是 dry-run，先写报告，不修改任务。
 - `subagent-run --execute` 会调用真实 API。
-- `subagents-dispatch --apply --execute-runners` 会调用真实 API。
+- `subagents-dispatch --apply --start-runners` 会调用真实 API。
 - `subagents-dispatch --planner` 在 gate 发现有待处理事项时会调用父代理 LLM。
-- `--execute-runners` 必须和 `--apply` 一起使用。
+- `--start-runners` 必须和 `--apply` 一起使用。
 - `--watch` 是前台常驻，终端关闭或 `Ctrl+C` 后进程停止。
 - `--force-lock` 只用于确认旧 watch 进程异常退出后的残留 lock。

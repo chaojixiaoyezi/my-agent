@@ -374,7 +374,7 @@ my-agent subagent-run <run_id> --execute
 my-agent subagents-dispatch --dry-run
 # 预览一轮父代理调度；不写回，不执行 runner。
 
-my-agent subagents-dispatch --apply --execute-runners --max-runners 1
+my-agent subagents-dispatch --apply --start-runners --max-runners 1
 # 真正调度并执行最多 1 个 runner；会调用真实模型。
 ```
 

@@ -1,5 +1,3 @@
-# LLM: Home migration copies legacy home data into owner home without deleting old files.
-# 模块用途: 生成并执行 V1 -> V2 owner home 迁移计划；只复制，不覆盖，不清理。
 
 from __future__ import annotations
 
@@ -59,8 +57,6 @@ def _legacy_copy_actions(home: MyAgentHomePaths) -> list[HomeMigrationAction]:
 
 
 def _legacy_long_term_memory_actions(home: MyAgentHomePaths) -> list[HomeMigrationAction]:
-    # LLM: long-term migration keeps the first legacy memory JSONL as a copy source and never merges in place.
-    # 函数用途: 找到旧全局 memory.jsonl，复制到 owner 长期记忆主文件；目标存在时 apply 阶段跳过。
     target = home.owner_memory_long_term_dir / "memory.jsonl"
     for source in (home.data_dir / "memory.jsonl", home.root / "memory.jsonl"):
         if source.is_file():

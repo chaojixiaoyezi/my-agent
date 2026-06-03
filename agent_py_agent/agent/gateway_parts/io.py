@@ -1,5 +1,3 @@
-# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
-# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
 
 from __future__ import annotations
 
@@ -16,9 +14,11 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..file_io import append_jsonl
+from ..runtime_errors import runtime_error_report
 from .paths import GatewayPaths
 
 try:
@@ -30,8 +30,12 @@ _JSON_FILE_LOCKS: dict[str, threading.Lock] = {}
 _JSON_FILE_LOCKS_GUARD = threading.Lock()
 
 
-# LLM: _path_lock 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理路径锁相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
+@dataclass(frozen=True)
+class GatewayJsonReadReport:
+    payload: dict
+    load_error: dict | None = None
+
+
 def _path_lock(path: Path) -> threading.Lock:
     key = str(path.resolve())
     with _JSON_FILE_LOCKS_GUARD:
@@ -42,16 +46,12 @@ def _path_lock(path: Path) -> threading.Lock:
         return lock
 
 
-# LLM: write_json_file 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 写入JSON文件的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def write_json_file(path: Path, payload: dict) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
-# LLM: write_json_file_atomic 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 写入JSON文件atomic的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def write_json_file_atomic(path: Path, payload: dict) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -64,8 +64,6 @@ def write_json_file_atomic(path: Path, payload: dict) -> None:
             _unlink_tmp_file(tmp)
 
 
-# LLM: _unlink_tmp_file 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理unlinktmp文件相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _unlink_tmp_file(tmp: Path) -> None:
     try:
         tmp.unlink()
@@ -73,8 +71,6 @@ def _unlink_tmp_file(tmp: Path) -> None:
         pass
 
 
-# LLM: _replace_with_retry 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理replaceretry相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _replace_with_retry(tmp: Path, path: Path) -> None:
     last_error: OSError | None = None
     for attempt in range(8):
@@ -88,20 +84,37 @@ def _replace_with_retry(tmp: Path, path: Path) -> None:
         raise last_error
 
 
-# LLM: read_json_file 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 读取或查询JSON文件需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def read_json_file(path: Path) -> dict:
+    return read_json_file_report(path).payload
+
+
+def read_json_file_report(path: Path, *, context: str = "gateway.json.read") -> GatewayJsonReadReport:
+    if not path.exists():
+        return GatewayJsonReadReport({})
 
     try:
         with _locked_json_path(path):
             payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return GatewayJsonReadReport({}, _gateway_json_load_error(path, exc, context))
+    if isinstance(payload, dict):
+        return GatewayJsonReadReport(payload)
+    return GatewayJsonReadReport(
+        {},
+        _gateway_json_load_error(
+            path,
+            ValueError(f"gateway JSON root is {type(payload).__name__}, expected object"),
+            context,
+        ),
+    )
 
 
-# LLM: update_json_file_atomic keeps read-modify-write under one file-level lock.
-# 函数用途: 在同一个 JSON 文件锁内读取、更新、原子替换，避免并发 tick 丢更新。
+def _gateway_json_load_error(path: Path, exc: BaseException, context: str) -> dict:
+    report = runtime_error_report(exc, context=context)
+    report["path"] = str(path)
+    return report
+
+
 def update_json_file_atomic(path: Path, updater: Callable[[dict], dict]) -> dict:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
@@ -165,8 +178,6 @@ def _flock_unlock(handle) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-# LLM: read_pid 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 读取或查询pid需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def read_pid(path: Path) -> int:
 
     try:
@@ -175,8 +186,6 @@ def read_pid(path: Path) -> int:
         return 0
 
 
-# LLM: tail_lines 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理taillines相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def tail_lines(path: Path, line_count: int) -> list[str]:
 
     try:
@@ -188,26 +197,18 @@ def tail_lines(path: Path, line_count: int) -> list[str]:
     return lines[-line_count:]
 
 
-# LLM: new_gateway_request_id 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 构建网关请求id所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def new_gateway_request_id() -> str:
 
     return f"gwreq-{int(time.time())}-{uuid.uuid4().hex}"
 
 
-# LLM: gateway_response_path 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理网关响应路径相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def gateway_response_path(paths: GatewayPaths, request_id: str) -> Path:
 
     return paths.responses / f"{request_id}.json"
 
 
-# LLM: gateway_request_counts 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理网关请求counts相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def gateway_request_counts(paths: GatewayPaths) -> dict[str, int]:
 
-    # LLM: count_json 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 计算数量JSON的预算、数量或限制，影响后续调度节奏；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
     def count_json(path: Path) -> int:
         try:
             return len([item for item in path.glob("*.json") if item.is_file()])
@@ -223,8 +224,6 @@ def gateway_request_counts(paths: GatewayPaths) -> dict[str, int]:
     }
 
 
-# LLM: write_gateway_request 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 写入网关请求的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def write_gateway_request(paths: GatewayPaths, payload: dict) -> Path:
 
     request_id = str(payload["id"])
@@ -236,8 +235,6 @@ def write_gateway_request(paths: GatewayPaths, payload: dict) -> Path:
     return target
 
 
-# LLM: append_gateway_history 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 写入网关history的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def append_gateway_history(paths: GatewayPaths, payload: dict) -> None:
 
     append_jsonl(paths.history, payload, sort_keys=True)

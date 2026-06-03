@@ -6,8 +6,6 @@ import sys
 from pathlib import Path
 
 
-# LLM: Replay gate script must stay runnable as a standalone verification command, not only through imported helpers.
-# 函数用途: 验证 `scripts/check_replay_contracts.py` 能在仓库根目录输出全绿 JSON 汇总。
 def test_check_replay_contracts_script_outputs_green_json():
     repo_root = Path(__file__).resolve().parents[2]
     script = repo_root / "scripts" / "check_replay_contracts.py"

@@ -41,8 +41,6 @@ def test_context_bundle_v1_captures_task_handoff_fields(tmp_path) -> None:
     assert set(REQUIRED_CONTEXT_BUNDLE_FIELDS).issubset(payload)
 
 
-# LLM: test_context_bundle_embeds_task_envelope_and_tool_preflight protects protocol-first handoff.
-# 函数用途: runner 开工前要拿到 TaskEnvelope 和 Tool Preflight，不能只靠自然语言 task_packet 猜路径和工具。
 def test_context_bundle_embeds_task_envelope_and_tool_preflight(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
@@ -68,8 +66,32 @@ def test_context_bundle_embeds_task_envelope_and_tool_preflight(tmp_path) -> Non
     ]
 
 
-# LLM: _assert_core_context_bundle groups identity and task contract assertions.
-# 函数用途: 检查 context bundle 的身份、目标、计划、验收和权限主字段。
+def test_context_bundle_hides_legacy_subagent_paths_from_model_visible_payload(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / "data" / "subagents")
+    task = manager.create_run(
+        goal="读取 /tmp/project/data/subagents/old-run/source.md 后写报告。",
+        thought="旧路径只来自兼容账本，不应继续给模型当事实。",
+        plan=["读取 /tmp/project/data/subagents/old-run/source.md"],
+        role="worker",
+        attributes={
+            "output_files": ["/tmp/project/data/subagents/old-run/final_report.md"],
+            "required_read_paths": ["/tmp/project/data/subagents/old-run/source.md"],
+        },
+    )
+    task.task_workspace_dir = "/tmp/project/data/subagents/old-run"
+    task.agent_run_workspace_dir = "/tmp/project/data/subagents/old-run/agent"
+    task.agent_run_final_report_md = "/tmp/project/data/subagents/old-run/final_report.md"
+    task.allowed_write_roots = ["/tmp/project/data/subagents/old-run"]
+    manager.save(task)
+
+    bundle = build_context_bundle(manager.load(task.id))
+    payload = json.dumps(asdict(bundle), ensure_ascii=False)
+
+    assert "/data/subagents/" not in payload
+    assert "source.md" in bundle.goal
+    assert bundle.output_contract["declared_output_refs"] == ["final_report.md"]
+
+
 def _assert_core_context_bundle(bundle, task) -> None:
     assert bundle.schema_version == "subagent_context_bundle.v1"
     assert bundle.run_id == task.id
@@ -83,8 +105,6 @@ def _assert_core_context_bundle(bundle, task) -> None:
     assert bundle.permissions["allowed_tools"] == ["read_file", "write_file"]
 
 
-# LLM: _assert_workspace_context_bundle groups filesystem refs and packet contract assertions.
-# 函数用途: 检查 task/run workspace 引用、输出合同和 source refs 没有退化。
 def _assert_workspace_context_bundle(bundle, task, tmp_path: Path) -> None:
     assert bundle.workspace_refs["shared_messages"].endswith("shared/messages.jsonl")
     assert bundle.workspace_refs["agent_run_inbox"].endswith("inbox")
@@ -106,8 +126,6 @@ def _assert_workspace_context_bundle(bundle, task, tmp_path: Path) -> None:
     assert "task.acceptance_checks" in bundle.source_refs["acceptance_checks"]
 
 
-# LLM: This regression keeps user deliverables separate from agent-run internal reports.
-# 函数用途: 验证 final_report.md 这类用户产物会绑定到 product root，而不是内部 agent_run final_report。
 def test_context_bundle_maps_required_file_to_product_root(tmp_path) -> None:
     manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
     product_root = tmp_path / "product"
@@ -132,8 +150,6 @@ def test_context_bundle_maps_required_file_to_product_root(tmp_path) -> None:
     assert bundle.task_packet["write_contract"]["product_write_roots"] == [str(product_root)]
 
 
-# LLM: Parent-declared output_files must be visible to the child runner contract.
-# 函数用途: create_subagents 的 output_files 被验收当作交付目标时，context bundle 也必须把它传给 runner。
 def test_context_bundle_maps_declared_output_files_to_required_refs(tmp_path) -> None:
     manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
     product_root = tmp_path / "product"
@@ -157,8 +173,6 @@ def test_context_bundle_maps_declared_output_files_to_required_refs(tmp_path) ->
     assert bundle.task_packet["write_contract"]["declared_output_refs"] == [str(target)]
 
 
-# LLM: Logical output_refs are result keys, not filesystem deliverables.
-# 函数用途: 允许父级用 output_refs 标注结构化结果字段；没有路径形态时不进入 required_file_refs 硬门。
 def test_context_bundle_keeps_logical_output_refs_out_of_required_files(tmp_path) -> None:
     manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
     task = manager.create_run(
@@ -181,8 +195,6 @@ def test_context_bundle_keeps_logical_output_refs_out_of_required_files(tmp_path
     assert bundle.task_packet["file_contract"]["required_file_refs"] == []
 
 
-# LLM: This regression covers product refs that already include the product root basename.
-# 函数用途: 防止 `site/index.html` 在 product root `/tmp/site` 下被拼成 `/tmp/site/site/index.html`。
 def test_context_bundle_strips_product_root_basename_from_required_ref(tmp_path) -> None:
     manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
     product_root = tmp_path / "site"
@@ -249,7 +261,3 @@ def test_context_bundle_exposes_controlled_exec_grant_refs(tmp_path) -> None:
             },
         }
     ]
-
-
-# LLM: test_context_bundle_output_contract_separates_required_and_forbidden_files covers prompt drift.
-# 函数用途: context bundle 要把必需产物和禁止反例拆成结构化字段，减少下层模型靠自然语言猜。

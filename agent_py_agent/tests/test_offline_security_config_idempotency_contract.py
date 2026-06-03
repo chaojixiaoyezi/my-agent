@@ -8,8 +8,6 @@ from agent_py_agent.agent.contracts.idempotency import decide_idempotency, idemp
 from agent_py_agent.agent.contracts.runtime_config_contract import validate_runtime_config
 
 
-# LLM: Artifact validation must reject paths outside workspace_root before format checks.
-# 函数用途: 验证产物路径越界时返回 ARTIFACT_PATH_OUTSIDE_WORKSPACE。
 def test_validate_artifact_rejects_path_outside_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -22,8 +20,6 @@ def test_validate_artifact_rejects_path_outside_workspace(tmp_path: Path) -> Non
     assert [item.code for item in result.findings] == ["ARTIFACT_PATH_OUTSIDE_WORKSPACE"]
 
 
-# LLM: Runtime config should reject artifact dirs that resolve outside the workspace root.
-# 函数用途: 验证 artifact_dir 逃逸 workspace_root 时 doctor 合同失败。
 def test_runtime_config_rejects_artifact_dir_outside_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside-artifacts"
@@ -41,8 +37,6 @@ def test_runtime_config_rejects_artifact_dir_outside_workspace(tmp_path: Path) -
     assert result.error_codes == ("CONFIG_ARTIFACT_DIR_OUTSIDE_WORKSPACE",)
 
 
-# LLM: Legacy allowed_write_roots no longer acts as the runtime path authority.
-# 函数用途: 验证 allowed_write_roots 旧字段不会覆盖 path_access_mode/path_dangerous_roots 策略。
 def test_runtime_config_treats_allowed_write_roots_as_legacy_context(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
 
@@ -60,8 +54,6 @@ def test_runtime_config_treats_allowed_write_roots_as_legacy_context(tmp_path: P
     assert "CONFIG_ALLOWED_WRITE_ROOT_DANGEROUS" not in result.error_codes
 
 
-# LLM: Idempotency keys must be stable across dict ordering and return reuse decisions when ids exist.
-# 函数用途: 验证同一结构化操作重复执行时复用 existing_ids，而不是创建重复副作用。
 def test_idempotency_key_is_stable_and_reuses_existing_ids() -> None:
     left = {"target": "artifact://report", "args": {"b": 2, "a": 1}}
     right = {"args": {"a": 1, "b": 2}, "target": "artifact://report"}
@@ -73,8 +65,6 @@ def test_idempotency_key_is_stable_and_reuses_existing_ids() -> None:
     assert decision.existing_ids == ["write-1"]
 
 
-# LLM: Contract mutation tests prove a previously valid artifact fails after deleting required structure.
-# 函数用途: 验证删除 Markdown 必需章节后，验收合同会失败，防止空泛报告假通过。
 def test_contract_mutation_removing_required_markdown_section_fails(tmp_path: Path) -> None:
     report_path = tmp_path / "report.md"
     report_path.write_text("# Summary\nok\n# Evidence\nsource\n", encoding="utf-8")

@@ -8,10 +8,10 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.subagent_progress_closeout import (
+from agent_py_agent.agent.agent_core.subagent.progress_closeout import (
     subagent_progress_closeout_response,
 )
-from agent_py_agent.agent.agent_core.tool_round_execution import (
+from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolRoundExecutionRequest,
     execute_tool_round,
     subagent_output_json_response,
@@ -20,8 +20,6 @@ from agent_py_agent.agent.backend import ModelResponse
 from agent_py_agent.agent.tools import ToolExecutionResult
 
 
-# LLM: same-turn hierarchy dispatch must wait for real schedule output before using run ids.
-# 函数用途: 模型同一轮先 schedule 又 dispatch 时，只执行 schedule，并把 dispatch 延后到下一轮。
 def test_tool_round_defers_dependent_dispatch_after_schedule():
     calls = [
         {"tool": "schedule_child_subagents", "children": [{"goal": "child"}]},
@@ -58,8 +56,6 @@ def test_tool_round_defers_dependent_dispatch_after_schedule():
     assert "已延后" in records[1][2]
 
 
-# LLM: test_tool_round_detects_bundled_filesystem_output_json covers real model write_file bundles.
-# 函数用途: 模型用 filesystem.path 写 output.json 时，也应触发 runner 提前收口，避免再生成长结果块。
 def test_tool_round_detects_bundled_filesystem_output_json(tmp_path):
     output_json = tmp_path / "output.json"
     task = SimpleNamespace(output_json=str(output_json))
@@ -93,8 +89,40 @@ def test_tool_round_detects_bundled_filesystem_output_json(tmp_path):
     assert records == ["write_file"]
 
 
-# LLM: output.json closeout should be accepted only when refs are traceable on disk.
-# 函数用途: 模型漏写 evidence_packets 但已写 coordinator report 时，系统要补最小证据包并回写 output.json。
+def test_tool_round_reports_subagent_output_json_scope_load_error(tmp_path):
+    output_json = tmp_path / "output.json"
+
+    def broken_load(run_id):
+        del run_id
+        raise OSError("canonical state missing")
+
+    agent = SimpleNamespace(
+        _current_subagent_run_id="run-1",
+        subagents=SimpleNamespace(load=broken_load),
+    )
+    payload = {"tool": "write_file", "path": str(output_json), "content": "{}"}
+    params = SimpleNamespace(tool_context=[])
+
+    def execute_one(_request):
+        return ToolExecutionResult("write_file", True, "ok")
+
+    completed = execute_tool_round(
+        ToolRoundExecutionRequest(
+            agent=agent,
+            params=params,
+            tool_rounds=1,
+            response=ModelResponse(text="", backend="test"),
+            calls=[payload],
+            execute_one=execute_one,
+            record_one=lambda _record: None,
+        )
+    )
+
+    assert completed is False
+    assert any("SUBAGENT_RESULT_LOAD_ERROR" in str(item) for item in params.tool_context)
+    assert any("subagent_output_json.subagents.load" in str(item) for item in params.tool_context)
+
+
 def test_subagent_output_json_response_derives_packet_from_report(tmp_path):
     output_json = tmp_path / "output.json"
     reports_dir = tmp_path / "reports"
@@ -124,8 +152,20 @@ def test_subagent_output_json_response_derives_packet_from_report(tmp_path):
     assert str(output_json) in written["evidence_packets"][0]["evidence_refs"]
 
 
-# LLM: malformed packets are left strict so acceptance can reject them instead of hiding bad evidence.
-# 函数用途: 如果模型写了非空但无 refs 的 evidence_packets，自动收口不应偷偷追加好证据掩盖问题。
+def test_subagent_output_json_response_reports_task_load_error():
+    def broken_load(run_id):
+        del run_id
+        raise OSError("subagent ledger unavailable")
+
+    agent = SimpleNamespace(_current_subagent_run_id="root-1", subagents=SimpleNamespace(load=broken_load))
+
+    response = subagent_output_json_response(agent, ModelResponse(text="fallback", backend="test"))
+
+    assert "[SUBAGENT_RESULT_LOAD_ERROR]" in response.text
+    assert "subagent_output_json.subagents.load" in response.text
+    assert "subagent ledger unavailable" in response.text
+
+
 def test_subagent_output_json_response_does_not_hide_bad_packet(tmp_path):
     output_json = tmp_path / "output.json"
     reports_dir = tmp_path / "reports"
@@ -146,8 +186,6 @@ def test_subagent_output_json_response_does_not_hide_bad_packet(tmp_path):
     assert written == original
 
 
-# LLM: ready task-local progress should close the runner without one more free-form model turn.
-# 函数用途: 复现真实 E2E 中 HTML 已写完并通过结构检查，但模型还没写 output.json 导致父级一直等待。
 def test_subagent_progress_closeout_response_uses_latest_tool_progress(tmp_path):
     artifact = tmp_path / "lab_outputs" / "site-output" / "index.html"
     artifact.parent.mkdir(parents=True)
@@ -189,4 +227,40 @@ def test_subagent_progress_closeout_response_uses_latest_tool_progress(tmp_path)
     assert "[SUBAGENT_RESULT]" in response.text
     assert '"status": "DONE"' in response.text
     assert str(artifact) in response.text
+    assert str(progress_ref) in response.text
+
+
+def test_subagent_progress_closeout_reports_task_load_error():
+    def broken_load(run_id):
+        del run_id
+        raise OSError("progress ledger unavailable")
+
+    agent = SimpleNamespace(_current_subagent_run_id="worker", subagents=SimpleNamespace(load=broken_load))
+
+    response = subagent_progress_closeout_response(agent, ModelResponse(text="fallback", backend="test"))
+
+    assert response is not None
+    assert "[SUBAGENT_PROGRESS_LOAD_ERROR]" in response.text
+    assert "subagent_progress_closeout.subagents.load" in response.text
+    assert "progress ledger unavailable" in response.text
+
+
+def test_subagent_progress_closeout_reports_dirty_latest_progress(tmp_path):
+    workspace = tmp_path / "tasks" / "worker" / "agents" / "worker"
+    progress_dir = workspace / "progress"
+    progress_dir.mkdir(parents=True)
+    progress_ref = progress_dir / "latest_tool_progress.json"
+    progress_ref.write_text("{bad-progress", encoding="utf-8")
+    task = SimpleNamespace(
+        id="worker",
+        agent_run_workspace_dir=str(workspace),
+        output_json=str(tmp_path / "output.json"),
+    )
+    agent = SimpleNamespace(_current_subagent_run_id="worker", subagents=SimpleNamespace(load=lambda _: task))
+
+    response = subagent_progress_closeout_response(agent, ModelResponse(text="fallback", backend="test"))
+
+    assert response is not None
+    assert "[SUBAGENT_PROGRESS_LOAD_ERROR]" in response.text
+    assert "subagent_progress_closeout.latest_tool_progress" in response.text
     assert str(progress_ref) in response.text

@@ -7,19 +7,21 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.dispatch_params import DispatchContext
-from agent_py_agent.agent.agent_core.dispatch_runner_batches import _runner_candidates_for_context
-from agent_py_agent.agent.agent_core.orchestration_progress_payload import _progress_payload
-from agent_py_agent.agent.agent_core.runner_dispatch import _dispatch_runner_candidates
+from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchContext
+from agent_py_agent.agent.agent_core.orchestration.dispatch.progress_payload import (
+    _progress_payload,
+)
+from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_batches import (
+    _runner_candidates_for_context,
+)
+from agent_py_agent.agent.agent_core.runner.dispatch import _dispatch_runner_candidates
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
 
 
-# LLM: _runner_task builds dispatch candidate fixtures with all fields the runner gate reads.
-# 函数用途: 构造 runner dispatch 候选任务，避免测试依赖完整持久化任务。
 def _runner_task(run_id: str, role: str, agent_name: str = "", goal: str = ""):
     return SimpleNamespace(
         id=run_id,
@@ -41,13 +43,10 @@ def _runner_task(run_id: str, role: str, agent_name: str = "", goal: str = ""):
     )
 
 
-# LLM: _dispatch_ctx builds runner selection context without repeating unrelated defaults.
-# 函数用途: 让 phase-gate 测试只声明本例关心的 run_ids 和并发数量。
 def _dispatch_ctx(include_run_ids: list[str], max_runners: int = 3) -> DispatchContext:
     return DispatchContext(
         cfg=SimpleNamespace(),
         normalized_workflow_mode="off",
-        apply=True,
         planner=False,
         runner_instruction="",
         max_runners=max_runners,
@@ -61,16 +60,12 @@ def _dispatch_ctx(include_run_ids: list[str], max_runners: int = 3) -> DispatchC
     )
 
 
-# LLM: _attach_tmp_workspace gives fixture tasks real roots for dependency-ref checks.
-# 函数用途: 批量设置 allowed_write_roots 和 task_dir，避免每个测试重复路径样板。
 def _attach_tmp_workspace(tmp_path, tasks) -> None:
     for task in tasks:
         task.allowed_write_roots = [str(tmp_path)]
         task.task_dir = str(tmp_path / ".my-agent" / "subagents" / task.id)
 
 
-# LLM: test_root_with_coordinators_can_still_create_direct_leaf keeps dispatch policy flexible.
-# 函数用途: root 已创建 coordinator 后，仍可为别的工作分支直接创建 leaf_worker；是否满足层级链路交给验收判断。
 def test_root_with_coordinators_can_still_create_direct_leaf(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root delegates", thought="plan", plan=["plan"], role="coordinator")
@@ -99,8 +94,6 @@ def test_root_with_coordinators_can_still_create_direct_leaf(tmp_path):
     assert result.created_run_ids
 
 
-# LLM: test_runner_candidates_keep_creation_order_without_hidden_role_phase covers deleted phase gates.
-# 函数用途: 验证 dispatch 不再因为角色名自动只放行 producer/coordinator，父代理自己控制执行顺序。
 def test_runner_candidates_keep_creation_order_without_hidden_role_phase():
     tasks = [
         _runner_task("auth", "coordinator", "auth-coordinator", "write auth pages"),
@@ -113,8 +106,6 @@ def test_runner_candidates_keep_creation_order_without_hidden_role_phase():
     assert [task.id for task in selected] == ["auth", "catalog", "quality"]
 
 
-# LLM: test_runner_selection_does_not_hide_requested_quality_roles covers deleted QA phase gating.
-# 函数用途: tester/bug_finder/coordinator 都是普通候选，不再由 runtime 偷偷按阶段卡住。
 def test_runner_selection_does_not_hide_requested_quality_roles():
     inherited_contract = (
         "父级要求至少创建 tester / bug_finder；"
@@ -131,8 +122,6 @@ def test_runner_selection_does_not_hide_requested_quality_roles():
     assert [task.id for task in selected] == ["qa-test", "qa-bug", "coord"]
 
 
-# LLM: explicit run_ids must remain exact instead of being silently narrowed by phase gates.
-# 函数用途: 覆盖 Task17 真实 E2E：root 明确传 3 个 run_ids 时，不能只因 coordinator 优先就只跑 1 个。
 def test_explicit_run_ids_keep_mixed_worker_and_coordinator_targets():
     tasks = [
         _runner_task("market", "worker", "小傻妞-市场环境"),
@@ -142,7 +131,6 @@ def test_explicit_run_ids_keep_mixed_worker_and_coordinator_targets():
     ctx = DispatchContext(
         cfg=SimpleNamespace(),
         normalized_workflow_mode="off",
-        apply=True,
         planner=False,
         runner_instruction="",
         max_runners=3,
@@ -160,8 +148,6 @@ def test_explicit_run_ids_keep_mixed_worker_and_coordinator_targets():
     assert [task.id for task in selected] == ["market", "competition", "strategy"]
 
 
-# LLM: explicit run_ids no longer wait on inferred input refs.
-# 函数用途: 旧输入依赖启动门已删除；如果需要 A 后 B，父代理应先派 A 完成后再派 B。
 def test_explicit_run_ids_do_not_wait_for_missing_input_refs(tmp_path):
     data = _runner_task("collect", "worker", "小傻妞-数据", "生成 data/weekly_data.json")
     report = _runner_task("report", "worker", "小傻妞-报告", "读取 data/weekly_data.json，生成 final_report.md")
@@ -175,8 +161,6 @@ def test_explicit_run_ids_do_not_wait_for_missing_input_refs(tmp_path):
     assert [task.id for task in selected] == ["collect", "report"]
 
 
-# LLM: natural sibling-output wording is prompt context, not a dispatch gate.
-# 函数用途: 验证旧 sibling 输出依赖不会再把下游 runner 从显式 run_ids 中静默过滤。
 def test_explicit_run_ids_keep_named_upstream_output_refs_in_same_wave(tmp_path):
     collect = _runner_task("collect", "worker", "小傻妞-数据搜集", "输出到 data/source_data.md")
     analysis = _runner_task(
@@ -203,8 +187,6 @@ def test_explicit_run_ids_keep_named_upstream_output_refs_in_same_wave(tmp_path)
     assert [task.id for task in selected] == ["report", "analysis", "collect"]
 
 
-# LLM: test_progress_payload_surfaces_blocked_children covers parent recovery after a child fails.
-# 函数用途: 直接 child 已失败/阻塞时，dispatch payload 必须给出可执行 run_ids，而不是假装没有下一步。
 def test_progress_payload_surfaces_blocked_children():
     tasks = [
         _runner_task("done", "leaf_worker"),

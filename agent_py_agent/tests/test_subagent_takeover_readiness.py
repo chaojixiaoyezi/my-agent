@@ -6,7 +6,7 @@ from pathlib import Path
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.reports import DueCheckIssue
 from agent_py_agent.agent.subagents.services.rescue_policy import rescue_fields_for_issue
-from agent_py_agent.agent.subagents.services.takeover_readiness import (
+from agent_py_agent.agent.subagents.services.takeover.readiness import (
     build_takeover_readiness_packet,
     render_takeover_readiness_markdown,
 )

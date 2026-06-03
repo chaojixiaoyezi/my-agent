@@ -1,5 +1,3 @@
-# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
 
 from __future__ import annotations
 
@@ -21,24 +19,20 @@ from .manager_work_orders import (
 )
 from .models import SubAgentCard, SubAgentTask, TakeoverRecord, WorkOrderValidation
 from .services.base import CreateRunParams
-from .services.takeover_run import SubAgentTakeoverRunService
+from .services.takeover.run import SubAgentTakeoverRunService
 from .utils import _new_id
 
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
 
-# LLM: SubAgentManagerInitParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存subagent管理器init参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class SubAgentManagerInitParams:
 
     local_store: LocalStore | None = None
-    # LLM: collaboration_store lets runner context reuse existing case/request refs without parsing goals.
-    # 参数说明: 协作账本依赖；为空时子代理仍按普通无协作上下文运行。
+    # 协作账本依赖；为空时子代理仍按普通无协作上下文运行。
     collaboration_store: Any | None = None
-    # LLM: conversation_store lets child completion wake the parent thread without running inline.
-    # 参数说明: 长期会话账本依赖；为空时只更新子代理树，不触发父代理后台唤醒。
+    # 长期会话账本依赖；为空时只更新子代理树，不触发父代理后台唤醒。
     conversation_store: Any | None = None
     workspace_root: str | Path | None = None
     workspace_roots: list[str | Path] | None = None
@@ -47,19 +41,14 @@ class SubAgentManagerInitParams:
     debug_trace_level: int = 0
     takeover_chain_max_depth: int = 0
     closeout_for_all_task_nodes: bool = False
-    # LLM: owner scope travels with the manager as machine facts, not as model-written prompt text.
     owner_id: str = ""
     owner_home_dir: str = ""
     owner_policy_snapshot: dict[str, object] | None = None
 
 
-# LLM: SubAgentBaseMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 拆分subagent基础混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class SubAgentBaseMixin:
     """Facade delegating core task lifecycle to services."""
 
-    # LLM: __init__ 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def __init__(
         self,
         workspace: str | Path,
@@ -107,8 +96,6 @@ class SubAgentBaseMixin:
         self.persistence = SubAgentPersistenceService(self)
         self.base_service = SubAgentBaseService(self)
 
-    # LLM: split must preserve configured default allowed_tools when spawn_subagents delegates through the manager.
-    # 函数用途: 拆分目标并创建子任务；可传入默认工具白名单，保证真实 runner 拿到父级配置的工具边界。
     def split(
         self,
         goal: str,
@@ -124,13 +111,9 @@ class SubAgentBaseMixin:
             allowed_tools=allowed_tools,
         )
 
-    # LLM: register_card 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 处理registercard相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def register_card(self, card: SubAgentCard) -> None:
         self.cards[card.name] = card
 
-    # LLM: create_run 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 构建createrun所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
     def create_run(
         self,
         *,
@@ -163,8 +146,6 @@ class SubAgentBaseMixin:
         )
         return self.base_service.create_run(params=params)
 
-    # LLM: record_takeover 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 写入takeover的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def record_takeover(
         self,
         run_id: str,
@@ -175,33 +156,24 @@ class SubAgentBaseMixin:
     ):
         return self.base_service.record_takeover(run_id, take_over_by=take_over_by, reason=reason, locked_files=locked_files)
 
-    # LLM: create_takeover_run creates one idempotent replacement run for a dead source run.
-    # 函数用途: 原 runner 挂死时创建接管 run，并记录旧 run 被接管；重复调用会复用已有接管者。
     def create_takeover_run(self, params):
         return SubAgentTakeoverRunService(self).create(params)
 
-    # LLM: load 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 读取或查询load需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def load(self, run_id: str) -> SubAgentTask:
         return self.persistence.load(run_id)
 
-    # LLM: list_runs 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 读取或查询runs需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
     def list_runs(self) -> list[SubAgentTask]:
         return self.persistence.list_runs()
 
-    # LLM: save 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 写入save的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
+    def list_runs_report(self):
+        return self.persistence.list_runs_report()
+
     def save(self, task: SubAgentTask) -> None:
         self.persistence.save(task)
 
-    # LLM: save_hierarchy_links is reserved for controlled reparent operations that intentionally remove child edges.
-    # 函数用途: 精确保存任务的 child_ids，用于显式领导权恢复/子树重挂；普通保存仍走 save() 的防覆盖合并。
     def save_hierarchy_links(self, task: SubAgentTask) -> None:
         self.persistence.save(task, preserve_child_links=False)
 
-    # LLM: add_child 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 处理add子级相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def add_child(self, parent_id: str, child_id: str) -> None:
         try:
             parent = self.load(parent_id)
@@ -212,8 +184,6 @@ class SubAgentBaseMixin:
             parent.updated_at = time.time()
             self.save(parent)
 
-    # LLM: _build_work_order_paths 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 构建workorder路径所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _build_work_order_paths(
         self,
         run_id: str,
@@ -222,29 +192,19 @@ class SubAgentBaseMixin:
     ) -> dict[str, object]:
         return build_work_order_paths(self, run_id, task_dir, extra_write_roots)
 
-    # LLM: _ensure_work_order_files 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 校验workorder文件需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
     def _ensure_work_order_files(self, task: SubAgentTask) -> None:
         ensure_work_order_files(task)
 
-    # LLM: _write_takeover_file 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 写入takeover文件的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def _write_takeover_file(self, task: SubAgentTask, record: TakeoverRecord) -> None:
         write_takeover_file(task, record)
 
-    # LLM: validate_work_order 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 校验workorder需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
     def validate_work_order(self, run_id: str) -> WorkOrderValidation:
         return validate_work_order(self, run_id)
 
-    # LLM: _new_id 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 构建id所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def _new_id(self, prefix: str) -> str:
         return _new_id(prefix)
 
 
-# LLM: _normalized_workspace_roots 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 解析并归一化normalizedworkspaceroots的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -> list[Path]:
     resolved: list[Path] = []
     for raw in [primary, *(roots or [])]:
@@ -254,16 +214,12 @@ def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -
     return resolved
 
 
-# LLM: _apply_owner_scope keeps manager init shorter while preserving owner machine facts.
-# 函数用途: 保存 owner_id、owner_home 和 owner policy 快照，供子代理创建/投影/权限过滤复用。
 def _apply_owner_scope(manager, params: SubAgentManagerInitParams) -> None:
     manager.owner_id = str(params.owner_id or "")
     manager.owner_home_dir = str(params.owner_home_dir or "")
     manager.owner_policy_snapshot = dict(params.owner_policy_snapshot or {})
 
 
-# LLM: _normalized_template_dirs adds the standard user role-template directory when config is empty.
-# 函数用途: 子代理角色模板目录为空时默认使用工作区 `.agent/subagents/roles`，用户无需配置即可扩展。
 def _normalized_template_dirs(primary: Path, dirs: list[str | Path] | None) -> list[Path]:
     raw_dirs = dirs if dirs else [primary / ".agent" / "subagents" / "roles"]
     resolved: list[Path] = []
@@ -277,8 +233,6 @@ def _normalized_template_dirs(primary: Path, dirs: list[str | Path] | None) -> l
     return resolved
 
 
-# LLM: _normalize_debug_trace_level keeps direct manager construction aligned with AgentConfig normalization.
-# 函数用途: 把子代理调试追踪等级裁剪到 0-5，坏值按 0 关闭，避免测试配置把 manager 初始化打崩。
 def _normalize_debug_trace_level(value: object) -> int:
     try:
         level = int(value or 0)
@@ -287,7 +241,7 @@ def _normalize_debug_trace_level(value: object) -> int:
     return max(0, min(5, level))
 
 
-from .services.persistence_model_normalizers import (
+from .services.persistence.model_normalizers import (
     _field_names,
     _list_value,
     _normalize_context_manifest,
@@ -296,8 +250,6 @@ from .services.persistence_model_normalizers import (
     _string_list_value,
 )
 from .services.workflow import (
-    _CODING_SUBAGENT_TOOLS,
-    _READ_ONLY_SUBAGENT_TOOLS,
     _WORKFLOW_MODES,
     _normalize_workflow_mode_value,
     _workflow_worker_tools,

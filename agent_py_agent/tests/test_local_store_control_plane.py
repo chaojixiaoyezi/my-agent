@@ -86,8 +86,6 @@ def _blocked_sibling_record() -> AgentRunRecord:
     )
 
 
-# LLM: _timeout_leaf_record models a hung grandchild that should still be visible to takeover views.
-# 函数用途: 构造 TIMEOUT 孙代理投影，验证接管候选不仅包含 BLOCKED。
 def _timeout_leaf_record() -> AgentRunRecord:
     return AgentRunRecord(
         run_id="run-timeout",
@@ -245,8 +243,6 @@ def _assert_child_rollup_projection(store: LocalStore, root_id: str, child_id: s
     assert child_id in [item.run_id for item in tree.runs]
 
 
-# LLM: Regression for multi-level agent trees where stale parent snapshots are saved after child creation.
-# 函数用途: 验证旧父/子对象再次保存时不会覆盖 add_child 已写入的 child_ids，避免并行子代理层级断链。
 def test_subagent_save_preserves_child_links_from_stale_snapshots(tmp_path) -> None:
     from agent_py_agent.agent.subagents.manager import SubAgentManager
 
@@ -286,8 +282,6 @@ def test_subagent_save_preserves_child_links_from_stale_snapshots(tmp_path) -> N
     assert leaf.id in reloaded_child.child_ids
 
 
-# LLM: System-owned tree metadata must override model-provided hints.
-# 函数用途: 防止子代理把 attributes.system_tree 当成事实源；树关系、状态和 refs 只能由保存链路从任务字段派生。
 def test_subagent_save_overwrites_model_written_system_tree_snapshot(tmp_path) -> None:
     from agent_py_agent.agent.subagents.manager import SubAgentManager
 

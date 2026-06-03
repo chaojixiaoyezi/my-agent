@@ -1,5 +1,3 @@
-# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
-# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
 
 from __future__ import annotations
 
@@ -14,9 +12,11 @@ import json
 import os
 import signal
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from ..runtime_errors import runtime_error_report
 from .daemon_metadata import (
     _build_pid_record,
     _get_process_start_time,
@@ -42,11 +42,21 @@ from .scoped_locks import (
 GATEWAY_SERVICE_RESTART_EXIT_CODE = 75
 
 
+@dataclass(frozen=True)
+class PidRecordReadReport:
+    payload: dict | None
+    load_error: dict | None = None
+
+
+@dataclass(frozen=True)
+class RunningPidReport:
+    pid: int | None
+    load_error: dict | None = None
+
+
 # 鈹€鈹€ PID file management 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 
-# LLM: read_pid_file 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 读取或查询pid文件需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def read_pid_file(pid_path: Path) -> int | None:
     if not pid_path.exists():
         return None
@@ -57,8 +67,6 @@ def read_pid_file(pid_path: Path) -> int | None:
     return _pid_from_file_content(pid_path, content)
 
 
-# LLM: _pid_from_file_content 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理来自pid文件内容相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _pid_from_file_content(pid_path: Path, content: str) -> int | None:
     if not content:
         return None
@@ -70,8 +78,6 @@ def _pid_from_file_content(pid_path: Path, content: str) -> int | None:
         return None
 
 
-# LLM: _pid_from_record 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理来自pid记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def _pid_from_record(record: dict | None) -> int | None:
     if not record or "pid" not in record:
         return None
@@ -81,8 +87,6 @@ def _pid_from_record(record: dict | None) -> int | None:
         return None
 
 
-# LLM: remove_pid_file 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理removepid文件相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def remove_pid_file(pid_path: Path) -> None:
     try:
         pid_path.unlink()
@@ -90,8 +94,6 @@ def remove_pid_file(pid_path: Path) -> None:
         pass
 
 
-# LLM: check_already_running 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 校验alreadyrunning需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def check_already_running(pid_path: Path) -> tuple[bool, int | None]:
     existing_pid = read_pid_file(pid_path)
     if existing_pid is None:
@@ -105,37 +107,67 @@ def check_already_running(pid_path: Path) -> tuple[bool, int | None]:
 # 鈹€鈹€ PID record with start time (长期助手 pattern) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 
-# LLM: write_pid_record 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 写入pid记录的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def write_pid_record(pid_path: Path) -> None:
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     _write_json_file(pid_path, _build_pid_record())
 
 
-# LLM: read_pid_record 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 读取或查询pid记录需要的状态，返回调用方可继续处理的快照；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def read_pid_record(pid_path: Path) -> dict | None:
     return _read_json_file(pid_path)
 
 
-# LLM: get_running_pid 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 读取或查询runningpid需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
+def read_pid_record_report(pid_path: Path) -> PidRecordReadReport:
+    if not pid_path.exists():
+        return PidRecordReadReport(None)
+    try:
+        raw = pid_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        return PidRecordReadReport(None, _pid_record_load_error(pid_path, exc))
+    if not raw:
+        return PidRecordReadReport(None)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return PidRecordReadReport(None, _pid_record_load_error(pid_path, exc))
+    if isinstance(payload, dict):
+        return PidRecordReadReport(payload)
+    return PidRecordReadReport(
+        None,
+        _pid_record_load_error(
+            pid_path,
+            ValueError(f"PID record root is {type(payload).__name__}, expected object"),
+        ),
+    )
+
+
+def _pid_record_load_error(pid_path: Path, exc: BaseException) -> dict:
+    report = runtime_error_report(exc, context="gateway.pid_record.read")
+    report["path"] = str(pid_path)
+    return report
+
+
 def get_running_pid(pid_path: Path, *, cleanup_stale: bool = True) -> int | None:
-    record = read_pid_record(pid_path)
+    return get_running_pid_report(pid_path, cleanup_stale=cleanup_stale).pid
+
+
+def get_running_pid_report(pid_path: Path, *, cleanup_stale: bool = True) -> RunningPidReport:
+    record_report = read_pid_record_report(pid_path)
+    if record_report.load_error is not None:
+        return RunningPidReport(None, record_report.load_error)
+    record = record_report.payload
     if not record:
         _cleanup_stale_pid_file(pid_path, cleanup_stale)
-        return None
+        return RunningPidReport(None)
 
     pid = _pid_from_record(record)
     if pid is None:
         _cleanup_stale_pid_file(pid_path, cleanup_stale)
-        return None
+        return RunningPidReport(None)
 
-    # LLM: 使用共享进程控制辅助函数，避免 Windows 路径调用 POSIX 探测方式。
     # while macOS/Linux keep the POSIX liveness path.
     if not is_pid_alive(pid):
         _cleanup_stale_pid_file(pid_path, cleanup_stale)
-        return None
+        return RunningPidReport(None)
 
     # Check start_time to detect PID reuse
     recorded_start = record.get("start_time")
@@ -143,13 +175,11 @@ def get_running_pid(pid_path: Path, *, cleanup_stale: bool = True) -> int | None
     if recorded_start is not None and current_start is not None and current_start != recorded_start:
         # PID was reused by another process
         _cleanup_stale_pid_file(pid_path, cleanup_stale)
-        return None
+        return RunningPidReport(None)
 
-    return pid
+    return RunningPidReport(pid)
 
 
-# LLM: _cleanup_stale_pid_file 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理cleanupstalepid文件相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _cleanup_stale_pid_file(pid_path: Path, cleanup_stale: bool) -> None:
     if not cleanup_stale:
         return
@@ -159,11 +189,12 @@ def _cleanup_stale_pid_file(pid_path: Path, cleanup_stale: bool) -> None:
         pass
 
 
-# LLM: remove_pid_file_if_owned 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理removepid文件ifowned相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def remove_pid_file_if_owned(pid_path: Path) -> None:
     try:
-        record = _read_json_file(pid_path)
+        record_report = read_pid_record_report(pid_path)
+        if record_report.load_error is not None:
+            return
+        record = record_report.payload
         file_pid = _pid_from_record(record)
         if file_pid is not None and file_pid != os.getpid():
             return
@@ -178,15 +209,11 @@ def remove_pid_file_if_owned(pid_path: Path) -> None:
 # 鈹€鈹€ Legacy API compatibility 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 
-# LLM: write_pid_file 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 写入pid文件的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def write_pid_file(pid_path: Path, pid: int) -> None:
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     pid_path.write_text(str(pid), encoding="utf-8")
 
 
-# LLM: daemonize 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理daemonize相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def daemonize(pid_path: Path) -> bool:
     if os.name == "nt":
         return False
@@ -218,8 +245,6 @@ def daemonize(pid_path: Path) -> bool:
     return False  # Continue as daemon
 
 
-# LLM: request_graceful_shutdown 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 发送gracefulshutdown请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def request_graceful_shutdown(
     pid_path: Path, stop_request_path: Path, reason: str = "user request"
 ) -> bool:
@@ -236,14 +261,10 @@ def request_graceful_shutdown(
     return True
 
 
-# LLM: wait_for_shutdown 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进shutdown的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def wait_for_shutdown(pid: int, timeout: float) -> bool:
     return wait_for_pid_exit(pid, timeout)
 
 
-# LLM: install_signal_handler 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理installsignalhandler相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def install_signal_handler(handler) -> None:
     if os.name == "nt":
         signal.signal(signal.SIGTERM, handler)

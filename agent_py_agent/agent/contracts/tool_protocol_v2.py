@@ -1,5 +1,3 @@
-# LLM: Tool protocol v2 defines machine-readable tool call/result contracts without touching runtime flows.
-# 模块用途: 提供工具调用、结果、错误和产物引用的结构化 envelope，以及 normalize/validate/JSON helpers。
 
 from __future__ import annotations
 
@@ -21,8 +19,6 @@ from .tool_protocol_v2_models import (
 )
 
 
-# LLM: normalize_tool_call converts v2 and legacy tool-call dicts into ToolCallEnvelope.
-# 函数用途: 兼容 tool/args/call_id 等旧字段，生成稳定 operation_id 和 idempotency_key。
 def normalize_tool_call(payload: Any) -> ToolCallEnvelope:
     if isinstance(payload, ToolCallEnvelope):
         return payload
@@ -59,8 +55,6 @@ def normalize_tool_call(payload: Any) -> ToolCallEnvelope:
     )
 
 
-# LLM: normalize_tool_result converts v2 and legacy result dicts into ToolResultEnvelope.
-# 函数用途: 兼容 ok/output_ref/tool/call_id 等旧字段，并把错误统一分类为 ToolError。
 def normalize_tool_result(payload: Any) -> ToolResultEnvelope:
     if isinstance(payload, ToolResultEnvelope):
         return payload
@@ -84,8 +78,6 @@ def normalize_tool_result(payload: Any) -> ToolResultEnvelope:
     )
 
 
-# LLM: validate_tool_call returns machine-checkable contract violations for a call envelope.
-# 函数用途: 校验必填字段、schema_version、status 和 artifact refs，不抛异常打断调用方。
 def validate_tool_call(envelope: ToolCallEnvelope | dict[str, Any]) -> list[str]:
     call = normalize_tool_call(envelope)
     findings: list[str] = []
@@ -103,8 +95,6 @@ def validate_tool_call(envelope: ToolCallEnvelope | dict[str, Any]) -> list[str]
     return findings
 
 
-# LLM: validate_tool_result returns machine-checkable contract violations for a result envelope.
-# 函数用途: 校验结果状态、错误字段和 refs 合同，失败结果必须携带结构化 ToolError。
 def validate_tool_result(envelope: ToolResultEnvelope | dict[str, Any]) -> list[str]:
     result = normalize_tool_result(envelope)
     findings: list[str] = []
@@ -124,32 +114,22 @@ def validate_tool_result(envelope: ToolResultEnvelope | dict[str, Any]) -> list[
     return findings
 
 
-# LLM: serialize_tool_call writes a normalized call envelope as deterministic JSON.
-# 函数用途: 给日志、测试和跨进程边界提供稳定 JSON 字符串。
 def serialize_tool_call(envelope: ToolCallEnvelope | dict[str, Any]) -> str:
     return json.dumps(normalize_tool_call(envelope).to_dict(), ensure_ascii=False, sort_keys=True)
 
 
-# LLM: serialize_tool_result writes a normalized result envelope as deterministic JSON.
-# 函数用途: 给日志、测试和跨进程边界提供稳定 JSON 字符串。
 def serialize_tool_result(envelope: ToolResultEnvelope | dict[str, Any]) -> str:
     return json.dumps(normalize_tool_result(envelope).to_dict(), ensure_ascii=False, sort_keys=True)
 
 
-# LLM: deserialize_tool_call reads JSON/dict payloads into a ToolCallEnvelope.
-# 函数用途: 作为工具协议 v2 的读取边界，兼容旧字段并返回规范对象。
 def deserialize_tool_call(payload: str | bytes | dict[str, Any]) -> ToolCallEnvelope:
     return normalize_tool_call(payload)
 
 
-# LLM: deserialize_tool_result reads JSON/dict payloads into a ToolResultEnvelope.
-# 函数用途: 作为工具协议 v2 的读取边界，兼容旧字段并返回规范对象。
 def deserialize_tool_result(payload: str | bytes | dict[str, Any]) -> ToolResultEnvelope:
     return normalize_tool_result(payload)
 
 
-# LLM: _legacy_flat_call_input keeps flat tool args open-world without treating arg status as protocol status.
-# 函数用途: 把旧式 {"tool": "...", "path": "..."} 调用里的参数提取到 input。
 def _legacy_flat_call_input(data: dict[str, Any], *, include_status: bool) -> dict[str, Any]:
     protocol_keys = {
         "args",
@@ -172,8 +152,6 @@ def _legacy_flat_call_input(data: dict[str, Any], *, include_status: bool) -> di
     return {key: value for key, value in data.items() if key not in protocol_keys}
 
 
-# LLM: _loads_if_json accepts protocol payloads as JSON strings or dict-like data.
-# 函数用途: 为 deserialize/normalize 统一输入边界，非对象 JSON 降成空对象。
 def _loads_if_json(payload: Any) -> dict[str, Any]:
     if isinstance(payload, bytes):
         payload = payload.decode("utf-8")
@@ -186,8 +164,6 @@ def _loads_if_json(payload: Any) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-# LLM: _result_identity keeps normalize_tool_result below the function-size guard.
-# 函数用途: 从结果 payload 中恢复 tool_name 和 operation_id，兼容 call_id 旧字段。
 def _result_identity(data: dict[str, Any]) -> tuple[str, str]:
     tool_name = str(data.get("tool_name") or data.get("tool") or "")
     call_id = str(data.get("call_id") or "")
@@ -199,8 +175,6 @@ def _result_identity(data: dict[str, Any]) -> tuple[str, str]:
     return tool_name, operation_id
 
 
-# LLM: _result_idempotency_key derives replay safety from structured result fields.
-# 函数用途: 读取或生成工具结果幂等键，不依赖结果自然语言。
 def _result_idempotency_key(data: dict[str, Any], tool_name: str, operation_id: str, status: str) -> str:
     existing = str(data.get("idempotency_key") or "")
     if existing:
@@ -208,8 +182,6 @@ def _result_idempotency_key(data: dict[str, Any], tool_name: str, operation_id: 
     return build_idempotency_key(tool_name or "unknown_tool", {"operation_id": operation_id, "status": status})
 
 
-# LLM: _result_error builds ToolError only when the structured status is failed.
-# 函数用途: 归一化失败结果的错误字段，成功结果不制造错误对象。
 def _result_error(data: dict[str, Any], status: str) -> ToolError | None:
     error_payload = data.get("error")
     if error_payload is None and status == "failed":
@@ -221,16 +193,12 @@ def _result_error(data: dict[str, Any], status: str) -> ToolError | None:
     return ToolError.from_payload(error_payload) if error_payload is not None else None
 
 
-# LLM: _result_output keeps output refs structured without scanning prose for paths.
-# 函数用途: 兼容 legacy output_ref；否则返回 output 原值。
 def _result_output(data: dict[str, Any]) -> Any:
     if data.get("output") is None and "output_ref" in data:
         return {"output_ref": data.get("output_ref")}
     return data.get("output")
 
 
-# LLM: _result_operation_ref keeps result envelopes linked to their call operation.
-# 函数用途: 从 operation_ref 字段恢复引用；缺失时用结构化 result 身份补齐。
 def _result_operation_ref(
     data: dict[str, Any],
     tool_name: str,
@@ -248,8 +216,6 @@ def _result_operation_ref(
     )
 
 
-# LLM: _normalize_artifact_refs preserves only explicit artifact refs from structured fields.
-# 函数用途: 规范化 artifact_refs 列表；不会读取 output/summary 等自然语言来造 refs。
 def _normalize_artifact_refs(payload: Any) -> list[ArtifactRef]:
     if not isinstance(payload, list):
         return []
@@ -257,8 +223,6 @@ def _normalize_artifact_refs(payload: Any) -> list[ArtifactRef]:
     return [item for item in refs if item.path]
 
 
-# LLM: _artifact_ref_from_payload converts explicit refs into the canonical action-protocol ArtifactRef.
-# 函数用途: 只从 artifact_refs 结构字段恢复产物引用；不会扫描 output/summary 等自然语言。
 def _artifact_ref_from_payload(payload: Any) -> ArtifactRef:
     if isinstance(payload, ArtifactRef):
         return payload
@@ -289,8 +253,6 @@ def _artifact_ref_from_payload(payload: Any) -> ArtifactRef:
     )
 
 
-# LLM: _artifact_ref_findings validates artifact refs without checking filesystem state.
-# 函数用途: 返回 refs 合同问题，保持该模块纯数据校验、不做 I/O。
 def _artifact_ref_findings(refs: list[ArtifactRef]) -> list[str]:
     findings: list[str] = []
     for index, ref in enumerate(refs):
@@ -301,8 +263,6 @@ def _artifact_ref_findings(refs: list[ArtifactRef]) -> list[str]:
     return findings
 
 
-# LLM: _status_from_result maps legacy ok booleans and v2 status strings into one status vocabulary.
-# 函数用途: 兼容旧结果字段，同时让失败结果进入结构化错误校验链路。
 def _status_from_result(data: dict[str, Any]) -> str:
     if data.get("status"):
         return str(data["status"]).lower()

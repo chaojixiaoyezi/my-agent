@@ -110,8 +110,7 @@
 - Gateway helper calls remain stable for CLI/scenario callers while watch/daemon/gateway paths continue to enter core through `WatchParams` and context bundles.
 - Focused verification covered gateway helper and gateway logging tests.
 - 2026-05-07 high-risk cleanup continued across adapter, audit, HTTP startup, logging, recovery, and request execution helpers; new fields stay behind focused dataclass contexts rather than widening gateway request handling.
-## 2026-05-07 LLM annotation coverage update
-- 中文说明：这一轮是 gateway 模块的注释同步，不改变协议、文件格式、工作流语义和公开接口。以后改模块/类/函数行为、bundle 字段或副作用，要同步维护这些注释。
-- Product-code modules, classes, functions, and methods in the active module now carry the required `LLM:` plus `函数用途:` / `类用途:` definition-level double-layer comments format.
-- This is a documentation-only maintainability pass: behavior, file formats, workflow semantics, and public interfaces are intended to stay unchanged.
-- Future module changes must keep these comments current when changing module/class/def behavior, side effects, bundles, or caller expectations.
+## 2026-06-02 template annotation cleanup
+- 中文说明：这一轮只清理 gateway 生产代码里的机械模板注释标签，不改变协议、文件格式、工作流语义和公开接口。
+- `gateway.py` 和 `gateway_parts/runtime.py` 保留兼容 facade 的真实边界说明，但不再要求 `LLM:` / `函数用途:` 这类模板标签。
+- 后续改模块、bundle 字段或副作用时，只补能说明真实边界、事实源、失败模式或调用方影响的注释；不要恢复机械模板注释。

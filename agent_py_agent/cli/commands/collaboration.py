@@ -1,5 +1,3 @@
-# LLM: Collaboration command registration keeps argparse shape separate from command execution.
-# 模块用途: 注册 collaboration list/status 只读命令，方便查看通用协作控制面状态。
 
 from __future__ import annotations
 
@@ -12,8 +10,6 @@ from ..collaboration import (
 )
 
 
-# LLM: add_collaboration_subcommands owns the public CLI shape for collaboration status views.
-# 函数用途: 注册 collaboration 命令组和 list/status 子命令。
 def add_collaboration_subcommands(subparsers) -> None:
     group = subparsers.add_parser(
         "collaboration",
@@ -27,16 +23,12 @@ def add_collaboration_subcommands(subparsers) -> None:
     _add_update_status_command(sub)
 
 
-# LLM: _add_overview_command registers the collaboration health/preflight view.
-# 函数用途: 注册 collaboration overview 参数。
 def _add_overview_command(sub) -> None:
     overview_cmd = sub.add_parser("overview", help="查看协作控制面总览和 readiness")
     overview_cmd.add_argument("--json", action="store_true", help="输出 JSON")
     overview_cmd.set_defaults(func=cmd_collaboration_overview)
 
 
-# LLM: _add_list_command registers bounded case-list parameters.
-# 函数用途: 注册 collaboration list 参数。
 def _add_list_command(sub) -> None:
     list_cmd = sub.add_parser("list", help="列出协作 case 摘要")
     list_cmd.add_argument("--status", default="", help="可选 case 状态过滤，如 open/escalated")
@@ -45,8 +37,6 @@ def _add_list_command(sub) -> None:
     list_cmd.set_defaults(func=cmd_collaboration_list)
 
 
-# LLM: _add_status_command registers one-case inspection parameters.
-# 函数用途: 注册 collaboration status 参数。
 def _add_status_command(sub) -> None:
     status_cmd = sub.add_parser("status", help="查看单个协作 case 详情")
     status_cmd.add_argument("--case-id", required=True, help="协作 case ID")
@@ -54,8 +44,6 @@ def _add_status_command(sub) -> None:
     status_cmd.set_defaults(func=cmd_collaboration_status)
 
 
-# LLM: _add_update_status_command registers audited lifecycle update parameters.
-# 函数用途: 注册 collaboration update-status 参数。
 def _add_update_status_command(sub) -> None:
     update_cmd = sub.add_parser("update-status", help="推进协作 case 状态并记录决策摘要")
     update_cmd.add_argument("--case-id", required=True, help="协作 case ID")
@@ -67,8 +55,6 @@ def _add_update_status_command(sub) -> None:
     update_cmd.set_defaults(func=cmd_collaboration_update_status)
 
 
-# LLM: _add_update_request_command registers responder lifecycle updates.
-# 函数用途: 注册 collaboration update-request 参数。
 def _add_update_request_command(sub) -> None:
     update_cmd = sub.add_parser("update-request", help="更新协作请求状态")
     update_cmd.add_argument("--case-id", required=True, help="协作 case ID")

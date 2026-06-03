@@ -1,5 +1,3 @@
-# LLM: CLI scenario case definition; keep fixture flow and expected gateway/subagent behavior stable.
-# 模块用途: 定义一类命令行情景测试，用来复现和验证端到端流程。
 
 from __future__ import annotations
 
@@ -34,8 +32,6 @@ from ..scenario_utils import (
 )
 
 
-# LLM: _delayed_response_setup 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _delayed_response_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -82,8 +78,6 @@ def _delayed_response_setup(args):
     return paths, agent, gpaths, request_id, request_path, response_path
 
 
-# LLM: _DelayedResponseVerifyContext 是gateway CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass
 class _DelayedResponseVerifyContext:
     paths: Any
@@ -99,8 +93,6 @@ class _DelayedResponseVerifyContext:
     done_payload: dict = None  # type: ignore[assignment]
 
 
-# LLM: _DelayedResponseRunRequest 是gateway CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class _DelayedResponseRunRequest:
     paths: Any
@@ -112,8 +104,6 @@ class _DelayedResponseRunRequest:
     run_called: dict
 
 
-# LLM: _delayed_response_verify 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _delayed_response_verify(ctx: _DelayedResponseVerifyContext) -> int:
     final_ok = (
         ctx.processed == 1
@@ -146,8 +136,6 @@ def _delayed_response_verify(ctx: _DelayedResponseVerifyContext) -> int:
     return 0 if final_ok else 2
 
 
-# LLM: _collect_delayed_response_result 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 汇总多个检查来源，并按统一结构返回调用方。
 def _collect_delayed_response_result(request: _DelayedResponseRunRequest) -> _DelayedResponseVerifyContext:
     processed = _process_gateway_requests(request.agent, request.gpaths, worker_id="scenario-delayed-response-worker")
     done_path = request.gpaths.done / request.request_path.name
@@ -166,8 +154,6 @@ def _collect_delayed_response_result(request: _DelayedResponseRunRequest) -> _De
     )
 
 
-# LLM: run_scenario_gateway_delayed_response_case 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_gateway_delayed_response_case(args) -> int:
     paths, agent, gpaths, request_id, request_path, response_path = _delayed_response_setup(args)
     print_scenario_step(1, "Create a pending request with an already-arrived response")
@@ -176,8 +162,6 @@ def run_scenario_gateway_delayed_response_case(args) -> int:
 
     run_called = {"value": False}
 
-    # LLM: fail_if_called 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def fail_if_called(user_prompt: str, *, params=None) -> AgentRunResult:
         run_called["value"] = True
         raise AssertionError("agent.run should not be called when response already exists")

@@ -1,5 +1,3 @@
-# LLM: Capability request tool gives runners a formal lane to ask parents for missing powers.
-# 模块用途: 让子代理在 runner 内通过工具记录能力申请，而不是写假 JSON 文件或改 execution_context。
 
 from __future__ import annotations
 
@@ -7,16 +5,16 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ..subagents.root_task_policy import is_self_authorized_root_task
 from ..subagents.services.lifecycle import RecordCapabilityRequestParams
 from ..tools import BaseTool, ToolExecutionResult, ToolSpec
-from .orchestration_scope_resolution import (
+from .orchestration.scope_resolution import (
     ScopeResolution,
     identity_scope_resolution,
     scope_resolution_payload,
 )
-from .parameters import _string_list
-from .runner_context import current_subagent_run_id
+from .runner.context import current_subagent_run_id
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -25,8 +23,6 @@ if TYPE_CHECKING:
 _TOOL_NAME = "capability_request"
 
 
-# LLM: CapabilityRequestToolInput carries a normalized self-scoped capability request.
-# 类用途: 保存一次能力申请的 run_id 和字段包，工具执行时只写入当前 runner 的任务记录。
 @dataclass(frozen=True)
 class CapabilityRequestToolInput:
     run_id: str
@@ -34,18 +30,12 @@ class CapabilityRequestToolInput:
     scope_resolution: ScopeResolution
 
 
-# LLM: CapabilityRequestTool is the model-callable request lane for tools, skills, shell, MCP, and network.
-# 类用途: 给子代理正式申请缺失能力；只记录申请，不授权、不执行命令、不跨分支写别的代理状态。
 class CapabilityRequestTool(BaseTool):
 
-    # LLM: __init__ stores the agent facade and stable tool metadata.
-    # 函数用途: 初始化能力申请工具，不执行任何状态写入。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.spec = build_capability_request_spec()
 
-    # LLM: execute validates current-run scope and persists one OPEN CapabilityRequest.
-    # 函数用途: 把模型的能力申请写入当前 subagent run，返回 request_id 供父级路由。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         request = _capability_request_input(self.agent, params)
         if isinstance(request, ToolExecutionResult):
@@ -65,8 +55,6 @@ class CapabilityRequestTool(BaseTool):
         return _capability_ok(payload)
 
 
-# LLM: build_capability_request_spec explains the formal lane and rejects fake file-based requests.
-# 函数用途: 构建 capability_request 工具说明，帮助 runner 在缺工具/skill/shell/MCP 时走系统通道。
 def build_capability_request_spec() -> ToolSpec:
     return ToolSpec(
         name=_TOOL_NAME,
@@ -97,8 +85,6 @@ def build_capability_request_spec() -> ToolSpec:
     )
 
 
-# LLM: _capability_request_input normalizes bundle-shaped calls and enforces self-run scope.
-# 函数用途: 校验 run_id、problem 和能力字段，并转换成生命周期服务参数包。
 def _capability_request_input(agent: object, params: dict[str, object]) -> CapabilityRequestToolInput | ToolExecutionResult:
     normalized = _capability_params(params)
     resolution = identity_scope_resolution(
@@ -122,8 +108,6 @@ def _capability_request_input(agent: object, params: dict[str, object]) -> Capab
     )
 
 
-# LLM: _is_root_run only blocks self-authorized root/coordinator seeds, not main-agent children.
-# 函数用途: 判断当前 run 是否真的是无上级 root；普通一层小傻妞仍能向主代理申请能力。
 def _is_root_run(agent: object, run_id: str) -> bool:
     manager = getattr(agent, "subagents", None)
     if manager is None or not hasattr(manager, "load"):
@@ -135,43 +119,37 @@ def _is_root_run(agent: object, run_id: str) -> bool:
     return is_self_authorized_root_task(task)
 
 
-# LLM: _record_params converts a normalized tool payload into the lifecycle request bundle.
-# 函数用途: 把能力申请字段集中转成 RecordCapabilityRequestParams，保持业务接口 bundle 化。
 def _record_params(params: dict[str, object], problem: str) -> RecordCapabilityRequestParams:
-    requested_commands = _string_list(params.get("requested_commands"))
-    requested_tools = _string_list(params.get("requested_tools"))
+    requested_commands = string_list(params.get("requested_commands"), TOOL_TEXT_LIST_OPTIONS)
+    requested_tools = string_list(params.get("requested_tools"), TOOL_TEXT_LIST_OPTIONS)
     needed = _needed_capability(params, requested_tools, requested_commands)
     return RecordCapabilityRequestParams(
         problem=problem,
         needed_capability=needed,
         expected_output=str(params.get("expected_output") or ""),
         capability_type=_capability_type(params, requested_tools, requested_commands),
-        tried=_string_list(params.get("tried")),
-        evidence=_string_list(params.get("evidence")),
+        tried=string_list(params.get("tried"), TOOL_TEXT_LIST_OPTIONS),
+        evidence=string_list(params.get("evidence"), TOOL_TEXT_LIST_OPTIONS),
         constraints=_string_dict(params.get("constraints")),
         requested_tools=requested_tools,
-        requested_skills=_string_list(params.get("requested_skills")),
-        requested_mcp_tools=_string_list(params.get("requested_mcp_tools")),
+        requested_skills=string_list(params.get("requested_skills"), TOOL_TEXT_LIST_OPTIONS),
+        requested_mcp_tools=string_list(params.get("requested_mcp_tools"), TOOL_TEXT_LIST_OPTIONS),
         requested_commands=requested_commands,
-        cwd_scope=_string_list(params.get("cwd_scope")),
-        path_scope=_string_list(params.get("path_scope")),
-        network_scope=_string_list(params.get("network_scope")),
+        cwd_scope=string_list(params.get("cwd_scope"), TOOL_TEXT_LIST_OPTIONS),
+        path_scope=string_list(params.get("path_scope"), TOOL_TEXT_LIST_OPTIONS),
+        network_scope=string_list(params.get("network_scope"), TOOL_TEXT_LIST_OPTIONS),
         output_budget=_object_dict(params.get("output_budget")),
         risk_level=str(params.get("risk_level") or ""),
-        fallback_attempted=_string_list(params.get("fallback_attempted")),
+        fallback_attempted=string_list(params.get("fallback_attempted"), TOOL_TEXT_LIST_OPTIONS),
         escalation_target=str(params.get("escalation_target") or "parent"),
         reserved=_object_dict(params.get("reserved")),
     )
 
 
-# LLM: _capability_params keeps capability_request parameters flat.
-# 函数用途: 不再展开 request/orchestration 包装；模型可见协议只接受顶层字段。
 def _capability_params(params: dict[str, object]) -> dict[str, object]:
     return dict(params)
 
 
-# LLM: _needed_capability infers a conservative name when the model supplies only scoped tool details.
-# 函数用途: 优先使用模型显式字段；缺省时从 requested_tools/commands 推断 controlled_exec 或通用能力。
 def _needed_capability(params: dict[str, object], tools: list[str], commands: list[str]) -> str:
     explicit = str(params.get("needed_capability") or params.get("capability") or "").strip()
     if explicit:
@@ -183,8 +161,6 @@ def _needed_capability(params: dict[str, object], tools: list[str], commands: li
     return "capability"
 
 
-# LLM: _capability_type keeps shell/tool/skill/MCP routing hints narrow and predictable.
-# 函数用途: 生成 capability_type；显式值优先，否则根据 requested 字段保守推断。
 def _capability_type(params: dict[str, object], tools: list[str], commands: list[str]) -> str:
     explicit = str(params.get("capability_type") or "").strip()
     if explicit:
@@ -194,15 +170,11 @@ def _capability_type(params: dict[str, object], tools: list[str], commands: list
     return "generic"
 
 
-# LLM: _string_dict normalizes JSON-object fields without accepting arbitrary scalar text.
-# 函数用途: 把 constraints 等字段转成 str->str 字典，避免服务层收到非预期结构。
 def _string_dict(value: object) -> dict[str, str]:
     parsed = _object_dict(value)
     return {key: str(item) for key, item in parsed.items() if str(item).strip()}
 
 
-# LLM: _object_dict preserves JSON-like budgets and reserved values while rejecting scalar blobs.
-# 函数用途: 支持 dict 或 JSON object 字符串；其他输入返回空字典。
 def _object_dict(value: object) -> dict[str, object]:
     if isinstance(value, dict):
         return {str(key): item for key, item in value.items()}
@@ -216,8 +188,6 @@ def _object_dict(value: object) -> dict[str, object]:
     return {}
 
 
-# LLM: _capability_request_parameters keeps the spec dict readable under size guards.
-# 函数用途: 返回工具参数摘要，供 Tool Catalog 展示。
 def _capability_request_parameters() -> dict[str, str]:
     return {
         "problem": "必填；当前被什么能力缺口阻塞",
@@ -231,8 +201,6 @@ def _capability_request_parameters() -> dict[str, str]:
     }
 
 
-# LLM: _capability_request_parameter_details gives the model exact field semantics without growing the class.
-# 函数用途: 返回详细参数说明，减少模型写 capability_request.json 这类假动作。
 def _capability_request_parameter_details() -> dict[str, str]:
     return {
         "problem": "写清楚为什么现有工具不能继续；不要只写“需要工具”。",
@@ -246,13 +214,9 @@ def _capability_request_parameter_details() -> dict[str, str]:
     }
 
 
-# LLM: _capability_ok formats machine-readable success output for the runner loop.
-# 函数用途: 统一成功返回，方便测试和父级日志读取。
 def _capability_ok(payload: dict[str, object]) -> ToolExecutionResult:
     return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
-# LLM: _capability_error formats concise model-facing validation errors.
-# 函数用途: 统一失败返回，让模型能自修参数而不是继续写假文件。
 def _capability_error(message: str) -> ToolExecutionResult:
     return ToolExecutionResult(_TOOL_NAME, False, message)

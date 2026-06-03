@@ -1,15 +1,12 @@
-# LLM: Context bundle refs collect task/run workspace paths without reading artifact bodies.
-# 模块用途: 为子代理 context bundle 生成 workspace_refs、lineage 和安全路径字符串。
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from ..model_visible_refs import current_model_ref
 from .models import SubAgentTask
 
 
-# LLM: workspace_refs is the only model-facing path vocabulary for subagent workspaces.
-# 函数用途: 生成当前任务根、交付目录、工作目录和当前 agent 工作目录；旧工单目录只留给恢复文件，不再进入模型提示。
 def workspace_refs(task: SubAgentTask) -> dict[str, str]:
     task_workspace = safe_string_ref(task, "task_workspace_dir")
     work_dir = str(Path(task_workspace) / "work") if task_workspace else ""
@@ -48,8 +45,6 @@ def workspace_refs(task: SubAgentTask) -> dict[str, str]:
     }
 
 
-# LLM: latest_continue_packet_ref reserves a stable task-local subagent resume packet path.
-# 函数用途: 从 agent_run_compactions_dir 派生 latest_continue_packet.json，供 runner prompt 按存在性读取。
 def latest_continue_packet_ref(task: SubAgentTask) -> str:
     explicit = safe_string_ref(task, "agent_run_latest_session_continue_packet_json")
     if explicit:
@@ -58,8 +53,6 @@ def latest_continue_packet_ref(task: SubAgentTask) -> str:
     return str(Path(compactions) / "session" / "latest_continue_packet.json") if compactions else ""
 
 
-# LLM: lineage gives nested runners parent/root refs without expanding ancestor files into prompt text.
-# 函数用途: 记录当前子代理在任务树中的位置，以及直接父级 context bundle 的可读路径。
 def lineage(task: SubAgentTask) -> dict[str, object]:
     parent_id = str(task.parent_id or "")
     task_workspace_ref = safe_string_ref(task, "task_workspace_dir")
@@ -80,10 +73,8 @@ def lineage(task: SubAgentTask) -> dict[str, object]:
     }
 
 
-# LLM: safe_string_ref protects JSON context bundles from mocks or missing optional path refs.
-# 函数用途: 读取可选路径字段；只有字符串和 Path 会进入 bundle，MagicMock/None 归一成空串。
 def safe_string_ref(task: SubAgentTask, field_name: str) -> str:
     value = getattr(task, field_name, "")
     if isinstance(value, Path):
-        return str(value)
-    return value if isinstance(value, str) else ""
+        return current_model_ref(value)
+    return current_model_ref(value) if isinstance(value, str) else ""

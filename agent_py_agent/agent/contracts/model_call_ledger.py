@@ -1,5 +1,3 @@
-# LLM: Model call ledger stores provider request timing as structured machine facts.
-# 模块用途: 记录模型调用 started、first_token、finished 和 timeout 事件，供超时估算和恢复逻辑读取。
 
 from __future__ import annotations
 
@@ -9,22 +7,16 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 
-# LLM: ModelCallLedgerOptions keeps ledger retention policy out of method signatures.
-# 类用途: 配置账本最多保留多少条模型调用记录。
 @dataclass(frozen=True)
 class ModelCallLedgerOptions:
     max_records: int = 128
 
 
-# LLM: ModelCallLedgerContext injects clock access for deterministic tests and runtime isolation.
-# 类用途: 保存账本运行时依赖；默认使用 monotonic，不读取自然语言日志。
 @dataclass(frozen=True)
 class ModelCallLedgerContext:
     now: Callable[[], float] = time.monotonic
 
 
-# LLM: ModelCallStartedParams bundles structured facts known before provider generation begins.
-# 类用途: 作为 started 事件的参数包，记录模型、后端、输入规模和运行引用。
 @dataclass(frozen=True)
 class ModelCallStartedParams:
     call_id: str
@@ -38,8 +30,6 @@ class ModelCallStartedParams:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-# LLM: ModelCallFirstTokenParams carries structured first-token observations.
-# 类用途: 作为 first_token 事件的参数包，记录可选输出 token 数和缓存疑似标记。
 @dataclass(frozen=True)
 class ModelCallFirstTokenParams:
     call_id: str
@@ -47,8 +37,6 @@ class ModelCallFirstTokenParams:
     cache_suspected: bool = False
 
 
-# LLM: ModelCallFinishParams carries structured completion observations.
-# 类用途: 作为 finished 事件的参数包，记录完成时输出 token 数和缓存疑似标记。
 @dataclass(frozen=True)
 class ModelCallFinishParams:
     call_id: str
@@ -56,8 +44,6 @@ class ModelCallFinishParams:
     cache_suspected: bool = False
 
 
-# LLM: ModelCallTimeoutParams records timeout details without parsing provider prose.
-# 类用途: 作为 timeout 事件的参数包，描述命中的超时预算和阶段。
 @dataclass(frozen=True)
 class ModelCallTimeoutParams:
     call_id: str
@@ -65,8 +51,6 @@ class ModelCallTimeoutParams:
     timeout_stage: str
 
 
-# LLM: ModelCallRecord is the immutable model-call fact row consumed by monitors.
-# 类用途: 保存一次模型调用的结构化状态、时间戳、耗时和 token 规模。
 @dataclass(frozen=True)
 class ModelCallRecord:
     call_id: str
@@ -92,8 +76,6 @@ class ModelCallRecord:
     events: tuple[str, ...] = ("started",)
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: to_dict gives persistence and tests a stable primitive payload.
-    # 函数用途: 把模型调用记录转为普通 dict，避免调用方读取 dataclass 内部实现。
     def to_dict(self) -> dict[str, Any]:
         return {
             "call_id": self.call_id,
@@ -121,11 +103,7 @@ class ModelCallRecord:
         }
 
 
-# LLM: ModelCallLedger maintains an in-memory append-only view of model-call facts.
-# 类用途: 提供 started、first_token、finished、timeout 写入接口和 records 读取接口。
 class ModelCallLedger:
-    # LLM: __init__ wires retention options and injectable clock into the ledger.
-    # 函数用途: 初始化空账本和 call_id 索引，不执行文件或网络 I/O。
     def __init__(
         self,
         options: ModelCallLedgerOptions | None = None,
@@ -136,8 +114,6 @@ class ModelCallLedger:
         self._records: list[ModelCallRecord] = []
         self._index: dict[str, int] = {}
 
-    # LLM: started writes the initial structured fact row for a provider call.
-    # 函数用途: 记录模型调用开始事件并返回创建的记录。
     def started(self, params: ModelCallStartedParams) -> ModelCallRecord:
         now = float(self.context.now())
         record = ModelCallRecord(
@@ -155,8 +131,6 @@ class ModelCallLedger:
         self._append_or_replace(record)
         return record
 
-    # LLM: first_token records the first streamed token timing for timeout learning.
-    # 函数用途: 标记模型调用已产出首 token，并计算 started 到 first_token 的耗时。
     def first_token(self, params: ModelCallFirstTokenParams) -> ModelCallRecord:
         record = self._require_record(params.call_id)
         if record.first_token_at is not None:
@@ -174,8 +148,6 @@ class ModelCallLedger:
         self._replace(updated)
         return updated
 
-    # LLM: finished records successful provider completion and total latency.
-    # 函数用途: 标记模型调用完成，并保存输出 token 数和总耗时。
     def finished(self, params: ModelCallFinishParams) -> ModelCallRecord:
         record = self._require_record(params.call_id)
         now = float(self.context.now())
@@ -191,8 +163,6 @@ class ModelCallLedger:
         self._replace(updated)
         return updated
 
-    # LLM: timeout records provider timeout facts for recovery and future timeout budgets.
-    # 函数用途: 标记模型调用超时，并保存超时预算、阶段和总等待时长。
     def timeout(self, params: ModelCallTimeoutParams) -> ModelCallRecord:
         record = self._require_record(params.call_id)
         now = float(self.context.now())
@@ -208,13 +178,9 @@ class ModelCallLedger:
         self._replace(updated)
         return updated
 
-    # LLM: records exposes a stable snapshot for monitors without sharing mutable storage.
-    # 函数用途: 返回当前账本记录的不可变 tuple，调用方可安全遍历。
     def records(self) -> tuple[ModelCallRecord, ...]:
         return tuple(self._records)
 
-    # LLM: _append_or_replace keeps call_id uniqueness and retention limits consistent.
-    # 函数用途: 插入新记录或替换同 call_id 记录，并按 max_records 修剪旧记录。
     def _append_or_replace(self, record: ModelCallRecord) -> None:
         if record.call_id in self._index:
             self._replace(record)
@@ -223,20 +189,14 @@ class ModelCallLedger:
         self._rebuild_index()
         self._trim_records()
 
-    # LLM: _replace swaps one immutable record in the ledger by call_id.
-    # 函数用途: 用更新后的记录替换旧记录，保持列表顺序不变。
     def _replace(self, record: ModelCallRecord) -> None:
         self._records[self._index[record.call_id]] = record
 
-    # LLM: _require_record centralizes unknown call_id errors for event updates.
-    # 函数用途: 根据 call_id 取记录；不存在时抛出 KeyError。
     def _require_record(self, call_id: str) -> ModelCallRecord:
         if call_id not in self._index:
             raise KeyError(f"unknown model call id: {call_id}")
         return self._records[self._index[call_id]]
 
-    # LLM: _trim_records enforces bounded in-memory retention.
-    # 函数用途: 超出 max_records 时丢弃最旧记录并重建索引。
     def _trim_records(self) -> None:
         max_records = max(1, int(self.options.max_records))
         if len(self._records) <= max_records:
@@ -244,14 +204,10 @@ class ModelCallLedger:
         self._records = self._records[-max_records:]
         self._rebuild_index()
 
-    # LLM: _rebuild_index derives call_id positions from the current record list.
-    # 函数用途: 在插入或修剪后刷新内部索引。
     def _rebuild_index(self) -> None:
         self._index = {record.call_id: index for index, record in enumerate(self._records)}
 
 
-# LLM: _append_event prevents duplicate terminal events in repeated writes.
-# 函数用途: 给事件 tuple 追加新阶段；最后一个事件相同时保持原值。
 def _append_event(events: tuple[str, ...], event: str) -> tuple[str, ...]:
     if events and events[-1] == event:
         return events

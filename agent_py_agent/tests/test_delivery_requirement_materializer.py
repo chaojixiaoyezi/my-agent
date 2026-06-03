@@ -402,7 +402,7 @@ def test_materialized_delivery_contract_attaches_doctor_findings_for_bad_contrac
 
     doctor = contract["_contract_doctor"]
     assert doctor["ok"] is False
-    assert doctor["repair_actions"][0]["recommended_action"] == "rematerialize_delivery_contract"
+    assert doctor["repair_actions"][0]["recommended_action"] == "repair_effective_contract"
     assert "DELIVERY_CONTRACT_ARTIFACTS_NOT_LIST" in {
         finding["code"] for finding in doctor["findings"]
     }

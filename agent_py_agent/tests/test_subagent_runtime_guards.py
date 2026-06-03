@@ -8,11 +8,11 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
-from agent_py_agent.agent.agent_core.subagent_attempt_guard import (
+from agent_py_agent.agent.agent_core.subagent.attempt_guard import (
     stale_subagent_attempt_message,
     stale_subagent_attempt_result,
 )
-from agent_py_agent.agent.agent_core.tool_loop_completion import (
+from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
 )
@@ -49,6 +49,27 @@ def test_stale_attempt_guard_blocks_abandoned_runner_tools(tmp_path):
     assert result.ok is False
     assert result.tool == "write_file"
     assert "已被废弃或超时" in result.output
+
+
+def test_attempt_guard_blocks_when_runner_state_unreadable() -> None:
+    def broken_load(_run_id):
+        raise RuntimeError("attempt ledger unreadable")
+
+    agent = SimpleNamespace(
+        subagents=SimpleNamespace(load=broken_load),
+        _current_subagent_run_id="run-1",
+        _current_subagent_attempt_id="attempt-1",
+    )
+
+    result = stale_subagent_attempt_result(agent, {"tool": "write_file", "path": "out.txt"})
+    message = stale_subagent_attempt_message(agent)
+
+    assert result is not None
+    assert result.ok is False
+    assert "attempt 状态读取失败" in result.output
+    assert "attempt ledger unreadable" in result.output
+    assert message is not None
+    assert "attempt 状态读取失败" in message
 
 
 def test_stale_attempt_guard_stops_tool_loop_before_next_model_call(tmp_path):

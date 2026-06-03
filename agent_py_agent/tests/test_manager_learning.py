@@ -80,11 +80,11 @@ class TestLearningSimilarity:
         assert result == 0.0
 
     def test_similarity_substring(self):
-        """测试子串关系。"""
+        """子串只作为相似信号，不再直接给硬编码高分。"""
         from agent_py_agent.agent.subagents.manager_learning import _learning_similarity
 
         result = _learning_similarity("hello", "hello world")
-        assert result >= 0.9
+        assert 0.45 <= result < 0.9
 
     def test_similarity_long_context_containment_is_not_duplicate(self):
         """短教训出现在长报告里时，不应只靠包含关系当成同一条学习。"""
@@ -107,6 +107,16 @@ class TestLearningSimilarity:
         result = _learning_similarity(
             "先确认真实路径再读文件",
             "执行前先确认真实路径，再读取文件",
+        )
+        assert result >= 0.45
+
+    def test_similarity_reworded_lesson_stays_mergeable(self):
+        """同一条经验换一种说法时，仍应超过候选合并阈值。"""
+        from agent_py_agent.agent.subagents.manager_learning import _learning_similarity
+
+        result = _learning_similarity(
+            "先复现失败，再改代码，最后补一个最小回归测试",
+            "遇到缺陷时先做最小复现，然后修改实现，最后补回归检查",
         )
         assert result >= 0.45
 
@@ -235,6 +245,30 @@ class TestSubAgentLearningMixin:
         result = manager.list_learning_candidates()
         assert result == []
 
+    def test_list_learning_candidates_report_keeps_load_errors(self, tmp_path: Path):
+        """坏学习草稿不应被伪装成没有候选。"""
+        from agent_py_agent.agent.subagents.manager_learning import SubAgentLearningMixin
+
+        class MockManager(SubAgentLearningMixin):
+            def __init__(self):
+                self.workspace = tmp_path
+                self.workspace_root = tmp_path
+
+        manager = MockManager()
+        drafts_dir = manager.learning_drafts_dir()
+        (drafts_dir / "broken.json").write_text("{", encoding="utf-8")
+        (drafts_dir / "list.json").write_text("[]", encoding="utf-8")
+
+        report = manager.list_learning_candidates_report()
+
+        assert report.candidates == []
+        assert len(report.load_errors) == 2
+        assert {
+            item["error"]["context"]
+            for item in report.load_errors
+            if isinstance(item.get("error"), dict)
+        } == {"subagent_learning.candidates.load"}
+
     def test_learning_drafts_dir_creates_directory(self, tmp_path: Path):
         """测试学习草稿目录自动创建。"""
         from agent_py_agent.agent.subagents.manager_learning import SubAgentLearningMixin
@@ -355,6 +389,7 @@ class TestSubAgentLearningCandidateMixin:
         stats = manager.learning_stats()
         assert stats["total"] == 0
         assert stats["draft"] == 0
+        assert stats["load_errors"] == []
         assert stats["accepted"] == 0
 
     def test_learning_stats_with_candidates(self, tmp_path: Path):

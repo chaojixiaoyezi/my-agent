@@ -15,7 +15,7 @@ def _daemon_args(tmp_path: Path) -> MagicMock:
     args.capability_config = str(tmp_path / "capability.yaml")
     args.skill_dir = None
     args.apply = True
-    args.execute_runners = True
+    args.start_runners = True
     args.planner = True
     args.interval = 0
     args.max_runners = 2
@@ -36,8 +36,8 @@ def _daemon_agent(tmp_path: Path) -> MagicMock:
     mock_report = MagicMock()
     mock_report.summary = {"total": 0}
     mock_agent = MagicMock()
-    mock_agent.config.daemon_apply = False
-    mock_agent.config.daemon_execute_runners = False
+    mock_agent.config.daemon_mutate_state = False
+    mock_agent.config.daemon_start_runners = False
     mock_agent.config.daemon_planner = False
     mock_agent.config.daemon_interval = 30
     mock_agent.config.daemon_max_runners = 1
@@ -77,7 +77,7 @@ class TestCmdDaemon:
         args.config = str(tmp_path / "config.yaml")
         args.capability_config = str(tmp_path / "capability.yaml")
         args.apply = False
-        args.execute_runners = False
+        args.start_runners = False
         args.planner = False
         args.interval = 60
         args.max_runners = 1
@@ -94,8 +94,8 @@ class TestCmdDaemon:
         args.skill_dir = None
 
         mock_agent = MagicMock()
-        mock_agent.config.daemon_apply = False
-        mock_agent.config.daemon_execute_runners = False
+        mock_agent.config.daemon_mutate_state = False
+        mock_agent.config.daemon_start_runners = False
         mock_agent.config.daemon_planner = False
         mock_agent.config.daemon_interval = 60
         mock_agent.config.daemon_max_runners = 1
@@ -108,11 +108,11 @@ class TestCmdDaemon:
 
         # 直接测试 _resolve_daemon_options 函数
         options = _resolve_daemon_options(mock_agent, args)
-        assert options.apply is False
+        assert options.mutate_state is False
         assert options.interval == 60
 
     def test_cmd_daemon_passes_watch_params_bundle(self, tmp_path: Path):
-        from agent_py_agent.agent.agent_core.dispatch_params import WatchParams
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.params import WatchParams
         from agent_py_agent.cli.daemon import cmd_daemon
 
         args = _daemon_args(tmp_path)
@@ -127,7 +127,7 @@ class TestCmdDaemon:
 
         call_kwargs = mock_agent.watch_subagents.call_args.kwargs
         assert isinstance(call_kwargs["params"], WatchParams)
-        assert call_kwargs["params"].execute_runners is True
+        assert call_kwargs["params"].start_runners is True
         assert call_kwargs["params"].advance is True
         assert call_kwargs["params"].max_runners == 2
         assert "apply" not in call_kwargs
@@ -214,13 +214,13 @@ class TestValidateDaemonNumbers:
 class TestResolveDaemonOptions:
     """测试 _resolve_daemon_options 函数。"""
 
-    def test_resolve_daemon_options_execute_runners_without_apply(self, tmp_path: Path):
-        """测试 execute_runners 必须和 apply 一起使用。"""
+    def test_resolve_daemon_options_start_runners_without_apply(self, tmp_path: Path):
+        """测试 start_runners 必须和状态写回一起使用。"""
         from agent_py_agent.cli.daemon import _resolve_daemon_options
 
         mock_agent = MagicMock()
-        mock_agent.config.daemon_apply = False
-        mock_agent.config.daemon_execute_runners = True
+        mock_agent.config.daemon_mutate_state = False
+        mock_agent.config.daemon_start_runners = True
         mock_agent.config.daemon_planner = False
         mock_agent.config.daemon_interval = 60
         mock_agent.config.daemon_max_runners = 1
@@ -233,7 +233,7 @@ class TestResolveDaemonOptions:
 
         args = MagicMock()
         args.apply = False
-        args.execute_runners = True
+        args.start_runners = True
         args.planner = None
         args.interval = None
         args.max_runners = None

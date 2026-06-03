@@ -1,5 +1,3 @@
-# LLM: Tool-call runtime helpers isolate guard checks and finished traces from the main tool loop.
-# 模块用途: 执行单个工具调用前的拦截、预算、去重和 runner trace，不让 tool loop 主流程变长。
 
 from __future__ import annotations
 
@@ -8,20 +6,17 @@ from dataclasses import dataclass
 
 from ..tools import ToolExecutionResult
 from .parameters import _one_shot_tool_call_key
-from .runner_stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_finished
-from .subagent_attempt_guard import stale_subagent_attempt_result
-from .tool_agent_budget_stage import ToolAgentBudgetStageRequest, maybe_block_tool_agent_budget
-from .tool_call_guardrail import (
-    maybe_block_repeated_tool_failure,
-    maybe_block_repeated_tool_no_progress,
+from .runner.stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_finished
+from .subagent.attempt_guard import stale_subagent_attempt_result
+from .tool_guard.agent_budget_stage import (
+    ToolAgentBudgetStageRequest,
+    maybe_block_tool_agent_budget,
 )
-from .tool_loop_recovery import tool_payload_with_run_scope
-from .tool_round_execution import ToolCallExecuteParams
+from .tool_loop.recovery import tool_payload_with_run_scope
+from .tool_loop.round_execution import ToolCallExecuteParams
 from .tool_runtime_ledger import write_boundary_with_runtime_ledger
 
 
-# LLM: ToolCallRuntimeRequest bundles one parsed tool call with its trace metadata.
-# 类用途: 把工具执行、guard 和 trace 需要的字段放进一个参数包，避免 helper 参数膨胀。
 @dataclass(frozen=True)
 class ToolCallRuntimeRequest:
     agent: object
@@ -30,8 +25,6 @@ class ToolCallRuntimeRequest:
     trace_request: RunnerToolStageTraceRequest
 
 
-# LLM: guarded_tool_call_result centralizes pre-execution blocks for one tool call.
-# 函数用途: 在真正执行工具前统一处理一次性去重、过期子代理尝试、读正文限制、直接写入限制和预算限制。
 def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
     request = runtime_request.request
     payload = runtime_request.payload
@@ -40,28 +33,12 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
     if one_shot_key and one_shot_key in request.params.one_shot_tool_calls:
         result = _duplicate_one_shot_result(payload)
         return _trace_finished_result(trace_request, result)
-    repeated_no_progress_result = maybe_block_repeated_tool_no_progress(
-        runtime_request.agent,
-        request.params,
-        payload,
-    )
-    if repeated_no_progress_result is not None:
-        return _trace_finished_result(trace_request, repeated_no_progress_result)
-    repeated_failure_result = maybe_block_repeated_tool_failure(
-        runtime_request.agent,
-        request.params,
-        payload,
-    )
-    if repeated_failure_result is not None:
-        return _trace_finished_result(trace_request, repeated_failure_result)
     stale_result = stale_subagent_attempt_result(runtime_request.agent, payload)
     if stale_result is not None:
         return _trace_finished_result(trace_request, stale_result)
     return maybe_block_tool_agent_budget(ToolAgentBudgetStageRequest(runtime_request.agent, request, payload))
 
 
-# LLM: execute_traced_tool_call runs the tool and writes the runner finished trace.
-# 函数用途: 执行工具调用、登记一次性编排 key，并写入 finished trace。
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     one_shot_key = _one_shot_tool_call_key(runtime_request.payload)
     executable_payload = tool_payload_with_run_scope(
@@ -86,8 +63,6 @@ def _runtime_tool_call_id(runtime_request: ToolCallRuntimeRequest) -> str:
     return f"round-{runtime_request.trace_request.tool_rounds}-tool-{runtime_request.trace_request.idx}"
 
 
-# LLM: _duplicate_one_shot_result gives the model a deterministic stop signal for repeated orchestration calls.
-# 函数用途: 同一轮重复调用 create/schedule 这类一次性工具时，返回可读阻断结果。
 def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolExecutionResult:
     tool_name = str(payload.get("tool") or "unknown")
     return ToolExecutionResult(
@@ -98,8 +73,6 @@ def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolExecutionResul
     )
 
 
-# LLM: _trace_finished_result keeps guard branches short while preserving runner trace symmetry.
-# 函数用途: 工具调用被 guard 提前拦截时，统一写 finished trace 并返回同一个 ToolExecutionResult。
 def _trace_finished_result(
     trace_request: RunnerToolStageTraceRequest,
     result: ToolExecutionResult,
@@ -108,14 +81,10 @@ def _trace_finished_result(
     return result
 
 
-# LLM: _finished_trace_request projects runtime request facts into the trace dataclass.
-# 函数用途: 为正常工具完成路径生成 runner_tool_call_finished 事件。
 def _finished_trace_request(runtime_request: ToolCallRuntimeRequest, result: ToolExecutionResult):
     return _finished_trace_request_from_trace(runtime_request.trace_request, result)
 
 
-# LLM: _finished_trace_request_from_trace avoids duplicating finished trace field mapping.
-# 函数用途: 复用 started trace 的 agent/params/round/index/payload 字段，并附加 result。
 def _finished_trace_request_from_trace(trace_request: RunnerToolStageTraceRequest, result: ToolExecutionResult):
     return RunnerToolStageTraceRequest(
         agent=trace_request.agent,
@@ -127,16 +96,12 @@ def _finished_trace_request_from_trace(trace_request: RunnerToolStageTraceReques
     )
 
 
-# LLM: _one_shot_result_consumes_key preserves retry room for semantic orchestration blocks.
-# 函数用途: 只有真正成功推进的 create/schedule 调用才登记去重；blocked=true 允许上层修正后重试。
 def _one_shot_result_consumes_key(result: ToolExecutionResult) -> bool:
     if not result.ok:
         return False
     return not _orchestration_result_is_blocked(result.output)
 
 
-# LLM: _orchestration_result_is_blocked detects JSON schedule payloads that did not mutate the tree.
-# 函数用途: schedule_child_subagents 可能 ok=True 但返回 blocked=true；这类结果不应吃掉一次性调用名额。
 def _orchestration_result_is_blocked(output: object) -> bool:
     try:
         payload = json.loads(str(output or ""))

@@ -1,11 +1,8 @@
-# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
 
 from __future__ import annotations
 
 """base task creation and lifecycle service.
 
-给人看的解释：
 这里承接子代理任务创建、分割、注册卡等基础能力。
 SubAgentManager 通过 facade 方法委托到这里。
 """
@@ -19,7 +16,7 @@ from ..models import SubAgentTask
 from .collaboration_registry import register_collaboration_agent_capability
 from .inheritance_manifest import build_inheritance_manifest
 from .output_ref_rebinding import rebind_task_output_refs_to_run
-from .persistence_model_normalizers import (
+from .persistence.model_normalizers import (
     _normalize_context_manifest,
     _normalize_context_packs,
     _normalize_quality_contract,
@@ -29,8 +26,6 @@ if TYPE_CHECKING:
     from ..models import ContextManifest, QualityContract, SubAgentCard
 
 
-# LLM: CreateRunParams 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 类用途: 集中保存createrun参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class CreateRunParams:
     """Bundle of create_run parameters."""
@@ -62,8 +57,6 @@ class CreateRunParams:
     destroy_summary_required: bool = True
 
 
-# LLM: _load_parent_task keeps inheritance manifest creation best-effort and non-blocking.
-# 函数用途: 读取父级任务快照，失败时返回 None，避免创建 child 因旧工单缺失而中断。
 def _load_parent_task(manager: Any, parent_id: str):
     if not parent_id:
         return None
@@ -73,8 +66,6 @@ def _load_parent_task(manager: Any, parent_id: str):
         return None
 
 
-# LLM: _session_identity_fields creates stable session/thread ids above concrete run attempts.
-# 函数用途: 为新 run 生成独立会话身份，并把 parent/root session refs 传下去；旧记录缺字段时按 run_id 兼容。
 def _session_identity_fields(run_id: str, parent_task: Any | None) -> dict[str, str]:
     session_id = f"session-{run_id}"
     parent_session = str(getattr(parent_task, "subagent_session_id", "") or "")
@@ -87,8 +78,6 @@ def _session_identity_fields(run_id: str, parent_task: Any | None) -> dict[str, 
     }
 
 
-# LLM: _create_run_route_attrs exposes workflow route machine facts without parsing the user goal.
-# 函数用途: 从 CreateRunParams.attributes 提取 workflow 模板选择字段；普通 goal/thought 文本不作为机器事实来源。
 def _create_run_route_attrs(params: CreateRunParams) -> dict[str, object]:
     attrs = params.attributes if isinstance(params.attributes, dict) else {}
     return {
@@ -98,15 +87,11 @@ def _create_run_route_attrs(params: CreateRunParams) -> dict[str, object]:
     }
 
 
-# LLM: _memory_retention_policy keeps retention policy open-world and non-blocking.
-# 函数用途: 读取配置/创建参数里的策略名，空值回退默认策略。
 def _memory_retention_policy(value: object) -> str:
     text = str(value or "").strip()
     return text or "parent_review_or_cleanup"
 
 
-# LLM: _nonnegative_int normalizes optional retention day counts.
-# 函数用途: 将配置/参数转成非负整数，无法解析时返回 0。
 def _nonnegative_int(value: object) -> int:
     try:
         parsed = int(value)
@@ -115,10 +100,7 @@ def _nonnegative_int(value: object) -> int:
     return max(0, parsed)
 
 
-# LLM: _apply_runtime_identity_and_memory_scope writes system-derived run identity facts.
-# 函数用途: 给子代理设置 root/conversation/memory namespace，并写入 memory_scope 账本。
 def _apply_runtime_identity_and_memory_scope(task: Any, params: CreateRunParams) -> None:
-    # LLM: runtime identity records who owns the child run without promoting child memory globally.
     owner_id = str(task.owner or params.owner or "").strip()
     task.runtime_identity.root_run_id = task.root_id or task.id
     task.runtime_identity.service_owner_id = owner_id
@@ -133,8 +115,6 @@ def _apply_runtime_identity_and_memory_scope(task: Any, params: CreateRunParams)
     }
 
 
-# LLM: _memory_scope is the task-local memory retention record for one subagent.
-# 函数用途: 生成子代理任务级记忆策略，不授予长期记忆写入权限。
 def _memory_scope(task: Any, params: CreateRunParams) -> dict[str, object]:
     return {
         "schema_version": "subagent_memory_scope.v1",
@@ -146,18 +126,12 @@ def _memory_scope(task: Any, params: CreateRunParams) -> dict[str, object]:
     }
 
 
-# LLM: SubAgentBaseService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 类用途: 封装subagent基础服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class SubAgentBaseService:
     """Base task creation and lifecycle service."""
 
-    # LLM: __init__ 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def __init__(self, manager: Any):
         self.manager = manager
 
-    # LLM: split owns template child creation and leaves empty allowed_tools to role inference.
-    # 函数用途: 按数量创建模板子任务；有显式工具才传入，空值交给 worker 角色模板和任务推断。
     def split(
         self,
         goal: str,
@@ -187,14 +161,10 @@ class SubAgentBaseService:
             tasks.append(task)
         return tasks
 
-    # LLM: register_card 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 处理registercard相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def register_card(self, card: SubAgentCard) -> None:
         """Register a subagent role card."""
         self.manager.cards[card.name] = card
 
-    # LLM: create_run 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 构建createrun所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
     def create_run(
         self,
         *,
@@ -207,7 +177,6 @@ class SubAgentBaseService:
           - "plan" : run workflow planning, write result to task.workflow_plan
           - "auto" : run workflow planning, auto-merge worker spec and closeout into acceptance checklist
         """
-        # LLM: role contracts normalize reporter/checker semantics before workflow planning and persistence.
         from ..role_contracts import apply_role_contract_to_create_params
 
         params = apply_role_contract_to_create_params(
@@ -219,8 +188,6 @@ class SubAgentBaseService:
         self._finalize_task(task, params.parent_id)
         return task
 
-    # LLM: _prepare_run 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 处理preparerun相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
     def _prepare_run(self, params: CreateRunParams) -> dict[str, object]:
         """Prepare run context: paths, workflow planning, merged acceptance checks."""
         from ..services.workflow import (
@@ -260,8 +227,6 @@ class SubAgentBaseService:
             "now": time.time(),
         }
 
-    # LLM: _build_task 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 构建任务所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _build_task(self, params: CreateRunParams, prepared: dict[str, object]) -> SubAgentTask:
         """Build SubAgentTask from params and prepared context."""
         run_id = prepared["run_id"]
@@ -305,19 +270,15 @@ class SubAgentBaseService:
         )
         _apply_runtime_identity_and_memory_scope(task, params)
         task.inheritance_manifest = build_inheritance_manifest(parent_task, task)
-        # LLM: Bind self-output refs after run_id exists so models cannot persist guessed sibling ids.
         rebind_task_output_refs_to_run(task)
         return task
 
-    # LLM: _finalize_task 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 处理finalize任务相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def _finalize_task(self, task: SubAgentTask, parent_id: str) -> None:
         """Save task, register in local store, and link to parent if needed."""
         from ..debug_trace import trace_task_created
 
         self.manager.save(task)
         register_collaboration_agent_capability(self.manager, task)
-        # LLM: trace_task_created is gated by subagent_debug_trace_level and writes only internal refs.
         trace_task_created(self.manager, task)
         if self.manager.local_store:
             self.manager.local_store.task_registry.register_task(
@@ -330,8 +291,6 @@ class SubAgentBaseService:
         if parent_id:
             self.manager.add_child(parent_id, task.id)
 
-    # LLM: record_takeover 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 写入takeover的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def record_takeover(
         self,
         run_id: str,

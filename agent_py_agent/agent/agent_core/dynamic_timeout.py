@@ -1,5 +1,3 @@
-# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
-# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
 
 from __future__ import annotations
 
@@ -20,11 +18,8 @@ if TYPE_CHECKING:
     from ..settings import AgentConfig
 
 
-# LLM: DynamicTimeoutParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存动态超时参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class DynamicTimeoutParams:
-    # LLM: 超时输入集中成一个参数包，后续模型速度字段不会撑大公开接口。
     estimated_input_tokens: int = 0
     estimated_output_tokens: int = 0
     safety_margin: float | None = None
@@ -32,8 +27,6 @@ class DynamicTimeoutParams:
     max_timeout: float | None = None
 
 
-# LLM: calculate_dynamic_timeout 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 计算动态超时的预算、数量或限制，影响后续调度节奏；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def calculate_dynamic_timeout(
     config: AgentConfig,
     estimated_input_tokens: int = 0,
@@ -79,8 +72,6 @@ def calculate_dynamic_timeout(
     return max(effective_min_timeout, min(effective_max_timeout, timeout))
 
 
-# LLM: estimate_tokens_from_text 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 估算文本的令牌数量，影响后续调度节奏；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def estimate_tokens_from_text(text: str) -> int:
 
     if not text:
@@ -98,8 +89,6 @@ def estimate_tokens_from_text(text: str) -> int:
     return chinese_tokens + other_tokens
 
 
-# LLM: estimate_task_tokens 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 估算任务目标和计划的令牌数量，影响后续调度节奏；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def estimate_task_tokens(goal: str, plan: list[str] | None = None) -> tuple[int, int]:
 
     # 估算输入 token：goal + plan

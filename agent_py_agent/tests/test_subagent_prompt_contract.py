@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
 from agent_py_agent.agent.subagents.models import SubAgentExecutionContext
 
 
@@ -31,8 +31,6 @@ def test_runner_prompt_tells_leaf_to_defer_command_execution_to_parent():
     assert "从 working_dir 运行能导入被测模块" in prompt
 
 
-# LLM: test_runner_prompt_tells_leaf_to_chunk_long_file_writes prevents repeated truncated tool calls.
-# 函数用途: 长 CSS/JS/HTML 不能等工具解析失败后才提醒；runner 起步就要要求分块写。
 def test_runner_prompt_tells_leaf_to_chunk_long_file_writes():
     context = SubAgentExecutionContext(
         run_id="leaf-css",
@@ -133,8 +131,6 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
     assert "scope=peers" not in prompt
 
 
-# LLM: test_runner_prompt_tells_root_not_to_request_capability keeps root as the decision node.
-# 函数用途: root 没有上级，提示词不能引导 root 提交 capability_request 卡住自己。
 def test_runner_prompt_tells_root_not_to_request_capability():
     context = SubAgentExecutionContext(
         run_id="root-1",
@@ -277,8 +273,6 @@ def test_runner_prompt_tells_targeted_responder_to_reuse_existing_collaboration_
     assert "inspect_collaboration -> submit_collaboration_result -> update_collaboration" in prompt
 
 
-# LLM: compacted subagents must resume from their task-local run workspace, not parent long-term memory.
-# 函数用途: 验证子代理 runner prompt 会引用本地 checkpoint、summary 和 latest continue packet，避免压缩后丢失任务状态。
 def test_runner_prompt_includes_task_local_compact_continuation_refs(tmp_path: Path):
     context = _compact_continuation_context(tmp_path)
 
@@ -295,8 +289,6 @@ def test_runner_prompt_includes_task_local_compact_continuation_refs(tmp_path: P
     assert "USER.md" not in prompt
 
 
-# LLM: _compact_continuation_context builds realistic task-local refs without bloating the assertion test.
-# 函数用途: 准备带 compact packet、checkpoint 和 summary 的子代理执行上下文，复用标准 workspace_refs 形状。
 def _compact_continuation_context(tmp_path: Path) -> SubAgentExecutionContext:
     run_workspace, compactions = _prepare_compact_continuation_workspace(tmp_path)
     context = SubAgentExecutionContext(
@@ -324,8 +316,6 @@ def _compact_continuation_context(tmp_path: Path) -> SubAgentExecutionContext:
     return context
 
 
-# LLM: _prepare_compact_continuation_workspace keeps the prompt contract test data realistic but local.
-# 函数用途: 创建子代理 run workspace、checkpoint、summary 和 latest_continue_packet 测试文件。
 def _prepare_compact_continuation_workspace(tmp_path: Path) -> tuple[Path, Path]:
     run_workspace = tmp_path / "tasks" / "root-1" / "agents" / "leaf-compact"
     compactions = run_workspace / "compactions"
@@ -344,8 +334,6 @@ def _prepare_compact_continuation_workspace(tmp_path: Path) -> tuple[Path, Path]
     return run_workspace, compactions
 
 
-# LLM: _write_latest_continue_packet isolates the packet fixture shape from workspace setup.
-# 函数用途: 写入最小 task-local continue packet，供 prompt 续接测试读取。
 def _write_latest_continue_packet(session_compactions: Path, run_workspace: Path) -> None:
     (session_compactions / "latest_continue_packet.json").write_text(
         json.dumps(

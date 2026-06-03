@@ -8,12 +8,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agent_py_agent.agent.common.json_io import read_json_object
 from agent_py_agent.agent.subagents.utils import (
     _apply_missing_paths,
     _apply_paths,
     _merge_list,
     _new_id,
-    _read_json_object,
     _write_if_missing,
     _write_json_if_missing,
 )
@@ -90,41 +90,39 @@ class TestReadJsonObject:
         """读取有效 JSON 文件。"""
         file = tmp_path / "test.json"
         file.write_text('{"key": "value"}', encoding="utf-8")
-        result = _read_json_object(file)
+        result = read_json_object(file, parse_nested_string=True)
         assert result == {"key": "value"}
 
     def test_read_empty_file(self, tmp_path: Path):
         """读取空文件返回空对象。"""
         file = tmp_path / "empty.json"
         file.write_text("", encoding="utf-8")
-        result = _read_json_object(file)
+        result = read_json_object(file, parse_nested_string=True)
         assert result == {}
 
     def test_read_invalid_json(self, tmp_path: Path):
         """读取无效 JSON 返回空对象。"""
         file = tmp_path / "bad.json"
         file.write_text("not json", encoding="utf-8")
-        result = _read_json_object(file)
+        result = read_json_object(file, parse_nested_string=True)
         assert result == {}
 
     def test_read_non_dict_json(self, tmp_path: Path):
         """读取非对象 JSON 返回空对象。"""
         file = tmp_path / "array.json"
         file.write_text("[1, 2, 3]", encoding="utf-8")
-        result = _read_json_object(file)
+        result = read_json_object(file, parse_nested_string=True)
         assert result == {}
 
-    # LLM: Older work-order defaults accidentally wrote JSON objects as JSON strings; readers should tolerate that.
-    # 函数用途: 保证历史 output.json/status JSON 即使是双层编码，也能被最终收口和恢复读取。
     def test_read_nested_json_string_object(self, tmp_path: Path):
         file = tmp_path / "nested.json"
         file.write_text(json.dumps('{"run_id": "run-1", "status": "PLANNING"}'), encoding="utf-8")
-        result = _read_json_object(file)
+        result = read_json_object(file, parse_nested_string=True)
         assert result == {"run_id": "run-1", "status": "PLANNING"}
 
     def test_read_nonexistent_file(self, tmp_path: Path):
         """读取不存在文件返回空对象。"""
-        result = _read_json_object(tmp_path / "nonexistent.json")
+        result = read_json_object(tmp_path / "nonexistent.json", parse_nested_string=True)
         assert result == {}
 
 

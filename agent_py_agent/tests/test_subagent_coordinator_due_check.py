@@ -7,13 +7,11 @@ from pathlib import Path
 
 from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
 from agent_py_agent.agent.subagents.models import SubAgentTask, WorkOrderValidation
+from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
 
-# LLM: _BoardTestMixin provides an in-memory run list for coordinator due-check tests.
-# 类用途: 测试用 manager 替身，只保存任务列表并返回通过的工单校验。
-class _BoardTestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+class _BoardTestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
     def __init__(self, workspace: Path):
         SubAgentBaseMixin.__init__(self, workspace=workspace)
         self._tasks = []
@@ -25,8 +23,6 @@ class _BoardTestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
         return WorkOrderValidation(run_id=run_id, ok=True, missing=[], warnings=[])
 
 
-# LLM: _coordinator_task creates a stale planning parent with child ownership.
-# 函数用途: 构造带 child_ids 的失联 coordinator，用于验证不会被普通 runner timeout 误伤。
 def _coordinator_task(mixin: _BoardTestMixin, *, old: float) -> SubAgentTask:
     return SubAgentTask(
         id="root_coord",
@@ -46,8 +42,6 @@ def _coordinator_task(mixin: _BoardTestMixin, *, old: float) -> SubAgentTask:
     )
 
 
-# LLM: _running_child_task creates a stale active child under the coordinator.
-# 函数用途: 构造真正 RUNNING 的子任务，验证普通 heartbeat/run timeout 仍然生效。
 def _running_child_task(mixin: _BoardTestMixin, *, old: float) -> SubAgentTask:
     return SubAgentTask(
         id="run_child",
@@ -67,8 +61,6 @@ def _running_child_task(mixin: _BoardTestMixin, *, old: float) -> SubAgentTask:
     )
 
 
-# LLM: _timed_out_parent_task creates a failed leader that still owns unfinished children.
-# 函数用途: 构造父节点已经 TIMEOUT、但 child_ids 仍指向未完成子任务的真实恢复场景。
 def _timed_out_parent_task(mixin: _BoardTestMixin, *, old: float) -> SubAgentTask:
     return SubAgentTask(
         id="root_timeout",
@@ -88,8 +80,6 @@ def _timed_out_parent_task(mixin: _BoardTestMixin, *, old: float) -> SubAgentTas
     )
 
 
-# LLM: _timed_out_coordinator_task creates a dead leader with child ownership.
-# 函数用途: 构造真实 E2E 暴露的问题：coordinator 超时但仍挂着子树，应走 leadership recovery。
 def _timed_out_coordinator_task(mixin: _BoardTestMixin, *, old: float) -> SubAgentTask:
     return SubAgentTask(
         id="root_timeout_coord",
@@ -111,8 +101,6 @@ def _timed_out_coordinator_task(mixin: _BoardTestMixin, *, old: float) -> SubAge
     )
 
 
-# LLM: _planning_child_after_parent_timeout keeps the child unfinished but not independently stale.
-# 函数用途: 构造父节点超时后的未完成子节点，用于验证 due-check 能识别领导权断链。
 def _planning_child_after_parent_timeout(mixin: _BoardTestMixin, *, old: float) -> SubAgentTask:
     return SubAgentTask(
         id="run_child",

@@ -1,7 +1,5 @@
 """Adapter and user identity config normalizers."""
 
-# LLM: Identity field normalization is separate from runtime limits to keep config services readable.
-# 模块用途: 归一化外部适配器账号字段和本地用户身份字段。
 
 from __future__ import annotations
 
@@ -10,13 +8,9 @@ import os
 from ._coercion import CoercionService
 
 
-# LLM: AdapterFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: AdapterFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
 class AdapterFieldsService:
     """Normalize adapter-related config fields (feishu, qq, etc.)."""
 
-    # LLM: AdapterFieldsService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 归一化 AdapterFieldsService 负责的配置字段并追加告警。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         warnings: list[str] = []
@@ -47,13 +41,9 @@ class AdapterFieldsService:
         return out, warnings
 
 
-# LLM: UserFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: UserFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
 class UserFieldsService:
     """Normalize user-related config fields."""
 
-    # LLM: UserFieldsService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 归一化 UserFieldsService 负责的配置字段并追加告警。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         warnings: list[str] = []

@@ -4,8 +4,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-# LLM: Runtime numeric knobs must be visible in agent_config.yaml and AgentConfig.
-# 函数用途: 验证运行预算、上下文裁剪、工具解析和只读看板扫描参数都能通过主配置归一化。
 def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
     from agent_py_agent.agent.settings.config import normalize_agent_config
 
@@ -75,17 +73,103 @@ def test_simple_agent_keeps_runtime_guard_policy_snapshot(tmp_path: Path) -> Non
     assert "values" in snapshot
 
 
-# LLM: runner_concurrency=auto must not hide a second hard-coded max worker count.
-# 函数用途: 验证 auto 并发上限可由配置字段控制。
+def test_dispatch_runtime_policy_uses_agent_config_values() -> None:
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchRuntimePolicy
+
+    policy = DispatchRuntimePolicy.from_config(
+        SimpleNamespace(
+            dispatch_max_consecutive_rounds=7,
+            dispatch_active_interval=2,
+            dispatch_idle_interval=9,
+            dispatch_default_max_runners=4,
+            dispatch_default_limit=33,
+            dispatch_default_watch_interval=6.5,
+        )
+    )
+
+    assert policy.snapshot()["schema_version"] == "dispatch_runtime_policy.v1"
+    assert policy.max_consecutive_rounds == 7
+    assert policy.active_interval == 2.0
+    assert policy.idle_interval == 9.0
+    assert policy.default_max_runners == 4
+    assert policy.default_limit == 33
+    assert policy.default_watch_interval == 6.5
+
+
+def test_dispatch_loop_omitted_numbers_follow_agent_config() -> None:
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import dispatch_loop
+
+    agent = SimpleNamespace(
+        config=SimpleNamespace(
+            runner_failure_policy="auto",
+            dispatch_max_consecutive_rounds=1,
+            dispatch_default_max_runners=3,
+            dispatch_default_limit=44,
+        ),
+        has_pending_work=True,
+    )
+    agent.subagents = SimpleNamespace(list_runs=lambda: [])
+
+    class Report:
+        records = []
+
+    seen_params = []
+
+    def dispatch_subagents(_router, _capability_config, *, params):
+        seen_params.append(params)
+        return Report()
+
+    agent.dispatch_subagents = dispatch_subagents
+
+    result = dispatch_loop(agent, router=None)
+
+    assert result.rounds_count == 1
+    assert result.stopped_by_limit is True
+    assert seen_params[0].execution_plan.max_runners == 3
+    assert seen_params[0].limit == 44
+
+
+def test_dispatch_loop_explicit_numbers_override_config() -> None:
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import dispatch_loop
+
+    agent = SimpleNamespace(
+        config=SimpleNamespace(
+            runner_failure_policy="auto",
+            dispatch_max_consecutive_rounds=1,
+            dispatch_default_max_runners=3,
+            dispatch_default_limit=44,
+        ),
+        has_pending_work=True,
+    )
+    agent.subagents = SimpleNamespace(list_runs=lambda: [])
+
+    class Report:
+        records = []
+
+    seen_params = []
+
+    def dispatch_subagents(_router, _capability_config, *, params):
+        seen_params.append(params)
+        agent.has_pending_work = False
+        return Report()
+
+    agent.dispatch_subagents = dispatch_subagents
+
+    result = dispatch_loop(agent, router=None, max_consecutive_rounds=5, max_runners=2, limit=11)
+
+    assert result.rounds_count == 1
+    assert result.stopped_by_limit is False
+    assert seen_params[0].execution_plan.max_runners == 2
+    assert seen_params[0].limit == 11
+
+
 def test_runner_auto_concurrency_uses_configured_limit() -> None:
-    from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_concurrency
+    from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_concurrency
 
     assert _resolve_runner_concurrency("auto", 20, auto_limit=3) == 3
     assert _resolve_runner_concurrency("bad", 20, auto_limit=4) == 4
 
 
-# LLM: Background prompt trimming must be controlled by AgentConfig fields, not module constants.
-# 函数用途: 验证长期会话上下文预算能从配置对象生成并影响 prompt 副本裁剪。
 def test_background_context_budget_uses_configured_values() -> None:
     from agent_py_agent.agent.conversation.context_budget import (
         BackgroundContextPayloadRequest,
@@ -115,8 +199,6 @@ def test_background_context_budget_uses_configured_values() -> None:
     assert payload["agent_tree"]["nodes"][-1]["omitted_items"] == 1
 
 
-# LLM: Large tool-output archive thresholds and previews must come from config.
-# 函数用途: 验证工具输出外置阈值和预览长度都能由调用方配置。
 def test_tool_output_externalizer_uses_configured_threshold_and_preview(tmp_path: Path) -> None:
     from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
         ExternalizeToolOutputRequest,
@@ -139,8 +221,6 @@ def test_tool_output_externalizer_uses_configured_threshold_and_preview(tmp_path
     assert record["output_preview"] == "abcdef\n... [truncated 10 chars]"
 
 
-# LLM: Contract status scan defaults should be provided by config when callers do not pass explicit caps.
-# 函数用途: 验证合同状态汇总能用配置对象控制扫描文件数和 recent finding 条数。
 def test_contract_status_summary_can_read_scan_limits_from_config(tmp_path: Path) -> None:
     import json
 

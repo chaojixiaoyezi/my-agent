@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 
-# LLM: Root coordinator grants must merge baseline orchestration tools with parent-provided tools.
-# 函数用途: 确认显式 root 保留 run_command 等上层已给能力，同时补齐协调工具。
 def test_explicit_root_allowed_tools_merges_parent_grants():
     from agent_py_agent.agent.agent_core.coordinator_seed_tools import explicit_root_allowed_tools
 

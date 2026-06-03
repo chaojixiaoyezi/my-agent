@@ -1,5 +1,3 @@
-# LLM: External adapter module; keep platform payload and runtime boundary contracts stable.
-# 模块用途: 对接 QQ、飞书等外部渠道，把平台事件转换成内部请求。
 
 """WebSocket frame protocol (RFC 6455) — text frames only."""
 
@@ -9,8 +7,6 @@ import os
 import struct
 
 
-# LLM: WebSocketFrame 属于外部通道适配的类边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 类用途: 封装websocketframe相关状态和行为，维持当前模块的职责边界；关键副作用: 方法可能触发通道配置、消息回调和平台输入输出相关副作用，需保持公开契约稳定。
 class WebSocketFrame:
     """WebSocket frame parsing and construction (text frames only)."""
 
@@ -21,8 +17,6 @@ class WebSocketFrame:
     OPCODE_PING = 0x9
     OPCODE_PONG = 0xA
 
-    # LLM: build_text_frame 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 构建文本frame所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     @staticmethod
     def build_text_frame(payload: bytes, masked: bool = True) -> bytes:
         """Construct a text data frame (client -> server, must be masked)."""
@@ -35,22 +29,16 @@ class WebSocketFrame:
             return _frame_header(first, length, masked=True) + mask_key + masked_payload
         return _frame_header(first, length, masked=False) + payload
 
-    # LLM: build_close_frame 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 构建closeframe所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     @staticmethod
     def build_close_frame() -> bytes:
         """Construct a close frame."""
         return bytes([0x88, 0x00])
 
-    # LLM: build_ping_frame 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 构建pingframe所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     @staticmethod
     def build_ping_frame() -> bytes:
         """Construct a ping frame."""
         return bytes([0x89, 0x00])
 
-    # LLM: parse_frame 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 解析并归一化frame的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     @staticmethod
     def parse_frame(data: bytes) -> tuple[int, bytes] | None:
         """Parse a server response frame. Returns (opcode, payload) or None."""
@@ -82,8 +70,6 @@ class WebSocketFrame:
         return opcode, payload
 
 
-# LLM: _frame_header 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 函数用途: 处理frameheader相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持通道配置、消息回调和平台输入输出上的返回值和副作用边界稳定。
 def _frame_header(first: int, length: int, *, masked: bool) -> bytes:
     mask_bit = 0x80 if masked else 0
     if length < 126:
@@ -93,8 +79,6 @@ def _frame_header(first: int, length: int, *, masked: bool) -> bytes:
     return bytes([first, mask_bit | 127]) + struct.pack(">Q", length)
 
 
-# LLM: _parse_payload_length 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 函数用途: 解析并归一化载荷length的输入形态，让下游只处理稳定结构；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _parse_payload_length(data: bytes, length: int) -> tuple[int, int] | None:
     if length == 126:
         if len(data) < 4:
@@ -107,8 +91,6 @@ def _parse_payload_length(data: bytes, length: int) -> tuple[int, int] | None:
     return length, 2
 
 
-# LLM: _parse_mask 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 函数用途: 解析并归一化mask的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _parse_mask(data: bytes, offset: int, has_mask: bool) -> tuple[bytes | None, int]:
     if not has_mask:
         return b"", offset

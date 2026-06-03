@@ -1,5 +1,3 @@
-# LLM: Run intent is a soft path reminder, not a filesystem permission gate.
-# 模块用途: 从明确产物合同和用户显式路径中提取本轮“写到哪/参考哪”的运行意图。
 
 from __future__ import annotations
 
@@ -7,6 +5,9 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+
+from .common.value_parsing import dedupe_strings
+from .runtime_errors import DataCorruptionError, runtime_error_report
 
 _PATH_RE = re.compile(r"(~?/[^ \t\r\n，。；;：:、)）\]】\"'<>`]+)")
 _MAX_FACT_FILES = 12
@@ -46,7 +47,7 @@ def desired_outputs_from_contract(contract: dict[str, Any] | None) -> list[str]:
         ).strip()
         if path:
             outputs.append(path)
-    return _dedupe(outputs)
+    return dedupe_strings(outputs)
 
 
 def reference_roots_from_prompt(
@@ -66,7 +67,7 @@ def reference_roots_from_prompt(
         if any(_same_or_related(candidate, output) for output in desired_paths):
             continue
         roots.append(str(candidate))
-    return _dedupe(roots)
+    return dedupe_strings(roots)
 
 
 def run_intent_payload(*, reference_roots: list[str], desired_outputs: list[str]) -> dict[str, Any]:
@@ -78,31 +79,60 @@ def run_intent_payload(*, reference_roots: list[str], desired_outputs: list[str]
     }
 
 
-def latest_run_intent(workspace_root: Path) -> dict[str, Any]:
-    facts_dir = workspace_root / "memory_archive" / "runtime_facts"
+def latest_run_intent(workspace_root: Path, *, fact_roots: list[Path] | None = None) -> dict[str, Any]:
+    return latest_run_intent_report(workspace_root, fact_roots=fact_roots)[0]
+
+
+def latest_run_intent_report(
+    workspace_root: Path,
+    *,
+    fact_roots: list[Path] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    load_errors: list[dict[str, Any]] = []
+    for facts_dir in _runtime_fact_dirs(workspace_root, fact_roots):
+        intent, errors = _latest_run_intent_from_dir_report(facts_dir)
+        load_errors.extend(errors)
+        if intent:
+            return intent, load_errors
+    return {}, load_errors
+
+
+def _latest_run_intent_from_dir(facts_dir: Path) -> dict[str, Any]:
+    return _latest_run_intent_from_dir_report(facts_dir)[0]
+
+
+def _latest_run_intent_from_dir_report(facts_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if not facts_dir.exists():
-        return {}
+        return {}, []
     candidates = sorted(
         (path for path in facts_dir.glob("*/task.json") if path.is_file()),
-        key=lambda path: path.stat().st_mtime,
+        key=_path_mtime,
         reverse=True,
     )
+    load_errors: list[dict[str, Any]] = []
     for path in candidates[:_MAX_FACT_FILES]:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        payload, load_error = _runtime_fact_payload(path)
+        if load_error:
+            load_errors.append(load_error)
             continue
         intent = payload.get("run_intent") if isinstance(payload, dict) else None
         if isinstance(intent, dict) and _items(intent.get("desired_outputs")):
-            return intent
-    return {}
+            return intent, load_errors
+    return {}, load_errors
 
 
-def reference_write_feedback(*, workspace_root: Path, target: Path) -> dict[str, Any]:
-    intent = latest_run_intent(workspace_root)
+def reference_write_feedback(*, workspace_root: Path, target: Path, fact_roots: list[Path] | None = None) -> dict[str, Any]:
+    intent, load_errors = latest_run_intent_report(workspace_root, fact_roots=fact_roots)
     desired = _items(intent.get("desired_outputs"))
     references = _items(intent.get("reference_roots"))
     if not desired or not references:
+        if load_errors:
+            return {
+                "severity": "soft",
+                "blocking": False,
+                "message": "软提醒：运行意图账本读取失败；不要把它当成没有目标路径或参考目录，请按用户原话确认输出位置。",
+                "run_intent_load_errors": load_errors[:5],
+            }
         return {}
     target = target.resolve(strict=False)
     desired_paths = [_resolve_path(path, workspace_root) for path in desired]
@@ -125,7 +155,7 @@ def reference_write_feedback(*, workspace_root: Path, target: Path) -> dict[str,
 
 def _field_payload(items: list[str]) -> dict[str, Any]:
     return {
-        "items": _dedupe(items),
+        "items": dedupe_strings(items),
         "source_status": "recorded" if items else "not_recorded",
     }
 
@@ -135,7 +165,7 @@ def _items(value: Any) -> list[str]:
     raw = payload.get("items")
     if not isinstance(raw, list | tuple):
         return []
-    return _dedupe([str(item).strip() for item in raw if str(item).strip()])
+    return dedupe_strings([str(item).strip() for item in raw if str(item).strip()])
 
 
 def _resolve_path(path: str, workspace_root: Path) -> Path:
@@ -143,6 +173,42 @@ def _resolve_path(path: str, workspace_root: Path) -> Path:
     if not raw.is_absolute():
         raw = workspace_root / raw
     return raw.resolve(strict=False)
+
+
+def _runtime_fact_dirs(workspace_root: Path, fact_roots: list[Path] | None) -> list[Path]:
+    roots = [*(fact_roots or []), workspace_root]
+    dirs: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(Path(root).expanduser().resolve(strict=False))
+        if key in seen:
+            continue
+        seen.add(key)
+        dirs.append(Path(key) / "memory_archive" / "runtime_facts")
+    return dirs
+
+
+def _runtime_fact_payload(path: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return {}, _load_error(exc, path)
+    if not isinstance(payload, dict):
+        return {}, _load_error(DataCorruptionError(f"runtime fact root must be a JSON object: {path}"), path)
+    return payload, None
+
+
+def _load_error(exc: BaseException, path: Path) -> dict[str, Any]:
+    report = runtime_error_report(exc, context="run_intent.runtime_fact.read")
+    report["path"] = str(path)
+    return report
+
+
+def _path_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _same_or_related(path: Path, target: Path) -> bool:
@@ -157,22 +223,11 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
-def _dedupe(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        text = str(value or "").strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        result.append(text)
-    return result
-
-
 __all__ = [
     "build_run_intent",
     "desired_outputs_from_contract",
     "latest_run_intent",
+    "latest_run_intent_report",
     "reference_roots_from_prompt",
     "reference_write_feedback",
     "run_intent_payload",

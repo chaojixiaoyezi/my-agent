@@ -9,7 +9,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
@@ -17,8 +17,6 @@ from agent_py_agent.cli.parser import build_parser
 from agent_py_agent.tests.test_subagent_hierarchy_scheduler import _child_specs
 
 
-# LLM: Explicit max_depth/max_children still honor user-provided hard limits.
-# 函数用途: 确认用户显式给出最大深度或最大直接子任务数量时仍不会越界创建。
 def test_hierarchy_schedule_blocks_explicit_depth_and_child_limits(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="orchestrate", plan=["plan"])
@@ -99,8 +97,6 @@ def test_hierarchy_schedule_default_depth_is_unlimited(tmp_path):
     assert result.created_run_ids
 
 
-# LLM: test_subagents_hierarchy_cli_is_dry_run_by_default covers the command boundary.
-# 函数用途: 确认 CLI 可以解析 child spec，默认不写入，输出可读 JSON 摘要。
 def test_subagents_hierarchy_cli_is_dry_run_by_default(tmp_path, capsys):
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(goal="parent", thought="split", plan=["plan"])
@@ -130,8 +126,6 @@ def test_subagents_hierarchy_cli_is_dry_run_by_default(tmp_path, capsys):
     assert manager.load(parent.id).child_ids == []
 
 
-# LLM: test_subagents_hierarchy_cli_apply_creates_child proves explicit materialization.
-# 函数用途: 确认 CLI 只有带 --apply 才创建子任务，并返回 created_run_ids。
 def test_subagents_hierarchy_cli_apply_creates_child(tmp_path, capsys):
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(goal="parent", thought="split", plan=["plan"])

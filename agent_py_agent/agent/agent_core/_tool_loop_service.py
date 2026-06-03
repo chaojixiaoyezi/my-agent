@@ -1,5 +1,3 @@
-# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
-# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
 
 
 from __future__ import annotations
@@ -11,48 +9,47 @@ from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ._runtime_params import ToolLoopExecuteParams
 from .delivery_completion_soft_hint import maybe_append_delivery_completion_soft_hint
-from .orchestration_shared_context import (
+from .orchestration.loop.scope import executed_subagent_orchestration
+from .orchestration.shared_context import (
     refresh_parent_shared_context_cache,
     refresh_parent_shared_context_from_tool_record,
 )
 from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
-from .runner_context import current_task_attributes
-from .runtime_live_archive import (
+from .runner.context import current_task_attributes
+from .runtime.live_archive import (
     archive_tool_call_if_enabled,
     update_runtime_fact_progress_if_enabled,
 )
-from .subagent_attempt_guard import stale_subagent_attempt_message
+from .subagent.attempt_guard import stale_subagent_attempt_message
 from .tool_call_archive_record import archive_tool_call_record
-from .tool_call_context_reducer import render_tool_payload_for_live_prompt
-from .tool_call_guardrail import record_tool_guard_observation
-from .tool_context_reducer import render_tool_result_for_live_prompt
+from .tool_context.call_reducer import render_tool_payload_for_live_prompt
+from .tool_context.reducer import render_tool_result_for_live_prompt
+from .tool_guard.call_guardrail import record_tool_guard_observation
+from .tool_guard.loop_hints import append_tool_guardrail_action_block_hint
 from .tool_limit_closeout import final_response_after_tool_limit
-from .tool_loop_completion import ToolRoundCompletionRequest, completion_response_after_tool_round
-from .tool_loop_empty_response import (
+from .tool_loop.completion import ToolRoundCompletionRequest, completion_response_after_tool_round
+from .tool_loop.empty_response import (
     empty_model_response_fallback,
     empty_model_response_retry_context,
     should_retry_empty_model_response,
 )
-from .tool_loop_orchestration_scope import executed_subagent_orchestration
-from .tool_loop_prompting import build_tool_loop_prompt, next_tool_loop_model_response
-from .tool_loop_recovery import append_long_content_recovery_context
-from .tool_loop_response_decision import (
+from .tool_loop.prompting import build_tool_loop_prompt, next_tool_loop_model_response
+from .tool_loop.recovery import append_long_content_recovery_context
+from .tool_loop.response_decision import (
     ToolLoopRepairCounters,
     ToolLoopResponseDecisionRequest,
     tool_loop_response_decision,
 )
-from .tool_loop_tool_call import execute_one_tool_call
-from .tool_round_execution import (
+from .tool_loop.round_execution import (
     ToolCallExecuteParams,
     ToolCallRecordParams,
     ToolRoundExecutionRequest,
     execute_tool_round,
 )
+from .tool_loop.tool_call import execute_one_tool_call
 from .tool_runtime_ledger import persist_tool_runtime_ledger
 
 
-# LLM: _ToolStepRequest bundles one tool-step transition for the loop service.
-# 类用途: 保存进入工具执行/工具上限判断所需的上下文，避免 helper 参数继续扩散。
 @dataclass(frozen=True)
 class _ToolStepRequest:
     params: ToolLoopExecuteParams
@@ -61,12 +58,14 @@ class _ToolStepRequest:
     current_prompt: str
 
 
-# LLM: _effective_max_tool_rounds 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理effectivemax工具轮数相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     effective = getattr(getattr(agent, "config", None), "max_tool_rounds", None)
     if effective is None:
-        effective = runtime_guard_int("max_tool_rounds", 0)
+        effective = runtime_guard_int(
+            "max_tool_rounds",
+            0,
+            policy=getattr(agent, "runtime_guard_policy", None),
+        )
     attrs_to_check = params.task_attributes or current_task_attributes(agent)
     if attrs_to_check and "max_tool_rounds" in attrs_to_check:
         effective = attrs_to_check["max_tool_rounds"]
@@ -76,17 +75,11 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
         return 0
 
 
-# LLM: ToolLoopService 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 封装工具循环服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class ToolLoopService:
 
-    # LLM: __init__ 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def __init__(self, agent):
         self._agent = agent
 
-    # LLM: execute 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 推进execute的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def execute(self, params: ToolLoopExecuteParams):
         final_prompt = ""
         final_response = None
@@ -129,8 +122,6 @@ class ToolLoopService:
 
         return final_prompt, final_response, tool_rounds
 
-    # LLM: _model_turn_or_fallback keeps model errors and fallback response generation isolated.
-    # 函数用途: 执行一轮模型调用；过期 runner attempt 或空响应可恢复时返回 fallback 并要求主循环停止。
     def _model_turn_or_fallback(
         self,
         params: ToolLoopExecuteParams,
@@ -145,6 +136,7 @@ class ToolLoopService:
             prompt, response = run_with_provider_transient_auto_resume(
                 lambda: next_tool_loop_model_response(self._agent, params, tool_rounds),
                 on_chunk=params.effective_on_chunk,
+                policy=getattr(self._agent, "runtime_guard_policy", None),
             )
             return prompt, response, False, False, empty_response_repairs
         except Exception as exc:
@@ -167,8 +159,6 @@ class ToolLoopService:
                 raise
             return build_tool_loop_prompt(self._agent, params), fallback, True, False, empty_response_repairs
 
-    # LLM: _response_action owns response decision bookkeeping for one model turn.
-    # 函数用途: 根据模型输出判断继续生成、停止、或进入工具执行，并同步 reserved repair 次数。
     def _response_action(
         self,
         params: ToolLoopExecuteParams,
@@ -185,8 +175,6 @@ class ToolLoopService:
         )
         return decision.counters, decision
 
-    # LLM: _tool_step_or_limit keeps tool-limit closeout separate from normal tool execution.
-    # 函数用途: 达到工具轮数上限时生成收口回复，否则执行一轮工具并返回新状态。
     def _tool_step_or_limit(self, request: _ToolStepRequest):
         if self._tool_round_limit_reached(request.params, request.tool_rounds):
             final_prompt, final_response = self._final_response_after_tool_limit(
@@ -208,14 +196,11 @@ class ToolLoopService:
         )
         return request.current_prompt, final_response, next_round
 
-    # LLM: _run_tool_round executes one parsed tool round and returns any deterministic closeout.
-    # 函数用途: 封装工具执行、output.json 收口和顶层 dispatch 收口，让 execute 保持短流程。
     def _run_tool_round(self, request: ToolRoundExecutionRequest):
         before_executed_count = len(request.params.executed_tools)
         subagent_output_written = execute_tool_round(request)
         update_runtime_fact_progress_if_enabled(self._agent, request.params, tool_round=request.tool_rounds)
-        if terminal_response := _terminal_tool_guard_response(request):
-            return request.tool_rounds, terminal_response
+        append_tool_guardrail_action_block_hint(request)
         final_response = completion_response_after_tool_round(
             ToolRoundCompletionRequest(
                 self._agent,
@@ -227,24 +212,16 @@ class ToolLoopService:
         )
         return request.tool_rounds, final_response
 
-    # LLM: _tool_round_limit_reached 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 处理工具round限制reached相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _tool_round_limit_reached(self, params: ToolLoopExecuteParams, tool_rounds: int) -> bool:
         limit = _effective_max_tool_rounds(self._agent, params)
         return limit > 0 and tool_rounds >= limit
 
-    # LLM: _final_response_after_tool_limit 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 处理final响应after工具限制相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _final_response_after_tool_limit(self, params: ToolLoopExecuteParams, tool_rounds: int):
         return final_response_after_tool_limit(self._agent, params, tool_rounds)
 
-    # LLM: _execute_one_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 推进one工具call的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _execute_one_tool_call(self, request: ToolCallExecuteParams):
         return execute_one_tool_call(self._agent, request)
 
-    # LLM: _record_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 写入工具call的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _record_tool_call(self, record: ToolCallRecordParams) -> None:
         guardrail_hint = record_tool_guard_observation(self._agent, record.params, record.payload, record.result)
         if record.result.ok and record.result.tool not in {"__parse_error__", "unknown"}:
@@ -281,15 +258,13 @@ class ToolLoopService:
         if progress:
             record.params.tool_context.append(_task_local_progress_context(progress))
 
-    # LLM: _archive_tool_call_record 属于 SimpleAgent 核心运行的函数边界；工具输出归档格式变化会影响 raw archive 和 compact。
-    # 函数用途: 生成可归档的工具调用记录，大输出外置为 artifact，当前工具上下文仍保留完整结果。
     def _archive_tool_call_record(self, record: ToolCallRecordParams) -> dict[str, object]:
         return archive_tool_call_record(self._agent, record)
 
 
-# LLM: _task_local_progress_context gives the next runner turn a tiny progress anchor after writes.
-# 函数用途: 将 latest_tool_progress 摘要放入 live prompt，提醒子代理 compact/续跑后对照已完成章节。
 def _task_local_progress_context(progress: dict[str, object]) -> str:
+    load_error = progress.get("load_error")
+    status_save_error = progress.get("status_save_error")
     return "\n".join(
         [
             "[task-local-progress]",
@@ -298,32 +273,9 @@ def _task_local_progress_context(progress: dict[str, object]) -> str:
             f"headings: {progress.get('headings', [])}",
             f"next_action: {progress.get('next_action', '')}",
             f"latest_tool_progress_ref: {progress.get('latest_tool_progress_ref', '')}",
+            f"load_error: {load_error}" if isinstance(load_error, dict) else "",
+            f"status_save_error: {status_save_error}" if isinstance(status_save_error, dict) else "",
             "policy: follow next_action; avoid duplicating recorded headings. "
             "If next_action mentions output.json, stop product-body writes and close out with structured refs.",
         ]
     )
-
-
-# LLM: _terminal_tool_guard_response only stops the whole run when terminal blocking is explicitly enabled.
-# 函数用途: 检查本轮工具记录是否触发终止级 runtime gate，并生成 blocked 模型响应。
-def _terminal_tool_guard_response(request: ToolRoundExecutionRequest) -> ModelResponse | None:
-    current_round_prefix = f"{request.tool_rounds}-"
-    for record in reversed(list(getattr(request.params, "archive_tool_calls", []) or [])):
-        if not isinstance(record, dict):
-            continue
-        if not str(record.get("call_id") or "").startswith(current_round_prefix):
-            continue
-        gate = record.get("runtime_gate")
-        if not isinstance(gate, dict) or gate.get("action") != "terminal_block":
-            continue
-        text = (
-            "[TOOL_GUARD_TERMINAL_BLOCKED] 同一工具路径持续无效，且 terminal_block_enabled 已开启，"
-            "本任务已停止继续自动尝试。请调整参数、换工具/来源，或重新发起任务。"
-        )
-        return ModelResponse(
-            text=text,
-            backend=request.response.backend,
-            runtime_status="blocked",
-            runtime_reason=str(gate.get("code") or "TOOL_GUARD_TERMINAL_BLOCKED"),
-        )
-    return None

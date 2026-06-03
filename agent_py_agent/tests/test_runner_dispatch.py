@@ -1,4 +1,4 @@
-"""runner_dispatch.py 单元测试。
+"""agent_core.runner.dispatch 单元测试。
 
 测试 runner 任务分配、并发控制、超时处理等核心功能。
 """
@@ -10,11 +10,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_py_agent.agent.agent_core.runner_candidate_policy import RunnerCandidatePolicy
+from agent_py_agent.agent.agent_core.runner.candidate_policy import RunnerCandidatePolicy
 
 
 def test_execute_runner_uses_worker_even_when_timeout_disabled(monkeypatch, tmp_path):
-    from agent_py_agent.agent.agent_core.runner_gate import SingleRunnerParams, run_single_runner
+    from agent_py_agent.agent.agent_core.runner.gate import SingleRunnerParams, run_single_runner
 
     calls: list[object] = []
 
@@ -31,7 +31,7 @@ def test_execute_runner_uses_worker_even_when_timeout_disabled(monkeypatch, tmp_
             raise AssertionError("execute runner should not run on the parent agent object")
 
     monkeypatch.setattr(
-        "agent_py_agent.agent.agent_core.runner_dispatch._run_subagent_worker",
+        "agent_py_agent.agent.agent_core.runner.dispatch._run_subagent_worker",
         fake_worker,
     )
 
@@ -41,7 +41,7 @@ def test_execute_runner_uses_worker_even_when_timeout_disabled(monkeypatch, tmp_
             run_id="subagent-1",
             task_timeout=0.0,
             instruction="继续完成任务",
-            execute_runners=True,
+            start_runner=True,
             max_cards=0,
             probe=True,
             retry_reason="",
@@ -54,12 +54,45 @@ def test_execute_runner_uses_worker_even_when_timeout_disabled(monkeypatch, tmp_
     assert calls[0].run_id == "subagent-1"
 
 
+def test_runner_failure_reports_memory_injection_error(monkeypatch):
+    from agent_py_agent.agent.agent_core.runner.gate import (
+        RunnerFailureParams,
+        handle_runner_failure,
+    )
+
+    def broken_push(*_args, **_kwargs):
+        raise OSError("memory push unavailable")
+
+    monkeypatch.setattr("agent_py_agent.agent.memory_push.push_relevant_memories", broken_push)
+    introspections: list[str] = []
+    agent = SimpleNamespace(
+        _has_pending_work=False,
+        _handle_failure_introspection=lambda run_id, _before, _result: introspections.append(run_id),
+    )
+
+    instruction = handle_runner_failure(
+        RunnerFailureParams(
+            agent=agent,
+            run_id="runner-1",
+            before=SimpleNamespace(goal="继续写报告"),
+            result=SimpleNamespace(status="BLOCKED"),
+            effective_instruction="继续推进",
+        )
+    )
+
+    assert agent._has_pending_work is True
+    assert introspections == ["runner-1"]
+    assert "RUNNER_FAILURE_MEMORY_INJECTION_ERROR" in instruction
+    assert "runner_failure.memory_injection" in instruction
+    assert "memory push unavailable" in instruction
+
+
 class TestRunnerMaxAttempts:
     """测试 _runner_max_attempts() 函数。"""
 
     def test_auto_policy_returns_2(self):
         """auto 策略返回 2 次尝试。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _runner_max_attempts
+        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
 
         assert _runner_max_attempts("auto") == 2
         assert _runner_max_attempts("Auto") == 2
@@ -67,14 +100,14 @@ class TestRunnerMaxAttempts:
 
     def test_empty_policy_returns_2(self):
         """空策略返回 2 次尝试。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _runner_max_attempts
+        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
 
         assert _runner_max_attempts("") == 2
         assert _runner_max_attempts(None) == 2
 
     def test_off_policy_returns_1(self):
         """off 策略返回 0 次补跑（不自动重试）。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _runner_max_attempts
+        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
 
         assert _runner_max_attempts("off") == 0
         assert _runner_max_attempts("none") == 0
@@ -82,7 +115,7 @@ class TestRunnerMaxAttempts:
 
     def test_numeric_policy_returns_value(self):
         """数字策略返回对应失败后重试次数。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _runner_max_attempts
+        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
 
         assert _runner_max_attempts("3") == 3
         assert _runner_max_attempts(3) == 3
@@ -92,15 +125,13 @@ class TestRunnerMaxAttempts:
 
     def test_invalid_policy_returns_2(self):
         """无效策略默认返回 2。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _runner_max_attempts
+        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
 
         assert _runner_max_attempts("invalid") == 2
         assert _runner_max_attempts("abc") == 2
 
-    # LLM: zero runner attempts means no retry ceiling, not retry disabled.
-    # 函数用途: 验证 runner_failure_policy=0 时可重试失败不会因 attempt 计数被提前卡死。
     def test_zero_policy_keeps_retry_candidate_unlimited(self):
-        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         task = SimpleNamespace(
             status="FAILED",
@@ -114,10 +145,8 @@ class TestRunnerMaxAttempts:
 
         assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=0, same_run_redispatch_limit=0)) is True
 
-    # LLM: runner retry limits count retries after the first failed attempt, not total attempts.
-    # 函数用途: 验证 runner_failure_retry_limit=2 允许第一次失败后的两次补跑机会。
     def test_runner_failure_retry_limit_counts_retries_after_initial_attempt(self):
-        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         task = SimpleNamespace(
             status="FAILED",
@@ -133,10 +162,8 @@ class TestRunnerMaxAttempts:
         task.runner_attempts = 3
         assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=2, same_run_redispatch_limit=0)) is False
 
-    # LLM: same-run redispatch has its own cap so a parent can choose a different recovery strategy.
-    # 函数用途: 验证 same_run_redispatch_limit=1 时，同一个 run_id 只允许失败后再派一次。
     def test_same_run_redispatch_limit_blocks_repeating_same_run(self):
-        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         task = SimpleNamespace(
             status="FAILED",
@@ -157,7 +184,7 @@ class TestRunnerFailureType:
 
     def test_normalizes_failure_type(self):
         """验证 failure_type 被标准化为小写。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _runner_failure_type
+        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_failure_type
 
         mock_task = MagicMock()
         mock_task.failure_type = "TIMEOUT"
@@ -166,7 +193,7 @@ class TestRunnerFailureType:
 
     def test_strips_whitespace(self):
         """验证前后空格被去除。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _runner_failure_type
+        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_failure_type
 
         mock_task = MagicMock()
         mock_task.failure_type = "  runner_error  "
@@ -175,7 +202,7 @@ class TestRunnerFailureType:
 
     def test_empty_failure_type(self):
         """空 failure_type 返回空字符串。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _runner_failure_type
+        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_failure_type
 
         mock_task = MagicMock()
         mock_task.failure_type = ""
@@ -186,10 +213,8 @@ class TestRunnerFailureType:
 class TestRunnerCandidateCapabilityGrant:
     """测试能力授权后的 blocked runner 能继续执行。"""
 
-    # LLM: granted permission blockers should re-enter runner selection without relying on retry attempts.
-    # 函数用途: 子代理因为写权限阻塞后，父级授权完成时必须能被 dispatch 再跑一轮。
     def test_permission_blocked_with_grant_is_runner_candidate(self):
-        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         task = SimpleNamespace(
             status="BLOCKED",
@@ -207,10 +232,8 @@ class TestRunnerCandidateCapabilityGrant:
 
         assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=1)) is True
 
-    # LLM: open requests remain a hard stop even if an older grant exists.
-    # 函数用途: 仍有 OPEN capability_request 时不能提前重跑，避免模型在未授权状态反复失败。
     def test_open_request_still_blocks_runner_candidate(self):
-        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         task = SimpleNamespace(
             status="BLOCKED",
@@ -234,7 +257,7 @@ class TestResolveRunnerConcurrency:
 
     def test_auto_uses_bounded_job_count(self):
         """auto 策略按任务数并发，但受内部安全上限约束。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_concurrency
+        from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_concurrency
 
         assert _resolve_runner_concurrency("auto", 5) == 5
         assert _resolve_runner_concurrency("", 5) == 5
@@ -242,25 +265,25 @@ class TestResolveRunnerConcurrency:
 
     def test_zero_job_count_returns_0(self):
         """job_count 为 0 时返回 0。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_concurrency
+        from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_concurrency
 
         assert _resolve_runner_concurrency(2, 0) == 0
 
     def test_negative_job_count_returns_0(self):
         """负数 job_count 返回 0。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_concurrency
+        from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_concurrency
 
         assert _resolve_runner_concurrency(2, -1) == 0
 
     def test_numeric_value(self):
         """数字值直接转换。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_concurrency
+        from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_concurrency
 
         assert _resolve_runner_concurrency(3, 5) == 3
 
     def test_capped_at_job_count(self):
         """并发数不超过 job_count。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_concurrency
+        from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_concurrency
 
         assert _resolve_runner_concurrency(10, 3) == 3
 
@@ -270,25 +293,25 @@ class TestResolveRunnerStartRate:
 
     def test_auto_returns_job_count(self):
         """auto 策略返回全部 job_count。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_start_rate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_start_rate
 
         assert _resolve_runner_start_rate("auto", 5) == 5
 
     def test_zero_job_count_returns_0(self):
         """job_count 为 0 时返回 0。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_start_rate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_start_rate
 
         assert _resolve_runner_start_rate(3, 0) == 0
 
     def test_numeric_value(self):
         """数字值直接转换。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_start_rate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_start_rate
 
         assert _resolve_runner_start_rate(2, 10) == 2
 
     def test_capped_at_job_count(self):
         """启动率不超过 job_count。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_start_rate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_start_rate
 
         assert _resolve_runner_start_rate(20, 5) == 5
 
@@ -298,7 +321,7 @@ class TestResolveRunnerTimeoutSeconds:
 
     def test_off_returns_zero(self):
         """off/disabled 等禁用超时。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_timeout_seconds
+        from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_timeout_seconds
 
         assert _resolve_runner_timeout_seconds("off") == 0.0
         assert _resolve_runner_timeout_seconds("disabled") == 0.0
@@ -306,20 +329,20 @@ class TestResolveRunnerTimeoutSeconds:
 
     def test_auto_returns_zero(self):
         """auto 默认不启用超时。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_timeout_seconds
+        from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_timeout_seconds
 
         assert _resolve_runner_timeout_seconds("auto") == 0.0
 
     def test_numeric_seconds(self):
         """数字值转换为秒数。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_timeout_seconds
+        from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_timeout_seconds
 
         assert _resolve_runner_timeout_seconds(30.5) == 30.5
         assert _resolve_runner_timeout_seconds("60") == 60.0
 
     def test_negative_returns_zero(self):
         """负数返回 0。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_timeout_seconds
+        from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_timeout_seconds
 
         assert _resolve_runner_timeout_seconds(-10) == 0.0
 
@@ -341,7 +364,7 @@ class TestRunnerTaskTimeout:
 
     def test_off_runner_timeout_returns_no_limit(self):
         """用户配置 off/none/disabled 时，runner 不套超时墙。"""
-        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+        from agent_py_agent.agent.agent_core.runner.gate import get_task_timeout
 
         task = MagicMock()
         task.attributes = {}
@@ -352,11 +375,9 @@ class TestRunnerTaskTimeout:
 
         assert get_task_timeout(task, 0.0, self._timeout_config("off")) == 0.0
 
-    # LLM: runner timeout off must override stale adaptive timeout attributes after a failed run.
-    # 函数用途: 确认用户关闭 runner 超时后，旧任务里的 dynamic_timeout_seconds 不会继续制造隐藏超时墙。
     def test_off_runner_timeout_ignores_dynamic_timeout_attribute(self):
         """用户配置 off 时，失败后遗留的动态超时也不能重新启用超时。"""
-        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+        from agent_py_agent.agent.agent_core.runner.gate import get_task_timeout
 
         task = MagicMock()
         task.attributes = {"dynamic_timeout_seconds": 300.0}
@@ -369,7 +390,7 @@ class TestRunnerTaskTimeout:
 
     def test_static_runner_timeout_still_overrides_no_limit_config(self):
         """用户显式数字超时时，仍按数字超时执行。"""
-        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+        from agent_py_agent.agent.agent_core.runner.gate import get_task_timeout
 
         task = MagicMock()
         task.attributes = {}
@@ -380,10 +401,8 @@ class TestRunnerTaskTimeout:
 
         assert get_task_timeout(task, 45.0, self._timeout_config("off")) == 45.0
 
-    # LLM: role timeout overrides let root stay alive while leaf workers are intentionally bounded.
-    # 函数用途: 验证 root/coordinator/worker 可以使用不同 runner timeout，不再为了测试 worker 超时误杀 root。
     def test_role_timeout_override_can_disable_root_and_bound_worker(self):
-        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+        from agent_py_agent.agent.agent_core.runner.gate import get_task_timeout
 
         config = self._timeout_config("8")
         config.runner_timeout_by_role = {"root": "off", "worker": "8"}
@@ -409,10 +428,8 @@ class TestRunnerTaskTimeout:
         assert get_task_timeout(root_task, 8.0, config) == 0.0
         assert get_task_timeout(worker_task, 8.0, config) == 8.0
 
-    # LLM: top-level worker runs are still workers, not unlimited root coordinators.
-    # 函数用途: 复现真实 E2E 中顶层 worker 因 parent_id 为空误吃 root=off，导致 worker 时间上限失效的问题。
     def test_top_level_worker_uses_worker_timeout_not_root_timeout(self):
-        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+        from agent_py_agent.agent.agent_core.runner.gate import get_task_timeout
 
         config = self._timeout_config("off")
         config.runner_timeout_by_role = {"root": "off", "worker": "180"}
@@ -428,10 +445,8 @@ class TestRunnerTaskTimeout:
 
         assert get_task_timeout(task, 0.0, config) == 180.0
 
-    # LLM: user-facing worker timeout should cover internal concrete worker roles.
-    # 函数用途: 验证 leaf_worker 这类内部角色名会自动匹配用户配置的 worker 超时。
     def test_role_timeout_worker_alias_matches_leaf_worker(self):
-        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+        from agent_py_agent.agent.agent_core.runner.gate import get_task_timeout
 
         config = self._timeout_config("off")
         config.runner_timeout_by_role = {"worker": "7"}
@@ -447,10 +462,8 @@ class TestRunnerTaskTimeout:
 
         assert get_task_timeout(task, 0.0, config) == 7.0
 
-    # LLM: takeover timeout bucket lets recovery runs get a different budget than the failed worker.
-    # 函数用途: 验证接管 run 优先匹配 takeover 超时桶，再回退到 leaf_worker/worker。
     def test_role_timeout_takeover_bucket_overrides_worker_alias(self):
-        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+        from agent_py_agent.agent.agent_core.runner.gate import get_task_timeout
 
         config = self._timeout_config("off")
         config.runner_timeout_by_role = {"worker": "1", "takeover": "30"}
@@ -466,10 +479,8 @@ class TestRunnerTaskTimeout:
 
         assert get_task_timeout(task, 0.0, config) == 30.0
 
-    # LLM: role auto should mean dynamic timeout even when the global config is fixed.
-    # 函数用途: 验证角色级 auto 可以绕过全局固定超时，使用动态估算。
     def test_role_timeout_auto_uses_dynamic_timeout(self):
-        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+        from agent_py_agent.agent.agent_core.runner.gate import get_task_timeout
 
         config = self._timeout_config("8")
         config.runner_timeout_by_role = {"worker": "auto"}

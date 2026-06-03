@@ -1,5 +1,3 @@
-# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
-# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
 
 from __future__ import annotations
 
@@ -18,15 +16,11 @@ from typing import Any
 JsonValue = dict[str, Any] | list[Any] | str | int | float | bool | None
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 utc_now_iso 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 utc now iso 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def utc_now_iso() -> str:
 
     return datetime.now(timezone.utc).isoformat()
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 CompressionSnapshot 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 CompressionSnapshot 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class CompressionSnapshot:
 
@@ -53,8 +47,6 @@ class CompressionSnapshot:
     timestamp: str = ""
     created_at: str = field(default_factory=utc_now_iso)
 
-    # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 __post_init__ 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 post init 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
     def __post_init__(self) -> None:
 
         if not self.timestamp:
@@ -62,15 +54,11 @@ class CompressionSnapshot:
         if not self.created_at:
             self.created_at = self.timestamp or utc_now_iso()
 
-    # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
 
         return asdict(self)
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 RawMemoryEvent 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 RawMemoryEvent 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class RawMemoryEvent:
 
@@ -96,8 +84,6 @@ class RawMemoryEvent:
     source: str = ""
     archive_level: int = 3
 
-    # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
 
         return asdict(self)

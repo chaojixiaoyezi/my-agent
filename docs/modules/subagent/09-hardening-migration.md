@@ -143,7 +143,7 @@
 ## 2026-05-15 Code-Size Zero Refactor
 
 - 中文说明：本轮不新增流程限制，主要把已经跑通的子代理硬化代码拆成更稳的长期结构，目标是“子代理像换了记忆/任务空间的主代理一样能干活”，而不是继续靠大文件和细碎参数走钢丝。
-- 已拆分：`result_structured_evidence.py` 承接 evidence / evidence_packets / findings 解析；`filesystem_read_file.py` 承接 `read_file` 执行；`registry_payload_normalize.py` 承接工具 JSON 容错归一；`runner_timeout_policy.py`、`context_bundle_*`、`static_site_*` 小模块承接各自边界。早期的 `subagent_finalize_artifact_integrity.py`、`subagent_dispatch_closeout_*` 已在后续协作简化中删除，避免 runner 收尾和 dispatch 本地收口变成额外卡点。
+- 已拆分：`result_structured_evidence.py` 承接 evidence / evidence_packets / findings 解析；`filesystem_read_file.py` 承接 `read_file` 执行；`registry_payload_normalize.py` 承接工具 JSON 容错归一；`agent_core/runner/timeout_policy.py`、`context_bundle_*`、`static_site_*` 小模块承接各自边界。早期的 `subagent_finalize_artifact_integrity.py`、`subagent_dispatch_closeout_*` 已在后续协作简化中删除，避免 runner 收尾和 dispatch 本地收口变成额外卡点。
 - 已清零：strict code-size 报告达到 `hard=0 high-risk=0 soft=0`。后续新增功能不允许靠调高阈值通过；接近 high-risk 时要优先拆模块、用 bundle，或把纯数据表移出控制流文件。
 - 已复验：focused 子代理/工具/配置测试 `157 passed`；自然语言层级基线和恢复相关 focused tests `29 passed`。
 - 开发要求：后续继续少写死流程。工具、路径、执行、自毁红线由系统守；角色选择、QA 范围、修复顺序、是否继续派工尽量交给 LLM + 模板 + workflow + 验收事实决定。
@@ -201,7 +201,7 @@
 - 中文说明：这片继续把真实 E2E 中暴露的“系统边界不硬”问题归到协议、记忆和工具网关，而不是继续往 prompt 里补口号。
 - Closeout repair：`orchestration_final_closeout_repair.py` 把 `runner_result.json=REJECT`、`test_execution.json` 和 parent follow-up refs 转成机器字段 `final_closeout_repair_advice`。runner-context dispatch 的下一步会明确说“按最终收口 refs 派修复 child”，不是让 root 读正文猜。
 - Top-level repair handoff：顶层 `dispatch_subagents` 的 acceptance reject record 也会附带 `final_closeout_repair_advice` 和 `create_subagents` 建议工具调用；失败 refs 包含 test/follow-up/output/run，小傻妞修复任务会继承原 child 的 product write roots。
-- Stale runner stop：`subagent_attempt_guard.py` 现在同时服务工具前拦截和模型前停止。runner attempt 被 timeout/abandon 后，旧线程下一轮不会再调用模型。
+- Stale runner stop：`agent_core/subagent/attempt_guard.py` 现在同时服务工具前拦截和模型前停止。runner attempt 被 timeout/abandon 后，旧线程下一轮不会再调用模型。
 - Memory isolation：LocalStore memory hit 带 `memory_path`，搜索只接受当前 `JsonlMemory.path` 的命中，避免干净 E2E 或未来多用户 workspace 被旧任务记忆污染。
 - Tool gateway：registry 在单次文件工具调用内把父级授权的 product roots 并入 `workspace_roots`。读、列、搜、写都能访问用户指定产物目录；调用结束后恢复，避免授权根外泄到别的工具调用。
 - Artifact integrity：runner 结构化输出里的相对产物 ref 可能已经包含 product root 尾部，例如 `deliverables/furniture-home/index.html`。完整性检查会先做 root suffix 对齐，再检查真实文件，避免误拼路径后把已写成功的产物标成 `artifact_missing`。

@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 """本包把日志分析工单拆成 planning（数据结构和规划）与 creation（任务创建）两个子模块。
 

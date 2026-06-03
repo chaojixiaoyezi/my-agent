@@ -6,14 +6,12 @@
 from __future__ import annotations
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
 
 
-# LLM: test_hierarchy_schedule_infers_coordinator_role_from_tools keeps model role slips recoverable.
-# 函数用途: 当模型把带层级调度权限的下一层误写成 worker 时，系统按 depth 纠正为 coordinator。
 def test_hierarchy_schedule_infers_coordinator_role_from_tools(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root", thought="split", plan=["plan"])
@@ -45,8 +43,6 @@ def test_hierarchy_schedule_infers_coordinator_role_from_tools(tmp_path):
     assert grandchild.role == "grandchild_coordinator"
 
 
-# LLM: test_hierarchy_schedule_applies_depth_agent_name_prefixes locks user-facing lineage names.
-# 函数用途: 层级调度创建子/孙/孙孙节点时，自动按 depth 加中文前缀，同时保留专业辨识名。
 def test_hierarchy_schedule_applies_depth_agent_name_prefixes(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root", thought="split", plan=["plan"], agent_name="root")
@@ -88,8 +84,6 @@ def test_hierarchy_schedule_applies_depth_agent_name_prefixes(tmp_path):
     assert great_result.items[0].agent_name == "小小小傻妞-sku-leaf"
 
 
-# LLM: root-created runs already wearing 小傻妞 must advance visible lineage for their children.
-# 函数用途: 真实 E2E 中 root 第一层已叫“小傻妞-*”，再派下级时不能重新生成同一层“小傻妞-*”。
 def test_hierarchy_schedule_advances_from_parent_lineage_prefix(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root", thought="split", plan=["plan"], agent_name="小傻妞-shop-root")
@@ -107,8 +101,6 @@ def test_hierarchy_schedule_advances_from_parent_lineage_prefix(tmp_path):
     assert result.items[0].agent_name == "小小傻妞-coord-r78"
 
 
-# LLM: test_hierarchy_schedule_repairs_bare_lineage_agent_name covers real E2E name-only prefixes.
-# 函数用途: 模型只写“小小傻妞”这类无后缀名字时，调度器不能抛 IndexError，应回退到 role 后缀。
 def test_hierarchy_schedule_repairs_bare_lineage_agent_name(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root", thought="split", plan=["plan"], agent_name="root")
@@ -134,8 +126,6 @@ def test_hierarchy_schedule_repairs_bare_lineage_agent_name(tmp_path):
     assert result.items[0].agent_name == "小小傻妞-coordinator-1"
 
 
-# LLM: test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools covers report-write coordinators.
-# 函数用途: coordinator 允许写报告后，模型误写 worker 也不能因为 write_file 存在而跳过协调角色推断。
 def test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root", thought="split", plan=["plan"])
@@ -174,8 +164,6 @@ def test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools(tmp_
     assert "write_file" in grandchild.allowed_tools
 
 
-# LLM: test_hierarchy_schedule_keeps_write_intent_as_leaf_role covers real model over-granting scheduler tools.
-# 函数用途: 当模型给叶子写文件任务也带了调度工具时，系统仍按交付物写入意图归一成 leaf_worker。
 def test_hierarchy_schedule_keeps_write_intent_as_leaf_role(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -213,8 +201,6 @@ def test_hierarchy_schedule_keeps_write_intent_as_leaf_role(tmp_path):
     assert "dispatch_subagents" in leaf.allowed_tools
 
 
-# LLM: test_hierarchy_schedule_keeps_orchestration_tools_for_leaf_write_tasks protects full-agent leaves.
-# 函数用途: leaf 角色仍保留派下级能力；角色只是职责倾向，不能把子代理变成不能求助的小工人。
 def test_hierarchy_schedule_keeps_orchestration_tools_for_leaf_write_tasks(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -249,8 +235,6 @@ def test_hierarchy_schedule_keeps_orchestration_tools_for_leaf_write_tasks(tmp_p
     assert "inspect_agent_tree" in leaf.allowed_tools
 
 
-# LLM: test_hierarchy_schedule_preserves_report_write_tools_for_coordinators covers coordinator report output.
-# 函数用途: coordinator 可以写自己的计划/证据报告；业务产物仍由角色提示和写入边界约束。
 def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"

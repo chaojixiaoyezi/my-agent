@@ -10,8 +10,6 @@ if TYPE_CHECKING:
     from ..conversation import ConversationStore
 
 
-# LLM: CollaborationCoordinatorPolicy keeps close/wake thresholds configurable and generic.
-# 类用途: 定义协作 case 何时关闭收集窗口并通知主代理的轻量策略。
 @dataclass(frozen=True)
 class CollaborationCoordinatorPolicy:
     urgent_min_evidence_packets: int = 1
@@ -38,11 +36,7 @@ class _CloseMetadataRequest:
     unavailable: dict
 
 
-# LLM: CollaborationCoordinator bridges collaboration cases into conversation observations and wake signals.
-# 类用途: 扫描协作 case，在证据齐或 deadline 到时写入主代理可处理的 observation/wake。
 class CollaborationCoordinator:
-    # LLM: CollaborationCoordinator.__init__ only wires stores and policy; it does not call LLM.
-    # 函数用途: 创建协作协调器，绑定协作账本和长期会话账本。
     def __init__(
         self,
         *,
@@ -54,8 +48,6 @@ class CollaborationCoordinator:
         self.conversation_store = conversation_store
         self.policy = policy or CollaborationCoordinatorPolicy()
 
-    # LLM: tick is deterministic control-plane work; keep business judgment in the main agent.
-    # 函数用途: 执行一次协作 case 扫描，必要时关闭收集窗口并生成主代理 observation/wake。
     def tick(self, *, now: float) -> list[CaseDecision]:
         decisions: list[CaseDecision] = []
         for case in self.store.list_cases(status="open"):
@@ -87,8 +79,6 @@ class CollaborationCoordinator:
         return wake.wake_signal_id
 
 
-# LLM: _should_close_case uses structural evidence/request/deadline facts instead of task-specific text.
-# 函数用途: 判断 case 是否达到关闭收集窗口并通知主代理的条件。
 def _should_close_case(priority, status, policy, now: float) -> bool:
     if bool(status.get("ready_for_main_agent")):
         return True
@@ -112,8 +102,6 @@ def _should_close_case(priority, status, policy, now: float) -> bool:
     return bool(deadlines and min(deadlines) <= now)
 
 
-# LLM: _mark_expired_requests records request-level timeout before case-level close.
-# 函数用途: 把过期且未响应的协作请求标为 timeout，方便主代理知道谁没回。
 def _mark_expired_requests(store: CollaborationStore, case_id: str, *, now: float) -> None:
     evidence_sources_by_request = _evidence_sources_by_request(store, store.case_evidence(case_id))
     for request in store.case_requests(case_id):
@@ -178,8 +166,6 @@ def _missing_responder_agent_ids(request, evidence_sources: set[str], *, target_
     return missing
 
 
-# LLM: _decision_summary creates user-readable context while machine routing still uses fields.
-# 函数用途: 生成协作窗口关闭摘要，供 observation 和后台 prompt 使用。
 def _decision_summary(
     title: str,
     summary: str,
@@ -190,9 +176,9 @@ def _decision_summary(
     details = summary or "协作事件已达到主代理处理条件。"
     request_bits = (
         f"待响应={facts.pending_request_count}，"
-        f"阻塞={facts.blocked_request_count}，"
-        f"超时={facts.timed_out_request_count}，"
-        f"已完成={facts.completed_request_count}"
+        f"不可达={facts.blocked_request_count}，"
+        f"到期未回={facts.timed_out_request_count}，"
+        f"已回={facts.completed_request_count}"
     )
     missing_count = sum(len(items) for items in facts.missing_by_request.values())
     unavailable_count = sum(len(items) for items in facts.unavailable_by_request.values())
@@ -297,8 +283,6 @@ def _dict_of_string_lists(value) -> dict[str, list[str]]:
     return result
 
 
-# LLM: _float keeps malformed request deadline fields from crashing the coordinator tick.
-# 函数用途: 宽松解析数字字段，失败时返回 0。
 def _float(value) -> float:
     try:
         return float(value or 0.0)

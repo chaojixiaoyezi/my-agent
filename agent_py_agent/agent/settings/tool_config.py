@@ -1,7 +1,5 @@
 """tool registry and execution settings."""
 
-# LLM: 这些上限保护 prompt 预算和外部调用，放宽前确认调用面。
-# 模块用途: 工具读取、检索、HTTP 和目录展示上限的配置模型。
 
 from __future__ import annotations
 
@@ -15,8 +13,6 @@ DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS = 12_000
 DEFAULT_COMMAND_ACCESS_MODE = "workspace-write"
 
 
-# LLM: ToolConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: ToolConfig 配置模型，保存 配置系统 的默认值和可调参数。
 @dataclass
 class ToolConfig:
     """Tool registry and execution limits."""
@@ -49,8 +45,10 @@ class ToolConfig:
     tool_catalog_mode: str = "compact"
     tool_catalog_offset: int = 0
     tool_catalog_categories: list[str] = field(default_factory=list)
-    tool_catalog_include_examples: bool = True
-    tool_catalog_entry_max_chars: int = 1200
+    # Default prompt catalog stays compact: examples and long parameter notes
+    # remain available through list_tools or the recommended-tool details.
+    tool_catalog_include_examples: bool = False
+    tool_catalog_entry_max_chars: int = 700
     tool_catalog_show_truncated_notice: bool = True
     tool_detail_max_chars: int = 4000
     tool_retrieval_limit: int = 3

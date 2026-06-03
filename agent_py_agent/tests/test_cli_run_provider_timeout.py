@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from agent_py_agent.agent.backends.errors import (
     ProviderRecoverableError,
+    ProviderResponseError,
     ProviderTimeoutError,
     ProviderTransientError,
     is_provider_recoverable_error,
@@ -12,8 +13,6 @@ from agent_py_agent.agent.backends.errors import (
 from agent_py_agent.cli.local_commands import cmd_run
 
 
-# LLM: _NoopSpinner prevents CLI timeout tests from starting terminal animation threads.
-# 类用途: 替代 ThinkingSpinner，保持测试输出稳定且不创建后台 UI 行为。
 class _NoopSpinner:
     def start(self) -> None:
         return None
@@ -22,8 +21,6 @@ class _NoopSpinner:
         return None
 
 
-# LLM: cmd_run should close provider-timeout runs with a readable report and nonzero exit.
-# 函数用途: 顶层 CLI 模型接口超时时，不打印 Python 堆栈，也不让用户以为还在运行。
 def test_cmd_run_reports_provider_timeout(capsys) -> None:
     agent = SimpleNamespace(
         config=SimpleNamespace(request_timeout=23),
@@ -52,8 +49,6 @@ def test_cmd_run_reports_provider_timeout(capsys) -> None:
     assert "memory-resume" in output
 
 
-# LLM: Provider rate-limit errors should leave a readable resume handoff instead of a traceback.
-# 函数用途: 顶层 CLI 遇到 provider transient/429 时，输出可恢复说明并返回非零。
 def test_cmd_run_reports_provider_transient(capsys) -> None:
     agent = SimpleNamespace(
         config=SimpleNamespace(request_timeout=23),
@@ -82,8 +77,37 @@ def test_cmd_run_reports_provider_transient(capsys) -> None:
     assert "稍后重试" in output
 
 
+def test_cmd_run_reports_provider_response_error(capsys) -> None:
+    agent = SimpleNamespace(
+        config=SimpleNamespace(request_timeout=23),
+        run=MagicMock(side_effect=ProviderResponseError("missing choices")),
+    )
+    args = SimpleNamespace(
+        config="config.yaml",
+        prompt="run a task",
+        inject=[],
+        prompt_file=[],
+        save=False,
+        show_prompt=False,
+        resume_context=None,
+    )
+
+    with (
+        patch("agent_py_agent.cli.local_commands.make_agent", return_value=agent),
+        patch("agent_py_agent.cli.local_commands.ThinkingSpinner", return_value=_NoopSpinner()),
+    ):
+        code = cmd_run(args)
+
+    output = capsys.readouterr().out
+    assert code == 2
+    assert "provider_response_error" in output
+    assert "missing choices" in output
+
+
 def test_provider_timeout_and_transient_share_recoverable_base() -> None:
     assert issubclass(ProviderTimeoutError, ProviderRecoverableError)
     assert issubclass(ProviderTransientError, ProviderRecoverableError)
+    assert issubclass(ProviderResponseError, ProviderRecoverableError)
     assert is_provider_recoverable_error(ProviderTimeoutError("timeout"))
     assert is_provider_recoverable_error(ProviderTransientError("429"))
+    assert is_provider_recoverable_error(ProviderResponseError("bad payload"))

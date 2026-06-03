@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 from __future__ import annotations
 
@@ -42,8 +40,6 @@ from .gateway_client import ensure_gateway_started
 from .models import AdapterOptions
 
 
-# LLM: FileAdapterLoopContext 是gateway CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass(frozen=True)
 class FileAdapterLoopContext:
     agent: object
@@ -53,15 +49,11 @@ class FileAdapterLoopContext:
     timeout: float
 
 
-# LLM: cmd_adapter 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_adapter(args) -> int:
     print("please specify adapter subcommand: file", file=sys.stderr)
     return 2
 
 
-# LLM: cmd_adapter_file 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_adapter_file(args) -> int:
     agent = make_agent(args)
     options = _adapter_options_from_args(args)
@@ -77,11 +69,7 @@ def cmd_adapter_file(args) -> int:
     return 0
 
 
-# LLM: _adapter_options_from_args 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _adapter_options_from_args(args) -> AdapterOptions:
-    # LLM: value 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def value(name: str, default=None):
         return getattr(args, "__dict__", {}).get(name, default)
 
@@ -107,8 +95,6 @@ def _adapter_options_from_args(args) -> AdapterOptions:
     )
 
 
-# LLM: _resolve_adapter_paths 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _resolve_adapter_paths(agent, options: AdapterOptions) -> AdapterPaths:
     apaths = adapter_paths(agent)
     if options.root:
@@ -128,8 +114,6 @@ def _resolve_adapter_paths(agent, options: AdapterOptions) -> AdapterPaths:
     return apaths
 
 
-# LLM: _ensure_gateway_available 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _ensure_gateway_available(options: AdapterOptions, gpaths) -> int:
     _, alive = gateway_running(gpaths)
     if alive:
@@ -138,8 +122,6 @@ def _ensure_gateway_available(options: AdapterOptions, gpaths) -> int:
     return 2
 
 
-# LLM: _process_file_adapter_loop 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _process_file_adapter_loop(context: FileAdapterLoopContext) -> int:
     total = 0
     while True:
@@ -155,8 +137,6 @@ def _process_file_adapter_loop(context: FileAdapterLoopContext) -> int:
         time.sleep(max(0.2, context.options.poll_interval))
 
 
-# LLM: _print_file_adapter_summary 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_file_adapter_summary(total: int, apaths: AdapterPaths, gpaths) -> None:
     print(
         json.dumps(
@@ -174,8 +154,6 @@ def _print_file_adapter_summary(total: int, apaths: AdapterPaths, gpaths) -> Non
     )
 
 
-# LLM: cmd_adapter_start 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_adapter_start(args) -> int:
     agent = make_agent(args)
     options = _adapter_options_from_args(args)
@@ -187,8 +165,6 @@ def cmd_adapter_start(args) -> int:
     return _run_adapter_foreground(agent, options, gpaths)
 
 
-# LLM: _register_channel_adapter 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _register_channel_adapter(manager: ChannelManager, channel: str, agent) -> None:
     workspace_root = _adapter_workspace_root(agent)
     if channel == "feishu":
@@ -208,14 +184,10 @@ def _register_channel_adapter(manager: ChannelManager, channel: str, agent) -> N
     manager.register_adapter(adapter)
 
 
-# LLM: _adapter_workspace_root 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _adapter_workspace_root(agent) -> Path:
     return Path(getattr(agent, "root", Path.cwd())).resolve()
 
 
-# LLM: _feishu_adapter_config 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _feishu_adapter_config(agent) -> dict[str, str]:
     return {
         "feishu_app_id": agent.config.feishu_app_id or "",
@@ -225,8 +197,6 @@ def _feishu_adapter_config(agent) -> dict[str, str]:
     }
 
 
-# LLM: _qq_adapter_config 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _qq_adapter_config(agent) -> dict[str, str]:
     return {
         "qq_app_id": agent.config.qq_app_id or "",
@@ -234,8 +204,6 @@ def _qq_adapter_config(agent) -> dict[str, str]:
     }
 
 
-# LLM: _run_adapter_foreground 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def _run_adapter_foreground(agent, options: AdapterOptions, gpaths) -> int:
     manager = ChannelManager(gateway_port=agent.config.gateway_port)
     _register_requested_adapters(manager, options.channel, agent)
@@ -255,8 +223,6 @@ def _run_adapter_foreground(agent, options: AdapterOptions, gpaths) -> int:
     return 0
 
 
-# LLM: _register_requested_adapters 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _register_requested_adapters(manager: ChannelManager, channel: str, agent) -> None:
     if channel in ("feishu", "all"):
         _register_channel_adapter(manager, "feishu", agent)
@@ -264,13 +230,9 @@ def _register_requested_adapters(manager: ChannelManager, channel: str, agent) -
         _register_channel_adapter(manager, "qq", agent)
 
 
-# LLM: _wait_for_adapter_shutdown 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _wait_for_adapter_shutdown() -> None:
     stop_event = threading.Event()
 
-    # LLM: _sig_handler 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def _sig_handler(signum, frame):
         stop_event.set()
 
@@ -282,8 +244,6 @@ def _wait_for_adapter_shutdown() -> None:
         pass
 
 
-# LLM: _write_adapter_state 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
 def _write_adapter_state(gpaths, state: str, extra: dict | None = None) -> None:
     from ..agent.gateway_parts.daemon_control import _get_process_start_time, _utc_now_iso
 
@@ -301,8 +261,6 @@ def _write_adapter_state(gpaths, state: str, extra: dict | None = None) -> None:
     state_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
-# LLM: cmd_adapter_status 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_adapter_status(args) -> int:
     agent = make_agent(args)
     options = _adapter_options_from_args(args)
@@ -315,8 +273,6 @@ def cmd_adapter_status(args) -> int:
     return _print_foreground_adapter_status()
 
 
-# LLM: _print_foreground_adapter_status 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_foreground_adapter_status() -> int:
     manager: ChannelManager | None = globals().get("_adapter_manager")
     if manager is None:
@@ -329,8 +285,6 @@ def _print_foreground_adapter_status() -> int:
     return 0
 
 
-# LLM: cmd_adapter_stop 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_adapter_stop(args) -> int:
     agent = make_agent(args)
     options = _adapter_options_from_args(args)
@@ -342,8 +296,6 @@ def cmd_adapter_stop(args) -> int:
     return _stop_foreground_adapter_manager()
 
 
-# LLM: _stop_foreground_adapter_manager 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _stop_foreground_adapter_manager() -> int:
     manager: ChannelManager | None = globals().get("_adapter_manager")
     if manager is None:

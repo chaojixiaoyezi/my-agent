@@ -220,6 +220,7 @@ def test_memory_compact_work_state_reads_task_progress_ledger(tmp_path: Path) ->
     assert progress["summary"] == "已完成项目 A/B，对项目 C 只读了 README。"
     assert progress["counts"]["done"] == 1
     assert progress["counts"]["in_progress"] == 1
+    assert progress["ref"].endswith("memory_archive/task_progress/run-compact/progress.json")
     assert work_state["next_actions"] == ["继续阅读项目 C 的核心模块。"]
 
 
@@ -289,8 +290,6 @@ def test_memory_compact_resume_links_subagent_run_workspace_refs(tmp_path: Path)
     assert Path(owner["legacy_run_ref"]["legacy_task_dir"]).parts[-2:] == ("subagents", "run-compact")
 
 
-# LLM: parent resume status needs to see whether a subagent has a task-local continue packet ready.
-# 函数用途: 验证 compact resume 会把子代理 run workspace 的 latest_continue_packet 作为只读引用暴露给父级。
 def test_memory_compact_resume_exposes_subagent_latest_continue_packet(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     write_compact_fixture(root)
@@ -335,8 +334,6 @@ def test_memory_compact_resume_exposes_subagent_latest_continue_packet(tmp_path:
     assert owner["reserved_hooks"]["writes_main_memory"] is False
 
 
-# LLM: Real E2E stores legacy subagent work orders in the configured subagent workspace, not always root/subagents.
-# 函数用途: 验证 compact resume 能通过配置的 subagent_workspace 找到真实子代理 run workspace 和继续包。
 def test_memory_compact_resume_uses_configured_subagent_workspace_refs(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     configured_subagents = root / "_runtime" / "subagents"
@@ -349,8 +346,6 @@ def test_memory_compact_resume_uses_configured_subagent_workspace_refs(tmp_path:
     _assert_configured_subagent_owner_resume(resume, configured_subagents)
 
 
-# LLM: _assert_configured_subagent_owner_resume keeps the E2E-shaped regression compact and readable.
-# 函数用途: 校验 configured subagent workspace 被解析成 task-local owner refs 和推荐读取路径。
 def _assert_configured_subagent_owner_resume(resume: dict, configured_subagents: Path) -> None:
     owner = resume["subagent_session_compact"]
     assert owner["status"] == "linked_run_workspace"
@@ -369,8 +364,6 @@ def _assert_configured_subagent_owner_resume(resume: dict, configured_subagents:
     assert all(str(configured_subagents) in path for path in subagent_packet["recommended_read_paths"])
 
 
-# LLM: _configured_subagent_resume creates one compact apply then resumes it with an explicit subagent root.
-# 函数用途: 复用标准 compact apply 流程，返回指定 subagent_run owner 的 resume payload。
 def _configured_subagent_resume(root: Path, configured_subagents: Path) -> dict:
     result = apply_memory_compact(
         root,
@@ -390,8 +383,6 @@ def _configured_subagent_resume(root: Path, configured_subagents: Path) -> dict:
     )
 
 
-# LLM: _write_configured_continue_packet simulates the task-local packet produced by a real subagent save.
-# 函数用途: 在配置 subagent workspace 的 agent-run compactions 目录写 latest_continue_packet.json。
 def _write_configured_continue_packet(configured_subagents: Path, run_id: str) -> None:
     packet = (
         configured_subagents

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 
-# LLM: Runtime rate limiting is keyed by tool plus args_hash, not by tool alone.
-# 函数用途: 验证同 tool/args_hash 在窗口内超过预算时返回 retry_after_seconds。
 def test_same_tool_args_rate_limit_blocks_after_budget() -> None:
-    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
         ToolRateLimitPolicy,
@@ -21,10 +19,8 @@ def test_same_tool_args_rate_limit_blocks_after_budget() -> None:
     assert decision.findings[0].evidence["retry_after_seconds"] == 8.0
 
 
-# LLM: zero max_calls disables the rate cap instead of creating a one-call fuse.
-# 函数用途: 验证 max_calls=0 表示不限制同一工具身份在窗口内的调用次数。
 def test_zero_max_calls_is_unlimited() -> None:
-    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
         ToolRateLimitPolicy,
@@ -37,10 +33,8 @@ def test_zero_max_calls_is_unlimited() -> None:
         ledger.record_attempt(facts)
 
 
-# LLM: Tool rate limits must isolate different argument identities.
-# 函数用途: 验证同一工具换 args_hash 时不会被另一个参数桶的速率预算阻断。
 def test_rate_limit_uses_args_hash_as_part_of_key() -> None:
-    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
         ToolRateLimitPolicy,
@@ -56,10 +50,8 @@ def test_rate_limit_uses_args_hash_as_part_of_key() -> None:
     assert decision.evidence["args_hash"] == "sha256:b"
 
 
-# LLM: Consecutive failures should fail closed by opening a per-key circuit.
-# 函数用途: 验证同 tool/args_hash 连续失败达到阈值后，重试窗口内会被 circuit breaker 阻断。
 def test_consecutive_failures_open_circuit_for_same_key() -> None:
-    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
         ToolRateLimitPolicy,
@@ -79,10 +71,8 @@ def test_consecutive_failures_open_circuit_for_same_key() -> None:
     assert decision.findings[0].evidence["circuit_state"] == "open"
 
 
-# LLM: zero failure_threshold disables the failure circuit rather than opening it immediately.
-# 函数用途: 验证 failure_threshold=0 表示不限制连续失败次数，不产生 circuit open 阻断。
 def test_zero_failure_threshold_disables_circuit() -> None:
-    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
         ToolRateLimitPolicy,
@@ -100,10 +90,8 @@ def test_zero_failure_threshold_disables_circuit() -> None:
     assert decision.evidence["consecutive_failures"] == 5
 
 
-# LLM: Backoff should increase by structured failure count, not by parsing error text.
-# 函数用途: 验证半开探测再次失败时，retry_after_seconds 按 schedule 递增。
 def test_circuit_backoff_increases_after_half_open_failure() -> None:
-    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
         ToolRateLimitPolicy,
@@ -127,10 +115,8 @@ def test_circuit_backoff_increases_after_half_open_failure() -> None:
     assert second.findings[0].evidence["retry_after_seconds"] == 1.75
 
 
-# LLM: A successful half-open probe should close the circuit and reset failure history.
-# 函数用途: 验证成功结果会清零连续失败、关闭 circuit，并让下一次失败从首个 backoff 重新开始。
 def test_success_closes_circuit_and_resets_backoff() -> None:
-    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
         ToolRateLimitPolicy,
@@ -152,10 +138,8 @@ def test_success_closes_circuit_and_resets_backoff() -> None:
     assert blocked.findings[0].evidence["retry_after_seconds"] == 0.5
 
 
-# LLM: Missing runtime identities should fail closed instead of sharing one global bucket.
-# 函数用途: 验证 tool 或 args_hash 缺失时返回机器码，避免自然语言推断 identity。
 def test_missing_rate_limit_identity_denies_closed() -> None:
-    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
     )

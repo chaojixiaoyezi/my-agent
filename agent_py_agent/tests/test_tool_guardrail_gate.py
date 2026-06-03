@@ -1,11 +1,9 @@
-# LLM: Tool guardrail gate tests verify repeat-failure hints and action-level blocks.
-# 模块用途: 用结构化 records 模拟重复失败和无进展场景，确保合同层 gate 与主代理运行时使用同一套 N/2N/3N 语义。
 
 from __future__ import annotations
 
 import time
 
-from agent_py_agent.agent.contracts.gates.tool_guardrail import (
+from agent_py_agent.agent.contracts.gates.tool.guardrail import (
     ToolGuardrailConfig,
     ToolGuardrailFacts,
     args_hash_for_guardrail,
@@ -69,8 +67,6 @@ class TestRepeatFailureDetection:
         assert decision.recommended_action == "change_strategy"
         assert any("REPEAT_FAILURE_BLOCKED" in f.code for f in decision.findings)
 
-    # LLM: zero repeat thresholds disable action blocks and keep only fixed soft hints.
-    # 函数用途: 验证 repeat_fail_threshold=0 时不会按次数阻断，但 50/100 次仍给模型换路提示。
     def test_zero_threshold_is_unlimited_with_fixed_hints(self):
         config = ToolGuardrailConfig(repeat_fail_threshold=0)
         records = tuple(

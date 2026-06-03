@@ -137,6 +137,23 @@ def test_build_execution_context_basic(mock_manager, tmp_path):
     assert context.generated_at > 0
 
 
+def test_build_execution_context_reports_collaboration_context_load_error(mock_manager, tmp_path):
+    class BrokenCollaborationStore:
+        def pending_requests_for_agent(self, **_kwargs):
+            raise OSError("collaboration ledger unavailable")
+
+    sample_task = make_task(tmp_path)
+    mock_manager._tasks[sample_task.id] = sample_task
+    mock_manager.collaboration_store = BrokenCollaborationStore()
+
+    context = mock_manager.build_execution_context(sample_task.id)
+    collaboration = context.context_bundle["collaboration"]
+
+    assert collaboration["targeted_request_count"] == 0
+    assert collaboration["collaboration_load_error"]["context"] == "subagent_context.collaboration.pending_requests"
+    assert collaboration["collaboration_load_error"]["category"] == "io"
+
+
 def test_build_execution_context_keeps_read_refs_without_hidden_dependency_rebinding(mock_manager, tmp_path):
     """执行上下文不再根据 sibling workflow 自动补写上游 artifact ref。"""
     upstream = make_task(tmp_path, "collect")
@@ -421,8 +438,6 @@ def test_build_execution_context_exposes_controlled_exec_grant_refs(mock_manager
     assert context.write_boundary["controlled_exec_grants"] == context.controlled_exec_grants
 
 
-# LLM: filesystem grants must affect the actual write boundary, not only the audit grant list.
-# 函数用途: 验证父级批准 write_file 路径后，runner context 的 allowed_write_roots 会包含 grant.path_scope。
 def test_build_execution_context_adds_filesystem_grant_path_scope_to_write_roots(mock_manager, tmp_path):
     sample_task = make_task(tmp_path)
     build_dir = tmp_path / "deliverables" / "build"

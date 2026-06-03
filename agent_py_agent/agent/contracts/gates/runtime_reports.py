@@ -1,5 +1,3 @@
-# LLM: Runtime report gates validate acceptance, recovery snapshots, and audit records.
-# 模块用途: 校验完成收口、恢复回放和工具审计的结构化字段，让 replay 不依赖自然语言摘要。
 
 from __future__ import annotations
 
@@ -8,8 +6,6 @@ from typing import Any
 from .models import GateDecision, GateFinding
 
 
-# LLM: evaluate_acceptance_closeout_gate requires verified runtime gate facts before DONE.
-# 函数用途: 完成入口必须带 verification_status 和 runtime_gate，不能只凭 final_status 成功。
 def evaluate_acceptance_closeout_gate(report: dict[str, Any]) -> GateDecision:
     status = str(report.get("final_status") or report.get("status") or "").strip().upper()
     verification = str(report.get("verification_status") or "").strip().upper()
@@ -28,8 +24,6 @@ def evaluate_acceptance_closeout_gate(report: dict[str, Any]) -> GateDecision:
     return GateDecision.allow("acceptance_closeout", evidence={"final_status": status, "verification_status": verification})
 
 
-# LLM: evaluate_final_closeout_gate checks the mandatory child gate set before final success.
-# 函数用途: 最终完成只能由 run/runtime/state/quality/acceptance 五个结构化 gate 共同放行，不能跳过任何一门。
 def evaluate_final_closeout_gate(report: dict[str, Any]) -> GateDecision:
     findings: list[GateFinding] = []
     child_gates = [
@@ -50,8 +44,6 @@ def evaluate_final_closeout_gate(report: dict[str, Any]) -> GateDecision:
     )
 
 
-# LLM: evaluate_runtime_audit_gate confirms replay records include gate and parameters.
-# 函数用途: 工具审计记录必须带 runtime_gate 和 parameters，否则恢复链路进入 RECOVERING。
 def evaluate_runtime_audit_gate(records: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> GateDecision:
     findings: list[GateFinding] = []
     if not isinstance(records, (list, tuple)):
@@ -67,8 +59,6 @@ def evaluate_runtime_audit_gate(records: list[dict[str, Any]] | tuple[dict[str, 
     return GateDecision.allow("runtime_audit", evidence={"record_count": len(records)})
 
 
-# LLM: evaluate_recovery_replay_gate checks snapshot refs before recovery trusts state.
-# 函数用途: 恢复/回放必须有 run/task/scope/effective_contract/tool_manifest/runlog 这些机器事实。
 def evaluate_recovery_replay_gate(snapshot: dict[str, Any]) -> GateDecision:
     findings: list[GateFinding] = []
     _require_text(snapshot, "run_id", findings)
@@ -93,8 +83,6 @@ def evaluate_recovery_replay_gate(snapshot: dict[str, Any]) -> GateDecision:
     )
 
 
-# LLM: evaluate_recovery_lineage_gate validates inherited artifacts before recovery trusts them.
-# 函数用途: 旧产物只有带 source_run_id 和 operation_id 的结构化 lineage 才能进入恢复链路。
 def evaluate_recovery_lineage_gate(snapshot: dict[str, Any]) -> GateDecision:
     refs = snapshot.get("previous_artifact_refs")
     if refs is None:
@@ -121,8 +109,6 @@ def evaluate_recovery_lineage_gate(snapshot: dict[str, Any]) -> GateDecision:
     return GateDecision.allow("recovery_lineage", evidence={"previous_artifact_count": len(refs)})
 
 
-# LLM: gate_payload_findings copies child gate findings without parsing human text.
-# 函数用途: 从 runtime_gate.findings 结构字段恢复统一 GateFinding，缺失时给 fallback code。
 def gate_payload_findings(payload: dict[str, Any], *, fallback: str) -> list[GateFinding]:
     raw = payload.get("findings")
     if not isinstance(raw, list):
@@ -131,14 +117,10 @@ def gate_payload_findings(payload: dict[str, Any], *, fallback: str) -> list[Gat
     return findings or [GateFinding(fallback)]
 
 
-# LLM: is_tool_audit_record identifies tool rows by stable type/tool fields.
-# 函数用途: 区分工具审计记录和其他记录，避免按自然语言标签判断。
 def is_tool_audit_record(record: dict[str, Any]) -> bool:
     return str(record.get("type") or "tool_result") == "tool_result" or str(record.get("tool") or "").strip() != ""
 
 
-# LLM: validate_tool_audit_record appends machine findings for missing audit fields.
-# 函数用途: 检查单条工具审计记录是否包含 runtime_gate 和 parameters。
 def validate_tool_audit_record(index: int, record: dict[str, Any], findings: list[GateFinding]) -> None:
     if not isinstance(record.get("runtime_gate"), dict):
         findings.append(GateFinding("AUDIT_RUNTIME_GATE_MISSING", evidence={"index": index}))
@@ -146,8 +128,6 @@ def validate_tool_audit_record(index: int, record: dict[str, Any], findings: lis
         findings.append(GateFinding("AUDIT_PARAMETERS_MISSING", evidence={"index": index}))
 
 
-# LLM: _require_allowed_child_gate records missing or failed final closeout child gates.
-# 函数用途: 从 gate payload 的 allowed 字段判断子门结果，不读取 message 文本。
 def _require_allowed_child_gate(report: dict[str, Any], key: str, findings: list[GateFinding]) -> None:
     payload = report.get(key)
     code_prefix = "FINAL_CLOSEOUT_" + key.removesuffix("_gate").upper()
@@ -165,8 +145,6 @@ def _require_allowed_child_gate(report: dict[str, Any], key: str, findings: list
         )
 
 
-# LLM: _gate_payload_finding maps one child gate finding into this gate's finding format.
-# 函数用途: 保留 code/severity/message/evidence 字段，让父级 gate 可追溯子 gate 失败原因。
 def _gate_payload_finding(item: dict[str, Any], *, fallback: str) -> GateFinding:
     evidence = item.get("evidence")
     return GateFinding(
@@ -177,15 +155,11 @@ def _gate_payload_finding(item: dict[str, Any], *, fallback: str) -> GateFinding
     )
 
 
-# LLM: _require_text records a missing non-empty snapshot field.
-# 函数用途: 对恢复快照的字符串字段做必填检查，并输出稳定 code。
 def _require_text(snapshot: dict[str, Any], key: str, findings: list[GateFinding]) -> None:
     if not str(snapshot.get(key) or "").strip():
         findings.append(GateFinding(f"{key.upper()}_MISSING"))
 
 
-# LLM: _require_mapping records a missing object snapshot field.
-# 函数用途: 对恢复快照的 mapping 字段做必填检查，并输出稳定 code。
 def _require_mapping(snapshot: dict[str, Any], key: str, findings: list[GateFinding]) -> None:
     value = snapshot.get(key)
     if not isinstance(value, dict) or not value:

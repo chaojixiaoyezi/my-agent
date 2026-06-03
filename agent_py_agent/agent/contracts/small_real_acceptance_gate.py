@@ -1,5 +1,3 @@
-# LLM: Small real acceptance gates bound live validation before expensive complex real tasks.
-# 模块用途: 校验小型真实验收 case 是否隔离、限时、只读或 dry-run、可验收、可回放。
 
 from __future__ import annotations
 
@@ -22,8 +20,6 @@ ALLOWED_EFFECTS = {"read_only", "dry_run"}
 ALLOWED_TOOL_MODES = {"read_only", "dry_run"}
 
 
-# LLM: _AllowedValuesCheck bundles one whitelist validation request.
-# 类用途: 保存字段名、允许值集合和错误码，避免 helper 参数变宽。
 @dataclass(frozen=True)
 class _AllowedValuesCheck:
     key: str
@@ -31,8 +27,6 @@ class _AllowedValuesCheck:
     code: str
 
 
-# LLM: validate_small_real_acceptance_gate is the pre-large-real-task gate.
-# 函数用途: 校验小型真实验收 case 是否隔离、限时、只读或 dry-run、可验收且可 replay。
 def validate_small_real_acceptance_gate(
     gate: dict[str, Any],
     *,
@@ -49,8 +43,6 @@ def validate_small_real_acceptance_gate(
     return validation_report(findings)
 
 
-# LLM: _validate_case checks one bounded live-validation case.
-# 函数用途: 对单个小型真实验收 case 执行结构化边界校验。
 def _validate_case(
     case: dict[str, Any],
     findings: list[dict[str, object]],
@@ -75,8 +67,6 @@ def _validate_case(
         findings.append(finding("SMALL_REAL_RUNTIME_TOO_LARGE", _case_extra(case)))
 
 
-# LLM: _max_runtime_seconds resolves the small-real runtime cap from AgentConfig.
-# 函数用途: 读取小型真实验收声明运行时长上限；0 表示关闭这个上限 finding。
 def _max_runtime_seconds(config: object | None) -> int:
     if config is None:
         config = default_agent_config()
@@ -86,8 +76,6 @@ def _max_runtime_seconds(config: object | None) -> int:
         return 0
 
 
-# LLM: _validate_allowed_values rejects effects or modes outside the bounded live gate.
-# 函数用途: 校验字段值都在允许集合内，不从 prompt 文本推断工具风险。
 def _validate_allowed_values(
     case: dict[str, Any],
     check: _AllowedValuesCheck,
@@ -98,8 +86,6 @@ def _validate_allowed_values(
         findings.append(finding(check.code, _case_extra(case)))
 
 
-# LLM: _case_extra keeps findings traceable to a small real case id.
-# 函数用途: 给小型真实验收 finding 附加 case_id。
 def _case_extra(case: dict[str, Any]) -> dict[str, object]:
     return {"case_id": text(case.get("case_id"))}
 

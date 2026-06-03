@@ -1,15 +1,15 @@
-# LLM: Runner completion wake bridges subagent tree facts back to the parent conversation.
-# 模块用途: 子代理执行器完成后写 observation 和 wake signal，让父代理后续自动继续编排。
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+from ..runtime_errors import runtime_error_report
+
 _WAKE_STATUSES = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "BLOCKED"}
+_LOGGER = logging.getLogger(__name__)
 
 
-# LLM: notify_parent_on_runner_result is best-effort; child completion must not fail because wake IO failed.
-# 函数用途: 当子代理完成或失败时，给绑定的长期会话写一条可去重唤醒信号；没有绑定会话时保持静默。
 def notify_parent_on_runner_result(manager: Any, task: Any, result: Any, output_payload: dict[str, object]) -> None:
     store = getattr(manager, "conversation_store", None)
     if store is None or bool(getattr(result, "dry_run", False)):
@@ -51,8 +51,8 @@ def notify_parent_on_runner_result(manager: Any, task: Any, result: Any, output_
                 "metadata": {"task_id": task_id, "status": status},
             }
         )
-    except Exception:
-        return
+    except Exception as exc:
+        _record_wake_error(manager, task, result, exc)
 
 
 def _summary(task: Any, result: Any, status: str) -> str:
@@ -71,6 +71,23 @@ def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict
         "output_json": str(getattr(task, "output_json", "") or ""),
         "artifact_refs": list(output_payload.get("artifacts") or []) if isinstance(output_payload.get("artifacts"), list) else [],
     }
+
+
+def _record_wake_error(manager: Any, task: Any, result: Any, exc: BaseException) -> None:
+    status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").upper()
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    attrs["runner_completion_wake_error"] = {
+        "status": status,
+        "run_id": str(getattr(task, "id", "") or getattr(result, "run_id", "") or ""),
+        "error": runtime_error_report(exc, context="subagent_runner_completion_wake.notify_parent"),
+    }
+    task.attributes = attrs
+    try:
+        manager.save(task)
+    except Exception as save_exc:
+        report = runtime_error_report(save_exc, context="subagent_runner_completion_wake.record_error")
+        report["run_id"] = str(getattr(task, "id", "") or getattr(result, "run_id", "") or "")
+        _LOGGER.warning("subagent runner completion wake error could not be saved: %s", report)
 
 
 __all__ = ["notify_parent_on_runner_result"]

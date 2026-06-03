@@ -1,17 +1,15 @@
-# LLM: Fact evidence gate binds produced facts to structured source and tool evidence.
-# 模块用途: 收口前校验证据 claim/source/tool 三者的机器绑定，避免报告里的事实声明只靠产物文本通过。
 
 from __future__ import annotations
 
 from typing import Any
 
+from ...common.value_parsing import sequence_strings
+from ...common.value_parsing import text_value as _text
 from ..evidence_contract import EvidenceContractRequest, evaluate_evidence_contract
-from ..staged_checkpoint_evidence_payloads import claims, source_refs, string_list
+from ..staged_checkpoint_evidence_payloads import claims, source_refs
 from .models import GateDecision, GateFinding
 
 
-# LLM: evaluate_fact_evidence_gate checks fact claims without parsing artifact prose.
-# 函数用途: 复用 EvidenceContract，并额外要求关键来源绑定 archive_tool_calls 里的真实工具记录。
 def evaluate_fact_evidence_gate(
     payload: dict[str, Any],
     contract: dict[str, Any],
@@ -57,8 +55,8 @@ def _evidence_contract_findings(
         EvidenceContractRequest(
             source_refs=list(source_records),
             claims=list(claim_records),
-            required_fields=string_list(contract.get("required_fields")),
-            allowed_value_types=string_list(contract.get("allowed_value_types")) or ["exact"],
+            required_fields=sequence_strings(contract.get("required_fields")),
+            allowed_value_types=sequence_strings(contract.get("allowed_value_types")) or ["exact"],
             min_confidence=_float_value(contract.get("min_confidence")),
             require_methodology_for_estimates=bool(contract.get("require_methodology_for_estimates", False)),
             require_verified=bool(contract.get("require_verified", True)),
@@ -115,7 +113,7 @@ def _referenced_source_ids(value: object) -> set[str]:
     source_ids: set[str] = set()
     for item in value:
         if isinstance(item, dict):
-            source_ids.update(string_list(item.get("source_ids")))
+            source_ids.update(sequence_strings(item.get("source_ids")))
     return source_ids
 
 
@@ -208,10 +206,5 @@ def _float_value(value: object, *, default: float = 0.0) -> float:
 
 def _mapping(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
-
-
-def _text(value: object) -> str:
-    return str(value or "").strip()
-
 
 __all__ = ["evaluate_fact_evidence_gate"]

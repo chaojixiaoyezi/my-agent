@@ -1,5 +1,3 @@
-# LLM: Recovery models are the shared serialized shape for contract repair feedback.
-# 模块用途: 定义合同返工包和构建请求；机器读取状态/动作，中文字段只给模型和用户看。
 
 from __future__ import annotations
 

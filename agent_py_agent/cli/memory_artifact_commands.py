@@ -1,12 +1,10 @@
-# LLM: CLI command for explicit artifact body reads; keep it separate from archive search/resume commands.
-# 模块用途: 提供 `memory-artifact-read`，只读取已登记 tool-output artifact 的正文切片。
 from __future__ import annotations
 
 """CLI entrypoint for explicit externalized artifact reads."""
 
 import json
 
-from ..agent.memory_archive.artifact_reader import (
+from ..agent.memory_archive.artifact.reader import (
     ReadToolOutputArtifactRequest,
     read_tool_output_artifact,
 )
@@ -14,8 +12,6 @@ from ..agent.memory_archive.query import strip_sort_keys
 from .common import make_agent
 
 
-# LLM: cmd_memory_artifact_read is the explicit CLI gate from artifact refs to artifact body text.
-# 函数用途: 只读取 tool output index 已登记 artifact；失败时返回非 0 且不打印正文。
 def cmd_memory_artifact_read(args) -> int:
     agent = make_agent(args)
     payload = read_tool_output_artifact(
@@ -32,8 +28,6 @@ def cmd_memory_artifact_read(args) -> int:
     return 0 if payload.get("ok") else 2
 
 
-# LLM: _memory_artifact_max_chars resolves the CLI default from backend config.
-# 函数用途: 用户没有显式传 --max-chars 时，使用 agent_config.yaml 的 memory_artifact_default_read_chars。
 def _memory_artifact_max_chars(agent, args) -> int:
     value = getattr(args, "max_chars", None)
     if value is not None:
@@ -41,8 +35,6 @@ def _memory_artifact_max_chars(agent, args) -> int:
     return int(getattr(agent.config, "memory_artifact_default_read_chars", 4000) or 0)
 
 
-# LLM: _print_memory_artifact_read keeps metadata visible before printing explicit artifact content.
-# 函数用途: 文本模式先展示 artifact 校验信息，再输出本次显式读取的正文切片。
 def _print_memory_artifact_read(payload: dict, *, json_output: bool) -> None:
     if json_output:
         print(json.dumps(strip_sort_keys(payload), ensure_ascii=False, indent=2, sort_keys=True))

@@ -1,5 +1,3 @@
-# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
-# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
 
 from __future__ import annotations
 
@@ -15,8 +13,6 @@ import signal
 import time
 
 
-# LLM: is_pid_alive 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 判断pidalive条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def is_pid_alive(pid: int) -> bool:
 
     if pid <= 0:
@@ -40,8 +36,6 @@ def is_pid_alive(pid: int) -> bool:
     return True
 
 
-# LLM: terminate_pid 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理terminatepid相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def terminate_pid(pid: int) -> None:
 
     if pid <= 0:
@@ -52,8 +46,6 @@ def terminate_pid(pid: int) -> None:
         return
 
 
-# LLM: wait_for_pid_exit 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进pidexit的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def wait_for_pid_exit(pid: int, timeout: float) -> bool:
 
     deadline = time.time() + max(0.0, timeout)

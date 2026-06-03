@@ -9,15 +9,13 @@ import json
 from unittest.mock import MagicMock, patch
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
 from agent_py_agent.cli.parser import build_parser
 
 
-# LLM: _child_specs keeps hierarchy tests readable while using the production bundle shape.
-# 函数用途: 构造多个待调度子任务规格，避免测试里重复写 dataclass 字段。
 def _child_specs(count: int, *, prefix: str = "worker") -> list[HierarchyChildSpec]:
     return [
         HierarchyChildSpec(
@@ -30,8 +28,6 @@ def _child_specs(count: int, *, prefix: str = "worker") -> list[HierarchyChildSp
     ]
 
 
-# LLM: test_hierarchy_schedule_dry_run_previews_without_writing_children locks the safe default.
-# 函数用途: 确认层级调度默认只预览，不创建子任务，也不修改父任务 child_ids。
 def test_hierarchy_schedule_dry_run_previews_without_writing_children(tmp_path):
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(goal="parent", thought="split safely", plan=["plan"])
@@ -50,8 +46,6 @@ def test_hierarchy_schedule_dry_run_previews_without_writing_children(tmp_path):
     assert manager.load(parent.id).child_ids == []
 
 
-# LLM: test_hierarchy_schedule_apply_builds_two_child_four_grandchild_tree proves controlled nesting.
-# 函数用途: 显式 apply 创建 1 主、2 子、4 孙结构，并保持 root/parent/depth 可恢复。
 def test_hierarchy_schedule_apply_builds_two_child_four_grandchild_tree(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="orchestrate", plan=["plan"])
@@ -85,8 +79,6 @@ def test_hierarchy_schedule_apply_builds_two_child_four_grandchild_tree(tmp_path
     assert sum(len(manager.load(child_id).child_ids) for child_id in first.created_run_ids) == 4
 
 
-# LLM: test_hierarchy_schedule_repairs_literal_lineage_wildcard_names locks the real R5 naming fix.
-# 函数用途: 模型把“小傻妞-*”模板里的星号当成实际名字时，调度器用 role 生成可读后缀。
 def test_hierarchy_schedule_repairs_literal_lineage_wildcard_names(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root", thought="orchestrate", plan=["plan"])
@@ -120,8 +112,6 @@ def test_hierarchy_schedule_repairs_literal_lineage_wildcard_names(tmp_path):
     assert leaf.agent_name.endswith("leaf_worker")
 
 
-# LLM: real prompts often write "4层" without a space; the hierarchy guard must still prevent early leaves.
-# 函数用途: 父级明确要求 depth=3 leaf 时，depth=1 不能提前创建 depth=2 leaf_worker。
 def test_hierarchy_schedule_blocks_leaf_when_four_layer_token_has_no_space(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -166,8 +156,6 @@ def test_hierarchy_schedule_blocks_leaf_when_four_layer_token_has_no_space(tmp_p
     assert leaf.depth == 2
 
 
-# LLM: child goals may mention task_dir as context; product-root drift should only reject user-output drift.
-# 函数用途: 子任务描述里包含父级 runtime/task_dir 时，不应被当成用户产物根漂移阻断。
 def test_hierarchy_schedule_allows_internal_task_dir_context_with_product_root(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -202,8 +190,6 @@ def test_hierarchy_schedule_allows_internal_task_dir_context_with_product_root(t
     assert result.created_run_ids
 
 
-# LLM: test_hierarchy_schedule_inherits_parent_extra_write_roots keeps user-approved product roots available.
-# 函数用途: 确认下一层默认继承父节点的外部产物目录权限，但不继承父节点工单目录。
 def test_hierarchy_schedule_inherits_parent_extra_write_roots(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -223,8 +209,6 @@ def test_hierarchy_schedule_inherits_parent_extra_write_roots(tmp_path):
     assert root.task_dir not in child.allowed_write_roots
 
 
-# LLM: test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables covers real runner prompt drift.
-# 函数用途: 当模型忘记 allowed_tools 但 leaf 任务明确要写已授权产物文件时，系统自动补齐文件读写工具。
 def test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -267,8 +251,6 @@ def test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables(t
     assert str(deliverables) in leaf.allowed_write_roots
 
 
-# LLM: test_hierarchy_schedule_normalizes_model_write_alias keeps real runners from receiving unavailable tool names.
-# 函数用途: 当模型把 write 当成工具名时，系统转成真实 write_file，并保留叶子写文件需要的工具包。
 def test_hierarchy_schedule_normalizes_model_write_alias_for_leaf_tasks(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -303,8 +285,6 @@ def test_hierarchy_schedule_normalizes_model_write_alias_for_leaf_tasks(tmp_path
     assert "apply_patch" in leaf.allowed_tools
 
 
-# LLM: test_hierarchy_schedule_carries_parent_context_to_child_thought prevents vague nested handoffs.
-# 函数用途: 确认下层 coordinator 能通过 thought 看到父级目标和提示，避免只拿到空泛编号任务。
 def test_hierarchy_schedule_carries_parent_context_to_child_thought(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(
@@ -323,8 +303,6 @@ def test_hierarchy_schedule_carries_parent_context_to_child_thought(tmp_path):
     assert "必须把下一层 goal 写成自包含任务" in child.thought
 
 
-# LLM: test_hierarchy_schedule_carries_parent_boundary_into_vague_child_goal locks real E2E path preservation.
-# 函数用途: 当模型给下一层的 goal 太短时，系统把父级产物路径和边界补进 goal，避免路径靠 thought 转述而丢失。
 def test_hierarchy_schedule_carries_parent_boundary_into_vague_child_goal(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -350,8 +328,6 @@ def test_hierarchy_schedule_carries_parent_boundary_into_vague_child_goal(tmp_pa
     assert "write_file" in leaf.allowed_tools
 
 
-# LLM: test_hierarchy_schedule_keeps_sibling_scope_out_of_child_handoff covers real E2E tree blow-up.
-# 函数用途: 当父级同时描述多个 sibling 任务时，调度某一个 child 不应把其它 sibling 的目标塞进交接。
 def test_hierarchy_schedule_keeps_sibling_scope_out_of_child_handoff(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -387,8 +363,6 @@ def test_hierarchy_schedule_keeps_sibling_scope_out_of_child_handoff(tmp_path):
     assert "当前子任务只执行" in child.goal
 
 
-# LLM: test_hierarchy_schedule_keeps_exact_file_contract_when_child_goal_only_has_dir locks real E2E drift.
-# 函数用途: child goal 只带产物目录时，也要继承父级指定的 solution.py/test_solution.py/README.md 文件契约。
 def test_hierarchy_schedule_keeps_exact_file_contract_when_child_goal_only_has_dir(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -435,8 +409,6 @@ def test_hierarchy_schedule_keeps_exact_file_contract_when_child_goal_only_has_d
     assert "README.md" in leaf.goal
 
 
-# LLM: test_hierarchy_schedule_keeps_controlled_exec_contract covers real E2E capability drift.
-# 函数用途: 父级要求 controlled_exec/capability_request/trash 时，即使中间 coordinator 简化目标，leaf 也必须拿到这些硬约束。
 def test_hierarchy_schedule_keeps_controlled_exec_contract_for_leaf(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -460,8 +432,6 @@ def test_hierarchy_schedule_keeps_controlled_exec_contract_for_leaf(tmp_path):
 
 
 
-# LLM: _controlled_exec_contract_root centralizes the long parent contract text for inheritance tests.
-# 函数用途: 创建要求 controlled_exec/capability_request/task_trash refs 的 root 任务。
 def _controlled_exec_contract_root(manager: SubAgentManager, deliverables):
     return manager.create_run(
         goal=(
@@ -488,8 +458,6 @@ def _controlled_exec_contract_root(manager: SubAgentManager, deliverables):
     )
 
 
-# LLM: _schedule_controlled_exec_contract_leaf builds the extra coordinator layer before the final leaf.
-# 函数用途: 先创建 depth=2 coordinator，再创建 depth=3 leaf，用于验证合同跨层传递。
 def _schedule_controlled_exec_contract_leaf(manager: SubAgentManager, child_id: str):
     grand_result = manager.schedule_child_runs(
         params=HierarchyScheduleRequest(
@@ -522,8 +490,6 @@ def _schedule_controlled_exec_contract_leaf(manager: SubAgentManager, child_id: 
     )
     return manager.load(leaf_result.created_run_ids[0])
 
-# LLM: _schedule_vague_child keeps the boundary-inheritance test below the code-size risk threshold.
-# 函数用途: 生成缺少产物路径的 child spec，用于验证 scheduler 自动补父级边界。
 def _schedule_vague_child(manager: SubAgentManager, parent_id: str):
     return manager.schedule_child_runs(
         params=HierarchyScheduleRequest(
@@ -541,8 +507,6 @@ def _schedule_vague_child(manager: SubAgentManager, parent_id: str):
     )
 
 
-# LLM: _schedule_vague_leaf verifies inherited parent scope is also used for leaf tool inference.
-# 函数用途: 生成缺少产物路径的 leaf spec，用于验证补全 goal 后仍能推断写文件工具。
 def _schedule_vague_leaf(manager: SubAgentManager, parent_id: str):
     return manager.schedule_child_runs(
         params=HierarchyScheduleRequest(

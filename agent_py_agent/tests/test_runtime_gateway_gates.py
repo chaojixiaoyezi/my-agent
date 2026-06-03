@@ -175,6 +175,7 @@ def test_state_event_ledger_gate_requires_events_and_blocks_late_or_duplicate_ac
     )
 
     assert missing_event.finding_codes == ("STATE_EVENT_LEDGER_EVENT_MISSING",)
+    assert missing_event.recommended_action == "repair"
     assert done_dispatch.finding_codes == ("STATE_EVENT_LEDGER_TERMINAL_ACTION_BLOCKED",)
     assert expired_lease_tool_result.finding_codes == ("STATE_EVENT_LEDGER_LEASE_EXPIRED_RESULT",)
     assert passed.allowed is True

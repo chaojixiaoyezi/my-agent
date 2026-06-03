@@ -173,8 +173,6 @@ def test_pending_requests_for_agent_ignores_closed_cases(tmp_path) -> None:
     assert store.pending_requests_for_agent(agent_id="agent-b") == []
 
 
-# LLM: Multi-target collaboration requests stay pending for unresponsive targets.
-# 函数用途: 一个请求发给多个代理时，单个代理提交证据不能让其它目标丢失 inbox 请求。
 def test_multi_target_request_tracks_each_responder_until_all_submit_collaboration_result(tmp_path) -> None:
     from agent_py_agent.agent.collaboration import CollaborationStore
 

@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 
 
-# LLM: provider identity index is the lookup bridge before resolving an owner home.
-# 函数用途: 验证 provider 用户身份会写到按 provider 分片的索引文件，避免全局 JSONL 全表扫。
 def test_provider_identity_index_is_provider_sharded(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.identity_store import (
@@ -32,8 +30,36 @@ def test_provider_identity_index_is_provider_sharded(tmp_path: Path):
     assert found.canonical_user_id == "canonical_user_001"
 
 
-# LLM: canonical user state is a directory profile, while provider bindings remain JSONL rows.
-# 函数用途: 验证 canonical user 目录不会和 canonical_user_001.json 文件冲突。
+def test_provider_identity_lookup_reports_corrupt_index_rows(tmp_path: Path):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.identity_store import (
+        ProviderIdentityRecord,
+        link_provider_identity,
+        lookup_provider_identity_report,
+    )
+
+    home = ensure_my_agent_home(tmp_path)
+    home.provider_identity_dir.mkdir(parents=True, exist_ok=True)
+    (home.provider_identity_dir / "feishu.jsonl").write_text("{bad-json}\n", encoding="utf-8")
+    link_provider_identity(
+        home,
+        ProviderIdentityRecord(
+            provider="feishu",
+            provider_subject_id="ou_123",
+            owner_kind="user",
+            owner_id="ou_123",
+            canonical_user_id="canonical_user_001",
+        ),
+    )
+
+    report = lookup_provider_identity_report(home, provider="feishu", provider_subject_id="ou_123")
+
+    assert report.record is not None
+    assert report.record.owner_id == "ou_123"
+    assert report.load_errors
+    assert report.load_errors[0]["context"] == "identity_store.provider_identity"
+
+
 def test_canonical_user_profile_is_directory_based(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.identity_store import ensure_canonical_user_profile
@@ -49,8 +75,6 @@ def test_canonical_user_profile_is_directory_based(tmp_path: Path):
     assert not (home.canonical_users_dir / "canonical_user_001.json").exists()
 
 
-# LLM: provider requests should resolve to an owner home through identity rows, not path guessing.
-# 函数用途: 验证外部通道身份可通过 provider_identity 索引找到并初始化对应 owner home。
 def test_provider_identity_resolves_owner_home(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.identity_store import (
@@ -78,8 +102,35 @@ def test_provider_identity_resolves_owner_home(tmp_path: Path):
     assert owner.memory_md.exists()
 
 
-# LLM: canonical links keep cross-provider merge facts explicit and auditable.
-# 函数用途: 验证同一真实用户的多平台绑定会写 canonical 目录和 linked identity 账本，不覆盖 provider memory。
+def test_provider_identity_owner_resolution_report_keeps_load_errors(tmp_path: Path):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.identity_store import (
+        ProviderIdentityRecord,
+        link_provider_identity,
+        resolve_owner_from_provider_identity_report,
+    )
+
+    home = ensure_my_agent_home(tmp_path)
+    home.provider_identity_dir.mkdir(parents=True, exist_ok=True)
+    (home.provider_identity_dir / "feishu.jsonl").write_text("{bad-json}\n", encoding="utf-8")
+    link_provider_identity(
+        home,
+        ProviderIdentityRecord(
+            provider="feishu",
+            provider_subject_id="ou_456",
+            owner_kind="user",
+            owner_id="ou_456",
+            canonical_user_id="canonical_user_001",
+        ),
+    )
+
+    report = resolve_owner_from_provider_identity_report(home, provider="feishu", provider_subject_id="ou_456")
+
+    assert report.owner is not None
+    assert report.owner.owner_id == "providers/feishu/users/ou_456"
+    assert report.load_errors
+
+
 def test_canonical_identity_links_are_append_only(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.identity_store import (
@@ -106,8 +157,6 @@ def test_canonical_identity_links_are_append_only(tmp_path: Path):
     assert links[0].owner_id == "providers/feishu/users/ou_123"
 
 
-# LLM: canonical memory is a shared preference layer, not a provider memory overwrite.
-# 函数用途: 验证 canonical 用户记忆和 provider owner 记忆分开保存，避免跨平台绑定时互相覆盖。
 def test_canonical_memory_note_does_not_overwrite_provider_memory(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.identity_store import (
@@ -132,8 +181,6 @@ def test_canonical_memory_note_does_not_overwrite_provider_memory(tmp_path: Path
     assert provider_memory.read_text(encoding="utf-8") == '{"scope":"provider","language":"zh"}\n'
 
 
-# LLM: provider owner lifecycle is owner metadata, not a global state file.
-# 函数用途: 验证暂停/归档等 owner 状态写在对应 provider owner home，并留下审计记录。
 def test_provider_owner_lifecycle_is_owner_scoped(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.owner_lifecycle import (
@@ -152,3 +199,21 @@ def test_provider_owner_lifecycle_is_owner_scoped(tmp_path: Path):
     assert updated.path == owner.home_dir / "owner_status.json"
     assert updated.status == "suspended"
     assert "用户要求暂停后台任务" in (owner.home_dir / "audit_log.jsonl").read_text(encoding="utf-8")
+
+
+def test_provider_owner_lifecycle_reports_corrupt_status_file(tmp_path: Path):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_lifecycle import read_owner_lifecycle_report
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, ensure_owner_home
+
+    home = ensure_my_agent_home(tmp_path)
+    owner = ensure_owner_home(home.root, OwnerIdentity.provider_user("feishu", "ou_bad_status"))
+    status_path = owner.home_dir / "owner_status.json"
+    status_path.write_text("{bad-json", encoding="utf-8")
+
+    report = read_owner_lifecycle_report(owner)
+
+    assert report.state.status == "UNKNOWN"
+    assert report.load_error["category"] == "data_parse"
+    assert report.load_error["context"] == "owner_lifecycle.status"
+    assert report.load_error["path"] == str(status_path)

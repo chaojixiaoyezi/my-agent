@@ -1,7 +1,7 @@
-# LLM: Recovery classification maps stable finding codes to repair/user/block actions.
-# 模块用途: 只按 code/status 分类合同失败，不读取普通自然语言 message。
 
 from __future__ import annotations
+
+from .recovery_actions import RecoveryAction
 
 
 def action_status(status: str, code: str) -> str:
@@ -97,34 +97,34 @@ def recovery_category(code: str) -> str:
 
 def recommended_action(code: str, status: str) -> str:
     if status == "needs_user_input":
-        return "request_user_input_or_approval"
+        return RecoveryAction.REQUEST_USER_INPUT.value
     if status == "recovering":
-        return "recover_from_checkpoint"
+        return RecoveryAction.RECOVER_FROM_CHECKPOINT.value
     if status == "blocked":
-        return "stop_and_report_blocker"
+        return RecoveryAction.REPORT_BLOCKER.value
     if code.startswith("COLLABORATION_"):
-        return "continue_collaboration_or_mark_true_blocker"
+        return RecoveryAction.CONTINUE_COLLABORATION.value
     if code.startswith(("METRIC_", "LANGUAGE_", "COLLECTION_")):
-        return "repair_structured_checkpoint_json"
+        return RecoveryAction.REPAIR_STRUCTURED_CHECKPOINT_JSON.value
     if code.startswith(("EVIDENCE_", "FACT_")):
-        return "repair_evidence_refs"
+        return RecoveryAction.REPAIR_EVIDENCE_REFS.value
     if code.startswith(("ARTIFACT_", "BUILDER_", "DOCUMENT_", "DOCX_", "HTML_", "XLSX_", "CSV_", "JSON_", "PDF_", "MARKDOWN_", "STATIC_SITE_")):
-        return "repair_artifact_against_findings"
+        return RecoveryAction.REPAIR_ARTIFACT_AGAINST_FINDINGS.value
     if code.startswith(("STAGED_", "SPREADSHEET_")):
-        return "repair_structured_checkpoint_json"
+        return RecoveryAction.REPAIR_STRUCTURED_CHECKPOINT_JSON.value
     if code.startswith("PATH_"):
-        return "fix_path_within_allowed_roots"
+        return RecoveryAction.FIX_PATH_WITHIN_ALLOWED_ROOTS.value
     if code.startswith("TOOL_PROTOCOL_"):
-        return "repair_tool_call"
+        return RecoveryAction.REPAIR_TOOL_CALL.value
     if code in {"TOOL_NOT_REGISTERED", "TOOL_MANIFEST_EFFECT_MISSING"} or code.startswith("TOOL_MANIFEST_"):
-        return "choose_registered_tool_or_request_capability"
+        return RecoveryAction.CHOOSE_REGISTERED_TOOL.value
     if code.startswith("TOOL_"):
-        return "repair_tool_arguments_or_choose_allowed_tool"
+        return RecoveryAction.REPAIR_TOOL_ARGUMENTS.value
     if code.startswith(("CONTRACT_", "EFFECTIVE_CONTRACT_", "UNKNOWN_VERIFIER")):
-        return "repair_effective_contract"
+        return RecoveryAction.REPAIR_EFFECTIVE_CONTRACT.value
     if code.startswith(("STATE_", "FINAL_CLOSEOUT_", "ACCEPTANCE_")):
-        return "rerun_acceptance_after_repair"
-    return "repair_against_contract_findings"
+        return RecoveryAction.RERUN_ACCEPTANCE_AFTER_REPAIR.value
+    return RecoveryAction.REPAIR_AGAINST_CONTRACT_FINDINGS.value
 
 
 def next_status(status: str) -> str:

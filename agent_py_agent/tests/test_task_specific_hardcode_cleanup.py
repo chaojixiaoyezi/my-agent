@@ -16,8 +16,6 @@ from agent_py_agent.agent.subagents.policy_checks import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-# LLM: Sample neutrality checker should be driven by structured rules, not task-specific code.
-# 函数用途: 验证样板污染扫描器只读调用方传入的文件和 marker，不在实现里内置业务词。
 def test_sample_neutrality_checker_uses_caller_supplied_rules(tmp_path) -> None:
     clean = tmp_path / "tool_spec.py"
     clean.write_text('example = {"columns": ["字段A"]}\n', encoding="utf-8")
@@ -45,14 +43,10 @@ def test_sample_neutrality_checker_uses_caller_supplied_rules(tmp_path) -> None:
     assert findings[0].surface == "runtime_prompt_example"
 
 
-# LLM: Production defaults should not retain the old shop-specific parent oracle module.
-# 函数用途: 防止电商专用最终收口模块重新进入 agent 生产代码路径。
 def test_shop_parent_oracle_module_removed_from_production_defaults() -> None:
     assert not (REPO_ROOT / "agent_py_agent/agent/subagents/shop_web_parent_oracle.py").exists()
 
 
-# LLM: Built-in routing and orchestration examples should stay domain-neutral.
-# 函数用途: 只检查审计指出的默认提示/示例文件，避免示例流程类示例再次污染通用能力路由。
 def test_default_tool_examples_do_not_contain_shop_specific_terms() -> None:
     forbidden_terms = {
         "示例流程",
@@ -76,7 +70,7 @@ def test_default_tool_examples_do_not_contain_shop_specific_terms() -> None:
             )
             for relative_path in (
                 "agent_py_agent/agent/capability/router.py",
-                "agent_py_agent/agent/agent_core/orchestration_tool_specs.py",
+                "agent_py_agent/agent/agent_core/orchestration/tool_specs.py",
             )
         ],
     )
@@ -84,8 +78,6 @@ def test_default_tool_examples_do_not_contain_shop_specific_terms() -> None:
     assert findings == []
 
 
-# LLM: Tool prompt examples and contract fixtures should use neutral labels.
-# 函数用途: 防止工具示例或 contracts 夹具继续把记录/条目/示例流程写成默认样板。
 def test_structured_tool_and_contract_fixtures_use_neutral_sample_terms() -> None:
     findings = find_sample_neutrality_violations(
         REPO_ROOT,
@@ -111,17 +103,13 @@ def test_structured_tool_and_contract_fixtures_use_neutral_sample_terms() -> Non
     assert findings == []
 
 
-# LLM: Default hierarchy stopwords should not include user-specific or one-task domain names.
-# 函数用途: 确认领域去重词表不再把个人名或示例流程任务样本写成生产默认。
 def test_hierarchy_domain_stopwords_are_user_and_task_neutral() -> None:
-    from agent_py_agent.agent.subagents.services.hierarchy_domain_terms import DOMAIN_STOPWORDS
+    from agent_py_agent.agent.subagents.services.hierarchy.domain_terms import DOMAIN_STOPWORDS
 
     assert "xiaoyezi" not in DOMAIN_STOPWORDS
     assert "shop" not in DOMAIN_STOPWORDS
 
 
-# LLM: Reference-project write protection should be configured, not hardcoded into defaults.
-# 函数用途: 防止默认 forbidden roots 写死 .通道运行时 这类外部项目路径。
 def test_default_forbidden_write_roots_do_not_hardcode_reference_project_dirs() -> None:
     for roots in (policy_roots(), check_roots()):
         assert all(not str(root).endswith(".openclaw") for root in roots)

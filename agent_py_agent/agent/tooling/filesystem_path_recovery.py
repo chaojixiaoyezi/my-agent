@@ -1,5 +1,3 @@
-# LLM: missing path recovery should suggest safe candidates, not auto-read or hard-stop the task.
-# 模块用途: 为 read_file/list_files/search_text 提供统一的路径不存在恢复提示。
 
 from __future__ import annotations
 
@@ -67,8 +65,6 @@ class MissingPathRecovery:
         }
 
 
-# LLM: missing_path_result is advisory; it never opens candidate files.
-# 函数用途: 生成路径不存在的统一工具结果，并附上工作区内候选路径。
 def missing_path_result(request: MissingPathRequest) -> ToolExecutionResult:
     candidates = suggest_missing_path_candidates(
         raw_path=request.raw_path,
@@ -92,8 +88,6 @@ def missing_path_result(request: MissingPathRequest) -> ToolExecutionResult:
     )
 
 
-# LLM: suggestions stay inside known workspace roots and are bounded for large repos.
-# 函数用途: 根据同目录相似项和工作区内同名/近似文件，返回少量安全候选。
 def suggest_missing_path_candidates(
     *,
     raw_path: str,

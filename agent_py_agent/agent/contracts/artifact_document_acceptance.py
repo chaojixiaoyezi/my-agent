@@ -1,5 +1,3 @@
-# LLM: Document artifact acceptance bridges file-format integrity and document-quality contracts.
-# 模块用途: 放置 DOCX/TXT 和 document_quality_contract 验收适配，避免主 artifact 分发器膨胀。
 
 from __future__ import annotations
 
@@ -12,11 +10,9 @@ from .artifact_acceptance_models import (
     ArtifactFinding,
     advisory_artifact_findings,
 )
-from .gates.document_content_quality import document_content_quality_findings
+from .gates.document.content_quality import document_content_quality_findings
 
 
-# LLM: validate_docx_artifact checks Word package integrity before content-quality gates run.
-# 函数用途: DOCX 必须能打开且包含 word/document.xml，随后按可选机器合同检查内容厚度。
 def validate_docx_artifact(
     path: Path,
     validation_contract: dict[str, object] | None = None,
@@ -40,8 +36,6 @@ def validate_docx_artifact(
     )
 
 
-# LLM: validate_text_artifact gives plain text the same explicit document-quality contract path.
-# 函数用途: TXT 至少检查非空，若声明 document_quality_contract 则执行通用内容门。
 def validate_text_artifact(
     path: Path,
     validation_contract: dict[str, object] | None = None,
@@ -59,8 +53,6 @@ def validate_text_artifact(
     )
 
 
-# LLM: document_quality_artifact_findings converts gate findings into artifact acceptance findings.
-# 函数用途: 让 Markdown/PDF/TXT/DOCX 共用同一个 document_quality_contract 适配层。
 def document_quality_artifact_findings(
     path: Path,
     validation_contract: dict[str, object] | None,

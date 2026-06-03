@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 
 
-# LLM: daily memory is the readable progress journal that sits beside raw archive.
-# 函数用途: 验证每日记忆事件按天落盘，并保存摘要、引用、教训和下一步。
 def test_append_daily_memory_event_writes_openclaw_style_work_journal(tmp_path: Path):
     from agent_py_agent.agent.memory_store.daily import DailyMemoryEvent, append_daily_memory_event
 

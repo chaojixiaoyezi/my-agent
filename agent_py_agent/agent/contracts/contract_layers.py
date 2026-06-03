@@ -1,5 +1,3 @@
-# LLM: Contract layer classification keeps runtime gates distinct from lab scenarios.
-# 模块用途: 给合同模块做机器可读分层，避免真实任务套件被误当成生产运行时 gate。
 
 from __future__ import annotations
 
@@ -70,8 +68,6 @@ _CORE_NAMES = {
 }
 
 
-# LLM: classify_contract_module maps a contract module to its architecture layer.
-# 函数用途: 使用模块名的结构化前缀做分层，不读取业务 prompt 或任务自然语言。
 def classify_contract_module(module_name: object) -> str:
     name = _module_basename(module_name)
     if name in _LIVE_SCENARIO_NAMES or _starts_with(name, _LIVE_SCENARIO_PREFIXES):
@@ -85,8 +81,6 @@ def classify_contract_module(module_name: object) -> str:
     return CONTRACT_LAYER_SUPPORT
 
 
-# LLM: _module_basename normalizes module paths before layer classification.
-# 函数用途: 将文件路径或 dotted module 转成基础模块名，保留 gates.* 前缀。
 def _module_basename(module_name: object) -> str:
     text = str(module_name or "").strip().replace("\\", "/")
     if text.endswith(".py"):
@@ -95,8 +89,6 @@ def _module_basename(module_name: object) -> str:
     return text.rsplit(".", 1)[-1] if "." in text and not text.startswith("gates.") else text
 
 
-# LLM: _starts_with checks stable module-name prefixes.
-# 函数用途: 用结构化前缀集合分类模块，不读取 prompt 或任务描述。
 def _starts_with(name: str, prefixes: tuple[str, ...]) -> bool:
     return any(name == prefix.rstrip("_") or name.startswith(prefix) for prefix in prefixes)
 

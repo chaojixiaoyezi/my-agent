@@ -1,5 +1,3 @@
-# LLM: Artifact acceptance validators turn model self-checks into machine-verifiable findings.
-# 模块用途: 验收 HTML 等产物的常见质量问题，给真实 E2E、QA 和修复流程提供结构化 findings。
 
 from __future__ import annotations
 
@@ -40,8 +38,6 @@ from .artifact_validator_registry import (
 from .artifact_xlsx_contract import xlsx_contract_findings
 
 
-# LLM: validate_html_artifact performs generic HTML checks that model self-reports often miss.
-# 函数用途: 验收 HTML 产物里的结构完整性、图片引用和合同声明的资源规则，返回结构化 findings。
 def validate_html_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
     path = Path(request.path)
     if _outside_workspace(path, request.workspace_root):
@@ -70,8 +66,6 @@ def validate_html_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAccept
     )
 
 
-# LLM: validate_artifact is the public dispatcher for artifact QA across formats.
-# 函数用途: 根据文件后缀选择 HTML/JSON/CSV/XLSX/PDF/通用验收器，统一返回结构化 findings。
 def validate_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
     path = Path(request.path)
     if _outside_workspace(path, request.workspace_root):
@@ -87,8 +81,6 @@ def validate_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceR
     return validator(request)
 
 
-# LLM: _named_validators keeps explicit validator selectors registered in one place.
-# 函数用途: 返回按 validation_contract.validator 映射的验收器，避免 validate_artifact 继续写死分支。
 def _named_validators() -> dict[str, ArtifactValidator]:
     return {
         "artifact_acceptance": validate_by_artifact_kind,
@@ -98,8 +90,6 @@ def _named_validators() -> dict[str, ArtifactValidator]:
     }
 
 
-# LLM: _kind_validators keeps default per-kind validators registered separately from contract names.
-# 函数用途: 返回按 artifact kind 映射的默认验收器，让 html/xlsx/pdf 只是插件项。
 def _kind_validators() -> dict[str, ArtifactValidator]:
     return {
         "html": validate_html_artifact,
@@ -115,8 +105,6 @@ def _kind_validators() -> dict[str, ArtifactValidator]:
     }
 
 
-# LLM: validate_by_artifact_kind routes through registered kind validators when the contract stays generic.
-# 函数用途: 在 validator=artifact_acceptance 时仍按产物类型选默认验收器，不让上层关心具体格式。
 def validate_by_artifact_kind(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
     capability = _request_capability(request)
     return _kind_validators().get(capability.validator_key or capability.kind, _validate_generic_request)(request)
@@ -129,8 +117,6 @@ def _request_capability(request: ArtifactAcceptanceRequest):
     return artifact_capability(request.path, declared_kind=declared_kind, declared_mime=declared_mime)
 
 
-# LLM: _missing_report preserves one missing-file shape for every validator.
-# 函数用途: 产物不存在时生成稳定 ARTIFACT_MISSING finding，供修复流程识别。
 def _missing_report(path: Path, *, kind: str) -> ArtifactAcceptanceReport:
     finding = ArtifactFinding(
         code="ARTIFACT_MISSING",
@@ -141,8 +127,6 @@ def _missing_report(path: Path, *, kind: str) -> ArtifactAcceptanceReport:
     return ArtifactAcceptanceReport(ok=False, artifact_ref=str(path), artifact_kind=kind, findings=[finding])
 
 
-# LLM: _outside_workspace rejects artifact paths outside the declared workspace root.
-# 函数用途: 在格式验收前执行路径边界，避免 /tmp 或外部目录产物被当作本任务结果。
 def _outside_workspace(path: Path, workspace_root: Path | None) -> bool:
     if workspace_root is None:
         return False
@@ -153,45 +137,31 @@ def _outside_workspace(path: Path, workspace_root: Path | None) -> bool:
         return True
 
 
-# LLM: _outside_workspace_report returns one stable finding for artifact path escapes.
-# 函数用途: 产物路径越界时生成统一 hard finding。
 def _outside_workspace_report(path: Path) -> ArtifactAcceptanceReport:
     finding = ArtifactFinding("ARTIFACT_PATH_OUTSIDE_WORKSPACE", "hard", "Artifact path is outside workspace_root.", str(path))
     return ArtifactAcceptanceReport(ok=False, artifact_ref=str(path), artifact_kind=kind_for_path(path), findings=[finding])
 
 
-# LLM: _validate_json_request adapts the path-based validator to the shared request shape.
-# 函数用途: 保持注册表只处理 ArtifactAcceptanceRequest，不暴露内部 path-only helper。
 def _validate_json_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
     return _validate_json(Path(request.path), request.validation_contract)
 
 
-# LLM: _validate_markdown_request adapts Markdown validation to the shared request shape.
-# 函数用途: 对 md/markdown 产物执行通用大小和章节合同验收。
 def _validate_markdown_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
     return _validate_markdown(Path(request.path), request.validation_contract)
 
 
-# LLM: _validate_text_request adapts text documents to the shared document quality contract.
-# 函数用途: 对 txt 产物执行通用文档内容质量检查。
 def _validate_text_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
     return validate_text_artifact(Path(request.path), request.validation_contract, workspace_root=request.workspace_root)
 
 
-# LLM: _validate_csv_request adapts the path-based validator to the shared request shape.
-# 函数用途: 保持注册表只处理 ArtifactAcceptanceRequest，不暴露内部 path-only helper。
 def _validate_csv_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
     return validate_csv_artifact(Path(request.path), request.validation_contract)
 
 
-# LLM: _validate_xlsx_request passes validation_contract through the registry entrypoint.
-# 函数用途: 让 xlsx 验收既可按后缀触发，也可按 validator 名称触发。
 def _validate_xlsx_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
     return _validate_xlsx(Path(request.path), request.validation_contract, workspace_root=request.workspace_root)
 
 
-# LLM: _validate_pdf_request adapts the path-based validator to the shared request shape.
-# 函数用途: 保持注册表只处理 ArtifactAcceptanceRequest，不暴露内部 path-only helper。
 def _validate_pdf_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
     return _validate_pdf(
         Path(request.path),
@@ -200,20 +170,14 @@ def _validate_pdf_request(request: ArtifactAcceptanceRequest) -> ArtifactAccepta
     )
 
 
-# LLM: _validate_docx_request adapts Word documents to the shared document quality contract.
-# 函数用途: 对 docx 产物执行基本包完整性和通用文档内容质量检查。
 def _validate_docx_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
     return validate_docx_artifact(Path(request.path), request.validation_contract, workspace_root=request.workspace_root)
 
 
-# LLM: _validate_generic_request keeps unknown artifact kinds on the generic fallback path.
-# 函数用途: 对未注册的后缀或 validator 统一走最小存在性检查。
 def _validate_generic_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
     return _validate_generic(Path(request.path))
 
 
-# LLM: _validate_json checks machine-readable reports before downstream agents trust them.
-# 函数用途: 验证 JSON 产物可解析、顶层形状正确，并满足合同声明的 required_fields。
 def _validate_json(path: Path, validation_contract: dict[str, object] | None = None) -> ArtifactAcceptanceReport:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -241,8 +205,6 @@ def _validate_json(path: Path, validation_contract: dict[str, object] | None = N
     )
 
 
-# LLM: _validate_markdown checks declared report sections and size without scoring prose style.
-# 函数用途: 验证 Markdown 非空、满足 min_size，并包含合同声明的标题章节。
 def _validate_markdown(
     path: Path,
     validation_contract: dict[str, object] | None = None,
@@ -266,8 +228,6 @@ def _validate_markdown(
     )
 
 
-# LLM: _validate_xlsx performs a lightweight workbook integrity check without new dependencies.
-# 函数用途: 验证 xlsx 是可打开的 zip 工作簿，并且至少包含 workbook 和 worksheet 文件。
 def _validate_xlsx(
     path: Path,
     validation_contract: dict[str, object] | None = None,
@@ -305,8 +265,6 @@ def _validate_xlsx(
     )
 
 
-# LLM: _validate_pdf catches obviously corrupt PDF deliverables before human review.
-# 函数用途: 用轻量文件签名检查 PDF，不替代后续更强的渲染验收。
 def _validate_pdf(
     path: Path,
     validation_contract: dict[str, object] | None = None,
@@ -365,8 +323,6 @@ def _xlsx_open_finding(path: Path) -> ArtifactFinding | None:
     return None
 
 
-# LLM: _validate_generic keeps unknown artifact types from passing when empty or missing.
-# 函数用途: 对未知格式至少检查存在和非空，后续格式可以继续注册专门验收器。
 def _validate_generic(path: Path) -> ArtifactAcceptanceReport:
     if path.stat().st_size <= 0:
         finding = ArtifactFinding(code="ARTIFACT_EMPTY", severity="hard", message="Artifact is empty.")
@@ -377,14 +333,10 @@ def _validate_generic(path: Path) -> ArtifactAcceptanceReport:
     return ArtifactAcceptanceReport(ok=True, artifact_ref=str(path), artifact_kind=kind_for_path(path))
 
 
-# LLM: _report_with_finding avoids repeating one-error report construction in validators.
-# 函数用途: 构造只有一个 hard finding 的验收报告。
 def _report_with_finding(path: Path, kind: str, finding: ArtifactFinding) -> ArtifactAcceptanceReport:
     return ArtifactAcceptanceReport(ok=False, artifact_ref=str(path), artifact_kind=kind, findings=[finding])
 
 
-# LLM: _finding_records converts JSON-shaped helper findings into public report objects.
-# 函数用途: 保持专门校验模块独立，同时让公开报告继续使用统一 ArtifactFinding 类型。
 def _finding_records(items: list[dict[str, str]]) -> list[ArtifactFinding]:
     return [ArtifactFinding(**item) for item in items]
 

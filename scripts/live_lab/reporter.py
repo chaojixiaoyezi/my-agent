@@ -1,11 +1,8 @@
-# LLM: Live Lab validation script; keep CLI flags, artifact paths, and replay outputs stable for scenario tests.
-# 模块用途: 支撑可见验收和回放场景，负责启动案例、整理输出或生成报告。
 
 from __future__ import annotations
 
 """Live Lab transcript, preflight, and summary reporter.
 
-给人看的解释：
 这里统一处理终端输出和 TRANSCRIPT.md 记录，避免 runner 里散落重复日志逻辑。
 """
 
@@ -18,19 +15,13 @@ from .constants import REPO_ROOT
 from .session import LabSessionManager
 
 
-# LLM: LabReporter 是Live Lab 验收的数据契约；字段名会被调用方和测试读取。
-# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 class LabReporter:
     """owns output logging, model preflight, and summary writing."""
 
-    # LLM: __init__ 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def __init__(self, session: LabSessionManager, args: argparse.Namespace) -> None:
         self._session = session
         self.args = args
 
-    # LLM: log_header 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def log_header(self) -> None:
         """prints the run metadata that a human needs at the top of the terminal."""
         self.log("# MY-AGENT LIVE LAB")
@@ -47,8 +38,6 @@ class LabReporter:
         self.log(f"`touch {shlex.quote(str(self._session.stop_file))}`")
         self.log("")
 
-    # LLM: log_model_preflight 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def log_model_preflight(self) -> None:
         """logs backend/key presence without exposing secrets."""
         sys.path.insert(0, str(REPO_ROOT))
@@ -68,8 +57,6 @@ class LabReporter:
             self.log("- warning: 真实模型后端未读到 API key，本轮真实 case 可能会失败。")
         self.log("")
 
-    # LLM: log_output 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def log_output(self, label: str, value: str) -> None:
         """prints a captured output block only when it is non-empty."""
         if not value:
@@ -80,8 +67,6 @@ class LabReporter:
         self.log(value.rstrip())
         self.log("```")
 
-    # LLM: write_summary 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
     def write_summary(self, results: list[dict[str, object]]) -> int:
         """writes final machine-readable run summary and returns process code."""
         failed = [item for item in results if item["status"] == "fail"]
@@ -106,16 +91,12 @@ class LabReporter:
         self.log("LIVE_LAB_PASS" if payload["ok"] else "LIVE_LAB_FAIL")
         return 0 if payload["ok"] else 2
 
-    # LLM: section 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def section(self, title: str) -> None:
         """renders a visible case boundary."""
         self.log("")
         self.log(f"## {title}")
         self.log("")
 
-    # LLM: log 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def log(self, message: str = "") -> None:
         """Write to transcript and terminal."""
         if self._session.created:

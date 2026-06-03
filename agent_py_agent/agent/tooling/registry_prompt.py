@@ -1,11 +1,7 @@
-# LLM: Registry prompt rendering keeps the tool registry focused on tool facts instead of prompt prose.
-# 模块用途: 生成工具目录头部和工具列表文本，避免 registry.py 因展示文案继续膨胀。
 
 from __future__ import annotations
 
 
-# LLM: render_tool_catalog_section combines the global tool protocol with rendered catalog entries.
-# 函数用途: 输出给模型看的 Tools 段落；调用方只传已经筛选好的工具条目和大内容协议。
 def render_tool_catalog_section(entries: list[str], content_transport_protocol: str) -> str:
     if not entries:
         entries = ["- none：当前执行上下文没有授权任何工具；缺能力时请上抛 capability_request。"]
@@ -19,8 +15,6 @@ def render_tool_catalog_section(entries: list[str], content_transport_protocol: 
     )
 
 
-# LLM: _tool_call_protocol is the stable visible syntax contract for model tool calls.
-# 函数用途: 说明工具调用块和 JSON 参数格式；只描述协议，不绑定具体工具。
 def _tool_call_protocol() -> str:
     return (
         "# Tools\n"

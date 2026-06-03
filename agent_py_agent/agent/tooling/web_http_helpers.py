@@ -1,5 +1,3 @@
-# LLM: HTTP request helpers keep web.py below size limits without changing tool behavior.
-# 模块用途: 归一 HTTP method/header/body 参数，并给变更类请求补充幂等提示。
 
 from __future__ import annotations
 

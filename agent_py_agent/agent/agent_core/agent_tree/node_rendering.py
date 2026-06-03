@@ -1,0 +1,236 @@
+
+from __future__ import annotations
+
+from dataclasses import asdict
+from typing import Any
+
+from ...model_visible_refs import current_model_ref, current_model_ref_list, current_model_text
+from ...runtime_errors import runtime_error_report
+from .progress import attach_task_progress
+
+
+def node_from_kernel_run(agent: object, row: object) -> dict[str, object]:
+    payload = asdict(row)
+    refs = _node_ref_values(payload)
+    node = _node_identity(payload)
+    node.update(_node_status(payload, refs))
+    node["liveness"] = _liveness_layer(payload)
+    node["progress_layer"] = _progress_layer(agent, payload)
+    node["evidence_layer"] = _evidence_layer(refs)
+    node["guidance_layer"] = _guidance_layer(agent, str(node.get("run_id") or ""))
+    return node
+
+
+def _node_ref_values(payload: dict[str, object]) -> dict[str, list[object]]:
+    tool_contract = _dict(payload.get("tool_contract"))
+    reserved = _dict(payload.get("reserved"))
+    return {
+        "artifact_refs": current_model_ref_list(_list(payload.get("artifact_refs"))),
+        "artifact_registry_refs": _current_registry_refs(payload.get("artifact_registry_refs")),
+        "evidence_refs": current_model_ref_list(_list(payload.get("evidence_refs"))),
+        "blockers": _list(payload.get("blockers")),
+        "needs_capability": _needs_capability(tool_contract, reserved),
+        "recent_tool_trace": _recent_tool_trace(reserved),
+    }
+
+
+def _node_identity(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "task_id": payload.get("task_id") or payload.get("run_id", ""),
+        "run_id": payload.get("run_id", ""),
+        "parent_id": payload.get("parent_id", ""),
+        "parent_task_id": payload.get("parent_task_id", ""),
+        "parent_run_id": payload.get("parent_run_id", ""),
+        "root_id": payload.get("root_id", ""),
+        "root_run_id": payload.get("root_run_id", ""),
+        "depth": payload.get("depth", 0),
+        "agent_kind": payload.get("agent_kind", ""),
+        "role": payload.get("role", ""),
+        "agent_name": payload.get("agent_name", ""),
+        "status": payload.get("status", ""),
+        "verification_status": payload.get("verification_status", ""),
+        "failure_type": payload.get("failure_type", ""),
+        "progress": payload.get("progress", 0.0),
+        "current_step": current_model_text(payload.get("current_step", "")),
+        "current_tool": payload.get("current_tool", ""),
+        "heartbeat_at": payload.get("heartbeat_at", 0.0),
+        "updated_at": payload.get("updated_at", 0.0),
+        "last_progress_at": payload.get("last_progress_at", 0.0),
+        "last_progress_summary": current_model_text(payload.get("last_progress_summary", "")),
+        "latest_summary": current_model_text(payload.get("latest_summary", "")),
+        "child_ids": payload.get("child_ids", []),
+    }
+
+
+def _node_status(payload: dict[str, object], refs: dict[str, list[object]]) -> dict[str, object]:
+    return {
+        "artifact_refs": refs["artifact_refs"],
+        "artifact_registry_refs": refs["artifact_registry_refs"],
+        "evidence_refs": refs["evidence_refs"],
+        "blockers": refs["blockers"],
+        "workspace_refs": _workspace_refs(payload.get("workspace_refs")),
+        "recovery_refs": _recovery_refs(payload.get("recovery_refs")),
+        "tool_contract": _dict(payload.get("tool_contract")),
+        "needs_capability": refs["needs_capability"],
+        "recent_tool_trace": refs["recent_tool_trace"],
+    }
+
+
+def _liveness_layer(payload: dict[str, object]) -> dict[str, object]:
+    heartbeat_at = payload.get("heartbeat_at", 0.0)
+    return {
+        "status": payload.get("status", ""),
+        "heartbeat_at": heartbeat_at,
+        "updated_at": payload.get("updated_at", 0.0),
+        "has_heartbeat": bool(heartbeat_at),
+    }
+
+
+def _progress_layer(agent: object, payload: dict[str, object]) -> dict[str, object]:
+    layer = {
+        "progress": payload.get("progress", 0.0),
+        "current_step": current_model_text(payload.get("current_step", "")),
+        "current_tool": payload.get("current_tool", ""),
+        "last_progress_at": payload.get("last_progress_at", 0.0),
+        "last_progress_summary": current_model_text(payload.get("last_progress_summary", "")),
+        "latest_summary": current_model_text(payload.get("latest_summary", "")),
+    }
+    attach_task_progress(agent, str(payload.get("run_id") or ""), layer)
+    return layer
+
+
+def _workspace_refs(value: object) -> dict[str, object]:
+    refs = _dict(value)
+    task_root = current_model_ref(refs.get("task_root") or refs.get("task_workspace") or "")
+    task_work_dir = current_model_ref(refs.get("task_work_dir") or "")
+    task_output_dir = current_model_ref(refs.get("task_output_dir") or "")
+    if task_root:
+        from pathlib import Path
+
+        task_work_dir = task_work_dir or str(Path(task_root) / "work")
+        task_output_dir = task_output_dir or str(Path(task_root) / "output")
+    normalized = {
+        "task_root": task_root,
+        "task_work_dir": task_work_dir,
+        "task_output_dir": task_output_dir,
+        "agent_work_dir": current_model_ref(refs.get("agent_work_dir") or refs.get("agent_run_workspace")),
+        "shared_blackboard": current_model_ref(refs.get("shared_blackboard")),
+        "inbox": current_model_ref(refs.get("agent_run_inbox") or refs.get("inbox")),
+        "outbox": current_model_ref(refs.get("agent_run_outbox") or refs.get("outbox")),
+        "final_report": current_model_ref(refs.get("agent_run_final_report") or refs.get("final_report")),
+    }
+    return {key: item for key, item in normalized.items() if item}
+
+
+def _recovery_refs(value: object) -> dict[str, object]:
+    refs = _dict(value)
+    return {
+        str(key): projected
+        for key, item in refs.items()
+        if (projected := _recovery_ref_value(item))
+    }
+
+
+def _recovery_ref_value(value: object) -> object:
+    if isinstance(value, list | tuple | set):
+        return current_model_ref_list(value)
+    return current_model_ref(value)
+
+
+def _current_registry_refs(value: object) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for item in _dict_list(value):
+        rows.append(_current_registry_ref(item))
+    return rows
+
+
+def _current_registry_ref(item: dict[str, object]) -> dict[str, object]:
+    row = dict(item)
+    if "path" not in row:
+        return row
+    projected = current_model_ref(row.get("path"))
+    if projected:
+        return {**row, "path": projected}
+    return {key: value for key, value in row.items() if key != "path"}
+
+
+def _evidence_layer(values: dict[str, list[object]]) -> dict[str, object]:
+    return {
+        "artifact_refs": values["artifact_refs"],
+        "artifact_registry_refs": values["artifact_registry_refs"],
+        "evidence_refs": values["evidence_refs"],
+        "blockers": values["blockers"],
+        "needs_capability": values["needs_capability"],
+        "recent_tool_trace": values["recent_tool_trace"],
+    }
+
+
+def _guidance_layer(agent: object, run_id: str) -> dict[str, object]:
+    store = getattr(agent, "conversation_store", None)
+    if store is None or not run_id:
+        return {"pending_count": 0, "recent_pending": []}
+    try:
+        pending = list(store.pending_guidance("agent_run", run_id, limit=5))
+    except Exception as exc:
+        return {
+            "pending_count": 0,
+            "recent_pending": [],
+            "warnings": ["guidance_unavailable"],
+            "guidance_load_error": runtime_error_report(exc, context="agent_tree.guidance.pending"),
+        }
+    return {
+        "pending_count": len(pending),
+        "recent_pending": [_guidance_item(item) for item in pending],
+    }
+
+
+def _guidance_item(item: object) -> dict[str, object]:
+    return {
+        "guidance_id": str(getattr(item, "guidance_id", "") or ""),
+        "message": str(getattr(item, "message", "") or ""),
+        "priority": str(getattr(item, "priority", "") or "normal"),
+        "sender": str(getattr(item, "sender", "") or ""),
+    }
+
+
+def _dict(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _list(value: object) -> list:
+    return list(value) if isinstance(value, list) else []
+
+
+def _dict_list(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _needs_capability(tool_contract: dict[str, object], reserved: dict[str, object]) -> list[str]:
+    explicit = reserved.get("needs_capability")
+    if isinstance(explicit, list):
+        return [str(item) for item in explicit if str(item or "").strip()]
+    needs: list[str] = []
+    if _safe_int(tool_contract.get("open_request_count")) > 0:
+        needs.append("capability_request")
+    if _safe_int(tool_contract.get("gap_count")) > 0:
+        needs.append("capability_gap")
+    return needs
+
+
+def _recent_tool_trace(reserved: dict[str, object]) -> list[dict[str, object]]:
+    value = reserved.get("recent_tool_trace")
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value[-5:] if isinstance(item, dict)]
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+__all__ = ["node_from_kernel_run"]

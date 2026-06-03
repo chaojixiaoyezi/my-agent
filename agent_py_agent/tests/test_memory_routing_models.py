@@ -8,12 +8,12 @@ import time
 
 import pytest
 
+from agent_py_agent.agent.common.value_parsing import dedupe_strings
 from agent_py_agent.agent.memory_routing.models import (
     MemoryPathResolution,
     MemoryReadReceipt,
     MemoryRoute,
     MemoryRouteMatch,
-    _dedupe,
 )
 
 # ── MemoryRoute 测试 ────────────────────────────────────────────────────────
@@ -231,34 +231,34 @@ def test_memory_read_receipt_full_fields():
 def test_dedupe_preserves_order():
     """测试保持顺序去重。"""
     items = ["a", "b", "a", "c"]
-    result = _dedupe(items)
+    result = dedupe_strings(items)
     assert result == ["a", "b", "c"]
 
 
 def test_dedupe_removes_empty():
     """测试空字符串被移除。"""
     items = ["a", "", "b", "  "]
-    result = _dedupe(items)
+    result = dedupe_strings(items)
     assert result == ["a", "b"]
 
 
 def test_dedupe_strips_before_dedup():
     """测试去重前先去除空白。"""
     items = ["a", "  a  ", "b"]
-    result = _dedupe(items)
+    result = dedupe_strings(items)
     assert result == ["a", "b"]
 
 
 def test_dedupe_only_strings():
     """测试去重只处理字符串，非字符串应预先转换。"""
     items = ["a", "b", "a", "c"]
-    result = _dedupe(items)
+    result = dedupe_strings(items)
     assert result == ["a", "b", "c"]
 
 
 def test_dedupe_empty_list():
     """测试空列表。"""
-    assert _dedupe([]) == []
+    assert dedupe_strings([]) == []
 
 
 # ── 边界场景测试 ──────────────────────────────────────────────────────────

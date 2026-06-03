@@ -8,8 +8,6 @@ from pathlib import Path
 from agent_py_agent.agent.backend import ModelResponse
 
 
-# LLM: DeliveryContractBackend proves valid artifacts close out after explicit acceptance submission.
-# 类用途: 第一轮写出合同要求的 HTML，第二轮显式调用 submit_for_acceptance 触发验收。
 class DeliveryContractBackend:
     name = "fake_delivery_contract_backend"
 
@@ -37,8 +35,6 @@ class DeliveryContractBackend:
         raise AssertionError("delivery contract should close out after explicit acceptance")
 
 
-# LLM: FailedDeliveryContractBackend proves failed machine acceptance feeds repair instead of false closeout.
-# 类用途: 第一轮写出不完整且带外部资源的 HTML；第二轮检查系统把结构化验收失败交还给模型。
 class FailedDeliveryContractBackend:
     name = "fake_failed_delivery_contract_backend"
 
@@ -64,8 +60,6 @@ class FailedDeliveryContractBackend:
         return ModelResponse(text="已收到结构化修复反馈。", backend=self.name)
 
 
-# LLM: IncompleteDeliveryContractBackend reproduces a truncated HTML file that used to close out too early.
-# 类用途: 写出半截单文件 HTML；第二轮确认系统返回机器验收失败而不是完成标记。
 class IncompleteDeliveryContractBackend:
     name = "fake_incomplete_delivery_contract_backend"
 
@@ -92,8 +86,6 @@ class IncompleteDeliveryContractBackend:
         return ModelResponse(text="已收到不完整 HTML 的结构化反馈。", backend=self.name)
 
 
-# LLM: ArtifactFindingRepairBackend proves failed artifact findings can be repaired and revalidated.
-# 类用途: 第一轮写出不合格 HTML，第二轮提交验收，第三轮按结构化返工单修复，第四轮显式再验收。
 class ArtifactFindingRepairBackend:
     name = "fake_artifact_finding_repair_backend"
 
@@ -130,8 +122,6 @@ class ArtifactFindingRepairBackend:
         raise AssertionError("artifact finding repair should close out after explicit acceptance")
 
 
-# LLM: MissingArtifactRepairBackend proves wrong-path output is repaired through artifact refs.
-# 类用途: 第一轮写到错误路径，第二轮提交验收，第三轮按 ARTIFACT_MISSING 写到合同路径。
 class MissingArtifactRepairBackend:
     name = "fake_missing_artifact_repair_backend"
 
@@ -162,8 +152,6 @@ class MissingArtifactRepairBackend:
         raise AssertionError("missing artifact repair should close out after explicit acceptance")
 
 
-# LLM: OpenWriteSessionDeliveryBackend creates a valid-looking artifact while leaving staged writes open.
-# 类用途: 复现真实 E2E 中目录验收提前收口的问题；系统必须先处理 open write_file。
 class OpenWriteSessionDeliveryBackend:
     name = "fake_legacy_write_session_delivery_backend"
 
@@ -193,8 +181,6 @@ class OpenWriteSessionDeliveryBackend:
         raise AssertionError("delivery should close out after open session is finished")
 
 
-# LLM: NoProgressDeliveryBackend reproduces repeated identical delivery failures with no workspace progress.
-# 类用途: 连续写出同一个坏 HTML；系统应结构化阻塞收口，而不是继续空转。
 class NoProgressDeliveryBackend:
     name = "fake_no_progress_delivery_backend"
 
@@ -218,8 +204,6 @@ class NoProgressDeliveryBackend:
         raise AssertionError("delivery should block after repeated unchanged failure")
 
 
-# LLM: PendingTargetsDeliveryBackend proves multi-file work is not blocked before missing bootstrap targets are materialized.
-# 类用途: 第一轮只写 index，第二轮只读检查，第三轮再补 app；系统不应在中段误判卡死。
 class PendingTargetsDeliveryBackend:
     name = "fake_pending_targets_delivery_backend"
 
@@ -244,8 +228,6 @@ class PendingTargetsDeliveryBackend:
         raise AssertionError("pending targets should complete before any blocked closeout")
 
 
-# LLM: CloseoutReworkBackend proves failed closeout guidance can recover without a separate repair gate.
-# 类用途: 第一轮写空骨架，第二轮允许只读确认；closeout 返工单随后推动补数据并调 builder。
 class CloseoutReworkBackend:
     name = "fake_closeout_rework_backend"
 
@@ -285,8 +267,6 @@ class CloseoutReworkBackend:
         raise AssertionError("closeout rework should let the agent repair and then complete")
 
 
-# LLM: LocalProgressRedirectBackend proves repeated remote exploration gets redirected back to staged local work.
-# 类用途: 第一轮写空结构化骨架，随后连续只读 artifact；系统应回到本地补数据并调用 builder。
 class LocalProgressRedirectBackend:
     name = "fake_local_progress_redirect_backend"
 
@@ -316,8 +296,6 @@ class LocalProgressRedirectBackend:
         raise AssertionError("local-progress guard should redirect remote exploration back to local staged work")
 
 
-# LLM: RecoveryAttemptRepairBackend proves fresh recovery attempts do not inherit stale no-progress debt.
-# 类用途: 先故意只读一次恢复上下文；系统应走阶段修复合同，而不是被旧 local-progress 计数直接阻断。
 class RecoveryAttemptRepairBackend:
     name = "fake_recovery_attempt_repair_backend"
 
@@ -344,8 +322,6 @@ class RecoveryAttemptRepairBackend:
         raise AssertionError("fresh recovery attempt should repair before local-progress block")
 
 
-# LLM: WrongToolDuringOpenSessionBackend proves open sessions block writes to the same unfinished target.
-# 类用途: begin 之后故意覆盖同一个目标；系统必须要求继续同一个 session，而不是执行冲突写入。
 class WrongToolDuringOpenSessionBackend:
     name = "fake_wrong_tool_during_open_session_backend"
 
@@ -371,14 +347,10 @@ class WrongToolDuringOpenSessionBackend:
         raise AssertionError("open session should finish before any unrelated write executes")
 
 
-# LLM: delivery_contract_prompt returns only user-visible task prose.
-# 函数用途: 构造普通用户任务文本；机器合同由 RunParams.delivery_contract 传入。
 def delivery_contract_prompt() -> str:
     return "用单文件 html 做一个高端家具品牌首页。"
 
 
-# LLM: delivery_contract is the machine-only contract fixture shared by prompt and RunParams tests.
-# 函数用途: 生成主代理交付收口需要的结构化合同；测试不从普通自然语言里推断产物要求。
 def delivery_contract() -> dict[str, object]:
     return {
         "case_id": "html_delivery_case",
@@ -400,8 +372,6 @@ def delivery_contract() -> dict[str, object]:
     }
 
 
-# LLM: web_project_delivery_contract validates directory artifacts through static_site_check.
-# 函数用途: 生成目录型 Web 产物合同，要求 index.html 和 app.js 都真实存在。
 def web_project_delivery_contract() -> dict[str, object]:
     return {
         "case_id": "web_project_case",
@@ -424,8 +394,6 @@ def web_project_delivery_contract() -> dict[str, object]:
     }
 
 
-# LLM: xlsx_delivery_contract models a staged data-to-workbook artifact without task-specific recovery code.
-# 函数用途: 给 closeout 恢复动作测试提供通用表格阶段合同：先有 source_data，再调 builder 生成 workbook。
 def xlsx_delivery_contract() -> dict[str, object]:
     return {
         "case_id": "workbook_recovery_case",
@@ -441,15 +409,11 @@ def xlsx_delivery_contract() -> dict[str, object]:
     }
 
 
-# LLM: session_id_from_prompt reads structured tool result JSON from the previous model/tool turn.
-# 函数用途: 测试后端从 write_file begin 回执里取 session_id，不靠自然语言描述。
 def session_id_from_prompt(prompt: str) -> str:
     match = re.search(r'"session_id":\s*"([^"]+)"', prompt)
     return match.group(1) if match else ""
 
 
-# LLM: _static_site_targets returns structured bootstrap materialization targets for a static site.
-# 函数用途: 声明目录、index 和 app.js 三个目标，不用 prompt 文字推断。
 def _static_site_targets() -> list[dict[str, object]]:
     return [
         {"artifact_id": "static_site_root", "kind": "web_project", "target_type": "artifact", "workspace_relative_path": "outputs/static_site"},
@@ -458,8 +422,6 @@ def _static_site_targets() -> list[dict[str, object]]:
     ]
 
 
-# LLM: _xlsx_validation_contract returns the reusable spreadsheet validation and staging contract.
-# 函数用途: 声明列要求、builder、source_json 和 checkpoint shape hint。
 def _xlsx_validation_contract() -> dict[str, object]:
     return {
         "validator": "spreadsheet_acceptance",
@@ -479,15 +441,11 @@ def _xlsx_validation_contract() -> dict[str, object]:
     }
 
 
-# LLM: _write_file_response builds one write_file tool call response.
-# 函数用途: 让测试后端用统一格式输出真实工具调用 JSON。
 def _write_file_response(path: str, content: str, backend: str) -> ModelResponse:
     escaped = content.replace("\\", "\\\\").replace('"', '\\"')
     return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"write_file","path":"{path}","content":"{escaped}"}}\n[/TOOL_CALL]', backend=backend)
 
 
-# LLM: _write_structured_json_response builds the generic JSON checkpoint writer call.
-# 函数用途: 在测试中按机器 writer_tool 合同写阶段 JSON，不绕回普通文本写入。
 def _write_structured_json_response(path: str, json_payload: str, backend: str) -> ModelResponse:
     return ModelResponse(
         text=f'[TOOL_CALL]\n{{"tool":"write_file","path":"{path}","data":{json_payload}}}\n[/TOOL_CALL]',
@@ -495,15 +453,11 @@ def _write_structured_json_response(path: str, json_payload: str, backend: str) 
     )
 
 
-# LLM: _session_append_response builds one write_file append call response.
-# 函数用途: 用真实 session_id 写入 chunk，覆盖 open-session 修复路径。
 def _session_append_response(session_id: str, content: str, backend: str) -> ModelResponse:
     escaped = content.replace("\\", "\\\\").replace('"', '\\"')
     return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"write_file","action":"append","session_id":"{session_id}","chunk_index":0,"content":"{escaped}"}}\n[/TOOL_CALL]', backend=backend)
 
 
-# LLM: _session_append_finish_response appends and finishes in one model turn.
-# 函数用途: 让测试先关闭 open session，再由下一轮 submit_for_acceptance 触发 closeout。
 def _session_append_finish_response(session_id: str, content: str, backend: str) -> ModelResponse:
     escaped = content.replace("\\", "\\\\").replace('"', '\\"')
     return ModelResponse(
@@ -519,21 +473,15 @@ def _session_append_finish_response(session_id: str, content: str, backend: str)
     )
 
 
-# LLM: _session_finish_response builds one write_file finish call response.
-# 函数用途: 完成 open write session，允许后续 closeout 验收通过。
 def _session_finish_response(session_id: str, backend: str) -> ModelResponse:
     return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"write_file","action":"finish","session_id":"{session_id}"}}\n[/TOOL_CALL]', backend=backend)
 
 
-# LLM: _submit_for_acceptance_response builds the explicit delivery closeout tool call.
-# 函数用途: 测试交付验收必须由 submit_for_acceptance 明确触发，不能靠无工具文本猜测。
 def _submit_for_acceptance_response(note: str, backend: str) -> ModelResponse:
     escaped = note.replace("\\", "\\\\").replace('"', '\\"')
     return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"submit_for_acceptance","note":"{escaped}"}}\n[/TOOL_CALL]', backend=backend)
 
 
-# LLM: _workbook_builder_response builds the data_to_workbook call for staged xlsx tests.
-# 函数用途: 将 source_data.json 物化成 table_report.xlsx。
 def _workbook_builder_response(backend: str) -> ModelResponse:
     return ModelResponse(
         text='[TOOL_CALL]\n{"tool":"write_file","source_json_path":"outputs/table_report/source_data.json","path":"outputs/table_report/table_report.xlsx"}\n[/TOOL_CALL]',
@@ -541,14 +489,10 @@ def _workbook_builder_response(backend: str) -> ModelResponse:
     )
 
 
-# LLM: _empty_workbook_source_json returns a structured-but-empty staged data payload.
-# 函数用途: 触发 STAGED_JSON_NO_ROWS/local-progress 修复路径。
 def _empty_workbook_source_json() -> str:
     return '{"sheets":[{"name":"数据清单","columns":["记录名","地址","指标值","中文说明","说明依据"]}],"generated_at":"2026-05-20"}'
 
 
-# LLM: _valid_workbook_source_json returns minimal builder-compatible staged data.
-# 函数用途: 提供两张 sheet 和必要列，供 data_to_workbook 生成可验收 xlsx。
 def _valid_workbook_source_json() -> str:
     return (
         '{"sheets":[{"name":"数据清单","columns":["记录名","地址","指标值","中文说明","说明依据"],'

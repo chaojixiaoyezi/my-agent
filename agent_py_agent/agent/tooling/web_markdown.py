@@ -1,5 +1,3 @@
-# LLM: web_markdown keeps lightweight HTML-to-Markdown conversion out of network tool entrypoints.
-# 模块用途: 将网页 HTML 的标题、段落、列表和链接转成模型可读预览，不参与网络请求和安全判断。
 
 from __future__ import annotations
 

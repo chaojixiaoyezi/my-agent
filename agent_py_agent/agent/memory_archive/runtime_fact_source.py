@@ -1,5 +1,3 @@
-# LLM: Runtime fact source writes explicit run-local facts for later compact work-state recovery.
-# 模块用途: 在真实 run 保存时写入可审计的 task.json 事实源，让 compact apply 读取明确验收/约束/测试。
 
 from __future__ import annotations
 
@@ -12,12 +10,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..common.value_parsing import dedupe_strings
 from ..run_intent import build_run_intent, run_intent_payload
 from .runtime_workspace_outputs import run_intent_has_desired_outputs, runtime_desired_outputs
 
 
-# LLM: RuntimeFactSourceRequest bundles the real run facts that are safe to persist for compact.
-# 类用途: 描述一次真实 run 可写入事实源的目标、下一步、工具记录和运行状态。
 @dataclass(frozen=True)
 class RuntimeFactSourceRequest:
     root: Path
@@ -40,8 +37,6 @@ class RuntimeFactSourceRequest:
     delivery_contract: dict[str, Any] | None = None
 
 
-# LLM: ApprovedRuntimeFactSourceRequest carries user-approved compact completion facts without parsing prose.
-# 类用途: 描述手动补齐 compact resume 缺失字段时要写入的明确验收、约束和测试事实。
 @dataclass(frozen=True)
 class ApprovedRuntimeFactSourceRequest:
     root: Path
@@ -54,8 +49,6 @@ class ApprovedRuntimeFactSourceRequest:
     source_apply_id: str = ""
 
 
-# LLM: write_runtime_fact_source writes explicit facts only and returns a directory ref for recovery snapshots.
-# 函数用途: 写入 memory_archive/runtime_facts/<request_id>/task.json，供 compact work_state 扫描。
 def write_runtime_fact_source(request: RuntimeFactSourceRequest) -> str:
     if not request.request_id:
         return ""
@@ -66,8 +59,6 @@ def write_runtime_fact_source(request: RuntimeFactSourceRequest) -> str:
     return str(root)
 
 
-# LLM: write_approved_runtime_fact_source is the manual bridge from completion prompt to compact facts.
-# 函数用途: 把用户确认过的补全字段写成 runtime_facts/<fact_id>/task.json，供下一次 compact apply 读取。
 def write_approved_runtime_fact_source(request: ApprovedRuntimeFactSourceRequest) -> str:
     if not request.fact_id:
         return ""
@@ -78,11 +69,9 @@ def write_approved_runtime_fact_source(request: ApprovedRuntimeFactSourceRequest
     return str(root)
 
 
-# LLM: _runtime_fact_payload keeps explicit user-authored fields separate from run status fields.
-# 函数用途: 生成 task.json；验收/约束只来自明确标题或标签，测试来自明确测试条目或实际工具命令。
 def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
     sections = _explicit_sections(_fact_source_text(request))
-    latest_tests = _dedupe([*sections.tests, *_tool_test_items(request.archive_tool_calls)])
+    latest_tests = dedupe_strings([*sections.tests, *_tool_test_items(request.archive_tool_calls)])
     desired_outputs = runtime_desired_outputs(request.delivery_contract, request.runtime_injections)
     run_intent = build_run_intent(
         user_prompt=request.user_prompt,
@@ -116,22 +105,18 @@ def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
     }
 
 
-# LLM: _runtime_progress_payload is the live whiteboard for compact/resume, not a second raw archive.
-# 函数用途: 保存运行中当前轮次、最近工具和引用；原始细节仍以 raw archive / artifact registry 为准。
 def _runtime_progress_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
     return {
         "phase": request.phase or _phase_from_status(request.status),
         "source": request.source,
         "tool_rounds": max(0, int(request.tool_rounds or 0)),
-        "executed_tools": _dedupe([str(item) for item in request.executed_tools if str(item).strip()])[-20:],
-        "latest_archive_refs": _dedupe(request.latest_archive_refs)[-20:],
-        "artifact_refs": _dedupe(request.artifact_refs)[-20:],
+        "executed_tools": dedupe_strings([str(item) for item in request.executed_tools if str(item).strip()])[-20:],
+        "latest_archive_refs": dedupe_strings(request.latest_archive_refs)[-20:],
+        "artifact_refs": dedupe_strings(request.artifact_refs)[-20:],
         "updated_at": _utc_timestamp(),
     }
 
 
-# LLM: _phase_from_status maps run status into a small runtime_fact progress phase.
-# 函数用途: 把 ok/failed/timeout 等状态规整成 runtime_progress.phase。
 def _phase_from_status(status: str) -> str:
     lowered = str(status or "").strip().lower()
     if lowered in {"ok", "succeeded", "done"}:
@@ -141,8 +126,6 @@ def _phase_from_status(status: str) -> str:
     return "running"
 
 
-# LLM: _fact_source_text includes compact auto continuation facts without parsing unrelated home prompts.
-# 函数用途: 合并用户原始 prompt 和受控 compact 续跑注入块，让多次 compact 不丢验收/约束/测试字段。
 def _fact_source_text(request: RuntimeFactSourceRequest) -> str:
     continuation_blocks = [
         text for text in _runtime_injection_texts(request.runtime_injections) if "# Compact Auto Continuation" in text
@@ -150,8 +133,6 @@ def _fact_source_text(request: RuntimeFactSourceRequest) -> str:
     return "\n\n".join([request.user_prompt, *continuation_blocks])
 
 
-# LLM: _runtime_injection_texts tolerates old callers that accidentally pass one string instead of a tuple.
-# 函数用途: 将 runtime injections 规整成字符串列表，供 compact continuation 事实源解析。
 def _runtime_injection_texts(value: tuple[str, ...] | list[str] | str) -> list[str]:
     if isinstance(value, str):
         return [value]
@@ -160,22 +141,16 @@ def _runtime_injection_texts(value: tuple[str, ...] | list[str] | str) -> list[s
     return []
 
 
-# LLM: _write_json_atomic prevents partially-written runtime_fact files from becoming recovery facts.
-# 函数用途: 先写临时 JSON 再原子替换目标 task.json。
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
 
 
-# LLM: _utc_timestamp records runtime_fact update times in a stable UTC format.
-# 函数用途: 生成 runtime_progress.updated_at，避免依赖本地时区字符串。
 def _utc_timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-# LLM: _approved_fact_payload keeps manual completion facts auditable and schema-compatible with task.json readers.
-# 函数用途: 生成手动补全事实源 payload，保留 source_apply_id 方便追溯是哪次 compact 被补齐。
 def _approved_fact_payload(request: ApprovedRuntimeFactSourceRequest) -> dict[str, Any]:
     return {
         "version": 1,
@@ -183,10 +158,10 @@ def _approved_fact_payload(request: ApprovedRuntimeFactSourceRequest) -> dict[st
         "fact_id": request.fact_id,
         "source_apply_id": request.source_apply_id,
         "goal": request.goal.strip(),
-        "next_actions": _dedupe(request.next_actions),
-        "acceptance": _dedupe(request.acceptance),
-        "constraints": _dedupe(request.constraints),
-        "latest_tests": _dedupe(request.latest_tests),
+        "next_actions": dedupe_strings(request.next_actions),
+        "acceptance": dedupe_strings(request.acceptance),
+        "constraints": dedupe_strings(request.constraints),
+        "latest_tests": dedupe_strings(request.latest_tests),
         "run_status": {
             "status": "approved_manual_completion",
             "backend": "manual",
@@ -195,8 +170,6 @@ def _approved_fact_payload(request: ApprovedRuntimeFactSourceRequest) -> dict[st
     }
 
 
-# LLM: _ExplicitSections carries conservative parser output from the user's prompt.
-# 类用途: 保存用户 prompt 中明确标注的验收、约束和测试条目；没有明确标注则保持空。
 @dataclass(frozen=True)
 class _ExplicitSections:
     acceptance: list[str]
@@ -204,8 +177,6 @@ class _ExplicitSections:
     tests: list[str]
 
 
-# LLM: _explicit_sections parses only labeled sections and inline labels, never free-form assistant prose.
-# 函数用途: 从用户原始 prompt 中提取“验收/约束/测试”显式条目，避免把普通描述当事实。
 def _explicit_sections(text: str) -> _ExplicitSections:
     lines = text.splitlines()
     buckets = {"acceptance": [], "constraints": [], "tests": []}
@@ -224,21 +195,17 @@ def _explicit_sections(text: str) -> _ExplicitSections:
         if active:
             buckets[active].extend(_line_items(line))
     return _ExplicitSections(
-        acceptance=_dedupe(buckets["acceptance"]),
-        constraints=_dedupe(buckets["constraints"]),
-        tests=_dedupe(buckets["tests"]),
+        acceptance=dedupe_strings(buckets["acceptance"]),
+        constraints=dedupe_strings(buckets["constraints"]),
+        tests=dedupe_strings(buckets["tests"]),
     )
 
 
-# LLM: _is_section_metadata_line skips status/source metadata inside generated fact sections.
-# 函数用途: 让 `Status: recorded` 这类说明不打断 Latest Tests 下方的真实测试 bullet。
 def _is_section_metadata_line(line: str) -> bool:
     text = line.strip().lower()
     return bool(re.match(r"^(status|source_status|source paths?|source_paths)\s*[:：]", text))
 
 
-# LLM: _section_heading recognizes explicit Chinese/English section labels with optional inline content.
-# 函数用途: 判断一行是否是验收、约束或测试标题，并返回标题后的内联条目。
 def _section_heading(line: str) -> tuple[str, str]:
     text = line.strip().lstrip("-*# ").strip()
     match = re.match(r"^(验收条件|验收|acceptance|constraints?|约束|限制|tests?|测试|最近测试)\s*[:：]\s*(.*)$", text, re.I)
@@ -247,8 +214,6 @@ def _section_heading(line: str) -> tuple[str, str]:
     return _label_key(match.group(1)), match.group(2).strip()
 
 
-# LLM: _markdown_section_heading recognizes generated compact continuation headings without colons.
-# 函数用途: 支持 `## Acceptance` / `## Constraints` / `## Latest Tests` 这类受控注入块事实源。
 def _markdown_section_heading(line: str, text: str) -> tuple[str, str]:
     if not line.strip().startswith("#"):
         return "", ""
@@ -262,8 +227,6 @@ def _markdown_section_heading(line: str, text: str) -> tuple[str, str]:
     return "", ""
 
 
-# LLM: _looks_like_unmatched_heading prevents unrelated labeled sections from leaking into active fact buckets.
-# 函数用途: 识别未知标题或标签行，一旦出现就停止继续收集上一段验收/约束/测试事实。
 def _looks_like_unmatched_heading(line: str) -> bool:
     if line.strip().startswith("#"):
         return True
@@ -275,8 +238,6 @@ def _looks_like_unmatched_heading(line: str) -> bool:
     return bool(re.match(r"^[^:：]{1,40}\s*[:：]\s+.+$", text))
 
 
-# LLM: _label_key maps human labels to the three compact work-state fields.
-# 函数用途: 将中英文标题归一化为 acceptance、constraints 或 tests。
 def _label_key(label: str) -> str:
     lower = label.lower()
     if lower in {"acceptance", "验收条件", "验收"}:
@@ -286,8 +247,6 @@ def _label_key(label: str) -> str:
     return "tests"
 
 
-# LLM: _line_items accepts only bullets/checklists inside an explicit section.
-# 函数用途: 从已进入标题范围的行提取条目；遇到普通段落则不扩写成事实。
 def _line_items(line: str) -> list[str]:
     text = line.strip()
     for prefix in ("- [x]", "- [X]", "- [ ]", "- ", "* "):
@@ -297,22 +256,16 @@ def _line_items(line: str) -> list[str]:
     return []
 
 
-# LLM: _inline_items splits explicit inline label content into short fact items.
-# 函数用途: 支持“验收: A；B”这类紧凑写法，不处理空内容。
 def _inline_items(text: str) -> list[str]:
     if not text:
         return []
     return [item.strip() for item in re.split(r"[;；]", text) if item.strip()]
 
 
-# LLM: _tool_test_items records actual test-like tool commands as latest_tests facts.
-# 函数用途: 从工具归档中提取 pytest/ruff/unittest 等测试命令；普通工具调用不会写成测试状态。
 def _tool_test_items(tool_calls: list[Any]) -> list[str]:
     return [item for call in tool_calls if (item := _tool_test_item(call))]
 
 
-# LLM: _tool_test_item keeps latest_tests tied to explicit test commands rather than model claims.
-# 函数用途: 读取单个工具调用记录，命中测试命令时返回一行可审计测试状态。
 def _tool_test_item(call: Any) -> str:
     text = json.dumps(call, ensure_ascii=False, sort_keys=True) if isinstance(call, dict) else str(call)
     if not _looks_like_test_command(text):
@@ -320,27 +273,13 @@ def _tool_test_item(call: Any) -> str:
     return text[:240]
 
 
-# LLM: _looks_like_test_command uses conservative keyword matching for known test/lint commands.
-# 函数用途: 判断工具文本是否包含真实测试命令，避免所有工具调用都变成 latest_tests。
 def _looks_like_test_command(text: str) -> bool:
     lowered = text.lower()
     return any(token in lowered for token in ("pytest", "unittest", "ruff check", "npm test", "cargo test"))
 
 
-# LLM: _safe_id keeps runtime fact directories filesystem-safe without changing request identity meaning.
-# 函数用途: 将 request_id 转成目录名，避免路径分隔符或空白影响落盘。
 def _safe_id(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-") or "run"
-
-
-# LLM: _dedupe preserves prompt order while removing duplicate explicit fact items.
-# 函数用途: 对验收、约束、测试条目去重，保持用户原始顺序。
-def _dedupe(values: list[str]) -> list[str]:
-    result: list[str] = []
-    for value in values:
-        if value and value not in result:
-            result.append(value)
-    return result
 
 
 __all__ = [

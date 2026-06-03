@@ -1,5 +1,3 @@
-# LLM: Tool runtime ledger bridges archive_tool_calls into durable LocalStore rows.
-# 模块用途: 从结构化工具归档记录提取 gate、operation、幂等和审批事实并写入本地账本。
 
 from __future__ import annotations
 
@@ -7,14 +5,14 @@ import sqlite3
 from collections.abc import Mapping
 from typing import Any
 
-from ..contracts.gates.tool_effects import args_hash_for_call
+from ..common.value_parsing import text_value as _text
+from ..contracts.gates.tool.effects import args_hash_for_call
 from ..contracts.tool_protocol_v2 import normalize_tool_call
 from ..local_storage import RuntimeGateLedgerRecord
 from ..local_storage.control_plane_models import AgentEventInput
+from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_records
 
 
-# LLM: persist_tool_runtime_ledger is a best-effort persistence hook after tool execution.
-# 函数用途: 将工具入口 runtime_gate 和参数事实写入 LocalStore；缺少 local_store 时静默跳过。
 def persist_tool_runtime_ledger(agent: object, archive_record: dict[str, object]) -> None:
     store = getattr(agent, "local_store", None)
     _best_effort_control_plane_write(lambda: _record_tool_agent_event(store, archive_record))
@@ -36,8 +34,6 @@ def _best_effort_control_plane_write(write_fn) -> None:
         return
 
 
-# LLM: _record_tool_agent_event appends 通道运行时 per-run tool events for tree/replay queries.
-# 函数用途: 每次工具完成都写 agent_events，事件自己带 run/parent/root 身份，不依赖当前线程。
 def _record_tool_agent_event(store: object, archive_record: dict[str, object]) -> None:
     if not hasattr(store, "record_agent_event"):
         return
@@ -82,17 +78,24 @@ def _tool_event_payload(
     return payload
 
 
-# LLM: write_boundary_with_runtime_ledger injects durable idempotency rows before tool execution.
-# 函数用途: 把 LocalStore 中同 run 的幂等账本合并到 write_boundary，供入口 gate 阻断重复副作用。
 def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[str, object] | None:
     boundary = getattr(params, "write_boundary", None)
+    merged = dict(boundary) if isinstance(boundary, dict) else {}
+    guardrail_rows = tool_guardrail_records(agent)
+    if guardrail_rows:
+        merged["tool_guardrail_records"] = _merged_tool_guardrail_rows(
+            merged.get("tool_guardrail_records"),
+            guardrail_rows,
+        )
+    guardrail_policy = tool_guardrail_policy(params)
+    if guardrail_policy:
+        merged["tool_guardrail_policy"] = guardrail_policy
     store = getattr(agent, "local_store", None)
     if not hasattr(store, "runtime_idempotency_ledger"):
-        return boundary
+        return merged or boundary
     run_id = _text(getattr(params, "run_id", ""))
     if not run_id:
-        return boundary
-    merged = dict(boundary) if isinstance(boundary, dict) else {}
+        return merged or boundary
     persisted = store.runtime_idempotency_ledger(run_id=run_id)
     if persisted:
         merged["idempotency_ledger"] = _merged_idempotency_rows(merged.get("idempotency_ledger"), persisted)
@@ -102,8 +105,6 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     return merged or boundary
 
 
-# LLM: runtime_gate_ledger_record_from_archive converts one archive row into a durable ledger row.
-# 函数用途: 只读取 archive_tool_call 里的结构字段，生成 RuntimeGateLedgerRecord。
 def runtime_gate_ledger_record_from_archive(archive_record: dict[str, object]) -> RuntimeGateLedgerRecord | None:
     runtime_gate = archive_record.get("runtime_gate")
     if not isinstance(runtime_gate, dict):
@@ -127,8 +128,6 @@ def runtime_gate_ledger_record_from_archive(archive_record: dict[str, object]) -
     )
 
 
-# LLM: _operation_id prefers protocol facts over display call ids.
-# 函数用途: 从 operation_id 或 tool_protocol_v2 中读取操作 id，不使用输出文本。
 def _operation_id(record: Mapping[str, object]) -> str:
     direct = _text(record.get("operation_id"))
     if direct:
@@ -137,8 +136,6 @@ def _operation_id(record: Mapping[str, object]) -> str:
     return _text(protocol.get("operation_id"))
 
 
-# LLM: _idempotency_key reads replay identity from protocol or runtime gate evidence.
-# 函数用途: 按结构字段恢复幂等键，供持久化账本和 gate 复用。
 def _idempotency_key(record: Mapping[str, object], runtime_gate: Mapping[str, object]) -> str:
     direct = _text(record.get("idempotency_key"))
     if direct:
@@ -151,8 +148,6 @@ def _idempotency_key(record: Mapping[str, object], runtime_gate: Mapping[str, ob
     return _text(evidence.get("idempotency_key"))
 
 
-# LLM: _approval_id reads approval identity from operation facts or gate evidence.
-# 函数用途: 持久化已绑定审批号，避免恢复时靠自然语言描述猜审批状态。
 def _approval_id(record: Mapping[str, object], runtime_gate: Mapping[str, object]) -> str:
     direct = _text(record.get("approval_id"))
     if direct:
@@ -161,8 +156,6 @@ def _approval_id(record: Mapping[str, object], runtime_gate: Mapping[str, object
     return _text(evidence.get("approval_id"))
 
 
-# LLM: _args_hash computes the same normalized input hash used by side-effect gates.
-# 函数用途: 根据 parameters 机器字段生成参数 hash，缺失时返回空字符串让恢复 gate 自行处理。
 def _args_hash(record: Mapping[str, object]) -> str:
     parameters = _dict_value(record.get("parameters"))
     if not parameters:
@@ -171,8 +164,6 @@ def _args_hash(record: Mapping[str, object]) -> str:
     return args_hash_for_call(call.input)
 
 
-# LLM: _result_ref keeps replay pointed at externalized output or artifact refs.
-# 函数用途: 选择最稳定的结果引用，不复制大输出正文。
 def _result_ref(record: Mapping[str, object]) -> str:
     for key in ("artifact_ref", "output_path", "source_ref", "path"):
         value = _text(record.get(key))
@@ -181,16 +172,12 @@ def _result_ref(record: Mapping[str, object]) -> str:
     return ""
 
 
-# LLM: _ledger_status maps result and gate booleans to stable replay statuses.
-# 函数用途: 将 ok/runtime_gate.allowed 转为 completed/blocked/failed。
 def _ledger_status(record: Mapping[str, object], runtime_gate: Mapping[str, object]) -> str:
     if runtime_gate.get("allowed") is not True:
         return "blocked"
     return "completed" if record.get("ok") is True else "failed"
 
 
-# LLM: _merged_idempotency_rows preserves caller-provided rows and appends persisted rows once.
-# 函数用途: 合并 write_boundary 和 LocalStore 幂等账本，避免重复记录膨胀 prompt/ledger。
 def _merged_idempotency_rows(existing: object, persisted: tuple[dict[str, str], ...]) -> tuple[dict[str, str], ...]:
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -210,8 +197,6 @@ def _merged_idempotency_rows(existing: object, persisted: tuple[dict[str, str], 
     return tuple(rows)
 
 
-# LLM: _runtime_tool_rate_limit_rows projects durable tool attempts into rate-limit gate records.
-# 函数用途: 用运行账本里的 tool/args_hash/status/created_at 构造限流和熔断门的结构化历史。
 def _runtime_tool_rate_limit_rows(store: object, run_id: str) -> tuple[dict[str, object], ...]:
     if not hasattr(store, "list_runtime_gate_ledger"):
         return ()
@@ -226,16 +211,12 @@ def _runtime_tool_rate_limit_rows(store: object, run_id: str) -> tuple[dict[str,
     return tuple(by_identity.values())
 
 
-# LLM: _rate_limit_identity extracts the durable tool+args_hash key from one ledger row.
-# 函数用途: 缺少 tool 或 args_hash 的记录不参与限流事实，避免写入不可匹配身份。
 def _rate_limit_identity(record: object) -> tuple[str, str] | None:
     tool = _text(getattr(record, "tool", ""))
     args_hash = _text(getattr(record, "args_hash", ""))
     return (tool, args_hash) if tool and args_hash else None
 
 
-# LLM: _new_rate_limit_row builds the initial projected rate-limit row.
-# 函数用途: 统一 tool_rate_limit_records 的字段形状，供 gate 直接读取。
 def _new_rate_limit_row(identity: tuple[str, str]) -> dict[str, object]:
     tool, args_hash = identity
     return {
@@ -249,8 +230,6 @@ def _new_rate_limit_row(identity: tuple[str, str]) -> dict[str, object]:
     }
 
 
-# LLM: _apply_rate_limit_record folds one runtime ledger row into a projected rate-limit row.
-# 函数用途: 根据 status 更新尝试时间、连续失败、成功时间，不解析工具输出文本。
 def _apply_rate_limit_record(row: dict[str, object], record: object) -> None:
     timestamp = float(getattr(record, "created_at", 0.0) or getattr(record, "updated_at", 0.0) or 0.0)
     if timestamp > 0:
@@ -265,8 +244,6 @@ def _apply_rate_limit_record(row: dict[str, object], record: object) -> None:
         row["last_success_at"] = timestamp
 
 
-# LLM: _merged_rate_limit_rows keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _merged_rate_limit_rows(existing: object, persisted: tuple[dict[str, object], ...]) -> tuple[dict[str, object], ...]:
     rows: list[dict[str, object]] = []
     seen: set[tuple[str, str]] = set()
@@ -282,17 +259,19 @@ def _merged_rate_limit_rows(existing: object, persisted: tuple[dict[str, object]
     return tuple(rows)
 
 
-# LLM: _dict_value normalizes optional mapping payloads without accepting prose fallback.
-# 函数用途: 将 mapping 转成普通 dict，其他类型返回空对象。
+def _merged_tool_guardrail_rows(
+    existing: object,
+    runtime_rows: tuple[dict[str, object], ...],
+) -> tuple[dict[str, object], ...]:
+    rows: list[dict[str, object]] = []
+    for item in [*(existing if isinstance(existing, (list, tuple)) else ()), *runtime_rows]:
+        if isinstance(item, Mapping):
+            rows.append(dict(item))
+    return tuple(rows[-256:])
+
+
 def _dict_value(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
-
-
-# LLM: _text normalizes scalar machine fields for ledger keys.
-# 函数用途: 将结构字段转成去空白字符串。
-def _text(value: object) -> str:
-    return str(value or "").strip()
-
 
 __all__ = [
     "persist_tool_runtime_ledger",

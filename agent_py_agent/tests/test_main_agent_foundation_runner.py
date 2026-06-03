@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 
-# LLM: Main foundation runner should expose deterministic contracts without model calls by default.
-# 函数用途: 验证主代理基础测试矩阵有固定入口；本地可确定的用例直接执行，真实模型用例明确跳过。
 def test_main_agent_foundation_runner_reports_core_categories(tmp_path):
     from agent_py_agent.agent.contracts.main_agent_foundation_runner import (
         MainAgentFoundationRequest,
@@ -31,8 +29,6 @@ def test_main_agent_foundation_runner_reports_core_categories(tmp_path):
     assert by_id["tool_error_recovery_real"].status == "SKIPPED"
 
 
-# LLM: Foundation reports must stay refs-first so real testing cannot flood prompts with artifact bodies.
-# 函数用途: 确认主代理基础测试报告只返回摘要和证据路径，不把大工具输出正文塞回 JSON。
 def test_main_agent_foundation_report_is_refs_first(tmp_path):
     from agent_py_agent.agent.contracts.main_agent_foundation_runner import (
         MainAgentFoundationRequest,
@@ -50,8 +46,6 @@ def test_main_agent_foundation_report_is_refs_first(tmp_path):
     assert large_case["evidence_refs"]
 
 
-# LLM: Tool failure contracts need stable categories before real-model recovery tests are meaningful.
-# 函数用途: 覆盖路径、权限、超时、工具不可用和模型上游失败，保证主代理后续能按错误类型恢复。
 def test_main_agent_foundation_tool_failure_contracts_are_specific(tmp_path):
     from agent_py_agent.agent.contracts.main_agent_foundation_runner import (
         MainAgentFoundationRequest,

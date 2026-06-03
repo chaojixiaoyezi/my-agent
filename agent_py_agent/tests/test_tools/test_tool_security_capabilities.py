@@ -12,8 +12,6 @@ from agent_py_agent.agent.log_analysis.storage import LocalLogStore
 from agent_py_agent.agent.tools import ToolRegistry, ToolRegistryParams
 
 
-# LLM: _make_tool_registry builds a realistic registry with conservative test limits.
-# 函数用途: 创建测试用工具注册表，让安全工具授权测试复用同一套真实注册逻辑。
 def _make_tool_registry(workspace: Path) -> ToolRegistry:
     return ToolRegistry(
         ToolRegistryParams(
@@ -92,8 +90,8 @@ def test_security_tools_are_exposed_for_security_capability_or_tool_grant():
         )
         payload = json.loads(result.output)
 
-        assert "security_query [log_analysis]" in capability_catalog
-        assert "security_query [log_analysis]" in allowed_catalog
+        assert "security_query [log_analysis" in capability_catalog
+        assert "security_query [log_analysis" in allowed_catalog
         assert result.ok
         assert payload["tool"] == "security_query"
         assert payload["row_count"] == 1

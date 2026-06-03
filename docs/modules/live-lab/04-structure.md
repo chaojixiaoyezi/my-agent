@@ -90,9 +90,9 @@ scripts/
 - `scripts/live_lab/cases.py`：自然 suite 还有两层控制面验收：`_assert_no_subagent_state_blockers()` 检查 gateway 最终回复是否明确报告阻塞；`_assert_persisted_subagent_state_clean()` 读取隔离项目 `.my_agent/subagents/subagent-*/task.json` 做轻量状态一致性检查。
 - `scripts/live_lab/session.py`：Live Lab 隔离配置默认 `max_tool_rounds: 0`。真实页面、购物站和长任务 canary 不应该被测试台轮数上限截断；需要测预算/熔断时应由专门 stress case 显式覆盖。
 - `agent_py_agent/tests/test_live_lab_natural_case.py`：锁住三个合同：提示词不含内部调度术语、suite 注册为 real opt-in、HTML artifact gate 不信口头总结。
-- `agent_py_agent/agent/agent_core/subagent_run_flow.py`：runner prompt 会在模型调用前预写到 `runner_prompt.md`；真实 Live Lab 超时、断网或 runner 被杀时，仍能看到下发给小傻妞的任务包。
+- `agent_py_agent/agent/agent_core/subagent/run_flow.py`：runner prompt 会在模型调用前预写到 `runner_prompt.md`；真实 Live Lab 超时、断网或 runner 被杀时，仍能看到下发给小傻妞的任务包。
 - 产品侧依赖：runner 收尾不再做 artifact 完整性硬改写；产物质量问题由通用 closeout、tree/refs 和后续验收事实暴露。`runner_input_dependencies.py` 必须把 `输出路径/保存路径/产物文件` 识别为写目标，不当成输入依赖。
-- 产品侧依赖：`orchestration_write_guard.py` 只拦截真实写入目标落入 `path_dangerous_roots` 的情况；普通工作区外输出目录不再默认拒绝。否定示例里的路由路径（例如“不要写成 `/collections`”）不能被当成文件系统写目标，否则 root 会被迫绕过子代理。
+- 产品侧依赖：`agent_core/orchestration/write_guard.py` 只拦截真实写入目标落入 `path_dangerous_roots` 的情况；普通工作区外输出目录不再默认拒绝。否定示例里的路由路径（例如“不要写成 `/collections`”）不能被当成文件系统写目标，否则 root 会被迫绕过子代理。
 - 当前验收只做轻量结构检查、离线资源检查和子代理状态一致性检查。表单行为、视觉布局、可访问性和图片实际内容质量应作为后续更强 Live Lab case，而不是塞进这个最小 canary。
 
 ## 2026-05-17 shop-suite structure
@@ -103,7 +103,7 @@ scripts/
 - `scripts/live_lab/state_assertions.py`：承载 gateway response 阻塞检查和持久化 `task.json` 状态门；家具和购物站 case 共用，保证 Live Lab 不只看口头回复。
 - `scripts/live_lab/shop_case.py`：`_assert_shop_html_output()` 检查完整 HTML、关键业务区域、关键按钮动作、空链接、disabled 和外部渲染资源；`_assert_static_site_check_clean()` 复用产品侧 `static_site_check` 检查坏链接、可见占位符、失效控件、表单绑定和缺失 DOM id。
 - `agent_py_agent/tests/test_live_lab_natural_case.py`：同一个测试文件覆盖家具和购物站两个自然语言 canary，确保 suite 注册、提示词口径和产物门同步。
-- 产品侧依赖：`static_site_html_parser.py` / `static_site_dom_checks.py` 负责通用网页控件检查；真实 disabled 控件会被拦截，但 CSS/JS 里的 disabled 字样不会被当成坏按钮。
+- 产品侧依赖：`subagents/static_site/html_parser.py` / `subagents/static_site/dom_checks.py` 负责通用网页控件检查；真实 disabled 控件会被拦截，但 CSS/JS 里的 disabled 字样不会被当成坏按钮。
 - 调度侧依赖：最终收口失败时，`dispatch_subagents` 的外置摘要必须保留 `final_closeout_repair_advice` 机器字段；Live Lab shop case 不直接创建 repair child，但真实 E2E 会验证 root 是否能看见这类修复建议。
 - 当前真实验收：`20260517-shop-flow-08-repair-wave` 已通过，证明 shop suite 能跑真实 MiniMax-M2.7、隔离 gateway、子代理产物和最终状态门。后续还需要加“故意失败再修复”case，专门压测 repair wave。
 
@@ -123,7 +123,7 @@ scripts/
 - `scripts/live_lab/constants.py`：`file-repair` suite 显式包含 `health` 和 `natural_file_repair_wave`；`natural_file_repair_wave` 属于 `REAL_CASES`，必须传 `--real-llm`。
 - `scripts/live_lab/cases.py`：只负责把 `natural_file_repair_wave` 分发到拆分模块，避免主 case 文件继续膨胀。
 - `scripts/live_lab/file_repair_wave_case.py`：负责 `seed_failed_file_child()`、`_natural_file_repair_wave_prompt()`、`assert_file_repair_wave_created()` 和最终 CSV 内容 gate。seed 使用真实 `SubAgentManager` 创建 task，并在 acceptance checks 里写结构化 `required_content_lines`。
-- 产品侧依赖：`required_content_lines.py` 从任务验收文本抽取必须出现的字面行，`execution_test_items.py` 在单个普通文件 artifact 上生成 `content_check`。这条路只读 workspace 内真实文件，不相信模型自述。
+- 产品侧依赖：`required_content_lines.py` 从任务验收文本抽取必须出现的字面行，`subagents/execution/test_items.py` 在单个普通文件 artifact 上生成 `content_check`。这条路只读 workspace 内真实文件，不相信模型自述。
 - 当前真实收口交给父级 `content_check` 全部通过；后续可把同一合同扩展到 Excel 导出清单、Markdown 报告和代码生成任务。
 
 ## 2026-05-17 markdown-repair structure
@@ -132,7 +132,7 @@ scripts/
 - `scripts/live_lab/constants.py`：`markdown-repair` suite 显式包含 `health` 和 `natural_markdown_repair_wave`；`natural_markdown_repair_wave` 属于 `REAL_CASES`，必须传 `--real-llm`。
 - `scripts/live_lab/cases.py`：只负责把 `natural_markdown_repair_wave` 分发到拆分模块，避免主 case 文件继续膨胀。
 - `scripts/live_lab/markdown_repair_wave_case.py`：负责 `seed_failed_markdown_child()`、`_natural_markdown_repair_wave_prompt()`、`assert_markdown_repair_wave_created()` 和最终 Markdown 内容 gate。seed 使用真实 `SubAgentManager` 创建 task，并在 acceptance checks 里写 `required_content_lines[weekly.md]`。
-- 产品侧依赖：`required_content_lines.py` 既支持结构化 per-file 内容合同，也支持普通用户“下面 N 行一字不差”这种自然语言块；`execution_test_items.py` 会把目标文件和内容行映射成 `content_check`，仍然只读真实产物文件，不相信口头回复。
+- 产品侧依赖：`required_content_lines.py` 既支持结构化 per-file 内容合同，也支持普通用户“下面 N 行一字不差”这种自然语言块；`subagents/execution/test_items.py` 会把目标文件和内容行映射成 `content_check`，仍然只读真实产物文件，不相信口头回复。
 - 当前离线验收：`agent_py_agent/tests/test_live_lab_natural_case.py` 已覆盖 suite 注册、坏 Markdown seed、verified repair sibling 状态门和最终内容 gate。真实 `--suite markdown-repair --real-llm` 是后续 repair-wave 压测入口。
 
 ## 2026-05-18 main-complex / main-artifact structure
@@ -161,4 +161,4 @@ scripts/
 - 中文说明：运行时 gate 是产品侧硬门，不是 Live Lab 自己的专项判断。Live Lab 的作用是后续真实任务能观察这些结构化证据是否贯穿工具调用、归档和最终收口。
 - 产品侧依赖：`agent_py_agent/agent/contracts/gates/` 定义 gate decision、tool side-effect policy、artifact gate、recovery/replay gate 和 runtime report helpers。
 - 产品侧依赖：`agent_py_agent/agent/tooling/registry_execution.py` 在真实工具执行前调用 tool gate；拒绝结果写成普通 `ToolExecutionResult`，机器事实保存在 `result_envelope.runtime_gate`。
-- 产品侧依赖：`agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py` 把 runtime gate 和 acceptance gate 写进最终 closeout，后续真实 LLM case 不能只靠口头回复判断完成。
+- 产品侧依赖：`agent_py_agent/agent/agent_core/delivery_closeout/closeout.py` 把 runtime gate 和 acceptance gate 写进最终 closeout，后续真实 LLM case 不能只靠口头回复判断完成。

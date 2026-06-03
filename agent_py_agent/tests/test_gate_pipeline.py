@@ -99,6 +99,35 @@ def test_gate_pipeline_short_circuits_before_later_side_effect_gate():
     assert calls == ["tool_call"]
 
 
+def test_gate_pipeline_merged_block_uses_single_recovery_action_name():
+    calls: list[str] = []
+    registry = GateRegistry()
+    registry.register("tool_call", _bare_blocking_gate("tool_call", calls))
+    registry.register("path_url_command", _bare_blocking_gate("path_url_command", calls))
+    pipeline = GatePipeline(
+        registry=registry,
+        specs=(
+            GatePipelineSpec(
+                phase="tool_execution",
+                action="read_only",
+                steps=(
+                    GatePipelineStep("tool_call"),
+                    GatePipelineStep("path_url_command"),
+                ),
+                short_circuit=False,
+            ),
+        ),
+    )
+
+    decision = pipeline.evaluate(GateContext(phase="tool_execution"), action="read_only")
+
+    assert decision.allowed is False
+    assert decision.gate == "gate_pipeline"
+    assert decision.finding_codes == ("TOOL_CALL_BARE_BLOCK", "PATH_URL_COMMAND_BARE_BLOCK")
+    assert decision.recommended_action == "report_blocker"
+    assert calls == ["tool_call", "path_url_command"]
+
+
 def test_gate_pipeline_does_not_allow_empty_high_risk_phase():
     pipeline = GatePipeline(registry=GateRegistry(), specs=())
 
@@ -127,5 +156,13 @@ def _blocking_gate(gate: str, calls: list[str]):
             [GateFinding("TOOL_CALL_BAD_FACT")],
             recommended_action="repair_tool_call",
         )
+
+    return _validator
+
+
+def _bare_blocking_gate(gate: str, calls: list[str]):
+    def _validator(context: GateContext) -> GateDecision:
+        calls.append(gate)
+        return GateDecision(gate, "DENY", False, (GateFinding(f"{gate.upper()}_BARE_BLOCK"),))
 
     return _validator

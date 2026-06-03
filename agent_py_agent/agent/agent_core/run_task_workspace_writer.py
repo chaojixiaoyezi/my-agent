@@ -1,5 +1,3 @@
-# LLM: Run task workspace writer keeps finalization thin while preserving owner isolation.
-# 模块用途: 保存型主代理 run 收尾时创建当前 owner 的任务工作区，并登记轻量索引。
 
 from __future__ import annotations
 
@@ -11,8 +9,6 @@ from ._runtime_params import ArchiveRunParams
 from .run_task_workspace_index import register_saved_run_task_ref
 
 
-# LLM: write_run_task_workspace_if_needed creates one owner-scoped task workspace for saved root runs.
-# 函数用途: 保存型 run 收尾时按 owner home 创建任务工作区，并避免 provider 用户再写 legacy workspace。
 def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
     if not bool(getattr(agent.config, "run_task_workspace_enabled", True)):
         return ""
@@ -39,8 +35,6 @@ def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
     return str(result.root)
 
 
-# LLM: attach_run_task_workspace_context makes the current output/work roots visible before the first model turn.
-# 函数用途: 保存型主代理 run 开始时创建任务目录，并把 output/work 作为软运行状态注入 prompt。
 def attach_run_task_workspace_context(agent, params, user_prompt: str):
     if not _should_create_workspace(agent, params):
         return params
@@ -52,8 +46,6 @@ def attach_run_task_workspace_context(agent, params, user_prompt: str):
     return replace(params, inject=next_inject, task_attributes=next_attrs)
 
 
-# LLM: _should_create_workspace keeps no-save and task-local runs from leaking persistent task folders.
-# 函数用途: 判断本轮是否应创建 owner task workspace；保存关闭或隔离上下文时返回 False。
 def _should_create_workspace(agent, params) -> bool:
     if not bool(getattr(agent.config, "run_task_workspace_enabled", True)):
         return False
@@ -64,8 +56,6 @@ def _should_create_workspace(agent, params) -> bool:
     return bool(do_save and getattr(agent, "home_paths", None) is not None)
 
 
-# LLM: _ensure_workspace_for_run centralizes the run-start workspace request shape.
-# 函数用途: 用当前 owner、run 和 task 标识创建或复用本轮任务目录。
 def _ensure_workspace_for_run(agent, params, user_prompt: str):
     home_paths = agent.home_paths
     owner_home = getattr(home_paths, "owner_home_dir", None)
@@ -86,8 +76,6 @@ def _ensure_workspace_for_run(agent, params, user_prompt: str):
     )
 
 
-# LLM: _workspace_prompt_section tells the model where this task's deliverables and scratch files belong.
-# 函数用途: 渲染短提示，区分 output 交付区和 work 过程区，不强迫纯聊天任务落盘。
 def _workspace_prompt_section(paths) -> str:
     return "\n".join(
         [
@@ -102,15 +90,11 @@ def _workspace_prompt_section(paths) -> str:
     )
 
 
-# LLM: _append_once prevents compact auto-continuation from duplicating the same workspace prompt.
-# 函数用途: 只在注入列表中追加一次当前任务目录提示。
 def _append_once(items: list[str], injection: str) -> list[str]:
     marker = "# Current Task Workspace"
     return items if any(marker in str(item) for item in items) else [*items, injection]
 
 
-# LLM: _task_attributes_with_workspace makes the same task workspace refs available to machine readers.
-# 函数用途: 把 task_root、output_dir 和 work_dir 写入 task_attributes.run_workspace。
 def _task_attributes_with_workspace(attrs: object, paths) -> dict:
     result = dict(attrs) if isinstance(attrs, dict) else {}
     result["run_workspace"] = {

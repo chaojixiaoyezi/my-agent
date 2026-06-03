@@ -1,5 +1,3 @@
-# LLM: Owner resolver maps CLI/provider identities to isolated V2 owner homes.
-# 模块用途: 解析 local/provider 用户或群的 owner home，并按需初始化 owner 私有入口文件和策略。
 
 from __future__ import annotations
 
@@ -8,6 +6,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from ..common.path_segments import safe_path_segment
 from .home_layout import MyAgentHomePaths
 from .owner_policy_seed_payloads import (
     default_permissions_payload,
@@ -18,35 +17,25 @@ from .owner_policy_seed_payloads import (
 )
 
 
-# LLM: OwnerIdentity is the stable identity key before session/task/run lookup.
-# 类用途: 描述当前运行属于本地 CLI、外部用户还是外部群空间。
 @dataclass(frozen=True)
 class OwnerIdentity:
     provider: str
     owner_kind: str
     owner_id: str
 
-    # LLM: local_main is the default CLI/admin owner identity.
-    # 函数用途: 返回本地主账号身份，不混入 provider 用户或群空间。
     @classmethod
     def local_main(cls) -> OwnerIdentity:
         return cls(provider="local", owner_kind="main", owner_id="main")
 
-    # LLM: provider_user normalizes external user identities before path resolution.
-    # 函数用途: 构造飞书、微信等外部用户 owner 身份，并清洗路径片段。
     @classmethod
     def provider_user(cls, provider: str, owner_id: str) -> OwnerIdentity:
-        return cls(provider=_safe_segment(provider), owner_kind="user", owner_id=_safe_segment(owner_id))
+        return cls(provider=safe_path_segment(provider), owner_kind="user", owner_id=safe_path_segment(owner_id))
 
-    # LLM: provider_group gives group chats their own isolated owner home.
-    # 函数用途: 构造外部群空间 owner 身份，让群记忆和个人记忆分开。
     @classmethod
     def provider_group(cls, provider: str, owner_id: str) -> OwnerIdentity:
-        return cls(provider=_safe_segment(provider), owner_kind="group", owner_id=_safe_segment(owner_id))
+        return cls(provider=safe_path_segment(provider), owner_kind="group", owner_id=safe_path_segment(owner_id))
 
 
-# LLM: OwnerHomeResult is the path bundle handed to runtime, provider adapters, and future migrations.
-# 类用途: 保存某个 owner 的私有 home、记忆、任务、能力和策略文件路径。
 @dataclass(frozen=True)
 class OwnerHomeResult:
     root: Path
@@ -88,8 +77,6 @@ class OwnerHomeResult:
     audit_log_jsonl: Path
 
 
-# LLM: resolve_owner_home is the read-only half of owner path resolution.
-# 函数用途: 根据 home 根和 owner 身份计算目录路径，不创建文件。
 def resolve_owner_home(root: str | Path, identity: OwnerIdentity | None = None) -> OwnerHomeResult:
     home = Path(root).expanduser().resolve()
     resolved = identity or OwnerIdentity.local_main()
@@ -97,8 +84,6 @@ def resolve_owner_home(root: str | Path, identity: OwnerIdentity | None = None) 
     return _owner_home_result(home, resolved, owner_home)
 
 
-# LLM: ensure_owner_home bootstraps a fresh owner home with seed policies.
-# 函数用途: 创建 owner 私有目录、入口文档和默认策略 JSON。
 def ensure_owner_home(root: str | Path, identity: OwnerIdentity | None = None) -> OwnerHomeResult:
     result = resolve_owner_home(root, identity)
     for directory in _owner_directories(result):
@@ -110,12 +95,10 @@ def ensure_owner_home(root: str | Path, identity: OwnerIdentity | None = None) -
     return result
 
 
-# LLM: owner_identity_from_config is the boundary from runtime config to owner identity.
-# 函数用途: 从 AgentConfig 读取 local/provider/group 字段并生成稳定 owner 身份。
 def owner_identity_from_config(config: Any) -> OwnerIdentity:
-    provider = _safe_segment(getattr(config, "my_agent_owner_provider", "local"))
-    kind = _safe_segment(getattr(config, "my_agent_owner_kind", "main"))
-    owner_id = _safe_segment(getattr(config, "my_agent_owner_id", "main"))
+    provider = safe_path_segment(getattr(config, "my_agent_owner_provider", "local"))
+    kind = safe_path_segment(getattr(config, "my_agent_owner_kind", "main"))
+    owner_id = safe_path_segment(getattr(config, "my_agent_owner_id", "main"))
     if provider == "local" and kind == "main":
         return OwnerIdentity.local_main()
     if kind == "group":
@@ -123,8 +106,6 @@ def owner_identity_from_config(config: Any) -> OwnerIdentity:
     return OwnerIdentity.provider_user(provider, owner_id)
 
 
-# LLM: home_paths_with_owner attaches owner-specific paths to the shared home path bundle.
-# 函数用途: 把 owner home 的 memory/tasks/agents/policy 路径合并进 MyAgentHomePaths。
 def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> MyAgentHomePaths:
     return replace(
         paths,
@@ -168,8 +149,6 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
     )
 
 
-# LLM: _owner_home_dir is the canonical directory layout for each owner kind.
-# 函数用途: 根据 local/user/group 身份返回 owner 私有 home 目录。
 def _owner_home_dir(root: Path, identity: OwnerIdentity) -> Path:
     if identity.provider == "local" and identity.owner_kind == "main":
         return root / "owners" / "local" / "main"
@@ -177,8 +156,6 @@ def _owner_home_dir(root: Path, identity: OwnerIdentity) -> Path:
     return root / "owners" / "providers" / identity.provider / bucket / identity.owner_id
 
 
-# LLM: _owner_home_result builds the full owner path bundle from one home directory.
-# 函数用途: 生成 owner 的记忆、任务、compact、策略、缓存和审计路径对象。
 def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> OwnerHomeResult:
     memory = home_dir / "memory"
     return OwnerHomeResult(
@@ -222,8 +199,6 @@ def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> O
     )
 
 
-# LLM: _owner_directories lists every directory needed for a fresh owner home.
-# 函数用途: 给 ensure_owner_home 创建目录使用，避免目录散落在多处硬编码。
 def _owner_directories(result: OwnerHomeResult) -> tuple[Path, ...]:
     return (
         result.home_dir,
@@ -255,8 +230,6 @@ def _owner_directories(result: OwnerHomeResult) -> tuple[Path, ...]:
     )
 
 
-# LLM: _owner_seed_files defines human-editable owner entry files.
-# 函数用途: 生成 AGENTS/SOUL/USER/memory-hot 等 Markdown 初始内容。
 def _owner_seed_files(result: OwnerHomeResult) -> tuple[tuple[Path, str], ...]:
     return (
         (result.soul_md, "# SOUL\n\n"),
@@ -268,8 +241,6 @@ def _owner_seed_files(result: OwnerHomeResult) -> tuple[tuple[Path, str], ...]:
     )
 
 
-# LLM: _owner_seed_jsons defines machine-readable owner policy files.
-# 函数用途: 生成 permissions/quota/retention/skill/tool policy 初始 JSON。
 def _owner_seed_jsons(result: OwnerHomeResult) -> tuple[tuple[Path, dict[str, object]], ...]:
     return (
         (result.permissions_json, default_permissions_payload()),
@@ -280,8 +251,6 @@ def _owner_seed_jsons(result: OwnerHomeResult) -> tuple[tuple[Path, dict[str, ob
     )
 
 
-# LLM: _owner_id is the stable display and index key for an owner.
-# 函数用途: 把 provider/kind/id 合成统一 owner_id，供索引和审计引用。
 def _owner_id(identity: OwnerIdentity) -> str:
     if identity.provider == "local" and identity.owner_kind == "main":
         return "local/main"
@@ -289,23 +258,11 @@ def _owner_id(identity: OwnerIdentity) -> str:
     return f"providers/{identity.provider}/{bucket}/{identity.owner_id}"
 
 
-# LLM: _safe_segment protects owner ids before they become path segments.
-# 函数用途: 清洗 provider/user/group 标识，避免空值或路径分隔符进入目录名。
-def _safe_segment(value: object) -> str:
-    text = str(value or "").strip()
-    result = "".join(char if char.isalnum() or char in {"_", "-", "."} else "-" for char in text)
-    return result.strip(".-_/") or "unknown"
-
-
-# LLM: _write_seed_file never overwrites user-edited owner entry files.
-# 函数用途: 只在文件不存在时写入 Markdown 种子内容。
 def _write_seed_file(path: Path, content: str) -> None:
     if not path.exists():
         path.write_text(content, encoding="utf-8")
 
 
-# LLM: _write_seed_json preserves existing policy files while bootstrapping new owners.
-# 函数用途: 只在 JSON 策略文件不存在时写入默认配置。
 def _write_seed_json(path: Path, payload: dict[str, object]) -> None:
     if not path.exists():
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")

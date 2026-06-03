@@ -1,5 +1,3 @@
-# LLM: Shared parsing helpers keep model/tool parameter coercion consistent.
-# 模块用途: 提供薄的字符串、布尔、数字和字典解析入口，避免各模块重复写小型 normalize。
 
 from __future__ import annotations
 
@@ -28,7 +26,7 @@ def string_list(value: object, options: StringListOptions | None = None) -> list
     options = options or StringListOptions()
     if value is None:
         return []
-    if isinstance(value, list | tuple):
+    if isinstance(value, list | tuple | set):
         return [str(item).strip() for item in value if str(item or "").strip()]
     text = str(value).strip()
     if not text:
@@ -41,6 +39,45 @@ def string_list(value: object, options: StringListOptions | None = None) -> list
     if options.split_commas and "," in text:
         return [item.strip() for item in text.split(",") if item.strip()]
     return [text]
+
+
+def dedupe_strings(values: object) -> list[str]:
+    """Return non-empty strings while preserving first-seen order."""
+
+    if not isinstance(values, list | tuple | set):
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
+
+
+def sequence_strings(value: object, *, allow_scalar: bool = False) -> list[str]:
+    """Return non-empty strings from sequence-like values; optionally accept one scalar."""
+
+    if isinstance(value, list | tuple | set):
+        return [str(item).strip() for item in value if str(item or "").strip()]
+    if allow_scalar:
+        text = str(value or "").strip()
+        return [text] if text else []
+    return []
+
+
+def text_or_sequence_strings(value: object) -> list[str]:
+    """Return strings from a text value or from a sequence of values."""
+
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    return sequence_strings(value)
+
+
+def text_value(value: object) -> str:
+    return str(value or "").strip()
 
 
 def bool_value(value: object, *, default: bool = False) -> bool:

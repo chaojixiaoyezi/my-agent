@@ -1,5 +1,3 @@
-# LLM: Staged evidence adapters keep final artifact validation tied to source checkpoint evidence.
-# 模块用途: 把阶段 source JSON 的证据合同 findings 转成统一 ArtifactFinding，供最终 xlsx/pdf 验收复用。
 
 from __future__ import annotations
 
@@ -14,8 +12,6 @@ from .staged_checkpoint_acceptance import (
 )
 
 
-# LLM: staged_source_evidence_findings 是 agent_py_agent/agent/contracts/artifact_staged_evidence.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
-# 函数用途: 处理 staged source evidence findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def staged_source_evidence_findings(
     validation_contract: dict[str, object],
     workspace_root: Path,
@@ -37,8 +33,6 @@ def staged_source_evidence_findings(
     )
 
 
-# LLM: _evidence_finding_records 是 agent_py_agent/agent/contracts/artifact_staged_evidence.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
-# 函数用途: 处理 evidence finding records 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _evidence_finding_records(items: list[dict[str, object]]) -> list[ArtifactFinding]:
     records: list[ArtifactFinding] = []
     public_keys = {"code", "severity", "message", "location", "value"}

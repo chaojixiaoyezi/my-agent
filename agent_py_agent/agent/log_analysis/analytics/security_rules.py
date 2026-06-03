@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 from __future__ import annotations
 
@@ -11,8 +9,6 @@ from typing import Any
 RULE_VERSION = "v1"
 
 
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 DetectorRule 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 DetectorRule 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class DetectorRule:
     detector_id: str
@@ -27,8 +23,6 @@ class DetectorRule:
     tactics: tuple[str, ...] = field(default_factory=tuple)
     techniques: tuple[str, ...] = field(default_factory=tuple)
 
-    # LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -94,14 +88,10 @@ SOFT_DETECTOR_RULES: dict[str, DetectorRule] = {
 }
 
 
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 get_rule 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 读取 get rule 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
 def get_rule(detector_id: str) -> DetectorRule:
     return SOFT_DETECTOR_RULES[detector_id]
 
 
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 detector_ids 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 基于规则或事件字段计算 detector ids 的判定结果，避免把推测当作事实写入。
 def detector_ids() -> list[str]:
     return list(SOFT_DETECTOR_RULES)
 

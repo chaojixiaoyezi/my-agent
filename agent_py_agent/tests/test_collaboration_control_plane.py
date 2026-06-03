@@ -218,8 +218,6 @@ def _submit_generic_miss_evidence(agent: SimpleAgent, case_id: str, request_id: 
     )
 
 
-# LLM: Relative collaboration deadlines let agents express short waits without hard-coding wall-clock timestamps.
-# 函数用途: raise_collaboration 支持 deadline_seconds，coordinator 仍按结构化 deadline_at 升级。
 def test_raise_collaboration_tool_accepts_relative_deadline_seconds(tmp_path, monkeypatch) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})

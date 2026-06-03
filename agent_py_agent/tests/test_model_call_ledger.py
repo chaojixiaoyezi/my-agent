@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from agent_py_agent.agent.agent_core.model_call_monitor import (
+from agent_py_agent.agent.agent_core.model.call_monitor import (
     FirstTokenTimeoutContext,
     FirstTokenTimeoutOptions,
     FirstTokenTimeoutParams,
@@ -20,25 +20,17 @@ from agent_py_agent.agent.contracts.model_call_ledger import (
 )
 
 
-# LLM: _FakeClock lets ledger tests assert exact event timing without sleeping.
-# 类用途: 测试专用时钟；通过显式 advance 生成可预测的 started/first_token/finished 时间戳。
 @dataclass
 class _FakeClock:
     now_seconds: float = 0.0
 
-    # LLM: now mirrors time.monotonic so production code can accept this injected clock.
-    # 函数用途: 返回当前测试时间，不读取真实系统时钟。
     def now(self) -> float:
         return self.now_seconds
 
-    # LLM: advance moves the deterministic test clock forward.
-    # 函数用途: 调整当前测试时间，让测试能验证耗时字段。
     def advance(self, seconds: float) -> None:
         self.now_seconds += seconds
 
 
-# LLM: _ProbeSpec keeps probe helper arguments structured and readable.
-# 类用途: 测试用 probe 样本参数包，避免 helper 用散乱业务参数。
 @dataclass(frozen=True)
 class _ProbeSpec:
     call_id: str
@@ -46,8 +38,6 @@ class _ProbeSpec:
     latency_seconds: float
 
 
-# LLM: ledger records must expose finished model-call timing as structured facts.
-# 函数用途: 验证 started、first_token、finished 的状态、事件顺序和耗时字段。
 def test_ledger_records_finished_model_call_timing() -> None:
     clock = _FakeClock(100.0)
     ledger = _ledger(clock)
@@ -77,8 +67,6 @@ def test_ledger_records_finished_model_call_timing() -> None:
     assert finished.to_dict()["first_token_at"] == 102.5
 
 
-# LLM: timeout records must keep stage and duration as machine-readable recovery facts.
-# 函数用途: 验证模型调用 timeout 状态、timeout_stage 和 total_latency_seconds。
 def test_ledger_records_timeout_stage_and_duration() -> None:
     clock = _FakeClock(100.0)
     ledger = _ledger(clock)
@@ -111,8 +99,6 @@ def test_ledger_records_timeout_stage_and_duration() -> None:
     assert timed_out.total_latency_seconds == 30.0
 
 
-# LLM: timeout estimation should separate prefill cost from first-token fixed overhead.
-# 函数用途: 验证无 probe 样本时，按结构化输入 token 和 fallback prefill 速率估算并应用安全边际。
 def test_estimates_prefill_and_first_token_timeout_without_probe_samples() -> None:
     ledger = ModelCallLedger()
 
@@ -136,8 +122,6 @@ def test_estimates_prefill_and_first_token_timeout_without_probe_samples() -> No
     assert estimate.timeout_seconds == 14.0
 
 
-# LLM: probe samples at 5K and 10K must drive extrapolation for larger prompts.
-# 函数用途: 验证 monitor 从账本中的 5K/10K first_token 结构化记录推算目标输入大小。
 def test_estimates_first_token_timeout_from_5k_and_10k_probe_samples() -> None:
     clock = _FakeClock(0.0)
     ledger = ModelCallLedger(context=ModelCallLedgerContext(now=clock.now))
@@ -163,8 +147,6 @@ def test_estimates_first_token_timeout_from_5k_and_10k_probe_samples() -> None:
     assert estimate.timeout_seconds == 49.5
 
 
-# LLM: timeout budgets must stay inside operator-configured bounds.
-# 函数用途: 覆盖首 token 超时估算的 clamp 边界，避免异常样本给出过小或过大预算。
 def test_first_token_timeout_estimate_clamps_to_bounds() -> None:
     low = estimate_first_token_timeout(
         FirstTokenTimeoutParams(
@@ -197,8 +179,6 @@ def test_first_token_timeout_estimate_clamps_to_bounds() -> None:
     assert high.timeout_seconds == 50.0
 
 
-# LLM: very fast first-token samples for large prompts are cache evidence, not normal speed facts.
-# 函数用途: 验证 cache_suspected 标记来自结构化 token/latency，不依赖模型输出文本。
 def test_cache_suspected_mark_for_large_fast_first_token_record() -> None:
     estimate = estimate_first_token_timeout(
         FirstTokenTimeoutParams(
@@ -226,8 +206,6 @@ def test_cache_suspected_mark_for_large_fast_first_token_record() -> None:
     )
 
 
-# LLM: _record_first_token_probe creates finished ledger entries for probe extrapolation tests.
-# 函数用途: 用 started/first_token/finished 公共 API 写入一个指定首 token 延迟的 probe 样本。
 def _record_first_token_probe(
     ledger: ModelCallLedger,
     clock: _FakeClock,
@@ -250,8 +228,6 @@ def _record_first_token_probe(
     ledger.finished(ModelCallFinishParams(call_id=spec.call_id, output_tokens=1))
 
 
-# LLM: _ledger gives tests the same small retention setup without repeating constructor details.
-# 函数用途: 创建带假时钟和固定 max_records 的 ModelCallLedger。
 def _ledger(clock: _FakeClock) -> ModelCallLedger:
     return ModelCallLedger(
         options=ModelCallLedgerOptions(max_records=4),

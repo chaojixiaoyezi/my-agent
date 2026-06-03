@@ -37,7 +37,7 @@
 - `agent_py_agent/agent/conversation/store_guidance.py`
 - `agent_py_agent/agent/agent_core/runtime_guidance.py`
 - `agent_py_agent/agent/agent_core/runtime_guidance_tool.py`
-- `agent_py_agent/agent/agent_core/orchestration_dispatch_tool.py`
+- `agent_py_agent/agent/agent_core/orchestration/dispatch/tool.py`
 
 新的统一入口是 `send_guidance`。它只做一件事：把“用户/父代理临时补充的一句话”写进 guidance 账本，让目标主代理、子代理或孙代理下一轮看到。
 
@@ -53,6 +53,42 @@
 - 旧 `subagent_message` 工具已移除，运行中补充提示只走 `send_guidance`。
 - `dispatch_subagents.runner_instruction` 只保留“补充一句并立刻推进这个 run”的窄用途；不推进时只用 `send_guidance`。
 - `dispatch_subagents` 的职责回到“推进、恢复、重跑、查状态”，不再承担主要消息通道。
+- `send_guidance` 解析 `target_scope=children/subtree` 时，如果子代理树读取失败，会返回 `target_scope_resolution_failed` 和结构化 `load_error`；系统不会把范围投递失败退化成给父 run 发提示，避免软提示发错对象。
+- `dispatch_subagents.runner_instruction` 写 guidance 账本失败时，dispatch 仍可继续，但工具结果必须返回 `guidance_persist_errors`。模型看到的是“提示没有成功投递给哪个 run”，不是静默少了一个 guidance id。
+- `dispatch_subagents` 读取 runtime capability config 时，缺文件仍按默认配置启动；但配置路径不可读、是目录或解析失败时，工具结果必须返回 `capability_config_load_error`。模型看到的是“能力/预算配置读取异常”，不是被静默切到默认限制。
+- `resolve_owner_capability` 读取 owner/shared 能力索引时，如果某一行 JSONL 损坏、非对象或文件读取失败，解析结果必须携带 `index_load_errors`。好行仍然可以 resolved；坏行不能被吞成“没有这个 skill/tool/workflow”，也不能作为新 hard gate 阻断普通任务。
+- `lookup_provider_identity_report` / `resolve_owner_from_provider_identity_report` 读取 provider 身份索引时，如果 JSONL 混入坏行，仍返回能匹配到的 owner，同时携带 `load_errors`。模型和后台入口看到的是“身份索引部分坏了”，不是“用户没有绑定 owner home”。
+- `latest_owner_refs_report` / `latest_task_refs_report` / `latest_run_refs_report` / `latest_agent_refs_report` 读取 global index 时，如果 JSONL 混入坏行，好记录继续用于看板、doctor 和恢复，坏行进入 `load_errors`。全局索引坏行不能被解释成“没有活跃任务、没有 run、没有 agent”。
+- `list_temporary_grants_report` 读取 owner 临时授权文件时，如果某个 grant JSON 损坏或不是对象，该文件进入 `load_errors`，不会被 `_grant_from_payload({})` 补成 active 空授权。坏授权文件不能扩大权限，也不能被静默吞成“没有授权问题”。
+- `read_owner_policy_bundle_report` 读取 owner 的 permissions/quota/retention/skill/tool policy 时，如果策略文件坏 JSON 或不是对象，会把错误写入 `load_errors`；旧 wrapper 仍返回可用默认 bundle。`resolve_effective_owner_policy().to_dict()` 和 `home_doctor` 会暴露这些诊断，不能把坏配置静默解释成“用户没有配置策略”。
+- `home_runtime_status_payload` 读取 `system/schema_version.json` 时，如果 schema 文件坏 JSON 或不是对象，会返回 `schema_load_error`。home/status/doctor 看到的是“home schema 文件坏了”，不是空 schema。
+- `latest_home_backup_snapshots_report` 读取 backup manifest 时，如果某个 `manifest.json` 损坏，会把它写入 `load_errors`；同目录里的正常 snapshot 继续返回。doctor 看到的是“部分备份清单坏了”，不是“没有备份”或“备份全都正常”。
+- `rebuild_home_indexes` 扫描 task/agent state 时，如果 state JSON 损坏，仍保留对应 task/agent ref，但状态标为 `UNKNOWN` 并在结果 `load_errors` 里记录路径和上下文。坏 state 不能被重建流程写成正常 `active`，也不能让 run ref 从坏 payload 里猜出来。
+- `dangling_owner_compact_index_refs_report` 读取 owner compact 索引指针时，如果 pointer JSON 损坏，会把解析错误写入 `load_errors`；旧 dangling refs 仍继续返回。doctor 看到的是“compact 索引指针文件坏了”，不是只有模糊的 target missing。
+- `sync_task_compact_rollup` 汇总 task/run/agent compact 时，如果 task state 或 child state JSON 损坏，rollup 顶层写入 `load_errors`，对应 child row 写入 `state_load_error` 且状态为 `UNKNOWN`。父代理恢复时看到的是“某个子代理状态账本坏了”，不是“它没有状态/没有产物”。
+- `home_task_workspace_payload` 暴露 task compact refs 时，如果 `latest.txt` 指向不存在的 compact 包或 `latest` 链接异常，payload 的 `compact.load_errors` 必须保留诊断；可用的 fallback refs 继续返回。模型看到的是“latest 指针坏了但还有其它恢复材料”，不是“没有 compact 恢复包”。
+- `memory-daily-list` / `read_daily_memory_records_report` 读取 owner 每日记忆时，如果 JSONL 混入坏行或文件读取失败，好记录继续返回，坏行进入 `load_errors`。坏每日记忆不能被模型误解成“这一天没有其它记忆”。
+- `JsonlMemory.search_report()` 读取可选 LocalStore/FTS 记忆索引时，如果索引搜索失败，会继续从 JSONL、daily mirror 和 fallback 文件检索，并把 `memory_store.local_store.search` 写入 `load_errors`。这表示“索引不可用但事实流水仍可读”，不是“没有相关记忆”，也不是新的阻断门。
+- `push_relevant_memories_report()` 注入相关记忆时，会把 `search_report()` 的索引诊断继续带出去；如果搜索函数本身异常，会返回 `memory_push.search`。旧 `push_relevant_memories()` 继续只返回文本列表，保证旧调用不被打断。这样模型少了记忆时，系统能区分“确实没搜到”和“记忆搜索链路坏了”。
+- `GatewayHTTPServer._serve()` 捕获 HTTP 服务线程异常时，会写入 `last_error_report` 和 gateway `state.server_error`；`/status` 会返回这条 `server_error`。`/status` 读取坏 `gateway_state.json` 时也会返回 `state_load_error`。`GET /result/<id>` 读取坏 pending/processing 请求文件或坏响应 JSON 时，会返回 `request_load_error` / `result_load_error`。这不是任务硬门，而是运行器诊断：服务线程、状态账本或请求/响应账本坏了，不能被吞成“gateway 没请求/只是空闲/unknown/正常 queued”。
+- CLI `render_gateway_status()` 和 `gateway status` 使用 gateway JSON report 读取 state/heartbeat。坏 JSON、编码错误或非对象根会输出 `gateway state_load_error=` / `gateway heartbeat_load_error=` 或 `state_load_error=`。这同样只是诊断，不会停止任务；目的是避免把坏状态文件渲染成默认 stopped、unknown 或空 heartbeat。
+- `my-agent status --json` 也使用 gateway JSON report 读取 state/heartbeat。坏 state/heartbeat 会进入 `gateway.state_load_error` / `gateway.heartbeat_load_error`；状态判断仍以进程存活和可读 heartbeat 为准，不把坏文件伪装成天然空状态。
+- gateway index 重建使用 `rebuild_gateway_index_report()` 暴露 history/request/response 的坏 JSON、编码错误或非对象根；旧 `rebuild_gateway_index()` 仍只返回数量。坏 gateway 历史或请求文件不会阻断正常索引，但也不能被静默跳过成“没有这些记录”。
+- gateway worker / request execution / recovery 读取坏请求文件时返回 `GATEWAY_REQUEST_LOAD_ERROR` 与 `request_load_error`。坏 inbox 或 processing request 会被归档到 failed，processing 恢复的 report 里保留 `load_errors`。这不是业务失败，也不是模型没写 prompt；它表示 gateway 请求账本损坏，不能误报成 `EMPTY_PROMPT`、`UNSUPPORTED_KIND` 或普通未知请求。
+- gateway 请求执行完成前后再次读取 processing request 来补 lease 字段或归档字段时，如果文件已损坏，会在 response 里留下 `final_request_load_error`。任务结果本身不因此被推翻；这只是告诉后续恢复/审计：lease 或归档字段缺失是请求账本读取失败造成的，不是这些字段本来为空。
+- gateway response 文件读取坏 JSON、坏编码或非对象根时返回 `GATEWAY_RESPONSE_LOAD_ERROR` 与 `response_load_error`。CLI ask/chat/result、worker 查看已有响应和 response renderer 都走同一套读取语义：response 不存在才继续等待或提示未找到；response 存在但坏了必须立刻报告，不能误等到超时、不能把旧请求重跑一遍，也不能把坏响应解释成模型没有返回内容。
+- gateway 流式 chunk 文件读取时，如果单行 chunk JSON 损坏、编码错误或根不是对象，CLI 会把该行消费掉并输出 `gateway stream/chat chunk load_error`，后续正常 chunk 继续显示。坏流式片段不能让用户看到“模型没输出”，也不能让轮询反复卡在同一条坏行。
+- gateway file adapter 读取坏外部消息文件时返回 `ADAPTER_MESSAGE_LOAD_ERROR` 与 `message_load_error`。坏 adapter inbox JSON 会归档到 failed，并在 outbox 写结构化失败响应；它表示外部通道消息文件损坏，不是用户发了空 prompt，也不会继续转成 gateway ask。
+- gateway file adapter 的迟到响应索引 `late_pending.jsonl` 使用 report 版扫描。坏 JSONL 行会进入 `load_errors`，正常待检查项继续处理；cleanup 会保留坏行，不能把外部通道迟到响应账本损坏静默吞成“没有待检查响应”。
+- adapter daemon 状态面读取 `adapter_state.json` 时，如果文件损坏，会输出 `state_load_error=cli.adapter_daemon.state.read`。坏 adapter 状态不能被渲染成“只是没有 state 字段”，也不能让用户误以为 daemon 正常但无状态。
+- `contracts migrate` CLI 读取输入合同时，如果 JSON 损坏、编码错误或根不是对象，会返回 `CONTRACT_LOAD_ERROR` 与 `load_error`，并且不写迁移输出文件。坏合同不能被 `{}` 补成一个看似可 lint 的空合同，也不能让迁移命令生成误导性的新版合同。
+- gateway runtime status 读取使用 `read_runtime_status_report()` 暴露坏 status 文件；旧 `read_runtime_status()` 仍保留兼容返回。写入新 status 时，如果旧 status 文件损坏，新 payload 会带 `previous_status_load_error`。这不是任务硬门，只是保留“旧状态账本坏过”的运行器诊断，避免静默覆盖。
+- gateway scoped lock 文件存在但损坏时，`acquire_scoped_lock()` 返回 `lock_load_error`。这不是任务失败，也不会自动删锁；它告诉启动器/运维“锁文件本身坏了”，避免把坏锁伪装成没有锁、空锁或可安全释放的锁。
+- gateway processing lease 心跳读取坏 request 文件时，`refresh_processing_lease_report()` 返回 `load_error`，旧 `refresh_processing_lease()` / `_touch_gateway_processing_lease()` 继续兼容返回 `False`。这不是任务硬门，而是运行器诊断：心跳停下来的原因是 request 账本损坏，不是普通 lease mismatch 或请求自然消失。旧 `lease.py` 只做兼容门面，heartbeat 活跃集合只在 `lease_service` 维护。
+- gateway PID record 读取坏 JSON、坏编码或非对象根时，`get_running_pid_report()` 返回 `pid_load_error`，CLI `render_gateway_status()` 会显示这条错误。旧 `get_running_pid()` 继续只返回 pid/None，但不会因为坏 record 把 PID 文件静默删除。它表示控制面账本损坏，不是 gateway 自然 stopped。
+- gateway supervisor 健康检查读取坏 heartbeat、PID record 或 adapter state 时，会把错误写入 `_last_health_load_errors` 并判定本轮不健康。坏 heartbeat 不再被当成“刚启动还没 heartbeat”，坏 adapter state 也不再被当成“PID 活着就健康”。这仍是运行器诊断，不是业务任务硬门。
+- `task-workspace-list` / `home_task_workspace_payload` 读取 task `state.json` 时，如果 state JSON 损坏，任务目录仍会展示，但 item 带 `state_load_error` 且 `state` 为空。模型看到的是“任务状态账本坏了”，不是“任务天然没有状态”。
+- `list_capability_requests_report` / `home_doctor` 读取 owner 能力申请时，如果某个 request JSON 损坏，该文件进入 `load_errors` 并从 request 列表排除。坏申请不能被 `{}` 补成一个假的 open request，也不能被 doctor 当成没有问题。
 
 目标效果：
 
@@ -76,6 +112,7 @@
 - 审批绑定：dangerous + real action 必须绑定 approval、args_hash、run_id、operation_id。
 - 幂等：mutating / dangerous 工具必须带 idempotency key，重复执行要能复用或拒绝冲突。
 - open file write session：分块写文件未 finish/abort 时不能最终成功；它是写入事务保护，不是次数熔断器。
+- runner attempt guard：当前 runner 带有 run_id + attempt_id 时，必须能确认这个 attempt 仍然有效；如果账本不可读或 attempt 已废弃/被替换，本次工具调用和下一轮模型调用都要停下，避免旧线程继续写文件、调度或汇报。
 - delivery closeout：模型交卷后机器验收不通过，不能假完成。
 - delivery contract doctor：合同本身不是对象、`artifacts` 结构坏、路径越界这类入口合同错误不能继续执行到假完成。
 
@@ -88,6 +125,29 @@
 - `evidence_refs`：本次 gate 关联的路径或证据引用。
 
 这层语义是为了防止“某处看到 DENY 就杀任务”或“warning 被当硬门”。它不增加新的阻断条件。
+
+### RecoveryAction 统一词表
+
+恢复动作只允许使用 `agent_py_agent/agent/contracts/recovery_actions.py` 里的 `RecoveryAction`。
+这条规则覆盖三类输出：
+
+- `state_machine.recovery_decision.action`
+- `error_taxonomy.ErrorContract.recommended_action`
+- `GateDecision.recommended_action`
+
+动作名必须是单动作，例如 `request_approval`、`change_strategy`、`takeover`、`retry`。
+不要写 `request_approval_or_stop`、`change_strategy_or_stop`、`retry_or_switch_backend`。
+如果确实有分支，写在旁边字段：
+
+- 状态机用 `fallback_action` 和 `reason`。
+- 错误合同用 `recovery_hint`。
+- gate 用 `evidence` / `model_message`。
+
+子代理恢复策略额外使用 `recovery_mode` 表示具体路线，例如
+`rerun_from_continue_packet`、`takeover_from_continue_packet`、`leadership_recovery`。
+父代理做恢复批次时按 `recovery_mode` 分组，`recommended_action` 只保留统一动作词表。
+
+这样模型和恢复器先看到“现在该做什么”，再看“做不到时怎么办”，不会把两个分支误当成一个动作。
 
 ### 软提醒 / 可配置次数门
 
@@ -153,9 +213,9 @@ last_7_days_range
 文件：
 
 - `agent_py_agent/agent/agent_core/delivery_requirement_materializer.py`
-- `agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifacts.py`
-- `agent_py_agent/agent/agent_core/orchestration_create_items.py`
-- `agent_py_agent/agent/agent_core/orchestration_tool_specs.py`
+- `agent_py_agent/agent/agent_core/delivery_closeout/artifacts.py`
+- `agent_py_agent/agent/agent_core/orchestration/create_items.py`
+- `agent_py_agent/agent/agent_core/orchestration/tool_specs.py`
 
 这轮明确撤销一个走偏方向：
 
@@ -180,8 +240,10 @@ last_7_days_range
 
 文件：
 
-- `agent_py_agent/agent/agent_core/tool_call_guardrail.py`
-- `agent_py_agent/agent/contracts/gates/tool_guardrail.py`
+- `agent_py_agent/agent/agent_core/tool_guard/call_guardrail.py`
+- `agent_py_agent/agent/contracts/gates/tool/guardrail.py`
+- `agent_py_agent/agent/tooling/registry_runtime_gate_pipeline.py`
+- `agent_py_agent/agent/agent_core/tool_runtime_ledger.py`
 - `agent_py_agent/agent/contracts/offline_tool_contract.py`
 - `agent_py_agent/agent/agent_core/_tool_loop_service.py`
 - `agent_py_agent/config/runtime_guard_config.yaml`
@@ -206,13 +268,20 @@ terminal_block_enabled: false
 - 第 3N 次之后如果还要原样调用：拦截这一次工具调用，返回合成工具结果，告诉模型必须换路。
 - 默认不杀任务，模型还能继续换办法。
 
-`terminal_block_enabled: false` 是默认值，表示只拦重复动作，不把整个任务置为 `blocked`。只有显式改成 `true`，3N 后继续重复才会把任务置为 blocked。
+`terminal_block_enabled: false` 是默认值，表示只拦重复动作，不把整个任务置为 `blocked`。即使显式改成 `true`，普通工具循环也只把 3N 后的重复撞墙作为 gate 诊断和下一轮软提示，不再由 tool loop 直接截断整个任务。
 
 `repeat_fail_threshold: 0` 表示无限，不按次数拦截；系统只在 50、100 次给软提示。
 
 分页、游标、大文件分片读取不会被误伤：如果同参数调用每次返回的结果不同，或者结果里体现 cursor/offset/rows 等真实进展，就不算无进展。
 
-这轮也清掉了旧的合同层双轨逻辑。以前 `contracts/gates/tool_guardrail.py` 还有另一套字段：
+当前运行时边界：
+
+- `tool_guard/call_guardrail.py` 只负责记录结构化历史和生成软提示，不再直接返回 block 工具结果。
+- `tool_runtime_ledger.write_boundary_with_runtime_ledger()` 把 `tool_guardrail_records` 和 `tool_guardrail_policy` 合并进工具执行边界。
+- `registry_runtime_gate_pipeline.py` 是执行前唯一裁决点：`tool_call`、`tool_manifest`、`path_url_command`、`tool_guardrail`、`tool_rate_limit`、`tool_effect` 都从这里返回统一 `GateDecision`。
+- `registry_runtime_gate_results.py` 把 `GateDecision.model_message` 和 finding code 放回工具结果，模型看到的是“本次同路工具调用没执行，请换路”，不是一个模糊 traceback 或任务失败。
+
+这轮也清掉了旧的合同层双轨逻辑。以前 `contracts/gates/tool/guardrail.py` 还有另一套字段：
 
 ```text
 exact_failure_warn_after / exact_failure_block_after
@@ -229,7 +298,7 @@ TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED
 TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED
 ```
 
-它们的含义是“本次同一路径工具动作被拦，模型需要换策略”，不是“任务天然失败”。只有 `terminal_block_enabled: true` 时，调用方才可以把 3N 后的重复撞墙转成整个任务 blocked。
+它们的含义是“本次同一路径工具动作被拦，模型需要换策略”，不是“任务天然失败”。tool loop 会把 gate 的 `model_message` 追加到下一轮上下文，让模型换关键词、换参数、换工具或换数据源。
 
 ### 1. 工具工程限流 / circuit 配置化
 
@@ -268,7 +337,7 @@ tool_rate_max_records: 256
 
 文件：
 
-- `agent_py_agent/agent/agent_core/tool_agent_budget.py`
+- `agent_py_agent/agent/agent_core/tool_guard/agent_budget.py`
 - `agent_py_agent/config/runtime_guard_config.yaml`
 
 这条门按 `run_id` 统计单个代理的工具调用预算，主要用于子代理/后台 runner 防空转，不是主代理普通研究任务的质量门。
@@ -293,7 +362,7 @@ tool_agent_budget_max_calls: 200
 文件：
 
 - `agent_py_agent/agent/agent_core/_tool_loop_service.py`
-- `agent_py_agent/agent/agent_core/runner_dispatch.py`
+- `agent_py_agent/agent/agent_core/runner/dispatch.py`
 - `agent_py_agent/config/runtime_guard_config.yaml`
 
 默认配置：
@@ -355,6 +424,108 @@ same_run_redispatch_limit: 1
 系统会按能力注册表找到合适的已有子代理 B。如果 A 明确知道目标，也仍然可以写 `target_agent_ids`；显式 target 优先。
 
 `raise_collaboration` 的 thread 解析也遵守同一条原则：已有外部/长期会话 thread 优先；如果本地 runner 只有已知 `task_id/run_id`，没有飞书、微信或 CLI thread，系统会用结构化任务记录自动物化一个 `internal` thread 并绑定任务。模型猜错 `thread_id` 或 `task_id` 时，只要当前确实处在子代理 runner 内，系统会退回当前 runner 的真实 run_id；不会因为一个坏 thread/task 字段把整个协作 case 打断。
+
+如果 thread 解析过程中读 `conversation_store`、子代理账本或内部 thread 物化失败，工具会返回结构化 `load_error`，包含 `context`、错误类别和给模型看的恢复提示。它不能静默退化成 `thread_required` / `unknown_thread`，也不能让模型误以为“没有协作上下文”。
+
+如果 request 已经可以落账，但读取目标代理运行状态失败，`raise_collaboration` 不会取消请求；它会把 `target_runtime_load_error` 写进工具结果和 request metadata。大白话：先把“找别人帮忙”这件事记下来，同时告诉模型“目标是否在线看不准”，后续可以刷新 tree 或让上级接管。
+
+如果 request 没有显式目标，需要按 `required_capabilities` 自动匹配 responder，但 capability roster 文件读取失败，`raise_collaboration` 会把 `capability_roster_load_error` 写进工具结果和 request metadata。大白话：模型应该知道这是能力名单账本坏了，不是系统确认“没人能帮忙”。
+
+协作 case 的 append-only JSONL 账本也不能静默跳坏行。`requests.jsonl`、`evidence.jsonl`、`participants.jsonl`、`decisions.jsonl` 里单行坏 JSON 或非对象行会进入 `load_errors`，同文件里的正常 request/evidence/participant/decision 继续展示。这样模型看到的是“账本某行坏了，但已有好记录仍在”，而不是被误导成“没人响应、没有证据、没有参与者、没有决策”。
+
+如果目标别名/身份索引读取失败，工具结果和 request metadata 会保留 `target_resolution_errors`，不能把“索引坏了、目标解析不完整”伪装成普通 `unknown_target`。响应者用自己的 run_id 查看待处理请求时，如果子代理身份账本读取失败，`inspect_collaboration` 会返回 `identity_load_error`，让模型知道 agent_name/role 不完整是账本问题，不是自己没被点名。
+
+子代理执行上下文注入协作请求时，如果 pending request 账本读取失败，`context_bundle.collaboration` 会带 `collaboration_load_error`。这不是协作请求为 0，而是账本不可读，父/子代理应先恢复或报告该错误。
+
+父代理看板统计 child 状态时，如果某个 child 账本读取失败，会把该项计入 `child_status_counts.load_error`，并在 `child_status_load_errors` 写出结构化原因；普通文件缺失仍计入 `missing`。
+
+`inspect_collaboration` 和 `update_collaboration` 也走同一套错误语义：读 case 状态、待处理 request 或更新后的 overview 失败时，返回 `load_error` / `overview_load_error`。已经成功写入的 request 更新不会因为 overview 读取失败被回滚成失败；模型会看到“更新已落账，但概览暂时读不到”。
+
+顶层 `dispatch_subagents` 的最终指导也不能把读取失败当成“没有未完成子代理”。如果系统记住过某个 run，但本轮读取它的状态失败，payload 会包含 `unfinished_load_errors`，并设置 `must_not_report_done=true`。这只是防误报完成的事实提示，不会把任务打死。
+
+`dispatch_subagents` 为协作请求自动挑选 runner 时，也不能把 pending request 读取失败吞成“没有协作候选”。协作候选扫描如果读到坏 request/evidence 账本或读取方法抛错，会写入 dispatch record 的 `collaboration_candidate_load_errors`；同一轮里读到的正常待响应请求仍可作为 runner candidate。大白话：候选扫描不完整要告诉父代理，但不能因为坏账本隐藏好请求，也不能把错误解释成“所有子代理都不需要响应协作”。
+
+`create_subagents` 自动后台启动时，如果给子代理账本写 `background_start` 状态失败，启动仍会继续，但 `auto_start` payload 会带 `background_mark_errors`。父代理看到的是“后台启动已发出，但某些 run 的启动标记写账失败”，而不是被误导成所有 run 的状态账本都正常。
+
+`dispatch_subagents` 在直接子代理进度层生成恢复建议时，如果读取某个 BLOCKED/FAILED/TIMEOUT child 的详细账本失败，`direct_children` 会带 `recovery_load_errors`；如果读取全量 sibling 上下文失败，会带 `recovery_context_load_error`。这两类错误只说明恢复建议不完整，不会把任务打停，也不会伪装成“没有需要恢复的子代理”。
+
+如果直接子代理都已结束、系统准备给父代理提供质量波次建议，但读取父 run 账本失败，`direct_children` 会带 `quality_advice_load_error`。这样父代理看到的是“质量建议缺失因为父 run 读取失败”，而不是误以为质量建议本来不需要。
+
+`SubAgentRecoveryOrchestrator` 自己扫描可恢复 run 时也必须保留账本读取失败。`list_runs()`、全量 sibling 列表或单个 run 读取失败时，报告带 `load_errors`，包含 `context`、`run_id`（如有）和 `runtime_error_report`。这避免父代理把“恢复账本坏了”误读成“没有可恢复子代理”。
+
+子代理 task-local continue packet 也不能把输出、恢复和进度账本坏了吞成空输出。生成 `latest_continue_packet.json` 时，如果 `output.json`、session compact metadata 或 latest tool progress 缺损、坏 JSON 或不是对象，packet 的 `reserved.load_errors` 会写出 `subagent.continue_packet.output_json`、`subagent.continue_packet.session_compact` 或 `subagent.continue_packet.work_progress`，并带路径和错误分类；packet 仍会生成，恢复方可以读 checkpoint/summary 等其它 refs 继续推进，但不会被误导成“这个子代理本来没有输出、没有 compact、没有进度”。
+
+子代理 runner 消费 task-local compact continuation 时也不能把坏恢复包吞成模糊状态。`Task-Local Compact Continuation` 里如果 `latest_continue_packet.json` 或 session compact metadata 存在但坏 JSON、编码错误、过大或不是对象，prompt 会保留 `packet_status` / `metadata_status`，同时写出 `packet_load_error` / `metadata_load_error` 的 `context/path/category/model_message`。这不是新硬门；runner 仍按 checkpoint/summary/task-local refs 降级接续，但模型能看见“恢复包坏了”，不会把它当成没有恢复包。
+
+子代理恢复策略选择 fallback 时也必须把坏 continue packet 说清楚。`SubagentRecoveryStrategy` 读取 `latest_continue_packet.json` 失败、编码错误或 JSON 根不是对象时，会在策略 payload 写入 `packet_load_error`，并在 `runner_instruction` 里提示 `latest_continue_packet 读取失败`、上下文和路径；恢复动作仍可降级到 checkpoint/summary refs，不会因为坏包直接打死任务，也不会把坏包伪装成普通缺包。
+
+保存子代理状态时，`output.json` 损坏也不能让 checkpoint 派生链误以为没有 tests、next actions 或 blockers。`persistence/service.py` 读取 `output.json` 失败时，会把 `subagent.persistence.output_json` 写入 legacy checkpoint 和 agent-run checkpoint 的 `load_errors`；保存继续进行，恢复方读 checkpoint 时能看到是输出账本坏了，而不是子代理没有留下结构化输出事实。
+
+子代理 task-local 工具进度也不能把上一轮 `latest_tool_progress.json` 损坏吞成“没有历史进度”。记录新的写入进度时，如果旧进度快照坏 JSON、编码错误或不是对象，新快照仍会写入，但 `reserved.load_errors` 会保留 `subagent_tool_progress.previous_progress` 和路径；`latest_continue_packet.json` 同步携带这条错误。这样恢复方知道“历史进度链不完整”，而不是误以为子代理从未留下过进度。
+
+Patch review/apply 批量扫描也不能把坏 `output.json` 当成“没有 patch”。`patch_review.output_json` 或 `patch_apply.output_json` 读取失败时，报告必须生成 `OUTPUT_LOAD_ERROR` 记录，附带 `load_errors`、坏文件路径和模型可读提示；同一轮其它正常 run 继续处理。真实 apply 成功后如果发现旧 `output.json` 已坏，新写出的输出账本也要保留 `patch_apply.success_output_json` 诊断，不能用干净 `{}` 覆盖掉坏账本事实。
+
+子代理结构化结果里的 artifact refs 解析也不能把 child state 读取失败当作“child 没产物”。如果父/兄弟结果里引用了某个 child 产物，但对应 child state JSON 损坏或不可读，系统会把 `artifact_ref_load_errors` 写回当前 task attributes，保留 `subagent.artifact_refs.child_state`、`child_run_id` 和路径。解析继续保持开放世界：不阻断、不改写成专项规则，只把坏账本事实留给父代理和后续 closeout/接管流程。
+
+子代理 runner 成本汇总也不能把坏 `runner_result.json` 跳过后当成真实低成本。`SubagentRunBudgetReport.load_errors` 会记录 `subagent.run_budget.runner_result`、run id 和路径；Markdown 报告也会显示 load errors。这样父代理/CLI 看到的是“成本报告不完整”，不是“没有模型调用、没有工具轮数”。
+
+Workflow 规划器失败也不能吞成空计划。`plan_workflow_for_goal()` 抛异常时，任务保存 `workflow_plan.ok=false` 和 `planning_error`；dispatch record 的 `ok=false`，并给父代理明确提示可以手动拆分或稍后重试。这不是阻断任务，而是避免“规划器坏了”被误读成“不需要拆分”。
+
+父代理 planner 调用失败也必须进入结构化记录。`run_parent_planner()` 调 LLM/控制面失败时，`ParentPlannerRecord.runtime_error` 会保留 `parent_planner.run` 的错误分类和恢复提示；record 仍是 `PLANNER_ERROR`，但父代理能区分 provider transient、上下文过长、本地 bug 或其它调用问题。
+
+`dispatch_loop` 收尾会统计还剩多少 runner 候选。如果这一步读取子代理账本失败，报告必须带 `final_pending_load_error`，不能只返回 `final_pending_count=0`。`0` 仍是保守数值，但上层能看到这是统计失败，不是确实没有待跑任务。
+
+后台 watch 判断是否有子代理输入时，也不能把 `list_runs()` 失败吞成空闲或假装有任务可推进。读取失败时，本轮 watch 写入 `list_runs_load_error` 记录和 `load_error` heartbeat，不执行 dispatch，也不把它当成 idle。
+
+Capability grant 后的续跑提示也要保留上下文读取错误。目标 run 账本读取失败时提示里带 `dispatch_capability_followup.subagents.load`；`next_actions.json` 损坏时提示里带 `next_actions_load_error`，不能展示成 `next_actions=none`，否则模型会误以为没有下一步。
+
+能力缺口记录也不能吞 memory route 索引错误。`record_capability_gap()` 匹配 memory routing 失败时，缺口照常落账，但 `memory_routes` 里会有 `_memory_route_load_error` 诊断；模型/父代理看到的是“路由索引坏了”，不是“没有相关规则”。
+
+runner 失败后的相关记忆注入失败也要变成可读提示。`handle_runner_failure()` 仍会设置 pending work 并继续做失败内省；如果 `memory_push` 失败，重试 instruction 会附加 `[RUNNER_FAILURE_MEMORY_INJECTION_ERROR]`，说明这是记忆注入问题，不是“没有历史经验”。
+
+子代理结束后的父级唤醒不能静默丢失。`subagent_runner_finished` observation 或 wake signal 写入失败时，runner completion 会把 `runner_completion_wake_error` 写回 task attributes，包含 run_id、status 和结构化错误。这样父代理或 tree/board 后续至少能看到“完成通知没送达”，而不是一直等不到消息。
+
+如果 runner completion 已经捕获到父级唤醒失败，但把 `runner_completion_wake_error` 写回 task attributes 时也失败，系统会输出 `subagent_runner_completion_wake.record_error` warning。它仍不改变任务状态，但操作员可以区分“父代理没醒”和“连错误记录也没保存成”。
+
+完成通知也遵循“可见但不阻断”的原则。任务进入终态后，通知投递失败会优先写回 notification failed；如果连 failed 状态都写不进去，`notification_service` 会输出 `notification.mark_failed` 结构化 warning。任务不会因为通知账本问题被改成失败，但排障时能看到“通知记录没写进去”，不会误以为通知成功或通知系统没有被调用。
+
+本地索引写入是旁路能力，不是子代理权威账本。`SubAgentIndexingService.log_local_record()` 写 LocalStore 失败时，会输出 `subagent_index.local_store.log_record` warning；`canonical_state`、task 文件和 dispatch 主流程不受影响。这样搜索/看板缺记录时能看到是索引侧写入失败，不会误判成子代理没有工作。
+
+运行中 raw archive / runtime fact 是 compact 续接的兜底材料。`runtime_live_archive` 写 assistant 工具轮、工具调用或 runtime fact 失败时，会把结构化错误写进 `params.live_archive_state["live_archive_errors"]` 并输出 warning；任务继续跑，但后续 compact/排障能看到“兜底归档没写成”，不会误以为没有历史。
+
+compact resume 的 fail-safe checkpoint 扫描也不能把坏 archive 行吞成“没有兜底 checkpoint”。`collect_fail_safe_checkpoint_report()` 扫 raw/hooks JSONL 时，如果单行坏 JSON，会在恢复包写入 `fail_safe_checkpoint_load_errors`，同一文件里的正常 checkpoint 仍继续返回；如果文件读取失败，也会报告路径和错误分类。恢复上下文会显示 `Fail Safe Checkpoint Load Errors`，提醒模型这是归档扫描不完整，不是历史里没有工具输出兜底。
+
+compact resume 的核心 apply artifacts 也要保留读取诊断。`read_compact_apply_artifacts_report()` 读取 `apply_bundle`、`restore_refs`、`work_state_snapshot`、`self_check`、`compact_context` 等 refs 时，如果目标文件缺失、坏 JSON、编码错误或不是对象，会把 `artifact_load_errors` 写进恢复包，并在上下文显示 `Compact Artifact Load Errors`。一致性检查仍按原规则判断能否继续；错误报告只负责告诉模型“哪份恢复材料坏了”，不把坏材料伪装成普通字段缺失。
+
+compact resume 的 metadata 入口也要区分“缺失”和“损坏”。`build_memory_compact_resume()` 读取 compact apply metadata 时，如果文件存在但坏 JSON、编码错误或不是对象，blocked payload 会返回 `status=blocked_compact_metadata_load_error` 和 `metadata_load_error`，而不是普通 `blocked_missing_compact_metadata`。这样模型/操作员知道要修坏 metadata 或换 apply id，不会误以为只是路径没找到。
+
+compact work_state 从 snapshot/raw archive 推导目标和下一步时，也不能把来源坏行吞成“没有目标”。`source_work_state()` 遇到 snapshot 或 raw/archive JSONL 坏行时，会把 `source_load_errors` 写进 `work_state_snapshot`；compact resume 的上下文也会显示 `Source Load Errors`。如果其它正常来源还能推导出目标和下一步，任务继续恢复；错误只说明来源扫描不完整。
+
+runner stage trace 是子代理运行期心跳和调试线索。读取当前 run、保存心跳链或读取父级心跳失败时，`runner_stage_trace` 会输出结构化 warning；runner 不因此失败，但父代理后续看到心跳停滞时能追到“追踪/心跳账本更新失败”，而不是只能猜子代理真的停了。
+
+`update_collaboration` 更新 case 状态后，如果读取 decision 账本失败，更新本身仍算成功，但返回 `decision_load_error`。模型看到的是“case 已更新、最新决策摘要暂时读不到”，不是被误导成 case 没有决策。
+
+`raise_collaboration` 为本地子代理物化 internal thread 后，会尝试把 thread_id 反写进 task attributes。这个反写失败不应该取消已创建的 case，但会输出 `raise_collaboration.remember_thread_on_task` warning，避免后续协作提示查不到绑定时只能猜原因。
+
+capability grant 后的同 run 续跑提示也不能吞掉目标 run。`dispatch_capability_followup` 读取获批 run 的账本失败时，会把 `dispatch_capability_followup.subagents.load` 写进续跑提示；模型看到的是“授权已处理，但目标 run 上下文暂时读不到”，不是以为没有需要续跑的 run。
+
+运行中补充提示注入也不能把 thread 绑定读取失败吞成“没有提示”。`inject_pending_guidance()` 按 task 反查 thread 失败时，会注入 `GUIDANCE_LOOKUP_WARNING`，告诉模型这是绑定/提示账本读取问题；已有 agent_run/task 级提示仍照常投递。
+
+工具调用 envelope 的 `RunScope` 也要保留读取问题。工具循环有 run_id 但加载对应子代理账本失败时，scope 仍保留 run_id，同时把 `tool_call_scope.subagents.load` 写进 `scope.reserved.task_load_error`。这样工具结果归档至少知道“当前归属可疑是账本读取失败”，不会悄悄丢掉 parent/root/depth 事实。
+
+子代理写出 `execution_context.output_json` 后的自动收口也不能吞账本读取失败。工具轮判断 output_json 写入时如果加载当前 run 失败，会把 `[SUBAGENT_RESULT_LOAD_ERROR]` 注入下一轮 `tool_context`；已经进入结果收口但加载 task 失败时，也会返回同一类可见报告。若 `output.json` 文件存在但 JSON 损坏、编码错误或不是对象，收口响应也必须返回 `[SUBAGENT_RESULT_LOAD_ERROR]`，不能把坏文件补成空结果或假 evidence packet。
+
+task-local progress 自动收口同样不能吞当前 run 账本或最新进度快照读取失败。系统只在确认处于子代理 run 时才尝试读取账本；如果读取当前 run 失败，返回 `[SUBAGENT_PROGRESS_LOAD_ERROR]`，提示父级刷新代理树或读取 canonical state。若 `progress/latest_tool_progress.json` 存在但坏 JSON、编码错误或不是对象，同样返回 `[SUBAGENT_PROGRESS_LOAD_ERROR]`，并暴露 `subagent_progress_closeout.latest_tool_progress`、路径和错误类型，而不是把失败误当成“没有进度”。
+
+task-local 工具进度写账失败也不能变成假空进度。`record_runtime_subagent_tool_progress()` 读取当前 run 失败时返回 `load_error`；工具确实推进了但保存 task 状态失败时返回 `status_save_error`。这两类错误会进入工具上下文，提示父代理刷新/修复账本，而不是把它当作工具没有产出。
+
+主代理/子代理的通用 `task_progress` 覆盖账本也不能把坏 `progress.json` 吞成空进度。`read_task_progress_report()` 会返回正常化空进度和 `load_error`；旧 `read_task_progress()` 兼容返回 payload，但同样带 `load_error` 字段；`task_progress_summary()` 和 compact `work_state_snapshot.task_progress` 会继续携带这条诊断。这样长任务 compact 后看到的是“进度账本坏了”，不是“模型从来没维护进度表”。
+
+运行意图账本也不能静默失效。`latest_run_intent_report()` 扫描 runtime facts 时，如果 `task.json` 坏 JSON、编码错误或不是对象，`write_file` 的软反馈会包含 `run_intent_load_errors` 和模型可见的 context/path。compact work_state 从 task.json 汇总 `run_intent` 时也会把坏来源写入 `run_intent.load_errors`。这只提示模型“路径意图账本坏了，请按用户原话确认输出位置”，不会阻断写入或强行猜路径。
+
+`agent_core/subagent/attempt_guard.py` 是少数允许 fail-closed 的运行保护。当前 runner 已经有 `run_id + attempt_id` 时，如果无法读取 attempt 状态，系统不能假设它仍然有效；它会返回“attempt 状态读取失败”的结构化中文提示，等待父级接管、重试或创建新 attempt。
+
+嵌套 `dispatch_subagents` 会保守排除当前 run 和已知活跃祖先。如果当前 run 的状态里已经写明父级 run_id，但父级账本读取失败，系统仍会把这个已知父级加入 `exclude_run_ids`，避免子代理把自己的父级重新推进成候选。
 
 ### 3.2 通用线索协作请求
 
@@ -479,7 +650,7 @@ context_refs
 - `raise_collaboration` / `raise_collaboration` 没有显式 deadline 时，会使用 `collaboration_default_deadline_seconds` 自动补一个相对截止时间。默认 120 秒；配置 0 表示不自动补。这样普通协作不会因为模型忘写 deadline 而永久等待。
 - 当多目标证据已经齐了但 case 仍为 open，系统可以在 case 状态里提示“可汇总/可标 resolved”，但不再通过 closeout 强制要求先更新 case 状态。
 - 当 deadline 已到但仍有 responder 未回，`inspect_collaboration` 读取时就能看到 timed out/missing responder；后台 `CollaborationCoordinator.tick()` 会把 case 状态推进为 `close` 并写 observation/wake。模型可以按部分证据推进，不能无限等待，也不能因为有人未回就让流程死卡。
-- `dispatch_subagents` 对模型公开的执行开关只保留 `dry_run`：`dry_run=true` 只预览，`dry_run=false` 才真实推进 runner。内部服务仍用 `apply/execute_runners` 表达写回和 runner 执行，但不再作为模型工具协议的第二套名字。
+- `dispatch_subagents` 对模型公开的执行开关只保留 `dry_run`：`dry_run=true` 只预览，`dry_run=false` 才真实推进 runner。内部服务仍用 `apply/start_runners` 表达写回和 runner 执行，但不再作为模型工具协议的第二套名字。
 - `dispatch_subagents` 的顶层响应不再优先展示 `collaboration_closeout` 或把 `next_action` 改成 `continue_collaboration_or_dispatch_pending_requests`。协作信息如果需要展示，应作为只读状态/日志/账本摘要，不覆盖普通 dispatch 结果。
 - 最终收口不再把“需要协作但没调用协作工具”提升为顶层 `suggested_tool_call`。如果测试发现模型漏协作，应修 runtime 工具暴露、prompt 简化或自动协作触发，而不是在验收阶段补开 case。
 - `dispatch_subagents` 会把 `final_closeout_repair_advice`、`suggested_tool_call`、`next_action` 放在长 `records` 前面。真实模型或 live prompt 只读工具结果前段时，也能先看到普通修复或继续调度建议，不会因为建议埋在几万字记录后面而误走慢路。协作 case 不再由 closeout 兜底补开；发现者需要协作时，应在自己的运行中直接记录 case/request。
@@ -525,7 +696,7 @@ main_agent_auto_resume_attempt_limit: 3
 
 - `agent_py_agent/agent/agent_core/exploration_fuse_config.py`
 - `agent_py_agent/config/runtime_guard_config.yaml`
-- `agent_py_agent/agent/agent_core/tool_exploration_fuse.py`
+- `agent_py_agent/agent/agent_core/tool_guard/exploration_fuse.py`
 
 现在默认 `round_threshold=300`。模型连续 300 个工具轮都只做 read/search/fetch/list 且没有本地落地动作，才会触发最终阻断。达到 1/5、2/5、4/5 时只给中文软提示。
 
@@ -543,7 +714,7 @@ main_agent_auto_resume_attempt_limit: 3
 
 - `agent_py_agent/agent/agent_core/exploration_fuse_config.py`
 - `agent_py_agent/config/runtime_guard_config.yaml`
-- `agent_py_agent/agent/agent_core/tool_local_progress_guard.py`
+- `agent_py_agent/agent/agent_core/tool_guard/local_progress.py`
 
 现在只保留一个参数：`local_progress_unlimited_hint_interval`。
 
@@ -558,7 +729,7 @@ main_agent_auto_resume_attempt_limit: 3
 
 - `agent_py_agent/agent/tooling/delivery_acceptance.py`
 - `agent_py_agent/agent/tooling/registry_bootstrap.py`
-- `agent_py_agent/agent/agent_core/tool_loop_completion.py`
+- `agent_py_agent/agent/agent_core/tool_loop/completion.py`
 
 新增通用工具 `submit_for_acceptance`。模型可以在认为任务完成时显式提交验收。这个工具本身不判定成功，只记录“我要交卷了”；真正通过与否仍由 delivery closeout 读取机器合同和文件系统事实判断。
 
@@ -568,7 +739,7 @@ main_agent_auto_resume_attempt_limit: 3
 
 文件：
 
-- `agent_py_agent/agent/agent_core/tool_loop_response_decision.py`
+- `agent_py_agent/agent/agent_core/tool_loop/response_decision.py`
 
 如果模型认为产物已经准备好，必须调用 `submit_for_acceptance` 才会触发 delivery closeout。普通无工具最终回复只当作自然语言回复，不再被系统猜成“交卷”：
 
@@ -587,9 +758,9 @@ main_agent_auto_resume_attempt_limit: 3
 
 文件：
 
-- `agent_py_agent/agent/agent_core/delivery_closeout_config.py`
+- `agent_py_agent/agent/agent_core/delivery_closeout/config.py`
 - `agent_py_agent/config/runtime_guard_config.yaml`
-- `agent_py_agent/agent/agent_core/main_agent_delivery_closeout_progress.py`
+- `agent_py_agent/agent/agent_core/delivery_closeout/progress.py`
 
 现在只保留两类通用预算：
 
@@ -604,7 +775,7 @@ main_agent_auto_resume_attempt_limit: 3
 
 文件：
 
-- `agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py`
+- `agent_py_agent/agent/agent_core/delivery_closeout/closeout.py`
 - `agent_py_agent/agent/contracts/delivery_contract_doctor.py`
 
 如果 delivery contract 自身结构坏掉，第一次验收会把 `[delivery-contract-doctor]` 放回模型上下文，告诉模型入口合同需要重新物化或修复。若下一次仍是同一份坏合同，系统不再返回 `DELIVERY_CONTRACT_DOCTOR_BLOCKED`，而是让模型按普通最终回复继续收口；doctor 报告只保留在 `.agent_delivery/contract_doctor.json` 和上下文提示里。
@@ -615,8 +786,8 @@ main_agent_auto_resume_attempt_limit: 3
 
 文件：
 
-- `agent_py_agent/agent/contracts/gates/artifact_provenance.py`
-- `agent_py_agent/agent/agent_core/main_agent_delivery_closeout_quality.py`
+- `agent_py_agent/agent/contracts/gates/artifact/provenance.py`
+- `agent_py_agent/agent/agent_core/delivery_closeout/quality.py`
 - `agent_py_agent/agent/agent_core/main_agent_delivery_fact_evidence.py`
 
 产物 provenance 缺失、跨 run 来源、delivery quality payload 缺失、fact evidence payload 缺失、自动派生的事实口径 warning，默认都写进 closeout 报告的 `warning_codes`，不阻断最终交付。只有外部显式结构化合同声明 `enforcement: required`、`hard`、`block` 或 `blocking` 时，delivery quality / fact evidence gate 才会变成硬返工。
@@ -638,8 +809,8 @@ main_agent_auto_resume_attempt_limit: 3
 
 调整文件：
 
-- `agent_py_agent/agent/agent_core/tool_loop_response_decision.py`
-- `agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py`
+- `agent_py_agent/agent/agent_core/tool_loop/response_decision.py`
+- `agent_py_agent/agent/agent_core/delivery_closeout/closeout.py`
 - `agent_py_agent/agent/agent_core/_tool_loop_service.py`
 
 旧逻辑在 closeout 生成结构化返工单之后，额外用 `_MAX_REPAIRS = 2` 控制“模型忽略返工动作”的次数。这个逻辑和探索熔断、本地进展门、closeout 返工预算重叠，而且比它们更硬，会让任务在仍可返工时提前 blocked。
@@ -657,8 +828,8 @@ main_agent_auto_resume_attempt_limit: 3
 
 文件：
 
-- `agent_py_agent/agent/agent_core/tool_unresolved_runtime_issue_guard.py`
-- `agent_py_agent/agent/agent_core/tool_loop_unresolved_runtime_issue_decision.py`
+- `agent_py_agent/agent/agent_core/tool_guard/unresolved_runtime_issue.py`
+- `agent_py_agent/agent/agent_core/tool_loop/unresolved_runtime_issue_decision.py`
 
 旧逻辑发现归档工具记录里仍有未解决的结构化失败时，会先给模型 3 次返工上下文；超过后返回 `UNRESOLVED_RUNTIME_ISSUES_BLOCKED`，把最终收口置为 `blocked`。这和 closeout 的返工循环重复，也会把“还能换工具、换路径、重写产物、重新复验”的普通问题变成硬停。
 
@@ -728,11 +899,11 @@ bootstrap 开工物化门不是安全门，也不是最终收口门。它会把�
 
 文件：
 
-- `agent_py_agent/agent/agent_core/agent_tree_status.py`
+- `agent_py_agent/agent/agent_core/agent_tree/status.py`
 - `agent_py_agent/agent/agent_core/orchestration_tools.py`
 - `agent_py_agent/agent/subagents/kernel.py`
 - `agent_py_agent/agent/subagents/model_task.py`
-- `agent_py_agent/agent/subagents/services/session_progress.py`
+- `agent_py_agent/agent/subagents/services/session_progress/`
 
 新增通用只读工具 `inspect_agent_tree`。它只返回主代理、子代理、孙代理的状态树，不创建任务、不调度、不恢复、不验收，也不会清理 `has_pending_work`。
 
@@ -773,7 +944,7 @@ blockers
 
 文件：
 
-- `agent_py_agent/agent/agent_core/dispatch_params.py`
+- `agent_py_agent/agent/agent_core/orchestration/dispatch/params.py`
 - `agent_py_agent/agent/agent_core/services/watch_service.py`
 - `agent_py_agent/cli/_dispatch.py`
 - `agent_py_agent/cli/subcommands_agents.py`
@@ -794,7 +965,7 @@ subagents-dispatch --watch --advance
 
 watch 才会进入旧的推进路径，调用 `dispatch_subagents`。
 
-这条边界是为了防止“看一眼子代理状态”误变成“推进/重派/验收子代理”。`planner`、`execute_runners` 都属于内部推进语义；在 `--watch` 下使用推进入口时必须同时显式给 `--advance`。
+这条边界是为了防止“看一眼子代理状态”误变成“推进/重派/验收子代理”。`planner`、`start_runners` 都属于内部推进语义；在 `--watch` 下使用推进入口时必须同时显式给 `--advance`。
 
 例外边界：`gateway run` 和 `daemon` 是明确的常驻运行器入口，不是“看一眼状态”的入口。它们会显式传 `advance=True`，保持后台任务队列可以继续推进。换句话说，默认只读的是 watch 能力本身；真正名字和职责就是“运行器”的入口必须显式声明推进。
 
@@ -828,7 +999,14 @@ ProgressPolicy      = 定时汇报策略
 - 定时汇报走 `ProgressPolicy`，到期后唤醒后台主代理，回复通过 channel route 投递。
 - `BackgroundMainAgentScheduler` 对同一个 thread 使用 per-thread claim，防止同一轮或跨 tick 重复烧后台主代理。claim TTL 表示“多久没有 heartbeat 就认为运行者死了”，不是任务最长运行时间；正常运行中由 heartbeat 续约，结束时先停 heartbeat 再 finish claim。
 - background claim 是“执行权账本”，不是验收门。运行失败时 claim 会写成 `failed`，并保留 `last_error`、`task_id`、最近工具/进展和任务树状态桶；下一次同 thread 唤醒会把上一任 claim 摘要带进 `Recovery Snapshot`，让接手主代理先对账，而不是从自然语言里猜“上次做到哪”。
+- background claim 读取也不能把坏文件吞成空 claim。`background_claim.json` 坏 JSON、编码错误或不是对象时，`Recovery Snapshot` 会包含 `claim_load_error`。这表示执行权/接管账本不可确认，不能被模型误解成“当前没有 claim 或可以随便接管”。
 - `Recovery Snapshot` 只读 claim、agent tree 和 artifact registry，给出恢复提示，不阻断任务、不替代 closeout、不把普通质量问题变成硬门。真正的事实优先级仍是 artifact registry、agent tree、claim ledger、run/tool trace；模型文本里的路径和完成声明只能当线索。
+- 后台主代理上下文构建时，thread bundle、thread task link、message/observation/guidance JSONL、pending wake、wake signal 文件、agent tree 或 recovery snapshot 读取失败，会进入 prompt 里的 `Runtime Load Errors`。这类错误是可恢复事实，不会阻断唤醒，也不能被模型理解成“没有消息、没有运行中提示、没有绑定任务、没有子代理、没有待处理事件”。JSONL 里单行坏数据只报告该行错误，正常行仍继续进入上下文；wake 队列里单个坏文件只报告该文件错误，正常 wake signal 仍继续进入上下文；一个 task link 坏了只报告该 task，其他绑定任务继续显示。当前 thread 文件、channel binding 索引或 latest-user 索引损坏时也必须走结构化 `load_error`；后台启动不能把坏 thread 说成 unknown thread，消息入口也不能因为索引坏而悄悄创建重复 thread。
+- 旧 session manager 读取 `session.json` 时也要区分“文件不存在”和“文件损坏”。`list_sessions_report()` 会返回正常 session 和 `load_errors`；旧 `list_sessions()` 继续只返回正常 session。坏 session 文件不能被解释成用户从来没有这个会话。
+- 旧 session 跨通道查询也不能把坏 `channels.json` 吞成“没有会话”。`list_sessions_by_channel_report()` 会返回正常会话列表和 `load_errors`；旧 `list_sessions_by_channel()` 继续兼容只返回列表。这样飞书/微信/QQ 这类通道绑定局部损坏时，系统能知道是绑定文件坏了，不是用户没有历史会话。
+- 旧 session 的管理员查询和跨通道上下文同步也不能把 task registry 读取失败吞成“没有活跃任务”。`AdminCrossChannelQuery` 的 report 版任务列表、最近活动和频道摘要会返回 `load_errors`；`SessionContextSync.sync_to_channel()` 会把 registry 失败写进上下文并在格式化文本中展示“读取警告”。这只是可恢复事实提示，不是新硬门。
+- 会话恢复里的最近记忆也不能吞坏行。`resume_session()` 会返回 `recent_memory_load_errors`；`format_resume_context()` 显示“最近记忆读取警告”。坏 `memory.jsonl` 行或编码问题不能让模型看到“暂无历史记录”，否则它会误以为这段会话没有可恢复上下文。
+- `ProgressPolicy` 读取也不能静默降级。policy 目录里单个坏 JSON 文件会进入 scheduler 的 `progress_policy_load_errors` 诊断；其它到期 policy 继续唤醒后台主代理并投递消息。坏 policy 不能被系统解释成“没有定时汇报策略”，也不能影响同目录里的正常定时汇报。
 - 默认 heartbeat 间隔按 TTL 的安全比例计算。生产默认 TTL 900 秒时约 300 秒续约一次；小 TTL 测试场景会保持间隔小于 TTL，避免第一次续约前 claim 已经过期。
 - 后台主代理可用控制工具由 `background_main_agent_allowed_tools` 决定。留空时使用默认 profile；显式配置后，执行参数和 prompt 里的 `Available Control Actions` 共用同一份列表，避免模型看到一个工具集、运行时又用另一套。
 - fake Feishu / fake WeChat 只用于离线验证跨渠道恢复；真实适配器以后只需要接入同一套 `ChannelBinding` 和发送接口。
@@ -874,7 +1052,7 @@ my-agent background-main-agent service --interval 5 --max-cycles 3
 
 文件：
 
-- `agent_py_agent/agent/subagents/parsing.py`
+- `agent_py_agent/agent/subagents/parsing/`
 - `agent_py_agent/agent/subagents/final_closeout_empty_report.py`
 
 这一层解决的是调查、查询、监控、状态核验这类任务：子代理可能只需要返回“查到了什么 / 没查到什么 / 证据在哪里”，不一定会生成新的 PDF、XLSX、HTML 或其它用户产物。
@@ -904,7 +1082,7 @@ my-agent background-main-agent service --interval 5 --max-cycles 3
 - `agent_py_agent/agent/conversation/store.py`
 - `agent_py_agent/agent/conversation/runtime.py`
 - `agent_py_agent/agent/agent_core/orchestration_tools.py`
-- `agent_py_agent/agent/agent_core/orchestration_tool_specs.py`
+- `agent_py_agent/agent/agent_core/orchestration/tool_specs.py`
 - `agent_py_agent/cli/background_main_agent.py`
 
 这一层解决的是长期任务里“下面的代理发现情况，主代理要不要立刻知道”的问题。它不是安全专项、API 专项或告警专项，而是通用事件控制面。
@@ -975,7 +1153,7 @@ raise_collaboration              打开协作 case
 raise_collaboration  请求其他代理围绕实体/问题补充证据
 submit_collaboration_result        提交证据 refs 和摘要
 update_collaboration
-                       更新协作请求生命周期，如 working/completed/blocked
+                       更新协作请求当前进展，或说明不可达/已响应/继续等待
 update_collaboration
                        把阻塞或不合适的协作请求结构化改派到新目标代理
 update_collaboration     推进 case 生命周期并写入决策摘要
@@ -990,12 +1168,11 @@ inspect_collaboration            只读查看 case 状态
 - `BackgroundMainAgentScheduler.tick()` 会先处理协作 case，再处理 wake/observation/progress policy。这样紧急协作事件可以复用现有后台主代理唤醒链路。
 - 子代理默认获得协作工具，可以参与 case；但它们提交的是证据和请求，不直接替主代理对用户收口。
 - case 的基础窗口状态是 `open/close`：`open` 表示还在收集响应，`close` 表示本轮收集结束。关闭窗口不等于交付成功，也不会替代普通任务 closeout。
-- `CollaborationRequest` 现在有独立生命周期。响应者可以把请求更新为进行中、已完成、阻塞或自定义状态；`inspect_collaboration` 会折叠同一 `request_id` 的 append-only 快照，返回当前状态，同时保留 `request_history_count` 方便回放。
-- `inspect_collaboration` 会给出 `pending/blocked/timed_out/completed/declined` 请求计数、`missing_evidence_request_ids`、`missing_responder_agent_ids_by_request`、`unavailable_target_agent_ids_by_request`、`ready_for_main_agent` 和 `requires_main_agent`。这些都是机器字段，主代理和 watcher 不需要从普通问题文本里猜。
+- `CollaborationRequest` 仍保留 append-only 当前快照和 `request_history_count` 方便回放；模型侧主要看 `response_status`，即 `waiting/responded/unanswered/unavailable`。这些是响应事实，不是验收状态。
+- `inspect_collaboration` 会给出 `case_window` 和 `collection_result`：窗口是否仍 open、是否 ready_to_report、已回/未回/不可达目标数量、`missing_responder_agent_ids_by_request` 和 `unavailable_target_agent_ids_by_request`。到 deadline 后可以带部分结果继续推进，不等所有人。
 - `status` 是开放世界字段，系统不限制只能用 open/triaged/closed 这几个值。唯一硬约束是：如果状态表达关闭、解决、完成这类终态语义，必须留下 `summary`、`decision_type` 或已有 `CaseDecision`，避免 case 无声消失。
-- `inspect_collaboration` 和 `update_collaboration` / `update_collaboration` 的工具结果进入 live prompt 时，会保留 request/evidence/ready 等高信号摘要。完整 JSON 仍可外置，但不能把关键控制字段压缩没，让模型只看到一句模糊自然语言。
-- `inspect_collaboration` 现在带 `rework` 和 `rework_targets`。这不是专项规则，而是从阻塞请求、缺证据请求和结构化 `request_id/status/evidence.request_id` 生成的返工目标，告诉主代理该换来源、换参数、询问响应者、补交证据或标记真实阻塞。
-- `rework_targets` 会从结构化 metadata 读取 `alternate_sources_available`、`candidate_target_agent_ids` 或 `alternate_target_agent_ids`，输出 `candidate_target_agent_ids` 和 `primary_tool=update_collaboration`。这只读机器字段，不解析普通自然语言摘要。
+- `inspect_collaboration` 和 `update_collaboration` 的工具结果进入 live prompt 时，会优先保留 `case_window` / `collection_result` 等高信号摘要。完整 JSON 仍可外置或回放，但不能把关键控制字段压缩没，让模型只看到一句模糊自然语言。
+- 旧的 `rework` / `rework_targets` 已删除。协作控制面只告诉上级“谁已回、谁没回、谁不可达、证据 refs 在哪”，不再生成一套协作返工门。
 - `update_collaboration` 是明确的换路动作：必须传 `case_id`、`request_id` 和新的 `target_agent_ids`。系统会把新目标写进 `CollaborationRequest.target_agent_ids`，并记录 `original_target_agent_ids`、`rerouted_from`、`rerouted_to` 和审计 decision，避免模型只在 metadata 或最终回复里说“已换路”。
 - `CollaborationStore.overview()` 汇总所有 case 的 ready、blocked、missing evidence、evidence、participant 和 decision 计数，给真实任务前的控制面体检使用。它只输出结构化计数和 bounded `ready_cases/blockers`，不展开大证据正文。
 - `BackgroundMainAgentScheduler.tick()` 对同一个 thread 的多条 pending wake signal 做批处理：同一轮只唤醒一次后台主代理，其他同 thread wake 标记为已处理，避免一个 case 的多个证据/阻塞事件把主代理重复烧多次。
@@ -1064,12 +1241,12 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
 文件：
 
 - `agent_py_agent/agent/agent_core/runtime_mixin.py`
-- `agent_py_agent/agent/agent_core/orchestration_create_policy.py`
+- `agent_py_agent/agent/agent_core/orchestration/create_policy.py`
 - `agent_py_agent/agent/agent_core/orchestration_tools.py`
 - `agent_py_agent/agent/collaboration/tools.py`
-- `agent_py_agent/agent/subagents/services/hierarchy_context.py`
+- `agent_py_agent/agent/subagents/services/hierarchy/context.py`
 - `agent_py_agent/agent/subagents/context_bundle.py`
-- `agent_py_agent/agent/agent_core/runner_prompt_context_summary.py`
+- `agent_py_agent/agent/agent_core/runner/prompt_context_summary.py`
 - `agent_py_agent/agent/conversation/store.py`
 - `agent_py_agent/cli/background_main_agent.py`
 - `agent_py_agent/cli/commands/background_main_agent.py`
@@ -1079,10 +1256,22 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
 新增语义：
 
 - 主代理在带 `RunParams.task_id` 的长期 thread 内调用 `create_subagents` 时，创建出的子代理会自动继承 `conversation_thread_id` 和 `conversation_task_id`。
+- 如果 thread 反查或 internal thread 物化失败，子代理 attributes 会写入 `conversation_thread_lookup_error` / `conversation_thread_materialize_error`。这表示会话绑定账本或创建动作失败，不能静默当成“这个任务不需要回到原会话”。
 - 继承字段会通过 hierarchy context 继续传给孙代理；孙代理不需要知道飞书/微信/internal 通道细节，只需要带自己的 `run_id/task_id` 上报。
 - `raise_event`、`raise_event`、`raise_collaboration` 支持用子/孙代理自己的 `task_id/run_id` 反查 thread。系统先查 conversation task binding，再查 subagent attributes；`raise_collaboration` 在本地任务无外部绑定时可创建 internal thread，不从自然语言里猜线程。
+- `raise_event` 反查 thread 或写 wake signal 失败时，会返回 `load_error` / `wake_signal_error`。如果 thread 已解析、事件能落账，但补 `source_agent_id/parent_agent_id/root_task_id` 时读取子代理账本失败，事件不会被阻断；系统会把 `lineage_load_error` 写进 observation metadata，表示归属信息不完整是账本读取问题，不是模型没有上报事件。
 - 子代理 runner 写出终态结果时，也会通过 task binding 给父 thread 写 observation 和 wake signal。父代理下一轮醒来后仍自己决定是否派测试、找茬、补派或汇报；系统不因为 DONE/VERIFIED 自动替父代理收口。
 - 子/孙代理 context bundle 和 runner prompt summary 会带上最小 conversation refs：`thread_id`、`root_task_id`。这些是机器 refs，不是要求用户在 prompt 里填写工程字段。
+- `thread_for_task` 这类单点会话反查也要区分“未绑定”和“绑定账本坏了”。task link 文件缺失时仍表示没有绑定；文件存在但坏 JSON、编码错误或不是对象时会抛出可报告的数据损坏错误，让 `raise_event`、`raise_collaboration`、运行中 guidance 等上游把它转成 `load_error`，不能把坏绑定误判成没有 thread。显式 `thread_id` 指向坏 thread 文件时，同样返回 `thread_lookup_failed` + `load_error`，并保留 `read_context=conversation.thread.read`，不能退化成 `unknown_thread`。
+- 主代理 context bundle 生成 `tool_manifest` 时，如果工具规格读取失败，会写入 `tool_manifest.tool_load_errors`。这表示工具清单读取/生成出错，不能让模型误解成“当前没有可用工具”。
+- 主代理 context bundle 收尾回填 artifact refs 时，如果 context bundle JSON 已损坏，会返回 `load_error`。这表示任务身份证/交接包读取失败，不应被解释成“没有产物引用要回填”或“只是普通缺文件”。
+- `context-bundle latest` CLI 读取最新主 context bundle 时，如果 JSON 已损坏，也会在 `invalid_context_bundle` 结果里带 `load_error`。这表示命令层看到的是“交接包文件坏了”，不是只有一个模糊 invalid。
+- compact apply 使用主 context bundle 引用时，如果显式或自动引用指向坏 JSON、编码错误或缺失文件，`main_context_bundle` 和 `restore_refs.source_refs.context_bundles[].reserved.load_error` 会保留路径和错误分类。普通 scope mismatch 仍会清掉不该注入的无关 bundle，避免跨任务污染。
+- `subagents tests` 读取子代理 `output_json` 时，如果 JSON 损坏、编码错误或根不是对象，会在命令输出里显示 `output_load_error`。测试执行报告仍可展示，不能因为子代理输出账本坏了而 traceback，也不能把坏输出误判成“没有 tests/没有输出”。
+- shared progress / takeover view 读取 `takeover_readiness_ref` 时，如果接管包 JSON 损坏，会在看板条目里显示 `takeover_readiness_load_error`，同时保留 readiness/failure refs 作为读取顺序兜底。坏接管包不能被吞成“没有推荐读取顺序”。
+- owner lifecycle 状态读取到坏 `owner_status.json` 时，home status/doctor 会标 `UNKNOWN` 并暴露 `owner_lifecycle_load_error`。这表示 owner 状态不可确认，不能默认当成 active。
+- compact 基础包创建时如果旧 `branches.json` 损坏，新包可以继续落地，但新的分支索引会保留 `load_errors`。这表示 compact 分支账本曾经损坏，不能把旧分支丢失误判为“原本没有其它分支”。
+- compact 注入 prompt 时如果 `continue_packet.json` 损坏，会继续渲染 `compact_context.md`，同时写出 `continue_packet 读取失败`、context、path、category 和 message。模型不能把后续字段里的“无”理解成任务已经没有下一步。
 - `background-main-agent status` 提供只读控制面体检：会话数、绑定任务数、待处理 wake、未处理 observation、progress policy、协作 case 和代理树 schema 都能一次看到。
 
 本地验收场景：
@@ -1110,8 +1299,8 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
 
 文件：
 
-- `agent_py_agent/agent/agent_core/runner_prompts.py`
-- `agent_py_agent/agent/agent_core/runner_prompt_context_summary.py`
+- `agent_py_agent/agent/agent_core/runner/prompts.py`
+- `agent_py_agent/agent/agent_core/runner/prompt_context_summary.py`
 - `agent_py_agent/agent/collaboration/store.py`
 - `agent_py_agent/agent/subagents/manager_runner_context.py`
 - `agent_py_agent/agent/subagents/context_bundle.py`
@@ -1269,6 +1458,12 @@ create_subagents 写清楚 goal / refs
 - 加载后的 `RuntimeGuardPolicy`：SimpleAgent 启动时持有 `runtime_guard_policy`，可输出 `values/sources/source_path/loaded_at`。
 - task/run snapshot：需要排查某个任务时，用 `runtime_guard_policy.snapshot(task_id=..., run_id=...)` 固化当时的运行门值和来源。
 
+当前真实运行入口必须优先读取当前 agent 持有的 `runtime_guard_policy`：
+
+- 主模型工具循环和入口 delivery contract 物化遇到 provider transient 时，重试等待表来自当前 agent policy。
+- 子代理结构化修复模型调用、runner retry、same-run redispatch、max tool rounds、repeat/no-progress guard 都优先读当前 agent policy。
+- 工具执行 pipeline 的 tool guardrail 和 tool rate-limit 默认值也从 registry 持有的 agent policy 读取；只有 `write_boundary` 里显式传入本次工具调用覆盖值时，才覆盖 agent policy。
+
 旧 `runtime_guard_int/bool/float_tuple` 仍保留兼容，但内部走同一个 policy 解析口径。后续新增运行门参数必须先进入
 `runtime_guard_config.yaml` 和 `RuntimeGuardPolicy`，再由具体模块读取，不能在工具、runner、closeout 或 scheduler 里再写一份隐藏默认值。
 
@@ -1276,7 +1471,7 @@ create_subagents 写清楚 goal / refs
 
 当前规则是：`create_subagents` 默认创建后直接启动新 run，不再要求主代理再手动催一次。只有显式传 `defer_start=true` 时，才只创建/复用任务记录。父代理后续要看状态、追加提示、推进卡住项、重跑某几个 run 或尝试恢复时，再使用 `dispatch_subagents`。
 
-真实模型后端下，这个“直接启动”不是短命 CLI 里的 daemon thread，而是独立 `subagents-dispatch --apply --execute-runners --run-id ... --background-launch-id ...` 进程。这样 `my-agent run` 返回后，子代理 runner 仍然能继续推进；后台进程会把 `attributes.background_start.status` 写成 `running/finished/failed`，任务树不会因为父进程退出而只剩一个假启动标记。离线 `echo` 后端保留进程内线程，方便单测和本地 smoke 不额外启动子进程。
+真实模型后端下，这个“直接启动”不是短命 CLI 里的 daemon thread，而是独立 `subagents-dispatch --apply --start-runners --run-id ... --background-launch-id ...` 进程。这样 `my-agent run` 返回后，子代理 runner 仍然能继续推进；后台进程会把 `attributes.background_start.status` 写成 `running/finished/failed`，任务树不会因为父进程退出而只剩一个假启动标记。离线 `echo` 后端保留进程内线程，方便单测和本地 smoke 不额外启动子进程。
 
 `defer_start` 也可以写在单个 `items[]` 子任务上：例如同批创建“开发 worker + 测试 tester + 找错 bug_finder”时，开发可以默认启动，测试/找错可以 `defer_start=true`，等开发产物 refs 出现后再启动。系统会在 `create_subagents` 返回里给 `scheduling_advice` 软提醒，但不会因为测试提前启动而硬拦；父代理仍按任务目标自己决定调度节奏。
 
@@ -1329,7 +1524,7 @@ create_subagents 写清楚 goal / refs
 历史上的验收-only dispatch 建议类似：
 
 ```text
-execute_runners = false
+start_runners = false
 execute_acceptance_tests = true
 auto_apply_result_followup = true
 ```
@@ -1372,6 +1567,8 @@ auto_apply_result_followup = true
 
 如果旧代码已经创建过一个缺字段的 takeover run，后续复用它时会自动补齐源 run 的缺失交接字段；已有 takeover 自己新增的字段不被覆盖。这是恢复链一致性修复，不是 IP、日志、GitHub、论文等专项规则。
 
+创建 takeover run 前必须先能确认“是否已有接管 run”。如果源 run 没有 `takeover_by`，但扫描同源 takeover 时读取账本失败，`create_takeover_run()` 返回 `load_error`，不会继续创建新的接管 run。这样宁可让父代理看到“接管状态不可验证”，也不重复派出多个接管者同时写同一份任务。
+
 ## 恢复编排账本
 
 `recovery_strategy` 只负责判断“建议怎么恢复”，不会直接跑模型或改任务树。`SubAgentRecoveryOrchestrator`
@@ -1390,6 +1587,9 @@ auto_apply_result_followup = true
 当前语义：
 
 - 工具执行后返回紧凑的 `result_refs_by_run` / `child_result_index`、状态摘要、`run_closeout_ref`、产物 refs 和调度报告 refs。
+- `child_result_index` 读取 child `output_json` 时，如果文件存在但 JSON 损坏，会在该 child 行写 `output_load_error`，而不是静默当作没有结果。
+- runner 创建下级后，如果读取某个 child 状态账本失败，dispatch record 会带 `runner_child_load_errors`。父代理看到 `UNKNOWN` 状态时要同时看这个结构化错误，不能把账本读取失败解释成“子代理没有产物”。
+- `create_subagents` 后台自动启动返回的 `agent_tree` 如果构建失败，会保留旧的 `agent_tree_unavailable:*` warning，同时增加 `agent_tree_load_error` 结构化错误。父代理应刷新树、重建索引或按 run_id 查账本，不要把它解释成“没有子代理”。
 - 顶层主代理拿到这些索引后，必须自己进入下一轮模型判断：是否汇总、是否继续调度、是否读某个 ref、是否写最终报告。
 - 系统不再因为“子代理都 DONE/VERIFIED”就在工具轮后直接生成 `未再发起额外模型请求` 的本地收口回答。
 - 如果没有显式 run scope，`dispatch_subagents` 会退回列出当前可见子代理的紧凑状态索引，支持父代理“按一下查状态”。

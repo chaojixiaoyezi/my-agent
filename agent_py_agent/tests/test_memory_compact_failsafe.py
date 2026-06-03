@@ -121,6 +121,11 @@ def _write_tool_output_fail_safe_checkpoint(root: Path) -> Path:
     return path
 
 
+def _append_corrupt_fail_safe_checkpoint_row(path: Path) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("{bad-json\n")
+
+
 def test_memory_resume_from_compact_prioritizes_fail_safe_tool_checkpoint(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     _write_compact_fixture(root)
@@ -144,3 +149,96 @@ def test_memory_resume_from_compact_prioritizes_fail_safe_tool_checkpoint(tmp_pa
     assert str(checkpoint_path) in resume["recommended_read_paths"]
     assert "## Fail Safe Checkpoints" in resume["context_block"]
     assert "large-output-hash" in resume["context_block"]
+
+
+def test_memory_resume_reports_corrupt_fail_safe_checkpoint_rows(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _write_compact_fixture(root)
+    checkpoint_path = _write_tool_output_fail_safe_checkpoint(root)
+    _append_corrupt_fail_safe_checkpoint_row(checkpoint_path)
+    apply_result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+
+    resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=apply_result["apply_id"]))
+
+    assert resume["fail_safe_checkpoints"][0]["snapshot_id"] == "failsafe-tool-1"
+    errors = resume["fail_safe_checkpoint_load_errors"]
+    assert errors[0]["context"] == "compact_resume.fail_safe_checkpoint"
+    assert errors[0]["path"] == str(checkpoint_path)
+    assert errors[0]["line_no"] == 3
+    assert "Fail Safe Checkpoint Load Errors" in resume["context_block"]
+
+
+def test_memory_resume_reports_corrupt_apply_artifacts(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _write_compact_fixture(root)
+    apply_result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+    work_state_ref = Path(str(apply_result["refs"]["work_state_snapshot"]))
+    work_state_ref.write_text("{bad-json", encoding="utf-8")
+
+    resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=apply_result["apply_id"]))
+
+    assert resume["ok"] is False
+    errors = resume["artifact_load_errors"]
+    assert errors[0]["artifact"] == "work_state"
+    assert errors[0]["context"] == "compact_resume.artifact.work_state"
+    assert errors[0]["path"] == str(work_state_ref)
+    assert "Compact Artifact Load Errors" in resume["context_block"]
+
+
+def test_memory_resume_reports_corrupt_metadata_separately_from_missing_metadata(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _write_compact_fixture(root)
+    apply_result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+    metadata_ref = Path(str(apply_result["refs"]["metadata"]))
+    metadata_ref.write_text("{bad-json", encoding="utf-8")
+
+    resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=apply_result["apply_id"]))
+
+    assert resume["ok"] is False
+    assert resume["status"] == "blocked_compact_metadata_load_error"
+    assert resume["metadata_load_error"]["context"] == "compact_resume.metadata"
+    assert resume["metadata_load_error"]["path"] == str(metadata_ref)
+    assert resume["consistency_report"]["metadata_load_error"]["path"] == str(metadata_ref)
+
+
+def test_memory_compact_work_state_reports_corrupt_archive_sources(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _write_compact_fixture(root)
+    for snapshot_ref in (root / "memory_archive" / "snapshots").glob("*.json"):
+        snapshot_ref.unlink()
+    archive_ref = root / "memory" / "raw" / "2026-05-06.jsonl"
+    with archive_ref.open("a", encoding="utf-8") as handle:
+        handle.write("{bad-json\n")
+
+    apply_result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+
+    work_state = apply_result["work_state_snapshot"]
+    assert work_state["goal"] == "need compact dry-run plan"
+    errors = work_state["source_load_errors"]
+    assert errors[0]["context"] == "compact_work_state.archive"
+    assert errors[0]["path"] == str(archive_ref)
+    assert errors[0]["line_no"] == 2
+
+    resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=apply_result["apply_id"]))
+    assert "Source Load Errors" in resume["context_block"]
+    assert str(archive_ref) in resume["context_block"]

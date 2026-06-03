@@ -6,12 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
-from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import DispatchSubagentsTool
-from agent_py_agent.agent.agent_core.runtime_guidance import (
+from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import DispatchSubagentsTool
+from agent_py_agent.agent.agent_core.runtime.guidance import (
     inject_pending_guidance,
     render_subagent_guidance_section,
 )
-from agent_py_agent.agent.agent_core.runtime_guidance_tool import SendGuidanceTool
+from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
@@ -127,6 +127,31 @@ def test_send_guidance_tool_can_target_direct_child_scope(tmp_path) -> None:
     assert agent.conversation_store.pending_guidance("agent_run", grandchild.id) == []
 
 
+def test_send_guidance_scope_resolution_failure_does_not_target_parent(tmp_path, monkeypatch) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    root = agent.subagents.create_run(goal="root", thought="", plan=["root"])
+
+    def broken_kernel_snapshot(query):
+        del query
+        raise ValueError("broken kernel")
+
+    monkeypatch.setattr(agent.subagents, "kernel_snapshot", broken_kernel_snapshot)
+
+    result = SendGuidanceTool(agent).execute(
+        {
+            "target_scope": "children",
+            "run_id": root.id,
+            "message": "请所有孩子补充证据。",
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert payload["error"] == "target_scope_resolution_failed"
+    assert payload["load_error"]["context"] == "send_guidance.target_scope"
+    assert agent.conversation_store.pending_guidance("agent_run", root.id) == []
+
+
 def test_cli_guidance_send_writes_same_guidance_inbox(tmp_path, capsys) -> None:
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -176,6 +201,23 @@ def test_tool_loop_injects_pending_guidance_and_marks_delivered(tmp_path) -> Non
     assert any("guidance_id=" in str(item) for item in params.tool_context)
     assert any("先写一个可打开的草稿" in str(item) for item in params.tool_context)
     assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
+
+
+def test_tool_loop_reports_thread_guidance_lookup_error(tmp_path, monkeypatch) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    params = _tool_loop_params(task_id="task-1")
+
+    def broken_thread_for_task(task_id):
+        del task_id
+        raise OSError("thread binding index missing")
+
+    monkeypatch.setattr(agent.conversation_store, "thread_for_task", broken_thread_for_task)
+
+    updated = inject_pending_guidance(agent, params, now=11.0)
+
+    assert updated is True
+    assert any("GUIDANCE_LOOKUP_WARNING" in str(item) for item in params.tool_context)
+    assert any("runtime_guidance.thread_for_task" in str(item) for item in params.tool_context)
 
 
 def test_subagent_runner_prompt_can_render_pending_guidance(tmp_path) -> None:
@@ -232,3 +274,29 @@ def test_dispatch_runner_instruction_writes_guidance_for_explicit_run(tmp_path) 
     pending = agent.conversation_store.pending_guidance("agent_run", child.id)
     assert pending[0].message == "先汇总已有文件，再继续补缺口。"
     assert pending[0].metadata["legacy_tool"] == "dispatch_subagents"
+
+
+def test_dispatch_runner_instruction_reports_guidance_persist_error(tmp_path, monkeypatch) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    child = agent.subagents.create_run(goal="child", thought="", plan=["child"])
+    agent.dispatch_subagents = MagicMock(
+        return_value=SimpleNamespace(dry_run=False, summary={"ok": True}, records=[])
+    )
+
+    def fail_append_guidance(_payload):
+        raise RuntimeError("guidance store unavailable")
+
+    monkeypatch.setattr(agent.conversation_store, "append_guidance", fail_append_guidance)
+
+    result = DispatchSubagentsTool(agent).execute(
+        {
+            "run_ids": [child.id],
+            "dry_run": False,
+            "runner_instruction": "先汇总已有文件，再继续补缺口。",
+        }
+    )
+
+    payload = json.loads(result.output)
+    assert result.ok is True
+    assert payload["guidance_persist_errors"][0]["run_id"] == child.id
+    assert payload["guidance_persist_errors"][0]["context"] == "dispatch.guidance.persist"

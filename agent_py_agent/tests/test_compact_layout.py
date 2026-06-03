@@ -3,8 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 
-# LLM: compact package shape must stay the same at task, run, and agent levels.
-# 函数用途: 验证 task/run/agent 三层 compact 包共享同一组基础文件，防止恢复链路分叉。
 def test_compact_package_layout_is_shared_across_levels(tmp_path: Path):
     from agent_py_agent.agent.user_space.compact_layout import (
         CompactPackageRequest,
@@ -30,8 +28,6 @@ def test_compact_package_layout_is_shared_across_levels(tmp_path: Path):
         assert pkg.ledger_jsonl.exists()
 
 
-# LLM: compact branches let recovery from an old compact continue without overwriting the main chain.
-# 函数用途: 验证 compact 包会记录 branch/current_branch/parent_compact_id，供后续恢复区分主链和分叉。
 def test_compact_package_records_branch_metadata(tmp_path: Path):
     import json
 
@@ -57,8 +53,28 @@ def test_compact_package_records_branch_metadata(tmp_path: Path):
     assert branches["branches"]["recovery-a"]["head"] == "compact_0002"
 
 
-# LLM: task rollups should keep a branch-specific summary next to the general task summary.
-# 函数用途: 验证 task compact rollup 会生成 branch_main_rollup.json，父代理可先读当前分支摘要。
+def test_compact_package_preserves_corrupt_branch_index_error(tmp_path: Path):
+    import json
+
+    from agent_py_agent.agent.user_space.compact_layout import (
+        CompactPackageRequest,
+        ensure_compact_package,
+    )
+
+    compact_root = tmp_path / "compact"
+    compact_root.mkdir()
+    branches_path = compact_root / "branches.json"
+    branches_path.write_text("{bad-json", encoding="utf-8")
+
+    ensure_compact_package(compact_root, CompactPackageRequest(1, "task"))
+
+    branches = json.loads(branches_path.read_text(encoding="utf-8"))
+    assert branches["current_branch"] == "main"
+    assert branches["branches"]["main"]["head"] == "compact_0001"
+    assert branches["load_errors"][0]["context"] == "compact_layout.branches"
+    assert branches["load_errors"][0]["path"] == str(branches_path)
+
+
 def test_task_compact_rollup_writes_branch_rollup(tmp_path: Path):
     import json
 

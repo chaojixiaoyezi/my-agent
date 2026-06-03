@@ -6,8 +6,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 
-# LLM: _mock_items_agent keeps contract-edge tests independent from the oversized orchestration suite.
-# 函数用途: 构造 items[] 派工测试用的最小 agent mock，固定 create_run 返回任务数量。
 def _mock_items_agent(task_count: int = 3):
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
@@ -29,8 +27,6 @@ def _mock_items_agent(task_count: int = 3):
     return mock_agent
 
 
-# LLM: Absolute path refs must remain machine-usable when parent creates dependent children.
-# 函数用途: 验证 items 派工中的绝对路径输入依赖不会丢掉开头 /，避免子代理读错 Users/... 这种假路径。
 def test_items_mode_preserves_absolute_path_dependencies():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -59,8 +55,6 @@ def test_items_mode_preserves_absolute_path_dependencies():
     ]
 
 
-# LLM: Research-style children should have web evidence tools by default, like the main agent baseline.
-# 函数用途: 验证 researcher/web 任务默认能拿到新网络四件套，不再先卡成 capability_request 往返。
 def test_researcher_preset_gets_web_tools_by_default():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 

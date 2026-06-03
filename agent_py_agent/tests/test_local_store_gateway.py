@@ -201,8 +201,6 @@ def test_gateway_processing_recovery_requeues_then_fails_after_attempt_limit():
     _assert_failed(paths, failed, second_path, "gwreq-fail")
 
 
-# LLM: zero gateway recovery attempts means no retry ceiling for stale processing requests.
-# 函数用途: 验证 gateway_request_max_attempts=0 不会把首次恢复直接判成失败。
 def test_gateway_processing_recovery_zero_attempt_limit_is_unlimited():
     root, agent, paths = _setup_agent_with_gateway(
         {"gateway_processing_timeout_seconds": 1, "gateway_request_max_attempts": 0}

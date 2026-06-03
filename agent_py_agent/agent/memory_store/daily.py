@@ -1,5 +1,3 @@
-# LLM: Daily memory is the human-readable work journal layer above raw JSONL archive.
-# 模块用途: 写入按天分片的工作记忆，记录进展、教训、下一步和引用，而不是替代 raw archive。
 
 from __future__ import annotations
 
@@ -10,8 +8,6 @@ from pathlib import Path
 from ..io import append_jsonl
 
 
-# LLM: DailyMemoryEvent is deliberately generic so research, coding, monitoring, and chat tasks share one journal shape.
-# 类用途: 承载每日工作记忆事件，供 owner/task/run/agent 运行中追加可读摘要。
 @dataclass(frozen=True)
 class DailyMemoryEvent:
     event_type: str

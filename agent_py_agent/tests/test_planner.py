@@ -134,13 +134,13 @@ class TestBuildParentPlannerPrompt:
         prompt = _build_parent_planner_prompt(
             state,
             apply=True,
-            execute_runners=True,
+            start_runners=True,
             max_runners=2,
             runner_instruction="测试指令",
         )
 
         assert "mode: apply" in prompt
-        assert "execute_runners: True" in prompt
+        assert "start_runners: True" in prompt
         assert "cli_max_runners: 2" in prompt
         assert "测试指令" in prompt
 
@@ -153,7 +153,7 @@ class TestBuildParentPlannerPrompt:
         prompt = _build_parent_planner_prompt(
             state,
             apply=False,
-            execute_runners=False,
+            start_runners=False,
             max_runners=1,
             runner_instruction="",
         )
@@ -172,7 +172,7 @@ class TestBuildParentPlannerPrompt:
         prompt = _build_parent_planner_prompt(
             state,
             apply=True,
-            execute_runners=False,
+            start_runners=False,
             max_runners=1,
             runner_instruction="",
         )
@@ -189,7 +189,7 @@ class TestBuildParentPlannerPrompt:
         prompt = _build_parent_planner_prompt(
             state,
             apply=True,
-            execute_runners=False,
+            start_runners=False,
             max_runners=1,
             runner_instruction="",
         )
@@ -323,6 +323,51 @@ class TestBuildParentPlannerState:
         assert state["gate"]["total_tasks"] == 0
         assert state["gate"]["active_tasks"] == 0
         assert state["gate"]["needs_planner"] == 0
+
+
+class TestRunParentPlannerErrors:
+    """测试父代理 planner 调用异常能留给父代理查看。"""
+
+    def test_parent_planner_runtime_error_is_recorded(self, tmp_path, monkeypatch):
+        from agent_py_agent.agent.agent_core._subagent_planner_mixin import RunParentPlannerParams
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.params import (
+            DispatchExecutionPlan,
+        )
+        from agent_py_agent.agent.capabilities import CapabilityRouter
+        from agent_py_agent.agent.capability_config import CapabilityConfig
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+
+        monkeypatch.setattr(
+            "agent_py_agent.agent.agent_core._subagent_planner_mixin._build_parent_planner_state",
+            lambda *args, **kwargs: {"gate": {"needs_planner": 1, "active_tasks": 1}, "tasks": []},
+        )
+
+        def fail_run(*args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("provider returned 503")
+
+        monkeypatch.setattr(agent, "run", fail_run)
+
+        record = agent.run_parent_planner(
+            RunParentPlannerParams(
+                router=CapabilityRouter(),
+                capability_config=CapabilityConfig(),
+                execution_plan=DispatchExecutionPlan(preview_only=False, mutate_state=True),
+                max_runners=1,
+                limit=10,
+                reviewer="test",
+                note="",
+                runner_instruction="",
+            )
+        )
+
+        assert record.ok is False
+        assert record.decision == "PLANNER_ERROR"
+        assert record.runtime_error["context"] == "parent_planner.run"
+        assert "provider returned 503" in str(record.runtime_error)
 
 
 class TestParentPlannerReadTools:

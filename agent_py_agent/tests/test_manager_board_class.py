@@ -1,4 +1,4 @@
-"""subagents/manager_board.py 单元测试。
+"""subagents/services/board/facade.py 单元测试。
 
 测试看板数据生成、状态汇总、HTML输出。
 """
@@ -14,9 +14,9 @@ import pytest
 
 def _make_board_mixin(tmp_path: Path):
     from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-    from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
+    from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-    class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+    class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
         def __init__(self, workspace: Path):
             SubAgentBaseMixin.__init__(self, workspace=workspace)
 
@@ -71,10 +71,10 @@ class TestBuildBoard:
     def test_build_board_returns_subagent_board(self, tmp_path: Path):
         """验证返回 SubAgentBoard。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
 
@@ -90,10 +90,10 @@ class TestBuildBoard:
     def test_board_counts_tasks_by_status(self, tmp_path: Path):
         """验证按状态统计。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
                 self._tasks = []
@@ -140,10 +140,10 @@ class TestToBoardItem:
     def test_converts_task_to_board_item(self, tmp_path: Path):
         """验证任务转换为看板行。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
 
@@ -184,6 +184,21 @@ class TestToBoardItem:
         assert item.child_count == 2
         assert item.locked_file_count == 1
 
+    def test_child_status_load_error_is_visible(self, tmp_path: Path):
+        mixin = _make_board_mixin(tmp_path)
+        task = _make_board_task(mixin, "parent")
+        task.child_ids = ["child-bad"]
+
+        def broken_load(_run_id):
+            raise OSError("child ledger unreadable")
+
+        mixin.load = broken_load
+        item = mixin._to_board_item(task)
+
+        assert item.child_status_counts["load_error"] == 1
+        assert item.child_status_load_errors[0]["child_id"] == "child-bad"
+        assert item.child_status_load_errors[0]["context"] == "subagent_board.child_status.load"
+
 
 class TestRiskFlags:
     """测试 _risk_flags() 方法。"""
@@ -191,10 +206,10 @@ class TestRiskFlags:
     def test_blocked_status_flag(self, tmp_path: Path):
         """BLOCKED 状态添加风险标记。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
 
@@ -240,10 +255,10 @@ class TestRiskFlags:
     def test_channel_broken_flag(self, tmp_path: Path):
         """通道损坏时添加标记。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
 
@@ -285,9 +300,9 @@ class TestDueCheck:
         """无任务时返回空报告。"""
         from agent_py_agent.agent.capability_config import CapabilityConfig
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
 
@@ -303,10 +318,10 @@ class TestDueCheck:
     def test_due_check_detects_failed_task(self, tmp_path: Path):
         """检测失败任务。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
                 self._tasks = []
@@ -348,10 +363,10 @@ class TestDueCheck:
     def test_due_check_can_scope_to_root_id(self, tmp_path: Path):
         """只巡检指定 root_id 的任务树。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentDueCheckOptions, SubAgentTask
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
                 self._tasks = []
@@ -395,10 +410,10 @@ class TestDueCheck:
     def test_due_check_can_scope_to_explicit_run_ids(self, tmp_path: Path):
         """显式 run_ids 调度时，due-check 不应把同目录其它失败 run 混进来。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentDueCheckOptions, SubAgentTask
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
                 self._tasks = []
@@ -441,10 +456,10 @@ class TestDueCheck:
         """连续恢复无进展时，due-check 应明确报告熔断而不是普通失败。"""
         from agent_py_agent.agent.capability_config import CapabilityConfig
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
                 self._tasks = []

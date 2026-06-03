@@ -1,5 +1,3 @@
-# LLM: Main-agent foundation runner turns the six requested stability checks into one refs-first report.
-# 模块用途: 提供主代理基础测试矩阵入口；确定性用例本地执行，真实模型用例明确标记需要显式运行。
 
 from __future__ import annotations
 
@@ -7,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from ..subagents.static_site_validator import run_static_site_check
+from ..subagents.static_site import run_static_site_check
 from .activity_timeout import ActivitySnapshot, ActivityTimeoutPolicy, decide_activity_timeout
 from .e2e_matrix_runner import E2ERunnerRequest, run_e2e_matrix
 from .error_taxonomy import classify_error
@@ -30,8 +28,6 @@ REAL_MODEL_CASE_IDS = {
 }
 
 
-# LLM: run_main_agent_foundation executes deterministic checks and records real-model gaps honestly.
-# 函数用途: 执行主代理基础测试的固定入口；真实模型测试不在这里假装通过。
 def run_main_agent_foundation(request: MainAgentFoundationRequest) -> MainAgentFoundationReport:
     workspace = Path(request.workspace)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -71,8 +67,6 @@ def run_main_agent_foundation(request: MainAgentFoundationRequest) -> MainAgentF
     )
 
 
-# LLM: _case_tool_failure_contracts validates stable error taxonomy before model recovery tests.
-# 函数用途: 制造常见失败文本，确认路径、权限、超时、工具不可用和模型失败会被稳定分类。
 def _case_tool_failure_contracts(workspace: Path) -> MainAgentFoundationCaseResult:
     samples = {
         "PATH_INVALID": "文件不存在: missing-input.txt",
@@ -102,14 +96,10 @@ def _case_tool_failure_contracts(workspace: Path) -> MainAgentFoundationCaseResu
     )
 
 
-# LLM: _case_research_evidence_contracts blocks fabricated table data without source refs.
-# 函数用途: 用一正一反两组资料 claim 证明关键统计字段必须挂结构化来源。
 def _case_research_evidence_contracts(workspace: Path) -> MainAgentFoundationCaseResult:
     return MainAgentFoundationCaseResult(**research_evidence_contract_case(workspace))
 
 
-# LLM: _case_web_artifact_validator proves generated web apps are checked by DOM facts.
-# 函数用途: 生成一份 HTML/JS id 不一致的页面，确认通用静态站点验收会机器失败。
 def _case_web_artifact_validator(workspace: Path) -> MainAgentFoundationCaseResult:
     site = workspace / "web_artifact_validator" / "site"
     site.mkdir(parents=True, exist_ok=True)
@@ -150,8 +140,6 @@ def _case_web_artifact_validator(workspace: Path) -> MainAgentFoundationCaseResu
     )
 
 
-# LLM: _case_activity_timeout_recovery validates idle-based timeout and recovery refs.
-# 函数用途: 证明长任务最近有活动不会被总耗时误杀，真正空闲时会要求写恢复包。
 def _case_activity_timeout_recovery(workspace: Path) -> MainAgentFoundationCaseResult:
     active = decide_activity_timeout(
         ActivityTimeoutPolicy(idle_timeout_seconds=120, wall_timeout_seconds=300),
@@ -193,8 +181,6 @@ def _case_activity_timeout_recovery(workspace: Path) -> MainAgentFoundationCaseR
     )
 
 
-# LLM: _case_large_output_artifact_refs checks refs/hash/size behavior without embedding output bodies.
-# 函数用途: 写入模拟大输出并生成 metadata，验证测试报告只带 artifact 引用。
 def _case_large_output_artifact_refs(workspace: Path) -> MainAgentFoundationCaseResult:
     artifact = workspace / "large_output_artifact_refs" / "large-tool-output.txt"
     artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -220,8 +206,6 @@ def _case_large_output_artifact_refs(workspace: Path) -> MainAgentFoundationCase
     )
 
 
-# LLM: _case_deterministic_e2e_matrix nests the lower-level E2E matrix report as evidence.
-# 函数用途: 复用真实 E2E 矩阵的本地确定性用例，并把完整报告写成证据文件。
 def _case_deterministic_e2e_matrix(workspace: Path) -> MainAgentFoundationCaseResult:
     report = run_e2e_matrix(E2ERunnerRequest(workspace=workspace / "deterministic_e2e_matrix"))
     evidence = workspace / "deterministic_e2e_matrix" / "report.json"
@@ -239,8 +223,6 @@ def _case_deterministic_e2e_matrix(workspace: Path) -> MainAgentFoundationCaseRe
     )
 
 
-# LLM: _real_model_placeholder prevents accidental green reports for tests that require model calls.
-# 函数用途: 真实模型用例没有外部 runner 时标记 SKIPPED，避免把未测试当成已通过。
 def _real_model_placeholder(
     case_id: str,
     title: str,
@@ -255,8 +237,6 @@ def _real_model_placeholder(
     return MainAgentFoundationCaseResult(case_id=case_id, title=title, status=status, summary=note)
 
 
-# LLM: _summary counts statuses for quick progress and CI display.
-# 函数用途: 汇总 PASSED/FAILED/SKIPPED 数量，并保留 total。
 def _summary(results: list[MainAgentFoundationCaseResult]) -> dict[str, int]:
     return {
         "total": len(results),

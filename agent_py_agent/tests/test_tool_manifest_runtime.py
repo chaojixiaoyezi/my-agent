@@ -6,8 +6,6 @@ from pathlib import Path
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 
 
-# LLM: list_tools gives the model a machine-readable ToolManifest at runtime.
-# 函数用途: 验证模型主动查询工具时能看到通用执行和写入工具，不再靠固定构建器。
 def test_list_tools_returns_runtime_tool_manifest(tmp_path: Path) -> None:
     registry = ToolRegistry(
         ToolRegistryParams(
@@ -37,4 +35,4 @@ def test_list_tools_returns_runtime_tool_manifest(tmp_path: Path) -> None:
     assert list_tools["visible_in_context"] is True
     assert list_tools["executable_in_context"] is True
     failure_contracts = {item["code"]: item for item in payload["failure_contracts"]}
-    assert failure_contracts["TOOL_TIMEOUT"]["recommended_action"] == "retry_with_smaller_scope_or_longer_timeout"
+    assert failure_contracts["TOOL_TIMEOUT"]["recommended_action"] == "retry"

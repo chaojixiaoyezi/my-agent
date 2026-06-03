@@ -1,5 +1,3 @@
-# LLM: Identity helpers match structural agent IDs and generated display names.
-# 模块用途: 为协作请求提供代理身份别名和结构化改派目标解析，不解析任务自然语言。
 
 from __future__ import annotations
 

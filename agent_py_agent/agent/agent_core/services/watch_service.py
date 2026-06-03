@@ -1,5 +1,3 @@
-# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
-# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
 
 
 from __future__ import annotations
@@ -11,8 +9,14 @@ from typing import TYPE_CHECKING
 
 from ...capabilities import CapabilityRouter
 from ...capability_config import CapabilityConfig
-from ..dispatch_no_progress import DispatchNoProgressTracker, dispatch_made_progress
-from ..dispatch_params import DispatchParams, WatchParams, dispatch_params_from_watch
+from ..orchestration.dispatch.lock import _DispatchWatchLock
+from ..orchestration.dispatch.no_progress import DispatchNoProgressTracker, dispatch_made_progress
+from ..orchestration.dispatch.params import (
+    DispatchParams,
+    DispatchRuntimePolicy,
+    WatchParams,
+    dispatch_params_from_watch,
+)
 from .watch_config_reload import (
     WatchRuntimeConfigRequest,
     initial_watch_config_snapshot,
@@ -32,8 +36,6 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-# LLM: RunSingleWatchCycleParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存run单个监控cycle参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class RunSingleWatchCycleParams:
 
@@ -56,8 +58,6 @@ class RunSingleWatchCycleParams:
 WatchSubagentsParams = WatchParams
 
 
-# LLM: WatchLoopParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存监控循环参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class WatchLoopParams:
     params: WatchParams
@@ -70,8 +70,6 @@ class WatchLoopParams:
     max_consecutive: int
 
 
-# LLM: WatchCycleBuildParams bundles one cycle's dynamic config and progress state.
-# 类用途: 构建 RunSingleWatchCycleParams 时集中携带 loop、热加载配置和上轮是否有变化。
 @dataclass(frozen=True)
 class WatchCycleBuildParams:
     loop: WatchLoopParams
@@ -83,8 +81,6 @@ class WatchCycleBuildParams:
     router: CapabilityRouter
 
 
-# LLM: watch_subagents 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 巡检子代理状态；只有 params.advance=True 时才推进调度、runner 或验收流程。
 def watch_subagents(
     agent: SimpleAgent,
     router: CapabilityRouter,
@@ -98,16 +94,13 @@ def watch_subagents(
         raise ValueError("interval 不能小于 0。")
 
     from ...subagent import DispatchWatchReport
-    from ..dispatch_lock import _DispatchWatchLock
 
     cfg = capability_config or CapabilityConfig()
     records = []
     lock_path = agent.subagents.workspace / "subagent_dispatch_watch.lock"
     stop_path = Path(params.stop_file) if params.stop_file else None
 
-    active_interval = getattr(agent.config, "dispatch_active_interval", 5)
-    idle_interval = getattr(agent.config, "dispatch_idle_interval", 30)
-    max_consecutive = getattr(agent.config, "dispatch_max_consecutive_rounds", 20)
+    policy = DispatchRuntimePolicy.from_config(getattr(agent, "config", None))
 
     agent._reset_dispatch_rounds()
 
@@ -121,19 +114,17 @@ def watch_subagents(
                 router=router,
                 lock_path=lock_path,
                 stop_path=stop_path,
-                active_interval=active_interval,
-                idle_interval=idle_interval,
-                max_consecutive=max_consecutive,
+                active_interval=policy.active_interval,
+                idle_interval=policy.idle_interval,
+                max_consecutive=policy.max_consecutive_rounds,
             ),
         )
         write_watch_stopped(agent, cycle, lock_path, lock.token)
 
-    report = agent.subagents.build_dispatch_watch_report(records, dry_run=not params.apply)
+    report = agent.subagents.build_dispatch_watch_report(records, dry_run=params.preview_only)
     return agent.subagents.write_dispatch_watch_report(report)
 
 
-# LLM: _run_watch_cycles 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 执行 watch 周期；默认只观察状态，显式 advance 才调 dispatch。
 def _run_watch_cycles(
     agent,
     records: list,
@@ -171,8 +162,6 @@ def _run_watch_cycles(
     return cycle
 
 
-# LLM: _next_idle_record_state coalesces repeated idle ticks while resetting after real progress.
-# 函数用途: 让持续空闲的 gateway 只留一条 idle 记录，出现真实进展后允许下一次 idle 再留证据。
 def _next_idle_record_state(state: WatchLoopState, result: WatchCycleResult) -> bool:
     if result.had_progress:
         return False
@@ -181,8 +170,6 @@ def _next_idle_record_state(state: WatchLoopState, result: WatchCycleResult) -> 
     return state.idle_record_written or result.store_record
 
 
-# LLM: _watch_cycle_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 把 watch 配置转换为单轮参数，保留 observe/advance 边界。
 def _watch_cycle_params(request: WatchCycleBuildParams) -> RunSingleWatchCycleParams:
     loop = request.loop
     params = request.loop.params
@@ -198,8 +185,6 @@ def _watch_cycle_params(request: WatchCycleBuildParams) -> RunSingleWatchCyclePa
     )
 
 
-# LLM: _execute_watch_dispatch 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 推进execute监控调度的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _execute_watch_dispatch(agent, params):
     try:
         dispatch_report = agent.dispatch_subagents(
@@ -225,8 +210,6 @@ def _execute_watch_dispatch(agent, params):
     return ok, message, record_count, dispatch_summary, evidence_paths, dispatch_report
 
 
-# LLM: _watch_scoped_dispatch_params separates durable watch advancement from model-turn dispatch.
-# 函数用途: watch --advance 是显式后台推进器；未给 run_ids 时，用当前 workspace 的 run_id 作为明确范围，
 # 避免触发“模型顶层 dispatch 不得猜历史任务”的保护。
 def _watch_scoped_dispatch_params(agent: SimpleAgent, dispatch_params: DispatchParams) -> DispatchParams:
     updates: dict[str, object] = {}
@@ -245,21 +228,36 @@ def _watch_scoped_dispatch_params(agent: SimpleAgent, dispatch_params: DispatchP
     return replace(dispatch_params, **updates)
 
 
-# LLM: _run_single_watch_cycle 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 执行单个 watch 周期；无任务时 idle，有任务时默认 inspect，advance 才 dispatch。
 def _run_single_watch_cycle(
     agent: SimpleAgent,
     params: RunSingleWatchCycleParams,
 ) -> WatchCycleResult:
-    from ..parameters import _sleep_with_stop
-
     started_at = time_module.time()
     write_watch_heartbeat(agent, params, status="running", message="dispatch cycle started")
 
-    if not _watch_has_dispatch_inputs(agent):
+    input_state = _watch_dispatch_input_state(agent)
+    if input_state.load_error is not None:
+        return _run_watch_input_load_error_cycle(
+            agent,
+            params,
+            started_at=started_at,
+            load_error=input_state.load_error,
+        )
+    if not input_state.has_inputs:
         return _run_idle_watch_cycle(agent, params, started_at=started_at)
     if not params.advance:
         return _run_readonly_watch_cycle(agent, params, started_at=started_at)
+
+    return _run_advancing_watch_cycle(agent, params, started_at=started_at)
+
+
+def _run_advancing_watch_cycle(
+    agent: SimpleAgent,
+    params: RunSingleWatchCycleParams,
+    *,
+    started_at: float,
+) -> WatchCycleResult:
+    from ..parameters import _sleep_with_stop
 
     ok, message, record_count, dispatch_summary, evidence_paths, dispatch_report = _execute_watch_dispatch(
         agent, params
@@ -295,28 +293,23 @@ def _run_single_watch_cycle(
 from .watch_cycle_observe import (
     _run_idle_watch_cycle,
     _run_readonly_watch_cycle,
-    _watch_has_dispatch_inputs,
+    _run_watch_input_load_error_cycle,
+    _watch_dispatch_input_state,
 )
 
 
-# LLM: _watch_dispatch_had_progress shares dispatch_loop's progress contract with gateway watch.
-# 函数用途: 用统一 no-progress 规则判断本轮是否应按活跃间隔继续。
 def _watch_dispatch_had_progress(params: RunSingleWatchCycleParams, dispatch_report) -> bool:
     if dispatch_report is None:
         return False
     return dispatch_made_progress(dispatch_report)
 
 
-# LLM: _watch_repeated_no_progress suppresses repeated audit-only watch records.
-# 函数用途: 连续看到相同 due-check/inspect 轮次时，只保留首轮证据，后续靠 heartbeat 表示仍存活。
 def _watch_repeated_no_progress(params: RunSingleWatchCycleParams, dispatch_report) -> bool:
     if dispatch_report is None or params.no_progress_tracker is None:
         return False
     return params.no_progress_tracker.should_stop(dispatch_report)
 
 
-# LLM: _update_dispatch_rounds treats real progress as a reset and audit-only rounds as consecutive idle work.
-# 函数用途: 维护 max_consecutive 的计数语义，避免真实推进被误算为空转。
 def _update_dispatch_rounds(agent, had_progress: bool) -> None:
     if had_progress:
         agent._reset_dispatch_rounds()

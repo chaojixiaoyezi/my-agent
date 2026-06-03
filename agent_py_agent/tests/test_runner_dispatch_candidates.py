@@ -1,4 +1,4 @@
-"""runner_dispatch.py 单元测试。
+"""agent_core.runner.dispatch 候选筛选单元测试。
 
 测试 runner 任务分配、并发控制、超时处理等核心功能。
 """
@@ -10,17 +10,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_py_agent.agent.agent_core.runner_candidate_policy import RunnerCandidatePolicy
+from agent_py_agent.agent.agent_core.runner.candidate_policy import RunnerCandidatePolicy
 
 
 class TestIsDispatchRunnerCandidate:
     """测试 _is_dispatch_runner_candidate() 函数。"""
 
-    # LLM: active RUNNING attempts must not be selected again by ordinary dispatch.
-    # 函数用途: 防止同一个 run 在前一次模型回合未结束时被 dispatch 再次启动，造成 stale result。
     def test_running_task_with_active_attempt_is_not_runner_candidate(self):
         """RUNNING 且已有 active attempt 时，不能被普通 dispatch 重入执行。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         mock_task = MagicMock()
         mock_task.status = "RUNNING"
@@ -34,7 +32,7 @@ class TestIsDispatchRunnerCandidate:
 
     def test_done_status_not_candidate(self):
         """已完成任务不是候选。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         mock_task = MagicMock()
         mock_task.status = "DONE"
@@ -47,7 +45,7 @@ class TestIsDispatchRunnerCandidate:
 
     def test_channel_broken_not_candidate(self):
         """通道损坏的任务不是候选。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         mock_task = MagicMock()
         mock_task.status = "RUNNING"
@@ -60,7 +58,7 @@ class TestIsDispatchRunnerCandidate:
 
     def test_open_capability_request_not_candidate(self):
         """有待处理的 capability_requests 不是候选。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         mock_request = MagicMock()
         mock_request.status = "OPEN"
@@ -76,7 +74,7 @@ class TestIsDispatchRunnerCandidate:
 
     def test_running_status_without_active_attempt_is_not_candidate(self):
         """RUNNING 即便没有 active attempt，也不能被普通 dispatch 重入执行。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         mock_task = MagicMock()
         mock_task.status = "RUNNING"
@@ -89,7 +87,7 @@ class TestIsDispatchRunnerCandidate:
 
     def test_planning_status_is_candidate(self):
         """PLANNING 状态是候选。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         mock_task = MagicMock()
         mock_task.status = "PLANNING"
@@ -102,7 +100,7 @@ class TestIsDispatchRunnerCandidate:
 
     def test_failed_with_retryable_reason(self):
         """可重试失败类型的 FAILED 任务是候选。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         mock_task = MagicMock()
         mock_task.status = "FAILED"
@@ -117,7 +115,7 @@ class TestIsDispatchRunnerCandidate:
 
     def test_non_retryable_failure_not_candidate(self):
         """不可重试失败类型的任务不是候选。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         mock_task = MagicMock()
         mock_task.status = "FAILED"
@@ -132,10 +130,8 @@ class TestIsDispatchRunnerCandidate:
         # capability_request 在 capability_grants 为空时不可重试
         assert _is_dispatch_runner_candidate(mock_task, policy=RunnerCandidatePolicy(runner_max_attempts=2)) is False
 
-    # LLM: Provider timeouts are transient model-service failures and must enter bounded runner retry.
-    # 函数用途: 确认真实模型请求超时后的 BLOCKED runner 会被下一轮 dispatch 选中重试，而不是只做 classify_blocker。
     def test_provider_timeout_blocked_task_is_retry_candidate(self):
-        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 
         task = SimpleNamespace(
             status="BLOCKED",
@@ -171,7 +167,7 @@ class TestDispatchRunnerCandidates:
 
     def test_zero_max_runners_returns_empty(self):
         """max_runners 为 0 返回空列表。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _dispatch_runner_candidates
+        from agent_py_agent.agent.agent_core.runner.dispatch import _dispatch_runner_candidates
 
         mock_task = MagicMock()
         result = _dispatch_runner_candidates([mock_task], max_runners=0)
@@ -179,7 +175,7 @@ class TestDispatchRunnerCandidates:
 
     def test_returns_up_to_max_runners(self):
         """返回最多 max_runners 个候选。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _dispatch_runner_candidates
+        from agent_py_agent.agent.agent_core.runner.dispatch import _dispatch_runner_candidates
 
         mock_task1 = MagicMock()
         mock_task1.status = "PLANNING"
@@ -200,7 +196,7 @@ class TestDispatchRunnerCandidates:
 
     def test_runner_limit_preserves_candidate_order_without_hidden_role_phase(self):
         """runner 不再按角色阶段重排；父代理要顺序时显式控制。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _dispatch_runner_candidates
+        from agent_py_agent.agent.agent_core.runner.dispatch import _dispatch_runner_candidates
 
         tasks = [
             self._runner_task("accept", "bug_finder", created_at=1.0),
@@ -219,7 +215,7 @@ class TestLimitItems:
 
     def test_zero_limit_returns_all(self):
         """limit 为 0 返回全部。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _limit_items
+        from agent_py_agent.agent.agent_core.runner.dispatch import _limit_items
 
         items = [1, 2, 3, 4, 5]
         result = _limit_items(items, 0)
@@ -227,7 +223,7 @@ class TestLimitItems:
 
     def test_positive_limit_truncates(self):
         """正数 limit 截断列表。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _limit_items
+        from agent_py_agent.agent.agent_core.runner.dispatch import _limit_items
 
         items = [1, 2, 3, 4, 5]
         result = _limit_items(items, 3)
@@ -235,7 +231,7 @@ class TestLimitItems:
 
     def test_returns_copy(self):
         """返回列表副本，不修改原列表。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _limit_items
+        from agent_py_agent.agent.agent_core.runner.dispatch import _limit_items
 
         items = [1, 2, 3]
         result = _limit_items(items, 2)
@@ -248,7 +244,7 @@ class TestRetryableRunnerFailureTypes:
 
     def test_contains_expected_types(self):
         """验证包含预期的可重试失败类型。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import RETRYABLE_RUNNER_FAILURE_TYPES
+        from agent_py_agent.agent.agent_core.runner.dispatch import RETRYABLE_RUNNER_FAILURE_TYPES
 
         assert "runner_error" in RETRYABLE_RUNNER_FAILURE_TYPES
         assert "structured_output_parse_error" in RETRYABLE_RUNNER_FAILURE_TYPES

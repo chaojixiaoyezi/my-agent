@@ -226,8 +226,6 @@ def test_record_runner_result_keeps_tool_created_open_request_blocked(capability
     assert any("route_capability_request" in item for item in capability_task.blockers)
 
 
-# LLM: real model output can be cut after opening SUBAGENT_RESULT; tool-created requests still drive the state.
-# 函数用途: 叶子代理已用 capability_request 工具写出 OPEN 请求时，即使结构化结果缺闭合标记，也应保持能力申请阻塞态。
 def test_parse_error_with_tool_created_open_request_stays_capability_blocked(capability_manager, capability_task):
     capability_task.capability_requests.append(
         CapabilityRequest(

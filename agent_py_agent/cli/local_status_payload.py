@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 from __future__ import annotations
 
@@ -11,8 +9,6 @@ from typing import Any
 from .shared_progress import shared_progress_for_board
 
 
-# LLM: GatewayStatusRequest 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class GatewayStatusRequest:
     alive: bool
@@ -22,8 +18,6 @@ class GatewayStatusRequest:
     now: float
 
 
-# LLM: resolve_gateway_status 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def resolve_gateway_status(request: GatewayStatusRequest) -> tuple[str, float]:
     heartbeat_at = float(request.heartbeat.get("updated_at", 0) or 0)
     heartbeat_age = request.now - heartbeat_at if heartbeat_at else 0
@@ -34,8 +28,6 @@ def resolve_gateway_status(request: GatewayStatusRequest) -> tuple[str, float]:
     return gateway_status, heartbeat_age
 
 
-# LLM: StatusPayloadContext 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
-# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass
 class StatusPayloadContext:
     agent: Any
@@ -49,22 +41,15 @@ class StatusPayloadContext:
     heartbeat_age: float
     active_work_summary: Any
     request_counts: dict
+    gateway_state_load_error: dict | None = None
+    gateway_heartbeat_load_error: dict | None = None
 
 
-# LLM: build_status_payload 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def build_status_payload(ctx: StatusPayloadContext) -> dict:
     return {
         "agent_name": ctx.agent.config.agent_name,
         "workspace_root": str(ctx.agent.root),
-        "gateway": {
-            "status": ctx.gateway_status,
-            "pid": ctx.pid,
-            "alive": ctx.alive,
-            "heartbeat_age_seconds": round(ctx.heartbeat_age, 1) if ctx.heartbeat_age else 0,
-            "request_counts": ctx.request_counts,
-            "workspace": str(ctx.paths.root),
-        },
+        "gateway": _gateway_payload(ctx),
         "local_store": ctx.local_stats,
         "subagents": _subagents_payload(ctx),
         "active_work": _active_work_payload(ctx.active_work_summary),
@@ -72,8 +57,22 @@ def build_status_payload(ctx: StatusPayloadContext) -> dict:
     }
 
 
-# LLM: _active_work_payload 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
+def _gateway_payload(ctx: StatusPayloadContext) -> dict:
+    payload = {
+        "status": ctx.gateway_status,
+        "pid": ctx.pid,
+        "alive": ctx.alive,
+        "heartbeat_age_seconds": round(ctx.heartbeat_age, 1) if ctx.heartbeat_age else 0,
+        "request_counts": ctx.request_counts,
+        "workspace": str(ctx.paths.root),
+    }
+    if ctx.gateway_state_load_error:
+        payload["state_load_error"] = ctx.gateway_state_load_error
+    if ctx.gateway_heartbeat_load_error:
+        payload["heartbeat_load_error"] = ctx.gateway_heartbeat_load_error
+    return payload
+
+
 def _active_work_payload(active_work_summary: Any) -> dict | None:
     if not active_work_summary:
         return None
@@ -85,8 +84,6 @@ def _active_work_payload(active_work_summary: Any) -> dict | None:
     }
 
 
-# LLM: _subagents_payload 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagents_payload(ctx: StatusPayloadContext) -> dict:
     return {
         "summary": ctx.board.summary,

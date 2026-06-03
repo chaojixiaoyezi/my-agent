@@ -1,5 +1,3 @@
-# LLM: Code-size governance helper; keep report identities, thresholds, and baseline behavior stable.
-# 模块用途: 支撑代码规模守卫，统计文件/函数/类大小并生成可审查的报告。
 
 from __future__ import annotations
 
@@ -11,8 +9,6 @@ from pathlib import Path
 from typing import Any
 
 
-# LLM: ReportRenderContext 是 code-size 报告渲染参数契约。
-# 类用途: 保存 mode、blocked 和 baseline 状态，供 Markdown 报告头部读取。
 @dataclass(frozen=True)
 class ReportRenderContext:
     mode: str
@@ -21,8 +17,6 @@ class ReportRenderContext:
     baseline_loaded: bool
 
 
-# LLM: _format_table 负责 finding 表格行；列顺序是报告格式契约。
-# 函数用途: 把 findings 渲染成 Markdown 表格，并按 limit 截断长列表。
 def _format_table(findings: list[Any], limit: int = 0) -> list[str]:
     if not findings:
         return ["- none"]
@@ -41,14 +35,10 @@ def _format_table(findings: list[Any], limit: int = 0) -> list[str]:
     return lines
 
 
-# LLM: _section 组装报告章节；标题和表格紧邻输出。
-# 函数用途: 返回一个 Markdown 小节，包括空行、标题和 findings 表格。
 def _section(title: str, findings: list[Any], limit: int = 0) -> list[str]:
     return ["", title, *_format_table(findings, limit)]
 
 
-# LLM: _findings_by_kind 固定报告分类；新增 finding kind 要同步这里。
-# 函数用途: 按 kind 把 findings 分桶，供后续章节按类别读取。
 def _findings_by_kind(findings: list[Any]) -> dict[str, list[Any]]:
     kinds = {
         "file",
@@ -65,8 +55,6 @@ def _findings_by_kind(findings: list[Any]) -> dict[str, list[Any]]:
     return {kind: [item for item in findings if item.kind == kind] for kind in kinds}
 
 
-# LLM: _summary_lines 生成报告摘要；字段名要和 CI 阅读口径一致。
-# 函数用途: 统计 hard、high-risk、soft 数量，并输出 mode、baseline 和 blocked 状态。
 def _summary_lines(findings: list[Any], context: ReportRenderContext) -> list[str]:
     hard = [item for item in findings if item.severity == "hard"]
     high_risk = [item for item in findings if item.severity == "high-risk"]
@@ -83,8 +71,6 @@ def _summary_lines(findings: list[Any], context: ReportRenderContext) -> list[st
     ]
 
 
-# LLM: _finding_sections 控制 CODE_SIZE_REPORT 主体顺序。
-# 函数用途: 按文件、函数、类、参数、嵌套等类别拼接所有 findings 章节。
 def _finding_sections(findings: list[Any]) -> list[str]:
     by_kind = _findings_by_kind(findings)
     high_risk = [item for item in findings if item.severity == "high-risk"]
@@ -105,8 +91,6 @@ def _finding_sections(findings: list[Any]) -> list[str]:
     ]
 
 
-# LLM: _recommendations 写报告末尾治理建议；内容面向后续拆分工作。
-# 函数用途: 返回 code-size 报告里的下一步维护建议。
 def _recommendations() -> list[str]:
     return [
         "",
@@ -119,8 +103,6 @@ def _recommendations() -> list[str]:
     ]
 
 
-# LLM: write_report 是 Markdown 报告唯一写盘入口。
-# 函数用途: 汇总摘要、分类章节、建议和阻断状态，并写入 CODE_SIZE_REPORT.md。
 def write_report(report_path: Path, findings: list[Any], context: ReportRenderContext) -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     lines = [

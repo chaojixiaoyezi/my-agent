@@ -1,5 +1,3 @@
-# LLM: Channel runtime attaches incoming messages to durable threads.
-# 模块用途: 接收外部通道消息，写入 thread 后按需唤醒后台主代理。
 
 from __future__ import annotations
 

@@ -11,7 +11,7 @@ def test_main_agent_core_entrypoints_accepts_complete_structured_contract() -> N
             "entrypoints": {
                 "state_machine": "agent.contracts.state_machine",
                 "tool_executor": "agent.agent_core.tool_call_runtime",
-                "closeout_gate": "agent.agent_core.main_agent_delivery_closeout_gates",
+                "closeout_gate": "agent.agent_core.delivery_closeout.gates",
                 "runlog": "agent.contracts.run_trace_contract",
                 "tooltrace": "agent.contracts.run_trace_contract",
                 "approval_gate": "agent.contracts.approval_gate",

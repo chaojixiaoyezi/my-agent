@@ -1,5 +1,3 @@
-# LLM: Compaction gate tests verify state preservation checks across compaction boundaries.
-# 模块用途: 模拟 pre-compact 和 post-compact 状态，确保关键字段不丢、状态恢复完整。
 
 from __future__ import annotations
 

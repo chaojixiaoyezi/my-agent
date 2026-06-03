@@ -50,8 +50,6 @@ def test_document_quality_contract_is_advisory_not_blocking(tmp_path):
     assert "DOCUMENT_SECTION_MISSING" in {item.code for item in report.findings}
 
 
-# LLM: Generic HTML acceptance should focus on structural/resource facts, not task-specific link style rules.
-# 函数用途: 验证通用 HTML 验收不会因为 `href="#"` 这类页面实现细节直接判死，只保留通用结构和资源检查。
 def test_html_acceptance_does_not_fail_placeholder_links_by_default(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
@@ -67,8 +65,6 @@ def test_html_acceptance_does_not_fail_placeholder_links_by_default(tmp_path):
     assert report.findings == []
 
 
-# LLM: HTML validator should distinguish image refs from unrelated external resources like fonts.
-# 函数用途: 验证 HTML 图片坏链风险会被标记，但 Google Fonts 这类非图片链接不会误判为图片坏链。
 def test_html_acceptance_flags_external_images_without_flagging_fonts(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
@@ -89,8 +85,6 @@ def test_html_acceptance_flags_external_images_without_flagging_fonts(tmp_path):
     assert "HTML_EXTERNAL_STYLESHEET" not in codes
 
 
-# LLM: Contracted single-file HTML should reject remote runtime resources, not only broken images.
-# 函数用途: 验证单文件网页合同时，外部字体/CSS/脚本资源会被结构化 finding 拦住。
 def test_html_acceptance_contract_rejects_external_resources_for_single_file(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
@@ -115,8 +109,6 @@ def test_html_acceptance_contract_rejects_external_resources_for_single_file(tmp
     assert any(item.code == "HTML_EXTERNAL_RESOURCE_REF" for item in report.findings)
 
 
-# LLM: Contracted complete HTML should catch truncated files before delivery closeout.
-# 函数用途: 验证要求完整 HTML 文档时，缺少 body/html 关闭标签的半截文件不能通过。
 def test_html_acceptance_contract_rejects_incomplete_html_document(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
@@ -137,8 +129,6 @@ def test_html_acceptance_contract_rejects_incomplete_html_document(tmp_path):
     assert any(item.code == "HTML_INCOMPLETE_DOCUMENT" for item in report.findings)
 
 
-# LLM: Acceptance reports must stay JSON friendly even when HTML passes default generic checks.
-# 函数用途: 确认验收报告仍可结构化输出，后续 QA/修复链路不需要解析自然语言。
 def test_html_acceptance_report_to_dict(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
@@ -154,8 +144,6 @@ def test_html_acceptance_report_to_dict(tmp_path):
     assert payload["findings"] == []
 
 
-# LLM: Generic artifact acceptance should route common formats through one contract.
-# 函数用途: 验证 JSON/CSV/XLSX/PDF 等常见产物不再各走各的验收入口，后续 QA 可以统一消费报告。
 def test_validate_artifact_routes_common_formats(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
@@ -186,8 +174,6 @@ def test_validate_artifact_routes_common_formats(tmp_path):
     assert {report.artifact_kind for report in reports} == {"json", "csv", "xlsx", "pdf"}
 
 
-# LLM: CSV data-row strictness should be a structured contract threshold, not a one-size hard stop.
-# 函数用途: 验证最终 CSV 默认仍要求数据行，但阶段性表头文件可用 min_data_rows=0 明确放行。
 def test_validate_artifact_csv_data_row_threshold_is_contract_driven(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
@@ -207,8 +193,6 @@ def test_validate_artifact_csv_data_row_threshold_is_contract_driven(tmp_path):
     assert staged.ok is True
 
 
-# LLM: Artifact acceptance reports should expose a structured ArtifactRef, not only a path string.
-# 函数用途: 验证产物验收报告包含 artifact_id、path、kind、hash、size，后续恢复和 QA 不用解析自然语言。
 def test_validate_artifact_report_contains_structured_artifact_ref(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
@@ -227,8 +211,6 @@ def test_validate_artifact_report_contains_structured_artifact_ref(tmp_path):
     assert ref["reserved"]["size_bytes"] == path.stat().st_size
 
 
-# LLM: Generic validators should turn broken files into repairable machine findings.
-# 函数用途: 验证坏 JSON 会产生稳定错误码，而不是只在 CLI 输出一段自然语言。
 def test_validate_artifact_reports_invalid_json(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
@@ -245,8 +227,6 @@ def test_validate_artifact_reports_invalid_json(tmp_path):
     assert report.findings[0].code == "JSON_INVALID"
 
 
-# LLM: Generic binary acceptance should reject known extensions with impossible signatures.
-# 函数用途: 验证未知格式的 fallback 也会检查常见二进制签名，避免坏图片/压缩包只因非空而通过。
 def test_validate_generic_artifact_checks_known_binary_signatures(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
@@ -267,8 +247,6 @@ def test_validate_generic_artifact_checks_known_binary_signatures(tmp_path):
     assert zip_report.findings[0].code == "ARTIFACT_INVALID_SIGNATURE"
 
 
-# LLM: Web project directories must be validated by their declared static-site contract, not as generic folders.
-# 函数用途: 验证 web_project 目录缺少 validation_contract.required_files 时不能因为目录存在就通过。
 def test_validate_artifact_static_site_contract_rejects_missing_required_files(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,

@@ -6,16 +6,15 @@ import json
 
 import pytest
 
+from agent_py_agent.agent.common.value_parsing import dedupe_strings, text_or_sequence_strings
 from agent_py_agent.agent.memory_archive.resume_brief import (
     RecoveryBriefContext,
     _append,
     _context_block,
-    _dedupe,
     _latest_assistant_actions,
     _latest_user_intents,
     _likely_task_statuses,
     _related_ids,
-    _string_list,
     _summary_line,
     build_resume_brief,
 )
@@ -430,42 +429,42 @@ class TestStringList:
 
     def test_list_input(self):
         """验证列表输入"""
-        result = _string_list(["a", "b", "c"])
+        result = text_or_sequence_strings(["a", "b", "c"])
         assert result == ["a", "b", "c"]
 
     def test_string_input(self):
         """验证字符串输入"""
-        result = _string_list("single")
+        result = text_or_sequence_strings("single")
         assert result == ["single"]
 
     def test_empty_string(self):
         """验证空字符串"""
-        result = _string_list("")
+        result = text_or_sequence_strings("")
         assert result == []
 
     def test_strips_whitespace(self):
         """验证去除空白"""
-        result = _string_list(["  a  ", "  b"])
+        result = text_or_sequence_strings(["  a  ", "  b"])
         assert "a" in result
         assert "b" in result
 
 
 class TestDedupe:
-    """测试 _dedupe 字符串去重"""
+    """测试通用字符串去重"""
 
     def test_removes_duplicates(self):
         """验证移除重复"""
-        result = _dedupe(["a", "b", "a", "c", "b"])
+        result = dedupe_strings(["a", "b", "a", "c", "b"])
         assert result == ["a", "b", "c"]
 
     def test_preserves_order(self):
         """验证保留顺序"""
-        result = _dedupe(["first", "second", "third"])
+        result = dedupe_strings(["first", "second", "third"])
         assert result == ["first", "second", "third"]
 
     def test_ignores_empty_strings(self):
         """验证忽略空字符串"""
-        result = _dedupe(["a", "", "b", ""])
+        result = dedupe_strings(["a", "", "b", ""])
         assert result == ["a", "b"]
 
 

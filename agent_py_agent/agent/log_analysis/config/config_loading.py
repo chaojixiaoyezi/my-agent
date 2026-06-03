@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 """本模块负责从 YAML 读取配置并逐字段校验、类型转换和范围限制，坏值写 warning 后回退安全默认值。
 
@@ -34,8 +32,6 @@ from .config_model import (
 )
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 load_log_analysis_config 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 读取 load log analysis config 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
 def load_log_analysis_config(
     config_path: str | Path | None = None,
     *,
@@ -47,7 +43,6 @@ def load_log_analysis_config(
     普通用户可能完全没启用日志分析，所以配置文件不存在时默认返回安全关闭状态。
     如果文件存在，函数会读取 YAML，再调用 normalize_log_analysis_config 校验每个字段。
 
-    参数说明:
     config_path: 可选配置文件路径；不传时使用 default_log_analysis_config_path()。
     missing_ok: True 表示配置文件不存在时返回默认配置；False 表示不存在就抛 FileNotFoundError。
 
@@ -68,8 +63,6 @@ def load_log_analysis_config(
     return config
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 _coerce_bool_and_choice_fields 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 coerce bool and choice fields 涉及的字段，让后续匹配和存储使用同一形态。
 def _coerce_bool_and_choice_fields(
     source: Mapping[str, Any] | object,
     defaults: LogAnalysisConfig,
@@ -99,8 +92,6 @@ def _coerce_bool_and_choice_fields(
     }
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 _coerce_path_and_int_fields 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 coerce path and int fields 涉及的字段，让后续匹配和存储使用同一形态。
 def _coerce_path_and_int_fields(
     source: Mapping[str, Any] | object,
     defaults: LogAnalysisConfig,
@@ -121,8 +112,6 @@ def _coerce_path_and_int_fields(
     }
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 normalize_log_analysis_config 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 normalize log analysis config 涉及的字段，让后续匹配和存储使用同一形态。
 def normalize_log_analysis_config(
     values: Mapping[str, Any] | object | None = None,
 ) -> tuple[LogAnalysisConfig, list[LogAnalysisConfigWarning]]:
@@ -132,7 +121,6 @@ def normalize_log_analysis_config(
     YAML 读出来的值可能是字符串、数字、布尔值，也可能写错。这个函数统一检查：
     布尔值要像布尔值，整数要在范围内，枚举值要在允许集合里，路径不能是空字符串。
 
-    参数说明:
     values: 原始配置。可以是 Mapping，也可以是带同名属性的对象；None 表示空配置。
 
     返回说明:

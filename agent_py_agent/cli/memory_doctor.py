@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 from __future__ import annotations
 
@@ -31,8 +29,6 @@ from .common import make_agent
 RECENT_ARCHIVE_FILE_LIMIT = 5
 
 
-# LLM: cmd_memory_doctor 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_doctor(args) -> int:
 
     agent = make_agent(args)
@@ -56,15 +52,11 @@ def cmd_memory_doctor(args) -> int:
     return 0
 
 
-# LLM: _resolve_index_path 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _resolve_index_path(root: Path, raw_index: str | None, *, home_paths: object | None = None) -> Path:
 
     return resolve_route_index_target(root, raw_index, home_paths=home_paths).path
 
 
-# LLM: _build_routing_doctor 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _build_routing_doctor(root: Path, index_path: Path) -> dict[str, Any]:
 
     payload: dict[str, Any] = {
@@ -88,8 +80,6 @@ def _build_routing_doctor(root: Path, index_path: Path) -> dict[str, Any]:
     return payload
 
 
-# LLM: _build_archive_doctor 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
 
     hook_today_path = snapshot_path_for(root)
@@ -106,8 +96,6 @@ def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
     }
 
 
-# LLM: _archive_dir_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _archive_dir_payload(directory: Path, today_path: Path, *, config: object | None = None) -> dict[str, Any]:
 
     files = sorted(
@@ -127,14 +115,10 @@ def _archive_dir_payload(directory: Path, today_path: Path, *, config: object | 
     }
 
 
-# LLM: _recent_archive_file_limit preserves old helper calls while making doctor limits config-backed.
-# 函数用途: 从配置读取 memory doctor 最近文件数量上限；没有配置时回退 5。
 def _recent_archive_file_limit(config: object | None) -> int:
     return int(getattr(config, "memory_doctor_recent_archive_file_limit", 5) or 0)
 
 
-# LLM: _archive_file_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _archive_file_payload(path: Path) -> dict[str, Any]:
 
     stat = path.stat()
@@ -146,8 +130,6 @@ def _archive_file_payload(path: Path) -> dict[str, Any]:
     }
 
 
-# LLM: _memory_config_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _memory_config_payload(config: object) -> dict[str, Any]:
 
     fields = [
@@ -163,8 +145,6 @@ def _memory_config_payload(config: object) -> dict[str, Any]:
     return {field: getattr(config, field) for field in fields}
 
 
-# LLM: _normalize_warning_item 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _normalize_warning_item(item: Any) -> dict[str, Any]:
     if isinstance(item, dict):
         return dict(item)
@@ -175,15 +155,11 @@ def _normalize_warning_item(item: Any) -> dict[str, Any]:
     return {"message": str(item)}
 
 
-# LLM: _config_warnings 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _config_warnings(config: object) -> list[dict[str, Any]]:
     warnings = getattr(config, "memory_config_warnings", []) or []
     return [_normalize_warning_item(item) for item in warnings]
 
 
-# LLM: _index_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _index_payload(index_path: Path) -> dict[str, Any]:
 
     return {
@@ -193,8 +169,6 @@ def _index_payload(index_path: Path) -> dict[str, Any]:
     }
 
 
-# LLM: _route_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _route_payload(route: MemoryRoute) -> dict[str, Any]:
 
     return {
@@ -212,8 +186,6 @@ def _route_payload(route: MemoryRoute) -> dict[str, Any]:
     }
 
 
-# LLM: _print_memory_doctor_report 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_memory_doctor_report(payload: dict[str, Any], *, json_output: bool) -> None:
 
     if json_output:
@@ -257,8 +229,6 @@ def _print_memory_doctor_report(payload: dict[str, Any], *, json_output: bool) -
         )
 
 
-# LLM: _print_home_report keeps memory doctor text aligned with the JSON home payload.
-# 函数用途: 在 memory-doctor 文本输出中展示 home runtime 入口文件和关键目录状态。
 def _print_home_report(home: dict[str, Any]) -> None:
     print("Home")
     print(f"- root={home['root']}")

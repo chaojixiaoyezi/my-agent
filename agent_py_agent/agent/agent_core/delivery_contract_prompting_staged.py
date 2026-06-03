@@ -1,5 +1,3 @@
-# LLM: Staged JSON recovery prompting; keep checkpoint repair hints generic and contract-derived.
-# 模块用途: 渲染 staged JSON 缺行、坏 JSON、collection/evidence 合同修复提示。
 
 from __future__ import annotations
 
@@ -8,8 +6,6 @@ import json
 from .delivery_contract_prompting_recovery_bool import _json_bool
 
 
-# LLM: _staged_json_no_rows_lines renders the structured data handoff after an empty JSON checkpoint.
-# 函数用途: 当阶段 JSON 无行时，提示模型补非空 rows/sheets，再调用合同里的 builder_tool 生成产物。
 def _staged_json_no_rows_lines(
     finding: dict[str, object], artifact_items: list[dict[str, object]]
 ) -> list[str]:
@@ -33,8 +29,6 @@ def _staged_json_no_rows_lines(
     return lines
 
 
-# LLM: _staged_json_invalid_lines renders checkpoint-repair guidance from structured refs only.
-# 函数用途: 当阶段 JSON 语法坏掉或被截断时，提示模型先修复结构化 JSON，再继续 builder/下一阶段产物。
 def _staged_json_invalid_lines(
     finding: dict[str, object], artifact_items: list[dict[str, object]]
 ) -> list[str]:
@@ -56,8 +50,6 @@ def _staged_json_invalid_lines(
     ]
 
 
-# LLM: _artifact_for_stage_ref finds the artifact contract that owns a staged checkpoint ref.
-# 函数用途: 用 staging_contract.checkpoint_refs/source_json_ref 匹配 artifact，不根据提示词或 stdout 推断。
 def _artifact_for_stage_ref(
     artifact_items: list[dict[str, object]], stage_ref: str
 ) -> dict[str, object]:
@@ -70,8 +62,6 @@ def _artifact_for_stage_ref(
     return {}
 
 
-# LLM: _staging_refs returns source/output aliases that can identify an artifact's staged contract.
-# 函数用途: 让恢复提示支持 JSON、Markdown、PDF、workbook 等通用 ref，不再只匹配 source_json_ref。
 def _staging_refs(staging: dict[str, object]) -> set[str]:
     return {
         str(staging.get(key) or "").strip()
@@ -121,8 +111,6 @@ def _staging_output_keys(staging: dict[str, object]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(key for key in keys if key))
 
 
-# LLM: _collection_contract_lines exposes generic coverage and evidence facts from the machine contract.
-# 函数用途: 从 collection_contract/evidence_contract 渲染最小组数、每组条数和证据要求，不从任务文案推断。
 def _collection_contract_lines(validation: dict[str, object]) -> list[str]:
     collection = validation.get("collection_contract")
     evidence = validation.get("evidence_contract")
@@ -135,8 +123,6 @@ def _collection_contract_lines(validation: dict[str, object]) -> list[str]:
     return lines
 
 
-# LLM: _collection_shape_lines 是 agent_py_agent/agent/agent_core/delivery_contract_prompting_recovery.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
-# 函数用途: 处理 collection shape lines 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _collection_shape_lines(collection: dict[str, object]) -> list[str]:
     lines = [f"  - {key}={value}" for key in ("groups_path", "items_path", "min_groups", "min_items_per_group") if (value := collection.get(key))]
     fields = collection.get("required_item_fields")
@@ -145,8 +131,6 @@ def _collection_shape_lines(collection: dict[str, object]) -> list[str]:
     return lines
 
 
-# LLM: _evidence_contract_lines 是 agent_py_agent/agent/agent_core/delivery_contract_prompting_recovery.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
-# 函数用途: 处理 evidence contract lines 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _evidence_contract_lines(evidence: dict[str, object]) -> list[str]:
     lines: list[str] = []
     if evidence.get("require_verified") is not None:
@@ -157,8 +141,6 @@ def _evidence_contract_lines(evidence: dict[str, object]) -> list[str]:
     return lines
 
 
-# LLM: _item_evidence_contract_lines 是 agent_py_agent/agent/agent_core/delivery_contract_prompting_recovery.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
-# 函数用途: 处理 item evidence contract lines 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _item_evidence_contract_lines(collection: dict[str, object], evidence: object) -> list[str]:
     evidence_fields = collection.get("required_item_evidence_fields")
     if not isinstance(evidence_fields, list) and isinstance(evidence, dict) and collection.get("require_item_evidence") is not False:
@@ -171,8 +153,6 @@ def _item_evidence_contract_lines(collection: dict[str, object], evidence: objec
     ]
 
 
-# LLM: _checkpoint_shape_hint lets each staged checkpoint describe its own generic JSON shape without hard-coding one task's schema.
-# 函数用途: 优先读取 staging_contract.checkpoint_shape_hints；缺失时回退到宽松通用 JSON 形状提示。
 def _checkpoint_shape_hint(stage_ref: str, staging: dict[str, object]) -> str:
     hints = staging.get("checkpoint_shape_hints")
     if isinstance(hints, dict):

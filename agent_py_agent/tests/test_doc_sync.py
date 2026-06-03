@@ -21,7 +21,7 @@ def test_doc_sync_requires_module_progress_and_structure_docs():
 
     problems = sync.evaluate_sync(
         ["agent_py_agent/agent/log_analysis/dispatch/work_orders.py"],
-        {"agent_py_agent/agent/log_analysis/dispatch/work_orders.py": ""},
+        {"agent_py_agent/agent/log_analysis/dispatch/work_orders.py": "+def changed():\n+    return True"},
     )
 
     assert any("docs/modules/log-analysis/02-progress.md" in item for item in problems)
@@ -89,3 +89,15 @@ def test_doc_sync_rejects_code_change_without_same_file_comment_update():
     )
 
     assert any("no same-file comment/doc update" in item for item in problems)
+
+
+def test_doc_sync_ignores_comment_only_cleanup():
+    sync = _load_doc_sync_module()
+
+    path = "agent_py_agent/agent/subagents/services/persistence/service.py"
+    problems = sync.evaluate_sync(
+        [path],
+        {path: "-# LLM: old generated comment\n-# 函数用途: duplicate wording"},
+    )
+
+    assert problems == []

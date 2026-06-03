@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 from __future__ import annotations
 
@@ -31,8 +29,6 @@ from .query_projection import (
 )
 
 
-# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _QuerySummaryInput 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 _QuerySummaryInput 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _QuerySummaryInput:
     rows: list[dict[str, Any]]
@@ -42,8 +38,6 @@ class _QuerySummaryInput:
     event_read_audit: dict[str, Any] | None
 
 
-# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _QueryResultInput 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 _QueryResultInput 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _QueryResultInput:
     query_id: str
@@ -58,11 +52,8 @@ class _QueryResultInput:
     preview_limit: int
 
 
-# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _WriteQueryEvidenceInput 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 _WriteQueryEvidenceInput 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _WriteQueryEvidenceInput:
-    # LLM: Query evidence writes share this small bundle with LocalEvidenceStore.
     query_id: str
     parameters: dict[str, Any]
     rows: list[dict[str, Any]]
@@ -71,8 +62,6 @@ class _WriteQueryEvidenceInput:
     summary: dict[str, Any]
 
 
-# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 SecurityQueryOptions 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 SecurityQueryOptions 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class SecurityQueryOptions:
     require_time_range: bool = True
@@ -80,8 +69,6 @@ class SecurityQueryOptions:
     max_limit: int | None = None
 
 
-# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 execute_security_query 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 推进 execute security query 对应的调度、执行或处理步骤，并返回可追踪的状态结果。
 def execute_security_query(
     store: LocalLogStore,
     criteria: QueryCriteria | dict[str, Any],
@@ -105,8 +92,6 @@ def execute_security_query(
     return _query_result(_QueryResultInput(preview_limit=query_options.preview_limit, **result_payload))
 
 
-# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _execute_query_payload 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 execute query payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _execute_query_payload(
     store: LocalLogStore,
     query: QueryCriteria,
@@ -150,8 +135,6 @@ def _execute_query_payload(
     return result_payload
 
 
-# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _save_query_record 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 写入或登记 save query record 相关记录，集中处理目标路径、格式化和状态更新。
 def _save_query_record(
     store: LocalLogStore,
     payload: dict[str, Any],
@@ -170,16 +153,12 @@ def _save_query_record(
     )
 
 
-# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _matching_rows 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 判断 matching rows 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _matching_rows(store: LocalLogStore, query: QueryCriteria) -> list[dict[str, Any]]:
     rows = [row for row in store.list_events() if query_matches(row, query)]
     rows.sort(key=lambda row: str(event_time_value(row) or ""))
     return rows
 
 
-# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _query_summary 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 query summary 的候选结果，并按参数完成筛选、排序或数量限制。
 def _query_summary(data: _QuerySummaryInput) -> dict[str, Any]:
     summary = summarize_rows(data.rows, data.parameters)
     summary["returned_row_count"] = data.returned_row_count
@@ -191,8 +170,6 @@ def _query_summary(data: _QuerySummaryInput) -> dict[str, Any]:
     return summary
 
 
-# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _write_query_evidence 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 写入或登记 write query evidence 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_query_evidence(
     store: LocalLogStore,
     data: _WriteQueryEvidenceInput,
@@ -209,8 +186,6 @@ def _write_query_evidence(
     )
 
 
-# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _query_result 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 query result 的候选结果，并按参数完成筛选、排序或数量限制。
 def _query_result(payload: _QueryResultInput) -> QueryResult:
     limited_rows = payload.limited_rows
     return QueryResult(
@@ -227,24 +202,18 @@ def _query_result(payload: _QueryResultInput) -> QueryResult:
     )
 
 
-# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _criteria 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 criteria 在当前模块中的核心转换或协调步骤，衔接 日志分析存储层读写本地事件、finding、case 和 evidence 投影。
 def _criteria(criteria: QueryCriteria | dict[str, Any]) -> QueryCriteria:
     if isinstance(criteria, QueryCriteria):
         return criteria
     return dict_to_model(QueryCriteria, criteria)
 
 
-# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _criteria_to_parameters 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 criteria to parameters 在当前模块中的核心转换或协调步骤，衔接 日志分析存储层读写本地事件、finding、case 和 evidence 投影。
 def _criteria_to_parameters(criteria: QueryCriteria, limit: int) -> dict[str, Any]:
     data = model_to_dict(criteria)
     data["limit"] = limit
     return data
 
 
-# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _query_id 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 query id 的候选结果，并按参数完成筛选、排序或数量限制。
 def _query_id(parameters: dict[str, Any]) -> str:
     stamp = utc_now().replace("-", "").replace(":", "").replace("Z", "")
     payload = {"parameters": parameters, "nonce": time.time_ns()}

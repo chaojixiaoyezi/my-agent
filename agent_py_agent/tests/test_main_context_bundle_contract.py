@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from agent_py_agent.__main__ import build_parser
+from agent_py_agent.agent.agent_core.runtime.context_bundle import build_runtime_main_context_bundle
+from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeContextRequest
 from agent_py_agent.agent.memory_archive import (
     CompressionSnapshot,
     RawMemoryEvent,
@@ -33,8 +36,6 @@ from agent_py_agent.agent.user_space.context_bundle_artifacts import (
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
 
-# LLM: Main context bundles must carry contracts, not only loose path summaries.
-# 函数用途: 验证主代理上下文包包含运行范围、工具清单、验收合同、自检、预算和 owner 预留字段。
 def test_main_context_bundle_contains_contract_surfaces_and_self_check(tmp_path: Path) -> None:
     root, result = _build_contract_bundle_result(tmp_path)
 
@@ -58,7 +59,7 @@ def test_main_context_bundle_contains_contract_surfaces_and_self_check(tmp_path:
     assert payload["tool_manifest"]["executable_tools"] == ["read_file", "write_file"]
     assert "WRITE_FORBIDDEN" in payload["tool_manifest"]["failure_taxonomy"]
     failure_contracts = {item["code"]: item for item in payload["tool_manifest"]["failure_contracts"]}
-    assert failure_contracts["WRITE_FORBIDDEN"]["recommended_action"] == "request_permission_or_choose_allowed_root"
+    assert failure_contracts["WRITE_FORBIDDEN"]["recommended_action"] == "request_permission"
     assert payload["tool_manifest"]["tool_specs"][0]["visible_in_context"] is True
     assert payload["artifact_refs"]["items"][0]["ref"].endswith("outputs/index.html")
     assert payload["acceptance_contract"]["items"] == ["有登录", "有购买"]
@@ -67,6 +68,39 @@ def test_main_context_bundle_contains_contract_surfaces_and_self_check(tmp_path:
     assert payload["self_check"]["ok"] is True
     assert payload["prompt_budget"]["prompt_section_chars"] <= payload["prompt_budget"]["max_prompt_section_chars"]
     assert Path(result.json_path).exists()
+
+
+def test_runtime_context_bundle_surfaces_tool_spec_load_error(tmp_path: Path) -> None:
+    class BrokenTools:
+        def specs(self, **_kwargs):
+            raise ValueError("tool registry broken")
+
+    agent = SimpleNamespace(
+        root=tmp_path,
+        home_paths=None,
+        config=SimpleNamespace(auto_save_memory=False),
+        workspace_roots=[tmp_path],
+        tools=BrokenTools(),
+    )
+    result = build_runtime_main_context_bundle(
+        agent,
+        RuntimeContextRequest(
+            user_prompt="检查工具清单错误报告",
+            inject=None,
+            resume_context=None,
+            save=False,
+        ),
+        memories=[],
+        runtime_injections=[],
+        routed_context=SimpleNamespace(required_read_paths=(), candidate_paths=()),
+        resume_context_injected=False,
+        task_local=False,
+    )
+
+    errors = result.bundle["tool_manifest"]["tool_load_errors"]
+    assert errors[0]["context"] == "main_context_bundle.tool_specs"
+    assert errors[0]["category"] == "data_parse"
+    assert "读取失败" in errors[0]["model_message"]
 
 
 def _build_contract_bundle_result(tmp_path: Path):
@@ -114,8 +148,6 @@ def _contract_task_attributes() -> dict[str, list[str]]:
     }
 
 
-# LLM: Compact apply must not bind the latest context bundle if it belongs to another scope.
-# 函数用途: 验证自动 latest context bundle 有 scope match，避免老任务 compact 误拿新任务任务卡。
 def test_compact_apply_skips_auto_context_bundle_when_scope_mismatches(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     home_paths = ensure_my_agent_home(tmp_path / "home")
@@ -151,8 +183,6 @@ def test_compact_apply_skips_auto_context_bundle_when_scope_mismatches(tmp_path:
     assert result["restore_refs"]["source_refs"]["context_bundles"] == []
 
 
-# LLM: Explicit bundle refs may override a mismatch while still recording the mismatch.
-# 函数用途: 验证用户显式传 context bundle 时保留引用，但 match report 仍提示 scope 不一致。
 def test_compact_apply_explicit_context_bundle_ref_records_mismatch_but_keeps_ref(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     home_paths = ensure_my_agent_home(tmp_path / "home")
@@ -188,8 +218,6 @@ def test_compact_apply_explicit_context_bundle_ref_records_mismatch_but_keeps_re
     assert result["restore_refs"]["source_refs"]["context_bundles"][0]["path"] == explicit_bundle.json_path
 
 
-# LLM: The CLI should expose the latest context bundle and its self-check without reading large bodies.
-# 函数用途: 验证 `context-bundle latest --json` 能让用户/前端查看最新任务卡、scope 和自检状态。
 def test_context_bundle_latest_cli_reports_observability_payload(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "agent_config.yaml"
     home = tmp_path / "home"
@@ -224,8 +252,19 @@ def test_context_bundle_latest_cli_reports_observability_payload(tmp_path: Path,
     assert payload["path"].endswith("latest_context_bundle.json")
 
 
-# LLM: Saved context bundles should receive post-tool artifact refs by scope, not by broad scans.
-# 函数用途: 验证工具循环后同 request/run/task 的外置工具输出会写回主 context bundle 的 artifact_refs。
+def test_context_bundle_latest_payload_reports_bad_json(tmp_path: Path) -> None:
+    from agent_py_agent.cli.context_bundle_commands import _latest_payload
+
+    bundle_path = tmp_path / "latest_context_bundle.json"
+    bundle_path.write_text("{bad json", encoding="utf-8")
+
+    payload = _latest_payload(str(bundle_path))
+
+    assert payload["ok"] is False
+    assert payload["status"] == "invalid_context_bundle"
+    assert payload["load_error"]["context"] == "cli.context_bundle.latest.read"
+
+
 def test_main_context_bundle_artifacts_can_be_updated_from_tool_output_index(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     home_paths = ensure_my_agent_home(tmp_path / "home")
@@ -270,8 +309,30 @@ def test_main_context_bundle_artifacts_can_be_updated_from_tool_output_index(tmp
     assert payload["artifact_refs"]["items"][0]["scoped_call_id"] == "run-artifact:1-1"
 
 
-# LLM: _write_compact_scope gives compact apply a real old task scope.
-# 函数用途: 写入 old scope 的 raw/snapshot/token 事实，供 scope mismatch 测试构造 compact plan。
+def test_main_context_bundle_artifacts_report_corrupt_bundle(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    bundle_path = root / "context_bundle.json"
+    root.mkdir()
+    bundle_path.write_text("{bad-json", encoding="utf-8")
+
+    update = update_main_context_bundle_artifacts(
+        MainContextBundleArtifactUpdateRequest(
+            context_bundle_path=str(bundle_path),
+            workspace_root=root,
+            request_id="request-artifact",
+            run_id="run-artifact",
+            task_id="task-artifact",
+        )
+    )
+
+    assert update["ok"] is False
+    assert update["status"] == "missing_or_invalid_context_bundle"
+    assert update["artifact_count"] == 0
+    assert update["load_error"]["category"] == "data_parse"
+    assert update["load_error"]["context"] == "context_bundle_artifacts.context_bundle"
+    assert update["load_error"]["path"] == str(bundle_path)
+
+
 def _write_compact_scope(root: Path) -> None:
     append_raw_event(
         root,

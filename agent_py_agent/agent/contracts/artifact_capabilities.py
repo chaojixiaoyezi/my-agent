@@ -1,5 +1,3 @@
-# LLM: Artifact capabilities keep artifact handling open-world while still giving known formats strong validators.
-# 模块用途: 将产物后缀、MIME、默认 validator 归一到可扩展 capability；未知格式走通用兜底而不是直接拒绝。
 
 from __future__ import annotations
 
@@ -40,8 +38,6 @@ _KNOWN_VALIDATORS = {
 _KNOWN_BUILDERS: dict[str, str] = {}
 
 
-# LLM: artifact_capability derives a best-effort capability without treating unknown suffixes as invalid.
-# 函数用途: 已知格式返回专门 validator/builder；未知格式保留 kind/MIME 并交给通用验收兜底。
 def artifact_capability(path: str | Path, *, declared_kind: str = "", declared_mime: str = "") -> ArtifactCapability:
     artifact_path = Path(path)
     kind = _normalize_kind(declared_kind) or kind_for_path(artifact_path)

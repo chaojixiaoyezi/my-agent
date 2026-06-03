@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 
-# LLM: Every tool should declare its side-effect class before registration.
-# 函数用途: 验证缺少 effect 声明的工具不能进入执行合同。
 def test_side_effect_requires_tool_effect_declaration() -> None:
     from agent_py_agent.agent.contracts.offline_side_effect_contract import validate_side_effects
 
@@ -12,8 +10,6 @@ def test_side_effect_requires_tool_effect_declaration() -> None:
     assert result.error_codes == ("TOOL_EFFECT_MISSING",)
 
 
-# LLM: Read-only tools cannot report writes, and mutating tools need idempotency keys.
-# 函数用途: 验证只读工具副作用和可变更工具缺少幂等键都会失败。
 def test_side_effect_rejects_read_only_writes_and_missing_idempotency() -> None:
     from agent_py_agent.agent.contracts.offline_side_effect_contract import validate_side_effects
 
@@ -27,8 +23,6 @@ def test_side_effect_rejects_read_only_writes_and_missing_idempotency() -> None:
     assert result.error_codes == ("READ_ONLY_TOOL_SIDE_EFFECT", "SIDE_EFFECT_IDEMPOTENCY_MISSING")
 
 
-# LLM: Replay should not execute side effects, and dry-run must not be claimed as real execution.
-# 函数用途: 验证副作用 replay 阻断和 dry-run/real-run 隔离。
 def test_side_effect_rejects_replay_execution_and_dry_run_claims() -> None:
     from agent_py_agent.agent.contracts.offline_side_effect_contract import validate_side_effects
 

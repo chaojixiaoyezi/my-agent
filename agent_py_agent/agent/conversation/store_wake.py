@@ -1,12 +1,12 @@
-# LLM: Wake-signal queue dedupes urgent work without running the agent inline.
-# 模块用途: 创建、读取、去重和处理后台主代理唤醒信号。
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from typing import Any
 
 from ..gateway_parts.io import read_json_file, update_json_file_atomic, write_json_file_atomic
+from ..runtime_errors import runtime_error_report
 from .models import ObservationEvent, WakeSignal, new_id
 from .store_common import now as current_time
 from .store_common import wake_evidence_refs, wake_urgency
@@ -37,9 +37,27 @@ class ConversationWakeStore(ConversationGuidanceStore):
         return signal
 
     def pending_wake_signals(self, *, limit: int = 100, include_normal: bool = True) -> list[WakeSignal]:
-        signals = [signal for kind in _wake_kinds(include_normal) for signal in self._pending_signals(kind)]
+        signals, _load_errors = self.pending_wake_signals_report(
+            limit=limit,
+            include_normal=include_normal,
+        )
+        return signals
+
+    def pending_wake_signals_report(
+        self,
+        *,
+        limit: int = 100,
+        include_normal: bool = True,
+    ) -> tuple[list[WakeSignal], list[dict[str, Any]]]:
+        signals: list[WakeSignal] = []
+        load_errors: list[dict[str, Any]] = []
+        for kind in _wake_kinds(include_normal):
+            kind_signals, kind_errors = self._pending_signals_report(kind)
+            signals.extend(kind_signals)
+            load_errors.extend(kind_errors)
         signals.sort(key=lambda item: (0 if item.urgency == "urgent" else 1, item.created_at))
-        return signals if limit <= 0 else signals[:limit]
+        selected = signals if limit <= 0 else signals[:limit]
+        return selected, load_errors
 
     def mark_wake_signal_handled(self, wake_signal_id: str, *, now: float | None = None) -> WakeSignal | None:
         path = self._find_wake_signal_path(wake_signal_id)
@@ -57,8 +75,19 @@ class ConversationWakeStore(ConversationGuidanceStore):
         return next((path for kind in ("urgent", "normal") if (path := self.wake_queue_dir / kind / name).exists()), None)
 
     def _pending_signals(self, kind: str) -> list[WakeSignal]:
-        signals = [WakeSignal.from_dict(data) for path in sorted((self.wake_queue_dir / kind).glob("*.json")) if (data := read_json_file(path))]
-        return [signal for signal in signals if signal.status == "pending"]
+        signals, _load_errors = self._pending_signals_report(kind)
+        return signals
+
+    def _pending_signals_report(self, kind: str) -> tuple[list[WakeSignal], list[dict[str, Any]]]:
+        signals: list[WakeSignal] = []
+        load_errors: list[dict[str, Any]] = []
+        for path in sorted((self.wake_queue_dir / kind).glob("*.json")):
+            signal, error = _read_wake_signal(path)
+            if error is not None:
+                load_errors.append(error)
+            if signal is not None and signal.status == "pending":
+                signals.append(signal)
+        return signals, load_errors
 
     def _raise_deduped_wake_signal(self, signal: WakeSignal) -> WakeSignal:
         selected: WakeSignal | None = None
@@ -113,3 +142,15 @@ def _unlink_quietly(path) -> None:
         path.unlink()
     except OSError:
         pass
+
+
+def _read_wake_signal(path) -> tuple[WakeSignal | None, dict[str, Any] | None]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"wake signal file is {type(payload).__name__}, expected object")
+        return WakeSignal.from_dict(payload), None
+    except Exception as exc:
+        report = runtime_error_report(exc, context="conversation.wake_signal.read")
+        report["path"] = str(path)
+        return None, report

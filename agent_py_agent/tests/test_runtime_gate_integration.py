@@ -5,11 +5,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
-from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
+from agent_py_agent.agent.agent_core.delivery_closeout.closeout import (
     MainAgentDeliveryCloseoutRequest,
     main_agent_delivery_closeout_response,
 )
-from agent_py_agent.agent.contracts.gates.tool_effects import args_hash_for_call
+from agent_py_agent.agent.contracts.gates.tool.effects import args_hash_for_call
 from agent_py_agent.agent.contracts.tool_protocol_v2 import normalize_tool_call
 from agent_py_agent.agent.tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 from agent_py_agent.agent.tooling.registry_execution import (
@@ -113,8 +113,6 @@ def test_registry_execution_blocks_when_runtime_rate_limit_is_exhausted(tmp_path
     assert result.result_envelope["runtime_gate"]["findings"][0]["code"] == "TOOL_RATE_LIMIT_EXCEEDED"
 
 
-# LLM: runtime write-boundary policies can explicitly disable tool rate limits with zero budgets.
-# 函数用途: 验证 max_calls=0 和 failure_threshold=0 在 registry gate 里也表示不启用对应次数门。
 def test_registry_execution_zero_rate_limit_policy_is_unlimited(tmp_path):
     payload = {"tool": "echo", "value": 1}
     result = execute_registry_call(
@@ -320,8 +318,6 @@ def test_delivery_closeout_allows_preexisting_artifact_with_provenance_warning(t
     assert report["final_closeout_gate"]["status"] == "ALLOW"
 
 
-# LLM: Auto-derived delivery quality findings are advisory unless a contract explicitly requests hard enforcement.
-# 函数用途: 验证数据口径问题会进入 closeout 报告，但默认不把普通交付卡死。
 def test_delivery_closeout_reports_metric_quality_contract_mismatch_as_warning(tmp_path):
     output = tmp_path / "out.txt"
     output.write_text("finished artifact", encoding="utf-8")
@@ -362,8 +358,6 @@ def test_delivery_closeout_blocks_metric_quality_contract_mismatch_when_enforcem
     assert report["final_closeout_gate"]["allowed"] is False
 
 
-# LLM: Artifact validation contracts feed advisory quality findings unless explicitly hardened.
-# 函数用途: 验证 artifact.validation_contract 里的 staged metric 合同会进入 closeout 质量报告，但默认不阻断普通交付。
 def test_delivery_closeout_derives_quality_gate_from_artifact_validation_contract(tmp_path):
     output = tmp_path / "out.txt"
     output.write_text("finished artifact", encoding="utf-8")
@@ -383,8 +377,6 @@ def test_delivery_closeout_derives_quality_gate_from_artifact_validation_contrac
     assert report["final_closeout_gate"]["allowed"] is True
 
 
-# LLM: Multi-artifact closeout must not stop at the first quality contract.
-# 函数用途: 验证多个 artifact 各自声明质量合同时，后续 artifact 的 metric 合同也会进入质量门。
 def test_delivery_closeout_merges_quality_contracts_from_all_artifacts(tmp_path):
     output = tmp_path / "out.txt"
     output.write_text("finished artifact", encoding="utf-8")

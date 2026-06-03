@@ -1,5 +1,3 @@
-# LLM: web_fetch is the single URL/API reader; web_search is the discovery tool.
-# 模块用途: 提供单页读取、批量抽取和简单 HTTP/API 请求，保存大正文/二进制内容为 artifact ref。
 
 from __future__ import annotations
 
@@ -46,21 +44,15 @@ class WebRuntimeDeps:
     allow_private_resolution: bool | None = None
 
 
-# LLM: CachedFetch stores short-lived GET responses for repeated model reads.
-# 类用途: 为 web_fetch 的同 URL/format 短期缓存保存过期时间和响应。
 @dataclass(frozen=True)
 class CachedFetch:
     expires_at: float
     response: RawResponseParts
 
 
-# LLM: WebFetchTool returns a small preview and stores binary content as artifacts.
-# 类用途: 打开一个 URL，按 auto/markdown/text/html 返回模型可读预览。
 class WebFetchTool(BaseTool):
     """Fetch URL content, extract several URLs, or call a simple HTTP API."""
 
-    # LLM: WebFetchTool.__init__ wires timeout, DNS resolver, cache and artifact root.
-    # 函数用途: 初始化 web_fetch 的配置、依赖和工具说明。
     def __init__(self, deps: WebRuntimeDeps):
         self.max_chars = deps.max_chars
         self.timeout = deps.timeout
@@ -76,8 +68,6 @@ class WebFetchTool(BaseTool):
         self._cache: dict[tuple[str, str], CachedFetch] = {}
         self.spec = _web_fetch_spec()
 
-    # LLM: WebFetchTool.execute performs GET, cache lookup and preview/artifact formatting.
-    # 函数用途: 执行单 URL 读取；网络失败返回工具错误，不终止任务流程。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             max_chars = self.response_preview_chars(params, self.max_chars)
@@ -198,8 +188,6 @@ class WebFetchTool(BaseTool):
             result_envelope=payload,
         )
 
-    # LLM: _cache_get returns valid cached responses only.
-    # 函数用途: 按 URL 和格式读取未过期缓存，过期时返回空。
     def _cache_get(self, url: str, fmt: str) -> RawResponseParts | None:
         if self.cache_ttl_seconds <= 0:
             return None
@@ -208,8 +196,6 @@ class WebFetchTool(BaseTool):
             return None
         return item.response
 
-    # LLM: _cache_put stores successful GET responses for repeated local reads.
-    # 函数用途: 将读取结果按 TTL 写入内存缓存。
     def _cache_put(self, url: str, fmt: str, response: RawResponseParts) -> None:
         if self.cache_ttl_seconds <= 0:
             return

@@ -1,11 +1,7 @@
-# LLM: Context bundle source refs stay separate from bundle assembly to keep the main file small.
-# 模块用途: 维护 context bundle 字段来源说明，方便调试和后续 schema 扩展。
 
 from __future__ import annotations
 
 
-# LLM: source_refs makes every major bundle field traceable to existing task facts.
-# 函数用途: 给大模型和调试人员标明关键字段从哪里来，后续可扩展到 ledger/compact/task refs。
 def source_refs() -> dict[str, list[str]]:
     return {
         "goal": ["task.goal"],

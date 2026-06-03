@@ -6,6 +6,13 @@ import json
 import tempfile
 from pathlib import Path
 
+from agent_py_agent.agent.agent_core.runner.context import (
+    restore_current_subagent_context,
+    set_current_subagent_context,
+)
+from agent_py_agent.agent.agent_core.tool_loop.round_subagent_output import (
+    subagent_output_json_response,
+)
 from agent_py_agent.agent.backend import ModelResponse
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
@@ -26,7 +33,7 @@ class _DispatchThenQualityBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    '{"tool":"dispatch_subagents","apply":true,"execute_runners":false,"no_probe":true}\n'
+                    '{"tool":"dispatch_subagents","dry_run":false}\n'
                     "[/TOOL_CALL]"
                 ),
                 backend=self.name,
@@ -63,6 +70,35 @@ def test_subagent_runner_stops_after_output_json_write():
         assert result.structured_output_found is True
         assert result.structured_output_ok is True
         assert result.tool_rounds == 1
+
+
+def test_subagent_output_json_closeout_reports_dirty_output_json():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            subagent_workspace="subs",
+            max_tool_rounds=4,
+        )
+        agent = SimpleAgent(cfg, workspace)
+        task = agent.subagents.create_run(
+            goal="写出 output.json 后收口",
+            thought="坏 output.json 不能被当成空结果。",
+            plan=["写结果", "停止工具循环"],
+            allowed_tools=["write_file"],
+        )
+        Path(task.output_json).write_text("{bad-output", encoding="utf-8")
+        previous = set_current_subagent_context(agent, run_id=task.id)
+        try:
+            response = subagent_output_json_response(agent, ModelResponse(text="fallback", backend="fake"))
+        finally:
+            restore_current_subagent_context(agent, previous)
+
+        assert "[SUBAGENT_RESULT_LOAD_ERROR]" in response.text
+        assert "subagent_output_json.output_json" in response.text
+        assert task.output_json in response.text
+        assert "fallback" not in response.text
 
 
 def test_completed_dispatch_returns_to_parent_synthesis_turn():
@@ -142,10 +178,10 @@ def test_tool_allowlist_limits_prompt_and_execution():
             allowed_tools=["read_file"],
         )
 
-        assert "read_file [filesystem]" in result.prompt
-        assert "write_file [filesystem]" not in result.prompt
+        assert "read_file [filesystem" in result.prompt
+        assert "write_file [filesystem" not in result.prompt
         assert not blocked.ok
-        assert "未授权" in blocked.output
+        assert "TOOL_NOT_ALLOWED" in blocked.output
 
 
 def _done_verified_task(agent, *, required_qa_roles: list[str] | None = None):

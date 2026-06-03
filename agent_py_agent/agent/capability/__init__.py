@@ -1,11 +1,8 @@
-# LLM: Capability module; keep skill/tool routing contracts stable for planner and dispatch callers.
-# 模块用途: 描述和路由 agent 能力、技能、工具和执行条件。
 
 from __future__ import annotations
 
 """public API for capability routing, capability config, and skill cards.
 
-给人看的解释：
 这里是'能力治理'目录。skill 和 tool 都会先变成能力卡，再由父代理判断该给谁、给多少、
 什么时候上抛缺口。以后 resource、MCP、remote agent 也应该接到这里。
 """

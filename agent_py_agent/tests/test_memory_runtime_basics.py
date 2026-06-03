@@ -143,8 +143,6 @@ def test_run_writes_raw_archive_when_saved(tmp_path):
     assert facts["runtime_progress"]["phase"] == "final"
 
 
-# LLM: provider owners should get one authoritative task workspace under their owner home.
-# 函数用途: 验证外部用户保存任务时，不再额外写顶层 legacy tasks 造成双账本。
 def test_provider_saved_run_writes_only_owner_task_workspace(tmp_path):
     agent = SimpleAgent(
         _test_config(

@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from agent_py_agent.agent.gateway_parts.adapter import _record_late_pending, check_late_responses
+from agent_py_agent.agent.gateway_parts.adapter_late import check_late_responses_report
 from agent_py_agent.agent.gateway_parts.paths import AdapterPaths
 
 
@@ -106,3 +107,22 @@ def test_check_late_responses_cleans_index(tmp_path):
     remaining = json.loads(remaining_lines[0])
     assert remaining["request_id"] == "req-2"
     assert remaining["checked"] is False
+
+
+def test_check_late_responses_report_keeps_bad_jsonl_visible(tmp_path):
+    paths = _make_adapter_paths(tmp_path)
+    paths.root.mkdir(parents=True, exist_ok=True)
+    late_path = paths.root / "late_pending.jsonl"
+    late_path.write_text(
+        "{bad json\n"
+        + json.dumps({"request_id": "req-ok", "timeout_at": time.time(), "original_timeout": 30.0, "checked": False})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = check_late_responses_report(paths)
+
+    assert report.results == []
+    assert report.load_errors
+    assert report.load_errors[0]["context"] == "gateway.adapter_late_pending.read"
+    assert "{bad json" in late_path.read_text(encoding="utf-8")

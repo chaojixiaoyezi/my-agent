@@ -1,5 +1,3 @@
-# LLM: Task progress is a soft ledger for long work, not an acceptance gate.
-# 模块用途: 为主代理/子代理/孙代理保存通用进度清单；tree 和 compact 只读取摘要，不据此阻断任务。
 
 from __future__ import annotations
 
@@ -10,6 +8,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .common.value_parsing import string_list
+from .runtime_errors import DataCorruptionError, runtime_error_report
 from .task_progress_coverage import (
     coverage_from_update,
     coverage_summary,
@@ -27,15 +27,38 @@ def progress_path(root: str | Path, run_id: str) -> Path:
 
 
 def read_task_progress(root: str | Path, run_id: str) -> dict[str, Any]:
-    payload = _read_json_file(progress_path(root, run_id))
+    progress, _load_error = read_task_progress_report(root, run_id)
+    return progress
+
+
+def read_task_progress_report(root: str | Path, run_id: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    payload, load_error = _read_json_file_report(progress_path(root, run_id))
     if not payload:
-        return _empty_progress(run_id)
-    return normalize_task_progress(payload, run_id=run_id)
+        progress = _empty_progress(run_id)
+        if load_error:
+            progress["load_error"] = load_error
+        return progress, load_error
+    progress = normalize_task_progress(payload, run_id=run_id)
+    if load_error:
+        progress["load_error"] = load_error
+    return progress, load_error
+
+
+def _normalize_existing_task_progress(root: str | Path, run_id: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    payload, load_error = _read_json_file_report(progress_path(root, run_id))
+    if not payload:
+        progress = _empty_progress(run_id)
+        if load_error:
+            progress["load_error"] = load_error
+        return progress, load_error
+    return normalize_task_progress(payload, run_id=run_id), load_error
 
 
 def write_task_progress(root: str | Path, run_id: str, update: dict[str, Any]) -> dict[str, Any]:
-    existing = read_task_progress(root, run_id)
+    existing, load_error = _normalize_existing_task_progress(root, run_id)
     merged = merge_task_progress(existing, update, run_id=run_id)
+    if load_error:
+        merged["load_errors"] = [load_error]
     _write_json_file_atomic(progress_path(root, run_id), merged)
     return merged
 
@@ -61,6 +84,8 @@ def task_progress_summary(progress: dict[str, Any]) -> dict[str, Any]:
         summary["quality_hints"] = normalized["quality_hints"]
     if normalized.get("coverage"):
         summary["coverage"] = coverage_summary(normalized["coverage"])
+    if normalized.get("load_error"):
+        summary["load_error"] = normalized["load_error"]
     return summary
 
 
@@ -81,6 +106,9 @@ def normalize_task_progress(payload: dict[str, Any], *, run_id: str) -> dict[str
         normalized["quality_hints"] = hints
     if coverage["targets"] or coverage["goal"] or coverage["dimensions"]:
         normalized["coverage"] = coverage
+    load_error = payload.get("load_error") or _first_load_error(payload.get("load_errors"))
+    if isinstance(load_error, dict):
+        normalized["load_error"] = load_error
     ref = str(payload.get("ref") or "").strip()
     if ref:
         normalized["ref"] = ref
@@ -135,7 +163,7 @@ def _normalize_item(value: object) -> dict[str, Any]:
         "status": status,
         "notes": str(item.get("notes") or item.get("note") or "").strip(),
         "next": str(item.get("next") or "").strip(),
-        "evidence": _string_list(item.get("evidence")),
+        "evidence": string_list(item.get("evidence")),
     }
     for key in ("result", "outcome", "conclusion", "decision", "summary"):
         text = str(item.get(key) or "").strip()
@@ -184,32 +212,26 @@ def _list(value: object) -> list:
     return list(value) if isinstance(value, list | tuple) else []
 
 
-def _string_list(value: object) -> list[str]:
-    return [text for item in _list(value) if (text := str(item).strip())]
-
-
-def _dedupe(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        text = str(value or "").strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        result.append(text)
-    return result
-
-
 def _safe_id(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "")).strip("-") or "main"
 
 
-def _read_json_file(path: Path) -> dict[str, Any]:
+def _read_json_file_report(path: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if not path.exists():
+        return {}, None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return {}, runtime_error_report(exc, context="task_progress.read")
+    if not isinstance(payload, dict):
+        exc = DataCorruptionError(f"task_progress root must be a JSON object: {path}")
+        return {}, runtime_error_report(exc, context="task_progress.read")
+    return payload, None
+
+
+def _first_load_error(value: object) -> dict[str, Any] | None:
+    items = value if isinstance(value, list) else []
+    return next((item for item in items if isinstance(item, dict)), None)
 
 
 def _write_json_file_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -230,6 +252,7 @@ __all__ = [
     "normalize_task_progress",
     "progress_path",
     "read_task_progress",
+    "read_task_progress_report",
     "task_progress_summary",
     "write_task_progress",
 ]

@@ -29,8 +29,6 @@ from agent_py_agent.agent.user_space.context_bundle import (
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
 
-# LLM: This fixture mirrors a compactable saved run while keeping this focused test file self-contained.
-# 函数用途: 写入 raw/hook/token 三类最小归档事实，让 compact apply/resume 可以走真实路径。
 def _write_compact_fixture(root: Path) -> None:
     append_raw_event(
         root,
@@ -77,8 +75,6 @@ def _write_compact_fixture(root: Path) -> None:
     )
 
 
-# LLM: _write_home_config gives CLI compact tests an isolated my-agent home for context bundles.
-# 函数用途: 写入带绝对 my_agent_home 的临时配置，避免测试读写用户真实家目录。
 def _write_home_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     home = tmp_path / "home"
@@ -95,8 +91,6 @@ def _write_home_config(tmp_path: Path) -> Path:
     return config_path
 
 
-# LLM: compact apply/resume should carry the root run context card instead of making resume guess scope.
-# 函数用途: 验证手动 compact apply 登记主代理 context bundle，resume 时优先推荐读取并写进继续包。
 def test_memory_compact_apply_and_resume_use_main_context_bundle(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     _write_compact_fixture(root)
@@ -133,8 +127,30 @@ def test_memory_compact_apply_and_resume_use_main_context_bundle(tmp_path: Path)
     assert resume["continue_packet"]["main_context_bundle"]["ref"] == bundle.json_path
 
 
-# LLM: CLI compact apply should find the latest saved root context bundle without a user-supplied path.
-# 函数用途: 验证真实 run --save 后执行 memory-compact --apply 会自动携带最新主代理 context bundle。
+def test_memory_compact_apply_reports_corrupt_main_context_bundle_ref(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _write_compact_fixture(root)
+    bundle_path = tmp_path / "bad_context_bundle.json"
+    bundle_path.write_text("{bad-json", encoding="utf-8")
+
+    apply_result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+            main_context_bundle_ref=str(bundle_path),
+            main_context_bundle_ref_explicit=True,
+        ),
+    )
+
+    error = apply_result["main_context_bundle"]["load_error"]
+    assert apply_result["main_context_bundle"]["loaded"] is False
+    assert apply_result["main_context_bundle"]["error"] == "invalid_context_bundle"
+    assert error["context"] == "compact_context_bundle.main_context_bundle"
+    assert error["path"] == str(bundle_path)
+    source_ref = apply_result["restore_refs"]["source_refs"]["context_bundles"][0]
+    assert source_ref["reserved"]["load_error"]["path"] == str(bundle_path)
+
+
 def test_memory_compact_cli_apply_uses_latest_main_context_bundle(tmp_path: Path, capsys) -> None:
     config_path = _write_home_config(tmp_path)
     run_args = build_parser().parse_args([

@@ -1,5 +1,3 @@
-# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
-# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
 
 from __future__ import annotations
 
@@ -95,8 +93,6 @@ _STOP_TERMS = {
 }
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 ResumeContextResult 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 ResumeContextResult 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class ResumeContextResult:
 
@@ -108,16 +104,12 @@ class ResumeContextResult:
     reason: str = ""
     error: str = ""
 
-    # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 injected 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 injected 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
     @property
     def injected(self) -> bool:
 
         return bool(self.context_block.strip())
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 build_auto_resume_context 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 build auto resume context 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def build_auto_resume_context(
     agent: Any,
     user_prompt: str,
@@ -145,8 +137,6 @@ def build_auto_resume_context(
         return ResumeContextResult(reason="error", error=f"{type(exc).__name__}: {exc}")
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _build_resume_context 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 build resume context 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
 
     limit = _config_int(agent, "memory_resume_auto_context_limit")
@@ -189,8 +179,6 @@ def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
     )
 
 
-# LLM: resume context reads the owner archive first, with legacy workspace archive only as fallback.
-# 函数用途: 从 owner-home 和旧工作区归档收集恢复候选，避免 owner 迁移后“继续”找不到刚写入的 raw archive。
 def _collect_resume_archive_records(agent: Any) -> list[dict[str, Any]]:
     roots = _resume_archive_roots(agent)
     scan_limit = _config_int(agent, "memory_resume_archive_scan_limit")
@@ -233,8 +221,6 @@ def _resume_archive_roots(agent: Any) -> tuple[Path, ...]:
     return tuple(roots)
 
 
-# LLM: _resume_local_payloads keeps resume context assembly shallow and preview-size config-backed.
-# 函数用途: 查询 LocalStore 恢复线索，并转成可注入的轻量 payload。
 def _resume_local_payloads(agent: Any, local_query: str, limit: int) -> list[dict[str, Any]]:
     local_hits = (
         agent.local_store.search(local_query, limit=limit)
@@ -245,8 +231,6 @@ def _resume_local_payloads(agent: Any, local_query: str, limit: int) -> list[dic
     return [local_hit_payload(hit, preview_chars=preview_chars) for hit in local_hits]
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _first_archive_matches 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 判断 first archive matches 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _first_archive_matches(records: list[dict[str, Any]], user_prompt: str, *, limit: int) -> tuple[list[dict[str, Any]], str]:
 
     for query in _candidate_queries(user_prompt):
@@ -258,8 +242,6 @@ def _first_archive_matches(records: list[dict[str, Any]], user_prompt: str, *, l
     return [], ""
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _candidate_queries 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 candidate queries 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _candidate_queries(user_prompt: str) -> list[str]:
 
     text = user_prompt.strip()
@@ -276,8 +258,6 @@ def _candidate_queries(user_prompt: str) -> list[str]:
     return values
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _has_resume_trigger 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 has resume trigger 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _has_resume_trigger(user_prompt: str) -> bool:
 
     text = str(user_prompt or "")
@@ -293,14 +273,10 @@ def _has_resume_trigger(user_prompt: str) -> bool:
     return bool(_CONTINUE_WITH_EXPLICIT_TARGET.search(text))
 
 
-# LLM: has_resume_trigger is the public intent check shared by prompt-memory scoping.
-# 函数用途: 判断用户是否明确在恢复或继续旧任务；只返回布尔值，不读取任何历史上下文。
 def has_resume_trigger(user_prompt: str) -> bool:
     return _has_resume_trigger(user_prompt)
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _resume_args 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 resume args 的候选结果，并按参数完成筛选、排序或数量限制。
 def _resume_args(query: str) -> SimpleNamespace:
 
     return SimpleNamespace(
@@ -312,8 +288,6 @@ def _resume_args(query: str) -> SimpleNamespace:
     )
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _append 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 append 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _append(items: list[str], value: str) -> None:
 
     text = str(value or "").strip()
@@ -321,8 +295,6 @@ def _append(items: list[str], value: str) -> None:
         items.append(text)
 
 
-# LLM: _config_int keeps auto-resume archive scan limits sourced from AgentConfig.
-# 函数用途: 读取恢复上下文扫描预算，非法值只回退到配置 schema 默认，不在 memory 模块写死数字。
 def _config_int(agent: Any, key: str) -> int:
     try:
         return max(0, int(getattr(agent.config, key)))

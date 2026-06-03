@@ -1,5 +1,3 @@
-# LLM: External adapter module; keep platform payload and runtime boundary contracts stable.
-# 模块用途: 对接 QQ、飞书等外部渠道，把平台事件转换成内部请求。
 
 """QQ WebSocket client — handshake, send/receive, keepalive."""
 
@@ -18,8 +16,6 @@ from .qq_protocol import WebSocketFrame
 __all__ = ["QQWebSocketClient"]
 
 
-# LLM: _parse_ws_url 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 函数用途: 解析并归一化wsurl的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _parse_ws_url(url: str):
     parsed = urlsplit(url)
     if parsed.scheme not in {"ws", "wss"}:
@@ -30,8 +26,6 @@ def _parse_ws_url(url: str):
     return parsed.scheme == "wss", parsed.hostname or "", port, request_target
 
 
-# LLM: _connect_socket 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 函数用途: 处理connectsocket相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持通道配置、消息回调和平台输入输出上的返回值和副作用边界稳定。
 def _connect_socket(parsed):
     is_ssl, host, port, _request_target = parsed
     sock = _socket()
@@ -43,8 +37,6 @@ def _connect_socket(parsed):
     return sock
 
 
-# LLM: _send_handshake 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 函数用途: 发送handshake请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _send_handshake(sock, parsed, access_token: str) -> str:
     import secrets
 
@@ -64,8 +56,6 @@ def _send_handshake(sock, parsed, access_token: str) -> str:
     return key
 
 
-# LLM: _verify_handshake 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 函数用途: 处理verifyhandshake相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持通道配置、消息回调和平台输入输出上的返回值和副作用边界稳定。
 def _verify_handshake(sock, key: str) -> None:
     response = b""
     while b"\r\n\r\n" not in response:
@@ -80,13 +70,9 @@ def _verify_handshake(sock, key: str) -> None:
         pass
 
 
-# LLM: QQWebSocketClient 属于外部通道适配的类边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 类用途: 封装qqwebsocketclient相关状态和行为，维持当前模块的职责边界；关键副作用: 方法可能触发通道配置、消息回调和平台输入输出相关副作用，需保持公开契约稳定。
 class QQWebSocketClient:
     """QQ WebSocket client — handles handshake, messaging, and keepalive."""
 
-    # LLM: __init__ 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持通道配置、消息回调和平台输入输出上的返回值和副作用边界稳定。
     def __init__(self, url: str, access_token: str, intents: int = 1 << 30) -> None:
         self.url = url
         self.access_token = access_token
@@ -96,14 +82,10 @@ class QQWebSocketClient:
         self._closed = False
         self._last_seq = 0
 
-    # LLM: is_connected 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 判断connected条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
     @property
     def is_connected(self) -> bool:
         return self._connected
 
-    # LLM: connect 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 处理connect相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持通道配置、消息回调和平台输入输出上的返回值和副作用边界稳定。
     def connect(self) -> None:
         """Establish TCP connection and complete WebSocket handshake."""
         parsed = _parse_ws_url(self.url)
@@ -113,8 +95,6 @@ class QQWebSocketClient:
         self._sock = sock
         self._connected = True
 
-    # LLM: send_text 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 发送文本请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
     def send_text(self, payload: str | bytes) -> None:
         """Send a text frame."""
         if not self._connected or self._sock is None:
@@ -124,14 +104,10 @@ class QQWebSocketClient:
         frame = WebSocketFrame.build_text_frame(payload, masked=True)
         self._sock.sendall(frame)
 
-    # LLM: send_json 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 发送JSON请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
     def send_json(self, data: dict[str, Any]) -> None:
         """Send a JSON text frame."""
         self.send_text(json.dumps(data, ensure_ascii=False))
 
-    # LLM: recv_text 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 处理recv文本相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持通道配置、消息回调和平台输入输出上的返回值和副作用边界稳定。
     def recv_text(self, timeout: float | None = None) -> str | None:
         """Receive a text frame, returns None on timeout."""
         if not self._connected or self._sock is None:
@@ -143,8 +119,6 @@ class QQWebSocketClient:
         except Exception:
             return None
 
-    # LLM: _handle_received_frame 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 推进receivedframe的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响通道配置、消息回调和平台输入输出，需保持重试、超时和状态迁移语义。
     def _handle_received_frame(self, data: bytes) -> str | None:
         if not data:
             return None
@@ -161,14 +135,10 @@ class QQWebSocketClient:
             self._send_pong()
         return None
 
-    # LLM: _send_pong 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 发送pong请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
     def _send_pong(self) -> None:
         if self._sock:
             self._sock.sendall(bytes([0x8A, 0x00]))
 
-    # LLM: close 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 处理close相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持通道配置、消息回调和平台输入输出上的返回值和副作用边界稳定。
     def close(self) -> None:
         """Gracefully close the connection."""
         self._closed = True

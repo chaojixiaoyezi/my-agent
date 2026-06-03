@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 
-# LLM: Contract doctor should reject malformed schemas, wrong field types, and unknown verifiers before task start.
-# 函数用途: 验证合同自身错误不会被静默忽略。
 def test_contract_doctor_rejects_schema_type_and_unknown_verifier() -> None:
     from agent_py_agent.agent.contracts.contract_doctor import lint_contract
 
@@ -24,8 +22,6 @@ def test_contract_doctor_rejects_schema_type_and_unknown_verifier() -> None:
     )
 
 
-# LLM: Contract doctor should catch conflicting and impossible requirements from structured fields.
-# 函数用途: 验证 required/forbidden 工具冲突和不可能完成的产物规则会预检失败。
 def test_contract_doctor_rejects_conflicts_and_impossible_rules() -> None:
     from agent_py_agent.agent.contracts.contract_doctor import lint_contract
 
@@ -52,8 +48,6 @@ def test_contract_doctor_rejects_conflicts_and_impossible_rules() -> None:
     assert report.error_codes == ("CONTRACT_RULE_CONFLICT", "CONTRACT_IMPOSSIBLE")
 
 
-# LLM: Contract doctor should migrate supported old contracts and reject unsupported versions explicitly.
-# 函数用途: 验证 version=1 的 artifact_path 可迁移，未知版本返回 CONTRACT_VERSION_UNSUPPORTED。
 def test_contract_doctor_migrates_v1_and_rejects_unknown_version() -> None:
     from agent_py_agent.agent.contracts.contract_doctor import lint_contract, migrate_contract
 

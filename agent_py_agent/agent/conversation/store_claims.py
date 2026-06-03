@@ -1,12 +1,13 @@
-# LLM: Background run claims are local leases with heartbeat renewal.
-# 模块用途: 为后台主代理 tick 提供抢占、续约和释放语义。
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from ..gateway_parts.io import read_json_file, update_json_file_atomic
+from ..gateway_parts.io import update_json_file_atomic
+from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..settings.defaults import default_config_value
 from .models import new_id
 from .store_common import float_value
@@ -50,8 +51,12 @@ class ConversationClaimStore(ConversationProgressStore):
         return updated if claimed else None
 
     def load_background_run_claim(self, thread_id: str) -> dict[str, Any]:
+        claim, load_error = self.load_background_run_claim_report(thread_id)
+        return claim if not load_error else {"load_error": load_error}
+
+    def load_background_run_claim_report(self, thread_id: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
         self._require_thread(str(thread_id or ""))
-        return read_json_file(self._background_claim_path(str(thread_id or "")))
+        return _read_claim_report(self._background_claim_path(str(thread_id or "")))
 
     def renew_background_run_claim(self, request: dict) -> dict[str, Any] | None:
         thread_id = str(request.get("thread_id") or "")
@@ -125,8 +130,6 @@ def _new_claim(payload: BackgroundClaimPayload) -> dict[str, Any]:
     }
 
 
-# LLM: _claim_lease_seconds keeps background run claim TTL sourced from AgentConfig.
-# 函数用途: 解析一次后台 claim 的租约秒数；缺失或非法时使用配置 schema 默认。
 def _claim_lease_seconds(value: object) -> int:
     if value is None or value == "":
         value = default_config_value("background_claim_ttl_seconds")
@@ -177,3 +180,21 @@ def _previous_claim_summary(data: dict[str, Any], current: float) -> dict[str, A
         "last_error": _error_payload(data.get("last_error")),
         "takeover": data.get("takeover") if isinstance(data.get("takeover"), dict) else _takeover_payload(status),
     }
+
+
+def _read_claim_report(path: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if not path.exists():
+        return {}, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return {}, _claim_load_error(exc, path)
+    if not isinstance(payload, dict):
+        return {}, _claim_load_error(DataCorruptionError(f"background claim must be a JSON object: {path}"), path)
+    return payload, None
+
+
+def _claim_load_error(exc: BaseException, path: Path) -> dict[str, Any]:
+    report = runtime_error_report(exc, context="conversation.background_claim.read")
+    report["path"] = str(path)
+    return report

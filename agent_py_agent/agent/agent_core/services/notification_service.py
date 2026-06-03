@@ -1,21 +1,20 @@
-# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
-# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
 
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
+from ...runtime_errors import runtime_error_report
 from ...settings.defaults import default_config_bool
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 _DEFAULT_NOTIFICATION_ENABLED = default_config_bool("notification_enabled")
+_LOGGER = logging.getLogger(__name__)
 
 
-# LLM: notify_completed_tasks 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理notifycompletedtasks相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def notify_completed_tasks(agent: SimpleAgent, records: list) -> None:
     if not getattr(agent.config, "notification_enabled", _DEFAULT_NOTIFICATION_ENABLED):
         return
@@ -35,10 +34,7 @@ def notify_completed_tasks(agent: SimpleAgent, records: list) -> None:
         _deliver_task_notification(agent, task, run_id)
 
 
-# LLM: _should_consider_notification 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 判断consider通知条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _should_consider_notification(record, notified_run_ids: set[str], final_statuses: set[str]) -> bool:
-    # LLM: notification eligibility is separate from delivery side effects.
     return (
         record.step in {"runner", "acceptance"}
         and record.applied
@@ -47,8 +43,6 @@ def _should_consider_notification(record, notified_run_ids: set[str], final_stat
     )
 
 
-# LLM: _load_final_task 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 读取或查询final任务需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _load_final_task(agent: SimpleAgent, run_id: str, final_statuses: set[str]):
     try:
         task = agent.subagents.load(run_id)
@@ -57,8 +51,6 @@ def _load_final_task(agent: SimpleAgent, run_id: str, final_statuses: set[str]):
     return task if task.status in final_statuses else None
 
 
-# LLM: _deliver_task_notification 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理deliver任务通知相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _deliver_task_notification(agent: SimpleAgent, task, run_id: str) -> None:
     try:
         from ...notification import NotificationManager, NotificationRouter
@@ -75,13 +67,32 @@ def _deliver_task_notification(agent: SimpleAgent, task, run_id: str) -> None:
         try:
             NotificationRouter(agent.config).deliver(notification.notification_id)
         except Exception as exc:
-            notif_manager.mark_failed(notification.notification_id, _notification_error_message(exc))
-    except Exception:
-        pass
+            _mark_notification_failed(notif_manager, notification.notification_id, exc)
+    except Exception as exc:
+        _warn_notification_failure(exc, context="notification.create_or_deliver", run_id=run_id)
 
 
-# LLM: _task_completion_message 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理任务completion消息相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
+def _mark_notification_failed(notif_manager, notification_id: str, exc: Exception) -> None:
+    try:
+        marked = notif_manager.mark_failed(notification_id, _notification_error_message(exc))
+    except Exception as mark_exc:
+        _warn_notification_failure(
+            mark_exc,
+            context="notification.mark_failed",
+            notification_id=notification_id,
+        )
+        return
+    if not marked:
+        _LOGGER.warning(
+            "notification failure could not be recorded: %s",
+            {
+                "notification_id": notification_id,
+                "delivery_error": _notification_error_message(exc),
+                "context": "notification.mark_failed_missing_record",
+            },
+        )
+
+
 def _task_completion_message(task, run_id: str) -> str:
     return (
         f"任务 {run_id} 已完成\n"
@@ -91,8 +102,21 @@ def _task_completion_message(task, run_id: str) -> str:
     )
 
 
-# LLM: notification errors can contain adapter internals, so persist a bounded diagnostic string.
-# 函数用途: 生成通知失败原因摘要，避免网关异常把超长错误写进通知文件。
 def _notification_error_message(exc: Exception) -> str:
     message = f"{exc.__class__.__name__}: {exc}"
     return message[:500]
+
+
+def _warn_notification_failure(
+    exc: Exception,
+    *,
+    context: str,
+    run_id: str = "",
+    notification_id: str = "",
+) -> None:
+    report = runtime_error_report(exc, context=context)
+    if run_id:
+        report["run_id"] = run_id
+    if notification_id:
+        report["notification_id"] = notification_id
+    _LOGGER.warning("notification runtime failure: %s", report)

@@ -1,5 +1,3 @@
-# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
-# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
 
 
 from __future__ import annotations
@@ -22,8 +20,6 @@ from .tui_transcript_store import (
 )
 
 
-# LLM: StatusBarConfig 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class StatusBarConfig:
     refs: TuiStatusRefs
@@ -31,8 +27,6 @@ class StatusBarConfig:
     context_window_chars: int
 
 
-# LLM: TranscriptSinkRequest bundles TUI transcript sink installation inputs.
-# 类用途: 打包 TUI transcript 输出区、跟随状态、app 引用和配置参数。
 @dataclass
 class TranscriptSinkRequest:
     output_area: Any | None
@@ -45,8 +39,6 @@ class TranscriptSinkRequest:
 APP_RENDER_POSTPONE_SECONDS = 1 / 60
 
 
-# LLM: _make_activity_bar 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_activity_bar(
     config: StatusBarConfig,
 ):
@@ -66,8 +58,6 @@ def _make_activity_bar(
     )
 
 
-# LLM: _make_status_bar 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_status_bar(
     config: StatusBarConfig,
 ):
@@ -87,8 +77,6 @@ def _make_status_bar(
     )
 
 
-# LLM: _make_input_area 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_input_area(history_file_path: str) -> Any:
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.history import FileHistory
@@ -105,8 +93,6 @@ def _make_input_area(history_file_path: str) -> Any:
     )
 
 
-# LLM: _make_input_prompt_window 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_input_prompt_window() -> Any:
     from prompt_toolkit.layout import FormattedTextControl, Window
 
@@ -118,8 +104,6 @@ def _make_input_prompt_window() -> Any:
     )
 
 
-# LLM: _make_transcript_area 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_transcript_area() -> Any:
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.widgets import TextArea
@@ -137,8 +121,6 @@ def _make_transcript_area() -> Any:
     )
 
 
-# LLM: _install_transcript_sink 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _install_transcript_sink(
     output_area: Any,
     follow_ref: list[bool],
@@ -152,16 +134,12 @@ def _install_transcript_sink(
     set_tui_stream_sink(store.append_stream, finish=store.finish_stream)
 
 
-# LLM: _app_scrollback_enabled 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _app_scrollback_enabled(args: Any) -> bool:
     if getattr(args, "plain", False):
         return False
     return bool(getattr(args, "app_scrollback", True) or getattr(args, "app", False))
 
 
-# LLM: make_tui_app 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def make_tui_app(params: MakeTuiAppParams):
     from prompt_toolkit.application import Application
     from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
@@ -203,8 +181,6 @@ def make_tui_app(params: MakeTuiAppParams):
     return app
 
 
-# LLM: _make_status_bar_config 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_status_bar_config(params: MakeTuiAppParams) -> StatusBarConfig:
     config = params.agent.config
     return StatusBarConfig(
@@ -221,8 +197,6 @@ def _make_status_bar_config(params: MakeTuiAppParams) -> StatusBarConfig:
     )
 
 
-# LLM: _make_tui_keybindings 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_tui_keybindings(
     app_config: MakeTuiAppParams,
     input_area: Any,
@@ -255,8 +229,6 @@ def _make_tui_keybindings(
     )
 
 
-# LLM: _make_tui_style 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_tui_style():
     from prompt_toolkit.styles import Style
 
@@ -266,8 +238,6 @@ def _make_tui_style():
     )
 
 
-# LLM: _configure_transcript_sink 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _configure_transcript_sink(request: TranscriptSinkRequest) -> None:
     if request.output_area is not None and request.transcript_follow_ref is not None:
         request.app_ref[0] = request.app

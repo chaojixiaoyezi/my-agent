@@ -52,8 +52,6 @@ class TestParseScalar:
         """Inline lists are convenient for workspace_root."""
         assert parse_scalar('["", "C:/work"]') == ["", "C:/work"]
 
-    # LLM: inline dict support keeps small config maps editable without adding PyYAML.
-    # 函数用途: 验证简化 YAML 能解析角色级 runner timeout 这类小字典配置。
     def test_parse_scalar_inline_dict(self):
         """Inline dict syntax should work for compact role maps."""
         assert parse_scalar('{"root": "off", "worker": 8}') == {"root": "off", "worker": 8}
@@ -102,8 +100,6 @@ class TestLoadSimpleYaml:
         finally:
             path.unlink()
 
-    # LLM: simple YAML inline maps are used for role-level runtime policy knobs.
-    # 函数用途: 验证配置文件中的行内字典能被 load_simple_yaml 保留下来。
     def test_load_simple_yaml_with_inline_dict(self):
         """Inline dict syntax should work for compact map values."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -185,16 +181,12 @@ class TestNormalizeAgentConfig:
         assert normalized["max_tool_rounds"] is None
         assert len(warnings) > 0
 
-    # LLM: Tool write inline limits must be user-configurable through the standard config normalizer.
-    # 函数用途: 验证用户能通过配置调整 write_file/apply_patch 单次正文上限。
     def test_normalize_agent_config_tool_write_inline_max_chars(self):
         data = {"tool_write_inline_max_chars": 16384}
         normalized, warnings = normalize_agent_config(data)
         assert normalized["tool_write_inline_max_chars"] == 16384
         assert warnings == []
 
-    # LLM: Tool catalog prompt budgets must be real config fields, not hidden registry constants.
-    # 函数用途: 验证工具目录分页、模式、类别和展示上限能通过配置归一化。
     def test_normalize_agent_config_tool_catalog_fields(self):
         data = {
             "tool_catalog_mode": "full",
@@ -215,22 +207,22 @@ class TestNormalizeAgentConfig:
         assert normalized["tool_detail_max_chars"] == 3000
         assert warnings == []
 
-    # LLM: access_mode is intentionally the only user-facing command permission knob.
-    # 函数用途: 验证命令运行权限档位接受连字符和下划线写法，并归一到稳定值。
+    def test_agent_config_default_tool_catalog_is_short(self):
+        config = AgentConfig()
+
+        assert config.tool_catalog_include_examples is False
+        assert config.tool_catalog_entry_max_chars == 700
+
     def test_normalize_agent_config_access_mode(self):
         normalized, warnings = normalize_agent_config({"access_mode": "full_access"})
         assert normalized["access_mode"] == "full-access"
         assert warnings == []
 
-    # LLM: invalid access_mode must not accidentally widen shell permissions.
-    # 函数用途: 验证坏权限档位会回退默认 workspace-write 并产生配置告警。
     def test_normalize_agent_config_invalid_access_mode(self):
         normalized, warnings = normalize_agent_config({"access_mode": "god-mode"})
         assert normalized["access_mode"] == AgentConfig().access_mode
         assert warnings
 
-    # LLM: Invalid inline write limits should fall back before reaching ToolRegistry.
-    # 函数用途: 验证过小的写入正文上限会回退默认值，并产生配置告警。
     def test_normalize_agent_config_invalid_tool_write_inline_max_chars(self):
         data = {"tool_write_inline_max_chars": 10}
         normalized, warnings = normalize_agent_config(data)
@@ -330,8 +322,6 @@ class TestLoadConfig:
         finally:
             path.unlink()
 
-    # LLM: User config files should be able to tune write/append inline transport limits.
-    # 函数用途: 验证完整 load_config 会保留用户写入的 tool_write_inline_max_chars 配置项。
     def test_load_config_with_tool_write_inline_max_chars(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write("model_backend: echo\ntool_write_inline_max_chars: 16000\n")
@@ -344,8 +334,6 @@ class TestLoadConfig:
         finally:
             path.unlink()
 
-    # LLM: load_config should expose the single command access-mode knob.
-    # 函数用途: 验证配置文件里的 access_mode 能进入 AgentConfig。
     def test_load_config_with_access_mode(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write("model_backend: echo\naccess_mode: full-access\n")

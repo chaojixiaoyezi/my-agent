@@ -1,6 +1,4 @@
 
-# LLM: Audit event writer; keep JSONL and LocalStore payload shapes stable for later querying.
-# 模块用途: 把任务、调度、状态等关键操作写入审计日志，并可同步写入本地事件库。
 
 from __future__ import annotations
 
@@ -24,8 +22,6 @@ if TYPE_CHECKING:
     from ..settings.config import AgentConfig
 
 
-# LLM: Direct callers sometimes pass small config stubs, so audit_enabled needs local string handling too.
-# 函数用途: 判断审计是否开启；兼容未经过完整配置归一化的测试配置或轻量配置对象。
 def _audit_enabled(config: AgentConfig) -> bool:
     raw_value = getattr(config, "audit_enabled", True)
     if isinstance(raw_value, str):
@@ -33,12 +29,8 @@ def _audit_enabled(config: AgentConfig) -> bool:
     return bool(raw_value)
 
 
-# LLM: Bridges high-level audit actions to JSONL and optional LocalStore records; preserve public convenience methods.
-# 类用途: 负责生成审计记录、落盘到 audit.jsonl，并在可用时同步到 LocalStore。
 class AuditLogger:
 
-    # LLM: Creates the audit directory and stores optional LocalStore integration; constructor intentionally prepares filesystem state.
-    # 函数用途: 初始化审计日志路径，确保目录存在，并保存可选的本地事件库引用。
     def __init__(self, config: AgentConfig, local_store: LocalStore | None = None):
         self.config = config
         self._local_store = local_store
@@ -49,8 +41,6 @@ class AuditLogger:
         if self.enabled:
             self._audit_root.mkdir(parents=True, exist_ok=True)
 
-    # LLM: ID format is timestamp plus short random suffix; keep it stable enough for log readers.
-    # 函数用途: 生成审计记录 ID，用时间戳方便粗略排序，用随机段降低冲突概率。
     def _generate_entry_id(self) -> str:
         """生成条目 ID。"""
         import secrets
@@ -59,8 +49,6 @@ class AuditLogger:
         random_part = secrets.token_hex(2)
         return f"audit_{timestamp}_{random_part}"
 
-    # LLM: Main audit entry point; accepts legacy loose fields through normalize_log_params and always returns the stored entry.
-    # 函数用途: 记录一次审计事件，兼容旧参数写法，最终写入文件并返回 AuditEntry。
     def log(
         self,
         params: LogParams | AuditAction | str = None,
@@ -95,8 +83,6 @@ class AuditLogger:
             self._write_to_local_store(entry)
         return entry
 
-    # LLM: Converts normalized bundle data into the persisted AuditEntry shape.
-    # 函数用途: 把 LogParams 转成完整审计记录，补上 ID、时间戳和枚举字符串。
     def _entry_from_params(self, log_params: LogParams) -> AuditEntry:
         return AuditEntry(
             entry_id=self._generate_entry_id(),
@@ -112,15 +98,11 @@ class AuditLogger:
             user_agent=log_params.user_agent,
         )
 
-    # LLM: Appends one JSON object per line; downstream tools rely on UTF-8 and ensure_ascii=False.
-    # 函数用途: 把审计记录追加写入 audit.jsonl，每条记录占一行。
     def _write_to_file(self, entry: AuditEntry) -> None:
         line = json.dumps(entry.to_dict(), ensure_ascii=False)
         with open(self._audit_file, "a", encoding="utf-8") as f:
             f.write(line + "\n")
 
-    # LLM: Optional best-effort mirror into LocalStore; failures are intentionally swallowed to keep audit JSONL primary.
-    # 函数用途: 尝试把审计事件同步到 LocalStore，失败时不影响主审计日志写入。
     def _write_to_local_store(self, entry: AuditEntry) -> None:
         try:
             from ..local_storage import LocalStore
@@ -145,8 +127,6 @@ class AuditLogger:
 
     # 便捷方法
 
-    # LLM: Convenience wrapper for CREATE_TASK audit events; keep target_type as task for query compatibility.
-    # 函数用途: 记录创建任务事件，少让调用方重复填写 action 和 target_type。
     def log_create_task(
         self,
         task_id: str,
@@ -166,8 +146,6 @@ class AuditLogger:
             )
         )
 
-    # LLM: Convenience wrapper for dispatch audit events with task as the target.
-    # 函数用途: 记录某个任务被调度的审计事件。
     def log_dispatch(
         self,
         task_id: str,
@@ -187,8 +165,6 @@ class AuditLogger:
             )
         )
 
-# LLM: AuditTaskUpdateRequest is a 审计系统 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: 保存 AuditTaskUpdateRequest 的输入字段，调用方先构造这个对象再进入 审计系统，避免继续散传参数。
 @dataclass(frozen=True)
 class AuditTaskUpdateRequest:
     """bundle for audit task status transitions."""
@@ -201,8 +177,6 @@ class AuditTaskUpdateRequest:
     details: dict[str, Any] | None = None
 
 
-# LLM: AuditAccessDeniedRequest is a 审计系统 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: 保存 AuditAccessDeniedRequest 的输入字段，调用方先构造这个对象再进入 审计系统，避免继续散传参数。
 @dataclass(frozen=True)
 class AuditAccessDeniedRequest:
     """bundle for audit denied events."""
@@ -215,8 +189,6 @@ class AuditAccessDeniedRequest:
     reason: str
 
 
-# LLM: AuditErrorRequest is a 审计系统 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: 保存 AuditErrorRequest 的输入字段，调用方先构造这个对象再进入 审计系统，避免继续散传参数。
 @dataclass(frozen=True)
 class AuditErrorRequest:
     """bundle for audit error events."""
@@ -229,8 +201,6 @@ class AuditErrorRequest:
     error: str
 
 
-# LLM: _log_update_task belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 把结果、日志或状态写回磁盘/索引，改动时要确认审计记录和失败处理。
 def _log_update_task(
     self,
     request: AuditTaskUpdateRequest | None = None,
@@ -259,8 +229,6 @@ def _log_update_task(
     )
 
 
-# LLM: _log_access_denied belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 把结果、日志或状态写回磁盘/索引，改动时要确认审计记录和失败处理。
 def _log_access_denied(
     self,
     request: AuditAccessDeniedRequest | None = None,
@@ -286,8 +254,6 @@ def _log_access_denied(
     )
 
 
-# LLM: _log_error belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 把结果、日志或状态写回磁盘/索引，改动时要确认审计记录和失败处理。
 def _log_error(
     self,
     request: AuditErrorRequest | None = None,

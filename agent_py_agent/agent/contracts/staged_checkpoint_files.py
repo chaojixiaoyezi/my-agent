@@ -1,5 +1,3 @@
-# LLM: Staged checkpoint file helpers validate workspace paths and JSON checkpoint shape.
-# 模块用途: 为阶段产物验收提供通用文件级判断，和证据合同逻辑解耦。
 
 from __future__ import annotations
 
@@ -12,8 +10,6 @@ from .staged_checkpoint_tabular_shape import (
 )
 
 
-# LLM: artifact_path resolves one workspace-relative checkpoint ref without accepting prose-derived paths.
-# 函数用途: 把阶段 ref 解析到任务工作区里的绝对路径，保持和主验收一致的路径语义。
 def artifact_path(ref: str, task_workspace: Path) -> Path:
     preferred = Path(str(ref or ""))
     path = preferred.resolve(strict=False) if preferred.is_absolute() else (task_workspace / preferred).resolve(strict=False)
@@ -24,8 +20,6 @@ def artifact_path(ref: str, task_workspace: Path) -> Path:
     return path
 
 
-# LLM: json_checkpoint_status separates invalid JSON from valid-but-empty structured data.
-# 函数用途: 返回阶段 JSON 的结构状态，避免把被截断的 JSON 误判成“只是没有数据”。
 def json_checkpoint_status(
     path: Path,
     required_columns: list[str] | None = None,

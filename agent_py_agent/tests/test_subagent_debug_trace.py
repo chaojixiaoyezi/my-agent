@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import json
+import logging
+from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core.runner.stage_trace import (
+    RunnerModelStageTraceRequest,
+    trace_runner_model_request_started,
+)
 from agent_py_agent.agent.backend import BaseBackend, ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderTimeoutError, ProviderTransientError
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_runner_results import RecordRunnerResultParams
-from agent_py_agent.agent.subagents.services.hierarchy_recovery import HierarchyRecoveryRequest
-from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+from agent_py_agent.agent.subagents.services.hierarchy.recovery import HierarchyRecoveryRequest
+from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
@@ -22,8 +28,6 @@ def _trace_records(workspace):
     return [json.loads(line) for line in trace_file.read_text(encoding="utf-8").splitlines()]
 
 
-# LLM: _TraceToolBackend drives one model request, one tool call, and one final response for trace assertions.
-# 类用途: 测试 runner 阶段心跳时使用的假后端；第一轮请求 list_files，第二轮返回结构化子代理结果。
 class _TraceToolBackend(BaseBackend):
     name = "trace_tool_backend"
 
@@ -61,8 +65,6 @@ class _TraceToolBackend(BaseBackend):
         )
 
 
-# LLM: _FailingTraceBackend verifies request-failed trace writes before runner failure handling.
-# 类用途: 测试模型请求抛异常时，debug trace 也能留下失败阶段事件。
 class _FailingTraceBackend(BaseBackend):
     name = "failing_trace_backend"
 
@@ -70,8 +72,6 @@ class _FailingTraceBackend(BaseBackend):
         raise RuntimeError("trace backend failed")
 
 
-# LLM: _ProviderTimeoutBackend lets runner tests exercise timeout classification without sleeping.
-# 类用途: 测试模型接口超时时，子代理失败类型和 trace 都能稳定记录。
 class _ProviderTimeoutBackend(BaseBackend):
     name = "provider_timeout_backend"
 
@@ -79,8 +79,6 @@ class _ProviderTimeoutBackend(BaseBackend):
         raise ProviderTimeoutError("模型接口请求超时: request_timeout=17s")
 
 
-# LLM: _ProviderTransientBackend lets runner tests exercise provider flake classification without real network calls.
-# 类用途: 测试模型接口临时断连时，子代理失败类型会进入可恢复 transient_error，而不是普通 runner_error。
 class _ProviderTransientBackend(BaseBackend):
     name = "provider_transient_backend"
 
@@ -118,6 +116,24 @@ def test_subagent_debug_trace_records_task_creation_when_enabled(tmp_path):
         "verification_status": "UNVERIFIED",
         "goal_preview": "write proof file",
     }
+
+
+def test_runner_stage_trace_reports_current_run_load_error(caplog: pytest.LogCaptureFixture) -> None:
+    """runner 追踪读不到当前 run 时要有 warning，不能静默丢掉心跳线索。"""
+
+    class BrokenSubagents:
+        def load(self, run_id: str):
+            raise OSError("canonical state unavailable")
+
+    agent = SimpleNamespace(_current_subagent_run_id="run-1", subagents=BrokenSubagents())
+    request = RunnerModelStageTraceRequest(agent=agent, params=SimpleNamespace(), tool_rounds=1, prompt="hello")
+
+    with caplog.at_level(logging.WARNING):
+        trace_runner_model_request_started(request)
+
+    assert "runner stage trace failed" in caplog.text
+    assert "runner_stage_trace.subagents.load" in caplog.text
+    assert "canonical state unavailable" in caplog.text
 
 
 def test_subagent_debug_trace_records_runner_result_when_enabled(tmp_path):
@@ -321,8 +337,6 @@ def test_runner_stage_trace_refreshes_active_ancestor_heartbeats(tmp_path):
     _assert_ancestor_heartbeats_refreshed(manager, [child.id, parent.id, root.id], old)
 
 
-# LLM: _running_trace_hierarchy builds a three-level active subagent tree for heartbeat tests.
-# 函数用途: 创建 root -> parent -> child 并把三层都标记为 RUNNING，减少测试主体样板。
 def _running_trace_hierarchy(manager: SubAgentManager, old: float):
     root = manager.create_run(goal="root", thought="root", plan=["root"], role="coordinator")
     parent = manager.create_run(
@@ -352,12 +366,10 @@ def _running_trace_hierarchy(manager: SubAgentManager, old: float):
     return root, parent, child
 
 
-# LLM: _trace_child_tool_started sends the same runner trace event the real tool loop would emit.
-# 函数用途: 触发孙级工具开始事件，验证祖先 heartbeat 刷新。
 def _trace_child_tool_started(manager: SubAgentManager, root_id: str, child_id: str) -> None:
     from types import SimpleNamespace
 
-    from agent_py_agent.agent.agent_core.runner_stage_trace import (
+    from agent_py_agent.agent.agent_core.runner.stage_trace import (
         RunnerToolStageTraceRequest,
         trace_runner_tool_call_started,
     )
@@ -374,8 +386,6 @@ def _trace_child_tool_started(manager: SubAgentManager, root_id: str, child_id: 
     )
 
 
-# LLM: _assert_ancestor_heartbeats_refreshed keeps heartbeat expectations compact and ordered.
-# 函数用途: 断言 child、parent、root 三层 heartbeat 都被刷新。
 def _assert_ancestor_heartbeats_refreshed(manager: SubAgentManager, run_ids: list[str], old: float) -> None:
     for run_id in run_ids:
         assert manager.load(run_id).heartbeat_at > old
@@ -482,8 +492,6 @@ def test_subagent_debug_trace_records_runner_model_request_failure(tmp_path):
     assert "trace backend failed" in failed["error_preview"]
 
 
-# LLM: provider timeouts should become recoverable runner facts instead of generic runner_error.
-# 函数用途: 确认子代理模型接口超时会写成 provider_timeout，方便父级接管和后续调度。
 def test_subagent_run_failure_classifies_provider_timeout(tmp_path):
     cfg = AgentConfig(
         enable_tools=True,
@@ -513,12 +521,10 @@ def test_subagent_run_failure_classifies_provider_timeout(tmp_path):
     assert failed["error_type"] == "ProviderTimeoutError"
 
 
-# LLM: provider transient errors should stay retryable/recoverable instead of looking like task logic failures.
-# 函数用途: 确认子代理模型接口临时断连会写成 transient_error，便于父级按恢复/重跑策略处理。
 def test_subagent_run_failure_classifies_provider_transient(tmp_path, monkeypatch):
     from agent_py_agent.agent.agent_core import provider_transient_auto_resume
 
-    monkeypatch.setattr(provider_transient_auto_resume, "provider_transient_retry_delays", lambda: ())
+    monkeypatch.setattr(provider_transient_auto_resume, "provider_transient_retry_delays", lambda _policy=None: ())
     cfg = AgentConfig(
         enable_tools=True,
         model_backend="echo",

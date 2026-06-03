@@ -1,5 +1,3 @@
-# LLM: Home memory seeds define default HOT/routing/lesson files without bloating layout code.
-# 模块用途: 保存 ~/.my-agent 初始 HOT 记忆、路由索引和 lesson 文件内容。
 
 from __future__ import annotations
 

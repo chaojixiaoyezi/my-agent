@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 from __future__ import annotations
 
@@ -14,8 +12,6 @@ from .budgets import DispatchBudget
 from .queue import InvestigationQueue
 
 
-# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 DispatchHealthSummary 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 DispatchHealthSummary 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class DispatchHealthSummary:
     case_backlog: dict[str, int] = field(default_factory=dict)
@@ -23,14 +19,10 @@ class DispatchHealthSummary:
     prompt_switch: dict[str, Any] = field(default_factory=dict)
     dispatch_budget: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 DispatchHealthInputs 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 DispatchHealthInputs 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class DispatchHealthInputs:
     cases: list[Any] | None = None
@@ -40,16 +32,12 @@ class DispatchHealthInputs:
     prompt_config: SecurityPromptConfig | Mapping[str, Any] | None = None
 
 
-# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _get 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 get 在当前模块中的核心转换或协调步骤，衔接 dispatch 流程按预算、队列和工单状态分派日志分析任务。
 def _get(source: Any, key: str, default: Any = None) -> Any:
     if isinstance(source, Mapping):
         return source.get(key, default)
     return getattr(source, key, default)
 
 
-# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _case_backlog_from_cases 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 case backlog from cases 在当前模块中的核心转换或协调步骤，衔接 dispatch 流程按预算、队列和工单状态分派日志分析任务。
 def _case_backlog_from_cases(cases: list[Any] | None) -> dict[str, int]:
     counts: dict[str, int] = {}
     for case in cases or []:
@@ -60,8 +48,6 @@ def _case_backlog_from_cases(cases: list[Any] | None) -> dict[str, int]:
     return counts
 
 
-# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 build_health_summary 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 build health summary 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def build_health_summary(
     *,
     params: DispatchHealthInputs | None = None,
@@ -101,8 +87,6 @@ def build_health_summary(
     )
 
 
-# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 render_health_summary 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 render health summary 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def render_health_summary(summary: DispatchHealthSummary | Mapping[str, Any]) -> str:
     payload = summary.to_dict() if isinstance(summary, DispatchHealthSummary) else dict(summary)
     case_backlog = payload.get("case_backlog", {})

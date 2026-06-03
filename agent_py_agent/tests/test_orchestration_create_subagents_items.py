@@ -6,8 +6,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 
-# LLM: _agent keeps items-mode tests small and below code-size guard thresholds.
-# 函数用途: 创建只包含 create_subagents 所需字段的 mock agent，避免每个测试重复样板。
 def _agent(max_subagents: int = 10) -> MagicMock:
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
@@ -17,8 +15,6 @@ def _agent(max_subagents: int = 10) -> MagicMock:
     return mock_agent
 
 
-# LLM: _create_run_sequence mirrors SubAgentManager ids while keeping assertions deterministic.
-# 函数用途: 返回按调用次数递增的 create_run side effect，便于检查 next_action.run_ids。
 def _create_run_sequence():
     created_count = 0
 
@@ -98,7 +94,7 @@ class TestCreateSubagentsItemsMode:
         """轻量配置对象缺少 max_subagents 时，也使用 AgentConfig 默认值。"""
         from types import SimpleNamespace
 
-        from agent_py_agent.agent.agent_core.orchestration_create_items import CreateSubagentItem
+        from agent_py_agent.agent.agent_core.orchestration.create_items import CreateSubagentItem
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
         from agent_py_agent.agent.settings import AgentConfig
 

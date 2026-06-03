@@ -1,5 +1,3 @@
-# LLM: Tool call archive records keep replayable tool evidence compact and structured.
-# 模块用途: 生成 archive_tool_calls 记录，并保留 runtime_gate、工具产物 ref 和小型结果 envelope 供 closeout/replay 使用。
 
 from __future__ import annotations
 
@@ -8,14 +6,12 @@ from pathlib import Path
 from ..artifacts.registry import ArtifactRegistration, register_artifact
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..settings.defaults import default_config_int
-from .runtime_owner_roots import runtime_owner_root
-from .tool_loop_recovery import runtime_run_id, runtime_run_scope
+from .runtime.owner_roots import runtime_owner_root
+from .tool_loop.recovery import runtime_run_id, runtime_run_scope
+from .tool_loop.round_execution import ToolCallRecordParams
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
-from .tool_round_execution import ToolCallRecordParams
 
 
-# LLM: archive_tool_call_record externalizes output and attaches replayable gate/provenance facts.
-# 函数用途: 从一次工具结果生成可归档记录，确保产物来源和 runtime_gate 不丢失。
 def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dict[str, object]:
     call_id = f"{record.tool_rounds}-{record.idx}"
     request = ExternalizeToolOutputRequest(
@@ -40,8 +36,6 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
     return output_record
 
 
-# LLM: _config_int reads archive-related tool budgets from AgentConfig.
-# 函数用途: 读取工具输出外置和 preview 预算，非法值只回退到配置 schema 默认。
 def _config_int(agent: object, key: str) -> int:
     try:
         return int(getattr(agent.config, key))
@@ -49,8 +43,6 @@ def _config_int(agent: object, key: str) -> int:
         return default_config_int(key)
 
 
-# LLM: _attach_gate_and_refs copies small structured result facts into the archive row.
-# 函数用途: 将 runtime_gate、tool_result_refs 和 compact envelope 附到归档记录，不复制大正文。
 def _attach_gate_and_refs(output_record: dict[str, object], result: object) -> None:
     runtime_gate = _runtime_gate_from_result(result)
     if runtime_gate:
@@ -69,8 +61,6 @@ def _attach_gate_and_refs(output_record: dict[str, object], result: object) -> N
         output_record["tool_result_envelope"] = result_envelope
 
 
-# LLM: _register_tool_result_artifacts makes tool-created files enter the run artifact registry.
-# 函数用途: write_file/apply-like 工具返回机器路径后，立即登记成 artifact_id，避免后续从文本路径猜产物。
 def _register_tool_result_artifacts(
     agent: object,
     output_record: dict[str, object],
@@ -107,8 +97,6 @@ def _register_tool_result_artifacts(
             output_record["artifact_registry_refs"].append(registered.to_dict())
 
 
-# LLM: _existing_file_ref accepts only concrete local files for artifact registry hints.
-# 函数用途: 从工具结构化 ref 中提取已经存在的本地文件路径，URL 和空值不登记。
 def _existing_file_ref(value: object) -> Path | None:
     text = str(value or "").strip()
     if not text or "://" in text:
@@ -120,8 +108,6 @@ def _existing_file_ref(value: object) -> Path | None:
     return path if path.is_file() else None
 
 
-# LLM: _attach_run_scope makes every archived tool row self-identifying.
-# 函数用途: 把 run/task/parent/root 身份写进工具归档，避免后续从线程上下文猜来源。
 def _attach_run_scope(output_record: dict[str, object], agent: object, record: ToolCallRecordParams) -> None:
     scope = _scope_from_result(record.result) or runtime_run_scope(agent, record.params).to_dict()
     output_record["run_scope"] = scope
@@ -132,8 +118,6 @@ def _attach_run_scope(output_record: dict[str, object], agent: object, record: T
     _copy_text_fact(output_record, "agent_kind", scope.get("agent_kind"))
 
 
-# LLM: _scope_from_result prefers explicit result scope over thread-local guessing.
-# 函数用途: 从工具结果 envelope 中读取 run/task/depth 身份字段。
 def _scope_from_result(result: object) -> dict[str, object]:
     envelope = getattr(result, "result_envelope", None)
     if not isinstance(envelope, dict):
@@ -142,8 +126,6 @@ def _scope_from_result(result: object) -> dict[str, object]:
     return dict(scope) if isinstance(scope, dict) else {}
 
 
-# LLM: _runtime_gate_from_result carries runtime gate evidence into replayable archives.
-# 函数用途: 只读取 ToolExecutionResult.result_envelope.runtime_gate 结构字段，不从输出文本推断。
 def _runtime_gate_from_result(result: object) -> dict[str, object]:
     envelope = getattr(result, "result_envelope", None)
     if not isinstance(envelope, dict):
@@ -152,8 +134,6 @@ def _runtime_gate_from_result(result: object) -> dict[str, object]:
     return dict(gate) if isinstance(gate, dict) else {}
 
 
-# LLM: _error_facts_from_result carries error taxonomy fields into replayable archives.
-# 函数用途: 归档失败工具的错误码和恢复建议，供 final gate/replay 只读机器字段判断。
 def _error_facts_from_result(result: object) -> dict[str, object]:
     facts: dict[str, object] = {}
     for key in ("error_code", "error_category", "recommended_action", "recovery_hint"):
@@ -164,8 +144,6 @@ def _error_facts_from_result(result: object) -> dict[str, object]:
     return facts
 
 
-# LLM: _operation_facts_from_result copies replay identity from the typed result envelope.
-# 函数用途: 将 operation_id/idempotency_key 这些小型机器字段放入 archive 行。
 def _operation_facts_from_result(result: object) -> dict[str, object]:
     envelope = getattr(result, "result_envelope", None)
     if not isinstance(envelope, dict):
@@ -184,16 +162,12 @@ def _operation_facts_from_result(result: object) -> dict[str, object]:
     return facts
 
 
-# LLM: _copy_text_fact preserves only non-empty scalar operation fields.
-# 函数用途: 避免空字符串覆盖已经存在的结构化 identity。
 def _copy_text_fact(target: dict[str, object], key: str, value: object) -> None:
     text = str(value or "").strip()
     if text:
         target[key] = text
 
 
-# LLM: _int_value keeps archive depth parsing total and non-throwing.
-# 函数用途: 把可选数字字段转成 int，坏值按 0 处理。
 def _int_value(value: object) -> int:
     try:
         return int(value or 0)
@@ -201,8 +175,6 @@ def _int_value(value: object) -> int:
         return 0
 
 
-# LLM: _tool_result_refs_from_result extracts artifact/path refs from structured tool envelopes.
-# 函数用途: 将工具产物来源写入 archive_tool_calls，供 closeout 按机器 ref 证明当前 run 生成了产物。
 def _tool_result_refs_from_result(result: object) -> list[dict[str, object]]:
     envelope = getattr(result, "result_envelope", None)
     if not isinstance(envelope, dict):
@@ -215,8 +187,6 @@ def _tool_result_refs_from_result(result: object) -> list[dict[str, object]]:
     return refs
 
 
-# LLM: _compact_result_envelope keeps path refs while avoiding full content copies.
-# 函数用途: 给工具归档保留 target_path/artifact_ref 等小字段，不把大正文写进 archive 行。
 def _compact_result_envelope(result: object) -> dict[str, object]:
     envelope = getattr(result, "result_envelope", None)
     if not isinstance(envelope, dict):
@@ -232,8 +202,6 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
     return compact
 
 
-# LLM: _compact_artifact_integrity keeps only small artifact integrity facts in tool archive rows.
-# 函数用途: 裁剪 artifact integrity payload，避免归档里复制长 issue 或产物正文。
 def _compact_artifact_integrity(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         return {}
@@ -253,24 +221,18 @@ def _compact_artifact_integrity(value: object) -> dict[str, object]:
     return compact
 
 
-# LLM: _append_refs adds stable file refs from a structured envelope object.
-# 函数用途: 收集 path/artifact_ref/source_ref/target_path 字段，避免从 output_preview 文本里猜路径。
 def _append_refs(refs: list[dict[str, object]], payload: dict[str, object]) -> None:
     for key in ("artifact_ref", "source_ref", "path", "target_path", "output_path"):
         for value in _ref_values(payload.get(key)):
             _append_ref(refs, key, value)
 
 
-# LLM: _ref_values normalizes scalar and nested target_path refs.
-# 函数用途: 兼容 legacy session target_path 的 raw/resolved 对象形态，降低 refs 提取嵌套复杂度。
 def _ref_values(value: object) -> list[object]:
     if not isinstance(value, dict):
         return [value]
     return [value.get(key) for key in ("resolved", "raw", "path", "artifact_ref")]
 
 
-# LLM: _append_ref records one non-empty tool result reference.
-# 函数用途: 统一 tool_result_refs 的 kind/path 形态，让 provenance gate 可直接消费。
 def _append_ref(refs: list[dict[str, object]], kind: str, value: object) -> None:
     text = str(value or "").strip()
     if text:

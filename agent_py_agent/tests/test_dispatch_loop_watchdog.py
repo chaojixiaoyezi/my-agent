@@ -120,7 +120,10 @@ class TestDispatchLoopExceptions:
 
     def test_task_midway_failure(self, tmp_path: Path):
         """任务中途失败的处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -152,7 +155,10 @@ class TestDispatchLoopExceptions:
 
     def test_all_tasks_paused(self, tmp_path: Path):
         """所有任务都被暂停时的处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -178,7 +184,10 @@ class TestDispatchLoopExceptions:
 
     def test_max_rounds_limit_reached(self, tmp_path: Path):
         """达到最大轮数限制时的处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -200,7 +209,10 @@ class TestDispatchLoopExceptions:
 
     def test_dispatch_with_no_retry_policy(self, tmp_path: Path):
         """不重试策略下的 dispatch 处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "no_retry"
@@ -220,7 +232,9 @@ class TestDispatchLoopExceptions:
 
     def test_dispatch_runner_worker_exception(self, tmp_path: Path):
         """runner worker 抛出异常时的处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_mixin import SimpleAgentDispatchMixin
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.mixin import (
+            SimpleAgentDispatchMixin,
+        )
 
         class MockAgent(SimpleAgentDispatchMixin):
             def __init__(self):
@@ -259,14 +273,17 @@ class TestDispatchLoopExceptions:
             agent.dispatch_subagents(
                 router=MagicMock(),
                 apply=True,
-                execute_runners=True,
+                start_runners=True,
             )
         except Exception:
             pass  # 异常应该被捕获
 
     def test_dispatch_zero_candidates(self, tmp_path: Path):
         """零候选任务时的处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -283,7 +300,10 @@ class TestDispatchLoopExceptions:
 
     def test_dispatch_with_negative_max_rounds(self, tmp_path: Path):
         """负数 max_rounds 时的处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"

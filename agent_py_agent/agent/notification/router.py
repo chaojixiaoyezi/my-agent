@@ -1,5 +1,3 @@
-# LLM: 路由顺序影响用户可见性，改动时核对降级和重放行为。
-# 模块用途: 通知路由器，在会话渠道、适配器渠道和本地存储之间选择投递路径。
 
 from __future__ import annotations
 
@@ -16,20 +14,14 @@ from .manager import NotificationManager
 from .models import Notification
 
 
-# LLM: NotificationRouter 属于 通知系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: 按会话和渠道状态选择通知投递或存储路径。
 class NotificationRouter:
 
-    # LLM: NotificationRouter.__init__ 属于 通知系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 初始化 NotificationRouter 的依赖、配置和运行期字段。
     def __init__(self, config: AgentConfig):
         self.config = config
         self._channel_checker = ChannelStatusChecker(config)
         self._manager = NotificationManager(config)
         self._session_workspace = Path(config.session_workspace)
 
-    # LLM: NotificationRouter.route 属于 通知系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 通知系统 中的 route 步骤，并保持调用方依赖的数据形状。
     def route(self, notification: Notification) -> str | None:
         # 策略 1：尝试发起通道
         if self._channel_checker.check(notification.channel, notification.user_id):
@@ -51,8 +43,6 @@ class NotificationRouter:
         # 策略 4：都不在线，需要存储
         return None
 
-    # LLM: NotificationRouter._find_session_active_channel 属于 通知系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 通知系统 中的 find_session_active_channel 步骤，并保持调用方依赖的数据形状。
     def _find_session_active_channel(
         self,
         user_id: str,
@@ -72,13 +62,9 @@ class NotificationRouter:
             return None
         return best_channel
 
-    # LLM: NotificationRouter._candidate_fallback_channels 属于 通知系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 通知系统 中的 candidate_fallback_channels 步骤，并保持调用方依赖的数据形状。
     def _candidate_fallback_channels(self, excluded_channel: str) -> tuple[str, ...]:
         return tuple(channel for channel in ("chat", "feishu", "qq") if channel != excluded_channel)
 
-    # LLM: NotificationRouter._eval_session_for_router 属于 通知系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 通知系统 中的 eval_session_for_router 步骤，并保持调用方依赖的数据形状。
     def _eval_session_for_router(self, session_dir: Path, user_id: str, exclude_channel: str | None, timeout: float) -> tuple[str | None, float]:
         """Evaluate session dir for active channel; return (channel, updated_at)."""
         if not session_dir.is_dir():
@@ -100,13 +86,9 @@ class NotificationRouter:
             return channel, updated_at
         return None, 0.0
 
-    # LLM: NotificationRouter.is_channel_online 属于 通知系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 判断 is_channel_online 是否满足安全或状态条件。
     def is_channel_online(self, channel: str, user_id: str | None = None) -> bool:
         return self._channel_checker.check(channel, user_id)
 
-    # LLM: NotificationRouter.deliver 属于 通知系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 通知系统 中的 deliver 步骤，并保持调用方依赖的数据形状。
     def deliver(self, notification_id: str) -> tuple[bool, str]:
         notification = self._manager.load_notification(notification_id)
         if notification is None:
@@ -133,8 +115,6 @@ class NotificationRouter:
             self._manager.mark_failed(notification_id, "投递失败")
             return False, "投递失败"
 
-    # LLM: NotificationRouter._do_deliver 属于 通知系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 通知系统 中的 do_deliver 步骤，并保持调用方依赖的数据形状。
     def _do_deliver(self, notification: Notification, channel: str) -> bool:
         # 模拟投递：实际实现中调用通道适配器
         # 对于 chat 通道，直接输出到 stderr（用于测试）
@@ -146,8 +126,6 @@ class NotificationRouter:
             # 其他通道调用适配器（这里简化处理）
             return True
 
-    # LLM: NotificationRouter.flush_stored 属于 通知系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 通知系统 中的 flush_stored 步骤，并保持调用方依赖的数据形状。
     def flush_stored(self, user_id: str) -> int:
         pending = self._manager.get_pending(user_id)
         success_count = 0
@@ -161,8 +139,6 @@ class NotificationRouter:
 
         return success_count
 
-    # LLM: NotificationRouter.get_pending_count 属于 通知系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 查询并返回 get_pending_count，保持返回形状给上层调用。
     def get_pending_count(self, user_id: str) -> int:
         return self._manager.get_pending_count(user_id)
 
@@ -170,8 +146,6 @@ class NotificationRouter:
 __all__ = ["NotificationRouter"]
 
 
-# LLM: _newer_channel 属于 通知系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 通知系统 中的 newer_channel 步骤，并保持调用方依赖的数据形状。
 def _newer_channel(
     channel: str | None,
     updated_at: float,

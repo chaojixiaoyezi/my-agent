@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
-from agent_py_agent.agent.subagents.services.patch_apply_test_commands import PatchApplyTestCommands
+from agent_py_agent.agent.subagents.services.patch_apply.test_commands import PatchApplyTestCommands
 
 
 class TestBuildUnifiedDiff:
@@ -312,15 +312,14 @@ class TestPatchReviewTask:
         output = {"patches": []}
         patches = []
 
-        with patch("agent_py_agent.agent.subagents.manager_patch._read_json_object", return_value=output):
-            result = manager._review_patch_task(
-                task,
-                output=output,
-                patches=patches,
-                apply=False,
-                reviewer="test",
-                note="",
-            )
+        result = manager._review_patch_task(
+            task,
+            output=output,
+            patches=patches,
+            apply=False,
+            reviewer="test",
+            note="",
+        )
 
         assert result.decision == "NO_PATCHES"
         assert result.ok is False
@@ -343,18 +342,43 @@ class TestPatchReviewTask:
         output = {"patches": [{"status": "planned"}]}
         patches = [{"status": "planned"}]
 
-        with patch("agent_py_agent.agent.subagents.manager_patch._read_json_object", return_value=output):
-            result = manager._review_patch_task(
-                task,
-                output=output,
-                patches=patches,
-                apply=False,
-                reviewer="test",
-                note="",
-            )
+        result = manager._review_patch_task(
+            task,
+            output=output,
+            patches=patches,
+            apply=False,
+            reviewer="test",
+            note="",
+        )
 
         assert result.decision == "REJECT"
         assert result.ok is False
+
+    def test_review_report_exposes_dirty_output_json_when_auto_scanning(self, tmp_path: Path):
+        """坏 output.json 不能在自动扫描时被吞成“没有 patch”。"""
+        from agent_py_agent.agent.subagents.patch import PatchReviewService
+
+        task = SimpleNamespace(
+            id="dirty_review_task",
+            output_json=str(tmp_path / "output.json"),
+            work_log_file=str(tmp_path / "work.log"),
+        )
+        Path(task.output_json).write_text("{bad json", encoding="utf-8")
+
+        manager = SimpleNamespace(
+            workspace=tmp_path,
+            workspace_root=tmp_path,
+            _select_runs=lambda run_ids=None: [task],
+        )
+
+        report = PatchReviewService(manager).review_patches(run_ids=None)
+
+        assert len(report.records) == 1
+        record = report.records[0]
+        assert record.decision == "OUTPUT_LOAD_ERROR"
+        assert record.ok is False
+        assert record.load_errors
+        assert record.load_errors[0]["context"] == "patch_review.output_json"
 
 
 class TestResolvePatchTarget:
@@ -393,6 +417,76 @@ class TestResolvePatchTarget:
 class TestPatchApplyReport:
     """测试补丁应用报告生成。"""
 
+    def test_apply_report_exposes_dirty_output_json_when_auto_scanning(self, tmp_path: Path):
+        """坏 output.json 不能在自动扫描时被吞成“没有 patch”。"""
+        from agent_py_agent.agent.subagents.patch import PatchApplyService
+
+        task = SimpleNamespace(
+            id="dirty_apply_task",
+            output_json=str(tmp_path / "output.json"),
+            work_log_file=str(tmp_path / "work.log"),
+        )
+        Path(task.output_json).write_text("{bad json", encoding="utf-8")
+
+        manager = SimpleNamespace(
+            workspace=tmp_path,
+            workspace_root=tmp_path,
+            _select_runs=lambda run_ids=None: [task],
+        )
+
+        report = PatchApplyService(manager).apply_patches(run_ids=None)
+
+        assert len(report.records) == 1
+        record = report.records[0]
+        assert record.decision == "OUTPUT_LOAD_ERROR"
+        assert record.ok is False
+        assert record.load_errors
+        assert record.load_errors[0]["context"] == "patch_apply.output_json"
+
+    def test_real_apply_preserves_output_load_error_after_success_rewrite(self, tmp_path: Path):
+        """真实 apply 成功后，也不能抹掉 apply 前读到的坏 output.json 诊断。"""
+        from agent_py_agent.agent.subagents.patch import PatchApplyService
+
+        task = SimpleNamespace(
+            id="dirty_apply_success_task",
+            output_json=str(tmp_path / "output.json"),
+            work_log_file=str(tmp_path / "work.log"),
+            allowed_write_roots=[],
+            forbidden_write_roots=[],
+            locked_files=[],
+            acceptance_checks=[],
+        )
+        Path(task.output_json).write_text("{bad json", encoding="utf-8")
+        target = tmp_path / "target.txt"
+
+        class MockManager:
+            workspace = tmp_path
+            workspace_root = tmp_path
+
+            @staticmethod
+            def _append_task_work_log(task, message):
+                Path(task.work_log_file).write_text(message, encoding="utf-8")
+
+        record = PatchApplyService(MockManager())._apply_patch_task(
+            task,
+            output={},
+            patches=[
+                {
+                    "path": str(target),
+                    "status": "planned",
+                    "tool": "write_file",
+                    "content": "fixed\n",
+                }
+            ],
+            apply=True,
+            applier="test",
+        )
+
+        payload = json.loads(Path(task.output_json).read_text(encoding="utf-8"))
+        assert record.ok is True
+        assert target.read_text(encoding="utf-8") == "fixed\n"
+        assert payload["load_errors"][0]["context"] == "patch_apply.success_output_json"
+
     def test_apply_dry_run_mode(self, tmp_path: Path):
         """测试 dry-run 模式不实际写入文件。"""
         from agent_py_agent.agent.subagents.manager_patch import SubAgentPatchMixin
@@ -426,15 +520,14 @@ class TestPatchApplyReport:
             }
         ]
 
-        with patch("agent_py_agent.agent.subagents.manager_patch._read_json_object", return_value=output):
-            result = manager._apply_patch_task(
-                task,
-                output=output,
-                patches=patches,
-                apply=False,
-                applier="test",
-                note="",
-            )
+        result = manager._apply_patch_task(
+            task,
+            output=output,
+            patches=patches,
+            apply=False,
+            applier="test",
+            note="",
+        )
 
         # dry-run 模式
         assert result.dry_run is True

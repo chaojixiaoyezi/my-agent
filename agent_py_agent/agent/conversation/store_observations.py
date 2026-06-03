@@ -1,5 +1,3 @@
-# LLM: Observation events record agent-tree facts without waking the LLM by default.
-# 模块用途: 追加、查询和标记长期会话 observation。
 
 from __future__ import annotations
 
@@ -8,9 +6,10 @@ from typing import Any
 
 from ..gateway_parts.io import read_json_file, update_json_file_atomic
 from ..io.jsonl import append_jsonl
+from ..runtime_errors import runtime_error_report
 from .models import ObservationEvent, new_id
 from .store_common import now as current_time
-from .store_common import read_jsonl, with_handled_at
+from .store_common import read_jsonl_report, with_handled_at
 from .store_tasks import ConversationTaskStore
 
 
@@ -45,11 +44,30 @@ class ConversationObservationStore(ConversationTaskStore):
         return event
 
     def recent_observations(self, thread_id: str, *, limit: int = 20, include_handled: bool = True) -> list[ObservationEvent]:
+        events, _errors = self.recent_observations_report(
+            thread_id,
+            limit=limit,
+            include_handled=include_handled,
+        )
+        return events
+
+    def recent_observations_report(
+        self,
+        thread_id: str,
+        *,
+        limit: int = 20,
+        include_handled: bool = True,
+    ) -> tuple[list[ObservationEvent], list[dict[str, Any]]]:
         handled = self._read_observation_handled()
-        events = [with_handled_at(ObservationEvent.from_dict(row), handled) for row in read_jsonl(self._observation_path(thread_id))]
+        report = read_jsonl_report(
+            self._observation_path(thread_id),
+            context="conversation.observations.read",
+        )
+        events, parse_errors = _observation_events(report.rows, handled)
         if not include_handled:
             events = [event for event in events if event.handled_at <= 0]
-        return events if limit <= 0 else events[-limit:]
+        selected = events if limit <= 0 else events[-limit:]
+        return selected, [*report.load_errors, *parse_errors]
 
     def unhandled_observations_requiring_main(self, *, limit: int = 20) -> list[ObservationEvent]:
         events = [event for path in sorted(self.observations_dir.glob("*.jsonl")) for event in self.recent_observations(path.stem, limit=0, include_handled=False) if event.requires_main_agent or event.requires_llm_report]
@@ -90,3 +108,19 @@ def _observation_event(request: _ObservationEventInput) -> ObservationEvent:
         observed_at=request.current,
         metadata=kwargs.get("metadata") or {},
     )
+
+
+def _observation_events(
+    rows: list[dict[str, Any]],
+    handled: dict[str, float],
+) -> tuple[list[ObservationEvent], list[dict[str, Any]]]:
+    events: list[ObservationEvent] = []
+    errors: list[dict[str, Any]] = []
+    for index, row in enumerate(rows, start=1):
+        try:
+            events.append(with_handled_at(ObservationEvent.from_dict(row), handled))
+        except Exception as exc:
+            report = runtime_error_report(exc, context="conversation.observations.parse")
+            report["row_index"] = index
+            errors.append(report)
+    return events, errors

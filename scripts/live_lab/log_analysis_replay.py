@@ -1,5 +1,3 @@
-# LLM: Live Lab validation script; keep CLI flags, artifact paths, and replay outputs stable for scenario tests.
-# 模块用途: 支撑可见验收和回放场景，负责启动案例、整理输出或生成报告。
 
 from __future__ import annotations
 
@@ -32,8 +30,6 @@ DEFAULT_END_TIME = "2026-04-30T10:30:00Z"
 SIMULATED_FAILURE_STAGES = frozenset({"evidence", "report"})
 
 
-# LLM: RunSecurityAlertV1ReplayParams 是安全告警回放入口参数契约。
-# 类用途: 保存 fixture、输出目录、时间窗口、limit 和失败模拟配置。
 @dataclass(frozen=True)
 class RunSecurityAlertV1ReplayParams:
     """Parameter bundle for run_security_alert_v1_replay."""
@@ -49,8 +45,6 @@ class RunSecurityAlertV1ReplayParams:
     simulate_failure_stage: str | None = None
 
 
-# LLM: ReplayState 保存跨阶段产物；每个回放阶段只填自己负责的字段。
-# 类用途: 暂存 findings、case、route 和 traced evidence，供后续阶段使用。
 @dataclass
 class ReplayState:
     findings: Any = None
@@ -59,8 +53,6 @@ class ReplayState:
     traced: Any = None
 
 
-# LLM: ReplayStageContext 传递回放共享资源；避免每个 stage 散传路径和 summary。
-# 类用途: 汇集 summary、fixture、store、artifacts 和入口参数。
 @dataclass(frozen=True)
 class ReplayStageContext:
     summary: dict[str, Any]
@@ -70,8 +62,6 @@ class ReplayStageContext:
     params: RunSecurityAlertV1ReplayParams
 
 
-# LLM: _base_summary 定义 replay_summary.json 初始结构；字段是验收证据契约。
-# 函数用途: 初始化所有阶段状态、计数、产物路径和错误字段。
 def _base_summary(
     output_root: Path, fixture_path: Path, fixture_format, dry_run: bool
 ) -> dict[str, Any]:
@@ -109,8 +99,6 @@ def _base_summary(
     }
 
 
-# LLM: _run_stage 包装单个回放阶段；负责 pass/fail 状态和异常落点。
-# 函数用途: 执行 stage handler，成功合并 summary，失败时记录错误并返回空结果。
 def _run_stage(
     summary: dict[str, Any],
     stage: str,
@@ -128,8 +116,6 @@ def _run_stage(
         return False, None
 
 
-# LLM: _write_summary 是 summary 唯一写盘点；JSON 排序和换行保持稳定。
-# 函数用途: 将回放摘要写入 replay_summary.json 并返回同一份字典。
 def _write_summary(summary: dict[str, Any]) -> dict[str, Any]:
     """Write summary to disk and return it."""
     Path(summary["summary_path"]).write_text(
@@ -139,8 +125,6 @@ def _write_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
-# LLM: _capture_stage_result 把 stage 返回值落到 ReplayState；仅 detector/case/route 有状态。
-# 函数用途: 按阶段名保存 findings、case 或 route，供后续阶段读取。
 def _capture_stage_result(stage_name: str, result: Any, state: ReplayState) -> ReplayState:
     """Capture a stage result into the appropriate variable, returning updated tuple."""
     if stage_name == "detector":
@@ -152,8 +136,6 @@ def _capture_stage_result(stage_name: str, result: Any, state: ReplayState) -> R
     return state
 
 
-# LLM: _run_replay_stages 编排安全告警六段回放；失败时立即返回已有证据。
-# 函数用途: 依次运行 ingest、detector、case、route、evidence 和 report 阶段。
 def _run_replay_stages(context: ReplayStageContext) -> tuple[dict[str, Any], Any, Any, Any, Any]:
     state = ReplayState()
     if not _run_ingest_replay(context):
@@ -170,14 +152,10 @@ def _run_replay_stages(context: ReplayStageContext) -> tuple[dict[str, Any], Any
     return _replay_result(context, state)
 
 
-# LLM: _replay_result 固定回放返回形状；调用方按位置解包。
-# 函数用途: 返回 summary、findings、case、route 和 traced evidence。
 def _replay_result(context: ReplayStageContext, state: ReplayState) -> tuple[dict[str, Any], Any, Any, Any, Any]:
     return context.summary, state.findings, state.case, state.route, state.traced
 
 
-# LLM: _run_ingest_replay 负责 fixture 入库阶段；source_id 和格式来自入口参数。
-# 函数用途: 调用 ingest stage，将 fixture 事件写入本次 replay store。
 def _run_ingest_replay(context: ReplayStageContext) -> bool:
     ok, _ = _run_stage(
         context.summary,
@@ -192,8 +170,6 @@ def _run_ingest_replay(context: ReplayStageContext) -> bool:
     return ok
 
 
-# LLM: _run_detector_replay 负责检测阶段；失败时仍补充 total_events。
-# 函数用途: 从本地 store 生成 findings，并在异常路径补齐事件计数。
 def _run_detector_replay(context: ReplayStageContext, state: ReplayState) -> bool:
     ok, state.findings = _run_stage(context.summary, "detector", lambda: run_detector_stage(context.store_root))
     if not ok:
@@ -203,8 +179,6 @@ def _run_detector_replay(context: ReplayStageContext, state: ReplayState) -> boo
     return ok
 
 
-# LLM: _run_case_replay 负责 case 生成阶段；依赖 detector 输出的 findings。
-# 函数用途: 根据 findings 和 store 生成 case 产物并写入 artifacts。
 def _run_case_replay(context: ReplayStageContext, state: ReplayState) -> bool:
     ok, state.case = _run_stage(
         context.summary,
@@ -214,8 +188,6 @@ def _run_case_replay(context: ReplayStageContext, state: ReplayState) -> bool:
     return ok
 
 
-# LLM: _run_route_replay 负责路由阶段；产物供报告阶段引用。
-# 函数用途: 根据 case 和 findings 生成 route 文件并更新 summary。
 def _run_route_replay(context: ReplayStageContext, state: ReplayState) -> bool:
     ok, state.route = _run_stage(
         context.summary,
@@ -225,8 +197,6 @@ def _run_route_replay(context: ReplayStageContext, state: ReplayState) -> bool:
     return ok
 
 
-# LLM: _run_evidence_replay 负责证据追踪阶段；时间窗和 limit 来自参数。
-# 函数用途: 查询 evidence refs 和路径，并支持受控失败模拟。
 def _run_evidence_replay(context: ReplayStageContext, state: ReplayState) -> bool:
     ok, state.traced = _run_stage(
         context.summary,
@@ -245,8 +215,6 @@ def _run_evidence_replay(context: ReplayStageContext, state: ReplayState) -> boo
     return ok
 
 
-# LLM: _run_report_replay 负责最终报告阶段；它通过后 summary 才能 ok。
-# 函数用途: 汇总 case、route、findings 和 evidence，写出报告产物。
 def _run_report_replay(context: ReplayStageContext, state: ReplayState) -> bool:
     ok, _ = _run_stage(
         context.summary,
@@ -265,8 +233,6 @@ def _run_report_replay(context: ReplayStageContext, state: ReplayState) -> bool:
     return ok
 
 
-# LLM: run_security_alert_v1_replay 是外部可调用回放入口；验收脚本依赖它。
-# 函数用途: 准备输出目录，校验失败模拟参数，运行所有 replay 阶段并写 summary。
 def run_security_alert_v1_replay(
     params: RunSecurityAlertV1ReplayParams,
 ) -> dict[str, Any]:
@@ -292,8 +258,6 @@ def run_security_alert_v1_replay(
     return _write_summary(summary)
 
 
-# LLM: _record_failure 统一失败字段；Live Lab 报告按这些字段展示错误。
-# 函数用途: 写入 failed_stage、error_type、error_message 和 stage fail 状态。
 def _record_failure(summary: dict[str, Any], stage: str, exc: Exception) -> None:
     summary["ok"] = False
     summary["failed_stage"] = stage
@@ -303,15 +267,11 @@ def _record_failure(summary: dict[str, Any], stage: str, exc: Exception) -> None
     summary["error"] = f"{type(exc).__name__}: {exc}"
 
 
-# LLM: new_output_root 生成默认验收输出目录；时间戳加短 uuid 避免覆盖。
-# 函数用途: 返回 validation/live_lab/log_analysis_replay 下的新 run 目录。
 def new_output_root() -> Path:
     stamp = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     return DEFAULT_OUTPUTS_DIR / stamp
 
 
-# LLM: build_parser 定义离线回放 CLI；默认 fixture 和时间窗在这里暴露。
-# 函数用途: 注册 fixture、格式、输出目录、source、时间窗和 limit 参数。
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Replay the SecurityAlertV1 log-analysis scenario offline."
@@ -334,8 +294,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# LLM: main 是离线回放脚本入口；退出码 2 表示回放未完整通过。
-# 函数用途: 解析 CLI 参数，运行 SecurityAlertV1 replay，并打印 JSON summary。
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     summary = run_security_alert_v1_replay(

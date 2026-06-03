@@ -1,11 +1,8 @@
-# LLM: Main-agent artifact Live Lab cases validate long output readback without subagent delegation.
-# 模块用途: 提供主代理长资料读回真实模型测试；case 会关闭小傻妞，专门观察主代理自己能否续读证据。
 
 from __future__ import annotations
 
 """main-agent artifact E2E cases.
 
-给人看的解释：
 这里的测试会准备一个比较长的资料文件，让主代理自己找远距离证据。
 它用来检查“大输出外置、分片续读、报告验收”这一类能力。
 """
@@ -19,8 +16,6 @@ from .main_agent_complex_case import _ensure_main_agent_only
 ARTIFACT_READBACK_BYTES = 96 * 1024
 
 
-# LLM: case_main_artifact_readback verifies long tool output can be resumed from refs instead of guessed.
-# 函数用途: 准备一个超过普通读取窗口的资料文件，让主代理找远处证据并写续读报告。
 def case_main_artifact_readback(lab) -> None:
     lab.section("CASE main_artifact_readback")
     _ensure_main_agent_only(lab)
@@ -38,8 +33,6 @@ def case_main_artifact_readback(lab) -> None:
     lab.log(f"artifact_readback_report={output}")
 
 
-# LLM: case_main_compact_resume_roundtrip verifies compact apply and auto resume after a real root-agent run.
-# 函数用途: 对刚完成的长输出读回任务补齐结构化事实，执行 compact apply，再验证 resume 交接包可继续。
 def case_main_compact_resume_roundtrip(lab) -> None:
     lab.section("CASE main_compact_resume_roundtrip")
     fact_id = _latest_artifact_readback_fact_id(lab.fixture_root)
@@ -83,8 +76,6 @@ def case_main_compact_resume_roundtrip(lab) -> None:
     lab.log(f"compact_resume_apply_id={apply_id}")
 
 
-# LLM: _main_artifact_readback_prompt asks in normal user language for evidence across a long file.
-# 函数用途: 生成长输出读回测试提示词，要求主代理遇到片段化读取时继续找完整证据。
 def _main_artifact_readback_prompt() -> str:
     return textwrap.dedent(
         """
@@ -100,8 +91,6 @@ def _main_artifact_readback_prompt() -> str:
     ).strip()
 
 
-# LLM: _seed_artifact_readback_source creates far-apart anchors so a short preview is insufficient.
-# 函数用途: 生成长资料文件，把三个证据点放在开头、中段和末尾附近，测试续读能力。
 def _seed_artifact_readback_source(path: Path) -> None:
     if path.exists() and path.stat().st_size >= ARTIFACT_READBACK_BYTES:
         return
@@ -123,8 +112,6 @@ def _seed_artifact_readback_source(path: Path) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-# LLM: _assert_artifact_readback_report validates that the agent recovered all seeded distant evidence.
-# 函数用途: 检查长输出续读报告是否包含三处远距离证据，并且不是一句话糊弄。
 def _assert_artifact_readback_report(output: Path) -> None:
     if not output.exists():
         raise RuntimeError(f"长输出读回报告不存在: {output}")
@@ -138,8 +125,6 @@ def _assert_artifact_readback_report(output: Path) -> None:
         raise RuntimeError("长输出读回报告过短，不足以说明证据、风险和建议。")
 
 
-# LLM: _latest_artifact_readback_fact_id reads structured runtime facts instead of guessing from final prose.
-# 函数用途: 找到刚才长输出读回 run 的 request_id，供 compact apply 用同一范围过滤。
 def _latest_artifact_readback_fact_id(fixture_root: Path) -> str:
     roots = sorted((fixture_root / "memory_archive" / "runtime_facts").glob("*/task.json"))
     matches = [
@@ -152,8 +137,6 @@ def _latest_artifact_readback_fact_id(fixture_root: Path) -> str:
     return sorted(matches)[-1][1]
 
 
-# LLM: _run_json_command preserves Live Lab transcript output while giving cases structured payloads.
-# 函数用途: 执行 JSON CLI 命令、保存 stdout，并把结果解析成 dict 供机器验收。
 def _run_json_command(lab, name: str, command: list[str], *, timeout: float) -> dict:
     response = lab.run_command(command, timeout=timeout)
     (lab.responses_dir / f"{name}.stdout.json").write_text(response.stdout, encoding="utf-8")
@@ -166,8 +149,6 @@ def _run_json_command(lab, name: str, command: list[str], *, timeout: float) -> 
     return payload
 
 
-# LLM: _assert_compact_resume_roundtrip_payload gates compact/resume by structured fields and refs only.
-# 函数用途: 检查 apply、work_state、self-check、handoff 和 action guard 是否形成可续接交接包。
 def _assert_compact_resume_roundtrip_payload(apply_payload: dict, resume_payload: dict) -> None:
     if not apply_payload.get("ok"):
         raise RuntimeError("compact apply 没有成功。")
@@ -193,16 +174,12 @@ def _assert_compact_resume_roundtrip_payload(apply_payload: dict, resume_payload
         raise RuntimeError("compact resume 没有推荐读取路径。")
 
 
-# LLM: _assert_recorded_field keeps compact work-state assertions schema-based and reusable.
-# 函数用途: 检查 work_state 的验收、约束、测试字段来自记录事实源，而不是空默认值。
 def _assert_recorded_field(work_state: dict, field: str, status_key: str) -> None:
     payload = work_state.get(field, {})
     if payload.get(status_key) != "recorded" or not payload.get("items") or not payload.get("source_paths"):
         raise RuntimeError(f"compact work_state 字段 {field} 没有结构化事实源: {payload}")
 
 
-# LLM: _read_text tolerates missing or unreadable fact files while scanning candidates.
-# 函数用途: 读取短小 task.json 文本；失败时返回空字符串，避免候选扫描中断。
 def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="replace")

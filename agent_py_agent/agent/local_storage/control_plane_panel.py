@@ -1,5 +1,3 @@
-# LLM: Shared progress panel composes runtime query projections without becoming a fact source.
-# 模块用途: 将 LocalStore 控制面查询整理成上级代理/接管代理可读的共享进度状态包。
 
 from __future__ import annotations
 
@@ -10,12 +8,8 @@ from .control_plane_models import AgentRunRecord, AgentRuntimeQueryContext, Shar
 _BLOCKED_STATUSES = {"BLOCKED"}
 
 
-# LLM: LocalStoreSharedProgressPanelMixin builds panel read models from existing control-plane queries.
-# 类用途: 为 LocalStore 增加共享进度面板查询，不新增事实源。
 class LocalStoreSharedProgressPanelMixin:
 
-    # LLM: query_shared_progress_panel joins runtime query, blocked runs, and recovery refs.
-    # 函数用途: 查询共享进度面板所需的最小状态包。
     def query_shared_progress_panel(self, context: AgentRuntimeQueryContext) -> SharedProgressPanel:
         runtime = self.query_agent_runtime(context)
         runs = list(runtime.report.runs)
@@ -36,14 +30,10 @@ class LocalStoreSharedProgressPanelMixin:
         )
 
 
-# LLM: _blocked_runs keeps panel risk highlights scoped to visible runs.
-# 函数用途: 从面板可见 run 中筛选阻塞项。
 def _blocked_runs(runs: list[AgentRunRecord]) -> list[AgentRunRecord]:
     return [run for run in runs if run.status in _BLOCKED_STATUSES]
 
 
-# LLM: _inheritance_manifest_refs exposes audit refs without loading file contents.
-# 函数用途: 收集可见 run 的 inheritance manifest 引用并去重。
 def _inheritance_manifest_refs(runs: list[AgentRunRecord]) -> list[str]:
     refs: list[str] = []
     for run in runs:
@@ -53,8 +43,6 @@ def _inheritance_manifest_refs(runs: list[AgentRunRecord]) -> list[str]:
     return refs
 
 
-# LLM: _failure_handoff_refs exposes recovery refs without loading failure handoff files.
-# 函数用途: 收集可见 run 的 failure handoff 引用并去重。
 def _failure_handoff_refs(runs: list[AgentRunRecord]) -> list[str]:
     refs: list[str] = []
     for run in runs:
@@ -64,8 +52,6 @@ def _failure_handoff_refs(runs: list[AgentRunRecord]) -> list[str]:
     return refs
 
 
-# LLM: _takeover_readiness_refs exposes recovery packet refs without loading packet files.
-# 函数用途: 收集可见 run 的 takeover readiness 引用并去重。
 def _takeover_readiness_refs(runs: list[AgentRunRecord]) -> list[str]:
     refs: list[str] = []
     for run in runs:

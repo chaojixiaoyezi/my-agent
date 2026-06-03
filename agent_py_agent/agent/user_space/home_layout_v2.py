@@ -1,5 +1,3 @@
-# LLM: V2 home layout extensions keep owner/shared/system paths out of the legacy resolver.
-# 模块用途: 提供 my-agent-home.v2 的路径字段、目录清单和默认种子配置。
 
 from __future__ import annotations
 

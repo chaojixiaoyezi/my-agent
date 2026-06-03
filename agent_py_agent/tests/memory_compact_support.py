@@ -1,5 +1,3 @@
-# LLM: Shared compact test fixtures keep behavior tests small without hiding production logic.
-# 模块用途: 为 memory compact 测试写入固定 raw/snapshot/token 夹具和常用断言，避免单个测试文件继续膨胀。
 
 from __future__ import annotations
 
@@ -23,6 +21,7 @@ def write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
         'workspace_root: "workspace"\n'
+        f'my_agent_home: "{(tmp_path / "home").as_posix()}"\n'
         'model_backend: "echo"\n'
         'subagent_workspace: "subagents"\n'
         'local_store_path: "local_store/local.db"\n'
@@ -35,6 +34,10 @@ def write_config(tmp_path: Path) -> Path:
 
 def workspace(config_path: Path) -> Path:
     return config_path.parent / "workspace"
+
+
+def owner_home(config_path: Path) -> Path:
+    return config_path.parent / "home" / "owners" / "local" / "main"
 
 
 def write_compact_fixture(root: Path) -> None:

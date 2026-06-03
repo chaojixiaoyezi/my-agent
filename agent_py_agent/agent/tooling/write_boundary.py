@@ -1,11 +1,8 @@
-# LLM: 这是写工具的安全闸口，路径归一和错误解释必须保持保守。
-# 模块用途: 子代理写入边界校验，阻止文件工具越过授权路径。
 
 from __future__ import annotations
 
 """enforces subagent write scopes before mutating filesystem tools run.
 
-给人看的解释：
 这个文件是一道真正的写入门禁。
 prompt 里说'只能写这个目录'只是提醒，真正防止越界写文件的是这里的路径检查。
 它会检查允许目录、禁止目录、锁定文件，确保子代理不能改不该改的地方。
@@ -49,8 +46,6 @@ _REPORT_ARTIFACT_NAME_MARKERS = (
 )
 
 
-# LLM: _path_text 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 path_text 步骤，并保持调用方依赖的数据形状。
 def _path_text(raw_path: object, *, label: str = "path") -> str:
     if raw_path is None:
         raise ValueError(f"{label} 参数缺失")
@@ -68,8 +63,6 @@ def _path_text(raw_path: object, *, label: str = "path") -> str:
     return text
 
 
-# LLM: validate_write_boundary 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 validate_write_boundary 步骤，并保持调用方依赖的数据形状。
 def validate_write_boundary(
     tool_name: str,
     params: dict[str, Any],
@@ -146,8 +139,6 @@ def _patch_declared_paths(patch: str) -> list[str]:
     return [path for path in paths if path]
 
 
-# LLM: _patch_declared_path extracts one filesystem path from a patch control line.
-# 函数用途: 让 write boundary 能在 apply_patch 真执行前检查全部声明路径。
 def _patch_declared_path(raw: str) -> str:
     prefixes = (
         "*** Add File: ",
@@ -161,8 +152,6 @@ def _patch_declared_path(raw: str) -> str:
     return ""
 
 
-# LLM: _internal_output_json_error keeps runner bookkeeping out of user deliverable roots.
-# 函数用途: 阻止子代理把内部收口 output.json 写进产品目录；真实 task.output_json 仍然允许写。
 def _internal_output_json_error(
     target: Path,
     write_boundary: dict[str, object],
@@ -185,8 +174,6 @@ def _internal_output_json_error(
     )
 
 
-# LLM: _product_write_policy_error separates inherited authority from direct business writes.
-# 函数用途: 上层 coordinator/tester/reviewer 可以拥有产物目录权限用于检查和救援，但默认不能直接写业务产物。
 def _product_write_policy_error(
     target: Path,
     write_boundary: dict[str, object],
@@ -212,8 +199,6 @@ def _product_write_policy_error(
     )
 
 
-# LLM: _is_report_artifact_target lets QA/acceptance roles leave visible evidence in deliverables.
-# 函数用途: 识别报告、测试、验收、状态、发现等交接证据文件；这些不是业务正文产物。
 def _is_report_artifact_target(target: Path) -> bool:
     name = target.name.lower()
     if name == _INTERNAL_OUTPUT_JSON_NAME:
@@ -223,8 +208,6 @@ def _is_report_artifact_target(target: Path) -> bool:
     return any(marker in name for marker in _REPORT_ARTIFACT_NAME_MARKERS)
 
 
-# LLM: _forbidden_boundary_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 forbidden_boundary_error 步骤，并保持调用方依赖的数据形状。
 def _forbidden_boundary_error(
     target: Path,
     allowed_roots: list[Path],
@@ -241,16 +224,12 @@ def _forbidden_boundary_error(
     return ""
 
 
-# LLM: _forbidden_root_blocks_target 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 forbidden_root_blocks_target 步骤，并保持调用方依赖的数据形状。
 def _forbidden_root_blocks_target(target: Path, root: Path, allowed_roots: list[Path]) -> bool:
     if not _is_relative_to(target, root):
         return False
     return any(_is_relative_to(root, aroot) for aroot in allowed_roots)
 
 
-# LLM: _locked_boundary_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 locked_boundary_error 步骤，并保持调用方依赖的数据形状。
 def _locked_boundary_error(target: Path, write_boundary: dict[str, object], workspace_root: Path) -> str:
     locked_paths = _boundary_paths(write_boundary.get("locked_files"), workspace_root)
     for locked in locked_paths:
@@ -262,8 +241,6 @@ def _locked_boundary_error(target: Path, write_boundary: dict[str, object], work
     return ""
 
 
-# LLM: _boundary_paths 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 boundary_paths 步骤，并保持调用方依赖的数据形状。
 def _boundary_paths(
     raw_paths: object,
     workspace_root: Path,
@@ -280,8 +257,6 @@ def _boundary_paths(
     return paths
 
 
-# LLM: _resolve_boundary_path 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 解析 resolve_boundary_path 并确认结果仍在允许边界内。
 def _resolve_boundary_path(
     raw_path: object,
     workspace_root: Path,
@@ -299,8 +274,6 @@ def _resolve_boundary_path(
     return resolved
 
 
-# LLM: _is_relative_to 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 判断 is_relative_to 是否满足安全或状态条件。
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -309,8 +282,6 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
-# LLM: _normalized_workspace_roots 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 解析并去重工作区根目录，保留第一个主工作区。
 def _normalized_workspace_roots(primary: Path, roots: list[Path] | None) -> list[Path]:
     resolved: list[Path] = []
     for raw in [primary, *(roots or [])]:
@@ -320,8 +291,6 @@ def _normalized_workspace_roots(primary: Path, roots: list[Path] | None) -> list
     return resolved
 
 
-# LLM: _display_path 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 把内部路径转换成调用方可读的展示路径。
 def _display_path(path: Path, workspace_root: Path) -> str:
     try:
         return str(path.relative_to(workspace_root)).replace("\\", "/")

@@ -1,5 +1,3 @@
-# LLM: User-space module; keep per-user path and migration behavior stable.
-# 模块用途: 管理用户隔离目录、路径推导和旧数据迁移。
 
 from __future__ import annotations
 
@@ -34,13 +32,18 @@ from .home_doctor import build_home_doctor_report
 from .home_index_rebuild import HomeIndexRebuildResult, rebuild_home_indexes
 from .home_indexes import (
     AgentIndexRef,
+    IndexRefsReport,
     RunIndexRef,
     TaskIndexRef,
     dangling_index_refs,
     latest_agent_refs,
+    latest_agent_refs_report,
     latest_owner_refs,
+    latest_owner_refs_report,
     latest_run_refs,
+    latest_run_refs_report,
     latest_task_refs,
+    latest_task_refs_report,
     register_agent_ref,
     register_owner_ref,
     register_run_ref,
@@ -66,10 +69,15 @@ from .home_retention import (
     plan_owner_retention,
 )
 from .identity_store import (
+    ProviderIdentityLookupReport,
     ProviderIdentityRecord,
+    ProviderOwnerResolutionReport,
     ensure_canonical_user_profile,
     link_provider_identity,
     lookup_provider_identity,
+    lookup_provider_identity_report,
+    resolve_owner_from_provider_identity,
+    resolve_owner_from_provider_identity_report,
 )
 from .legacy_user_paths import LegacyUserPaths, get_legacy_admin_paths, get_legacy_user_paths
 from .manager import UserSpaceManager
@@ -78,8 +86,10 @@ from .owner_policy import (
     EffectiveOwnerPolicy,
     OwnerDiskUsage,
     OwnerPolicyBundle,
+    OwnerPolicyBundleReport,
     owner_disk_usage,
     read_owner_policy_bundle,
+    read_owner_policy_bundle_report,
     resolve_effective_owner_policy,
 )
 from .owner_resolver import (
@@ -101,9 +111,11 @@ from .task_compact_rollup import TaskCompactRollupResult, sync_task_compact_roll
 from .temporary_grants import (
     CreateTemporaryGrant,
     OwnerTemporaryGrant,
+    TemporaryGrantsReport,
     create_temporary_grant,
     expire_temporary_grants,
     list_temporary_grants,
+    list_temporary_grants_report,
 )
 
 __all__ = [
@@ -125,9 +137,13 @@ __all__ = [
     "OwnerDiskUsage",
     "OwnerIdentity",
     "OwnerPolicyBundle",
+    "OwnerPolicyBundleReport",
     "OwnerRetentionPlan",
     "OwnerTemporaryGrant",
+    "TemporaryGrantsReport",
     "EffectiveOwnerPolicy",
+    "ProviderIdentityLookupReport",
+    "ProviderOwnerResolutionReport",
     "ProviderIdentityRecord",
     "LegacyUserPaths",
     "UserSpaceManager",
@@ -136,6 +152,7 @@ __all__ = [
     "MainContextBundleResult",
     "RunWorkspacePaths",
     "AgentIndexRef",
+    "IndexRefsReport",
     "RunIndexRef",
     "RetentionAction",
     "SkillCandidate",
@@ -169,18 +186,25 @@ __all__ = [
     "latest_main_context_bundle_path",
     "latest_owner_refs",
     "latest_agent_refs",
+    "latest_agent_refs_report",
+    "latest_owner_refs_report",
     "latest_run_refs",
+    "latest_run_refs_report",
     "latest_task_refs",
+    "latest_task_refs_report",
     "link_provider_identity",
     "list_capability_requests",
     "list_temporary_grants",
+    "list_temporary_grants_report",
     "lookup_provider_identity",
+    "lookup_provider_identity_report",
     "migrate_to_user_space",
     "owner_identity_from_config",
     "owner_disk_usage",
     "plan_home_migration",
     "plan_owner_retention",
     "read_owner_policy_bundle",
+    "read_owner_policy_bundle_report",
     "register_owner_ref",
     "register_agent_ref",
     "register_run_ref",
@@ -191,6 +215,8 @@ __all__ = [
     "resolve_owner_capability",
     "resolve_my_agent_home",
     "resolve_owner_home",
+    "resolve_owner_from_provider_identity",
+    "resolve_owner_from_provider_identity_report",
     "sync_task_compact_rollup",
     "upsert_lesson_note",
 ]

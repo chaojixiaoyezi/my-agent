@@ -1,5 +1,3 @@
-# LLM: Path/URL/command gates block unsafe structured tool inputs before execution.
-# 模块用途: 对 path/url/command 机器字段做统一边界校验，覆盖 symlink 越界、file URL、私网 URL 和 shell 注入符。
 
 from __future__ import annotations
 
@@ -9,8 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from ...common.value_parsing import text_value as _text
 from ...path_access_policy import PathAccessPolicy
-from .command_policy import evaluate_command_policy
+from .command.policy import evaluate_command_policy
 from .models import GateDecision, GateFinding
 
 _PATH_KEYS = {"path", "file_path", "target_path", "output_path", "working_dir", "cwd", "directory"}
@@ -18,8 +17,6 @@ _URL_KEYS = {"url", "endpoint", "webhook_url"}
 _COMMAND_KEYS = {"command", "cmd", "argv"}
 _PRIVATE_HOSTS = {"localhost"}
 
-# LLM: PathUrlCommandFacts is the trusted input bundle for path, URL, and command gates.
-# 类用途: 保存工具 payload、workspace roots 和 gate policy，避免函数参数继续变宽。
 @dataclass(frozen=True)
 class PathUrlCommandFacts:
     payload: object
@@ -41,8 +38,6 @@ class PathFindingRequest:
     tool_name: str = ""
 
 
-# LLM: evaluate_path_url_command_gate checks structured path, URL, and command fields without reading prose.
-# 函数用途: 在工具入口统一阻断越界路径、私网/file URL 和未声明允许的 shell 操作符。
 def evaluate_path_url_command_gate(facts: PathUrlCommandFacts) -> GateDecision:
     data = facts.payload if isinstance(facts.payload, Mapping) else {}
     roots = _normalized_roots(facts.workspace_root, facts.workspace_roots)
@@ -59,8 +54,6 @@ def evaluate_path_url_command_gate(facts: PathUrlCommandFacts) -> GateDecision:
     return GateDecision.allow("path_url_command", evidence={"checked_fields": _checked_field_names(data)})
 
 
-# LLM: _collect_path_findings validates only known path fields and follows symlinks via Path.resolve.
-# 函数用途: 把路径字段归一到 workspace roots 内；解析后出界说明 symlink 或路径越权。
 def _collect_path_findings(
     data: Mapping[object, object],
     roots: list[Path],
@@ -74,8 +67,6 @@ def _collect_path_findings(
             findings.append(finding)
 
 
-# LLM: _collect_url_findings blocks local/private targets by parsing URL host fields.
-# 函数用途: 对 url/endpoint/webhook_url 等结构字段校验 scheme 和 host，不发起网络请求。
 def _collect_url_findings(
     data: Mapping[object, object],
     allowed_private_hosts: set[str],
@@ -87,8 +78,6 @@ def _collect_url_findings(
             findings.append(finding)
 
 
-# LLM: _collect_command_findings treats command fields as executable payloads, not explanatory text.
-# 函数用途: 复用共享 command policy 阻断危险 executable、危险参数模式和 shell 控制符。
 def _collect_command_findings(
     data: Mapping[object, object],
     allow_shell_operators: bool,
@@ -99,8 +88,6 @@ def _collect_command_findings(
         findings.extend(_command_findings(str(key), value, allow_shell_operators, allowed_commands))
 
 
-# LLM: _path_finding checks one path-like field value.
-# 函数用途: 把路径解析、symlink 判断和 workspace 边界判断封装成单值校验。
 def _path_finding(request: PathFindingRequest) -> GateFinding | None:
     text = _text(request.raw_path)
     if not text:
@@ -126,8 +113,6 @@ def _path_finding(request: PathFindingRequest) -> GateFinding | None:
     return None
 
 
-# LLM: _url_finding checks one URL-like field value.
-# 函数用途: 拒绝 file URL 和未 allowlist 的本机/私网地址。
 def _url_finding(field: str, raw_url: object, allowed_private_hosts: set[str]) -> GateFinding | None:
     parsed = urlparse(_text(raw_url))
     if parsed.scheme == "file":
@@ -138,8 +123,6 @@ def _url_finding(field: str, raw_url: object, allowed_private_hosts: set[str]) -
     return None
 
 
-# LLM: _command_findings adapts shared command policy findings into GateFinding records.
-# 函数用途: 给 path/url/command gate 输出统一 GateFinding，同时保留字段名和 policy evidence。
 def _command_findings(field: str, value: object, allow_shell_operators: bool, allowed_commands: Iterable[str] = ()) -> list[GateFinding]:
     decision = evaluate_command_policy(value, allow_shell_operators=allow_shell_operators, allowed_commands=allowed_commands)
     return [
@@ -149,8 +132,6 @@ def _command_findings(field: str, value: object, allow_shell_operators: bool, al
     ]
 
 
-# LLM: _normalized_roots resolves workspace roots once so every field uses the same path policy.
-# 函数用途: 生成去重后的 workspace root 列表，缺省时只使用 workspace_root。
 def _normalized_roots(workspace_root: Path, workspace_roots: list[Path] | None) -> list[Path]:
     raw = [workspace_root, *(workspace_roots or [])]
     roots: list[Path] = []
@@ -161,20 +142,14 @@ def _normalized_roots(workspace_root: Path, workspace_roots: list[Path] | None) 
     return roots or [Path.cwd().resolve(strict=False)]
 
 
-# LLM: _matching_fields yields only known machine fields from the payload.
-# 函数用途: 将字段过滤与各类 gate 逻辑分离，避免 collector 函数嵌套过深。
 def _matching_fields(data: Mapping[object, object], names: set[str]) -> list[tuple[object, object]]:
     return [(key, value) for key, value in data.items() if str(key) in names]
 
 
-# LLM: _matching_values flattens list-valued fields before gate-specific checks.
-# 函数用途: 让 path/url collector 保持单层循环，避免边界校验函数继续变厚。
 def _matching_values(data: Mapping[object, object], names: set[str]) -> list[tuple[str, object]]:
     return [(str(key), item) for key, value in _matching_fields(data, names) for item in _iter_values(value)]
 
 
-# LLM: _resolve_path wraps Path.resolve failures as None for gate findings.
-# 函数用途: 路径解析失败时不抛异常，交给调用方转成结构化 finding。
 def _resolve_path(path: Path) -> Path | None:
     try:
         return path.resolve(strict=False)
@@ -203,8 +178,6 @@ def _lexically_under_any_root(path: Path, roots: list[Path]) -> bool:
     return False
 
 
-# LLM: _is_private_host handles localhost, IPv4 shorthand, IPv6, private, loopback, and link-local hosts.
-# 函数用途: 本地判断 host 是否指向内网或本机地址，不依赖 DNS 解析。
 def _is_private_host(host: str) -> bool:
     normalized = _normalize_host(host)
     if normalized in _PRIVATE_HOSTS:
@@ -222,8 +195,6 @@ def _is_private_host(host: str) -> bool:
     return address.is_private or address.is_loopback or address.is_link_local or address.is_unspecified
 
 
-# LLM: _numeric_ipv4_host converts decimal IPv4 host notation into dotted quad for policy checks.
-# 函数用途: 覆盖 2130706433 这类 localhost 绕过写法。
 def _numeric_ipv4_host(host: str) -> str:
     if not host.isdigit():
         return ""
@@ -236,8 +207,6 @@ def _numeric_ipv4_host(host: str) -> str:
     return ".".join(str((value >> shift) & 0xFF) for shift in (24, 16, 8, 0))
 
 
-# LLM: _shorthand_ipv4_host handles inet_aton-style dotted shorthand such as 127.1.
-# 函数用途: 将 1-3 段 IPv4 简写归一为四段，防止 localhost 私网绕过。
 def _shorthand_ipv4_host(host: str) -> str:
     parts = host.split(".")
     if not 1 < len(parts) < 4 or not all(part.isdigit() for part in parts):
@@ -252,33 +221,18 @@ def _shorthand_ipv4_host(host: str) -> str:
     return ".".join(str(num) for num in nums)
 
 
-# LLM: _checked_field_names returns machine field names only for compact gate evidence.
-# 函数用途: 给通过结果记录检查过的字段名，避免把参数正文塞进审计。
 def _checked_field_names(data: Mapping[object, object]) -> list[str]:
     keys = _PATH_KEYS | _URL_KEYS | _COMMAND_KEYS | {"urls"}
     return sorted(str(key) for key in data.keys() if str(key) in keys)
 
 
-# LLM: _iter_values normalizes scalar/list payload fields.
-# 函数用途: 让 path/url gate 统一遍历单值和数组值字段。
 def _iter_values(value: object) -> list[object]:
     return list(value) if isinstance(value, list) else [value]
 
-
-# LLM: _text converts structured scalar fields into trimmed strings.
-# 函数用途: 只做字段值归一化，不扫描普通说明文本。
-def _text(value: object) -> str:
-    return str(value or "").strip()
-
-
-# LLM: _normalize_host canonicalizes host text for private-address checks.
-# 函数用途: 统一大小写和 IPv6 方括号，供 URL gate 判断 allowlist。
 def _normalize_host(value: object) -> str:
     return _text(value).lower().strip("[]")
 
 
-# LLM: _under_any_root checks resolved paths against allowed roots.
-# 函数用途: 判断路径是否在任一授权 workspace/root 内。
 def _under_any_root(path: Path, roots: list[Path]) -> bool:
     for root in roots:
         try:
@@ -289,8 +243,6 @@ def _under_any_root(path: Path, roots: list[Path]) -> bool:
     return False
 
 
-# LLM: _under_any_root_lexical detects symlink escapes from an otherwise allowed lexical path.
-# 函数用途: 区分普通 workspace 外路径和“字面在 root 下但 resolve 后逃逸”的 symlink。
 def _under_any_root_lexical(path: Path, roots: list[Path]) -> bool:
     for root in roots:
         try:

@@ -1,5 +1,3 @@
-# LLM: Tool-output fail-safe checkpoints run before large outputs are externalized.
-# 模块用途: 在黑盒/大工具输出写 artifact 前留下恢复快照，避免外置失败时什么都没留下。
 
 from __future__ import annotations
 
@@ -14,8 +12,6 @@ from ..memory_archive import ExternalizeToolOutputRequest, snapshots
 FAIL_SAFE_NEXT_ACTION = "先读取工具输出 artifact 摘要和 fail-safe checkpoint，再决定是否把内容切片读回 prompt。"
 
 
-# LLM: write_tool_output_fail_safe_checkpoint writes metadata only, never the full tool output body.
-# 函数用途: 大工具输出外置前写恢复快照，返回可合并到归档记录的状态字段。
 def write_tool_output_fail_safe_checkpoint(request: ExternalizeToolOutputRequest) -> dict[str, object]:
     output = str(request.output or "")
     if len(output) < max(0, int(request.min_chars)):
@@ -47,8 +43,6 @@ def write_tool_output_fail_safe_checkpoint(request: ExternalizeToolOutputRequest
     }
 
 
-# LLM: _empty_checkpoint returns the stable no-checkpoint shape used by archive metadata.
-# 函数用途: 在无需写快照或写快照失败时返回统一字段，避免调用方分支处理。
 def _empty_checkpoint() -> dict[str, object]:
     return {
         "fail_safe_checkpoint_written": False,
@@ -58,8 +52,6 @@ def _empty_checkpoint() -> dict[str, object]:
     }
 
 
-# LLM: _tool_call_snapshot records output identity without copying the output body.
-# 函数用途: 构建工具调用恢复元数据，只保存 hash、大小、工具名和调用 id。
 def _tool_call_snapshot(request: ExternalizeToolOutputRequest, output: str) -> dict[str, Any]:
     return {
         "tool": request.tool,

@@ -22,11 +22,6 @@ class _ActionTestMixin(SubAgentBaseMixin, SubAgentActionMixin):
     def __init__(self, workspace: Path):
         SubAgentBaseMixin.__init__(self, workspace=workspace)
 
-    def load(self, run_id: str) -> SubAgentTask:
-        path = self.workspace / run_id / "task.json"
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return SubAgentTask(**data)
-
     def _index_task(self, task) -> None:
         pass
 
@@ -289,7 +284,7 @@ class TestRecordAfterTaskAction:
     """测试 _record_after_task_action() 方法。"""
 
     def test_creates_apply_record(self, tmp_path: Path):
-        from agent_py_agent.agent.subagents.services.action_params import (
+        from agent_py_agent.agent.subagents.services.actions.params import (
             RecordAfterTaskActionParams,
         )
 

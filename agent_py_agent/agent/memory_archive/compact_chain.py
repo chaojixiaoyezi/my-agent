@@ -1,5 +1,3 @@
-# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
-# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
 
 from __future__ import annotations
 
@@ -18,9 +16,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import read_json_object, write_json_object
+from ..common.path_segments import safe_path_segment
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 CompactChainResult 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 CompactChainResult 的字段集合，在模块边界间传递结构化状态和结果。
+
 @dataclass(frozen=True)
 class CompactChainResult:
     """Paths for the latest run-local compact checkpoint chain."""
@@ -30,21 +29,16 @@ class CompactChainResult:
     latest_metadata_json: Path
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 SyncAgentRunCompactChainRequest 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 SyncAgentRunCompactChainRequest 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class SyncAgentRunCompactChainRequest:
     """Bundle inputs for appending one agent-run compact checkpoint."""
 
-    # LLM: compact chain writes remain additive; request bundling avoids hidden positional drift.
     task: Any
     agent_run_workspace_root: Path
     artifact_manifest_jsonl: Path
     now: float
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _CompactSnapshotContext 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 _CompactSnapshotContext 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _CompactSnapshotContext:
     event_id: str
@@ -58,8 +52,6 @@ class _CompactSnapshotContext:
     state_fingerprint: str
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 sync_agent_run_compact_chain 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 sync agent run compact chain 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def sync_agent_run_compact_chain(
     request: SyncAgentRunCompactChainRequest | Any = None,
     *,
@@ -101,16 +93,14 @@ def sync_agent_run_compact_chain(
     metadata = _metadata_payload(inputs.task, context)
     summary = _summary_markdown(inputs.task, metadata)
     _write_markdown(event_summary, summary)
-    _write_json(event_metadata, metadata)
+    write_json_object(event_metadata, metadata, sort_keys=False)
     _write_markdown(paths.latest_summary_md, summary)
-    _write_json(paths.latest_metadata_json, metadata)
+    write_json_object(paths.latest_metadata_json, metadata, sort_keys=False)
     _append_ledger(paths.ledger_jsonl, metadata)
     _merge_checkpoint(inputs.agent_run_workspace_root / "checkpoint.json", metadata)
     return paths
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _coerce_sync_request 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 coerce sync request 涉及的字段，让后续匹配和存储使用同一形态。
 def _coerce_sync_request(
     request: SyncAgentRunCompactChainRequest | Any,
     *,
@@ -140,16 +130,12 @@ def _coerce_sync_request(
     )
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 default_compact_chain_result 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 default compact chain result 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def default_compact_chain_result(agent_run_workspace_root: Path) -> CompactChainResult:
     """Return compact-chain paths without writing them."""
 
     return _compact_paths(agent_run_workspace_root)
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _compact_paths 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 compact paths 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _compact_paths(agent_run_workspace_root: Path) -> CompactChainResult:
     compactions_dir = agent_run_workspace_root / "compactions"
     return CompactChainResult(
@@ -159,8 +145,6 @@ def _compact_paths(agent_run_workspace_root: Path) -> CompactChainResult:
     )
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _metadata_payload 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 metadata payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _metadata_payload(
     task: Any,
     context: _CompactSnapshotContext,
@@ -186,8 +170,6 @@ def _metadata_payload(
     }
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _refs 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 refs 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _refs(
     task: Any,
     context: _CompactSnapshotContext,
@@ -206,8 +188,6 @@ def _refs(
     }
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _summary_markdown 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 summary markdown 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _summary_markdown(task: Any, metadata: dict[str, object]) -> str:
     refs = metadata.get("refs") if isinstance(metadata.get("refs"), dict) else {}
     blockers = "\n".join(f"- {item}" for item in list(getattr(task, "blockers", []) or [])) or "- 暂无"
@@ -233,12 +213,9 @@ def _summary_markdown(task: Any, metadata: dict[str, object]) -> str:
     )
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _merge_checkpoint 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 merge checkpoint 涉及的字段，让后续匹配和存储使用同一形态。
 def _merge_checkpoint(path: Path, metadata: dict[str, object]) -> None:
-    checkpoint = _read_json_object(path)
+    checkpoint = read_json_object(path)
     refs = metadata.get("refs") if isinstance(metadata.get("refs"), dict) else {}
-    # LLM: compact refs are additive recovery pointers; they never replace the original checkpoint facts.
     checkpoint["compact_chain"] = {
         "status": metadata.get("compact_status", ""),
         "last_event_id": metadata.get("event_id", ""),
@@ -249,17 +226,13 @@ def _merge_checkpoint(path: Path, metadata: dict[str, object]) -> None:
         "timeline_ref": refs.get("timeline", ""),
         "content_preserved": True,
     }
-    _write_json(path, checkpoint)
+    write_json_object(path, checkpoint, sort_keys=False)
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _next_sequence 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 next sequence 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _next_sequence(path: Path) -> int:
     return len(_ledger_lines(path)) + 1
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _last_event_id 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 last event id 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _last_event_id(path: Path) -> str:
     for line in reversed(_ledger_lines(path)):
         try:
@@ -272,14 +245,10 @@ def _last_event_id(path: Path) -> str:
     return ""
 
 
-# LLM: _latest_state_fingerprint lets saves skip no-op checkpoint compact entries.
-# 函数用途: 读取最新 checkpoint compact 的状态指纹；旧 metadata 没有该字段时返回空值以保持兼容。
 def _latest_state_fingerprint(path: Path) -> str:
-    return str(_read_json_object(path).get("state_fingerprint") or "")
+    return str(read_json_object(path).get("state_fingerprint") or "")
 
 
-# LLM: _state_fingerprint captures material recovery facts while ignoring updated_at/save churn.
-# 函数用途: 生成 checkpoint compact 去重指纹；只有任务状态、摘要、阻塞、产物引用或 artifact manifest 变化才追加事件。
 def _state_fingerprint(task: Any, artifact_manifest_jsonl: Path) -> str:
     payload = {
         "status": str(getattr(task, "status", "")),
@@ -295,8 +264,6 @@ def _state_fingerprint(task: Any, artifact_manifest_jsonl: Path) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-# LLM: _file_sha256 keeps artifact manifest changes visible without embedding manifest bodies in metadata.
-# 函数用途: 对 artifact manifest 做短指纹；文件不存在或读取失败时返回空字符串。
 def _file_sha256(path: Path) -> str:
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -304,61 +271,26 @@ def _file_sha256(path: Path) -> str:
         return ""
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _ledger_lines 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 ledger lines 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _ledger_lines(path: Path) -> list[str]:
     if not path.exists():
         return []
     return [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _append_ledger 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 写入或登记 append ledger 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_ledger(path: Path, payload: dict[str, object]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _read_json_object 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 读取 read json object 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
-def _read_json_object(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_json 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 写入或登记 write json 相关记录，集中处理目标路径、格式化和状态更新。
-def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_markdown 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 写入或登记 write markdown 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_markdown(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _event_id 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 event id 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _event_id(run_id: str, sequence: int) -> str:
-    return f"compact-{_safe_segment(run_id)}-{sequence:04d}"
+    return f"compact-{safe_path_segment(run_id, default='run', replacement='_')}-{sequence:04d}"
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _safe_segment 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 safe segment 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
-def _safe_segment(value: str) -> str:
-    return str(value or "run").replace("/", "_").replace("\\", "_").strip() or "run"
-
-
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _utc_iso 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 utc iso 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _utc_iso(value: float) -> str:
     return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
 

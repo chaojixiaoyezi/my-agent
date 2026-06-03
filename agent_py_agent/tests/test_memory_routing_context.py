@@ -222,8 +222,8 @@ def test_build_routed_memory_context_valid_index(tmp_path):
 
 def test_runtime_memory_routing_uses_home_index_when_project_index_missing(tmp_path):
     """普通用户主代理没有项目索引时，也能读 home 里的 HOT/lessons 路由。"""
-    from agent_py_agent.agent.agent_core.runtime_loop_models import RuntimeContextRequest
-    from agent_py_agent.agent.agent_core.runtime_loop_support import (
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeContextRequest
+    from agent_py_agent.agent.agent_core.runtime.loop_support import (
         _routed_memory_context_for_request,
     )
     from agent_py_agent.agent.config import AgentConfig

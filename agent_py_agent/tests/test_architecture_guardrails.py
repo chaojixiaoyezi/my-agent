@@ -18,11 +18,9 @@ STAR_IMPORT_BASELINE: dict[str, int] = {}
 ENTRYPOINT_LINE_LIMITS = {
     "agent_py_agent/cli/parser.py": 120,
     "agent_py_agent/cli/chat.py": 1017,
-    "agent_py_agent/agent/agent_core/dispatch_mixin.py": 895,
     "agent_py_agent/agent/subagents/manager_base.py": 751,
     "agent_py_agent/agent/subagents/manager_patch.py": 794,
     "agent_py_agent/agent/settings/config.py": 751,
-    "agent_py_agent/agent/memory_archive/query.py": 839,
     "agent_py_agent/agent/log_analysis/analytics/detectors/rules.py": 747,
 }
 
@@ -137,7 +135,7 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
         "_workflow_goal_fields",
         "_STRUCTURED_ROUTE_FIELD_RE",
     ],
-    "agent_py_agent/agent/agent_core/runner_ref_fields.py": [
+    "agent_py_agent/agent/agent_core/runner/ref_fields.py": [
         "_fallback_file_ref_roles",
         "_READ_REF_MARKERS",
         "_WRITE_REF_MARKERS",
@@ -151,25 +149,25 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
         "_WINDOWS_DIR_PATTERN",
         "_HOME_DIR_PATTERN",
     ],
-    "agent_py_agent/agent/agent_core/orchestration_create_constraints.py": [
+    "agent_py_agent/agent/agent_core/orchestration/create_constraints.py": [
         "goal_has_concrete_file_target",
         "goal_has_single_concrete_file_target",
         "_CONCRETE_FILE_TARGET_RE",
         "getattr(agent, \"_current_user_prompt\"",
         "_structured_parent_constraints(user_text)",
     ],
-    "agent_py_agent/agent/agent_core/orchestration_write_guard.py": [
+    "agent_py_agent/agent/agent_core/orchestration/write_guard.py": [
         "_goal_has_write_intent",
         "_path_candidate_is_write_target",
         "_WRITE_INTENT_WORDS",
         "_NEGATED_WRITE_MARKERS",
         "_TARGET_LEFT_MARKERS",
     ],
-    "agent_py_agent/agent/agent_core/orchestration_dispatch_scope.py": [
+    "agent_py_agent/agent/agent_core/orchestration/dispatch/scope.py": [
         "_CONCRETE_FILE_TARGET_RE",
         "_is_active_concrete_worker_task",
     ],
-    "agent_py_agent/agent/agent_core/subagent_finalize_helpers.py": [
+    "agent_py_agent/agent/agent_core/subagent/finalize_helpers.py": [
         "_structured_next_step_text",
         "_looks_like_tool_round_limit_text",
     ],
@@ -178,7 +176,7 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
         "_iter_write_dir_matches",
         "_write_dir_candidate_matches",
     ],
-    "agent_py_agent/agent/subagents/services/hierarchy_write_policy.py": [
+    "agent_py_agent/agent/subagents/services/hierarchy/write_policy.py": [
         "_extract_write_dirs",
     ],
     "agent_py_agent/agent/agent_core/spawn_role_seed.py": [
@@ -209,7 +207,7 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
         "_mentions_agent_word",
         "required_quality_roles_from_prompt",
     ],
-    "agent_py_agent/agent/subagents/services/hierarchy_context.py": [
+    "agent_py_agent/agent/subagents/services/hierarchy/context.py": [
         "_missing_relevant_file_terms",
         "_missing_forbidden_file_terms",
         "_missing_hierarchy_contract_terms",
@@ -227,7 +225,7 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
     "agent_py_agent/agent/subagents/patch/patch_apply_helpers.py": [
         "extract_patch_test_command",
     ],
-    "agent_py_agent/agent/subagents/services/patch_apply_test_commands.py": [
+    "agent_py_agent/agent/subagents/services/patch_apply/test_commands.py": [
         "for check in task.acceptance_checks",
     ],
     "agent_py_agent/agent/agent_core/failure_analysis_service.py": [
@@ -237,12 +235,12 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
         "getattr(task, \"goal\", \"\")",
         "for item in task.acceptance_checks",
     ],
-    "agent_py_agent/agent/agent_core/orchestration_create_idempotency.py": [
+    "agent_py_agent/agent/agent_core/orchestration/create_idempotency.py": [
         "_normalized_goal",
         "goal_output_refs(params.goal)",
         "goal_output_refs(candidate.goal)",
     ],
-    "agent_py_agent/agent/subagents/services/hierarchy_schedule_idempotency.py": [
+    "agent_py_agent/agent/subagents/services/hierarchy/schedule_idempotency.py": [
         "_normalized_goal",
         "request.goal == task.goal",
         "goal_output_refs(request.goal)",
@@ -252,14 +250,14 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
         "_child_spawn_text",
         "required_child_depth:",
     ],
-    "agent_py_agent/agent/subagents/execution_content_checks.py": [
+    "agent_py_agent/agent/subagents/execution/content_checks.py": [
         "_expected_literal_from_text",
         "item.get(\"summary\")",
         "item.get(\"name\")",
         "内容应为",
         "must be|should be",
     ],
-    "agent_py_agent/agent/subagents/execution_test_items.py": [
+    "agent_py_agent/agent/subagents/execution/test_items.py": [
         "artifact_summaries",
         "_artifact_summaries_by_path",
     ],

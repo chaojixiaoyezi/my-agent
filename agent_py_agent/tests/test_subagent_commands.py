@@ -334,7 +334,7 @@ class TestCmdSubagentsDispatch:
         args.config = str(tmp_path / "config.yaml")
         args.capability_config = str(tmp_path / "capability.yaml")
         args.apply = False
-        args.execute_runners = False
+        args.start_runners = False
         args.planner = False
         args.workflow_mode = None
         args.max_runners = None
@@ -365,15 +365,15 @@ class TestCmdSubagentsDispatch:
             result = cmd_subagents_dispatch(args)
             assert result == 0
 
-    def test_cmd_subagents_dispatch_execute_runners_requires_apply(self, tmp_path: Path):
-        """execute_runners 必须和 apply 一起使用。"""
+    def test_cmd_subagents_dispatch_start_runners_requires_mutate_state(self, tmp_path: Path):
+        """start_runners 必须和状态写回一起使用。"""
         from agent_py_agent.cli.subagents import cmd_subagents_dispatch
 
         args = MagicMock()
         args.config = str(tmp_path / "config.yaml")
         args.capability_config = str(tmp_path / "capability.yaml")
         args.apply = False
-        args.execute_runners = True  # 错误组合
+        args.start_runners = True  # 错误组合
         args.planner = False
         args.workflow_mode = None
         args.max_runners = None

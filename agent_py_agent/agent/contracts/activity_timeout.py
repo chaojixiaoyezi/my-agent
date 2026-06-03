@@ -1,5 +1,3 @@
-# LLM: Activity timeout contracts separate idle failure from healthy long-running work.
-# 模块用途: 为长任务、真实模型 E2E 和恢复包提供机器可读的超时判断；只因无活动暂停，不因总耗时长直接杀任务。
 
 from __future__ import annotations
 
@@ -7,8 +5,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-# LLM: ActivityTimeoutPolicy bundles timeout thresholds without adding workflow-specific rules.
-# 类用途: 描述空闲超时和可选总时长提示；wall_timeout 不覆盖最近活动事实。
 @dataclass(frozen=True)
 class ActivityTimeoutPolicy:
     idle_timeout_seconds: int
@@ -16,8 +12,6 @@ class ActivityTimeoutPolicy:
     reserved: dict[str, Any] = field(default_factory=dict)
 
 
-# LLM: ActivitySnapshot is the structured state needed for one timeout decision.
-# 类用途: 保存任务开始时间、当前时间、最后活动时间、活动工具数和恢复引用。
 @dataclass(frozen=True)
 class ActivitySnapshot:
     started_at: float
@@ -29,8 +23,6 @@ class ActivitySnapshot:
     reserved: dict[str, Any] = field(default_factory=dict)
 
 
-# LLM: ActivityTimeoutDecision records whether to continue or write a recovery packet.
-# 类用途: 输出机器动作、原因和恢复引用；调用方不用解析错误文本决定下一步。
 @dataclass(frozen=True)
 class ActivityTimeoutDecision:
     action: str
@@ -40,8 +32,6 @@ class ActivityTimeoutDecision:
     wall_seconds: float = 0
     recovery_refs: dict[str, str] = field(default_factory=dict)
 
-    # LLM: to_dict gives logs and tests a stable timeout payload.
-    # 函数用途: 转成普通 dict，方便写入 ledger、checkpoint 或恢复包。
     def to_dict(self) -> dict[str, Any]:
         return {
             "action": self.action,
@@ -53,8 +43,6 @@ class ActivityTimeoutDecision:
         }
 
 
-# LLM: decide_activity_timeout implements 长期助手 activity-aware timeout behavior.
-# 函数用途: 最近仍有工具/模型活动时继续运行；真正空闲超过阈值时要求写恢复包并暂停。
 def decide_activity_timeout(policy: ActivityTimeoutPolicy, snapshot: ActivitySnapshot) -> ActivityTimeoutDecision:
     last_activity_at = snapshot.last_activity_at or snapshot.started_at
     idle_seconds = max(0.0, float(snapshot.now) - float(last_activity_at))
@@ -89,8 +77,6 @@ def decide_activity_timeout(policy: ActivityTimeoutPolicy, snapshot: ActivitySna
     )
 
 
-# LLM: _recovery_refs preserves continuation anchors without reading task prose.
-# 函数用途: 从 snapshot 提取 checkpoint/recovery 引用，空值不写入。
 def _recovery_refs(snapshot: ActivitySnapshot) -> dict[str, str]:
     refs: dict[str, str] = {}
     if snapshot.latest_checkpoint_ref:

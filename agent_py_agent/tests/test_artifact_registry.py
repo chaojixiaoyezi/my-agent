@@ -48,6 +48,35 @@ def test_artifact_registry_updates_same_artifact_id_path(tmp_path: Path):
     assert latest_artifact_records(tmp_path)["github_weekly"].path == str(second.resolve())
 
 
+def test_artifact_registry_reports_bad_rows_without_losing_good_records(tmp_path: Path):
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        latest_artifact_records_report,
+        register_artifact,
+        registry_path,
+    )
+
+    artifact = tmp_path / "outputs" / "report.md"
+    artifact.parent.mkdir()
+    artifact.write_text("ok", encoding="utf-8")
+    register_artifact(
+        ArtifactRegistration(
+            workspace_root=tmp_path,
+            path=artifact,
+            artifact_id="report",
+            run_id="run-1",
+        )
+    )
+    with registry_path(tmp_path).open("a", encoding="utf-8") as handle:
+        handle.write("{bad-json\n")
+
+    report = latest_artifact_records_report(tmp_path)
+
+    assert report.records["report"].path == str(artifact.resolve())
+    assert report.errors[0]["context"] == "artifact_registry.read_line"
+    assert report.errors[0]["category"] == "data_parse"
+
+
 def test_artifact_registry_records_logical_file_group(tmp_path: Path):
     from agent_py_agent.agent.artifacts.registry import (
         ArtifactGroupRegistration,
@@ -83,7 +112,7 @@ def test_artifact_registry_records_logical_file_group(tmp_path: Path):
 
 
 def test_closeout_prefers_registry_record_for_artifact_id_over_stale_contract_path(tmp_path: Path):
-    from agent_py_agent.agent.agent_core.main_agent_delivery_closeout_artifacts import (
+    from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import (
         DeliveryContractValidationRequest,
         _validate_contract_artifacts,
     )
@@ -127,7 +156,7 @@ def test_closeout_prefers_registry_record_for_artifact_id_over_stale_contract_pa
 
 
 def test_closeout_does_not_mark_invalid_artifact_ready(tmp_path: Path):
-    from agent_py_agent.agent.agent_core.main_agent_delivery_closeout_artifacts import (
+    from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import (
         DeliveryContractValidationRequest,
         _validate_contract_artifacts,
     )
@@ -158,6 +187,40 @@ def test_closeout_does_not_mark_invalid_artifact_ready(tmp_path: Path):
     record = latest_artifact_records(tmp_path)["final_workbook"]
     assert report["ok"] is False
     assert record.status == "invalid"
+
+
+def test_closeout_surfaces_registry_parse_error_in_artifact_report(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import (
+        DeliveryContractValidationRequest,
+        _validate_contract_artifacts,
+    )
+    from agent_py_agent.agent.artifacts.registry import registry_path
+
+    registry_path(tmp_path).parent.mkdir(parents=True)
+    registry_path(tmp_path).write_text("{bad-json\n", encoding="utf-8")
+    contract = {
+        "artifacts": [
+            {
+                "artifact_id": "missing_report",
+                "kind": "md",
+                "preferred_path": "outputs/missing.md",
+            }
+        ]
+    }
+
+    report = _validate_contract_artifacts(
+        DeliveryContractValidationRequest(
+            contract=contract,
+            artifacts=contract["artifacts"],
+            workspace_root=tmp_path,
+            params=_empty_tool_loop_params(),
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["registry_read_errors"][0]["context"] == "artifact_registry.read_line"
+    acceptance = report["artifacts"][0]["acceptance_report"]
+    assert acceptance["registry_read_errors"][0]["category"] == "data_parse"
 
 
 def test_closeout_ignores_legacy_manifest_and_requires_canonical_registry_for_group(tmp_path: Path):
@@ -219,7 +282,7 @@ def _file_group_contract() -> dict:
 
 
 def _validate_group_contract(tmp_path: Path) -> dict:
-    from agent_py_agent.agent.agent_core.main_agent_delivery_closeout_artifacts import (
+    from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import (
         DeliveryContractValidationRequest,
         _validate_contract_artifacts,
     )
@@ -278,7 +341,7 @@ def _register_site_group(tmp_path: Path, site: Path) -> None:
 
 
 def test_subagent_file_path_alias_is_recovered_as_artifact_item():
-    from agent_py_agent.agent.subagents.parsing_artifacts import artifact_items_from_payload
+    from agent_py_agent.agent.subagents.parsing.artifacts import artifact_items_from_payload
 
     items = artifact_items_from_payload(
         {
@@ -343,7 +406,7 @@ def test_write_file_result_exposes_machine_path_for_registry(tmp_path: Path):
 def test_tool_archive_registers_write_file_artifact(tmp_path: Path):
     from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
     from agent_py_agent.agent.agent_core.tool_call_archive_record import archive_tool_call_record
-    from agent_py_agent.agent.agent_core.tool_round_execution import ToolCallRecordParams
+    from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
     from agent_py_agent.agent.artifacts.registry import latest_artifact_records
     from agent_py_agent.agent.tools import WriteFileTool
 

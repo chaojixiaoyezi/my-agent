@@ -1,5 +1,3 @@
-# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
-# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
 
 from __future__ import annotations
 
@@ -25,8 +23,6 @@ except ImportError:  # pragma: no cover
     patch_stdout = None
 
 
-# LLM: TuiInputRefs 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass
 class TuiInputRefs:
     app_ref: list
@@ -38,8 +34,6 @@ class TuiInputRefs:
     stop_event: threading.Event
 
 
-# LLM: TuiStatusRefs 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass
 class TuiStatusRefs:
     state_lock: threading.Lock
@@ -50,8 +44,6 @@ class TuiStatusRefs:
     thinking_line_ref: list
 
 
-# LLM: TuiExitRefs 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass
 class TuiExitRefs:
     shutting_down_ref: list
@@ -61,8 +53,6 @@ class TuiExitRefs:
     stop_event: threading.Event
 
 
-# LLM: TuiLoopContext 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass
 class TuiLoopContext:
     app: object
@@ -76,8 +66,6 @@ CONTEXT_WINDOW = 200_000
 COLLAPSE_PREVIEW_CHARS = 900
 
 
-# LLM: _tui_get_status_text 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def _tui_get_status_text(
     refs: TuiStatusRefs,
     model: str,
@@ -97,8 +85,6 @@ def _tui_get_status_text(
     return " | ".join(pieces)
 
 
-# LLM: _tui_get_activity_text 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def _tui_get_activity_text(refs: TuiStatusRefs) -> str:
     with refs.state_lock:
         thinking = refs.thinking_line_ref[0] if refs.thinking_line_ref else ""
@@ -109,8 +95,6 @@ def _tui_get_activity_text(refs: TuiStatusRefs) -> str:
     return format_activity_text(thinking, started_at, running, now=time.perf_counter())
 
 
-# LLM: _tui_handle_expand_command 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def _tui_handle_expand_command(raw: str, assistant_outputs: list[str]) -> bool:
     from .input_loop import parse_expand_target
 
@@ -131,8 +115,6 @@ def _tui_handle_expand_command(raw: str, assistant_outputs: list[str]) -> bool:
     return True
 
 
-# LLM: _tui_request_exit 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def _tui_request_exit(refs: TuiExitRefs) -> None:
     refs.shutting_down_ref[0] = True
     with refs.state_lock:
@@ -142,8 +124,6 @@ def _tui_request_exit(refs: TuiExitRefs) -> None:
     refs.stop_event.set()
 
 
-# LLM: _make_tui_exit_refs 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_tui_exit_refs(params: TuiHandleCommandParams) -> TuiExitRefs:
     return TuiExitRefs(
         shutting_down_ref=params.shutting_down_ref,
@@ -154,8 +134,6 @@ def _make_tui_exit_refs(params: TuiHandleCommandParams) -> TuiExitRefs:
     )
 
 
-# LLM: _show_tui_status 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def _show_tui_status(params: TuiHandleCommandParams) -> None:
     import time
 
@@ -183,8 +161,6 @@ def _show_tui_status(params: TuiHandleCommandParams) -> None:
             _cprint(line)
 
 
-# LLM: _tui_handle_command 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
     from .input_loop import handle_common_slash_command, is_exit_command
     from .slash_command_types import SlashCommandContext
@@ -209,8 +185,6 @@ def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
     )
 
 
-# LLM: _run_tui_loop 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def _run_tui_loop(ctx: TuiLoopContext) -> None:
     from .rendering import set_tui_output_sink, set_tui_stream_sink
 
@@ -228,8 +202,6 @@ def _run_tui_loop(ctx: TuiLoopContext) -> None:
     ctx.session_manager.touch_session(ctx.current_session_id, channel="chat")
 
 
-# LLM: _make_tui_app_params 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_tui_app_params(
     run_config: TuiRunParams,
     assistant_outputs: list[str],
@@ -258,8 +230,6 @@ def _make_tui_app_params(
     )
 
 
-# LLM: _make_start_worker_params 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_start_worker_params(
     params: TuiRunParams,
     refs: TuiInputRefs,
@@ -289,8 +259,6 @@ def _make_start_worker_params(
     )
 
 
-# LLM: run_tui 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_tui(*, params: TuiRunParams) -> int:
     assistant_outputs: list[str] = []
     thinking_line_ref = [""]
@@ -325,8 +293,6 @@ def run_tui(*, params: TuiRunParams) -> int:
     return 0
 
 
-# LLM: _make_tui_app 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_tui_app(*, params: MakeTuiAppParams):
     from .tui_ui_setup import make_tui_app as _make_app
 

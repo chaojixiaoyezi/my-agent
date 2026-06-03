@@ -1,5 +1,3 @@
-# LLM: Main-agent foundation contract cases cover hard runtime contracts used by real E2E.
-# 模块用途: 提供模型调用账本、工具协议 v2 和通用文件写入的确定性验收用例。
 
 from __future__ import annotations
 
@@ -7,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from ..agent_core.model_call_monitor import (
+from ..agent_core.model.call_monitor import (
     FirstTokenTimeoutOptions,
     FirstTokenTimeoutParams,
     estimate_first_token_timeout,
@@ -27,8 +25,6 @@ from .tool_protocol_v2 import (
 )
 
 
-# LLM: case_model_call_ledger_timeout proves provider timing facts are structured.
-# 函数用途: 写入模型调用 started/timeout 账本，并验证动态首 token 预算会落到证据文件。
 def case_model_call_ledger_timeout(workspace: Path) -> MainAgentFoundationCaseResult:
     ledger = ModelCallLedger()
     ledger.started(_started_params())
@@ -60,8 +56,6 @@ def case_model_call_ledger_timeout(workspace: Path) -> MainAgentFoundationCaseRe
     )
 
 
-# LLM: case_tool_protocol_v2_envelope proves tool facts use machine envelopes.
-# 函数用途: 规范化工具调用和失败结果，验证 operation/idempotency/error/artifact 字段齐全。
 def case_tool_protocol_v2_envelope(workspace: Path) -> MainAgentFoundationCaseResult:
     call = normalize_tool_call(
         {
@@ -104,8 +98,6 @@ def case_tool_protocol_v2_envelope(workspace: Path) -> MainAgentFoundationCaseRe
     )
 
 
-# LLM: case_general_write_contract checks the two open-world write surfaces.
-# 函数用途: 验证 write_file 支持文本/二进制原子写入，apply_patch 支持局部文本编辑。
 def case_general_write_contract(workspace: Path) -> MainAgentFoundationCaseResult:
     case_dir = workspace / "general_write_contract"
     write_tool = WriteFileTool(case_dir)
@@ -135,8 +127,6 @@ def case_general_write_contract(workspace: Path) -> MainAgentFoundationCaseResul
     )
 
 
-# LLM: _started_params keeps the ledger test case body focused on behavior.
-# 函数用途: 返回 foundation 超时用例的模型调用 started 参数。
 def _started_params() -> ModelCallStartedParams:
     return ModelCallStartedParams(
         call_id="foundation-timeout",
@@ -149,8 +139,6 @@ def _started_params() -> ModelCallStartedParams:
     )
 
 
-# LLM: _timeout_params keeps timeout facts structured and reusable in the case.
-# 函数用途: 返回 provider_wall 超时事件参数。
 def _timeout_params() -> ModelCallTimeoutParams:
     return ModelCallTimeoutParams(
         call_id="foundation-timeout",
@@ -159,8 +147,6 @@ def _timeout_params() -> ModelCallTimeoutParams:
     )
 
 
-# LLM: _ledger_issues checks model-call ledger case outcomes without reading prose.
-# 函数用途: 根据结构化账本状态判断模型调用超时用例是否通过。
 def _ledger_issues(ledger: ModelCallLedger) -> list[str]:
     records = ledger.records()
     if records and records[0].status == "timed_out":
@@ -168,8 +154,6 @@ def _ledger_issues(ledger: ModelCallLedger) -> list[str]:
     return ["model call ledger did not record timeout"]
 
 
-# LLM: _write_general_write_evidence persists deterministic refs for generic write tools.
-# 函数用途: 写入通用写入确定性用例的证据 JSON。
 def _write_general_write_evidence(case_dir: Path, text_result: object, binary_result: object, patch_result: object) -> Path:
     evidence = case_dir / "evidence.json"
     text_target = case_dir / "out" / "report.txt"
@@ -189,8 +173,6 @@ def _write_general_write_evidence(case_dir: Path, text_result: object, binary_re
     return evidence
 
 
-# LLM: _general_write_issues checks generic write tool behavior through files and result flags.
-# 函数用途: 判断文本写入、二进制写入和 patch 修改是否符合合同。
 def _general_write_issues(case_dir: Path, text_result: object, binary_result: object, patch_result: object) -> list[str]:
     issues: list[str] = []
     if not all(bool(getattr(item, "ok", False)) for item in (text_result, binary_result, patch_result)):

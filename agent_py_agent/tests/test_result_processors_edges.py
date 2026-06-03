@@ -74,8 +74,6 @@ def test_process_structured_output_records_evidence_packets_and_findings(mock_ta
     assert mock_task.artifact_refs == ["artifact://raw-1"]
 
 
-# LLM: coverage records are the machine-readable replacement for parent prose like “sibling covered it”.
-# 函数用途: 验证 runner 输出的 coverage_records 会被解析并持久到 task.attributes，供验收和收口链路读取。
 def test_process_structured_output_records_coverage_records(mock_task):
     text = """
     [SUBAGENT_RESULT]
@@ -107,8 +105,6 @@ def test_process_structured_output_records_coverage_records(mock_task):
     }]
 
 
-# LLM: negative content-check evidence must use explicit schema rather than summary prose.
-# 函数用途: 子代理用 match_mode=not_contains 表示坏模式不存在时，最终收口按负向检查通过。
 def test_process_structured_output_normalizes_explicit_absent_pattern_evidence(mock_task):
     parsed = SubAgentParsedOutput(
         found=True,
@@ -131,8 +127,6 @@ def test_process_structured_output_normalizes_explicit_absent_pattern_evidence(m
     assert mock_task.evidence[0].ok is True
 
 
-# LLM: prose-only negative summaries are not enough to flip evidence state.
-# 函数用途: 防止代码层把“没有/无/不存在”这类自然语言摘要误当成业务验收合同。
 def test_process_structured_output_does_not_invert_natural_absent_summary(mock_task):
     parsed = SubAgentParsedOutput(
         found=True,
@@ -178,8 +172,6 @@ def test_process_structured_output_synthesizes_artifact_evidence_packet(mock_tas
     assert mock_task.evidence_packets[0].claim == "artifact produced: 包含精确内容 coordinator-seed-ok"
 
 
-# LLM: short artifact paths from real runners should become durable refs before parent closeout.
-# 函数用途: 覆盖 coordinator 输出 market_synthesis_report.md 这类短路径时，任务状态保存真实文件路径。
 def test_process_structured_output_normalizes_relative_artifact_refs(mock_task, tmp_path):
     task_dir = tmp_path / "subagent-run"
     task_dir.mkdir()
@@ -208,8 +200,6 @@ def test_process_structured_output_normalizes_relative_artifact_refs(mock_task, 
     assert mock_task.artifact_refs == [str(artifact)]
 
 
-# LLM: model-provided evidence packet refs need the same path normalization as artifacts.
-# 函数用途: 覆盖 evidence_packets.artifact_refs 直接写短路径时，父级 closeout 不再出现相对/绝对混用。
 def test_process_structured_output_normalizes_evidence_packet_artifact_refs(mock_task, tmp_path):
     task_dir = tmp_path / "subagent-run"
     output_dir = task_dir / "output"
@@ -243,8 +233,6 @@ def test_process_structured_output_normalizes_evidence_packet_artifact_refs(mock
     assert mock_task.artifact_refs == [str(artifact)]
 
 
-# LLM: Real hierarchy runs may write deliverables beside run metadata, not only inside artifacts/.
-# 函数用途: 覆盖子代理把报告写在 agent_run_workspace 根目录时，evidence packet 短路径仍能解析为真实产物引用。
 def test_process_structured_output_resolves_refs_from_agent_run_workspace(mock_task, tmp_path):
     task_dir = tmp_path / "legacy-task"
     run_workspace = tmp_path / "tasks" / "parent" / "agents" / "child"
@@ -284,8 +272,6 @@ def test_process_structured_output_resolves_refs_from_agent_run_workspace(mock_t
     assert mock_task.artifact_refs == [str(artifact)]
 
 
-# LLM: coordinator parent refs should prefer child task artifact_refs over guessed child paths.
-# 函数用途: 复现真实 E2E 中父级把 child 产物路径猜错，但 child task.json 里已有真实 artifact_refs 的场景。
 def test_process_structured_output_resolves_guessed_child_artifact_refs(mock_task, tmp_path):
     subagents_root = tmp_path / "subagents"
     parent_dir = subagents_root / "parent-run"
@@ -311,6 +297,7 @@ def test_process_structured_output_resolves_guessed_child_artifact_refs(mock_tas
     mock_task.scratch_dir = ""
     mock_task.allowed_write_roots = []
     mock_task.child_ids = [child_id]
+    mock_task.attributes = {}
     guessed = subagents_root / child_id / "reports" / "direct_competitors_research.md"
     parsed = SubAgentParsedOutput(
         found=True,
@@ -331,6 +318,50 @@ def test_process_structured_output_resolves_guessed_child_artifact_refs(mock_tas
     assert parsed.failure_type == ""
     assert result["evidence_packets"][0]["artifact_refs"] == [str(actual)]
     assert mock_task.artifact_refs == [str(actual)]
+
+
+def test_process_structured_output_reports_dirty_child_artifact_state(mock_task, tmp_path):
+    subagents_root = tmp_path / "subagents"
+    parent_dir = subagents_root / "parent-run"
+    child_id = "subagent-child-bad"
+    child_dir = subagents_root / child_id
+    parent_dir.mkdir(parents=True)
+    child_dir.mkdir(parents=True)
+    (child_dir / "task.json").write_text("{bad-child-state", encoding="utf-8")
+    mock_task.task_dir = str(parent_dir)
+    mock_task.output_dir = str(parent_dir / "output")
+    mock_task.reports_dir = str(parent_dir / "reports")
+    mock_task.agent_run_workspace_dir = ""
+    mock_task.task_workspace_artifacts_dir = ""
+    mock_task.agent_run_artifacts_dir = ""
+    mock_task.task_workspace_shared_dir = ""
+    mock_task.task_workspace_dir = ""
+    mock_task.data_dir = ""
+    mock_task.scratch_dir = ""
+    mock_task.allowed_write_roots = []
+    mock_task.child_ids = [child_id]
+    mock_task.attributes = {}
+    guessed = subagents_root / child_id / "reports" / "child_report.md"
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        evidence_packets=[{
+            "claim": "子代理报告已完成",
+            "checked_scope": "child artifact refs",
+            "artifact_refs": [str(guessed)],
+            "confidence": 0.9,
+        }],
+    )
+
+    result = _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert result["evidence_packets"][0]["artifact_refs"] == [str(guessed)]
+    (error,) = mock_task.attributes["artifact_ref_load_errors"]
+    assert error["context"] == "subagent.artifact_refs.child_state"
+    assert error["child_run_id"] == child_id
+    assert error["path"].endswith("task.json")
 
 
 def _lessons_payload_context(mock_task, parsed: SubAgentParsedOutput) -> OutputPayloadContext:

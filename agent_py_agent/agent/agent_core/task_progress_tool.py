@@ -1,16 +1,14 @@
-# LLM: task_progress is one generic model-facing ledger tool for long work.
-# 模块用途: 让模型记录/读取自己的任务进度清单；不触发验收、不调度子代理、不改变任务状态机。
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..task_progress import read_task_progress, write_task_progress
 from ..tools import BaseTool, ToolExecutionResult
-from .orchestration_tool_specs import build_task_progress_spec
-from .runner_context import current_subagent_run_id
+from .orchestration.tool_specs import build_task_progress_spec
+from .runner.context import current_subagent_run_id
+from .runtime.owner_roots import runtime_owner_root
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -26,7 +24,7 @@ class TaskProgressTool(BaseTool):
         run_id = _target_run_id(self.agent, params, allow_explicit=action == "read")
         if not run_id:
             run_id = "main"
-        root = Path(getattr(self.agent, "root", "."))
+        root = runtime_owner_root(self.agent)
         if action == "update":
             payload = write_task_progress(root, run_id, params)
             payload = _with_write_feedback(payload)
@@ -89,8 +87,6 @@ def _with_write_feedback(payload: dict[str, object]) -> dict[str, object]:
     return {**payload, "soft_feedback": feedback}
 
 
-# LLM: _missing_evidence_ids makes soft progress hints actionable in the tool result.
-# 函数用途: 从 quality_hints 汇总缺证据条目 id，方便模型下一步直接补。
 def _missing_evidence_ids(hints: dict[str, object]) -> list[str]:
     values: list[str] = []
     for key in ("done_without_evidence_ids", "result_without_evidence_ids", "coverage_done_without_evidence_ids"):

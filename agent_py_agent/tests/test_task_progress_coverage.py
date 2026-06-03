@@ -14,7 +14,7 @@ class TestTaskProgressCoverageTool:
         from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
         tool = TaskProgressTool(agent)
 
@@ -92,6 +92,28 @@ class TestTaskProgressCoverageTool:
         assert target["evidence"] == ["codex-main/README.md", "codex-main/core"]
         assert payload["coverage"]["counts"]["targets_done"] == 1
 
+    def test_corrupt_progress_file_is_reported_not_silently_emptied(self, tmp_path):
+        """坏进度账本不能被伪装成“没有进度”。"""
+        from agent_py_agent.agent.task_progress import (
+            progress_path,
+            read_task_progress,
+            read_task_progress_report,
+            task_progress_summary,
+        )
+
+        path = progress_path(tmp_path, "run-main")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not-json", encoding="utf-8")
+
+        progress, load_error = read_task_progress_report(tmp_path, "run-main")
+        legacy_progress = read_task_progress(tmp_path, "run-main")
+        summary = task_progress_summary({**legacy_progress, "ref": str(path)})
+
+        assert progress["load_error"]["context"] == "task_progress.read"
+        assert load_error == progress["load_error"]
+        assert legacy_progress["load_error"] == load_error
+        assert summary["load_error"] == load_error
+
     def test_coverage_targets_accept_expected_fields_as_pending_checks(self, tmp_path):
         """模型用 expected_fields 表达覆盖项时，也应归一成 checks。"""
         from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
@@ -124,7 +146,7 @@ class TestTaskProgressCoverageTool:
         from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = agent.tools.execute_call(
@@ -153,7 +175,7 @@ class TestTaskProgressCoverageTool:
         from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = agent.tools.execute_call(
@@ -186,7 +208,7 @@ class TestTaskProgressCoverageAliases:
         from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = agent.tools.execute_call(
@@ -213,7 +235,7 @@ class TestTaskProgressCoverageAliases:
         from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = agent.tools.execute_call(
@@ -246,7 +268,7 @@ class TestTaskProgressCoverageAliases:
         from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = agent.tools.execute_call(
@@ -277,7 +299,7 @@ class TestTaskProgressCoverageAliases:
         from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = agent.tools.execute_call(
@@ -342,7 +364,7 @@ class TestTaskProgressQualityHints:
         from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = agent.tools.execute_call(

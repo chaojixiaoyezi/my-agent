@@ -1,16 +1,14 @@
-# LLM: 维持 settings 包的导入表稳定，新增配置模型时同步 __all__。
-# 模块用途: 配置系统公开导出点，集中暴露运行配置 dataclass 和加载入口。
 
 from __future__ import annotations
 
 """public API for runtime configuration schemas and config file loading.
 
-给人看的解释：
 这里放启动配置相关代码。模型、工具、gateway、daemon、本地存储这些开关都从这里读取。
 业务模块不要自己解析 YAML。
 """
 
 from .config import AgentConfig, load_config, load_simple_yaml, parse_scalar
+from .config_layers import ConfigLayer, EffectiveConfig, merge_config_layers
 from .defaults import (
     default_agent_config,
     default_config_bool,
@@ -22,6 +20,8 @@ from .normalize import normalize_agent_config, normalize_subagent_workflow_confi
 
 __all__ = [
     "AgentConfig",
+    "ConfigLayer",
+    "EffectiveConfig",
     "default_agent_config",
     "default_config_bool",
     "default_config_float",
@@ -29,6 +29,7 @@ __all__ = [
     "default_config_value",
     "load_config",
     "load_simple_yaml",
+    "merge_config_layers",
     "parse_scalar",
     "normalize_agent_config",
     "normalize_subagent_workflow_config",

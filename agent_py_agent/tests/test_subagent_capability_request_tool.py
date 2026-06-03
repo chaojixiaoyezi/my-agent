@@ -13,14 +13,12 @@ from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.role_templates import ROLE_BASE_TOOLS
-from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
 
 
-# LLM: _agent_with_current_run builds the minimal facade CapabilityRequestTool needs.
-# 函数用途: 创建真实 SubAgentManager 和非 root 当前 run_id，避免测试依赖完整模型后端。
 def _agent_with_current_run(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     parent = manager.create_run(goal="root", thought="decide", plan=["delegate"])
@@ -35,8 +33,6 @@ def _agent_with_current_run(tmp_path):
     return SimpleNamespace(subagents=manager, _current_subagent_run_id=task.id), manager, task
 
 
-# LLM: test_capability_request_tool_records_open_request covers the model-callable formal lane.
-# 函数用途: 子代理调用 capability_request 后，任务记录里必须出现 OPEN 请求和 scoped shell 字段。
 def test_capability_request_tool_records_open_request(tmp_path):
     agent, manager, task = _agent_with_current_run(tmp_path)
 
@@ -66,8 +62,6 @@ def test_capability_request_tool_records_open_request(tmp_path):
     assert request.output_budget["stdout_bytes"] == 1024
 
 
-# LLM: test_capability_request_tool_scopes_cross_run_writes_to_current_runner locks hierarchy authority without stopping the run.
-# 函数用途: 当前 runner 传错显式 run_id 时只写当前 run，并返回 scope warning，不替 sibling 写能力申请。
 def test_capability_request_tool_scopes_cross_run_writes_to_current_runner(tmp_path):
     agent, manager, task = _agent_with_current_run(tmp_path)
     other = manager.create_run(goal="other", thought="separate", plan=["noop"])
@@ -89,8 +83,6 @@ def test_capability_request_tool_scopes_cross_run_writes_to_current_runner(tmp_p
     assert manager.load(other.id).capability_requests == []
 
 
-# LLM: test_capability_request_tool_blocks_root_run_requests prevents root from waiting on a parent.
-# 函数用途: root 没有上级，不能写 OPEN capability_request 把自己卡住；root 策略以后单独实现。
 def test_capability_request_tool_blocks_root_run_requests(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(
@@ -114,8 +106,6 @@ def test_capability_request_tool_blocks_root_run_requests(tmp_path):
     assert manager.load(root.id).capability_requests == []
 
 
-# LLM: test_top_level_worker_can_request_capability fixes the main-agent parent boundary.
-# 函数用途: 顶层 worker 虽然没有 subagent parent_id，但真实上级是主代理，因此缺工具时必须能写 capability_request。
 def test_top_level_worker_can_request_capability(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     task = manager.create_run(
@@ -138,8 +128,6 @@ def test_top_level_worker_can_request_capability(tmp_path):
     assert manager.load(task.id).capability_requests[0].requested_tools == ["web_fetch"]
 
 
-# LLM: test_capability_request_tool_is_registered_for_simple_agent proves runners can see the tool.
-# 函数用途: SimpleAgent 初始化后，Tool Catalog 能在 orchestration 工具里展示 capability_request。
 def test_capability_request_tool_is_registered_for_simple_agent(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
 
@@ -149,8 +137,6 @@ def test_capability_request_tool_is_registered_for_simple_agent(tmp_path):
     assert specs["capability_request"].category == "orchestration"
 
 
-# LLM: test_capability_request_tool_is_available_to_role_and_leaf_defaults keeps users from hand-picking it.
-# 函数用途: 默认角色和自动推断叶子工具都带 capability_request，不需要用户配置每个子代理工具。
 def test_capability_request_tool_is_available_to_role_and_leaf_defaults(tmp_path):
     assert "capability_request" in ROLE_BASE_TOOLS
     manager = SubAgentManager(tmp_path / "subs")
@@ -181,8 +167,6 @@ def test_capability_request_tool_is_available_to_role_and_leaf_defaults(tmp_path
     assert "capability_request" in leaf.allowed_tools
 
 
-# LLM: test_root_execution_context_hides_capability_request_tool removes a misleading no-parent lane.
-# 函数用途: root/coordinator 没有上级，执行上下文不应展示 capability_request；普通 child 仍保留。
 def test_root_execution_context_hides_capability_request_tool(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(
@@ -210,8 +194,6 @@ def test_root_execution_context_hides_capability_request_tool(tmp_path):
     assert "capability_request" in child_context.allowed_tools
 
 
-# LLM: test_top_level_worker_context_keeps_capability_request covers create_subagents direct children.
-# 函数用途: 主代理直接创建的一层 worker 没有 subagent parent_id，但执行上下文仍要保留能力申请工具。
 def test_top_level_worker_context_keeps_capability_request(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     worker = manager.create_run(

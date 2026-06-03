@@ -9,8 +9,6 @@ from agent_py_agent.agent.memory_archive.compact import (
 )
 
 
-# LLM: _bulk_raw_event proves default compact coverage does not silently drop older matching records.
-# 函数用途: 构造同一 compact scope 下的多条 raw 记录，用来验证默认 compact 不再截断 50 条。
 def _bulk_raw_event(index: int) -> RawMemoryEvent:
     return RawMemoryEvent(
         event_id=f"raw-bulk-{index:03d}",
@@ -29,8 +27,6 @@ def _bulk_raw_event(index: int) -> RawMemoryEvent:
     )
 
 
-# LLM: Default compact should cover all matching records; users should not guess a magic limit.
-# 函数用途: 验证没有显式 --limit 时，compact 默认不截断最近 50 条，而是覆盖当前 scope 全部匹配记录。
 def test_memory_compact_default_covers_all_matching_records(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     for index in range(60):

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 
-# LLM: staged contracts must be visible to the model without becoming machine facts.
-# 函数用途: 验证 prompt 渲染会展示 checkpoint refs，系统事实仍保留在 JSON 合同里。
 def test_render_delivery_contract_section_includes_staging_refs():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
@@ -45,8 +43,6 @@ def test_render_delivery_contract_section_includes_staging_refs():
     assert "阶段构建工具:" not in text
 
 
-# LLM: One malformed artifact entry must not erase valid contract guidance.
-# 函数用途: 验证 artifacts 混入脏项时只忽略脏项，仍渲染其它结构化 artifact。
 def test_render_delivery_contract_section_skips_bad_artifact_items():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
@@ -76,8 +72,6 @@ def test_render_delivery_contract_section_skips_bad_artifact_items():
     assert "阶段构建工具:" not in text
 
 
-# LLM: bootstrap contract guidance should push the model to materialize targets before repeated inspection.
-# 函数用途: 验证通用开工合同会渲染结构化目标路径和 builder tool，而不是按任务专项写提示。
 def test_render_delivery_contract_section_includes_bootstrap_targets():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
@@ -152,8 +146,6 @@ def test_render_delivery_contract_section_keeps_research_first_before_skeletons(
     assert "最小有效骨架" not in text
 
 
-# LLM: source-evidence checkpoints should not be rendered as skeleton-first recovery work.
-# 函数用途: 验证需要来源证据的 checkpoint 会提示先采集/绑定 source refs，而不是写空骨架。
 def test_render_delivery_contract_section_avoids_skeleton_hint_for_source_evidence_checkpoint():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
@@ -181,8 +173,6 @@ def test_render_delivery_contract_section_avoids_skeleton_hint_for_source_eviden
     assert "最小有效骨架" not in text
 
 
-# LLM: document outputs should use generic write guidance instead of fixed builder prompts.
-# 函数用途: 验证 PDF 产物不会渲染旧的专项 markdown_to_pdf 工具参数。
 def test_render_delivery_contract_section_uses_generic_document_write_guidance():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
@@ -223,8 +213,6 @@ def test_render_delivery_contract_section_uses_generic_document_write_guidance()
     assert "source_json_path=outputs/docs/draft.md" not in text
 
 
-# LLM: staged JSON hints should come from per-checkpoint contract fields instead of leaking workbook-only shapes into unrelated tasks.
-# 函数用途: 验证 source_index 这类数组索引文件会渲染自己的 shape hint，而不是默认提示成 sheets/rows。
 def test_render_delivery_contract_section_uses_checkpoint_shape_hint_for_non_workbook_json():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
@@ -267,8 +255,6 @@ def test_render_delivery_contract_section_uses_checkpoint_shape_hint_for_non_wor
     assert '{"sheets":[{"name":"...","columns":[...],"rows":[{...}]}]}' not in text
 
 
-# LLM: HTML validation guidance should stay generic and avoid task-specific link rules.
-# 函数用途: 验证 prompt 只渲染通用 HTML 结构/资源要求，不再携带占位 href 这类专项规则。
 def test_render_delivery_contract_section_includes_generic_html_rules_only():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
@@ -296,8 +282,6 @@ def test_render_delivery_contract_section_includes_generic_html_rules_only():
     assert "HTML 链接不得使用这些 href 占位值" not in text
 
 
-# LLM: unknown retired runtime findings should render only as raw machine facts.
-# 函数用途: 旧分块写入 finding 不再拥有专项恢复提示，只按普通 runtime finding 展示。
 def test_render_delivery_contract_section_renders_retired_finding_generically():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
@@ -333,8 +317,6 @@ def test_render_delivery_contract_section_renders_retired_finding_generically():
     assert "session_id=session-123" not in text
 
 
-# LLM: duplicate retired write sessions should not revive the old session workflow.
-# 函数用途: 验证旧重复 session finding 不再生成推荐 session，其他 staged finding 仍正常展示。
 def test_render_delivery_contract_section_ignores_duplicate_retired_write_sessions():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
@@ -357,8 +339,6 @@ def test_render_delivery_contract_section_ignores_duplicate_retired_write_sessio
     assert "data_to_workbook" not in text
 
 
-# LLM: recovery reconciliation for retired sessions should not render old session controls.
-# 函数用途: 验证旧 reconciliation 字段不会重新暴露 session 工作流。
 def test_render_delivery_contract_section_does_not_render_retired_session_reconciliation():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
@@ -399,8 +379,6 @@ def test_render_delivery_contract_section_does_not_render_retired_session_reconc
     assert "session_id=stale-session" not in text
 
 
-# LLM: _duplicate_open_session_contract keeps the duplicate-session fixture reusable and under code-size limits.
-# 函数用途: 构造包含重复 open write_file 和空 staged JSON 的交付合同测试数据。
 def _duplicate_open_session_contract() -> dict[str, object]:
     return {
         "artifacts": [_xlsx_artifact_contract()],
@@ -424,8 +402,6 @@ def _duplicate_open_session_contract() -> dict[str, object]:
     }
 
 
-# LLM: _xlsx_artifact_contract supplies a staged workbook contract for prompt rendering tests.
-# 函数用途: 返回带 required_columns 和 data_to_workbook staging_contract 的 xlsx 产物合同。
 def _xlsx_artifact_contract() -> dict[str, object]:
     return {
         "kind": "xlsx",
@@ -459,8 +435,6 @@ def _xlsx_artifact_contract() -> dict[str, object]:
     }
 
 
-# LLM: _legacy_write_session builds one structured runtime finding without embedding prose facts.
-# 函数用途: 构造 open write_file finding，用于测试重复 session 的恢复选择。
 def _legacy_write_session(session_id: str, next_chunk: int, chunks: list[int]) -> dict[str, object]:
     return {
         "code": "OPEN_FILE_WRITE_SESSION",

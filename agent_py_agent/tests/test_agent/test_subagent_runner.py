@@ -96,8 +96,8 @@ def test_subagent_runner_dry_run_and_execute():
         assert loaded.verification_status == "VERIFIED"
         assert output["dry_run"] is False
         assert output["next_action"] == ""
-        assert "read_file [filesystem]" in prompt
-        assert "write_file [filesystem]" not in prompt
+        assert "read_file [filesystem" in prompt
+        assert "write_file [filesystem" not in prompt
         assert "echo 后端" in response
         _assert_subagent_recovery_snapshot(root, task.id, loaded.status_file)
 
@@ -131,7 +131,6 @@ def test_subagent_runner_uses_child_system_prompt_not_parent_root_identity():
 
 
 def _assert_subagent_recovery_snapshot(root: Path, run_id: str, status_file: str) -> None:
-    # LLM: recovery snapshot assertions stay outside the runner flow test body.
     hook_files = sorted((root / "memory" / "hooks").glob("*.jsonl"))
     assert len(hook_files) == 1
     snapshots = [
@@ -299,8 +298,6 @@ def test_subagent_runner_can_schedule_children_from_current_node_context():
         assert "schedule_child_subagents" in child.allowed_tools
 
 
-# LLM: _wait_for_background_dispatches keeps async child auto-starts from racing temp cleanup.
-# 函数用途: 等待测试中由 schedule_child_subagents 启动的后台线程结束，避免临时目录删除时仍有写入。
 def _wait_for_background_dispatches(agent: SimpleAgent, *, timeout: float = 2.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -350,8 +347,6 @@ def test_subagent_runner_repairs_missing_structured_output():
         assert output_json["structured_output"]["repair_ok"] is True
 
 
-# LLM: coordinator finalization no longer rewrites status from child-status heuristics.
-# 函数用途: 子代理收尾只记录模型/工具事实，不再因为 child 已完成而把 tool-limit BLOCKED 改成待收口。
 def test_subagent_runner_does_not_override_coordinator_tool_limit_status():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)

@@ -30,11 +30,11 @@ def test_create_run_persists_quality_contract(tmp_path):
         context_packs=[{"name": "core", "summary": "No fake done"}],
     )
 
-    payload = json.loads((Path(task.task_dir) / "task.json").read_text(encoding="utf-8"))
+    loaded = manager.load(task.id)
 
-    assert payload["quality_contract"]["quality_bar"] == "Evidence-backed and ready for review"
-    assert payload["context_manifest"]["required_read_paths"] == ["README.md"]
-    assert payload["context_packs"][0]["name"] == "core"
+    assert loaded.quality_contract.quality_bar == "Evidence-backed and ready for review"
+    assert loaded.context_manifest.required_read_paths == ["README.md"]
+    assert loaded.context_packs[0]["name"] == "core"
 
 
 def _write_task_json(run_dir: Path, payload: dict) -> None:
@@ -141,12 +141,12 @@ def test_create_run_workflow_plan_persists_without_raw_json(tmp_path):
         workflow_mode="plan",
         attributes={"workflow_task_type": "code_or_bugfix"},
     )
-    payload = json.loads((Path(task.task_dir) / "task.json").read_text(encoding="utf-8"))
+    loaded = manager.load(task.id)
 
     assert task.workflow_mode == "plan"
     assert task.workflow_plan["ok"] is True
     assert task.workflow_template_id == "code_feature_split"
-    assert payload["workflow_mode"] == "plan"
-    assert payload["workflow_plan"]["selected_template_id"] == "code_feature_split"
+    assert loaded.workflow_mode == "plan"
+    assert loaded.workflow_plan["selected_template_id"] == "code_feature_split"
     assert "Implementation satisfies the shared contract" in task.acceptance_checks
     assert "Tests cover the closeout criteria" in task.acceptance_checks

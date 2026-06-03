@@ -5,16 +5,14 @@
 
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
-from agent_py_agent.agent.agent_core.tool_agent_budget import (
+from agent_py_agent.agent.agent_core.runtime.guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
+from agent_py_agent.agent.agent_core.tool_guard.agent_budget import (
     ToolAgentBudgetRequest,
     check_tool_agent_budget,
 )
 from agent_py_agent.agent.settings.config_io import load_simple_yaml
 
 
-# LLM: _agent creates the minimum config surface used by the budget helper.
-# 函数用途: 生成测试用代理对象，带滚动窗口和可调最大调用次数。
 def _agent(max_calls: int = 2, window_seconds: int = 600):
     return SimpleNamespace(
         config=SimpleNamespace(
@@ -24,8 +22,6 @@ def _agent(max_calls: int = 2, window_seconds: int = 600):
     )
 
 
-# LLM: main-agent calls without a run id must stay unlimited by this per-agent budget.
-# 函数用途: 确认普通主代理聊天没有 run_id 时不会被单代理预算误伤。
 def test_tool_agent_budget_ignores_calls_without_run_id():
     agent = _agent(max_calls=1)
 
@@ -36,8 +32,6 @@ def test_tool_agent_budget_ignores_calls_without_run_id():
     assert second is None
 
 
-# LLM: Shared runtime config should provide the default per-agent budget when legacy config is absent.
-# 函数用途: 验证单代理工具预算默认值集中在 runtime_guard_config.yaml，而不是必须依赖 AgentConfig 字段。
 def test_tool_agent_budget_uses_shared_runtime_config_defaults():
     agent = SimpleNamespace(config=SimpleNamespace())
     defaults = load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
@@ -52,8 +46,6 @@ def test_tool_agent_budget_uses_shared_runtime_config_defaults():
     assert f"最近 {window_seconds} 秒最多 {max_calls} 次工具调用" in blocked.output
 
 
-# LLM: a single subagent run is blocked after its rolling budget is exhausted.
-# 函数用途: 同一个 run_id 在窗口内超过预算后，返回自检提示而不是继续执行工具。
 def test_tool_agent_budget_blocks_after_per_agent_window_limit():
     agent = _agent(max_calls=2)
 
@@ -68,8 +60,6 @@ def test_tool_agent_budget_blocks_after_per_agent_window_limit():
     assert "自检" in blocked.output
 
 
-# LLM: sibling subagents must not consume each other's rolling tool budgets.
-# 函数用途: 证明预算按 run_id 隔离，不是整个任务树共享一个全局次数池。
 def test_tool_agent_budget_is_scoped_per_run_id():
     agent = _agent(max_calls=1)
 
@@ -81,8 +71,6 @@ def test_tool_agent_budget_is_scoped_per_run_id():
     assert "run-a" in blocked.output
 
 
-# LLM: old calls outside the rolling window should not keep blocking a healthy agent.
-# 函数用途: 10 分钟窗口外的历史调用会过期，避免长期任务永久背负旧次数。
 def test_tool_agent_budget_prunes_calls_outside_window():
     agent = _agent(max_calls=1, window_seconds=10)
 

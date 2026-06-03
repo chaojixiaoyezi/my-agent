@@ -1,5 +1,3 @@
-# LLM: Watch record I/O helpers keep watch_service focused on loop decisions.
-# 模块用途: 写入 watch 心跳、报告记录和 sleep 状态，不决定是否 dispatch。
 
 from __future__ import annotations
 
@@ -8,12 +6,10 @@ import time as time_module
 from dataclasses import dataclass
 from typing import Any
 
-from ...subagents.services.dispatch_params import DispatchWatchHeartbeatParams
+from ...subagents.services.dispatch.params import DispatchWatchHeartbeatParams
 from .watch_state import WatchCycleResult
 
 
-# LLM: LimitIdleResultRequest bundles no-progress idle transition inputs.
-# 类用途: 让 watch_service 用单个参数包进入 idle-by-limit 收口，避免函数签名继续膨胀。
 @dataclass(frozen=True)
 class LimitIdleResultRequest:
     agent: Any
@@ -23,8 +19,6 @@ class LimitIdleResultRequest:
     store_record: bool
 
 
-# LLM: write_watch_stopped emits the final heartbeat after the watch lock is released.
-# 函数用途: 记录 watch 正常停止状态，保留 lock token 方便排查并发父级。
 def write_watch_stopped(agent: Any, cycle: int, lock_path, token: str) -> None:
     agent.subagents.write_dispatch_watch_heartbeat(
         params=DispatchWatchHeartbeatParams(
@@ -37,8 +31,6 @@ def write_watch_stopped(agent: Any, cycle: int, lock_path, token: str) -> None:
     )
 
 
-# LLM: append_watch_record builds the durable per-cycle watch record.
-# 函数用途: 把 watch 单轮结果转换成 DispatchWatchRecord，是否落盘由调用方决定。
 def append_watch_record(
     agent: Any,
     params: Any,
@@ -50,11 +42,12 @@ def append_watch_record(
     dispatch_summary: dict,
     evidence_paths: list[str],
 ):
-    from ..dispatch_service import MakeDispatchWatchRecordParams, make_dispatch_watch_record
+    from ...subagents.services.dispatch.params import DispatchWatchRecordParams
+    from ..orchestration.dispatch.service import make_dispatch_watch_record
 
-    watch_record_params = MakeDispatchWatchRecordParams(
+    watch_record_params = DispatchWatchRecordParams(
         cycle=params.cycle,
-        dry_run=not params.dispatch_params.apply,
+        dry_run=params.dispatch_params.preview_only,
         ok=ok,
         message=message,
         dispatch_record_count=record_count,
@@ -66,8 +59,6 @@ def append_watch_record(
     return make_dispatch_watch_record(agent, watch_record_params)
 
 
-# LLM: write_watch_heartbeat keeps liveness updates separate from durable audit records.
-# 函数用途: 写入当前 cycle 的 running/sleeping/idle/stopping 状态，供外部观察 gateway 是否活着。
 def write_watch_heartbeat(agent: Any, params: Any, *, status: str, message: str) -> None:
     agent.subagents.write_dispatch_watch_heartbeat(
         params=DispatchWatchHeartbeatParams(
@@ -80,8 +71,6 @@ def write_watch_heartbeat(agent: Any, params: Any, *, status: str, message: str)
     )
 
 
-# LLM: write_idle_by_limit reports no-progress throttling without terminating persistent gateways.
-# 函数用途: 连续空转达到阈值时写 idle_by_limit 心跳，让 watcher 进入慢速等待。
 def write_idle_by_limit(agent: Any, params: Any, message: str) -> None:
     message = f"{message} 已达到最大连续空转轮数 ({params.max_consecutive})，进入空闲等待。"
     agent.subagents.write_dispatch_watch_heartbeat(
@@ -95,8 +84,6 @@ def write_idle_by_limit(agent: Any, params: Any, message: str) -> None:
     )
 
 
-# LLM: watch_sleep_state decides whether a cycle should sleep or finish.
-# 函数用途: 根据 max_cycles 和 stop_file 判断 watch 是否还有下一轮。
 def watch_sleep_state(params: Any, message: str) -> tuple[bool, str]:
     more_cycles = params.max_cycles == 0 or params.cycle < params.max_cycles
     if params.stop_path and params.stop_path.exists():
@@ -104,8 +91,6 @@ def watch_sleep_state(params: Any, message: str) -> tuple[bool, str]:
     return more_cycles, message
 
 
-# LLM: limit_idle_result handles no-progress limits without terminating persistent gateways.
-# 函数用途: 连续空转达到上限后写 idle heartbeat、按需睡眠并重置计数，避免 tight-loop。
 def limit_idle_result(request: LimitIdleResultRequest) -> WatchCycleResult:
     from ..parameters import _sleep_with_stop
 

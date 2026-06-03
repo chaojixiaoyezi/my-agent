@@ -1,5 +1,3 @@
-# LLM: Context bundle contracts hold task_packet and deliverable file contract helpers.
-# 模块用途: 从 SubAgentTask 生成产物合同、结构化 task_packet 和 Markdown 展示行。
 
 from __future__ import annotations
 
@@ -7,6 +5,7 @@ import ast
 from pathlib import Path
 from typing import NamedTuple
 
+from ..model_visible_refs import current_model_ref, current_model_text, is_legacy_subagent_path
 from .context_bundle_file_roots import (
     add_file_root_term,
     file_level_write_root_terms,
@@ -28,8 +27,6 @@ class _TaskContractComponents(NamedTuple):
     source: str
 
 
-# LLM: output_contract tells the runner where durable reports and machine output must land.
-# 函数用途: 约定子代理最终报告、结构化输出、证据、测试和产物引用，避免只返回自然语言。
 def output_contract(task: SubAgentTask) -> dict[str, object]:
     components = task_contract_components(task)
     return {
@@ -49,8 +46,6 @@ def output_contract(task: SubAgentTask) -> dict[str, object]:
     }
 
 
-# LLM: task_packet is the compact typed handoff child runners should trust before prose.
-# 函数用途: 生成子代理/接管代理优先读取的结构化任务包，避免从自然语言摘要里猜路径。
 def task_packet(task: SubAgentTask) -> dict[str, object]:
     refs = workspace_refs(task)
     components = task_contract_components(task)
@@ -62,9 +57,9 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
         "depth": int(task.depth or 0),
         "role": task.role,
         "agent_name": task.agent_name,
-        "goal": task.goal,
-        "plan": list(task.plan or []),
-        "acceptance_checks": list(task.acceptance_checks or []),
+        "goal": current_model_text(task.goal),
+        "plan": [current_model_text(item) for item in list(task.plan or [])],
+        "acceptance_checks": [current_model_text(item) for item in list(task.acceptance_checks or [])],
         "file_contract": {
             "required_files": components.required_files,
             "required_file_refs": components.required_file_refs,
@@ -73,13 +68,12 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
             "source": components.source,
         },
         "write_contract": {
-            # LLM: Write contracts expose generic roots only; concrete writes use write_file/apply_patch.
             "product_write_roots": components.product_roots,
             "required_file_refs": components.required_file_refs,
             "declared_output_refs": declared_output_refs(task),
             "allowed_write_roots": allowed_write_roots(task),
-            "forbidden_write_roots": list(task.forbidden_write_roots or []),
-            "locked_files": list(task.locked_files or []),
+            "forbidden_write_roots": _model_visible_file_terms(task.forbidden_write_roots),
+            "locked_files": _model_visible_file_terms(task.locked_files),
         },
         "tool_contract": {
             "allowed_tools": list(task.allowed_tools or []),
@@ -98,8 +92,6 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
 }
 
 
-# LLM: allowed_write_roots keeps task packets aligned with the current runtime workspace.
-# 函数用途: task_packet 里的可写目录优先展示当前 task/agent workspace，再展示显式产物目录。
 def allowed_write_roots(task: SubAgentTask) -> list[str]:
     roots: list[str] = []
     for raw in (
@@ -108,13 +100,12 @@ def allowed_write_roots(task: SubAgentTask) -> list[str]:
         *list(task.allowed_write_roots or []),
     ):
         text = str(raw or "").strip()
+        text = current_model_ref(text)
         if text and text not in roots:
             roots.append(text)
     return roots
 
 
-# LLM: task_contract_components is the single source for task_packet/output_contract shared file facts.
-# 函数用途: 集中计算 required/product/forbidden 文件合同，避免两个出口出现细微分叉。
 def task_contract_components(task: SubAgentTask) -> _TaskContractComponents:
     required_files = required_file_contract(task)
     product_roots = product_write_roots(task)
@@ -127,8 +118,6 @@ def task_contract_components(task: SubAgentTask) -> _TaskContractComponents:
     )
 
 
-# LLM: required_file_contract extracts exact deliverable filenames from task attributes and write roots.
-# 函数用途: 从 task.attributes.required_files 和文件级写入根生成必需文件清单；不读取 goal/acceptance 文本。
 def required_file_contract(task: SubAgentTask) -> list[str]:
     return _dedupe_file_terms(
         [
@@ -138,13 +127,11 @@ def required_file_contract(task: SubAgentTask) -> list[str]:
     )
 
 
-# LLM: product_write_roots separates user deliverable roots from run-private report roots for handoff contracts.
-# 函数用途: 从 allowed_write_roots 里筛出真实用户产物根，避免内部 agent-run final_report 被当成业务交付物。
 def product_write_roots(task: SubAgentTask) -> list[str]:
     internal_roots = internal_root_texts(task)
     roots: list[str] = []
     for raw in getattr(task, "allowed_write_roots", []) or []:
-        text = str(raw or "").strip()
+        text = current_model_ref(raw)
         if not text or path_is_internal(text, internal_roots):
             continue
         if text not in roots:
@@ -152,8 +139,6 @@ def product_write_roots(task: SubAgentTask) -> list[str]:
     return roots
 
 
-# LLM: required_product_file_refs gives the runner exact product paths for required deliverables.
-# 函数用途: 将 `final_report.md` 这类相对产物名绑定到 product_write_roots，减少模型把文件写进内部 run workspace。
 def required_product_file_refs(
     task: SubAgentTask,
     required_files: list[str] | None = None,
@@ -168,21 +153,15 @@ def required_product_file_refs(
     return refs
 
 
-# LLM: forbidden_file_contract extracts structured forbidden filenames from task attributes only.
-# 函数用途: 从 task.attributes.forbidden_files 生成禁止文件清单，明确反例不能创建。
 def forbidden_file_contract(task: SubAgentTask) -> list[str]:
     return _structured_forbidden_file_contract(task)
 
 
-# LLM: file_contract_source labels bundle file contracts as task-attribute based.
-# 函数用途: 给下游调试/验收说明 file_contract 的来源；不再存在 task text extraction 模式。
 def file_contract_source(task: SubAgentTask) -> str:
     del task
     return "attributes_required_forbidden_fields"
 
 
-# LLM: _structured_required_file_contract reads required files from task attributes only.
-# 函数用途: 只读取 attributes.required_files / required_file_refs，不读取自然语言或中文继承标签。
 def _structured_required_file_contract(task: SubAgentTask) -> list[str]:
     attrs = _task_attributes(task)
     return _dedupe_file_terms([
@@ -193,8 +172,6 @@ def _structured_required_file_contract(task: SubAgentTask) -> list[str]:
     ])
 
 
-# LLM: declared_output_refs exposes parent-declared deliverables without parsing prose.
-# 函数用途: 把 create/schedule 里的 output_files/output_refs/artifact_refs 传给 runner；不从 goal 自然语言推导。
 def declared_output_refs(task: SubAgentTask) -> list[str]:
     attrs = _task_attributes(task)
     return _dedupe_file_terms([
@@ -204,8 +181,6 @@ def declared_output_refs(task: SubAgentTask) -> list[str]:
     ])
 
 
-# LLM: output_refs may be logical field names, so only path-like values become file requirements.
-# 函数用途: 允许模型/外部系统用 output_refs 表示结果键；只有绝对路径、带目录或具体文件名才进入硬文件合同。
 def _path_like_output_contract_list(value: object) -> list[str]:
     return [item for item in _file_contract_list(value) if _looks_like_output_path(item)]
 
@@ -218,14 +193,10 @@ def _looks_like_output_path(value: object) -> bool:
     return path.is_absolute() or "/" in text or is_contract_file_path(path)
 
 
-# LLM: _structured_forbidden_file_contract reads forbidden files from task attributes only.
-# 函数用途: 只读取 attributes.forbidden_files，不读取 goal/thought/acceptance_checks 文本。
 def _structured_forbidden_file_contract(task: SubAgentTask) -> list[str]:
     return _dedupe_file_terms(_file_contract_list(_task_attributes(task).get("forbidden_files")))
 
 
-# LLM: render_output_contract_lines makes machine file contracts visible in handoff markdown.
-# 函数用途: 渲染 context bundle 的产物合同，方便人和接管代理快速看到 required/forbidden 清单。
 def render_output_contract_lines(contract: dict[str, object]) -> list[str]:
     lines: list[str] = []
     for key, value in contract.items():
@@ -237,8 +208,6 @@ def render_output_contract_lines(contract: dict[str, object]) -> list[str]:
     return lines
 
 
-# LLM: render_task_packet_lines keeps the packet readable without dumping nested JSON into Markdown.
-# 函数用途: 在 CONTEXT_BUNDLE.md 展示任务包关键字段，让接管代理快速确认结构化合同。
 def render_task_packet_lines(packet: dict[str, object]) -> list[str]:
     file_contract = packet.get("file_contract") if isinstance(packet.get("file_contract"), dict) else {}
     write_contract = packet.get("write_contract") if isinstance(packet.get("write_contract"), dict) else {}
@@ -257,22 +226,16 @@ def render_task_packet_lines(packet: dict[str, object]) -> list[str]:
     ]
 
 
-# LLM: _context_bundle_json_ref derives the standard context bundle path from agent_work_dir.
-# 函数用途: 只从 refs 构造路径字符串，不访问文件系统。
 def _context_bundle_json_ref(refs: dict[str, str]) -> str:
     workspace = refs.get("agent_work_dir", "") or refs.get("agent_run_workspace", "")
     return str(Path(workspace) / "context_bundle.json") if workspace else ""
 
 
-# LLM: _task_attributes normalizes task attributes for file-contract reads.
-# 函数用途: 读取 task.attributes 字典；缺失或类型不对时返回空，不做文本兜底。
 def _task_attributes(task: SubAgentTask) -> dict[str, object]:
     attrs = getattr(task, "attributes", {})
     return attrs if isinstance(attrs, dict) else {}
 
 
-# LLM: _file_contract_list normalizes explicit file refs without parsing prose.
-# 函数用途: 支持 list/tuple 或单字符串；不会按逗号、顿号或自然语言拆分。
 def _file_contract_list(value: object) -> list[str]:
     if value is None:
         return []
@@ -290,8 +253,6 @@ def _file_contract_list(value: object) -> list[str]:
     return [term] if term else []
 
 
-# LLM: _structured_file_ref_value accepts serialized ref carriers without making prose a contract.
-# 函数用途: 兼容旧任务把 {"output_path": "..."} 误存成字符串的情况，只按结构化对象读取路径字段。
 def _structured_file_ref_value(value: object) -> object:
     if not isinstance(value, str):
         return value
@@ -305,19 +266,15 @@ def _structured_file_ref_value(value: object) -> object:
     return parsed if isinstance(parsed, dict | list | tuple) else value
 
 
-# LLM: _dedupe_file_terms preserves user-mentioned order for required/forbidden contract lists.
-# 函数用途: 对结构化文件清单去重，避免同一文件从 goal 和验收条件重复出现。
 def _dedupe_file_terms(values) -> list[str]:
     terms: list[str] = []
     for value in values:
-        text = str(value or "").strip()
+        text = _model_visible_file_term(value)
         if text and text not in terms:
             terms.append(text)
     return terms
 
 
-# LLM: _preferred_final_report_ref keeps the legacy key useful while separating internal reports.
-# 函数用途: 如果用户明确要求 final_report.md，优先返回 product root 下的真实交付路径；否则保持旧内部报告引用。
 def _preferred_final_report_ref(task: SubAgentTask, required_refs: list[str]) -> str:
     for ref in required_refs:
         if Path(str(ref)).name == "final_report.md":
@@ -325,8 +282,6 @@ def _preferred_final_report_ref(task: SubAgentTask, required_refs: list[str]) ->
     return safe_string_ref(task, "agent_run_final_report_md") or safe_string_ref(task, "debrief_file")
 
 
-# LLM: _resolve_required_file_ref maps a required relative filename to one authorized product root.
-# 函数用途: 目录 root 直接拼接文件；具体文件 root 只有同名/同后缀匹配时才作为精确交付路径。
 def _resolve_required_file_ref(root: str, file_path: Path) -> str:
     root_path = Path(str(root or "").strip())
     if not str(root_path):
@@ -338,8 +293,6 @@ def _resolve_required_file_ref(root: str, file_path: Path) -> str:
     return str(root_path / _file_path_with_product_root_stripped(root_path, file_path))
 
 
-# LLM: _file_path_with_product_root_stripped avoids duplicating the product root basename.
-# 函数用途: 当模型/任务文本写出 `site/index.html` 且 product root 已经是 `.../site` 时，生成 `.../site/index.html` 而不是 `.../site/site/index.html`。
 def _file_path_with_product_root_stripped(root_path: Path, file_path: Path) -> Path:
     file_parts = file_path.parts
     root_parts = root_path.parts
@@ -350,8 +303,6 @@ def _file_path_with_product_root_stripped(root_path: Path, file_path: Path) -> P
     return file_path
 
 
-# LLM: _required_product_ref_candidates keeps path resolution flat and literal.
-# 函数用途: 将一个 required 文件名解析为候选业务产物路径；绝对路径原样返回，相对路径只绑定到 product root。
 def _required_product_ref_candidates(file_text: str, product_roots: list[str]) -> list[str]:
     if not file_text:
         return []
@@ -365,9 +316,22 @@ def _required_product_ref_candidates(file_text: str, product_roots: list[str]) -
     ]
 
 
-# LLM: _compact_list renders short packet arrays for handoff markdown.
-# 函数用途: 把列表值压成一行；空值显示 none。
 def _compact_list(value: object) -> str:
     if not isinstance(value, list) or not value:
         return "none"
     return ", ".join(str(item) for item in value)
+
+
+def _model_visible_file_terms(value: object) -> list[str]:
+    if not isinstance(value, list | tuple | set):
+        return []
+    return _dedupe_file_terms(value)
+
+
+def _model_visible_file_term(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if is_legacy_subagent_path(text):
+        return current_model_ref(text, basename_for_legacy=True)
+    return text

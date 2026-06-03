@@ -1,5 +1,3 @@
-# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
-# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
 
 from __future__ import annotations
 
@@ -21,8 +19,6 @@ from .gateway_client import (
 from .rendering import GRAY, RESET, _cprint
 
 
-# LLM: FallbackJobContext 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass
 class FallbackJobContext:
     job: object
@@ -33,8 +29,6 @@ class FallbackJobContext:
     build_history_context: Callable[[], str]
 
 
-# LLM: _fallback_gateway_handle 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _fallback_gateway_handle(ctx: FallbackJobContext) -> tuple[str, bool]:
     if not check_gateway_alive(ctx.paths):
         raise RuntimeError("gateway 已停止。请先执行 my-agent gateway start")
@@ -65,8 +59,6 @@ def _fallback_gateway_handle(ctx: FallbackJobContext) -> tuple[str, bool]:
     return response_text, stream_started_ref[0]
 
 
-# LLM: _fallback_local_handle 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护非 TUI 聊天路径的命令处理、展示或任务提交。
 def _fallback_local_handle(ctx: FallbackJobContext) -> tuple[str, bool]:
     started_at = time.perf_counter()
     on_chunk, stream_started_ref = _make_chunk_handler(
@@ -90,14 +82,10 @@ def _fallback_local_handle(ctx: FallbackJobContext) -> tuple[str, bool]:
     return agent_response_text, stream_started_ref[0]
 
 
-# LLM: _next_message_id 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _next_message_id(ctx: FallbackJobContext) -> int:
     return len(ctx.assistant_outputs) + 1
 
 
-# LLM: _turn_inject 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _turn_inject(ctx: FallbackJobContext) -> list[str]:
     history_ctx = ctx.build_history_context()
     turn_inject = list(ctx.job.inject) + [_CHAT_RESPONSE_STYLE_INJECT]
@@ -106,8 +94,6 @@ def _turn_inject(ctx: FallbackJobContext) -> list[str]:
     return turn_inject
 
 
-# LLM: _gateway_deadline 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _gateway_deadline(ctx: FallbackJobContext) -> float:
     timeout = getattr(ctx.args, "gateway_timeout", None)
     if timeout is None:
@@ -115,8 +101,6 @@ def _gateway_deadline(ctx: FallbackJobContext) -> float:
     return time.time() + max(0.0, timeout)
 
 
-# LLM: _render_if_needed 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _render_if_needed(
     ctx: FallbackJobContext, response_text: str, stream_started: bool
 ) -> None:
@@ -134,8 +118,6 @@ def _render_if_needed(
         )
 
 
-# LLM: fallback preview getters keep long-response folding wired to agent_config.yaml.
-# 函数用途: 从配置读取折叠预览行数；配置异常时回退到 12 行。
 def _chat_preview_lines(ctx: FallbackJobContext) -> int:
     try:
         return max(0, int(getattr(ctx.agent.config, "chat_collapse_preview_lines", 12) or 0))
@@ -143,8 +125,6 @@ def _chat_preview_lines(ctx: FallbackJobContext) -> int:
         return 12
 
 
-# LLM: fallback preview getters keep long-response folding wired to agent_config.yaml.
-# 函数用途: 从配置读取折叠预览字符数；配置异常时回退到 900 字符。
 def _chat_preview_chars(ctx: FallbackJobContext) -> int:
     try:
         return max(0, int(getattr(ctx.agent.config, "chat_collapse_preview_chars", 900) or 0))
@@ -152,8 +132,6 @@ def _chat_preview_chars(ctx: FallbackJobContext) -> int:
         return 900
 
 
-# LLM: _print_gateway_timing 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_gateway_timing(
     request_id: str,
     started_at: float,
@@ -166,8 +144,6 @@ def _print_gateway_timing(
     )
 
 
-# LLM: _print_local_timing 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_local_timing(result, started_at: float) -> None:
     elapsed = time.perf_counter() - started_at
     _cprint(

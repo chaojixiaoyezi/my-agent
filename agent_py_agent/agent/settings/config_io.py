@@ -1,5 +1,3 @@
-# LLM: YAML-lite parsing stays separate from AgentConfig so the config model file stays small.
-# 模块用途: 解析项目自带的简化 YAML 配置文件和值。
 
 from __future__ import annotations
 
@@ -8,8 +6,6 @@ from pathlib import Path
 from typing import Any
 
 
-# LLM: parse_scalar 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 解析简化 YAML 中的单个标量、行内列表或行内字典值。
 def parse_scalar(value: str) -> Any:
     value = value.strip().strip('"').strip("'")
     if value.startswith("[") and value.endswith("]"):
@@ -28,8 +24,6 @@ def parse_scalar(value: str) -> Any:
         return value
 
 
-# LLM: _parse_inline_list 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 解析简化 YAML 的行内列表，解析失败时返回 None 让调用方回退。
 def _parse_inline_list(value: str) -> list[Any] | None:
     try:
         parsed = ast.literal_eval(value)
@@ -40,8 +34,6 @@ def _parse_inline_list(value: str) -> list[Any] | None:
     return parsed
 
 
-# LLM: _parse_inline_dict lets config expose small maps without adding a full YAML dependency.
-# 函数用途: 解析简化 YAML 的行内字典，例如 {"worker": 8, "root": "off"}；解析失败时回退普通字符串。
 def _parse_inline_dict(value: str) -> dict[str, Any] | None:
     try:
         parsed = ast.literal_eval(value)
@@ -52,8 +44,6 @@ def _parse_inline_dict(value: str) -> dict[str, Any] | None:
     return {str(key): item for key, item in parsed.items()}
 
 
-# LLM: load_simple_yaml 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 读取简化 YAML 配置文件并转换成字典。
 def load_simple_yaml(path: Path) -> dict[str, Any]:
     data: dict[str, Any] = {}
     current_key: str | None = None
@@ -67,8 +57,6 @@ def load_simple_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-# LLM: _append_yaml_list_item 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 处理简化 YAML 的列表项行，并在成功处理时返回 True。
 def _append_yaml_list_item(data: dict[str, Any], current_key: str | None, line: str) -> bool:
     if not (line.startswith("  - ") and current_key):
         return False
@@ -76,8 +64,6 @@ def _append_yaml_list_item(data: dict[str, Any], current_key: str | None, line: 
     return True
 
 
-# LLM: _handle_yaml_mapping_line 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 处理简化 YAML 的 key/value 行，并返回当前列表 key。
 def _handle_yaml_mapping_line(data: dict[str, Any], current_key: str | None, line: str) -> str | None:
     if ":" not in line or line.startswith(" "):
         return current_key

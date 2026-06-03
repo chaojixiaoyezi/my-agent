@@ -6,12 +6,12 @@ from unittest.mock import patch
 
 import pytest
 
+from agent_py_agent.agent.common.value_parsing import dedupe_strings
 from agent_py_agent.agent.memory_routing.models import (
     MemoryPathResolution,
     MemoryReadReceipt,
     MemoryRoute,
     MemoryRouteMatch,
-    _dedupe,
 )
 from agent_py_agent.agent.memory_routing.validator import (
     VALID_INJECT_MODES,
@@ -212,22 +212,22 @@ class TestMemoryReadReceipt:
 
 class TestDedupe:
     def test_dedupe_empty(self):
-        assert _dedupe([]) == []
+        assert dedupe_strings([]) == []
 
     def test_dedupe_no_duplicates(self):
-        assert _dedupe(["a", "b", "c"]) == ["a", "b", "c"]
+        assert dedupe_strings(["a", "b", "c"]) == ["a", "b", "c"]
 
     def test_dedupe_with_duplicates(self):
-        assert _dedupe(["a", "b", "a", "c", "b"]) == ["a", "b", "c"]
+        assert dedupe_strings(["a", "b", "a", "c", "b"]) == ["a", "b", "c"]
 
     def test_dedupe_preserves_first_occurrence(self):
-        assert _dedupe(["first", "second", "first"]) == ["first", "second"]
+        assert dedupe_strings(["first", "second", "first"]) == ["first", "second"]
 
     def test_dedupe_strips_whitespace(self):
-        assert _dedupe(["  a  ", "a", " b"]) == ["a", "b"]
+        assert dedupe_strings(["  a  ", "a", " b"]) == ["a", "b"]
 
     def test_dedupe_skips_empty_after_strip(self):
-        assert _dedupe(["a", "  ", "", "b"]) == ["a", "b"]
+        assert dedupe_strings(["a", "  ", "", "b"]) == ["a", "b"]
 
 
 class TestValidateRoutesEmpty:

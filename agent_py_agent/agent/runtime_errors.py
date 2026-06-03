@@ -142,6 +142,9 @@ def _builtin_category(exc: BaseException) -> str:
 
 
 def _local_failure_model_message(context: str) -> str:
-    if str(context or "").strip() == "subagents.load":
+    normalized = str(context or "").strip()
+    if normalized == "subagents.load" or ("subagent" in normalized and "load" in normalized):
         return "子代理账本读取失败；请刷新代理树或重建索引，不要把它当成子代理没产物。"
+    if "guidance" in normalized:
+        return "运行中补充提示读取失败；请刷新会话或提示账本，不要把它当成没有用户补充提示。"
     return "本地状态或路径读取失败；请检查路径、权限、编码或刷新代理树后继续。"

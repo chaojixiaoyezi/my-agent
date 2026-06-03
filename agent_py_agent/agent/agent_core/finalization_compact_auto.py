@@ -1,5 +1,3 @@
-# LLM: Finalization compact-auto projection keeps auto compact fields out of the main finalizer file.
-# 模块用途: 负责 run 收尾时的自动 compact/resume 字段组装和续跑轮跳过策略。
 
 from __future__ import annotations
 
@@ -7,8 +5,8 @@ from ..memory_archive import run_memory_compact_auto_cycle
 from ..memory_archive.compact import MemoryCompactPlanOptions
 from ..memory_archive.compact_auto import MemoryCompactAutoCycleOptions
 from ._runtime_params import FinalizeContext
-from .runtime_context_compactor import runtime_compact_policy
-from .runtime_owner_roots import runtime_owner_root
+from .runtime.context_compactor import runtime_compact_policy
+from .runtime.owner_roots import runtime_owner_root
 
 _CONTEXT_OVERFLOW_REASONS = {
     "blackbox_output_overflow",
@@ -19,8 +17,6 @@ _CONTEXT_OVERFLOW_REASONS = {
 }
 
 
-# LLM: compact_auto_cycle_fields honors do_save before any compact apply write.
-# 函数用途: 在 run 收尾时触发自动 compact/resume 协调器；保存型运行默认走自动 apply，`save=False` 只做计划不写产物。
 def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[str, int], *, request_id: str = "") -> dict:
     trigger = _compact_trigger_from_runtime(ctx)
     if _should_return_after_continuation(ctx, trigger):
@@ -69,16 +65,12 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
     }
 
 
-# LLM: A compact continuation turn that made no tool progress should return to the caller, not recursively compact itself.
-# 函数用途: 去掉次数门后仍避免“恢复提示自身”无限 compact；续接轮只要有真实工具进展，就允许再次 compact 续跑。
 def _should_return_after_continuation(ctx: FinalizeContext, trigger: dict[str, object]) -> bool:
     if int(ctx.compact_auto_continue_depth or 0) <= 0:
         return False
     return int(ctx.tool_rounds or 0) <= 0 and not list(ctx.executed_tools or [])
 
 
-# LLM: Normal final answers may compact for future recovery but must not reopen a completed turn.
-# 函数用途: 只有真正的上下文中断/撞墙 compact 才自动续跑；普通阈值 compact 只保存恢复包并返回结果。
 def _should_auto_continue_after_cycle(ctx: FinalizeContext, trigger_payload: dict[str, object], cycle: dict[str, object]) -> bool:
     if not bool(cycle.get("allowed_to_continue")):
         return False
@@ -98,8 +90,6 @@ def _should_auto_continue_after_cycle(ctx: FinalizeContext, trigger_payload: dic
     )
 
 
-# LLM: _compact_auto_continuation_return_fields marks a no-tool continuation as complete without another compact loop.
-# 函数用途: 生成“本轮续接已返回”的结构化字段，避免旧的次数门拆掉后出现递归 compact。
 def _compact_auto_continuation_return_fields() -> dict:
     return {
         "memory_compact_suggested": False,
@@ -120,8 +110,6 @@ def _compact_auto_continuation_return_fields() -> dict:
     }
 
 
-# LLM: _compact_trigger_from_runtime maps provider overflow signals into the same auto compact cycle.
-# 函数用途: 正常阈值和 provider 上下文溢出共用一套 compact/apply/resume 链路，只用 trigger 字段区分来源。
 def _compact_trigger_from_runtime(ctx: FinalizeContext) -> dict[str, object]:
     status = _runtime_code(getattr(ctx.final_response, "runtime_status", ""))
     reason = _runtime_code(getattr(ctx.final_response, "runtime_reason", ""))
@@ -139,8 +127,6 @@ def _compact_trigger_from_runtime(ctx: FinalizeContext) -> dict[str, object]:
     }
 
 
-# LLM: _runtime_code normalizes provider status strings for compact overflow matching.
-# 函数用途: 把不同 provider 的错误状态规整成小写下划线格式。
 def _runtime_code(value: object) -> str:
     return str(value or "").strip().lower().replace("-", "_")
 

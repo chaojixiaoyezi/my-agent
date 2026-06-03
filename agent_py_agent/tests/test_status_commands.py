@@ -14,6 +14,33 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _status_args(tmp_path: Path, *, json_mode: bool = False) -> MagicMock:
+    args = MagicMock()
+    args.config = str(tmp_path / "config.yaml")
+    args.limit = 5
+    args.recent = False
+    args.json = json_mode
+    return args
+
+
+def _status_mock_agent(tmp_path: Path) -> MagicMock:
+    mock_agent = MagicMock()
+    mock_agent.config.agent_name = "test_agent"
+    mock_agent.root = tmp_path
+    mock_agent.config.gateway_stale_seconds = 300
+    mock_agent.config.auto_detect_work_on_startup = False
+    mock_agent.config.subagent_board_limit = 5
+    mock_agent.local_store.stats.return_value = {
+        "record_count": 100,
+        "event_count": 50,
+        "fts5_enabled": True,
+        "db_path": str(tmp_path / "store.db"),
+    }
+    mock_agent.subagents.build_board.return_value = MagicMock(summary={"total": 0}, hot_list=[], recent=[])
+    mock_agent.local_store.timeline.return_value = []
+    return mock_agent
+
+
 class TestCmdStatus:
     """测试 cmd_status 命令。"""
 
@@ -39,7 +66,6 @@ class TestCmdStatus:
         with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.local_commands.gateway_paths", return_value=MagicMock(root=tmp_path, state=tmp_path / "state.json", heartbeat=tmp_path / "heartbeat.json")), \
              patch("agent_py_agent.cli.local_commands.gateway_running", return_value=(None, False)), \
-             patch("agent_py_agent.cli.local_commands.read_json_file", return_value={}), \
              patch("agent_py_agent.cli.local_commands.gateway_request_counts", return_value={}), \
              patch("agent_py_agent.cli.local_commands.build_status_suggestions", return_value=[]):
             result = cmd_status(args)
@@ -74,11 +100,15 @@ class TestCmdStatus:
         )
         mock_agent.local_store.timeline.return_value = []
 
+        state_path = tmp_path / "state.json"
+        heartbeat_path = tmp_path / "heartbeat.json"
+        state_path.write_text(json.dumps({"status": "running"}), encoding="utf-8")
+        heartbeat_path.write_text("{}", encoding="utf-8")
+
         stdout = StringIO()
         with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.local_commands.gateway_paths", return_value=MagicMock(root=tmp_path, state=tmp_path / "state.json", heartbeat=tmp_path / "heartbeat.json")), \
+             patch("agent_py_agent.cli.local_commands.gateway_paths", return_value=MagicMock(root=tmp_path, state=state_path, heartbeat=heartbeat_path)), \
              patch("agent_py_agent.cli.local_commands.gateway_running", return_value=(None, False)), \
-             patch("agent_py_agent.cli.local_commands.read_json_file", side_effect=[{"status": "running"}, {}]), \
              patch("agent_py_agent.cli.local_commands.gateway_request_counts", return_value={}), \
              patch("agent_py_agent.cli.local_commands.build_status_suggestions", return_value=[]), \
              redirect_stdout(stdout):
@@ -88,6 +118,31 @@ class TestCmdStatus:
         payload = json.loads(stdout.getvalue())
         assert payload["gateway"]["alive"] is False
         assert payload["gateway"]["status"] == "stopped"
+
+    def test_status_json_reports_bad_gateway_state_files(self, tmp_path: Path):
+        from agent_py_agent.cli.local_commands import cmd_status
+
+        state_path = tmp_path / "state.json"
+        heartbeat_path = tmp_path / "heartbeat.json"
+        state_path.write_text("{bad state", encoding="utf-8")
+        heartbeat_path.write_text("{bad heartbeat", encoding="utf-8")
+
+        stdout = StringIO()
+        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=_status_mock_agent(tmp_path)), \
+             patch(
+                 "agent_py_agent.cli.local_commands.gateway_paths",
+                 return_value=MagicMock(root=tmp_path, state=state_path, heartbeat=heartbeat_path),
+             ), \
+             patch("agent_py_agent.cli.local_commands.gateway_running", return_value=(None, False)), \
+             patch("agent_py_agent.cli.local_commands.gateway_request_counts", return_value={}), \
+             patch("agent_py_agent.cli.local_commands.build_status_suggestions", return_value=[]), \
+             redirect_stdout(stdout):
+            result = cmd_status(_status_args(tmp_path, json_mode=True))
+
+        assert result == 0
+        payload = json.loads(stdout.getvalue())
+        assert payload["gateway"]["state_load_error"]["context"] == "cli.status.gateway_state.read"
+        assert payload["gateway"]["heartbeat_load_error"]["context"] == "cli.status.gateway_heartbeat.read"
 
     def test_status_with_recent_flag(self, tmp_path: Path):
         """带 --recent 标志显示最近项。"""
@@ -118,7 +173,6 @@ class TestCmdStatus:
         with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.local_commands.gateway_paths", return_value=MagicMock(root=tmp_path, state=tmp_path / "state.json", heartbeat=tmp_path / "heartbeat.json")), \
              patch("agent_py_agent.cli.local_commands.gateway_running", return_value=(None, False)), \
-             patch("agent_py_agent.cli.local_commands.read_json_file", return_value={}), \
              patch("agent_py_agent.cli.local_commands.gateway_request_counts", return_value={}), \
              patch("agent_py_agent.cli.local_commands.build_status_suggestions", return_value=[]):
             result = cmd_status(args)

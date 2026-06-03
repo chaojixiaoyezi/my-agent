@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 
-# LLM: runtime guard knobs should share one default config file so operators do not chase scattered YAMLs.
-# 函数用途: 验证探索、本地进展和交付返工默认都读同一个配置入口。
 def test_runtime_guard_configs_share_one_default_file():
-    from agent_py_agent.agent.agent_core.delivery_closeout_config import (
+    from agent_py_agent.agent.agent_core.delivery_closeout.config import (
         DEFAULT_DELIVERY_CLOSEOUT_CONFIG_PATH,
     )
     from agent_py_agent.agent.agent_core.exploration_fuse_config import (
@@ -15,27 +13,23 @@ def test_runtime_guard_configs_share_one_default_file():
     assert DEFAULT_DELIVERY_CLOSEOUT_CONFIG_PATH == DEFAULT_EXPLORATION_FUSE_CONFIG_PATH
 
 
-# LLM: Tool repeat guard should read the shared runtime guard config without exposing scattered knobs.
-# 函数用途: 验证工具重复失败门的默认配置集中在 runtime_guard_config.yaml，且默认只拦动作不杀任务。
 def test_runtime_guard_file_contains_tool_repeat_guard_defaults():
-    from agent_py_agent.agent.agent_core.tool_call_guardrail import (
-        _repeat_fail_threshold,
-        _terminal_block_enabled,
+    from agent_py_agent.agent.agent_core.tool_guard.call_guardrail_config import (
+        repeat_fail_threshold,
+        terminal_block_enabled,
     )
 
     class Params:
         task_attributes = {}
 
-    assert _repeat_fail_threshold(Params()) == 10
-    assert _terminal_block_enabled(Params()) is False
+    assert repeat_fail_threshold(Params()) == 10
+    assert terminal_block_enabled(Params()) is False
 
 
-# LLM: Tool rate-limit defaults should live beside the other runtime guard knobs.
-# 函数用途: 验证工具工程限流和熔断默认值来自统一 runtime_guard_config.yaml，而不是散落在调用点。
 def test_runtime_guard_file_contains_tool_rate_limit_defaults():
-    from agent_py_agent.agent.tooling.registry_runtime_gate_pipeline import _tool_rate_limit_policy
+    from agent_py_agent.agent.tooling.registry_rate_limit_policy import tool_rate_limit_policy
 
-    policy = _tool_rate_limit_policy(None)
+    policy = tool_rate_limit_policy(None)
 
     assert policy is not None
     assert policy.window_seconds == 60.0
@@ -45,12 +39,10 @@ def test_runtime_guard_file_contains_tool_rate_limit_defaults():
     assert policy.max_records == 256
 
 
-# LLM: Explicit write-boundary policies should still override shared defaults for special tools or monitors.
-# 函数用途: 验证长期监控等调用方仍可显式覆盖统一默认限流参数。
 def test_tool_rate_limit_boundary_policy_overrides_shared_defaults():
-    from agent_py_agent.agent.tooling.registry_runtime_gate_pipeline import _tool_rate_limit_policy
+    from agent_py_agent.agent.tooling.registry_rate_limit_policy import tool_rate_limit_policy
 
-    policy = _tool_rate_limit_policy(
+    policy = tool_rate_limit_policy(
         {
             "tool_rate_limit_policy": {
                 "max_calls": 12,
@@ -69,13 +61,11 @@ def test_tool_rate_limit_boundary_policy_overrides_shared_defaults():
     assert policy.max_records == 64
 
 
-# LLM: Per-agent tool budget should share the same runtime guard YAML as other count gates.
-# 函数用途: 验证子代理/runner 工具预算默认值也集中在 runtime_guard_config.yaml。
 def test_runtime_guard_file_contains_tool_agent_budget_defaults():
-    from agent_py_agent.agent.agent_core.runtime_guard_config import (
+    from agent_py_agent.agent.agent_core.runtime.guard_config import (
         DEFAULT_RUNTIME_GUARD_CONFIG_PATH,
     )
-    from agent_py_agent.agent.agent_core.tool_agent_budget import _budget_int
+    from agent_py_agent.agent.agent_core.tool_guard.agent_budget import _budget_int
     from agent_py_agent.agent.settings.config_io import load_simple_yaml
 
     class Config:
@@ -87,15 +77,13 @@ def test_runtime_guard_file_contains_tool_agent_budget_defaults():
     assert _budget_int(Config(), "tool_agent_budget_max_calls") == int(defaults["tool_agent_budget_max_calls"])
 
 
-# LLM: Tool-loop and runner retry counts should share the same runtime guard YAML.
-# 函数用途: 验证主工具轮上限、runner 失败重试和同 run 重派限制都集中在 runtime_guard_config.yaml。
 def test_runtime_guard_file_contains_tool_loop_and_runner_defaults():
     from agent_py_agent.agent.agent_core._tool_loop_service import _effective_max_tool_rounds
-    from agent_py_agent.agent.agent_core.runner_dispatch import (
+    from agent_py_agent.agent.agent_core.runner.dispatch import (
         _runner_max_attempts,
         _same_run_redispatch_limit,
     )
-    from agent_py_agent.agent.agent_core.runtime_guard_config import (
+    from agent_py_agent.agent.agent_core.runtime.guard_config import (
         DEFAULT_RUNTIME_GUARD_CONFIG_PATH,
     )
     from agent_py_agent.agent.settings.config_io import load_simple_yaml
@@ -116,17 +104,15 @@ def test_runtime_guard_file_contains_tool_loop_and_runner_defaults():
     assert _same_run_redispatch_limit(None) == int(defaults["same_run_redispatch_limit"])
 
 
-# LLM: runtime guard readers should honor YAML patches instead of imported hard-coded defaults.
-# 函数用途: 验证改 runtime_guard_config.yaml 后，工具轮、runner 重试和同 run 重派限制会同步生效。
 def test_runtime_guard_readers_follow_the_same_patched_yaml(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from agent_py_agent.agent.agent_core._tool_loop_service import _effective_max_tool_rounds
-    from agent_py_agent.agent.agent_core.runner_dispatch import (
+    from agent_py_agent.agent.agent_core.runner.dispatch import (
         _runner_max_attempts,
         _same_run_redispatch_limit,
     )
-    from agent_py_agent.agent.agent_core.tool_agent_budget import _budget_int
+    from agent_py_agent.agent.agent_core.tool_guard.agent_budget import _budget_int
     from agent_py_agent.agent.settings import runtime_guard_config
 
     config_path = tmp_path / "runtime_guard_config.yaml"
@@ -153,3 +139,63 @@ def test_runtime_guard_readers_follow_the_same_patched_yaml(tmp_path, monkeypatc
     assert _same_run_redispatch_limit(None) == 4
     assert _budget_int(config, "tool_agent_budget_window_seconds") == 33
     assert _budget_int(config, "tool_agent_budget_max_calls") == 44
+
+
+def test_runtime_guard_readers_prefer_agent_policy_snapshot():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core._tool_loop_service import _effective_max_tool_rounds
+    from agent_py_agent.agent.agent_core.runner.dispatch import (
+        _runner_max_attempts,
+        _same_run_redispatch_limit,
+    )
+    from agent_py_agent.agent.agent_core.tool_guard.agent_budget import _budget_int
+    from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
+
+    policy = RuntimeGuardPolicy(
+        values={
+            "max_tool_rounds": 21,
+            "runner_failure_retry_limit": 6,
+            "same_run_redispatch_limit": 5,
+            "tool_agent_budget_window_seconds": 77,
+        },
+        sources={},
+    )
+    agent = SimpleNamespace(config=SimpleNamespace(max_tool_rounds=None), runtime_guard_policy=policy)
+    params = SimpleNamespace(task_attributes={})
+    config = SimpleNamespace()
+
+    assert _effective_max_tool_rounds(agent, params) == 21
+    assert _runner_max_attempts("auto", runtime_policy=policy) == 6
+    assert _same_run_redispatch_limit(None, runtime_policy=policy) == 5
+    assert _budget_int(config, "tool_agent_budget_window_seconds", policy=policy) == 77
+
+
+def test_registry_runtime_gate_policy_uses_passed_runtime_policy():
+    from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
+    from agent_py_agent.agent.tooling.registry_rate_limit_policy import tool_rate_limit_policy
+    from agent_py_agent.agent.tooling.registry_runtime_gate_pipeline import _tool_guardrail_config
+
+    policy = RuntimeGuardPolicy(
+        values={
+            "repeat_fail_threshold": 13,
+            "terminal_block_enabled": True,
+            "tool_rate_max_calls": 14,
+            "tool_rate_window_seconds": 15,
+            "tool_circuit_failure_threshold": 16,
+            "tool_circuit_backoff_seconds": [1, 3, 5],
+            "tool_rate_max_records": 17,
+        },
+        sources={},
+    )
+
+    guardrail = _tool_guardrail_config(None, policy)
+    rate = tool_rate_limit_policy(None, policy)
+
+    assert guardrail.repeat_fail_threshold == 13
+    assert guardrail.terminal_block_enabled is True
+    assert rate.max_calls == 14
+    assert rate.window_seconds == 15.0
+    assert rate.failure_threshold == 16
+    assert rate.backoff_schedule_seconds == (1.0, 3.0, 5.0)
+    assert rate.max_records == 17

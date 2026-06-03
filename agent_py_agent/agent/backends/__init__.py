@@ -1,5 +1,3 @@
-# LLM: Model backend module; keep streaming, gateway, and backend protocol shapes stable.
-# 模块用途: 封装模型后端协议、流式解析和 gateway 辅助调用。
 
 from __future__ import annotations
 
@@ -21,12 +19,14 @@ from .base import (
 )
 from .errors import (
     ProviderRecoverableError,
+    ProviderResponseError,
     ProviderTimeoutError,
     ProviderTransientError,
     is_provider_recoverable_error,
     is_provider_timeout_error,
     is_provider_transient_error,
     provider_recoverable_report,
+    provider_response_report,
     provider_timeout_report,
     provider_transient_report,
 )
@@ -40,6 +40,7 @@ __all__ = [
     "ModelResponse",
     "OpenAICompatibleBackend",
     "ProviderRecoverableError",
+    "ProviderResponseError",
     "ProviderTimeoutError",
     "ProviderTransientError",
     "get_backend",
@@ -47,6 +48,7 @@ __all__ = [
     "is_provider_timeout_error",
     "is_provider_transient_error",
     "provider_recoverable_report",
+    "provider_response_report",
     "provider_timeout_report",
     "provider_transient_report",
 ]

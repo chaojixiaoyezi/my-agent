@@ -7,8 +7,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 
-# LLM: _mock_workspace_agent keeps output-ref tests small and independent from the large create tool suite.
-# 函数用途: 构造拥有真实 SubAgentManager 的最小 agent，用于检查 payload 和持久化 task 是否一致。
 def _mock_workspace_agent(tmp_path: Path):
     from agent_py_agent.agent.subagents.manager import SubAgentManager
 
@@ -20,8 +18,6 @@ def _mock_workspace_agent(tmp_path: Path):
     return mock_agent
 
 
-# LLM: This regression covers the real E2E bug where a stale guessed run id entered a new child goal.
-# 函数用途: 确认 create_subagents 返回给模型的 payload 和 task.json 都使用真实 run_id 作为自写产物目录。
 def test_items_mode_payload_rebinds_stale_self_output_run_id(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -46,8 +42,6 @@ def test_items_mode_payload_rebinds_stale_self_output_run_id(tmp_path):
     assert loaded.attributes["output_ref_rebindings"][0]["to"].endswith("/data_collection.md")
 
 
-# LLM: This keeps the workspace-root default behavior out of the oversized create tool test file.
-# 函数用途: 验证已有真实任务工作区时，结构化 output_files worker 默认获得 workspace_root 写入根。
 def test_structured_output_worker_defaults_to_workspace_root():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -77,8 +71,6 @@ def test_structured_output_worker_defaults_to_workspace_root():
     assert params.extra_write_roots == [str(Path("/tmp/project").resolve(strict=False))]
 
 
-# LLM: repair tasks with structured output refs need the product workspace, not only a private run dir.
-# 函数用途: 验证 repair_worker 带 output_files 时默认拿到项目写入根，避免 repair 写到私有工单目录。
 def test_repair_file_task_with_output_ref_defaults_to_workspace_root():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -108,8 +100,6 @@ def test_repair_file_task_with_output_ref_defaults_to_workspace_root():
     assert params.extra_write_roots == [str(Path("/tmp/project").resolve(strict=False))]
 
 
-# LLM: Repair create calls with target refs should write to the target artifact directory, not workspace root.
-# 函数用途: 复现真实 E2E 中修复 worker 读对了 lab_outputs/index.html 却写到项目根 index.html 的路径漂移。
 def test_repair_task_uses_required_read_target_as_product_root(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -133,8 +123,6 @@ def test_repair_task_uses_required_read_target_as_product_root(tmp_path):
     ]
 
 
-# LLM: Absolute target files in structured roots should become directory write roots.
-# 函数用途: 防止 create_subagents 从 extra_write_roots 文件路径持久化出文件本身作为 allowed_write_root。
 def test_goal_absolute_target_file_normalizes_write_root_to_parent(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -157,8 +145,6 @@ def test_goal_absolute_target_file_normalizes_write_root_to_parent(tmp_path):
     ]
 
 
-# LLM: Repair suggested tool calls must survive create_subagents into the runner context.
-# 函数用途: 验证 repair_contract 第一片的 required refs/context packs 会写入真实 task，而不是只停留在父级工具输出里。
 def test_repair_contract_fields_are_persisted_to_child_context(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -180,8 +166,6 @@ def test_repair_contract_fields_are_persisted_to_child_context(tmp_path):
     assert task.context_packs[0]["kind"] == "repair_contract"
 
 
-# LLM: same display name is not enough to merge different repair scopes.
-# 函数用途: 两个验收修复小傻妞如果 repair_contract 指向不同失败 run/产物，必须创建不同任务。
 def test_repair_contract_idempotency_does_not_merge_different_scope(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -196,8 +180,6 @@ def test_repair_contract_idempotency_does_not_merge_different_scope(tmp_path):
     assert first["ids"] != second["ids"]
 
 
-# LLM: same repair contract should reuse even when the model rewrites the natural-language goal.
-# 函数用途: 同一个失败 run/目标产物被重复派修复时，复用已有 repair owner，避免拆成修复/执行/验证多段链。
 def test_repair_contract_idempotency_reuses_same_scope_with_reworded_goal(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -309,8 +291,6 @@ def test_same_output_without_structured_inputs_does_not_reuse_different_work(tmp
     assert "work_scope_key" not in second["tasks"][0]["attributes"]
 
 
-# LLM: repair identity no longer guesses scope from natural goals without repair_contract.
-# 函数用途: 没有 repair_contract 时，即使自然语言看起来是同一文件修复，也不靠代码词表复用。
 def test_repair_goal_without_contract_does_not_guess_same_target(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -333,8 +313,6 @@ def test_repair_goal_without_contract_does_not_guess_same_target(tmp_path):
     assert second["reused_run_ids"] == []
 
 
-# LLM: without repair_contract, same display name but different goal text remains separate work.
-# 函数用途: 两个不同目标文件的自然语言修复任务应保持独立 repair owner，不靠“修复”词合并。
 def test_repair_goal_without_contract_keeps_different_targets_separate(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -357,8 +335,6 @@ def test_repair_goal_without_contract_keeps_different_targets_separate(tmp_path)
     assert first["ids"] != second["ids"]
 
 
-# LLM: schedule_child_subagents should persist repair context into the child task, not drop it at parsing.
-# 函数用途: runner 内父节点创建修复 child 时，repair_contract 的 required refs/context pack 必须进入真实 task。
 def test_schedule_child_repair_contract_fields_are_persisted_to_child_context(tmp_path):
     from agent_py_agent.agent.agent_core.hierarchy_tools import ScheduleChildSubagentsTool
     from agent_py_agent.agent.config import AgentConfig
@@ -380,8 +356,6 @@ def test_schedule_child_repair_contract_fields_are_persisted_to_child_context(tm
     assert task.context_packs[0]["kind"] == "repair_contract"
 
 
-# LLM: runner-context repair scheduling should reuse the same repair owner by contract, not exact prose.
-# 函数用途: 同一个父级重复派同一 repair_contract，即使 goal 改写，也不能拆出第二个执行/验证 child。
 def test_schedule_child_repair_contract_reuses_same_scope_with_reworded_goal(tmp_path):
     from agent_py_agent.agent.agent_core.hierarchy_tools import ScheduleChildSubagentsTool
     from agent_py_agent.agent.config import AgentConfig
@@ -431,8 +405,6 @@ def test_schedule_child_without_idempotency_contract_does_not_reuse_by_goal_text
     assert second["reused_run_ids"] == []
 
 
-# LLM: _repair_create_params mirrors the repair suggested_tool_call shape used by closeout.
-# 函数用途: 生成带同 run 修复合同的 create/schedule 参数，供顶层和 runner-context 测试复用。
 def _repair_create_params(run_id: str, artifact: str, *, goal: str = "修复最终收口失败") -> dict[str, object]:
     contract = {
         "schema": "subagent_repair_contract.v1",

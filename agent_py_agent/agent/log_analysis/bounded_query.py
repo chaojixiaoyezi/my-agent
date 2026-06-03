@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 """受控查询工具。
 
@@ -19,8 +17,6 @@ from .models import QueryResult
 default_config = BoundedQueryConfig()
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _EmptyResultInput 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 _EmptyResultInput 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _EmptyResultInput:
     query_template: str
@@ -30,8 +26,6 @@ class _EmptyResultInput:
     error: dict[str, Any]
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 BoundedQueryParams 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 BoundedQueryParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class BoundedQueryParams:
     """Params bundle for bounded log queries."""
@@ -43,8 +37,6 @@ class BoundedQueryParams:
     config: BoundedQueryConfig | None = None
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 bounded_query 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 bounded query 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def bounded_query(
     query_template: str,
     *,
@@ -83,8 +75,6 @@ def bounded_query(
     return _empty_result(_EmptyResultInput(query_template, _result_params(query_params), time_window, max_results, _unsupported_template_error(query_template)))
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _query_inputs 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 query inputs 的候选结果，并按参数完成筛选、排序或数量限制。
 def _query_inputs(
     *,
     params: BoundedQueryParams | None,
@@ -105,8 +95,6 @@ def _query_inputs(
     )
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _result_params 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 result params 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def _result_params(params: BoundedQueryParams) -> dict[str, Any]:
     return {
         "file_path": params.file_path,
@@ -116,16 +104,12 @@ def _result_params(params: BoundedQueryParams) -> dict[str, Any]:
     }
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _effective_max_results 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 effective max results 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def _effective_max_results(max_results: int | None, config: BoundedQueryConfig) -> int:
     if max_results is None or max_results <= 0:
         return config.default_max_results
     return max_results
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _time_window 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 time window 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _time_window(start_time: str | None, end_time: str | None) -> dict[str, str]:
     window: dict[str, str] = {}
     if start_time:
@@ -135,8 +119,6 @@ def _time_window(start_time: str | None, end_time: str | None) -> dict[str, str]
     return window
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _empty_result 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 empty result 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def _empty_result(data: _EmptyResultInput) -> QueryResult:
     return QueryResult(
         query_template=data.query_template,
@@ -150,14 +132,10 @@ def _empty_result(data: _EmptyResultInput) -> QueryResult:
     )
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _missing_file_error 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 missing file error 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def _missing_file_error() -> dict[str, Any]:
     return {"error_type": "missing_parameter", "message": "file_tail 模板需要 file_path 参数", "details": {}}
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _unsupported_template_error 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 unsupported template error 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def _unsupported_template_error(query_template: str) -> dict[str, Any]:
     return {
         "error_type": "unsupported_template",

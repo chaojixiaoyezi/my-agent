@@ -73,7 +73,7 @@
 
    运行中人类或父代理可以通过 `send_guidance` 或 CLI `guidance-send` 给某个 run/thread/task/case 追加自然语言提示。提示只进入下一轮 prompt，不会直接 dispatch、closeout 或修改任务状态。需要同步提醒一批下级时，`send_guidance` 可以用 `run_ids` 或 `target_scope=children/descendants` 批量写入同一条软提示；`inspect_agent_tree` 会展示未读提示数量。
 
-   `dispatch_subagents` 的模型入口只保留 `dry_run` 一个执行开关。工具边界会把它转换成内部 `DispatchExecutionPlan`，后续 dispatch loop、runner batch 和 watch 都读取同一份执行计划；旧 `apply/execute_runners` 只作为代码兼容投影，不再让模型填写。
+   `dispatch_subagents` 的模型入口只保留 `dry_run` 一个执行开关。工具边界会把它转换成内部 `DispatchExecutionPlan`，后续 dispatch loop、runner batch 和 watch 都读取同一份执行计划；旧 `apply/start_runners` 只作为代码兼容投影，不再让模型填写。
 
    `create_subagents` 和 `schedule_child_subagents` 入口不同，但创建后的生命周期相同：写入真实 run、绑定会话、登记 run_id、默认后台启动，并把启动状态放回任务树。区别只在权限边界：顶层主代理用 `create_subagents`，运行中的子/孙代理用 `schedule_child_subagents`，后者只能在自己的子树下面创建下一层。`dispatch_subagents` 不再是普通启动入口，它用于推进、恢复、重跑或诊断已有 run。
 
@@ -250,7 +250,7 @@ agent_py_agent/agent/contracts/
 - 显式命名的小傻妞现在把名字当作结构化身份；默认泛名仍用 goal/write-root 等字段区分。这避免“同一个小傻妞目标文字稍微变了就重复创建”，也避免默认 worker 把不同任务误合并。
 - `ToolExecutionResult` 现在会在失败时自动带 `error_code`、`error_category`、`retryable`、`recommended_action`、`recovery_hint`。typed tool result envelope 也同步这些字段；这只是恢复事实，不改变工具是否允许执行。
 - `tool_protocol_v2` 已接入 registry result envelope：每次工具执行会同步一份 `schema=tool_protocol.v2` 的结构化结果，包含 operation id、idempotency key、error taxonomy、artifact refs 和 output preview。机器事实读这个 envelope，不再从工具输出自然语言里猜。
-- `model_call_ledger` 已接入公共模型调用路径：每次 `backend.generate` 会记录 started、first_token、finished 或 timeout。动态超时预算由结构化输入 token 和首 token 观测生成；provider wall timeout 会抛 `ProviderTimeoutError`，让恢复层知道这是模型上游/请求超时，不是工具失败或验收失败。429/529/503/临时 5xx 等 provider transient 会先在当前模型回合内按 `10/25/45/100/180` 秒等待表自动重试，避免重启整轮 run 或重复执行已完成工具；重试耗尽后才归类为 `ProviderTransientError`，CLI 输出可恢复提示，不把裸 HTTP traceback 当成任务事实。
+- `model_call_ledger` 已接入公共模型调用路径：每次 `backend.generate` 会记录 started、first_token、finished 或 timeout。动态超时预算由结构化输入 token 和首 token 观测生成；provider wall timeout 会抛 `ProviderTimeoutError`，让恢复层知道这是模型上游/请求超时，不是工具失败或验收失败。429/529/503/临时 5xx 等 provider transient 会先在当前模型回合、入口 delivery contract 物化和子代理结构化修复调用中按 `10/25/45/100/180` 秒等待表自动重试，避免重启整轮 run 或重复执行已完成工具；重试耗尽后才归类为 `ProviderTransientError`，CLI 输出可恢复提示，不把裸 HTTP traceback 当成任务事实。Anthropic-compatible 流式空文本后的非流式兜底也会保留真实 provider/IO 错误，不再把兜底失败降成“流式响应没有文本内容”。
 - `file_write_session` 已作为大文件写入工具注册：长 HTML/CSS/JS、长报告或大文本可以走 `begin -> append -> finish`，chunk 写入有 manifest、sha256、幂等重复提交和原子提交。公开工具类只保留模型目录和入口，具体状态机在 service/IO/model 三层里，避免再次长成一个难维护大类。
 - `e2e_matrix_runner.py` 提供 deterministic runner 第一片：当前可跑中文路径写读、大工具输出 artifact 元数据、工具失败分类；真实模型用例会明确 `SKIPPED`，避免单测假装覆盖真实链路。
 - `main_agent_foundation_runner.py` 把主代理基础 1-6 类测试收成一个 refs-first 报告：工具失败合同、真实单代理任务占位、compact/resume 占位、大输出 artifact refs、真实错误恢复占位和确定性 E2E matrix。真实模型项没有跑时必须显示 `SKIPPED`。

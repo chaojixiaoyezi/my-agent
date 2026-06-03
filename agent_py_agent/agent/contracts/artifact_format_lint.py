@@ -1,5 +1,3 @@
-# LLM: Artifact format lint is the unified entrypoint over existing artifact validators.
-# 模块用途: 收口 JSON/Markdown/HTML/PDF/DOCX/XLSX/CSV 等格式检查，避免 closeout 到处直接找专项门。
 
 from __future__ import annotations
 
@@ -10,8 +8,6 @@ from .artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from .artifact_acceptance_models import ArtifactAcceptanceReport
 
 
-# LLM: lint_artifact_format reuses existing validators and preserves their structured finding shape.
-# 函数用途: 统一从 path/workspace/contract 进入格式 lint，内部仍复用已有 artifact acceptance 能力。
 def lint_artifact_format(
     *,
     path: Path,

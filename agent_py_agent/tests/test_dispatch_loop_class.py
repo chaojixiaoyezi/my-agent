@@ -12,7 +12,10 @@ class TestDispatchLoopClass:
 
     def test_dispatch_loop_single_round(self, tmp_path: Path):
         """无待处理任务时只执行一轮。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -32,7 +35,10 @@ class TestDispatchLoopClass:
 
     def test_dispatch_loop_multiple_rounds(self, tmp_path: Path):
         """多轮调度直到任务完成。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -59,7 +65,10 @@ class TestDispatchLoopClass:
 
     def test_dispatch_loop_stops_at_limit(self, tmp_path: Path):
         """达到最大轮数时停止。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -78,7 +87,10 @@ class TestDispatchLoopClass:
 
     def test_dispatch_loop_empty_candidates(self, tmp_path: Path):
         """无候选任务时结束。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -94,9 +106,35 @@ class TestDispatchLoopClass:
         assert result.rounds_count == 1
         assert result.final_pending_count == 0
 
+    def test_final_pending_count_reports_load_error(self, tmp_path: Path):
+        """最终 pending 统计不能把账本读取失败伪装成没有待跑任务。"""
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import dispatch_loop
+
+        agent = MagicMock()
+        agent.config.runner_failure_policy = "auto"
+        agent.config.same_run_redispatch_limit = 0
+        agent.has_pending_work = False
+        mock_report = MagicMock()
+        mock_report.records = []
+        agent.dispatch_subagents.return_value = mock_report
+        agent.subagents.list_runs.side_effect = ValueError("bad subagent state")
+
+        result = dispatch_loop(agent, router=None, max_consecutive_rounds=20)
+
+        assert result.final_pending_count == 0
+        assert result.final_pending_load_error["context"] == "dispatch_loop.final_pending_runner_count"
+        assert result.final_pending_load_error["error"]["message"]
+
+
+class TestDispatchLoopClassRecords:
+    """测试 dispatch_loop 的记录和报告结构。"""
+
     def test_dispatch_loop_records_count(self, tmp_path: Path):
         """正确统计 records 总数。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -128,7 +166,10 @@ class TestDispatchLoopClass:
 
     def test_dispatch_loop_report_structure(self, tmp_path: Path):
         """验证报告结构。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -150,7 +191,10 @@ class TestDispatchLoopClass:
 
     def test_dispatch_loop_rounds_list(self, tmp_path: Path):
         """每轮记录被正确保存。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -177,7 +221,10 @@ class TestDispatchLoopClass:
 
     def test_dispatch_loop_zero_max_rounds(self, tmp_path: Path):
         """max_rounds=0 时的处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -198,7 +245,7 @@ class TestDispatchLoopReport:
 
     def test_default_values(self, tmp_path: Path):
         """默认值的测试。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import DispatchLoopReport
 
         report = DispatchLoopReport()
         assert report.rounds_count == 0
@@ -210,7 +257,7 @@ class TestDispatchLoopReport:
 
     def test_round_info_structure(self, tmp_path: Path):
         """每轮信息结构。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import DispatchLoopReport
 
         report = DispatchLoopReport()
         report.rounds.append({"round": 1, "record_count": 5, "ok": True})

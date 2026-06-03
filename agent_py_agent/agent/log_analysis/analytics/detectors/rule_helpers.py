@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 from __future__ import annotations
 
@@ -46,9 +44,6 @@ from .field_extractors import (
 )
 
 
-# LLM: detector finding fields stay in MakeFindingParams so rule helpers remain extensible.
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 MakeFindingParams 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 MakeFindingParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class MakeFindingParams:
     """Params bundle for _make_finding."""
@@ -64,8 +59,6 @@ class MakeFindingParams:
     extra_entities: dict[str, list[Any]] | None = None
 
 
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _FindingIdPayloadParams 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 _FindingIdPayloadParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _FindingIdPayloadParams:
     finding: MakeFindingParams
@@ -74,8 +67,6 @@ class _FindingIdPayloadParams:
     evidence_refs: Sequence[EvidenceRef]
 
 
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _make_finding 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 make finding 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _make_finding(
     detector_id: str,
     evidence_events: Sequence[Any],
@@ -121,8 +112,6 @@ def _make_finding(
     return finding
 
 
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _finding_entities 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 finding entities 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _finding_entities(params: MakeFindingParams) -> dict[str, list[str]]:
     entities = _entities_from_events(params.evidence_events)
     for key, values in (params.extra_entities or {}).items():
@@ -131,8 +120,6 @@ def _finding_entities(params: MakeFindingParams) -> dict[str, list[str]]:
     return _normalize_entities(entities)
 
 
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _finding_id_payload 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 finding id payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _finding_id_payload(
     params: _FindingIdPayloadParams,
 ) -> dict[str, Any]:
@@ -146,8 +133,6 @@ def _finding_id_payload(
     }
 
 
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _evidence_id 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 evidence id 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _evidence_id(event: dict[str, Any]) -> str:
     """Return a stable evidence identifier for *event*."""
     for field_name in ("raw_ref", "evidence_ref", "event_id", "security_event_id", "alert_id", "id"):
@@ -157,8 +142,6 @@ def _evidence_id(event: dict[str, Any]) -> str:
     return _stable_id("event", event)
 
 
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _evidence_ref 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 evidence ref 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _evidence_ref(event: dict[str, Any]) -> EvidenceRef:
     """Build an EvidenceRef from *event*."""
     evidence_id = _evidence_id(event)
@@ -176,8 +159,6 @@ def _evidence_ref(event: dict[str, Any]) -> EvidenceRef:
     )
 
 
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _query 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 query 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _query(prefix: str, event: dict[str, Any]) -> dict[str, Any]:
     """Build a follow-up QueryPlan dict for *event*."""
     when = _event_time(event)
@@ -205,8 +186,6 @@ def _query(prefix: str, event: dict[str, Any]) -> dict[str, Any]:
     return plan.to_dict()
 
 
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _query_source_products 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 query source products 的候选结果，并按参数完成筛选、排序或数量限制。
 def _query_source_products(prefix: str, event: dict[str, Any]) -> list[str]:
     """Infer relevant source products from the query prefix text."""
     text = prefix.lower()
@@ -225,8 +204,6 @@ def _query_source_products(prefix: str, event: dict[str, Any]) -> list[str]:
     return _unique_texts(products)
 
 
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _query_evidence_needed 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 query evidence needed 的候选结果，并按参数完成筛选、排序或数量限制。
 def _query_evidence_needed(prefix: str) -> list[str]:
     """Infer what evidence types the query needs from its prefix text."""
     text = prefix.lower()
@@ -244,8 +221,6 @@ def _query_evidence_needed(prefix: str) -> list[str]:
     return needed or ["corroborating_events"]
 
 
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _stable_id 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 stable id 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _stable_id(prefix: str, payload: Any) -> str:
     """Generate a stable SHA-256-based ID from *payload*."""
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
@@ -253,8 +228,6 @@ def _stable_id(prefix: str, payload: Any) -> str:
     return f"{prefix}-{digest[:16]}"
 
 
-# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _dedupe_findings 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 dedupe findings 涉及的字段，让后续匹配和存储使用同一形态。
 def _dedupe_findings(findings: Sequence[Any]) -> list[Any]:
     """Remove duplicate findings by finding_id."""
     result: list[Any] = []

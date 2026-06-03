@@ -1,0 +1,133 @@
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from ..runner.context import restore_current_subagent_context, set_current_subagent_context
+from .params import (
+    SubagentFinalizeParams,
+    SubagentProbeParams,
+    SubagentRunFailureParams,
+    SubagentRunParams,
+)
+from .session_continuation import continue_subagent_session_if_needed
+
+
+@dataclass(frozen=True)
+class SubagentModelTurnBundle:
+    options: SubagentRunParams
+    active_attempt_id: str
+    context: object
+    prompt: str
+
+
+def run_subagent_flow(lifecycle, options: SubagentRunParams):
+    """Run one subagent task from prompt construction through result persistence."""
+    active_attempt_id = _prepare_subagent_attempt(lifecycle, options)
+    context, prompt = _build_prompt(lifecycle, options)
+    if options.dry_run:
+        return lifecycle.record_dry_run(options.run_id, active_attempt_id, prompt)
+
+    probe_blocked = _probe_subagent_channel(lifecycle, options, active_attempt_id)
+    if probe_blocked is not None:
+        return probe_blocked
+
+    context, prompt = _build_prompt(lifecycle, options)
+    _persist_runner_prompt_before_model(lifecycle.agent, options.run_id, prompt)
+    return _run_and_finalize_subagent(
+        lifecycle,
+        SubagentModelTurnBundle(options, active_attempt_id, context, prompt),
+    )
+
+
+def _prepare_subagent_attempt(lifecycle, options: SubagentRunParams) -> str:
+    active_attempt_id = str(options.attempt_id or "").strip()
+    return lifecycle.prepare_attempt(
+        options.run_id,
+        dry_run=options.dry_run,
+        active_attempt_id=active_attempt_id,
+        retry_reason=options.retry_reason,
+    )
+
+
+def _build_prompt(lifecycle, options: SubagentRunParams):
+    return lifecycle.build_prompt(options.run_id, options.max_cards, options.instruction)
+
+
+def _probe_subagent_channel(lifecycle, options: SubagentRunParams, active_attempt_id: str):
+    return lifecycle.probe_channel(
+        SubagentProbeParams(
+            options.run_id,
+            active_attempt_id,
+            options.max_cards,
+            options.instruction,
+            options.probe,
+        )
+    )
+
+
+def _persist_runner_prompt_before_model(agent, run_id: str, prompt: str) -> None:
+    task = agent.subagents.load(run_id)
+    prompt_file = str(getattr(task, "runner_prompt_file", "") or "")
+    if not prompt_file:
+        return
+    path = Path(prompt_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(prompt, encoding="utf-8")
+
+
+def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
+    agent = lifecycle.agent
+    options = bundle.options
+    task_for_attrs = agent.subagents.load(options.run_id)
+    previous_context = set_current_subagent_context(
+        agent,
+        run_id=options.run_id,
+        attempt_id=bundle.active_attempt_id,
+        task_attributes=task_for_attrs.attributes,
+    )
+
+    try:
+        result = _run_subagent_model_turn(lifecycle, bundle.prompt, bundle.context)
+        continued = continue_subagent_session_if_needed(agent, bundle, result)
+        result = continued.result
+        bundle = continued.bundle
+    except Exception as exc:
+        return lifecycle.handle_run_failure(
+            SubagentRunFailureParams(
+                options.run_id,
+                bundle.active_attempt_id,
+                exc,
+                bundle.context,
+                bundle.prompt,
+            )
+        )
+    finally:
+        restore_current_subagent_context(agent, previous_context)
+
+    return lifecycle.finalize_run(
+        SubagentFinalizeParams(
+            options.run_id,
+            bundle.active_attempt_id,
+            result,
+            bundle.context,
+            bundle.prompt,
+        )
+    )
+
+
+def _run_subagent_model_turn(lifecycle, prompt: str, context):
+    from ..runner.identity_prompt import subagent_runner_system_prompt
+
+    return lifecycle.agent.run(
+        prompt,
+        save=False,
+        allowed_tools=context.allowed_tools,
+        write_boundary=context.write_boundary,
+        run_id=context.run_id,
+        task_id=context.root_id or context.run_id,
+        system_prompt_override=subagent_runner_system_prompt(context),
+        source="subagent_run_model_turn",
+        context_scope="task_local",
+    )

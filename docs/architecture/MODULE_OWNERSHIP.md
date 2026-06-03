@@ -54,22 +54,80 @@ LLM: Use this table to decide where new code belongs.
 | 模块 | 唯一职责 | 不可承担 | 当前行数 | 状态 |
 |---|---|---|---|---|
 | `agent_core/runtime_mixin.py` | 主代理模型/工具执行循环（run 方法） | 子代理调度、CLI 渲染 | 350+ | OK |
-| `agent_core/dispatch_mixin.py` | 父代理调度主循环（due-check, 派工, 验收） | 模型调用、CLI 输出 | 895 | FROZEN |
-| `agent_core/subagent_mixin.py` | 子代理相关入口 mixin | 具体子代理管理 | 200+ | OK |
+| `agent_core/subagent_mixin.py` | 子代理相关公开入口 facade | 具体子代理管理 | 200+ | OK |
+| `agent_core/subagent/lifecycle_service.py` | 子代理 spawn/run/probe/finalize 生命周期组合服务 | repair/planner 细节、持久化实现 | 90- | OK |
+| `agent_core/subagent/params.py` | 子代理创建/运行 lifecycle 参数对象 | dispatch/watch 参数、业务状态 | 90- | OK |
+| `agent_core/subagent/run_flow.py` | 单个子代理 runner 从 prompt 到 finalize 的顺序流程 | prompt 细节、repair 策略 | 150- | OK |
+| `agent_core/subagent/spawn_flow.py` | 子代理创建数量、角色种子和自动拆分流程 | persistence 实现、runner 执行 | 100- | OK |
+| `agent_core/subagent/finalize_helpers.py` | 子代理 runner 结果持久化和恢复快照写入 | lifecycle 调度、模型调用 | 90- | OK |
+| `agent_core/subagent/compact_continuation.py` | 子代理 task-local compact 接续提示 | 主代理 memory、工具执行 | 300+ | OK |
+| `agent_core/subagent/session_continuation.py` | 子代理本地 session compact 后自动续接 | 任务拆分、父代理调度 | 120- | OK |
+| `agent_core/subagent/progress_closeout.py` | 子代理 task-local 产物进度收口提示 | 主任务 closeout、产物验收策略 | 180- | OK |
+| `agent_core/subagent/attempt_guard.py` | runner attempt 过期/废弃保护 | 通用工具权限、任务终止策略 | 80- | OK |
+| `agent_core/tool_stream/boundary.py` | 模型流式输出中工具协议截断、畸形协议和超长内联写入边界 | 工具执行、写入权限 | 220- | OK |
+| `agent_core/tool_stream/models.py` | 工具流边界异常和 payload 模型 | 协议解析、业务策略 | 60- | OK |
+| `agent_core/tool_stream/write_abort.py` | write_file 流式内联内容过长的 abort payload 解析 | 文件写入执行、产物验证 | 150- | OK |
 | `agent_core/failure_introspector.py` | 失败自省引擎（LLM 分析失败原因） | 调度决策 | 150+ | OK |
 | `agent_core/failure_analyzer.py` | 失败模式分析 | 自省 | 100+ | OK |
 | `agent_core/planner.py` | 调度规划（runner 指令组合） | 执行 | 150+ | OK |
-| `agent_core/runner_dispatch.py` | runner 分发（并发控制、重试、超时） | 调度规划 | 200+ | OK |
-| `agent_core/runner_prompts.py` | runner 提示词模板 | 无 | 100+ | OK |
-| `agent_core/dispatch_lock.py` | 调度锁 | 无 | 50+ | OK |
-| `agent_core/dispatch_loop.py` | 调度循环 | 无 | 100+ | OK |
+| `agent_core/runner/dispatch.py` | runner 分发（并发控制、重试、超时） | 调度规划、runner gate | 200+ | OK |
+| `agent_core/runner/gate.py` | runner 执行入口、失败续跑提示和 worker 参数收口 | runner dispatch、memory push | 200- | OK |
+| `agent_core/runner/prompts.py` | runner 提示词模板 | runner context summary、compact continuation | 300- | OK |
+| `agent_core/runner/ref_fields.py` | runner 输入/输出 refs 解析 | create_subagents、write roots | 200- | OK |
+| `agent_core/orchestration/dispatch/mixin.py` | SimpleAgent dispatch 公开 facade | runner 实现、watch 实现 | 270- | OK |
+| `agent_core/orchestration/dispatch/params.py` | dispatch/watch 参数对象和执行计划 | 业务执行、CLI 渲染 | 250- | OK |
+| `agent_core/orchestration/dispatch/loop.py` | dispatch_loop 循环推进 | 子代理创建、模型调用 | 270- | OK |
+| `agent_core/orchestration/dispatch/lock.py` | dispatch watch 文件锁 | 业务状态判断 | 90- | OK |
+| `agent_core/orchestration/dispatch/runner_batches.py` | runner 候选收集、限流和批量执行衔接 | runner 内部执行、模型 prompt | 240- | OK |
+| `agent_core/orchestration/dispatch/service.py` | dispatch step record builders | watch 循环、runner 执行 | 250- | OK |
 | `agent_core/dynamic_timeout.py` | 动态超时计算 | 无 | 80+ | OK |
 | `agent_core/adaptive_retry.py` | 自适应重试 | 无 | 80+ | OK |
 | `agent_core/task_complexity.py` | 任务复杂度评估 | 无 | 100+ | OK |
 | `agent_core/watchdog.py` | 看门狗（daemon 巡检） | 无 | 80+ | OK |
 | `agent_core/orchestration_tools.py` | 编排工具 | 无 | 100+ | OK |
+| `agent_core/orchestration/tool_specs.py` | 编排工具模型可见短规格 | 编排执行逻辑、长文档说明 | 160- | OK |
+| `agent_core/orchestration/tool_spec_data.py` | 编排工具短参数说明数据 | 角色模板路径、开发者长说明 | 120- | OK |
+| `agent_core/orchestration/tool_grants.py` | 子代理基础工具授权名单与工具预设解析 | workflow 私有工具名单、权限执行 | 70- | OK |
+| `agent_core/orchestration/workflow_mode.py` | 编排工具 workflow_mode 归一化 | workflow 执行、配置加载 | 20- | OK |
+| `agent_core/orchestration/lineage_names.py` | 编排创建时的子代理显示名和序号归一化 | 子代理执行、角色选择 | 70- | OK |
+| `agent_core/orchestration/summary_action_lines.py` | 编排工具结果的上下文摘要行渲染 | 工具执行、状态裁决 | 60- | OK |
+| `agent_core/orchestration/create_config.py` | 编排创建参数读取当前 agent 配置 | 配置加载、默认值事实源 | 50- | OK |
+| `agent_core/orchestration/dispatch/run_ids.py` | dispatch run_id 参数归一化 | dispatch 执行、scope 裁决 | 50- | OK |
+| `agent_core/orchestration/replacements.py` | create 后记录显式 replacement/takeover 关系 | 子代理执行、接管裁决 | 80- | OK |
+| `agent_core/orchestration/run_scope.py` | 当前主代理已见/已推进 run_id 的轻量记忆 | tree 构建、持久化状态 | 50- | OK |
+| `agent_core/orchestration/work_scope.py` | 输入/输出 refs 派生 work_scope_key | 路径授权、产物验收 | 60- | OK |
+| `agent_core/orchestration/background/dispatch.py` | create/schedule 后台自动启动 dispatch | create payload、runner 生命周期、tree 状态 | 280- | OK |
+| `agent_core/orchestration/background/marks.py` | 后台启动标记和标记失败报告 | 后台执行、runner 生命周期 | 50- | OK |
+| `agent_core/orchestration/tools/event.py` | raise_event 模型工具入口 | conversation store、wake signals、lineage | 240- | OK |
+| `agent_core/orchestration/tools/status.py` | inspect_agent_tree 模型工具入口 | agent tree status payload | 50- | OK |
+| `agent_core/orchestration/dispatch/load_errors.py` | 子代理账本读取失败的结构化行 | 子代理加载、结果聚合 | 50- | OK |
+| `agent_core/orchestration/recovery_batches.py` | 恢复策略分组和建议 dispatch payload | 恢复裁决、dispatch 执行 | 130- | OK |
+| `agent_core/orchestration/runner_instruction.py` | runner_instruction 工作区占位符解析 | prompt 生成、dispatch 执行 | 30- | OK |
+| `agent_core/orchestration/create_payload.py` | create_subagents 工具返回 payload 组装 | 子代理创建执行、idempotency 事实源 | 210- | OK |
+| `agent_core/orchestration/create_constraints.py` | create/schedule 写入根和委托约束冲突解析 | 自然语言目标推断、路径授权执行 | 190- | OK |
+| `agent_core/orchestration/create_context.py` | create_subagents context manifest/context packs 归一化 | runner 启动门、路径存在性验收 | 220- | OK |
+| `agent_core/orchestration/create_conversation.py` | create_subagents 会话/thread 继承属性 | conversation store 实现、消息投递 | 80- | OK |
+| `agent_core/orchestration/create_idempotency.py` | create_subagents 复用已有 child 的结构化幂等裁决 | 目标自然语言相似度裁决、状态机定义 | 230- | OK |
+| `agent_core/orchestration/create_items.py` | create_subagents items 批量参数解析 | 子代理创建执行、全局 plan 复制 | 220- | OK |
+| `agent_core/orchestration/create_policy.py` | create_subagents CreateRunParams 组装和 role/workflow 归一化 | 工具执行、子代理持久化 | 300- | OK |
+| `agent_core/orchestration/create_target_roots.py` | create/schedule 产品写入根推导 | 安全策略裁决、文件写入 | 210- | OK |
+| `agent_core/orchestration/shared_context.py` | 父级小型读取 brief 传给子代理 context_packs | 工具归档、runner context | 300- | OK |
+| `agent_core/orchestration/lifecycle.py` | 子代理创建后发布、会话绑定和自动启动 | conversation store、background dispatch | 90- | OK |
+| `agent_core/orchestration/write_guard.py` | create/schedule 写入目标预检 | 路径策略、产品写入根 | 130- | OK |
+| `agent_core/orchestration/dispatch/payload.py` | dispatch_subagents 记录和恢复 payload 组装 | dispatch 执行、runner 选择 | 80- | OK |
+| `agent_core/orchestration/dispatch/state_contract.py` | 当前回合子代理状态摘要和下一步建议 payload | 状态机定义、子代理加载 | 180- | OK |
+| `agent_core/orchestration/dispatch/refs.py` | dispatch 子代理结果 refs-first 索引 | 子代理账本、artifact refs | 180- | OK |
+| `agent_core/orchestration/dispatch/scope.py` | dispatch 目标作用域、apply/dry-run 裁决 | 参数解析、runner scope | 180- | OK |
+| `agent_core/orchestration/dispatch/progress_payload.py` | runner-context child 进度摘要 | recovery、QA 建议、refs | 180- | OK |
+| `agent_core/orchestration/dispatch/tool.py` | dispatch_subagents 模型工具入口 | dispatch 参数、scope、payload、guidance | 260- | OK |
+| `agent_core/orchestration/dispatch/tool_helpers.py` | dispatch 工具入口辅助函数 | runtime config、scope、refs | 180- | OK |
+| `agent_core/orchestration/quality_advice_payload.py` | QA/验收建议对象的模型可见 payload | QA 策略生成、子代理调度 | 40- | OK |
+| `agent_core/orchestration/quality_payload.py` | QA 子代理失败信号扫描和修复建议 payload | QA 执行、修复执行 | 200- | OK |
+| `agent_core/orchestration/child_result_index.py` | 子代理结果索引和模型可见 artifact refs | 读取 artifact 正文、状态加载 | 180- | OK |
+| `agent_core/orchestration/scope_resolution.py` | 编排工具身份/scope 裁决 payload | 树构建、dispatch 执行 | 180- | OK |
+| `agent_core/orchestration/sibling_roster.py` | 同批子代理 roster context pack | 子代理执行、未来产物预测 | 90- | OK |
 | `agent_core/parameters.py` | 调度参数 | 无 | 80+ | OK |
-| `agent_core/runtime_capabilities.py` | 运行时能力解析 | 无 | 80+ | OK |
+| `agent_core/runtime/capabilities.py` | 运行时能力解析 | 无 | 80+ | OK |
 | `agent_core/models.py` | 核心数据模型 | 无 | 100+ | OK |
 
 **归属原则**: agent_core 负责主代理的核心调度循环和运行时执行。不负责 CLI 渲染、不负责具体的子代理状态管理（委托给 subagents/）。
@@ -80,24 +138,40 @@ LLM: Use this table to decide where new code belongs.
 
 | 模块 | 唯一职责 | 不可承担 | 当前行数 | 状态 |
 |---|---|---|---|---|
-| `manager.py` | SubAgentManager 入口（纯组合类） | 业务逻辑 | 49 | OK |
+| `manager.py` | SubAgentManager 入口（组合 root + 兼容薄 facade） | 业务逻辑 | 100+ | OK |
+| `services/budget.py` | runner refs-only 预算报告生成和落盘 | 调度、验收、模型调用 | 80- | OK |
 | `manager_base.py` | 基础 CRUD + 卡片管理 | patch 审核、看板渲染 | 751 | FROZEN |
-| `manager_patch.py` | patch 审核 + 应用 | 基础 CRUD、看板 | 794 | FROZEN |
-| `manager_dispatch.py` | 调度派工逻辑 | 验收、patch | 423 | SOFT |
-| `manager_board.py` | 看板渲染（HTML + 终端） | 调度、验收 | 471 | SOFT |
+| `manager_patch.py` | patch 兼容 facade / helper re-export | patch review/apply 实现、基础 CRUD、看板 | 220- | OK |
+| `manager_dispatch.py` | dispatch 兼容 facade / helper re-export | dispatch/watch/parent planner 报告实现 | 80- | OK |
+| `services/board/service.py` + `services/board/facade.py` | 看板核心服务 + 兼容 facade | 渲染、状态投影 | - | OK |
 | `manager_acceptance.py` | 验收流程 | 调度、patch | 293 | OK |
 | `manager_acceptance_findings.py` | 验收发现处理 | 验收主流程 | 390 | OK |
-| `manager_runner_context.py` | runner 上下文注入 | runner 结果处理 | 181 | OK |
-| `manager_runner_results.py` | runner 结果处理 | runner 上下文 | 302 | OK |
-| `manager_lifecycle.py` | 生命周期（暂停/恢复/放弃） | 调度 | 257 | OK |
-| `manager_capabilities.py` | 能力路由集成 | 无 | 293 | OK |
-| `manager_actions.py` | 动作执行 | 无 | 439 | SOFT |
-| `manager_indexing.py` | 索引管理 | 无 | 382 | OK |
-| `manager_learning.py` | 学习反馈 | 无 | 255 | OK |
-| `manager_channel_probe.py` | 通道探测 | 无 | 230 | OK |
+| `manager_runner_context.py` | runner 上下文兼容 facade | runner 上下文实现、runner 结果处理 | 50- | OK |
+| `services/runner_context/` | execution context、context bundle、write boundary、grant 注入 | runner 结果处理、主代理调度 | - | OK |
+| `manager_runner_results.py` | runner 结果兼容 facade / dataclass re-export | runner result 实现、runner 上下文 | 80- | OK |
+| `services/runner_result/` | runner result 记录、structured output 处理、debrief、session compact、completion wake | runner 上下文构建 | - | OK |
+| `manager_lifecycle.py` | 生命周期兼容 facade / dataclass re-export | 生命周期实现、调度 | 80- | OK |
+| `services/capabilities/` | OPEN capability request 到 skill/tool card 的路由和 report 写入 | 生命周期记录、主代理调度 | - | OK |
+| `manager_actions.py` | action apply 兼容 facade / dataclass re-export | 动作 handler 细节、审计落盘 | 130- | OK |
+| `services/actions/` | 动作 apply 服务 | 看板、派工 | - | OK |
+| `manager_indexing.py` | 索引管理兼容 facade / helper re-export | 索引实现 | 120- | OK |
+| `services/indexing/` | 任务索引、LocalStore 事件、报告索引 | 持久化事实源、调度、模型调用 | - | OK |
+| `manager_learning.py` | 学习反馈兼容 facade / helper re-export | 学习候选存储实现 | 60- | OK |
+| `services/learning.py` | 学习候选草稿存储、去重、确认、统计 | 正式 skill 安装、长期记忆写入 | 200+ | OK |
+| `services/memory_gate.py` | memory gate 候选列出、审核、导出、retention、verifier | 自动提升长期记忆或安装 skill | 120- | OK |
+| `manager_channel_probe.py` | 通道探测兼容 facade / helper re-export | 通道探测实现 | 60- | OK |
+| `services/channel_probe.py` | 通道健康探测、probe 证据写入、批量报告 | 调度、验收、模型调用 | 200- | OK |
+| `services/workflow.py` | workflow 规划和 worker materialize | 主代理调度、模型调用 | 300- | OK |
+| `services/hierarchy/facade.py` | child scheduling、hierarchy recovery、leadership recovery report | 普通 dispatch、模型调用 | 160- | OK |
+| `services/hierarchy/` | 子代理树调度、角色继承、恢复包细分模块 | 普通 dispatch、模型调用 | - | OK |
 | `manager_normalize.py` | 数据归一化 | 无 | 143 | OK |
-| `services/persistence.py` | 持久化服务（load/list_runs/save） | 生命周期 | 100+ | OK |
-| `services/lifecycle.py` | 生命周期服务（能力请求/授予/缺口/心跳） | 持久化 | 100+ | OK |
+| `services/persistence/` | 持久化服务（load/list_runs/save） | 生命周期 | - | OK |
+| `services/dispatch/` | dispatch/watch 服务和 parent planner report 服务 | agent_core dispatch 主循环、验收、模型调用 | - | OK |
+| `services/leadership_recovery/` | 领导权恢复服务 | 恢复编排 | - | OK |
+| `services/lifecycle.py` | 生命周期服务（能力请求/授予/缺口/证据/状态/心跳） | 持久化、runner attempt 细节 | 300- | OK |
+| `services/lifecycle_runner_attempts.py` | runner attempt 开始/放弃和恢复预检属性更新 | 能力记录、状态验收 | 100- | OK |
+| `services/patch_apply/facade.py` | patch review/apply 对 SubAgentManager 的组合 facade | 具体文件写入实现、索引实现 | 200- | OK |
+| `patch/` | patch review/apply/renderer 核心实现 | manager 继承、主代理调度 | - | OK |
 | `models.py` | 子代理数据模型 | 业务逻辑 | 428 | SOFT |
 | `policies.py` | 策略规则（纯函数） | I/O、状态变更 | 383 | OK |
 | `policy_checks.py` | 策略校验 | 无 | 287 | OK |
@@ -228,31 +302,32 @@ LLM: Use this table to decide where new code belongs.
 | 文件 | 行数 | 拆分目标 |
 |---|---|---|
 | `cli/chat.py` | 1017 | chat_parts/ 继续拆分 |
-| `agent_core/dispatch_mixin.py` | 895 | dispatch/planner + runner + loop |
-| `memory_archive/query.py` | 838 | query_builder + query_executor |
-| `subagents/manager_patch.py` | 794 | subagent_services/patch.py |
+| `agent_core/orchestration/dispatch/` | 已拆包 | 继续保持 facade / runner / loop / record 职责分离 |
+| `memory_archive/query/` | 已拆包 | 继续保持 query builder / executor / formatter 职责分离 |
+| `subagents/manager_patch.py` | 220- | 已从 manager mixin 继承链移出，主链路通过 `services/patch_apply/facade.py` |
 | `settings/config.py` | 751 | shared/config/ + 加载逻辑 |
-| `subagents/manager_base.py` | 751 | subagent_services/persistence + board |
+| `subagents/manager_base.py` | 751 | subagent_services/persistence/ + board |
 | `log_analysis/analytics/detectors/rules.py` | 745 | rule_engine + rule_loader |
 
 ### SOFT Warning Files (consider splitting)
 | 文件 | 行数 | 建议 |
 |---|---|---|
 | `log_analysis/tools.py` | 672 | 插件化拆分 |
-| `memory_archive/runtime.py` | 657 | 拆分归档运行时 |
+| `memory_archive/runtime/` | 已拆包 | 继续保持 live archiver / turn archiver / event builder 分层 |
 | `cli/memory_commands.py` | 608 | 拆分记忆子命令 |
 | `gateway_parts/runtime.py` | 551 | 拆分请求处理 |
 | `cli/gateway_service.py` | 547 | 拆分服务封装 |
 | `cli/gateway_process.py` | 539 | 拆分进程管理 |
 | `tooling/filesystem.py` | 530 | 拆分读写操作 |
 | `cli/subagents.py` | 525 | 拆分子代理命令 |
-| `subagents/manager_board.py` | 471 | 拆分 HTML/终端渲染 |
+| `subagents/services/board/facade.py` | - | 已从 manager mixin 继承链移出，后续只做兼容 facade 收敛 |
 | `gateway_parts/daemon_control.py` | 492 | 拆分控制逻辑 |
 | `memory_routing/context.py` | 440 | 拆分上下文构建 |
-| `subagents/manager_actions.py` | 439 | 拆分动作类型 |
+| `subagents/manager_actions.py` | 439 | 已改成 facade；动作类型在 `services/actions/` |
+| `subagents/manager_indexing.py` | 382 | 已改成 facade；索引类型在 `services/indexing/` |
+| `subagents/manager_dispatch.py` | 80- | 已改成兼容 facade；dispatch/watch 与 parent planner 报告通过 `services/dispatch/` |
 | `gateway_parts/supervisor.py` | 425 | 拆分监管逻辑 |
 | `gateway_parts/http_service.py` | 402 | 拆分 HTTP 处理 |
-| `subagents/manager_dispatch.py` | 423 | 拆分派工逻辑 |
 
 ### Zero Star Import Policy
 项目已消除所有 `import *` 使用。CI 中有 guardrail 测试强制执行零 star import。新代码一律禁止使用 `import *`。

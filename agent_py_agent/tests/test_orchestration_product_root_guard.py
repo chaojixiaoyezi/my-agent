@@ -6,12 +6,10 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from agent_py_agent.agent.agent_core.orchestration_tool_specs import build_create_subagents_spec
+from agent_py_agent.agent.agent_core.orchestration.tool_specs import build_create_subagents_spec
 from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
 
-# LLM: Structured output refs should start work without an extra legacy write-root field.
-# 函数用途: 显式 root/coordinator 交付结构化产物文件时，output_files 是产物目标事实，不再要求 extra_write_roots。
 def test_explicit_coordinator_product_delivery_uses_output_files_without_extra_write_root():
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
@@ -38,8 +36,6 @@ def test_explicit_coordinator_product_delivery_uses_output_files_without_extra_w
     assert params.extra_write_roots == [str(Path("/tmp/project/build").resolve(strict=False))]
 
 
-# LLM: The public create_subagents spec must describe output refs, not legacy write-root authorization.
-# 函数用途: 防止工具提示继续诱导模型把普通产物路径当成 extra_write_roots/allowed_write_roots 权限问题。
 def test_create_subagents_spec_does_not_require_legacy_write_roots():
     spec = build_create_subagents_spec()
     rendered = "\n".join([

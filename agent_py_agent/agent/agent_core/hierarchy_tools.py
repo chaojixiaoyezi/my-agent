@@ -1,5 +1,3 @@
-# LLM: Model-callable hierarchy tools let a running subagent create only its own next layer.
-# 模块用途: 承载 schedule_child_subagents 工具，把 runner 内部层级派工和通用编排工具解耦。
 
 from __future__ import annotations
 
@@ -8,23 +6,25 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..action_protocol import subagent_schedule_envelope_from_payload
-from ..subagents.services.hierarchy_scheduler import (
+from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
+from ..runtime_errors import runtime_error_report
+from ..subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
     HierarchyScheduleResult,
 )
 from ..tools import BaseTool, ToolExecutionResult
-from .orchestration_create_context import create_context_manifest, create_context_packs
-from .orchestration_dispatch_state_contract import dispatch_state_contract_payload
-from .orchestration_quality_advice_payload import quality_advice_payload
-from .orchestration_subagent_lifecycle import (
+from .orchestration.create_context import create_context_manifest, create_context_packs
+from .orchestration.dispatch.state_contract import dispatch_state_contract_payload
+from .orchestration.lifecycle import (
     CreatedSubagentLifecycleRequest,
     publish_created_subagents,
 )
-from .orchestration_tool_specs import build_schedule_child_subagents_spec
-from .orchestration_write_guard import ExternalWriteTargetRequest, external_write_target_error
-from .parameters import _bool_param, _non_negative_int, _string_list
-from .runner_context import current_subagent_run_id
+from .orchestration.quality_advice_payload import quality_advice_payload
+from .orchestration.tool_specs import build_schedule_child_subagents_spec
+from .orchestration.write_guard import ExternalWriteTargetRequest, external_write_target_error
+from .parameters import _bool_param, _non_negative_int
+from .runner.context import current_subagent_run_id
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -32,8 +32,6 @@ if TYPE_CHECKING:
 _MAX_CHILDREN_PER_TOOL_CALL = 0
 
 
-# LLM: ScheduleRequestBuildParams bundles internal request-build inputs to keep signatures stable.
-# 类用途: 汇总当前 agent、parent run、child specs 和原始工具参数，避免后续字段扩展推高参数数量。
 @dataclass(frozen=True)
 class ScheduleRequestBuildParams:
     agent: object
@@ -42,18 +40,19 @@ class ScheduleRequestBuildParams:
     raw_params: dict[str, object]
 
 
-# LLM: ScheduleChildSubagentsTool exposes child-run creation only from the active runner context.
-# 类用途: 给主/子/孙节点 runner 暴露受控层级调度入口，parent_id 从当前 runner 上下文读取。
+@dataclass(frozen=True)
+class ScheduleLifecyclePayload:
+    auto_start: dict[str, object] | None
+    load_errors: list[dict[str, object]]
+    conversation_bind_errors: list[dict[str, object]]
+
+
 class ScheduleChildSubagentsTool(BaseTool):
 
-    # LLM: __init__ stores the agent facade and stable tool specification.
-    # 函数用途: 初始化当前节点层级调度工具，不执行任何写入。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.spec = build_schedule_child_subagents_spec()
 
-    # LLM: execute validates model JSON, builds a hierarchy request, and delegates scheduling.
-    # 函数用途: 当前 runner 按 bundle 创建下一层 child runs；没有当前 run 上下文时直接阻断。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         params = _schedule_tool_params(params)
         parent_run_id = current_subagent_run_id(self.agent)
@@ -84,20 +83,18 @@ class ScheduleChildSubagentsTool(BaseTool):
                 result,
                 {
                     "auto_start": _schedule_auto_start_payload(lifecycle.auto_start),
+                    "schedule_load_errors": lifecycle.load_errors,
+                    "conversation_bind_errors": lifecycle.conversation_bind_errors,
                     **dispatch_state_contract_payload(self.agent),
                 },
             ),
         )
 
 
-# LLM: _schedule_error keeps all schedule_child_subagents failures consistently named.
-# 函数用途: 生成层级调度工具的失败结果，便于模型和测试稳定识别工具名。
 def _schedule_error(message: str) -> ToolExecutionResult:
     return ToolExecutionResult("schedule_child_subagents", False, message)
 
 
-# LLM: _schedule_validation_error_message keeps model-facing schedule failures actionable.
-# 函数用途: 把底层参数异常转成结构化工具错误，避免真实 runner 看到裸 IndexError 后反复试错。
 def _schedule_validation_error_message(exc: Exception) -> str:
     return (
         f"schedule_child_subagents 参数无效: {exc.__class__.__name__}。"
@@ -106,14 +103,10 @@ def _schedule_validation_error_message(exc: Exception) -> str:
     )
 
 
-# LLM: _schedule_tool_params keeps schedule_child_subagents parameters flat.
-# 函数用途: 不再展开 orchestration 包装；模型可见协议只接受顶层 children/dry_run 等字段。
 def _schedule_tool_params(params: dict[str, object]) -> dict[str, object]:
     return dict(params)
 
 
-# LLM: _schedule_request converts validated tool params into the manager service bundle.
-# 函数用途: 构造 HierarchyScheduleRequest，集中处理 dry_run、children、depth 和审计请求者。
 def _schedule_request(request: ScheduleRequestBuildParams) -> HierarchyScheduleRequest:
     return HierarchyScheduleRequest(
         parent_run_id=request.parent_run_id,
@@ -125,8 +118,6 @@ def _schedule_request(request: ScheduleRequestBuildParams) -> HierarchyScheduleR
     )
 
 
-# LLM: _schedule_apply_default lets active runners materialize their own direct children by default.
-# 函数用途: runner 内 schedule_child_subagents 省略 dry_run 时默认创建；显式 dry_run=true 预览。
 def _schedule_apply_default(params: dict[str, object]) -> bool:
     if "apply" in params:
         raise ValueError("schedule_child_subagents 只接受 dry_run；请移除 apply。")
@@ -135,8 +126,6 @@ def _schedule_apply_default(params: dict[str, object]) -> bool:
     return True
 
 
-# LLM: _schedule_payload_json renders service results without leaking large workspace content.
-# 函数用途: 输出层级调度结果摘要，包含新建/复用/建议 dispatch 的 run id、层级关系和阻断原因。
 def _schedule_payload_json(result: HierarchyScheduleResult, state_payload: dict[str, object] | None = None) -> str:
     payload = {
         "parent_run_id": result.parent_run_id,
@@ -160,8 +149,6 @@ def _schedule_payload_json(result: HierarchyScheduleResult, state_payload: dict[
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-# LLM: _schedule_auto_start_payload mirrors create_subagents and omits nested tree payloads.
-# 函数用途: schedule_child_subagents 只返回启动状态和 run id；详细树状态由 inspect_agent_tree 提供。
 def _schedule_auto_start_payload(auto_start: dict[str, object] | None) -> dict[str, object]:
     if not isinstance(auto_start, dict):
         return {"status": "not_attempted"}
@@ -178,35 +165,44 @@ def _schedule_auto_start_payload(auto_start: dict[str, object] | None) -> dict[s
     return payload or {"status": str(auto_start.get("status") or "unknown")}
 
 
-# LLM: _schedule_lifecycle shares create_subagents post-create registration and startup.
-# 函数用途: schedule_child_subagents 只负责权限和 parent scope；创建后登记和启动复用通用 lifecycle。
 def _schedule_lifecycle(agent: object, result: HierarchyScheduleResult, params: dict[str, object]):
     if result.dry_run or result.blocked:
-        tasks = _load_schedule_dispatch_tasks(agent, [*result.created_run_ids, *result.reused_run_ids])
-        return publish_created_subagents(
+        tasks, load_errors = _load_schedule_dispatch_tasks(agent, [*result.created_run_ids, *result.reused_run_ids])
+        lifecycle = publish_created_subagents(
             CreatedSubagentLifecycleRequest(agent, tasks, {**params, "defer_start": True})
         )
-    tasks = _load_schedule_dispatch_tasks(agent, result.dispatch_run_ids)
-    return publish_created_subagents(CreatedSubagentLifecycleRequest(agent, tasks, params))
+        return ScheduleLifecyclePayload(
+            auto_start=lifecycle.auto_start,
+            load_errors=load_errors,
+            conversation_bind_errors=lifecycle.conversation_bind_errors,
+        )
+    tasks, load_errors = _load_schedule_dispatch_tasks(agent, result.dispatch_run_ids)
+    lifecycle = publish_created_subagents(CreatedSubagentLifecycleRequest(agent, tasks, params))
+    return ScheduleLifecyclePayload(
+        auto_start=lifecycle.auto_start,
+        load_errors=load_errors,
+        conversation_bind_errors=lifecycle.conversation_bind_errors,
+    )
 
 
-# LLM: _load_schedule_dispatch_tasks loads only scheduler-selected child ids for auto-start.
-# 函数用途: 按 dispatch_run_ids 读取刚创建或可复用的直接孩子；读取失败时跳过单项而不中断调度响应。
-def _load_schedule_dispatch_tasks(agent: object, run_ids: list[str]) -> list[object]:
+def _load_schedule_dispatch_tasks(agent: object, run_ids: list[str]) -> tuple[list[object], list[dict[str, object]]]:
     manager = getattr(agent, "subagents", None)
     tasks: list[object] = []
+    load_errors: list[dict[str, object]] = []
     for run_id in run_ids:
         try:
             task = manager.load(run_id)
-        except Exception:
+        except Exception as exc:
+            load_errors.append({
+                "run_id": str(run_id or ""),
+                **runtime_error_report(exc, context="schedule_child_subagents.load"),
+            })
             continue
         if getattr(task, "id", "") == run_id:
             tasks.append(task)
-    return tasks
+    return tasks, load_errors
 
 
-# LLM: _schedule_item_payload keeps the tool response refs-only and safe for model context.
-# 函数用途: 把单个 child 创建/计划结果转换为轻量 JSON 字段。
 def _schedule_item_payload(item) -> dict[str, object]:
     return {
         "run_id": item.run_id,
@@ -221,8 +217,6 @@ def _schedule_item_payload(item) -> dict[str, object]:
     }
 
 
-# LLM: _hierarchy_child_specs parses the model-provided children list into strict schedule bundles.
-# 函数用途: 解析 schedule_child_subagents.children，支持 JSON 字符串或对象列表并拒绝空 goal。
 def _hierarchy_child_specs(params: dict[str, object]) -> list[HierarchyChildSpec] | ToolExecutionResult:
     if "child_specs" in params:
         return _schedule_error("schedule_child_subagents 只接受 children；请移除 child_specs。")
@@ -241,8 +235,6 @@ def _hierarchy_child_specs(params: dict[str, object]) -> list[HierarchyChildSpec
     return specs
 
 
-# LLM: _bulk_schedule_error turns real-model long child batches into explicit retry guidance.
-# 函数用途: 限制 runner 单次层级调度最多 2 个 child，避免长 JSON 工具参数被截断后卡死。
 def _bulk_schedule_error(child_specs: list[HierarchyChildSpec]) -> str:
     if _MAX_CHILDREN_PER_TOOL_CALL <= 0:
         return ""
@@ -254,8 +246,6 @@ def _bulk_schedule_error(child_specs: list[HierarchyChildSpec]) -> str:
     )
 
 
-# LLM: _hierarchy_child_spec validates one child bundle from the model tool call.
-# 函数用途: 把单个 child 对象转换为 HierarchyChildSpec，并保留工具、验收和写入边界字段。
 def _hierarchy_child_spec(raw: object) -> HierarchyChildSpec | ToolExecutionResult:
     if not isinstance(raw, dict):
         return _schedule_error("children 每一项必须是对象。")
@@ -267,18 +257,16 @@ def _hierarchy_child_spec(raw: object) -> HierarchyChildSpec | ToolExecutionResu
         agent_name=str(raw.get("agent_name") or raw.get("role") or "worker").strip(),
         role=str(raw.get("role") or "worker").strip(),
         thought=str(raw.get("thought") or "").strip(),
-        plan=_string_list(raw.get("plan")),
-        allowed_skills=_string_list(raw.get("allowed_skills")),
-        allowed_tools=_string_list(raw.get("allowed_tools")),
-        acceptance_checks=_string_list(raw.get("acceptance_checks")),
-        extra_write_roots=_string_list(raw.get("extra_write_roots")),
+        plan=string_list(raw.get("plan"), TOOL_TEXT_LIST_OPTIONS),
+        allowed_skills=string_list(raw.get("allowed_skills"), TOOL_TEXT_LIST_OPTIONS),
+        allowed_tools=string_list(raw.get("allowed_tools"), TOOL_TEXT_LIST_OPTIONS),
+        acceptance_checks=string_list(raw.get("acceptance_checks"), TOOL_TEXT_LIST_OPTIONS),
+        extra_write_roots=string_list(raw.get("extra_write_roots"), TOOL_TEXT_LIST_OPTIONS),
         context_manifest=create_context_manifest(raw),
         context_packs=create_context_packs(raw),
     )
 
 
-# LLM: _json_list_param accepts common model encodings while keeping tool params explicit.
-# 函数用途: 将列表、单对象或 JSON 字符串规范成对象列表；解析失败时返回空列表。
 def _json_list_param(value: object) -> list[object]:
     if isinstance(value, list):
         return value
@@ -298,8 +286,6 @@ def _json_list_param(value: object) -> list[object]:
     return []
 
 
-# LLM: _hierarchy_target_error reuses existing write-target guard before child task creation.
-# 函数用途: 对每个 child goal/allowed_tools 做越界写入预检，失败时整批阻断。
 def _hierarchy_target_error(agent, specs: list[HierarchyChildSpec]) -> str:
     for spec in specs:
         target_error = external_write_target_error(
@@ -314,8 +300,6 @@ def _hierarchy_target_error(agent, specs: list[HierarchyChildSpec]) -> str:
     return ""
 
 
-# LLM: _schedule_max_depth accepts model-friendly relative depth when absolute depth would block all children.
-# 函数用途: 兼容模型把 max_depth=1 理解成“再开一层”的写法，同时保留顶层绝对 depth 语义。
 def _schedule_max_depth(agent, parent_run_id: str, params: dict[str, object]) -> int:
     parsed = _non_negative_int(params.get("max_depth"), default=0)
     if "max_depth" not in params:

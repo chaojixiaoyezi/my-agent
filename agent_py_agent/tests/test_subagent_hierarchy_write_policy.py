@@ -6,14 +6,12 @@
 from __future__ import annotations
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
 
 
-# LLM: test_hierarchy_schedule_keeps_report_roles_with_parent_write_coverage covers takeover authority.
-# 函数用途: researcher/tester/bug_finder 等报告型角色也继承父级产物根，方便检查、接管、救援；是否亲自写由角色职责约束。
 def test_hierarchy_schedule_keeps_report_roles_with_parent_write_coverage(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -44,8 +42,6 @@ def test_hierarchy_schedule_keeps_report_roles_with_parent_write_coverage(tmp_pa
     assert "允许写入根：" in child.goal
 
 
-# LLM: descendants use their own task room plus product/shared roots, not parent internals.
-# 函数用途: 小小傻妞写局部报告到自己的 task_dir；跨层共享走 message/summary/refs，不直接污染父级任务目录。
 def test_hierarchy_schedule_does_not_grant_parent_task_dir_to_children(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     parent = manager.create_run(
@@ -75,8 +71,6 @@ def test_hierarchy_schedule_does_not_grant_parent_task_dir_to_children(tmp_path)
     assert "write_file" in child.allowed_tools
 
 
-# LLM: test_hierarchy_schedule_keeps_report_goal_product_root_writable_for_recovery covers model paths.
-# 函数用途: 模型把最终目录写进报告型 goal 时，系统保留路径上下文并授予覆盖权限，方便父链检查和恢复。
 def test_hierarchy_schedule_keeps_report_goal_product_root_writable_for_recovery(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -106,8 +100,6 @@ def test_hierarchy_schedule_keeps_report_goal_product_root_writable_for_recovery
     assert str(deliverables) in child.goal
 
 
-# LLM: test_hierarchy_schedule_recovers_report_role_from_child_agent_name covers real runner placeholder roles.
-# 函数用途: 模型把 role 写成 child 但 agent_name 写 researcher/tester 时，系统仍识别报告型职责，同时保留上级覆盖写入根。
 def test_hierarchy_schedule_recovers_report_role_from_child_agent_name(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -145,8 +137,6 @@ def test_hierarchy_schedule_recovers_report_role_from_child_agent_name(tmp_path)
     assert str(deliverables) in writer.allowed_write_roots
 
 
-# LLM: test_hierarchy_schedule_grants_worker_structured_write_root covers real coordinator output.
-# 函数用途: coordinator 给 worker 的结构化 extra_write_roots 写出产物目录时，worker 应拿到该目录写权限。
 def test_hierarchy_schedule_grants_worker_path_written_by_child_spec(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -180,8 +170,6 @@ def test_hierarchy_schedule_grants_worker_path_written_by_child_spec(tmp_path):
     assert "write_file" in worker.allowed_tools
 
 
-# LLM: test_hierarchy_schedule_blocks_sibling_path_drift protects exact deliverable-root propagation.
-# 函数用途: coordinator 把结构化 write root 指到 sibling 目录时，调度层应阻断并要求重写 child spec。
 def test_hierarchy_schedule_blocks_sibling_path_drift(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables" / "case"
@@ -214,8 +202,6 @@ def test_hierarchy_schedule_blocks_sibling_path_drift(tmp_path):
     assert result.created_run_ids
 
 
-# LLM: test_hierarchy_schedule_allows_child_root_under_parent_root keeps valid nested output dirs working.
-# 函数用途: child 的结构化写入根在父级 build 目录下时不能被漂移 guard 误挡。
 def test_hierarchy_schedule_allows_child_path_under_parent_root(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables" / "case"
@@ -249,8 +235,6 @@ def test_hierarchy_schedule_allows_child_path_under_parent_root(tmp_path):
     assert str(deliverables / "build") in worker.allowed_write_roots
 
 
-# LLM: test_hierarchy_schedule_ignores_url_image_sources_in_goal covers real shopping E2E URLs.
-# 函数用途: worker goal 里出现图片 CDN URL 时，scheduler 不能把普通文本 URL 当成本地写入根。
 def test_hierarchy_schedule_ignores_url_image_sources_in_write_roots(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -288,8 +272,6 @@ def test_hierarchy_schedule_ignores_url_image_sources_in_write_roots(tmp_path):
     assert not any("picsum" in root or "unsplash" in root for root in worker.allowed_write_roots)
 
 
-# LLM: test_hierarchy_schedule_preserves_coordinator_orchestration_tools covers real model omissions.
-# 函数用途: 模型给 coordinator 显式传读写工具但漏掉调度工具时，系统仍补齐创建/调度下一层能力。
 def test_hierarchy_schedule_preserves_coordinator_orchestration_tools(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(

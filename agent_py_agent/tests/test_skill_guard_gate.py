@@ -1,5 +1,3 @@
-# LLM: Skill guard tests verify threat detection, trust-level policy, and structural checks.
-# 模块用途: 模拟危险 skill 目录和文件，确保 scan_skill 和 install_decision 输出正确裁决。
 
 from __future__ import annotations
 

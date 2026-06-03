@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.agent.memory_archive.memory_gate_review import MemoryGateReviewRequest
+from agent_py_agent.agent.memory_archive.memory_gate.review import MemoryGateReviewRequest
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import EvidencePacket, Finding
 

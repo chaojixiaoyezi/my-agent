@@ -3,8 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 
-# LLM: Pre-real validation should run the six requested gates without real model calls.
-# 函数用途: 验证阶段 1-6 有统一入口，且报告只包含 refs、状态和结构化问题。
 def test_pre_real_task_validation_runs_phases_1_to_6(tmp_path: Path) -> None:
     from agent_py_agent.agent.contracts.pre_real_task_validation import (
         PreRealTaskValidationRequest,
@@ -27,8 +25,6 @@ def test_pre_real_task_validation_runs_phases_1_to_6(tmp_path: Path) -> None:
     assert "hello from real read_file wrapper" not in str(report.to_dict())
 
 
-# LLM: Small real acceptance should prove real wrappers ran while staying read-only/dry-run.
-# 函数用途: 验证小真实用例实际走 ToolRegistry wrapper，并通过小真实闸门合同。
 def test_small_real_acceptance_runner_executes_bounded_wrapper_cases(tmp_path: Path) -> None:
     from agent_py_agent.agent.contracts.small_real_acceptance_runner import (
         SmallRealAcceptanceRunRequest,
@@ -50,8 +46,6 @@ def test_small_real_acceptance_runner_executes_bounded_wrapper_cases(tmp_path: P
     assert (tmp_path / report.report_ref).is_file()
 
 
-# LLM: Failed real cases must become replayable failure samples instead of chat-only notes.
-# 函数用途: 验证失败 case 会被转换成 failure sample library 所需的结构化 refs。
 def test_failure_sample_capture_converts_failed_case_to_replay_refs() -> None:
     from agent_py_agent.agent.contracts.failure_sample_capture import (
         failure_samples_from_case_results,
@@ -85,8 +79,6 @@ def test_failure_sample_capture_converts_failed_case_to_replay_refs() -> None:
     assert samples[0]["expected_error_codes"] == ["ARTIFACT_MISSING"]
 
 
-# LLM: Task-tree and long-task scenarios should materialize reusable refs before real subagents.
-# 函数用途: 验证父子账本和长任务恢复小场景都能写出可验收的结构化 artifact。
 def test_task_tree_and_long_task_scenarios_materialize_refs(tmp_path: Path) -> None:
     from agent_py_agent.agent.contracts.long_task_recovery_scenario import (
         run_long_task_recovery_scenario,
@@ -106,8 +98,6 @@ def test_task_tree_and_long_task_scenarios_materialize_refs(tmp_path: Path) -> N
     assert recovery.validation_error_codes == ()
 
 
-# LLM: Medium acceptance waits for the small gate and stays side-effect free.
-# 函数用途: 验证中型验收复用小真实报告作为前置，并仍然只生成隔离 artifact refs。
 def test_medium_real_acceptance_runner_uses_small_report_as_prerequisite(tmp_path: Path) -> None:
     from agent_py_agent.agent.contracts.medium_real_acceptance_runner import (
         MediumRealAcceptanceRunRequest,

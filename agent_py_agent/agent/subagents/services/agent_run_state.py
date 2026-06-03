@@ -1,9 +1,12 @@
-# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
+"""Canonical state payloads and locator/projection records for subagent runs.
+
+The detailed state lives in task-local ``work/agents/<run_id>/canonical_state``.
+Legacy task/run JSON files and owner projections are only locators or compact
+views, so loaders always jump back to the canonical payload when it exists.
+"""
 
 from __future__ import annotations
-
-"""canonical state payload for one subagent run."""
 
 import json
 from dataclasses import asdict, dataclass
@@ -13,31 +16,62 @@ from typing import Any
 from ..models import SubAgentTask
 
 CANONICAL_STATE_FILENAME = "canonical_state.json"
+STATE_LOCATOR_SCHEMA_VERSION = "subagent-state-locator.v1"
 
 
-# LLM: AgentRunState is the single detailed state payload that projections mirror.
-# 类用途: 把子代理完整状态和权威文件路径绑在一起，避免 persistence 各处重新组装不同版本的 payload。
 @dataclass(frozen=True)
 class AgentRunState:
     run_id: str
     canonical_path: Path | None
     payload: dict[str, Any]
 
-    # LLM: AgentRunState.to_json is the single serializer for canonical state mirrors.
-    # 函数用途: 按稳定 UTF-8 JSON 形态输出 payload，确保 canonical_state/task.json/run.json 内容一致。
     def to_json(self) -> str:
         return json.dumps(self.payload, ensure_ascii=False, indent=2)
 
 
-# LLM: build_agent_run_state snapshots one SubAgentTask into the canonical run-state payload.
-# 函数用途: 从任务对象生成权威状态文件路径和 payload，供 persistence 一次写入后再镜像到旧 locator。
 def build_agent_run_state(task: SubAgentTask) -> AgentRunState:
     path = canonical_state_path_for_task(task)
     return AgentRunState(run_id=task.id, canonical_path=path, payload=asdict(task))
 
 
-# LLM: canonical_state_path_for_task derives the task-local authoritative state file.
-# 函数用途: 根据 agent_run_workspace_dir 生成 canonical_state.json 路径；缺运行目录时返回 None。
+def build_agent_state_locator(task: SubAgentTask, state: AgentRunState) -> dict[str, Any]:
+    return {
+        "schema_version": STATE_LOCATOR_SCHEMA_VERSION,
+        "kind": "subagent_state_locator",
+        "run_id": task.id,
+        "agent_id": task.id,
+        "task_id": task.root_id or task.id,
+        "root_id": task.root_id or task.id,
+        "parent_id": task.parent_id,
+        "canonical_state_ref": str(state.canonical_path or ""),
+        "task_workspace_dir": task.task_workspace_dir,
+        "agent_run_workspace_dir": task.agent_run_workspace_dir,
+        "updated_at": task.updated_at,
+        "status_mirror": task.status,
+    }
+
+
+def build_owner_agent_projection(task: SubAgentTask, state: AgentRunState) -> dict[str, Any]:
+    return {
+        "schema_version": "owner-agent-projection.v1",
+        "agent_id": task.id,
+        "run_id": task.id,
+        "task_id": task.root_id or task.id,
+        "root_id": task.root_id or task.id,
+        "parent_id": task.parent_id,
+        "owner_id": task.owner,
+        "status": task.status,
+        "progress": task.progress,
+        "current_tool": task.current_tool,
+        "last_progress_at": task.last_progress_at,
+        "last_progress_summary": task.last_progress_summary,
+        "canonical_state_ref": str(state.canonical_path or ""),
+        "task_workspace_dir": task.task_workspace_dir,
+        "agent_run_workspace_dir": task.agent_run_workspace_dir,
+        "updated_at": task.updated_at,
+    }
+
+
 def canonical_state_path_for_task(task: SubAgentTask) -> Path | None:
     run_workspace = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
     if not run_workspace:
@@ -45,9 +79,10 @@ def canonical_state_path_for_task(task: SubAgentTask) -> Path | None:
     return Path(run_workspace) / CANONICAL_STATE_FILENAME
 
 
-# LLM: canonical_state_path_from_payload lets legacy task.json act as a locator.
-# 函数用途: 从 payload 中读取 canonical_state_ref，缺失时用 agent_run_workspace_dir 兼容推导权威状态路径。
 def canonical_state_path_from_payload(payload: dict[str, Any]) -> Path | None:
+    ref = str(payload.get("canonical_state_ref") or "").strip()
+    if ref:
+        return Path(ref)
     attrs = payload.get("attributes")
     if isinstance(attrs, dict):
         ref = str(attrs.get("canonical_state_ref") or "").strip()
@@ -59,10 +94,36 @@ def canonical_state_path_from_payload(payload: dict[str, Any]) -> Path | None:
     return None
 
 
-# LLM: write_agent_run_state writes the authoritative task-local state if a workspace exists.
-# 函数用途: 创建目录并写 canonical_state.json；没有 agent 工作目录时保持兼容不写。
+def read_agent_state_payload(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise TypeError("subagent task state must be a JSON object")
+    canonical_path = canonical_state_path_from_payload(data)
+    if canonical_path and canonical_path.exists() and _different_path(canonical_path, path):
+        canonical = json.loads(canonical_path.read_text(encoding="utf-8"))
+        if isinstance(canonical, dict):
+            return canonical
+    if is_agent_state_locator(data):
+        raise FileNotFoundError(f"canonical subagent state missing for locator: {canonical_path}")
+    return data
+
+
+def is_agent_state_locator(payload: dict[str, Any]) -> bool:
+    return str(payload.get("schema_version") or "") in {
+        STATE_LOCATOR_SCHEMA_VERSION,
+        "owner-agent-projection.v1",
+    }
+
+
 def write_agent_run_state(state: AgentRunState) -> None:
     if state.canonical_path is None:
         return
     state.canonical_path.parent.mkdir(parents=True, exist_ok=True)
     state.canonical_path.write_text(state.to_json(), encoding="utf-8")
+
+
+def _different_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() != right.resolve()
+    except OSError:
+        return str(left) != str(right)

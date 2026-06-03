@@ -58,8 +58,6 @@ def test_backup_manifest_records_owner_refs_without_copying_large_files(tmp_path
     assert str(home.owner_memory_dir) in manifest.included_roots
 
 
-# LLM: backup restore must recover owner facts, not only write a manifest saying what would be copied.
-# 函数用途: 验证 owner memory/task/index 可以从真实备份快照恢复。
 def test_home_backup_snapshot_can_restore_owner_files(tmp_path: Path) -> None:
     from agent_py_agent.agent.user_space.home_backup import (
         create_home_backup_snapshot,
@@ -86,8 +84,6 @@ def test_home_backup_snapshot_can_restore_owner_files(tmp_path: Path) -> None:
     assert task_state.read_text(encoding="utf-8") == '{"task_id":"demo"}\n'
 
 
-# LLM: restore dry-run should show what would be overwritten before copying files back.
-# 函数用途: 验证备份恢复可以先预览覆盖范围，不直接改 owner home。
 def test_home_backup_restore_dry_run_reports_paths_without_copying(tmp_path: Path) -> None:
     from agent_py_agent.agent.user_space.home_backup import (
         create_home_backup_snapshot,
@@ -108,3 +104,27 @@ def test_home_backup_restore_dry_run_reports_paths_without_copying(tmp_path: Pat
     assert plan.restore_count >= 1
     assert str(memory_file) in plan.restore_paths
     assert memory_file.read_text(encoding="utf-8") == '{"content":"after"}\n'
+
+
+def test_home_backup_snapshot_report_preserves_bad_manifest(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.home_backup import (
+        create_home_backup_snapshot,
+        latest_home_backup_snapshots_report,
+    )
+    from agent_py_agent.agent.user_space.home_doctor import build_home_doctor_report
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    good = create_home_backup_snapshot(home, reason="good")
+    bad_manifest = home.system_backups_dir / "backup_20260601T000000Z" / "manifest.json"
+    bad_manifest.parent.mkdir(parents=True, exist_ok=True)
+    bad_manifest.write_text("{bad-json}\n", encoding="utf-8")
+
+    report = latest_home_backup_snapshots_report(home)
+    doctor = build_home_doctor_report(home)
+
+    assert report.snapshots[0]["manifest_path"] == str(good.manifest_path)
+    assert report.load_errors
+    assert report.load_errors[0]["context"] == "home_backup.manifest"
+    assert report.load_errors[0]["path"] == str(bad_manifest)
+    assert doctor["backup"]["load_errors"] == report.load_errors

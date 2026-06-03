@@ -176,7 +176,7 @@ runner 输出的 lessons 只写到 output.json 和 DEBRIEF.md，无法聚合、�
 
 ### 关键文件
 
-- `agent_py_agent/agent/agent_core/dispatch.py` 或 `agent_py_agent/agent/agent_core/runner_dispatch.py`：runner 执行逻辑
+- `agent_py_agent/agent/agent_core/orchestration/dispatch/` 和 `agent_py_agent/agent/agent_core/runner/dispatch.py`：dispatch 编排与 runner 执行逻辑
 - `agent_py_agent/agent/settings/config.py`：`runner_concurrency`、`runner_start_rate`、`runner_timeout_seconds` 配置读取
 - `agent_py_agent/cli/subagents.py`：`subagents-dispatch` 命令
 - `agent_py_agent/cli/daemon.py`：daemon 模式下的 runner 执行

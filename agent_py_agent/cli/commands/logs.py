@@ -1,5 +1,3 @@
-# LLM: CLI command registration module; keep parser wiring and command handler imports stable.
-# 模块用途: 组织某组命令行子命令，让用户能从 CLI 触发对应功能。
 
 from __future__ import annotations
 
@@ -17,8 +15,6 @@ from ..logs import (
 )
 
 
-# LLM: add_logs_subcommands 属于logs CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def add_logs_subcommands(sub: argparse._SubParsersAction) -> None:
     logs = sub.add_parser("logs", help="Log analysis status, ingest and query commands")
     logs_sub = logs.add_subparsers(dest="logs_command")
@@ -60,8 +56,6 @@ def add_logs_subcommands(sub: argparse._SubParsersAction) -> None:
     logs_trace_case.set_defaults(func=cmd_logs_trace_case)
 
 
-# LLM: _add_log_query_filters 属于logs CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_log_query_filters(logs_query: argparse.ArgumentParser) -> None:
     logs_query.add_argument("--root", help="Override log-analysis data directory")
     logs_query.add_argument("--start-time", help="Inclusive ISO-8601 start time")

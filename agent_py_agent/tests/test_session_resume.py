@@ -111,6 +111,56 @@ class TestResumeSession:
             finally:
                 _restore_subagent_module(original)
 
+    def test_subagent_context_load_failure_is_model_visible(self, tmp_path: Path):
+        """Subagent board read errors should be visible, not disguised as no subagents."""
+        mock_agent = MagicMock()
+        memory_file = tmp_path / "memory.jsonl"
+        memory_file.write_text("", encoding="utf-8")
+        mock_agent.config.memory_path = str(memory_file)
+        mock_agent.subagents.list_runs.side_effect = OSError("board unreadable")
+
+        mock_session = MagicMock()
+        mock_session.session_id = "test-session"
+
+        with patch("agent_py_agent.agent.session.resume.SessionManager") as MockSM:
+            mock_instance = MagicMock()
+            mock_instance.load_session.return_value = mock_session
+            MockSM.return_value = mock_instance
+            result = resume_session(mock_agent, "test-session")
+
+        error = result["subagent_context"][0]
+        assert error["type"] == "subagent_context_load_error"
+        assert error["recoverable"] is True
+        assert "子代理" in format_resume_context(result)
+
+    def test_recent_memory_corrupt_line_is_model_visible(self, tmp_path: Path):
+        """坏记忆行不能被吞成“没有历史记忆”。"""
+        mock_agent = MagicMock()
+        memory_file = tmp_path / "memory.jsonl"
+        memory_file.write_text(
+            "\n".join(
+                [
+                    '{"session_id": "test-session", "role": "user", "content": "hello"}',
+                    "{not-json",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        mock_agent.config.memory_path = str(memory_file)
+
+        mock_session = MagicMock()
+        mock_session.session_id = "test-session"
+
+        with patch("agent_py_agent.agent.session.resume.SessionManager") as MockSM:
+            mock_instance = MagicMock()
+            mock_instance.load_session.return_value = mock_session
+            MockSM.return_value = mock_instance
+            result = resume_session(mock_agent, "test-session")
+
+        assert result["recent_memories"][0]["content"] == "hello"
+        assert result["recent_memory_load_errors"][0]["context"] == "session.resume.memory_line"
+        assert "最近记忆读取警告" in format_resume_context(result)
+
 
 class TestFormatResumeContext:
     """Test format_resume_context function."""

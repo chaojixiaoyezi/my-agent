@@ -1,5 +1,3 @@
-# LLM: CLI scenario case definition; keep fixture flow and expected gateway/subagent behavior stable.
-# 模块用途: 定义一类命令行情景测试，用来复现和验证端到端流程。
 
 from __future__ import annotations
 
@@ -10,19 +8,13 @@ import json
 from ...agent.backend import ModelResponse
 
 
-# LLM: ScenarioStructuredRepairBackend 是scenario CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 class ScenarioStructuredRepairBackend:
 
     name = "scenario_structured_repair_backend"
 
-    # LLM: __init__ 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def __init__(self) -> None:
         self.calls = 0
 
-    # LLM: generate 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
@@ -41,19 +33,13 @@ class ScenarioStructuredRepairBackend:
         return ModelResponse(text=_structured_repair_success_text(), backend=self.name)
 
 
-# LLM: ScenarioRetryBackend 是scenario CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 class ScenarioRetryBackend:
 
     name = "scenario_retry_backend"
 
-    # LLM: __init__ 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def __init__(self) -> None:
         self.calls = 0
 
-    # LLM: generate 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         if "输出严格 JSON 格式" in prompt:
             return ModelResponse(
@@ -76,8 +62,6 @@ class ScenarioRetryBackend:
         return ModelResponse(text=_runner_retry_success_text(), backend=self.name)
 
 
-# LLM: _structured_repair_success_text keeps the scenario output contract readable and traceable.
-# 函数用途: 生成结构化修复场景的成功 SUBAGENT_RESULT，包含 evidence packet refs 和安全 file_check。
 def _structured_repair_success_text() -> str:
     text = (
         "[SUBAGENT_RESULT]\n"
@@ -106,8 +90,6 @@ def _structured_repair_success_text() -> str:
     return text.replace("_STRUCTURED_TEST_", _file_check_test("structured repair", "坏 JSON 已修复"))
 
 
-# LLM: _runner_retry_success_text keeps retry scenario output aligned with strict closeout.
-# 函数用途: 生成 runner retry 成功 SUBAGENT_RESULT，显式提供 evidence packet refs 和 file_check 测试事实。
 def _runner_retry_success_text() -> str:
     text = (
         "[SUBAGENT_RESULT]\n"
@@ -136,8 +118,6 @@ def _runner_retry_success_text() -> str:
     return text.replace("_RETRY_TEST_", _file_check_test("runner retry", "第二次尝试通过"))
 
 
-# LLM: _packet returns a compact JSON object string for scenario evidence packets.
-# 函数用途: 复用 scenario evidence packet 结构，确保每个成功 stub 都带 evidence/artifact refs。
 def _packet(packet_id: str, claim: str, checked_scope: str) -> str:
     return json.dumps({
         "id": packet_id,
@@ -149,8 +129,6 @@ def _packet(packet_id: str, claim: str, checked_scope: str) -> str:
     }, ensure_ascii=False)
 
 
-# LLM: _file_check_test returns a safe test fact for parent auto-policy dry-run.
-# 函数用途: 生成不会触发命令执行风险的 file_check 测试条目，并保留 ok/summary 兼容旧验收。
 def _file_check_test(name: str, summary: str) -> str:
     return json.dumps({
         "name": name,

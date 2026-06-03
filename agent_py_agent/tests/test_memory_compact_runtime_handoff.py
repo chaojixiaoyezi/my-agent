@@ -12,7 +12,7 @@ from agent_py_agent.agent.memory_archive.compact_resume import (
     MemoryCompactResumeOptions,
     build_memory_compact_resume,
 )
-from agent_py_agent.agent.memory_archive.compact_work_state_sources import (
+from agent_py_agent.agent.memory_archive.compact_work_state import (
     WorkStateFieldSourceRequest,
     build_work_state_field_sources,
 )

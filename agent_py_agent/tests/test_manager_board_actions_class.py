@@ -1,8 +1,4 @@
-"""subagents board action-plan and recent-list tests.
-
-LLM: Split from test_manager_board_class to keep code-size guardrails clean.
-模块用途: 覆盖 plan_actions、write_board、hot list 和 recent list 的看板行为。
-"""
+"""Subagent board action-plan and recent-list tests."""
 
 from __future__ import annotations
 
@@ -16,9 +12,9 @@ class TestPlanActions:
     def test_plan_actions_empty(self, tmp_path: Path):
         """无问题时返回空计划。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
 
@@ -35,10 +31,10 @@ class TestPlanActions:
     def test_plan_actions_can_scope_to_root_id(self, tmp_path: Path):
         """动作计划只使用指定 root_id 的 due-check 问题。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentPlanActionsOptions, SubAgentTask
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
                 self._tasks = []
@@ -83,10 +79,10 @@ class TestPlanActions:
     def test_plan_actions_can_scope_to_explicit_run_ids(self, tmp_path: Path):
         """显式 run_ids 调度时，action plan 只生成目标 run 的动作。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentPlanActionsOptions, SubAgentTask
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
                 self._tasks = []
@@ -130,10 +126,10 @@ class TestPlanActions:
         """no-progress fuse 应生成停止自动重试的动作计划。"""
         from agent_py_agent.agent.capability_config import CapabilityConfig
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
                 self._tasks = []
@@ -172,9 +168,9 @@ class TestWriteBoard:
     def test_writes_json_and_markdown(self, tmp_path: Path):
         """写出 JSON 和 Markdown 看板。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
 
@@ -194,10 +190,10 @@ class TestBoardHotList:
     def test_hot_list_contains_risky_tasks(self, tmp_path: Path):
         """热榜包含风险任务。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask, WorkOrderValidation
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
                 self._tasks = []
@@ -233,10 +229,10 @@ class TestBoardRecent:
     def test_respects_recent_limit(self, tmp_path: Path):
         """限制最近条目数。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask, WorkOrderValidation
+        from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
 
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
             def __init__(self, workspace: Path):
                 SubAgentBaseMixin.__init__(self, workspace=workspace)
                 self._tasks = []

@@ -214,8 +214,6 @@ def test_subagent_board_scales_and_flags():
         assert (root / "subs" / "SUBAGENT_BOARD.md").exists()
 
 
-# LLM: Board output is model-visible status and must not leak legacy work-order paths.
-# 函数用途: 确认 subagent_board JSON 不把旧 data/subagents 路径递给上级模型。
 def test_subagent_board_hides_legacy_subagent_paths():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)

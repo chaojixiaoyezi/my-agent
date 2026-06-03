@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 
-# LLM: Shared tool manifest contracts must expose recovery facts, not only tool names.
-# 函数用途: 验证共享工具清单会输出 visible/executable tools 和失败恢复合同。
 def test_tool_manifest_payload_includes_failure_contracts():
     payload = _tool_manifest_payload()
 
@@ -12,13 +10,11 @@ def test_tool_manifest_payload_includes_failure_contracts():
     assert payload["failure_taxonomy"] == sorted(payload["failure_taxonomy"])
     assert "PATH_INVALID" in payload["failure_taxonomy"]
     failure_contracts = {item["code"]: item for item in payload["failure_contracts"]}
-    assert failure_contracts["TOOL_UNAVAILABLE"]["recommended_action"] == "request_capability_or_choose_available_tool"
+    assert failure_contracts["TOOL_UNAVAILABLE"]["recommended_action"] == "request_capability"
     assert failure_contracts["APPROVAL_REQUIRED"]["retryable"] is True
     assert payload["tools"][0]["visible_in_context"] is True
 
 
-# LLM: Shared tool manifest contracts must expose side-effect policy fields.
-# 函数用途: 验证 list_tools/context bundle 能看到执行门使用的同一组机器字段。
 def test_tool_manifest_payload_includes_side_effect_policy_fields():
     payload = _tool_manifest_payload()
     write_manifest = payload["tools"][1]
@@ -31,8 +27,6 @@ def test_tool_manifest_payload_includes_side_effect_policy_fields():
     assert write_manifest["output_refs"] == ["file"]
 
 
-# LLM: Subagent-style owners must surface owner-scoped permission mode in the same manifest contract.
-# 函数用途: 验证 owner_type 变化时权限模式字段同步变化，不需要各处单独拼字符串。
 def test_tool_manifest_payload_uses_owner_scoped_permission_mode_for_non_root_owner():
     from agent_py_agent.agent.contracts.tool_manifest_contract import tool_manifest_payload
 

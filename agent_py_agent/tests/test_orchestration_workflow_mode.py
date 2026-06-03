@@ -7,11 +7,9 @@ from __future__ import annotations
 
 import pytest
 
-from agent_py_agent.agent.agent_core.orchestration_tools import _tool_workflow_mode
+from agent_py_agent.agent.agent_core.orchestration.workflow_mode import tool_workflow_mode
 
 
-# LLM: test_tool_workflow_mode_cases keeps workflow mode compatibility compact.
-# 函数用途: 用参数化覆盖显式值、配置 fallback、默认 off 和空格处理。
 @pytest.mark.parametrize(
     ("explicit", "configured", "expected"),
     [
@@ -28,4 +26,4 @@ from agent_py_agent.agent.agent_core.orchestration_tools import _tool_workflow_m
     ],
 )
 def test_tool_workflow_mode_cases(explicit, configured, expected):
-    assert _tool_workflow_mode(explicit, configured) == expected
+    assert tool_workflow_mode(explicit, configured) == expected

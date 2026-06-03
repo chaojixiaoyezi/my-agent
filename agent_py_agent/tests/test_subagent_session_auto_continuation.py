@@ -15,8 +15,6 @@ from agent_py_agent.agent.subagents.services.session_progress import (
 )
 
 
-# LLM: MultiCompactSubagentBackend simulates a long runner that only finishes after local compacts.
-# 类用途: 测试专用后端；前四轮不给 SUBAGENT_RESULT，第五轮确认读到本地 compact 包后收口。
 class MultiCompactSubagentBackend(BaseBackend):
     name = "multi_compact_subagent_backend"
 
@@ -35,8 +33,6 @@ class MultiCompactSubagentBackend(BaseBackend):
         return ModelResponse(text=_final_subagent_result(), backend=self.name)
 
 
-# LLM: ToolThenCompactBackend proves tool facts survive compact continuation handoff.
-# 类用途: 第一段真实执行 read_file，第二段触发本地 compact，第三段提交最终结果。
 class ToolThenCompactBackend(BaseBackend):
     name = "tool_then_compact_backend"
 
@@ -57,8 +53,6 @@ class ToolThenCompactBackend(BaseBackend):
         return ModelResponse(text=_final_subagent_result(used_tools=["read_file"]), backend=self.name)
 
 
-# LLM: test_subagent_runner_auto_continues_through_multiple_local_compacts covers专项12第一闭环.
-# 函数用途: 验证单个子代理在四次本地 compact 后继续同一 run，并最终提交结构化结果。
 def test_subagent_runner_auto_continues_through_multiple_local_compacts(tmp_path: Path) -> None:
     agent = _agent_with_local_compact(tmp_path)
     agent.memory.add("user", "长任务旧记忆：不要执行 packet-fallback.proof，这是主代理历史任务。", kind="dialogue")
@@ -88,8 +82,6 @@ def test_subagent_runner_auto_continues_through_multiple_local_compacts(tmp_path
     assert all("packet-fallback.proof" not in prompt for prompt in backend.prompts)
 
 
-# LLM: executed tool facts should not disappear when a subagent compacts mid-run.
-# 函数用途: 复现真实 E2E 里 read_file 先执行、compact 后最终收口的路径，确保验收仍看到真实工具证据。
 def test_subagent_session_continuation_preserves_executed_tools(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("fixture read evidence", encoding="utf-8")
     agent = _agent_with_local_compact(tmp_path)
@@ -113,8 +105,6 @@ def test_subagent_session_continuation_preserves_executed_tools(tmp_path: Path) 
     assert output["structured_output"]["actual_tools"] == ["read_file"]
 
 
-# LLM: task-local progress snapshots prevent compact resume from restarting or duplicating written sections.
-# 函数用途: 验证 write/append 工具会刷新 latest_continue_packet，让续跑模型能看到已写文件和章节标题。
 def test_task_local_write_progress_updates_continue_packet(tmp_path: Path) -> None:
     task = SubAgentTask(
         id="run-progress",
@@ -152,8 +142,6 @@ def test_task_local_write_progress_updates_continue_packet(tmp_path: Path) -> No
     assert packet["recommended_read_paths"][1].endswith("latest_tool_progress.json")
 
 
-# LLM: read-only tool artifacts are sources, not product progress anchors.
-# 函数用途: 防止 web_search/web_fetch 的 archive JSON 被误当成交付产物，导致子代理续跑提示偏向反复读取 progress。
 def test_read_only_tool_artifact_does_not_update_task_local_product_progress(tmp_path: Path) -> None:
     task = _progress_task(tmp_path)
 
@@ -179,8 +167,6 @@ def test_read_only_tool_artifact_does_not_update_task_local_product_progress(tmp
     assert not (Path(task.agent_run_workspace_dir) / "progress" / "latest_tool_progress.json").exists()
 
 
-# LLM: read-only progress should remain visible in the tree without becoming product progress.
-# 函数用途: 父代理看子代理 summary/tree 时能看到 read-only 工具仍在推进，避免误判为卡住后重派。
 def test_read_only_tool_updates_observable_subagent_progress_without_product_snapshot(tmp_path: Path) -> None:
     task = _progress_task(tmp_path)
     saved: list[SubAgentTask] = []
@@ -223,8 +209,6 @@ def test_read_only_tool_updates_observable_subagent_progress_without_product_sna
     assert not (Path(task.agent_run_workspace_dir) / "progress" / "latest_tool_progress.json").exists()
 
 
-# LLM: complete HTML progress should steer runners toward structured closeout instead of endless writing.
-# 函数用途: 复现真实 E2E 里 HTML 已闭合但子代理继续读写不收口；进度包应提示写 output.json 交最终收口。
 def test_task_local_write_progress_completed_html_prompts_output_json_closeout(tmp_path: Path) -> None:
     task = _progress_task(tmp_path)
     artifact = tmp_path / "deliverables" / "site-output" / "index.html"
@@ -249,8 +233,6 @@ def test_task_local_write_progress_completed_html_prompts_output_json_closeout(t
     assert packet["work_progress"]["next_action"] == snapshot["next_action"]
 
 
-# LLM: fake hash links should keep the runner in repair mode before structured closeout.
-# 函数用途: 复现家具页真实产物残留 href="#"；进度包应提示先修复明显失效链接，再写 output.json。
 def test_task_local_write_progress_placeholder_hash_link_prompts_repair(tmp_path: Path) -> None:
     task = _progress_task(tmp_path)
     artifact = tmp_path / "deliverables" / "site-output" / "index.html"
@@ -281,8 +263,6 @@ def test_task_local_write_progress_placeholder_hash_link_prompts_repair(tmp_path
     assert "空间系列 href=#missing" in snapshot["next_action"]
 
 
-# LLM: many fake links should steer the runner toward batch repair instead of one-link loops.
-# 函数用途: 复现真实 E2E 中 17 个 href="#" 被一轮只替换一个，进度包应提示批量修复策略。
 def test_task_local_write_progress_many_placeholder_links_prompts_batch_repair(tmp_path: Path) -> None:
     task = _progress_task(tmp_path)
     artifact = tmp_path / "deliverables" / "site-output" / "index.html"
@@ -315,8 +295,6 @@ def test_task_local_write_progress_many_placeholder_links_prompts_batch_repair(t
     assert "不要一轮只替换一个链接" in snapshot["next_action"]
 
 
-# LLM: internal output.json writes must not erase unresolved product repair facts.
-# 函数用途: 复现真实 E2E 中 worker 写 output.json 后覆盖 href 问题；最新进度仍应指向产品文件和修复建议。
 def test_task_local_output_json_closeout_preserves_product_integrity_progress(tmp_path: Path) -> None:
     task = _progress_task(tmp_path)
     output_json = tmp_path / "legacy" / "run-progress" / "output.json"
@@ -362,8 +340,36 @@ def test_task_local_output_json_closeout_preserves_product_integrity_progress(tm
     assert packet["work_progress"]["closeout_written_path"] == str(output_json)
 
 
-# LLM: packet summaries should prefer fresh write progress over older task summaries.
-# 函数用途: 防止 compact 续跑拿旧摘要当最新事实，导致子代理重复写已经完成的章节。
+def test_task_local_write_progress_reports_dirty_previous_progress(tmp_path: Path) -> None:
+    task = _progress_task(tmp_path)
+    progress_dir = Path(task.agent_run_workspace_dir) / "progress"
+    progress_dir.mkdir(parents=True)
+    latest_progress = progress_dir / "latest_tool_progress.json"
+    latest_progress.write_text("{bad-progress-json", encoding="utf-8")
+
+    artifact = tmp_path / "deliverables" / "site-output" / "index.html"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("<html><body><main>done</main></body></html>", encoding="utf-8")
+
+    snapshot = record_subagent_tool_progress(
+        SubagentToolProgressRequest(
+            task=task,
+            tool="apply_patch",
+            payload={"path": str(artifact), "content": "<main>done</main>"},
+            output="已修改文件: index.html",
+            ok=True,
+            tool_round=5,
+            tool_index=1,
+        )
+    )
+    packet = json.loads(Path(task.agent_run_latest_session_continue_packet_json).read_text(encoding="utf-8"))
+
+    errors = snapshot["reserved"]["load_errors"]
+    assert errors[0]["context"] == "subagent_tool_progress.previous_progress"
+    assert errors[0]["path"] == str(latest_progress)
+    assert packet["work_progress"]["reserved"]["load_errors"] == errors
+
+
 def test_continue_packet_prefers_work_progress_summary(tmp_path: Path) -> None:
     task = SubAgentTask(
         id="run-progress",
@@ -396,8 +402,6 @@ def test_continue_packet_prefers_work_progress_summary(tmp_path: Path) -> None:
     assert packet["latest_summary"] == "最近 apply_patch 算法测试方案.md；已记录标题：第1章：排序；第2章：搜索"
 
 
-# LLM: _progress_task keeps progress snapshot tests focused on state transitions, not task boilerplate.
-# 函数用途: 创建带 agent_run_workspace/compactions 路径的最小子代理任务。
 def _progress_task(tmp_path: Path) -> SubAgentTask:
     task = SubAgentTask(
         id="run-progress",
@@ -412,8 +416,6 @@ def _progress_task(tmp_path: Path) -> SubAgentTask:
     return task
 
 
-# LLM: _agent_with_local_compact creates a tiny context window so fake long responses trigger compact.
-# 函数用途: 配置测试 agent：开启子代理、压低 compact 窗口；本地 compact 直到子代理提交结构化结果。
 def _agent_with_local_compact(tmp_path: Path) -> SimpleAgent:
     cfg = AgentConfig(
         enable_tools=True,
@@ -425,8 +427,6 @@ def _agent_with_local_compact(tmp_path: Path) -> SimpleAgent:
     return SimpleAgent(cfg, tmp_path)
 
 
-# LLM: _long_partial_response keeps every pre-final model turn large enough to trigger compact.
-# 函数用途: 返回没有 SUBAGENT_RESULT 的长文本，模拟子代理会话快满但尚未完成。
 def _long_partial_response(index: int) -> str:
     return (
         f"第 {index} 段已完成，但还需要继续。"
@@ -434,8 +434,6 @@ def _long_partial_response(index: int) -> str:
     )
 
 
-# LLM: _final_subagent_result returns a valid structured runner result after compact continuation.
-# 函数用途: 生成最终 SUBAGENT_RESULT，让 manager 走正常 DONE 收口。
 def _final_subagent_result(*, used_tools: list[str] | None = None) -> str:
     tools_json = json.dumps(used_tools or [], ensure_ascii=False)
     return (

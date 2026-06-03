@@ -1,5 +1,3 @@
-# LLM: Subagent typed protocol envelopes for result and fan-out events.
-# 模块用途: 定义子代理结果、层级创建结果和结构化 refs 展开逻辑。
 
 from __future__ import annotations
 
@@ -18,12 +16,10 @@ from .action_protocol_core import (
     _dict_list,
     _dict_or_empty,
     _now_iso,
-    _string_list,
 )
+from .common.value_parsing import string_list
 
 
-# LLM: SubagentResultEnvelope is the typed form of a child run final report.
-# 类用途: 保存子代理状态、真实工具、证据 ref 和产物 ref；summary 只用于展示。
 @dataclass(frozen=True)
 class SubagentResultEnvelope:
     result_id: str
@@ -45,14 +41,10 @@ class SubagentResultEnvelope:
     created_at: str = field(default_factory=_now_iso)
     reserved: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: __post_init__ assigns a replay-safe operation key for child result ingestion.
-    # 函数用途: 旧子代理结果没有 operation_id 时，按 result_id 自动补齐。
     def __post_init__(self) -> None:
         if not self.operation_id:
             object.__setattr__(self, "operation_id", _default_operation_id(self.kind, self.result_id))
 
-    # LLM: to_dict serializes nested refs explicitly for storage and parent review.
-    # 函数用途: 把子代理结果 envelope 转成 JSON 字典。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["scope"] = self.scope.to_dict()
@@ -61,8 +53,6 @@ class SubagentResultEnvelope:
         payload["path_refs"] = [item.to_dict() for item in self.path_refs]
         return payload
 
-    # LLM: from_dict restores typed child results without trusting display summaries.
-    # 函数用途: 从 JSON 字典恢复 SubagentResultEnvelope。
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> SubagentResultEnvelope:
         return cls(
@@ -70,12 +60,12 @@ class SubagentResultEnvelope:
             run_id=str(payload.get("run_id") or ""),
             status=str(payload.get("status") or ""),
             summary=str(payload.get("summary") or ""),
-            actual_tools=_string_list(payload.get("actual_tools")),
+            actual_tools=string_list(payload.get("actual_tools")),
             artifact_refs=[ArtifactRef.from_dict(item) for item in _dict_list(payload.get("artifact_refs"))],
             evidence_refs=[EvidenceRef.from_dict(item) for item in _dict_list(payload.get("evidence_refs"))],
             path_refs=[PathRef.from_dict(item) for item in _dict_list(payload.get("path_refs"))],
             tests=_dict_list(payload.get("tests")),
-            next_actions=_string_list(payload.get("next_actions")),
+            next_actions=string_list(payload.get("next_actions")),
             blocked_reason=str(payload.get("blocked_reason") or ""),
             failure_type=str(payload.get("failure_type") or ""),
             scope=RunScope.from_dict(payload.get("scope")),
@@ -87,8 +77,6 @@ class SubagentResultEnvelope:
         )
 
 
-# LLM: SubagentScheduleEnvelope is the typed handoff for every subagent fan-out layer.
-# 类用途: 统一 create_subagents 和 schedule_child_subagents 的创建结果，让多层 refs 不靠自然语言传递。
 @dataclass(frozen=True)
 class SubagentScheduleEnvelope:
     schedule_id: str
@@ -112,29 +100,23 @@ class SubagentScheduleEnvelope:
     created_at: str = field(default_factory=_now_iso)
     reserved: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: __post_init__ gives every fan-out event a stable idempotency key.
-    # 函数用途: 让 create/schedule 子代理事件能被恢复逻辑去重。
     def __post_init__(self) -> None:
         if not self.operation_id:
             object.__setattr__(self, "operation_id", _default_operation_id(self.kind, self.schedule_id))
 
-    # LLM: to_dict keeps subagent fan-out results machine-readable for parent recovery.
-    # 函数用途: 把 SubagentScheduleEnvelope 转成 JSON 字典。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["scope"] = self.scope.to_dict()
         return payload
 
-    # LLM: from_dict restores schedule refs without parsing tool output prose.
-    # 函数用途: 从 JSON 字典恢复 SubagentScheduleEnvelope。
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> SubagentScheduleEnvelope:
         return cls(
             schedule_id=str(payload.get("schedule_id") or payload.get("id") or ""),
             tool=str(payload.get("tool") or ""),
-            created_run_ids=_string_list(payload.get("created_run_ids")),
-            reused_run_ids=_string_list(payload.get("reused_run_ids")),
-            dispatch_run_ids=_string_list(payload.get("dispatch_run_ids")),
+            created_run_ids=string_list(payload.get("created_run_ids")),
+            reused_run_ids=string_list(payload.get("reused_run_ids")),
+            dispatch_run_ids=string_list(payload.get("dispatch_run_ids")),
             parent_run_id=str(payload.get("parent_run_id") or ""),
             root_id=str(payload.get("root_id") or ""),
             planned_count=int(payload.get("planned_count") or 0),
@@ -153,8 +135,6 @@ class SubagentScheduleEnvelope:
         )
 
 
-# LLM: path_refs_from_subagent_refs flattens structured artifact/evidence refs for resolvers.
-# 函数用途: 从 ArtifactRef/EvidenceRef 生成去重 PathRef；不解析 summary，避免自然语言误触发读取。
 def path_refs_from_subagent_refs(
     *,
     artifact_refs: list[ArtifactRef],
@@ -164,8 +144,6 @@ def path_refs_from_subagent_refs(
     refs: list[PathRef] = []
     seen: set[str] = set()
 
-    # LLM: add closes over owner/seen so path-ref creation avoids long parameter lists.
-    # 函数用途: 追加非空路径引用并按 path 去重，保持读取顺序稳定。
     def add(path: str, kind: str, source: str, owner: str = "") -> None:
         clean = str(path or "").strip()
         if not clean or clean in seen:
@@ -183,8 +161,6 @@ def path_refs_from_subagent_refs(
     return refs
 
 
-# LLM: subagent_schedule_envelope_from_payload normalizes top-level and nested spawn outputs.
-# 函数用途: 把 create_subagents/schedule_child_subagents 的旧 JSON 响应转成统一 SubagentScheduleEnvelope。
 def subagent_schedule_envelope_from_payload(
     payload: dict[str, Any],
     *,
@@ -198,8 +174,8 @@ def subagent_schedule_envelope_from_payload(
         schedule_id=_schedule_envelope_id(tool, created_run_ids, parent_run_id, root_id),
         tool=tool,
         created_run_ids=created_run_ids,
-        reused_run_ids=_string_list(payload.get("reused_run_ids")),
-        dispatch_run_ids=_string_list(payload.get("dispatch_run_ids")),
+        reused_run_ids=string_list(payload.get("reused_run_ids")),
+        dispatch_run_ids=string_list(payload.get("dispatch_run_ids")),
         parent_run_id=parent_run_id,
         root_id=root_id,
         planned_count=int(payload.get("planned_count") or len(created_run_ids)),
@@ -214,18 +190,14 @@ def subagent_schedule_envelope_from_payload(
     )
 
 
-# LLM: _jsonish_value keeps typed envelopes from stringifying structured tool advice.
-# 函数用途: 保留 next_action 这类 dict/list/string 字段；坏类型回落默认值，避免自然语言再解析。
 def _jsonish_value(value: object, *, default: object) -> object:
     if isinstance(value, str | dict | list | int | float | bool):
         return value
     return default
 
 
-# LLM: _schedule_created_run_ids accepts both create_subagents ids and child scheduling ids.
-# 函数用途: 从旧 payload 的 created_run_ids/ids/tasks 里提取创建出来的 run id。
 def _schedule_created_run_ids(payload: dict[str, Any]) -> list[str]:
-    ids = _string_list(payload.get("created_run_ids") or payload.get("ids"))
+    ids = string_list(payload.get("created_run_ids") or payload.get("ids"))
     if ids:
         return ids
     return [
@@ -235,8 +207,6 @@ def _schedule_created_run_ids(payload: dict[str, Any]) -> list[str]:
     ]
 
 
-# LLM: _schedule_envelope_id gives schedule events stable ids without reading task files.
-# 函数用途: 基于工具名、父级/root 和第一个子 run id 生成可追踪 schedule_id。
 def _schedule_envelope_id(tool: str, run_ids: list[str], parent_run_id: str, root_id: str) -> str:
     anchor = run_ids[0] if run_ids else parent_run_id or root_id or "unknown"
     return f"{tool}:{anchor}"

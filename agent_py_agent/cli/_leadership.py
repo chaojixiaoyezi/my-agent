@@ -1,5 +1,3 @@
-# LLM: CLI surface for subagent leadership recovery planning; keep commands dry-run by default.
-# 模块用途: 提供批量 coordinator 领导权恢复计划命令，不执行任务树改写。
 
 from __future__ import annotations
 
@@ -16,8 +14,6 @@ from ..agent.subagents.models import (
 from .common import make_agent
 
 
-# LLM: cmd_subagents_leadership_recovery_plan prints a dry-run batch handoff plan for stale coordinators.
-# 函数用途: CLI 入口；把 root、候选 leader 和容量上限整理成 bundle 交给 subagent manager。
 def cmd_subagents_leadership_recovery_plan(args) -> int:
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
@@ -56,8 +52,6 @@ def cmd_subagents_leadership_recovery_plan(args) -> int:
     return 0
 
 
-# LLM: cmd_subagents_leadership_recovery_apply performs a controlled subset handoff only with --apply.
-# 函数用途: CLI 分批接管入口；默认 dry-run，显式 --apply 才移动 child 子树。
 def cmd_subagents_leadership_recovery_apply(args) -> int:
     agent = make_agent(args)
     params = SubAgentLeadershipRecoveryApplyOptions(
@@ -94,8 +88,6 @@ def cmd_subagents_leadership_recovery_apply(args) -> int:
     return 0
 
 
-# LLM: _leader_config_int keeps leadership recovery capacities configurable.
-# 函数用途: leadership recovery CLI 未传容量时，读取 agent_config.yaml 默认值。
 def _leader_config_int(agent, args, arg_name: str, config_name: str) -> int:
     value = getattr(args, arg_name, None)
     if value is not None:

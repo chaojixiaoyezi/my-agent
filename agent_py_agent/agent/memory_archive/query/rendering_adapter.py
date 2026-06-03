@@ -1,5 +1,3 @@
-# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
-# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
 
 from __future__ import annotations
 
@@ -14,8 +12,6 @@ import json
 from typing import Any
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 format_archive_record 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 format archive record 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def format_archive_record(record: dict[str, Any]) -> str:
 
     timestamp = record.get("created_at", "")
@@ -40,8 +36,6 @@ def format_archive_record(record: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 format_archive_records_table 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 format archive records table 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def format_archive_records_table(records: list[dict[str, Any]]) -> str:
 
     if not records:
@@ -67,8 +61,6 @@ def format_archive_records_table(records: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 format_query_response_json 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 format query response json 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def format_query_response_json(response: Any) -> str:
 
     return json.dumps(
@@ -85,8 +77,6 @@ def format_query_response_json(response: Any) -> str:
     )
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 render_resume_guidance 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 render resume guidance 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def render_resume_guidance(guidance: dict[str, Any]) -> str:
 
     lines: list[str] = []

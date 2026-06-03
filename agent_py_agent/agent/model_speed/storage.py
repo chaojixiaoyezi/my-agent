@@ -1,11 +1,8 @@
-# LLM: Model-speed module; keep benchmark samples and interpolation data shapes stable.
-# 模块用途: 记录和估算模型速度，辅助超时、调度或容量判断。
 
 from __future__ import annotations
 
 """model speed profile storage.
 
-给人看的解释：
 负责速度配置文件的保存和加载。
 """
 
@@ -19,8 +16,6 @@ if TYPE_CHECKING:
     pass
 
 
-# LLM: save_speed_profile belongs to 模型速度评估; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 保存速度配置文件。；会写入或调整文件，改动时要确认路径、安全边界和失败恢复；会读写 JSON 结构，改字段时要保持兼容。
 def save_speed_profile(profile: SpeedProfile, path: str | Path) -> None:
     """保存速度配置文件。"""
 
@@ -29,8 +24,6 @@ def save_speed_profile(profile: SpeedProfile, path: str | Path) -> None:
     target.write_text(json.dumps(profile.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-# LLM: load_speed_profile belongs to 模型速度评估; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 加载速度配置文件，文件不存在时返回 None。；会读写 JSON 结构，改字段时要保持兼容。
 def load_speed_profile(path: str | Path) -> SpeedProfile | None:
     """加载速度配置文件，文件不存在时返回 None。"""
 

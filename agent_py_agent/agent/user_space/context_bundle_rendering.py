@@ -1,13 +1,9 @@
-# LLM: Context bundle rendering keeps prompt/Markdown formatting out of bundle assembly.
-# 模块用途: 渲染主代理 context bundle 的 prompt 摘要和 Markdown 镜像，避免核心生成文件继续膨胀。
 
 from __future__ import annotations
 
 import json
 
 
-# LLM: render_prompt_section is intentionally short because detailed bodies stay behind refs.
-# 函数用途: 渲染给模型看的简短 context bundle 摘要，保证 prompt 里有稳定机器字段。
 def render_prompt_section(bundle: dict[str, object], *, json_path: str) -> str:
     scope = dict(bundle.get("scope") or {})
     workspace = dict(bundle.get("workspace_refs") or {})
@@ -30,8 +26,6 @@ def render_prompt_section(bundle: dict[str, object], *, json_path: str) -> str:
     return _fit_prompt_budget("\n".join(lines), bundle)
 
 
-# LLM: render_markdown_bundle renders a human-readable mirror of the same machine payload.
-# 函数用途: 写给人看的 context bundle 说明，方便调试而不需要打开 JSON。
 def render_markdown_bundle(bundle: dict[str, object], *, json_path: str) -> str:
     return "\n".join(
         [
@@ -69,8 +63,6 @@ def render_markdown_bundle(bundle: dict[str, object], *, json_path: str) -> str:
     )
 
 
-# LLM: _fit_prompt_budget keeps the injected section bounded while full JSON stays on disk.
-# 函数用途: 如果摘要超过预算，保留前段核心字段并追加截断说明。
 def _fit_prompt_budget(text: str, bundle: dict[str, object]) -> str:
     budget = bundle.get("prompt_budget", {}) if isinstance(bundle.get("prompt_budget"), dict) else {}
     maximum = int(budget.get("max_prompt_section_chars", 1600) or 1600)
@@ -80,8 +72,6 @@ def _fit_prompt_budget(text: str, bundle: dict[str, object]) -> str:
     return text[: max(0, maximum - len(suffix))].rstrip() + suffix
 
 
-# LLM: _json_block centralizes deterministic Markdown JSON rendering.
-# 函数用途: 在 Markdown 镜像里输出排序后的 JSON 片段，方便人和 LLM 对照。
 def _json_block(value: object) -> str:
     return "```json\n" + json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n```"
 

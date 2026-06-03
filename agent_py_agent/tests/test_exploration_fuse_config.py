@@ -3,8 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 
-# LLM: exploration fuse settings live in the shared runtime guard config file, not the main AgentConfig.
-# 函数用途: 验证统一运行门配置文件能调整探索额度，且 0 保留为不按次数阻断。
 def test_load_exploration_fuse_config_from_shared_runtime_guard_file(tmp_path: Path):
     from agent_py_agent.agent.agent_core.exploration_fuse_config import load_exploration_fuse_config
 
@@ -27,8 +25,6 @@ def test_load_exploration_fuse_config_from_shared_runtime_guard_file(tmp_path: P
     assert config.local_progress_unlimited_hint_interval == 12
 
 
-# LLM: invalid shared config values should fall back without disabling the guard by accident.
-# 函数用途: 验证非法阈值不会被解释成 0，避免配置写错后意外关闭探索阻断。
 def test_load_exploration_fuse_config_invalid_values_fall_back(tmp_path: Path):
     from agent_py_agent.agent.agent_core.exploration_fuse_config import (
         DEFAULT_EXPLORATION_FUSE_ROUND_THRESHOLD,
@@ -48,8 +44,6 @@ def test_load_exploration_fuse_config_invalid_values_fall_back(tmp_path: Path):
     assert config.unlimited_hint_rounds == DEFAULT_UNLIMITED_HINT_ROUNDS
 
 
-# LLM: local-progress guard defaults share the same runtime guard config file.
-# 函数用途: 验证本地进展门只保留固定提醒间隔，默认每 10 轮提醒一次。
 def test_load_exploration_fuse_config_local_progress_defaults():
     from agent_py_agent.agent.agent_core.exploration_fuse_config import load_exploration_fuse_config
 

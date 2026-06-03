@@ -17,8 +17,6 @@ from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 
 
-# LLM: _dispatch_agent_with_state builds a minimal agent whose load() exposes mixed run statuses.
-# 函数用途: 构造 dispatch_subagents 测试用 agent，避免状态合同测试塞进大型 child-refs suite。
 def _dispatch_agent_with_state(tasks: dict[str, SimpleNamespace]):
     report = MagicMock()
     report.dry_run = False
@@ -35,8 +33,6 @@ def _dispatch_agent_with_state(tasks: dict[str, SimpleNamespace]):
     return mock_agent
 
 
-# LLM: Top-level dispatch should expose the current run-state contract without reading bulky records.
-# 函数用途: root 显式 dispatch 多个 run 后，要能直接看到哪些可跑、哪些在跑、哪些阻塞、哪些已验收。
 def test_dispatch_execute_payload_includes_current_turn_run_state():
     tasks = {
         "planning": SimpleNamespace(id="planning", status="PLANNING", verification_status="UNVERIFIED"),
@@ -67,7 +63,7 @@ def test_dispatch_execute_payload_includes_current_turn_run_state():
         "run_id": "blocked",
         "status": "BLOCKED",
         "failure_type": "TOOL_UNAVAILABLE",
-        "recommended_action": "repair_or_request_capability",
+        "recommended_action": "request_capability",
         "allow_new_run": False,
         "reason": "blocked_tool_unavailable",
         "recovery_hint": "工具不可用；查看 ToolManifest，换可执行工具或申请能力。",
@@ -91,8 +87,6 @@ def test_dispatch_state_reports_load_errors_instead_of_empty_state():
     assert state["next_action"] == "refresh_agent_tree_or_rebuild_state_index"
 
 
-# LLM: create_subagents should expose current-turn state immediately after default auto-start.
-# 函数用途: root 创建小傻妞后，不必再手动催跑，应直接看到已启动/已完成状态和看板建议。
 def test_create_payload_includes_current_turn_run_state(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
 
@@ -116,8 +110,6 @@ def test_create_payload_includes_current_turn_run_state(tmp_path):
     assert envelope.dispatch_run_ids == []
 
 
-# LLM: create payload idempotency metadata is audit data; reuse needs an explicit child contract.
-# 函数用途: 重复 create_subagents 时 operation_contract 仍稳定，但不会仅凭 goal 文本自动复用 run。
 def test_create_payload_includes_stable_operation_contract(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     params = {"goal": "写一个高端现代家具品牌首页 index.html", "role": "worker"}
@@ -131,8 +123,6 @@ def test_create_payload_includes_stable_operation_contract(tmp_path):
     assert second["created_run_ids"]
 
 
-# LLM: schedule_child_subagents should expose current-turn state for nested parents too.
-# 函数用途: 子代理创建小小傻妞后，要直接拿到 dispatchable run ids，不能等下一轮从 prose 里抄 id。
 def test_schedule_child_payload_includes_current_turn_run_state(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])

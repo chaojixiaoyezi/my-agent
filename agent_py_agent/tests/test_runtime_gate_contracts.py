@@ -34,8 +34,6 @@ def test_gate_registry_blocks_when_any_required_gate_denies():
     assert decision.finding_codes == ("BROKEN_FACT",)
 
 
-# LLM: Failed gate decisions must carry a structured recovery envelope, not only a blocking status.
-# 函数用途: 验证合同门失败会给出机器可读返工动作；中文说明只是展示字段，不参与判断。
 def test_gate_decision_serializes_recovery_envelope_with_chinese_message():
     decision = GateDecision.repair(
         "delivery_quality",
@@ -68,8 +66,8 @@ def test_gate_decision_exposes_action_and_operator_semantics():
         "DENY",
         False,
         (GateFinding("TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED"),),
-        "terminal_block",
-        {},
+        "change_strategy",
+        {"block_task": True},
     )
 
     payload = warning.to_dict()
@@ -84,7 +82,7 @@ def test_gate_decision_exposes_action_and_operator_semantics():
 
 
 def test_contract_recovery_exposes_rework_loop_for_repairable_gate_failure():
-    from agent_py_agent.agent.agent_core.main_agent_delivery_closeout_gate_recovery import (
+    from agent_py_agent.agent.agent_core.delivery_closeout.gate_recovery import (
         attach_contract_recovery,
     )
 
@@ -103,8 +101,6 @@ def test_contract_recovery_exposes_rework_loop_for_repairable_gate_failure():
     assert "重新跑同一套合同验收" in recovery["rework_loop"]["message_zh"]
 
 
-# LLM: Approval gates should ask the user instead of being mislabeled as automatic repair.
-# 函数用途: 验证需要审批的合同门返回 needs_user_input，让运行时等待审批而不是粗暴失败或自动绕过。
 def test_gate_decision_recovery_envelope_marks_approval_as_user_input():
     decision = GateDecision.need_approval("tool_effect", evidence={"tool_name": "block_ip"})
     recovery = decision.to_dict()["recovery"]
@@ -112,7 +108,7 @@ def test_gate_decision_recovery_envelope_marks_approval_as_user_input():
     assert recovery["status"] == "needs_user_input"
     assert recovery["requires_user"] is True
     assert recovery["next_status"] == "WAITING_APPROVAL"
-    assert recovery["actions"][0]["recommended_action"] == "request_user_input_or_approval"
+    assert recovery["actions"][0]["recommended_action"] == "request_user_input"
 
 
 def test_tool_call_gate_accepts_legacy_payload_only_after_structured_normalization():
@@ -193,8 +189,6 @@ def test_run_contract_gate_requires_scope_and_records_effective_contract_hash():
     assert passed.evidence["artifact_count"] == 1
 
 
-# LLM: Run contract gate must lint the effective contract before hashing it.
-# 函数用途: 验证坏合同不能只因为有 hash 就进入执行/收口链路。
 def test_run_contract_gate_rejects_contract_doctor_findings():
     decision = evaluate_run_contract_gate(
         {"version": 2, "artifact_path": "out.md", "rules": ["magic_verify"]},
@@ -228,8 +222,6 @@ def test_artifact_provenance_gate_warns_on_missing_or_cross_run_tool_evidence():
     assert passed.allowed is True
 
 
-# LLM: Artifact provenance should survive post-write validation failures when the file was actually written.
-# 函数用途: 验证写工具产生文件但结果因后置完整性门 ok=false 时，产物来源仍绑定当前 run。
 def test_artifact_provenance_accepts_materialized_write_record_with_failed_post_validation(tmp_path: Path):
     artifact_dir = tmp_path / "site"
     artifact_dir.mkdir()
@@ -408,8 +400,6 @@ def test_runtime_audit_gate_requires_tool_records_to_carry_gate_and_parameters()
     assert passed.allowed is True
 
 
-# LLM: Runtime state gate must reject events that belong to another run.
-# 函数用途: 验证旧 run 的异步工具/审批事件不会推进当前 run 状态。
 def test_state_event_ledger_gate_rejects_cross_run_events():
     decision = evaluate_state_event_ledger_gate(
         {

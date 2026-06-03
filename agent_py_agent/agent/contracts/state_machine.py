@@ -1,5 +1,3 @@
-# LLM: Shared state-machine facts separate lifecycle truth from prompt workflow preferences.
-# 模块用途: 定义主代理/子代理都能复用的状态事实和调度判断，不把流程写死成 guard。
 
 from __future__ import annotations
 
@@ -7,22 +5,7 @@ import logging
 from dataclasses import dataclass
 
 from .error_taxonomy import classify_error, error_contract
-from .recovery_actions import (
-    ACTION_CHANGE_STRATEGY_OR_STOP,
-    ACTION_CLOSEOUT,
-    ACTION_DISPATCH,
-    ACTION_MANUAL_REVIEW,
-    ACTION_REPAIR,
-    ACTION_REPAIR_OR_PROBE_CHANNEL,
-    ACTION_REPAIR_OR_REQUEST_CAPABILITY,
-    ACTION_REQUEST_APPROVAL_OR_STOP,
-    ACTION_TAKEOVER_OR_STOP,
-    ACTION_WAIT_FOR_ACCEPTANCE,
-    ACTION_WAIT_FOR_LOCAL_PROGRESS,
-    ACTION_WAIT_OR_OBSERVE,
-    RecoveryAction,
-    recovery_action_value,
-)
+from .recovery_actions import RecoveryAction, recovery_action_value
 
 SCHEMA_VERSION = "state_machine.v1"
 DISPATCHABLE_STATES = {"PLANNING", "PENDING"}
@@ -34,8 +17,6 @@ HEALTHY_CHANNEL_STATES = {"", "OK", "UNKNOWN"}
 LOGGER = logging.getLogger(__name__)
 
 
-# LLM: RunStateFacts is a small typed snapshot for dispatch/recovery decisions.
-# 类用途: 保存一个 run 的状态、验收状态、失败类型和尝试次数，让状态判断不依赖自然语言。
 @dataclass(frozen=True)
 class RunStateFacts:
     status: str
@@ -47,20 +28,19 @@ class RunStateFacts:
     has_progress: bool = True
 
 
-# LLM: RecoveryDecision tells orchestration whether to repair, takeover, wait, or stop.
-# 类用途: 表达状态机给调度层的下一步建议；它不直接执行工具或创建新 run。
 @dataclass(frozen=True)
 class RecoveryDecision:
     action: RecoveryAction | str
     allow_new_run: bool
     reason: str
+    fallback_action: RecoveryAction | str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "action", recovery_action_value(self.action))
+        if self.fallback_action:
+            object.__setattr__(self, "fallback_action", recovery_action_value(self.fallback_action))
 
 
-# LLM: normalize_status keeps legacy status strings compatible with the shared state machine.
-# 函数用途: 把空值、大小写和旧 WAIT_CHILD 写法规整为统一状态名。
 def normalize_status(value: object) -> str:
     text = str(value or "").strip().upper()
     if text == "WAIT_CHILD":
@@ -76,20 +56,14 @@ def normalize_status(value: object) -> str:
     return text or "PLANNING"
 
 
-# LLM: normalize_verification keeps closeout checks independent from spelling variants.
-# 函数用途: 规整验收状态；空值保持 UNVERIFIED，避免 DONE 被误当 VERIFIED。
 def normalize_verification(value: object) -> str:
     return str(value or "UNVERIFIED").strip().upper() or "UNVERIFIED"
 
 
-# LLM: normalize_channel keeps closeout and repair decisions independent from spelling variants.
-# 函数用途: 规整通道状态；缺失值按 UNKNOWN 处理，只有明确 BROKEN 才会阻止 closeout。
 def normalize_channel(value: object) -> str:
     return str(value or "UNKNOWN").strip().upper() or "UNKNOWN"
 
 
-# LLM: can_dispatch answers whether a run is eligible to start now.
-# 函数用途: 判断 run 是否能 dispatch；RUNNING/DONE/BLOCKED 不会被重复启动。
 def can_dispatch(facts: RunStateFacts, *, force: bool = False) -> bool:
     status = normalize_status(facts.status)
     if status in DISPATCHABLE_STATES:
@@ -99,8 +73,6 @@ def can_dispatch(facts: RunStateFacts, *, force: bool = False) -> bool:
     return status in {"FAILED", "ABANDONED"} and _attempts_available(facts)
 
 
-# LLM: can_closeout answers whether parent/root can report the run as actually complete.
-# 函数用途: 只有 DONE 且 VERIFIED 才允许 closeout，避免完成和验收混淆。
 def can_closeout(facts: RunStateFacts) -> bool:
     return (
         normalize_status(facts.status) == "DONE"
@@ -109,8 +81,6 @@ def can_closeout(facts: RunStateFacts) -> bool:
     )
 
 
-# LLM: can_repair answers whether a run should be repaired before creating unrelated new work.
-# 函数用途: 判断失败/阻塞 run 是否适合进入 repair，而不是被父级误当完成或无限扩容。
 def can_repair(facts: RunStateFacts) -> bool:
     status = normalize_status(facts.status)
     if normalize_channel(facts.channel_status) == "BROKEN":
@@ -122,8 +92,6 @@ def can_repair(facts: RunStateFacts) -> bool:
     return status == "FAILED" and _attempts_available(facts)
 
 
-# LLM: waiting_reason exposes why execution is paused without asking callers to parse status prose.
-# 函数用途: 把等待用户、等待工具和等待本地进展整理成稳定原因字段，供控制面和 UI 统一使用。
 def waiting_reason(facts: RunStateFacts) -> str:
     status = normalize_status(facts.status)
     verification = normalize_verification(facts.verification_status)
@@ -145,8 +113,6 @@ def waiting_reason(facts: RunStateFacts) -> str:
     return "none"
 
 
-# LLM: terminal_outcome separates active/blocked/completed/timed_out meanings from raw status spelling.
-# 函数用途: 给终态和等待态补一个统一结果标签，避免上层只看 status 文本就误判 run 是否真的完成。
 def terminal_outcome(facts: RunStateFacts) -> str:
     status = normalize_status(facts.status)
     if can_closeout(facts):
@@ -162,8 +128,6 @@ def terminal_outcome(facts: RunStateFacts) -> str:
     return "active"
 
 
-# LLM: lifecycle_phase projects shared status facts into a stable orchestration-facing phase.
-# 函数用途: 把状态、验收、通道和进展规整成 WAITING/VERIFYING/BLOCKED/DONE 这类统一生命周期阶段。
 def lifecycle_phase(facts: RunStateFacts) -> str:
     status = normalize_status(facts.status)
     channel = normalize_channel(facts.channel_status)
@@ -189,48 +153,44 @@ def lifecycle_phase(facts: RunStateFacts) -> str:
     return "DONE" if can_closeout(facts) else status
 
 
-# LLM: recovery_decision is deliberately advisory; workflow choice remains with the caller/LLM.
-# 函数用途: 根据状态事实返回修复、接管、等待或停止建议，不直接改变任务状态。
 def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
     status = normalize_status(facts.status)
     channel = normalize_channel(facts.channel_status)
     failure = str(facts.failure_type or "").upper()
     if can_closeout(facts):
-        return RecoveryDecision(ACTION_CLOSEOUT, False, "done_verified")
+        return RecoveryDecision(RecoveryAction.CLOSEOUT, False, "done_verified")
     if channel == "BROKEN":
-        return RecoveryDecision(ACTION_REPAIR_OR_PROBE_CHANNEL, False, "channel_broken")
+        return RecoveryDecision(RecoveryAction.REPAIR_CHANNEL, False, "channel_broken")
     if status in {"TIMEOUT", "CHANNEL_ERROR"} and can_repair(facts):
-        return RecoveryDecision(ACTION_REPAIR, False, "repairable_failure")
+        return RecoveryDecision(RecoveryAction.REPAIR, False, "repairable_failure")
     if waiting_reason(facts) == "acceptance":
-        return RecoveryDecision(ACTION_WAIT_FOR_ACCEPTANCE, False, "done_unverified")
+        return RecoveryDecision(RecoveryAction.WAIT_FOR_ACCEPTANCE, False, "done_unverified")
     if failure == "NO_PROGRESS":
-        return RecoveryDecision(ACTION_CHANGE_STRATEGY_OR_STOP, False, "no_progress")
+        return RecoveryDecision(RecoveryAction.CHANGE_STRATEGY, False, "no_progress", RecoveryAction.STOP)
     if failure == "APPROVAL_REQUIRED":
-        return RecoveryDecision(ACTION_REQUEST_APPROVAL_OR_STOP, False, "approval_required")
+        return RecoveryDecision(RecoveryAction.REQUEST_APPROVAL, False, "approval_required", RecoveryAction.STOP)
     if status in DISPATCHABLE_STATES:
-        return RecoveryDecision(ACTION_DISPATCH, False, "not_started")
+        return RecoveryDecision(RecoveryAction.DISPATCH, False, "not_started")
     if status == "RUNNING" and not facts.has_progress:
-        return RecoveryDecision(ACTION_WAIT_FOR_LOCAL_PROGRESS, False, "running_without_local_progress")
+        return RecoveryDecision(RecoveryAction.WAIT_FOR_LOCAL_PROGRESS, False, "running_without_local_progress")
     if status in ACTIVE_STATES:
-        return RecoveryDecision(ACTION_WAIT_OR_OBSERVE, False, "already_active")
+        return RecoveryDecision(RecoveryAction.WAIT, False, "already_active")
     if status == "BLOCKED" and failure in {"TOOL_UNAVAILABLE", "WRITE_FORBIDDEN", "PATH_OUTSIDE_WORKSPACE"}:
         if can_repair(facts):
-            return RecoveryDecision(ACTION_REPAIR_OR_REQUEST_CAPABILITY, False, f"blocked_{failure.lower()}")
-        return RecoveryDecision(ACTION_TAKEOVER_OR_STOP, True, "attempts_exhausted")
+            return RecoveryDecision(RecoveryAction.REQUEST_CAPABILITY, False, f"blocked_{failure.lower()}")
+        return RecoveryDecision(RecoveryAction.TAKEOVER, True, "attempts_exhausted", RecoveryAction.STOP)
     if status == "BLOCKED" and _structured_repair_action(failure):
         if can_repair(facts):
             return RecoveryDecision(_structured_repair_action(failure), False, f"blocked_{failure.lower()}")
-        return RecoveryDecision(ACTION_TAKEOVER_OR_STOP, True, "attempts_exhausted")
+        return RecoveryDecision(RecoveryAction.TAKEOVER, True, "attempts_exhausted", RecoveryAction.STOP)
     if can_repair(facts):
-        return RecoveryDecision(ACTION_REPAIR, False, "repairable_failure")
+        return RecoveryDecision(RecoveryAction.REPAIR, False, "repairable_failure")
     if status in {"BLOCKED", "FAILED"}:
-        return RecoveryDecision(ACTION_TAKEOVER_OR_STOP, True, "attempts_exhausted")
+        return RecoveryDecision(RecoveryAction.TAKEOVER, True, "attempts_exhausted", RecoveryAction.STOP)
     LOGGER.warning("unhandled recovery state: status=%s failure=%s", status, failure)
-    return RecoveryDecision(ACTION_MANUAL_REVIEW, False, f"unhandled_state_{status.lower()}")
+    return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, f"unhandled_state_{status.lower()}")
 
 
-# LLM: run_state_snapshot_from_task adapts legacy task objects into the shared state-machine contract.
-# 函数用途: 从任意 task-like 对象读取状态、验收、错误和尝试次数，输出机器可读调度/恢复事实。
 def run_state_snapshot_from_task(task: object) -> dict[str, object]:
     facts = RunStateFacts(
         status=normalize_status(getattr(task, "status", "")),
@@ -261,12 +221,11 @@ def run_state_snapshot_from_task(task: object) -> dict[str, object]:
             "action": decision.action,
             "allow_new_run": decision.allow_new_run,
             "reason": decision.reason,
+            "fallback_action": decision.fallback_action or "",
         },
     }
 
 
-# LLM: _failure_type_from_task prefers structured failure_type and falls back to taxonomy classification.
-# 函数用途: 从任务对象中提取稳定错误类型，避免状态合同只看到自然语言错误。
 def _failure_type_from_task(task: object) -> str:
     raw = str(getattr(task, "failure_type", "") or "").strip()
     if raw:
@@ -275,8 +234,6 @@ def _failure_type_from_task(task: object) -> str:
     return classify_error(message).code if message else "UNKNOWN_ERROR"
 
 
-# LLM: _int_attr keeps snapshots tolerant of legacy string counters.
-# 函数用途: 读取 task 上的整数字段；缺失或坏值按 0 处理。
 def _int_attr(task: object, name: str) -> int:
     try:
         return int(getattr(task, name, 0) or 0)
@@ -284,14 +241,10 @@ def _int_attr(task: object, name: str) -> int:
         return 0
 
 
-# LLM: _attempts_available applies the same retry ceiling across failed and blocked states.
-# 函数用途: 判断是否还有修复尝试次数，避免 BLOCKED 任务无限 repair。
 def _attempts_available(facts: RunStateFacts) -> bool:
     return facts.max_attempts <= 0 or facts.attempts < facts.max_attempts
 
 
-# LLM: _structured_repair_action maps known failure contracts into repair-loop action names.
-# 函数用途: 从 error_contract 读取推荐动作，让 evidence/staged-json 等错误不落到泛化 repair。
 def _structured_repair_action(failure: str) -> str:
     contract = error_contract(failure)
     if contract.code == "UNKNOWN_ERROR":

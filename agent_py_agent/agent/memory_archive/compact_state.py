@@ -1,5 +1,3 @@
-# LLM: Compaction state is the durable handoff boundary for multi-round compact/resume.
-# 模块用途: 生成压缩交接包的机器状态和模型可读摘要；事实以 refs 为准，摘要只辅助续接。
 
 from __future__ import annotations
 
@@ -15,7 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .compact_apply_work_state import restore_refs_summary
+from ..common.value_parsing import sequence_strings
+from .compact_apply.work_state import restore_refs_summary
 from .compact_runtime_handoff import render_runtime_handoff_lines, runtime_handoff_payload
 from .compact_state_run_intent import (
     desired_outputs_line,
@@ -97,8 +96,6 @@ def render_compaction_handoff_summary(state: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-# LLM: _handoff_base_lines keeps the public renderer short and section-oriented.
-# 函数用途: 渲染 compact handoff 的固定小节，运行交接和 lineage 由入口函数追加。
 def _handoff_base_lines(
     work: dict[str, Any],
     source_refs: dict[str, Any],
@@ -207,24 +204,20 @@ def _work_payload(work_state: dict[str, Any]) -> dict[str, Any]:
         "desired_outputs": desired_outputs_payload(work_state.get("desired_outputs")),
         "run_intent": run_intent_payload(work_state.get("run_intent")),
         "runtime_handoff": runtime_handoff_payload(work_state.get("runtime_handoff")),
-        "read_files": _string_list(work_state.get("read_files")),
-        "changed_files": _string_list(work_state.get("changed_files")),
-        "missing_fields": _string_list(work_state.get("missing_fields")),
+        "read_files": sequence_strings(work_state.get("read_files")),
+        "changed_files": sequence_strings(work_state.get("changed_files")),
+        "missing_fields": sequence_strings(work_state.get("missing_fields")),
     }
 
 
-# LLM: _continuation_payload stores action-first resume instructions in compaction_state.
-# 函数用途: 生成 compact 后续接字段，明确恢复文件只是备用证据。
 def _continuation_payload(work_state: dict[str, Any]) -> dict[str, Any]:
     return {
         "next_actions": _action_first_actions(work_state),
-        "missing_fields": _string_list(work_state.get("missing_fields")),
+        "missing_fields": sequence_strings(work_state.get("missing_fields")),
         "continue_prompt": "继续执行当前任务；优先按下一步推进。compact 文件只是备用证据，缺事实或要核验时再读取。",
     }
 
 
-# LLM: _artifact_refs preserves structured archive refs for later resume and verification.
-# 函数用途: 从 work_state 中提取字典型 artifact refs，丢弃坏条目。
 def _artifact_refs(work_state: dict[str, Any]) -> list[dict[str, Any]]:
     value = work_state.get("artifact_refs")
     return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
@@ -256,36 +249,26 @@ def _progress_line(value: Any) -> str:
     return (summary or next_action or "未记录") + hint
 
 
-# LLM: _items reads compact payload list fields without trusting arbitrary shapes.
-# 函数用途: 从带 items 字段的字典里取字符串列表，坏类型返回空列表。
 def _items(value: Any, *, key: str = "items") -> list[str]:
     payload = value if isinstance(value, dict) else {}
-    return _string_list(payload.get(key))
+    return sequence_strings(payload.get(key))
 
 
-# LLM: _inline_items renders short compact state lists into one human-readable line.
-# 函数用途: 把列表字段拼成中文分号分隔文本，空值显示未记录。
 def _inline_items(value: Any) -> str:
     items = value if isinstance(value, list) else _items(value)
-    normalized = _string_list(items)
+    normalized = sequence_strings(items)
     return "；".join(normalized) if normalized else "未记录"
 
 
-# LLM: _bullet_items renders fallback continuation bullets for handoff summaries.
-# 函数用途: 把下一步动作转成 bullet，缺失时给出通用继续推进提示。
 def _bullet_items(value: Any) -> list[str]:
-    items = _string_list(value)
+    items = sequence_strings(value)
     return [f"- {item}" for item in items] if items else ["- 按当前任务目标继续推进。"]
 
 
-# LLM: _action_first_actions keeps compaction_state next actions focused on task progress.
-# 函数用途: 过滤旧式恢复文件读取提示，保证机器状态里的下一步不是“先翻恢复包”。
 def _action_first_actions(work_state: dict[str, Any]) -> list[str]:
-    return [item for item in _string_list(work_state.get("next_actions")) if not _looks_like_reader_first_hint(item)]
+    return [item for item in sequence_strings(work_state.get("next_actions")) if not _looks_like_reader_first_hint(item)]
 
 
-# LLM: _looks_like_reader_first_hint recognizes recovery-reader prose from older compact flows.
-# 函数用途: 判断 next_step/next_actions 是否只是读恢复文件的提示，命中后从续接动作中移除。
 def _looks_like_reader_first_hint(value: str) -> bool:
     text = value.strip().lower()
     recovery_markers = ("memory-resume", "localstore", "compact_context", "work_state_snapshot", "restore_refs")
@@ -293,16 +276,6 @@ def _looks_like_reader_first_hint(value: str) -> bool:
     return any(marker in text for marker in recovery_markers) and any(marker in text for marker in reader_markers)
 
 
-# LLM: _string_list is the compact_state local list normalizer.
-# 函数用途: 只保留列表或元组中的非空字符串表示。
-def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, list | tuple):
-        return []
-    return [text for item in value if (text := str(item).strip())]
-
-
-# LLM: _positive_int keeps optional numeric compact counters safe.
-# 函数用途: 解析正整数，缺失、坏值或非正数都按 0 处理。
 def _positive_int(value: Any) -> int:
     try:
         parsed = int(value)

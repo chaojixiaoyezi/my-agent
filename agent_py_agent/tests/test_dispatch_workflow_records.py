@@ -4,12 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.agent_core import dispatch_workflow_records as workflow_records
-from agent_py_agent.agent.agent_core.dispatch_record_params import WorkflowRecordParams
+from agent_py_agent.agent.agent_core.orchestration.dispatch import (
+    workflow_records as workflow_records,
+)
 
 
-# LLM: per-task workflow_mode=off must beat global dispatch workflow auto.
-# 函数用途: 明确单文件 worker 创建时已被标成 workflow off，后续顶层 dispatch 不应重新给它套通用 workflow。
 def test_build_workflow_records_respects_task_workflow_off(monkeypatch: pytest.MonkeyPatch) -> None:
     task = SimpleNamespace(
         id="worker-1",
@@ -19,6 +18,7 @@ def test_build_workflow_records_respects_task_workflow_off(monkeypatch: pytest.M
         workflow_mode="off",
     )
     agent = SimpleNamespace()
+    ctx = SimpleNamespace(normalized_workflow_mode="auto", limit=20, apply=True)
 
     def fail_if_called(*_args, **_kwargs):
         raise AssertionError("workflow planner should not run for task.workflow_mode=off")
@@ -26,7 +26,9 @@ def test_build_workflow_records_respects_task_workflow_off(monkeypatch: pytest.M
     monkeypatch.setattr(workflow_records, "_try_workflow_plan", fail_if_called)
 
     result = workflow_records.build_workflow_records(
-        WorkflowRecordParams(agent=agent, tasks=[task], workflow_mode="auto", limit=20, apply=True)
+        agent,
+        ctx,
+        [task],
     )
 
     assert result == []

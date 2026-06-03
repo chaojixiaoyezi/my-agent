@@ -1,17 +1,13 @@
-# LLM: Long-task recovery scenario materializes checkpoint, compact, and resume refs.
-# 模块用途: 提供单主代理长任务恢复的小型可验收场景，避免直接靠真实长任务调试。
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..common.json_io import write_json_file
 from .long_task_recovery_contract import validate_long_task_recovery
 
 
-# LLM: LongTaskRecoveryScenarioReport records the deterministic recovery scenario.
-# 类用途: 保存恢复场景报告、recovery ref、验证错误码和事实快照。
 @dataclass(frozen=True)
 class LongTaskRecoveryScenarioReport:
     ok: bool
@@ -20,8 +16,6 @@ class LongTaskRecoveryScenarioReport:
     validation_error_codes: tuple[str, ...]
     facts: dict[str, object]
 
-    # LLM: to_dict serializes the recovery scenario report.
-    # 函数用途: 输出长任务恢复场景结果，保留 refs 和结构化校验结果。
     def to_dict(self) -> dict[str, object]:
         return {
             "ok": self.ok,
@@ -32,14 +26,12 @@ class LongTaskRecoveryScenarioReport:
         }
 
 
-# LLM: run_long_task_recovery_scenario writes every ref before running the recovery contract.
-# 函数用途: 生成 checkpoint、state、artifact、compact/apply/resume 和 idempotency 文件。
 def run_long_task_recovery_scenario(workspace: Path) -> LongTaskRecoveryScenarioReport:
     root = Path(workspace).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     refs = _materialize_refs(root)
     facts = _facts(refs)
-    recovery_ref = _write_json(root / "long_task_recovery_scenario" / "recovery.json", facts, root)
+    recovery_ref = _write_artifact_json_ref(root / "long_task_recovery_scenario" / "recovery.json", facts, root)
     validation = validate_long_task_recovery(facts)
     report = LongTaskRecoveryScenarioReport(
         ok=validation.ok,
@@ -48,12 +40,10 @@ def run_long_task_recovery_scenario(workspace: Path) -> LongTaskRecoveryScenario
         validation_error_codes=validation.error_codes,
         facts=facts,
     )
-    _write_json(root / report.report_ref, report.to_dict(), root)
+    _write_artifact_json_ref(root / report.report_ref, report.to_dict(), root)
     return report
 
 
-# LLM: _materialize_refs writes every recovery input file before validation.
-# 函数用途: 生成 RunScope、checkpoint、state、artifact、compact/resume 和幂等账本 refs。
 def _materialize_refs(root: Path) -> dict[str, str]:
     base = root / "long_task_recovery_scenario" / "run-long-1"
     payloads = {
@@ -67,13 +57,11 @@ def _materialize_refs(root: Path) -> dict[str, str]:
         "idempotency_state_ref": ("idempotency.json", {"executed_action_ids": []}),
     }
     return {
-        key: _write_json(base / filename, payload, root)
+        key: _write_artifact_json_ref(base / filename, payload, root)
         for key, (filename, payload) in payloads.items()
     }
 
 
-# LLM: _facts builds the long-task recovery contract payload.
-# 函数用途: 从已写入的 refs 构造 validate_long_task_recovery 所需机器事实。
 def _facts(refs: dict[str, str]) -> dict[str, object]:
     return {
         "task_id": "task-long-1",
@@ -109,11 +97,8 @@ def _facts(refs: dict[str, str]) -> dict[str, object]:
     }
 
 
-# LLM: _write_json persists one structured recovery artifact.
-# 函数用途: 写入 JSON 并返回 workspace-relative ref。
-def _write_json(path: Path, payload: object, root: Path) -> str:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+def _write_artifact_json_ref(path: Path, payload: object, root: Path) -> str:
+    write_json_file(path, payload)
     return str(path.resolve().relative_to(root.resolve()))
 
 

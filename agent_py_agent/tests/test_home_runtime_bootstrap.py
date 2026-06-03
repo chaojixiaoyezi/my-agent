@@ -8,8 +8,6 @@ from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 
 
-# LLM: home runtime tests prove the new ~/.my-agent layout is used by real SimpleAgent runs, not only docs.
-# 函数用途: 验证 SimpleAgent 启动时会初始化 my-agent 家目录，并暴露 home_paths 给运行时后续模块使用。
 def test_simple_agent_initializes_my_agent_home(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
@@ -25,8 +23,6 @@ def test_simple_agent_initializes_my_agent_home(tmp_path: Path):
     assert agent.home_paths.memory_md.exists()
 
 
-# LLM: legacy config consumers should see resolved owner-home runtime paths after startup.
-# 函数用途: 防止 gateway/session/notification 等旧入口继续从 AgentConfig 读取 repo data/* 默认路径。
 def test_simple_agent_rewrites_runtime_config_paths_to_owner_home(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
@@ -45,8 +41,6 @@ def test_simple_agent_rewrites_runtime_config_paths_to_owner_home(tmp_path: Path
     assert not (repo / "data").exists()
 
 
-# LLM: saved runs should get a clean owner task workspace while old repo-relative memory paths keep working.
-# 函数用途: 验证普通 run 保存后，会在 owner_home/tasks/date/task 下创建 output 交付区和 work 过程区。
 def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
@@ -71,8 +65,6 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     assert not (home / "tasks").exists()
 
 
-# LLM: machine run ids must stay metadata, not become user-visible task folder names.
-# 函数用途: 验证 gw/run/req 这类机器编号不会污染 owner tasks/date 下的任务目录列表。
 def test_saved_run_uses_prompt_slug_when_only_machine_ids_are_available(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
@@ -128,8 +120,6 @@ def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):
     assert wechat.home_paths.owner_id == "providers/wechat/users/u001"
 
 
-# LLM: main context bundle tests pin the root-agent prompt contract before implementation.
-# 函数用途: 验证普通保存 run 会生成主代理 context bundle，并把 refs-only 交接信息注入 prompt。
 def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
@@ -168,8 +158,6 @@ def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
     assert Path(result.main_context_bundle_markdown_path).exists()
 
 
-# LLM: save=False remains a persistence boundary even when the prompt gets an ephemeral context bundle.
-# 函数用途: 验证临时 run 可以看到主代理上下文说明，但不会写 context bundle 文件。
 def test_no_save_run_keeps_main_context_bundle_ephemeral(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
@@ -184,8 +172,6 @@ def test_no_save_run_keeps_main_context_bundle_ephemeral(tmp_path: Path):
     assert not (home / "memory_archive" / "snapshots" / "context_bundles").exists()
 
 
-# LLM: task-local runs must not inherit main-agent owner context through the new bundle path.
-# 函数用途: 验证子代理/控制面隔离上下文不会注入主代理 context bundle。
 def test_task_local_run_does_not_inject_main_context_bundle(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
@@ -205,8 +191,6 @@ def test_task_local_run_does_not_inject_main_context_bundle(tmp_path: Path):
     assert result.main_context_bundle_path == ""
 
 
-# LLM: no-save must remain a hard persistence boundary even after home task workspaces are added.
-# 函数用途: 验证 save=False 不会创建任务工作区，也不会写 legacy memory 或 daily mirror。
 def test_no_save_run_does_not_create_task_workspace_or_daily_memory(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
@@ -222,8 +206,6 @@ def test_no_save_run_does_not_create_task_workspace_or_daily_memory(tmp_path: Pa
     assert not daily_path.exists()
 
 
-# LLM: owner memory is the primary write target; legacy memory_path remains read-only fallback.
-# 函数用途: 验证 remember 写入 owner 私有 memory，并且旧 memory_path 只作为兼容读取源。
 def test_memory_add_writes_owner_memory_and_keeps_legacy_read_fallback(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
@@ -261,8 +243,6 @@ def test_memory_add_writes_owner_memory_and_keeps_legacy_read_fallback(tmp_path:
     assert agent.memory.search("旧记忆", top_k=1)[0].content == "旧记忆仍可搜索"
 
 
-# LLM: home prompt context should read key memory every time and only matching lessons by simple filename signal.
-# 函数用途: 验证 prompt 会带上 memory.md 关键记忆，并按任务关键词读取有限数量的 lesson 文件。
 def test_prompt_builder_reads_key_memory_and_matching_lessons(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
@@ -279,8 +259,6 @@ def test_prompt_builder_reads_key_memory_and_matching_lessons(tmp_path: Path):
     assert "视频教训：不用读。" not in prompt
 
 
-# LLM: root prompts should load the owner entry files every round, not only memory.md.
-# 函数用途: 验证 SOUL/USER/AGENTS/memory 四个家目录关键文件会进入每轮 prompt。
 def test_prompt_builder_reads_home_entry_files_every_round(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"

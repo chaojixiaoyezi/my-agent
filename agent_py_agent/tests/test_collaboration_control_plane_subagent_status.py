@@ -46,7 +46,7 @@ def test_subagent_execution_context_includes_role_targeted_collaboration_request
 
 
 def test_dispatch_candidates_include_done_agent_with_new_collaboration_request(tmp_path) -> None:
-    from agent_py_agent.agent.agent_core.dispatch_runner_batches import (
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_batches import (
         collaboration_request_runner_candidates,
     )
 
@@ -102,23 +102,19 @@ def test_collaboration_overview_counts_ready_and_blocked_cases(tmp_path) -> None
     assert overview["readiness"]["blockers"][0]["case_id"] == blocked_case.case_id
 
 
-def test_inspect_collaboration_includes_structured_rework_targets_for_blocked_and_missing_evidence(tmp_path) -> None:
+def test_inspect_collaboration_includes_collection_result_for_unanswered_requests(tmp_path) -> None:
     store, case, blocked_request, missing_request = _rework_target_case(tmp_path)
 
     status = store.case_status(case.case_id)
 
-    assert status["rework"]["needed"] is True
-    assert status["rework"]["target_count"] == 2
-    by_request = {item["request_id"]: item for item in status["rework"]["targets"]}
-    assert by_request[blocked_request.request_id]["reason"] == "request_blocked"
-    assert by_request[missing_request.request_id]["reason"] == "missing_evidence"
-    assert by_request[blocked_request.request_id]["suggested_actions"] == [
-        "inspect_request_context",
-        "update_collaboration",
-        "try_alternate_source_or_params",
-        "ask_requester_for_clarification_if_needed",
-        "submit_collaboration_result_or_mark_true_blocker",
-    ]
+    assert status["collection_result"]["status"] == "ready_to_report"
+    assert status["collection_result"]["missing_responder_agent_ids_by_request"][
+        missing_request.request_id
+    ] == ["agent-c"]
+    assert status["collection_result"]["unavailable_target_count"] == 0
+    by_request = {item["request_id"]: item for item in status["requests"]}
+    assert by_request[blocked_request.request_id]["response_status"] == "unavailable"
+    assert by_request[missing_request.request_id]["response_status"] == "waiting"
 
 
 def _overview_blocked_case(tmp_path):
@@ -144,7 +140,7 @@ def _rework_target_case(tmp_path):
     return store, case, blocked, missing
 
 
-def test_inspect_collaboration_rework_exposes_candidate_targets_from_structured_metadata(tmp_path) -> None:
+def test_inspect_collaboration_preserves_reroute_metadata_without_rework_gate(tmp_path) -> None:
     from agent_py_agent.agent.collaboration import CollaborationStore
 
     store = CollaborationStore(tmp_path / "collaboration")
@@ -152,12 +148,10 @@ def test_inspect_collaboration_rework_exposes_candidate_targets_from_structured_
     request = store.request_collaboration({'case_id': case.case_id, 'requester_agent_id': "source-a", 'target_agent_ids': ("source-a",), 'required_capabilities': ("query",), 'question': "请查询这个线索。", 'now': 2.0})
     store.update_request_status({'case_id': case.case_id, 'request_id': request.request_id, 'status': "blocked", 'actor_agent_id': "source-a", 'summary': "source-a 查询失败。", 'metadata': {"alternate_sources_available": ["source-b", "source-c"]}, 'now': 3.0})
 
-    target = store.case_status(case.case_id)["rework"]["targets"][0]
+    target = store.case_status(case.case_id)["requests"][0]
 
-    assert target["candidate_target_agent_ids"] == ["source-b", "source-c"]
-    assert target["primary_tool"] == "update_collaboration"
-    assert target["suggested_actions"][0] == "inspect_request_context"
-    assert target["suggested_actions"][1] == "update_collaboration"
+    assert target["metadata"]["alternate_sources_available"] == ["source-b", "source-c"]
+    assert target["response_status"] == "unavailable"
 
 
 def test_many_cases_and_requests_keep_overview_structural_and_bounded(tmp_path) -> None:

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from agent_py_agent.agent.config import AgentConfig
-from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
 
 
@@ -29,10 +29,7 @@ def test_collaboration_tools_are_registered_and_write_case_flow(tmp_path) -> Non
     )
     status_result = agent.tools.tools["inspect_collaboration"].execute({"case_id": case_id})
 
-    assert open_result.ok is True
-    assert request_result.ok is True
-    assert evidence_result.ok is True
-    assert request_update_result.ok is True
+    assert all(item.ok is True for item in (open_result, request_result, evidence_result, request_update_result))
     assert json.loads(status_result.output)["evidence_count"] == 1
     assert json.loads(status_result.output)["completed_request_count"] == 1
 
@@ -149,16 +146,264 @@ def test_raise_collaboration_materializes_internal_thread_for_known_local_task(t
     assert linked.channel_bindings[0].channel == "internal"
 
 
+def test_raise_collaboration_warns_when_task_thread_binding_save_fails(tmp_path, monkeypatch, caplog) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    child = agent.subagents.create_run(
+        goal="本地协作子代理需要打开一个 case。",
+        allowed_tools=["raise_collaboration"],
+        agent_name="local-source-a",
+    )
+
+    def broken_save(_task):
+        raise OSError("task state locked")
+
+    monkeypatch.setattr(agent.subagents, "save", broken_save)
+
+    with caplog.at_level(logging.WARNING):
+        open_result = agent.tools.tools["raise_collaboration"].execute(
+            {
+                "task_id": child.id,
+                "title": "本地任务协作 case",
+                "summary": "保存 thread 反写失败时仍能开 case。",
+                "created_by": child.id,
+            }
+        )
+
+    assert open_result.ok is True
+    assert "collaboration thread binding could not be saved on task" in caplog.text
+    assert "raise_collaboration.remember_thread_on_task" in caplog.text
+    assert "task state locked" in caplog.text
+
+
+def test_raise_collaboration_thread_binding_error_is_structured(tmp_path, monkeypatch) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+
+    def broken_thread_for_task(_task_id):
+        raise ValueError("bad task binding")
+
+    monkeypatch.setattr(agent.conversation_store, "thread_for_task", broken_thread_for_task)
+
+    result = agent.tools.tools["raise_collaboration"].execute(
+        {
+            "task_id": "task-1",
+            "title": "账本读取失败 case",
+            "summary": "读取任务绑定失败时要把错误交给模型。",
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert payload["error"] == "task_thread_lookup_failed"
+    assert payload["load_error"]["context"] == "raise_collaboration.thread_for_task"
+    assert payload["load_error"]["category"] == "data_parse"
+
+
+def test_raise_collaboration_subagent_load_error_is_structured(tmp_path, monkeypatch) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+
+    def broken_load(_task_id):
+        raise OSError("subagent ledger unavailable")
+
+    monkeypatch.setattr(agent.subagents, "load", broken_load)
+
+    result = agent.tools.tools["raise_collaboration"].execute(
+        {
+            "task_id": "task-1",
+            "title": "子代理账本读取失败 case",
+            "summary": "读取子代理账本失败时要把错误交给模型。",
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert payload["error"] == "subagent_task_load_failed"
+    assert payload["load_error"]["context"] == "raise_collaboration.subagents.load"
+    assert payload["load_error"]["category"] == "io"
+
+
+def test_raise_collaboration_internal_thread_materialize_error_is_structured(tmp_path, monkeypatch) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    child = agent.subagents.create_run(
+        goal="本地协作子代理需要打开一个 case。",
+        allowed_tools=["raise_collaboration"],
+        agent_name="local-source-a",
+    )
+
+    def broken_get_or_create_thread(_attrs):
+        raise OSError("thread store unavailable")
+
+    monkeypatch.setattr(agent.conversation_store, "get_or_create_thread", broken_get_or_create_thread)
+
+    result = agent.tools.tools["raise_collaboration"].execute(
+        {
+            "task_id": child.id,
+            "title": "内部线程物化失败 case",
+            "summary": "创建内部线程失败时要把错误交给模型。",
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert payload["error"] == "internal_thread_materialize_failed"
+    assert payload["load_error"]["context"] == "raise_collaboration.materialize_internal_thread"
+    assert payload["load_error"]["category"] == "io"
+
+
+def test_raise_collaboration_target_runtime_error_is_visible(tmp_path, monkeypatch) -> None:
+    agent = _agent_with_task(tmp_path)
+
+    def broken_list_runs():
+        raise ValueError("subagent tree index broken")
+
+    monkeypatch.setattr(agent.subagents, "list_runs", broken_list_runs)
+
+    result = agent.tools.tools["raise_collaboration"].execute(
+        {
+            "task_id": "task-1",
+            "title": "目标状态读取失败 case",
+            "summary": "目标状态读取失败时请求仍应落账，但要报告错误。",
+            "target_agent_ids": ["agent-b"],
+            "question": "请补充证据。",
+        }
+    )
+    payload = json.loads(result.output)
+    status = json.loads(agent.tools.tools["inspect_collaboration"].execute({"case_id": payload["case_id"]}).output)
+
+    assert result.ok is True
+    assert payload["target_runtime_load_error"]["context"] == "raise_collaboration.target_runtime"
+    assert payload["target_runtime_load_error"]["category"] == "data_parse"
+    assert status["requests"][0]["metadata"]["target_runtime_load_error"]["category"] == "data_parse"
+
+
+def test_raise_collaboration_target_alias_error_is_visible(tmp_path, monkeypatch) -> None:
+    agent = _agent_with_task(tmp_path)
+    original_aliases = agent.collaboration_store.agent_identity_aliases
+
+    def broken_aliases(_text):
+        raise ValueError("identity index broken")
+
+    monkeypatch.setattr(agent.collaboration_store, "agent_identity_aliases", broken_aliases)
+
+    result = agent.tools.tools["raise_collaboration"].execute(
+        {
+            "task_id": "task-1",
+            "title": "目标别名解析失败 case",
+            "summary": "目标别名索引坏了不能伪装成正常找不到目标。",
+            "target_agent_ids": ["agent-b"],
+            "question": "请补充证据。",
+        }
+    )
+    payload = json.loads(result.output)
+    monkeypatch.setattr(agent.collaboration_store, "agent_identity_aliases", original_aliases)
+    status = json.loads(agent.tools.tools["inspect_collaboration"].execute({"case_id": payload["case_id"]}).output)
+
+    assert result.ok is True
+    assert payload["target_resolution_errors"][0]["context"] == "raise_collaboration.agent_identity_aliases"
+    assert payload["target_resolution_errors"][0]["category"] == "data_parse"
+    assert status["requests"][0]["metadata"]["target_resolution_errors"][0]["message"] == "identity index broken"
+
+
+def test_inspect_collaboration_identity_load_error_is_visible(tmp_path, monkeypatch) -> None:
+    agent = _agent_with_task(tmp_path)
+    child = agent.subagents.create_run(
+        goal="响应协作请求。",
+        allowed_tools=["inspect_collaboration"],
+        agent_name="source-b",
+        role="responder",
+    )
+
+    def broken_load(_run_id):
+        raise OSError("subagent identity ledger unavailable")
+
+    monkeypatch.setattr(agent.subagents, "load", broken_load)
+
+    result = agent.tools.tools["inspect_collaboration"].execute({"agent_id": child.id})
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["agent_id"] == child.id
+    assert payload["identity_load_error"]["context"] == "collaboration.identity.subagents.load"
+    assert payload["identity_load_error"]["category"] == "io"
+
+
+def test_inspect_collaboration_case_status_error_is_structured(tmp_path, monkeypatch) -> None:
+    agent = _agent_with_task(tmp_path)
+    case_id = json.loads(agent.tools.tools["raise_collaboration"].execute(_raise_collaboration_params()).output)[
+        "case_id"
+    ]
+
+    def broken_case_status(_case_id):
+        raise ValueError("case ledger broken")
+
+    monkeypatch.setattr(agent.collaboration_store, "case_status", broken_case_status)
+
+    result = agent.tools.tools["inspect_collaboration"].execute({"case_id": case_id})
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert payload["error"] == "case_status_read_failed"
+    assert payload["load_error"]["context"] == "inspect_collaboration.case_status"
+    assert payload["load_error"]["category"] == "data_parse"
+
+
+def test_update_collaboration_request_keeps_update_when_overview_fails(tmp_path, monkeypatch) -> None:
+    agent, case_id, request_id = _reroute_tool_fixture(tmp_path)
+
+    def broken_case_status(_case_id):
+        raise ValueError("overview ledger broken")
+
+    monkeypatch.setattr(agent.collaboration_store, "case_status", broken_case_status)
+
+    result = agent.tools.tools["update_collaboration"].execute(
+        {
+            "case_id": case_id,
+            "request_id": request_id,
+            "status": "working",
+            "actor_agent_id": "source-a",
+            "summary": "已经接手处理。",
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["request"]["status"] == "working"
+    assert payload["overview"]["overview_load_error"]["context"] == "update_collaboration.case_status"
+
+
+def test_update_collaboration_case_reports_decision_load_error(tmp_path, monkeypatch) -> None:
+    agent = _agent_with_task(tmp_path)
+    case_id = json.loads(agent.tools.tools["raise_collaboration"].execute(_raise_collaboration_params()).output)[
+        "case_id"
+    ]
+
+    def broken_case_decisions(_case_id):
+        raise OSError("decision ledger unavailable")
+
+    monkeypatch.setattr(agent.collaboration_store, "case_decisions", broken_case_decisions)
+
+    result = agent.tools.tools["update_collaboration"].execute(
+        {
+            "case_id": case_id,
+            "status": "closed",
+            "actor_agent_id": "main",
+            "summary": "证据已收口。",
+            "decision_type": "resolved_by_main_agent",
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["case"]["status"] == "closed"
+    assert payload["decision_load_error"]["context"] == "update_collaboration.case_decisions"
+
+
 def test_targeted_collaboration_request_carries_clue_packet_to_responder_context(tmp_path) -> None:
     agent, responder, request = _targeted_clue_request(tmp_path)
 
     context = agent.subagents.build_execution_context(responder.id)
     targeted = context.context_bundle["collaboration"]["targeted_requests"][0]
 
-    assert targeted["request_id"] == request.request_id
-    assert targeted["observed_facts"][0]["kind"] == "caller-defined-kind"
-    assert targeted["query_hints"][0]["hint_id"] == "hint-1"
-    assert targeted["response_contract"]["allow_not_matched"] is True
+    assert (targeted["request_id"], targeted["observed_facts"][0]["kind"], targeted["query_hints"][0]["hint_id"], targeted["response_contract"]["allow_not_matched"]) == (request.request_id, "caller-defined-kind", "hint-1", True)
 
 
 def _targeted_clue_request(tmp_path):
@@ -269,9 +514,7 @@ def _assert_empty_close_rejected(store, case_id: str) -> None:
 
 
 def test_update_collaboration_tool_records_decision_and_inspect_collaboration(tmp_path) -> None:
-    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
-    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "协作任务", 'now': 2.0})
+    agent = _agent_with_task(tmp_path)
     open_result = agent.tools.tools["raise_collaboration"].execute(
         {
             "task_id": "task-1",

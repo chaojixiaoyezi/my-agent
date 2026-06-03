@@ -11,12 +11,10 @@ from unittest.mock import MagicMock, NonCallableMock, PropertyMock, patch
 
 import pytest
 
-from agent_py_agent.agent.agent_core.subagent_mixin import (
-    SimpleAgentSubagentMixin,
-    _config_workflow_dispatch_mode,
-)
-from agent_py_agent.agent.agent_core.subagent_params import SpawnSubagentsParams
-from agent_py_agent.agent.agent_core.subagent_spawn_flow import configured_subagent_allowed_tools
+from agent_py_agent.agent.agent_core.subagent import config_workflow_dispatch_mode
+from agent_py_agent.agent.agent_core.subagent.params import SpawnSubagentsParams
+from agent_py_agent.agent.agent_core.subagent.spawn_flow import configured_subagent_allowed_tools
+from agent_py_agent.agent.agent_core.subagent_mixin import SimpleAgentSubagentMixin
 
 
 class TestSubagentMixinSpawn:
@@ -290,14 +288,20 @@ class TestSubagentMixinParentPlanner:
                 "gate": {"needs_planner": 0},
                 "tasks": [],
             }
+            from agent_py_agent.agent.agent_core.orchestration.dispatch.params import (
+                DispatchExecutionPlan,
+            )
             from agent_py_agent.agent.agent_core.subagent_mixin import RunParentPlannerParams
 
             result = mock_mixin.run_parent_planner(
                 RunParentPlannerParams(
                     router=MagicMock(),
                     capability_config=None,
-                    apply=False,
-                    execute_runners=False,
+                    execution_plan=DispatchExecutionPlan(
+                        preview_only=True,
+                        mutate_state=False,
+                        start_runners=False,
+                    ),
                     max_runners=1,
                     limit=20,
                     reviewer="parent-dispatch",
@@ -397,37 +401,37 @@ class TestSubagentMixinRecoverySnapshot:
 class TestSubagentMixinWorkflowDispatch:
     """测试 workflow dispatch 配置。"""
 
-    def test_config_workflow_dispatch_mode_auto(self) -> None:
+    def testconfig_workflow_dispatch_mode_auto(self) -> None:
         """测试 auto 模式转换。"""
-        result = _config_workflow_dispatch_mode("auto")
+        result = config_workflow_dispatch_mode("auto")
         assert result == "auto"
 
-    def test_config_workflow_dispatch_mode_manual(self) -> None:
+    def testconfig_workflow_dispatch_mode_manual(self) -> None:
         """测试 manual 模式转换为 plan。"""
-        result = _config_workflow_dispatch_mode("manual")
+        result = config_workflow_dispatch_mode("manual")
         assert result == "plan"
 
-    def test_config_workflow_dispatch_mode_off(self) -> None:
+    def testconfig_workflow_dispatch_mode_off(self) -> None:
         """测试 off 模式。"""
-        result = _config_workflow_dispatch_mode("off")
+        result = config_workflow_dispatch_mode("off")
         assert result == "off"
 
-    def test_config_workflow_dispatch_mode_invalid(self) -> None:
+    def testconfig_workflow_dispatch_mode_invalid(self) -> None:
         """测试无效值默认为 off。"""
-        result = _config_workflow_dispatch_mode("invalid")
+        result = config_workflow_dispatch_mode("invalid")
         assert result == "off"
 
-    def test_config_workflow_dispatch_mode_whitespace(self) -> None:
+    def testconfig_workflow_dispatch_mode_whitespace(self) -> None:
         """测试带空白的值。"""
-        result = _config_workflow_dispatch_mode("  auto  ")
+        result = config_workflow_dispatch_mode("  auto  ")
         assert result == "auto"
 
-    def test_config_workflow_dispatch_mode_case_insensitive(self) -> None:
+    def testconfig_workflow_dispatch_mode_case_insensitive(self) -> None:
         """测试大小写不敏感。"""
-        result = _config_workflow_dispatch_mode("AUTO")
+        result = config_workflow_dispatch_mode("AUTO")
         assert result == "auto"
 
-    def test_config_workflow_dispatch_mode_none(self) -> None:
+    def testconfig_workflow_dispatch_mode_none(self) -> None:
         """测试 None 值。"""
-        result = _config_workflow_dispatch_mode(None)
+        result = config_workflow_dispatch_mode(None)
         assert result == "off"

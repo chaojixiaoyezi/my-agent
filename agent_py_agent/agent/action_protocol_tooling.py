@@ -1,5 +1,3 @@
-# LLM: Tool-call typed protocol envelopes and legacy payload bridge.
-# 模块用途: 定义工具调用、工具结果和旧工具 payload 到 envelope 的转换。
 
 from __future__ import annotations
 
@@ -17,8 +15,6 @@ from .action_protocol_core import (
 )
 
 
-# LLM: ToolCallEnvelopePayloadRequest keeps legacy payload conversion bundle-shaped.
-# 类用途: 集中保存旧工具 payload 转 typed envelope 所需字段，避免函数参数继续膨胀。
 @dataclass(frozen=True)
 class ToolCallEnvelopePayloadRequest:
     payload: dict[str, Any]
@@ -28,8 +24,6 @@ class ToolCallEnvelopePayloadRequest:
     reserved: dict[str, Any] | None = None
 
 
-# LLM: ToolCallEnvelope is the typed replacement for executable [TOOL_CALL] text blocks.
-# 类用途: 保存一次工具调用的 call_id、工具名、参数、来源和运行范围。
 @dataclass(frozen=True)
 class ToolCallEnvelope:
     call_id: str
@@ -43,21 +37,15 @@ class ToolCallEnvelope:
     created_at: str = field(default_factory=_now_iso)
     reserved: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: __post_init__ backfills operation_id for direct constructors and legacy payloads.
-    # 函数用途: 让每次工具调用都有稳定幂等键，旧调用方不传 operation_id 也能兼容。
     def __post_init__(self) -> None:
         if not self.operation_id:
             object.__setattr__(self, "operation_id", _default_operation_id(self.kind, self.call_id))
 
-    # LLM: to_dict preserves exact envelope shape consumed by future executors.
-    # 函数用途: 把工具调用 envelope 转成 JSON 字典。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["scope"] = self.scope.to_dict()
         return payload
 
-    # LLM: from_dict restores a typed tool call from persisted JSON.
-    # 函数用途: 从 JSON 字典恢复 ToolCallEnvelope。
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> ToolCallEnvelope:
         return cls(
@@ -74,8 +62,6 @@ class ToolCallEnvelope:
         )
 
 
-# LLM: ToolCallResultEnvelope links tool output back to the call_id that produced it.
-# 类用途: 保存工具执行结果、输出引用、错误和范围，避免后续只靠自然语言记录工具结果。
 @dataclass(frozen=True)
 class ToolCallResultEnvelope:
     call_id: str
@@ -91,21 +77,15 @@ class ToolCallResultEnvelope:
     created_at: str = field(default_factory=_now_iso)
     reserved: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: __post_init__ keeps tool results linked to a replay-safe operation key.
-    # 函数用途: 自动生成工具结果 operation_id，兼容旧结果 envelope。
     def __post_init__(self) -> None:
         if not self.operation_id:
             object.__setattr__(self, "operation_id", _default_operation_id(self.kind, self.call_id))
 
-    # LLM: to_dict serializes the result envelope with scope metadata.
-    # 函数用途: 把工具结果 envelope 转成 JSON 字典。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["scope"] = self.scope.to_dict()
         return payload
 
-    # LLM: from_dict restores tool result envelopes from ledgers or artifacts.
-    # 函数用途: 从 JSON 字典恢复 ToolCallResultEnvelope。
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> ToolCallResultEnvelope:
         return cls(
@@ -124,8 +104,6 @@ class ToolCallResultEnvelope:
         )
 
 
-# LLM: tool_call_envelope_from_payload is the legacy bridge from flat tool dicts.
-# 函数用途: 把旧文本协议解析出的 {"tool": "...", ...} 转成 ToolCallEnvelope。
 def tool_call_envelope_from_payload(request: ToolCallEnvelopePayloadRequest) -> ToolCallEnvelope:
     payload = request.payload
     tool = str(payload.get("tool") or "").strip()

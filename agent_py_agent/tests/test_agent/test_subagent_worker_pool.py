@@ -5,7 +5,7 @@ import threading
 import time
 from pathlib import Path
 
-from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
+from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
 from agent_py_agent.agent.backend import BaseBackend, ModelResponse
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability_config import CapabilityConfig
@@ -92,7 +92,7 @@ def test_dispatch_parallel_runner_pool_respects_start_rate(monkeypatch):
             router,
             CapabilityConfig(),
             apply=True,
-            execute_runners=True,
+            start_runners=True,
             max_runners=3,
             probe=False,
             reviewer="worker-pool-test",
@@ -137,7 +137,7 @@ def test_dispatch_parallel_runner_pool_does_not_broadcast_specific_instruction(m
             )
         )
 
-    monkeypatch.setattr("agent_py_agent.agent.agent_core.runner_dispatch._run_subagent_worker", fake_worker)
+    monkeypatch.setattr("agent_py_agent.agent.agent_core.runner.dispatch._run_subagent_worker", fake_worker)
 
     router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
     report = agent.dispatch_subagents(
@@ -145,7 +145,7 @@ def test_dispatch_parallel_runner_pool_does_not_broadcast_specific_instruction(m
         CapabilityConfig(),
         params=None,
         apply=True,
-        execute_runners=True,
+        start_runners=True,
         max_runners=2,
         probe=False,
         reviewer="worker-pool-test",
@@ -183,7 +183,7 @@ def test_dispatch_single_runner_keeps_specific_instruction(monkeypatch, tmp_path
             )
         )
 
-    monkeypatch.setattr("agent_py_agent.agent.agent_core.runner_dispatch._run_subagent_worker", fake_worker)
+    monkeypatch.setattr("agent_py_agent.agent.agent_core.runner.dispatch._run_subagent_worker", fake_worker)
 
     router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
     agent.dispatch_subagents(
@@ -191,7 +191,7 @@ def test_dispatch_single_runner_keeps_specific_instruction(monkeypatch, tmp_path
         CapabilityConfig(),
         params=DispatchParams(
             apply=True,
-            execute_runners=True,
+            start_runners=True,
             include_run_ids=[task.id],
             max_runners=1,
             probe=False,
@@ -203,8 +203,6 @@ def test_dispatch_single_runner_keeps_specific_instruction(monkeypatch, tmp_path
     assert captured == ["你是 auth-coordinator，只能写 auth 页面。"]
 
 
-# LLM: _parent_child_pair creates a scoped coordinator/child pair for dispatch selection tests.
-# 函数用途: 准备一个父 coordinator 和直接 child，避免测试函数本身堆太多搭建代码。
 def _parent_child_pair(agent):
     parent = agent.subagents.create_run(
         goal="cart coordinator", thought="create cart worker", plan=["dispatch child"], role="coordinator",
@@ -216,8 +214,6 @@ def _parent_child_pair(agent):
     return parent, child
 
 
-# LLM: _capture_runner_ids patches runner execution while preserving dispatch report construction.
-# 函数用途: 记录本轮是否真的启动 runner；错 id 测试要求该列表保持为空。
 def _capture_runner_ids(monkeypatch, agent, captured: list[str]) -> None:
     def fake_worker(params):
         captured.append(params.run_id)
@@ -232,7 +228,7 @@ def _capture_runner_ids(monkeypatch, agent, captured: list[str]) -> None:
             )
         )
 
-    monkeypatch.setattr("agent_py_agent.agent.agent_core.runner_dispatch._run_subagent_worker", fake_worker)
+    monkeypatch.setattr("agent_py_agent.agent.agent_core.runner.dispatch._run_subagent_worker", fake_worker)
 
 
 def test_dispatch_blocks_invalid_scoped_run_id_with_valid_child_hint(monkeypatch, tmp_path):
@@ -255,7 +251,7 @@ def test_dispatch_blocks_invalid_scoped_run_id_with_valid_child_hint(monkeypatch
         CapabilityConfig(),
         params=DispatchParams(
             apply=True,
-            execute_runners=True,
+            start_runners=True,
             parent_run_id=parent.id,
             include_run_ids=[wrong_id],
             max_runners=1,
@@ -298,7 +294,7 @@ def test_dispatch_parallel_runner_pool_timeout_does_not_block_other_workers(monk
         router,
         CapabilityConfig(),
         apply=True,
-        execute_runners=True,
+        start_runners=True,
         max_runners=2,
         probe=False,
         reviewer="worker-pool-timeout-test",

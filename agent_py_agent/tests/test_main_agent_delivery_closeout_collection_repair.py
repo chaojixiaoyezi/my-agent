@@ -4,14 +4,12 @@ import json
 import tempfile
 from pathlib import Path
 
-from agent_py_agent.agent.agent_core.runtime_loop_models import RunParams
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.tests.support.main_agent_delivery_closeout_fixtures import (
     xlsx_delivery_contract,
 )
 
 
-# LLM: Collection checkpoint quality failures route to collection tools, not manual JSON patching.
-# 函数用途: 验证带 collection_contract 的 source_data 质量失败时，恢复动作优先要求 api_json_collection。
 def test_collection_checkpoint_quality_prefers_api_collection_writer() -> None:
     contract = xlsx_delivery_contract()
     validation = contract["artifacts"][0]["validation_contract"]
@@ -33,8 +31,6 @@ def test_collection_checkpoint_quality_prefers_api_collection_writer() -> None:
     assert action["collection_contract"]["source_json_ref"] == "outputs/table_report/source_data.json"
 
 
-# LLM: Too-few collection findings should repair the source checkpoint, not only the final artifact.
-# 函数用途: 验证集合条目不足时会生成 api_json_collection 返工动作，避免真实任务被泛化 artifact repair 卡断。
 def test_collection_too_few_items_routes_to_api_collection_writer() -> None:
     contract = xlsx_delivery_contract()
     validation = contract["artifacts"][0]["validation_contract"]
@@ -57,8 +53,6 @@ def test_collection_too_few_items_routes_to_api_collection_writer() -> None:
     assert action["collection_contract"]["min_items_total"] == 3
 
 
-# LLM: Synthetic generated-row checkpoints should prefer deterministic structured writer repair.
-# 函数用途: 有 generated_rows 形状提示时，恢复动作优先走 write_structured_json，不误导成 API 采集。
 def test_collection_checkpoint_quality_prefers_structured_writer_for_generated_rows() -> None:
     contract = xlsx_delivery_contract()
     validation = contract["artifacts"][0]["validation_contract"]
@@ -95,7 +89,7 @@ def test_collection_checkpoint_quality_prefers_structured_writer_for_generated_r
 
 
 def _actions_for_source(source_content: str, contract: dict[str, object]) -> dict[str, dict[str, object]]:
-    from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
+    from agent_py_agent.agent.agent_core.delivery_closeout.closeout import (
         DeliveryContractValidationRequest,
         DeliveryProgressContext,
         _enrich_delivery_progress,

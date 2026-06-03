@@ -1,10 +1,10 @@
-# LLM: Coverage progress is a soft ledger, not a template or acceptance gate.
-# 模块用途: 归一化“多个对象/多个检查点”的开放覆盖账本；供 task_progress/tree/compact 读取。
 
 from __future__ import annotations
 
 import re
 from typing import Any
+
+from .common.value_parsing import dedupe_strings, string_list
 
 _DONE_STATUSES = {"done", "complete", "completed", "ok", "passed", "skipped"}
 
@@ -12,7 +12,7 @@ _DONE_STATUSES = {"done", "complete", "completed", "ok", "passed", "skipped"}
 def normalize_coverage(payload: dict[str, Any]) -> dict[str, Any]:
     raw_coverage = payload.get("coverage")
     coverage = dict(raw_coverage) if isinstance(raw_coverage, dict) else {}
-    dimensions = _string_list(coverage.get("dimensions") or payload.get("coverage_dimensions"))
+    dimensions = string_list(coverage.get("dimensions") or payload.get("coverage_dimensions"))
     targets = _list(coverage.get("targets")) or _list(payload.get("coverage_targets"))
     normalized_targets = [_normalize_coverage_target(item) for item in targets]
     normalized = {
@@ -44,7 +44,7 @@ def merge_coverage(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[s
     targets = merge_coverage_targets(existing["targets"], incoming["targets"])
     merged = {
         "goal": incoming["goal"] or existing["goal"],
-        "dimensions": _dedupe([*existing["dimensions"], *incoming["dimensions"]]),
+        "dimensions": dedupe_strings([*existing["dimensions"], *incoming["dimensions"]]),
         "targets": targets,
     }
     merged["counts"] = _coverage_counts(targets)
@@ -78,7 +78,7 @@ def merge_coverage_targets(existing: list[dict[str, Any]], incoming: list[dict[s
             **previous,
             **{key: value for key, value in item.items() if value not in ("", [], {}, None)},
             "checks": {**dict(previous.get("checks") or {}), **dict(item.get("checks") or {})},
-            "evidence": _dedupe([*_string_list(previous.get("evidence")), *_string_list(item.get("evidence"))]),
+            "evidence": dedupe_strings([*string_list(previous.get("evidence")), *string_list(item.get("evidence"))]),
         }
     return [by_id[item_id] for item_id in order if item_id in by_id]
 
@@ -105,7 +105,7 @@ def _normalize_coverage_target(value: object) -> dict[str, Any]:
         "title": title,
         "status": str(item.get("status") or "pending").strip() or "pending",
         "checks": _normalize_target_checks(item),
-        "evidence": _string_list(item.get("evidence")),
+        "evidence": string_list(item.get("evidence")),
         "notes": str(item.get("notes") or "").strip(),
         "next": str(item.get("next") or "").strip(),
     }
@@ -172,7 +172,7 @@ def _check_key(item: dict[str, Any]) -> str:
 def _fields_to_checks(value: object) -> dict[str, str]:
     if isinstance(value, dict):
         return _normalize_checks(value)
-    return dict.fromkeys(_string_list(value), "pending")
+    return dict.fromkeys(string_list(value), "pending")
 
 
 def _checks_from_note_text(value: str) -> dict[str, str]:
@@ -239,22 +239,6 @@ def _first_present(payload: dict[str, Any], keys: tuple[str, ...]) -> object:
 
 def _list(value: object) -> list:
     return list(value) if isinstance(value, list | tuple) else []
-
-
-def _string_list(value: object) -> list[str]:
-    return [text for item in _list(value) if (text := str(item).strip())]
-
-
-def _dedupe(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        text = str(value or "").strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        result.append(text)
-    return result
 
 
 def _safe_id(value: str) -> str:

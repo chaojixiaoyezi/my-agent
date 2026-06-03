@@ -5,11 +5,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
-from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
+from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import _existing_report
+from agent_py_agent.agent.agent_core.delivery_closeout.closeout import (
     MainAgentDeliveryCloseoutRequest,
     main_agent_delivery_closeout_response,
 )
-from agent_py_agent.agent.agent_core.main_agent_delivery_closeout_artifacts import _existing_report
 
 
 def test_fact_evidence_repair_loop_blocks_then_accepts_tool_backed_claims(tmp_path: Path) -> None:

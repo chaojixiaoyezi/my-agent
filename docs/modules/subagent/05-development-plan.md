@@ -31,7 +31,7 @@
   shared progress 和 acceptance plan 只能读热元数据和索引，不读 runner prompt/response、
   artifact 正文或外置工具输出，也不调用模型。
 - 只有显式执行入口才能产生模型调用或命令调用，例如 `subagent-run --execute`、
-  `subagents-dispatch --execute-runners`、`subagents-tests --re-run` 和
+  `subagents-dispatch --start-runners`、`subagents-tests --re-run` 和
   `subagents-dispatch --execute-acceptance-tests`。
 - 子代理目录允许保留大量冷文件，但冷文件必须通过 detail / inspect / resume /
   acceptance 等明确命令读取，不能被看板、状态页或普通检索自动展开。

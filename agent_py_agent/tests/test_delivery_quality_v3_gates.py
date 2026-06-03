@@ -3,21 +3,19 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from agent_py_agent.agent.agent_core.main_agent_delivery_closeout_artifacts import (
+from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import (
     _validate_artifact_item,
 )
 from agent_py_agent.agent.contracts.artifact_collection_mapping import mapping_findings
 from agent_py_agent.agent.contracts.artifact_format_lint import lint_artifact_format
-from agent_py_agent.agent.contracts.gates.artifact_provenance import (
+from agent_py_agent.agent.contracts.gates.artifact.provenance import (
     evaluate_artifact_provenance_gate,
 )
-from agent_py_agent.agent.contracts.gates.document_content_quality import (
+from agent_py_agent.agent.contracts.gates.document.content_quality import (
     evaluate_document_content_quality_gate,
 )
 
 
-# LLM: V3 document quality must reject thin sections through structured facts, not a PDF-specific rule.
-# 函数用途: 验证文档类交付物即使章节存在，也必须满足合同声明的正文量和占位比例。
 def test_document_content_quality_rejects_thin_required_sections(tmp_path: Path) -> None:
     report = tmp_path / "report.md"
     report.write_text("# 摘要\n这是一段足够的摘要内容。\n\n# 结果\n待补充\n", encoding="utf-8")
@@ -40,8 +38,6 @@ def test_document_content_quality_rejects_thin_required_sections(tmp_path: Path)
     assert action["evidence"]["required_state"]
 
 
-# LLM: HTML documents use the same content gate, so heading extraction must not be format fragile.
-# 函数用途: 验证 HTML 标题和正文会被抽成统一文档事实，而不是因为格式适配器错误漏检。
 def test_document_content_quality_reads_html_sections(tmp_path: Path) -> None:
     report = tmp_path / "report.html"
     report.write_text(
@@ -59,8 +55,6 @@ def test_document_content_quality_reads_html_sections(tmp_path: Path) -> None:
     assert not decision.finding_codes
 
 
-# LLM: Source coverage levels must not treat title-only mentions as body coverage.
-# 函数用途: 验证 source item 只在产物里出现标题时，只能算 metadata_only，不能满足 body 合同。
 def test_source_item_coverage_rejects_metadata_only_mapping(tmp_path: Path) -> None:
     artifact = tmp_path / "report.md"
     artifact.write_text("# 资料\n\nPaper A\n\nPaper B\n", encoding="utf-8")
@@ -85,8 +79,6 @@ def test_source_item_coverage_rejects_metadata_only_mapping(tmp_path: Path) -> N
     assert "metadata_only" in findings[0].value
 
 
-# LLM: Builder provenance must prove final artifacts came from the latest source hash.
-# 函数用途: 验证本轮写过文件还不够，source/checkpoint 更新后旧构建产物必须进入返工。
 def test_artifact_provenance_rejects_stale_source_hash(tmp_path: Path) -> None:
     source = tmp_path / "draft.md"
     source.write_text("# 新稿\n\n这是最新正文。\n", encoding="utf-8")
@@ -117,8 +109,6 @@ def test_artifact_provenance_rejects_stale_source_hash(tmp_path: Path) -> None:
     assert decision.to_dict()["recovery"]["actions"][0]["evidence"]["current_state"]
 
 
-# LLM: Format lint is a unified entrypoint over existing validators, not another task-specific gate.
-# 函数用途: 验证统一 lint 入口能复用现有 JSON 格式验收并输出同一 finding 形状。
 def test_artifact_format_lint_reuses_existing_format_validators(tmp_path: Path) -> None:
     broken = tmp_path / "broken.json"
     broken.write_text("{bad json", encoding="utf-8")
@@ -130,8 +120,6 @@ def test_artifact_format_lint_reuses_existing_format_validators(tmp_path: Path) 
     assert [finding.code for finding in report.findings] == ["JSON_INVALID"]
 
 
-# LLM: Closeout must consume the unified lint path while keeping subjective document quality advisory.
-# 函数用途: 验证交付收口入口会保留 document_quality_contract finding，但不把内容质量变成硬失败。
 def test_closeout_artifact_validation_reports_v3_document_quality_as_warning(tmp_path: Path) -> None:
     report = tmp_path / "handoff.md"
     report.write_text("# 摘要\n很好。\n\n# 结果\n待补充\n", encoding="utf-8")

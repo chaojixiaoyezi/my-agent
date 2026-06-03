@@ -1,5 +1,3 @@
-# LLM: Collaboration CLI exposes read-only views over the generic collaboration ledger.
-# 模块用途: 提供 collaboration list/status 命令，方便查看协作 case、请求、证据和待响应情况。
 
 from __future__ import annotations
 
@@ -9,8 +7,6 @@ from typing import Any
 from .common import make_agent
 
 
-# LLM: cmd_collaboration_overview is a read-only health summary for all collaboration cases.
-# 函数用途: 输出协作控制面总览，供真实任务前检查是否还有待主代理处理的阻塞。
 def cmd_collaboration_overview(args) -> int:
     agent = make_agent(args)
     payload = {"ok": True, **agent.collaboration_store.overview()}
@@ -18,8 +14,6 @@ def cmd_collaboration_overview(args) -> int:
     return 0
 
 
-# LLM: cmd_collaboration_list is a read-only CLI command over CollaborationStore.
-# 函数用途: 列出协作 case 摘要，包括请求数、待响应请求数、证据数和决策数。
 def cmd_collaboration_list(args) -> int:
     agent = make_agent(args)
     status_filter = str(getattr(args, "status", "") or "").strip() or None
@@ -38,8 +32,6 @@ def cmd_collaboration_list(args) -> int:
     return 0
 
 
-# LLM: cmd_collaboration_status is a read-only CLI command for one case.
-# 函数用途: 展示单个协作 case 的完整状态、请求、证据、参与者和决策摘要。
 def cmd_collaboration_status(args) -> int:
     agent = make_agent(args)
     case_id = str(getattr(args, "case_id", "") or "").strip()
@@ -64,8 +56,6 @@ def cmd_collaboration_status(args) -> int:
     return 0
 
 
-# LLM: cmd_collaboration_update_status is an audited mutating CLI command over case lifecycle.
-# 函数用途: 推进协作 case 状态并写入决策摘要，关闭类状态缺摘要时返回结构化错误。
 def cmd_collaboration_update_status(args) -> int:
     agent = make_agent(args)
     case_id = str(getattr(args, "case_id", "") or "").strip()
@@ -85,8 +75,6 @@ def cmd_collaboration_update_status(args) -> int:
     return 0
 
 
-# LLM: cmd_collaboration_update_request is a mutating CLI command for responder progress.
-# 函数用途: 更新协作请求状态，并返回最新 request 和 case 概览。
 def cmd_collaboration_update_request(args) -> int:
     agent = make_agent(args)
     case_id = str(getattr(args, "case_id", "") or "").strip()
@@ -114,8 +102,6 @@ def cmd_collaboration_update_request(args) -> int:
     return 0
 
 
-# LLM: _overview_from_status derives display counters from structured case status only.
-# 函数用途: 从 case_status payload 计算列表页使用的摘要，不读取自然语言判断任务类型。
 def _overview_from_status(status: dict[str, Any]) -> dict[str, Any]:
     case = _dict(status.get("case"))
     requests = [_dict(item) for item in _list(status.get("requests"))]
@@ -140,8 +126,6 @@ def _overview_from_status(status: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# LLM: _print_payload keeps JSON and human-readable output backed by the same payload.
-# 函数用途: 根据 --json 选择输出结构化 JSON 或简短文本。
 def _print_payload(payload: dict[str, Any], *, json_output: bool, text_renderer) -> None:
     if json_output:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
@@ -149,8 +133,6 @@ def _print_payload(payload: dict[str, Any], *, json_output: bool, text_renderer)
     print(text_renderer(payload))
 
 
-# LLM: _render_list_text is intentionally compact for terminal status checks.
-# 函数用途: 把 case 列表 payload 渲染成人可读文本。
 def _render_list_text(payload: dict[str, Any]) -> str:
     lines = [f"collaboration cases total={payload.get('total', 0)}"]
     for item in _list(payload.get("cases")):
@@ -171,8 +153,6 @@ def _render_list_text(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-# LLM: _render_overview_text keeps preflight health readable without dumping every case.
-# 函数用途: 把协作总览 payload 渲染为简短文本。
 def _render_overview_text(payload: dict[str, Any]) -> str:
     readiness = _dict(payload.get("readiness"))
     lines = [
@@ -201,8 +181,6 @@ def _render_overview_text(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-# LLM: _render_status_text shows one case's counters and latest refs without dumping large payloads.
-# 函数用途: 把单 case status payload 渲染成人可读文本。
 def _render_status_text(payload: dict[str, Any]) -> str:
     overview = _dict(payload.get("overview"))
     lines = [
@@ -225,8 +203,6 @@ def _render_status_text(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-# LLM: _render_update_text keeps lifecycle updates compact and auditable in terminal output.
-# 函数用途: 把状态推进结果渲染成人可读文本。
 def _render_update_text(payload: dict[str, Any]) -> str:
     case = _dict(payload.get("case"))
     decision = _dict(payload.get("decision"))
@@ -237,8 +213,6 @@ def _render_update_text(payload: dict[str, Any]) -> str:
     )
 
 
-# LLM: _render_update_request_text keeps request lifecycle updates short for shell use.
-# 函数用途: 把协作请求状态更新结果渲染为一行文本。
 def _render_update_request_text(payload: dict[str, Any]) -> str:
     request = _dict(payload.get("request"))
     overview = _dict(payload.get("overview"))
@@ -249,20 +223,14 @@ def _render_update_request_text(payload: dict[str, Any]) -> str:
     )
 
 
-# LLM: _render_error_text keeps CLI failures readable while JSON output remains structured.
-# 函数用途: 把错误 payload 渲染为一行错误文本。
 def _render_error_text(payload: dict[str, Any]) -> str:
     return f"error={payload.get('error', '')} message={payload.get('message', '')}"
 
 
-# LLM: _dict safely normalizes optional object payloads.
-# 函数用途: 非 dict 输入返回空字典，避免坏行影响整段展示。
 def _dict(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-# LLM: _list safely normalizes optional list payloads.
-# 函数用途: 非 list 输入返回空列表，避免展示命令崩溃。
 def _list(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
 

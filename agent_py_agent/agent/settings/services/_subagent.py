@@ -1,7 +1,5 @@
 """Subagent workflow normalization service."""
 
-# LLM: 这些规则控制自动化授权和工作区范围，改动前核对安全含义。
-# 模块用途: 子代理工作流模式、目录策略和 review 轮数归一化。
 
 from __future__ import annotations
 
@@ -10,8 +8,6 @@ from dataclasses import dataclass
 from ..defaults import default_agent_config
 
 
-# LLM: SubagentWorkflowWarningParams 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: SubagentWorkflowWarningParams 参数包，把相关输入集中传给 配置系统 的服务函数。
 @dataclass(frozen=True)
 class SubagentWorkflowWarningParams:
     field_name: str
@@ -20,13 +16,9 @@ class SubagentWorkflowWarningParams:
     reason: str
 
 
-# LLM: SubagentWorkflowWarningService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: SubagentWorkflowWarningService 封装 配置系统 的一组相关操作，供上层组合调用。
 class SubagentWorkflowWarningService:
     """Service for handling subagent workflow config warnings."""
 
-    # LLM: SubagentWorkflowWarningService.add_warning 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 向结果或告警集合加入 add_warning，同时保留调用方依赖的顺序。
     @staticmethod
     def add_warning(
         warnings: list[dict[str, object]],
@@ -43,13 +35,9 @@ class SubagentWorkflowWarningService:
         )
 
 
-# LLM: SubagentWorkflowConfigService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: SubagentWorkflowConfigService 封装 配置系统 的一组相关操作，供上层组合调用。
 class SubagentWorkflowConfigService:
     """Service for validating and coercing subagent workflow config fields."""
 
-    # LLM: SubagentWorkflowConfigService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 归一化 SubagentWorkflowConfigService 负责的配置字段并追加告警。
     @staticmethod
     def normalize(config: object) -> list[dict[str, object]]:
         """Validate and coerce subagent workflow config fields on an AgentConfig instance."""
@@ -63,8 +51,6 @@ class SubagentWorkflowConfigService:
         config.subagent_workflow_config_warnings = warnings
         return warnings
 
-    # LLM: SubagentWorkflowConfigService._normalize_mode 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 把输入值归一成 配置系统 内部使用的稳定格式。
     @staticmethod
     def _normalize_mode(config: object, defaults: object, warnings: list[dict[str, object]]) -> None:
         """Normalize subagent workflow mode."""
@@ -86,8 +72,6 @@ class SubagentWorkflowConfigService:
                 ),
             )
 
-    # LLM: SubagentWorkflowConfigService._normalize_builtin 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 把输入值归一成 配置系统 内部使用的稳定格式。
     @staticmethod
     def _normalize_builtin(config: object, defaults: object, warnings: list[dict[str, object]]) -> None:
         """Normalize builtin workflow enablement."""
@@ -106,8 +90,6 @@ class SubagentWorkflowConfigService:
                 ),
             )
 
-    # LLM: SubagentWorkflowConfigService._normalize_dirs 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 把输入值归一成 配置系统 内部使用的稳定格式。
     @staticmethod
     def _normalize_dirs(config: object, defaults: object, warnings: list[dict[str, object]]) -> None:
         """Normalize user workflow directories."""
@@ -129,8 +111,6 @@ class SubagentWorkflowConfigService:
                 ),
             )
 
-    # LLM: SubagentWorkflowConfigService._normalize_review_rounds 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 把输入值归一成 配置系统 内部使用的稳定格式。
     @staticmethod
     def _normalize_review_rounds(config: object, defaults: object, warnings: list[dict[str, object]]) -> None:
         """Normalize workflow review rounds."""
@@ -152,8 +132,6 @@ class SubagentWorkflowConfigService:
             )
 
 
-# LLM: _coerce_review_rounds_value 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 把原始配置值转换成目标类型，失败时回退默认值并记录告警。
 def _coerce_review_rounds_value(raw_review_rounds: object) -> int | None:
     if isinstance(raw_review_rounds, bool):
         return None

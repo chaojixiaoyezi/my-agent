@@ -1,5 +1,3 @@
-# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
 
 """Patch review and apply diff rendering.
 
@@ -15,8 +13,6 @@ import difflib
 from ..reports import PatchApplyRecord, PatchApplyReport, PatchReviewRecord, PatchReviewReport
 
 
-# LLM: render_patch_review_markdown 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 渲染或汇总补丁审查markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新补丁文件、预演结果和应用报告，需避免破坏既有状态机约定。
 def render_patch_review_markdown(report: PatchReviewReport) -> str:
     """Render batch patch review report to markdown."""
 
@@ -43,11 +39,10 @@ def render_patch_review_markdown(report: PatchReviewReport) -> str:
             f"patches={record.patch_count} approved={record.approved_count} blocked={record.blocked_count}"
         )
         lines.append(f"  - {record.message}")
+        lines.extend(_load_error_lines(record.load_errors, prefix="  - "))
     return "\n".join(lines) + "\n"
 
 
-# LLM: render_patch_review_record_markdown 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 渲染或汇总补丁审查记录markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会改动补丁文件、预演结果和应用报告，调用方依赖写入顺序和文件格式。
 def render_patch_review_record_markdown(record: PatchReviewRecord) -> str:
     """Render single patch review record to markdown."""
 
@@ -67,6 +62,10 @@ def render_patch_review_record_markdown(record: PatchReviewRecord) -> str:
         f"- blocked_count: {record.blocked_count}",
         f"- message: {record.message}",
         "",
+        "## Load Errors",
+        "",
+        *_load_error_lines(record.load_errors),
+        "",
         "## Patches",
         "",
     ]
@@ -80,8 +79,6 @@ def render_patch_review_record_markdown(record: PatchReviewRecord) -> str:
     return "\n".join(lines) + "\n"
 
 
-# LLM: render_patch_apply_markdown 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 渲染或汇总补丁应用markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新补丁文件、预演结果和应用报告，需避免破坏既有状态机约定。
 def render_patch_apply_markdown(report: PatchApplyReport) -> str:
     """Render batch patch apply report to markdown."""
 
@@ -109,11 +106,10 @@ def render_patch_apply_markdown(report: PatchApplyReport) -> str:
             f"rollback={record.rollback_performed}"
         )
         lines.append(f"  - {record.message}")
+        lines.extend(_load_error_lines(record.load_errors, prefix="  - "))
     return "\n".join(lines) + "\n"
 
 
-# LLM: render_patch_apply_record_markdown 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 渲染或汇总补丁应用记录markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会改动补丁文件、预演结果和应用报告，调用方依赖写入顺序和文件格式。
 def render_patch_apply_record_markdown(record: PatchApplyRecord) -> str:
     """Render single patch apply record to markdown."""
 
@@ -134,14 +130,21 @@ def render_patch_apply_record_markdown(record: PatchApplyRecord) -> str:
         f"- blocked_count: {record.blocked_count}",
         f"- message: {record.message}",
         "",
-        "## Test Commands",
+        "## Load Errors",
         "",
+        *_load_error_lines(record.load_errors),
+        "",
+        *_patch_apply_detail_sections(record),
     ]
-    if not record.test_commands:
-        lines.append("- none")
+    return "\n".join(lines) + "\n"
+
+
+def _patch_apply_detail_sections(record: PatchApplyRecord) -> list[str]:
+    lines = ["## Test Commands", ""]
+    if record.test_commands:
+        lines.extend(f"- `{cmd}`" for cmd in record.test_commands)
     else:
-        for cmd in record.test_commands:
-            lines.append(f"- `{cmd}`")
+        lines.append("- none")
     lines.extend(["", "## Test Results", ""])
     if not record.test_results:
         lines.append("- none")
@@ -152,18 +155,22 @@ def render_patch_apply_record_markdown(record: PatchApplyRecord) -> str:
                 f"- [{status}] returncode={result.get('returncode')} command={result.get('command')}"
             )
     lines.extend(["", "## Patches", ""])
-    if not record.patches:
-        lines.append("- none")
-    for item in record.patches:
+    lines.extend(_patch_apply_lines(record.patches))
+    return lines
+
+
+def _patch_apply_lines(patches: list[dict[str, object]]) -> list[str]:
+    if not patches:
+        return ["- none"]
+    lines = []
+    for item in patches:
         lines.append(
             f"- [{item.get('status', 'unknown')}] {item.get('path', 'unknown')} "
             f"apply_status={item.get('apply_status', 'PENDING')} :: {item.get('message', '')}"
         )
-    return "\n".join(lines) + "\n"
+    return lines
 
 
-# LLM: build_unified_diff 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 构建unifieddiff所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def build_unified_diff(path: str, before_text: str, after_text: str) -> str:
     """Build unified diff between two text strings."""
 
@@ -176,3 +183,15 @@ def build_unified_diff(path: str, before_text: str, after_text: str) -> str:
         )
     )
     return "".join(lines)
+
+
+def _load_error_lines(load_errors: list[dict[str, object]], *, prefix: str = "") -> list[str]:
+    if not load_errors:
+        return [f"{prefix}- none"] if not prefix else []
+    lines = []
+    for item in load_errors:
+        context = item.get("context", "unknown")
+        path = item.get("path", "")
+        message = item.get("message", item.get("error_type", ""))
+        lines.append(f"{prefix}- {context}: {message} path={path}")
+    return lines

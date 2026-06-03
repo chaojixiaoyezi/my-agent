@@ -90,8 +90,6 @@ def test_read_artifact_tool_reads_explicit_slice_from_registered_artifact(tmp_pa
     assert payload["reads_artifact_body"] is True
 
 
-# LLM: artifact read modes should let agents inspect large outputs without rereading the whole body.
-# 函数用途: 验证 read_artifact 支持 head/tail/search/slice 模式，方便子代理只读需要的片段或关键行。
 def test_read_artifact_supports_head_tail_and_search_modes(tmp_path: Path) -> None:
     content = "alpha first\nbeta middle\nneedle here\nbeta after\nomega last"
     artifact_path = _write_externalized_tool_output(tmp_path, content=content)
@@ -114,8 +112,6 @@ def test_read_artifact_supports_head_tail_and_search_modes(tmp_path: Path) -> No
     assert "4: beta after" in search["content"]
 
 
-# LLM: artifact read budgets prevent repeated artifact-body pulls from flooding prompts or disk IO.
-# 函数用途: 验证同一 run 在窗口内超过 artifact 正文读取字符预算时会被阻断，兄弟 run 不受影响。
 def test_read_artifact_tool_enforces_per_run_artifact_read_budget(tmp_path: Path) -> None:
     artifact_path = _write_externalized_tool_output(tmp_path, content="0123456789" * 20)
     registry = ToolRegistry(
@@ -160,8 +156,6 @@ def test_read_artifact_tool_enforces_per_run_artifact_read_budget(tmp_path: Path
     assert sibling.ok is True
 
 
-# LLM: unbounded reads should use the artifact index size before loading the body.
-# 函数用途: 验证 max_chars=0 读取全部时，会先按 index 里的 size_bytes 做预算预判，避免大 artifact 被直接展开。
 def test_read_artifact_budget_blocks_unbounded_large_read_from_index(tmp_path: Path) -> None:
     artifact_path = _write_externalized_tool_output(tmp_path, content="0123456789" * 20)
     registry = ToolRegistry(
@@ -222,8 +216,6 @@ def test_read_artifact_tool_repairs_wrong_prefix_with_unique_artifact_name(tmp_p
     assert payload["content"] == "abcdef"
 
 
-# LLM: short call ids must resolve by current run scope before falling back to latest.
-# 函数用途: 防止 read_artifact("17-1") 在长任务里读到旧 run 的同号工具输出，导致路径和 prompt 串线。
 def test_read_artifact_short_call_id_prefers_matching_run_scope(tmp_path: Path) -> None:
     _write_externalized_tool_output(
         tmp_path,
@@ -254,8 +246,6 @@ def test_read_artifact_short_call_id_prefers_matching_run_scope(tmp_path: Path) 
     assert payload["run_id"] == "old-run"
 
 
-# LLM: unscoped short call ids should choose the newest record instead of the oldest legacy collision.
-# 函数用途: 没有 run_id 注入的旧调用也不能优先读到历史测试的同号 artifact。
 def test_read_artifact_short_call_id_without_scope_prefers_latest(tmp_path: Path) -> None:
     _write_externalized_tool_output(
         tmp_path,
@@ -284,8 +274,6 @@ def test_read_artifact_short_call_id_without_scope_prefers_latest(tmp_path: Path
     assert payload["run_id"] == "latest-run"
 
 
-# LLM: old internal tool archives can be reread later, so read_artifact must hide legacy refs too.
-# 函数用途: 验证历史 create_subagents 等内部工具归档经 read_artifact 展开时不会重新暴露 data/subagents 路径。
 def test_read_artifact_hides_legacy_paths_from_internal_tool_archives(tmp_path: Path) -> None:
     legacy_path = "/repo/data/subagents/tasks/run_1/agents/run_1/final_report.md"
     raw_content = json.dumps({"workspace_refs": {"final_report": legacy_path}}, ensure_ascii=False)
@@ -306,8 +294,6 @@ def test_read_artifact_hides_legacy_paths_from_internal_tool_archives(tmp_path: 
     assert "[internal_legacy_subagent_path_hidden]" in payload["content"]
 
 
-# LLM: read_artifact should not rewrite ordinary user or blackbox tool content.
-# 函数用途: 验证普通工具归档里提到 data/subagents 字样时保持原文，避免隐藏用户要分析的正文。
 def test_read_artifact_preserves_ordinary_tool_archive_content(tmp_path: Path) -> None:
     text = "用户文档里提到 /repo/data/subagents/tasks/run_1 这个历史路径。"
     artifact_path = _write_externalized_tool_output(tmp_path, content=text)
@@ -321,8 +307,6 @@ def test_read_artifact_preserves_ordinary_tool_archive_content(tmp_path: Path) -
     assert payload["content"] == text
 
 
-# LLM: read_file is the normal path for explicit tool-output artifact paths.
-# 函数用途: 验证模型拿到外置工具输出路径后，可以直接用 read_file 读取正文切片。
 def test_read_file_reads_tool_output_artifact_content(tmp_path: Path) -> None:
     artifact_path = _write_externalized_tool_output(tmp_path, content="large-output" * 500)
     registry = ToolRegistry(
@@ -347,8 +331,6 @@ def test_read_file_reads_tool_output_artifact_content(tmp_path: Path) -> None:
     assert '"kind": "tool_output"' not in result.output
 
 
-# LLM: read_file should not require read_artifact permission for explicit artifact wrapper paths.
-# 函数用途: 即使当前上下文只授权 read_file，也能读取安全路径下 tool-output artifact 的正文。
 def test_read_file_artifact_wrapper_does_not_require_read_artifact_permission(tmp_path: Path) -> None:
     artifact_path = _write_externalized_tool_output(tmp_path, content="alpha\nbeta\n" * 20)
     registry = _registry(tmp_path)
@@ -363,8 +345,6 @@ def test_read_file_artifact_wrapper_does_not_require_read_artifact_permission(tm
     assert "3: alpha" in result.output
 
 
-# LLM: typo recovery should stay on read_file instead of switching tools.
-# 函数用途: 模型把 artifact 绝对路径前缀抄错时，提示继续 read_file suggested_target。
 def test_read_file_typo_to_tool_output_artifact_keeps_read_file_recovery(tmp_path: Path) -> None:
     artifact_path = _write_externalized_tool_output(tmp_path, content="large-output" * 500)
     registry = ToolRegistry(
@@ -425,14 +405,12 @@ def _registry(root: Path) -> ToolRegistry:
     )
 
 
-# LLM: _read_artifact_payload keeps mode tests focused on the public memory reader contract.
-# 函数用途: 直接调用 artifact reader 并返回 JSON payload，避免重复构造 registry。
 def _read_artifact_payload(
     root: Path,
     artifact_path: Path,
     options: dict[str, object],
 ) -> dict:
-    from agent_py_agent.agent.memory_archive.artifact_reader import (
+    from agent_py_agent.agent.memory_archive.artifact.reader import (
         ReadToolOutputArtifactRequest,
         read_tool_output_artifact,
     )

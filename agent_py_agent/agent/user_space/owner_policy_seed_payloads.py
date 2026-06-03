@@ -1,11 +1,7 @@
-# LLM: Owner policy seed payloads define fresh-install defaults for every owner home.
-# 模块用途: 提供 permissions/quota/retention/skill/tool policy 的初始 JSON，避免 owner_resolver 继续膨胀。
 
 from __future__ import annotations
 
 
-# LLM: default_permissions_payload is intentionally capability-shaped rather than task-shaped.
-# 函数用途: 生成新 owner 的默认权限边界，作为后续 provider/user/group 权限解析的起点。
 def default_permissions_payload() -> dict[str, object]:
     return {
         "schema_version": "permissions.v1",
@@ -16,8 +12,6 @@ def default_permissions_payload() -> dict[str, object]:
     }
 
 
-# LLM: default_quota_payload keeps count and storage limits separate from permission decisions.
-# 函数用途: 生成新 owner 的资源配额默认值；权限判断仍由 permissions/policy 层决定。
 def default_quota_payload() -> dict[str, object]:
     return {
         "schema_version": "quota.v1",
@@ -28,8 +22,6 @@ def default_quota_payload() -> dict[str, object]:
     }
 
 
-# LLM: default_retention_payload documents default cleanup windows for owner-scoped memory and work data.
-# 函数用途: 生成新 owner 的保留策略默认值，供 doctor/retention 后续统一读取。
 def default_retention_payload() -> dict[str, object]:
     return {
         "schema_version": "retention.v1",
@@ -43,8 +35,6 @@ def default_retention_payload() -> dict[str, object]:
     }
 
 
-# LLM: default_skill_policy_payload gives each owner a private/shared/builtin skill allow policy.
-# 函数用途: 生成新 owner 的 skill 来源、禁用项和版本 pin 默认配置。
 def default_skill_policy_payload() -> dict[str, object]:
     return {
         "schema_version": "skill-policy.v1",
@@ -55,8 +45,6 @@ def default_skill_policy_payload() -> dict[str, object]:
     }
 
 
-# LLM: default_tool_policy_payload mirrors skill policy for tools without granting extra runtime privilege.
-# 函数用途: 生成新 owner 的 tool 来源、禁用项和版本 pin 默认配置。
 def default_tool_policy_payload() -> dict[str, object]:
     return {
         "schema_version": "tool-policy.v1",

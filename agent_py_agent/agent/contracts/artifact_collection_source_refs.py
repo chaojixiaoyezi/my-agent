@@ -1,5 +1,3 @@
-# LLM: Collection source refs helpers keep row evidence validation small and auditable.
-# 模块用途: 解析 source_refs，并判断来源是否带有工具结果、抓取记录或 artifact 绑定。
 
 from __future__ import annotations
 

@@ -59,8 +59,6 @@ def test_task_envelope_v1_contains_address_tool_write_and_acceptance(tmp_path: P
     assert payload["acceptance"]["checks"] == ["index.html 存在", "页面没有空链接"]
 
 
-# LLM: granted file-write scopes must be visible in TaskEnvelope, not only in the tool gateway.
-# 函数用途: 复现真实 E2E 中父级已批准 write_file path_scope，但 runner 协议包仍显示没有产品写入根。
 def test_task_envelope_write_contract_includes_granted_filesystem_roots(tmp_path: Path) -> None:
     from agent_py_agent.agent.subagents.protocol import build_task_envelope
 
@@ -137,7 +135,7 @@ def test_tool_preflight_reports_missing_tool_and_write_root_without_stripping_ba
 
 
 def test_recovery_strategy_exports_address_and_envelope_refs(tmp_path: Path) -> None:
-    from agent_py_agent.agent.subagents.services.recovery_strategy import (
+    from agent_py_agent.agent.subagents.services.recovery.strategy import (
         SubagentRecoveryStrategyRequest,
         build_subagent_recovery_strategy,
     )
@@ -161,7 +159,8 @@ def test_recovery_strategy_exports_address_and_envelope_refs(tmp_path: Path) -> 
     assert strategy["address"]["run_id"] == task.id
     assert strategy["task_envelope"]["address"]["run_id"] == task.id
     assert strategy["task_envelope"]["acceptance"]["checks"] == ["index.html 存在"]
-    assert strategy["recommended_action"] == "create_takeover_run_from_continue_packet"
+    assert strategy["recommended_action"] == "takeover"
+    assert strategy["recovery_mode"] == "takeover_from_continue_packet"
 
 
 @pytest.mark.skip(reason="旧 final_closeout_controller 已删除，验收事实走统一 closeout")
@@ -182,8 +181,6 @@ def test_final_closeout_decision_carries_task_envelope_acceptance(tmp_path: Path
     assert decision.reserved["task_envelope"]["acceptance"]["checks"] == ["index.html 存在"]
 
 
-# LLM: _make_protocol_tree builds a small root-child-leaf hierarchy for address/envelope tests.
-# 函数用途: 构造稳定的三层子代理树，避免每个协议测试重复创建父子关系。
 def _make_protocol_tree(tmp_path: Path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="", plan=["派工"], role="coordinator")

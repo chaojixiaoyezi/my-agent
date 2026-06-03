@@ -1,5 +1,3 @@
-# LLM: Session runtime module; keep conversation state and persistence contracts stable.
-# 模块用途: 维护会话运行时状态、上下文和持久化边界。
 
 from __future__ import annotations
 
@@ -7,90 +5,131 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..runtime_errors import DataCorruptionError, runtime_error_report
+
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 from .manager import SessionManager
 
 
-# LLM: resume_session 属于跨通道会话管理的函数边界；调整时先确认会话归属、上下文同步和用户隔离仍按原契约工作。
-# 函数用途: 处理恢复会话相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持会话归属、上下文同步和用户隔离上的返回值和副作用边界稳定。
 def resume_session(agent: SimpleAgent, session_id: str) -> dict:
     """恢复会话上下文."""
     manager = SessionManager(agent.config)
     session = manager.load_session(session_id)
     if session is None:
         return {"session": None, "error": f"会话 {session_id} 不存在"}
-    recent_memories = _load_recent_memories(agent.config, session_id)
+    recent_memories, recent_memory_load_errors = _load_recent_memories_report(agent.config, session_id)
     subagent_context = _load_subagent_context(agent, session_id)
-    return {"session": session, "recent_memories": recent_memories, "subagent_context": subagent_context}
+    return {
+        "session": session,
+        "recent_memories": recent_memories,
+        "recent_memory_load_errors": recent_memory_load_errors,
+        "subagent_context": subagent_context,
+    }
 
 
-# LLM: _load_recent_memories 属于跨通道会话管理的函数边界；调整时先确认会话归属、上下文同步和用户隔离仍按原契约工作。
-# 函数用途: 读取或查询recentmemories需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _load_recent_memories(config, session_id: str) -> list[dict]:
     """Load recent memories for a session from memory.jsonl."""
+    return _load_recent_memories_report(config, session_id)[0]
+
+
+def _load_recent_memories_report(config, session_id: str) -> tuple[list[dict], list[dict]]:
     try:
         memory_path = Path(config.memory_path)
-    except (OSError, UnicodeDecodeError):
-        return []
+    except (OSError, UnicodeDecodeError, TypeError, ValueError) as exc:
+        return [], [_memory_load_error(exc, context="session.resume.memory_path")]
     if not memory_path.exists():
-        return []
-    return _recent_memory_records(memory_path, session_id)
+        return [], []
+    return _recent_memory_records_report(memory_path, session_id)
 
 
-# LLM: _recent_memory_records 属于跨通道会话管理的函数边界；调整时先确认会话归属、上下文同步和用户隔离仍按原契约工作。
-# 函数用途: 处理recent记忆记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动会话归属、上下文同步和用户隔离，调用方依赖写入顺序和文件格式。
 def _recent_memory_records(memory_path: Path, session_id: str) -> list[dict]:
+    return _recent_memory_records_report(memory_path, session_id)[0]
+
+
+def _recent_memory_records_report(memory_path: Path, session_id: str) -> tuple[list[dict], list[dict]]:
     try:
         lines = memory_path.read_text(encoding="utf-8").strip().split("\n")
-    except (OSError, UnicodeDecodeError):
-        return []
-    return [
-        record
-        for line in reversed(lines[-10:])
-        if (record := _parse_memory_line(line, session_id))
-    ]
+    except (OSError, UnicodeDecodeError) as exc:
+        return [], [_memory_load_error(exc, context="session.resume.memory_file", path=memory_path)]
+    records: list[dict] = []
+    load_errors: list[dict] = []
+    for offset, line in enumerate(reversed(lines[-10:]), start=1):
+        record, load_error = _parse_memory_line_report(line, session_id, memory_path=memory_path, offset=offset)
+        if record:
+            records.append(record)
+        if load_error:
+            load_errors.append(load_error)
+    return records, load_errors
 
 
-# LLM: _parse_memory_line 属于跨通道会话管理的函数边界；调整时先确认会话归属、上下文同步和用户隔离仍按原契约工作。
-# 函数用途: 解析并归一化记忆line的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _parse_memory_line(line: str, session_id: str) -> dict | None:
     """Parse one memory line and return it if session_id matches."""
+    return _parse_memory_line_report(line, session_id, memory_path=None, offset=0)[0]
+
+
+def _parse_memory_line_report(
+    line: str,
+    session_id: str,
+    *,
+    memory_path: Path | None,
+    offset: int,
+) -> tuple[dict | None, dict | None]:
     if not line:
-        return None
+        return None, None
     try:
         record = json.loads(line)
-        if record.get("session_id") == session_id:
-            return record
-    except (json.JSONDecodeError, KeyError):
-        pass
-    return None
+    except json.JSONDecodeError as exc:
+        return None, _memory_load_error(exc, context="session.resume.memory_line", path=memory_path, offset=offset)
+    if not isinstance(record, dict):
+        exc = DataCorruptionError("memory JSONL record must be an object")
+        return None, _memory_load_error(exc, context="session.resume.memory_line", path=memory_path, offset=offset)
+    if record.get("session_id") == session_id:
+        return record, None
+    return None, None
 
 
-# LLM: _load_subagent_context 属于跨通道会话管理的函数边界；调整时先确认会话归属、上下文同步和用户隔离仍按原契约工作。
-# 函数用途: 读取或查询子代理上下文需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
+def _memory_load_error(
+    exc: BaseException,
+    *,
+    context: str,
+    path: Path | None = None,
+    offset: int = 0,
+) -> dict:
+    report = runtime_error_report(exc, context=context)
+    if path is not None:
+        report["path"] = str(path)
+    if offset:
+        report["recent_line_offset"] = offset
+    return report
+
+
 def _load_subagent_context(agent: SimpleAgent, session_id: str) -> list[dict]:
     """Load subagent context for a session."""
     subagent_context: list[dict] = []
+    manager = getattr(agent, "subagents", None)
+    list_runs = getattr(manager, "list_runs", None)
+    if not callable(list_runs):
+        return subagent_context
     try:
-        from ..subagent import SubagentRegistry
-
-        registry = SubagentRegistry(agent)
-        board = registry.build_board(recent_limit=5)
-        for item in board.recent:
-            _append_subagent_context_item(subagent_context, item, session_id)
-    except Exception:
-        pass
+        tasks = list_runs()
+    except Exception as exc:
+        subagent_context.append({
+            "type": "subagent_context_load_error",
+            **runtime_error_report(exc, context="session.resume.subagent_context"),
+        })
+        return subagent_context
+    if not isinstance(tasks, list | tuple):
+        return subagent_context
+    for item in tasks[-5:]:
+        _append_subagent_context_item(subagent_context, item, session_id)
     return subagent_context
 
 
-# LLM: _append_subagent_context_item 属于跨通道会话管理的函数边界；调整时先确认会话归属、上下文同步和用户隔离仍按原契约工作。
-# 函数用途: 写入子代理上下文条目的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动会话归属、上下文同步和用户隔离，调用方依赖写入顺序和文件格式。
 def _append_subagent_context_item(subagent_context: list[dict], item, session_id: str) -> None:
-    if not (hasattr(item, "metadata") and item.metadata.get("session_id") == session_id):
+    if not _subagent_belongs_to_session(item, session_id):
         return
-    # LLM: resume context stores only compact subagent facts.
     subagent_context.append({
         "id": item.id,
         "goal": item.goal,
@@ -98,8 +137,20 @@ def _append_subagent_context_item(subagent_context: list[dict], item, session_id
     })
 
 
-# LLM: format_resume_context 属于跨通道会话管理的函数边界；调整时先确认会话归属、上下文同步和用户隔离仍按原契约工作。
-# 函数用途: 渲染或汇总恢复上下文的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
+def _subagent_belongs_to_session(item, session_id: str) -> bool:
+    metadata = getattr(item, "metadata", None)
+    if isinstance(metadata, dict) and metadata.get("session_id") == session_id:
+        return True
+    attributes = getattr(item, "attributes", None)
+    if isinstance(attributes, dict) and attributes.get("session_id") == session_id:
+        return True
+    return session_id in {
+        str(getattr(item, "subagent_session_id", "") or ""),
+        str(getattr(item, "agent_thread_id", "") or ""),
+        str(getattr(item, "root_subagent_session_id", "") or ""),
+    }
+
+
 def format_resume_context(resume_data: dict) -> str:
     if resume_data.get("error"):
         return f"恢复失败: {resume_data['error']}"
@@ -122,16 +173,28 @@ def format_resume_context(resume_data: dict) -> str:
         for mem in memories[:3]:  # 最多显示 3 条
             lines.append(f"- [{mem.get('role', 'unknown')}] {mem.get('content', '')[:100]}...")
 
+    memory_load_errors = resume_data.get("recent_memory_load_errors", [])
+    if memory_load_errors:
+        lines.append(f"\n### 最近记忆读取警告 ({len(memory_load_errors)} 条)")
+        for error in memory_load_errors[:3]:
+            lines.append(f"- {error.get('model_message', error.get('message', 'unknown'))}")
+
     subagents = resume_data.get("subagent_context", [])
     if subagents:
         lines.append(f"\n### 子代理任务 ({len(subagents)} 条)")
         for sub in subagents[:3]:
-            lines.append(f"- {sub['id']}: {sub['goal']} ({sub['status']})")
+            lines.append(_format_subagent_resume_line(sub))
 
-    if not memories and not subagents:
+    if not memories and not memory_load_errors and not subagents:
         lines.append("\n暂无历史记录")
 
     return "\n".join(lines)
+
+
+def _format_subagent_resume_line(sub: dict) -> str:
+    if sub.get("type") == "subagent_context_load_error":
+        return f"- 子代理上下文读取失败: {sub.get('model_message', sub.get('message', 'unknown'))}"
+    return f"- {sub['id']}: {sub['goal']} ({sub['status']})"
 
 
 __all__ = [

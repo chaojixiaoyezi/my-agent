@@ -1,5 +1,3 @@
-# LLM: Registry bootstrap isolates concrete tool wiring from the registry protocol.
-# 模块用途: 集中注册内置工具，避免 ToolRegistry 主入口继续膨胀。
 
 from __future__ import annotations
 
@@ -15,6 +13,7 @@ from .filesystem import (
     ReadFileTool,
     SearchTextTool,
     WriteFileTool,
+    WriteFileToolOptions,
     filesystem_access_options,
 )
 from .models import HybridToolRetriever, KeywordToolSearchProvider, VectorToolSearchProvider
@@ -23,8 +22,6 @@ from .web import WebFetchTool
 from .web_search import WebSearchTool
 
 
-# LLM: build_tool_retriever centralizes catalog retrieval setup.
-# 函数用途: 根据配置创建关键词/向量混合工具检索器，供 ToolRegistry 查询推荐工具。
 def build_tool_retriever(params: Any) -> HybridToolRetriever:
     return HybridToolRetriever(
         [
@@ -34,8 +31,6 @@ def build_tool_retriever(params: Any) -> HybridToolRetriever:
     )
 
 
-# LLM: register_base_tools keeps ToolRegistry focused on protocol behavior.
-# 函数用途: 按稳定顺序注册文件、网络、shell、表格和安全工具。
 def register_base_tools(registry: Any, params: Any) -> None:
     _register_filesystem_tools(registry, params)
     _register_network_tools(registry, params)
@@ -43,8 +38,6 @@ def register_base_tools(registry: Any, params: Any) -> None:
     _register_security_tools(registry)
 
 
-# LLM: _register_filesystem_tools keeps file-tool config in one place.
-# 函数用途: 注册文件系统工具，并把用户配置的读取/写入上限传给对应工具。
 def _register_filesystem_tools(registry: Any, params: Any) -> None:
     workspace_roots = registry.workspace_roots
     access_options = filesystem_access_options(
@@ -67,15 +60,16 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
         WriteFileTool(
             registry.workspace_root,
             workspace_roots,
-            max_inline_content_chars=params.tool_write_inline_max_chars,
-            access_options=access_options,
+            WriteFileToolOptions(
+                max_inline_content_chars=params.tool_write_inline_max_chars,
+                access_options=access_options,
+                runtime_fact_roots=_runtime_fact_roots(registry, params),
+            ),
         )
     )
     registry.register(ApplyPatchTool(registry.workspace_root, workspace_roots, access_options))
 
 
-# LLM: _register_network_tools isolates non-filesystem tool setup from constructor policy.
-# 函数用途: 注册网页、HTTP 和 shell 工具，保持工具初始化顺序稳定。
 def _register_network_tools(registry: Any, params: Any) -> None:
     registry.register(WebSearchTool(max_results=params.max_matches, timeout=params.http_timeout))
     registry.register(WebFetchTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
@@ -97,8 +91,6 @@ def _register_network_tools(registry: Any, params: Any) -> None:
     registry.register(ControlledExecTool())
 
 
-# LLM: _register_security_tools keeps optional security tool registration easy to audit.
-# 函数用途: 延迟导入并注册安全分析工具，避免主注册流程继续增长。
 def _register_security_tools(registry: Any) -> None:
     from ..log_analysis.tools import (
         SecurityHuntIpTool,
@@ -109,6 +101,21 @@ def _register_security_tools(registry: Any) -> None:
     registry.register(SecurityQueryTool(registry.workspace_root))
     registry.register(SecurityHuntIpTool(registry.workspace_root))
     registry.register(SecurityTraceCaseTool(registry.workspace_root))
+
+
+def _runtime_fact_roots(registry: Any, params: Any) -> list[Any]:
+    roots = [*(getattr(params, "runtime_fact_roots", None) or []), getattr(params, "artifact_root", None), registry.workspace_root]
+    result: list[Any] = []
+    seen: set[str] = set()
+    for root in roots:
+        if not root:
+            continue
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(root)
+    return result
 
 
 __all__ = ["build_tool_retriever", "register_base_tools"]

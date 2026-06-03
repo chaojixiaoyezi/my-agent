@@ -10,6 +10,7 @@ import pytest
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.services.lifecycle import (
+    RecordCapabilityGapParams,
     RecordCapabilityGrantParams,
     RecordCapabilityRequestParams,
     RecordEvidenceParams,
@@ -126,6 +127,35 @@ def test_subagent_lifecycle_service_blocks_done_without_evidence(tmp_path) -> No
 
     with pytest.raises(ValueError):
         manager.set_status(task.id, "DONE", require_evidence=True)
+
+
+def test_subagent_lifecycle_service_records_memory_route_load_error(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.subagents.services import lifecycle
+
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(goal="需要额外能力", thought="record gap", plan=["record"])
+    index = manager.workspace_root / "memory" / "routing" / "INDEX.md"
+    index.parent.mkdir(parents=True)
+    index.write_text("# routes\n", encoding="utf-8")
+
+    def broken_load_routes(_path):
+        raise OSError("memory route index unreadable")
+
+    monkeypatch.setattr(lifecycle, "load_routes", broken_load_routes)
+
+    gap = manager.record_capability_gap(
+        task.id,
+        RecordCapabilityGapParams(
+            missing_capability="search",
+            why_failed="route lookup failed",
+        ),
+    )
+
+    loaded = manager.load(task.id)
+    assert loaded.capability_gaps[0].id == gap.id
+    assert gap.memory_routes[0]["route_id"] == "_memory_route_load_error"
+    assert gap.memory_routes[0]["context"] == "capability_gap.memory_routes"
+    assert "memory route index unreadable" in gap.memory_routes[0]["message"]
 
 
 def test_create_run_rebinds_stale_self_output_subagent_path(tmp_path) -> None:

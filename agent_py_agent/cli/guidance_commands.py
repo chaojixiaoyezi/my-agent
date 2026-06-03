@@ -1,5 +1,3 @@
-# LLM: CLI guidance command is an external bridge to the same soft inbox used by send_guidance.
-# 模块用途: 支持人在任务运行中从终端追加自然语言提示；只写 guidance 账本，不直接推进或验收任务。
 
 from __future__ import annotations
 

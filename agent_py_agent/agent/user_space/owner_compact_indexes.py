@@ -1,21 +1,26 @@
-# LLM: Owner compact indexes expose task/run/agent compact pointers without copying compact bodies.
-# 模块用途: 在 owner_home/compact/by_* 下写轻量恢复指针，方便父代理和 doctor 快速定位 rollup。
 
 from __future__ import annotations
 
-import json
+from dataclasses import dataclass
 from pathlib import Path
 
+from ..common.json_io import read_json_object_report, write_json_object
+from ..common.path_segments import safe_path_segment
 
-# LLM: sync_owner_compact_indexes writes small owner-level pointers to the latest task rollup.
-# 函数用途: 根据 task rollup 写 by_task/by_run/by_agent 指针；不复制子运行正文。
+
+@dataclass(frozen=True)
+class OwnerCompactIndexRefsReport:
+    dangling_refs: list[dict[str, object]]
+    load_errors: list[dict[str, object]]
+
+
 def sync_owner_compact_indexes(task_root: Path, rollup: dict[str, object]) -> None:
     owner_home = _owner_home_for_task(task_root)
     if owner_home is None:
         return
     task_id = _safe_key(rollup.get("task_id") or task_root.name)
     payload = _owner_compact_payload(rollup)
-    _write_json(owner_home / "compact" / "by_task" / f"{task_id}.json", payload)
+    write_json_object(owner_home / "compact" / "by_task" / f"{task_id}.json", payload)
     for row in rollup.get("child_runs", []):
         if not isinstance(row, dict):
             continue
@@ -23,12 +28,73 @@ def sync_owner_compact_indexes(task_root: Path, rollup: dict[str, object]) -> No
         if not run_id:
             continue
         child_payload = {**payload, "run_id": str(row.get("run_id") or ""), "status": str(row.get("status") or "")}
-        _write_json(owner_home / "compact" / "by_run" / f"{run_id}.json", child_payload)
-        _write_json(owner_home / "compact" / "by_agent" / f"{run_id}.json", child_payload)
+        write_json_object(owner_home / "compact" / "by_run" / f"{run_id}.json", child_payload)
+        write_json_object(owner_home / "compact" / "by_agent" / f"{run_id}.json", child_payload)
 
 
-# LLM: _owner_compact_payload keeps owner compact indexes small and refs-only.
-# 函数用途: 生成 owner_home/compact/by_* 的统一轻量指针内容。
+def dangling_owner_compact_index_refs(owner_home: str | Path, *, limit: int = 100) -> list[dict[str, object]]:
+    return dangling_owner_compact_index_refs_report(owner_home, limit=limit).dangling_refs
+
+
+def dangling_owner_compact_index_refs_report(owner_home: str | Path, *, limit: int = 100) -> OwnerCompactIndexRefsReport:
+    root = Path(owner_home) / "compact"
+    findings: list[dict[str, object]] = []
+    load_errors: list[dict[str, object]] = []
+    for index_kind, pointer, payload, load_error in _compact_pointer_payloads(root):
+        if load_error:
+            load_errors.append(load_error)
+        findings.extend(_pointer_findings(index_kind=index_kind, pointer=pointer, payload=payload))
+        if len(findings) >= limit:
+            return OwnerCompactIndexRefsReport(findings[:limit], load_errors)
+    return OwnerCompactIndexRefsReport(findings, load_errors)
+
+
+def _compact_pointer_payloads(root: Path) -> list[tuple[str, Path, dict[str, object], dict[str, object] | None]]:
+    rows: list[tuple[str, Path, dict[str, object], dict[str, object] | None]] = []
+    for index_kind in ("by_task", "by_run", "by_agent"):
+        rows.extend(_read_pointer(index_kind, pointer) for pointer in sorted((root / index_kind).glob("*.json")))
+    return rows
+
+
+def _read_pointer(index_kind: str, pointer: Path) -> tuple[str, Path, dict[str, object], dict[str, object] | None]:
+    report = read_json_object_report(pointer, context="owner_compact_index.pointer")
+    return index_kind, pointer, report.payload, report.load_error
+
+
+def _pointer_findings(*, index_kind: str, pointer: Path, payload: dict[str, object]) -> list[dict[str, object]]:
+    if payload:
+        return _missing_pointer_targets(pointer, index_kind=index_kind, payload=payload)
+    return [
+        {
+            "kind": index_kind,
+            "pointer": str(pointer),
+            "field": "pointer_json",
+            "missing_path": str(pointer),
+            "reason": "unreadable_compact_index_pointer",
+        }
+    ]
+
+
+def _missing_pointer_targets(pointer: Path, *, index_kind: str, payload: dict[str, object]) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for field in ("rollup_json", "compact_package"):
+        target = str(payload.get(field) or "")
+        if target and Path(target).exists():
+            continue
+        findings.append(
+            {
+                "kind": index_kind,
+                "pointer": str(pointer),
+                "field": field,
+                "missing_path": target,
+                "reason": "missing_compact_index_target" if target else "empty_compact_index_target",
+                "task_id": str(payload.get("task_id") or ""),
+                "run_id": str(payload.get("run_id") or ""),
+            }
+        )
+    return findings
+
+
 def _owner_compact_payload(rollup: dict[str, object]) -> dict[str, object]:
     return {
         "schema_version": "owner-compact-index.v1",
@@ -42,8 +108,6 @@ def _owner_compact_payload(rollup: dict[str, object]) -> dict[str, object]:
     }
 
 
-# LLM: _owner_home_for_task infers the owner home from a V2 task workspace path.
-# 函数用途: 从 owner_home/tasks/<date>/<task> 路径回推 owner_home；非 task 路径返回 None。
 def _owner_home_for_task(task_root: Path) -> Path | None:
     parts = task_root.parts
     if "tasks" not in parts:
@@ -54,18 +118,13 @@ def _owner_home_for_task(task_root: Path) -> Path | None:
     return Path(*parts[:index])
 
 
-# LLM: _safe_key turns open-world ids into file names without rejecting unknown ids.
-# 函数用途: 把 task/run/agent id 转成安全文件名，未知字符用下划线兜底。
 def _safe_key(value: object) -> str:
-    text = str(value or "").strip()
-    return "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in text)
+    return safe_path_segment(value, default="", replacement="_")
 
 
-# LLM: _write_json writes deterministic refs-only owner compact index files.
-# 函数用途: 创建父目录并写入带排序键的 UTF-8 JSON。
-def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-__all__ = ["sync_owner_compact_indexes"]
+__all__ = [
+    "OwnerCompactIndexRefsReport",
+    "dangling_owner_compact_index_refs",
+    "dangling_owner_compact_index_refs_report",
+    "sync_owner_compact_indexes",
+]

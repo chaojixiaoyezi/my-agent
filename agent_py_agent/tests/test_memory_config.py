@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """memory 配置安全解析测试。"""
 
-from agent_py_agent.agent.agent_core.runtime_context_compactor import (
+from agent_py_agent.agent.agent_core.runtime.context_compactor import (
     compact_trigger_percent,
     compact_trigger_tokens,
 )

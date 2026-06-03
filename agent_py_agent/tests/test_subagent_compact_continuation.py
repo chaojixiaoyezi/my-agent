@@ -4,18 +4,16 @@ import json
 import time
 from pathlib import Path
 
-from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
-from agent_py_agent.agent.agent_core.subagent_compact_continuation import (
+from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
+from agent_py_agent.agent.agent_core.subagent.compact_continuation import (
     _is_stale_packet,
-    _read_json,
 )
+from agent_py_agent.agent.agent_core.subagent.compact_continuation_io import read_json
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_runner_results import RecordRunnerResultParams
 from agent_py_agent.agent.subagents.models import SubAgentParsedOutput
 
 
-# LLM: subagent saves must materialize a task-local continue packet before any parent rerun.
-# 函数用途: 验证子代理保存时自动生成 latest_continue_packet 和 session compact ledger，供父级按 refs 接管。
 def test_subagent_save_writes_task_local_continue_packet(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
@@ -53,8 +51,53 @@ def test_subagent_save_writes_task_local_continue_packet(tmp_path: Path) -> None
     assert json.loads(ledger_lines[-1])["packet_ref"] == str(packet_ref)
 
 
-# LLM: parent reruns should pick up generated task-local continue packets through the normal context path.
-# 函数用途: 验证父级重新构建 runner prompt 时自动读取保存生成的 continue packet，而不是靠手工传入。
+def test_subagent_continue_packet_reports_dirty_output_json(tmp_path: Path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="继续分析任务",
+        thought="output.json 损坏时恢复包要说明问题。",
+        plan=["读取恢复包", "继续修复输出"],
+        role="worker",
+    )
+    Path(task.output_json).write_text("{not-json", encoding="utf-8")
+
+    manager.save(task)
+    loaded = manager.load(task.id)
+    packet = json.loads(Path(loaded.agent_run_latest_session_continue_packet_json).read_text(encoding="utf-8"))
+
+    (error,) = packet["reserved"]["load_errors"]
+    assert error["context"] == "subagent.continue_packet.output_json"
+    assert error["path"] == task.output_json
+    assert error["category"] == "data_parse"
+
+
+def test_subagent_continue_packet_reports_dirty_runtime_refs(tmp_path: Path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="继续分析任务",
+        thought="session compact 和进度文件损坏时恢复包要说明问题。",
+        plan=["读取恢复包", "继续修复输出"],
+        role="worker",
+    )
+    workspace = Path(task.agent_run_workspace_dir)
+    progress_ref = workspace / "progress" / "latest_tool_progress.json"
+    progress_ref.parent.mkdir(parents=True, exist_ok=True)
+    progress_ref.write_text("{bad-progress", encoding="utf-8")
+    metadata_ref = workspace / "compact" / "session" / "latest_session_compact_metadata.json"
+    metadata_ref.parent.mkdir(parents=True, exist_ok=True)
+    metadata_ref.write_text("{bad-session-compact", encoding="utf-8")
+    task.agent_run_latest_session_compaction_metadata_json = str(metadata_ref)
+
+    manager.save(task)
+    loaded = manager.load(task.id)
+    packet = json.loads(Path(loaded.agent_run_latest_session_continue_packet_json).read_text(encoding="utf-8"))
+
+    contexts = {error["context"] for error in packet["reserved"]["load_errors"]}
+    assert "subagent.continue_packet.session_compact" in contexts
+    assert "subagent.continue_packet.work_progress" in contexts
+    assert packet["ready_to_continue"] is True
+
+
 def test_runner_prompt_uses_generated_task_local_continue_packet(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
@@ -79,8 +122,6 @@ def test_runner_prompt_uses_generated_task_local_continue_packet(tmp_path: Path)
     assert "SOUL.md" not in prompt
 
 
-# LLM: repeated saves should not create noisy duplicate continue-packet ledger rows.
-# 函数用途: 防止长任务每轮保存都把相同 packet 追加到 session ledger，避免日志膨胀。
 def test_continue_packet_ledger_dedupes_unchanged_state(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
@@ -98,8 +139,6 @@ def test_continue_packet_ledger_dedupes_unchanged_state(tmp_path: Path) -> None:
     assert json.loads(rows[0])["state_fingerprint"]
 
 
-# LLM: empty packets should be summarized enough that a runner can start work without rereading the packet body.
-# 函数用途: 覆盖真实 E2E 暴露的慢路径：新任务 packet 无进度时，runner prompt 要明确不要反复读完整 JSON。
 def test_runner_prompt_says_empty_continue_packet_can_start_from_goal(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
@@ -117,8 +156,6 @@ def test_runner_prompt_says_empty_continue_packet_can_start_from_goal(tmp_path: 
     assert "start from the task goal instead of reading the packet body" in prompt
 
 
-# LLM: corrupted continue packets must not make parent reruns reinterpret the original task from scratch.
-# 函数用途: 验证 latest_continue_packet 损坏时，runner prompt 明确降级到 checkpoint/summary/task-local refs。
 def test_runner_prompt_falls_back_to_checkpoint_when_continue_packet_is_corrupt(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
@@ -139,13 +176,14 @@ def test_runner_prompt_falls_back_to_checkpoint_when_continue_packet_is_corrupt(
 
     assert "Task-Local Compact Continuation" in prompt
     assert "packet_status: unreadable_json" in prompt
+    assert "packet_load_error:" in prompt
+    assert "subagent_compact_continuation.continue_packet" in prompt
+    assert str(packet_ref) in prompt
     assert "fallback_to: checkpoint/summary/task-local refs" in prompt
     assert "agent_run_checkpoint" in prompt
     assert "checkpoint 里还有可用恢复事实" in prompt
 
 
-# LLM: runner prepare may self-heal packet files, but the prompt must still show the damaged preflight state.
-# 函数用途: 验证真实 dispatch 前的 prepare_runner_attempt 会记录 packet 损坏事实，并让 runner prompt 可审计地降级到 checkpoint。
 def test_prepare_runner_attempt_preserves_corrupt_packet_preflight(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
@@ -174,8 +212,6 @@ def test_prepare_runner_attempt_preserves_corrupt_packet_preflight(tmp_path: Pat
     assert "checkpoint 仍然可用" in prompt
 
 
-# LLM: stale continue packets should be treated as hints only, with durable refs as the recovery source.
-# 函数用途: 验证 latest_continue_packet 过期时，runner prompt 标记 stale 并降级读 checkpoint/summary。
 def test_runner_prompt_falls_back_to_checkpoint_when_continue_packet_is_stale(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
@@ -193,7 +229,7 @@ def test_runner_prompt_falls_back_to_checkpoint_when_continue_packet_is_stale(tm
     packet = json.loads(packet_ref.read_text(encoding="utf-8"))
     packet["created_at"] = time.time() - 8 * 24 * 60 * 60
     packet_ref.write_text(json.dumps(packet, ensure_ascii=False), encoding="utf-8")
-    assert _is_stale_packet(packet_ref, _read_json(packet_ref))
+    assert _is_stale_packet(packet_ref, read_json(packet_ref))
 
     prompt = _build_subagent_runner_prompt(manager.build_execution_context(task.id))
 
@@ -203,8 +239,6 @@ def test_runner_prompt_falls_back_to_checkpoint_when_continue_packet_is_stale(tm
     assert "summary 是过期 packet 后的稳定恢复事实" in prompt
 
 
-# LLM: missing continue packets should still leave the durable task-local recovery refs visible.
-# 函数用途: 验证 latest_continue_packet 缺失时不会放弃恢复，而是继续展示 checkpoint/summary/task refs。
 def test_runner_prompt_uses_checkpoint_when_continue_packet_is_missing(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
@@ -229,8 +263,6 @@ def test_runner_prompt_uses_checkpoint_when_continue_packet_is_missing(tmp_path:
     assert "summary 是缺失 packet 后的稳定恢复事实" in prompt
 
 
-# LLM: timeout recovery packets must reflect the final runner state, not the earlier RUNNING attempt state.
-# 函数用途: 验证 runner timeout 写回后，接管包、失败交接和 continue packet 都能指向同一个 TIMEOUT 事实。
 def test_timeout_runner_result_refreshes_recovery_packets(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
@@ -268,8 +300,6 @@ def test_timeout_runner_result_refreshes_recovery_packets(tmp_path: Path) -> Non
     assert handoff["failure_type"] == "runner_timeout"
 
 
-# LLM: subagent-owned compact packages must stay inside the run workspace, never main memory_archive.
-# 函数用途: 验证子代理模型回合接近上下文上限时，会写 task-local session compact 包并挂到 continue packet。
 def test_subagent_runner_result_writes_task_local_session_compact_package(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
@@ -315,8 +345,6 @@ def test_subagent_runner_result_writes_task_local_session_compact_package(tmp_pa
     assert not (tmp_path / "memory_archive" / "compact_applies").exists()
 
 
-# LLM: Session compact packages need their own refs so checkpoint compact latest files stay authoritative.
-# 函数用途: 验证子代理会话续接包不会覆盖普通 checkpoint compact chain 的 latest_metadata/latest_summary。
 def test_session_compact_refs_do_not_overwrite_checkpoint_compact_latest_refs(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
@@ -351,8 +379,6 @@ def test_session_compact_refs_do_not_overwrite_checkpoint_compact_latest_refs(tm
     assert json.loads(session_metadata_ref.read_text(encoding="utf-8"))["schema_version"] == "subagent_session_compact.v1"
 
 
-# LLM: runner prompts should surface the task-local session compact package before stale parent memory.
-# 函数用途: 验证父级重新 dispatch 时，runner prompt 展示子代理 compact metadata/summary refs 和下一步。
 def test_runner_prompt_includes_task_local_session_compact_package(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
@@ -382,8 +408,6 @@ def test_runner_prompt_includes_task_local_session_compact_package(tmp_path: Pat
     assert "memory_archive/compact_applies" not in prompt
 
 
-# LLM: _record_session_compact_result keeps compact package tests focused on assertions.
-# 函数用途: 写入一个带 session_compact 信号的 runner result，复用结构化输出和 token budget 形状。
 def _record_session_compact_result(
     manager: SubAgentManager,
     run_id: str,
@@ -415,8 +439,6 @@ def _record_session_compact_result(
     )
 
 
-# LLM: _session_compact_refs reads the compact package files produced by manager persistence.
-# 函数用途: 返回测试断言需要的 metadata、continue packet 和 ledger 行，避免测试函数变长。
 def _session_compact_refs(task) -> dict[str, object]:
     latest_metadata = Path(task.agent_run_latest_session_compaction_metadata_json)
     latest_summary = Path(task.agent_run_latest_session_compaction_summary_md)

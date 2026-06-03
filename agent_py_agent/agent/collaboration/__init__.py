@@ -1,5 +1,3 @@
-# LLM: Collaboration package exposes the generic multi-agent coordination control plane.
-# 模块用途: 对外导出协作 case、能力、请求、证据和 coordinator，不承载任何业务专项逻辑。
 
 from __future__ import annotations
 

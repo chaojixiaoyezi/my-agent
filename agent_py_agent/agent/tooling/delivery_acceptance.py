@@ -1,5 +1,3 @@
-# LLM: submit_for_acceptance is a generic handoff signal from model work to machine closeout.
-# 模块用途: 提供通用“提交系统验收”工具；工具本身不验收、不放行，只让运行循环进入验收门。
 
 from __future__ import annotations
 

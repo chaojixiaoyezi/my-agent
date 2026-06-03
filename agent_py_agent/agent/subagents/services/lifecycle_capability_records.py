@@ -1,5 +1,3 @@
-# LLM: Capability lifecycle record builders keep SubAgentLifecycleService small as schemas grow.
-# 模块用途: 集中构造能力申请、授权和缺口记录，避免生命周期服务文件随字段扩展变大。
 
 from __future__ import annotations
 
@@ -13,8 +11,6 @@ from ..models import CapabilityGap, CapabilityGrant, CapabilityRequest
 from ..utils import _new_id
 
 
-# LLM: build_capability_request keeps request schema construction in one place.
-# 函数用途: 根据参数包构造 CapabilityRequest，避免服务类方法随字段扩展不断变长。
 def build_capability_request(run_id: str, params: Any) -> CapabilityRequest:
     return CapabilityRequest(
         id=_new_id("capreq"),
@@ -42,8 +38,6 @@ def build_capability_request(run_id: str, params: Any) -> CapabilityRequest:
     )
 
 
-# LLM: build_capability_grant mirrors scoped grant params without bloating SubAgentLifecycleService.
-# 函数用途: 根据参数包构造 CapabilityGrant，并保留旧 skills/tools 兼容行为。
 def build_capability_grant(run_id: str, params: Any) -> CapabilityGrant:
     return CapabilityGrant(
         id=_new_id("capgrant"),
@@ -68,8 +62,6 @@ def build_capability_grant(run_id: str, params: Any) -> CapabilityGrant:
     )
 
 
-# LLM: BuildCapabilityGapInput bundles route-derived memory facts for gap construction.
-# 类用途: 汇总 gap 构造所需的任务、参数和 memory route 命中信息，保持 helper 调用稳定。
 @dataclass(frozen=True)
 class BuildCapabilityGapInput:
     run_id: str
@@ -79,8 +71,6 @@ class BuildCapabilityGapInput:
     injected_rule_paths: list[str]
 
 
-# LLM: build_capability_gap preserves requested scope and memory routes in one construction point.
-# 函数用途: 根据参数包和路由命中构造 CapabilityGap，避免字段扩展散落在服务方法中。
 def build_capability_gap(request: BuildCapabilityGapInput) -> CapabilityGap:
     params = request.params
     return CapabilityGap(

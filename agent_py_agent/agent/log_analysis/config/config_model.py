@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 """本模块定义 LOG 配置的数据模型、默认值和路径解析，所有高风险能力默认关闭。
 
@@ -17,8 +15,6 @@ from pathlib import Path
 from typing import Any
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 LogAnalysisConfigWarning 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 LogAnalysisConfigWarning 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class LogAnalysisConfigWarning:
     """记录单个配置字段为什么被回退到安全默认值。
@@ -38,15 +34,12 @@ class LogAnalysisConfigWarning:
     fallback_value: Any
     reason: str
 
-    # LLM: 配置层加载、校验并归一化日志分析运行参数；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
         """把 warning dataclass 转成可序列化 dict。
 
         新手说明:
         CLI、doctor 和测试更适合处理字典。这个方法不改变 warning，只转换格式。
 
-        参数说明:
         这个方法没有输入参数，只读取当前 warning 的字段。
 
         返回说明:
@@ -54,8 +47,6 @@ class LogAnalysisConfigWarning:
         return asdict(self)
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 LogAnalysisConfig 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 LogAnalysisConfig 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class LogAnalysisConfig:
     """表示 LOG 配置经过校验后的最终生效值，并把危险能力保持默认关闭。
@@ -115,15 +106,12 @@ class LogAnalysisConfig:
     config_warnings: list[dict[str, Any]] = field(default_factory=list)
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 default_log_analysis_config_path 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 default log analysis config path 在当前模块中的核心转换或协调步骤，衔接 配置层加载、校验并归一化日志分析运行参数。
 def default_log_analysis_config_path() -> Path:
     """返回项目默认 LOG 配置文件路径。
 
     新手说明:
     不传 config_path 时，加载器会去这里找 `config/log_analysis_config.yaml`。
 
-    参数说明:
     这个函数没有输入参数。
 
     返回说明:
@@ -131,15 +119,12 @@ def default_log_analysis_config_path() -> Path:
     return Path(__file__).resolve().parents[2] / "config" / "log_analysis_config.yaml"
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 default_log_analysis_workspace_root 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 default log analysis workspace root 在当前模块中的核心转换或协调步骤，衔接 配置层加载、校验并归一化日志分析运行参数。
 def default_log_analysis_workspace_root() -> Path:
     """返回 LOG 默认工作区根目录，用于解析相对 data_dir。
 
     新手说明:
     data_dir 如果是相对路径，需要知道从哪里开始拼。这里给出项目默认根目录。
 
-    参数说明:
     这个函数没有输入参数。
 
     返回说明:
@@ -147,8 +132,6 @@ def default_log_analysis_workspace_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 resolve_log_analysis_data_dir 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 resolve log analysis data dir 在当前模块中的核心转换或协调步骤，衔接 配置层加载、校验并归一化日志分析运行参数。
 def resolve_log_analysis_data_dir(
     data_dir: str | Path,
     *,
@@ -160,7 +143,6 @@ def resolve_log_analysis_data_dir(
     用户可以把 data_dir 写成绝对路径，也可以写成 `data/log_analysis` 这种相对路径。
     这个函数负责把它变成程序真正能用的 Path。
 
-    参数说明:
     data_dir: 配置里的数据目录，可以是 str 或 Path。
     workspace_root: 可选工作区根目录；相对 data_dir 会拼到这个目录下。
 

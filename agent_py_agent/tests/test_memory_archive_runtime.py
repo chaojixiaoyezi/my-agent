@@ -5,7 +5,8 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.runtime_live_archive import (
+from agent_py_agent.agent.agent_core.runtime import live_archive as runtime_live_archive
+from agent_py_agent.agent.agent_core.runtime.live_archive import (
     archive_assistant_tool_round_if_enabled,
     update_runtime_fact_progress_if_enabled,
 )
@@ -246,6 +247,59 @@ def test_live_archive_respects_archive_level_zero(tmp_path: Path) -> None:
     assert "abcdefabcdefabcdef" in records[0]["content_preview"]
 
 
+def test_live_archive_records_assistant_archive_errors(tmp_path: Path, monkeypatch) -> None:
+    config = AgentConfig()
+    agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
+    params = SimpleNamespace(
+        request_id="req-live",
+        run_id="run-live",
+        task_id="task-live",
+        save=True,
+        live_archive_state={},
+    )
+
+    def fail_archive(*args, **kwargs):
+        raise OSError("raw archive locked")
+
+    monkeypatch.setattr(runtime_live_archive, "archive_assistant_tool_round", fail_archive)
+
+    archive_assistant_tool_round_if_enabled(
+        agent,
+        params,
+        tool_round=1,
+        response_text="准备读取资料。",
+        tool_calls=[],
+    )
+
+    errors = params.live_archive_state["live_archive_errors"]
+    assert errors[0]["context"] == "live_archive.assistant_tool_round"
+    assert errors[0]["message"] == "raw archive locked"
+
+
+def test_runtime_fact_progress_records_write_errors(tmp_path: Path, monkeypatch) -> None:
+    config = AgentConfig()
+    agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
+    params = SimpleNamespace(
+        request_id="req-live",
+        run_id="run-live",
+        task_id="task-live",
+        user_prompt="继续长期任务",
+        archive_tool_calls=[],
+        live_archive_state={},
+    )
+
+    def fail_runtime_fact(*args, **kwargs):
+        raise OSError("runtime fact locked")
+
+    monkeypatch.setattr(runtime_live_archive, "write_runtime_fact_source", fail_runtime_fact)
+
+    update_runtime_fact_progress_if_enabled(agent, params, tool_round=7)
+
+    errors = params.live_archive_state["live_archive_errors"]
+    assert errors[0]["context"] == "live_archive.runtime_fact.progress"
+    assert errors[0]["message"] == "runtime fact locked"
+
+
 def test_archive_run_turn_skips_tool_records_already_written_live():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -310,8 +364,6 @@ def test_runtime_fact_progress_updates_without_raw_checkpoint(tmp_path: Path) ->
     assert not (tmp_path / "memory" / "raw").exists()
 
 
-# LLM: Runtime live archive should follow the resolved owner home when available.
-# 函数用途: 验证运行中 raw archive 和 runtime_fact 优先写入 owner 私有目录，不再默认写到 workspace 根。
 def test_live_archive_and_runtime_fact_use_owner_home(tmp_path: Path) -> None:
     config = AgentConfig()
     owner_home = tmp_path / "home" / "owners" / "providers" / "feishu" / "users" / "ou_123"
@@ -342,8 +394,6 @@ def test_live_archive_and_runtime_fact_use_owner_home(tmp_path: Path) -> None:
     assert not (agent.root / "memory_archive" / "runtime_facts" / "req-owner" / "task.json").exists()
 
 
-# LLM: Continuation runs should update progress without replacing the original task goal.
-# 函数用途: 验证 compact 续跑轮写 runtime_fact 时保留 root_user_prompt，不把“继续执行”提示当用户目标。
 def test_runtime_fact_progress_preserves_root_user_prompt(tmp_path: Path) -> None:
     config = AgentConfig()
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")

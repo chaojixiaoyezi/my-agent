@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 
-# LLM: Delivery-contract CLI loading should be observable when a machine contract is unreadable.
-# 函数用途: 验证坏 JSON 不会静默吞掉，方便运行链路定位合同文件问题。
 def test_delivery_contract_from_file_warns_on_unreadable_contract(tmp_path, caplog) -> None:
     from agent_py_agent.cli.delivery_contracts import delivery_contract_from_file
 
@@ -16,8 +14,6 @@ def test_delivery_contract_from_file_warns_on_unreadable_contract(tmp_path, capl
     assert "failed to read delivery contract" in caplog.text
 
 
-# LLM: Valid delivery contracts should still load as plain machine fields.
-# 函数用途: 防止 warning 增强影响正常 --delivery-contract-file 读取。
 def test_delivery_contract_from_file_loads_json_object(tmp_path) -> None:
     from agent_py_agent.cli.delivery_contracts import delivery_contract_from_file
 
@@ -30,8 +26,6 @@ def test_delivery_contract_from_file_loads_json_object(tmp_path) -> None:
     }
 
 
-# LLM: Delivery contract loading should leave machine-readable findings for malformed contract shapes.
-# 函数用途: 验证 schema preflight 不把坏 artifacts 列表静默交给 prompt renderer 降级。
 def test_delivery_contract_from_file_attaches_preflight_findings(tmp_path, caplog) -> None:
     from agent_py_agent.cli.delivery_contracts import delivery_contract_from_file
 

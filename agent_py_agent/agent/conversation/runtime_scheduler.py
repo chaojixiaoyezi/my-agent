@@ -1,12 +1,10 @@
-# LLM: Background scheduler decides when to wake the runtime, not what to conclude.
-# 模块用途: 处理 wake signal、observation、progress policy 和后台运行 claim。
 
 from __future__ import annotations
 
 import threading
 from typing import TYPE_CHECKING
 
-from ..agent_core.agent_tree_status import agent_tree_status_payload
+from ..agent_core.agent_tree.status import agent_tree_status_payload
 from ..settings.defaults import default_config_int
 from .models import BackgroundMainAgentReport, ObservationEvent, ProgressPolicy, WakeSignal
 from .runtime_utils import (
@@ -43,6 +41,7 @@ class BackgroundMainAgentScheduler:
             ttl_seconds=self.claim_ttl_seconds,
             configured_interval_seconds=claim_heartbeat_interval_seconds,
         )
+        self.last_progress_policy_load_errors: list[dict[str, object]] = []
 
     def tick(self, *, now: float | None = None) -> list[BackgroundMainAgentReport]:
         current = now if now is not None else __import__("time").time()
@@ -89,7 +88,9 @@ class BackgroundMainAgentScheduler:
                 reported.add(report.thread_id)
 
     def _run_due_policies(self, reports: list[BackgroundMainAgentReport], reported: set[str], current: float) -> None:
-        for policy in self.store.due_progress_policies(now=current):
+        policies, load_errors = self.store.due_progress_policies_report(now=current)
+        self.last_progress_policy_load_errors = load_errors
+        for policy in policies:
             if policy.thread_id in reported:
                 continue
             if report := self._run_due_policy(policy, now=current):
@@ -161,8 +162,6 @@ class BackgroundMainAgentScheduler:
             if signal.thread_id == thread_id and signal.wake_signal_id not in handled:
                 self._mark_signal(signal, current, handled)
 
-    # LLM: _config_limit reads scheduler list limits from the current agent config.
-    # 函数用途: 读取 wake signal / observation 批量处理上限，避免 scheduler 写死读取条数。
     def _config_limit(self, key: str) -> int:
         return _agent_config_int(getattr(getattr(self.runtime, "agent", None), "config", None), key)
 
@@ -174,11 +173,10 @@ class BackgroundMainAgentScheduler:
             "last_progress_at": float(getattr(agent, "_last_progress_at", 0.0) or 0.0),
             "last_progress_summary": str(getattr(agent, "_last_progress_summary", "") or ""),
             "tree_status_buckets": tree.get("status_buckets") if isinstance(tree.get("status_buckets"), dict) else {},
+            "progress_policy_load_errors": list(self.last_progress_policy_load_errors),
         }
 
 
-# LLM: _agent_config_int normalizes background scheduler integer config.
-# 函数用途: 读取后台 claim 和会话扫描预算；非法值回退到 AgentConfig 默认值。
 def _agent_config_int(config: object | None, key: str) -> int:
     if config is None:
         return default_config_int(key, minimum=0)

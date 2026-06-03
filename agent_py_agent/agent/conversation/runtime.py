@@ -1,5 +1,3 @@
-# LLM: Compatibility exports for background conversation runtime.
-# 模块用途: 保留原 runtime.py 导入入口，具体实现分散在 runtime_worker/scheduler/channel。
 
 from __future__ import annotations
 

@@ -51,7 +51,6 @@ def _run_cli_json(capsys, config_path: Path, *argv: str) -> tuple[int, dict]:
 
 @dataclass(frozen=True)
 class _ArchiveRawEventParams:
-    # LLM: archive fixture fields stay bundled so tests mirror product bundle rules.
     event_id: str
     run_id: str
     speaker: str

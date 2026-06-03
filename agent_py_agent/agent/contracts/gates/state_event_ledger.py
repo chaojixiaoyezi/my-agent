@@ -1,5 +1,3 @@
-# LLM: State/event ledger gates keep lifecycle changes and async results tied to auditable events.
-# 模块用途: 校验状态迁移、事件记录、lease 和重复调度，防止 DONE 继续跑或过期 worker 写成功。
 
 from __future__ import annotations
 
@@ -7,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from ..recovery_actions import RecoveryAction
 from ..state_machine_transitions import transition_contract
 from .models import GateDecision, GateFinding
 
@@ -16,8 +15,6 @@ _TOOL_RESULT_EVENTS = {"tool_result", "tool_completed"}
 _ACTIVE_STATUSES = {"RUNNING", "WAITING_FOR_TOOL", "WAITING_FOR_CHILD", "WAITING_FOR_USER"}
 
 
-# LLM: StateEventLedgerSnapshot is the state-control input consumed by the gate.
-# 类用途: 保存一个 run 的当前状态、事件流水、迁移记录和 lease 状态。
 @dataclass(frozen=True)
 class StateEventLedgerSnapshot:
     run_id: str
@@ -28,8 +25,6 @@ class StateEventLedgerSnapshot:
     lease_status: str = ""
 
 
-# LLM: evaluate_state_event_ledger_gate validates transitions and async event ordering.
-# 函数用途: 保证状态变化有事件、迁移合法、终态不再 dispatch、过期 lease 不能提交工具结果。
 def evaluate_state_event_ledger_gate(snapshot: StateEventLedgerSnapshot | Mapping[str, object]) -> GateDecision:
     item = _ledger_snapshot(snapshot)
     findings: list[GateFinding] = []
@@ -41,7 +36,14 @@ def evaluate_state_event_ledger_gate(snapshot: StateEventLedgerSnapshot | Mappin
     _collect_lease_findings(item, events, findings)
     _collect_duplicate_action_findings(item, events, findings)
     if findings:
-        return GateDecision("state_event_ledger", "DENY", False, tuple(findings), "repair_or_recover_ledger", {})
+        return GateDecision(
+            "state_event_ledger",
+            "DENY",
+            False,
+            tuple(findings),
+            RecoveryAction.REPAIR.value,
+            {},
+        )
     return GateDecision.allow(
         "state_event_ledger",
         evidence={
@@ -53,8 +55,6 @@ def evaluate_state_event_ledger_gate(snapshot: StateEventLedgerSnapshot | Mappin
     )
 
 
-# LLM: _collect_run_mismatch_findings blocks stale async events from other runs.
-# 函数用途: 事件带 run_id 时必须匹配当前 snapshot.run_id，防止旧 run 结果误投递。
 def _collect_run_mismatch_findings(
     snapshot: StateEventLedgerSnapshot,
     events: list[dict[str, Any]],
@@ -75,8 +75,6 @@ def _collect_run_mismatch_findings(
             return
 
 
-# LLM: _collect_transition_findings requires every state change to have a matching event and legal hop.
-# 函数用途: 检查 transitions 列表，不允许绕过共享状态机或缺少 event_id。
 def _collect_transition_findings(
     snapshot: StateEventLedgerSnapshot,
     event_ids: set[str],
@@ -97,8 +95,6 @@ def _collect_transition_findings(
             )
 
 
-# LLM: _collect_terminal_action_findings blocks work from restarting after terminal states.
-# 函数用途: DONE/CANCELLED/ABANDONED 后不能继续 dispatch 或执行工具。
 def _collect_terminal_action_findings(snapshot: StateEventLedgerSnapshot, findings: list[GateFinding]) -> None:
     status = str(snapshot.current_status or "").strip().upper()
     action = str(snapshot.next_action or "").strip().lower()
@@ -106,8 +102,6 @@ def _collect_terminal_action_findings(snapshot: StateEventLedgerSnapshot, findin
         findings.append(GateFinding("STATE_EVENT_LEDGER_TERMINAL_ACTION_BLOCKED", evidence={"status": status}))
 
 
-# LLM: _collect_lease_findings rejects late tool results after worker lease expiry.
-# 函数用途: lease 已过期时，不允许 tool_result 事件继续推进成功链路。
 def _collect_lease_findings(
     snapshot: StateEventLedgerSnapshot,
     events: list[dict[str, Any]],
@@ -119,8 +113,6 @@ def _collect_lease_findings(
         findings.append(GateFinding("STATE_EVENT_LEDGER_LEASE_EXPIRED_RESULT", evidence={"run_id": snapshot.run_id}))
 
 
-# LLM: _collect_duplicate_action_findings detects repeated dispatch/tool actions for active runs.
-# 函数用途: 同 operation_id 在活跃状态下重复出现，说明调度或工具提交不具备幂等保护。
 def _collect_duplicate_action_findings(
     snapshot: StateEventLedgerSnapshot,
     events: list[dict[str, Any]],
@@ -141,8 +133,6 @@ def _collect_duplicate_action_findings(
         seen.add(operation_id)
 
 
-# LLM: _ledger_snapshot converts dict payloads into the public dataclass.
-# 函数用途: 兼容 persisted JSON rows，但 gate 内部只处理 StateEventLedgerSnapshot。
 def _ledger_snapshot(value: StateEventLedgerSnapshot | Mapping[str, object]) -> StateEventLedgerSnapshot:
     if isinstance(value, StateEventLedgerSnapshot):
         return value
@@ -157,8 +147,6 @@ def _ledger_snapshot(value: StateEventLedgerSnapshot | Mapping[str, object]) -> 
         lease_status=str(value.get("lease_status") or ""),
     )
 
-# LLM: _event_dict normalizes persisted event mappings into plain string-key dicts.
-# 函数用途: 兼容 JSON 行和 dataclass/mapping 输入，后续 gate 只读字符串键。
 def _event_dict(event: Mapping[object, object]) -> dict[str, Any]:
     return {str(key): value for key, value in event.items()}
 

@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 from __future__ import annotations
 
@@ -14,11 +12,8 @@ from typing import Any
 from ..parsers.common import utc_now
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 BatchFinish 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 BatchFinish 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class BatchFinish:
-    # LLM: Batch finalization is bundled so ingest accounting can grow safely.
     batch_id: str
     status: str
     event_count: int
@@ -27,23 +22,17 @@ class BatchFinish:
     manifest_path: str
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 DedupStore 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 封装 DedupStore 的持久化入口，把路径、读写和查询操作集中到同一对象。
 class DedupStore:
     """SQLite-backed batch and event dedup ledger."""
 
     _init_locks_guard = threading.Lock()
     _init_locks: dict[str, threading.Lock] = {}
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 __init__ 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 初始化实例依赖、路径或缓存状态，为同一对象的后续方法提供共享上下文。
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema_once()
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _init_schema_once 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 init schema once 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     def _init_schema_once(self) -> None:
         """Serialize first-time schema bootstrap for the same SQLite path.
 
@@ -56,8 +45,6 @@ class DedupStore:
         with lock:
             self._init_schema()
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 begin_batch 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 begin batch 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     def begin_batch(
         self,
         *,
@@ -93,8 +80,6 @@ class DedupStore:
                 )
             return cur.rowcount == 1
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 finish_batch 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 finish batch 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     def finish_batch(
         self,
         *,
@@ -135,8 +120,6 @@ class DedupStore:
                 ),
             )
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 is_duplicate 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 is duplicate 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     def is_duplicate(self, dedup_key: str) -> bool:
         with self._connect() as conn:
             row = conn.execute(
@@ -145,8 +128,6 @@ class DedupStore:
             ).fetchone()
         return row is not None
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 mark_event 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 写入或登记 mark event 相关记录，集中处理目标路径、格式化和状态更新。
     def mark_event(
         self,
         *,
@@ -178,8 +159,6 @@ class DedupStore:
                 )
             return cur.rowcount == 1
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 note_duplicate 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 note duplicate 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     def note_duplicate(self, dedup_key: str) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -191,16 +170,12 @@ class DedupStore:
                 (utc_now(), dedup_key),
             )
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 stats 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 stats 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     def stats(self) -> dict[str, Any]:
         with self._connect() as conn:
             event_count = conn.execute("SELECT COUNT(*) FROM log_event_dedup").fetchone()[0]
             batch_count = conn.execute("SELECT COUNT(*) FROM log_ingest_batches").fetchone()[0]
         return {"event_dedup_count": event_count, "batch_count": batch_count}
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _init_schema 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 init schema 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     def _init_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(
@@ -234,8 +209,6 @@ class DedupStore:
                 """
             )
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _connect 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 connect 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path, timeout=30.0)

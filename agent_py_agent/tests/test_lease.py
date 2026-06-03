@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_py_agent.agent.gateway_parts import lease as lease_module
+from agent_py_agent.agent.gateway_parts import lease_service
 
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
 
@@ -187,6 +188,28 @@ def test_touch_gateway_processing_lease_updates_timestamp(request_path):
     assert payload["lease_heartbeat_at"] > before
 
 
+def test_refresh_processing_lease_report_bad_json(request_path):
+    """坏 request JSON 不能伪装成普通心跳失败。"""
+    request_id = "test-bad-json-lease"
+    request_path.write_text("{bad json", encoding="utf-8")
+
+    report = lease_service.refresh_processing_lease_report(
+        request_path,
+        request_id=request_id,
+        worker_id="worker-lease",
+    )
+
+    assert report.ok is False
+    assert report.load_error is not None
+    assert report.load_error["context"] == "gateway.lease.request.read"
+    assert report.load_error["path"] == str(request_path)
+    assert lease_service.refresh_processing_lease(
+        request_path,
+        request_id=request_id,
+        worker_id="worker-lease",
+    ) is False
+
+
 # ── 心跳线程启动测试 ──────────────────────────────────────────────────────
 
 def test_start_heartbeat_thread_adds_to_active(mock_agent, request_path):
@@ -311,19 +334,11 @@ def test_touch_lease_write_error(mock_agent, request_path, monkeypatch):
     request_id = "test-write-error"
     write_json_file(request_path, {"id": request_id, "status": "processing"})
 
-    # Mock read_json_file to succeed but write_json_file_atomic to fail
-    def mock_read(path):
-        return {"id": request_id, "status": "processing"}
-
     def mock_write_fail(path, payload):
         raise OSError("Simulated write error")
 
     monkeypatch.setattr(
-        "agent_py_agent.agent.gateway_parts.lease.read_json_file",
-        mock_read
-    )
-    monkeypatch.setattr(
-        "agent_py_agent.agent.gateway_parts.lease.write_json_file_atomic",
+        "agent_py_agent.agent.gateway_parts.lease_service.write_json_file_atomic",
         mock_write_fail
     )
 

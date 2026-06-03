@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 from __future__ import annotations
 
@@ -37,8 +35,6 @@ from .subcommands_agents_hierarchy import (
 )
 
 
-# LLM: _add_capability_config_arg 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--capability-config",
@@ -47,8 +43,6 @@ def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
     )
 
 
-# LLM: _add_agents_basic_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_agents_basic_subcommands(sub):
     spawn = sub.add_parser("spawn-subagents", help="拆分并创建 subagent 任务记录")
     spawn.add_argument("goal", help="要拆分的目标")
@@ -79,8 +73,6 @@ def _add_agents_basic_subcommands(sub):
     _add_agents_monitoring_subcommands(sub)
 
 
-# LLM: _add_agents_monitoring_subcommands groups board follow-up and budget commands.
-# 函数用途: 注册 due-check、budget、probe 和 action-plan 等监控/父代理待办命令。
 def _add_agents_monitoring_subcommands(sub):
     due_check = sub.add_parser("subagents-due-check", help="巡检 subagent 并输出父代理待处理项")
     _add_capability_config_arg(due_check)
@@ -115,8 +107,6 @@ def _add_agents_monitoring_subcommands(sub):
     action_plan.add_argument("--root-id", help="只为指定 root subagent 任务树生成动作计划")
     action_plan.set_defaults(func=cmd_subagents_plan_actions)
 
-# LLM: _add_agents_action_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_agents_action_subcommands(sub):
     apply_actions = sub.add_parser("subagents-apply-actions", help="执行或 dry-run 执行 action plan")
     _add_capability_config_arg(apply_actions)
@@ -142,8 +132,6 @@ def _add_agents_action_subcommands(sub):
     _add_agents_patch_subcommand(sub)
 
 
-# LLM: _add_agents_tests_subcommand registers the explicit test-report inspection command.
-# 函数用途: 注册测试执行记录查看和手动重跑命令。
 def _add_agents_tests_subcommand(sub):
     tests = sub.add_parser("subagents-tests", help="查看或显式重跑 subagent 真实测试执行记录")
     tests.add_argument("run_id", help="子代理运行 ID")
@@ -152,8 +140,6 @@ def _add_agents_tests_subcommand(sub):
     tests.set_defaults(func=cmd_subagents_tests)
 
 
-# LLM: _add_agents_patch_subcommand keeps patch review/apply argparse wiring out of the action hub.
-# 函数用途: 注册 patch 审核、预演和 apply 命令参数。
 def _add_agents_patch_subcommand(sub):
     patches = sub.add_parser("subagents-patches", help="审核 runner 输出里的 patch 记录")
     patch_action = patches.add_mutually_exclusive_group()
@@ -167,8 +153,6 @@ def _add_agents_patch_subcommand(sub):
     patches.add_argument("--note", help="写入 patch 审核记录的备注")
     patches.set_defaults(func=cmd_subagents_patches, patch_action="review_dry_run")
 
-# LLM: _add_agents_memory_gate_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_agents_memory_gate_subcommands(sub):
     memory_gate = sub.add_parser("subagents-memory-gate", help="查看或写回 memory gate review decision")
     memory_gate.add_argument("run_id", help="子代理运行 ID")
@@ -193,14 +177,12 @@ def _add_agents_memory_gate_subcommands(sub):
     memory_gate.set_defaults(func=cmd_subagents_memory_gate)
 
 
-# LLM: _add_agents_dispatch_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_agents_dispatch_subcommands(sub):
     dispatch = sub.add_parser("subagents-dispatch", help="执行一轮父代理调度，默认 dry-run")
     _add_capability_config_arg(dispatch)
     dispatch.add_argument("--dry-run", action="store_false", dest="apply", help="只生成调度报告，不修改记录")
     dispatch.add_argument("--apply", action="store_true", help="执行低风险调度动作并写审计日志")
-    dispatch.add_argument("--execute-runners", action="store_true", help="配合 --apply 调用真实模型执行 runner")
+    dispatch.add_argument("--start-runners", action="store_true", help="配合 --apply 调用真实模型执行 runner")
     dispatch.add_argument("--planner", action="store_true", help="有待处理事项时调用父代理 LLM planner，禁止空心 HEARTBEAT_OK")
     dispatch.add_argument("--workflow-mode", choices=["off", "plan", "auto"], default="off", help="dispatch 前对父任务执行 workflow 规划；plan 只写计划，auto 还会自动派工")
     dispatch.add_argument("--max-runners", type=int, default=None, help="本轮最多推进多少个 runner，0 表示不执行 runner；默认读配置")
@@ -223,8 +205,6 @@ def _add_agents_dispatch_subcommands(sub):
     dispatch.set_defaults(func=cmd_subagents_dispatch, apply=False)
 
 
-# LLM: _add_agents_context_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_agents_context_subcommands(sub):
     subagent_context = sub.add_parser("subagent-context", help="生成单个 subagent 执行上下文包")
     subagent_context.add_argument("run_id", help="子代理运行 ID")
@@ -245,8 +225,6 @@ def _add_agents_context_subcommands(sub):
     subagent.set_defaults(func=cmd_subagent_detail)
 
 
-# LLM: add_subagents_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def add_subagents_subcommands(sub: argparse._SubParsersAction) -> None:
     _add_agents_basic_subcommands(sub)
     _add_agents_action_subcommands(sub)

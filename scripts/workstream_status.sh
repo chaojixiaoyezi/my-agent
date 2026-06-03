@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# LLM: show git status for the main repository and all registered worktrees.
-# 给人看的解释：
 # 用它看现在开了哪些并行开发线、在哪个分支、有没有未提交改动。
 # 主线集成前先跑一遍，能减少漏看某条线的风险。
 

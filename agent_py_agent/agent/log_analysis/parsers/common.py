@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 from __future__ import annotations
 
@@ -22,8 +20,6 @@ from .field_aliases import (
 DEFAULT_PAYLOAD_MAX_CHARS = 512
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 _NormalizeOptions 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 _NormalizeOptions 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _NormalizeOptions:
     raw_ref: str
@@ -33,8 +29,6 @@ class _NormalizeOptions:
     payload_max_chars: int
     ingest_time: str | None
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 normalize_security_alert_v1 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 normalize security alert v1 涉及的字段，让后续匹配和存储使用同一形态。
 def normalize_security_alert_v1(
     record: Mapping[str, Any],
     *,
@@ -75,8 +69,6 @@ def normalize_security_alert_v1(
     return event
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 _map_security_alert_fields 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 map security alert fields 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def _map_security_alert_fields(raw_fields: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
     mapped: dict[str, Any] = {}
     mapping_source: dict[str, str] = {}
@@ -94,8 +86,6 @@ def _map_security_alert_fields(raw_fields: Mapping[str, Any]) -> tuple[dict[str,
     return mapped, mapping_source, attributes
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 _base_security_event 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 base security event 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def _base_security_event(
     mapped: Mapping[str, Any],
     raw_fields: Mapping[str, Any],
@@ -123,15 +113,11 @@ def _base_security_event(
     event["parser_id"] = "security_alert_v1"
     return event
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 stable_field_key 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 stable field key 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def stable_field_key(raw_key: str) -> str:
     key = _strip_key(raw_key)
     return FIELD_ALIASES.get(key) or FIELD_ALIASES.get(header_token(key)) or _to_snake(key)
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 mapping_source_for 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 mapping source for 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def mapping_source_for(raw_key: str, stable_key: str) -> str:
     key = _strip_key(raw_key)
     if CHINESE_SECURITY_ALERT_FIELD_MAP.get(key) == stable_key:
@@ -141,8 +127,6 @@ def mapping_source_for(raw_key: str, stable_key: str) -> str:
     return "alias"
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 parser_confidence 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 parser confidence 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def parser_confidence(raw_fields: Mapping[str, Any], mapping_source: Mapping[str, str]) -> float:
     if not raw_fields:
         return 0.0
@@ -155,8 +139,6 @@ def parser_confidence(raw_fields: Mapping[str, Any], mapping_source: Mapping[str
     return 0.25
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 clean_value 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 clean value 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def clean_value(value: Any) -> Any:
     if value is None:
         return None
@@ -166,8 +148,6 @@ def clean_value(value: Any) -> Any:
     return value
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 normalize_timestamp 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 normalize timestamp 涉及的字段，让后续匹配和存储使用同一形态。
 def normalize_timestamp(value: Any) -> str:
     if value is None:
         return utc_now()
@@ -183,27 +163,19 @@ def normalize_timestamp(value: Any) -> str:
     return parsed.isoformat().replace("+00:00", "Z")
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 utc_now 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 utc now 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 sha256_text 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 sha256 text 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 sha256_json 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 sha256 json 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def sha256_json(value: Mapping[str, Any]) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return sha256_text(payload)
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 event_fingerprint 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 event fingerprint 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def event_fingerprint(event: Mapping[str, Any]) -> str:
     source_id = event.get("source_id") or "unknown"
     alert_id = event.get("alert_id")
@@ -230,8 +202,6 @@ def event_fingerprint(event: Mapping[str, Any]) -> str:
     return sha256_json(compact)
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 infer_source_product 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 infer source product 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def infer_source_product(event: Mapping[str, Any], raw_fields: Mapping[str, Any]) -> str | None:
     haystack = " ".join(
         str(value)
@@ -251,8 +221,6 @@ def infer_source_product(event: Mapping[str, Any], raw_fields: Mapping[str, Any]
     return None
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 _apply_payload_policy 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 apply payload policy 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def _apply_payload_policy(event: dict[str, Any], *, payload_max_chars: int) -> None:
     payload = clean_value(event.get("payload"))
     if payload is None:
@@ -271,8 +239,6 @@ def _apply_payload_policy(event: dict[str, Any], *, payload_max_chars: int) -> N
     event["payload_original_size"] = len(text.encode("utf-8"))
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 _copy_security_ip_semantics 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 copy security ip semantics 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def _copy_security_ip_semantics(event: dict[str, Any]) -> None:
     if not event.get("attacker_ip") and event.get("src_ip"):
         event["attacker_ip"] = event["src_ip"]
@@ -284,8 +250,6 @@ def _copy_security_ip_semantics(event: dict[str, Any]) -> None:
         event["dst_ip"] = event["victim_ip"]
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 _coerce_port_fields 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 coerce port fields 涉及的字段，让后续匹配和存储使用同一形态。
 def _coerce_port_fields(event: dict[str, Any]) -> None:
     for key in ("dst_port",):
         value = clean_value(event.get(key))
@@ -298,8 +262,6 @@ def _coerce_port_fields(event: dict[str, Any]) -> None:
             event[key] = value
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 _clean_raw_fields 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 clean raw fields 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def _clean_raw_fields(record: Mapping[str, Any]) -> dict[str, Any]:
     raw_fields: dict[str, Any] = {}
     for key, value in record.items():
@@ -309,20 +271,14 @@ def _clean_raw_fields(record: Mapping[str, Any]) -> dict[str, Any]:
     return raw_fields
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 _strip_key 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 strip key 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def _strip_key(key: str) -> str:
     return strip_key(key)
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 _header_token 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 header token 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def _header_token(key: str) -> str:
     return header_token(key)
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 _to_snake 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 把 to snake 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
 def _to_snake(key: str) -> str:
     stripped = _strip_key(key)
     token = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", stripped).strip("_")
@@ -334,8 +290,6 @@ def _to_snake(key: str) -> str:
     return token.lower()
 
 
-# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 _try_parse_datetime 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 try parse datetime 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _try_parse_datetime(value: str) -> datetime | None:
     text = value.strip()
     if text.endswith("Z"):

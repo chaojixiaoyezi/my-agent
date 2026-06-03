@@ -1,5 +1,3 @@
-# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
-# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
 
 from __future__ import annotations
 
@@ -42,6 +40,7 @@ from .queue_service import (
     gateway_running,
     is_heartbeat_alive_for_request,
     rebuild_gateway_index,
+    rebuild_gateway_index_report,
     render_gateway_status,
     wait_for_gateway_running,
 )
@@ -50,10 +49,10 @@ from .recovery import (
     _gateway_processing_started_at,
     _gateway_request_attempts,
     _write_gateway_failure_response,
-    gateway_stale_processing,
     recover_gateway_processing_requests,
     requeue_gateway_processing_requests,
 )
+from .recovery_stale import gateway_stale_processing
 from .request_worker import (
     GatewayAskParams,
     _handle_gateway_request,
@@ -88,6 +87,7 @@ __all__ = [
     "read_pid",
     "read_pid_record",
     "rebuild_gateway_index",
+    "rebuild_gateway_index_report",
     "recover_gateway_processing_requests",
     "render_gateway_status",
     "requeue_gateway_processing_requests",

@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import ToolCallRecordParams, ToolLoopService
-from agent_py_agent.agent.agent_core.tool_call_context_reducer import (
+from agent_py_agent.agent.agent_core.tool_context.call_reducer import (
     AssistantToolRoundContextRequest,
     render_assistant_tool_round_context,
     render_tool_payload_for_live_prompt,
@@ -111,8 +111,6 @@ def test_tool_loop_records_live_raw_archive_for_each_tool_result(tmp_path: Path)
     assert raw_records[-1]["request_id"] == "req-live"
 
 
-# LLM: subagent runner scope must reach artifacts even when run(save=False) did not pass run_id.
-# 函数用途: 子代理内部工具输出要带当前 runner id，否则 read_artifact 短引用会跨任务串线。
 def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: Path) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path, _current_subagent_run_id="runner-42"))
     params = _tool_loop_params(request_id="", run_id="", task_id="")
@@ -135,8 +133,6 @@ def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: 
     assert artifact["run_id"] == "runner-42"
 
 
-# LLM: internal orchestration outputs are archived in the same model-visible form the live prompt sees.
-# 函数用途: 验证外置归档当前内部工具输出时同步隐藏旧 data/subagents 路径，避免未来 read_artifact 读出误导路径。
 def test_externalizer_hides_legacy_paths_for_internal_tool_outputs(tmp_path: Path) -> None:
     legacy_path = "/repo/data/subagents/tasks/run_1/agents/run_1/final_report.md"
     output = json.dumps({"workspace_refs": {"final_report": legacy_path}}, ensure_ascii=False)
@@ -179,8 +175,6 @@ def test_externalizer_preserves_ordinary_tool_outputs(tmp_path: Path) -> None:
     assert artifact["content"] == output
 
 
-# LLM: read_artifact already returns bounded slices, so archiving it must not create artifact-of-artifact loops.
-# 函数用途: 防止显式读取 artifact 后又生成第二层 tool_output JSON，避免模型继续追套娃引用。
 def test_read_artifact_output_is_not_re_externalized(tmp_path: Path) -> None:
     output = json.dumps(
         {
@@ -255,8 +249,6 @@ def test_tool_call_record_summarizes_large_payload_for_live_prompt(tmp_path: Pat
     assert huge_html not in live_context
 
 
-# LLM: Runtime gate facts must travel with tool archive records for replay and audit.
-# 函数用途: 验证工具执行入口产生的 runtime_gate 会落进归档记录，而不是只留在当前 prompt 输出里。
 def test_tool_call_archive_keeps_runtime_gate_for_replay(tmp_path: Path) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path))
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
@@ -281,8 +273,6 @@ def test_tool_call_archive_keeps_runtime_gate_for_replay(tmp_path: Path) -> None
     assert record["runtime_gate"]["allowed"] is True
 
 
-# LLM: parse-error recovery mode must survive payload summarization and guide the next model turn.
-# 函数用途: 验证长 write_file 工具块被截断后，工具循环会追加稳定降级策略，而不只是一条错误文本。
 def test_tool_loop_enters_long_content_recovery_after_truncated_write_parse_error(
     tmp_path: Path,
 ) -> None:
@@ -317,8 +307,6 @@ def test_tool_loop_enters_long_content_recovery_after_truncated_write_parse_erro
     assert "site/app.js" in live_context
 
 
-# LLM: structured JSON parse failures should recover through batched machine writes.
-# 函数用途: 验证旧结构化 JSON 写入截断后只记录普通解析错误，不再进入专项写入器恢复模式。
 def test_tool_loop_enters_structured_json_recovery_after_truncated_parse_error(
     tmp_path: Path,
 ) -> None:
@@ -348,8 +336,6 @@ def test_tool_loop_enters_structured_json_recovery_after_truncated_parse_error(
     assert "outputs/report/source_data.json" in live_context
 
 
-# LLM: write-tool long-content failures should trigger the same reusable recovery mode as parser failures.
-# 函数用途: 验证长 content 写入失败后，下一轮 prompt 会明确要求小块追加，避免模型原样重试。
 def test_tool_loop_enters_long_content_recovery_after_inline_write_rejection(
     tmp_path: Path,
 ) -> None:
@@ -455,8 +441,6 @@ def test_archive_tool_event_keeps_externalized_output_path(tmp_path: Path) -> No
     assert tool_event.tool_name == "read_file"
 
 
-# LLM: _assert_schema_v2 protects the externalized tool output version and reserved fields contract.
-# 函数用途: 校验工具输出归档记录、artifact 正文和 index 行都使用统一 runtime memory schema v2。
 def _assert_schema_v2(record: dict[str, object], name: str) -> None:
     assert record["version"] == RUNTIME_MEMORY_SCHEMA_VERSION
     assert record["schema"]["name"] == name

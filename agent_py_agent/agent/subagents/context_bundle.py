@@ -1,11 +1,10 @@
-# LLM: Build a compact, source-traceable handoff bundle for subagent runner prompts.
-# 模块用途: 从已有 SubAgentTask 事实生成子代理实时工单包，并在派发前检查关键字段是否齐全。
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..model_visible_refs import current_model_ref, current_model_text
 from .context_bundle_contracts import (
     output_contract,
     render_output_contract_lines,
@@ -30,8 +29,6 @@ REQUIRED_CONTEXT_BUNDLE_FIELDS = (
 )
 
 
-# LLM: ContextBundleV1 is the runner-facing handoff contract; keep fields stable and source refs explicit.
-# 类用途: 保存一次子代理运行需要的目标、约束、权限、产物要求和字段来源，方便模型和接管代理快速理解任务。
 @dataclass(frozen=True)
 class ContextBundleV1:
     schema_version: str
@@ -59,8 +56,6 @@ class ContextBundleV1:
     reserved: dict[str, object] = field(default_factory=dict)
 
 
-# LLM: ContextGateReport records missing handoff fields without mutating task state.
-# 类用途: 给派发前检查返回是否可继续、缺哪些字段、阻断原因和后续可扩展信息。
 @dataclass(frozen=True)
 class ContextGateReport:
     ok: bool
@@ -69,8 +64,6 @@ class ContextGateReport:
     reserved: dict[str, object] = field(default_factory=dict)
 
 
-# LLM: build_context_bundle converts a persisted task into a compact runner handoff snapshot.
-# 函数用途: 根据 SubAgentTask 构造实时 context bundle；只引用路径和摘要，不读取大型 artifact 正文。
 def build_context_bundle(task: SubAgentTask) -> ContextBundleV1:
     envelope = build_task_envelope(task)
     return ContextBundleV1(
@@ -81,9 +74,9 @@ def build_context_bundle(task: SubAgentTask) -> ContextBundleV1:
         depth=int(task.depth or 0),
         role=task.role,
         agent_name=task.agent_name,
-        goal=task.goal,
-        thought=task.thought,
-        plan=list(task.plan or []),
+        goal=current_model_text(task.goal),
+        thought=current_model_text(task.thought),
+        plan=[current_model_text(item) for item in list(task.plan or [])],
         acceptance_checks=list(task.acceptance_checks or []),
         permissions=_permissions(task),
         constraints=_constraints(task),
@@ -99,8 +92,6 @@ def build_context_bundle(task: SubAgentTask) -> ContextBundleV1:
     )
 
 
-# LLM: validate_context_bundle checks both presence and semantic consistency of handoff facts.
-# 函数用途: 检查子代理工单包是否具备可派发字段，并确认文件合同没有从自然语言目标里缩水。
 def validate_context_bundle(bundle: ContextBundleV1) -> ContextGateReport:
     missing = [
         field_name
@@ -119,8 +110,6 @@ def validate_context_bundle(bundle: ContextBundleV1) -> ContextGateReport:
     )
 
 
-# LLM: render_context_bundle_markdown keeps the persisted handoff readable for humans and future takeover agents.
-# 函数用途: 把 context bundle 和 gate 报告渲染成轻量 Markdown，不展开 artifact 正文。
 def render_context_bundle_markdown(bundle: ContextBundleV1, gate: ContextGateReport) -> str:
     lines = [
         "# SUBAGENT CONTEXT BUNDLE",
@@ -164,8 +153,6 @@ def render_context_bundle_markdown(bundle: ContextBundleV1, gate: ContextGateRep
     return "\n".join(lines) + "\n"
 
 
-# LLM: context_gate_prompt_lines gives the runner a short mandatory self-check before doing work.
-# 函数用途: 把 gate 结果渲染成 prompt 片段；缺关键字段时要求子代理停止业务实现并返回 BLOCKED。
 def context_gate_prompt_lines(context_bundle: dict[str, object]) -> list[str]:
     gate = context_bundle.get("gate") if isinstance(context_bundle, dict) else {}
     if not isinstance(gate, dict):
@@ -188,8 +175,6 @@ def context_gate_prompt_lines(context_bundle: dict[str, object]) -> list[str]:
     ]
 
 
-# LLM: render_task_envelope_lines keeps the richer protocol visible without dumping nested JSON.
-# 函数用途: 在 CONTEXT_BUNDLE.md 展示 TaskEnvelope 关键字段，方便 runner/接管者优先读机器合同。
 def render_task_envelope_lines(envelope: dict[str, object]) -> list[str]:
     address = envelope.get("address") if isinstance(envelope.get("address"), dict) else {}
     acceptance = envelope.get("acceptance") if isinstance(envelope.get("acceptance"), dict) else {}
@@ -202,8 +187,6 @@ def render_task_envelope_lines(envelope: dict[str, object]) -> list[str]:
     ]
 
 
-# LLM: render_tool_preflight_lines summarizes startup readiness issues as stable codes.
-# 函数用途: 在 CONTEXT_BUNDLE.md 展示工具/写入预检结果；只列 code，不展开长正文。
 def render_tool_preflight_lines(preflight: dict[str, object]) -> list[str]:
     issues = preflight.get("issues") if isinstance(preflight.get("issues"), list) else []
     issue_codes = [str(item.get("code") or "") for item in issues if isinstance(item, dict)]
@@ -214,8 +197,6 @@ def render_tool_preflight_lines(preflight: dict[str, object]) -> list[str]:
     ]
 
 
-# LLM: render_collaboration_lines shows targeted request refs without expanding case history.
-# 函数用途: 在 CONTEXT_BUNDLE.md 中展示点名协作请求，方便接管者复用已有 case/request。
 def render_collaboration_lines(collaboration: dict[str, object]) -> list[str]:
     if not collaboration:
         return ["- targeted_request_count: 0"]
@@ -235,8 +216,6 @@ def render_collaboration_lines(collaboration: dict[str, object]) -> list[str]:
     return lines
 
 
-# LLM: _protocol_prompt_lines makes envelope/preflight the first runner-facing protocol hints.
-# 函数用途: 给 runner prompt 增加很短的协议状态，避免模型忽略 context_bundle 里的机器字段。
 def _protocol_prompt_lines(context_bundle: dict[str, object]) -> list[str]:
     envelope = context_bundle.get("task_envelope") if isinstance(context_bundle.get("task_envelope"), dict) else {}
     preflight = context_bundle.get("tool_preflight") if isinstance(context_bundle.get("tool_preflight"), dict) else {}
@@ -252,8 +231,6 @@ def _protocol_prompt_lines(context_bundle: dict[str, object]) -> list[str]:
     ]
 
 
-# LLM: _tool_preflight builds the non-mutating startup readiness report from the task envelope.
-# 函数用途: 在 runner 开工前记录工具/产物写入/exec 授权缺口；不会阻断基础读写能力。
 def _tool_preflight(task: SubAgentTask, envelope) -> dict[str, object]:
     return run_tool_preflight(
         envelope,
@@ -261,22 +238,16 @@ def _tool_preflight(task: SubAgentTask, envelope) -> dict[str, object]:
     ).to_dict()
 
 
-# LLM: _preflight_available_tools uses the task's explicit tool set as the first startup boundary.
-# 函数用途: context bundle 构建阶段没有 ToolRegistry，先用任务已授权工具检测写入和 exec 合同。
 def _preflight_available_tools(task: SubAgentTask) -> list[str]:
     return [str(item) for item in list(task.allowed_tools or []) if str(item).strip()]
 
 
-# LLM: _compact_prompt_list renders protocol arrays into one bounded prompt line.
-# 函数用途: 压缩 lineage、issue code 和工具列表，避免 prompt 展示大 JSON。
 def _compact_prompt_list(value: object) -> str:
     if not isinstance(value, list) or not value:
         return "none"
     return ", ".join(str(item) for item in value if str(item).strip()) or "none"
 
 
-# LLM: _permissions separates tool/skill access and controlled exec grants from task instructions.
-# 函数用途: 汇总子代理授权工具、技能和受控 exec grant refs；空列表表示后续策略可自动判断，不代表模型能越权。
 def _permissions(task: SubAgentTask) -> dict[str, object]:
     return {
         "allowed_tools": list(task.allowed_tools or []),
@@ -286,20 +257,16 @@ def _permissions(task: SubAgentTask) -> dict[str, object]:
     }
 
 
-# LLM: _constraints carries current runtime write roots plus explicit user deliverable roots.
-# 函数用途: 汇总写入范围、禁止范围、锁定文件和失败/接管提示引用；当前 runtime 目录优先，旧工单目录只作兼容。
 def _constraints(task: SubAgentTask) -> dict[str, object]:
     return {
         "allowed_write_roots": _allowed_write_roots(task),
-        "forbidden_write_roots": list(task.forbidden_write_roots or []),
-        "locked_files": list(task.locked_files or []),
+        "forbidden_write_roots": _path_terms(task.forbidden_write_roots),
+        "locked_files": _path_terms(task.locked_files),
         "failure_handoff_ref": safe_string_ref(task, "failure_handoff_json"),
         "takeover_readiness_ref": safe_string_ref(task, "takeover_readiness_json"),
     }
 
 
-# LLM: _allowed_write_roots avoids showing only the old legacy work-order directory to child runners.
-# 函数用途: 将当前 task workspace、agent run workspace 和显式授权产物目录去重后传给模型。
 def _allowed_write_roots(task: SubAgentTask) -> list[str]:
     roots: list[str] = []
     for raw in (
@@ -307,14 +274,23 @@ def _allowed_write_roots(task: SubAgentTask) -> list[str]:
         safe_string_ref(task, "agent_run_workspace_dir"),
         *list(task.allowed_write_roots or []),
     ):
-        text = str(raw or "").strip()
+        text = current_model_ref(raw)
         if text and text not in roots:
             roots.append(text)
     return roots
 
 
-# LLM: _reserved carries small future-extensible handoff hints without changing the context bundle schema.
-# 函数用途: 将 task.attributes 里的轻量恢复预检信息传给 runner prompt；不复制正文产物或主代理记忆。
+def _path_terms(value: object) -> list[str]:
+    if not isinstance(value, list | tuple | set):
+        return []
+    terms: list[str] = []
+    for item in value:
+        text = current_model_ref(item)
+        if text and text not in terms:
+            terms.append(text)
+    return terms
+
+
 def _reserved(task: SubAgentTask) -> dict[str, object]:
     attributes = getattr(task, "attributes", {})
     attributes = attributes if isinstance(attributes, dict) else {}
@@ -328,8 +304,6 @@ def _reserved(task: SubAgentTask) -> dict[str, object]:
     return reserved
 
 
-# LLM: _conversation_reserved carries durable channel/thread identity for descendant event tools.
-# 函数用途: 把长期会话绑定作为机器字段传给 runner；不要求模型从自然语言里猜 thread。
 def _conversation_reserved(attributes: dict[str, object]) -> dict[str, str]:
     thread_id = str(attributes.get("conversation_thread_id") or "").strip()
     task_id = str(attributes.get("conversation_task_id") or "").strip()
@@ -341,16 +315,12 @@ def _conversation_reserved(attributes: dict[str, object]) -> dict[str, str]:
     return payload
 
 
-# LLM: _file_contract_reserved gives the semantic gate an attribute-side expectation snapshot.
-# 函数用途: 把 required_files 的机器期望带进 reserved，避免 gate 从 goal/acceptance 文本重解析。
 def _file_contract_reserved(attributes: dict[str, object]) -> dict[str, object]:
     required = attributes.get("required_files")
     if not isinstance(required, list):
         return {}
     return {"expected_required_files": [str(item).strip() for item in required if str(item or "").strip()]}
 
-# LLM: _is_missing defines the minimum useful handoff signal for gate checks.
-# 函数用途: 判断字符串、列表、字典等字段是否为空；用于缺字段报告。
 def _is_missing(value: object) -> bool:
     if value is None:
         return True

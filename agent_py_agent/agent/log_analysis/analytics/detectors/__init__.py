@@ -1,9 +1,6 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 """Soft detector package for local log analysis.
 
-给人看的解释：
 本包是日志分析检测器的主入口，包含：
   - rules.py          : 高层检测器规则（WAF/VPN/暴力破解等）和 Finding 构造
   - field_access.py   : 底层字段访问、类型转换、时间工具

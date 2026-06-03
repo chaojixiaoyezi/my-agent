@@ -19,8 +19,6 @@ from scripts.live_lab.main_agent_complex_case import (
 from scripts.live_lab.session import LabSessionManager
 
 
-# LLM: The main-complex suite should test the root agent with ordinary wording and no delegation jargon.
-# 函数用途: 确认主代理复杂任务 suite 已注册，提示词像普通用户表达，并显式关闭小傻妞链路。
 def test_main_complex_case_is_registered_as_real_opt_in_suite():
     prompts = [
         _main_tool_failure_prompt(),
@@ -49,8 +47,6 @@ def test_main_complex_case_is_registered_as_real_opt_in_suite():
         assert "contract" not in prompt.lower()
 
 
-# LLM: Main-complex cases append isolation overrides without mutating the source config.
-# 函数用途: 确认主代理复杂测试会在临时配置里关闭小傻妞，并保持工具轮数不限制。
 def test_main_complex_config_disables_subagents_in_isolated_config(tmp_path):
     source = tmp_path / "agent_config.yaml"
     source.write_text("model_backend: echo\nenable_subagents: true\n", encoding="utf-8")
@@ -75,8 +71,6 @@ def test_main_complex_config_disables_subagents_in_isolated_config(tmp_path):
     assert source.read_text(encoding="utf-8") == "model_backend: echo\nenable_subagents: true\n"
 
 
-# LLM: Main-complex artifact gates should inspect concrete root-agent outputs.
-# 函数用途: 确认主代理复杂测试的 Web、恢复报告和大日志报告验收都不相信口头回复。
 def test_main_complex_artifact_gates_accept_complete_outputs(tmp_path):
     _write_tool_recovery_report(tmp_path)
     _write_artifact_readback_report(tmp_path)
@@ -84,8 +78,6 @@ def test_main_complex_artifact_gates_accept_complete_outputs(tmp_path):
     _write_large_log_report(tmp_path)
 
 
-# LLM: _write_tool_recovery_report builds a readable recovery report fixture.
-# 函数用途: 写出测试用工具失败恢复报告，并立即走主代理恢复 gate。
 def _write_tool_recovery_report(tmp_path) -> None:
     recovery = tmp_path / "lab_outputs" / "tool-recovery" / "report.md"
     recovery.parent.mkdir(parents=True)
@@ -97,8 +89,6 @@ def _write_tool_recovery_report(tmp_path) -> None:
     _assert_tool_recovery_report(recovery)
 
 
-# LLM: _write_artifact_readback_report builds a report that proves far-apart artifact sections were recovered.
-# 函数用途: 写出测试用 artifact 读回报告，并立即走主代理 artifact 续接 gate。
 def _write_artifact_readback_report(tmp_path) -> None:
     report = tmp_path / "lab_outputs" / "artifact-readback" / "report.md"
     report.parent.mkdir(parents=True)
@@ -113,8 +103,6 @@ def _write_artifact_readback_report(tmp_path) -> None:
     _assert_artifact_readback_report(report)
 
 
-# LLM: _write_large_log_report builds a realistic enough audit report fixture.
-# 函数用途: 写出测试用大日志审计报告，并立即走关键证据 gate。
 def _write_large_log_report(tmp_path) -> None:
     log_report = tmp_path / "lab_outputs" / "large-log-audit" / "report.md"
     log_report.parent.mkdir(parents=True)
@@ -135,8 +123,6 @@ def _write_large_log_report(tmp_path) -> None:
     _assert_large_log_report(log_report)
 
 
-# LLM: _compact_apply_payload builds the minimum structured apply facts expected after manual fact completion.
-# 函数用途: 构造 compact apply 测试 payload，验证 roundtrip gate 只读结构化字段。
 def _compact_apply_payload() -> dict:
     source = "/tmp/runtime_facts/task.json"
     return {
@@ -152,8 +138,6 @@ def _compact_apply_payload() -> dict:
     }
 
 
-# LLM: _compact_resume_payload builds the minimum auto-guard handoff expected from memory-resume.
-# 函数用途: 构造 compact resume 测试 payload，确认 auto guard 放行和推荐路径存在。
 def _compact_resume_payload() -> dict:
     return {
         "ok": True,

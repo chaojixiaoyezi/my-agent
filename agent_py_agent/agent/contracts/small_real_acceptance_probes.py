@@ -1,5 +1,3 @@
-# LLM: Small real probe helpers keep the runner thin and schema-focused.
-# 模块用途: 构造小真实验收需要的 ToolRegistry、tool probe 和 Shadow runtime facts。
 
 from __future__ import annotations
 
@@ -10,8 +8,6 @@ from ..tooling.models import ToolExecutionResult
 from ..tooling.registry import ToolRegistry, ToolRegistryParams
 
 
-# LLM: small_real_registry builds a bounded ToolRegistry for probe execution.
-# 函数用途: 创建只指向当前小真实工作区的工具注册表，避免 probe 越界读写。
 def small_real_registry(root: Path) -> ToolRegistry:
     return ToolRegistry(
         ToolRegistryParams(
@@ -30,8 +26,6 @@ def small_real_registry(root: Path) -> ToolRegistry:
     )
 
 
-# LLM: read_file_probe wraps a real read_file result in the phase-5 probe schema.
-# 函数用途: 生成只读工具 probe，供 real_tool_dry_run_contract 验收。
 def read_file_probe(result: ToolExecutionResult) -> dict[str, object]:
     return {
         "probe_id": "read-file-success",
@@ -46,8 +40,6 @@ def read_file_probe(result: ToolExecutionResult) -> dict[str, object]:
     }
 
 
-# LLM: controlled_exec_probe wraps a dry-run shell plan in the phase-5 probe schema.
-# 函数用途: 生成 controlled_exec dry-run probe，记录幂等键和参数 hash。
 def controlled_exec_probe(result: ToolExecutionResult) -> dict[str, object]:
     return {
         "probe_id": "controlled-exec-dry-run",
@@ -64,8 +56,6 @@ def controlled_exec_probe(result: ToolExecutionResult) -> dict[str, object]:
     }
 
 
-# LLM: shadow_runtime_facts builds a Shadow runtime ledger from validated probe refs.
-# 函数用途: 生成影子模式运行事实，明确引用 phase-5 probe 和人工对比 artifact。
 def shadow_runtime_facts(
     probe_refs: list[dict[str, object]],
     comparison_ref: str,
@@ -81,8 +71,6 @@ def shadow_runtime_facts(
     }
 
 
-# LLM: controlled_exec_grant builds the parent-injected dry-run grant.
-# 函数用途: 给 controlled_exec probe 提供命令、路径和输出预算边界。
 def controlled_exec_grant(root: Path) -> dict[str, object]:
     return {
         "grant_id": "grant-small-real",
@@ -96,8 +84,6 @@ def controlled_exec_grant(root: Path) -> dict[str, object]:
     }
 
 
-# LLM: _shadow_facts returns the nested static Shadow ledger.
-# 函数用途: 构造 Shadow 合同需要的风险、证据、建议动作、dry-run 和人工复核字段。
 def _shadow_facts(comparison_ref: str) -> dict[str, object]:
     return {
         "mode": "shadow",
@@ -115,8 +101,6 @@ def _shadow_facts(comparison_ref: str) -> dict[str, object]:
     }
 
 
-# LLM: _recommended_action builds one non-executing dangerous action recommendation.
-# 函数用途: 生成需要人工复核和审批草稿的 dry-run 建议动作。
 def _recommended_action(comparison_ref: str) -> dict[str, object]:
     return {
         "action_id": "ACT-1",
@@ -127,8 +111,6 @@ def _recommended_action(comparison_ref: str) -> dict[str, object]:
     }
 
 
-# LLM: json_payload parses tool output into a bounded structured object.
-# 函数用途: 将 controlled_exec 输出 JSON 转成 dict；解析失败时返回结构化错误字段。
 def json_payload(value: str) -> dict[str, object]:
     try:
         loaded = json.loads(value)

@@ -1,19 +1,14 @@
-# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
 
 from __future__ import annotations
 
 """markdown renderers for dispatch, watch, and parent planner reports.
 
-给人看的解释：
 这些报告都属于父代理调度视角，单独拆出后 rendering.py 保持兼容入口。
 """
 
 from .reports import DispatchReport, DispatchWatchReport, ParentPlannerReport
 
 
-    # LLM: render_dispatch_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果和报告展示仍按原契约工作。
-    # 函数用途: 渲染或汇总markdown的展示文本；关键副作用: 会影响任务状态、执行器结果和报告展示，需保持重试、超时和状态迁移语义。
 def render_dispatch_markdown(report: DispatchReport) -> str:
     """渲染父代理调度器报告。"""
 
@@ -47,8 +42,6 @@ def render_dispatch_markdown(report: DispatchReport) -> str:
     return "\n".join(lines) + "\n"
 
 
-# LLM: _dispatch_completion_gate_lines prevents markdown readers from reporting done while reject records remain.
-# 函数用途: 在 SUBAGENT_DISPATCH.md 顶部写清楚是否允许收尾，避免 root 读 markdown 后忽略阻塞 run。
 def _dispatch_completion_gate_lines(records: list[object]) -> list[str]:
     blockers = _dispatch_blocking_run_ids(records)
     lines = ["", "## Completion Gate", ""]
@@ -68,8 +61,6 @@ def _dispatch_completion_gate_lines(records: list[object]) -> list[str]:
     return lines
 
 
-# LLM: _dispatch_blocking_run_ids derives the gate from failed dispatch records only.
-# 函数用途: 收集 reject/fail 记录里的 run_id；空 run_id 的全局错误不污染任务 id 列表。
 def _dispatch_blocking_run_ids(records: list[object]) -> list[str]:
     ids: list[str] = []
     for record in records:
@@ -81,8 +72,6 @@ def _dispatch_blocking_run_ids(records: list[object]) -> list[str]:
     return ids[:20]
 
 
-# LLM: _dispatch_runner_line shows nested runner effects compactly for humans and LLM readers.
-# 函数用途: 渲染 runner 内部创建的 child 摘要，避免把 dispatch record 数误读成 child 数。
 def _dispatch_runner_line(record) -> str:
     child_ids = ",".join(record.runner_created_child_ids)
     roles = ",".join(record.runner_created_roles)
@@ -98,8 +87,6 @@ def _dispatch_runner_line(record) -> str:
         f"summary={record.runner_summary}"
     )
 
-# LLM: render_dispatch_watch_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def render_dispatch_watch_markdown(report: DispatchWatchReport) -> str:
     """渲染父代理 watch 模式报告。"""
 
@@ -129,8 +116,6 @@ def render_dispatch_watch_markdown(report: DispatchWatchReport) -> str:
     return "\n".join(lines) + "\n"
 
 
-# LLM: render_parent_planner_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总父级收口和报告展示，需避免破坏既有状态机约定。
 def render_parent_planner_markdown(report: ParentPlannerReport) -> str:
     """渲染父代理 planner 报告。"""
 

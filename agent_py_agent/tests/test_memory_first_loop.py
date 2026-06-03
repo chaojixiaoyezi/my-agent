@@ -13,9 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import agent_py_agent.agent.agent_core.runtime_loop_support as runtime_loop_support
+import agent_py_agent.agent.agent_core.runtime.loop_support as runtime_loop_support
+import agent_py_agent.agent.agent_core.runtime.services as runtime_services
 import agent_py_agent.agent.agent_core.runtime_mixin as runtime_mixin
-import agent_py_agent.agent.agent_core.runtime_services as runtime_services
 from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent

@@ -1,5 +1,3 @@
-# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
-# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
 
 from __future__ import annotations
 
@@ -8,7 +6,7 @@ from __future__ import annotations
 这个文件是主代理最基础的一轮对话链路：召回记忆、构建 prompt、调用模型、解析工具调用、把工具结果再喂回模型。
 它不处理子代理调度细节，那些已经拆到别的 mixin。
 
-Facade pattern: delegates to service classes in runtime_services.py.
+Facade pattern: delegates to service classes in runtime/services.py.
 """
 
 from contextlib import contextmanager
@@ -19,8 +17,8 @@ from .compact_auto_continuation import (
     mark_compact_auto_continued,
 )
 from .run_task_workspace_writer import attach_run_task_workspace_context
-from .runtime_loop_models import RuntimeContextRequest
-from .runtime_loop_support import (
+from .runtime.loop_models import RuntimeContextRequest
+from .runtime.loop_support import (
     FinalizeParams,
     RunParams,
     _execute_runtime_loop,
@@ -28,17 +26,15 @@ from .runtime_loop_support import (
     _prepare_runtime_context,
     _runtime_loop_params,
 )
-from .runtime_run_params import (
+from .runtime.run_params import (
     RunCompatibilityFields,
     run_params_from_compat,
     run_params_with_materialized_delivery_contract,
     run_params_with_request_id,
 )
-from .runtime_services import CompressionService, FinalizationService, ToolLoopService
+from .runtime.services import CompressionService, FinalizationService, ToolLoopService
 
 
-# LLM: _RuntimeServices 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存运行时services字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 @dataclass
 class _RuntimeServices:
 
@@ -47,11 +43,8 @@ class _RuntimeServices:
     finalization: FinalizationService
 
 
-# LLM: _CompressionSnapshotRequest 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存压缩snapshot请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class _CompressionSnapshotRequest:
-    # LLM: snapshot render inputs stay bundled before crossing into CompressionService.
     user_prompt: object
     memories: object
     runtime_injections: object
@@ -59,8 +52,6 @@ class _CompressionSnapshotRequest:
     resume_context_section: object
 
 
-# LLM: _PromptScopeSnapshot preserves nested run prompt state while tools inspect current run identity.
-# 类用途: 记录进入 run 作用域前的临时 prompt/params 字段，退出时无损恢复。
 @dataclass(frozen=True)
 class _PromptScopeSnapshot:
     had_prompt: bool
@@ -69,8 +60,6 @@ class _PromptScopeSnapshot:
     previous_params: object
 
 
-# LLM: _current_prompt_scope keeps run() flat while exposing current run identity to tools.
-# 函数用途: 在一次 run 内设置当前用户 prompt 和 RunParams，退出时恢复旧值或删除临时字段。
 @contextmanager
 def _current_prompt_scope(agent, user_prompt: str, params: RunParams | None = None):
     had_current_prompt = hasattr(agent, "_current_user_prompt")
@@ -92,8 +81,6 @@ def _current_prompt_scope(agent, user_prompt: str, params: RunParams | None = No
         _restore_current_prompt(agent, snapshot)
 
 
-# LLM: _restore_current_prompt keeps the context manager below nesting limits.
-# 函数用途: 退出 run 作用域时恢复旧 prompt/RunParams；旧字段不存在时删除临时字段。
 def _restore_current_prompt(agent, snapshot: _PromptScopeSnapshot) -> None:
     if snapshot.had_prompt:
         agent._current_user_prompt = snapshot.previous_prompt
@@ -105,14 +92,10 @@ def _restore_current_prompt(agent, snapshot: _PromptScopeSnapshot) -> None:
         delattr(agent, "_current_run_params")
 
 
-# LLM: SimpleAgentRuntimeMixin 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 拆分simpleagent运行时混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class SimpleAgentRuntimeMixin:
 
     _services: _RuntimeServices | None = None
 
-    # LLM: _get_services 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 读取或查询services需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _get_services(self) -> _RuntimeServices:
         if self._services is None:
             self._services = _RuntimeServices(
@@ -122,13 +105,9 @@ class SimpleAgentRuntimeMixin:
             )
         return self._services
 
-    # LLM: _compress_memories 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 处理compressmemories相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _compress_memories(self, memories: list[object], *, keep_recent: int) -> list[object]:
         return self._get_services().compression._compress_memories(memories, keep_recent=keep_recent)
 
-    # LLM: _build_compression_snapshot_content 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 构建压缩snapshot内容所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _build_compression_snapshot_content(
         self,
         *,
@@ -154,8 +133,6 @@ class SimpleAgentRuntimeMixin:
             )
         )
 
-    # LLM: run 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 推进run的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def run(
         self,
         user_prompt: str,
@@ -199,10 +176,8 @@ class SimpleAgentRuntimeMixin:
         )
         return _run_with_params(self, user_prompt, params)
 
-    # LLM: _build_finalize_context 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 构建finalize上下文所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _build_finalize_context(self, params: FinalizeParams):
-        from .runtime_services import FinalizeContext
+        from .runtime.services import FinalizeContext
         rp = params.run_params
         return FinalizeContext(
             user_prompt=params.user_prompt,
@@ -231,19 +206,13 @@ class SimpleAgentRuntimeMixin:
             main_context_bundle_markdown_path=params.main_context_bundle_markdown_path,
         )
 
-    # LLM: remember 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 处理remember相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def remember(self, content: str, *, kind: str = "note"):
         return self.memory.add("user", content, kind=kind)
 
-    # LLM: recall 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 处理recall相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def recall(self, query: str, top_k: int | None = None):
         return self.memory.search(query, top_k or self.config.memory_top_k)
 
 
-# LLM: _run_with_params keeps the public run() compatibility shim under code-size limits.
-# 函数用途: 执行已归一化的 RunParams，串接准备上下文、工具循环和 finalization。
 def _run_with_params(agent, user_prompt: str, params: RunParams):
     current_params = run_params_with_request_id(params)
     current_params = run_params_with_materialized_delivery_contract(agent, user_prompt, current_params)
@@ -263,8 +232,6 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
         current_params = next_params
 
 
-# LLM: _run_once_with_params contains one normal model/tool/finalize pass for reuse by auto continuation.
-# 函数用途: 执行单轮 run，不处理自动 compact 后续跑，避免递归和重复上下文作用域。
 def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     params = attach_run_task_workspace_context(agent, params, user_prompt)
     root_user_prompt = params.root_user_prompt or user_prompt
@@ -295,8 +262,6 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
         return agent._get_services().finalization.finalize(ctx)
 
 
-# LLM: _compact_auto_continue_params injects the continue packet and bumps depth for exactly one guarded turn.
-# 函数用途: 构造自动续跑参数，保留原有注入内容，同时防止续跑轮再次触发自动续跑链。
 def _compact_auto_continue_params(params: RunParams, injection: str) -> RunParams:
     return replace(
         params,

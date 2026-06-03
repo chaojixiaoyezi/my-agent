@@ -1,5 +1,3 @@
-# LLM: Delivery requirement materializer validates LLM-created machine contracts.
-# 模块用途: 把模型从普通用户需求中抽取出的 JSON 合同规整为通用 delivery_contract，不内置任务模板。
 
 from __future__ import annotations
 
@@ -13,8 +11,6 @@ SCHEMA_VERSION = "delivery_contract.v1"
 MATERIALIZER_SCHEMA_VERSION = "delivery_requirement_materializer.v1"
 
 
-# LLM: build_delivery_requirement_materializer_prompt asks the model for machine fields only.
-# 函数用途: 生成入口物化提示；提示用于 LLM 结构化抽取，系统事实仍只信返回 JSON。
 def build_delivery_requirement_materializer_prompt(user_prompt: str) -> str:
     return (
         "请把下面的用户需求转换成一个最小 delivery_contract.v1 JSON 对象。\n"
@@ -39,8 +35,6 @@ def build_delivery_requirement_materializer_prompt(user_prompt: str) -> str:
     )
 
 
-# LLM: materialized_delivery_contract validates a structured materializer result.
-# 函数用途: 接收模型/外部 case 给出的结构化 JSON，过滤越界路径和坏字段后返回运行合同。
 def materialized_delivery_contract(
     payload: object,
     *,
@@ -86,8 +80,6 @@ def _artifact_payload(value: dict[str, Any]) -> object:
     return None
 
 
-# LLM: _payload_object normalizes materializer output without trusting prose.
-# 函数用途: 接受 dict 或 JSON 字符串，解析失败时返回空结构供预检继续报告。
 def _payload_object(payload: object) -> dict[str, Any]:
     if isinstance(payload, dict):
         return payload
@@ -120,8 +112,6 @@ def _json_candidates(text: str) -> list[str]:
     return candidates
 
 
-# LLM: _artifact_contracts extracts artifact contracts from structured JSON only.
-# 函数用途: 过滤坏 artifact 条目，保留可运行产物合同和预检 finding。
 def _artifact_contracts(value: object, workspace_root: Path | None) -> tuple[list[dict[str, Any]], list[dict[str, object]]]:
     artifacts: list[dict[str, Any]] = []
     findings: list[dict[str, object]] = []
@@ -143,8 +133,6 @@ def _artifact_contracts(value: object, workspace_root: Path | None) -> tuple[lis
     return artifacts, findings
 
 
-# LLM: _artifact_contract keeps only generic artifact fields from a materialized result.
-# 函数用途: 丢弃执行步骤模板等非机器合同字段，补 required 默认值并规整 kind/root。
 def _artifact_contract(item: dict[str, Any]) -> dict[str, Any]:
     allowed_keys = {
         "allowed_output_roots",
@@ -191,8 +179,6 @@ def _artifact_contract(item: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-# LLM: _normalize_kind_field keeps model-authored artifact kind open-world and scalar.
-# 函数用途: 处理模型把 kind 错写成对象的情况，把对象里的扩展名线索并入 artifact_intent。
 def _normalize_kind_field(artifact: dict[str, Any]) -> None:
     raw_kind = artifact.get("kind")
     if isinstance(raw_kind, dict):
@@ -206,8 +192,6 @@ def _normalize_kind_field(artifact: dict[str, Any]) -> None:
         artifact.pop("kind", None)
 
 
-# LLM: _kind_text accepts only scalar kind labels and rejects object/list values.
-# 函数用途: 将 kind 字符串归一化；非字符串返回空，让调用方从路径或扩展名推导。
 def _kind_text(value: object) -> str:
     if not isinstance(value, str):
         return ""
@@ -324,8 +308,6 @@ def _promote_file_root_to_preferred_path(artifact: dict[str, Any]) -> None:
     artifact["allowed_output_roots"] = [str(Path(root).parent)]
 
 
-# LLM: _derive_fact_evidence_contract turns quality facts into mandatory source/tool evidence checks.
-# 函数用途: 从结构化质量合同派生事实证据门，不要求用户或专项模板手写 fact_evidence_contract。
 def _derive_fact_evidence_contract(contract: dict[str, Any]) -> None:
     if isinstance(contract.get("fact_evidence_contract"), dict):
         return
@@ -389,8 +371,6 @@ def _preserve_explicit_bootstrap_contract(contract: dict[str, Any]) -> None:
     contract["bootstrap_contract"] = bootstrap
 
 
-# LLM: _path_finding validates materialized paths against the task workspace.
-# 函数用途: 检查 path/preferred_path 是否越界，越界时返回结构化 warning。
 def _path_finding(item: dict[str, Any], workspace_root: Path | None, index: int) -> dict[str, object] | None:
     if workspace_root is None:
         return None
@@ -412,8 +392,6 @@ def _path_finding(item: dict[str, Any], workspace_root: Path | None, index: int)
     return None
 
 
-# LLM: _finding emits materializer preflight diagnostics.
-# 函数用途: 构造 code/location/value finding，供入口层返工或观测使用。
 def _finding(code: str, location: str, *, value: str = "") -> dict[str, object]:
     return {
         "code": code,
@@ -424,8 +402,6 @@ def _finding(code: str, location: str, *, value: str = "") -> dict[str, object]:
     }
 
 
-# LLM: _doctor_payload keeps materialized contracts from recursively embedding themselves.
-# 函数用途: 只保留 Doctor 结论和返工动作，不把 normalized_contract 再塞回合同自身。
 def _doctor_payload(report: dict[str, object]) -> dict[str, object]:
     return {
         "schema_version": report.get("schema_version", ""),

@@ -10,8 +10,6 @@ def _path_text(path: str) -> str:
     return path.replace("\\", "/")
 
 
-# LLM: _create_checkpoint_recovery_task builds a blocked run with enough facts for resume handoff.
-# 函数用途: 构造 compact 后恢复需要的子代理状态、失败测试和下一步事实。
 def _create_checkpoint_recovery_task(manager: SubAgentManager, tmp_path: Path):
     task = manager.create_run(
         goal="恢复 compact 后的子代理事实",
@@ -45,8 +43,6 @@ def _create_checkpoint_recovery_task(manager: SubAgentManager, tmp_path: Path):
     return task
 
 
-# LLM: _assert_checkpoint_recovery_artifacts verifies durable recovery refs, not transient logs.
-# 函数用途: 检查 checkpoint、失败测试、下一步和进度报告都写入 task reports。
 def _assert_checkpoint_recovery_artifacts(tmp_path: Path, task) -> None:
     checkpoint = json.loads((tmp_path / task.id / "reports" / "checkpoint.json").read_text(encoding="utf-8"))
     failing_tests = json.loads((tmp_path / task.id / "reports" / "failing_tests.json").read_text(encoding="utf-8"))

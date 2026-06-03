@@ -1,5 +1,3 @@
-# LLM: Delivery progress ledger records append-only closeout progress events.
-# 模块用途: 将 closeout 的失败指纹、恢复动作和 gate 结果写成可回放账本，避免只依赖最新报告快照。
 
 from __future__ import annotations
 
@@ -7,14 +5,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .main_agent_delivery_closeout_artifacts import CLOSEOUT_DIR
-from .main_agent_delivery_closeout_gate_recovery import failed_gate_payloads
+from .delivery_closeout.artifacts import CLOSEOUT_DIR
+from .delivery_closeout.gate_recovery import failed_gate_payloads
 
 PROGRESS_LEDGER = "progress_ledger.jsonl"
 
 
-# LLM: append_delivery_progress_event persists one compact progress fact row.
-# 函数用途: 每次 closeout 后写入 append-only 账本，后续 replay、观察和无进展判断可复用。
 def append_delivery_progress_event(
     workspace_root: Path,
     report: dict[str, Any],

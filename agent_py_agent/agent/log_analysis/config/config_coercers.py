@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 """本模块包含配置字段的私有辅助函数：哨兵值、正则、查找、警告和类型转换。
 
@@ -22,8 +20,6 @@ _INT_PATTERN = re.compile(r"-?[0-9]+")
 _LEVELS = {"L0", "L1", "L2", "L3", "L4", "L5"}
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 _WarningInput 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 _WarningInput 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _WarningInput:
     field_name: str
@@ -32,8 +28,6 @@ class _WarningInput:
     reason: str
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 _ChoiceOptions 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 _ChoiceOptions 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _ChoiceOptions:
     default: str
@@ -41,8 +35,6 @@ class _ChoiceOptions:
     uppercase: bool = False
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 _IntOptions 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 _IntOptions 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _IntOptions:
     default: int
@@ -50,15 +42,12 @@ class _IntOptions:
     max_value: int | None
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 _lookup 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 lookup 在当前模块中的核心转换或协调步骤，衔接 配置层加载、校验并归一化日志分析运行参数。
 def _lookup(source: Mapping[str, Any] | object, field_name: str) -> Any:
     """从 Mapping 或普通对象中读取配置字段，缺失时返回 _MISSING 哨兵。
 
     新手说明:
     测试和调用方可能传字典，也可能传对象。这个函数统一读取方式。
 
-    参数说明:
     source: 配置来源，可能是 dict 或有属性的对象。
     field_name: 要读取的字段名。
 
@@ -69,8 +58,6 @@ def _lookup(source: Mapping[str, Any] | object, field_name: str) -> Any:
     return getattr(source, field_name, _MISSING)
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 _warn 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 warn 在当前模块中的核心转换或协调步骤，衔接 配置层加载、校验并归一化日志分析运行参数。
 def _warn(
     warnings: list[LogAnalysisConfigWarning],
     params: _WarningInput | None = None,
@@ -82,7 +69,6 @@ def _warn(
     新手说明:
     每次发现坏配置，不直接 print，也不吞掉；统一写进 warnings 列表，最后给 doctor/CLI 展示。
 
-    参数说明:
     warnings: 要追加 warning 的列表，会被原地修改。
     field_name: 出问题的字段名。
     raw_value: 用户写的原始值。
@@ -104,8 +90,6 @@ def _warn(
     )
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 _coerce_bool 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 coerce bool 涉及的字段，让后续匹配和存储使用同一形态。
 def _coerce_bool(
     field_name: str,
     raw_value: Any,
@@ -119,7 +103,6 @@ def _coerce_bool(
     支持 True/False、0/1、"true"/"false"、"yes"/"no"、"on"/"off"。
     其它值会被认为不清楚，回退 default。
 
-    参数说明:
     field_name: 字段名，用于 warning。
     raw_value: 原始值，可能是 _MISSING、bool、int、str 或坏值。
     default: 缺失或坏值时使用的默认值。
@@ -143,8 +126,6 @@ def _coerce_bool(
     return default
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 _coerce_choice 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 coerce choice 涉及的字段，让后续匹配和存储使用同一形态。
 def _coerce_choice(
     field_name: str,
     raw_value: Any,
@@ -161,7 +142,6 @@ def _coerce_choice(
     例如 response_mode 只能是 recommend/dry_run/execute，capability_level 只能是 L0-L5。
     如果用户写了别的值，就回退默认值并记录 warning。
 
-    参数说明:
     field_name: 字段名，用于 warning。
     raw_value: 原始值。
     default: 缺失或坏值时使用的默认选项。
@@ -183,8 +163,6 @@ def _coerce_choice(
     return coercion.default
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 _coerce_int_warning 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 coerce int warning 涉及的字段，让后续匹配和存储使用同一形态。
 def _coerce_int_warning(
     warnings: list[LogAnalysisConfigWarning],
     params: _WarningInput,
@@ -193,8 +171,6 @@ def _coerce_int_warning(
     return int(params.fallback_value)
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 _coerce_int 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 coerce int 涉及的字段，让后续匹配和存储使用同一形态。
 def _coerce_int(
     field_name: str,
     raw_value: Any,
@@ -234,8 +210,6 @@ def _coerce_int(
     return number
 
 
-# LLM: 配置层加载、校验并归一化日志分析运行参数；修改 _coerce_path_string 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 coerce path string 涉及的字段，让后续匹配和存储使用同一形态。
 def _coerce_path_string(
     field_name: str,
     raw_value: Any,
@@ -249,7 +223,6 @@ def _coerce_path_string(
     路径配置必须是字符串，不能是空值，也不能包含换行或 NUL 字符。
     这不是完整安全沙盒，只是配置层的基础防呆。
 
-    参数说明:
     field_name: 字段名，用于 warning。
     raw_value: 原始值。
     default: 缺失或坏值时使用的默认路径字符串。

@@ -394,7 +394,7 @@ audit_log_path: "data/audit"
 # 前台 daemon 默认策略（高级 / 过渡期）：
 # - my-agent daemon 会读取这些配置，减少启动时的长参数。
 # - 当前 daemon 还不是完整 gateway/service；它是一个前台 watch 调度循环。
-# - 默认开启自动调度（apply=true, execute_runners=true），确保 gateway 启动后自动推进子代理任务。
+# - 默认开启自动调度（mutate_state=true, start_runners=true），确保 gateway 启动后自动推进子代理任务。
 # - 安全边界：dry-run 优先；高风险操作（写文件、执行 runner）需要用户确认或显式配置。
 # - daemon_max_runners 是当前前台调度器的”每轮最多推进多少 runner”，不是未来 worker 并发数。
 # - daemon_max_runners: “auto” 当前会映射成保守值 1；未来 gateway 会改成自适应并发。
@@ -404,8 +404,8 @@ audit_log_path: "data/audit"
 #   daemon_max_cards=0 表示不限制能力卡数量
 #   daemon_interval=0 表示每轮之间不等待，通常只用于测试或单轮验证
 daemon_planner: true
-daemon_apply: true
-daemon_execute_runners: true
+daemon_mutate_state: true
+daemon_start_runners: true
 daemon_interval: 30
 daemon_max_runners: "auto"
 daemon_limit: 0

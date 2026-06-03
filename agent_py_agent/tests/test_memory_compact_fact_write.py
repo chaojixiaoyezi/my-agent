@@ -1,5 +1,3 @@
-# LLM: memory-fact-write tests cover the manual bridge from completion prompt to auto resume.
-# 模块用途: 验证用户确认的 compact 补全事实能写入 runtime_facts 并被下一次 apply 读取。
 
 from __future__ import annotations
 
@@ -23,8 +21,6 @@ from agent_py_agent.tests.memory_compact_support import (
 )
 
 
-# LLM: test_memory_fact_write_closes_compact_missing_fields verifies the semi-auto manual fact loop.
-# 函数用途: 先确认 compact resume 暴露缺失备注，再写入用户确认事实并重新 apply，确认 auto guard 继续放行。
 def test_memory_fact_write_closes_compact_missing_fields(tmp_path: Path, capsys) -> None:
     config_path = write_config(tmp_path)
     root = workspace(config_path)
@@ -55,8 +51,6 @@ def test_memory_fact_write_closes_compact_missing_fields(tmp_path: Path, capsys)
     assert resume["action_guard"]["status"] == "allow_automated_continue"
 
 
-# LLM: _apply_scoped_compact keeps the test fact source tied to the same request scope.
-# 函数用途: 使用 request/session 过滤重复执行 compact apply，确保 runtime_facts/<request_id> 可被读取。
 def _apply_scoped_compact(root: Path) -> dict:
     return apply_memory_compact(
         root,

@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# LLM: Code-size governance helper; keep report identities, thresholds, and baseline behavior stable.
-# 模块用途: 支撑代码规模守卫，统计文件/函数/类大小并生成可审查的报告。
 
 from __future__ import annotations
 
 """code-size governance checker for files, functions, classes, and imports.
 
-给人看的解释：
 这个脚本先以 warn 模式暴露历史技术债，并生成 CODE_SIZE_REPORT.md。
 strict 模式用于后续 CI 收紧，阻断新增违规。
 支持 baseline 机制：历史违规不阻断，新增/恶化的违规阻断。
@@ -53,8 +50,6 @@ DEFAULT_BASELINE_PATH = ROOT / "CODE_SIZE_BASELINE.json"
 _SEVERITY_RANK = {"soft": 1, "high-risk": 2, "hard": 3}
 
 
-# LLM: _is_excluded 是扫描入口的路径闸门；目录白名单变化会影响所有规模检查。
-# 函数用途: 判断路径是否属于缓存、生成物、运行时数据或第三方产物。
 def _is_excluded(path: Path) -> bool:
     """Check if a path should be excluded from scanning."""
     try:
@@ -75,8 +70,6 @@ def _is_excluded(path: Path) -> bool:
     return False
 
 
-# LLM: _git_added_files 只服务新增文件命名守卫；失败时保持非阻断。
-# 函数用途: 读取 git status，把新增文件路径整理成仓库相对路径集合。
 def _git_added_files() -> set[str]:
     try:
         result = subprocess.run(
@@ -96,8 +89,6 @@ def _git_added_files() -> set[str]:
     return added
 
 
-# LLM: _added_file_from_status_line 解析 porcelain 行；保守返回能避免误阻断。
-# 函数用途: 从单行 git status 输出中识别新增文件，无法识别时返回空字符串。
 def _added_file_from_status_line(line: str) -> str:
     if line.startswith("?? "):
         return line[3:].rstrip("/")
@@ -106,8 +97,6 @@ def _added_file_from_status_line(line: str) -> str:
     return ""
 
 
-# LLM: _source_files 汇总规模检查入口；SOURCE_ROOTS 变化会影响报告覆盖面。
-# 函数用途: 展开所有源码根，返回参与文件大小、AST 和命名检查的 Python 文件。
 def _source_files() -> list[Path]:
     files: list[Path] = []
     for root_name in SOURCE_ROOTS:
@@ -115,8 +104,6 @@ def _source_files() -> list[Path]:
     return sorted(files)
 
 
-# LLM: _source_files_under 复用统一排除策略；不要绕过 _is_excluded。
-# 函数用途: 遍历一个源码根下的 Python 文件，并跳过生成物和运行时目录。
 def _source_files_under(root: Path) -> list[Path]:
     if root.is_file() and root.suffix == ".py":
         return [] if _is_excluded(root) else [root]
@@ -125,14 +112,10 @@ def _source_files_under(root: Path) -> list[Path]:
     return [path for path in root.rglob("*.py") if not _is_excluded(path)]
 
 
-# LLM: _relative 生成报告身份；baseline 和本地路径都依赖这个口径。
-# 函数用途: 将绝对路径转成仓库相对路径，保证不同机器上的报告稳定。
 def _relative(path: Path) -> str:
     return path.relative_to(ROOT).as_posix()
 
 
-# LLM: _read_text_safe 是解析前的 UTF-8 入口；调用方把 None 转成 finding。
-# 函数用途: 读取源码文本，遇到解码失败时返回 None 而不是抛出异常。
 def _read_text_safe(path: Path) -> str | None:
     """Read a file as UTF-8, returning None on decode error."""
     try:
@@ -141,8 +124,6 @@ def _read_text_safe(path: Path) -> str | None:
         return None
 
 
-# LLM: _effective_file_line_count 定义文件规模口径；注释和 docstring 不算实现行。
-# 函数用途: 计算有效代码行数，避免维护注释触发文件过大告警。
 def _effective_file_line_count(text: str) -> int:
     physical = len(text.splitlines())
     try:
@@ -152,8 +133,6 @@ def _effective_file_line_count(text: str) -> int:
     return max(0, physical - len(non_code_line_numbers(text, tree)))
 
 
-# LLM: _check_file_size 产生文件级 finding；阈值口径需和报告说明一致。
-# 函数用途: 检查单个文件是否接近或超过大小限制，并生成对应 finding。
 def _check_file_size(path: Path) -> list[Finding]:
     rel = _relative(path)
     text = _read_text_safe(path)
@@ -174,8 +153,6 @@ def _check_file_size(path: Path) -> list[Finding]:
     return [limit_finding(LimitFindingInput(FindingInput("file", rel, path.name, line_count, soft, f"{rel} has {line_count} lines"), hard))]
 
 
-# LLM: _check_ast 汇总 AST 级规则；语法错误、星号导入和节点规模都在这里归口。
-# 函数用途: 解析源码 AST，收集函数、类、嵌套、参数和 import-star findings。
 def _check_ast(path: Path) -> list[Finding]:
     rel = _relative(path)
     findings: list[Finding] = []
@@ -198,8 +175,6 @@ def _check_ast(path: Path) -> list[Finding]:
     return findings
 
 
-# LLM: _check_junk_names 保护新增文件命名；历史债只保留 soft 提醒。
-# 函数用途: 检查模糊文件名，并只对新增违规文件产生 hard finding。
 def _check_junk_names(paths: list[Path]) -> list[Finding]:
     findings: list[Finding] = []
     added = _git_added_files()
@@ -212,8 +187,6 @@ def _check_junk_names(paths: list[Path]) -> list[Finding]:
     return findings
 
 
-# LLM: _check_high_risk_files 守住冻结文件基线；增长时直接 strict 阻断。
-# 函数用途: 对比高风险文件当前行数和冻结 baseline，报告新增膨胀。
 def _check_high_risk_files() -> list[Finding]:
     """Check that frozen high-risk files have not grown past their baseline."""
     findings: list[Finding] = []
@@ -240,8 +213,6 @@ def _check_high_risk_files() -> list[Finding]:
     return findings
 
 
-# LLM: collect_findings 是 code-size 总入口；报告和 strict 模式共用这份排序结果。
-# 函数用途: 运行文件、AST、命名和高风险检查，并按稳定顺序返回 findings。
 def collect_findings() -> list[Finding]:
     files = _source_files()
     findings: list[Finding] = []
@@ -253,8 +224,6 @@ def collect_findings() -> list[Finding]:
     return sorted(findings, key=lambda item: (item.severity != "hard", item.kind, item.path, item.name))
 
 
-# LLM: load_baseline 读取 strict 豁免口径；JSON 字段需要向后兼容。
-# 函数用途: 从 baseline JSON 中加载 finding identity 到 severity 的映射。
 def load_baseline(baseline_path: Path) -> dict[str, str]:
     """Load baseline file mapping finding identity -> severity."""
     if not baseline_path.exists():
@@ -263,8 +232,6 @@ def load_baseline(baseline_path: Path) -> dict[str, str]:
     return {item["identity"]: item["severity"] for item in data.get("findings", [])}
 
 
-# LLM: write_baseline 写出当前豁免快照；字段变化会影响 CI 收紧流程。
-# 函数用途: 将当前 findings 序列化为 baseline JSON，供后续 strict 比对。
 def write_baseline(findings: list[Finding], baseline_path: Path) -> None:
     """Write current findings as baseline."""
     data = {
@@ -278,8 +245,6 @@ def write_baseline(findings: list[Finding], baseline_path: Path) -> None:
     baseline_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-# LLM: compute_strict_blockers 决定 strict 退出码；新增 hard finding 不能漏掉。
-# 函数用途: 根据 baseline 判断哪些 hard findings 应该阻断本次检查。
 def compute_strict_blockers(findings: list[Finding], baseline: dict[str, str] | None) -> list[Finding]:
     """Compute which findings should block in strict mode.
 
@@ -300,8 +265,6 @@ def compute_strict_blockers(findings: list[Finding], baseline: dict[str, str] | 
     return blockers
 
 
-# LLM: report_findings filters historical baseline debt so CODE_SIZE_REPORT represents current net risk.
-# 函数用途: 生成报告时只展示新增、恶化或强制阻断的规模问题，避免下游矩阵把历史 baseline 当作新失败。
 def report_findings(findings: list[Finding], baseline: dict[str, str] | None) -> list[Finding]:
     if baseline is None:
         return findings
@@ -317,8 +280,6 @@ def _finding_exceeds_baseline(item: Finding, baseline: dict[str, str]) -> bool:
     return _SEVERITY_RANK.get(item.severity, 0) > _SEVERITY_RANK.get(previous, 0)
 
 
-# LLM: _parse_args 定义脚本参数面；改参数会影响 CI 调用方式。
-# 函数用途: 注册 warn/strict、baseline 和写 baseline 等命令行参数。
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Check code-size engineering guardrails.")
     parser.add_argument("--mode", choices=["warn", "strict"], default="warn")
@@ -327,8 +288,6 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# LLM: _load_optional_baseline 处理 baseline 缺失；警告文案会进入 CI 日志。
-# 函数用途: 在用户提供路径时加载 baseline，缺失时返回未加载状态。
 def _load_optional_baseline(path: str | None) -> tuple[dict[str, str] | None, bool]:
     if not path:
         return None, False
@@ -339,8 +298,6 @@ def _load_optional_baseline(path: str | None) -> tuple[dict[str, str] | None, bo
     return None, False
 
 
-# LLM: _effective_baseline_arg gives local checks the repo baseline unless a caller explicitly overrides it.
-# 函数用途: 让 warn/strict 生成同一净报告口径；没有默认 baseline 时保持旧的无 baseline 行为。
 def _effective_baseline_arg(path: str | None) -> str | None:
     if path:
         return path
@@ -349,8 +306,6 @@ def _effective_baseline_arg(path: str | None) -> str | None:
     return None
 
 
-# LLM: _write_requested_baseline 只在显式请求时写文件；默认检查不落盘。
-# 函数用途: 根据 --write-baseline 写出当前 findings 并打印生成位置。
 def _write_requested_baseline(findings: list[Finding], path: str | None) -> None:
     if not path:
         return
@@ -358,8 +313,6 @@ def _write_requested_baseline(findings: list[Finding], path: str | None) -> None
     print(f"baseline written to {path}")
 
 
-# LLM: _print_summary 是脚本的单行结果摘要；日志解析依赖字段名。
-# 函数用途: 输出 findings 总数、严重级别计数、报告路径和阻断状态。
 def _print_summary(findings: list[Finding], blocked: bool) -> None:
     hard_count = len([f for f in findings if f.severity == "hard"])
     high_risk_count = len([f for f in findings if f.severity == "high-risk"])
@@ -371,8 +324,6 @@ def _print_summary(findings: list[Finding], blocked: bool) -> None:
     )
 
 
-# LLM: main 编排 code-size 检查、baseline、报告和退出码；CI 直接调用它。
-# 函数用途: 解析参数，收集 findings，写报告，并在 strict 阻断时返回 1。
 def main() -> int:
     args = _parse_args()
     findings = collect_findings()

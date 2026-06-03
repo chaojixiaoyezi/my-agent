@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 
 from __future__ import annotations
@@ -24,20 +22,14 @@ from ._gateway_service_unit_gen import (
 # =============================================================================
 
 
-# LLM: is_macos 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 判断输入或环境是否满足规则，结果会影响分支、告警或阻断。
 def is_macos() -> bool:
     return sys.platform == "darwin"
 
 
-# LLM: is_linux 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 判断输入或环境是否满足规则，结果会影响分支、告警或阻断。
 def is_linux() -> bool:
     return sys.platform.startswith("linux")
 
 
-# LLM: supports_systemd_services 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def supports_systemd_services() -> bool:
     import shutil
 
@@ -63,8 +55,6 @@ def supports_systemd_services() -> bool:
 # =============================================================================
 
 
-# LLM: _ensure_user_systemd_env 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _ensure_user_systemd_env() -> None:
     uid = os.getuid()
     if "XDG_RUNTIME_DIR" not in os.environ:
@@ -79,16 +69,12 @@ def _ensure_user_systemd_env() -> None:
             os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_path}"
 
 
-# LLM: _systemctl_cmd 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _systemctl_cmd(system: bool = False) -> list[str]:
     if not system:
         _ensure_user_systemd_env()
     return ["systemctl"] if system else ["systemctl", "--user"]
 
 
-# LLM: _run_systemctl 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def _run_systemctl(
     args: list[str], system: bool = False, check: bool = True, timeout: int = 30
 ) -> subprocess.CompletedProcess:
@@ -96,14 +82,10 @@ def _run_systemctl(
     return subprocess.run(cmd, check=check, capture_output=True, text=True, timeout=timeout)
 
 
-# LLM: _service_scope_label 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _service_scope_label(system: bool) -> str:
     return "system" if system else "user"
 
 
-# LLM: install_systemd 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def install_systemd(system: bool = False, force: bool = False) -> bool:
     unit_path = get_systemd_unit_path(system=system)
 
@@ -147,8 +129,6 @@ def install_systemd(system: bool = False, force: bool = False) -> bool:
     return True
 
 
-# LLM: uninstall_systemd 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def uninstall_systemd(system: bool = False) -> bool:
     scope = _service_scope_label(system)
 
@@ -180,14 +160,10 @@ def uninstall_systemd(system: bool = False) -> bool:
 # =============================================================================
 
 
-# LLM: _launchd_domain 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _launchd_domain() -> str:
     return f"gui/{os.getuid()}"
 
 
-# LLM: install_launchd 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def install_launchd(force: bool = False) -> bool:
     plist_path = get_launchd_plist_path()
     label = _get_launchd_label()
@@ -229,8 +205,6 @@ def install_launchd(force: bool = False) -> bool:
     return True
 
 
-# LLM: uninstall_launchd 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def uninstall_launchd() -> bool:
     plist_path = get_launchd_plist_path()
     label = _get_launchd_label()
@@ -261,8 +235,6 @@ def uninstall_launchd() -> bool:
 # =============================================================================
 
 
-# LLM: install_service 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def install_service(force: bool = False) -> bool:
     if is_macos():
         return install_launchd(force=force)
@@ -273,8 +245,6 @@ def install_service(force: bool = False) -> bool:
         return False
 
 
-# LLM: uninstall_service 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def uninstall_service() -> bool:
     if is_macos():
         return uninstall_launchd()

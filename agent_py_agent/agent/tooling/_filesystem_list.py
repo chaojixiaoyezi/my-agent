@@ -1,5 +1,3 @@
-# LLM: list_files lives outside read_file so navigation and reading can evolve independently.
-# 模块用途: 实现工作区目录列举工具，支持分页、递归、glob 和常见噪声目录过滤。
 
 from __future__ import annotations
 
@@ -25,12 +23,8 @@ from .filesystem_path_recovery import MissingPathRequest, missing_path_result
 from .models import ToolExecutionResult, ToolSpec
 
 
-# LLM: ListFilesTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: ListFilesTool 数据模型，集中保存 工具系统 的结构化状态。
 class ListFilesTool(FileSystemTool):
 
-    # LLM: ListFilesTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 初始化 ListFilesTool 的依赖、配置和运行期字段。
     def __init__(
         self,
         workspace_root: Path,
@@ -46,8 +40,6 @@ class ListFilesTool(FileSystemTool):
         self.max_entries = max_entries
         self.spec = build_list_files_spec()
 
-    # LLM: ListFilesTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 执行 ListFilesTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             request = _list_files_request_from_params(params, self.max_entries)
@@ -68,8 +60,6 @@ class ListFilesTool(FileSystemTool):
             return ToolExecutionResult("list_files", True, self.display_path(target))
         return self._list_target(target, request)
 
-    # LLM: ListFilesTool._list_target keeps execute focused on validation and path safety.
-    # 函数用途: 遍历目标目录，按分页和过滤参数生成 list_files 输出。
     def _list_target(self, target: Path, request: _ListFilesRequest) -> ToolExecutionResult:
         iterator = _iter_list_candidates(target, recursive=request.recursive, include_ignored=request.include_ignored)
         entries: list[str] = []
@@ -96,8 +86,6 @@ class ListFilesTool(FileSystemTool):
             )
         return ToolExecutionResult("list_files", True, "\n".join(entries) or "目录为空")
 
-    # LLM: _list_item_visible applies paging filters without changing workspace safety checks.
-    # 函数用途: 根据 depth、glob 和文件/目录开关判断 list_files 是否返回某个条目。
     def _list_item_visible(
         self,
         item: Path,
@@ -122,8 +110,6 @@ class ListFilesTool(FileSystemTool):
         return fnmatch.fnmatch(item.name, request.file_glob) or fnmatch.fnmatch(display, request.file_glob)
 
 
-# LLM: _ListFilesRequest bundles list_files filters so paging can expand without long signatures.
-# 类用途: 保存 list_files 的路径、分页、递归和过滤参数。
 @dataclass(frozen=True)
 class _ListFilesRequest:
     raw_path: str
@@ -137,8 +123,6 @@ class _ListFilesRequest:
     include_ignored: bool
 
 
-# LLM: _list_files_request_from_params validates model JSON before any directory traversal.
-# 函数用途: 从 list_files 工具参数中解析长期可配置的分页和过滤参数。
 def _list_files_request_from_params(params: dict[str, Any], max_entries: int) -> _ListFilesRequest:
     return _ListFilesRequest(
         raw_path=_optional_path(_bundled_filesystem_param(params, "path", "."), default="."),
@@ -162,8 +146,6 @@ def _list_files_request_from_params(params: dict[str, Any], max_entries: int) ->
     )
 
 
-# LLM: _iter_list_candidates keeps list_files deterministic and skips common project-noise dirs by default.
-# 函数用途: 生成稳定排序的目录候选项；递归时避免扫描 .git/node_modules 等常见噪声目录。
 def _iter_list_candidates(target: Path, *, recursive: bool, include_ignored: bool) -> list[Path]:
     if not recursive:
         return sorted(
@@ -180,8 +162,6 @@ def _iter_list_candidates(target: Path, *, recursive: bool, include_ignored: boo
     return sorted(candidates, key=_path_sort_key)
 
 
-# LLM: _path_sort_key provides deterministic file navigation output across filesystems.
-# 函数用途: 给文件导航结果提供大小写无关的稳定排序键。
 def _path_sort_key(path: Path) -> tuple[str, str]:
     text = path.as_posix()
     return (text.lower(), text)

@@ -1,13 +1,9 @@
-# LLM: Semantic checks for subagent context bundles live outside the bundle builder to keep it small.
-# 模块用途: 校验 context bundle 有没有丢失用户明确要求的产物文件名，不读取 artifact 正文。
 
 from __future__ import annotations
 
 from typing import Any
 
 
-# LLM: semantic_context_missing_fields catches structured contracts that lost explicit deliverables.
-# 函数用途: 从 bundle.reserved.expected_required_files 读取机器期望，并校验 output_contract 与 task_packet 都完整携带。
 def semantic_context_missing_fields(bundle: Any) -> list[str]:
     expected = _bundle_required_file_terms(bundle)
     if not expected:
@@ -27,8 +23,6 @@ def semantic_context_missing_fields(bundle: Any) -> list[str]:
     return missing
 
 
-# LLM: _bundle_required_file_terms reuses task-contract parsing so examples/forbidden names do not become deliverables.
-# 函数用途: 从 bundle.reserved.expected_required_files 读取文件合同期望；不解析 goal/plan/acceptance 文本。
 def _bundle_required_file_terms(bundle: Any) -> list[str]:
     reserved = getattr(bundle, "reserved", {})
     if not isinstance(reserved, dict):
@@ -36,8 +30,6 @@ def _bundle_required_file_terms(bundle: Any) -> list[str]:
     return _dedupe_file_terms(_object_string_list(reserved.get("expected_required_files")))
 
 
-# LLM: _dedupe_file_terms preserves user-mentioned order for semantic gate filenames.
-# 函数用途: 对结构化文件清单去重，避免同一文件从 goal 和验收条件重复出现。
 def _dedupe_file_terms(values) -> list[str]:
     terms: list[str] = []
     for value in values:
@@ -47,8 +39,6 @@ def _dedupe_file_terms(values) -> list[str]:
     return terms
 
 
-# LLM: _object_string_list safely reads contract arrays from loose JSON-shaped dicts.
-# 函数用途: 把 required_files 这类未知输入规整成字符串列表，过滤空值。
 def _object_string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []

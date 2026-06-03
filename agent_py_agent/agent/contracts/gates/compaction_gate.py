@@ -1,5 +1,3 @@
-# LLM: Compaction gate enforces state preservation checks before and after context compaction.
-# 模块用途: 参考 通道运行时 compaction 策略，在 compact 前检查关键引用保留，compact 后检查状态恢复。
 
 from __future__ import annotations
 
@@ -31,8 +29,6 @@ _REPEAT_GUARD_PATTERNS = frozenset({
 })
 
 
-# LLM: CompactionGateFacts bundles pre/post state snapshots and phase for compaction checks.
-# 类用途: 封装 task_id、run_id、pre/post 状态快照和检查阶段，供 gate 决策使用。
 @dataclass(frozen=True)
 class CompactionGateFacts:
     """Facts needed for pre-compact and post-compact state checks."""
@@ -44,16 +40,12 @@ class CompactionGateFacts:
     phase: str = "pre_compact"
 
 
-# LLM: evaluate_compaction_gate checks structural state preservation across compaction boundaries.
-# 函数用途: 在 compact 前校验关键字段存在，compact 后校验状态恢复和不重复危险动作。
 def evaluate_compaction_gate(facts: CompactionGateFacts) -> GateDecision:
     if facts.phase == "pre_compact":
         return _pre_compact_check(facts)
     return _post_compact_check(facts)
 
 
-# LLM: _pre_compact_check validates all REQUIRED_COMPACT_FIELDS exist and non-empty before compaction.
-# 函数用途: 在 compact 前遍历必需字段，对缺失或空字段生成 DENY 决策。
 def _pre_compact_check(facts: CompactionGateFacts) -> GateDecision:
     state = facts.pre_compact_state
     findings: list[GateFinding] = []
@@ -83,8 +75,6 @@ def _pre_compact_check(facts: CompactionGateFacts) -> GateDecision:
     })
 
 
-# LLM: _post_compact_check verifies no key field was lost during compaction.
-# 函数用途: 对比 pre/post 快照，检查之前存在的关键字段在 compact 后是否丢失。
 def _post_compact_check(facts: CompactionGateFacts) -> GateDecision:
     pre = facts.pre_compact_state
     post = facts.post_compact_state
@@ -127,8 +117,6 @@ def _post_compact_check(facts: CompactionGateFacts) -> GateDecision:
     })
 
 
-# LLM: compaction_gate_snapshot extracts a minimal machine-readable state snapshot for pre-compact.
-# 函数用途: 从状态字典中提取关键字段的长度代理，作为 compaction 前的快照。
 def compaction_gate_snapshot(state: dict[str, object] | None = None) -> dict[str, object]:
     s = state or {}
     return {
@@ -143,8 +131,6 @@ def compaction_gate_snapshot(state: dict[str, object] | None = None) -> dict[str
     }
 
 
-# LLM: _action_set extracts a deduplicated set of action names from pending_actions and failed_actions.
-# 函数用途: 从状态的 pending/failed actions 列表中提取去重后的动作名，供跨状态对比。
 def _action_set(state: dict[str, object]) -> frozenset[str]:
     actions: set[str] = set()
     for key in ("pending_actions", "failed_actions"):
@@ -157,8 +143,6 @@ def _action_set(state: dict[str, object]) -> frozenset[str]:
     return frozenset(actions)
 
 
-# LLM: _ref_snapshot normalizes a value into a compact size proxy for state comparison.
-# 函数用途: 将列表/字典转为长度计数，字符串/数字保留原值，None 保留，其他截断为字符串。
 def _ref_snapshot(value: object) -> object:
     if value is None:
         return None

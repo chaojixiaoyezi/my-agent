@@ -1,4 +1,4 @@
-"""manager_capabilities 模块测试。
+"""Capability service routing tests.
 
 测试能力请求处理、授权管理、gap记录功能。
 """
@@ -8,6 +8,25 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+def _capability_service(tmp_path: Path, selected_runs=None):
+    from agent_py_agent.agent.subagents.services.capabilities import SubAgentCapabilityService
+
+    class MockManager:
+        def __init__(self):
+            self.workspace = tmp_path
+            self.workspace_root = tmp_path
+            self._selected_runs = list(selected_runs or [])
+
+        def _select_runs(self, run_ids):
+            return list(self._selected_runs)
+
+        def _new_id(self, prefix):
+            return f"{prefix}_001"
+
+    manager = MockManager()
+    return manager, SubAgentCapabilityService(manager)
 
 
 class TestCapabilityRequestQuery:
@@ -136,25 +155,15 @@ class TestCapabilityRoutingPolicies:
         assert len(result) == 2
 
 
-class TestCapabilityRouteMixin:
-    """测试 SubAgentCapabilityMixin 的基本方法。"""
+class TestCapabilityRouteService:
+    """测试 SubAgentCapabilityService 的基本方法。"""
 
     def test_route_capability_requests_empty(self, tmp_path: Path):
         """测试无请求时的路由报告。"""
-        from agent_py_agent.agent.subagents.manager_capabilities import SubAgentCapabilityMixin
-
-        class MockManager(SubAgentCapabilityMixin):
-            def __init__(self):
-                self.workspace = tmp_path
-                self.workspace_root = tmp_path
-
-            def _select_runs(self, run_ids):
-                return []
-
-        manager = MockManager()
+        _, service = _capability_service(tmp_path)
         router = MagicMock()
 
-        report = manager.route_capability_requests(
+        report = service.route_capability_requests(
             router=router,
             apply=False,
             run_ids=None,
@@ -166,20 +175,10 @@ class TestCapabilityRouteMixin:
 
     def test_route_capability_requests_with_limit(self, tmp_path: Path):
         """测试带限制的路由报告。"""
-        from agent_py_agent.agent.subagents.manager_capabilities import SubAgentCapabilityMixin
-
-        class MockManager(SubAgentCapabilityMixin):
-            def __init__(self):
-                self.workspace = tmp_path
-                self.workspace_root = tmp_path
-
-            def _select_runs(self, run_ids):
-                return []
-
-        manager = MockManager()
+        _, service = _capability_service(tmp_path)
         router = MagicMock()
 
-        report = manager.route_capability_requests(
+        report = service.route_capability_requests(
             router=router,
             apply=False,
             limit=5,
@@ -271,8 +270,6 @@ class TestCapabilityModels:
         assert loaded.capability_requests[1].status == "GRANTED"
 
 
-# LLM: _manager_with_rm_reuse_request keeps the rm-only grant reuse regression focused on assertions.
-# 函数用途: 构造已有 controlled_exec grant 和后续 rm-only request，复现 task_trash 复用场景。
 def _manager_with_rm_reuse_request(tmp_path: Path):
     from agent_py_agent.agent.subagents.manager import SubAgentManager
     from agent_py_agent.agent.subagents.services.lifecycle import (
@@ -322,18 +319,8 @@ class TestCapabilityRoutingDryRun:
 
     def test_route_capability_request_no_hits_returns_would_gap(self, tmp_path: Path):
         """测试无命中时返回 WOULD_GAP。"""
-        from agent_py_agent.agent.subagents.manager_capabilities import SubAgentCapabilityMixin
         from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentTask
-
-        class MockManager(SubAgentCapabilityMixin):
-            def __init__(self):
-                self.workspace = tmp_path
-                self.workspace_root = tmp_path
-
-            def _new_id(self, prefix):
-                return f"{prefix}_001"
-
-        manager = MockManager()
+        _, service = _capability_service(tmp_path)
 
         task = SubAgentTask(
             id="test_task",
@@ -351,7 +338,7 @@ class TestCapabilityRoutingDryRun:
             status="OPEN",
         )
 
-        result = manager._route_capability_request(
+        result = service._route_capability_request(
             task=task,
             request=request,
             query="test query",
@@ -364,18 +351,8 @@ class TestCapabilityRoutingDryRun:
         assert result.dry_run is True
 
     def test_route_capability_request_with_hits_returns_would_grant(self, tmp_path: Path):
-        from agent_py_agent.agent.subagents.manager_capabilities import SubAgentCapabilityMixin
         from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentTask
-
-        class MockManager(SubAgentCapabilityMixin):
-            def __init__(self):
-                self.workspace = tmp_path
-                self.workspace_root = tmp_path
-
-            def _new_id(self, prefix):
-                return f"{prefix}_001"
-
-        manager = MockManager()
+        _, service = _capability_service(tmp_path)
 
         task = SubAgentTask(
             id="test_task",
@@ -399,7 +376,7 @@ class TestCapabilityRoutingDryRun:
         mock_hit.reasons = ["匹配"]
         mock_hit.score = 0.95
 
-        result = manager._route_capability_request(
+        result = service._route_capability_request(
             task=task,
             request=request,
             query="test query",
@@ -455,20 +432,10 @@ class TestCapabilityRouteSummary:
 
     def test_route_report_summary_counts(self, tmp_path: Path):
         """测试路由报告摘要计数。"""
-        from agent_py_agent.agent.subagents.manager_capabilities import SubAgentCapabilityMixin
-
-        class MockManager(SubAgentCapabilityMixin):
-            def __init__(self):
-                self.workspace = tmp_path
-                self.workspace_root = tmp_path
-
-            def _select_runs(self, run_ids):
-                return []
-
-        manager = MockManager()
+        _, service = _capability_service(tmp_path)
         router = MagicMock()
 
-        report = manager.route_capability_requests(
+        report = service.route_capability_requests(
             router=router,
             apply=False,
         )

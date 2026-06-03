@@ -7,8 +7,6 @@ from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings.config import AgentConfig
 
 
-# LLM: closeout_for_all_task_nodes is a config switch, not a new parent-acceptance subsystem.
-# 函数用途: 验证 SimpleAgent 只把统一 closeout 开关传入子代理管理器，后续由 runner 保存链路写反馈。
 def test_simple_agent_passes_closeout_task_node_config(tmp_path):
     config = AgentConfig(
         model_backend="echo",

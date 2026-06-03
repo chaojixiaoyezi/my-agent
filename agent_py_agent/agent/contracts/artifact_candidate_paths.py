@@ -1,5 +1,3 @@
-# LLM: Artifact candidate path helpers keep alternate-path repair facts contract-based.
-# 模块用途: 扫描同名候选产物，并用同一份验收合同判断是否能提示恢复流程复用。
 
 from __future__ import annotations
 
@@ -9,8 +7,6 @@ from .artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from .artifact_acceptance_models import ArtifactAcceptanceReport, ArtifactFinding
 
 
-# LLM: report_with_candidate_paths adds structured repair hints without accepting wrong paths.
-# 函数用途: 当目标产物缺失时，扫描同名候选文件并写入 finding，方便恢复包纠正路径。
 def report_with_candidate_paths(
     report: ArtifactAcceptanceReport,
     expected_path: Path,
@@ -32,8 +28,6 @@ def report_with_candidate_paths(
     )
 
 
-# LLM: _candidate_artifact_paths searches by filename under the task workspace only.
-# 函数用途: 找同名候选产物，排除目标路径本身和内部元数据目录，避免读取自然语言日志。
 def _candidate_artifact_paths(expected_path: Path, task_workspace: Path) -> list[Path]:
     name = expected_path.name
     if not name:
@@ -48,8 +42,6 @@ def _candidate_artifact_paths(expected_path: Path, task_workspace: Path) -> list
     return sorted(candidates, key=lambda item: str(item))
 
 
-# LLM: _candidate_path_finding validates alternate artifacts before suggesting reuse.
-# 函数用途: 对同名候选产物复用同一份 validation_contract，避免错表或空壳误导恢复流程。
 def _candidate_path_finding(
     candidate: Path,
     expected_path: Path,
@@ -80,8 +72,6 @@ def _candidate_path_finding(
     )
 
 
-# LLM: _is_internal_path keeps caches and run metadata out of artifact candidate facts.
-# 函数用途: 判断候选路径是否位于内部目录，避免把日志、session 临时文件当成业务产物。
 def _is_internal_path(path: Path, root: Path) -> bool:
     try:
         rel_parts = path.relative_to(root).parts

@@ -1,5 +1,3 @@
-# LLM: Target coverage ledger is advisory; it never blocks task execution by itself.
-# 模块用途: 汇总目标清单覆盖情况，让模型知道哪些目标已覆盖、哪些还缺，不新增硬门。
 
 from __future__ import annotations
 

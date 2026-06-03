@@ -148,8 +148,6 @@ class TestToolExecutionResult:
         assert "status=error" in rendered
         assert "文件不存在" in rendered
 
-    # LLM: Tool errors should carry machine-readable recovery facts, not only prose.
-    # 函数用途: 工具失败时自动补 Error Taxonomy 字段，让模型知道该修路径、换工具还是重试。
     def test_execution_result_error_contract_auto_classifies_failure(self):
         from agent_py_agent.agent.tooling.models import ToolExecutionResult
 
@@ -168,8 +166,6 @@ class TestToolExecutionResult:
         assert "error_code=PATH_OUTSIDE_WORKSPACE" in rendered
         assert "recommended_action=fix_path_within_allowed_roots" in rendered
 
-    # LLM: Successful results should not pretend to have a failure contract.
-    # 函数用途: 成功工具结果保持轻量，不给模型注入无意义错误字段。
     def test_execution_result_ok_has_no_error_contract(self):
         from agent_py_agent.agent.tooling.models import ToolExecutionResult
 

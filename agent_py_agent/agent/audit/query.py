@@ -1,5 +1,3 @@
-# LLM: Audit module; keep JSONL entry shape and query filters stable.
-# 模块用途: 记录和查询关键操作审计事件，支持后续排查和治理。
 
 
 from __future__ import annotations
@@ -16,8 +14,6 @@ from .logger import AuditAction, AuditEntry
 from .paths import resolve_audit_paths
 
 
-# LLM: AuditQueryResult is a 审计系统 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: 审计查询结果。
 @dataclass
 class AuditQueryResult:
     """审计查询结果。"""
@@ -27,8 +23,6 @@ class AuditQueryResult:
     query_time_ms: float
 
 
-# LLM: AuditQueryParams is a 审计系统 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: Bundle of AuditQuery.query parameters.
 @dataclass(frozen=True)
 class AuditQueryParams:
     """Bundle of AuditQuery.query parameters."""
@@ -44,8 +38,6 @@ class AuditQueryParams:
     offset: int = 0
 
 
-# LLM: _normalize_query_params belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 把宽松输入、配置或默认值归一成稳定内部形状，改默认值要同步配置测试。
 def _normalize_query_params(
     params: AuditQueryParams | None,
     *,
@@ -74,8 +66,6 @@ def _normalize_query_params(
     )
 
 
-# LLM: _iter_audit_dicts belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 完成 审计系统 里的 _iter_audit_dicts 步骤，保持现有返回值、异常和副作用语义。
 def _iter_audit_dicts(path: Path):
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -87,8 +77,6 @@ def _iter_audit_dicts(path: Path):
             yield data
 
 
-# LLM: _parse_audit_line belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 读取文件、配置或外部文本并转换成内部对象，格式变化要保留兼容路径；会读写 JSON 结构，改字段时要保持兼容。
 def _parse_audit_line(line: str) -> dict[str, Any] | None:
     line = line.strip()
     if not line:
@@ -100,8 +88,6 @@ def _parse_audit_line(line: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-# LLM: _audit_entry_matches belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 完成 审计系统 里的 _audit_entry_matches 步骤，保持现有返回值、异常和副作用语义。
 def _audit_entry_matches(data: dict[str, Any], params: AuditQueryParams, action_str: str | None) -> bool:
     if params.user_id and data.get("user_id") != params.user_id:
         return False
@@ -116,8 +102,6 @@ def _audit_entry_matches(data: dict[str, Any], params: AuditQueryParams, action_
     return _timestamp_matches(data.get("timestamp", 0), params)
 
 
-# LLM: _timestamp_matches belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 完成 审计系统 里的 _timestamp_matches 步骤，保持现有返回值、异常和副作用语义。
 def _timestamp_matches(timestamp: float, params: AuditQueryParams) -> bool:
     if params.start_time and timestamp < params.start_time:
         return False
@@ -126,20 +110,14 @@ def _timestamp_matches(timestamp: float, params: AuditQueryParams) -> bool:
     return True
 
 
-# LLM: AuditQuery is a 审计系统 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: 保存 AuditQuery 的输入字段，调用方先构造这个对象再进入 审计系统，避免继续散传参数。
 class AuditQuery:
 
-    # LLM: AuditQuery.__init__ belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 初始化实例依赖和字段，不应在构造阶段做难以回滚的重副作用；它是 AuditQuery 的方法，通常依赖实例字段。
     def __init__(self, config: AgentConfig):
         self.config = config
         paths = resolve_audit_paths(config)
         self._audit_root = paths.root
         self._audit_file = paths.log_file
 
-    # LLM: AuditQuery.query belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 查询已有记录、索引或配置并返回给上层调用方，返回结构需要保持稳定；它是 AuditQuery 的方法，通常依赖实例字段。
     def query(
         self,
         params: AuditQueryParams | None = None,
@@ -188,8 +166,6 @@ class AuditQuery:
             query_time_ms=query_time_ms,
         )
 
-    # LLM: AuditQuery.summary belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 完成 审计系统 里的 summary 步骤，保持现有返回值、异常和副作用语义；会读取实例字段。
     def summary(self, user_id: str | None = None) -> dict[str, Any]:
         if not self._audit_file.exists():
             return {
@@ -223,8 +199,6 @@ class AuditQuery:
             "last_action_time": last_action_time,
         }
 
-    # LLM: AuditQuery.recent_users belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 完成 审计系统 里的 recent_users 步骤，保持现有返回值、异常和副作用语义；会读取实例字段。
     def recent_users(self, limit: int = 10) -> list[dict[str, Any]]:
         if not self._audit_file.exists():
             return []
@@ -245,8 +219,6 @@ class AuditQuery:
             for user, last_time in sorted_users[:limit]
         ]
 
-    # LLM: AuditQuery.cleanup_old_entries belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 清理旧审计条目.；会写入或调整文件，改动时要确认路径、安全边界和失败恢复。
     def cleanup_old_entries(self, days: int = 90) -> int:
         """清理旧审计条目."""
         if not self._audit_file.exists():
@@ -258,8 +230,6 @@ class AuditQuery:
             temp_file.replace(self._audit_file)
         return deleted_count
 
-    # LLM: AuditQuery._cleanup_entries belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: Clean up entries older than cutoff_time; return deleted count.；会写入或调整文件，改动时要确认路径、安全边界和失败恢复。
     def _cleanup_entries(self, cutoff_time: float, temp_file: Path) -> int:
         """Clean up entries older than cutoff_time; return deleted count."""
         deleted_count = 0
@@ -274,8 +244,6 @@ class AuditQuery:
         return deleted_count
 
 
-# LLM: _cleanup_audit_lines belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 完成 审计系统 里的 _cleanup_audit_lines 步骤，保持现有返回值、异常和副作用语义。
 def _cleanup_audit_lines(lines: list[str], cutoff_time: float) -> tuple[list[str], int]:
     kept_lines = []
     deleted_count = 0

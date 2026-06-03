@@ -1,11 +1,8 @@
-# LLM: schema 与迁移兼容性由这里兜底，改表结构前先设计旧库路径。
-# 模块用途: LocalStore SQLite 连接、schema 初始化和事务上下文。
 
 from __future__ import annotations
 
 """owns SQLite connection setup, schema creation, and transactional context helpers.
 
-给人看的解释：
 这个文件只负责 LocalStore 的数据库地基。
 建表、打开连接、启用 WAL/外键、处理 FTS5 是否可用，都在这里集中处理。
 """
@@ -165,12 +162,8 @@ _RUNTIME_GATE_LEDGER_SQL = (
 )
 
 
-# LLM: LocalStoreSchemaMixin 属于 LocalStore 本地事实索引 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: LocalStoreSchemaMixin 封装 LocalStore 本地事实索引 的一组相关操作，供上层组合调用。
 class LocalStoreSchemaMixin:
 
-    # LLM: LocalStoreSchemaMixin._init_schema 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 LocalStore 本地事实索引 中的 init_schema 步骤，并保持调用方依赖的数据形状。
     def _init_schema(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.files_dir.mkdir(parents=True, exist_ok=True)
@@ -184,14 +177,10 @@ class LocalStoreSchemaMixin:
                 self._init_fts_schema(conn)
             conn.commit()
 
-    # LLM: LocalStoreSchemaMixin._execute_schema 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 LocalStore 本地事实索引 中的 execute_schema 步骤，并保持调用方依赖的数据形状。
     def _execute_schema(self, conn: sqlite3.Connection, statements: tuple[str, ...]) -> None:
         for statement in statements:
             conn.execute(statement)
 
-    # LLM: LocalStoreSchemaMixin._init_fts_schema 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 LocalStore 本地事实索引 中的 init_fts_schema 步骤，并保持调用方依赖的数据形状。
     def _init_fts_schema(self, conn: sqlite3.Connection) -> None:
         try:
             conn.execute(
@@ -204,8 +193,6 @@ class LocalStoreSchemaMixin:
         except sqlite3.OperationalError:
             self._fts_available = False
 
-    # LLM: LocalStoreSchemaMixin._connect 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 LocalStore 本地事实索引 中的 connect 步骤，并保持调用方依赖的数据形状。
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
@@ -218,8 +205,6 @@ class LocalStoreSchemaMixin:
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
-    # LLM: LocalStoreSchemaMixin._connection 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 LocalStore 本地事实索引 中的 connection 步骤，并保持调用方依赖的数据形状。
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
         conn = self._connect()

@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 from __future__ import annotations
 
@@ -22,8 +20,6 @@ from agent_py_agent.cli._dispatch import (
     cmd_subagents_dispatch,
     cmd_subagents_workflow_plan,
 )
-
-# LLM: hierarchy commands expose explicit child scheduling and refs-only recovery tree queries.
 from agent_py_agent.cli._hierarchy import cmd_subagents_hierarchy, cmd_subagents_recovery_tree
 from agent_py_agent.cli._inspection import (
     cmd_subagent_context,
@@ -31,15 +27,11 @@ from agent_py_agent.cli._inspection import (
     cmd_subagents_due_check,
     cmd_subagents_probe,
 )
-
-# LLM: leadership recovery commands keep planning refs-only and subset apply explicitly gated.
 from agent_py_agent.cli._leadership import (
     cmd_subagents_leadership_recovery_apply,
     cmd_subagents_leadership_recovery_plan,
 )
 from agent_py_agent.cli._memory_gate import cmd_subagents_memory_gate
-
-# 函数用途: 汇总 review 类子命令入口，供 argparse 注册层统一导入。
 from agent_py_agent.cli._review import (
     cmd_subagents_patches,
     cmd_subagents_tests,

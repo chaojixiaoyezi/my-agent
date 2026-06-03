@@ -10,8 +10,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 
-# LLM: _workspace_agent uses the real manager so dedupe sees persisted sibling runs.
-# 函数用途: 构造真实 SubAgentManager 驱动的 create_subagents 工具测试环境。
 def _workspace_agent(tmp_path: Path):
     from agent_py_agent.agent.subagents.manager import SubAgentManager
 
@@ -23,8 +21,6 @@ def _workspace_agent(tmp_path: Path):
     return agent
 
 
-# LLM: Repeated batch creation should reuse children only through explicit idempotency contracts.
-# 函数用途: 同一父级下同一幂等合同已存在时，第二次 create_subagents 返回 reused_run_ids 和 dispatch_run_ids。
 def test_items_mode_reuses_existing_contract_children_and_returns_dispatch_contract(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -42,8 +38,6 @@ def test_items_mode_reuses_existing_contract_children_and_returns_dispatch_contr
     assert len(agent.subagents.list_runs()) == 3
 
 
-# LLM: Done reused children should remain visible but not be dispatched again.
-# 函数用途: 如果复用到的 run 已 DONE/VERIFIED，调度合同不能要求父级再次 dispatch 它。
 def test_reused_done_children_are_excluded_from_dispatch_contract(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -62,8 +56,6 @@ def test_reused_done_children_are_excluded_from_dispatch_contract(tmp_path):
     assert second["next_action"]["tool"] == "inspect_agent_tree"
 
 
-# LLM: count-based fanout is an explicit request for multiple sibling runs, not an idempotent retry.
-# 函数用途: 保证 count=2 创建两个相似子代理，不被同名复用压成一个 run。
 def test_count_fanout_creates_requested_number_of_sibling_runs(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -80,8 +72,6 @@ def test_count_fanout_creates_requested_number_of_sibling_runs(tmp_path):
     assert len(agent.subagents.list_runs()) == 2
 
 
-# LLM: Live Lab fixture names must not be mistaken for repair/fix work.
-# 函数用途: 防止 `fixture-worker-*` 里的英文 fix 触发修复任务复用，导致 items[] 两个 worker 被压成一个。
 def test_items_mode_fixture_worker_names_do_not_trigger_repair_dedupe(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -100,8 +90,6 @@ def test_items_mode_fixture_worker_names_do_not_trigger_repair_dedupe(tmp_path):
     assert len(agent.subagents.list_runs()) == 2
 
 
-# LLM: Indexed default lineage names should behave like separate siblings in the same batch.
-# 函数用途: 覆盖真实模型生成“小傻妞-worker-1/2”时，两个 item 不应被合同去重合成一个。
 def test_items_mode_indexed_generic_names_create_distinct_siblings(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -120,8 +108,6 @@ def test_items_mode_indexed_generic_names_create_distinct_siblings(tmp_path):
     assert payload["reused_run_ids"] == []
 
 
-# LLM: Generic workers need an explicit idempotency contract to replay safely.
-# 函数用途: 带 idempotency_contract 的普通 worker 第二次创建同一合同，应复用已有 run。
 def test_generic_single_worker_reuses_explicit_idempotency_contract(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -142,8 +128,6 @@ def test_generic_single_worker_reuses_explicit_idempotency_contract(tmp_path):
     assert len(agent.subagents.list_runs()) == 1
 
 
-# LLM: Structured output refs should create a system idempotency contract even if the model forgot one.
-# 函数用途: 防止真实 E2E 中模型只传 output_files 时重复创建同一个交付 worker。
 def test_generic_worker_reuses_system_derived_output_ref_contract(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -169,8 +153,6 @@ def test_generic_worker_reuses_system_derived_output_ref_contract(tmp_path):
     assert len(agent.subagents.list_runs()) == 1
 
 
-# LLM: Default role display names are generic and must not merge unrelated goals.
-# 函数用途: 两个未显式命名的小傻妞-worker 目标不同，应创建两个 run，不能只靠默认名字误复用。
 def test_generic_default_name_does_not_reuse_different_goal(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -185,8 +167,6 @@ def test_generic_default_name_does_not_reuse_different_goal(tmp_path):
     assert len(agent.subagents.list_runs()) == 2
 
 
-# LLM: Repeated count fanout should reuse each indexed child when an explicit contract exists.
-# 函数用途: count=2 第二次重复调用在同一幂等合同下按 agent_name 区分并复用“子任务1/子任务2”。
 def test_repeated_count_fanout_reuses_indexed_children_with_contract(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -209,8 +189,6 @@ def test_repeated_count_fanout_reuses_indexed_children_with_contract(tmp_path):
     assert len(agent.subagents.list_runs()) == 2
 
 
-# LLM: A fully done reused batch should not tell the parent to dispatch an empty run-id list.
-# 函数用途: 全部复用任务已 DONE/VERIFIED 时，next_action 应建议看板/汇报状态，而不是 dispatch_subagents 空跑。
 def test_all_reused_done_children_return_non_dispatch_next_action(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -230,8 +208,6 @@ def test_all_reused_done_children_return_non_dispatch_next_action(tmp_path):
     assert second["next_action"]["reason"].startswith("create_subagents 没有可调度")
 
 
-# LLM: _pipeline_items mirrors the real Task18 short duplicate batch with stable child names.
-# 函数用途: 返回三段流水线 item，output_name 用来模拟第二次创建时目标文本略有变化。
 def _pipeline_items(output_name: str) -> list[dict[str, object]]:
     return [
         {
@@ -255,8 +231,6 @@ def _pipeline_items(output_name: str) -> list[dict[str, object]]:
     ]
 
 
-# LLM: _fixture_worker_item mirrors the real Live Lab create_subagents tool call that regressed.
-# 函数用途: 构造含 README.md 目标和 fixture-worker 名称的普通 worker item。
 def _fixture_worker_item(agent_name: str) -> dict[str, object]:
     return {
         "agent_name": agent_name,
@@ -267,8 +241,6 @@ def _fixture_worker_item(agent_name: str) -> dict[str, object]:
     }
 
 
-# LLM: _idempotency_pack builds the explicit replay contract used by these tests.
-# 函数用途: 生成 subagent_idempotency_contract.v1 context pack，避免测试继续靠 goal/agent_name 文本复用。
 def _idempotency_pack(key: str, *scope_refs: str) -> dict[str, object]:
     return {
         "kind": "idempotency_contract",

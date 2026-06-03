@@ -9,8 +9,8 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.dispatch_capability_followup import (
-    PostRunnerCapabilityFollowupParams,
+from agent_py_agent.agent.agent_core.orchestration.dispatch.capability_followup import (
+    _capability_followup_instruction,
     run_post_runner_capability_followup,
 )
 from agent_py_agent.agent.capabilities import CapabilityRouter
@@ -24,19 +24,49 @@ from .backends import CapabilityThenAcceptedBackend, IncompleteOutputThenAccepte
 def test_dispatch_capability_followup_skips_when_router_missing():
     records = [SimpleNamespace(step="runner", action="ok")]
     result = run_post_runner_capability_followup(
-        PostRunnerCapabilityFollowupParams(
-            agent=SimpleNamespace(),
-            ctx=SimpleNamespace(router=None, cfg=CapabilityConfig(), limit=20),
-            params=SimpleNamespace(apply=True, execute_runners=True),
-            records=records,
-        )
+        SimpleNamespace(),
+        (
+            SimpleNamespace(router=None, cfg=CapabilityConfig(), limit=20),
+            SimpleNamespace(apply=True, start_runners=True),
+            records,
+        ),
     )
 
     assert result == records
 
 
-# LLM: test_dispatch_routes_new_capability_request_then_reruns_worker covers the real R3 stalled flow.
-# 函数用途: 同一次 dispatch 中，runner 写出 capability_request 后，应先路由授权，再重跑该 worker，而不是让上层模型空转猜下一步。
+def test_capability_followup_instruction_reports_task_load_error():
+    def broken_load(_run_id):
+        raise RuntimeError("task ledger unavailable")
+
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=broken_load))
+    records = [SimpleNamespace(step="capability_route", action="granted", run_id="child-1")]
+
+    instruction = _capability_followup_instruction(agent, records)
+
+    assert "child-1" in instruction
+    assert "dispatch_capability_followup.subagents.load" in instruction
+    assert "task ledger unavailable" in instruction
+
+
+def test_capability_followup_instruction_reports_next_actions_load_error(tmp_path: Path):
+    next_actions = tmp_path / "next_actions.json"
+    next_actions.write_text("{bad json", encoding="utf-8")
+    task = SimpleNamespace(
+        capability_grants=[SimpleNamespace(tools=["write_file"])],
+        blockers=[],
+        next_actions_json=str(next_actions),
+        artifact_refs=[],
+    )
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda _run_id: task))
+    records = [SimpleNamespace(step="capability_route", action="granted", run_id="child-1")]
+
+    instruction = _capability_followup_instruction(agent, records)
+
+    assert "next_actions_load_error" in instruction
+    assert "dispatch_capability_followup.next_actions.load" in instruction
+
+
 def test_dispatch_routes_new_capability_request_then_reruns_worker(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -56,7 +86,7 @@ def test_dispatch_routes_new_capability_request_then_reruns_worker(monkeypatch):
             router,
             CapabilityConfig(),
             apply=True,
-            execute_runners=True,
+            start_runners=True,
             max_runners=1,
             probe=False,
             reviewer="dispatch-test",
@@ -74,8 +104,6 @@ def test_dispatch_routes_new_capability_request_then_reruns_worker(monkeypatch):
         assert loaded.verification_status == "VERIFIED"
 
 
-# LLM: test_dispatch_reruns_incomplete_output_after_write_grant covers real HTML E2E stalls.
-# 函数用途: 子代理产物只写半截时，父级授权继续写后，同一次 dispatch 应重跑该 run，而不是停在纸面授权。
 def test_dispatch_reruns_incomplete_output_after_write_grant(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -96,7 +124,7 @@ def test_dispatch_reruns_incomplete_output_after_write_grant(monkeypatch):
             router,
             CapabilityConfig(),
             apply=True,
-            execute_runners=True,
+            start_runners=True,
             max_runners=1,
             probe=False,
             reviewer="dispatch-test",

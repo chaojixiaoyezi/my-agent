@@ -11,8 +11,6 @@ from agent_py_agent.agent.subagents.required_file_terms import (
 )
 
 
-# LLM: structured required_files fields are the only source of required deliverable filenames.
-# 函数用途: required_files 机器字段里的文件名会进入必需产物合同，逗号、顿号、斜杠和 bullet 写法都可读。
 def test_file_contract_extracts_structured_required_files():
     text = """
     required_files: index.html、style.css/app.js, docs/README.md
@@ -26,8 +24,6 @@ def test_file_contract_extracts_structured_required_files():
     assert required == ["index.html", "style.css", "app.js", "docs/README.md", "flow-b.html", "reports/final_report.md"]
 
 
-# LLM: structured forbidden_files fields stay separate from deliverables.
-# 函数用途: forbidden_files 机器字段只进入禁止文件合同，不会污染 required_files。
 def test_file_contract_extracts_structured_forbidden_files():
     text = """
     required_files: index.html, item-detail.html
@@ -44,8 +40,6 @@ def test_file_contract_extracts_structured_forbidden_files():
     assert forbidden == ["product.html", "legacy.html", "output.json", "RUNNER_RESULT.md", "execution_context.json"]
 
 
-# LLM: natural prose is no longer a product-code file contract source.
-# 函数用途: 即便句子里出现“必须/禁止/输出/读取”等自然语言，代码层也不能据此猜 required/forbidden 文件。
 def test_file_contract_ignores_natural_language_file_requirements():
     text = (
         "必须包含 index.html、style.css、app.js。"
@@ -60,8 +54,6 @@ def test_file_contract_ignores_natural_language_file_requirements():
     assert forbidden == []
 
 
-# LLM: unknown natural labels are deliberately ignored instead of becoming new product rules.
-# 函数用途: 中文标题、英文 prose 和括号解释都不能替代 required_files/forbidden_files 机器字段。
 def test_file_contract_ignores_non_protocol_labels():
     text = """
     必须文件（禁止改名）：index.html, register.html

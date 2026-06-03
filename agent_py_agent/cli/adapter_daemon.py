@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 from __future__ import annotations
 
@@ -14,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..agent.common.json_io import JsonObjectReadReport, read_json_object_report
 from ..agent.gateway_parts.daemon_control import (
     get_running_pid,
     is_pid_alive,
@@ -23,8 +22,6 @@ from ..agent.gateway_parts.process_control import terminate_pid, wait_for_pid_ex
 from .models import AdapterOptions
 
 
-# LLM: AdapterDaemonRequest 是gateway CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class AdapterDaemonRequest:
     agent: object
@@ -33,8 +30,6 @@ class AdapterDaemonRequest:
     options: AdapterOptions
 
 
-# LLM: AdapterStopRequest 是gateway CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class AdapterStopRequest:
     options: AdapterOptions
@@ -43,8 +38,6 @@ class AdapterStopRequest:
     pid: int
 
 
-# LLM: daemonize_adapter 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def daemonize_adapter(request: AdapterDaemonRequest) -> int:
     existing_pid = get_running_pid(request.pid_file)
     if existing_pid is not None:
@@ -56,8 +49,6 @@ def daemonize_adapter(request: AdapterDaemonRequest) -> int:
     return _wait_for_adapter_pid(process, request.pid_file)
 
 
-# LLM: _start_adapter_daemon_process 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _start_adapter_daemon_process(agent, gpaths, options: AdapterOptions) -> subprocess.Popen:
     cmd = [
         sys.executable,
@@ -83,8 +74,6 @@ def _start_adapter_daemon_process(agent, gpaths, options: AdapterOptions) -> sub
         )
 
 
-# LLM: _daemon_subprocess_flags 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _daemon_subprocess_flags() -> tuple[int, bool]:
     if os.name != "nt":
         return 0, True
@@ -93,8 +82,6 @@ def _daemon_subprocess_flags() -> tuple[int, bool]:
     return flags, False
 
 
-# LLM: _wait_for_adapter_pid 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _wait_for_adapter_pid(process: subprocess.Popen, pid_file: Path) -> int:
     deadline = time.time() + 30.0
     while time.time() < deadline:
@@ -110,40 +97,35 @@ def _wait_for_adapter_pid(process: subprocess.Popen, pid_file: Path) -> int:
     return 1
 
 
-# LLM: print_daemon_adapter_status 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def print_daemon_adapter_status(pid: int, pid_file: Path, gpaths) -> None:
     print(f"adapter running: pid={pid}", file=sys.stderr)
     record = read_pid_record(pid_file)
     if record:
         print(f"  start_time: {record.get('start_time', 'unknown')}", file=sys.stderr)
-    state = read_adapter_state(gpaths)
+    state_report = read_adapter_state_report(gpaths)
+    state = state_report.payload
+    if state_report.load_error:
+        print(f"  state_load_error={state_report.load_error.get('context')}", file=sys.stderr)
     if state:
         print(f"  state: {state.get('state', 'unknown')}", file=sys.stderr)
 
 
-# LLM: read_adapter_state 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 读取文件、索引或配置，并转换成后续逻辑可直接使用的数据。
 def read_adapter_state(gpaths) -> dict[str, Any] | None:
+    payload = read_adapter_state_report(gpaths).payload
+    return payload or None
+
+
+def read_adapter_state_report(gpaths) -> JsonObjectReadReport:
     state_path = gpaths.root / "adapter_state.json"
-    if not state_path.exists():
-        return None
-    try:
-        return json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    return read_json_object_report(state_path, context="cli.adapter_daemon.state.read")
 
 
-# LLM: read_pid_record 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 读取文件、索引或配置，并转换成后续逻辑可直接使用的数据。
 def read_pid_record(path: Path):
     from ..agent.gateway_parts.daemon_control import _read_json_file
 
     return _read_json_file(path)
 
 
-# LLM: stop_adapter_daemon 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def stop_adapter_daemon(request: AdapterStopRequest) -> int:
     print(f"stopping adapter (PID {request.pid})...", file=sys.stderr)
     _write_stop_request(request.gpaths)
@@ -160,8 +142,6 @@ def stop_adapter_daemon(request: AdapterStopRequest) -> int:
     return 1
 
 
-# LLM: _write_stop_request 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
 def _write_stop_request(gpaths) -> None:
     stop_request_path = gpaths.root / "adapter_stop.request"
     stop_request_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,16 +1,12 @@
-# LLM: Structured subagent evidence helpers stay separate from the main result merge flow.
-# 模块用途: 解析子代理结构化输出里的 evidence、evidence_packets 和 findings，并回写到任务状态。
 
 from __future__ import annotations
 
+from ..common.value_parsing import text_or_sequence_strings
 from .models import EvidencePacket, Finding, SubAgentTask, VerificationEvidence
-from .parsing import _string_list
 from .result_artifact_evidence import normalize_artifact_ref
 from .utils import _merge_list, _new_id
 
 
-# LLM: process_evidence_items keeps simple evidence notes out of result_structured.py.
-# 函数用途: 把 parsed.evidence 中的普通证据写入 task.evidence，并返回新增数量。
 def process_evidence_items(parsed, task: SubAgentTask, now: float) -> int:
     count = 0
     for item in parsed.evidence:
@@ -32,8 +28,6 @@ def process_evidence_items(parsed, task: SubAgentTask, now: float) -> int:
     return count
 
 
-# LLM: process_evidence_packets records higher-confidence evidence bundles with stable refs.
-# 函数用途: 把 parsed.evidence_packets 转成 EvidencePacket，更新 task 的 evidence/artifact 引用。
 def process_evidence_packets(parsed, task: SubAgentTask, now: float) -> list[dict[str, object]]:
     packets: list[dict[str, object]] = []
     for item in parsed.evidence_packets:
@@ -47,8 +41,6 @@ def process_evidence_packets(parsed, task: SubAgentTask, now: float) -> list[dic
     return packets
 
 
-# LLM: process_findings records review-style findings without deciding acceptance.
-# 函数用途: 把 parsed.findings 写入 task.findings，并同步相关 evidence_refs。
 def process_findings(parsed, task: SubAgentTask, now: float) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
     for item in parsed.findings:
@@ -61,8 +53,6 @@ def process_findings(parsed, task: SubAgentTask, now: float) -> list[dict[str, o
     return findings
 
 
-# LLM: _evidence_packet_from_item validates refs before creating a durable packet.
-# 函数用途: 从单条模型输出中构建 EvidencePacket，并把 artifact_refs 归一化成 task-local durable refs；缺 claim 或 refs 时返回 None。
 def _evidence_packet_from_item(task: SubAgentTask, item: dict[str, object], now: float) -> EvidencePacket | None:
     claim = str(item.get("claim", "") or "").strip()
     evidence_refs = _string_refs(item.get("evidence_refs", []))
@@ -82,8 +72,6 @@ def _evidence_packet_from_item(task: SubAgentTask, item: dict[str, object], now:
     )
 
 
-# LLM: _finding_from_item validates findings before they affect acceptance review.
-# 函数用途: 从模型输出中构建 Finding；缺 claim 或证据引用时返回 None。
 def _finding_from_item(item: dict[str, object], now: float) -> Finding | None:
     claim = str(item.get("claim", "") or "").strip()
     evidence_packet_ids = _string_refs(item.get("evidence_packet_ids", []))
@@ -103,8 +91,6 @@ def _finding_from_item(item: dict[str, object], now: float) -> Finding | None:
     )
 
 
-# LLM: _evidence_packet_dict preserves the public summary shape used by tests and reports.
-# 函数用途: 把 EvidencePacket 转成可序列化字典，保持字段名稳定。
 def _evidence_packet_dict(packet: EvidencePacket) -> dict[str, object]:
     return {
         "id": packet.id,
@@ -119,8 +105,6 @@ def _evidence_packet_dict(packet: EvidencePacket) -> dict[str, object]:
     }
 
 
-# LLM: _finding_dict preserves the public finding summary shape used by reports.
-# 函数用途: 把 Finding 转成可序列化字典，保持验收报告读取字段稳定。
 def _finding_dict(finding: Finding) -> dict[str, object]:
     return {
         "id": finding.id,
@@ -135,8 +119,6 @@ def _finding_dict(finding: Finding) -> dict[str, object]:
     }
 
 
-# LLM: _evidence_ok trusts explicit evidence fields and avoids natural-language summary heuristics.
-# 函数用途: 只有 match_mode=not_contains 或 expect_absent=true 这类机器字段才会把 ok=false 反转为负向检查通过。
 def _evidence_ok(item: dict[str, object]) -> bool:
     raw_ok = bool(item.get("ok", True))
     if raw_ok:
@@ -148,14 +130,10 @@ def _evidence_ok(item: dict[str, object]) -> bool:
     return kind == "content_check" and bool(pattern) and (explicit_absent or mode in {"not_contains", "not_exists", "absent"})
 
 
-# LLM: _string_refs keeps packet/finding reference parsing identical across fields.
-# 函数用途: 把证据引用字段规范成字符串列表。
 def _string_refs(value: object) -> list[str]:
-    return _string_list(value)
+    return text_or_sequence_strings(value)
 
 
-# LLM: _float_confidence tolerates model-written numbers and invalid confidence text.
-# 函数用途: 把 confidence 字段转成 float；非法值按 0.0 处理。
 def _float_confidence(value: object) -> float:
     try:
         return float(value)

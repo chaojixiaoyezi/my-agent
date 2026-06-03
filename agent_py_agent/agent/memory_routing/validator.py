@@ -1,5 +1,3 @@
-# LLM: Memory routing module; keep context selection and read-receipt records stable.
-# 模块用途: 根据任务上下文选择可注入记忆，并记录读取路径。
 
 from __future__ import annotations
 
@@ -11,8 +9,6 @@ from .models import MemoryRoute
 VALID_INJECT_MODES = {"always", "on_hit", "never"}
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _TermValidationContext 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 _TermValidationContext 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _TermValidationContext:
     label: str
@@ -21,8 +17,6 @@ class _TermValidationContext:
     findings: list[str]
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _RouteIdentityContext 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 _RouteIdentityContext 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _RouteIdentityContext:
     idx: int
@@ -31,8 +25,6 @@ class _RouteIdentityContext:
     findings: list[str]
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 validate_routes 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 校验 validate routes 的输入、状态或路径，提前暴露无效数据和越界条件。
 def validate_routes(routes: list[MemoryRoute], root: str | Path) -> list[str]:
     findings: list[str] = []
     seen_route_ids: dict[str, int] = {}
@@ -54,8 +46,6 @@ def validate_routes(routes: list[MemoryRoute], root: str | Path) -> list[str]:
     return findings
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _validate_route_identity 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 校验 validate route identity 的输入、状态或路径，提前暴露无效数据和越界条件。
 def _validate_route_identity(
     route: MemoryRoute,
     context: _RouteIdentityContext,
@@ -71,8 +61,6 @@ def _validate_route_identity(
     context.seen_route_ids[route_id] = context.idx
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _validate_route_shape 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 校验 validate route shape 的输入、状态或路径，提前暴露无效数据和越界条件。
 def _validate_route_shape(route: MemoryRoute, label: str, findings: list[str]) -> None:
     if not route.topic.strip():
         findings.append(f"route '{label}': topic is empty")
@@ -82,8 +70,6 @@ def _validate_route_shape(route: MemoryRoute, label: str, findings: list[str]) -
         findings.append(f"route '{label}': inject_mode must be one of {sorted(VALID_INJECT_MODES)}")
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _validate_route_terms 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 校验 validate route terms 的输入、状态或路径，提前暴露无效数据和越界条件。
 def _validate_route_terms(
     route: MemoryRoute,
     label: str,
@@ -99,8 +85,6 @@ def _validate_route_terms(
         _validate_route_term(term, normalized, context)
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _validate_route_term 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 校验 validate route term 的输入、状态或路径，提前暴露无效数据和越界条件。
 def _validate_route_term(
     term: str,
     normalized: str,
@@ -117,8 +101,6 @@ def _validate_route_term(
     context.keyword_owners[normalized] = context.label
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _validate_authority_path 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 校验 validate authority path 的输入、状态或路径，提前暴露无效数据和越界条件。
 def _validate_authority_path(
     route: MemoryRoute,
     resolved_root: Path,

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 
-# LLM: Markdown format checks should use heading/table facts, not report prose scoring.
-# 函数用途: 验证 Markdown 缺少声明章节和表格时返回结构化格式错误。
 def test_markdown_output_requires_sections_and_tables() -> None:
     from agent_py_agent.agent.contracts.offline_output_format_contract import (
         validate_output_format_contract,
@@ -27,8 +25,6 @@ def test_markdown_output_requires_sections_and_tables() -> None:
     assert result.error_codes == ("MARKDOWN_SECTION_MISSING", "MARKDOWN_TABLE_MISSING")
 
 
-# LLM: JSON report checks should require declared fields and evidence count.
-# 函数用途: 验证 JSON 输出缺少 schema 字段和证据条数时不能通过。
 def test_json_output_requires_schema_fields_and_evidence_count() -> None:
     from agent_py_agent.agent.contracts.offline_output_format_contract import (
         validate_output_format_contract,
@@ -54,8 +50,6 @@ def test_json_output_requires_schema_fields_and_evidence_count() -> None:
     assert result.findings[0]["missing_fields"] == ["evidence", "decision"]
 
 
-# LLM: XLSX output checks should validate sheet names, columns, and row count from workbook facts.
-# 函数用途: 验证 xlsx 缺少子表、列和数据行时返回通用格式 finding。
 def test_xlsx_output_requires_sheets_columns_and_rows() -> None:
     from agent_py_agent.agent.contracts.offline_output_format_contract import (
         validate_output_format_contract,
@@ -82,8 +76,6 @@ def test_xlsx_output_requires_sheets_columns_and_rows() -> None:
     assert result.error_codes == ("XLSX_SHEET_MISSING", "XLSX_COLUMN_MISSING", "XLSX_ROW_MISSING")
 
 
-# LLM: Encoding and long-output checks should be generic across artifact kinds.
-# 函数用途: 验证中文 UTF-8 解码失败和大输出未外置都会被离线合同拦住。
 def test_utf8_and_long_output_contracts_are_generic() -> None:
     from agent_py_agent.agent.contracts.offline_output_format_contract import (
         validate_output_format_contract,

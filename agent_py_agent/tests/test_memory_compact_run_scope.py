@@ -16,7 +16,7 @@ from agent_py_agent.agent.memory_archive.runtime_fact_source import (
     RuntimeFactSourceRequest,
     write_runtime_fact_source,
 )
-from agent_py_agent.agent.task_progress import write_task_progress
+from agent_py_agent.agent.task_progress import progress_path, write_task_progress
 from agent_py_agent.tests.memory_compact_support import write_compact_fixture
 
 
@@ -122,6 +122,26 @@ def test_memory_compact_work_state_carries_run_intent_paths(tmp_path: Path) -> N
     assert "outputs/final-report.md" in result["handoff_summary"]
 
 
+def test_memory_compact_work_state_reports_corrupt_run_intent_task_json(tmp_path: Path) -> None:
+    """运行意图来源 task.json 坏了不能被 compact 当成没有路径意图。"""
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    task_root = root / "tasks" / "run-compact"
+    task_root.mkdir(parents=True, exist_ok=True)
+    (task_root / "task.json").write_text("{not-json", encoding="utf-8")
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+
+    assert work_state["run_intent"]["load_errors"][0]["context"] == "compact_work_state.run_intent.task_json"
+
+
 def test_memory_compact_work_state_reads_task_coverage_ledger(tmp_path: Path) -> None:
     """compact 应携带覆盖账本摘要，避免长任务压缩后忘记哪些对象没覆盖。"""
     root = tmp_path / "workspace"
@@ -163,3 +183,23 @@ def test_memory_compact_work_state_reads_task_coverage_ledger(tmp_path: Path) ->
     assert coverage["counts"]["targets_done"] == 1
     assert coverage["active_targets"][0]["id"] == "codex-main"
     assert coverage["active_targets"][0]["checks"]["分析模块"] == "pending"
+
+
+def test_memory_compact_work_state_reports_corrupt_task_progress(tmp_path: Path) -> None:
+    """进度账本坏了应进入 compact 恢复材料，而不是被当成没有进度。"""
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    path = progress_path(root, "run-compact")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not-json", encoding="utf-8")
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+
+    assert work_state["task_progress"]["load_error"]["context"] == "task_progress.read"

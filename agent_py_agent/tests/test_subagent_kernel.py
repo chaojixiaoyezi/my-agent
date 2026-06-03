@@ -38,8 +38,22 @@ def test_kernel_snapshot_returns_root_tree_with_status_buckets(tmp_path) -> None
     assert snapshot.runs[1].artifact_refs == ["artifact:index.html"]
 
 
-# LLM: _create_kernel_root_worker keeps the kernel bucket test below the strict function-size line.
-# 函数用途: 构造 root + worker fixture，包含工具合同、恢复引用和产物引用。
+def test_kernel_snapshot_reports_corrupt_task_record_instead_of_hiding_it(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    bad_dir = tmp_path / "run-bad"
+    bad_dir.mkdir()
+    (bad_dir / "task.json").write_text("{not-json", encoding="utf-8")
+
+    snapshot = manager.kernel_snapshot(SubagentKernelQuery())
+
+    assert snapshot.runs == []
+    assert any(item.startswith("subagent_load_error:run-bad") for item in snapshot.warnings)
+    errors = snapshot.reserved["load_errors"]
+    assert errors[0]["run_id"] == "run-bad"
+    assert errors[0]["category"] == "data_parse"
+    assert "不要把它当成子代理没产物" in errors[0]["model_message"]
+
+
 def _create_kernel_root_worker(manager: SubAgentManager, tmp_path):
     root = manager.create_run(
         goal="做一个家具品牌首页",
@@ -66,8 +80,6 @@ def _create_kernel_root_worker(manager: SubAgentManager, tmp_path):
     return root, worker
 
 
-# LLM: _populate_worker_kernel_fields isolates tool and recovery refs from the core assertion path.
-# 函数用途: 给 worker fixture 补齐工具申请、授权、缺口、artifact 和 checkpoint refs。
 def _populate_worker_kernel_fields(worker, tmp_path, root_id: str) -> None:
     worker.status = "DONE"
     worker.progress = 1.0
@@ -190,3 +202,62 @@ def test_runtime_tool_progress_updates_agent_status_fields(tmp_path) -> None:
     assert loaded.last_progress_at > 0
     assert loaded.last_progress_summary
     assert loaded.heartbeat_at == loaded.last_progress_at
+
+
+def test_runtime_tool_progress_reports_task_load_error() -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.subagents.services.session_progress import (
+        record_runtime_subagent_tool_progress,
+    )
+
+    class Manager:
+        def load(self, run_id: str):
+            raise FileNotFoundError(run_id)
+
+    progress = record_runtime_subagent_tool_progress(
+        SimpleNamespace(subagents=Manager()),
+        SimpleNamespace(
+            params=SimpleNamespace(context_scope="task_local", run_id="missing-run"),
+            result=SimpleNamespace(tool="write_file", output="ok", ok=True),
+            payload={"path": "out.md", "content": "done"},
+            tool_rounds=1,
+            idx=1,
+        ),
+    )
+
+    assert progress["load_error"]["context"] == "subagent_tool_progress.subagents.load"
+    assert progress["run_id"] == "missing-run"
+
+
+def test_runtime_tool_progress_reports_status_save_error(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.subagents.services.session_progress import (
+        record_runtime_subagent_tool_progress,
+    )
+
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(goal="write", thought="", plan=["write"])
+    task.agent_run_workspace_dir = str(tmp_path / "agents" / task.id)
+
+    class Manager:
+        def load(self, run_id: str):
+            return task
+
+        def save(self, item):
+            raise OSError("state locked")
+
+    progress = record_runtime_subagent_tool_progress(
+        SimpleNamespace(subagents=Manager()),
+        SimpleNamespace(
+            params=SimpleNamespace(context_scope="task_local", run_id=task.id),
+            result=SimpleNamespace(tool="write_file", output="ok", ok=True),
+            payload={"path": str(tmp_path / "out.md"), "content": "# Summary\ndone"},
+            tool_rounds=1,
+            idx=1,
+        ),
+    )
+
+    assert progress["status_save_error"]["context"] == "subagent_tool_progress.subagents.save"
+    assert progress["status_save_error"]["message"] == "state locked"

@@ -330,7 +330,7 @@ class TestIndexingRecordAliases:
         """验证 index_report() 正确委托给 _index_report。"""
         from agent_py_agent.agent.subagents.manager_indexing import SubAgentIndexingMixin
         from agent_py_agent.agent.subagents.reports import DueCheckReport
-        from agent_py_agent.agent.subagents.services.indexing_params import IndexReportParams
+        from agent_py_agent.agent.subagents.services.indexing.params import IndexReportParams
 
         class MockManager(SubAgentIndexingMixin):
             def __init__(self):

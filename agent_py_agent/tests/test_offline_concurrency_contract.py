@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 
-# LLM: Concurrent workers must not both own the same run lease in the offline control plane.
-# 函数用途: 验证同一个 run_id 被两个 active worker claim 时，合同返回结构化冲突。
 def test_only_one_worker_can_claim_same_run_lease() -> None:
     from agent_py_agent.agent.contracts.offline_concurrency_contract import (
         validate_concurrency_events,
@@ -20,8 +18,6 @@ def test_only_one_worker_can_claim_same_run_lease() -> None:
     assert result.findings[0]["run_id"] == "run-1"
 
 
-# LLM: Artifact writes need idempotency keys so repeated model calls cannot overwrite sibling run output.
-# 函数用途: 验证两个 run 写同一产物且幂等键不同会冲突，相同幂等键视为重放。
 def test_two_runs_cannot_write_same_artifact_without_same_idempotency_key() -> None:
     from agent_py_agent.agent.contracts.offline_concurrency_contract import (
         validate_concurrency_events,
@@ -65,8 +61,6 @@ def test_two_runs_cannot_write_same_artifact_without_same_idempotency_key() -> N
     assert replay.ok is True
 
 
-# LLM: Approval races should accept only the first terminal decision for one approval id.
-# 函数用途: 验证同一个 approval_id 已经 APPROVED 后又 REJECTED，会作为结构化竞态失败。
 def test_same_approval_decision_accepts_first_terminal_status_only() -> None:
     from agent_py_agent.agent.contracts.offline_concurrency_contract import (
         validate_concurrency_events,

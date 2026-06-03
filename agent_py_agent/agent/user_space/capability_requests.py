@@ -1,5 +1,3 @@
-# LLM: Owner capability requests are durable work items, not execution gates.
-# 模块用途: 在 owner home 中记录能力/工具/权限申请，让父代理或用户后续处理；不阻断普通任务。
 
 from __future__ import annotations
 
@@ -10,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from ..common.json_io import read_json_object_report
 from .home_layout import MyAgentHomePaths
 
 
@@ -33,6 +32,12 @@ class CreateCapabilityRequest:
     reason: str
     task_id: str = ""
     expires_at: str = ""
+
+
+@dataclass(frozen=True)
+class CapabilityRequestsReport:
+    requests: list[OwnerCapabilityRequest]
+    load_errors: list[dict[str, object]]
 
 
 def create_capability_request(home: MyAgentHomePaths, request: CreateCapabilityRequest) -> OwnerCapabilityRequest:
@@ -66,16 +71,24 @@ def close_capability_request(home: MyAgentHomePaths, request_id: str, *, status:
 
 
 def list_capability_requests(home: MyAgentHomePaths, *, status: str = "") -> list[OwnerCapabilityRequest]:
+    return list_capability_requests_report(home, status=status).requests
+
+
+def list_capability_requests_report(home: MyAgentHomePaths, *, status: str = "") -> CapabilityRequestsReport:
     wanted = str(status or "").strip().lower()
     rows: list[OwnerCapabilityRequest] = []
+    load_errors: list[dict[str, object]] = []
     if not home.owner_capability_requests_dir.exists():
-        return rows
+        return CapabilityRequestsReport(rows, load_errors)
     for path in sorted(home.owner_capability_requests_dir.glob("*.json")):
-        payload = _read_payload(path)
+        payload, load_error = _read_payload_report(path)
+        if load_error is not None:
+            load_errors.append(load_error)
+            continue
         item = _request_from_payload(path, payload)
         if not wanted or item.status.lower() == wanted:
             rows.append(item)
-    return rows
+    return CapabilityRequestsReport(rows, load_errors)
 
 
 def expire_capability_requests(home: MyAgentHomePaths, *, now: str | None = None) -> list[OwnerCapabilityRequest]:
@@ -84,7 +97,9 @@ def expire_capability_requests(home: MyAgentHomePaths, *, now: str | None = None
     if not home.owner_capability_requests_dir.exists():
         return expired
     for path in sorted(home.owner_capability_requests_dir.glob("*.json")):
-        payload = _read_payload(path)
+        payload, load_error = _read_payload_report(path)
+        if load_error is not None:
+            continue
         if str(payload.get("status") or "") != "open":
             continue
         expires = _parse_time(str(payload.get("expires_at") or ""))
@@ -112,11 +127,12 @@ def _request_from_payload(path: Path, payload: dict[str, Any]) -> OwnerCapabilit
 
 
 def _read_payload(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        payload = {}
-    return payload if isinstance(payload, dict) else {}
+    return _read_payload_report(path)[0]
+
+
+def _read_payload_report(path: Path) -> tuple[dict[str, Any], dict[str, object] | None]:
+    report = read_json_object_report(path, context="owner_capability_request.read")
+    return report.payload, report.load_error
 
 
 def _safe_id(value: object) -> str:
@@ -146,9 +162,11 @@ def _parse_time(value: str) -> datetime | None:
 
 __all__ = [
     "CreateCapabilityRequest",
+    "CapabilityRequestsReport",
     "OwnerCapabilityRequest",
     "close_capability_request",
     "create_capability_request",
     "expire_capability_requests",
     "list_capability_requests",
+    "list_capability_requests_report",
 ]

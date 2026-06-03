@@ -1,10 +1,9 @@
-# LLM: Task progress hints are advisory text for continuation, never acceptance gates.
-# 模块用途: 根据 task_progress/coverage 生成软提示，帮助模型继续补覆盖和证据。
 
 from __future__ import annotations
 
 from typing import Any
 
+from .common.value_parsing import dedupe_strings, string_list
 from .task_progress_coverage import normalize_coverage
 
 _RESULT_FIELDS = ("result", "outcome", "conclusion", "decision", "summary")
@@ -45,7 +44,7 @@ def quality_hints(
         "coverage_incomplete_ids": coverage_incomplete[:20],
         "next_suggestions": next_suggestions,
         "soft_prompt": _soft_prompt(next_suggestions),
-        "messages": _dedupe(messages),
+        "messages": dedupe_strings(messages),
     }
 
 
@@ -53,7 +52,7 @@ def _items_with_result_without_evidence(items: list[dict[str, Any]]) -> list[str
     return [
         str(item.get("id") or "")
         for item in items
-        if _has_result_signal(item) and not _string_list(item.get("evidence"))
+        if _has_result_signal(item) and not string_list(item.get("evidence"))
     ]
 
 
@@ -61,7 +60,7 @@ def _coverage_done_without_evidence(coverage: dict[str, Any]) -> list[str]:
     return [
         str(target.get("id") or "")
         for target in coverage.get("targets", [])
-        if _coverage_target_done(target) and not _string_list(target.get("evidence"))
+        if _coverage_target_done(target) and not string_list(target.get("evidence"))
     ]
 
 
@@ -85,7 +84,7 @@ def _incoming_messages(incoming: list[dict[str, Any]]) -> list[str]:
     batch_result_without_evidence = [
         str(item.get("id") or "")
         for item in incoming
-        if _has_result_signal(item) and not _string_list(item.get("evidence"))
+        if _has_result_signal(item) and not string_list(item.get("evidence"))
     ]
     if len(batch_result_without_evidence) < 3:
         return []
@@ -143,7 +142,7 @@ def _next_suggestions(
         suggestions.append("补证据引用：不要只打勾；每个有状态、结果或结论的条目最好写一个文件路径、产物路径、工具结果或来源说明。")
     if coverage_incomplete or result_without_evidence or coverage_done_without_evidence:
         suggestions.append("写报告时同步推进账本：读过什么、分析了什么、写进报告哪里，都用 task_progress 轻量记录。")
-    return _dedupe(suggestions)
+    return dedupe_strings(suggestions)
 
 
 def _soft_prompt(suggestions: list[str]) -> str:
@@ -152,24 +151,8 @@ def _soft_prompt(suggestions: list[str]) -> str:
     return "软提醒，不会阻断任务：" + "；".join(suggestions)
 
 
-def _string_list(value: object) -> list[str]:
-    return [text for item in _list(value) if (text := str(item).strip())]
-
-
 def _list(value: object) -> list:
     return list(value) if isinstance(value, list | tuple) else []
-
-
-def _dedupe(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        text = str(value or "").strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        result.append(text)
-    return result
 
 
 __all__ = ["quality_hints"]

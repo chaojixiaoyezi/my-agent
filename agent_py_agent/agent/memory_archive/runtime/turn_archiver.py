@@ -1,5 +1,3 @@
-# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
-# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
 
 
 from __future__ import annotations
@@ -26,8 +24,6 @@ from .event_builders import (
 )
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 ArchiveRunTurnResult 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 ArchiveRunTurnResult 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class ArchiveRunTurnResult:
 
@@ -38,15 +34,11 @@ class ArchiveRunTurnResult:
     content_hashes: tuple[str, ...]
     events: tuple[RawMemoryEvent, ...]
 
-    # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 paths 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 paths 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
     @property
     def paths(self) -> tuple[Path, ...]:
 
         return self.write_paths
 
-    # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
 
         return {
@@ -58,15 +50,11 @@ class ArchiveRunTurnResult:
             "events": [event.to_dict() for event in self.events],
         }
 
-    # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 __getitem__ 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 getitem 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
     def __getitem__(self, key: str) -> Any:
 
         return self.to_dict()[key]
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 TurnData 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 TurnData 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class TurnData:
     """Bundle of user/assistant content for one turn."""
@@ -75,8 +63,6 @@ class TurnData:
     tool_calls: list[dict[str, Any]]
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 RunContext 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 RunContext 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class RunContext:
     """Shared runtime fields for turn archiving."""
@@ -91,8 +77,6 @@ class RunContext:
     summary_chars: int = 96
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _build_run_turn_events 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 build run turn events 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _build_run_turn_events(
     session_id: str,
     turn: TurnData,
@@ -105,8 +89,6 @@ def _build_run_turn_events(
     ]
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _message_events 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 message events 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _message_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[RawMemoryEvent]:
     """Build user and assistant message events for one turn."""
     return [
@@ -155,8 +137,6 @@ def _message_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[Ra
     ]
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _tool_events 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 tool events 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _tool_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[RawMemoryEvent]:
     """Build tool events for one turn."""
     events: list[RawMemoryEvent] = []
@@ -190,8 +170,6 @@ def _already_live_archived(tool_call: dict[str, Any]) -> bool:
     return bool(tool_call.get("raw_archive_event_id") or tool_call.get("raw_archive_path"))
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 ArchiveTurnContext 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 ArchiveTurnContext 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class ArchiveTurnContext:
     """Context for archiving a single turn."""
@@ -210,8 +188,6 @@ class ArchiveTurnContext:
     summary_chars: int = 96
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 ArchiveRunTurnParams 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 ArchiveRunTurnParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class ArchiveRunTurnParams:
     """Parameter bundle for archive_run_turn."""
@@ -219,8 +195,6 @@ class ArchiveRunTurnParams:
     ctx: ArchiveTurnContext
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 archive_run_turn 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 archive run turn 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def archive_run_turn(
     params: ArchiveRunTurnParams,
 ) -> ArchiveRunTurnResult:
@@ -264,8 +238,6 @@ def archive_run_turn(
     )
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _append_events 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 写入或登记 append events 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_events(root: str | Path, events: list[RawMemoryEvent]) -> list[Path]:
     paths: list[Path] = []
     for event in events:
@@ -275,8 +247,6 @@ def _append_events(root: str | Path, events: list[RawMemoryEvent]) -> list[Path]
     return paths
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _turn_token_estimate 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 turn token estimate 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _turn_token_estimate(ctx: ArchiveTurnContext, tool_calls: list[dict[str, Any]]) -> int:
     return estimate_tokens(
         {

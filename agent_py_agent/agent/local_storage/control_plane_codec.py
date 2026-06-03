@@ -1,11 +1,8 @@
-# LLM: Codec helpers keep LocalStore control-plane SQL and row mapping out of the public mixin.
-# 模块用途: 集中维护控制面 SQLite SQL、参数组装和行到数据类的转换。
 
 from __future__ import annotations
 
 """SQLite codec helpers for agent runtime control-plane projections.
 
-给人看的解释：
 这个文件不承载业务判断，只负责把数据类安全地写入/读出 SQLite。
 把 SQL 放在这里可以让 `control_plane.py` 继续保持像 API 层，而不是变成 SQL 长文件。
 """
@@ -73,8 +70,6 @@ ON CONFLICT(task_id) DO UPDATE SET
 """
 
 
-# LLM: agent_run_values keeps UPSERT parameter ordering close to the SQL constant.
-# 函数用途: 把 AgentRunRecord 转成 SQLite 写入参数。
 def agent_run_values(record: AgentRunRecord, created_at: float, updated_at: float) -> tuple[object, ...]:
     return (
         record.run_id,
@@ -99,8 +94,6 @@ def agent_run_values(record: AgentRunRecord, created_at: float, updated_at: floa
     )
 
 
-# LLM: task_rollup_values mirrors TASK_ROLLUP_UPSERT_SQL parameter order.
-# 函数用途: 把 TaskRollupRecord 转成 SQLite 写入参数。
 def task_rollup_values(rollup: TaskRollupRecord, updated_at: float) -> tuple[object, ...]:
     return (
         rollup.task_id,
@@ -117,8 +110,6 @@ def task_rollup_values(rollup: TaskRollupRecord, updated_at: float) -> tuple[obj
     )
 
 
-# LLM: row helpers keep SQLite schema changes localized to this module.
-# 函数用途: 把 SQLite 行转换成控制面数据类。
 def agent_run_from_row(row: sqlite3.Row) -> AgentRunRecord:
     return AgentRunRecord(
         run_id=row["run_id"],
@@ -143,8 +134,6 @@ def agent_run_from_row(row: sqlite3.Row) -> AgentRunRecord:
     )
 
 
-# LLM: agent_event_from_row hydrates SQLite rows into immutable event records.
-# 函数用途: 把 agent_events 查询结果转换成稳定 dataclass，统一 JSON 字段解析。
 def agent_event_from_row(row: sqlite3.Row) -> AgentEventRecord:
     return AgentEventRecord(
         event_id=row["event_id"],
@@ -158,8 +147,6 @@ def agent_event_from_row(row: sqlite3.Row) -> AgentEventRecord:
     )
 
 
-# LLM: task_rollup_from_row hydrates SQLite rows into task rollup records.
-# 函数用途: 把 task_rollups 查询结果转换成共享进度和 status 可用的摘要对象。
 def task_rollup_from_row(row: sqlite3.Row) -> TaskRollupRecord:
     return TaskRollupRecord(
         task_id=row["task_id"],
@@ -176,14 +163,10 @@ def task_rollup_from_row(row: sqlite3.Row) -> TaskRollupRecord:
     )
 
 
-# LLM: json_dumps centralizes compact JSON encoding for control-plane reserved fields.
-# 函数用途: 将控制面 metadata/reserved 字典序列化，保持中文和排序稳定。
 def json_dumps(payload: dict[str, Any]) -> str:
     return json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
 
 
-# LLM: json_loads tolerates bad historical JSON without breaking control-plane reads.
-# 函数用途: 读取 metadata/reserved 字段，解析失败时退回空字典。
 def json_loads(raw: str) -> dict[str, Any]:
     try:
         value = json.loads(raw or "{}")

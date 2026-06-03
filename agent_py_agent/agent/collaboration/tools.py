@@ -1,5 +1,3 @@
-# LLM: Consolidated exports for collaboration tools.
-# 模块用途: 只导出模型可见的协作工具，旧细碎入口不再保留。
 
 from __future__ import annotations
 

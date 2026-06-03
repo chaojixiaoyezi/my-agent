@@ -1,5 +1,3 @@
-# LLM: Runtime tool integer field specs are data, not normalization control flow.
-# 模块用途: 集中维护工具、聊天和 CLI 相关整数配置的最小值/最大值规则。
 
 from __future__ import annotations
 

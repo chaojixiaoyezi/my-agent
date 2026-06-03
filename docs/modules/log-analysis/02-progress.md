@@ -80,6 +80,7 @@
 - 2026-05-07 high-risk cleanup continued in detector rule helpers and query evidence references; finding construction and evidence metadata now keep multi-field payloads inside explicit params objects.
 - 2026-05-09 LOG work-order apply compatibility updated: LOG-created tasks keep domain-visible `analyst` / `reviewer` roles even though the generic subagent layer now has `reporter` / `checker` aliases; closeout and cannot-self-accept contracts remain enforced through the work-order quality contract.
 - 2026-05-22 LOG tools joined the runtime manifest gate contract: `security_query`, `security_hunt_ip`, and `security_trace_case` declare `effect=read_only` in both tool class entrypoints, so side-effect policy no longer relies on prompt wording.
+- 2026-06-02 LOG analyst/reviewer contract cleanup removed generated template comments and renamed the internal string-list helper to `_compact_string_list`; serialized payloads, evidence-ref requirements, and validation semantics are unchanged.
 ## 2026-05-07 LLM annotation coverage update
 - 中文说明：这一轮只补 LOG 模块产品代码的双层注释，不改行为、文件格式、工作流语义或公开接口。后续改模块/类/函数行为、bundle 或副作用时要同步维护。
 - Product-code modules, classes, functions, and methods in the active module now carry the required `LLM:` plus `函数用途:` / `类用途:` definition-level double-layer comments format.

@@ -1,5 +1,3 @@
-# LLM: Skill candidate storage captures learning suggestions without auto-installing skills.
-# 模块用途: 记录 owner/task/agent 提出的 skill 候选，只进草稿账本，不自动提升成正式能力。
 
 from __future__ import annotations
 
@@ -11,8 +9,6 @@ from typing import Any
 from ..io import append_jsonl
 
 
-# LLM: SkillCandidate is intentionally generic so any task type can suggest reusable know-how.
-# 类用途: 保存一条 skill 学习候选，包括摘要、来源任务和证据引用。
 @dataclass(frozen=True)
 class SkillCandidate:
     title: str
@@ -32,8 +28,6 @@ class SkillCandidate:
         return payload
 
 
-# LLM: SkillCandidateAppendResult keeps callers from depending on a raw path string.
-# 类用途: 返回 skill 候选写入位置和记录内容，便于测试、doctor 和后续审核流程复用。
 @dataclass(frozen=True)
 class SkillCandidateAppendResult:
     path: Path

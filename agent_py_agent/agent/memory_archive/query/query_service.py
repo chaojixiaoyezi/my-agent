@@ -1,5 +1,3 @@
-# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
-# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
 
 from __future__ import annotations
 
@@ -22,8 +20,6 @@ from .query_models import ArchiveQueryRequest, ArchiveQueryResponse, paginate_re
 from .task_sources import task_recovery_read_paths
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 RawArchiveCollectOptions 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 RawArchiveCollectOptions 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class RawArchiveCollectOptions:
     layer: str
@@ -32,8 +28,6 @@ class RawArchiveCollectOptions:
     level: int | None = None
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 execute_archive_query 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 推进 execute archive query 对应的调度、执行或处理步骤，并返回可追踪的状态结果。
 def execute_archive_query(
     root: Path,
     request: ArchiveQueryRequest,
@@ -60,8 +54,6 @@ def execute_archive_query(
     )
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 collect_raw_archive_records 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 collect raw archive records 的候选结果，并按参数完成筛选、排序或数量限制。
 def collect_raw_archive_records(
     root: Path,
     options: RawArchiveCollectOptions,
@@ -75,8 +67,6 @@ def collect_raw_archive_records(
     return records[:options.limit] if options.limit > 0 else records
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 apply_filters 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 apply filters 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def apply_filters(
     records: list[dict[str, Any]],
     options: ArchiveFilterOptions,
@@ -88,8 +78,6 @@ def apply_filters(
     ]
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 collect_task_payloads 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 collect task payloads 的候选结果，并按参数完成筛选、排序或数量限制。
 def collect_task_payloads(agent, task_ids: list[str], *, limit: int) -> list[dict[str, Any]]:
 
     import json
@@ -101,7 +89,6 @@ def collect_task_payloads(agent, task_ids: list[str], *, limit: int) -> list[dic
         except (FileNotFoundError, json.JSONDecodeError, TypeError):
             payloads.append(_missing_or_home_task_payload(agent, run_id))
             continue
-        # LLM: use one compact-first source list for CLI resume and runtime resume.
         paths = task_recovery_read_paths(task)
         payloads.append({
             "run_id": task.id, "exists": True, "status": task.status,
@@ -113,8 +100,6 @@ def collect_task_payloads(agent, task_ids: list[str], *, limit: int) -> list[dic
     return payloads
 
 
-# LLM: _missing_or_home_task_payload upgrades resume from legacy-only subagents to home task workspace refs.
-# 函数用途: 旧 subagent 工单不存在时，尝试从 ~/my-agent/tasks 找主代理任务事实源。
 def _missing_or_home_task_payload(agent, run_id: str) -> dict[str, Any]:
     payload = home_task_workspace_payload(agent.home_paths, run_id)
     if payload is not None:
@@ -122,8 +107,6 @@ def _missing_or_home_task_payload(agent, run_id: str) -> dict[str, Any]:
     return {"run_id": run_id, "exists": False, "error": "task not found"}
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _validate_task_fact_sources 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 校验 validate task fact sources 的输入、状态或路径，提前暴露无效数据和越界条件。
 def _validate_task_fact_sources(paths: list[str]) -> dict[str, Any]:
     """verify whether task-directory authority files still exist."""
 
@@ -131,8 +114,6 @@ def _validate_task_fact_sources(paths: list[str]) -> dict[str, Any]:
     return {"ok": not missing, "missing_paths": missing}
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 collect_gateway_payloads 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 collect gateway payloads 的候选结果，并按参数完成筛选、排序或数量限制。
 def collect_gateway_payloads(local_hits: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
 
     payloads: list[dict[str, Any]] = []

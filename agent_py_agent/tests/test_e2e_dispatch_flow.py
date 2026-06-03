@@ -365,7 +365,7 @@ class TestDispatchLoopIntegration:
 
         验证 runner_max_attempts 参数返回值大于 0。
         """
-        from agent_py_agent.agent.agent_core.runner_dispatch import _runner_max_attempts
+        from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
 
         # auto 模式返回合理的重试次数
         auto_max = _runner_max_attempts("auto")

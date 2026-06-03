@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 
 
-# LLM: Contract status must summarize machine findings without reading report prose.
-# 函数用途: 验证 contracts status 能从嵌套 JSON findings 里统计 code/severity 和 trace。
 def test_summarize_contract_status_counts_nested_findings(tmp_path: Path) -> None:
     from agent_py_agent.agent.contracts.contract_status import summarize_contract_status
 
@@ -38,8 +36,6 @@ def test_summarize_contract_status_counts_nested_findings(tmp_path: Path) -> Non
     assert status.recent_findings[0]["trace"] == [{"stage": "acceptance", "ref": "outputs/report.md"}]
 
 
-# LLM: Contract traces stay bounded so failure debugging does not bloat reports.
-# 函数用途: 验证追加 trace 时最多保留三层结构化调用链。
 def test_contract_trace_is_bounded() -> None:
     from agent_py_agent.agent.contracts.contract_trace import trace_entry, with_contract_trace
 
@@ -60,8 +56,6 @@ def test_contract_trace_is_bounded() -> None:
     ]
 
 
-# LLM: Staged checkpoint findings carry trace refs for recovery debugging.
-# 函数用途: 验证阶段 JSON 失败会带上通用 trace，不需要追多级文件链。
 def test_staged_checkpoint_finding_includes_trace(tmp_path: Path) -> None:
     from agent_py_agent.agent.contracts.staged_checkpoint_acceptance import (
         one_staged_checkpoint_findings,
@@ -83,8 +77,6 @@ def test_staged_checkpoint_finding_includes_trace(tmp_path: Path) -> None:
     ]
 
 
-# LLM: The contracts CLI exposes status and migration without model calls.
-# 函数用途: 验证 parser 注册 contracts status/migrate，并且 migrate 能输出新版合同。
 def test_contracts_cli_status_and_migrate(tmp_path: Path, capsys) -> None:
     from agent_py_agent.cli.parser import build_parser
 

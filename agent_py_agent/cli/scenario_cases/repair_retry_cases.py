@@ -1,5 +1,3 @@
-# LLM: CLI scenario case definition; keep fixture flow and expected gateway/subagent behavior stable.
-# 模块用途: 定义一类命令行情景测试，用来复现和验证端到端流程。
 
 from __future__ import annotations
 
@@ -14,6 +12,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from ...agent.agent_core.orchestration.dispatch.params import DispatchExecutionPlan
 from ...agent.capability_config import load_capability_config
 from ..common import make_capability_router
 from ..scenario_utils import (
@@ -26,8 +25,6 @@ from ..scenario_utils import (
 from .repair_retry_backends import ScenarioRetryBackend, ScenarioStructuredRepairBackend
 
 
-# LLM: StructuredRepairVerifyRequest 是scenario CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class StructuredRepairVerifyRequest:
     backend: object
@@ -37,8 +34,6 @@ class StructuredRepairVerifyRequest:
     report: object
 
 
-# LLM: DispatchRoundRequest 是scenario CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class DispatchRoundRequest:
     agent: object
@@ -48,8 +43,6 @@ class DispatchRoundRequest:
     note: str
 
 
-# LLM: RunnerRetryVerifyRequest 是scenario CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class RunnerRetryVerifyRequest:
     first: object
@@ -59,8 +52,6 @@ class RunnerRetryVerifyRequest:
     backend: object
 
 
-# LLM: print_dispatch_report 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def print_dispatch_report(report) -> None:
 
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -73,8 +64,6 @@ def print_dispatch_report(report) -> None:
         )
 
 
-# LLM: _structured_repair_setup 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _structured_repair_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -100,8 +89,6 @@ def _structured_repair_setup(args):
     return paths, agent, backend, capability_config, router, task
 
 
-# LLM: _verify_structured_repair 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _verify_structured_repair(request: StructuredRepairVerifyRequest):
     return (
         request.backend.calls == 2
@@ -116,15 +103,19 @@ def _verify_structured_repair(request: StructuredRepairVerifyRequest):
     )
 
 
-# LLM: run_scenario_structured_repair_case 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_structured_repair_case(args) -> int:
 
     paths, agent, backend, capability_config, router, task = _structured_repair_setup(args)
 
     print_scenario_step(2, "执行 dispatch：runner 输出坏 JSON 后修复并验收")
     report = agent.dispatch_subagents(
-        router, capability_config, apply=True, execute_runners=True,
+        router,
+        capability_config,
+        execution_plan=DispatchExecutionPlan.from_parts(
+            mutate_state=True,
+            start_runners=True,
+            max_runners=1,
+        ),
         max_runners=1, probe=False,
         reviewer="scenario-structured-repair", note="structured output damage should be repaired",
     )
@@ -158,8 +149,6 @@ def run_scenario_structured_repair_case(args) -> int:
     return 0 if final_ok else 2
 
 
-# LLM: _runner_retry_setup 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def _runner_retry_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -185,19 +174,21 @@ def _runner_retry_setup(args):
     return paths, agent, backend, capability_config, router, task
 
 
-# LLM: _run_dispatch_round 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def _run_dispatch_round(request: DispatchRoundRequest):
     report = request.agent.dispatch_subagents(
-        request.router, request.capability_config, apply=True, execute_runners=True,
+        request.router,
+        request.capability_config,
+        execution_plan=DispatchExecutionPlan.from_parts(
+            mutate_state=True,
+            start_runners=True,
+            max_runners=1,
+        ),
         max_runners=1, probe=False, reviewer=request.reviewer, note=request.note,
     )
     print_dispatch_report(report)
     return report
 
 
-# LLM: _verify_runner_retry 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _verify_runner_retry(request: RunnerRetryVerifyRequest):
     first_runner = [item for item in request.first.records if item.step == "runner"]
     second_runner = [item for item in request.second.records if item.step == "runner"]
@@ -218,8 +209,6 @@ def _verify_runner_retry(request: RunnerRetryVerifyRequest):
     )
 
 
-# LLM: run_scenario_runner_retry_case 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_runner_retry_case(args) -> int:
 
     paths, agent, backend, capability_config, router, task = _runner_retry_setup(args)

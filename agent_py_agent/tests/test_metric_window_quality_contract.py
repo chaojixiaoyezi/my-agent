@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from agent_py_agent.agent.contracts.evidence_contract import EvidenceClaim, EvidenceSourceRef
-from agent_py_agent.agent.contracts.gates.delivery_quality_metrics import (
+from agent_py_agent.agent.contracts.gates.delivery_quality import (
     delivery_quality_metric_findings,
 )
 
@@ -50,4 +50,3 @@ def test_metric_window_contract_accepts_source_window_when_claim_omits_it():
     )
 
     assert findings == []
-

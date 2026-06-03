@@ -1,7 +1,7 @@
 """Tests for parent-owned classification of subagent test execution outcomes."""
 
-from agent_py_agent.agent.subagents.execution_records import TestExecutionRecord
-from agent_py_agent.agent.subagents.execution_report import (
+from agent_py_agent.agent.subagents.execution import (
+    TestExecutionRecord,
     TestExecutionReport,
     TestExecutionReportOptions,
     write_test_execution_report,
@@ -24,7 +24,7 @@ def test_classify_zero_tests_as_runner_output_gap():
 
     assert result.overall_status == "blocked"
     assert result.primary_category == "runner_output_missing_tests"
-    assert result.recommended_action == "fix_runner_output"
+    assert result.recommended_action == "repair"
     assert result.counts["runner_output_missing_tests"] == 1
 
 
@@ -64,7 +64,7 @@ def test_classify_mixed_execution_failures():
 
     assert result.overall_status == "failed"
     assert result.primary_category == "assertion_failure"
-    assert result.recommended_action == "repair_code"
+    assert result.recommended_action == "repair"
     assert result.counts["assertion_failure"] == 1
     assert result.counts["command_rejected"] == 1
     assert result.counts["syntax_or_import_error"] == 1

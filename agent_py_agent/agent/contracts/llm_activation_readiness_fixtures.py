@@ -1,13 +1,9 @@
-# LLM: LLM activation readiness fixtures provide structured healthy facts for the gate.
-# 模块用途: 生成模型适配、上下文、副作用、canary 和 trace capture 的通用结构化样本。
 
 from __future__ import annotations
 
 from pathlib import Path
 
 
-# LLM: build_small_llm_canary_gate returns bounded live-model canary specs.
-# 函数用途: 生成小型 LLM canary case 的结构化合同，只给 prompt_ref，不内联 prompt 文本。
 def build_small_llm_canary_gate(workspace: Path) -> dict[str, object]:
     root = Path(workspace).expanduser().resolve()
     return {
@@ -20,8 +16,6 @@ def build_small_llm_canary_gate(workspace: Path) -> dict[str, object]:
     }
 
 
-# LLM: model_adapter_facts returns a healthy adapter fixture with provider-normalized IDs.
-# 函数用途: 提供模型适配合同所需字段，不调用真实模型。
 def model_adapter_facts() -> dict[str, object]:
     return {
         "tool_calls": [
@@ -35,8 +29,6 @@ def model_adapter_facts() -> dict[str, object]:
     }
 
 
-# LLM: prompt_context_facts returns context assembly facts with contract priority preserved.
-# 函数用途: 提供 prompt/context 合同字段，证明 required fields 和 tool schemas 未丢。
 def prompt_context_facts() -> dict[str, object]:
     required = (
         "contract_hash",
@@ -67,8 +59,6 @@ def prompt_context_facts() -> dict[str, object]:
     }
 
 
-# LLM: side_effect_events returns healthy tool effect and call records.
-# 函数用途: 提供副作用合同事件，覆盖 read_only、mutating dry-run 和 replay 模式。
 def side_effect_events() -> tuple[dict[str, object], ...]:
     return (
         {"type": "tool_registration", "tool": "read_file", "effect": "read_only"},
@@ -86,8 +76,6 @@ def side_effect_events() -> tuple[dict[str, object], ...]:
     )
 
 
-# LLM: trace_events returns a minimal replayable run trace.
-# 函数用途: 生成状态迁移和工具结果事件，供 RunTrace 合同校验。
 def trace_events() -> tuple[dict[str, object], ...]:
     return (
         {"type": "state_transition", "run_id": "run-activation", "from": "PLANNING", "event": "PLAN_DONE", "to": "RUNNING"},
@@ -118,8 +106,6 @@ def trace_events() -> tuple[dict[str, object], ...]:
     )
 
 
-# LLM: trace_capture_manifest lists required capture refs for future live LLM replay.
-# 函数用途: 描述真实 LLM canary 运行时必须保存哪些 refs，不保存正文为事实来源。
 def trace_capture_manifest() -> dict[str, object]:
     return {
         "refs_only": True,
@@ -147,8 +133,6 @@ def trace_capture_manifest() -> dict[str, object]:
     }
 
 
-# LLM: trace_manifest_issues checks trace capture refs without parsing natural-language summaries.
-# 函数用途: 校验 capture manifest 是否 refs-only、脱敏合格且必需 ref 齐全。
 def trace_manifest_issues(manifest: dict[str, object]) -> list[str]:
     issues: list[str] = []
     refs = manifest.get("capture_refs") if isinstance(manifest.get("capture_refs"), dict) else {}
@@ -163,8 +147,6 @@ def trace_manifest_issues(manifest: dict[str, object]) -> list[str]:
     return issues
 
 
-# LLM: _canary_case creates one bounded canary case using refs instead of prompt text.
-# 函数用途: 生成 canary case 的结构化字段，供小真实验收 gate 读取。
 def _canary_case(
     root: Path,
     case_id: str,
@@ -188,8 +170,6 @@ def _canary_case(
     }
 
 
-# LLM: _string_tuple normalizes explicit string lists only.
-# 函数用途: 将结构化 list/tuple/set 规整成非空字符串 tuple，不解析自然语言。
 def _string_tuple(value: object) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple, set)):
         return ()

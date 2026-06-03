@@ -1,11 +1,8 @@
-# LLM: Runtime gate public API exposes mandatory contract gate models and adapters.
-# 模块用途: 汇总运行时 gate 的统一类型和通用 adapter，供工具、收口、恢复和状态入口复用。
 
 from .adapters import evaluate_state_transition_gate, evaluate_tool_call_gate
-from .approval_binding import ApprovalBindingFacts, evaluate_approval_binding_gate
-from .artifact_gate import evaluate_artifact_report_gate, evaluate_delivery_closeout_gate
-from .artifact_provenance import artifact_provenance_from_archive, evaluate_artifact_provenance_gate
-from .command_policy import (
+from .artifact.gate import evaluate_artifact_report_gate, evaluate_delivery_closeout_gate
+from .artifact.provenance import artifact_provenance_from_archive, evaluate_artifact_provenance_gate
+from .command.policy import (
     CommandPolicyDecision,
     CommandPolicyFinding,
     command_name,
@@ -22,7 +19,7 @@ from .delivery_quality import (
     append_delivery_quality_gate_trace,
     evaluate_delivery_quality_gate,
 )
-from .document_content_quality import (
+from .document.content_quality import (
     DocumentContentFacts,
     DocumentSection,
     document_content_quality_findings,
@@ -37,13 +34,8 @@ from .gate_pipeline import (
     GatePipelineSpec,
     GatePipelineStep,
 )
-from .idempotency_ledger import (
-    IdempotencyLedgerFacts,
-    IdempotencyLedgerRecord,
-    evaluate_idempotency_ledger_gate,
-)
 from .models import GateContext, GateDecision, GateFinding, GateValidator
-from .network_safety import NetworkResolver, NetworkSafetyFacts, evaluate_network_safety_gate
+from .network.safety import NetworkResolver, NetworkSafetyFacts, evaluate_network_safety_gate
 from .path_url_command import PathUrlCommandFacts, evaluate_path_url_command_gate
 from .registry import GateRegistry
 from .run_contract import evaluate_run_contract_gate
@@ -62,8 +54,9 @@ from .skill_guard import (
     scan_skill,
 )
 from .state_event_ledger import StateEventLedgerSnapshot, evaluate_state_event_ledger_gate
-from .tool_effects import ToolEffectFacts, ToolGatePolicy, evaluate_tool_effect_gate
-from .tool_guardrail import (
+from .tool.approval_binding import ApprovalBindingFacts, evaluate_approval_binding_gate
+from .tool.effects import ToolEffectFacts, ToolGatePolicy, evaluate_tool_effect_gate
+from .tool.guardrail import (
     ToolGuardrailConfig,
     ToolGuardrailFacts,
     args_hash_for_guardrail,
@@ -71,8 +64,13 @@ from .tool_guardrail import (
     record_tool_guardrail_result,
     result_hash_for_guardrail,
 )
-from .tool_manifest import ToolManifestFacts, evaluate_tool_manifest_gate, tool_manifest_from_spec
-from .tool_rate_limit import (
+from .tool.idempotency_ledger import (
+    IdempotencyLedgerFacts,
+    IdempotencyLedgerRecord,
+    evaluate_idempotency_ledger_gate,
+)
+from .tool.manifest import ToolManifestFacts, evaluate_tool_manifest_gate, tool_manifest_from_spec
+from .tool.rate_limit import (
     ToolRateLimitFacts,
     ToolRateLimitLedger,
     ToolRateLimitPolicy,

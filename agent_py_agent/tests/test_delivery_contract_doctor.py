@@ -5,16 +5,12 @@ from pathlib import Path
 from agent_py_agent.tests.support.delivery_contract_suite import run_delivery_contract_suite
 
 
-# LLM: delivery contract doctor should expose schema failures before runtime closeout.
-# 函数用途: 验证 delivery_contract 入口合同有统一结构化 doctor，不让坏 dict 进入后续链路。
 def test_delivery_contract_doctor_runs_standard_contract_suite(tmp_path: Path) -> None:
     from agent_py_agent.agent.contracts.delivery_contract_doctor import validate_delivery_contract
 
     run_delivery_contract_suite(validate_delivery_contract, tmp_path)
 
 
-# LLM: delivery contract doctor should not require closed artifact kind enums.
-# 函数用途: 验证未知 kind 只要能通过开放世界扩展名或根目录声明定位，就不是 schema 错误。
 def test_delivery_contract_doctor_accepts_unknown_kind_with_explicit_extension(tmp_path: Path) -> None:
     from agent_py_agent.agent.contracts.delivery_contract_doctor import validate_delivery_contract
 
@@ -66,8 +62,6 @@ def test_delivery_contract_doctor_normalizes_structured_required_columns(tmp_pat
     assert validation["required_columns"] == ["来源文件", "行号", "编号"]
 
 
-# LLM: delivery contract doctor should make unrepairable malformed contracts machine-visible.
-# 函数用途: 验证 artifact 缺少 path/kind 时返回 hard finding 和可执行的重新物化建议。
 def test_delivery_contract_doctor_returns_repair_action_for_missing_target(tmp_path: Path) -> None:
     from agent_py_agent.agent.contracts.delivery_contract_doctor import validate_delivery_contract
 
@@ -79,11 +73,9 @@ def test_delivery_contract_doctor_returns_repair_action_for_missing_target(tmp_p
     payload = report.to_dict()
     assert report.ok is False
     assert payload["should_rematerialize"] is True
-    assert payload["repair_actions"][0]["recommended_action"] == "rematerialize_delivery_contract"
+    assert payload["repair_actions"][0]["recommended_action"] == "repair_effective_contract"
 
 
-# LLM: recovery action schema should reject vague repair instructions before they enter the loop.
-# 函数用途: 验证恢复动作也有结构化校验，不能只放一段文本让模型猜。
 def test_recovery_action_schema_rejects_missing_machine_fields() -> None:
     from agent_py_agent.agent.contracts.delivery_contract_doctor import validate_recovery_action
 

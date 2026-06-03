@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 
-# LLM: test_read_only_subagent_tools_contains_read_tools locks basic inspection grants.
-# 函数用途: 验证只读子代理工具包包含列目录、读文件和文本搜索。
 def test_read_only_subagent_tools_contains_read_tools():
     from agent_py_agent.agent.agent_core.orchestration_tools import READ_ONLY_SUBAGENT_TOOLS
 
@@ -16,8 +14,6 @@ def test_read_only_subagent_tools_contains_read_tools():
     assert "search_text" in READ_ONLY_SUBAGENT_TOOLS
 
 
-# LLM: test_coding_subagent_tools_contains_file_tools locks product-writing grants.
-# 函数用途: 验证写代码/产物的子代理工具包同时包含读工具和安全文件写工具。
 def test_coding_subagent_tools_contains_file_tools():
     from agent_py_agent.agent.agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS
 

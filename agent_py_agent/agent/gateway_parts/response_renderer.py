@@ -1,5 +1,3 @@
-# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
-# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
 
 from __future__ import annotations
 
@@ -12,12 +10,11 @@ functions that were previously in that file.
 import json
 from typing import Any
 
-from .io import gateway_response_path, read_json_file
+from .io import gateway_response_path, read_json_file_report
 from .paths import GatewayPaths
+from .request_errors import gateway_response_load_error_response
 
 
-# LLM: print_gateway_response 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理print网关响应相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def print_gateway_response(payload: dict, *, json_mode: bool = False, show_prompt: bool = False) -> int:
     if json_mode:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
@@ -46,7 +43,21 @@ def print_gateway_response(payload: dict, *, json_mode: bool = False, show_promp
     return 0 if payload.get("ok") else 2
 
 
-# LLM: read_gateway_response 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 读取或查询网关响应需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def read_gateway_response(paths: GatewayPaths, request_id: str) -> dict[str, Any]:
-    return read_json_file(gateway_response_path(paths, request_id))
+    return read_gateway_response_file(
+        gateway_response_path(paths, request_id),
+        request_id=request_id,
+        context="gateway.response_renderer.response.read",
+    )
+
+
+def read_gateway_response_file(
+    response_path,
+    *,
+    request_id: str | None = None,
+    context: str = "gateway.response.read",
+) -> dict[str, Any]:
+    report = read_json_file_report(response_path, context=context)
+    if report.load_error is not None:
+        return gateway_response_load_error_response(response_path, report.load_error, request_id=request_id)
+    return report.payload

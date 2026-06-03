@@ -1,5 +1,3 @@
-# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
-# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
 
 from __future__ import annotations
 
@@ -23,8 +21,6 @@ from .tui_worker_stream import (
 )
 
 
-# LLM: _worker_gateway_path 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _worker_gateway_path(ctx) -> tuple[str, bool]:
     if not check_gateway_alive(ctx.cfg.paths):
         raise RuntimeError("gateway 已停止。请先执行 my-agent gateway start")
@@ -50,8 +46,6 @@ def _worker_gateway_path(ctx) -> tuple[str, bool]:
     return _finish_gateway_response(ctx, request_id, response, visible_chunks_ref[0] > 0)
 
 
-# LLM: _submit_gateway_job 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _submit_gateway_job(ctx):
     return submit_chat_request(
         ctx.cfg.paths,
@@ -67,16 +61,12 @@ def _submit_gateway_job(ctx):
     )
 
 
-# LLM: _gateway_timeout 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _gateway_timeout(cfg) -> float:
     if cfg.args.gateway_timeout is not None:
         return cfg.args.gateway_timeout
     return cfg.agent.config.gateway_request_timeout
 
 
-# LLM: _finish_gateway_response 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _finish_gateway_response(
     ctx,
     request_id: str,
@@ -103,8 +93,6 @@ def _finish_gateway_response(
     return agent_response_text, response_recorded
 
 
-# LLM: _record_gateway_response 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 记录运行结果、失败原因或会话痕迹，供报告和诊断读取。
 def _record_gateway_response(ctx, agent_response_text: str, stream_has_visible_text: bool) -> bool:
     if not agent_response_text or not agent_response_text.strip():
         return False
@@ -127,8 +115,6 @@ def _record_gateway_response(ctx, agent_response_text: str, stream_has_visible_t
     return True
 
 
-# LLM: _stream_output_contains_response 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _stream_output_contains_response(cfg, response_text: str) -> bool:
     streamed_text_ref = getattr(cfg, "stream_visible_text_ref", [""])
     streamed_text = streamed_text_ref[0] if streamed_text_ref else ""
@@ -137,14 +123,10 @@ def _stream_output_contains_response(cfg, response_text: str) -> bool:
     return bool(response_norm and response_norm in streamed_norm)
 
 
-# LLM: _compact_visible_text 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _compact_visible_text(text: str) -> str:
     return re.sub(r"\s+", "", strip_ansi(text or ""))
 
 
-# LLM: _print_gateway_timing 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_gateway_timing(ctx, request_id: str, response: dict) -> None:
     elapsed = time.perf_counter() - ctx.started_at
     _publish_timing(
@@ -156,8 +138,6 @@ def _print_gateway_timing(ctx, request_id: str, response: dict) -> None:
     )
 
 
-# LLM: _worker_local_path 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _worker_local_path(ctx) -> tuple[str, bool]:
     from .fallback_ui import _render_assistant_response
 
@@ -192,8 +172,6 @@ def _worker_local_path(ctx) -> tuple[str, bool]:
     return result.response, False
 
 
-# LLM: _print_local_timing 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_local_timing(ctx, result) -> None:
     from .rendering import _cprint
 
@@ -210,8 +188,6 @@ def _print_local_timing(ctx, result) -> None:
     )
 
 
-# LLM: _publish_timing 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _publish_timing(ctx, text: str) -> None:
     if _use_app_status_line(getattr(ctx.cfg, "args", None)):
         _set_thinking_line(text, ctx.cfg.thinking_line_ref)
@@ -223,8 +199,6 @@ def _publish_timing(ctx, text: str) -> None:
     _cprint(f"{GRAY}{text}{RESET}")
 
 
-# LLM: _use_app_status_line 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _use_app_status_line(args) -> bool:
     if args is None:
         return False

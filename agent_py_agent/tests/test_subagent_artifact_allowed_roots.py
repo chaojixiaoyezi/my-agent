@@ -11,8 +11,6 @@ from pathlib import Path
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 
 
-# LLM: test_subagent_persistence_resolves_allowed_product_artifacts covers leaf outputs outside task_dir.
-# 函数用途: 子代理被授权写入的产物目录也应成为 artifact manifest 的安全解析根。
 def test_subagent_persistence_resolves_allowed_product_artifacts(tmp_path) -> None:
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -39,7 +37,5 @@ def test_subagent_persistence_resolves_allowed_product_artifacts(tmp_path) -> No
     assert record["size_bytes"] == artifact_path.stat().st_size
 
 
-# LLM: _read_jsonl keeps the tiny test file self-contained.
-# 函数用途: 读取 manifest JSONL，避免依赖大测试文件里的私有 helper。
 def _read_jsonl(path: str) -> list[dict[str, object]]:
     return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]

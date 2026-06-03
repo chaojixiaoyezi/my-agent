@@ -3,7 +3,7 @@ from agent_py_agent.agent.subagents.parsing import (
     parse_subagent_result_envelope,
     parse_subagent_runner_output,
 )
-from agent_py_agent.agent.subagents.parsing_envelope import SubagentResultEnvelopeParseRequest
+from agent_py_agent.agent.subagents.parsing.envelope import SubagentResultEnvelopeParseRequest
 
 
 def test_subagent_result_text_converts_to_typed_envelope():
@@ -64,8 +64,6 @@ def test_subagent_result_envelope_does_not_infer_tools_from_summary():
     assert envelope.actual_tools == []
 
 
-# LLM: Real runners sometimes say deliverables; parser must normalize that before closeout.
-# 函数用途: 复现真实 E2E 中模型把 artifacts 写成 deliverables 后父级漏测产物的问题。
 def test_subagent_result_accepts_deliverables_alias_for_artifacts():
     text = (
         "[SUBAGENT_RESULT]\n"
@@ -85,8 +83,6 @@ def test_subagent_result_accepts_deliverables_alias_for_artifacts():
     assert parsed.artifacts == [{"path": "deliverables/site-output/index.html", "kind": "html"}]
 
 
-# LLM: Envelope conversion consumes parser artifacts, so aliases must survive into typed refs.
-# 函数用途: 确认 deliverables 同义字段会变成 typed artifact_refs，供后续 refs-only 验收和恢复读取。
 def test_subagent_result_envelope_accepts_deliverables_alias_for_artifacts():
     text = (
         "[SUBAGENT_RESULT]\n"
@@ -111,8 +107,6 @@ def test_subagent_result_envelope_accepts_deliverables_alias_for_artifacts():
     assert envelope.artifact_refs[0].path == "deliverables/site-output/index.html"
 
 
-# LLM: Structured repair may move the file path into evidence while leaving artifacts empty.
-# 函数用途: 复现真实 E2E 中修复后的 SUBAGENT_RESULT 有 evidence.path 但 artifacts=[]，父级因此漏测的问题。
 def test_subagent_result_recovers_artifact_from_evidence_path():
     text = (
         "[SUBAGENT_RESULT]\n"
@@ -131,8 +125,6 @@ def test_subagent_result_recovers_artifact_from_evidence_path():
     assert parsed.artifacts == [{"path": "/tmp/site/index.html", "kind": "file", "summary": "HTML"}]
 
 
-# LLM: Evidence packets are already refs-first claims and should feed parent artifact checks.
-# 函数用途: 确认 evidence_packets.artifact_refs 会补成 artifacts，避免验收链路只看文字声明。
 def test_subagent_result_recovers_artifact_from_evidence_packet_refs():
     text = (
         "[SUBAGENT_RESULT]\n"
@@ -151,8 +143,6 @@ def test_subagent_result_recovers_artifact_from_evidence_packet_refs():
     assert parsed.artifacts == [{"path": "/tmp/site/index.html", "kind": "file", "summary": "HTML exists"}]
 
 
-# LLM: Repair workers often report changed files instead of repeating the canonical artifact list.
-# 函数用途: 确认 files_modified 字符串列表会补成 artifacts，避免最终收口漏跑修复后的产物。
 def test_subagent_result_recovers_artifact_from_files_modified():
     text = (
         "[SUBAGENT_RESULT]\n"

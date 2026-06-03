@@ -1,5 +1,3 @@
-# LLM: CLI boundary for explicit subagent hierarchy scheduling.
-# 模块用途: 把 subagents-hierarchy 命令解析成 HierarchyScheduleRequest，默认只预览。
 
 from __future__ import annotations
 
@@ -7,16 +5,14 @@ import json
 from dataclasses import asdict
 
 from ..agent.capability_config import load_capability_config
-from ..agent.subagents.services.hierarchy_recovery import HierarchyRecoveryRequest
-from ..agent.subagents.services.hierarchy_scheduler import (
+from ..agent.subagents.services.hierarchy.recovery import HierarchyRecoveryRequest
+from ..agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
 from .common import make_agent
 
 
-# LLM: _parse_child_spec accepts a compact ROLE:AGENT:GOAL form for CLI ergonomics.
-# 函数用途: 将命令行 child 字符串转换为 HierarchyChildSpec；goal 中允许继续包含冒号。
 def _parse_child_spec(raw: str) -> HierarchyChildSpec:
     parts = raw.split(":", 2)
     if len(parts) != 3 or not all(part.strip() for part in parts):
@@ -25,14 +21,10 @@ def _parse_child_spec(raw: str) -> HierarchyChildSpec:
     return HierarchyChildSpec(role=role, agent_name=agent_name, goal=goal)
 
 
-# LLM: _hierarchy_payload renders dataclass results into stable JSON-compatible dictionaries.
-# 函数用途: 转换层级调度结果，供 CLI JSON 输出和测试读取。
 def _hierarchy_payload(result) -> dict:
     return asdict(result)
 
 
-# LLM: _print_hierarchy_result keeps human output refs-only and compact.
-# 函数用途: 展示层级调度摘要，不展开任何 artifact 正文。
 def _print_hierarchy_result(result) -> None:
     mode = "dry-run" if result.dry_run else "apply"
     status = "BLOCKED" if result.blocked else "OK"
@@ -47,8 +39,6 @@ def _print_hierarchy_result(result) -> None:
         print(f"- depth={item.depth} run={run} parent={item.parent_id} role={item.role} :: {item.goal}")
 
 
-# LLM: cmd_subagents_hierarchy is the explicit command for creating child/grandchild tasks.
-# 函数用途: 执行 subagents-hierarchy CLI；默认 dry-run，带 --apply 才写任务。
 def cmd_subagents_hierarchy(args) -> int:
     try:
         child_specs = [_parse_child_spec(raw) for raw in args.child]
@@ -73,8 +63,6 @@ def cmd_subagents_hierarchy(args) -> int:
     return 0
 
 
-# LLM: cmd_subagents_recovery_tree prints refs-only hierarchy recovery packets.
-# 函数用途: 执行 subagents-recovery-tree CLI；按 capability 超时阈值查询恢复线索，不接管、不读 artifact 正文。
 def cmd_subagents_recovery_tree(args) -> int:
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
@@ -96,8 +84,6 @@ def cmd_subagents_recovery_tree(args) -> int:
     return 0
 
 
-# LLM: _print_recovery_tree keeps human recovery output short and refs-only.
-# 函数用途: 展示恢复树摘要和候选节点，不展开恢复 refs 正文。
 def _print_recovery_tree(payload: dict[str, object]) -> None:
     print("SUBAGENT RECOVERY TREE")
     print(
@@ -117,8 +103,6 @@ def _print_recovery_tree(payload: dict[str, object]) -> None:
             print(f"  takeover_readiness_ref={node.get('takeover_readiness_ref')}")
 
 
-# LLM: _hierarchy_config_int keeps hierarchy CLI defaults in AgentConfig.
-# 函数用途: 层级创建/恢复查询没有显式传数量时，读取 agent_config.yaml。
 def _hierarchy_config_int(agent, args, arg_name: str, config_name: str) -> int:
     value = getattr(args, arg_name, None)
     if value is not None:

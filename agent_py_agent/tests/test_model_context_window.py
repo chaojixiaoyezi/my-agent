@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.model_context_window import resolve_model_context_window_tokens
+from agent_py_agent.agent.agent_core.model.context_window import resolve_model_context_window_tokens
 
 
 def _agent(config: object, backend: object | None = None) -> object:

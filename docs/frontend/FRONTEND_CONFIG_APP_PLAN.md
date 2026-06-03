@@ -245,7 +245,7 @@ type ConfigSchema = {
 | `workflow` | 工作流（预留） | `subagent_workflow_mode`, `subagent_builtin_workflows`, `subagent_workflow_review_rounds` |
 | `capability` | 能力路由 | `enable_capability_routing`, `capability_grant_expires_after_task` |
 | `gateway` | Gateway | `gateway_workspace`, `gateway_port`, `gateway_heartbeat_interval`, `gateway_request_workers` |
-| `daemon` | 前台 Daemon | `daemon_planner`, `daemon_apply`, `daemon_execute_runners`, `daemon_interval` |
+| `daemon` | 前台 Daemon | `daemon_planner`, `daemon_mutate_state`, `daemon_start_runners`, `daemon_interval` |
 | `scheduler` | 调度策略（高级兼容） | `scheduler_mode`, `runner_failure_policy` |
 | `result_check` | 结果检查 | `result_check_execute_tests`, `result_check_timeout_seconds` |
 | `notification` | 通知系统 | `notification_enabled`, `notification_store_path` |
@@ -1953,7 +1953,7 @@ const configSchemaExample: ConfigSchema = {
           order: 1,
         },
         {
-          key: "daemon_apply",
+          key: "daemon_mutate_state",
           label: "自动应用调度",
           description: "Daemon 是否自动应用调度结果",
           type: "boolean",
@@ -1966,7 +1966,7 @@ const configSchemaExample: ConfigSchema = {
           order: 2,
         },
         {
-          key: "daemon_execute_runners",
+          key: "daemon_start_runners",
           label: "自动执行 Runner",
           description: "Daemon 是否自动执行子代理 runner",
           type: "boolean",

@@ -1,11 +1,8 @@
-# LLM: Subagent kernel read model; keep it refs-first and free of orchestration side effects.
-# 模块用途: 汇总子代理 run/session/task 的核心状态，给父级、接管和收口链路提供统一读取入口。
 
 from __future__ import annotations
 
 """Subagent kernel facade.
 
-给人看的解释：
 这里不是新的调度器，也不是新的事实源。它只是把旧 task.json、run workspace、
 control-plane 已有字段整理成一个稳定快照，后续恢复、QA、验收、E2E 都先读这里，
 减少“每个模块自己猜状态”的问题。
@@ -14,7 +11,6 @@ control-plane 已有字段整理成一个稳定快照，后续恢复、QA、验�
 from pathlib import Path
 from typing import Any
 
-# LLM: Kernel snapshots reuse the same canonical workspace_refs helper as context bundles.
 from .context_bundle_refs import workspace_refs as model_workspace_refs
 from .kernel_models import SubagentKernelQuery, SubagentKernelRun, SubagentKernelSnapshot
 from .models import SubAgentTask
@@ -27,21 +23,17 @@ _BLOCKED_STATUSES = {"BLOCKED"}
 _TAKEOVER_CANDIDATE_STATUSES = _FAILED_STATUSES | _BLOCKED_STATUSES
 
 
-# LLM: SubagentKernel builds read-only snapshots from SubAgentManager's current file facts.
-# 类用途: 为 SubAgentManager 提供内核读取门面，不调度、不恢复、不验收，只整理当前状态。
 class SubagentKernel:
 
-    # LLM: __init__ keeps the kernel facade attached to one manager instance.
-    # 函数用途: 保存 manager 依赖，后续所有读取仍通过 manager 的 load/list_runs 事实源完成。
     def __init__(self, manager: Any):
         self.manager = manager
 
-    # LLM: snapshot returns a refs-first status view without mutating task files.
-    # 函数用途: 按 query 读取 root tree、own subtree 或全部 run，并生成统一状态快照。
     def snapshot(self, query: SubagentKernelQuery | None = None) -> SubagentKernelSnapshot:
         query = query or SubagentKernelQuery()
-        all_tasks = self._safe_list_runs()
+        all_tasks, load_errors = self._safe_list_runs_report()
         selected, warnings = _select_tasks(all_tasks, query)
+        if load_errors:
+            warnings.extend(_load_error_warning(error) for error in load_errors)
         rows = [_task_to_kernel_run(task, include_refs=query.include_refs, all_tasks=selected) for task in selected]
         root_id = _snapshot_root_id(selected, query)
         return SubagentKernelSnapshot(
@@ -58,30 +50,35 @@ class SubagentKernel:
             ],
             source_refs=_snapshot_source_refs(selected),
             warnings=warnings,
-            reserved={"query": _query_reserved(query)},
+            reserved={"query": _query_reserved(query), "load_errors": load_errors},
         )
 
-    # LLM: _safe_list_runs isolates missing/corrupt task records from the public snapshot call.
-    # 函数用途: 读取全部 run；如果 workspace 还没初始化，返回空列表而不是让状态查询卡死。
-    def _safe_list_runs(self) -> list[SubAgentTask]:
+    def _safe_list_runs_report(self) -> tuple[list[SubAgentTask], list[dict[str, object]]]:
         try:
-            return list(self.manager.list_runs())
+            report_method = getattr(self.manager, "list_runs_report", None)
+            if callable(report_method):
+                report = report_method()
+                return list(report.runs), list(report.load_errors)
+            return list(self.manager.list_runs()), []
         except FileNotFoundError:
-            return []
+            return [], []
 
 
-# LLM: SubagentKernelMixin exposes kernel_snapshot on the public SubAgentManager facade.
-# 类用途: 给 manager 增加稳定内核读取入口，调用方不需要自己实例化 SubagentKernel。
+def _load_error_warning(error: dict[str, object]) -> str:
+    run_id = str(error.get("run_id") or "").strip()
+    error_type = str(error.get("error_type") or "").strip()
+    suffix = f":{run_id}" if run_id else ""
+    if error_type:
+        suffix = f"{suffix}:{error_type}"
+    return f"subagent_load_error{suffix}"
+
+
 class SubagentKernelMixin:
 
-    # LLM: kernel_snapshot is the public read boundary for subagent kernel status.
-    # 函数用途: 返回当前子代理任务树/子树快照；只读，不触发调度、恢复或验收。
     def kernel_snapshot(self, query: SubagentKernelQuery | None = None) -> SubagentKernelSnapshot:
         return SubagentKernel(self).snapshot(query)
 
 
-# LLM: _select_tasks keeps scope rules explicit and separate from snapshot rendering.
-# 函数用途: 根据 root_id、run_id 和 scope 选择需要返回的任务集合。
 def _select_tasks(
     tasks: list[SubAgentTask],
     query: SubagentKernelQuery,
@@ -100,14 +97,10 @@ def _select_tasks(
     return _stable_tasks(tasks), warnings
 
 
-# LLM: _ordered_subtree selects one run and descendants using persisted child edges.
-# 函数用途: 按 child_ids 递归返回子树，避免把 sibling 的正文或状态混进接管视图。
 def _ordered_subtree(tasks: list[SubAgentTask], run_id: str) -> list[SubAgentTask]:
     by_id = {task.id: task for task in tasks}
     selected: list[SubAgentTask] = []
 
-    # LLM: visit walks persisted child links without loading artifact bodies.
-    # 函数用途: 递归收集当前 run 及其后代；遇到缺失 child 或重复节点时安全跳过。
     def visit(current_id: str) -> None:
         task = by_id.get(current_id)
         if task is None or task in selected:
@@ -120,8 +113,6 @@ def _ordered_subtree(tasks: list[SubAgentTask], run_id: str) -> list[SubAgentTas
     return selected
 
 
-# LLM: _task_to_kernel_run maps a full task record to a compact kernel row.
-# 函数用途: 保留状态、关系和 refs；不读取 artifact 正文，避免父级上下文膨胀。
 def _task_to_kernel_run(
     task: SubAgentTask,
     *,
@@ -167,8 +158,6 @@ def _task_to_kernel_run(
     )
 
 
-# LLM: _recovery_refs groups checkpoint, compact, handoff, and continue packet refs.
-# 函数用途: 给接管/恢复链路提供稳定入口，只返回路径和摘要，不读取正文。
 def _recovery_refs(task: SubAgentTask) -> dict[str, str]:
     refs = {
         "checkpoint": task.agent_run_checkpoint_json or task.checkpoint_ref,
@@ -184,8 +173,6 @@ def _recovery_refs(task: SubAgentTask) -> dict[str, str]:
     return {key: value for key, value in refs.items() if value}
 
 
-# LLM: _tool_contract exposes tool readiness as machine fields without granting new capabilities.
-# 函数用途: 汇总允许工具、已用工具和能力缺口，供父级/接管者判断是否需要工具网关或授权。
 def _tool_contract(task: SubAgentTask) -> dict[str, object]:
     return {
         "allowed_tools": list(task.allowed_tools),
@@ -199,8 +186,6 @@ def _tool_contract(task: SubAgentTask) -> dict[str, object]:
     }
 
 
-# LLM: _artifact_registry_refs exposes registered artifacts as refs without trusting free-text paths.
-# 函数用途: 从 task attributes 读取 artifact registry 记录，去重并限制数量后给 tree/kernel 使用。
 def _artifact_registry_refs(task: SubAgentTask, *, limit: int = 12) -> list[dict[str, object]]:
     attrs = dict(getattr(task, "attributes", {}) or {})
     value = attrs.get("artifact_registry_refs")
@@ -224,8 +209,6 @@ def _artifact_registry_refs(task: SubAgentTask, *, limit: int = 12) -> list[dict
     return rows
 
 
-# LLM: _task_reserved carries observability-only facts that do not fit the stable kernel top-level schema yet.
-# 函数用途: 给父级状态树附加最近工具轨迹、后台启动标记和调试路径；这些字段只读展示，不参与调度判断。
 def _task_reserved(task: SubAgentTask) -> dict[str, object]:
     attrs = dict(getattr(task, "attributes", {}) or {})
     reserved: dict[str, object] = {}
@@ -240,29 +223,21 @@ def _task_reserved(task: SubAgentTask) -> dict[str, object]:
     return reserved
 
 
-# LLM: _open_capability_requests normalizes old and new request status fields.
-# 函数用途: 统计仍需要父级/工具网关处理的能力申请，关闭态不再算缺口。
 def _open_capability_requests(task: SubAgentTask) -> list[object]:
     closed = {"CLOSED", "RESOLVED", "REJECTED", "APPROVED", "GRANTED"}
     return [item for item in task.capability_requests if str(getattr(item, "status", "OPEN") or "OPEN").upper() not in closed]
 
 
-# LLM: _continue_packet_ref derives the latest task-local continue packet path from compaction refs.
-# 函数用途: 当子代理 compact 后，给父级一个固定读取 latest_continue_packet.json 的位置。
 def _continue_packet_ref(task: SubAgentTask) -> str:
     if not task.agent_run_compactions_dir:
         return ""
     return str(Path(task.agent_run_compactions_dir) / "session" / "latest_continue_packet.json")
 
 
-# LLM: _stable_tasks gives deterministic root-before-child ordering for snapshots.
-# 函数用途: 按 depth、created_at 和 run id 排序，让测试、日志和父级读取结果稳定。
 def _stable_tasks(tasks: list[SubAgentTask]) -> list[SubAgentTask]:
     return sorted(tasks, key=lambda item: (int(item.depth or 0), float(item.created_at or 0.0), item.id))
 
 
-# LLM: _agent_kind is a structural projection, not a role/prompt classifier.
-# 函数用途: 根据 parent/depth 给状态树一个稳定层级标签，让父级查看时不用猜 child/grandchild。
 def _agent_kind(task: SubAgentTask) -> str:
     if int(task.depth or 0) <= 0 and not task.parent_id:
         return "root_agent"
@@ -271,16 +246,12 @@ def _agent_kind(task: SubAgentTask) -> str:
     return "grandchild_agent"
 
 
-# LLM: _root_for_run normalizes legacy empty root_id to the run itself.
-# 函数用途: root 任务通常 root_id 为空；快照里统一显示自己的 id。
 def _root_for_run(task: SubAgentTask | None) -> str:
     if task is None:
         return ""
     return task.root_id or task.id
 
 
-# LLM: _snapshot_root_id chooses the most useful root id for the returned snapshot.
-# 函数用途: 优先 query，再从首个 run 推导 root，保持空工作区可安全返回。
 def _snapshot_root_id(tasks: list[SubAgentTask], query: SubagentKernelQuery) -> str:
     if query.root_id:
         return query.root_id
@@ -289,8 +260,6 @@ def _snapshot_root_id(tasks: list[SubAgentTask], query: SubagentKernelQuery) -> 
     return ""
 
 
-# LLM: _snapshot_source_refs reports canonical task/work/output roots, not legacy work-order dirs.
-# 函数用途: 给调试和后续接管说明当前快照基于哪些 workspace 文件。
 def _snapshot_source_refs(tasks: list[SubAgentTask]) -> dict[str, str]:
     if not tasks:
         return {}
@@ -307,8 +276,6 @@ def _snapshot_source_refs(tasks: list[SubAgentTask]) -> dict[str, str]:
     }
 
 
-# LLM: _query_reserved stores non-control query details without growing the public schema.
-# 函数用途: 把查询参数放入 reserved，方便调试且不影响主字段稳定性。
 def _query_reserved(query: SubagentKernelQuery) -> dict[str, object]:
     return {
         "root_id": query.root_id,

@@ -1,5 +1,3 @@
-# LLM: Runtime guard config is the low-level reader for runtime reminder/rework knobs.
-# 模块用途: 在 settings 层统一读取运行门配置，避免 tooling 和 agent_core 互相导入造成循环依赖。
 
 from __future__ import annotations
 
@@ -52,13 +50,19 @@ class RuntimeGuardPolicy:
         }
 
 
-# LLM: runtime_guard_data is dynamic so config edits and monkeypatched paths take effect immediately.
-# 函数用途: 每次读取当前 DEFAULT_RUNTIME_GUARD_CONFIG_PATH，确保改 YAML 后不会被代码默认值遮住。
-def runtime_guard_data(path: Path | str | None = None) -> dict[str, object]:
-    return runtime_guard_policy(path).values
+def runtime_guard_data(
+    path: Path | str | None = None,
+    *,
+    policy: RuntimeGuardPolicy | None = None,
+) -> dict[str, object]:
+    return _effective_policy(path=path, policy=policy).values
 
 
-def runtime_guard_policy(path: Path | str | None = None, *, overrides: dict[str, object] | None = None) -> RuntimeGuardPolicy:
+def runtime_guard_policy(
+    path: Path | str | None = None,
+    *,
+    overrides: dict[str, object] | None = None,
+) -> RuntimeGuardPolicy:
     config_path = _config_path(path)
     try:
         data = load_simple_yaml(config_path)
@@ -76,27 +80,44 @@ def runtime_guard_policy(path: Path | str | None = None, *, overrides: dict[str,
     )
 
 
-# LLM: runtime_guard_int is the shared integer reader for runtime guard knobs.
-# 函数用途: 从 runtime_guard_config.yaml 读取非负整数，缺失或非法时使用调用方默认值。
-def runtime_guard_int(key: str, default: int = 0, *, path: Path | str | None = None) -> int:
-    return runtime_guard_policy(path).int_value(key, default)
+def runtime_guard_int(
+    key: str,
+    default: int = 0,
+    *,
+    path: Path | str | None = None,
+    policy: RuntimeGuardPolicy | None = None,
+) -> int:
+    return _effective_policy(path=path, policy=policy).int_value(key, default)
 
 
-# LLM: runtime_guard_bool is the shared boolean reader for runtime guard switches.
-# 函数用途: 从 runtime_guard_config.yaml 读取布尔开关，支持 true/yes/on/1 这类配置写法。
-def runtime_guard_bool(key: str, default: bool = False, *, path: Path | str | None = None) -> bool:
-    return runtime_guard_policy(path).bool_value(key, default)
+def runtime_guard_bool(
+    key: str,
+    default: bool = False,
+    *,
+    path: Path | str | None = None,
+    policy: RuntimeGuardPolicy | None = None,
+) -> bool:
+    return _effective_policy(path=path, policy=policy).bool_value(key, default)
 
 
-# LLM: runtime_guard_float_tuple keeps numeric sequence config parsing in one place.
-# 函数用途: 从 runtime_guard_config.yaml 读取浮点数列表，非法条目自动跳过并回退默认序列。
 def runtime_guard_float_tuple(
     key: str,
     default: tuple[float, ...],
     *,
     path: Path | str | None = None,
+    policy: RuntimeGuardPolicy | None = None,
 ) -> tuple[float, ...]:
-    return runtime_guard_policy(path).float_tuple_value(key, default)
+    return _effective_policy(path=path, policy=policy).float_tuple_value(key, default)
+
+
+def _effective_policy(
+    *,
+    path: Path | str | None = None,
+    policy: RuntimeGuardPolicy | None = None,
+) -> RuntimeGuardPolicy:
+    if policy is not None:
+        return policy
+    return runtime_guard_policy(path)
 
 
 def _config_path(path: Path | str | None = None) -> Path:

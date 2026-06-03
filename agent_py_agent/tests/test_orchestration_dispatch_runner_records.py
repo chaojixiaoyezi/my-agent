@@ -8,15 +8,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from agent_py_agent.agent.agent_core.runner_dispatch import (
+from agent_py_agent.agent.agent_core.runner.dispatch import (
     RunnerDispatchRecordParams,
     _runner_dispatch_record,
 )
 from agent_py_agent.agent.subagents.models import SubAgentRunnerResult
 
 
-# LLM: _runner_result returns the minimal successful runner result used by child-ref dispatch tests.
-# 函数用途: 构造带结构化摘要的 runner 结果，供 dispatch record 测试复用。
 def _runner_result() -> SubAgentRunnerResult:
     return SubAgentRunnerResult(
         run_id="root",
@@ -32,8 +30,6 @@ def _runner_result() -> SubAgentRunnerResult:
     )
 
 
-# LLM: test_runner_dispatch_record_carries_created_child_summary validates persisted dispatch evidence.
-# 函数用途: runner 内创建 children 后，父级 dispatch record 要保留 child refs 和角色摘要。
 def test_runner_dispatch_record_carries_created_child_summary():
     before = SimpleNamespace(status="PLANNING", verification_status="UNVERIFIED")
     after = SimpleNamespace(
@@ -56,7 +52,7 @@ def test_runner_dispatch_record_carries_created_child_summary():
             after=after,
             result=_runner_result(),
             retry_reason="",
-            execute_runners=True,
+            start_runner=True,
         )
     )
 
@@ -66,8 +62,6 @@ def test_runner_dispatch_record_carries_created_child_summary():
     assert record.runner_created_roles == ["researcher", "worker"]
 
 
-# LLM: test_runner_dispatch_record_marks_partial_success_children covers timeout-after-schedule E2E facts.
-# 函数用途: root runner 超时但已创建孩子时，dispatch record 要保留部分成功和未完成 child ids。
 def test_runner_dispatch_record_marks_partial_success_children():
     before = SimpleNamespace(status="PLANNING", verification_status="UNVERIFIED")
     after = SimpleNamespace(status="TIMEOUT", verification_status="UNVERIFIED", child_ids=["child-a", "child-b"])
@@ -89,10 +83,36 @@ def test_runner_dispatch_record_marks_partial_success_children():
             after=after,
             result=result,
             retry_reason="",
-            execute_runners=True,
+            start_runner=True,
         )
     )
 
     assert record.runner_partial_success is True
     assert record.runner_child_status_counts == {"DONE": 1, "PLANNING": 1}
     assert record.runner_unfinished_child_ids == ["child-b"]
+
+
+def test_runner_dispatch_record_surfaces_child_load_error():
+    before = SimpleNamespace(status="PLANNING", verification_status="UNVERIFIED")
+    after = SimpleNamespace(status="DONE", verification_status="VERIFIED", child_ids=["child-broken"])
+    agent = MagicMock()
+    agent.subagents.load.side_effect = ValueError("child ledger broken")
+    agent.subagents.make_dispatch_record.side_effect = lambda *, params: params
+
+    record = _runner_dispatch_record(
+        RunnerDispatchRecordParams(
+            agent=agent,
+            run_id="root",
+            before=before,
+            after=after,
+            result=_runner_result(),
+            retry_reason="",
+            start_runner=True,
+        )
+    )
+
+    assert record.runner_child_status_counts == {"UNKNOWN": 1}
+    assert record.runner_unfinished_child_ids == ["child-broken"]
+    assert record.runner_child_load_errors[0]["run_id"] == "child-broken"
+    assert record.runner_child_load_errors[0]["context"] == "subagents.load"
+    assert "不要把它当成子代理没产物" in record.runner_child_load_errors[0]["model_message"]

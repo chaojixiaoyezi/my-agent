@@ -9,8 +9,6 @@ from agent_py_agent.agent.contracts.artifact_collection_contract import collecti
 from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
 
-# LLM: complex table tasks need coverage contracts, not just workbook existence.
-# 函数用途: 验证结构化分组数量不足时，即使 xlsx 存在且列正确，也不能通过验收。
 def test_collection_contract_rejects_too_few_structured_groups(tmp_path: Path) -> None:
     source = tmp_path / "source_data.json"
     source.write_text(
@@ -53,8 +51,6 @@ def test_collection_contract_rejects_too_few_structured_groups(tmp_path: Path) -
     assert "COLLECTION_TOO_FEW_GROUPS" in {finding.code for finding in report.findings}
 
 
-# LLM: each declared bucket must satisfy item-count contracts independently.
-# 函数用途: 验证某个分组行数不足会被机器验收发现，防止只做最近几条数据也通过。
 def test_collection_contract_rejects_group_with_too_few_items(tmp_path: Path) -> None:
     source = tmp_path / "source_data.json"
     source.write_text(
@@ -93,8 +89,6 @@ def test_collection_contract_rejects_group_with_too_few_items(tmp_path: Path) ->
     assert "COLLECTION_GROUP_TOO_FEW_ITEMS" in {finding.code for finding in report.findings}
 
 
-# LLM: document outputs need source-index completeness and source-to-artifact mapping.
-# 函数用途: 验证 PDF 签名正确但来源数量、完整性证据和正文映射不足时不能通过验收。
 def test_collection_contract_rejects_incomplete_source_index_and_mapping(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs/docs"
     outputs.mkdir(parents=True)
@@ -144,8 +138,6 @@ def test_collection_contract_rejects_incomplete_source_index_and_mapping(tmp_pat
     assert "Paper 2" in mapping_finding.value
 
 
-# LLM: row-level machine fields must satisfy the declared contract, not only exist.
-# 函数用途: 验证清单行里的布尔/枚举等结构化状态不符合要求时会失败，避免 translated=false 也被当成完成。
 def test_collection_contract_rejects_required_item_value_mismatch(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs/docs"
     outputs.mkdir(parents=True)
@@ -192,8 +184,6 @@ def test_collection_contract_rejects_required_item_value_mismatch(tmp_path: Path
     assert "COLLECTION_ITEM_VALUE_MISMATCH" in {finding.code for finding in report.findings}
 
 
-# LLM: collection date ranges are machine bounds, not prose hidden in the user prompt.
-# 函数用途: 验证集合型来源清单能声明日期下界，防止过期条目混入“今年/某日期之后”的任务。
 def test_collection_contract_rejects_item_date_before_declared_min(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs/docs"
     outputs.mkdir(parents=True)
@@ -241,8 +231,6 @@ def test_collection_contract_rejects_item_date_before_declared_min(tmp_path: Pat
     assert "COLLECTION_ITEM_DATE_BEFORE_MIN" in {finding.code for finding in report.findings}
 
 
-# LLM: source collections must not treat generator placeholders as real required field values.
-# 函数用途: 验证 __FILL_* / TODO 这类模板值不能通过 required_item_fields，避免假来源数据进入最终产物映射。
 def test_collection_contract_rejects_required_item_placeholder_values(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs/docs"
     outputs.mkdir(parents=True)
@@ -290,8 +278,6 @@ def test_collection_contract_rejects_required_item_placeholder_values(tmp_path: 
     assert "__FILL_3_date__" in placeholder.value
 
 
-# LLM: api_json_collection emits sheets while document source indexes may declare flat rows.
-# 函数用途: 验证集合验收能把标准 sheets[].rows 输出作为 rows 集合读取，不误判为 0 items。
 def test_collection_contract_accepts_sheets_rows_when_flat_items_path_is_missing(tmp_path: Path) -> None:
     source_id = "src-web"
     (tmp_path / "source_index.json").write_text(

@@ -1,5 +1,3 @@
-# LLM: Run workspace helpers materialize per-task owner workspaces with output/work split.
-# 模块用途: 为普通主代理 run 创建 output 交付区和 work 过程区、状态文件和时间线记录。
 
 from __future__ import annotations
 
@@ -13,8 +11,6 @@ from ..io import append_jsonl
 from .home_layout import task_workspace_path
 
 
-# LLM: RunWorkspacePaths is the stable handoff object for task-local outputs and runtime refs.
-# 类用途: 保存一次主代理任务工作区的标准目录和元数据文件路径。
 @dataclass(frozen=True)
 class RunWorkspacePaths:
     root: Path
@@ -37,8 +33,6 @@ class RunWorkspacePaths:
     timeline_jsonl: Path
 
 
-# LLM: EnsureRunWorkspaceRequest keeps run workspace creation bundle-based and future-proof.
-# 类用途: 打包创建主代理任务工作区需要的 home、模板、任务、run 和请求字段。
 @dataclass(frozen=True)
 class EnsureRunWorkspaceRequest:
     home: str | Path
@@ -54,8 +48,6 @@ class EnsureRunWorkspaceRequest:
     created_at: str | None = None
 
 
-# LLM: ensure_run_workspace is intentionally refs-only; it records where work belongs, not model/tool bodies.
-# 函数用途: 创建或更新主代理任务工作区，并追加一条运行时间线事件。
 def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths:
     paths = run_workspace_paths(request)
     for directory in (
@@ -85,8 +77,6 @@ def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePath
     return paths
 
 
-# LLM: run_workspace_paths expands the task template into an output/work task folder.
-# 函数用途: 根据 home、任务模板和任务名计算本次 run 的任务目录、交付目录和过程目录。
 def run_workspace_paths(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths:
     root = task_workspace_path(
         request.home,
@@ -117,8 +107,6 @@ def run_workspace_paths(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths
     )
 
 
-# LLM: _write_task_yaml_if_missing preserves user edits to task metadata after first creation.
-# 函数用途: 首次创建任务目录时写入轻量任务说明，后续运行不覆盖人工修改。
 def _write_task_yaml_if_missing(path: Path, request: EnsureRunWorkspaceRequest) -> None:
     if path.exists():
         return
@@ -134,8 +122,6 @@ def _write_task_yaml_if_missing(path: Path, request: EnsureRunWorkspaceRequest) 
     path.write_text(text, encoding="utf-8")
 
 
-# LLM: _state_payload captures current run refs without storing long prompts or responses.
-# 函数用途: 生成 state.json 的稳定字段，供 resume、doctor 和前端展示使用。
 def _state_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
     return {
         "version": 1,
@@ -151,8 +137,6 @@ def _state_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
     }
 
 
-# LLM: _artifact_manifest_payload seeds an empty manifest; real artifacts register later.
-# 函数用途: 初始化 output/ 交付物登记文件，不把模型口头路径当最终事实。
 def _artifact_manifest_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
     return {
         "version": 1,
@@ -166,8 +150,6 @@ def _artifact_manifest_payload(request: EnsureRunWorkspaceRequest) -> dict[str, 
     }
 
 
-# LLM: _timeline_payload is append-only so future debugging can reconstruct task workspace creation.
-# 函数用途: 生成 timeline.jsonl 的单条 refs-only 事件。
 def _timeline_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
     return {
         "event_type": "run_workspace_saved",
@@ -181,8 +163,6 @@ def _timeline_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
     }
 
 
-# LLM: _date_key accepts explicit ISO dates for tests and defaults to local calendar days for task folders.
-# 函数用途: 归一化任务目录日期字段。
 def _date_key(value: str | None) -> str:
     if not value:
         return date.today().isoformat()
@@ -192,14 +172,10 @@ def _date_key(value: str | None) -> str:
         return value[:10]
 
 
-# LLM: _now_iso centralizes timeline timestamps.
-# 函数用途: 返回 UTC ISO 时间字符串。
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# LLM: _workspace_task_name keeps machine ids as metadata, not user-visible task folder names.
-# 函数用途: 选择任务目录名；run/gw/req 等机器编号不作为 tasks/date 下的目录名。
 def _workspace_task_name(request: EnsureRunWorkspaceRequest) -> str:
     candidates = (request.task_id, request.task_name, request.user_prompt)
     for value in candidates:
@@ -209,8 +185,6 @@ def _workspace_task_name(request: EnsureRunWorkspaceRequest) -> str:
     return str(request.user_prompt or request.task_name or request.task_id or request.run_id or request.request_id or "task")
 
 
-# LLM: _looks_like_machine_id keeps gateway/run/request ids out of visible task folder names.
-# 函数用途: 识别机器编号形态，只作为 metadata 保留，不拿来命名任务目录。
 def _looks_like_machine_id(value: str) -> bool:
     text = str(value or "").strip().lower()
     if not text:
@@ -231,21 +205,15 @@ def _looks_like_machine_id(value: str) -> bool:
     return bool(re.fullmatch(r"(run|gw|req|task|session|thread)[_-]?[0-9a-f]{6,}", text))
 
 
-# LLM: _yaml_escape keeps the tiny YAML seed readable without adding a YAML dependency.
-# 函数用途: 转义任务元数据里的双引号。
 def _yaml_escape(value: object) -> str:
     return str(value or "").replace('"', '\\"')
 
 
-# LLM: _write_seed_file is idempotent so reruns do not overwrite user-visible task notes.
-# 函数用途: 仅在缺失时写入小型种子文件。
 def _write_seed_file(path: Path, content: str) -> None:
     if not path.exists():
         path.write_text(content, encoding="utf-8")
 
 
-# LLM: _write_seed_json mirrors _write_seed_file for machine-readable bootstrap files.
-# 函数用途: 仅在缺失时写入 JSON 种子，避免重跑覆盖已有状态。
 def _write_seed_json(path: Path, payload: dict[str, object]) -> None:
     if path.exists():
         return

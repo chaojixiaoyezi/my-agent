@@ -1,5 +1,3 @@
-# LLM: CLI scenario case definition; keep fixture flow and expected gateway/subagent behavior stable.
-# 模块用途: 定义一类命令行情景测试，用来复现和验证端到端流程。
 
 from __future__ import annotations
 
@@ -33,8 +31,6 @@ from ..scenario_utils import (
 )
 
 
-# LLM: SubagentRunResults 是scenario CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class SubagentRunResults:
     runner: object
@@ -42,27 +38,19 @@ class SubagentRunResults:
     backend: object
 
 
-# LLM: ResumeCommandResults 是scenario CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class ResumeCommandResults:
     payload: object
     returncode: int
 
 
-# LLM: ScenarioParentSubagentRecoveryBackend 是scenario CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 class ScenarioParentSubagentRecoveryBackend:
 
     name = "scenario_parent_subagent_recovery_backend"
 
-    # LLM: __init__ 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def __init__(self) -> None:
         self.calls = 0
 
-    # LLM: generate 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
@@ -102,8 +90,6 @@ class ScenarioParentSubagentRecoveryBackend:
         )
 
 
-# LLM: _write_parent_subagent_recovery_fact_files 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
 def _write_parent_subagent_recovery_fact_files(task) -> None:
 
     Path(task.status_file).write_text(
@@ -138,8 +124,6 @@ def _write_parent_subagent_recovery_fact_files(task) -> None:
     )
 
 
-# LLM: _append_parent_subagent_cross_day_resume_clues 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _append_parent_subagent_cross_day_resume_clues(root: Path, task) -> None:
 
     append_raw_event(
@@ -162,8 +146,6 @@ def _append_parent_subagent_cross_day_resume_clues(root: Path, task) -> None:
     _append_subagent_snapshot(root, task)
 
 
-# LLM: _append_subagent_snapshot 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _append_subagent_snapshot(root: Path, task) -> None:
     append_snapshot(
         root,
@@ -201,8 +183,6 @@ def _append_subagent_snapshot(root: Path, task) -> None:
     )
 
 
-# LLM: _parent_subagent_setup 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _parent_subagent_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -244,8 +224,6 @@ def _parent_subagent_setup(args):
     return paths, agent, backend, task, loaded, runner
 
 
-# LLM: _run_subagent_resume 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def _run_subagent_resume(paths, task):
     env = os.environ.copy()
     env.setdefault("PYTHONUTF8", "1")
@@ -264,8 +242,6 @@ def _run_subagent_resume(paths, task):
         return {"ok": False, "error": f"memory-resume JSON parse failed: {exc}", "stdout": resume.stdout}, resume.returncode
 
 
-# LLM: _verify_subagent_resume 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _verify_subagent_resume(run: SubagentRunResults, resume: ResumeCommandResults, task, expected_reads):
     task_sources = resume.payload.get("task_fact_sources", []) if isinstance(resume.payload, dict) else []
     recommended_reads = resume.payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume.payload, dict) else []
@@ -291,8 +267,6 @@ def _verify_subagent_resume(run: SubagentRunResults, resume: ResumeCommandResult
     )
 
 
-# LLM: run_scenario_parent_subagent_cross_day_resume_case 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_parent_subagent_cross_day_resume_case(args) -> int:
 
     paths, agent, backend, task, loaded, runner = _parent_subagent_setup(args)

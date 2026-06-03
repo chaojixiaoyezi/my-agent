@@ -2,9 +2,53 @@
 
 父验收旧链路已经移除。子代理只负责执行自己的任务、写结果和证据引用；上级通过任务树、状态、refs 和普通 closeout 继续推进。
 
+## 2026-06-02 canonical state 与派生投影收敛
+
+- 子代理详细状态的权威位置收敛到当前任务工作区的 `work/agents/<run_id>/canonical_state.json`。
+- 旧工单目录中的 `task.json` / `run.json` 只保留 locator/projection 作用；读取时如果 canonical state 存在，会自动跳回权威 payload。
+- owner 侧 `owner_home/agents/<run_id>/state.json` 现在是 refs-only projection，只用于 tree、doctor、compact 和恢复发现，不再当第二套事实账本。
+- 保存链路改为先写 canonical state，再同步状态报告、owner projection、global index、LocalStore 等派生投影。
+- 派生投影失败不会回滚 canonical save，也不会把任务改成失败；失败摘要会写到工单目录的 `projection_warnings.json`，方便父代理或人工排查。
+- 子代理结构化结果里的 artifact 路径会优先登记到统一 artifact registry；缺失或暂时解析不了的路径只作为恢复线索保留，不在 runner 层直接阻断任务。
+- `static_site_*` 平铺文件收敛到 `subagents/static_site/`。静态站点测试仍只通过
+  `run_static_site_check` 公开入口调用；parser/check/record helper 不再散在
+  `subagents/` 根层。
+- `execution_*` 平铺文件收敛到 `subagents/execution/`。测试执行器、测试记录、
+  测试报告和测试项准备保留包级公开 API；具体 file/content/pytest/static-site
+  helper 不再散在 `subagents/` 根层。
+- `services/hierarchy_*` 平铺文件收敛到 `subagents/services/hierarchy/`。层级调度、
+  层级恢复和 QA 波次建议仍由同一套 service 使用；agent naming、write policy、
+  idempotency 和 role/tool policy helper 不再散在 `services/` 根层。
+- `services/patch_apply_*`、patch review helper 和 patch spec normalizer 收敛到
+  `subagents/services/patch_apply/`。patch apply / review / test command / record
+  helper 仍服务同一套 patch flow，不新增第二套 patch 执行入口。
+- `takeover_*` 平铺文件收敛到 `subagents/services/takeover/`。接管 readiness、
+  source refs 和幂等 takeover run 创建仍服务原有恢复编排，不改变接管深度、
+  写入根继承或 load_error 语义。
+- `services/board*.py` 平铺文件收敛到 `subagents/services/board/`。看板核心服务、
+  facade、due-check、action-plan 和 board item helper 仍只服务同一套 tree/board
+  可观察状态，不新增第二个状态事实源。
+- `services/action*.py` 和 `actions.py` 平铺文件收敛到 `subagents/services/actions/`。
+  动作 apply service、options、params、records、handler、leadership 和 takeover handler
+  仍服务原有 action-plan 写回流程，不新增第二套恢复/接管入口。
+- `services/indexing*.py` 平铺文件收敛到 `subagents/services/indexing/`。索引
+  service、params、本地记录、dispatch/watch 记录索引仍服务原有 LocalStore / report
+  indexing 流程，不新增第二套索引事实源。
+- `services/persistence*.py` 平铺文件收敛到 `subagents/services/persistence/`。
+  持久化 service、模型归一化、投影同步、recovery output、状态报告、安全/继承/失败交接
+  helper 仍服务同一套 canonical state 保存流程，不新增第二套事实账本。
+- `services/dispatch*.py` 平铺文件收敛到 `subagents/services/dispatch/`。dispatch
+  service、params、report/watch builder 和日志 appender 仍服务同一套调度报告写回流程，
+  不新增第二套调度状态源。
+- `services/leadership_recovery*.py` 平铺文件收敛到
+  `subagents/services/leadership_recovery/`。领导权恢复 plan/apply 仍服务原有恢复编排，
+  不改变 coordinator handoff 语义。
+
 ## 2026-06-02 自学习候选去重收敛
 
 - learning draft 去重不再把“短教训出现在长复盘里”直接当成同一条候选。精确相同仍直接合并；短文本之间的合理包含仍保留高相似度；长文本改走词元和短语片段相似度。
+- 去重相似度现在组合 word token、word shingle、字符片段、编辑相似度和长度差封顶；它只影响 learning draft 候选合并，不会提升正式 skill，也不会阻断任务。
+- 验证样例里，同一经验换说法可以超过候选合并阈值；不相关文本保持低分；短教训嵌在长复盘里低于合并阈值。
 - 这样保留了“相同经验多次出现就提高置信度”的能力，同时避免一篇长报告因为包含某句局部经验，就把多个不同 lesson 误合并成一个候选。
 - 参考 通道运行时 的短文本不靠 substring 误判重复、终端交互 的明确来源/索引去重思路后，当前实现仍保持自学习草稿层，不提升正式 skill、不新增硬门。
 
@@ -18,7 +62,7 @@
 - runner 内的消息、能力申请和协作证据入口同样按当前身份裁剪。模型如果传错 `sender_run_id`、`source_agent_id`、`requester_agent_id`、`actor_agent_id`，系统不会替别的 run 写账；工具结果会把被忽略字段放进 `scope_resolution.ignored_explicit`。
 - `schedule_child_subagents` 现在和 `create_subagents` 一样默认创建后后台启动；启动参数会保留当前 runner 作为 parent scope，不会把孙代理挂到顶层或平行子树。
 - 子代理任务级记忆命名空间改为 `subagent:{root_run_id}:{run_id}`，并把保留策略写入 `attributes.memory_scope`。新增配置 `subagent_memory_retention_policy`、`subagent_memory_delete_after_days`、`subagent_destroy_summary_required`；这些只描述归档/清理边界，不是新硬门。
-- 为保持 code-size 清零，把后台启动逻辑拆到 `orchestration_background_dispatch.py`，把 kernel 数据模型拆到 `kernel_models.py`；行为保持 refs/tree/status 路线不变。
+- 为保持 code-size 清零，把后台启动逻辑拆到 `agent_core/orchestration/background/dispatch.py`，把 kernel 数据模型拆到 `kernel_models.py`；行为保持 refs/tree/status 路线不变。
 
 ## 2026-05-27 调度卡点清理
 
@@ -78,6 +122,9 @@
   失败，会返回 `task_load_errors` / `load_error`，状态为 `LOAD_FAILED`。
 - 父代理现在能区分“子代理没有产物”和“子代理状态账本读取失败”。前者按任务继续催产物或补派；
   后者应刷新 tree、重建索引或接管恢复，而不是误判子代理没干活。
+- `create_subagents` / `schedule_child_subagents` 创建 run 后，如果会话绑定 `bind_task()` 失败，
+  工具结果会返回 `conversation_bind_errors`。子代理创建和启动不因此取消，但父代理能知道“会话回路账本有问题”，
+  而不是把它误解成子代理没有异常。
 - 这不是新硬门。它只把原来被吞掉的异常暴露出来，不会因为某个读取失败直接终止任务。
 
 ## 2026-06-02 协作 case 响应覆盖账本
@@ -104,6 +151,7 @@
 - 当前内部编排/状态工具的 tool-output 归档也会写入当前模型可见正文；更早生成的旧归档在经 `read_artifact` 展开时会按来源工具再净化一次，避免历史 `create_subagents` / `inspect_agent_tree` 结果把旧路径重新带回上下文。普通 `read_file`、网页、命令输出和用户产物正文保持原文。
 - `create_subagents` 的模型可见输入统一使用 `input_refs` / `context_manifest` 描述“交给子代理自己读的资料线索”。旧 `required_read_paths` 只保留在解析兼容层，避免继续把旧字段教给模型。
 - 旧式 work-order 目录不再作为状态面主路径返回，避免父代理接管时按 `data/subagents/<run_id>/...` 猜旧路径或直接 `read_file` 旧账本。
+- 2026-06-02 继续补齐：`context_bundle`、`task_envelope`、runner prompt 摘要、board goal/summary 和 child result summary 也走同一套模型可见路径投影；旧路径夹在自然语言里时只保留可用文件名线索，不再把 `data/subagents/...` 作为下一步事实暴露给模型。
 - 父级读取子代理结果时，应优先用 `agent_work_dir`、`final_report_ref`、`artifact_refs` 和 `evidence_refs`，不要自己拼子代理目录。
 - 如果模型仍然拿旧路径或抄错路径去读，`read_file/list_files/search_text`
   会返回 `path_not_found=true`、`candidate_paths` 和下一步建议；这只是恢复提示，

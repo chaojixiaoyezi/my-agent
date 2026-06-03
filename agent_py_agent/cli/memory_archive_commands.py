@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 from __future__ import annotations
 
@@ -39,11 +37,7 @@ from .memory_archive_roots import (
 )
 from .memory_resume_compact_rendering import print_memory_resume_from_compact
 
-# LLM: memory resume CLI converts argparse fields into ResumeGuidanceRequest before calling archive services.
 
-
-# LLM: cmd_memory_archive_list 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_archive_list(args) -> int:
 
     agent = make_agent(args)
@@ -73,8 +67,6 @@ def cmd_memory_archive_list(args) -> int:
     return 0
 
 
-# LLM: cmd_memory_archive_search 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_archive_search(args) -> int:
 
     agent = make_agent(args)
@@ -114,8 +106,6 @@ def cmd_memory_archive_search(args) -> int:
     return 0
 
 
-# LLM: _collect_resume_data 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 汇总多个检查来源，并按统一结构返回调用方。
 def _collect_resume_data(agent, args):
     roots = archive_roots(agent)
     archive_records = collect_agent_archive_records(
@@ -147,8 +137,6 @@ def _collect_resume_data(agent, args):
     return filters, roots, archive_matches, local_payloads, task_payloads, gateway_payloads
 
 
-# LLM: cmd_memory_resume 属于memory CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_resume(args) -> int:
     agent = make_agent(args)
     _apply_archive_default_limit(agent, args)
@@ -187,15 +175,11 @@ def cmd_memory_resume(args) -> int:
     return 0
 
 
-# LLM: _from_compact_arg ignores MagicMock/default argparse sentinels and accepts only real user input.
-# 函数用途: 判断 CLI 是否真正传入 --from-compact，避免旧测试或兼容调用误入 compact resume 分支。
 def _from_compact_arg(args) -> str:
     value = getattr(args, "from_compact", "")
     return value.strip() if isinstance(value, str) else ""
 
 
-# LLM: _cmd_memory_resume_from_compact keeps compact resume read-only and separate from archive search resume.
-# 函数用途: 处理 memory-resume --from-compact，读取 apply 产物并输出恢复上下文或 JSON。
 def _cmd_memory_resume_from_compact(agent, args) -> int:
     payload = build_memory_compact_resume(
         agent.root,
@@ -204,7 +188,6 @@ def _cmd_memory_resume_from_compact(agent, args) -> int:
             owner_type=getattr(args, "compact_owner_type", "main_agent") or "main_agent",
             owner_id=getattr(args, "compact_owner_id", "") or "",
             resume_mode=getattr(args, "compact_resume_mode", "manual") or "manual",
-            # LLM: CLI passes configured subagent workspace so owner refs find task-local run homes.
             subagent_workspace=getattr(getattr(agent, "subagents", None), "workspace", ""),
         ),
     )
@@ -215,8 +198,6 @@ def _cmd_memory_resume_from_compact(agent, args) -> int:
     return 0 if _compact_resume_exit_ok(payload) else 2
 
 
-# LLM: _compact_resume_exit_ok treats auto guard blocking as a non-zero CLI result.
-# 函数用途: 判断 compact resume 命令退出码；manual 成功可返回 0，auto guard 阻断必须返回 2。
 def _compact_resume_exit_ok(payload: dict[str, Any]) -> bool:
     if not payload.get("ok"):
         return False
@@ -224,14 +205,10 @@ def _compact_resume_exit_ok(payload: dict[str, Any]) -> bool:
     return guard.get("mode") != "auto" or bool(guard.get("allowed_to_continue"))
 
 
-# LLM: _archive_search_file_limit keeps archive scans tied to backend config instead of fixed module constants.
-# 函数用途: 读取 memory_archive_search_file_limit；用户可通过配置调大/调小恢复和查询扫描范围。
 def _archive_search_file_limit(agent) -> int:
     return int(getattr(agent.config, "memory_archive_search_file_limit", 30) or 0)
 
 
-# LLM: _apply_archive_default_limit lets archive CLI defaults live in AgentConfig.
-# 函数用途: 用户没有传 --limit 时，统一使用 cli_memory_archive_limit。
 def _apply_archive_default_limit(agent, args) -> None:
     if getattr(args, "limit", None) is None:
         args.limit = int(getattr(agent.config, "cli_memory_archive_limit", 20) or 0)

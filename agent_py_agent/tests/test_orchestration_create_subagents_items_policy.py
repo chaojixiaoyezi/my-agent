@@ -6,8 +6,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 
-# LLM: _mock_items_agent keeps items role-policy tests independent from the larger create tool test file.
-# 函数用途: 构造最小 create_subagents items 测试替身，避免主测试文件继续变大。
 def _mock_items_agent(task_count: int = 3):
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
@@ -22,8 +20,6 @@ def _mock_items_agent(task_count: int = 3):
     return mock_agent
 
 
-# LLM: _mock_task provides only payload fields used by CreateSubagentsTool.
-# 函数用途: 返回带 id/status/task_dir 的任务替身，供 create_run side_effect 使用。
 def _mock_task(index: int):
     task = MagicMock()
     task.id = f"run_{index}"
@@ -34,8 +30,6 @@ def _mock_task(index: int):
     return task
 
 
-# LLM: This regression separates capability grants from orchestration intent.
-# 函数用途: 验证 broad allowed_tools 只是授权，不会把 items[] 普通 worker 误升为 coordinator。
 def test_items_worker_with_dispatch_tools_stays_worker():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -72,8 +66,6 @@ def test_items_worker_with_dispatch_tools_stays_worker():
     assert all("用户原始层级" not in call.kwargs["params"].goal for call in calls)
 
 
-# LLM: Batch items must not grow hidden sibling workflow edges.
-# 函数用途: 验证 create_subagents 不再把 dependencies/input_refs 自动转成 workflow_depends_on；
 # 真要流水线由父代理显式按顺序派工。
 def test_items_path_refs_do_not_persist_hidden_workflow_depends_on():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool

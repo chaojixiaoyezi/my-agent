@@ -180,11 +180,10 @@ memory-resume 或 run(auto resume)
 - 中文说明：请求执行状态被收进小 context，完成审计也拆成 helper，所以 gateway request-execution 这条路径不再有高风险体积项。
 - `gateway_parts/request_execution.py` keeps request execution state in small context records and delegates completion audit into a helper, leaving no high-risk code-size entry in the gateway request-execution slice.
 
-## 2026-05-07 annotation structure update
-- 中文说明：结构文档把代码里的双层注释也当成架构一部分。新增文件、服务、bundle 或 facade 方法时，需要同时更新结构页和代码注释，避免 LLM/人类读到旧契约。
-- Module structure docs now treat the definition-level double-layer comments as part of the code architecture: `LLM:` records model-facing contract/caller/side-effect notes, and `函数用途:` / `类用途:` records beginner-readable purpose and edit guidance.
-- New files, services, bundles, or facade methods must update both this structure page and the in-code comments at the same time.
-- The global file tree in `CODEBASE_TREE.md` now includes a current architecture map for CLI, agent core, gateway, memory, log-analysis, subagent, tooling, and settings boundaries.
+## 2026-06-02 template annotation cleanup
+- 中文说明：结构文档不再要求 gateway 代码使用 `LLM:` / `函数用途:` 这类模板标签；这轮只清理旧标签，不改变 gateway 文件队列协议、request/response JSON、worker 认领流程或 facade 入口。
+- Gateway facade comments should explain real boundaries only: which module is authoritative, which import path is compatibility-only, and what behavior must not change.
+- New files, services, bundles, or facade methods still need structure docs when behavior changes, but code comments must stay useful and specific instead of mechanically repeating a template.
 
 ## 2026-05-13 backend config structure update
 - 中文说明：gateway 相关默认等待、join timeout、service command timeout 进入 `AgentConfig`，由 `agent_config.yaml` 作为真实后端配置源。

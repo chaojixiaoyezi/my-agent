@@ -1,15 +1,13 @@
-# LLM: Compact gate bridge connects memory compact apply/resume to the shared compaction gate.
-# 模块用途: 从 compact metadata、restore refs 和 work_state 组装机器事实，避免 compact 门只停留在孤立单测。
 
 from __future__ import annotations
 
 from typing import Any
 
+from ..common.value_parsing import sequence_strings
 from ..contracts.gates.compaction_gate import CompactionGateFacts, evaluate_compaction_gate
+from ..contracts.recovery_actions import RecoveryAction
 
 
-# LLM: build_compaction_gate_state extracts the stable state that must survive compact/resume.
-# 函数用途: 只读取结构化 compact/work_state 字段，生成 compaction_gate 的 pre/post 对比状态。
 def build_compaction_gate_state(
     metadata: dict[str, Any],
     restore_refs: dict[str, Any],
@@ -31,8 +29,6 @@ def build_compaction_gate_state(
     }
 
 
-# LLM: evaluate_pre_compaction_state runs the gate before metadata becomes authoritative.
-# 函数用途: 生成 pre_compact 裁决和可序列化状态快照，供 metadata 和后续 resume 使用。
 def evaluate_pre_compaction_state(
     metadata: dict[str, Any],
     restore_refs: dict[str, Any],
@@ -50,8 +46,6 @@ def evaluate_pre_compaction_state(
     return {"pre": decision.to_dict(), "state_snapshot": state}
 
 
-# LLM: evaluate_post_compaction_state compares resume state against the apply-time snapshot.
-# 函数用途: 在 memory-resume 阶段确认 compact 后关键状态没有丢失。
 def evaluate_post_compaction_state(metadata: dict[str, Any], artifacts: dict[str, Any]) -> dict[str, Any]:
     recorded = _dict_value(metadata.get("compaction_gate"))
     pre_state = _dict_value(recorded.get("state_snapshot"))
@@ -63,7 +57,7 @@ def evaluate_post_compaction_state(metadata: dict[str, Any], artifacts: dict[str
                 "status": "SKIPPED",
                 "allowed": True,
                 "findings": [],
-                "recommended_action": "continue",
+                "recommended_action": RecoveryAction.CONTINUE.value,
                 "evidence": {"reason": "missing_pre_compaction_snapshot"},
             },
         }
@@ -82,8 +76,6 @@ def evaluate_post_compaction_state(metadata: dict[str, Any], artifacts: dict[str
     return {"present": True, "post": decision.to_dict(), "state_snapshot": post_state}
 
 
-# LLM: _contract_state keeps acceptance/constraints as structured contract signals.
-# 函数用途: compact 不发明验收事实；只保留 work_state 已经记录的结构化合同字段。
 def _contract_state(work_state: dict[str, Any]) -> dict[str, Any]:
     return {
         "acceptance": work_state.get("acceptance", []),
@@ -129,12 +121,12 @@ def _recovery_packet(
 
 
 def _pending_actions(work_state: dict[str, Any], source_plan: dict[str, Any]) -> list[str]:
-    actions = _string_list(work_state.get("next_actions")) or _string_list(source_plan.get("recommended_actions"))
+    actions = sequence_strings(work_state.get("next_actions")) or sequence_strings(source_plan.get("recommended_actions"))
     return actions or ["manual_resume_review"]
 
 
 def _failed_actions(work_state: dict[str, Any], source_plan: dict[str, Any]) -> list[str]:
-    return _string_list(work_state.get("missing_fields")) + _string_list(source_plan.get("risks"))
+    return sequence_strings(work_state.get("missing_fields")) + sequence_strings(source_plan.get("risks"))
 
 
 def _restore_source_count(restore_payload: dict[str, Any]) -> int:
@@ -152,12 +144,6 @@ def _scope_id(scope: dict[str, Any], key: str) -> str:
 
 def _dict_value(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _string_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
 
 
 __all__ = [

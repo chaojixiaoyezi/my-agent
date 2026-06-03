@@ -12,8 +12,6 @@ from agent_py_agent.agent.tools import ToolRegistry, ToolRegistryParams, ToolSpe
 from .backends import make_tool_registry
 
 
-# LLM: _registry builds a catalog/parser registry with stable test defaults.
-# 函数用途: 生成测试用 ToolRegistry，避免每个解析器用例重复一大段配置。
 def _registry() -> ToolRegistry:
     return ToolRegistry(
         ToolRegistryParams(
@@ -43,16 +41,17 @@ def test_tool_catalog_and_recommended_sections():
     recommended = registry.render_recommended_tools_section("帮我测试一个 REST API 接口并查看返回")
 
     assert "# Tool Catalog" in catalog
-    assert "web_fetch [web]" in catalog
+    assert "web_fetch [web" in catalog
     assert "http_request [api]" not in catalog
     assert "web_extract [web]" not in catalog
-    assert "适用场景" in catalog
-    assert "## web_fetch" in recommended
+    assert "关键参数" in catalog
+    assert "适用场景" not in catalog
+    assert "示例：" not in catalog
+    assert "web_fetch [web]" in recommended
+    assert "参数：" in recommended
     assert "推荐理由" in recommended
 
 
-# LLM: ToolRegistry treats configured inline write limits as transport advice, not a write blocker.
-# 函数用途: 验证注册表里的 write_file 会使用用户配置的推荐值提示模型，但合法内容仍然先写入文件。
 def test_registry_uses_configured_write_inline_recommendation(tmp_path: Path):
     registry = ToolRegistry(
         ToolRegistryParams(
@@ -81,8 +80,6 @@ def test_registry_uses_configured_write_inline_recommendation(tmp_path: Path):
     assert "512" in result.output
 
 
-# LLM: Shell timeout config should reach the actual run_command tool, not stop at AgentConfig.
-# 函数用途: 验证工具注册表把 tool_shell_timeout 传给 run_command 的默认超时和工具说明。
 def test_registry_uses_configured_shell_timeout(tmp_path: Path):
     registry = ToolRegistry(
         ToolRegistryParams(
@@ -119,8 +116,6 @@ def test_tool_catalog_format_example_does_not_bias_to_path_param():
     assert "不要写 param_name" in catalog
 
 
-# LLM: long content protocol must be visible before compact catalog entries can hide write-file details.
-# 函数用途: 验证工具目录顶部始终提示大 HTML/JS/报告要分块写入，避免真实模型先走超大 write_file。
 def test_tool_catalog_includes_global_large_content_protocol():
     registry = _registry()
 
@@ -154,8 +149,9 @@ def test_tool_catalog_uses_configured_categories_offset_and_notice():
 
     catalog = registry.render_catalog_section()
 
-    assert "read_file" in catalog
+    assert "find_files" in catalog
     assert "list_files" not in catalog
+    assert "read_file" not in catalog
     assert "示例：" not in catalog
     assert "next_offset=2" in catalog
 
@@ -204,8 +200,6 @@ def test_tool_executor_unwraps_model_filesystem_bundle(tmp_path: Path):
     assert "category bundle recovered" in result.output
 
 
-# LLM: model function-call wrappers should flatten before aliases and required-param checks.
-# 函数用途: 覆盖真实 E2E 暴露的 actual_parameter_name 包装，避免 run_command 误报 command 为空。
 def test_tool_call_parser_unwraps_actual_parameter_name_bundle():
     registry = make_tool_registry(Path.cwd())
 
@@ -218,8 +212,6 @@ def test_tool_call_parser_unwraps_actual_parameter_name_bundle():
     assert calls == [{"tool": "run_command", "command": "echo ok", "working_dir": "/tmp"}]
 
 
-# LLM: direct execution should use the same wrapper normalization as text parsing.
-# 函数用途: 验证 arguments 这类函数调用参数外壳会被解包，再执行真实工具。
 def test_tool_executor_unwraps_arguments_bundle(tmp_path: Path):
     registry = make_tool_registry(tmp_path)
 
@@ -231,8 +223,6 @@ def test_tool_executor_unwraps_arguments_bundle(tmp_path: Path):
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "wrapped"
 
 
-# LLM: test_tool_call_parser_canonicalizes_json_tool_and_param_aliases covers non-XML model drift.
-# 函数用途: 标准 JSON 工具块里写 write/file_path 这类别名时，协议层应归一成 write_file/path。
 def test_tool_call_parser_canonicalizes_json_tool_and_param_aliases():
     registry = make_tool_registry(Path.cwd())
 
@@ -243,8 +233,6 @@ def test_tool_call_parser_canonicalizes_json_tool_and_param_aliases():
     assert calls == [{"tool": "write_file", "path": "notes.txt", "content": "ok"}]
 
 
-# LLM: test_tool_executor_canonicalizes_json_aliases keeps direct envelope execution equally robust.
-# 函数用途: 直接执行旧 dict/envelope payload 时也要归一工具名和路径别名，不能只修 parser。
 def test_tool_executor_canonicalizes_json_aliases(tmp_path: Path):
     registry = make_tool_registry(tmp_path)
 
@@ -254,8 +242,6 @@ def test_tool_executor_canonicalizes_json_aliases(tmp_path: Path):
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "alias ok"
 
 
-# LLM: test_tool_call_parser_rejects_conflicting_canonical_aliases avoids silent path swaps.
-# 函数用途: 如果 path 和 file_path 同时出现且不同，必须明确报错，不能猜哪个是真的。
 def test_tool_call_parser_rejects_conflicting_canonical_aliases():
     registry = make_tool_registry(Path.cwd())
 
@@ -282,8 +268,6 @@ def test_tool_call_parser_unwraps_model_memory_bundle():
     ]
 
 
-# LLM: test_tool_call_parser_recovers_single_extra_trailing_brace covers real MiniMax tool-call drift.
-# 函数用途: 模型在有效 JSON 后多吐一个 `}` 时，解析器应保留完整工具参数而不是逼模型缩短任务。
 def test_tool_call_parser_recovers_single_extra_trailing_brace():
     registry = make_tool_registry(Path.cwd())
 
@@ -294,8 +278,6 @@ def test_tool_call_parser_recovers_single_extra_trailing_brace():
     assert calls == [{"tool": "read_file", "path": "README.md"}]
 
 
-# LLM: Detached top-level metadata should be repaired before parse-error recovery.
-# 函数用途: 验证模型把 source_refs/claims 误写到 premature-close 后面时，解析器能合回同一个工具调用。
 def test_tool_call_parser_recovers_detached_top_level_fields():
     registry = make_tool_registry(Path.cwd())
 
@@ -319,8 +301,6 @@ def test_tool_call_parser_recovers_detached_top_level_fields():
     ]
 
 
-# LLM: test_parse_error_result_includes_retry_format_hint covers malformed XML-ish tool-call recovery.
-# 函数用途: 模型工具调用格式坏掉时，执行结果要明确告诉它下一轮用标准 JSON 工具块重试。
 def test_parse_error_result_includes_retry_format_hint():
     registry = make_tool_registry(Path.cwd())
     calls = registry.parse_tool_calls("<tool_call><function=read><parameter=file_path>README.md</parameter>")
@@ -333,8 +313,6 @@ def test_parse_error_result_includes_retry_format_hint():
     assert "[/TOOL_CALL]" in result.output
 
 
-# LLM: test_tool_call_parser_reports_missing_closing_tool_marker covers R25 truncated JSON.
-# 函数用途: 模型开始写标准工具块但没闭合时，运行循环要让它重试，而不是把半截工具调用当最终回答。
 def test_tool_call_parser_reports_missing_closing_tool_marker():
     registry = make_tool_registry(Path.cwd())
     calls = registry.parse_tool_calls(
@@ -379,8 +357,6 @@ def test_tool_call_parser_still_accepts_tool_call_after_subagent_result():
     assert calls == [{"tool": "read_file", "path": "README.md"}]
 
 
-# LLM: complete JSON without the closing marker should still execute when the payload is intact.
-# 函数用途: 真实模型偶尔少写 [/TOOL_CALL]，但 JSON 已完整；这种情况不应浪费一轮重试。
 def test_tool_call_parser_recovers_complete_json_without_closing_marker():
     registry = make_tool_registry(Path.cwd())
     calls = registry.parse_tool_calls(
@@ -392,8 +368,6 @@ def test_tool_call_parser_recovers_complete_json_without_closing_marker():
     ]
 
 
-# LLM: malformed opener recovery covers real model drift where `[TOOL_CALL` misses `]`.
-# 函数用途: 工具协议开头坏掉时，系统应给 parse-error 纠偏，而不是把坏工具块当最终回答。
 def test_tool_call_parser_reports_malformed_opening_marker():
     registry = make_tool_registry(Path.cwd())
     calls = registry.parse_tool_calls(
@@ -408,8 +382,6 @@ def test_tool_call_parser_reports_malformed_opening_marker():
     assert "[TOOL_CALL]" in result.output
 
 
-# LLM: test_parse_error_hint_recommends_raw_or_patch_for_truncated_write covers long generated CSS/HTML writes.
-# 函数用途: 写文件内容太长被截断时，错误提示要引导模型用 raw write 或 apply_patch，避免重复失败。
 def test_parse_error_hint_recommends_append_for_truncated_write():
     registry = make_tool_registry(Path.cwd())
     calls = registry.parse_tool_calls(
@@ -532,8 +504,6 @@ def test_tool_call_parser_and_executor_reject_non_object_payloads():
     assert "JSON 对象" in direct_result.output
 
 
-# LLM: A malformed unfinished tool block must not swallow the next independent tool call.
-# 函数用途: 复现真实模型输出大 JSON 工具块中途断开后，后续正常 TOOL_CALL 被坏块污染的问题。
 def test_tool_call_parser_recovers_next_block_after_unclosed_nested_start():
     registry = make_tool_registry(Path.cwd())
 

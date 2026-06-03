@@ -1,5 +1,3 @@
-# LLM: Collaboration model helper functions; keep parsing permissive and open-world.
-# 模块用途: 提供协作模型 ID 生成和宽松类型规整，避免模型定义文件继续膨胀。
 
 from __future__ import annotations
 

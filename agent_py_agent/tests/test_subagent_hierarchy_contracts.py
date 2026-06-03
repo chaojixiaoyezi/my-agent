@@ -6,14 +6,12 @@
 from __future__ import annotations
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
 
 
-# LLM: test_hierarchy_schedule_preserves_shopping_file_contract covers real E2E page-name drift.
-# 函数用途: 示例站这类父级明确列文件名时，下层不能把 product-detail/style.css/app.js 改成其它名字。
 def test_hierarchy_schedule_preserves_shopping_file_contract_when_child_goal_only_has_build_dir(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
@@ -54,8 +52,6 @@ def test_hierarchy_schedule_preserves_shopping_file_contract_when_child_goal_onl
     assert "4 层链路" in child.goal
 
 
-# LLM: R44 proved exact forbidden filenames must survive even when a child mentions the build root.
-# 函数用途: child goal 已包含产物目录和必需文件时，仍必须继承 product.html/output.json 等具体禁止清单。
 def test_hierarchy_schedule_preserves_forbidden_file_contract_when_child_goal_summarizes_constraints(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
@@ -105,8 +101,6 @@ def _schedule_forbidden_contract_child(manager: SubAgentManager, root_id: str, b
     ))
 
 
-# LLM: R70 showed schedule-time chain forcing over-constrained otherwise valid implementation children.
-# 函数用途: 父级收口判断。
 def test_hierarchy_schedule_preserves_no_space_four_layer_contract_without_forcing_coord_chain(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
@@ -130,8 +124,6 @@ def test_hierarchy_schedule_preserves_no_space_four_layer_contract_without_forci
     assert "小小小傻妞-*" in leaf.goal
 
 
-# LLM: _create_no_space_four_layer_child keeps the no-space hierarchy regression focused on assertions.
-# 函数用途: 创建带“4层”中文无空格约束的 root 和第一层 coordinator。
 def _create_no_space_four_layer_child(manager: SubAgentManager, build):
     root = manager.create_run(
         goal="示例站需要指定文件和 4 层链路。",
@@ -165,8 +157,6 @@ def _create_no_space_four_layer_child(manager: SubAgentManager, build):
     return manager.load(child_result.created_run_ids[0])
 
 
-# LLM: test_hierarchy_file_contract_skips_forbidden_rename_targets guards R22 prompt corruption.
-# 函数用途: 父级写“禁止改成 product.html”时，只继承 item-detail.html，不能把反例当必需产物。
 def test_hierarchy_file_contract_skips_forbidden_rename_targets(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
@@ -200,8 +190,6 @@ def test_hierarchy_file_contract_skips_forbidden_rename_targets(tmp_path):
     assert "\n- old-product.html\n" in child.goal
     assert "\n- legacy.html" in child.goal
 
-# LLM: test_hierarchy_schedule_blocks_leaf_before_explicit_four_layer_chain_reaches_depth_three covers root-only E2E.
-# 函数用途: 父级明确要求 4 层链路时，深度未到孙孙层前不能直接创建 leaf/worker 跳层。
 def test_hierarchy_schedule_blocks_leaf_before_explicit_four_layer_chain_reaches_depth_three(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(
@@ -230,8 +218,6 @@ def test_hierarchy_schedule_blocks_leaf_before_explicit_four_layer_chain_reaches
     assert manager.load(child.id).child_ids == result.created_run_ids
 
 
-# LLM: Coordinator names can include writer/domain words without becoming leaf workers.
-# 函数用途: 防止“小小傻妞-site-writer”这类 coordinator 因名字里有 writer 被四层链路 guard 误挡。
 def test_hierarchy_schedule_allows_coordinator_name_with_writer_before_depth_three(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(

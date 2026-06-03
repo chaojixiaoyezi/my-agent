@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# LLM: open a visible terminal in a named workstream directory.
-# 给人看的解释：
 # 用它把某条开发线打开成你能看到的终端窗口。
 # 不传命令时会停在 shell；传命令时会先执行命令，再保持窗口打开。
 
@@ -11,8 +9,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/workstream_common.sh"
 
 usage() {
-  # LLM: render command help for opening a workstream terminal.
-  # 给人看的解释：
   # 第一个参数是 workstream 名字；后面可以跟一整条要在终端里执行的命令。
   cat <<'EOF'
 Usage:
@@ -55,9 +51,8 @@ import sys
 
 
 def applescript_string(value: str) -> str:
-    """LLM: quote a shell command as an AppleScript string.
+    """Quote a shell command as an AppleScript string.
 
-    给人看的解释：
     macOS Terminal 需要 AppleScript 字符串。
     这里把反斜杠和双引号转义，避免路径或参数里有特殊字符时打不开。
     """

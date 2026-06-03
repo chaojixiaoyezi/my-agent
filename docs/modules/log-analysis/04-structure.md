@@ -97,3 +97,7 @@ agent_py_agent/agent/log_analysis/
 ## 2026-05-22 runtime manifest structure update
 - 中文说明：LOG 工具现在把副作用类型作为机器字段写进 `ToolSpec.effect`，并保持两个 BaseTool 入口同步。registry 执行前的 Tool Manifest Gate 直接读取该字段，不从工具描述或 prompt 文本推断。
 - `security_query`、`security_hunt_ip` 和 `security_trace_case` 都是 read-only evidence query wrappers；如果后续新增会写文件、发消息或执行处置的 LOG 工具，必须显式声明 mutating/dangerous、幂等键和审批策略。
+
+## 2026-06-02 contract comment cleanup
+- 中文说明：`agents/contracts.py` 的 analyst/reviewer 合同继续作为 LOG 子任务输入输出的结构边界；本轮只清理生成式模板注释，并把内部 helper 名字改成 `_compact_string_list`，表示它会裁剪、规范化列表输入。
+- Public LOG analyst/reviewer payload shape stays stable: `case_id`、`summary`、`evidence_refs`、facts/inferences/gaps、review decision fields and validation errors keep the same serialized meaning.

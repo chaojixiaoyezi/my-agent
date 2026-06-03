@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import re
 
-from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
-from agent_py_agent.agent.agent_core.runtime_loop_models import RunParams
+from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.backend import ModelResponse
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.conversation import (
@@ -382,7 +382,7 @@ def test_real_local_child_runner_event_wakes_background_main_agent_after_restart
         None,
         params=DispatchParams(
             apply=True,
-            execute_runners=True,
+            start_runners=True,
             include_run_ids=[child.id],
             max_runners=1,
             probe=False,
@@ -467,7 +467,7 @@ def _dispatch_one_child(agent: SimpleAgent, run_id: str, backend):
         None,
         params=DispatchParams(
             apply=True,
-            execute_runners=True,
+            start_runners=True,
             include_run_ids=[run_id],
             max_runners=1,
             probe=False,

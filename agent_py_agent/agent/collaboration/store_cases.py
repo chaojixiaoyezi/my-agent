@@ -1,5 +1,3 @@
-# LLM: Case lifecycle operations for collaboration rooms.
-# 模块用途: 打开、读取、列出和记录协作 case 状态。
 
 from __future__ import annotations
 

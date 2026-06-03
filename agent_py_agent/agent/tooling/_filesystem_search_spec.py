@@ -1,13 +1,9 @@
-# LLM: search_text tool metadata stays separate from search execution code.
-# 模块用途: 构建 search_text 的 ToolSpec，避免执行模块因为说明文字变厚。
 
 from __future__ import annotations
 
 from .models import ToolSpec
 
 
-# LLM: build_search_text_spec returns the model-facing catalog entry for search_text.
-# 函数用途: 集中维护 search_text 的说明、参数和示例，不影响搜索执行逻辑。
 def build_search_text_spec() -> ToolSpec:
     return ToolSpec(
         name="search_text",

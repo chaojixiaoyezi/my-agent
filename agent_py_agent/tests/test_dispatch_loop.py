@@ -12,7 +12,9 @@ class TestPendingWorkState:
 
     def test_has_pending_work_when_candidates_exist(self, tmp_path: Path):
         """有可调度任务时 has_pending_work 为 True。"""
-        from agent_py_agent.agent.agent_core.dispatch_mixin import SimpleAgentDispatchMixin
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.mixin import (
+            SimpleAgentDispatchMixin,
+        )
 
         # 创建一个 mock agent
         class MockAgent(SimpleAgentDispatchMixin):
@@ -40,7 +42,9 @@ class TestPendingWorkState:
 
     def test_has_pending_work_false_when_no_candidates(self, tmp_path: Path):
         """无任务时 has_pending_work 为 False。"""
-        from agent_py_agent.agent.agent_core.dispatch_mixin import SimpleAgentDispatchMixin
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.mixin import (
+            SimpleAgentDispatchMixin,
+        )
 
         class MockAgent(SimpleAgentDispatchMixin):
             def __init__(self):
@@ -62,8 +66,11 @@ class TestDispatchLoop:
 
     def test_dispatch_loop_single_round(self, tmp_path: Path):
         """单轮 dispatch 后无任务时只跑一轮。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
-        from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
 
         # Mock agent
         agent = MagicMock()
@@ -87,7 +94,10 @@ class TestDispatchLoop:
 
     def test_dispatch_loop_multiple_rounds(self, tmp_path: Path):
         """有任务时跑多轮。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -121,7 +131,10 @@ class TestDispatchLoop:
 
     def test_dispatch_loop_stops_at_limit(self, tmp_path: Path):
         """达到最大轮数后停止。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -140,10 +153,8 @@ class TestDispatchLoop:
         # dispatch_subagents 被调用 5 次
         assert agent.dispatch_subagents.call_count == 5
 
-    # LLM: zero max_consecutive_rounds means no hard round ceiling.
-    # 函数用途: 验证调度循环里 max_consecutive_rounds=0 不会变成“0 轮不跑”。
     def test_dispatch_loop_zero_max_rounds_is_unlimited_until_done(self, tmp_path: Path):
-        from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import dispatch_loop
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -166,7 +177,7 @@ class TestDispatchLoop:
 
     def test_dispatch_loop_stops_when_audit_only_actions_repeat(self, tmp_path: Path):
         """重复的记录类动作不应该把调度循环拖到最大轮数。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import dispatch_loop
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -186,8 +197,6 @@ class TestDispatchLoop:
         assert agent._has_pending_work is False
 
 
-# LLM: _audit_only_dispatch_report keeps loop tests short while preserving real report shape.
-# 函数用途: 构造只有 due-check 和 classify_blocker 的调度报告，用于验证 no-progress fuse。
 def _audit_only_dispatch_report():
     from agent_py_agent.agent.subagents.reports import DispatchRecord, DispatchReport
 
@@ -202,8 +211,6 @@ def _audit_only_dispatch_report():
     )
 
 
-# LLM: _audit_record models the repeated scan half of an audit-only dispatch round.
-# 函数用途: 返回无状态变化的 due_check/scan 记录，模拟真实 R33/R34 空转前半段。
 def _audit_record():
     from agent_py_agent.agent.subagents.reports import DispatchRecord
 
@@ -219,8 +226,6 @@ def _audit_record():
     )
 
 
-# LLM: _classify_record models the record-only blocker classification that should not count as progress.
-# 函数用途: 返回状态不变的 classify_blocker 记录，验证重复分类不会让父级循环一直跑。
 def _classify_record():
     from agent_py_agent.agent.subagents.reports import DispatchRecord
 
@@ -265,12 +270,51 @@ class TestAdaptiveInterval:
         assert current_interval == 30
 
 
+class TestWatchDispatchInputState:
+    """测试 watch 读取调度输入时不会把账本错误吞成空状态。"""
+
+    def test_watch_dispatch_input_state_reports_list_runs_error(self):
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.services.watch_cycle_observe import (
+            _watch_dispatch_input_state,
+        )
+
+        def broken_list_runs():
+            raise OSError("subagent index unreadable")
+
+        agent = SimpleNamespace(subagents=SimpleNamespace(list_runs=broken_list_runs))
+
+        state = _watch_dispatch_input_state(agent)
+
+        assert state.has_inputs is False
+        assert state.load_error is not None
+        assert state.load_error["context"] == "watch.subagents.list_runs"
+        assert "subagent index unreadable" in state.load_error["message"]
+
+    def test_watch_dispatch_input_state_reports_available_runs(self):
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.services.watch_cycle_observe import (
+            _watch_dispatch_input_state,
+        )
+
+        agent = SimpleNamespace(subagents=SimpleNamespace(list_runs=lambda: [object()]))
+
+        state = _watch_dispatch_input_state(agent)
+
+        assert state.has_inputs is True
+        assert state.load_error is None
+
+
 class TestFailureAutoTrigger:
     """测试失败自动触发逻辑。"""
 
     def test_runner_failure_sets_pending_work(self, tmp_path: Path):
         """runner 失败后设置 _has_pending_work 为 True。"""
-        from agent_py_agent.agent.agent_core.dispatch_mixin import SimpleAgentDispatchMixin
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.mixin import (
+            SimpleAgentDispatchMixin,
+        )
 
         class MockAgent(SimpleAgentDispatchMixin):
             def __init__(self):
@@ -299,7 +343,9 @@ class TestFailureAutoTrigger:
 
     def test_runner_success_does_not_trigger(self, tmp_path: Path):
         """runner 成功后不触发。"""
-        from agent_py_agent.agent.agent_core.dispatch_mixin import SimpleAgentDispatchMixin
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.mixin import (
+            SimpleAgentDispatchMixin,
+        )
 
         class MockAgent(SimpleAgentDispatchMixin):
             def __init__(self):
@@ -362,7 +408,9 @@ class TestConsecutiveRoundsCounter:
 
     def test_increment_dispatch_rounds(self, tmp_path: Path):
         """递增连续 dispatch 轮数。"""
-        from agent_py_agent.agent.agent_core.dispatch_mixin import SimpleAgentDispatchMixin
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.mixin import (
+            SimpleAgentDispatchMixin,
+        )
 
         class MockAgent(SimpleAgentDispatchMixin):
             def __init__(self):
@@ -378,7 +426,9 @@ class TestConsecutiveRoundsCounter:
 
     def test_reset_dispatch_rounds(self, tmp_path: Path):
         """重置连续 dispatch 轮数。"""
-        from agent_py_agent.agent.agent_core.dispatch_mixin import SimpleAgentDispatchMixin
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.mixin import (
+            SimpleAgentDispatchMixin,
+        )
 
         class MockAgent(SimpleAgentDispatchMixin):
             def __init__(self):

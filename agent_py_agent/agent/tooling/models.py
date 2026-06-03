@@ -1,15 +1,7 @@
-# LLM: prompt 渲染和检索排序依赖这些结构，字段和文本格式要谨慎调整。
-# 模块用途: 工具规格、执行结果和工具检索评分模型。
 
 from __future__ import annotations
 
-"""defines stable tool metadata, retrieval hits, and base execution contracts.
-
-给人看的解释：
-这个文件只放工具系统最基础的'名词'和'接口'。
-比如一个工具叫什么、适合干什么、执行后返回什么格式，以及工具检索结果长什么样。
-后面无论是文件工具、网络工具还是编排工具，都应该沿用这里的结构。
-"""
+"""Defines stable tool metadata, retrieval hits, and base execution contracts."""
 
 import re
 from dataclasses import dataclass, field
@@ -18,8 +10,6 @@ from typing import Any
 from ..contracts.error_taxonomy import classify_error, error_contract
 
 
-# LLM: ToolSpec 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: 工具元数据模型，描述工具用途、参数、示例和检索关键词。
 @dataclass
 class ToolSpec:
 
@@ -39,8 +29,6 @@ class ToolSpec:
     timeout_seconds: int = 0
     output_refs: list[str] = field(default_factory=list)
 
-    # LLM: ToolSpec.render_catalog_entry 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 把 render_catalog_entry 转成人或模型可读的展示文本。
     def render_catalog_entry(
         self,
         *,
@@ -49,14 +37,12 @@ class ToolSpec:
     ) -> str:
 
         params = "、".join(self.parameters.keys()) or "无"
-        use_cases = "；".join(self.use_cases[:2]) or "无"
-        avoid_when = "；".join(self.avoid_when[:1]) or "无"
         example = f"\n  示例：{self.examples[0]}" if include_examples and self.examples else ""
+        traits = _tool_traits(self)
+        trait_text = f"；{traits}" if traits else ""
         rendered = (
-            f"- {self.name} [{self.category}]：{self.description}\n"
-            f"  适用场景：{use_cases}\n"
-            f"  关键参数：{params}\n"
-            f"  不适用时机：{avoid_when}"
+            f"- {self.name} [{self.category}{trait_text}]：{self.description}\n"
+            f"  关键参数：{params}"
             f"{example}"
         )
         return _truncate_rendered_tool_entry(
@@ -65,8 +51,24 @@ class ToolSpec:
             label="tool_catalog_entry_max_chars",
         )
 
-    # LLM: ToolSpec.render_detail_entry 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 把 render_detail_entry 转成人或模型可读的展示文本。
+    def render_recommended_entry(self, *, max_chars: int = 0) -> str:
+
+        params = "\n".join(
+            f"  - {name}: {self.parameters.get(name, '')}" for name in self.parameters
+        ) or "  - 无"
+        traits = _tool_traits(self)
+        trait_line = f"\n  属性：{traits}" if traits else ""
+        rendered = (
+            f"- {self.name} [{self.category}]：{self.description}"
+            f"{trait_line}\n"
+            f"  参数：\n{params}"
+        )
+        return _truncate_rendered_tool_entry(
+            rendered,
+            max_chars=max_chars,
+            label="tool_detail_max_chars",
+        )
+
     def render_detail_entry(self, *, max_chars: int = 0) -> str:
 
         params = "\n".join(
@@ -81,7 +83,7 @@ class ToolSpec:
             f"类别：{self.category}\n"
             f"一句话说明：{self.description}\n"
             f"适合在这些时候用：\n{use_cases}\n"
-            f"关键参数说明：\n{params}\n"
+            f"关键 \n{params}\n"
             f"示例：\n{examples}\n"
             f"这些场景别优先选它：\n{avoid_when}"
         )
@@ -92,8 +94,6 @@ class ToolSpec:
         )
 
 
-# LLM: ToolExecutionResult 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: 工具执行结果模型，保存成功状态和返回给模型的文本。
 @dataclass
 class ToolExecutionResult:
 
@@ -108,8 +108,6 @@ class ToolExecutionResult:
     recommended_action: str = ""
     recovery_hint: str = ""
 
-    # LLM: __post_init__ attaches advisory error facts without changing tool success/failure semantics.
-    # 函数用途: 失败结果自动补统一错误合同字段；成功结果保持空字段，避免多余 prompt 噪音。
     def __post_init__(self) -> None:
         if self.ok:
             self.error_code = ""
@@ -125,8 +123,6 @@ class ToolExecutionResult:
         self.recommended_action = contract.recommended_action
         self.recovery_hint = contract.recovery_hint
 
-    # LLM: ToolExecutionResult.render_for_prompt 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 把 render_for_prompt 转成人或模型可读的展示文本。
     def render_for_prompt(self) -> str:
 
         status = "ok" if self.ok else "error"
@@ -136,8 +132,6 @@ class ToolExecutionResult:
         return f"[{fields}]\n{self.output}"
 
 
-# LLM: ToolSearchHit 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: 工具检索命中模型，保存分数和召回原因。
 @dataclass
 class ToolSearchHit:
 
@@ -146,26 +140,18 @@ class ToolSearchHit:
     reasons: list[str]
 
 
-# LLM: BaseToolSearchProvider 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: BaseToolSearchProvider 封装 工具系统 的一组相关操作，供上层组合调用。
 class BaseToolSearchProvider:
 
     name = "base"
 
-    # LLM: BaseToolSearchProvider.search 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 按查询词检索候选工具或本地记录并返回排序结果。
     def search(self, query: str, specs: list[ToolSpec], limit: int) -> list[ToolSearchHit]:
         raise NotImplementedError
 
 
-# LLM: KeywordToolSearchProvider 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: KeywordToolSearchProvider 封装 工具系统 的一组相关操作，供上层组合调用。
 class KeywordToolSearchProvider(BaseToolSearchProvider):
 
     name = "keyword"
 
-    # LLM: KeywordToolSearchProvider.search 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 按查询词检索候选工具或本地记录并返回排序结果。
     def search(self, query: str, specs: list[ToolSpec], limit: int) -> list[ToolSearchHit]:
         tokens = _tokenize(query)
         hits: list[ToolSearchHit] = []
@@ -177,36 +163,24 @@ class KeywordToolSearchProvider(BaseToolSearchProvider):
         return hits[:limit]
 
 
-# LLM: VectorToolSearchProvider 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: VectorToolSearchProvider 封装 工具系统 的一组相关操作，供上层组合调用。
 class VectorToolSearchProvider(BaseToolSearchProvider):
 
     name = "vector"
 
-    # LLM: VectorToolSearchProvider.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 初始化 VectorToolSearchProvider 的依赖、配置和运行期字段。
     def __init__(self, enabled: bool = False):
         self.enabled = enabled
 
-    # LLM: VectorToolSearchProvider.search 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 按查询词检索候选工具或本地记录并返回排序结果。
     def search(self, query: str, specs: list[ToolSpec], limit: int) -> list[ToolSearchHit]:
         if not self.enabled:
             return []
         return []
 
 
-# LLM: HybridToolRetriever 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: HybridToolRetriever 封装 工具系统 的一组相关操作，供上层组合调用。
 class HybridToolRetriever:
 
-    # LLM: HybridToolRetriever.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 初始化 HybridToolRetriever 的依赖、配置和运行期字段。
     def __init__(self, providers: list[BaseToolSearchProvider]):
         self.providers = providers
 
-    # LLM: HybridToolRetriever.search 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 按查询词检索候选工具或本地记录并返回排序结果。
     def search(self, query: str, specs: list[ToolSpec], limit: int) -> list[ToolSearchHit]:
         merged: dict[str, ToolSearchHit] = {}
         for provider in self.providers:
@@ -216,20 +190,29 @@ class HybridToolRetriever:
         return ranked[:limit]
 
 
-# LLM: BaseTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: BaseTool 数据模型，集中保存 工具系统 的结构化状态。
 class BaseTool:
 
     spec: ToolSpec
 
-    # LLM: BaseTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 执行 BaseTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         raise NotImplementedError
 
 
-# LLM: _truncate_rendered_tool_entry lets config cap tool prompt blocks without changing tool metadata.
-# 函数用途: 按配置截断工具目录/详情文本，避免单个工具说明撑爆 prompt。
+def _tool_traits(spec: ToolSpec) -> str:
+    parts: list[str] = []
+    if spec.effect:
+        parts.append(f"effect={spec.effect}")
+    if spec.default_mode:
+        parts.append(f"default={spec.default_mode}")
+    if spec.requires_idempotency:
+        parts.append("idempotent")
+    if spec.requires_approval:
+        parts.append("approval")
+    if spec.timeout_seconds:
+        parts.append(f"timeout={spec.timeout_seconds}s")
+    return "；".join(parts)
+
+
 def _truncate_rendered_tool_entry(text: str, *, max_chars: int, label: str) -> str:
     if max_chars <= 0 or len(text) <= max_chars:
         return text
@@ -237,8 +220,6 @@ def _truncate_rendered_tool_entry(text: str, *, max_chars: int, label: str) -> s
 
 
 
-# LLM: _tokenize 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 tokenize 步骤，并保持调用方依赖的数据形状。
 def _tokenize(text: str) -> list[str]:
 
     lowered = (text or "").lower()
@@ -256,8 +237,6 @@ def _tokenize(text: str) -> list[str]:
     return unique
 
 
-# LLM: _score_keyword_spec 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 score_keyword_spec 步骤，并保持调用方依赖的数据形状。
 def _score_keyword_spec(spec: ToolSpec, tokens: list[str]) -> tuple[float, list[str]]:
     haystacks = _keyword_haystacks(spec)
     score = 0.0
@@ -269,8 +248,6 @@ def _score_keyword_spec(spec: ToolSpec, tokens: list[str]) -> tuple[float, list[
     return score, reasons
 
 
-# LLM: _merge_tool_hit 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 整理工具调用的 merge_tool_hit 信息，供注册表鉴权或执行使用。
 def _merge_tool_hit(
     merged: dict[str, ToolSearchHit],
     provider_name: str,
@@ -289,8 +266,6 @@ def _merge_tool_hit(
     _append_unique_reasons(existing.reasons, [provider_reason, *hit.reasons])
 
 
-# LLM: _append_unique_reasons 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 向结果或告警集合加入 append_unique_reasons，同时保留调用方依赖的顺序。
 def _append_unique_reasons(target: list[str], reasons: list[str]) -> None:
     for reason in reasons:
         if reason not in target:
@@ -298,8 +273,6 @@ def _append_unique_reasons(target: list[str], reasons: list[str]) -> None:
     del target[4:]
 
 
-# LLM: _keyword_haystacks 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 keyword_haystacks 步骤，并保持调用方依赖的数据形状。
 def _keyword_haystacks(spec: ToolSpec) -> dict[str, str]:
     return {
         "name": spec.name.lower(),
@@ -310,8 +283,6 @@ def _keyword_haystacks(spec: ToolSpec) -> dict[str, str]:
     }
 
 
-# LLM: _score_keyword_token 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 score_keyword_token 步骤，并保持调用方依赖的数据形状。
 def _score_keyword_token(token: str, haystacks: dict[str, str]) -> tuple[float, list[str]]:
     score = 0.0
     reasons: list[str] = []
@@ -330,8 +301,6 @@ def _score_keyword_token(token: str, haystacks: dict[str, str]) -> tuple[float, 
     return score, reasons
 
 
-# LLM: _chinese_subtokens 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 chinese_subtokens 步骤，并保持调用方依赖的数据形状。
 def _chinese_subtokens(token: str) -> list[str]:
     if not re.fullmatch(r"[\u4e00-\u9fff]+", token):
         return []

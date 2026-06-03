@@ -1,9 +1,9 @@
-# LLM: Subagent runner collaboration context surfaces targeted requests without expanding full case ledgers.
-# 模块用途: 给被点名的 responder 注入待处理协作请求摘要，帮助复用已有 case/request。
 
 from __future__ import annotations
 
 from typing import Any
+
+from ..runtime_errors import runtime_error_report
 
 
 def collaboration_context_payload(manager: object, task: object) -> dict[str, object]:
@@ -17,8 +17,15 @@ def collaboration_context_payload(manager: object, task: object) -> dict[str, ob
             agent_role=str(getattr(task, "role", "") or ""),
             limit=10,
         )
-    except (OSError, ValueError, TypeError, AttributeError):
-        return {}
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        return {
+            "targeted_request_count": 0,
+            "targeted_requests": [],
+            "collaboration_load_error": runtime_error_report(
+                exc,
+                context="subagent_context.collaboration.pending_requests",
+            ),
+        }
     if not requests:
         return {}
     return {

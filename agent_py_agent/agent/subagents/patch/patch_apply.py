@@ -1,5 +1,3 @@
-# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
 
 """Patch application with file write boundary enforcement.
 
@@ -14,12 +12,13 @@ import json
 import time
 from dataclasses import dataclass, replace
 
-from agent_py_agent.agent.subagents.reports import PatchApplyReport
-from agent_py_agent.agent.subagents.services.indexing_params import (
+from agent_py_agent.agent.common.json_io import read_json_object_report
+from agent_py_agent.agent.subagents.reports import PatchApplyRecord, PatchApplyReport
+from agent_py_agent.agent.subagents.services.indexing.params import (
     DataclassRecordIndexParams,
     IndexReportParams,
 )
-from agent_py_agent.agent.subagents.utils import _read_json_object
+from agent_py_agent.agent.subagents.utils import _new_id
 
 from .patch_apply_reports import patch_apply_record_to_dict
 from .patch_apply_task import (
@@ -30,20 +29,15 @@ from .patch_apply_task import (
 )
 
 
-# LLM: PatchApplyOptions 属于子代理补丁应用的类边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 类用途: 集中保存补丁应用选项字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class PatchApplyOptions:
     """Options bundle for patch apply report entrypoints."""
 
-    # LLM: apply policy knobs travel together so future gates do not widen public signatures.
     apply: bool = False
     applier: str = "parent"
     note: str = ""
     limit: int = 0
 
-    # LLM: from_values 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-    # 函数用途: 转换values的数据表示，保持跨模块传递时的字段含义一致；关键副作用: 需保持补丁文件、预演结果和应用报告上的返回值和副作用边界稳定。
     @classmethod
     def from_values(
         cls,
@@ -60,8 +54,6 @@ class PatchApplyOptions:
         return replace(base, **clean)
 
 
-# LLM: _patch_apply_options 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 处理补丁应用选项相关的数据流，连接当前职责的前后步骤；关键副作用: 会更新补丁文件、预演结果和应用报告，需避免破坏既有状态机约定。
 def _patch_apply_options(
     options: PatchApplyOptions | None,
     *,
@@ -81,18 +73,12 @@ def _patch_apply_options(
     )
 
 
-# LLM: PatchApplyService 属于子代理补丁应用的类边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 类用途: 封装补丁应用服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发补丁文件、预演结果和应用报告相关副作用，需保持公开契约稳定。
 class PatchApplyService:
     """Execute patch apply with write boundary enforcement and rollback support."""
 
-    # LLM: __init__ 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持补丁文件、预演结果和应用报告上的返回值和副作用边界稳定。
     def __init__(self, manager):
         self.manager = manager
 
-    # LLM: apply_patches 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-    # 函数用途: 更新patches对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新补丁文件、预演结果和应用报告，需避免破坏既有状态机约定。
     def apply_patches(
         self,
         run_ids=None,
@@ -104,7 +90,7 @@ class PatchApplyService:
         limit=0,
     ) -> PatchApplyReport:
         """Execute the independent patch-apply audit chain for runner-declared file writes."""
-        from agent_py_agent.agent.subagents.services.patch_apply_summary import PatchApplySummary
+        from agent_py_agent.agent.subagents.services.patch_apply.summary import PatchApplySummary
 
         opts = _patch_apply_options(
             options,
@@ -121,8 +107,6 @@ class PatchApplyService:
             records=records,
         )
 
-    # LLM: write_apply_report 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-    # 函数用途: 写入报告的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动补丁文件、预演结果和应用报告，调用方依赖写入顺序和文件格式。
     def write_apply_report(
         self,
         run_ids=None,
@@ -161,11 +145,9 @@ class PatchApplyService:
         )
         return report
 
-    # LLM: _write_apply_records 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-    # 函数用途: 写入记录的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动补丁文件、预演结果和应用报告，调用方依赖写入顺序和文件格式。
     def _write_apply_records(self, report: PatchApplyReport, *, apply: bool) -> None:
         """Persist per-run patch apply records and append apply logs when requested."""
-        from agent_py_agent.agent.subagents.services.patch_apply_record_files import (
+        from agent_py_agent.agent.subagents.services.patch_apply.record_files import (
             PatchApplyRecordFiles,
         )
 
@@ -183,8 +165,6 @@ class PatchApplyService:
             if apply:
                 PatchApplyRecordFiles.append_log(record, self.manager)
 
-    # LLM: _apply_patch_task 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-    # 函数用途: 更新补丁任务对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新补丁文件、预演结果和应用报告，需避免破坏既有状态机约定。
     def _apply_patch_task(
         self,
         task,
@@ -209,40 +189,65 @@ class PatchApplyService:
             params=params,
         )
 
-    # LLM: _normalize_patch_apply_spec 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-    # 函数用途: 解析并归一化补丁应用spec的输入形态，让下游只处理稳定结构；关键副作用: 会更新补丁文件、预演结果和应用报告，需避免破坏既有状态机约定。
     def _normalize_patch_apply_spec(self, task, patch):
         """Backward-compatible wrapper for patch spec normalization."""
         return normalize_patch_apply_spec(self.manager, task, patch)
 
-    # LLM: _resolve_patch_target 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-    # 函数用途: 读取或查询补丁target需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _resolve_patch_target(self, raw_path: str):
         """Backward-compatible wrapper for patch path resolution."""
         return resolve_patch_target(self.manager, raw_path)
 
 
-# LLM: _collect_patch_apply_records 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 读取或查询补丁应用记录需要的状态，返回调用方可继续处理的快照；关键副作用: 会改动补丁文件、预演结果和应用报告，调用方依赖写入顺序和文件格式。
 def _collect_patch_apply_records(service: PatchApplyService, run_ids, opts: PatchApplyOptions):
-    from pathlib import Path
-
-    from agent_py_agent.agent.subagents.parsing import _dict_list
-
     records = []
     for task in service.manager._select_runs(run_ids):
-        output = _read_json_object(Path(task.output_json))
-        patches = _dict_list(output.get("patches", []))
-        if run_ids is None and not patches:
+        record = _patch_apply_record_for_task(service, task, run_ids, opts)
+        if record is None:
             continue
-        records.append(_apply_patch_record(_PatchApplyRecordParams(service, task, output, patches, opts)))
+        records.append(record)
         if opts.limit > 0 and len(records) >= opts.limit:
             break
     return records
 
 
-# LLM: _PatchApplyRecordParams 属于子代理补丁应用的类边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 类用途: 集中保存补丁应用记录参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+def _patch_apply_record_for_task(service: PatchApplyService, task, run_ids, opts: PatchApplyOptions):
+    from pathlib import Path
+
+    from agent_py_agent.agent.subagents.parsing import _dict_list
+
+    read_report = read_json_object_report(
+        Path(task.output_json),
+        parse_nested_string=True,
+        context="patch_apply.output_json",
+    )
+    if read_report.load_error is not None:
+        return _patch_apply_output_load_error_record(task, opts, read_report.load_error)
+    output = read_report.payload
+    patches = _dict_list(output.get("patches", []))
+    if run_ids is None and not patches:
+        return None
+    return _apply_patch_record(_PatchApplyRecordParams(service, task, output, patches, opts))
+
+
+def _patch_apply_output_load_error_record(task, opts: PatchApplyOptions, load_error: dict[str, object]):
+    return PatchApplyRecord(
+        id=_new_id("patchapply"),
+        run_id=task.id,
+        dry_run=not opts.apply,
+        applied=False,
+        ok=False,
+        decision="OUTPUT_LOAD_ERROR",
+        message="output.json 读取失败；这不是没有 patch，请先修复或重建该子代理输出账本。",
+        patch_count=0,
+        blocked_count=1,
+        applier=opts.applier,
+        note=opts.note,
+        evidence_paths=[task.output_json, task.work_log_file],
+        load_errors=[load_error],
+        created_at=time.time(),
+    )
+
+
 @dataclass(frozen=True)
 class _PatchApplyRecordParams:
 
@@ -253,8 +258,6 @@ class _PatchApplyRecordParams:
     opts: PatchApplyOptions
 
 
-# LLM: _apply_patch_record 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 更新补丁记录对应的任务或运行状态，并保留既有字段语义；关键副作用: 会改动补丁文件、预演结果和应用报告，调用方依赖写入顺序和文件格式。
 def _apply_patch_record(params: _PatchApplyRecordParams):
     opts = params.opts
     service = params.service
@@ -270,8 +273,6 @@ def _apply_patch_record(params: _PatchApplyRecordParams):
     )
 
 
-# LLM: _write_patch_apply_report_json 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 写入补丁应用报告JSON的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动补丁文件、预演结果和应用报告，调用方依赖写入顺序和文件格式。
 def _write_patch_apply_report_json(manager, report: PatchApplyReport) -> None:
     payload = {
         "generated_at": report.generated_at,

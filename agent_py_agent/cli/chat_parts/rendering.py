@@ -1,5 +1,3 @@
-# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
-# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
 
 from __future__ import annotations
 
@@ -45,15 +43,11 @@ _TUI_STREAM_SINK: Callable[[str], None] | None = None
 _TUI_STREAM_FINISH: Callable[[], None] | None = None
 
 
-# LLM: set_tui_output_sink 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def set_tui_output_sink(sink: Callable[[str], None] | None) -> None:
     global _TUI_OUTPUT_SINK
     _TUI_OUTPUT_SINK = sink
 
 
-# LLM: set_tui_stream_sink 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def set_tui_stream_sink(
     sink: Callable[[str], None] | None,
     *,
@@ -64,15 +58,11 @@ def set_tui_stream_sink(
     _TUI_STREAM_FINISH = finish
 
 
-# LLM: finish_tui_stream 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def finish_tui_stream() -> None:
     if _TUI_STREAM_FINISH is not None:
         _TUI_STREAM_FINISH()
 
 
-# LLM: _cprint 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _cprint(text: str) -> None:
     if _TUI_OUTPUT_SINK is not None:
         _TUI_OUTPUT_SINK(text + "\n")
@@ -84,8 +74,6 @@ def _cprint(text: str) -> None:
         print(text if supports_ansi() else strip_ansi(text))
 
 
-# LLM: _write_output_text 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
 def _write_output_text(text: str) -> None:
     if _TUI_OUTPUT_SINK is not None:
         _TUI_OUTPUT_SINK(text)
@@ -94,8 +82,6 @@ def _write_output_text(text: str) -> None:
     sys.stdout.flush()
 
 
-# LLM: _write_stream_text 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
 def _write_stream_text(text: str) -> None:
     if _TUI_STREAM_SINK is not None:
         _TUI_STREAM_SINK(text)
@@ -103,8 +89,6 @@ def _write_stream_text(text: str) -> None:
     _write_output_text(text)
 
 
-# LLM: startup_banner 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def startup_banner(agent_name: str, *, use_gateway: bool) -> str:
 
     mode = "gateway client" if use_gateway else "local runtime"
@@ -119,16 +103,12 @@ def startup_banner(agent_name: str, *, use_gateway: bool) -> str:
 
 
 # Backward-compat wrapper: original signature was _tui_print_banner(agent, use_gateway)
-# LLM: _tui_print_banner 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def _tui_print_banner(agent, use_gateway: bool) -> None:
     text = startup_banner(agent.config.agent_name, use_gateway=use_gateway)
     for line in text.splitlines():
         _cprint(line)
 
 
-# LLM: terminal_rule 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def terminal_rule(char: str = "─", *, fallback: int = 119) -> str:
 
     width = max(20, shutil.get_terminal_size(fallback=(fallback, 24)).columns)

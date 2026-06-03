@@ -1,5 +1,3 @@
-# LLM: Session runtime module; keep conversation state and persistence contracts stable.
-# 模块用途: 维护会话运行时状态、上下文和持久化边界。
 
 from __future__ import annotations
 

@@ -8,24 +8,18 @@ from pathlib import Path
 from agent_py_agent.agent.backend import BaseBackend, ModelResponse
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.subagents.static_site_validator import run_static_site_check
+from agent_py_agent.agent.subagents.static_site import run_static_site_check
 
 
-# LLM: NaturalFurnitureRootBackend simulates only the top-level model choices from a plain user request.
-# 类用途: 测试 root 只收到自然语言任务后，是否通过工具派小傻妞并触发子代理执行，而不是测试直接创建子代理。
 class NaturalFurnitureRootBackend(BaseBackend):
     name = "natural_furniture_root_backend"
 
-    # LLM: __init__ stores the product directory used by root tool-call payloads.
-    # 函数用途: 保存本轮 E2E 的站点输出目录，后续 create_subagents 会把它作为真实写入根。
     def __init__(self, site_dir: Path):
         self.site_dir = site_dir
         self.prompts: list[str] = []
         self.root_prompts: list[str] = []
         self.runner = NaturalFurnitureRunnerBackend(site_dir)
 
-    # LLM: generate drives root through create -> dispatch -> final using model-like tool calls.
-    # 函数用途: 模拟主代理模型逐轮调用工具；用户 prompt 本身保持自然语言，不写内部术语。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.prompts.append(prompt)
         if "# SubAgent Runner Task" in prompt:
@@ -40,8 +34,6 @@ class NaturalFurnitureRootBackend(BaseBackend):
         assert "dispatch_subagents" in prompt
         return ModelResponse(text="小傻妞团队已交付高端现代家具品牌首页，产物和验收线索都已写入。", backend=self.name)
 
-    # LLM: _create_payload keeps root's delegation contract explicit and refs-first.
-    # 函数用途: 构造主代理派给第一层小傻妞的任务，带真实产物目录，不要求用户懂内部参数。
     def _create_payload(self) -> dict[str, object]:
         return {
             "tool": "create_subagents",
@@ -66,21 +58,15 @@ class NaturalFurnitureRootBackend(BaseBackend):
         }
 
 
-# LLM: NaturalFurnitureRunnerBackend simulates child and grandchild model behavior behind dispatch.
-# 类用途: 让小傻妞自己派小小傻妞、叶子节点自己写文件，主测试不直接操作下级 run。
 class NaturalFurnitureRunnerBackend(BaseBackend):
     name = "natural_furniture_runner_backend"
 
-    # LLM: __init__ stores target refs and per-role call counters for nested runner calls.
-    # 函数用途: 保存 E2E 产物路径，并区分 coordinator 与 leaf 的多轮模型调用。
     def __init__(self, site_dir: Path):
         self.site_dir = site_dir
         self.prompts: list[str] = []
         self.coordinator_calls = 0
         self.leaf_calls = 0
 
-    # LLM: generate routes each runner prompt by the current agent header, not by parent summaries.
-    # 函数用途: 根据执行上下文中的 `- agent:` 行判断当前是哪一层，避免从工具输出文本误判角色。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.prompts.append(prompt)
         agent_name = _agent_name_from_prompt(prompt)
@@ -90,8 +76,6 @@ class NaturalFurnitureRunnerBackend(BaseBackend):
             return self._coordinator_response()
         raise AssertionError(f"unknown runner agent: {agent_name}")
 
-    # LLM: _coordinator_response creates a grandchild, dispatches it, then reports refs.
-    # 函数用途: 验证 coordinator 有完整工具能力，既能派工也能触发自己下级执行。
     def _coordinator_response(self) -> ModelResponse:
         self.coordinator_calls += 1
         if self.coordinator_calls == 1:
@@ -100,16 +84,12 @@ class NaturalFurnitureRunnerBackend(BaseBackend):
             return ModelResponse(text=_tool_call(_child_dispatch_payload()), backend=self.name)
         return ModelResponse(text=_subagent_result("小傻妞已让小小傻妞完成 index.html，并完成本地验收。"), backend=self.name)
 
-    # LLM: _leaf_response writes the HTML on the first turn and reports structured evidence on the second.
-    # 函数用途: 验证叶子代理能独立写产物，不需要主代理代写或直接干预。
     def _leaf_response(self) -> ModelResponse:
         self.leaf_calls += 1
         if self.leaf_calls == 1:
             return ModelResponse(text=_tool_call(self._write_html_payload()), backend=self.name)
         return ModelResponse(text=_subagent_result(f"小小傻妞已写入 {self.site_dir / 'index.html'}。"), backend=self.name)
 
-    # LLM: _schedule_leaf_payload passes a concrete write root to the next layer.
-    # 函数用途: 构造小傻妞派给小小傻妞的任务，保留用户原始文件和交互约束。
     def _schedule_leaf_payload(self) -> dict[str, object]:
         return {
             "tool": "schedule_child_subagents",
@@ -129,8 +109,6 @@ class NaturalFurnitureRunnerBackend(BaseBackend):
             ],
         }
 
-    # LLM: _write_html_payload is the leaf's real product write tool call.
-    # 函数用途: 生成单文件 HTML 内容，包含真实锚点和按钮动作，便于静态验收发现坏链接。
     def _write_html_payload(self) -> dict[str, object]:
         return {
             "tool": "write_file",
@@ -139,26 +117,18 @@ class NaturalFurnitureRunnerBackend(BaseBackend):
         }
 
 
-# LLM: _tool_call renders one JSON tool call block exactly as the runtime parser expects.
-# 函数用途: 把测试模型的结构化工具参数包装成 [TOOL_CALL] 文本。
 def _tool_call(payload: dict[str, object]) -> str:
     return "[TOOL_CALL]\n" + json.dumps(payload, ensure_ascii=False) + "\n[/TOOL_CALL]"
 
 
-# LLM: _root_dispatch_payload asks root to execute the direct child through the normal dispatch tool.
-# 函数用途: 构造主代理第二轮工具调用，只推进自己创建的直接 child。
 def _root_dispatch_payload() -> dict[str, object]:
     return {"tool": "dispatch_subagents", "dry_run": False, "max_runners": 1}
 
 
-# LLM: _child_dispatch_payload asks a coordinator to execute its own direct child.
-# 函数用途: 构造小傻妞第二轮工具调用，验证下级派工由当前父节点继续推进。
 def _child_dispatch_payload() -> dict[str, object]:
     return {"tool": "dispatch_subagents", "dry_run": False, "max_runners": 1}
 
 
-# LLM: _subagent_result produces a minimal accepted runner result with refs-friendly evidence.
-# 函数用途: 返回 runner 结构化结果块，让 dispatch/验收流程按机器字段推进。
 def _subagent_result(summary: str) -> str:
     return (
         "[SUBAGENT_RESULT]\n"
@@ -194,8 +164,6 @@ def _subagent_result(summary: str) -> str:
     )
 
 
-# LLM: _agent_name_from_prompt reads only the execution-context header for current runner identity.
-# 函数用途: 从 prompt 的 `- agent:` 行提取当前 runner 名称，避免从下级工具结果中误判。
 def _agent_name_from_prompt(prompt: str) -> str:
     for line in prompt.splitlines():
         if line.startswith("- agent:"):
@@ -207,8 +175,6 @@ def _agent_name_from_prompt(prompt: str) -> str:
     return ""
 
 
-# LLM: _furniture_html returns a compact but realistic single-file site for static QA.
-# 函数用途: 提供测试用 HTML 产物，包含完整结构、内联 CSS、真实锚点和按钮交互。
 def _furniture_html() -> str:
     return """<!doctype html>
 <html lang="zh-CN">
@@ -245,8 +211,6 @@ button.secondary{background:transparent;color:#171717}
 """
 
 
-# LLM: test_natural_language_root_drives_child_and_grandchild_e2e is the user-style smoke path.
-# 函数用途: 用户只发自然语言任务，验证 root 派小傻妞、小傻妞派小小傻妞，叶子节点写产物并通过本地 QA。
 def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -> None:
     site_dir = tmp_path / "site"
     site_dir.mkdir()
@@ -290,8 +254,6 @@ def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -
     assert site_check.validation_result["ok"] is True
 
 
-# LLM: _wait_for_subagent_records accounts for create_subagents background auto-start.
-# 函数用途: 等待后台子代理线程短暂完成，避免测试重新假设 create_subagents 同步阻塞。
 def _wait_for_subagent_records(agent: SimpleAgent, *, expected: int, artifact_path: Path) -> list:
     deadline = time.monotonic() + 10.0
     records = list(agent.subagents.list_runs())

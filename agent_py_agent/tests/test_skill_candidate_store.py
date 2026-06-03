@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 
 
-# LLM: skill candidates are learning suggestions, not automatic new capabilities.
-# 函数用途: 验证 owner 私有 skill 候选只进入 drafts 账本，不会安装为正式 skill。
 def test_append_owner_skill_candidate_writes_draft_only(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.skill_candidates import (

@@ -159,7 +159,7 @@ def test_unknown_error_downgrades_to_unknown_error():
     error = ToolError.from_payload({"error_type": "ALIEN_SIGNAL", "message": "strange failure"})
 
     assert error.error_type == "UNKNOWN_ERROR"
-    assert error.retry_hint == "stop_and_record_diagnostic"
+    assert error.retry_hint == "report_blocker"
     assert error.retryable is False
 
 

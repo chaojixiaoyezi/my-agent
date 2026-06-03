@@ -3,8 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 
-# LLM: global indexes are rebuildable maps, not authoritative task state.
-# 函数用途: 验证 owner/task 轻量索引只写引用，真实状态仍在 owner/task 目录。
 def test_global_index_records_owner_and_task_refs(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_indexes import (
         TaskIndexRef,
@@ -35,8 +33,6 @@ def test_global_index_records_owner_and_task_refs(tmp_path: Path):
     assert home.global_index_active_tasks_jsonl.exists()
 
 
-# LLM: latest global task refs should collapse append-only history by task identity.
-# 函数用途: 验证全局索引读取时只返回同一 owner/task 的最新记录，旧悬空记录不会污染恢复和 doctor。
 def test_global_index_latest_refs_ignore_stale_duplicate_paths(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_indexes import (
         TaskIndexRef,
@@ -62,3 +58,26 @@ def test_global_index_latest_refs_ignore_stale_duplicate_paths(tmp_path: Path):
     assert tasks[0]["status"] == "done"
     assert tasks[0]["task_path"] == str(current)
     assert dangling_index_refs(home) == []
+
+
+def test_global_index_latest_task_refs_report_corrupt_rows(tmp_path: Path):
+    from agent_py_agent.agent.user_space.home_indexes import (
+        TaskIndexRef,
+        latest_task_refs_report,
+        register_task_ref,
+    )
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, ensure_owner_home
+
+    home = ensure_my_agent_home(tmp_path)
+    owner = ensure_owner_home(home.root, OwnerIdentity.provider_user("feishu", "ou_3"))
+    home.global_index_active_tasks_jsonl.write_text("{bad-json}\n", encoding="utf-8")
+    task_path = owner.tasks_dir / "task_1"
+    task_path.mkdir(parents=True)
+    register_task_ref(home, TaskIndexRef(owner_id=owner.owner_id, task_id="task_1", task_path=task_path, status="running", title="新标题"))
+
+    report = latest_task_refs_report(home, owner_id=owner.owner_id)
+
+    assert [row["task_id"] for row in report.records] == ["task_1"]
+    assert report.load_errors
+    assert report.load_errors[0]["context"] == "home_indexes.active_tasks"

@@ -1,20 +1,14 @@
 """Timeout and limit config normalization services."""
 
-# LLM: Timeout-related numeric fields are separated so runtime config normalization stays below code-size risk.
-# 模块用途: 归一化超时、扫描数量和默认展示数量等整数配置。
 
 from __future__ import annotations
 
 from ._coercion import CoercionService
 
 
-# LLM: TimeoutFieldsService centralizes runtime integer limits that should be configurable.
-# 类用途: 负责把超时、扫描限制和展示数量配置归一成安全整数。
 class TimeoutFieldsService:
     """Normalize timeout-related config fields."""
 
-    # LLM: TimeoutFieldsService.normalize belongs to the config pipeline; update tests when adding fields.
-    # 函数用途: 归一化超时和数量类配置，并把非法值回退到 AgentConfig 默认值。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)

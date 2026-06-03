@@ -32,8 +32,6 @@ def test_task_acceptance_ignores_open_session_for_accepted_target(tmp_path):
     assert report.artifacts[0].ok is True
 
 
-# LLM: _write_valid_workbook creates the accepted target that an open session must not invalidate.
-# 函数用途: 生成满足表格验收的 workbook，并返回最终产物路径。
 def _write_valid_workbook(workspace: Path) -> Path:
     from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
     write_xlsx_fixture(workspace, 
@@ -48,16 +46,12 @@ def _write_valid_workbook(workspace: Path) -> Path:
     return workspace / "outputs/table_report/table_report.xlsx"
 
 
-# LLM: _write_expected_artifacts writes the structured artifact contract used by the acceptance service.
-# 函数用途: 生成 expected_artifacts.json；测试不从自然语言任务说明推断验收条件。
 def _write_expected_artifacts(tmp_path: Path) -> Path:
     expected = tmp_path / "expected_artifacts.json"
     expected.write_text(json.dumps({"artifacts": [_workbook_artifact_contract()]}), encoding="utf-8")
     return expected
 
 
-# LLM: _workbook_artifact_contract keeps workbook requirements machine-readable in one reusable fixture.
-# 函数用途: 返回 xlsx 产物验收合同，包含必需列和最小 sheet 数。
 def _workbook_artifact_contract() -> dict[str, object]:
     return {
         "artifact_id": "table_report_workbook",

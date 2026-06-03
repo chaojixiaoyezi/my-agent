@@ -1,8 +1,4 @@
-"""Tests for agent_core/parameters.py: parameter parsing, defaults, type coercion, and boundary values.
-
-给人看的解释：
-测试参数解析模块：工具参数解析、默认值、类型转换、边界值处理。
-"""
+"""Tests for tool parameter parsing, defaults, type coercion, and boundary values."""
 import tempfile
 from pathlib import Path
 
@@ -14,8 +10,8 @@ from agent_py_agent.agent.agent_core.parameters import (
     _one_shot_tool_call_key,
     _positive_int,
     _sleep_with_stop,
-    _string_list,
 )
+from agent_py_agent.agent.common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 
 
 class TestOneShotToolCallKey:
@@ -56,42 +52,42 @@ class TestStringList:
 
     def test_string_list_from_list(self):
         """验证从列表解析。"""
-        result = _string_list(["item1", "item2", "item3"])
+        result = string_list(["item1", "item2", "item3"], TOOL_TEXT_LIST_OPTIONS)
         assert result == ["item1", "item2", "item3"]
 
     def test_string_list_from_tuple(self):
         """验证从元组解析。"""
-        result = _string_list(("a", "b", "c"))
+        result = string_list(("a", "b", "c"), TOOL_TEXT_LIST_OPTIONS)
         assert result == ["a", "b", "c"]
 
     def test_string_list_from_json_string(self):
         """验证从 JSON 数组字符串解析。"""
-        result = _string_list('["read", "write"]')
+        result = string_list('["read", "write"]', TOOL_TEXT_LIST_OPTIONS)
         assert result == ["read", "write"]
 
     def test_string_list_from_newline_string(self):
         """验证从多行文本解析。"""
-        result = _string_list("item1\nitem2\nitem3")
+        result = string_list("item1\nitem2\nitem3", TOOL_TEXT_LIST_OPTIONS)
         assert result == ["item1", "item2", "item3"]
 
     def test_string_list_from_comma_string(self):
         """验证从逗号分隔字符串解析。"""
-        result = _string_list("a, b, c")
+        result = string_list("a, b, c", TOOL_TEXT_LIST_OPTIONS)
         assert result == ["a", "b", "c"]
 
     def test_string_list_from_single_value(self):
         """验证从单个值解析。"""
-        result = _string_list("single")
+        result = string_list("single", TOOL_TEXT_LIST_OPTIONS)
         assert result == ["single"]
 
     def test_string_list_from_none(self):
         """验证 None 返回空列表。"""
-        result = _string_list(None)
+        result = string_list(None, TOOL_TEXT_LIST_OPTIONS)
         assert result == []
 
     def test_string_list_strips_whitespace(self):
         """验证去除空白字符。"""
-        result = _string_list(["  item1  ", "  item2  "])
+        result = string_list(["  item1  ", "  item2  "], TOOL_TEXT_LIST_OPTIONS)
         assert result == ["item1", "item2"]
 
 

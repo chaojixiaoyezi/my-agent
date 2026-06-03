@@ -1,5 +1,3 @@
-# LLM: Compatibility facade for runtime capability config patching and hot reload.
-# 模块用途: 汇总 capability_config 运行期补丁、版本、快照和热加载公开入口。
 
 from __future__ import annotations
 

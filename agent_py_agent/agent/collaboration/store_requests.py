@@ -1,5 +1,3 @@
-# LLM: Request ledger operations for targeted collaboration.
-# 模块用途: 创建、更新和查询协作请求，支持多目标响应覆盖率。
 
 from __future__ import annotations
 
@@ -18,7 +16,7 @@ from .request_status import (
     request_has_required_evidence,
 )
 from .store_cases import CollaborationCaseStore
-from .store_common import dict_items, read_jsonl, strings
+from .store_common import dict_items, read_jsonl_report, strings
 from .store_common import now as current_time
 
 
@@ -31,19 +29,28 @@ class _CoveredStatusRequest:
     kwargs: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _RequestTargetResolution:
+    targets: tuple[str, ...]
+    load_error: dict[str, Any] | None = None
+
+
 class CollaborationRequestStore(CollaborationCaseStore):
     def request_collaboration(self, request_data: dict) -> CollaborationRequest:
         case_id = str(request_data.get("case_id") or "")
         case = self.load_case(case_id)
         required = strings(request_data.get("required_capabilities"))
         request_params = {"target_agent_ids": request_data.get("target_agent_ids") or [], "requester_agent_id": request_data.get("requester_agent_id", "")}
-        targets = self._request_targets(required, request_params)
+        target_resolution = self._request_targets_report(required, request_params)
         current = current_time(request_data.get("now"))
+        metadata = dict(request_data.get("metadata") or {})
+        if target_resolution.load_error:
+            metadata["capability_roster_load_error"] = target_resolution.load_error
         request = CollaborationRequest(
             request_id=new_request_id(),
             case_id=case.case_id,
             requester_agent_id=str(request_data.get("requester_agent_id") or ""),
-            target_agent_ids=targets,
+            target_agent_ids=target_resolution.targets,
             required_capabilities=required,
             question=str(request_data.get("question") or ""),
             entities=request_data.get("entities") or case.entities,
@@ -58,7 +65,7 @@ class CollaborationRequestStore(CollaborationCaseStore):
             deadline_at=float(request_data.get("deadline_at") or 0.0),
             created_at=current,
             updated_at=current,
-            metadata=request_data.get("metadata") or {},
+            metadata=metadata,
         )
         append_jsonl(self._requests_path(case_id), request.to_dict(), sort_keys=True)
         self._add_request_participants(case_id, request, current)
@@ -86,34 +93,57 @@ class CollaborationRequestStore(CollaborationCaseStore):
         return updated
 
     def case_requests(self, case_id: str) -> list[CollaborationRequest]:
+        requests, _load_errors = self.case_requests_report(case_id)
+        return requests
+
+    def case_requests_report(self, case_id: str) -> tuple[list[CollaborationRequest], list[dict[str, Any]]]:
         requests: dict[str, CollaborationRequest] = {}
-        for row in read_jsonl(self._requests_path(case_id)):
+        report = read_jsonl_report(self._requests_path(case_id), context="collaboration.requests.read")
+        for row in report.rows:
             request = CollaborationRequest.from_dict(row)
             if request.request_id:
                 requests[request.request_id] = request
-        return list(requests.values())
+        return list(requests.values()), report.load_errors
 
     def case_request_history(self, case_id: str) -> list[CollaborationRequest]:
-        return [CollaborationRequest.from_dict(row) for row in read_jsonl(self._requests_path(case_id))]
+        requests, _load_errors = self.case_request_history_report(case_id)
+        return requests
+
+    def case_request_history_report(self, case_id: str) -> tuple[list[CollaborationRequest], list[dict[str, Any]]]:
+        report = read_jsonl_report(self._requests_path(case_id), context="collaboration.requests.read")
+        return [CollaborationRequest.from_dict(row) for row in report.rows], report.load_errors
 
     def pending_requests_for_agent(self, *, agent_id: str, agent_name: str = "", agent_role: str = "", limit: int = 10) -> list[dict[str, Any]]:
+        requests, _load_errors = self.pending_requests_for_agent_report(
+            agent_id=agent_id,
+            agent_name=agent_name,
+            agent_role=agent_role,
+            limit=limit,
+        )
+        return requests
+
+    def pending_requests_for_agent_report(self, *, agent_id: str, agent_name: str = "", agent_role: str = "", limit: int = 10) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         identities = self.agent_identity_aliases((agent_id, agent_name, agent_role))
-        rows = self._pending_request_rows_for_identities(identities) if identities else []
+        rows, load_errors = self._pending_request_rows_for_identities_report(identities) if identities else ([], [])
         rows.sort(key=lambda item: (str(item.get("priority") or ""), float(item.get("created_at") or 0.0)))
-        return rows if limit <= 0 else rows[:limit]
+        return (rows if limit <= 0 else rows[:limit]), load_errors
 
     def _request_targets(self, required: tuple[str, ...], kwargs: dict[str, Any]) -> tuple[str, ...]:
+        return self._request_targets_report(required, kwargs).targets
+
+    def _request_targets_report(self, required: tuple[str, ...], kwargs: dict[str, Any]) -> _RequestTargetResolution:
         targets = strings(kwargs.get("target_agent_ids"))
         if targets:
-            return targets
-        return tuple(
-            item.agent_id
-            for item in self.match_agents(
-                required_capabilities=required,
-                exclude_agent_id=str(kwargs.get("requester_agent_id") or ""),
-                limit=20,
-            )
+            return _RequestTargetResolution(targets)
+        matches, load_error = self.match_agents_report(
+            required_capabilities=required,
+            exclude_agent_id=str(kwargs.get("requester_agent_id") or ""),
+            limit=20,
         )
+        return _RequestTargetResolution(tuple(
+            item.agent_id
+            for item in matches
+        ), load_error)
 
     def _add_request_participants(self, case_id: str, request: CollaborationRequest, current: float) -> None:
         for agent_id in request.target_agent_ids:
@@ -171,18 +201,31 @@ class CollaborationRequestStore(CollaborationCaseStore):
         self.append_decision(CaseDecision(decision_id=new_decision_id(), case_id=case_id, decision_type="collaboration_request_status_update", summary=summary, created_at=current_time(kwargs.get("now")), metadata={"request_id": request.request_id, "request_status": request.status, "actor_agent_id": str(kwargs.get("actor_agent_id") or ""), **(kwargs.get("metadata") or {})}))
 
     def _pending_request_rows_for_identities(self, identities: set[str]) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        for case in self.list_cases(status="open"):
-            rows.extend(self._pending_rows_for_case(case, identities))
+        rows, _load_errors = self._pending_request_rows_for_identities_report(identities)
         return rows
 
+    def _pending_request_rows_for_identities_report(self, identities: set[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        rows: list[dict[str, Any]] = []
+        load_errors: list[dict[str, Any]] = []
+        for case in self.list_cases(status="open"):
+            case_rows, case_errors = self._pending_rows_for_case_report(case, identities)
+            rows.extend(case_rows)
+            load_errors.extend(case_errors)
+        return rows, load_errors
+
     def _pending_rows_for_case(self, case, identities: set[str]) -> list[dict[str, Any]]:
-        evidence_sources = evidence_sources_by_request(self.case_evidence(case.case_id), aliases=self.agent_identity_aliases)
+        rows, _load_errors = self._pending_rows_for_case_report(case, identities)
+        return rows
+
+    def _pending_rows_for_case_report(self, case, identities: set[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        evidence, evidence_errors = self.case_evidence_report(case.case_id)
+        requests, request_errors = self.case_requests_report(case.case_id)
+        evidence_sources = evidence_sources_by_request(evidence, aliases=self.agent_identity_aliases)
         return [
             pending_request_row(case, request)
-            for request in self.case_requests(case.case_id)
+            for request in requests
             if self._request_waits_for_identity(request, identities, evidence_sources)
-        ]
+        ], [*evidence_errors, *request_errors]
 
     def _request_waits_for_identity(self, request: CollaborationRequest, identities: set[str], evidence_sources: dict[str, set[str]]) -> bool:
         target_aliases = self.agent_identity_aliases(request.target_agent_ids)

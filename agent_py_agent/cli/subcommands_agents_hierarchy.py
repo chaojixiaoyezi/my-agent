@@ -1,5 +1,3 @@
-# LLM: CLI registration helpers for subagent hierarchy and leadership recovery commands.
-# 模块用途: 注册多层 subagent 创建、恢复树查询和 coordinator 领导权恢复命令。
 
 from __future__ import annotations
 
@@ -12,8 +10,6 @@ from .subagents import (
 )
 
 
-# LLM: _add_capability_config_arg mirrors the shared CLI option without importing the crowded parent module.
-# 函数用途: 给需要能力路由配置的 hierarchy/recovery 子命令添加统一参数。
 def _add_capability_config_arg(p) -> None:
     p.add_argument(
         "--capability-config",
@@ -22,8 +18,6 @@ def _add_capability_config_arg(p) -> None:
     )
 
 
-# LLM: add_agents_leadership_subcommands keeps batch recovery planning isolated.
-# 函数用途: 注册批量 coordinator 领导权恢复计划和显式 child 子集重挂命令。
 def add_agents_leadership_subcommands(sub):
     recovery_plan = sub.add_parser(
         "subagents-leadership-recovery-plan",
@@ -53,8 +47,6 @@ def add_agents_leadership_subcommands(sub):
     recovery_apply.set_defaults(func=cmd_subagents_leadership_recovery_apply, apply=False)
 
 
-# LLM: add_agents_hierarchy_subcommands registers tree creation and recovery-tree inspection.
-# 函数用途: 注册层级创建和恢复树查询命令，避免基础 subcommand 注册函数继续增长。
 def add_agents_hierarchy_subcommands(sub):
     hierarchy = sub.add_parser("subagents-hierarchy", help="Preview or create child/grandchild subagent runs")
     hierarchy.add_argument("run_id", help="父级 subagent 运行 ID")

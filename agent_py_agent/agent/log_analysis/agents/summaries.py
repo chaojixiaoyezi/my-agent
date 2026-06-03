@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 from __future__ import annotations
 
@@ -57,8 +55,6 @@ EVIDENCE_REF_FIELDS = (
 )
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 CaseSummary 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 CaseSummary 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class CaseSummary:
     """Small summary safe for parent prompts."""
@@ -67,8 +63,6 @@ class CaseSummary:
     evidence: list[dict[str, Any] | str] = field(default_factory=list)
     route: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
         return {
             "case": dict(self.case),
@@ -77,16 +71,12 @@ class CaseSummary:
         }
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _get 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 get 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _get(source: Any, key: str, default: Any = None) -> Any:
     if isinstance(source, Mapping):
         return source.get(key, default)
     return getattr(source, key, default)
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _to_mapping 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 把 to mapping 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
 def _to_mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value
@@ -98,8 +88,6 @@ def _to_mapping(value: Any) -> Mapping[str, Any]:
     return {}
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _items 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 items 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _items(source: Any) -> list[Any]:
     if source is None:
         return []
@@ -111,8 +99,6 @@ def _items(source: Any) -> list[Any]:
         return [source]
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _compact_text 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 compact text 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _compact_text(value: Any, *, limit: int = 220) -> Any:
     if value is None:
         return None
@@ -124,8 +110,6 @@ def _compact_text(value: Any, *, limit: int = 220) -> Any:
     return text[: limit - 3].rstrip() + "..."
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _compact_list 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 compact list 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _compact_list(value: Any, *, limit: int = 8) -> list[Any]:
     output: list[Any] = []
     for item in _items(value)[:limit]:
@@ -133,16 +117,12 @@ def _compact_list(value: Any, *, limit: int = 8) -> list[Any]:
     return output
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _append_compact_item 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 写入或登记 append compact item 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_compact_item(output: list[Any], item: Any, *, limit: int) -> None:
     compact = _compact_mapping(item, limit=limit) if isinstance(item, Mapping) else _compact_text(item)
     if compact not in (None, ""):
         output.append(compact)
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _compact_mapping 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 compact mapping 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _compact_mapping(value: Mapping[str, Any], *, limit: int = 8) -> dict[str, Any]:
     output: dict[str, Any] = {}
     for key, item in list(value.items())[:limit]:
@@ -152,8 +132,6 @@ def _compact_mapping(value: Mapping[str, Any], *, limit: int = 8) -> dict[str, A
     return output
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _compact_value 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 compact value 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _compact_value(value: Any, *, limit: int = 8) -> Any:
     if isinstance(value, Mapping):
         return _compact_mapping(value, limit=limit)
@@ -162,8 +140,6 @@ def _compact_value(value: Any, *, limit: int = 8) -> Any:
     return _compact_text(value)
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _summarize_case_fields 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 summarize case fields 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _summarize_case_fields(case: Any) -> dict[str, Any]:
     output: dict[str, Any] = {}
     case_id = _get(case, "case_id") or _get(case, "id")
@@ -187,8 +163,6 @@ def _summarize_case_fields(case: Any) -> dict[str, Any]:
     return output
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _summarize_evidence 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 summarize evidence 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _summarize_evidence(evidence: Any) -> list[dict[str, Any] | str]:
     output: list[dict[str, Any] | str] = []
     seen: set[str] = set()
@@ -197,8 +171,6 @@ def _summarize_evidence(evidence: Any) -> list[dict[str, Any] | str]:
     return output
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _append_evidence_summary 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 写入或登记 append evidence summary 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_evidence_summary(output: list[dict[str, Any] | str], seen: set[str], item: Any) -> None:
     mapping = _to_mapping(item)
     if mapping:
@@ -207,8 +179,6 @@ def _append_evidence_summary(output: list[dict[str, Any] | str], seen: set[str],
     _append_evidence_ref(output, seen, item)
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _append_evidence_ref 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 写入或登记 append evidence ref 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_evidence_ref(output: list[dict[str, Any] | str], seen: set[str], item: Any) -> None:
     refs = normalize_evidence_refs(item, limit=1)
     if refs and refs[0] not in seen:
@@ -216,8 +186,6 @@ def _append_evidence_ref(output: list[dict[str, Any] | str], seen: set[str], ite
         seen.add(refs[0])
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _append_compact_evidence 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 写入或登记 append compact evidence 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_compact_evidence(output: list[dict[str, Any] | str], seen: set[str], mapping: Mapping[str, Any]) -> None:
     compact = _compact_evidence_mapping(mapping)
     ref_key = json.dumps(compact, ensure_ascii=False, sort_keys=True)
@@ -226,8 +194,6 @@ def _append_compact_evidence(output: list[dict[str, Any] | str], seen: set[str],
         seen.add(ref_key)
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _compact_evidence_mapping 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 compact evidence mapping 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _compact_evidence_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
     compact = {
         field_name: _compact_text(mapping.get(field_name))
@@ -240,8 +206,6 @@ def _compact_evidence_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
     return compact
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _merge_evidence_metadata 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 merge evidence metadata 涉及的字段，让后续匹配和存储使用同一形态。
 def _merge_evidence_metadata(compact: dict[str, Any], metadata: Mapping[str, Any]) -> None:
     evidence_path = metadata.get("evidence_path") or metadata.get("path")
     if evidence_path and "path" not in compact:
@@ -251,8 +215,6 @@ def _merge_evidence_metadata(compact: dict[str, Any], metadata: Mapping[str, Any
         compact["sha256"] = _compact_text(sha256)
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _summarize_route 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 summarize route 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _summarize_route(route: Any) -> dict[str, Any]:
     if not route:
         return {}
@@ -265,8 +227,6 @@ def _summarize_route(route: Any) -> dict[str, Any]:
     return output
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 summarize_case 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 summarize case 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def summarize_case(case: Any) -> CaseSummary:
     """Build a compact case/evidence/route summary.
 
@@ -286,14 +246,10 @@ def summarize_case(case: Any) -> CaseSummary:
     )
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 render_case_summary 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 render case summary 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def render_case_summary(summary: CaseSummary | Mapping[str, Any]) -> str:
     payload = summary.to_dict() if isinstance(summary, CaseSummary) else dict(summary)
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 case_summary_for_prompt 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 case summary for prompt 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def case_summary_for_prompt(case: Any) -> str:
     return render_case_summary(summarize_case(case))

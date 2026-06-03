@@ -1,5 +1,3 @@
-# LLM: Runner rendering for context packs stays bounded and open-world.
-# 模块用途: 渲染 context_packs 的小字段、repair contract 摘要和开放扩展字段。
 
 from __future__ import annotations
 

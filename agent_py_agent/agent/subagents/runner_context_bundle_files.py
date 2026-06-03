@@ -1,5 +1,3 @@
-# LLM: Runner context bundle file persistence is separate from execution-context assembly.
-# 模块用途: 生成并写出 context_bundle.json / CONTEXT_BUNDLE.md，同时镜像到 agent run workspace。
 
 from __future__ import annotations
 
@@ -17,8 +15,6 @@ from .context_bundle import (
 from .models import SubAgentExecutionContext, SubAgentTask
 
 
-# LLM: execution_context_bundle embeds the gate report beside handoff facts for runner self-checks.
-# 函数用途: 生成执行上下文内的 context_bundle 字典，包含 bundle 正文和 gate 结果。
 def execution_context_bundle(task: SubAgentTask) -> dict[str, object]:
     bundle = build_context_bundle(task)
     gate = validate_context_bundle(bundle)
@@ -29,8 +25,6 @@ def execution_context_bundle(task: SubAgentTask) -> dict[str, object]:
     return payload
 
 
-# LLM: write_context_bundle_files persists the handoff bundle next to execution context files.
-# 函数用途: 写出 context_bundle.json 和 CONTEXT_BUNDLE.md；不改变任务状态，只补充可读交接物。
 def write_context_bundle_files(context: SubAgentExecutionContext) -> None:
     payload = dict(context.context_bundle or {})
     bundle_payload = {
@@ -50,8 +44,6 @@ def write_context_bundle_files(context: SubAgentExecutionContext) -> None:
     _mirror_context_bundle_to_run_workspace(context)
 
 
-# LLM: _mirror_context_bundle_to_run_workspace writes the bundle to the canonical agent_work_dir.
-# 函数用途: 把 context bundle 同步到当前 agent 工作目录，供接管和 compact 读取。
 def _mirror_context_bundle_to_run_workspace(context: SubAgentExecutionContext) -> None:
     refs = context.context_bundle.get("workspace_refs") if isinstance(context.context_bundle, dict) else {}
     if not isinstance(refs, dict):
@@ -67,16 +59,12 @@ def _mirror_context_bundle_to_run_workspace(context: SubAgentExecutionContext) -
     md_target.write_text(Path(context.context_bundle_file).read_text(encoding="utf-8"), encoding="utf-8")
 
 
-# LLM: build_context_bundle_from_payload keeps Markdown rendering decoupled from dataclass serialization.
-# 函数用途: 从已序列化字典恢复 ContextBundleV1；只用于同进程落盘渲染。
 def build_context_bundle_from_payload(payload: object):
     if not isinstance(payload, dict):
         payload = {}
     return ContextBundleV1(**payload)
 
 
-# LLM: context_gate_report_from_payload keeps gate Markdown rendering tolerant of missing future fields.
-# 函数用途: 从 gate 字典恢复 ContextGateReport；只用于 context bundle 文件渲染。
 def context_gate_report_from_payload(payload: object):
     if not isinstance(payload, dict):
         payload = {}

@@ -1,5 +1,3 @@
-# LLM: Role contracts normalize subagent roles before task persistence.
-# 模块用途: 固化 reporter/checker 角色别名、默认工具和验收边界，避免角色继续散落成自由字符串。
 
 from __future__ import annotations
 
@@ -40,8 +38,6 @@ REPORTER_ACCEPTANCE_CHECK = "Reporter output must cite evidence_refs or artifact
 CHECKER_ACCEPTANCE_CHECK = "Checker must verify reporter evidence refs and write concrete findings."
 
 
-# LLM: normalize_subagent_role is the single public role-name normalization helper.
-# 函数用途: 把 analyst/reviewer 等旧角色名映射到 reporter/checker，新自定义角色保持原样。
 def normalize_subagent_role(role: str) -> str:
     cleaned = str(role or "").strip().lower()
     if not cleaned:
@@ -49,8 +45,6 @@ def normalize_subagent_role(role: str) -> str:
     return ROLE_ALIASES.get(cleaned, cleaned)
 
 
-# LLM: apply_role_contract_to_create_params rewrites create-run bundles without changing call shape.
-# 函数用途: 在任务落盘前补齐角色名、角色模板默认工具、验收要求和最终收口质量门。
 def apply_role_contract_to_create_params(params: Any, role_template_dirs: object = None):
     original_role = str(getattr(params, "role", "") or "general")
     contract_role = normalize_subagent_role(original_role)
@@ -68,16 +62,12 @@ def apply_role_contract_to_create_params(params: Any, role_template_dirs: object
     return replace(params, role=stored_role, acceptance_checks=checks, allowed_tools=tools, quality_contract=quality_contract)
 
 
-# LLM: _fallback_template_role prevents unknown LLM-created roles from becoming empty agents.
-# 函数用途: reporter/checker 用专属旧契约；其他未命中模板的自由角色至少套 worker 模板获得基础读写能力。
 def _fallback_template_role(role: str) -> str | None:
     if role in {"", "general", REPORTER_ROLE, CHECKER_ROLE}:
         return None
     return "worker"
 
 
-# LLM: _stored_role preserves hierarchy subtype names while applying their matched template contracts.
-# 函数用途: child_coordinator/leaf_worker 这类角色仍保留在任务树里，但工具和验收按匹配到的模板生成。
 def _stored_role(original_role: str, contract_role: str, template_role: str, normalize_role: object) -> str:
     if not bool(normalize_role):
         return original_role
@@ -86,8 +76,6 @@ def _stored_role(original_role: str, contract_role: str, template_role: str, nor
     return contract_role
 
 
-# LLM: _acceptance_checks_for_role appends stable role-specific gates exactly once.
-# 函数用途: 根据角色和模板补默认验收项，并保留调用方已有验收要求。
 def _acceptance_checks_for_role(role: str, checks: object, template: RoleTemplate | None) -> list[str]:
     normalized = [str(item) for item in _list_value(checks) if item not in (None, "")]
     if role == REPORTER_ROLE:
@@ -102,8 +90,6 @@ def _acceptance_checks_for_role(role: str, checks: object, template: RoleTemplat
     return normalized
 
 
-# LLM: _allowed_tools_for_role applies template defaults without turning roles into zero-hand agents.
-# 函数用途: 按角色模板补默认工具；角色只追加职责，不拿掉基础读写、汇报和任务目录工作能力。
 def _allowed_tools_for_role(
     role: str,
     tools: object,
@@ -119,8 +105,6 @@ def _allowed_tools_for_role(
     return list(ROLE_BASE_TOOLS) if role else tools
 
 
-# LLM: _quality_contract_for_role attaches broad quality defaults without creating a closeout.
-# 函数用途: 让 reporter/checker/找茬/测试等角色拿到通用质量字段，不再生成额外收口门。
 def _quality_contract_for_role(role: str, value: object, template: RoleTemplate | None) -> object:
     if role not in {REPORTER_ROLE, CHECKER_ROLE} and template is None:
         return value
@@ -131,8 +115,6 @@ def _quality_contract_for_role(role: str, value: object, template: RoleTemplate 
     return QualityContract()
 
 
-# LLM: _list_value mirrors persistence normalization for local role-contract inputs.
-# 函数用途: 把 None、单值、tuple/list 统一成 list，便于追加默认项。
 def _list_value(value: object) -> list[object]:
     if value is None:
         return []
@@ -143,15 +125,11 @@ def _list_value(value: object) -> list[object]:
     return [value]
 
 
-# LLM: _append_once keeps generated acceptance checks stable across repeated saves.
-# 函数用途: 向列表追加默认项但避免重复。
 def _append_once(values: list[str], item: str) -> list[str]:
     if item not in values:
         values.append(item)
     return values
 
 
-# LLM: _stable_tools preserves caller/template order while removing duplicate tool grants.
-# 函数用途: 合并显式工具、模板工具和基础读写汇报工具，保持顺序稳定且不重复。
 def _stable_tools(values: list[str]) -> list[str]:
     return list(dict.fromkeys(item for item in values if item))

@@ -1,12 +1,19 @@
-# LLM: Small shared helpers for the collaboration ledger; keep them enum-free.
-# 模块用途: 提供协作账本内部通用的时间、JSONL 和开放字符串整理函数。
 
 from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from ..runtime_errors import runtime_error_report
+
+
+@dataclass(frozen=True)
+class JsonlReadReport:
+    rows: list[dict[str, Any]]
+    load_errors: list[dict[str, Any]]
 
 
 def strings(value: object) -> tuple[str, ...]:
@@ -25,16 +32,29 @@ def dict_items(value: object) -> tuple[dict[str, Any], ...]:
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     """Read tolerant JSONL rows; malformed rows do not drop the whole ledger."""
+    return read_jsonl_report(path, context="collaboration.jsonl").rows
+
+
+def read_jsonl_report(path: Path, *, context: str) -> JsonlReadReport:
+    """Read JSONL rows and report dirty rows without hiding valid rows."""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
+    except FileNotFoundError:
+        return JsonlReadReport([], [])
+    except OSError as exc:
+        return JsonlReadReport([], [_jsonl_error(exc, context, path=path)])
     rows: list[dict[str, Any]] = []
-    for line in lines:
-        row = _json_object_row(line)
+    errors: list[dict[str, Any]] = []
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        row, error = _json_object_row(line, context=context, path=path, line_number=line_number)
+        if error is not None:
+            errors.append(error)
+            continue
         if row is not None:
             rows.append(row)
-    return rows
+    return JsonlReadReport(rows, errors)
 
 
 def now(value: float | None = None) -> float:
@@ -50,9 +70,36 @@ def float_value(value: object) -> float:
         return 0.0
 
 
-def _json_object_row(line: str) -> dict[str, Any] | None:
+def _json_object_row(
+    line: str,
+    *,
+    context: str,
+    path: Path,
+    line_number: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     try:
         row = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-    return row if isinstance(row, dict) else None
+    except json.JSONDecodeError as exc:
+        return None, _jsonl_error(exc, context, path=path, line_number=line_number)
+    if not isinstance(row, dict):
+        return None, _jsonl_error(
+            ValueError(f"JSONL row is {type(row).__name__}, expected object"),
+            context,
+            path=path,
+            line_number=line_number,
+        )
+    return row, None
+
+
+def _jsonl_error(
+    exc: BaseException,
+    context: str,
+    *,
+    path: Path,
+    line_number: int | None = None,
+) -> dict[str, Any]:
+    report = runtime_error_report(exc, context=context)
+    report["path"] = str(path)
+    if line_number is not None:
+        report["line_number"] = line_number
+    return report

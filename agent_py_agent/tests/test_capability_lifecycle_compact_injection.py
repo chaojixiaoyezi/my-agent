@@ -66,8 +66,25 @@ def test_compact_injection_renders_context_and_continue_packet(tmp_path: Path) -
     assert "不要重复读 A 的 README" in rendered
 
 
-# LLM: resolver caches a run's chosen capability version but must not keep using revoked entries.
-# 函数用途: 验证同一 run 内版本解析可复用，安全撤销后缓存会失效并返回 revoked。
+def test_compact_injection_reports_corrupt_continue_packet(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.compact_injection import render_compact_injection
+    from agent_py_agent.agent.user_space.compact_layout import (
+        CompactPackageRequest,
+        ensure_compact_package,
+    )
+
+    paths = ensure_compact_package(tmp_path / "compact", CompactPackageRequest(1, "task"))
+    paths.compact_context_md.write_text("已经读完 A 项目。\n", encoding="utf-8")
+    paths.continue_packet_json.write_text("{bad-json", encoding="utf-8")
+
+    rendered = render_compact_injection(paths.package_dir)
+
+    assert "已经读完 A 项目" in rendered
+    assert "continue_packet 读取失败" in rendered
+    assert "compact_injection.continue_packet" in rendered
+    assert str(paths.continue_packet_json) in rendered
+
+
 def test_capability_resolver_pins_version_and_invalidates_revoked(tmp_path: Path) -> None:
     import json
 

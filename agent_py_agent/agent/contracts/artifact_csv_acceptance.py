@@ -1,5 +1,3 @@
-# LLM: CSV artifact acceptance validates table shape outside the artifact dispatcher.
-# 模块用途: 独立校验 CSV header、数据行阈值和列合同，让 artifact_acceptance 保持路由职责。
 
 from __future__ import annotations
 
@@ -10,8 +8,6 @@ from .artifact_acceptance_models import ArtifactAcceptanceReport, ArtifactFindin
 from .artifact_structured_contracts import csv_contract_findings
 
 
-# LLM: validate_csv_artifact checks CSV structure and declared column contracts.
-# 函数用途: 验证 CSV header、数据行阈值和 required_columns，返回统一 ArtifactAcceptanceReport。
 def validate_csv_artifact(
     path: Path,
     validation_contract: dict[str, object] | None = None,
@@ -48,8 +44,6 @@ def validate_csv_artifact(
     )
 
 
-# LLM: _csv_min_data_rows reads the structured minimum row threshold.
-# 函数用途: 将 validation_contract.min_data_rows 转成非负整数，非法值回退默认 1。
 def _csv_min_data_rows(validation_contract: dict[str, object]) -> int:
     try:
         return max(0, int(validation_contract.get("min_data_rows", 1)))
@@ -57,8 +51,6 @@ def _csv_min_data_rows(validation_contract: dict[str, object]) -> int:
         return 1
 
 
-# LLM: _report_with_finding builds a one-finding CSV report.
-# 函数用途: 避免 CSV 早失败分支重复构造 ArtifactAcceptanceReport。
 def _report_with_finding(path: Path, finding: ArtifactFinding) -> ArtifactAcceptanceReport:
     return ArtifactAcceptanceReport(ok=False, artifact_ref=str(path), artifact_kind="csv", findings=[finding])
 

@@ -27,8 +27,6 @@ from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
 )
 
 
-# LLM: This focused fixture creates one compactable run and one large tool-output artifact.
-# 函数用途: 为 compact apply/resume 验证 tool output artifact refs，避免测试依赖完整模型工具循环。
 def _write_run_with_large_tool_output(root: Path) -> str:
     _append_raw_tool_ref_event(root)
     _append_tool_ref_snapshot(root)
@@ -36,8 +34,6 @@ def _write_run_with_large_tool_output(root: Path) -> str:
     return _write_large_tool_output_artifact(root)
 
 
-# LLM: _append_raw_tool_ref_event writes the user-side archive fact for the compact scope.
-# 函数用途: 写入与大工具输出同 scope 的 raw 事件，供 compact plan 找到本次任务。
 def _append_raw_tool_ref_event(root: Path) -> None:
     append_raw_event(
         root,
@@ -59,8 +55,6 @@ def _append_raw_tool_ref_event(root: Path) -> None:
     )
 
 
-# LLM: _append_tool_ref_snapshot writes the recovery snapshot side of the compact fixture.
-# 函数用途: 写入包含目标和下一步的压缩快照，让 work_state 能回填恢复状态。
 def _append_tool_ref_snapshot(root: Path) -> None:
     snapshot = CompressionSnapshot(
         snapshot_id="snapshot-tool-ref-1",
@@ -78,8 +72,6 @@ def _append_tool_ref_snapshot(root: Path) -> None:
     write_compression_snapshot_file(root, snapshot)
 
 
-# LLM: _append_tool_ref_token_usage gives compact plan a token ledger for the same session.
-# 函数用途: 写入最小 token 账本，验证 compact apply 仍保留 token 恢复引用。
 def _append_tool_ref_token_usage(root: Path) -> None:
     append_session_token_usage(
         root,
@@ -94,8 +86,6 @@ def _append_tool_ref_token_usage(root: Path) -> None:
     )
 
 
-# LLM: _write_large_tool_output_artifact creates the scoped tool-output artifact under the real index path.
-# 函数用途: 调用正式 externalizer 写完整大输出和 index.jsonl，返回 artifact 引用路径。
 def _write_large_tool_output_artifact(root: Path) -> str:
     record = externalize_tool_output_record(
         ExternalizeToolOutputRequest(
@@ -113,8 +103,6 @@ def _write_large_tool_output_artifact(root: Path) -> str:
     return str(record["artifact_ref"])
 
 
-# LLM: compact apply should carry tool-output artifact refs as first-class restore facts.
-# 函数用途: 验证大工具输出 artifact 会进入 restore_refs、work_state 和 resume 推荐路径。
 def test_compact_apply_and_resume_include_scoped_tool_output_artifact_refs(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     artifact_ref = _write_run_with_large_tool_output(root)

@@ -10,6 +10,7 @@ import pytest
 
 from agent_py_agent.agent.settings.config import (
     HIDDEN_COMPAT_CONFIG_FIELDS,
+    INTERNAL_RUNTIME_CONFIG_FIELDS,
     AgentConfig,
     load_simple_yaml,
 )
@@ -373,7 +374,7 @@ class TestNormalizeAgentConfigIntegration:
             "memory_config_warnings",
             "subagent_workflow_config_warnings",
             "config_warnings",
-        }
+        } | INTERNAL_RUNTIME_CONFIG_FIELDS
         config_keys = set(AgentConfig.__dataclass_fields__) - internal_keys - HIDDEN_COMPAT_CONFIG_FIELDS
 
         assert sorted(config_keys - yaml_keys) == []

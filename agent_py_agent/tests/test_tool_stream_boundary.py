@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from agent_py_agent.agent.agent_core.tool_stream_boundary import (
+from agent_py_agent.agent.agent_core.tool_stream import (
     LongToolContentStreamAbort,
     MalformedToolProtocolStreamAbort,
     ToolBoundaryChunkFilter,
@@ -12,7 +12,7 @@ from agent_py_agent.agent.agent_core.tool_stream_boundary import (
     long_write_abort_response,
     malformed_tool_protocol_abort_response,
 )
-from agent_py_agent.agent.agent_core.tool_stream_boundary_models import (
+from agent_py_agent.agent.agent_core.tool_stream.models import (
     LongToolContentAbortPayload,
 )
 from agent_py_agent.agent.backends import ModelResponse

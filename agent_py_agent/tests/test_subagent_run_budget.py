@@ -12,8 +12,6 @@ from agent_py_agent.agent.subagents.run_budget import (
 )
 
 
-# LLM: _record_real_runner_result writes a bounded fake runner result through the public manager API.
-# 函数用途: 构造预算测试里的真实 runner 文件引用，避免直接拼 JSON 绕过生产写入路径。
 def _record_real_runner_result(manager: SubAgentManager, run_id: str) -> None:
     manager.record_runner_result(
         RecordRunnerResultParams(
@@ -80,6 +78,21 @@ def test_budget_report_skips_dry_runs_by_default(tmp_path: Path):
 
     assert report.totals["runs"] == 0
     assert report.totals["model_calls"] == 0
+
+
+def test_budget_report_reports_dirty_runner_result_json(tmp_path: Path):
+    """Bad runner_result.json should be visible instead of silently lowering totals."""
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(goal="dirty result", thought="bad json", plan=["run"])
+    Path(task.runner_result_json).write_text("{bad-runner-result", encoding="utf-8")
+
+    report = build_subagent_run_budget_report(SubagentRunBudgetRequest(manager=manager))
+
+    assert report.totals["runs"] == 0
+    (error,) = report.load_errors
+    assert error["context"] == "subagent.run_budget.runner_result"
+    assert error["run_id"] == task.id
+    assert error["path"] == task.runner_result_json
 
 
 def test_manager_writes_budget_report_files(tmp_path: Path):

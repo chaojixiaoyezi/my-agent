@@ -1,4 +1,4 @@
-"""分布式锁测试 - dispatch_lock.py 死锁检测、锁获取释放。"""
+"""分布式锁测试 - orchestration.dispatch.lock 死锁检测、锁获取释放。"""
 from __future__ import annotations
 
 import json
@@ -15,7 +15,7 @@ class TestDispatchWatchLock:
 
     def test_lock_acquire_success(self, tmp_path: Path):
         """成功获取锁。"""
-        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 
         lock_path = tmp_path / "dispatch.lock"
 
@@ -26,7 +26,7 @@ class TestDispatchWatchLock:
 
     def test_lock_release_on_context_exit(self, tmp_path: Path):
         """上下文退出时释放锁。"""
-        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 
         lock_path = tmp_path / "dispatch.lock"
 
@@ -39,7 +39,7 @@ class TestDispatchWatchLock:
 
     def test_lock_not_released_if_token_mismatch(self, tmp_path: Path):
         """token 不匹配时不释放锁。"""
-        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 
         lock_path = tmp_path / "dispatch.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,7 +61,7 @@ class TestDispatchWatchLock:
 
     def test_lock_already_exists_raises(self, tmp_path: Path):
         """锁已存在时抛出异常。"""
-        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 
         lock_path = tmp_path / "dispatch.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,7 +81,7 @@ class TestDispatchWatchLock:
 
     def test_force_lock_removes_existing(self, tmp_path: Path):
         """force=True 时移除已存在的锁。"""
-        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 
         lock_path = tmp_path / "dispatch.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,7 +94,7 @@ class TestDispatchWatchLock:
 
     def test_lock_with_different_tokens(self, tmp_path: Path):
         """两个锁实例使用不同的 token。"""
-        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 
         lock_path = tmp_path / "dispatch.lock"
 
@@ -109,7 +109,7 @@ class TestDispatchWatchLock:
 
     def test_lock_token_is_hex_uuid(self, tmp_path: Path):
         """token 是十六进制 UUID。"""
-        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 
         lock_path = tmp_path / "dispatch.lock"
         lock = _DispatchWatchLock(lock_path)
@@ -119,7 +119,7 @@ class TestDispatchWatchLock:
 
     def test_lock_pid_is_current_process(self, tmp_path: Path):
         """锁中记录的是当前进程 PID。"""
-        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 
         lock_path = tmp_path / "dispatch.lock"
 
@@ -130,7 +130,7 @@ class TestDispatchWatchLock:
 
 
     def test_stale_lock_with_dead_pid_is_replaced(self, tmp_path: Path):
-        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 
         lock_path = tmp_path / "dispatch.lock"
         lock_path.write_text(
@@ -138,7 +138,7 @@ class TestDispatchWatchLock:
             encoding="utf-8",
         )
 
-        with patch("agent_py_agent.agent.agent_core.dispatch_lock.is_pid_alive", return_value=False):
+        with patch("agent_py_agent.agent.agent_core.orchestration.dispatch.lock.is_pid_alive", return_value=False):
             with _DispatchWatchLock(lock_path) as lock:
                 payload = json.loads(lock_path.read_text(encoding="utf-8"))
 
@@ -146,7 +146,7 @@ class TestDispatchWatchLock:
         assert not lock_path.exists()
 
     def test_live_lock_is_still_rejected(self, tmp_path: Path):
-        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 
         lock_path = tmp_path / "dispatch.lock"
         lock_path.write_text(
@@ -154,7 +154,7 @@ class TestDispatchWatchLock:
             encoding="utf-8",
         )
 
-        with patch("agent_py_agent.agent.agent_core.dispatch_lock.is_pid_alive", return_value=True), \
+        with patch("agent_py_agent.agent.agent_core.orchestration.dispatch.lock.is_pid_alive", return_value=True), \
              pytest.raises(RuntimeError, match="dispatch watch lock"):
             _DispatchWatchLock(lock_path).__enter__()
 
@@ -164,7 +164,7 @@ class TestLockEdgeCases:
 
     def test_lock_exit_without_acquire(self, tmp_path: Path):
         """未获取锁时调用 exit 不做任何事。"""
-        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 
         lock_path = tmp_path / "dispatch.lock"
         lock = _DispatchWatchLock(lock_path)
@@ -175,7 +175,7 @@ class TestLockEdgeCases:
 
     def test_lock_exit_with_corrupted_file(self, tmp_path: Path):
         """锁文件损坏时的处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 
         lock_path = tmp_path / "dispatch.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -189,7 +189,7 @@ class TestLockEdgeCases:
 
     def test_lock_exit_when_file_deleted(self, tmp_path: Path):
         """退出时锁文件已被删除的处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 
         lock_path = tmp_path / "dispatch.lock"
         lock = _DispatchWatchLock(lock_path)

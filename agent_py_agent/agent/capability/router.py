@@ -1,5 +1,3 @@
-# LLM: Capability module; keep skill/tool routing contracts stable for planner and dispatch callers.
-# 模块用途: 描述和路由 agent 能力、技能、工具和执行条件。
 
 from __future__ import annotations
 
@@ -13,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..common.value_parsing import dedupe_strings
 from ..tools import ToolSpec
 from .config import CapabilityConfig
 from .skills import SkillCard, SkillRegistry
@@ -56,8 +55,6 @@ _PLAYWRIGHT_KEYWORDS = [
 ]
 
 
-# LLM: CapabilityCard is a 能力路由 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: 统一能力卡片。 `kind` 当前主要是 `skill` 或 `tool`，但刻意保留成普通字符串。 后续如果要加入 resource、mcp、remote_agent，也不用改 schema。
 @dataclass
 class CapabilityCard:
     """统一能力卡片。
@@ -79,8 +76,6 @@ class CapabilityCard:
     path: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: CapabilityCard.render_compact belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 渲染短卡片。 `max_chars=0` 表示不限制。这里先用字符数兜底，未来接 tokenizer 后 再替换成精确 token 控制。。
     def render_compact(self, *, max_chars: int = 0) -> str:
         """渲染短卡片。
 
@@ -105,8 +100,6 @@ class CapabilityCard:
         return text
 
 
-# LLM: CapabilitySearchHit is a 能力路由 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: 能力检索命中结果。
 @dataclass
 class CapabilitySearchHit:
     """能力检索命中结果。"""
@@ -116,16 +109,12 @@ class CapabilitySearchHit:
     reasons: list[str]
 
 
-# LLM: CapabilityRouter is a 能力路由 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: 统一能力路由器。 它不负责执行工具，也不负责展开 skill 正文。 它只回答一个问题：当前能力缺口最可能需要哪些 skill/tool card？
 class CapabilityRouter:
     """统一能力路由器。
 
     它不负责执行工具，也不负责展开 skill 正文。
     它只回答一个问题：当前能力缺口最可能需要哪些 skill/tool card？"""
 
-    # LLM: CapabilityRouter.__init__ belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 初始化实例依赖和字段，不应在构造阶段做难以回滚的重副作用；它是 CapabilityRouter 的方法，通常依赖实例字段。
     def __init__(
         self,
         *,
@@ -146,15 +135,11 @@ class CapabilityRouter:
         for card in extra_cards or []:
             self.register(card)
 
-    # LLM: CapabilityRouter.register belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 注册或覆盖一张能力卡。。
     def register(self, card: CapabilityCard) -> None:
         """注册或覆盖一张能力卡。"""
 
         self._cards[card.id] = card
 
-    # LLM: CapabilityRouter.cards belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 返回当前能力卡。。
     def cards(self, *, kinds: set[str] | None = None) -> list[CapabilityCard]:
         """返回当前能力卡。"""
 
@@ -163,8 +148,6 @@ class CapabilityRouter:
             return cards
         return [card for card in cards if card.kind in kinds]
 
-    # LLM: CapabilityRouter.search belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 检索候选能力。 `limit=None` 时使用配置里的 `capability_candidate_limit`。 `limit=0` 表示不限制。。
     def search(
         self,
         query: str,
@@ -188,8 +171,6 @@ class CapabilityRouter:
             return hits
         return hits[:effective_limit]
 
-    # LLM: CapabilityRouter.render_candidates belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 把候选能力渲染成给代理看的短说明。。
     def render_candidates(
         self,
         query: str,
@@ -209,8 +190,6 @@ class CapabilityRouter:
         return "# Candidate Capabilities\n" + "\n\n".join(blocks)
 
 
-# LLM: from_skill_card belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 把 Skill Card 映射成统一能力卡。。
 def from_skill_card(card: SkillCard) -> CapabilityCard:
     """把 Skill Card 映射成统一能力卡。"""
 
@@ -232,8 +211,6 @@ def from_skill_card(card: SkillCard) -> CapabilityCard:
     )
 
 
-# LLM: from_tool_spec belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 把现有 ToolSpec 映射成统一能力卡。。
 def from_tool_spec(spec: ToolSpec) -> CapabilityCard:
     """把现有 ToolSpec 映射成统一能力卡。"""
 
@@ -257,14 +234,10 @@ def from_tool_spec(spec: ToolSpec) -> CapabilityCard:
     )
 
 
-# LLM: default_capability_cards maps built-in higher-level abilities onto stable execution tools.
-# 函数用途: 提供默认能力卡；例如 Playwright 前端/E2E 能力先路由到 controlled_exec，后续有专用工具时可只替换这里的卡片映射。
 def default_capability_cards() -> list[CapabilityCard]:
     return [_playwright_capability_card()]
 
 
-# LLM: _playwright_capability_card keeps browser/E2E routing centralized and easy to swap.
-# 函数用途: 构造 Playwright 默认能力卡，把前端浏览器测试需求映射到受控执行工具。
 def _playwright_capability_card() -> CapabilityCard:
     return CapabilityCard(
         id="builtin:playwright-browser-testing",
@@ -285,8 +258,6 @@ def _playwright_capability_card() -> CapabilityCard:
     )
 
 
-# LLM: classify_tool_risk belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 给现有工具补一层基础风险分类。 这不是最终安全策略，只是 Tool Card 的初始风险信号。 后续可以在 tool card 里继续扩展更细的权限和确认机制。。
 def classify_tool_risk(spec: ToolSpec) -> tuple[list[str], str]:
     """给现有工具补一层基础风险分类。
 
@@ -305,8 +276,6 @@ def classify_tool_risk(spec: ToolSpec) -> tuple[list[str], str]:
     return [], "low"
 
 
-# LLM: score_card belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 用可解释的关键词规则给能力卡打分。。
 def score_card(query: str, card: CapabilityCard) -> tuple[float, list[str]]:
     """用可解释的关键词规则给能力卡打分。"""
 
@@ -342,11 +311,9 @@ def score_card(query: str, card: CapabilityCard) -> tuple[float, list[str]]:
             token_score += 1.5
             reasons.append(f"命中描述'{token}'")
         score += token_score
-    return score, _dedupe(reasons)
+    return score, dedupe_strings(reasons)
 
 
-# LLM: tokenize belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 把查询切成适合粗检索的 token。。
 def tokenize(text: str) -> list[str]:
     """把查询切成适合粗检索的 token。"""
 
@@ -357,11 +324,9 @@ def tokenize(text: str) -> list[str]:
         expanded.append(token)
         if re.fullmatch(r"[\u4e00-\u9fff]+", token):
             expanded.extend(_chinese_ngrams(token))
-    return _dedupe(expanded)
+    return dedupe_strings(expanded)
 
 
-# LLM: _chinese_ngrams belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 提取中文字符的 n-gram（2-4 gram）。。
 def _chinese_ngrams(token: str) -> list[str]:
     """提取中文字符的 n-gram（2-4 gram）。"""
 
@@ -370,18 +335,3 @@ def _chinese_ngrams(token: str) -> list[str]:
         for idx in range(0, max(len(token) - size + 1, 0)):
             ngrams.append(token[idx : idx + size])
     return ngrams
-
-
-# LLM: _dedupe belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 保持顺序去重。。
-def _dedupe(items: list[str]) -> list[str]:
-    """保持顺序去重。"""
-
-    seen: set[str] = set()
-    result: list[str] = []
-    for item in items:
-        if item in seen:
-            continue
-        seen.add(item)
-        result.append(item)
-    return result

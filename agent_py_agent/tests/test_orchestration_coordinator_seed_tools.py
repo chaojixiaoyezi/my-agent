@@ -8,8 +8,6 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 
-# LLM: _mock_coordinator_agent builds the minimal facade CreateSubagentsTool needs.
-# 函数用途: 构造启用 subagent 的 mock agent，避免每个 coordinator seed 测试重复字段。
 def _mock_coordinator_agent():
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
@@ -26,8 +24,6 @@ def _mock_coordinator_agent():
     return mock_agent
 
 
-# LLM: test_explicit_coordinator_seed_merges_parent_and_coordinator_tools covers upper-level grants.
-# 函数用途: 显式 coordinator seed 保留父级已授予工具，同时补齐内置协调工具。
 def test_explicit_coordinator_seed_merges_parent_and_coordinator_tools():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
     from agent_py_agent.agent.subagents.role_templates import COORDINATOR_TOOLS
@@ -49,8 +45,6 @@ def test_explicit_coordinator_seed_merges_parent_and_coordinator_tools():
     assert "write_file" in params.allowed_tools
 
 
-# LLM: test_explicit_coordinator_seed_keeps_product_paths_and_write_grants locks parent coverage.
-# 函数用途: root coordinator 可以在 goal 里保留产物目录，也保留覆盖下级的写入根用于验收、接管和救援。
 def test_explicit_coordinator_seed_keeps_product_paths_and_write_grants():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 

@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 """Pipeline stage components extracted from IngestPipeline for size governance."""
 
@@ -19,11 +17,8 @@ from .dead_letter import DeadLetterRecord
 from .pipeline_helpers import WriteManifestParams  # noqa: F401
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 RecordIteratorOptions 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 RecordIteratorOptions 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class RecordIteratorOptions:
-    # LLM: Iterator construction stays option-bundled to avoid parser-stage drift.
     file_format: str
     parser: LogParser
     batch_id: str
@@ -32,13 +27,9 @@ class RecordIteratorOptions:
     source_product: str | None = None
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 RecordIterator 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 封装 RecordIterator 的状态和协作方法，作为当前模块对外复用的领域对象。
 class RecordIterator:
     """Yields parsed records (or None for skipped lines) from JSONL / CSV sources."""
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 __init__ 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 初始化实例依赖、路径或缓存状态，为同一对象的后续方法提供共享上下文。
     def __init__(
         self,
         source_path: Path,
@@ -68,8 +59,6 @@ class RecordIterator:
         self.source_product = options.source_product
         self.dead_letters = options.dead_letters
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 iter_records 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 iter records 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     def iter_records(self):
         """Dispatch to format-specific iterator."""
         if self.file_format in {"jsonl", "log"}:
@@ -80,16 +69,12 @@ class RecordIterator:
             return
         raise ParserError(f"unsupported ingest file format: {self.file_format}")
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _iter_jsonl 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 iter jsonl 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     def _iter_jsonl(self):
         """Parse a JSONL / .log file line by line."""
         with self.source_path.open("r", encoding="utf-8-sig", errors="replace") as handle:
             for line_no, raw_line in enumerate(handle, start=1):
                 yield from self._parse_jsonl_line(line_no, raw_line)
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _parse_jsonl_line 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 从外部数据还原 parse jsonl line 需要的领域对象，统一缺省值和兼容字段。
     def _parse_jsonl_line(self, line_no: int, raw_line: str):
         text = raw_line.rstrip("\n")
         raw_ref = f"{self.batch_id}:line-{line_no}"
@@ -113,8 +98,6 @@ class RecordIterator:
             return ()
         return (parsed,)
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _iter_csv 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 iter csv 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     def _iter_csv(self):
         """Parse a CSV file row by row via the registered LogParser."""
         with self.source_path.open(
@@ -135,8 +118,6 @@ class RecordIterator:
             for row in reader:
                 yield from self._parse_csv_row(row, reader.line_num)
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _parse_csv_row 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 从外部数据还原 parse csv row 需要的领域对象，统一缺省值和兼容字段。
     def _parse_csv_row(self, row: Mapping[str, Any], line_no: int):
         raw_ref = f"{self.batch_id}:line-{line_no}"
         try:
@@ -169,19 +150,13 @@ class RecordIterator:
         return (parsed,)
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 EventWriter 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 封装 EventWriter 的状态和协作方法，作为当前模块对外复用的领域对象。
 class EventWriter:
     """Write events to a store (or JsonlEventSink fallback) and return storage metadata."""
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 __init__ 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 初始化实例依赖、路径或缓存状态，为同一对象的后续方法提供共享上下文。
     def __init__(self, store: Any, fallback_sink: Any):
         self.store = store
         self.fallback_sink = fallback_sink
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 write 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 write 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     def write(self, events: list[dict[str, Any]]) -> dict[str, Any]:
         """Dispatch to the first available write method on the store."""
         if not events:
@@ -198,8 +173,6 @@ class EventWriter:
             return item_result
         return self.fallback_sink.write_events(events)
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _write_batch 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 写入或登记 write batch 相关记录，集中处理目标路径、格式化和状态更新。
     def _write_batch(self, events: list[dict[str, Any]]) -> dict[str, Any] | None:
         for method_name in ("write_events", "append_events", "upsert_events"):
             method = getattr(self.store, method_name, None)
@@ -208,8 +181,6 @@ class EventWriter:
                 return _storage_result(result, count=len(events), store=self.store)
         return None
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _write_items 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 写入或登记 write items 相关记录，集中处理目标路径、格式化和状态更新。
     def _write_items(self, events: list[dict[str, Any]]) -> dict[str, Any] | None:
         for method_name in ("write_event", "append_event", "upsert_event"):
             method = getattr(self.store, method_name, None)
@@ -218,26 +189,18 @@ class EventWriter:
         return None
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _write_events_with_method 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 写入或登记 write events with method 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_events_with_method(method: Any, events: list[dict[str, Any]]) -> dict[str, Any]:
     for event in events:
         method(event)
     return {"count": len(events), "path": None}
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 ManifestWriter 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 封装 ManifestWriter 的状态和协作方法，作为当前模块对外复用的领域对象。
 class ManifestWriter:
     """Build and atomically write a batch manifest JSON file."""
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 __init__ 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 初始化实例依赖、路径或缓存状态，为同一对象的后续方法提供共享上下文。
     def __init__(self, root: Path):
         self.root = root
 
-    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 write 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 write 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     def write(
         self,
         *,
@@ -252,8 +215,6 @@ class ManifestWriter:
         return manifest_path
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _manifest_payload 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 manifest payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _manifest_payload(params: WriteManifestParams) -> dict[str, Any]:
     from ..parsers.common import utc_now
 
@@ -282,8 +243,6 @@ def _manifest_payload(params: WriteManifestParams) -> dict[str, Any]:
     }
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _manifest_cursor_after 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 manifest cursor after 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def _manifest_cursor_after(params: WriteManifestParams) -> dict[str, Any]:
     return {
         "path": str(params.source_path),
@@ -294,8 +253,6 @@ def _manifest_cursor_after(params: WriteManifestParams) -> dict[str, Any]:
     }
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _manifest_counts 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 manifest counts 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def _manifest_counts(params: WriteManifestParams) -> dict[str, int]:
     return {
         "parsed": params.parsed_count,
@@ -306,8 +263,6 @@ def _manifest_counts(params: WriteManifestParams) -> dict[str, int]:
     }
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _storage_result 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 storage result 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def _storage_result(result: Any, *, count: int, store: Any | None = None) -> dict[str, Any]:
     store_path = getattr(store, "events_path", None)
     if isinstance(result, Mapping):
@@ -323,7 +278,5 @@ def _storage_result(result: Any, *, count: int, store: Any | None = None) -> dic
     return {"count": count, "path": str(store_path).replace("\\", "/") if store_path is not None else None}
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _jsonable_mapping 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 jsonable mapping 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def _jsonable_mapping(mapping: Mapping[Any, Any]) -> dict[str, Any]:
     return {str(key): value for key, value in mapping.items()}

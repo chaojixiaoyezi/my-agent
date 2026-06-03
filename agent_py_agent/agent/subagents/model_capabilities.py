@@ -1,5 +1,3 @@
-# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
 
 from __future__ import annotations
 
@@ -8,8 +6,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-# LLM: CapabilityRequest 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存能力请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class CapabilityRequest:
     """Request from a subagent for a missing capability."""
@@ -19,7 +15,6 @@ class CapabilityRequest:
     problem: str
     needed_capability: str
     expected_output: str = ""
-    # LLM: 以下 scoped request 字段是后续 shell/MCP/tool/skill 网关的稳定申请口，旧记录缺省为 generic。
     capability_type: str = "generic"
     tried: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
@@ -40,8 +35,6 @@ class CapabilityRequest:
     reserved: dict[str, object] = field(default_factory=dict)
 
 
-# LLM: CapabilityGrant 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存能力grant字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class CapabilityGrant:
     """Capability granted by a parent/supervisor to a subagent."""
@@ -49,7 +42,6 @@ class CapabilityGrant:
     id: str
     request_id: str
     grant_to_run_id: str
-    # LLM: grant 的 scope 字段只表示父级授权边界，不等于立即执行任何工具。
     grant_type: str = "generic"
     skills: list[str] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)
@@ -68,8 +60,6 @@ class CapabilityGrant:
     reserved: dict[str, object] = field(default_factory=dict)
 
 
-# LLM: CapabilityGap 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存能力缺口字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class CapabilityGap:
     """A capability gap left after routing/search could not find a match."""
@@ -79,7 +69,6 @@ class CapabilityGap:
     missing_capability: str
     source_task: str
     why_failed: str
-    # LLM: gap 保留原始申请范围，方便后续升级给父级、skill_spark 或人工处理。
     gap_type: str = "generic"
     attempted_skills: list[str] = field(default_factory=list)
     attempted_tools: list[str] = field(default_factory=list)
@@ -96,8 +85,6 @@ class CapabilityGap:
     reserved: dict[str, object] = field(default_factory=dict)
 
 
-# LLM: VerificationEvidence 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存verification证据字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class VerificationEvidence:
     """Evidence produced by a subagent for verification/acceptance."""

@@ -1,5 +1,3 @@
-# LLM: Subagent automation gate separates refs-only automation from state-changing execution.
-# 模块用途: 判断某个子代理自动化动作能否执行；默认保守，防止无人值守时误跑工具或改任务状态。
 
 from __future__ import annotations
 
@@ -8,8 +6,6 @@ from dataclasses import asdict, dataclass, field
 AUTO_SAFE_ACTIONS = frozenset({"query_recovery_tree", "inspect_refs"})
 
 
-# LLM: SubAgentAutomationGateRequest is the bundle future auto runners must pass through.
-# 类用途: 描述自动化动作的模式、风险属性、refs 和恢复候选数量。
 @dataclass(frozen=True)
 class SubAgentAutomationGateRequest:
     mode: str = "manual"
@@ -24,8 +20,6 @@ class SubAgentAutomationGateRequest:
     reserved: dict[str, object] = field(default_factory=dict)
 
 
-# LLM: SubAgentAutomationGateResult exposes both current allowance and true automatic allowance.
-# 类用途: 返回动作是否可执行、是否算无人值守自动放行、阻断原因和下一步建议。
 @dataclass(frozen=True)
 class SubAgentAutomationGateResult:
     action: str
@@ -37,14 +31,10 @@ class SubAgentAutomationGateResult:
     recommended_next_step: str = ""
     reserved: dict[str, object] = field(default_factory=dict)
 
-    # LLM: to_dict supports audit JSON without callers depending on dataclass internals.
-    # 函数用途: 输出 JSON 友好的自动化门结果。
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
-# LLM: evaluate_subagent_automation_gate is the deterministic policy entrypoint.
-# 函数用途: 根据动作类型和风险属性判断是否放行；不执行动作、不修改任务。
 def evaluate_subagent_automation_gate(request: SubAgentAutomationGateRequest) -> SubAgentAutomationGateResult:
     blockers = _blockers(request)
     if blockers:
@@ -81,8 +71,6 @@ def evaluate_subagent_automation_gate(request: SubAgentAutomationGateRequest) ->
     )
 
 
-# LLM: _blockers returns hard blockers that apply before manual or automatic allowance.
-# 函数用途: 识别会让动作不能继续的确定性风险，例如缺 refs 或候选过多。
 def _blockers(request: SubAgentAutomationGateRequest) -> list[str]:
     blockers: list[str] = []
     if request.max_recovery_candidates > 0 and request.recovery_candidate_count > request.max_recovery_candidates:
@@ -97,8 +85,6 @@ def _blockers(request: SubAgentAutomationGateRequest) -> list[str]:
     return blockers
 
 
-# LLM: _is_auto_safe allows only explicit refs-only actions in auto mode.
-# 函数用途: 判断动作是否属于无人值守自动可执行的只读范围。
 def _is_auto_safe(request: SubAgentAutomationGateRequest) -> bool:
     return (
         str(request.mode or "").strip().lower() == "auto"

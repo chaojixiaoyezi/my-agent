@@ -1,10 +1,9 @@
-# LLM: Contract recovery envelopes convert gate failures into repair, user-input, recovery, or hard-stop actions.
-# 模块用途: 把各种合同/gate finding 统一转换成结构化返工包；机器只读取 code/status/action，中文只作为可读提示。
 
 from __future__ import annotations
 
 from typing import Any
 
+from .recovery_actions import RecoveryAction
 from .recovery_classification import (
     action_status,
     next_status,
@@ -146,7 +145,7 @@ def _first_action(actions: tuple[dict[str, Any], ...]) -> str:
         value = str(action.get("recommended_action") or "").strip()
         if value:
             return value
-    return "stop_and_report_blocker"
+    return RecoveryAction.REPORT_BLOCKER.value
 
 
 def _fallback_code(status: str) -> str:

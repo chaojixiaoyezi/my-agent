@@ -1,5 +1,3 @@
-# LLM: Home memory route helpers keep CLI and runtime fallback rules identical.
-# 模块用途: 解析 memory/routing/INDEX.md 的项目优先、home 兜底路径。
 
 from __future__ import annotations
 

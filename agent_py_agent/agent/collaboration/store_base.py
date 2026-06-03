@@ -1,5 +1,3 @@
-# LLM: Base paths for the durable collaboration ledger.
-# 模块用途: 初始化协作账本目录，并集中维护各类 ledger 文件路径。
 
 from __future__ import annotations
 

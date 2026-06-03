@@ -1,5 +1,3 @@
-# LLM: CLI scenario case definition; keep fixture flow and expected gateway/subagent behavior stable.
-# 模块用途: 定义一类命令行情景测试，用来复现和验证端到端流程。
 
 from __future__ import annotations
 
@@ -37,14 +35,10 @@ from ..scenario_utils import (
 from .gateway_delayed_response_case import run_scenario_gateway_delayed_response_case
 
 
-# LLM: ScenarioGatewayRecoveryBackend 是gateway CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 class ScenarioGatewayRecoveryBackend:
 
     name = "scenario_gateway_recovery_backend"
 
-    # LLM: generate 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         return ModelResponse(
             text='{"scenario": "gateway-stale-lease", "ok": true}',
@@ -52,8 +46,6 @@ class ScenarioGatewayRecoveryBackend:
         )
 
 
-# LLM: _restart_case_write_processing_payload 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _restart_case_write_processing_payload(gpaths, request_id):
     import os
     import time
@@ -74,8 +66,6 @@ def _restart_case_write_processing_payload(gpaths, request_id):
     return processing_path, payload
 
 
-# LLM: _restart_case_verify 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _restart_case_verify(paths, requeued, processing_path, pending_path):
     final_ok = requeued == 1 and not processing_path.exists() and pending_path.exists()
     write_scenario_summary(
@@ -95,8 +85,6 @@ def _restart_case_verify(paths, requeued, processing_path, pending_path):
     return 0 if final_ok else 2
 
 
-# LLM: run_scenario_gateway_restart_case 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_gateway_restart_case(args) -> int:
 
     paths = create_scenario_workspace(args)
@@ -126,8 +114,6 @@ def run_scenario_gateway_restart_case(args) -> int:
     return _restart_case_verify(paths, requeued, processing_path, pending_path)
 
 
-# LLM: _stale_lease_setup 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _stale_lease_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -167,8 +153,6 @@ def _stale_lease_setup(args):
     return paths, agent, gpaths, request_id, processing_path
 
 
-# LLM: _StaleLeaseVerifyContext 是gateway CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass
 class _StaleLeaseVerifyContext:
     paths: Any
@@ -184,8 +168,6 @@ class _StaleLeaseVerifyContext:
     done_payload: dict
 
 
-# LLM: _stale_lease_verify 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _stale_lease_verify(ctx: _StaleLeaseVerifyContext) -> int:
     final_ok = (
         ctx.stale_before
@@ -222,8 +204,6 @@ def _stale_lease_verify(ctx: _StaleLeaseVerifyContext) -> int:
     return 0 if final_ok else 2
 
 
-# LLM: run_scenario_gateway_stale_lease_case 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_gateway_stale_lease_case(args) -> int:
 
     paths, agent, gpaths, request_id, processing_path = _stale_lease_setup(args)

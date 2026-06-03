@@ -1,5 +1,3 @@
-# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
-# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
 
 from __future__ import annotations
 
@@ -17,8 +15,6 @@ from pathlib import Path
 from typing import Any
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _derived_archive_fields 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 derived archive fields 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def _derived_archive_fields(payload: dict[str, Any]) -> dict[str, Any]:
 
     fields: dict[str, Any] = {}
@@ -31,16 +27,12 @@ def _derived_archive_fields(payload: dict[str, Any]) -> dict[str, Any]:
     return fields
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _copy_dispatch_archive_fields 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 copy dispatch archive fields 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def _copy_dispatch_archive_fields(fields: dict[str, Any], dispatch_events: list[object]) -> None:
     for event in dispatch_events:
         if isinstance(event, dict):
             _copy_present_archive_fields(fields, event, only_missing=True)
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _copy_present_archive_fields 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 copy present archive fields 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def _copy_present_archive_fields(
     fields: dict[str, Any],
     source: dict[str, Any],
@@ -53,8 +45,6 @@ def _copy_present_archive_fields(
             fields[key] = source.get(key)
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _archive_preview 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 archive preview 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def _archive_preview(payload: dict[str, Any]) -> str:
 
     preview = str(payload.get("content_preview", "") or "").strip()
@@ -68,8 +58,6 @@ def _archive_preview(payload: dict[str, Any]) -> str:
     return "；".join(parts)[:500]
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _archive_error_record 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 archive error record 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def _archive_error_record(layer: str, path: Path, *, line_no: int, message: str) -> dict[str, Any]:
 
     return {
@@ -102,8 +90,6 @@ def _archive_error_record(layer: str, path: Path, *, line_no: int, message: str)
     }
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _archive_search_text 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 archive search text 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def _archive_search_text(record: dict[str, Any]) -> str:
 
     parts = [
@@ -126,8 +112,6 @@ def _archive_search_text(record: dict[str, Any]) -> str:
     return "\n".join(parts).lower()
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _append_run_id 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 写入或登记 append run id 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_run_id(items: list[str], value: object) -> None:
 
     text = str(value or "").strip()
@@ -138,8 +122,6 @@ def _append_run_id(items: list[str], value: object) -> None:
         items.append(run_id)
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _dedupe_strings 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 dedupe strings 涉及的字段，让后续匹配和存储使用同一形态。
 def _dedupe_strings(values: list[str]) -> list[str]:
 
     items: list[str] = []
@@ -150,8 +132,6 @@ def _dedupe_strings(values: list[str]) -> list[str]:
     return items
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _created_at_sort 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 created at sort 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def _created_at_sort(value: str, *, fallback: float) -> float:
 
     text = str(value or "").strip()
@@ -171,8 +151,6 @@ def _created_at_sort(value: str, *, fallback: float) -> float:
     return parsed.timestamp()
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _is_date_only 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 is date only 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _is_date_only(value: str) -> bool:
 
     text = str(value or "").strip()
@@ -185,8 +163,6 @@ def _is_date_only(value: str) -> bool:
     return text[4] == "-" and text[7] == "-"
 
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _list_value 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 list value 的候选结果，并按参数完成筛选、排序或数量限制。
 def _list_value(value: object) -> list[object]:
 
     if isinstance(value, list):

@@ -1,5 +1,3 @@
-# LLM: staged_checkpoint_acceptance centralizes generic staged checkpoint validation for long-running artifact flows.
-# 模块用途: 统一校验阶段产物是否缺失、为空、JSON 截断或无数据，避免真实任务和普通任务各自维护一套判断。
 
 from __future__ import annotations
 
@@ -7,28 +5,25 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..common.value_parsing import sequence_strings
 from .artifact_collection_contract import collection_contract_finding_dicts
 from .contract_trace import trace_entry, with_contract_trace
 from .evidence_contract import (
     EvidenceContractRequest,
     evaluate_evidence_contract,
 )
-from .gates.delivery_quality_metrics import delivery_quality_metric_findings
+from .gates.delivery_quality import delivery_quality_metric_findings
 from .staged_checkpoint_contract_options import staged_checkpoint_contexts
-from .staged_checkpoint_evidence_payloads import claims, source_refs, string_list
+from .staged_checkpoint_evidence_payloads import claims, source_refs
 from .staged_checkpoint_files import artifact_path, json_checkpoint_status
 
 
-# LLM: StagedEvidenceOptions keeps this contract helper structure-first and stable.
-# 类用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 @dataclass(frozen=True)
 class StagedEvidenceOptions:
     phase: str = "staged"
     emit_path_findings: bool = True
 
 
-# LLM: StagedEvidenceRequest keeps this contract helper structure-first and stable.
-# 类用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 @dataclass(frozen=True)
 class StagedEvidenceRequest:
     ref: str
@@ -37,8 +32,6 @@ class StagedEvidenceRequest:
     options: StagedEvidenceOptions = StagedEvidenceOptions()
 
 
-# LLM: StagedCheckpointOptions carries optional shape checks for one checkpoint.
-# 类用途: 将列、sheet 和 validation_contract 打包，避免函数参数继续膨胀。
 @dataclass(frozen=True)
 class StagedCheckpointOptions:
     required_columns: list[str] | None = None
@@ -49,8 +42,6 @@ class StagedCheckpointOptions:
 _DEFAULT_STAGED_CHECKPOINT_OPTIONS = StagedCheckpointOptions()
 
 
-# LLM: staged_checkpoint_findings inspects only machine-declared checkpoint refs and emits stable findings.
-# 函数用途: 根据 staging_contract.checkpoint_refs 检查阶段文件状态，只返回结构化 finding，不读取提示词或自然语言摘要。
 def staged_checkpoint_findings(
     items: list[dict[str, object]],
     task_workspace: Path,
@@ -86,8 +77,6 @@ def staged_checkpoint_findings(
     return findings
 
 
-# LLM: one_staged_checkpoint_findings validates one checkpoint file with generic shape-aware rules.
-# 函数用途: 单独检查一个阶段文件，区分缺失、空文件、JSON 非法、JSON 无有效数据等通用错误。
 def one_staged_checkpoint_findings(
     ref: str,
     task_workspace: Path,
@@ -110,8 +99,6 @@ def one_staged_checkpoint_findings(
     )
 
 
-# LLM: _artifact_validation_findings routes non-JSON checkpoints through the shared artifact validator.
-# 函数用途: CSV/XLSX/PDF/TXT 阶段文件不再只检查存在；统一复用产物注册表输出结构化 findings。
 def _artifact_validation_findings(
     ref: str,
     path: Path,
@@ -146,8 +133,6 @@ def _artifact_validation_findings(
     ]
 
 
-# LLM: staged_json_evidence_findings validates source/claim refs for factual staged data.
-# 函数用途: 对 source_data.json 这类阶段文件执行通用证据合同，不读取自然语言说明。
 def staged_json_evidence_findings(request: StagedEvidenceRequest) -> list[dict[str, object]]:
     ref = request.ref
     task_workspace = request.task_workspace
@@ -181,8 +166,6 @@ def staged_json_evidence_findings(request: StagedEvidenceRequest) -> list[dict[s
     return findings
 
 
-# LLM: _staged_json_dict keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _staged_json_dict(path: Path) -> dict[str, object] | None:
     if not path.exists() or path.suffix.lower() != ".json":
         return None
@@ -193,8 +176,6 @@ def _staged_json_dict(path: Path) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
-# LLM: _evaluate_staged_evidence keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _evaluate_staged_evidence(
     evidence_contract: dict[str, object],
     source_records: list[dict[str, object]],
@@ -206,8 +187,8 @@ def _evaluate_staged_evidence(
         EvidenceContractRequest(
             source_refs=source_records,
             claims=claim_records,
-            required_fields=string_list(evidence_contract.get("required_fields")),
-            allowed_value_types=string_list(evidence_contract.get("allowed_value_types")) or ["exact"],
+            required_fields=sequence_strings(evidence_contract.get("required_fields")),
+            allowed_value_types=sequence_strings(evidence_contract.get("allowed_value_types")) or ["exact"],
             min_confidence=_float_value(evidence_contract.get("min_confidence")),
             require_methodology_for_estimates=bool(evidence_contract.get("require_methodology_for_estimates", False)),
             require_verified=_requires_verified(evidence_contract, phase),
@@ -215,8 +196,6 @@ def _evaluate_staged_evidence(
     )
 
 
-# LLM: _evidence_finding_dicts keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _evidence_finding_dicts(report: object, ref: str, path: Path) -> list[dict[str, object]]:
     return [
         with_contract_trace(
@@ -237,8 +216,6 @@ def _evidence_finding_dicts(report: object, ref: str, path: Path) -> list[dict[s
     ]
 
 
-# LLM: _metric_finding_dicts keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _metric_finding_dicts(findings: object, ref: str, path: Path) -> list[dict[str, object]]:
     return [
         with_contract_trace(
@@ -259,8 +236,6 @@ def _metric_finding_dicts(findings: object, ref: str, path: Path) -> list[dict[s
     ]
 
 
-# LLM: _json_checkpoint_findings keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _json_checkpoint_findings(
     ref: str,
     path: Path,
@@ -281,8 +256,6 @@ def _json_checkpoint_findings(
     return []
 
 
-# LLM: _float_value normalizes optional numeric evidence contract thresholds.
-# 函数用途: 从 evidence_contract.min_confidence 读取浮点阈值，坏值按 0 处理。
 def _float_value(value: object) -> float:
     try:
         return float(value or 0.0)
@@ -290,8 +263,6 @@ def _float_value(value: object) -> float:
         return 0.0
 
 
-# LLM: _requires_verified keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _requires_verified(evidence_contract: dict[str, object], phase: str) -> bool:
     if phase == "staged":
         return bool(
@@ -303,15 +274,11 @@ def _requires_verified(evidence_contract: dict[str, object], phase: str) -> bool
     return bool(evidence_contract.get("require_verified", True))
 
 
-# LLM: _display_path keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _display_path(ref: str, task_workspace: Path) -> Path:
     preferred = Path(str(ref or ""))
     return preferred.resolve(strict=False) if preferred.is_absolute() else (task_workspace / preferred).resolve(strict=False)
 
 
-# LLM: _path_outside_workspace_finding keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _path_outside_workspace_finding(ref: str, task_workspace: Path, message: str) -> dict[str, object]:
     return _finding(
         "STAGED_ARTIFACT_PATH_OUTSIDE_WORKSPACE",
@@ -321,8 +288,6 @@ def _path_outside_workspace_finding(ref: str, task_workspace: Path, message: str
     )
 
 
-# LLM: _finding keeps staged checkpoint findings compact and machine-readable.
-# 函数用途: 统一生成阶段文件 finding，必要时带上额外字段，例如 parse_error。
 def _finding(code: str, ref: str, path: Path, detail: dict[str, object] | None = None) -> dict[str, object]:
     payload = detail or {}
     return with_contract_trace(

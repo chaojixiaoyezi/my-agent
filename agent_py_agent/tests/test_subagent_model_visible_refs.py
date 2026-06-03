@@ -6,8 +6,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 
-# LLM: _mock_create_agent keeps path-redaction tests out of the larger create_subagents suite.
-# 函数用途: 构造最小 create_subagents agent 替身，专测模型可见路径净化。
 def _mock_create_agent():
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
@@ -30,7 +28,7 @@ def _mock_create_agent():
 
 def test_create_subagents_payload_hides_legacy_subagent_paths(monkeypatch):
     """create_subagents 返回给模型的 payload 不能暴露旧 data/subagents 路径。"""
-    from agent_py_agent.agent.agent_core import orchestration_background_dispatch
+    import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     mock_agent = _mock_create_agent()
@@ -53,7 +51,7 @@ def test_create_subagents_payload_hides_legacy_subagent_paths(monkeypatch):
             },
         }
 
-    monkeypatch.setattr(orchestration_background_dispatch, "_start_background_dispatch", fake_background_start)
+    monkeypatch.setattr(background_dispatch, "_start_background_dispatch", fake_background_start)
 
     result = CreateSubagentsTool(mock_agent).execute({"goal": "整理资料", "count": 1})
 
@@ -75,3 +73,16 @@ def test_sanitizer_keeps_output_filename_without_legacy_path():
 
     assert sanitized["output_files"] == ["data_collection.md"]
     assert sanitized["task_dir"] == "[internal_legacy_subagent_path_hidden]"
+
+
+def test_sanitizer_removes_legacy_path_embedded_in_model_visible_text():
+    """旧 data/subagents 路径夹在自然语言里时，也不能继续作为模型可见事实。"""
+    from agent_py_agent.agent.model_visible_ref_sanitizer import sanitize_model_visible_refs
+    from agent_py_agent.agent.model_visible_refs import current_model_text
+
+    text = "请读取 /tmp/project/data/subagents/subagent-old/data_collection.md 后继续。"
+
+    assert current_model_text(text) == "请读取 data_collection.md 后继续。"
+    sanitized = sanitize_model_visible_refs({"goal": text, "summary": text})
+    assert "/data/subagents/" not in sanitized["goal"]
+    assert sanitized["goal"] == "请读取 data_collection.md 后继续。"

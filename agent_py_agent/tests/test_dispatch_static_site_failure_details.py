@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import time
 
-from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
+from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
@@ -16,8 +16,6 @@ from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagent import EvidencePacket, VerificationEvidence
 
 
-# LLM: test_static_site_failure_details_reach_dispatch_record verifies repair-ready facts.
-# 函数用途: static_site_check 失败时，dispatch record 必须包含具体失效控件，方便父级重新派修复任务。
 def test_static_site_failure_details_reach_dispatch_record(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     site = tmp_path / "deliverables"
@@ -32,7 +30,7 @@ def test_static_site_failure_details_reach_dispatch_record(tmp_path):
     report = agent.dispatch_subagents(
         CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs()),
         CapabilityConfig(),
-        params=DispatchParams(apply=True, max_runners=0, execute_runners=True),
+        params=DispatchParams(apply=True, max_runners=0, start_runners=True),
     )
 
     assert not any(item.step == "acceptance" and item.run_id == task.id for item in report.records)
@@ -40,8 +38,6 @@ def test_static_site_failure_details_reach_dispatch_record(tmp_path):
     assert task.verification_status == "VERIFIED"
 
 
-# LLM: _acceptance_task creates the minimum awaiting-acceptance task with evidence.
-# 函数用途: 构造一个可进入最终收口的子代理任务，避免复用大型 dispatch 测试模块。
 def _acceptance_task(agent: SimpleAgent):
     task = agent.subagents.create_run(
         goal="静态页面验收失败要给出具体修复线索",
@@ -65,8 +61,6 @@ def _acceptance_task(agent: SimpleAgent):
     return task
 
 
-# LLM: _write_static_site_output keeps the output contract focused on one failing HTML page.
-# 函数用途: 写入 output.json，声明一个会被 static_site_check 识别的失效锚点页面。
 def _write_static_site_output(task) -> None:
     output = {
         "run_id": task.id,

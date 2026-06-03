@@ -66,13 +66,13 @@ class _BlockedCollaborationBackend:
         self.prompts.append(prompt)
         if self.calls == 1:
             assert "collaboration_case_closed" in prompt
-            assert "阻塞=1" in prompt
+            assert "不可达=1" in prompt
             return ModelResponse(
                 text=f'[TOOL_CALL]\n{{"tool":"inspect_collaboration","case_id":"{self.case_id}"}}\n[/TOOL_CALL]',
                 backend=self.name,
             )
-        assert "blocked_request_count" in prompt
-        assert "ready_for_main_agent: true" in prompt
+        assert "collection_result" in prompt
+        assert "ready_to_report" in prompt
         return ModelResponse(text="协作阻塞已确认：需要主代理调整策略。", backend=self.name)
 
 
@@ -94,8 +94,8 @@ class _PlainLanguageCollaborationBackend:
                 backend=self.name,
             )
         if self.calls == 2:
-            assert "rework_targets" in prompt
-            assert "try_alternate_source_or_params" in prompt
+            assert "collection_result" in prompt
+            assert "ready_to_report" in prompt
             return ModelResponse(
                 text=(
                     '[TOOL_CALL]\n'

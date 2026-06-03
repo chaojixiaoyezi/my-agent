@@ -1,5 +1,3 @@
-# LLM: Run task workspace indexing is refs-only and must not become a second task truth source.
-# 模块用途: 把保存型主代理 run 的任务工作区登记到全局轻量索引，正文仍以 owner task workspace 为准。
 
 from __future__ import annotations
 

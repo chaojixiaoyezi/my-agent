@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 
-# LLM: Compact bundles must preserve waiting state and referenced tool outputs for resume.
-# 函数用途: 验证等待人工状态、等待原因和 tool result refs 都在 compact 结构字段中保留。
 def test_compact_resume_preserves_waiting_for_human_and_tool_refs() -> None:
     from agent_py_agent.agent.contracts.offline_compact_resume_contract import (
         validate_compact_resume_bundle,
@@ -26,8 +24,6 @@ def test_compact_resume_preserves_waiting_for_human_and_tool_refs() -> None:
     assert result.error_codes == ()
 
 
-# LLM: Compact bundles must not drop structured waiting state or tool result refs.
-# 函数用途: 验证压缩前的等待状态和工具结果引用没有进入 compact，会返回对应错误码。
 def test_compact_resume_rejects_missing_waiting_state_or_tool_refs() -> None:
     from agent_py_agent.agent.contracts.offline_compact_resume_contract import (
         validate_compact_resume_bundle,
@@ -56,8 +52,6 @@ def test_compact_resume_rejects_missing_waiting_state_or_tool_refs() -> None:
     assert result.error_codes == ("COMPACT_STATE_MISSING", "COMPACT_TOOL_REF_MISSING")
 
 
-# LLM: Compact resume must not forget failed operation ids from pre-compact events.
-# 函数用途: 验证压缩前失败的工具 operation_id 没进入 compact，会返回 COMPACT_FAILURE_FORGOTTEN。
 def test_compact_resume_cannot_forget_failed_tool_result() -> None:
     from agent_py_agent.agent.contracts.offline_compact_resume_contract import (
         validate_compact_resume_bundle,
@@ -83,8 +77,6 @@ def test_compact_resume_cannot_forget_failed_tool_result() -> None:
     assert result.error_codes == ("COMPACT_FAILURE_FORGOTTEN",)
 
 
-# LLM: Resume after compact must not replay dangerous side-effect operation ids.
-# 函数用途: 验证 compact 已记录的副作用 operation_id 在 resume 中再次 tool_call 会被拦截。
 def test_compact_resume_cannot_repeat_dangerous_operation() -> None:
     from agent_py_agent.agent.contracts.offline_compact_resume_contract import (
         validate_compact_resume_bundle,
@@ -109,8 +101,6 @@ def test_compact_resume_cannot_repeat_dangerous_operation() -> None:
     assert result.error_codes == ("DANGEROUS_OPERATION_REPLAYED",)
 
 
-# LLM: Resume after compact must not repeat a previously stalled progress fingerprint.
-# 函数用途: 验证 compact 记录的 no_progress_fingerprints 在 resume 中再次出现会被拦截。
 def test_compact_resume_cannot_repeat_no_progress_loop() -> None:
     from agent_py_agent.agent.contracts.offline_compact_resume_contract import (
         validate_compact_resume_bundle,
@@ -136,8 +126,6 @@ def test_compact_resume_cannot_repeat_no_progress_loop() -> None:
     assert result.error_codes == ("COMPACT_NO_PROGRESS_LOOP_REPEATED",)
 
 
-# LLM: Compact summary quality is a structured checklist, not a prose style judgment.
-# 函数用途: 验证 summary 缺少状态、完成动作、未完成动作、证据 refs、下一步限制时会失败。
 def test_compact_summary_quality_requires_state_done_next_and_refs() -> None:
     from agent_py_agent.agent.contracts.offline_compact_resume_contract import (
         validate_compact_resume_bundle,
@@ -161,8 +149,6 @@ def test_compact_summary_quality_requires_state_done_next_and_refs() -> None:
     assert "pending_actions" in result.findings[0]["missing_fields"]
 
 
-# LLM: _complete_summary keeps compact tests focused on each behavior instead of repeated fixture data.
-# 函数用途: 返回满足 compact 摘要质量合同的最小结构化 summary。
 def _complete_summary() -> dict[str, object]:
     return {
         "current_status": "RUNNING",

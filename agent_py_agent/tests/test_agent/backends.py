@@ -90,8 +90,6 @@ class AcceptedSubagentBackend(BaseBackend):
         )
 
 
-# LLM: CapabilityThenAcceptedBackend simulates a worker that needs one parent grant before finishing.
-# 类用途: 第一轮返回 controlled_exec 能力申请，第二轮看到父级收口结果，用于测试 dispatch 内部闭环。
 class CapabilityThenAcceptedBackend(BaseBackend):
     """测试用后端：先申请 controlled_exec，授权后完成。"""
 
@@ -109,8 +107,6 @@ class CapabilityThenAcceptedBackend(BaseBackend):
         return ModelResponse(text=_controlled_exec_done_result(), backend=self.name)
 
 
-# LLM: IncompleteOutputThenAcceptedBackend covers product-writing blockers that ask for write grants.
-# 类用途: 测试用后端；第一轮模拟网页只写半截并申请继续写，第二轮在父级授权后完成。
 class IncompleteOutputThenAcceptedBackend(BaseBackend):
     """测试用后端：先返回半截产物阻塞，授权继续写后完成。"""
 
@@ -130,8 +126,6 @@ class IncompleteOutputThenAcceptedBackend(BaseBackend):
         return ModelResponse(text=_incomplete_write_done_result(), backend=self.name)
 
 
-# LLM: _controlled_exec_request_result keeps the capability backend class compact.
-# 函数用途: 返回一个结构化 BLOCKED 结果，包含 shell/tool/path/output budget 申请字段。
 def _controlled_exec_request_result() -> str:
     return (
         "[SUBAGENT_RESULT]\n"
@@ -157,8 +151,6 @@ def _controlled_exec_request_result() -> str:
     )
 
 
-# LLM: _incomplete_write_request_result keeps the product-output follow-up scenario reusable.
-# 函数用途: 返回一个非 capability_request failure_type 的 BLOCKED 结果，但包含继续写文件的能力申请。
 def _incomplete_write_request_result() -> str:
     return (
         "[SUBAGENT_RESULT]\n"
@@ -184,8 +176,6 @@ def _incomplete_write_request_result() -> str:
     )
 
 
-# LLM: _incomplete_write_done_result is the second-turn success for artifact continuation.
-# 函数用途: 返回授权后完成的结构化结果，证明 dispatch 后置重跑真的发生。
 def _incomplete_write_done_result() -> str:
     return (
         "[SUBAGENT_RESULT]\n"
@@ -209,8 +199,6 @@ def _incomplete_write_done_result() -> str:
     )
 
 
-# LLM: _controlled_exec_done_result includes the refs required by controlled_exec acceptance.
-# 函数用途: 返回授权后完成的结构化结果，明确记录 used_tools 和 stdout/audit/trash refs。
 def _controlled_exec_done_result() -> str:
     return (
         "[SUBAGENT_RESULT]\n"
@@ -297,7 +285,7 @@ class HierarchicalScheduleSubagentBackend(BaseBackend):
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.prompts.append(prompt)
         if len(self.prompts) == 1:
-            assert "schedule_child_subagents [orchestration]" in prompt
+            assert "schedule_child_subagents [orchestration" in prompt
             return _hierarchical_schedule_tool_call_response(self.name)
 
         assert "child-catalog" in prompt
@@ -310,7 +298,7 @@ class CoordinatorAnalysisOnlyBackend(BaseBackend):
     name = "coordinator_analysis_only_backend"
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
-        assert "schedule_child_subagents [orchestration]" in prompt
+        assert "schedule_child_subagents [orchestration" in prompt
         return ModelResponse(
             text=(
                 "[SUBAGENT_RESULT]\n"
@@ -335,8 +323,6 @@ class CoordinatorAnalysisOnlyBackend(BaseBackend):
         )
 
 
-# LLM: _hierarchical_schedule_tool_call_response keeps the fake model's first turn short.
-# 函数用途: 返回测试模型第一次调用 schedule_child_subagents 的固定响应。
 def _hierarchical_schedule_tool_call_response(backend: str) -> ModelResponse:
     return ModelResponse(
         text=(
@@ -360,8 +346,6 @@ def _hierarchical_schedule_tool_call_response(backend: str) -> ModelResponse:
     )
 
 
-# LLM: _hierarchical_schedule_result_response keeps the fake model's final result reusable.
-# 函数用途: 返回测试模型第二次收口的结构化 subagent 结果。
 def _hierarchical_schedule_result_response(backend: str) -> ModelResponse:
     return ModelResponse(
         text=(

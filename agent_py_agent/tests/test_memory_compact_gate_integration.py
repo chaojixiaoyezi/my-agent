@@ -1,5 +1,3 @@
-# LLM: Compact gate integration tests prove memory compact uses the runtime gate at apply/resume.
-# 模块用途: 只覆盖 compact gate 的真实入口接线，避免撑大 test_memory_compact.py。
 
 from __future__ import annotations
 

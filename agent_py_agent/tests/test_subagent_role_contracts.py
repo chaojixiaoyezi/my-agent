@@ -12,14 +12,12 @@ from agent_py_agent.agent.subagents.role_contracts import (
     normalize_subagent_role,
 )
 from agent_py_agent.agent.subagents.role_templates import role_template_id_for_role
-from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
 
 
-# LLM: test_role_aliases_normalize_legacy_names protects compatibility with existing log-analysis roles.
-# 函数用途: 确认 analyst/reviewer 旧角色名可继续使用，但内部会映射到 reporter/checker。
 def test_role_aliases_normalize_legacy_names():
     assert normalize_subagent_role("analyst") == REPORTER_ROLE
     assert normalize_subagent_role("reviewer") == CHECKER_ROLE
@@ -28,8 +26,6 @@ def test_role_aliases_normalize_legacy_names():
     assert normalize_subagent_role("custom-reviewer") == "custom-reviewer"
 
 
-# LLM: test_natural_hierarchy_role_names_resolve_to_template_ids protects template-driven dispatch.
-# 函数用途: LLM 写出 child_coordinator / leaf_worker / qa_tester 这类自然角色名时，系统要找到模板而不是给空工具。
 def test_natural_hierarchy_role_names_resolve_to_template_ids():
     assert role_template_id_for_role("child_coordinator") == "coordinator"
     assert role_template_id_for_role("grandchild-coordinator") == "coordinator"
@@ -37,8 +33,6 @@ def test_natural_hierarchy_role_names_resolve_to_template_ids():
     assert role_template_id_for_role("qa_tester") == "tester"
 
 
-# LLM: test_create_run_uses_template_defaults_after_natural_role_resolution covers the R80 regression.
-# 函数用途: 创建 child_coordinator 时必须套协调模板并获得派下级工具，不能落成无工具的自由角色。
 def test_create_run_uses_template_defaults_after_natural_role_resolution(tmp_path):
     manager = SubAgentManager(tmp_path)
 
@@ -55,8 +49,6 @@ def test_create_run_uses_template_defaults_after_natural_role_resolution(tmp_pat
     assert any("协调子代理" in check for check in task.acceptance_checks)
 
 
-# LLM: test_unknown_llm_role_falls_back_to_worker_template avoids zero-tool agents.
-# 函数用途: LLM 造出非模板 role 时，任务树可保留该名字，但执行能力至少按 worker 模板补齐。
 def test_unknown_llm_role_falls_back_to_worker_template(tmp_path):
     manager = SubAgentManager(tmp_path)
 
@@ -73,8 +65,6 @@ def test_unknown_llm_role_falls_back_to_worker_template(tmp_path):
     assert any("执行子代理" in check for check in task.acceptance_checks)
 
 
-# LLM: test_create_run_applies_reporter_contract adds evidence expectations without changing execution.
-# 函数用途: 创建 reporter 任务时补稳定验收要求，要求报告结论引用证据或 artifact。
 def test_create_run_applies_reporter_contract(tmp_path):
     manager = SubAgentManager(tmp_path)
 
@@ -84,8 +74,6 @@ def test_create_run_applies_reporter_contract(tmp_path):
     assert any("evidence_refs" in check for check in task.acceptance_checks)
 
 
-# LLM: test_create_run_applies_checker_contract keeps checker capable by default.
-# 函数用途: 创建 checker 任务时保留基础读写/报告能力。
 def test_create_run_applies_checker_contract(tmp_path):
     manager = SubAgentManager(tmp_path)
 
@@ -98,8 +86,6 @@ def test_create_run_applies_checker_contract(tmp_path):
     assert any("concrete findings" in check for check in task.acceptance_checks)
 
 
-# LLM: test_hierarchy_scheduler_applies_role_contracts_to_children covers nested creation.
-# 函数用途: 层级调度创建 child 时同样套用 reporter/checker 角色契约。
 def test_hierarchy_scheduler_applies_role_contracts_to_children(tmp_path):
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(goal="root", thought="orchestrate", plan=["split"])

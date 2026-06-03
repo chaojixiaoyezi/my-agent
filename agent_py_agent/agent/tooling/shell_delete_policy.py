@@ -1,5 +1,3 @@
-# LLM: shell_delete_policy validates explicit delete targets for workspace shell access.
-# 模块用途: 在 workspace-write 模式下只防止 rm/rmdir/unlink 删到工作区外，不限制普通命令执行。
 
 from __future__ import annotations
 
@@ -7,12 +5,10 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_py_agent.agent.contracts.gates.command_policy import command_name
+from agent_py_agent.agent.contracts.gates.command.policy import command_name
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 
 
-# LLM: DeleteCommandCheck bundles one rm/rmdir/unlink target scan.
-# 类用途: 保存删除命令扫描所需 argv、位置、cwd、roots 和访问策略，避免宽参数 helper。
 @dataclass(frozen=True)
 class DeleteCommandCheck:
     argv: list[str]

@@ -11,6 +11,19 @@ import pytest
 
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.subagents.services.parent_planner_builder import ParentPlannerRecordParams
+
+
+def _planner_record_params(**overrides) -> ParentPlannerRecordParams:
+    values = {
+        "dry_run": True,
+        "triggered": False,
+        "ok": True,
+        "decision": "",
+        "message": "",
+    }
+    values.update(overrides)
+    return ParentPlannerRecordParams(**values)
 
 
 class TestMakeDispatchRecord:
@@ -234,11 +247,13 @@ class TestMakeParentPlannerRecord:
             agent = SimpleAgent(cfg, root)
 
             record = agent.subagents.make_parent_planner_record(
-                dry_run=False,
-                triggered=True,
-                ok=True,
-                decision="EXECUTE",
-                message="执行子代理",
+                params=_planner_record_params(
+                    dry_run=False,
+                    triggered=True,
+                    ok=True,
+                    decision="EXECUTE",
+                    message="执行子代理",
+                ),
             )
 
             assert record.dry_run is False
@@ -256,12 +271,14 @@ class TestMakeParentPlannerRecord:
 
             gate_summary = {"has_active": 2, "has_pending": 1, "has_blocked": 0}
             record = agent.subagents.make_parent_planner_record(
-                dry_run=True,
-                triggered=True,
-                ok=True,
-                decision="PLAN",
-                message="规划中",
-                gate_summary=gate_summary,
+                params=_planner_record_params(
+                    dry_run=True,
+                    triggered=True,
+                    ok=True,
+                    decision="PLAN",
+                    message="规划中",
+                    gate_summary=gate_summary,
+                ),
             )
 
             assert record.gate_summary == gate_summary
@@ -274,12 +291,14 @@ class TestMakeParentPlannerRecord:
             agent = SimpleAgent(cfg, root)
 
             record = agent.subagents.make_parent_planner_record(
-                dry_run=False,
-                triggered=True,
-                ok=False,
-                decision="PLAN",
-                message="解析失败",
-                parse_error="JSONDecodeError: Expecting value",
+                params=_planner_record_params(
+                    dry_run=False,
+                    triggered=True,
+                    ok=False,
+                    decision="PLAN",
+                    message="解析失败",
+                    parse_error="JSONDecodeError: Expecting value",
+                ),
             )
 
             assert record.ok is False
@@ -310,18 +329,22 @@ class TestBuildParentPlannerReport:
 
             records = [
                 agent.subagents.make_parent_planner_record(
-                    dry_run=False,
-                    triggered=True,
-                    ok=True,
-                    decision="EXECUTE",
-                    message="执行",
+                    params=_planner_record_params(
+                        dry_run=False,
+                        triggered=True,
+                        ok=True,
+                        decision="EXECUTE",
+                        message="执行",
+                    ),
                 ),
                 agent.subagents.make_parent_planner_record(
-                    dry_run=False,
-                    triggered=False,
-                    ok=True,
-                    decision="SKIP",
-                    message="跳过",
+                    params=_planner_record_params(
+                        dry_run=False,
+                        triggered=False,
+                        ok=True,
+                        decision="SKIP",
+                        message="跳过",
+                    ),
                 ),
             ]
 
@@ -373,11 +396,13 @@ class TestWriteDispatchReport:
 
             records = [
                 agent.subagents.make_parent_planner_record(
-                    dry_run=True,
-                    triggered=True,
-                    ok=True,
-                    decision="PLAN",
-                    message="测试",
+                    params=_planner_record_params(
+                        dry_run=True,
+                        triggered=True,
+                        ok=True,
+                        decision="PLAN",
+                        message="测试",
+                    ),
                 ),
             ]
             report = agent.subagents.build_parent_planner_report(records, dry_run=True)

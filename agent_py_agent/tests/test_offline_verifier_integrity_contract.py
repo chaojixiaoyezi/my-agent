@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 
-# LLM: Verifier integrity should reject keyword-only evidence and forged tool names.
-# 函数用途: 验证报告标题/文字声明不能替代真实 ToolTrace 或证据 refs。
 def test_verifier_rejects_keyword_cheating_and_forged_tool_evidence() -> None:
     from agent_py_agent.agent.contracts.offline_verifier_integrity_contract import (
         validate_verifier_integrity,
@@ -21,8 +19,6 @@ def test_verifier_rejects_keyword_cheating_and_forged_tool_evidence() -> None:
     assert result.error_codes == ("VERIFIER_KEYWORD_ONLY_CONTENT", "EVIDENCE_TOOL_TRACE_MISSING")
 
 
-# LLM: Evidence refs should exist and satisfy freshness budgets.
-# 函数用途: 验证不存在或过期的证据不能让验收通过。
 def test_verifier_rejects_missing_and_stale_evidence_refs() -> None:
     from agent_py_agent.agent.contracts.offline_verifier_integrity_contract import (
         validate_verifier_integrity,
@@ -43,8 +39,6 @@ def test_verifier_rejects_missing_and_stale_evidence_refs() -> None:
     assert result.error_codes == ("EVIDENCE_REF_MISSING", "EVIDENCE_STALE")
 
 
-# LLM: Core verifiers should be bounded and not depend on LLM calls for pass/fail.
-# 函数用途: 验证 verifier 超时或声明 requires_llm=true 都会被核心验收合同拒绝。
 def test_core_verifier_timeout_and_llm_dependency_are_failures() -> None:
     from agent_py_agent.agent.contracts.offline_verifier_integrity_contract import (
         validate_verifier_integrity,

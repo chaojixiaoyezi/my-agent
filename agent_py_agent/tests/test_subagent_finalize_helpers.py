@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.subagent_finalize_helpers import (
+from agent_py_agent.agent.agent_core.subagent.finalize_helpers import (
     FinalizedRunnerRecordRequest,
     record_finalized_runner_result,
 )
-from agent_py_agent.agent.agent_core.subagent_params import SubagentFinalizeParams
+from agent_py_agent.agent.agent_core.subagent.params import SubagentFinalizeParams
 from agent_py_agent.agent.subagent import SubAgentParsedOutput
 
 

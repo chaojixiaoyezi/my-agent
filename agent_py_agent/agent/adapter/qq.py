@@ -1,5 +1,3 @@
-# LLM: External adapter module; keep platform payload and runtime boundary contracts stable.
-# 模块用途: 对接 QQ、飞书等外部渠道，把平台事件转换成内部请求。
 
 
 from __future__ import annotations
@@ -29,8 +27,6 @@ logger = logging.getLogger(__name__)
 _QQ_API_BASE = "https://api.sgroup.qq.com"
 _QQ_TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
 
-# LLM: _qq_send_message 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 函数用途: 处理QQsend消息相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _qq_send_message(self, user_id: str, message: OutgoingMessage) -> bool:
     try:
         token = self._get_access_token()
@@ -55,23 +51,17 @@ def _qq_send_message(self, user_id: str, message: OutgoingMessage) -> bool:
         logger.error(f"QQ send_message 异常: {exc}")
         return False
 
-# LLM: _qq_send_request 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 函数用途: 处理QQsend请求相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _qq_send_request(req: urllib.request.Request) -> tuple[bool, dict[str, Any]]:
     with urllib.request.urlopen(req, timeout=10) as resp:
         result = json.loads(resp.read().decode("utf-8"))
         return result.get("code") == 0 or resp.status == 200, result
 
-# LLM: _parse_ws_payload 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 函数用途: 解析并归一化ws载荷的输入形态，让下游只处理稳定结构；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _parse_ws_payload(raw: str) -> dict[str, Any] | None:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         return None
 
-# LLM: _qq_send_target 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 函数用途: 处理QQsendtarget相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _qq_send_target(user_id: str, message: OutgoingMessage) -> tuple[str, dict[str, object]]:
     user_openid = message.metadata.get("qq_user_openid", user_id)
     payload = {"content": message.content[:4000], "msg_type": 0}
@@ -82,8 +72,6 @@ def _qq_send_target(user_id: str, message: OutgoingMessage) -> tuple[str, dict[s
         return "", payload
     return f"{_QQ_API_BASE}/channels/{channel_id}/messages", payload
 
-# LLM: _qq_get_access_token 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 函数用途: 处理QQgetaccess令牌相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _qq_get_access_token(self) -> str | None:
     now = time.time()
     if self._access_token and now < self._token_expires_at - 60:
@@ -101,8 +89,6 @@ def _qq_get_access_token(self) -> str | None:
         logger.error(f"获取 QQ access_token 失败: {exc}")
         return None
 
-# LLM: _qq_request_token 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 函数用途: 处理QQ请求令牌相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _qq_request_token(app_id: str, app_secret: str) -> dict[str, Any]:
     http_payload = json.dumps({
         "appId": str(app_id),
@@ -116,8 +102,6 @@ def _qq_request_token(app_id: str, app_secret: str) -> dict[str, Any]:
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
-# LLM: _qq_fetch_gateway_url 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 函数用途: 处理QQfetch网关url相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _qq_fetch_gateway_url(self, token: str) -> str | None:
     try:
         req = urllib.request.Request(
@@ -131,14 +115,10 @@ def _qq_fetch_gateway_url(self, token: str) -> str | None:
         logger.error(f"获取 QQ gateway URL 失败: {exc}")
         return None
 
-# LLM: QQAdapter 属于外部通道适配的类边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-# 类用途: 适配qqadapter协议，把平台消息转换为内部统一消息契约；关键副作用: 方法可能触发通道配置、消息回调和平台输入输出相关副作用，需保持公开契约稳定。
 class QQAdapter(BaseChannelAdapter):
 
     adapter_name = "qq"
 
-    # LLM: __init__ 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持通道配置、消息回调和平台输入输出上的返回值和副作用边界稳定。
     def __init__(
         self,
         config: dict[str, Any],
@@ -169,8 +149,6 @@ class QQAdapter(BaseChannelAdapter):
         self._reconnect_count = 0
         self._max_reconnect = 5
 
-    # LLM: start 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 推进start的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响通道配置、消息回调和平台输入输出，需保持重试、超时和状态迁移语义。
     def start(self) -> None:
         if self._running:
             return
@@ -183,8 +161,6 @@ class QQAdapter(BaseChannelAdapter):
             self._running = True
             logger.info("QQ 适配器已启动（WebSocket 模式）")
 
-    # LLM: stop 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 推进stop的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响通道配置、消息回调和平台输入输出，需保持重试、超时和状态迁移语义。
     def stop(self) -> None:
         if not self._running:
             return
@@ -195,8 +171,6 @@ class QQAdapter(BaseChannelAdapter):
             self._join_ws_threads()
             logger.info("QQ 适配器已停止")
 
-    # LLM: _run_ws_loop 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 推进ws循环的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响通道配置、消息回调和平台输入输出，需保持重试、超时和状态迁移语义。
     def _run_ws_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
@@ -216,8 +190,6 @@ class QQAdapter(BaseChannelAdapter):
             logger.info(f"QQ WebSocket {wait:.0f}s 后重连...")
             self._stop_event.wait(wait)
 
-    # LLM: _connect_and_run 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 处理connectrun相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响通道配置、消息回调和平台输入输出，需保持重试、超时和状态迁移语义。
     def _connect_and_run(self) -> None:
         token = self._get_access_token()
         if not token:
@@ -253,13 +225,9 @@ class QQAdapter(BaseChannelAdapter):
                 continue
             self._handle_ws_message(msg)
 
-    # LLM: _intents_for_qq 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 处理intentsQQ相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持通道配置、消息回调和平台输入输出上的返回值和副作用边界稳定。
     def _intents_for_qq(self) -> int:
         return (1 << 25) | (1 << 30) | (1 << 12)
 
-    # LLM: _handle_ws_message 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 推进ws消息的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响通道配置、消息回调和平台输入输出，需保持重试、超时和状态迁移语义。
     def _handle_ws_message(self, raw: str) -> None:
         payload = _parse_ws_payload(raw)
         if payload is None:
@@ -278,8 +246,6 @@ class QQAdapter(BaseChannelAdapter):
             self._session_id = None
             self._stop_event.set()
 
-    # LLM: _handle_dispatch_event 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 推进event的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响通道配置、消息回调和平台输入输出，需保持重试、超时和状态迁移语义。
     def _handle_dispatch_event(self, payload: dict[str, Any], d: dict[str, Any]) -> None:
         seq = payload.get("s", 0)
         if seq:
@@ -294,16 +260,12 @@ class QQAdapter(BaseChannelAdapter):
         if t == "INVALID_SESSION":
             self._request_reconnect("QQ WebSocket INVALID_SESSION，重新连接")
 
-    # LLM: _maybe_start_heartbeat 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 处理maybestartheartbeat相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响通道配置、消息回调和平台输入输出，需保持重试、超时和状态迁移语义。
     def _maybe_start_heartbeat(self, d: dict[str, Any]) -> None:
         raw_hb = d.get("heartbeat_interval", 0)
         if raw_hb and raw_hb > 0:
             self._heartbeat_interval = float(raw_hb)
             self._start_heartbeat()
 
-    # LLM: _start_heartbeat 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 推进heartbeat的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响通道配置、消息回调和平台输入输出，需保持重试、超时和状态迁移语义。
     def _start_heartbeat(self) -> None:
         if self._heartbeat_thread and self._heartbeat_thread.is_alive():
             return
@@ -311,8 +273,6 @@ class QQAdapter(BaseChannelAdapter):
         if interval_sec <= 0:
             return
 
-        # LLM: heartbeat_loop 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-        # 函数用途: 处理heartbeat循环相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持通道配置、消息回调和平台输入输出上的返回值和副作用边界稳定。
         def heartbeat_loop() -> None:
             while not self._stop_event.is_set():
                 self._send_heartbeat_once()
@@ -321,8 +281,6 @@ class QQAdapter(BaseChannelAdapter):
         self._heartbeat_thread = threading.Thread(target=heartbeat_loop, daemon=True)
         self._heartbeat_thread.start()
 
-    # LLM: _process_qq_message 属于外部通道适配的函数边界；调整时先确认通道配置、消息回调和平台输入输出仍按原契约工作。
-    # 函数用途: 推进QQ消息的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响通道配置、消息回调和平台输入输出，需保持重试、超时和状态迁移语义。
     def _process_qq_message(self, d: dict[str, Any]) -> None:
         payload = {"d": d, "t": "MESSAGE_CREATE"}
         msg = qq_to_incoming(payload)

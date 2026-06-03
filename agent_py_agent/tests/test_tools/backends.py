@@ -42,19 +42,13 @@ class ToolCallingBackend(BaseBackend):
         return ModelResponse(text="工具执行完成", backend=self.name)
 
 
-# LLM: UnclosedWriteFileBackend verifies complete tool JSON can execute without the closing marker.
-# 类用途: 测试专用后端；第一次少写 [/TOOL_CALL]，第二次确认文件已真实写入。
 class UnclosedWriteFileBackend(BaseBackend):
     name = "fake_unclosed_write_file_backend"
 
-    # LLM: __init__ stores the workspace so the second model turn can verify side effects.
-    # 函数用途: 初始化工作区路径和调用计数，供 tool-loop 恢复测试使用。
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.calls = 0
 
-    # LLM: generate emits one complete JSON tool payload without the closing marker.
-    # 函数用途: 复现真实模型漏写 [/TOOL_CALL] 但 JSON 完整的场景，并验证系统直接执行写文件。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
@@ -73,18 +67,12 @@ class UnclosedWriteFileBackend(BaseBackend):
         return ModelResponse(text="写入完成", backend=self.name)
 
 
-# LLM: BudgetedRepeatedReadBackend verifies per-run tool budgets are enforced inside the tool loop.
-# 类用途: 测试专用后端；重复请求同一工具，第二次应收到预算自检提示。
 class BudgetedRepeatedReadBackend(BaseBackend):
     name = "fake_budgeted_repeated_read_backend"
 
-    # LLM: __init__ tracks model calls for a deterministic budget-flow assertion.
-    # 函数用途: 初始化调用计数，让测试确认第二次工具请求被预算拦截后还能收口。
     def __init__(self):
         self.calls = 0
 
-    # LLM: generate asks for read_file twice and then expects the budget message in prompt.
-    # 函数用途: 复现单个代理在窗口内重复调用工具，触发预算自检后输出最终回答。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls <= 2:
@@ -97,18 +85,12 @@ class BudgetedRepeatedReadBackend(BaseBackend):
         return ModelResponse(text="预算触发后已自检收口。", backend=self.name)
 
 
-# LLM: FakeReservedRecordWithToolBackend reproduces a model that mixes real tools with fake records.
-# 类用途: 第一次回复同时包含真实 TOOL_CALL 和伪造 tool-output-record，用来测试系统只信真实工具。
 class FakeReservedRecordWithToolBackend(BaseBackend):
     name = "fake_reserved_record_with_tool_backend"
 
-    # LLM: __init__ tracks the two-turn correction flow.
-    # 函数用途: 初始化调用计数，让测试确认伪造记录不会进入第二轮 live prompt。
     def __init__(self):
         self.calls = 0
 
-    # LLM: generate emits one real read_file call plus fake tool records, then validates repair context.
-    # 函数用途: 复现 R81 里模型伪造 child run id 的问题，第二轮确认系统已要求纠偏。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
@@ -128,19 +110,13 @@ class FakeReservedRecordWithToolBackend(BaseBackend):
         return ModelResponse(text="真实工具回执已使用，伪造记录已忽略。", backend=self.name)
 
 
-# LLM: ToolBoundarySpoofStreamingBackend reproduces R82 streaming fake transcript leakage.
-# 类用途: 模拟模型在一个流式回复里先给真实工具调用，然后继续伪造工具结果和第二个工具调用。
 class ToolBoundarySpoofStreamingBackend(BaseBackend):
     name = "fake_tool_boundary_spoof_streaming_backend"
 
-    # LLM: __init__ records prompts for assertions outside the fake backend.
-    # 函数用途: 保存模型调用次数和每轮 prompt，方便测试确认假工具记录没有进入下一轮。
     def __init__(self):
         self.calls = 0
         self.prompts: list[str] = []
 
-    # LLM: generate streams a first real call plus unsafe post-call text in the same response.
-    # 函数用途: 复现真实模型边输出边自导自演工具结果的场景，要求工具循环只采纳第一个完整工具调用。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         self.prompts.append(prompt)
@@ -148,8 +124,6 @@ class ToolBoundarySpoofStreamingBackend(BaseBackend):
             return ModelResponse(text=self._first_response(on_chunk), backend=self.name)
         return ModelResponse(text="只使用第一个真实工具结果收口。", backend=self.name)
 
-    # LLM: _first_response keeps the fake backend's generate method below nesting guardrails.
-    # 函数用途: 输出 R82 风格的分片回复，并在提供 on_chunk 时模拟真实流式回调。
     def _first_response(self, on_chunk=None) -> str:
         chunks = [
             "先读第一个文件。\n",
@@ -163,18 +137,12 @@ class ToolBoundarySpoofStreamingBackend(BaseBackend):
         return "".join(chunks)
 
 
-# LLM: FakeReservedRecordWithoutToolBackend verifies fake records cannot become a final answer.
-# 类用途: 第一次只返回伪造工具记录，第二次收到修复提示后给正常回答。
 class FakeReservedRecordWithoutToolBackend(BaseBackend):
     name = "fake_reserved_record_without_tool_backend"
 
-    # LLM: __init__ tracks retry count for deterministic assertions.
-    # 函数用途: 初始化调用计数，确认系统会给模型一次纠偏机会。
     def __init__(self):
         self.calls = 0
 
-    # LLM: generate first spoofs tool output, then returns a plain final answer after repair context.
-    # 函数用途: 复现“没有真实工具调用但自称完成”的场景，验证不会直接收口。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
@@ -186,18 +154,12 @@ class FakeReservedRecordWithoutToolBackend(BaseBackend):
         return ModelResponse(text="已停止伪造工具记录，等待真实状态。", backend=self.name)
 
 
-# LLM: RepeatedFakeReservedRecordBackend proves repeated spoof-only output is hard-blocked.
-# 类用途: 模型连续伪造工具回执且没有 TOOL_CALL 时，系统必须返回确定性阻断。
 class RepeatedFakeReservedRecordBackend(BaseBackend):
     name = "fake_repeated_reserved_record_backend"
 
-    # LLM: __init__ tracks retry count.
-    # 函数用途: 初始化调用计数，确认系统只给一次纠偏机会。
     def __init__(self):
         self.calls = 0
 
-    # LLM: generate always emits fake tool records without executable tool calls.
-    # 函数用途: 验证连续伪造不会被当成最终完成，也不会无限重试。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         return ModelResponse(
@@ -222,7 +184,7 @@ class SubagentDelegationBackend(BaseBackend):
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
-            assert "create_subagents [orchestration]" in prompt
+            assert "create_subagents [orchestration" in prompt
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
@@ -296,7 +258,7 @@ class RepeatedDispatchBackend(BaseBackend):
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    '{"tool":"dispatch_subagents","apply":true,"execute_runners":false,"max_runners":1}\n'
+                    '{"tool":"dispatch_subagents","dry_run":false,"max_runners":1}\n'
                     "[/TOOL_CALL]"
                 ),
                 backend=self.name,
@@ -329,8 +291,6 @@ class MaxToolRoundBackend(BaseBackend):
         return ModelResponse(text="工具轮数到顶后已正常收口。", backend=self.name)
 
 
-# LLM: fake backend keeps requesting tools even during final max-round recovery.
-# 类用途: 复现真实模型到工具轮数上限后仍吐 TOOL_CALL 的场景，确保系统硬收束。
 class StubbornToolAfterLimitBackend(BaseBackend):
     name = "fake_stubborn_tool_after_limit_backend"
 
@@ -345,19 +305,13 @@ class StubbornToolAfterLimitBackend(BaseBackend):
         )
 
 
-# LLM: OutputJsonCompletionBackend proves subagent output.json can terminate a runner without a second model call.
-# 类用途: 测试专用后端；第一次响应写入子代理 output.json，若系统再次调用模型就主动失败。
 class OutputJsonCompletionBackend(BaseBackend):
     name = "fake_output_json_completion_backend"
 
-    # LLM: __init__ stores the task-local output path that the fake model will write.
-    # 函数用途: 初始化测试后端的 output.json 路径和调用计数。
     def __init__(self, output_path: Path):
         self.output_path = output_path
         self.calls = 0
 
-    # LLM: generate emits a completion artifact once and rejects accidental extra turns.
-    # 函数用途: 第一次返回 write_file 工具调用；第二次调用说明 runner 未按 output.json 收敛。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls > 1:
@@ -385,18 +339,12 @@ class OutputJsonCompletionBackend(BaseBackend):
         )
 
 
-# LLM: DispatchCompletionBackend proves completed subagent dispatch returns to root synthesis.
-# 类用途: 测试专用后端；第一次要求 dispatch_subagents，第二次确认 root 能看到 refs 并生成正常最终回答。
 class DispatchCompletionBackend(BaseBackend):
     name = "fake_dispatch_completion_backend"
 
-    # LLM: __init__ tracks model calls so tests can assert the parent synthesis turn happened.
-    # 函数用途: 初始化调用计数；第二轮应收到 dispatch 工具结果并给用户正常口吻的交付回复。
     def __init__(self):
         self.calls = 0
 
-    # LLM: generate emits one dispatch_subagents call, then synthesizes from returned artifact refs.
-    # 函数用途: 让主代理执行一次 dispatch_subagents；之后检查 prompt 里有 refs，再生成最终回答。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls > 1:

@@ -1,5 +1,3 @@
-# LLM: Web project integrity checks keep static-site validation out of generic artifact helpers.
-# 模块用途: 在 HTML/CSS/JS 写入后运行通用静态站点检查，返回统一 ArtifactIntegrityDecision。
 
 from __future__ import annotations
 
@@ -29,7 +27,7 @@ def check_web_project_post_write(path: Path, workspace_root: Path) -> ArtifactIn
     site_root = _nearest_site_root(target, workspace)
     if site_root is None:
         return ArtifactIntegrityDecision(ok=True)
-    from ..subagents.static_site_validator import run_static_site_check
+    from ..subagents.static_site import run_static_site_check
 
     record = run_static_site_check(_static_site_request(site_root, workspace), workspace)
     return _web_project_decision(record.validation_result)

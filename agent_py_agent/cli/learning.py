@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 from __future__ import annotations
 
@@ -16,8 +14,6 @@ import sys
 from .common import make_agent
 
 
-# LLM: _ensure_learning_enabled 属于learning CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _ensure_learning_enabled(args) -> tuple[int, object | None]:
     agent = make_agent(args)
     if agent.config.enable_self_learning:
@@ -26,8 +22,6 @@ def _ensure_learning_enabled(args) -> tuple[int, object | None]:
     return 2, None
 
 
-# LLM: cmd_learn_list 属于learning CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_learn_list(args) -> int:
     code, agent = _ensure_learning_enabled(args)
     if code:
@@ -46,8 +40,6 @@ def cmd_learn_list(args) -> int:
     return 0
 
 
-# LLM: cmd_learn_accept 属于learning CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_learn_accept(args) -> int:
     code, agent = _ensure_learning_enabled(args)
     if code:
@@ -60,8 +52,6 @@ def cmd_learn_accept(args) -> int:
     return 0
 
 
-# LLM: cmd_learn_reject 属于learning CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_learn_reject(args) -> int:
     code, agent = _ensure_learning_enabled(args)
     if code:
@@ -74,8 +64,6 @@ def cmd_learn_reject(args) -> int:
     return 0
 
 
-# LLM: cmd_learn_stats 属于learning CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_learn_stats(args) -> int:
     code, agent = _ensure_learning_enabled(args)
     if code:

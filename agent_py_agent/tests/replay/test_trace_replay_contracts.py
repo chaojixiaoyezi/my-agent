@@ -112,8 +112,6 @@ def test_trace_replay_rejects_dry_run_claimed_as_real_success(tmp_path: Path):
     assert "FINAL_STATUS_REJECTED" in result.contract_result.error_codes
 
 
-# LLM: replay should preserve collection coverage failures from real complex-task traces.
-# 函数用途: 验证历史 trace 里最终状态成功但结构化采集范围不足时，回放仍按旧合同拒绝。
 def test_trace_replay_rejects_short_collection_coverage_success(tmp_path: Path):
     from agent_py_agent.tests.support.trace_replay import replay_contract_trace
 

@@ -1,5 +1,3 @@
-# LLM: Exploration fuse config keeps long-research budgets configurable instead of hidden constants.
-# 模块用途: 集中定义探索熔断次数、提示节点和 0=不限制语义，避免真实研究任务被写死阈值误伤。
 
 from __future__ import annotations
 
@@ -8,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..settings.config_io import load_simple_yaml
-from .runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
+from .runtime.guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 
 DEFAULT_EXPLORATION_FUSE_ROUND_THRESHOLD = 300
 DEFAULT_UNLIMITED_HINT_ROUNDS = (50, 150, 250)
@@ -19,8 +17,6 @@ _RATIO_HINT_NUMERATORS = (1, 2, 4)
 _RATIO_HINT_DENOMINATOR = 5
 
 
-# LLM: ExplorationFuseConfig is the runtime contract for read-only exploration budget behavior.
-# 类用途: 保存探索额度上限和提示节点；round_threshold=0 表示不按次数阻断，只保留固定提醒。
 @dataclass(frozen=True)
 class ExplorationFuseConfig:
     """Config for exploration-only tool loop hints and blocking.
@@ -39,8 +35,6 @@ class ExplorationFuseConfig:
     local_progress_unlimited_hint_interval: int = DEFAULT_LOCAL_PROGRESS_UNLIMITED_HINT_INTERVAL
 
 
-# LLM: exploration_fuse_config keeps exploration budgets outside the main AgentConfig.
-# 函数用途: 从专门的探索预算配置读取阈值；缺失、非法或负数时回到默认 300，0 保留为不限制。
 def exploration_fuse_config(agent: object) -> ExplorationFuseConfig:
     override = getattr(agent, "_exploration_fuse_config", None)
     if isinstance(override, ExplorationFuseConfig):
@@ -48,8 +42,6 @@ def exploration_fuse_config(agent: object) -> ExplorationFuseConfig:
     return load_exploration_fuse_config()
 
 
-# LLM: load_exploration_fuse_config is the single reader for exploration fields in the shared runtime guard config.
-# 函数用途: 读取 agent_py_agent/config/runtime_guard_config.yaml；环境变量只作为部署覆盖入口。
 def load_exploration_fuse_config(path: Path | str | None = None) -> ExplorationFuseConfig:
     config_path = _resolve_config_path(path)
     data = _read_config_data(config_path)
@@ -66,8 +58,6 @@ def load_exploration_fuse_config(path: Path | str | None = None) -> ExplorationF
     )
 
 
-# LLM: exploration_fuse_hint_rounds returns ratio hints for finite budgets and fixed hints for unlimited budgets.
-# 函数用途: 计算应该提示模型的探索轮次：有限额度按 1/5、2/5、4/5；0 额度按 50、150、250。
 def exploration_fuse_hint_rounds(config: ExplorationFuseConfig) -> tuple[int, ...]:
     if config.round_threshold <= 0:
         return tuple(item for item in config.unlimited_hint_rounds if item > 0)
@@ -78,8 +68,6 @@ def exploration_fuse_hint_rounds(config: ExplorationFuseConfig) -> tuple[int, ..
     return tuple(sorted(item for item in hints if item < config.round_threshold))
 
 
-# LLM: exploration_fuse_used_percent renders stable percentages for the configured ratio hints.
-# 函数用途: 给模型提示“已经消耗多少探索额度”；非比例提示返回 0，由调用方按固定提醒处理。
 def exploration_fuse_used_percent(config: ExplorationFuseConfig, count: int) -> int:
     if config.round_threshold <= 0:
         return 0

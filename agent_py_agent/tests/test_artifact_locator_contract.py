@@ -133,7 +133,7 @@ def test_artifact_locator_uses_nested_artifact_intent_extensions(tmp_path):
 
 
 def test_delivery_closeout_uses_artifact_locator_when_path_is_not_declared(tmp_path):
-    from agent_py_agent.agent.agent_core.main_agent_delivery_closeout_artifacts import (
+    from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import (
         DeliveryContractValidationRequest,
         _validate_contract_artifacts,
     )
@@ -166,7 +166,7 @@ def test_delivery_closeout_uses_artifact_locator_when_path_is_not_declared(tmp_p
 
 
 def test_delivery_closeout_locates_spreadsheet_artifact_without_declared_path(tmp_path):
-    from agent_py_agent.agent.agent_core.main_agent_delivery_closeout_artifacts import (
+    from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import (
         DeliveryContractValidationRequest,
         _validate_contract_artifacts,
     )

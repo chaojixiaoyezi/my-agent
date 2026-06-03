@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 from __future__ import annotations
 
@@ -40,8 +38,6 @@ RUNTIME_DIRS = [
 ]
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 collect_doctor_status 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 collect doctor status 的候选结果，并按参数完成筛选、排序或数量限制。
 def collect_doctor_status(
     config_path: str | Path | None = None,
     *,
@@ -53,7 +49,6 @@ def collect_doctor_status(
     这个函数只回答'模块配置是什么、目录在哪里、功能门现在是什么状态'。
     它不会读取真实日志、不会跑检测器、不会启动子代理，也不会加载 ML 或集群后端。
 
-    参数说明:
     config_path: 可选配置文件路径；不传时使用默认 `config/log_analysis_config.yaml`。
     workspace_root: 可选工作区根目录；用于把相对 data_dir 解析到指定工作区，测试时常传临时目录。
 
@@ -88,14 +83,10 @@ def collect_doctor_status(
     }
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _workspace_root 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 workspace root 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def _workspace_root(workspace_root: str | Path | None) -> Path:
     return Path(workspace_root) if workspace_root is not None else Path(__file__).resolve().parents[2]
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _load_doctor_config 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 读取 load doctor config 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
 def _load_doctor_config(path: Path) -> tuple[LogAnalysisConfig, list[dict[str, Any]]]:
     try:
         config = load_log_analysis_config(path, missing_ok=True)
@@ -111,8 +102,6 @@ def _load_doctor_config(path: Path) -> tuple[LogAnalysisConfig, list[dict[str, A
         return config, [warning.to_dict()]
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _effective_config 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 effective config 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def _effective_config(config: LogAnalysisConfig) -> dict[str, Any]:
     return {
         "worker_enabled": config.worker_enabled,
@@ -126,8 +115,6 @@ def _effective_config(config: LogAnalysisConfig) -> dict[str, Any]:
     }
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _runtime_paths 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 runtime paths 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _runtime_paths(data_dir: Path) -> dict[str, dict[str, Any]]:
     paths = {"base": _path_status(data_dir)}
     for name in RUNTIME_DIRS:
@@ -135,15 +122,12 @@ def _runtime_paths(data_dir: Path) -> dict[str, dict[str, Any]]:
     return paths
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _path_status 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 path status 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def _path_status(path: Path) -> dict[str, Any]:
     """把一个路径转成 doctor 可展示的 path/exists/is_dir 三元状态。
 
     新手说明:
     doctor 不需要读取目录内容，只要告诉用户这个路径存在吗、是不是目录。
 
-    参数说明:
     path: 要检查的本地路径。
 
     返回说明:

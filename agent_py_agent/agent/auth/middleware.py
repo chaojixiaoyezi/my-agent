@@ -1,9 +1,6 @@
-# LLM: Auth module; keep user/session/token contracts stable for middleware callers.
-# 模块用途: 处理认证用户、会话、权限检查和请求中间件。
 
 """HTTP 请求鉴权中间件 — 从请求中提取身份并进行权限检查。
 
-给人看的解释：
 AuthMiddleware 用于 gateway HTTP 服务，对每个请求：
 1. 从 HTTP header 提取 X-User-Id 和 X-Channel
 2. 如果没有 header → 视为终端（chat），给 ADMIN 权限
@@ -22,21 +19,15 @@ from .models import Action, Permission, Role
 logger = logging.getLogger(__name__)
 
 
-# LLM: AuthMiddleware is a 认证和权限 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: Gateway HTTP 请求鉴权中间件。
 class AuthMiddleware:
     """Gateway HTTP 请求鉴权中间件。"""
 
     HEADER_USER_ID = "X-User-Id"
     HEADER_CHANNEL = "X-Channel"
 
-    # LLM: AuthMiddleware.__init__ belongs to 认证和权限; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 初始化实例依赖和字段，不应在构造阶段做难以回滚的重副作用；它是 AuthMiddleware 的方法，通常依赖实例字段。
     def __init__(self, auth_manager: AuthManager) -> None:
         self.auth_manager = auth_manager
 
-    # LLM: AuthMiddleware.extract_identity belongs to 认证和权限; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 从 HTTP header 提取 user_id 和 channel。 规则： - 有 X-User-Id + X-Channel → 使用 header 值 - 没有 header → 终端请求，channel=chat，user_id=默认用户。
     def extract_identity(self, headers: dict[str, str]) -> tuple[str, str]:
         """从 HTTP header 提取 user_id 和 channel。
 
@@ -61,15 +52,11 @@ class AuthMiddleware:
 
         return (user_id, channel or "unknown")
 
-    # LLM: AuthMiddleware.get_permission belongs to 认证和权限; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 从请求 header 认证并返回权限对象。。
     def get_permission(self, headers: dict[str, str]) -> Permission:
         """从请求 header 认证并返回权限对象。"""
         user_id, channel = self.extract_identity(headers)
         return self.auth_manager.authenticate(channel, user_id)
 
-    # LLM: AuthMiddleware.check_permission belongs to 认证和权限; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 检查请求是否有权执行指定操作。。
     def check_permission(
         self,
         headers: dict[str, str],
@@ -94,8 +81,6 @@ class AuthMiddleware:
             )
         return (True, permission, 200, {})
 
-    # LLM: AuthMiddleware.require_admin belongs to 认证和权限; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 检查请求是否为管理员。。
     def require_admin(self, headers: dict[str, str]) -> tuple[bool, Permission, int, dict[str, Any]]:
         """检查请求是否为管理员。"""
         permission = self.get_permission(headers)
@@ -111,16 +96,12 @@ class AuthMiddleware:
             )
         return (True, permission, 200, {})
 
-    # LLM: AuthMiddleware.require_auth belongs to 认证和权限; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 检查请求是否已认证（任何角色都可以）。。
     def require_auth(self, headers: dict[str, str]) -> tuple[bool, Permission, int, dict[str, Any]]:
         """检查请求是否已认证（任何角色都可以）。"""
         permission = self.get_permission(headers)
         return (True, permission, 200, {})
 
 
-# LLM: extract_user_from_request belongs to 认证和权限; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 从 HTTP handler 的 headers 提取 user_id 和 channel。。
 def extract_user_from_request(handler) -> tuple[str, str]:
     """从 HTTP handler 的 headers 提取 user_id 和 channel。"""
     headers = {}
@@ -132,8 +113,6 @@ def extract_user_from_request(handler) -> tuple[str, str]:
     return mw.extract_identity(headers)
 
 
-# LLM: require_permission belongs to 认证和权限; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 在 handler 方法内调用，完成鉴权并发送响应。 如果无权，返回 True（已发送响应）；有权返回 False（继续执行）。。
 def require_permission(handler, action: Action, target_user_id: str | None = None) -> bool:
     """在 handler 方法内调用，完成鉴权并发送响应。
 
@@ -153,8 +132,6 @@ def require_permission(handler, action: Action, target_user_id: str | None = Non
     return False
 
 
-# LLM: require_admin_handler belongs to 认证和权限; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 在 handler 方法内调用，检查管理员权限。。
 def require_admin_handler(handler) -> bool:
     """在 handler 方法内调用，检查管理员权限。"""
     mw = getattr(handler, "_auth_middleware", None)

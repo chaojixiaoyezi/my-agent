@@ -1,5 +1,3 @@
-# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
 
 from __future__ import annotations
 
@@ -7,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..common.value_parsing import text_or_sequence_strings
 from .capability_request_identity import find_equivalent_capability_request
 from .coverage_records import merge_task_coverage_records
 from .models import (
@@ -15,7 +14,7 @@ from .models import (
     SubAgentTask,
     VerificationEvidence,
 )
-from .parsing import _normalize_runner_items, _split_allowed_items, _string_dict, _string_list
+from .parsing import _normalize_runner_items, _split_allowed_items, _string_dict
 from .result_artifact_evidence import merge_artifact_evidence, normalize_artifact_items
 from .result_structured_evidence import (
     process_evidence_items,
@@ -24,13 +23,7 @@ from .result_structured_evidence import (
 )
 from .utils import _merge_list, _new_id
 
-# LLM: artifact refs are normalized before merge so parent agents can read durable task-local paths.
-# 函数用途: 本文件合并 structured output 时先把模型短路径修正为真实 artifact refs，再进入验收链路。
-# LLM: coverage records are persisted as task attributes so acceptance/closeout never parse prose fallback.
 
-
-# LLM: MergeActualToolsParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存mergeactual工具参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class MergeActualToolsParams:
 
@@ -42,8 +35,6 @@ class MergeActualToolsParams:
     now: float
 
 
-# LLM: MergeTaskToolsParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存merge任务工具参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class MergeTaskToolsParams:
 
@@ -55,8 +46,6 @@ class MergeTaskToolsParams:
     now: float
 
 
-# LLM: _merge_actual_tools 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 更新actual工具对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def _merge_actual_tools(params: MergeActualToolsParams):
     task = params.task
     actual_allowed_tools = [item for item in params.actual_tools if item in params.allowed_tools]
@@ -86,8 +75,6 @@ def _merge_actual_tools(params: MergeActualToolsParams):
     return ignored_tools
 
 
-# LLM: _create_evidence_from_parsed 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 构建来自证据parsed所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _create_evidence_from_parsed(parsed, now):
     count = 0
     for item in parsed.evidence:
@@ -97,8 +84,6 @@ def _create_evidence_from_parsed(parsed, now):
     return count
 
 
-# LLM: _create_capability_requests_from_parsed 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 构建来自能力requestsparsed所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _create_capability_requests_from_parsed(task, parsed, now):
     count = 0
     created_ids = []
@@ -114,19 +99,19 @@ def _create_capability_requests_from_parsed(task, parsed, now):
             needed_capability=needed,
             expected_output=str(item.get("expected_output", "") or ""),
             capability_type=str(item.get("capability_type", "generic") or "generic"),
-            tried=_string_list(item.get("tried", [])),
-            evidence=_string_list(item.get("evidence", [])),
+            tried=text_or_sequence_strings(item.get("tried", [])),
+            evidence=text_or_sequence_strings(item.get("evidence", [])),
             constraints=_string_dict(item.get("constraints", {})),
-            requested_tools=_string_list(item.get("requested_tools", [])),
-            requested_skills=_string_list(item.get("requested_skills", [])),
-            requested_mcp_tools=_string_list(item.get("requested_mcp_tools", [])),
-            requested_commands=_string_list(item.get("requested_commands", [])),
-            cwd_scope=_string_list(item.get("cwd_scope", [])),
-            path_scope=_string_list(item.get("path_scope", [])),
-            network_scope=_string_list(item.get("network_scope", [])),
+            requested_tools=text_or_sequence_strings(item.get("requested_tools", [])),
+            requested_skills=text_or_sequence_strings(item.get("requested_skills", [])),
+            requested_mcp_tools=text_or_sequence_strings(item.get("requested_mcp_tools", [])),
+            requested_commands=text_or_sequence_strings(item.get("requested_commands", [])),
+            cwd_scope=text_or_sequence_strings(item.get("cwd_scope", [])),
+            path_scope=text_or_sequence_strings(item.get("path_scope", [])),
+            network_scope=text_or_sequence_strings(item.get("network_scope", [])),
             output_budget=_object_dict(item.get("output_budget", {})),
             risk_level=str(item.get("risk_level", "") or ""),
-            fallback_attempted=_string_list(item.get("fallback_attempted", [])),
+            fallback_attempted=text_or_sequence_strings(item.get("fallback_attempted", [])),
             escalation_target=str(item.get("escalation_target", "") or ""),
             created_at=now,
             reserved=_object_dict(item.get("reserved", {})),
@@ -141,24 +126,18 @@ def _create_capability_requests_from_parsed(task, parsed, now):
     return count, created_ids
 
 
-# LLM: _object_dict preserves JSON-like scope/budget values without stringifying nested data.
-# 函数用途: 把模型给出的对象字段规范成普通字典，用于能力申请里的范围、预算和预留字段。
 def _object_dict(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         return {}
     return {str(key): val for key, val in value.items()}
 
 
-# LLM: _split_tools_and_skills 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 拆分工具skills输入集合，给调度、验收或补丁处理提供分组结果；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _split_tools_and_skills(parsed, allowed_tools, allowed_skills):
     used_tools, ignored_tools = _split_allowed_items(parsed.used_tools, allowed_tools)
     used_skills, ignored_skills = _split_allowed_items(parsed.used_skills, allowed_skills)
     return used_tools, ignored_tools, used_skills, ignored_skills
 
 
-# LLM: _merge_task_tools 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 更新任务工具对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def _merge_task_tools(params: MergeTaskToolsParams):
     if params.actual_tools is not None:
         return _merge_actual_tools(
@@ -175,16 +154,12 @@ def _merge_task_tools(params: MergeTaskToolsParams):
     return []
 
 
-# LLM: merge_actual_tools_for_unparsed preserves executed tool facts even when result JSON is truncated.
-# 函数用途: 结构化结果解析失败时，仍把 runner loop 实际执行过的授权工具写回 task.used_tools 和证据，供验收与调试读取。
 def merge_actual_tools_for_unparsed(task: SubAgentTask, actual_tools: list[str] | None, now: float) -> list[str]:
     if actual_tools is None:
         return []
     return _merge_task_tools(MergeTaskToolsParams(task, [], [], actual_tools, [], now))
 
 
-# LLM: _normalize_parsed_fields 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 解析并归一化parsed字段的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _normalize_parsed_fields(parsed):
     return {
         "artifacts": _normalize_runner_items(parsed.artifacts),
@@ -195,8 +170,6 @@ def _normalize_parsed_fields(parsed):
     }
 
 
-# LLM: _process_structured_output 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 推进structuredoutput的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _process_structured_output(
     task: SubAgentTask,
     parsed: SubAgentParsedOutput,
@@ -245,8 +218,6 @@ def _process_structured_output(
     }
 
 
-# LLM: _process_findings_and_coverage groups small structured facts so the main state function stays below guardrails.
-# 函数用途: 写入 findings 和 coverage_records；coverage 只记录机器 run_id 关系，不改变任务状态。
 def _process_findings_and_coverage(parsed, task: SubAgentTask, now: float) -> list[dict[str, object]]:
     merge_task_coverage_records(task, parsed.coverage_records)
     return process_findings(parsed, task, now)

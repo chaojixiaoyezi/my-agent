@@ -1,13 +1,9 @@
-# LLM: Real E2E matrix is a data contract for deterministic and real-model user-flow tests.
-# 模块用途: 定义必须长期维护的真实端到端场景，让测试不只停留在单点 focused tests。
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 
-# LLM: E2EMatrixCase describes one end-to-end scenario without embedding runner implementation.
-# 类用途: 保存 E2E 用例 id、运行模式、目的、验收条件和覆盖的底层合同。
 @dataclass(frozen=True)
 class E2EMatrixCase:
     case_id: str
@@ -78,8 +74,6 @@ REAL_E2E_MATRIX: tuple[E2EMatrixCase, ...] = (
 )
 
 
-# LLM: required_matrix_ids keeps documentation and test runners aligned on the minimum matrix.
-# 函数用途: 返回必须存在的 E2E 用例 id 集合，防止后续删掉关键真实链路。
 def required_matrix_ids() -> set[str]:
     return {
         "windows_chinese_path_write",

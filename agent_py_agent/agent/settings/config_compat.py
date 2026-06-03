@@ -1,5 +1,3 @@
-# LLM: Hidden compatibility fields allow older config files without re-exposing removed knobs.
-# 模块用途: 存放旧配置兼容字段名单，load_config 可忽略这些字段但不把它们作为新接口推荐。
 
 from __future__ import annotations
 
@@ -38,4 +36,10 @@ HIDDEN_COMPAT_CONFIG_FIELDS = {
     "task_max_subagents",
     "tool_agent_budget_max_calls",
     "tool_agent_budget_window_seconds",
+}
+
+INTERNAL_RUNTIME_CONFIG_FIELDS = {
+    "config_layers",
+    "config_path",
+    "config_sources",
 }

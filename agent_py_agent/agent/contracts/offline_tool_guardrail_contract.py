@@ -1,16 +1,13 @@
-# LLM: Offline tool guardrail contracts catch loops and invalid fake-tool results before real runs.
-# 模块用途: 校验重复无进展工具调用、失败重试预算和 fake tool 返回形状，防止任务卡死或假成功。
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
 
+from ..common.value_parsing import text_value as _text
 from .contract_validation_recovery import recovery_for_findings
 
 
-# LLM: OfflineToolGuardrailValidation reports tool-loop and fake-tool findings.
-# 类用途: 返回工具 guardrail 离线合同是否通过、错误码和逐项结构化 finding。
 @dataclass(frozen=True)
 class OfflineToolGuardrailValidation:
     ok: bool
@@ -19,8 +16,6 @@ class OfflineToolGuardrailValidation:
     recovery: dict[str, object] | None = None
 
 
-# LLM: validate_tool_guardrail_events checks structured tool_result events only.
-# 函数用途: 用 type/tool/args_hash/result_hash/retryable/result.ok 等机器字段判断循环和重试。
 def validate_tool_guardrail_events(
     events: tuple[dict[str, Any], ...],
     *,
@@ -39,8 +34,6 @@ def validate_tool_guardrail_events(
     )
 
 
-# LLM: _validate_result_shapes requires fake tools to return object results with boolean ok.
-# 函数用途: 非 dict result 或缺少布尔 ok 时返回 FAKE_TOOL_RESULT_INVALID。
 def _validate_result_shapes(
     events: tuple[dict[str, Any], ...],
     findings: list[dict[str, object]],
@@ -53,8 +46,6 @@ def _validate_result_shapes(
             findings.append(_finding("FAKE_TOOL_RESULT_INVALID", index, event))
 
 
-# LLM: _validate_repeated_exact_results blocks unchanged tool-result streaks.
-# 函数用途: 同 tool、args_hash、result_hash 连续达到阈值时返回 TOOL_REPEATED_EXACT_RESULT。
 def _validate_repeated_exact_results(
     events: tuple[dict[str, Any], ...],
     threshold: int,
@@ -78,8 +69,6 @@ def _validate_repeated_exact_results(
             findings.append(_finding("TOOL_REPEATED_EXACT_RESULT", index, event, {"streak": streak}))
 
 
-# LLM: _validate_retry_budget blocks retryable failures after the configured budget.
-# 函数用途: 连续同 tool/args_hash 的 retryable failure 超出预算时返回 TOOL_RETRY_LIMIT_EXCEEDED。
 def _validate_retry_budget(
     events: tuple[dict[str, Any], ...],
     retry_limit: int,
@@ -98,8 +87,6 @@ def _validate_retry_budget(
             findings.append(_finding("TOOL_RETRY_LIMIT_EXCEEDED", index, event, {"attempts": failures[key]}))
 
 
-# LLM: _repeat_key returns exact no-progress identity for tool results.
-# 函数用途: 只有 tool、args_hash、result_hash 都存在时才参与重复判断。
 def _repeat_key(event: dict[str, Any]) -> tuple[str, str, str] | None:
     if _event_type(event) != "tool_result":
         return None
@@ -111,8 +98,6 @@ def _repeat_key(event: dict[str, Any]) -> tuple[str, str, str] | None:
     return (tool, args_hash, result_hash)
 
 
-# LLM: _failure_key returns retry identity for failed retryable tool results.
-# 函数用途: 只有 result.ok=false 且 retryable=true 时参与失败重试预算。
 def _failure_key(event: dict[str, Any]) -> tuple[str, str] | None:
     result = event.get("result")
     if _event_type(event) != "tool_result" or not isinstance(result, dict):
@@ -126,8 +111,6 @@ def _failure_key(event: dict[str, Any]) -> tuple[str, str] | None:
     return (tool, args_hash)
 
 
-# LLM: _finding creates compact tool guardrail findings.
-# 函数用途: 生成 code、index、tool、operation_id 和可选结构化字段。
 def _finding(
     code: str,
     index: int,
@@ -143,14 +126,10 @@ def _finding(
     }
 
 
-# LLM: _event_type normalizes event type values for exact dispatch.
-# 函数用途: 读取 type 字段并转小写字符串。
 def _event_type(event: dict[str, Any]) -> str:
     return _text(event.get("type")).lower()
 
 
-# LLM: _positive_int parses optional numeric limits.
-# 函数用途: 将 retry_limit 等字段规整为非负整数。
 def _positive_int(value: object) -> int:
     try:
         parsed = int(value)
@@ -163,12 +142,5 @@ def _event_retry_limit(event: dict[str, Any], default: int) -> int:
     if "retry_limit" not in event:
         return default
     return _positive_int(event.get("retry_limit"))
-
-
-# LLM: _text normalizes optional scalar values for exact comparisons.
-# 函数用途: 把 None 或标量转成去空白字符串；不解析自然语言含义。
-def _text(value: object) -> str:
-    return str(value or "").strip()
-
 
 __all__ = ["OfflineToolGuardrailValidation", "validate_tool_guardrail_events"]

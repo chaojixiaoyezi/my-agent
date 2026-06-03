@@ -111,10 +111,10 @@ modules = ["agent_py_agent"]
 | 存储目标 | 写入方式 | 仓库状态 |
 |---|---|---|
 | JSONL 记忆文件 | `memory_store/jsonl.py` -> `append_jsonl()` | 直接文件操作，需封装为仓库 |
-| 子代理状态文件 | `subagents/services/persistence.py` | 已提取为服务，待进一步仓库化 |
+| 子代理状态文件 | `subagents/services/persistence/` | 已提取为服务，待进一步仓库化 |
 | SQLite 本地存储 | `local_storage/` | 直接 SQL 操作，需封装为仓库 |
 | 审计日志 | `audit/logger.py` | 直接文件操作，需封装为仓库 |
-| 归档快照 | `memory_archive/snapshots.py` | 直接文件操作，需封装为仓库 |
+| 归档快照 | `memory_archive/snapshots/` | 直接文件操作，需封装为仓库 |
 | 通知数据 | `notification/` | 直接文件操作，需封装为仓库 |
 
 ### 2.2 Write Boundary Enforcement / 写入边界执行
@@ -135,7 +135,7 @@ modules = ["agent_py_agent"]
 | 模块 | 可写入位置 | 不可写入位置 |
 |---|---|---|
 | `memory_store/` | `owner_home/memory/long_term/`, `owner_home/memory/daily/`；旧 `memory_path` 只做 local/main 兼容读取 | 任何其他路径 |
-| `subagents/services/persistence.py` | 保存型 root run 下的子代理详细状态写 task-local `work/agents/<run_id>/canonical_state.json`；默认 locator 写 `owner_home/workspace/runtime/workspaces/<workspace-scope>/subagents/`，显式非默认 `subagent_workspace` 可覆盖；旧 `task.json/run.json` 只镜像同一 payload 供兼容定位；refs-only 投影写 `owner_home/agents/` | 任何其他路径 |
+| `subagents/services/persistence/` | 保存型 root run 下的子代理详细状态写 task-local `work/agents/<run_id>/canonical_state.json`；默认 locator 写 `owner_home/workspace/runtime/workspaces/<workspace-scope>/subagents/`，显式非默认 `subagent_workspace` 可覆盖；旧 `task.json/run.json` 只镜像同一 payload 供兼容定位；refs-only 投影写 `owner_home/agents/` | 任何其他路径 |
 | `memory_archive/` | `owner_home/memory/`, `owner_home/memory_archive/`, task-local `work/compact/` | 任何其他路径 |
 | `audit/` | 默认 `owner_home/logs/audit/`；显式非默认 audit 路径可覆盖 | 任何其他路径 |
 | `local_storage/` | 默认 `owner_home/workspace/runtime/workspaces/<workspace-scope>/local_store/`；显式非默认 local_store 路径可覆盖 | 任何其他路径 |
@@ -156,6 +156,13 @@ SimpleAgent 启动时会把 runtime resolver 得出的 owner-home 路径回写�
 归一化后的 `agent.config`；底层模块如果处在兼容路径、测试边界或静态 dataclass 默认值里，不能
 直接 `AgentConfig()`，只能通过 `default_agent_config()` / `default_config_value()` 等 helper
 读取 schema 默认值。这样用户改配置时，活跃运行路径不会被某个底层模块偷偷 new 出来的默认对象覆盖。
+加载后的 `AgentConfig` 必须保留来源账本：`config_sources` 说明每个字段由 schema 默认、配置文件或
+环境变量覆盖提供，`config_layers` 说明本次合并经过的层。用户 YAML 不能写入这些内部字段；后续
+owner/workspace/task/run/agent override 必须接同一套来源账本，而不是在业务模块里私下覆盖字段。
+作用域覆盖入口统一使用 `settings/runtime_scope_config.py`：边界代码把 owner、workspace、task、run、
+agent runtime override 转成 `RuntimeConfigLayer`，内部模块只消费合并后的 `EffectiveConfig` 或已加载
+`agent.config` 快照。低优先级作用域不能覆盖更高优先级来源，例如 env 注入的密钥；需要强制覆盖时必须
+显式走 runtime layer，并在来源账本里留下 source。
 
 旧 `data/users/<user_id>` 路径只能通过 `user_space/legacy_user_paths.py` 访问。正常运行代码不应新增
 `data/users` 路径模型调用；需要迁移旧数据时走明确的 migration/fallback 入口。
@@ -207,12 +214,12 @@ config/local*.json
 | 文件 | 行数 | 级别 | 拆分计划 |
 |---|---|---|---|
 | `cli/chat.py` | 989 | FROZEN | -> `chat_parts/` 继续拆分（见 CHAT_REFACTOR_PLAN.md） |
-| `agent_core/dispatch_mixin.py` | 889 | FROZEN | -> `dispatch/planner.py`, `dispatch/runner.py`, `dispatch/loop.py` |
-| `memory_archive/query.py` | 839 | FROZEN | -> `archive/query_builder.py`, `archive/query_executor.py` |
+| `agent_core/orchestration/dispatch/` | 已拆包 | WATCH | 继续保持 facade / runner / loop / record 职责分离 |
+| `memory_archive/query/` | 已拆包 | WATCH | 继续保持 builder/executor/formatter 职责分离 |
 | `subagents/manager_patch.py` | 794 | FROZEN | -> `subagent_services/patch.py` |
 | `settings/config.py` | 751 | FROZEN | -> `shared/config/agent_config.py` + 加载逻辑 |
 | `log_analysis/analytics/detectors/rules.py` | 747 | FROZEN | -> `detectors/rule_engine.py`, `detectors/rule_loader.py` |
-| `subagents/manager_base.py` | 744 | FROZEN | -> `subagent_services/persistence.py` + `subagent_services/board.py` |
+| `subagents/manager_base.py` | 744 | FROZEN | -> `subagents/services/persistence/` + `subagents/services/board/` |
 
 ### 3.3 Function Size Limits / 函数大小限制
 
@@ -230,12 +237,12 @@ config/local*.json
 
 ### 3.5 Mixin Limits / Mixin 限制
 
-当前 `SubAgentManager` 由 14 个 mixin 拼合，公开方法数量已超过 100 个。这是典型的分布式上帝类（distributed god class）。
+当前 `SubAgentManager` 仍由多组 mixin 拼合，公开方法数量已超过 100 个。这是典型的分布式上帝类（distributed god class）。`SubAgentBoardMixin` 已作为第一批迁移对象退出继承链，后续新能力只能走 service composition。
 
 | 规则 | 限制 | 说明 |
 |---|---|---|
 | 单个 mixin 最大行数 | 400 行 | 超过说明承担了过多职责 |
-| manager 类 mixin 数量 | 5 个 | 当前 14 个是历史债务 |
+| manager 类 mixin 数量 | 5 个 | 当前仍高于目标；继续把 patch、dispatch、runner、learning 等切到服务对象 |
 | mixin 间方法调用 | 禁止直接 `self.other_mixin_method()` | 应通过注入的服务调用 |
 
 ---

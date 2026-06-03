@@ -7,8 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
-# LLM: _mock_create_items_agent keeps items-mode tests focused on create params, not fixture setup.
-# 函数用途: 构造支持 create_subagents items[] 测试的最小 agent mock 和固定数量任务。
 def _mock_create_items_agent(task_count: int = 3):
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
@@ -23,8 +21,6 @@ def _mock_create_items_agent(task_count: int = 3):
     return mock_agent
 
 
-# LLM: _mock_created_task gives create_subagents payload rendering stable task fields.
-# 函数用途: 为 create_run side_effect 提供带 id/status/task_dir 的任务替身。
 def _mock_created_task(index: int):
     task = MagicMock()
     task.id = f"run_{index}"
@@ -124,7 +120,7 @@ class TestCreateSubagentsToolExecute:
 
     def test_create_subagents_auto_starts_created_runs_without_waiting_for_completion(self, monkeypatch):
         """create_subagents 默认创建并后台启动，父代理不等子代理全部结束。"""
-        from agent_py_agent.agent.agent_core import orchestration_background_dispatch
+        import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent(task_count=2)
@@ -141,7 +137,7 @@ class TestCreateSubagentsToolExecute:
                 "agent_tree": {"schema_version": "agent_tree_status.v1"},
             }
 
-        monkeypatch.setattr(orchestration_background_dispatch, "_start_background_dispatch", fake_background_start)
+        monkeypatch.setattr(background_dispatch, "_start_background_dispatch", fake_background_start)
 
         result = CreateSubagentsTool(mock_agent).execute({"goal": "分别整理两份资料", "count": 2})
         payload = json.loads(result.output)
@@ -156,7 +152,7 @@ class TestCreateSubagentsToolExecute:
 
     def test_auto_start_process_command_targets_created_run_ids(self):
         """真实后台进程必须显式只推进本轮创建的 run_id，不能靠全局候选猜。"""
-        from agent_py_agent.agent.agent_core.orchestration_background_dispatch import (
+        from agent_py_agent.agent.agent_core.orchestration.background.dispatch import (
             _background_dispatch_command,
             _BackgroundDispatchRequest,
         )
@@ -192,7 +188,7 @@ class TestCreateSubagentsToolExecute:
 
         args = Namespace(
             apply=True,
-            execute_runners=True,
+            start_runners=True,
             planner=False,
             workflow_mode="off",
             max_runners=2,
@@ -246,7 +242,7 @@ class TestCreateSubagentsToolStartControls:
         """单个 item.defer_start=true 只挂起该 child，不拖住同批生产 worker。"""
         from types import SimpleNamespace
 
-        import agent_py_agent.agent.agent_core.orchestration_background_dispatch as background_dispatch
+        import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
 
         captured: dict[str, object] = {}
 
@@ -314,8 +310,8 @@ class TestCreateSubagentsAutoStartLifecycle:
         manager.load.return_value = task
         agent = SimpleNamespace(subagents=manager)
         options = SubagentsDispatchOptions(
-            apply=True,
-            execute_runners=True,
+            mutate_state=True,
+            start_runners=True,
             planner=False,
             workflow_mode="off",
             max_runners=1,

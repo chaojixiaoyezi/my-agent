@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 from __future__ import annotations
 
@@ -16,8 +14,6 @@ from .bounded_query_models import BoundedQueryConfig, BoundedQueryError
 from .models import QueryResult
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _QueryErrorInput 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 _QueryErrorInput 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _QueryErrorInput:
     error_type: str
@@ -28,8 +24,6 @@ class _QueryErrorInput:
     details: dict[str, Any] = field(default_factory=dict)
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 validate_time_window 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 校验 validate time window 的输入、状态或路径，提前暴露无效数据和越界条件。
 def validate_time_window(time_window: dict[str, str]) -> tuple[bool, BoundedQueryError | None]:
     """验证时间窗口是否有效。"""
     start_str = time_window.get("start", "")
@@ -51,8 +45,6 @@ def validate_time_window(time_window: dict[str, str]) -> tuple[bool, BoundedQuer
     return True, None
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 execute_file_tail 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 推进 execute file tail 对应的调度、执行或处理步骤，并返回可追踪的状态结果。
 def execute_file_tail(file_path: str, time_window: dict[str, str], max_results: int, config: BoundedQueryConfig) -> QueryResult:
     """执行 file_tail 查询。"""
     allowed, error_msg = check_file_path_allowed(file_path, config)
@@ -86,8 +78,6 @@ def execute_file_tail(file_path: str, time_window: dict[str, str], max_results: 
     )
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 check_file_path_allowed 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 校验 check file path allowed 的输入、状态或路径，提前暴露无效数据和越界条件。
 def check_file_path_allowed(file_path: str, config: BoundedQueryConfig) -> tuple[bool, str | None]:
     """检查文件路径是否允许访问。"""
     path = Path(file_path).resolve()
@@ -103,8 +93,6 @@ def check_file_path_allowed(file_path: str, config: BoundedQueryConfig) -> tuple
     return False, f"不允许访问路径: {file_path}"
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 read_tail_lines 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 读取 read tail lines 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
 def read_tail_lines(file_path: str, tail_lines: int) -> tuple[int, list[dict[str, Any]]]:
     """Read a bounded tail from a text log file and parse non-empty lines."""
     with open(file_path, encoding="utf-8", errors="replace") as handle:
@@ -113,8 +101,6 @@ def read_tail_lines(file_path: str, tail_lines: int) -> tuple[int, list[dict[str
     return len(all_lines), [parse_log_line(line.strip()) for line in lines_to_parse if line.strip()]
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 parse_log_line 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 从外部数据还原 parse log line 需要的领域对象，统一缺省值和兼容字段。
 def parse_log_line(line: str) -> dict[str, Any]:
     """简单解析日志行，提取时间戳和内容。"""
     result = {"raw": line, "timestamp": "", "message": line}
@@ -129,8 +115,6 @@ def parse_log_line(line: str) -> dict[str, Any]:
     return result
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 filter_by_time_window 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 判断 filter by time window 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def filter_by_time_window(lines: Iterable[dict[str, Any]], time_window: dict[str, str]) -> tuple[list[dict[str, Any]], int, int]:
     """按时间窗口过滤日志行。"""
     items = list(lines)
@@ -149,8 +133,6 @@ def filter_by_time_window(lines: Iterable[dict[str, Any]], time_window: dict[str
     return filtered, len(filtered), skipped
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 parse_line_timestamp 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 从外部数据还原 parse line timestamp 需要的领域对象，统一缺省值和兼容字段。
 def parse_line_timestamp(timestamp_str: str) -> datetime | None:
     """Parse supported line timestamp formats."""
     if not timestamp_str:
@@ -165,8 +147,6 @@ def parse_line_timestamp(timestamp_str: str) -> datetime | None:
     return None
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _parse_window_bounds 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 从外部数据还原 parse window bounds 需要的领域对象，统一缺省值和兼容字段。
 def _parse_window_bounds(time_window: dict[str, str]) -> tuple[datetime | None, datetime | None]:
     try:
         start = datetime.fromisoformat(time_window["start"].replace("Z", "+00:00")) if time_window.get("start") else None
@@ -176,8 +156,6 @@ def _parse_window_bounds(time_window: dict[str, str]) -> tuple[datetime | None, 
     return start, end
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _within_base 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 within base 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def _within_base(path: Path, base: str) -> bool:
     try:
         path.relative_to(Path(base).resolve())
@@ -186,8 +164,6 @@ def _within_base(path: Path, base: str) -> bool:
         return False
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _query_error 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 query error 的候选结果，并按参数完成筛选、排序或数量限制。
 def _query_error(data: _QueryErrorInput) -> QueryResult:
     return QueryResult(
         query_template="file_tail",

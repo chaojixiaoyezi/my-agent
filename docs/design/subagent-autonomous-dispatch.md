@@ -495,7 +495,7 @@ my-agent estimate-task "翻译这篇文档"
 | `spawn_subagents()` | 集成自动化级别判断 |
 | `_run_subagent_worker()` | 使用动态超时 |
 | `dispatch_subagents()` | 集成失败分析和自适应重派 |
-| `runner_dispatch.py` | 扩展超时逻辑 |
+| `agent_core/runner/dispatch.py` | 扩展超时逻辑 |
 | `subagent_mixin.py` | 扩展失败处理 |
 
 ## 安全边界

@@ -1,5 +1,3 @@
-# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
 
 from __future__ import annotations
 
@@ -27,14 +25,10 @@ from .reports import (
 )
 
 
-# LLM: _summary_lines 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总lines的展示文本，保持命令行、日志和审计输出一致；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _summary_lines(summary: dict[str, int]) -> list[str]:
     return [f"- {key}: {summary[key]}" for key in sorted(summary)]
 
 
-# LLM: render_board_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总看板markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def render_board_markdown(board: SubAgentBoard) -> str:
     lines = [
         "# SUBAGENT BOARD",
@@ -55,14 +49,10 @@ def render_board_markdown(board: SubAgentBoard) -> str:
     return "\n".join(lines) + "\n"
 
 
-# LLM: _board_lines 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 处理看板lines相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _board_lines(items: list[SubAgentBoardItem], *, empty: str) -> list[str]:
     return [_render_board_line(item) for item in items] if items else [empty]
 
 
-# LLM: render_due_check_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总到期检查markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def render_due_check_markdown(report: DueCheckReport) -> str:
     lines = [
         "# SUBAGENT DUE CHECK",
@@ -91,8 +81,6 @@ def render_due_check_markdown(report: DueCheckReport) -> str:
     return "\n".join(lines) + "\n"
 
 
-# LLM: render_action_plan_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总动作计划markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def render_action_plan_markdown(report: ActionPlanReport) -> str:
     lines = [
         "# SUBAGENT ACTION PLAN",
@@ -118,7 +106,6 @@ def render_action_plan_markdown(report: ActionPlanReport) -> str:
         )
         lines.append(f"  - reason: {action.reason}")
         if action.rescue_strategy:
-            # LLM: render rescue metadata next to the action that would use it.
             lines.append(
                 f"  - rescue: trigger={action.rescue_trigger or 'none'} "
                 f"strategy={action.rescue_strategy} escalate={action.escalation_target or 'parent'}"
@@ -136,8 +123,6 @@ def render_action_plan_markdown(report: ActionPlanReport) -> str:
     return "\n".join(lines) + "\n"
 
 
-# LLM: render_action_apply_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总动作应用markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def render_action_apply_markdown(report: ActionApplyReport) -> str:
     mode = "dry-run" if report.dry_run else "apply"
     lines = [
@@ -174,8 +159,6 @@ def render_action_apply_markdown(report: ActionApplyReport) -> str:
     return "\n".join(lines) + "\n"
 
 
-# LLM: render_capability_route_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总能力routemarkdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def render_capability_route_markdown(report: CapabilityRouteReport) -> str:
     mode = "dry-run" if report.dry_run else "apply"
     lines = [
@@ -208,21 +191,16 @@ def render_capability_route_markdown(report: CapabilityRouteReport) -> str:
     return "\n".join(lines) + "\n"
 
 
-# LLM: _list_or_none 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 读取或查询none需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _list_or_none(items: list[str]) -> list[str]:
     if not items:
         return ["- none"]
     return [f"- {item}" for item in items]
 
 
-# LLM: _render_board_line 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总看板line的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _render_board_line(item: SubAgentBoardItem) -> str:
     flags = ",".join(item.risk_flags) if item.risk_flags else "ok"
     children = ",".join(f"{key}:{value}" for key, value in sorted(item.child_status_counts.items())) or "none"
     goal = item.goal.replace("\n", " ")[:100]
-    # LLM: compact board lines surface task-tree status for parent triage.
     return (
         f"- `{item.id}` role={item.role or 'unknown'} name={item.agent_name or 'unnamed'} "
         f"status={item.status} verify={item.verification_status} "

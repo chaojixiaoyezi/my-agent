@@ -6,8 +6,6 @@ import json
 from pathlib import Path
 
 
-# LLM: missing artifact reports should expose structured alternate candidates for recovery.
-# 函数用途: 验证模型写错目录时，验收报告能提供同名候选路径，而不是只说缺文件。
 def test_real_task_acceptance_reports_candidate_artifact_paths(tmp_path):
     from openpyxl import Workbook
 
@@ -56,8 +54,6 @@ def test_real_task_acceptance_reports_candidate_artifact_paths(tmp_path):
     assert str(Path(candidates[0]["value"]).relative_to(workspace)) == "data/outputs/table_report/table_report.xlsx"
 
 
-# LLM: candidate artifacts must pass the same validation contract before recovery suggests reuse.
-# 函数用途: 验证同名旧 xlsx 如果缺少必需列，只记录 rejected，不让主代理直接复用错表。
 def test_real_task_acceptance_rejects_invalid_candidate_artifact(tmp_path):
     from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
         RealTaskAcceptanceRequest,
@@ -89,8 +85,6 @@ def test_real_task_acceptance_rejects_invalid_candidate_artifact(tmp_path):
     assert "ARTIFACT_CANDIDATE_PATH" not in codes
 
 
-# LLM: Accepted artifacts should not be re-blocked by stale open sessions that point to the same finished target.
-# 函数用途: 验证目标产物已经通过验收时，同目标旧 open write_file 不会再把真实任务卡成 runtime finding。
 def test_real_task_acceptance_ignores_open_session_for_accepted_target(tmp_path):
     from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
         RealTaskAcceptanceRequest,
@@ -131,8 +125,6 @@ def test_real_task_acceptance_ignores_open_session_for_accepted_target(tmp_path)
     assert report.artifacts[0].ok is True
 
 
-# LLM: _write_candidate_expected_artifacts keeps invalid-candidate tests compact.
-# 函数用途: 写一个要求两张表和必需列的 expected_artifacts.json。
 def _write_candidate_expected_artifacts(path: Path) -> None:
     path.write_text(
         json.dumps(
@@ -156,8 +148,6 @@ def _write_candidate_expected_artifacts(path: Path) -> None:
     )
 
 
-# LLM: staged checkpoint validation should explain why long tasks cannot continue.
-# 函数用途: 验证 source_data 为空时会进入结构化 runtime findings，最终 xlsx 仍走 artifact 验收。
 def test_real_task_acceptance_validates_staged_checkpoints(tmp_path):
     from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
         RealTaskAcceptanceRequest,
@@ -182,8 +172,6 @@ def test_real_task_acceptance_validates_staged_checkpoints(tmp_path):
     assert "STAGED_JSON_NO_ROWS" in codes
 
 
-# LLM: Skeleton-only staged JSON with empty nested collections must not count as ready row data.
-# 函数用途: 验证只有 sheet 骨架和 metadata、没有真实项目行时，阶段 JSON 仍然会被标记为无数据。
 def test_real_task_acceptance_treats_skeleton_only_staged_json_as_no_rows(tmp_path):
     from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
         RealTaskAcceptanceRequest,
@@ -218,8 +206,6 @@ def test_real_task_acceptance_treats_skeleton_only_staged_json_as_no_rows(tmp_pa
     assert "STAGED_JSON_NO_ROWS" in codes
 
 
-# LLM: invalid staged JSON must be reported as truncated/invalid, not as merely empty data.
-# 函数用途: 验证阶段 JSON 语法坏掉时会产出 STAGED_JSON_INVALID，避免恢复链误判为空数据。
 def test_real_task_acceptance_reports_invalid_staged_json(tmp_path):
     from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
         RealTaskAcceptanceRequest,
@@ -245,16 +231,12 @@ def test_real_task_acceptance_reports_invalid_staged_json(tmp_path):
     assert finding["stage_ref"] == "outputs/table_report/source_data.json"
 
 
-# LLM: _write_staged_expected_artifacts keeps the staging test focused on assertions.
-# 函数用途: 写一个带 source/final 和通用 builder 工具的 expected_artifacts.json。
 def _write_staged_expected_artifacts(tmp_path):
     expected = tmp_path / "expected_artifacts.json"
     expected.write_text(json.dumps({"artifacts": [_staged_workbook_artifact()]}), encoding="utf-8")
     return expected
 
 
-# LLM: _staged_workbook_artifact is the minimal xlsx artifact contract used by tests.
-# 函数用途: 返回 代码平台 xlsx 任务的阶段化产物合同，避免测试函数过长。
 def _staged_workbook_artifact():
     return {
         "artifact_id": "table_report_workbook",

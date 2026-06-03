@@ -1,5 +1,3 @@
-# LLM: Owner retention plans cleanup from owner policy without blocking normal runtime work.
-# 模块用途: 根据 owner retention.json 生成和执行可审计清理计划；默认只处理过期文件，不删除目录。
 
 from __future__ import annotations
 
@@ -68,8 +66,6 @@ def apply_owner_retention(home: MyAgentHomePaths, *, now: datetime | None = None
     return OwnerRetentionPlan(applied=True, actions=tuple(applied))
 
 
-# LLM: _append_retention_audit records cleanup decisions without making retention a runtime gate.
-# 函数用途: 把 owner retention 的删除/失败结果写入 owner 审计日志，方便 doctor 和人工追踪。
 def _append_retention_audit(home: MyAgentHomePaths, actions: list[RetentionAction], *, now: datetime) -> None:
     append_jsonl(
         home.owner_audit_log_jsonl,

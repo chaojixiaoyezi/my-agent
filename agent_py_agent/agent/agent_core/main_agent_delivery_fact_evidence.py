@@ -1,5 +1,3 @@
-# LLM: Delivery fact evidence bridge wires source/claim verification into closeout.
-# 模块用途: 从交付合同加载事实证据 payload，并在最终收口前执行通用 fact_evidence 门。
 
 from __future__ import annotations
 
@@ -8,14 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts.gates import GateDecision, GateFinding, evaluate_fact_evidence_gate
-from .main_agent_delivery_closeout_quality import (
+from ..contracts.recovery_actions import RecoveryAction
+from .delivery_closeout.quality import (
     delivery_quality_payload_ref,
     workspace_relative_json_path,
 )
 
 
-# LLM: fact_evidence_decision runs only on structured fact-evidence contracts.
-# 函数用途: 有 fact_evidence_contract 时加载 source_refs/claims 并校验工具来源绑定；未声明时显式放行。
 def fact_evidence_decision(
     *,
     contract: dict[str, Any],
@@ -29,14 +26,14 @@ def fact_evidence_decision(
     if payload is None:
         return GateDecision.allow(
             "fact_evidence",
-            recommended_action="record_fact_evidence_payload_when_available",
+            recommended_action=RecoveryAction.RECORD_FACT_EVIDENCE_PAYLOAD.value,
             evidence={"declared": True, "warning_codes": ["FACT_EVIDENCE_PAYLOAD_MISSING"]},
         )
     decision = evaluate_fact_evidence_gate(payload, fact_contract, archive_tool_calls=archive_tool_calls)
     if not decision.allowed and not _fact_evidence_enforcement_required(fact_contract):
         return GateDecision.allow(
             "fact_evidence",
-            recommended_action="review_fact_evidence_findings",
+            recommended_action=RecoveryAction.REVIEW_FACT_EVIDENCE_FINDINGS.value,
             evidence={
                 "declared": True,
                 "warning_codes": list(decision.finding_codes),

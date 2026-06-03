@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import pytest
 
+from agent_py_agent.agent.common.value_parsing import dedupe_strings
 from agent_py_agent.agent.memory_routing.matcher import (
-    _dedupe,
     _normalize,
     _tokens,
     _unique_paths,
@@ -111,27 +111,27 @@ def test_unique_paths_empty_list():
 def test_dedupe_preserves_order():
     """测试去重保持顺序。"""
     items = ["a", "b", "a", "c", "b"]
-    result = _dedupe(items)
+    result = dedupe_strings(items)
     assert result == ["a", "b", "c"]
 
 
 def test_dedupe_strips_whitespace():
     """测试去重前先去除空白。"""
     items = ["a", "  a  ", "b"]
-    result = _dedupe(items)
+    result = dedupe_strings(items)
     assert result == ["a", "b"]
 
 
 def test_dedupe_empty_string():
     """测试空字符串被移除。"""
     items = ["a", "", "b"]
-    result = _dedupe(items)
+    result = dedupe_strings(items)
     assert result == ["a", "b"]
 
 
 def test_dedupe_empty_list():
     """测试空列表。"""
-    assert _dedupe([]) == []
+    assert dedupe_strings([]) == []
 
 
 # ── score_route 测试 ───────────────────────────────────────────────────────

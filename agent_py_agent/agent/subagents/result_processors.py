@@ -1,5 +1,3 @@
-# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
 
 from __future__ import annotations
 
@@ -31,8 +29,6 @@ from .result_structured import (
 from .result_structured_evidence import process_evidence_items as _process_evidence_items
 
 
-# LLM: _build_runner_result 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 构建执行器结果所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _build_runner_result(ctx: RunnerResultContext) -> SubAgentRunnerResult:
     """Build the SubAgentRunnerResult dataclass from processed fields."""
 
@@ -73,8 +69,6 @@ def _build_runner_result(ctx: RunnerResultContext) -> SubAgentRunnerResult:
     )
 
 
-# LLM: _write_runner_result_files 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 写入执行器结果文件的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def _write_runner_result_files(
     task: SubAgentTask,
     result: SubAgentRunnerResult,

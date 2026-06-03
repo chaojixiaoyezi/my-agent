@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 
 from __future__ import annotations
@@ -7,10 +5,15 @@ from __future__ import annotations
 import json
 import sys
 
-from ..agent.agent_core.dispatch_params import DispatchParams, WatchParams
-from ..agent.agent_core.runner_gate import get_task_timeout, resolve_runner_config
-from ..agent.agent_core.runner_worker import RunSubagentWorkerParams, _run_subagent_worker
-from ..agent.agent_core.subagent_params import SubagentRunParams
+from ..agent.agent_core.orchestration.dispatch.params import (
+    DispatchExecutionPlan,
+    DispatchParams,
+    DispatchRuntimePolicy,
+    WatchParams,
+)
+from ..agent.agent_core.runner.gate import get_task_timeout, resolve_runner_config
+from ..agent.agent_core.runner.worker import RunSubagentWorkerParams, _run_subagent_worker
+from ..agent.agent_core.subagent import SubagentRunParams
 from ..agent.capability_config import load_capability_config
 from ..agent.config import load_config
 from ..agent.subagent_workflows import (
@@ -24,17 +27,16 @@ from .dispatch_background import BackgroundLaunchUpdate, mark_background_launch
 from .models import SubagentsDispatchOptions
 
 
-# LLM: _subagents_dispatch_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagents_dispatch_options(args, agent=None) -> SubagentsDispatchOptions:
     config = getattr(agent, "config", None)
+    policy = DispatchRuntimePolicy.from_config(config)
     return SubagentsDispatchOptions(
-        apply=bool(args.apply),
-        execute_runners=bool(args.execute_runners),
+        mutate_state=bool(args.apply),
+        start_runners=bool(args.start_runners),
         planner=bool(args.planner),
         workflow_mode=args.workflow_mode or "off",
-        max_runners=_configured_int(args.max_runners, config, "dispatch_default_max_runners"),
-        limit=_configured_int(args.limit, config, "dispatch_default_limit"),
+        max_runners=_configured_int(args.max_runners, policy.default_max_runners),
+        limit=_configured_int(args.limit, policy.default_limit),
         reviewer=args.reviewer or "parent-dispatch",
         note=args.note or "",
         instruction=args.instruction or "",
@@ -42,7 +44,7 @@ def _subagents_dispatch_options(args, agent=None) -> SubagentsDispatchOptions:
         probe=not bool(args.no_probe),
         take_over_by=args.take_over_by or "",
         locked_files=args.locked_file or [],
-        interval=_configured_float(args.interval, config, "dispatch_default_watch_interval"),
+        interval=_configured_float(args.interval, policy.default_watch_interval),
         max_cycles=int(args.max_cycles or 0),
         advance=getattr(args, "advance", False) is True,
         force_lock=bool(args.force_lock),
@@ -52,31 +54,27 @@ def _subagents_dispatch_options(args, agent=None) -> SubagentsDispatchOptions:
     )
 
 
-# LLM: _configured_int resolves optional dispatch CLI numbers from AgentConfig.
-# 函数用途: 把 argparse 的 None 映射为后端配置值，显式 0 仍按用户输入保留。
-def _configured_int(value: object, config: object, field: str) -> int:
+def _configured_int(value: object, default: int) -> int:
     if value is not None:
         return int(value)
-    return int(getattr(config, field, 0) or 0)
+    return int(default or 0)
 
 
-# LLM: _configured_float resolves optional dispatch CLI floats from AgentConfig.
-# 函数用途: 和 _configured_int 一样处理 watch interval 这类浮点配置。
-def _configured_float(value: object, config: object, field: str) -> float:
+def _configured_float(value: object, default: float) -> float:
     if value is not None:
         return float(value)
-    return float(getattr(config, field, 0.0) or 0.0)
+    return float(default or 0.0)
 
 
-# LLM: _dispatch_params 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _dispatch_params(options: SubagentsDispatchOptions) -> DispatchParams:
     return DispatchParams(
-        apply=options.apply,
-        execute_runners=options.execute_runners,
+        execution_plan=DispatchExecutionPlan.from_parts(
+            mutate_state=options.mutate_state,
+            start_runners=options.start_runners,
+            max_runners=options.max_runners,
+        ),
         planner=options.planner,
         workflow_mode=options.workflow_mode,
-        max_runners=options.max_runners,
         limit=options.limit,
         reviewer=options.reviewer,
         note=options.note,
@@ -90,8 +88,6 @@ def _dispatch_params(options: SubagentsDispatchOptions) -> DispatchParams:
     )
 
 
-# LLM: _watch_params 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _watch_params(options: SubagentsDispatchOptions) -> WatchParams:
     return WatchParams(
         **_dispatch_params(options).__dict__,
@@ -102,8 +98,6 @@ def _watch_params(options: SubagentsDispatchOptions) -> WatchParams:
     )
 
 
-# LLM: _flatten_run_ids accepts repeated or comma-separated --run-id values from CLI callers.
-# 函数用途: 将多个 --run-id 参数归一成去重列表，保持输入顺序。
 def _flatten_run_ids(values: list[object]) -> list[str]:
     run_ids: list[str] = []
     for value in values:
@@ -112,13 +106,11 @@ def _flatten_run_ids(values: list[object]) -> list[str]:
     return run_ids
 
 
-# LLM: _print_watch_report 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_watch_report(agent, report, options: SubagentsDispatchOptions) -> None:
-    mode = "apply" if options.apply else "dry-run"
+    mode = "apply" if options.mutate_state else "dry-run"
     print("SUBAGENT DISPATCH WATCH")
     print(
-        f"mode={mode} planner={options.planner} execute_runners={options.execute_runners} "
+        f"mode={mode} planner={options.planner} start_runners={options.start_runners} "
         f"advance={options.advance} "
         f"cycles={report.summary.get('total', 0)}"
     )
@@ -140,13 +132,11 @@ def _print_watch_report(agent, report, options: SubagentsDispatchOptions) -> Non
         print(f"planner: {ws / 'PARENT_PLANNER.md'}")
 
 
-# LLM: _print_dispatch_report 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_dispatch_report(agent, report, options: SubagentsDispatchOptions) -> None:
-    mode = "apply" if options.apply else "dry-run"
+    mode = "apply" if options.mutate_state else "dry-run"
     print("SUBAGENT DISPATCH")
     print(
-        f"mode={mode} planner={options.planner} execute_runners={options.execute_runners} "
+        f"mode={mode} planner={options.planner} start_runners={options.start_runners} "
         f"total_records={report.summary.get('total', 0)}"
     )
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -162,7 +152,7 @@ def _print_dispatch_report(agent, report, options: SubagentsDispatchOptions) -> 
     ws = agent.subagents.workspace
     print(f"\n已写入: {ws / 'subagent_dispatch_report.json'}")
     print(f"已写入: {ws / 'SUBAGENT_DISPATCH.md'}")
-    if options.apply:
+    if options.mutate_state:
         print(f"审计日志: {ws / 'subagent_dispatch_log.jsonl'}")
         print(f"审计日志: {ws / 'DISPATCH_LOG.md'}")
     if options.planner:
@@ -170,21 +160,19 @@ def _print_dispatch_report(agent, report, options: SubagentsDispatchOptions) -> 
         print(f"planner: {ws / 'PARENT_PLANNER.md'}")
 
 
-# LLM: cmd_subagents_dispatch 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_dispatch(args) -> int:
 
     agent = make_agent(args)
     options = _subagents_dispatch_options(args, agent=agent)
-    if options.execute_runners and not options.apply:
-        print("--execute-runners 必须和 --apply 一起使用。", file=sys.stderr)
+    if options.start_runners and not options.mutate_state:
+        print("--start-runners 必须和 --apply 一起使用。", file=sys.stderr)
         return 2
 
     capability_config = load_capability_config(args.capability_config)
     agent.capability_config_path = args.capability_config
     router = make_capability_router(agent, capability_config, args.skill_dir)
     if options.watch:
-        if not options.advance and (options.execute_runners or options.planner):
+        if not options.advance and (options.start_runners or options.planner):
             print("--watch 下 planner/runner 推进需要显式加 --advance。", file=sys.stderr)
             return 2
         try:
@@ -206,8 +194,6 @@ def cmd_subagents_dispatch(args) -> int:
     return 0
 
 
-# LLM: cmd_subagents_workflow_plan 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_workflow_plan(args) -> int:
 
     config = load_config(args.config)
@@ -254,8 +240,6 @@ def cmd_subagents_workflow_plan(args) -> int:
     return 0
 
 
-# LLM: cmd_subagent_run 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagent_run(args) -> int:
 
     agent = make_agent(args)
@@ -278,8 +262,6 @@ def cmd_subagent_run(args) -> int:
     return 0 if result.ok else 1
 
 
-# LLM: _execute_subagent_run_cli keeps direct CLI execution under the same timeout boundary as dispatched runners.
-# 函数用途: 根据 CLI 参数执行或 dry-run 一个 subagent；执行模式走 worker timeout，避免模型流式响应卡住时裸跑不收口。
 def _execute_subagent_run_cli(agent, args):
     if not args.execute:
         return agent.run_subagent(
@@ -308,8 +290,6 @@ def _execute_subagent_run_cli(agent, args):
     )
 
 
-# LLM: _cli_subagent_run_timeout mirrors dispatch timeout calculation for one explicitly requested runner.
-# 函数用途: 读取 run 的任务信息和配置，计算 `subagent-run --execute` 的总运行超时秒数。
 def _cli_subagent_run_timeout(agent, run_id: str) -> float:
     task = agent.subagents.load(run_id)
     runner_timeout_seconds, _, _ = resolve_runner_config(agent.config, 1)

@@ -16,9 +16,8 @@ import sys
 
 
 def applescript_string(value: str) -> str:
-    """LLM: quote a shell command as an AppleScript string.
+    """Quote a shell command as an AppleScript string.
 
-    给人看的解释：
     macOS Terminal 需要 AppleScript 字符串。
     这里把反斜杠和双引号转义，避免路径或参数里有特殊字符时打不开。
     """

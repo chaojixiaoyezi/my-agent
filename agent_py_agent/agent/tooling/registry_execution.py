@@ -1,11 +1,8 @@
-# LLM: 安全工具可见性和执行授权在这里落地，改动前核对认证边界。
-# 模块用途: 工具调用解析、授权校验、参数准备和异常格式化。
 
 from __future__ import annotations
 
 """parsing and execution helpers for ToolRegistry.
 
-给人看的解释：
 ToolRegistry 本身保持'服务台'职责；这里集中放工具调用解析、授权检查和异常格式化，
 避免注册表类继续变厚。
 """
@@ -56,8 +53,6 @@ from .registry_runtime_gate_pipeline import tool_call_gate_decision
 from .registry_runtime_gate_results import attach_runtime_gate, runtime_gate_block_result
 
 
-# LLM: ExecuteRegistryCallParams 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: 工具执行参数包，集中保存调用上下文、授权和安全策略。
 @dataclass(frozen=True)
 class ExecuteRegistryCallParams:
     payload: object
@@ -66,6 +61,7 @@ class ExecuteRegistryCallParams:
     workspace_roots: list[Path] | None
     expose_security_tools: bool
     security_tool_names: set[str]
+    default_hidden_tool_names: set[str] | None = None
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
     allowed_tools: list[str] | None = None
@@ -73,10 +69,9 @@ class ExecuteRegistryCallParams:
     granted_capabilities: list[str] | None = None
     write_boundary: dict[str, object] | None = None
     payload_limits: ToolPayloadNormalizeLimits | None = None
+    runtime_guard_policy: object | None = None
 
 
-# LLM: _ToolBlockParseContext bundles parser state to keep helper signatures small.
-# 类用途: 保存当前文本工具块解析的原文、输出列表和 payload 预算。
 @dataclass
 class _ToolBlockParseContext:
     calls: list[tuple[int, dict[str, Any]]]
@@ -84,8 +79,6 @@ class _ToolBlockParseContext:
     payload_limits: ToolPayloadNormalizeLimits | None
 
 
-# LLM: parse_registry_tool_calls 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 解析 parse_registry_tool_calls 数据结构。
 def parse_registry_tool_calls(
     text: str,
     *,
@@ -102,8 +95,6 @@ def parse_registry_tool_calls(
     return [payload for _, payload in calls]
 
 
-# LLM: _parse_tool_block_calls extracts JSON tool blocks while preserving source order.
-# 函数用途: 解析 `[TOOL_CALL]...[/TOOL_CALL]` 块，并把缺结束标记、嵌套坏块转成结构化 parse error。
 def _parse_tool_block_calls(
     scan_text: str,
     *,
@@ -126,8 +117,6 @@ def _parse_tool_block_calls(
     return calls
 
 
-# LLM: _append_unclosed_tool_block records a missing-end-marker parse error without aborting parsing.
-# 函数用途: 处理没有 `[/TOOL_CALL]` 的尾部工具块，并保留可解析 payload 时的兼容结果。
 def _append_unclosed_tool_block(
     context: _ToolBlockParseContext,
     start: int,
@@ -143,8 +132,6 @@ def _append_unclosed_tool_block(
     ))
 
 
-# LLM: _append_closed_tool_block records one complete tool block and returns the next cursor.
-# 函数用途: 处理完整工具块；嵌套坏块时把坏块转成 parse error 并让外层循环从嵌套处继续。
 def _append_closed_tool_block(
     context: _ToolBlockParseContext,
     start: int,
@@ -167,8 +154,6 @@ def _append_closed_tool_block(
     return end + len(marker_end)
 
 
-# LLM: parse_registry_tool_call_envelopes is the typed bridge for legacy text tool calls.
-# 函数用途: 复用旧文本 parser，但把结果立即包装成 ToolCallEnvelope，避免业务层继续直接消费自然语言块。
 def parse_registry_tool_call_envelopes(
     text: str,
     *,
@@ -182,8 +167,6 @@ def parse_registry_tool_call_envelopes(
     )
 
 
-# LLM: execute_registry_call 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 execute_registry_call 步骤，并保持调用方依赖的数据形状。
 def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResult:
 
     envelope = tool_call_envelope_from_execution_payload(call.payload)
@@ -208,8 +191,6 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     return result
 
 
-# LLM: _prepare_tool_payload 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 整理工具调用的 prepare_tool_payload 信息，供注册表鉴权或执行使用。
 def _prepare_tool_payload(
     payload: object,
     *,
@@ -224,8 +205,6 @@ def _prepare_tool_payload(
     return normalized_payload
 
 
-# LLM: _normalized_payload_or_error bundles parse and payload normalization failures.
-# 函数用途: 将执行 payload 归一为 dict；解析失败时直接返回带 envelope 的工具错误。
 def _normalized_payload_or_error(
     call: ExecuteRegistryCallParams,
     envelope: ToolCallEnvelope | None,
@@ -241,8 +220,6 @@ def _normalized_payload_or_error(
     return prepared
 
 
-# LLM: _with_resolved_dispatch_tool_name rewrites only deterministic tool-name drift.
-# 函数用途: 在工具网关执行前修正大小写/命名空间后缀，不执行 fuzzy suggestion。
 def _with_resolved_dispatch_tool_name(
     payload: dict[str, Any],
     call: ExecuteRegistryCallParams,
@@ -253,8 +230,6 @@ def _with_resolved_dispatch_tool_name(
     return {**payload, "tool": resolved}
 
 
-# LLM: _invoke_registry_with_envelope invokes the selected tool and preserves call envelope refs.
-# 函数用途: 把 RegistryToolInvokeRequest 的构造从主入口拆出，降低执行入口复杂度。
 def _invoke_registry_with_envelope(
     call: ExecuteRegistryCallParams,
     envelope: ToolCallEnvelope | None,
@@ -284,8 +259,6 @@ def _invoke_registry_with_envelope(
     )
 
 
-# LLM: _with_execution_scope carries runtime identity to tools that need self-scoped ledgers.
-# 函数用途: 把 envelope 的 run scope 作为内部字段传给工具，避免进度/账本工具落到 main 兜底。
 def _with_execution_scope(payload: dict[str, Any], envelope: ToolCallEnvelope | None) -> dict[str, Any]:
     if envelope is None or not envelope.scope.run_id:
         return payload
@@ -296,14 +269,13 @@ def _with_execution_scope(payload: dict[str, Any], envelope: ToolCallEnvelope | 
     }
 
 
-# LLM: _registry_auth_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 registry_auth_error 步骤，并保持调用方依赖的数据形状。
 def _registry_auth_error(tool_name: str, call: ExecuteRegistryCallParams) -> str:
     return registry_auth_error(
         tool_name,
         ToolAuthContext(
             allowed=allowed_tool_set(call.allowed_tools),
             disabled=allowed_tool_set(call.disabled_tools) or set(),
+            default_hidden=allowed_tool_set(call.default_hidden_tool_names) or set(),
             granted_capabilities=call.granted_capabilities,
             expose_security_tools=call.expose_security_tools,
             security_tool_names=call.security_tool_names,

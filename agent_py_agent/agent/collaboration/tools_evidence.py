@@ -1,5 +1,3 @@
-# LLM: Collaboration result submission stores refs-first response packets.
-# 模块用途: 实现 submit_collaboration_result 工具，不内联重型日志或业务专项数据。
 
 from __future__ import annotations
 
@@ -15,8 +13,6 @@ if TYPE_CHECKING:
 
 
 class SubmitCollaborationResultTool(BaseTool):
-    # LLM: SubmitCollaborationResultTool keeps collaboration response packets behind one model action.
-    # 类用途: 提交命中、未命中、证据引用和限制说明，供 case 汇总使用。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.spec = build_submit_collaboration_result_spec()

@@ -1,11 +1,8 @@
-# LLM: Live Lab validation script; keep CLI flags, artifact paths, and replay outputs stable for scenario tests.
-# 模块用途: 支撑可见验收和回放场景，负责启动案例、整理输出或生成报告。
 
 from __future__ import annotations
 
 """Live Lab session workspace and isolated config writer.
 
-给人看的解释：
 这个模块只负责创建隔离测试目录、fixture 小项目和临时配置，避免 Live Lab 污染开发仓库。
 """
 
@@ -15,16 +12,12 @@ import uuid
 from pathlib import Path
 
 
-# LLM: The per-model timeout is one provider request budget, not the whole user task lifecycle.
-# 函数用途: 从 CLI timeout 派生单次模型调用预算，并保持最小安全值。
 def live_lab_model_request_timeout(args: argparse.Namespace) -> int:
     """Return the per-model-call timeout used by the isolated Live Lab config."""
 
     return max(30, int(getattr(args, "timeout", 300) or 300))
 
 
-# LLM: Gateway ask can contain root, tool-result, child runner, and final-response model calls.
-# 函数用途: 根据单次模型预算和 runner 周期估算完整 gateway ask 的等待上限。
 def live_lab_gateway_wait_timeout(args: argparse.Namespace) -> int:
     """Return the total wait budget for a gateway request.
 
@@ -40,25 +33,18 @@ def live_lab_gateway_wait_timeout(args: argparse.Namespace) -> int:
     return per_call * estimated_model_calls + 120
 
 
-# LLM: Gateway processing timeout must be wider than the client wait budget.
-# 函数用途: 给隔离 gateway 后台处理留出收尾空间，避免客户端刚等完后台就被判 stale。
 def live_lab_gateway_processing_timeout(args: argparse.Namespace) -> int:
     """Return the stale-processing timeout for the isolated gateway."""
 
     return max(live_lab_gateway_wait_timeout(args) + 120, 180)
 
 
-# LLM: LabSessionManager 是Live Lab 验收的数据契约；字段名会被调用方和测试读取。
-# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 class LabSessionManager:
     """owns workspace setup and config writing.
 
-    给人看的解释：
     测试前先建目录、写 fixture 小项目、写一份临时配置。
     这份配置会把 memory、gateway、subagent、LocalStore 都关进测试目录。"""
 
-    # LLM: __init__ 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.source_config = Path(args.config).expanduser().resolve()
@@ -74,8 +60,6 @@ class LabSessionManager:
         self.stop_file = self.run_root / "STOP"
         self.created = False
 
-    # LLM: setup 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def setup(self) -> None:
         """creates the isolated live-lab workspace and config."""
         if not self.source_config.exists():
@@ -88,24 +72,18 @@ class LabSessionManager:
         self.prepare_runtime_dirs()
         self.created = True
 
-    # LLM: model_request_timeout keeps this runtime helper grounded in structured fields.
-    # 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
     @property
     def model_request_timeout(self) -> int:
         """Per-model-call timeout configured for this isolated run."""
 
         return live_lab_model_request_timeout(self.args)
 
-    # LLM: gateway_wait_timeout keeps this runtime helper grounded in structured fields.
-    # 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
     @property
     def gateway_wait_timeout(self) -> int:
         """Total wait budget for one gateway ask in this isolated run."""
 
         return live_lab_gateway_wait_timeout(self.args)
 
-    # LLM: write_fixture 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
     def write_fixture(self) -> None:
         """writes a tiny project that real agents can safely read and modify."""
         (self.fixture_root / "README.md").write_text(
@@ -137,13 +115,10 @@ class LabSessionManager:
         )
         (self.fixture_root / "lab_outputs").mkdir(parents=True, exist_ok=True)
 
-    # LLM: write_config 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
     def write_config(self) -> None:
         """appends isolation overrides while preserving model/API settings."""
         base = self.source_config.read_text(encoding="utf-8")
         fixture = str(self.fixture_root).replace("\\", "/")
-        # LLM: Live Lab must isolate the owner home too, or global daily memory can rewrite the next case.
         isolated_home = str((self.fixture_root / ".my_agent" / "home").resolve()).replace("\\", "/")
         backend_override = "" if self.args.real_llm else '\nmodel_backend: "echo"\n'
         request_timeout = live_lab_model_request_timeout(self.args)
@@ -180,8 +155,6 @@ request_timeout: {request_timeout}
 {backend_override}"""
         self.config_path.write_text(base + overrides, encoding="utf-8")
 
-    # LLM: prepare_runtime_dirs 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def prepare_runtime_dirs(self) -> None:
         """pre-creates runtime files that doctor expects in a fresh workspace."""
         event_path = self.fixture_root / ".my_agent" / "local_store" / "events.jsonl"

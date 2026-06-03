@@ -1,13 +1,9 @@
-# LLM: Real run review rendering converts structured review snapshots into human audit Markdown.
-# 模块用途: 渲染真实运行复盘报告，避免核心扫描文件同时承担展示逻辑。
 
 from __future__ import annotations
 
 from .real_run_review_models import RealRunReview
 
 
-# LLM: render_real_run_review_markdown renders a compact human audit report from structured review data.
-# 函数用途: 生成用户可读复盘文档；表格内容来自 RealRunReview 字段，不重新判断。
 def render_real_run_review_markdown(review: RealRunReview) -> str:
     lines = [
         "# 真实运行复盘报告",
@@ -37,8 +33,6 @@ def render_real_run_review_markdown(review: RealRunReview) -> str:
     return "\n".join(lines)
 
 
-# LLM: _cluster_row keeps cluster Markdown formatting isolated from report assembly.
-# 函数用途: 渲染单行失败聚类表格，避免主函数拼接过长。
 def _cluster_row(cluster) -> str:
     return (
         f"| {cluster.tag} | {cluster.priority} | {cluster.count} | "
@@ -46,8 +40,6 @@ def _cluster_row(cluster) -> str:
     )
 
 
-# LLM: _record_table_header returns the static Markdown block for record rows.
-# 函数用途: 提供每轮摘要表头，减少渲染函数内的固定文本。
 def _record_table_header() -> list[str]:
     return [
         "",

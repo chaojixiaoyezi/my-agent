@@ -34,6 +34,29 @@ def test_task_compact_rollup_exposes_status_counts_and_actionable_refs(tmp_path:
     assert continue_packet["active_refs"][0] == str(result.rollup_json)
 
 
+def test_task_compact_rollup_reports_corrupt_child_state(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.task_compact_rollup import sync_task_compact_rollup
+
+    task_root = tmp_path / "tasks" / "task-root"
+    work = task_root / "work"
+    (work / "agents" / "agent-good").mkdir(parents=True)
+    (work / "agents" / "agent-bad").mkdir(parents=True)
+    (work / "state.json").write_text(
+        json.dumps({"task_id": "task-root", "status": "RUNNING", "progress": 0.4}),
+        encoding="utf-8",
+    )
+    _write_agent_state(work / "agents" / "agent-good" / "state.json", {"id": "agent-good", "status": "DONE"})
+    (work / "agents" / "agent-bad" / "state.json").write_text("{bad-json}\n", encoding="utf-8")
+
+    result = sync_task_compact_rollup(task_root)
+
+    rollup = json.loads(result.rollup_json.read_text(encoding="utf-8"))
+    bad_row = next(row for row in rollup["child_runs"] if row["run_id"] == "agent-bad")
+    assert rollup["load_errors"]
+    assert bad_row["state_load_error"]["context"] == "task_compact_rollup.child_state"
+    assert rollup["status_counts"]["unknown"] == 1
+
+
 def test_task_compact_rollup_writes_owner_level_compact_indexes(tmp_path: Path) -> None:
     from agent_py_agent.agent.user_space.task_compact_rollup import sync_task_compact_rollup
 

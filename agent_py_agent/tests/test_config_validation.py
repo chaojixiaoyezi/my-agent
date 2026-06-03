@@ -146,8 +146,6 @@ def test_load_config_coerces_string_numbers(tmp_path):
     assert config.max_tokens == 2048
 
 
-# LLM: runner_timeout_by_role must survive config normalization so E2E can bound leaf workers without killing root.
-# 函数用途: 验证角色级 runner timeout 配置能从 YAML 加载到 AgentConfig。
 def test_load_config_keeps_runner_timeout_by_role(tmp_path):
     config_path = _write_config(
         tmp_path,
@@ -162,10 +160,10 @@ def test_load_config_keeps_runner_timeout_by_role(tmp_path):
 
 
 def test_daemon_defaults_are_true():
-    """验证 daemon_apply 和 daemon_execute_runners 默认值为 True。"""
+    """验证 daemon_mutate_state 和 daemon_start_runners 默认值为 True。"""
     defaults_normalized, _ = normalize_agent_config({})
-    assert defaults_normalized.get("daemon_apply") is True, "daemon_apply 默认应为 True"
-    assert defaults_normalized.get("daemon_execute_runners") is True, "daemon_execute_runners 默认应为 True"
+    assert defaults_normalized.get("daemon_mutate_state") is True, "daemon_mutate_state 默认应为 True"
+    assert defaults_normalized.get("daemon_start_runners") is True, "daemon_start_runners 默认应为 True"
 
 
 def test_acceptance_real_execution_config_defaults_are_conservative():

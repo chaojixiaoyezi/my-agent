@@ -1,8 +1,7 @@
 # SubAgent Service Refactor Plan
 # 子代理服务重构计划：从分布式上帝类到服务化架构
 
-LLM: Preserve SubAgentManager behavior while extracting services behind it.
-给人看的解释：这是一份低风险迁移计划。不要一次性重写状态机，先把边界切出来。每一步都要保证旧测试通过。
+这是一份低风险迁移计划。不要一次性重写状态机，先把边界切出来。每一步都要保证旧测试通过。
 
 ---
 
@@ -10,27 +9,86 @@ LLM: Preserve SubAgentManager behavior while extracting services behind it.
 
 ### 1.1 The Distributed God Class Problem / 分布式上帝类问题
 
-当前 `SubAgentManager` 由 14 个 mixin 拼合而成，总行数超过 8,300 行。虽然每个 mixin 文件名暗示了单一职责，但实际上：
+历史上 `SubAgentManager` 由多组业务 mixin 拼合而成，总行数超过 8,000 行。当前主链路已迁为服务组合，manager 只保留基础持久化骨架和 kernel 骨架：
 
 ```python
 class SubAgentManager(
-    SubAgentBaseMixin,           # 744行 - CRUD + 卡片 + 工作流 + 校验
-    SubAgentLifecycleMixin,      # 257行 - 生命周期变更
-    SubAgentBoardMixin,          # 471行 - 看板渲染
-    SubAgentActionMixin,         # 439行 - 动作执行
-    SubAgentCapabilityMixin,     # 293行 - 能力路由
-    SubAgentAcceptanceMixin,     # 293行 - 验收流程
-    SubAgentPatchMixin,          # 794行 - patch审核+应用+回滚+测试
-    SubAgentDispatchMixin,       # 423行 - 调度派工
-    SubAgentAcceptanceFindingMixin,  # 390行 - 验收发现
-    SubAgentRunnerContextMixin,  # 181行 - runner上下文注入
-    SubAgentRunnerResultMixin,   # 302行 - runner结果处理
-    SubAgentChannelProbeMixin,   # 230行 - 通道探测
-    SubAgentLearningMixin,       # 255行 - 学习反馈
-    SubAgentIndexingMixin,       # 382行 - 索引管理
+    SubAgentBaseMixin,           # 基础 CRUD + 卡片 + 工作流 + 校验骨架
+    SubagentKernelMixin,         # kernel 快照和查询骨架
+    SubAgentLifecycleService,    # service - 能力记录、证据、心跳和 runner attempt
+    SubAgentCapabilityService,   # service - 能力请求路由和 route report
+    SubAgentActionService,       # service - action apply 执行和审计记录
+    SubAgentPatchService,        # service - patch审核、应用、回滚和测试
+    SubAgentRunnerContextService,# service - runner上下文和写入边界
+    SubAgentRunnerResultService, # service - runner结果记录和唤醒通知
+    SubAgentChannelProbeService, # service - 通道健康探测和证据报告
+    SubAgentBudgetService,       # service - runner refs-only 预算报告
+    SubAgentLearningService,     # service - 学习反馈候选草稿
+    SubAgentMemoryGateService,   # service - run-local memory gate 审核/导出
+    SubAgentIndexingService,     # service - 索引管理和 LocalStore 事件
+    SubAgentWorkflowService,     # service - workflow plan/realize
+    SubAgentHierarchyService,    # service - hierarchy schedule/recovery
+    SubAgentDispatchService,     # service - dispatch/watch report
+    SubAgentParentPlannerService,# service - parent planner report
 ):
-    pass  # 纯组合，无业务逻辑
+    pass  # 兼容 facade；新能力应继续迁到 service composition
 ```
+
+`SubAgentBoardMixin` 已从继承链移除，公开 board API 由 `SubAgentManager` 薄转发到 `SubAgentBoardFacade`，再委托 `SubAgentBoardService`。
+
+`SubAgentLearningMixin` 也已从继承链移除。学习候选草稿的保存、去重、确认和统计进入
+`services/learning.py`；`manager_learning.py` 暂时保留兼容 wrapper 和 helper re-export，
+避免旧测试/旧 import 立即断裂。
+
+`SubAgentBudgetMixin` 已从继承链移除。runner refs-only 预算报告进入 `services/budget.py`；
+旧 `manager_budget.py` 已删除，外部直接使用 `SubAgentManager` 或 `SubAgentBudgetService`。
+
+`SubAgentMemoryGateMixin` 已从继承链移除。run-local memory gate 候选列出、审核、导出、
+retention 和 verifier 进入 `services/memory_gate.py`；旧 `manager_memory_gate.py` 已删除。
+
+`SubAgentLifecycleMixin` 已从继承链移除。能力请求、能力授权、能力缺口、证据、状态、
+心跳和 runner attempt 更新进入 `services/lifecycle.py` 与
+`services/lifecycle_runner_attempts.py`；`manager_lifecycle.py` 暂时保留兼容 wrapper。
+
+`SubAgentCapabilityMixin` 已从继承链移除。OPEN capability request 到 skill/tool card 的路由、
+route report 写入和 grant/gap 记录衔接进入 `services/capabilities/`；
+旧 `manager_capabilities.py` 已删除。
+
+`SubAgentActionMixin` 已从继承链移除。action apply、action apply report、任务 work log 和
+action audit log 进入 `services/actions/`；`manager_actions.py` 暂时保留兼容 wrapper。
+
+`SubAgentPatchMixin` 已从继承链移除。patch review/apply/report/rollback 通过
+`services/patch_apply/facade.py` 组合 `patch/patch_service.py` 和 `patch/patch_apply.py`；
+`manager_patch.py` 暂时保留兼容 wrapper 和旧 helper re-export。
+
+`SubAgentRunnerContextMixin` 已从继承链移除。runner execution context、context bundle、
+write boundary 和 grant 注入进入 `services/runner_context/`；
+`manager_runner_context.py` 暂时保留兼容 wrapper。
+
+`SubAgentRunnerResultMixin` 已从继承链移除。runner result 记录、structured output 处理、
+debrief、learning side effects、session compact 和 completion wake 进入
+`services/runner_result/`；`manager_runner_results.py` 暂时保留兼容 wrapper 和
+`RecordRunnerResultParams` re-export。
+
+`SubAgentChannelProbeMixin` 已从继承链移除。通道健康探测、probe 证据写入和批量报告进入
+`services/channel_probe.py`；`manager_channel_probe.py` 暂时保留兼容 wrapper。
+
+`SubAgentWorkflowMixin` 已从继承链移除。workflow 规划和 materialize worker 的实现继续由
+`services/workflow.py` 承担，`SubAgentManager` 只通过 `SubAgentWorkflowService` 组合转发。
+
+`SubAgentIndexingMixin` 已从继承链移除。任务索引、LocalStore 事件、报告索引和 dataclass
+record 索引进入 `services/indexing/`；`manager_indexing.py` 暂时保留兼容 wrapper，
+`SubAgentManager` 只通过 `SubAgentIndexingService` 组合转发。
+
+`SubAgentHierarchyMixin` 已从继承链移除。child scheduling、hierarchy recovery packet、
+leadership recovery 计划/应用进入 `services/hierarchy/facade.py`；`services/hierarchy/facade.py`
+是唯一实现入口，旧 `manager_hierarchy.py` 已删除，`SubAgentManager` 只通过
+`SubAgentHierarchyService` 组合转发。
+
+`SubAgentDispatchMixin` 已从继承链移除。dispatch record 和 dispatch watch 进入
+`services/dispatch/service.py`；parent planner report 进入
+`services/dispatch/parent_planner_service.py`。`manager_dispatch.py` 暂时保留兼容 wrapper，
+`SubAgentManager` 只通过 `SubAgentDispatchService` 与 `SubAgentParentPlannerService` 组合转发。
 
 ### 1.2 Why This is Dangerous / 为什么这是危险的
 
@@ -52,8 +110,23 @@ class SubAgentManager(
 
 | 服务 | 源文件 | 方法 | 状态 |
 |---|---|---|---|
-| `SubAgentPersistenceService` | `services/persistence.py` | `load`, `list_runs`, `save`, 归一化 | 已完成 |
-| `SubAgentLifecycleService` | `services/lifecycle.py` | `record_capability_request`, `record_capability_grant`, `record_capability_gap`, `record_verification_evidence`, `update_status`, `heartbeat` | 已完成 |
+| `SubAgentPersistenceService` | `services/persistence/` | `load`, `list_runs`, `save`, 归一化 | 已完成 |
+| `SubAgentLifecycleService` | `services/lifecycle.py`, `services/lifecycle_runner_attempts.py` | `record_capability_request`, `record_capability_grant`, `record_capability_gap`, `record_verification_evidence`, `update_status`, `heartbeat`, `prepare_runner_attempt`, `abandon_runner_attempt` | 已完成 |
+| `SubAgentCapabilityService` | `services/capabilities/` | `route_capability_requests`, `write_capability_route_report`, grant/gap 路由衔接 | 已完成 |
+| `SubAgentActionService` | `services/actions/` | action apply、action apply report、task work log、action audit log | 已完成 |
+| `SubAgentPatchService` | `services/patch_apply/facade.py`, `patch/` | patch review、apply、report、rollback、diff/test helper | 已完成 |
+| `SubAgentRunnerContextService` | `services/runner_context/` | execution context、context bundle、write boundary、grant 注入 | 已完成 |
+| `SubAgentRunnerResultService` | `services/runner_result/` | runner result 记录、debrief、session compact、completion wake | 已完成 |
+| `SubAgentBoardService` + `SubAgentBoardFacade` | `services/board/service.py`, `services/board/facade.py` | board item、risk flags、board/due-check/action-plan 写入 | 已完成 |
+| `SubAgentBudgetService` | `services/budget.py` | runner refs-only 预算报告生成和落盘 | 已完成 |
+| `SubAgentLearningService` | `services/learning.py` | 学习候选草稿保存、去重、确认、统计 | 已完成 |
+| `SubAgentMemoryGateService` | `services/memory_gate.py` | memory gate 候选列出、审核、导出、retention、verifier | 已完成 |
+| `SubAgentChannelProbeService` | `services/channel_probe.py` | 通道健康探测、probe 证据写入和报告落盘 | 已完成 |
+| `SubAgentWorkflowService` | `services/workflow.py` | workflow 规划和 worker materialize | 已完成 |
+| `SubAgentIndexingService` | `services/indexing/` | 任务索引、LocalStore 事件、报告索引 | 已完成 |
+| `SubAgentHierarchyService` | `services/hierarchy/facade.py` | child scheduling、hierarchy recovery、leadership recovery report | 已完成 |
+| `SubAgentDispatchService` | `services/dispatch/service.py` | dispatch record、watch report | 已完成 |
+| `SubAgentParentPlannerService` | `services/dispatch/parent_planner_service.py` | parent planner prompt/response 和 report | 已完成 |
 
 ---
 
@@ -121,7 +194,7 @@ class SubAgentLifecycleService:
 
 **职责**: 调度决策、并发控制、重试策略、runner 分发
 
-**当前来源**: `manager_dispatch.py` (423行)
+**当前实现**: `services/dispatch/` 是唯一业务实现入口，`manager_dispatch.py` 暂时保留兼容 facade。
 
 **目标方法**:
 ```python
@@ -212,28 +285,16 @@ class SubAgentPatchService:
 
 **职责**: 能力路由、请求、授权、缺口管理
 
-**当前来源**: `manager_capabilities.py` (293行) + `services/lifecycle.py` 中的能力相关方法
+**当前来源**: `services/capabilities/` + `services/lifecycle.py` 中的能力记录方法
 
 **目标方法**:
 ```python
 class SubAgentCapabilityService:
-    def __init__(self, persistence: SubAgentPersistenceService):
-        self.persistence = persistence
+    def route_capability_requests(self, router, config=None, ...) -> CapabilityRouteReport:
+        """把 OPEN capability request 路由到 skill/tool card"""
 
-    def record_request(self, run_id: str, ...) -> CapabilityRequest:
-        """记录能力请求"""
-
-    def grant(self, run_id: str, request_id: str, ...) -> CapabilityGrant:
-        """授权能力"""
-
-    def record_gap(self, run_id: str, ...) -> CapabilityGap:
-        """记录能力缺口"""
-
-    def search_capabilities(self, query: str) -> list[CapabilitySearchHit]:
-        """搜索能力"""
-
-    def route_card(self, card: SubAgentCard) -> dict:
-        """路由能力卡片"""
+    def write_capability_route_report(self, router, config=None, ...) -> CapabilityRouteReport:
+        """写入 route report，并在 apply 时写入 route 审计记录"""
 ```
 
 **依赖**: `PersistenceService`, `capability/router.py`
@@ -242,7 +303,7 @@ class SubAgentCapabilityService:
 
 **职责**: runner 上下文注入、指令构建、工具白名单
 
-**当前来源**: `manager_runner_context.py` (181行) + `agent_core/planner.py`
+**当前来源**: `services/runner_context/` + `agent_core/planner.py`
 
 **目标方法**:
 ```python
@@ -266,7 +327,7 @@ class SubAgentRunnerContextService:
 
 **职责**: runner 结果处理、归档、token 统计
 
-**当前来源**: `manager_runner_results.py` (302行) + `result_processors.py` (358行)
+**当前来源**: `services/runner_result/` + `result_processors.py` (358行)
 
 **目标方法**:
 ```python
@@ -293,7 +354,7 @@ class SubAgentRunnerResultService:
 
 **职责**: 看板渲染、报告生成、摘要
 
-**当前来源**: `manager_board.py` (471行) + `rendering.py` (490行) + `reports.py` (406行)
+**当前来源**: `services/board/service.py` + `services/board/facade.py` + `rendering.py` + `reports.py`
 
 **目标方法**:
 ```python
@@ -429,7 +490,7 @@ class JsonlTaskRepository:
 ### 4.2 Migration Steps / 迁移步骤
 
 #### Step 1: 完善 PersistenceService（已完成）
-- [x] `services/persistence.py` 已提取 `load`, `list_runs`, `save`, 归一化逻辑
+- [x] `services/persistence/` 已提取 `load`, `list_runs`, `save`, 归一化逻辑
 - [x] `SubAgentBaseMixin` 已委托 persistence 方法给服务
 - [x] 测试: `test_subagent_persistence_service.py`
 
@@ -438,12 +499,18 @@ class JsonlTaskRepository:
 - [x] `SubAgentLifecycleMixin` 已委托 lifecycle 方法给服务
 - [x] 测试: `test_subagent_lifecycle_service.py`
 
-#### Step 3: 提取 PatchService
-- [ ] 创建 `services/patch.py`
-- [ ] 从 `manager_patch.py` 提取 `review_patches`, `apply_patches`, `rollback_patches`
-- [ ] 从 `manager_patch.py` 提取辅助方法（路径校验、diff 构建、测试执行）
-- [ ] `SubAgentPatchMixin` 委托给 `self.patch_service`
-- [ ] 测试: `test_subagent_patch_service.py`
+#### Step 2.5: 移除 BoardMixin（已完成）
+- [x] 删除 `manager_board.py`
+- [x] 新增 `services/board/facade.py`，让旧 board API 保持可用但不再挂到继承链
+- [x] `SubAgentManager` 只保留薄转发：`build_board`、`write_board`、`due_check`、`plan_actions`
+- [x] 测试: `test_manager_board_class.py`, `test_manager_board_actions_class.py`, `test_subagent_coordinator_due_check.py`
+
+#### Step 3: 提取 PatchService（已完成）
+- [x] 使用现有 `patch/` 子包承载 review/apply/renderer 实现，新增 `services/patch_apply/facade.py`
+- [x] 从 `manager_patch.py` 提取 `review_patches`, `apply_patches`, `rollback_patches`
+- [x] 从 `manager_patch.py` 提取辅助方法（路径校验、diff 构建、测试执行）
+- [x] `SubAgentManager` 不再继承 `SubAgentPatchMixin`，主链路通过 `self.patch` 服务组合转发
+- [x] 测试: `test_manager_patch.py`, `test_subagent_bundle_interfaces.py`, `test_public_aliases.py`
 
 #### Step 4: 提取 AcceptanceService
 - [ ] 创建 `services/acceptance.py`
@@ -453,22 +520,24 @@ class JsonlTaskRepository:
 - [ ] 测试: `test_subagent_acceptance_service.py`
 
 #### Step 5: 提取 DispatchService
-- [ ] 创建 `services/dispatch.py`
-- [ ] 从 `manager_dispatch.py` 提取调度逻辑
-- [ ] 测试: `test_subagent_dispatch_service.py`
+- [x] 创建 `services/dispatch/`
+- [x] 从 `manager_dispatch.py` 提取 dispatch/watch 报告逻辑到 `SubAgentDispatchService`
+- [x] 从 `manager_dispatch.py` 提取 parent planner 报告逻辑到 `SubAgentParentPlannerService`
+- [x] `SubAgentManager` 不再继承 `SubAgentDispatchMixin`，主链路通过 `self.dispatch` 和 `self.parent_planner` 服务组合转发
+- [x] 测试: `test_manager_dispatch.py`, `test_manager_indexing.py`, `test_subagent_debug_trace.py`, `test_dispatch_mixin.py`, `test_dispatch_loop.py`, `test_dispatch_loop_class.py`
 
-#### Step 6: 提取 BoardService
-- [ ] 创建 `services/board.py`
-- [ ] 从 `manager_board.py` 提取看板渲染
-- [ ] 从 `rendering.py` 提取渲染工具
-- [ ] 测试: `test_subagent_board_service.py`
+#### Step 6: 提取 BoardService（已完成）
+- [x] `services/board/service.py` 已承载看板核心服务
+- [x] `services/board/facade.py` 已承载旧公开 API 的兼容转发
+- [x] `SubAgentManager` 已不再继承 board mixin
+- [x] 测试: `test_manager_board_class.py`, `test_manager_board_actions_class.py`, `test_subagent_coordinator_due_check.py`
 
 #### Step 7: 提取剩余服务
-- [ ] `services/capability.py` — 从 `manager_capabilities.py` 提取
-- [ ] `services/runner_context.py` — 从 `manager_runner_context.py` 提取
-- [ ] `services/runner_result.py` — 从 `manager_runner_results.py` 提取
-- [ ] `services/indexing.py` — 从 `manager_indexing.py` 提取
-- [ ] `services/learning.py` — 从 `manager_learning.py` 提取
+- [x] `services/capabilities/` — 从 `services/capabilities/` 提取 capability route
+- [x] `services/runner_context/` — 从 `manager_runner_context.py` 提取
+- [x] `services/runner_result/` — 从 `manager_runner_results.py` 提取
+- [x] `services/indexing/` — 从 `manager_indexing.py` 提取
+- [x] `services/learning.py` — 从 `manager_learning.py` 提取
 
 #### Step 8: 引入 Repository Pattern
 - [ ] 定义 `domain/subagent/ports.py`（TaskRepository, ArtifactRepository, IndexRepository）

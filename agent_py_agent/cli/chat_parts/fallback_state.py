@@ -1,5 +1,3 @@
-# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
-# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
 
 from __future__ import annotations
 
@@ -15,8 +13,6 @@ from dataclasses import dataclass
 from typing import Any
 
 
-# LLM: FallbackWorkerConfig 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class FallbackWorkerConfig:
 
@@ -36,8 +32,6 @@ class FallbackWorkerConfig:
     build_history_context: Callable[[], str]
 
 
-# LLM: FallbackHandleCommandConfig 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class FallbackHandleCommandConfig:
 
@@ -57,8 +51,6 @@ class FallbackHandleCommandConfig:
     jobs: Any  # queue.Queue
 
 
-# LLM: RunFallbackConfig 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class RunFallbackConfig:
 
@@ -77,8 +69,6 @@ class RunFallbackConfig:
     current_session_id: str
 
 
-# LLM: ConversationTurn 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass(frozen=True)
 class ConversationTurn:
     user_message: str
@@ -99,16 +89,12 @@ MAX_HISTORY_TURNS = 20
 ASSISTANT_PREVIEW_CHARS = 500
 
 
-# LLM: _startup_banner 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _startup_banner(agent_name: str, *, use_gateway: bool) -> str:
     from .rendering import startup_banner as _sb
 
     return _sb(agent_name, use_gateway=use_gateway)
 
 
-# LLM: append_conversation_turn 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def append_conversation_turn(
     conversation_history: list[tuple[str, str]],
     history_lock: threading.Lock,
@@ -122,30 +108,22 @@ def append_conversation_turn(
             conversation_history[:] = conversation_history[-max_turns:]
 
 
-# LLM: render_gateway_status 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def render_gateway_status(agent, paths):
     from ...agent.gateway import render_gateway_status as _rgs
 
     return _rgs(agent, paths)
 
 
-# LLM: resume_context_override 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def resume_context_override(args) -> str | None:
     if hasattr(args, "resume_context"):
         return args.resume_context
     return None
 
 
-# LLM: ChatJob 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 class ChatJob:
 
     __slots__ = ("user", "show_prompt", "inject", "prompt_files")
 
-    # LLM: __init__ 属于chat CLI；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def __init__(
         self, *, user: str, show_prompt: bool, inject: list[str], prompt_files: list[str]
     ) -> None:

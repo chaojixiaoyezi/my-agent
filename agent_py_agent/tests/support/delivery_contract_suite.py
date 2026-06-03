@@ -4,8 +4,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 
-# LLM: run_delivery_contract_suite is the reusable contract-suite pattern for delivery contracts.
-# 函数用途: 复用一组通用合同校验用例，避免每个入口各写一套散测试。
 def run_delivery_contract_suite(validate: Callable[..., object], workspace: Path) -> None:
     _assert_invalid_artifacts_shape(validate, workspace)
     _assert_valid_open_world_artifact(validate, workspace)

@@ -1,5 +1,3 @@
-# LLM: Capability module; keep skill/tool routing contracts stable for planner and dispatch callers.
-# 模块用途: 描述和路由 agent 能力、技能、工具和执行条件。
 
 from __future__ import annotations
 
@@ -16,8 +14,6 @@ from typing import Any
 from ..contracts.gates.skill_guard import evaluate_skill_guard_gate
 
 
-# LLM: SkillCard is a 能力路由 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: 一个 skill 的轻量索引卡。 Card 只放路由需要的短信息，不直接装进完整 `SKILL.md`。 这样即使未来有一万个 skill，也可以先检索 card，再按需加载正文。
 @dataclass
 class SkillCard:
     """一个 skill 的轻量索引卡。
@@ -36,8 +32,6 @@ class SkillCard:
     risk_level: str = "low"
     source: str = "workspace"
 
-    # LLM: SkillCard.render_compact belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 渲染给模型看的短卡片。。
     def render_compact(self) -> str:
         """渲染给模型看的短卡片。"""
 
@@ -54,16 +48,12 @@ class SkillCard:
         return "\n".join(parts)
 
 
-# LLM: SkillRegistry is a 能力路由 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: Skill 注册表。 它按目录扫描 `SKILL.md`，只解析索引信息。后续真正需要某个 skill 时， 再用 `load_body()` 读取正文。
 class SkillRegistry:
     """Skill 注册表。
 
     它按目录扫描 `SKILL.md`，只解析索引信息。后续真正需要某个 skill 时，
     再用 `load_body()` 读取正文。"""
 
-    # LLM: SkillRegistry.__init__ belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 初始化实例依赖和字段，不应在构造阶段做难以回滚的重副作用；它是 SkillRegistry 的方法，通常依赖实例字段。
     def __init__(
         self,
         skill_dirs: list[str | Path] | None = None,
@@ -79,8 +69,6 @@ class SkillRegistry:
         self._cards: dict[str, SkillCard] = {}
         self._gate_decisions: dict[str, dict[str, Any]] = {}
 
-    # LLM: SkillRegistry.scan belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 扫描所有 skill 目录，并按后出现覆盖先出现的规则合并同名 skill。。
     def scan(self) -> list[SkillCard]:
         """扫描所有 skill 目录，并按后出现覆盖先出现的规则合并同名 skill。"""
 
@@ -90,16 +78,12 @@ class SkillRegistry:
         self._cards = cards
         return self.cards()
 
-    # LLM: _scan_skill_dir keeps the scan loop shallow while preserving gate-first registration.
-    # 函数用途: 扫描单个 skill 根目录；每个 SKILL.md 先过 skill_guard，再转成 SkillCard。
     def _scan_skill_dir(self, skill_dir: Path, cards: dict[str, SkillCard]) -> None:
         if not skill_dir.exists():
             return
         for skill_file in sorted(skill_dir.glob("*/SKILL.md")):
             self._register_skill_file(skill_dir, skill_file, cards)
 
-    # LLM: _register_skill_file registers one skill only after the shared skill_guard allows it.
-    # 函数用途: 将 gate 裁决写入审计缓存；被拦 skill 不进入能力路由。
     def _register_skill_file(self, skill_dir: Path, skill_file: Path, cards: dict[str, SkillCard]) -> None:
         decision = self._evaluate_skill_gate(skill_file)
         self._gate_decisions[skill_file.parent.name] = decision.to_dict()
@@ -109,27 +93,19 @@ class SkillRegistry:
         cards[card.name] = card
         self._gate_decisions[card.name] = decision.to_dict()
 
-    # LLM: SkillRegistry.cards belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 返回当前已扫描到的 skill card。。
     def cards(self) -> list[SkillCard]:
         """返回当前已扫描到的 skill card。"""
 
         return list(self._cards.values())
 
-    # LLM: SkillRegistry.get belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 按名称取一个 skill card。。
     def get(self, name: str) -> SkillCard | None:
         """按名称取一个 skill card。"""
 
         return self._cards.get(name)
 
-    # LLM: SkillRegistry.gate_decisions exposes skill scan decisions as machine records.
-    # 函数用途: 返回最近 scan/load_body 产生的 skill_guard 裁决，供 CLI、测试和审计读取。
     def gate_decisions(self) -> dict[str, dict[str, Any]]:
         return {name: dict(decision) for name, decision in self._gate_decisions.items()}
 
-    # LLM: SkillRegistry.load_body belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 读取某个 skill 的正文。 `max_chars=0` 表示不限制长度。这里先用字符数兜底，后续接 tokenizer 时可以替换成真正的 token 截断。。
     def load_body(self, name: str, *, max_chars: int = 0) -> str:
         """读取某个 skill 的正文。
 
@@ -148,8 +124,6 @@ class SkillRegistry:
             return body[:max_chars] + "\n... 已截断"
         return body
 
-    # LLM: _evaluate_skill_gate keeps skill enablement behind the shared runtime gate.
-    # 函数用途: 对一个 SKILL.md 所在目录执行 skill_guard；关闭 enforce 时仍记录裁决供审计。
     def _evaluate_skill_gate(self, skill_file: Path) -> Any:
         from ..contracts.gates.skill_guard import SkillGuardRequest
 
@@ -163,8 +137,6 @@ class SkillRegistry:
         )
 
 
-# LLM: parse_skill_file belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 从 `SKILL.md` 解析轻量 Skill Card。。
 def parse_skill_file(path: str | Path, *, source: str = "workspace") -> SkillCard:
     """从 `SKILL.md` 解析轻量 Skill Card。"""
 
@@ -187,8 +159,6 @@ def parse_skill_file(path: str | Path, *, source: str = "workspace") -> SkillCar
     )
 
 
-# LLM: _split_frontmatter belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 拆出 Markdown frontmatter。 这里只支持项目需要的极简 YAML 子集，避免为了 skill 索引引入完整解析器。。
 def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     """拆出 Markdown frontmatter。
 
@@ -205,8 +175,6 @@ def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return {}, text
 
 
-# LLM: _parse_meta belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 解析 card frontmatter 里的小型 key/value/list 结构。。
 def _parse_meta(text: str) -> dict[str, Any]:
     """解析 card frontmatter 里的小型 key/value/list 结构。"""
 
@@ -222,8 +190,6 @@ def _parse_meta(text: str) -> dict[str, Any]:
     return data
 
 
-# LLM: _append_meta_list_item belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 把结果、日志或状态写回磁盘/索引，改动时要确认审计记录和失败处理。
 def _append_meta_list_item(data: dict[str, Any], current_key: str | None, line: str) -> bool:
     if not (line.startswith("  - ") and current_key):
         return False
@@ -231,8 +197,6 @@ def _append_meta_list_item(data: dict[str, Any], current_key: str | None, line: 
     return True
 
 
-# LLM: _parse_meta_mapping_line belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 读取文件、配置或外部文本并转换成内部对象，格式变化要保留兼容路径。
 def _parse_meta_mapping_line(data: dict[str, Any], current_key: str | None, line: str) -> str | None:
     if ":" not in line or line.startswith(" "):
         return current_key
@@ -246,8 +210,6 @@ def _parse_meta_mapping_line(data: dict[str, Any], current_key: str | None, line
     return None
 
 
-# LLM: _parse_value belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 解析 frontmatter 标量或简单行内列表。。
 def _parse_value(value: str) -> Any:
     """解析 frontmatter 标量或简单行内列表。"""
 
@@ -260,8 +222,6 @@ def _parse_value(value: str) -> Any:
     return value
 
 
-# LLM: _as_list belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 把 frontmatter 里的值统一转成字符串列表。。
 def _as_list(value: Any) -> list[str]:
     """把 frontmatter 里的值统一转成字符串列表。"""
 
@@ -272,8 +232,6 @@ def _as_list(value: Any) -> list[str]:
     return [str(value).strip()]
 
 
-# LLM: _first_paragraph belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 从 Markdown 正文里取第一段非标题文本作为兜底描述。。
 def _first_paragraph(body: str) -> str:
     """从 Markdown 正文里取第一段非标题文本作为兜底描述。"""
 
@@ -284,8 +242,6 @@ def _first_paragraph(body: str) -> str:
     return ""
 
 
-# LLM: _skill_guard_error formats a compact exception without making prose a machine fact.
-# 函数用途: 将 skill_guard 结构化 finding code 放入异常，方便调用方和用户定位被拦原因。
 def _skill_guard_error(name: str, decision: dict[str, Any]) -> str:
     codes = [
         str(item.get("code"))

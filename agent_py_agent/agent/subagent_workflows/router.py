@@ -1,5 +1,3 @@
-# LLM: Subagent workflow planner module; keep route, compile, and acceptance bundle shapes stable.
-# 模块用途: 拆分子代理工作流的规划、编译、验收或存储逻辑。
 
 from __future__ import annotations
 
@@ -17,8 +15,6 @@ DEFAULT_MODE = "auto"
 VALID_MODES = {"off", "manual", "auto"}
 
 
-# LLM: WorkflowRouteDecision 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 类用途: 集中保存工作流routedecision字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class WorkflowRouteDecision:
     """Structured decision returned by the workflow router."""
@@ -33,8 +29,6 @@ class WorkflowRouteDecision:
     issues: list[str] = field(default_factory=list)
 
 
-# LLM: _RouteDecisionFields 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 类用途: 集中保存routedecision字段字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模板选择、步骤编译和验收策略相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class _RouteDecisionFields:
     mode: str
@@ -47,8 +41,6 @@ class _RouteDecisionFields:
     issues: list[str]
 
 
-# LLM: WorkflowRouteRequest bundles workflow route inputs for the public router boundary.
-# 类用途: 让 workflow 路由只接收一个结构化参数包，避免继续增加散参。
 @dataclass(frozen=True)
 class WorkflowRouteRequest:
     goal: str
@@ -59,8 +51,6 @@ class WorkflowRouteRequest:
     workflow_risk_tags: object = None
 
 
-# LLM: _TemplateSelectionRequest 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 类用途: 集中保存模板selection请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模板选择、步骤编译和验收策略相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class _TemplateSelectionRequest:
     explicit_template_id: str
@@ -70,11 +60,8 @@ class _TemplateSelectionRequest:
     issues: list[str]
 
 
-# LLM: _RouteFieldsRequest 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 类用途: 集中保存route字段请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模板选择、步骤编译和验收策略相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class _RouteFieldsRequest:
-    # LLM: route decision projection keeps mode/template/task facts together.
     mode: str
     selected_template_id: str
     task_type: str
@@ -91,8 +78,6 @@ _TASK_TYPE_TEMPLATE_MAP = {
 }
 
 
-# LLM: route_workflow 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 函数用途: 处理route工作流相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def route_workflow(
     request: WorkflowRouteRequest,
 ) -> WorkflowRouteDecision:
@@ -130,15 +115,11 @@ def route_workflow(
     )
 
 
-# LLM: _disabled_route_decision 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 函数用途: 处理disabledroutedecision相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _disabled_route_decision(fields: _RouteDecisionFields) -> WorkflowRouteDecision:
     """Build the off-mode route result without lengthening the public facade."""
     return _make_route_decision(fields)
 
 
-# LLM: _route_fields 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 函数用途: 处理route字段相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _route_fields(request: _RouteFieldsRequest) -> _RouteDecisionFields:
     return _RouteDecisionFields(
         mode=request.mode,
@@ -152,8 +133,6 @@ def _route_fields(request: _RouteFieldsRequest) -> _RouteDecisionFields:
     )
 
 
-# LLM: _workflow_route_inputs 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 函数用途: 处理工作流routeinputs相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _workflow_route_inputs(
     config: Any,
     template_store: WorkflowTemplateStore | None,
@@ -165,8 +144,6 @@ def _workflow_route_inputs(
     return store, available_template_ids, issues, mode
 
 
-# LLM: _make_route_decision 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 函数用途: 构建routedecision所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _make_route_decision(fields: _RouteDecisionFields) -> WorkflowRouteDecision:
     return WorkflowRouteDecision(
         mode=fields.mode,
@@ -180,8 +157,6 @@ def _make_route_decision(fields: _RouteDecisionFields) -> WorkflowRouteDecision:
     )
 
 
-# LLM: _workflow_mode 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 函数用途: 处理工作流mode相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _workflow_mode(config: Any, issues: list[str]) -> str:
     raw_mode = getattr(config, "subagent_workflow_mode", DEFAULT_MODE)
     if isinstance(raw_mode, str):
@@ -193,8 +168,6 @@ def _workflow_mode(config: Any, issues: list[str]) -> str:
     return DEFAULT_MODE
 
 
-# LLM: _select_template 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 函数用途: 读取或查询模板需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _select_template(request: _TemplateSelectionRequest) -> tuple[str, str]:
     explicit_template_id = request.explicit_template_id.strip()
     if explicit_template_id:
@@ -214,15 +187,11 @@ def _select_template(request: _TemplateSelectionRequest) -> tuple[str, str]:
     return "", "No workflow template could be selected."
 
 
-# LLM: _workflow_task_type normalizes explicit machine task-type values only.
-# 函数用途: 从 WorkflowPlanConstraints.workflow_task_type 读取模板类型；普通 goal 文本不参与路由。
 def _workflow_task_type(value: object) -> str:
     task_type = str(value or "").strip().lower().replace("-", "_")
     return task_type if task_type in _TASK_TYPE_TEMPLATE_MAP else "simple"
 
 
-# LLM: _workflow_risk_tags preserves explicit structured risk tags without route guessing.
-# 函数用途: 从 workflow_risk_tags 参数读取审计标签；缺省时只标记是否显式 workflow。
 def _workflow_risk_tags(value: object, *, task_type: str, explicit_template_id: str) -> list[str]:
     tags = _token_list(value)
     if tags:
@@ -230,8 +199,6 @@ def _workflow_risk_tags(value: object, *, task_type: str, explicit_template_id: 
     return ["explicit_workflow"] if task_type != "simple" or str(explicit_template_id or "").strip() else ["low_scope"]
 
 
-# LLM: _token_list normalizes already-structured route fields.
-# 函数用途: 支持字符串、列表、元组形式的机器 token；不扫描 goal/prompt 自然语言。
 def _token_list(value: object) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         values = [str(item or "").strip().lower().replace("-", "_") for item in value]
@@ -240,8 +207,6 @@ def _token_list(value: object) -> list[str]:
     return [item for item in values if item and all(ch.isalnum() or ch == "_" for ch in item)]
 
 
-# LLM: _format_store_issue 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 函数用途: 渲染或汇总存储issue的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _format_store_issue(issue: Any) -> str:
     parts = [str(getattr(issue, "message", issue))]
     template_id = getattr(issue, "template_id", "")

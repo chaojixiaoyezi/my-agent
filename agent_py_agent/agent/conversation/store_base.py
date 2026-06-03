@@ -1,5 +1,3 @@
-# LLM: Base paths for the long-running conversation control plane.
-# 模块用途: 初始化长期会话账本目录，并集中维护 thread/message/task/policy/wake 路径。
 
 from __future__ import annotations
 
@@ -65,8 +63,6 @@ class ConversationBaseStore:
     def _observation_path(self, thread_id: str) -> Path:
         return self.observations_dir / f"{thread_id}.jsonl"
 
-    # LLM: _guidance_path stores soft runtime hints per target without mixing them into messages.
-    # 函数用途: 根据 target_type/target_id 定位 guidance JSONL 文件，文件名做安全归一。
     def _guidance_path(self, target_type: str, target_id: str) -> Path:
         return self.guidance_dir / f"{safe_file_stem(target_type)}.{safe_file_stem(target_id)}.jsonl"
 

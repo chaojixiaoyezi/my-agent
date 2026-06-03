@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 
 from agent_py_agent.agent.gateway_parts import supervisor as sv
+from agent_py_agent.agent.gateway_parts.daemon_control import RunningPidReport
 
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
 
@@ -176,6 +177,23 @@ def test_read_gateway_heartbeat_invalid_json(supervisor_instance, tmp_path):
     assert result is None
 
 
+def test_read_gateway_heartbeat_report_invalid_json(supervisor_instance, tmp_path):
+    """坏 heartbeat JSON 要有结构化读取错误。"""
+    heartbeat_file = tmp_path / "bad_heartbeat.json"
+    heartbeat_file.write_text("{bad heartbeat", encoding="utf-8")
+
+    mock_paths = MagicMock()
+    mock_paths.heartbeat = heartbeat_file
+    supervisor_instance._paths = mock_paths
+
+    report = supervisor_instance._read_gateway_heartbeat_report()
+
+    assert report.payload is None
+    assert report.load_error is not None
+    assert report.load_error["context"] == "gateway.supervisor.heartbeat.read"
+    assert report.load_error["path"] == str(heartbeat_file)
+
+
 # ── 健康检测测试 ──────────────────────────────────────────────────────────
 
 @patch.object(sv, "get_running_pid", return_value=None)
@@ -241,6 +259,26 @@ def test_is_gateway_healthy_stale_heartbeat(supervisor_instance, tmp_path):
     assert result is False
 
 
+def test_is_gateway_healthy_bad_heartbeat_is_not_startup_phase(supervisor_instance, tmp_path):
+    """坏 heartbeat 不能被当成 gateway 启动期健康。"""
+    heartbeat_file = tmp_path / "bad_heartbeat.json"
+    heartbeat_file.write_text("{bad heartbeat", encoding="utf-8")
+
+    mock_paths = MagicMock()
+    mock_paths.pid = tmp_path / "gateway.pid"
+    mock_paths.heartbeat = heartbeat_file
+    supervisor_instance._paths = mock_paths
+    supervisor_instance._agent = MagicMock()
+
+    with patch.object(sv, "get_running_pid_report", return_value=RunningPidReport(12345)), \
+         patch.object(sv, "is_pid_alive", return_value=True):
+        result = supervisor_instance._is_gateway_healthy()
+
+    assert result is False
+    assert supervisor_instance._last_health_load_errors
+    assert supervisor_instance._last_health_load_errors[0]["context"] == "gateway.supervisor.heartbeat.read"
+
+
 # ── 适配器健康检测测试 ─────────────────────────────────────────────────────
 
 @patch.object(sv, "get_running_pid", return_value=None)
@@ -254,7 +292,7 @@ def test_check_adapter_health_no_pid(mock_get_pid, supervisor_instance):
     assert result is False
 
 
-@patch.object(sv, "get_running_pid", return_value=12345)
+@patch.object(sv, "get_running_pid_report", return_value=RunningPidReport(12345))
 @patch.object(sv, "is_pid_alive", return_value=True)
 def test_check_adapter_health_pid_alive_no_state(mock_alive, mock_get_pid, supervisor_instance, tmp_path):
     """测试适配器 PID 存活但无状态文件时返回健康（假设健康）。"""
@@ -270,7 +308,7 @@ def test_check_adapter_health_pid_alive_no_state(mock_alive, mock_get_pid, super
     assert result is True
 
 
-@patch.object(sv, "get_running_pid", return_value=12345)
+@patch.object(sv, "get_running_pid_report", return_value=RunningPidReport(12345))
 @patch.object(sv, "is_pid_alive", return_value=True)
 def test_check_adapter_health_running_state(mock_alive, mock_get_pid, supervisor_instance, tmp_path):
     """测试适配器状态为 running 时返回健康。"""

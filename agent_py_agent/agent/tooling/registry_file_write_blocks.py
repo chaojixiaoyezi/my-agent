@@ -1,5 +1,3 @@
-# LLM: File-write raw blocks provide structured large-content transport outside JSON strings.
-# 模块用途: 解析写文件 raw block，转成 write_file 工具调用。
 
 from __future__ import annotations
 
@@ -20,8 +18,6 @@ _ATTR_RE = re.compile(
 )
 
 
-# LLM: parse_write_file_raw_blocks is the one-shot structured commit path for complete files.
-# 函数用途: 把 [WRITE_FILE_RAW path="..."] 原文块解析成 write_file 调用，避免模型手工续 chunk。
 def parse_write_file_raw_blocks(text: str) -> list[tuple[int, dict[str, Any]]]:
     calls: list[tuple[int, dict[str, Any]]] = []
     for match in _WRITE_FILE_BLOCK_RE.finditer(text):
@@ -34,8 +30,6 @@ def parse_write_file_raw_blocks(text: str) -> list[tuple[int, dict[str, Any]]]:
     return calls
 
 
-# LLM: malformed_file_write_raw_block_calls prevents broken write markers from becoming final prose.
-# 函数用途: 模型明显开始写文件 raw block 但没按机器协议闭合时，生成 parse-error 触发下一轮修复。
 def malformed_file_write_raw_block_calls(text: str) -> list[tuple[int, dict[str, Any]]]:
     valid_ranges = _valid_raw_block_ranges(text)
     calls: list[tuple[int, dict[str, Any]]] = []
@@ -44,8 +38,6 @@ def malformed_file_write_raw_block_calls(text: str) -> list[tuple[int, dict[str,
     return sorted(calls, key=lambda item: item[0])
 
 
-# LLM: _parse_attrs keeps the block header as a small structured map.
-# 函数用途: 解析 session_id、target_path、chunk_index 等 header 属性，不读取正文语义。
 def _parse_attrs(raw: str) -> dict[str, str]:
     attrs: dict[str, str] = {}
     for match in _ATTR_RE.finditer(raw):
@@ -58,8 +50,6 @@ def _parse_attrs(raw: str) -> dict[str, str]:
     return attrs
 
 
-# LLM: _decode_attr_value handles JSON-style escapes in quoted header fields.
-# 函数用途: 让路径和 session_id 可包含转义字符，同时坏转义保留原文方便诊断。
 def _decode_attr_value(value: str) -> str:
     try:
         return str(json.loads(f'"{value}"'))
@@ -67,16 +57,12 @@ def _decode_attr_value(value: str) -> str:
         return value
 
 
-# LLM: _write_attrs_error validates WRITE_FILE_RAW headers before write_file mutates disk.
-# 函数用途: 检查一次性写文件 raw block 的 path 字段是否存在。
 def _write_attrs_error(attrs: dict[str, str]) -> str:
     if not str(attrs.get("path") or "").strip():
         return "WRITE_FILE_RAW 缺少结构化属性: path"
     return ""
 
 
-# LLM: _write_file_payload emits the same dict shape as JSON write_file.
-# 函数用途: 构造 write_file payload；正文只做协议换行剥离，不做语义判断。
 def _write_file_payload(attrs: dict[str, str], content: str) -> dict[str, Any]:
     return {
         "tool": "write_file",
@@ -85,8 +71,6 @@ def _write_file_payload(attrs: dict[str, str], content: str) -> dict[str, Any]:
     }
 
 
-# LLM: _block_content removes syntax padding while preserving generated file bytes.
-# 函数用途: 去掉 marker 后第一行和结束 marker 前一行的协议换行，不改正文内部内容。
 def _block_content(content: str) -> str:
     if content.startswith("\n"):
         content = content[1:]
@@ -95,20 +79,14 @@ def _block_content(content: str) -> str:
     return content
 
 
-# LLM: _valid_raw_block_ranges lets malformed detection ignore blocks handled by the normal parsers.
-# 函数用途: 标记已经完整闭合的 raw block 区间，避免一个坏属性块被重复报两次错误。
 def _valid_raw_block_ranges(text: str) -> list[tuple[int, int]]:
     return [(match.start(), match.end()) for match in _WRITE_FILE_BLOCK_RE.finditer(text)]
 
 
-# LLM: _position_in_ranges keeps scanner logic independent from regex match internals.
-# 函数用途: 判断某个 marker 位置是否已经属于完整 raw block。
 def _position_in_ranges(pos: int, ranges: list[tuple[int, int]]) -> bool:
     return any(start <= pos < end for start, end in ranges)
 
 
-# LLM: _malformed_raw_marker_calls handles one marker type so the public scanner stays flat.
-# 函数用途: 返回某种 raw 写文件 marker 的坏协议 parse-error 列表。
 def _malformed_raw_marker_calls(
     text: str,
     marker: str,
@@ -122,8 +100,6 @@ def _malformed_raw_marker_calls(
     ]
 
 
-# LLM: _raw_marker_positions is a tiny literal scanner for machine marker starts.
-# 函数用途: 找到某个 raw marker 的所有出现位置；是否有效由调用方继续判断。
 def _raw_marker_positions(text: str, opener: str) -> list[int]:
     positions: list[int] = []
     cursor = 0
@@ -135,8 +111,6 @@ def _raw_marker_positions(text: str, opener: str) -> list[int]:
         cursor = pos + len(opener)
 
 
-# LLM: _looks_like_raw_block_opener mirrors tool marker filtering without reading prose as facts.
-# 函数用途: 只把行首 raw 写文件协议形状当机器协议，避免文档里的普通说明误触发。
 def _looks_like_raw_block_opener(text: str, pos: int, opener: str) -> bool:
     line_start = text.rfind("\n", 0, pos) + 1
     if text[line_start:pos].strip():
@@ -145,14 +119,10 @@ def _looks_like_raw_block_opener(text: str, pos: int, opener: str) -> bool:
     return not next_char or next_char.isspace() or next_char in {"]", ":"}
 
 
-# LLM: _malformed_raw_block_error returns stable protocol diagnostics for model recovery.
-# 函数用途: 用固定错误码式描述告诉下一轮这不是最终答案，而是坏机器块。
 def _malformed_raw_block_error(marker: str) -> str:
     return f"{marker} 原文块格式错误，缺少完整结构化 header 或结束标记 [/{marker}]"
 
 
-# LLM: _raw_block_sample bounds the broken protocol sample in parse diagnostics.
-# 函数用途: 提取坏 raw block 片段，优先在其它机器结束标记处截断，避免污染下一轮上下文。
 def _raw_block_sample(text: str, pos: int) -> str:
     candidates = [
         idx + len(marker)

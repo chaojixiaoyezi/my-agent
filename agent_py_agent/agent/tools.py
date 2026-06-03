@@ -1,11 +1,8 @@
-# LLM: Agent package module; keep public imports and cross-module compatibility stable.
-# 模块用途: 提供 agent 核心功能的一部分，对外暴露稳定入口或兼容转发。
 
 from __future__ import annotations
 
 """compatibility facade for the split `agent.tooling` package.
 
-给人看的解释：
 真实工具代码现在已经拆到 `agent_py_agent.agent.tooling` 目录里。
 这个文件暂时保留老入口，避免以前写的 `from agent_py_agent.agent.tools import ToolRegistry` 立刻失效。
 新代码建议直接按职责导入 `agent.tooling` 里的模块。
@@ -33,6 +30,7 @@ from .tooling import (
     WebFetchTool,
     WebSearchTool,
     WriteFileTool,
+    WriteFileToolOptions,
     validate_write_boundary,
 )
 from .tooling.models import _tokenize
@@ -77,4 +75,5 @@ __all__ = [
     "WebSearchTool",
     "WRITE_TOOL_NAMES",
     "WriteFileTool",
+    "WriteFileToolOptions",
 ]

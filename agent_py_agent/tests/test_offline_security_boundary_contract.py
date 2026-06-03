@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 
-# LLM: Private network targets should be blocked by URL facts before any browser/fetch call.
-# 函数用途: 验证 localhost、loopback 和私网 IP 触发 NETWORK_PRIVATE_HOST_BLOCKED。
 def test_network_url_policy_blocks_private_hosts_without_allowlist() -> None:
     from agent_py_agent.agent.contracts.offline_security_boundary_contract import (
         validate_security_boundary_events,
@@ -21,8 +19,6 @@ def test_network_url_policy_blocks_private_hosts_without_allowlist() -> None:
     assert [item["host"] for item in result.findings] == ["127.0.0.1", "10.0.0.5"]
 
 
-# LLM: Prompt-injection content is allowed as data but cannot mutate machine contracts.
-# 函数用途: 验证外部文本只有在被错误应用到机器合同时才生成隔离 finding。
 def test_prompt_injection_text_cannot_override_state_machine_or_contracts() -> None:
     from agent_py_agent.agent.contracts.offline_security_boundary_contract import (
         validate_security_boundary_events,
@@ -39,8 +35,6 @@ def test_prompt_injection_text_cannot_override_state_machine_or_contracts() -> N
     assert blocked.error_codes == ("PROMPT_INJECTION_IGNORED_AS_DATA",)
 
 
-# LLM: LLM context must not receive raw secret fields.
-# 函数用途: 验证 token/password 等结构字段未脱敏会返回 SECRET_REDACTION_REQUIRED。
 def test_secret_fields_are_redacted_before_llm_context() -> None:
     from agent_py_agent.agent.contracts.offline_security_boundary_contract import (
         validate_security_boundary_events,
@@ -55,8 +49,6 @@ def test_secret_fields_are_redacted_before_llm_context() -> None:
     assert result.findings[0]["field_path"] == "payload.tool_result.token"
 
 
-# LLM: Side effects need idempotency keys and cannot reuse one key for different args.
-# 函数用途: 验证消息、产物写入等副作用缺少幂等键或同键换参数会被拦截。
 def test_replayed_message_or_artifact_write_uses_idempotency_key() -> None:
     from agent_py_agent.agent.contracts.offline_security_boundary_contract import (
         validate_security_boundary_events,
@@ -86,8 +78,6 @@ def test_replayed_message_or_artifact_write_uses_idempotency_key() -> None:
     assert result.error_codes == ("IDEMPOTENCY_KEY_REQUIRED", "SIDE_EFFECT_REPLAY_BLOCKED")
 
 
-# LLM: Path and URL normalization should catch symlink escapes, file URLs, and localhost variants.
-# 函数用途: 验证符号链接越界、file://、IPv6 localhost 和数字 localhost 会被安全边界合同拦截。
 def test_advanced_path_and_url_boundary_blocks_escape_variants() -> None:
     from agent_py_agent.agent.contracts.offline_security_boundary_contract import (
         validate_security_boundary_events,

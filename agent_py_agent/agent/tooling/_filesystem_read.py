@@ -1,6 +1,4 @@
 
-# LLM: 路径解析必须持续限制在工作区根内，避免读越界。
-# 模块用途: 工作区内文件列举、读取和文本搜索工具实现。
 
 from __future__ import annotations
 
@@ -34,12 +32,8 @@ _COMMON_FILE_DISCOVERY_IGNORES = frozenset(
 )
 
 
-# LLM: FileSystemTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: FileSystemTool 数据模型，集中保存 工具系统 的结构化状态。
 class FileSystemTool(BaseTool):
 
-    # LLM: FileSystemTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 初始化 FileSystemTool 的依赖、配置和运行期字段。
     def __init__(
         self,
         workspace_root: Path,
@@ -54,8 +48,6 @@ class FileSystemTool(BaseTool):
             dangerous_roots=access.path_dangerous_roots,
         )
 
-    # LLM: FileSystemTool.resolve_path 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 解析 resolve_path 并确认结果仍在允许边界内。
     def resolve_path(self, raw_path: str | Path) -> Path:
 
         raw_text = _required_path(raw_path)
@@ -74,8 +66,6 @@ class FileSystemTool(BaseTool):
             raise ValueError(hint)
         raise ValueError(decision.message or "路径访问被拒绝。")
 
-    # LLM: FileSystemTool.display_path 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 把内部路径转换成调用方可读的展示路径。
     def display_path(self, path: Path) -> str:
 
         for root in self.workspace_roots:
@@ -92,8 +82,6 @@ class FileSystemTool(BaseTool):
             return str(path).replace("\\", "/")
 
 
-# LLM: _workspace_typo_error gives models a precise retry path for near-miss workspace paths.
-# 函数用途: 当读/列文件路径只是工作区前缀拼错时，返回机器可读的 suggested_target 提示。
 def _workspace_typo_error(raw_path: str, workspace_root: Path, workspace_roots: list[Path]) -> str:
     suggested = suggest_workspace_typo_target(raw_path, workspace_roots)
     if not suggested:
@@ -124,12 +112,8 @@ def filesystem_access_options(
     return FileSystemAccessOptions(path_access_mode=str(path_access_mode or "normal"), path_dangerous_roots=roots)
 
 
-# LLM: ReadFileTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: ReadFileTool 数据模型，集中保存 工具系统 的结构化状态。
 class ReadFileTool(FileSystemTool):
 
-    # LLM: ReadFileTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 初始化 ReadFileTool 的依赖、配置和运行期字段。
     def __init__(
         self,
         workspace_root: Path,
@@ -173,7 +157,5 @@ class ReadFileTool(FileSystemTool):
             ],
         )
 
-    # LLM: ReadFileTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 执行 ReadFileTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         return execute_read_file(self, params, self.max_chars)

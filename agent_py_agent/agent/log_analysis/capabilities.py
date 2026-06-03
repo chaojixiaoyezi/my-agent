@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 from __future__ import annotations
 
@@ -21,8 +19,6 @@ SECURITY_TOOL_CAPABILITIES = (
 )
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 CapabilityLevel 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 定义 CapabilityLevel 的合法枚举值，供序列化、分支判断和兼容旧数据使用。
 class CapabilityLevel(str, Enum):
     L0 = "L0"
     L1 = "L1"
@@ -32,8 +28,6 @@ class CapabilityLevel(str, Enum):
     L5 = "L5"
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 LevelInfo 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 LevelInfo 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class LevelInfo:
     level: CapabilityLevel
@@ -41,8 +35,6 @@ class LevelInfo:
     description: str
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 FeatureGate 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 FeatureGate 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class FeatureGate:
     feature: str
@@ -82,8 +74,6 @@ FEATURE_GATES: dict[str, FeatureGate] = {
 }
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 normalize_level 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 normalize level 涉及的字段，让后续匹配和存储使用同一形态。
 def normalize_level(level: str | CapabilityLevel) -> CapabilityLevel:
     if isinstance(level, CapabilityLevel):
         return level
@@ -93,14 +83,10 @@ def normalize_level(level: str | CapabilityLevel) -> CapabilityLevel:
         return CapabilityLevel.L0
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 level_rank 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 level rank 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def level_rank(level: str | CapabilityLevel) -> int:
     return list(CapabilityLevel).index(normalize_level(level))
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 feature_gate_for 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 feature gate for 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def feature_gate_for(feature: str) -> FeatureGate:
     try:
         return FEATURE_GATES[feature]
@@ -108,8 +94,6 @@ def feature_gate_for(feature: str) -> FeatureGate:
         raise KeyError(f"unknown log analysis feature gate: {feature}") from exc
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 is_feature_enabled 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 is feature enabled 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def is_feature_enabled(config: LogAnalysisConfig | str | CapabilityLevel, feature: str) -> bool:
     gate = feature_gate_for(feature)
 
@@ -131,14 +115,10 @@ def is_feature_enabled(config: LogAnalysisConfig | str | CapabilityLevel, featur
     return level_rank(config) >= level_rank(gate.min_level)
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 effective_feature_gates 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 effective feature gates 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def effective_feature_gates(config: LogAnalysisConfig) -> dict[str, bool]:
     return {feature: is_feature_enabled(config, feature) for feature in FEATURE_GATES}
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 describe_capability_levels 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 describe capability levels 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def describe_capability_levels() -> list[dict[str, str]]:
     return [
         {
@@ -150,8 +130,6 @@ def describe_capability_levels() -> list[dict[str, str]]:
     ]
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 describe_feature_gates 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 describe feature gates 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def describe_feature_gates(config: LogAnalysisConfig | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for gate in FEATURE_GATES.values():
@@ -167,8 +145,6 @@ def describe_feature_gates(config: LogAnalysisConfig | None = None) -> list[dict
     return rows
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 has_security_tool_capability 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 has security tool capability 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def has_security_tool_capability(grants: list[str] | tuple[str, ...] | set[str] | None) -> bool:
     if not grants:
         return False
@@ -176,8 +152,6 @@ def has_security_tool_capability(grants: list[str] | tuple[str, ...] | set[str] 
     return bool(normalized.intersection(SECURITY_TOOL_CAPABILITIES))
 
 
-# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 security_tool_names_for_capabilities 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 security tool names for capabilities 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def security_tool_names_for_capabilities(
     grants: list[str] | tuple[str, ...] | set[str] | None,
 ) -> list[str]:

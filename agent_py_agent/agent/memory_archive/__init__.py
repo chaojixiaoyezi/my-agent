@@ -1,5 +1,3 @@
-# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
-# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
 
 from __future__ import annotations
 
@@ -8,21 +6,19 @@ from __future__ import annotations
 新手说明:
 这里是"压缩前快照"、"全量冷归档"和 runtime workspace adapter 的最小入口。
 以后真实压缩流程要接入时，优先从这里导入数据结构和写入函数，不要把 JSONL 路径规则散落到别的模块里。
-LLM: daily ledger helpers are exported here so runtime memory callers do not invent path rules.
-LLM: artifact manifest helpers share the same public adapter surface.
-LLM: compact apply helpers are exported as non-destructive context/self-check writers.
-LLM: shared workspace helpers stay task-local and do not write main memory.
+Daily ledger helpers are exported here so runtime memory callers do not invent path rules.
+Artifact manifest helpers share the same public adapter surface.
+Compact apply helpers are exported as non-destructive context/self-check writers.
+Shared workspace helpers stay task-local and do not write main memory.
 """
 
-# LLM: bundle request exports keep archive call sites stable as runtime memory grows.
-# LLM: keep task/run workspace adapter exports centralized for callers.
 from .agent_run_workspace import (
     AgentRunWorkspacePaths,
     EnsureAgentRunWorkspaceRequest,
     agent_run_workspace_paths,
     ensure_agent_run_workspace,
 )
-from .artifact_registry import (
+from .artifact.registry import (
     ArtifactManifestResult,
     SyncArtifactManifestsRequest,
     sync_artifact_manifests,
@@ -40,8 +36,6 @@ from .compact_chain import (
     default_compact_chain_result,
     sync_agent_run_compact_chain,
 )
-
-# LLM: Continue packet exports are the shared compact/resume continuation contract for future automation.
 from .compact_continue_packet import CompactContinuePacketRequest, build_compact_continue_packet
 from .compact_resume import MemoryCompactResumeOptions, build_memory_compact_resume
 from .compact_suggest import MemoryCompactSuggestOptions, build_memory_compact_suggestion
@@ -147,7 +141,6 @@ __all__ = [
     "apply_memory_compact",
     "append_subagent_task_event",
     "build_auto_resume_context",
-    # LLM: re-export prompt-only resume intent detection without loading archive history.
     "has_resume_trigger",
     "build_compact_continue_packet",
     "build_memory_compact_resume",

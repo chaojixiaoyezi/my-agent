@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from agent_py_agent.agent.contracts.gates.network_safety import (
+from agent_py_agent.agent.contracts.gates.network.safety import (
     NetworkSafetyFacts,
     evaluate_network_safety_gate,
 )

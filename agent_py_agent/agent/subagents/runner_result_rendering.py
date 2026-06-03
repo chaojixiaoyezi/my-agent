@@ -1,13 +1,9 @@
-# LLM: Runner result rendering is split from the larger subagent report renderer.
-# 模块用途: 专门渲染 RUNNER_RESULT.md，让执行上下文、通道探测和 runner 结果的展示边界清楚。
 
 from __future__ import annotations
 
 from .models import SubAgentRunnerResult
 
 
-# LLM: render_runner_result_markdown renders one persisted runner closeout report.
-# 函数用途: 把 runner 状态、结构化输出和关键文件 refs 渲染成 Markdown。
 def render_runner_result_markdown(result: SubAgentRunnerResult) -> str:
     status = "OK" if result.ok else "FAIL"
     mode = "dry-run" if result.dry_run else "execute"
@@ -17,8 +13,6 @@ def render_runner_result_markdown(result: SubAgentRunnerResult) -> str:
     return "\n".join(lines) + "\n"
 
 
-# LLM: _runner_result_header_lines keeps the top metadata stable for humans and parent agents.
-# 函数用途: 渲染 RUNNER_RESULT.md 的固定头部字段，便于父级快速判断 run 状态。
 def _runner_result_header_lines(
     result: SubAgentRunnerResult,
     mode: str,
@@ -54,8 +48,6 @@ def _runner_result_header_lines(
     ]
 
 
-# LLM: _runner_structured_output_lines shows parsed output without expanding artifact bodies.
-# 函数用途: 渲染 summary、blocked_reason 和 parse/repair error，保留结构化事实源。
 def _runner_structured_output_lines(result: SubAgentRunnerResult) -> list[str]:
     if result.structured_summary or result.blocked_reason or result.structured_parse_error:
         lines = ["", "## Structured Output", ""]
@@ -71,8 +63,6 @@ def _runner_structured_output_lines(result: SubAgentRunnerResult) -> list[str]:
     return []
 
 
-# LLM: _runner_result_file_lines lists refs the parent should read instead of product bodies.
-# 函数用途: 渲染执行上下文、prompt/response、runner_result 和 output_json 等小型文件引用。
 def _runner_result_file_lines(result: SubAgentRunnerResult) -> list[str]:
     return [
         "",

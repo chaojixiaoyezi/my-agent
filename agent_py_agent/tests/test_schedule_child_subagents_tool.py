@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import json
 import threading
+from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core.hierarchy_tools import _load_schedule_dispatch_tasks
 from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 
 
-# LLM: test_runner_context_schedule_bare_lineage_name_returns_payload_not_index_error guards R32 prefix-only names.
-# 函数用途: 验证真实模型只写“小小傻妞”这类层级前缀时，runner 工具会补稳定后缀并返回 JSON，而不是抛裸 IndexError。
 def test_runner_context_schedule_bare_lineage_name_returns_payload_not_index_error(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
@@ -39,6 +39,23 @@ def test_runner_context_schedule_bare_lineage_name_returns_payload_not_index_err
     assert agent.subagents.load(payload["created_run_ids"][0]).agent_name == "小小傻妞-coordinator-1"
 
 
+def test_schedule_load_failure_reports_recoverable_error_instead_of_dropping_child():
+    class BrokenManager:
+        def load(self, run_id: str):
+            raise ValueError(f"bad ledger for {run_id}")
+
+    tasks, load_errors = _load_schedule_dispatch_tasks(
+        SimpleNamespace(subagents=BrokenManager()),
+        ["child-1"],
+    )
+
+    assert tasks == []
+    assert load_errors[0]["run_id"] == "child-1"
+    assert load_errors[0]["recoverable"] is True
+    assert load_errors[0]["category"] == "data_parse"
+    assert "不要把它当成子代理没产物" in load_errors[0]["model_message"]
+
+
 def test_runner_context_schedule_auto_starts_created_children(tmp_path, monkeypatch):
     """runner 内创建下一层后应像 create_subagents 一样后台启动，并返回状态。"""
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
@@ -51,7 +68,7 @@ def test_runner_context_schedule_auto_starts_created_children(tmp_path, monkeypa
         return {"status": "started", "dispatch_mode": "background", "run_ids": list(run_ids)}
 
     monkeypatch.setattr(
-        "agent_py_agent.agent.agent_core.orchestration_background_dispatch._start_background_dispatch",
+        "agent_py_agent.agent.agent_core.orchestration.background.dispatch._start_background_dispatch",
         fake_start,
     )
 
@@ -91,7 +108,7 @@ def test_runner_context_schedule_hides_legacy_subagent_paths(tmp_path, monkeypat
         }
 
     monkeypatch.setattr(
-        "agent_py_agent.agent.agent_core.orchestration_background_dispatch._start_background_dispatch",
+        "agent_py_agent.agent.agent_core.orchestration.background.dispatch._start_background_dispatch",
         fake_start,
     )
 
@@ -106,7 +123,7 @@ def test_runner_context_schedule_hides_legacy_subagent_paths(tmp_path, monkeypat
 
 def test_auto_start_dispatch_keeps_current_runner_parent_scope(tmp_path):
     """后台启动参数要保留当前 runner 作用域，避免越过父子边界。"""
-    from agent_py_agent.agent.agent_core.orchestration_background_dispatch import (
+    from agent_py_agent.agent.agent_core.orchestration.background.dispatch import (
         _auto_start_dispatch_args,
     )
 
@@ -122,10 +139,10 @@ def test_auto_start_dispatch_keeps_current_runner_parent_scope(tmp_path):
 
 def test_runner_context_is_thread_local_for_background_autostart(tmp_path):
     """后台 runner 身份不能污染父线程后续 create_subagents 的作用域。"""
-    from agent_py_agent.agent.agent_core.orchestration_background_dispatch import (
+    from agent_py_agent.agent.agent_core.orchestration.background.dispatch import (
         _auto_start_dispatch_args,
     )
-    from agent_py_agent.agent.agent_core.runner_context import (
+    from agent_py_agent.agent.agent_core.runner.context import (
         current_subagent_run_id,
         restore_current_subagent_context,
         set_current_subagent_context,
@@ -161,8 +178,6 @@ def test_runner_context_is_thread_local_for_background_autostart(tmp_path):
     assert worker_result == {"current": root.id, "parent": root.id}
 
 
-# LLM: schedule_child_subagents without children can return LLM advice instead of forcing a fixed flow.
-# 函数用途: worker 已可测试但模型还没决定 QA 波次时，工具返回 quality_advice，让 LLM 选择 tester/bug_finder。
 def test_runner_context_schedule_without_children_returns_quality_advice(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     build = tmp_path / "deliverables" / "shop" / "build"

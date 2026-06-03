@@ -54,7 +54,7 @@ def test_run_state_snapshot_projects_broken_channel_to_blocked():
 
     assert snapshot["channel_status"] == "BROKEN"
     assert snapshot["lifecycle_phase"] == "BLOCKED"
-    assert snapshot["recovery_decision"]["action"] == "repair_or_probe_channel"
+    assert snapshot["recovery_decision"]["action"] == "repair_channel"
     assert snapshot["can_closeout"] is False
 
 
@@ -111,7 +111,8 @@ def test_run_state_snapshot_projects_approval_wait_to_waiting_for_user():
     assert snapshot["lifecycle_phase"] == "WAITING_FOR_USER"
     assert snapshot["waiting_reason"] == "approval"
     assert snapshot["terminal_outcome"] == "blocked"
-    assert snapshot["recovery_decision"]["action"] == "request_approval_or_stop"
+    assert snapshot["recovery_decision"]["action"] == "request_approval"
+    assert snapshot["recovery_decision"]["fallback_action"] == "stop"
 
 
 def test_run_state_snapshot_projects_waiting_for_tool_to_tool_wait_reason():

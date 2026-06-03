@@ -1,5 +1,3 @@
-# LLM: Compact tool-output refs connect externalized tool artifacts to compact/resume without reading bodies.
-# 模块用途: 从 tool_outputs/index.jsonl 读取同 scope 的大工具输出引用，供 compact apply 和 work_state 使用。
 
 from __future__ import annotations
 
@@ -8,15 +6,11 @@ from pathlib import Path
 from typing import Any
 
 
-# LLM: tool_output_source_refs returns scoped artifact refs from the lightweight tool-output index only.
-# 函数用途: 按 request/run/task 过滤 tool output index，返回可恢复引用，不读取 artifact 正文。
 def tool_output_source_refs(workspace: str | Path, scope: dict[str, Any]) -> list[dict[str, Any]]:
     rows = _read_tool_output_index(Path(workspace))
     return [_source_ref(row) for row in rows if _matches_scope(row, scope)]
 
 
-# LLM: tool_output_artifact_refs converts restore refs into work_state artifact refs.
-# 函数用途: 将 restore_refs.source_refs.tool_outputs 转成 work_state_snapshot.artifact_refs，供自检和恢复显示使用。
 def tool_output_artifact_refs(restore_refs: dict[str, Any]) -> list[dict[str, Any]]:
     source_refs = restore_refs.get("source_refs", {}) if isinstance(restore_refs.get("source_refs"), dict) else {}
     items = source_refs.get("tool_outputs", []) if isinstance(source_refs.get("tool_outputs"), list) else []
@@ -38,8 +32,6 @@ def tool_output_artifact_refs(restore_refs: dict[str, Any]) -> list[dict[str, An
     ]
 
 
-# LLM: _read_tool_output_index tolerates missing/corrupt index rows and never opens artifact bodies.
-# 函数用途: 读取 memory_archive/artifacts/tool_outputs/index.jsonl 中的轻量索引记录。
 def _read_tool_output_index(workspace: Path) -> list[dict[str, Any]]:
     path = workspace / "memory_archive" / "artifacts" / "tool_outputs" / "index.jsonl"
     if not path.exists():
@@ -51,8 +43,6 @@ def _read_tool_output_index(workspace: Path) -> list[dict[str, Any]]:
     return rows
 
 
-# LLM: _matches_scope keeps compact apply from importing unrelated tool output artifacts.
-# 函数用途: 对 request_id/run_id/task_id 做空值通配匹配，确保同一任务范围内的 artifact 才进入恢复包。
 def _matches_scope(row: dict[str, Any], scope: dict[str, Any]) -> bool:
     return all(
         not expected or str(row.get(key) or "") == str(expected)
@@ -61,8 +51,6 @@ def _matches_scope(row: dict[str, Any], scope: dict[str, Any]) -> bool:
     )
 
 
-# LLM: _source_ref normalizes the public restore-ref shape for one tool-output index row.
-# 函数用途: 生成 tool output 恢复引用条目，保留路径、hash、scope、call id 和原始输入线索，方便 compact 后接着做而不重扫。
 def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
     path = Path(str(row.get("path") or ""))
     return {
@@ -85,8 +73,6 @@ def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# LLM: _json_line keeps malformed tool-output index rows from breaking compact apply.
-# 函数用途: 解析 JSONL 单行；空行、坏行或非对象行返回空 dict。
 def _json_line(line: str) -> dict[str, Any]:
     if not line.strip():
         return {}

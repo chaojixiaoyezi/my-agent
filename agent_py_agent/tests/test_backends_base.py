@@ -17,7 +17,7 @@ from agent_py_agent.agent.backends.base import (
     OpenAICompatibleBackend,
     get_backend,
 )
-from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+from agent_py_agent.agent.backends.errors import ProviderResponseError, ProviderTimeoutError
 
 _DEFAULT_OPTIONS = BackendOptions(
     api_base="https://api.example.com",
@@ -155,8 +155,6 @@ class TestHttpBackendRequestJson:
         with pytest.raises(RuntimeError, match="HTTP 400"):
             backend.request_json("/path", {}, {})
 
-    # LLM: provider socket timeouts must be typed so CLI and runner recovery can classify them.
-    # 函数用途: 模拟模型 HTTP 请求卡到 timeout，确认不再只是普通 RuntimeError。
     @patch("urllib.request.urlopen")
     def test_request_json_timeout_raises_provider_timeout(self, mock_urlopen):
         mock_urlopen.side_effect = TimeoutError("timed out")
@@ -173,8 +171,6 @@ class TestHttpBackendRequestStream:
         with pytest.raises(ValueError, match="api_key 为空"):
             backend.request_stream("/path", {}, {})
 
-    # LLM: streaming provider timeouts need the same typed boundary as non-streaming calls.
-    # 函数用途: 流式接口超时时也抛 ProviderTimeoutError，避免 runner/CLI 判断分叉。
     @patch("urllib.request.urlopen")
     def test_request_stream_timeout_raises_provider_timeout(self, mock_urlopen):
         mock_urlopen.side_effect = TimeoutError("timed out")
@@ -222,7 +218,7 @@ class TestOpenAICompatibleBackend:
         mock_urlopen.return_value = mock_response
 
         backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4", stream_enabled=False))
-        with pytest.raises(RuntimeError, match="无法解析"):
+        with pytest.raises(ProviderResponseError, match="无法解析"):
             backend.generate("test")
 
     @patch("urllib.request.urlopen")
@@ -348,7 +344,7 @@ class TestAnthropicCompatibleBackend:
         mock_urlopen.return_value = mock_response
 
         backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3", stream_enabled=False))
-        with pytest.raises(RuntimeError, match="没有文本内容"):
+        with pytest.raises(ProviderResponseError, match="没有文本内容"):
             backend.generate("test")
 
     def test_generate_stream_calls_on_chunk_during_iteration(self):
@@ -446,6 +442,23 @@ class TestAnthropicCompatibleBackend:
 
         assert resp.text == "fallback chunk"
         assert chunks == ["fallback chunk"]
+
+    def test_generate_stream_fallback_failure_preserves_provider_error(self):
+        backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))
+
+        def request_stream(path, payload, headers):
+            del path, payload, headers
+            return [json.dumps({"type": "message_stop"})]
+
+        def request_json(path, payload, headers):
+            del path, payload, headers
+            raise OSError("fallback gateway down")
+
+        backend.request_stream = request_stream
+        backend.request_json = request_json
+
+        with pytest.raises(ProviderResponseError, match="非流式兜底请求失败"):
+            backend.generate("test prompt", on_chunk=None)
 
 
 class TestGetBackend:

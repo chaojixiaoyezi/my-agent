@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import agent_py_agent.agent.memory_archive.compact_apply as compact_apply_module
-import agent_py_agent.agent.memory_archive.compact_apply_validation as compact_apply_validation_module
+import agent_py_agent.agent.memory_archive.compact_apply.validation as compact_apply_validation_module
 from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.memory_archive.compact import (
     MemoryCompactPlanOptions,
@@ -14,7 +14,7 @@ from agent_py_agent.agent.memory_archive.compact_apply import (
     MemoryCompactApplyOptions,
     apply_memory_compact,
 )
-from agent_py_agent.agent.memory_archive.compact_apply_payloads import apply_bundle_payload
+from agent_py_agent.agent.memory_archive.compact_apply.payloads import apply_bundle_payload
 from agent_py_agent.agent.memory_archive.compact_resume import (
     MemoryCompactResumeOptions,
     build_memory_compact_resume,
@@ -30,6 +30,7 @@ from agent_py_agent.tests.memory_compact_support import (
     check_names,
     failed_self_check,
     load_apply_artifacts,
+    owner_home,
     workspace,
     write_compact_fixture,
     write_config,
@@ -99,7 +100,7 @@ def test_apply_bundle_restore_steps_are_action_first(tmp_path: Path) -> None:
 
 def test_memory_compact_cli_outputs_json_plan(tmp_path: Path, capsys) -> None:
     config_path = write_config(tmp_path)
-    write_compact_fixture(workspace(config_path))
+    write_compact_fixture(owner_home(config_path))
     parser = build_parser()
 
     args = parser.parse_args(
@@ -195,8 +196,6 @@ def test_memory_compact_apply_reads_hook_recovery_state_without_snapshot_file(tm
     assert auto_resume["action_guard"]["missing_fields"] == ["acceptance", "constraints", "latest_tests"]
 
 
-# LLM: _assert_apply_artifact_schemas verifies all manual compact apply files share schema v2 and IDs.
-# 函数用途: 校验 apply 相关 JSON 产物的 schema、apply_id 和 plan_id 一致。
 def _assert_apply_artifact_schemas(result: dict[str, object], artifacts: dict[str, object]) -> None:
     apply_bundle = artifacts["apply_bundle"]
     restore_refs = artifacts["restore_refs"]
@@ -210,8 +209,6 @@ def _assert_apply_artifact_schemas(result: dict[str, object], artifacts: dict[st
     assert_apply_ids_match(result, apply_bundle, restore_refs, work_state, self_check)
 
 
-# LLM: _assert_successful_apply_payload captures the Step 1 manual apply contract in one readable place.
-# 函数用途: 校验成功 apply 的状态、恢复引用、work state、自检和 ledger 关键字段。
 def _assert_successful_apply_payload(result: dict[str, object], artifacts: dict[str, object]) -> None:
     refs = result["refs"]
     apply_bundle = artifacts["apply_bundle"]
@@ -309,7 +306,7 @@ def test_apply_memory_compact_records_self_check_failure_without_rewriting_sourc
 
 def test_memory_compact_cli_apply_outputs_json_result(tmp_path: Path, capsys) -> None:
     config_path = write_config(tmp_path)
-    write_compact_fixture(workspace(config_path))
+    write_compact_fixture(owner_home(config_path))
     parser = build_parser()
 
     args = parser.parse_args(
@@ -427,8 +424,6 @@ def test_memory_resume_from_compact_cli_outputs_context_only(tmp_path: Path, cap
     assert apply_result["apply_id"] in captured.out
 
 
-# LLM: test_memory_fact_write_closes_compact_missing_fields verifies the semi-auto manual fact loop.
-# 函数用途: 先确认 compact resume 会暴露缺失备注，再写入用户确认事实并重新 apply，确认 auto guard 仍放行。
 def test_memory_compact_suggestion_prompts_without_applying(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     write_compact_fixture(root)

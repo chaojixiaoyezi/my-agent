@@ -117,6 +117,118 @@ def test_raise_event_tool_resolves_thread_from_task(tmp_path) -> None:
     assert store.pending_wake_signals()[0].summary == "孙代理发现紧急事件，需要主代理立刻处理。"
 
 
+def test_raise_event_thread_binding_error_is_structured(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+
+    def broken_thread_for_task(task_id):
+        del task_id
+        raise ValueError("task binding index broken")
+
+    monkeypatch.setattr(agent.conversation_store, "thread_for_task", broken_thread_for_task)
+
+    result = RaiseEventTool(agent).execute({"task_id": "task-1", "summary": "需要主代理处理。"})
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert payload["error"] == "task_thread_lookup_failed"
+    assert payload["load_error"]["context"] == "raise_event.thread_for_task"
+    assert payload["load_error"]["category"] == "data_parse"
+
+
+def test_raise_event_reports_corrupt_explicit_thread(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    thread = _thread(agent.conversation_store)
+    agent.conversation_store._thread_path(thread.thread_id).write_text("{bad-json", encoding="utf-8")
+
+    result = RaiseEventTool(agent).execute({"thread_id": thread.thread_id, "summary": "需要主代理处理。"})
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert payload["error"] == "thread_lookup_failed"
+    assert payload["load_error"]["context"] == "raise_event.load_thread"
+    assert payload["load_error"]["thread_id"] == thread.thread_id
+
+
+def test_raise_event_subagent_task_load_error_is_structured(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+
+    def broken_load(task_id):
+        del task_id
+        raise OSError("subagent ledger missing")
+
+    monkeypatch.setattr(agent.subagents, "load", broken_load)
+
+    result = RaiseEventTool(agent).execute({"task_id": "child-1", "summary": "需要主代理处理。"})
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert payload["error"] == "subagent_task_load_failed"
+    assert payload["load_error"]["context"] == "raise_event.subagents.load"
+    assert payload["load_error"]["category"] == "io"
+
+
+def test_raise_event_lineage_load_error_stays_with_observation(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    thread = _thread(agent.conversation_store)
+    agent.conversation_store.bind_task(
+        {'thread_id': thread.thread_id, 'task_id': "child-1", 'goal': "监控任务", 'now': 11.0}
+    )
+
+    def broken_load(task_id):
+        del task_id
+        raise OSError("lineage ledger missing")
+
+    monkeypatch.setattr(agent.subagents, "load", broken_load)
+
+    result = RaiseEventTool(agent).execute({"task_id": "child-1", "summary": "需要主代理处理。"})
+    payload = json.loads(result.output)
+    observation = agent.conversation_store.recent_observations(thread.thread_id)[-1]
+
+    assert result.ok is True
+    assert payload["observation_id"].startswith("obs-")
+    assert observation.source_agent_id == "child-1"
+    assert observation.root_task_id == "child-1"
+    assert observation.metadata["lineage_load_error"]["context"] == "raise_event.lineage.subagents.load"
+    assert observation.metadata["lineage_load_error"]["category"] == "io"
+
+
+def test_raise_event_wake_failure_is_reported_without_losing_observation(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    thread = _thread(agent.conversation_store)
+
+    def broken_wake(payload):
+        del payload
+        raise OSError("wake ledger locked")
+
+    monkeypatch.setattr(agent.conversation_store, "raise_wake_signal", broken_wake)
+
+    result = RaiseEventTool(agent).execute(
+        {
+            "thread_id": thread.thread_id,
+            "event_type": "runtime_alert",
+            "summary": "孙代理发现紧急事件，需要主代理立刻处理。",
+            "urgency": "urgent",
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["observation_id"].startswith("obs-")
+    assert payload["wake_signal_id"] == ""
+    assert payload["wake_signal_error"]["context"] == "raise_event.raise_wake_signal"
+    assert agent.conversation_store.recent_observations(thread.thread_id)[-1].summary == "孙代理发现紧急事件，需要主代理立刻处理。"
+
+
 def test_main_event_tools_are_registered_for_subagent_contexts(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
 

@@ -1,5 +1,3 @@
-# LLM: Delivery completion soft hints nudge finished artifact work toward explicit closeout.
-# 模块用途: 当声明的交付文件已经落盘后，给下一轮模型一个非阻断收口提醒，避免继续无目的探索。
 
 from __future__ import annotations
 
@@ -13,8 +11,6 @@ _HINT_MARKER = "[delivery-completion-soft-hint]"
 _MUTATING_TOOLS = {"write_file", "apply_patch", "run_command", "controlled_exec"}
 
 
-# LLM: maybe_append_delivery_completion_soft_hint adds advice only after concrete local delivery exists.
-# 函数用途: 根据工具记录和 delivery_contract 判断是否提醒模型收口；只写 tool_context，不改变状态或阻断任务。
 def maybe_append_delivery_completion_soft_hint(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -57,8 +53,6 @@ def maybe_append_delivery_completion_soft_hint(
     )
 
 
-# LLM: _is_successful_mutation limits hints to tools that can materially change local delivery.
-# 函数用途: 避免 read/search/fetch 的归档文件被误当成用户交付物。
 def _is_successful_mutation(record: dict[str, object], *, tool_ok: bool) -> bool:
     if not tool_ok:
         return False
@@ -68,8 +62,6 @@ def _is_successful_mutation(record: dict[str, object], *, tool_ok: bool) -> bool
     return True
 
 
-# LLM: _required_target_paths extracts explicit artifact targets without interpreting prose.
-# 函数用途: 从 delivery_contract.artifacts 的 path/preferred_path 获取目标路径；开放格式但未声明路径时不猜。
 def _required_target_paths(contract: dict[str, Any], workspace_root: Path) -> list[Path]:
     raw = contract.get("artifacts")
     if not isinstance(raw, list):
@@ -86,8 +78,6 @@ def _required_target_paths(contract: dict[str, Any], workspace_root: Path) -> li
     return _unique_paths(paths)
 
 
-# LLM: _produced_refs reads structured artifact refs from archive records only.
-# 函数用途: 收集工具产物/registry refs，给提示提供可追踪路径，不解析自然语言输出。
 def _produced_refs(record: dict[str, object]) -> list[str]:
     refs: list[str] = []
     for key in ("artifact_ref", "output_path"):
@@ -97,22 +87,16 @@ def _produced_refs(record: dict[str, object]) -> list[str]:
     return list(dict.fromkeys(refs))
 
 
-# LLM: _hint_already_added keeps the soft prompt one-shot per tool loop.
-# 函数用途: 防止长任务每次写文件都重复插入同一类收口提示。
 def _hint_already_added(params: ToolLoopExecuteParams) -> bool:
     return any(str(item).startswith(_HINT_MARKER) for item in params.tool_context)
 
 
-# LLM: _append_text normalizes optional tool reference fields without inventing missing paths.
-# 函数用途: 将非空文本加入 refs 列表，忽略空值。
 def _append_text(items: list[str], value: object) -> None:
     text = str(value or "").strip()
     if text:
         items.append(text)
 
 
-# LLM: _append_ref_items extracts structured refs defensively from registry-like lists.
-# 函数用途: 从列表对象里按候选字段收集第一个可用引用。
 def _append_ref_items(items: list[str], value: object, keys: tuple[str, ...]) -> None:
     if not isinstance(value, list):
         return
@@ -120,8 +104,6 @@ def _append_ref_items(items: list[str], value: object, keys: tuple[str, ...]) ->
         _append_first_ref_value(items, item, keys)
 
 
-# LLM: _append_first_ref_value keeps each structured ref row to one stable display value.
-# 函数用途: 从一个字典行里按字段顺序加入首个非空引用。
 def _append_first_ref_value(items: list[str], value: object, keys: tuple[str, ...]) -> None:
     if not isinstance(value, dict):
         return
@@ -132,8 +114,6 @@ def _append_first_ref_value(items: list[str], value: object, keys: tuple[str, ..
             return
 
 
-# LLM: _unique_paths preserves discovery order while de-duplicating candidate output files.
-# 函数用途: 对 Path 列表按字符串值去重，保留首次出现顺序。
 def _unique_paths(paths: list[Path]) -> list[Path]:
     seen: set[str] = set()
     result: list[Path] = []

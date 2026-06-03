@@ -1,0 +1,236 @@
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+from ...backends import ModelResponse
+from ...tooling.content_transport_policy import (
+    MAX_INLINE_WRITE_CONTENT_CHARS,
+)
+from .models import (
+    CompleteToolCallStreamAbort,
+    LongToolContentStreamAbort,
+    MalformedToolProtocolStreamAbort,
+)
+from .write_abort import (
+    long_write_stream_abort,
+    recovered_write_abort_payload,
+)
+
+_TOOL_START_MARKERS = ("[TOOL_CALL]", "[SUBAGENT_CALL]")
+_TOOL_END_MARKERS = ("[/TOOL_CALL]", "[/SUBAGENT_CALL]")
+_MACHINE_BLOCK_PATTERNS = (
+    re.compile(r"\[TOOL_CALL\].*?\[/TOOL_CALL\]", re.DOTALL),
+    re.compile(r"\[SUBAGENT_CALL\].*?\[/SUBAGENT_CALL\]", re.DOTALL),
+    re.compile(r"\[WRITE_FILE_RAW[^\]]*\].*?\[/WRITE_FILE_RAW\]", re.DOTALL),
+)
+_MAX_UNCLOSED_TOOL_START_MARKERS = 1
+_MAX_NEAR_TOOL_PROTOCOL_LINES = 7
+_NEAR_TOOL_PROTOCOL_LINE_RE = re.compile(r"(?m)^\s*(?:\[|<)?\s*TOOL(?:\b|_|\])")
+
+
+def first_complete_tool_call_cut_index(text: str) -> int | None:
+    start_info = _first_marker(text, _TOOL_START_MARKERS, 0)
+    if start_info is None:
+        return None
+    start, marker = start_info
+    end_info = _first_marker(text, _TOOL_END_MARKERS, start + len(marker))
+    if end_info is None:
+        return None
+    end, end_marker = end_info
+    return end + len(end_marker)
+
+
+def cut_response_after_first_complete_tool_call(response: ModelResponse) -> tuple[ModelResponse, bool]:
+    ranges = _complete_machine_block_ranges(response.text)
+    if not ranges:
+        return response, False
+    machine_text = "\n".join(response.text[start:end].strip() for start, end in ranges)
+    if machine_text == response.text.strip():
+        return response, False
+    return ModelResponse(text=machine_text, backend=response.backend), True
+
+
+def _complete_machine_block_ranges(text: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for pattern in _MACHINE_BLOCK_PATTERNS:
+        ranges.extend((match.start(), match.end()) for match in pattern.finditer(text))
+    ranges.sort(key=lambda item: item[0])
+    return _non_overlapping_ranges(ranges)
+
+
+def _non_overlapping_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    kept: list[tuple[int, int]] = []
+    last_end = -1
+    for start, end in ranges:
+        if start < last_end:
+            continue
+        kept.append((start, end))
+        last_end = end
+    return kept
+
+
+@dataclass
+class ToolBoundaryChunkFilter:
+    on_chunk: Callable[[str], None] | None
+    max_inline_content_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
+    _text: str = ""
+    _forwarded: int = 0
+    _closed: bool = False
+    cut_detected: bool = field(default=False, init=False)
+
+    def __call__(self, chunk: str) -> None:
+        if self._closed:
+            return
+        self._text += str(chunk or "")
+        protocol_abort = malformed_tool_protocol_stream_abort(self._text)
+        if protocol_abort is not None:
+            raise protocol_abort
+        start_info = _first_marker(self._text, _TOOL_START_MARKERS, 0)
+        abort = long_write_stream_abort(
+            self._text,
+            max_chars=self.max_inline_content_chars,
+            start_info=start_info,
+            first_end_marker=lambda cursor: _first_marker(self._text, _TOOL_END_MARKERS, cursor),
+        )
+        if abort is not None:
+            raise abort
+        cut_index = first_complete_tool_call_cut_index(self._text)
+        if cut_index is None:
+            if self.on_chunk is not None:
+                self._forward_to(len(self._text))
+            return
+        self.cut_detected = True
+        if self.on_chunk is not None:
+            self._forward_to(cut_index)
+        self._closed = True
+        raise CompleteToolCallStreamAbort(text=self._text[:cut_index], cut_index=cut_index)
+
+    def finish(self) -> None:
+        if self.on_chunk is None or self._closed:
+            return
+        self._forward_to(len(self._text))
+
+    def _forward_to(self, end: int) -> None:
+        if end <= self._forwarded:
+            return
+        safe = self._text[self._forwarded : end]
+        self._forwarded = end
+        if safe:
+            self.on_chunk(safe)
+
+
+def _first_marker(text: str, markers: tuple[str, ...], cursor: int) -> tuple[int, str] | None:
+    hits = [
+        (pos, marker)
+        for marker in markers
+        for pos in [text.find(marker, cursor)]
+        if pos != -1
+    ]
+    return min(hits, key=lambda item: item[0]) if hits else None
+
+
+def malformed_tool_protocol_stream_abort(text: str) -> MalformedToolProtocolStreamAbort | None:
+    start_info = _first_marker(text, _TOOL_START_MARKERS, 0)
+    near_count = _near_tool_protocol_line_count(text)
+    if start_info is None:
+        if near_count <= _MAX_NEAR_TOOL_PROTOCOL_LINES:
+            return None
+        return MalformedToolProtocolStreamAbort(
+            start_marker="TOOL_PROTOCOL_LINE",
+            marker_count=near_count,
+            limit=_MAX_NEAR_TOOL_PROTOCOL_LINES,
+        )
+    start, marker = start_info
+    first_end = _first_marker(text, _TOOL_END_MARKERS, start + len(marker))
+    next_start = _first_marker(text, _TOOL_START_MARKERS, start + len(marker))
+    if next_start is not None and (first_end is None or next_start[0] < first_end[0]):
+        return MalformedToolProtocolStreamAbort(
+            start_marker=marker,
+            marker_count=sum(text.count(item) for item in _TOOL_START_MARKERS),
+            limit=_MAX_UNCLOSED_TOOL_START_MARKERS,
+        )
+    if first_end is not None:
+        return None
+    count = sum(text.count(item) for item in _TOOL_START_MARKERS)
+    if count > _MAX_UNCLOSED_TOOL_START_MARKERS:
+        return MalformedToolProtocolStreamAbort(
+            start_marker=marker,
+            marker_count=count,
+            limit=_MAX_UNCLOSED_TOOL_START_MARKERS,
+        )
+    if near_count <= _MAX_NEAR_TOOL_PROTOCOL_LINES:
+        return None
+    return MalformedToolProtocolStreamAbort(
+        start_marker="TOOL_PROTOCOL_LINE",
+        marker_count=near_count,
+        limit=_MAX_NEAR_TOOL_PROTOCOL_LINES,
+    )
+
+
+def _near_tool_protocol_line_count(text: str) -> int:
+    return len(_NEAR_TOOL_PROTOCOL_LINE_RE.findall(text))
+
+
+def malformed_tool_protocol_abort_response(
+    exc: MalformedToolProtocolStreamAbort, *, backend: str
+) -> ModelResponse:
+    payload = {
+        "tool": "__parse_error__",
+        "error": (
+            f"模型连续输出 {exc.marker_count} 个未闭合 {exc.start_marker} 工具协议标记；"
+            "工具调用缺少结束标记"
+        ),
+        "raw": json.dumps(
+            {
+                "start_marker": exc.start_marker,
+                "marker_count": exc.marker_count,
+                "limit": exc.limit,
+            },
+            ensure_ascii=False,
+        ),
+    }
+    return ModelResponse(
+        text="[TOOL_CALL]\n"
+        f"{json.dumps(payload, ensure_ascii=False)}\n"
+        "[/TOOL_CALL]",
+        backend=backend,
+    )
+
+
+def complete_tool_call_abort_response(
+    exc: CompleteToolCallStreamAbort, *, backend: str
+) -> ModelResponse:
+    return ModelResponse(text=exc.text, backend=backend)
+
+
+def long_write_abort_response(exc: LongToolContentStreamAbort, *, backend: str) -> ModelResponse:
+    recovered = recovered_write_abort_payload(exc)
+    if recovered is not None:
+        return ModelResponse(
+            text="[TOOL_CALL]\n"
+            f"{json.dumps(recovered, ensure_ascii=False)}\n"
+            "[/TOOL_CALL]",
+            backend=backend,
+        )
+    raw = json.dumps(
+        {"tool": exc.tool, "path": exc.path, "content": "...streaming content omitted..."},
+        ensure_ascii=False,
+    )
+    payload = {
+        "tool": "__parse_error__",
+        "error": (
+            f"{exc.tool}.content inline content streaming exceeded {exc.limit} chars; "
+            "工具调用缺少结束标记"
+        ),
+        "raw": raw,
+    }
+    return ModelResponse(
+        text="[TOOL_CALL]\n"
+        f"{json.dumps(payload, ensure_ascii=False)}\n"
+        "[/TOOL_CALL]",
+        backend=backend,
+    )

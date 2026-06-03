@@ -1,5 +1,3 @@
-# LLM: Error classification rules rank legacy raw-error text into stable codes.
-# 模块用途: 将错误文本 fallback 的匹配规则从错误合同字典中分离，保持 taxonomy 文件小而稳定。
 
 from __future__ import annotations
 
@@ -15,8 +13,6 @@ class ErrorClassificationRule:
     patterns: tuple[re.Pattern[str], ...]
 
 
-# LLM: matched_error_codes returns all matching codes with specificity scores for deterministic ranking.
-# 函数用途: 收集精确错误码和 fallback 文本规则命中，不在第一个宽匹配处提前返回。
 def matched_error_codes(text: str, contract_codes: Iterable[str]) -> list[tuple[int, str]]:
     payload = str(text or "")
     return [
@@ -29,8 +25,6 @@ def matched_error_codes(text: str, contract_codes: Iterable[str]) -> list[tuple[
     ]
 
 
-# LLM: _exact_code_matches trusts machine-like error code tokens but not ordinary phrase variants.
-# 函数用途: 识别 PATH_INVALID/path-invalid 这类结构化错误码，避免 "path invalid" 普通正文抢优先级。
 def _exact_code_matches(text: str, contract_codes: Iterable[str]) -> list[tuple[int, str]]:
     lowered = text.lower()
     matches: list[tuple[int, str]] = []
@@ -41,8 +35,6 @@ def _exact_code_matches(text: str, contract_codes: Iterable[str]) -> list[tuple[
     return matches
 
 
-# LLM: _patterns compiles one rule's accepted raw-error fallback patterns.
-# 函数用途: 统一编译正则，保持规则表只描述错误信号和优先级。
 def _patterns(items: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
     return tuple(re.compile(item, re.IGNORECASE) for item in items)
 

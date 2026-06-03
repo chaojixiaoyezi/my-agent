@@ -1,5 +1,3 @@
-# LLM: Run contract gate makes the effective contract and run scope mandatory facts.
-# 模块用途: 在执行/收口前校验 request/run/task/workspace 和有效合同，并生成稳定 hash 供 replay 对齐。
 
 from __future__ import annotations
 
@@ -12,8 +10,6 @@ from ..contract_doctor import lint_contract
 from .models import GateDecision, GateFinding
 
 
-# LLM: evaluate_run_contract_gate validates scope and fingerprints the effective contract.
-# 函数用途: 要求运行标识和 workspace 这些机器字段存在，并输出 effective_contract_hash。
 def evaluate_run_contract_gate(
     contract: Mapping[str, Any] | None,
     *,
@@ -52,23 +48,17 @@ def evaluate_run_contract_gate(
     )
 
 
-# LLM: _should_lint_contract detects full structured contracts without rejecting legacy gate fixtures.
-# 函数用途: 只有带 version/rules/tool policy 或 artifacts 对象的合同才跑 Contract Doctor。
 def _should_lint_contract(contract: Mapping[str, Any]) -> bool:
     return any(key in contract for key in ("version", "rules", "required_tools", "forbidden_tools", "artifact_path")) or isinstance(
         contract.get("artifacts"), dict
     )
 
 
-# LLM: _doctor_findings converts Contract Doctor codes into gate findings.
-# 函数用途: 把合同预检错误接入 run_contract gate，不让坏合同继续进入 hash/replay。
 def _doctor_findings(contract: dict[str, Any]) -> list[GateFinding]:
     report = lint_contract(contract)
     return [GateFinding(code) for code in report.error_codes]
 
 
-# LLM: _artifact_items accepts the legacy list shape and current artifacts.required shape.
-# 函数用途: 计算产物数量时只读取结构字段，兼容旧 gate 调用方。
 def _artifact_items(contract: Mapping[str, Any] | None) -> list[object]:
     if not isinstance(contract, Mapping):
         return []
@@ -81,15 +71,11 @@ def _artifact_items(contract: Mapping[str, Any] | None) -> list[object]:
     return []
 
 
-# LLM: _require_text appends one stable missing-field finding.
-# 函数用途: 对 run scope 字段做非空校验，保持错误码稳定。
 def _require_text(code: str, value: object, findings: list[GateFinding]) -> None:
     if not str(value or "").strip():
         findings.append(GateFinding(code))
 
 
-# LLM: _contract_hash fingerprints canonical JSON rather than prompt text.
-# 函数用途: 用排序 JSON 计算有效合同 hash，供 closeout/replay 对照同一份机器合同。
 def _contract_hash(contract: dict[str, Any]) -> str:
     encoded = json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()

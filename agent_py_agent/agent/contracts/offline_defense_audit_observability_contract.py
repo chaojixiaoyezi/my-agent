@@ -1,5 +1,3 @@
-# LLM: Offline defense/audit/observability contracts validate generic safety and audit facts.
-# 模块用途: 校验防御动作、审计字段/脱敏/关联和可观测指标/卡住告警。
 
 from __future__ import annotations
 
@@ -20,8 +18,6 @@ REQUIRED_METRICS = ("task_duration", "tool_call_count", "failed_tool_count")
 REDACTED_VALUES = {"[redacted]", "<redacted>", "***", "redacted"}
 
 
-# LLM: validate_defense_audit_observability checks structured safety, audit, and metric facts.
-# 函数用途: 用 defense_actions、audit_records、metrics、stuck_tasks 校验通用底座，不接真实 CMDB。
 def validate_defense_audit_observability(facts: dict[str, Any]) -> OfflineContractValidation:
     findings: list[dict[str, object]] = []
     _validate_defense_actions(facts, findings)
@@ -30,8 +26,6 @@ def validate_defense_audit_observability(facts: dict[str, Any]) -> OfflineContra
     return validation_report(findings)
 
 
-# LLM: _validate_defense_actions blocks risky generic defense decisions.
-# 函数用途: 白名单、过宽 CIDR、风险评分、证据数量和封禁有效期都用结构字段判断。
 def _validate_defense_actions(facts: dict[str, Any], findings: list[dict[str, object]]) -> None:
     for action in dict_items(facts.get("defense_actions")):
         if action.get("target_in_whitelist") is True:
@@ -46,8 +40,6 @@ def _validate_defense_actions(facts: dict[str, Any], findings: list[dict[str, ob
             findings.append(finding("DEFENSE_BLOCK_EXPIRY_MISSING"))
 
 
-# LLM: _validate_audit_records requires complete, linked, redacted high-risk audit facts.
-# 函数用途: 审计字段缺失、敏感字段未脱敏、缺少 tool/evidence 关联都会失败。
 def _validate_audit_records(facts: dict[str, Any], findings: list[dict[str, object]]) -> None:
     for record in dict_items(facts.get("audit_records")):
         if any(not text(record.get(field)) for field in REQUIRED_AUDIT_FIELDS):
@@ -58,8 +50,6 @@ def _validate_audit_records(facts: dict[str, Any], findings: list[dict[str, obje
             findings.append(finding("AUDIT_LINK_MISSING"))
 
 
-# LLM: _validate_observability requires core metrics and stuck-task alerts.
-# 函数用途: 缺少核心指标返回 METRIC_FIELD_MISSING，超过阈值未告警返回 STUCK_TASK_ALERT_REQUIRED。
 def _validate_observability(facts: dict[str, Any], findings: list[dict[str, object]]) -> None:
     if "metrics" not in facts and "stuck_tasks" not in facts:
         return
@@ -73,8 +63,6 @@ def _validate_observability(facts: dict[str, Any], findings: list[dict[str, obje
             findings.append(finding("STUCK_TASK_ALERT_REQUIRED"))
 
 
-# LLM: _has_secret_leak scans structured audit fields for raw secret values.
-# 函数用途: 对敏感字段名做精确检查，值不是脱敏占位则为泄露。
 def _has_secret_leak(value: dict[str, Any]) -> bool:
     for key, child in value.items():
         if key.lower() in SECRET_FIELD_NAMES and text(child).lower() not in REDACTED_VALUES:

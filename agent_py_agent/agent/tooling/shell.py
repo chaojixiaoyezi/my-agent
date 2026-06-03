@@ -1,6 +1,4 @@
 
-# LLM: 命令安全策略和输出格式会影响自动化执行，放宽前需非常谨慎。
-# 模块用途: 受限 shell 工具，负责危险命令拦截、超时和工作目录解析。
 
 from __future__ import annotations
 
@@ -16,7 +14,7 @@ from agent_py_agent.agent.artifacts.shell_protection import (
     shell_artifact_protection_note,
     snapshot_ready_artifacts,
 )
-from agent_py_agent.agent.contracts.gates.command_policy import (
+from agent_py_agent.agent.contracts.gates.command.policy import (
     evaluate_command_policy,
 )
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
@@ -32,8 +30,6 @@ _ACCESS_MODE_RANK = {"restricted": 0, "workspace-write": 1, "full-access": 2}
 _TOOL_DEADLINE_UNIX_ENV = "MY_AGENT_TOOL_DEADLINE_UNIX"
 _TOOL_DEADLINE_MARGIN_SECONDS_ENV = "MY_AGENT_TOOL_DEADLINE_MARGIN_SECONDS"
 
-# LLM: ShellToolOptions keeps run_command constructor stable while avoiding parameter sprawl.
-# 类用途: 保存 run_command 的工作区、权限、超时和输出预算配置。
 @dataclass(frozen=True)
 class ShellToolOptions:
     workspace_roots: list[Path] | None = None
@@ -44,14 +40,10 @@ class ShellToolOptions:
     max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS
 
 
-# LLM: _is_dangerous_command is a compatibility wrapper over the shared structured command policy.
-# 函数用途: 判断命令是否命中灾难级保护；普通 rm/chmod 不在这里被硬拒。
 def _is_dangerous_command(command: str) -> bool:
     return not evaluate_command_policy(command, allow_shell_operators=True).allowed
 
 
-# LLM: _validate_command 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 validate_command 步骤，并保持调用方依赖的数据形状。
 def _validate_command(command: str) -> str:
     if not command:
         raise ValueError("command 不能为空")
@@ -63,8 +55,6 @@ def _validate_command(command: str) -> str:
     return text
 
 
-# LLM: _timeout_from_params applies structured run deadlines before launching shell work.
-# 函数用途: 从工具参数读取超时，并按外层任务 deadline 自动收紧，避免单个命令吃完整个任务预算。
 def _timeout_from_params(params: dict[str, Any], default_timeout: int) -> int:
     raw_timeout = params.get("timeout")
     if raw_timeout is None:
@@ -77,8 +67,6 @@ def _timeout_from_params(params: dict[str, Any], default_timeout: int) -> int:
     return _apply_tool_deadline(timeout if timeout > 0 else default_timeout)
 
 
-# LLM: _apply_tool_deadline mirrors 会话运行时 exec expiration at the tool boundary.
-# 函数用途: 根据 MY_AGENT_TOOL_DEADLINE_UNIX 和安全余量收紧命令超时；0 表示不应再启动命令。
 def _apply_tool_deadline(timeout: int) -> int:
     deadline = _float_env(_TOOL_DEADLINE_UNIX_ENV)
     if deadline <= 0:
@@ -89,15 +77,11 @@ def _apply_tool_deadline(timeout: int) -> int:
     return min(timeout, max(1, int(remaining)))
 
 
-# LLM: _tool_deadline_margin_seconds keeps shell completion inside the parent task envelope.
-# 函数用途: 读取工具 deadline 安全余量；配置异常时使用保守默认值。
 def _tool_deadline_margin_seconds() -> float:
     margin = _float_env(_TOOL_DEADLINE_MARGIN_SECONDS_ENV)
     return margin if margin >= 0 else 10.0
 
 
-# LLM: _float_env parses runtime deadline env vars without treating prose as facts.
-# 函数用途: 将结构化环境变量转为 float，缺失或非法时返回 0。
 def _float_env(name: str) -> float:
     try:
         return float(os.environ.get(name, "0") or 0)
@@ -105,15 +89,11 @@ def _float_env(name: str) -> float:
         return 0.0
 
 
-# LLM: _normalize_access_mode keeps command permissions a small runtime enum.
-# 函数用途: 归一化 access_mode；坏配置回退 workspace-write，避免把异常值变成隐式 full access。
 def _normalize_access_mode(access_mode: str) -> str:
     mode = str(access_mode or "").strip().lower().replace("_", "-")
     return mode if mode in _ACCESS_MODES else _DEFAULT_ACCESS_MODE
 
 
-# LLM: Shell access overrides can only narrow the tool's configured mode.
-# 函数用途: 子代理执行上下文可把父级 full-access 降为 workspace-write，但不能反向提权。
 def _effective_access_mode(configured: str, override: object = "") -> str:
     configured_mode = _normalize_access_mode(configured)
     override_text = str(override or "").strip()
@@ -125,8 +105,6 @@ def _effective_access_mode(configured: str, override: object = "") -> str:
     return configured_mode
 
 
-# LLM: _path_inside_any_root is the shell cwd boundary for workspace modes.
-# 函数用途: 判断工作目录是否落在允许 roots 内；用 resolve 后路径避免简单前缀绕过。
 def _path_inside_any_root(path: Path, roots: list[Path]) -> bool:
     resolved = path.expanduser().resolve()
     for root in roots:
@@ -138,8 +116,6 @@ def _path_inside_any_root(path: Path, roots: list[Path]) -> bool:
     return False
 
 
-# LLM: _working_dir_from_params applies access_mode before launching shell work.
-# 函数用途: 解析 working_dir，并按权限档位决定是否允许工作区外执行。
 def _working_dir_from_params(
     params: dict[str, Any],
     workspace_root: Path,
@@ -180,8 +156,6 @@ def _working_dir_from_params(
     )
 
 
-# LLM: _bounded_output preserves enough command output for diagnosis without flooding the live prompt.
-# 函数用途: 按配置截断单个 stdout/stderr 字段，并返回是否截断，避免大日志撑爆上下文。
 def _bounded_output(text: str, max_chars: int) -> tuple[str, bool]:
     if max_chars <= 0:
         return "", bool(text)
@@ -190,8 +164,6 @@ def _bounded_output(text: str, max_chars: int) -> tuple[str, bool]:
     return text[:max_chars], True
 
 
-# LLM: _format_process_result keeps shell results machine-readable so parent/subagents can reason from flags.
-# 函数用途: 把命令结果转成包含总长度、预览长度和截断标记的稳定文本格式。
 def _format_process_result(result: subprocess.CompletedProcess[str], max_output_chars: int) -> str:
     stdout = result.stdout if result.stdout else ""
     stderr = result.stderr if result.stderr else ""
@@ -208,16 +180,12 @@ def _format_process_result(result: subprocess.CompletedProcess[str], max_output_
     )
 
 
-# LLM: _subprocess_text_env 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 subprocess_text_env 步骤，并保持调用方依赖的数据形状。
 def _subprocess_text_env() -> dict[str, str]:
     env = dict(os.environ)
     env.setdefault("PYTHONIOENCODING", "utf-8")
     return env
 
 
-# LLM: _build_shell_tool_spec keeps run_command metadata out of the constructor.
-# 函数用途: 构建模型可见的 run_command 工具说明。
 def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_chars: int) -> ToolSpec:
     return ToolSpec(
         name="run_command",
@@ -256,12 +224,8 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
     )
 
 
-# LLM: ShellTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: ShellTool 数据模型，集中保存 工具系统 的结构化状态。
 class ShellTool(BaseTool):
 
-    # LLM: ShellTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 初始化 ShellTool 的依赖、配置和运行期字段。
     def __init__(
         self,
         workspace_root: Path,
@@ -280,8 +244,6 @@ class ShellTool(BaseTool):
         self.max_output_chars = max(0, int(options.max_output_chars))
         self.spec = _build_shell_tool_spec(self.access_mode, self.default_timeout, self.max_output_chars)
 
-    # LLM: ShellTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 执行 ShellTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         command_result = self._parse_command(params)
         if isinstance(command_result, ToolExecutionResult):
@@ -312,8 +274,6 @@ class ShellTool(BaseTool):
             return target
         return self._execute_with_artifact_protection(command, target, timeout)
 
-    # LLM: ShellTool._execution_target resolves cwd and delete policy before subprocess launch.
-    # 函数用途: 校验 shell 工作目录、access_mode 和删除范围，返回可执行目录或结构化错误。
     def _execution_target(
         self,
         params: dict[str, Any],
@@ -342,8 +302,6 @@ class ShellTool(BaseTool):
             return ToolExecutionResult(self.spec.name, False, delete_error, error_code="PATH_OUTSIDE_WORKSPACE")
         return target
 
-    # LLM: ShellTool._execute_with_artifact_protection wraps subprocess execution with registry snapshots.
-    # 函数用途: 在命令前备份 ready 产物，命令后复核并把保护摘要写回工具结果。
     def _execute_with_artifact_protection(
         self,
         command: str,
@@ -375,8 +333,6 @@ class ShellTool(BaseTool):
             result_envelope={"artifact_protection": artifact_summary},
         )
 
-    # LLM: ShellTool._run_process_text normalizes subprocess success, timeout, and OS errors.
-    # 函数用途: 执行命令并返回工具输出文本和 ok 标记，不处理产物登记副作用。
     def _run_process_text(
         self,
         command: str,
@@ -392,16 +348,12 @@ class ShellTool(BaseTool):
         except OSError as exc:
             return f"命令执行失败: {exc}", False
 
-    # LLM: ShellTool._parse_command 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 解析 parse_command 数据结构。
     def _parse_command(self, params: dict[str, Any]) -> str | ToolExecutionResult:
         try:
             return _validate_command(str(params.get("command", "")))
         except ValueError as exc:
             return ToolExecutionResult(self.spec.name, False, str(exc))
 
-    # LLM: ShellTool._run_command 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 工具系统 中的 run_command 步骤，并保持调用方依赖的数据形状。
     def _run_command(
         self,
         command: str,

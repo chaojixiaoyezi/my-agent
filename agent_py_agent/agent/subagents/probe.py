@@ -1,5 +1,3 @@
-# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
 
 from __future__ import annotations
 
@@ -17,8 +15,6 @@ from pathlib import Path
 from .models import ChannelProbeCheck
 
 
-# LLM: ProbeCheckParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存probe检查参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class ProbeCheckParams:
 
@@ -28,8 +24,6 @@ class ProbeCheckParams:
     error: str = ""
 
 
-# LLM: _probe_ok 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 处理probeok相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _probe_ok(
     name: str,
     summary: str,
@@ -52,8 +46,6 @@ def _probe_ok(
     )
 
 
-# LLM: _probe_fail 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 处理probefail相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _probe_fail(
     name: str,
     summary: str,
@@ -83,8 +75,6 @@ def _probe_fail(
     )
 
 
-# LLM: _probe_json_file 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 处理probeJSON文件相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _probe_json_file(
     name: str,
     path: Path,
@@ -113,8 +103,6 @@ def _probe_json_file(
     )
 
 
-# LLM: _probe_writable_dir 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 处理probewritabledir相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _probe_writable_dir(
     name: str,
     directory: Path,
@@ -149,8 +137,6 @@ def _probe_writable_dir(
     )
 
 
-# LLM: _channel_status 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 处理通道状态相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _channel_status(checks: list[ChannelProbeCheck]) -> str:
     """根据检查项计算通道状态。"""
 

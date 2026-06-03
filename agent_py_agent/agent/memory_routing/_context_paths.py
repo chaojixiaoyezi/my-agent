@@ -1,5 +1,3 @@
-# LLM: Memory routing module; keep context selection and read-receipt records stable.
-# 模块用途: 根据任务上下文选择可注入记忆，并记录读取路径。
 
 """Path safety and match-to-read-target helpers for routed memory context."""
 
@@ -11,8 +9,6 @@ from pathlib import Path
 from .models import MemoryRouteMatch
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _ReadTarget 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 _ReadTarget 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class _ReadTarget:
     """Internal representation of one safe authority file read target."""
@@ -22,8 +18,6 @@ class _ReadTarget:
     reasons: list[str] = field(default_factory=list)
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _resolve_root 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 resolve root 在当前模块中的核心转换或协调步骤，衔接 memory routing 读取项目规则、路径和上下文片段来决定注入范围。
 def _resolve_root(root: str | Path) -> tuple[Path | None, str]:
     """Resolve the configured project root before any index or rule reads."""
     root_path = Path(root)
@@ -38,8 +32,6 @@ def _resolve_root(root: str | Path) -> tuple[Path | None, str]:
     return resolved, ""
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _resolve_relative_path 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 resolve relative path 在当前模块中的核心转换或协调步骤，衔接 memory routing 读取项目规则、路径和上下文片段来决定注入范围。
 def _resolve_relative_path(root: Path, raw_path: str, *, label: str) -> tuple[Path | None, str, str]:
     """Resolve a caller-provided relative path without escaping root."""
     cleaned = raw_path.strip()
@@ -59,8 +51,6 @@ def _resolve_relative_path(root: Path, raw_path: str, *, label: str) -> tuple[Pa
     return resolved, relative.as_posix(), ""
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _read_targets_from_matches 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 读取 read targets from matches 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
 def _read_targets_from_matches(
     matches: list[MemoryRouteMatch],
     root: Path,
@@ -91,8 +81,6 @@ def _read_targets_from_matches(
     return targets
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _authority_path_finding 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 authority path finding 在当前模块中的核心转换或协调步骤，衔接 memory routing 读取项目规则、路径和上下文片段来决定注入范围。
 def _authority_path_finding(match: MemoryRouteMatch, error: str, raw_path: str) -> str:
     """Format authority path safety findings like the route validator."""
     label = match.route.route_id or "<empty route_id>"
@@ -105,8 +93,6 @@ def _authority_path_finding(match: MemoryRouteMatch, error: str, raw_path: str) 
     return f"route '{label}': {error}"
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _append_finding 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 写入或登记 append finding 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_finding(findings: list[str], finding: str) -> None:
     """Append a diagnostic once while preserving first-seen order."""
     if finding and finding not in findings:

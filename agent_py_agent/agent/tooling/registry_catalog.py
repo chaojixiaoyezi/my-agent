@@ -1,5 +1,3 @@
-# LLM: Tool catalog rendering stays outside ToolRegistry so registry orchestration remains small.
-# 模块用途: 根据工具目录配置渲染 Tool Catalog 的分页、过滤和紧凑/完整展示。
 
 from __future__ import annotations
 
@@ -8,8 +6,6 @@ from dataclasses import dataclass
 from .models import ToolSpec
 
 
-# LLM: CatalogRenderConfig is the bundle for tool-catalog prompt shaping knobs.
-# 类用途: 保存工具目录渲染时需要的分页、类别过滤和字符上限配置。
 @dataclass(frozen=True)
 class CatalogRenderConfig:
     mode: str
@@ -22,8 +18,6 @@ class CatalogRenderConfig:
     detail_max_chars: int
 
 
-# LLM: render_catalog_entries is the single entry for Tool Catalog prompt rendering.
-# 函数用途: 按工具目录配置过滤、分页并渲染工具条目。
 def render_catalog_entries(specs: list[ToolSpec], config: CatalogRenderConfig) -> list[str]:
     filtered = _filter_catalog_specs(specs, config.categories)
     if config.mode == "off":
@@ -39,8 +33,6 @@ def render_catalog_entries(specs: list[ToolSpec], config: CatalogRenderConfig) -
     return entries
 
 
-# LLM: _filter_catalog_specs makes catalog categories a prompt budget knob, not an auth rule.
-# 函数用途: 只过滤工具目录展示类别，不改变真正可调用工具集合。
 def _filter_catalog_specs(specs: list[ToolSpec], categories: list[str]) -> list[ToolSpec]:
     if not categories:
         return specs
@@ -48,8 +40,6 @@ def _filter_catalog_specs(specs: list[ToolSpec], categories: list[str]) -> list[
     return [spec for spec in specs if spec.category in allowed_categories]
 
 
-# LLM: _render_catalog_spec applies compact/full mode without leaking config handling to ToolSpec.
-# 函数用途: 根据目录模式渲染单个工具条目。
 def _render_catalog_spec(spec: ToolSpec, config: CatalogRenderConfig) -> str:
     if config.mode == "full":
         return spec.render_detail_entry(max_chars=config.detail_max_chars)
@@ -59,8 +49,6 @@ def _render_catalog_spec(spec: ToolSpec, config: CatalogRenderConfig) -> str:
     )
 
 
-# LLM: _catalog_page_notice gives models a copyable continuation offset.
-# 函数用途: 在工具目录分页或过滤后追加 next_offset 提示。
 def _catalog_page_notice(config: CatalogRenderConfig, *, total: int, returned: int) -> str:
     next_offset = config.offset + returned
     if total <= next_offset:

@@ -1,11 +1,13 @@
-# LLM: Thread and channel-binding operations for conversation persistence.
-# 模块用途: 管理长期 thread、跨渠道绑定、用户最新 thread 索引和 thread 摘要。
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from pathlib import Path
+from typing import Any
 
-from ..gateway_parts.io import read_json_file, update_json_file_atomic, write_json_file_atomic
+from ..gateway_parts.io import update_json_file_atomic, write_json_file_atomic
+from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .models import ChannelBinding, ConversationThread, new_id
 from .store_base import ConversationBaseStore
 from .store_common import now as current_time
@@ -13,21 +15,54 @@ from .store_common import now as current_time
 
 class ConversationThreadStore(ConversationBaseStore):
     def get_or_create_thread(self, request: dict) -> ConversationThread:
-        existing = self.resolve_thread(channel=request.get("channel", ""), channel_conversation_id=request.get("channel_conversation_id", ""), channel_user_id=request.get("channel_user_id", ""))
+        existing, binding_error = self.resolve_thread_report(channel=request.get("channel", ""), channel_conversation_id=request.get("channel_conversation_id", ""), channel_user_id=request.get("channel_user_id", ""))
+        if binding_error is not None:
+            raise DataCorruptionError(str(binding_error))
         if existing is not None:
             return self._bind_existing(existing.thread_id, request)
-        latest = self.latest_thread_for_user(request.get("canonical_user_id", "")) if request.get("reuse_latest_for_user") else None
+        latest = None
+        if request.get("reuse_latest_for_user"):
+            latest, latest_error = self.latest_thread_for_user_report(request.get("canonical_user_id", ""))
+            if latest_error is not None:
+                raise DataCorruptionError(str(latest_error))
         if latest is not None:
             return self._bind_existing(latest.thread_id, request)
         return self._create_thread(request)
 
     def resolve_thread(self, *, channel: str, channel_conversation_id: str, channel_user_id: str) -> ConversationThread | None:
-        thread_id = str(self._read_bindings().get(_binding_key(channel, channel_conversation_id, channel_user_id)) or "")
-        return self.load_thread(thread_id) if thread_id else None
+        thread, _load_error = self.resolve_thread_report(
+            channel=channel,
+            channel_conversation_id=channel_conversation_id,
+            channel_user_id=channel_user_id,
+        )
+        return thread
+
+    def resolve_thread_report(
+        self,
+        *,
+        channel: str,
+        channel_conversation_id: str,
+        channel_user_id: str,
+    ) -> tuple[ConversationThread | None, dict[str, Any] | None]:
+        bindings, error = self._read_bindings_report()
+        if error is not None:
+            return None, error
+        thread_id = str(bindings.get(_binding_key(channel, channel_conversation_id, channel_user_id)) or "")
+        return self.load_thread_report(thread_id) if thread_id else (None, None)
 
     def latest_thread_for_user(self, canonical_user_id: str) -> ConversationThread | None:
-        thread_id = str(read_json_file(self.user_latest_path).get(canonical_user_id) or "")
-        return self.load_thread(thread_id) if thread_id else None
+        thread, _load_error = self.latest_thread_for_user_report(canonical_user_id)
+        return thread
+
+    def latest_thread_for_user_report(self, canonical_user_id: str) -> tuple[ConversationThread | None, dict[str, Any] | None]:
+        payload, error = _read_json_object_report(
+            self.user_latest_path,
+            context="conversation.user_latest.read",
+        )
+        if error is not None:
+            return None, error
+        thread_id = str(payload.get(canonical_user_id) or "")
+        return self.load_thread_report(thread_id) if thread_id else (None, None)
 
     def bind_channel(self, request: dict) -> ConversationThread:
         thread_id = str(request.get("thread_id") or "")
@@ -47,9 +82,21 @@ class ConversationThreadStore(ConversationBaseStore):
         return updated
 
     def list_threads(self, *, limit: int = 100) -> list[ConversationThread]:
-        threads = [ConversationThread.from_dict(data) for data in self._thread_dicts()]
+        threads, _load_errors = self.list_threads_report(limit=limit)
+        return threads
+
+    def list_threads_report(self, *, limit: int = 100) -> tuple[list[ConversationThread], list[dict[str, Any]]]:
+        threads: list[ConversationThread] = []
+        load_errors: list[dict[str, Any]] = []
+        for path in sorted(self.threads_dir.glob("*.json")):
+            thread, error = self._load_thread_path_report(path)
+            if thread is not None:
+                threads.append(thread)
+            if error is not None:
+                load_errors.append(error)
         threads.sort(key=lambda item: item.updated_at)
-        return threads if limit <= 0 else threads[-limit:]
+        limited = threads if limit <= 0 else threads[-limit:]
+        return limited, load_errors
 
     def update_summary(self, thread_id: str, summary: str, *, now: float | None = None) -> ConversationThread:
         thread = self._require_thread(thread_id)
@@ -58,10 +105,13 @@ class ConversationThreadStore(ConversationBaseStore):
         return updated
 
     def load_thread(self, thread_id: str) -> ConversationThread | None:
+        thread, _load_error = self.load_thread_report(thread_id)
+        return thread
+
+    def load_thread_report(self, thread_id: str) -> tuple[ConversationThread | None, dict[str, Any] | None]:
         if not thread_id:
-            return None
-        data = read_json_file(self._thread_path(thread_id))
-        return ConversationThread.from_dict(data) if data else None
+            return None, None
+        return self._load_thread_path_report(self._thread_path(thread_id), thread_id=thread_id)
 
     def _require_thread(self, thread_id: str) -> ConversationThread:
         thread = self.load_thread(thread_id)
@@ -73,7 +123,17 @@ class ConversationThreadStore(ConversationBaseStore):
         write_json_file_atomic(self._thread_path(thread.thread_id), thread.to_dict())
 
     def _read_bindings(self) -> dict[str, str]:
-        return {str(key): str(value) for key, value in read_json_file(self.bindings_path).items()}
+        bindings, _load_error = self._read_bindings_report()
+        return bindings
+
+    def _read_bindings_report(self) -> tuple[dict[str, str], dict[str, Any] | None]:
+        payload, error = _read_json_object_report(
+            self.bindings_path,
+            context="conversation.bindings.read",
+        )
+        if error is not None:
+            return {}, error
+        return {str(key): str(value) for key, value in payload.items()}, None
 
     def _bind_existing(self, thread_id: str, kwargs: dict) -> ConversationThread:
         return self.bind_channel({"thread_id": thread_id, "canonical_user_id": kwargs.get("canonical_user_id", ""), "channel": kwargs.get("channel", ""), "channel_conversation_id": kwargs.get("channel_conversation_id", ""), "channel_user_id": kwargs.get("channel_user_id", ""), "now": kwargs.get("now")})
@@ -97,8 +157,26 @@ class ConversationThreadStore(ConversationBaseStore):
         update_json_file_atomic(self.bindings_path, lambda data: {**data, key: binding.thread_id})
         update_json_file_atomic(self.user_latest_path, lambda data: {**data, binding.canonical_user_id: binding.thread_id})
 
-    def _thread_dicts(self) -> list[dict]:
-        return [data for path in sorted(self.threads_dir.glob("*.json")) if (data := read_json_file(path))]
+    def _load_thread_path_report(
+        self,
+        path: Path,
+        *,
+        thread_id: str = "",
+    ) -> tuple[ConversationThread | None, dict[str, Any] | None]:
+        payload, error = _read_json_object_report(path, context="conversation.thread.read")
+        actual_thread_id = str(thread_id or path.stem)
+        if error is not None:
+            error["thread_id"] = actual_thread_id
+            return None, error
+        if not payload:
+            return None, None
+        try:
+            return ConversationThread.from_dict(payload), None
+        except Exception as exc:
+            report = runtime_error_report(exc, context="conversation.thread.read")
+            report["thread_id"] = actual_thread_id
+            report["path"] = str(path)
+            return None, report
 
 
 def _binding_key(channel: str, conversation_id: str, user_id: str) -> str:
@@ -113,3 +191,17 @@ def _replace_binding(thread: ConversationThread, binding: ChannelBinding) -> tup
     key = _binding_key(binding.channel, binding.channel_conversation_id, binding.channel_user_id)
     old = (item for item in thread.channel_bindings if _binding_key(item.channel, item.channel_conversation_id, item.channel_user_id) != key)
     return (*old, binding)
+
+
+def _read_json_object_report(path: Path, *, context: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if not path.exists():
+        return {}, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise DataCorruptionError(f"{path.name} is {type(payload).__name__}, expected object")
+        return payload, None
+    except Exception as exc:
+        report = runtime_error_report(exc, context=context)
+        report["path"] = str(path)
+        return {}, report

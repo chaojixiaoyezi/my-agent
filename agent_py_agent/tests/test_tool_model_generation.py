@@ -23,36 +23,24 @@ from agent_py_agent.agent.backend import ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderTimeoutError
 
 
-# LLM: _BlockingBackend simulates a provider call that ignores socket-level timeouts.
-# 类用途: 测试专用模型后端；generate 会短暂卡住，用来复现真实 E2E 中 root runner 长时间 RUNNING 的情况。
 class _BlockingBackend:
     name = "blocking-test-backend"
 
-    # LLM: __init__ exposes an event so tests can verify the backend was actually entered.
-    # 函数用途: 初始化测试事件；没有外部 I/O，只用于确认 generate 已被调用。
     def __init__(self) -> None:
         self.entered = threading.Event()
 
-    # LLM: generate blocks longer than the configured request timeout and then returns late.
-    # 函数用途: 模拟模型服务持续不返回的情况；正常逻辑应该在返回前就触发 ProviderTimeoutError。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.entered.set()
         time.sleep(0.08)
         return ModelResponse(text="late response", backend=self.name)
 
 
-# LLM: _StreamingLongWriteBackend simulates a model trying to emit a whole site in one tool call.
-# 类用途: 测试专用模型后端；它持续流出未闭合 write_file content，公共边界应提前打断而不是等超时。
 class _StreamingLongWriteBackend:
     name = "streaming-long-write-test-backend"
 
-    # LLM: __init__ tracks how far the fake stream advanced before the boundary interrupted it.
-    # 函数用途: 初始化测试计数器；用于证明系统没有等完整超长工具调用输出完。
     def __init__(self) -> None:
         self.chunks_emitted = 0
 
-    # LLM: generate emits an invalid oversized write stream that used to end as provider_timeout.
-    # 函数用途: 模拟模型把完整网页塞进一次 write_file content 且迟迟不闭合工具调用。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         parts = [
             '[TOOL_CALL]\n'
@@ -70,18 +58,12 @@ class _StreamingLongWriteBackend:
         return ModelResponse(text=text, backend=self.name)
 
 
-# LLM: _StreamingRepeatedToolBackend simulates a provider that keeps generating after a complete tool call.
-# 类用途: 测试专用模型后端；它先输出一个完整工具调用，再继续输出重复工具调用，公共边界应在第一块闭合时停住。
 class _StreamingRepeatedToolBackend:
     name = "streaming-repeated-tool-test-backend"
 
-    # LLM: __init__ tracks how many chunks reached the provider callback before early stop.
-    # 函数用途: 初始化测试计数器；用于证明第一个完整工具调用后不会继续消费后续模型输出。
     def __init__(self) -> None:
         self.chunks_emitted = 0
 
-    # LLM: generate emits a complete executable tool block followed by duplicated tool content.
-    # 函数用途: 复现真实 E2E 中模型吐完 chunk 3 后继续重复 chunk 3，系统应立即执行第一块工具调用。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         parts = [
             '[TOOL_CALL]\n{"tool":"read_file","path":"final.html"}\n[/TOOL_CALL]',
@@ -97,18 +79,12 @@ class _StreamingRepeatedToolBackend:
         return ModelResponse(text=text, backend=self.name)
 
 
-# LLM: _StreamingLongFileWriteSessionBackend simulates a runaway write_file append above one session chunk.
-# 类用途: 测试 write_file.append 只有超过大文件 session 上限后才 salvage，普通 HTML 不会被 4K 截断。
 class _StreamingLongFileWriteSessionBackend:
     name = "streaming-long-file-write-session-test-backend"
 
-    # LLM: __init__ tracks emitted chunks so the test proves early stop.
-    # 函数用途: 初始化流式输出计数，不执行外部 I/O。
     def __init__(self) -> None:
         self.chunks_emitted = 0
 
-    # LLM: generate emits an unclosed append content stream larger than the session chunk ceiling.
-    # 函数用途: 模拟模型输出超过一个 session chunk 的未闭合大文件内容，验证高上限后的恢复路径。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         parts = [
             '[TOOL_CALL]\n'
@@ -126,36 +102,26 @@ class _StreamingLongFileWriteSessionBackend:
         return ModelResponse(text=text, backend=self.name)
 
 
-# LLM: _StreamingTokenBackend emits one chunk so tests can verify first-token ledger facts.
-# 类用途: 测试专用模型后端；通过 on_chunk 模拟真实流式首 token 到达。
 class _StreamingTokenBackend:
     name = "streaming-token-test-backend"
     model_name = "test-model"
     max_tokens = 64
 
-    # LLM: generate emits a normal chunk and returns a final response.
-    # 函数用途: 模拟一次成功模型调用，供账本测试读取 first_token 和 finished 事件。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         if on_chunk is not None:
             on_chunk("hello")
         return ModelResponse(text="hello world", backend=self.name)
 
 
-# LLM: _TimeoutAwareBackend records the backend request_timeout visible during generate.
-# 类用途: 测试动态 timeout 是否真正传入 HTTP backend 层，而不是只停在外层 guard。
 class _TimeoutAwareBackend:
     name = "timeout-aware-test-backend"
     model_name = "test-model"
     max_tokens = 1200
 
-    # LLM: __init__ starts with an unrealistically low backend timeout to expose missing overrides.
-    # 函数用途: 初始化 request_timeout 和观测字段，验证 generate 期间能看到动态预算。
     def __init__(self) -> None:
         self.request_timeout = 1
         self.seen_timeout = 0
 
-    # LLM: generate captures request_timeout and returns immediately.
-    # 函数用途: 不发网络请求，只记录调用期间后端超时字段是否被提升。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.seen_timeout = self.request_timeout
         if on_chunk is not None:
@@ -163,8 +129,6 @@ class _TimeoutAwareBackend:
         return ModelResponse(text="ok", backend=self.name)
 
 
-# LLM: _tool_loop_params returns the smallest valid tool-loop bundle for generation tests.
-# 函数用途: 构造 generate_model_response 所需参数包，避免每个测试重复填一长串字段。
 def _tool_loop_params() -> ToolLoopExecuteParams:
     return ToolLoopExecuteParams(
         user_prompt="",
@@ -188,8 +152,6 @@ def _tool_loop_params() -> ToolLoopExecuteParams:
     )
 
 
-# LLM: model generation must have a wall-clock guard above individual backend implementations.
-# 函数用途: 确认 backend.generate 自己卡住时，公共模型调用边界会按 request_timeout 抛出可恢复超时。
 def test_model_generate_enforces_request_timeout_when_backend_blocks():
     backend = _BlockingBackend()
     agent = SimpleNamespace(
@@ -213,8 +175,6 @@ def test_model_generate_enforces_request_timeout_when_backend_blocks():
     assert time.monotonic() - started < 0.06
 
 
-# LLM: large write_file streams should become recoverable parse errors, not hidden session writes.
-# 函数用途: 复现示例站点类失败：模型把大 HTML 塞进未闭合 write_file 时，系统给出可返工的解析错误。
 def test_model_generate_aborts_streaming_write_file_content_over_inline_limit():
     backend = _StreamingLongWriteBackend()
     agent = SimpleNamespace(
@@ -239,8 +199,6 @@ def test_model_generate_aborts_streaming_write_file_content_over_inline_limit():
     assert "site/index.html" in response.text
 
 
-# LLM: retired session-style stream aborts should become parse errors with repair hints.
-# 函数用途: 验证未闭合旧 session 写入不会被隐藏续写，而是交给通用返工提示处理。
 def test_model_generate_salvages_streaming_write_file_append_prefix():
     backend = _StreamingLongFileWriteSessionBackend()
     agent = SimpleNamespace(
@@ -264,8 +222,6 @@ def test_model_generate_salvages_streaming_write_file_append_prefix():
     assert "inline content streaming exceeded" in response.text
 
 
-# LLM: complete tool calls are execution boundaries, not just display boundaries.
-# 函数用途: 验证模型流出第一个完整工具调用后，系统会停止继续消费后续模型输出并立即交给工具循环执行。
 def test_model_generate_stops_stream_after_first_complete_tool_call():
     backend = _StreamingRepeatedToolBackend()
     agent = SimpleNamespace(
@@ -287,8 +243,6 @@ def test_model_generate_stops_stream_after_first_complete_tool_call():
     assert response.text == '[TOOL_CALL]\n{"tool":"read_file","path":"final.html"}\n[/TOOL_CALL]'
 
 
-# LLM: model generation should leave structured timing facts for timeout tuning and recovery.
-# 函数用途: 验证正常流式模型调用会写入 started/first_token/finished 账本，不依赖响应自然语言。
 def test_model_generate_records_model_call_ledger_for_streaming_response():
     backend = _StreamingTokenBackend()
     agent = SimpleNamespace(
@@ -322,8 +276,6 @@ def test_model_generate_records_model_call_ledger_for_streaming_response():
     assert "first_token_timeout_estimate" in records[0].metadata
 
 
-# LLM: dynamic model timeout extends only agents that expose dynamic timeout config.
-# 函数用途: 验证旧 fake agent 仍只用 request_timeout，而真实配置可按首 token 估算抬高预算。
 def test_effective_model_timeout_uses_dynamic_config_only_when_present():
     legacy_agent = SimpleNamespace(config=SimpleNamespace(request_timeout=1), backend=SimpleNamespace())
     dynamic_agent = SimpleNamespace(
@@ -340,8 +292,6 @@ def test_effective_model_timeout_uses_dynamic_config_only_when_present():
     assert _effective_model_request_timeout_seconds(dynamic_agent, 30) == 30
 
 
-# LLM: Wall timeout must reserve output generation time, not only prefill/first-token time.
-# 函数用途: 验证动态模型请求总超时会把 max_tokens 对应的输出时间纳入预算，避免长回复被 240s 墙过早杀掉。
 def test_effective_model_timeout_includes_output_generation_budget():
     dynamic_agent = SimpleNamespace(
         config=SimpleNamespace(
@@ -356,8 +306,6 @@ def test_effective_model_timeout_includes_output_generation_budget():
     assert _effective_model_request_timeout_seconds(dynamic_agent, 30) == 70
 
 
-# LLM: Dynamic timeout must reach the backend stream deadline, not only the outer guard thread.
-# 函数用途: 验证模型调用边界会把结构化动态总超时写进后端请求层，防止流式 SSE 仍按旧 240s 截断。
 def test_model_generate_applies_dynamic_timeout_to_backend_request():
     backend = _TimeoutAwareBackend()
     agent = SimpleNamespace(

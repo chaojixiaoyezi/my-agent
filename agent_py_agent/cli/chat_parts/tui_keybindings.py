@@ -1,5 +1,3 @@
-# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
-# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
 
 """Prompt-toolkit key bindings for the chat TUI."""
 
@@ -24,8 +22,6 @@ from .tui_params import TuiHandleCommandParams
 TRANSCRIPT_SCROLL_LINES = 10
 
 
-# LLM: TuiCreateKeybindingsParams 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass
 class TuiCreateKeybindingsParams:
     """bundle for creating TUI keybindings without growing setup signatures."""
@@ -52,8 +48,6 @@ class TuiCreateKeybindingsParams:
     transcript_scroll_lines: int = TRANSCRIPT_SCROLL_LINES
 
 
-# LLM: _tui_create_keybindings 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.keys import Keys
@@ -72,8 +66,6 @@ def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     return kb
 
 
-# LLM: _handle_enter_keybinding 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 处理用户输入、快捷命令或事件，并分发到对应动作。
 def _handle_enter_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     text = params.input_area.text.strip()
     if not text:
@@ -86,8 +78,6 @@ def _handle_enter_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     _tui_enqueue_job(params, text)
 
 
-# LLM: _handle_command_params 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _handle_command_params(params: TuiCreateKeybindingsParams, text: str) -> TuiHandleCommandParams:
     return TuiHandleCommandParams(
         user=text,
@@ -108,8 +98,6 @@ def _handle_command_params(params: TuiCreateKeybindingsParams, text: str) -> Tui
     )
 
 
-# LLM: _tui_enqueue_job 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def _tui_enqueue_job(params: TuiCreateKeybindingsParams, text: str) -> None:
     show_prompt, text = is_show_prompt_command(text)
     job = ChatJob(
@@ -124,8 +112,6 @@ def _tui_enqueue_job(params: TuiCreateKeybindingsParams, text: str) -> None:
     _print_enqueued_prompt(text)
 
 
-# LLM: _print_enqueued_prompt 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_enqueued_prompt(text: str) -> None:
     from .rendering import terminal_rule
 
@@ -138,22 +124,16 @@ def _print_enqueued_prompt(text: str) -> None:
     _cprint("")
 
 
-# LLM: _handle_ctrl_c_keybinding 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 处理用户输入、快捷命令或事件，并分发到对应动作。
 def _handle_ctrl_c_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     _request_exit(params)
     event.app.exit()
 
 
-# LLM: _handle_ctrl_d_keybinding 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 处理用户输入、快捷命令或事件，并分发到对应动作。
 def _handle_ctrl_d_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     _request_exit(params)
     event.app.exit()
 
 
-# LLM: _request_exit 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _request_exit(params: TuiCreateKeybindingsParams) -> None:
     _tui_request_exit(
         TuiExitRefs(
@@ -166,15 +146,11 @@ def _request_exit(params: TuiCreateKeybindingsParams) -> None:
     )
 
 
-# LLM: _set_transcript_follow 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _set_transcript_follow(params: TuiCreateKeybindingsParams, value: bool) -> None:
     if params.transcript_follow_ref is not None:
         params.transcript_follow_ref[0] = value
 
 
-# LLM: _move_transcript_cursor 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _move_transcript_cursor(area: Any, delta: int) -> None:
     if area is None:
         return
@@ -184,8 +160,6 @@ def _move_transcript_cursor(area: Any, delta: int) -> None:
         area.buffer.cursor_down(count=delta)
 
 
-# LLM: _scroll_transcript 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _scroll_transcript(params: TuiCreateKeybindingsParams, delta: int) -> None:
     if params.transcript_area is None:
         return
@@ -193,8 +167,6 @@ def _scroll_transcript(params: TuiCreateKeybindingsParams, delta: int) -> None:
     _move_transcript_cursor(params.transcript_area, delta)
 
 
-# LLM: _scroll_transcript_home 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _scroll_transcript_home(params: TuiCreateKeybindingsParams) -> None:
     if params.transcript_area is None:
         return
@@ -202,8 +174,6 @@ def _scroll_transcript_home(params: TuiCreateKeybindingsParams) -> None:
     params.transcript_area.buffer.cursor_position = 0
 
 
-# LLM: _scroll_transcript_end 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _scroll_transcript_end(params: TuiCreateKeybindingsParams) -> None:
     if params.transcript_area is None:
         return

@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import json
 
-from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import _dispatch_capability_config
+from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (
+    DispatchSubagentsTool,
+    _dispatch_capability_config,
+)
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability.runtime_config import (
     CapabilityConfigPatch,
@@ -21,8 +24,6 @@ from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 
 
-# LLM: _write_config creates a tiny capability config fixture with comments preserved by patching.
-# 函数用途: 写入测试用 capability_config.yaml，避免依赖仓库里的真实配置文件。
 def _write_config(path, *, run_timeout: int = 900, routing: bool = False) -> None:
     path.write_text(
         "\n".join(
@@ -38,8 +39,6 @@ def _write_config(path, *, run_timeout: int = 900, routing: bool = False) -> Non
     )
 
 
-# LLM: test_safe_patch_applies_with_audit locks the safe auto-change path.
-# 函数用途: 安全字段能在版本匹配时自动写入、重新加载，并留下审计和通知文件。
 def test_safe_patch_applies_with_audit(tmp_path):
     config_path = tmp_path / "capability_config.yaml"
     audit_path = tmp_path / "audit.jsonl"
@@ -80,8 +79,6 @@ def test_safe_patch_applies_with_audit(tmp_path):
     assert "subagent_run_timeout" in notice_path.read_text(encoding="utf-8")
 
 
-# LLM: test_manual_only_patch_returns_suggestion prevents risky config flips from auto-applying.
-# 函数用途: enable_capability_routing 这种全局行为开关只生成建议，不偷偷改用户配置。
 def test_manual_only_patch_returns_suggestion_without_mutating(tmp_path):
     config_path = tmp_path / "capability_config.yaml"
     _write_config(config_path, routing=False)
@@ -103,8 +100,6 @@ def test_manual_only_patch_returns_suggestion_without_mutating(tmp_path):
     assert config_path.read_text(encoding="utf-8") == before_text
 
 
-# LLM: test_version_mismatch_blocks_write protects user or other-agent config edits.
-# 函数用途: 文件版本和请求期望不一致时拒绝写入，避免覆盖并行修改。
 def test_version_mismatch_blocks_write(tmp_path):
     config_path = tmp_path / "capability_config.yaml"
     _write_config(config_path, run_timeout=900)
@@ -126,8 +121,6 @@ def test_version_mismatch_blocks_write(tmp_path):
     assert "subagent_run_timeout: 901" in config_path.read_text(encoding="utf-8")
 
 
-# LLM: test_reload_updates_router_config_when_file_changes proves new dispatch cycles see new knobs.
-# 函数用途: 配置文件变化后，reload 会更新 snapshot 和 router.config，已在跑的子代理不被直接改动。
 def test_reload_updates_router_config_when_file_changes(tmp_path):
     config_path = tmp_path / "capability_config.yaml"
     _write_config(config_path, run_timeout=900)
@@ -142,8 +135,6 @@ def test_reload_updates_router_config_when_file_changes(tmp_path):
     assert router.config.subagent_run_timeout == 1500
 
 
-# LLM: test_capability_config_patch_service_applies_safe_patch keeps config changes on the admin/runtime path.
-# 函数用途: 后台补丁服务仍可安全调整 capability_config；普通模型工具入口不负责这件事。
 def test_capability_config_patch_service_applies_safe_patch(tmp_path):
     config_path = tmp_path / "capability_config.yaml"
     _write_config(config_path, run_timeout=900)
@@ -168,8 +159,6 @@ def test_capability_config_patch_service_applies_safe_patch(tmp_path):
     assert "subagent_run_timeout: 1800" in config_path.read_text(encoding="utf-8")
 
 
-# LLM: test_capability_config_patch_tool_is_not_model_visible keeps config mutation off ordinary task surfaces.
-# 函数用途: 主代理普通工具列表不暴露配置补丁入口；配置调整走后台、CLI 或显式管理入口。
 def test_capability_config_patch_tool_is_not_model_visible(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
 
@@ -178,8 +167,6 @@ def test_capability_config_patch_tool_is_not_model_visible(tmp_path):
     assert "capability_config_patch" not in specs
 
 
-# LLM: test_dispatch_tool_reads_runtime_capability_config proves future dispatch sees patched config.
-# 函数用途: dispatch_subagents 工具构建内部配置时会读取 agent.capability_config_path 的最新文件。
 def test_dispatch_tool_reads_runtime_capability_config(tmp_path):
     config_path = tmp_path / "capability_config.yaml"
     _write_config(config_path, run_timeout=1500)
@@ -196,3 +183,21 @@ def test_dispatch_tool_reads_runtime_capability_config(tmp_path):
     cfg = _dispatch_capability_config(agent)
 
     assert cfg.subagent_run_timeout == 1500
+
+
+def test_dispatch_tool_reports_capability_config_load_error(tmp_path):
+    config_path = tmp_path / "capability_config.yaml"
+    config_path.mkdir()
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    agent.capability_config_path = config_path
+    agent.dispatch_subagents = lambda *_args, **_kwargs: type(
+        "Report",
+        (),
+        {"dry_run": True, "summary": {}, "records": []},
+    )()
+
+    result = DispatchSubagentsTool(agent).execute({"dry_run": True})
+
+    payload = json.loads(result.output)
+    assert payload["capability_config_load_error"]["context"] == "dispatch.capability_config.load"
+    assert payload["capability_config_load_error"]["path"] == str(config_path)

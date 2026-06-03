@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 
 import random as _random
@@ -184,8 +182,6 @@ PHRASES: dict[str, list[str]] = {
 }
 
 
-# LLM: random_phrase 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def random_phrase() -> str:
     category = _random.choice(list(PHRASES.keys()))
     return _random.choice(PHRASES[category])

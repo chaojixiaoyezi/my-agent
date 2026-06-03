@@ -1,11 +1,8 @@
-# LLM: 这里桥接旧字段和新内存配置对象，保留告警结构给 CLI 展示。
-# 模块用途: 把原始 AgentConfig 中的 memory_* 字段归一化成 MemorySettings。
 
 from __future__ import annotations
 
 """normalize memory-related runtime config with safe defaults and fallback warnings.
 
-给人看的解释：
 用户会手动改配置文件，所以这里专门负责把 memory 配置"洗干净"。
 具体字段和底层 coercion 已拆到内部模块，本文件保持历史 public imports。
 """
@@ -33,8 +30,6 @@ __all__ = [
 ]
 
 
-# LLM: normalize_memory_settings 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 把输入值归一成 配置系统 内部使用的稳定格式。
 def normalize_memory_settings(
     values: Mapping[str, Any] | object | None = None,
 ) -> tuple[MemorySettings, list[MemoryConfigWarning]]:
@@ -46,8 +41,6 @@ def normalize_memory_settings(
     return settings, warnings
 
 
-# LLM: normalize_agent_memory_config 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 把输入值归一成 配置系统 内部使用的稳定格式。
 def normalize_agent_memory_config(config: object) -> list[MemoryConfigWarning]:
     """Mutate an AgentConfig-like object so memory fields hold safe effective values."""
     settings, warnings = normalize_memory_settings(config)

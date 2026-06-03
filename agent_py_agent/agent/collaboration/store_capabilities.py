@@ -1,14 +1,21 @@
-# LLM: Capability registry for collaboration routing; matching stays structural.
-# 模块用途: 管理代理能力快照和基于能力的候选匹配。
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
-from ..gateway_parts.io import read_json_file, update_json_file_atomic
+from ..gateway_parts.io import update_json_file_atomic
+from ..runtime_errors import runtime_error_report
 from .identity import agent_identity_aliases, capability_identity_aliases
 from .models import AgentCapability
 from .store_evidence import CollaborationEvidenceStore
+
+
+def _capability_roster_load_error(path: Path, exc: BaseException) -> dict[str, Any]:
+    report = runtime_error_report(exc, context="collaboration.agent_capabilities.read")
+    report["path"] = str(path)
+    return report
 
 
 class CollaborationCapabilityStore(CollaborationEvidenceStore):
@@ -20,8 +27,19 @@ class CollaborationCapabilityStore(CollaborationEvidenceStore):
         return capability
 
     def agent_capabilities(self) -> list[AgentCapability]:
-        data = read_json_file(self.capabilities_path)
-        return [AgentCapability.from_dict(item) for item in data.values() if isinstance(item, dict)]
+        capabilities, _load_error = self.agent_capabilities_report()
+        return capabilities
+
+    def agent_capabilities_report(self) -> tuple[list[AgentCapability], dict[str, Any] | None]:
+        if not self.capabilities_path.exists():
+            return [], None
+        try:
+            data = json.loads(self.capabilities_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError(f"agent capabilities roster is {type(data).__name__}, expected object")
+        except (OSError, UnicodeError, ValueError) as exc:
+            return [], _capability_roster_load_error(self.capabilities_path, exc)
+        return [AgentCapability.from_dict(item) for item in data.values() if isinstance(item, dict)], None
 
     def agent_identity_aliases(self, values: object = ()) -> set[str]:
         aliases = agent_identity_aliases(values)
@@ -36,10 +54,26 @@ class CollaborationCapabilityStore(CollaborationEvidenceStore):
         exclude_agent_id: str = "",
         limit: int = 20,
     ) -> list[AgentCapability]:
+        matches, _load_error = self.match_agents_report(
+            required_capabilities=required_capabilities,
+            exclude_agent_id=exclude_agent_id,
+            limit=limit,
+        )
+        return matches
+
+    def match_agents_report(
+        self,
+        *,
+        required_capabilities: list[str] | tuple[str, ...] | None = None,
+        exclude_agent_id: str = "",
+        limit: int = 20,
+    ) -> tuple[list[AgentCapability], dict[str, Any] | None]:
         required = {str(item) for item in (required_capabilities or []) if str(item or "").strip()}
-        matches = [item for item in self.agent_capabilities() if self._matches(item, required, exclude_agent_id)]
+        capabilities, load_error = self.agent_capabilities_report()
+        matches = [item for item in capabilities if self._matches(item, required, exclude_agent_id)]
         matches.sort(key=lambda item: (item.load, item.agent_id))
-        return matches if limit <= 0 else matches[:limit]
+        matches = matches if limit <= 0 else matches[:limit]
+        return matches, load_error
 
     def _registered_aliases_for(self, aliases: set[str]) -> set[str]:
         result: set[str] = set()

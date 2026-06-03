@@ -1,5 +1,3 @@
-# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
-# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
 
 
 from __future__ import annotations
@@ -10,8 +8,6 @@ from typing import Any
 from ..action_protocol import RunScope
 
 
-# LLM: FinalizeContext 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存finalize上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class FinalizeContext:
 
@@ -41,8 +37,6 @@ class FinalizeContext:
     main_context_bundle_markdown_path: str = ""
 
 
-# LLM: ToolLoopExecuteParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存工具循环 execute 参数、运行标识和可变记录容器；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class ToolLoopExecuteParams:
 
@@ -72,10 +66,9 @@ class ToolLoopExecuteParams:
     delivery_contract: dict | None = None
     run_scope: RunScope | None = None
     root_user_prompt: str = ""
+    runtime_guard_policy: object | None = None
 
 
-# LLM: CompressionContext 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存压缩上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class CompressionContext:
 
@@ -90,8 +83,6 @@ class CompressionContext:
     source: str
 
 
-# LLM: ArchiveRunParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存archiverun参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class ArchiveRunParams:
 
@@ -105,8 +96,6 @@ class ArchiveRunParams:
     source: str
 
 
-# LLM: EstimateTokenParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存estimate令牌参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class EstimateTokenParams:
 

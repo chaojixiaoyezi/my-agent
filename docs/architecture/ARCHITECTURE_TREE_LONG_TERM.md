@@ -45,44 +45,127 @@ agent_py_agent/
 ├── agent/                        # 核心层：所有运行时逻辑
 │   ├── agent_core/               #   SimpleAgent 主类 + 调度 mixin
 │   │   ├── runtime_mixin.py      #     运行时能力（工具调用、模型交互、上下文管理）
-│   │   ├── dispatch_mixin.py     #     [HARD 889行] 父代理调度主循环
-│   │   ├── subagent_mixin.py     #     子代理相关入口 mixin
+│   │   ├── subagent_mixin.py     #     子代理相关公开入口 facade
+│   │   ├── subagent/              #     子代理创建/运行生命周期组合服务
+│   │   │   ├── lifecycle_service.py
+│   │   │   ├── params.py
+│   │   │   ├── run_flow.py
+│   │   │   ├── spawn_flow.py
+│   │   │   ├── finalize_helpers.py
+│   │   │   ├── compact_continuation.py
+│   │   │   ├── session_continuation.py
+│   │   │   ├── session_compact_payload.py
+│   │   │   ├── progress_closeout.py
+│   │   │   └── attempt_guard.py
+│   │   ├── tool_stream/           #     模型流式输出里的工具协议边界
+│   │   │   ├── boundary.py
+│   │   │   ├── models.py
+│   │   │   └── write_abort.py
 │   │   ├── failure_introspector.py  # 失败自省引擎（LLM 分析失败原因）
 │   │   ├── failure_analyzer.py   #     失败模式分析
 │   │   ├── planner.py            #     调度规划（runner 指令组合）
-│   │   ├── runner_dispatch.py    #     runner 分发（并发控制、重试、超时）
-│   │   ├── runner_prompts.py     #     runner 提示词模板
-│   │   ├── dispatch_lock.py      #     调度锁
-│   │   ├── dispatch_loop.py      #     调度循环
+│   │   ├── runner/               #     runner 执行、提示、超时和 refs 边界
+│   │   │   ├── dispatch.py       #     runner 分发（并发控制、重试、超时）
+│   │   │   ├── gate.py           #     runner 执行入口和失败续跑提示
+│   │   │   ├── prompts.py        #     runner 提示词模板
+│   │   │   ├── ref_fields.py     #     runner 输入/输出 refs 解析
+│   │   │   └── timeout_policy.py #     runner 超时策略
 │   │   ├── dynamic_timeout.py    #     动态超时计算
 │   │   ├── adaptive_retry.py     #     自适应重试
 │   │   ├── task_complexity.py    #     任务复杂度评估
 │   │   ├── watchdog.py           #     看门狗（daemon 巡检）
-│   │   ├── orchestration_tools.py #    编排工具
+│   │   ├── orchestration_tools.py #    编排工具执行入口
+│   │   ├── orchestration/        #     编排工具短规格与后续编排子包
+│   │   │   ├── tool_specs.py     #     模型可见 ToolSpec builder
+│   │   │   ├── tool_spec_data.py #     短参数说明数据
+│   │   │   ├── tool_grants.py    #     子代理基础工具授权名单
+│   │   │   ├── workflow_mode.py  #     编排工具 workflow_mode 归一化
+│   │   │   ├── lineage_names.py  #     子代理显示名和序号归一化
+│   │   │   ├── summary_action_lines.py # 编排工具结果上下文摘要
+│   │   │   ├── create_config.py #       编排创建配置读取
+│   │   │   ├── dispatch/
+│   │   │   │   ├── mixin.py #      SimpleAgent dispatch facade
+│   │   │   │   ├── facade.py #     watch/dispatch facade helpers
+│   │   │   │   ├── service.py #    dispatch step record builders
+│   │   │   │   ├── params.py #     dispatch/watch 参数对象和执行计划
+│   │   │   │   ├── loop.py #       dispatch_loop 循环
+│   │   │   │   ├── lock.py #       dispatch watch 文件锁
+│   │   │   │   ├── no_progress.py # dispatch 空转识别
+│   │   │   │   ├── limiter.py #    runner 启动限流
+│   │   │   │   ├── runner_batches.py # runner 候选批量执行
+│   │   │   │   ├── runner_candidates.py # runner 候选筛选
+│   │   │   │   ├── runner_records.py # runner 记录生成
+│   │   │   │   ├── runner_selection.py # runner scope 可见性
+│   │   │   │   ├── collection_records.py # dispatch 记录收集
+│   │   │   │   ├── collaboration_candidates.py # 协作请求候选
+│   │   │   │   ├── capability_followup.py # 授权后续跑提示
+│   │   │   │   ├── workflow_records.py # workflow 规划记录
+│   │   │   │   ├── run_ids.py #    dispatch run_id 参数归一化
+│   │   │   │   ├── load_errors.py # 子代理账本读取失败行
+│   │   │   │   ├── payload.py #    dispatch_subagents 返回 payload
+│   │   │   │   ├── state_contract.py # 当前回合状态摘要 payload
+│   │   │   │   ├── refs.py #      子代理结果 refs-first 索引
+│   │   │   │   ├── scope.py #     dispatch 作用域裁决
+│   │   │   │   ├── progress_payload.py # runner-context child 进度摘要
+│   │   │   │   ├── tool.py #      dispatch_subagents 模型工具入口
+│   │   │   │   └── tool_helpers.py # dispatch 工具入口 helper
+│   │   │   ├── replacements.py   #       replacement/takeover 记录
+│   │   │   ├── run_scope.py      #       编排 run_id 轻量记忆
+│   │   │   ├── work_scope.py     #       work_scope_key 派生
+│   │   │   ├── background/
+│   │   │   │   ├── dispatch.py # 后台自动启动 dispatch
+│   │   │   │   └── marks.py #    后台启动标记
+│   │   │   ├── tools/
+│   │   │   │   ├── event.py #   raise_event 工具入口
+│   │   │   │   └── status.py #  inspect_agent_tree 工具入口
+│   │   │   ├── recovery_batches.py #    恢复策略分组
+│   │   │   ├── runner_instruction.py #  runner_instruction 占位符解析
+│   │   │   ├── create_payload.py #      create_subagents 返回 payload
+│   │   │   ├── create_constraints.py #  create/schedule 写入根与约束冲突解析
+│   │   │   ├── create_context.py #      create context manifest/context packs
+│   │   │   ├── create_conversation.py # create 会话/thread 继承
+│   │   │   ├── create_idempotency.py #  create 结构化幂等复用裁决
+│   │   │   ├── create_items.py #        create items 批量参数解析
+│   │   │   ├── create_policy.py #       CreateRunParams 组装
+│   │   │   ├── create_target_roots.py # create/schedule 产品写入根推导
+│   │   │   ├── shared_context.py #      父级小型读取 brief 传递
+│   │   │   ├── lifecycle.py #           创建后发布、会话绑定和自动启动
+│   │   │   ├── write_guard.py #         create/schedule 写入目标预检
+│   │   │   ├── quality_advice_payload.py # QA 建议 payload
+│   │   │   ├── quality_payload.py #      QA 失败信号 payload
+│   │   │   ├── child_result_index.py #    子代理结果 refs 索引
+│   │   │   ├── scope_resolution.py #      编排工具身份/scope 裁决
+│   │   │   └── sibling_roster.py #        同批子代理 roster
 │   │   ├── parameters.py         #     调度参数
-│   │   ├── runtime_capabilities.py #   运行时能力
+│   │   ├── runtime/
+│   │   │   └── capabilities.py #       运行时能力
 │   │   └── models.py             #     核心数据模型
 │   │
-│   ├── subagents/                #   子代理管理（14个mixin + services 拆分）
+│   ├── subagents/                #   子代理管理（历史 mixin + services 拆分）
 │   │   ├── manager.py            #     SubAgentManager 入口（纯组合类，无业务逻辑）
 │   │   ├── manager_base.py       #     [HARD 744行] 基础CRUD + 卡片管理
 │   │   ├── manager_patch.py      #     [HARD 794行] patch审核 + 应用
 │   │   ├── manager_dispatch.py   #     调度派工逻辑
-│   │   ├── manager_board.py      #     看板渲染（HTML + 终端）
+│   │   ├── services/board/service.py     #     看板核心服务
+│   │   ├── services/board/facade.py #   旧 board API 兼容入口
 │   │   ├── manager_acceptance.py #     验收流程
 │   │   ├── manager_acceptance_findings.py  # 验收发现处理
 │   │   ├── manager_runner_context.py  # runner 上下文注入
 │   │   ├── manager_runner_results.py  # runner 结果处理
 │   │   ├── manager_lifecycle.py  #     生命周期（暂停/恢复/放弃）
-│   │   ├── manager_capabilities.py    # 能力路由集成
-│   │   ├── manager_actions.py    #     动作执行
+│   │   ├── services/capabilities/    # 能力路由集成
+│   │   ├── manager_actions.py    #     动作 facade
+│   │   ├── services/actions/     #     action apply 服务与 handler
 │   │   ├── manager_indexing.py   #     索引管理
+│   │   ├── services/indexing/    #     索引 service 与 report/local-record helper
+│   │   ├── services/dispatch/    #     调度报告 service 与 params/helper
+│   │   ├── services/leadership_recovery/ # 领导权恢复 plan/apply
 │   │   ├── manager_learning.py   #     学习反馈
 │   │   ├── manager_channel_probe.py   # 通道探测
 │   │   ├── manager_normalize.py  #     数据归一化
 │   │   ├── services/             #     [已启动] 服务层提取
 │   │   │   ├── lifecycle.py      #       生命周期服务（能力请求/授予/缺口/心跳）
-│   │   │   └── persistence.py    #       持久化服务（load/list_runs/save）
+│   │   │   └── persistence/      #       持久化服务（load/list_runs/save）
 │   │   ├── models.py             #     子代理数据模型
 │   │   ├── policies.py           #     策略规则（动作映射、权重、路由）
 │   │   ├── policy_checks.py      #     策略校验
@@ -400,17 +483,17 @@ interfaces ──> application ──> domain ──> shared
 3. 将 `memory_store/jsonl.py` 的直接文件操作封装为 `JsonlMemoryRepository`
 4. 将 `local_storage/` 的 SQLite 操作封装为 `SqliteLocalRepository`
 5. 将 `tooling/write_boundary.py` 保留为校验层，但写入操作委托给仓库
-6. 更新 `subagents/services/persistence.py` 使用仓库接口
+6. 更新 `subagents/services/persistence/` 使用仓库接口
 
 ### Phase 3: God Class Decomposition（拆解巨型类）
 **目标**: 消除所有 HARD 违规
 **预计工作量**: 5-7 天
 
 1. `chat.py` (989行) -> 继续 `chat_parts/` 拆分（见 CHAT_REFACTOR_PLAN.md）
-2. `dispatch_mixin.py` (889行) -> 拆为 `dispatch/planner.py`, `dispatch/runner.py`, `dispatch/loop.py`, `dispatch/audit.py`
-3. `manager_base.py` (744行) -> 基础 CRUD 移入 `subagent_services/persistence.py` + `subagent_services/board.py`
+2. dispatch 主体已迁入 `agent_core/orchestration/dispatch/`，继续保持 facade/runner/loop/record 职责分离。
+3. `manager_base.py` (744行) -> 基础 CRUD 移入 `subagent_services/persistence/` + `subagent_services/board/service.py`
 4. `manager_patch.py` (794行) -> 移入 `subagent_services/patch.py`
-5. `memory_archive/query.py` (839行) -> 拆为 `archive/query_builder.py`, `archive/query_executor.py`, `archive/query_formatter.py`
+5. `memory_archive/query/` 已拆成查询子包；继续保持 builder / executor / formatter 职责分离，不再恢复平铺 `query.py`
 6. `log_analysis/analytics/detectors/rules.py` (747行) -> 拆为 `detectors/rule_engine.py`, `detectors/rule_loader.py`, `detectors/rule_matcher.py`
 7. `settings/config.py` (751行) -> `AgentConfig` 移入 `shared/config/`，加载逻辑移入 `infrastructure/`
 
@@ -540,7 +623,7 @@ layers = [
 - `cli/chat_parts/history.py` 已提取会话历史管理
 - `cli/chat_parts/rendering.py` 已提取终端渲染
 - `cli/chat_parts/slash_commands.py` 已提取公共斜杠命令
-- `subagents/services/persistence.py` 已提取持久化服务
+- `subagents/services/persistence/` 已提取持久化服务
 - `subagents/services/lifecycle.py` 已提取生命周期服务
 - `subagents/manager.py` 已成为纯组合类（14个mixin拼合）
 - 已消除所有 `import *` 使用

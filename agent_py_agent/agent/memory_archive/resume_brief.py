@@ -1,5 +1,3 @@
-# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
-# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
 
 from __future__ import annotations
 
@@ -14,9 +12,9 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ..common.value_parsing import dedupe_strings, sequence_strings
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 RecoveryBriefContext 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 RecoveryBriefContext 的字段集合，在模块边界间传递结构化状态和结果。
+
 @dataclass
 class RecoveryBriefContext:
     """Bundle for _context_block keyword parameters."""
@@ -30,17 +28,12 @@ class RecoveryBriefContext:
     authority_note: str
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 ResumeBriefParams 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 ResumeBriefParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class ResumeBriefParams:
-    # LLM: resume brief callers pass optional recommendations as one bundle.
     recommended_read_paths: list[str] | None = None
     next_actions: list[str] | None = None
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 build_resume_brief 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 build resume brief 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def build_resume_brief(
     archive_matches: list[dict[str, Any]],
     local_hits: list[dict[str, Any]],
@@ -84,8 +77,6 @@ def build_resume_brief(
     }
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _summary 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 summary 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _summary(ctx: RecoveryBriefContext) -> str:
     summary_lines = [
         _summary_line("latest_user_intent", ctx.latest_user_intents[:1]),
@@ -96,40 +87,32 @@ def _summary(ctx: RecoveryBriefContext) -> str:
     return "\n".join(line for line in summary_lines if line)
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _task_status_summaries 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 task status summaries 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _task_status_summaries(statuses: list[dict[str, str]]) -> list[str]:
     return [f"{item['run_id']} {item['status']}/{item['verification_status']}" for item in statuses]
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _latest_user_intents 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 latest user intents 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _latest_user_intents(archive_matches: list[dict[str, Any]]) -> list[str]:
 
     values: list[str] = []
     for record in archive_matches:
         payload = record.get("payload", {}) if isinstance(record.get("payload"), dict) else {}
-        values.extend(_string_list(payload.get("user_intents")))
+        values.extend(sequence_strings(payload.get("user_intents"), allow_scalar=True))
         if record.get("speaker") == "user":
             values.append(str(record.get("content_preview", "") or ""))
-    return _dedupe(values)
+    return dedupe_strings(values)
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _latest_assistant_actions 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 latest assistant actions 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _latest_assistant_actions(archive_matches: list[dict[str, Any]]) -> list[str]:
 
     values: list[str] = []
     for record in archive_matches:
         payload = record.get("payload", {}) if isinstance(record.get("payload"), dict) else {}
-        values.extend(_string_list(payload.get("assistant_actions")))
+        values.extend(sequence_strings(payload.get("assistant_actions"), allow_scalar=True))
         if record.get("speaker") == "assistant":
             values.append(str(record.get("content_preview", "") or ""))
-    return _dedupe(values)
+    return dedupe_strings(values)
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _related_ids 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 related ids 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _related_ids(
     archive_matches: list[dict[str, Any]],
     local_hits: list[dict[str, Any]],
@@ -164,8 +147,6 @@ def _related_ids(
     return ids
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _likely_task_statuses 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 likely task statuses 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _likely_task_statuses(task_payloads: list[dict[str, Any]]) -> list[dict[str, str]]:
 
     statuses: list[dict[str, str]] = []
@@ -183,8 +164,6 @@ def _likely_task_statuses(task_payloads: list[dict[str, Any]]) -> list[dict[str,
     return statuses
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _context_block 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 context block 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _context_block(ctx: RecoveryBriefContext) -> str:
 
     lines = ["# Recovery Brief", "", f"- authority: {ctx.authority_note}"]
@@ -210,37 +189,12 @@ def _context_block(ctx: RecoveryBriefContext) -> str:
     return "\n".join(lines)
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _summary_line 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 summary line 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _summary_line(label: str, values: list[str]) -> str:
 
     return f"{label}: {values[0]}" if values else ""
 
 
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _string_list 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 string list 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
-def _string_list(value: object) -> list[str]:
 
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    text = str(value or "").strip()
-    return [text] if text else []
-
-
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _dedupe 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 dedupe 涉及的字段，让后续匹配和存储使用同一形态。
-def _dedupe(values: list[str]) -> list[str]:
-
-    items: list[str] = []
-    for value in values:
-        text = value.strip()
-        if text and text not in items:
-            items.append(text)
-    return items
-
-
-# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _append 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 append 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _append(items: list[str], value: object) -> None:
 
     text = str(value or "").strip()

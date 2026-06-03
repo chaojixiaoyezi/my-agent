@@ -1,5 +1,3 @@
-# LLM: Main-agent research evidence fixtures live outside the foundation runner to keep the matrix thin.
-# 模块用途: 生成资料证据合同测试结果，证明关键统计字段必须有结构化来源引用。
 
 from __future__ import annotations
 
@@ -14,8 +12,6 @@ from .evidence_contract import (
 )
 
 
-# LLM: research_evidence_contract_case returns a dict compatible with MainAgentFoundationCaseResult.
-# 函数用途: 用一正一反两组资料 claim 证明关键统计字段必须挂 source_ref，供主 runner 直接包装。
 def research_evidence_contract_case(workspace: Path) -> dict[str, object]:
     valid = _valid_research_evidence_contract()
     invalid = _invalid_research_evidence_contract()
@@ -31,8 +27,6 @@ def research_evidence_contract_case(workspace: Path) -> dict[str, object]:
     }
 
 
-# LLM: _valid_research_evidence_contract builds the positive sourced-claim fixture.
-# 函数用途: 构造带 source_ref 的通用指标 claim，证明有来源资料可以通过证据合同。
 def _valid_research_evidence_contract():
     return evaluate_evidence_contract(
         EvidenceContractRequest(
@@ -57,8 +51,6 @@ def _valid_research_evidence_contract():
     )
 
 
-# LLM: _invalid_research_evidence_contract builds the negative unsourced-claim fixture.
-# 函数用途: 构造没有 source_ref 的增长数据 claim，证明模型不能凭空填写关键统计。
 def _invalid_research_evidence_contract():
     return evaluate_evidence_contract(
         EvidenceContractRequest(
@@ -68,8 +60,6 @@ def _invalid_research_evidence_contract():
     )
 
 
-# LLM: _write_research_evidence_report persists evidence-contract outputs as refs.
-# 函数用途: 写出有效/无效两组证据合同结果，供主代理基础测试报告引用。
 def _write_research_evidence_report(workspace: Path, valid, invalid) -> Path:
     evidence = workspace / "research_evidence_contracts" / "report.json"
     evidence.parent.mkdir(parents=True, exist_ok=True)
@@ -85,8 +75,6 @@ def _write_research_evidence_report(workspace: Path, valid, invalid) -> Path:
     return evidence
 
 
-# LLM: _research_evidence_issues turns contract booleans into stable test issue labels.
-# 函数用途: 根据正例/反例的 ok 状态输出问题列表，避免测试结果解析自然语言。
 def _research_evidence_issues(valid_ok: bool, invalid_ok: bool) -> list[str]:
     issues: list[str] = []
     if not valid_ok:

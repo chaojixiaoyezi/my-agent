@@ -10,8 +10,6 @@ from agent_py_agent.agent.contracts.gates.delivery_quality import (
 )
 
 
-# LLM: Delivery quality gates must reject wrong metric semantics, not only missing evidence.
-# 函数用途: 验证时间窗口增量不能由当前总量冒充，机器只读 metric_kind 结构字段。
 def test_delivery_quality_gate_rejects_time_window_delta_from_point_in_time_total() -> None:
     decision = evaluate_delivery_quality_gate(
         _payload(
@@ -50,8 +48,6 @@ def test_delivery_quality_gate_rejects_time_window_delta_from_point_in_time_tota
     assert "METRIC_KIND_MISMATCH" in decision.finding_codes
 
 
-# LLM: Estimated metrics may be allowed only when their uncertainty is structured.
-# 函数用途: 验证估算值即使有 methodology，也必须带 limitations 才能通过严格口径合同。
 def test_delivery_quality_gate_requires_limitations_for_estimated_metrics() -> None:
     decision = evaluate_delivery_quality_gate(
         _estimated_metric_payload(),
@@ -63,8 +59,6 @@ def test_delivery_quality_gate_requires_limitations_for_estimated_metrics() -> N
     assert "METRIC_ESTIMATE_LIMITATIONS_MISSING" in decision.finding_codes
 
 
-# LLM: Language quality checks are driven by structured field contracts, not prompt keywords.
-# 函数用途: 验证声明为中文交付字段时，英文占位内容不能通过质量门。
 def test_delivery_quality_gate_rejects_non_target_language_rows() -> None:
     decision = evaluate_delivery_quality_gate(
         {
@@ -101,8 +95,6 @@ def test_delivery_quality_gate_rejects_non_target_language_rows() -> None:
     assert decision.finding_codes == ("LANGUAGE_FIELD_TARGET_MISMATCH",)
 
 
-# LLM: Artifact validation must be tied to the same effective contract hash used for closeout.
-# 函数用途: 验证旧合同验收过的产物不能在新合同下直接收口。
 def test_delivery_quality_gate_rejects_stale_artifact_contract_hash() -> None:
     decision = evaluate_delivery_quality_gate(
         {
@@ -132,8 +124,6 @@ def test_delivery_quality_gate_rejects_stale_artifact_contract_hash() -> None:
     assert decision.finding_codes == ("ARTIFACT_VALIDATION_CONTRACT_HASH_MISMATCH",)
 
 
-# LLM: Delivery quality decisions should leave an append-only trace for replay and audit.
-# 函数用途: 验证质量门结果可落 gate trace，后续真实 run 能复盘哪一门挡住。
 def test_delivery_quality_gate_trace_records_contract_hash_and_findings(tmp_path: Path) -> None:
     trace_path = tmp_path / "delivery_quality_gate.jsonl"
     decision = evaluate_delivery_quality_gate(

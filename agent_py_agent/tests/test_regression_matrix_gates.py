@@ -1,31 +1,29 @@
-# LLM: Non-real-environment regression matrix covering 10 failure scenarios for gate validation.
-# 模块用途: 用 fake tool/fake result/fake state 模拟假完成、产物缺失、空产物、坏 JSON、假成功、
 # recovery packet 损坏、compact/resume 返工、重复幂等、等价绕过、scope creep 等场景。
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from agent_py_agent.agent.contracts.gates.artifact_gate import evaluate_artifact_report_gate
-from agent_py_agent.agent.contracts.gates.command_policy import evaluate_command_policy
+from agent_py_agent.agent.contracts.gates.artifact.gate import evaluate_artifact_report_gate
+from agent_py_agent.agent.contracts.gates.command.policy import evaluate_command_policy
 from agent_py_agent.agent.contracts.gates.compaction_gate import (
     CompactionGateFacts,
     compaction_gate_snapshot,
     evaluate_compaction_gate,
 )
-from agent_py_agent.agent.contracts.gates.idempotency_ledger import (
-    IdempotencyLedgerFacts,
-    IdempotencyLedgerRecord,
-    evaluate_idempotency_ledger_gate,
-)
-from agent_py_agent.agent.contracts.gates.network_safety import (
+from agent_py_agent.agent.contracts.gates.network.safety import (
     NetworkSafetyFacts,
     evaluate_network_safety_gate,
 )
-from agent_py_agent.agent.contracts.gates.tool_guardrail import (
+from agent_py_agent.agent.contracts.gates.tool.guardrail import (
     ToolGuardrailConfig,
     ToolGuardrailFacts,
     evaluate_tool_guardrail_gate,
+)
+from agent_py_agent.agent.contracts.gates.tool.idempotency_ledger import (
+    IdempotencyLedgerFacts,
+    IdempotencyLedgerRecord,
+    evaluate_idempotency_ledger_gate,
 )
 
 
@@ -274,13 +272,13 @@ class TestScenario8IdempotencyDuplicate:
 # ============================================================
 class TestScenario9EquivalentActionBypass:
     def test_rm_alias_normalized(self):
-        from agent_py_agent.agent.contracts.gates.command_policy import command_name
+        from agent_py_agent.agent.contracts.gates.command.policy import command_name
         assert command_name("/bin/rm") == "rm"
         assert command_name("/usr/bin/rm") == "rm"
         assert command_name("rm") == "rm"
 
     def test_mkfs_prefix_detected(self):
-        from agent_py_agent.agent.contracts.gates.command_policy import _is_dangerous_executable
+        from agent_py_agent.agent.contracts.gates.command.policy import _is_dangerous_executable
         assert _is_dangerous_executable("mkfs.ext4")
         assert _is_dangerous_executable("mkfs.fat")
         assert _is_dangerous_executable("mkfs")

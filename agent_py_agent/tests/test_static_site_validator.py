@@ -2,12 +2,10 @@
 
 from pathlib import Path
 
-from agent_py_agent.agent.subagents.execution_executor import TestExecutor
+from agent_py_agent.agent.subagents.execution import TestExecutor
 from agent_py_agent.tests.static_site_validator_fixtures import _write_site
 
 
-# LLM: The happy path proves local links, remote images, buttons, and required files can pass together.
-# 函数用途: 验证完整静态站点检查通过时，执行记录是 static_site_check 且 validation_result.ok 为真。
 def test_static_site_check_passes_valid_site(tmp_path):
     _write_site(
         tmp_path,
@@ -42,8 +40,6 @@ def test_static_site_check_passes_valid_site(tmp_path):
     assert record.validation_result["broken_local_refs"] == []
 
 
-# LLM: This regression captures the R11 failure shape from the real shopping-site E2E.
-# 函数用途: 缺失页面、本地坏链接、`${...}` 占位符和无动作按钮都必须让静态站点验收失败。
 def test_static_site_check_blocks_common_generated_site_failures(tmp_path):
     _write_site(
         tmp_path,
@@ -73,8 +69,6 @@ def test_static_site_check_blocks_common_generated_site_failures(tmp_path):
     assert record.validation_result["placeholder_hits"] == ["flow-done.html"]
 
 
-# LLM: Placeholder hash links from real E2E must fail when pages claim buttons/links work.
-# 函数用途: 家具网站真实测试生成 href="#" 后，静态验收要把这类假链接当成失效控件。
 def test_static_site_check_blocks_placeholder_hash_links(tmp_path):
     _write_site(
         tmp_path,
@@ -107,8 +101,6 @@ def test_static_site_check_blocks_placeholder_hash_links(tmp_path):
     ]
 
 
-# LLM: Disabled HTML controls are generic inert UI, independent of the task domain.
-# 函数用途: 固定静态网页产物的通用验收合同；页面打开时默认失效的控件不能通过。
 def test_static_site_check_blocks_disabled_html_controls(tmp_path):
     _write_site(
         tmp_path,
@@ -136,8 +128,6 @@ def test_static_site_check_blocks_disabled_html_controls(tmp_path):
     assert record.validation_result["inert_control_hits"] == ["index.html:button:去结算 disabled"]
 
 
-# LLM: CSS pseudo-classes and runtime JS disabled assignments are not initial disabled controls.
-# 函数用途: 只拦截 HTML 初始 disabled 属性，不误伤样式选择器或运行时状态切换代码。
 def test_static_site_check_ignores_css_and_runtime_disabled_mentions(tmp_path):
     _write_site(
         tmp_path,
@@ -164,8 +154,6 @@ def test_static_site_check_ignores_css_and_runtime_disabled_mentions(tmp_path):
     assert record.validation_result["inert_control_hits"] == []
 
 
-# LLM: Leaf acceptance must not fail because sibling pages in the same deliverables folder are still broken.
-# 函数用途: 单个 worker 只负责 index1.html 时，static_site_check 可以限定检查文件，避免 sibling 串扰。
 def test_static_site_check_can_scope_to_declared_html_files(tmp_path):
     _write_site(
         tmp_path,
@@ -191,8 +179,6 @@ def test_static_site_check_can_scope_to_declared_html_files(tmp_path):
     assert record.validation_result["checked_files"] == ["index1.html"]
 
 
-# LLM: R59 shopping E2E generated loginForm/registerForm but JS bound login-form/register-form.
-# 函数用途: 静态产物检查要能发现表单 id 和本地 app.js 绑定目标不一致，避免按钮假可用。
 def test_static_site_check_blocks_missing_validate_form_targets(tmp_path):
     _write_site(
         tmp_path,
@@ -218,8 +204,6 @@ def test_static_site_check_blocks_missing_validate_form_targets(tmp_path):
     assert record.validation_result["form_binding_hits"] == ["validateForm:login-form"]
 
 
-# LLM: external app.js listeners should count as real button behavior.
-# 函数用途: 本地脚本里绑定按钮事件时，静态验收不能只因为 HTML 没有 onclick 就误报 inert control。
 def test_static_site_check_allows_external_script_button_handlers(tmp_path):
     _write_site(
         tmp_path,
@@ -243,8 +227,6 @@ def test_static_site_check_allows_external_script_button_handlers(tmp_path):
     assert record.validation_result["inert_control_hits"] == []
 
 
-# LLM: optional DOM hooks should not create repair loops when a UI branch is absent by design.
-# 函数用途: `const el = getElementById(...); el && ...` 是安全可选绑定，不能被误判成硬失败。
 def test_static_site_check_allows_optional_missing_dom_binding(tmp_path):
     _write_site(
         tmp_path,
@@ -270,8 +252,6 @@ def test_static_site_check_allows_optional_missing_dom_binding(tmp_path):
     assert record.validation_result["missing_dom_id_hits"] == []
 
 
-# LLM: Strict DOM mode still respects explicit optional hooks; required ids are declared separately.
-# 函数用途: 验证 strict_dom_bindings 不会把 `v&&...` 这种安全可选 hook 误判成硬失败。
 def test_static_site_check_strict_mode_allows_optional_missing_dom_binding(tmp_path):
     _write_site(
         tmp_path,
@@ -298,8 +278,6 @@ def test_static_site_check_strict_mode_allows_optional_missing_dom_binding(tmp_p
     assert record.validation_result["missing_dom_id_hits"] == []
 
 
-# LLM: Grouped null checks such as `if (a && b)` should also count as guarded optional hooks.
-# 函数用途: 避免真实生成站点里可选移动菜单 hook 被 strict DOM 检查误判。
 def test_static_site_check_allows_group_guarded_missing_dom_binding(tmp_path):
     _write_site(
         tmp_path,
@@ -329,8 +307,6 @@ def test_static_site_check_allows_group_guarded_missing_dom_binding(tmp_path):
     assert record.validation_result["missing_dom_id_hits"] == []
 
 
-# LLM: DOM id binding mismatches catch generated buttons that look clickable but break at runtime.
-# 函数用途: app.js 读取不存在的按钮 id 时，静态产物检查要失败并给出具体缺失 id。
 def test_static_site_check_blocks_missing_dom_id_targets(tmp_path):
     _write_site(
         tmp_path,
@@ -361,8 +337,6 @@ def test_static_site_check_blocks_missing_dom_id_targets(tmp_path):
     ]
 
 
-# LLM: DOM binding checks should be on by default for generated apps, not a hidden expert option.
-# 函数用途: 固定示例站真实测试暴露的问题；HTML/JS 的 id 不一致时默认验收失败。
 def test_static_site_check_blocks_missing_dom_id_targets_by_default(tmp_path):
     _write_site(
         tmp_path,
@@ -387,8 +361,6 @@ def test_static_site_check_blocks_missing_dom_id_targets_by_default(tmp_path):
     assert record.validation_result["missing_dom_id_hits"] == ["getElementById:productGrid"]
 
 
-# LLM: Explicit required DOM ids let closeout preserve business flow contracts.
-# 函数用途: 当任务声明必须存在某些页面区域时，static_site_check 要检查这些 id，而不是只看 HTML 结构。
 def test_static_site_check_blocks_missing_required_dom_ids(tmp_path):
     _write_site(
         tmp_path,
@@ -416,8 +388,6 @@ def test_static_site_check_blocks_missing_required_dom_ids(tmp_path):
     ]
 
 
-# LLM: inferred full-page checks must catch malformed HTML that browsers would render incorrectly.
-# 函数用途: 完整 HTML 产物正文落进 style/head 时，最终收口应提示先修骨架，而不是只追 DOM id。
 def test_static_site_check_blocks_malformed_complete_html(tmp_path):
     _write_site(
         tmp_path,
@@ -450,8 +420,6 @@ def test_static_site_check_blocks_malformed_complete_html(tmp_path):
     )
 
 
-# LLM: repeated full-document fragments after </html> are malformed generated pages.
-# 函数用途: 验证模型把多段页面片段追加到完整 HTML 后，完整页面验收会给出结构化骨架失败。
 def test_static_site_check_blocks_trailing_markup_after_html_close(tmp_path):
     _write_site(
         tmp_path,
@@ -479,8 +447,6 @@ def test_static_site_check_blocks_trailing_markup_after_html_close(tmp_path):
     assert "index.html:trailing_markup_after_html_close" in record.validation_result["html_structure_hits"]
 
 
-# LLM: test_static_site_check_allows_javascript_template_literals preserves real shop pages.
-# 函数用途: JS 运行时模板字符串可以包含 `${...}`，但不应被当成未替换的 HTML 占位符。
 def test_static_site_check_allows_javascript_template_literals(tmp_path):
     _write_site(
         tmp_path,
@@ -513,8 +479,6 @@ def test_static_site_check_allows_javascript_template_literals(tmp_path):
     assert record.validation_result["placeholder_hits"] == []
 
 
-# LLM: JS-rendered static apps should not fail just because ids live in local templates.
-# 函数用途: 验证 index.html + app.js 这类静态应用可把 id 写在 JS 模板字符串里，DOM 绑定验收仍能通过。
 def test_static_site_check_allows_dom_ids_declared_in_javascript_templates(tmp_path):
     _write_site(
         tmp_path,
@@ -544,8 +508,6 @@ def test_static_site_check_allows_dom_ids_declared_in_javascript_templates(tmp_p
     assert record.validation_result["missing_dom_id_hits"] == []
 
 
-# LLM: The validator must never scan outside the configured workspace.
-# 函数用途: 验证 site_root 越界时返回未执行失败记录，而不是读取外部目录。
 def test_static_site_check_rejects_outside_site_root(tmp_path):
     executor = TestExecutor(tmp_path)
 
@@ -562,10 +524,8 @@ def test_static_site_check_rejects_outside_site_root(tmp_path):
     assert record.error == "site_root 超出 workspace 边界"
 
 
-# LLM: The validator should compare resolved workspace paths so /tmp symlink aliases stay inside.
-# 函数用途: 验证工作区路径经过符号链接别名传入时，站点目录不会被误判为越界。
 def test_static_site_check_allows_workspace_symlink_alias(tmp_path):
-    from agent_py_agent.agent.subagents.static_site_validator import run_static_site_check
+    from agent_py_agent.agent.subagents.static_site import run_static_site_check
 
     real_workspace = tmp_path / "real"
     real_workspace.mkdir()

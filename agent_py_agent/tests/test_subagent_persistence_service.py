@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from agent_py_agent.agent.local_store import LocalStore
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import EvidencePacket, Finding
 
@@ -56,6 +57,66 @@ def test_subagent_persistence_service_round_trips_task(tmp_path) -> None:
     assert loaded.checkpoint_ref == loaded.checkpoint_json
     assert loaded.skill_sparks_file.endswith("SKILL_SPARKS.md")
     _assert_runtime_workspace_paths(loaded, tmp_path / "tasks" / task.root_id, task.id)
+
+
+def test_subagent_save_keeps_canonical_state_when_projection_fails(tmp_path) -> None:
+    """派生投影坏了也不能让 canonical_state.json 保存失败。"""
+
+    class BrokenLocalStore(LocalStore):
+        def upsert_agent_run(self, _record) -> None:  # noqa: ANN001
+            msg = "projection db offline"
+            raise RuntimeError(msg)
+
+    manager = SubAgentManager(tmp_path, local_store=BrokenLocalStore(tmp_path / "local.db"))
+    task = manager.create_run(
+        goal="投影失败仍保存权威状态",
+        thought="canonical state 不能被 local_store 拖垮。",
+        plan=["创建", "保存", "读取"],
+    )
+    task.status = "RUNNING"
+
+    manager.save(task)
+
+    canonical_state = Path(task.agent_run_workspace_dir) / "canonical_state.json"
+    assert canonical_state.exists()
+    loaded = manager.load(task.id)
+    assert loaded.status == "RUNNING"
+
+    warnings_path = tmp_path / task.id / "projection_warnings.json"
+    warnings = json.loads(warnings_path.read_text(encoding="utf-8"))
+    assert warnings["warnings"][0]["step"] == "local_store_projection"
+    assert warnings["warnings"][0]["error_type"] == "RuntimeError"
+    ledger_path = tmp_path / task.id / "projection_ledger.jsonl"
+    ledger = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    assert any(item["step"] == "local_store_projection" and item["status"] == "failed" for item in ledger)
+
+
+def test_subagent_projection_rebuild_replays_from_canonical_state(tmp_path) -> None:
+    from agent_py_agent.agent.subagents.services.persistence.projections import (
+        rebuild_derived_projections,
+    )
+
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="从 canonical state 重建派生投影",
+        thought="派生文件可以删除后重建。",
+        plan=["保存", "删除派生文件", "重建"],
+    )
+    task.status = "RUNNING"
+    manager.save(task)
+
+    thought_path = tmp_path / task.id / "thought.md"
+    thought_path.unlink()
+
+    records = rebuild_derived_projections(manager, task.id)
+
+    assert thought_path.exists()
+    assert any(record.step == "thought_markdown" and record.status == "ok" for record in records)
+    ledger = [
+        json.loads(line)
+        for line in (tmp_path / task.id / "projection_ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(item["step"] == "thought_markdown" and item["status"] == "ok" for item in ledger)
 
 
 def test_subagent_task_has_session_and_thread_identity(tmp_path) -> None:
@@ -368,8 +429,27 @@ def test_subagent_persistence_writes_compact_checkpoint_chain(tmp_path) -> None:
     assert output_path.exists()
 
 
-# LLM: checkpoint compact writes should be material-change driven, not every save call.
-# 函数用途: 相同任务状态重复保存时不追加新的 checkpoint compact 事件，避免长 runner 目录被噪音撑大。
+def test_subagent_persistence_checkpoint_reports_dirty_output_json(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+
+    task = manager.create_run(
+        goal="保存坏 output 仍暴露恢复错误",
+        thought="坏 output.json 不能让 checkpoint 误以为没有输出事实。",
+        plan=["写坏 output", "保存 checkpoint"],
+    )
+    output_path = Path(task.output_json)
+    output_path.write_text("{bad-output-json", encoding="utf-8")
+    task.status = "RUNNING"
+    manager.save(task)
+
+    loaded = manager.load(task.id)
+    checkpoint = json.loads(Path(loaded.agent_run_checkpoint_json).read_text(encoding="utf-8"))
+
+    error = checkpoint["load_errors"][0]
+    assert error["context"] == "subagent.persistence.output_json"
+    assert error["path"] == str(output_path)
+
+
 def test_subagent_persistence_deduplicates_unchanged_compact_checkpoint_chain(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
 

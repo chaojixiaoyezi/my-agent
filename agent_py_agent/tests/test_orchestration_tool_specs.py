@@ -5,11 +5,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
+from agent_py_agent.agent.subagents.role_templates import load_role_template_store
 
-# LLM: TestOrchestrationToolsSpec keeps model-facing tool schemas stable.
-# 类用途: 验证 create/board/dispatch/schedule 这些 orchestration 工具暴露给模型的参数和说明。
+
 class TestOrchestrationToolsSpec:
     """测试工具规格定义。"""
 
@@ -29,8 +30,11 @@ class TestOrchestrationToolsSpec:
         assert "role" in spec.parameters
         assert "bug_finder" in spec.parameter_details["role"]
         assert "writer" in spec.parameter_details["role"]
-        assert "最小必要信息" in spec.parameter_details["items"]
-        assert "不要由 root 先读完所有正文再派工" in spec.parameter_details["items"]
+        assert "资料线索" in spec.parameter_details["items"]
+        assert "root" not in spec.parameter_details["items"]
+        assert "context_manifest" not in spec.parameters
+        assert "context_packs" not in spec.parameters
+        assert "output_refs" not in spec.parameters
 
     def test_dispatch_subagents_spec_defined(self):
         """DispatchSubagentsTool 工具规格已定义。"""
@@ -46,8 +50,8 @@ class TestOrchestrationToolsSpec:
         assert spec.name == "dispatch_subagents"
         assert spec.category == "orchestration"
 
-    def test_dispatch_subagents_spec_documents_leadership_recovery_params(self):
-        """dispatch_subagents 暴露 leader 接管参数，避免恢复能力只存在于代码里。"""
+    def test_dispatch_subagents_spec_hides_internal_recovery_params(self):
+        """dispatch_subagents 的模型规格不暴露内部恢复接管字段。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_agent = MagicMock()
@@ -57,10 +61,11 @@ class TestOrchestrationToolsSpec:
         tool = DispatchSubagentsTool(mock_agent)
         spec = tool.spec
 
-        assert "take_over_by" in spec.parameters
-        assert "locked_files" in spec.parameters
-        assert "leader" in spec.parameter_details["take_over_by"]
-        assert any("take_over_by" in example for example in spec.examples)
+        assert "take_over_by" not in spec.parameters
+        assert "locked_files" not in spec.parameters
+        assert "workflow_mode" not in spec.parameters
+        assert not any("take_over_by" in example for example in spec.examples)
+        assert not any("workflow_mode" in example for example in spec.examples)
 
     def test_schedule_child_subagents_spec_defined(self):
         """ScheduleChildSubagentsTool 工具规格已定义。"""
@@ -72,6 +77,30 @@ class TestOrchestrationToolsSpec:
 
         assert spec.name == "schedule_child_subagents"
         assert spec.category == "orchestration"
-        assert "当前 subagent runner" in spec.description
+        assert "当前子代理" in spec.description
         assert "tester" in spec.parameter_details["children"]
-        assert "找茬子代理" in spec.parameter_details["children"]
+        assert "runner" not in spec.description
+
+    def test_orchestration_specs_do_not_expose_role_template_paths(self):
+        from agent_py_agent.agent.agent_core.orchestration_tools import (
+            CreateSubagentsTool,
+            ScheduleChildSubagentsTool,
+        )
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        store = load_role_template_store()
+
+        for tool_cls in (CreateSubagentsTool, ScheduleChildSubagentsTool):
+            spec = tool_cls(mock_agent).spec
+            blob = str(spec.parameters) + str(spec.parameter_details) + str(spec.examples)
+            assert "模板位置" not in blob
+            for template in store.all():
+                assert template.source_path not in blob
+
+    def test_orchestration_model_spec_stays_compact(self):
+        from agent_py_agent.agent.agent_core.orchestration import tool_spec_data
+
+        source_lines = Path(tool_spec_data.__file__).read_text().splitlines()
+        assert len(source_lines) <= 120

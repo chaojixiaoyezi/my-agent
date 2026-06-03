@@ -1,18 +1,16 @@
-# LLM: LLM activation timeout budget builds model-call timing evidence from structured probes.
-# 模块用途: 用模型调用账本的 5K/10K probe 样本生成首 token 动态超时预算。
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..agent_core.model_call_monitor import (
+from ..agent_core.model.call_monitor import (
     FirstTokenTimeoutContext,
     FirstTokenTimeoutOptions,
     FirstTokenTimeoutParams,
     estimate_first_token_timeout,
 )
+from ..common.json_io import write_json_file
 from .model_call_ledger import (
     ModelCallFinishParams,
     ModelCallFirstTokenParams,
@@ -22,8 +20,6 @@ from .model_call_ledger import (
 )
 
 
-# LLM: ProbeSample bundles model probe timing fields to keep helpers narrow.
-# 类用途: 描述一个 probe 调用 id、输入 token 数和首 token 延迟。
 @dataclass(frozen=True)
 class ProbeSample:
     call_id: str
@@ -31,25 +27,17 @@ class ProbeSample:
     first_token_latency_seconds: float
 
 
-# LLM: _FakeClock provides deterministic ledger timings for readiness evidence.
-# 类用途: 生成可预测的模型调用 started/first_token/finished 时间，不睡眠、不调用真实模型。
 @dataclass
 class _FakeClock:
     now_seconds: float = 0.0
 
-    # LLM: now mirrors monotonic clock access for ModelCallLedger.
-    # 函数用途: 返回测试时钟当前秒数。
     def now(self) -> float:
         return self.now_seconds
 
-    # LLM: advance moves the fake clock forward by explicit seconds.
-    # 函数用途: 推进账本时间，让 probe latency 可复现。
     def advance(self, seconds: float) -> None:
         self.now_seconds += float(seconds)
 
 
-# LLM: build_model_timeout_budget produces first-token timeout evidence from probe ledger facts.
-# 函数用途: 用 5K/10K 结构化 probe 样本估算较大输入的首 token 超时预算，并写账本文件。
 def build_model_timeout_budget(workspace: Path) -> dict[str, object]:
     root = Path(workspace).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -76,13 +64,11 @@ def build_model_timeout_budget(workspace: Path) -> dict[str, object]:
         "probe_tokens": [5000, 10000],
         "target_input_tokens": 15000,
     }
-    _write_json(root / ledger_ref, [record.to_dict() for record in ledger.records()])
-    _write_json(root / "timeout_budget.json", payload)
+    write_json_file(root / ledger_ref, [record.to_dict() for record in ledger.records()])
+    write_json_file(root / "timeout_budget.json", payload)
     return payload
 
 
-# LLM: timeout_budget_issues checks model timeout evidence shape.
-# 函数用途: 校验 timeout 估算来源、数值和 cache_suspected 标记。
 def timeout_budget_issues(budget: dict[str, object]) -> list[str]:
     estimate = budget.get("estimate") if isinstance(budget.get("estimate"), dict) else {}
     issues: list[str] = []
@@ -97,8 +83,6 @@ def timeout_budget_issues(budget: dict[str, object]) -> list[str]:
     return issues
 
 
-# LLM: _record_probe appends one finished probe sample to the model call ledger.
-# 函数用途: 用公共账本 API 写入 started、first_token 和 finished 事件。
 def _record_probe(
     ledger: ModelCallLedger,
     clock: _FakeClock,
@@ -119,13 +103,6 @@ def _record_probe(
     clock.advance(sample.first_token_latency_seconds)
     ledger.first_token(ModelCallFirstTokenParams(call_id=sample.call_id))
     ledger.finished(ModelCallFinishParams(call_id=sample.call_id, output_tokens=1))
-
-
-# LLM: _write_json persists timeout evidence in deterministic JSON form.
-# 函数用途: 写入 JSON 文件，供后续 replay、审计或 CI gate 读取。
-def _write_json(path: Path, payload: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
 __all__ = ["ProbeSample", "build_model_timeout_budget", "timeout_budget_issues"]

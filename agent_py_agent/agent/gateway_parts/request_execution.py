@@ -1,5 +1,3 @@
-# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
-# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
 
 from __future__ import annotations
 
@@ -18,10 +16,12 @@ from .audit_service import (
     audit_request_processing,
 )
 from .chunk_service import close_chunk_stream, open_chunk_stream, write_chunk
-from .io import gateway_response_path, read_json_file
+from .io import gateway_response_path, read_json_file, read_json_file_report
 from .lease_service import refresh_processing_lease, start_lease_heartbeat
 from .paths import gateway_chunk_path, gateway_paths
 from .recovery import _gateway_request_attempts
+from .request_errors import gateway_request_load_error_response
+from .response_renderer import read_gateway_response_file
 
 if TYPE_CHECKING:
     from ...core import SimpleAgent
@@ -29,8 +29,6 @@ if TYPE_CHECKING:
 _EMPTY_PROMPT_MESSAGE = "gateway ask prompt/goal cannot be empty"
 
 
-# LLM: _GatewayResponseBaseContext 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 类用途: 集中保存网关响应基础上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class _GatewayResponseBaseContext:
 
@@ -41,8 +39,6 @@ class _GatewayResponseBaseContext:
     started_at: float
 
 
-# LLM: _GatewayAskRunContext 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 类用途: 集中保存网关askrun上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class _GatewayAskRunContext:
 
@@ -54,8 +50,6 @@ class _GatewayAskRunContext:
     on_chunk: object
 
 
-# LLM: _GatewayLeaseStartContext 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 类用途: 集中保存网关租约start上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class _GatewayLeaseStartContext:
 
@@ -67,8 +61,6 @@ class _GatewayLeaseStartContext:
     worker_id: str
 
 
-# LLM: _build_gateway_response_base 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 构建网关响应基础所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _build_gateway_response_base(context: _GatewayResponseBaseContext) -> dict:
     request = context.request
     return {
@@ -95,8 +87,6 @@ def _build_gateway_response_base(context: _GatewayResponseBaseContext) -> dict:
     }
 
 
-# LLM: _update_response_from_result 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 更新来自响应结果对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新请求队列、租约文件、进程状态和响应渲染，需避免破坏既有状态机约定。
 def _update_response_from_result(response: dict, result, request: dict) -> None:
     response.update(
         {
@@ -118,8 +108,6 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
     )
 
 
-# LLM: _start_gateway_request_lease 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进网关请求租约的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _start_gateway_request_lease(
     context: _GatewayLeaseStartContext,
 ) -> tuple[threading.Event | None, threading.Thread | None]:
@@ -131,8 +119,6 @@ def _start_gateway_request_lease(
     return start_lease_heartbeat(context.agent, context.request_path, request_id=context.request_id, worker_id=lease_worker)
 
 
-# LLM: _run_gateway_ask 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进网关ask的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _run_gateway_ask(context: _GatewayAskRunContext):
     request = context.request
     prompt = str(request.get("prompt") or request.get("goal") or "").strip()
@@ -156,8 +142,6 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
     )
 
 
-# LLM: _stop_gateway_request_lease 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进网关请求租约的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _stop_gateway_request_lease(
     lease_stop: threading.Event | None,
     lease_thread: threading.Thread | None,
@@ -168,10 +152,12 @@ def _stop_gateway_request_lease(
         lease_thread.join(timeout=2)
 
 
-# LLM: _copy_final_lease_fields 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理copyfinal租约字段相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _copy_final_lease_fields(response: dict, request_path: Path) -> None:
-    final_request = read_json_file(request_path)
+    report = read_json_file_report(request_path, context="gateway.request_execution.final_request.read")
+    if report.load_error is not None:
+        response["final_request_load_error"] = report.load_error
+        return
+    final_request = report.payload
     if not final_request:
         return
     response["lease_owner"] = final_request.get("lease_owner", response.get("lease_owner", ""))
@@ -182,8 +168,6 @@ def _copy_final_lease_fields(response: dict, request_path: Path) -> None:
     )
 
 
-# LLM: _execute_gateway_request_body 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进网关请求body的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _execute_gateway_request_body(context: dict, on_chunk) -> None:
     response = context["response"]
     kind = str(response.get("kind") or "").strip()
@@ -208,14 +192,36 @@ def _execute_gateway_request_body(context: dict, on_chunk) -> None:
     _update_response_from_result(response, result, context["request"])
 
 
-# LLM: _prepare_gateway_request_context 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理prepare网关请求上下文相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _prepare_gateway_request_context(agent: SimpleAgent, request_path: Path) -> dict:
-    request = read_json_file(request_path)
+    request_report = read_json_file_report(request_path, context="gateway.request_execution.request.read")
+    if request_report.load_error is not None:
+        started_at = time.time()
+        response = gateway_request_load_error_response(
+            request_path,
+            request_report.load_error,
+            started_at=started_at,
+        )
+        context = {
+            "request": {},
+            "request_id": str(request_path.stem),
+            "kind": "unknown",
+            "started_at": started_at,
+            "request_path": request_path,
+            "response_path": gateway_response_path(gateway_paths(agent), request_path.stem),
+            "response": response,
+            "skip_execution": True,
+        }
+        audit_request_processing(agent, context)
+        return context
+    request = request_report.payload
     request_id = str(request.get("id") or request_path.stem)
     kind = str(request.get("kind") or "").strip() or ("ask" if request_id else "")
     response_path = gateway_response_path(gateway_paths(agent), request_id)
-    existing_response = read_json_file(response_path)
+    existing_response = read_gateway_response_file(
+        response_path,
+        request_id=request_id,
+        context="gateway.request_execution.response.read",
+    )
     if existing_response:
         return {"existing_response": existing_response}
     started_at = time.time()
@@ -235,8 +241,6 @@ def _prepare_gateway_request_context(agent: SimpleAgent, request_path: Path) -> 
     return context
 
 
-# LLM: _finalize_gateway_response 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理finalize网关响应相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _finalize_gateway_response(context: dict, response: dict) -> None:
     ended_at = time.time()
     _copy_final_lease_fields(response, context["request_path"])
@@ -244,8 +248,6 @@ def _finalize_gateway_response(context: dict, response: dict) -> None:
     response["duration_seconds"] = round(ended_at - context["started_at"], 3)
 
 
-# LLM: _complete_gateway_request_audit 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理complete网关请求audit相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _complete_gateway_request_audit(agent: SimpleAgent, context: dict, request_path: Path, response: dict) -> None:
     audit_request_completed(
         agent,
@@ -258,8 +260,6 @@ def _complete_gateway_request_audit(agent: SimpleAgent, context: dict, request_p
     )
 
 
-# LLM: _handle_gateway_request 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进网关请求的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _handle_gateway_request(
     agent: SimpleAgent,
     request_path: Path,
@@ -271,6 +271,10 @@ def _handle_gateway_request(
     if context.get("existing_response"):
         return context["existing_response"]
     response = context["response"]
+    if context.get("skip_execution"):
+        _finalize_gateway_response(context, response)
+        _complete_gateway_request_audit(agent, context, request_path, response)
+        return response
     lease_stop, lease_thread = _start_gateway_request_lease(
         _GatewayLeaseStartContext(
             agent,

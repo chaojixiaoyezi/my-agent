@@ -1,5 +1,3 @@
-# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
-# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
 
 from __future__ import annotations
 
@@ -13,8 +11,6 @@ import dataclasses
 import threading
 
 
-# LLM: TuiHandleCommandParams 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclasses.dataclass(frozen=True)
 class TuiHandleCommandParams:
     user: str
@@ -34,8 +30,6 @@ class TuiHandleCommandParams:
     assistant_outputs: list[str]
 
 
-# LLM: WorkerConfigParams 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclasses.dataclass(frozen=True)
 class WorkerConfigParams:
     jobs: object
@@ -60,8 +54,6 @@ class WorkerConfigParams:
     stop_event: threading.Event
 
 
-# LLM: StartWorkerParams 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclasses.dataclass(frozen=True)
 class StartWorkerParams:
     app_ref: list
@@ -87,8 +79,6 @@ class StartWorkerParams:
     stop_event: threading.Event
 
 
-# LLM: MakeTuiAppParams 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclasses.dataclass(frozen=True)
 class MakeTuiAppParams:
     agent: object
@@ -111,8 +101,6 @@ class MakeTuiAppParams:
     stop_event: threading.Event
 
 
-# LLM: TuiRunParams 是chat CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclasses.dataclass(frozen=True)
 class TuiRunParams:
     agent: object

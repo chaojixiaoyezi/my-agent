@@ -1,11 +1,9 @@
 import json
 
-from agent_py_agent.agent.agent_core.tool_context_reducer import render_tool_result_for_live_prompt
+from agent_py_agent.agent.agent_core.tool_context.reducer import render_tool_result_for_live_prompt
 from agent_py_agent.agent.tools import ToolExecutionResult
 
 
-# LLM: dispatch externalization tests protect root context from growing by artifact rereads.
-# 函数用途: 验证大型 dispatch_subagents 输出外置后，live prompt 仍保留 refs-first 下一步，而不是诱导模型读正文。
 def test_dispatch_externalized_result_keeps_compact_next_action_without_read_hint():
     output = _dispatch_externalized_output()
     rendered = render_tool_result_for_live_prompt(
@@ -25,8 +23,6 @@ def test_dispatch_externalized_result_keeps_compact_next_action_without_read_hin
     assert len(rendered) < 1400
 
 
-# LLM: _dispatch_externalized_output keeps the reducer regression fixture out of the assertion body.
-# 函数用途: 构造带 direct_children/recovery 策略的大型 dispatch_subagents 输出。
 def _dispatch_externalized_output() -> str:
     return json.dumps(
         {
@@ -37,8 +33,6 @@ def _dispatch_externalized_output() -> str:
     )
 
 
-# LLM: _direct_children_recovery_payload models the compact next-action facts the reducer must preserve.
-# 函数用途: 返回 direct_children 恢复摘要，保护 latest_continue_packet 路径提示不丢失。
 def _direct_children_recovery_payload() -> dict:
     return {
         "parent_run_id": "root-1",
@@ -61,8 +55,6 @@ def _direct_children_recovery_payload() -> dict:
     }
 
 
-# LLM: _dispatch_externalized_archive_record mirrors the tool-output archive metadata shape.
-# 函数用途: 给 live prompt reducer 提供外置 artifact 元数据和 scoped call id。
 def _dispatch_externalized_archive_record(output: str) -> dict:
     return {
         "output_externalized": True,
@@ -75,8 +67,6 @@ def _dispatch_externalized_archive_record(output: str) -> dict:
     }
 
 
-# LLM: read_artifact reducer tests prevent repeated full dispatch artifact rereads.
-# 函数用途: 验证模型显式读了 dispatch artifact 后，下一轮 prompt 也只保留调度摘要和少量正文预览。
 def test_read_artifact_dispatch_content_is_summarized_for_live_prompt():
     dispatch_content = json.dumps(
         {
@@ -123,8 +113,6 @@ def test_read_artifact_dispatch_content_is_summarized_for_live_prompt():
     assert len(rendered) < 1600
 
 
-# LLM: Board externalization must keep deliverable refs visible to the root synthesis turn.
-# 函数用途: inspect_agent_tree 输出过大时，live prompt 仍给出可读产物 refs，避免模型乱猜 task_dir。
 def test_inspect_agent_tree_externalized_result_keeps_deliverable_refs():
     output = json.dumps(
         {
@@ -155,8 +143,6 @@ def test_inspect_agent_tree_externalized_result_keeps_deliverable_refs():
     assert '"goal"' not in rendered
 
 
-# LLM: Board summaries should preserve artifact IDs when registry-backed refs exist.
-# 函数用途: 大输出外置后，最终汇报提示仍能看到 artifact_id，避免只靠路径文字判断产物事实。
 def test_inspect_agent_tree_externalized_result_keeps_deliverable_artifact_ids():
     output = json.dumps(
         {
@@ -190,8 +176,6 @@ def test_inspect_agent_tree_externalized_result_keeps_deliverable_artifact_ids()
     assert "artifact-report-1" in rendered
 
 
-# LLM: Top-level dispatch completion gates must survive output externalization.
-# 函数用途: dispatch 大输出被外置时，root 仍能看到 not_complete 和修复建议，避免先报完成。
 def test_dispatch_externalized_result_keeps_top_level_completion_gate():
     output = json.dumps(
         {
@@ -224,8 +208,6 @@ def test_dispatch_externalized_result_keeps_top_level_completion_gate():
     assert "records" not in rendered
 
 
-# LLM: Current-turn run state must survive orchestration output externalization.
-# 函数用途: create/schedule/dispatch 大输出被外置时，root 下一轮仍能看到状态桶和建议工具调用。
 def test_orchestration_externalized_result_keeps_current_turn_run_state():
     output = json.dumps(
         {
@@ -253,8 +235,6 @@ def test_orchestration_externalized_result_keeps_current_turn_run_state():
     assert "records" not in rendered
 
 
-# LLM: Closeout repair advice must survive dispatch output externalization.
-# 函数用途: dispatch_subagents 输出过大时，live prompt 摘要仍要保留修复子代理建议，而不是丢掉测试失败线索。
 def test_dispatch_externalized_result_keeps_final_closeout_repair_advice():
     output = json.dumps(
         {
@@ -287,8 +267,6 @@ def test_dispatch_externalized_result_keeps_final_closeout_repair_advice():
     assert "records" not in rendered
 
 
-# LLM: Top-level closeout repair advice needs a copyable tool call, not only a clipped blob.
-# 函数用途: 顶层 dispatch 输出外置时，修复建议要保留独立 tool/refs/call 行，方便 root 下一轮直接派修复小傻妞。
 def test_dispatch_externalized_result_keeps_top_level_parent_repair_tool_call():
     output = json.dumps(
         {
@@ -319,8 +297,6 @@ def test_dispatch_externalized_result_keeps_top_level_parent_repair_tool_call():
     assert "records" not in rendered
 
 
-# LLM: Result refs by run must survive clipping that affects flat artifact lists.
-# 函数用途: dispatch 大输出外置后，每个直接子代理的主产物路径仍单独展示，避免 root 只看到第一类报告就猜其它文件名。
 def test_dispatch_externalized_result_keeps_result_refs_by_run():
     output = json.dumps(
         {
@@ -366,8 +342,6 @@ def test_dispatch_externalized_result_keeps_result_refs_by_run():
     assert "records" not in rendered
 
 
-# LLM: Result refs by run should preserve artifact IDs from the registry.
-# 函数用途: dispatch 大输出外置后，每个 child 的 artifact_id 应继续留在摘要里，供最终汇报按 registry 认产物。
 def test_dispatch_externalized_result_keeps_result_ref_artifact_ids():
     output = json.dumps(
         {
@@ -399,8 +373,6 @@ def test_dispatch_externalized_result_keeps_result_ref_artifact_ids():
     assert "artifact-market-1" in rendered
 
 
-# LLM: legacy nested read_artifact archive records must not invite models to chase artifact-of-artifact files.
-# 函数用途: 验证显式 read_artifact 后的 live prompt 只保留原始 artifact 引用，不暴露二次外置 wrapper 路径。
 def test_read_artifact_summary_hides_nested_wrapper_artifact_path():
     output = json.dumps(
         {

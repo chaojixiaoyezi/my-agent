@@ -1,5 +1,3 @@
-# LLM: Compact auto cycle coordinates suggestion/apply/resume but never runs task tools itself.
-# 模块用途: 生成自动 compact/resume 的安全计划；调用方允许持久化时执行非破坏性 apply，并把是否可续接交给 action guard。
 
 from __future__ import annotations
 
@@ -22,8 +20,6 @@ from .schema import (
 COMPACT_AUTO_CYCLE_SCHEMA = RuntimeMemorySchemaOptions("compact_auto_cycle")
 
 
-# LLM: MemoryCompactAutoCycleOptions keeps persistence boundaries explicit.
-# 类用途: 描述自动 compact/resume 协调器输入；allow_apply 由运行层的 save 边界决定，不再暴露为用户开关。
 @dataclass(frozen=True)
 class MemoryCompactAutoCycleOptions:
     current_tokens: int
@@ -33,14 +29,12 @@ class MemoryCompactAutoCycleOptions:
     allow_apply: bool = False
     owner_type: str = "main_agent"
     owner_id: str = ""
-    # 参数说明: 只用 trigger 标记为什么进入 compact；不为兜底触发另建第二套 apply/resume 流程。
+    #  只用 trigger 标记为什么进入 compact；不为兜底触发另建第二套 apply/resume 流程。
     trigger_reason: str = "normal_threshold"
     trigger_source: str = "token_budget"
     force_trigger: bool = False
 
 
-# LLM: _AutoCyclePayloadOptions keeps internal payload assembly extensible without widening helper signatures.
-# 类用途: 打包 auto cycle 输出所需的上下文、状态和可选 apply/resume 结果，只在本模块内部使用。
 @dataclass(frozen=True)
 class _AutoCyclePayloadOptions:
     workspace: Path
@@ -51,8 +45,6 @@ class _AutoCyclePayloadOptions:
     resume: dict[str, Any] | None = None
 
 
-# LLM: run_memory_compact_auto_cycle is the safe automation coordinator and never runs task tools.
-# 函数用途: 串起提示、非破坏性 apply、auto resume 和 action guard；不会执行工具或改代码。
 def run_memory_compact_auto_cycle(root: str | Path, options: MemoryCompactAutoCycleOptions) -> dict[str, Any]:
     workspace = Path(root)
     suggestion = _suggestion(workspace, options)
@@ -76,8 +68,6 @@ def run_memory_compact_auto_cycle(root: str | Path, options: MemoryCompactAutoCy
     )
 
 
-# LLM: _suggestion keeps compact auto cycle aligned with the normal semi-auto prompt thresholds.
-# 函数用途: 复用 compact_suggest 的 token 阈值、scope 和 owner 字段。
 def _suggestion(workspace: Path, options: MemoryCompactAutoCycleOptions) -> dict[str, Any]:
     return build_memory_compact_suggestion(
         workspace,
@@ -95,8 +85,6 @@ def _suggestion(workspace: Path, options: MemoryCompactAutoCycleOptions) -> dict
     )
 
 
-# LLM: _cycle_payload returns one stable audit shape for skipped, planned, applied, and blocked cycles.
-# 函数用途: 组装自动 compact/resume 协调结果，明确是否写入 apply 产物和是否允许继续。
 def _cycle_payload(request: _AutoCyclePayloadOptions) -> dict[str, Any]:
     resume = request.resume
     return {
@@ -122,8 +110,6 @@ def _cycle_payload(request: _AutoCyclePayloadOptions) -> dict[str, Any]:
     }
 
 
-# LLM: _continue_packet exposes the resume continuation contract without expanding auto-cycle callers.
-# 函数用途: 从 resume_result 中取出继续工作包；没有 apply/resume 时返回空对象。
 def _continue_packet(resume: dict[str, Any] | None) -> dict[str, Any]:
     if not resume:
         return {}
@@ -131,14 +117,10 @@ def _continue_packet(resume: dict[str, Any] | None) -> dict[str, Any]:
     return packet if isinstance(packet, dict) else {}
 
 
-# LLM: _apply_id gives run finalization a small stable ref without copying the whole apply result.
-# 函数用途: 从可选 apply_result 中取 apply_id，未执行 apply 时返回空字符串。
 def _apply_id(apply_result: dict[str, Any] | None) -> str:
     return str(apply_result.get("apply_id", "") or "") if apply_result else ""
 
 
-# LLM: _next_action gives automation callers one machine-readable stop/continue recommendation.
-# 函数用途: 根据 auto cycle 状态返回下一步建议，不靠自然语言解析。
 def _next_action(status: str) -> str:
     if status == "skipped_below_threshold":
         return "continue_without_compact"

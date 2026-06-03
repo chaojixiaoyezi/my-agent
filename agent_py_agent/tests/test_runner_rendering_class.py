@@ -83,8 +83,6 @@ class TestExecutionContextRendering:
         assert "- product_write_policy: delegate" in result
         assert "- allowed_write_roots: /tmp/task, /tmp/deliverables" in result
 
-    # LLM: Declared output refs should be visible before a runner writes only output.json.
-    # 函数用途: 父级声明 output_files 时，执行上下文必须明确告诉 runner 这些是用户产物路径。
     def test_render_execution_context_highlights_declared_output_refs(self):
         context = SubAgentExecutionContext(
             run_id="run-output-target",

@@ -1,5 +1,3 @@
-# LLM: Compact typed protocol envelope for resume continuation packets.
-# 模块用途: 定义 compact/resume 继续工作包的机器可读 envelope。
 
 from __future__ import annotations
 
@@ -16,12 +14,10 @@ from .action_protocol_core import (
     _dict_list,
     _dict_or_empty,
     _now_iso,
-    _string_list,
 )
+from .common.value_parsing import string_list
 
 
-# LLM: CompactContinuePacketEnvelope is the typed recovery handle after compact/resume.
-# 类用途: 保存 compact 后继续工作的关键状态、guard 决策和推荐读取引用，避免从自然语言恢复说明里猜任务状态。
 @dataclass(frozen=True)
 class CompactContinuePacketEnvelope:
     packet_id: str
@@ -41,22 +37,16 @@ class CompactContinuePacketEnvelope:
     created_at: str = field(default_factory=_now_iso)
     reserved: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: __post_init__ makes compact continuation packets safe to replay or dedupe.
-    # 函数用途: 自动生成 compact 恢复包 operation_id，旧包缺字段时也能按 packet_id 识别。
     def __post_init__(self) -> None:
         if not self.operation_id:
             object.__setattr__(self, "operation_id", _default_operation_id(self.kind, self.packet_id))
 
-    # LLM: to_dict serializes compact recovery packets for resume payloads.
-    # 函数用途: 把 CompactContinuePacketEnvelope 转成 JSON 字典。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["scope"] = self.scope.to_dict()
         payload["path_refs"] = [item.to_dict() for item in self.path_refs]
         return payload
 
-    # LLM: from_dict restores compact recovery packets without parsing prose blocks.
-    # 函数用途: 从 JSON 字典恢复 CompactContinuePacketEnvelope。
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> CompactContinuePacketEnvelope:
         return cls(
@@ -69,7 +59,7 @@ class CompactContinuePacketEnvelope:
             work_state=_dict_or_empty(payload.get("work_state")),
             guard=_dict_or_empty(payload.get("guard")),
             path_refs=[PathRef.from_dict(item) for item in _dict_list(payload.get("path_refs"))],
-            next_actions=_string_list(payload.get("next_actions")),
+            next_actions=string_list(payload.get("next_actions")),
             scope=RunScope.from_dict(payload.get("scope")),
             operation_id=str(payload.get("operation_id") or ""),
             schema_version=int(payload.get("schema_version") or ACTION_PROTOCOL_SCHEMA_VERSION),

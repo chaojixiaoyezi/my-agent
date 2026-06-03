@@ -1,5 +1,3 @@
-# LLM: Model backend module; keep streaming, gateway, and backend protocol shapes stable.
-# 模块用途: 封装模型后端协议、流式解析和 gateway 辅助调用。
 
 from __future__ import annotations
 
@@ -16,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from .errors import ProviderResponseError
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
 from .usage_metadata import (
     collect_anthropic_stream,
@@ -25,8 +24,6 @@ from .usage_metadata import (
 )
 
 
-# LLM: ModelResponse is the stable return envelope from all backend adapters.
-# 类用途: 保存模型文本、后端名、运行状态和 usage 元数据，供运行循环统一消费。
 @dataclass
 class ModelResponse:
     """Normalized model response returned to the agent runtime."""
@@ -38,8 +35,6 @@ class ModelResponse:
     runtime_source: str = ""
     usage: dict[str, Any] = field(default_factory=dict)
 
-# LLM: BackendOptions is the one config bundle passed into HTTP backends.
-# 类用途: 保存 provider 连接、模型名、超时、生成参数和流式开关。
 @dataclass(frozen=True)
 class BackendOptions:
     """Connection and generation options shared by HTTP model backends."""
@@ -53,15 +48,11 @@ class BackendOptions:
     stream_enabled: bool = True
 
 
-# LLM: BaseBackend is the adapter protocol implemented by every model backend.
-# 类用途: 规定 generate() 返回 ModelResponse，避免核心运行循环知道各厂商协议。
 class BaseBackend:
     """所有后端适配器都要实现的基类接口。"""
 
     name = "base"
 
-    # LLM: BaseBackend.generate is the single generation method used by the runtime.
-    # 函数用途: 子类实现一次模型请求；返回统一响应对象，错误走 provider typed exceptions。
     def generate(
         self, prompt: str, on_chunk: Callable[[str], None] | None = None
     ) -> ModelResponse:
@@ -69,15 +60,11 @@ class BaseBackend:
         raise NotImplementedError
 
 
-# LLM: EchoBackend provides deterministic local responses for tests and offline smoke runs.
-# 类用途: 不访问网络，按 prompt 生成固定结构文本，方便验证运行循环。
 class EchoBackend(BaseBackend):
     """Local deterministic backend used by tests and dry development."""
 
     name = "echo"
 
-    # LLM: EchoBackend.generate creates a local response without provider side effects.
-    # 函数用途: 从 prompt 提取用户任务摘要，并返回可预测的 ModelResponse。
     def generate(
         self, prompt: str, on_chunk: Callable[[str], None] | None = None
     ) -> ModelResponse:
@@ -102,13 +89,9 @@ class EchoBackend(BaseBackend):
         return ModelResponse(text=text, backend=self.name)
 
 
-# LLM: HttpBackend owns the common HTTP provider configuration and gateway helper calls.
-# 类用途: 将 api_base/api_key/timeout 等配置统一传给 post_json/post_stream。
 class HttpBackend(BaseBackend):
     """真实模型后端共用的 HTTP 请求基础逻辑。"""
 
-    # LLM: HttpBackend.__init__ normalizes config values once at backend construction.
-    # 函数用途: 把外部配置转成稳定类型，后续请求不再重复清洗这些字段。
     def __init__(
         self,
         options: BackendOptions,
@@ -121,8 +104,6 @@ class HttpBackend(BaseBackend):
         self.temperature = float(options.temperature)
         self.stream_enabled = bool(options.stream_enabled)
 
-    # LLM: request_json is the synchronous provider JSON boundary.
-    # 函数用途: 发送非流式请求，并让 gateway_helpers 统一处理 provider/network 错误。
     def request_json(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
     ) -> dict[str, Any]:
@@ -133,24 +114,18 @@ class HttpBackend(BaseBackend):
 
         return post_json(self._gateway_request(path, payload, headers))
 
-    # LLM: request_stream is the collected streaming provider boundary.
-    # 函数用途: 发送流式请求并收集 data 行，供不需要实时输出的调用方使用。
     def request_stream(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
     ) -> list[str]:
         """Send a streaming request and collect all data lines."""
         return post_stream(self._gateway_request(path, payload, headers))
 
-    # LLM: request_stream_iter is the live streaming provider boundary.
-    # 函数用途: 逐段产出 data 行，让 CLI 或日志能实时显示模型输出。
     def request_stream_iter(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
     ):
         """Send a streaming request and yield data lines as they arrive."""
         yield from post_stream_iter(self._gateway_request(path, payload, headers))
 
-    # LLM: _gateway_request builds the transport-neutral HTTP request envelope.
-    # 函数用途: 将当前 backend 配置和一次请求 payload 合并成 GatewayRequest。
     def _gateway_request(self, path: str, payload: dict[str, Any], headers: dict[str, str]) -> GatewayRequest:
         """Build the immutable gateway request envelope used by all HTTP calls."""
         return GatewayRequest(
@@ -163,15 +138,11 @@ class HttpBackend(BaseBackend):
         )
 
 
-# LLM: OpenAICompatibleBackend adapts chat/completions providers to ModelResponse.
-# 类用途: 负责 OpenAI-compatible 请求体、响应解析和流式 usage 收集。
 class OpenAICompatibleBackend(HttpBackend):
     """适配 OpenAI-compatible `/chat/completions` 接口。"""
 
     name = "openai_compatible"
 
-    # LLM: OpenAICompatibleBackend.generate sends one chat/completions request.
-    # 函数用途: 构造 messages payload，按配置选择流式或非流式解析。
     def generate(
         self, prompt: str, on_chunk: Callable[[str], None] | None = None
     ) -> ModelResponse:
@@ -192,11 +163,9 @@ class OpenAICompatibleBackend(HttpBackend):
         try:
             text = obj["choices"][0]["message"]["content"]
         except Exception as exc:
-            raise RuntimeError(f"无法解析 OpenAI-compatible 响应: {obj}") from exc
+            raise ProviderResponseError(f"无法解析 OpenAI-compatible 响应: {_response_preview(obj)}") from exc
         return ModelResponse(text=text, backend=self.name, usage=usage_dict(obj.get("usage")))
 
-    # LLM: _generate_stream parses OpenAI-compatible SSE into text and usage.
-    # 函数用途: 选择实时迭代或收集模式，并把 delta.content 合并成 ModelResponse。
     def _generate_stream(
         self,
         payload: dict[str, Any],
@@ -212,15 +181,11 @@ class OpenAICompatibleBackend(HttpBackend):
         return ModelResponse(text=text, backend=self.name, usage=usage)
 
 
-# LLM: AnthropicCompatibleBackend adapts messages-style providers to ModelResponse.
-# 类用途: 负责 Anthropic-compatible 请求体、版本头、响应解析和空流兜底。
 class AnthropicCompatibleBackend(HttpBackend):
     """适配 Anthropic 风格的 `/v1/messages` 接口。"""
 
     name = "anthropic_compatible"
 
-    # LLM: AnthropicCompatibleBackend.__init__ records the required anthropic-version header.
-    # 函数用途: 保存通用 HTTP 配置和 Anthropic-compatible 版本标识。
     def __init__(
         self,
         options: BackendOptions,
@@ -229,8 +194,6 @@ class AnthropicCompatibleBackend(HttpBackend):
         super().__init__(options)
         self.anthropic_version = anthropic_version
 
-    # LLM: AnthropicCompatibleBackend.generate sends one messages request.
-    # 函数用途: 构造 messages payload，处理 thinking-only 响应的一次非流式重试。
     def generate(
         self, prompt: str, on_chunk: Callable[[str], None] | None = None
     ) -> ModelResponse:
@@ -255,15 +218,13 @@ class AnthropicCompatibleBackend(HttpBackend):
             try:
                 text = _anthropic_text_from_response(obj)
             except Exception as exc:
-                raise RuntimeError(f"无法解析 Anthropic-compatible 响应: {obj}") from exc
+                raise ProviderResponseError(f"无法解析 Anthropic-compatible 响应: {_response_preview(obj)}") from exc
             if text or attempt > 0 or not _anthropic_has_thinking_without_text(obj):
                 break
         if not text:
-            raise RuntimeError(f"Anthropic-compatible 响应没有文本内容: {obj}")
+            raise ProviderResponseError(f"Anthropic-compatible 响应没有文本内容: {_response_preview(obj)}")
         return ModelResponse(text=text, backend=self.name, usage=usage_dict(obj.get("usage")))
 
-    # LLM: _generate_stream parses Anthropic-compatible SSE and falls back on empty text.
-    # 函数用途: 流式拼接正文；若只收到 thinking/空正文，再用非流式请求恢复一次。
     def _generate_stream(
         self,
         payload: dict[str, Any],
@@ -280,11 +241,9 @@ class AnthropicCompatibleBackend(HttpBackend):
             if text and on_chunk is not None:
                 on_chunk(text)
         if not text:
-            raise RuntimeError("Anthropic-compatible 流式响应没有文本内容")
+            raise ProviderResponseError("Anthropic-compatible 流式响应没有文本内容")
         return ModelResponse(text=text, backend=self.name, usage=usage)
 
-    # LLM: _stream_text_once isolates one Anthropic SSE attempt so retry logic stays flat.
-    # 函数用途: 执行一次流式请求并拼接文本；有 on_chunk 时同步把片段推给调用方。
     def _stream_text_once(
         self,
         payload: dict[str, Any],
@@ -294,20 +253,20 @@ class AnthropicCompatibleBackend(HttpBackend):
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
         return collect_anthropic_stream(lines("/v1/messages", payload, headers), on_chunk=on_chunk)
 
-    # LLM: _fallback_non_stream_text mirrors 会话运行时 provider resilience at the backend boundary.
-    # 函数用途: 当 Anthropic-compatible 流式响应没有可见文本时，改走一次非流式完整响应；去掉 stream 字段避免污染兜底请求。
     def _fallback_non_stream_text(self, payload: dict[str, Any], headers: dict[str, str]) -> tuple[str, dict[str, Any]]:
         fallback_payload = dict(payload)
         fallback_payload.pop("stream", None)
         try:
             obj = self.request_json("/v1/messages", fallback_payload, headers)
             return _anthropic_text_from_response(obj), usage_dict(obj.get("usage"))
-        except Exception:
-            return "", {}
+        except ProviderResponseError:
+            raise
+        except Exception as exc:
+            raise ProviderResponseError(
+                f"Anthropic-compatible 非流式兜底请求失败: {type(exc).__name__}: {exc}"
+            ) from exc
 
 
-# LLM: _anthropic_text_from_response extracts only assistant-visible text from messages payloads.
-# 函数用途: 解析 Anthropic-compatible 非流式响应，兼容 content text 和旧 completion 字段。
 def _anthropic_text_from_response(obj: dict[str, Any]) -> str:
     parts = obj.get("content", [])
     text = "".join(
@@ -320,8 +279,6 @@ def _anthropic_text_from_response(obj: dict[str, Any]) -> str:
     return str(text or "")
 
 
-# LLM: _anthropic_has_thinking_without_text identifies transient MiniMax/Anthropic-compatible shapes.
-# 函数用途: 模型偶尔只返回 thinking block 时触发一次非流式重试，避免把可恢复空正文直接打成 runner 失败。
 def _anthropic_has_thinking_without_text(obj: dict[str, Any]) -> bool:
     parts = obj.get("content", [])
     if not isinstance(parts, list):
@@ -329,8 +286,11 @@ def _anthropic_has_thinking_without_text(obj: dict[str, Any]) -> bool:
     return any(isinstance(part, dict) and "thinking" in part for part in parts)
 
 
-# LLM: get_backend is the only public backend-name resolver.
-# 函数用途: 根据配置名称构造 backend adapter，未知名称明确报错。
+def _response_preview(obj: object, *, max_chars: int = 1000) -> str:
+    text = str(obj)
+    return text if len(text) <= max_chars else text[:max_chars] + "... [truncated]"
+
+
 def get_backend(name: str, config: Any | None = None) -> BaseBackend:
     """Resolve a configured backend name to a backend adapter instance."""
 

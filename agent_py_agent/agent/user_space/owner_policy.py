@@ -1,13 +1,12 @@
-# LLM: Owner policy readers make permissions/quota/retention inspectable without enforcing new gates.
-# 模块用途: 读取 owner_home 下的权限、配额和保留策略，并提供轻量磁盘用量统计；这里只报告，不阻断任务。
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import read_json_object_report
+from ..common.value_parsing import positive_int
 from .home_layout import MyAgentHomePaths
 from .temporary_grants import list_temporary_grants
 
@@ -21,6 +20,12 @@ class OwnerPolicyBundle:
     retention: dict[str, Any]
     skill_policy: dict[str, Any]
     tool_policy: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class OwnerPolicyBundleReport:
+    bundle: OwnerPolicyBundle
+    load_errors: tuple[dict[str, object], ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -45,10 +50,11 @@ class EffectiveOwnerPolicy:
     disabled_tools: tuple[str, ...]
     enabled_skill_sources: tuple[str, ...]
     disabled_skills: tuple[str, ...]
+    load_errors: tuple[dict[str, object], ...] = field(default_factory=tuple)
     active_grants: tuple[dict[str, str], ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": "effective-owner-policy.v1",
             "owner_id": self.owner_id,
             "owner_home": self.owner_home,
@@ -74,15 +80,40 @@ class EffectiveOwnerPolicy:
             },
             "active_grants": list(self.active_grants),
         }
+        if self.load_errors:
+            payload["load_errors"] = list(self.load_errors)
+        return payload
 
 
 def read_owner_policy_bundle(home: MyAgentHomePaths) -> OwnerPolicyBundle:
-    return OwnerPolicyBundle(
-        permissions=_read_json_object(home.owner_permissions_json),
-        quota=_read_json_object(home.owner_quota_json),
-        retention=_read_json_object(home.owner_retention_json),
-        skill_policy=_read_json_object(home.owner_skill_policy_json),
-        tool_policy=_read_json_object(home.owner_tool_policy_json),
+    return read_owner_policy_bundle_report(home).bundle
+
+
+def read_owner_policy_bundle_report(home: MyAgentHomePaths) -> OwnerPolicyBundleReport:
+    permissions = read_json_object_report(home.owner_permissions_json, context="owner_policy.permissions")
+    quota = read_json_object_report(home.owner_quota_json, context="owner_policy.quota")
+    retention = read_json_object_report(home.owner_retention_json, context="owner_policy.retention")
+    skill_policy = read_json_object_report(home.owner_skill_policy_json, context="owner_policy.skill_policy")
+    tool_policy = read_json_object_report(home.owner_tool_policy_json, context="owner_policy.tool_policy")
+    return OwnerPolicyBundleReport(
+        bundle=OwnerPolicyBundle(
+            permissions=permissions.payload,
+            quota=quota.payload,
+            retention=retention.payload,
+            skill_policy=skill_policy.payload,
+            tool_policy=tool_policy.payload,
+        ),
+        load_errors=tuple(
+            error
+            for error in (
+                permissions.load_error,
+                quota.load_error,
+                retention.load_error,
+                skill_policy.load_error,
+                tool_policy.load_error,
+            )
+            if error is not None
+        ),
     )
 
 
@@ -91,7 +122,8 @@ def resolve_effective_owner_policy(
     *,
     parent_policy: EffectiveOwnerPolicy | None = None,
 ) -> EffectiveOwnerPolicy:
-    bundle = read_owner_policy_bundle(home)
+    report = read_owner_policy_bundle_report(home)
+    bundle = report.bundle
     permissions = bundle.permissions
     quota = bundle.quota
     tool_policy = bundle.tool_policy
@@ -129,6 +161,7 @@ def resolve_effective_owner_policy(
         disabled_tools=tuple(sorted(disabled_tools)),
         enabled_skill_sources=_string_tuple(skill_policy.get("enabled_sources")),
         disabled_skills=_string_tuple(skill_policy.get("disabled_skills")),
+        load_errors=report.load_errors,
         active_grants=tuple(_grant_payload(grant) for grant in list_temporary_grants(home, status="active")),
     )
 
@@ -168,14 +201,6 @@ def owner_disk_usage(home: MyAgentHomePaths) -> OwnerDiskUsage:
     return OwnerDiskUsage(total_bytes=sum(by_root.values()), by_root=by_root)
 
 
-def _read_json_object(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
 def _dict_value(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -188,11 +213,7 @@ def _string_tuple(value: object) -> tuple[str, ...]:
 
 
 def _positive_int(value: object, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
+    return positive_int(value, default=default) or default
 
 
 def _child_capped_limit(value: int, parent: int) -> int:
@@ -246,7 +267,9 @@ __all__ = [
     "EffectiveOwnerPolicy",
     "OwnerDiskUsage",
     "OwnerPolicyBundle",
+    "OwnerPolicyBundleReport",
     "owner_disk_usage",
     "read_owner_policy_bundle",
+    "read_owner_policy_bundle_report",
     "resolve_effective_owner_policy",
 ]

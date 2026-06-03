@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 from __future__ import annotations
 
@@ -26,19 +24,17 @@ from ..agent.gateway import (
     gateway_running,
     log_gateway_payload,
     print_gateway_response,
-    read_json_file,
     submit_gateway_ask,
     wait_for_gateway_response,
     wait_for_gateway_running,
 )
+from ..agent.gateway_parts.response_renderer import read_gateway_response_file
 from .chat import cmd_chat
 from .common import make_agent, resume_context_override
 from .gateway_process import cmd_gateway_start
 from .thinking_spinner import ThinkingSpinner
 
 
-# LLM: GatewayAskContext 是gateway CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass
 class GatewayAskContext:
     agent: object
@@ -50,8 +46,6 @@ class GatewayAskContext:
     stream_output: bool = True
 
 
-# LLM: GatewayPollRequest 是gateway CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class GatewayPollRequest:
     chunk_path: Path
@@ -61,16 +55,12 @@ class GatewayPollRequest:
     stream_output: bool
 
 
-# LLM: cmd_gateway 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_gateway(args) -> int:
 
     print("请指定 gateway 子命令：start / supervisor-start / status / stop / restart / logs / ask / result / start-all。", file=sys.stderr)
     return 2
 
 
-# LLM: ensure_gateway_started 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def ensure_gateway_started(args) -> int:
 
     agent = make_agent(args)
@@ -96,8 +86,6 @@ def ensure_gateway_started(args) -> int:
     return 2
 
 
-# LLM: cmd_default 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_default(args) -> int:
     code = ensure_gateway_started(args)
     if code:
@@ -109,15 +97,12 @@ def cmd_default(args) -> int:
     args.gateway_timeout = None
     args.inject = None
     args.prompt_file = None
-    # LLM: leave chat memory default unresolved so cmd_chat can read AgentConfig.
     args.memory_limit = None
     args.no_save = False
     args.app_scrollback = not bool(getattr(args, "plain", False))
     return cmd_chat(args)
 
 
-# LLM: _maybe_handle_active_work 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _maybe_handle_active_work(args) -> int | None:
     agent = make_agent(args)
     if not agent or not agent.config.auto_detect_work_on_startup:
@@ -125,8 +110,6 @@ def _maybe_handle_active_work(args) -> int | None:
     return _handle_active_work_prompt(agent)
 
 
-# LLM: _handle_active_work_prompt 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 处理用户输入、快捷命令或事件，并分发到对应动作。
 def _handle_active_work_prompt(agent) -> int | None:
     from ..agent.startup_recovery import (
         detect_active_work,
@@ -154,50 +137,61 @@ def _handle_active_work_prompt(agent) -> int | None:
     return None
 
 
-# LLM: _stream_chunk_lines 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _stream_chunk_lines(chunk_path: Path, chunks_printed: int, spinner) -> int:
     if not chunk_path.exists():
         return chunks_printed
     try:
         lines = chunk_path.read_text(encoding="utf-8").splitlines()
-        for line in lines[chunks_printed:]:
-            chunks_printed += _write_stream_chunk_line(line, chunks_printed, spinner)
-    except (OSError, json.JSONDecodeError):
-        pass
+    except OSError as exc:
+        print(f"gateway stream chunk load_error path={chunk_path} message={exc}", file=sys.stderr)
+        return chunks_printed
+    for line in lines[chunks_printed:]:
+        chunks_printed += _write_stream_chunk_line(line, chunks_printed, spinner)
     return chunks_printed
 
 
-# LLM: _write_stream_chunk_line 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
 def _write_stream_chunk_line(line: str, chunks_printed: int, spinner) -> int:
     if not line.strip():
-        return 0
-    obj = json.loads(line)
-    if chunks_printed == 0:
+        return 1
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError as exc:
+        print(
+            "gateway stream chunk load_error "
+            f"line={chunks_printed + 1} category=json_decode message={exc}",
+            file=sys.stderr,
+        )
+        return 1
+    if not isinstance(obj, dict):
+        print(
+            "gateway stream chunk load_error "
+            f"line={chunks_printed + 1} category=non_object_root",
+            file=sys.stderr,
+        )
+        return 1
+    if obj.get("text"):
         spinner.stop()
-    sys.stdout.write(obj.get("text", ""))
+    sys.stdout.write(str(obj.get("text", "")))
     sys.stdout.flush()
     return 1
 
 
-# LLM: _flush_stream_chunks 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _flush_stream_chunks(request: GatewayPollRequest, chunks_printed: int) -> int:
     if not request.stream_output:
         return chunks_printed
     return _stream_chunk_lines(request.chunk_path, chunks_printed, request.spinner)
 
 
-# LLM: _wait_for_gateway_response 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _wait_for_gateway_response(request: GatewayPollRequest) -> dict[str, Any]:
     chunks_printed = 0
     response: dict[str, Any] = {}
 
     while time.time() <= request.deadline:
         chunks_printed = _flush_stream_chunks(request, chunks_printed)
-        response = read_json_file(request.response_path)
+        response = read_gateway_response_file(
+            request.response_path,
+            context="gateway.cli.response.read",
+        )
         if response:
             _flush_stream_chunks(request, chunks_printed)
             break
@@ -206,8 +200,6 @@ def _wait_for_gateway_response(request: GatewayPollRequest) -> dict[str, Any]:
     return response
 
 
-# LLM: _poll_gateway_response 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _poll_gateway_response(ctx: GatewayAskContext) -> dict[str, Any]:
     chunk_path = gateway_chunk_path(ctx.paths, ctx.request_id)
     spinner = ThinkingSpinner()
@@ -220,8 +212,6 @@ def _poll_gateway_response(ctx: GatewayAskContext) -> dict[str, Any]:
     return response
 
 
-# LLM: _handle_gateway_timeout 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 处理用户输入、快捷命令或事件，并分发到对应动作。
 def _handle_gateway_timeout(ctx: GatewayAskContext) -> int:
     log_gateway_payload(
         ctx.agent,
@@ -243,8 +233,6 @@ def _handle_gateway_timeout(ctx: GatewayAskContext) -> int:
     return 2
 
 
-# LLM: cmd_gateway_ask 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_gateway_ask(args) -> int:
 
     agent = make_agent(args)
@@ -293,13 +281,15 @@ def cmd_gateway_ask(args) -> int:
     return print_gateway_response(response, json_mode=args.json, show_prompt=args.show_prompt)
 
 
-# LLM: cmd_gateway_result 属于gateway CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_gateway_result(args) -> int:
 
     agent = make_agent(args)
     paths = gateway_paths(agent)
-    payload = read_json_file(gateway_response_path(paths, args.request_id))
+    payload = read_gateway_response_file(
+        gateway_response_path(paths, args.request_id),
+        request_id=args.request_id,
+        context="gateway.cli.result.response.read",
+    )
     if not payload:
         print(f"未找到 gateway 响应: {args.request_id}", file=sys.stderr)
         print(f"response: {gateway_response_path(paths, args.request_id)}")

@@ -1,5 +1,3 @@
-# LLM: Runtime config contracts validate startup safety from structured config keys.
-# 模块用途: 校验运行配置的必填字段、数字类型和危险组合，供 doctor/离线测试在启动前发现问题。
 
 from __future__ import annotations
 
@@ -10,8 +8,6 @@ from typing import Any
 from .contract_validation_recovery import recovery_for_findings
 
 
-# LLM: RuntimeConfigValidation is the machine-readable doctor result for runtime settings.
-# 类用途: 返回配置是否通过、错误码和逐项 finding，方便 CLI/测试直接消费。
 @dataclass(frozen=True)
 class RuntimeConfigValidation:
     ok: bool
@@ -20,8 +16,6 @@ class RuntimeConfigValidation:
     recovery: dict[str, object] | None = None
 
 
-# LLM: validate_runtime_config checks required fields and dangerous switches without reading prompt prose.
-# 函数用途: 校验 workspace_root、artifact_dir、tool_timeout、max_steps 和高危配置组合。
 def validate_runtime_config(config: dict[str, Any]) -> RuntimeConfigValidation:
     findings: list[dict[str, str]] = []
     _validate_required_text(config, "workspace_root", "CONFIG_WORKSPACE_ROOT_MISSING", findings)
@@ -37,8 +31,6 @@ def validate_runtime_config(config: dict[str, Any]) -> RuntimeConfigValidation:
     )
 
 
-# LLM: _validate_required_text enforces non-empty string-like config values.
-# 函数用途: 检查必填文本配置是否存在且非空。
 def _validate_required_text(
     config: dict[str, Any],
     field: str,
@@ -50,8 +42,6 @@ def _validate_required_text(
     findings.append(_finding(missing_code, field, "required"))
 
 
-# LLM: _validate_positive_number handles timeout-like settings with int or float values.
-# 函数用途: 校验配置字段必须是正数；缺失和类型错误用不同错误码。
 def _validate_positive_number(
     config: dict[str, Any],
     field: str,
@@ -66,8 +56,6 @@ def _validate_positive_number(
         findings.append(_finding(f"{code_prefix}_INVALID", field, "positive_number_required"))
 
 
-# LLM: _validate_positive_integer handles step-budget settings before execution loops start.
-# 函数用途: 校验配置字段必须是正整数；缺失和类型错误用不同错误码。
 def _validate_positive_integer(
     config: dict[str, Any],
     field: str,
@@ -82,8 +70,6 @@ def _validate_positive_integer(
         findings.append(_finding(f"{code_prefix}_INVALID", field, "positive_integer_required"))
 
 
-# LLM: _validate_dangerous_combinations flags settings that widen write or side-effect scope.
-# 函数用途: 检查根目录工作区、shell 开关、无审批高危动作这些通用危险组合。
 def _validate_dangerous_combinations(config: dict[str, Any], findings: list[dict[str, str]]) -> None:
     root = str(config.get("workspace_root") or "").strip()
     if root and Path(root).expanduser() == Path("/"):
@@ -101,8 +87,6 @@ def _validate_dangerous_combinations(config: dict[str, Any], findings: list[dict
         )
 
 
-# LLM: _validate_artifact_dir_boundary keeps artifact output inside workspace_root.
-# 函数用途: artifact_dir 可相对 workspace_root，也可绝对路径，但最终必须落在 workspace_root 内。
 def _validate_artifact_dir_boundary(config: dict[str, Any], findings: list[dict[str, str]]) -> None:
     workspace = _path_or_none(config.get("workspace_root"))
     artifact_dir = _path_or_none(config.get("artifact_dir"))
@@ -114,8 +98,6 @@ def _validate_artifact_dir_boundary(config: dict[str, Any], findings: list[dict[
     findings.append(_finding("CONFIG_ARTIFACT_DIR_OUTSIDE_WORKSPACE", "artifact_dir", "artifact_dir_must_stay_in_workspace"))
 
 
-# LLM: _path_inside checks resolved path containment without requiring paths to exist.
-# 函数用途: 判断目标路径是否在 base 内，供启动配置 doctor 复用。
 def _path_inside(path: Path, base: Path) -> bool:
     try:
         path.expanduser().resolve(strict=False).relative_to(base.expanduser().resolve(strict=False))
@@ -124,8 +106,6 @@ def _path_inside(path: Path, base: Path) -> bool:
         return False
 
 
-# LLM: _path_or_none converts non-empty config strings to Path objects.
-# 函数用途: 空值或非法类型返回 None，缺失错误由必填字段校验负责。
 def _path_or_none(value: object) -> Path | None:
     text = str(value or "").strip()
     if not text:
@@ -133,8 +113,6 @@ def _path_or_none(value: object) -> Path | None:
     return Path(text).expanduser()
 
 
-# LLM: _finding keeps config diagnostics stable and compact.
-# 函数用途: 生成 code/field/detail 结构化 finding。
 def _finding(code: str, field: str, detail: str) -> dict[str, str]:
     return {"code": code, "field": field, "detail": detail}
 

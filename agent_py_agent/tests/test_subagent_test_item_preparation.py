@@ -1,6 +1,6 @@
 """测试子代理验收测试项目录推断。"""
 
-from agent_py_agent.agent.subagents.execution_test_items import (
+from agent_py_agent.agent.subagents.execution import (
     TestItemPreparationRequest,
     prepare_test_items,
 )
@@ -183,8 +183,6 @@ def test_prepare_test_items_infers_pytest_when_runner_only_reports_test_artifact
     }]
 
 
-# LLM: test_prepare_test_items_infers_static_site_check covers auto validation for generated HTML sites.
-# 函数用途: runner 只报告多个 HTML 产物时，最终收口会自动补 static_site_check。
 def test_prepare_test_items_infers_static_site_check_for_html_artifacts(tmp_path):
     site_dir = tmp_path / "deliverables" / "shop" / "build"
     site_dir.mkdir(parents=True)
@@ -211,8 +209,6 @@ def test_prepare_test_items_infers_static_site_check_for_html_artifacts(tmp_path
     }]
 
 
-# LLM: test_prepare_test_items_drops_malformed_runner_checklist_when_static_check_is_available covers R13.
-# 函数用途: 模型把清单写成 content_check 但缺 file_path/pattern 时，自动站点验收接管，避免误报失败。
 def test_prepare_test_items_drops_malformed_runner_checklist_when_static_check_is_available(tmp_path):
     site_dir = tmp_path / "deliverables" / "shop" / "build"
     site_dir.mkdir(parents=True)
@@ -250,8 +246,6 @@ def test_prepare_test_items_drops_malformed_runner_checklist_when_static_check_i
     }]
 
 
-# LLM: test_prepare_test_items_infers_static_site_check_for_single_html_artifact covers single-page leaf outputs.
-# 函数用途: 只有一个 HTML 页面和 CSS/JS 资源时也要生成静态站点验收，避免模型空壳测试误报。
 def test_prepare_test_items_infers_static_site_check_for_single_html_artifact(tmp_path):
     site_dir = tmp_path / "deliverables" / "shop" / "build"
     site_dir.mkdir(parents=True)
@@ -291,8 +285,6 @@ def test_prepare_test_items_infers_static_site_check_for_single_html_artifact(tm
     }]
 
 
-# LLM: artifact_integrity test items need explicit workspace-local file refs before executor runs.
-# 函数用途: runner 只声明 artifact_integrity 方法时，父级从 output.artifacts 补 file_path，而不是读取测试名文案猜路径。
 def test_prepare_test_items_fills_artifact_integrity_file_path(tmp_path):
     output_path = tmp_path / "deliverables" / "site" / "index.html"
     output_path.parent.mkdir(parents=True)
@@ -310,8 +302,6 @@ def test_prepare_test_items_fills_artifact_integrity_file_path(tmp_path):
     assert prepared[0]["file_path"] == "deliverables/site/index.html"
 
 
-# LLM: Required DOM ids should flow into inferred static-site checks as machine fields.
-# 函数用途: 父级从任务合同抽取的业务区域 id 要进入 static_site_check，避免修复任务只补 HTML 骨架。
 def test_prepare_test_items_infers_static_site_check_with_required_dom_ids(tmp_path):
     site_dir = tmp_path / "deliverables" / "shop" / "build"
     site_dir.mkdir(parents=True)
@@ -337,8 +327,6 @@ def test_prepare_test_items_infers_static_site_check_with_required_dom_ids(tmp_p
     }]
 
 
-# LLM: Structured required DOM ids in closeout text should become result-check inputs.
-# 函数用途: 从 acceptance_checks 中提取 required_dom_ids: ...，供父级收口业务区域。
 def test_required_static_dom_ids_from_structured_acceptance_text():
     ids = required_static_dom_ids_from_texts([
         "required_dom_ids: register, login, cart, checkout, order-confirmation",
@@ -348,8 +336,6 @@ def test_required_static_dom_ids_from_structured_acceptance_text():
     assert ids == ["register", "login", "cart", "checkout", "order-confirmation"]
 
 
-# LLM: test_prepare_test_items_merges_task_required_static_files covers root whole-site required files.
-# 函数用途: 分支目录已有 HTML 时，也要把任务明确要求的顶层示例站文件放进 static_site_check。
 def test_prepare_test_items_merges_task_required_static_files(tmp_path):
     site_dir = tmp_path / "deliverables" / "shop" / "build"
     auth = site_dir / "auth"
@@ -389,8 +375,6 @@ def test_prepare_test_items_merges_task_required_static_files(tmp_path):
     }]
 
 
-# LLM: test_static_required_files_from_texts_reads_structured_file_contract validates protocol input.
-# 函数用途: 静态站必需文件只从 required_files 机器字段读取，不从自然语言句子里猜。
 def test_static_required_files_from_texts_reads_structured_file_contract():
     files = static_required_files_from_texts([
         "required_files: index.html, items.html, item-detail.html, flow-a.html, flow-b.html",
@@ -409,8 +393,6 @@ def test_static_required_files_from_texts_reads_structured_file_contract():
     ]
 
 
-# LLM: natural static-site prose is not a code-layer contract source.
-# 函数用途: 普通“必须生成/不要创建”自然语言不能让 Python 生成 required_files。
 def test_static_required_files_from_texts_ignores_natural_language():
     files = static_required_files_from_texts([
         "必须生成 index.html, items.html，还要有 style.css 和 app.js。",
@@ -420,8 +402,6 @@ def test_static_required_files_from_texts_ignores_natural_language():
     assert files == []
 
 
-# LLM: test_prepare_test_items_keeps_malformed_check_without_machine_fallback preserves conservative failure signals.
-# 函数用途: 没有自动机器收口交给父级看到 runner 输出不合格。
 def test_prepare_test_items_keeps_malformed_check_without_machine_fallback(tmp_path):
     prepared = prepare_test_items(
         TestItemPreparationRequest(
@@ -434,8 +414,6 @@ def test_prepare_test_items_keeps_malformed_check_without_machine_fallback(tmp_p
     assert prepared == [{"name": "文件结构验证", "validation_method": "content_check"}]
 
 
-# LLM: test_prepare_test_items_does_not_duplicate_static_site_check preserves runner-declared tests.
-# 函数用途: 模型已显式给 static_site_check 时，预处理只保留原测试并补安全字段，不重复追加。
 def test_prepare_test_items_does_not_duplicate_static_site_check(tmp_path):
     site_dir = tmp_path / "site"
     site_dir.mkdir()
@@ -461,8 +439,6 @@ def test_prepare_test_items_does_not_duplicate_static_site_check(tmp_path):
     assert [item["validation_method"] for item in prepared] == ["static_site_check"]
 
 
-# LLM: static_site_check written as a pseudo command should use the native validator instead of shell policy.
-# 函数用途: 覆盖真实 E2E 暴露的问题：模型把内置验收写进 command 字段时，不应被 allowlist 当陌生命令拦住。
 def test_prepare_test_items_converts_static_site_command_alias(tmp_path):
     site_dir = tmp_path / "site"
     site_dir.mkdir()

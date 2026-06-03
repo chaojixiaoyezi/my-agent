@@ -1,5 +1,3 @@
-# LLM: Conversation models are durable control-plane facts, not task templates.
-# 模块用途: 定义长期会话、跨渠道绑定、消息流水、任务绑定和进度策略的数据结构。
 
 from __future__ import annotations
 

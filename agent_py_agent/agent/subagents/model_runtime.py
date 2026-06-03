@@ -1,5 +1,3 @@
-# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
 
 from __future__ import annotations
 
@@ -10,8 +8,6 @@ from dataclasses import dataclass, field
 from .quality_models import ContextManifest, QualityContract
 
 
-# LLM: SubAgentExecutionContext 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存subagentexecution上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class SubAgentExecutionContext:
     """Minimum authorized context passed to a subagent runner."""
@@ -34,7 +30,6 @@ class SubAgentExecutionContext:
     parent_id: str = ""
     root_id: str = ""
     depth: int = 0
-    # LLM: These ids describe the long-lived subagent session, separate from one runner attempt.
     subagent_session_id: str = ""
     agent_thread_id: str = ""
     parent_subagent_session_id: str = ""
@@ -47,14 +42,12 @@ class SubAgentExecutionContext:
     effective_permissions: dict[str, object] = field(default_factory=dict)
     granted_cards: list[dict[str, str]] = field(default_factory=list)
     grants: list[dict[str, object]] = field(default_factory=list)
-    # LLM: controlled_exec_grants are parent-supplied scope refs; runners cannot mint these locally.
     controlled_exec_grants: list[dict[str, object]] = field(default_factory=list)
     acceptance_checks: list[str] = field(default_factory=list)
     evidence: list[dict[str, object]] = field(default_factory=list)
     quality_contract: QualityContract = field(default_factory=QualityContract)
     context_manifest: ContextManifest = field(default_factory=ContextManifest)
     context_packs: list[dict[str, object]] = field(default_factory=list)
-    # LLM: context_bundle refs let runners and recovery readers inspect handoff facts without loading parent text.
     context_bundle: dict[str, object] = field(default_factory=dict)
     context_bundle_file: str = ""
     context_bundle_json: str = ""
@@ -64,8 +57,6 @@ class SubAgentExecutionContext:
     instructions: list[str] = field(default_factory=list)
 
 
-# LLM: SubAgentRunnerResult 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存subagent执行器结果字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class SubAgentRunnerResult:
     """Result of one subagent runner invocation."""
@@ -104,8 +95,6 @@ class SubAgentRunnerResult:
     created_at: float = 0.0
 
 
-# LLM: SubAgentParsedOutput 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存subagentparsedoutput字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class SubAgentParsedOutput:
     """Machine-readable output parsed from a runner model response."""
@@ -120,10 +109,8 @@ class SubAgentParsedOutput:
     used_skills: list[str] = field(default_factory=list)
     used_tools: list[str] = field(default_factory=list)
     evidence: list[dict[str, object]] = field(default_factory=list)
-    # LLM: evidence_packets/findings keep claims traceable for closeout.
     evidence_packets: list[dict[str, object]] = field(default_factory=list)
     findings: list[dict[str, object]] = field(default_factory=list)
-    # LLM: coverage_records records machine-readable sibling/takeover coverage for failed descendant runs.
     # 字段用途: 保存 covered_run_id -> covered_by_run_id 的覆盖关系，禁止只靠自然语言 fallback 放行。
     coverage_records: list[dict[str, object]] = field(default_factory=list)
     capability_requests: list[dict[str, object]] = field(default_factory=list)

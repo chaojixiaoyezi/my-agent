@@ -1,5 +1,3 @@
-# LLM: Home memory note helpers let agents update HOT memory and lessons without inventing new stores.
-# 模块用途: 给家目录 HOT 记忆和 lesson 文件提供最小写入闭环，后续工具/CLI 复用这里。
 
 from __future__ import annotations
 

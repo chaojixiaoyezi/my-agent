@@ -7,14 +7,12 @@ from unittest.mock import MagicMock
 
 from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
 
 
-# LLM: test_runner_context_invalid_workflow_mode_stays_off protects runner-local workflow scoping.
-# 函数用途: 模型误传 parallel 时，runner dispatch 也不能回退成全局 auto。
 def test_runner_context_invalid_workflow_mode_stays_off() -> None:
     mock_report = MagicMock()
     mock_report.dry_run = False
@@ -35,8 +33,6 @@ def test_runner_context_invalid_workflow_mode_stays_off() -> None:
     assert call_kwargs["params"].workflow_mode == "off"
 
 
-# LLM: test_runner_context_dispatch_reports_direct_child_progress keeps parent runners from misreading PLANNING.
-# 函数用途: runner 内 dispatch 结果要提示剩余 PLANNING child，避免误判失败。
 def test_runner_context_dispatch_reports_direct_child_progress() -> None:
     mock_report = MagicMock()
     mock_report.dry_run = False
@@ -63,8 +59,6 @@ def test_runner_context_dispatch_reports_direct_child_progress() -> None:
     assert "继续调用 dispatch_subagents" in payload["direct_children"]["continue_hint"]
 
 
-# LLM: test_runner_context_dispatch_suggests_recovery_child_for_blocked_direct_child protects role-flexible recovery.
-# 函数用途: 直接 child 阻塞时，父 runner 要拿到可执行恢复建议，但不能被强制成 coordinator。
 def test_runner_context_dispatch_suggests_recovery_child_for_blocked_direct_child() -> None:
     mock_report = MagicMock()
     mock_report.dry_run = False
@@ -94,8 +88,57 @@ def test_runner_context_dispatch_suggests_recovery_child_for_blocked_direct_chil
     assert "child-blocked" in suggestion["children"][0]["goal"]
 
 
-# LLM: test_runner_context_dispatch_includes_packet_first_recovery_strategy protects root-only recovery.
-# 函数用途: 父 runner 看到阻塞 child 时，dispatch 响应要先给 latest_continue_packet 续跑策略。
+def test_runner_context_dispatch_reports_recovery_child_load_error() -> None:
+    mock_report = MagicMock()
+    mock_report.dry_run = False
+    mock_report.summary = {}
+    mock_report.records = []
+
+    mock_agent = MagicMock()
+    mock_agent._current_subagent_run_id = "parent-run"
+    mock_agent.config.subagent_workflow_mode = "off"
+    mock_agent.tools.specs.return_value = []
+    mock_agent.dispatch_subagents.return_value = mock_report
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    mock_agent.subagents.list_runs.return_value = [
+        SimpleNamespace(id="parent-run", parent_id="", status="RUNNING"),
+        SimpleNamespace(id="child-broken", parent_id="parent-run", status="BLOCKED"),
+    ]
+    mock_agent.subagents.load.side_effect = RuntimeError("child state unreadable")
+
+    result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False})
+
+    direct_children = json.loads(result.output)["direct_children"]
+    assert direct_children["needs_recovery"] is True
+    assert direct_children["recovery_load_errors"][0]["run_id"] == "child-broken"
+    assert direct_children["recovery_load_errors"][0]["context"] == "direct_children.recovery_task.load"
+
+
+def test_runner_context_dispatch_reports_quality_advice_parent_load_error() -> None:
+    mock_report = MagicMock()
+    mock_report.dry_run = False
+    mock_report.summary = {}
+    mock_report.records = []
+
+    mock_agent = MagicMock()
+    mock_agent._current_subagent_run_id = "parent-run"
+    mock_agent.config.subagent_workflow_mode = "off"
+    mock_agent.tools.specs.return_value = []
+    mock_agent.dispatch_subagents.return_value = mock_report
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    mock_agent.subagents.list_runs.return_value = [
+        SimpleNamespace(id="child-done", parent_id="parent-run", status="DONE"),
+    ]
+    mock_agent.subagents.load.side_effect = RuntimeError("parent state unreadable")
+
+    result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False})
+
+    direct_children = json.loads(result.output)["direct_children"]
+    assert direct_children["ready_for_closeout"] is True
+    assert direct_children["quality_advice_load_error"]["context"] == "direct_children.quality_advice.parent_load"
+    assert "parent state unreadable" in direct_children["quality_advice_load_error"]["message"]
+
+
 def test_runner_context_dispatch_includes_packet_first_recovery_strategy(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(goal="父任务", thought="派 child", plan=["schedule"], role="coordinator")
@@ -130,7 +173,8 @@ def test_runner_context_dispatch_includes_packet_first_recovery_strategy(tmp_pat
     direct = payload["direct_children"]
     strategy = direct["recovery_strategies"][0]
     suggested = direct["suggested_tool_call"]
-    assert strategy["recommended_action"] == "rerun_original_from_continue_packet"
+    assert strategy["recommended_action"] == "retry"
+    assert strategy["recovery_mode"] == "rerun_from_continue_packet"
     assert strategy["packet_status"] == "ready"
     assert strategy["uses_continue_packet"] is True
     assert strategy["task_envelope"]["address"]["lineage"] == [parent.id, child_id]
@@ -139,8 +183,6 @@ def test_runner_context_dispatch_includes_packet_first_recovery_strategy(tmp_pat
     assert suggested["run_ids"] == [child_id]
 
 
-# LLM: test_runner_context_dispatch_batches_multiple_recovery_strategies_without_shared_instruction covers fan-out failure.
-# 函数用途: 多个 child 同时失败时，父级要拿到批量策略，但不能把单个 runner_instruction 串给所有 child。
 def test_runner_context_dispatch_batches_multiple_recovery_strategies_without_shared_instruction(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(goal="父任务", thought="派多个 child", plan=["schedule"], role="coordinator")
@@ -175,15 +217,15 @@ def test_runner_context_dispatch_batches_multiple_recovery_strategies_without_sh
 
     direct = json.loads(result.output)["direct_children"]
     assert len(direct["recovery_strategies"]) == 2
-    assert direct["recovery_action_counts"]["rerun_original_from_continue_packet"] == 2
-    assert direct["recovery_batches"][0]["action"] == "rerun_original_from_continue_packet"
+    assert direct["recovery_action_counts"]["retry"] == 2
+    assert direct["recovery_mode_counts"]["rerun_from_continue_packet"] == 2
+    assert direct["recovery_batches"][0]["recovery_mode"] == "rerun_from_continue_packet"
+    assert direct["recovery_batches"][0]["recommended_action"] == "retry"
     assert set(direct["recovery_batches"][0]["run_ids"]) == set(created)
     assert set(direct["suggested_tool_call"]["run_ids"]) == set(created)
     assert "runner_instruction" not in direct["suggested_tool_call"]
 
 
-# LLM: Mixed recovery states should be split by action so takeover and rerun do not cross wires.
-# 函数用途: 一个 child 续跑原 run、另一个 child 需要 takeover 时，父级拿到分批计划而不是一个混合 dispatch。
 def test_runner_context_dispatch_splits_mixed_recovery_batches(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(goal="父任务", thought="派多个 child", plan=["schedule"], role="coordinator")
@@ -197,13 +239,8 @@ def test_runner_context_dispatch_splits_mixed_recovery_batches(tmp_path: Path) -
             ],
         )
     ).created_run_ids
-    blocked = manager.load(blocked_id)
-    blocked.status = "BLOCKED"
-    manager.save(blocked)
-    timed_out = manager.load(timeout_id)
-    timed_out.status = "TIMEOUT"
-    timed_out.failure_type = "runner_timeout"
-    manager.save(timed_out)
+    _set_child_state(manager, blocked_id, status="BLOCKED")
+    _set_child_state(manager, timeout_id, status="TIMEOUT", failure_type="runner_timeout")
 
     mock_report = MagicMock()
     mock_report.dry_run = False
@@ -220,13 +257,23 @@ def test_runner_context_dispatch_splits_mixed_recovery_batches(tmp_path: Path) -
     result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False})
 
     batches = json.loads(result.output)["direct_children"]["recovery_batches"]
-    by_action = {item["action"]: item for item in batches}
-    rerun = by_action["rerun_original_from_continue_packet"]
-    takeover = by_action["create_takeover_run_from_continue_packet"]
+    by_mode = {item["recovery_mode"]: item for item in batches}
+    rerun = by_mode["rerun_from_continue_packet"]
+    takeover = by_mode["takeover_from_continue_packet"]
     assert rerun["run_ids"] == [blocked_id]
+    assert rerun["recommended_action"] == "retry"
     assert rerun["suggested_tool_call"]["dry_run"] is False
     assert "runner_instruction" in rerun["suggested_tool_call"]
     assert takeover["run_ids"] == [timeout_id]
+    assert takeover["recommended_action"] == "takeover"
     assert takeover["execution_mode"] == "takeover_apply"
     assert takeover["suggested_tool_call"]["dry_run"] is True
     assert takeover["suggested_tool_call"]["max_runners"] == 0
+
+
+def _set_child_state(manager: SubAgentManager, run_id: str, *, status: str, failure_type: str = "") -> None:
+    child = manager.load(run_id)
+    child.status = status
+    if failure_type:
+        child.failure_type = failure_type
+    manager.save(child)

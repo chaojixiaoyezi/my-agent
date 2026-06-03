@@ -1,6 +1,4 @@
 
-# LLM: 保持旧模块路径可用，真实实现放在拆分后的读写模块。
-# 模块用途: 文件工具的兼容导入门面。
 
 from __future__ import annotations
 
@@ -36,7 +34,7 @@ from ._filesystem_read import (
     filesystem_access_options,
 )
 from ._filesystem_search import SearchTextTool
-from ._filesystem_write import WriteFileTool
+from ._filesystem_write import WriteFileTool, WriteFileToolOptions
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 __all__ = [
@@ -68,4 +66,5 @@ __all__ = [
     # Write tools
     "ApplyPatchTool",
     "WriteFileTool",
+    "WriteFileToolOptions",
 ]

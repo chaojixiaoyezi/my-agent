@@ -1,5 +1,3 @@
-# LLM: Guidance CLI registration stays separate from basic command bulk.
-# 模块用途: 注册 guidance-send 命令，让外部用户给运行中的代理追加软提示。
 
 from __future__ import annotations
 

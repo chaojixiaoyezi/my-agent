@@ -1,11 +1,8 @@
-# LLM: 这是主代理兼容门面，保持初始化依赖顺序和公开导出稳定。
-# 模块用途: SimpleAgent 组装入口，连接配置、记忆、后端、工具和子代理管理器。
 
 from __future__ import annotations
 
 """composition root for SimpleAgent after splitting runtime, subagents, dispatch, and tools.
 
-给人看的解释：
 以前这个文件把主循环、子代理 runner、父代理 dispatch、工具定义、prompt 模板都堆在一起。
 现在真实逻辑按职责拆到 `agent_core/`，这里只负责组装 SimpleAgent，并保留旧公开导入路径。
 """
@@ -27,7 +24,7 @@ from .agent_core import (
     SimpleAgentSubagentMixin,
     TaskProgressTool,
 )
-from .agent_core.dispatch_lock import _DispatchWatchLock
+from .agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 from .agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS, READ_ONLY_SUBAGENT_TOOLS
 from .agent_core.parameters import (
     ONE_SHOT_TOOL_NAMES,
@@ -36,7 +33,6 @@ from .agent_core.parameters import (
     _one_shot_tool_call_key,
     _positive_int,
     _sleep_with_stop,
-    _string_list,
 )
 from .agent_core.planner import (
     PARENT_PLANNER_READ_TOOLS,
@@ -45,7 +41,7 @@ from .agent_core.planner import (
     _combine_runner_instruction,
     _task_state_for_planner,
 )
-from .agent_core.runner_dispatch import (
+from .agent_core.runner.dispatch import (
     RETRYABLE_RUNNER_FAILURE_TYPES,
     _dispatch_patch_review_run_ids,
     _dispatch_runner_candidates,
@@ -59,14 +55,14 @@ from .agent_core.runner_dispatch import (
     _runner_retry_reason,
     _task_has_runner_patches,
 )
-from .agent_core.runner_prompts import (
+from .agent_core.runner.prompts import (
     _append_runner_repair_failure,
     _append_runner_repair_prompt,
     _append_runner_repair_response,
     _build_subagent_runner_prompt,
     _build_subagent_runner_repair_prompt,
 )
-from .agent_core.runtime_owner_roots import runtime_owner_root
+from .agent_core.runtime.owner_roots import runtime_owner_root
 from .backend import get_backend
 from .capability.runtime_config import default_capability_config_path
 from .collaboration import (
@@ -102,8 +98,6 @@ from .user_space.runtime_paths import (
 logger = logging.getLogger(__name__)
 
 
-# LLM: _normalized_workspace_roots 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 解析并去重工作区根目录，保留第一个主工作区。
 def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -> list[Path]:
     resolved: list[Path] = []
     for raw in [primary, *(roots or [])]:
@@ -113,8 +107,6 @@ def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -
     return resolved
 
 
-# LLM: SimpleAgent 属于 兼容入口 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: 主代理门面，持有配置、记忆、后端、工具注册表和子代理管理器。
 class SimpleAgent(
     SimpleAgentRuntimeMixin,
     SimpleAgentSubagentMixin,
@@ -122,17 +114,13 @@ class SimpleAgent(
 ):
     """wires config, memory, prompts, backend, tools, and subagent manager into one agent facade.
 
-    给人看的解释：
     这是用户和 CLI 看到的主代理对象。
     它自己只做依赖组装；具体怎么聊天、怎么跑子代理、怎么 dispatch，已经分别交给 mixin 文件。
     """
 
-    # LLM: SimpleAgent.__init__ 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 初始化 SimpleAgent 的依赖、配置和运行期字段。
     def __init__(self, config: AgentConfig, root: str | Path, workspace_roots: list[str | Path] | None = None):
         """initialize all SimpleAgent collaborators and register orchestration tools.
 
-        给人看的解释：
         创建主代理时会准备本地账本、记忆、prompt 构造器、模型后端、子代理管理器和工具注册表。
         最后把"创建子代理、看板、dispatch"这三个编排工具也注册进去。
         """
@@ -175,8 +163,6 @@ class SimpleAgent(
         _register_orchestration_tools(self)
 
 
-# LLM: _resolve_home_paths is the single owner-home bootstrap point for SimpleAgent startup.
-# 函数用途: 根据配置初始化或解析 my-agent 家目录，并把路径对象交给运行时复用。
 def _resolve_home_paths(config: AgentConfig):
     root = getattr(config, "my_agent_home", None)
     if bool(getattr(config, "home_runtime_bootstrap_enabled", True)):
@@ -190,8 +176,6 @@ def _resolve_home_paths(config: AgentConfig):
     return home_paths_with_owner(paths, owner)
 
 
-# LLM: _register_owner_ref_if_possible keeps owner indexes best-effort during startup.
-# 函数用途: 将 owner 写入全局索引；索引不可写时不影响代理启动。
 def _register_owner_ref_if_possible(paths, owner) -> None:
     try:
         register_owner_ref(paths, owner)
@@ -199,8 +183,6 @@ def _register_owner_ref_if_possible(paths, owner) -> None:
         return
 
 
-# LLM: _daily_memory_dir keeps daily mirroring opt-in/out through config while preserving legacy memory_path.
-# 函数用途: 返回 JsonlMemory 的按天镜像目录；关闭配置时返回 None。
 def _daily_memory_dir(config: AgentConfig, paths):
     if not bool(getattr(config, "daily_memory_mirror_enabled", True)):
         return None
@@ -208,8 +190,6 @@ def _daily_memory_dir(config: AgentConfig, paths):
     return (owner_daily,) if owner_daily else None
 
 
-# LLM: _owner_memory_jsonl_path is the one write target for long-term memory.
-# 函数用途: 优先返回 owner long_term/memory.jsonl，缺少 owner home 时才回退旧路径。
 def _owner_memory_jsonl_path(paths, *, fallback: Path) -> Path:
     owner_long_term = getattr(paths, "owner_memory_long_term_dir", None)
     if owner_long_term:
@@ -217,16 +197,12 @@ def _owner_memory_jsonl_path(paths, *, fallback: Path) -> Path:
     return Path(fallback)
 
 
-# LLM: _legacy_memory_fallbacks is read-only migration support for local/main.
-# 函数用途: 只给本地主账号补读旧 memory_path，避免 provider owner 误读管理员记忆。
 def _legacy_memory_fallbacks(paths, fallback: Path) -> tuple[Path, ...]:
     if _is_local_main_owner(paths):
         return (Path(fallback),)
     return ()
 
 
-# LLM: _is_local_main_owner gates compatibility reads to the CLI main owner only.
-# 函数用途: 判断当前 owner 是否是本地主账号，供旧记忆和旧 task 扫描兼容使用。
 def _is_local_main_owner(paths) -> bool:
     return (
         str(getattr(paths, "owner_provider", "") or "local") == "local"
@@ -235,8 +211,6 @@ def _is_local_main_owner(paths) -> bool:
     )
 
 
-# LLM: _build_subagent_manager 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 用代理依赖和路径配置创建 SubAgentManager。
 def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
     manager = SubAgentManager(
         paths["subagent_workspace"],
@@ -258,8 +232,6 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
     return manager
 
 
-# LLM: _build_tool_registry 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 按工具配置创建 ToolRegistry 并注入工作区边界。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     workspace_root = agent.root.parent if (agent.root / "__main__.py").exists() else agent.root
     workspace_roots = [workspace_root, *[root for root in agent.workspace_roots if root != agent.root]]
@@ -294,12 +266,11 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             payload_limits=tool_payload_limits_from_config(config),
             disabled_tools=list(getattr(agent.owner_policy, "disabled_tools", ())),
             artifact_root=runtime_owner_root(agent),
+            runtime_guard_policy=getattr(agent, "runtime_guard_policy", None),
         )
     )
 
 
-# LLM: _register_orchestration_tools 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 把创建子代理、看板和 dispatch 编排工具注册到主代理工具表。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CreateSubagentsTool(agent))
     agent.tools.register(CapabilityRequestTool(agent))

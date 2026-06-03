@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 
 from __future__ import annotations
@@ -8,13 +6,11 @@ import json
 
 from ..agent.capability_config import load_capability_config
 from ..agent.subagents.models import SubAgentCapabilityRouteOptions, SubAgentPlanActionsOptions
-from ..agent.subagents.services.action_options import ActionApplyOptions
+from ..agent.subagents.services.actions.options import ActionApplyOptions
 from .common import make_agent, make_capability_router
 from .models import SubagentsCapabilityRouteOptions, SubagentsPlanActionsOptions
 
 
-# LLM: cmd_subagents_plan_actions preserves root-scoped dry-run planning for noisy shared workspaces.
-# 函数用途: CLI 动作计划入口；可按 root_id 限定一棵任务树，输出和落盘使用同一作用域。
 def cmd_subagents_plan_actions(args) -> int:
 
     agent = make_agent(args)
@@ -46,8 +42,6 @@ def cmd_subagents_plan_actions(args) -> int:
     return 0
 
 
-# LLM: _subagents_plan_actions_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成 action-plan 结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagents_plan_actions_options(args, *, agent=None) -> SubagentsPlanActionsOptions:
     return SubagentsPlanActionsOptions(
         all=bool(args.all),
@@ -56,8 +50,6 @@ def _subagents_plan_actions_options(args, *, agent=None) -> SubagentsPlanActions
     )
 
 
-# LLM: cmd_subagents_apply_actions 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_apply_actions(args) -> int:
 
     agent = make_agent(args)
@@ -88,8 +80,6 @@ def cmd_subagents_apply_actions(args) -> int:
     return 0
 
 
-# LLM: _subagents_action_apply_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagents_action_apply_options(args, *, agent=None) -> ActionApplyOptions:
     return ActionApplyOptions(
         apply=bool(getattr(args, "apply", False)),
@@ -101,8 +91,6 @@ def _subagents_action_apply_options(args, *, agent=None) -> ActionApplyOptions:
     )
 
 
-# LLM: cmd_subagents_route_capabilities 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_route_capabilities(args) -> int:
 
     agent = make_agent(args)
@@ -140,8 +128,6 @@ def cmd_subagents_route_capabilities(args) -> int:
     return 0
 
 
-# LLM: _subagents_capability_route_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagents_capability_route_options(args, *, agent=None) -> SubagentsCapabilityRouteOptions:
     return SubagentsCapabilityRouteOptions(
         apply=bool(args.apply),
@@ -150,8 +136,6 @@ def _subagents_capability_route_options(args, *, agent=None) -> SubagentsCapabil
     )
 
 
-# LLM: _subagent_config_int keeps action CLI defaults in agent_config.yaml.
-# 函数用途: 子代理 action/route/plan 命令没有显式 limit 时，读取统一默认值。
 def _subagent_config_int(agent, args, arg_name: str, config_name: str) -> int:
     value = getattr(args, arg_name, None)
     if value is not None:

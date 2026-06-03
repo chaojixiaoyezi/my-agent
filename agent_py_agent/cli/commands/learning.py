@@ -1,5 +1,3 @@
-# LLM: CLI command registration module; keep parser wiring and command handler imports stable.
-# 模块用途: 组织某组命令行子命令，让用户能从 CLI 触发对应功能。
 
 from __future__ import annotations
 
@@ -14,8 +12,6 @@ import argparse
 from ..learning import cmd_learn_accept, cmd_learn_list, cmd_learn_reject, cmd_learn_stats
 
 
-# LLM: add_learning_subcommand 属于learning CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def add_learning_subcommand(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
 
     learn = subparsers.add_parser("learn", help="管理自动生成的 learning draft 候选")

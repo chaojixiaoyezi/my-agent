@@ -1,5 +1,3 @@
-# LLM: Real run review turns live-task folders into structured failure samples before more live retries.
-# 模块用途: 只读取报告、日志标记和文件事实，聚类真实运行失败模式，给离线回归队列和最终复盘报告使用。
 
 from __future__ import annotations
 
@@ -11,8 +9,6 @@ from .real_run_review_render import render_real_run_review_markdown
 from .real_run_review_rules import P0_TAGS, P1_TAGS, STAGE_BY_TAG, TAG_RULES
 
 
-# LLM: review_real_run_tree scans one root for run directories and returns structured review facts.
-# 函数用途: 复盘某个真实运行根目录下的 run；只读文件，不启动模型、不调用真实工具。
 def review_real_run_tree(
     root: Path,
     *,
@@ -31,8 +27,6 @@ def review_real_run_tree(
     )
 
 
-# LLM: review_real_run_directory reads reports and logs from one run directory.
-# 函数用途: 把单个真实运行目录规整成一行复盘记录，所有结论来自结构化报告和机器标记。
 def review_real_run_directory(
     run_dir: Path,
     *,
@@ -77,8 +71,6 @@ def review_real_run_directory(
     )
 
 
-# LLM: cluster_real_run_failures groups records by machine tags and sorts by severity/frequency.
-# 函数用途: 生成失败模式聚类统计；不按目录名写专项逻辑。
 def cluster_real_run_failures(records: tuple[RealRunRecord, ...]) -> tuple[FailurePattern, ...]:
     grouped: dict[str, list[RealRunRecord]] = {}
     for record in records:
@@ -88,8 +80,6 @@ def cluster_real_run_failures(records: tuple[RealRunRecord, ...]) -> tuple[Failu
     return tuple(sorted(patterns, key=lambda item: (_priority_rank(item.priority), -item.count, item.tag)))
 
 
-# LLM: _final_status derives run status from report ok booleans only.
-# 函数用途: 把报告中的 ok 字段转成 PASSED/FAILED/UNKNOWN，避免读最终聊天总结。
 def _final_status(facts: CollectedFacts) -> str:
     if any(value is False for value in facts.ok_values):
         return "FAILED"
@@ -98,8 +88,6 @@ def _final_status(facts: CollectedFacts) -> str:
     return "UNKNOWN"
 
 
-# LLM: _tags_for_codes maps machine codes to generic failure tags.
-# 函数用途: 根据稳定 code 前缀归类失败模式，所有规则都是通用合同层标签。
 def _tags_for_codes(codes: tuple[str, ...]) -> tuple[str, ...]:
     tags: list[str] = []
     for tag, prefixes in TAG_RULES:
@@ -108,8 +96,6 @@ def _tags_for_codes(codes: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(tags)
 
 
-# LLM: _task_types extracts structured case ids from task directories when present.
-# 函数用途: 从 `tasks/<case_id>` 路径提取任务类型；没有则回退到 run 目录名。
 def _task_types(root: Path) -> tuple[str, ...]:
     values: list[str] = []
     for path in root.rglob("tasks/*"):
@@ -118,8 +104,6 @@ def _task_types(root: Path) -> tuple[str, ...]:
     return _ordered_unique(values) or (root.name,)
 
 
-# LLM: _failure_stage chooses one broad failing layer from generic root-cause tags.
-# 函数用途: 给复盘表提供 plan/tool/artifact/acceptance/state 等稳定层级。
 def _failure_stage(tags: tuple[str, ...]) -> str:
     for tag in tags:
         stage = STAGE_BY_TAG.get(tag)
@@ -128,8 +112,6 @@ def _failure_stage(tags: tuple[str, ...]) -> str:
     return "none"
 
 
-# LLM: _priority converts root-cause tags into the P0/P1/P2 repair queue.
-# 函数用途: 标记修复优先级；假成功/状态严重错优先 P0，主链路阻断为 P1。
 def _priority(tags: tuple[str, ...], status: str) -> str:
     if any(tag in P0_TAGS for tag in tags):
         return "P0"
@@ -138,14 +120,10 @@ def _priority(tags: tuple[str, ...], status: str) -> str:
     return "P2" if status == "FAILED" else "NONE"
 
 
-# LLM: _priority_rank gives deterministic ordering to cluster severities.
-# 函数用途: 聚类排序时让 P0 在前、P1 次之、低风险最后。
 def _priority_rank(priority: str) -> int:
     return {"P0": 0, "P1": 1, "P2": 2, "NONE": 3}.get(priority, 4)
 
 
-# LLM: _recommended_test names the offline regression surface without task-specific branching.
-# 函数用途: 根据失败标签建议新增哪类离线测试，用于报告，不直接改变运行逻辑。
 def _recommended_test(tags: tuple[str, ...], first_code: str) -> str:
     if not tags:
         return ""
@@ -153,8 +131,6 @@ def _recommended_test(tags: tuple[str, ...], first_code: str) -> str:
     return f"pytest://agent_py_agent/tests/replay/{tag}#{first_code or tag}"
 
 
-# LLM: _cluster_payload builds one FailurePattern from records sharing a tag.
-# 函数用途: 生成单个失败模式的 count、runs 和首个错误码集合。
 def _cluster_payload(tag: str, records: list[RealRunRecord]) -> FailurePattern:
     priority = _priority((tag,), "FAILED")
     return FailurePattern(
@@ -168,8 +144,6 @@ def _cluster_payload(tag: str, records: list[RealRunRecord]) -> FailurePattern:
     )
 
 
-# LLM: _summary counts record statuses for the top-level report.
-# 函数用途: 汇总 total/passed/failed/unknown，供脚本和最终说明使用。
 def _summary(records: tuple[RealRunRecord, ...]) -> dict[str, int]:
     failed = sum(1 for record in records if record.final_status == "FAILED")
     passed = sum(1 for record in records if record.final_status == "PASSED")
@@ -177,8 +151,6 @@ def _summary(records: tuple[RealRunRecord, ...]) -> dict[str, int]:
     return {"failed": failed, "passed": passed, "total": len(records), "unknown": unknown}
 
 
-# LLM: _ordered_unique preserves first-seen order while deduplicating hashable values.
-# 函数用途: 去重但保留顺序，确保 first_failure_code 和报告展示稳定。
 def _ordered_unique(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
     seen: set[str] = set()
     result: list[str] = []
@@ -190,8 +162,6 @@ def _ordered_unique(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
     return tuple(result)
 
 
-# LLM: _rel emits stable relative refs when possible.
-# 函数用途: 把证据路径写成相对引用；跨根路径时回退绝对路径。
 def _rel(path: Path, root: Path) -> str:
     try:
         return str(path.resolve().relative_to(root.resolve()))

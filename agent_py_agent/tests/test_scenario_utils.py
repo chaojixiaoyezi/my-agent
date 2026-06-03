@@ -48,8 +48,6 @@ def test_runner_instruction_mentions_write_boundary_target():
     assert "task_dir/scenario_outputs/<run_id>.md" in instruction
 
 
-# LLM: Scenario stress flags should be persisted in the isolated config, not edited into the real config.
-# 函数用途: 确认 scenario-test 的并发和模型超时覆盖项只写入本次测试配置，方便真实压测可复现。
 def test_write_scenario_config_persists_runner_stress_overrides(tmp_path):
     source = tmp_path / "agent_config.yaml"
     target = tmp_path / "scenario_agent_config.yaml"

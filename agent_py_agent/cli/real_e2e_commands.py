@@ -1,5 +1,3 @@
-# LLM: Real E2E CLI exposes main-agent foundation checks as a stable, refs-first command.
-# 模块用途: 提供 `my-agent real-e2e`，把主代理基础测试和产物验收写成可重复运行的报告。
 
 from __future__ import annotations
 
@@ -18,8 +16,6 @@ from ..agent.contracts.main_agent_foundation_runner import (
 )
 
 
-# LLM: RealE2EPayloadRequest bundles report parts before JSON serialization.
-# 类用途: 描述 real-e2e 报告包含哪些部分，避免 payload helper 随新增区域拉长签名。
 @dataclass(frozen=True)
 class RealE2EPayloadRequest:
     ok: bool
@@ -28,8 +24,6 @@ class RealE2EPayloadRequest:
     artifacts: list[dict[str, object]]
 
 
-# LLM: add_real_e2e_subcommand registers the formal main-agent E2E test entrypoint.
-# 函数用途: 注册 `real-e2e` 参数；它只跑基础矩阵和用户显式传入产物，不再注入内置任务模板。
 def add_real_e2e_subcommand(
     subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
@@ -50,8 +44,6 @@ def add_real_e2e_subcommand(
     parser.set_defaults(func=cmd_real_e2e)
 
 
-# LLM: cmd_real_e2e runs deterministic foundation checks plus optional artifact acceptance.
-# 函数用途: 执行主代理基础测试、验收指定产物、写 JSON 报告，并用退出码表达是否通过。
 def cmd_real_e2e(args) -> int:
     workspace = _workspace_path(getattr(args, "workspace", ""))
     foundation = run_main_agent_foundation(
@@ -79,20 +71,14 @@ def cmd_real_e2e(args) -> int:
     return 0 if payload.get("ok") else 2
 
 
-# LLM: _workspace_path keeps generated E2E files isolated from user project files by default.
-# 函数用途: 解析 real-e2e 工作区，没传时使用当前目录下 `.my-agent-real-e2e`。
 def _workspace_path(value: str) -> Path:
     return Path(value).expanduser() if value else Path.cwd() / ".my-agent-real-e2e"
 
 
-# LLM: _report_path co-locates the machine report with the E2E workspace unless overridden.
-# 函数用途: 解析报告路径，支持用户显式传入，也支持默认工作区报告。
 def _report_path(value: str, *, workspace: Path) -> Path:
     return Path(value).expanduser() if value else workspace / "real_e2e_report.json"
 
 
-# LLM: _artifact_reports validates user-supplied deliverables through the artifact acceptance contract.
-# 函数用途: 对真实任务产物逐个运行通用验收器，返回可序列化 findings。
 def _artifact_reports(values: list[str], *, workspace: Path) -> list[dict[str, object]]:
     return [
         validate_artifact(
@@ -102,8 +88,6 @@ def _artifact_reports(values: list[str], *, workspace: Path) -> list[dict[str, o
     ]
 
 
-# LLM: _payload gives CLI, docs, and frontend one stable report shape.
-# 函数用途: 组合基础测试结果、产物验收结果和报告引用，保留 summary 便于旧调用方读取。
 def _payload(request: RealE2EPayloadRequest) -> dict[str, object]:
     payload = {
         "ok": request.ok,
@@ -119,8 +103,6 @@ def _payload(request: RealE2EPayloadRequest) -> dict[str, object]:
     return payload
 
 
-# LLM: _print_payload keeps human mode short and JSON mode exact.
-# 函数用途: 根据 --json 输出完整 JSON 或简短人类摘要，不打印大产物正文。
 def _print_payload(payload: dict[str, object], *, json_output: bool) -> None:
     if json_output:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))

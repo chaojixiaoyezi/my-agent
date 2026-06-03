@@ -4,8 +4,10 @@
 测试子代理索引模块：_select_runs() 状态过滤、_index_task() 索引写入、
 DISPATCH_INELIGIBLE_STATUSES 过滤。
 """
+import logging
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,7 +15,12 @@ import pytest
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagents.models import DISPATCH_INELIGIBLE_STATUSES
-from agent_py_agent.agent.subagents.services.indexing_params import IndexReportParams
+from agent_py_agent.agent.subagents.services.indexing import SubAgentIndexingService
+from agent_py_agent.agent.subagents.services.indexing.params import (
+    IndexReportParams,
+    LocalRecordParams,
+)
+from agent_py_agent.agent.subagents.services.parent_planner_builder import ParentPlannerRecordParams
 
 
 class TestDispatchIneligibleStatuses:
@@ -230,11 +237,13 @@ class TestIndexParentPlannerRecord:
             agent = SimpleAgent(cfg, root)
 
             record = agent.subagents.make_parent_planner_record(
-                dry_run=True,
-                triggered=True,
-                ok=True,
-                decision="PLAN",
-                message="测试",
+                params=ParentPlannerRecordParams(
+                    dry_run=True,
+                    triggered=True,
+                    ok=True,
+                    decision="PLAN",
+                    message="测试",
+                ),
             )
 
             # 不应该抛出异常
@@ -283,30 +292,28 @@ class TestLogLocalRecord:
                 event_type="test_event",
             )
 
-    def test_log_local_record_with_local_store_failure(self):
+    def test_log_local_record_with_local_store_failure(self, caplog: pytest.LogCaptureFixture):
         """验证 LocalStore.log_record 失败时不影响主流程。"""
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
-            agent = SimpleAgent(cfg, root)
+        def failing_log_record(**kwargs):
+            raise RuntimeError("LocalStore unavailable")
 
-            if agent.subagents.local_store:
-                # 模拟 log_record 失败
-                original = agent.subagents.local_store.log_record
+        manager = SimpleNamespace(local_store=SimpleNamespace(log_record=failing_log_record))
+        service = SubAgentIndexingService(manager)
 
-                def failing_log_record(**kwargs):
-                    raise RuntimeError("LocalStore unavailable")
-
-                agent.subagents.local_store.log_record = failing_log_record
-
-                # 不应该抛出异常
-                agent.subagents.log_local_record(
+        with caplog.at_level(logging.WARNING):
+            service.log_local_record(
+                params=LocalRecordParams(
                     source_type="test",
                     source_id="test-id",
                     title="Test Title",
                     content="Test Content",
                     event_type="test_event",
                 )
+            )
+
+        assert "subagent local index write failed" in caplog.text
+        assert "subagent_index.local_store.log_record" in caplog.text
+        assert "LocalStore unavailable" in caplog.text
 
 
 class TestIndexReport:

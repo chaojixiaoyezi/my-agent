@@ -1,5 +1,3 @@
-# LLM: Runner tool policy is child-scope filtering only; it does not infer task quality.
-# 模块用途: 根据 owner policy 和 self-authorized root 规则裁剪子代理 runner 可见工具。
 
 from __future__ import annotations
 

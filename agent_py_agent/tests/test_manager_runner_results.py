@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
+from types import SimpleNamespace
 
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentParsedOutput
+from agent_py_agent.agent.subagents.runner_completion_wake import _record_wake_error
 from agent_py_agent.tests.support.manager_runner_results import _rrr, mock_manager, sample_task
 
 # ── record_runner_result 基本测试 ──────────────────────────────────────────
@@ -94,6 +97,50 @@ def test_record_runner_result_wakes_bound_parent_thread(mock_manager, sample_tas
     assert sample_task.id in signals[0].summary
 
 
+def test_record_runner_result_records_wake_error(mock_manager, sample_task, tmp_path, monkeypatch):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    store.bind_task({'thread_id': thread.thread_id, 'task_id': sample_task.id, 'goal': sample_task.goal, 'now': 2.0})
+    mock_manager.conversation_store = store
+    mock_manager._tasks[sample_task.id] = sample_task
+
+    def fail_wake(_payload):
+        raise RuntimeError("wake ledger unavailable")
+
+    monkeypatch.setattr(store, "raise_wake_signal", fail_wake)
+
+    result = mock_manager.record_runner_result(_rrr(
+        run_id=sample_task.id,
+        dry_run=False,
+        ok=True,
+        message="完成",
+        status="DONE",
+        verification_status="VERIFIED",
+    ))
+
+    error = mock_manager.load(sample_task.id).attributes["runner_completion_wake_error"]
+    assert result.status == "DONE"
+    assert error["status"] == "DONE"
+    assert error["error"]["context"] == "subagent_runner_completion_wake.notify_parent"
+    assert "wake ledger unavailable" in error["error"]["message"]
+
+
+def test_runner_completion_wake_error_save_failure_is_visible(caplog):
+    class Manager:
+        def save(self, task):
+            raise OSError("task state locked")
+
+    task = SimpleNamespace(id="run-1", attributes={})
+    result = SimpleNamespace(status="DONE", run_id="run-1")
+
+    with caplog.at_level(logging.WARNING):
+        _record_wake_error(Manager(), task, result, RuntimeError("wake unavailable"))
+
+    assert "subagent runner completion wake error could not be saved" in caplog.text
+    assert "subagent_runner_completion_wake.record_error" in caplog.text
+    assert "task state locked" in caplog.text
+
+
 def test_record_runner_result_dry_run_does_not_wake_parent_thread(mock_manager, sample_task, tmp_path):
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
@@ -112,8 +159,6 @@ def test_record_runner_result_dry_run_does_not_wake_parent_thread(mock_manager, 
     assert store.pending_wake_signals() == []
 
 
-# LLM: closeout_for_all_task_nodes writes feedback only; it must not revive parent acceptance states.
-# 函数用途: 验证子代理完成后只在任务属性里留下同一套 closeout 提示事实，不改变成功状态。
 def test_record_runner_result_writes_task_node_closeout_feedback_when_enabled(mock_manager, sample_task):
     mock_manager.closeout_for_all_task_nodes = True
     mock_manager._tasks[sample_task.id] = sample_task
@@ -136,8 +181,6 @@ def test_record_runner_result_writes_task_node_closeout_feedback_when_enabled(mo
     assert "acceptance" not in feedback
 
 
-# LLM: Missing artifact refs are not a runner-level hard stop; closeout owns delivery validation.
-# 函数用途: 验证子代理声明了不存在的产物路径时，不再由 runner 直接改成 BLOCKED。
 def test_record_runner_result_does_not_block_missing_local_artifact_ref(mock_manager, sample_task, tmp_path):
     mock_manager._tasks[sample_task.id] = sample_task
     sample_task.task_dir = str(tmp_path)

@@ -28,25 +28,33 @@ class TestListValue:
 
     def test_none_returns_empty_list(self):
         """None 返回空列表。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _list_value
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _list_value,
+        )
 
         assert _list_value(None) == []
 
     def test_list_unchanged(self):
         """列表保持不变。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _list_value
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _list_value,
+        )
 
         assert _list_value([1, 2, 3]) == [1, 2, 3]
 
     def test_tuple_converted_to_list(self):
         """元组转换为列表。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _list_value
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _list_value,
+        )
 
         assert _list_value((1, 2)) == [1, 2]
 
     def test_other_values_wrapped(self):
         """其它值包装成单元素列表。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _list_value
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _list_value,
+        )
 
         assert _list_value("string") == ["string"]
         assert _list_value(42) == [42]
@@ -57,14 +65,18 @@ class TestStringListValue:
 
     def test_filters_none_and_empty(self):
         """过滤 None 和空字符串。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _string_list_value
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _string_list_value,
+        )
 
         result = _string_list_value([None, "", "valid"])
         assert result == ["valid"]
 
     def test_converts_to_strings(self):
         """转换为字符串。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _string_list_value
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _string_list_value,
+        )
 
         result = _string_list_value([1, 2, 3])
         assert result == ["1", "2", "3"]
@@ -242,11 +254,13 @@ class TestReadOnlySubagentTools:
 
     def test_read_only_tools_defined(self):
         """验证只读工具列表已定义。"""
-        from agent_py_agent.agent.subagents.manager_base import _READ_ONLY_SUBAGENT_TOOLS
+        from agent_py_agent.agent.agent_core.orchestration.tool_grants import (
+            READ_ONLY_SUBAGENT_TOOLS,
+        )
 
-        assert "list_files" in _READ_ONLY_SUBAGENT_TOOLS
-        assert "read_file" in _READ_ONLY_SUBAGENT_TOOLS
-        assert "search_text" in _READ_ONLY_SUBAGENT_TOOLS
+        assert "list_files" in READ_ONLY_SUBAGENT_TOOLS
+        assert "read_file" in READ_ONLY_SUBAGENT_TOOLS
+        assert "search_text" in READ_ONLY_SUBAGENT_TOOLS
 
 
 class TestCodingSubagentTools:
@@ -254,8 +268,8 @@ class TestCodingSubagentTools:
 
     def test_coding_tools_defined(self):
         """验证编码工具列表已定义。"""
-        from agent_py_agent.agent.subagents.manager_base import _CODING_SUBAGENT_TOOLS
+        from agent_py_agent.agent.agent_core.orchestration.tool_grants import CODING_SUBAGENT_TOOLS
 
-        assert "write_file" in _CODING_SUBAGENT_TOOLS
-        assert "apply_patch" in _CODING_SUBAGENT_TOOLS
-        assert "apply_patch" in _CODING_SUBAGENT_TOOLS
+        assert "write_file" in CODING_SUBAGENT_TOOLS
+        assert "apply_patch" in CODING_SUBAGENT_TOOLS
+        assert "apply_patch" in CODING_SUBAGENT_TOOLS

@@ -1,5 +1,3 @@
-# LLM: Contract trace helpers attach bounded machine call-chain refs to findings.
-# 模块用途: 给合同 finding 增加最多三层结构化 trace，方便调试时不用手动追多级 JSON 引用。
 
 from __future__ import annotations
 
@@ -10,8 +8,6 @@ from typing import Any
 MAX_TRACE_DEPTH = 3
 
 
-# LLM: trace_entry creates one machine-readable contract call-chain item.
-# 函数用途: 生成 trace 节点，只保存阶段、引用和路径等结构化字段，不保存自由文本事实。
 def trace_entry(
     stage: str,
     *,
@@ -29,8 +25,6 @@ def trace_entry(
     return {key: value for key, value in entry.items() if value}
 
 
-# LLM: with_contract_trace merges existing and new trace entries without unbounded growth.
-# 函数用途: 给 finding 附加 bounded trace；旧 trace 保留前缀，新 trace 追加到最多三项。
 def with_contract_trace(
     finding: dict[str, Any],
     entries: Iterable[dict[str, object]] = (),
@@ -44,8 +38,6 @@ def with_contract_trace(
     return merged
 
 
-# LLM: _trace_items keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _trace_items(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []

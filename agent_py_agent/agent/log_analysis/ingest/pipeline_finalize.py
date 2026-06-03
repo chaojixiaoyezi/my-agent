@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 from __future__ import annotations
 
@@ -16,8 +14,6 @@ from .pipeline_helpers import WriteManifestParams, _EnrichCounts
 from .pipeline_helpers import write_manifest as _write_manifest
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 FinalizeIngestParams 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 FinalizeIngestParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class FinalizeIngestParams:
     """Bundle of all finalize_ingest_result parameters."""
@@ -38,8 +34,6 @@ class FinalizeIngestParams:
     cursor_before: dict
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 PreparedFinalize 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 PreparedFinalize 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class PreparedFinalize:
     pipeline: Any
@@ -49,8 +43,6 @@ class PreparedFinalize:
     storage_summary: dict[str, Any]
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 finalize_prepared_ingest 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 finalize prepared ingest 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def finalize_prepared_ingest(request: PreparedFinalize) -> IngestResult:
     prepared = request.prepared
     return finalize_ingest_result(
@@ -73,8 +65,6 @@ def finalize_prepared_ingest(request: PreparedFinalize) -> IngestResult:
     )
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 finalize_ingest_result 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 finalize ingest result 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def finalize_ingest_result(params: FinalizeIngestParams) -> IngestResult:
     """Write manifest, finish dedup batch, commit checkpoint, return IngestResult."""
     manifest_path = _write_manifest(_manifest_params(params))
@@ -101,8 +91,6 @@ def finalize_ingest_result(params: FinalizeIngestParams) -> IngestResult:
     )
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _manifest_params 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 manifest params 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def _manifest_params(params: FinalizeIngestParams) -> WriteManifestParams:
     return WriteManifestParams(
         pipeline=params.pipeline,
@@ -127,8 +115,6 @@ def _manifest_params(params: FinalizeIngestParams) -> WriteManifestParams:
     )
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _finish_dedup_batch 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 finish dedup batch 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def _finish_dedup_batch(params: FinalizeIngestParams, manifest_path: Path) -> None:
     params.pipeline.dedup.finish_batch(
         batch_id=params.batch_id,
@@ -140,8 +126,6 @@ def _finish_dedup_batch(params: FinalizeIngestParams, manifest_path: Path) -> No
     )
 
 
-# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _commit_checkpoint 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 commit checkpoint 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def _commit_checkpoint(params: FinalizeIngestParams):
     return params.pipeline.checkpoints.commit(
         source_id=params.batch_source_id,

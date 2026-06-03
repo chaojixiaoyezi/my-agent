@@ -1,5 +1,3 @@
-# LLM: Fake channels exercise routing semantics without touching real Feishu or WeChat.
-# 模块用途: 提供 internal/fake-feishu/fake-wechat 的离线投递器，供后台主代理测试使用。
 
 from __future__ import annotations
 

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
@@ -15,8 +15,6 @@ from agent_py_agent.agent.subagents.services.qa_role_contract import qa_roles_re
 ORCHESTRATION_TOOLS = ["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"]
 
 
-# LLM: _qa_parent creates a coordinator that explicitly requires all broad QA roles.
-# 函数用途: 构造点名 tester/bug_finder 的父任务，复用在 QA advice 测试里。
 def _qa_parent(manager: SubAgentManager, *, extra_write_roots: list[str] | None = None):
     return manager.create_run(
         goal="父级要做真实分工，完成后需要质量检查。",
@@ -29,8 +27,6 @@ def _qa_parent(manager: SubAgentManager, *, extra_write_roots: list[str] | None 
     )
 
 
-# LLM: explicit QA role contracts should become LLM-facing advice, not hardcoded child creation.
-# 函数用途: 父级点名 tester/bug_finder 时，调度器提示缺失 QA 角色，但不替 LLM 固定创建。
 def test_hierarchy_schedule_advises_required_qa_roles_without_auto_creation(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
@@ -60,8 +56,6 @@ def test_hierarchy_schedule_advises_required_qa_roles_without_auto_creation(tmp_
     assert len(manager.load(parent.id).child_ids) == 1
 
 
-# LLM: persisted QA children should narrow LLM advice instead of forcing deterministic auto-fill.
-# 函数用途: 父级已存在 tester 时，调度器建议缺失 QA 角色，但不自动创建 bug_finder/bug_finder。
 def test_hierarchy_schedule_advice_omits_existing_qa_roles(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     parent = _qa_parent(manager)
@@ -96,8 +90,6 @@ def test_hierarchy_schedule_advice_omits_existing_qa_roles(tmp_path):
     assert result.quality_advice.suggested_roles == ["bug_finder"]
 
 
-# LLM: product delivery parents should not auto-create QA before implementation is ready.
-# 函数用途: 有产物根的父任务先创建/完成 worker 或 leaf，再给 LLM QA advice，避免空 build 上测试空转。
 def test_hierarchy_schedule_defers_auto_qa_until_implementation_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
@@ -124,8 +116,6 @@ def test_hierarchy_schedule_defers_auto_qa_until_implementation_ready(tmp_path):
     assert len(manager.load(parent.id).child_ids) == 1
 
 
-# LLM: once implementation reaches acceptance, required QA advice should invite LLM-chosen checkers.
-# 函数用途: worker 已等待收口后，调度器建议可创建 QA wave，但不直接替 LLM 创建固定角色。
 def test_hierarchy_schedule_quality_advice_after_implementation_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
@@ -159,8 +149,6 @@ def test_hierarchy_schedule_quality_advice_after_implementation_ready(tmp_path):
     assert set(result.quality_advice.suggested_roles) == {"tester", "bug_finder"}
 
 
-# LLM: QA advice must notice ready implementation descendants, not only direct worker children.
-# 函数用途: root 先通过 coordinator 链路完成 leaf 后，再询问 schedule_child_subagents 时应收到 quality_wave_ready。
 def test_hierarchy_schedule_quality_advice_after_implementation_descendant_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
@@ -204,8 +192,6 @@ def test_hierarchy_schedule_quality_advice_after_implementation_descendant_ready
     assert set(result.quality_advice.suggested_roles) == {"tester", "bug_finder"}
 
 
-# LLM: QA workers are terminal reviewer roles, not parents that must spawn another copy of themselves.
-# 函数用途: tester/bug_finder 自己的目标会出现角色名，但验收时不应再要求它们创建同名 QA 子代理。
 def test_qa_role_tasks_do_not_inherit_their_own_required_role_contract(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     task = manager.create_run(
@@ -219,8 +205,6 @@ def test_qa_role_tasks_do_not_inherit_their_own_required_role_contract(tmp_path)
     assert qa_roles_required_by_task(task) == []
 
 
-# LLM: natural QA prose should not become code-layer scheduling obligations.
-# 函数用途: 普通中文“记得测试和验收”不能被 Python 硬解析成 tester/bug_finder；应由 LLM 基于模板索引自行规划。
 def test_qa_role_contract_ignores_natural_language_role_requests(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     task = manager.create_run(

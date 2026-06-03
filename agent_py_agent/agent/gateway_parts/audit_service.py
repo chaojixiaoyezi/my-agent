@@ -1,5 +1,3 @@
-# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
-# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
 
 from __future__ import annotations
 
@@ -20,8 +18,6 @@ if TYPE_CHECKING:
     from ...core import SimpleAgent
 
 
-# LLM: AuditRequestCompletedParams 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 类用途: 集中保存audit请求completed参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class AuditRequestCompletedParams:
     response: dict
@@ -30,8 +26,6 @@ class AuditRequestCompletedParams:
     response_path: Path
 
 
-# LLM: audit_request_processing 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理audit请求processing相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def audit_request_processing(
     agent: SimpleAgent,
     context: dict,
@@ -53,8 +47,6 @@ def audit_request_processing(
     )
 
 
-# LLM: audit_request_completed 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理audit请求completed相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def audit_request_completed(
     agent: SimpleAgent,
     *,
@@ -73,8 +65,6 @@ def audit_request_completed(
     )
 
 
-# LLM: audit_request_queued 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理audit请求queued相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def audit_request_queued(
     agent: SimpleAgent,
     payload: dict,
@@ -90,8 +80,6 @@ def audit_request_queued(
     )
 
 
-# LLM: audit_heartbeat_abandoned 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理auditheartbeatabandoned相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def audit_heartbeat_abandoned(
     agent: SimpleAgent,
     request_id: str,
@@ -106,8 +94,6 @@ def audit_heartbeat_abandoned(
     )
 
 
-# LLM: audit_side_effect_error 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理auditsideeffecterror相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def audit_side_effect_error(
     operation: str,
     request_id: str,

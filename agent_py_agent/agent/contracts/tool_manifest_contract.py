@@ -1,15 +1,12 @@
-# LLM: Shared tool-manifest contracts keep runtime visibility and recovery facts aligned across bundle, list_tools, and replay.
-# 模块用途: 统一生成工具清单、失败分类和恢复合同，避免 context bundle、list_tools 和恢复链各自拼一份工具事实。
 
 from __future__ import annotations
 
 from typing import Any
 
+from ..common.value_parsing import dedupe_strings
 from .error_taxonomy import error_contract, tool_failure_taxonomy
 
 
-# LLM: tool_manifest_payload builds one machine-readable tool surface from specs and runtime grants.
-# 函数用途: 统一返回 visible/executable tools、权限模式、失败分类和恢复合同，供主代理上下文包与 list_tools 共用。
 def tool_manifest_payload(
     tool_specs: list[object],
     *,
@@ -36,15 +33,13 @@ def tool_manifest_payload(
         "visible_tools": visible,
         "executable_tools": executable,
         "permission_mode": _permission_mode(owner_type),
-        "granted_capabilities": _string_list(granted_capabilities),
+        "granted_capabilities": dedupe_strings(granted_capabilities or []),
         "failure_taxonomy": tool_failure_taxonomy(),
         "failure_contracts": _failure_contracts(),
         "tools": tools,
     }
 
 
-# LLM: _tool_item trims tool specs down to stable runtime facts.
-# 函数用途: 从 ToolSpec 或 dict 中提取名字、类别、参数和示例，避免把整份工具手册塞进上下文。
 def _tool_item(value: object) -> dict[str, object]:
     if isinstance(value, dict):
         name = str(value.get("name") or "")
@@ -83,7 +78,7 @@ def _tool_item(value: object) -> dict[str, object]:
         "requires_idempotency": requires_idempotency,
         "requires_approval": requires_approval,
         "timeout_seconds": timeout_seconds,
-        "output_refs": _string_list(output_refs),
+        "output_refs": dedupe_strings(output_refs),
         "parameters": sorted(str(key) for key in param_map),
         "parameter_details": {str(key): str(val) for key, val in detail_map.items()},
         "examples": [str(item) for item in list(examples or ())[:2]],
@@ -91,21 +86,15 @@ def _tool_item(value: object) -> dict[str, object]:
     }
 
 
-# LLM: _visible_tools treats explicit allowed_tools as runtime visibility hints, not permanent hard-coded contracts.
-# 函数用途: allowed_tools 存在时按它决定当前可见工具；否则回退到 specs 里的全部工具名。
 def _visible_tools(spec_names: list[str], allowed_tools: list[str] | None) -> list[str]:
-    allowed = _string_list(allowed_tools)
+    allowed = dedupe_strings(allowed_tools or [])
     return allowed or spec_names
 
 
-# LLM: _permission_mode keeps owner-scoped bundle readers from inferring policy from prose.
-# 函数用途: 根据 owner_type 返回稳定权限模式名。
 def _permission_mode(owner_type: str) -> str:
     return "same_as_root_agent" if str(owner_type or "").strip() == "main_agent" else "owner_scoped"
 
 
-# LLM: _failure_contracts exposes structured recovery facts instead of only raw error-code strings.
-# 函数用途: 把工具失败分类扩展成 code/category/retryable/recommended_action/recovery_hint，方便恢复链直接消费。
 def _failure_contracts() -> list[dict[str, object]]:
     return [
         {
@@ -120,21 +109,6 @@ def _failure_contracts() -> list[dict[str, object]]:
     ]
 
 
-# LLM: _string_list normalizes optional list inputs without importing larger utility modules.
-# 函数用途: 将 granted_capabilities / allowed_tools 这类可空列表规整成去重字符串数组。
-def _string_list(items: object) -> list[str]:
-    result: list[str] = []
-    if not isinstance(items, (list, tuple, set)):
-        return result
-    for item in items:
-        text = str(item or "").strip()
-        if text and text not in result:
-            result.append(text)
-    return result
-
-
-# LLM: _int_or_zero keeps manifest rendering deterministic for optional numeric fields.
-# 函数用途: 将 timeout_seconds 这类可选数字字段规整成 int，非法值暴露为 0 供执行门再拒绝。
 def _int_or_zero(value: object) -> int:
     if value in (None, ""):
         return 0

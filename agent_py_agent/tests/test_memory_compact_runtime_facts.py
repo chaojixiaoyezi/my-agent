@@ -1,5 +1,3 @@
-# LLM: Runtime fact source tests prove real run --save can feed compact resume work_state fields.
-# 模块用途: 验证真实 CLI run 写入显式验收、约束、测试事实源，并让 auto resume 在字段齐全时放行。
 
 from __future__ import annotations
 
@@ -22,8 +20,6 @@ from agent_py_agent.agent.memory_archive.runtime_fact_source import (
 )
 
 
-# LLM: test_real_run_runtime_fact_source_allows_complete_compact_resume covers the saved-run CLI path.
-# 函数用途: 跑真实 echo backend run --save，再确认 compact apply 读取 runtime_facts 并让 auto guard 放行。
 def test_real_run_runtime_fact_source_allows_complete_compact_resume(tmp_path: Path, capsys) -> None:
     config_path = _write_config(tmp_path)
     run_args = build_parser().parse_args(["--config", str(config_path), "run", _explicit_prompt(), "--save"])
@@ -48,8 +44,6 @@ def test_real_run_runtime_fact_source_allows_complete_compact_resume(tmp_path: P
     assert resume["completion_prompt"]["status"] == "complete"
 
 
-# LLM: test_runtime_fact_source_stops_sections_at_unknown_headings guards scoped facts from prompt prose bleed.
-# 函数用途: 确认显式验收段落后遇到未知标题时会停止收集，避免实施步骤被当成验收事实。
 def test_runtime_fact_source_stops_sections_at_unknown_headings(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
 
@@ -81,8 +75,6 @@ def test_runtime_fact_source_stops_sections_at_unknown_headings(tmp_path: Path) 
     assert "do not treat this as acceptance" not in payload["acceptance"]
 
 
-# LLM: Generated compact continuation packets should carry facts into the next compact cycle.
-# 函数用途: 验证 runtime facts 会解析受控 Compact Auto Continuation 注入块，但不会把后续标题下的内容串场。
 def test_runtime_fact_source_reads_compact_auto_continuation_injection(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
 
@@ -121,8 +113,6 @@ def test_runtime_fact_source_reads_compact_auto_continuation_injection(tmp_path:
     assert payload["latest_tests"] == ["focused compact continuation test"]
 
 
-# LLM: Compact work-state should not treat repository checklists as this run's task facts.
-# 函数用途: 防止 workspace 根目录 TEST_CHECKLIST.md 污染普通真实任务的 compact 交接。
 def test_compact_work_state_does_not_import_workspace_root_checklist(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     root.mkdir()
@@ -152,8 +142,6 @@ def test_compact_work_state_does_not_import_workspace_root_checklist(tmp_path: P
     assert work_state["read_files"] == []
 
 
-# LLM: _write_config keeps the real-run test isolated from repository and user config.
-# 函数用途: 写入临时 echo backend 配置，让测试只使用 tmp_path workspace。
 def _write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
@@ -169,20 +157,14 @@ def _write_config(tmp_path: Path) -> Path:
     return config_path
 
 
-# LLM: _workspace mirrors CLI workspace root resolution for the temporary config.
-# 函数用途: 返回临时配置对应的 workspace 路径，供 compact apply/resume 直接读取。
 def _workspace(config_path: Path) -> Path:
     return config_path.parent / "workspace"
 
 
-# LLM: _owner_home mirrors the default local/main owner home under the temp config.
-# 函数用途: 返回临时配置的 owner home，用于断言 V2 runtime facts 不再写 workspace 根。
 def _owner_home(config_path: Path) -> Path:
     return config_path.parent / "home" / "owners" / "local" / "main"
 
 
-# LLM: _explicit_prompt includes labeled fields that runtime_fact_source is allowed to persist.
-# 函数用途: 构造带显式验收、约束、测试章节的用户输入，避免测试依赖自然语言猜测。
 def _explicit_prompt() -> str:
     return (
         "真实运行 compact/resume 可用性测试。\n"

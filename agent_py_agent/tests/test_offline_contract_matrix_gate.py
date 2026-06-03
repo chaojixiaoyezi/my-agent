@@ -3,8 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 
-# LLM: Offline matrix gate should pass only when all broad contract areas exist and code-size is clean.
-# 函数用途: 验证当前仓库离线矩阵覆盖文件齐全，且 high-risk/soft 计数为 0。
 def test_offline_contract_matrix_gate_passes_current_repo() -> None:
     from scripts.check_offline_contract_matrix import check_offline_contract_matrix, main
 
@@ -19,8 +17,6 @@ def test_offline_contract_matrix_gate_passes_current_repo() -> None:
     assert main(["--repo-root", str(repo_root), "--json"]) == 0
 
 
-# LLM: Offline matrix gate should report missing areas as machine findings.
-# 函数用途: 验证缺少必需合同文件时会返回 OFFLINE_MATRIX_FILE_MISSING。
 def test_offline_contract_matrix_gate_reports_missing_files(tmp_path: Path) -> None:
     from scripts.check_offline_contract_matrix import check_offline_contract_matrix
 
@@ -36,8 +32,6 @@ def test_offline_contract_matrix_gate_reports_missing_files(tmp_path: Path) -> N
     assert report.findings[0]["code"] == "OFFLINE_MATRIX_FILE_MISSING"
 
 
-# LLM: Offline matrix gate should fail if code-size report has high-risk or soft findings.
-# 函数用途: 验证 high_risk_findings/soft_findings 非 0 会阻断离线矩阵验收。
 def test_offline_contract_matrix_gate_reports_code_size_findings(tmp_path: Path) -> None:
     from scripts.check_offline_contract_matrix import check_offline_contract_matrix
 
@@ -58,8 +52,6 @@ def test_offline_contract_matrix_gate_reports_code_size_findings(tmp_path: Path)
     assert {"CODE_SIZE_HIGH_RISK_NOT_ZERO", "CODE_SIZE_SOFT_NOT_ZERO"} <= {item["code"] for item in report.findings}
 
 
-# LLM: _required_matrix_paths mirrors the gate's public required file map for temp repo setup.
-# 函数用途: 给测试临时仓库补齐矩阵文件，专注测试 code-size 分支。
 def _required_matrix_paths() -> tuple[str, ...]:
     from scripts.check_offline_contract_matrix import REQUIRED_AREAS
 

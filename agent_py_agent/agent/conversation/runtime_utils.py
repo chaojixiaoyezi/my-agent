@@ -1,5 +1,3 @@
-# LLM: Shared runtime helpers for background main-agent wakeups.
-# 模块用途: 提供后台主代理 runtime/scheduler/channel 共用的小型转换函数。
 
 from __future__ import annotations
 

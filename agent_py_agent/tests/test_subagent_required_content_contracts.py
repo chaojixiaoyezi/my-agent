@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from agent_py_agent.agent.subagents.execution_test_items import (
+from agent_py_agent.agent.subagents.execution import (
     TestItemPreparationRequest,
     prepare_test_items,
 )
@@ -14,8 +14,6 @@ from agent_py_agent.agent.subagents.required_content_lines import (
 )
 
 
-# LLM: Required content lines should become parent content checks for non-web artifacts.
-# 函数用途: 子代理只报告一个普通文件产物时，父级能按机器字段检查关键内容，不依赖模型自评。
 def test_prepare_test_items_infers_content_checks_for_single_file_artifact(tmp_path):
     report_dir = tmp_path / "deliverables" / "orders"
     report_dir.mkdir(parents=True)
@@ -50,8 +48,6 @@ def test_prepare_test_items_infers_content_checks_for_single_file_artifact(tmp_p
     ]
 
 
-# LLM: Ambiguous multi-artifact outputs should not guess which file owns required lines.
-# 函数用途: 有多个普通文件产物时先不自动猜目标文件，避免把验收内容套到错误文件上。
 def test_prepare_test_items_does_not_guess_required_content_file_for_multiple_artifacts(tmp_path):
     report_dir = tmp_path / "deliverables" / "orders"
     report_dir.mkdir(parents=True)
@@ -72,8 +68,6 @@ def test_prepare_test_items_does_not_guess_required_content_file_for_multiple_ar
     assert prepared == []
 
 
-# LLM: Explicit per-file content contracts let closeout validate multi-file outputs safely.
-# 函数用途: 多个普通文件产物时，只按文件名映射生成对应 content_check，不靠顺序猜测。
 def test_prepare_test_items_infers_content_checks_for_mapped_file_artifacts(tmp_path):
     report_dir = tmp_path / "deliverables" / "order-pack"
     report_dir.mkdir(parents=True)
@@ -116,8 +110,6 @@ def test_prepare_test_items_infers_content_checks_for_mapped_file_artifacts(tmp_
     ]
 
 
-# LLM: Structured required content text should keep CSV commas intact.
-# 函数用途: 从内部验收合同提取必须出现的文本行，按竖线拆分，不把 CSV 逗号误当分隔符。
 def test_required_content_lines_from_structured_acceptance_text():
     lines = required_content_lines_from_texts([
         "required_content_lines: order_id,customer,total,status,notes | A-1001,Lin Studio,299.00,PAID,first order",
@@ -130,8 +122,6 @@ def test_required_content_lines_from_structured_acceptance_text():
     ]
 
 
-# LLM: natural exact-line instructions are no longer parsed by product code.
-# 函数用途: 普通中文说明不能替代 required_content_lines 机器字段，避免代码层靠自然语言猜验收内容。
 def test_required_content_lines_ignores_natural_exact_line_count_block():
     lines = required_content_lines_from_texts([
         """
@@ -147,8 +137,6 @@ def test_required_content_lines_ignores_natural_exact_line_count_block():
     assert lines == []
 
 
-# LLM: fenced prose without a protocol field is deliberately ignored.
-# 函数用途: 代码块本身不能成为硬验收合同，必须由 required_content_lines 字段承载。
 def test_required_content_lines_ignores_natural_fenced_expected_block():
     lines = required_content_lines_from_texts([
         """
@@ -165,8 +153,6 @@ def test_required_content_lines_ignores_natural_fenced_expected_block():
     assert lines == []
 
 
-# LLM: Per-file content contracts are explicit enough for multi-artifact parent checks.
-# 函数用途: 只从 `required_content_lines[file]` 机器字段提取文件到内容行的映射。
 def test_required_content_lines_by_file_from_structured_text():
     mapping = required_content_lines_by_file_from_texts([
         "required_content_lines[orders.csv]: order_id,total | A-1001,299.00",
@@ -179,8 +165,6 @@ def test_required_content_lines_by_file_from_structured_text():
     }
 
 
-# LLM: task-level content contracts must come from attributes, not goal/acceptance prose.
-# 函数用途: 确认运行时验收不会从普通 task 文本里解析 required_content_lines。
 def test_required_content_for_task_ignores_text_fields_and_reads_attributes():
     task = SimpleNamespace(
         goal="required_content_lines: should-not-count",
@@ -196,8 +180,6 @@ def test_required_content_for_task_ignores_text_fields_and_reads_attributes():
     assert required_content_lines_by_file_for_task(task) == {"report.md": ["# 记录报告"]}
 
 
-# LLM: text-only task fields are no longer machine facts for content acceptance.
-# 函数用途: 即便 goal/acceptance_checks 写了 required_content_lines，缺 attributes 时也不生成验收合同。
 def test_required_content_for_task_does_not_parse_goal_or_acceptance_checks():
     task = SimpleNamespace(
         goal="required_content_lines: should-not-count",
@@ -210,8 +192,6 @@ def test_required_content_for_task_does_not_parse_goal_or_acceptance_checks():
     assert required_content_lines_by_file_for_task(task) == {}
 
 
-# LLM: create_run should persist structured content contracts without text-field parsing.
-# 函数用途: 验证子代理创建入口能直接接收 attributes，后续最终收口从这里读内容合同。
 def test_create_run_persists_required_content_attributes(tmp_path):
     from agent_py_agent.agent.subagents.manager import SubAgentManager
 

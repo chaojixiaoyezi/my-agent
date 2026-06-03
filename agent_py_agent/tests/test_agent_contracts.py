@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 
-# LLM: Core contracts should be machine-readable and reusable across main/subagent flows.
-# 函数用途: 验证错误分类、状态机、幂等键和真实 E2E 矩阵先有统一合同，不再靠零散 guard。
 def test_error_taxonomy_classifies_failures_and_recommends_recovery() -> None:
     from agent_py_agent.agent.contracts.error_taxonomy import classify_error, error_contract
 
@@ -17,7 +15,7 @@ def test_error_taxonomy_classifies_failures_and_recommends_recovery() -> None:
 
     contract = error_contract("ARTIFACT_MISSING")
     assert contract.category == "artifact"
-    assert contract.recommended_action == "read_or_rebuild_artifact_ref"
+    assert contract.recommended_action == "read_artifact_ref"
 
     approval = classify_error("dangerous command blocked: approval required before execution")
     assert approval.code == "APPROVAL_REQUIRED"
@@ -25,11 +23,9 @@ def test_error_taxonomy_classifies_failures_and_recommends_recovery() -> None:
 
     no_progress = error_contract("NO_PROGRESS")
     assert no_progress.category == "orchestration"
-    assert no_progress.recommended_action == "change_strategy_or_stop"
+    assert no_progress.recommended_action == "change_strategy"
 
 
-# LLM: Raw text fallback must not let generic words like schema/path outrank concrete failure signals.
-# 函数用途: 验证错误分类优先读更明确的结构化失败语义，避免宽匹配带偏恢复策略。
 def test_error_taxonomy_does_not_overclassify_generic_schema_or_path_words() -> None:
     from agent_py_agent.agent.contracts.error_taxonomy import classify_error
 
@@ -40,8 +36,6 @@ def test_error_taxonomy_does_not_overclassify_generic_schema_or_path_words() -> 
     assert generic_schema.code == "UNKNOWN_ERROR"
 
 
-# LLM: Error classification should be rule-ranked and multilingual without broad text authority.
-# 函数用途: 验证错误分类按明确失败信号排序，并支持中文运行错误，不把普通正文当机器事实。
 def test_error_taxonomy_uses_ranked_specific_matches_and_chinese_signals() -> None:
     from agent_py_agent.agent.contracts.error_taxonomy import (
         classify_error,
@@ -61,8 +55,6 @@ def test_error_taxonomy_uses_ranked_specific_matches_and_chinese_signals() -> No
     assert {"RATE_LIMITED", "QUOTA_EXCEEDED", "MAINTENANCE"}.issubset(taxonomy)
 
 
-# LLM: State machine decisions must be facts, not prompt-specific guard prose.
-# 函数用途: 验证统一状态机能判断是否可调度、是否可收口、失败后应修复还是接管。
 def test_run_state_machine_dispatch_closeout_and_recovery_decisions() -> None:
     from agent_py_agent.agent.contracts.state_machine import (
         RunStateFacts,
@@ -79,24 +71,24 @@ def test_run_state_machine_dispatch_closeout_and_recovery_decisions() -> None:
     assert can_closeout(RunStateFacts(status="DONE", verification_status="VERIFIED")) is True
 
     blocked = recovery_decision(RunStateFacts(status="BLOCKED", failure_type="TOOL_UNAVAILABLE"))
-    assert blocked.action == "repair_or_request_capability"
+    assert blocked.action == "request_capability"
     assert blocked.allow_new_run is False
 
     approval = recovery_decision(RunStateFacts(status="FAILED", failure_type="APPROVAL_REQUIRED"))
-    assert approval.action == "request_approval_or_stop"
+    assert approval.action == "request_approval"
+    assert approval.fallback_action == "stop"
     assert approval.allow_new_run is False
 
     no_progress = recovery_decision(RunStateFacts(status="BLOCKED", failure_type="NO_PROGRESS"))
-    assert no_progress.action == "change_strategy_or_stop"
+    assert no_progress.action == "change_strategy"
+    assert no_progress.fallback_action == "stop"
     assert no_progress.allow_new_run is False
 
     failed = recovery_decision(RunStateFacts(status="FAILED", attempts=3, max_attempts=3))
-    assert failed.action == "takeover_or_stop"
+    assert failed.action == "takeover"
     assert failed.allow_new_run is True
 
 
-# LLM: State-machine recovery should not silently hide unhandled states or infinite blocked repairs.
-# 函数用途: 验证状态机兜底会写 warning，BLOCKED 也受 attempts 限制，证据/阶段 JSON 错误有明确返工动作。
 def test_run_state_machine_warns_and_uses_structured_recovery_actions(caplog) -> None:
     from agent_py_agent.agent.contracts.state_machine import (
         RunStateFacts,
@@ -115,7 +107,7 @@ def test_run_state_machine_warns_and_uses_structured_recovery_actions(caplog) ->
     assert can_repair(RunStateFacts(status="BLOCKED", attempts=1, max_attempts=2)) is True
     assert can_repair(RunStateFacts(status="BLOCKED", attempts=2, max_attempts=2)) is False
     exhausted = recovery_decision(RunStateFacts(status="BLOCKED", attempts=2, max_attempts=2))
-    assert exhausted.action == "takeover_or_stop"
+    assert exhausted.action == "takeover"
     assert exhausted.allow_new_run is True
 
     with caplog.at_level("WARNING"):
@@ -124,8 +116,6 @@ def test_run_state_machine_warns_and_uses_structured_recovery_actions(caplog) ->
     assert "unhandled recovery state" in caplog.text
 
 
-# LLM: State machine snapshots should normalize legacy task objects into one contract shape.
-# 函数用途: 验证调度层可以从任意 task-like 对象得到统一状态、错误类型和 closeout 结果。
 def test_run_state_snapshot_from_task_like_object() -> None:
     from types import SimpleNamespace
 
@@ -151,8 +141,6 @@ def test_run_state_snapshot_from_task_like_object() -> None:
     assert snapshot["recovery_decision"]["action"] == "repair"
 
 
-# LLM: Idempotency keys make duplicate model calls safe without hardcoding workflow guards.
-# 函数用途: 验证幂等键对 dict/list 顺序稳定，并能生成 create/dispatch/compact 的通用操作键。
 def test_idempotency_contract_stable_keys_and_operation_shapes() -> None:
     from agent_py_agent.agent.contracts.idempotency import idempotency_key, operation_id
 
@@ -184,8 +172,6 @@ def test_idempotency_contract_stable_keys_and_operation_shapes() -> None:
     )
 
 
-# LLM: Real E2E matrix must be a data contract so CI/manual runners can execute the same scenarios.
-# 函数用途: 验证真实端到端测试矩阵覆盖主代理、compact、artifact、失败修复和子代理复用内核。
 def test_real_e2e_matrix_contains_required_scenarios() -> None:
     from agent_py_agent.agent.contracts.e2e_matrix import REAL_E2E_MATRIX, required_matrix_ids
 
@@ -198,8 +184,6 @@ def test_real_e2e_matrix_contains_required_scenarios() -> None:
     assert all(item.acceptance for item in REAL_E2E_MATRIX)
 
 
-# LLM: Acceptance contracts should combine artifacts, tests, and run state into one final gate.
-# 函数用途: 验证任务完成判断能用结构化产物报告、真实测试记录和状态机结果统一判定。
 def test_acceptance_contract_evaluates_artifacts_tests_and_state(tmp_path) -> None:
     from agent_py_agent.agent.contracts.acceptance_contract import (
         AcceptanceContract,
@@ -211,7 +195,7 @@ def test_acceptance_contract_evaluates_artifacts_tests_and_state(tmp_path) -> No
         validate_artifact,
     )
     from agent_py_agent.agent.contracts.state_machine import RunStateFacts
-    from agent_py_agent.agent.subagents.execution_records import TestExecutionRecord
+    from agent_py_agent.agent.subagents.execution import TestExecutionRecord
 
     artifact = tmp_path / "report.json"
     artifact.write_text('{"ok": true}', encoding="utf-8")
@@ -241,8 +225,6 @@ def test_acceptance_contract_evaluates_artifacts_tests_and_state(tmp_path) -> No
     }
 
 
-# LLM: Acceptance constraints are machine criteria metadata, not dead fields.
-# 函数用途: 验证 constraints 会进入验收 finding，后续人工/返工链路能看到约束事实。
 def test_acceptance_contract_records_constraints_as_criteria(tmp_path) -> None:
     from agent_py_agent.agent.contracts.acceptance_contract import (
         AcceptanceContract,

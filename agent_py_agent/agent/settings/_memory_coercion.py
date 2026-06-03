@@ -1,7 +1,5 @@
 """Coercion helpers for memory-related config fields."""
 
-# LLM: 配置值的拒绝条件会影响安全边界和用户提示，调整时同步配置测试。
-# 模块用途: 内存配置的严格类型转换与告警生成，避免宽松配置进入运行态。
 
 from __future__ import annotations
 
@@ -16,8 +14,6 @@ _MISSING = object()
 _INT_PATTERN = re.compile(r"-?[0-9]+")
 
 
-# LLM: _FieldSpec 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: 内存配置字段规范，保存字段名、默认值和类型转换策略。
 @dataclass(frozen=True)
 class _FieldSpec:
     field_name: str
@@ -27,8 +23,6 @@ class _FieldSpec:
     choices: set[str] | None = None
 
 
-# LLM: _WarningDraft 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: 配置告警草稿，先收集字段和值再生成用户可见告警。
 @dataclass(frozen=True)
 class _WarningDraft:
     field_name: str
@@ -37,8 +31,6 @@ class _WarningDraft:
     reason: str
 
 
-# LLM: _ChoiceCoercion 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: 枚举配置转换参数，保存允许值和默认选择。
 @dataclass(frozen=True)
 class _ChoiceCoercion:
     field_name: str
@@ -48,8 +40,6 @@ class _ChoiceCoercion:
     warnings: list[MemoryConfigWarning]
 
 
-# LLM: _IntCoercion 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: 整数配置转换参数，保存默认值和闭区间边界。
 @dataclass(frozen=True)
 class _IntCoercion:
     field_name: str
@@ -75,8 +65,6 @@ _FIELDS = (
 )
 
 
-# LLM: _build_memory_settings_dict 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 组装 build_memory_settings_dict 需要的结构化对象或服务实例。
 def _build_memory_settings_dict(
     source: Mapping[str, Any] | object,
     defaults: MemorySettings,
@@ -89,8 +77,6 @@ def _build_memory_settings_dict(
     return result
 
 
-# LLM: _coerce_field 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 把原始配置值转换成目标类型，失败时回退默认值并记录告警。
 def _coerce_field(
     spec: _FieldSpec,
     source: Mapping[str, Any] | object,
@@ -118,8 +104,6 @@ def _coerce_field(
     )
 
 
-# LLM: _coerce_compact_trigger_percent keeps the only user-facing compact threshold simple and bounded.
-# 函数用途: 归一化 memory_compact_auto_trigger_percent；缺省用默认值，0 表示 100，小于 50 抬到 50。
 def _coerce_compact_trigger_percent(
     field_name: str,
     raw_value: Any,
@@ -145,8 +129,6 @@ def _coerce_compact_trigger_percent(
     return number
 
 
-# LLM: _lookup 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 配置系统 中的 lookup 步骤，并保持调用方依赖的数据形状。
 def _lookup(source: Mapping[str, Any] | object, field_name: str) -> Any:
     """Read a raw config field from a mapping or dataclass-like object."""
     if isinstance(source, Mapping):
@@ -154,8 +136,6 @@ def _lookup(source: Mapping[str, Any] | object, field_name: str) -> Any:
     return getattr(source, field_name, _MISSING)
 
 
-# LLM: _warn 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 配置系统 中的 warn 步骤，并保持调用方依赖的数据形状。
 def _warn(
     warnings: list[MemoryConfigWarning],
     draft: _WarningDraft,
@@ -171,8 +151,6 @@ def _warn(
     )
 
 
-# LLM: _coerce_bool 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 把原始配置值转换成目标类型，失败时回退默认值并记录告警。
 def _coerce_bool(
     field_name: str,
     raw_value: Any,
@@ -197,8 +175,6 @@ def _coerce_bool(
     return default
 
 
-# LLM: _coerce_choice 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 把原始配置值转换成目标类型，失败时回退默认值并记录告警。
 def _coerce_choice(params: _ChoiceCoercion) -> str:
     """Parse an enum-like string config value against an allowlist."""
     if params.raw_value is _MISSING:
@@ -214,8 +190,6 @@ def _coerce_choice(params: _ChoiceCoercion) -> str:
     return params.default
 
 
-# LLM: _coerce_int 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 把原始配置值转换成目标类型，失败时回退默认值并记录告警。
 def _coerce_int(
     request: _IntCoercion,
     *,
@@ -240,8 +214,6 @@ def _coerce_int(
     return number
 
 
-# LLM: _memory_int_number 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 配置系统 中的 memory_int_number 步骤，并保持调用方依赖的数据形状。
 def _memory_int_number(raw_value: Any) -> int | None:
     if isinstance(raw_value, bool):
         return None

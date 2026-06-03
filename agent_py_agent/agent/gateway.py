@@ -1,11 +1,8 @@
-# LLM: Agent package module; keep public imports and cross-module compatibility stable.
-# 模块用途: 提供 agent 核心功能的一部分，对外暴露稳定入口或兼容转发。
 
 from __future__ import annotations
 
 """compatibility facade for the split `agent.gateway_parts` modules.
 
-给人看的解释：
 真正的 gateway 实现已经拆到 `agent_py_agent.agent.gateway_parts` 目录。
 这个文件保留老导入路径，避免 `from agent_py_agent.agent.gateway import ...` 的调用方失效。
 新代码可以优先按职责导入 gateway_parts 里的具体模块。

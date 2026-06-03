@@ -1,5 +1,3 @@
-# LLM: Context bundle internal-root helpers keep user product roots separate from run-private files.
-# 模块用途: 归一 task 内部目录，用于过滤 allowed_write_roots 里的非交付目录。
 
 from __future__ import annotations
 

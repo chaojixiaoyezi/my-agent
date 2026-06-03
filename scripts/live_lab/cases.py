@@ -1,11 +1,8 @@
-# LLM: Live Lab validation script; keep CLI flags, artifact paths, and replay outputs stable for scenario tests.
-# 模块用途: 支撑可见验收和回放场景，负责启动案例、整理输出或生成报告。
 
 from __future__ import annotations
 
 """concrete Live Lab case implementations.
 
-给人看的解释：
 这里放每种测试场景具体做什么。
 以后要加“记忆长任务”“工具边界任务”“问题任务”，优先在这里加一个新的 case。
 """
@@ -24,16 +21,11 @@ from .main_agent_complex_case import (
     case_main_tool_failure_recovery,
 )
 
-# LLM: Case imports stay explicit so adding a real canary also updates docs and tests in one place.
-# 函数用途: 下面的 run_case 字典是 CLI suite 字符串到真实 case 函数的公开调度表。
 # 2026-05-18: main-complex/main-artifact cases stay imported here only for suite dispatch; task logic lives in split main-agent case modules.
 
-# LLM: run_case 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_case(lab, case_name: str) -> None:
     """dispatches a suite case name to its implementation.
 
-    给人看的解释：
     suite 里保存的是字符串，比如 `health`。
     这里把字符串转成真正要执行的函数。"""
 
@@ -51,12 +43,9 @@ def run_case(lab, case_name: str) -> None:
     handlers[case_name](lab)
 
 
-# LLM: case_health 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def case_health(lab) -> None:
     """validates CLI wiring and local observability without calling a model.
 
-    给人看的解释：
     这是最便宜的健康检查：看 CLI 能不能启动、LocalStore/gateway 状态能不能读。
     它不调用真实 LLM，适合每次开发完先跑一下。"""
 
@@ -67,12 +56,9 @@ def case_health(lab) -> None:
     lab.run_command(lab.agent_command("gateway", "status"), timeout=60)
 
 
-# LLM: case_bad_weather 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def case_bad_weather(lab) -> None:
     """runs focused recovery/guard scenarios that do not require real LLM calls.
 
-    给人看的解释：
     这组是“坏天气测试”：伪造完成、gateway 崩溃残留、坏 JSON、runner 临时失败。
     它们用固定/模拟后端复现坑位，适合快速回归系统边界。"""
 
@@ -100,8 +86,6 @@ def case_bad_weather(lab) -> None:
         )
 
 
-# LLM: case_log_analysis_replay 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def case_log_analysis_replay(lab) -> None:
     """Run the offline SecurityAlertV1 replay without a model call."""
 
@@ -120,12 +104,9 @@ def case_log_analysis_replay(lab) -> None:
         raise RuntimeError(f"log analysis replay failed at {summary.get('failed_stage')}: {summary.get('error')}")
 
 
-# LLM: case_gateway_ask 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def case_gateway_ask(lab) -> None:
     """starts gateway and sends one real LLM ask through the runtime path.
 
-    给人看的解释：
     这是最小真实模型路径：
     先启动后台 gateway，再把一条 prompt 投进去，等真实模型回包，最后关闭 gateway。
     你能在终端看到我们发了什么、命令怎么跑、返回 JSON 是什么。"""
@@ -142,8 +123,6 @@ def case_gateway_ask(lab) -> None:
     lab.record_prompt("gateway_ask", prompt)
     lab.run_command(lab.agent_command("gateway", "start", "--force"), timeout=90)
     try:
-        # LLM: Gateway wait budget covers multi-turn ask orchestration; request_timeout remains per model call.
-        # 函数用途: 真实 gateway case 使用总等待预算，避免多工具轮任务被测试台提前杀掉。
         response = lab.run_command(
             lab.agent_command(
                 "gateway",
@@ -167,12 +146,9 @@ def case_gateway_ask(lab) -> None:
         )
 
 
-# LLM: case_long_subagent 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def case_long_subagent(lab) -> None:
     """runs the existing happy-path scenario with real gateway, runners, and acceptance.
 
-    给人看的解释：
     这是比较接近真实工作的长链路测试：
     gateway 收到任务、主代理派工、runner 读写文件、父代理验收，全部关在隔离 fixture 里。"""
 

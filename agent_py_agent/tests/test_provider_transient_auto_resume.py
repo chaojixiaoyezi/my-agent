@@ -34,7 +34,7 @@ def test_provider_transient_model_turn_retries_with_configured_schedule(
     monkeypatch.setattr(
         provider_transient_auto_resume,
         "provider_transient_retry_delays",
-        lambda: (10.0, 25.0, 45.0, 100.0, 180.0),
+        lambda _policy=None: (10.0, 25.0, 45.0, 100.0, 180.0),
     )
 
     agent = SimpleAgent(
@@ -65,7 +65,7 @@ def test_provider_transient_model_turn_raises_after_schedule_exhausted(
     monkeypatch.setattr(
         provider_transient_auto_resume,
         "provider_transient_retry_delays",
-        lambda: (10.0, 25.0),
+        lambda _policy=None: (10.0, 25.0),
     )
 
     agent = SimpleAgent(
@@ -92,7 +92,7 @@ def test_provider_transient_empty_schedule_disables_auto_resume(
     from agent_py_agent.agent.agent_core import provider_transient_auto_resume
 
     monkeypatch.setattr(provider_transient_auto_resume.time, "sleep", lambda _delay: None)
-    monkeypatch.setattr(provider_transient_auto_resume, "provider_transient_retry_delays", lambda: ())
+    monkeypatch.setattr(provider_transient_auto_resume, "provider_transient_retry_delays", lambda _policy=None: ())
 
     agent = SimpleAgent(
         AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
@@ -114,7 +114,18 @@ def test_provider_transient_retry_delays_allow_empty_config(monkeypatch) -> None
     monkeypatch.setattr(
         provider_transient_auto_resume,
         "runtime_guard_data",
-        lambda: {"provider_transient_auto_resume_delays_seconds": []},
+        lambda **_kwargs: {"provider_transient_auto_resume_delays_seconds": []},
     )
 
     assert provider_transient_auto_resume.provider_transient_retry_delays() == ()
+
+
+def test_provider_transient_retry_delays_use_passed_policy() -> None:
+    from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
+
+    policy = RuntimeGuardPolicy(
+        values={"provider_transient_auto_resume_delays_seconds": [1, "2.5", "bad", 0, -1]},
+        sources={"provider_transient_auto_resume_delays_seconds": "agent.runtime_guard_policy"},
+    )
+
+    assert provider_transient_auto_resume.provider_transient_retry_delays(policy) == (1.0, 2.5)

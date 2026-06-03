@@ -32,8 +32,6 @@ from agent_py_agent.agent.user_space.context_bundle import (
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
 
-# LLM: This fixture creates a compactable scope with state, a root context bundle, and a tool artifact.
-# 函数用途: 为重复 compact/resume 测试准备稳定任务事实，覆盖主上下文、下一步和大工具输出线索。
 def _write_repeat_compact_fixture(root: Path, home: Path) -> tuple[str, str]:
     _write_repeat_memory_facts(root)
     artifact_ref = _write_repeat_tool_output(root)
@@ -51,8 +49,6 @@ def _write_repeat_compact_fixture(root: Path, home: Path) -> tuple[str, str]:
     return bundle.json_path, artifact_ref
 
 
-# LLM: _write_repeat_memory_facts records the durable task state that every compact cycle must preserve.
-# 函数用途: 写入 raw、snapshot 和 token ledger，让 work_state 在多轮压缩后仍能恢复目标和下一步。
 def _write_repeat_memory_facts(root: Path) -> None:
     append_raw_event(
         root,
@@ -99,8 +95,6 @@ def _write_repeat_memory_facts(root: Path) -> None:
     )
 
 
-# LLM: _write_repeat_tool_output adds a large output ref that should survive every resume packet.
-# 函数用途: 写入正式 tool output index，验证重复 compact 不会丢失可恢复的大输出 artifact 引用。
 def _write_repeat_tool_output(root: Path) -> str:
     record = externalize_tool_output_record(
         ExternalizeToolOutputRequest(
@@ -117,8 +111,6 @@ def _write_repeat_tool_output(root: Path) -> str:
     return str(record["artifact_ref"])
 
 
-# LLM: _append_live_raw_message creates scoped raw records for compact live-hint tests.
-# 函数用途: 写入同一 request/run/task 下的用户或 live 工具轮事件，避免测试函数堆满样板字段。
 def _append_live_raw_message(root: Path, *, speaker: str, action: str, content: str) -> None:
     append_raw_event(
         root,
@@ -140,8 +132,6 @@ def _append_live_raw_message(root: Path, *, speaker: str, action: str, content: 
     )
 
 
-# LLM: Repeated compact cycles must form an auditable lineage and keep recovery facts intact.
-# 函数用途: 连续执行五次 compact apply/resume，验证不会覆盖旧包、不会丢上下文包、产物引用和下一步。
 def test_repeated_compact_apply_resume_preserves_lineage_and_state(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     bundle_ref, artifact_ref = _write_repeat_compact_fixture(root, tmp_path / "home")
@@ -182,8 +172,6 @@ def test_repeated_compact_apply_resume_preserves_lineage_and_state(tmp_path: Pat
     assert ledger_rows[-1]["lineage"]["previous_apply_id"] == apply_ids[-2]
 
 
-# LLM: Compact apply must produce a machine state and a readable handoff before runtime auto-compact uses it.
-# 函数用途: 验证 compact 本体产物同时包含机器可读状态和给模型续接用的交接摘要，而不是只写零散 refs。
 def test_compact_apply_writes_machine_state_and_handoff_summary(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     bundle_ref, artifact_ref = _write_repeat_compact_fixture(root, tmp_path / "home")
@@ -218,8 +206,6 @@ def test_compact_apply_writes_machine_state_and_handoff_summary(tmp_path: Path) 
     assert "## Compaction Handoff Summary" in resume["context_block"]
 
 
-# LLM: Repeated compacts should roll forward the previous handoff instead of creating isolated summaries.
-# 函数用途: 验证第二轮 compact 显式引用上一轮交接包，便于多轮压缩后继续同一任务。
 def test_repeated_compact_rolls_forward_previous_handoff_summary(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     bundle_ref, _artifact_ref = _write_repeat_compact_fixture(root, tmp_path / "home")
@@ -277,8 +263,6 @@ def test_compact_apply_uses_live_raw_assistant_round_as_continuation_hint(tmp_pa
     assert work_state["next_actions"] == ["已查到前三周，下一步继续查剩余周并汇总 workbook。"]
 
 
-# LLM: Tool-call-only assistant rounds are too low-level to become compact next steps.
-# 函数用途: 防止 compact 交接把单个 read_file/tool_call 当作任务级路线图，导致续跑反复读同一文件。
 def test_compact_apply_ignores_raw_tool_call_as_continuation_hint(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     _append_live_raw_message(

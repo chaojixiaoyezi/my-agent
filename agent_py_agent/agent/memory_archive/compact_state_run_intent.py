@@ -1,17 +1,17 @@
-# LLM: Compact path-intent rendering is soft resume context, never a delivery gate.
-# 模块用途: 渲染 compact 状态里的目标产物和参考目录，避免 compact_state.py 继续膨胀。
 
 from __future__ import annotations
 
 from typing import Any
 
+from ..common.value_parsing import sequence_strings
+
 
 def desired_outputs_payload(value: Any) -> dict[str, Any]:
     payload = value if isinstance(value, dict) else {}
     return {
-        "items": _string_list(payload.get("items")),
+        "items": sequence_strings(payload.get("items")),
         "source_status": str(payload.get("source_status") or "not_recorded"),
-        "source_paths": _string_list(payload.get("source_paths")),
+        "source_paths": sequence_strings(payload.get("source_paths")),
     }
 
 
@@ -42,12 +42,6 @@ def run_intent_line(value: Any) -> str:
     if outputs:
         parts.append("目标输出=" + "；".join(outputs[:2]))
     return "；".join(parts) if parts else "未记录"
-
-
-def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, list | tuple):
-        return []
-    return [text for item in value if (text := str(item).strip())]
 
 
 __all__ = [

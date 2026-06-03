@@ -1,5 +1,3 @@
-# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
-# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
 
 from __future__ import annotations
 
@@ -22,8 +20,6 @@ from .daemon_control import (
 from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
 
 
-# LLM: start_gateway 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进网关的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def start_gateway(supervisor) -> int | None:
     supervisor._resolve_agent_and_paths()
     cmd = [sys.executable, "-m", "agent_py_agent", "--config", supervisor.config_path, "gateway", "run"]
@@ -37,8 +33,6 @@ def start_gateway(supervisor) -> int | None:
     return _wait_for_gateway_start(supervisor, process)
 
 
-# LLM: _gateway_process_flags 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理网关processflags相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _gateway_process_flags() -> tuple[int, bool]:
     if os.name == "nt":
         flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -46,8 +40,6 @@ def _gateway_process_flags() -> tuple[int, bool]:
     return 0, True
 
 
-# LLM: _spawn_gateway_process 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理spawn网关process相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _spawn_gateway_process(supervisor, cmd: list[str], creationflags: int, start_new_session: bool):
     supervisor._paths.root.mkdir(parents=True, exist_ok=True)
     with supervisor._paths.log.open("ab") as log_file:
@@ -62,8 +54,6 @@ def _spawn_gateway_process(supervisor, cmd: list[str], creationflags: int, start
         )
 
 
-# LLM: _wait_for_gateway_start 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进网关start的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _wait_for_gateway_start(supervisor, process) -> int | None:
     deadline = time.time() + 120.0
     while time.time() < deadline:
@@ -79,8 +69,6 @@ def _wait_for_gateway_start(supervisor, process) -> int | None:
     return process.pid
 
 
-# LLM: stop_gateway 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进网关的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def stop_gateway(supervisor, timeout: float = 20.0) -> bool:
     supervisor._resolve_agent_and_paths()
     pid = get_running_pid(supervisor._paths.pid)
@@ -101,8 +89,6 @@ def stop_gateway(supervisor, timeout: float = 20.0) -> bool:
     return False
 
 
-# LLM: _write_supervisor_stop_request 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 写入监督器stop请求的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def _write_supervisor_stop_request(supervisor) -> None:
     supervisor._paths.stop_request.parent.mkdir(parents=True, exist_ok=True)
     supervisor._paths.stop_request.write_text(
@@ -111,8 +97,6 @@ def _write_supervisor_stop_request(supervisor) -> None:
     )
 
 
-# LLM: restart_gateway 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进网关的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def restart_gateway(supervisor) -> bool:
     if supervisor._restart_count >= supervisor.max_restart_attempts:
         supervisor._log_error(
@@ -139,8 +123,6 @@ def restart_gateway(supervisor) -> bool:
     return False
 
 
-# LLM: run_supervisor_loop 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进监督器循环的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def run_supervisor_loop(supervisor) -> int:
     supervisor._log_info("Gateway supervisor starting")
     supervisor._resolve_agent_and_paths()
@@ -154,8 +136,6 @@ def run_supervisor_loop(supervisor) -> int:
     return 0
 
 
-# LLM: _prepare_supervisor_run 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理prepare监督器run相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _prepare_supervisor_run(supervisor, supervisor_pid_path: Path) -> None:
     write_pid_file(supervisor_pid_path, os.getpid())
     signal.signal(signal.SIGTERM, supervisor._handle_signal)
@@ -170,8 +150,6 @@ def _prepare_supervisor_run(supervisor, supervisor_pid_path: Path) -> None:
     )
 
 
-# LLM: _log_supervisor_active 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 写入监督器active的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def _log_supervisor_active(supervisor) -> None:
     supervisor._log_info(
         f"Supervisor active: check_interval={supervisor.check_interval}s, "
@@ -180,8 +158,6 @@ def _log_supervisor_active(supervisor) -> None:
     )
 
 
-# LLM: _monitor_until_stopped 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理monitoruntilstopped相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _monitor_until_stopped(supervisor) -> None:
     last_check = time.time()
     consecutive_failures = 0
@@ -194,8 +170,6 @@ def _monitor_until_stopped(supervisor) -> None:
         consecutive_failures = _run_health_check(supervisor, consecutive_failures)
 
 
-# LLM: _run_health_check 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进health检查的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _run_health_check(supervisor, consecutive_failures: int) -> int:
     healthy = supervisor._is_gateway_healthy()
     adapter_healthy = supervisor._check_adapter_health()
@@ -214,8 +188,6 @@ def _run_health_check(supervisor, consecutive_failures: int) -> int:
     return consecutive_failures
 
 
-# LLM: _finish_supervisor_run 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理finish监督器run相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _finish_supervisor_run(supervisor, supervisor_pid_path: Path) -> None:
     supervisor._log_info("Supervisor shutting down...")
     supervisor._stop_gateway(timeout=15.0)

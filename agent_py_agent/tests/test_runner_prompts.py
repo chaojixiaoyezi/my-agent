@@ -1,4 +1,4 @@
-"""runner_prompts.py 单元测试。
+"""agent_core.runner.prompts 单元测试。
 
 测试子代理 runner 提示词模板构建、变量替换和上下文注入功能。
 """
@@ -28,7 +28,7 @@ class TestBuildSubagentRunnerPrompt:
 
     def test_prompt_contains_execution_context(self):
         """验证 prompt 包含执行上下文 JSON。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+        from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
 
         context = self._make_context("run_123", "测试任务", task_dir="/tmp/test")
         prompt = _build_subagent_runner_prompt(context)
@@ -39,7 +39,7 @@ class TestBuildSubagentRunnerPrompt:
 
     def test_prompt_contains_extra_instruction(self):
         """验证 prompt 使用额外指令。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+        from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
 
         context = self._make_context("run_456", task_dir="/tmp")
         prompt = _build_subagent_runner_prompt(context, instruction="优先使用 read_file")
@@ -48,7 +48,7 @@ class TestBuildSubagentRunnerPrompt:
 
     def test_prompt_uses_default_instruction_when_empty(self):
         """验证空指令时使用默认指令。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+        from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
 
         context = self._make_context("run_default", task_dir="/tmp")
         prompt = _build_subagent_runner_prompt(context, instruction="")
@@ -57,7 +57,7 @@ class TestBuildSubagentRunnerPrompt:
 
     def test_prompt_contains_result_block_markers(self):
         """验证 prompt 包含结果块标记。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+        from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
 
         context = self._make_context("run_result", task_dir="/tmp")
         prompt = _build_subagent_runner_prompt(context)
@@ -70,17 +70,15 @@ class TestBuildSubagentRunnerPrompt:
 
     def test_prompt_describes_role(self):
         """验证 prompt 说明子代理角色。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+        from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
 
         context = self._make_context("run_role", role="coder", task_dir="/tmp")
         prompt = _build_subagent_runner_prompt(context)
 
         assert "父代理" in prompt
 
-    # LLM: Real leaf workers must know write_file can create missing product directories.
-    # 函数用途: 防止叶子节点因为 build 目录不存在而误报缺少 mkdir/shell 能力。
     def test_prompt_says_write_file_creates_parent_dirs(self):
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+        from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
 
         context = self._make_context(
             "run_write_parent",
@@ -93,10 +91,8 @@ class TestBuildSubagentRunnerPrompt:
         assert "自动创建父目录" in prompt
         assert "不要因为目标目录尚未创建就标记 BLOCKED" in prompt
 
-    # LLM: Real MiniMax runner E2E timed out when the prompt embedded full execution_context/context_bundle JSON.
-    # 函数用途: 锁住 runner prompt 的瘦身边界：模型看摘要和 refs，不直接吞完整大 JSON。
     def test_prompt_uses_slim_context_summary_instead_of_full_bundle(self):
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+        from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
 
         huge_blob = "BLOAT" * 6000
         context = self._make_context(
@@ -128,10 +124,8 @@ class TestBuildSubagentRunnerPrompt:
         assert huge_blob[:100] not in prompt
         assert len(prompt) < 12000
 
-    # LLM: Read refs are visible to runners without becoming startup dependencies.
-    # 函数用途: 路径线索进入 prompt，但语义是可读线索，不再要求 runner 先满足输入依赖门。
     def test_prompt_shows_read_refs_without_dependency_gate_language(self, tmp_path):
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+        from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
         from agent_py_agent.agent.subagents.models import ContextManifest
 
         workspace = tmp_path / "task"
@@ -157,14 +151,13 @@ class TestBuildSubagentRunnerPrompt:
 
         assert "resolved_read_paths" in prompt
         assert str(artifact) in prompt
-        assert missing_alias in prompt
+        assert missing_alias not in prompt
+        assert "data_collection.md" in prompt
         assert "不是启动前置条件" in prompt
         assert "input_contract" not in prompt
 
-    # LLM: Addressed collaboration requests must expose generic clue content, not just request ids.
-    # 函数用途: 防止响应子代理只看到 case/request 引用却看不到开放世界线索、查询意图和响应形状。
     def test_prompt_exposes_targeted_collaboration_clue_packet(self):
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+        from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
 
         context = self._make_context(
             "run_responder",
@@ -225,7 +218,7 @@ class TestBuildSubagentRunnerRepairPrompt:
 
     def test_repair_prompt_contains_parse_error(self):
         """验证修复 prompt 包含解析错误信息。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import (
+        from agent_py_agent.agent.agent_core.runner.prompts import (
             _build_subagent_runner_repair_prompt,
         )
 
@@ -243,7 +236,7 @@ class TestBuildSubagentRunnerRepairPrompt:
 
     def test_repair_prompt_default_error_message(self):
         """验证使用默认错误信息。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import (
+        from agent_py_agent.agent.agent_core.runner.prompts import (
             _build_subagent_runner_repair_prompt,
         )
 
@@ -258,7 +251,7 @@ class TestBuildSubagentRunnerRepairPrompt:
 
     def test_repair_prompt_includes_execution_context(self):
         """验证修复 prompt 包含执行上下文。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import (
+        from agent_py_agent.agent.agent_core.runner.prompts import (
             _build_subagent_runner_repair_prompt,
         )
 
@@ -272,10 +265,8 @@ class TestBuildSubagentRunnerRepairPrompt:
         assert "Execution Context JSON" in prompt
         assert "测试上下文" in prompt
 
-    # LLM: repair prompts must stay small enough for the model to close the JSON block.
-    # 函数用途: 复现真实 E2E 中 repair prompt 太胖导致修复回复再次截断的问题。
     def test_repair_prompt_clips_large_prompt_and_response(self):
-        from agent_py_agent.agent.agent_core.runner_prompts import (
+        from agent_py_agent.agent.agent_core.runner.prompts import (
             _build_subagent_runner_repair_prompt,
         )
 
@@ -300,7 +291,7 @@ class TestAppendRunnerRepairPrompt:
 
     def test_appends_separator(self):
         """验证合并时添加分隔符。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _append_runner_repair_prompt
+        from agent_py_agent.agent.agent_core.runner.prompts import _append_runner_repair_prompt
 
         result = _append_runner_repair_prompt("原始 prompt", "修复 prompt")
 
@@ -310,7 +301,7 @@ class TestAppendRunnerRepairPrompt:
 
     def test_includes_repair_header(self):
         """验证包含修复标记。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _append_runner_repair_prompt
+        from agent_py_agent.agent.agent_core.runner.prompts import _append_runner_repair_prompt
 
         result = _append_runner_repair_prompt("base", "repair")
 
@@ -322,7 +313,7 @@ class TestAppendRunnerRepairResponse:
 
     def test_appends_repair_response(self):
         """验证合并修复响应。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _append_runner_repair_response
+        from agent_py_agent.agent.agent_core.runner.prompts import _append_runner_repair_response
 
         result = _append_runner_repair_response("原始响应", "修复响应")
 
@@ -332,7 +323,7 @@ class TestAppendRunnerRepairResponse:
 
     def test_includes_repair_response_header(self):
         """验证包含修复响应标记。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _append_runner_repair_response
+        from agent_py_agent.agent.agent_core.runner.prompts import _append_runner_repair_response
 
         result = _append_runner_repair_response("original", "repair")
 
@@ -344,7 +335,7 @@ class TestAppendRunnerRepairFailure:
 
     def test_includes_original_response(self):
         """验证包含原始响应。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _append_runner_repair_failure
+        from agent_py_agent.agent.agent_core.runner.prompts import _append_runner_repair_failure
 
         result = _append_runner_repair_failure("原始回复内容", ValueError("测试错误"))
 
@@ -352,7 +343,7 @@ class TestAppendRunnerRepairFailure:
 
     def test_includes_exception_info(self):
         """验证包含异常信息。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _append_runner_repair_failure
+        from agent_py_agent.agent.agent_core.runner.prompts import _append_runner_repair_failure
 
         result = _append_runner_repair_failure("response", ValueError("测试错误"))
 
@@ -361,7 +352,7 @@ class TestAppendRunnerRepairFailure:
 
     def test_includes_failure_header(self):
         """验证包含失败标记。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _append_runner_repair_failure
+        from agent_py_agent.agent.agent_core.runner.prompts import _append_runner_repair_failure
 
         result = _append_runner_repair_failure("resp", RuntimeError("运行错误"))
 
@@ -386,7 +377,7 @@ class TestContextJsonSerialization:
 
     def test_context_serializes_to_json(self):
         """验证上下文能序列化为 JSON。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+        from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
 
         context = self._make_context(
             "run_json",
@@ -418,7 +409,7 @@ class TestPromptOutputRequirements:
 
     def test_prompt_requires_machine_parseable_result(self):
         """验证 prompt 要求机器可解析结果。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+        from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
 
         context = self._make_context("run_parse", task_dir="/tmp")
         prompt = _build_subagent_runner_prompt(context)
@@ -428,7 +419,7 @@ class TestPromptOutputRequirements:
 
     def test_repair_prompt_forbids_tool_calls(self):
         """验证修复 prompt 要求不调用工具。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import (
+        from agent_py_agent.agent.agent_core.runner.prompts import (
             _build_subagent_runner_repair_prompt,
         )
 

@@ -15,8 +15,6 @@ from agent_py_agent.agent.subagents.controlled_exec_gateway import (
 from agent_py_agent.agent.subagents.models import CapabilityGrant
 
 
-# LLM: _grant creates the minimum parent grant used by controlled exec planning tests.
-# 函数用途: 构造测试用 CapabilityGrant，模拟父级给下级的命令、路径、网络和输出预算授权。
 def _grant(tmp_path: Path, **overrides) -> CapabilityGrant:
     data = {
         "id": "capgrant-1",
@@ -32,8 +30,6 @@ def _grant(tmp_path: Path, **overrides) -> CapabilityGrant:
     return CapabilityGrant(**data)
 
 
-# LLM: parent grants should compile into the shell gateway without trusting model-declared grants.
-# 函数用途: 确认受控 exec 计划使用 CapabilityGrant 的 command/path/output scope 生成 shell 决策。
 def test_controlled_exec_uses_parent_grant_scope(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -52,8 +48,6 @@ def test_controlled_exec_uses_parent_grant_scope(tmp_path: Path) -> None:
     assert plan.shell_decision.audit["request_id"] == "capreq-1"
 
 
-# LLM: real capability routing may store controlled_exec as a tool grant; the exec boundary must still be injected.
-# 函数用途: 模型常把 capability_type 写成 tool，但只要父级 grant 明确包含 controlled_exec、命令和路径 scope，runner 仍应拿到受控执行 grant。
 def test_controlled_exec_refs_include_controlled_exec_tool_grants(tmp_path: Path) -> None:
     grant = _grant(
         tmp_path,
@@ -87,8 +81,6 @@ def test_controlled_exec_refs_include_controlled_exec_tool_grants(tmp_path: Path
     ]
 
 
-# LLM: a child cannot self-authorize a command missing from the parent grant.
-# 函数用途: 父级 grant 没给 python 时，即使命令在工作目录内也必须被拒绝。
 def test_controlled_exec_rejects_command_not_in_parent_grant(tmp_path: Path) -> None:
     plan = plan_controlled_exec(
         ControlledExecRequest(command="python --version", workspace_root=tmp_path, grant=_grant(tmp_path))
@@ -99,8 +91,6 @@ def test_controlled_exec_rejects_command_not_in_parent_grant(tmp_path: Path) -> 
     assert plan.blockers == ["command_not_granted:python"]
 
 
-# LLM: grants without explicit path scope are not enough for subagent exec.
-# 函数用途: 子代理 exec 必须有父级给的路径范围，不能隐式扩大到整个 workspace。
 def test_controlled_exec_requires_parent_path_scope(tmp_path: Path) -> None:
     grant = _grant(tmp_path, path_scope=[])
 
@@ -111,8 +101,6 @@ def test_controlled_exec_requires_parent_path_scope(tmp_path: Path) -> None:
     assert plan.blockers == ["missing_parent_path_scope"]
 
 
-# LLM: delete-like shell commands should route toward task trash instead of execution.
-# 函数用途: 即使父级错误 grant 了 rm，受控 exec 也要提示走 task-local trash，而不是执行删除。
 def test_controlled_exec_routes_delete_to_task_trash(tmp_path: Path) -> None:
     grant = _grant(tmp_path, command_allowlist=["rm"])
 
@@ -127,8 +115,6 @@ def test_controlled_exec_routes_delete_to_task_trash(tmp_path: Path) -> None:
     assert plan.trash_hint["source_path"] == str((tmp_path / "stale.txt").resolve())
 
 
-# LLM: network grants must flow from the parent grant into shell gateway URL checks.
-# 函数用途: curl 只能访问父级 grant 的网络 scope，其他域名继续阻断。
 def test_controlled_exec_uses_parent_network_scope(tmp_path: Path) -> None:
     grant = _grant(
         tmp_path,

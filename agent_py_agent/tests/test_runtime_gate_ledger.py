@@ -6,12 +6,12 @@ from types import SimpleNamespace
 from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
-from agent_py_agent.agent.agent_core.runner_stage_trace import RunnerToolStageTraceRequest
+from agent_py_agent.agent.agent_core.runner.stage_trace import RunnerToolStageTraceRequest
 from agent_py_agent.agent.agent_core.tool_call_runtime import (
     ToolCallRuntimeRequest,
     execute_traced_tool_call,
 )
-from agent_py_agent.agent.agent_core.tool_round_execution import ToolCallRecordParams
+from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
 from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
     persist_tool_runtime_ledger,
     write_boundary_with_runtime_ledger,
@@ -21,8 +21,6 @@ from agent_py_agent.agent.local_store import LocalStore
 from agent_py_agent.agent.tooling.models import ToolExecutionResult
 
 
-# LLM: Runtime gate records must survive process restarts for replay and resume.
-# 函数用途: 验证工具入口 gate、审批绑定和幂等事实会落入 LocalStore，而不是只存在当前内存。
 def test_local_store_persists_runtime_gate_records_for_replay(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
 
@@ -51,8 +49,6 @@ def test_local_store_persists_runtime_gate_records_for_replay(tmp_path):
     assert records[0].parameters == {"path": "out/report.md"}
 
 
-# LLM: Idempotency replay should read the same ledger facts used by the runtime gate.
-# 函数用途: 验证 LocalStore 能输出 IdempotencyLedgerGate 可直接消费的结构字段。
 def test_local_store_projects_runtime_gate_records_to_idempotency_ledger(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     store.record_runtime_gate_ledger(
@@ -82,8 +78,6 @@ def test_local_store_projects_runtime_gate_records_to_idempotency_ledger(tmp_pat
     )
 
 
-# LLM: Replaying the same operation should update the row instead of duplicating side effects.
-# 函数用途: 验证 operation_id 是同一 run 内的幂等写入键，重复记录不会膨胀账本。
 def test_local_store_runtime_gate_operation_id_is_idempotent(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     base = RuntimeGateLedgerRecord(
@@ -116,8 +110,6 @@ def test_local_store_runtime_gate_operation_id_is_idempotent(tmp_path):
     assert records[0].result_ref == "artifact://run-1/op-1"
 
 
-# LLM: Tool loop recording should persist runtime gate facts without relying on final prose.
-# 函数用途: 验证真实工具循环记录时，会把 archive_tool_call 中的 gate 和参数写入 LocalStore 账本。
 def test_tool_loop_record_persists_runtime_gate_ledger(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     agent = SimpleNamespace(root=tmp_path, local_store=store)
@@ -140,8 +132,6 @@ def test_tool_loop_record_persists_runtime_gate_ledger(tmp_path):
     assert records[0].parameters == {"tool": "write_file", "path": "out/report.md"}
 
 
-# LLM: Tool execution must carry explicit run scope instead of relying on shared current-agent state.
-# 函数用途: 验证普通模型工具调用进入 registry 前会包装成带 run_id/parent/root 的 typed envelope。
 def test_execute_traced_tool_call_passes_explicit_run_scope_envelope(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     tools = _CapturingTools()
@@ -176,8 +166,6 @@ def test_execute_traced_tool_call_passes_explicit_run_scope_envelope(tmp_path):
     assert tools.captured_payload.scope.agent_kind == "child_agent"
 
 
-# LLM: Tool completion events should be queryable by the same explicit run identity used by the tree.
-# 函数用途: 验证工具记录写入 agent_events，tree/审计不用再从“当前子代理是谁”推断来源。
 def test_tool_loop_record_appends_agent_event_with_explicit_scope(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     agent = SimpleNamespace(root=tmp_path, local_store=store)
@@ -239,8 +227,6 @@ def test_runtime_ledger_locked_control_plane_does_not_crash_tool_loop():
     assert _LockedStore.calls >= 1
 
 
-# LLM: Tool execution should feed persisted idempotency rows back into the runtime gate.
-# 函数用途: 验证同一 run 的历史副作用账本会注入 write_boundary.idempotency_ledger。
 def test_execute_traced_tool_call_injects_persisted_idempotency_ledger(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     store.record_runtime_gate_ledger(

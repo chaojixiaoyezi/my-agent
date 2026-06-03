@@ -1,5 +1,3 @@
-# LLM: Collection mapping checks verify source items appear in final artifacts.
-# 模块用途: 校验 source JSON 中的结构化条目是否能按 key_fields 映射到最终产物文本，避免“源数据有了但成品漏项”。
 
 from __future__ import annotations
 
@@ -7,8 +5,9 @@ import json
 import re
 from pathlib import Path
 
+from ..common.value_parsing import sequence_strings
 from .artifact_acceptance_models import ArtifactFinding
-from .artifact_structured_contracts import positive_int, string_list
+from .artifact_structured_contracts import positive_int
 
 _COVERAGE_LEVELS = {
     "missing": -1,
@@ -20,8 +19,6 @@ _COVERAGE_LEVELS = {
 }
 
 
-# LLM: mapping_findings 是 agent_py_agent/agent/contracts/artifact_collection_mapping.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
-# 函数用途: 处理 mapping findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def mapping_findings(
     items: list[object],
     contract: dict[str, object],
@@ -32,7 +29,7 @@ def mapping_findings(
     if not isinstance(mapping, dict):
         return []
     artifact_ref = str(mapping.get("artifact_ref") or "").strip()
-    key_fields = string_list(mapping.get("key_fields"))
+    key_fields = sequence_strings(mapping.get("key_fields"))
     if not artifact_ref or not key_fields:
         return [_finding("ARTIFACT_MAPPING_CONTRACT_INVALID", "mapping requires artifact_ref and key_fields.", source_ref)]
     artifact_path = _workspace_path(artifact_ref, workspace_root)
@@ -62,15 +59,11 @@ def mapping_findings(
     ]
 
 
-# LLM: _item_mapped 是 agent_py_agent/agent/contracts/artifact_collection_mapping.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
-# 函数用途: 处理 item mapped 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _item_mapped(item: dict[str, object], key_fields: list[str], text: str) -> bool:
     keys = [str(item.get(field) or "").strip() for field in key_fields]
     return bool(keys) and all(key and key in text for key in keys)
 
 
-# LLM: _coverage_depth_finding upgrades title matching into declared source coverage levels.
-# 函数用途: 当合同要求 body/translated_body/tabular_row 时，不让 key 字符串出现冒充正文覆盖。
 def _coverage_depth_finding(
     items: list[object],
     key_fields: list[str],
@@ -105,8 +98,6 @@ def _coverage_depth_finding(
     )
 
 
-# LLM: _coverage_record computes one source item's current coverage without guessing task semantics.
-# 函数用途: 基于 key 字段附近的结构文本量和目标语言字符统计，输出 metadata/summary/body 等机器级别。
 def _coverage_record(
     item: dict[str, object],
     key_fields: list[str],
@@ -165,21 +156,15 @@ def _cjk_count(value: str) -> int:
     return sum(1 for char in value if "\u4e00" <= char <= "\u9fff")
 
 
-# LLM: _item_key_values 是 agent_py_agent/agent/contracts/artifact_collection_mapping.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
-# 函数用途: 处理 item key values 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _item_key_values(item: dict[str, object], key_fields: list[str]) -> dict[str, str]:
     return {field: str(item.get(field) or "").strip() for field in key_fields if str(item.get(field) or "").strip()}
 
 
-# LLM: _workspace_path 是 agent_py_agent/agent/contracts/artifact_collection_mapping.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
-# 函数用途: 处理 workspace path 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _workspace_path(ref: str, workspace_root: Path) -> Path:
     path = Path(ref)
     return path if path.is_absolute() else (workspace_root / path).resolve()
 
 
-# LLM: _inside_workspace 是 agent_py_agent/agent/contracts/artifact_collection_mapping.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
-# 函数用途: 处理 inside workspace 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _inside_workspace(path: Path, workspace_root: Path) -> bool:
     try:
         path.resolve(strict=False).relative_to(workspace_root.resolve(strict=False))
@@ -188,14 +173,10 @@ def _inside_workspace(path: Path, workspace_root: Path) -> bool:
         return False
 
 
-# LLM: _finding 是 agent_py_agent/agent/contracts/artifact_collection_mapping.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
-# 函数用途: 处理 finding 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _finding(code: str, message: str, location: str = "", value: str = "") -> ArtifactFinding:
     return ArtifactFinding(code=code, severity="hard", message=message, location=location, value=value)
 
 
-# LLM: _compact_json 是 agent_py_agent/agent/contracts/artifact_collection_mapping.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
-# 函数用途: 处理 compact json 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _compact_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 

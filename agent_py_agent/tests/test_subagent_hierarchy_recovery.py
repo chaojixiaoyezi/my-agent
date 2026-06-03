@@ -9,15 +9,13 @@ import json
 from pathlib import Path
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.services.hierarchy_recovery import HierarchyRecoveryRequest
-from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+from agent_py_agent.agent.subagents.services.hierarchy.recovery import HierarchyRecoveryRequest
+from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
 
 
-# LLM: _make_tree creates a 1 parent / 2 child / 4 grandchild recovery fixture.
-# 函数用途: 构造多层子代理树，并让一个孙代理失败、一个孙代理超时。
 def _make_tree(manager: SubAgentManager):
     root = manager.create_run(goal="root", thought="orchestrate", plan=["split"])
     children = manager.schedule_child_runs(
@@ -63,8 +61,6 @@ def _make_tree(manager: SubAgentManager):
     return root, children, grandchildren
 
 
-# LLM: test_hierarchy_recovery_packet_collects_multilevel_candidates_refs_only covers tree recovery.
-# 函数用途: 确认恢复包能列出多层节点、失败候选和接管入口，但不读取 artifact 正文。
 def test_hierarchy_recovery_packet_collects_multilevel_candidates_refs_only(tmp_path):
     manager = SubAgentManager(tmp_path)
     root, _, grandchildren = _make_tree(manager)
@@ -85,8 +81,6 @@ def test_hierarchy_recovery_packet_collects_multilevel_candidates_refs_only(tmp_
     assert "DO_NOT_READ_THIS_RECOVERY_ARTIFACT_BODY" not in payload
 
 
-# LLM: test_hierarchy_recovery_packet_can_hide_healthy_nodes keeps compact handoff small.
-# 函数用途: include_healthy=False 时只返回 root 和需要恢复的节点，减少上下文压力。
 def test_hierarchy_recovery_packet_can_hide_healthy_nodes(tmp_path):
     manager = SubAgentManager(tmp_path)
     root, _, grandchildren = _make_tree(manager)
@@ -99,8 +93,6 @@ def test_hierarchy_recovery_packet_can_hide_healthy_nodes(tmp_path):
     assert result.omitted_healthy_count == 4
 
 
-# LLM: test_hierarchy_recovery_packet_includes_stale_running_descendant covers due-check parity.
-# 函数用途: 确认 RUNNING 孙代理心跳停滞/运行超时时，也会进入 recovery-tree 候选。
 def test_hierarchy_recovery_packet_includes_stale_running_descendant(tmp_path):
     manager = SubAgentManager(tmp_path)
     root, _, grandchildren = _make_tree(manager)
@@ -139,8 +131,6 @@ def test_hierarchy_recovery_packet_includes_stale_running_descendant(tmp_path):
     ]
 
 
-# LLM: test_hierarchy_recovery_packet_includes_unfinished_child_after_parent_timeout covers root timeout cleanup.
-# 函数用途: 父节点 TIMEOUT 后，恢复树在 hide-healthy 模式下仍展示未完成 child。
 def test_hierarchy_recovery_packet_includes_unfinished_child_after_parent_timeout(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="orchestrate", plan=["split"])
@@ -173,8 +163,6 @@ def test_hierarchy_recovery_packet_includes_unfinished_child_after_parent_timeou
     assert "subagents-recovery-tree" in child.recommended_command
 
 
-# LLM: test_hierarchy_recovery_packet_marks_failed_middle_leader_with_strategy covers 4-level handoff.
-# 函数用途: 四层链路中间 coordinator 挂掉时，恢复树要标出 leader recovery，而不是只提示普通 followup。
 def test_hierarchy_recovery_packet_marks_failed_middle_leader_with_strategy(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="orchestrate", plan=["split"], role="coordinator")
@@ -212,6 +200,7 @@ def test_hierarchy_recovery_packet_marks_failed_middle_leader_with_strategy(tmp_
     nodes = {item.run_id: item for item in result.nodes}
     assert grand in nodes
     assert leaf in nodes[grand].child_ids
-    assert nodes[grand].recovery_action == "recover_coordinator_leadership"
+    assert nodes[grand].recovery_action == "takeover"
+    assert nodes[grand].recovery_mode == "leadership_recovery"
     assert nodes[grand].continue_packet_status == "ready"
     assert nodes[grand].continue_packet_ref.endswith("latest_continue_packet.json")

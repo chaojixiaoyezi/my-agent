@@ -1,5 +1,3 @@
-# LLM: Memory routing module; keep context selection and read-receipt records stable.
-# 模块用途: 根据任务上下文选择可注入记忆，并记录读取路径。
 
 from __future__ import annotations
 
@@ -35,8 +33,6 @@ from .validator import validate_routes
 VALID_CONTEXT_MODES = {"soft", "strict"}
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 RoutedMemoryContext 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 RoutedMemoryContext 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class RoutedMemoryContext:
 
@@ -51,8 +47,6 @@ class RoutedMemoryContext:
     findings: list[str] = field(default_factory=list)
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 RouteContextOptions 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 承载 RouteContextOptions 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class RouteContextOptions:
     """Bundle for build_routed_memory_context keyword parameters."""
@@ -65,8 +59,6 @@ class RouteContextOptions:
     max_chars_per_file: int = 4000
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 build_routed_memory_context 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 build routed memory context 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def build_routed_memory_context(
     root: str | Path,
     query: str,
@@ -114,8 +106,6 @@ def build_routed_memory_context(
     return context
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _read_target_sections 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 读取 read target sections 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
 def _read_target_sections(
     context: RoutedMemoryContext,
     read_targets: list[_ReadTarget],
@@ -129,8 +119,6 @@ def _read_target_sections(
             context.injected_sections.append(section)
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _prepare_root 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 prepare root 在当前模块中的核心转换或协调步骤，衔接 memory routing 读取项目规则、路径和上下文片段来决定注入范围。
 def _prepare_root(context: RoutedMemoryContext, root: str | Path) -> Path | None:
     """Resolve root and attach a finding instead of raising."""
     resolved_root, root_error = _resolve_root(root)
@@ -140,8 +128,6 @@ def _prepare_root(context: RoutedMemoryContext, root: str | Path) -> Path | None
     return resolved_root
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _normalize_context_mode 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 提取、合并或规范化 normalize context mode 涉及的字段，让后续匹配和存储使用同一形态。
 def _normalize_context_mode(context: RoutedMemoryContext, mode: str) -> str:
     """Normalize route context mode and record invalid values."""
     normalized_mode = mode.strip().lower()
@@ -153,8 +139,6 @@ def _normalize_context_mode(context: RoutedMemoryContext, mode: str) -> str:
     return ""
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _resolve_index_file 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 resolve index file 在当前模块中的核心转换或协调步骤，衔接 memory routing 读取项目规则、路径和上下文片段来决定注入范围。
 def _resolve_index_file(context: RoutedMemoryContext, root: Path, index_path: str) -> Path | None:
     """Resolve and validate the configured route index file."""
     index_file, normalized_index, index_error = _resolve_relative_path(root, index_path, label="index_path")
@@ -174,8 +158,6 @@ def _resolve_index_file(context: RoutedMemoryContext, root: Path, index_path: st
     return index_file
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _load_routes 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 读取 load routes 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
 def _load_routes(context: RoutedMemoryContext, index_file: Path):
     """Load routes and convert parser errors into context findings."""
     try:
@@ -185,8 +167,6 @@ def _load_routes(context: RoutedMemoryContext, index_file: Path):
         return None
 
 
-# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _match_to_dict 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 判断 match to dict 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _match_to_dict(match: MemoryRouteMatch) -> dict[str, Any]:
 
     route = match.route

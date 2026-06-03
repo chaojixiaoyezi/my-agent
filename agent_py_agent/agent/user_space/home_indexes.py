@@ -1,14 +1,12 @@
-# LLM: Global indexes are rebuildable maps; never treat them as task truth.
-# 模块用途: 写 owner/task/run/agent 的轻量引用索引，正文仍以各自 owner home 下文件为准。
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import read_jsonl_objects_report
 from ..io import append_jsonl
 from .home_layout import MyAgentHomePaths
 from .owner_resolver import OwnerHomeResult
@@ -53,6 +51,19 @@ class _IndexSpec:
 class _ScopeFilter:
     owner_id: str = ""
     task_id: str = ""
+
+
+@dataclass(frozen=True)
+class _LatestRefSource:
+    path: Path
+    key_fields: tuple[str, ...]
+    context: str
+
+
+@dataclass(frozen=True)
+class IndexRefsReport:
+    records: list[dict[str, Any]]
+    load_errors: list[dict[str, object]]
 
 
 def register_owner_ref(home: MyAgentHomePaths, owner: OwnerHomeResult) -> dict[str, Any]:
@@ -111,14 +122,39 @@ def register_agent_ref(home: MyAgentHomePaths, ref: AgentIndexRef) -> dict[str, 
 
 
 def latest_owner_refs(home: MyAgentHomePaths, *, limit: int = 20) -> list[dict[str, Any]]:
-    return _latest_unique_refs(home.global_index_owners_jsonl, key_fields=("owner_id",), limit=limit)
+    return latest_owner_refs_report(home, limit=limit).records
+
+
+def latest_owner_refs_report(home: MyAgentHomePaths, *, limit: int = 20) -> IndexRefsReport:
+    return _latest_unique_refs_report(
+        home.global_index_owners_jsonl,
+        key_fields=("owner_id",),
+        limit=limit,
+        context="home_indexes.owners",
+    )
 
 
 def latest_task_refs(home: MyAgentHomePaths, *, owner_id: str = "", status: str = "", limit: int = 20) -> list[dict[str, Any]]:
+    return latest_task_refs_report(home, owner_id=owner_id, status=status, limit=limit).records
+
+
+def latest_task_refs_report(
+    home: MyAgentHomePaths,
+    *,
+    owner_id: str = "",
+    status: str = "",
+    limit: int = 20,
+) -> IndexRefsReport:
     owner = str(owner_id or "")
     wanted_status = str(status or "")
     rows = []
-    for record in _latest_unique_refs(home.global_index_active_tasks_jsonl, key_fields=("owner_id", "task_id"), limit=0):
+    report = _latest_unique_refs_report(
+        home.global_index_active_tasks_jsonl,
+        key_fields=("owner_id", "task_id"),
+        limit=0,
+        context="home_indexes.active_tasks",
+    )
+    for record in report.records:
         if owner and str(record.get("owner_id") or "") != owner:
             continue
         if wanted_status and str(record.get("status") or "") != wanted_status:
@@ -126,23 +162,37 @@ def latest_task_refs(home: MyAgentHomePaths, *, owner_id: str = "", status: str 
         rows.append(record)
         if limit > 0 and len(rows) >= limit:
             break
-    return rows
+    return IndexRefsReport(rows, report.load_errors)
 
 
 def latest_run_refs(home: MyAgentHomePaths, *, owner_id: str = "", task_id: str = "", limit: int = 20) -> list[dict[str, Any]]:
-    return _latest_scoped_refs(
-        home.global_index_active_runs_jsonl,
+    return latest_run_refs_report(home, owner_id=owner_id, task_id=task_id, limit=limit).records
+
+
+def latest_run_refs_report(home: MyAgentHomePaths, *, owner_id: str = "", task_id: str = "", limit: int = 20) -> IndexRefsReport:
+    return _latest_scoped_refs_report(
+        _LatestRefSource(
+            home.global_index_active_runs_jsonl,
+            ("owner_id", "run_id"),
+            "home_indexes.active_runs",
+        ),
         filters=_ScopeFilter(owner_id=owner_id, task_id=task_id),
-        key_fields=("owner_id", "run_id"),
         limit=limit,
     )
 
 
 def latest_agent_refs(home: MyAgentHomePaths, *, owner_id: str = "", task_id: str = "", limit: int = 20) -> list[dict[str, Any]]:
-    return _latest_scoped_refs(
-        home.global_index_active_agents_jsonl,
+    return latest_agent_refs_report(home, owner_id=owner_id, task_id=task_id, limit=limit).records
+
+
+def latest_agent_refs_report(home: MyAgentHomePaths, *, owner_id: str = "", task_id: str = "", limit: int = 20) -> IndexRefsReport:
+    return _latest_scoped_refs_report(
+        _LatestRefSource(
+            home.global_index_active_agents_jsonl,
+            ("owner_id", "agent_id"),
+            "home_indexes.active_agents",
+        ),
         filters=_ScopeFilter(owner_id=owner_id, task_id=task_id),
-        key_fields=("owner_id", "agent_id"),
         limit=limit,
     )
 
@@ -179,17 +229,17 @@ def _dangling_refs_for(
     return findings
 
 
-def _latest_scoped_refs(
-    path: Path,
+def _latest_scoped_refs_report(
+    source: _LatestRefSource,
     *,
     filters: _ScopeFilter,
-    key_fields: tuple[str, ...],
     limit: int,
-) -> list[dict[str, Any]]:
+) -> IndexRefsReport:
     owner = str(filters.owner_id or "")
     task = str(filters.task_id or "")
     rows = []
-    for record in _latest_unique_refs(path, key_fields=key_fields, limit=0):
+    report = _latest_unique_refs_report(source.path, key_fields=source.key_fields, limit=0, context=source.context)
+    for record in report.records:
         if owner and str(record.get("owner_id") or "") != owner:
             continue
         if task and str(record.get("task_id") or "") != task:
@@ -197,15 +247,18 @@ def _latest_scoped_refs(
         rows.append(record)
         if limit > 0 and len(rows) >= limit:
             break
-    return rows
+    return IndexRefsReport(rows, report.load_errors)
 
 
-# LLM: _latest_unique_refs treats append-only indexes as history and returns one current row per identity.
-# 函数用途: 从索引尾部倒读并按 owner/task/run/agent key 去重，避免旧路径继续影响恢复和 doctor。
 def _latest_unique_refs(path: Path, *, key_fields: tuple[str, ...], limit: int) -> list[dict[str, Any]]:
+    return _latest_unique_refs_report(path, key_fields=key_fields, limit=limit, context="home_indexes.refs").records
+
+
+def _latest_unique_refs_report(path: Path, *, key_fields: tuple[str, ...], limit: int, context: str) -> IndexRefsReport:
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, ...]] = set()
-    for record in _latest_jsonl_records(path, limit=0):
+    report = _latest_jsonl_records_report(path, limit=0, context=context)
+    for record in report.records:
         key = tuple(str(record.get(field) or "") for field in key_fields)
         if key in seen:
             continue
@@ -213,23 +266,21 @@ def _latest_unique_refs(path: Path, *, key_fields: tuple[str, ...], limit: int) 
         rows.append(record)
         if limit > 0 and len(rows) >= limit:
             break
-    return rows
+    return IndexRefsReport(rows, report.load_errors)
 
 
 def _latest_jsonl_records(path: Path, *, limit: int) -> list[dict[str, Any]]:
+    return _latest_jsonl_records_report(path, limit=limit, context="home_indexes.records").records
+
+
+def _latest_jsonl_records_report(path: Path, *, limit: int, context: str) -> IndexRefsReport:
     if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in reversed(path.read_text(encoding="utf-8").splitlines()):
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            rows.append(value)
-        if limit > 0 and len(rows) >= limit:
-            break
-    return rows
+        return IndexRefsReport([], [])
+    report = read_jsonl_objects_report(path, context=context)
+    rows = list(reversed(report.records))
+    if limit > 0:
+        rows = rows[:limit]
+    return IndexRefsReport(rows, report.load_errors)
 
 
 def _now_iso() -> str:
@@ -238,13 +289,18 @@ def _now_iso() -> str:
 
 __all__ = [
     "AgentIndexRef",
+    "IndexRefsReport",
     "RunIndexRef",
     "TaskIndexRef",
     "dangling_index_refs",
     "latest_agent_refs",
+    "latest_agent_refs_report",
     "latest_owner_refs",
+    "latest_owner_refs_report",
     "latest_run_refs",
+    "latest_run_refs_report",
     "latest_task_refs",
+    "latest_task_refs_report",
     "register_agent_ref",
     "register_owner_ref",
     "register_run_ref",

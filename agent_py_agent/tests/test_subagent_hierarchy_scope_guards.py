@@ -6,14 +6,12 @@
 from __future__ import annotations
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
 
 
-# LLM: scheduler no longer turns scope hints into hard blockers.
-# 函数用途: parent 里的领域提示只作为上下文，不再阻断父级显式派工。
 def test_hierarchy_schedule_allows_forbidden_sibling_scope_hint(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -47,8 +45,6 @@ def test_hierarchy_schedule_allows_forbidden_sibling_scope_hint(tmp_path):
     assert manager.load(parent.id).child_ids == result.created_run_ids
 
 
-# LLM: test_hierarchy_schedule_allows_depth_limit_text_without_scope_block reproduces R15's depth token bug.
-# 函数用途: 父级写“不要创建 depth>=4”只是深度限制，不应被解析成禁止创建所有包含 depth 的 child。
 def test_hierarchy_schedule_allows_depth_limit_text_without_scope_block(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -92,8 +88,6 @@ def test_hierarchy_schedule_allows_depth_limit_text_without_scope_block(tmp_path
     assert result.created_run_ids
 
 
-# LLM: test_forbidden_scope_ignores_parent_thought keeps debug notes from becoming hard constraints.
-# 函数用途: thought 里的测试说明不应被解析为“不得创建 X”的硬禁止规则。
 def test_hierarchy_schedule_forbidden_scope_ignores_parent_thought(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root", thought="root", plan=["root"])
@@ -119,8 +113,6 @@ def test_hierarchy_schedule_forbidden_scope_ignores_parent_thought(tmp_path):
     assert len(result.created_run_ids) == 1
 
 
-# LLM: QA order is left to the parent model, not scheduler warnings.
-# 函数用途: 有产物根但没有 ready worker/leaf child 时，scheduler 仍只执行父级显式派工。
 def test_hierarchy_schedule_allows_qa_before_implementation_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
@@ -159,8 +151,6 @@ def test_hierarchy_schedule_allows_qa_before_implementation_ready(tmp_path):
     assert len(manager.load(parent.id).child_ids) == 2
 
 
-# LLM: test_hierarchy_schedule_allows_qa_after_implementation_child keeps normal QA follow-up possible.
-# 函数用途: 父节点已有实现 child 后，可以继续创建 tester/bug_finder 检查产物。
 def test_hierarchy_schedule_allows_qa_after_implementation_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
@@ -205,8 +195,6 @@ def test_hierarchy_schedule_allows_qa_after_implementation_ready(tmp_path):
     assert len(result.created_run_ids) == 1
 
 
-# LLM: delegated production branches should also unlock QA at the parent that owns the contract.
-# 函数用途: root 通过 coordinator 链路完成 leaf 后，root 仍能创建 tester/bug_finder，不被“直接 child 不是 worker”误挡。
 def test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
@@ -255,8 +243,6 @@ def test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready(tmp_
     assert len(result.created_run_ids) == 1
 
 
-# LLM: scheduler does not infer hidden blockers from prose.
-# 函数用途: text/arithmetic 这类领域词不再变成 Python 层硬卡点。
 def test_hierarchy_schedule_allows_different_declared_work_topics(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"

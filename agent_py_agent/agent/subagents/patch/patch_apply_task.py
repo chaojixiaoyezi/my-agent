@@ -1,11 +1,8 @@
-# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
 
 from __future__ import annotations
 
 """single-task patch apply workflow for PatchApplyService.
 
-给人看的解释：
 这里处理单个任务里的 patch 规范化、边界检查、执行和回滚，PatchApplyService 只保留批量门面。
 """
 
@@ -15,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_py_agent.agent.common.json_io import read_json_object_report
 from agent_py_agent.agent.subagents.patch.patch_renderer import build_unified_diff
 from agent_py_agent.agent.subagents.reports import PatchApplyRecord
 from agent_py_agent.agent.subagents.utils import _new_id
@@ -23,8 +21,6 @@ from agent_py_agent.agent.tooling.write_boundary import validate_write_boundary
 _PATCH_APPLY_WRITE_TYPES = {"write_file"}
 
 
-# LLM: _ExecuteApplyContext 属于子代理补丁应用的类边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 类用途: 集中保存execute应用上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _ExecuteApplyContext:
     """Bundle for _execute_apply to reduce parameter count."""
@@ -40,12 +36,9 @@ class _ExecuteApplyContext:
     message: str
 
 
-# LLM: ApplyPatchTaskParams 属于子代理补丁应用的类边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 类用途: 集中保存应用补丁任务参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class ApplyPatchTaskParams:
     """Bundle for apply_patch_task keyword-only parameters."""
-    # LLM: 单任务补丁应用状态以同一参数包穿过服务和兜底路径。
     output: dict
     patches: list
     apply: bool
@@ -53,8 +46,6 @@ class ApplyPatchTaskParams:
     note: str
 
 
-# LLM: BaseAuditParams 属于子代理补丁应用的类边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 类用途: 集中保存基础audit参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class BaseAuditParams:
 
@@ -65,11 +56,9 @@ class BaseAuditParams:
     diff_text: str
 
 
-# LLM: extract_patch_test_info 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 处理extract补丁testinfo相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持补丁文件、预演结果和应用报告上的返回值和副作用边界稳定。
 def extract_patch_test_info(task, output):
     """Extract test commands and blocked test reasons from task output."""
-    from agent_py_agent.agent.subagents.services.patch_apply_test_commands import (
+    from agent_py_agent.agent.subagents.services.patch_apply.test_commands import (
         PatchApplyTestCommands,
     )
 
@@ -86,8 +75,6 @@ def extract_patch_test_info(task, output):
     return test_commands, len(blocked_test_reasons), patch_entries
 
 
-# LLM: apply_patch_task 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 更新补丁任务对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新补丁文件、预演结果和应用报告，需避免破坏既有状态机约定。
 def apply_patch_task(manager, task, *, params: ApplyPatchTaskParams) -> PatchApplyRecord:
     """Execute single task patch apply dry-run or real apply."""
     now = time.time()
@@ -96,7 +83,7 @@ def apply_patch_task(manager, task, *, params: ApplyPatchTaskParams) -> PatchApp
     blocked_count += test_blocked_count
     patch_entries.extend(test_entries)
 
-    from agent_py_agent.agent.subagents.services.patch_apply_decision import PatchApplyDecision
+    from agent_py_agent.agent.subagents.services.patch_apply.decision import PatchApplyDecision
 
     decision, ok, message = PatchApplyDecision.decide(params.patches, patch_specs, blocked_count, params.apply)
     rollback_performed, test_results, applied_count = False, [], 0
@@ -117,6 +104,7 @@ def apply_patch_task(manager, task, *, params: ApplyPatchTaskParams) -> PatchApp
                 message=message,
             )
         )
+        _carry_existing_load_errors(params.output, task.output_json)
         params.output["patches"] = [spec["patch_ref"] for spec in patch_specs]
         Path(task.output_json).write_text(
             json.dumps(params.output, ensure_ascii=False, indent=2),
@@ -136,8 +124,20 @@ def apply_patch_task(manager, task, *, params: ApplyPatchTaskParams) -> PatchApp
     )
 
 
-# LLM: _normalize_all_patches 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 解析并归一化allpatches的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
+def _carry_existing_load_errors(output: dict, output_json: str) -> None:
+    read_report = read_json_object_report(
+        Path(output_json),
+        parse_nested_string=True,
+        context="patch_apply.outer_success_output_json",
+    )
+    errors = read_report.payload.get("load_errors") if isinstance(read_report.payload, dict) else None
+    items = list(errors) if isinstance(errors, list) else []
+    if read_report.load_error is not None:
+        items.append(read_report.load_error)
+    if items:
+        output["load_errors"] = items
+
+
 def _normalize_all_patches(manager, task, patches):
     """Normalize all patches and return entries, specs, and blocked count."""
     patch_entries, patch_specs, blocked_count = [], [], 0
@@ -151,13 +151,11 @@ def _normalize_all_patches(manager, task, patches):
     return patch_entries, patch_specs, blocked_count
 
 
-# LLM: _execute_apply 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 推进execute应用的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响补丁文件、预演结果和应用报告，需保持重试、超时和状态迁移语义。
 def _execute_apply(ctx: _ExecuteApplyContext):
     """Execute the patch apply and handle rollback on failure."""
     applied_count, rollback_performed, test_results = 0, False, []
     try:
-        from agent_py_agent.agent.subagents.services.patch_apply_executor import (
+        from agent_py_agent.agent.subagents.services.patch_apply.executor import (
             PatchApplyExecutor,
             PatchApplyParams,
         )
@@ -183,8 +181,6 @@ def _execute_apply(ctx: _ExecuteApplyContext):
     return applied_count, rollback_performed, test_results, ctx.decision, ctx.ok, ctx.message
 
 
-# LLM: normalize_patch_apply_spec 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 解析并归一化补丁应用spec的输入形态，让下游只处理稳定结构；关键副作用: 会更新补丁文件、预演结果和应用报告，需避免破坏既有状态机约定。
 def normalize_patch_apply_spec(manager, task, patch: dict) -> dict:
     """Normalize patch spec with write boundary enforcement."""
     raw_path = str(patch.get("path") or "").strip()
@@ -222,8 +218,6 @@ def normalize_patch_apply_spec(manager, task, patch: dict) -> dict:
     return {"ok": True, "audit": audit, "patch_ref": patch, "target": target, "content": content, "path": raw_path}
 
 
-# LLM: _patch_type 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 处理补丁type相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持补丁文件、预演结果和应用报告上的返回值和副作用边界稳定。
 def _patch_type(patch: dict) -> str:
     return str(
         patch.get("tool")
@@ -232,8 +226,6 @@ def _patch_type(patch: dict) -> str:
     ).strip().lower()
 
 
-# LLM: _patch_content 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 处理补丁内容相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持补丁文件、预演结果和应用报告上的返回值和副作用边界稳定。
 def _patch_content(patch: dict):
     content = patch.get("content")
     if content is not None:
@@ -244,8 +236,6 @@ def _patch_content(patch: dict):
     return None
 
 
-# LLM: _patch_diff_text 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 处理补丁diff文本相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持补丁文件、预演结果和应用报告上的返回值和副作用边界稳定。
 def _patch_diff_text(patch: dict) -> str:
     for key in ("diff", "patch", "patch_diff", "unified_diff"):
         value = patch.get(key)
@@ -254,8 +244,6 @@ def _patch_diff_text(patch: dict) -> str:
     return ""
 
 
-# LLM: _base_audit 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 处理基础audit相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持补丁文件、预演结果和应用报告上的返回值和副作用边界稳定。
 def _base_audit(params: BaseAuditParams) -> dict:
     return {
         "path": params.raw_path,
@@ -270,8 +258,6 @@ def _base_audit(params: BaseAuditParams) -> dict:
     }
 
 
-# LLM: _preflight_patch_blocker 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 处理preflight补丁blocker相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持补丁文件、预演结果和应用报告上的返回值和副作用边界稳定。
 def _preflight_patch_blocker(raw_path: str, status: str, patch_type: str, content) -> str:
     if not raw_path:
         return "patch 缺少 path。"
@@ -284,8 +270,6 @@ def _preflight_patch_blocker(raw_path: str, status: str, patch_type: str, conten
     return ""
 
 
-# LLM: resolve_patch_target 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 读取或查询补丁target需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def resolve_patch_target(manager, raw_path: str) -> Path:
     """Resolve patch target path relative to workspace root."""
     target = Path(raw_path).expanduser()

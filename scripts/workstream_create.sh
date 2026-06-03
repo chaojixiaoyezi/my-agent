@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# LLM: create an isolated git worktree and branch for one named workstream.
-# 给人看的解释：
 # 用它开一条并行开发线。
 # 它会创建目录、创建或复用 workstream/<name> 分支，并打印下一步怎么进入这条线。
 
@@ -11,8 +9,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/workstream_common.sh"
 
 usage() {
-  # LLM: render command help for creating a workstream.
-  # 给人看的解释：
   # 参数很少：必填名字，可选 base 分支和自定义分支名。
   cat <<'EOF'
 Usage:

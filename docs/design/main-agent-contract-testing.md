@@ -252,7 +252,7 @@
 
 当前规则改为：协作链路只保留 tree/refs/dispatch 状态事实和日志观察，系统不再用专门 orchestration 合同阻断 root 最终回答。主代理或父代理需要继续推进时，应读取代理树、dispatch 返回索引和子代理产物引用，再自行判断下一步。
 
-同轮复验还显示模型会把 dispatch 参数写成 `{"orchestration": {"run_ids": [...], "concurrency": 5, "mode": "parallel"}}`。这是通用工具协议漂移，不是业务专项问题。当前工具协议已经收敛：`dispatch_subagents` 只接受顶层字段，推进开关只看 `dry_run`，并会明确拒绝 `orchestration` wrapper、`apply`、`execute_runners` 等旧写法。这样可以让错误尽快暴露，而不是长期保留第二套入口。
+同轮复验还显示模型会把 dispatch 参数写成 `{"orchestration": {"run_ids": [...], "concurrency": 5, "mode": "parallel"}}`。这是通用工具协议漂移，不是业务专项问题。当前工具协议已经收敛：`dispatch_subagents` 只接受顶层字段，推进开关只看 `dry_run`，并会明确拒绝 `orchestration` wrapper、`apply`、`start_runners` 等旧写法。这样可以让错误尽快暴露，而不是长期保留第二套入口。
 
 ### 运行硬门阶段 0-6
 
@@ -294,9 +294,9 @@
 
 2026-05-24 开始把真实 LLM 测试前的“入口级合同门”补齐。目标是让普通用户提示词先被物化成结构化合同，再由通用门守住执行边界，而不是靠专项模板或长提示词约束模型。
 
-阶段 1：Contract Schema。新增 `delivery_contract_doctor.py`，对 `delivery_contract.v1` 做轻量 schema 自检；坏字段输出结构化 finding 和 `rematerialize_delivery_contract` 返工动作，schema version 不匹配只 warning，保持向后兼容。
+阶段 1：Contract Schema。新增 `delivery_contract_doctor.py`，对 `delivery_contract.v1` 做轻量 schema 自检；坏字段输出结构化 finding 和统一的 `repair_effective_contract` 返工动作，schema version 不匹配只 warning，保持向后兼容。
 
-阶段 2：Contract Doctor。`delivery_requirement_materializer.py` 保留原始物化结果的 Doctor findings；`main_agent_delivery_closeout.py` 在验收 artifact 前先跑 Doctor，合同本身坏了就写 `.agent_delivery/contract_doctor.json` 并把 `[delivery-contract-doctor]` 注入下一轮返工上下文。
+阶段 2：Contract Doctor。`delivery_requirement_materializer.py` 保留原始物化结果的 Doctor findings；`delivery_closeout/closeout.py` 在验收 artifact 前先跑 Doctor，合同本身坏了就写 `.agent_delivery/contract_doctor.json` 并把 `[delivery-contract-doctor]` 注入下一轮返工上下文。
 
 阶段 3：标准合同测试套件。新增 `tests/support/delivery_contract_suite.py`，复用同一组合同用例测试 artifacts 类型错误、未知格式显式扩展、路径越界和版本漂移，避免每个入口散写一套。
 

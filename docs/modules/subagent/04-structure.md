@@ -14,7 +14,7 @@
 
 `create_subagents` 的“立即启动”是后台启动：工具调用本身只负责创建 run、写入 `background_start` 标记、拉起 runner 调度后台进程，然后立刻把 `run_ids`、启动状态和任务树快照返回给父代理。父代理不会同步等待所有子代理完成，因此可以继续和用户对话、继续规划，或稍后用 `inspect_agent_tree` 查看进展。
 
-真实模型后端的后台启动会调用独立 `subagents-dispatch --apply --execute-runners --run-id ... --background-launch-id ...` 进程。这个进程启动时把任务树里的 `background_start.status` 更新为 `running`，结束时更新为 `finished`，异常时更新为 `failed` 并写错误摘要；日志用无缓冲 Python 进程输出，方便父代理或人工快速看到后台 runner 是否真的启动。
+真实模型后端的后台启动会调用独立 `subagents-dispatch --apply --start-runners --run-id ... --background-launch-id ...` 进程。这个进程启动时把任务树里的 `background_start.status` 更新为 `running`，结束时更新为 `finished`，异常时更新为 `failed` 并写错误摘要；日志用无缓冲 Python 进程输出，方便父代理或人工快速看到后台 runner 是否真的启动。
 
 后台启动使用显式运行身份加线程级兜底。每个子代理 runner 会形成自己的 `RunScope`，包含 `run_id`、`task_id`、`parent_run_id`、`root_run_id`、`root_task_id`、`depth` 和 `agent_kind`。工具调用、工具结果、归档记录和 `agent_events` 会优先写这份结构化身份；线程级 runner 上下文只作为权限上界和旧调用链的兼容兜底。这样父代理一边继续派第二个子代理时，不会被第一个正在运行的后台子代理污染身份，也不会把新子代理误挂进兄弟子树。
 
@@ -31,6 +31,8 @@
 真正的运行事实源是显式 run 账本：`agent_runs` 记录当前状态，`agent_events` 记录每次 run 保存和工具完成。工具完成事件会带 `run_id`、`parent_run_id`、`root_run_id`、`root_task_id` 和操作号。父级看 tree 时只是在读这些事实的投影，不再靠“当前子代理是谁”猜来源。
 
 每次保存会把完整详细状态写进 `work/agents/<run_id>/canonical_state.json`。旧工单目录里的 `task.json` / `run.json` 仍会保留，但只镜像同一份 payload，用来给旧入口定位；读取时如果 canonical state 存在，以它为准。这样 tree、owner projection、board 和 index 都是同一份状态的投影，不再各自维护一套事实。
+
+如果 owner projection、状态报告、LocalStore 控制面投影或 global index 同步失败，保存链路只记录 `projection_warnings.json`。这些派生文件可以重建，不能反过来让 canonical state 保存失败，也不能让父代理误以为子代理没干活。
 
 子代理应该做的是写自己的结果、证据引用和必要的工作文件；父级或主代理通过 `inspect_agent_tree`、`run_closeout_ref` 和 refs 看状态，不要求子代理手动维护树。
 
@@ -51,6 +53,8 @@
 路径、旧任务目录、搜索结果里的文件名，都只能当恢复线索；系统不能把这些文本当成
 最终产物事实。
 
+子代理 runner 回写的 artifact refs 会经过同一套 registry 登记。登记成功后，父级看到的是 `artifact_id` / `registry_ref`；登记失败或路径尚不存在时，原始文本不会被丢弃，但也不会被升级成 ready 产物。
+
 当产物被移动、重建或修复时，继续更新同一个 `artifact_id`。这样父代理汇总、tree
 展示和 closeout 都会看到最新文件，不会因为旧 `preferred_path` 或子代理口头路径
 而读错产物。
@@ -67,7 +71,7 @@
 
 状态面只返回当前布局路径。`workspace_refs.task_root` 指向任务级目录，`workspace_refs.agent_work_dir` 指向具体代理运行目录；旧式 `data/subagents/<run_id>` work-order 路径只作为系统兼容恢复材料存在，不放进模型可见的 `workspace_refs`。当前布局里，任务根目录只保留 `output/` 和 `work/` 两个一眼能懂的目录；子代理、孙代理等下级代理运行窝统一在 `task_root/work/agents/<agent_id>/`，包括其 `context_bundle.json`、状态、compact 和产物引用。主代理不是当前任务的 child agent，它自己的长期 memory、compact、日志和状态仍属于 `owners/local/main`，不会写进 `task_root/work/agents/`。
 
-`create_subagents`、`dispatch_subagents`、`schedule_child_subagents` 和人工/CLI 看板返回前也会走同一层模型可见路径净化，避免嵌套 `agent_tree` 或 `child_result_index` 把旧路径重新吐给模型。当前内部编排/状态工具输出被外置到 tool-output artifact 时同样保存净化后的正文；历史旧 artifact 被 `read_artifact` 展开时也会按来源工具净化一次，但普通文件、网页、命令和用户产物正文不做这种替换。
+`create_subagents`、`dispatch_subagents`、`schedule_child_subagents`、`context_bundle`、runner prompt 摘要和人工/CLI 看板返回前也会走同一层模型可见路径净化，避免嵌套 `agent_tree`、`child_result_index`、`task_envelope` 或 `workspace_refs` 把旧路径重新吐给模型。当前内部编排/状态工具输出被外置到 tool-output artifact 时同样保存净化后的正文；历史旧 artifact 被 `read_artifact` 展开时也会按来源工具净化一次，但普通文件、网页、命令和用户产物正文不做这种替换。
 
 旧模型工具 `subagent_board` 已撤掉，避免和 `inspect_agent_tree` 形成两个状态入口。底层仍可写
 `subagent_board.json` / `SUBAGENT_BOARD.md` 给 CLI 或人工排查，但模型看状态只走
@@ -92,6 +96,10 @@ shell 权限按“不能比父级更大”派生：
 - 父级是 `full-access` 时，子代理仍只拿 `workspace-write`，不会自动获得全盘 shell 权限。
 
 这个有效权限会落在 `effective_permissions` 和执行上下文的 `write_boundary.shell_access_mode` 里，`run_command` 实际执行时会读取这个机器字段。模型自己在参数里写更大的权限不会生效。
+
+旧的 `controlled_exec` 仍保留给内部 capability 迁移链路，但它不是普通模型工具：
+默认工具目录、`list_tools` 和模型直接执行都会挡住它。只有内部链路显式传入
+`allowed_tools=["controlled_exec"]` 且带父级 grant 时，才允许继续使用，避免“菜单隐藏但猜名字能调”的旧口子。
 
 外部插件、额外系统工具和未来 skill 不默认自授。父级可以在派工时显式给 `allowed_skills`，子代理也可以通过能力申请链路请求更多工具或 skill；批准和授予仍由上级/系统决定。
 
@@ -127,6 +135,76 @@ runner 结构化结果只负责把状态、summary、artifacts、evidence packet
 
 父级看到子代理结果后，可以按 refs 读取产物、继续调度、要求返工或提交 closeout。系统不再在 runner 层单独制造 `artifact_integrity_repair_advice`，避免和统一 closeout 形成两套验收/返工机制。
 
+静态站点检查入口收敛到 `subagents/static_site/`。外部只应 import
+`subagents.static_site.run_static_site_check`；HTML parser、DOM/JS/path checks 和
+record helper 都是子包内部实现。这只是已有静态站点测试执行器的包结构收敛，
+不新增子代理父验收层，也不改变 closeout 语义。
+
+测试执行器入口收敛到 `subagents/execution/`。外部只应 import
+`subagents.execution.TestExecutor`、`TestExecutionRecord`、测试报告和测试项准备 API；
+命令执行、文件存在、内容检查、pytest 推断、静态站点测试项和报告渲染 helper 都在
+子包内部。它仍然只是普通 runner 测试执行层，不引入额外父验收链。
+
+层级调度 service 入口收敛到 `subagents/services/hierarchy/`。外部只应 import
+`SubAgentHierarchyScheduler`、`SubAgentHierarchyRecoveryService` 和调度/恢复请求模型；
+agent name、write policy、role/tool policy、QA ready refs 和 schedule idempotency
+都是 hierarchy 子包内部 helper。它只是把原本平铺的 services 文件归位，不改变
+`create_subagents`、`schedule_child_subagents` 或 `dispatch_subagents` 的执行语义。
+
+Patch apply service helper 收敛到 `subagents/services/patch_apply/`。外部只应 import
+`PatchApplyExecutor`、`PatchApplyTaskHelper`、`PatchReviewTaskHelper`、`PatchApplySpecNormalizer`
+和 `PatchApplyTestCommands` 等包级 API；decision、record files、summary、test command
+提取 helper 都在子包内部。它仍然服务原有 patch flow，不改变 patch 权限、rollback
+或测试命令校验语义。
+
+Takeover service helper 收敛到 `subagents/services/takeover/`。外部只应 import
+`SubAgentTakeoverRunService`、`TakeoverRunRequest`、`write_takeover_readiness_files`
+和 readiness 读取顺序 API；source refs、chain depth 和 readiness markdown 渲染都在子包
+内部。它仍然服务原有恢复编排，不改变接管 run 的幂等、写入根继承或错误可见化语义。
+
+Board service helper 收敛到 `subagents/services/board/`。外部只应 import
+`SubAgentBoardService` 和 `SubAgentBoardFacade` 等包级 API；due-check、action-plan、
+board item、timeout 检查和 parent timeout helper 都在子包内部。它仍然只是 tree/board
+可观察状态的投影和人工/CLI 看板写出层，不替代 `inspect_agent_tree`，也不新增第二套
+状态账本。
+
+Action apply service helper 收敛到 `subagents/services/actions/`。外部只应 import
+`SubAgentActionService`、`ActionApplyOptions` 和 `RecordAfterTaskActionParams` 等包级
+API；具体 action handler、action records、leadership recovery 和 takeover 写回 handler
+都在子包内部。它仍然服务原有 action-plan 应用流程，不替代 recovery orchestrator，
+也不新增第二套接管链路。
+
+Indexing service helper 收敛到 `subagents/services/indexing/`。外部只应 import
+`SubAgentIndexingService`、`IndexReportParams`、`LocalRecordParams` 和
+`DataclassRecordIndexParams` 等包级 API；dispatch/watch/report/local-record
+索引 helper 都在子包内部。它仍然服务原有 LocalStore 与 report indexing 流程，
+不替代 canonical state，也不新增第二套索引事实源。
+
+Persistence service helper 收敛到 `subagents/services/persistence/`。外部只应 import
+`SubAgentPersistenceService`、`SubAgentListRunsReport`、模型归一化和 projection 包级 API；
+状态报告、owner/global index 投影、recovery output、失败交接和继承 manifest helper
+都在子包内部。它仍然服务同一套 canonical state 读取/保存流程，不新增第二套事实账本。
+
+Dispatch service helper 收敛到 `subagents/services/dispatch/`。外部只应 import
+`SubAgentDispatchService`、`DispatchRecordParams`、`DispatchWatchRecordParams` 和
+`ParentPlannerRecordParams` 等包级 API；report builder、watch builder 和日志 appender
+都在子包内部。它仍然服务同一套 dispatch / watch / parent planner 报告流程，
+不新增第二套调度状态源。
+
+Leadership recovery helper 收敛到 `subagents/services/leadership_recovery/`。外部只应
+import `SubAgentLeadershipRecoveryPlanner`、`SubAgentLeadershipRecoveryApplier` 和
+对应 report/record 模型；plan/apply helper 都在子包内部。它仍然服务原有 coordinator
+handoff 恢复编排，不改变恢复策略或任务树写回语义。
+
+## 编排工具说明
+
+模型可见的编排工具目录保持短摘要：工具名、一句话用途、关键参数和少量示例。长边界说明移动到
+`docs/modules/subagent/ORCHESTRATION_TOOL_REFERENCE.md`，供开发者维护和排查使用。
+
+这条规则避免每轮 prompt 都塞入大段工具手册，也避免把操作手册误读成新的硬门。修改
+`create_subagents`、`dispatch_subagents`、`schedule_child_subagents`、`inspect_agent_tree`、
+`raise_event` 或 `task_progress` 语义时，需要同步短摘要和这份长参考。
+
 ## 旧兼容层清理
 
 已经确认无生产调用的 task/real-task 读取兼容文件、repair 目标辅助文件、
@@ -152,6 +230,16 @@ capability contract 文本片段辅助文件已删除。当前结构保持一套
 
 这套结构只负责“下一轮让模型看见补充提示”。真正推进仍靠 `create_subagents`、
 `schedule_child_subagents`、`dispatch_subagents` 和任务树状态；真正验收仍靠普通 closeout。
+
+## Collaboration 账本
+
+协作控制面只负责“发请求、收回应、到点收回、上报上级”，不负责验收任务成功。
+
+- 模型可见工具保持四个：`raise_collaboration`、`inspect_collaboration`、`submit_collaboration_result`、`update_collaboration`。
+- `inspect_collaboration` 的主摘要是 `case_window` 和 `collection_result`：窗口是否还开着、是否该上报、谁已回、谁没回、谁不可达。
+- 单个请求用 `response_status=waiting/responded/unanswered/unavailable` 表达响应事实。
+- 没回复的响应者只记到 `missing_responder_agent_ids_by_request`，不可达目标只记到 `unavailable_target_agent_ids_by_request`，不阻塞主流程。
+- 旧 `rework` / `rework_targets` 已删除；协作不再生成额外返工门。
 
 子代理状态机只做生命周期形状校验，例如 `PLANNING -> RUNNING -> DONE/FAILED/BLOCKED`。
 它不再保留一组空的“未来 guard”参数，也不在 `RUNNING -> DONE`

@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 from __future__ import annotations
 
@@ -20,16 +18,12 @@ from .common import ROOT, resolve_workspace_root
 from .models import TaskIdOptions, TaskListOptions, TaskSearchOptions
 
 
-# LLM: _task_store 是 task CLI 到本地 SQLite store 的入口。
-# 函数用途: 根据配置解析 workspace root，并打开 data/local_store.db。
 def _task_store(config_path: str):
     config = load_config(config_path)
     root = resolve_workspace_root(config, config_path)
     return LocalStore(root / "data" / "local_store.db")
 
 
-# LLM: cmd_task_list 输出任务列表；表格字段和 JSON 字段都属于 CLI 契约。
-# 函数用途: 读取任务列表选项，查询 store，并按用户选择输出。
 def cmd_task_list(args) -> int:
 
     options = _task_list_options(args)
@@ -46,8 +40,6 @@ def cmd_task_list(args) -> int:
     return 0
 
 
-# LLM: cmd_task_show 查看单个任务；缺失任务时返回非零退出码。
-# 函数用途: 解析任务 id，读取详情，并输出人读或 JSON 结果。
 def cmd_task_show(args) -> int:
 
     options = _task_id_options(args)
@@ -57,8 +49,6 @@ def cmd_task_show(args) -> int:
     return 0
 
 
-# LLM: cmd_task_abandon 属于task CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_task_abandon(args) -> int:
 
     options = _task_id_options(args)
@@ -83,8 +73,6 @@ def cmd_task_abandon(args) -> int:
         return 1
 
 
-# LLM: cmd_task_pause 属于task CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_task_pause(args) -> int:
 
     options = _task_id_options(args)
@@ -109,8 +97,6 @@ def cmd_task_pause(args) -> int:
         return 1
 
 
-# LLM: cmd_task_resume 属于task CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_task_resume(args) -> int:
 
     options = _task_id_options(args)
@@ -135,8 +121,6 @@ def cmd_task_resume(args) -> int:
         return 1
 
 
-# LLM: cmd_task_search 执行任务搜索；查询参数直接来自 CLI。
-# 函数用途: 按关键词和过滤条件查询任务，并输出匹配结果。
 def cmd_task_search(args) -> int:
 
     options = _task_search_options(args)
@@ -164,8 +148,6 @@ def cmd_task_search(args) -> int:
     return 0
 
 
-# LLM: _task_list_options 属于task CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _task_list_options(args) -> TaskListOptions:
     config = load_config(args.config)
     return TaskListOptions(
@@ -176,13 +158,9 @@ def _task_list_options(args) -> TaskListOptions:
     )
 
 
-# LLM: _task_id_options 属于task CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _task_id_options(args) -> TaskIdOptions:
     return TaskIdOptions(config=args.config, task_id=args.task_id)
 
 
-# LLM: _task_search_options 属于task CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _task_search_options(args) -> TaskSearchOptions:
     return TaskSearchOptions(config=args.config, query=args.query)

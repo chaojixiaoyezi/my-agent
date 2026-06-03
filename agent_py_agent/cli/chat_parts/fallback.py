@@ -1,5 +1,3 @@
-# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
-# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
 
 from __future__ import annotations
 
@@ -23,8 +21,6 @@ from .rendering import BLUE, BOLD, RESET, terminal_rule
 from .slash_command_types import SlashCommandContext
 
 
-# LLM: _show_status 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _show_status(
     state: WorkerStateRefs,
     agent,
@@ -45,8 +41,6 @@ def _show_status(
             print(line)
 
 
-# LLM: _print_worker_status 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_worker_status(
     state: WorkerStateRefs, active: int, prompt: str, elapsed: float
 ) -> None:
@@ -60,8 +54,6 @@ def _print_worker_status(
     print(f"当前没有运行中的任务；队列中还有 {state.pending_jobs_ref[0]} 个任务。")
 
 
-# LLM: _fallback_handle_command 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护非 TUI 聊天路径的命令处理、展示或任务提交。
 def _fallback_handle_command(cfg: FallbackHandleCommandConfig) -> bool | None:
     if is_exit_command(cfg.user):
         _wait_for_exit(cfg)
@@ -77,8 +69,6 @@ def _fallback_handle_command(cfg: FallbackHandleCommandConfig) -> bool | None:
     return None
 
 
-# LLM: _wait_for_exit 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _wait_for_exit(cfg: FallbackHandleCommandConfig) -> None:
     with cfg.state_lock:
         active = cfg.pending_jobs_ref[0] + (1 if cfg.is_running_ref[0] else 0)
@@ -88,8 +78,6 @@ def _wait_for_exit(cfg: FallbackHandleCommandConfig) -> None:
     print("再见。")
 
 
-# LLM: _worker_state_refs 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _worker_state_refs(cfg: FallbackHandleCommandConfig) -> WorkerStateRefs:
     return WorkerStateRefs(
         state_lock=cfg.state_lock,
@@ -100,8 +88,6 @@ def _worker_state_refs(cfg: FallbackHandleCommandConfig) -> WorkerStateRefs:
     )
 
 
-# LLM: _handle_shared_slash_command 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 处理用户输入、快捷命令或事件，并分发到对应动作。
 def _handle_shared_slash_command(cfg: FallbackHandleCommandConfig) -> bool:
     return handle_common_slash_command(
         cfg.user,
@@ -116,8 +102,6 @@ def _handle_shared_slash_command(cfg: FallbackHandleCommandConfig) -> bool:
     )
 
 
-# LLM: _fallback_enqueue_job 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护非 TUI 聊天路径的命令处理、展示或任务提交。
 def _fallback_enqueue_job(params: FallbackEnqueueParams) -> ChatJob:
     show_prompt, text = is_show_prompt_command(params.user)
     job = ChatJob(
@@ -132,8 +116,6 @@ def _fallback_enqueue_job(params: FallbackEnqueueParams) -> ChatJob:
     return job
 
 
-# LLM: _print_fallback_banner 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_fallback_banner(cfg: RunFallbackConfig) -> None:
     print(_startup_banner(cfg.agent.config.agent_name, use_gateway=cfg.use_gateway))
     print(f"{cfg.agent.config.agent_name} 交互循环已启动 [v2 fallback模式]。")
@@ -142,8 +124,6 @@ def _print_fallback_banner(cfg: RunFallbackConfig) -> None:
         print("当前模式: gateway 客户端。普通消息会投递给后台 gateway 处理。")
 
 
-# LLM: _fallback_handle_user_input 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护非 TUI 聊天路径的命令处理、展示或任务提交。
 def _fallback_handle_user_input(
     cfg: RunFallbackConfig,
     user: str,
@@ -155,8 +135,6 @@ def _fallback_handle_user_input(
     return None
 
 
-# LLM: _fallback_command_config 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 维护非 TUI 聊天路径的命令处理、展示或任务提交。
 def _fallback_command_config(
     cfg: RunFallbackConfig,
     user: str,
@@ -180,8 +158,6 @@ def _fallback_command_config(
     )
 
 
-# LLM: _make_fallback_refs 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_fallback_refs() -> FallbackInputRefs:
     return FallbackInputRefs(
         is_running_ref=[False],
@@ -192,8 +168,6 @@ def _make_fallback_refs() -> FallbackInputRefs:
     )
 
 
-# LLM: _read_fallback_user 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 读取文件、索引或配置，并转换成后续逻辑可直接使用的数据。
 def _read_fallback_user(cfg: RunFallbackConfig, waiting_ref: list[bool]) -> str | None:
     try:
         return _read_user_input(cfg.state_lock, waiting_ref)
@@ -202,8 +176,6 @@ def _read_fallback_user(cfg: RunFallbackConfig, waiting_ref: list[bool]) -> str 
         return None
 
 
-# LLM: _handle_fallback_message 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 处理用户输入、快捷命令或事件，并分发到对应动作。
 def _handle_fallback_message(
     cfg: RunFallbackConfig,
     user: str,
@@ -217,8 +189,6 @@ def _handle_fallback_message(
     return False
 
 
-# LLM: _enqueue_params 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _enqueue_params(
     cfg: RunFallbackConfig, user: str, refs: FallbackInputRefs
 ) -> FallbackEnqueueParams:
@@ -232,15 +202,11 @@ def _enqueue_params(
     )
 
 
-# LLM: _render_user_entry 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _render_user_entry(user: str) -> None:
     print(f"\n{terminal_rule()}")
     print(f"{BLUE}●{RESET}  {BLUE}{BOLD}{user}{RESET}")
 
 
-# LLM: _run_fallback_input_loop 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def _run_fallback_input_loop(cfg: RunFallbackConfig, refs: FallbackInputRefs) -> None:
     waiting_ref = [False]
     while True:
@@ -251,8 +217,6 @@ def _run_fallback_input_loop(cfg: RunFallbackConfig, refs: FallbackInputRefs) ->
             break
 
 
-# LLM: run_fallback 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_fallback(cfg: RunFallbackConfig) -> int:
     refs = _make_fallback_refs()
     _start_fallback_worker(cfg, refs)

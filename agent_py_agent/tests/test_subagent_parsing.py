@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+from agent_py_agent.agent.common.value_parsing import text_or_sequence_strings as _string_list
 from agent_py_agent.agent.subagents.parsing import (
     _dict_list,
     _extract_subagent_result_blocks,
@@ -11,7 +12,6 @@ from agent_py_agent.agent.subagents.parsing import (
     _parse_runner_json_payload,
     _split_allowed_items,
     _string_dict,
-    _string_list,
     _strip_json_fence,
     parse_parent_planner_output,
     parse_subagent_runner_output,
@@ -148,8 +148,6 @@ class TestParseSubagentRunnerOutput:
         assert result.lessons == ["l1"]
         assert result.next_actions == ["a1"]
 
-    # LLM: top-level artifact_refs are common in reviewer/bug_finder outputs and must feed machine checks.
-    # 函数用途: 复现验收代理把真实产物写在 artifact_refs 而不是 artifacts 时，结果检查漏掉产物的问题。
     def test_parse_top_level_artifact_refs_as_artifacts(self):
         text = """[SUBAGENT_RESULT]
 {

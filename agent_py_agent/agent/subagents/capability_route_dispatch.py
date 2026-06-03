@@ -1,5 +1,3 @@
-# LLM: Capability route dispatch helpers keep manager mixin methods as facade wiring only.
-# 模块用途: 生成 capability route dry-run、gap、已有 grant 复用等记录，不直接执行能力工具。
 
 from __future__ import annotations
 
@@ -25,8 +23,6 @@ if TYPE_CHECKING:
     from ..capabilities import CapabilitySearchHit
 
 
-# LLM: CapabilityNoHitsParams bundles no-hit route context for dry-run/apply symmetry.
-# 类用途: 集中保存 capability 无命中记录所需字段，避免 helper 接口散参数。
 @dataclass(frozen=True)
 class CapabilityNoHitsParams:
     task: SubAgentTask
@@ -36,8 +32,6 @@ class CapabilityNoHitsParams:
     apply: bool
 
 
-# LLM: WouldCapabilityGrantParams carries selected card data for dry-run grant records.
-# 类用途: 保存 dry-run WOULD_GRANT 记录的所有上下文，供路由服务稳定序列化。
 @dataclass(frozen=True)
 class WouldCapabilityGrantParams:
     task: SubAgentTask
@@ -50,8 +44,6 @@ class WouldCapabilityGrantParams:
     reasons: list[str]
 
 
-# LLM: ExistingCapabilityGrantParams carries an already-safe grant reuse decision.
-# 类用途: 已有 controlled_exec grant 覆盖新请求时，统一生成 dry-run 或 apply 记录。
 @dataclass(frozen=True)
 class ExistingCapabilityGrantParams:
     task: SubAgentTask
@@ -62,8 +54,6 @@ class ExistingCapabilityGrantParams:
     grant: object
 
 
-# LLM: route_capability_no_hits returns WOULD_GAP or records a real gap without selecting tools.
-# 函数用途: capability 没有候选命中时，按 dry-run/apply 模式生成 gap 记录。
 def route_capability_no_hits(manager, params: CapabilityNoHitsParams):
     now = time.time()
     if not params.apply:
@@ -78,8 +68,6 @@ def route_capability_no_hits(manager, params: CapabilityNoHitsParams):
     )
 
 
-# LLM: route_would_capability_grant builds a dry-run grant record from selected capability cards.
-# 函数用途: apply=false 时展示将授予哪些 skills/tools，不修改任务状态。
 def route_would_capability_grant(params: WouldCapabilityGrantParams) -> CapabilityRouteRecord:
     return build_would_grant_record(
         WouldGrantRecordParams(
@@ -96,8 +84,6 @@ def route_would_capability_grant(params: WouldCapabilityGrantParams) -> Capabili
     )
 
 
-# LLM: route_existing_capability_grant prevents rm-only repeats from creating empty duplicate grants.
-# 函数用途: 已有 controlled_exec grant 能覆盖删除请求时，将新请求标记为已授权并复用原 grant。
 def route_existing_capability_grant(manager, params: ExistingCapabilityGrantParams) -> CapabilityRouteRecord:
     reasons = ["已有 controlled_exec grant；删除命令应通过 task_trash 处理，不进入 shell 白名单。"]
     granted_skills = list(getattr(params.grant, "skills", []) or [])

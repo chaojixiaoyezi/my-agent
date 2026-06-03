@@ -1,5 +1,3 @@
-# LLM: Home index rebuild repairs lightweight maps from owner-home bodies without changing task truth.
-# 模块用途: 从 owner home 的 task/run/agent 正文重建全局索引；默认只预览，显式 apply 才写索引。
 
 from __future__ import annotations
 
@@ -8,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import read_json_object_report
 from .home_indexes import (
     AgentIndexRef,
     RunIndexRef,
@@ -21,8 +20,6 @@ from .home_layout import MyAgentHomePaths
 from .owner_resolver import OwnerHomeResult, OwnerIdentity, resolve_owner_home
 
 
-# LLM: HomeIndexRebuildResult is a refs-only maintenance result for CLI and tests.
-# 类用途: 保存重建索引的预览/执行结果，不携带任务正文或产物内容。
 @dataclass(frozen=True)
 class HomeIndexRebuildResult:
     applied: bool
@@ -30,9 +27,8 @@ class HomeIndexRebuildResult:
     task_refs: tuple[TaskIndexRef, ...]
     run_refs: tuple[RunIndexRef, ...]
     agent_refs: tuple[AgentIndexRef, ...]
+    load_errors: tuple[dict[str, object], ...] = ()
 
-    # LLM: to_dict serializes rebuild results without leaking task bodies.
-    # 函数用途: 转成 CLI/doctor 可输出的 refs-only JSON 字典。
     def to_dict(self) -> dict[str, object]:
         return {
             "applied": self.applied,
@@ -52,26 +48,31 @@ class HomeIndexRebuildResult:
             "tasks": [_task_ref_dict(ref) for ref in self.task_refs],
             "runs": [_run_ref_dict(ref) for ref in self.run_refs],
             "agents": [_agent_ref_dict(ref) for ref in self.agent_refs],
+            "load_errors": list(self.load_errors),
         }
 
 
-# LLM: rebuild_home_indexes scans owner homes and optionally appends fresh index refs.
-# 函数用途: 根据当前磁盘正文重建 owner/task/run/agent 轻量索引；不会删除旧索引行。
 def rebuild_home_indexes(home: MyAgentHomePaths, *, apply: bool = False) -> HomeIndexRebuildResult:
     owners = tuple(_owner_records(home))
     task_refs: list[TaskIndexRef] = []
     run_refs: list[RunIndexRef] = []
     agent_refs: list[AgentIndexRef] = []
+    load_errors: list[dict[str, object]] = []
     for owner in owners:
-        task_refs.extend(_task_refs_for_owner(owner))
-        run_refs.extend(_run_refs_for_owner(owner))
-        agent_refs.extend(_agent_refs_for_owner(owner))
+        task_states = _task_state_reports_for_owner(owner)
+        task_refs.extend(_task_refs_for_owner(owner, task_states))
+        run_refs.extend(_run_refs_for_owner(owner, task_states))
+        agent_report = _agent_refs_for_owner(owner)
+        agent_refs.extend(agent_report.refs)
+        load_errors.extend(error for _path, _payload, error in task_states if error is not None)
+        load_errors.extend(agent_report.load_errors)
     result = HomeIndexRebuildResult(
         applied=bool(apply),
         owners=owners,
         task_refs=tuple(task_refs),
         run_refs=tuple(run_refs),
         agent_refs=tuple(agent_refs),
+        load_errors=tuple(load_errors),
     )
     if apply:
         for owner in owners:
@@ -85,8 +86,6 @@ def rebuild_home_indexes(home: MyAgentHomePaths, *, apply: bool = False) -> Home
     return result
 
 
-# LLM: _owner_records discovers concrete owner homes from the V2 directory tree.
-# 函数用途: 枚举 local owner、provider user 和 provider group，生成统一 owner 记录。
 def _owner_records(home: MyAgentHomePaths) -> list[OwnerHomeResult]:
     records: list[OwnerHomeResult] = []
     records.extend(_local_owner_records(home))
@@ -97,8 +96,6 @@ def _owner_records(home: MyAgentHomePaths) -> list[OwnerHomeResult]:
     return records
 
 
-# LLM: _local_owner_records expands local owner folders into owner records.
-# 函数用途: 从 owners/local/* 推导本机 owner 身份和 home 路径。
 def _local_owner_records(home: MyAgentHomePaths) -> list[OwnerHomeResult]:
     if not home.local_owners_dir.exists():
         return []
@@ -110,8 +107,6 @@ def _local_owner_records(home: MyAgentHomePaths) -> list[OwnerHomeResult]:
     return records
 
 
-# LLM: _provider_owner_records expands provider user/group folders into owner records.
-# 函数用途: 从 owners/providers/<provider>/users|groups 下推导 owner 身份和 home 路径。
 def _provider_owner_records(provider_dir: Path) -> list[OwnerHomeResult]:
     records: list[OwnerHomeResult] = []
     root = provider_dir.parents[2]
@@ -129,31 +124,43 @@ def _provider_owner_records(provider_dir: Path) -> list[OwnerHomeResult]:
     return records
 
 
-# LLM: _task_refs_for_owner reads task workspace states as the authority for task refs.
-# 函数用途: 从 owner/tasks 下的 work/state.json 生成 task 索引引用。
-def _task_refs_for_owner(owner: OwnerHomeResult) -> list[TaskIndexRef]:
+@dataclass(frozen=True)
+class _AgentRefsReport:
+    refs: list[AgentIndexRef]
+    load_errors: list[dict[str, object]]
+
+
+def _task_state_reports_for_owner(owner: OwnerHomeResult) -> list[tuple[Path, dict[str, Any], dict[str, object] | None]]:
+    return [_read_json_report(path, context="home_index_rebuild.task_state") for path in _task_state_paths(owner.home_dir)]
+
+
+def _task_refs_for_owner(
+    owner: OwnerHomeResult,
+    state_reports: list[tuple[Path, dict[str, Any], dict[str, object] | None]],
+) -> list[TaskIndexRef]:
     refs: list[TaskIndexRef] = []
-    for state_path in _task_state_paths(owner.home_dir):
-        payload = _read_json(state_path)
+    for state_path, payload, load_error in state_reports:
         task_id = str(payload.get("task_id") or state_path.parents[1].name)
         refs.append(
             TaskIndexRef(
                 owner_id=owner.owner_id,
                 task_id=task_id,
                 task_path=state_path.parents[1],
-                status=str(payload.get("status") or "active"),
+                status="UNKNOWN" if load_error else str(payload.get("status") or "active"),
                 title=str(payload.get("task_name") or task_id),
             )
         )
     return refs
 
 
-# LLM: _run_refs_for_owner reads task workspace states as the authority for run refs.
-# 函数用途: 从 owner/tasks 下的 work/state.json 生成 run 索引引用。
-def _run_refs_for_owner(owner: OwnerHomeResult) -> list[RunIndexRef]:
+def _run_refs_for_owner(
+    owner: OwnerHomeResult,
+    state_reports: list[tuple[Path, dict[str, Any], dict[str, object] | None]],
+) -> list[RunIndexRef]:
     refs: list[RunIndexRef] = []
-    for state_path in _task_state_paths(owner.home_dir):
-        payload = _read_json(state_path)
+    for state_path, payload, load_error in state_reports:
+        if load_error:
+            continue
         run_id = str(payload.get("run_id") or "")
         if not run_id:
             continue
@@ -170,13 +177,14 @@ def _run_refs_for_owner(owner: OwnerHomeResult) -> list[RunIndexRef]:
     return refs
 
 
-# LLM: _agent_refs_for_owner reads owner agent projections as agent index truth.
-# 函数用途: 从 owner_home/agents/*/state.json 生成 agent 索引引用。
-def _agent_refs_for_owner(owner: OwnerHomeResult) -> list[AgentIndexRef]:
+def _agent_refs_for_owner(owner: OwnerHomeResult) -> _AgentRefsReport:
     refs: list[AgentIndexRef] = []
+    load_errors: list[dict[str, object]] = []
     agents_root = owner.home_dir / "agents"
     for state_path in sorted(agents_root.glob("*/state.json")):
-        payload = _read_json(state_path)
+        _path, payload, load_error = _read_json_report(state_path, context="home_index_rebuild.agent_state")
+        if load_error:
+            load_errors.append(load_error)
         agent_id = str(payload.get("id") or payload.get("agent_id") or state_path.parent.name)
         task_id = str(payload.get("task_id") or "")
         refs.append(
@@ -185,30 +193,21 @@ def _agent_refs_for_owner(owner: OwnerHomeResult) -> list[AgentIndexRef]:
                 agent_id=agent_id,
                 task_id=task_id,
                 run_path=state_path.parent,
-                status=str(payload.get("status") or "active"),
+                status="UNKNOWN" if load_error else str(payload.get("status") or "active"),
             )
         )
-    return refs
+    return _AgentRefsReport(refs, load_errors)
 
 
-# LLM: _task_state_paths finds V2 task workspace state files only.
-# 函数用途: 列出 owner_home/tasks/<date>/<task>/work/state.json 文件。
 def _task_state_paths(owner_home: Path) -> list[Path]:
     return sorted((owner_home / "tasks").glob("*/*/work/state.json"))
 
 
-# LLM: _read_json tolerates broken maintenance inputs during rebuild previews.
-# 函数用途: 读取 JSON 对象，缺失、损坏或非对象时返回空字典。
-def _read_json(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+def _read_json_report(path: Path, *, context: str) -> tuple[Path, dict[str, Any], dict[str, object] | None]:
+    report = read_json_object_report(path, context=context)
+    return path, report.payload, report.load_error
 
 
-# LLM: _task_ref_dict keeps rebuild JSON output stable without exposing dataclasses.
-# 函数用途: 把 task 索引引用转成 CLI 可序列化字典。
 def _task_ref_dict(ref: TaskIndexRef) -> dict[str, object]:
     return {
         "owner_id": ref.owner_id,
@@ -219,8 +218,6 @@ def _task_ref_dict(ref: TaskIndexRef) -> dict[str, object]:
     }
 
 
-# LLM: _run_ref_dict keeps rebuild JSON output stable without exposing dataclasses.
-# 函数用途: 把 run 索引引用转成 CLI 可序列化字典。
 def _run_ref_dict(ref: RunIndexRef) -> dict[str, object]:
     return {
         "owner_id": ref.owner_id,
@@ -231,8 +228,6 @@ def _run_ref_dict(ref: RunIndexRef) -> dict[str, object]:
     }
 
 
-# LLM: _agent_ref_dict keeps rebuild JSON output stable without exposing dataclasses.
-# 函数用途: 把 agent 索引引用转成 CLI 可序列化字典。
 def _agent_ref_dict(ref: AgentIndexRef) -> dict[str, object]:
     return {
         "owner_id": ref.owner_id,

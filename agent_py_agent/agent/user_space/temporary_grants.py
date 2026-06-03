@@ -1,5 +1,3 @@
-# LLM: Temporary grants are auditable owner-scoped allowances, not permanent permission edits.
-# 模块用途: 记录一次性/限时授权，过期只改状态保留证据，不删除历史。
 
 from __future__ import annotations
 
@@ -10,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from ..common.json_io import read_json_object_report
 from .home_layout import MyAgentHomePaths
 
 
@@ -34,6 +33,12 @@ class CreateTemporaryGrant:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class TemporaryGrantsReport:
+    grants: list[OwnerTemporaryGrant]
+    load_errors: list[dict[str, object]]
+
+
 def create_temporary_grant(home: MyAgentHomePaths, request: CreateTemporaryGrant) -> OwnerTemporaryGrant:
     grant_id = f"grant_{uuid4().hex[:12]}"
     path = home.owner_temporary_grants_dir / f"{grant_id}.json"
@@ -55,16 +60,32 @@ def create_temporary_grant(home: MyAgentHomePaths, request: CreateTemporaryGrant
 
 
 def list_temporary_grants(home: MyAgentHomePaths, *, status: str = "") -> list[OwnerTemporaryGrant]:
+    return list_temporary_grants_report(home, status=status).grants
+
+
+def list_temporary_grants_report(home: MyAgentHomePaths, *, status: str = "") -> TemporaryGrantsReport:
     wanted = str(status or "").strip().lower()
-    rows = [_grant_from_payload(path, _read_payload(path)) for path in sorted(home.owner_temporary_grants_dir.glob("*.json"))]
-    return [row for row in rows if not wanted or row.status.lower() == wanted]
+    grants: list[OwnerTemporaryGrant] = []
+    load_errors: list[dict[str, object]] = []
+    for path in sorted(home.owner_temporary_grants_dir.glob("*.json")):
+        report = _read_payload_report(path)
+        if report.load_error is not None:
+            load_errors.append(report.load_error)
+            continue
+        row = _grant_from_payload(path, report.payload)
+        if not wanted or row.status.lower() == wanted:
+            grants.append(row)
+    return TemporaryGrantsReport(grants, load_errors)
 
 
 def expire_temporary_grants(home: MyAgentHomePaths, *, now: str | None = None) -> list[OwnerTemporaryGrant]:
     current = _parse_time(now or _now_iso())
     expired: list[OwnerTemporaryGrant] = []
     for path in sorted(home.owner_temporary_grants_dir.glob("*.json")):
-        payload = _read_payload(path)
+        report = _read_payload_report(path)
+        if report.load_error is not None:
+            continue
+        payload = report.payload
         if str(payload.get("status") or "") != "active":
             continue
         expires = _parse_time(str(payload.get("expires_at") or ""))
@@ -90,12 +111,8 @@ def _grant_from_payload(path: Path, payload: dict[str, Any]) -> OwnerTemporaryGr
     )
 
 
-def _read_payload(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+def _read_payload_report(path: Path):
+    return read_json_object_report(path, context="temporary_grants.read")
 
 
 def _write_payload(path: Path, payload: dict[str, Any]) -> None:
@@ -119,7 +136,9 @@ def _now_iso() -> str:
 __all__ = [
     "CreateTemporaryGrant",
     "OwnerTemporaryGrant",
+    "TemporaryGrantsReport",
     "create_temporary_grant",
     "expire_temporary_grants",
     "list_temporary_grants",
+    "list_temporary_grants_report",
 ]

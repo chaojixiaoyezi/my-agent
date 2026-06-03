@@ -3,17 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
+from agent_py_agent.agent.agent_core.delivery_closeout.closeout import (
     DeliveryContractValidationRequest,
     DeliveryProgressContext,
     _enrich_delivery_progress,
     _validate_contract_artifacts,
 )
-from agent_py_agent.agent.agent_core.runtime_loop_models import RunParams
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 
 
-# LLM: Builder repair must wait when the builder source artifact is the failed mapping target.
-# 函数用途: 验证通用 source->builder->final 链路中，源产物待修时不会继续重复调用 builder。
 def test_builder_repair_waits_for_failed_source_artifact_mapping(tmp_path: Path) -> None:
     contract = _document_pdf_contract()
     _write_valid_pdf(tmp_path / "outputs/docs/out.pdf")

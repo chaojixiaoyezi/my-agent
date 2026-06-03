@@ -1,5 +1,3 @@
-# LLM: Request status helpers keep collaboration lifecycle open-world and timer-aware.
-# 模块用途: 判断协作请求状态、证据覆盖、缺席响应者和工具展示行。
 
 from __future__ import annotations
 
@@ -16,6 +14,10 @@ def is_terminal_status(status: str) -> bool:
     text = str(status or "").strip().lower()
     markers = ("close", "closed", "resolved", "done", "completed", "finished", "关闭", "已关闭", "解决", "完成")
     return bool(text and any(marker in text for marker in markers))
+
+
+def case_window_status(status: str) -> str:
+    return "closed" if is_terminal_status(status) else "open"
 
 
 def is_completed_request_status(status: str) -> bool:
@@ -58,6 +60,21 @@ def request_is_effectively_timed_out(
 def request_deadline_expired(request: CollaborationRequest, now: float) -> bool:
     deadline = float_value(getattr(request, "deadline_at", 0.0))
     return bool(deadline > 0 and deadline <= now)
+
+
+def request_response_status(
+    request: CollaborationRequest,
+    *,
+    now: float,
+    has_required_evidence: bool,
+) -> str:
+    if has_required_evidence:
+        return "responded"
+    if is_blocked_request_status(request.status) or is_declined_request_status(request.status):
+        return "unavailable"
+    if request_is_effectively_timed_out(request, now=now, has_required_evidence=False):
+        return "unanswered"
+    return "waiting"
 
 
 def evidence_sources_by_request(evidence: list[EvidencePacket], *, aliases: TargetAliases) -> dict[str, set[str]]:
@@ -149,6 +166,7 @@ def pending_request_row(case: CollaborationCase, request: CollaborationRequest) 
         "created_at": request.created_at,
         "updated_at": request.updated_at,
         "recommended_tools": ["inspect_collaboration", "submit_collaboration_result", "update_collaboration"],
+        "next_action_zh": "查自己负责的范围；有命中就提交证据，没有命中也提交未命中说明。",
     }
 
 

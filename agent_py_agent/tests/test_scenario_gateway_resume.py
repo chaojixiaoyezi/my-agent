@@ -65,8 +65,6 @@ def _write_real_model_config(tmp_path: Path) -> Path | None:
     return config_path
 
 
-# LLM: Runs an offline scenario case through the real CLI parser without hitting external APIs.
-# 函数用途: 执行不依赖真实模型的 scenario-test 用例，并返回输出，供端到端回归断言。
 def _run_offline_scenario_case(tmp_path: Path, capsys, case: str) -> str:
     parser = build_parser()
     args = parser.parse_args(

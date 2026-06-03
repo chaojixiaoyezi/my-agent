@@ -7,6 +7,7 @@ from __future__ import annotations
 """
 
 import json
+import logging
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
-from agent_py_agent.agent.agent_core.dispatch_mixin import SimpleAgentDispatchMixin
+from agent_py_agent.agent.agent_core.orchestration.dispatch.mixin import SimpleAgentDispatchMixin
 from agent_py_agent.agent.agent_core.services.notification_service import notify_completed_tasks
 from agent_py_agent.agent.subagent import DispatchReport
 from agent_py_agent.agent.subagents.models import SubAgentRunnerResult, SubAgentTask
@@ -25,13 +26,13 @@ class TestDispatchMixinBasics:
 
     def test_update_pending_work_state_no_candidates(self) -> None:
         """测试无候选任务时更新待处理状态。"""
-        from agent_py_agent.agent.agent_core.runner_dispatch import _dispatch_runner_candidates
+        from agent_py_agent.agent.agent_core.runner.dispatch import _dispatch_runner_candidates
 
         mixin = SimpleAgentDispatchMixin()
         mixin.config = MagicMock()
         mixin.subagents = MagicMock()
 
-        with patch("agent_py_agent.agent.agent_core.runner_dispatch._dispatch_runner_candidates", return_value=[]):
+        with patch("agent_py_agent.agent.agent_core.runner.dispatch._dispatch_runner_candidates", return_value=[]):
             mixin._update_pending_work_state()
             assert mixin._has_pending_work is False
 
@@ -41,7 +42,7 @@ class TestDispatchMixinBasics:
         mixin.config = MagicMock()
         mixin.subagents = MagicMock()
 
-        with patch('agent_py_agent.agent.agent_core.runner_dispatch._dispatch_runner_candidates', return_value=[MagicMock(), MagicMock()]):
+        with patch('agent_py_agent.agent.agent_core.runner.dispatch._dispatch_runner_candidates', return_value=[MagicMock(), MagicMock()]):
             mixin._update_pending_work_state()
             assert mixin._has_pending_work is True
 
@@ -260,9 +261,35 @@ class TestDispatchMixinNotifyCompleted:
         assert payload["status"] == "failed"
         assert "gateway timeout" in str(payload["last_error"])
 
+    def test_completed_task_notification_mark_failed_exception_is_visible(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """通知失败记录写不进去时应该有可排查 warning，而不是静默消失。"""
+        config = _notification_test_config(tmp_path)
+        _write_online_chat_session(config, "admin")
+        agent = _notification_test_agent(config)
+        record = SimpleNamespace(step="runner", run_id="run-1", applied=True, after_status="DONE")
 
-# LLM: notification test helpers keep completion-notification fixtures realistic without reaching the real user home.
-# 函数用途: 生成通知测试配置，把通知、会话和适配器目录都限制在 pytest 临时目录里。
+        with (
+            caplog.at_level(logging.WARNING),
+            patch(
+                "agent_py_agent.agent.notification.NotificationRouter.deliver",
+                side_effect=TimeoutError("gateway timeout"),
+            ),
+            patch(
+                "agent_py_agent.agent.notification.NotificationManager.mark_failed",
+                side_effect=OSError("notification store locked"),
+            ),
+        ):
+            notify_completed_tasks(agent, [record])
+
+        assert "notification runtime failure" in caplog.text
+        assert "notification.mark_failed" in caplog.text
+        assert "notification store locked" in caplog.text
+
+
 def _notification_test_config(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         notification_enabled=True,
@@ -274,8 +301,6 @@ def _notification_test_config(tmp_path: Path) -> SimpleNamespace:
     )
 
 
-# LLM: this fixture mirrors a finished subagent task while avoiding the full manager stack.
-# 函数用途: 构造最小 agent 对象，让 notify_completed_tasks 能加载 DONE 任务并创建完成通知。
 def _notification_test_agent(config: SimpleNamespace) -> SimpleNamespace:
     task = SimpleNamespace(
         status="DONE",
@@ -289,8 +314,6 @@ def _notification_test_agent(config: SimpleNamespace) -> SimpleNamespace:
     return SimpleNamespace(config=config, subagents=subagents)
 
 
-# LLM: chat delivery depends on a fresh session heartbeat, so tests write the same file the router reads.
-# 函数用途: 写入在线 chat 会话，让通知路由器选择 chat 作为真实可投递通道。
 def _write_online_chat_session(config: SimpleNamespace, user_id: str) -> None:
     session_dir = Path(config.session_workspace) / "session-1"
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -298,8 +321,6 @@ def _write_online_chat_session(config: SimpleNamespace, user_id: str) -> None:
     (session_dir / "session.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
-# LLM: notification assertions read the persisted JSON contract instead of private objects.
-# 函数用途: 读取测试生成的唯一通知文件，方便断言状态、渠道和后续兼容字段。
 def _single_notification_payload(tmp_path: Path) -> dict[str, object]:
     paths = list((tmp_path / "notifications").glob("*.json"))
     assert len(paths) == 1

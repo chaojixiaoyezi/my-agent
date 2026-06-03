@@ -161,6 +161,27 @@ class TestCrossChannelSession:
         assert "sess_1" in chat_sessions
         assert "sess_2" in chat_sessions
 
+    def test_list_sessions_by_channel_report_keeps_good_sessions_when_one_file_is_bad(self, tmp_path: Path):
+        """坏 channels.json 不能让系统误以为没有其它好会话。"""
+        from agent_py_agent.agent.session.cross_channel import CrossChannelSession
+
+        class MockConfig:
+            session_workspace = str(tmp_path / "sessions")
+            user_id = "admin"
+
+        cc = CrossChannelSession(MockConfig())
+        cc.bind_session("sess_good", "chat", "admin")
+        bad_file = tmp_path / "sessions" / "sess_bad" / "channels.json"
+        bad_file.parent.mkdir(parents=True, exist_ok=True)
+        bad_file.write_text("{bad-json", encoding="utf-8")
+
+        sessions, load_errors = cc.list_sessions_by_channel_report("admin", "chat")
+
+        assert sessions == ["sess_good"]
+        assert load_errors
+        assert load_errors[0]["context"] == "session.cross_channel.channels.read"
+        assert load_errors[0]["path"] == str(bad_file)
+
     def test_non_admin_cannot_access_others(self, tmp_path: Path):
         """非管理员不能跨用户访问。"""
         from agent_py_agent.agent.session.cross_channel import CrossChannelSession

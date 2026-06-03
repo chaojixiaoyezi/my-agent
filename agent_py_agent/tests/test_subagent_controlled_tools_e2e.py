@@ -24,8 +24,6 @@ from agent_py_agent.agent.subagents.shell_gateway_execution import execute_shell
 from agent_py_agent.agent.subagents.task_trash import TaskTrashMoveRequest, move_to_task_trash
 
 
-# LLM: ControlledToolsFixture bundles E2E setup so helpers avoid wide parameter lists.
-# 类用途: 保存受控工具 E2E 的 task、目录、request 和 grant。
 @dataclass(frozen=True)
 class ControlledToolsFixture:
     task: object
@@ -34,8 +32,6 @@ class ControlledToolsFixture:
     grant: object
 
 
-# LLM: Helper creates a subagent task plus a scoped shell request/grant for the E2E chain.
-# 函数用途: 准备受控工具 E2E 所需的 task、request 和 grant，减少测试主体长度。
 def _prepare_controlled_shell_grant(tmp_path: Path) -> ControlledToolsFixture:
     manager = SubAgentManager(tmp_path / "subs")
     task = manager.create_run(goal="controlled tools", thought="exercise primitives", plan=["run"])
@@ -65,8 +61,6 @@ def _prepare_controlled_shell_grant(tmp_path: Path) -> ControlledToolsFixture:
     return ControlledToolsFixture(task, task_dir, request, grant)
 
 
-# LLM: Helper runs a granted command through shell gateway execution.
-# 函数用途: 使用 grant 的命令白名单和输出预算执行一条受控命令。
 def _run_controlled_shell(tmp_path: Path, fixture: ControlledToolsFixture):
     shell_result = execute_shell_command(
         ShellGatewayRequest(
@@ -84,8 +78,6 @@ def _run_controlled_shell(tmp_path: Path, fixture: ControlledToolsFixture):
     return shell_result
 
 
-# LLM: Helper archives shell stdout through task trash and writes the fallback report.
-# 函数用途: 将 shell 输出移入 task trash，并生成 fallback report refs。
 def _archive_stdout_and_report(fixture: ControlledToolsFixture, shell_result):
     trash_result = move_to_task_trash(
         TaskTrashMoveRequest(

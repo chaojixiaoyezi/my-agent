@@ -64,8 +64,6 @@ def _make_stale_task(agent):
     return task
 
 
-# LLM: _make_coordinator_handoff_fixture builds a stale coordinator, one child, and one candidate leader.
-# 函数用途: 复用 coordinator 领导权恢复测试夹具，避免单个测试函数膨胀。
 def _make_coordinator_handoff_fixture(agent):
     coordinator = agent.subagents.create_run(
         goal="协调子任务", thought="等待孩子完成。", plan=["dispatch", "collect"],
@@ -215,7 +213,7 @@ def test_subagent_action_apply_recovers_coordinator_leadership():
 
 def test_subagent_action_apply_excludes_active_parent_from_takeover():
     """LLM: Parent dispatch must never apply takeover_or_reassign to the active parent run itself."""
-    from agent_py_agent.agent.subagents.services.action_options import ActionApplyOptions
+    from agent_py_agent.agent.subagents.services.actions.options import ActionApplyOptions
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -315,8 +313,6 @@ def test_subagent_action_apply_repairs_work_order():
         assert (root / "subs" / "SUBAGENT_ACTION_APPLY.md").exists()
 
 
-# LLM: Helper keeps the route grant test focused while preserving scoped request coverage.
-# 函数用途: 创建带 shell/path/network/output budget 范围的 web_fetch capability request。
 def _record_scoped_web_fetch(agent, task_id: str, root: Path):
     return agent.subagents.record_capability_request(
         task_id,
@@ -335,8 +331,6 @@ def _record_scoped_web_fetch(agent, task_id: str, root: Path):
     )
 
 
-# LLM: Helper asserts scoped grant fields without lengthening the main route test.
-# 函数用途: 验证父级路由生成的 grant 和 route record 都保留了申请范围。
 def _assert_scoped_http_grant(routed, applied, root: Path) -> None:
     grant = routed.capability_grants[0]
     assert grant.grant_type == "shell"

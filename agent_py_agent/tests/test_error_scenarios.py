@@ -12,7 +12,10 @@ class TestDispatchLoopExceptions:
 
     def test_task_not_found_during_dispatch(self, tmp_path: Path):
         """任务不存在时的异常处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -34,7 +37,10 @@ class TestDispatchLoopExceptions:
 
     def test_corrupted_task_file(self, tmp_path: Path):
         """任务文件损坏时的行为。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -118,7 +124,10 @@ class TestDispatchLoopExceptions:
 
     def test_all_tasks_failed_and_no_retry(self, tmp_path: Path):
         """所有任务都失败且不允许重试时的处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "no_retry"  # 不重试策略

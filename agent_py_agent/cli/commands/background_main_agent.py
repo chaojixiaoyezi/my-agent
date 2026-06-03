@@ -1,5 +1,3 @@
-# LLM: Background MainAgent command registration keeps parser wiring separate from runtime code.
-# 模块用途: 注册 background-main-agent 子命令组，让本地 tick/service 可从 CLI 调用。
 
 from __future__ import annotations
 
@@ -15,8 +13,6 @@ from ..background_main_agent import (
 )
 
 
-# LLM: add_background_main_agent_subcommands owns the public CLI shape for local background runtime tests.
-# 函数用途: 注册后台主代理 message/bind-task/tick/service 命令和参数。
 def add_background_main_agent_subcommands(subparsers) -> None:
     group = subparsers.add_parser(
         "background-main-agent",

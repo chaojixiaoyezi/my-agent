@@ -1,5 +1,3 @@
-# LLM: Memory archive module; keep large tool outputs out of compact ledgers and raw event rows.
-# 模块用途: 将过大的工具输出外置为 artifact 文件，并返回可归档的摘要、hash 和路径。
 
 from __future__ import annotations
 
@@ -20,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..common.path_segments import safe_path_segment
 from ..model_visible_ref_sanitizer import sanitize_model_visible_tool_output
 from ..settings.defaults import default_agent_config
 from .schema import (
@@ -33,8 +32,6 @@ TOOL_OUTPUT_ARTIFACT_SCHEMA = RuntimeMemorySchemaOptions("tool_output_artifact")
 TOOL_OUTPUT_INDEX_SCHEMA = RuntimeMemorySchemaOptions("tool_output_index")
 
 
-# LLM: ExternalizeToolOutputRequest 是工具输出外置的业务入口 bundle；后续阈值、格式和保留字段都放这里。
-# 类用途: 保存工具调用、结果、运行标识和写入根目录；调用 externalize_tool_output_record 后才会写 artifact 文件。
 @dataclass(frozen=True)
 class ExternalizeToolOutputRequest:
     root: str | Path
@@ -50,8 +47,6 @@ class ExternalizeToolOutputRequest:
     parameters: dict[str, Any] | None = None
 
 
-# LLM: externalize_tool_output_record 是 runtime 工具输出进入 memory archive artifact 的唯一入口。
-# 函数用途: 大输出写 artifact 文件，小输出只返回 preview/hash；内部状态工具先做展示层路径净化，普通工具保持原文。
 def externalize_tool_output_record(request: ExternalizeToolOutputRequest) -> dict[str, Any]:
     output = sanitize_model_visible_tool_output(request.tool, str(request.output or ""))
     digest = _sha256_text(output)
@@ -70,18 +65,12 @@ def externalize_tool_output_record(request: ExternalizeToolOutputRequest) -> dic
     return record
 
 
-# LLM: _base_record 保持归档记录短小稳定；永远不把完整工具输出塞进返回 dict。
-# 函数用途: 生成工具输出摘要字段，包括 preview、hash、size、状态和保留扩展字段。
-# LLM: _ResolvedOutputLimits carries output archive budgets after config resolution.
-# 类用途: 保存工具输出外置阈值和归档预览长度，确保外置链路只认一套配置。
 @dataclass(frozen=True)
 class _ResolvedOutputLimits:
     min_chars: int
     preview_chars: int
 
 
-# LLM: _resolved_request_limits merges per-call overrides with AgentConfig archive defaults.
-# 函数用途: 解析工具输出归档预算；调用方未显式传值时使用主配置，不在本模块写死阈值。
 def _resolved_request_limits(request: ExternalizeToolOutputRequest) -> _ResolvedOutputLimits:
     defaults = default_agent_config()
     return _ResolvedOutputLimits(
@@ -90,8 +79,6 @@ def _resolved_request_limits(request: ExternalizeToolOutputRequest) -> _Resolved
     )
 
 
-# LLM: _request_limit interprets negative values as "use AgentConfig fallback" for archive budgets.
-# 函数用途: 归一化单个工具输出预算字段；0 保留为显式配置值，不自动回到默认。
 def _request_limit(value: object, fallback: int) -> int:
     try:
         parsed = int(value)
@@ -100,8 +87,6 @@ def _request_limit(value: object, fallback: int) -> int:
     return int(fallback) if parsed < 0 else max(0, parsed)
 
 
-# LLM: _base_record keeps archive rows compact and uses the resolved preview budget.
-# 函数用途: 生成工具输出摘要字段，包括 preview、hash、size、状态和保留扩展字段。
 def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str, *, preview_chars: int) -> dict[str, Any]:
     return {
         "version": TOOL_OUTPUT_RECORD_SCHEMA.version,
@@ -123,8 +108,6 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
     }
 
 
-# LLM: _write_output_artifact 是唯一文件写入点；路径固定在 memory_archive/artifacts/tool_outputs 下。
-# 函数用途: 将完整工具输出写入 JSON artifact，内容和 metadata 放同一文件便于后续审计。
 def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, digest: str) -> Path:
     path = _artifact_path(request, digest)
     created_at = datetime.now(tz=timezone.utc).isoformat()
@@ -153,8 +136,6 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
     return path
 
 
-# LLM: _append_index 维护工具输出 artifact 的轻量 manifest；只追加摘要，不复制正文。
-# 函数用途: 将外置工具输出的路径、hash、size 和运行标识写入 index.jsonl，供 compact/resume 快速扫描。
 def _append_index(path: Path, payload: dict[str, Any]) -> None:
     record = {
         "version": TOOL_OUTPUT_INDEX_SCHEMA.version,
@@ -179,20 +160,19 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-# LLM: _artifact_path 负责生成文件名安全且稳定可查的工具输出 artifact 路径。
-# 函数用途: 根据 root、工具名、call_id 和内容 hash 计算 artifact JSON 文件路径。
 def _artifact_path(request: ExternalizeToolOutputRequest, digest: str) -> Path:
     return (
         Path(request.root)
         / "memory_archive"
         / "artifacts"
         / "tool_outputs"
-        / f"{_safe_segment(request.tool)}-{_safe_segment(request.call_id)}-{digest[:12]}.json"
+        / (
+            f"{safe_path_segment(request.tool, default='item', replacement='_')}-"
+            f"{safe_path_segment(request.call_id, default='item', replacement='_')}-{digest[:12]}.json"
+        )
     )
 
 
-# LLM: _preview 控制归档预览长度；完整内容只能去 artifact 文件读取。
-# 函数用途: 截断工具输出为可读预览，避免 raw event 和 token ledger 被大输出撑大。
 def _preview(output: str, max_chars: int) -> str:
     if max_chars <= 0:
         return ""
@@ -201,14 +181,10 @@ def _preview(output: str, max_chars: int) -> str:
     return output[:max_chars] + f"\n... [truncated {len(output) - max_chars} chars]"
 
 
-# LLM: _sha256_text 提供内容寻址和完整性校验所需的稳定 hash。
-# 函数用途: 计算 UTF-8 文本的 sha256 hex digest。
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-# LLM: _is_bounded_read_artifact_output prevents artifact-of-artifact loops in live recovery.
-# 函数用途: 判断工具输出是否已经是 read_artifact 返回的受控正文切片；这种输出不再二次外置。
 def _is_bounded_read_artifact_output(request: ExternalizeToolOutputRequest, output: str) -> bool:
     if request.tool != "read_artifact" or not request.ok:
         return False
@@ -216,8 +192,6 @@ def _is_bounded_read_artifact_output(request: ExternalizeToolOutputRequest, outp
     return bool(payload and payload.get("reads_artifact_body") is True)
 
 
-# LLM: _read_artifact_record_fields keeps source artifact metadata visible without creating a wrapper artifact.
-# 函数用途: 给 read_artifact 归档记录补充原始 artifact 引用，方便后续按 source_artifact_ref 继续分片读取。
 def _read_artifact_record_fields(output: str) -> dict[str, Any]:
     payload = _json_object(output) or {}
     return {
@@ -228,8 +202,6 @@ def _read_artifact_record_fields(output: str) -> dict[str, Any]:
     }
 
 
-# LLM: _safe_parameters stores only small scalar tool args in the artifact index.
-# 函数用途: 记录源路径/URL/查询等定位线索，避免把大参数、嵌套对象或敏感复杂结构塞进 compact refs。
 def _safe_parameters(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -246,8 +218,6 @@ def _safe_parameters(value: Any) -> dict[str, Any]:
 _UNSAFE_PARAMETER = object()
 
 
-# LLM: _safe_parameter_item keeps parameter metadata shallow and scalar-only.
-# 函数用途: 裁剪单个工具参数值；复杂对象返回哨兵，不进入 artifact index。
 def _safe_parameter_item(item: Any) -> object:
     if isinstance(item, str | int | float | bool) or item is None:
         return item
@@ -262,8 +232,6 @@ def _safe_parameter_item(item: Any) -> object:
     return _UNSAFE_PARAMETER
 
 
-# LLM: _source_input gives compact continuation a human-readable origin for each tool artifact.
-# 函数用途: 从通用参数中提取 path/url/artifact_ref/query/command 等源输入；未知工具退到首个字符串参数。
 def _source_input(value: Any) -> str:
     params = _safe_parameters(value)
     for key in ("path", "url", "artifact_ref", "query", "command"):
@@ -276,8 +244,6 @@ def _source_input(value: Any) -> str:
     return ""
 
 
-# LLM: _json_object parses only dict payloads and lets malformed tool text fall back to normal externalization.
-# 函数用途: 安全解析工具输出 JSON；不是对象或解析失败时返回 None。
 def _json_object(text: str) -> dict[str, Any] | None:
     try:
         value = json.loads(text)
@@ -286,15 +252,6 @@ def _json_object(text: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-# LLM: _safe_segment 避免工具名和 call id 把 artifact 写到预期目录外。
-# 函数用途: 将任意标识符压成安全文件名片段。
-def _safe_segment(value: str) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(value or "item"))
-    return cleaned.strip("._") or "item"
-
-
-# LLM: _scoped_call_id prevents short call ids like 17-1 from colliding across subagent runs.
-# 函数用途: 为 tool-output artifact 生成 run/task/request 作用域短引用；没有作用域时保留旧 call_id 兼容。
 def _scoped_call_id(request: ExternalizeToolOutputRequest) -> str:
     scope = request.run_id or request.task_id or request.request_id
     return f"{scope}:{request.call_id}" if scope else request.call_id

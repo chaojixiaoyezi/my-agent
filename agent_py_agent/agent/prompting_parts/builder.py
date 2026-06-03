@@ -1,5 +1,3 @@
-# LLM: Prompt-building module; keep assembled prompt sections and file-loading behavior stable.
-# 模块用途: 构造系统提示、工具说明、任务上下文和会话片段。
 
 from __future__ import annotations
 
@@ -25,8 +23,6 @@ from ..config import AgentConfig
 from ..memory import MemoryRecord
 
 
-# LLM: ToolSections is a Prompt 构造 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: Bundle for PromptBuilder.build tool-related parameters.
 @dataclass
 class ToolSections:
     """Bundle for PromptBuilder.build tool-related parameters."""
@@ -36,8 +32,6 @@ class ToolSections:
     tool_context: list[str] | None = None
 
 
-# LLM: PromptBuildRequest is a Prompt 构造 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: 保存 PromptBuildRequest 的输入字段，调用方先构造这个对象再进入 Prompt 构造，避免继续散传参数。
 @dataclass
 class PromptBuildRequest:
     """bundle for PromptBuilder.build inputs."""
@@ -51,8 +45,6 @@ class PromptBuildRequest:
     context_scope: str = "default"
 
 
-# LLM: _PromptBuildCompatArgs bundles legacy kwargs before normalizing to PromptBuildRequest.
-# 类用途: 保存 build 旧参数入口，避免辅助函数继续出现长参数列表。
 @dataclass(frozen=True)
 class _PromptBuildCompatArgs:
     user_prompt: str
@@ -64,20 +56,14 @@ class _PromptBuildCompatArgs:
     context_scope: str
 
 
-# LLM: PromptBuilder is a Prompt 构造 boundary object; coordinate field or method changes with callers, docs, and focused tests.
-# 类用途: 负责构造每一轮发给模型的完整 prompt。
 class PromptBuilder:
     """负责构造每一轮发给模型的完整 prompt。"""
 
-    # LLM: PromptBuilder.__init__ belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 初始化实例依赖和字段，不应在构造阶段做难以回滚的重副作用；它是 PromptBuilder 的方法，通常依赖实例字段。
     def __init__(self, config: AgentConfig, root: Path, home_paths: Any | None = None):
         self.config = config
         self.root = root
         self.home_paths = home_paths
 
-    # LLM: PromptBuilder.read_prompt_files belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 读取动态 prompt 文件并拼接内容。 scope="isolated" 时跳过项目级 prompt 文件，只读取 caller 显式传入的 extra_files。
     def read_prompt_files(self, extra_files: list[str] | None = None, *, include_config: bool = True, scope: str = "default") -> list[str]:
         """读取动态 prompt 文件并拼接内容。
 
@@ -94,8 +80,6 @@ class PromptBuilder:
                 chunks.append(f"# Prompt File: {path}\n" + path.read_text(encoding="utf-8"))
         return chunks
 
-    # LLM: PromptBuilder.build belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 拼出完整 prompt。 这版和旧版最大的区别是把工具信息拆成了两层： - `tool_catalog_section`：常驻的工具目录，告诉模型'你手里有什么工具' - `tool_recommendations_section`：按当前任务筛出来的少量候选详情，告诉模型'这次。
     def build(
         self,
         user_prompt: str = "",
@@ -147,8 +131,6 @@ class PromptBuilder:
             f"{task_and_transcript}\n"
         )
 
-    # LLM: read_home_context injects owner entry files every round, then only matching lesson files.
-    # 函数用途: 每轮读取家目录关键入口文件，并按任务匹配少量 lesson 文件作为运行时动态上下文。
     def read_home_context(self, user_prompt: str) -> list[str]:
         if not self.home_paths or not bool(getattr(self.config, "home_context_enabled", True)):
             return []
@@ -157,8 +139,6 @@ class PromptBuilder:
         return chunks
 
 
-# LLM: _prompt_build_request keeps legacy build kwargs as one explicit PromptBuildRequest bundle.
-# 函数用途: 兼容旧调用方式，同时让 build 主流程只处理已经归一化的参数包。
 def _prompt_build_request(
     request: PromptBuildRequest | None,
     args: _PromptBuildCompatArgs,
@@ -174,8 +154,6 @@ def _prompt_build_request(
     )
 
 
-# LLM: _memory_text renders related memory separately so PromptBuilder.build remains thin.
-# 函数用途: 将 memory records 渲染成 prompt 文本；没有可用记忆时输出固定占位。
 def _memory_text(memories: list[MemoryRecord]) -> str:
     if not memories:
         return "（无相关记忆）"
@@ -188,8 +166,6 @@ def _memory_text(memories: list[MemoryRecord]) -> str:
     return f"{guidance}\n{rendered}"
 
 
-# LLM: _dynamic_prompt_text centralizes prompt-file and home-context injection rules.
-# 函数用途: 隔离上下文禁止读取主家目录；普通 root 运行读取配置 prompt 和匹配 lesson。
 def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, isolated: bool) -> str:
     chunks = [
         *builder.read_prompt_files(request.prompt_files, include_config=not isolated),
@@ -198,8 +174,6 @@ def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, is
     return "\n".join(chunks)
 
 
-# LLM: _workspace_context_text pins path semantics so models stop inventing /workspace.
-# 函数用途: 每轮把真实工作区根目录和当前本地日期写进 prompt；相对路径和报告日期不要由模型猜。
 def _workspace_context_text(builder: PromptBuilder) -> str:
     root = Path(builder.root).resolve()
     now = datetime.now().astimezone()
@@ -232,8 +206,6 @@ def _workspace_context_text(builder: PromptBuilder) -> str:
     ])
 
 
-# LLM: _task_and_transcript_section belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 完成 Prompt 构造 里的 _task_and_transcript_section 步骤，保持现有返回值、异常和副作用语义。
 def _task_and_transcript_section(user_prompt: str, tool_context: list[str]) -> str:
     tools_history = "\n\n".join(tool_context)
     if not tools_history:
@@ -248,20 +220,14 @@ def _task_and_transcript_section(user_prompt: str, tool_context: list[str]) -> s
     )
 
 
-# LLM: _is_task_local_context is the prompt-layer boundary between owner memory and isolated workspaces.
-# 函数用途: 判断本轮 prompt 是否只允许隔离上下文，避免子代理或控制面调用看到主代理长期记忆和家目录制度。
 def _is_task_local_context(value: object) -> bool:
     return str(value or "").strip().lower() in {"task_local", "control_plane"}
 
 
-# LLM: _is_isolated_scope keeps task-local and control-plane prompts out of owner-level context.
-# 函数用途: 判断 prompt scope 是否属于隔离范围，隔离范围不会注入主代理家目录和长期个人上下文。
 def _is_isolated_scope(value: object) -> bool:
     return str(value or "").strip().lower() in {"isolated", "task_local", "control_plane"}
 
 
-# LLM: _home_entry_context_chunks loads stable owner entry files with AGENTS.md first as the boot contract.
-# 函数用途: 读取 AGENTS/SOUL/USER/memory/memory-hot 五类家目录关键文件；文件为空或不存在时跳过。
 def _home_entry_context_chunks(home_paths: Any) -> list[str]:
     entries = (
         ("AGENTS.md", _owner_and_legacy_paths(home_paths, "owner_agents_md", "agents_md")),
@@ -294,8 +260,6 @@ def _owner_and_legacy_paths(home_paths: Any, owner_attr: str, legacy_attr: str) 
     return tuple(paths)
 
 
-# LLM: _matching_lesson_chunks uses simple filename matching until semantic lesson routing is added.
-# 函数用途: 按 lesson 文件名和当前任务文本匹配少量教训文件，避免每轮全量读取。
 def _matching_lesson_chunks(home_paths: Any, user_prompt: str, limit: int) -> list[str]:
     if limit <= 0:
         return []
@@ -318,14 +282,10 @@ def _matching_lesson_paths(home_paths: Any, prompt_text: str) -> list[Path]:
     return paths
 
 
-# LLM: _lesson_limit centralizes config coercion for home lesson reads.
-# 函数用途: 获取每轮 prompt 最多自动读取多少个 lesson 文件。
 def _lesson_limit(config: AgentConfig) -> int:
     return max(0, int(getattr(config, "home_lesson_auto_read_limit", 3) or 0))
 
 
-# LLM: _read_text_if_nonempty is a tolerant prompt-context reader for user-owned markdown files.
-# 函数用途: 安全读取 UTF-8 文本，文件缺失、权限或编码问题时返回空字符串。
 def _read_text_if_nonempty(path: Path) -> str:
     try:
         text = path.read_text(encoding="utf-8").strip()

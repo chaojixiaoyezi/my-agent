@@ -10,7 +10,11 @@ from agent_py_agent.agent.tooling.content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
     write_file_content_parameter_detail,
 )
-from agent_py_agent.agent.tooling.filesystem_write import ApplyPatchTool, WriteFileTool
+from agent_py_agent.agent.tooling.filesystem_write import (
+    ApplyPatchTool,
+    WriteFileTool,
+    WriteFileToolOptions,
+)
 
 
 def test_write_file_writes_text_and_creates_parent_dirs(tmp_path: Path) -> None:
@@ -86,7 +90,10 @@ def test_write_file_blocks_configured_dangerous_root(tmp_path: Path) -> None:
     danger = tmp_path / "danger"
     workspace.mkdir()
     danger.mkdir()
-    tool = WriteFileTool(workspace, access_options=filesystem_access_options(path_dangerous_roots=[str(danger)]))
+    tool = WriteFileTool(
+        workspace,
+        options=WriteFileToolOptions(access_options=filesystem_access_options(path_dangerous_roots=[str(danger)])),
+    )
 
     result = tool.execute({"path": str(danger / "secret.txt"), "content": "bad"})
 
@@ -152,6 +159,40 @@ def test_write_file_soft_warns_when_writing_final_text_into_reference_root(tmp_p
     assert "outputs/final-report.md" in result.output
 
 
+def test_write_file_soft_warns_from_owner_home_runtime_facts(tmp_path: Path) -> None:
+    """owner-home runtime facts 也要能驱动参考目录软提示，避免只看旧 workspace 根。"""
+    workspace = tmp_path / "workspace"
+    owner_home = tmp_path / "home" / "owners" / "local" / "main"
+    reference = tmp_path / "reference"
+    workspace.mkdir()
+    reference.mkdir()
+    fact_dir = owner_home / "memory_archive/runtime_facts/req-1"
+    fact_dir.mkdir(parents=True)
+    (fact_dir / "task.json").write_text(
+        json.dumps(
+            {
+                "run_intent": {
+                    "reference_roots": {"items": [str(reference)]},
+                    "desired_outputs": {"items": ["outputs/final-report.md"]},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    tool = WriteFileTool(
+        workspace,
+        workspace_roots=[workspace, reference],
+        options=WriteFileToolOptions(runtime_fact_roots=[owner_home]),
+    )
+
+    result = tool.execute({"path": str(reference / "notes/report.md"), "content": "hello"})
+
+    assert result.ok
+    assert "软提醒" in result.output
+    assert "outputs/final-report.md" in result.output
+
+
 def test_write_file_does_not_warn_without_desired_output(tmp_path: Path) -> None:
     """没有明确目标产物时，系统不能凭参考路径猜测并提示模型写错位置。"""
     workspace = tmp_path / "workspace"
@@ -178,6 +219,24 @@ def test_write_file_does_not_warn_without_desired_output(tmp_path: Path) -> None
 
     assert result.ok
     assert "软提醒" not in result.output
+
+
+def test_write_file_reports_corrupt_run_intent_facts(tmp_path: Path) -> None:
+    """运行意图账本坏了不能静默退化成“没有目标路径/参考目录”。"""
+    workspace = tmp_path / "workspace"
+    reference = tmp_path / "reference"
+    workspace.mkdir()
+    reference.mkdir()
+    fact_dir = workspace / "memory_archive/runtime_facts/req-1"
+    fact_dir.mkdir(parents=True)
+    (fact_dir / "task.json").write_text("{not-json", encoding="utf-8")
+    tool = WriteFileTool(workspace, workspace_roots=[workspace, reference])
+
+    result = tool.execute({"path": str(reference / "notes/report.md"), "content": "hello"})
+
+    assert result.ok
+    assert "运行意图账本读取失败" in result.output
+    assert "run_intent.runtime_fact.read" in result.output
 
 
 def test_apply_patch_add_update_delete_and_move(tmp_path: Path) -> None:

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 
-# LLM: Retryable tool failures should produce bounded retry advice from machine fields.
-# 函数用途: 验证 retryable=true 且未超过 retry_limit 时，恢复合同返回 RETRY_ALLOWED。
 def test_retryable_tool_failure_allows_bounded_retry() -> None:
     from agent_py_agent.agent.contracts.offline_recovery_contract import validate_recovery_events
 
@@ -26,8 +24,6 @@ def test_retryable_tool_failure_allows_bounded_retry() -> None:
     assert result.actions[0]["operation_id"] == "op-fetch"
 
 
-# LLM: zero retry limits should keep retryable recovery alive until another gate stops it.
-# 函数用途: 验证 retry_limit=0 表示恢复重试预算不设上限，不会按默认 1 次误阻断。
 def test_retryable_tool_failure_zero_retry_limit_is_unlimited() -> None:
     from agent_py_agent.agent.contracts.offline_recovery_contract import validate_recovery_events
 
@@ -50,8 +46,6 @@ def test_retryable_tool_failure_zero_retry_limit_is_unlimited() -> None:
     assert result.actions[0]["code"] == "RETRY_ALLOWED"
 
 
-# LLM: Non-retryable tool failures must stop automatic retry instead of looping.
-# 函数用途: 验证 permission/path 类不可重试失败返回 NON_RETRYABLE_FAILURE。
 def test_non_retryable_permission_failure_stops_retry() -> None:
     from agent_py_agent.agent.contracts.offline_recovery_contract import validate_recovery_events
 
@@ -74,8 +68,6 @@ def test_non_retryable_permission_failure_stops_retry() -> None:
     assert result.error_codes == ("NON_RETRYABLE_FAILURE",)
 
 
-# LLM: Corrupt state files must become recovery diagnostics, not unknown crashes.
-# 函数用途: 验证状态文件读取失败会返回 STATE_CORRUPT 和 BLOCKED 建议。
 def test_corrupt_state_file_blocks_with_recovery_diagnostic() -> None:
     from agent_py_agent.agent.contracts.offline_recovery_contract import validate_recovery_events
 
@@ -99,8 +91,6 @@ def test_corrupt_state_file_blocks_with_recovery_diagnostic() -> None:
     assert "checkpoint" in result.recovery["message_zh"]
 
 
-# LLM: If artifact write succeeded before finalizer crash, recovery should revalidate before rerun.
-# 函数用途: 验证 finalizer 崩溃但已有产物时，不建议重跑副作用工具，而是先验收产物。
 def test_artifact_written_before_finalizer_crash_revalidates_without_reexecuting_side_effects() -> None:
     from agent_py_agent.agent.contracts.offline_recovery_contract import validate_recovery_events
 

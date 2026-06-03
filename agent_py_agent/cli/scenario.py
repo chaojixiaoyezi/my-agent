@@ -1,5 +1,3 @@
-# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
-# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
 
 from __future__ import annotations
 
@@ -16,6 +14,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
+from ..agent.agent_core.orchestration.dispatch.params import DispatchExecutionPlan
 from ..agent.capability_config import load_capability_config
 from .common import make_capability_router
 from .scenario_cases import (
@@ -45,8 +44,6 @@ from .scenario_utils import (
 )
 
 
-# LLM: print_dispatch_report 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def print_dispatch_report(report) -> None:
 
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -59,8 +56,6 @@ def print_dispatch_report(report) -> None:
         )
 
 
-# LLM: _cmd_scenario_validate_args 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _cmd_scenario_validate_args(args) -> bool:
     if args.count <= 0:
         print("--count 必须大于 0。", file=sys.stderr)
@@ -74,8 +69,6 @@ def _cmd_scenario_validate_args(args) -> bool:
     return True
 
 
-# LLM: _cmd_scenario_happy_path 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _cmd_scenario_happy_path(args, paths):
     print("MY-AGENT SCENARIO TEST")
     print(f"run_root={paths.run_root}")
@@ -117,8 +110,6 @@ def _cmd_scenario_happy_path(args, paths):
     return 0 if final_ok else 2
 
 
-# LLM: ScenarioDispatchRequest 是scenario CLI的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class ScenarioDispatchRequest:
     agent: Any
@@ -128,48 +119,17 @@ class ScenarioDispatchRequest:
     gateway_payload: dict[str, object]
 
 
-# LLM: _cmd_scenario_dispatch 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _cmd_scenario_dispatch(request: ScenarioDispatchRequest):
     agent = request.agent
     args = request.args
     print_scenario_step(3, "父代理调度 runner 和收口")
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
-    dispatch_summaries: list[dict[str, object]] = []
     final_ok = False
     for cycle in range(1, args.max_cycles + 1):
         print(f"\n--- dispatch cycle {cycle}/{args.max_cycles} ---")
-        report = agent.dispatch_subagents(
-            router,
-            capability_config,
-            apply=True,
-            execute_runners=not args.dry_run,
-            planner=args.planner,
-            max_runners=args.max_runners,
-            limit=0,
-            reviewer="scenario-test",
-            note="isolated full-flow scenario test",
-            runner_instruction=build_scenario_runner_instruction(),
-            max_cards=0,
-            probe=True,
-        )
-        dispatch_summaries.append(
-            {
-                "cycle": cycle,
-                "summary": report.summary,
-                "record_count": len(report.records),
-                "ok": all(item.ok for item in report.records),
-            }
-        )
-        print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
-        for record in report.records:
-            status = "OK" if record.ok else "FAIL"
-            run = record.run_id or "global"
-            print(
-                f"- [{status}] {record.step}/{record.action} run={run} "
-                f"applied={record.applied} :: {record.message}"
-            )
+        report = _run_scenario_dispatch_cycle(agent, args, router, capability_config)
+        print_dispatch_report(report)
         print_scenario_board(agent, limit=args.count + 5)
         final_ok = scenario_tasks_verified(agent, args.count)
         if final_ok:
@@ -177,8 +137,26 @@ def _cmd_scenario_dispatch(request: ScenarioDispatchRequest):
     return final_ok
 
 
-# LLM: _cmd_scenario_verify_files 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
+def _run_scenario_dispatch_cycle(agent, args, router, capability_config):
+    return agent.dispatch_subagents(
+        router,
+        capability_config,
+        execution_plan=DispatchExecutionPlan.from_parts(
+            mutate_state=True,
+            start_runners=not args.dry_run,
+            max_runners=args.max_runners,
+        ),
+        planner=args.planner,
+        max_runners=args.max_runners,
+        limit=0,
+        reviewer="scenario-test",
+        note="isolated full-flow scenario test",
+        runner_instruction=build_scenario_runner_instruction(),
+        max_cards=0,
+        probe=True,
+    )
+
+
 def _cmd_scenario_verify_files(agent, args, paths, final_ok):
     report_files = collect_scenario_report_files(agent, paths.fixture_root, args.count)
     if args.dry_run:
@@ -204,8 +182,6 @@ def _cmd_scenario_verify_files(agent, args, paths, final_ok):
     print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
 
 
-# LLM: cmd_scenario_test 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_scenario_test(args) -> int:
 
     if args.case == "all":
@@ -221,8 +197,6 @@ def cmd_scenario_test(args) -> int:
     return _cmd_scenario_happy_path(args, paths)
 
 
-# LLM: _scenario_case_runners 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _scenario_case_runners():
     return {
         "gateway-restart": run_scenario_gateway_restart_case,
@@ -239,8 +213,6 @@ def _scenario_case_runners():
     }
 
 
-# LLM: run_scenario_suite 属于scenario CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_suite(args) -> int:
 
     # Keep all cheap deterministic recovery cases before the happy path, which may call a real model.

@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 
 
-# LLM: home layout tests lock the install-time user home contract before runtime migration.
-# 函数用途: 验证 MY_AGENT_HOME 默认值、环境变量覆盖和任务路径模板解析。
 def test_my_agent_home_defaults_to_dot_my_agent(monkeypatch):
     from agent_py_agent.agent.user_space.home_layout import resolve_my_agent_home
 
@@ -14,8 +12,6 @@ def test_my_agent_home_defaults_to_dot_my_agent(monkeypatch):
     assert resolve_my_agent_home().name == ".my-agent"
 
 
-# LLM: explicit MY_AGENT_HOME must win so packaged installs can isolate profiles like 长期助手.
-# 函数用途: 验证用户可以用 MY_AGENT_HOME 指定 my-agent 家目录。
 def test_my_agent_home_uses_env_override(tmp_path: Path, monkeypatch):
     from agent_py_agent.agent.user_space.home_layout import resolve_my_agent_home
 
@@ -25,8 +21,6 @@ def test_my_agent_home_uses_env_override(tmp_path: Path, monkeypatch):
     assert resolve_my_agent_home() == home.resolve()
 
 
-# LLM: MY_AGENT_HOME must beat config so parallel real runs can isolate homes without editing user config.
-# 函数用途: 验证配置文件里有默认 my_agent_home 时，测试/多 profile 仍可用环境变量隔离家目录。
 def test_my_agent_home_env_beats_config_value(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import resolve_my_agent_home
 
@@ -36,8 +30,6 @@ def test_my_agent_home_env_beats_config_value(tmp_path: Path):
     assert resolve_my_agent_home(config_home, env={"MY_AGENT_HOME": str(env_home)}) == env_home.resolve()
 
 
-# LLM: task paths should be date/task scoped and sanitize model-provided task names.
-# 函数用途: 验证 tasks/{date}/{task_slug} 模板生成稳定安全的任务目录。
 def test_task_workspace_path_template_sanitizes_task_name(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import task_workspace_path
 
@@ -51,8 +43,6 @@ def test_task_workspace_path_template_sanitizes_task_name(tmp_path: Path):
     assert path == tmp_path / "tasks" / "2026-05-13" / "示例网站-e2e-main"
 
 
-# LLM: home paths are a stable map for docs, setup, doctor, and later migration commands.
-# 函数用途: 验证 home_paths 暴露家目录里的核心路径，不主动创建目录。
 def test_home_paths_exposes_core_dirs_without_creating(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import home_paths
 
@@ -70,8 +60,6 @@ def test_home_paths_exposes_core_dirs_without_creating(tmp_path: Path):
     assert not paths.config_dir.exists()
 
 
-# LLM: home initialization should create the owner home without overwriting user-edited identity files.
-# 函数用途: 验证 my-agent 家目录初始化会创建标准目录和入口文件，但保留用户已有内容。
 def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
@@ -100,8 +88,6 @@ def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Pa
     assert (paths.memory_lessons_dir / "compact.md").exists()
 
 
-# LLM: V2 home initialization must create owner-local policy files without taking over existing legacy files.
-# 函数用途: 验证 V2 owner home、公共能力层、身份索引和 schema 版本文件都能被初始化。
 def test_ensure_my_agent_home_creates_v2_owner_and_system_files(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 

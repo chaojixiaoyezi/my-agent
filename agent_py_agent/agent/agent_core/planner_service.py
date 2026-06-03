@@ -1,5 +1,3 @@
-# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
-# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
 
 
 from __future__ import annotations
@@ -9,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..capability_config import CapabilityConfig
 from ..subagents.models import SubAgentBoardOptions, SubAgentDueCheckOptions
+from .orchestration.dispatch.params import DispatchExecutionPlan
 from .planner_templates import PARENT_PLANNER_RESULT_TEMPLATE
 
 if TYPE_CHECKING:
@@ -19,8 +18,6 @@ if TYPE_CHECKING:
 # Planner state collection
 # ---------------------------------------------------------------------------
 
-# LLM: PlannerInputContext 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存规划器input上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class PlannerInputContext:
     tasks: list
@@ -33,8 +30,6 @@ class PlannerInputContext:
     open_gaps: list
 
 
-# LLM: PlannerStateParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存规划器状态参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class PlannerStateParams:
     cfg: CapabilityConfig
@@ -44,18 +39,12 @@ class PlannerStateParams:
     note: str
 
 
-# LLM: PlannerPromptParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存规划器提示词参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class PlannerPromptParams:
-    apply: bool
-    execute_runners: bool
-    max_runners: int
+    execution_plan: DispatchExecutionPlan
     runner_instruction: str
 
 
-# LLM: build_parent_planner_state 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 构建父级规划器状态所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def build_parent_planner_state(
     agent: SimpleAgent,
     cfg: CapabilityConfig | None = None,
@@ -78,10 +67,8 @@ def build_parent_planner_state(
     return _build_planner_state_dict(gate_summary, board, ctx, params.limit)
 
 
-# LLM: _collect_parent_planner_context 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 读取或查询父级规划器上下文需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _collect_parent_planner_context(agent: SimpleAgent, params: PlannerStateParams) -> tuple[Any, PlannerInputContext]:
-    from .runner_dispatch import (
+    from .runner.dispatch import (
         _dispatch_patch_review_run_ids,
         _dispatch_runner_candidates,
         _limit_items,
@@ -111,15 +98,11 @@ def _collect_parent_planner_context(agent: SimpleAgent, params: PlannerStatePara
     )
 
 
-# LLM: _active_planner_tasks 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理active规划器tasks相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _active_planner_tasks(tasks: list) -> list:
     terminal_statuses = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
     return [task for task in tasks if task.status not in terminal_statuses]
 
 
-# LLM: _collect_open_capability_items 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 读取或查询开放能力条目需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _collect_open_capability_items(tasks):
     open_requests = []
     open_gaps = []
@@ -129,8 +112,6 @@ def _collect_open_capability_items(tasks):
     return open_requests, open_gaps
 
 
-# LLM: _open_capability_request_items 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理开放能力请求条目相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _open_capability_request_items(task) -> list[dict[str, object]]:
     return [
         item
@@ -139,8 +120,6 @@ def _open_capability_request_items(task) -> list[dict[str, object]]:
     ]
 
 
-# LLM: _open_capability_gap_items 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理开放能力缺口条目相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _open_capability_gap_items(task) -> list[dict[str, object]]:
     return [
         item
@@ -149,8 +128,6 @@ def _open_capability_gap_items(task) -> list[dict[str, object]]:
     ]
 
 
-# LLM: _open_capability_request_item 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理开放能力请求条目相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _open_capability_request_item(task, request) -> dict[str, object] | None:
     if request.status != "OPEN":
         return None
@@ -163,8 +140,6 @@ def _open_capability_request_item(task, request) -> dict[str, object] | None:
     }
 
 
-# LLM: _open_capability_gap_item 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理开放能力缺口条目相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _open_capability_gap_item(task, gap) -> dict[str, object] | None:
     if gap.status != "OPEN":
         return None
@@ -176,8 +151,6 @@ def _open_capability_gap_item(task, gap) -> dict[str, object] | None:
     }
 
 
-# LLM: _build_gate_summary 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 构建闸门summary所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _build_gate_summary(ctx: PlannerInputContext) -> dict[str, Any]:
     gate_summary = {
         "total_tasks": len(ctx.tasks),
@@ -206,10 +179,8 @@ def _build_gate_summary(ctx: PlannerInputContext) -> dict[str, Any]:
     return gate_summary
 
 
-# LLM: _build_planner_state_dict 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 构建规划器状态dict所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _build_planner_state_dict(gate_summary: dict[str, Any], board: Any, ctx: PlannerInputContext, limit: int) -> dict[str, Any]:
-    from .runner_dispatch import _limit_items
+    from .runner.dispatch import _limit_items
 
     return {
         "gate": gate_summary,
@@ -246,8 +217,6 @@ def _build_planner_state_dict(gate_summary: dict[str, Any], board: Any, ctx: Pla
     }
 
 
-# LLM: task_state_for_planner 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理任务状态规划器相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def task_state_for_planner(task) -> dict[str, Any]:
     return {
         "run_id": task.id,
@@ -268,27 +237,30 @@ def task_state_for_planner(task) -> dict[str, Any]:
 _task_state_for_planner = task_state_for_planner
 
 
-# LLM: build_parent_planner_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 构建父级规划器提示词所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def build_parent_planner_prompt(
     state: dict[str, Any],
     *,
     params: PlannerPromptParams | None = None,
     apply: bool = False,
-    execute_runners: bool = False,
+    start_runners: bool = False,
     max_runners: int = 1,
     runner_instruction: str = "",
 ) -> str:
     import json
 
-    params = params or PlannerPromptParams(apply, execute_runners, max_runners, runner_instruction)
+    params = params or PlannerPromptParams(
+        DispatchExecutionPlan.from_parts(
+            mutate_state=apply,
+            start_runners=start_runners,
+            max_runners=max_runners,
+        ),
+        runner_instruction,
+    )
     payload = json.dumps(state, ensure_ascii=False, indent=2)
-    mode = "apply" if params.apply else "dry-run"
+    mode = "apply" if params.execution_plan.mutate_state else "dry-run"
     return _parent_planner_prompt(payload, mode, params)
 
 
-# LLM: _parent_planner_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理父级规划器提示词相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _parent_planner_prompt(payload: str, mode: str, params: PlannerPromptParams) -> str:
     return (
         "# Parent Planner Tick\n\n"
@@ -298,8 +270,8 @@ def _parent_planner_prompt(payload: str, mode: str, params: PlannerPromptParams)
         "你不能调用工具；State Snapshot 是本轮唯一事实来源。真正写回由调度器按审计流程执行。\n\n"
         "## Runtime\n\n"
         f"- mode: {mode}\n"
-        f"- execute_runners: {params.execute_runners}\n"
-        f"- cli_max_runners: {params.max_runners}\n"
+        f"- start_runners: {params.execution_plan.start_runners}\n"
+        f"- cli_max_runners: {params.execution_plan.max_runners}\n"
         f"- existing_runner_instruction: {params.runner_instruction or 'none'}\n\n"
         "## State Snapshot\n\n"
         "```json\n"
@@ -314,8 +286,6 @@ def _parent_planner_prompt(payload: str, mode: str, params: PlannerPromptParams)
     )
 
 
-# LLM: combine_runner_instruction 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理combine执行器instruction相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def combine_runner_instruction(base: str, planner_instruction: str) -> str:
     base = base.strip()
     planner_instruction = planner_instruction.strip()

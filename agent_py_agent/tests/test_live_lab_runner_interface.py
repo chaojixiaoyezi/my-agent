@@ -5,8 +5,6 @@ from types import SimpleNamespace
 from scripts.live_lab.runner import _LabInterface
 
 
-# LLM: Live Lab cases still use the old lab surface; this test keeps the adapter honest.
-# 函数用途: 复现真实 Live Lab gateway_ask 中 responses_dir 未转发导致真实模型 case 失败的问题。
 def test_lab_interface_exposes_case_workspace_dirs(tmp_path):
     session = SimpleNamespace(
         run_root=tmp_path / "run",

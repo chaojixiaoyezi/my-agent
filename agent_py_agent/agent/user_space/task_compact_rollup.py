@@ -1,5 +1,3 @@
-# LLM: Task compact rollups summarize child run recovery refs without replacing child facts.
-# 模块用途: 给一个 task 下所有 agent/run 生成任务级 compact 汇总，父代理恢复时先读它再按需读子代理细节。
 
 from __future__ import annotations
 
@@ -9,13 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import JsonObjectReadReport, read_json_object_report, write_json_object
 from ..io import append_jsonl
 from .compact_layout import CompactPackageRequest, ensure_compact_package
 from .owner_compact_indexes import sync_owner_compact_indexes
 
 
-# LLM: TaskCompactRollupResult returns the files produced by a task-level compact rollup.
-# 类用途: 保存 task rollup 的主要路径和子运行数量，供调用方写日志或测试断言。
 @dataclass(frozen=True)
 class TaskCompactRollupResult:
     task_workspace: Path
@@ -26,8 +23,6 @@ class TaskCompactRollupResult:
     child_count: int
 
 
-# LLM: sync_task_compact_rollup creates a task-level summary without mutating child run state.
-# 函数用途: 汇总 task 下子代理状态、产物引用和恢复入口，并写入标准 compact 包。
 def sync_task_compact_rollup(task_workspace: str | Path, *, compact_index: int | None = None) -> TaskCompactRollupResult:
     task_root = Path(task_workspace)
     work_root = _task_work_root(task_root)
@@ -38,12 +33,12 @@ def sync_task_compact_rollup(task_workspace: str | Path, *, compact_index: int |
     rollup_json = compact_root / "task_rollup.json"
     rollup_md = compact_root / "task_rollup.md"
     rollup = _rollup_payload(task_root, child_runs, package.package_dir, rollup_json=rollup_json)
-    _write_json(rollup_json, rollup)
+    write_json_object(rollup_json, rollup)
     _write_branch_rollup(compact_root, rollup, branch_id="main")
     rollup_md.write_text(_rollup_markdown(rollup), encoding="utf-8")
-    _write_json(package.work_state_snapshot_json, _work_state_payload(rollup))
-    _write_json(package.refs_json, _refs_payload(rollup_json, rollup_md, child_runs))
-    _write_json(package.continue_packet_json, _continue_packet_payload(rollup))
+    write_json_object(package.work_state_snapshot_json, _work_state_payload(rollup))
+    write_json_object(package.refs_json, _refs_payload(rollup_json, rollup_md, child_runs))
+    write_json_object(package.continue_packet_json, _continue_packet_payload(rollup))
     package.handoff_summary_md.write_text(_rollup_markdown(rollup), encoding="utf-8")
     append_jsonl(
         compact_root / "rollup_ledger.jsonl",
@@ -67,8 +62,6 @@ def sync_task_compact_rollup(task_workspace: str | Path, *, compact_index: int |
         child_count=len(child_runs),
     )
 
-# LLM: _write_branch_rollup records per-branch task progress without changing the main rollup.
-# 函数用途: 写入 work/compact/rollups/branch_<id>_rollup.json，供分支恢复快速读取。
 def _write_branch_rollup(compact_root: Path, rollup: dict[str, object], *, branch_id: str) -> Path:
     branch_payload = {
         **rollup,
@@ -76,42 +69,41 @@ def _write_branch_rollup(compact_root: Path, rollup: dict[str, object], *, branc
         "branch_id": _safe_branch_id(branch_id),
     }
     path = compact_root / "rollups" / f"branch_{_safe_branch_id(branch_id)}_rollup.json"
-    _write_json(path, branch_payload)
+    write_json_object(path, branch_payload)
     return path
 
 
-# LLM: _child_run_records collects lightweight child state rows from agent state files.
-# 函数用途: 从 task/work/agents/*/state.json 提取状态、进度、摘要、产物引用和阻塞原因。
 def _child_run_records(task_root: Path) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     agents_root = _agents_root(task_root)
     for state_path in sorted(agents_root.glob("*/state.json")):
-        payload = _read_json(state_path)
+        state_report = _read_json_report(state_path, context="task_compact_rollup.child_state")
+        payload = state_report.payload
         run_id = str(payload.get("id") or payload.get("run_id") or state_path.parent.name)
         attrs = payload.get("attributes") if isinstance(payload.get("attributes"), dict) else {}
         system_tree = attrs.get("system_tree") if isinstance(attrs.get("system_tree"), dict) else {}
-        rows.append(
-            {
-                "run_id": run_id,
-                "status": str(payload.get("status") or system_tree.get("status") or ""),
-                "progress": _safe_float(payload.get("progress") or system_tree.get("progress")),
-                "summary": str(payload.get("latest_summary") or system_tree.get("latest_summary") or "")[:500],
-                "refs": {
-                    "state": str(state_path),
-                    "compact": str(state_path.parent / "compactions"),
-                    "summary": str(state_path.parent / "summary.md"),
-                    "final_report": str(state_path.parent / "final_report.md"),
-                    "artifact_manifest": str(state_path.parent / "artifacts" / "manifest.jsonl"),
-                },
-                "artifact_refs": _list_strings(payload.get("artifact_refs") or system_tree.get("artifact_refs")),
-                "blockers": _list_strings(payload.get("blockers") or system_tree.get("blockers")),
-            }
-        )
+        row: dict[str, object] = {
+            "run_id": run_id,
+            "status": str(payload.get("status") or system_tree.get("status") or ""),
+            "progress": _safe_float(payload.get("progress") or system_tree.get("progress")),
+            "summary": str(payload.get("latest_summary") or system_tree.get("latest_summary") or "")[:500],
+            "refs": {
+                "state": str(state_path),
+                "compact": str(state_path.parent / "compactions"),
+                "summary": str(state_path.parent / "summary.md"),
+                "final_report": str(state_path.parent / "final_report.md"),
+                "artifact_manifest": str(state_path.parent / "artifacts" / "manifest.jsonl"),
+            },
+            "artifact_refs": _list_strings(payload.get("artifact_refs") or system_tree.get("artifact_refs")),
+            "blockers": _list_strings(payload.get("blockers") or system_tree.get("blockers")),
+        }
+        if state_report.load_error is not None:
+            row["status"] = "UNKNOWN"
+            row["state_load_error"] = state_report.load_error
+        rows.append(row)
     return rows
 
 
-# LLM: _rollup_payload builds the machine-readable task compact summary.
-# 函数用途: 生成 task_rollup.json 的主体数据，包括状态分组和产物引用汇总。
 def _rollup_payload(
     task_root: Path,
     child_runs: list[dict[str, object]],
@@ -119,8 +111,17 @@ def _rollup_payload(
     *,
     rollup_json: Path,
 ) -> dict[str, object]:
-    state = _read_json(_task_state_path(task_root))
+    task_state_report = _read_json_report(_task_state_path(task_root), context="task_compact_rollup.task_state")
+    state = task_state_report.payload
     status_groups = _status_groups(child_runs)
+    load_errors = [
+        *([task_state_report.load_error] if task_state_report.load_error is not None else []),
+        *[
+            row["state_load_error"]
+            for row in child_runs
+            if isinstance(row.get("state_load_error"), dict)
+        ],
+    ]
     return {
         "schema_version": "task-compact-rollup.v1",
         "task_id": str(state.get("task_id") or task_root.name),
@@ -141,33 +142,26 @@ def _rollup_payload(
             for row in child_runs
             for ref in _list_strings(row.get("artifact_refs"))
         ),
+        "load_errors": load_errors,
         "updated_at": _now_iso(),
     }
 
 
-# LLM: _task_work_root resolves the current work/ authority while preserving legacy read compatibility.
-# 函数用途: 返回任务过程区；新目录用 work/，旧 task 根目录只作为迁移读取兜底。
 def _task_work_root(task_root: Path) -> Path:
     work = task_root / "work"
     return work if work.exists() else task_root
 
 
-# LLM: _agents_root keeps child-run scans pointed at work/agents for new tasks.
-# 函数用途: 返回子代理状态根目录；新目录优先 work/agents，旧 agents 只作兼容读取。
 def _agents_root(task_root: Path) -> Path:
     work_agents = task_root / "work" / "agents"
     return work_agents if work_agents.exists() else task_root / "agents"
 
 
-# LLM: _task_state_path reads work/state.json as the task state authority.
-# 函数用途: 返回任务状态文件；新目录优先 work/state.json，旧 state.json 只作兼容读取。
 def _task_state_path(task_root: Path) -> Path:
     work_state = task_root / "work" / "state.json"
     return work_state if work_state.exists() else task_root / "state.json"
 
 
-# LLM: _work_state_payload narrows rollup data to the standard compact work-state snapshot.
-# 函数用途: 生成 compact/work_state_snapshot.json 的任务级恢复摘要。
 def _work_state_payload(rollup: dict[str, object]) -> dict[str, object]:
     return {
         "schema_version": "work-state-snapshot.v1",
@@ -183,8 +177,6 @@ def _work_state_payload(rollup: dict[str, object]) -> dict[str, object]:
     }
 
 
-# LLM: _refs_payload lists only recovery references, not full child artifacts.
-# 函数用途: 生成 compact/refs.json，指向 task rollup 和子 run state。
 def _refs_payload(rollup_json: Path, rollup_md: Path, child_runs: list[dict[str, object]]) -> dict[str, object]:
     return {
         "schema_version": "compact-refs.v1",
@@ -200,8 +192,6 @@ def _refs_payload(rollup_json: Path, rollup_md: Path, child_runs: list[dict[str,
     }
 
 
-# LLM: _continue_packet_payload tells the next worker how to resume from the task rollup.
-# 函数用途: 生成 compact/continue_packet.json，列出先读什么和未完成子任务。
 def _continue_packet_payload(rollup: dict[str, object]) -> dict[str, object]:
     pending = [
         f"{row.get('run_id')}: {row.get('status')}"
@@ -223,8 +213,6 @@ def _continue_packet_payload(rollup: dict[str, object]) -> dict[str, object]:
     }
 
 
-# LLM: _rollup_markdown provides a human-readable task compact summary.
-# 函数用途: 把 task rollup 渲染成 Markdown，方便父代理和人快速查看。
 def _rollup_markdown(rollup: dict[str, object]) -> str:
     rows = [
         f"- {row.get('run_id')}: {row.get('status')} progress={row.get('progress')} summary={row.get('summary')}"
@@ -244,41 +232,22 @@ def _rollup_markdown(rollup: dict[str, object]) -> str:
     )
 
 
-# LLM: _next_compact_index appends compact packages in a stable linear sequence.
-# 函数用途: 根据 ledger 非空行数量计算下一次 compact 序号。
 def _next_compact_index(ledger: Path) -> int:
     if not ledger.exists():
         return 1
     return sum(1 for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()) + 1
 
 
-# LLM: _read_json tolerates missing or malformed child state during recovery rollups.
-# 函数用途: 读取 JSON 对象；失败或非对象时返回空字典。
-def _read_json(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+def _read_json_report(path: Path, *, context: str) -> JsonObjectReadReport:
+    return read_json_object_report(path, context=context)
 
 
-# LLM: _write_json writes deterministic JSON payloads for compact artifacts.
-# 函数用途: 创建父目录并写入带排序键的 UTF-8 JSON 文件。
-def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-# LLM: _list_strings normalizes optional list-like fields from child state.
-# 函数用途: 从列表或元组中提取非空字符串。
 def _list_strings(value: object) -> list[str]:
     if not isinstance(value, list | tuple):
         return []
     return [str(item) for item in value if str(item)]
 
 
-# LLM: _status_counts gives parents an aggregate view before opening child details.
-# 函数用途: 统计子运行状态桶数量。
 def _status_counts(child_runs: list[dict[str, object]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for row in child_runs:
@@ -287,8 +256,6 @@ def _status_counts(child_runs: list[dict[str, object]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-# LLM: _status_groups separates completed, pending, and blocked child run IDs.
-# 函数用途: 生成子运行 ID 分组，供 rollup 和 continue packet 使用。
 def _status_groups(child_runs: list[dict[str, object]]) -> dict[str, list[str]]:
     groups = {"completed": [], "pending": [], "blocked": []}
     for row in child_runs:
@@ -303,8 +270,6 @@ def _status_groups(child_runs: list[dict[str, object]]) -> dict[str, list[str]]:
     return groups
 
 
-# LLM: _status_bucket maps variant runtime words into broad lifecycle buckets.
-# 函数用途: 把 DONE/RUNNING/BLOCKED 等不同写法归一成通用状态桶。
 def _status_bucket(value: object) -> str:
     status = str(value or "").strip().upper()
     if status in {"DONE", "COMPLETED", "SUCCEEDED", "SUCCESS"}:
@@ -322,8 +287,6 @@ def _status_bucket(value: object) -> str:
     return status.lower() or "unknown"
 
 
-# LLM: _unique_strings deduplicates artifact refs while preserving first-seen order.
-# 函数用途: 去重字符串序列，保留原始顺序。
 def _unique_strings(values) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
@@ -336,8 +299,6 @@ def _unique_strings(values) -> list[str]:
     return result
 
 
-# LLM: _safe_float keeps progress parsing tolerant of missing or invalid values.
-# 函数用途: 把输入转换为 float，失败时返回 0.0。
 def _safe_float(value: object) -> float:
     try:
         return float(value or 0.0)
@@ -345,13 +306,9 @@ def _safe_float(value: object) -> float:
         return 0.0
 
 
-# LLM: _now_iso centralizes UTC timestamps for task rollup records.
-# 函数用途: 返回当前 UTC ISO 时间字符串。
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-# LLM: _safe_branch_id normalizes compact branch ids for filenames.
-# 函数用途: 把任意 branch 值转换成可用于文件名的稳定标识。
 def _safe_branch_id(value: object) -> str:
     text = str(value or "main").strip() or "main"
     result = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in text)

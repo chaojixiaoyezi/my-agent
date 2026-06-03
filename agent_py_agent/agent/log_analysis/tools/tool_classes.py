@@ -1,5 +1,3 @@
-# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
-# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
 from __future__ import annotations
 
@@ -24,20 +22,15 @@ from .query_functions import (
 )
 
 
-# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 SecurityQueryTool 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 封装 SecurityQueryTool 的状态和协作方法，作为当前模块对外复用的领域对象。
 class SecurityQueryTool(BaseTool):
     """Tool wrapper for bounded log-analysis queries."""
 
-    # LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 __init__ 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 初始化实例依赖、路径或缓存状态，为同一对象的后续方法提供共享上下文。
     def __init__(self, store_root: Path):
         """Initialize the tool spec and default store root."""
         self.store_root = store_root
         self.spec = ToolSpec(
             name="security_query",
             category="log_analysis",
-            # LLM: LOG query tools are read-only; registry Tool Manifest Gate depends on this machine field.
             effect="read_only",
             description="Run a bounded local security-event query and return summary, preview rows, and evidence refs.",
             use_cases=[
@@ -75,8 +68,6 @@ class SecurityQueryTool(BaseTool):
             ],
         )
 
-    # LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 execute 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 execute 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         """Execute the tool and return prompt-safe JSON."""
         payload = security_query(SecurityQueryParams(
@@ -86,20 +77,15 @@ class SecurityQueryTool(BaseTool):
         return ToolExecutionResult(self.spec.name, True, _prompt_json(payload))
 
 
-# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 SecurityHuntIpTool 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 封装 SecurityHuntIpTool 的状态和协作方法，作为当前模块对外复用的领域对象。
 class SecurityHuntIpTool(BaseTool):
     """Tool wrapper for IP pivot hunting."""
 
-    # LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 __init__ 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 初始化实例依赖、路径或缓存状态，为同一对象的后续方法提供共享上下文。
     def __init__(self, store_root: Path):
         """Initialize the tool spec and default store root."""
         self.store_root = store_root
         self.spec = ToolSpec(
             name="security_hunt_ip",
             category="log_analysis",
-            # LLM: LOG hunt tools read local evidence only; they must not be treated as mutating actions.
             effect="read_only",
             description="Hunt a single IP as attacker, victim, or both with bounded security queries.",
             use_cases=[
@@ -124,8 +110,6 @@ class SecurityHuntIpTool(BaseTool):
             ],
         )
 
-    # LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 execute 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 execute 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         """Execute the tool and return prompt-safe JSON."""
         ip = _required_text(params, "ip")
@@ -133,20 +117,15 @@ class SecurityHuntIpTool(BaseTool):
         return ToolExecutionResult(self.spec.name, True, _prompt_json(payload))
 
 
-# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 SecurityTraceCaseTool 前先核对字段语义、序列化形态和调用方假设。
-# 类用途: 封装 SecurityTraceCaseTool 的状态和协作方法，作为当前模块对外复用的领域对象。
 class SecurityTraceCaseTool(BaseTool):
     """Tool wrapper for case trace expansion."""
 
-    # LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 __init__ 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 初始化实例依赖、路径或缓存状态，为同一对象的后续方法提供共享上下文。
     def __init__(self, store_root: Path):
         """Initialize the tool spec and default store root."""
         self.store_root = store_root
         self.spec = ToolSpec(
             name="security_trace_case",
             category="log_analysis",
-            # LLM: Trace-case expansion is a read-only query wrapper; side-effect gates consume this flag.
             effect="read_only",
             description="Trace case entities with bounded queries and return evidence refs plus compact summaries.",
             use_cases=[
@@ -171,8 +150,6 @@ class SecurityTraceCaseTool(BaseTool):
             ],
         )
 
-    # LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 execute 时同步检查返回值、异常处理和读写副作用。
-    # 函数用途: 完成 execute 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         """Execute the tool and return prompt-safe JSON."""
         case_id = _required_text(params, "case_id")
@@ -184,8 +161,6 @@ class SecurityTraceCaseTool(BaseTool):
         return ToolExecutionResult(self.spec.name, True, _prompt_json(payload))
 
 
-# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _query_params 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 query params 的候选结果，并按参数完成筛选、排序或数量限制。
 def _query_params(params: dict[str, Any]) -> dict[str, Any]:
     """Tool wrapper for bounded log-analysis queries."""
     keys = (
@@ -202,23 +177,17 @@ def _query_params(params: dict[str, Any]) -> dict[str, Any]:
     return {key: params[key] for key in keys if key in params}
 
 
-# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _hunt_params 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 hunt params 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def _hunt_params(params: dict[str, Any]) -> dict[str, Any]:
     """Tool wrapper for bounded log-analysis queries."""
     payload = {key: params[key] for key in ("role", "start_time", "end_time", "limit", "max_limit") if key in params}
     return payload
 
 
-# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _trace_params 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 trace params 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def _trace_params(params: dict[str, Any]) -> dict[str, Any]:
     """Tool wrapper for bounded log-analysis queries."""
     return {key: params[key] for key in ("start_time", "end_time", "limit", "max_limit", "max_queries") if key in params}
 
 
-# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _required_text 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 required text 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def _required_text(params: dict[str, Any], key: str) -> str:
     """Tool wrapper for bounded log-analysis queries."""
     value = params.get(key)
@@ -227,8 +196,6 @@ def _required_text(params: dict[str, Any], key: str) -> str:
     return str(value)
 
 
-# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _prompt_json 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 prompt json 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def _prompt_json(payload: dict[str, Any]) -> str:
     """Tool wrapper for bounded log-analysis queries."""
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)

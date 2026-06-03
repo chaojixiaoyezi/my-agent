@@ -1,5 +1,3 @@
-# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
-# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
 
 from __future__ import annotations
 
@@ -18,6 +16,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any, Optional
 
+from ..runtime_errors import runtime_error_report
 from .http_handlers import (
     handle_admin_summary,
     handle_ask,
@@ -27,6 +26,7 @@ from .http_handlers import (
     handle_status,
     handle_stop,
 )
+from .io import update_json_file_atomic
 
 if TYPE_CHECKING:
     from ..agent.core import SimpleAgent
@@ -36,13 +36,10 @@ if TYPE_CHECKING:
     from .paths import GatewayPaths
 
 
-# LLM: HTTP 启动选项先集中到参数记录，再暴露给请求处理器状态。
 # Global server instance for signal handler access
 _server_instance: GatewayHTTPServer | None = None
 
 
-# LLM: GatewayHTTPServerParams 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 类用途: 集中保存网关httpserver参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class GatewayHTTPServerParams:
     cross_channel: CrossChannelSession | None = None
@@ -50,32 +47,22 @@ class GatewayHTTPServerParams:
     auth_middleware: AuthMiddleware | None = None
 
 
-# LLM: _generate_request_id 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 处理generate请求id相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _generate_request_id() -> str:
     return f"req_{int(time.time() * 1000)}_{os.getpid()}"
 
 
-# LLM: GatewayHTTPHandler 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 类用途: 封装网关httphandler相关状态和行为，维持当前模块的职责边界；关键副作用: 方法可能触发请求队列、租约文件、进程状态和响应渲染相关副作用，需保持公开契约稳定。
 class GatewayHTTPHandler(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
 
-    # LLM: log_message 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 写入消息的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
     def log_message(self, format: str, *args: Any) -> None:
         pass
 
-    # LLM: _inject_auth_middleware 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 处理injectauthmiddleware相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
     def _inject_auth_middleware(self) -> None:
         server = _server_instance
         if server is not None and server.auth_middleware is not None:
             self._auth_middleware = server.auth_middleware
 
-    # LLM: _send_json 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 发送JSON请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
     def _send_json(self, status: int, body: dict[str, Any]) -> None:
         body_str = json.dumps(body, ensure_ascii=False)
         self.send_response(status)
@@ -85,8 +72,6 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body_str.encode("utf-8"))
 
-    # LLM: _read_json 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 读取或查询JSON需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _read_json(self) -> dict[str, Any]:
         content_length = int(self.headers.get("Content-Length", 0))
         if content_length == 0:
@@ -94,8 +79,6 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length)
         return json.loads(body.decode("utf-8"))
 
-    # LLM: do_GET 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 处理doget相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def do_GET(self) -> None:
         self._inject_auth_middleware()
         if self.path == "/status":
@@ -112,8 +95,6 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             return
         self._send_json(404, {"error": "not found"})
 
-    # LLM: do_POST 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 处理dopost相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
     def do_POST(self) -> None:
         self._inject_auth_middleware()
         if self.path == "/ask":
@@ -127,48 +108,30 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             return
         self._send_json(404, {"error": "not found"})
 
-    # LLM: _handle_status 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 推进状态的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
     def _handle_status(self) -> None:
         handle_status(self, _server_instance)
 
-    # LLM: _handle_result 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 推进结果的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
     def _handle_result(self) -> None:
         handle_result(self, _server_instance)
 
-    # LLM: _handle_ask 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 推进ask的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
     def _handle_ask(self) -> None:
         handle_ask(self, _server_instance, _generate_request_id)
 
-    # LLM: _handle_stop 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 推进handlestop的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
     def _handle_stop(self) -> None:
         handle_stop(self, _server_instance)
 
-    # LLM: _handle_session_channels 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 推进会话channels的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
     def _handle_session_channels(self) -> None:
         handle_session_channels(self, _server_instance)
 
-    # LLM: _handle_session_bind 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 推进会话bind的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
     def _handle_session_bind(self) -> None:
         handle_session_bind(self, _server_instance)
 
-    # LLM: _handle_admin_summary 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 推进管理summary的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
     def _handle_admin_summary(self) -> None:
         handle_admin_summary(self, _server_instance)
 
 
-# LLM: GatewayHTTPServer 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 类用途: 封装网关httpserver相关状态和行为，维持当前模块的职责边界；关键副作用: 方法可能触发请求队列、租约文件、进程状态和响应渲染相关副作用，需保持公开契约稳定。
 class GatewayHTTPServer:
 
-    # LLM: __init__ 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
     def __init__(
         self,
         port: int,
@@ -188,12 +151,12 @@ class GatewayHTTPServer:
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self.last_error_report: dict[str, Any] | None = None
 
-    # LLM: start 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 推进start的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
     def start(self) -> None:
         global _server_instance
         _server_instance = self
+        self.last_error_report = None
 
         self.server = ThreadingHTTPServer(("", self.port), GatewayHTTPHandler)
         self.server.server_version = "MyAgentGateway/1.0"
@@ -202,18 +165,36 @@ class GatewayHTTPServer:
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
 
-    # LLM: _serve 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 推进serve的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
     def _serve(self) -> None:
         if self.server is None:
             return
         try:
             self.server.serve_forever()
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_serve_error(exc)
 
-    # LLM: stop 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-    # 函数用途: 推进stop的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
+    def _record_serve_error(self, exc: BaseException) -> None:
+        report = runtime_error_report(exc, context="gateway.http_server.serve")
+        self.last_error_report = report
+
+        def update_state(current: dict) -> dict:
+            updated = dict(current)
+            updated["status"] = "http_server_error"
+            updated["server_error"] = report
+            updated["updated_at"] = time.time()
+            return updated
+
+        try:
+            update_json_file_atomic(self.paths.state, update_state)
+        except Exception as persist_exc:
+            self.last_error_report = {
+                **report,
+                "state_persist_error": runtime_error_report(
+                    persist_exc,
+                    context="gateway.http_server.state.write",
+                ),
+            }
+
     def stop(self, timeout: float = 5.0) -> None:
         global _server_instance
         if self.server:
@@ -226,8 +207,6 @@ class GatewayHTTPServer:
         _server_instance = None
 
 
-# LLM: start_http_server 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进HTTPserver的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def start_http_server(
     port: int,
     paths: GatewayPaths,

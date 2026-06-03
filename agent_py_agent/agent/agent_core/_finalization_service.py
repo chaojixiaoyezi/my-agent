@@ -1,5 +1,3 @@
-# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
-# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
 
 
 from __future__ import annotations
@@ -24,14 +22,12 @@ from ._runtime_params import (
     FinalizeContext,
 )
 from .finalization_compact_auto import compact_auto_cycle_fields
-from .model_usage import input_token_usage, output_token_usage
+from .model.usage import input_token_usage, output_token_usage
 from .models import AgentRunResult
 from .run_task_workspace_writer import write_run_task_workspace_if_needed
-from .runtime_owner_roots import runtime_archive_roots
+from .runtime.owner_roots import runtime_archive_roots
 
 
-# LLM: BuildAgentRunResultParams keeps final AgentRunResult assembly inputs bundled and extensible.
-# 类用途: 保存收尾阶段组装 AgentRunResult 需要的归档、快照、token 和 request_id 字段。
 @dataclass(frozen=True)
 class BuildAgentRunResultParams:
     ctx: FinalizeContext
@@ -40,17 +36,11 @@ class BuildAgentRunResultParams:
     run_request_id: str
 
 
-# LLM: FinalizationService 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 封装收尾服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class FinalizationService:
 
-    # LLM: __init__ 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def __init__(self, agent):
         self._agent = agent
 
-    # LLM: finalize 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 处理finalize相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def finalize(self, ctx: FinalizeContext):
         assert ctx.final_response is not None
         run_request_id = ctx.request_id or f"run-{time_module.time_ns()}"
@@ -74,8 +64,6 @@ class FinalizationService:
             BuildAgentRunResultParams(ctx, archive_result, token_ledger, run_request_id)
         )
 
-    # LLM: _write_runtime_fact_source_if_needed makes real run facts visible to later compact apply.
-    # 函数用途: 保存真实 run 的显式验收、约束和测试事实源，并把目录交给 recovery snapshot。
     def _write_runtime_fact_source_if_needed(self, ctx: FinalizeContext, run_request_id: str) -> str:
         if not ctx.do_save:
             return ""
@@ -104,8 +92,6 @@ class FinalizationService:
             )
         return written
 
-    # LLM: _update_main_context_bundle_artifacts links post-tool artifact refs back to the root run card.
-    # 函数用途: run 收尾时把同 scope 的工具输出 artifact refs 写回 context bundle；失败不阻断主流程。
     def _update_main_context_bundle_artifacts(self, ctx: FinalizeContext, run_request_id: str) -> None:
         if not ctx.do_save or not ctx.main_context_bundle_path:
             return
@@ -119,8 +105,6 @@ class FinalizationService:
             )
         )
 
-    # LLM: _archive_run_if_needed 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 写入ifneeded的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _archive_run_if_needed(self, params: ArchiveRunParams):
         if not params.do_save:
             return None
@@ -152,8 +136,6 @@ class FinalizationService:
             )
         return result
 
-    # LLM: _estimate_token_usage 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 计算令牌usage的预算、数量或限制，影响后续调度节奏；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _estimate_token_usage(self, params: EstimateTokenParams):
         input_tokens = input_token_usage(params.final_response)
         if input_tokens is None:
@@ -185,8 +167,6 @@ class FinalizationService:
             "active": int(input_tokens) + int(output_tokens) + int(tool_tokens),
         }
 
-    # LLM: _build_agent_run_result 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 构建agentrun结果所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _build_agent_run_result(self, params: BuildAgentRunResultParams):
         ctx = params.ctx
         routed_context = ctx.routed_context
@@ -223,8 +203,6 @@ class FinalizationService:
         )
 
 
-# LLM: _estimate_token_params keeps FinalizationService.finalize focused on lifecycle ordering.
-# 函数用途: 组装 token 估算参数包，保持 turn_id 生成规则和调用方解耦。
 def _estimate_token_params(ctx: FinalizeContext, run_request_id: str) -> EstimateTokenParams:
     turn_id = run_request_id or ctx.run_id or ctx.task_id or f"turn-{time_module.time_ns()}"
     return EstimateTokenParams(
@@ -238,10 +216,7 @@ def _estimate_token_params(ctx: FinalizeContext, run_request_id: str) -> Estimat
     )
 
 
-# LLM: _snapshot_result_fields 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理snapshot结果字段相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _snapshot_result_fields() -> dict:
-    # LLM: recovery_snapshot is legacy; runtime compact now relies on runtime_fact/raw archive/compact refs.
     return {
         "recovery_snapshot_id": "",
         "recovery_snapshot_path": "",
@@ -250,8 +225,6 @@ def _snapshot_result_fields() -> dict:
     }
 
 
-# LLM: _latest_archive_refs extracts recent raw archive refs for runtime_fact without reading their contents.
-# 函数用途: 从工具归档记录里收集最近 raw_archive_path，供 compact/resume 做事实源定位。
 def _latest_archive_refs(records: list[object]) -> list[str]:
     return [
         str(record.get("raw_archive_path") or "")
@@ -260,8 +233,6 @@ def _latest_archive_refs(records: list[object]) -> list[str]:
     ]
 
 
-# LLM: _artifact_refs extracts artifact-like refs from tool records for runtime_fact.
-# 函数用途: 收集工具记录里的 artifact/path 引用，帮助恢复时找到产物或大工具输出。
 def _artifact_refs(records: list[object]) -> list[str]:
     keys = ("artifact_ref", "artifact_path", "output_artifact_ref", "raw_archive_path")
     refs: list[str] = []
@@ -272,8 +243,6 @@ def _artifact_refs(records: list[object]) -> list[str]:
     return refs
 
 
-# LLM: _resume_context_fields 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理恢复上下文字段相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _resume_context_fields(ctx: FinalizeContext) -> dict:
     resume = ctx.resume_context_result
     return {
@@ -291,8 +260,6 @@ def _resume_context_fields(ctx: FinalizeContext) -> dict:
     }
 
 
-# LLM: _memory_archive_preview_limits centralizes archive preview sizing so callers do not bake defaults.
-# 函数用途: 从 AgentConfig 读取 raw archive 各 archive_level 的预览字符数，供归档事件构建复用。
 def _memory_archive_preview_limits(config) -> dict[int, int]:
     return {
         0: int(getattr(config, "memory_archive_preview_level_0_chars", 2048) or 0),

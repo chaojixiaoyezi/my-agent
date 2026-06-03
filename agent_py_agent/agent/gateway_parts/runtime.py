@@ -1,11 +1,8 @@
-# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
-# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
 
 from __future__ import annotations
 
 """Gateway runtime entry point — thin re-export facade.
 
-给人看的解释：
 这个文件是 gateway 的主运行时。它负责投递 ask 请求、等待响应、显示状态、处理 pending 队列。
 大部分实现已经拆分到 request_worker、queue_service、response_renderer、audit_service 等模块。
 """

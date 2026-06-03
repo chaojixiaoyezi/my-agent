@@ -1,5 +1,3 @@
-# LLM: Small value/result helpers for collaboration tools.
-# 模块用途: 整理模型工具参数，并生成统一 ToolExecutionResult JSON。
 
 from __future__ import annotations
 
@@ -24,8 +22,10 @@ def ok(tool: str, payload: dict[str, Any]) -> ToolExecutionResult:
     return ToolExecutionResult(tool, True, json.dumps({"ok": True, **payload}, ensure_ascii=False, indent=2))
 
 
-def error(tool: str, code: str, message: str) -> ToolExecutionResult:
+def error(tool: str, code: str, message: str, details: dict[str, Any] | None = None) -> ToolExecutionResult:
     payload = {"ok": False, "error": code, "message": message}
+    if details:
+        payload.update(details)
     return ToolExecutionResult(tool, False, json.dumps(payload, ensure_ascii=False, indent=2))
 
 

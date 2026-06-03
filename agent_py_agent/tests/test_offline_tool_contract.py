@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 
-# LLM: Fake tools returning None or malformed results must become structured contract failures.
-# 函数用途: 验证 tool_result 缺少 result 或 result 不是对象时会失败，避免模型当成功处理。
 def test_tool_result_rejects_none_and_malformed_payloads() -> None:
     from agent_py_agent.agent.contracts.offline_tool_contract import validate_tool_events
 
@@ -17,8 +15,6 @@ def test_tool_result_rejects_none_and_malformed_payloads() -> None:
     assert result.error_codes == ("TOOL_RESULT_NONE", "TOOL_RESULT_SHAPE_INVALID")
 
 
-# LLM: Large tool outputs must be externalized or explicitly marked truncated before model injection.
-# 函数用途: 验证超过 inline_budget_bytes 且无 artifact_refs/truncated 标记的工具结果会失败。
 def test_large_tool_output_requires_artifact_ref_or_truncation_marker() -> None:
     from agent_py_agent.agent.contracts.offline_tool_contract import validate_tool_events
 
@@ -38,8 +34,6 @@ def test_large_tool_output_requires_artifact_ref_or_truncation_marker() -> None:
     assert result.error_codes == ("TOOL_RESULT_TOO_LARGE_NOT_EXTERNALIZED",)
 
 
-# LLM: Tool results returned to the model must not contain raw secret fields.
-# 函数用途: 验证 result 内 token/password/api_key 等字段未脱敏时会被合同拦截。
 def test_tool_result_rejects_unredacted_secret_fields() -> None:
     from agent_py_agent.agent.contracts.offline_tool_contract import validate_tool_events
 
@@ -59,8 +53,6 @@ def test_tool_result_rejects_unredacted_secret_fields() -> None:
     assert result.findings[0]["field_path"] == "result.data.token"
 
 
-# LLM: Repeated identical read-only calls with unchanged result hash should use the unified no-progress guard code.
-# 函数用途: 验证同工具同参数同结果达到显式阈值时会返回统一工具无进展 finding。
 def test_repeated_identical_tool_calls_block_after_threshold() -> None:
     from agent_py_agent.agent.contracts.offline_tool_contract import validate_tool_events
 
@@ -78,8 +70,6 @@ def test_repeated_identical_tool_calls_block_after_threshold() -> None:
     assert result.error_codes == ("TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED",)
 
 
-# LLM: zero repeated_threshold disables the offline no-progress cap.
-# 函数用途: 验证工具结果合同中 repeated_threshold=0 不会把重复只读结果直接判死。
 def test_repeated_threshold_zero_is_unlimited() -> None:
     from agent_py_agent.agent.contracts.offline_tool_contract import validate_tool_events
 
@@ -95,8 +85,6 @@ def test_repeated_threshold_zero_is_unlimited() -> None:
     assert result.ok is True
 
 
-# LLM: Repeated tool names with different arguments are exploration, not a no-progress loop.
-# 函数用途: 验证同一工具不同 args_hash 不会被重复调用合同误杀。
 def test_same_tool_with_different_args_is_allowed() -> None:
     from agent_py_agent.agent.contracts.offline_tool_contract import validate_tool_events
 

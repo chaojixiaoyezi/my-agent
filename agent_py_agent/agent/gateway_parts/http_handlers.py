@@ -1,5 +1,3 @@
-# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
-# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
 
 from __future__ import annotations
 
@@ -11,9 +9,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ..runtime_errors import runtime_error_report
 
-# LLM: _ResultAccessContext 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 类用途: 集中保存结果access上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+
 @dataclass(frozen=True)
 class _ResultAccessContext:
 
@@ -22,8 +20,6 @@ class _ResultAccessContext:
     permission: Any
 
 
-# LLM: _AskRequestContext 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 类用途: 集中保存ask请求上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class _AskRequestContext:
 
@@ -34,8 +30,6 @@ class _AskRequestContext:
     channel: str
 
 
-# LLM: _request_identity 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 发送identity请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _request_identity(handler) -> tuple[str, Any]:
     mw = getattr(handler, "_auth_middleware", None)
     if mw is None:
@@ -44,8 +38,6 @@ def _request_identity(handler) -> tuple[str, Any]:
     return user_id, mw.get_permission(dict(handler.headers))
 
 
-# LLM: _request_channel 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 发送通道请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _request_channel(handler) -> tuple[str, str]:
     mw = getattr(handler, "_auth_middleware", None)
     if mw is None:
@@ -53,8 +45,6 @@ def _request_channel(handler) -> tuple[str, str]:
     return mw.extract_identity(dict(handler.headers))
 
 
-# LLM: _can_read_payload 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 判断载荷条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _can_read_payload(payload: dict, user_id: str, permission: Any) -> bool:
     if permission is None or permission.can_access_all_users:
         return True
@@ -62,13 +52,11 @@ def _can_read_payload(payload: dict, user_id: str, permission: Any) -> bool:
     return payload_user == user_id
 
 
-# LLM: handle_status 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进状态的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def handle_status(handler, server) -> None:
     if server is None:
         handler._send_json(500, {"error": "server not initialized"})
         return
-    state = _read_state(server.paths.state)
+    state, state_load_error = _read_state_report(server.paths.state)
     counts = _request_counts(server.paths)
     response = {
         "status": state.get("status", "unknown"),
@@ -76,22 +64,39 @@ def handle_status(handler, server) -> None:
         "uptime": time.time() - state.get("started_at", time.time()),
         "requests": counts,
     }
+    if state_load_error:
+        response["state_load_error"] = state_load_error
+    if isinstance(state.get("server_error"), dict):
+        response["server_error"] = state["server_error"]
     handler._send_json(200, response)
 
 
-# LLM: _read_state 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 读取或查询状态需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _read_state(state_path) -> dict:
+    state, _ = _read_state_report(state_path)
+    return state
+
+
+def _read_state_report(state_path) -> tuple[dict, dict[str, Any] | None]:
     if not state_path.exists():
-        return {}
+        return {}, None
     try:
-        return json.loads(state_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        return {}, _state_load_error(state_path, exc)
+    if isinstance(payload, dict):
+        return payload, None
+    return {}, _state_load_error(
+        state_path,
+        ValueError(f"gateway state JSON root is {type(payload).__name__}, expected object"),
+    )
 
 
-# LLM: _request_counts 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 发送counts请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
+def _state_load_error(state_path, exc: BaseException) -> dict[str, Any]:
+    report = runtime_error_report(exc, context="gateway.http_state.read")
+    report["path"] = str(state_path)
+    return report
+
+
 def _request_counts(paths) -> dict[str, int]:
     counts = {"pending": 0, "processing": 0, "done": 0, "failed": 0}
     for name, dir_path in (
@@ -105,8 +110,6 @@ def _request_counts(paths) -> dict[str, int]:
     return counts
 
 
-# LLM: handle_result 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进结果的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def handle_result(handler, server) -> None:
     request_id = handler.path[len("/result/"):]
     if server is None:
@@ -125,27 +128,32 @@ def handle_result(handler, server) -> None:
     handler._send_json(404, {"error": "not found", "request_id": request_id})
 
 
-# LLM: _send_pending_state 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 发送pending状态请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _send_pending_state(handler, folder, status: str, access: _ResultAccessContext) -> bool:
     request_path = folder / f"{access.request_id}.json"
     if not request_path.exists():
         return False
-    payload = _read_payload(request_path)
+    payload, request_load_error = _read_payload_report(request_path, context="gateway.http_pending.read")
     if payload and not _can_read_payload(payload, access.user_id, access.permission):
         handler._send_json(403, {"error": "forbidden", "request_id": access.request_id})
         return True
-    handler._send_json(202, {"status": status, "request_id": access.request_id})
+    response = {"status": status, "request_id": access.request_id}
+    if request_load_error:
+        response["request_load_error"] = request_load_error
+    handler._send_json(202, response)
     return True
 
 
-# LLM: _send_finished_result 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 发送finished结果请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _send_finished_result(handler, response_path, access: _ResultAccessContext) -> None:
-    try:
-        result = json.loads(response_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        handler._send_json(500, {"error": f"failed to read result: {exc}"})
+    result, result_load_error = _read_payload_report(response_path, context="gateway.http_result.read")
+    if result_load_error:
+        handler._send_json(
+            500,
+            {
+                "error": "failed to read result",
+                "request_id": access.request_id,
+                "result_load_error": result_load_error,
+            },
+        )
         return
     if not _can_read_payload(result, access.user_id, access.permission):
         handler._send_json(403, {"error": "forbidden", "request_id": access.request_id})
@@ -153,17 +161,31 @@ def _send_finished_result(handler, response_path, access: _ResultAccessContext) 
     handler._send_json(200, result)
 
 
-# LLM: _read_payload 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 读取或查询载荷需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _read_payload(path) -> dict:
+    payload, _ = _read_payload_report(path, context="gateway.http_payload.read")
+    return payload
+
+
+def _read_payload_report(path, *, context: str) -> tuple[dict, dict[str, Any] | None]:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        return {}, _payload_load_error(path, exc, context)
+    if isinstance(payload, dict):
+        return payload, None
+    return {}, _payload_load_error(
+        path,
+        ValueError(f"gateway payload JSON root is {type(payload).__name__}, expected object"),
+        context,
+    )
 
 
-# LLM: handle_ask 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进ask的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
+def _payload_load_error(path, exc: BaseException, context: str) -> dict[str, Any]:
+    report = runtime_error_report(exc, context=context)
+    report["path"] = str(path)
+    return report
+
+
 def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     try:
         body = handler._read_json()
@@ -193,8 +215,6 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     handler._send_json(202, {"request_id": request_id, "status": "queued"})
 
 
-# LLM: _build_ask_request 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 构建ask请求所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _build_ask_request(context: _AskRequestContext) -> dict:
     metadata = context.body.get("metadata", {})
     metadata["user_id"] = context.user_id
@@ -210,8 +230,6 @@ def _build_ask_request(context: _AskRequestContext) -> dict:
     }
 
 
-# LLM: handle_stop 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进handlestop的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def handle_stop(handler, server) -> None:
     if server is None:
         handler._send_json(500, {"error": "server not initialized"})
@@ -224,8 +242,6 @@ def handle_stop(handler, server) -> None:
     handler._send_json(200, {"status": "stopping"})
 
 
-# LLM: handle_session_channels 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进会话channels的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def handle_session_channels(handler, server) -> None:
     from ..auth.middleware import require_admin_handler
 
@@ -244,8 +260,6 @@ def handle_session_channels(handler, server) -> None:
     handler._send_json(200, {"session_id": session_id, "bound_channels": bound, "primary_channel": primary})
 
 
-# LLM: handle_session_bind 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进会话bind的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def handle_session_bind(handler, server) -> None:
     from ..auth.middleware import require_admin_handler
 
@@ -269,8 +283,6 @@ def handle_session_bind(handler, server) -> None:
     handler._send_json(200, {"success": success, "session_id": session_id, "channel": body["channel"]})
 
 
-# LLM: _read_bind_body 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 读取或查询bindbody需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _read_bind_body(handler) -> dict | None:
     try:
         return handler._read_json()
@@ -279,8 +291,6 @@ def _read_bind_body(handler) -> dict | None:
         return None
 
 
-# LLM: handle_admin_summary 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
-# 函数用途: 推进管理summary的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def handle_admin_summary(handler, server) -> None:
     from ..auth.middleware import require_admin_handler
 

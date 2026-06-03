@@ -44,7 +44,7 @@ Status: Implemented
 
 ## Impact / 影响
 
-- `agent_core/tool_agent_budget.py`：新增预算 helper。
+- `agent_core/tool_guard/agent_budget.py`：新增预算 helper。
 - `agent_core/_tool_loop_service.py`：执行工具前检查预算。
 - `settings/runtime_guard_config.py` 和 `config/runtime_guard_config.yaml`：集中保存运行门默认值，避免 AgentConfig 和运行门 YAML 双写。
 - Subagent 文档、开发规范和代码树同步说明。

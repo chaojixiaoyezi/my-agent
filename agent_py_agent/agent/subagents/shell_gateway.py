@@ -1,5 +1,3 @@
-# LLM: Controlled shell gateway plans subagent shell usage before any subprocess execution exists.
-# 模块用途: 为子代理提供受控 shell 干跑判断，校验命令白名单、cwd、路径范围、网络范围和输出预算。
 
 from __future__ import annotations
 
@@ -8,15 +6,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from agent_py_agent.agent.contracts.gates.command_policy import (
+from agent_py_agent.agent.contracts.gates.command.policy import (
     CommandPolicyDecision,
     command_name,
     evaluate_command_policy,
 )
 
 
-# LLM: ShellGatewayRequest is the stable bundle for all future shell dry-run/execute checks.
-# 类用途: 集中保存一次 shell 网关请求，调用方必须显式传入 workspace、授权命令、网络范围和预算。
 @dataclass(frozen=True)
 class ShellGatewayRequest:
     command: str | list[str]
@@ -32,8 +28,6 @@ class ShellGatewayRequest:
     artifact_dir: str | Path = ""
 
 
-# LLM: ShellGatewayDecision is refs-only approval data; allowed=True never means execution already happened.
-# 类用途: 返回 shell 网关判断结果，说明是否可执行、阻断原因、解析后的 argv、cwd 和输出预算。
 @dataclass
 class ShellGatewayDecision:
     allowed: bool
@@ -48,8 +42,6 @@ class ShellGatewayDecision:
     audit: dict[str, object] = field(default_factory=dict)
 
 
-# LLM: plan_shell_command validates a command under a scoped grant but intentionally does not run it.
-# 函数用途: 对 shell 请求做 dry-run 判断，返回允许或拒绝原因；当前阶段不创建进程、不写文件。
 def plan_shell_command(request: ShellGatewayRequest) -> ShellGatewayDecision:
     command_policy = evaluate_command_policy(request.command)
     argv = list(command_policy.argv)
@@ -82,14 +74,10 @@ def plan_shell_command(request: ShellGatewayRequest) -> ShellGatewayDecision:
     )
 
 
-# LLM: decision_to_dict keeps CLI/report callers from depending on dataclass internals.
-# 函数用途: 将 shell 网关判断结果转成 JSON 友好的字典，方便后续写审计和报告。
 def decision_to_dict(decision: ShellGatewayDecision) -> dict[str, object]:
     return asdict(decision)
 
 
-# LLM: _BlockerCheck keeps dry-run policy bundled and below params-count limits.
-# 类用途: 汇总一次 shell dry-run 阻断检查所需的解析结果、路径和授权根目录。
 @dataclass(frozen=True)
 class _BlockerCheck:
     request: ShellGatewayRequest
@@ -100,8 +88,6 @@ class _BlockerCheck:
     roots: list[Path]
 
 
-# LLM: _collect_blockers centralizes dry-run policy so execute v1 can reuse the same gate.
-# 函数用途: 汇总共享 command policy、白名单、cwd 和网络范围的阻断原因。
 def _collect_blockers(check: _BlockerCheck) -> list[str]:
     blockers: list[str] = []
     blockers.extend(_command_policy_blockers(check.request, check.argv))
@@ -113,8 +99,6 @@ def _collect_blockers(check: _BlockerCheck) -> list[str]:
     return blockers
 
 
-# LLM: _command_policy_blockers requires explicit parent allowlist grants after shared policy passes.
-# 函数用途: 共享 command policy 先 deny；通过后再校验父级授权白名单。
 def _command_policy_blockers(request: ShellGatewayRequest, argv: list[str]) -> list[str]:
     if not argv:
         return ["COMMAND_EMPTY"]
@@ -128,8 +112,6 @@ def _command_policy_blockers(request: ShellGatewayRequest, argv: list[str]) -> l
     return []
 
 
-# LLM: _cwd_policy_blockers keeps subprocess cwd inside workspace-local allowed roots.
-# 函数用途: 校验 cwd 是否存在、是否在 workspace 内、是否落在授权根目录里。
 def _cwd_policy_blockers(cwd: Path, cwd_error: str, roots: list[Path]) -> list[str]:
     if cwd_error:
         return [cwd_error]
@@ -140,8 +122,6 @@ def _cwd_policy_blockers(cwd: Path, cwd_error: str, roots: list[Path]) -> list[s
     return []
 
 
-# LLM: _delete_target_policy_blockers keeps granted rm/rmdir/unlink inside the scoped roots.
-# 函数用途: 允许普通工作区清理，但拒绝删除授权根目录之外的显式目标。
 def _delete_target_policy_blockers(argv: list[str], cwd: Path, roots: list[Path]) -> list[str]:
     if not argv or command_name(argv[0]) not in {"rm", "rmdir", "unlink"}:
         return []
@@ -153,8 +133,6 @@ def _delete_target_policy_blockers(argv: list[str], cwd: Path, roots: list[Path]
     return []
 
 
-# LLM: _delete_targets filters flags and returns only path-like delete operands.
-# 函数用途: 从 rm/rmdir/unlink 参数中提取路径目标，不把 -rf/--force 当路径。
 def _delete_targets(args: list[str]) -> list[str]:
     targets: list[str] = []
     for arg in args:
@@ -166,8 +144,6 @@ def _delete_targets(args: list[str]) -> list[str]:
     return targets
 
 
-# LLM: _network_policy_blockers requires explicit network scope for curl-like commands.
-# 函数用途: 对 curl 等网络命令检查 URL 是否落在授权网络范围；无 URL 的版本查询不阻断。
 def _network_policy_blockers(request: ShellGatewayRequest, argv: list[str]) -> list[str]:
     if not argv or command_name(argv[0]) not in {"curl"}:
         return []
@@ -183,8 +159,6 @@ def _network_policy_blockers(request: ShellGatewayRequest, argv: list[str]) -> l
             return [f"network_scope_denied:{url}"]
     return []
 
-# LLM: _resolve_cwd resolves cwd relative to workspace and blocks escape at the planning layer.
-# 函数用途: 把 cwd 解析成绝对路径；未指定时使用 workspace 根目录。
 def _resolve_cwd(cwd: str | Path, workspace: Path) -> tuple[Path, str]:
     if not str(cwd or "").strip():
         return workspace, ""
@@ -195,8 +169,6 @@ def _resolve_cwd(cwd: str | Path, workspace: Path) -> tuple[Path, str]:
     return path, ""
 
 
-# LLM: _resolve_allowed_roots normalizes optional roots and always includes workspace as a safe default.
-# 函数用途: 归一化授权根目录；没有传入时默认只允许 workspace 根目录。
 def _resolve_allowed_roots(workspace: Path, allowed_roots: list[str | Path]) -> list[Path]:
     roots = []
     for raw in allowed_roots:
@@ -207,8 +179,6 @@ def _resolve_allowed_roots(workspace: Path, allowed_roots: list[str | Path]) -> 
     return roots or [workspace]
 
 
-# LLM: _normalize_output_budget clamps future execute output before any command can run.
-# 函数用途: 标准化输出预算字段，避免大日志或大 stdout 后续被默认全量保存。
 def _normalize_output_budget(value: dict[str, object]) -> dict[str, object]:
     return {
         "stdout_bytes": _positive_int(value.get("stdout_bytes"), 65536),
@@ -218,8 +188,6 @@ def _normalize_output_budget(value: dict[str, object]) -> dict[str, object]:
     }
 
 
-# LLM: _positive_int accepts config JSON values and falls back for invalid or unbounded inputs.
-# 函数用途: 将预算值转成正整数；空值、负数和非法值使用安全默认值。
 def _positive_int(value: object, default: int) -> int:
     try:
         parsed = int(value)
@@ -228,8 +196,6 @@ def _positive_int(value: object, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
-# LLM: _is_relative_to preserves Python compatibility and avoids exception-heavy policy branches.
-# 函数用途: 判断 path 是否在 root 下，供 cwd 和授权根目录检查复用。
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)

@@ -104,8 +104,6 @@ class TestFailureIntrospector:
         assert result.confidence == 0.8
         mock_agent.run.assert_called_once()
 
-    # LLM: real models often wrap JSON in markdown fences; introspection should still parse it.
-    # 函数用途: 防止 FailureIntrospector 因 ```json 包裹而降级，降低阻塞诊断噪音。
     def test_introspect_with_llm_fenced_json_success(
         self,
         mock_agent: MagicMock,

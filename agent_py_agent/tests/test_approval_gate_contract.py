@@ -82,7 +82,7 @@ def test_approval_gate_rejects_action_if_bound_args_change():
     assert decision.error_code == "APPROVAL_BINDING_MISMATCH"
     payload = decision.to_dict()
     assert payload["recovery"]["status"] == "needs_user_input"
-    assert payload["recovery"]["actions"][0]["recommended_action"] == "request_user_input_or_approval"
+    assert payload["recovery"]["actions"][0]["recommended_action"] == "request_user_input"
 
 
 def test_approval_gate_rejects_denied_expired_unauthorized_and_replayed_records():

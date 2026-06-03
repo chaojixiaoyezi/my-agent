@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 
-# LLM: external knowledge stays flat in YAML-lite config and follows directory, API, database order.
-# 函数用途: 验证外部知识库配置项能通过标准配置归一化，并按固定顺序暴露非空来源。
 def test_external_knowledge_config_normalizes_flat_fields():
     from agent_py_agent.agent.external_knowledge.config import external_knowledge_config_from_agent
     from agent_py_agent.agent.settings.config import AgentConfig
@@ -29,8 +27,6 @@ def test_external_knowledge_config_normalizes_flat_fields():
     ]
 
 
-# LLM: empty external knowledge config must be cheap and opt-out by default.
-# 函数用途: 验证外部知识库默认关闭，不会让普通请求额外扫描。
 def test_external_knowledge_config_defaults_to_disabled():
     from agent_py_agent.agent.external_knowledge.config import external_knowledge_config_from_agent
     from agent_py_agent.agent.settings.config import AgentConfig

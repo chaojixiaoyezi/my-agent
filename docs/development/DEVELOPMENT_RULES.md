@@ -150,6 +150,9 @@ before changing code.
   model-authored `grant_id`, `command_allowlist`, `path_scope`, `apply`, or output
   budget fields.  Legacy `controlled_exec` code may exist during migration, but
   it must not be introduced into ordinary task prompts or default tool catalogs.
+  Hidden/internal tools must also be blocked at execution time unless the caller
+  supplies an explicit internal `allowed_tools` scope; hiding a tool from the
+  catalog is not enough.
 - Shell policy must be controlled rather than name-banned: ordinary cleanup such
   as `rm file`, `rm -rf build`, `rmdir tmp`, or `chmod 777 scratch` may run when it
   stays inside the configured access boundary.  Catastrophic actions such as
@@ -282,24 +285,16 @@ x = x + 1  # increment x
 x = x + 1  # skip the sentinel row that the legacy exporter always emits
 ```
 
-- Every product-code module, class, function, and method must have a two-layer
-  comment block above the definition. For decorated definitions, place it above
-  the first decorator:
-  ```python
-  # LLM: contract, callers, side effects, and invariants for future models.
-  # 函数用途: plain-language purpose, call timing, and edit notes for humans.
-  def example(...):
-      ...
-  ```
-- Modules use `模块用途:`. Classes use `类用途:`. Functions and methods use `函数用途:`.
-- `LLM:` is for future coding agents: mention module ownership, stable contract,
-  side effects, caller expectations, and tests/docs to check after edits.
-- `模块用途:` / `函数用途:` / `类用途:` is for humans: explain what it does, when it
-  is called, and what a beginner should inspect before changing it.
-- Do not use mechanical filler such as “handles this small logic block”; comments
-  must describe the actual responsibility visible in the code.
-- Existing `新手说明:` / `参数说明:` / `返回说明:` blocks may remain as additional
-  detail, but they do not replace the required `LLM:` + human-purpose line.
+- Do not add mechanical template comments such as `# LLM:` / `# 函数用途:` just to
+  satisfy a pattern. They make future agents treat filler as architecture.
+- Add a comment only when it answers a real maintenance question: why this
+  boundary exists, which data source is authoritative, what side effect must not
+  be moved, or which failure mode the code is protecting against.
+- Prefer short docstrings or ordinary comments near the non-obvious decision.
+  A function whose name and types already explain the behavior does not need a
+  banner comment.
+- Existing generated comments should be removed when touching nearby code unless
+  they contain a concrete invariant that is still true.
 - Inline comments are for non-obvious decisions, workarounds, and domain constraints.
 - Code-size spans count implementation lines, not comment/docstring lines. Do not weaken
   required comments to satisfy size checks; split real implementation when the
@@ -359,11 +354,11 @@ do_write()
   They must not call an LLM, run a runner, execute tests, or expand artifact
   bodies unless the command name/flag explicitly says it will execute.
 - Explicit model-call entry points must stay opt-in, such as
-  `subagent-run --execute`, `subagents-dispatch --execute-runners`, and
+  `subagent-run --execute`, `subagents-dispatch --start-runners`, and
   planner paths that are clearly named as planner/model execution.
 - Explicit command execution must stay opt-in, such as
   `subagents-tests --re-run`, `subagents-tests --execute-tests`, or
-  `subagents-dispatch --execute-runners`.
+  `subagents-dispatch --start-runners`.
 - Default lookup surfaces must be refs-only: show ids, status, summaries,
   counts, hashes, sizes, and file refs. Do not read or inline
   `logs/runner_prompt.md`, `logs/runner_response.md`, externalized tool
@@ -457,8 +452,9 @@ do_write()
   recovery handoff rather than exposing a raw traceback or staying silent.
 - Provider rate limits or temporary overloads must also be typed and recoverable.
   HTTP 429/529/503 and temporary 5xx should retry with bounded backoff first.
-  During a model/tool loop, retry the current model turn with the shared
-  provider transient delay schedule before surfacing `ProviderTransientError`.
+  During model turns, delivery-contract materialization, and subagent structured
+  repair turns, retry the current model call with the shared provider transient
+  delay schedule before surfacing `ProviderTransientError`.
   Do not restart the whole run for this path, do not repeat already completed
   tool calls, do not treat provider flakes as delivery-quality failures, and do
   not let raw provider JSON tracebacks become the final user-facing answer.

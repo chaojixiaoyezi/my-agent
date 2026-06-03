@@ -1,5 +1,3 @@
-# LLM: Home runtime subcommand registration stays separate from the large basic CLI module.
-# 模块用途: 注册 owner-home 调试和维护命令，避免主 subcommands_basic 文件继续膨胀。
 
 from __future__ import annotations
 
@@ -15,8 +13,6 @@ from .home_runtime_commands import (
 )
 
 
-# LLM: add_home_runtime_subcommands registers owner-home debug and maintenance commands.
-# 函数用途: 注册 home-status、home-migrate、home-retention、home-index-rebuild 和读取侧调试命令。
 def add_home_runtime_subcommands(sub: argparse._SubParsersAction) -> None:
     home_status = sub.add_parser("home-status", help="查看 my-agent 家目录入口文件和关键目录")
     home_status.add_argument("--json", action="store_true", help="输出机器可读 JSON")

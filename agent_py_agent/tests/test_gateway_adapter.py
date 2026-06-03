@@ -263,6 +263,35 @@ class TestProcessFileAdapterOnce:
 
         assert result == 1
 
+    def test_bad_json_reports_message_load_error(self, tmp_path: Path):
+        """坏 adapter 消息文件不能被误判成用户发了空 prompt。"""
+        from agent_py_agent.agent.gateway_parts.adapter import process_file_adapter_once
+        from agent_py_agent.agent.gateway_parts.io import read_json_file
+
+        gateway_paths = _gateway_paths(tmp_path)
+        adapter_paths = _adapter_paths(tmp_path / "adapter")
+        adapter_paths.inbox.mkdir(parents=True, exist_ok=True)
+        message_path = adapter_paths.inbox / "bad_adapter_message.json"
+        message_path.write_text("{bad json", encoding="utf-8")
+
+        mock_agent = MagicMock()
+
+        result = process_file_adapter_once(
+            mock_agent,
+            gateway_paths_obj=gateway_paths,
+            adapter_paths_obj=adapter_paths,
+            timeout=5.0,
+            limit=20,
+        )
+
+        assert result == 1
+        response = read_json_file(adapter_paths.outbox / "bad_adapter_message.json")
+        assert response["ok"] is False
+        assert response["error_code"] == "ADAPTER_MESSAGE_LOAD_ERROR"
+        assert response["message_load_error"]["context"] == "gateway.adapter.message.read"
+        assert (adapter_paths.failed / "bad_adapter_message.json").exists()
+        assert not message_path.exists()
+
 
 class TestAdapterCliBundles:
     """Adapter CLI helper bundle regressions."""

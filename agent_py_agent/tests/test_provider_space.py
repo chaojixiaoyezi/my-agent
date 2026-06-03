@@ -3,8 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 
-# LLM: provider roots are lazy-created only when a connector is enabled.
-# 函数用途: 验证接入平台时只创建平台根目录和平台级配置，不提前创建用户/群目录。
 def test_ensure_provider_root_is_lazy(tmp_path: Path):
     from agent_py_agent.agent.user_space.provider_space import ensure_provider_root
 
@@ -17,8 +15,6 @@ def test_ensure_provider_root_is_lazy(tmp_path: Path):
     assert not (result.provider_dir / "groups").exists()
 
 
-# LLM: provider user spaces own their local tools, skills, templates, and workflows.
-# 函数用途: 验证外部私聊用户首次使用时获得自己的隔离空间和可自定义能力目录。
 def test_ensure_provider_user_space_creates_private_customization_dirs(tmp_path: Path):
     from agent_py_agent.agent.user_space.provider_space import (
         ProviderSpaceIdentity,
@@ -32,8 +28,6 @@ def test_ensure_provider_user_space_creates_private_customization_dirs(tmp_path:
         assert (paths.root_dir / child).is_dir()
 
 
-# LLM: group admins may manage only their own group scope; owner home remains out of scope.
-# 函数用途: 验证群管理/群主只能在本群空间内做破坏性管理，不能越权到主目录。
 def test_group_admin_scope_checks_do_not_allow_owner_home(tmp_path: Path):
     from agent_py_agent.agent.user_space.provider_space import (
         ProviderSpaceIdentity,
@@ -51,8 +45,6 @@ def test_group_admin_scope_checks_do_not_allow_owner_home(tmp_path: Path):
     assert not path_is_within_provider_space(tmp_path / "SOUL.md", paths)
 
 
-# LLM: destructive group actions should move targets into the same group's dated trash.
-# 函数用途: 验证群空间删除目标默认进入本群 trash/date，不直接物理删除。
 def test_provider_space_trash_target_stays_in_same_group(tmp_path: Path):
     from agent_py_agent.agent.user_space.provider_space import (
         ProviderSpaceIdentity,
@@ -68,8 +60,6 @@ def test_provider_space_trash_target_stays_in_same_group(tmp_path: Path):
     assert trash_target.name.startswith("old-tool")
 
 
-# LLM: quota status is scoped per external user/group and uses MiB config values.
-# 函数用途: 验证外部用户/群空间存储配额按当前目录统计并返回 M 单位状态。
 def test_provider_space_quota_status_reports_limit_and_usage(tmp_path: Path):
     from agent_py_agent.agent.user_space.provider_space import (
         ProviderSpaceIdentity,
@@ -89,8 +79,6 @@ def test_provider_space_quota_status_reports_limit_and_usage(tmp_path: Path):
     assert not status.over_limit
 
 
-# LLM: moving to provider trash must be recoverable and leave an audit event in the same scope.
-# 函数用途: 验证外部用户/群空间内的删除会移动到 trash，并写入本空间审计流水。
 def test_move_to_space_trash_moves_target_and_records_audit(tmp_path: Path):
     from agent_py_agent.agent.user_space.provider_space import (
         ProviderSpaceIdentity,
@@ -120,8 +108,6 @@ def test_move_to_space_trash_moves_target_and_records_audit(tmp_path: Path):
     assert provider_audit_log_path(paths).read_text(encoding="utf-8").count("move_to_trash") == 1
 
 
-# LLM: provider-space config values should come from AgentConfig, not scattered constants.
-# 函数用途: 验证外部用户/群空间配额配置可以从后端真实配置归一化后生成。
 def test_provider_space_quota_from_agent_config():
     from agent_py_agent.agent.settings.config import AgentConfig
     from agent_py_agent.agent.settings.config_normalize import normalize_agent_config
@@ -142,8 +128,6 @@ def test_provider_space_quota_from_agent_config():
     assert quota.max_download_file_mb == 64
 
 
-# LLM: provider trash cleanup must use retention days from config and never leave the provider space.
-# 函数用途: 验证外部用户/群空间 trash 可按配置保留天数清理旧日期目录。
 def test_provider_trash_retention_from_agent_config_purges_old_days(tmp_path: Path):
     from agent_py_agent.agent.settings.config import AgentConfig
     from agent_py_agent.agent.settings.config_normalize import normalize_agent_config

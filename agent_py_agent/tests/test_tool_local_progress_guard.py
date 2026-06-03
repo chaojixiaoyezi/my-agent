@@ -5,10 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-# LLM: repeated remote-style exploration should only warn at the configured local-progress interval.
-# 函数用途: 验证 closeout 失败后本地进展门只按固定间隔提示返工，不阻断。
 def test_local_progress_guard_warns_at_fixed_interval_without_blocking(tmp_path: Path):
-    from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
+    from agent_py_agent.agent.agent_core.tool_guard.local_progress import (
         has_required_local_progress_guard,
         local_progress_guard_context,
     )
@@ -55,11 +53,9 @@ def _assert_guard_false_for_rounds(func, args: tuple[object, object, object], ro
     for _ in range(rounds):
         assert func(*args) is False
 
-# LLM: local-progress guard can tune unlimited reminder intervals from the shared config object.
-# 函数用途: 验证本地进展门无限模式的固定提醒间隔由同一个探索/进展配置控制。
 def test_local_progress_guard_unlimited_hint_interval_is_configurable(tmp_path: Path):
     from agent_py_agent.agent.agent_core.exploration_fuse_config import ExplorationFuseConfig
-    from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
+    from agent_py_agent.agent.agent_core.tool_guard.local_progress import (
         has_required_local_progress_guard,
         local_progress_guard_context,
     )
@@ -80,10 +76,8 @@ def test_local_progress_guard_unlimited_hint_interval_is_configurable(tmp_path: 
     assert "第 7 轮本地进展固定提醒" in local_progress_guard_context(agent, redirects=99)
 
 
-# LLM: a changed work-progress fingerprint should reset the guard budget instead of carrying old exploration debt forever.
-# 函数用途: 验证只要 closeout 报告里的本地进展指纹变化了，local-progress guard 会重置计数，避免误伤后续合理探索。
 def test_local_progress_guard_resets_when_work_progress_fingerprint_changes(tmp_path: Path):
-    from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
+    from agent_py_agent.agent.agent_core.tool_guard.local_progress import (
         has_required_local_progress_guard,
     )
 
@@ -98,10 +92,8 @@ def test_local_progress_guard_resets_when_work_progress_fingerprint_changes(tmp_
     assert has_required_local_progress_guard(agent, params, exploratory_calls) is False
 
 
-# LLM: local write/build actions should not be treated as remote exploration debt.
-# 函数用途: 验证 builder 或写文件这类本地推进动作不会触发 local-progress guard。
 def test_local_progress_guard_allows_local_progressive_calls(tmp_path: Path):
-    from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
+    from agent_py_agent.agent.agent_core.tool_guard.local_progress import (
         has_required_local_progress_guard,
     )
 
@@ -138,10 +130,8 @@ def test_local_progress_guard_allows_local_progressive_calls(tmp_path: Path):
     )
 
 
-# LLM: writer_tool and document builder actions should reset local-progress debt through structured tool names.
-# 函数用途: 验证 write_structured_json/markdown_to_pdf 这类通用构建工具不会被误判成空转。
 def test_local_progress_guard_allows_writer_and_document_builder_tools(tmp_path: Path):
-    from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
+    from agent_py_agent.agent.agent_core.tool_guard.local_progress import (
         has_required_local_progress_guard,
     )
 
@@ -207,8 +197,6 @@ def _write_closeout(root: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# LLM: _closeout_payload returns a minimal structured closeout report for local-progress guard tests.
-# 函数用途: 生成带 failure/work 指纹和 write-first recovery action 的机器报告。
 def _closeout_payload(*, work_progress_fingerprint: str) -> dict[str, object]:
     return {
         "ok": False,

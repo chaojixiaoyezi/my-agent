@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_py_agent.agent.agent_core.agent_tree_status import agent_tree_status_payload
+from agent_py_agent.agent.agent_core.agent_tree.status import agent_tree_status_payload
 from agent_py_agent.agent.subagents.kernel import SubagentKernelRun, SubagentKernelSnapshot
 
 
@@ -52,8 +52,6 @@ def test_agent_tree_node_exposes_liveness_progress_and_evidence_layers():
     assert node["recent_tool_trace"] == [{"tool": "web_search", "ok": True, "summary": "查到候选资料"}]
 
 
-# LLM: Tree status should steer parents to current run workspaces, not legacy task dirs.
-# 函数用途: inspect_agent_tree 返回给模型的 workspace_refs 不暴露旧式子代理目录，避免接管时读错路径。
 def test_agent_tree_workspace_refs_hide_legacy_task_dir():
     class _Manager:
         def kernel_snapshot(self, query):
@@ -91,8 +89,6 @@ def test_agent_tree_workspace_refs_hide_legacy_task_dir():
     assert "/data/subagents/" not in str(payload)
 
 
-# LLM: Model-visible status should redact any remaining old subagent paths, including source refs.
-# 函数用途: 防止 inspect_agent_tree 把旧 data/subagents 路径递给模型后被模型 read_file 误读。
 def test_agent_tree_redacts_legacy_subagent_paths_everywhere():
     class _Manager:
         def kernel_snapshot(self, query):
@@ -125,8 +121,6 @@ def test_agent_tree_redacts_legacy_subagent_paths_everywhere():
     assert "[internal_legacy_subagent_path_hidden]" not in str(payload)
 
 
-# LLM: Tree status should expose registry records beside legacy path refs.
-# 函数用途: 父代理查看树时，应看到 artifact_id/path 的机器账本引用，而不是只依赖模型文本里的路径。
 def test_agent_tree_exposes_artifact_registry_refs():
     registry_record = {
         "artifact_id": "artifact-report-1",
@@ -182,6 +176,33 @@ def test_agent_tree_exposes_pending_guidance_layer(tmp_path):
     assert node["guidance_layer"]["pending_count"] == 1
     assert node["guidance_layer"]["recent_pending"][0]["message"] == "补读核心源码后再写结论。"
     assert node["guidance_layer"]["recent_pending"][0]["priority"] == "high"
+
+
+def test_agent_tree_reports_pending_guidance_load_error():
+    class _ConversationStore:
+        def pending_guidance(self, *_args, **_kwargs):
+            raise OSError("guidance ledger unreadable")
+
+    class _Manager:
+        def kernel_snapshot(self, query):
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                scope=query.scope,
+                runs=[SubagentKernelRun(run_id="child-1", task_id="child-1", status="RUNNING")],
+            )
+
+    class _Agent:
+        subagents = _Manager()
+        conversation_store = _ConversationStore()
+
+    payload = agent_tree_status_payload(_Agent(), {"root_id": "child-1"})
+    guidance_layer = payload["nodes"][0]["guidance_layer"]
+
+    assert guidance_layer["pending_count"] == 0
+    assert guidance_layer["warnings"] == ["guidance_unavailable"]
+    assert guidance_layer["guidance_load_error"]["context"] == "agent_tree.guidance.pending"
+    assert guidance_layer["guidance_load_error"]["category"] == "io"
+    assert "不要把它当成" in guidance_layer["guidance_load_error"]["model_message"]
 
 
 def test_agent_tree_visible_run_ids_filters_prompt_copy_only():

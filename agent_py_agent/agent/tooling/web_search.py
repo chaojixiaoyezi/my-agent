@@ -1,5 +1,3 @@
-# LLM: web_search is a source-discovery tool, not an evidence verifier.
-# 模块用途: 公开网页搜索入口，只返回结构化候选来源，真实证据仍要由后续 fetch/extract 和合同门确认。
 
 from __future__ import annotations
 
@@ -47,7 +45,6 @@ class _ProviderSearchResult:
 class WebSearchProvider:
     """Small provider interface for web_search backends.
 
-    给人看的解释：
     这只是搜索来源的“插槽”。DuckDuckGo、Exa、Parallel、Tavily 这类来源都应该长得像
     `search(query, limit) -> list[dict]`，这样以后加来源不用改主工具流程。
     """
@@ -89,8 +86,6 @@ class DuckDuckGoHtmlProvider(WebSearchProvider):
         ]
 
 
-# LLM: _DuckDuckGoHtmlResultParser extracts structured search hits from the public HTML endpoint.
-# 类用途: 解析 DuckDuckGo HTML 结果页中的标题、URL 和摘要；不把搜索正文当机器事实。
 class _DuckDuckGoHtmlResultParser(HTMLParser):
 
     def __init__(self) -> None:
@@ -227,8 +222,6 @@ def _dedupe_search_results(results: list[_SearchResult], limit: int) -> list[_Se
     return deduped
 
 
-# LLM: WebSearchTool discovers candidate public URLs before fetch/extract tools read a page.
-# 类用途: 通用网页搜索工具，返回结构化候选来源，避免模型靠猜测 URL 做研究。
 class WebSearchTool(BaseTool):
 
     def __init__(self, *, max_results: int = 5, timeout: int, providers: list[WebSearchProvider] | None = None):
