@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ...config import AgentConfig
+from ...settings.services.runtime_config_task import apply_task_runtime_config_overlay
 from ...subagent import RecordRunnerResultParams, SubAgentRunnerResult
 from ..subagent.params import SubagentRunParams
+from .session_pool import RunnerSessionPoolLease, runner_session_lease
 
 
 @dataclass(frozen=True)
@@ -30,23 +32,78 @@ class RunSubagentWorkerParams:
 def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResult:
     from ...core import SimpleAgent
 
-    worker = SimpleAgent(params.config, params.root)
+    worker = _build_worker_agent(SimpleAgent, params)
+    with runner_session_lease(
+        RunnerSessionPoolLease(
+            manager=worker.subagents,
+            run_id=params.run_id,
+            worker_id=f"subagent-worker:{params.run_id}",
+            interval_seconds=_runner_session_heartbeat_interval(worker),
+        )
+    ):
+        if params.dry_run or params.timeout_seconds <= 0:
+            return worker.run_subagent(
+                params=SubagentRunParams(
+                    run_id=params.run_id,
+                    instruction=params.instruction,
+                    dry_run=params.dry_run,
+                    max_cards=params.max_cards,
+                    probe=params.probe,
+                    retry_reason=params.retry_reason,
+                )
+            )
+        return _run_subagent_worker_with_timeout(worker, params)
+
+
+def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
+    worker = simple_agent_cls(params.config, params.root)
+    _attach_worker_runtime(worker, params)
+    task = worker.subagents.load(params.run_id)
+    effective_config = apply_task_runtime_config_overlay(
+        params.config,
+        task,
+        workspace_root=worker.subagents.workspace_root,
+    )
+    if effective_config is params.config:
+        return worker
+    worker = simple_agent_cls(effective_config, params.root)
+    _attach_worker_runtime(worker, params)
+    _record_effective_config_overlay(worker, params.run_id, task)
+    return worker
+
+
+def _attach_worker_runtime(worker, params: RunSubagentWorkerParams) -> None:
     if params.backend_override is not None:
         worker.backend = params.backend_override
         worker._subagent_worker_backend_override = params.backend_override
     _attach_worker_local_store(worker, params.local_store)
-    if params.dry_run or params.timeout_seconds <= 0:
-        return worker.run_subagent(
-            params=SubagentRunParams(
-                run_id=params.run_id,
-                instruction=params.instruction,
-                dry_run=params.dry_run,
-                max_cards=params.max_cards,
-                probe=params.probe,
-                retry_reason=params.retry_reason,
-            )
-        )
-    return _run_subagent_worker_with_timeout(worker, params)
+
+
+def _record_effective_config_overlay(worker, run_id: str, task) -> None:
+    identity = getattr(task, "runtime_identity", None)
+    overlay_ref = str(getattr(identity, "config_overlay_ref", "") or "").strip()
+    if not overlay_ref:
+        return
+    refreshed = worker.subagents.load(run_id)
+    attrs = dict(getattr(refreshed, "attributes", {}) or {})
+    attrs["runtime_config_overlay"] = {
+        "schema_version": "runtime_config_overlay.v1",
+        "overlay_ref": overlay_ref,
+        "scope": str(getattr(identity, "config_scope", "") or "run"),
+        "config_sources": getattr(worker.config, "config_sources", {}),
+        "config_layers": list(getattr(worker.config, "config_layers", []) or []),
+        "warnings": list(getattr(worker.config, "config_warnings", []) or []),
+    }
+    refreshed.attributes = attrs
+    worker.subagents.save(refreshed)
+
+
+def _runner_session_heartbeat_interval(worker) -> float:
+    try:
+        value = float(getattr(worker.config, "background_claim_heartbeat_interval_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    return value if value > 0 else 5.0
 
 
 def _attach_worker_local_store(worker, local_store: object | None) -> None:

@@ -12,6 +12,7 @@ from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import gateway_paths, write_json_file
 from agent_py_agent.agent.gateway_parts import runtime as gateway_runtime
+from agent_py_agent.agent.gateway_parts.logging import _report_gateway_side_effect_error
 
 
 def _make_agent(tmp_path):
@@ -71,6 +72,16 @@ def test_heartbeat_cleanup_on_exit(tmp_path):
 
     # After stop, liveness should be cleaned up
     assert not gateway_runtime.is_heartbeat_alive_for_request(request_id)
+
+
+def test_gateway_side_effect_error_is_structured(capsys):
+    _report_gateway_side_effect_error("unit", "req-1", ValueError("bad side effect"))
+
+    captured = capsys.readouterr()
+    assert "[gateway-side-effect-error]" in captured.err
+    assert '"operation": "unit"' in captured.err
+    assert '"request_id": "req-1"' in captured.err
+    assert "bad side effect" in captured.err
 
 
 @pytest.mark.skip(reason="heartbeat runs in daemon thread, mock at import-time closure not effective")

@@ -1,5 +1,8 @@
 
-"""Patch apply test command extraction and validation helper."""
+"""Patch apply test command extraction and validation helper.
+
+This module also builds blocked test-command audit entries for patch apply records.
+"""
 
 from __future__ import annotations
 
@@ -32,6 +35,20 @@ class PatchApplyTestCommands:
             command = str(test.get("command") or "").strip()
             _append_validated_command(command, commands, blocked, validate_patch_test_command)
         return commands, blocked
+
+    @staticmethod
+    def extract_with_audit_entries(task: SubAgentTask, output: dict) -> tuple[list[str], int, list[dict[str, object]]]:
+        commands, blocked_reasons = PatchApplyTestCommands.extract(task, output)
+        entries = [
+            {
+                "path": "",
+                "status": "test_command",
+                "apply_status": "BLOCKED",
+                "message": reason,
+            }
+            for reason in blocked_reasons
+        ]
+        return commands, len(blocked_reasons), entries
 
 
 def _append_validated_command(

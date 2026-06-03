@@ -78,3 +78,25 @@ def test_subagent_save_preserves_runtime_identity_memory_and_config_scope_reserv
     assert projected.metadata["config_scope"]["overlay_ref"] == "overlays/feishu-dm-1.json"
     assert projected.metadata["config_scope"]["promotion_policy"] == "admin_approval_required"
     assert projected.metadata["config_scope"]["writes_global_config"] is False
+
+
+def test_create_run_inherits_parent_config_overlay_ref(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / "subagents")
+    parent = manager.create_run(
+        goal="父任务",
+        thought="配置覆盖从父层传给子层。",
+        plan=["创建父任务"],
+        attributes={"config_overlay_ref": "overlays/parent.yaml", "config_scope": "task"},
+    )
+
+    child = manager.create_run(
+        goal="子任务",
+        thought="继承父任务运行配置覆盖。",
+        plan=["创建子任务"],
+        parent_id=parent.id,
+    )
+
+    assert child.runtime_identity.config_overlay_ref == "overlays/parent.yaml"
+    assert child.runtime_identity.config_scope == "run"
+    assert child.attributes["runtime_config_scope"]["overlay_ref"] == "overlays/parent.yaml"
+    assert child.attributes["runtime_config_scope"]["loaded_as"] == "run_layer"

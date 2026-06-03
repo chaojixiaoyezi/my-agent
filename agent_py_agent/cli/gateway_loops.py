@@ -8,6 +8,7 @@ from __future__ import annotations
 从 gateway_process.py 拆出来，让主入口文件更短。
 """
 
+import json
 import os
 import sys
 import threading
@@ -22,6 +23,7 @@ from ..agent.gateway import (
     recover_gateway_processing_requests,
     write_json_file,
 )
+from ..agent.runtime_errors import runtime_error_report
 from .common import make_agent
 from .models import GatewayRunContext, GatewayRunOptions
 
@@ -36,7 +38,7 @@ def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_
         bootstrap_agent = _gateway_agent_from_context(context)
         worker_count = max(1, int(bootstrap_agent.config.gateway_request_workers or 1))
     except Exception as exc:
-        print(f"gateway request worker failed to initialize: {exc}", file=sys.stderr)
+        _print_gateway_loop_error("gateway_request_pool.initialize", "pool", exc)
         return
     workers: list[threading.Thread] = []
     for index in range(worker_count):
@@ -63,7 +65,7 @@ def _gateway_request_worker_loop(
     try:
         agent = _gateway_agent_from_context(context)
     except Exception as exc:
-        print(f"gateway request worker {worker_index} failed to initialize: {exc}", file=sys.stderr)
+        _print_gateway_loop_error("gateway_request_worker.initialize", str(worker_index), exc)
         return
 
     poll_interval = max(1, int(agent.config.gateway_request_poll_interval))
@@ -72,7 +74,7 @@ def _gateway_request_worker_loop(
             _recover_gateway_requests_if_primary(agent, paths, worker_index)
             processed = _process_gateway_requests(agent, paths, worker_id=f"gw-worker-{worker_index}")
         except Exception as exc:
-            print(f"gateway request worker {worker_index} failed: {exc}", file=sys.stderr)
+            _print_gateway_loop_error("gateway_request_worker.iteration", str(worker_index), exc)
             processed = 0
         if processed:
             continue
@@ -126,3 +128,9 @@ def _write_gateway_heartbeat(
             "request_counts": gateway_request_counts(paths),
         },
     )
+
+
+def _print_gateway_loop_error(context: str, worker_id: str, exc: BaseException) -> None:
+    report = runtime_error_report(exc, context=context)
+    report["worker_id"] = worker_id
+    print("[gateway-loop-error] " + json.dumps(report, ensure_ascii=False, sort_keys=True), file=sys.stderr)

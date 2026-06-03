@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..runtime_errors import runtime_error_report
 from .paths import resolve_audit_paths
 from .records import (
     AuditAction,
@@ -121,9 +122,19 @@ class AuditLogger:
                         "details": entry.details,
                     },
                 )
-        except Exception:
-            # LocalStore 不可用时静默失败
-            pass
+        except Exception as exc:
+            self._write_audit_side_effect_error(entry, exc)
+
+    def _write_audit_side_effect_error(self, entry: AuditEntry, exc: BaseException) -> None:
+        report = runtime_error_report(exc, context="audit.local_store.record_event")
+        report["entry_id"] = entry.entry_id
+        report["action"] = entry.action
+        fallback = self._audit_root / "audit_side_effect_errors.jsonl"
+        try:
+            with fallback.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(report, ensure_ascii=False) + "\n")
+        except OSError:
+            return
 
     # 便捷方法
 

@@ -157,6 +157,19 @@ Patch apply service helper 收敛到 `subagents/services/patch_apply/`。外部�
 提取 helper 都在子包内部。它仍然服务原有 patch flow，不改变 patch 权限、rollback
 或测试命令校验语义。
 
+Patch apply 的 owner/权限/批量验证/恢复审计在 `subagents/patch/patch_apply_audit.py` 构造，
+`patch_apply_task.py` 只负责单任务规范化、执行和回滚，`patch_apply_reports.py` 负责统一序列化。
+新增字段随 `PatchApplyRecord` 一起进入报告、任务目录记录和全局 apply 日志。
+
+子代理 runtime config scope helper 在 `subagents/services/runtime_config_scope.py`。创建任务时写入
+`attributes.runtime_config_scope`，并从父任务继承 `config_overlay_ref`；worker 侧由
+`settings/services/runtime_config_task.py` 读取 task identity 并合并 scoped config layer。
+这条链路只影响运行配置来源，不新增模型可见硬门。
+
+Runner session heartbeat helper 在 `agent_core/runner/session_pool.py`。worker 运行期间写
+`runner_session` 和 `runner_session_history`，用于恢复和排查长期 runner 是否仍有进程在推进；
+最终完成状态仍以 runner result 和 task canonical state 为准。
+
 Takeover service helper 收敛到 `subagents/services/takeover/`。外部只应 import
 `SubAgentTakeoverRunService`、`TakeoverRunRequest`、`write_takeover_readiness_files`
 和 readiness 读取顺序 API；source refs、chain depth 和 readiness markdown 渲染都在子包

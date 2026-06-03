@@ -8,6 +8,26 @@
 
 ## 基础设施
 
+### 架构收口第二批：worker/session、grant wake、patch 权限与 task overlay（2026-06-03）
+
+解决问题：第一批收口后，仍有五条链路停在“已有骨架但未闭环”：runner 缺长期 session heartbeat 账本，capability grant 后缺后台唤醒信号，patch apply 审计缺 owner/权限和批量验证恢复信息，gateway/audit best-effort 异常仍偏字符串或静默，子代理 `config_overlay_ref` 只被保存但没有真正装载成 run/task layer。
+
+落地内容：
+- 新增 `runner_session_pool.v1`，runner worker 运行期间会写 `runner_session`、`runner_session_history`、`worker_pid`、`heartbeat_at` 和完成/失败状态，形成进程级 session lease 账本。
+- 子代理 worker 在执行前读取 task `runtime_identity.config_overlay_ref`，按 run/task scope 合并 runtime config layer，并把有效 `config_sources/config_layers/warnings` 记录到 task attributes。
+- 子代理创建会从 attributes 或父 task 继承 `config_overlay_ref`，接管时保留当前 runtime config scope 并记录 takeover 信息。
+- capability route 生成 grant 后，会创建 `subagent_capability_granted` observation + wake signal，并把 `capability_grant_wake` 或结构化错误写回 task。
+- patch apply record 新增 `owner_policy`、`batch_validation`、`failure_recovery`，记录 applier、owner policy snapshot、write roots、locked files、批量验证数量、测试结果和 rollback 下一步。
+- gateway loop 和 gateway side-effect error 改为输出 `runtime_error_report()` JSON；audit local-store 旁路失败写入 `audit_side_effect_errors.jsonl`。
+- 为新增链路补齐 focused tests，并把 patch apply / runtime config scope 拆到独立 helper，保持 code-size / offline contract matrix 为 0 findings。
+
+验证方式：
+- `python3 -m pytest -q agent_py_agent/tests/test_runner_session_pool.py agent_py_agent/tests/test_subagent_security_reserve.py::test_create_run_inherits_parent_config_overlay_ref agent_py_agent/tests/test_capability_runtime_config.py::test_task_config_overlay_ref_loads_as_runtime_layer agent_py_agent/tests/test_manager_patch.py::TestValidatePatchTestCommand::test_patch_apply_record_includes_owner_policy_and_batch_validation agent_py_agent/tests/test_gateway_heartbeat.py::test_gateway_side_effect_error_is_structured`
+- `ruff check agent_py_agent scripts`
+- `python3 scripts/check_code_size.py --mode strict`
+- `python3 scripts/check_offline_contract_matrix.py`
+- `python3 -m pytest -q`
+
 ### 架构收口第一批：运行时错误与配置 overlay（2026-06-03）
 
 解决问题：运行时收口时，后台 dispatch、启动恢复和配置层仍有几条“骨架存在但未接入”的链路。错误被静默吞掉时，父代理容易把坏账本解释成没有任务；runtime config layer 只能在测试里合并，CLI 真正创建 agent 时没有应用 scoped overlay。

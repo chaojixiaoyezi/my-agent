@@ -5,6 +5,7 @@ from __future__ import annotations
 
 文件队列是 gateway 的事实源，LocalStore 是方便搜索和排查的索引。
 这个文件负责把请求、响应、生命周期事件写进索引；索引失败会报告，但不会弄坏主请求。
+side-effect 错误统一输出 runtime_error_report JSON，方便后台日志和 CI 定位。
 """
 
 import json
@@ -13,6 +14,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from ..runtime_errors import runtime_error_report
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -174,9 +177,12 @@ def _index_gateway_payload(
 
 def _report_gateway_side_effect_error(operation: str, request_id: str, exc: Exception) -> None:
     try:
+        report = runtime_error_report(exc, context=f"gateway.side_effect.{operation}")
+        report["operation"] = operation
+        report["request_id"] = request_id
         print(
-            f"[gateway-side-effect-error] operation={operation} request_id={request_id} "
-            f"error_type={type(exc).__name__} error={exc}",
+            "[gateway-side-effect-error] "
+            + json.dumps(report, ensure_ascii=False, sort_keys=True),
             file=sys.stderr,
         )
     except Exception:

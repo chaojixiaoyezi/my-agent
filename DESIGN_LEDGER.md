@@ -17,6 +17,25 @@
 - `python3 -m pytest -q agent_py_agent/tests/test_config_layers.py agent_py_agent/tests/test_dispatch_background.py agent_py_agent/tests/test_startup_commands.py::test_startup_recovery_preserves_active_task_detection_errors --tb=short`
 - `ruff check agent_py_agent/agent/settings/services/runtime_config_env.py agent_py_agent/cli/common.py agent_py_agent/cli/dispatch_background.py agent_py_agent/cli/_dispatch.py agent_py_agent/agent/startup_recovery.py agent_py_agent/tests/test_config_layers.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_startup_commands.py`
 
+## 2026-06-03 / 架构收口第二批：worker session、grant wake、patch 权限和 task overlay
+
+状态：本地已落地，全量 pytest 已跑；待远端 CI
+
+摘要：
+- runner worker 现在在真实运行外层写 `runner_session_pool.v1` lease，包含 `session_id`、`worker_pid`、`heartbeat_at`、完成/失败状态和最近 session history。这个账本不替代 runner result，只解决“长期 worker 是否还活着、哪个进程在跑”的可观测性。
+- `config_overlay_ref` 从 task identity 的保留字段进入运行链路：create 可显式写入，child 默认继承父 overlay，takeover 保留 scope，worker 启动前合并 overlay 为 run/task layer，并把 `config_sources/config_layers` 写回 task attributes。
+- capability grant 后除了现有同 run follow-up，还会写 `subagent_capability_granted` observation 和 wake signal；失败时写结构化 `capability_grant_wake_error`，避免授权后后台线程睡过去。
+- patch apply 审计从“写了什么和是否回滚”扩展为 owner/权限/批量验证/恢复四段证据：`owner_policy`、`batch_validation`、`failure_recovery` 随 `PatchApplyRecord` 一起进入 JSON、Markdown 和全局日志。
+- gateway loop / gateway side-effect / audit local-store 旁路失败统一到 `runtime_error_report()`，仍保持 best-effort 不中断主请求，但不再静默吞掉。
+- 代码体量按职责拆分：`runtime_config_scope.py`、`runtime_config_task.py`、`patch_apply_audit.py`、`runner/session_pool.py` 承接新逻辑，`check_code_size --mode strict` 与 offline contract matrix 保持 0 findings。
+
+验证：
+- `python3 -m pytest -q agent_py_agent/tests/test_runner_session_pool.py agent_py_agent/tests/test_subagent_security_reserve.py::test_create_run_inherits_parent_config_overlay_ref agent_py_agent/tests/test_capability_runtime_config.py::test_task_config_overlay_ref_loads_as_runtime_layer agent_py_agent/tests/test_manager_patch.py::TestValidatePatchTestCommand::test_patch_apply_record_includes_owner_policy_and_batch_validation agent_py_agent/tests/test_gateway_heartbeat.py::test_gateway_side_effect_error_is_structured`
+- `ruff check agent_py_agent scripts`
+- `python3 scripts/check_code_size.py --mode strict`
+- `python3 scripts/check_offline_contract_matrix.py`
+- `python3 -m pytest -q`
+
 ## 2026-05-28 / 通道运行时 式显式 run 身份账本
 
 状态：本地已落地，focused tests 已跑；未提交

@@ -1,7 +1,10 @@
 
 from __future__ import annotations
 
-"""Patch review report models."""
+"""Patch review/apply report models.
+
+Patch apply records carry owner policy, batch validation, and failure recovery evidence.
+"""
 
 from dataclasses import dataclass, field
 
@@ -60,6 +63,9 @@ class PatchApplyRecord:
     test_results: list[dict[str, object]] = field(default_factory=list)
     patches: list[dict[str, object]] = field(default_factory=list)
     load_errors: list[dict[str, object]] = field(default_factory=list)
+    owner_policy: dict[str, object] = field(default_factory=dict)
+    batch_validation: dict[str, object] = field(default_factory=dict)
+    failure_recovery: dict[str, object] = field(default_factory=dict)
     created_at: float = 0.0
 
 

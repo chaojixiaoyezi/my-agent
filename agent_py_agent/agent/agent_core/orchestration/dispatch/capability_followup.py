@@ -21,6 +21,7 @@ def run_post_runner_capability_followup(agent: Any, state: tuple[Any, Any, list]
     records.extend(route_records)
     if not _created_grant(route_records):
         return records
+    _raise_grant_wake_signals(agent, route_records)
     ctx.runner_instruction = _with_capability_followup_instruction(agent, ctx, records)
     return run_dispatch_runner_stage(agent, ctx=ctx, params=params, records=records)
 
@@ -94,6 +95,80 @@ def _granted_task_snippets(agent: Any, run_ids: list[str]) -> list[str]:
             f"artifact_refs={'; '.join(paths[:3]) or 'none'}"
         )
     return snippets
+
+
+def _raise_grant_wake_signals(agent: Any, records: list) -> None:
+    store = getattr(agent, "conversation_store", None)
+    if store is None:
+        return
+    for run_id in _granted_run_ids(records):
+        _raise_grant_wake_signal_for_run(agent, store, run_id)
+
+
+def _raise_grant_wake_signal_for_run(agent: Any, store: Any, run_id: str) -> None:
+    try:
+        task = agent.subagents.load(run_id)
+        thread = store.thread_for_task(run_id)
+        if thread is None:
+            return
+        observation = store.append_observation(_grant_wake_observation(thread, task, run_id))
+        signal = store.raise_wake_signal(_grant_wake_signal_request(thread, task, run_id, observation))
+        _record_grant_wake(agent, task, signal.wake_signal_id)
+    except Exception as exc:
+        _record_grant_wake_error(agent, run_id, exc)
+
+
+def _grant_wake_observation(thread: Any, task: Any, run_id: str) -> dict[str, object]:
+    return {
+        "thread_id": thread.thread_id,
+        "event_type": "subagent_capability_granted",
+        "summary": f"子代理 {run_id} 的 capability_request 已授权，继续同一任务后续执行。",
+        "urgency": "normal",
+        "source_agent_id": run_id,
+        "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
+        "root_task_id": str(getattr(task, "root_id", "") or run_id),
+        "requires_main_agent": True,
+        "metadata": {"run_id": run_id, "grant_wake": True},
+    }
+
+
+def _grant_wake_signal_request(thread: Any, task: Any, run_id: str, observation: Any) -> dict[str, object]:
+    return {
+        "thread_id": thread.thread_id,
+        "observation": observation,
+        "urgency": "normal",
+        "reason": "subagent_capability_granted",
+        "source_agent_id": run_id,
+        "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
+        "root_task_id": str(getattr(task, "root_id", "") or run_id),
+        "dedupe_key": f"capability-granted:{run_id}",
+        "metadata": {"run_id": run_id, "grant_wake": True},
+    }
+
+
+def _record_grant_wake(agent: Any, task: Any, wake_signal_id: str) -> None:
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    attrs["capability_grant_wake"] = {
+        "schema_version": "capability_grant_wake.v1",
+        "wake_signal_id": wake_signal_id,
+        "status": "raised",
+    }
+    task.attributes = attrs
+    agent.subagents.save(task)
+
+
+def _record_grant_wake_error(agent: Any, run_id: str, exc: BaseException) -> None:
+    try:
+        task = agent.subagents.load(run_id)
+    except Exception:
+        return
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    attrs["capability_grant_wake_error"] = runtime_error_report(exc, context="dispatch_capability_followup.grant_wake")
+    task.attributes = attrs
+    try:
+        agent.subagents.save(task)
+    except Exception:
+        return
 
 
 def _task_next_actions(task: Any) -> list[str]:

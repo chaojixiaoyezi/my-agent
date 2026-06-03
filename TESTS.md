@@ -2,6 +2,11 @@
 
 ## 近期新增验证
 
+- `agent_py_agent/tests/test_runner_session_pool.py`：覆盖 runner worker session lease 心跳、进程 id、完成状态和 task attributes 写回。
+- `agent_py_agent/tests/test_subagent_security_reserve.py::test_create_run_inherits_parent_config_overlay_ref`：覆盖 child 从 parent 继承 `config_overlay_ref` 并写入 runtime config scope。
+- `agent_py_agent/tests/test_capability_runtime_config.py::test_task_config_overlay_ref_loads_as_runtime_layer`：覆盖 task `config_overlay_ref` 被加载为真实 runtime config layer。
+- `agent_py_agent/tests/test_manager_patch.py::TestValidatePatchTestCommand::test_patch_apply_record_includes_owner_policy_and_batch_validation`：覆盖 patch apply 的 owner policy、批量验证和 failure recovery 审计字段。
+- `agent_py_agent/tests/test_gateway_heartbeat.py::test_gateway_side_effect_error_is_structured`：覆盖 gateway best-effort side-effect 异常输出结构化 report。
 - `agent_py_agent/tests/test_real_run_review_contract.py`：覆盖真实运行复盘合同，验证 acceptance/report 结构化错误码、runtime bracketed marker、非失败 marker 过滤、失败聚类和 Markdown 输出。
 - `agent_py_agent/tests/test_real_run_review_script.py`：覆盖 `scripts/review_real_runs.py`，验证脚本会写 `real-run-review.json`、`real-run-review.jsonl` 和 `real-run-review.md`，并在发现失败 run 时返回非零码。
 - `scripts/review_real_runs.py --runs-root ... --glob '*20260521*' --out-dir docs/reports`：用于把真实任务输出转成可追踪的失败样本候选，真实外部系统只作为输入来源，日常修复仍回到离线合同测试。

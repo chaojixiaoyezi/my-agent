@@ -181,6 +181,45 @@ class TestValidatePatchTestCommand:
         assert commands == ["python -m pytest tests/from_output.py"]
         assert blocked == []
 
+    def test_patch_apply_record_includes_owner_policy_and_batch_validation(self, tmp_path: Path):
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+        from agent_py_agent.agent.subagents.patch.patch_apply_task import (
+            ApplyPatchTaskParams,
+            apply_patch_task,
+        )
+
+        manager = SubAgentManager(tmp_path / "subagents", workspace_root=tmp_path)
+        task = manager.create_run(
+            goal="应用补丁",
+            thought="记录 owner 策略和批量验证。",
+            plan=["写文件"],
+            extra_write_roots=[str(tmp_path)],
+            attributes={"patch_test_commands": ["python -c \"print('ok')\""]},
+        )
+        output = {
+            "patches": [
+                {
+                    "path": "target.txt",
+                    "status": "planned",
+                    "type": "write_file",
+                    "content": "hello\n",
+                }
+            ]
+        }
+
+        record = apply_patch_task(
+            manager,
+            task,
+            params=ApplyPatchTaskParams(output=output, patches=output["patches"], apply=False, applier="owner-a", note=""),
+        )
+
+        assert record.owner_policy["applier"] == "owner-a"
+        assert record.owner_policy["run_id"] == task.id
+        assert record.batch_validation["requested_patch_count"] == 1
+        assert record.batch_validation["validated_patch_count"] == 1
+        assert record.batch_validation["ready_for_apply"] is True
+        assert record.failure_recovery["rollback_performed"] is False
+
 
 class TestRollbackPatchApply:
     """测试补丁回滚函数。"""

@@ -3,6 +3,7 @@
 
 Human version:
 这个模块处理 patch apply 记录的字典序列化，避免在 patch_apply.py 中重复代码。
+owner policy、批量验证和失败恢复字段也在这里统一序列化，保证报告和日志看到同一份审计证据。
 """
 
 from __future__ import annotations
@@ -35,6 +36,9 @@ def patch_apply_record_to_dict(record: PatchApplyRecord) -> dict:
         "test_results": record.test_results,
         "patches": record.patches,
         "load_errors": record.load_errors,
+        "owner_policy": record.owner_policy,
+        "batch_validation": record.batch_validation,
+        "failure_recovery": record.failure_recovery,
         "created_at": record.created_at,
     }
 

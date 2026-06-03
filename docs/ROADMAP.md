@@ -71,43 +71,43 @@
 
 ### Grant 注入执行上下文
 
-状态：部分落地
+状态：部分落地，grant 后自动唤醒已落地
 
 解决问题：capability grant 不能只停留在运行记录里，必须能变成子代理实际可读取的执行包。
 
-已有：`SubAgentExecutionContext`、`build_execution_context()`、`write_execution_context()`、CLI 命令。
+已有：`SubAgentExecutionContext`、`build_execution_context()`、`write_execution_context()`、CLI 命令；capability grant 后会创建 observation/wake signal，并把 `capability_grant_wake` 写回 task。
 
-待做：grant 后自动重新唤醒子代理、按 token 预算裁剪、子代理写 capability request 统一入口。
+待做：按 token 预算裁剪 execution context；子代理写 capability request 统一入口继续精简。
 
 ### 层级能力上抛
 
-状态：部分落地
+状态：部分落地，授权后下发唤醒已落地
 
 解决问题：子代理遇到问题不应自己全局搜索 skill/tool，应描述能力缺口，由父代理发现和下发。
 
-已有：`CapabilityRequest`/`CapabilityGrant`/`CapabilityGap`、单个子代理 runner 入口、capability request 路由。
+已有：`CapabilityRequest`/`CapabilityGrant`/`CapabilityGap`、单个子代理 runner 入口、capability request 路由、grant 后 wake signal 和同 run follow-up。
 
-待做：跨层级自动上抛、根据 route 结果自动重新唤醒子代理、tool fallback group 和 failure mode 参与排序。
+待做：跨多层级的批量上抛汇总；tool fallback group 和 failure mode 参与排序。
 
 ### 本地恢复、诊断、worker 和 adapter 第一版
 
-状态：部分落地
+状态：部分落地，runner session heartbeat 已落地
 
 解决问题：LocalStore 一致性诊断、gateway 请求崩溃恢复、adapter 文件协议。
 
-已有：`local-doctor`、`local-rebuild`、gateway failed 归档、processing lease、保守 worker pool、`adapter file`、启动恢复结构化检测错误、后台 dispatch 启动标记错误报告。
+已有：`local-doctor`、`local-rebuild`、gateway failed 归档、processing lease、保守 worker pool、runner session heartbeat 账本、`adapter file`、启动恢复结构化检测错误、后台 dispatch 启动标记错误报告。
 
-待做：LocalStore compact/backup/export、gateway 请求取消/优先级/租约续期、runner 进程级隔离、adapter HTTP/WebSocket 版。
+待做：LocalStore compact/backup/export、gateway 请求取消/优先级、独立子进程隔离版 runner worker、adapter HTTP/WebSocket 版。
 
 ### Runtime 配置层与错误报告全链路
 
-状态：部分落地
+状态：部分落地，子代理 run/task overlay 与主要 best-effort 结构化已落地
 
 解决问题：运行时 overlay、owner/task/run scoped 配置、错误报告和恢复摘要必须成为一条真实链路，不能只停在合同测试或局部 helper。
 
-已有：基础配置来源链、`RuntimeConfigLayer`、CLI runtime overlay 环境入口、后台启动和启动恢复错误可见化。
+已有：基础配置来源链、`RuntimeConfigLayer`、CLI runtime overlay 环境入口、子代理 `config_overlay_ref` 创建继承/接管记录/worker 装载、后台启动和启动恢复错误可见化、gateway/audit 旁路错误结构化。
 
-待做：子代理创建/接管时把 `config_overlay_ref` 真实装载成 run/task layer；远端 session/ACP 入口接入 scoped config；继续清理 gateway/http/lease/audit 等剩余 best-effort 异常路径。
+待做：远端 session/ACP 入口接入 scoped config；继续扩展少数低频 gateway adapter/supervisor 旁路异常的统一持久化。
 
 ### 可见真实环境测试台 Live Lab
 

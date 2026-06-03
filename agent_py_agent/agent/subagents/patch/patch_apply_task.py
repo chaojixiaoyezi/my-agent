@@ -4,6 +4,7 @@ from __future__ import annotations
 """single-task patch apply workflow for PatchApplyService.
 
 这里处理单个任务里的 patch 规范化、边界检查、执行和回滚，PatchApplyService 只保留批量门面。
+审计字段由 patch_apply_audit 统一构造，避免执行流程和报告证据互相分叉。
 """
 
 import json
@@ -13,6 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from agent_py_agent.agent.common.json_io import read_json_object_report
+from agent_py_agent.agent.subagents.patch.patch_apply_audit import (
+    PatchApplyRecordPayload,
+    build_patch_apply_record,
+)
 from agent_py_agent.agent.subagents.patch.patch_renderer import build_unified_diff
 from agent_py_agent.agent.subagents.reports import PatchApplyRecord
 from agent_py_agent.agent.subagents.utils import _new_id
@@ -46,6 +51,25 @@ class ApplyPatchTaskParams:
     note: str
 
 
+@dataclass
+class _PreparedPatchApply:
+    patch_entries: list
+    patch_specs: list
+    blocked_count: int
+    test_commands: list
+
+
+@dataclass
+class _ApplyIfReadyContext:
+    manager: Any
+    task: Any
+    params: ApplyPatchTaskParams
+    prepared: _PreparedPatchApply
+    decision: str
+    ok: bool
+    message: str
+
+
 @dataclass(frozen=True)
 class BaseAuditParams:
 
@@ -57,70 +81,91 @@ class BaseAuditParams:
 
 
 def extract_patch_test_info(task, output):
-    """Extract test commands and blocked test reasons from task output."""
     from agent_py_agent.agent.subagents.services.patch_apply.test_commands import (
         PatchApplyTestCommands,
     )
 
-    test_commands, blocked_test_reasons = PatchApplyTestCommands.extract(task, output)
-    patch_entries = [
-        {
-            "path": "",
-            "status": "test_command",
-            "apply_status": "BLOCKED",
-            "message": reason,
-        }
-        for reason in blocked_test_reasons
-    ]
-    return test_commands, len(blocked_test_reasons), patch_entries
+    return PatchApplyTestCommands.extract_with_audit_entries(task, output)
 
 
 def apply_patch_task(manager, task, *, params: ApplyPatchTaskParams) -> PatchApplyRecord:
     """Execute single task patch apply dry-run or real apply."""
     now = time.time()
-    patch_entries, patch_specs, blocked_count = _normalize_all_patches(manager, task, params.patches)
-    test_commands, test_blocked_count, test_entries = extract_patch_test_info(task, params.output)
-    blocked_count += test_blocked_count
-    patch_entries.extend(test_entries)
-
+    prepared = _prepare_patch_apply(manager, task, params)
     from agent_py_agent.agent.subagents.services.patch_apply.decision import PatchApplyDecision
 
-    decision, ok, message = PatchApplyDecision.decide(params.patches, patch_specs, blocked_count, params.apply)
-    rollback_performed, test_results, applied_count = False, [], 0
-
-    if params.apply and ok and patch_specs:
-        review_status_updates = [dict(item) for item in params.patches]
-        applied_count, rollback_performed, test_results, decision, ok, message = _execute_apply(
-            _ExecuteApplyContext(
-                manager=manager,
-                task=task,
-                patch_specs=patch_specs,
-                patches=review_status_updates,
-                applier=params.applier,
-                note=params.note,
-                test_commands=test_commands,
-                decision=decision,
-                ok=ok,
-                message=message,
-            )
-        )
-        _carry_existing_load_errors(params.output, task.output_json)
-        params.output["patches"] = [spec["patch_ref"] for spec in patch_specs]
-        Path(task.output_json).write_text(
-            json.dumps(params.output, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+    decision, ok, message = PatchApplyDecision.decide(
+        params.patches, prepared.patch_specs, prepared.blocked_count, params.apply
+    )
+    applied_count, rollback_performed, test_results, decision, ok, message = _execute_apply_if_ready(
+        _ApplyIfReadyContext(manager, task, params, prepared, decision, ok, message)
+    )
 
     evidence_paths = [task.output_json, task.work_log_file]
     if params.apply:
         evidence_paths.append(str(manager.workspace / "subagent_patch_apply_log.jsonl"))
 
-    return PatchApplyRecord(
-        id=_new_id("patchapply"), run_id=task.id, dry_run=not params.apply, applied=params.apply and ok,
-        ok=ok, decision=decision, message=message, patch_count=len(params.patches),
-        applied_count=applied_count, blocked_count=blocked_count, rollback_performed=rollback_performed,
-        applier=params.applier, note=params.note, evidence_paths=evidence_paths, test_commands=test_commands,
-        test_results=test_results, patches=patch_entries, created_at=now,
+    return build_patch_apply_record(
+        PatchApplyRecordPayload(
+            manager=manager,
+            task=task,
+            params=params,
+            now=now,
+            ok=ok,
+            decision=decision,
+            message=message,
+            patch_specs=prepared.patch_specs,
+            blocked_count=prepared.blocked_count,
+            rollback_performed=rollback_performed,
+            test_commands=prepared.test_commands,
+            test_results=test_results,
+            patch_entries=prepared.patch_entries,
+            evidence_paths=evidence_paths,
+            applied_count=applied_count,
+        )
+    )
+
+
+def _prepare_patch_apply(manager, task, params: ApplyPatchTaskParams) -> _PreparedPatchApply:
+    patch_entries, patch_specs, blocked_count = _normalize_all_patches(manager, task, params.patches)
+    test_commands, test_blocked_count, test_entries = extract_patch_test_info(task, params.output)
+    return _PreparedPatchApply(
+        patch_entries=[*patch_entries, *test_entries],
+        patch_specs=patch_specs,
+        blocked_count=blocked_count + test_blocked_count,
+        test_commands=test_commands,
+    )
+
+
+def _execute_apply_if_ready(ctx: _ApplyIfReadyContext):
+    params = ctx.params
+    prepared = ctx.prepared
+    if not (params.apply and ctx.ok and prepared.patch_specs):
+        return 0, False, [], ctx.decision, ctx.ok, ctx.message
+    applied_count, rollback_performed, test_results, decision, ok, message = _execute_apply(
+        _ExecuteApplyContext(
+            manager=ctx.manager,
+            task=ctx.task,
+            patch_specs=prepared.patch_specs,
+            patches=[dict(item) for item in params.patches],
+            applier=params.applier,
+            note=params.note,
+            test_commands=prepared.test_commands,
+            decision=ctx.decision,
+            ok=ctx.ok,
+            message=ctx.message,
+        )
+    )
+    _write_successful_apply_output(ctx.task, params, prepared)
+    return applied_count, rollback_performed, test_results, decision, ok, message
+
+
+def _write_successful_apply_output(task, params: ApplyPatchTaskParams, prepared) -> None:
+    _carry_existing_load_errors(params.output, task.output_json)
+    params.output["patches"] = [spec["patch_ref"] for spec in prepared.patch_specs]
+    Path(task.output_json).write_text(
+        json.dumps(params.output, ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
 
 

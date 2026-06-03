@@ -5,6 +5,7 @@ from __future__ import annotations
 
 这里承接子代理任务创建、分割、注册卡等基础能力。
 SubAgentManager 通过 facade 方法委托到这里。
+运行身份会写 memory scope 和 runtime config scope，供 worker 装载 task overlay。
 """
 
 import time
@@ -21,6 +22,7 @@ from .persistence.model_normalizers import (
     _normalize_context_packs,
     _normalize_quality_contract,
 )
+from .runtime_config_scope import apply_config_overlay_ref, runtime_config_scope
 
 if TYPE_CHECKING:
     from ..models import ContextManifest, QualityContract, SubAgentCard
@@ -100,7 +102,7 @@ def _nonnegative_int(value: object) -> int:
     return max(0, parsed)
 
 
-def _apply_runtime_identity_and_memory_scope(task: Any, params: CreateRunParams) -> None:
+def _apply_runtime_identity_and_memory_scope(task: Any, params: CreateRunParams, *, parent_task: Any | None) -> None:
     owner_id = str(task.owner or params.owner or "").strip()
     task.runtime_identity.root_run_id = task.root_id or task.id
     task.runtime_identity.service_owner_id = owner_id
@@ -109,9 +111,11 @@ def _apply_runtime_identity_and_memory_scope(task: Any, params: CreateRunParams)
     task.runtime_identity.memory_namespace = f"subagent:{task.root_id or task.id}:{task.id}"
     task.runtime_identity.conversation_memory_policy = "task_scoped"
     task.runtime_identity.promotion_policy = "explicit_parent_review"
+    apply_config_overlay_ref(task, params, parent_task=parent_task)
     task.attributes = {
         **dict(task.attributes or {}),
         "memory_scope": _memory_scope(task, params),
+        "runtime_config_scope": runtime_config_scope(task),
     }
 
 
@@ -268,7 +272,7 @@ class SubAgentBaseService:
             attributes=dict(params.attributes or {}),
             **prepared["paths"],
         )
-        _apply_runtime_identity_and_memory_scope(task, params)
+        _apply_runtime_identity_and_memory_scope(task, params, parent_task=parent_task)
         task.inheritance_manifest = build_inheritance_manifest(parent_task, task)
         rebind_task_output_refs_to_run(task)
         return task
@@ -323,6 +327,13 @@ class SubAgentBaseService:
         task.final_owner = take_over_by
         task.status = "TAKEN_OVER"
         task.updated_at = time.time()
+        attrs = dict(getattr(task, "attributes", {}) or {})
+        runtime_scope = dict(attrs.get("runtime_config_scope") or runtime_config_scope(task))
+        runtime_scope["takeover_by"] = take_over_by
+        runtime_scope["takeover_record_id"] = record.id
+        runtime_scope["loaded_as"] = "task_layer_after_takeover" if runtime_scope.get("overlay_ref") else "base_config"
+        attrs["runtime_config_scope"] = runtime_scope
+        task.attributes = attrs
         self.manager.save(task)
         self.manager._write_takeover_file(task, record)
         return record

@@ -2,6 +2,14 @@
 
 父验收旧链路已经移除。子代理只负责执行自己的任务、写结果和证据引用；上级通过任务树、状态、refs 和普通 closeout 继续推进。
 
+## 2026-06-03 worker/session、grant wake、patch apply 审计与 runtime overlay
+
+- runner worker 现在写 `runner_session_pool.v1` session lease，包含 worker pid、heartbeat、完成/失败状态和最近 session history；这是长期 worker/session 可观察账本，不替代 runner result。
+- 子代理创建支持从 attributes 显式写入 `config_overlay_ref`，child 默认继承 parent overlay；takeover 会保留 runtime config scope，并标出 takeover record。
+- 子代理 worker 执行前会把 task `runtime_identity.config_overlay_ref` 装载成 run/task scoped config layer，并把有效 `config_sources/config_layers/warnings` 写回 task attributes。
+- capability grant 后会创建 observation 和 wake signal，并写回 `capability_grant_wake`；失败则写结构化 `capability_grant_wake_error`。
+- patch apply record 增加 owner policy、batch validation 和 failure recovery 证据，覆盖 applier、owner policy snapshot、write roots、locked files、测试结果和 rollback 下一步。
+
 ## 2026-06-02 canonical state 与派生投影收敛
 
 - 子代理详细状态的权威位置收敛到当前任务工作区的 `work/agents/<run_id>/canonical_state.json`。

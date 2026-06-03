@@ -38,6 +38,8 @@ agent_py_agent/cli/
 - `cli/gateway_client.py`：用户或 chat 客户端投递消息和读取结果的命令；默认入口也在这里把 `my-agent --app` 映射为 gateway chat + 应用内滚动历史 UI。
 - `cli/models.py`：承接 gateway/adapter CLI 的 bundle 数据结构，例如 `GatewayRunOptions`、`GatewayRunContext`、`GatewayThreadsRequest`、`GatewayRunCleanupRequest` 和 `AdapterOptions`；cmd 层解析 `argparse args` 后再传给 helper。
 - `cli/adapter.py`、`cli/_gateway_state_helpers.py`、`cli/gateway_loops.py`：运行期 helper 接收 options/context bundle，不再把 argparse namespace 深传到线程和内部 helper。
+- `gateway_parts/logging.py` 的 `_report_gateway_side_effect_error()` 是 gateway 旁路失败的统一 stderr 结构化入口；它输出 `runtime_error_report()` JSON，不改变文件队列事实源。
+- `cli/gateway_loops.py` 的 worker pool 初始化和迭代失败也走结构化 loop error report，方便后台日志定位 worker/session pool 问题。
 
 ## 数据流
 

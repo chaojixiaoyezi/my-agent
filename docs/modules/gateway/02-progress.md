@@ -7,6 +7,7 @@
 
 ## 已完成
 
+- 2026-06-03 Gateway best-effort 异常结构化：`gateway_parts/logging.py` 的 side-effect 失败现在输出 `runtime_error_report()` JSON，CLI gateway loop 初始化/迭代失败也输出结构化 report；这些错误仍不阻断主请求，但不会再只剩字符串或静默吞掉。
 - 2026-05-29 Gateway request 恢复事实源已并入 `runtime_fact`：worker 调用 `SimpleAgent.run()` 时不再要求主运行链路写 `recovery_snapshot`，响应 JSON 也不再暴露空的 recovery snapshot 字段；保存型请求会写 `memory_archive/runtime_facts/<request_id>/task.json`，供 compact/resume 和人工排查读取。
 - 2026-06-02 Gateway lease 配置默认入口收敛：`gateway_parts/lease.py` 和 `lease_service.py` 仍从运行时 `agent.config` 读取 heartbeat/processing timeout；非法值只回退到 `settings/defaults.py` 的 schema 默认入口，不再由 lease 模块各自裸建 `AgentConfig()` 或隐藏本地数字。
 - 2026-05-27 Gateway lease 时间预算已回到主配置：processing lease heartbeat 间隔和 processing timeout 只从 `agent_config.yaml` / `AgentConfig` 读取，lease 模块不再写第二份 5 秒 / 900 秒本地默认。

@@ -22,6 +22,9 @@ from agent_py_agent.agent.capability.runtime_config import (
 )
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings.services.runtime_config_task import (
+    apply_task_runtime_config_overlay,
+)
 
 
 def _write_config(path, *, run_timeout: int = 900, routing: bool = False) -> None:
@@ -201,3 +204,21 @@ def test_dispatch_tool_reports_capability_config_load_error(tmp_path):
     payload = json.loads(result.output)
     assert payload["capability_config_load_error"]["context"] == "dispatch.capability_config.load"
     assert payload["capability_config_load_error"]["path"] == str(config_path)
+
+
+def test_task_config_overlay_ref_loads_as_runtime_layer(tmp_path):
+    overlay = tmp_path / "overlays" / "runner.yaml"
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text("runner_timeout_seconds: 123\nrunner_concurrency: 1\n", encoding="utf-8")
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    task = agent.subagents.create_run(
+        goal="需要运行层配置",
+        thought="overlay ref 应该影响 worker config。",
+        plan=["加载 overlay"],
+        attributes={"config_overlay_ref": "overlays/runner.yaml", "config_scope": "run"},
+    )
+
+    effective = apply_task_runtime_config_overlay(agent.config, task, workspace_root=tmp_path)
+
+    assert effective.runner_timeout_seconds == 123
+    assert any(str(item.get("source", "")).endswith("overlays/runner.yaml") for item in effective.config_layers)
