@@ -208,3 +208,44 @@ def test_load_runtime_config_layer_reads_yaml_override(tmp_path) -> None:
     assert "config_path" not in layer.values
     assert layer.source == str(path.resolve())
     assert any("config_path" in warning for warning in layer.warnings)
+
+
+def test_cli_runtime_config_environment_applies_scoped_overlay(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.settings.services.runtime_config_env import (
+        apply_runtime_config_environment,
+    )
+
+    base_path = tmp_path / "agent_config.yaml"
+    overlay_path = tmp_path / "runtime.yaml"
+    base_path.write_text("model_backend: echo\nmax_subagents: 17\n", encoding="utf-8")
+    overlay_path.write_text("max_subagents: 29\nconfig_layers: fake\n", encoding="utf-8")
+    monkeypatch.setenv("MY_AGENT_RUNTIME_CONFIG", str(overlay_path))
+    monkeypatch.setenv("MY_AGENT_RUNTIME_CONFIG_SCOPE", "run")
+
+    config = apply_runtime_config_environment(load_config(base_path))
+
+    assert config.max_subagents == 29
+    assert config.config_source_for("max_subagents") == {"source": str(overlay_path.resolve()), "priority": 60}
+    assert any("config_layers" in warning for warning in config.config_warnings)
+
+
+def test_cli_runtime_config_environment_supports_multiple_layers(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.settings.services.runtime_config_env import (
+        apply_runtime_config_environment,
+    )
+
+    base_path = tmp_path / "agent_config.yaml"
+    owner_path = tmp_path / "owner.yaml"
+    task_path = tmp_path / "task.yaml"
+    base_path.write_text("model_backend: echo\nmax_subagents: 17\n", encoding="utf-8")
+    owner_path.write_text("max_subagents: 21\n", encoding="utf-8")
+    task_path.write_text("max_subagents: 33\n", encoding="utf-8")
+    monkeypatch.setenv(
+        "MY_AGENT_RUNTIME_CONFIG_LAYERS",
+        f"owner={owner_path},task={task_path}",
+    )
+
+    config = apply_runtime_config_environment(load_config(base_path))
+
+    assert config.max_subagents == 33
+    assert config.config_source_for("max_subagents") == {"source": str(task_path.resolve()), "priority": 50}

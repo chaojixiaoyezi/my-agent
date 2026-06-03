@@ -15,6 +15,7 @@ from pathlib import Path, PureWindowsPath
 from ..agent.capabilities import CapabilityRouter
 from ..agent.config import load_config
 from ..agent.core import SimpleAgent
+from ..agent.settings.services.runtime_config_env import apply_runtime_config_environment
 from ..agent.skills import SkillRegistry
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,7 +54,7 @@ def _reconfigure_stdio_stream(stream_name: str, reconfigure) -> None:
 
 def make_agent(args) -> SimpleAgent:
 
-    config = load_config(args.config)
+    config = apply_runtime_config_environment(load_config(args.config))
     roots = resolve_workspace_roots(config, args.config)
     return SimpleAgent(config, roots[0], workspace_roots=roots)
 

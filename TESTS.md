@@ -74,7 +74,7 @@
 | test_capability_config.py | capability_config | 17 |
 | test_capability_config_class.py | capability_config | 13 |
 
-### cli (20 文件, 400+ tests)
+### cli (21 文件, 400+ tests)
 
 | 文件 | 覆盖模块 | 测试数 |
 |------|----------|--------|
@@ -84,6 +84,7 @@
 | test_config_commands.py | cli.config | 20 |
 | test_config_normalize.py | cli.config_normalize | 30 |
 | test_config_validation.py | cli.config_validation | 15 |
+| test_dispatch_background.py | cli.dispatch_background | 2 |
 | test_gateway_commands.py | cli.gateway | 15 |
 | test_local_store_commands.py | cli.local_store | 11 |
 | test_log_analysis_cli.py | cli.log_analysis | 6 |

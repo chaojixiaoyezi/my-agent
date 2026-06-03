@@ -2,6 +2,21 @@
 
 > 2026-05-27 当前路线备注：早期条目里提到的 `orchestration_contract`、`materialize_subagent_inputs`、`subagent_dispatch_closeout`、`parent_acceptance` 专项收口、`scheduling_warnings`、领域/重复目标调度提示等，都是历史试错记录。当前生产路线是：调度工具只返回 refs/tree/status，普通协作不靠中间验收门卡住；最终质量统一回到 closeout 和任务树事实。
 
+## 2026-06-03 / 架构收口第一批：runtime overlay 与错误可见化
+
+状态：本地已落地，focused tests 已跑；待全量 CI
+
+摘要：
+- runtime config layer 从“可合并但未接 CLI 入口”推进到真实 `make_agent()` 路径。CLI 现在可通过 `MY_AGENT_RUNTIME_CONFIG` / `MY_AGENT_RUNTIME_CONFIG_LAYERS` 注入 scoped overlay，仍复用 `RuntimeConfigLayer` 的优先级和来源链，不引入第二套配置体系。
+- 后台 dispatch 启动标记不再在 `manager.load/save` 失败时静默跳过；`mark_background_launch()` 返回 `BackgroundLaunchReport`，错误归一成 `runtime_error_report()`，CLI 把失败摘要打到 stderr。
+- 启动恢复摘要新增 `detection_errors`，active task、notification、dispatch status 检测失败时会显示上下文、类别和错误类型，避免把坏账本误读成“没有进行中任务”。
+- 包结构选择是小步收敛：新增入口放入 `agent/settings/services/`，没有把 settings 根目录或 agent_core mixin 面继续扩大。本轮不做大规模搬文件，以免把行为修复和导入重排混在一起。
+- 剩余收口仍包括：gateway/http/lease/audit 的 best-effort 异常路径、子代理创建/接管的 `config_overlay_ref` 装载、远端 session/ACP scoped config、以及更系统的 package 分层瘦身。
+
+验证：
+- `python3 -m pytest -q agent_py_agent/tests/test_config_layers.py agent_py_agent/tests/test_dispatch_background.py agent_py_agent/tests/test_startup_commands.py::test_startup_recovery_preserves_active_task_detection_errors --tb=short`
+- `ruff check agent_py_agent/agent/settings/services/runtime_config_env.py agent_py_agent/cli/common.py agent_py_agent/cli/dispatch_background.py agent_py_agent/cli/_dispatch.py agent_py_agent/agent/startup_recovery.py agent_py_agent/tests/test_config_layers.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_startup_commands.py`
+
 ## 2026-05-28 / 通道运行时 式显式 run 身份账本
 
 状态：本地已落地，focused tests 已跑；未提交

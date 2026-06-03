@@ -8,6 +8,21 @@
 
 ## 基础设施
 
+### 架构收口第一批：运行时错误与配置 overlay（2026-06-03）
+
+解决问题：运行时收口时，后台 dispatch、启动恢复和配置层仍有几条“骨架存在但未接入”的链路。错误被静默吞掉时，父代理容易把坏账本解释成没有任务；runtime config layer 只能在测试里合并，CLI 真正创建 agent 时没有应用 scoped overlay。
+
+落地内容：
+- CLI `make_agent()` 在 `load_config()` 后接入 runtime config overlay，支持 `MY_AGENT_RUNTIME_CONFIG` + `MY_AGENT_RUNTIME_CONFIG_SCOPE` 或 `MY_AGENT_RUNTIME_CONFIG_LAYERS=owner=...,task=...`。
+- overlay 继续复用 `RuntimeConfigLayer` / `merge_runtime_config_layers()`，保留 `config_sources` / `config_layers`，并把未知或内部字段告警写回 `config_warnings`。
+- `mark_background_launch()` 从静默 best-effort 改为返回 `BackgroundLaunchReport`，记录 task load/save 的 `runtime_error_report()`，CLI 会把失败摘要写到 stderr。
+- 启动恢复的 active task、notification、dispatch status 检测失败会写入 `ActiveWorkSummary.detection_errors`，格式化摘要中显示错误上下文。
+- 新增实现放在 `agent/settings/services/runtime_config_env.py`，避免继续扩大 settings 根目录文件面。
+
+验证方式：
+- `python3 -m pytest -q agent_py_agent/tests/test_config_layers.py agent_py_agent/tests/test_dispatch_background.py agent_py_agent/tests/test_startup_commands.py::test_startup_recovery_preserves_active_task_detection_errors --tb=short`
+- `ruff check agent_py_agent/agent/settings/services/runtime_config_env.py agent_py_agent/cli/common.py agent_py_agent/cli/dispatch_background.py agent_py_agent/cli/_dispatch.py agent_py_agent/agent/startup_recovery.py agent_py_agent/tests/test_config_layers.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_startup_commands.py`
+
 ### CI 回归修复（2026-05-05）
 
 解决问题：GitHub Actions 在 `Test` 和 `Lint` 工作流里同时暴露出几类问题，包括 gateway 测试共享仓库目录导致互相污染、heartbeat 测试读取了错误的队列路径、日志证据子进程测试缺少 `Path` 导入，以及 subagent runner 结构化解析失败后 `SubAgentRunnerResult` 仍沿用旧的 `ok=True`。

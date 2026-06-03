@@ -9,6 +9,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_py_agent.agent.startup_recovery import (
+    ActiveWorkSummary,
+    _detect_active_tasks,
+    format_active_work_summary,
+)
+
 
 def _daemon_args(tmp_path: Path) -> MagicMock:
     args = MagicMock()
@@ -131,6 +137,20 @@ class TestCmdDaemon:
         assert call_kwargs["params"].advance is True
         assert call_kwargs["params"].max_runners == 2
         assert "apply" not in call_kwargs
+
+
+def test_startup_recovery_preserves_active_task_detection_errors() -> None:
+    agent = MagicMock()
+    agent.subagents.build_board.side_effect = TypeError("bad board payload")
+    summary = ActiveWorkSummary()
+
+    _detect_active_tasks(agent, summary)
+    text = format_active_work_summary(summary)
+
+    assert summary.active_task_count == 0
+    assert summary.detection_errors[0]["context"] == "startup_recovery.active_tasks"
+    assert "启动恢复检测有 1 个读取错误" in text
+    assert "startup_recovery.active_tasks" in text
 
 
 class TestResolveDaemonMaxRunners:

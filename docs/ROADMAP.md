@@ -95,9 +95,19 @@
 
 解决问题：LocalStore 一致性诊断、gateway 请求崩溃恢复、adapter 文件协议。
 
-已有：`local-doctor`、`local-rebuild`、gateway failed 归档、processing lease、保守 worker pool、`adapter file`。
+已有：`local-doctor`、`local-rebuild`、gateway failed 归档、processing lease、保守 worker pool、`adapter file`、启动恢复结构化检测错误、后台 dispatch 启动标记错误报告。
 
 待做：LocalStore compact/backup/export、gateway 请求取消/优先级/租约续期、runner 进程级隔离、adapter HTTP/WebSocket 版。
+
+### Runtime 配置层与错误报告全链路
+
+状态：部分落地
+
+解决问题：运行时 overlay、owner/task/run scoped 配置、错误报告和恢复摘要必须成为一条真实链路，不能只停在合同测试或局部 helper。
+
+已有：基础配置来源链、`RuntimeConfigLayer`、CLI runtime overlay 环境入口、后台启动和启动恢复错误可见化。
+
+待做：子代理创建/接管时把 `config_overlay_ref` 真实装载成 run/task layer；远端 session/ACP 入口接入 scoped config；继续清理 gateway/http/lease/audit 等剩余 best-effort 异常路径。
 
 ### 可见真实环境测试台 Live Lab
 

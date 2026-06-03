@@ -495,12 +495,16 @@ agent_py_agent/config/capability_config.yaml
 8. runner 输出 `[SUBAGENT_RESULT]` JSON 后，系统会把 evidence、artifacts、tests、patches、lessons、next_actions 写回工单。
 9. workflow plan 已能进入真实任务创建：父任务保存 `workflow_plan`，`auto` apply 可物化 worker 子工单。
 10. `enable_self_learning=true` 时，成功 runner 的 lessons 会生成 learning draft 候选，由 `my-agent learn` 管理。
+11. CLI 构造 agent 时支持 `MY_AGENT_RUNTIME_CONFIG` / `MY_AGENT_RUNTIME_CONFIG_LAYERS` 注入 owner/task/run/runtime scoped 配置 overlay，并保留 `config_sources` / `config_layers` 来源链。
+12. 后台 dispatch 启动标记和启动恢复摘要会暴露结构化读取/保存错误，避免把坏账本误判成“没有任务”。
 
 还没做完的主链路：
 
 - 真正的进程级 worker pool / session pool 和长期心跳治理。
-- 多层父子代理自动上抛和下发。
-- patch 自动集成后的验证闭环和更强 owner / 权限策略。
+- 多层父子代理自动上抛和下发，以及 capability grant 后的自动唤醒闭环。
+- patch 自动集成后的更强 owner / 权限策略、批量验证和失败恢复编排。
+- 运行时错误报告已经覆盖更多恢复入口，但仍需继续清理 gateway/http/lease/audit 等剩余 `except Exception` best-effort 路径。
+- 配置层已支持 CLI runtime overlay，后续还要把 agent-local/task-local overlay ref 接到子代理创建、接管和远端 session 入口。
 - accepted learning draft 到正式 skill / rule / profile 的人工确认提升流程。
 - 完整 ACP / 外部 agent session / 远端执行器接入。
 

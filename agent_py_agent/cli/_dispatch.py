@@ -183,15 +183,29 @@ def cmd_subagents_dispatch(args) -> int:
         _print_watch_report(agent, report, options)
         return 0
 
-    mark_background_launch(agent, options, BackgroundLaunchUpdate("running"))
+    _print_background_launch_report(mark_background_launch(agent, options, BackgroundLaunchUpdate("running")))
     try:
         report = agent.dispatch_subagents(router, capability_config, params=_dispatch_params(options))
     except Exception as exc:
-        mark_background_launch(agent, options, BackgroundLaunchUpdate("failed", f"{type(exc).__name__}: {exc}"))
+        _print_background_launch_report(
+            mark_background_launch(agent, options, BackgroundLaunchUpdate("failed", f"{type(exc).__name__}: {exc}"))
+        )
         raise
-    mark_background_launch(agent, options, BackgroundLaunchUpdate("finished"))
+    _print_background_launch_report(mark_background_launch(agent, options, BackgroundLaunchUpdate("finished")))
     _print_dispatch_report(agent, report, options)
     return 0
+
+
+def _print_background_launch_report(report) -> None:
+    if getattr(report, "ok", True):
+        return
+    for error in [*getattr(report, "load_errors", []), *getattr(report, "save_errors", [])]:
+        print(
+            "background launch state update failed "
+            f"run_id={error.get('run_id') or '-'} category={error.get('category') or '-'} "
+            f"context={error.get('context') or '-'} error={error.get('message') or '-'}",
+            file=sys.stderr,
+        )
 
 
 def cmd_subagents_workflow_plan(args) -> int:

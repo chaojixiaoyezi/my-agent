@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .runtime_errors import runtime_error_report
 from .subagents.models import SubAgentBoardOptions
 
 if TYPE_CHECKING:
@@ -32,12 +33,15 @@ class ActiveWorkSummary:
     pending_notifications: int = 0
     dispatch_pending: bool = False
     dispatch_rounds: int = 0
+    detection_errors: list[dict] = None
 
     def __post_init__(self) -> None:
         if self.recent_tasks is None:
             self.recent_tasks = []
         if self.processing_requests is None:
             self.processing_requests = []
+        if self.detection_errors is None:
+            self.detection_errors = []
 
 
 def _detect_gateway_state(paths, summary):
@@ -80,9 +84,10 @@ def _detect_active_tasks(agent, summary):
             }
             for item in board.recent[:3]
         ]
-    except (AttributeError, TypeError):
+    except (AttributeError, TypeError) as exc:
         summary.active_task_count = 0
         summary.recent_tasks = []
+        _append_detection_error(summary, exc, "startup_recovery.active_tasks")
 
 
 def _detect_pending_notifications(agent, summary):
@@ -92,8 +97,9 @@ def _detect_pending_notifications(agent, summary):
         if agent.config.notification_enabled:
             notif_manager = NotificationManager(agent.config)
             summary.pending_notifications = notif_manager.get_pending_count(agent.config.user_id)
-    except Exception:
+    except Exception as exc:
         summary.pending_notifications = 0
+        _append_detection_error(summary, exc, "startup_recovery.pending_notifications")
 
 
 def _detect_dispatch_status(agent, summary):
@@ -103,9 +109,14 @@ def _detect_dispatch_status(agent, summary):
         rounds = getattr(agent, "_consecutive_dispatch_rounds", 0)
         summary.dispatch_pending = has_pending and rounds > 0
         summary.dispatch_rounds = rounds
-    except Exception:
+    except Exception as exc:
         summary.dispatch_pending = False
         summary.dispatch_rounds = 0
+        _append_detection_error(summary, exc, "startup_recovery.dispatch_status")
+
+
+def _append_detection_error(summary, exc: BaseException, context: str) -> None:
+    summary.detection_errors.append(runtime_error_report(exc, context=context))
 
 
 def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
@@ -164,6 +175,14 @@ def format_active_work_summary(summary: ActiveWorkSummary) -> str:
     if summary.dispatch_pending:
         lines.append(f"⚠ 有未完成的 dispatch 循环（已运行 {summary.dispatch_rounds} 轮）")
         lines.append("  是否继续？使用 my-agent daemon --continue 继续调度")
+
+    if summary.detection_errors:
+        lines.append(f"⚠ 启动恢复检测有 {len(summary.detection_errors)} 个读取错误")
+        for error in summary.detection_errors[:3]:
+            lines.append(
+                f"  - {error.get('context')}: {error.get('category')} "
+                f"{error.get('error_type')} :: {error.get('message')}"
+            )
 
     if summary.recent_tasks:
         lines.append("最近任务:")
