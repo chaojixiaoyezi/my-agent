@@ -230,11 +230,11 @@ def _is_isolated_scope(value: object) -> bool:
 
 def _home_entry_context_chunks(home_paths: Any) -> list[str]:
     entries = (
-        ("AGENTS.md", _owner_and_legacy_paths(home_paths, "owner_agents_md", "agents_md")),
-        ("SOUL.md", _owner_and_legacy_paths(home_paths, "owner_soul_md", "soul_md")),
-        ("USER.md", _owner_and_legacy_paths(home_paths, "owner_user_md", "user_md")),
-        ("memory.md", _owner_and_legacy_paths(home_paths, "owner_memory_md", "memory_md")),
-        ("memory-hot.md", _owner_and_legacy_paths(home_paths, "owner_memory_hot_md", "memory_hot_md")),
+        ("AGENTS.md", _owner_paths(home_paths, "owner_agents_md")),
+        ("SOUL.md", _owner_paths(home_paths, "owner_soul_md")),
+        ("USER.md", _owner_paths(home_paths, "owner_user_md")),
+        ("memory.md", _owner_paths(home_paths, "owner_memory_md")),
+        ("memory-hot.md", _owner_paths(home_paths, "owner_memory_hot_md")),
     )
     chunks: list[str] = []
     for label, paths in entries:
@@ -250,14 +250,9 @@ def _home_entry_chunk(label: str, path: Path) -> list[str]:
     return [f"# Home Entry: {label}\nPath: {path}\n{content}"]
 
 
-def _owner_and_legacy_paths(home_paths: Any, owner_attr: str, legacy_attr: str) -> tuple[Path, ...]:
-    paths: list[Path] = []
+def _owner_paths(home_paths: Any, owner_attr: str) -> tuple[Path, ...]:
     owner_path = Path(getattr(home_paths, owner_attr, "") or "")
-    legacy_path = Path(getattr(home_paths, legacy_attr, "") or "")
-    for path in (owner_path, legacy_path):
-        if path and path not in paths:
-            paths.append(path)
-    return tuple(paths)
+    return (owner_path,) if owner_path else ()
 
 
 def _matching_lesson_chunks(home_paths: Any, user_prompt: str, limit: int) -> list[str]:
@@ -276,7 +271,7 @@ def _matching_lesson_chunks(home_paths: Any, user_prompt: str, limit: int) -> li
 
 def _matching_lesson_paths(home_paths: Any, prompt_text: str) -> list[Path]:
     paths: list[Path] = []
-    for lessons_dir in _owner_and_legacy_paths(home_paths, "owner_memory_lessons_dir", "memory_lessons_dir"):
+    for lessons_dir in _owner_paths(home_paths, "owner_memory_lessons_dir"):
         if lessons_dir.exists():
             paths.extend(path for path in sorted(lessons_dir.glob("*.md")) if path.stem.casefold() in prompt_text)
     return paths

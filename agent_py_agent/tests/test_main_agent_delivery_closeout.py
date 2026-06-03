@@ -64,8 +64,8 @@ def test_tool_loop_closes_out_after_delivery_contract_passes():
             params=RunParams(delivery_contract=delivery_contract(), save=False),
         )
 
-        assert backend.calls == 2
-        assert result.tool_rounds == 2
+        assert backend.calls == 1
+        assert result.tool_rounds == 1
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert (workspace / "outputs/html_report/index.html").exists()
         assert (workspace / ".agent_delivery/closeout.json").exists()
@@ -84,7 +84,7 @@ def test_tool_loop_closes_out_from_structured_run_params_delivery_contract():
             params=RunParams(delivery_contract=delivery_contract(), save=False),
         )
 
-        assert backend.calls == 2
+        assert backend.calls == 1
         assert "outputs/html_report/index.html" in backend.prompts[0]
         assert "[tool-system delivery-contract]" in backend.prompts[0]
         assert "不得引用 http/https 外部" in backend.prompts[0]
@@ -129,6 +129,36 @@ def test_submit_for_acceptance_without_contract_persists_non_terminal_closeout_r
         assert report["non_terminal"] is True
         assert report["reason"] == "delivery_contract_missing"
         assert report["artifacts"] == []
+
+
+def test_submit_for_acceptance_without_contract_closes_after_current_task_output_report():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        task_root = workspace / "tasks" / "2026-06-03" / "all-agent-架构分析"
+        output_dir = task_root / "output"
+        work_dir = task_root / "work"
+        backend = NoContractTaskOutputReportBackend(output_dir / "final_analysis_report.md")
+
+        result = _agent(workspace, backend, max_tool_rounds=3).run(
+            "写一份最终分析报告。",
+            params=RunParams(
+                save=False,
+                task_attributes={
+                    "run_workspace": {
+                        "task_root": str(task_root),
+                        "output_dir": str(output_dir),
+                        "work_dir": str(work_dir),
+                    }
+                },
+            ),
+        )
+        report = _closeout_report(workspace)
+
+        assert backend.calls == 2
+        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
+        assert report["ok"] is True
+        assert report["delivery_mode"] == "uncontracted_task_output"
+        assert report["artifacts"][0]["path"] == str((output_dir / "final_analysis_report.md").resolve(strict=False))
 
 
 def test_tool_loop_does_not_block_immediately_on_malformed_validation_contract_with_artifact_target():
@@ -199,7 +229,7 @@ def test_tool_loop_repairs_failed_artifact_findings_before_closeout():
             params=RunParams(delivery_contract=delivery_contract(), save=False),
         )
 
-        assert backend.calls == 4
+        assert backend.calls == 3
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert _closeout_report(workspace)["ok"] is True
 
@@ -213,7 +243,7 @@ def test_tool_loop_repairs_missing_artifact_to_contract_path_before_closeout():
             params=RunParams(delivery_contract=delivery_contract(), save=False),
         )
 
-        assert backend.calls == 4
+        assert backend.calls == 3
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert (workspace / "outputs/html_report/index.html").exists()
         assert _closeout_report(workspace)["ok"] is True
@@ -375,6 +405,39 @@ class NoContractAcceptanceBackend:
                 backend=self.name,
             )
         return ModelResponse(text="我会继续按用户目标处理。", backend=self.name)
+
+
+class NoContractTaskOutputReportBackend:
+    name = "fake_no_contract_task_output_report_backend"
+
+    def __init__(self, report_path: Path):
+        self.report_path = report_path
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None):
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    + json.dumps(
+                        {
+                            "tool": "write_file",
+                            "path": str(self.report_path),
+                            "content": "# 最终分析报告\n\n已完成。",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        if self.calls == 2:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"submit_for_acceptance","note":"最终报告已写入 task output，提交验收。"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        return ModelResponse(text="不应该继续运行。", backend=self.name)
 
 
 class MalformedDeliveryContractBackend:

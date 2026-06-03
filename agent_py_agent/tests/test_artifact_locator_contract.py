@@ -17,6 +17,23 @@ def test_artifact_locator_finds_single_required_kind_under_allowed_root(tmp_path
     assert result.findings == []
 
 
+def test_artifact_locator_accepts_user_requested_absolute_output_root(tmp_path):
+    from agent_py_agent.agent.agent_core.artifact_locator import locate_artifact
+
+    requested = tmp_path.parent / "requested-output"
+    requested.mkdir()
+    output = requested / "final_report.md"
+    output.write_text("done", encoding="utf-8")
+
+    result = locate_artifact(
+        {"artifact_id": "final_report", "kind": "md", "allowed_output_roots": [str(requested)]},
+        tmp_path,
+    )
+
+    assert result.path == output.resolve()
+    assert result.findings == []
+
+
 def test_artifact_locator_treats_spreadsheet_as_open_workbook_family(tmp_path):
     from agent_py_agent.agent.agent_core.artifact_locator import locate_artifact
 

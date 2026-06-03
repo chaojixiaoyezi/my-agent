@@ -18,8 +18,8 @@
 - `memory-resume` 已能从 archive、LocalStore、subagent task fact source 和 gateway request/response 生成恢复简报。
 - `memory-compact --dry-run` 第一版已接入，只读扫描 raw/hook、权威 snapshot 和 token ledger。
 - `memory-compact --apply` 第二片已接入为非破坏性 apply：生成 compact context、metadata、apply bundle、restore refs、ledger、self-check 和失败阻断报告，不删除、不重写、不裁剪原始事实源。
-- runtime 工具输出外置第一片已接入：大工具输出会写入 `memory_archive/artifacts/tool_outputs/`，compact 相关记录只读 preview/hash/path/size。
-- live raw archive 已接入工具循环：工具执行中也会往既有 `memory/raw/YYYY-MM-DD.jsonl` 写 `assistant_tool_round` 和 `tool_call`，避免长任务未收尾时完全没有黑匣子线索。运行中进度白板统一写入 `runtime_fact`，不再单独写 `run_checkpoint`。
+- runtime 工具输出外置第一片已接入：大工具输出会写入 `blobs/tool_outputs/`，compact 相关记录只读 preview/hash/path/size。
+- live raw archive 已接入工具循环：工具执行中会往 owner `audit/YYYY-MM-DD.jsonl` 写 `assistant_tool_round` 和 `tool_call`，避免长任务未收尾时完全没有黑匣子线索。运行中进度白板统一写入 `runtime_fact`，不再单独写 `run_checkpoint`。
 - 长任务工具上下文窗口裁剪已接回统一 compact/resume：保存型运行里，旧工具记录超过 live prompt 窗口时不再只做隐形裁剪；系统会把这次裁剪转成同一套 `context_overflow -> compact apply -> resume` 链路。`save=false` 的临时测试仍只裁剪当前 prompt，不落 compact 包。
 - Prompt 层新增长任务软提示：如果用户要求长报告、多文件整理、代码生成或其他文件产物，模型应持续把已确认阶段成果写进草稿、目标文件或阶段笔记；如果用户没有要求文件产物，则不能为了“落盘”强行写文件。
 - `local-rebuild` 已能从 memory/gateway/subagent 文件事实源重建 LocalStore。
@@ -71,7 +71,7 @@ compact 后的模型上下文应该由这些层组成：
 
 | 配置值 | 行为 |
 | --- | --- |
-| 未填写 / 无效值 | 按默认 `90` 处理 |
+| 未填写 / 无效值 | 按默认 `50` 处理 |
 | `0` / 大于 `100` | 按 `100` 处理，接近模型窗口上限时自动 compact |
 | 小于 `50` 的正数 | 按 `50` 处理，避免过早频繁 compact |
 | `50-100` | 按用户填写的百分比自动 compact |
@@ -453,7 +453,7 @@ my-agent local-rebuild --source memory --reset
 范围：
 
 - 新增 `memory-compact --dry-run`。
-- 扫描 `memory/raw`、`memory/hooks`、`memory_archive/snapshots`、`memory_archive/tokens`。
+- 扫描 `audit`、`memory/hooks`、`memory_archive/snapshots`、`memory_archive/tokens`。
 - 输出候选文件、记录数量、archive level 分布、token ledger 大小、潜在 artifact 化对象。
 - 不写文件，不删除文件。
 

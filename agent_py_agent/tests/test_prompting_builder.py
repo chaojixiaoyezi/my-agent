@@ -413,12 +413,12 @@ class TestBuildPromptFilesParam:
         hot = home / "memory-hot.md"
         hot.write_text("不要把测试失败改成硬门。", encoding="utf-8")
         home_paths = SimpleNamespace(
-            agents_md=home / "AGENTS.md",
-            soul_md=home / "SOUL.md",
-            user_md=home / "USER.md",
-            memory_md=home / "memory.md",
-            memory_hot_md=hot,
-            memory_lessons_dir=home / "lessons",
+            owner_agents_md=home / "AGENTS.md",
+            owner_soul_md=home / "SOUL.md",
+            owner_user_md=home / "USER.md",
+            owner_memory_md=home / "memory.md",
+            owner_memory_hot_md=hot,
+            owner_memory_lessons_dir=home / "lessons",
         )
         builder = PromptBuilder(AgentConfig(system_prompt="System"), tmp_path, home_paths=home_paths)
 

@@ -53,12 +53,13 @@ class OwnerHomeResult:
     skill_policy_json: Path
     tool_policy_json: Path
     daily_memory_dir: Path
-    raw_memory_dir: Path
     hooks_memory_dir: Path
     lessons_memory_dir: Path
     routing_memory_dir: Path
     routing_index_md: Path
     indexes_dir: Path
+    memory_store_jsonl: Path
+    memory_ops_jsonl: Path
     long_term_dir: Path
     runtime_refs_dir: Path
     tasks_dir: Path
@@ -67,6 +68,10 @@ class OwnerHomeResult:
     compact_dir: Path
     workspace_dir: Path
     artifacts_dir: Path
+    audit_dir: Path
+    blobs_dir: Path
+    blob_tool_outputs_dir: Path
+    blob_files_dir: Path
     data_dir: Path
     logs_dir: Path
     cache_dir: Path
@@ -124,12 +129,13 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
         owner_skill_policy_json=owner.skill_policy_json,
         owner_tool_policy_json=owner.tool_policy_json,
         owner_memory_daily_dir=owner.daily_memory_dir,
-        owner_memory_raw_dir=owner.raw_memory_dir,
         owner_memory_hooks_dir=owner.hooks_memory_dir,
         owner_memory_lessons_dir=owner.lessons_memory_dir,
         owner_memory_routing_dir=owner.routing_memory_dir,
         owner_memory_routing_index_md=owner.routing_index_md,
         owner_memory_indexes_dir=owner.indexes_dir,
+        owner_memory_store_jsonl=owner.memory_store_jsonl,
+        owner_memory_ops_jsonl=owner.memory_ops_jsonl,
         owner_memory_long_term_dir=owner.long_term_dir,
         owner_memory_runtime_refs_dir=owner.runtime_refs_dir,
         owner_tasks_dir=owner.tasks_dir,
@@ -138,6 +144,10 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
         owner_compact_dir=owner.compact_dir,
         owner_workspace_dir=owner.workspace_dir,
         owner_artifacts_dir=owner.artifacts_dir,
+        owner_audit_dir=owner.audit_dir,
+        owner_blobs_dir=owner.blobs_dir,
+        owner_blob_tool_outputs_dir=owner.blob_tool_outputs_dir,
+        owner_blob_files_dir=owner.blob_files_dir,
         owner_data_dir=owner.data_dir,
         owner_logs_dir=owner.logs_dir,
         owner_cache_dir=owner.cache_dir,
@@ -174,12 +184,13 @@ def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> O
         skill_policy_json=home_dir / "skill_policy.json",
         tool_policy_json=home_dir / "tool_policy.json",
         daily_memory_dir=memory / "daily",
-        raw_memory_dir=memory / "raw",
         hooks_memory_dir=memory / "hooks",
         lessons_memory_dir=memory / "lessons",
         routing_memory_dir=memory / "routing",
         routing_index_md=memory / "routing" / "INDEX.md",
         indexes_dir=memory / "indexes",
+        memory_store_jsonl=memory / "store.jsonl",
+        memory_ops_jsonl=memory / "ops.jsonl",
         long_term_dir=memory / "long_term",
         runtime_refs_dir=memory / "runtime_refs",
         tasks_dir=home_dir / "tasks",
@@ -188,6 +199,10 @@ def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> O
         compact_dir=home_dir / "compact",
         workspace_dir=home_dir / "workspace",
         artifacts_dir=home_dir / "artifacts",
+        audit_dir=home_dir / "audit",
+        blobs_dir=home_dir / "blobs",
+        blob_tool_outputs_dir=home_dir / "blobs" / "tool_outputs",
+        blob_files_dir=home_dir / "blobs" / "files",
         data_dir=home_dir / "data",
         logs_dir=home_dir / "logs",
         cache_dir=home_dir / "cache",
@@ -203,7 +218,6 @@ def _owner_directories(result: OwnerHomeResult) -> tuple[Path, ...]:
     return (
         result.home_dir,
         result.daily_memory_dir,
-        result.raw_memory_dir,
         result.hooks_memory_dir,
         result.lessons_memory_dir,
         result.routing_memory_dir,
@@ -218,6 +232,9 @@ def _owner_directories(result: OwnerHomeResult) -> tuple[Path, ...]:
         result.compact_dir / "by_agent",
         result.workspace_dir,
         result.artifacts_dir,
+        result.audit_dir,
+        result.blob_tool_outputs_dir,
+        result.blob_files_dir,
         result.data_dir,
         result.logs_dir,
         result.cache_dir,
@@ -238,6 +255,8 @@ def _owner_seed_files(result: OwnerHomeResult) -> tuple[tuple[Path, str], ...]:
         (result.memory_md, "# Memory\n\n"),
         (result.memory_hot_md, "# Memory HOT\n\n"),
         (result.routing_index_md, "# Owner Memory Routing Index\n\n"),
+        (result.memory_store_jsonl, ""),
+        (result.memory_ops_jsonl, ""),
     )
 
 

@@ -93,7 +93,7 @@ def _compact_applies(workspace: Path) -> list[dict[str, Any]]:
 
 
 def _tool_outputs(workspace: Path) -> list[dict[str, Any]]:
-    return _read_jsonl(workspace / "memory_archive" / "artifacts" / "tool_outputs" / "index.jsonl")
+    return _read_jsonl(workspace / "blobs" / "tool_outputs" / "index.jsonl")
 
 
 def _task_run_refs(

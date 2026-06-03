@@ -244,7 +244,7 @@
 | --- | --- |
 | `memory/daily/YYYY-MM-DD.md` | 当天状态摘要、决策、下一步 |
 | `memory/hooks/YYYY-MM-DD.jsonl` | 压缩前 hook 结构化快照，一行一个 snapshot |
-| `memory/raw/YYYY-MM-DD.jsonl` | 全量冷归档，按 archive level 控制内容 |
+| `audit/YYYY-MM-DD.jsonl` | 全量冷归档，按 archive level 控制内容 |
 | `memory/index/` | 索引或索引元数据 |
 | `memory/hot/` | HOT 入口和最高频铁律 |
 | `memory/lessons/` | 抽象教训 |

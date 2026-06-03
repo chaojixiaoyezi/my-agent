@@ -12,6 +12,7 @@ from .hierarchy_tools import ScheduleChildSubagentsTool
 from .models import AgentRunResult
 from .orchestration.dispatch.mixin import SimpleAgentDispatchMixin
 from .orchestration_tools import (
+    CancelSubagentsTool,
     CreateSubagentsTool,
     DispatchSubagentsTool,
     InspectAgentTreeTool,
@@ -25,6 +26,7 @@ from .task_progress_tool import TaskProgressTool
 __all__ = [
     "AgentRunResult",
     "CapabilityRequestTool",
+    "CancelSubagentsTool",
     "CreateSubagentsTool",
     "DispatchSubagentsTool",
     "InspectAgentTreeTool",

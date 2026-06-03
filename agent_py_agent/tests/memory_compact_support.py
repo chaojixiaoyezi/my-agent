@@ -151,5 +151,5 @@ def load_apply_artifacts(result: dict[str, object]) -> dict[str, object]:
 
 
 def assert_apply_preserved_sources(root: Path) -> None:
-    assert (root / "memory" / "raw" / "2026-05-06.jsonl").exists()
+    assert (root / "audit" / "2026-05-06.jsonl").exists()
     assert (root / "memory_archive" / "snapshots" / "2026-05-06--snapshot-compact-1.json").exists()

@@ -22,7 +22,7 @@ def test_cli_run_materializes_delivery_contract_before_tool_loop() -> None:
             params=RunParams(source="cli_run", save=False),
         )
 
-        assert backend.calls == 3
+        assert backend.calls == 2
         assert "delivery_contract.v1" in backend.prompts[0]
         assert "[tool-system delivery-contract]" in backend.prompts[1]
         assert "outputs/auto/index.html" in backend.prompts[1]

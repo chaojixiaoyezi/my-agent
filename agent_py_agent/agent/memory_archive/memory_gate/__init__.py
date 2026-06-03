@@ -15,7 +15,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ...common.json_io import read_json_object, write_json_object, write_jsonl_records
+from ...common.json_io import (
+    append_jsonl_records,
+    read_json_object,
+    write_json_object,
+    write_jsonl_records,
+)
 from .candidates import (
     build_memory_gate_candidates,
     memory_gate_review_queue_records,
@@ -49,6 +54,7 @@ def sync_agent_run_memory_gate(
     write_jsonl_records(paths.candidates_jsonl, candidates)
     write_jsonl_records(paths.review_queue_jsonl, memory_gate_review_queue_records(candidates))
     write_json_object(paths.skill_spark_gate_json, _gate_summary(task, paths, candidates, now), sort_keys=False)
+    append_jsonl_records(agent_run_workspace_root / "events.jsonl", _candidate_events(task, candidates, now))
     _merge_checkpoint(agent_run_workspace_root / "checkpoint.json", paths, candidates)
     return paths
 
@@ -112,6 +118,26 @@ def _merge_checkpoint(checkpoint_path: Path, paths: MemoryGateResult, candidates
         "auto_promote": False,
     }
     write_json_object(checkpoint_path, checkpoint, sort_keys=False)
+
+
+def _candidate_events(task: Any, candidates: list[dict[str, object]], now: float) -> list[dict[str, object]]:
+    run_id = str(getattr(task, "id", ""))
+    task_id = str(getattr(task, "root_id", "") or run_id)
+    return [
+        {
+            "version": 1,
+            "event": "subagent_memory_candidate",
+            "task_id": task_id,
+            "run_id": run_id,
+            "candidate_id": str(candidate.get("candidate_id") or ""),
+            "candidate_type": str(candidate.get("candidate_type") or candidate.get("kind") or ""),
+            "review_required": bool(candidate.get("review_required", True)),
+            "auto_promote": False,
+            "scope": "task_local_subagent",
+            "updated_at": _utc_iso(now),
+        }
+        for candidate in candidates
+    ]
 
 
 def _utc_iso(value: float) -> str:

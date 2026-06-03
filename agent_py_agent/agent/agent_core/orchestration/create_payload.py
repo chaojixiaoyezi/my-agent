@@ -121,7 +121,7 @@ def _dispatch_next_action(
     if (auto_start or {}).get("status") == "started":
         return {
             "tool": "inspect_agent_tree",
-            "reason": "create_subagents 已自动启动这些 run；下一步查看状态、读取产物或按需继续推进。",
+            "reason": "create_subagents 已自动启动这些 run；下一步可先做其他汇总准备，只有到验收/接管节点或等待一段时间后再查看状态、读取产物或按需继续推进。",
             "params": {},
         }
     return {

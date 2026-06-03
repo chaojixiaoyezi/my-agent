@@ -25,7 +25,7 @@ class MemoryCompactAutoCycleOptions:
     current_tokens: int
     max_context_tokens: int
     plan_options: MemoryCompactPlanOptions
-    trigger_percent: int = 90
+    trigger_percent: int = 50
     allow_apply: bool = False
     owner_type: str = "main_agent"
     owner_id: str = ""

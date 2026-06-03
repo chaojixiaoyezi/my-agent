@@ -412,8 +412,8 @@ do_write()
   the budget. Read these two fields as one policy: "within this many seconds,
   this run may read up to this many artifact body chars." Prefer
   `read_artifact mode=search/head/tail` or small slices over full artifact reads.
-  `read_file` must never be used to open
-  `memory_archive/artifacts/tool_outputs/*.json` wrapper files.
+  `read_file` may read registered `blobs/tool_outputs/*.json` wrappers as
+  artifact content.
 - A budget hit must be a recoverable self-check/handoff signal: return a bounded
   tool result asking the agent to summarize current progress, detect repeated
   tool use, and escalate to its parent if more tools are needed. Do not silently

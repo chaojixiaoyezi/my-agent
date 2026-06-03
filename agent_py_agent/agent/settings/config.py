@@ -82,7 +82,7 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     memory_resume_auto_context_enabled: bool = False
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
-    memory_compact_auto_trigger_percent: int = 90
+    memory_compact_auto_trigger_percent: int = 50
     memory_artifact_default_read_chars: int = 4000
     memory_archive_preview_level_0_chars: int = 2048
     memory_archive_preview_level_1_chars: int = 1024

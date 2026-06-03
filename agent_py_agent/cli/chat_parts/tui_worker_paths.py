@@ -133,13 +133,14 @@ def _print_gateway_timing(ctx, request_id: str, response: dict) -> None:
         ctx,
         f"[耗时 {elapsed:.2f}s; "
         f"工具轮数 {response.get('tool_rounds', 0)}; "
+        f"ctx_tokens~{response.get('cumulative_token_estimate') or response.get('prompt_token_estimate', 0)}; "
         f"prompt_tokens~{response.get('prompt_token_estimate', 0)}; "
         f"resume_context={1 if response.get('memory_resume_context_injected') else 0}]",
     )
 
 
 def _worker_local_path(ctx) -> tuple[str, bool]:
-    from .fallback_ui import _render_assistant_response
+    from .fallback_ui import AssistantResponseRenderRequest, _render_assistant_response
 
     result = ctx.cfg.agent.run(
         ctx.job.user,
@@ -155,7 +156,9 @@ def _worker_local_path(ctx) -> tuple[str, bool]:
     _flush_stream_buf(ctx.cfg.stream_buf_ref)
     _print_local_timing(ctx, result)
     with ctx.cfg.state_lock:
-        ctx.cfg.last_token_estimate_ref[0] = result.prompt_token_estimate
+        ctx.cfg.last_token_estimate_ref[0] = (
+            getattr(result, "cumulative_token_estimate", 0) or result.prompt_token_estimate
+        )
     if result.response.strip():
         stream_has_visible_text = bool(strip_ansi(ctx.cfg.stream_visible_text_ref[0]).strip())
         if stream_has_visible_text and _stream_output_contains_response(ctx.cfg, result.response):
@@ -183,6 +186,7 @@ def _print_local_timing(ctx, result) -> None:
     _publish_timing(
         ctx,
         f"[耗时 {elapsed:.2f}s; 工具轮数 {result.tool_rounds}; "
+        f"ctx_tokens~{getattr(result, 'cumulative_token_estimate', 0) or result.prompt_token_estimate}; "
         f"prompt_tokens~{result.prompt_token_estimate}; "
         f"resume_context={1 if result.memory_resume_context_injected else 0}]",
     )

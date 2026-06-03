@@ -93,6 +93,25 @@ def test_tui_status_uses_configured_context_window() -> None:
     assert "50%" in status
 
 
+def test_gateway_timing_reports_cumulative_context_tokens() -> None:
+    from agent_py_agent.cli.chat_parts.gateway_client import (
+        GatewayTimingContext,
+        format_gateway_timing,
+    )
+
+    timing = format_gateway_timing(
+        GatewayTimingContext(
+            request_id="req-1",
+            elapsed=1.25,
+            response={"tool_rounds": 2, "prompt_token_estimate": 1200, "cumulative_token_estimate": 9400},
+            use_gateway=True,
+        )
+    )
+
+    assert "ctx_tokens~9400" in timing
+    assert "prompt_tokens~1200" in timing
+
+
 def test_collapse_response_text_returns_preview_for_long_text() -> None:
     text = "\n".join(f"line {index}" for index in range(20))
 

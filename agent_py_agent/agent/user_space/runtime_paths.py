@@ -72,16 +72,6 @@ def apply_runtime_paths_to_config(config: Any, resolution: RuntimePathResolution
             setattr(config, field_name, str(path))
 
 
-def legacy_memory_path(config: Any, root: Path) -> Path:
-    user_id = getattr(config, "user_id", "admin") or "admin"
-    if user_id != "admin":
-        user_data_root = getattr(config, "user_data_root", "data/users") or "data/users"
-        from .legacy_user_paths import get_legacy_user_paths
-
-        return get_legacy_user_paths(user_id, Path(root) / user_data_root).memory_path
-    return Path(root) / getattr(config, "memory_path", "memory.jsonl")
-
-
 def _legacy_runtime_paths(config: Any, root: Path) -> dict[str, Path]:
     user_id = getattr(config, "user_id", "admin") or "admin"
     user_data_root = getattr(config, "user_data_root", "data/users") or "data/users"
@@ -233,7 +223,6 @@ def _workspace_scope_id(root: Path) -> str:
 __all__ = [
     "RuntimePathResolution",
     "apply_runtime_paths_to_config",
-    "legacy_memory_path",
     "resolve_runtime_paths_for_agent",
     "runtime_paths_for_agent",
 ]

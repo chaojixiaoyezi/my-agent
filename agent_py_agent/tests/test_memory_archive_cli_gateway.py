@@ -31,6 +31,7 @@ def test_memory_resume_cross_day_gateway_request_uses_response_fact_source(tmp_p
     root = _workspace(config_path)
     agent = SimpleAgent(
         AgentConfig(
+            my_agent_home=str(config_path.parent / "home"),
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",
@@ -73,6 +74,7 @@ def _create_processing_done_fallback_agent(tmp_path) -> tuple[Path, SimpleAgent,
     root = _workspace(config_path)
     agent = SimpleAgent(
         AgentConfig(
+            my_agent_home=str(config_path.parent / "home"),
             model_backend="echo",
             subagent_workspace="subagents",
             gateway_workspace="gateway",

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from ..model.context_window import resolve_model_context_window_tokens
 
-DEFAULT_COMPACT_TRIGGER_PERCENT = 90
+DEFAULT_COMPACT_TRIGGER_PERCENT = 50
 
 
 @dataclass(frozen=True)

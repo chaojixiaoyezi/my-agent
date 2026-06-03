@@ -61,6 +61,7 @@ def write_scenario_config(request: ScenarioConfigRequest) -> None:
 
 # scenario-test isolation overrides
 workspace_root: "{fixture}"
+my_agent_home: "{fixture}/.my_agent/home"
 prompt_files:
 memory_path: ".my_agent/memory.jsonl"
 subagent_workspace: ".my_agent/subagents"

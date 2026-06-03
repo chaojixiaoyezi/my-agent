@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .agent_core import (
     AgentRunResult,
+    CancelSubagentsTool,
     CapabilityRequestTool,
     CreateSubagentsTool,
     DispatchSubagentsTool,
@@ -91,7 +92,6 @@ from .user_space.owner_resolver import (
 )
 from .user_space.runtime_paths import (
     apply_runtime_paths_to_config,
-    legacy_memory_path,
     resolve_runtime_paths_for_agent,
 )
 
@@ -140,7 +140,6 @@ class SimpleAgent(
         if self.using_legacy_paths:
             logger.warning("using legacy runtime paths: reason=%s root=%s", self.runtime_path_resolution.reason, self.root)
         paths = self.runtime_path_resolution.paths
-        legacy_memory_fallback = legacy_memory_path(config, self.root)
         apply_runtime_paths_to_config(config, self.runtime_path_resolution)
         self.local_store = LocalStore(
             paths["local_store_path"],
@@ -152,7 +151,6 @@ class SimpleAgent(
             _owner_memory_jsonl_path(self.home_paths, fallback=paths["memory_path"]),
             local_store=self.local_store,
             daily_mirror_dir=_daily_memory_dir(config, self.home_paths),
-            fallback_read_paths=_legacy_memory_fallbacks(self.home_paths, legacy_memory_fallback),
         )
         self.prompts = PromptBuilder(config, self.root, home_paths=self.home_paths)
         self.backend = get_backend(config.model_backend, config)
@@ -195,20 +193,6 @@ def _owner_memory_jsonl_path(paths, *, fallback: Path) -> Path:
     if owner_long_term:
         return Path(owner_long_term) / "memory.jsonl"
     return Path(fallback)
-
-
-def _legacy_memory_fallbacks(paths, fallback: Path) -> tuple[Path, ...]:
-    if _is_local_main_owner(paths):
-        return (Path(fallback),)
-    return ()
-
-
-def _is_local_main_owner(paths) -> bool:
-    return (
-        str(getattr(paths, "owner_provider", "") or "local") == "local"
-        and str(getattr(paths, "owner_kind", "") or "main") == "main"
-        and str(getattr(paths, "owner_id", "") or "local/main") == "local/main"
-    )
 
 
 def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
@@ -274,6 +258,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CreateSubagentsTool(agent))
     agent.tools.register(CapabilityRequestTool(agent))
+    agent.tools.register(CancelSubagentsTool(agent))
     agent.tools.register(InspectAgentTreeTool(agent))
     agent.tools.register(RaiseEventTool(agent))
     agent.tools.register(TaskProgressTool(agent))
@@ -289,6 +274,7 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
 __all__ = [
     "AgentRunResult",
     "CapabilityRequestTool",
+    "CancelSubagentsTool",
     "CODING_SUBAGENT_TOOLS",
     "CreateSubagentsTool",
     "DispatchSubagentsTool",

@@ -118,21 +118,22 @@ def _hint_message(config: ExplorationFuseConfig, count: int, hint_round: int, pe
     action_hint = (
         "下一轮优先做一次本地落地动作，例如保存来源索引、阶段笔记、检查点、草稿、结构化数据或目标产物；"
     )
+    visibility = "这是内部调度提醒，不要向用户转述本提醒、百分比或内部治理字段。"
     if config.round_threshold <= 0:
         return (
-            f"连续探索额度配置为 0，不会因次数阻断；这是第 {hint_round} 轮固定提醒"
-            f"（当前已连续探索 {count} 轮）。"
+            f"{visibility} 当前是第 {hint_round} 轮固定提醒"
+            f"（当前已连续只读/检索 {count} 轮）。"
             f"{action_hint}"
             "如果还要继续远程抓取，也要同步留下本地进展。"
         )
     if percent >= 80:
         return (
-            f"你已经消耗了 {percent}% 的连续探索额度（{count}/{config.round_threshold} 轮）。"
+            f"{visibility} 当前连续只读/检索进度为 {percent}%（{count}/{config.round_threshold} 轮）。"
             f"请尽快执行本地落地动作；下一轮必须优先物化本地进展。{action_hint}"
             "如果还要继续远程抓取，也要同步留下本地进展。"
         )
     return (
-        f"你已经消耗 {percent}% 的连续探索额度（{count}/{config.round_threshold} 轮）。"
+        f"{visibility} 当前连续只读/检索进度为 {percent}%（{count}/{config.round_threshold} 轮）。"
         f"建议先写出本地阶段产物；下一轮请执行本地落地动作。{action_hint}"
         "如果还要继续远程抓取，也要同步留下本地进展。"
     )

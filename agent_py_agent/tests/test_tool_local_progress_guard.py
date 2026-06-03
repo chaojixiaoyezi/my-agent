@@ -31,7 +31,7 @@ def test_local_progress_guard_warns_at_fixed_interval_without_blocking(tmp_path:
     )
     params = _params()
     agent = SimpleNamespace(root=tmp_path)
-    exploratory_calls = [{"tool": "read_artifact", "artifact_ref": "memory_archive/artifacts/tool_outputs/demo.json"}]
+    exploratory_calls = [{"tool": "read_artifact", "artifact_ref": "blobs/tool_outputs/demo.json"}]
 
     _assert_guard_false_for_rounds(has_required_local_progress_guard, (agent, params, exploratory_calls), 9)
     assert has_required_local_progress_guard(agent, params, exploratory_calls) is True
@@ -83,7 +83,7 @@ def test_local_progress_guard_resets_when_work_progress_fingerprint_changes(tmp_
 
     params = _params()
     agent = SimpleNamespace(root=tmp_path)
-    exploratory_calls = [{"tool": "read_artifact", "artifact_ref": "memory_archive/artifacts/tool_outputs/demo.json"}]
+    exploratory_calls = [{"tool": "read_artifact", "artifact_ref": "blobs/tool_outputs/demo.json"}]
 
     _write_closeout(tmp_path, _closeout_payload(work_progress_fingerprint="progress-a"))
     assert has_required_local_progress_guard(agent, params, exploratory_calls) is False

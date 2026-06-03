@@ -1838,9 +1838,9 @@ const configSchemaExample: ConfigSchema = {
           key: "memory_compact_auto_trigger_percent",
           label: "自动 Compact 阈值",
           description:
-            "上下文使用到多少百分比时自动 compact；默认 90，0 表示 100，小于 50 会按 50 处理",
+            "上下文使用到多少百分比时自动 compact；默认 50，0 表示 100，小于 50 会按 50 处理",
           type: "number",
-          defaultValue: 90,
+          defaultValue: 50,
           category: "memory",
           advanced: true,
           restartRequired: false,

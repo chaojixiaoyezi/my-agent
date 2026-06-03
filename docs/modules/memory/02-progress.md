@@ -2,6 +2,11 @@
 
 ## 已完成
 
+- 2026-06-03 task workspace 污染修复：保存型主代理 run 仍默认写当前 owner 的 `tasks/<date>/<task-slug>/{output,work}/`；用户显式指定普通输出目录时允许最终交付写到用户目录，但本轮索引、过程材料和验收记录仍回到 task workspace。`task-slug` 不再直接截取整段 prompt；运行时会从任务名/用户意图生成短标题，例如 `all-agent-架构分析`。同一 prompt/同一任务复用同一个任务目录，并在 `work/timeline.jsonl` 记录多次 run；只有不同任务撞名时才追加 run/request 后缀，避免一天底下堆出大量长 prompt 目录。
+- 2026-06-03 自然语言报告收口提示：没有显式 delivery contract 的保存型 run，如果成功把明显报告/分析/总结文件写进当前 `task/output/`，运行时也会追加一次 `[delivery-completion-soft-hint]`。它不硬停、不自动验收，只提示模型先查漏补缺再汇报产物位置，避免“报告已写但继续无限读 README/目录”。
+- 2026-06-03 子代理 workspace adapter 收敛：子代理保存到父级 task workspace 时，只能更新 `work/agents/<run_id>/...`、rollup、timeline 和 child refs，不能把自己的 `state.json` 覆盖父任务的 `work/state.json`。父 task state 继续表示主 run 身份，子代理运行状态以 agent run workspace / canonical state 为准。
+- 2026-06-03 compact 高频包修复：task compact rollup 的常规状态同步复用当前 `compact_0001`，不再每次子代理 save 都创建 `compact_NNNN`；`rollup_ledger.jsonl` 只在子代理状态签名变化时追加，避免心跳式保存把 compact 目录和账本打爆。自动 compact 续接会复用原 `task_attributes.run_workspace`，不再按“继续当前任务...”另起任务目录。
+- 2026-06-03 Memory V2 路径收敛：主代理 raw archive 新写入只走 owner `audit/YYYY-MM-DD.jsonl`，大工具输出只走 owner `blobs/tool_outputs/`；子代理只保留 task-local memory 投影 `state.json`、`events.jsonl`、`artifacts.jsonl` 和 `compact/`，不拥有长期记忆。旧 raw/tool-output 读取兼容已从运行时路径移除。
 - 2026-06-02 compact owner/work-state 来源收敛：子代理 compact/resume 会优先读取当前任务本地 `work/agents/<run_id>` 与 canonical state locator；旧 work-order 只作为迁移兼容。`memory_archive/compact_work_state/` 只扫描当前 workspace 和 scope 对应的任务/run/agent 事实源，缺少 acceptance/constraints/latest_tests 时写 `not_recorded`，不再凭空制造验收要求。
 - 2026-05-31 Home V2 第一片已落地：`ensure_my_agent_home()` 会创建 `shared/`、`owners/local/main/`、`identity/`、`global_index/` 和 `system/schema_version.json`，并给本地主 owner 写入 `permissions.json`、`quota.json`、`retention.json`、`skill_policy.json`、`tool_policy.json` 种子文件；任务工作区会创建 `collab/`、`artifacts/manifest.json`、`compact/` 和 `summaries/`。新增 `memory_store.daily`，把每日工作记忆作为可读事件写入 `memory/daily/YYYY-MM-DD.jsonl`，raw archive 继续保留黑盒流水。
 - 2026-05-31 Home V2 第二片已落地：新增 owner resolver，`local/main`、provider user、provider group 都能解析到 V2 owner home；PromptBuilder 优先读取 owner entry files，SimpleAgent daily mirror 默认写 owner memory/daily；home doctor 暴露 owner/shared/system/schema 状态；新增 owner-private skill candidate 草稿账本，只记录候选，不自动提升。
@@ -12,17 +17,17 @@
 - 2026-05-31 Home V2 第七片已落地：新增 effective owner policy 快照，汇总 permissions/quota/skill_policy/tool_policy/temporary_grants；工具注册表会隐藏并拒绝 owner 显式禁用工具，network.enabled=false 时会禁用内置网络工具。这是 owner 策略边界，不是任务质量硬门。
 - 2026-05-31 Home V2 第八片已落地：保存型主代理 run 的 task.yaml/state/timeline/artifact manifest 会写入 owner_id/owner_home，并同步 owner_home/tasks 下任务工作区；ConversationThread 也可记录 owner_id/owner_home，外部通道创建线程时从当前主代理 owner 注入归属。
 - 2026-05-31 Home V2 第九片已落地：子代理创建时默认继承当前 owner_id 和 owner policy 快照，父级 full-access 不直接下放给子代理；子代理保存时在 owner_home/agents/<run_id>/ 写 refs-only projection，供 tree、恢复、compact 和跨 session 检索定位。
-- 2026-05-31 Home V2 阶段 3 接实：`remember()` 的主写入已切到 `owner_home/memory/long_term/memory.jsonl`，daily mirror 只写当前 owner 的 `memory/daily/`；旧 `memory_path` 不再作为新写入目标，只保留为只读 fallback，避免 provider 用户和本地主账号记忆混写。
+- 2026-05-31 Home V2 阶段 3 接实：`remember()` 的主写入已切到 `owner_home/memory/long_term/memory.jsonl`，daily mirror 只写当前 owner 的 `memory/daily/`；当时旧 `memory_path` 还保留只读 fallback，2026-06-03 已收敛为普通运行不再默认读取旧 `memory_path`。
 - 2026-05-31 Home V2 阶段 5 接实：新增 `task_compact_rollup.py`，子代理保存时会同步 `tasks/<root_id>/compact/task_rollup.json` 和同形 compact package。父代理恢复大任务时可先读 task rollup，再按 child run refs 读取单个子代理细节。
 - 2026-05-31 Home V2 阶段 7 接实：`home_indexes.py` 增加 run/agent refs 和 dangling index doctor helper；保存型主代理 run 会登记 task/run，子代理保存会登记 agent。global index 仍是可重建地图，不替代 owner/task/run 正文。
 - 2026-05-31 Home V2 阶段 8 接实：新增 owner capability resolver，按 owner -> shared -> builtin 优先级解析 skill/tool/workflow 短名，同一 run 内把解析结果缓存到 `owner_home/memory/runtime_refs/capability_resolver/`，避免多处同名时反复确认。
 - 2026-05-31 Home V2 迁移/doctor/retention 闭环接实：`home-migrate` 现在覆盖旧 long-term `data/memory.jsonl`、daily、raw、hooks 和 task workspace，仍然只复制、不覆盖、不删除；新增 `home_doctor.py` 汇总迁移建议、悬空 global index、schema 和 retention 候选；新增 `home_retention.py` 按 owner `retention.json` 生成/执行过期文件清理计划，0 天表示不清理。
 - 2026-05-31 HOT/路由/lessons 第一版接实：home 初始化会生成 `memory-hot.md`、`memory/routing/INDEX.md` 和 `memory/lessons/*.md`；普通用户主代理可复用这一套 owner 记忆入口，主代理创建的子代理不另开长期用户记忆；`memory-doctor`、`memory-route` 和运行时路由在项目没有显式 route index 时会回退到当前 home 的索引。
-- 2026-05-31 HOT/路由/lessons 第二片接实：`PromptBuilder` 普通主代理上下文会读取 `memory-hot.md`，task-local/control-plane 仍隔离；新增 `home_memory_notes.py`，提供 HOT 去重追加和 lesson + route index 同步写入入口；auto resume 读取 owner raw archive 优先、旧 workspace archive 兜底，避免 owner-home 迁移后“继续”找不到刚写入的归档。
-- 2026-05-31 Owner 隔离补强：provider user/group 不再读取本地 CLI 旧 `memory_path`、旧顶层 daily/task workspace；保存型 provider run 只写入并登记自己的 `owner_home/tasks`；HOT、lesson 和 route index 写入也改为非 local/main owner 优先自己的 owner home。local/main 仍保留旧顶层入口兼容历史数据。
-- 2026-06-01 Owner 记忆闭环补强：工具输出外置归档改为写入当前 `owner_home/memory_archive/artifacts/tool_outputs/`，旧 workspace 根 `memory_archive/` 不再接收新工具输出；global index 读取和 doctor 悬空检查按 owner/task/run/agent 身份只看最新 append-only 引用；retention 显式清理会写 owner audit log；子代理保存会同时登记 task/run/agent 三层 refs，父代理、tree、doctor 共用这一套发现入口。
+- 2026-05-31 HOT/路由/lessons 第二片接实：`PromptBuilder` 普通主代理上下文会读取 `memory-hot.md`，task-local/control-plane 仍隔离；新增 `home_memory_notes.py`，提供 HOT 去重追加和 lesson + route index 同步写入入口；当时 auto resume 还有旧 workspace archive 兜底，2026-06-03 已改为普通恢复只扫当前 owner home。
+- 2026-05-31 Owner 隔离补强：provider user/group 不再读取本地 CLI 旧 `memory_path`、旧顶层 daily/task workspace；保存型 provider run 只写入并登记自己的 `owner_home/tasks`；HOT、lesson 和 route index 写入也改为非 local/main owner 优先自己的 owner home。local/main 当时仍保留旧顶层入口兼容历史数据，2026-06-03 已收敛为普通 prompt/notes 不再读写旧顶层入口。
+- 2026-06-01 Owner 记忆闭环补强：工具输出外置归档后续已收敛到当前 `owner_home/blobs/tool_outputs/`；global index 读取和 doctor 悬空检查按 owner/task/run/agent 身份只看最新 append-only 引用；retention 显式清理会写 owner audit log；子代理保存会同时登记 task/run/agent 三层 refs，父代理、tree、doctor 共用这一套发现入口。
 - 2026-06-01 tool-output 模型可见路径补强：内部编排/状态工具的 live 输出从源头只投影当前布局 refs；新外置归档会保存当前模型可见正文。更早的旧归档在 `read_artifact` 展开时按来源工具再净化一次，避免历史 `data/subagents/...` 路径重新进入上下文。普通 `read_file`、网页、shell/controlled_exec 输出和用户产物正文保持原文，不做展示替换。
-- 2026-06-01 Owner home 主链路继续收敛：保存型 local/main run 的新任务工作区也写入 `owner_home/tasks/...`，旧顶层 `tasks/...` 只保留读取/迁移兼容；新增 `home-index-rebuild` 显式维护命令，默认 dry-run，`--apply` 才从 owner 正文重建 owner/task/run/agent 全局索引；task compact rollup 会同步 `owner_home/compact/by_task|by_run|by_agent/` 轻量指针，父代理恢复时可先读 owner 级索引再打开具体 rollup。
+- 2026-06-01 Owner home 主链路继续收敛：保存型 local/main run 的新任务工作区也写入 `owner_home/tasks/...`；旧顶层 `tasks/...` 现在只作为显式迁移来源，不再进入普通恢复读取链路。新增 `home-index-rebuild` 显式维护命令，默认 dry-run，`--apply` 才从 owner 正文重建 owner/task/run/agent 全局索引；task compact rollup 会同步 `owner_home/compact/by_task|by_run|by_agent/` 轻量指针，父代理恢复时可先读 owner 级索引再打开具体 rollup。
 - 2026-05-30 `task_progress` 增加软质量提示：如果模型把条目标成 `done` 但没有 evidence，系统只在 `quality_hints` 里提醒补文件、产物或工具结果引用；这不会影响 closeout，不会阻断任务。compact / tree 会带着这个提示，帮助长任务压缩后继续把证据补扎实。
 - 2026-06-01 `task_progress` 更新工具返回：模型一写完成、结果、结论但没 evidence，`task_progress` 会在本次工具结果里返回
   `soft_feedback.missing_evidence_item_ids` 和建议动作。它仍然只是即时软提醒，不改变任务状态、不触发验收、不阻断任务。
@@ -30,7 +35,7 @@
 - 2026-05-30 compact work state 增加通用 `runtime_handoff`：压缩前会收集同 scope 下最近 guidance 和可见下级 agent 状态，写入 `work_state_snapshot`、handoff context 和 continue packet。它不是聊天专项，也不是子代理专项，只是一份“运行中交接摘要”；API 监控、长报告、多人协作和普通聊天续接都复用同一字段。
 - 2026-05-31 compact 续接优先级调整：如果运行中 guidance 或后台唤醒已经明确给出新的下一步，`compact_apply_work_state` 会优先使用这条最新运行提示，而不是沿用压缩前旧的 `task_progress.next_action`。这样父代理在子代理完成后被叫醒时，会先按“去汇总/去检查最新结果”继续，不会被早前的旧进度提示带偏。
 - 2026-06-02 compact runtime handoff 路径收敛：运行中 guidance 只从当前 owner/runtime conversation guidance 和 task-local `work/guidance` 读取；下级状态只从任务本地 `work/agents/<run_id>/canonical_state.json` 读取。旧 `data/conversations/guidance`、旧 `tasks/<id>/agents/<run_id>/state.json` 不再进入模型可见 handoff。
-- 2026-05-29 Live Raw Archive 已接入工具循环：运行中会把助手工具轮可见文字和完成后的工具结果增量写入既有 `memory/raw/YYYY-MM-DD.jsonl`；收尾归档会跳过已 live 写入的工具事件，避免重复记录。运行中进度白板已合并到 `runtime_facts/<request_id>/task.json`，不再维护单独 `run_checkpoint`。`compact_apply_work_state` 在缺少权威 snapshot 时，可从 live `assistant_tool_round` 提取下一步续接提示；这只是恢复提示，不把助手回复升级成验收事实。
+- 2026-05-29 Live Raw Archive 已接入工具循环：运行中会把助手工具轮可见文字和完成后的工具结果增量写入当前 owner `audit/YYYY-MM-DD.jsonl`；收尾归档会跳过已 live 写入的工具事件，避免重复记录。运行中进度白板已合并到 `runtime_facts/<request_id>/task.json`，不再维护单独 `run_checkpoint`。`compact_apply_work_state` 在缺少权威 snapshot 时，可从 live `assistant_tool_round` 提取下一步续接提示；这只是恢复提示，不把助手回复升级成验收事实。
 - 2026-05-30 Compact Continue Packet 已改成 action-first 续接：`continue_packet.resume_focus.next_action` 表示压缩后优先继续的动作，`work_state_snapshot.captured_refs` 记录已读、已写和外置 artifact refs。自动续接 prompt 会先展示这些字段，避免模型每次 compact 后重新读 compact 文件或重复派工；推荐恢复文件只在缺事实、要验证或引用损坏时读取。
 - 2026-05-30 工具输出外置索引补充 `parameters/source_input/source_path`：compact 后展示的 artifact refs 会带出原始读写目标，帮助模型知道“这个 artifact 是哪个源文件/URL/查询的结果”，避免压缩后只看到旧 artifact 编号而重新扫目录。
 - 2026-05-30 通用 `task_progress` 进度账本已落地：主代理、子代理、孙代理都可用同一个工具记录“哪些小块完成、正在做、下一步是什么”。账本写在 `memory_archive/task_progress/<run_id>/progress.json`，是软进度，不参与硬验收；`inspect_agent_tree` 只展示摘要，compact 会按当前 run_id 把该账本带进 `work_state_snapshot`，让子代理压缩后也能先续接自己的工作清单。
@@ -53,7 +58,7 @@
 - 2026-05-18 执行合同层已接入 create/dispatch：`create_subagents` 输出 `operation_contract`，`current_turn_run_state` 输出 `state_machine_contract` 和 `recovery_recommendations`；显式命名的小傻妞按结构化名字复用，默认泛名仍按 goal/write-root 区分，减少重复创建和重复调度。
 - 2026-05-18 工具结果与 E2E 矩阵继续接入合同层：`ToolExecutionResult` 失败时自动带 `error_code/recommended_action/recovery_hint`，typed tool result envelope 同步这些字段；新增 `e2e_matrix_runner.py` deterministic runner 第一片，先跑中文路径、大输出 artifact 元数据和工具失败分类，真实模型用例明确标为 skipped。
 - 2026-05-17 compact/resume 体积边界同步整理：compact apply 的 Markdown 渲染拆到 `compact_apply_rendering.py`，compact resume 的 handoff/continue packet 派生输出拆到 `compact_resume_payloads.py`，新增 context bundle 专项测试拆到独立测试文件，避免主编排文件和大测试文件继续接近 code-size high-risk。
-- 2026-05-17 Tool Output Artifact Refs 第一片已落地：`memory-compact --apply` 会只读扫描 `memory_archive/artifacts/tool_outputs/index.jsonl`，按 request/run/task scope 登记同任务的大工具输出 artifact refs；`work_state_snapshot.artifact_refs` 和 `memory-resume --from-compact recommended_read_paths` 都会带上这些路径。它只登记路径、hash、size 和 call id，不读取 artifact 正文。
+- 2026-05-17 Tool Output Artifact Refs 第一片已落地，后续已收敛为只读扫描 `blobs/tool_outputs/index.jsonl`，按 request/run/task scope 登记同任务的大工具输出 artifact refs；`work_state_snapshot.artifact_refs` 和 `memory-resume --from-compact recommended_read_paths` 都会带上这些路径。它只登记路径、hash、size 和 call id，不读取 artifact 正文。
 - 2026-05-17 Artifact Read Hints 第一片已落地：`memory-resume --from-compact` 会从 `work_state_snapshot.artifact_refs` 生成 `artifact_read_hints`，在 handoff、context block 和 continue packet 中给出 `read_artifact` 的 `artifact_ref/offset/max_chars`；优先使用 scoped call id，避免恢复模型复制长路径出错。
 - 2026-05-23 Compact Gate 真实入口已落地：`memory-compact --apply` 会把 apply 时的 contract、artifact refs、restore refs、pending/failed actions 写入 `compaction_gate.state_snapshot`，`memory-resume --from-compact` 会用同一快照做 post-compact 对比；如果恢复包丢失关键状态，consistency report 会给出 `compaction_gate_ok=false` 并阻断自动继续。
 - `memory_store/` 已承接长期记忆 JSONL 存储，根层 `memory.py` 保留兼容入口。
@@ -93,10 +98,10 @@
 - 2026-05-07 bundle 接口规范已写入 runtime memory 开发要求：复杂业务入口统一 Request/Options/Params，复杂输出统一 Result/Record/Report；CLI args 必须在 CLI 层转换，manager 可保留旧签名作为兼容 wrapper。
 - 2026-05-07 P0 安全切片已落地：runtime compression snapshot 现在会带上 routed memory context 和 auto resume context；artifact manifest 只允许读取 legacy task dir、task workspace、agent run workspace 内的 artifact；shared workspace 的 findings/evidence 改为按 id 合并，避免 sibling 子代理互相覆盖。
 - 2026-05-07 Compact Apply 语义拆分第一片已落地：`memory-compact --apply` 不再等同于 destructive rewrite，而是写 `memory_archive/compact_applies/` 下的 compact context、metadata、ledger 和 self-check，状态标记为 `applied_non_destructive`。
-- 2026-05-07 Artifact Externalizer 第一片已落地：runtime 工具循环会把超过阈值的大工具输出写入 `memory_archive/artifacts/tool_outputs/*.json`，并追加 `index.jsonl`；`archive_tool_calls` 只保留 preview/hash/path/size，当前工具上下文仍保留完整结果，不改变本轮模型行为。
+- 2026-05-07 Artifact Externalizer 第一片已落地，后续已收敛为把超过阈值的大工具输出写入 `blobs/tool_outputs/*.json`，并追加 `index.jsonl`；`archive_tool_calls` 只保留 preview/hash/path/size，当前工具上下文仍保留完整结果，不改变本轮模型行为。
 - 2026-05-08 Tool Output fail-safe checkpoint 已落地：大工具输出写 artifact 前会先写 recovery snapshot；snapshot 的 `tool_calls` 会保留工具名、调用 id、ok、output hash、size 和 externalized=pending 元数据，但仍不保存完整工具输出正文。
 - 2026-05-08 ToolContextReducer live prompt 保护已落地：大工具输出外置后，下一轮 prompt 只注入 preview、artifact path、hash、size 和 fail-safe checkpoint；完整正文只留在 artifact 文件里。
-- 2026-05-07 Control-plane Query API 第一片已落地：`query_memory_control_plane()` 会只读汇总 `daily/YYYY-MM-DD/events.jsonl`、task/run refs、`memory_archive/compact_applies/ledger.jsonl` 和 `memory_archive/artifacts/tool_outputs/index.jsonl`，按 date/task/run/event scope 返回轻量引用；它不读取大工具正文，不写入 workspace，也不替代 task/run 事实源。
+- 2026-05-07 Control-plane Query API 第一片已落地，后续已收敛为只读汇总 `daily/YYYY-MM-DD/events.jsonl`、task/run refs、`memory_archive/compact_applies/ledger.jsonl` 和 `blobs/tool_outputs/index.jsonl`，按 date/task/run/event scope 返回轻量引用；它不读取大工具正文，不写入 workspace，也不替代 task/run 事实源。
 - 2026-05-07 Schema v2 / Reserved Fields 已固化第一片：`daily_ledger_event`、`control_plane_task_run_ref`、`compact_apply` / `compact_apply_ledger` / `compact_apply_self_check`、`tool_output_archive_record` / `tool_output_artifact` / `tool_output_index` 现在统一写 `version=2`、`schema` 和结构化 `reserved={schema_name,schema_version,extensions,compat,future}`；后续新增字段优先走明确业务字段，实验性扩展只能放入 reserved 三槽。
 - 2026-05-07 Compact Apply 第二片已落地：`memory-compact --apply` 现在除 context/metadata/self-check/ledger 外，还会写 `*.apply_bundle.json` 和 `*.restore_refs.json`，把原始 archive/snapshot/token refs 和恢复步骤串起来；如果 post-compact self-check 失败，会写 `*.self_check_failed.json` 并把 metadata/ledger 标记为 `blocked_self_check_failed`，仍然不删除、不重写、不裁剪历史事实源。
 - 2026-05-08 手动 Compact Apply 完整化第一片已落地：`memory-compact --apply` 现在会生成稳定 `apply_id/plan_id`，并把同一组 ID 写进 metadata、apply bundle、restore refs、work state snapshot、self-check、失败报告和 ledger；新增 `*.work_state_snapshot.json` 作为后续手动 resume 和无人值守状态锁的对照基线。
@@ -122,7 +127,7 @@
 - 2026-05-08 Compact work-state scope 安全修正：request/session/task/run id 现在按字面路径解析，`*`、`[]` 等 glob 字符不会扩大扫描 `tasks/*/work/agents/*`；半自动 completion 命令也会保留原 `--session-id/--request-id/--task-id/--run-id` scope。
 - 2026-05-08 compact + closeout 联调第一片已落地：新增 focused 测试串起 subagent task、compact apply/resume、continue packet、closeout apply 阻断和 auto-policy dry-run；断言 auto-policy 仍 `executed=false`、`mutates_task_state=false`，且 task 状态不被 compact 自动链路改动。
 - 2026-05-13 Code-size high-risk 清零第一片已落地：`memory_archive/query/resume_guidance.py` 承接 `ResumeGuidanceRequest` bundle，CLI/runtime 恢复建议不再用散装参数；相关 focused tests、ruff、strict code-size 已验证 `hard=0 high-risk=0 soft=0`。
-- 2026-05-13 Home Runtime 读取侧迁移第一片已落地：`memory_store/jsonl.py` 的搜索/recall 会把 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl` 作为旧 `memory_path` 的补充事实源并去重，`all()` / `index_all()` 仍保持旧 memory_path 语义；新增 `home_runtime_query.py`，统一读取 daily memory、`tasks/{date}/{task_slug}` 和 home status。
+- 2026-05-13 Home Runtime 读取侧迁移第一片已落地：当时 `memory_store/jsonl.py` 的搜索/recall 会把 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl` 作为旧 `memory_path` 的补充事实源并去重；2026-06-03 已收敛为只读当前 owner 长期 JSONL 和 daily mirror。新增 `home_runtime_query.py`，统一读取 daily memory、`tasks/{date}/{task_slug}` 和 home status。
 - 2026-05-13 Home Runtime CLI/Doctor 第一片已落地：新增 `home-status`、`memory-daily-list`、`task-workspace-list`；`memory-doctor --json` 会报告 home 入口文件、关键目录和计数；`memory-resume --task-id/--run-id` 在旧 subagent 工单不存在时可回退到主代理 task workspace 的 `state.json` / `timeline.jsonl`。
 - **记忆推模式** (`memory_push.py`)：在关键决策点自动查询并注入相关记忆，实现"推模式"记忆系统。
   - `MemoryType` 枚举：`LESSON_GENERAL`、`LESSON_TASK`、`LESSON_TEMP`、`CONTEXT`、`FACT`
@@ -274,7 +279,7 @@
 - `memory-resume --from-compact` 现在会从 compact restore refs 指向的 hook JSONL 中提取 `tool_output_externalizer` 的 fail-safe checkpoint。
 - 新增输出字段 `fail_safe_checkpoints`，只包含 checkpoint path、line_no、snapshot_id、source/status、request/run/task id、工具名、调用 id、output hash、size、externalized 状态和 next_actions。
 - `compact_resume_handoff` 和 `Compact Resume Context` 新增 `Fail Safe Checkpoints` 小节；`recommended_read_paths` 会把这些 checkpoint path 提前放入必读入口。
-- 该流程只读 metadata-only hook checkpoint，不自动读取 `memory_archive/artifacts/tool_outputs/*` 的完整正文；完整大输出仍必须后续显式按 artifact 路径读取。
+- 该流程只读 metadata-only hook checkpoint，不自动读取 `blobs/tool_outputs/*` 的完整正文；完整大输出仍必须后续显式按 artifact 路径读取。
 
 ## 2026-05-08 compact resume fail-safe code-size split
 - 为避免 `compact_resume.py` 和 `test_memory_compact.py` 继续接近 code-size 软上限，checkpoint JSONL 扫描逻辑拆到 `compact_resume_failsafe.py`，新增回归测试拆到 `test_memory_compact_failsafe.py`。
@@ -283,7 +288,7 @@
 ## 2026-05-08 artifact explicit read progress
 - 新增 `memory-artifact-read <artifact_ref>`，只读取 tool output index 已登记 artifact；未登记普通文件会返回 `artifact_not_registered`，不打印正文。
 - 新增 `read_artifact` 工具，模型只能通过 artifact path/hash/call_id 显式读取正文切片；默认 `max_chars=4000`，`max_chars=0` 表示读取完整正文。
-- artifact reader 会校验路径仍在 `memory_archive/artifacts/tool_outputs/` 下，并校验 artifact content sha256，避免把 artifact ref 变成任意文件读取后门。
+- artifact reader 会校验路径仍在 `blobs/tool_outputs/` 下，并校验 artifact content sha256，避免把 artifact ref 变成任意文件读取后门。
 
 ## 2026-05-08 artifact explicit read CI follow-up
 - 补齐 `memory_archive/artifact/reader.py` 私有 helper 的双层用途注释，符合 code-size 脚本对产品代码可维护性的检查要求。
@@ -301,7 +306,7 @@
 
 ## 2026-05-11 artifact copied-prefix recovery
 - 中文说明：真实 E2E 里模型会把 artifact 路径前缀抄成当前代码仓库路径，导致明明 index 里有登记，却按错误绝对路径读不到正文；现在 artifact reader 在精确匹配失败时，只允许用唯一 artifact 文件名回到 index 记录。
-- 行为边界不变：修复只信任 `index.jsonl` 已登记记录，仍会检查 artifact 位于 `memory_archive/artifacts/tool_outputs/` 边界内，并校验 sha256；同名多条或未登记文件继续失败，不会变成任意文件读取。
+- 行为边界不变：修复只信任 `index.jsonl` 已登记记录，仍会检查 artifact 位于 `blobs/tool_outputs/` 边界内，并校验 sha256；同名多条或未登记文件继续失败，不会变成任意文件读取。
 - 本轮 focused 验收：`python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_memory_artifact_read.py::test_read_artifact_tool_repairs_wrong_prefix_with_unique_artifact_name` -> passed。
 
 ## 2026-05-11 scoped tool-output artifact refs
@@ -317,7 +322,7 @@
 - `memory-artifact-read` CLI 同步支持 `--mode` 和 `--query`；`mode=search` 只返回带行号的匹配行，不把整个 artifact 搬回 prompt。
 - 新增单 run artifact 正文读取预算：`tool_artifact_read_budget_window_seconds=600`、`tool_artifact_read_budget_max_chars=240000`，`0` 表示关闭。预算按 `run_id` 隔离，不限制普通主代理无 run_id 的聊天，也不做整棵任务树总预算。
 - `max_chars=0` 仍兼容“读全部”，但如果有 run scope 和预算，会先从 `tool_outputs/index.jsonl` 的 `size_bytes` 做预判，过大就提前阻断，避免读 1G 日志这种事故先进入正文加载。
-- `read_file` 误读 `memory_archive/artifacts/tool_outputs/*.json` 包装文件时，会根据当前 `allowed_tools` 给更准确提示：有 `read_artifact` 就直接让模型用它；没有就要求向父级发 `capability_request`，不再让受限 leaf 空转。
+- `read_file` 读取 `blobs/tool_outputs/*.json` 包装文件时，会读取 artifact 正文并分页；需要短 call id、hash 或 scoped 防串 run 时继续用 `read_artifact`。
 - 对标吸收：长期助手 的工具输出外置 + preview + 分段读，通道运行时 的响应前缀限制/事件截断，会话运行时/模型助手 Code 的“工具结果正文不要自动回灌 prompt”。my-agent 选择 index-first、refs-first、按需窄读，不把大 artifact 当普通文件读。
 - 本轮 focused 验收：`/Users/example/ai_claw/bin/python -m pytest agent_py_agent/tests/test_memory_artifact_read.py -q` -> `12 passed`。
 
@@ -330,7 +335,7 @@
 
 ## 2026-05-13 home runtime bootstrap
 - 中文说明：单用户 `~/.my-agent` 暂不接飞书/QQ，但已经接入主代理本地运行时。`SimpleAgent` 启动会初始化 `my_agent_home`，普通保存型 run 会创建 `tasks/{date}/{task_slug}/output` 和 `work` 两个顶层目录；`output/` 是最终交付物，`work/` 保存日志、状态、compact、子代理账本和 refs-only 过程文件。
-- `JsonlMemory` 保留旧 `memory_path` 兼容，同时按配置镜像到 `memory/daily/YYYY-MM-DD.jsonl`，后续 query/resume 可以逐步迁移到按天流水。
+- `JsonlMemory` 当时保留旧 `memory_path` 兼容，同时按配置镜像到 `memory/daily/YYYY-MM-DD.jsonl`；2026-06-03 已移除普通读取侧旧 `memory_path` fallback。
 - `PromptBuilder` 对 home-backed root 每轮按 `AGENTS.md`、`SOUL.md`、`USER.md`、`memory.md` 顺序读取四个家目录入口文件，并用 lesson 文件名和当前任务文本做轻量匹配；不会每轮全量读取整个 lessons 目录。
 - provider trash 从 `provider_space.py` 拆到 `provider_trash.py`，新增按配置保留天数清理旧 trash 日期目录；破坏性操作仍默认走同空间 trash 和审计。
 - 本轮 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_home_runtime_bootstrap.py agent_py_agent/tests/test_provider_space.py agent_py_agent/tests/test_config_normalize.py::TestNormalizeAgentConfig::test_normalize_home_provider_risk_fields agent_py_agent/tests/test_agent/test_memory_and_basic.py agent_py_agent/tests/test_prompting_builder.py` -> passed；strict code-size 维持 `hard=0 high-risk=0 soft=0`。
@@ -396,9 +401,14 @@
 - `home_indexes.py` 增加最新 owner/task refs 读取；`home_backup.py` 先做 manifest-only 备份清单，避免开发期复制大目录拖慢迁移。
 - 新增 focused 验收：owner policy/grants、capability expiry/compact injection、home backup/index 三组测试均通过。
 
+## 2026-06-03 owner-only default reads
+- 中文说明：普通运行的 prompt home entry、home memory notes、archive list/search/resume、main context bundle 和长期记忆搜索都收敛到当前 owner home。local/main 不再默认读取 repo 根 `memory.jsonl`、旧顶层 `memory.md` / `memory-hot.md` / `memory/lessons`、旧 workspace archive 或旧 workspace task root。
+- 行为边界：显式迁移、doctor 状态报告、受限 subagent legacy adapter 和 LocalStore 索引损坏后的当前 JSONL 恢复仍保留；这些不是普通任务的跨目录 fallback。
+- 新增 focused 验收：旧根目录同名 home 文件不会进入 prompt；旧 `memory_path` 不会进入 local/main recall；archive roots 和 auto resume 只扫 owner home；main context bundle 不再暴露 `legacy_workspace_tasks_root`。
+
 ## 2026-06-01 owner archive resume isolation
-- 中文说明：`memory-resume`、`memory-archive-list` 和 `memory-archive-search` 现在从当前 owner home 读取 archive。provider user/group 只读自己的 owner archive；local/main 先读 owner home，同时保留旧 workspace archive 作为兼容线索。
-- 这次修复的问题：飞书/微信等外部用户恢复任务时，不能从 CLI 主账号或旧 workspace archive 里串到别人的 raw event。local/main 仍能在迁移期读到旧 archive，避免老任务恢复断档。
+- 中文说明：`memory-resume`、`memory-archive-list` 和 `memory-archive-search` 当时已从当前 owner home 读取 archive。provider user/group 只读自己的 owner archive；local/main 当时仍保留旧 workspace archive 作为兼容线索，2026-06-03 已收敛为普通 list/search/resume 不再默认扫描旧 workspace archive。
+- 这次修复的问题：飞书/微信等外部用户恢复任务时，不能从 CLI 主账号或旧 workspace archive 里串到别人的 raw event。local/main 的旧 archive 兼容后续已改为显式迁移/恢复入口处理，避免普通任务串入旧 run。
 - 测试同步：新增 provider owner archive 隔离测试；旧 memory archive CLI 测试补上临时 `my_agent_home`，避免测试时读取开发机真实 `~/.my-agent`。
 - 本轮 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_home_runtime_query.py agent_py_agent/tests/test_memory_archive_cli_query.py --tb=short` -> passed；`ruff check` 对修改文件通过。
 

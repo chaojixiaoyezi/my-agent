@@ -49,7 +49,7 @@ class ArtifactLocatorResult:
 def locate_artifact(item: dict[str, Any], workspace_root: Path) -> ArtifactLocatorResult:
     workspace = Path(workspace_root).resolve(strict=False)
     if raw_path := _artifact_target_path(item):
-        path = _bounded_path(raw_path, workspace)
+        path = _resolve_output_path(raw_path, workspace)
         if path is None:
             return ArtifactLocatorResult(None, [_finding("ARTIFACT_PATH_INVALID", raw_path)])
         return ArtifactLocatorResult(path)
@@ -91,7 +91,7 @@ def _artifact_target_path(item: dict[str, Any]) -> str:
 def _candidate_paths(item: dict[str, Any], workspace: Path, extensions: tuple[str, ...]) -> list[Path]:
     candidates: list[Path] = []
     for root in _search_roots(item):
-        root_path = _bounded_path(root, workspace)
+        root_path = _resolve_output_path(root, workspace)
         candidates.extend(_candidate_paths_under_root(root_path, extensions, remaining=_MAX_CANDIDATES - len(candidates)))
         if len(candidates) >= _MAX_CANDIDATES:
             break
@@ -209,14 +209,12 @@ def _select_by_structured_hint(item: dict[str, Any], candidates: list[Path]) -> 
     return matches[0] if len(matches) == 1 else None
 
 
-def _bounded_path(raw_path: str, workspace: Path) -> Path | None:
+def _resolve_output_path(raw_path: str, workspace: Path) -> Path | None:
     candidate = Path(raw_path).expanduser()
-    path = candidate.resolve(strict=False) if candidate.is_absolute() else (workspace / candidate).resolve(strict=False)
     try:
-        path.relative_to(workspace)
-    except ValueError:
+        return candidate.resolve(strict=False) if candidate.is_absolute() else (workspace / candidate).resolve(strict=False)
+    except (OSError, RuntimeError):
         return None
-    return path
 
 
 def _finding(code: str, value: str, *, evidence: dict[str, object] | None = None) -> dict[str, object]:

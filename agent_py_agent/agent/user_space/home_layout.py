@@ -76,12 +76,13 @@ class MyAgentHomePaths:
     owner_sessions_dir: Path
     owner_memory_dir: Path
     owner_memory_daily_dir: Path
-    owner_memory_raw_dir: Path
     owner_memory_hooks_dir: Path
     owner_memory_lessons_dir: Path
     owner_memory_routing_dir: Path
     owner_memory_routing_index_md: Path
     owner_memory_indexes_dir: Path
+    owner_memory_store_jsonl: Path
+    owner_memory_ops_jsonl: Path
     owner_memory_long_term_dir: Path
     owner_memory_runtime_refs_dir: Path
     owner_tasks_dir: Path
@@ -90,6 +91,10 @@ class MyAgentHomePaths:
     owner_compact_dir: Path
     owner_workspace_dir: Path
     owner_artifacts_dir: Path
+    owner_audit_dir: Path
+    owner_blobs_dir: Path
+    owner_blob_tool_outputs_dir: Path
+    owner_blob_files_dir: Path
     owner_data_dir: Path
     owner_logs_dir: Path
     owner_cache_dir: Path
@@ -195,7 +200,6 @@ def _HOME_DIRECTORIES(paths: MyAgentHomePaths) -> tuple[Path, ...]:
         paths.config_dir,
         paths.scripts_dir,
         paths.memory_daily_dir,
-        paths.memory_raw_dir,
         paths.memory_hooks_dir,
         paths.memory_lessons_dir,
         paths.memory_routing_dir,

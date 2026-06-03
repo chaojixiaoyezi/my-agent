@@ -204,7 +204,7 @@ def test_read_artifact_tool_repairs_wrong_prefix_with_unique_artifact_name(tmp_p
 
     result = registry.execute_call({
         "tool": "read_artifact",
-        "artifact_ref": f"/wrong/workspace/memory_archive/artifacts/tool_outputs/{artifact_path.name}",
+        "artifact_ref": f"/wrong/workspace/blobs/tool_outputs/{artifact_path.name}",
         "offset": 0,
         "max_chars": 6,
     })
@@ -360,7 +360,7 @@ def test_read_file_typo_to_tool_output_artifact_keeps_read_file_recovery(tmp_pat
             vector_search_enabled=False,
         )
     )
-    wrong_prefix = f"/wrong/{tmp_path.name}/memory_archive/artifacts/tool_outputs/{artifact_path.name}"
+    wrong_prefix = f"/wrong/{tmp_path.name}/blobs/tool_outputs/{artifact_path.name}"
 
     result = registry.execute_call({"tool": "read_file", "path": wrong_prefix})
 

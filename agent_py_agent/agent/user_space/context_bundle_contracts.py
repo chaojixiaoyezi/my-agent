@@ -155,7 +155,7 @@ def _path_checks(bundle: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         _exists_check("workspace_root_exists", workspace.get("primary_workspace_root"), "hard"),
         _exists_check("my_agent_home_exists", workspace.get("my_agent_home"), "soft"),
-        _exists_check("memory_root_exists", workspace.get("memory_root"), "soft"),
+        _exists_check("owner_memory_root_exists", workspace.get("owner_memory_root"), "soft"),
         _exists_check("compact_applies_root_exists", recovery.get("compact_applies_root"), "soft"),
     ]
 
@@ -180,10 +180,8 @@ def _task_workspace_refs(home_paths: Any | None) -> dict[str, str]:
     if home_paths is None:
         return {}
     owner_tasks = Path(getattr(home_paths, "owner_tasks_dir", home_paths.workspace_tasks_dir)).resolve()
-    legacy_tasks = Path(home_paths.workspace_tasks_dir).resolve()
     return {
         "owner_tasks_root": str(owner_tasks),
-        "legacy_workspace_tasks_root": str(legacy_tasks),
     }
 
 

@@ -57,7 +57,7 @@ class TestArchiveFiles:
 
     def test_raw_layer_only(self, tmp_path):
         """验证只搜索 raw 层"""
-        raw_dir = tmp_path / "memory" / "raw"
+        raw_dir = tmp_path / "audit"
         raw_dir.mkdir(parents=True)
         (raw_dir / "2026-05-01.jsonl").write_text("{}\n")
 
@@ -77,7 +77,7 @@ class TestArchiveFiles:
 
     def test_all_layer_includes_both(self, tmp_path):
         """验证 all 层包含 raw 和 hook"""
-        raw_dir = tmp_path / "memory" / "raw"
+        raw_dir = tmp_path / "audit"
         raw_dir.mkdir(parents=True)
         (raw_dir / "2026-05-01.jsonl").write_text('{"event_id": "e1"}\n')
 
@@ -90,7 +90,7 @@ class TestArchiveFiles:
 
     def test_date_key_filters_by_date(self, tmp_path):
         """验证日期键过滤功能"""
-        raw_dir = tmp_path / "memory" / "raw"
+        raw_dir = tmp_path / "audit"
         raw_dir.mkdir(parents=True)
         (raw_dir / "2026-05-01.jsonl").write_text('{"event_id": "e1"}\n')
         (raw_dir / "2026-05-02.jsonl").write_text('{"event_id": "e2"}\n')
@@ -100,7 +100,7 @@ class TestArchiveFiles:
 
     def test_files_sorted_by_mtime_newest_first(self, tmp_path):
         """验证文件按修改时间倒序排列"""
-        raw_dir = tmp_path / "memory" / "raw"
+        raw_dir = tmp_path / "audit"
         raw_dir.mkdir(parents=True)
 
         file1 = raw_dir / "2026-05-01.jsonl"

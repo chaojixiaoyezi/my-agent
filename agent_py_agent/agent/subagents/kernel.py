@@ -5,7 +5,8 @@ from __future__ import annotations
 
 这里不是新的调度器，也不是新的事实源。它只是把旧 task.json、run workspace、
 control-plane 已有字段整理成一个稳定快照，后续恢复、QA、验收、E2E 都先读这里，
-减少“每个模块自己猜状态”的问题。
+减少“每个模块自己猜状态”的问题。source_refs 指向最新可见 workspace，避免同 slug
+旧任务把父级带回过期 task_root。
 """
 
 from pathlib import Path
@@ -263,7 +264,8 @@ def _snapshot_root_id(tasks: list[SubAgentTask], query: SubagentKernelQuery) -> 
 def _snapshot_source_refs(tasks: list[SubAgentTask]) -> dict[str, str]:
     if not tasks:
         return {}
-    root = tasks[0]
+    # Prefer the freshest workspace so same-slug historical task dirs cannot pollute source refs.
+    root = _latest_workspace_task(tasks)
     return {
         key: value
         for key, value in {
@@ -274,6 +276,12 @@ def _snapshot_source_refs(tasks: list[SubAgentTask]) -> dict[str, str]:
         }.items()
         if value
     }
+
+
+def _latest_workspace_task(tasks: list[SubAgentTask]) -> SubAgentTask:
+    with_workspace = [task for task in tasks if str(task.task_workspace_dir or "").strip()]
+    candidates = with_workspace or tasks
+    return max(candidates, key=lambda task: (float(task.updated_at or 0.0), float(task.created_at or 0.0), task.id))
 
 
 def _query_reserved(query: SubagentKernelQuery) -> dict[str, object]:

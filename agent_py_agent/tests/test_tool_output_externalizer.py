@@ -180,7 +180,7 @@ def test_read_artifact_output_is_not_re_externalized(tmp_path: Path) -> None:
         {
             "ok": True,
             "reads_artifact_body": True,
-            "artifact_ref": str(tmp_path / "memory_archive/artifacts/tool_outputs/read_file-1.json"),
+            "artifact_ref": str(tmp_path / "blobs/tool_outputs/read_file-1.json"),
             "content": "important recovery packet\n" + ("x" * 1600),
             "content_chars": 1626,
             "truncated": False,
@@ -201,7 +201,7 @@ def test_read_artifact_output_is_not_re_externalized(tmp_path: Path) -> None:
 
     assert record["output_externalized"] is False
     assert record["output_path"] == ""
-    assert not (tmp_path / "memory_archive/artifacts/tool_outputs").exists()
+    assert not (tmp_path / "blobs/tool_outputs").exists()
 
 
 def test_tool_loop_summarizes_large_tool_call_payload_for_live_prompt() -> None:
@@ -406,7 +406,7 @@ def test_tool_loop_writes_fail_safe_checkpoint_before_externalizing_large_output
 
 
 def test_archive_tool_event_keeps_externalized_output_path(tmp_path: Path) -> None:
-    output_path = tmp_path / "memory_archive" / "artifacts" / "tool_outputs" / "demo.json"
+    output_path = tmp_path / "blobs" / "tool_outputs" / "demo.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("{}", encoding="utf-8")
 

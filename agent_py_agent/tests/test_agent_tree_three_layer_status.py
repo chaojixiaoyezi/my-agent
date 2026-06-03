@@ -46,7 +46,11 @@ def test_agent_tree_node_exposes_liveness_progress_and_evidence_layers():
     node = payload["nodes"][0]
 
     assert node["liveness"]["heartbeat_at"] == 100.0
+    assert node["liveness"]["not_done_reason"] == "blocked:需要执行脚本能力"
+    assert node["running_seconds"] > 0
+    assert node["seconds_since_progress"] > 0
     assert node["progress_layer"]["last_progress_summary"] == "查到一批候选资料"
+    assert node["progress_layer"]["seconds_since_progress"] > 0
     assert node["evidence_layer"]["artifact_refs"] == ["/tmp/out.xlsx"]
     assert node["needs_capability"] == ["capability_request", "capability_gap"]
     assert node["recent_tool_trace"] == [{"tool": "web_search", "ok": True, "summary": "查到候选资料"}]
@@ -227,6 +231,35 @@ def test_agent_tree_visible_run_ids_filters_prompt_copy_only():
     assert [node["run_id"] for node in payload["nodes"]] == ["child-current"]
     assert payload["main"]["child_run_ids"] == ["child-current"]
     assert payload["status_buckets"]["blocked"] == []
+
+
+def test_agent_tree_source_refs_prefer_latest_visible_workspace():
+    """同 owner 下有旧任务时，source_refs 应指向当前最新可见 workspace。"""
+    from agent_py_agent.agent.subagents.kernel import SubagentKernel
+    from agent_py_agent.agent.subagents.models import SubAgentTask
+
+    old = SubAgentTask(id="old-child", goal="old", thought="", plan=["old"])
+    old.task_workspace_dir = "/tmp/home/tasks/same-slug"
+    old.agent_run_workspace_dir = "/tmp/home/tasks/same-slug/work/agents/old-child"
+    old.updated_at = 100.0
+    new = SubAgentTask(id="new-child", goal="new", thought="", plan=["new"])
+    new.task_workspace_dir = "/tmp/home/tasks/same-slug-run-new"
+    new.agent_run_workspace_dir = "/tmp/home/tasks/same-slug-run-new/work/agents/new-child"
+    new.updated_at = 200.0
+
+    class _Manager:
+        def list_runs(self):
+            return [old, new]
+
+        def kernel_snapshot(self, query):
+            return SubagentKernel(self).snapshot(query)
+
+    class _Agent:
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent())
+
+    assert payload["source_refs"]["root_task"] == "/tmp/home/tasks/same-slug-run-new"
 
 
 def test_subagent_runner_can_only_inspect_own_subtree_even_with_root_params():
@@ -425,3 +458,52 @@ def test_agent_tree_soft_advice_does_not_treat_running_children_as_failed_output
     assert advice["missing_outputs_while_running_is_failure"] is False
     assert advice["should_take_over_running_children"] is False
     assert "不要把目标目录暂时为空或占位报告当失败" in payload["policy"]["next_step"]
+
+
+def test_child_result_index_keeps_progress_refs_for_running_child_without_artifacts():
+    """运行中的子代理即使还没有 artifact，也要给父代理可读的进度 refs。"""
+
+    class _Manager:
+        def kernel_snapshot(self, query):
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                scope=query.scope,
+                runs=[
+                    SubagentKernelRun(
+                        run_id="child-running",
+                        status="RUNNING",
+                        progress=0.2,
+                        current_tool="list_files",
+                        last_progress_summary="正在读项目目录",
+                        latest_summary="最近成功调用工具: list_files",
+                        workspace_refs={
+                            "task_workspace": "/tmp/home/owners/local/main/tasks/2026-06-03/all-agent-架构分析",
+                            "agent_run_workspace": "/tmp/home/owners/local/main/tasks/2026-06-03/all-agent-架构分析/work/agents/child-running",
+                            "final_report": "/tmp/home/owners/local/main/tasks/2026-06-03/all-agent-架构分析/work/agents/child-running/final_report.md",
+                        },
+                        recovery_refs={
+                            "summary": "/tmp/home/owners/local/main/tasks/2026-06-03/all-agent-架构分析/work/agents/child-running/summary.md",
+                            "checkpoint": "/tmp/home/owners/local/main/tasks/2026-06-03/all-agent-架构分析/work/agents/child-running/checkpoint.json",
+                        },
+                        reserved={
+                            "recent_tool_trace": [
+                                {"tool": "list_files", "ok": True, "summary": "最近成功调用工具: list_files"}
+                            ],
+                        },
+                    )
+                ],
+            )
+
+    class _Agent:
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent())
+    row = payload["child_result_index"][0]
+
+    assert row["primary_artifact_refs"] == []
+    assert row["final_report_ref"].endswith("/work/agents/child-running/final_report.md")
+    assert row["summary_ref"].endswith("/work/agents/child-running/summary.md")
+    assert row["checkpoint_ref"].endswith("/work/agents/child-running/checkpoint.json")
+    assert row["agent_work_dir"].endswith("/work/agents/child-running")
+    assert row["readiness"] == "progress_refs_available"
+    assert row["recent_tool_trace"] == [{"tool": "list_files", "ok": True, "summary": "最近成功调用工具: list_files"}]

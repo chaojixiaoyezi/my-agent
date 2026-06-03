@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import append_jsonl_records, write_json_object, write_jsonl_records
+from .agent_run_artifacts import agent_run_artifact_records
 
 
 @dataclass(frozen=True)
@@ -26,13 +27,16 @@ class AgentRunWorkspacePaths:
     state_json: Path
     task_md: Path
     timeline_jsonl: Path
+    events_jsonl: Path
     checkpoint_json: Path
     summary_md: Path
     final_report_md: Path
     findings_jsonl: Path
+    artifacts_jsonl: Path
     inbox_dir: Path
     outbox_dir: Path
     artifacts_dir: Path
+    compact_dir: Path
     compactions_dir: Path
     compaction_ledger_jsonl: Path
     latest_compaction_summary_md: Path
@@ -75,7 +79,10 @@ def ensure_agent_run_workspace(
         _legacy_run_ref_payload(inputs.task, inputs.task_id, inputs.now),
         sort_keys=False,
     )
-    _append_timeline(paths.timeline_jsonl, _timeline_event(inputs.task, inputs.task_id, inputs.now))
+    event = _timeline_event(inputs.task, inputs.task_id, inputs.now)
+    _append_timeline(paths.timeline_jsonl, event)
+    _append_timeline(paths.events_jsonl, event)
+    write_jsonl_records(paths.artifacts_jsonl, agent_run_artifact_records(paths, inputs.task, inputs.task_id, inputs.now))
     return paths
 
 
@@ -109,13 +116,16 @@ def agent_run_workspace_paths(root: Path) -> AgentRunWorkspacePaths:
         state_json=root / "state.json",
         task_md=root / "task.md",
         timeline_jsonl=root / "timeline.jsonl",
+        events_jsonl=root / "events.jsonl",
         checkpoint_json=root / "checkpoint.json",
         summary_md=root / "summary.md",
         final_report_md=root / "final_report.md",
         findings_jsonl=root / "findings.jsonl",
+        artifacts_jsonl=root / "artifacts.jsonl",
         inbox_dir=root / "inbox",
         outbox_dir=root / "outbox",
         artifacts_dir=root / "artifacts",
+        compact_dir=root / "compact",
         compactions_dir=root / "compactions",
         compaction_ledger_jsonl=root / "compactions" / "compaction_ledger.jsonl",
         latest_compaction_summary_md=root / "compactions" / "latest_summary.md",
@@ -132,6 +142,7 @@ def _ensure_directories(paths: AgentRunWorkspacePaths) -> None:
         paths.artifacts_dir,
         paths.artifacts_dir / "tool_outputs",
         paths.artifacts_dir / "reports",
+        paths.compact_dir,
         paths.compactions_dir,
     ]:
         directory.mkdir(parents=True, exist_ok=True)

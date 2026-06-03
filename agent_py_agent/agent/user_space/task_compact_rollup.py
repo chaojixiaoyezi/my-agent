@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import JsonObjectReadReport, read_json_object_report, write_json_object
-from ..io import append_jsonl
 from .compact_layout import CompactPackageRequest, ensure_compact_package
 from .owner_compact_indexes import sync_owner_compact_indexes
+from .task_compact_index import current_or_first_compact_index
+from .task_compact_rollup_signature import RollupEventRequest, append_rollup_event_if_changed
 
 
 @dataclass(frozen=True)
@@ -27,7 +28,7 @@ def sync_task_compact_rollup(task_workspace: str | Path, *, compact_index: int |
     task_root = Path(task_workspace)
     work_root = _task_work_root(task_root)
     compact_root = work_root / "compact"
-    index = compact_index if compact_index is not None else _next_compact_index(compact_root / "compact_ledger.jsonl")
+    index = compact_index if compact_index is not None else current_or_first_compact_index(compact_root)
     package = ensure_compact_package(compact_root, CompactPackageRequest(compact_index=index, scope="task"))
     child_runs = _child_run_records(task_root)
     rollup_json = compact_root / "task_rollup.json"
@@ -40,18 +41,7 @@ def sync_task_compact_rollup(task_workspace: str | Path, *, compact_index: int |
     write_json_object(package.refs_json, _refs_payload(rollup_json, rollup_md, child_runs))
     write_json_object(package.continue_packet_json, _continue_packet_payload(rollup))
     package.handoff_summary_md.write_text(_rollup_markdown(rollup), encoding="utf-8")
-    append_jsonl(
-        compact_root / "rollup_ledger.jsonl",
-        {
-            "schema_version": "task-compact-rollup-event.v1",
-            "task_workspace": str(task_root),
-            "rollup_json": str(rollup_json),
-            "compact_package": str(package.package_dir),
-            "child_count": len(child_runs),
-            "updated_at": _now_iso(),
-        },
-        sort_keys=True,
-    )
+    append_rollup_event_if_changed(RollupEventRequest(compact_root, task_root, rollup, package.package_dir, child_runs))
     sync_owner_compact_indexes(task_root, rollup)
     return TaskCompactRollupResult(
         task_workspace=task_root,
@@ -201,7 +191,7 @@ def _continue_packet_payload(rollup: dict[str, object]) -> dict[str, object]:
     return {
         "schema_version": "continue-packet.v1",
         "scope": "task",
-        "next_action": "先读 task_rollup.json，再按 pending_work 读取对应 child run refs。",
+        "next_action": "读取 task_rollup.json；只有存在新的 pending/blocked 变化、需要验收或需要接管时，才继续读取对应 child run refs，避免高频轮询。",
         "completed_headings": [],
         "avoid_repeating": [],
         "active_refs": [
@@ -230,12 +220,6 @@ def _rollup_markdown(rollup: dict[str, object]) -> str:
         + ("\n".join(rows) if rows else "- 暂无")
         + "\n"
     )
-
-
-def _next_compact_index(ledger: Path) -> int:
-    if not ledger.exists():
-        return 1
-    return sum(1 for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()) + 1
 
 
 def _read_json_report(path: Path, *, context: str) -> JsonObjectReadReport:

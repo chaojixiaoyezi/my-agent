@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+
 from agent_py_agent.agent.agent_core._runtime_params import FinalizeContext
 from agent_py_agent.agent.agent_core.compact_auto_continuation import (
     build_compact_auto_continue_injection,
@@ -191,6 +193,26 @@ def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path)
     assert second_prompt.index("# Home Entry: AGENTS.md") < second_prompt.index("# Compact Auto Continuation")
     assert "继续当前任务的未完成部分" in second_prompt
     assert "Do not redo completed work" in second_prompt
+
+
+def test_run_auto_compact_continuation_reuses_original_task_workspace(tmp_path):
+    home = tmp_path / "home"
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(home)), tmp_path)
+    backend = ContextOverflowThenCaptureBackend()
+    agent.backend = backend
+
+    agent.run(
+        "分析 all-agent 项目并写中文报告",
+        save=True,
+        request_id="req-workspace-continuation",
+        run_id="run-workspace-continuation",
+    )
+
+    date_roots = list((agent.home_paths.owner_tasks_dir).glob("*/*"))
+    task_names = sorted(path.name for path in date_roots if path.is_dir())
+    assert task_names == ["分析-all-agent-项目并写中文报告"]
+    state = json.loads((date_roots[0] / "work" / "state.json").read_text(encoding="utf-8"))
+    assert state["run_id"] == "run-workspace-continuation"
 
 
 def test_run_auto_compact_apply_returns_after_no_tool_continuation(tmp_path):

@@ -216,21 +216,22 @@ def _validate_optional_dict(payload: dict[str, Any], key: str) -> list[ContractF
 
 
 def _path_findings(artifact: dict[str, Any], workspace_root: Path | None, location: str) -> list[ContractFinding]:
-    if workspace_root is None:
-        return []
-    root = Path(workspace_root).resolve(strict=False)
     findings: list[ContractFinding] = []
     for key in _ARTIFACT_PATH_KEYS:
         raw = str(artifact.get(key) or "").strip()
-        if not raw:
-            continue
-        candidate = Path(raw).expanduser()
-        path = candidate.resolve(strict=False) if candidate.is_absolute() else (root / candidate).resolve(strict=False)
-        try:
-            path.relative_to(root)
-        except ValueError:
-            findings.append(_finding("DELIVERY_CONTRACT_ARTIFACT_PATH_OUTSIDE_WORKSPACE", "hard", f"{location}.{key}", value=raw))
+        if raw and not _path_resolves(raw, workspace_root):
+            findings.append(_finding("DELIVERY_CONTRACT_ARTIFACT_PATH_INVALID", "hard", f"{location}.{key}", value=raw))
     return findings
+
+
+def _path_resolves(raw: str, workspace_root: Path | None) -> bool:
+    candidate = Path(raw).expanduser()
+    try:
+        target = candidate if candidate.is_absolute() or workspace_root is None else Path(workspace_root).resolve(strict=False) / candidate
+        target.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
 
 
 def _report(normalized: dict[str, Any], findings: list[ContractFinding]) -> ContractDoctorReport:

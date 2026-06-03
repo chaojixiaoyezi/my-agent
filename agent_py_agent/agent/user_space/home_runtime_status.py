@@ -131,7 +131,7 @@ def _migration_status(home: MyAgentHomePaths) -> dict[str, dict[str, Any]]:
         ),
         "legacy_raw_memory": _legacy_jsonl_migration_status(
             source=home.memory_raw_dir,
-            target=home.owner_memory_raw_dir,
+            target=home.owner_audit_dir,
         ),
         "legacy_task_workspaces": _legacy_directory_migration_status(
             source=home.workspace_tasks_dir,

@@ -21,7 +21,7 @@ class TestCollectArchiveRecords:
     def test_limit_applied(self, tmp_path):
         """验证 limit 参数生效"""
         # 创建测试文件
-        raw_dir = tmp_path / "memory" / "raw"
+        raw_dir = tmp_path / "audit"
         raw_dir.mkdir(parents=True)
         for i in range(20):
             (raw_dir / f"2026-05-{i+1:02d}.jsonl").write_text('{"event_id": "e"}\n')
@@ -31,7 +31,7 @@ class TestCollectArchiveRecords:
 
     def test_level_filter_applied(self, tmp_path):
         """验证 level 过滤生效"""
-        raw_dir = tmp_path / "memory" / "raw"
+        raw_dir = tmp_path / "audit"
         raw_dir.mkdir(parents=True)
         (raw_dir / "2026-05-01.jsonl").write_text(
             '{"event_id": "e1", "archive_level": 1}\n'

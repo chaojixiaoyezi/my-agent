@@ -34,6 +34,7 @@ class CompactPackageRequest:
 def ensure_compact_package(root: str | Path, request: CompactPackageRequest) -> CompactPackagePaths:
     paths = compact_package_paths(root, compact_index=request.compact_index)
     branch = _safe_branch_id(request.branch_id)
+    is_new_package = not paths.package_dir.exists()
     paths.root.mkdir(parents=True, exist_ok=True)
     paths.package_dir.mkdir(parents=True, exist_ok=True)
     _write_seed_file(paths.compact_context_md, "# Compact Context\n\n")
@@ -52,20 +53,21 @@ def ensure_compact_package(root: str | Path, request: CompactPackageRequest) -> 
     )
     _write_latest(paths)
     _update_branch_refs(paths, branch_id=branch, parent_compact_id=request.parent_compact_id)
-    append_jsonl(
-        paths.ledger_jsonl,
-        {
-            "event_type": "compact_package_initialized",
-            "compact_index": int(request.compact_index),
-            "compact_id": paths.package_dir.name,
-            "branch_id": branch,
-            "parent_compact_id": str(request.parent_compact_id or ""),
-            "package_dir": str(paths.package_dir),
-            "scope": request.scope,
-            "created_at": _now_iso(),
-        },
-        sort_keys=True,
-    )
+    if is_new_package:
+        append_jsonl(
+            paths.ledger_jsonl,
+            {
+                "event_type": "compact_package_initialized",
+                "compact_index": int(request.compact_index),
+                "compact_id": paths.package_dir.name,
+                "branch_id": branch,
+                "parent_compact_id": str(request.parent_compact_id or ""),
+                "package_dir": str(paths.package_dir),
+                "scope": request.scope,
+                "created_at": _now_iso(),
+            },
+            sort_keys=True,
+        )
     return paths
 
 

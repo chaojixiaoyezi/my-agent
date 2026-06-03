@@ -295,6 +295,8 @@ def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> 
     checkpoint = json.loads((run_workspace / "checkpoint.json").read_text(encoding="utf-8"))
     legacy_ref = json.loads((run_workspace / "legacy_run_ref.json").read_text(encoding="utf-8"))
     run_timeline = (run_workspace / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
+    run_events = (run_workspace / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    run_artifacts = (run_workspace / "artifacts.jsonl").read_text(encoding="utf-8").splitlines()
 
     assert (run_workspace / "agent.yaml").exists()
     assert (run_workspace / "task.md").exists()
@@ -306,6 +308,7 @@ def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> 
     assert (run_workspace / "artifacts" / "tool_outputs").is_dir()
     assert (run_workspace / "artifacts" / "reports").is_dir()
     assert (run_workspace / "compactions").is_dir()
+    assert (run_workspace / "compact").is_dir()
     assert run_state["task_id"] == task.root_id
     assert run_state["run_id"] == task.id
     assert run_state["status"] == "BLOCKED"
@@ -314,6 +317,8 @@ def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> 
     assert legacy_ref["legacy_task_dir"] == str(tmp_path / task.id)
     assert legacy_ref["agent_run_workspace_status"] == "phase_1_skeleton"
     assert any(json.loads(line)["event"] == "agent_run_workspace_synced" for line in run_timeline)
+    assert any(json.loads(line)["event"] == "agent_run_workspace_synced" for line in run_events)
+    assert any(json.loads(line)["kind"] == "final_report" for line in run_artifacts)
 
 
 def test_subagent_persistence_appends_daily_event_ledger(tmp_path) -> None:

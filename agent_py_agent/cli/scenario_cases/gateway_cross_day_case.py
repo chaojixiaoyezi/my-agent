@@ -131,7 +131,10 @@ def run_scenario_gateway_cross_day_resume_case(args) -> int:
 
     print_scenario_step(2, "Simulate a previous-day clue and next-day recovery snapshot")
     _append_gateway_cross_day_resume_clues(
-        agent.root, request_id=request_id, request_path=request_path, response_path=response_path,
+        Path(agent.home_paths.owner_home_dir),
+        request_id=request_id,
+        request_path=request_path,
+        response_path=response_path,
     )
 
     print_scenario_step(3, "Run memory-resume against the real gateway request id")

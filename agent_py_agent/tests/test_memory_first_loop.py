@@ -79,7 +79,7 @@ def test_write_compression_snapshot_creates_authoritative_json_file(tmp_path):
 
 def test_memory_archive_list_can_filter_by_archive_level(tmp_path, capsys):
     config_path = _write_config(tmp_path)
-    root = tmp_path / "workspace"
+    root = tmp_path / "home" / "owners" / "local" / "main"
     append_raw_event(
         root,
         RawMemoryEvent(

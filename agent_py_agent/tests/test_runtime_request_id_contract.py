@@ -42,7 +42,7 @@ def test_saved_run_generates_request_id_before_externalized_tool_outputs(tmp_pat
 
     result = agent.run("读取 big.txt 并总结。\n验收条件:\n- 需要保留 TRACE-RUN-ID 线索", save=True)
 
-    index_path = agent.home_paths.owner_home_dir / "memory_archive" / "artifacts" / "tool_outputs" / "index.jsonl"
+    index_path = agent.home_paths.owner_blob_tool_outputs_dir / "index.jsonl"
     index_rows = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines()]
     request_id = index_rows[-1]["request_id"]
     fact_path = agent.home_paths.owner_home_dir / "memory_archive" / "runtime_facts" / request_id / "task.json"
@@ -51,7 +51,7 @@ def test_saved_run_generates_request_id_before_externalized_tool_outputs(tmp_pat
     assert request_id.startswith("run-")
     assert index_rows[-1]["tool"] == "read_file"
     assert fact_path.exists()
-    assert not (tmp_path / "memory_archive" / "artifacts" / "tool_outputs" / "index.jsonl").exists()
+    assert index_path.exists()
     artifact_read = agent.tools.execute_call(
         {
             "tool": "read_artifact",

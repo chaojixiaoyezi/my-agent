@@ -4,7 +4,8 @@ from __future__ import annotations
 """Response rendering for gateway CLI output.
 
 This module is derived from runtime.py split. It contains response display
-functions that were previously in that file.
+functions that were previously in that file. Human status lines show cumulative
+context pressure when available, while JSON mode preserves the raw fields.
 """
 
 import json
@@ -31,11 +32,13 @@ def print_gateway_response(payload: dict, *, json_mode: bool = False, show_promp
     else:
         print(str(payload.get("error", "gateway 请求没有返回内容。") or "gateway 请求没有返回内容。"))
 
+    # Human CLI status uses cumulative context pressure; JSON mode keeps both token fields.
     status_line = (
         f"request_id={payload.get('id', '-')}; "
         f"status={payload.get('status', '-')}; "
         f"backend={payload.get('backend', '-')}; "
         f"tool_rounds={payload.get('tool_rounds', 0)}; "
+        f"ctx_tokens≈{payload.get('cumulative_token_estimate') or payload.get('prompt_token_estimate', 0)}; "
         f"prompt_tokens≈{payload.get('prompt_token_estimate', 0)}; "
         f"resume_context={1 if payload.get('memory_resume_context_injected') else 0}"
     )

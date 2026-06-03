@@ -27,6 +27,7 @@ def _write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
         'workspace_root: "workspace"\n'
+        f'my_agent_home: "{(tmp_path / "home").as_posix()}"\n'
         'model_backend: "echo"\n'
         'subagent_workspace: "subagents"\n'
         'local_store_path: "local_store/local.db"\n'
@@ -39,6 +40,14 @@ def _write_config(tmp_path: Path) -> Path:
 
 def _workspace(config_path: Path) -> Path:
     return config_path.parent / "workspace"
+
+
+def _home_root(config_path: Path) -> Path:
+    return config_path.parent / "home"
+
+
+def _archive_root_for_workspace(root: Path) -> Path:
+    return root.parent / "home" / "owners" / "local" / "main"
 
 
 def _run_cli_json(capsys, config_path: Path, *argv: str) -> tuple[int, dict]:
@@ -110,8 +119,9 @@ def _archive_snapshot(run_id: str) -> CompressionSnapshot:
 
 
 def _write_archive_fixture(root: Path, *, run_id: str = "subagent-archive-demo") -> None:
+    archive_root = _archive_root_for_workspace(root)
     _append_archive_raw_event(
-        root,
+        archive_root,
         event_id="raw-demo-1",
         run_id=run_id,
         speaker="user",
@@ -119,14 +129,14 @@ def _write_archive_fixture(root: Path, *, run_id: str = "subagent-archive-demo")
         created_at="2026-04-30T08:00:00+00:00",
     )
     _append_archive_raw_event(
-        root,
+        archive_root,
         event_id="raw-demo-2",
         run_id=run_id,
         speaker="assistant",
         content="已创建子代理，等待父代理继续收口。",
         created_at="2026-04-30T08:00:30+00:00",
     )
-    append_snapshot(root, _archive_snapshot(run_id))
+    append_snapshot(archive_root, _archive_snapshot(run_id))
 
 
 def test_memory_archive_list_json_reads_raw_layer(tmp_path, capsys):
@@ -177,6 +187,7 @@ def test_memory_resume_links_archive_clue_to_task_fact_source(tmp_path, capsys):
     root = _workspace(config_path)
     agent = SimpleAgent(
         AgentConfig(
+            my_agent_home=str(_home_root(config_path)),
             model_backend="echo",
             subagent_workspace="subagents",
             local_store_path="local_store/local.db",
@@ -224,6 +235,7 @@ def test_memory_resume_context_only_prints_recovery_block(tmp_path, capsys):
     root = _workspace(config_path)
     agent = SimpleAgent(
         AgentConfig(
+            my_agent_home=str(_home_root(config_path)),
             model_backend="echo",
             subagent_workspace="subagents",
             local_store_path="local_store/local.db",

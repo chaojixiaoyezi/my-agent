@@ -291,6 +291,44 @@ class TestInspectAgentTreeTool:
         assert coverage["active_targets"][0]["id"] == "source-b"
         assert coverage["active_targets"][0]["checks"]["写证据"] == "pending"
 
+    def test_repeated_tree_inspection_returns_cooldown_snapshot(self, tmp_path):
+        """短时间重复看同一棵树时，应返回缓存提示，避免主代理高频轮询。"""
+        import json
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+        manager = SubAgentManager(tmp_path)
+        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
+        mock_agent = MagicMock()
+        mock_agent.subagents = manager
+
+        tool = InspectAgentTreeTool(mock_agent)
+        first = json.loads(tool.execute({"root_id": child.id}).output)
+        second = json.loads(tool.execute({"root_id": child.id}).output)
+
+        assert "cooldown_active" not in first
+        assert second["cooldown_active"] is True
+        assert "inspect_agent_tree_recent_duplicate" in second["warnings"]
+        assert "不要高频轮询" in second["policy"]["next_step"]
+
+    def test_tree_inspection_cooldown_can_be_disabled(self, tmp_path):
+        import json
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+        manager = SubAgentManager(tmp_path)
+        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
+        mock_agent = MagicMock()
+        mock_agent.subagents = manager
+
+        tool = InspectAgentTreeTool(mock_agent)
+        tool.execute({"root_id": child.id, "cooldown_seconds": 0})
+        second = json.loads(tool.execute({"root_id": child.id, "cooldown_seconds": 0}).output)
+
+        assert "cooldown_active" not in second
+
 
 class TestRaiseEventTool:
     """测试子孙代理事件冒泡。"""

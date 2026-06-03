@@ -163,8 +163,7 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
 def _artifact_path(request: ExternalizeToolOutputRequest, digest: str) -> Path:
     return (
         Path(request.root)
-        / "memory_archive"
-        / "artifacts"
+        / "blobs"
         / "tool_outputs"
         / (
             f"{safe_path_segment(request.tool, default='item', replacement='_')}-"

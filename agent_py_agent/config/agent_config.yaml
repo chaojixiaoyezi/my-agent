@@ -31,7 +31,7 @@ my_agent_home: "~/.my-agent"
 # 当前 owner 身份：
 # - 默认 local/main，表示本机 CLI 主用户。
 # - 接飞书/微信/QQ 等 provider 时，适配器可以把它改成 provider/user/id 或 provider/group/id。
-# - 这只决定 memory/raw/compact/task 等 owner home 归属，不给子代理额外权限。
+# - 这只决定 audit/memory/compact/task 等 owner home 归属，不给子代理额外权限。
 my_agent_owner_provider: "local"
 my_agent_owner_kind: "main"
 my_agent_owner_id: "main"
@@ -50,8 +50,9 @@ run_task_workspace_enabled: true
 
 # 任务工作区路径模板：
 # - {date} 是任务创建日期，例如 2026-05-13。
-# - {task_slug} 是从任务名生成的安全目录名，例如 “示例任务 / main” -> “示例任务-main”。
-# - 默认结果形如 ~/.my-agent/tasks/2026-05-13/示例任务-main/。
+# - {task_slug} 是从任务名/用户意图生成的短安全目录名，例如 “分析 /Users/.../all-agent 架构” -> “all-agent-架构分析”。
+# - 默认结果形如 ~/.my-agent/owners/local/main/tasks/2026-05-13/all-agent-架构分析/。
+# - 同一 prompt/同一任务会复用同一个任务目录，并用 work/timeline.jsonl 记录多次 run；不同任务只是撞名时才追加 run/request 后缀。
 # - 每个任务目录只保留两块顶层内容：
 #   output/ 是可以复制走的最终交付物；work/ 是日志、状态、compact、草稿、子代理账本等过程材料。
 workspace_task_path_template: "tasks/{date}/{task_slug}"
@@ -98,7 +99,7 @@ auto_save_memory: true
 # - memory_resume_auto_context_limit 表示自动恢复最多拿多少条线索，范围 1-50。
 # - compact 提前提示优先读取当前模型后端暴露的真实上下文窗口；拿不到时按 128K 通用窗口兜底。
 # - memory_compact_auto_trigger_percent 控制上下文使用到多少百分比时自动 compact：
-#   不写默认 90；0 表示 100；乱填回默认；大于100 => 100；小于50 => 50；50-100 => 按填写值。
+#   不写默认 50；0 表示 100；乱填回默认；大于100 => 100；小于50 => 50；50-100 => 按填写值。
 # - 保存型运行默认执行非破坏性 apply + auto resume + guard；save=false 时只生成计划，不写入 compact apply。
 # - 自动 compact 续接不再设最大深度；只要 compact 包可恢复，系统会继续同一个任务，不会因为普通任务缺少验收/测试备注而停车。
 # - 运行中 raw archive 和 runtime_fact 是 compact/resume 的基础事实源，随持久化运行默认启用，不提供单独关闭开关。
@@ -113,7 +114,7 @@ memory_rule_receipt_enabled: true
 memory_resume_auto_context_enabled: false
 memory_resume_auto_context_mode: "trigger"
 memory_resume_auto_context_limit: 5
-memory_compact_auto_trigger_percent: 90
+memory_compact_auto_trigger_percent: 50
 
 # Memory / compact / artifact 默认预算：
 # - 这些值只控制“默认读取多少、预览多少、扫描多少”，不是数据保留上限。

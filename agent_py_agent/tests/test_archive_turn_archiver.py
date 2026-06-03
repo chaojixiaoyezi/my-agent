@@ -224,7 +224,7 @@ class TestArchiveRunTurn:
 
         assert result.event_count >= 2
         assert len(result.write_paths) >= 1
-        assert all(("memory" in p.parts and "raw" in p.parts) for p in result.write_paths)
+        assert all("audit" in p.parts for p in result.write_paths)
 
     def test_event_count_matches(self, tmp_path):
         """验证事件计数正确"""

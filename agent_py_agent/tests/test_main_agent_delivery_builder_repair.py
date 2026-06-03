@@ -75,7 +75,7 @@ def _write_source_index(path: Path) -> None:
             {
                 "completion_evidence": {"method": "fixture"},
                 "rows": [{"date": "2026-01-01", "title": "MOSS: Self-Evolution", "url": "https://example.com/moss"}],
-                "source_refs": [{"artifact_ref": "memory_archive/artifacts/tool_outputs/fetch.json", "source_id": "src-1"}],
+                "source_refs": [{"artifact_ref": "blobs/tool_outputs/fetch.json", "source_id": "src-1"}],
             },
             ensure_ascii=False,
         ),

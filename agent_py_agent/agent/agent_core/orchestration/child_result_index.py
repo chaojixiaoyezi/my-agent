@@ -47,8 +47,13 @@ def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
     registry_refs = _dict_list(node.get("artifact_registry_refs"))
     artifact_refs = _string_items(node.get("artifact_refs"))
     workspace_refs = dict(node.get("workspace_refs") or {}) if isinstance(node.get("workspace_refs"), dict) else {}
+    recovery_refs = dict(node.get("recovery_refs") or {}) if isinstance(node.get("recovery_refs"), dict) else {}
+    progress_layer = dict(node.get("progress_layer") or {}) if isinstance(node.get("progress_layer"), dict) else {}
     primary_refs = [ref for item in registry_refs if (ref := current_model_ref(item.get("path")))]
     primary_refs.extend(current_model_ref_list(artifact_refs))
+    final_report_ref = current_model_ref(workspace_refs.get("final_report"))
+    summary_ref = current_model_ref(recovery_refs.get("summary"))
+    checkpoint_ref = current_model_ref(recovery_refs.get("checkpoint"))
     return {
         "run_id": str(node.get("run_id") or "").strip(),
         "parent_run_id": str(node.get("parent_run_id") or "").strip(),
@@ -61,9 +66,32 @@ def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
         "expected_outputs": [],
         "primary_artifact_refs": list(dict.fromkeys(primary_refs)),
         "artifact_registry_refs": _current_registry_refs(registry_refs),
-        "final_report_ref": "",
+        "final_report_ref": final_report_ref,
+        "summary_ref": summary_ref,
+        "checkpoint_ref": checkpoint_ref,
         "task_root": current_model_ref(workspace_refs.get("task_root")),
+        "agent_work_dir": current_model_ref(workspace_refs.get("agent_work_dir")),
+        "progress": node.get("progress", 0.0),
+        "current_tool": str(node.get("current_tool") or "").strip(),
+        "latest_summary": str(node.get("latest_summary") or progress_layer.get("latest_summary") or "").strip(),
+        "last_progress_summary": str(
+            node.get("last_progress_summary") or progress_layer.get("last_progress_summary") or ""
+        ).strip(),
+        "not_done_reason": str(node.get("not_done_reason") or "").strip(),
+        "recent_tool_trace": _dict_list(node.get("recent_tool_trace"))[-5:],
+        "readiness": _readiness_label(str(node.get("status") or ""), primary_refs, final_report_ref, summary_ref),
     }
+
+
+def _readiness_label(status: str, primary_refs: list[str], final_report_ref: str, summary_ref: str) -> str:
+    normalized = status.strip().upper()
+    if normalized in {"DONE", "COMPLETED", "SUCCEEDED", "VERIFIED", "ACCEPTED"}:
+        return "result_ready" if (primary_refs or final_report_ref or summary_ref) else "done_without_refs"
+    if primary_refs:
+        return "partial_artifacts_available"
+    if final_report_ref or summary_ref:
+        return "progress_refs_available"
+    return "running_no_result_yet" if normalized in {"RUNNING", "PLANNING"} else "not_ready"
 
 
 def _expected_outputs(attrs: dict[str, object]) -> list[str]:

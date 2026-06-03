@@ -66,7 +66,7 @@ class MemoryRecord:
 
 
 class JsonlMemory(JsonlMemoryIndexMixin):
-    """JSONL-backed memory store with optional LocalStore indexing and search fallback.
+    """JSONL-backed memory store with optional LocalStore indexing.
 
     新手说明:
     JSONL 是事实流水，LocalStore 是检索索引。
@@ -81,7 +81,6 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         path: str | Path,
         local_store: LocalStore | None = None,
         daily_mirror_dir: str | Path | None = None,
-        fallback_read_paths: tuple[str | Path, ...] | list[str | Path] | None = None,
     ):
         """初始化 JSONL 记忆文件位置，并确保父目录存在。
 
@@ -97,7 +96,6 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         self.local_store = local_store
         self.daily_mirror_dirs = _daily_mirror_dirs(daily_mirror_dir)
         self.daily_mirror_dir = self.daily_mirror_dirs[0] if self.daily_mirror_dirs else None
-        self.fallback_read_paths = _fallback_read_paths(fallback_read_paths, primary=self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def add(
@@ -153,7 +151,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         这个方法没有输入参数。
 
         返回说明:
-        返回旧 memory_path 的 MemoryRecord 列表；home daily mirror 由 search() 补充检索或 CLI 直接读取。
+        返回当前 owner 长期记忆文件的 MemoryRecord 列表；home daily mirror 由 search() 补充检索或 CLI 直接读取。
 
         异常说明:
         如果某一行不是合法 JSON，目前会由 json.loads 抛错；后续如需容错可加 read audit。"""
@@ -161,7 +159,6 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         return _dedupe_memory_records(
             [
                 *self._read_memory_file(self.path),
-                *self._read_fallback_memory_files(),
             ]
         )
 
@@ -184,8 +181,8 @@ class JsonlMemory(JsonlMemoryIndexMixin):
     def search_report(self, query: str, top_k: int = 5) -> tuple[list[MemoryRecord], list[dict]]:
         """搜索记忆并保留可恢复的索引读取错误。
 
-        LocalStore 只是检索索引，不是记忆事实源。索引坏了时继续从 JSONL / daily
-        mirror / fallback 文件检索，但把错误报告给调用方，避免上层误判为“没有记忆”。
+        LocalStore 只是检索索引，不是记忆事实源。索引坏了时继续从当前 owner JSONL / daily
+        mirror 检索，但把错误报告给调用方，避免上层误判为“没有记忆”。
         """
 
         indexed, load_errors = self._search_local_store_report(query, top_k)
@@ -194,7 +191,6 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         fallback = _merge_search_result_groups(
             (
                 self._search_jsonl(query, top_k),
-                self._search_fallback_memory(query, top_k),
                 self._search_daily_mirror(query, top_k),
             ),
             top_k=top_k,
@@ -211,7 +207,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         这个方法没有输入参数。
 
         返回说明:
-        返回成功尝试索引的旧 memory_path 记录数量；home daily mirror 暂不混入本地索引重建。
+        返回成功尝试索引的 owner 长期记忆记录数量；home daily mirror 暂不混入本地索引重建。
 
         副作用说明:
         会调用 LocalStore.upsert_record；不会改写 JSONL。"""
@@ -247,16 +243,6 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         for path in self._daily_mirror_files():
             records.extend(self._read_memory_file(path))
         return _search_memory_records(records, query, top_k)
-
-    def _read_fallback_memory_files(self) -> list[MemoryRecord]:
-        records: list[MemoryRecord] = []
-        for path in self.fallback_read_paths:
-            records.extend(self._read_memory_file(path))
-        return records
-
-    def _search_fallback_memory(self, query: str, top_k: int) -> list[MemoryRecord]:
-        return _search_memory_records(self._read_fallback_memory_files(), query, top_k)
-
 
 def _memory_record_key(record: MemoryRecord) -> tuple[str, str, str, float]:
     return (record.role, record.kind, record.content, float(record.created_at or 0.0))
@@ -330,16 +316,3 @@ def _daily_mirror_dirs(value: object) -> tuple[Path, ...]:
         if path not in dirs:
             dirs.append(path)
     return tuple(dirs)
-
-
-def _fallback_read_paths(value: object, *, primary: Path) -> tuple[Path, ...]:
-    if not value:
-        return ()
-    raw_items = value if isinstance(value, (list, tuple, set)) else (value,)
-    paths: list[Path] = []
-    for item in raw_items:
-        path = Path(item)
-        if path == primary or path in paths:
-            continue
-        paths.append(path)
-    return tuple(paths)

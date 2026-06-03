@@ -22,7 +22,7 @@ class MemoryCompactSuggestOptions:
     current_tokens: int
     max_context_tokens: int
     plan_options: MemoryCompactPlanOptions
-    trigger_percent: int = 90
+    trigger_percent: int = 50
     owner_type: str = "main_agent"
     owner_id: str = ""
     #  trigger 字段只记录触发来源；正常阈值和兜底救场仍走同一个 compact suggestion。
@@ -143,7 +143,7 @@ def _trigger_percent(value: object) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError):
-        return 90
+        return 50
     if parsed <= 0:
         return 100
     if parsed < 50:

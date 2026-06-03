@@ -45,8 +45,8 @@ def read_tool_output_artifact(request: ReadToolOutputArtifactRequest) -> dict[st
     if record is None:
         return _error_payload("artifact_not_registered", artifact_ref, "artifact ref was not found in tool output index")
     path = Path(str(record.get("path", "") or "")).expanduser().resolve(strict=False)
-    allowed_root = _tool_output_root(root)
-    if not _is_under_allowed_root(path, allowed_root):
+    allowed_roots = _tool_output_roots(root)
+    if not any(_is_under_allowed_root(path, allowed_root) for allowed_root in allowed_roots):
         return _error_payload("artifact_path_outside_tool_outputs", artifact_ref, "registered path is outside tool_outputs")
     if not path.is_file():
         return _error_payload("artifact_missing", artifact_ref, "registered artifact file does not exist")
@@ -143,8 +143,7 @@ def _find_index_record(
     artifact_ref: str,
     request: ReadToolOutputArtifactRequest,
 ) -> dict[str, Any] | None:
-    index_path = _tool_output_root(root) / "index.jsonl"
-    records = _index_records(index_path)
+    records = _index_records_for_root(root)
     ref_path = Path(artifact_ref).expanduser()
     resolved_ref = ref_path.resolve(strict=False) if ref_path.is_absolute() or _looks_like_path(artifact_ref) else None
     matches = [
@@ -244,8 +243,15 @@ def _error_payload(error_code: str, artifact_ref: str, message: str) -> dict[str
     }
 
 
-def _tool_output_root(root: Path) -> Path:
-    return root / "memory_archive" / "artifacts" / "tool_outputs"
+def _index_records_for_root(root: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for index_path in [directory / "index.jsonl" for directory in _tool_output_roots(root)]:
+        records.extend(_index_records(index_path))
+    return records
+
+
+def _tool_output_roots(root: Path) -> tuple[Path, ...]:
+    return (root / "blobs" / "tool_outputs",)
 
 
 def _is_under_allowed_root(path: Path, root: Path) -> bool:

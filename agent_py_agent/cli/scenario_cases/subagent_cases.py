@@ -272,7 +272,7 @@ def run_scenario_parent_subagent_cross_day_resume_case(args) -> int:
     paths, agent, backend, task, loaded, runner = _parent_subagent_setup(args)
 
     print_scenario_step(3, "Simulate cross-day archive clues for a resumed parent session")
-    _append_parent_subagent_cross_day_resume_clues(agent.root, loaded)
+    _append_parent_subagent_cross_day_resume_clues(Path(agent.home_paths.owner_home_dir), loaded)
     reloaded_agent = load_scenario_agent(paths.config)
     reloaded_task = reloaded_agent.subagents.load(task.id)
     print(f"reloaded_status={reloaded_task.status} task_dir={reloaded_task.task_dir}")

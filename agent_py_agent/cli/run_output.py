@@ -33,6 +33,7 @@ def print_run_result(result, *, show_prompt: bool, streamed_text: str = "") -> N
     print(
         f"\n[backend={result.backend}; used_memories={result.used_memories}; "
         f"tool_rounds={result.tool_rounds}; routed_rules={result.memory_route_matches}; "
+        f"ctx_tokens≈{getattr(result, 'cumulative_token_estimate', 0) or result.prompt_token_estimate}; "
         f"prompt_tokens≈{result.prompt_token_estimate}; inject_tokens≈{result.runtime_injection_token_estimate}; "
         f"archive_events={result.archive_events}; "
         f"resume_context={1 if result.memory_resume_context_injected else 0}; "

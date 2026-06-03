@@ -50,7 +50,7 @@ def test_prompt_home_context_reads_owner_entry_files(tmp_path: Path):
     rendered = "\n".join(_home_entry_context_chunks(paths))
 
     assert "owner agents" in rendered
-    assert "legacy agents" in rendered
+    assert "legacy agents" not in rendered
 
 
 def test_simple_agent_daily_memory_mirror_uses_owner_home(tmp_path: Path):

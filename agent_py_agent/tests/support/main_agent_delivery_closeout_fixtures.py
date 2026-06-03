@@ -275,7 +275,7 @@ class LocalProgressRedirectBackend:
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
-        artifact_ref = str(Path("memory_archive/artifacts/tool_outputs/demo.json").resolve())
+        artifact_ref = str(Path("blobs/tool_outputs/demo.json").resolve())
         if self.calls == 1:
             return _write_file_response("outputs/table_report/source_data.json", _empty_workbook_source_json(), self.name)
         if self.calls == 2:

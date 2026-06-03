@@ -21,6 +21,7 @@ def test_exploration_fuse_emits_crossed_hint_once(tmp_path: Path):
     context = exploration_fuse_context(agent, redirects=0)
 
     assert "20%" in context
+    assert "不要向用户转述" in context
     assert "下一轮请执行本地落地动作" in context
     assert exploration_fuse_context(agent, redirects=0) == ""
 
@@ -45,6 +46,7 @@ def test_exploration_fuse_unlimited_mode_emits_crossed_fixed_hint_once(tmp_path:
     context = exploration_fuse_context(agent, redirects=0)
 
     assert "第 150 轮固定提醒" in context
+    assert "不要向用户转述" in context
     assert has_pending_exploration_fuse(agent) is False
     assert exploration_fuse_context(agent, redirects=0) == ""
 
@@ -68,7 +70,8 @@ def test_exploration_fuse_uses_configured_budget_ratio_hints(tmp_path: Path):
     assert "[tool-system exploration-fuse]" in context
     assert has_pending_exploration_fuse(agent) is False
     assert "20%" in context
-    assert "连续探索额度" in context
+    assert "连续探索额度" not in context
+    assert "不要向用户转述" in context
     assert "建议先写出" in context
     assert "下一轮优先做一次本地落地动作" in context
     assert "保存来源索引、阶段笔记、检查点、草稿、结构化数据或目标产物" in context
@@ -112,7 +115,7 @@ def test_exploration_fuse_zero_threshold_uses_fixed_hints_without_blocking(tmp_p
     assert has_required_exploration_fuse(agent, calls) is True
     context = exploration_fuse_context(agent, redirects=0)
     assert "第 50 轮固定提醒" in context
-    assert "不会因次数阻断" in context
+    assert "不要向用户转述" in context
     assert "下一轮优先做一次本地落地动作" in context
 
     for _ in range(99):
@@ -137,7 +140,7 @@ def test_exploration_fuse_resets_when_local_progress_happens(tmp_path: Path):
     )
 
     agent = SimpleNamespace(root=tmp_path)
-    calls = [{"tool": "read_artifact", "artifact_ref": "memory_archive/artifacts/tool_outputs/data.json"}]
+    calls = [{"tool": "read_artifact", "artifact_ref": "blobs/tool_outputs/data.json"}]
 
     for _ in range(300):
         has_required_exploration_fuse(agent, calls)

@@ -50,7 +50,7 @@ def test_archive_run_turn_writes_user_and_assistant_events():
 
         assert result.event_count == 2
         assert result.token_estimate > 0
-        assert result.write_paths == (root / "memory" / "raw" / "2026-04-30.jsonl",)
+        assert result.write_paths == (root / "audit" / "2026-04-30.jsonl",)
 
         records = _read_jsonl(result.write_paths[0])
         assert [record["speaker"] for record in records] == ["user", "assistant"]
@@ -208,7 +208,7 @@ def test_archive_live_tool_round_writes_before_turn_finalization():
             )
         )
 
-        records = _read_jsonl(root / "memory" / "raw" / "2026-04-30.jsonl")
+        records = _read_jsonl(root / "audit" / "2026-04-30.jsonl")
         assert [record["action"] for record in records] == ["assistant_tool_round", "tool_call"]
         assert records[0]["speaker"] == "assistant"
         assert records[0]["status"] == "ok"
@@ -240,7 +240,7 @@ def test_live_archive_respects_archive_level_zero(tmp_path: Path) -> None:
         tool_calls=[],
     )
 
-    raw_files = list((tmp_path / "memory" / "raw").glob("*.jsonl"))
+    raw_files = list((tmp_path / "audit").glob("*.jsonl"))
     assert len(raw_files) == 1
     records = _read_jsonl(raw_files[0])
     assert records[0]["archive_level"] == 0
@@ -347,7 +347,7 @@ def test_runtime_fact_progress_updates_without_raw_checkpoint(tmp_path: Path) ->
         archive_tool_calls=[
             {
                 "tool": "web_search",
-                "raw_archive_path": str(tmp_path / "memory" / "raw" / "2026-04-30.jsonl"),
+                "raw_archive_path": str(tmp_path / "audit" / "2026-04-30.jsonl"),
                 "artifact_path": str(tmp_path / "outputs" / "report.md"),
             }
         ],
@@ -361,7 +361,7 @@ def test_runtime_fact_progress_updates_without_raw_checkpoint(tmp_path: Path) ->
     assert payload["runtime_progress"]["tool_rounds"] == 7
     assert payload["runtime_progress"]["executed_tools"] == ["web_search"]
     assert any(ref.endswith("outputs/report.md") for ref in payload["runtime_progress"]["artifact_refs"])
-    assert not (tmp_path / "memory" / "raw").exists()
+    assert not (tmp_path / "audit").exists()
 
 
 def test_live_archive_and_runtime_fact_use_owner_home(tmp_path: Path) -> None:
@@ -388,9 +388,9 @@ def test_live_archive_and_runtime_fact_use_owner_home(tmp_path: Path) -> None:
     archive_assistant_tool_round_if_enabled(agent, params, tool_round=1, response_text="准备读取资料。", tool_calls=[])
     update_runtime_fact_progress_if_enabled(agent, params, tool_round=1)
 
-    assert list((owner_home / "memory" / "raw").glob("*.jsonl"))
+    assert list((owner_home / "audit").glob("*.jsonl"))
     assert (owner_home / "memory_archive" / "runtime_facts" / "req-owner" / "task.json").exists()
-    assert not (agent.root / "memory" / "raw").exists()
+    assert not (agent.root / "audit").exists()
     assert not (agent.root / "memory_archive" / "runtime_facts" / "req-owner" / "task.json").exists()
 
 

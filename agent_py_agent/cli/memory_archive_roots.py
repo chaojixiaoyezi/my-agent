@@ -23,10 +23,6 @@ def archive_roots(agent) -> list[Path]:
     owner_home = _path_or_none(getattr(home_paths, "owner_home_dir", None))
     if owner_home is not None:
         roots.append(owner_home)
-    if _is_local_main_owner(home_paths):
-        legacy_root = _path_or_none(getattr(agent, "root", None))
-        if legacy_root is not None:
-            roots.append(legacy_root)
     return _dedupe_paths(roots)
 
 
@@ -83,14 +79,6 @@ def _dedupe_paths(paths: list[Path]) -> list[Path]:
         seen.add(key)
         deduped.append(path)
     return deduped
-
-
-def _is_local_main_owner(home_paths: Any) -> bool:
-    return (
-        str(getattr(home_paths, "owner_provider", "") or "local") == "local"
-        and str(getattr(home_paths, "owner_kind", "") or "main") == "main"
-        and str(getattr(home_paths, "owner_id", "") or "local/main") == "local/main"
-    )
 
 
 __all__ = ["ArchiveCollectRequest", "archive_roots", "collect_agent_archive_records"]

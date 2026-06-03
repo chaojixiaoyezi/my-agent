@@ -14,7 +14,7 @@ updated_at: 2026-06-01
 - 本地 CLI 主 owner 默认落在 owners/local/main。
 - owner 级 permissions / quota / retention / skill_policy / tool_policy 会生成种子文件。
 - system/schema_version.json 会写入 my-agent-home.v2 元信息。
-- 保存型主代理 run 在第一轮模型调用前就会创建 task workspace，并把当前 `output/` / `work/` 作为软运行状态注入 prompt；`output/` 只放最终交付物，`work/` 放任务状态、日志、任务级 compact、协作、草稿和下级代理账本。主代理自己的 memory/compact/logs 仍归当前 owner，不进入 `work/agents`。
+- 保存型主代理 run 在第一轮模型调用前就会创建 task workspace，并把当前 `output/` / `work/` 作为软运行状态注入 prompt；`output/` 只放最终交付物，`work/` 放任务状态、日志、任务级 compact、协作、草稿和下级代理账本。任务目录名来自短任务标题，不直接截取整段 prompt；同一 prompt/同一任务复用同一个 task workspace，多次 run 写入 `work/timeline.jsonl`。主代理自己的 memory/compact/logs 仍归当前 owner，不进入 `work/agents`。
 - daily memory 增加了独立的每日工作记忆事件 API，raw archive 仍保留黑盒流水。
 - owner resolver 已有第一片：local/main、provider user、provider group 都能解析到 V2 owner home。
 - 旧 `data/users` 路径推导已收敛到 `legacy_user_paths.py`，只服务迁移和关闭 owner-home runtime 后的兼容模式；正常运行入口不再暴露 `user_space.paths` 这种容易误解成新模型的名字。
@@ -37,7 +37,7 @@ updated_at: 2026-06-01
 - ConversationThread 已可记录 owner_id/owner_home；外部通道创建 thread 时会从当前主代理 owner 注入 owner 归属。
 - 子代理任务会继承当前 owner_id、owner policy 快照和父级 shell 权限上限；owner_home/agents/<run_id>/ 会保存 refs-only projection，方便跨 session/tree/compact 查找。
 - 长期记忆新写入以 owner 为主：主 JSONL 写 `owner_home/memory/long_term/memory.jsonl`，按天摘要写 `owner_home/memory/daily/`；旧 `memory_path` 只作为兼容读取源。
-- task 级 compact rollup 已有落地点：新任务目录统一更新 `tasks/{date}/{task_slug}/work/compact/task_rollup.json`，里面包含 status_counts、pending/completed/blocked run ids 和 artifact refs；同目录还会写 `rollups/branch_main_rollup.json`，compact 包 metadata/ledger 会记录 `branch_id`、`parent_compact_id`、`branches.json` 和 `current_branch.txt`。旧 `tasks/<root_id>/compact/...` 只作为迁移期读取兼容。父代理恢复时可以先看任务级汇总，再按 child run refs 深入。
+- task 级 compact rollup 已有落地点：新任务目录统一更新 `tasks/{date}/{task_slug}/work/compact/task_rollup.json`，里面包含 status_counts、pending/completed/blocked run ids 和 artifact refs；同目录还会写 `rollups/branch_main_rollup.json`，compact 包 metadata/ledger 会记录 `branch_id`、`parent_compact_id`、`branches.json` 和 `current_branch.txt`。这里的 `task_slug` 是短任务标题，例如 `all-agent-架构分析`，不是整段 prompt；同任务多次 run 仍在同一目录下滚动更新状态和 timeline。旧 `tasks/<root_id>/compact/...` 只作为迁移期读取兼容。父代理恢复时可以先看任务级汇总，再按 child run refs 深入。
 - task workspace 查询和 `memory-resume` 推荐读取路径会直接暴露 `work/compact/task_rollup.json`、latest compact `continue_packet.json` 和 `work_state_snapshot.json`；这只是恢复索引，不是验收门。
 - global index 已覆盖 owner/task/run/agent 轻量 refs，并有 dangling ref 检查 helper；索引只做发现，不替代正文。
 - owner capability resolver 已有第一版：按 owner/shared/builtin 优先级解析能力短名，同一 run 内缓存解析结果，避免重复确认。
@@ -2445,7 +2445,7 @@ owners/local/main/ 是默认本地 owner。
 2. 坏了读 timeline.jsonl。
 3. 再读 compact/latest/compact_context.md 或 handoff_summary.md。
 4. 再读 agent_tree.json 或从 agents/ 重建。
-5. 再从 memory/raw、memory/daily、global_index 交叉重建。
+5. 再从 audit、memory/daily、global_index 交叉重建。
 6. 最后尝试 system/backups 中最近可用备份。
 ```
 
@@ -2568,9 +2568,9 @@ system/migrations/
   CLI、provider user、provider group 都能解析到 owner_home。
   新入口不得绕过 resolver 写全局状态。
 
-阶段 3 memory/raw/hooks 按 owner 写：
-  新写入进入 owner_home/memory。
-  旧路径只读兼容，有迁移报告。
+阶段 3 audit/memory/hooks 按 owner 写：
+  raw archive 新写入进入 owner_home/audit。
+  hooks 和长期记忆继续进入 owner_home/memory。
 
 阶段 4 session/task/run/agent 全部挂 owner：
   session 只存 task/run 引用。
@@ -2819,10 +2819,11 @@ shared/bundled 能同步到 profiles，但 profile 可以禁用或不启用。
 本地 CLI 输出 owners/local/main。
 ```
 
-### 阶段 3：memory/raw/hooks 按 owner 写
+### 阶段 3：audit/memory/hooks 按 owner 写
 
 ```text
-新写入走 owner_home/memory/。
+raw archive 新写入走 owner_home/audit/。
+memory 和 hooks 新写入走 owner_home/memory/。
 旧路径保留只读兼容。
 run 级 runtime_facts 正文只写 runs/<run_id>/runtime_facts.json。
 memory 下只保留 runtime refs/index。

@@ -29,6 +29,7 @@ from .progress import (
     _enrich_delivery_progress,
     _should_block_on_no_progress,
 )
+from .uncontracted import uncontracted_task_output_closeout_response
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,8 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     contract = _delivery_contract(request.params)
     workspace_root = _workspace_root(request.agent)
     if not contract:
+        if response := uncontracted_task_output_closeout_response(request, workspace_root):
+            return response
         write_non_terminal_closeout_report(request, workspace_root, reason="delivery_contract_missing")
         return None
     doctor = validate_delivery_contract(contract, workspace_root=workspace_root)

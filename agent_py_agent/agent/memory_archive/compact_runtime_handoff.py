@@ -1,6 +1,12 @@
 
 from __future__ import annotations
 
+"""Runtime handoff facts for compact/resume.
+
+The handoff may point to recent guidance and active child agents, but its
+suggestion must not teach the parent to poll subagents every model turn.
+"""
+
 import json
 from pathlib import Path
 from typing import Any
@@ -16,7 +22,7 @@ def build_runtime_handoff(workspace: Path, ids: list[str]) -> dict[str, Any]:
         "recent_guidance": guidance,
         "agent_tree": tree,
         "next_suggestion": (
-            "继续推进当前任务；先查看进度账本和下级状态，再决定是否补充引导或接手。"
+            "继续推进当前任务；只有缺少最新事实、到验收/接管节点或已有状态明显变化时，才查看进度账本和下级状态，避免高频轮询。"
         ),
         "soft_only": True,
     }

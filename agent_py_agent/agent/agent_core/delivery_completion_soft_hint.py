@@ -23,7 +23,7 @@ def maybe_append_delivery_completion_soft_hint(
     if not _is_successful_mutation(archive_record, tool_ok=tool_ok):
         return
     contract = params.delivery_contract if isinstance(params.delivery_contract, dict) else {}
-    if not contract:
+    if not contract and not _looks_like_task_output_delivery(params, archive_record):
         return
     workspace_root = Path(getattr(agent, "root", ".")).expanduser().resolve(strict=False)
     target_paths = _required_target_paths(contract, workspace_root)
@@ -80,11 +80,49 @@ def _required_target_paths(contract: dict[str, Any], workspace_root: Path) -> li
 
 def _produced_refs(record: dict[str, object]) -> list[str]:
     refs: list[str] = []
-    for key in ("artifact_ref", "output_path"):
+    for key in ("artifact_ref", "output_path", "path"):
         _append_text(refs, record.get(key))
     _append_ref_items(refs, record.get("artifact_registry_refs"), ("path", "artifact_id"))
     _append_ref_items(refs, record.get("tool_result_refs"), ("path",))
     return list(dict.fromkeys(refs))
+
+
+def _looks_like_task_output_delivery(params: ToolLoopExecuteParams, record: dict[str, object]) -> bool:
+    output_dir = _task_output_dir(params)
+    if not output_dir:
+        return False
+    for ref in _produced_refs(record):
+        path = Path(ref).expanduser()
+        if not path.is_absolute():
+            continue
+        try:
+            path.relative_to(output_dir)
+        except ValueError:
+            continue
+        if _looks_like_report_file(path):
+            return True
+    return False
+
+
+def _task_output_dir(params: ToolLoopExecuteParams) -> Path | None:
+    attrs = getattr(params, "task_attributes", None)
+    if not isinstance(attrs, dict):
+        return None
+    workspace = attrs.get("run_workspace")
+    if not isinstance(workspace, dict):
+        return None
+    text = str(workspace.get("output_dir") or "").strip()
+    if not text:
+        return None
+    return Path(text).expanduser().resolve(strict=False)
+
+
+def _looks_like_report_file(path: Path) -> bool:
+    suffix = path.suffix.lower()
+    if suffix not in {".md", ".txt", ".json", ".html", ".csv", ".xlsx", ".docx", ".pptx"}:
+        return False
+    name = path.name.lower()
+    return any(marker in name for marker in ("report", "analysis", "summary", "final", "结果", "报告", "分析", "总结"))
 
 
 def _hint_already_added(params: ToolLoopExecuteParams) -> bool:

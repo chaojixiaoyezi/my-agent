@@ -221,7 +221,7 @@ def test_memory_compact_work_state_reports_corrupt_archive_sources(tmp_path: Pat
     _write_compact_fixture(root)
     for snapshot_ref in (root / "memory_archive" / "snapshots").glob("*.json"):
         snapshot_ref.unlink()
-    archive_ref = root / "memory" / "raw" / "2026-05-06.jsonl"
+    archive_ref = root / "audit" / "2026-05-06.jsonl"
     with archive_ref.open("a", encoding="utf-8") as handle:
         handle.write("{bad-json\n")
 

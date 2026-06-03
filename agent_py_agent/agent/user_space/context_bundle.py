@@ -139,13 +139,10 @@ def _workspace_refs(request: MainContextBundleRequest, home_paths: Any | None) -
         "primary_workspace_root": root,
         "my_agent_home": str(Path(home_paths.root).resolve()),
         "owner_id": str(getattr(home_paths, "owner_id", "") or ""),
-        "owner_home": str(Path(getattr(home_paths, "owner_home_dir", home_paths.root)).resolve()),
-        "owner_tasks_root": str(Path(getattr(home_paths, "owner_tasks_dir", home_paths.workspace_tasks_dir)).resolve()),
-        "legacy_workspace_tasks_root": str(Path(home_paths.workspace_tasks_dir).resolve()),
-        "memory_root": str(Path(home_paths.memory_dir).resolve()),
-        "owner_memory_root": str(Path(getattr(home_paths, "owner_memory_dir", home_paths.memory_dir)).resolve()),
-        "artifacts_root": str((Path(home_paths.memory_archive_dir) / "artifacts").resolve()),
-        "owner_artifacts_root": str(Path(getattr(home_paths, "owner_artifacts_dir", home_paths.memory_archive_dir)).resolve()),
+        "owner_home": _resolved_home_attr(home_paths, "owner_home_dir"),
+        "owner_tasks_root": _resolved_home_attr(home_paths, "owner_tasks_dir"),
+        "owner_memory_root": _resolved_home_attr(home_paths, "owner_memory_dir"),
+        "owner_artifacts_root": _resolved_home_attr(home_paths, "owner_artifacts_dir"),
         "reserved": {},
     }
 
@@ -168,17 +165,18 @@ def _memory_refs(request: MainContextBundleRequest, home_paths: Any | None) -> d
     if home_paths is not None:
         payload.update(
             {
-                "daily_memory_root": str(Path(home_paths.memory_daily_dir).resolve()),
-                "owner_daily_memory_root": str(
-                    Path(getattr(home_paths, "owner_memory_daily_dir", home_paths.memory_daily_dir)).resolve()
-                ),
-                "key_memory_path": str(Path(home_paths.memory_md).resolve()),
-                "owner_key_memory_path": str(Path(getattr(home_paths, "owner_memory_md", home_paths.memory_md)).resolve()),
-                "lessons_root": str(Path(home_paths.memory_lessons_dir).resolve()),
-                "indexes_root": str(Path(home_paths.memory_indexes_dir).resolve()),
+                "owner_daily_memory_root": _resolved_home_attr(home_paths, "owner_memory_daily_dir"),
+                "owner_key_memory_path": _resolved_home_attr(home_paths, "owner_memory_md"),
+                "owner_lessons_root": _resolved_home_attr(home_paths, "owner_memory_lessons_dir"),
+                "owner_indexes_root": _resolved_home_attr(home_paths, "owner_memory_indexes_dir"),
             }
         )
     return payload
+
+
+def _resolved_home_attr(home_paths: Any, attr: str) -> str:
+    raw = getattr(home_paths, attr, None)
+    return str(Path(raw).resolve()) if raw else ""
 
 
 def _recovery_refs(request: MainContextBundleRequest, home_paths: Any | None) -> dict[str, object]:

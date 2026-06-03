@@ -91,7 +91,7 @@ Control-plane query 第一片已落地：`query_memory_control_plane()` 会按 d
 
 工具大输出、日志样本、报告和中间产物必须留在 artifact 文件中。ledger、state、summary、raw tool event 和 memory item 只能保存摘要、hash、路径和状态。
 
-当前 runtime 工具输出外置第一片已落地：工具循环记录归档时，超过阈值的大输出会写入 `memory_archive/artifacts/tool_outputs/<tool>-<call>-<hash>.json`，并追加 `index.jsonl`；`archive_tool_calls` 和 raw tool event 只保存 `output_preview`、`output_hash`、`output_path`、`output_size_bytes` 和 `output_externalized`。当前模型轮的 `tool_context` 仍保留完整工具结果，所以这一步不改变工具执行行为，只改变归档和 compact 输入形态。
+当前 runtime 工具输出外置第一片已落地：工具循环记录归档时，超过阈值的大输出会写入 `blobs/tool_outputs/<tool>-<call>-<hash>.json`，并追加 `index.jsonl`。`archive_tool_calls` 和 raw tool event 只保存 `output_preview`、`output_hash`、`output_path`、`output_size_bytes` 和 `output_externalized`。当前模型轮的 `tool_context` 仍保留完整工具结果，所以这一步不改变工具执行行为，只改变归档和 compact 输入形态。
 
 当前 Phase 3 已先落地 `artifacts/manifest.jsonl`：subagent 保存时会在 task workspace 和 agent run workspace 各写一份 manifest，把 `artifact_refs` 规范化为 ref、resolved path、exists、size、sha256、summary、kind、source 和 `resolution_status`。manifest 只允许读取 legacy task dir、task workspace、agent run workspace 内的文件；越界绝对路径或 `..` 逃逸路径只登记 blocked 状态，不复制 artifact 正文，也不计算 hash。
 
@@ -263,7 +263,7 @@ Runtime memory 的轻量索引记录必须能长期扩展，但不能把字段�
 - task workspace 已有第一版 `task.yaml`、`state.json`、`timeline.jsonl`，run workspace 已有第一版 `agent.yaml`、run-level `state.json/timeline.jsonl` 和 checkpoint-first compact ledger/snapshot 链；全局 `memory-compact --apply` 已有非破坏性 apply、restore refs、apply bundle、work state snapshot、post-compact self-check 和失败阻断，`memory-resume --from-compact` 已能只读生成手动恢复上下文；run-local destructive compact apply 仍未接入。
 - compact 提示已接入主代理 `run` 返回值；自动 compact/resume 已能在主代理 guard 放行后连续续接同一任务。子代理侧已有 task-local refs、自动 latest continue packet、runner prompt 接续第一版；完整无人值守接管和失败后自动选择新 leader 仍是后续工作。
 - daily ledger 已有 append-only 文件入口和 artifact manifest refs，并已接入 control-plane 只读查询；resume 查询优先级还需要下一步显式改造，run-local gate retention 已有保守 active queue 清理。
-- artifact manifests 已能规范已有 `artifact_refs`，runtime 大工具输出已能外置到 `memory_archive/artifacts/tool_outputs/` 并追加 index，control-plane 已能统一查询全局 tool-output index；但 task/run artifact manifest 与全局 artifact index 的 content-addressed 去重存储还没做。
+- artifact manifests 已能规范已有 `artifact_refs`，runtime 大工具输出已能外置到 `blobs/tool_outputs/` 并追加 index，control-plane 已能统一查询全局 tool-output index；但 task/run artifact manifest 与全局 artifact index 的 content-addressed 去重存储还没做。
 - schema v2 已覆盖当前新写的轻量索引记录，但旧 raw/hook/archive 历史记录仍保持原 schema，后续要做迁移只能通过 reader 兼容或显式 migration，不允许原地重写历史事实源。
 - shared blackboard/messages/findings/evidence packets 已有最小同步面，但 locks/handoffs 和 sibling 消息协议仍未系统化。
 - memory item 写入门禁 / skill spark 提升链已能记录候选、review decision、retention、长期 memory 显式导出、skill draft 显式导出和 verifier 报告；正式 skill 安装仍未实现，后续也必须保持人工确认。

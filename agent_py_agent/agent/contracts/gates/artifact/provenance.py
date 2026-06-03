@@ -13,26 +13,69 @@ def evaluate_artifact_provenance_gate(item: dict[str, Any], *, run_id: str = "")
     if item.get("ok") is not True:
         return GateDecision.allow("artifact_provenance", evidence={"skipped": "artifact_not_accepted"})
     provenance = item.get("provenance")
-    if not isinstance(provenance, dict) or provenance.get("ok") is not True:
-        return GateDecision.allow(
-            "artifact_provenance",
-            recommended_action=RecoveryAction.RECORD_PROVENANCE.value,
-            evidence={"warning_codes": ["ARTIFACT_PROVENANCE_MISSING"]},
-        )
+    if not _has_accepted_provenance(provenance):
+        return _missing_provenance_decision()
     provenance_run_id = str(provenance.get("run_id") or "").strip()
     if run_id and provenance_run_id != run_id:
-        return GateDecision.allow(
-            "artifact_provenance",
-            recommended_action=RecoveryAction.VERIFY_CROSS_RUN_ARTIFACT.value,
-            evidence={
-                "warning_codes": ["ARTIFACT_PROVENANCE_RUN_MISMATCH"],
-                "artifact_run_id": provenance_run_id,
-                "current_run_id": run_id,
-            },
-        )
+        return _run_mismatch_decision(provenance_run_id, run_id)
     findings = _hash_chain_findings(item, provenance)
     if findings:
         return GateDecision.repair("artifact_provenance", findings)
+    warnings = _current_run_provenance_warnings(item, provenance)
+    if warnings:
+        return GateDecision.repair(
+            "artifact_provenance",
+            [GateFinding(code) for code in warnings],
+            recommended_action=RecoveryAction.RECORD_PROVENANCE.value,
+            evidence={
+                "artifact_ref": str(provenance.get("artifact_ref") or provenance.get("path") or ""),
+                "tool_name": str(provenance.get("tool_name") or ""),
+                "operation_id": str(provenance.get("operation_id") or ""),
+                "run_id": provenance_run_id,
+                "build_output_hash": str(provenance.get("build_output_hash") or ""),
+                "warning_codes": warnings,
+            },
+        )
+    return GateDecision.allow(
+        "artifact_provenance",
+        evidence={
+            "artifact_ref": str(provenance.get("artifact_ref") or provenance.get("path") or ""),
+            "tool_name": str(provenance.get("tool_name") or ""),
+            "operation_id": str(provenance.get("operation_id") or ""),
+            "run_id": provenance_run_id,
+            "build_output_hash": str(provenance.get("build_output_hash") or ""),
+            "warning_codes": warnings,
+        },
+    )
+
+
+def _has_accepted_provenance(value: object) -> bool:
+    return isinstance(value, dict) and value.get("ok") is True
+
+
+def _missing_provenance_decision() -> GateDecision:
+    return GateDecision.repair(
+        "artifact_provenance",
+        [GateFinding("ARTIFACT_PROVENANCE_MISSING")],
+        recommended_action=RecoveryAction.RECORD_PROVENANCE.value,
+        evidence={"warning_codes": ["ARTIFACT_PROVENANCE_MISSING"]},
+    )
+
+
+def _run_mismatch_decision(provenance_run_id: str, run_id: str) -> GateDecision:
+    return GateDecision.repair(
+        "artifact_provenance",
+        [GateFinding("ARTIFACT_PROVENANCE_RUN_MISMATCH")],
+        recommended_action=RecoveryAction.VERIFY_CROSS_RUN_ARTIFACT.value,
+        evidence={
+            "warning_codes": ["ARTIFACT_PROVENANCE_RUN_MISMATCH"],
+            "artifact_run_id": provenance_run_id,
+            "current_run_id": run_id,
+        },
+    )
+
+
+def _current_run_provenance_warnings(item: dict[str, Any], provenance: dict[str, Any]) -> list[str]:
     warnings = [
         code
         for code, value in (
@@ -45,17 +88,7 @@ def evaluate_artifact_provenance_gate(item: dict[str, Any], *, run_id: str = "")
     ]
     if provenance.get("created_by_current_run") is not True:
         warnings.append("ARTIFACT_PROVENANCE_NOT_CURRENT_RUN")
-    return GateDecision.allow(
-        "artifact_provenance",
-        evidence={
-            "artifact_ref": str(provenance.get("artifact_ref") or provenance.get("path") or ""),
-            "tool_name": str(provenance.get("tool_name") or ""),
-            "operation_id": str(provenance.get("operation_id") or ""),
-            "run_id": provenance_run_id,
-            "build_output_hash": str(provenance.get("build_output_hash") or ""),
-            "warning_codes": warnings,
-        },
-    )
+    return warnings
 
 
 def artifact_provenance_from_archive(

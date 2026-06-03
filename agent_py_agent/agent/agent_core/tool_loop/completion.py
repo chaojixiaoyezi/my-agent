@@ -33,7 +33,7 @@ def completion_response_after_tool_round(
     if _is_task_local_round(request):
         if progress_response := subagent_progress_closeout_response(request.agent, request.response):
             return progress_response
-    if _round_submitted_for_acceptance(request):
+    if _round_submitted_for_acceptance(request) or _round_delivery_auto_closeout_ready(request):
         if delivery_response := main_agent_delivery_closeout_response(
             MainAgentDeliveryCloseoutRequest(
                 agent=request.agent,
@@ -49,6 +49,14 @@ def _round_submitted_for_acceptance(request: ToolRoundCompletionRequest) -> bool
     executed = list(getattr(request.params, "executed_tools", []) or [])
     current_round = executed[request.before_executed_count :]
     return "submit_for_acceptance" in current_round
+
+
+def _round_delivery_auto_closeout_ready(request: ToolRoundCompletionRequest) -> bool:
+    if not isinstance(getattr(request.params, "delivery_contract", None), dict):
+        return False
+    if _round_submitted_for_acceptance(request):
+        return False
+    return any(str(item).startswith("[delivery-completion-soft-hint]") for item in getattr(request.params, "tool_context", []) or [])
 
 
 def _is_task_local_round(request: ToolRoundCompletionRequest) -> bool:

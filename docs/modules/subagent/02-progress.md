@@ -10,6 +10,15 @@
 - capability grant 后会创建 observation 和 wake signal，并写回 `capability_grant_wake`；失败则写结构化 `capability_grant_wake_error`。
 - patch apply record 增加 owner policy、batch validation 和 failure recovery 证据，覆盖 applier、owner policy snapshot、write roots、locked files、测试结果和 rollback 下一步。
 
+## 2026-06-03 树状态、轮询和旧 workspace 污染修复
+
+- `SubagentKernel` 选择 `source_refs` 时优先最新可见 task workspace，避免同 owner/date/slug 下旧任务排在前面时把父代理带回旧目录。
+- `inspect_agent_tree` 节点增加 `not_done_reason`、`running_seconds` 和 `seconds_since_progress`，父级能看见未完成原因、运行时长和多久没进展。
+- `inspect_agent_tree.child_result_index` 不再只展示完成后的 artifact。运行中的子代理即使还没有 `artifact_refs`，也会暴露 `final_report_ref`、`summary_ref`、`checkpoint_ref`、`agent_work_dir`、`recent_tool_trace`、`not_done_reason` 和 `readiness`，方便父代理等待、引导或验收，不再因为 `primary_artifact_refs=[]` 就乱扫 task/work 目录。
+- 相同范围短时间重复调用 `inspect_agent_tree` 会返回 cooldown 缓存快照和 warning，不再让父代理高频轮询放大状态扫描。
+- 新增 `cancel_subagents` 控制面工具，父级可以按 run_id/root/status 取消下级，并写 CANCELLED/ABANDONED、审计和 attempt 废弃记录。
+- 后台启动进程如果秒退、参数错或 import 失败，会立刻标记 `CHANNEL_ERROR` / `channel_status=BROKEN`，不再伪装成仍在 planning。
+
 ## 2026-06-02 canonical state 与派生投影收敛
 
 - 子代理详细状态的权威位置收敛到当前任务工作区的 `work/agents/<run_id>/canonical_state.json`。

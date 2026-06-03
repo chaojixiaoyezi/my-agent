@@ -82,7 +82,7 @@ def _append_retention_audit(home: MyAgentHomePaths, actions: list[RetentionActio
 
 def _retention_specs(home: MyAgentHomePaths) -> tuple[_RetentionSpec, ...]:
     return (
-        _RetentionSpec("raw", home.owner_memory_raw_dir, "raw_days", 90, "*.jsonl"),
+        _RetentionSpec("audit", home.owner_audit_dir, "raw_days", 90, "*.jsonl"),
         _RetentionSpec("daily", home.owner_memory_daily_dir, "daily_days", 365, "*.jsonl"),
         _RetentionSpec("hooks", home.owner_memory_hooks_dir, "hooks_days", 180, "*.jsonl"),
         _RetentionSpec("compact", home.owner_compact_dir, "compact_days", 365, "*"),

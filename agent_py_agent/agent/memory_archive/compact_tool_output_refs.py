@@ -33,7 +33,7 @@ def tool_output_artifact_refs(restore_refs: dict[str, Any]) -> list[dict[str, An
 
 
 def _read_tool_output_index(workspace: Path) -> list[dict[str, Any]]:
-    path = workspace / "memory_archive" / "artifacts" / "tool_outputs" / "index.jsonl"
+    path = workspace / "blobs" / "tool_outputs" / "index.jsonl"
     if not path.exists():
         return []
     rows: list[dict[str, Any]] = []

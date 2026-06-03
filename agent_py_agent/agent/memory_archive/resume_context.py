@@ -215,9 +215,6 @@ def _resume_archive_roots(agent: Any) -> tuple[Path, ...]:
     owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
     if owner_home:
         roots.append(Path(owner_home))
-    legacy_root = Path(getattr(agent, "root", "."))
-    if legacy_root not in roots:
-        roots.append(legacy_root)
     return tuple(roots)
 
 

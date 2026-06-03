@@ -46,7 +46,7 @@ def compression_snapshot_file_for(root: str | Path, snapshot: CompressionSnapsho
 
 def raw_event_path_for(root: str | Path, created_at: str | int | float | None = None) -> Path:
 
-    return Path(root) / "memory" / "raw" / f"{_date_key(created_at)}.jsonl"
+    return Path(root) / "audit" / f"{_date_key(created_at)}.jsonl"
 
 
 def filter_snapshot_for_level(payload: dict[str, Any], level: int) -> dict[str, Any]:

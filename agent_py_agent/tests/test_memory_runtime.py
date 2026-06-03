@@ -198,12 +198,13 @@ def _append_gateway_archive_events(root: Path, request_id: str, request_path: Pa
 
 def _write_cross_day_gateway_archive(agent: SimpleAgent, request_id: str = "gwreq-runtime-cross-day") -> Path:
     root = agent.root
+    archive_root = Path(agent.home_paths.owner_home_dir)
     response_path = root / "gateway" / "responses" / f"{request_id}.json"
     request_path = root / "gateway" / "requests" / "done" / f"{request_id}.json"
     _write_gateway_response_file(response_path, request_id)
     _write_gateway_request_file(request_path, request_id)
     _log_gateway_request_to_local_store(agent, request_id, request_path, response_path)
-    _append_gateway_archive_events(root, request_id, request_path, response_path)
+    _append_gateway_archive_events(archive_root, request_id, request_path, response_path)
     return response_path
 
 
@@ -233,7 +234,7 @@ def test_run_writes_raw_archive_when_saved(tmp_path):
 
     result = agent.run("请归档这轮对话", save=True, request_id="req-archive-save")
 
-    raw_dir = Path(agent.home_paths.owner_memory_raw_dir)
+    raw_dir = Path(agent.home_paths.owner_audit_dir)
     fact_path = Path(agent.home_paths.owner_home_dir) / "memory_archive" / "runtime_facts" / "req-archive-save" / "task.json"
     files = sorted(raw_dir.glob("*.jsonl"))
     assert result.archive_events == 2
@@ -257,7 +258,7 @@ def test_run_no_save_does_not_write_raw_archive(tmp_path):
 
     assert result.archive_events == 0
     assert result.recovery_snapshot_path == ""
-    assert not (tmp_path / "memory" / "raw").exists()
+    assert not (tmp_path / "audit").exists()
     assert not (tmp_path / "memory" / "hooks").exists()
 
 
@@ -277,7 +278,7 @@ def test_run_no_save_does_not_write_runtime_fact(tmp_path):
 
     assert result.archive_events == 0
     assert result.recovery_snapshot_path == ""
-    assert not (tmp_path / "memory" / "raw").exists()
+    assert not (tmp_path / "audit").exists()
     assert not (tmp_path / "memory" / "hooks").exists()
     assert not (tmp_path / "memory_archive" / "runtime_facts").exists()
 

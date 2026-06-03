@@ -1,7 +1,11 @@
 
 from __future__ import annotations
 
-"""execution helpers keep one claimed gateway request inside focused contexts."""
+"""execution helpers keep one claimed gateway request inside focused contexts.
+
+Gateway responses expose both per-turn and cumulative token estimates. CLI/TUI
+status should use the cumulative field when showing current context pressure.
+"""
 
 import threading
 import time
@@ -99,6 +103,8 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "prompt": result.prompt if request.get("include_prompt") else "",
             "prompt_token_estimate": result.prompt_token_estimate,
             "runtime_injection_token_estimate": result.runtime_injection_token_estimate,
+            "turn_token_estimate": result.turn_token_estimate,
+            "cumulative_token_estimate": result.cumulative_token_estimate,
             "memory_resume_context_injected": result.memory_resume_context_injected,
             "memory_resume_context_query": result.memory_resume_context_query,
             "memory_resume_context_matches": result.memory_resume_context_matches,

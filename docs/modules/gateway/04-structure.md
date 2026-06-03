@@ -34,6 +34,7 @@ agent_py_agent/cli/
 - `gateway_parts/process_control.py`：负责后台进程生命周期。
 - `gateway_parts/recovery.py`：处理卡在 processing 的请求。
 - `gateway_parts/runtime.py`：真正执行 request worker，从 pending 取请求、调用 agent、写 response。
+- `gateway_parts/request_execution.py`：单个请求的执行和响应 payload 组装；响应里区分本轮 token 估算和累计上下文估算，供 CLI/TUI 展示当前 run 的总上下文压力。
 - `cli/gateway_process.py`：用户管理后台进程的命令。
 - `cli/gateway_client.py`：用户或 chat 客户端投递消息和读取结果的命令；默认入口也在这里把 `my-agent --app` 映射为 gateway chat + 应用内滚动历史 UI。
 - `cli/models.py`：承接 gateway/adapter CLI 的 bundle 数据结构，例如 `GatewayRunOptions`、`GatewayRunContext`、`GatewayThreadsRequest`、`GatewayRunCleanupRequest` 和 `AdapterOptions`；cmd 层解析 `argparse args` 后再传给 helper。
@@ -63,6 +64,8 @@ request_id=<id>
 ```
 
 response JSON 只保留响应、模型、token、resume context 等运行结果，不再写 `recovery_snapshot_*` 空字段。后续 compact/resume 要恢复 gateway 请求时，先读 request/response JSON 和对应 `runtime_facts/<id>/task.json`，raw archive 仍作为黑匣子补充。
+
+response 里的 token 展示字段分两层：`turn_token_estimate` 是当前请求本轮估算，`cumulative_token_estimate` 是当前 run 累计上下文估算。CLI/TUI 的 `ctx_tokens` 使用累计值，方便观察 compact 触发压力。
 
 ### 多 worker 抢占
 

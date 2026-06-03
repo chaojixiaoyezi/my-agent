@@ -300,7 +300,7 @@ def test_apply_memory_compact_records_self_check_failure_without_rewriting_sourc
     assert failure["failed_checks"][0]["name"] == "forced_failure"
     assert ledger_record["compact_status"] == "blocked_self_check_failed"
     assert ledger_record["restore_ready"] is False
-    assert (root / "memory" / "raw" / "2026-05-06.jsonl").exists()
+    assert (root / "audit" / "2026-05-06.jsonl").exists()
     assert (root / "memory_archive" / "snapshots" / "2026-05-06--snapshot-compact-1.json").exists()
 
 

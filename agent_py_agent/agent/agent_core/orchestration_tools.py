@@ -45,6 +45,7 @@ from .orchestration.tool_grants import (
     subagent_allowed_tools,
 )
 from .orchestration.tool_specs import build_create_subagents_spec
+from .orchestration.tools.cancel import CancelSubagentsTool as CancelSubagentsTool
 from .orchestration.tools.event import RaiseEventTool as RaiseEventTool
 from .orchestration.tools.status import InspectAgentTreeTool as InspectAgentTreeTool
 from .orchestration.write_guard import ExternalWriteTargetRequest, external_write_target_error

@@ -54,7 +54,7 @@ def _update_response_state(
 ) -> str:
     agent_response_text = response.get("response", "")
     with state_lock:
-        last_token_estimate_ref[0] = response.get("prompt_token_estimate", 0)
+        last_token_estimate_ref[0] = response.get("cumulative_token_estimate") or response.get("prompt_token_estimate", 0)
     return agent_response_text
 
 

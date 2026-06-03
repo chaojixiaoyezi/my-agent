@@ -45,7 +45,7 @@ class ReadArtifactTool(BaseTool):
             "request_id": "可选；读取短 call_id 时用于限制当前请求作用域，通常由系统自动注入",
         },
         examples=[
-            '{"tool": "read_artifact", "artifact_ref": "C:/repo/memory_archive/artifacts/tool_outputs/read_file-call-abc.json", "offset": 0, "max_chars": 4000}',
+            '{"tool": "read_artifact", "artifact_ref": "C:/repo/blobs/tool_outputs/read_file-call-abc.json", "offset": 0, "max_chars": 4000}',
         ],
     )
 

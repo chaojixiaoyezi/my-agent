@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import asdict
 from typing import Any
 
@@ -35,6 +36,7 @@ def _node_ref_values(payload: dict[str, object]) -> dict[str, list[object]]:
 
 
 def _node_identity(payload: dict[str, object]) -> dict[str, object]:
+    timing = _timing(payload)
     return {
         "task_id": payload.get("task_id") or payload.get("run_id", ""),
         "run_id": payload.get("run_id", ""),
@@ -58,6 +60,9 @@ def _node_identity(payload: dict[str, object]) -> dict[str, object]:
         "last_progress_at": payload.get("last_progress_at", 0.0),
         "last_progress_summary": current_model_text(payload.get("last_progress_summary", "")),
         "latest_summary": current_model_text(payload.get("latest_summary", "")),
+        "running_seconds": timing["running_seconds"],
+        "seconds_since_progress": timing["seconds_since_progress"],
+        "not_done_reason": _not_done_reason(payload),
         "child_ids": payload.get("child_ids", []),
     }
 
@@ -78,15 +83,20 @@ def _node_status(payload: dict[str, object], refs: dict[str, list[object]]) -> d
 
 def _liveness_layer(payload: dict[str, object]) -> dict[str, object]:
     heartbeat_at = payload.get("heartbeat_at", 0.0)
+    timing = _timing(payload)
     return {
         "status": payload.get("status", ""),
         "heartbeat_at": heartbeat_at,
         "updated_at": payload.get("updated_at", 0.0),
         "has_heartbeat": bool(heartbeat_at),
+        "running_seconds": timing["running_seconds"],
+        "seconds_since_progress": timing["seconds_since_progress"],
+        "not_done_reason": _not_done_reason(payload),
     }
 
 
 def _progress_layer(agent: object, payload: dict[str, object]) -> dict[str, object]:
+    timing = _timing(payload)
     layer = {
         "progress": payload.get("progress", 0.0),
         "current_step": current_model_text(payload.get("current_step", "")),
@@ -94,6 +104,8 @@ def _progress_layer(agent: object, payload: dict[str, object]) -> dict[str, obje
         "last_progress_at": payload.get("last_progress_at", 0.0),
         "last_progress_summary": current_model_text(payload.get("last_progress_summary", "")),
         "latest_summary": current_model_text(payload.get("latest_summary", "")),
+        "running_seconds": timing["running_seconds"],
+        "seconds_since_progress": timing["seconds_since_progress"],
     }
     attach_task_progress(agent, str(payload.get("run_id") or ""), layer)
     return layer
@@ -197,6 +209,39 @@ def _dict(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _timing(payload: dict[str, object]) -> dict[str, float]:
+    now = time.time()
+    started = _safe_float(payload.get("heartbeat_at")) or _safe_float(payload.get("updated_at"))
+    progress_at = (
+        _safe_float(payload.get("last_progress_at"))
+        or _safe_float(payload.get("heartbeat_at"))
+        or _safe_float(payload.get("updated_at"))
+    )
+    return {
+        "running_seconds": max(0.0, now - started) if started > 0 else 0.0,
+        "seconds_since_progress": max(0.0, now - progress_at) if progress_at > 0 else 0.0,
+    }
+
+
+def _not_done_reason(payload: dict[str, object]) -> str:
+    status = str(payload.get("status") or "").strip().upper()
+    if status in {"DONE", "COMPLETED", "SUCCEEDED", "VERIFIED", "ACCEPTED"}:
+        return ""
+    failure_type = str(payload.get("failure_type") or "").strip()
+    if failure_type:
+        return f"failure_type:{failure_type}"
+    blockers = _list(payload.get("blockers"))
+    if blockers:
+        return f"blocked:{blockers[0]}"
+    current_tool = str(payload.get("current_tool") or "").strip()
+    if current_tool:
+        return f"running_tool:{current_tool}"
+    current_step = str(payload.get("current_step") or "").strip()
+    if current_step:
+        return f"current_step:{current_step}"
+    return status.lower() or "not_done"
+
+
 def _list(value: object) -> list:
     return list(value) if isinstance(value, list) else []
 
@@ -231,6 +276,13 @@ def _safe_int(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _safe_float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 __all__ = ["node_from_kernel_run"]

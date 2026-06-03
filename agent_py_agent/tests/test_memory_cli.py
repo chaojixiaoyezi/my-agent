@@ -82,7 +82,7 @@ def test_memory_doctor_json_contains_warnings_and_routes(tmp_path, capsys):
     root = _workspace(config_path)
     _write_route_index(root)
     hook_dir = root / "memory" / "hooks"
-    raw_dir = root / "memory" / "raw"
+    raw_dir = root / "audit"
     hook_dir.mkdir(parents=True, exist_ok=True)
     raw_dir.mkdir(parents=True, exist_ok=True)
     (hook_dir / "2026-04-30.jsonl").write_text("{}\n", encoding="utf-8")

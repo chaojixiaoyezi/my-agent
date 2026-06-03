@@ -370,27 +370,28 @@ def test_materialized_workbook_staging_infers_kind_from_output_path_and_metric_n
     assert contract["fact_evidence_contract"]["evidence_contract"]["required_fields"] == ["指标值"]
 
 
-def test_materialized_delivery_contract_rejects_unbounded_absolute_artifact_path(tmp_path):
+def test_materialized_delivery_contract_allows_user_requested_absolute_artifact_path(tmp_path):
     from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
         materialized_delivery_contract,
     )
 
+    requested_dir = tmp_path.parent / "requested-output"
+    requested_path = requested_dir / "report.pdf"
     contract = materialized_delivery_contract(
         {
             "artifacts": [
                 {
-                    "artifact_id": "bad",
+                    "artifact_id": "external_report",
                     "kind": "pdf",
-                    "preferred_path": "/etc/passwd",
+                    "preferred_path": str(requested_path),
                 }
             ]
         },
         workspace_root=tmp_path,
     )
 
-    finding_codes = [item["code"] for item in contract["_preflight_findings"]]
-    assert "DELIVERY_MATERIALIZER_ARTIFACT_PATH_OUTSIDE_WORKSPACE" in finding_codes
-    assert contract["artifacts"] == []
+    assert contract["artifacts"][0]["preferred_path"] == str(requested_path)
+    assert "_contract_doctor" not in contract
 
 
 def test_materialized_delivery_contract_attaches_doctor_findings_for_bad_contract_shape():

@@ -136,15 +136,18 @@ def check_gateway_alive(paths) -> bool:
 
 
 def format_gateway_timing(ctx: GatewayTimingContext) -> str:
+    ctx_tokens = ctx.response.get("cumulative_token_estimate") or ctx.response.get("prompt_token_estimate", 0)
     if ctx.use_gateway:
         return (
             f"[耗时 {ctx.elapsed:.2f}s; "
             f"工具轮数 {ctx.response.get('tool_rounds', 0)}; "
+            f"ctx_tokens~{ctx_tokens}; "
             f"prompt_tokens~{ctx.response.get('prompt_token_estimate', 0)}; "
             f"resume_context={1 if ctx.response.get('memory_resume_context_injected') else 0}]"
         )
     return (
         f"[耗时 {ctx.elapsed:.2f}s; 工具轮数 {ctx.response.get('tool_rounds', 0)}; "
+        f"ctx_tokens~{ctx_tokens}; "
         f"prompt_tokens~{ctx.response.get('prompt_token_estimate', 0)}; "
         f"resume_context={1 if ctx.response.get('memory_resume_context_injected') else 0}]"
     )

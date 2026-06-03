@@ -160,6 +160,8 @@
 - 中文说明：继续第 3 阶段协议结构化，`inspect_agent_tree` 输出现在会在可确定单棵 root tree 时附带 `kernel_snapshot`。
 - `kernel_snapshot` 只包含状态桶、run rows、workspace refs、recovery refs、artifact/evidence refs 和 blockers，不读取业务产物正文。父级模型要判断“谁还在跑、谁失败、谁可接管、恢复入口在哪里”时，可以先读机器字段，不再从看板自然语言摘要里猜。
 - 如果看板混入多棵 root tree，或 manager 没有 kernel 入口，则不附加该字段，避免把无关任务树混到当前决策里。
+- 2026-06-03 补强：`inspect_agent_tree` 的节点、liveness 和 progress layer 会带 `not_done_reason`、`running_seconds`、`seconds_since_progress`，让父级能看到“为什么还没完成”，而不是只看到 RUNNING/PLANNING。相同范围的短时间重复查看会返回 `cooldown_active` 缓存快照和 `inspect_agent_tree_recent_duplicate` warning，避免父代理高频轮询继续放大状态扫描；真正要接管、验收或出现新事实时仍可继续读取。
+- 2026-06-03 污染修复：kernel `source_refs` 选择最新可见 workspace，不再因为同 slug 旧任务排在前面而把 `root_task/root_work/root_output` 指到旧目录。子代理内部 `final_report.md` 仍属于 `work/agents/<run_id>/`，不能被父级或 closeout 当作用户最终交付物，除非它被注册为本轮产物并通过 provenance。
 - 验收：`test_orchestration_board_payload.py` 和 `test_subagent_kernel.py` focused tests 通过；strict code-size 仍为 `hard=0 high-risk=0 soft=0`。
 
 ## Stage 4 Tool Contract Readiness Slice

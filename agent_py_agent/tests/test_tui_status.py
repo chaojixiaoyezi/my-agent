@@ -59,3 +59,18 @@ def test_tui_status_keeps_static_thinking_without_elapsed_when_idle():
     status = _tui_get_activity_text(refs)
 
     assert status == "✦ 等待输入"
+
+
+def test_tui_response_state_uses_cumulative_context_tokens():
+    from agent_py_agent.cli.chat_parts.tui_worker_stream import _update_response_state
+
+    token_ref = [0]
+
+    text = _update_response_state(
+        {"response": "ok", "prompt_token_estimate": 1200, "cumulative_token_estimate": 9400},
+        threading.Lock(),
+        token_ref,
+    )
+
+    assert text == "ok"
+    assert token_ref[0] == 9400

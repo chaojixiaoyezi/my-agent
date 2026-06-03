@@ -34,6 +34,8 @@
 
 如果 owner projection、状态报告、LocalStore 控制面投影或 global index 同步失败，保存链路只记录 `projection_warnings.json`。这些派生文件可以重建，不能反过来让 canonical state 保存失败，也不能让父代理误以为子代理没干活。
 
+任务树的 `source_refs` 会从当前可见任务里选择最近更新的 workspace。它只负责指向本轮父任务的 `task_root/work/output`，不能因为同名旧任务目录存在就回退到旧 run。单个子代理的内部报告仍在 `work/agents/<run_id>/final_report.md`；除非通过 artifact registry / provenance 注册为本轮交付物，否则它只是内部材料。
+
 子代理应该做的是写自己的结果、证据引用和必要的工作文件；父级或主代理通过 `inspect_agent_tree`、`run_closeout_ref` 和 refs 看状态，不要求子代理手动维护树。
 
 每次子代理保存时，系统会同步当前任务目录的 `work/compact/task_rollup.json` 和 `task_rollup.md`。这个 rollup 是父级恢复和汇总的入口摘要：它列出子 run 状态、refs 和最近 compact 包位置，不复制大产物正文，也不替代具体子代理的 `task.json` / artifact registry。旧 `tasks/<root_id>/compact/...` 只作为迁移期读取兼容。
@@ -69,6 +71,8 @@
 
 这三层都是观察事实，不触发调度、不执行验收、不阻断任务。父代理看到异常后可以自己决定催办、补派、接手、汇报或等待。
 
+未完成原因也在这套只读状态里：节点、liveness 和 progress layer 会带 `not_done_reason`、`running_seconds` 和 `seconds_since_progress`。重复读取同一棵树时，`inspect_agent_tree` 可以返回 cooldown 缓存快照，告诉父级刚看过状态；它不会推进子代理，也不会清掉 pending work。
+
 状态面只返回当前布局路径。`workspace_refs.task_root` 指向任务级目录，`workspace_refs.agent_work_dir` 指向具体代理运行目录；旧式 `data/subagents/<run_id>` work-order 路径只作为系统兼容恢复材料存在，不放进模型可见的 `workspace_refs`。当前布局里，任务根目录只保留 `output/` 和 `work/` 两个一眼能懂的目录；子代理、孙代理等下级代理运行窝统一在 `task_root/work/agents/<agent_id>/`，包括其 `context_bundle.json`、状态、compact 和产物引用。主代理不是当前任务的 child agent，它自己的长期 memory、compact、日志和状态仍属于 `owners/local/main`，不会写进 `task_root/work/agents/`。
 
 `create_subagents`、`dispatch_subagents`、`schedule_child_subagents`、`context_bundle`、runner prompt 摘要和人工/CLI 看板返回前也会走同一层模型可见路径净化，避免嵌套 `agent_tree`、`child_result_index`、`task_envelope` 或 `workspace_refs` 把旧路径重新吐给模型。当前内部编排/状态工具输出被外置到 tool-output artifact 时同样保存净化后的正文；历史旧 artifact 被 `read_artifact` 展开时也会按来源工具净化一次，但普通文件、网页、命令和用户产物正文不做这种替换。
@@ -102,6 +106,8 @@ shell 权限按“不能比父级更大”派生：
 `allowed_tools=["controlled_exec"]` 且带父级 grant 时，才允许继续使用，避免“菜单隐藏但猜名字能调”的旧口子。
 
 外部插件、额外系统工具和未来 skill 不默认自授。父级可以在派工时显式给 `allowed_skills`，子代理也可以通过能力申请链路请求更多工具或 skill；批准和授予仍由上级/系统决定。
+
+`cancel_subagents` 是父级控制面工具，用于按 run_id、root 或状态取消仍活跃的下级。它会废弃 active attempt、标记 `CANCELLED/ABANDONED`、写审计日志，并在有关联进程时做 best-effort interrupt/terminate；取消结果随后通过任务树可见。
 
 owner 归属现在也会随子代理落账：
 

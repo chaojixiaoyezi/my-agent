@@ -5,6 +5,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .owner_policy_seed_payloads import (
+    default_permissions_payload,
+    default_quota_payload,
+    default_retention_payload,
+    default_skill_policy_payload,
+    default_tool_policy_payload,
+)
+
 HOME_SCHEMA_VERSION = "my-agent-home.v2"
 
 
@@ -47,7 +55,6 @@ def _owner_directories(paths: Any) -> tuple[Path, ...]:
         paths.owner_home_dir,
         paths.owner_sessions_dir,
         paths.owner_memory_daily_dir,
-        paths.owner_memory_raw_dir,
         paths.owner_memory_hooks_dir,
         paths.owner_memory_lessons_dir,
         paths.owner_memory_routing_dir,
@@ -62,6 +69,9 @@ def _owner_directories(paths: Any) -> tuple[Path, ...]:
         paths.owner_compact_dir / "by_agent",
         paths.owner_workspace_dir,
         paths.owner_artifacts_dir,
+        paths.owner_audit_dir,
+        paths.owner_blob_tool_outputs_dir,
+        paths.owner_blob_files_dir,
         paths.owner_data_dir,
         paths.owner_logs_dir,
         paths.owner_cache_dir,
@@ -106,6 +116,8 @@ def v2_seed_files(paths: Any) -> tuple[tuple[Path, str], ...]:
         (paths.owner_memory_md, "# Memory\n\n"),
         (paths.owner_memory_hot_md, "# Memory HOT\n\nOwner-specific HOT memory can override or refine root HOT memory.\n"),
         (paths.owner_memory_routing_index_md, "# Owner Memory Routing Index\n\n"),
+        (paths.owner_memory_store_jsonl, ""),
+        (paths.owner_memory_ops_jsonl, ""),
         (paths.shared_indexes_tools_jsonl, ""),
         (paths.shared_indexes_skills_jsonl, ""),
         (paths.shared_indexes_workflows_jsonl, ""),
@@ -122,11 +134,11 @@ def v2_seed_files(paths: Any) -> tuple[tuple[Path, str], ...]:
 def v2_seed_jsons(paths: Any) -> tuple[tuple[Path, dict[str, object]], ...]:
     return (
         (paths.system_schema_version_json, _schema_version_payload()),
-        (paths.owner_permissions_json, _default_permissions_payload()),
-        (paths.owner_quota_json, _default_quota_payload()),
-        (paths.owner_retention_json, _default_retention_payload()),
-        (paths.owner_skill_policy_json, _default_skill_policy_payload()),
-        (paths.owner_tool_policy_json, _default_tool_policy_payload()),
+        (paths.owner_permissions_json, default_permissions_payload()),
+        (paths.owner_quota_json, default_quota_payload()),
+        (paths.owner_retention_json, default_retention_payload()),
+        (paths.owner_skill_policy_json, default_skill_policy_payload()),
+        (paths.owner_tool_policy_json, default_tool_policy_payload()),
     )
 
 
@@ -170,22 +182,39 @@ def _owner_path_fields(home: Path) -> dict[str, Path]:
         "owner_skill_policy_json": owner_home_dir / "skill_policy.json",
         "owner_tool_policy_json": owner_home_dir / "tool_policy.json",
         "owner_sessions_dir": owner_home_dir / "sessions",
+        **_owner_memory_path_fields(owner_memory_dir),
+        **_owner_workspace_path_fields(owner_home_dir),
+    }
+
+
+def _owner_memory_path_fields(owner_memory_dir: Path) -> dict[str, Path]:
+    return {
         "owner_memory_dir": owner_memory_dir,
         "owner_memory_daily_dir": owner_memory_dir / "daily",
-        "owner_memory_raw_dir": owner_memory_dir / "raw",
         "owner_memory_hooks_dir": owner_memory_dir / "hooks",
         "owner_memory_lessons_dir": owner_memory_dir / "lessons",
         "owner_memory_routing_dir": owner_memory_dir / "routing",
         "owner_memory_routing_index_md": owner_memory_dir / "routing" / "INDEX.md",
         "owner_memory_indexes_dir": owner_memory_dir / "indexes",
+        "owner_memory_store_jsonl": owner_memory_dir / "store.jsonl",
+        "owner_memory_ops_jsonl": owner_memory_dir / "ops.jsonl",
         "owner_memory_long_term_dir": owner_memory_dir / "long_term",
         "owner_memory_runtime_refs_dir": owner_memory_dir / "runtime_refs",
+    }
+
+
+def _owner_workspace_path_fields(owner_home_dir: Path) -> dict[str, Path]:
+    return {
         "owner_tasks_dir": owner_home_dir / "tasks",
         "owner_runs_dir": owner_home_dir / "runs",
         "owner_agents_dir": owner_home_dir / "agents",
         "owner_compact_dir": owner_home_dir / "compact",
         "owner_workspace_dir": owner_home_dir / "workspace",
         "owner_artifacts_dir": owner_home_dir / "artifacts",
+        "owner_audit_dir": owner_home_dir / "audit",
+        "owner_blobs_dir": owner_home_dir / "blobs",
+        "owner_blob_tool_outputs_dir": owner_home_dir / "blobs" / "tool_outputs",
+        "owner_blob_files_dir": owner_home_dir / "blobs" / "files",
         "owner_data_dir": owner_home_dir / "data",
         "owner_logs_dir": owner_home_dir / "logs",
         "owner_cache_dir": owner_home_dir / "cache",
@@ -241,61 +270,6 @@ def _schema_version_payload() -> dict[str, object]:
         "migration_level": 0,
         "compatible_read_versions": ["my-agent-home.v1", HOME_SCHEMA_VERSION],
         "writer_version": HOME_SCHEMA_VERSION,
-    }
-
-
-def _default_permissions_payload() -> dict[str, object]:
-    return {
-        "schema_version": "permissions.v1",
-        "filesystem": {
-            "access_mode": "workspace-write",
-            "dangerous_paths": ["/", "/etc", "/System", "~/.ssh"],
-        },
-        "network": {"enabled": True},
-        "shell": {"inherits_parent": True},
-        "subagents": {"inheritance": "parent_capped"},
-    }
-
-
-def _default_quota_payload() -> dict[str, object]:
-    return {
-        "schema_version": "quota.v1",
-        "max_active_agents": 1000,
-        "max_subagents": 50,
-        "max_depth": 4,
-        "max_disk_mb": 102400,
-    }
-
-
-def _default_retention_payload() -> dict[str, object]:
-    return {
-        "schema_version": "retention.v1",
-        "raw_days": 90,
-        "daily_days": 365,
-        "hooks_days": 180,
-        "compact_days": 365,
-        "task_completed_days": 365,
-        "subagent_scratch_days": 30,
-        "trash_days": 30,
-    }
-
-
-def _default_skill_policy_payload() -> dict[str, object]:
-    return {
-        "schema_version": "skill-policy.v1",
-        "enabled_sources": ["owner", "workspace", "shared", "builtin"],
-        "enabled_shared_skills": [],
-        "disabled_skills": [],
-        "pin_versions": {},
-    }
-
-
-def _default_tool_policy_payload() -> dict[str, object]:
-    return {
-        "schema_version": "tool-policy.v1",
-        "enabled_sources": ["builtin", "owner", "workspace", "shared"],
-        "disabled_tools": [],
-        "pin_versions": {},
     }
 
 

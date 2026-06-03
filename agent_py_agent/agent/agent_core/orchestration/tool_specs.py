@@ -136,6 +136,41 @@ def build_dispatch_subagents_spec() -> ToolSpec:
     )
 
 
+def build_cancel_subagents_spec() -> ToolSpec:
+    return ToolSpec(
+        name="cancel_subagents",
+        category="orchestration",
+        effect="mutating",
+        requires_idempotency=True,
+        description="取消已有子代理运行；会废弃 active attempt、记录取消审计，有关联 pid 时会尝试终止。",
+        use_cases=[
+            "用户要求停止某些子代理或整棵子代理树",
+            "主代理发现子代理卡死、跑偏或不应继续消耗预算，需要显式收回",
+            "后台 runner/channel 已损坏，需要把 agent tree 标成可见的取消/废弃状态",
+        ],
+        avoid_when=["只是查看状态时用 inspect_agent_tree；只是补充说明让它继续时用 send_guidance 或 dispatch_subagents"],
+        keywords=["取消", "停止", "kill", "cancel", "subagent", "runner", "ABANDONED", "CANCELLED"],
+        parameters={
+            "run_id": "可选。单个子代理 run_id。",
+            "run_ids": "可选。多个子代理 run_id。和 root_id/status 组合时会取并集后去重。",
+            "root_id": "可选。取消某个 root_id 自己和它下面的子代理。",
+            "status": "可选。只取消指定状态的子代理，例如 RUNNING/PLANNING/CHANNEL_ERROR；可写字符串或列表。",
+            "reason": "可选。取消原因，会写入子代理 work log 和审计字段。",
+            "kill_process": "可选。默认 true；如果任务记录里有关联 pid，会尝试 terminate。",
+            "dry_run": "可选。默认 false；true 时只返回会取消哪些 run_id，不改状态。",
+        },
+        parameter_details={
+            "root_id": "root_id 会匹配 root 自己以及 child_ids 递归子树；如果没有 run_id/run_ids/root_id/status，工具会返回错误，避免误取消全部。",
+            "status": "status 只作为过滤条件；传 status 但不传 run_id/root_id 时，会匹配当前子代理账本里所有该状态任务。",
+        },
+        examples=[
+            '{"tool":"cancel_subagents","run_ids":["subagent-1","subagent-2"],"reason":"用户要求停止"}',
+            '{"tool":"cancel_subagents","root_id":"subagent-root","status":["RUNNING","PLANNING"],"reason":"重派前清理"}',
+            '{"tool":"cancel_subagents","status":"CHANNEL_ERROR","dry_run":true}',
+        ],
+    )
+
+
 def build_schedule_child_subagents_spec() -> ToolSpec:
     return ToolSpec(
         name="schedule_child_subagents",

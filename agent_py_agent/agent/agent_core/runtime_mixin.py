@@ -218,6 +218,7 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
     current_params = run_params_with_materialized_delivery_contract(agent, user_prompt, current_params)
     if not current_params.root_user_prompt:
         current_params = replace(current_params, root_user_prompt=user_prompt)
+    current_params = attach_run_task_workspace_context(agent, current_params, user_prompt)
     result = _run_once_with_params(agent, user_prompt, current_params)
     while True:
         decision = compact_auto_continuation_decision(

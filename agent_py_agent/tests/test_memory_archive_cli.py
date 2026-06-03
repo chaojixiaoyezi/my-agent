@@ -39,6 +39,14 @@ def _workspace(config_path: Path) -> Path:
     return config_path.parent / "workspace"
 
 
+def _home_root(config_path: Path) -> Path:
+    return config_path.parent / "home"
+
+
+def _archive_root_for_workspace(root: Path) -> Path:
+    return root.parent / "home" / "owners" / "local" / "main"
+
+
 def _run_cli_json(capsys, config_path: Path, *argv: str) -> tuple[int, dict]:
     parser = build_parser()
     args = parser.parse_args(["--config", str(config_path), *argv, "--json"])
@@ -108,8 +116,9 @@ def _archive_snapshot(run_id: str) -> CompressionSnapshot:
 
 
 def _write_archive_fixture(root: Path, *, run_id: str = "subagent-archive-demo") -> None:
+    archive_root = _archive_root_for_workspace(root)
     _append_archive_raw_event(
-        root,
+        archive_root,
         event_id="raw-demo-1",
         run_id=run_id,
         speaker="user",
@@ -117,14 +126,14 @@ def _write_archive_fixture(root: Path, *, run_id: str = "subagent-archive-demo")
         created_at="2026-04-30T08:00:00+00:00",
     )
     _append_archive_raw_event(
-        root,
+        archive_root,
         event_id="raw-demo-2",
         run_id=run_id,
         speaker="assistant",
         content="已创建子代理，等待父代理继续收口。",
         created_at="2026-04-30T08:00:30+00:00",
     )
-    append_snapshot(root, _archive_snapshot(run_id))
+    append_snapshot(archive_root, _archive_snapshot(run_id))
 
 
 def _append_cross_day_raw_event(root: Path, *, run_id: str) -> None:
@@ -179,13 +188,15 @@ def _cross_day_snapshot(run_id: str) -> CompressionSnapshot:
 
 
 def _write_cross_day_handoff_fixture(root: Path, *, run_id: str) -> None:
-    _append_cross_day_raw_event(root, run_id=run_id)
-    append_snapshot(root, _cross_day_snapshot(run_id))
+    archive_root = _archive_root_for_workspace(root)
+    _append_cross_day_raw_event(archive_root, run_id=run_id)
+    append_snapshot(archive_root, _cross_day_snapshot(run_id))
 
 
 def _make_echo_agent(root: Path) -> SimpleAgent:
     return SimpleAgent(
         AgentConfig(
+            my_agent_home=str(root.parent / "home"),
             model_backend="echo",
             subagent_workspace="subagents",
             local_store_path="local_store/local.db",
@@ -284,8 +295,9 @@ def _write_gateway_processing_and_done_files(
 def _log_gateway_archive_events(*args) -> None:
     """Append raw event and snapshot for gateway cross-day archive."""
     agent, root, request_id, request_path, response_path = args
+    archive_root = Path(agent.home_paths.owner_home_dir)
     append_raw_event(
-        root,
+        archive_root,
         RawMemoryEvent(
             event_id="raw-gateway-cross-day-1",
             session_id="session-gateway-cross-day",
@@ -301,7 +313,7 @@ def _log_gateway_archive_events(*args) -> None:
         ),
     )
     append_snapshot(
-        root,
+        archive_root,
         CompressionSnapshot(
             snapshot_id="snapshot-gateway-cross-day-1",
             session_id="session-gateway-cross-day",
@@ -410,6 +422,7 @@ def test_memory_resume_links_archive_clue_to_task_fact_source(tmp_path, capsys):
     root = _workspace(config_path)
     agent = SimpleAgent(
         AgentConfig(
+            my_agent_home=str(_home_root(config_path)),
             model_backend="echo",
             subagent_workspace="subagents",
             local_store_path="local_store/local.db",
@@ -456,6 +469,7 @@ def test_memory_resume_context_only_prints_recovery_block(tmp_path, capsys):
     root = _workspace(config_path)
     agent = SimpleAgent(
         AgentConfig(
+            my_agent_home=str(_home_root(config_path)),
             model_backend="echo",
             subagent_workspace="subagents",
             local_store_path="local_store/local.db",

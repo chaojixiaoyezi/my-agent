@@ -49,7 +49,6 @@ from ..shared_workspace import (
 from .payloads import (
     append_timeline,
     read_json_object,
-    state_payload,
     timeline_event,
     write_json,
 )
@@ -58,6 +57,7 @@ from .rendering import (
     write_task_yaml_if_missing,
 )
 from .roots import resolve_task_workspace_root
+from .state_merge import TaskStateMergeRequest, next_task_state
 
 
 @dataclass(frozen=True)
@@ -131,7 +131,11 @@ def ensure_subagent_task_workspace(
     *,
     workspace: str | Path | None = None,
 ) -> TaskWorkspacePaths:
-    """Create/update the Phase 0 task workspace for a persisted subagent task."""
+    """Create/update the Phase 0 task workspace for a persisted subagent task.
+
+    Child saves may share the parent task root, so they preserve existing parent
+    state and only add child refs instead of replacing ``work/state.json``.
+    """
 
     inputs = _coerce_ensure_request(request, task, workspace=workspace)
     task_id = str(getattr(inputs.task, "root_id", "") or getattr(inputs.task, "id", "task"))
@@ -143,7 +147,10 @@ def ensure_subagent_task_workspace(
     _ensure_directories(paths)
     write_task_yaml_if_missing(paths.task_yaml, task_id, inputs.task, now)
     previous_state = read_json_object(paths.state_json)
-    write_json(paths.state_json, state_payload(task_id, run_id, inputs.task, now))
+    write_json(
+        paths.state_json,
+        next_task_state(TaskStateMergeRequest(task_id, run_id, inputs.task, now, previous_state)),
+    )
     write_summary(paths.current_summary, task_id, run_id, inputs.task)
     shared = sync_shared_workspace(
         SyncSharedWorkspaceRequest(task_workspace_root=paths.work_dir, task=inputs.task, now=now)

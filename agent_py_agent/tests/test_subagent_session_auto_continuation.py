@@ -153,8 +153,8 @@ def test_read_only_tool_artifact_does_not_update_task_local_product_progress(tmp
             output=json.dumps(
                 {
                     "ok": True,
-                    "artifact_ref": str(tmp_path / "memory_archive" / "tool_outputs" / "web_search-1.json"),
-                    "artifact_path": str(tmp_path / "memory_archive" / "tool_outputs" / "web_search-1.json"),
+                    "artifact_ref": str(tmp_path / "blobs" / "tool_outputs" / "web_search-1.json"),
+                    "artifact_path": str(tmp_path / "blobs" / "tool_outputs" / "web_search-1.json"),
                 }
             ),
             ok=True,

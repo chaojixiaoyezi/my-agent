@@ -372,24 +372,26 @@ def _preserve_explicit_bootstrap_contract(contract: dict[str, Any]) -> None:
 
 
 def _path_finding(item: dict[str, Any], workspace_root: Path | None, index: int) -> dict[str, object] | None:
-    if workspace_root is None:
-        return None
     for key in ("preferred_path", "path"):
         raw = str(item.get(key) or "").strip()
         if not raw:
             continue
-        root = Path(workspace_root).resolve(strict=False)
-        candidate = Path(raw).expanduser()
-        path = candidate.resolve(strict=False) if candidate.is_absolute() else (root / candidate).resolve(strict=False)
         try:
-            path.relative_to(root)
-        except ValueError:
+            _resolve_artifact_path(raw, workspace_root)
+        except (OSError, RuntimeError, ValueError):
             return _finding(
-                "DELIVERY_MATERIALIZER_ARTIFACT_PATH_OUTSIDE_WORKSPACE",
+                "DELIVERY_MATERIALIZER_ARTIFACT_PATH_INVALID",
                 f"artifacts[{index}].{key}",
                 value=raw,
             )
     return None
+
+
+def _resolve_artifact_path(raw: str, workspace_root: Path | None) -> Path:
+    candidate = Path(raw).expanduser()
+    if candidate.is_absolute() or workspace_root is None:
+        return candidate.resolve(strict=False)
+    return (Path(workspace_root).resolve(strict=False) / candidate).resolve(strict=False)
 
 
 def _finding(code: str, location: str, *, value: str = "") -> dict[str, object]:

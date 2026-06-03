@@ -5,11 +5,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-_TOOL_OUTPUT_ARTIFACT_PARTS = ("memory_archive", "artifacts", "tool_outputs")
+_BLOB_TOOL_OUTPUT_ARTIFACT_PARTS = ("blobs", "tool_outputs")
 
 
 def is_tool_output_artifact_path(target: Path) -> bool:
-    return target.suffix.lower() == ".json" and _path_has_parts(target, _TOOL_OUTPUT_ARTIFACT_PARTS)
+    return target.suffix.lower() == ".json" and _path_has_parts(target, _BLOB_TOOL_OUTPUT_ARTIFACT_PARTS)
 
 
 def tool_output_artifact_typo_hint(
@@ -34,7 +34,7 @@ def tool_output_artifact_content(target: Path, roots: list[Path]) -> str:
     if not is_tool_output_artifact_path(target):
         return ""
     for root in roots:
-        artifact_root = root / Path(*_TOOL_OUTPUT_ARTIFACT_PARTS)
+        artifact_root = root / Path(*_BLOB_TOOL_OUTPUT_ARTIFACT_PARTS)
         try:
             target.relative_to(artifact_root.resolve(strict=False))
         except ValueError:

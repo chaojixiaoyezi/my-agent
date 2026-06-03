@@ -148,6 +148,7 @@ def _print_local_timing(result, started_at: float) -> None:
     elapsed = time.perf_counter() - started_at
     _cprint(
         f"{GRAY}[耗时 {elapsed:.2f}s; 工具轮数 {result.tool_rounds}; "
+        f"ctx_tokens~{getattr(result, 'cumulative_token_estimate', 0) or result.prompt_token_estimate}; "
         f"prompt_tokens~{result.prompt_token_estimate}; "
         f"resume_context={1 if result.memory_resume_context_injected else 0}]{RESET}"
     )

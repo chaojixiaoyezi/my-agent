@@ -185,7 +185,7 @@ owners/*/*/memory/
 data/log_fixtures/
 
 # 记忆文件
-memory/raw/
+audit/
 memory_archive/tokens/
 
 # 配置覆盖

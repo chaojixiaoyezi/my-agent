@@ -2,13 +2,19 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 from ..io import append_jsonl
 from .home_layout import task_workspace_path
+from .task_title import (
+    collapse_dashes,
+    concise_task_title,
+    looks_like_machine_id,
+    prompt_fingerprint,
+    workspace_slug_char,
+)
 
 
 @dataclass(frozen=True)
@@ -78,12 +84,7 @@ def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePath
 
 
 def run_workspace_paths(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths:
-    root = task_workspace_path(
-        request.home,
-        request.template,
-        date=_date_key(request.created_at),
-        task_name=_workspace_task_name(request),
-    )
+    root = _resolve_run_workspace_root(request)
     work = root / "work"
     return RunWorkspacePaths(
         root=root,
@@ -110,9 +111,10 @@ def run_workspace_paths(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths
 def _write_task_yaml_if_missing(path: Path, request: EnsureRunWorkspaceRequest) -> None:
     if path.exists():
         return
-    task_id = request.task_id or request.task_name or "task"
+    task_id = request.task_id if request.task_id and not looks_like_machine_id(request.task_id) else _workspace_task_name(request)
     text = (
         f'task_id: "{_yaml_escape(task_id)}"\n'
+        f'task_title: "{_yaml_escape(_workspace_task_name(request))}"\n'
         f'request_id: "{_yaml_escape(request.request_id)}"\n'
         f'run_id: "{_yaml_escape(request.run_id)}"\n'
         f'owner_id: "{_yaml_escape(request.owner_id)}"\n'
@@ -128,6 +130,8 @@ def _state_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
         "request_id": request.request_id,
         "run_id": request.run_id,
         "task_id": request.task_id,
+        "task_title": _workspace_task_name(request),
+        "prompt_fingerprint": prompt_fingerprint(request.user_prompt),
         "owner_id": request.owner_id,
         "owner_home": request.owner_home,
         "task_name": request.task_name,
@@ -177,32 +181,80 @@ def _now_iso() -> str:
 
 
 def _workspace_task_name(request: EnsureRunWorkspaceRequest) -> str:
-    candidates = (request.task_id, request.task_name, request.user_prompt)
+    candidates = (request.task_id, request.task_name)
     for value in candidates:
         text = str(value or "").strip()
-        if text and not _looks_like_machine_id(text):
-            return text
-    return str(request.user_prompt or request.task_name or request.task_id or request.run_id or request.request_id or "task")
-
-
-def _looks_like_machine_id(value: str) -> bool:
-    text = str(value or "").strip().lower()
-    if not text:
-        return False
-    machine_prefixes = (
-        "run-",
-        "gw-",
-        "req-",
-        "session-",
-        "thread-",
-        "subagent-",
-        "capreq-",
-        "capreq_",
-        "auto-compact",
+        if text and not looks_like_machine_id(text):
+            return concise_task_title(text)
+    return concise_task_title(
+        str(request.user_prompt or request.task_name or request.task_id or request.run_id or request.request_id or "task")
     )
-    if text.startswith(machine_prefixes):
+
+
+def _resolve_run_workspace_root(request: EnsureRunWorkspaceRequest) -> Path:
+    base = task_workspace_path(
+        request.home,
+        request.template,
+        date=_date_key(request.created_at),
+        task_name=_workspace_task_name(request),
+    )
+    if _workspace_matches_request(base, request):
+        return base
+    suffix = safe_workspace_suffix(request)
+    if not suffix:
+        return _next_available_workspace(base)
+    candidate = base.with_name(f"{base.name}-{suffix}")
+    if _workspace_matches_request(candidate, request):
+        return candidate
+    return _next_available_workspace(candidate)
+
+
+def _workspace_matches_request(root: Path, request: EnsureRunWorkspaceRequest) -> bool:
+    state_path = root / "work" / "state.json"
+    if not state_path.exists():
         return True
-    return bool(re.fullmatch(r"(run|gw|req|task|session|thread)[_-]?[0-9a-f]{6,}", text))
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+    prompt_fingerprint_value = prompt_fingerprint(request.user_prompt)
+    if prompt_fingerprint_value and str(state.get("prompt_fingerprint") or "") == prompt_fingerprint_value:
+        return True
+    request_values = _identity_values(request)
+    state_values = {
+        "request_id": str(state.get("request_id") or "").strip(),
+        "run_id": str(state.get("run_id") or "").strip(),
+        "task_id": str(state.get("task_id") or "").strip(),
+    }
+    for key, value in request_values.items():
+        if value and state_values.get(key) and state_values[key] != value:
+            return False
+    return True
+
+
+def _identity_values(request: EnsureRunWorkspaceRequest) -> dict[str, str]:
+    return {
+        "request_id": str(request.request_id or "").strip(),
+        "run_id": str(request.run_id or "").strip(),
+        "task_id": str(request.task_id or "").strip(),
+    }
+
+
+def safe_workspace_suffix(request: EnsureRunWorkspaceRequest) -> str:
+    source = str(request.run_id or request.request_id or request.task_id or "").strip()
+    if not source:
+        return ""
+    return collapse_dashes("".join(workspace_slug_char(char) for char in source.lower())).strip("-_")[:24].strip("-_")
+
+
+def _next_available_workspace(root: Path) -> Path:
+    if not root.exists():
+        return root
+    for index in range(2, 1000):
+        candidate = root.with_name(f"{root.name}-{index}")
+        if not candidate.exists():
+            return candidate
+    return root.with_name(f"{root.name}-{datetime.now(timezone.utc).strftime('%H%M%S%f')}")
 
 
 def _yaml_escape(value: object) -> str:

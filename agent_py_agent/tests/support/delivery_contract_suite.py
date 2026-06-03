@@ -7,7 +7,7 @@ from pathlib import Path
 def run_delivery_contract_suite(validate: Callable[..., object], workspace: Path) -> None:
     _assert_invalid_artifacts_shape(validate, workspace)
     _assert_valid_open_world_artifact(validate, workspace)
-    _assert_outside_workspace_path_rejected(validate, workspace)
+    _assert_user_requested_absolute_path_allowed(validate, workspace)
     _assert_version_mismatch_is_observable(validate, workspace)
 
 
@@ -53,18 +53,18 @@ def _assert_valid_open_world_artifact(validate: Callable[..., object], workspace
     assert _report_dict(report)["ok"] is True
 
 
-def _assert_outside_workspace_path_rejected(validate: Callable[..., object], workspace: Path) -> None:
+def _assert_user_requested_absolute_path_allowed(validate: Callable[..., object], workspace: Path) -> None:
     outside = workspace.parent / "outside.xlsx"
     report = validate(
         {
             "schema_version": "delivery_contract.v1",
-            "artifacts": [{"artifact_id": "bad", "kind": "xlsx", "path": str(outside)}],
+            "artifacts": [{"artifact_id": "user-output", "kind": "xlsx", "path": str(outside)}],
         },
         workspace_root=workspace,
     )
 
-    assert _report_dict(report)["ok"] is False
-    assert "DELIVERY_CONTRACT_ARTIFACT_PATH_OUTSIDE_WORKSPACE" in _codes(report)
+    assert _report_dict(report)["ok"] is True
+    assert "DELIVERY_CONTRACT_ARTIFACT_PATH_OUTSIDE_WORKSPACE" not in _codes(report)
 
 
 def _assert_version_mismatch_is_observable(validate: Callable[..., object], workspace: Path) -> None:

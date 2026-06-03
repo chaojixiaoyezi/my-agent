@@ -35,7 +35,7 @@ def _demo_snapshot(created_at: str = "2026-04-30T10:00:00+08:00") -> Compression
         next_actions=["接入压缩前 hook"],
         token_usage={"estimate": 1234},
         archive_level=3,
-        content_paths=["memory/raw/2026-04-30.jsonl"],
+        content_paths=["audit/2026-04-30.jsonl"],
         created_at=created_at,
     )
 
@@ -58,7 +58,7 @@ def _demo_raw_event(created_at: str = "2026-04-30T10:01:00+08:00") -> RawMemoryE
         tool_call_id="",
         tool_success=None,
         content_preview="宝宝，记忆压缩前要先保存现场。",
-        content_path="memory/raw/blob-1.txt",
+        content_path="audit/blob-1.txt",
         content_hash="sha256:demo",
         visibility="private",
         source="chat",
@@ -77,7 +77,7 @@ def test_snapshot_and_raw_event_use_daily_paths():
         raw_path = append_raw_event(root, _demo_raw_event())
 
         assert snapshot_path == root / "memory" / "hooks" / "2026-04-30.jsonl"
-        assert raw_path == root / "memory" / "raw" / "2026-04-30.jsonl"
+        assert raw_path == root / "audit" / "2026-04-30.jsonl"
         assert snapshot_path.exists()
         assert raw_path.exists()
 
@@ -126,7 +126,7 @@ def test_retention_seven_days_deletes_old_hook_files_only():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         hook_dir = root / "memory" / "hooks"
-        raw_dir = root / "memory" / "raw"
+        raw_dir = root / "audit"
         hook_dir.mkdir(parents=True)
         raw_dir.mkdir(parents=True)
         old_hook = hook_dir / "2026-04-20.jsonl"

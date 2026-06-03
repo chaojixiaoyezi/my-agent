@@ -245,13 +245,12 @@ class TestRawEventPathFor:
     """Test raw_event_path_for function."""
 
     def test_returns_raw_file_path(self):
-        """Test returns path to memory/raw/YYYY-MM-DD.jsonl."""
+        """Test returns path to audit/YYYY-MM-DD.jsonl."""
         from agent_py_agent.agent.memory_archive.storage import raw_event_path_for
 
         path = raw_event_path_for("/tmp/project")
 
-        assert "memory" in str(path)
-        assert "raw" in str(path)
+        assert "audit" in str(path)
         assert str(path).endswith(".jsonl")
 
     def test_accepts_iso_string(self):
@@ -290,6 +289,6 @@ class TestAppendSnapshot:
 
         path = raw_event_path_for(tmp_path, "2026-05-01")
 
-        assert "raw" in str(path)
+        assert "audit" in str(path)
         assert "2026-05-01" in str(path)
         assert path.suffix == ".jsonl"

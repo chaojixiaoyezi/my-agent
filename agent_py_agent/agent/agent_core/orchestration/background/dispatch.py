@@ -16,6 +16,7 @@ from ...runner.context import current_subagent_run_id
 from ..create_idempotency import dispatchable_tasks
 from ..dispatch.params import DispatchExecutionPlan, DispatchParams
 from ..dispatch.tool_helpers import _dispatch_capability_config
+from .launch_health import mark_background_channel_failure, process_startup_returncode
 from .marks import attach_mark_errors, mark_background_start
 
 
@@ -72,6 +73,25 @@ def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
     if _use_inprocess_autostart(agent):
         return _start_inprocess_dispatch(agent, request, mark_errors)
     process = _spawn_background_dispatch_process(agent, request)
+    if (returncode := process_startup_returncode(process)) is not None:
+        error = f"background dispatch process exited during startup returncode={returncode}"
+        mark_errors.extend(mark_background_start(request, status="failed", error=error))
+        mark_errors.extend(mark_background_channel_failure(request, error=error))
+        payload = {
+            "status": "failed",
+            "dispatch_mode": "background",
+            "background_backend": "process",
+            "failure_type": "background_dispatch_startup",
+            "run_ids": run_ids,
+            "launch_id": launch_id,
+            "pid": process.pid,
+            "returncode": returncode,
+            "log_path": _background_log_path(agent, launch_id),
+            "summary": "subagent dispatch process exited before runner startup; affected tasks were marked channel failed",
+            "agent_tree": _safe_agent_tree(agent),
+        }
+        attach_mark_errors(payload, mark_errors)
+        return payload
     _remember_background_dispatch(agent, launch_id, run_ids, f"pid:{process.pid}")
     payload = {
         "status": "started",
@@ -176,7 +196,7 @@ def _config_path(agent) -> str:
 
 
 def _project_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    return Path(__file__).resolve().parents[5]
 
 
 def _background_log_path(agent, launch_id: str) -> str:

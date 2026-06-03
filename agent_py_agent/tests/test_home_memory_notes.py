@@ -17,11 +17,13 @@ from agent_py_agent.agent.user_space.owner_resolver import (
 
 def test_append_hot_note_adds_dated_bullet_without_duplicate(tmp_path):
     paths = ensure_my_agent_home(tmp_path / "home")
+    owner = ensure_owner_home(paths.root, OwnerIdentity.local_main())
+    owner_paths = home_paths_with_owner(paths, owner)
 
-    first = append_hot_note(paths, "真实测试失败先查系统卡点，不要加硬门。", created_at="2026-05-31T10:00:00+08:00")
-    second = append_hot_note(paths, "真实测试失败先查系统卡点，不要加硬门。", created_at="2026-05-31T10:01:00+08:00")
+    first = append_hot_note(owner_paths, "真实测试失败先查系统卡点，不要加硬门。", created_at="2026-05-31T10:00:00+08:00")
+    second = append_hot_note(owner_paths, "真实测试失败先查系统卡点，不要加硬门。", created_at="2026-05-31T10:01:00+08:00")
 
-    text = Path(paths.memory_hot_md).read_text(encoding="utf-8")
+    text = Path(owner_paths.owner_memory_hot_md).read_text(encoding="utf-8")
     assert first.changed is True
     assert second.changed is False
     assert text.count("真实测试失败先查系统卡点，不要加硬门。") == 1
@@ -30,9 +32,11 @@ def test_append_hot_note_adds_dated_bullet_without_duplicate(tmp_path):
 
 def test_upsert_lesson_note_updates_lesson_and_route_index(tmp_path):
     paths = ensure_my_agent_home(tmp_path / "home")
+    owner = ensure_owner_home(paths.root, OwnerIdentity.local_main())
+    owner_paths = home_paths_with_owner(paths, owner)
 
     result = upsert_lesson_note(
-        paths,
+        owner_paths,
         LessonNoteRequest(
             lesson_id="quality-loop",
             topic="质量返工循环",
@@ -42,7 +46,7 @@ def test_upsert_lesson_note_updates_lesson_and_route_index(tmp_path):
     )
 
     lesson_text = Path(result.lesson_path).read_text(encoding="utf-8")
-    index_text = Path(paths.memory_routing_index_md).read_text(encoding="utf-8")
+    index_text = Path(owner_paths.owner_memory_routing_index_md).read_text(encoding="utf-8")
     assert result.changed is True
     assert "返工提示必须说明缺什么" in lesson_text
     assert "## lessons.quality-loop" in index_text

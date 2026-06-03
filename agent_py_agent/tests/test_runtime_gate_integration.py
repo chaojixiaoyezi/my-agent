@@ -9,6 +9,11 @@ from agent_py_agent.agent.agent_core.delivery_closeout.closeout import (
     MainAgentDeliveryCloseoutRequest,
     main_agent_delivery_closeout_response,
 )
+from agent_py_agent.agent.agent_core.tool_loop.completion import (
+    ToolRoundCompletionRequest,
+    completion_response_after_tool_round,
+)
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.contracts.gates.tool.effects import args_hash_for_call
 from agent_py_agent.agent.contracts.tool_protocol_v2 import normalize_tool_call
 from agent_py_agent.agent.tooling.models import BaseTool, ToolExecutionResult, ToolSpec
@@ -302,7 +307,7 @@ def test_delivery_closeout_report_contains_runtime_gate_decision(tmp_path):
     assert report["runtime_gate"]["evidence"]["artifact_count"] == 1
 
 
-def test_delivery_closeout_allows_preexisting_artifact_with_provenance_warning(tmp_path):
+def test_delivery_closeout_rejects_preexisting_artifact_without_current_run_provenance(tmp_path):
     output = tmp_path / "out.txt"
     output.write_text("finished artifact", encoding="utf-8")
     params = _delivery_closeout_params(archive_tool_calls=[])
@@ -313,9 +318,31 @@ def test_delivery_closeout_allows_preexisting_artifact_with_provenance_warning(t
     )
     report = json.loads((Path(tmp_path) / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
+    assert response is None
+    assert report["runtime_gate"]["status"] == "NEED_REPAIR"
+    assert report["runtime_gate"]["findings"][0]["code"] == "ARTIFACT_PROVENANCE_MISSING"
+    assert report["final_closeout_gate"]["status"] == "NEED_REPAIR"
+
+
+def test_tool_round_auto_closeout_after_delivery_completion_hint(tmp_path):
+    output = tmp_path / "out.txt"
+    output.write_text("finished artifact", encoding="utf-8")
+    params = _delivery_closeout_params(archive_tool_calls=[_write_file_archive_record()])
+    params.tool_context.append("[delivery-completion-soft-hint]\n{}")
+    agent = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(workspace_root=tmp_path))
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+
     assert response is not None
-    assert report["runtime_gate"]["status"] == "ALLOW"
-    assert report["final_closeout_gate"]["status"] == "ALLOW"
+    assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in response.text
 
 
 def test_delivery_closeout_reports_metric_quality_contract_mismatch_as_warning(tmp_path):

@@ -27,7 +27,7 @@ def append_hot_note(home_paths: object, text: str, *, created_at: str | None = N
     """Append one short HOT reminder if it is not already present."""
 
     note = str(text or "").strip()
-    path = _owner_scoped_path(home_paths, "owner_memory_hot_md", "memory_hot_md")
+    path = _owner_scoped_path(home_paths, "owner_memory_hot_md")
     if not note or not path:
         return HomeMemoryWriteResult(changed=False, hot_path=str(path))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -50,8 +50,8 @@ def upsert_lesson_note(
     slug = _slug(request.lesson_id)
     if not slug:
         return HomeMemoryWriteResult(changed=False)
-    lesson_dir = _owner_scoped_path(home_paths, "owner_memory_lessons_dir", "memory_lessons_dir")
-    index_path = _owner_scoped_path(home_paths, "owner_memory_routing_index_md", "memory_routing_index_md")
+    lesson_dir = _owner_scoped_path(home_paths, "owner_memory_lessons_dir")
+    index_path = _owner_scoped_path(home_paths, "owner_memory_routing_index_md")
     lesson_path = lesson_dir / f"{slug}.md"
     lesson_dir.mkdir(parents=True, exist_ok=True)
     index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,18 +93,8 @@ def _ensure_lesson_route(index_path: Path, slug: str, topic: str, trigger_keywor
     return True
 
 
-def _owner_scoped_path(home_paths: object, owner_attr: str, legacy_attr: str) -> Path:
-    if _is_local_main_owner(home_paths):
-        return Path(getattr(home_paths, legacy_attr, "") or getattr(home_paths, owner_attr, ""))
-    return Path(getattr(home_paths, owner_attr, "") or getattr(home_paths, legacy_attr, ""))
-
-
-def _is_local_main_owner(home_paths: object) -> bool:
-    return (
-        str(getattr(home_paths, "owner_provider", "") or "local") == "local"
-        and str(getattr(home_paths, "owner_kind", "") or "main") == "main"
-        and str(getattr(home_paths, "owner_id", "") or "local/main") == "local/main"
-    )
+def _owner_scoped_path(home_paths: object, owner_attr: str) -> Path:
+    return Path(getattr(home_paths, owner_attr, "") or "")
 
 
 def _lesson_body(*, topic: str, content: str) -> str:

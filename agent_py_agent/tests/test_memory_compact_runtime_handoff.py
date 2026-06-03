@@ -39,7 +39,7 @@ def test_memory_compact_work_state_reads_runtime_handoff(tmp_path: Path) -> None
     assert handoff["recent_guidance"][0]["message"] == "写报告时逐个对象收口，不要最后一次性打勾。"
     assert handoff["agent_tree"]["counts"]["total"] == 2
     assert handoff["agent_tree"]["active_agents"][0]["run_id"] == "run-child-a"
-    assert handoff["next_suggestion"] == "继续推进当前任务；先查看进度账本和下级状态，再决定是否补充引导或接手。"
+    assert "避免高频轮询" in handoff["next_suggestion"]
     assert resume["handoff"]["runtime_handoff"]["recent_guidance_count"] == 1
     assert "写报告时逐个对象收口" in resume["context_block"]
 

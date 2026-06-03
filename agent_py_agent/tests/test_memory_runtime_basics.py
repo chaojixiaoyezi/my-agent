@@ -126,7 +126,7 @@ def test_run_writes_raw_archive_when_saved(tmp_path):
 
     result = agent.run("请归档这轮对话", save=True, request_id="req-archive-save")
 
-    raw_dir = Path(agent.home_paths.owner_memory_raw_dir)
+    raw_dir = Path(agent.home_paths.owner_audit_dir)
     fact_path = Path(agent.home_paths.owner_home_dir) / "memory_archive" / "runtime_facts" / "req-archive-save" / "task.json"
     files = sorted(raw_dir.glob("*.jsonl"))
     assert result.archive_events == 2
@@ -278,7 +278,7 @@ def test_run_no_save_does_not_write_raw_archive(tmp_path):
 
     assert result.archive_events == 0
     assert result.recovery_snapshot_path == ""
-    assert not (tmp_path / "memory" / "raw").exists()
+    assert not (tmp_path / "audit").exists()
     assert not (tmp_path / "memory" / "hooks").exists()
 
 
@@ -299,7 +299,7 @@ def test_run_no_save_does_not_write_runtime_fact(tmp_path):
 
     assert result.archive_events == 0
     assert result.recovery_snapshot_path == ""
-    assert not (tmp_path / "memory" / "raw").exists()
+    assert not (tmp_path / "audit").exists()
     assert not (tmp_path / "memory" / "hooks").exists()
     assert not (tmp_path / "memory_archive" / "runtime_facts").exists()
 
