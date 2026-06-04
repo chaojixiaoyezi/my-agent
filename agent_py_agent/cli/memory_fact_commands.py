@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..agent.agent_core.runtime.owner_roots import runtime_owner_root
 from ..agent.memory_archive.compact_resume import (
     MemoryCompactResumeOptions,
     build_memory_compact_resume,
@@ -15,7 +16,6 @@ from ..agent.memory_archive.runtime_fact_source import (
     ApprovedRuntimeFactSourceRequest,
     write_approved_runtime_fact_source,
 )
-from ..agent.agent_core.runtime.owner_roots import runtime_owner_root
 from .common import make_agent
 
 
