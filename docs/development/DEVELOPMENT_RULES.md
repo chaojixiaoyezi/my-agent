@@ -257,6 +257,10 @@ before changing code.
 - “全部 / 每个 / 所有 / 每周 / 每个项目”这类业务覆盖要求默认属于进度账本和
   coverage ledger 的软管理范围。系统可以提醒哪些条目缺证据、缺引用或只到
   README 级，但不能把这类业务质量塞进 closeout 变成硬门。
+- 长文本读取里出现“别漏 / 不要漏 / 不能漏 / 所有 / 全部 / 全量”等普通用户说法时，
+  runtime 可以提醒模型先把已读片段的对象、事实和 source/offset/行号证据沉淀到
+  `task_progress` 或当前任务 work 草稿，再继续读下一段。这个提醒只降低 compact
+  摘要漏事实的风险，不改变 closeout 的硬验收边界。
 - 当用户明确要求“完整读完 / 完整读取 / 全文读完 / 从头到尾”某个源文件时，
   delivery materializer 可以补出 `target_coverage_contract`，把该源文件登记为
   required `full_source_read`。closeout 只用工具读文件记录里的客观

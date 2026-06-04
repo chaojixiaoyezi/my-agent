@@ -236,6 +236,33 @@ def test_tool_round_reminds_long_read_to_checkpoint_facts_before_more_reading():
     assert any("data/long.txt@offset=0" in str(item) for item in params.tool_context)
 
 
+def test_tool_round_reminds_long_read_for_no_omission_language():
+    params = SimpleNamespace(task_attributes={}, tool_context=[], live_archive_state={})
+    agent = SimpleNamespace(config=SimpleNamespace(memory_compact_auto_trigger_percent=0))
+
+    def execute_one(request):
+        return ToolExecutionResult(str(request.payload["tool"]), True, "片段包含：张三、会议纪要、过敏更新")
+
+    def record_one(record):
+        record.params.tool_context.append(f"[tool-record]\n{record.result.output}")
+
+    execute_tool_round(
+        ToolRoundExecutionRequest(
+            agent=agent,
+            params=params,
+            tool_rounds=1,
+            response=ModelResponse(text="tool batch", backend="test"),
+            calls=[{"tool": "read_file", "path": "data/long.txt", "offset": 50000, "max_chars": 50000}],
+            execute_one=execute_one,
+            record_one=record_one,
+            current_prompt="请按顺序读完这个大文件，里面所有事项都不能漏。",
+        )
+    )
+
+    assert any("[tool-system:long-read-facts]" in str(item) for item in params.tool_context)
+    assert any("data/long.txt@offset=50000" in str(item) for item in params.tool_context)
+
+
 def test_tool_round_does_not_remind_long_read_after_checkpoint_write():
     params = SimpleNamespace(task_attributes={}, tool_context=[], live_archive_state={})
     agent = SimpleNamespace(config=SimpleNamespace(memory_compact_auto_trigger_percent=0))

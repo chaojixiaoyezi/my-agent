@@ -249,7 +249,25 @@ def _looks_like_fact_preserving_long_read(value: str) -> bool:
     if not text:
         return False
     read_markers = ("完整读", "完整读取", "读完", "按顺序", "分段读", "分片读", "继续读取")
-    fact_markers = ("每个", "每篇", "每周", "每章", "每发现", "逐项", "逐章", "检查点", "最终报告", "报告里要包含")
+    fact_markers = (
+        "每个",
+        "每篇",
+        "每周",
+        "每章",
+        "每发现",
+        "逐项",
+        "逐章",
+        "检查点",
+        "最终报告",
+        "报告里要包含",
+        "别漏",
+        "不要漏",
+        "不能漏",
+        "不漏",
+        "所有",
+        "全部",
+        "全量",
+    )
     return any(marker in text for marker in read_markers) and any(marker in text for marker in fact_markers)
 
 
