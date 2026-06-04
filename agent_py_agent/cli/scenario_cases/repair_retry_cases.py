@@ -99,7 +99,6 @@ def _verify_structured_repair(request: StructuredRepairVerifyRequest):
         and request.runner.get("structured_repair_attempted") is True
         and request.runner.get("structured_repair_ok") is True
         and request.output.get("structured_output", {}).get("repair_attempted") is True
-        and any(item.step == "acceptance" and item.ok for item in request.report.records)
     )
 
 

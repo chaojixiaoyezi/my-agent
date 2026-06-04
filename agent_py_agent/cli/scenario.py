@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,6 +40,7 @@ from .scenario_utils import (
     print_scenario_board,
     print_scenario_step,
     run_scenario_gateway_ask,
+    scenario_tasks_active,
     scenario_tasks_verified,
     write_scenario_summary,
 )
@@ -134,7 +136,21 @@ def _cmd_scenario_dispatch(request: ScenarioDispatchRequest):
         final_ok = scenario_tasks_verified(agent, args.count)
         if final_ok:
             break
+        if cycle < args.max_cycles and scenario_tasks_active(agent, args.count):
+            wait_seconds = _scenario_dispatch_wait_seconds(args)
+            print(f"仍有子代理 RUNNING，等待 {wait_seconds:.1f}s 后继续检查。")
+            time.sleep(wait_seconds)
     return final_ok
+
+
+def _scenario_dispatch_wait_seconds(args) -> float:
+    try:
+        timeout = float(getattr(args, "timeout", 0) or 0)
+    except (TypeError, ValueError):
+        timeout = 0.0
+    if timeout <= 0:
+        return 10.0
+    return min(30.0, max(5.0, timeout / 20.0))
 
 
 def _run_scenario_dispatch_cycle(agent, args, router, capability_config):

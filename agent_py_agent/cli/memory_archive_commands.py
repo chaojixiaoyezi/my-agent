@@ -12,6 +12,7 @@ owner archive 根目录解析在 `memory_archive_roots.py`，输出渲染在 `me
 import json
 from typing import Any
 
+from ..agent.agent_core.runtime.owner_roots import runtime_owner_root
 from ..agent.memory_archive.compact_resume import (
     MemoryCompactResumeOptions,
     build_memory_compact_resume,
@@ -182,7 +183,7 @@ def _from_compact_arg(args) -> str:
 
 def _cmd_memory_resume_from_compact(agent, args) -> int:
     payload = build_memory_compact_resume(
-        agent.root,
+        runtime_owner_root(agent),
         MemoryCompactResumeOptions(
             apply_ref=_from_compact_arg(args),
             owner_type=getattr(args, "compact_owner_type", "main_agent") or "main_agent",

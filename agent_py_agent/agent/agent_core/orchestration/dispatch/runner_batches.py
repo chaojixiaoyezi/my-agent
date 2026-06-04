@@ -110,7 +110,7 @@ def _merge_runner_candidates(primary: list, secondary: list, *, limit: int) -> l
         seen.add(run_id)
         merged.append(task)
     if limit <= 0:
-        return []
+        return merged
     return merged[:limit]
 
 

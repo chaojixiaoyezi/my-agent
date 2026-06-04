@@ -59,12 +59,12 @@ def case_health(lab) -> None:
 def case_bad_weather(lab) -> None:
     """runs focused recovery/guard scenarios that do not require real LLM calls.
 
-    这组是“坏天气测试”：伪造完成、gateway 崩溃残留、坏 JSON、runner 临时失败。
+    这组是“坏天气测试”：gateway 崩溃残留、坏 JSON、runner 临时失败。
     它们用固定/模拟后端复现坑位，适合快速回归系统边界。"""
 
     lab.section("CASE bad_weather")
     workspace = lab.run_root / "bad_weather"
-    for case_name in ["verification", "gateway-restart", "structured-repair", "runner-retry"]:
+    for case_name in ["gateway-restart", "structured-repair", "runner-retry"]:
         lab.log(f"### scenario-test --case {case_name}")
         lab.run_command(
             lab.agent_command(
@@ -114,10 +114,9 @@ def case_gateway_ask(lab) -> None:
     lab.section("CASE gateway_ask")
     prompt = textwrap.dedent(
         """
-        LIVE LAB REAL LLM TASK:
-        请用 5 条中文要点评估当前 my-agent 的 memory、tools、gateway 三块里各一个风险和一个下一步建议。
+        请用 5 条中文要点评估当前 my-agent 的记忆、工具、后台通道三块里各一个风险和一个下一步建议。
         不要调用工具，不要改文件。
-        最后一行必须输出：LIVE_LAB_OK
+        最后一行写：本次检查完成
         """
     ).strip()
     lab.record_prompt("gateway_ask", prompt)

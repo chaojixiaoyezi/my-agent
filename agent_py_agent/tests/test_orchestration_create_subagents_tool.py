@@ -150,8 +150,8 @@ class TestCreateSubagentsToolExecute:
         assert "agent_tree" not in payload["auto_start"]
         assert payload["next_action"]["tool"] == "inspect_agent_tree"
 
-    def test_auto_start_process_command_targets_created_run_ids(self):
-        """真实后台进程必须显式只推进本轮创建的 run_id，不能靠全局候选猜。"""
+    def test_auto_start_process_command_runs_direct_dispatch_for_created_run_ids(self):
+        """真实后台进程只跑精确 run_id 的一轮 dispatch，不再抢父进程 watch lock。"""
         from agent_py_agent.agent.agent_core.orchestration.background.dispatch import (
             _background_dispatch_command,
             _BackgroundDispatchRequest,
@@ -173,10 +173,10 @@ class TestCreateSubagentsToolExecute:
         assert command[1:4] == ["-u", "-m", "agent_py_agent"]
         assert command[command.index("--config") + 1] == "/tmp/my-agent-config.yaml"
         assert "subagents-dispatch" in command
-        assert "--watch" in command
-        assert "--advance" in command
-        assert command[command.index("--interval") + 1] == "0"
-        assert command[command.index("--max-cycles") + 1] == "4"
+        assert "--watch" not in command
+        assert "--advance" not in command
+        assert "--interval" not in command
+        assert "--max-cycles" not in command
         assert "-u" in command
         assert "--background-launch-id" in command
         assert command[command.index("--background-launch-id") + 1] == "launch-1"

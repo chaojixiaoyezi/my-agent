@@ -15,18 +15,20 @@ from ..agent.memory_archive.runtime_fact_source import (
     ApprovedRuntimeFactSourceRequest,
     write_approved_runtime_fact_source,
 )
+from ..agent.agent_core.runtime.owner_roots import runtime_owner_root
 from .common import make_agent
 
 
 def cmd_memory_fact_write(args) -> int:
     agent = make_agent(args)
-    compact_payload = _compact_payload_for_fact_write(agent.root, args)
+    root = runtime_owner_root(agent)
+    compact_payload = _compact_payload_for_fact_write(root, args)
     fact_id = _completion_fact_id(args, compact_payload)
-    payload = _memory_fact_write_payload(agent.root, args, compact_payload, fact_id)
+    payload = _memory_fact_write_payload(root, args, compact_payload, fact_id)
     if payload["ok"]:
         payload["fact_source_path"] = write_approved_runtime_fact_source(
             ApprovedRuntimeFactSourceRequest(
-                root=agent.root,
+                root=root,
                 fact_id=fact_id,
                 goal=payload["goal"],
                 next_actions=payload["next_actions"],

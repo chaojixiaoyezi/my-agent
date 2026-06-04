@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -136,6 +137,52 @@ class TestPrintDispatchReport:
         captured = capsys.readouterr()
         assert "summary=" in captured.out
         assert "[OK]" in captured.out
+
+
+class TestScenarioDispatchLoop:
+    """测试 happy-path dispatch 循环的等待行为。"""
+
+    def test_dispatch_waits_between_cycles_when_children_are_running(self, monkeypatch):
+        """后台 runner 还在 RUNNING 时，场景测试应等待下一轮，而不是瞬时耗尽 cycles。"""
+        import agent_py_agent.cli.scenario as scenario
+
+        sleeps: list[float] = []
+        verified = iter([False, True])
+        args = SimpleNamespace(
+            capability_config="capability.yaml",
+            skill_dir=None,
+            max_cycles=2,
+            count=1,
+            max_runners=1,
+            dry_run=False,
+            planner=False,
+            timeout=600,
+        )
+        report = SimpleNamespace(summary={}, records=[])
+        request = scenario.ScenarioDispatchRequest(
+            agent=SimpleNamespace(),
+            args=args,
+            paths=SimpleNamespace(config="agent.yaml"),
+            created_via="gateway",
+            gateway_payload={},
+        )
+
+        monkeypatch.setattr(scenario, "load_capability_config", lambda _path: object())
+        monkeypatch.setattr(scenario, "make_capability_router", lambda *_args, **_kwargs: object())
+        monkeypatch.setattr(scenario, "_run_scenario_dispatch_cycle", lambda *_args, **_kwargs: report)
+        monkeypatch.setattr(scenario, "print_dispatch_report", lambda _report: None)
+        monkeypatch.setattr(scenario, "print_scenario_board", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(scenario, "scenario_tasks_verified", lambda *_args, **_kwargs: next(verified))
+        monkeypatch.setattr(scenario, "scenario_tasks_active", lambda *_args, **_kwargs: True, raising=False)
+        monkeypatch.setattr(
+            scenario,
+            "time",
+            SimpleNamespace(sleep=lambda seconds: sleeps.append(seconds)),
+            raising=False,
+        )
+
+        assert scenario._cmd_scenario_dispatch(request) is True
+        assert sleeps and sleeps[0] > 0
 
 
 class TestRunScenarioSuite:

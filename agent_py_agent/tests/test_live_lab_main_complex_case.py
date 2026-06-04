@@ -7,6 +7,7 @@ from scripts.live_lab.constants import REAL_CASES, SUITES
 from scripts.live_lab.main_agent_artifact_case import (
     _assert_artifact_readback_report,
     _assert_compact_resume_roundtrip_payload,
+    _latest_artifact_readback_fact_id,
     _main_artifact_readback_prompt,
 )
 from scripts.live_lab.main_agent_complex_case import (
@@ -76,6 +77,25 @@ def test_main_complex_artifact_gates_accept_complete_outputs(tmp_path):
     _write_artifact_readback_report(tmp_path)
     _assert_compact_resume_roundtrip_payload(_compact_apply_payload(), _compact_resume_payload())
     _write_large_log_report(tmp_path)
+
+
+def test_main_artifact_runtime_fact_lookup_uses_owner_home(tmp_path):
+    fact = (
+        tmp_path
+        / ".my_agent"
+        / "home"
+        / "owners"
+        / "local"
+        / "main"
+        / "memory_archive"
+        / "runtime_facts"
+        / "run-current"
+        / "task.json"
+    )
+    fact.parent.mkdir(parents=True)
+    fact.write_text('{"goal": "TRACE-ARTIFACT-991"}', encoding="utf-8")
+
+    assert _latest_artifact_readback_fact_id(tmp_path) == "run-current"
 
 
 def _write_tool_recovery_report(tmp_path) -> None:

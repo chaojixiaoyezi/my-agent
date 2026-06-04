@@ -7,7 +7,8 @@ Live Lab 是为了把“代码测试通过”再往前推一步：用可见、�
 ## 讨论过什么
 
 - `scripts/live_agent_lab.py` 作为命令入口，具体 case 放到 `scripts/live_lab/`。
-- smoke 套件先验证可见真实环境测试台能跑起来。
+- smoke 套件先验证可见真实环境测试台能跑起来，只包含不依赖真实 LLM 工具调用的健康检查和离线坏天气 case。
+- real 套件的 subagent case 会在子代理仍是 `RUNNING` 时等待下一轮检查，避免后台 runner 已经正常启动但模型还没写回结果时被误判为失败。
 - log-analysis 套件离线 replay SecurityAlertV1 fixture，不依赖真实 LLM。
 - macOS 可用 `open_live_lab.sh` 新开可见 Terminal，方便观察真实长链路。
 - Live Lab 失败应该产出明确 stage、error_type、summary 和 artifacts，而不是只说命令失败。

@@ -217,6 +217,13 @@ def scenario_tasks_verified(agent: SimpleAgent, expected_count: int) -> bool:
     )
 
 
+def scenario_tasks_active(agent: SimpleAgent, expected_count: int) -> bool:
+    tasks = agent.subagents.list_runs()
+    if len(tasks) < expected_count:
+        return False
+    return any(task.status == "RUNNING" for task in tasks[:expected_count])
+
+
 def collect_scenario_report_files(agent: SimpleAgent, fixture_root: Path, expected_count: int) -> list[Path]:
 
     report_files: list[Path] = []

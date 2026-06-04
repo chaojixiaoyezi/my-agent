@@ -53,7 +53,7 @@ def create_items_from_params(params: dict[str, object]) -> list[CreateSubagentIt
     raw_items = params.get("items")
     if raw_items is None:
         return []
-    items = _json_list_param(raw_items)
+    items = _expand_single_item_template(_json_list_param(raw_items), params.get("count"))
     if not items:
         return "items 必须是包含 goal 的对象列表。"
     parsed: list[CreateSubagentItem] = []
@@ -63,6 +63,22 @@ def create_items_from_params(params: dict[str, object]) -> list[CreateSubagentIt
             return item
         parsed.append(item)
     return parsed
+
+
+def _expand_single_item_template(items: list[object], raw_count: object) -> list[object]:
+    if len(items) != 1:
+        return items
+    count = _positive_count(raw_count)
+    if count <= 1:
+        return items
+    return [dict(items[0]) if isinstance(items[0], dict) else items[0] for _ in range(count)]
+
+
+def _positive_count(value: object) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _batch_protocol_error(params: dict[str, object]) -> str:

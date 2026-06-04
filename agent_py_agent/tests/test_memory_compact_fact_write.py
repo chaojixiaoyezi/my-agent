@@ -15,6 +15,7 @@ from agent_py_agent.agent.memory_archive.compact_resume import (
 )
 from agent_py_agent.cli.parser import build_parser
 from agent_py_agent.tests.memory_compact_support import (
+    owner_home,
     workspace,
     write_compact_fixture,
     write_config,
@@ -23,7 +24,7 @@ from agent_py_agent.tests.memory_compact_support import (
 
 def test_memory_fact_write_closes_compact_missing_fields(tmp_path: Path, capsys) -> None:
     config_path = write_config(tmp_path)
-    root = workspace(config_path)
+    root = owner_home(config_path)
     write_compact_fixture(root)
     first_apply = _apply_scoped_compact(root)
     parser = build_parser()
@@ -43,12 +44,25 @@ def test_memory_fact_write_closes_compact_missing_fields(tmp_path: Path, capsys)
         root,
         MemoryCompactResumeOptions(apply_ref=second_apply["apply_id"], resume_mode="auto"),
     )
+    resume_args = parser.parse_args([
+        "--config", str(config_path), "memory-resume",
+        "--from-compact", second_apply["apply_id"],
+        "--compact-resume-mode", "auto",
+        "--json",
+    ])
+    resume_code = resume_args.func(resume_args)
+    resume_payload = json.loads(capsys.readouterr().out)
 
     assert code == 0
     assert payload["fact_id"] == "request-compact"
     assert Path(payload["fact_source_path"], "task.json").exists()
+    assert Path(payload["fact_source_path"]).is_relative_to(root)
+    assert not (workspace(config_path) / "memory_archive" / "runtime_facts" / "request-compact").exists()
     assert second_apply["work_state_snapshot"]["missing_fields"] == []
     assert resume["action_guard"]["status"] == "allow_automated_continue"
+    assert resume_code == 0
+    assert resume_payload["workspace_root"] == str(root)
+    assert resume_payload["action_guard"]["status"] == "allow_automated_continue"
 
 
 def _apply_scoped_compact(root: Path) -> dict:

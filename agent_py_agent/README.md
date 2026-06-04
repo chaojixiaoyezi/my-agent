@@ -84,10 +84,11 @@ python3 -m agent_py_agent scenario-test
 这条命令会创建临时 fixture 项目，把 `workspace_root` 指过去，然后走：
 
 ```text
-gateway ask -> 主代理 create_subagents 创建并后台启动 -> tree/refs -> 按需 dispatch 恢复/重跑 -> 主代理收口
+gateway ask -> 主代理 create_subagents 创建并后台启动 -> tree/refs -> RUNNING 时等待后台 runner -> 必要时 dispatch 恢复/重跑 -> 主代理收口
 ```
 
 所有 memory、subagent、gateway 和文件工具写入都在临时目录里，不会碰当前开发仓库。
+`create_subagents` 的自动启动会对本批 run_id 跑一轮精确 `subagents-dispatch --apply --start-runners`，不复用 watch 循环，避免和 gateway/daemon 的观察锁互相抢占。
 
 ## 普通运行
 

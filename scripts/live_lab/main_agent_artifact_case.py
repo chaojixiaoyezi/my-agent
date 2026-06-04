@@ -126,7 +126,10 @@ def _assert_artifact_readback_report(output: Path) -> None:
 
 
 def _latest_artifact_readback_fact_id(fixture_root: Path) -> str:
-    roots = sorted((fixture_root / "memory_archive" / "runtime_facts").glob("*/task.json"))
+    facts_root = (
+        fixture_root / ".my_agent" / "home" / "owners" / "local" / "main" / "memory_archive" / "runtime_facts"
+    )
+    roots = sorted(facts_root.glob("*/task.json"))
     matches = [
         (path.stat().st_mtime, str(path.parent.name))
         for path in roots

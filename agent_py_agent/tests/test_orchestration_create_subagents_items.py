@@ -90,6 +90,40 @@ class TestCreateSubagentsItemsMode:
         assert result.ok is True
         assert mock_agent.subagents.create_run.call_count == 2
 
+    def test_single_item_template_expands_to_requested_count(self):
+        """模型常传一个模板 item 加 count；底层应按 count 展开同模板子任务。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _agent()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "count": 2,
+            "items": [
+                {
+                    "goal": "读取 README.md 并写证据报告",
+                    "role": "worker",
+                    "tool_preset": "coding",
+                }
+            ],
+        })
+        created_params = [
+            call.kwargs["params"] for call in mock_agent.subagents.create_run.call_args_list
+        ]
+        payload = json.loads(result.output)
+
+        assert result.ok is True
+        assert mock_agent.subagents.create_run.call_count == 2
+        assert [params.goal for params in created_params] == [
+            "读取 README.md 并写证据报告",
+            "读取 README.md 并写证据报告",
+        ]
+        assert [params.agent_name for params in created_params] == [
+            "小傻妞-worker-1",
+            "小傻妞-worker-2",
+        ]
+        assert payload["created"] == 2
+
     def test_items_cap_uses_agent_config_default_when_config_field_missing(self):
         """轻量配置对象缺少 max_subagents 时，也使用 AgentConfig 默认值。"""
         from types import SimpleNamespace

@@ -6,6 +6,9 @@ from agent_py_agent.agent.agent_core.orchestration.dispatch.collaboration_candid
     collaboration_request_runner_candidates_report,
 )
 from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchContext
+from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_batches import (
+    _merge_runner_candidates,
+)
 from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_records import (
     collaboration_candidate_load_error_record,
 )
@@ -53,6 +56,14 @@ def test_collaboration_candidate_load_error_record_is_model_visible() -> None:
     assert record.action == "candidate_scan_load_error"
     assert record.collaboration_candidate_load_errors == load_errors
     assert "不是没有待响应协作请求" in record.message
+
+
+def test_runner_candidate_merge_limit_zero_means_unbounded() -> None:
+    candidates = [_task("agent-a"), _task("agent-b")]
+
+    merged = _merge_runner_candidates([], candidates, limit=0)
+
+    assert [item.id for item in merged] == ["agent-a", "agent-b"]
 
 
 class _CandidateStore:

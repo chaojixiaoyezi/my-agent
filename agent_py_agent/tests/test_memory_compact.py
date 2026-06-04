@@ -394,7 +394,7 @@ def test_memory_resume_from_compact_auto_guard_allows_optional_notes_missing(tmp
 
 def test_memory_resume_from_compact_cli_outputs_context_only(tmp_path: Path, capsys) -> None:
     config_path = write_config(tmp_path)
-    root = workspace(config_path)
+    root = owner_home(config_path)
     write_compact_fixture(root)
     apply_result = apply_memory_compact(
         root,
