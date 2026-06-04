@@ -48,7 +48,7 @@ jobs:
           agent_py_agent/tests/test_dispatch_loop.py
           agent_py_agent/tests/test_policy_checks.py
           agent_py_agent/tests/test_subagent_policies.py
-          agent_py_agent/tests/test_manager_patch.py
+          agent_py_agent/tests/test_subagent_manager_core.py
           -q
 
       - name: Check docs sync
