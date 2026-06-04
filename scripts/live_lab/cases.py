@@ -16,6 +16,7 @@ from .main_agent_artifact_case import (
     case_main_artifact_readback,
     case_main_compact_resume_roundtrip,
 )
+from .main_agent_compact_stress import case_main_compact_stress_long_read
 from .main_agent_complex_case import (
     case_main_large_log_audit,
     case_main_tool_failure_recovery,
@@ -37,6 +38,7 @@ def run_case(lab, case_name: str) -> None:
         "long_subagent": case_long_subagent,
         "main_artifact_readback": case_main_artifact_readback,
         "main_compact_resume_roundtrip": case_main_compact_resume_roundtrip,
+        "main_compact_stress_long_read": case_main_compact_stress_long_read,
         "main_tool_failure_recovery": case_main_tool_failure_recovery,
         "main_large_log_audit": case_main_large_log_audit,
     }

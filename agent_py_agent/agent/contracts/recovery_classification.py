@@ -43,6 +43,7 @@ def repairable_code(code: str) -> bool:
             "STAGED_",
             "STATE_TRANSITION_",
             "TASK_PROGRESS_",
+            "TARGET_COVERAGE_",
             "STATIC_SITE_",
             "TOOL_PROTOCOL_",
             "TOOL_INVALID_",
@@ -81,7 +82,7 @@ def hard_stop_code(code: str) -> bool:
 def recovery_category(code: str) -> str:
     if code.startswith(("ARTIFACT_", "BUILDER_", "DOCUMENT_", "DOCX_", "HTML_", "XLSX_", "CSV_", "JSON_", "PDF_", "MARKDOWN_", "SPREADSHEET_", "STATIC_SITE_")):
         return "artifact"
-    if code.startswith(("EVIDENCE_", "FACT_", "METRIC_", "LANGUAGE_", "COLLABORATION_", "COLLECTION_", "TASK_PROGRESS_")):
+    if code.startswith(("EVIDENCE_", "FACT_", "METRIC_", "LANGUAGE_", "COLLABORATION_", "COLLECTION_", "TASK_PROGRESS_", "TARGET_COVERAGE_")):
         return "evidence"
     if code.startswith(("TOOL_", "TOOL_PROTOCOL_")):
         return "tool"
@@ -105,6 +106,8 @@ def recommended_action(code: str, status: str) -> str:
         return RecoveryAction.REPORT_BLOCKER.value
     if code.startswith("COLLABORATION_"):
         return RecoveryAction.CONTINUE_COLLABORATION.value
+    if code == "TARGET_COVERAGE_MISSING":
+        return RecoveryAction.CONTINUE.value
     if code == "TASK_PROGRESS_OPEN_ITEMS":
         return RecoveryAction.CONTINUE.value
     if code.startswith("TASK_PROGRESS_"):

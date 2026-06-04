@@ -276,6 +276,7 @@ def _merge_items(existing: list[dict[str, Any]], incoming: list[dict[str, Any]])
             by_id[key] = _merge_done_item_without_overwriting_facts(previous, item)
             continue
         by_id[key] = _merge_item_overlay(previous, item)
+    _remove_superseded_range_items(by_id, order)
     return [by_id[item_id] for item_id in order if item_id in by_id]
 
 
@@ -384,6 +385,137 @@ def _fragment_alias_key(value: str) -> str:
     if not match:
         return ""
     return f"fragment-{int(match.group(1)):03d}"
+
+
+def _remove_superseded_range_items(by_id: dict[str, dict[str, Any]], order: list[str]) -> None:
+    done_parts = {
+        part
+        for item in by_id.values()
+        if _done_like_status(item.get("status"))
+        for part in _numeric_item_parts(item)
+    }
+    continuation_starts = [
+        (key, *continuation)
+        for key, item in by_id.items()
+        if not _done_like_status(item.get("status"))
+        if (continuation := _numeric_continuation_key(item))
+    ]
+    _remove_superseded_continuation_items(by_id, order, continuation_starts, done_parts)
+    if not done_parts and not continuation_starts:
+        return
+    for key, item in list(by_id.items()):
+        if _done_like_status(item.get("status")):
+            continue
+        range_key = _numeric_range_key(item)
+        if not range_key:
+            continue
+        prefix, start, end = range_key
+        if start > end or end - start > 2000:
+            continue
+        if all((prefix, number) in done_parts for number in range(start, end + 1)):
+            by_id.pop(key, None)
+            if key in order:
+                order.remove(key)
+            continue
+        if _range_has_newer_continuation(prefix, start, end, continuation_starts, done_parts):
+            by_id.pop(key, None)
+            if key in order:
+                order.remove(key)
+
+
+def _remove_superseded_continuation_items(
+    by_id: dict[str, dict[str, Any]],
+    order: list[str],
+    continuation_starts: list[tuple[str, str, int]],
+    done_parts: set[tuple[str, int]],
+) -> None:
+    by_prefix: dict[str, list[tuple[str, int]]] = {}
+    for key, prefix, start in continuation_starts:
+        by_prefix.setdefault(prefix, []).append((key, start))
+    for prefix, values in by_prefix.items():
+        if len(values) < 2:
+            continue
+        latest_start = max(start for _, start in values)
+        for key, start in values:
+            if start >= latest_start:
+                continue
+            if done_parts and not all((prefix, number) in done_parts for number in range(start, latest_start)):
+                continue
+            by_id.pop(key, None)
+            if key in order:
+                order.remove(key)
+
+
+def _range_has_newer_continuation(
+    prefix: str,
+    start: int,
+    end: int,
+    continuation_starts: list[tuple[str, str, int]],
+    done_parts: set[tuple[str, int]],
+) -> bool:
+    for _key, continuation_prefix, continuation_start in continuation_starts:
+        if continuation_prefix != prefix:
+            continue
+        if continuation_start <= start or continuation_start > end + 1:
+            continue
+        if done_parts and not all((prefix, number) in done_parts for number in range(start, continuation_start)):
+            continue
+        return True
+    return False
+
+
+def _numeric_item_parts(item: dict[str, Any]) -> set[tuple[str, int]]:
+    parts: set[tuple[str, int]] = set()
+    for key in ("id", "title"):
+        text = str(item.get(key) or "")
+        if part := _numeric_item_key(text):
+            parts.add(part)
+    return parts
+
+
+def _numeric_item_key(value: str) -> tuple[str, int] | None:
+    text = str(value or "").strip().lower()
+    match = re.match(r"^([a-z\u4e00-\u9fff_-]*?)[-_ ]?(\d{1,6})(?:\D.*)?$", text)
+    if not match:
+        return None
+    return (_normalize_numeric_prefix(match.group(1)), int(match.group(2)))
+
+
+def _numeric_range_key(item: dict[str, Any]) -> tuple[str, int, int] | None:
+    for key in ("id", "title"):
+        text = str(item.get(key) or "").strip().lower()
+        match = re.match(
+            r"^([a-z\u4e00-\u9fff_-]*?)[-_ ]?(\d{1,6})\s*(?:-|~|至|到)\s*(?:[a-z\u4e00-\u9fff_-]*?[-_ ]?)?(\d{1,6})(?:\D.*)?$",
+            text,
+        )
+        if match:
+            return (_normalize_numeric_prefix(match.group(1)), int(match.group(2)), int(match.group(3)))
+    return None
+
+
+def _numeric_continuation_key(item: dict[str, Any]) -> tuple[str, int] | None:
+    for key in ("id", "title"):
+        text = str(item.get(key) or "").strip().lower()
+        match = re.match(
+            r"^([a-z\u4e00-\u9fff_-]*?)[-_ ]?(\d{1,6})\s*(?:\+|及之后|以后|之后|起|后续)(?:\D.*)?$",
+            text,
+        )
+        if match:
+            return (_normalize_numeric_prefix(match.group(1)), int(match.group(2)))
+    return None
+
+
+def _normalize_numeric_prefix(value: str) -> str:
+    text = str(value or "").strip().lower().replace("_", "-")
+    aliases = {
+        "chapter": "ch",
+        "chap": "ch",
+        "章节": "ch",
+        "fragment": "fragment",
+        "frag": "fragment",
+        "片段": "fragment",
+    }
+    return aliases.get(text, text)
 
 
 def _truthy(value: object) -> bool:

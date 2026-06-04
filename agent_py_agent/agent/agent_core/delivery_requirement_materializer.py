@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,7 @@ def materialized_delivery_contract(
     payload: object,
     *,
     workspace_root: Path | None = None,
+    user_prompt: str = "",
 ) -> dict[str, Any]:
     value = _payload_object(payload)
     source_doctor = validate_delivery_contract(value, workspace_root=workspace_root)
@@ -52,13 +54,17 @@ def materialized_delivery_contract(
             contract[key] = dict(value[key])
     _normalize_delivery_quality_contract(contract)
     _derive_fact_evidence_contract(contract)
+    _derive_full_source_read_coverage_contract(contract, user_prompt)
+    _derive_user_requested_output_artifacts(contract, user_prompt)
     _preserve_explicit_bootstrap_contract(contract)
     if findings:
         contract["_preflight_findings"] = findings
     doctor = validate_delivery_contract(contract, workspace_root=workspace_root)
     if doctor.normalized_contract:
         contract = dict(doctor.normalized_contract)
-    doctor_findings = [*source_doctor.findings, *doctor.findings]
+    doctor_findings = list(doctor.findings)
+    if not _artifact_payload(contract):
+        doctor_findings = [*source_doctor.findings, *doctor_findings]
     if doctor_findings:
         contract["_contract_doctor"] = _doctor_payload(
             {
@@ -70,6 +76,165 @@ def materialized_delivery_contract(
             }
         )
     return contract
+
+
+_COMPLETE_SOURCE_READ_MARKERS = (
+    "完整读完",
+    "完整读取",
+    "全部读完",
+    "全文读完",
+    "从头到尾",
+    "按顺序慢慢读",
+    "不要只抽样",
+    "不要只搜",
+)
+_PATH_RE = re.compile(r"(?P<path>(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+\.[A-Za-z0-9]{1,12})")
+_OUTPUT_INTENT_MARKERS = ("写到", "输出到", "保存到", "放到", "存到", "最终把", "最后写", "最终写")
+_OUTPUT_PATH_MARKERS = ("写到", "输出到", "保存到", "放到", "存到", "最后写", "最终写")
+
+
+def _derive_full_source_read_coverage_contract(contract: dict[str, Any], user_prompt: str) -> None:
+    source_paths = _complete_read_source_paths(user_prompt)
+    if not source_paths:
+        return
+    coverage = contract.get("target_coverage_contract")
+    if isinstance(coverage, dict):
+        _merge_full_source_read_targets(coverage, source_paths)
+        return
+    contract["target_coverage_contract"] = {
+        "scope_label": "完整读取源文件",
+        "enforcement": "required",
+        "coverage_requirement": "full_source_read",
+        "target_items": [_full_source_read_target(path) for path in source_paths],
+    }
+
+
+def _complete_read_source_paths(user_prompt: str) -> list[str]:
+    paths: list[str] = []
+    for line in str(user_prompt or "").splitlines():
+        if not _line_requests_complete_read(line):
+            continue
+        paths.extend(_path_candidates(line))
+    return list(dict.fromkeys(paths))
+
+
+def _derive_user_requested_output_artifacts(contract: dict[str, Any], user_prompt: str) -> None:
+    paths = _user_requested_output_paths(user_prompt)
+    if not paths:
+        return
+    artifacts = contract.get("artifacts")
+    if not isinstance(artifacts, list):
+        artifacts = []
+        contract["artifacts"] = artifacts
+    for path in paths:
+        if _artifact_path_already_declared(artifacts, path):
+            continue
+        if _promote_output_path_to_existing_artifact(artifacts, path):
+            continue
+        artifacts.append(_user_requested_output_artifact(path))
+
+
+def _user_requested_output_paths(user_prompt: str) -> list[str]:
+    paths: list[str] = []
+    for line in str(user_prompt or "").splitlines():
+        paths.extend(_output_path_candidates(line))
+    return list(dict.fromkeys(paths))
+
+
+def _output_path_candidates(line: str) -> list[str]:
+    candidates: list[str] = []
+    for marker in _OUTPUT_PATH_MARKERS:
+        index = line.find(marker)
+        if index < 0:
+            continue
+        candidates.extend(match.group("path") for match in _PATH_RE.finditer(line[index + len(marker) :]))
+    return candidates
+
+
+def _artifact_path_already_declared(artifacts: list[object], path: str) -> bool:
+    return any(
+        isinstance(item, dict)
+        and str(item.get("preferred_path") or item.get("path") or "").strip() == path
+        for item in artifacts
+    )
+
+
+def _promote_output_path_to_existing_artifact(artifacts: list[object], path: str) -> bool:
+    candidates = [
+        item
+        for item in artifacts
+        if isinstance(item, dict)
+        and not str(item.get("preferred_path") or item.get("path") or "").strip()
+        and not _artifact_declares_input_role(item)
+    ]
+    if len(candidates) != 1:
+        return False
+    artifact = candidates[0]
+    artifact["preferred_path"] = path
+    artifact.setdefault("allowed_output_roots", [str(Path(path).parent) if str(Path(path).parent) != "." else "."])
+    if not artifact.get("kind"):
+        kind = Path(path).suffix.lower().lstrip(".")
+        if kind:
+            artifact["kind"] = kind
+    return True
+
+
+def _user_requested_output_artifact(path: str) -> dict[str, Any]:
+    suffix = Path(path).suffix.lower().lstrip(".")
+    artifact: dict[str, Any] = {
+        "artifact_id": _artifact_id_from_output_path(path),
+        "preferred_path": path,
+        "allowed_output_roots": [str(Path(path).parent) if str(Path(path).parent) != "." else "."],
+        "required": True,
+    }
+    if suffix:
+        artifact["kind"] = suffix
+    return artifact
+
+
+def _artifact_id_from_output_path(path: str) -> str:
+    raw = Path(path).name or "artifact"
+    text = re.sub(r"[^A-Za-z0-9]+", "_", raw).strip("_").lower()
+    return f"user_requested_{text or 'artifact'}"
+
+
+def _line_requests_complete_read(line: str) -> bool:
+    return any(marker in line for marker in _COMPLETE_SOURCE_READ_MARKERS)
+
+
+def _path_candidates(text: str) -> list[str]:
+    return [match.group("path") for match in _PATH_RE.finditer(_source_intent_segment(text))]
+
+
+def _source_intent_segment(text: str) -> str:
+    end = len(text)
+    for marker in _OUTPUT_INTENT_MARKERS:
+        index = text.find(marker)
+        if index >= 0:
+            end = min(end, index)
+    return text[:end]
+
+
+def _merge_full_source_read_targets(coverage: dict[str, Any], paths: list[str]) -> None:
+    items = coverage.get("target_items")
+    if not isinstance(items, list):
+        items = []
+        coverage["target_items"] = items
+    existing = {str(item.get("source_ref") or item.get("target_id") or "") for item in items if isinstance(item, dict)}
+    for path in paths:
+        if path not in existing:
+            items.append(_full_source_read_target(path))
+    coverage.setdefault("coverage_requirement", "full_source_read")
+    coverage.setdefault("enforcement", "required")
+
+
+def _full_source_read_target(path: str) -> dict[str, str]:
+    return {
+        "target_id": path,
+        "label": f"完整读取 {path}",
+        "source_ref": path,
+        "coverage_kind": "full_source_read",
+    }
 
 
 def _artifact_payload(value: dict[str, Any]) -> object:
@@ -125,6 +290,8 @@ def _artifact_contracts(value: object, workspace_root: Path | None) -> tuple[lis
             findings.append(_finding("DELIVERY_MATERIALIZER_INPUT_NOT_ARTIFACT", f"artifacts[{index}]"))
             continue
         normalized = _artifact_contract(item)
+        if _is_internal_work_artifact(normalized):
+            continue
         path_finding = _path_finding(normalized, workspace_root, index)
         if path_finding:
             findings.append(path_finding)
@@ -282,6 +449,24 @@ def _artifact_declares_input_role(item: dict[str, Any]) -> bool:
         "search",
     )
     return any(marker in role for marker in input_markers)
+
+
+def _is_internal_work_artifact(artifact: dict[str, Any]) -> bool:
+    if str(artifact.get("preferred_path") or artifact.get("path") or "").strip():
+        return False
+    if artifact.get("kind") or _extension_values_from_artifact(artifact):
+        return False
+    roots = artifact.get("allowed_output_roots")
+    if not isinstance(roots, list) or not roots:
+        return False
+    return all(_is_work_root(root) for root in roots)
+
+
+def _is_work_root(value: object) -> bool:
+    text = str(value or "").strip().rstrip("/\\")
+    if not text:
+        return False
+    return text == "work" or Path(text).name == "work"
 
 
 def _kind_from_artifact_path(artifact: dict[str, Any]) -> str:

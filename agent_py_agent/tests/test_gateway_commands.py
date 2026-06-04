@@ -194,6 +194,31 @@ class TestCmdGatewayStatus:
 
         assert "state_load_error=" in capsys.readouterr().out
 
+    def test_gateway_status_marks_running_state_without_pid_as_stale(self, tmp_path: Path, capsys):
+        from agent_py_agent.cli.gateway_process import cmd_gateway_status
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        state_path = tmp_path / "gateway_state.json"
+        state_path.write_text('{"status": "running", "pid": 123}', encoding="utf-8")
+
+        mock_agent = MagicMock()
+        mock_agent.config = MagicMock()
+        type(mock_agent.config).gateway_port = PropertyMock(return_value=0)
+        mock_paths = MagicMock(root=tmp_path, pid=tmp_path / "gateway.pid", state=state_path)
+
+        with patch("agent_py_agent.cli._gateway_commands.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli._gateway_commands.gateway_paths", return_value=mock_paths), \
+             patch("agent_py_agent.cli._gateway_commands.read_pid_record", return_value=None), \
+             patch("agent_py_agent.cli._gateway_commands.read_runtime_status", return_value={}), \
+             patch("agent_py_agent.cli.gateway_process.gateway_running", return_value=(None, False)), \
+             patch("agent_py_agent.cli.gateway_process.gateway_request_counts", return_value={}):
+            assert cmd_gateway_status(args) == 0
+
+        out = capsys.readouterr().out
+        assert "gateway status=stopped pid=none state=stale-running" in out
+        assert '"stale_state": true' in out
+
     def test_gateway_status_counts_only_request_json_files(self, tmp_path: Path, capsys):
         from agent_py_agent.cli.gateway_process import cmd_gateway_status
 

@@ -389,6 +389,40 @@ def test_read_file_reports_next_start_line_when_truncated():
         assert "next_start_line=" in result.output
 
 
+def test_read_file_start_line_with_max_chars_keeps_line_cursor():
+    """LLM: start_line is a line cursor; max_chars should only bound that page."""
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        target = workspace / "long.txt"
+        target.write_text("\n".join(f"Line {idx}" for idx in range(1, 20)), encoding="utf-8")
+        read_tool = ReadFileTool(workspace, max_chars=30)
+
+        result = read_tool.execute({"path": "long.txt", "start_line": 5, "max_chars": 30})
+
+        assert result.ok
+        assert "5: Line 5" in result.output
+        assert "1: Line 1" not in result.output
+        assert "char-window offset=0" not in result.output
+
+
+def test_read_file_line_mode_honors_request_max_chars_below_tool_cap():
+    """LLM: model-requested line read pages should stay small when max_chars is explicit."""
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        target = workspace / "long.txt"
+        target.write_text("\n".join(f"Line {idx} has extra text" for idx in range(1, 20)), encoding="utf-8")
+        read_tool = ReadFileTool(workspace, max_chars=2000)
+
+        result = read_tool.execute({"path": "long.txt", "start_line": 5, "max_chars": 40})
+
+        assert result.ok
+        assert "5: Line 5" in result.output
+        assert "PARTIAL view only" in result.output
+        assert "limit_chars=40" in result.output
+        assert "next_start_line=" in result.output
+        assert len(result.output) < 260
+
+
 def test_read_file_single_long_line_reports_next_offset_and_resumes():
     """LLM: minified JSON/log style files may be one huge line; line cursor alone would skip data."""
     with tempfile.TemporaryDirectory() as td:

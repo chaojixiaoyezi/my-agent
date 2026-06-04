@@ -254,10 +254,18 @@ before changing code.
   文件包是否能被真实 reader 打开、hash/registry 状态和工具运行错误。文档厚度、
   覆盖比例、证据充分性、推荐理由质量、字段是否“有用”等业务质量，只能作为
   `warning` / advisory 返给模型或人工；不能直接把任务硬挡死。
-- “全部 / 每个 / 所有 / 每周 / 每个项目”这类覆盖要求属于进度账本和 coverage
-  ledger 的软管理范围。系统可以提醒哪些条目缺证据、缺引用或只到 README 级，
-  但不能把这类业务覆盖质量塞进 closeout 变成硬门；真正要硬验收必须先有用户
-  或外部结构化合同显式声明的客观字段。
+- “全部 / 每个 / 所有 / 每周 / 每个项目”这类业务覆盖要求默认属于进度账本和
+  coverage ledger 的软管理范围。系统可以提醒哪些条目缺证据、缺引用或只到
+  README 级，但不能把这类业务质量塞进 closeout 变成硬门。
+- 当用户明确要求“完整读完 / 完整读取 / 全文读完 / 从头到尾”某个源文件时，
+  delivery materializer 可以补出 `target_coverage_contract`，把该源文件登记为
+  required `full_source_read`。closeout 只用工具读文件记录里的客观
+  `offset/chars/total_chars` 或 `start_line/end_line/total_lines` 区间验收：从开头
+  连续覆盖到 EOF 才算完成；只读到部分不能因为最终报告存在就通过。这个规则
+  只适用于可机器证明的来源读取覆盖，不能扩展成“报告质量/分析深度”的通用硬门。
+- `task_progress` 里的普通 evidence/coverage 缺口是 advisory。它可以提醒模型补证据、
+  补来源或继续完善报告，但不能在没有结构化 required 读取合同时，把“done 项证据
+  不够多”或“覆盖清单没填满”升级成 closeout 硬阻断。
 - closeout 返工上下文只能在模型明确调用 `submit_for_acceptance` 且本次验收未通过时
   注入一次。普通工具循环、长任务续跑、compact 续接和后续读写轮次不得反复复读旧
   closeout 失败，避免模型被历史验收噪音带偏。

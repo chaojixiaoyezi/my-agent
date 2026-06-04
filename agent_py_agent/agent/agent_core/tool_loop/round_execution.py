@@ -99,6 +99,7 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     subagent_output_written = False
     stateful_orchestration_seen = False
     executed_count = 0
+    read_since_checkpoint: list[dict[str, object]] = []
     for idx, payload in enumerate(calls, start=1):
         tool_name = _tool_name(payload)
         if _should_defer_for_compact_digest(request, tool_name):
@@ -114,8 +115,11 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
             )
         _emit_tool_progress(request, idx, payload, _finished_status(result), started_at=started_at)
         request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
+        if result.ok and tool_name == "read_file":
+            read_since_checkpoint.append(dict(payload) if isinstance(payload, dict) else {})
         if result.ok and tool_name in _CHECKPOINT_TOOLS:
             mark_tool_context_checkpoint_satisfied(request.params)
+            read_since_checkpoint.clear()
         mark_tool_context_digest_pending(request.params)
         executed_count = idx
         subagent_output_written = subagent_output_written or is_subagent_output_json_write(
@@ -126,6 +130,7 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
         )
         if _round_context_over_compact_budget(request, before_context_count):
             break
+    _append_long_read_fact_reminder(request, read_since_checkpoint)
     _append_deferred_tool_call_notice(request, executed_count=executed_count)
     return subagent_output_written
 
@@ -219,6 +224,47 @@ def _append_deferred_tool_call_notice(
         f"只执行了前 {executed_count} 个，剩余 {deferred_count} 个没有执行。\n"
         "下一轮请继续处理未完成的读取、写入或检查；不要把未执行的工具调用当作已经完成。"
     )
+
+
+def _append_long_read_fact_reminder(
+    request: ToolRoundExecutionRequest,
+    read_since_checkpoint: list[dict[str, object]],
+) -> None:
+    if not read_since_checkpoint:
+        return
+    if not _looks_like_fact_preserving_long_read(request.current_prompt):
+        return
+    recent = ", ".join(_read_call_pointer(item) for item in read_since_checkpoint[-3:])
+    request.params.tool_context.append(
+        "[tool-system:long-read-facts]\n"
+        "刚才已经读取了一段或多段正文，但这一轮还没有看到新的 task_progress/write_file 检查点。\n"
+        "如果这些正文里有最终报告需要逐项保留的事实，请下一轮先把对象、事实和 source/offset/行号证据写入 task_progress 或当前任务 work 草稿，"
+        "再继续读取下一段；不要只写“已覆盖某个范围”来代替逐项事实。\n"
+        f"recent_reads: {recent}"
+    )
+
+
+def _looks_like_fact_preserving_long_read(value: str) -> bool:
+    text = str(value or "")
+    if not text:
+        return False
+    read_markers = ("完整读", "完整读取", "读完", "按顺序", "分段读", "分片读", "继续读取")
+    fact_markers = ("每个", "每篇", "每周", "每章", "每发现", "逐项", "逐章", "检查点", "最终报告", "报告里要包含")
+    return any(marker in text for marker in read_markers) and any(marker in text for marker in fact_markers)
+
+
+def _read_call_pointer(payload: dict[str, object]) -> str:
+    path = str(payload.get("path") or "").strip()
+    if not path:
+        path = "<unknown>"
+    offset = payload.get("offset")
+    start_line = payload.get("start_line")
+    end_line = payload.get("end_line")
+    if offset not in (None, ""):
+        return f"{path}@offset={offset}"
+    if start_line not in (None, "") or end_line not in (None, ""):
+        return f"{path}@lines={start_line or '?'}-{end_line or '?'}"
+    return path
 
 
 def _round_context_over_compact_budget(request: ToolRoundExecutionRequest, before_context_count: int) -> bool:

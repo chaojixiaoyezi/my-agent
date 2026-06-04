@@ -114,6 +114,19 @@ def test_task_progress_open_items_are_repairable_not_terminal():
     assert recovery["actions"][0]["recommended_action"] == "continue"
 
 
+def test_target_coverage_missing_is_repairable_not_terminal():
+    decision = GateDecision.repair(
+        "target_coverage",
+        [GateFinding("TARGET_COVERAGE_MISSING", message="继续 read_file(start_line=501)")],
+    )
+    recovery = decision.to_dict()["recovery"]
+
+    assert recovery["status"] == "repair_required"
+    assert recovery["terminal"] is False
+    assert recovery["can_auto_repair"] is True
+    assert recovery["actions"][0]["recommended_action"] == "continue"
+
+
 def test_gate_decision_recovery_envelope_marks_approval_as_user_input():
     decision = GateDecision.need_approval("tool_effect", evidence={"tool_name": "block_ip"})
     recovery = decision.to_dict()["recovery"]

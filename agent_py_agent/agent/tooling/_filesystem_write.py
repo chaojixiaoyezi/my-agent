@@ -92,6 +92,16 @@ class WriteFileTool(FileSystemTool):
             if content_policy and not content_policy.allowed:
                 return ToolExecutionResult("write_file", False, content_policy.message)
             target = self.resolve_path(raw_path)
+            ledger_error = _system_ledger_write_error(target)
+            if ledger_error:
+                return ToolExecutionResult(
+                    "write_file",
+                    False,
+                    ledger_error,
+                    error_code="SYSTEM_LEDGER_WRITE_BLOCKED",
+                    retryable=True,
+                    recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+                )
         except ValueError as exc:
             return ToolExecutionResult("write_file", False, str(exc))
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -202,6 +212,25 @@ def _content_policy(raw_path: str, content: str | None, max_chars: int) -> Any |
             max_chars=max_chars,
         )
     )
+
+
+def _system_ledger_write_error(target: Path) -> str:
+    parts = target.resolve(strict=False).parts
+    if _is_task_progress_ledger(parts):
+        return (
+            "系统账本写入被阻止: task_progress 进度账本不能用 write_file 直接覆盖。"
+            "请使用 task_progress 工具更新进度项、事实和证据；最终用户报告仍可写到 output 或用户指定路径。"
+        )
+    return ""
+
+
+def _is_task_progress_ledger(parts: tuple[str, ...]) -> bool:
+    for index, part in enumerate(parts):
+        if part != "memory_archive":
+            continue
+        if index + 1 < len(parts) and parts[index + 1] == "task_progress" and parts[-1] == "progress.json":
+            return True
+    return False
 
 
 def _write_output(

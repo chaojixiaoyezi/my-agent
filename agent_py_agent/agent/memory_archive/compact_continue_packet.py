@@ -121,6 +121,7 @@ def _work_state_payload(work_state: dict[str, Any], missing: list[str]) -> dict[
         "latest_tests": _tests_payload(work_state.get("latest_tests")),
         "changed_files": sequence_strings(work_state.get("changed_files")),
         "read_files": sequence_strings(work_state.get("read_files")),
+        "task_progress": _task_progress_payload(work_state.get("task_progress")),
         "tool_progress": _tool_progress_payload(work_state.get("tool_progress")),
         "runtime_handoff": runtime_handoff_payload(work_state.get("runtime_handoff")),
         "captured_refs": captured_refs_payload(work_state),
@@ -254,6 +255,59 @@ def _tests_payload(value: Any) -> dict[str, Any]:
         "items": sequence_strings(payload.get("items")),
         "source_paths": sequence_strings(payload.get("source_paths")),
     }
+
+
+def _task_progress_payload(value: Any) -> dict[str, Any]:
+    payload = value if isinstance(value, dict) else {}
+    if not payload:
+        return {}
+    result = {
+        "summary": str(payload.get("summary") or ""),
+        "next_action": str(payload.get("next_action") or ""),
+        "counts": dict(payload.get("counts", {}) if isinstance(payload.get("counts"), dict) else {}),
+        "ref": str(payload.get("ref") or ""),
+        "updated_at": payload.get("updated_at", 0),
+        "active_items": _progress_items(payload.get("active_items"), limit=8),
+        "recent_done_items": _progress_items(payload.get("recent_done_items"), limit=24),
+    }
+    quality = payload.get("quality_hints") if isinstance(payload.get("quality_hints"), dict) else {}
+    if quality:
+        result["quality_hints"] = {
+            "severity": str(quality.get("severity") or ""),
+            "messages": sequence_strings(quality.get("messages"))[:4],
+            "next_suggestions": sequence_strings(quality.get("next_suggestions"))[:4],
+            "result_without_evidence_count": _positive_int(quality.get("result_without_evidence_count")),
+            "coverage_incomplete_count": _positive_int(quality.get("coverage_incomplete_count")),
+        }
+    coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
+    if coverage:
+        result["coverage"] = {
+            "goal": str(coverage.get("goal") or ""),
+            "counts": dict(coverage.get("counts", {}) if isinstance(coverage.get("counts"), dict) else {}),
+            "active_targets": _progress_items(coverage.get("active_targets"), limit=12),
+        }
+    return {key: value for key, value in result.items() if value not in ("", [], {}, None)}
+
+
+def _progress_items(value: Any, *, limit: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in value if isinstance(value, list | tuple) else []:
+        if not isinstance(item, dict):
+            continue
+        row = {
+            "id": str(item.get("id") or ""),
+            "title": str(item.get("title") or ""),
+            "status": str(item.get("status") or ""),
+            "notes": str(item.get("notes") or ""),
+            "next": str(item.get("next") or ""),
+            "evidence": sequence_strings(item.get("evidence"))[:6],
+        }
+        row = {key: value for key, value in row.items() if value not in ("", [], {}, None)}
+        if row:
+            rows.append(row)
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 def _tool_progress_payload(value: Any) -> list[dict[str, Any]]:

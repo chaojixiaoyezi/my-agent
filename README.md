@@ -417,6 +417,9 @@ my-agent scenario-test --case all --count 1
 python3 scripts/live_agent_lab.py --suite smoke
 # 当前终端跑冒烟测试；默认不调用真实模型。
 
+python3 scripts/live_agent_lab.py --suite compact-stress --real-llm --timeout 2400
+# 当前终端跑真实 compact 长输出压测；默认生成约 10MB 现场记录，至少要求 20 次 compact。
+
 python3 scripts/live_agent_lab.py --suite real --real-llm --timeout 300 --count 1 --max-cycles 2
 # 当前终端跑真实 LLM + gateway + 长链路测试；会调用真实模型。
 

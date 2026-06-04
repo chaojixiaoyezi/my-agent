@@ -222,7 +222,7 @@ def cmd_gateway_status(args) -> int:
     http_port = getattr(agent.config, "gateway_port", 0)
 
     status = "running" if running else "stopped"
-    state_status = state.get("status", "unknown")
+    state_status = _gateway_state_status_for_display(running, state)
     print(f"gateway status={status} pid={pid_record.get('pid') if pid_record else 'none'} state={state_status}")
     print(f"  workspace={paths.root}")
     if state_report.load_error:
@@ -238,13 +238,28 @@ def cmd_gateway_status(args) -> int:
         print(f"  state_file={paths.state}")
 
     if state:
-        print(f"  status_detail={json.dumps(state, ensure_ascii=False)}")
+        print(f"  status_detail={json.dumps(_gateway_state_detail_for_display(running, state), ensure_ascii=False)}")
 
     runtime = read_runtime_status(paths.state)
     if runtime:
         print(f"  last_heartbeat={runtime.get('updated_at', 'none')}")
-        print(f"  last_status={runtime.get('status', 'none')}")
+        print(f"  last_status={_gateway_state_status_for_display(running, runtime)}")
     return 0
+
+
+def _gateway_state_status_for_display(running: bool, state: dict) -> str:
+    status = str(state.get("status") or "unknown")
+    if not running and status == "running":
+        return "stale-running"
+    return status
+
+
+def _gateway_state_detail_for_display(running: bool, state: dict) -> dict:
+    detail = dict(state)
+    if not running and detail.get("status") == "running":
+        detail["stale_state"] = True
+        detail["stale_state_reason"] = "pid_not_alive"
+    return detail
 
 
 def cmd_gateway_stop(args) -> int:

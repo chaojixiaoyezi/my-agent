@@ -171,6 +171,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="同一只读工具同一参数连续返回相同结果；不要继续原样读取，先写 checkpoint、换参数或记录阻塞原因。",
     ),
+    "SYSTEM_LEDGER_WRITE_BLOCKED": ErrorContract(
+        code="SYSTEM_LEDGER_WRITE_BLOCKED",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="系统运行账本不能用普通文件写入工具覆盖；改用对应专用工具更新，例如 task_progress。",
+    ),
     "MODEL_UPSTREAM_FAILED": ErrorContract(
         code="MODEL_UPSTREAM_FAILED",
         category="model",

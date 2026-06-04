@@ -1,32 +1,45 @@
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from typing import Any
 
+CHAR_WINDOW_RE = re.compile(r"\[char-window offset=(\d+) chars=(\d+) total_chars=(\d+)\]")
+LINE_NUMBER_RE = re.compile(r"^(\d+):\s", re.MULTILINE)
+TOTAL_LINES_RE = re.compile(r"total_lines=(\d+)")
+NEXT_START_LINE_RE = re.compile(r"next_start_line=(\d+)")
 
-def collect_target_coverage_records(payloads: list[object]) -> list[dict[str, object]]:
+
+def collect_target_coverage_records(
+    payloads: list[object],
+    *,
+    workspace_root: str | Path | None = None,
+) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
+    base = _base_path(workspace_root)
     for payload in payloads:
-        _collect_records(payload, records)
-    return _unique_records(records)
+        _collect_records(payload, records, base)
+    return _unique_records(_merge_read_file_windows(records))
 
 
 def target_coverage_status(
     contract: dict[str, Any],
     *,
     coverage_records: list[dict[str, object]],
+    workspace_root: str | Path | None = None,
 ) -> dict[str, object]:
+    base = _base_path(workspace_root)
     targets = _target_items(contract)
-    covered_keys = {
-        key
-        for record in coverage_records
-        if _record_counts_as_covered(record)
-        for key in _coverage_keys(record)
-    }
-    missing = [item for item in targets if not (_target_keys(item) & covered_keys)]
+    missing = [
+        item
+        for item in targets
+        if not _target_is_covered(item, coverage_records, contract=contract, base=base)
+    ]
     enforcement = str(contract.get("enforcement") or "advisory").strip().lower()
     should_block = bool(missing) and enforcement in {"required", "strict", "hard", "block", "blocking", "enforced"}
+    repair_hints = _repair_hints(missing, coverage_records, base=base)
     return {
         "scope_label": str(contract.get("scope_label") or ""),
         "enforcement": enforcement or "advisory",
@@ -34,17 +47,18 @@ def target_coverage_status(
         "covered_count": len(targets) - len(missing),
         "missing_count": len(missing),
         "missing_items": missing[:50],
+        "repair_hints": repair_hints[:50],
         "coverage_records": coverage_records[:100],
         "should_block": should_block,
-        "recommended_next_action": "cover_missing_targets_before_submit" if should_block else "continue_or_summarize_with_missing_items_visible",
+        "recommended_next_action": _recommended_next_action(should_block, repair_hints),
     }
 
 
-def _collect_records(value: object, records: list[dict[str, object]]) -> None:
+def _collect_records(value: object, records: list[dict[str, object]], base: Path | None) -> None:
     if isinstance(value, dict):
-        _collect_from_mapping(value, records)
+        _collect_from_mapping(value, records, base)
     for child in _children(value):
-        _collect_records(child, records)
+        _collect_records(child, records, base)
 
 
 def _children(value: object) -> list[object]:
@@ -55,10 +69,10 @@ def _children(value: object) -> list[object]:
     return []
 
 
-def _collect_from_mapping(value: dict[str, object], records: list[dict[str, object]]) -> None:
+def _collect_from_mapping(value: dict[str, object], records: list[dict[str, object]], base: Path | None) -> None:
     records.extend(_direct_coverage_records(value.get("coverage_records")))
     records.extend(_registry_coverage_records(value.get("artifact_registry_refs")))
-    if record := _tool_call_coverage_record(value):
+    if record := _tool_call_coverage_record(value, base):
         records.append(record)
 
 
@@ -134,7 +148,7 @@ def _record_counts_as_covered(record: dict[str, object]) -> bool:
     return bool(str(record.get("target_id") or "").strip()) and status in {"covered", "done", "ok", "ready", "hit"}
 
 
-def _tool_call_coverage_record(value: dict[str, object]) -> dict[str, object]:
+def _tool_call_coverage_record(value: dict[str, object], base: Path | None) -> dict[str, object]:
     tool = str(value.get("tool") or value.get("tool_name") or "").strip()
     if tool not in {"read_file", "read_artifact", "list_files", "find_files", "search_text"}:
         return {}
@@ -151,46 +165,431 @@ def _tool_call_coverage_record(value: dict[str, object]) -> dict[str, object]:
     ).strip()
     if not source:
         return {}
-    return {
-        "target_id": _canonical_ref(source),
+    record: dict[str, object] = {
+        "target_id": _canonical_ref(source, base),
         "status": "covered",
         "source_ref": source,
         "tool": tool,
     }
+    if tool == "read_file":
+        record.update(_read_file_window_fields(value, source, base))
+    return record
 
 
-def _target_keys(item: dict[str, str]) -> set[str]:
+def _read_file_window_fields(value: dict[str, object], source: str, base: Path | None) -> dict[str, object]:
+    text = _tool_output_text(value)
+    metadata = _char_window_metadata(text)
+    if not metadata:
+        return _line_window_fields(text, value, source, base)
+    start = metadata["offset"]
+    end = start + metadata["chars"]
+    total = metadata["total_chars"]
+    return {
+        "coverage_kind": "char_window",
+        "status": "covered" if start == 0 and end >= total else "partial",
+        "start_offset": start,
+        "end_offset": end,
+        "total_chars": total,
+    }
+
+
+def _line_window_fields(text: str, value: dict[str, object], source: str, base: Path | None) -> dict[str, object]:
+    metadata = _line_window_metadata(text, value, source, base)
+    if not metadata:
+        return {}
+    start = metadata["start_line"]
+    end = metadata["end_line"]
+    total = metadata["total_lines"]
+    return {
+        "coverage_kind": "line_window",
+        "status": "covered" if total > 0 and start == 1 and end >= total else "partial",
+        "start_line": start,
+        "end_line": end,
+        "total_lines": total,
+    }
+
+
+def _tool_output_text(value: dict[str, object]) -> str:
+    inline = _inline_output_text(value)
+    if inline:
+        return inline
+    return _artifact_output_text(value)
+
+
+def _inline_output_text(value: dict[str, object]) -> str:
+    for key in ("output", "content", "text", "result", "output_preview"):
+        item = value.get(key)
+        if isinstance(item, str) and item:
+            return item
+    return ""
+
+
+def _artifact_output_text(value: dict[str, object]) -> str:
+    for key in ("source_artifact_ref", "source_output_path", "artifact_ref", "output_path", "path"):
+        text = _read_tool_output_artifact(value.get(key))
+        if text:
+            return text
+    return ""
+
+
+def _read_tool_output_artifact(value: object) -> str:
+    path = _safe_artifact_path(value)
+    if path is None:
+        return ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("content", "output", "text", "result", "output_preview"):
+        item = payload.get(key)
+        if isinstance(item, str) and item:
+            return item
+    return ""
+
+
+def _safe_artifact_path(value: object, base: Path | None = None) -> Path | None:
+    text = str(value or "").strip()
+    if not text or "://" in text:
+        return None
+    try:
+        path = Path(text).expanduser()
+        if not path.is_absolute() and base is not None:
+            path = base / path
+        path = path.resolve(strict=False)
+    except OSError:
+        return None
+    return path if path.is_file() else None
+
+
+def _char_window_metadata(text: str) -> dict[str, int]:
+    if not text:
+        return {}
+    match = CHAR_WINDOW_RE.search(text)
+    if not match:
+        return {}
+    offset, chars, total = (int(item) for item in match.groups())
+    return {"offset": offset, "chars": chars, "total_chars": total}
+
+
+def _line_window_metadata(text: str, value: dict[str, object], source: str, base: Path | None) -> dict[str, int]:
+    parameters = value.get("parameters")
+    params = parameters if isinstance(parameters, dict) else {}
+    line_numbers = [int(match.group(1)) for match in LINE_NUMBER_RE.finditer(text or "")]
+    explicit_start = _optional_positive_int(params.get("start_line"))
+    explicit_end = _optional_positive_int(params.get("end_line"))
+    next_start = _regex_int(NEXT_START_LINE_RE, text)
+    total = _regex_int(TOTAL_LINES_RE, text) or _source_line_count(source, base)
+    has_line_shape = bool(line_numbers or explicit_start or explicit_end or next_start)
+    if not has_line_shape:
+        return {}
+    start = line_numbers[0] if line_numbers else (explicit_start or 1)
+    end = line_numbers[-1] if line_numbers else (explicit_end or 0)
+    if next_start:
+        end = min(end or next_start - 1, next_start - 1)
+    if explicit_end and not next_start:
+        end = min(end or explicit_end, explicit_end)
+    if end <= 0:
+        return {}
+    return {"start_line": start, "end_line": end, "total_lines": total}
+
+
+def _optional_positive_int(value: object) -> int:
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
+
+
+def _regex_int(pattern: re.Pattern[str], text: str) -> int:
+    match = pattern.search(text or "")
+    if not match:
+        return 0
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return 0
+
+
+def _source_line_count(source: str, base: Path | None) -> int:
+    path = _safe_artifact_path(source, base)
+    if path is None:
+        return 0
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return sum(1 for _ in handle)
+    except OSError:
+        return 0
+
+
+def _merge_read_file_windows(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    groups: dict[tuple[str, str, str], list[dict[str, object]]] = {}
+    for record in records:
+        if _is_window_record(record):
+            groups.setdefault(_window_group_key(record), []).append(record)
+    if not groups:
+        return records
+    merged = [_merged_window_record(items) for items in groups.values()]
+    passthrough = [record for record in records if _should_keep_record(record, groups)]
+    return [*merged, *passthrough]
+
+
+def _should_keep_record(
+    record: dict[str, object],
+    window_groups: dict[tuple[str, str, str], list[dict[str, object]]],
+) -> bool:
+    if _is_window_record(record):
+        return False
+    if record.get("tool") != "read_file":
+        return True
+    return not any(_record_source_key(record) == key[1:] for key in window_groups)
+
+
+def _merged_window_record(records: list[dict[str, object]]) -> dict[str, object]:
+    if records[0].get("coverage_kind") == "line_window":
+        return _merged_line_window_record(records)
+    return _merged_char_window_record(records)
+
+
+def _merged_char_window_record(records: list[dict[str, object]]) -> dict[str, object]:
+    first = records[0]
+    total = max(_int_record_value(record, "total_chars") for record in records)
+    ranges = _merged_ranges(_window_ranges(records))
+    covered_until = _covered_prefix_end(ranges)
+    return {
+        "target_id": str(first.get("target_id") or ""),
+        "status": "covered" if total > 0 and covered_until >= total else "partial",
+        "source_ref": str(first.get("source_ref") or ""),
+        "tool": "read_file",
+        "coverage_kind": "char_window",
+        "covered_until_offset": covered_until,
+        "total_chars": total,
+        "read_ranges": [{"start": start, "end": end} for start, end in ranges[:20]],
+    }
+
+
+def _merged_line_window_record(records: list[dict[str, object]]) -> dict[str, object]:
+    first = records[0]
+    total = max(_int_record_value(record, "total_lines") for record in records)
+    ranges = _merged_ranges(_line_ranges(records))
+    covered_until = _covered_line_prefix_end(ranges)
+    return {
+        "target_id": str(first.get("target_id") or ""),
+        "status": "covered" if total > 0 and covered_until >= total else "partial",
+        "source_ref": str(first.get("source_ref") or ""),
+        "tool": "read_file",
+        "coverage_kind": "line_window",
+        "covered_until_line": covered_until,
+        "total_lines": total,
+        "read_ranges": [{"start": start, "end": end} for start, end in ranges[:20]],
+    }
+
+
+def _is_window_record(record: dict[str, object]) -> bool:
+    return record.get("coverage_kind") in {"char_window", "line_window"}
+
+
+def _window_group_key(record: dict[str, object]) -> tuple[str, str, str]:
+    target_id, source_ref = _record_source_key(record)
+    return (str(record.get("coverage_kind") or ""), target_id, source_ref)
+
+
+def _record_source_key(record: dict[str, object]) -> tuple[str, str]:
+    return (
+        str(record.get("target_id") or "").strip(),
+        str(record.get("source_ref") or "").strip(),
+    )
+
+
+def _window_ranges(records: list[dict[str, object]]) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for record in records:
+        start = _int_record_value(record, "start_offset")
+        end = _int_record_value(record, "end_offset")
+        if end > start:
+            ranges.append((start, end))
+    return ranges
+
+
+def _line_ranges(records: list[dict[str, object]]) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for record in records:
+        start = _int_record_value(record, "start_line")
+        end = _int_record_value(record, "end_line")
+        if end >= start > 0:
+            ranges.append((start, end))
+    return ranges
+
+
+def _merged_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+            continue
+        merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return merged
+
+
+def _covered_prefix_end(ranges: list[tuple[int, int]]) -> int:
+    cursor = 0
+    for start, end in ranges:
+        if start > cursor:
+            break
+        cursor = max(cursor, end)
+    return cursor
+
+
+def _covered_line_prefix_end(ranges: list[tuple[int, int]]) -> int:
+    cursor = 0
+    for start, end in ranges:
+        if start > cursor + 1:
+            break
+        cursor = max(cursor, end)
+    return cursor
+
+
+def _int_record_value(record: dict[str, object], key: str) -> int:
+    try:
+        return int(record.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _target_is_covered(
+    item: dict[str, str],
+    records: list[dict[str, object]],
+    *,
+    contract: dict[str, Any],
+    base: Path | None,
+) -> bool:
+    item_keys = _target_keys(item, base)
+    for record in records:
+        if not item_keys.intersection(_coverage_keys(record, base)):
+            continue
+        if _target_requires_full_source_read(item, contract):
+            if _full_source_read_record_counts(record):
+                return True
+            continue
+        if _record_counts_as_covered(record):
+            return True
+    return False
+
+
+def _target_requires_full_source_read(item: dict[str, str], contract: dict[str, Any]) -> bool:
+    return (
+        str(item.get("coverage_kind") or "").strip() == "full_source_read"
+        or str(contract.get("coverage_requirement") or "").strip() == "full_source_read"
+    )
+
+
+def _full_source_read_record_counts(record: dict[str, object]) -> bool:
+    return (
+        str(record.get("tool") or "").strip() == "read_file"
+        and record.get("coverage_kind") in {"char_window", "line_window"}
+        and _record_counts_as_covered(record)
+    )
+
+
+def _target_keys(item: dict[str, str], base: Path | None = None) -> set[str]:
     keys: set[str] = set()
     for key in ("target_id", "path", "source_path", "artifact_ref", "source_ref"):
-        _add_ref_keys(keys, item.get(key))
+        _add_ref_keys(keys, item.get(key), base)
     return keys
 
 
-def _coverage_keys(record: dict[str, object]) -> set[str]:
+def _coverage_keys(record: dict[str, object], base: Path | None = None) -> set[str]:
     keys: set[str] = set()
     for key in ("target_id", "artifact_ref", "source_ref", "path"):
-        _add_ref_keys(keys, record.get(key))
+        _add_ref_keys(keys, record.get(key), base)
     return keys
 
 
-def _add_ref_keys(keys: set[str], value: object) -> None:
+def _repair_hints(
+    missing: list[dict[str, str]],
+    coverage_records: list[dict[str, object]],
+    *,
+    base: Path | None = None,
+) -> list[dict[str, object]]:
+    hints: list[dict[str, object]] = []
+    for item in missing:
+        if hint := _partial_read_hint(item, coverage_records, base):
+            hints.append(hint)
+    return hints
+
+
+def _partial_read_hint(
+    item: dict[str, str],
+    coverage_records: list[dict[str, object]],
+    base: Path | None = None,
+) -> dict[str, object]:
+    item_keys = _target_keys(item, base)
+    for record in coverage_records:
+        if record.get("coverage_kind") not in {"char_window", "line_window"}:
+            continue
+        if not item_keys.intersection(_coverage_keys(record, base)):
+            continue
+        source_ref = str(record.get("source_ref") or item.get("source_ref") or item.get("target_id") or "")
+        if record.get("coverage_kind") == "char_window":
+            offset = _int_record_value(record, "covered_until_offset")
+            return {
+                "target_id": str(item.get("target_id") or ""),
+                "source_ref": source_ref,
+                "covered_until_offset": offset,
+                "total_chars": _int_record_value(record, "total_chars"),
+                "recommended_tool_call": {"tool": "read_file", "path": source_ref, "offset": offset},
+            }
+        line = _int_record_value(record, "covered_until_line")
+        return {
+            "target_id": str(item.get("target_id") or ""),
+            "source_ref": source_ref,
+            "covered_until_line": line,
+            "total_lines": _int_record_value(record, "total_lines"),
+            "recommended_tool_call": {"tool": "read_file", "path": source_ref, "start_line": line + 1},
+        }
+    return {}
+
+
+def _recommended_next_action(should_block: bool, repair_hints: list[dict[str, object]]) -> str:
+    if not should_block:
+        return "continue_or_summarize_with_missing_items_visible"
+    if repair_hints:
+        return "continue_read_file_from_repair_hints_then_submit"
+    return "cover_missing_targets_before_submit"
+
+
+def _add_ref_keys(keys: set[str], value: object, base: Path | None = None) -> None:
     text = str(value or "").strip()
     if not text:
         return
     keys.add(text)
-    keys.add(_canonical_ref(text))
+    keys.add(_canonical_ref(text, base))
 
 
-def _canonical_ref(value: object) -> str:
+def _canonical_ref(value: object, base: Path | None = None) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
     if "://" in text:
         return text
     try:
-        return str(Path(text).expanduser().resolve(strict=False))
+        path = Path(text).expanduser()
+        if not path.is_absolute() and base is not None:
+            path = base / path
+        return str(path.resolve(strict=False))
     except OSError:
         return text
+
+
+def _base_path(value: str | Path | None) -> Path | None:
+    if value is None:
+        return None
+    try:
+        return Path(value).expanduser().resolve(strict=False)
+    except OSError:
+        return None
 
 
 def _unique_records(records: list[dict[str, object]]) -> list[dict[str, object]]:

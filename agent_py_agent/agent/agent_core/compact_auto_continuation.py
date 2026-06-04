@@ -44,6 +44,7 @@ def build_compact_auto_continue_injection(packet: dict[str, Any]) -> str:
         "",
         _resume_focus_section(resume_focus),
         _captured_refs_section(resume_focus.get("captured_refs")),
+        _task_progress_section(work_state.get("task_progress")),
         _tool_output_index_section(work_state.get("tool_progress"), packet.get("artifact_read_hints")),
         _runtime_handoff_section(work_state.get("runtime_handoff")),
         "## Goal",
@@ -155,6 +156,18 @@ def _resume_focus_section(focus: dict[str, Any]) -> str:
 def _captured_refs_section(payload: Any) -> str:
     refs = payload if isinstance(payload, dict) else {}
     lines = ["## Already Captured Refs"]
+    coverage = refs.get("full_read_coverage") if isinstance(refs.get("full_read_coverage"), dict) else {}
+    if coverage:
+        source = str(coverage.get("source_path") or "").strip()
+        covered = coverage.get("covered_until")
+        total = coverage.get("total_chars")
+        complete = coverage.get("complete")
+        if source and isinstance(covered, int) and isinstance(total, int):
+            lines.append(f"- full_read_coverage: source_path={source} covered_until={covered} total_chars={total} complete={complete}")
+    artifact_ref_count = refs.get("artifact_ref_count")
+    omitted = refs.get("omitted_artifact_ref_count")
+    if isinstance(artifact_ref_count, int) and artifact_ref_count > 0:
+        lines.append(f"- artifact_refs_total: {artifact_ref_count}; omitted_from_prompt: {omitted if isinstance(omitted, int) else 0}")
     lines.extend(_prefixed_lines("changed_files", _items(refs.get("changed_files"))))
     lines.extend(_prefixed_lines("read_files", _items(refs.get("read_files"))))
     artifact_refs = refs.get("artifact_refs") if isinstance(refs.get("artifact_refs"), list) else []
@@ -167,6 +180,73 @@ def _captured_refs_section(payload: Any) -> str:
     if len(lines) == 1:
         lines.append("- <none>")
     return "\n".join(lines)
+
+
+def _task_progress_section(payload: Any) -> str | None:
+    progress = payload if isinstance(payload, dict) else {}
+    if not progress:
+        return None
+    lines = ["## Task Progress Ledger"]
+    ref = str(progress.get("ref") or "").strip()
+    summary = str(progress.get("summary") or "").strip()
+    next_action = str(progress.get("next_action") or "").strip()
+    counts = progress.get("counts") if isinstance(progress.get("counts"), dict) else {}
+    if ref:
+        lines.append(f"- full_ledger_ref: {ref}")
+        lines.append("- compact prompt只显示账本摘要；逐项事实、长清单和最终汇总前的核对，以 full_ledger_ref 里的完整 JSON 为准。")
+    if summary:
+        lines.append(f"- summary: {summary}")
+    if next_action:
+        lines.append(f"- progress_next_action: {next_action}")
+    if counts:
+        rendered_counts = " ".join(f"{key}={value}" for key, value in sorted(counts.items()))
+        lines.append(f"- counts: {rendered_counts}")
+    quality = progress.get("quality_hints") if isinstance(progress.get("quality_hints"), dict) else {}
+    messages = _items(quality.get("messages"))[:3] if quality else []
+    suggestions = _items(quality.get("next_suggestions"))[:3] if quality else []
+    if messages:
+        lines.append("- quality_hints:")
+        lines.extend(f"  - {item}" for item in messages)
+    if suggestions:
+        lines.append("- next_suggestions:")
+        lines.extend(f"  - {item}" for item in suggestions)
+    active = _progress_rows(progress.get("active_items"), limit=8)
+    recent = _progress_rows(progress.get("recent_done_items"), limit=16)
+    if active:
+        lines.append("- active_items:")
+        lines.extend(f"  - {item}" for item in active)
+    if recent:
+        lines.append("- recent_done_items:")
+        lines.extend(f"  - {item}" for item in recent)
+    coverage = progress.get("coverage") if isinstance(progress.get("coverage"), dict) else {}
+    coverage_counts = coverage.get("counts") if isinstance(coverage.get("counts"), dict) else {}
+    if coverage_counts:
+        rendered_counts = " ".join(f"{key}={value}" for key, value in sorted(coverage_counts.items()))
+        lines.append(f"- coverage_counts: {rendered_counts}")
+    return "\n".join(lines)
+
+
+def _progress_rows(value: Any, *, limit: int) -> list[str]:
+    rows: list[str] = []
+    for item in value if isinstance(value, list | tuple) else []:
+        if not isinstance(item, dict):
+            text = str(item or "").strip()
+            if text:
+                rows.append(text)
+        else:
+            parts = []
+            for key in ("id", "title", "status", "notes", "next"):
+                text = str(item.get(key) or "").strip()
+                if text:
+                    parts.append(f"{key}={text}")
+            evidence = _items(item.get("evidence"))[:3]
+            if evidence:
+                parts.append("evidence=" + "; ".join(evidence))
+            if parts:
+                rows.append(" ".join(parts))
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 def _tool_output_index_section(tool_progress: Any, artifact_hints: Any) -> str | None:
@@ -308,9 +388,14 @@ def _artifact_ref_items(value: Any) -> list[str]:
 def _render_artifact_ref(item: dict[str, Any]) -> str:
     ref = str(item.get("artifact_ref") or item.get("source_path") or "").strip()
     source = str(item.get("source_path") or "").strip()
-    if source and ref:
-        return f"{ref} (source: {source})"
-    return ref or source
+    parts = [ref or source]
+    if source and ref and source != ref:
+        parts.append(f"source={source}")
+    if isinstance(item.get("offset"), int):
+        parts.append(f"offset={item['offset']}")
+    if isinstance(item.get("max_chars"), int):
+        parts.append(f"max_chars={item['max_chars']}")
+    return " ".join(part for part in parts if part)
 
 
 def _prefixed_lines(label: str, values: list[str]) -> list[str]:

@@ -82,7 +82,7 @@ def run_params_with_materialized_delivery_contract(agent, user_prompt: str, para
         on_chunk=params.on_chunk if callable(params.on_chunk) else None,
         policy=getattr(agent, "runtime_guard_policy", None),
     )
-    contract = materialized_delivery_contract(response.text, workspace_root=agent.root)
+    contract = materialized_delivery_contract(response.text, workspace_root=agent.root, user_prompt=user_prompt)
     if not _has_materialized_runtime_contract(contract):
         return params
     return replace(params, delivery_contract=contract)
@@ -98,6 +98,7 @@ def _has_materialized_runtime_contract(contract: dict) -> bool:
             bool(contract.get("artifacts")),
             isinstance(contract.get("delivery_quality_contract"), dict),
             isinstance(contract.get("fact_evidence_contract"), dict),
+            isinstance(contract.get("target_coverage_contract"), dict),
             isinstance(contract.get("bootstrap_contract"), dict),
         )
     )

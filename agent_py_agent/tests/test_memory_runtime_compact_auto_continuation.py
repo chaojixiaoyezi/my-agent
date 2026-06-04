@@ -419,6 +419,15 @@ def test_compact_auto_continue_injection_prioritizes_resume_focus_and_captured_r
             "next_step": "合并已有研究笔记",
             "changed_files": ["outputs/final-report.md"],
             "read_files": ["notes/openclaw.md", "notes/hermes.md"],
+            "task_progress": {
+                "summary": "已读 12 个项目，剩余 3 个",
+                "next_action": "继续补剩余项目事实",
+                "counts": {"total": 15, "done": 12, "in_progress": 1},
+                "ref": "/tmp/task_progress/progress.json",
+                "active_items": [{"id": "project-13", "title": "补 Hermes", "status": "in_progress"}],
+                "recent_done_items": [{"id": "project-12", "title": "OpenClaw", "status": "done", "notes": "已读核心运行时"}],
+                "quality_hints": {"messages": ["有些完成项缺 evidence。"]},
+            },
             "tool_progress": [
                 {
                     "tool": "read_file",
@@ -442,6 +451,10 @@ def test_compact_auto_continue_injection_prioritizes_resume_focus_and_captured_r
     assert "outputs/final-report.md" in rendered
     assert "notes/openclaw.md" in rendered
     assert "run-1:tool-2" in rendered
+    assert "## Task Progress Ledger" in rendered
+    assert "full_ledger_ref: /tmp/task_progress/progress.json" in rendered
+    assert "逐项事实" in rendered
+    assert "project-13" in rendered
     assert "## Exact Tool Output Index" in rendered
     assert "source_path=notes/hermes.md" in rendered
     assert "精确字段" in rendered
@@ -579,8 +592,102 @@ def test_compact_continue_packet_carries_task_state_refs_for_repeat_resume() -> 
     assert focus["next_action"] == "先合并已有笔记，再补缺口。"
     assert "outputs/final-report.md" in refs["changed_files"]
     assert "notes/openclaw.md" in refs["read_files"]
-    assert refs["artifact_refs"][0]["artifact_ref"] == "run-1:tool-2"
+    assert refs["artifact_refs"][0]["artifact_ref"] == "artifacts/search-result.json"
+    assert refs["artifact_refs"][0]["source_path"] == "notes/search-source.md"
     assert packet["work_state_snapshot"]["tool_progress"][0]["source_path"] == "notes/search-source.md"
+
+
+def test_compact_continue_packet_prioritizes_full_read_cursor(tmp_path: Path) -> None:
+    first = tmp_path / "read-1.json"
+    second = tmp_path / "read-2.json"
+    first.write_text(
+        '{"content":"[char-window offset=0 chars=100 total_chars=500]\\nPARTIAL view only"}',
+        encoding="utf-8",
+    )
+    second.write_text(
+        '{"content":"[char-window offset=100 chars=100 total_chars=500]\\nPARTIAL view only"}',
+        encoding="utf-8",
+    )
+    packet = build_compact_continue_packet(
+        CompactContinuePacketRequest(
+            metadata={"apply_id": "apply-full-read", "plan_id": "plan-full-read"},
+            work_state={
+                "goal": "完整读完 data/big.txt，按顺序慢慢读。",
+                "phase": "compact_apply",
+                "next_step": "继续读取 data/big.txt 的 offset=200，同时搜索章节标记。",
+                "next_actions": ["继续读取 data/big.txt 的 offset=200，同时搜索章节标记。"],
+                "task_progress": {
+                    "summary": "已读到 offset=200",
+                    "next_action": "继续读取 data/big.txt 的 offset=200，同时搜索章节标记。",
+                    "ref": str(tmp_path / "progress.json"),
+                },
+                "artifact_refs": [
+                    {"kind": "tool_output", "path": str(first), "source_path": "data/big.txt", "tool": "read_file"},
+                    {"kind": "tool_output", "path": str(second), "source_path": "data/big.txt", "tool": "read_file"},
+                ],
+            },
+            consistency={"status": "ok"},
+            action_guard={"allowed_to_continue": True, "status": "allowed"},
+            handoff={},
+            recommended_read_paths=[],
+            next_actions=["继续读取 data/big.txt 的 offset=200，同时搜索章节标记。"],
+            subagent_owner_refs={},
+            main_context_bundle={},
+        )
+    )
+
+    focus = packet["resume_focus"]
+    captured = focus["captured_refs"]
+
+    assert focus["next_action"].startswith("继续完整阅读 data/big.txt")
+    assert "先沉淀上一段已读出的关键事实" in focus["next_action"]
+    assert 'read_file(path="data/big.txt", offset=200, max_chars=50000)' in focus["next_action"]
+    assert "同时搜索章节标记" not in focus["next_action"]
+    assert str(tmp_path / "progress.json") in focus["next_action"]
+    assert "不要回到 offset=0" in " ".join(focus["do_not_repeat"])
+    assert captured["artifact_ref_count"] == 2
+    assert captured["omitted_artifact_ref_count"] == 0
+    assert captured["full_read_coverage"]["covered_until"] == 200
+    assert packet["work_state_snapshot"]["task_progress"]["ref"] == str(tmp_path / "progress.json")
+
+
+def test_compact_continue_packet_keeps_captured_refs_compact() -> None:
+    artifact_refs = [
+        {
+            "kind": "tool_output",
+            "path": f"artifacts/read-{index}.json",
+            "source_path": "data/big.txt",
+            "tool": "read_file",
+            "scoped_call_id": f"run-1:{index}",
+        }
+        for index in range(20)
+    ]
+
+    packet = build_compact_continue_packet(
+        CompactContinuePacketRequest(
+            metadata={"apply_id": "apply-many-refs", "plan_id": "plan-many-refs"},
+            work_state={
+                "goal": "完整读完 data/big.txt，按顺序慢慢读。",
+                "phase": "compact_apply",
+                "next_step": "继续读取 data/big.txt。",
+                "artifact_refs": artifact_refs,
+            },
+            consistency={"status": "ok"},
+            action_guard={"allowed_to_continue": True, "status": "allowed"},
+            handoff={},
+            recommended_read_paths=[],
+            next_actions=["继续读取 data/big.txt。"],
+            subagent_owner_refs={},
+            main_context_bundle={},
+        )
+    )
+
+    captured = packet["resume_focus"]["captured_refs"]
+
+    assert captured["artifact_ref_count"] == 20
+    assert captured["omitted_artifact_ref_count"] == 12
+    assert len(captured["artifact_refs"]) == 8
+    assert captured["artifact_refs"][0]["artifact_ref"] == "artifacts/read-12.json"
 
 
 def test_compact_continue_packet_ignores_reader_first_recovery_actions() -> None:

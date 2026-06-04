@@ -12,6 +12,7 @@ from ...contracts.delivery_contract_doctor import ContractDoctorReport, validate
 from .._runtime_params import ToolLoopExecuteParams
 from ..main_agent_delivery_progress_ledger import append_delivery_progress_event
 from ..main_agent_delivery_tool_failure_recovery import attach_tool_failure_recovery_actions
+from ..runtime.owner_roots import runtime_archive_roots
 from ..tool_guard.local_progress import reset_local_progress_guard
 from .artifacts import (
     DeliveryContractValidationRequest,
@@ -86,7 +87,11 @@ def _no_artifact_closeout_response(
     workspace_root: Path,
 ) -> ModelResponse | None:
     if not _allows_no_artifact_delivery(contract):
-        write_non_terminal_closeout_report(request, workspace_root, contract=contract, reason="required_artifacts_missing")
+        report = _required_artifacts_missing_report(request, contract, workspace_root)
+        report_ref = _write_report(workspace_root, report)
+        report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
+        _write_report(workspace_root, report)
+        _append_failed_contract_context(request.params, report)
         return None
     report = _message_delivery_report(request, contract, workspace_root)
     report_ref = _write_report(workspace_root, report)
@@ -117,6 +122,7 @@ def _delivery_report(
             artifacts=artifacts,
             workspace_root=workspace_root,
             params=closeout.params,
+            archive_tool_calls=_closeout_archive_tool_calls(closeout),
         )
     )
     enriched = _enrich_delivery_progress(
@@ -126,9 +132,106 @@ def _delivery_report(
     )
     return attach_tool_failure_recovery_actions(
         enriched,
-        list(getattr(closeout.params, "archive_tool_calls", []) or []),
+        _closeout_archive_tool_calls(closeout),
         workspace_root,
     )
+
+
+def _closeout_archive_tool_calls(closeout: MainAgentDeliveryCloseoutRequest) -> list[Any]:
+    records = [
+        item
+        for item in list(getattr(closeout.params, "archive_tool_calls", []) or [])
+        if isinstance(item, dict)
+    ]
+    records.extend(_disk_tool_output_records(closeout.agent, records))
+    return _unique_archive_tool_calls(records)
+
+
+def _disk_tool_output_records(agent: object, seed_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index_path in _tool_output_index_paths(agent, seed_records):
+        rows.extend(_read_tool_output_index(index_path))
+    return rows
+
+
+def _tool_output_index_paths(agent: object, seed_records: list[dict[str, Any]]) -> list[Path]:
+    paths: list[Path] = []
+    for record in seed_records:
+        for key in ("path", "artifact_ref", "source_artifact_ref", "source_output_path", "output_path"):
+            paths.extend(_index_path_from_artifact_ref(record.get(key)))
+    for root in runtime_archive_roots(agent):
+        paths.append(Path(root) / "blobs" / "tool_outputs" / "index.jsonl")
+    return _unique_existing_paths(paths)
+
+
+def _index_path_from_artifact_ref(value: object) -> list[Path]:
+    text = str(value or "").strip()
+    if not text or "://" in text:
+        return []
+    try:
+        path = Path(text).expanduser().resolve(strict=False)
+    except OSError:
+        return []
+    parents = [path, *path.parents]
+    return [parent / "index.jsonl" for parent in parents if parent.name == "tool_outputs"]
+
+
+def _unique_existing_paths(paths: list[Path]) -> list[Path]:
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        try:
+            resolved = path.expanduser().resolve(strict=False)
+        except OSError:
+            continue
+        key = str(resolved)
+        if key in seen or not resolved.is_file():
+            continue
+        seen.add(key)
+        unique.append(resolved)
+    return unique
+
+
+def _read_tool_output_index(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return rows
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def _unique_archive_tool_calls(records: list[dict[str, Any]]) -> list[Any]:
+    unique: list[Any] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for record in records:
+        key = (
+            str(record.get("run_id") or ""),
+            str(record.get("scoped_call_id") or ""),
+            str(record.get("call_id") or ""),
+            str(record.get("sha256") or ""),
+        )
+        fallback_key = (
+            "",
+            str(record.get("tool") or ""),
+            str(record.get("source_input") or record.get("path") or ""),
+            str(record.get("created_at") or ""),
+        )
+        dedupe_key = key if any(key) else fallback_key
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        unique.append(record)
+    return unique
 
 
 def _failed_delivery_response(
@@ -183,6 +286,34 @@ def _message_delivery_report(
     }
 
 
+def _required_artifacts_missing_report(
+    closeout: MainAgentDeliveryCloseoutRequest,
+    contract: dict[str, Any],
+    workspace_root: Path,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "main_agent_delivery_closeout.v1",
+        "ok": False,
+        "case_id": str(contract.get("case_id") or ""),
+        "request_id": closeout.params.request_id,
+        "run_id": closeout.params.run_id,
+        "task_id": closeout.params.task_id,
+        "workspace_root": str(workspace_root),
+        "canonical_artifact_registry_ref": _relative_report_ref(registry_path(workspace_root), workspace_root),
+        "artifacts": [],
+        "non_terminal": True,
+        "reason": "required_artifacts_missing",
+        "message_zh": "本次 submit_for_acceptance 已记录，但 delivery contract 没有可验收的 required artifact；请先写出用户要求的交付物再提交。",
+        "contract_recovery": {
+            "required_actions": [
+                "materialize_user_requested_output_artifact",
+                "write_real_deliverable_file",
+                "submit_for_acceptance_after_artifact_exists",
+            ],
+        },
+    }
+
+
 def _append_contract_doctor_context(params: ToolLoopExecuteParams, report: ContractDoctorReport) -> None:
     payload = report.to_dict()
     payload.pop("normalized_contract", None)
@@ -225,19 +356,72 @@ def _repair_guidance(report: dict[str, Any]) -> dict[str, Any]:
     progress = report.get("delivery_progress")
     actions = progress.get("recovery_actions") if isinstance(progress, dict) else []
     task_progress_message = task_progress_repair_message(report)
-    message = (
-        "请根据 failed_artifacts、failed_gates 和 required_actions 自主选择下一步修复方式。"
-        "如果还需要读取或搜索来确认上下文，可以继续做；但要尽快把结果落成可验收的本地产物，"
-        "然后调用 submit_for_acceptance 提交验收。"
-    )
+    coverage_message = _target_coverage_repair_message(report)
+    final_artifact_paths = _final_artifact_paths(report)
+    if str(report.get("reason") or "") == "required_artifacts_missing":
+        message = (
+            "当前验收失败是因为没有 required artifact 可验收。请根据用户要求写出真实交付物文件，"
+            "优先写到 delivery contract 或用户指定的输出路径；如果合同漏掉了用户指定路径，请按用户原话的输出路径写入，"
+            "然后重新调用 submit_for_acceptance。"
+        )
+    elif coverage_message:
+        message = coverage_message
+    else:
+        message = (
+            "请根据 failed_artifacts、failed_gates 和 required_actions 自主选择下一步修复方式。"
+            "如果还需要读取或搜索来确认上下文，可以继续做；但要尽快把结果落成可验收的本地产物，"
+            "然后调用 submit_for_acceptance 提交验收。"
+        )
+    path_message = _final_artifact_path_message(final_artifact_paths)
+    if path_message:
+        message = f"{path_message} {message}"
     if task_progress_message:
         message = f"{task_progress_message} {message}"
     return {
         "mode": "closeout_rework",
         "required_actions": actions if isinstance(actions, list) else [],
+        "final_artifact_paths": final_artifact_paths,
         "message_zh": message,
         "submit_when_ready": "submit_for_acceptance",
     }
+
+
+def _final_artifact_paths(report: dict[str, Any]) -> list[str]:
+    paths: list[str] = []
+    for item in report.get("artifacts", []):
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if path and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _final_artifact_path_message(paths: list[str]) -> str:
+    if not paths:
+        return ""
+    payload = json.dumps(paths[:5], ensure_ascii=False)
+    overflow = "" if len(paths) <= 5 else f" 等 {len(paths)} 个路径"
+    return (
+        f"本次返工必须更新最终交付路径 {payload}{overflow}；"
+        "不要只修改 task output/work 或 .my_agent 内部副本。"
+    )
+
+
+def _target_coverage_repair_message(report: dict[str, Any]) -> str:
+    status = report.get("target_coverage_status")
+    if not isinstance(status, dict) or status.get("should_block") is not True:
+        return ""
+    hints = status.get("repair_hints") if isinstance(status.get("repair_hints"), list) else []
+    hint_text = json.dumps(hints[:3], ensure_ascii=False, sort_keys=True)
+    return (
+        "当前验收失败是因为任务要求完整覆盖源材料，但 coverage ledger 还没有连续 read_file 覆盖证明。"
+        "grep、awk、search_text、run_command 只能辅助定位或统计，不能替代完整阅读证明。"
+        "下一步必须按 target_coverage_status.repair_hints 里的 recommended_tool_call 继续 read_file；"
+        "读到 total_lines/total_chars 覆盖完成后，再更新最终产物并调用 submit_for_acceptance。"
+        f" 当前可执行游标：{hint_text}"
+    )
+
 
 def _closeout_text(report: dict[str, Any]) -> str:
     payload = {

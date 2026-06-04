@@ -22,6 +22,7 @@ SUITES = {
     "log-analysis": ["log_analysis_replay"],
     "smoke": ["health", "bad_weather"],
     "main-artifact": ["health", "main_artifact_readback", "main_compact_resume_roundtrip"],
+    "compact-stress": ["health", "main_compact_stress_long_read"],
     "main-complex": [
         "health",
         "main_tool_failure_recovery",
@@ -45,5 +46,6 @@ REAL_CASES = {
     "main_tool_failure_recovery",
     "main_artifact_readback",
     "main_compact_resume_roundtrip",
+    "main_compact_stress_long_read",
     "main_large_log_audit",
 }

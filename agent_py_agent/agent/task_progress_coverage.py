@@ -99,8 +99,6 @@ def _item_as_coverage_target(value: object) -> dict[str, Any]:
         return {}
     fields = _fields_to_checks(_first_present(value, ("fields", "expected_fields", "fields_needed")))
     if not fields:
-        fields = _checks_from_note_text(str(value.get("notes") or value.get("note") or ""))
-    if not fields:
         return {}
     item = dict(value)
     item["checks"] = fields
@@ -184,20 +182,6 @@ def _fields_to_checks(value: object) -> dict[str, str]:
     if isinstance(value, dict):
         return _normalize_checks(value)
     return dict.fromkeys(string_list(value), "pending")
-
-
-def _checks_from_note_text(value: str) -> dict[str, str]:
-    text = str(value or "").strip()
-    if not text:
-        return {}
-    delimiter = "：" if "：" in text else ":" if ":" in text else ""
-    if not delimiter:
-        return {}
-    _, fields_text = text.split(delimiter, 1)
-    fields = _split_field_text(fields_text)
-    if len(fields) < 2:
-        return {}
-    return dict.fromkeys(fields, "pending")
 
 
 def _coverage_target_summary(target: dict[str, Any]) -> dict[str, Any]:

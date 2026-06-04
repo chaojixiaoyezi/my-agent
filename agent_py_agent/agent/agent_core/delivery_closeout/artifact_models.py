@@ -14,6 +14,7 @@ class DeliveryContractValidationRequest:
     artifacts: list[dict[str, Any]]
     workspace_root: Path
     params: ToolLoopExecuteParams
+    archive_tool_calls: list[Any] | None = None
 
 
 @dataclass(frozen=True)

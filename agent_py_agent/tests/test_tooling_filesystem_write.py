@@ -101,6 +101,38 @@ def test_write_file_blocks_configured_dangerous_root(tmp_path: Path) -> None:
     assert "危险目录" in result.output
 
 
+def test_write_file_blocks_direct_task_progress_ledger_overwrite(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = WriteFileTool(workspace)
+
+    result = tool.execute(
+        {
+            "path": ".my_agent/home/owners/local/main/memory_archive/task_progress/run-1/progress.json",
+            "content": "{}",
+        }
+    )
+
+    assert not result.ok
+    assert result.error_code == "SYSTEM_LEDGER_WRITE_BLOCKED"
+    assert "请使用 task_progress 工具" in result.output
+    assert not (
+        workspace
+        / ".my_agent/home/owners/local/main/memory_archive/task_progress/run-1/progress.json"
+    ).exists()
+
+
+def test_write_file_allows_user_report_named_progress_json_outside_system_ledger(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = WriteFileTool(workspace)
+
+    result = tool.execute({"path": "lab_outputs/progress.json", "content": "{}"})
+
+    assert result.ok
+    assert (workspace / "lab_outputs/progress.json").read_text(encoding="utf-8") == "{}"
+
+
 def test_write_file_content_detail_uses_transport_policy(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

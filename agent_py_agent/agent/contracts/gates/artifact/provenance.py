@@ -8,6 +8,8 @@ from typing import Any
 from ...recovery_actions import RecoveryAction
 from ..models import GateDecision, GateFinding
 
+_WRITE_ARTIFACT_TOOLS = {"write_file", "create_file", "replace_file", "edit_file", "append_file"}
+
 
 def evaluate_artifact_provenance_gate(item: dict[str, Any], *, run_id: str = "") -> GateDecision:
     if item.get("ok") is not True:
@@ -225,6 +227,8 @@ def _provenance_from_record(
         or not isinstance(evidence, dict)
         or runtime_gate.get("allowed") is not True
     ):
+        if _record_is_current_run_artifact_write(record, artifact_path=artifact_path, current_run_id=current_run_id):
+            return _write_record_provenance(record, artifact_path=artifact_path, current_run_id=current_run_id)
         return {"ok": False, "code": "ARTIFACT_TOOL_GATE_MISSING"}
     run_id = str(record.get("run_id") or "").strip()
     tool_name = str(evidence.get("tool_name") or record.get("tool") or "").strip()
@@ -238,6 +242,47 @@ def _provenance_from_record(
         "idempotency_key": str(evidence.get("idempotency_key") or record.get("idempotency_key") or ""),
         "call_id": str(record.get("call_id") or record.get("id") or ""),
         "created_by_current_run": bool(current_run_id and run_id == current_run_id),
+    }
+
+
+def _record_is_current_run_artifact_write(
+    record: dict[str, Any],
+    *,
+    artifact_path: Path,
+    current_run_id: str,
+) -> bool:
+    if not current_run_id or str(record.get("run_id") or "").strip() != current_run_id:
+        return False
+    if str(record.get("tool") or "").strip() not in _WRITE_ARTIFACT_TOOLS:
+        return False
+    if not artifact_path.is_file():
+        return False
+    params = _mapping(record.get("parameters"))
+    target = params.get("path") or params.get("file_path") or params.get("target_path")
+    return bool(str(target or "").strip())
+
+
+def _write_record_provenance(
+    record: dict[str, Any],
+    *,
+    artifact_path: Path,
+    current_run_id: str,
+) -> dict[str, Any]:
+    call_id = str(record.get("scoped_call_id") or record.get("call_id") or record.get("id") or "").strip()
+    sha = str(record.get("sha256") or "").strip()
+    tool_name = str(record.get("tool") or "").strip()
+    return {
+        "ok": True,
+        "artifact_ref": str(artifact_path),
+        "run_id": str(record.get("run_id") or current_run_id),
+        "task_id": str(record.get("task_id") or ""),
+        "tool_name": tool_name,
+        "operation_id": call_id or sha,
+        "idempotency_key": sha or call_id,
+        "call_id": call_id,
+        "created_by_current_run": True,
+        "build_output_hash": _file_hash(artifact_path),
+        "proof_kind": "tool_output_index",
     }
 
 

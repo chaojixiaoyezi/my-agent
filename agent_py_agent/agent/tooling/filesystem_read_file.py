@@ -63,6 +63,7 @@ def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) 
             default=max(len(lines), 1),
             min_value=1,
         )
+        line_max_chars = _line_max_chars(params, max_chars)
     except ValueError as exc:
         return ToolExecutionResult("read_file", False, str(exc))
     error = _line_range_error(lines, start_line, end_line, raw_end_line)
@@ -74,17 +75,31 @@ def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) 
         lines=lines,
         start_line=start_line,
         end_line=end_line,
-        max_chars=max_chars,
+        max_chars=line_max_chars,
     )
     return ToolExecutionResult("read_file", True, result or "(空文件)")
 
 
 def _has_char_window_params(params: dict[str, Any]) -> bool:
-    return (
-        _bundled_filesystem_param(params, "offset") is not None
-        or _bundled_filesystem_param(params, "start_char") is not None
-        or _bundled_filesystem_param(params, "max_chars") is not None
+    if _bundled_filesystem_param(params, "offset") is not None:
+        return True
+    if _bundled_filesystem_param(params, "start_char") is not None:
+        return True
+    if _bundled_filesystem_param(params, "start_line") is not None:
+        return False
+    if _bundled_filesystem_param(params, "end_line") is not None:
+        return False
+    return _bundled_filesystem_param(params, "max_chars") is not None
+
+
+def _line_max_chars(params: dict[str, Any], default_max_chars: int) -> int:
+    requested = _int_param(
+        _bundled_filesystem_param(params, "max_chars"),
+        name="max_chars",
+        default=default_max_chars,
+        min_value=1,
     )
+    return min(requested, default_max_chars)
 
 
 def _char_window_result(content: str, params: dict[str, Any], default_max_chars: int) -> ToolExecutionResult:
@@ -118,6 +133,7 @@ def _char_window_result(content: str, params: dict[str, Any], default_max_chars:
         footer = (
             "PARTIAL view only; 这不是完整文件。"
             f" total_chars={len(content)}; next_offset={next_offset}; limit_chars={min(limit, default_max_chars)}。"
+            " 如果本段包含最终报告需要逐项保留的事实，请先把对象、事实和本段 offset/source 证据写入 task_progress 或 work 事实表；"
             f" 继续读取请调用 read_file(offset={next_offset}, max_chars={min(limit, default_max_chars)})。"
         )
         return ToolExecutionResult("read_file", True, f"{header}\n{window}\n{footer}")
@@ -186,6 +202,7 @@ def _truncated_read_footer(
     footer = (
         "... 已截断；PARTIAL view only; 这不是完整文件。"
         f" total_lines={total_lines}; next_start_line={next_start_line}; limit_chars={max_chars}。"
+        " 如果本段包含最终报告需要逐项保留的事实，请先把对象、事实和本段行号/source 证据写入 task_progress 或 work 事实表；"
         f" 继续读取请调用 read_file(start_line={next_start_line})。"
     )
     if next_offset is not None:

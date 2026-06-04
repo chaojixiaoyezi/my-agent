@@ -73,11 +73,12 @@ def _artifact_declares_input_role(item: dict[str, Any]) -> bool:
 
 
 def _validate_contract_artifacts(request: DeliveryContractValidationRequest) -> dict[str, Any]:
+    archive_tool_calls = _request_archive_tool_calls(request)
     results = [
         _validate_artifact_item(
             item,
             request.workspace_root,
-            archive_tool_calls=list(getattr(request.params, "archive_tool_calls", []) or []),
+            archive_tool_calls=archive_tool_calls,
             run_id=str(getattr(request.params, "run_id", "") or ""),
         )
         for item in request.artifacts
@@ -104,11 +105,18 @@ def _validate_contract_artifacts(request: DeliveryContractValidationRequest) -> 
         report["target_coverage_status"] = target_coverage_status(
             coverage_contract,
             coverage_records=collect_target_coverage_records([
-                *list(getattr(request.params, "archive_tool_calls", []) or []),
+                *archive_tool_calls,
                 *results,
-            ]),
+            ], workspace_root=request.workspace_root),
+            workspace_root=request.workspace_root,
         )
     return report
+
+
+def _request_archive_tool_calls(request: DeliveryContractValidationRequest) -> list[Any]:
+    if request.archive_tool_calls is not None:
+        return list(request.archive_tool_calls)
+    return list(getattr(request.params, "archive_tool_calls", []) or [])
 
 
 def _existing_report(workspace_root: Path) -> dict[str, Any]:

@@ -285,6 +285,113 @@ class TestTaskProgressFactPreservation:
         assert payload["items"][0]["status"] == "done"
         assert payload["items"][0]["notes"] == "CP-001/SECRET-001/KEEP"
 
+    def test_open_range_item_is_removed_when_child_items_are_done(self, tmp_path):
+        """范围待办被后续逐项完成覆盖后，不应继续卡住 closeout。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {"items": [{"id": "ch051-052", "title": "章节051-052待读", "status": "in_progress"}]},
+        )
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "items": [
+                    {"id": "ch051", "title": "章节051", "status": "done", "notes": "地点=杭州"},
+                    {"id": "ch052", "title": "章节052", "status": "done", "notes": "地点=成都"},
+                ]
+            },
+        )
+
+        payload = read_task_progress(tmp_path, "run-main")
+
+        assert [item["id"] for item in payload["items"]] == ["ch051", "ch052"]
+        assert payload["counts"] == {"total": 2, "done": 2}
+
+    def test_open_range_item_stays_until_all_child_items_are_done(self, tmp_path):
+        """范围里还有缺口时，账本不能因为部分完成就放行。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {"items": [{"id": "chapter-051-053", "title": "章节051-053待读", "status": "in_progress"}]},
+        )
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "items": [
+                    {"id": "ch051", "title": "章节051", "status": "done"},
+                    {"id": "ch052", "title": "章节052", "status": "done"},
+                ]
+            },
+        )
+
+        payload = read_task_progress(tmp_path, "run-main")
+
+        assert [item["id"] for item in payload["items"]] == ["chapter-051-053", "ch051", "ch052"]
+        assert payload["counts"] == {"total": 3, "in_progress": 1, "done": 2}
+
+
+class TestTaskProgressContinuationAndAliases:
+    """测试续读游标和模型常见字段别名。"""
+
+    def test_old_open_continuation_item_is_replaced_by_newer_cursor(self, tmp_path):
+        """滚动读大文件时，只保留最新“后续章节待读”游标。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "items": [
+                    {"id": "ch011+", "title": "章节011及之后章节待读", "status": "in_progress"},
+                    {"id": "ch011", "title": "章节011", "status": "done"},
+                    {"id": "ch012", "title": "章节012", "status": "done"},
+                ]
+            },
+        )
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {"items": [{"id": "ch013+", "title": "章节013及之后章节待读", "status": "in_progress"}]},
+        )
+
+        payload = read_task_progress(tmp_path, "run-main")
+
+        assert [item["id"] for item in payload["items"]] == ["ch011", "ch012", "ch013+"]
+        assert payload["counts"] == {"total": 3, "done": 2, "in_progress": 1}
+
+    def test_old_estimated_open_range_is_replaced_by_newer_cursor(self, tmp_path):
+        """旧估算范围被更晚的读取游标覆盖后，不应继续作为 open 项卡住。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {"items": [{"id": "ch005-040", "title": "章节005-040待读", "status": "in_progress"}]},
+        )
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "items": [
+                    {"id": f"ch{number:03d}", "title": f"章节{number:03d}", "status": "done"}
+                    for number in range(5, 13)
+                ]
+                + [{"id": "ch013+", "title": "章节013及之后章节待读", "status": "in_progress"}]
+            },
+        )
+
+        payload = read_task_progress(tmp_path, "run-main")
+
+        assert "ch005-040" not in [item["id"] for item in payload["items"]]
+        assert payload["items"][-1]["id"] == "ch013+"
+        assert payload["counts"] == {"total": 9, "done": 8, "in_progress": 1}
+
     def test_task_progress_normalizes_common_done_status_words(self, tmp_path):
         """真实模型常写 completed/read/已读，这些应计为 done。"""
         from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
@@ -488,8 +595,8 @@ class TestTaskProgressCoverageAliases:
         assert by_id["hermes-agent-main"]["checks"]["主要模块"] == "pending"
         assert payload["coverage"]["counts"]["targets_total"] == 2
 
-    def test_task_progress_derives_checks_from_note_text(self, tmp_path):
-        """模型把覆盖要求写在 note/notes 里时，也应保留下来做覆盖清单。"""
+    def test_task_progress_notes_do_not_create_implicit_coverage_checks(self, tmp_path):
+        """note/notes 是事实或备注；不要靠冒号文本猜 coverage checks。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -515,9 +622,7 @@ class TestTaskProgressCoverageAliases:
         assert result.ok is True
         item = payload["items"][0]
         assert item["notes"] == "待分析：做什么、主要模块、优点、缺点、借鉴点"
-        target = payload["coverage"]["targets"][0]
-        assert target["id"] == "agentscope-main"
-        assert target["checks"]["主要模块"] == "pending"
+        assert "coverage" not in payload
 
     def test_task_progress_accepts_name_and_missing_fields_aliases(self, tmp_path):
         """模型用 name/missing_fields 和字符串 coverage 时，不应把多个对象合成一个 target。"""
