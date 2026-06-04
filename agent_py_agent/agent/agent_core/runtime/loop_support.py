@@ -85,6 +85,7 @@ def _runtime_loop_params(
         source=params.source,
         context_scope=params.context_scope,
         save=params.save,
+        carried_archive_tool_calls=params.carried_archive_tool_calls,
     )
 
 
@@ -114,9 +115,9 @@ def _finalize_params(
     )
 
 
-def _resolve_tool_sections(agent, allowed_tools, granted_capabilities):
+def _resolve_tool_sections(agent, user_prompt: str, inject, allowed_tools, granted_capabilities):
     runtime_capabilities = resolve_runtime_capabilities(
-        None, inject=None, granted_capabilities=granted_capabilities,
+        user_prompt, inject=inject, granted_capabilities=granted_capabilities,
     )
     if not agent.config.enable_tools:
         return "", ""
@@ -124,7 +125,9 @@ def _resolve_tool_sections(agent, allowed_tools, granted_capabilities):
         allowed_tools=allowed_tools, granted_capabilities=runtime_capabilities,
     )
     tool_recommendations = agent.tools.render_recommended_tools_section(
-        None, allowed_tools=allowed_tools, granted_capabilities=runtime_capabilities,
+        user_prompt,
+        allowed_tools=allowed_tools,
+        granted_capabilities=runtime_capabilities,
     )
     return tool_catalog, tool_recommendations
 
@@ -213,7 +216,11 @@ def _runtime_injections_with_bundle(
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
     tool_catalog_section, tool_recommendations_section = _resolve_tool_sections(
-        agent, params.allowed_tools, params.granted_capabilities,
+        agent,
+        params.user_prompt,
+        params.runtime_injections,
+        params.allowed_tools,
+        params.granted_capabilities,
     )
     compression = _execute_runtime_compression(agent, params)
     loop_params = _tool_loop_execute_params(
@@ -286,7 +293,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     tool_rounds = 0
     one_shot_tool_calls: set[str] = set()
     executed_tools: list[str] = []
-    archive_tool_calls: list[dict[str, object]] = []
+    archive_tool_calls: list[dict[str, object]] = list(params.carried_archive_tool_calls or [])
     return ToolLoopExecuteParams(
         user_prompt=params.user_prompt,
         root_user_prompt=params.root_user_prompt or params.user_prompt,
@@ -307,6 +314,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         run_id=params.run_id,
         task_id=params.task_id,
         run_scope=None,
+        source=params.source,
         runtime_guard_policy=getattr(agent, "runtime_guard_policy", None),
         one_shot_tool_calls=one_shot_tool_calls,
         executed_tools=executed_tools,

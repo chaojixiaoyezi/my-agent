@@ -5,7 +5,7 @@ import ast
 from pathlib import Path
 from typing import NamedTuple
 
-from ..model_visible_refs import current_model_ref, current_model_text, is_legacy_subagent_path
+from ..model_visible_refs import current_model_ref, current_model_text
 from .context_bundle_file_roots import (
     add_file_root_term,
     file_level_write_root_terms,
@@ -88,7 +88,6 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
             "context_bundle_json": _context_bundle_json_ref(refs),
             "latest_continue_packet": refs.get("agent_run_latest_continue_packet", ""),
         },
-        "reserved": {},
 }
 
 
@@ -330,8 +329,4 @@ def _model_visible_file_terms(value: object) -> list[str]:
 
 def _model_visible_file_term(value: object) -> str:
     text = str(value or "").strip()
-    if not text:
-        return ""
-    if is_legacy_subagent_path(text):
-        return current_model_ref(text, basename_for_legacy=True)
-    return text
+    return current_model_ref(text) if text else ""

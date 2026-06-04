@@ -282,7 +282,7 @@ def test_config_warnings_dict_format():
     """测试字典格式警告。"""
     mock_config = MagicMock()
     mock_config.memory_config_warnings = [
-        {"field_name": "test", "reason": "test error", "fallback_value": "default"}
+        {"field_name": "test", "reason": "test error", "default_value": "default"}
     ]
 
     result = _config_warnings(mock_config)
@@ -317,8 +317,8 @@ def test_config_warnings_object_with_dataclass_fields():
     assert len(result) == 1
 
 
-def test_config_warnings_fallback_to_string():
-    """测试无法识别时回退到字符串。"""
+def test_config_warnings_unknown_item_to_string():
+    """测试无法识别时转成字符串。"""
     mock_config = MagicMock()
     mock_config.memory_config_warnings = ["simple string warning", 123]
 

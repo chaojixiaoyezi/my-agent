@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 
-from ..agent.capability_config import load_capability_config
+from ..agent.capability.config import load_capability_config
 from ..agent.subagents.models import SubAgentChannelProbeOptions, SubAgentDueCheckOptions
 from ..agent.subagents.run_budget import SubagentRunBudgetRequest
 from .common import make_agent

@@ -33,6 +33,7 @@ def runtime_handoff_payload(value: Any) -> dict[str, Any]:
     guidance = payload.get("recent_guidance") if isinstance(payload.get("recent_guidance"), list) else []
     tree = payload.get("agent_tree") if isinstance(payload.get("agent_tree"), dict) else {}
     active = tree.get("active_agents") if isinstance(tree.get("active_agents"), list) else []
+    recent = tree.get("recent_agents") if isinstance(tree.get("recent_agents"), list) else []
     return {
         "schema_version": str(payload.get("schema_version") or ""),
         "soft_only": bool(payload.get("soft_only", True)),
@@ -42,6 +43,7 @@ def runtime_handoff_payload(value: Any) -> dict[str, Any]:
         "agent_tree": {
             "counts": dict(tree.get("counts", {}) if isinstance(tree.get("counts"), dict) else {}),
             "active_agents": [_short_agent(row) for row in active[:8] if isinstance(row, dict)],
+            "recent_agents": [_short_agent(row) for row in recent[:12] if isinstance(row, dict)],
         },
     }
 
@@ -51,7 +53,8 @@ def render_runtime_handoff_lines(value: Any, *, title: str = "Runtime Handoff") 
     guidance = payload.get("recent_guidance") if isinstance(payload.get("recent_guidance"), list) else []
     tree = payload.get("agent_tree") if isinstance(payload.get("agent_tree"), dict) else {}
     active = tree.get("active_agents") if isinstance(tree.get("active_agents"), list) else []
-    if not guidance and not active:
+    recent = tree.get("recent_agents") if isinstance(tree.get("recent_agents"), list) else []
+    if not guidance and not active and not recent:
         return []
     lines = [f"## {title}", ""]
     suggestion = str(payload.get("next_suggestion") or "")
@@ -59,6 +62,8 @@ def render_runtime_handoff_lines(value: Any, *, title: str = "Runtime Handoff") 
         lines.append(f"- next_suggestion: {suggestion}")
     lines.extend(_guidance_lines(guidance))
     lines.extend(_active_agent_lines(active))
+    if not active:
+        lines.extend(_recent_agent_lines(recent))
     lines.append("")
     return lines
 
@@ -86,12 +91,12 @@ def _guidance_candidate_files(guidance_dirs: list[Path], ids: list[str]) -> list
         for path in _guidance_exact_paths(guidance_dir, item_id)
         if path.exists()
     ]
-    fallback = [
+    recent = [
         path
         for guidance_dir in guidance_dirs
         for path in sorted(guidance_dir.glob("*.jsonl"))[:32]
     ]
-    return _dedupe_paths([*exact, *fallback])
+    return _dedupe_paths([*exact, *recent])
 
 
 def _guidance_dirs(workspace: Path) -> list[Path]:
@@ -124,7 +129,12 @@ def _guidance_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _agent_tree_handoff(workspace: Path, ids: list[str]) -> dict[str, Any]:
-    rows = [row for path in _agent_state_files(workspace, ids) if (row := _agent_state_payload(path))]
+    id_set = {item for item in ids if item}
+    rows = [
+        row
+        for path in _agent_state_files(workspace, ids)
+        if (row := _agent_state_payload(path)) and _agent_related_to_scope(row, id_set)
+    ]
     return {
         "source": "workspace_task_agents",
         "counts": _agent_counts(rows),
@@ -139,6 +149,7 @@ def _agent_state_files(workspace: Path, ids: list[str]) -> list[Path]:
         if item_id:
             paths.extend(_task_agent_state_files_for_task(workspace, item_id))
             paths.extend(_task_agent_state_files_for_id(workspace, item_id))
+    paths.extend(_recent_task_agent_state_files(workspace))
     return _dedupe_paths([path for path in paths if path.exists() and _inside_workspace(path, workspace)])
 
 
@@ -163,18 +174,43 @@ def _task_agent_state_files_for_id(workspace: Path, item_id: str) -> list[Path]:
     ]
 
 
+def _recent_task_agent_state_files(workspace: Path) -> list[Path]:
+    tasks_dir = workspace / "tasks"
+    if not tasks_dir.exists():
+        return []
+    paths = [
+        path
+        for pattern in ("*/work/agents/*/canonical_state.json", "*/*/work/agents/*/canonical_state.json")
+        for path in tasks_dir.glob(pattern)
+        if path.is_file()
+    ]
+    return sorted(paths, key=_path_mtime, reverse=True)[:512]
+
+
 def _agent_state_payload(path: Path) -> dict[str, Any]:
     payload = _read_json_dict(path)
     if not payload:
         return {}
     return {
-        "run_id": str(payload.get("run_id") or path.parent.name),
-        "parent_run_id": str(payload.get("parent_run_id") or ""),
+        "run_id": str(payload.get("run_id") or payload.get("id") or path.parent.name),
+        "parent_run_id": str(payload.get("parent_run_id") or payload.get("parent_id") or ""),
+        "root_run_id": str(payload.get("root_run_id") or payload.get("root_id") or ""),
+        "task_id": str(payload.get("task_id") or ""),
         "status": str(payload.get("status") or ""),
         "current_tool": str(payload.get("current_tool") or ""),
         "last_progress_summary": str(payload.get("last_progress_summary") or payload.get("latest_summary") or ""),
         "state_ref": str(path),
+        "updated_at": _safe_float(payload.get("updated_at")),
     }
+
+
+def _agent_related_to_scope(row: dict[str, Any], id_set: set[str]) -> bool:
+    if not id_set:
+        return False
+    return any(
+        str(row.get(field) or "").strip() in id_set
+        for field in ("run_id", "parent_run_id", "root_run_id", "task_id")
+    )
 
 
 def _agent_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
@@ -201,6 +237,8 @@ def _short_guidance(row: dict[str, Any]) -> dict[str, Any]:
 def _short_agent(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "run_id": str(row.get("run_id") or ""),
+        "parent_run_id": str(row.get("parent_run_id") or ""),
+        "root_run_id": str(row.get("root_run_id") or ""),
         "status": str(row.get("status") or ""),
         "current_tool": str(row.get("current_tool") or ""),
         "last_progress_summary": str(row.get("last_progress_summary") or ""),
@@ -217,6 +255,15 @@ def _active_agent_lines(rows: list[Any]) -> list[str]:
         f"- active_agent: {row.get('run_id', '')} status={row.get('status', '')} "
         f"tool={row.get('current_tool', '')} note={row.get('last_progress_summary', '')}"
         for row in rows[:5]
+        if isinstance(row, dict)
+    ]
+
+
+def _recent_agent_lines(rows: list[Any]) -> list[str]:
+    return [
+        f"- recent_agent: {row.get('run_id', '')} status={row.get('status', '')} "
+        f"tool={row.get('current_tool', '')} note={row.get('last_progress_summary', '')}"
+        for row in rows[:8]
         if isinstance(row, dict)
     ]
 
@@ -272,6 +319,13 @@ def _safe_float(value: object) -> float:
     try:
         return float(value or 0.0)
     except (TypeError, ValueError):
+        return 0.0
+
+
+def _path_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
         return 0.0
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ...subagent import SubAgentRunnerResult, SubAgentTask
+from ...subagents import SubAgentRunnerResult, SubAgentTask
 from ...subagents.services.dispatch.params import DispatchRecordParams
 from .child_summary import runner_child_summary_fields
 

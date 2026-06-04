@@ -5,7 +5,7 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-from ....tools import BaseTool, ToolExecutionResult
+from ....tooling.models import BaseTool, ToolExecutionResult
 from ...agent_tree.status import agent_tree_status_payload
 from ..tool_specs import (
     build_inspect_agent_tree_spec,
@@ -49,7 +49,7 @@ def _cached_payload(agent: SimpleAgent, params: dict[str, object]) -> dict[str, 
     age = time.time() - float(row.get("created_at", 0.0) or 0.0)
     if age < 0 or age > cooldown_seconds:
         return None
-    payload = dict(row.get("payload") if isinstance(row.get("payload"), dict) else {})
+    payload = _cooldown_payload(row.get("payload"))
     payload["cooldown_active"] = True
     payload["cooldown_seconds"] = cooldown_seconds
     payload["cooldown_age_seconds"] = round(age, 3)
@@ -58,9 +58,34 @@ def _cached_payload(agent: SimpleAgent, params: dict[str, object]) -> dict[str, 
         warnings.append("inspect_agent_tree_recent_duplicate")
     payload["warnings"] = warnings
     policy = dict(payload.get("policy") if isinstance(payload.get("policy"), dict) else {})
+    wait_call = {"tool": "wait", "seconds": max(120, int(cooldown_seconds) or 0), "reason": "inspect_agent_tree cooldown"}
     policy["next_step"] = "刚刚已经查看过同一代理树；除非需要验收、接管或已有新事实，否则先推进汇总/等待子代理产物，不要高频轮询。"
+    policy["suggested_tool_call"] = wait_call
     payload["policy"] = policy
+    direct_children = dict(payload.get("direct_children") if isinstance(payload.get("direct_children"), dict) else {})
+    direct_children["suggested_tool_call"] = wait_call
+    payload["direct_children"] = direct_children
     return payload
+
+
+def _cooldown_payload(value: object) -> dict[str, object]:
+    previous = value if isinstance(value, dict) else {}
+    direct = previous.get("direct_children") if isinstance(previous.get("direct_children"), dict) else {}
+    return {
+        "schema_version": previous.get("schema_version", "agent_tree_status.v1"),
+        "root_id": previous.get("root_id", ""),
+        "status": "POLL_COOLDOWN",
+        "summary": "同一代理树刚刚已经检查过；cooldown 内不重复返回完整树，避免父代理高频轮询或误判后重复派工。",
+        "direct_children": {
+            "total": direct.get("total", 0),
+            "by_status": direct.get("by_status", {}),
+            "running_run_ids": direct.get("running_run_ids", []),
+            "planning_run_ids": direct.get("planning_run_ids", []),
+            "unfinished_run_ids": direct.get("unfinished_run_ids", []),
+            "next_action": "wait_for_subagents_or_read_completed_refs",
+            "suggested_tool_call": {"tool": "wait", "seconds": 120, "reason": "等待子代理完成事件"},
+        },
+    }
 
 
 def _remember_payload(agent: SimpleAgent, params: dict[str, object], payload: dict[str, object]) -> None:

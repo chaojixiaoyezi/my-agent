@@ -394,7 +394,7 @@ def test_subagent_structured_artifact_registers_registry_ref(mock_task, tmp_path
 
 
 def test_write_file_result_exposes_machine_path_for_registry(tmp_path: Path):
-    from agent_py_agent.agent.tools import WriteFileTool
+    from agent_py_agent.agent.tooling.filesystem import WriteFileTool
 
     result = WriteFileTool(tmp_path).execute({"path": "outputs/report.md", "content": "hello"})
 
@@ -408,7 +408,7 @@ def test_tool_archive_registers_write_file_artifact(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_call_archive_record import archive_tool_call_record
     from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
     from agent_py_agent.agent.artifacts.registry import latest_artifact_records
-    from agent_py_agent.agent.tools import WriteFileTool
+    from agent_py_agent.agent.tooling.filesystem import WriteFileTool
 
     result = WriteFileTool(tmp_path).execute({"path": "outputs/report.md", "content": "hello"})
     params = _empty_tool_loop_params()

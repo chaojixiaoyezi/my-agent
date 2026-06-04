@@ -35,7 +35,7 @@ class AgentConfigNormalizer:
 
     @staticmethod
     def normalize(data: dict[str, object]) -> tuple[dict[str, object], list[str]]:
-        """Validate and coerce all non-memory AgentConfig fields with safe fallbacks."""
+        """Validate and coerce all non-memory AgentConfig fields with safe defaults."""
         warnings: list[str] = []
         out: dict[str, object] = dict(data)
         defaults = default_agent_config()

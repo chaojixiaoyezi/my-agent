@@ -19,7 +19,7 @@ def evaluate_acceptance_closeout_gate(report: dict[str, Any]) -> GateDecision:
     if not isinstance(runtime_gate, dict):
         return GateDecision.deny("acceptance_closeout", "ACCEPTANCE_RUNTIME_GATE_MISSING")
     if runtime_gate.get("allowed") is not True:
-        findings = gate_payload_findings(runtime_gate, fallback="ACCEPTANCE_RUNTIME_GATE_FAILED")
+        findings = gate_payload_findings(runtime_gate, default_code="ACCEPTANCE_RUNTIME_GATE_FAILED")
         return GateDecision.repair("acceptance_closeout", findings, evidence={"final_status": status})
     return GateDecision.allow("acceptance_closeout", evidence={"final_status": status, "verification_status": verification})
 
@@ -109,12 +109,12 @@ def evaluate_recovery_lineage_gate(snapshot: dict[str, Any]) -> GateDecision:
     return GateDecision.allow("recovery_lineage", evidence={"previous_artifact_count": len(refs)})
 
 
-def gate_payload_findings(payload: dict[str, Any], *, fallback: str) -> list[GateFinding]:
+def gate_payload_findings(payload: dict[str, Any], *, default_code: str) -> list[GateFinding]:
     raw = payload.get("findings")
     if not isinstance(raw, list):
-        return [GateFinding(fallback)]
-    findings = [_gate_payload_finding(item, fallback=fallback) for item in raw if isinstance(item, dict)]
-    return findings or [GateFinding(fallback)]
+        return [GateFinding(default_code)]
+    findings = [_gate_payload_finding(item, default_code=default_code) for item in raw if isinstance(item, dict)]
+    return findings or [GateFinding(default_code)]
 
 
 def is_tool_audit_record(record: dict[str, Any]) -> bool:
@@ -135,7 +135,7 @@ def _require_allowed_child_gate(report: dict[str, Any], key: str, findings: list
         findings.append(GateFinding(f"{code_prefix}_GATE_MISSING"))
         return
     if payload.get("allowed") is not True:
-        child_findings = gate_payload_findings(payload, fallback=f"{code_prefix}_GATE_FAILED")
+        child_findings = gate_payload_findings(payload, default_code=f"{code_prefix}_GATE_FAILED")
         findings.extend(
             GateFinding(
                 f"{code_prefix}_GATE_FAILED",
@@ -145,10 +145,10 @@ def _require_allowed_child_gate(report: dict[str, Any], key: str, findings: list
         )
 
 
-def _gate_payload_finding(item: dict[str, Any], *, fallback: str) -> GateFinding:
+def _gate_payload_finding(item: dict[str, Any], *, default_code: str) -> GateFinding:
     evidence = item.get("evidence")
     return GateFinding(
-        str(item.get("code") or fallback),
+        str(item.get("code") or default_code),
         severity=str(item.get("severity") or "P1"),
         message=str(item.get("message") or ""),
         evidence=dict(evidence) if isinstance(evidence, dict) else {},

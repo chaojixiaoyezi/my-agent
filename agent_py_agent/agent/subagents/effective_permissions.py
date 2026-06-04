@@ -17,16 +17,16 @@ def child_shell_access_mode(parent_access_mode: object) -> str:
     return "restricted" if mode == "restricted" else "workspace-write"
 
 
-def parent_shell_access_mode(parent_task: Any | None, fallback: object = "") -> str:
+def parent_shell_access_mode(parent_task: Any | None, default: object = "") -> str:
     if parent_task is None:
-        return normalize_access_mode(fallback)
+        return normalize_access_mode(default)
     permissions = getattr(parent_task, "effective_permissions", None)
     if not isinstance(permissions, dict):
-        return normalize_access_mode(fallback)
+        return normalize_access_mode(default)
     shell_mode = str(permissions.get("shell_access_mode") or "").strip()
     if shell_mode:
         return normalize_access_mode(shell_mode)
-    return normalize_access_mode(fallback)
+    return normalize_access_mode(default)
 
 
 def effective_permission_snapshot(

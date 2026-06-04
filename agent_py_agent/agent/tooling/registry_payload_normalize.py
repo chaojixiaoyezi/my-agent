@@ -283,8 +283,8 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[:max_chars] + "\n... 已截断"
 
 
-def _config_int(config: object, key: str, fallback: int) -> int:
+def _config_int(config: object, key: str, default: int) -> int:
     try:
         return max(0, int(getattr(config, key)))
     except (TypeError, ValueError):
-        return max(0, int(fallback))
+        return max(0, int(default))

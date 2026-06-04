@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-"""LLM: tests for file_io module.
+"""LLM: tests for agent.io helpers.
 
 给人看的解释：
-测试 agent/file_io.py 的兼容层导入和底层 IO 函数。
+测试 agent.io 导出的底层 IO 函数。
 """
 
 from pathlib import Path
@@ -12,24 +12,24 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-class TestFileIoFacade:
-    """测试 file_io 兼容层。"""
+class TestFileIoExports:
+    """测试 agent.io 导出。"""
 
     def test_imports_append_jsonl(self) -> None:
         """测试 file_io 导出 append_jsonl。"""
-        from agent_py_agent.agent.file_io import append_jsonl
+        from agent_py_agent.agent.io import append_jsonl
         assert callable(append_jsonl)
 
     def test_imports_append_line_locked(self) -> None:
         """测试 file_io 导出 append_line_locked。"""
-        from agent_py_agent.agent.file_io import append_line_locked
+        from agent_py_agent.agent.io import append_line_locked
         assert callable(append_line_locked)
 
     def test_exports_list(self) -> None:
         """测试 __all__ 导出列表。"""
-        from agent_py_agent.agent import file_io
-        assert "append_jsonl" in file_io.__all__
-        assert "append_line_locked" in file_io.__all__
+        from agent_py_agent.agent import io
+        assert "append_jsonl" in io.__all__
+        assert "append_line_locked" in io.__all__
 
 
 class TestAppendJsonlSignature:

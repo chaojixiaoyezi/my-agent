@@ -21,14 +21,14 @@ def test_delivery_quality_gate_rejects_time_window_delta_from_point_in_time_tota
                     "source_ids": ["src-current"],
                     "verification_status": "VERIFIED",
                     "value_type": "exact",
-                    "reserved": {"metric_kind": "point_in_time_total"},
+                    "metric_kind": "point_in_time_total",
                 }
             ],
             source_refs=[
                 {
                     "source_id": "src-current",
                     "uri": "https://api.example.invalid/repositories",
-                    "reserved": {"metric_kind": "point_in_time_total"},
+                    "metric_kind": "point_in_time_total",
                 }
             ],
         ),
@@ -198,18 +198,16 @@ def _estimated_metric_payload() -> dict[str, object]:
                 "verification_status": "VERIFIED",
                 "value_type": "estimated",
                 "methodology": "ranking snapshot plus repository current counters",
-                "reserved": {
-                    "metric_kind": "time_window_delta",
-                    "window_start": "2026-05-11",
-                    "window_end": "2026-05-17",
-                },
+                "metric_kind": "time_window_delta",
+                "window_start": "2026-05-11",
+                "window_end": "2026-05-17",
             }
         ],
         source_refs=[
             {
                 "source_id": "src-ranking",
                 "uri": "https://example.invalid/ranking",
-                "reserved": {"metric_kind": "time_window_delta"},
+                "metric_kind": "time_window_delta",
             }
         ],
     )

@@ -4,7 +4,7 @@ from __future__ import annotations
 """workflow planning service for subagent tasks.
 
 这里承接工作流规划、模板选择、worker 规格实例化等逻辑。
-SubAgentManager 通过 facade 方法委托到这里，不把规划逻辑塞在 mixin 里。
+SubAgentManager 通过当前服务组合调用这里，不把规划逻辑塞在 manager 里。
 """
 
 import json
@@ -17,7 +17,8 @@ from .base import CreateRunParams
 from .hierarchy.agent_names import scheduled_child_agent_name
 
 if TYPE_CHECKING:
-    from ..capability_config import CapabilityConfig
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+
     from ..models import SubAgentTask
 
 

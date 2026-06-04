@@ -69,7 +69,7 @@ def _attach_direct_child_next_action(children: dict[str, object]) -> None:
         children["next_action"] = "create_repair_child_from_qa_refs"
         return
     if children["needs_more_dispatch"]:
-        children.update(_continue_dispatch_payload(children["unfinished_run_ids"]))
+        children.update(_unfinished_child_payload(children))
         return
     if children.get("quality_advice"):
         children["ready_for_closeout"] = False
@@ -79,12 +79,35 @@ def _attach_direct_child_next_action(children: dict[str, object]) -> None:
         children.update(_closeout_payload())
 
 
+def _unfinished_child_payload(children: dict[str, object]) -> dict[str, object]:
+    running = [str(item) for item in children.get("running_run_ids") or [] if str(item)]
+    if running:
+        return _wait_for_running_children_payload(running)
+    return _continue_dispatch_payload(children.get("unfinished_run_ids") or [])
+
+
+def _wait_for_running_children_payload(run_ids: list[str]) -> dict[str, object]:
+    return {
+        "next_action": "wait_for_running_direct_children",
+        "suggested_tool_call": {
+            "tool": "wait",
+            "seconds": 120,
+            "reason": "等待运行中的直接子代理完成或产出新事件",
+        },
+        "wait_hint": (
+            "仍有直接 child 正在 RUNNING；这是正常后台执行状态。"
+            "登记 wait 后继续自己的工作或回复用户，不要因为等待而重复 inspect_agent_tree、dispatch_subagents 或重新 create_subagents。"
+        ),
+        "running_run_ids": run_ids,
+    }
+
+
 def _continue_dispatch_payload(run_ids: list[str]) -> dict[str, object]:
     return {
         "next_action": "continue_dispatch_direct_children",
         "suggested_tool_call": _dispatch_tool_call(run_ids),
         "continue_hint": (
-            "仍有直接 child 处于 PLANNING/RUNNING；这通常是限速或串行调度造成的。"
+            "仍有直接 child 处于 PLANNING，且没有 RUNNING 子代理；这通常是限速、串行调度或显式 defer_start 造成的。"
             "继续调用 dispatch_subagents，不要把 PLANNING 直接判为失败。"
         ),
     }

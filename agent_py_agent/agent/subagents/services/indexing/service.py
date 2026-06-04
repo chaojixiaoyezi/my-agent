@@ -4,7 +4,7 @@ from __future__ import annotations
 """indexing and event logging service.
 
 这里集中处理 LocalStore 写入、报告索引、任务索引等逻辑。
-SubAgentManager 通过 facade 方法委托到这里。
+SubAgentManager 通过当前服务组合调用这里。
 """
 
 import json

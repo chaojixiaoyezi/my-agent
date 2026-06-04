@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ....runtime_errors import runtime_error_report
-from ....tools import BaseTool, ToolExecutionResult
+from ....tooling.models import BaseTool, ToolExecutionResult
 from ..tool_specs import build_raise_event_spec
 
 if TYPE_CHECKING:

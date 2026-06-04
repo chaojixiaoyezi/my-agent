@@ -19,6 +19,7 @@ from .orchestration_tools import (
     RaiseEventTool,
 )
 from .runtime.guidance_tool import SendGuidanceTool
+from .runtime.wait_tool import WaitTool
 from .runtime_mixin import SimpleAgentRuntimeMixin
 from .subagent_mixin import SimpleAgentSubagentMixin
 from .task_progress_tool import TaskProgressTool
@@ -37,4 +38,5 @@ __all__ = [
     "SimpleAgentRuntimeMixin",
     "SimpleAgentSubagentMixin",
     "TaskProgressTool",
+    "WaitTool",
 ]

@@ -1,6 +1,6 @@
-"""lease 模块测试。
+"""lease service 模块测试。
 
-测试 lease.py 中的租约创建/刷新/过期、并发安全、stale 检测功能。
+测试 lease_service.py 中的租约创建/刷新/过期、并发安全、stale 检测功能。
 """
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_py_agent.agent.gateway_parts import lease as lease_module
 from agent_py_agent.agent.gateway_parts import lease_service
+from agent_py_agent.agent.gateway_parts import lease_service as lease_module
 
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
 
@@ -40,7 +40,7 @@ def test_lease_interval_normal(mock_agent):
     mock_agent.config.gateway_heartbeat_interval = 5
     mock_agent.config.gateway_processing_timeout_seconds = 900
 
-    interval = lease_module._gateway_processing_lease_interval(mock_agent)
+    interval = lease_module._lease_interval(mock_agent)
 
     # 5 秒间隔不应超过 processing_timeout/3 = 300 秒
     assert interval == 5
@@ -51,7 +51,7 @@ def test_lease_interval_short_timeout(mock_agent):
     mock_agent.config.gateway_heartbeat_interval = 10
     mock_agent.config.gateway_processing_timeout_seconds = 30
 
-    interval = lease_module._gateway_processing_lease_interval(mock_agent)
+    interval = lease_module._lease_interval(mock_agent)
 
     # 间隔应被限制到 max(0.2, 30/3) = 10 秒
     assert interval == 10
@@ -62,7 +62,7 @@ def test_lease_interval_very_long_timeout(mock_agent):
     mock_agent.config.gateway_heartbeat_interval = 5
     mock_agent.config.gateway_processing_timeout_seconds = 86400  # 24小时
 
-    interval = lease_module._gateway_processing_lease_interval(mock_agent)
+    interval = lease_module._lease_interval(mock_agent)
 
     # 间隔应保持 gateway_heartbeat_interval
     assert interval == 5
@@ -73,7 +73,7 @@ def test_lease_interval_minimum_enforced(mock_agent):
     mock_agent.config.gateway_heartbeat_interval = 0.1
     mock_agent.config.gateway_processing_timeout_seconds = 1
 
-    interval = lease_module._gateway_processing_lease_interval(mock_agent)
+    interval = lease_module._lease_interval(mock_agent)
 
     # 最小间隔应为 0.2 秒
     assert interval == 0.2
@@ -84,7 +84,7 @@ def test_lease_interval_zero_values(mock_agent):
     mock_agent.config.gateway_heartbeat_interval = 0
     mock_agent.config.gateway_processing_timeout_seconds = 0
 
-    interval = lease_module._gateway_processing_lease_interval(mock_agent)
+    interval = lease_module._lease_interval(mock_agent)
 
     # 应使用默认值 5.0 和 900.0
     assert interval == 5.0
@@ -95,7 +95,7 @@ def test_lease_interval_invalid_types(mock_agent):
     mock_agent.config.gateway_heartbeat_interval = "invalid"
     mock_agent.config.gateway_processing_timeout_seconds = None
 
-    interval = lease_module._gateway_processing_lease_interval(mock_agent)
+    interval = lease_module._lease_interval(mock_agent)
 
     # 异常被捕获，使用默认值
     assert interval == 5.0
@@ -123,58 +123,58 @@ def test_is_heartbeat_alive_false():
 
 # ── 租约刷新测试 ──────────────────────────────────────────────────────────
 
-def test_touch_gateway_processing_lease_success(request_path):
+def testrefresh_processing_lease_success(request_path):
     """测试成功刷新租约。"""
     from agent_py_agent.agent.gateway_parts.io import write_json_file
 
     request_id = "test-touch-request"
     write_json_file(request_path, {"id": request_id, "status": "processing"})
 
-    result = lease_module._touch_gateway_processing_lease(
+    result = lease_module.refresh_processing_lease(
         request_path, request_id=request_id
     )
 
     assert result is True
 
 
-def test_touch_gateway_processing_lease_mismatched_id(request_path):
+def testrefresh_processing_lease_mismatched_id(request_path):
     """测试 request_id 不匹配时返回 False。"""
     from agent_py_agent.agent.gateway_parts.io import write_json_file
 
     request_id = "test-mismatch"
     write_json_file(request_path, {"id": "different-id", "status": "processing"})
 
-    result = lease_module._touch_gateway_processing_lease(
+    result = lease_module.refresh_processing_lease(
         request_path, request_id=request_id
     )
 
     assert result is False
 
 
-def test_touch_gateway_processing_lease_nonexistent_file(request_path):
+def testrefresh_processing_lease_nonexistent_file(request_path):
     """测试请求文件不存在时返回 False。"""
-    result = lease_module._touch_gateway_processing_lease(
+    result = lease_module.refresh_processing_lease(
         request_path, request_id="any-request"
     )
 
     assert result is False
 
 
-def test_touch_gateway_processing_lease_with_worker_id(request_path):
+def testrefresh_processing_lease_with_worker_id(request_path):
     """测试带 worker_id 的租约刷新。"""
     from agent_py_agent.agent.gateway_parts.io import write_json_file
 
     request_id = "test-worker-request"
     write_json_file(request_path, {"id": request_id, "status": "processing"})
 
-    result = lease_module._touch_gateway_processing_lease(
+    result = lease_module.refresh_processing_lease(
         request_path, request_id=request_id, worker_id="worker-001"
     )
 
     assert result is True
 
 
-def test_touch_gateway_processing_lease_updates_timestamp(request_path):
+def testrefresh_processing_lease_updates_timestamp(request_path):
     """测试租约刷新更新 timestamp。"""
     from agent_py_agent.agent.gateway_parts.io import read_json_file, write_json_file
 
@@ -182,7 +182,7 @@ def test_touch_gateway_processing_lease_updates_timestamp(request_path):
     before = time.time() - 100
     write_json_file(request_path, {"id": request_id, "status": "processing"})
 
-    lease_module._touch_gateway_processing_lease(request_path, request_id=request_id)
+    lease_module.refresh_processing_lease(request_path, request_id=request_id)
 
     payload = read_json_file(request_path)
     assert payload["lease_heartbeat_at"] > before
@@ -219,7 +219,7 @@ def test_start_heartbeat_thread_adds_to_active(mock_agent, request_path):
     request_id = "test-start-thread"
     write_json_file(request_path, {"id": request_id, "status": "processing"})
 
-    stop_event, thread = lease_module._start_gateway_processing_lease_heartbeat(
+    stop_event, thread = lease_module.start_lease_heartbeat(
         mock_agent, request_path, request_id=request_id
     )
 
@@ -238,7 +238,7 @@ def test_start_heartbeat_thread_removes_on_stop(mock_agent, request_path):
     request_id = "test-stop-thread"
     write_json_file(request_path, {"id": request_id, "status": "processing"})
 
-    stop_event, thread = lease_module._start_gateway_processing_lease_heartbeat(
+    stop_event, thread = lease_module.start_lease_heartbeat(
         mock_agent, request_path, request_id=request_id
     )
 
@@ -256,7 +256,7 @@ def test_start_heartbeat_thread_returns_event_and_thread(mock_agent, request_pat
     request_id = "test-return-values"
     write_json_file(request_path, {"id": request_id, "status": "processing"})
 
-    stop_event, thread = lease_module._start_gateway_processing_lease_heartbeat(
+    stop_event, thread = lease_module.start_lease_heartbeat(
         mock_agent, request_path, request_id=request_id
     )
 
@@ -275,7 +275,7 @@ def test_start_heartbeat_thread_name(mock_agent, request_path):
     request_id = "test-thread-name-123"
     write_json_file(request_path, {"id": request_id, "status": "processing"})
 
-    stop_event, thread = lease_module._start_gateway_processing_lease_heartbeat(
+    stop_event, thread = lease_module.start_lease_heartbeat(
         mock_agent, request_path, request_id=request_id
     )
 
@@ -320,7 +320,7 @@ def test_touch_lease_read_error(mock_agent, request_path, monkeypatch):
         failing_read
     )
 
-    result = lease_module._touch_gateway_processing_lease(
+    result = lease_module.refresh_processing_lease(
         request_path, request_id=request_id
     )
 
@@ -342,7 +342,7 @@ def test_touch_lease_write_error(mock_agent, request_path, monkeypatch):
         mock_write_fail
     )
 
-    result = lease_module._touch_gateway_processing_lease(
+    result = lease_module.refresh_processing_lease(
         request_path, request_id=request_id
     )
 
@@ -367,15 +367,15 @@ def test_heartbeat_thread_exception_handling(mock_agent, request_path, monkeypat
         return True
 
     monkeypatch.setattr(
-        "agent_py_agent.agent.gateway_parts.lease._touch_gateway_processing_lease",
+        "agent_py_agent.agent.gateway_parts.lease_service.refresh_processing_lease",
         failing_touch
     )
     monkeypatch.setattr(
-        "agent_py_agent.agent.gateway_parts.lease._gateway_processing_lease_interval",
+        "agent_py_agent.agent.gateway_parts.lease_service._lease_interval",
         lambda agent: 0.05
     )
 
-    stop_event, thread = lease_module._start_gateway_processing_lease_heartbeat(
+    stop_event, thread = lease_module.start_lease_heartbeat(
         mock_agent, request_path, request_id=request_id
     )
 

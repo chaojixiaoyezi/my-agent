@@ -22,46 +22,46 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# Thin facade: delegate to service methods for backward compatibility
+# Normalize AgentConfig through settings services.
 # ---------------------------------------------------------------------------
 
 
-def _coerce_bool_config(key: str, value: object, fallback: bool) -> tuple[bool, str | None]:
-    """Coerce a raw config value to bool with a safe fallback."""
-    return CoercionService.coerce_bool(key, value, fallback)
+def _coerce_bool_config(key: str, value: object, default: bool) -> tuple[bool, str | None]:
+    """Coerce a raw config value to bool with a safe default."""
+    return CoercionService.coerce_bool(key, value, default)
 
 
 def _coerce_choice_config(
-    key: str, value: object, fallback: str, choices: tuple[str, ...]
+    key: str, value: object, default: str, choices: tuple[str, ...]
 ) -> tuple[str, str | None]:
     """Coerce a raw config value to one of the allowed string choices."""
-    return CoercionService.coerce_choice(key, value, fallback, choices)
+    return CoercionService.coerce_choice(key, value, default, choices)
 
 
 def _coerce_float_config(
     key: str,
     value: object,
-    fallback: float,
+    default: float,
     *,
     params: CoerceNumberParams | None = None,
     min_val: float | None = None,
     max_val: float | None = None,
 ) -> tuple[float, str | None]:
     """Coerce a raw config value to float with optional range checks."""
-    return CoercionService.coerce_float(key, value, fallback, params=params, min_val=min_val, max_val=max_val)
+    return CoercionService.coerce_float(key, value, default, params=params, min_val=min_val, max_val=max_val)
 
 
 def _coerce_int_config(
     key: str,
     value: object,
-    fallback: int,
+    default: int,
     *,
     params: CoerceNumberParams | None = None,
     min_val: int | None = None,
     max_val: int | None = None,
 ) -> tuple[int, str | None]:
     """Coerce a raw config value to int with optional range checks."""
-    return CoercionService.coerce_int(key, value, fallback, params=params, min_val=min_val, max_val=max_val)
+    return CoercionService.coerce_int(key, value, default, params=params, min_val=min_val, max_val=max_val)
 
 
 def normalize_agent_config(data: dict[str, object]) -> tuple[dict[str, object], list[str]]:
@@ -77,7 +77,7 @@ def normalize_subagent_workflow_config(config: object) -> list[dict[str, object]
 class SubagentWorkflowWarningParams:
     field_name: str
     raw_value: object
-    fallback_value: object
+    default_value: object
     reason: str
 
 
@@ -86,10 +86,10 @@ def _add_subagent_workflow_warning(
     *,
     field_name: str = "",
     raw_value: object = None,
-    fallback_value: object = None,
+    default_value: object = None,
     reason: str = "",
     params: SubagentWorkflowWarningParams | None = None,
 ) -> None:
     """Append a structured warning dict for a subagent workflow config field."""
-    values = params or SubagentWorkflowWarningParams(field_name, raw_value, fallback_value, reason)
+    values = params or SubagentWorkflowWarningParams(field_name, raw_value, default_value, reason)
     SubagentWorkflowWarningService.add_warning(warnings, values)

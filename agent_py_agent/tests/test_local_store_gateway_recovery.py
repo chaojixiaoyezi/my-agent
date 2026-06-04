@@ -6,27 +6,27 @@ import threading
 import time
 from pathlib import Path
 
-from agent_py_agent.__main__ import (
+from agent_py_agent.agent.agent_core.models import AgentRunResult
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts import (
     AdapterPaths,
     GatewayAskParams,
     _handle_gateway_request,
     _process_gateway_requests,
-    build_local_doctor_report,
     gateway_paths,
     gateway_stale_processing,
     process_file_adapter_once,
     read_json_file,
-    rebuild_local_store,
     recover_gateway_processing_requests,
     submit_gateway_ask,
     write_json_file,
 )
-from agent_py_agent.agent.agent_core.models import AgentRunResult
-from agent_py_agent.agent.config import AgentConfig
-from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.file_io import append_jsonl
-from agent_py_agent.agent.local_store import LocalStore
-from agent_py_agent.agent.memory import JsonlMemory
+from agent_py_agent.agent.gateway_parts.request_worker import _iter_pending_request_paths
+from agent_py_agent.agent.io import append_jsonl
+from agent_py_agent.agent.local_storage import LocalStore
+from agent_py_agent.agent.memory_store import JsonlMemory
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.cli.local_doctor import build_local_doctor_report, rebuild_local_store
 
 
 def _process_gateway_once_when_inbox_ready(agent, gpaths) -> None:
@@ -135,6 +135,66 @@ def test_gateway_processing_recovery_requeues_then_fails_after_attempt_limit():
         assert failed["failed"] == 1
         assert (paths.failed / second_path.name).exists()
         assert (paths.responses / "gwreq-fail.json").exists()
+
+
+def test_gateway_startup_requeued_request_does_not_block_fresh_pending():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        agent = _make_recovery_agent(root)
+        paths = gateway_paths(agent)
+        _ensure_gateway_dirs(paths)
+
+        old_path = _write_processing_request(paths, "gwreq-old", 0, "旧请求")
+        recovered = recover_gateway_processing_requests(
+            paths,
+            startup=True,
+            max_attempts=2,
+            timeout_seconds=1,
+            agent=agent,
+        )
+        assert recovered["requeued"] == 1
+        old_pending = paths.inbox / old_path.name
+        old_payload = read_json_file(old_pending)
+        assert old_payload["not_before_at"] > time.time()
+        assert old_payload["priority"] == "recovery"
+
+        fresh_id, fresh_path, _ = submit_gateway_ask(paths, params=GatewayAskParams(prompt="新请求", save=False))
+        assert _iter_pending_request_paths(paths)[0].name == fresh_path.name
+        assert _process_gateway_requests(agent, paths, worker_id="test-worker") == 1
+
+        assert (paths.responses / f"{fresh_id}.json").exists()
+        assert (paths.done / fresh_path.name).exists()
+        assert old_pending.exists()
+        assert not (paths.responses / "gwreq-old.json").exists()
+
+
+def test_gateway_worker_prioritizes_fresh_pending_over_due_recovery_request():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        agent = _make_recovery_agent(root)
+        paths = gateway_paths(agent)
+        _ensure_gateway_dirs(paths)
+
+        recovery_path = paths.inbox / "gwreq-recovery.json"
+        write_json_file(
+            recovery_path,
+            {
+                "id": "gwreq-recovery",
+                "kind": "ask",
+                "prompt": "旧恢复请求",
+                "status": "pending",
+                "priority": "recovery",
+                "requeued_at": time.time() - 60,
+                "not_before_at": time.time() - 1,
+            },
+        )
+        _fresh_id, fresh_path, _ = submit_gateway_ask(paths, params=GatewayAskParams(prompt="新请求", save=False))
+
+        ordered = _iter_pending_request_paths(paths)
+
+        assert ordered[0].name == fresh_path.name
+        assert ordered[-1].name == recovery_path.name
+
 
 def test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run():
     with tempfile.TemporaryDirectory() as td:

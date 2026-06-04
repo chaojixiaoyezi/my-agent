@@ -29,7 +29,6 @@ from ..compact_state import (
 )
 from ..schema import (
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 from .ids import (
@@ -197,7 +196,6 @@ def _metadata_payload(request: _ApplyMetadataBuildRequest) -> dict[str, Any]:
         "created_at": request.now,
         "content_preserved": True,
         "restore_ready": True,
-        "reserved": runtime_memory_reserved_fields(COMPACT_APPLY_SCHEMA),
     }
 
 

@@ -20,7 +20,7 @@ from .models import CapabilityRequest, SubAgentTask
 from .reports import CapabilityRouteRecord
 
 if TYPE_CHECKING:
-    from ..capabilities import CapabilitySearchHit
+    from agent_py_agent.agent.capability import CapabilitySearchHit
 
 
 @dataclass(frozen=True)

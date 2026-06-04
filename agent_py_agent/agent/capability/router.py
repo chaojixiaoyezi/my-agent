@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..common.value_parsing import dedupe_strings
-from ..tools import ToolSpec
+from ..tooling.models import ToolSpec
 from .config import CapabilityConfig
 from .skills import SkillCard, SkillRegistry
 
@@ -79,7 +79,7 @@ class CapabilityCard:
     def render_compact(self, *, max_chars: int = 0) -> str:
         """渲染短卡片。
 
-        `max_chars=0` 表示不限制。这里先用字符数兜底，未来接 tokenizer 后
+        `max_chars=0` 表示不限制。这里先用字符数估算，未来接 tokenizer 后
         再替换成精确 token 控制。"""
 
         lines = [

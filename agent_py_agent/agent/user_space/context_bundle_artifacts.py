@@ -56,13 +56,11 @@ def _merged_artifact_refs(current: object, refs: list[dict[str, Any]]) -> dict[s
             "scoped_call_id": str(ref.get("scoped_call_id") or ""),
             "sha256": str(ref.get("sha256") or ""),
             "size_bytes": int(ref.get("size_bytes", 0) or 0),
-            "reserved": {},
         })
     return {
         "items": items,
         "collection_phase": "post_tool_loop",
         "body_policy": "refs_only_read_explicitly",
-        "reserved": dict(payload.get("reserved", {}) if isinstance(payload.get("reserved"), dict) else {}),
     }
 
 

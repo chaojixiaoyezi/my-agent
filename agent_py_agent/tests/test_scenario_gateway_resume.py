@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from agent_py_agent.__main__ import build_parser
-from agent_py_agent.agent.backend import ModelResponse
-from agent_py_agent.agent.subagent import parse_subagent_runner_output
+from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.subagents import parse_subagent_runner_output
+from agent_py_agent.cli.parser import build_parser
 from agent_py_agent.cli.scenario_cases.real_model_multi_round_case import (
     ScenarioRealModelMultiRoundBackend,
 )

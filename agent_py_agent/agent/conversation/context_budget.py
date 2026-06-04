@@ -151,11 +151,11 @@ def _list(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
-def _config_int(config: object, key: str, fallback: int) -> int:
+def _config_int(config: object, key: str, default: int) -> int:
     try:
         return max(0, int(getattr(config, key)))
     except (TypeError, ValueError):
-        return fallback
+        return default
 
 
 __all__ = [

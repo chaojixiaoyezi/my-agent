@@ -16,8 +16,4 @@ def runtime_guidance_context(manager: object, run_id: str) -> list[dict[str, obj
 def attach_runtime_guidance(bundle: dict[str, object], guidance: list[dict[str, object]]) -> None:
     if not guidance:
         return
-    reserved = bundle.get("reserved")
-    if not isinstance(reserved, dict):
-        reserved = {}
-    reserved["runtime_guidance"] = guidance
-    bundle["reserved"] = reserved
+    bundle["runtime_guidance"] = guidance

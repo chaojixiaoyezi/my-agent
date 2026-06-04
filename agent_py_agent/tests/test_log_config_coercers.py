@@ -59,7 +59,7 @@ class TestWarn:
         assert len(warnings) == 1
         assert warnings[0].field_name == "field1"
         assert warnings[0].raw_value == "bad_value"
-        assert warnings[0].fallback_value == "default"
+        assert warnings[0].default_value == "default"
         assert warnings[0].reason == "expected integer"
 
     def test_warn_multiple(self):

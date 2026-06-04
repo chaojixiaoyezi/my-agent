@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ..subagents.root_task_policy import is_self_authorized_root_task
 from ..subagents.services.lifecycle import RecordCapabilityRequestParams
-from ..tools import BaseTool, ToolExecutionResult, ToolSpec
+from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 from .orchestration.scope_resolution import (
     ScopeResolution,
     identity_scope_resolution,
@@ -140,9 +140,8 @@ def _record_params(params: dict[str, object], problem: str) -> RecordCapabilityR
         network_scope=string_list(params.get("network_scope"), TOOL_TEXT_LIST_OPTIONS),
         output_budget=_object_dict(params.get("output_budget")),
         risk_level=str(params.get("risk_level") or ""),
-        fallback_attempted=string_list(params.get("fallback_attempted"), TOOL_TEXT_LIST_OPTIONS),
+        alternatives_attempted=string_list(params.get("alternatives_attempted"), TOOL_TEXT_LIST_OPTIONS),
         escalation_target=str(params.get("escalation_target") or "parent"),
-        reserved=_object_dict(params.get("reserved")),
     )
 
 

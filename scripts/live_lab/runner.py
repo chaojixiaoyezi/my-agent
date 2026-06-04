@@ -3,8 +3,8 @@ from __future__ import annotations
 
 """Live Lab runner for command execution and suite orchestration.
 
-这个文件是测试台入口门面。隔离目录和日志分别在 session/reporter 模块里，
-这里保留命令执行、case 调度和对旧 LiveLab 接口的兼容代理。
+这个文件是测试台执行入口。隔离目录和日志分别在 session/reporter 模块里，
+这里保留命令执行和 case 调度。
 """
 
 import argparse

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 
 class TestTaskProgressCoverageTool:
@@ -11,8 +12,8 @@ class TestTaskProgressCoverageTool:
     def test_updates_and_summarizes_open_coverage_ledger(self, tmp_path):
         """覆盖账本应复用 task_progress，不把“项目/论文/API”等对象写死。"""
         from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
@@ -92,6 +93,82 @@ class TestTaskProgressCoverageTool:
         assert target["evidence"] == ["codex-main/README.md", "codex-main/core"]
         assert payload["coverage"]["counts"]["targets_done"] == 1
 
+    def test_coverage_ledger_does_not_shrink_when_later_update_has_subset(self, tmp_path):
+        """compact 后模型只记得一部分覆盖目标时，账本不能静默丢掉剩余目标。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "coverage_targets": [
+                    {"id": "fragment-001", "checks": {"读文件": "done"}, "evidence": ["fragment-001.txt"]},
+                    {"id": "fragment-002", "checks": {"读文件": "pending"}},
+                    {"id": "fragment-003", "checks": {"读文件": "pending"}},
+                ]
+            },
+        )
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "summary": "误以为只有一个文件。",
+                "coverage_targets": [
+                    {"id": "fragment-001", "checks": {"读文件": "done"}, "evidence": ["fragment-001.txt"]}
+                ],
+                "next_action": "提交验收",
+            },
+        )
+
+        payload = read_task_progress(tmp_path, "run-main")
+
+        assert [target["id"] for target in payload["coverage"]["targets"]] == [
+            "fragment-001",
+            "fragment-002",
+            "fragment-003",
+        ]
+        assert payload["coverage"]["counts"]["targets_total"] == 3
+        assert payload["coverage"]["counts"]["targets_incomplete"] == 2
+        assert payload["next_action"] != "提交验收"
+
+    def test_done_coverage_checks_are_not_downgraded_by_later_update(self, tmp_path):
+        """已完成覆盖检查不能被后续模糊状态降级。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "coverage_targets": [
+                    {
+                        "id": "fragment-001",
+                        "status": "done",
+                        "checks": {"读文件": "done", "写报告": "done"},
+                        "evidence": ["fragment-001.txt", "final_report.md"],
+                    }
+                ]
+            },
+        )
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "coverage_targets": [
+                    {
+                        "id": "fragment-001",
+                        "status": "pending",
+                        "checks": {"读文件": "pending"},
+                    }
+                ]
+            },
+        )
+
+        target = read_task_progress(tmp_path, "run-main")["coverage"]["targets"][0]
+
+        assert target["status"] == "done"
+        assert target["checks"] == {"读文件": "done", "写报告": "done"}
+        assert target["evidence"] == ["fragment-001.txt", "final_report.md"]
+
     def test_corrupt_progress_file_is_reported_not_silently_emptied(self, tmp_path):
         """坏进度账本不能被伪装成“没有进度”。"""
         from agent_py_agent.agent.task_progress import (
@@ -113,6 +190,154 @@ class TestTaskProgressCoverageTool:
         assert load_error == progress["load_error"]
         assert legacy_progress["load_error"] == load_error
         assert summary["load_error"] == load_error
+
+
+class TestTaskProgressFactPreservation:
+    """测试 compact/恢复场景下已确认事实不会被无意覆盖。"""
+
+    def test_done_item_facts_are_not_overwritten_by_later_done_update(self, tmp_path):
+        """compact 后模型重构旧进度时，不应把已确认事实覆盖成错误值。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "items": [
+                    {
+                        "id": "fragment-002",
+                        "title": "fragment-002",
+                        "status": "done",
+                        "result": "CP-002-15975 / SECRET-002-12711 / REVIEW",
+                        "decision": "REVIEW",
+                        "evidence": ["fragment-002.txt:1-120"],
+                    }
+                ]
+            },
+        )
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "items": [
+                    {
+                        "id": "fragment-002",
+                        "title": "fragment-002",
+                        "status": "done",
+                        "result": "CP-002-71319 / SECRET-002-55247 / KEEP",
+                        "decision": "KEEP",
+                        "evidence": ["fragment-002.txt:compact-summary"],
+                    }
+                ]
+            },
+        )
+
+        item = read_task_progress(tmp_path, "run-main")["items"][0]
+
+        assert item["result"] == "CP-002-15975 / SECRET-002-12711 / REVIEW"
+        assert item["decision"] == "REVIEW"
+        assert item["evidence"] == ["fragment-002.txt:1-120", "fragment-002.txt:compact-summary"]
+
+    def test_done_item_can_be_explicitly_corrected(self, tmp_path):
+        """确实要纠错时可以显式声明 correction，而不是无意覆盖。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {"items": [{"id": "a", "status": "done", "result": "old", "evidence": ["old.md"]}]},
+        )
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {"items": [{"id": "a", "status": "done", "result": "new", "evidence": ["new.md"], "correction": True}]},
+        )
+
+        item = read_task_progress(tmp_path, "run-main")["items"][0]
+
+        assert item["result"] == "new"
+        assert item["evidence"] == ["old.md", "new.md"]
+
+    def test_fragment_id_aliases_merge_into_one_progress_item(self, tmp_path):
+        """模型在 compact 前后混用 001/frag-001/fragment-001 时，应合并成同一项。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {"items": [{"id": "001", "status": "done", "notes": "CP-001/SECRET-001/KEEP"}]},
+        )
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {"items": [{"id": "frag-001", "status": "pending", "next": "稍后再看"}]},
+        )
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {"items": [{"id": "fragment-001", "status": "done", "notes": "WRONG"}]},
+        )
+
+        payload = read_task_progress(tmp_path, "run-main")
+
+        assert payload["counts"] == {"total": 1, "done": 1}
+        assert payload["items"][0]["id"] == "001"
+        assert payload["items"][0]["status"] == "done"
+        assert payload["items"][0]["notes"] == "CP-001/SECRET-001/KEEP"
+
+    def test_task_progress_normalizes_common_done_status_words(self, tmp_path):
+        """真实模型常写 completed/read/已读，这些应计为 done。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "items": [
+                    {"id": "a", "status": "completed"},
+                    {"id": "b", "status": "read"},
+                    {"id": "c", "status": "已读"},
+                    {"id": "d", "status": "待处理"},
+                ]
+            },
+        )
+
+        payload = read_task_progress(tmp_path, "run-main")
+
+        assert payload["counts"] == {"total": 4, "done": 3, "pending": 1}
+        assert [item["status"] for item in payload["items"]] == ["done", "done", "done", "pending"]
+
+    def test_task_progress_summary_carries_recent_done_facts(self, tmp_path):
+        """compact 交接要带最近完成事实，而不是只带未完成项。"""
+        from agent_py_agent.agent.task_progress import (
+            read_task_progress,
+            task_progress_summary,
+            write_task_progress,
+        )
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "items": [
+                    {
+                        "id": "fragment-001",
+                        "title": "fragment-001",
+                        "status": "done",
+                        "result": "CP-001-10001 / SECRET-001-20001 / KEEP",
+                        "evidence": ["fragment-001.txt:1-120"],
+                    },
+                    {"id": "fragment-002", "title": "fragment-002", "status": "in_progress"},
+                ]
+            },
+        )
+
+        summary = task_progress_summary(read_task_progress(tmp_path, "run-main"))
+
+        assert summary["active_items"][0]["id"] == "fragment-002"
+        assert summary["recent_done_items"][0]["id"] == "fragment-001"
+        assert summary["recent_done_items"][0]["result"] == "CP-001-10001 / SECRET-001-20001 / KEEP"
+        assert summary["recent_done_items"][0]["evidence"] == ["fragment-001.txt:1-120"]
 
     def test_coverage_targets_accept_expected_fields_as_pending_checks(self, tmp_path):
         """模型用 expected_fields 表达覆盖项时，也应归一成 checks。"""
@@ -143,8 +368,8 @@ class TestTaskProgressCoverageTool:
 
     def test_task_progress_accepts_create_action_and_fields_alias(self, tmp_path):
         """真实模型常写 action=create 和 fields，工具应宽容成 update + checks。"""
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
@@ -172,8 +397,8 @@ class TestTaskProgressCoverageTool:
 
     def test_task_progress_accepts_fields_dict_as_checks(self, tmp_path):
         """模型把 fields 写成字段到状态的字典时，应直接当 checks。"""
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
@@ -205,8 +430,8 @@ class TestTaskProgressCoverageAliases:
 
     def test_task_progress_accepts_init_and_string_coverage_targets(self, tmp_path):
         """模型用 init 和字符串覆盖清单时，也应写成结构化 coverage。"""
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
@@ -232,8 +457,8 @@ class TestTaskProgressCoverageAliases:
 
     def test_task_progress_accepts_fields_needed_and_chinese_target_text(self, tmp_path):
         """模型用 fields_needed 或中文冒号写覆盖项时，也应归一成 checks。"""
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
@@ -265,8 +490,8 @@ class TestTaskProgressCoverageAliases:
 
     def test_task_progress_derives_checks_from_note_text(self, tmp_path):
         """模型把覆盖要求写在 note/notes 里时，也应保留下来做覆盖清单。"""
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
@@ -296,8 +521,8 @@ class TestTaskProgressCoverageAliases:
 
     def test_task_progress_accepts_name_and_missing_fields_aliases(self, tmp_path):
         """模型用 name/missing_fields 和字符串 coverage 时，不应把多个对象合成一个 target。"""
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
@@ -361,8 +586,8 @@ class TestTaskProgressQualityHints:
 
     def test_update_returns_immediate_soft_feedback_when_evidence_is_missing(self, tmp_path):
         """写入进度当场返回软提醒，避免模型到下一轮 read 才看到问题。"""
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
@@ -380,6 +605,82 @@ class TestTaskProgressQualityHints:
         assert payload["soft_feedback"]["severity"] == "soft"
         assert payload["soft_feedback"]["blocking"] is False
         assert "不要只打勾" in payload["soft_feedback"]["message"]
+
+    def test_update_soft_feedback_marks_failed_or_unseen_evidence_refs(self, tmp_path):
+        """已写进进度的本地证据应能对上本轮工具事实，但只给软提醒。"""
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        (tmp_path / "notes.md").write_text("ok\n", encoding="utf-8")
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent._main_agent_run_id = "run-main"
+        agent._current_tool_loop_params = SimpleNamespace(
+            archive_tool_calls=[
+                {"tool": "read_file", "ok": True, "parameters": {"path": "notes.md"}},
+                {
+                    "tool": "read_file",
+                    "ok": False,
+                    "parameters": {"path": "missing/README.md"},
+                    "error_code": "PATH_NOT_FOUND",
+                },
+            ]
+        )
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "action": "update",
+                "items": [
+                    {
+                        "id": "a",
+                        "title": "对象 A",
+                        "status": "done",
+                        "result": "已经分析完",
+                        "evidence": ["notes.md", "missing/README.md", "unread.md"],
+                    }
+                ],
+            }
+        )
+        payload = json.loads(result.output)
+
+        warnings = payload["soft_feedback"]["evidence_source_warnings"]
+        assert payload["soft_feedback"]["blocking"] is False
+        assert warnings["failed_refs"] == ["missing/README.md"]
+        assert warnings["unseen_refs"] == ["unread.md"]
+        assert payload["quality_hints"]["evidence_source_warning_count"] == 2
+
+    def test_update_does_not_warn_for_successfully_seen_evidence_refs(self, tmp_path):
+        """本轮工具已经成功确认的证据路径，不应产生来源软提醒。"""
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent._main_agent_run_id = "run-main"
+        agent._current_tool_loop_params = SimpleNamespace(
+            archive_tool_calls=[
+                {"tool": "read_file", "ok": True, "parameters": {"path": str(tmp_path / "notes.md")}},
+            ]
+        )
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "action": "update",
+                "items": [
+                    {
+                        "id": "a",
+                        "title": "对象 A",
+                        "status": "done",
+                        "result": "已经分析完",
+                        "evidence": ["notes.md"],
+                    }
+                ],
+            }
+        )
+        payload = json.loads(result.output)
+
+        assert "evidence_source_warnings" not in payload.get("soft_feedback", {})
+        assert "evidence_source_warning_count" not in payload.get("quality_hints", {})
 
     def test_plain_progress_item_without_result_signal_does_not_hint(self, tmp_path):
         """只写标题/待办项时不提醒，避免把普通进度表变成噪声。"""
@@ -430,3 +731,35 @@ class TestTaskProgressQualityHints:
         assert hints["coverage_incomplete_ids"] == ["agentscope-main", "codex-main"]
         assert any("继续补未完成对象" in item for item in hints["next_suggestions"])
         assert "先选一个未完成对象" in hints["soft_prompt"]
+
+    def test_closeout_next_action_is_soft_repaired_when_coverage_is_incomplete(self, tmp_path):
+        """账本还有未完成覆盖项时，不把“提交验收”继续喂给 compact/resume。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        payload = write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "summary": "误以为已经全部完成。",
+                "next_action": "提交验收",
+                "items": [{"id": "fragment-001", "status": "done", "evidence": ["fragment-001.txt:12"]}],
+                "coverage": {
+                    "targets": [
+                        {
+                            "id": "fragment-001",
+                            "checks": {"读取": "done", "写报告": "done"},
+                            "evidence": ["fragment-001.txt:12"],
+                        },
+                        {
+                            "id": "fragment-002",
+                            "checks": {"读取": "pending", "写报告": "pending"},
+                        },
+                    ]
+                },
+            },
+        )
+        readback = read_task_progress(tmp_path, "run-main")
+
+        assert payload["next_action"].startswith("继续补未完成对象")
+        assert readback["next_action"].startswith("继续补未完成对象")
+        assert payload["soft_next_action_repair"]["original_next_action"] == "提交验收"

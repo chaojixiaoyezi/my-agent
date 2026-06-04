@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 
-from ..agent.capability_config import load_capability_config
+from ..agent.capability.config import load_capability_config
 from ..agent.subagents.services.hierarchy.recovery import HierarchyRecoveryRequest
 from ..agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,

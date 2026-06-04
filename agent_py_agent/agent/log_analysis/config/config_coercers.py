@@ -24,7 +24,7 @@ _LEVELS = {"L0", "L1", "L2", "L3", "L4", "L5"}
 class _WarningInput:
     field_name: str
     raw_value: Any
-    fallback_value: Any
+    default_value: Any
     reason: str
 
 
@@ -64,7 +64,7 @@ def _warn(
     *,
     warning: _WarningInput | None = None,
 ) -> None:
-    """追加一条配置 warning，记录原始值、回退值和原因。
+    """追加一条配置 warning，记录原始值、默认值和原因。
 
     新手说明:
     每次发现坏配置，不直接 print，也不吞掉；统一写进 warnings 列表，最后给 doctor/CLI 展示。
@@ -72,8 +72,8 @@ def _warn(
     warnings: 要追加 warning 的列表，会被原地修改。
     field_name: 出问题的字段名。
     raw_value: 用户写的原始值。
-    fallback_value: 程序采用的回退值。
-    reason: 回退原因。
+    default_value: 程序采用的默认值。
+    reason: 默认值原因。
 
     返回说明:
     没有返回值；结果追加到 warnings。"""
@@ -84,7 +84,7 @@ def _warn(
         LogAnalysisConfigWarning(
             field_name=item.field_name,
             raw_value=item.raw_value,
-            fallback_value=item.fallback_value,
+            default_value=item.default_value,
             reason=item.reason,
         )
     )
@@ -97,11 +97,11 @@ def _coerce_bool(
     default: bool,
     warnings: list[LogAnalysisConfigWarning],
 ) -> bool:
-    """把用户配置值安全转换成 bool，坏值回退默认值并写 warning。
+    """把用户配置值安全转换成 bool，坏值采用默认值并写 warning。
 
     新手说明:
     支持 True/False、0/1、"true"/"false"、"yes"/"no"、"on"/"off"。
-    其它值会被认为不清楚，回退 default。
+    其它值会被认为不清楚，采用 default。
 
     field_name: 字段名，用于 warning。
     raw_value: 原始值，可能是 _MISSING、bool、int、str 或坏值。
@@ -140,7 +140,7 @@ def _coerce_choice(
 
     新手说明:
     例如 response_mode 只能是 recommend/dry_run/execute，capability_level 只能是 L0-L5。
-    如果用户写了别的值，就回退默认值并记录 warning。
+    如果用户写了别的值，就采用默认值并记录 warning。
 
     field_name: 字段名，用于 warning。
     raw_value: 原始值。
@@ -168,7 +168,7 @@ def _coerce_int_warning(
     params: _WarningInput,
 ) -> int:
     _warn(warnings, params)
-    return int(params.fallback_value)
+    return int(params.default_value)
 
 
 def _coerce_int(
@@ -181,7 +181,7 @@ def _coerce_int(
     max_value: int | None = None,
     options: _IntOptions | None = None,
 ) -> int:
-    """安全转换整数配置，解析失败或越界时写 warning 并回退默认值."""
+    """安全转换整数配置，解析失败或越界时写 warning 并采用默认值."""
     coercion = options or _IntOptions(default=int(default), min_value=int(min_value), max_value=max_value)
     if raw_value is _MISSING:
         return coercion.default

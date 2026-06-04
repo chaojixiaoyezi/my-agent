@@ -53,9 +53,9 @@ class RecordCapabilityGrantParams:
     network_scope: list[str] | None = None
     output_budget: dict[str, object] | None = None
     risk_level: str = ""
+    request_scope: dict[str, object] | None = None
     expires_after_task: bool = True
     expires_at: float = 0.0
-    reserved: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -71,9 +71,9 @@ class RecordCapabilityGapParams:
     suggested_skill: str = ""
     suggested_tool: str = ""
     requested_scope: dict[str, object] | None = None
+    constraints: dict[str, str] | None = None
     escalation_chain: list[str] | None = None
     next_record_refs: list[str] | None = None
-    reserved: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -96,9 +96,8 @@ class RecordCapabilityRequestParams:
     network_scope: list[str] | None = None
     output_budget: dict[str, object] | None = None
     risk_level: str = ""
-    fallback_attempted: list[str] | None = None
+    alternatives_attempted: list[str] | None = None
     escalation_target: str = ""
-    reserved: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -125,7 +124,7 @@ class SetStatusParams:
 
 
 class SubAgentLifecycleService:
-    """Mutate lifecycle fields on subagent tasks through the manager facade."""
+    """Mutate lifecycle fields on subagent tasks through SubAgentManager."""
 
     def __init__(self, manager: Any):
         self.manager = manager

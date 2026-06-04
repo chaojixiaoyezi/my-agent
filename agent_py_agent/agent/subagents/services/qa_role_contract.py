@@ -53,7 +53,7 @@ def _role_template_identity(value: object) -> str:
     normalized = normalize_subagent_role(str(value or ""))
     if normalized in QA_ROLE_ORDER:
         return normalized
-    return role_template_id_for_role(normalized, fallback="")
+    return role_template_id_for_role(normalized, default_id="")
 
 
 def _role_items(value: object) -> set[str]:

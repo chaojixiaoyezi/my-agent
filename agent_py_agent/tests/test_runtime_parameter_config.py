@@ -33,6 +33,7 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
             "real_run_review_max_log_bytes": "4321",
             "background_claim_ttl_seconds": "120",
             "background_claim_heartbeat_interval_seconds": "30",
+            "subagent_watch_interval_seconds": "240",
         }
     )
 
@@ -48,6 +49,22 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
     assert normalized["real_run_review_max_report_bytes"] == 1234
     assert normalized["real_run_review_max_log_bytes"] == 4321
     assert normalized["background_claim_ttl_seconds"] == 120
+    assert normalized["subagent_watch_interval_seconds"] == 240
+
+
+def test_subagent_watch_interval_config_clamps_bad_values() -> None:
+    from agent_py_agent.agent.settings.config import normalize_agent_config
+
+    low, low_warnings = normalize_agent_config({"subagent_watch_interval_seconds": "10"})
+    bad, bad_warnings = normalize_agent_config({"subagent_watch_interval_seconds": "soon"})
+    high, high_warnings = normalize_agent_config({"subagent_watch_interval_seconds": "99999"})
+
+    assert low["subagent_watch_interval_seconds"] == 60
+    assert bad["subagent_watch_interval_seconds"] == 60
+    assert high["subagent_watch_interval_seconds"] == 7200
+    assert low_warnings
+    assert bad_warnings
+    assert high_warnings
 
 
 def test_background_main_agent_allowed_tools_are_normalized() -> None:
@@ -168,6 +185,25 @@ def test_runner_auto_concurrency_uses_configured_limit() -> None:
 
     assert _resolve_runner_concurrency("auto", 20, auto_limit=3) == 3
     assert _resolve_runner_concurrency("bad", 20, auto_limit=4) == 4
+
+
+def test_runner_timeout_defaults_to_no_total_deadline() -> None:
+    from agent_py_agent.agent.agent_core.runner.timeout_policy import runner_timeout_disabled
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    config = AgentConfig()
+
+    assert config.runner_timeout_seconds == "off"
+    assert runner_timeout_disabled(config) is True
+
+
+def test_runner_timeout_off_still_disables_total_deadline() -> None:
+    from agent_py_agent.agent.agent_core.runner.timeout_policy import runner_timeout_disabled
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    config = AgentConfig(runner_timeout_seconds="off")
+
+    assert runner_timeout_disabled(config) is True
 
 
 def test_background_context_budget_uses_configured_values() -> None:

@@ -7,7 +7,7 @@ from pathlib import Path
 from ...backends import ModelResponse
 from ...common.json_io import read_json_object_report
 from ...runtime_errors import runtime_error_report
-from ...tools import ToolExecutionResult
+from ...tooling.models import ToolExecutionResult
 from .._runtime_params import ToolLoopExecuteParams
 from ..runner.context import current_subagent_run_id
 
@@ -20,14 +20,14 @@ class SubagentOutputWriteCheck:
     result: ToolExecutionResult
 
 
-def subagent_output_json_response(agent, fallback: ModelResponse) -> ModelResponse:
+def subagent_output_json_response(agent, base_response: ModelResponse) -> ModelResponse:
     run_id = current_subagent_run_id(agent)
     try:
         task = agent.subagents.load(run_id)
     except Exception as exc:
         return ModelResponse(
             text=_subagent_output_load_error_text(run_id, exc),
-            backend=fallback.backend,
+            backend=base_response.backend,
         )
     report = read_json_object_report(
         Path(task.output_json),
@@ -37,7 +37,7 @@ def subagent_output_json_response(agent, fallback: ModelResponse) -> ModelRespon
     if report.load_error:
         return ModelResponse(
             text=_subagent_output_json_load_error_text(task.output_json, report.load_error),
-            backend=fallback.backend,
+            backend=base_response.backend,
         )
     payload = report.payload
     payload = _enrich_subagent_output_payload(payload, task)
@@ -47,7 +47,7 @@ def subagent_output_json_response(agent, fallback: ModelResponse) -> ModelRespon
         "[/SUBAGENT_RESULT]\n\n"
         "系统检测到当前子代理已写出 output.json，已结束工具循环并交回父级汇总。"
     )
-    return ModelResponse(text=text, backend=fallback.backend)
+    return ModelResponse(text=text, backend=base_response.backend)
 
 
 def is_subagent_output_json_write(check: SubagentOutputWriteCheck) -> bool:

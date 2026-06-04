@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-"""Security reserve persistence helpers."""
+"""Security signal persistence helpers."""
 
 from dataclasses import fields
 
@@ -22,7 +22,6 @@ def normalize_security_signal(value: object) -> SecuritySignal:
     for key in ["evidence_refs", "artifact_refs"]:
         payload[key] = sequence_strings(payload.get(key))
     payload["created_at"] = _float_value(payload.get("created_at"))
-    payload["reserved"] = payload.get("reserved") if isinstance(payload.get("reserved"), dict) else {}
     return SecuritySignal(**payload)
 
 

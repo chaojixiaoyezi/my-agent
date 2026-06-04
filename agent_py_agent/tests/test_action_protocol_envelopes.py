@@ -16,7 +16,7 @@ from agent_py_agent.agent.action_protocol import (
 )
 
 
-def test_tool_call_envelope_round_trips_with_scope_and_reserved_fields():
+def test_tool_call_envelope_round_trips_with_explicit_scope_fields():
     scope = RunScope(
         request_id="req-1",
         session_id="sess-1",
@@ -24,15 +24,14 @@ def test_tool_call_envelope_round_trips_with_scope_and_reserved_fields():
         run_id="run-1",
         owner_type="subagent_run",
         owner_id="run-1",
-        reserved={"future": "ok"},
     )
     envelope = ToolCallEnvelope(
         call_id="call-1",
-        source="legacy_text_protocol",
+        source="text_protocol",
         tool="read_file",
         args={"path": "README.md"},
         scope=scope,
-        reserved={"parser": "tool_block"},
+        idempotency_key="idem-1",
     )
 
     payload = envelope.to_dict()
@@ -41,8 +40,9 @@ def test_tool_call_envelope_round_trips_with_scope_and_reserved_fields():
     assert payload["schema_version"] == ACTION_PROTOCOL_SCHEMA_VERSION
     assert payload["kind"] == "tool_call"
     assert payload["operation_id"] == "tool_call:call-1"
-    assert payload["scope"]["reserved"] == {"future": "ok"}
-    assert payload["reserved"] == {"parser": "tool_block"}
+    assert "reserved" not in payload
+    assert "reserved" not in payload["scope"]
+    assert payload["idempotency_key"] == "idem-1"
     assert isinstance(decoded, ToolCallEnvelope)
     assert decoded.call_id == "call-1"
     assert decoded.operation_id == "tool_call:call-1"
@@ -55,7 +55,7 @@ def test_tool_call_envelope_from_payload_separates_tool_name_from_args():
         ToolCallEnvelopePayloadRequest(
             payload={"tool": "write_file", "path": "out.txt", "content": "hello"},
             call_id="call-write",
-            source="legacy_text_protocol",
+            source="text_protocol",
         )
     )
 
@@ -63,7 +63,7 @@ def test_tool_call_envelope_from_payload_separates_tool_name_from_args():
     assert envelope.args == {"path": "out.txt", "content": "hello"}
     assert envelope.call_id == "call-write"
     assert envelope.operation_id == "tool_call:call-write"
-    assert envelope.source == "legacy_text_protocol"
+    assert envelope.source == "text_protocol"
 
 
 def test_tool_call_result_and_subagent_result_envelopes_are_decodeable():

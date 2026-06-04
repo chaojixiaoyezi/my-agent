@@ -44,7 +44,7 @@ class DispatchRuntimePolicy:
     default_max_runners: int = 1
     default_limit: int = 20
     default_watch_interval: float = 30.0
-    source: str = "compat-defaults"
+    source: str = "code-defaults"
 
     @classmethod
     def from_config(cls, config: object | None) -> DispatchRuntimePolicy:
@@ -77,9 +77,8 @@ class DispatchRuntimePolicy:
 class DispatchParams:
     """Dispatch controls after boundary normalization.
 
-    ``apply`` and ``start_runners`` are compatibility projections for older
-    callers. New code should read ``execution_plan`` or the convenience
-    properties below so execution intent has one authoritative source.
+    New code should read ``execution_plan`` or the convenience properties below
+    so execution intent has one authoritative source.
     """
 
     apply: bool = False

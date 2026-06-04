@@ -151,7 +151,7 @@ def test_near_soft_ast_findings_cover_requested_kinds(tmp_path, monkeypatch) -> 
     assert all("near soft limit" in finding.message for finding in by_kind.values())
 
 
-def test_high_risk_findings_do_not_block_strict() -> None:
+def test_file_size_findings_do_not_block_strict() -> None:
     findings = [
         Finding("function", "agent_py_agent/example.py", "near_function", 48, 60, "high-risk", "near soft limit"),
         Finding("file", "agent_py_agent/example.py", "example.py", 601, 600, "hard", "file too long"),
@@ -159,7 +159,18 @@ def test_high_risk_findings_do_not_block_strict() -> None:
 
     blockers = check_code_size.compute_strict_blockers(findings, baseline=None)
 
-    assert [finding.severity for finding in blockers] == ["hard"]
+    assert blockers == []
+
+
+def test_non_file_hard_findings_still_block_strict() -> None:
+    findings = [
+        Finding("function", "agent_py_agent/example.py", "too_long", 120, 100, "hard", "function too long"),
+        Finding("file", "agent_py_agent/example.py", "example.py", 2000, 600, "hard", "file too long"),
+    ]
+
+    blockers = check_code_size.compute_strict_blockers(findings, baseline=None)
+
+    assert [(finding.kind, finding.name) for finding in blockers] == [("function", "too_long")]
 
 
 def test_report_surfaces_high_risk_near_soft_findings(tmp_path) -> None:

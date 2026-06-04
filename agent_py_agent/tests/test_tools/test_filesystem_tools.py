@@ -11,7 +11,7 @@ import types
 from pathlib import Path
 
 from agent_py_agent.agent.tooling import _filesystem_search as search_mod
-from agent_py_agent.agent.tools import (
+from agent_py_agent.agent.tooling.filesystem import (
     ApplyPatchTool,
     FindFilesTool,
     ListFilesTool,
@@ -384,9 +384,28 @@ def test_read_file_reports_next_start_line_when_truncated():
         result = read_tool.execute({"path": "long.txt"})
 
         assert result.ok
-        assert "已截断" in result.output
+        assert "PARTIAL view only" in result.output
         assert "total_lines=79" in result.output
         assert "next_start_line=" in result.output
+
+
+def test_read_file_single_long_line_reports_next_offset_and_resumes():
+    """LLM: minified JSON/log style files may be one huge line; line cursor alone would skip data."""
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        target = workspace / "one-line.txt"
+        target.write_text("A" * 120 + "NEEDLE-IN-LATE-CHUNK" + "B" * 60, encoding="utf-8")
+        read_tool = ReadFileTool(workspace, max_chars=80)
+
+        first = read_tool.execute({"path": "one-line.txt"})
+        second = read_tool.execute({"path": "one-line.txt", "offset": 80, "max_chars": 120})
+
+        assert first.ok
+        assert "PARTIAL view only" in first.output
+        assert "next_offset=80" in first.output
+        assert second.ok
+        assert "NEEDLE-IN-LATE-CHUNK" in second.output
+        assert "offset=80" in second.output
 
 
 def test_read_file_start_line_past_eof_reports_total_lines():

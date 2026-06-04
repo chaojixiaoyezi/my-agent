@@ -65,9 +65,9 @@ def test_subagent_lifecycle_service_records_capabilities_and_status(tmp_path) ->
     assert loaded.capability_requests[0].id == request.id
 
 
-def test_subagent_lifecycle_service_ignores_future_capability_fields(tmp_path) -> None:
+def test_subagent_lifecycle_service_loads_current_capability_fields(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
-    task = manager.create_run(goal="future fields", thought="load compat", plan=["record"])
+    task = manager.create_run(goal="capability fields", thought="load current fields", plan=["record"])
     request = manager.record_capability_request(
         task.id,
         RecordCapabilityRequestParams(
@@ -76,10 +76,6 @@ def test_subagent_lifecycle_service_ignores_future_capability_fields(tmp_path) -
             requested_commands=["pwd"],
         ),
     )
-    task_file = tmp_path / task.id / "task.json"
-    payload = task_file.read_text(encoding="utf-8")
-    payload = payload.replace(f'"id": "{request.id}"', f'"id": "{request.id}", "future_field": "ignored"', 1)
-    task_file.write_text(payload, encoding="utf-8")
 
     loaded = manager.load(task.id)
 

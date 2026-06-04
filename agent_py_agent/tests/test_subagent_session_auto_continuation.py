@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from agent_py_agent.agent.backend import BaseBackend, ModelResponse
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.backends import BaseBackend, ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.model_task import SubAgentTask
 from agent_py_agent.agent.subagents.services.session_progress import (
     SubagentToolProgressRequest,
@@ -55,7 +55,7 @@ class ToolThenCompactBackend(BaseBackend):
 
 def test_subagent_runner_auto_continues_through_multiple_local_compacts(tmp_path: Path) -> None:
     agent = _agent_with_local_compact(tmp_path)
-    agent.memory.add("user", "长任务旧记忆：不要执行 packet-fallback.proof，这是主代理历史任务。", kind="dialogue")
+    agent.memory.add("user", "长任务旧记忆：不要执行 old-packet.proof，这是主代理历史任务。", kind="dialogue")
     backend = MultiCompactSubagentBackend()
     agent.backend = backend
     task = agent.subagents.create_run(
@@ -79,7 +79,7 @@ def test_subagent_runner_auto_continues_through_multiple_local_compacts(tmp_path
     assert packet["session_compact"]["metadata_ref"].endswith("latest_metadata.json")
     assert not (tmp_path / "memory_archive" / "compact_applies").exists()
     assert all("Task-Local Compact Continuation" in prompt for prompt in backend.prompts[1:])
-    assert all("packet-fallback.proof" not in prompt for prompt in backend.prompts)
+    assert all("old-packet.proof" not in prompt for prompt in backend.prompts)
 
 
 def test_subagent_session_continuation_preserves_executed_tools(tmp_path: Path) -> None:
@@ -109,7 +109,7 @@ def test_task_local_write_progress_updates_continue_packet(tmp_path: Path) -> No
     task = SubAgentTask(
         id="run-progress",
         root_id="run-progress",
-        task_dir=str(tmp_path / "legacy" / "run-progress"),
+        task_dir=str(tmp_path / "previous" / "run-progress"),
         goal="写算法测试方案",
         thought="记录子代理写作进度。",
         plan=["写章节", "刷新进度快照"],
@@ -122,7 +122,7 @@ def test_task_local_write_progress_updates_continue_packet(tmp_path: Path) -> No
             task=task,
             tool="apply_patch",
             payload={
-                "path": str(tmp_path / "legacy" / "run-progress" / "算法测试方案.md"),
+                "path": str(tmp_path / "previous" / "run-progress" / "算法测试方案.md"),
                 "content": "## 第1章：排序\n正文\n## 第2章：搜索\n正文",
             },
             output="已追加文件: 算法测试方案.md",
@@ -297,7 +297,7 @@ def test_task_local_write_progress_many_placeholder_links_prompts_batch_repair(t
 
 def test_task_local_output_json_closeout_preserves_product_integrity_progress(tmp_path: Path) -> None:
     task = _progress_task(tmp_path)
-    output_json = tmp_path / "legacy" / "run-progress" / "output.json"
+    output_json = tmp_path / "previous" / "run-progress" / "output.json"
     output_json.parent.mkdir(parents=True)
     task.output_json = str(output_json)
     artifact = tmp_path / "deliverables" / "site-output" / "index.html"
@@ -364,17 +364,17 @@ def test_task_local_write_progress_reports_dirty_previous_progress(tmp_path: Pat
     )
     packet = json.loads(Path(task.agent_run_latest_session_continue_packet_json).read_text(encoding="utf-8"))
 
-    errors = snapshot["reserved"]["load_errors"]
+    errors = snapshot["load_errors"]
     assert errors[0]["context"] == "subagent_tool_progress.previous_progress"
     assert errors[0]["path"] == str(latest_progress)
-    assert packet["work_progress"]["reserved"]["load_errors"] == errors
+    assert packet["work_progress"]["load_errors"] == errors
 
 
 def test_continue_packet_prefers_work_progress_summary(tmp_path: Path) -> None:
     task = SubAgentTask(
         id="run-progress",
         root_id="run-progress",
-        task_dir=str(tmp_path / "legacy" / "run-progress"),
+        task_dir=str(tmp_path / "previous" / "run-progress"),
         goal="写算法测试方案",
         thought="记录子代理写作进度。",
         plan=["写章节", "刷新进度快照"],
@@ -388,7 +388,7 @@ def test_continue_packet_prefers_work_progress_summary(tmp_path: Path) -> None:
             task=task,
             tool="apply_patch",
             payload={
-                "path": str(tmp_path / "legacy" / "run-progress" / "算法测试方案.md"),
+                "path": str(tmp_path / "previous" / "run-progress" / "算法测试方案.md"),
                 "content": "## 第1章：排序\n正文\n## 第2章：搜索\n正文",
             },
             output="已追加文件: 算法测试方案.md",
@@ -406,7 +406,7 @@ def _progress_task(tmp_path: Path) -> SubAgentTask:
     task = SubAgentTask(
         id="run-progress",
         root_id="run-progress",
-        task_dir=str(tmp_path / "legacy" / "run-progress"),
+        task_dir=str(tmp_path / "previous" / "run-progress"),
         goal="写 HTML 产物",
         thought="记录子代理写作进度。",
         plan=["写文件", "刷新进度快照"],

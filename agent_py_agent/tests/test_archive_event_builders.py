@@ -301,24 +301,24 @@ class TestSummarizeText:
     def test_truncates_long_text(self):
         """验证长文本被截断"""
         text = "a" * 200
-        result = _summarize_text(text, fallback="test")
+        result = _summarize_text(text, default="test")
         assert len(result) <= 99  # 96 + "..."
 
-    def test_empty_returns_fallback(self):
-        """验证空文本返回 fallback"""
-        result = _summarize_text("", fallback="test")
+    def test_empty_returns_default(self):
+        """验证空文本返回默认摘要。"""
+        result = _summarize_text("", default="test")
         assert result == "test"
 
     def test_short_text_preserved(self):
         """验证短文本被保留"""
         text = "short"
-        result = _summarize_text(text, fallback="fallback")
+        result = _summarize_text(text, default="default-summary")
         assert result == "short"
 
     def test_whitespace_normalized(self):
         """验证空白字符被规范化"""
         text = "hello   world"
-        result = _summarize_text(text, fallback="fall")
+        result = _summarize_text(text, default="fall")
         assert "   " not in result
 
 

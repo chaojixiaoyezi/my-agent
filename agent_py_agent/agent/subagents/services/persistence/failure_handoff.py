@@ -17,7 +17,6 @@ def normalize_failure_handoff(value: object) -> FailureHandoff:
     payload = {key: value[key] for key in _field_names(FailureHandoff) if key in value}
     for key in ["artifact_refs", "evidence_refs", "avoid_next_time"]:
         payload[key] = sequence_strings(payload.get(key), allow_scalar=True)
-    payload["reserved"] = _dict_value(payload.get("reserved"))
     payload["created_at"] = _float_value(payload.get("created_at"))
     return FailureHandoff(**payload)
 
@@ -37,10 +36,6 @@ def write_failure_handoff(task: SubAgentTask) -> None:
 
 def _field_names(model: type) -> set[str]:
     return {item.name for item in fields(model)}
-
-
-def _dict_value(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
 
 
 def _float_value(value: object) -> float:

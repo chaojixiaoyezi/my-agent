@@ -45,13 +45,6 @@ def _agent_run_record_from_task(task: SubAgentTask) -> AgentRunRecord:
         created_at=float(task.created_at or task.updated_at or 0.0),
         updated_at=float(task.updated_at or task.heartbeat_at or task.created_at or 0.0),
         metadata=_agent_run_metadata(task),
-        reserved={
-            "schema_name": "agent_run_projection",
-            "schema_version": 1,
-            "extensions": {},
-            "compat": {},
-            "future": {},
-        },
     )
 
 
@@ -123,11 +116,4 @@ def _agent_event_from_task(task: SubAgentTask) -> AgentEventInput:
             "checkpoint_ref": task.agent_run_checkpoint_json or task.checkpoint_ref or task.checkpoint_json,
         },
         created_at=float(task.updated_at or task.heartbeat_at or task.created_at or 0.0),
-        reserved={
-            "schema_name": "agent_event_projection",
-            "schema_version": 1,
-            "extensions": {},
-            "compat": {},
-            "future": {},
-        },
     )

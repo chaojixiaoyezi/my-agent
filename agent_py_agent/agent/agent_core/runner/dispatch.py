@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from ...settings.defaults import default_config_int
 from ...settings.runtime_guard_config import runtime_guard_int
-from ...subagent import SubAgentTask
+from ...subagents import SubAgentTask
 from .candidate_policy import (
     RunnerCandidatePolicy,
     candidate_policy,

@@ -12,7 +12,7 @@ from .node_rendering import node_from_kernel_run
 from .progress import attach_task_progress
 from .scope_filter import (
     coordination_advice,
-    scope_main_fallback_snapshot,
+    scope_main_visible_snapshot,
     status_buckets,
     visible_nodes,
 )
@@ -27,7 +27,7 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
     warnings = list(snapshot.warnings)
     if not snapshot.runs and _is_main_run_query(agent, query):
         snapshot = _kernel_snapshot(agent, SubagentKernelQuery(scope="root_tree"))
-        snapshot = scope_main_fallback_snapshot(agent, snapshot, remembered_orchestration_run_ids(agent))
+        snapshot = scope_main_visible_snapshot(agent, snapshot, remembered_orchestration_run_ids(agent))
         warnings.extend(["main_run_scope_had_no_subagent_rows_returned_visible_tree", *list(snapshot.warnings)])
     resolution = tree_scope_resolution(
         agent,
@@ -58,6 +58,7 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
             "does_not_dispatch": True,
             "does_not_clear_pending_work": True,
             "next_step": advice["next_step_zh"],
+            "suggested_tool_call": advice.get("suggested_tool_call"),
             "scope_resolution": resolution.to_dict(),
         },
     }
@@ -97,6 +98,11 @@ def _kernel_query(agent: object, params: dict[str, object]) -> SubagentKernelQue
         return SubagentKernelQuery(run_id=current_run_id, scope="own_subtree")
     root_id = str(params.get("root_id") or "").strip()
     run_id = str(params.get("run_id") or "").strip()
+    explicit_scope = "scope" in params
+    if not root_id and not run_id and not explicit_scope:
+        task_workspace = str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
+        if task_workspace:
+            return SubagentKernelQuery(scope="task_workspace", task_workspace_dir=task_workspace)
     scope = str(params.get("scope") or "").strip() or ("own_subtree" if run_id else "root_tree")
     return SubagentKernelQuery(root_id=root_id, run_id=run_id, scope=scope)
 
@@ -191,15 +197,15 @@ def _empty_snapshot(error_report: dict[str, object] | None = None):
     from ...subagents.kernel import SubagentKernelSnapshot
 
     warnings = ["subagent_manager_unavailable"]
-    reserved: dict[str, object] = {}
+    load_errors: list[dict[str, object]] = []
     if error_report:
         warnings = ["subagent_kernel_error"]
-        reserved["load_errors"] = [error_report]
+        load_errors = [error_report]
     return SubagentKernelSnapshot(
         schema_version="subagent_kernel_snapshot.v1",
         scope="root_tree",
         warnings=warnings,
-        reserved=reserved,
+        load_errors=load_errors,
     )
 
 

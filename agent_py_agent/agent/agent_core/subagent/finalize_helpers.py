@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ...subagent import RecordRunnerResultParams
+from ...subagents.manager_runner_result_payload import RecordRunnerResultParams
 from .._subagent_repair_mixin import RecoverySnapshotParams
 from .params import SubagentFinalizeParams
 from .session_compact_payload import subagent_session_compact_payload_from_result

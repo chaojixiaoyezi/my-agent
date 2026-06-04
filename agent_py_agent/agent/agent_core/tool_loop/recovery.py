@@ -63,7 +63,6 @@ def runtime_run_scope(agent, params: ToolLoopExecuteParams) -> RunScope:
     root_task_id = text_value(getattr(task, "root_id", "")) or text_value(attrs.get("root_task_id")) or root_run_id
     depth = _int_value(getattr(task, "depth", attrs.get("depth", 0)))
     agent_kind = text_value(attrs.get("agent_kind")) or _agent_kind(parent_run_id=parent_run_id, depth=depth)
-    reserved = _scope_reserved(load_error)
     return RunScope(
         request_id=params.request_id,
         task_id=params.task_id or run_id,
@@ -73,7 +72,7 @@ def runtime_run_scope(agent, params: ToolLoopExecuteParams) -> RunScope:
         root_run_id=root_run_id,
         depth=depth,
         agent_kind=agent_kind,
-        reserved=reserved,
+        task_load_error=_scope_task_load_error(load_error),
     )
 
 
@@ -106,12 +105,10 @@ def _load_runtime_task(agent, run_id: str) -> Any:
         return None, exc
 
 
-def _scope_reserved(load_error: BaseException | None) -> dict[str, object]:
+def _scope_task_load_error(load_error: BaseException | None) -> dict[str, object]:
     if load_error is None:
         return {}
-    return {
-        "task_load_error": runtime_error_report(load_error, context="tool_call_scope.subagents.load")
-    }
+    return runtime_error_report(load_error, context="tool_call_scope.subagents.load")
 
 
 def _agent_kind(*, parent_run_id: str, depth: int) -> str:

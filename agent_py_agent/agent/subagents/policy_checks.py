@@ -11,8 +11,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..capabilities import CapabilitySearchHit
-from ..capability_config import CapabilityConfig
+from agent_py_agent.agent.capability import CapabilitySearchHit
+from agent_py_agent.agent.capability.config import CapabilityConfig
+
 from .capability_status import is_pending_capability_status
 from .models import CapabilityGrant, CapabilityRequest, SubAgentParsedOutput, SubAgentTask
 from .reports import ActionPlanItem, DueCheckIssue, SubAgentBoardItem

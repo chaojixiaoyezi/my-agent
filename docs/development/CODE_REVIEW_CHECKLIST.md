@@ -36,10 +36,9 @@ risk reduction over formalism.
 
 ## 3. Size / 代码尺寸
 
-- [ ] New files are <= 300 lines.
+- [ ] File length changes make the call path clearer; file line count alone is not a blocker.
 - [ ] New functions are <= 100 lines.
 - [ ] New classes are <= 250 lines.
-- [ ] Existing files have not grown beyond their frozen baseline.
 - [ ] `scripts/check_code_size.py` passes.
 
 ---
@@ -93,11 +92,11 @@ risk reduction over formalism.
 
 ---
 
-## 8. Compatibility / 兼容性
+## 8. Upgrade Safety / 升级安全
 
-- [ ] **CLI compatibility** — existing command names and arguments are preserved.
-- [ ] **Data format compatibility** — existing JSONL/JSON schemas are unchanged.
-- [ ] **Config compatibility** — existing config files still work.
+- [ ] **Main chain** — changes remove obsolete paths instead of adding bypasses.
+- [ ] **CLI surface** — changed command names or arguments are documented.
+- [ ] **Data format** — changed JSONL/JSON schemas have current readers and tests.
 - [ ] **Python version** — code is compatible with Python 3.10+.
       No backslashes in f-strings, guarded `tomllib` import.
 - [ ] **Dependency changes** — new runtime dependencies are documented and justified.
@@ -121,7 +120,7 @@ When time is limited, review in this order:
 2. **File writing** — write boundary, storage class, `.gitignore`.
 3. **Architecture** — single responsibility, size limits, naming.
 4. **Testing** — coverage for new behavior, architecture tests pass.
-5. **Compatibility** — CLI, data format, Python version.
+5. **Upgrade safety** — CLI, data format, Python version.
 6. **Documentation** — task record, feature spec, comments.
 
 Security and file-writing issues are the highest risk because they can cause data

@@ -29,7 +29,11 @@ from .progress import (
     _enrich_delivery_progress,
     _should_block_on_no_progress,
 )
-from .uncontracted import uncontracted_task_output_closeout_response
+from .task_progress_gate import task_progress_repair_message
+from .uncontracted import (
+    _current_run_task_output_artifacts,
+    uncontracted_task_output_closeout_response,
+)
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,8 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     if not contract:
         if response := uncontracted_task_output_closeout_response(request, workspace_root):
             return response
+        if _current_run_task_output_artifacts(request.params, workspace_root=workspace_root):
+            return None
         write_non_terminal_closeout_report(request, workspace_root, reason="delivery_contract_missing")
         return None
     doctor = validate_delivery_contract(contract, workspace_root=workspace_root)
@@ -64,6 +70,9 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     decisions = attach_closeout_gates(CloseoutGateRequest(request, report, contract, workspace_root))
     _write_report(workspace_root, report)
     gates_allowed = _all_gates_allowed(decisions)
+    if not gates_allowed:
+        report["ok"] = False
+        _write_report(workspace_root, report)
     append_delivery_progress_event(workspace_root, report, blocked=not gates_allowed)
     if not gates_allowed:
         return _failed_delivery_response(request, report, contract, workspace_root)
@@ -85,6 +94,8 @@ def _no_artifact_closeout_response(
     decisions = attach_closeout_gates(CloseoutGateRequest(request, report, contract, workspace_root))
     _write_report(workspace_root, report)
     if not _all_gates_allowed(decisions):
+        report["ok"] = False
+        _write_report(workspace_root, report)
         return _failed_delivery_response(request, report, contract, workspace_root)
     reset_local_progress_guard(request.agent, request.params)
     return ModelResponse(text=_closeout_text(report), backend=request.backend)
@@ -213,14 +224,18 @@ def _append_failed_contract_context(params: ToolLoopExecuteParams, report: dict[
 def _repair_guidance(report: dict[str, Any]) -> dict[str, Any]:
     progress = report.get("delivery_progress")
     actions = progress.get("recovery_actions") if isinstance(progress, dict) else []
+    task_progress_message = task_progress_repair_message(report)
+    message = (
+        "请根据 failed_artifacts、failed_gates 和 required_actions 自主选择下一步修复方式。"
+        "如果还需要读取或搜索来确认上下文，可以继续做；但要尽快把结果落成可验收的本地产物，"
+        "然后调用 submit_for_acceptance 提交验收。"
+    )
+    if task_progress_message:
+        message = f"{task_progress_message} {message}"
     return {
         "mode": "closeout_rework",
         "required_actions": actions if isinstance(actions, list) else [],
-        "message_zh": (
-            "请根据 failed_artifacts、failed_gates 和 required_actions 自主选择下一步修复方式。"
-            "如果还需要读取或搜索来确认上下文，可以继续做；但要尽快把结果落成可验收的本地产物，"
-            "然后调用 submit_for_acceptance 提交验收。"
-        ),
+        "message_zh": message,
         "submit_when_ready": "submit_for_acceptance",
     }
 

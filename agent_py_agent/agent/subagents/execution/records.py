@@ -40,7 +40,7 @@ class TestExecutionRecord:
         return bool(self.executed and self.validation_result.get("ok") is True)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the record to a JSON-compatible dictionary."""
+        """Serialize the record to a JSON dictionary."""
 
         return asdict(self)
 

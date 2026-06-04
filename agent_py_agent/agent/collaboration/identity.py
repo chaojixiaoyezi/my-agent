@@ -42,7 +42,7 @@ def capability_identity_aliases(capability: AgentCapability) -> set[str]:
 
 
 def request_update_targets(*, explicit_targets: object, metadata: dict[str, Any]) -> tuple[str, ...]:
-    """Read reroute targets from explicit params or backward-compatible metadata."""
+    """Read reroute targets from explicit params or metadata."""
     targets = strings(explicit_targets)
     if targets:
         return targets

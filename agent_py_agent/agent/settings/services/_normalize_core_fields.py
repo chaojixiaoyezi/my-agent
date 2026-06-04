@@ -88,7 +88,15 @@ class ModelFieldsService:
             ("echo", "anthropic_compatible", "openai_compatible"),
         )
         warnings.extend(
-            _apply_int_fields(out, defaults, (("request_timeout", 1, 600), ("max_tokens", 1, None)))
+            _apply_int_fields(
+                out,
+                defaults,
+                (
+                    ("request_timeout", 1, 600),
+                    ("max_tokens", 1, None),
+                    ("model_context_window_tokens", 1, None),
+                ),
+            )
         )
         warnings.extend(_apply_bool_fields(out, defaults, ("auto_bench_model_on_first_use",)))
         warnings.extend(_normalize_temperature(out, defaults))
@@ -104,7 +112,7 @@ class GatewayFieldsService:
         ("gateway_stop_timeout", 1, None),
         ("gateway_request_timeout", 1, None),
         ("gateway_request_poll_interval", 1, None),
-        ("gateway_request_workers", 1, None),
+        ("gateway_request_workers", 3, None),
         ("gateway_processing_timeout_seconds", 30, None),
         ("gateway_request_max_attempts", 0, None),
         ("gateway_port", 0, 65535),

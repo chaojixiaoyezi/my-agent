@@ -46,7 +46,7 @@ def _get(source: Any, key: str, default: Any = None) -> Any:
 
 
 def _case_id(case: Any, summary: Mapping[str, Any]) -> str:
-    """Return a stable case id from case fields or summary fallback."""
+    """Return a stable case id from case fields or summary metadata."""
     summary_case = summary.get("case", {})
     if not isinstance(summary_case, Mapping):
         summary_case = {}

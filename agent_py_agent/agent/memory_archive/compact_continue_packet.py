@@ -17,7 +17,6 @@ from .compact_resume.focus import (
 from .compact_runtime_handoff import runtime_handoff_payload
 from .schema import (
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 
@@ -66,7 +65,6 @@ def build_compact_continue_packet(request: CompactContinuePacketRequest) -> dict
         "subagent": _subagent_payload(request.subagent_owner_refs),
         "consistency_status": str(request.consistency.get("status", "")),
         "resume_instructions": _resume_instructions(guard),
-        "reserved": runtime_memory_reserved_fields(COMPACT_CONTINUE_PACKET_SCHEMA),
     }
     payload["typed_envelope"] = _typed_continue_packet_envelope(payload).to_dict()
     return payload
@@ -88,7 +86,6 @@ def _typed_continue_packet_envelope(payload: dict[str, Any]) -> CompactContinueP
         path_refs=_path_refs_from_recommended(payload.get("recommended_read_paths"), owner_id=owner_id),
         next_actions=sequence_strings(payload.get("next_actions")),
         scope=RunScope(owner_type=owner_type, owner_id=owner_id),
-        reserved={"source": "compact_continue_packet"},
     )
 
 
@@ -124,6 +121,7 @@ def _work_state_payload(work_state: dict[str, Any], missing: list[str]) -> dict[
         "latest_tests": _tests_payload(work_state.get("latest_tests")),
         "changed_files": sequence_strings(work_state.get("changed_files")),
         "read_files": sequence_strings(work_state.get("read_files")),
+        "tool_progress": _tool_progress_payload(work_state.get("tool_progress")),
         "runtime_handoff": runtime_handoff_payload(work_state.get("runtime_handoff")),
         "captured_refs": captured_refs_payload(work_state),
         "missing_fields": missing,
@@ -161,7 +159,7 @@ def _subagent_payload(owner_refs: dict[str, Any]) -> dict[str, Any]:
         "automatic_tool_execution": str(owner_refs.get("automatic_tool_execution", "none")),
         "refs": dict(owner_refs.get("refs", {})),
         "recommended_read_paths": sequence_strings(owner_refs.get("recommended_read_paths")),
-        "reserved_hooks": dict(owner_refs.get("reserved_hooks", {})),
+        "continuation_hooks": dict(owner_refs.get("continuation_hooks", {})),
     }
 
 
@@ -256,6 +254,31 @@ def _tests_payload(value: Any) -> dict[str, Any]:
         "items": sequence_strings(payload.get("items")),
         "source_paths": sequence_strings(payload.get("source_paths")),
     }
+
+
+def _tool_progress_payload(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list | tuple):
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        source_path = str(item.get("source_path") or item.get("path") or "").strip()
+        artifact_ref = str(item.get("artifact_ref") or item.get("scoped_call_id") or item.get("call_id") or "").strip()
+        key = (str(item.get("tool") or "").strip(), source_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "tool": str(item.get("tool") or "").strip(),
+                "source_path": source_path,
+                "artifact_ref": artifact_ref,
+                "size_bytes": _positive_int(item.get("size_bytes")),
+            }
+        )
+    return rows
 
 
 def _positive_int(value: Any) -> int:

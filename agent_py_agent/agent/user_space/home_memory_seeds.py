@@ -22,7 +22,7 @@ HOT memory is always safe to read. Keep it short and route details elsewhere.
 
 1. Use ordinary user language for real my-agent tests; avoid framework terms in test prompts.
 2. Fix reusable bottom-layer behavior, not one-off task templates.
-3. Open-world concepts such as file formats and artifact kinds need fallback behavior.
+3. Open-world concepts such as file formats and artifact kinds need explicit metadata or auditable defaults.
 4. Failed quality checks should guide rework unless the issue is a real safety boundary.
 5. Update project docs when runtime, memory, contract, or tool behavior changes.
 
@@ -86,7 +86,7 @@ scope: owner
 priority: 80
 stale_check: review after tool or delivery changes""",
     """## lessons.open-world
-topic: open-world concepts and fallbacks
+topic: open-world concepts and auditable defaults
 trigger_keywords: 开放世界, 文件格式, 产物类型, MIME, 协议, 后缀
 aliases: open world, extensible formats
 when_to_read: Read before adding mappings for file types, artifact kinds, protocols, or MIME types.
@@ -132,7 +132,7 @@ def default_memory_lessons() -> dict[str, str]:
 
 - File formats, artifact kinds, protocols, and MIME types grow over time.
 - Built-in maps are useful hints but cannot be the only authority.
-- Prefer explicit user/config/contract declarations first, known mappings second, and safe fallback behavior third.
+- Prefer explicit user/config/contract declarations first, known mappings second, and auditable defaults third.
 - Unknown does not automatically mean forbidden; it means ask for or infer enough metadata to proceed safely.
 """,
     }

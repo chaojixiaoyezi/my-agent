@@ -5,7 +5,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
-from .config_compat import INTERNAL_RUNTIME_CONFIG_FIELDS
+from .config_internal_fields import INTERNAL_RUNTIME_CONFIG_FIELDS
 from .config_layers import ConfigLayer, EffectiveConfig, merge_config_layers
 
 

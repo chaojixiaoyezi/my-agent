@@ -30,6 +30,7 @@ def _make_worker_config(*, params: WorkerConfigParams):
         app_ref=params.app_ref,
         last_token_estimate_ref=params.last_token_estimate_ref,
         stop_event=params.stop_event,
+        current_session_id=params.current_session_id,
     )
 
 
@@ -58,6 +59,7 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
             app_ref=params.app_ref,
             last_token_estimate_ref=params.last_token_estimate_ref,
             stop_event=params.stop_event,
+            current_session_id=params.current_session_id,
         )
     )
     threading.Thread(target=_tui_worker_body, daemon=True, args=(worker_cfg,)).start()

@@ -76,7 +76,7 @@ def _record_runner_recovery_preflight(task: SubAgentTask, strategy: object, prev
     attributes["runner_recovery_preflight"] = {
         "packet_status": str(getattr(strategy, "packet_status", "") or "unknown"),
         "packet_ref": str(getattr(strategy, "packet_ref", "") or ""),
-        "fallback_refs": list(getattr(strategy, "fallback_refs", []) or []),
+        "recovery_refs": list(getattr(strategy, "recovery_refs", []) or []),
         "runner_instruction": str(getattr(strategy, "runner_instruction", "") or ""),
         "previous_status": previous_status,
         "observed_at": time.time(),

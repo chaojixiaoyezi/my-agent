@@ -150,51 +150,6 @@ class RecordIterator:
         return (parsed,)
 
 
-class EventWriter:
-    """Write events to a store (or JsonlEventSink fallback) and return storage metadata."""
-
-    def __init__(self, store: Any, fallback_sink: Any):
-        self.store = store
-        self.fallback_sink = fallback_sink
-
-    def write(self, events: list[dict[str, Any]]) -> dict[str, Any]:
-        """Dispatch to the first available write method on the store."""
-        if not events:
-            return {"count": 0, "path": str(self.fallback_sink.events_path)}
-
-        if self.store is None:
-            return self.fallback_sink.write_events(events)
-
-        batch_result = self._write_batch(events)
-        if batch_result is not None:
-            return batch_result
-        item_result = self._write_items(events)
-        if item_result is not None:
-            return item_result
-        return self.fallback_sink.write_events(events)
-
-    def _write_batch(self, events: list[dict[str, Any]]) -> dict[str, Any] | None:
-        for method_name in ("write_events", "append_events", "upsert_events"):
-            method = getattr(self.store, method_name, None)
-            if callable(method):
-                result = method(events)
-                return _storage_result(result, count=len(events), store=self.store)
-        return None
-
-    def _write_items(self, events: list[dict[str, Any]]) -> dict[str, Any] | None:
-        for method_name in ("write_event", "append_event", "upsert_event"):
-            method = getattr(self.store, method_name, None)
-            if callable(method):
-                return _write_events_with_method(method, events)
-        return None
-
-
-def _write_events_with_method(method: Any, events: list[dict[str, Any]]) -> dict[str, Any]:
-    for event in events:
-        method(event)
-    return {"count": len(events), "path": None}
-
-
 class ManifestWriter:
     """Build and atomically write a batch manifest JSON file."""
 

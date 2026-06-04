@@ -5,19 +5,16 @@ from __future__ import annotations
 import logging
 
 from ..backends import is_provider_timeout_error, is_provider_transient_error
-from ..subagent import (
-    RecordRunnerResultParams,
-    SubAgentRunnerResult,
-    SubAgentTask,
-    parse_subagent_runner_output,
-)
-from ._subagent_planner_mixin import RunParentPlannerParams, _ParentPlannerMixin
+from ..subagents.manager_runner_result_payload import RecordRunnerResultParams
+from ..subagents.models import SubAgentRunnerResult, SubAgentTask
+from ..subagents.parsing import parse_subagent_runner_output
+from ._subagent_planner_mixin import _ParentPlannerMixin
 from ._subagent_repair_mixin import (
     RecoverySnapshotParams,
     SubagentRepairParams,
     _SubagentRepairMixin,
 )
-from .planner import _build_parent_planner_state
+from .planner_service import build_parent_planner_state as _build_parent_planner_state
 from .runner.prompts import (
     _build_subagent_runner_prompt,
 )
@@ -221,7 +218,3 @@ def _subagent_run_failure_type(exc: BaseException) -> str:
     if is_provider_transient_error(exc):
         return "transient_error"
     return "runner_error"
-
-
-# Re-export for backward compatibility
-from ._subagent_planner_mixin import RunParentPlannerParams  # noqa: E402

@@ -288,10 +288,12 @@ class TestSubagentMixinParentPlanner:
                 "gate": {"needs_planner": 0},
                 "tasks": [],
             }
+            from agent_py_agent.agent.agent_core._subagent_planner_mixin import (
+                RunParentPlannerParams,
+            )
             from agent_py_agent.agent.agent_core.orchestration.dispatch.params import (
                 DispatchExecutionPlan,
             )
-            from agent_py_agent.agent.agent_core.subagent_mixin import RunParentPlannerParams
 
             result = mock_mixin.run_parent_planner(
                 RunParentPlannerParams(

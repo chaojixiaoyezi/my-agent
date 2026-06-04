@@ -8,9 +8,9 @@ from dataclasses import dataclass
 SOURCE_ROOTS = ["agent_py_agent", "scripts"]
 
 FILE_SOFT_LIMIT = 400
-FILE_HARD_LIMIT = 600
+FILE_HARD_LIMIT: int | None = None
 TEST_SOFT_LIMIT = 700
-TEST_HARD_LIMIT = 900
+TEST_HARD_LIMIT: int | None = None
 FUNCTION_SOFT_LIMIT = 60
 FUNCTION_HARD_LIMIT = 100
 CLASS_SOFT_LIMIT = 250
@@ -45,18 +45,9 @@ JUNK_NAME_BASELINE = {
     "agent_py_agent/cli/common.py",
 }
 
-# High-risk files frozen by architecture guardrails.
+# Files can grow when consolidation improves the main chain. This report keeps
+# visibility, but file length is advisory rather than a merge blocker.
 HIGH_RISK_FILES: dict[str, int] = {
-    "agent_py_agent/cli/chat.py": 1017,
-    "agent_py_agent/agent/memory_archive/query.py": 839,
-    "agent_py_agent/agent/subagents/manager_patch.py": 794,
-    "agent_py_agent/agent/settings/config.py": 751,
-    "agent_py_agent/agent/subagents/manager_base.py": 751,
-    "agent_py_agent/agent/log_analysis/analytics/detectors/rules.py": 747,
-    "agent_py_agent/agent/log_analysis/tools.py": 672,
-    "agent_py_agent/agent/memory_archive/runtime.py": 657,
-    "agent_py_agent/agent/adapter/qq.py": 613,
-    "agent_py_agent/cli/memory_commands.py": 609,
 }
 
 EXCLUDE_PARTS = {

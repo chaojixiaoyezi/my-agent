@@ -77,7 +77,7 @@ def test_staged_checkpoint_finding_includes_trace(tmp_path: Path) -> None:
     ]
 
 
-def test_contracts_cli_status_and_migrate(tmp_path: Path, capsys) -> None:
+def test_contracts_cli_status(tmp_path: Path, capsys) -> None:
     from agent_py_agent.cli.parser import build_parser
 
     report = tmp_path / "acceptance_report.json"
@@ -87,23 +87,3 @@ def test_contracts_cli_status_and_migrate(tmp_path: Path, capsys) -> None:
     assert args.func(args) == 0
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["by_code"] == {"CONTRACT_FAILED": 1}
-
-    old_contract = tmp_path / "old_contract.json"
-    old_contract.write_text('{"version":1,"artifact_path":"outputs/report.md"}', encoding="utf-8")
-    migrated = tmp_path / "new_contract.json"
-    args = build_parser().parse_args(
-        [
-            "contracts",
-            "migrate",
-            "--input",
-            str(old_contract),
-            "--output",
-            str(migrated),
-            "--json",
-        ]
-    )
-
-    assert args.func(args) == 0
-    migrate_payload = json.loads(capsys.readouterr().out)
-    assert migrate_payload["migrated"][0]["changed"] is True
-    assert json.loads(migrated.read_text(encoding="utf-8"))["version"] == 2

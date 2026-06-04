@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.__main__ import build_parser
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.cli.parser import build_parser
 
 
 def _write_config(tmp_path: Path, home: Path) -> Path:
@@ -56,7 +56,7 @@ def _write_daily_record(home: Path, *, date_key: str = "2026-05-13") -> Path:
     return path
 
 
-def test_memory_search_reads_daily_when_legacy_memory_missing(tmp_path: Path):
+def test_memory_search_reads_home_daily_when_repo_memory_missing(tmp_path: Path):
     home = tmp_path / "home"
     repo = tmp_path / "repo"
     agent = SimpleAgent(AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]), repo)
@@ -67,13 +67,13 @@ def test_memory_search_reads_daily_when_legacy_memory_missing(tmp_path: Path):
     assert [record.content for record in results] == ["用户喜欢表格和干净目录"]
 
 
-def test_provider_memory_search_does_not_read_legacy_memory_path(tmp_path: Path):
+def test_provider_memory_search_does_not_read_repo_memory_path(tmp_path: Path):
     home = tmp_path / "home"
     repo = tmp_path / "repo"
-    legacy = repo / "memory.jsonl"
-    legacy.parent.mkdir(parents=True, exist_ok=True)
-    legacy.write_text(
-        '{"role":"user","content":"local legacy secret","kind":"note","tags":[],"created_at":1}\n',
+    repo_memory = repo / "memory.jsonl"
+    repo_memory.parent.mkdir(parents=True, exist_ok=True)
+    repo_memory.write_text(
+        '{"role":"user","content":"repo local secret","kind":"note","tags":[],"created_at":1}\n',
         encoding="utf-8",
     )
     agent = SimpleAgent(
@@ -88,7 +88,7 @@ def test_provider_memory_search_does_not_read_legacy_memory_path(tmp_path: Path)
         repo,
     )
 
-    results = agent.recall("legacy secret", top_k=3)
+    results = agent.recall("repo local secret", top_k=3)
 
     assert results == []
 

@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from ...subagent import SubAgentExecutionContext
+from ...subagents import SubAgentExecutionContext
 
 
 def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:

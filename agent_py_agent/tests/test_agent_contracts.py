@@ -76,12 +76,12 @@ def test_run_state_machine_dispatch_closeout_and_recovery_decisions() -> None:
 
     approval = recovery_decision(RunStateFacts(status="FAILED", failure_type="APPROVAL_REQUIRED"))
     assert approval.action == "request_approval"
-    assert approval.fallback_action == "stop"
+    assert approval.secondary_action == "stop"
     assert approval.allow_new_run is False
 
     no_progress = recovery_decision(RunStateFacts(status="BLOCKED", failure_type="NO_PROGRESS"))
     assert no_progress.action == "change_strategy"
-    assert no_progress.fallback_action == "stop"
+    assert no_progress.secondary_action == "stop"
     assert no_progress.allow_new_run is False
 
     failed = recovery_decision(RunStateFacts(status="FAILED", attempts=3, max_attempts=3))

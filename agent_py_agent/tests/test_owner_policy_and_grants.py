@@ -91,8 +91,8 @@ def test_effective_owner_policy_disables_tools_and_keeps_grants(tmp_path: Path) 
 
 
 def test_tool_registry_respects_owner_disabled_tools(tmp_path: Path) -> None:
-    from agent_py_agent.agent.config import AgentConfig
     from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
 
     home = tmp_path / "home"
     agent = SimpleAgent(AgentConfig(my_agent_home=str(home), prompt_files=[]), tmp_path / "repo")
@@ -109,8 +109,8 @@ def test_tool_registry_respects_owner_disabled_tools(tmp_path: Path) -> None:
 
 
 def test_subagent_inherits_owner_policy_snapshot_and_projection(tmp_path: Path) -> None:
-    from agent_py_agent.agent.config import AgentConfig
     from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
 
     home = tmp_path / "home"
     agent = SimpleAgent(

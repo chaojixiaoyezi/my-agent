@@ -98,6 +98,7 @@ class GatewayRunCleanupRequest:
     stop_event: Any
     heartbeat_thread: Any
     request_thread: Any
+    background_thread: Any
     http_server: Any | None
 
 

@@ -101,6 +101,19 @@ def test_contract_recovery_exposes_rework_loop_for_repairable_gate_failure():
     assert "重新跑同一套合同验收" in recovery["rework_loop"]["message_zh"]
 
 
+def test_task_progress_open_items_are_repairable_not_terminal():
+    decision = GateDecision.repair(
+        "task_progress_closeout",
+        [GateFinding("TASK_PROGRESS_OPEN_ITEMS", message="继续读取 fragment-015")],
+    )
+    recovery = decision.to_dict()["recovery"]
+
+    assert recovery["status"] == "repair_required"
+    assert recovery["terminal"] is False
+    assert recovery["can_auto_repair"] is True
+    assert recovery["actions"][0]["recommended_action"] == "continue"
+
+
 def test_gate_decision_recovery_envelope_marks_approval_as_user_input():
     decision = GateDecision.need_approval("tool_effect", evidence={"tool_name": "block_ip"})
     recovery = decision.to_dict()["recovery"]

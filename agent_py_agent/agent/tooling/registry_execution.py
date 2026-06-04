@@ -28,8 +28,8 @@ from .registry_auth import (
 from .registry_control_ranges import mask_protected_control_ranges
 from .registry_envelopes import (
     attach_result_envelope,
-    legacy_payloads_to_tool_envelopes,
     payload_from_tool_call_envelope,
+    payloads_to_tool_envelopes,
     tool_call_envelope_from_execution_payload,
 )
 from .registry_file_write_blocks import (
@@ -158,9 +158,9 @@ def parse_registry_tool_call_envelopes(
     text: str,
     *,
     scope: RunScope | None = None,
-    source: str = "legacy_text_protocol",
+    source: str = "text_protocol",
 ) -> list[ToolCallEnvelope]:
-    return legacy_payloads_to_tool_envelopes(
+    return payloads_to_tool_envelopes(
         parse_registry_tool_calls(text),
         scope=scope,
         source=source,

@@ -203,10 +203,7 @@ def remove_pid_file_if_owned(pid_path: Path) -> None:
         pass
 
 
-# 鈹€鈹€ Scoped locks and runtime status are re-exported from focused modules. 鈹€鈹€鈹€
-
-
-# 鈹€鈹€ Legacy API compatibility 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Public daemon control helpers.
 
 
 def write_pid_file(pid_path: Path, pid: int) -> None:

@@ -39,7 +39,6 @@ class SubagentResultEnvelope:
     schema_version: int = ACTION_PROTOCOL_SCHEMA_VERSION
     kind: str = "subagent_result"
     created_at: str = field(default_factory=_now_iso)
-    reserved: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.operation_id:
@@ -73,7 +72,6 @@ class SubagentResultEnvelope:
             schema_version=int(payload.get("schema_version") or ACTION_PROTOCOL_SCHEMA_VERSION),
             kind=str(payload.get("kind") or "subagent_result"),
             created_at=str(payload.get("created_at") or _now_iso()),
-            reserved=_dict_or_empty(payload.get("reserved")),
         )
 
 
@@ -98,7 +96,7 @@ class SubagentScheduleEnvelope:
     schema_version: int = ACTION_PROTOCOL_SCHEMA_VERSION
     kind: str = "subagent_schedule"
     created_at: str = field(default_factory=_now_iso)
-    reserved: dict[str, Any] = field(default_factory=dict)
+    source: str = ""
 
     def __post_init__(self) -> None:
         if not self.operation_id:
@@ -131,7 +129,7 @@ class SubagentScheduleEnvelope:
             schema_version=int(payload.get("schema_version") or ACTION_PROTOCOL_SCHEMA_VERSION),
             kind=str(payload.get("kind") or "subagent_schedule"),
             created_at=str(payload.get("created_at") or _now_iso()),
-            reserved=_dict_or_empty(payload.get("reserved")),
+            source=str(payload.get("source") or ""),
         )
 
 
@@ -186,7 +184,7 @@ def subagent_schedule_envelope_from_payload(
         reason=str(payload.get("reason") or ""),
         items=_dict_list(payload.get("items") or payload.get("tasks")),
         scope=scope or RunScope(run_id=parent_run_id, root_task_id=root_id),
-        reserved={"source": "subagent_orchestration_tool"},
+        source="subagent_orchestration_tool",
     )
 
 

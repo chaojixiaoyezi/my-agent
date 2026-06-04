@@ -42,11 +42,10 @@ def captured_refs_payload(work_state: dict[str, Any]) -> dict[str, Any]:
 
 
 def artifact_ref_payload(item: dict[str, Any]) -> dict[str, Any]:
-    fallback = str(item.get("path") or "")
+    source_path = str(item.get("path") or item.get("source_path") or item.get("source_input") or "")
     return {
-        "artifact_ref": str(item.get("scoped_call_id") or item.get("call_id") or fallback),
-        "fallback_path": fallback,
-        "source_path": str(item.get("source_path") or item.get("source_input") or ""),
+        "artifact_ref": str(item.get("scoped_call_id") or item.get("call_id") or source_path),
+        "source_path": source_path,
         "tool": str(item.get("tool") or ""),
         "kind": str(item.get("kind") or ""),
     }

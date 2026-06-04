@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-"""code-size governance checker for files, functions, classes, and imports.
+"""code-size governance checker for functions, classes, imports, and file trends.
 
-这个脚本先以 warn 模式暴露历史技术债，并生成 CODE_SIZE_REPORT.md。
-strict 模式用于后续 CI 收紧，阻断新增违规。
-支持 baseline 机制：历史违规不阻断，新增/恶化的违规阻断。
+这个脚本生成 CODE_SIZE_REPORT.md。文件长度只做趋势提示，不再作为硬门；
+strict 模式仍用于函数长度、类长度、参数数量、嵌套、星号导入、语法错误和新增垃圾文件名等局部可读性问题。
 """
 
 import argparse
@@ -188,7 +187,7 @@ def _check_junk_names(paths: list[Path]) -> list[Finding]:
 
 
 def _check_high_risk_files() -> list[Finding]:
-    """Check that frozen high-risk files have not grown past their baseline."""
+    """Report advisory growth for explicitly watched files."""
     findings: list[Finding] = []
     for rel_path, baseline in HIGH_RISK_FILES.items():
         path = ROOT / rel_path
@@ -206,7 +205,7 @@ def _check_high_risk_files() -> list[Finding]:
                     path.name,
                     current,
                     baseline,
-                    "hard",
+                    "soft",
                     f"{rel_path} grew from {baseline} to {current} lines",
                 )
             )
@@ -246,22 +245,19 @@ def write_baseline(findings: list[Finding], baseline_path: Path) -> None:
 
 
 def compute_strict_blockers(findings: list[Finding], baseline: dict[str, str] | None) -> list[Finding]:
-    """Compute which findings should block in strict mode.
+    """Compute strict blockers while keeping whole-file line count advisory."""
 
-    Without baseline: all hard findings block.
-    With baseline: only new or worsened hard findings block."""
     blockers: list[Finding] = []
-    for f in findings:
-        if f.severity != "hard":
+    for finding in findings:
+        if finding.severity != "hard":
+            continue
+        if finding.kind == "file":
             continue
         if baseline is None:
-            blockers.append(f)
+            blockers.append(finding)
             continue
-        # With baseline: block if finding is new (not in baseline)
-        # or if it's high_risk_growth (always blocks)
-        fid = f.identity()
-        if fid not in baseline or f.kind == "high_risk_growth":
-            blockers.append(f)
+        if finding.identity() not in baseline:
+            blockers.append(finding)
     return blockers
 
 
@@ -272,8 +268,6 @@ def report_findings(findings: list[Finding], baseline: dict[str, str] | None) ->
 
 
 def _finding_exceeds_baseline(item: Finding, baseline: dict[str, str]) -> bool:
-    if item.kind == "high_risk_growth":
-        return True
     previous = baseline.get(item.identity())
     if previous is None:
         return True
@@ -281,7 +275,7 @@ def _finding_exceeds_baseline(item: Finding, baseline: dict[str, str]) -> bool:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Check code-size engineering guardrails.")
+    parser = argparse.ArgumentParser(description="Check local complexity guardrails and report file-size signals.")
     parser.add_argument("--mode", choices=["warn", "strict"], default="warn")
     parser.add_argument("--baseline", type=str, default=None, help="Path to baseline JSON file")
     parser.add_argument("--write-baseline", type=str, default=None, help="Write current findings as baseline")

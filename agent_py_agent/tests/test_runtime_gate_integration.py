@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -345,6 +346,138 @@ def test_tool_round_auto_closeout_after_delivery_completion_hint(tmp_path):
     assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in response.text
 
 
+def test_tool_round_auto_closeout_for_uncontracted_task_output_report(tmp_path):
+    task_root = tmp_path / "tasks" / "2026-06-03" / "all-agent"
+    output_dir = task_root / "output"
+    output = output_dir / "all-agent-源码结构分析报告.md"
+    output.parent.mkdir(parents=True)
+    output.write_text("finished artifact", encoding="utf-8")
+    params = replace(
+        _delivery_closeout_params(
+            archive_tool_calls=[
+                {
+                    **_write_file_archive_record(),
+                    "parameters": {"tool": "write_file", "path": str(output)},
+                    "path": str(output),
+                }
+            ]
+        ),
+        delivery_contract=None,
+        task_attributes={
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(output_dir),
+                "work_dir": str(task_root / "work"),
+            }
+        },
+    )
+    params.tool_context.append("[delivery-completion-soft-hint]\n{}")
+    agent = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(workspace_root=tmp_path))
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+
+    assert response is not None
+    assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in response.text
+    assert "uncontracted_task_output" in response.text
+
+
+def test_tool_round_auto_closeout_for_relative_uncontracted_task_output_report(tmp_path):
+    task_root = tmp_path / "tasks" / "2026-06-03" / "all-agent"
+    output_dir = task_root / "output"
+    output = output_dir / "architecture_analysis_report.md"
+    output.parent.mkdir(parents=True)
+    output.write_text("finished artifact", encoding="utf-8")
+    relative_output = output.relative_to(tmp_path)
+    params = replace(
+        _delivery_closeout_params(
+            archive_tool_calls=[
+                {
+                    **_write_file_archive_record(),
+                    "parameters": {"tool": "write_file", "path": str(relative_output)},
+                    "path": str(relative_output),
+                }
+            ]
+        ),
+        delivery_contract=None,
+        task_attributes={
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(output_dir),
+                "work_dir": str(task_root / "work"),
+            }
+        },
+    )
+    params.executed_tools.append("submit_for_acceptance")
+    agent = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(workspace_root=tmp_path))
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+
+    assert response is not None
+    assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in response.text
+    assert "uncontracted_task_output" in response.text
+
+
+def test_tool_round_auto_closeout_for_uncontracted_user_requested_output_report(tmp_path):
+    task_root = tmp_path / "tasks" / "2026-06-03" / "all-agent"
+    output_dir = task_root / "output"
+    requested_dir = tmp_path / "requested"
+    output = requested_dir / "all-agent-最终验收报告.md"
+    output.parent.mkdir(parents=True)
+    output.write_text("finished artifact", encoding="utf-8")
+    params = replace(
+        _delivery_closeout_params(
+            archive_tool_calls=[
+                {
+                    **_write_file_archive_record(),
+                    "parameters": {"tool": "write_file", "path": str(output)},
+                    "path": str(output),
+                }
+            ]
+        ),
+        user_prompt=f"请把最终验收报告写到 {output}，写完提交验收。",
+        delivery_contract=None,
+        task_attributes={
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(output_dir),
+                "work_dir": str(task_root / "work"),
+            }
+        },
+    )
+    params.tool_context.append("[delivery-completion-soft-hint]\n{}")
+    agent = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(workspace_root=tmp_path))
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+
+    assert response is not None
+    assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in response.text
+    assert "uncontracted_user_requested_output" in response.text
+
+
 def test_delivery_closeout_reports_metric_quality_contract_mismatch_as_warning(tmp_path):
     output = tmp_path / "out.txt"
     output.write_text("finished artifact", encoding="utf-8")
@@ -466,7 +599,7 @@ def _point_in_time_quality_payload() -> dict[str, object]:
             {
                 "source_id": "src-current",
                 "uri": "https://api.example.invalid/repositories",
-                "reserved": {"metric_kind": "point_in_time_total"},
+                "metric_kind": "point_in_time_total",
             }
         ],
         "claims": [
@@ -477,7 +610,7 @@ def _point_in_time_quality_payload() -> dict[str, object]:
                 "source_ids": ["src-current"],
                 "verification_status": "VERIFIED",
                 "value_type": "exact",
-                "reserved": {"metric_kind": "point_in_time_total"},
+                "metric_kind": "point_in_time_total",
             }
         ],
     }

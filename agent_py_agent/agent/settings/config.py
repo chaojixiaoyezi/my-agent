@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config_compat import HIDDEN_COMPAT_CONFIG_FIELDS, INTERNAL_RUNTIME_CONFIG_FIELDS
+from .config_internal_fields import INTERNAL_RUNTIME_CONFIG_FIELDS
 from .config_io import load_simple_yaml, parse_scalar
 from .config_sources import merge_agent_config_sources, public_config_keys
 from .home_config import HomeProviderConfigFields
@@ -35,7 +35,6 @@ from .tool_config import ToolConfig
 
 __all__ = [
     "AgentConfig",
-    "HIDDEN_COMPAT_CONFIG_FIELDS",
     "INTERNAL_RUNTIME_CONFIG_FIELDS",
     "_coerce_bool_config",
     "_coerce_choice_config",
@@ -68,7 +67,7 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     workspace_root: str | list[str] = ""
     auto_detect_work_on_startup: bool = True
     model_backend: str = "echo"
-    memory_path: str = "data/memory.jsonl"
+    memory_path: str = ""
     memory_top_k: int = 5
     auto_save_memory: bool = True
     memory_archive_level: int = 3
@@ -97,9 +96,9 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     memory_resume_recommended_read_paths_limit: int = 20
     memory_doctor_recent_archive_file_limit: int = 5
     memory_config_warnings: list[dict[str, Any]] = field(default_factory=list)
-    local_store_path: str = "data/local_store/local.db"
-    local_store_files_dir: str = "data/local_store/files"
-    local_store_events_path: str = "data/local_store/events.jsonl"
+    local_store_path: str = ""
+    local_store_files_dir: str = ""
+    local_store_events_path: str = ""
     local_store_fts_enabled: bool = True
     enable_self_learning: bool = False
     prompt_files: list[str] = field(default_factory=list)
@@ -107,7 +106,7 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     subagent_mode: str = "trusted_local_hardening"
     max_subagents: int = 50
     subagent_board_limit: int = 5
-    subagent_workspace: str = "data/subagents"
+    subagent_workspace: str = ""
     subagent_allowed_tools: list[str] = field(default_factory=list)
     subagent_role_template_dirs: list[str] = field(default_factory=list)
     subagent_workflow_mode: str = "auto"
@@ -140,10 +139,9 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     dynamic_timeout_max: int = 600
     max_auto_split_depth: int = 2
     max_auto_retry_attempts: int = 3
-    model_speed_profile_path: str = "data/model_speed_profile.json"
+    model_speed_profile_path: str = ""
     auto_bench_model_on_first_use: bool = True
     user_id: str = "admin"
-    user_data_root: str = "data/users"
     # 多租户鉴权配置
     auth_enabled: bool = True
     admin_user_id: str = "admin"
@@ -153,13 +151,13 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     runner_timeout_seconds: str = "off"
     runner_timeout_by_role: dict[str, object] = field(default_factory=dict)
     runner_failure_policy: str = "auto"
-    gateway_workspace: str = "data/gateway"
+    gateway_workspace: str = ""
     gateway_heartbeat_interval: int = 5
     gateway_stale_seconds: int = 120
     gateway_stop_timeout: int = 20
     gateway_request_timeout: int = 300
     gateway_request_poll_interval: int = 1
-    gateway_request_workers: int = 1
+    gateway_request_workers: int = 3
     gateway_processing_timeout_seconds: int = 900
     gateway_request_max_attempts: int = 2
     gateway_port: int = 8420
@@ -167,7 +165,7 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     gateway_ready_timeout_seconds: int = 10
     gateway_service_command_timeout_seconds: int = 30
     gateway_service_stop_timeout_seconds: int = 90
-    adapter_workspace: str = "data/adapters/file"
+    adapter_workspace: str = ""
     # 飞书适配器配置
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
@@ -177,13 +175,13 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     # QQ 适配器配置
     qq_app_id: str = ""
     qq_app_secret: str = ""
-    session_workspace: str = "data/sessions"
+    session_workspace: str = ""
     # 长期主代理会话账本目录。它保存 thread/message/task/policy 机器事实，
     # 不保存真实通道凭证，也不把用户任务变成内置 case。
-    conversation_workspace: str = "data/conversations"
+    conversation_workspace: str = ""
     # 多代理协作控制面目录。这里保存 case/request/evidence/decision 的轻量账本，
     # 大日志、大文件、API 返回和截图只通过 evidence_refs 引用，避免把协作层变成业务模板。
-    collaboration_workspace: str = "data/collaboration"
+    collaboration_workspace: str = ""
     # 协作请求自动唤醒 responder 的最大并发数。普通 dispatch 仍保持默认宽度；
     # 只有已有 collaboration request 等待多个代理响应时，才用这个上限减少串行等待。
     # 0 表示关闭自动放宽，完全按 dispatch/max_runners 原值执行。
@@ -193,12 +191,12 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     # 0 表示不自动补截止时间，只使用模型或用户显式给出的 deadline。
     collaboration_default_deadline_seconds: int = 120
     notification_enabled: bool = True
-    notification_store_path: str = "data/notifications"
+    notification_store_path: str = ""
     notification_channel_timeout_seconds: int = 300
     concurrency_lock_enabled: bool = True
     task_lock_timeout_seconds: int = 30
     audit_enabled: bool = True
-    audit_log_path: str = "data/audit"
+    audit_log_path: str = ""
     daemon_planner: bool = True
     daemon_mutate_state: bool = True
     daemon_start_runners: bool = True
@@ -220,6 +218,7 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     model_name: str = "gpt-4o-mini"
     request_timeout: int = 240
     max_tokens: int = 1024
+    model_context_window_tokens: int = 200_000
     temperature: str = "0.2"
     anthropic_version: str = "2023-06-01"
     chat_history_max_turns: int = 20
@@ -280,7 +279,7 @@ def load_config(config_path: str | Path) -> AgentConfig:
         raise FileNotFoundError(f"配置文件不存在: {path}")
     raw = load_simple_yaml(path)
 
-    # 先做类型验证和回退（在过滤未知 key 之前）
+    # 先做类型验证和默认值归一（在过滤未知 key 之前）
     normalized, config_warnings = normalize_agent_config(raw)
 
     # 过滤未知字段。运行时诊断字段只由 loader 写入，不能从 YAML 注入。

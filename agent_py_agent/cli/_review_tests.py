@@ -39,9 +39,7 @@ def cmd_subagents_tests(args, make_agent_fn=make_agent) -> int:
     report = load_test_execution_report(report_path)
     output_report = _read_task_output_report(task)
     classification = _write_subagents_test_classification(task, report, output_report.payload)
-    if output_report.load_error:
-        classification.reserved["output_load_error"] = output_report.load_error
-    _print_subagents_tests_report(options, report, classification)
+    _print_subagents_tests_report(options, report, classification, output_load_error=output_report.load_error)
     return _subagents_tests_exit_code(report)
 
 
@@ -113,10 +111,15 @@ def _read_task_output_report(task) -> JsonObjectReadReport:
     return read_json_object_report(output_json, context="cli.subagents_tests.output_json")
 
 
-def _print_subagents_tests_report(options: SubagentsTestsOptions, report, classification) -> None:
+def _print_subagents_tests_report(
+    options: SubagentsTestsOptions,
+    report,
+    classification,
+    *,
+    output_load_error: dict[str, object] | None = None,
+) -> None:
     print("SUBAGENT TESTS")
     print(f"run_id={options.run_id} re_run={options.re_run}")
-    output_load_error = classification.reserved.get("output_load_error")
     if output_load_error:
         print(
             "output_load_error="

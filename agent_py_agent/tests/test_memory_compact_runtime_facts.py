@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.memory_archive.compact import MemoryCompactPlanOptions
 from agent_py_agent.agent.memory_archive.compact_apply import (
     MemoryCompactApplyOptions,
@@ -18,6 +17,7 @@ from agent_py_agent.agent.memory_archive.runtime_fact_source import (
     RuntimeFactSourceRequest,
     write_runtime_fact_source,
 )
+from agent_py_agent.cli.parser import build_parser
 
 
 def test_real_run_runtime_fact_source_allows_complete_compact_resume(tmp_path: Path, capsys) -> None:

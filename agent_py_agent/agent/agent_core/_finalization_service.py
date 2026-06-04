@@ -54,6 +54,7 @@ class FinalizationService:
             run_id=ctx.run_id,
             task_id=ctx.task_id,
             source=ctx.source,
+            task_attributes=ctx.task_attributes,
         )
         archive_result = self._archive_run_if_needed(archive_params)
         self._write_runtime_fact_source_if_needed(ctx, run_request_id)
@@ -139,11 +140,14 @@ class FinalizationService:
     def _estimate_token_usage(self, params: EstimateTokenParams):
         input_tokens = input_token_usage(params.final_response)
         if input_tokens is None:
-            input_tokens = (
-                estimate_tokens(params.user_prompt)
-                + estimate_tokens(params.runtime_injections)
-                + estimate_tokens([getattr(memory, "content", "") for memory in params.memories])
-            )
+            if params.final_prompt:
+                input_tokens = estimate_tokens(params.final_prompt)
+            else:
+                input_tokens = (
+                    estimate_tokens(params.user_prompt)
+                    + estimate_tokens(params.runtime_injections)
+                    + estimate_tokens([getattr(memory, "content", "") for memory in params.memories])
+                )
         output_tokens = output_token_usage(params.final_response)
         if output_tokens is None:
             output_tokens = estimate_tokens(params.final_response.text)
@@ -164,7 +168,7 @@ class FinalizationService:
         return {
             "turn": int(ledger["turn_total"]),
             "cumulative": int(ledger["cumulative_tokens"]),
-            "active": int(input_tokens) + int(output_tokens) + int(tool_tokens),
+            "active": int(input_tokens) + int(output_tokens),
         }
 
     def _build_agent_run_result(self, params: BuildAgentRunResultParams):
@@ -177,6 +181,7 @@ class FinalizationService:
             used_memories=len(ctx.memories),
             tool_rounds=ctx.tool_rounds,
             executed_tools=ctx.executed_tools,
+            archive_tool_calls=ctx.archive_tool_calls,
             memory_route_matches=len(routed_context.matches),
             memory_route_paths=[
                 *routed_context.required_read_paths,
@@ -213,6 +218,7 @@ def _estimate_token_params(ctx: FinalizeContext, run_request_id: str) -> Estimat
         archive_tool_calls=ctx.archive_tool_calls,
         run_request_id=run_request_id,
         turn_id=turn_id,
+        final_prompt=ctx.final_prompt,
     )
 
 

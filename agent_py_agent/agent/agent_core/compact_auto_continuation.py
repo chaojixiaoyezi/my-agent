@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+_DELIVERY_COMPLETE_MARKER = "[MAIN_AGENT_DELIVERY_COMPLETE]"
+
 
 @dataclass(frozen=True)
 class CompactAutoContinuationDecision:
@@ -17,6 +19,8 @@ class CompactAutoContinuationDecision:
 
 def compact_auto_continuation_decision(result: Any, *, depth: int = 0) -> CompactAutoContinuationDecision:
     packet = _continue_packet(result)
+    if _result_delivery_complete(result):
+        return CompactAutoContinuationDecision(False, "delivery_complete")
     if not _result_ready(result, packet):
         return CompactAutoContinuationDecision(False, "not_ready")
     return CompactAutoContinuationDecision(
@@ -40,6 +44,8 @@ def build_compact_auto_continue_injection(packet: dict[str, Any]) -> str:
         "",
         _resume_focus_section(resume_focus),
         _captured_refs_section(resume_focus.get("captured_refs")),
+        _tool_output_index_section(work_state.get("tool_progress"), packet.get("artifact_read_hints")),
+        _runtime_handoff_section(work_state.get("runtime_handoff")),
         "## Goal",
         str(work_state.get("goal") or ""),
         "",
@@ -57,6 +63,9 @@ def build_compact_auto_continue_injection(packet: dict[str, Any]) -> str:
         "- Continue only from the Next Step above.",
         "- Do not redo completed work.",
         "- 不要先重读 compact 文件；只有下一步缺事实、需要校验或引用损坏时才读取恢复引用。",
+        "- 如果已读材料已经覆盖任务要求，下一步必须优先写入交付物并调用 submit_for_acceptance；不要只返回进度总结或建议接管。",
+        "- 如果原任务要求沿 next_path/清单/分片继续读取，只有看到 END、覆盖清单完成、验收目标全部满足等明确完成证据，才可以写最终交付；仅凭“已经读了若干文件”不能当作读完。",
+        "- 如果上下文、工具轮数或预算接近上限，先把已有证据落成可验收产物，再提交验收；不要继续重复核对已读文件。",
         "- 如果可选备注缺失，继续从目标、已捕获引用和工作区事实推进；只有关键源引用完全无法定位时才报告阻塞。",
     ]
     return "\n".join(section for section in sections if section is not None).strip()
@@ -66,6 +75,8 @@ def compact_auto_continue_user_prompt() -> str:
     return (
         "继续当前任务的未完成部分。"
         "不要重做已完成内容；优先推进未完成部分，必要时才读取恢复引用。"
+        "如果任务要求沿 next_path、清单或分片读到结束，必须看到明确结束证据后再写最终交付。"
+        "如果已经读完或只差交付，请直接写入目标产物并提交验收，不要只汇报进度。"
     )
 
 
@@ -88,6 +99,11 @@ def _result_ready(result: Any, packet: dict[str, Any]) -> bool:
 def _continue_packet(result: Any) -> dict[str, Any]:
     packet = getattr(result, "memory_compact_auto_continue_packet", None)
     return packet if isinstance(packet, dict) else {}
+
+
+def _result_delivery_complete(result: Any) -> bool:
+    text = str(getattr(result, "response", "") or getattr(result, "text", "") or "")
+    return _DELIVERY_COMPLETE_MARKER in text
 
 
 def _items_section(title: str, payload: Any) -> str:
@@ -153,13 +169,135 @@ def _captured_refs_section(payload: Any) -> str:
     return "\n".join(lines)
 
 
+def _tool_output_index_section(tool_progress: Any, artifact_hints: Any) -> str | None:
+    rows = _tool_output_rows(tool_progress)
+    if not rows:
+        rows = _tool_output_rows_from_hints(artifact_hints)
+    if not rows:
+        return None
+    lines = [
+        "## Exact Tool Output Index",
+        "- 精确字段、编号、SECRET、checksum、引用和清单不能凭 compact 摘要填写；需要时读取 artifact_ref 或重新读取 source_path。",
+    ]
+    for row in rows[:40]:
+        parts = []
+        tool = str(row.get("tool") or "").strip()
+        source = str(row.get("source_path") or "").strip()
+        artifact_ref = str(row.get("artifact_ref") or row.get("scoped_call_id") or "").strip()
+        size = row.get("size_bytes")
+        if tool:
+            parts.append(f"tool={tool}")
+        if source:
+            parts.append(f"source_path={source}")
+        if artifact_ref:
+            parts.append(f"artifact_ref={artifact_ref}")
+        if isinstance(size, int) and size > 0:
+            parts.append(f"size_bytes={size}")
+        if parts:
+            lines.append("- " + " ".join(parts))
+    return "\n".join(lines)
+
+
+def _tool_output_rows(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list | tuple):
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source_path") or item.get("path") or "").strip()
+        artifact_ref = str(item.get("artifact_ref") or item.get("scoped_call_id") or item.get("call_id") or "").strip()
+        key = (source, artifact_ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "tool": str(item.get("tool") or "").strip(),
+                "source_path": source,
+                "artifact_ref": artifact_ref,
+                "size_bytes": _positive_int(item.get("size_bytes")),
+            }
+        )
+    return rows
+
+
+def _tool_output_rows_from_hints(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list | tuple):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "tool": str(item.get("source_tool") or item.get("tool") or "").strip(),
+                "source_path": str(item.get("source_path") or "").strip(),
+                "artifact_ref": str(item.get("artifact_ref") or "").strip(),
+                "size_bytes": _positive_int(item.get("size_bytes")),
+            }
+        )
+    return rows
+
+
+def _runtime_handoff_section(payload: Any) -> str | None:
+    handoff = payload if isinstance(payload, dict) else {}
+    tree = handoff.get("agent_tree") if isinstance(handoff.get("agent_tree"), dict) else {}
+    active = tree.get("active_agents") if isinstance(tree.get("active_agents"), list) else []
+    active = [row for row in active if isinstance(row, dict)]
+    recent = tree.get("recent_agents") if isinstance(tree.get("recent_agents"), list) else []
+    recent = [row for row in recent if isinstance(row, dict)]
+    rows = active or recent
+    if not rows:
+        return None
+    counts = tree.get("counts") if isinstance(tree.get("counts"), dict) else {}
+    lines = [
+        "## Existing Child Agents",
+        f"- counts: {counts}" if counts else "- counts: <not recorded>",
+        _child_agent_instruction(active),
+    ]
+    lines.extend(_child_agent_lines(rows))
+    return "\n".join(lines)
+
+
+def _child_agent_instruction(active: list[dict[str, Any]]) -> str:
+    if active:
+        return "- 已有子代理在当前任务树里；不要重复 create_subagents。先查看/等待/收集这些子代理结果，只有确实新增工作时才再派新的。"
+    return "- 当前任务树已有子代理记录且没有活跃子代理；优先汇总 recent_agents 的结果，别被旧 artifact 带回重复等待。"
+
+
+def _child_agent_lines(rows: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for row in rows[:8]:
+        run_id = str(row.get("run_id") or "").strip()
+        status = str(row.get("status") or "").strip()
+        parent = str(row.get("parent_run_id") or "").strip()
+        tool = str(row.get("current_tool") or "").strip()
+        note = str(row.get("last_progress_summary") or "").strip()
+        state_ref = str(row.get("state_ref") or "").strip()
+        parts = [f"run_id={run_id}"]
+        if status:
+            parts.append(f"status={status}")
+        if parent:
+            parts.append(f"parent={parent}")
+        if tool:
+            parts.append(f"tool={tool}")
+        if note:
+            parts.append(f"note={note}")
+        if state_ref:
+            parts.append(f"state_ref={state_ref}")
+        lines.append("- active_child_agent: " + " ".join(parts))
+    return lines
+
+
 def _artifact_ref_items(value: Any) -> list[str]:
     if not isinstance(value, list | tuple):
         return []
     refs: list[str] = []
     for item in value:
         if isinstance(item, dict):
-            text = str(item.get("artifact_ref") or item.get("fallback_path") or "").strip()
+            text = str(item.get("artifact_ref") or item.get("source_path") or "").strip()
         else:
             text = str(item).strip()
         if text:
@@ -168,7 +306,7 @@ def _artifact_ref_items(value: Any) -> list[str]:
 
 
 def _render_artifact_ref(item: dict[str, Any]) -> str:
-    ref = str(item.get("artifact_ref") or item.get("fallback_path") or "").strip()
+    ref = str(item.get("artifact_ref") or item.get("source_path") or "").strip()
     source = str(item.get("source_path") or "").strip()
     if source and ref:
         return f"{ref} (source: {source})"
@@ -204,6 +342,14 @@ def _items(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return result if result > 0 else 0
 
 
 __all__ = [

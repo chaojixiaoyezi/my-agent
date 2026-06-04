@@ -90,17 +90,35 @@ def _write_large_tool_output_artifact(root: Path) -> str:
     record = externalize_tool_output_record(
         ExternalizeToolOutputRequest(
             root=root,
-            tool="read_file",
+            tool="shell",
             call_id="1-1",
             output="very long log\n" + ("x" * 1400),
             ok=True,
             request_id="request-tool-ref",
             run_id="run-tool-ref",
             task_id="task-tool-ref",
-            parameters={"path": "/workspace/projects/alpha/README.md"},
+            parameters={"command": "python scripts/collect-alpha.py"},
         )
     )
     return str(record["artifact_ref"])
+
+
+def _write_task_progress_tool_output_artifact(root: Path) -> str:
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=root,
+            tool="task_progress",
+            call_id="8-1",
+            output=json.dumps({"summary": "旧进度 4/40", "next_action": "继续 fragment-005"}, ensure_ascii=False),
+            ok=True,
+            request_id="request-tool-ref",
+            run_id="run-tool-ref",
+            task_id="task-tool-ref",
+            min_chars=0,
+            parameters={"action": "update", "summary": "旧进度 4/40"},
+        )
+    )
+    return str(record["output_path"])
 
 
 def test_compact_apply_and_resume_include_scoped_tool_output_artifact_refs(tmp_path: Path) -> None:
@@ -122,18 +140,48 @@ def test_compact_apply_and_resume_include_scoped_tool_output_artifact_refs(tmp_p
 
     tool_refs = apply_result["restore_refs"]["source_refs"]["tool_outputs"]
     assert tool_refs[0]["path"] == artifact_ref
-    assert tool_refs[0]["tool"] == "read_file"
+    assert tool_refs[0]["tool"] == "shell"
     assert tool_refs[0]["scoped_call_id"] == "run-tool-ref:1-1"
-    assert tool_refs[0]["source_path"] == "/workspace/projects/alpha/README.md"
+    assert tool_refs[0]["source_path"] == "python scripts/collect-alpha.py"
     assert apply_result["work_state_snapshot"]["artifact_refs"][0]["path"] == artifact_ref
-    assert apply_result["work_state_snapshot"]["artifact_refs"][0]["source_path"] == "/workspace/projects/alpha/README.md"
+    assert apply_result["work_state_snapshot"]["artifact_refs"][0]["source_path"] == "python scripts/collect-alpha.py"
     assert apply_result["work_state_snapshot"]["artifact_refs"][0]["kind"] == "tool_output"
     assert artifact_ref in resume["recommended_read_paths"]
     assert resume["artifact_read_hints"][0]["tool"] == "read_artifact"
     assert resume["artifact_read_hints"][0]["artifact_ref"] == "run-tool-ref:1-1"
-    assert resume["artifact_read_hints"][0]["fallback_path"] == artifact_ref
+    assert resume["artifact_read_hints"][0]["source_path"] == "python scripts/collect-alpha.py"
+    assert resume["artifact_read_hints"][0]["artifact_path"] == artifact_ref
     assert resume["continue_packet"]["artifact_read_hints"][0]["artifact_ref"] == "run-tool-ref:1-1"
     assert "Artifact Read Hints" in resume["context_block"]
     assert '"tool": "read_artifact"' in resume["context_block"]
     metadata = json.loads(Path(apply_result["refs"]["metadata"]).read_text(encoding="utf-8"))
     assert metadata["restore_refs"]["source_refs"]["tool_outputs"][0]["path"] == artifact_ref
+
+
+def test_compact_apply_does_not_expose_task_progress_tool_output_blobs(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    shell_ref = _write_run_with_large_tool_output(root)
+    progress_ref = _write_task_progress_tool_output_artifact(root)
+
+    apply_result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-tool-ref",
+                request_id="request-tool-ref",
+                run_id="run-tool-ref",
+                task_id="task-tool-ref",
+            ),
+        ),
+    )
+
+    tool_refs = apply_result["restore_refs"]["source_refs"]["tool_outputs"]
+    artifact_refs = apply_result["work_state_snapshot"]["artifact_refs"]
+    metadata = json.loads(Path(apply_result["refs"]["metadata"]).read_text(encoding="utf-8"))
+
+    assert shell_ref in [item["path"] for item in tool_refs]
+    assert progress_ref not in [item["path"] for item in tool_refs]
+    assert progress_ref not in [item["path"] for item in artifact_refs]
+    assert progress_ref not in [
+        item["path"] for item in metadata["restore_refs"]["source_refs"]["tool_outputs"]
+    ]

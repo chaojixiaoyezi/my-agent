@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ...subagent import SubAgentTask
+    from ...subagents import SubAgentTask
 
 
 def runner_timeout_disabled(config: Any) -> bool:

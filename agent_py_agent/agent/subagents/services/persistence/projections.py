@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from ....common.json_io import write_json_file_atomic
 from ...models import SubAgentTask
 from ..agent_run_state import build_agent_run_state, build_owner_agent_projection
 from ..control_plane_projection import sync_subagent_control_plane_projection
@@ -93,10 +94,7 @@ def rebuild_derived_projections(manager: Any, run_id: str) -> tuple[ProjectionRe
 def _write_status_report(task: SubAgentTask) -> None:
     if not task.status_report_json:
         return
-    Path(task.status_report_json).write_text(
-        json.dumps(asdict(task.latest_status_report), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    write_json_file_atomic(Path(task.status_report_json), asdict(task.latest_status_report))
 
 
 def _sync_local_store_projection(manager: Any, task: SubAgentTask) -> None:
@@ -118,10 +116,7 @@ def _write_owner_agent_projection(manager: Any, task: SubAgentTask, projection: 
         return
     root = Path(owner_home) / "agents" / task.id
     root.mkdir(parents=True, exist_ok=True)
-    (root / "state.json").write_text(
-        json.dumps(projection, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    write_json_file_atomic(root / "state.json", projection)
     refs = {
         "schema_version": "owner-agent-projection.v1",
         "run_id": task.id,
@@ -132,7 +127,7 @@ def _write_owner_agent_projection(manager: Any, task: SubAgentTask, projection: 
         "final_report": task.agent_run_final_report_md,
         "updated_at": task.updated_at,
     }
-    (root / "refs.json").write_text(json.dumps(refs, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    write_json_file_atomic(root / "refs.json", refs)
 
 
 def _append_projection_ledger(task_dir: Path, records: list[ProjectionRecord]) -> None:
@@ -172,17 +167,13 @@ def _write_projection_warnings(task_dir: Path, records: list[ProjectionRecord]) 
             pass
         return
     try:
-        path.write_text(
-            json.dumps(
-                {
-                    "schema_version": "subagent_projection_warnings.v1",
-                    "warnings": warnings,
-                    "updated_at": time.time(),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+        write_json_file_atomic(
+            path,
+            {
+                "schema_version": "subagent_projection_warnings.v1",
+                "warnings": warnings,
+                "updated_at": time.time(),
+            },
         )
     except OSError:
         return

@@ -59,6 +59,324 @@ def test_tool_round_with_acceptance_submit_runs_delivery_closeout(tmp_path: Path
     assert (tmp_path / ".agent_delivery" / "closeout.json").exists()
 
 
+def test_acceptance_submit_does_not_close_when_task_progress_has_open_items(tmp_path: Path):
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    _write_valid_artifact(tmp_path)
+    write_task_progress(
+        tmp_path,
+        "run-1",
+        {
+            "summary": "已读 001-012，剩余 013-060 未读",
+            "next_action": "继续读取 fragment-013 到 fragment-060",
+            "items": [
+                {"id": "fragment-001", "status": "completed"},
+                {"id": "fragment-013", "status": "in_progress"},
+                {"id": "fragment-014", "status": "pending"},
+            ],
+        },
+    )
+    params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
+    params.executed_tools.append("submit_for_acceptance")
+    agent = _agent(tmp_path)
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="[TOOL_CALL submit_for_acceptance]", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+    report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    payload = _last_tool_context_payload(params)
+
+    assert response is None
+    assert report["ok"] is False
+    assert report["task_progress_closeout_gate"]["allowed"] is False
+    assert "TASK_PROGRESS_OPEN_ITEMS" in {
+        finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
+    }
+    assert payload["failed_gates"][0]["gate"] == "task_progress_closeout"
+    assert "继续读取 fragment-013" in payload["repair_guidance"]["message_zh"]
+
+
+def test_acceptance_submit_requires_done_progress_items_to_have_auditable_facts(tmp_path: Path):
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    _write_valid_artifact(tmp_path)
+    write_task_progress(
+        tmp_path,
+        "run-1",
+        {
+            "items": [
+                {"id": "fragment-001", "status": "done", "notes": "需要从存档上下文恢复"},
+                {"id": "fragment-002", "status": "done", "evidence": ["fragment-002.txt line 12"]},
+            ],
+        },
+    )
+    params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
+    params.executed_tools.append("submit_for_acceptance")
+    agent = _agent(tmp_path)
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="[TOOL_CALL submit_for_acceptance]", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+    report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+
+    assert response is None
+    assert report["task_progress_closeout_gate"]["allowed"] is False
+    assert "TASK_PROGRESS_DONE_WITHOUT_EVIDENCE" in {
+        finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
+    }
+
+
+def test_acceptance_submit_rejects_incomplete_progress_coverage_even_when_items_done(tmp_path: Path):
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    _write_valid_artifact(tmp_path)
+    write_task_progress(
+        tmp_path,
+        "run-1",
+        {
+            "summary": "模型误以为可以提交验收。",
+            "next_action": "提交验收",
+            "items": [{"id": "fragment-001", "status": "done", "evidence": ["fragment-001.txt:12"]}],
+            "coverage": {
+                "goal": "读取两个片段并写入报告。",
+                "targets": [
+                    {
+                        "id": "fragment-001",
+                        "status": "done",
+                        "checks": {"读取": "done", "写报告": "done"},
+                        "evidence": ["fragment-001.txt:12"],
+                    },
+                    {
+                        "id": "fragment-002",
+                        "status": "pending",
+                        "checks": {"读取": "pending", "写报告": "pending"},
+                    },
+                ],
+            },
+        },
+    )
+    params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
+    params.executed_tools.append("submit_for_acceptance")
+    agent = _agent(tmp_path)
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="[TOOL_CALL submit_for_acceptance]", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+    report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+
+    assert response is None
+    assert report["task_progress_closeout_gate"]["allowed"] is False
+    assert "TASK_PROGRESS_COVERAGE_INCOMPLETE" in {
+        finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
+    }
+
+
+def test_acceptance_submit_does_not_treat_plain_evidence_text_as_source_ref(tmp_path: Path):
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    _write_valid_artifact(tmp_path)
+    write_task_progress(
+        tmp_path,
+        "run-1",
+        {
+            "items": [
+                {
+                    "id": "fragment-014",
+                    "status": "done",
+                    "evidence": ["输入目录不存在"],
+                }
+            ],
+        },
+    )
+    params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
+    params.executed_tools.append("submit_for_acceptance")
+    agent = _agent(tmp_path)
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="[TOOL_CALL submit_for_acceptance]", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+    report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+
+    assert response is None
+    assert report["task_progress_closeout_gate"]["allowed"] is False
+    assert "TASK_PROGRESS_DONE_WITHOUT_EVIDENCE" in {
+        finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
+    }
+
+
+def test_acceptance_submit_requires_final_artifact_to_include_progress_facts(tmp_path: Path):
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    (tmp_path / "out.txt").write_text("finished artifact without expected facts", encoding="utf-8")
+    write_task_progress(
+        tmp_path,
+        "run-1",
+        {
+            "items": [
+                {
+                    "id": "fragment-001",
+                    "status": "done",
+                    "evidence": ["CP_CODE=CPX-001-ABCDEF1234", "SECRET_VALUE=SVX-001-1234ABCDEF"],
+                }
+            ],
+        },
+    )
+    params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
+    params.executed_tools.append("submit_for_acceptance")
+    agent = _agent(tmp_path)
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="[TOOL_CALL submit_for_acceptance]", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+    report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    payload = _last_tool_context_payload(params)
+
+    assert response is None
+    assert report["task_progress_closeout_gate"]["allowed"] is False
+    assert "TASK_PROGRESS_FACTS_MISSING_FROM_ARTIFACT" in {
+        finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
+    }
+    assert "CPX-001-ABCDEF1234" in payload["repair_guidance"]["message_zh"]
+
+
+def test_acceptance_submit_requires_progress_facts_to_come_from_source_reads(tmp_path: Path):
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    (tmp_path / "out.txt").write_text("CPX-001-FAKE1234 SVX-001-FAKE5678 HOLD-FAKE90", encoding="utf-8")
+    source_artifact = tmp_path / "source-read.json"
+    source_artifact.write_text(
+        json.dumps(
+            {
+                "tool": "read_file",
+                "content": "fragment-001 contains CPX-001-REAL1234 SVX-001-REAL5678 HOLD-REAL90",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    write_task_progress(
+        tmp_path,
+        "run-1",
+        {
+            "items": [
+                {
+                    "id": "fragment-001",
+                    "status": "done",
+                    "evidence": [
+                        "fragment-001.txt line 12",
+                        "CPX-001-FAKE1234",
+                        "SVX-001-FAKE5678",
+                        "HOLD-FAKE90",
+                    ],
+                }
+            ],
+        },
+    )
+    params = _delivery_params(
+        archive_tool_calls=[
+            {
+                "tool": "read_file",
+                "ok": True,
+                "run_id": "run-1",
+                "source_artifact_ref": str(source_artifact),
+                "parameters": {"path": "fragment-001.txt"},
+                "output_preview": "fragment-001 contains CPX-001-REAL1234",
+            },
+            _write_file_archive_record(),
+        ]
+    )
+    params.executed_tools.append("submit_for_acceptance")
+    agent = _agent(tmp_path)
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="[TOOL_CALL submit_for_acceptance]", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+    report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    payload = _last_tool_context_payload(params)
+
+    assert response is None
+    assert report["task_progress_closeout_gate"]["allowed"] is False
+    assert "TASK_PROGRESS_FACTS_NOT_SOURCE_BACKED" in {
+        finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
+    }
+    assert "CPX-001-FAKE1234" in payload["repair_guidance"]["message_zh"]
+
+
+def test_background_wait_tool_round_yields_without_continuing_tool_loop(tmp_path: Path):
+    params = replace(_delivery_params(archive_tool_calls=[]), source="background_main_agent")
+    params.executed_tools.append("wait")
+    agent = _agent(tmp_path)
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="[TOOL_CALL wait]", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+
+    assert response is not None
+    assert "不继续轮询" in response.text
+    assert not (tmp_path / ".agent_delivery" / "closeout.json").exists()
+
+
+def test_cli_run_wait_tool_round_does_not_finish_task(tmp_path: Path):
+    params = replace(_delivery_params(archive_tool_calls=[]), source="cli_run")
+    params.executed_tools.append("wait")
+    agent = _agent(tmp_path)
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="[TOOL_CALL wait]", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+
+    assert response is None
+    assert not (tmp_path / ".agent_delivery" / "closeout.json").exists()
+
+
 def test_no_tool_final_answer_does_not_submit_delivery_acceptance(tmp_path: Path):
     params = _delivery_params(archive_tool_calls=[])
     agent = _agent(tmp_path)

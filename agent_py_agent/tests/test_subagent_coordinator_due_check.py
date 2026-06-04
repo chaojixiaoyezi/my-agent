@@ -5,15 +5,15 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from agent_py_agent.agent.capability_config import CapabilityConfig
-from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+from agent_py_agent.agent.capability.config import CapabilityConfig
+from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import SubAgentTask, WorkOrderValidation
-from agent_py_agent.agent.subagents.services.board.facade import SubAgentBoardFacade
+from agent_py_agent.agent.subagents.services.board.service import SubAgentBoardService
 
 
-class _BoardTestMixin(SubAgentBaseMixin, SubAgentBoardFacade):
+class _BoardTestMixin(SubAgentManager, SubAgentBoardService):
     def __init__(self, workspace: Path):
-        SubAgentBaseMixin.__init__(self, workspace=workspace)
+        SubAgentManager.__init__(self, workspace=workspace)
         self._tasks = []
 
     def list_runs(self):
@@ -229,4 +229,4 @@ def test_plan_actions_reports_parent_timeout_child_recovery(tmp_path: Path):
     assert "parent_timeout_with_unfinished_children" in action.source_issue_kinds
     assert "unfinished_child:run_child:PLANNING" in action.rescue_context_refs
     assert "unfinished_child:run_child:PLANNING" in action.rescue_packet["recovery_entrypoints"]
-    assert action.rescue_packet["reserved"]["auto_execute"] is False
+    assert action.rescue_packet["auto_execute"] is False

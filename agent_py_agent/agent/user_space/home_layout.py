@@ -119,7 +119,6 @@ class MyAgentHomePaths:
     system_metrics_dir: Path
     system_doctor_dir: Path
     system_backups_dir: Path
-    system_migrations_dir: Path
     owner_provider: str = ""
     owner_kind: str = ""
     owner_id: str = ""
@@ -136,12 +135,12 @@ def home_paths(root: str | Path | None = None) -> MyAgentHomePaths:
     home = resolve_my_agent_home(root)
     return MyAgentHomePaths(
         root=home,
-        **_legacy_home_path_fields(home),
+        **_root_home_path_fields(home),
         **v2_home_path_fields(home),
     )
 
 
-def _legacy_home_path_fields(home: Path) -> dict[str, Path]:
+def _root_home_path_fields(home: Path) -> dict[str, Path]:
     memory_dir = home / "memory"
     workspace_dir = home / "workspace"
     return {

@@ -15,9 +15,13 @@ _CONTEXT_OVERFLOW_REASONS = {
     "maximum_context_length",
     "tool_output_context_overflow",
 }
+_DELIVERY_COMPLETE_MARKER = "[MAIN_AGENT_DELIVERY_COMPLETE]"
+_MAX_CONSECUTIVE_NO_TOOL_PREFLIGHT_CONTINUATIONS = 3
 
 
 def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[str, int], *, request_id: str = "") -> dict:
+    if _delivery_complete(ctx.final_response):
+        return _compact_auto_delivery_complete_fields()
     trigger = _compact_trigger_from_runtime(ctx)
     if _should_return_after_continuation(ctx, trigger):
         return _compact_auto_continuation_return_fields()
@@ -68,12 +72,18 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
 def _should_return_after_continuation(ctx: FinalizeContext, trigger: dict[str, object]) -> bool:
     if int(ctx.compact_auto_continue_depth or 0) <= 0:
         return False
+    if _trigger_requires_continuation(trigger):
+        return int(ctx.compact_auto_no_tool_continue_depth or 0) >= _MAX_CONSECUTIVE_NO_TOOL_PREFLIGHT_CONTINUATIONS
     return int(ctx.tool_rounds or 0) <= 0 and not list(ctx.executed_tools or [])
 
 
 def _should_auto_continue_after_cycle(ctx: FinalizeContext, trigger_payload: dict[str, object], cycle: dict[str, object]) -> bool:
+    if _delivery_complete(ctx.final_response):
+        return False
     if not bool(cycle.get("allowed_to_continue")):
         return False
+    if _continuation_made_tool_progress(ctx):
+        return True
     if bool(trigger_payload.get("forced")):
         return True
     source = _runtime_code(trigger_payload.get("source"))
@@ -90,6 +100,18 @@ def _should_auto_continue_after_cycle(ctx: FinalizeContext, trigger_payload: dic
     )
 
 
+def _trigger_requires_continuation(trigger: dict[str, object]) -> bool:
+    if bool(trigger.get("force_trigger")):
+        return True
+    source = _runtime_code(trigger.get("trigger_source") or trigger.get("source"))
+    reason = _runtime_code(trigger.get("trigger_reason") or trigger.get("reason"))
+    return source in {"preflight", "provider_error", "runtime_status"} or reason in _CONTEXT_OVERFLOW_REASONS
+
+
+def _continuation_made_tool_progress(ctx: FinalizeContext) -> bool:
+    return int(ctx.tool_rounds or 0) > 0 or bool(list(ctx.executed_tools or []))
+
+
 def _compact_auto_continuation_return_fields() -> dict:
     return {
         "memory_compact_suggested": False,
@@ -101,6 +123,26 @@ def _compact_auto_continuation_return_fields() -> dict:
         "memory_compact_trigger_source": "auto_compact",
         "memory_compact_trigger_forced": False,
         "memory_compact_auto_status": "returned_after_continuation",
+        "memory_compact_auto_next_action": "return_result",
+        "memory_compact_auto_allowed_to_continue": False,
+        "memory_compact_auto_tool_execution": "none",
+        "memory_compact_auto_apply_id": "",
+        "memory_compact_auto_continue_ready": False,
+        "memory_compact_auto_continue_packet": {},
+    }
+
+
+def _compact_auto_delivery_complete_fields() -> dict:
+    return {
+        "memory_compact_suggested": False,
+        "memory_compact_status": "ok",
+        "memory_compact_ratio": 0.0,
+        "memory_compact_message": "delivery complete; compact auto continuation skipped",
+        "memory_compact_commands": [],
+        "memory_compact_trigger_reason": "delivery_complete",
+        "memory_compact_trigger_source": "delivery_closeout",
+        "memory_compact_trigger_forced": False,
+        "memory_compact_auto_status": "skipped_after_delivery_complete",
         "memory_compact_auto_next_action": "return_result",
         "memory_compact_auto_allowed_to_continue": False,
         "memory_compact_auto_tool_execution": "none",
@@ -129,6 +171,10 @@ def _compact_trigger_from_runtime(ctx: FinalizeContext) -> dict[str, object]:
 
 def _runtime_code(value: object) -> str:
     return str(value or "").strip().lower().replace("-", "_")
+
+
+def _delivery_complete(final_response: object) -> bool:
+    return _DELIVERY_COMPLETE_MARKER in str(getattr(final_response, "text", "") or "")
 
 
 __all__ = ["compact_auto_cycle_fields"]

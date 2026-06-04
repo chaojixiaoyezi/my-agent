@@ -30,7 +30,7 @@ def normalize_tool_call(payload: Any) -> ToolCallEnvelope:
     raw_status = str(data.get("status") or "").lower()
     status = raw_status if raw_status in STATUSES else "pending"
     if raw_input is None:
-        raw_input = _legacy_flat_call_input(data, include_status=bool(raw_status and raw_status not in STATUSES))
+        raw_input = _flat_call_input(data, include_status=bool(raw_status and raw_status not in STATUSES))
     input_payload = json_stable(raw_input if isinstance(raw_input, dict) else {"value": raw_input})
     call_id = str(data.get("call_id") or "")
     operation_id = str(data.get("operation_id") or "")
@@ -42,7 +42,7 @@ def normalize_tool_call(payload: Any) -> ToolCallEnvelope:
     if not idempotency_key:
         idempotency_key = build_idempotency_key(tool_name or "unknown_tool", input_payload)
     refs = _normalize_artifact_refs(data.get("artifact_refs") or data.get("artifacts") or [])
-    metadata = data.get("metadata") or data.get("reserved") or {}
+    metadata = data.get("metadata") or {}
     return ToolCallEnvelope(
         operation_id=operation_id,
         tool_name=tool_name,
@@ -63,7 +63,7 @@ def normalize_tool_result(payload: Any) -> ToolResultEnvelope:
     status = _status_from_result(data)
     idempotency_key = _result_idempotency_key(data, tool_name, operation_id, status)
     refs = _normalize_artifact_refs(data.get("artifact_refs") or data.get("artifacts") or [])
-    metadata = data.get("metadata") or data.get("reserved") or {}
+    metadata = data.get("metadata") or {}
     return ToolResultEnvelope(
         operation_id=operation_id,
         tool_name=tool_name,
@@ -130,7 +130,7 @@ def deserialize_tool_result(payload: str | bytes | dict[str, Any]) -> ToolResult
     return normalize_tool_result(payload)
 
 
-def _legacy_flat_call_input(data: dict[str, Any], *, include_status: bool) -> dict[str, Any]:
+def _flat_call_input(data: dict[str, Any], *, include_status: bool) -> dict[str, Any]:
     protocol_keys = {
         "args",
         "arguments",
@@ -142,7 +142,6 @@ def _legacy_flat_call_input(data: dict[str, Any], *, include_status: bool) -> di
         "kind",
         "metadata",
         "operation_id",
-        "reserved",
         "schema_version",
         "tool",
         "tool_name",
@@ -231,17 +230,12 @@ def _artifact_ref_from_payload(payload: Any) -> ArtifactRef:
     if not isinstance(payload, dict):
         return ArtifactRef(artifact_id="", path="")
     path = str(payload.get("path") or payload.get("uri") or payload.get("ref") or "")
-    metadata = payload.get("metadata") or payload.get("reserved") or {}
-    reserved = json_stable(metadata) if isinstance(metadata, dict) else {"metadata": str(metadata)}
     size = payload.get("size_bytes")
-    if size is not None:
-        try:
-            reserved = {**reserved, "size_bytes": int(size)}
-        except (TypeError, ValueError):
-            reserved = {**reserved, "size_bytes": str(size)}
+    try:
+        size_bytes = max(0, int(size or 0))
+    except (TypeError, ValueError):
+        size_bytes = 0
     mime_type = str(payload.get("mime_type") or payload.get("content_type") or "")
-    if mime_type:
-        reserved = {**reserved, "mime_type": mime_type}
     return ArtifactRef(
         artifact_id=str(payload.get("artifact_id") or payload.get("id") or path),
         path=path,
@@ -249,7 +243,8 @@ def _artifact_ref_from_payload(payload: Any) -> ArtifactRef:
         owner_run_id=str(payload.get("owner_run_id") or ""),
         hash=str(payload.get("hash") or payload.get("digest") or ""),
         summary=str(payload.get("summary") or ""),
-        reserved=reserved,
+        size_bytes=size_bytes,
+        mime_type=mime_type,
     )
 
 

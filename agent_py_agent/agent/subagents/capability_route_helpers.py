@@ -11,14 +11,15 @@ import time
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
-from ..file_io import append_jsonl
+from ..io import append_jsonl
 from .capability_scope import request_scope_snapshot
 from .models import CapabilityRequest, SubAgentTask
 from .reports import CapabilityRouteRecord
 from .utils import _new_id
 
 if TYPE_CHECKING:
-    from ..capabilities import CapabilitySearchHit
+    from agent_py_agent.agent.capability import CapabilitySearchHit
+
     from .models import CapabilityGrant
 
 

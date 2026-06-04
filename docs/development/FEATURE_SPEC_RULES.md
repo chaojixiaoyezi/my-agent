@@ -72,7 +72,7 @@ Concrete user scenarios: who, what, when, expected outcome.
 Priority: Must / Should / Nice-to-have.
 
 ## Constraints / 约束
-Technical constraints: Python version, dependencies, performance, backward compatibility.
+Technical constraints: Python version, dependencies, performance, and any external protocol promises.
 
 ## Impact / 影响
 Which modules, commands, and data formats are affected.

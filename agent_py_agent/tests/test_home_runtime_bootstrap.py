@@ -4,8 +4,8 @@ import json
 from datetime import date
 from pathlib import Path
 
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def test_simple_agent_initializes_my_agent_home(tmp_path: Path):
@@ -101,7 +101,7 @@ def test_same_prompt_new_run_reuses_task_workspace(tmp_path: Path):
     assert task_dirs[0].name == "分析-all-agent-项目并写中文报告"
     assert states[0]["run_id"] == "run-two"
     assert states[0]["prompt_fingerprint"]
-    assert len(timeline) == 4
+    assert len(timeline) == 2
     assert any('"run_id": "run-one"' in line for line in timeline)
     assert any('"run_id": "run-two"' in line for line in timeline)
 

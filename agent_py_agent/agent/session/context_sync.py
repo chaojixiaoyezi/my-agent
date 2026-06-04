@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from ..runtime_errors import runtime_error_report
 
 if TYPE_CHECKING:
-    from ..local_store import LocalStore
+    from ..local_storage import LocalStore
     from .cross_channel import CrossChannelSession
 
 

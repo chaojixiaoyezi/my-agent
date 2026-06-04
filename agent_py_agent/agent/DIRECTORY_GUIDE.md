@@ -4,23 +4,14 @@
 
 ## 根目录原则
 
-`agent/` 根目录只保留稳定门面文件和极少数入口文件。真实实现优先进入职责目录。
+`agent/` 根目录只保留当前入口文件和职责目录。真实实现必须进入对应职责目录。
 
-根目录里的这些文件是兼容门面：
-- `backend.py` -> `backends/`
-- `capabilities.py` / `capability_config.py` / `skills.py` -> `capability/`
-- `config.py` -> `settings/`
-- `file_io.py` -> `io/`
-- `memory.py` -> `memory_store/`
-- `prompting.py` -> `prompting_parts/`
-- `core.py` -> `agent_core/`
-- `gateway.py` -> `gateway_parts/`
-- `local_store.py` -> `local_storage/`
-- `subagent.py` -> `subagents/`
-- `tools.py` -> `tooling/`
-- `memory_settings.py` -> `settings/memory.py`
+当前根目录入口只包括：
+- `core.py`：`SimpleAgent` 主入口。
+- `action_protocol*.py`：模型动作协议入口。
+- `memory_push.py`、`model_visible_refs.py`、`path_access_policy.py`、`path_recovery_hints.py`、`run_intent.py`、`runtime_errors.py`、`startup_recovery.py`、`task_progress*.py`：跨模块轻量入口。
 
-新代码不要把真实业务继续堆到门面文件里。门面文件只做旧导入兼容。
+不再新增根目录门面文件；新能力必须放到明确职责目录。
 
 ## 目录定义
 

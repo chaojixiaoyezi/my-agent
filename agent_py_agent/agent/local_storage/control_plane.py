@@ -70,7 +70,6 @@ class LocalStoreControlPlaneMixin:
                     event.event_type,
                     json_dumps(event.payload),
                     float(created_at),
-                    json_dumps(event.reserved),
                 ),
             )
             conn.commit()
@@ -82,7 +81,6 @@ class LocalStoreControlPlaneMixin:
             event_type=event.event_type,
             payload=dict(event.payload),
             created_at=float(created_at),
-            reserved=dict(event.reserved),
         )
 
     def list_agent_events(
@@ -153,8 +151,12 @@ class LocalStoreControlPlaneMixin:
     def query_agent_runtime(self, context: AgentRuntimeQueryContext) -> AgentRuntimeQueryResult:
         normalized, warnings = _normalize_runtime_query_context(self, context)
         report = _runtime_query_report(self, normalized)
-        reserved = _runtime_query_reserved(normalized)
-        return AgentRuntimeQueryResult(context=normalized, report=report, warnings=warnings, reserved=reserved)
+        return AgentRuntimeQueryResult(
+            context=normalized,
+            report=report,
+            warnings=warnings,
+            takeover_hint=_runtime_query_takeover_hint(normalized),
+        )
 
     def _agent_runs_for_task(self, task_id: str) -> list[AgentRunRecord]:
         with self._connection() as conn:
@@ -274,7 +276,7 @@ def _default_query_visibility(scope: str) -> str:
     return "root_task"
 
 
-def _runtime_query_reserved(context: AgentRuntimeQueryContext) -> dict[str, object]:
+def _runtime_query_takeover_hint(context: AgentRuntimeQueryContext) -> str:
     if context.scope == "takeover_candidates":
-        return {"takeover_hint": "blocked_failed_timeout_runs"}
-    return {}
+        return "blocked_failed_timeout_runs"
+    return ""

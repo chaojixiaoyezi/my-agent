@@ -11,7 +11,7 @@ from typing import Any
 from ..agent.log_analysis.config import load_log_analysis_config, resolve_log_analysis_data_dir
 from ..agent.log_analysis.doctor import collect_doctor_status
 from ..agent.log_analysis.ingest.pipeline import ingest_file
-from ..agent.log_analysis.tools_functions import (
+from ..agent.log_analysis.tools.query_functions import (
     SecurityQueryParams,
     hunt_ip,
     security_query,

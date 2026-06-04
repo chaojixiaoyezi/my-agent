@@ -15,7 +15,7 @@ from agent_py_agent.agent.tooling.registry_runtime_gate_pipeline import tool_cal
 
 def test_runtime_routes_repeated_read_only_successes_through_gate_pipeline() -> None:
     agent = SimpleNamespace()
-    params = _params(task_attributes={"repeat_fail_threshold": 1})
+    params = _params(task_attributes={"readonly_no_progress_threshold": 1})
     payload = {"tool": "list_tools"}
 
     for _ in range(3):
@@ -29,7 +29,7 @@ def test_runtime_routes_repeated_read_only_successes_through_gate_pipeline() -> 
 
 def test_runtime_no_progress_threshold_zero_is_unlimited() -> None:
     agent = SimpleNamespace()
-    params = _params(task_attributes={"repeat_fail_threshold": 0})
+    params = _params(task_attributes={"readonly_no_progress_threshold": 0})
     payload = {"tool": "list_tools"}
 
     for _ in range(4):
@@ -42,7 +42,7 @@ def test_runtime_no_progress_threshold_zero_is_unlimited() -> None:
 
 def test_runtime_repeated_read_guard_resets_after_local_progress() -> None:
     agent = SimpleNamespace()
-    params = _params(task_attributes={"repeat_fail_threshold": 1})
+    params = _params(task_attributes={"readonly_no_progress_threshold": 1})
     read_payload = {"tool": "list_tools"}
     write_payload = {"tool": "write_file", "path": "outputs/source_index.json", "content": "{}"}
 

@@ -31,10 +31,9 @@ def build_capability_request(run_id: str, params: Any) -> CapabilityRequest:
         network_scope=params.network_scope or [],
         output_budget=params.output_budget or {},
         risk_level=params.risk_level,
-        fallback_attempted=params.fallback_attempted or [],
+        alternatives_attempted=params.alternatives_attempted or [],
         escalation_target=params.escalation_target,
         created_at=time.time(),
-        reserved=params.reserved or {},
     )
 
 
@@ -55,10 +54,10 @@ def build_capability_grant(run_id: str, params: Any) -> CapabilityGrant:
         network_scope=params.network_scope or [],
         output_budget=params.output_budget or {},
         risk_level=params.risk_level,
+        request_scope=params.request_scope or {},
         expires_after_task=params.expires_after_task,
         expires_at=params.expires_at,
         created_at=time.time(),
-        reserved=params.reserved or {},
     )
 
 
@@ -86,10 +85,10 @@ def build_capability_gap(request: BuildCapabilityGapInput) -> CapabilityGap:
         suggested_skill=params.suggested_skill,
         suggested_tool=params.suggested_tool,
         requested_scope=params.requested_scope or {},
+        constraints=params.constraints or {},
         escalation_chain=params.escalation_chain or [],
         next_record_refs=params.next_record_refs or [],
         memory_routes=request.memory_routes,
         injected_rule_paths=request.injected_rule_paths,
         created_at=time.time(),
-        reserved=params.reserved or {},
     )

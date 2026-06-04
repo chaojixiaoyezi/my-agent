@@ -3,11 +3,23 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..runtime_errors import runtime_error_report
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows import guard.
+    fcntl = None
+
+_JSON_FILE_LOCKS: dict[str, threading.Lock] = {}
+_JSON_FILE_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -74,6 +86,22 @@ def write_json_file(path: Path, payload: object, *, sort_keys: bool = True) -> N
     )
 
 
+def write_json_file_atomic(path: Path, payload: object, *, sort_keys: bool = True) -> None:
+    """Write JSON payloads via temp-file replace under a per-path lock."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    with _locked_json_path(path):
+        try:
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=sort_keys) + "\n",
+                encoding="utf-8",
+            )
+            _replace_with_retry(tmp, path)
+        finally:
+            _unlink_tmp_file(tmp)
+
+
 def read_jsonl_objects(path: Path) -> list[dict[str, Any]]:
     """Read JSONL objects, skipping blank or malformed rows."""
 
@@ -138,3 +166,63 @@ def append_jsonl_records(path: Path, records: list[dict[str, object]], *, sort_k
     with path.open("a", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=sort_keys) + "\n")
+
+
+def _path_lock(path: Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _JSON_FILE_LOCKS_GUARD:
+        lock = _JSON_FILE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _JSON_FILE_LOCKS[key] = lock
+        return lock
+
+
+@contextmanager
+def _locked_json_path(path: Path):
+    lock = _path_lock(path)
+    with lock:
+        with _locked_file_path(path):
+            yield
+
+
+@contextmanager
+def _locked_file_path(path: Path):
+    lock_path = path.with_name(path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        _flock_exclusive(handle)
+        try:
+            yield
+        finally:
+            _flock_unlock(handle)
+
+
+def _flock_exclusive(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _flock_unlock(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _replace_with_retry(tmp: Path, path: Path) -> None:
+    last_error: OSError | None = None
+    for attempt in range(8):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.01 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+
+
+def _unlink_tmp_file(tmp: Path) -> None:
+    try:
+        tmp.unlink()
+    except OSError:
+        pass

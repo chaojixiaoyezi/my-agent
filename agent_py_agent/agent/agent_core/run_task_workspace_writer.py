@@ -15,6 +15,13 @@ def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
     home_paths = getattr(agent, "home_paths", None)
     if home_paths is None:
         return ""
+    existing = _existing_workspace_paths(getattr(params, "task_attributes", None))
+    if existing is not None:
+        existing.root.mkdir(parents=True, exist_ok=True)
+        existing.output_dir.mkdir(parents=True, exist_ok=True)
+        existing.work_dir.mkdir(parents=True, exist_ok=True)
+        register_saved_run_task_ref(agent, _SavedWorkspaceRef(existing.root, existing.work_dir), _root_task_params(params))
+        return str(existing.root)
     owner_home = getattr(home_paths, "owner_home_dir", None)
     target_home = Path(owner_home) if owner_home else Path(home_paths.root)
     result = ensure_run_workspace(
@@ -90,6 +97,25 @@ class _ExistingWorkspacePaths:
     work_dir: Path
 
 
+@dataclass(frozen=True)
+class _SavedWorkspaceRef:
+    root: Path
+    work_dir: Path
+
+
+def _root_task_params(params: ArchiveRunParams) -> ArchiveRunParams:
+    root_task_id = _conversation_task_id(getattr(params, "task_attributes", None))
+    if not root_task_id:
+        return params
+    return replace(params, task_id=root_task_id)
+
+
+def _conversation_task_id(attrs: object) -> str:
+    if not isinstance(attrs, dict):
+        return ""
+    return str(attrs.get("conversation_task_id") or "").strip()
+
+
 def _existing_workspace_paths(attrs: object) -> _ExistingWorkspacePaths | None:
     if not isinstance(attrs, dict):
         return None
@@ -109,8 +135,14 @@ def _workspace_prompt_section(paths) -> str:
     return "\n".join(
         [
             "# Current Task Workspace",
-            "- 本轮任务已有独立任务目录；如果需要写交付物，请优先写到 output_dir。",
-            "- work_dir 用于草稿、日志、中间材料和过程文件；不要把参考源码目录当成交付目录。",
+            "- 本轮任务已有独立任务目录；没有用户明确指定其他输出目录时，最终交付物写到 output_dir。",
+            "- output_dir 可以作为协作时的共享产物区；代码、报告分片、子代理阶段产物可以先放这里方便联调和汇总。",
+            "- 收口前请整理 output_dir：最终只保留用户需要看的交付物；明显的草稿、日志、子代理分报告和临时材料挪到 work_dir 或在最终报告里做索引。",
+            "- work_dir 用于草稿、日志、中间材料和过程文件，也适合保存被挪走的过程产物。",
+            "- 用户让你阅读、分析、扫描的项目/源码/资料目录是输入目录，不是默认交付目录。",
+            "- 不要因为输入目录下面可以新建 output/，就把它当成本轮输出目录。",
+            "- 输入目录里的 output/、reports/ 或旧报告只能当线索；除非用户明确要求复用，不能当成本轮已完成证据。",
+            "- 即使读到旧报告，也要重新读取当前源码或文件，并把本轮产物登记/写入本轮 output_dir 或 work_dir。",
             "- 如果用户只要求聊天回答、不需要文件，可以正常直接回答，不必强行落盘。",
             f"- task_root: {paths.root}",
             f"- output_dir: {paths.output_dir}",
@@ -138,25 +170,131 @@ def _delivery_contract_with_workspace(contract: object, paths):
     if not isinstance(contract, dict):
         return contract
     result = dict(contract)
-    result["task_workspace"] = {
+    task_workspace = {
         "task_root": str(paths.root),
         "output_dir": str(paths.output_dir),
         "work_dir": str(paths.work_dir),
     }
     artifacts = result.get("artifacts")
+    user_requested_output_dir = _user_requested_output_dir(artifacts, paths)
+    if user_requested_output_dir:
+        task_workspace["user_requested_output_dir"] = user_requested_output_dir
+    result["task_workspace"] = task_workspace
     if isinstance(artifacts, list):
         result["artifacts"] = [_artifact_with_default_output_root(item, paths) for item in artifacts]
     return result
+
+
+def _user_requested_output_dir(artifacts: object, paths) -> str:
+    if not isinstance(artifacts, list):
+        return ""
+    for item in artifacts:
+        if not isinstance(item, dict):
+            continue
+        if directory := _user_requested_dir_from_artifact_path(item, paths):
+            return directory
+        if directory := _user_requested_dir_from_roots(item, paths):
+            return directory
+    return ""
+
+
+def _user_requested_dir_from_artifact_path(artifact: dict, paths) -> str:
+    text = str(artifact.get("preferred_path") or artifact.get("path") or "").strip()
+    if not text or not _is_absolute_or_home_path(text):
+        return ""
+    try:
+        path = Path(text).expanduser()
+    except OSError:
+        return ""
+    if _same_or_inside(path, Path(paths.output_dir)):
+        return ""
+    return str(path.parent if path.suffix else path)
+
+
+def _user_requested_dir_from_roots(artifact: dict, paths) -> str:
+    roots = artifact.get("allowed_output_roots")
+    if not isinstance(roots, list):
+        return ""
+    for value in roots:
+        text = str(value or "").strip()
+        if not text or not _is_absolute_or_home_path(text):
+            continue
+        try:
+            path = Path(text).expanduser()
+        except OSError:
+            continue
+        if not _same_or_inside(path, Path(paths.output_dir)):
+            return str(path)
+    return ""
+
+
+def _same_or_inside(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
 
 
 def _artifact_with_default_output_root(item: object, paths) -> object:
     if not isinstance(item, dict):
         return item
     artifact = dict(item)
+    artifact = _artifact_with_task_output_paths(artifact, paths)
     if _artifact_declares_output_target(artifact):
         return artifact
     artifact["allowed_output_roots"] = [str(paths.output_dir)]
     return artifact
+
+
+def _artifact_with_task_output_paths(artifact: dict, paths) -> dict:
+    for key in ("preferred_path", "path"):
+        rewritten = _rewrite_task_output_path(artifact.get(key), paths)
+        if rewritten:
+            artifact[key] = rewritten
+    roots = artifact.get("allowed_output_roots")
+    if isinstance(roots, list):
+        artifact["allowed_output_roots"] = [
+            _rewrite_task_output_root(value, paths) or value for value in roots
+        ]
+    return artifact
+
+
+def _rewrite_task_output_path(value: object, paths) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if _is_absolute_or_home_path(text):
+        return text
+    suffix = _relative_output_suffix(text)
+    if suffix is None:
+        return text
+    return str((paths.output_dir / suffix).resolve(strict=False)) if suffix else str(paths.output_dir)
+
+
+def _rewrite_task_output_root(value: object, paths) -> str:
+    text = str(value or "").strip()
+    if not text or _is_absolute_or_home_path(text):
+        return text
+    suffix = _relative_output_suffix(text)
+    if suffix is None:
+        return text
+    return str((paths.output_dir / suffix).resolve(strict=False)) if suffix else str(paths.output_dir)
+
+
+def _relative_output_suffix(text: str) -> Path | None:
+    normalized = text.replace("\\", "/").strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if normalized == "output":
+        return Path()
+    if normalized.startswith("output/"):
+        return Path(normalized[len("output/") :])
+    return None
+
+
+def _is_absolute_or_home_path(text: str) -> bool:
+    return text.startswith("/") or text.startswith("~")
 
 
 def _artifact_declares_output_target(artifact: dict) -> bool:

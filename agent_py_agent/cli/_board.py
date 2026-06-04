@@ -6,8 +6,8 @@ import json
 from dataclasses import asdict, is_dataclass
 
 from ..agent.agent_core.subagent import SpawnSubagentsParams
-from ..agent.subagent import filter_board_items
 from ..agent.subagents.models import SubAgentBoardOptions
+from ..agent.subagents.policies import filter_board_items
 from .common import make_agent
 from .shared_progress import (
     format_shared_progress_lines,

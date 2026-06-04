@@ -10,7 +10,7 @@ from .memory_doctor_cmd import (
     cmd_memory_doctor,
 )
 
-# Re-export helper functions for backward compatibility with tests
+# Public memory command helper imports.
 from .memory_query_cmd import (
     _config_warnings,
     _index_payload,

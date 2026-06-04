@@ -21,8 +21,6 @@ from .io import (
     read_json_file_report,
     write_json_file,
 )
-
-# Re-export heartbeat liveness check for backward compatibility
 from .lease_service import is_heartbeat_alive_for_request
 from .logging import GatewayIndexPayloadOptions, _index_gateway_payload
 from .paths import GatewayPaths, gateway_paths

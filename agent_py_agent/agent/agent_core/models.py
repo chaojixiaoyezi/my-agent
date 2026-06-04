@@ -19,6 +19,7 @@ class AgentRunResult:
     used_memories: int
     tool_rounds: int = 0
     executed_tools: list[str] | None = None
+    archive_tool_calls: list[dict[str, object]] | None = None
     memory_route_matches: int = 0
     memory_route_paths: list[str] | None = None
     archive_events: int = 0

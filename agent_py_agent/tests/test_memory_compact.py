@@ -5,7 +5,6 @@ from pathlib import Path
 
 import agent_py_agent.agent.memory_archive.compact_apply as compact_apply_module
 import agent_py_agent.agent.memory_archive.compact_apply.validation as compact_apply_validation_module
-from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.memory_archive.compact import (
     MemoryCompactPlanOptions,
     build_memory_compact_plan,
@@ -23,6 +22,7 @@ from agent_py_agent.agent.memory_archive.compact_suggest import (
     MemoryCompactSuggestOptions,
     build_memory_compact_suggestion,
 )
+from agent_py_agent.cli.parser import build_parser
 from agent_py_agent.tests.memory_compact_support import (
     assert_apply_ids_match,
     assert_apply_preserved_sources,

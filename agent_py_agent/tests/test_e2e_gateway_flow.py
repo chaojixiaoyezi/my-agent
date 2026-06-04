@@ -14,8 +14,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_py_agent.agent.gateway import GatewayPaths
 from agent_py_agent.agent.gateway_parts import (
+    GatewayPaths,
     gateway_request_counts,
     gateway_response_path,
     is_pid_alive,

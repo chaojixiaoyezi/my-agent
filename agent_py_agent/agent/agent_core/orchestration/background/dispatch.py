@@ -8,7 +8,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ....capabilities import CapabilityRouter
+from agent_py_agent.agent.capability import CapabilityRouter
+
 from ....runtime_errors import runtime_error_report
 from ...agent_tree.status import agent_tree_status_payload
 from ...parameters import _bool_param
@@ -161,6 +162,7 @@ def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchReques
 
 
 def _background_dispatch_command(agent, request: _BackgroundDispatchRequest) -> list[str]:
+    max_cycles = _background_watch_cycles(request.run_ids)
     command = [
         sys.executable,
         "-u",
@@ -169,12 +171,18 @@ def _background_dispatch_command(agent, request: _BackgroundDispatchRequest) -> 
         "--config",
         _config_path(agent),
         "subagents-dispatch",
+        "--watch",
+        "--advance",
         "--apply",
         "--start-runners",
         "--max-runners",
         str(max(1, len(request.run_ids))),
         "--limit",
         str(max(20, len(request.run_ids))),
+        "--interval",
+        "0",
+        "--max-cycles",
+        str(max_cycles),
         "--reviewer",
         "create-subagents-auto-start",
         "--note",
@@ -185,6 +193,14 @@ def _background_dispatch_command(agent, request: _BackgroundDispatchRequest) -> 
     for run_id in request.run_ids:
         command.extend(["--run-id", run_id])
     return command
+
+
+def _background_watch_cycles(run_ids: list[str]) -> int:
+    # A start-rate may intentionally launch only part of a batch per dispatch round.
+    # Keep auto-start on the same queue long enough to drain the created batch,
+    # without turning this helper into an unbounded daemon.
+    count = len([item for item in run_ids if str(item or "").strip()])
+    return max(2, count + 2)
 
 
 def _config_path(agent) -> str:

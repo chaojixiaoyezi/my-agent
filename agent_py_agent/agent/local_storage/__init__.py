@@ -27,6 +27,7 @@ from .runtime_gate_ledger import LocalStoreRuntimeGateLedgerMixin
 from .runtime_gate_models import RuntimeGateLedgerRecord
 from .schema import LocalStoreSchemaMixin
 from .search import LocalStoreSearchMixin
+from .store import LocalStore
 
 __all__ = [
     "AgentEventInput",
@@ -42,6 +43,7 @@ __all__ = [
     "LocalStoreEvent",
     "LocalStoreEventMixin",
     "LocalStoreMaintenanceMixin",
+    "LocalStore",
     "LocalStoreRecordMixin",
     "LocalStoreRuntimeGateLedgerMixin",
     "LocalStoreSchemaMixin",

@@ -8,7 +8,7 @@ Tool results can be useful evidence, but large bodies do not belong in raw
 archive rows, token ledgers, or compact metadata. This module writes the full
 tool output to an artifact file and returns a compact record with preview,
 hash, size, and path. Internal orchestration/status tool outputs are stored in
-their model-visible sanitized form; ordinary file/web/shell outputs stay raw.
+their original form.
 """
 
 import hashlib
@@ -19,11 +19,9 @@ from pathlib import Path
 from typing import Any
 
 from ..common.path_segments import safe_path_segment
-from ..model_visible_ref_sanitizer import sanitize_model_visible_tool_output
 from ..settings.defaults import default_agent_config
 from .schema import (
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 
@@ -48,12 +46,17 @@ class ExternalizeToolOutputRequest:
 
 
 def externalize_tool_output_record(request: ExternalizeToolOutputRequest) -> dict[str, Any]:
-    output = sanitize_model_visible_tool_output(request.tool, str(request.output or ""))
+    output = str(request.output or "")
     digest = _sha256_text(output)
     resolved = _resolved_request_limits(request)
     record = _base_record(request, output, digest, preview_chars=resolved.preview_chars)
     if _is_bounded_read_artifact_output(request, output):
         record.update(_read_artifact_record_fields(output))
+        return record
+    if _is_bounded_read_file_output(request):
+        record.update(_archive_bounded_read_file_output(request, output, resolved))
+        if not record.get("output_externalized") and not record.get("source_output_archived"):
+            _append_tool_call_index(request, record, digest)
         return record
     if len(output) >= max(0, int(resolved.min_chars)):
         path = _write_output_artifact(request, output, digest)
@@ -62,7 +65,31 @@ def externalize_tool_output_record(request: ExternalizeToolOutputRequest) -> dic
             "output_path": str(path),
             "artifact_ref": str(path),
         })
+    else:
+        _append_tool_call_index(request, record, digest)
     return record
+
+
+def _archive_bounded_read_file_output(
+    request: ExternalizeToolOutputRequest,
+    output: str,
+    resolved: _ResolvedOutputLimits,
+) -> dict[str, Any]:
+    if len(output) < max(0, int(resolved.min_chars)):
+        return {
+            "source_output_archived": False,
+            "source_output_path": "",
+            "source_artifact_ref": "",
+        }
+    path = _write_output_artifact(request, output, _sha256_text(output))
+    return {
+        "output_externalized": False,
+        "output_path": "",
+        "artifact_ref": str(path),
+        "source_output_archived": True,
+        "source_output_path": str(path),
+        "source_artifact_ref": str(path),
+    }
 
 
 @dataclass(frozen=True)
@@ -79,12 +106,12 @@ def _resolved_request_limits(request: ExternalizeToolOutputRequest) -> _Resolved
     )
 
 
-def _request_limit(value: object, fallback: int) -> int:
+def _request_limit(value: object, default: int) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError):
         parsed = -1
-    return int(fallback) if parsed < 0 else max(0, parsed)
+    return int(default) if parsed < 0 else max(0, parsed)
 
 
 def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str, *, preview_chars: int) -> dict[str, Any]:
@@ -104,7 +131,6 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
         "output_size_bytes": len(output.encode("utf-8")),
         "output_externalized": False,
         "output_path": "",
-        "reserved": runtime_memory_reserved_fields(TOOL_OUTPUT_RECORD_SCHEMA),
     }
 
 
@@ -128,7 +154,6 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
         "size_bytes": len(output.encode("utf-8")),
         "created_at": created_at,
         "content": output,
-        "reserved": runtime_memory_reserved_fields(TOOL_OUTPUT_ARTIFACT_SCHEMA),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -153,11 +178,36 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
         "sha256": payload["sha256"],
         "size_bytes": payload["size_bytes"],
         "created_at": payload["created_at"],
-        "reserved": runtime_memory_reserved_fields(TOOL_OUTPUT_INDEX_SCHEMA),
     }
     index_path = path.parent / "index.jsonl"
     with index_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[str, Any], digest: str) -> None:
+    created_at = datetime.now(tz=timezone.utc).isoformat()
+    payload = {
+        "version": TOOL_OUTPUT_INDEX_SCHEMA.version,
+        "schema": runtime_memory_schema_payload(TOOL_OUTPUT_INDEX_SCHEMA),
+        "kind": "tool_call",
+        "tool": request.tool,
+        "call_id": request.call_id,
+        "scoped_call_id": _scoped_call_id(request),
+        "request_id": request.request_id,
+        "run_id": request.run_id,
+        "task_id": request.task_id,
+        "parameters": _safe_parameters(request.parameters),
+        "source_input": _source_input(request.parameters),
+        "path": "",
+        "sha256": digest,
+        "size_bytes": int(record.get("output_size_bytes", 0) or 0),
+        "output_externalized": False,
+        "created_at": created_at,
+    }
+    index_path = Path(request.root) / "blobs" / "tool_outputs" / "index.jsonl"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    with index_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def _artifact_path(request: ExternalizeToolOutputRequest, digest: str) -> Path:
@@ -189,6 +239,10 @@ def _is_bounded_read_artifact_output(request: ExternalizeToolOutputRequest, outp
         return False
     payload = _json_object(output)
     return bool(payload and payload.get("reads_artifact_body") is True)
+
+
+def _is_bounded_read_file_output(request: ExternalizeToolOutputRequest) -> bool:
+    return request.tool == "read_file" and request.ok
 
 
 def _read_artifact_record_fields(output: str) -> dict[str, Any]:

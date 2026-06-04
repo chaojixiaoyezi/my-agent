@@ -22,7 +22,6 @@ class SubagentRunBudgetRequest:
     max_tool_rounds: int = 0
     max_prompt_response_tokens: int = 0
     include_dry_runs: bool = False
-    reserved: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -52,7 +51,6 @@ class SubagentRunBudgetReport:
     exceeded: list[str]
     records: list[SubagentRunBudgetRecord] = field(default_factory=list)
     load_errors: list[dict[str, object]] = field(default_factory=list)
-    reserved: dict[str, object] = field(default_factory=dict)
 
 
 def build_subagent_run_budget_report(request: SubagentRunBudgetRequest) -> SubagentRunBudgetReport:
@@ -73,7 +71,6 @@ def build_subagent_run_budget_report(request: SubagentRunBudgetRequest) -> Subag
         exceeded=_exceeded(totals, limits),
         records=records,
         load_errors=load_errors,
-        reserved=dict(request.reserved or {}),
     )
 
 

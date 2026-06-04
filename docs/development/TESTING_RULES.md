@@ -90,10 +90,9 @@ directory to `tmp_path`.
 `agent_py_agent/tests/test_architecture_guardrails.py` enforces:
 
 - **Zero star-import baseline** -- no new `import *` may be introduced.
-- **Entrypoint line limits** -- entry files must not exceed their frozen baselines.
 - **Junk filename baseline** -- no new `utils.py`, `helpers.py`, `common.py`, etc.
 - **Runtime artifact detection** -- `.pyc`, `__pycache__`, `.coverage` must not be committed.
-- **Size limit enforcement** -- new files/functions/classes must be within limits.
+- **Local complexity enforcement** -- functions/classes/params/nesting must stay within limits.
 
 These tests **must pass** on every commit.  If they fail, fix the violation or
 update the baseline with a documented reason and a task record.
@@ -154,7 +153,7 @@ blocked by billing, or intentionally deferred until the next quota cycle.
 python3 -m pytest -q --tb=short                          # Full test suite
 ruff check agent_py_agent scripts                        # Lint
 python3 scripts/check_doc_sync.py                        # Docs sync
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json  # Hard/high-risk/soft gate
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json  # Local-complexity hard gate; file length is advisory
 git diff --check                                         # Whitespace errors
 python3 scripts/check_clean_package.py .                 # Package cleanliness
 ```

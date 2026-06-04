@@ -273,7 +273,7 @@ def _apply_archive_level_to_message_event(
             event.content_hash = ""
         return event
     if event.archive_level == 2:
-        event.content_preview = _summarize_text(content, fallback=event.action, limit=summary_chars)
+        event.content_preview = _summarize_text(content, default=event.action, limit=summary_chars)
         event.content_hash = ""
         return event
     event.content_preview = _preview(content, event.archive_level, preview_limits)

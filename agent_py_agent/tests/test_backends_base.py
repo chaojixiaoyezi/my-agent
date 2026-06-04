@@ -306,16 +306,16 @@ class TestAnthropicCompatibleBackend:
         assert resp.usage == {"input_tokens": 8, "output_tokens": 2}
 
     @patch("urllib.request.urlopen")
-    def test_generate_with_completion_fallback(self, mock_urlopen):
+    def test_generate_with_completion_text_field(self, mock_urlopen):
         mock_response = MagicMock()
-        mock_response.read.return_value = b'{"completion": "fallback text", "content": []}'
+        mock_response.read.return_value = b'{"completion": "completion text", "content": []}'
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
         backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3", stream_enabled=False))
         resp = backend.generate("test")
-        assert resp.text == "fallback text"
+        assert resp.text == "completion text"
 
     @patch("urllib.request.urlopen")
     def test_generate_retries_once_on_thinking_without_text(self, mock_urlopen):
@@ -398,10 +398,9 @@ class TestAnthropicCompatibleBackend:
         assert resp.text == "after retry"
         assert calls == [1, 2]
 
-    def test_generate_stream_falls_back_to_non_stream_after_empty_retries(self):
+    def test_generate_stream_reports_empty_text_after_same_path_retries(self):
         backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))
         stream_calls: list[int] = []
-        json_payloads: list[dict[str, object]] = []
 
         def request_stream(path, payload, headers):
             del path, headers
@@ -409,56 +408,30 @@ class TestAnthropicCompatibleBackend:
             payload["stream"] = True
             return [json.dumps({"type": "message_stop"})]
 
-        def request_json(path, payload, headers):
-            del path, headers
-            json_payloads.append(dict(payload))
-            return {"content": [{"type": "text", "text": "fallback ok"}]}
-
         backend.request_stream = request_stream
-        backend.request_json = request_json
 
-        resp = backend.generate("test prompt", on_chunk=None)
+        with pytest.raises(ProviderResponseError, match="流式响应没有文本内容"):
+            backend.generate("test prompt", on_chunk=None)
 
-        assert resp.text == "fallback ok"
         assert stream_calls == [1, 2]
-        assert json_payloads and "stream" not in json_payloads[0]
 
-    def test_generate_stream_fallback_emits_chunk(self):
+    def test_generate_stream_iter_reports_empty_text_after_same_path_retries(self):
         backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))
         chunks: list[str] = []
+        stream_calls: list[int] = []
 
         def request_stream_iter(path, payload, headers):
             del path, payload, headers
+            stream_calls.append(len(stream_calls) + 1)
             yield json.dumps({"type": "message_stop"})
 
-        def request_json(path, payload, headers):
-            del path, payload, headers
-            return {"content": [{"type": "text", "text": "fallback chunk"}]}
-
         backend.request_stream_iter = request_stream_iter
-        backend.request_json = request_json
 
-        resp = backend.generate("test prompt", on_chunk=chunks.append)
+        with pytest.raises(ProviderResponseError, match="流式响应没有文本内容"):
+            backend.generate("test prompt", on_chunk=chunks.append)
 
-        assert resp.text == "fallback chunk"
-        assert chunks == ["fallback chunk"]
-
-    def test_generate_stream_fallback_failure_preserves_provider_error(self):
-        backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))
-
-        def request_stream(path, payload, headers):
-            del path, payload, headers
-            return [json.dumps({"type": "message_stop"})]
-
-        def request_json(path, payload, headers):
-            del path, payload, headers
-            raise OSError("fallback gateway down")
-
-        backend.request_stream = request_stream
-        backend.request_json = request_json
-
-        with pytest.raises(ProviderResponseError, match="非流式兜底请求失败"):
-            backend.generate("test prompt", on_chunk=None)
+        assert chunks == []
+        assert stream_calls == [1, 2]
 
 
 class TestGetBackend:
@@ -486,12 +459,14 @@ class TestGetBackend:
         config.model_name = "gpt-4"
         config.request_timeout = 60
         config.max_tokens = 1024
+        config.model_context_window_tokens = 234567
         config.temperature = "0.7"
         config.stream_enabled = True
         config.anthropic_version = "2023-06-01"
 
         backend = get_backend("openai_compatible", config)
         assert isinstance(backend, OpenAICompatibleBackend)
+        assert backend.context_window_tokens == 234567
 
     def test_get_backend_anthropic_with_config(self):
         config = MagicMock()
@@ -500,9 +475,11 @@ class TestGetBackend:
         config.model_name = "claude-3"
         config.request_timeout = 60
         config.max_tokens = 1024
+        config.model_context_window_tokens = 200000
         config.temperature = "0.7"
         config.stream_enabled = True
         config.anthropic_version = "2023-06-01"
 
         backend = get_backend("anthropic_compatible", config)
         assert isinstance(backend, AnthropicCompatibleBackend)
+        assert backend.context_window_tokens == 200000

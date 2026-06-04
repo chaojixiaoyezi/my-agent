@@ -22,12 +22,12 @@ class TestLogAnalysisConfigWarning:
         warning = LogAnalysisConfigWarning(
             field_name="enabled",
             raw_value="yes",
-            fallback_value=False,
+            default_value=False,
             reason="expected boolean",
         )
         assert warning.field_name == "enabled"
         assert warning.raw_value == "yes"
-        assert warning.fallback_value is False
+        assert warning.default_value is False
         assert warning.reason == "expected boolean"
 
     def test_warning_to_dict(self):
@@ -35,13 +35,13 @@ class TestLogAnalysisConfigWarning:
         warning = LogAnalysisConfigWarning(
             field_name="field",
             raw_value="bad",
-            fallback_value=0,
+            default_value=0,
             reason="invalid",
         )
         d = warning.to_dict()
         assert d["field_name"] == "field"
         assert d["raw_value"] == "bad"
-        assert d["fallback_value"] == 0
+        assert d["default_value"] == 0
         assert d["reason"] == "invalid"
 
 
@@ -143,7 +143,7 @@ class TestLogAnalysisConfigWithValues:
 
     def test_custom_config_warnings(self):
         """验证自定义警告列表。"""
-        warnings = [{"field_name": "test", "raw_value": "bad", "fallback_value": 0, "reason": "test"}]
+        warnings = [{"field_name": "test", "raw_value": "bad", "default_value": 0, "reason": "test"}]
         config = LogAnalysisConfig(config_warnings=warnings)
         assert len(config.config_warnings) == 1
 
@@ -191,7 +191,7 @@ class TestConfigWarningsToDict:
 
     def test_warnings_survive_round_trip(self):
         """警告能正确序列化/反序列化。"""
-        config = LogAnalysisConfig(config_warnings=[{"field_name": "x", "raw_value": 1, "fallback_value": 0, "reason": "y"}])
+        config = LogAnalysisConfig(config_warnings=[{"field_name": "x", "raw_value": 1, "default_value": 0, "reason": "y"}])
         d = {
             "enabled": config.enabled,
             "config_warnings": config.config_warnings,

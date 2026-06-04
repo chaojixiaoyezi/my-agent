@@ -3,7 +3,6 @@
 
 Human version:
 这个模块定义子代理状态机，确保状态转换的合法性和一致性。
-状态文件格式必须保持向后兼容。
 """
 
 from __future__ import annotations

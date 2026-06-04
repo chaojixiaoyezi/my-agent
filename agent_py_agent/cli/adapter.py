@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.adapter import ChannelManager, FeishuAdapter, QQAdapter
-from ..agent.gateway import (
+from ..agent.gateway_parts import (
     AdapterPaths,
     adapter_paths,
     gateway_paths,

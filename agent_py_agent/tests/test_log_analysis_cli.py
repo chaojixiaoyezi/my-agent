@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.log_analysis.config import LogAnalysisConfig
 from agent_py_agent.agent.log_analysis.storage import LocalLogStore
 from agent_py_agent.cli import logs as logs_cli
+from agent_py_agent.cli.parser import build_parser
 
 
 def _project_root() -> Path:

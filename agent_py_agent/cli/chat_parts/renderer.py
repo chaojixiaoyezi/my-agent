@@ -58,8 +58,8 @@ def startup_banner(agent_name: str, *, use_gateway: bool) -> str:
     )
 
 
-def terminal_rule(char: str = "─", *, fallback: int = 119) -> str:
-    width = max(20, shutil.get_terminal_size(fallback=(fallback, 24)).columns)
+def terminal_rule(char: str = "─", *, default_width: int = 119) -> str:
+    width = max(20, shutil.get_terminal_size((default_width, 24)).columns)
     return f"{GRAY}{char * width}{RESET}"
 
 
@@ -114,12 +114,6 @@ def _windows_vt_enabled() -> bool:
     except Exception:
         return False
 
-
-# Re-export for backward compatibility with tests that import from chat
-_collapse_response_text = collapse_response_text
-_progress_bar = progress_bar
-_startup_banner = startup_banner
-_terminal_rule = terminal_rule
 
 __all__ = [
     "BLUE",

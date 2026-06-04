@@ -10,12 +10,12 @@ from agent_py_agent.agent.agent_core.runner.stage_trace import (
     RunnerModelStageTraceRequest,
     trace_runner_model_request_started,
 )
-from agent_py_agent.agent.backend import BaseBackend, ModelResponse
+from agent_py_agent.agent.backends import BaseBackend, ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderTimeoutError, ProviderTransientError
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.manager_runner_results import RecordRunnerResultParams
+from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
 from agent_py_agent.agent.subagents.services.hierarchy.recovery import HierarchyRecoveryRequest
 from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
@@ -335,6 +335,32 @@ def test_runner_stage_trace_refreshes_active_ancestor_heartbeats(tmp_path):
     _trace_child_tool_started(manager, root.id, child.id)
 
     _assert_ancestor_heartbeats_refreshed(manager, [child.id, parent.id, root.id], old)
+
+
+def test_runner_stage_trace_allows_main_task_parent_anchor(
+    tmp_path, caplog: pytest.LogCaptureFixture
+):
+    """一级子代理挂在主任务 id 下时，不把主任务 id 当缺失的子代理父节点刷 warning。"""
+
+    manager = SubAgentManager(tmp_path / "subs", debug_trace_level=0)
+    task = manager.create_run(
+        goal="child",
+        thought="child",
+        plan=["child"],
+        parent_id="gw-main-run",
+        root_id="gw-main-run",
+        depth=1,
+    )
+    task.status = "RUNNING"
+    task.runner_active_attempt_id = "attempt-child"
+    task.heartbeat_at = 10.0
+    manager.save(task)
+
+    with caplog.at_level(logging.WARNING):
+        _trace_child_tool_started(manager, "gw-main-run", task.id)
+
+    assert "runner_stage_trace.heartbeat.parent_load" not in caplog.text
+    assert manager.load(task.id).heartbeat_at > 10.0
 
 
 def _running_trace_hierarchy(manager: SubAgentManager, old: float):

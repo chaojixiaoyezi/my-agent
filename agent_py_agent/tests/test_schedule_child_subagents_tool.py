@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.hierarchy_tools import _load_schedule_dispatch_tasks
 from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def test_runner_context_schedule_bare_lineage_name_returns_payload_not_index_error(tmp_path):
@@ -84,9 +84,9 @@ def test_runner_context_schedule_auto_starts_created_children(tmp_path, monkeypa
     assert payload["auto_start"]["run_ids"] == payload["created_run_ids"]
 
 
-def test_runner_context_schedule_hides_legacy_subagent_paths(tmp_path, monkeypatch):
-    """schedule_child_subagents 返回给模型的 payload 不应暴露旧 data/subagents 路径。"""
-    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="data/subagents"), tmp_path)
+def test_runner_context_schedule_keeps_current_subagent_paths(tmp_path, monkeypatch):
+    """schedule_child_subagents 返回当前任务路径时不再做旧路径隐藏。"""
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="tasks/current/work/agents"), tmp_path)
     root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
     agent._current_subagent_run_id = root.id
 
@@ -100,7 +100,9 @@ def test_runner_context_schedule_hides_legacy_subagent_paths(tmp_path, monkeypat
                     {
                         "run_id": run_ids[0],
                         "workspace_refs": {
-                            "final_report": str(tmp_path / "data" / "subagents" / "tasks" / root.id / "report.md")
+                            "final_report": str(
+                                tmp_path / "tasks" / "current" / "work" / "agents" / root.id / "report.md"
+                            )
                         },
                     }
                 ]
@@ -117,7 +119,6 @@ def test_runner_context_schedule_hides_legacy_subagent_paths(tmp_path, monkeypat
     })
 
     assert result.ok is True
-    assert "/data/subagents/" not in result.output
     assert "[internal_legacy_subagent_path_hidden]" not in result.output
 
 

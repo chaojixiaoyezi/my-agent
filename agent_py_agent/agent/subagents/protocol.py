@@ -24,7 +24,7 @@ class ProtocolIssue:
     field: str = ""
     message: str = ""
     severity: str = "error"
-    reserved: dict[str, object] = dataclass_field(default_factory=dict)
+    details: dict[str, object] = dataclass_field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -35,13 +35,11 @@ class ProtocolValidationReport:
 
     ok: bool
     issues: list[ProtocolIssue] = dataclass_field(default_factory=list)
-    reserved: dict[str, object] = dataclass_field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "ok": self.ok,
             "issues": [issue.to_dict() for issue in self.issues],
-            "reserved": dict(self.reserved),
         }
 
 
@@ -56,7 +54,8 @@ class TaskAddress:
     lineage: list[str] = dataclass_field(default_factory=list)
     attempt_id: str = ""
     workspace_ref: str = ""
-    reserved: dict[str, object] = dataclass_field(default_factory=dict)
+    session_id: str = ""
+    thread_id: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -76,7 +75,6 @@ class TaskEnvelope:
     acceptance: dict[str, object] = dataclass_field(default_factory=dict)
     context_refs: dict[str, object] = dataclass_field(default_factory=dict)
     audit: dict[str, object] = dataclass_field(default_factory=dict)
-    reserved: dict[str, object] = dataclass_field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
@@ -95,7 +93,8 @@ def build_task_address(task: SubAgentTask, *, all_tasks: list[SubAgentTask] | No
         lineage=_lineage_for_task(task, all_tasks or []),
         attempt_id=_task_text(task, "runner_active_attempt_id") or _attempt_from_task(task),
         workspace_ref=_workspace_ref(task),
-        reserved={"session_id": _task_text(task, "subagent_session_id"), "thread_id": _task_text(task, "agent_thread_id")},
+        session_id=_task_text(task, "subagent_session_id"),
+        thread_id=_task_text(task, "agent_thread_id"),
     )
 
 
@@ -204,7 +203,7 @@ def _tool_contract(task: SubAgentTask) -> dict[str, object]:
 def _acceptance_contract(task: SubAgentTask) -> dict[str, object]:
     return {
         "checks": [current_model_text(item) for item in _task_list(task, "acceptance_checks")],
-        "required_outputs": current_model_ref_list(_task_list(task, "artifact_refs"), basename_for_legacy=True),
+        "required_outputs": current_model_ref_list(_task_list(task, "artifact_refs")),
     }
 
 

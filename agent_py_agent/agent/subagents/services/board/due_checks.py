@@ -76,7 +76,7 @@ def _check_no_progress_fuse_issues(ctx: DueInspectionContext, attempt_limit: int
     )
     if not strategy.no_progress_fuse:
         return []
-    refs = [strategy.packet_ref, *strategy.fallback_refs, *strategy.takeover_refs]
+    refs = [strategy.packet_ref, *strategy.recovery_refs, *strategy.takeover_refs]
     return [
         _single_issue(
             ctx,
@@ -106,7 +106,7 @@ def _check_leadership_recovery_issues(ctx: DueInspectionContext, attempt_limit: 
     if not strategy.leadership_recovery:
         return []
     child_refs = [f"child_run:{run_id}" for run_id in strategy.child_run_ids]
-    refs = [*child_refs, *strategy.fallback_refs, *strategy.takeover_refs]
+    refs = [*child_refs, *strategy.recovery_refs, *strategy.takeover_refs]
     return [
         _single_issue(
             ctx,

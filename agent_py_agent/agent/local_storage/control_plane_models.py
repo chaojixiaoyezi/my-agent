@@ -31,7 +31,6 @@ class AgentRunRecord:
     created_at: float = 0.0
     updated_at: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
-    reserved: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -43,7 +42,6 @@ class AgentEventInput:
     payload: dict[str, Any] = field(default_factory=dict)
     created_at: float = 0.0
     event_id: str = ""
-    reserved: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -55,7 +53,6 @@ class AgentEventRecord:
     event_type: str
     payload: dict[str, Any]
     created_at: float
-    reserved: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -70,7 +67,6 @@ class TaskRollupRecord:
     latest_summary: str = ""
     updated_at: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
-    reserved: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -96,7 +92,6 @@ class AgentRuntimeQueryContext:
     requester_role: str = ""
     authorized_scope: str = ""
     visibility: str = ""
-    reserved: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -104,7 +99,9 @@ class AgentRuntimeQueryResult:
     context: AgentRuntimeQueryContext
     report: AgentTreeReport
     warnings: list[str] = field(default_factory=list)
-    reserved: dict[str, Any] = field(default_factory=dict)
+    source: str = "local_store_control_plane"
+    fact_source: str = "task_run_workspace"
+    takeover_hint: str = ""
 
 
 @dataclass(frozen=True)
@@ -117,4 +114,6 @@ class SharedProgressPanel:
     failure_handoff_refs: list[str] = field(default_factory=list)
     takeover_readiness_refs: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    reserved: dict[str, Any] = field(default_factory=dict)
+    source: str = "local_store_control_plane"
+    fact_source: str = "task_run_workspace"
+    view: str = "shared_progress_panel"

@@ -9,11 +9,11 @@ import json
 import time
 
 from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
-from agent_py_agent.agent.capabilities import CapabilityRouter
-from agent_py_agent.agent.capability_config import CapabilityConfig
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.subagent import EvidencePacket, VerificationEvidence
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.subagents import EvidencePacket, VerificationEvidence
 
 
 def test_static_site_failure_details_reach_dispatch_record(tmp_path):

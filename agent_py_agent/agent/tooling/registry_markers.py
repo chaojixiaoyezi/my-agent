@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-"""Legacy tool block marker helpers."""
+"""Tool block marker helpers."""
 
 
 def next_tool_block_start(text: str, cursor: int) -> tuple[int, str] | None:

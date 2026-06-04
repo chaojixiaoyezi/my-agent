@@ -44,6 +44,7 @@ class BackendOptions:
     model_name: str
     request_timeout: int = 240
     max_tokens: int = 1024
+    context_window_tokens: int = 0
     temperature: float = 0.2
     stream_enabled: bool = True
 
@@ -101,6 +102,7 @@ class HttpBackend(BaseBackend):
         self.model_name = str(options.model_name)
         self.request_timeout = int(options.request_timeout)
         self.max_tokens = int(options.max_tokens)
+        self.context_window_tokens = int(options.context_window_tokens or 0)
         self.temperature = float(options.temperature)
         self.stream_enabled = bool(options.stream_enabled)
 
@@ -231,15 +233,11 @@ class AnthropicCompatibleBackend(HttpBackend):
         headers: dict[str, str],
         on_chunk: Callable[[str], None] | None = None,
     ) -> ModelResponse:
-        """Parse Anthropic SSE and fall back once when the stream has no visible text."""
+        """Parse Anthropic SSE and retry the same stream path once when no text is visible."""
         for attempt in range(2):
             text, usage = self._stream_text_once(payload, headers, on_chunk)
             if text or attempt > 0:
                 break
-        if not text:
-            text, usage = self._fallback_non_stream_text(payload, headers)
-            if text and on_chunk is not None:
-                on_chunk(text)
         if not text:
             raise ProviderResponseError("Anthropic-compatible 流式响应没有文本内容")
         return ModelResponse(text=text, backend=self.name, usage=usage)
@@ -252,20 +250,6 @@ class AnthropicCompatibleBackend(HttpBackend):
     ) -> tuple[str, dict[str, Any]]:
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
         return collect_anthropic_stream(lines("/v1/messages", payload, headers), on_chunk=on_chunk)
-
-    def _fallback_non_stream_text(self, payload: dict[str, Any], headers: dict[str, str]) -> tuple[str, dict[str, Any]]:
-        fallback_payload = dict(payload)
-        fallback_payload.pop("stream", None)
-        try:
-            obj = self.request_json("/v1/messages", fallback_payload, headers)
-            return _anthropic_text_from_response(obj), usage_dict(obj.get("usage"))
-        except ProviderResponseError:
-            raise
-        except Exception as exc:
-            raise ProviderResponseError(
-                f"Anthropic-compatible 非流式兜底请求失败: {type(exc).__name__}: {exc}"
-            ) from exc
-
 
 def _anthropic_text_from_response(obj: dict[str, Any]) -> str:
     parts = obj.get("content", [])
@@ -305,6 +289,7 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         model_name=config.model_name,
         request_timeout=config.request_timeout,
         max_tokens=config.max_tokens,
+        context_window_tokens=getattr(config, "model_context_window_tokens", 0),
         temperature=float(config.temperature),
         stream_enabled=getattr(config, "stream_enabled", True),
     )

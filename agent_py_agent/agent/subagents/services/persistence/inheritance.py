@@ -16,7 +16,7 @@ def normalize_inheritance_manifest(value: object) -> InheritanceManifest:
     if not isinstance(value, dict):
         return InheritanceManifest()
     payload = {key: value[key] for key in _field_names(InheritanceManifest) if key in value}
-    for key in ["inherited", "overridden", "dropped", "policy", "reserved"]:
+    for key in ["inherited", "overridden", "dropped", "policy"]:
         payload[key] = _dict_value(payload.get(key))
     payload["created_at"] = _float_value(payload.get("created_at"))
     return InheritanceManifest(**payload)

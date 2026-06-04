@@ -3,8 +3,7 @@ from __future__ import annotations
 
 """public gateway package API composed from focused protocol modules.
 
-gateway 代码已经按职责拆开：路径、文件 IO、进程控制、恢复、运行时、adapter 转换、索引日志各管一块。
-外部仍然可以从 `agent.gateway` 旧入口导入这些名字，迁移不会被打断。
+gateway 代码按职责拆开：路径、文件 IO、进程控制、恢复、运行时、adapter 转换、索引日志各管一块。
 """
 
 from .adapter import (

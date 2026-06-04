@@ -1,8 +1,8 @@
 
 """Public dataclass exports for subagent state.
 
-This module stays as the compatibility import surface while concrete model
-families live in narrower modules.
+Concrete model families live in narrower modules; this file is the current
+public state model API.
 """
 
 from __future__ import annotations

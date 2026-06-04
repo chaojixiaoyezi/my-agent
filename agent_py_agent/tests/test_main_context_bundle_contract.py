@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.agent_core.runtime.context_bundle import build_runtime_main_context_bundle
 from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeContextRequest
 from agent_py_agent.agent.memory_archive import (
@@ -34,6 +33,7 @@ from agent_py_agent.agent.user_space.context_bundle_artifacts import (
     update_main_context_bundle_artifacts,
 )
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+from agent_py_agent.cli.parser import build_parser
 
 
 def test_main_context_bundle_contains_contract_surfaces_and_self_check(tmp_path: Path) -> None:

@@ -41,18 +41,18 @@ def configured_subagent_allowed_tools(config: object) -> list[str] | None:
     return tools or None
 
 
-def effective_max_subagents(value: object, *, fallback: int) -> int:
+def effective_max_subagents(value: object, *, default: int) -> int:
     try:
         cap = int(value)
     except (TypeError, ValueError):
-        return fallback
-    return cap if cap > 0 else fallback
+        return default
+    return cap if cap > 0 else default
 
 
 def _spawn_explicit_root_seed(request: SpawnSubagentsFlowRequest):
     count = min(
         request.options.count or 1,
-        effective_max_subagents(request.agent.config.max_subagents, fallback=request.options.count or 1),
+        effective_max_subagents(request.agent.config.max_subagents, default=request.options.count or 1),
     )
     return spawn_explicit_role_runs(
         SpawnExplicitRoleRequest(
@@ -74,7 +74,7 @@ def _spawn_auto_delegated(request: SpawnSubagentsFlowRequest):
     )
     guard = SubagentAutomationGuard(request.agent.config)
     should_delegate = guard.should_delegate(complexity)
-    tasks = _split_for_max_subagents(request, fallback=1000, allowed_tools=allowed_tools) if should_delegate else []
+    tasks = _split_for_max_subagents(request, default_count=1000, allowed_tools=allowed_tools) if should_delegate else []
     guard.warn_if_not_delegating(complexity, bool(tasks))
     return tasks
 
@@ -82,7 +82,7 @@ def _spawn_auto_delegated(request: SpawnSubagentsFlowRequest):
 def _spawn_fixed_count(request: SpawnSubagentsFlowRequest):
     return _split_for_max_subagents(
         request,
-        fallback=request.options.count or 1,
+        default_count=request.options.count or 1,
         allowed_tools=configured_subagent_allowed_tools(request.agent.config),
     )
 
@@ -90,10 +90,10 @@ def _spawn_fixed_count(request: SpawnSubagentsFlowRequest):
 def _split_for_max_subagents(
     request: SpawnSubagentsFlowRequest,
     *,
-    fallback: int,
+    default_count: int,
     allowed_tools: list[str] | None,
 ):
-    count = effective_max_subagents(request.agent.config.max_subagents, fallback=fallback)
+    count = effective_max_subagents(request.agent.config.max_subagents, default=default_count)
     if request.options.count is not None:
         count = min(request.options.count, count)
     return request.agent.subagents.split(

@@ -11,7 +11,11 @@ import time
 from pathlib import Path
 
 from ..agent.agent_core.orchestration.dispatch.params import DispatchExecutionPlan, WatchParams
-from ..agent.gateway import log_gateway_event, recover_gateway_processing_requests, write_json_file
+from ..agent.gateway_parts import (
+    log_gateway_event,
+    recover_gateway_processing_requests,
+    write_json_file,
+)
 from ..agent.gateway_parts.daemon_control import (
     _get_process_start_time,
     _utc_now_iso,
@@ -20,6 +24,7 @@ from ..agent.gateway_parts.daemon_control import (
 )
 from ..agent.gateway_parts.http_service import GatewayHTTPServer, start_http_server
 from .gateway_loops import (
+    _gateway_background_main_loop,
     _gateway_heartbeat_loop,
     _gateway_request_loop,
     _write_gateway_heartbeat,
@@ -191,6 +196,12 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
         daemon=True,
     )
     request_thread.start()
+    background_thread = threading.Thread(
+        target=_gateway_background_main_loop,
+        args=(context, stop_event),
+        daemon=True,
+    )
+    background_thread.start()
     http_server: GatewayHTTPServer | None = None
     http_port = request.http_port
     if http_port > 0:
@@ -198,13 +209,14 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
         pid = os.getpid()
         write_json_file(paths.state, _build_run_state(request, pid))
         log_gateway_event(agent, "gateway_run_running", _build_run_payload(request, pid))
-    return stop_event, heartbeat_thread, request_thread, http_server
+    return stop_event, heartbeat_thread, request_thread, background_thread, http_server
 
 
 def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest):
     request.stop_event.set()
     request.heartbeat_thread.join(timeout=2)
     request.request_thread.join(timeout=2)
+    request.background_thread.join(timeout=2)
     if request.http_server:
         request.http_server.stop()
     paths = request.context.paths

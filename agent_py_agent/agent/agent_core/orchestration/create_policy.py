@@ -52,6 +52,7 @@ def create_run_params(
         context_packs=create_context_packs(raw_params),
         workflow_mode=workflow_mode,
         attributes=_create_attributes(raw_params, agent),
+        **_lineage_fields(raw_params, agent),
         parent_access_mode=config_access_mode(agent),
         memory_retention_policy=config_string(
             agent,
@@ -61,6 +62,34 @@ def create_run_params(
         memory_delete_after_days=config_int(agent, "subagent_memory_delete_after_days", 0),
         destroy_summary_required=config_bool(agent, "subagent_destroy_summary_required", True),
     )
+
+
+def _lineage_fields(raw_params: dict[str, object], agent) -> dict[str, object]:
+    explicit_parent = str(raw_params.get("parent_id") or "").strip()
+    explicit_root = str(raw_params.get("root_id") or "").strip()
+    explicit_depth = raw_params.get("depth")
+    parent_id = explicit_parent or _current_run_id(agent)
+    root_id = explicit_root or parent_id
+    depth = _lineage_depth(explicit_depth, default=1 if parent_id else 0)
+    return {
+        "parent_id": parent_id,
+        "root_id": root_id,
+        "depth": depth,
+    }
+
+
+def _current_run_id(agent) -> str:
+    current = getattr(agent, "_current_run_params", None)
+    if current is None:
+        return ""
+    return str(getattr(current, "run_id", "") or getattr(current, "task_id", "") or "").strip()
+
+
+def _lineage_depth(value: object, *, default: int) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def _role_from_create_intent(raw_params: dict[str, object], goal: str, agent) -> str:
@@ -85,7 +114,7 @@ def _has_child_dispatch_tool(raw_params: dict[str, object]) -> bool:
 
 def _role_identity_is_quality(raw_params: dict[str, object]) -> bool:
     identity = f"{raw_params.get('role') or ''} {raw_params.get('agent_name') or ''}"
-    return role_template_id_for_role(identity, fallback="") in {"tester", "bug_finder"}
+    return role_template_id_for_role(identity, default_id="") in {"tester", "bug_finder"}
 
 
 def _should_disable_generic_workflow_for_concrete_worker(
@@ -218,7 +247,7 @@ def _role_field_is_lineage_agent_name(role: str) -> bool:
 def _role_from_lineage_agent_name(role: str) -> str:
     text = str(role or "").strip().lower().replace("-", "_")
     parts = [part for part in text.split("_") if part and part not in {"小傻妞", "小小傻妞", "agent", "subagent"}]
-    template_role = role_template_id_for_role("_".join(parts), fallback="")
+    template_role = role_template_id_for_role("_".join(parts), default_id="")
     return template_role or "worker"
 
 

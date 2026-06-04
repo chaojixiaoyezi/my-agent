@@ -76,7 +76,7 @@ def test_memory_compact_auto_cycle_reaches_single_trigger_percent(tmp_path: Path
     assert result["next_action"] == "ask_user_before_apply"
 
 
-def test_memory_compact_auto_cycle_forced_fallback_uses_plan_only(tmp_path: Path) -> None:
+def test_memory_compact_auto_cycle_forced_compact_uses_plan_only(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     write_compact_fixture(root)
 
@@ -129,7 +129,7 @@ def test_memory_compact_auto_cycle_apply_allows_optional_notes_missing(tmp_path:
     assert_apply_preserved_sources(root)
 
 
-def test_memory_compact_auto_cycle_forced_fallback_apply_reuses_resume_pipeline(tmp_path: Path) -> None:
+def test_memory_compact_auto_cycle_forced_compact_apply_reuses_resume_pipeline(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     write_compact_fixture(root)
     _write_work_state_fact_sources(root)
@@ -141,14 +141,14 @@ def test_memory_compact_auto_cycle_forced_fallback_apply_reuses_resume_pipeline(
             max_context_tokens=100000,
             allow_apply=True,
             force_trigger=True,
-            trigger_reason="emergency_fallback",
+            trigger_reason="emergency_compact",
             trigger_source="runtime_exception",
         ),
     )
 
     assert result["status"] == "ready_after_action_guard"
     assert result["trigger"] == {
-        "reason": "emergency_fallback",
+        "reason": "emergency_compact",
         "source": "runtime_exception",
         "forced": True,
     }
@@ -220,8 +220,11 @@ def test_memory_compact_work_state_reads_task_progress_ledger(tmp_path: Path) ->
     assert progress["summary"] == "已完成项目 A/B，对项目 C 只读了 README。"
     assert progress["counts"]["done"] == 1
     assert progress["counts"]["in_progress"] == 1
+    assert progress["recent_done_items"][0]["id"] == "project-a"
     assert progress["ref"].endswith("memory_archive/task_progress/run-compact/progress.json")
     assert work_state["next_actions"] == ["继续阅读项目 C 的核心模块。"]
+    handoff_text = Path(result["refs"]["handoff_summary"]).read_text(encoding="utf-8")
+    assert "project-a" in handoff_text
 
 
 def test_memory_compact_auto_guard_allows_complete_work_state_without_running_tools(tmp_path: Path) -> None:
@@ -277,17 +280,17 @@ def test_memory_compact_resume_links_subagent_run_workspace_refs(tmp_path: Path)
     assert owner["memory_scope"] == "task_local"
     assert owner["writes_main_memory"] is False
     assert owner["automatic_tool_execution"] == "none"
-    assert owner["reserved_hooks"]["enabled"] is False
-    assert owner["reserved_hooks"]["writes_main_memory"] is False
-    assert owner["reserved_hooks"]["automatic_tool_execution"] == "none"
-    assert Path(owner["refs"]["agent_run_workspace"]).parts[-4:] == (
+    assert owner["continuation_hooks"]["enabled"] is False
+    assert owner["continuation_hooks"]["writes_main_memory"] is False
+    assert owner["continuation_hooks"]["automatic_tool_execution"] == "none"
+    assert Path(owner["refs"]["agent_run_workspace"]).parts[-5:] == (
         "tasks",
         "root-compact",
+        "work",
         "agents",
         "run-compact",
     )
     assert owner["refs"]["agent_checkpoint"].endswith("checkpoint.json")
-    assert Path(owner["legacy_run_ref"]["legacy_task_dir"]).parts[-2:] == ("subagents", "run-compact")
 
 
 def test_memory_compact_resume_exposes_subagent_latest_continue_packet(tmp_path: Path) -> None:
@@ -299,6 +302,7 @@ def test_memory_compact_resume_exposes_subagent_latest_continue_packet(tmp_path:
         root
         / "tasks"
         / "root-compact"
+        / "work"
         / "agents"
         / "run-compact"
         / "compactions"
@@ -329,9 +333,9 @@ def test_memory_compact_resume_exposes_subagent_latest_continue_packet(tmp_path:
 
     owner = resume["subagent_session_compact"]
     assert owner["refs"]["latest_continue_packet"].endswith("latest_continue_packet.json")
-    assert owner["reserved_hooks"]["enabled"] is True
-    assert owner["reserved_hooks"]["continue_packet_ref"].endswith("latest_continue_packet.json")
-    assert owner["reserved_hooks"]["writes_main_memory"] is False
+    assert owner["continuation_hooks"]["enabled"] is True
+    assert owner["continuation_hooks"]["continue_packet_ref"].endswith("latest_continue_packet.json")
+    assert owner["continuation_hooks"]["writes_main_memory"] is False
 
 
 def test_memory_compact_resume_uses_configured_subagent_workspace_refs(tmp_path: Path) -> None:
@@ -349,9 +353,8 @@ def test_memory_compact_resume_uses_configured_subagent_workspace_refs(tmp_path:
 def _assert_configured_subagent_owner_resume(resume: dict, configured_subagents: Path) -> None:
     owner = resume["subagent_session_compact"]
     assert owner["status"] == "linked_run_workspace"
-    assert owner["refs"]["legacy_task_dir"] == str(configured_subagents / "run-configured")
-    assert owner["refs"]["agent_run_workspace"].endswith("tasks/root-configured/agents/run-configured")
-    assert owner["reserved_hooks"]["continue_packet_ready"] is True
+    assert owner["refs"]["agent_run_workspace"].endswith("tasks/root-configured/work/agents/run-configured")
+    assert owner["continuation_hooks"]["continue_packet_ready"] is True
     subagent_packet = resume["continue_packet"]["subagent"]
     assert subagent_packet["recommended_read_paths"] == [
         owner["refs"]["latest_continue_packet"],
@@ -388,6 +391,7 @@ def _write_configured_continue_packet(configured_subagents: Path, run_id: str) -
         configured_subagents
         / "tasks"
         / "root-configured"
+        / "work"
         / "agents"
         / run_id
         / "compactions"
@@ -449,14 +453,13 @@ def _write_work_state_fact_sources(root: Path) -> None:
 
 
 def _write_subagent_run_workspace(root: Path) -> None:
-    run_dir = root / "tasks" / "root-compact" / "agents" / "run-compact"
+    run_dir = root / "tasks" / "root-compact" / "work" / "agents" / "run-compact"
     run_dir.mkdir(parents=True, exist_ok=True)
     for directory in ("compactions", "artifacts"):
         (run_dir / directory).mkdir(exist_ok=True)
     for path, payload in {
         run_dir / "state.json": {"run_id": "run-compact", "status": "running"},
         run_dir / "checkpoint.json": {"run_id": "run-compact", "current_step": "resume"},
-        run_dir / "legacy_run_ref.json": {"legacy_task_dir": str(root / "subagents" / "run-compact")},
     }.items():
         path.write_text(json.dumps(payload), encoding="utf-8")
     (run_dir / "summary.md").write_text("summary\n", encoding="utf-8")
@@ -466,30 +469,16 @@ def _write_subagent_run_workspace(root: Path) -> None:
 
 
 def _write_subagent_run_workspace_in_configured_root(subagents_root: Path, run_id: str) -> None:
-    legacy_dir = subagents_root / run_id
-    run_dir = subagents_root / "tasks" / "root-configured" / "agents" / run_id
-    legacy_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = subagents_root / "tasks" / "root-configured" / "work" / "agents" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     for directory in ("compactions", "artifacts"):
         (run_dir / directory).mkdir(exist_ok=True)
     for path, payload in {
         run_dir / "state.json": {"run_id": run_id, "status": "running"},
         run_dir / "checkpoint.json": {"run_id": run_id, "current_step": "resume"},
-        run_dir / "legacy_run_ref.json": {"legacy_task_dir": str(legacy_dir)},
     }.items():
         path.write_text(json.dumps(payload), encoding="utf-8")
     (run_dir / "summary.md").write_text("summary\n", encoding="utf-8")
     (run_dir / "task.md").write_text("task\n", encoding="utf-8")
     (run_dir / "timeline.jsonl").write_text("", encoding="utf-8")
     (run_dir / "findings.jsonl").write_text("", encoding="utf-8")
-    (legacy_dir / "task.json").write_text(
-        json.dumps(
-            {
-                "id": run_id,
-                "agent_run_workspace_dir": str(run_dir),
-                "agent_run_checkpoint_json": str(run_dir / "checkpoint.json"),
-                "agent_run_compactions_dir": str(run_dir / "compactions"),
-            }
-        ),
-        encoding="utf-8",
-    )

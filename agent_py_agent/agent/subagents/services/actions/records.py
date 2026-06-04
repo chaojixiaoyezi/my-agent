@@ -142,7 +142,7 @@ def unsupported_action_record(ctx: ActionRecordContext) -> ActionApplyRecord:
 
 
 def append_action_apply_log(manager: Any, record: ActionApplyRecord) -> None:
-    from ....file_io import append_jsonl
+    from ....io import append_jsonl
 
     jsonl = manager.workspace / "subagent_action_apply_log.jsonl"
     append_jsonl(jsonl, asdict(record))

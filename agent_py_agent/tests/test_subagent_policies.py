@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.capability.router import CapabilityCard, CapabilitySearchHit
-from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.subagents.models import (
     CapabilityRequest,
     SubAgentParsedOutput,

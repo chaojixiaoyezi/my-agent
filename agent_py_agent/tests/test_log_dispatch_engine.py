@@ -457,7 +457,7 @@ class TestBoundaryCases:
 
     def test_dispatch_result_run_id_fallback(self):
         """测试 run_id 降级到 request_id"""
-        request = DispatchRequest(case_id="fallback-case-001")
+        request = DispatchRequest(case_id="default-case-001")
         result = DispatchResult(request=request, dispatched=True, reason="ok", agent_id="")
         assert result.run_id == request.request_id
 

@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 
 from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,

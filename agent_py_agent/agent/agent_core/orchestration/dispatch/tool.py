@@ -5,13 +5,14 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability.config import CapabilityConfig
+
 from ....action_protocol import subagent_dispatch_envelope_from_payload
-from ....capabilities import CapabilityRouter
-from ....capability_config import CapabilityConfig
 from ....common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ....model_visible_refs import current_model_ref
 from ....runtime_errors import runtime_error_report
-from ....tools import BaseTool, ToolExecutionResult
+from ....tooling.models import BaseTool, ToolExecutionResult
 from ...parameters import _bool_param, _non_negative_int
 from ..run_scope import (
     remember_dispatched_orchestration_run_ids,
@@ -45,13 +46,13 @@ if TYPE_CHECKING:
     from ....core import SimpleAgent
 
 
-def _legacy_execution_param_error(params: dict[str, object]) -> str:
-    legacy = [key for key in ("apply", "start_runners", "execute_runners") if key in (params or {})]
-    if not legacy:
+def _unsupported_execution_param_error(params: dict[str, object]) -> str:
+    unsupported = [key for key in ("apply", "start_runners", "execute_runners") if key in (params or {})]
+    if not unsupported:
         return ""
     return (
         "dispatch_subagents 模型入口只接受 dry_run 作为执行开关；"
-        f"请移除 {', '.join(legacy)}，用 dry_run=true 预览，dry_run=false 真实推进。"
+        f"请移除 {', '.join(unsupported)}，用 dry_run=true 预览，dry_run=false 真实推进。"
     )
 
 
@@ -70,9 +71,9 @@ class DispatchSubagentsTool(BaseTool):
         self.spec = build_dispatch_subagents_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
-        legacy_error = _legacy_execution_param_error(params)
-        if legacy_error:
-            return ToolExecutionResult("dispatch_subagents", False, legacy_error)
+        unsupported_error = _unsupported_execution_param_error(params)
+        if unsupported_error:
+            return ToolExecutionResult("dispatch_subagents", False, unsupported_error)
         request = self._request(params)
         guidance_ids, guidance_errors = _persist_dispatch_guidance(self.agent, request.dispatch_params)
         cfg, router = self._router()
@@ -227,7 +228,7 @@ def _persist_dispatch_guidance(agent: object, params: DispatchParams) -> tuple[l
                     "target_id": run_id,
                     "message": instruction,
                     "sender": "dispatch_subagents",
-                    "metadata": {"legacy_tool": "dispatch_subagents"},
+                    "metadata": {"tool_name": "dispatch_subagents"},
                 }
             )
         except Exception as exc:

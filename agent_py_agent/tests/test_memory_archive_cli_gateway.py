@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.__main__ import build_parser
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import (
     gateway_paths,
@@ -17,6 +15,8 @@ from agent_py_agent.agent.memory_archive import (
     append_raw_event,
     append_snapshot,
 )
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.cli.parser import build_parser
 from agent_py_agent.tests.test_memory_archive_cli import (
     _run_cli_json,
     _workspace,
@@ -68,8 +68,8 @@ def test_memory_resume_cross_day_gateway_request_uses_response_fact_source(tmp_p
     assert "gateway handoff：继续昨天网关请求" in payload["brief"]["context_block"]
     assert str(response_path) in payload["brief"]["context_block"]
 
-def _create_processing_done_fallback_agent(tmp_path) -> tuple[Path, SimpleAgent, str, Path, Path]:
-    """Create agent and paths for the processing-fallback test."""
+def _create_processing_done_recovery_agent(tmp_path) -> tuple[Path, SimpleAgent, str, Path, Path]:
+    """Create agent and paths for the processing-recovery test."""
     config_path = _write_config(tmp_path)
     root = _workspace(config_path)
     agent = SimpleAgent(
@@ -88,8 +88,8 @@ def _create_processing_done_fallback_agent(tmp_path) -> tuple[Path, SimpleAgent,
     paths = gateway_paths(agent)
     return root, agent, request_id, paths, config_path
 
-def test_memory_resume_gateway_processing_path_falls_back_to_done_request(tmp_path, capsys):
-    root, agent, request_id, paths, config_path = _create_processing_done_fallback_agent(tmp_path)
+def test_memory_resume_gateway_processing_path_uses_done_request_source(tmp_path, capsys):
+    root, agent, request_id, paths, config_path = _create_processing_done_recovery_agent(tmp_path)
     processing_path, done_path, response_path = _write_gateway_processing_and_done_files(
         agent, paths, request_id
     )

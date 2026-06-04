@@ -28,7 +28,7 @@ _SCOPE_PRIORITIES = {
     "agent": 70,
     "runtime": 90,
 }
-_LOADED_CONFIG_FALLBACK_SOURCE = {"source": "loaded_agent_config", "priority": 20}
+_LOADED_CONFIG_DEFAULT_SOURCE = {"source": "loaded_agent_config", "priority": 20}
 
 
 @dataclass(frozen=True)
@@ -151,7 +151,7 @@ def _base_config_layers(config: object) -> tuple[dict[str, object], ...]:
         records = tuple(item for item in raw_layers if isinstance(item, dict))
         if records:
             return records
-    return (_LOADED_CONFIG_FALLBACK_SOURCE,)
+    return (_LOADED_CONFIG_DEFAULT_SOURCE,)
 
 
 def _apply_runtime_config_layer(
@@ -178,7 +178,7 @@ def _source_record(value: object) -> dict[str, object]:
     if isinstance(value, dict) and "source" in value:
         priority = _current_priority(value)
         return {"source": str(value.get("source") or "unknown"), "priority": priority}
-    return dict(_LOADED_CONFIG_FALLBACK_SOURCE)
+    return dict(_LOADED_CONFIG_DEFAULT_SOURCE)
 
 
 def _current_priority(source: object) -> int:

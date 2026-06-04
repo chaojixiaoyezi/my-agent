@@ -173,6 +173,10 @@ class TestCreateSubagentsToolExecute:
         assert command[1:4] == ["-u", "-m", "agent_py_agent"]
         assert command[command.index("--config") + 1] == "/tmp/my-agent-config.yaml"
         assert "subagents-dispatch" in command
+        assert "--watch" in command
+        assert "--advance" in command
+        assert command[command.index("--interval") + 1] == "0"
+        assert command[command.index("--max-cycles") + 1] == "4"
         assert "-u" in command
         assert "--background-launch-id" in command
         assert command[command.index("--background-launch-id") + 1] == "launch-1"

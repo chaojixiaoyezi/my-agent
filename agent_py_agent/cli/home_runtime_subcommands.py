@@ -5,7 +5,6 @@ import argparse
 
 from .home_runtime_commands import (
     cmd_home_index_rebuild,
-    cmd_home_migrate,
     cmd_home_retention,
     cmd_home_status,
     cmd_memory_daily_list,
@@ -17,11 +16,6 @@ def add_home_runtime_subcommands(sub: argparse._SubParsersAction) -> None:
     home_status = sub.add_parser("home-status", help="查看 my-agent 家目录入口文件和关键目录")
     home_status.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     home_status.set_defaults(func=cmd_home_status)
-
-    home_migrate = sub.add_parser("home-migrate", help="预览或执行旧 home 数据到 owner home 的非破坏性迁移")
-    home_migrate.add_argument("--apply", action="store_true", help="实际复制；不传时只预览")
-    home_migrate.add_argument("--json", action="store_true", help="输出机器可读 JSON")
-    home_migrate.set_defaults(func=cmd_home_migrate)
 
     home_retention = sub.add_parser("home-retention", help="预览或执行当前 owner home 的 retention 清理")
     home_retention.add_argument("--apply", action="store_true", help="实际删除过期文件；不传时只预览")

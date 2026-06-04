@@ -26,8 +26,8 @@ def test_create_subagents_tool_spec_uses_template_index_not_full_prompt():
 
 def test_create_subagents_inherits_current_task_workspace(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
-    from agent_py_agent.agent.config import AgentConfig
     from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
     task_root = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-01" / "big-task"
@@ -41,14 +41,33 @@ def test_create_subagents_inherits_current_task_workspace(tmp_path):
     assert task.agent_run_workspace_dir == str(task_root / "work" / "agents" / task.id)
 
 
+def test_subagent_tools_are_not_registered_when_subagents_disabled(tmp_path):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", enable_subagents=False), tmp_path)
+
+    hidden = {
+        "create_subagents",
+        "dispatch_subagents",
+        "inspect_agent_tree",
+        "schedule_child_subagents",
+        "cancel_subagents",
+        "wait",
+        "send_guidance",
+    }
+    assert hidden.isdisjoint(agent.tools.tools)
+    assert hidden.isdisjoint({spec.name for spec in agent.tools.specs(include_orchestration=True)})
+
+
 class TestTaskProgressTool:
     """测试通用任务进度账本。"""
 
     def test_updates_and_reads_current_agent_progress(self, tmp_path):
         """模型可以用一个工具记录长期任务小块进度，后续读取不会丢。"""
         from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
@@ -83,8 +102,8 @@ class TestTaskProgressRegistryTool:
 
     def test_registry_gate_allows_task_progress_updates(self, tmp_path):
         """task_progress 的工具声明必须完整，否则真实工具入口会在执行前拦掉。"""
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
@@ -104,8 +123,8 @@ class TestTaskProgressRegistryTool:
 
     def test_registry_accepts_tool_name_wrapped_payload(self, tmp_path):
         """模型常把参数包放进同名字段，注册表应统一拆包后再执行。"""
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
@@ -128,8 +147,8 @@ class TestTaskProgressRegistryTool:
     def test_registry_scope_drives_task_progress_run_id(self, tmp_path):
         """真实工具循环注入的 run_scope 应决定进度账本归属，不能落到 main。"""
         from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         envelope = ToolCallEnvelope(
@@ -153,8 +172,8 @@ class TestTaskProgressRegistryTool:
 
     def test_task_progress_soft_feedback_names_missing_evidence_items(self, tmp_path):
         """模型一写完成/结果但没证据时，工具应立即给可操作软提醒，不等最终验收。"""
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
@@ -309,8 +328,88 @@ class TestInspectAgentTreeTool:
 
         assert "cooldown_active" not in first
         assert second["cooldown_active"] is True
+        assert second["status"] == "POLL_COOLDOWN"
         assert "inspect_agent_tree_recent_duplicate" in second["warnings"]
         assert "不要高频轮询" in second["policy"]["next_step"]
+        assert second["policy"]["suggested_tool_call"]["tool"] == "wait"
+        assert second["direct_children"]["suggested_tool_call"]["tool"] == "wait"
+        assert "tasks" not in second
+
+    def test_tree_inspection_suggests_wait_for_pending_children(self, tmp_path):
+        """普通查看代理树时，运行中的子代理应引导到 wait，而不是继续轮询。"""
+        import json
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+        manager = SubAgentManager(tmp_path)
+        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
+        child.status = "RUNNING"
+        manager.save(child)
+        mock_agent = MagicMock()
+        mock_agent.subagents = manager
+        mock_agent._main_agent_run_id = "main"
+
+        payload = json.loads(InspectAgentTreeTool(mock_agent).execute({"scope": "root_tree"}).output)
+
+        assert payload["coordination_advice"]["suggested_tool_call"]["tool"] == "wait"
+        assert payload["policy"]["suggested_tool_call"]["tool"] == "wait"
+        assert "调用 wait" in payload["policy"]["next_step"]
+
+    def test_main_agent_registers_wait_tool(self, tmp_path):
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+
+        assert "wait" in agent.tools.tools
+        result = json.loads(
+            agent.tools.tools["wait"].execute(
+                {"seconds": 5, "task_id": "root-task-1", "reason": "等子代理完成"}
+            ).output
+        )
+        assert result["ok"] is True
+        assert result["scheduled"] is True
+        assert result["interval_seconds"] == 60
+        assert result["reason"] == "等子代理完成"
+        policy = agent.conversation_store.get_progress_policy(result["policy_id"])
+        assert policy is not None
+        assert policy.task_id == "root-task-1"
+        assert policy.metadata["kind"] == "subagent_progress_watch"
+
+    def test_wait_tool_uses_configured_default_and_caps_user_seconds(self, tmp_path):
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", subagent_workspace="subs", subagent_watch_interval_seconds=240),
+            tmp_path,
+        )
+
+        defaulted = json.loads(agent.tools.tools["wait"].execute({"task_id": "task-a"}).output)
+        capped = json.loads(agent.tools.tools["wait"].execute({"task_id": "task-b", "seconds": 99999}).output)
+
+        assert defaulted["interval_seconds"] == 240
+        assert capped["interval_seconds"] == 7200
+
+    def test_wait_tool_sleeps_for_cli_run_without_burning_rounds(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.runtime import wait_tool
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        sleeps: list[int] = []
+        monkeypatch.setattr(wait_tool.time, "sleep", sleeps.append)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+        agent._current_run_params = SimpleNamespace(source="cli_run", task_id="task-cli-wait")
+
+        payload = json.loads(agent.tools.tools["wait"].execute({"seconds": 60, "reason": "等子代理"}).output)
+
+        assert payload["mode"] == "blocking_sleep"
+        assert payload["slept_seconds"] == 60
+        assert payload["next_action"] == "inspect_after_wait"
+        assert sleeps == [60]
 
     def test_tree_inspection_cooldown_can_be_disabled(self, tmp_path):
         import json
@@ -335,8 +434,8 @@ class TestRaiseEventTool:
 
     def test_infers_descendant_lineage_from_task_id(self, tmp_path):
         from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
         thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1"})
@@ -382,8 +481,8 @@ class TestDispatchSubagentsTool:
         from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (
             DispatchSubagentsTool,
         )
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
         task = agent.subagents.create_run(goal="child", thought="", plan=["do"], role="worker")
@@ -408,8 +507,8 @@ class TestDispatchSubagentsTool:
         from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (
             DispatchSubagentsTool,
         )
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
         report = SimpleNamespace(
@@ -431,8 +530,8 @@ class TestDispatchSubagentsTool:
         from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (
             DispatchSubagentsTool,
         )
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
         record = SimpleNamespace(
@@ -481,8 +580,8 @@ class TestScheduleChildSubagentsTool:
         import json
 
         from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
         root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
@@ -511,8 +610,8 @@ class TestScheduleChildSubagentsTool:
         import json
 
         from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
         root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
@@ -532,8 +631,8 @@ class TestScheduleChildSubagentsTool:
         import json
 
         from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
-        from agent_py_agent.agent.config import AgentConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
         root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])

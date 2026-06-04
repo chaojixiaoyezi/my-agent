@@ -7,8 +7,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ...capabilities import CapabilityRouter
-from ...capability_config import CapabilityConfig
+from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability.config import CapabilityConfig
+
 from ..orchestration.dispatch.lock import _DispatchWatchLock
 from ..orchestration.dispatch.no_progress import DispatchNoProgressTracker, dispatch_made_progress
 from ..orchestration.dispatch.params import (
@@ -93,7 +94,7 @@ def watch_subagents(
     if params.interval < 0:
         raise ValueError("interval 不能小于 0。")
 
-    from ...subagent import DispatchWatchReport
+    from ...subagents import DispatchWatchReport
 
     cfg = capability_config or CapabilityConfig()
     records = []
@@ -101,6 +102,7 @@ def watch_subagents(
     stop_path = Path(params.stop_file) if params.stop_file else None
 
     policy = DispatchRuntimePolicy.from_config(getattr(agent, "config", None))
+    interval = max(0.0, float(params.interval or 0.0))
 
     agent._reset_dispatch_rounds()
 
@@ -114,8 +116,8 @@ def watch_subagents(
                 router=router,
                 lock_path=lock_path,
                 stop_path=stop_path,
-                active_interval=policy.active_interval,
-                idle_interval=policy.idle_interval,
+                active_interval=interval,
+                idle_interval=interval,
                 max_consecutive=policy.max_consecutive_rounds,
             ),
         )

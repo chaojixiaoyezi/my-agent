@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...agent.backend import ModelResponse
+from ...agent.backends import ModelResponse
 from ...agent.memory_archive import (
     CompressionSnapshot,
     RawMemoryEvent,

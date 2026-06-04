@@ -1,13 +1,12 @@
 
 from __future__ import annotations
 
-from ...subagent import SubAgentExecutionContext
+from ...subagents import SubAgentExecutionContext
 
 
 def runtime_guidance_prompt_block(context: SubAgentExecutionContext) -> str:
     bundle = context.context_bundle if isinstance(context.context_bundle, dict) else {}
-    reserved = bundle.get("reserved")
-    guidance = reserved.get("runtime_guidance") if isinstance(reserved, dict) else None
+    guidance = bundle.get("runtime_guidance")
     if not isinstance(guidance, list) or not guidance:
         return ""
     lines = [

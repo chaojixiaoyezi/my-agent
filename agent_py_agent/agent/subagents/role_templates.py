@@ -95,10 +95,10 @@ def role_template_id_for_role(
     role: str,
     user_template_dir: str | Path | Iterable[str | Path] | None = None,
     *,
-    fallback: str | None = None,
+    default_id: str | None = None,
 ) -> str:
     store = load_role_template_store(user_template_dir=user_template_dir)
-    return resolve_role_template_id(store, role, fallback=fallback)
+    return resolve_role_template_id(store, role, default_id=default_id)
 
 
 def role_template_index_text(

@@ -220,9 +220,13 @@ def _requeue_stale_processing(
     payload: dict,
     context: _RecoveryContext,
 ) -> str:
+    if context.startup:
+        payload["not_before_at"] = context.now + 10
     payload.update(
         {
             "status": "pending",
+            "priority": "recovery",
+            "source": str(payload.get("source") or "gateway_recovery"),
             "requeued_at": context.now,
             "last_error": (
                 "gateway restarted before request completed"

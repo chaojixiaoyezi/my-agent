@@ -4,7 +4,7 @@ import json
 
 from test_tools.backends import make_tool_registry
 
-from agent_py_agent.agent.tools import ToolRegistry
+from agent_py_agent.agent.tooling.registry import ToolRegistry
 
 
 def test_controlled_exec_tool_plans_from_write_boundary_grant(tmp_path) -> None:

@@ -12,11 +12,11 @@ import tempfile
 import time
 from pathlib import Path
 
-from agent_py_agent.agent.capabilities import CapabilityRouter
-from agent_py_agent.agent.capability_config import CapabilityConfig
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability.config import CapabilityConfig
+from agent_py_agent.agent.capability.skills import SkillRegistry
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.skills import SkillRegistry
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.services.lifecycle import (
     RecordCapabilityGrantParams,
     RecordCapabilityRequestParams,
@@ -125,7 +125,7 @@ def test_subagent_action_plan_dry_run():
         assert takeover_packet["retry_policy"]["max_attempts"] == 1
         assert takeover_packet["escalation"]["target"] == "parent"
         assert takeover_packet["manual_confirmation"]["required"] is True
-        assert takeover_packet["reserved"]["auto_execute"] is False
+        assert takeover_packet["auto_execute"] is False
         assert (fake_done.id, "reopen_for_evidence") in actions
         assert (request_task.id, "route_capability_request") in actions
         assert (broken.id, "probe_or_repair_channel") in actions

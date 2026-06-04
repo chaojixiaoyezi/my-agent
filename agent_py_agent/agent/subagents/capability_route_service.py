@@ -26,7 +26,8 @@ from .services.lifecycle import RecordCapabilityGapParams
 from .utils import _merge_list, _new_id
 
 if TYPE_CHECKING:
-    from ..capabilities import CapabilitySearchHit
+    from agent_py_agent.agent.capability import CapabilitySearchHit
+
     from .models import CapabilityRequest, SubAgentTask
 
 
@@ -97,9 +98,9 @@ def record_capability_route_gap(
             attempted_tools=gap_attempted_tools(request),
             needed_outputs=[request.expected_output] if request.expected_output else [],
             requested_scope=request_scope_snapshot(request),
+            constraints=scoped_constraints(request),
             escalation_chain=escalation_chain(task, request),
             next_record_refs=[f"capability_request:{request.id}"],
-            reserved={"constraints": scoped_constraints(request)},
         ),
     )
     _mark_capability_request_status(manager, task.id, request.id, "GAP")

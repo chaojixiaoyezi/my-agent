@@ -1,6 +1,6 @@
 """Tests for agent_py_agent.agent.log_analysis.ingest.pipeline module.
 
-Covers: IngestResult, JsonlEventSink, IngestPipeline, normalize_file_format,
+Covers: IngestResult, IngestPipeline, normalize_file_format,
 file_digest, make_batch_id, _storage_result, _storage_summary, _jsonable_mapping,
 and the top-level ingest_file function.
 """
@@ -232,18 +232,18 @@ class TestStorageResult:
 class TestStorageSummary:
     """Test the _storage_summary helper."""
 
-    def test_empty_infos_uses_fallback(self):
+    def test_empty_infos_uses_default_path(self):
         from agent_py_agent.agent.log_analysis.ingest.pipeline import _storage_summary
 
-        summary = _storage_summary([], fallback_path=Path("/fallback/events.jsonl"))
+        summary = _storage_summary([], default_path=Path("/store/events.jsonl"))
         assert summary["count"] == 0
-        assert summary["path"] == "/fallback/events.jsonl"
+        assert summary["path"] == "/store/events.jsonl"
 
     def test_single_info(self):
         from agent_py_agent.agent.log_analysis.ingest.pipeline import _storage_summary
 
         infos = [{"count": 10, "path": "/a/events.jsonl"}]
-        summary = _storage_summary(infos, fallback_path=Path("/fb"))
+        summary = _storage_summary(infos, default_path=Path("/store/events.jsonl"))
         assert summary["count"] == 10
         assert summary["path"] == "/a/events.jsonl"
         assert "paths" not in summary
@@ -255,7 +255,7 @@ class TestStorageSummary:
             {"count": 5, "path": "/a/events.jsonl"},
             {"count": 5, "path": "/a/events.jsonl"},
         ]
-        summary = _storage_summary(infos, fallback_path=Path("/fb"))
+        summary = _storage_summary(infos, default_path=Path("/store/events.jsonl"))
         assert summary["count"] == 10
         assert "paths" not in summary
 
@@ -266,7 +266,7 @@ class TestStorageSummary:
             {"count": 5, "path": "/a/events.jsonl"},
             {"count": 3, "path": "/b/events.jsonl"},
         ]
-        summary = _storage_summary(infos, fallback_path=Path("/fb"))
+        summary = _storage_summary(infos, default_path=Path("/store/events.jsonl"))
         assert summary["count"] == 8
         assert "paths" in summary
         assert len(summary["paths"]) == 2
@@ -275,7 +275,7 @@ class TestStorageSummary:
         from agent_py_agent.agent.log_analysis.ingest.pipeline import _storage_summary
 
         infos = [{"count": None, "path": "/a"}]
-        summary = _storage_summary(infos, fallback_path=Path("/fb"))
+        summary = _storage_summary(infos, default_path=Path("/store/events.jsonl"))
         assert summary["count"] == 0
 
 
@@ -303,59 +303,6 @@ class TestJsonableMapping:
         from agent_py_agent.agent.log_analysis.ingest.pipeline import _jsonable_mapping
 
         assert _jsonable_mapping({}) == {}
-
-
-# ---------------------------------------------------------------------------
-# JsonlEventSink
-# ---------------------------------------------------------------------------
-
-
-class TestJsonlEventSink:
-    """Test the JsonlEventSink class."""
-
-    def test_init_creates_path(self, tmp_path: Path):
-        from agent_py_agent.agent.log_analysis.ingest.pipeline import JsonlEventSink
-
-        sink = JsonlEventSink(tmp_path)
-        assert sink.root == tmp_path
-        assert sink.events_path == tmp_path / "events.jsonl"
-
-    def test_write_events_empty(self, tmp_path: Path):
-        from agent_py_agent.agent.log_analysis.ingest.pipeline import JsonlEventSink
-
-        sink = JsonlEventSink(tmp_path)
-        result = sink.write_events([])
-        assert result["count"] == 0
-        assert "events.jsonl" in result["path"]
-
-    def test_write_events_creates_file(self, tmp_path: Path):
-        from agent_py_agent.agent.log_analysis.ingest.pipeline import JsonlEventSink
-
-        sink = JsonlEventSink(tmp_path)
-        events = [{"id": 1, "msg": "hello"}, {"id": 2, "msg": "world"}]
-        result = sink.write_events(events)
-        assert result["count"] == 2
-        assert sink.events_path.exists()
-
-    def test_write_events_content_is_jsonl(self, tmp_path: Path):
-        from agent_py_agent.agent.log_analysis.ingest.pipeline import JsonlEventSink
-
-        sink = JsonlEventSink(tmp_path)
-        events = [{"id": 1}, {"id": 2}]
-        sink.write_events(events)
-        lines = sink.events_path.read_text().strip().splitlines()
-        assert len(lines) == 2
-        for line in lines:
-            json.loads(line)  # must be valid JSON
-
-    def test_write_events_appends(self, tmp_path: Path):
-        from agent_py_agent.agent.log_analysis.ingest.pipeline import JsonlEventSink
-
-        sink = JsonlEventSink(tmp_path)
-        sink.write_events([{"id": 1}])
-        sink.write_events([{"id": 2}])
-        lines = sink.events_path.read_text().strip().splitlines()
-        assert len(lines) == 2
 
 
 # ---------------------------------------------------------------------------

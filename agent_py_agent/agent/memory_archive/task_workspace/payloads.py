@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+import json
 from typing import Any
 
 from ...common.json_io import append_jsonl_records, read_json_object, write_json_object
@@ -21,12 +21,6 @@ def state_payload(task_id: str, run_id: str, task: Any, now: float) -> dict[str,
         "evidence_refs": list(getattr(task, "evidence_refs", []) or []),
         "child_run_ids": list(getattr(task, "child_ids", []) or []),
         "updated_at": now,
-        "legacy": {
-            "task_dir": str(getattr(task, "task_dir", "")),
-            "task_json": str(Path(str(getattr(task, "task_dir", ""))) / "task.json")
-            if getattr(task, "task_dir", "")
-            else "",
-        },
     }
 
 
@@ -42,7 +36,8 @@ def timeline_event(task: Any, now: float, previous_state: dict[str, object]) -> 
         "previous_status": str(previous_state.get("status") or ""),
         "summary": str(getattr(task, "latest_summary", "")),
         "refs": {
-            "legacy_task_dir": str(getattr(task, "task_dir", "")),
+            "task_workspace": str(getattr(task, "task_workspace_dir", "")),
+            "agent_run_workspace": str(getattr(task, "agent_run_workspace_dir", "")),
         },
     }
 
@@ -52,7 +47,38 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
 
 
 def append_timeline(path: Path, payload: dict[str, object]) -> None:
+    if _last_event_signature(path) == _event_signature(payload):
+        return
     append_jsonl_records(path, [payload])
+
+
+def _last_event_signature(path: Path) -> tuple[object, ...] | None:
+    if not path.exists():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        return _event_signature(payload) if isinstance(payload, dict) else None
+    return None
+
+
+def _event_signature(payload: dict[str, object]) -> tuple[object, ...]:
+    return (
+        payload.get("event"),
+        payload.get("task_id"),
+        payload.get("run_id"),
+        payload.get("status"),
+        payload.get("summary"),
+        tuple(sorted((payload.get("refs") or {}).items())) if isinstance(payload.get("refs"), dict) else (),
+    )
 
 
 __all__ = [

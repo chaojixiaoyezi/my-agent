@@ -1,11 +1,10 @@
 
 from __future__ import annotations
 
-"""re-exports all public run_scenario_* functions from the scenario_cases package.
+"""Scenario case public entrypoint.
 
 给人看的解释：
-这个包把 scenario_cases.py 拆成了几个子模块，但对外保持一样的导入接口。
-所有 run_scenario_* 函数都能从这里直接导入。
+各 scenario 按领域放在子模块里；本包公开当前可运行的 case 函数。
 """
 
 from .gateway_cases import (

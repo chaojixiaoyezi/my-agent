@@ -143,7 +143,7 @@ class TestCreateSubagentsToolRawPromptRepair:
             "extra_write_roots": ["/tmp/site/build"],
             "required_files": ["index.html", "items.html", "item-detail.html", "style.css", "app.js"],
             "forbidden_files": [
-                "product.html", "old-product.html", "legacy.html", "obsolete.html",
+                "product.html", "old-product.html", "stale.html", "obsolete.html",
                 "output.json", "RUNNER_RESULT.md", "execution_context.json",
             ],
             "hierarchy_contracts": ["depth=1 小傻妞-*", "depth=2 小小傻妞-*", "depth=3 小小小傻妞-*", "max_depth=3"],

@@ -45,7 +45,7 @@ class TestItemPreparationContext:
     artifact_dirs: dict[str, Path]
     artifact_paths: list[tuple[str, Path]]
     artifact_expected_content: dict[Path, str]
-    fallback_dir: Path | None
+    default_dir: Path | None
     workspace_root: Path
 
 
@@ -58,7 +58,7 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
         artifact_dirs=artifact_dirs,
         artifact_paths=_artifact_paths(request.output, workspace_root),
         artifact_expected_content=_artifact_expected_content_by_path(request.output, workspace_root),
-        fallback_dir=_single_artifact_dir(artifact_dirs),
+        default_dir=_single_artifact_dir(artifact_dirs),
         workspace_root=workspace_root,
     )
     prepared = _artifact_pytest_items(context) if not request.tests else [
@@ -118,7 +118,7 @@ def _prepared_test_item(
     if command_dir is not None:
         item["working_dir"] = _relative_or_absolute(command_dir, context.workspace_root)
         return item
-    inferred = _named_artifact_dir(item, context.artifact_dirs) or context.fallback_dir
+    inferred = _named_artifact_dir(item, context.artifact_dirs) or context.default_dir
     if inferred is None:
         return item
     item["working_dir"] = _relative_or_absolute(inferred, context.workspace_root)

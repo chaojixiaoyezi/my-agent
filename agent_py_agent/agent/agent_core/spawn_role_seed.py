@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..subagent import SubAgentTask
+from ..subagents import SubAgentTask
 from ..subagents.role_templates import COORDINATOR_TOOLS
 from ..subagents.services.base import CreateRunParams
 from .subagent.params import SpawnSubagentsParams

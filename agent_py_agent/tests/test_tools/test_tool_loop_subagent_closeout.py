@@ -13,10 +13,10 @@ from agent_py_agent.agent.agent_core.runner.context import (
 from agent_py_agent.agent.agent_core.tool_loop.round_subagent_output import (
     subagent_output_json_response,
 )
-from agent_py_agent.agent.backend import ModelResponse
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.subagent import EvidencePacket, VerificationEvidence
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.subagents import EvidencePacket, VerificationEvidence
 
 from .backends import DispatchCompletionBackend, OutputJsonCompletionBackend
 
@@ -91,14 +91,14 @@ def test_subagent_output_json_closeout_reports_dirty_output_json():
         Path(task.output_json).write_text("{bad-output", encoding="utf-8")
         previous = set_current_subagent_context(agent, run_id=task.id)
         try:
-            response = subagent_output_json_response(agent, ModelResponse(text="fallback", backend="fake"))
+            response = subagent_output_json_response(agent, ModelResponse(text="base response", backend="fake"))
         finally:
             restore_current_subagent_context(agent, previous)
 
         assert "[SUBAGENT_RESULT_LOAD_ERROR]" in response.text
         assert "subagent_output_json.output_json" in response.text
         assert task.output_json in response.text
-        assert "fallback" not in response.text
+        assert "base response" not in response.text
 
 
 def test_completed_dispatch_returns_to_parent_synthesis_turn():

@@ -1,12 +1,10 @@
 
 from __future__ import annotations
 
-"""implements the SimpleAgent prompt/model/tool loop plus memory facade methods.
+"""implements the SimpleAgent prompt/model/tool loop plus memory methods.
 
 这个文件是主代理最基础的一轮对话链路：召回记忆、构建 prompt、调用模型、解析工具调用、把工具结果再喂回模型。
 它不处理子代理调度细节，那些已经拆到别的 mixin。
-
-Facade pattern: delegates to service classes in runtime/services.py.
 """
 
 from contextlib import contextmanager
@@ -27,8 +25,8 @@ from .runtime.loop_support import (
     _runtime_loop_params,
 )
 from .runtime.run_params import (
-    RunCompatibilityFields,
-    run_params_from_compat,
+    RunKeywordFields,
+    run_params_from_keywords,
     run_params_with_materialized_delivery_contract,
     run_params_with_request_id,
 )
@@ -150,9 +148,9 @@ class SimpleAgentRuntimeMixin:
         on_chunk: object = None,
         context_scope: str | None = None,
     ):
-        params = run_params_from_compat(
+        params = run_params_from_keywords(
             params,
-            RunCompatibilityFields(
+            RunKeywordFields(
                 inject=inject,
                 prompt_files=prompt_files,
                 save=save,
@@ -197,11 +195,13 @@ class SimpleAgentRuntimeMixin:
             task_id=rp.task_id,
             source=rp.source,
             do_save=self.config.auto_save_memory if rp.save is None else rp.save,
+            task_attributes=rp.task_attributes,
             recovery_task_refs=rp.recovery_task_refs,
             recovery_content_paths=rp.recovery_content_paths,
             recovery_next_actions=rp.recovery_next_actions,
             tool_rounds=params.tool_rounds,
             compact_auto_continue_depth=rp.compact_auto_continue_depth,
+            compact_auto_no_tool_continue_depth=rp.compact_auto_no_tool_continue_depth,
             main_context_bundle_path=params.main_context_bundle_path,
             main_context_bundle_markdown_path=params.main_context_bundle_markdown_path,
         )
@@ -227,7 +227,7 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
         )
         if not decision.should_continue:
             return result
-        next_params = _compact_auto_continue_params(current_params, decision.injection)
+        next_params = _compact_auto_continue_params(current_params, decision.injection, result)
         continued = _run_once_with_params(agent, decision.user_prompt, next_params)
         result = mark_compact_auto_continued(continued, result, depth=next_params.compact_auto_continue_depth)
         current_params = next_params
@@ -263,9 +263,61 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
         return agent._get_services().finalization.finalize(ctx)
 
 
-def _compact_auto_continue_params(params: RunParams, injection: str) -> RunParams:
+def _compact_auto_continue_params(params: RunParams, injection: str, source_result) -> RunParams:
+    no_tool_depth = params.compact_auto_no_tool_continue_depth + 1 if _result_has_no_tool_progress(source_result) else 0
     return replace(
         params,
-        inject=[*(params.inject or []), injection],
+        inject=[*_non_compact_auto_injections(params.inject), injection],
         compact_auto_continue_depth=params.compact_auto_continue_depth + 1,
+        compact_auto_no_tool_continue_depth=no_tool_depth,
+        carried_archive_tool_calls=_merged_archive_tool_calls(
+            params.carried_archive_tool_calls,
+            getattr(source_result, "archive_tool_calls", None),
+        ),
     )
+
+
+def _result_has_no_tool_progress(result) -> bool:
+    return int(getattr(result, "tool_rounds", 0) or 0) <= 0 and not list(getattr(result, "executed_tools", None) or [])
+
+
+def _non_compact_auto_injections(injections: list[str] | None) -> list[str]:
+    return [
+        item
+        for item in list(injections or [])
+        if not str(item).lstrip().startswith("# Compact Auto Continuation")
+    ]
+
+
+def _merged_archive_tool_calls(
+    existing: list[dict[str, object]] | None,
+    incoming: list[dict[str, object]] | None,
+) -> list[dict[str, object]]:
+    merged: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for record in [*list(existing or []), *list(incoming or [])]:
+        if not isinstance(record, dict):
+            continue
+        key = (
+            str(record.get("run_id") or ""),
+            str(record.get("tool") or ""),
+            str(record.get("source_input") or _record_parameter_path(record)),
+            str(record.get("output_hash") or record.get("sha256") or ""),
+            str(record.get("scoped_call_id") or record.get("call_id") or record.get("id") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(record)
+    return merged
+
+
+def _record_parameter_path(record: dict[str, object]) -> str:
+    params = record.get("parameters")
+    if not isinstance(params, dict):
+        return ""
+    for key in ("path", "file_path", "target_path", "output_path", "artifact_ref", "source_ref"):
+        value = str(params.get(key) or "").strip()
+        if value:
+            return value
+    return ""

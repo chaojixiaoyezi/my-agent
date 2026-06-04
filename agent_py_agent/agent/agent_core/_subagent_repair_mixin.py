@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from ..memory_archive import write_recovery_snapshot
 from ..memory_archive.snapshots import RecoverySnapshotInput
-from ..subagent import parse_subagent_runner_output
+from ..subagents import parse_subagent_runner_output
 from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
 from .runner.prompts import (
     _append_runner_repair_failure,

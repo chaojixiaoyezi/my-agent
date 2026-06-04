@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import time
 
-from ..agent.config import load_config
-from ..agent.local_store import LocalStore
+from ..agent.local_storage import LocalStore
+from ..agent.settings import load_config
 from ..agent.subagents.models import TaskStatus
 from ..agent.task_registry import TaskRegistry, format_task_list, get_task_summary
 from .common import ROOT, resolve_workspace_root

@@ -46,6 +46,8 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecu
 
 
 def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) -> ToolExecutionResult:
+    if _has_char_window_params(params):
+        return _char_window_result(content, params, max_chars)
     lines = content.splitlines()
     raw_end_line = _bundled_filesystem_param(params, "end_line")
     try:
@@ -75,6 +77,51 @@ def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) 
         max_chars=max_chars,
     )
     return ToolExecutionResult("read_file", True, result or "(空文件)")
+
+
+def _has_char_window_params(params: dict[str, Any]) -> bool:
+    return (
+        _bundled_filesystem_param(params, "offset") is not None
+        or _bundled_filesystem_param(params, "start_char") is not None
+        or _bundled_filesystem_param(params, "max_chars") is not None
+    )
+
+
+def _char_window_result(content: str, params: dict[str, Any], default_max_chars: int) -> ToolExecutionResult:
+    try:
+        offset = _int_param(
+            _bundled_filesystem_param(params, "offset")
+            if _bundled_filesystem_param(params, "offset") is not None
+            else _bundled_filesystem_param(params, "start_char"),
+            name="offset",
+            default=0,
+            min_value=0,
+        )
+        limit = _int_param(
+            _bundled_filesystem_param(params, "max_chars"),
+            name="max_chars",
+            default=default_max_chars,
+            min_value=1,
+        )
+    except ValueError as exc:
+        return ToolExecutionResult("read_file", False, str(exc))
+    if offset >= len(content):
+        return ToolExecutionResult(
+            "read_file",
+            False,
+            f"offset 超出文件末尾：offset={offset}, total_chars={len(content)}。请改用更小的 offset。",
+        )
+    window = content[offset : offset + min(limit, default_max_chars)]
+    next_offset = offset + len(window)
+    header = f"[char-window offset={offset} chars={len(window)} total_chars={len(content)}]"
+    if next_offset < len(content):
+        footer = (
+            "PARTIAL view only; 这不是完整文件。"
+            f" total_chars={len(content)}; next_offset={next_offset}; limit_chars={min(limit, default_max_chars)}。"
+            f" 继续读取请调用 read_file(offset={next_offset}, max_chars={min(limit, default_max_chars)})。"
+        )
+        return ToolExecutionResult("read_file", True, f"{header}\n{window}\n{footer}")
+    return ToolExecutionResult("read_file", True, f"{header}\n{window}")
 
 
 def _missing_tool_artifact_typo_hint(tool, raw_path: str) -> str:
@@ -117,18 +164,33 @@ def _render_numbered_read_lines(
         if not rendered and len(item) > max_chars:
             return "\n".join([
                 item[:max_chars],
-                _truncated_read_footer(len(lines), min(line_number + 1, len(lines)), max_chars),
+                _truncated_read_footer(
+                    len(lines),
+                    min(line_number + 1, len(lines)),
+                    max_chars,
+                    next_offset=max_chars,
+                ),
             ])
         rendered.append(item)
         used_chars += separator + len(item)
     return "\n".join(rendered)
 
 
-def _truncated_read_footer(total_lines: int, next_start_line: int, max_chars: int) -> str:
-    return (
-        f"... 已截断; total_lines={total_lines}; "
-        f"next_start_line={next_start_line}; limit_chars={max_chars}"
+def _truncated_read_footer(
+    total_lines: int,
+    next_start_line: int,
+    max_chars: int,
+    *,
+    next_offset: int | None = None,
+) -> str:
+    footer = (
+        "... 已截断；PARTIAL view only; 这不是完整文件。"
+        f" total_lines={total_lines}; next_start_line={next_start_line}; limit_chars={max_chars}。"
+        f" 继续读取请调用 read_file(start_line={next_start_line})。"
     )
+    if next_offset is not None:
+        footer += f"; next_offset={next_offset}"
+    return footer
 
 
 def _past_eof_line_message(start_line: int, total_lines: int) -> str:

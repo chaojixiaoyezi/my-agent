@@ -4,21 +4,27 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from agent_py_agent.agent.agent_core._runtime_params import FinalizeContext
 from agent_py_agent.agent.agent_core.compact_auto_continuation import (
     build_compact_auto_continue_injection,
+    compact_auto_continuation_decision,
 )
 from agent_py_agent.agent.agent_core.finalization_compact_auto import (
+    _should_auto_continue_after_cycle,
     _should_return_after_continuation,
+    compact_auto_cycle_fields,
 )
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.agent_core.runtime_mixin import _compact_auto_continue_params
 from agent_py_agent.agent.backends.base import ModelResponse
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive.compact_continue_packet import (
     CompactContinuePacketRequest,
     build_compact_continue_packet,
 )
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli.local_commands import _default_run_recovery_next_actions
 
 
@@ -117,6 +123,7 @@ def _finalize_context_for_continuation(*, tool_rounds: int, executed_tools: list
         recovery_task_refs=None,
         recovery_content_paths=None,
         recovery_next_actions=None,
+        task_attributes=None,
         tool_rounds=tool_rounds,
         compact_auto_continue_depth=1,
     )
@@ -134,7 +141,139 @@ def test_preflight_continuation_can_compact_again_after_tool_progress() -> None:
 def test_preflight_continuation_returns_when_no_tool_progress() -> None:
     ctx = _finalize_context_for_continuation(tool_rounds=0, executed_tools=[])
 
+    assert _should_return_after_continuation(ctx, {"trigger_source": "token_budget"}) is True
+
+
+def test_preflight_compact_response_continues_even_without_tool_progress() -> None:
+    ctx = _finalize_context_for_continuation(tool_rounds=0, executed_tools=[])
+
+    assert _should_return_after_continuation(ctx, {"trigger_source": "preflight"}) is False
+
+
+def test_repeated_preflight_compact_without_tool_progress_returns_after_limit() -> None:
+    ctx = replace(
+        _finalize_context_for_continuation(tool_rounds=0, executed_tools=[]),
+        compact_auto_no_tool_continue_depth=3,
+    )
+
     assert _should_return_after_continuation(ctx, {"trigger_source": "preflight"}) is True
+
+
+def test_compact_auto_continue_replaces_previous_compact_injection() -> None:
+    params = RunParams(inject=["keep me", "# Compact Auto Continuation\nold"])
+    result = type("Result", (), {"tool_rounds": 1, "executed_tools": ["read_file"]})()
+
+    updated = _compact_auto_continue_params(params, "# Compact Auto Continuation\nnew", result)
+
+    assert updated.inject == ["keep me", "# Compact Auto Continuation\nnew"]
+    assert updated.compact_auto_no_tool_continue_depth == 0
+
+
+def test_compact_auto_continue_carries_archive_tool_calls_for_closeout_evidence() -> None:
+    read_record = {
+        "run_id": "run-1",
+        "scoped_call_id": "run-1:1-1",
+        "call_id": "1-1",
+        "tool": "read_file",
+        "parameters": {"path": "/tmp/source/shard-01.md"},
+        "ok": True,
+    }
+    write_record = {
+        "run_id": "run-1",
+        "scoped_call_id": "run-1:2-1",
+        "call_id": "2-1",
+        "tool": "write_file",
+        "parameters": {"path": "/tmp/output/final_report.md"},
+        "ok": True,
+    }
+    next_read_same_call_id = {
+        "run_id": "run-1",
+        "scoped_call_id": "run-1:1-1",
+        "call_id": "1-1",
+        "tool": "read_file",
+        "parameters": {"path": "/tmp/source/shard-02.md"},
+        "ok": True,
+    }
+    params = RunParams(carried_archive_tool_calls=[read_record])
+    result = type(
+        "Result",
+        (),
+        {
+            "tool_rounds": 1,
+            "executed_tools": ["write_file"],
+            "archive_tool_calls": [read_record, next_read_same_call_id, write_record],
+        },
+    )()
+
+    updated = _compact_auto_continue_params(params, "# Compact Auto Continuation\nnew", result)
+
+    assert updated.carried_archive_tool_calls == [read_record, next_read_same_call_id, write_record]
+
+
+def test_continuation_with_tool_progress_continues_after_normal_threshold_compact() -> None:
+    ctx = _finalize_context_for_continuation(
+        tool_rounds=1,
+        executed_tools=[{"tool": "read_file", "success": True}],
+    )
+
+    assert _should_auto_continue_after_cycle(
+        ctx,
+        {"source": "token_budget", "reason": "normal_threshold"},
+        {"allowed_to_continue": True},
+    ) is True
+
+
+def test_first_normal_threshold_compact_continues_after_tool_progress() -> None:
+    ctx = replace(
+        _finalize_context_for_continuation(
+            tool_rounds=3,
+            executed_tools=["read_file", "write_file"],
+        ),
+        compact_auto_continue_depth=0,
+    )
+
+    assert _should_auto_continue_after_cycle(
+        ctx,
+        {"source": "token_budget", "reason": "normal_threshold"},
+        {"allowed_to_continue": True},
+    ) is True
+
+
+def test_delivery_complete_result_never_auto_continues() -> None:
+    result = type(
+        "Result",
+        (),
+        {
+            "response": "[MAIN_AGENT_DELIVERY_COMPLETE]\n已交付\n[/MAIN_AGENT_DELIVERY_COMPLETE]",
+            "memory_compact_auto_allowed_to_continue": True,
+            "memory_compact_auto_continue_ready": True,
+            "memory_compact_auto_apply_id": "apply-done",
+            "memory_compact_auto_continue_packet": {"ready_to_continue": True},
+        },
+    )()
+
+    decision = compact_auto_continuation_decision(result)
+
+    assert decision.should_continue is False
+    assert decision.reason == "delivery_complete"
+
+
+def test_finalization_skips_compact_cycle_after_delivery_complete(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    ctx = replace(
+        _finalize_context_for_continuation(tool_rounds=0, executed_tools=[]),
+        final_response=ModelResponse(
+            text="[MAIN_AGENT_DELIVERY_COMPLETE]\n已交付\n[/MAIN_AGENT_DELIVERY_COMPLETE]",
+            backend="test",
+            usage={"input_tokens": 19_000, "output_tokens": 100},
+        ),
+    )
+
+    fields = compact_auto_cycle_fields(agent, ctx, {"turn": 19_100, "active": 19_100})
+
+    assert fields["memory_compact_auto_status"] == "skipped_after_delivery_complete"
+    assert fields["memory_compact_auto_allowed_to_continue"] is False
+    assert fields["memory_compact_auto_continue_packet"] == {}
 
 
 def test_run_auto_compact_apply_continues_once_after_continue_packet(tmp_path):
@@ -280,9 +419,17 @@ def test_compact_auto_continue_injection_prioritizes_resume_focus_and_captured_r
             "next_step": "合并已有研究笔记",
             "changed_files": ["outputs/final-report.md"],
             "read_files": ["notes/openclaw.md", "notes/hermes.md"],
+            "tool_progress": [
+                {
+                    "tool": "read_file",
+                    "source_path": "notes/hermes.md",
+                    "artifact_ref": "run-1:tool-2",
+                    "size_bytes": 4096,
+                }
+            ],
         },
         "artifact_read_hints": [
-            {"artifact_ref": "run-1:tool-2", "fallback_path": "artifacts/search-result.json"}
+            {"artifact_ref": "run-1:tool-2", "source_path": "artifacts/search-result.json"}
         ],
         "recommended_read_paths": ["memory_archive/compact_applies/apply-1.work_state_snapshot.json"],
     }
@@ -295,9 +442,96 @@ def test_compact_auto_continue_injection_prioritizes_resume_focus_and_captured_r
     assert "outputs/final-report.md" in rendered
     assert "notes/openclaw.md" in rendered
     assert "run-1:tool-2" in rendered
+    assert "## Exact Tool Output Index" in rendered
+    assert "source_path=notes/hermes.md" in rendered
+    assert "精确字段" in rendered
     assert "不要先重读 compact 文件" in rendered
+    assert "next_path" in rendered
+    assert "END" in rendered
     assert "## Recommended Read Paths" not in rendered
     assert "memory_archive/compact_applies/apply-1.work_state_snapshot.json" not in rendered
+
+
+def test_compact_auto_continue_injection_shows_existing_child_agents() -> None:
+    packet = {
+        "apply_id": "apply-children",
+        "continue_mode": "automated_guarded",
+        "guard": {"status": "allowed"},
+        "work_state_snapshot": {
+            "goal": "整理多个项目架构报告",
+            "current_phase": "compact_apply",
+            "next_step": "继续汇总现有子代理结果",
+            "runtime_handoff": {
+                "agent_tree": {
+                    "counts": {"total": 1, "running": 1},
+                    "active_agents": [
+                        {
+                            "run_id": "subagent-child-a",
+                            "parent_run_id": "run-parent",
+                            "status": "RUNNING",
+                            "current_tool": "read_file",
+                            "last_progress_summary": "正在读核心模块",
+                            "state_ref": "tasks/2026-06-04/demo-task/work/agents/subagent-child-a/canonical_state.json",
+                        }
+                    ],
+                }
+            },
+        },
+    }
+
+    rendered = build_compact_auto_continue_injection(packet)
+
+    assert "## Existing Child Agents" in rendered
+    assert "subagent-child-a" in rendered
+    assert "正在读核心模块" in rendered
+    assert "不要重复 create_subagents" in rendered
+
+
+def test_compact_auto_continue_injection_shows_completed_child_agents() -> None:
+    packet = build_compact_continue_packet(
+        CompactContinuePacketRequest(
+            metadata={"apply_id": "apply-done-children", "plan_id": "plan-done-children"},
+            work_state={
+                "goal": "整理多个项目架构报告",
+                "phase": "compact_apply",
+                "next_step": "汇总已完成子代理报告",
+                "next_actions": ["汇总已完成子代理报告"],
+                "runtime_handoff": {
+                    "agent_tree": {
+                        "counts": {"total": 2, "done": 2},
+                        "active_agents": [],
+                        "recent_agents": [
+                            {
+                                "run_id": "subagent-child-a",
+                                "status": "DONE",
+                                "last_progress_summary": "已写 codex-main-report.md",
+                            },
+                            {
+                                "run_id": "subagent-child-b",
+                                "status": "DONE",
+                                "last_progress_summary": "已写 hermes-agent-main-report.md",
+                            },
+                        ],
+                    }
+                },
+            },
+            consistency={"status": "ok"},
+            action_guard={"allowed_to_continue": True, "status": "allowed"},
+            handoff={},
+            recommended_read_paths=[],
+            next_actions=["汇总已完成子代理报告"],
+            subagent_owner_refs={},
+            main_context_bundle={},
+        )
+    )
+
+    rendered = build_compact_auto_continue_injection(packet)
+
+    assert packet["work_state_snapshot"]["runtime_handoff"]["agent_tree"]["recent_agents"]
+    assert "## Existing Child Agents" in rendered
+    assert "subagent-child-a" in rendered
+    assert "DONE" in rendered
+    assert "汇总已完成子代理报告" in rendered
 
 
 def test_compact_continue_packet_carries_task_state_refs_for_repeat_resume() -> None:
@@ -315,8 +549,17 @@ def test_compact_continue_packet_carries_task_state_refs_for_repeat_resume() -> 
                     {
                         "kind": "tool_output",
                         "path": "artifacts/search-result.json",
+                        "source_path": "notes/search-source.md",
                         "tool": "web_search",
                         "scoped_call_id": "run-1:tool-2",
+                    }
+                ],
+                "tool_progress": [
+                    {
+                        "tool": "web_search",
+                        "source_path": "notes/search-source.md",
+                        "artifact_ref": "run-1:tool-2",
+                        "size_bytes": 2048,
                     }
                 ],
             },
@@ -337,6 +580,7 @@ def test_compact_continue_packet_carries_task_state_refs_for_repeat_resume() -> 
     assert "outputs/final-report.md" in refs["changed_files"]
     assert "notes/openclaw.md" in refs["read_files"]
     assert refs["artifact_refs"][0]["artifact_ref"] == "run-1:tool-2"
+    assert packet["work_state_snapshot"]["tool_progress"][0]["source_path"] == "notes/search-source.md"
 
 
 def test_compact_continue_packet_ignores_reader_first_recovery_actions() -> None:

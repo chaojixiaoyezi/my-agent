@@ -1,9 +1,9 @@
 
-"""本包把 LOG 配置拆成 config_model（数据模型和路径工具）与 config_loading（加载和归一化）两个子模块。
+"""LOG 配置公共入口。
 
 新手说明:
-从外部 import 时路径不变，仍然可以用 from ...config import LogAnalysisConfig。
-__init__.py 把两个子模块的公开名称全部 re-export，保证拆包后上游代码不需要修改。
+config_model 放数据模型和路径工具，config_loading 放加载和归一化。
+外部代码从本包导入当前公开 API。
 """
 
 from .config_loading import (

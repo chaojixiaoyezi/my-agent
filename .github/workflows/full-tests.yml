@@ -49,5 +49,5 @@ jobs:
       - name: Run architecture guardrails
         run: python3 -m pytest agent_py_agent/tests/test_architecture_guardrails.py -q --tb=short
 
-      - name: Check code size strict mode
+      - name: Check local complexity guardrails
         run: python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json

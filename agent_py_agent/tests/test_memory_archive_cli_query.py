@@ -6,8 +6,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.__main__ import build_parser
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import (
     gateway_paths,
@@ -20,6 +18,8 @@ from agent_py_agent.agent.memory_archive import (
     append_raw_event,
     append_snapshot,
 )
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.cli.parser import build_parser
 
 
 def _write_config(tmp_path: Path) -> Path:
@@ -298,10 +298,10 @@ def _write_cross_day_gateway_fixture(agent: SimpleAgent, *, request_id: str = "g
     return request_path, response_path
 
 
-def _create_processing_done_fallback_agent(
+def _create_processing_done_recovery_agent(
     tmp_path,
 ) -> tuple[Path, SimpleAgent, str, Path, Path]:
-    """Create agent and paths for the processing-fallback test."""
+    """Create agent and paths for the processing-recovery test."""
     config_path = _write_config(tmp_path)
     root = _workspace(config_path)
     agent = SimpleAgent(
@@ -393,9 +393,9 @@ def test_memory_resume_cross_day_gateway_request_uses_response_fact_source(tmp_p
     assert str(response_path) in payload["brief"]["context_block"]
 
 
-def test_memory_resume_gateway_processing_path_falls_back_to_done_request(tmp_path, capsys):
-    """LLM: Tests that memory-resume falls back from processing to done gateway request path."""
-    root, agent, request_id, paths, config_path = _create_processing_done_fallback_agent(tmp_path)
+def test_memory_resume_gateway_processing_path_uses_done_request_source(tmp_path, capsys):
+    """LLM: Tests that memory-resume uses done request source when processing moved gateway request path."""
+    root, agent, request_id, paths, config_path = _create_processing_done_recovery_agent(tmp_path)
     processing_path, done_path, response_path = _write_gateway_processing_and_done_files(
         agent, paths, request_id
     )

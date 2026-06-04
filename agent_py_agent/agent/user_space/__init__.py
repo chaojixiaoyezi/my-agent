@@ -56,12 +56,6 @@ from .home_memory_notes import (
     append_hot_note,
     upsert_lesson_note,
 )
-from .home_migration import (
-    HomeMigrationAction,
-    HomeMigrationResult,
-    apply_home_migration,
-    plan_home_migration,
-)
 from .home_retention import (
     OwnerRetentionPlan,
     RetentionAction,
@@ -79,9 +73,6 @@ from .identity_store import (
     resolve_owner_from_provider_identity,
     resolve_owner_from_provider_identity_report,
 )
-from .legacy_user_paths import LegacyUserPaths, get_legacy_admin_paths, get_legacy_user_paths
-from .manager import UserSpaceManager
-from .migration import migrate_to_user_space
 from .owner_policy import (
     EffectiveOwnerPolicy,
     OwnerDiskUsage,
@@ -127,8 +118,6 @@ __all__ = [
     "CreateCapabilityRequest",
     "CreateTemporaryGrant",
     "HomeBackupManifest",
-    "HomeMigrationAction",
-    "HomeMigrationResult",
     "HomeMemoryWriteResult",
     "HomeIndexRebuildResult",
     "LessonNoteRequest",
@@ -145,8 +134,6 @@ __all__ = [
     "ProviderIdentityLookupReport",
     "ProviderOwnerResolutionReport",
     "ProviderIdentityRecord",
-    "LegacyUserPaths",
-    "UserSpaceManager",
     "EnsureRunWorkspaceRequest",
     "MainContextBundleRequest",
     "MainContextBundleResult",
@@ -162,7 +149,6 @@ __all__ = [
     "append_owner_skill_candidate",
     "append_hot_note",
     "apply_owner_retention",
-    "apply_home_migration",
     "build_home_doctor_report",
     "build_main_context_bundle",
     "close_capability_request",
@@ -179,8 +165,6 @@ __all__ = [
     "ensure_run_workspace",
     "expire_capability_requests",
     "expire_temporary_grants",
-    "get_legacy_admin_paths",
-    "get_legacy_user_paths",
     "home_paths",
     "home_paths_with_owner",
     "latest_main_context_bundle_path",
@@ -198,10 +182,8 @@ __all__ = [
     "list_temporary_grants_report",
     "lookup_provider_identity",
     "lookup_provider_identity_report",
-    "migrate_to_user_space",
     "owner_identity_from_config",
     "owner_disk_usage",
-    "plan_home_migration",
     "plan_owner_retention",
     "read_owner_policy_bundle",
     "read_owner_policy_bundle_report",

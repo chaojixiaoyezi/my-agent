@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...agent.backend import ModelResponse
+from ...agent.backends import ModelResponse
 from ...agent.backends.base import get_backend
 from ..scenario_utils import (
     create_scenario_workspace,

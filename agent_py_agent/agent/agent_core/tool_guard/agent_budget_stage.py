@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
-from ...tools import ToolExecutionResult
+from ...tooling.models import ToolExecutionResult
 from ..runner.context import current_subagent_run_id
 from ..runner.stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_finished
 from ..tool_loop.round_execution import ToolCallExecuteParams

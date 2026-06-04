@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_py_agent.agent.local_store import LocalStore
+from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.subagents.models import TaskStatus
 from agent_py_agent.agent.task_registry import TaskRegistry
 

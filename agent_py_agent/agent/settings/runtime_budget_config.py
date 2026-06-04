@@ -25,6 +25,7 @@ class RuntimeBudgetConfigFields:
     background_context_max_depth: int = 6
     background_claim_ttl_seconds: int = 900
     background_claim_heartbeat_interval_seconds: int = 0
+    subagent_watch_interval_seconds: int = 120
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 

@@ -56,10 +56,10 @@ def _command_name(value: str) -> str:
     return name[:-4] if name.endswith(".exe") else name
 
 
-def _test_name(test: dict[str, Any], fallback: str = "") -> str:
+def _test_name(test: dict[str, Any], default: str = "") -> str:
     """Return a readable test name for records."""
 
-    return str(test.get("name") or fallback or "unknown").strip()[:120]
+    return str(test.get("name") or default or "unknown").strip()[:120]
 
 
 def _file_result(path: Path, exists: bool) -> dict[str, Any]:
@@ -136,7 +136,7 @@ def _command_rejected_record(
     """Return a failed command validation record."""
 
     return TestExecutionRecord(
-        test_name=_test_name(test, fallback=command),
+        test_name=_test_name(test, default=command),
         command=command,
         validation_method="command",
         error=error,
@@ -154,7 +154,7 @@ def _command_timeout_record(
 
     timeout_seconds, start = timing
     return TestExecutionRecord(
-        test_name=_test_name(test, fallback=command),
+        test_name=_test_name(test, default=command),
         command=command,
         executed=False,
         stdout=exc.stdout or "",
@@ -176,7 +176,7 @@ def _command_error_record(
     """Return a failed command execution-error record."""
 
     return TestExecutionRecord(
-        test_name=_test_name(test, fallback=command),
+        test_name=_test_name(test, default=command),
         command=command,
         executed=False,
         duration_seconds=time.monotonic() - start,
@@ -196,7 +196,7 @@ def _command_completed_record(
     """Return a completed command validation record."""
 
     return TestExecutionRecord(
-        test_name=_test_name(test, fallback=command),
+        test_name=_test_name(test, default=command),
         command=command,
         executed=True,
         exit_code=completed.returncode,

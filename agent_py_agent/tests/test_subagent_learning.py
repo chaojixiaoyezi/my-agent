@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.__main__ import build_parser
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.subagent import parse_subagent_runner_output
-from agent_py_agent.agent.subagents.manager_runner_results import RecordRunnerResultParams
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.subagents import parse_subagent_runner_output
+from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
+from agent_py_agent.cli.parser import build_parser
 
 
 def _rrr(run_id: str, **kwargs) -> RecordRunnerResultParams:

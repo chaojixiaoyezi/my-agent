@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.memory_archive import (
     CompressionSnapshot,
     RawMemoryEvent,
@@ -27,6 +26,7 @@ from agent_py_agent.agent.user_space.context_bundle import (
     build_main_context_bundle,
 )
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+from agent_py_agent.cli.parser import build_parser
 
 
 def _write_compact_fixture(root: Path) -> None:
@@ -148,7 +148,7 @@ def test_memory_compact_apply_reports_corrupt_main_context_bundle_ref(tmp_path: 
     assert error["context"] == "compact_context_bundle.main_context_bundle"
     assert error["path"] == str(bundle_path)
     source_ref = apply_result["restore_refs"]["source_refs"]["context_bundles"][0]
-    assert source_ref["reserved"]["load_error"]["path"] == str(bundle_path)
+    assert source_ref["load_error"]["path"] == str(bundle_path)
 
 
 def test_memory_compact_cli_apply_uses_latest_main_context_bundle(tmp_path: Path, capsys) -> None:

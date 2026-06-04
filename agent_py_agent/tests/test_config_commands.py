@@ -17,7 +17,7 @@ class TestLoadConfig:
 
     def test_load_config_from_yaml(self, tmp_path: Path):
         """从 YAML 文件加载配置。"""
-        from agent_py_agent.agent.config import load_config
+        from agent_py_agent.agent.settings import load_config
 
         config_file = tmp_path / "test_config.yaml"
         config_file.write_text("""
@@ -32,7 +32,7 @@ memory_rule_auto_read_limit: 5
 
     def test_load_config_with_defaults(self, tmp_path: Path):
         """使用默认配置值。"""
-        from agent_py_agent.agent.config import load_config
+        from agent_py_agent.agent.settings import load_config
 
         config_file = tmp_path / "minimal_config.yaml"
         config_file.write_text("workspace_root: /tmp/test\n", encoding="utf-8")
@@ -42,14 +42,14 @@ memory_rule_auto_read_limit: 5
 
     def test_load_config_missing_file(self):
         """加载不存在的配置文件。"""
-        from agent_py_agent.agent.config import load_config
+        from agent_py_agent.agent.settings import load_config
 
         with pytest.raises(FileNotFoundError):
             load_config("/nonexistent/config.yaml")
 
     def test_load_config_invalid_yaml(self, tmp_path: Path):
         """加载无效的 YAML 文件时配置仍能加载（可能使用默认值）。"""
-        from agent_py_agent.agent.config import load_config
+        from agent_py_agent.agent.settings import load_config
 
         config_file = tmp_path / "invalid.yaml"
         config_file.write_text("invalid: yaml: content: [}\n  broken", encoding="utf-8")
@@ -174,22 +174,22 @@ class TestCapabilityConfig:
 
     def test_load_capability_config_basic(self, tmp_path: Path):
         """加载基本能力配置。"""
-        from agent_py_agent.agent.capability_config import load_capability_config
+        from agent_py_agent.agent.capability.config import load_capability_config
 
         config_file = tmp_path / "capability.yaml"
-        config_file.write_text("""
-version: "1.0"
-capabilities:
-  - name: test_capability
-    enabled: true
-""", encoding="utf-8")
+        config_file.write_text(
+            "enable_capability_routing: true\n"
+            "capability_request_max_tokens: 800\n",
+            encoding="utf-8",
+        )
 
         config = load_capability_config(str(config_file))
-        assert config is not None
+        assert config.enable_capability_routing is True
+        assert config.capability_request_max_tokens == 800
 
     def test_load_capability_config_missing_file(self):
         """加载不存在的能力配置文件。"""
-        from agent_py_agent.agent.capability_config import load_capability_config
+        from agent_py_agent.agent.capability.config import load_capability_config
 
         with pytest.raises(FileNotFoundError):
             load_capability_config("/nonexistent/capability.yaml")
@@ -204,7 +204,7 @@ class TestConfigValidation:
 
         mock_config = MagicMock()
         mock_config.memory_config_warnings = [
-            {"field_name": "test_field", "reason": "test reason", "fallback_value": "default"}
+            {"field_name": "test_field", "reason": "test reason", "default_value": "default"}
         ]
 
         result = _config_warnings(mock_config)
@@ -232,7 +232,7 @@ class TestConfigFields:
 
     def test_config_memory_fields(self, tmp_path: Path):
         """测试 memory 相关配置字段。"""
-        from agent_py_agent.agent.config import load_config
+        from agent_py_agent.agent.settings import load_config
 
         config_file = tmp_path / "test_config.yaml"
         config_file.write_text("""
@@ -256,7 +256,7 @@ memory_rule_receipt_enabled: true
 
     def test_config_gateway_fields(self, tmp_path: Path):
         """测试 gateway 相关配置字段。"""
-        from agent_py_agent.agent.config import load_config
+        from agent_py_agent.agent.settings import load_config
 
         config_file = tmp_path / "test_config.yaml"
         config_file.write_text("""

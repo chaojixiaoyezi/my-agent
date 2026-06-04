@@ -4,16 +4,16 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_py_agent.__main__ import build_parser
-from agent_py_agent.agent.config import load_config
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.subagent import QualityContract
+from agent_py_agent.agent.settings import load_config
 from agent_py_agent.agent.subagent_workflows.models import WorkflowPhase, WorkflowTemplate
 from agent_py_agent.agent.subagent_workflows.planner import (
     WorkflowPlanConstraints,
     plan_workflow_for_goal,
 )
 from agent_py_agent.agent.subagent_workflows.store import WorkflowTemplateStore
+from agent_py_agent.agent.subagents import QualityContract
+from agent_py_agent.cli.parser import build_parser
 
 
 @dataclass

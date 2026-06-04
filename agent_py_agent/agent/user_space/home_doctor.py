@@ -11,7 +11,6 @@ from .home_doctor_findings import build_doctor_findings, repair_plan
 from .home_doctor_policy import owner_policy_doctor_payload
 from .home_indexes import dangling_index_refs
 from .home_layout import MyAgentHomePaths
-from .home_migration import plan_home_migration
 from .home_retention import plan_owner_retention
 from .home_runtime_query import home_runtime_status
 from .owner_compact_indexes import dangling_owner_compact_index_refs_report
@@ -26,7 +25,6 @@ def build_home_doctor_report(home: MyAgentHomePaths) -> dict[str, Any]:
 
 def _collect_doctor_sections(home: MyAgentHomePaths) -> dict[str, Any]:
     home_status = home_runtime_status(home)
-    migration = plan_home_migration(home)
     dangling = dangling_index_refs(home)
     compact_index_report = dangling_owner_compact_index_refs_report(home.owner_home_dir)
     retention = plan_owner_retention(home)
@@ -37,7 +35,6 @@ def _collect_doctor_sections(home: MyAgentHomePaths) -> dict[str, Any]:
     temporary_grants = _temporary_grants_payload(home)
     return {
         "home": home_status,
-        "migration": migration,
         "dangling": dangling,
         "compact_dangling": compact_index_report.dangling_refs,
         "compact_index_load_errors": compact_index_report.load_errors,
@@ -59,10 +56,6 @@ def _doctor_report(home: MyAgentHomePaths, sections: dict[str, Any], findings: l
         "owner_policy": sections["owner_policy"],
         "capability_requests": sections["capability_requests"],
         "temporary_grants": sections["temporary_grants"],
-        "migration": {
-            "pending_count": len(sections["migration"].actions),
-            "actions": [action.to_dict() for action in sections["migration"].actions],
-        },
         "indexes": {
             "dangling_count": len(sections["dangling"]),
             "dangling_refs": sections["dangling"],

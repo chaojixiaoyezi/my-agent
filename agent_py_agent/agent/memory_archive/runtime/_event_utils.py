@@ -17,11 +17,11 @@ _PREVIEW_LIMITS = {
 }
 
 
-def _summarize_text(content: str, *, fallback: str, limit: int = 96) -> str:
+def _summarize_text(content: str, *, default: str, limit: int = 96) -> str:
     """Build a short deterministic summary when full previews should not be stored."""
     compact = " ".join(str(content).split())
     if not compact:
-        return fallback
+        return default
     limit = max(0, int(limit))
     short = compact[:limit]
     if len(compact) > limit:

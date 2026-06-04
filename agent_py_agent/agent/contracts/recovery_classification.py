@@ -42,6 +42,7 @@ def repairable_code(code: str) -> bool:
             "SPREADSHEET_",
             "STAGED_",
             "STATE_TRANSITION_",
+            "TASK_PROGRESS_",
             "STATIC_SITE_",
             "TOOL_PROTOCOL_",
             "TOOL_INVALID_",
@@ -80,7 +81,7 @@ def hard_stop_code(code: str) -> bool:
 def recovery_category(code: str) -> str:
     if code.startswith(("ARTIFACT_", "BUILDER_", "DOCUMENT_", "DOCX_", "HTML_", "XLSX_", "CSV_", "JSON_", "PDF_", "MARKDOWN_", "SPREADSHEET_", "STATIC_SITE_")):
         return "artifact"
-    if code.startswith(("EVIDENCE_", "FACT_", "METRIC_", "LANGUAGE_", "COLLABORATION_", "COLLECTION_")):
+    if code.startswith(("EVIDENCE_", "FACT_", "METRIC_", "LANGUAGE_", "COLLABORATION_", "COLLECTION_", "TASK_PROGRESS_")):
         return "evidence"
     if code.startswith(("TOOL_", "TOOL_PROTOCOL_")):
         return "tool"
@@ -104,6 +105,10 @@ def recommended_action(code: str, status: str) -> str:
         return RecoveryAction.REPORT_BLOCKER.value
     if code.startswith("COLLABORATION_"):
         return RecoveryAction.CONTINUE_COLLABORATION.value
+    if code == "TASK_PROGRESS_OPEN_ITEMS":
+        return RecoveryAction.CONTINUE.value
+    if code.startswith("TASK_PROGRESS_"):
+        return RecoveryAction.REPAIR_EVIDENCE_REFS.value
     if code.startswith(("METRIC_", "LANGUAGE_", "COLLECTION_")):
         return RecoveryAction.REPAIR_STRUCTURED_CHECKPOINT_JSON.value
     if code.startswith(("EVIDENCE_", "FACT_")):

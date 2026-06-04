@@ -232,8 +232,8 @@ def _print_memory_doctor_report(payload: dict[str, Any], *, json_output: bool) -
     for warning in payload["warnings"]:
         field_name = warning.get("field_name", "warning")
         reason = warning.get("reason", warning.get("message", ""))
-        fallback = warning.get("fallback_value", "-")
-        print(f"- {field_name}: {reason} fallback={fallback}")
+        default = warning.get("default_value", "-")
+        print(f"- {field_name}: {reason} default={default}")
     routing = payload["routing"]
     print("Routing")
     print(f"- index={routing['index']['path']} exists={routing['index']['exists']}")

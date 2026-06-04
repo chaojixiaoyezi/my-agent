@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-"""normalize memory-related runtime config with safe defaults and fallback warnings.
+"""normalize memory-related runtime config with safe defaults and default warnings.
 
 用户会手动改配置文件，所以这里专门负责把 memory 配置"洗干净"。
 具体字段和底层 coercion 已拆到内部模块，本文件保持历史 public imports。
@@ -33,7 +33,7 @@ __all__ = [
 def normalize_memory_settings(
     values: Mapping[str, Any] | object | None = None,
 ) -> tuple[MemorySettings, list[MemoryConfigWarning]]:
-    """Coerce raw memory config fields into effective settings plus fallback warnings."""
+    """Coerce raw memory config fields into effective settings plus default warnings."""
     source = values if values is not None else {}
     warnings: list[MemoryConfigWarning] = []
     defaults = MemorySettings()

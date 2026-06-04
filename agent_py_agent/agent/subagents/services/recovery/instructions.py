@@ -6,7 +6,7 @@ from ..task_attribute_reader import task_text
 from .modes import LEADERSHIP_RECOVERY, NO_PROGRESS_LIMIT_REACHED, is_takeover_mode
 
 
-def runner_instruction(task: Any, packet: Any, fallback_refs: list[str], recovery_mode: str) -> str:
+def runner_instruction(task: Any, packet: Any, recovery_refs: list[str], recovery_mode: str) -> str:
     if recovery_mode == NO_PROGRESS_LIMIT_REACHED:
         return "连续恢复没有进展：不要继续自动重试，也不要继续扩容；请汇总 refs 后等待父级/用户决策。"
     if recovery_mode == LEADERSHIP_RECOVERY:
@@ -15,11 +15,11 @@ def runner_instruction(task: Any, packet: Any, fallback_refs: list[str], recover
             "再分批接管其 child_run_ids，不要重复重启失联 coordinator。"
         )
     if is_takeover_mode(recovery_mode):
-        return _takeover_instruction(task, packet, fallback_refs)
+        return _takeover_instruction(task, packet, recovery_refs)
     if getattr(packet, "status", "") == "ready":
         return _packet_instruction(task, packet)
-    if fallback_refs:
-        return _fallback_instruction(task, packet, fallback_refs)
+    if recovery_refs:
+        return _recovery_refs_instruction(task, packet, recovery_refs)
     return "缺少可用恢复 refs：请先生成 checkpoint/summary/continue packet，再继续。"
 
 
@@ -31,11 +31,11 @@ def _packet_instruction(task: Any, packet: Any) -> str:
     )
 
 
-def _fallback_instruction(task: Any, packet: Any, fallback_refs: list[str]) -> str:
-    refs = ", ".join(fallback_refs[:4])
+def _recovery_refs_instruction(task: Any, packet: Any, recovery_refs: list[str]) -> str:
+    refs = ", ".join(recovery_refs[:4])
     prefix = _packet_load_prefix(packet)
     return (
-        f"恢复 run {task_text(task, 'id')}：{prefix}latest_continue_packet 不可用，改读 checkpoint/summary fallback refs：{refs}。"
+        f"恢复 run {task_text(task, 'id')}：{prefix}latest_continue_packet 不可用，改读 checkpoint/summary recovery_refs：{refs}。"
         "只根据这些 task-local refs 接续，不要重读主代理长期记忆。"
     )
 
@@ -57,8 +57,8 @@ def _packet_load_prefix(packet: Any) -> str:
     return "；".join(parts) + "。"
 
 
-def _takeover_instruction(task: Any, packet: Any, fallback_refs: list[str]) -> str:
-    source = packet.ref if getattr(packet, "status", "") == "ready" else ", ".join(fallback_refs[:3])
+def _takeover_instruction(task: Any, packet: Any, recovery_refs: list[str]) -> str:
+    source = packet.ref if getattr(packet, "status", "") == "ready" else ", ".join(recovery_refs[:3])
     return (
         f"原 run {task_text(task, 'id')} 看起来已挂死：创建 takeover run 接管同一个任务目录 {task_text(task, 'task_dir')} "
         f"和同一批 artifacts refs。恢复入口：{source}。不要重写健康分支。"

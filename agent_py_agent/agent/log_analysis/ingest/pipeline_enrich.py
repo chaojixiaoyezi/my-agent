@@ -30,7 +30,7 @@ from .pipeline_helpers import (
 from .pipeline_processing import _ProcessRecordsParams
 from .pipeline_processing import process_records as _process_records
 
-# Re-export for backward compatibility
+# Public enrich helper import.
 write_manifest = _write_manifest
 
 
@@ -91,7 +91,7 @@ def enrich_ingest_file(
     )
 
     counts, event_ids, storage_infos = _process_prepared_ingest(pipeline, prepared, ingest_options.source_product)
-    storage_summary = _storage_summary(storage_infos, fallback_path=pipeline.fallback_sink.events_path)
+    storage_summary = _storage_summary(storage_infos, default_path=_store_events_path(pipeline))
     return finalize_prepared_ingest(PreparedFinalize(pipeline, prepared, counts, event_ids, storage_summary))
 
 
@@ -134,18 +134,20 @@ def _prepare_ingest(pipeline, request: _PrepareIngestRequest) -> _PreparedIngest
 
 
 def write_events(pipeline, events: list[dict[str, Any]]) -> dict[str, Any]:
-    """Write a list of events to the configured store or fallback JSONL sink."""
+    """Write a list of events through the configured log-analysis store."""
     if not events:
-        return {"count": 0, "path": str(pipeline.fallback_sink.events_path)}
+        return {"count": 0, "path": _store_events_path_text(pipeline)}
 
     if pipeline.store is None:
-        return pipeline.fallback_sink.write_events(events)
+        raise TypeError("log-analysis ingest store is not configured")
 
     batch_result = _write_batch_events(pipeline, events)
     if batch_result is not None:
         return batch_result
     item_result = _write_item_events(pipeline, events)
-    return item_result if item_result is not None else pipeline.fallback_sink.write_events(events)
+    if item_result is not None:
+        return item_result
+    raise TypeError("log-analysis ingest store has no event write method")
 
 
 def _write_batch_events(pipeline, events: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -179,7 +181,7 @@ def flush_events(
 ) -> tuple[dict[str, Any], list[str]]:
     """Flush buffered events to storage and register them in the dedup store."""
     if not events:
-        return {"count": 0, "path": str(pipeline.fallback_sink.events_path)}, []
+        return {"count": 0, "path": _store_events_path_text(pipeline)}, []
     storage_info = write_events(pipeline, events)
     stored_event_ids: list[str] = []
     for event in events:
@@ -191,3 +193,12 @@ def flush_events(
         ):
             stored_event_ids.append(str(event["event_id"]))
     return storage_info, stored_event_ids
+
+
+def _store_events_path(pipeline) -> Path | str | None:
+    return getattr(pipeline.store, "events_path", None)
+
+
+def _store_events_path_text(pipeline) -> str | None:
+    path = _store_events_path(pipeline)
+    return None if path is None else str(path).replace("\\", "/")

@@ -1,5 +1,5 @@
 
-"""Snapshot write implementations kept behind the public snapshots facade."""
+"""Snapshot write implementations used by the public snapshots API."""
 
 from __future__ import annotations
 

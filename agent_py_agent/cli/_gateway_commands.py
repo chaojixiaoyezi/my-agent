@@ -9,8 +9,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..agent.capability_config import load_capability_config
-from ..agent.gateway import (
+from ..agent.capability.config import load_capability_config
+from ..agent.gateway_parts import (
     GatewayPaths,
     gateway_paths,
     is_pid_alive,
@@ -181,7 +181,7 @@ def cmd_gateway_run(args) -> int:
 
     http_port = getattr(agent.config, "gateway_port", 0) or 0
     run_context = _gateway_run_context_from_args(_GatewayRunBuildRequest(agent, paths, options, args))
-    stop_event, heartbeat_thread, request_thread, http_server = _cmd_gateway_run_threads(
+    stop_event, heartbeat_thread, request_thread, background_thread, http_server = _cmd_gateway_run_threads(
         GatewayThreadsRequest(context=run_context, requeued=requeued, failed=0, http_port=http_port)
     )
 
@@ -205,6 +205,7 @@ def cmd_gateway_run(args) -> int:
                 stop_event=stop_event,
                 heartbeat_thread=heartbeat_thread,
                 request_thread=request_thread,
+                background_thread=background_thread,
                 http_server=http_server,
             )
         )
@@ -230,8 +231,8 @@ def cmd_gateway_status(args) -> int:
         print(f"  http_port={http_port}")
 
     if running:
-        inbox_count = len(list(paths.inbox.glob("*"))) if paths.inbox.exists() else 0
-        processing_count = len(list(paths.processing.glob("*"))) if paths.processing.exists() else 0
+        inbox_count = len(list(paths.inbox.glob("*.json"))) if paths.inbox.exists() else 0
+        processing_count = len(list(paths.processing.glob("*.json"))) if paths.processing.exists() else 0
         print(f"  inbox={inbox_count} processing={processing_count}")
         print(f"  pid_file={paths.pid}")
         print(f"  state_file={paths.state}")

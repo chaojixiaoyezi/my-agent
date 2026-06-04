@@ -6,20 +6,21 @@ import time as time_module
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...capabilities import CapabilityRouter
+from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability.config import CapabilityConfig
+
 from ...capability.runtime_config import (
     CapabilityConfigSnapshot,
     default_capability_config_path,
     load_capability_config_snapshot,
     reload_capability_config_if_changed,
 )
-from ...capability_config import CapabilityConfig
 
 
 @dataclass(frozen=True)
 class WatchRuntimeConfigRequest:
     agent: object
-    fallback_cfg: CapabilityConfig
+    current_cfg: CapabilityConfig
     router: CapabilityRouter
     snapshot: CapabilityConfigSnapshot | None
 
@@ -48,11 +49,11 @@ def initial_watch_config_snapshot(
 
 def watch_runtime_config(request: WatchRuntimeConfigRequest) -> WatchRuntimeConfigResult:
     if request.snapshot is None:
-        return WatchRuntimeConfigResult(request.fallback_cfg, request.router, None)
+        return WatchRuntimeConfigResult(request.current_cfg, request.router, None)
     try:
         result = reload_capability_config_if_changed(request.snapshot, router=request.router)
     except (FileNotFoundError, OSError, ValueError):
-        return WatchRuntimeConfigResult(request.fallback_cfg, request.router, request.snapshot)
+        return WatchRuntimeConfigResult(request.current_cfg, request.router, request.snapshot)
     if result.changed:
         request.agent._capability_config_runtime_snapshot = result.snapshot
         _write_watch_config_reload(request.agent, result.snapshot)

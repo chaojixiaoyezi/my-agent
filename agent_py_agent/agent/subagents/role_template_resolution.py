@@ -4,17 +4,17 @@ from __future__ import annotations
 from typing import Any
 
 
-def resolve_role_template_id(store: Any, role: str, *, fallback: str | None = None) -> str:
+def resolve_role_template_id(store: Any, role: str, *, default_id: str | None = None) -> str:
     cleaned = _clean_role_id(role)
     if not cleaned:
-        return _valid_fallback(store, fallback)
+        return _valid_default(store, default_id)
     exact = store.get(cleaned)
     if exact is not None:
         return exact.id
     match = _best_template_id_match(store, cleaned)
     if match:
         return match
-    return _valid_fallback(store, fallback)
+    return _valid_default(store, default_id)
 
 
 def _best_template_id_match(store: Any, cleaned_role: str) -> str:
@@ -32,8 +32,8 @@ def _contains_template_token(cleaned_role: str, template_id: str) -> bool:
     return needle in haystack
 
 
-def _valid_fallback(store: Any, fallback: str | None) -> str:
-    cleaned = _clean_role_id(fallback)
+def _valid_default(store: Any, default_id: str | None) -> str:
+    cleaned = _clean_role_id(default_id)
     if cleaned and store.get(cleaned):
         return cleaned
     return ""

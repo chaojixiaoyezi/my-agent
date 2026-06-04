@@ -66,30 +66,33 @@ def test_context_bundle_embeds_task_envelope_and_tool_preflight(tmp_path) -> Non
     ]
 
 
-def test_context_bundle_hides_legacy_subagent_paths_from_model_visible_payload(tmp_path) -> None:
-    manager = SubAgentManager(tmp_path / "data" / "subagents")
+def test_context_bundle_keeps_current_subagent_paths_in_model_visible_payload(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / "tasks" / "current" / "work" / "agents")
     task = manager.create_run(
-        goal="读取 /tmp/project/data/subagents/old-run/source.md 后写报告。",
-        thought="旧路径只来自兼容账本，不应继续给模型当事实。",
-        plan=["读取 /tmp/project/data/subagents/old-run/source.md"],
+        goal="读取 /tmp/project/tasks/current/work/agents/run-1/source.md 后写报告。",
+        thought="当前任务路径应直接给模型使用。",
+        plan=["读取 /tmp/project/tasks/current/work/agents/run-1/source.md"],
         role="worker",
         attributes={
-            "output_files": ["/tmp/project/data/subagents/old-run/final_report.md"],
-            "required_read_paths": ["/tmp/project/data/subagents/old-run/source.md"],
+            "output_files": ["/tmp/project/tasks/current/work/agents/run-1/final_report.md"],
+            "required_read_paths": ["/tmp/project/tasks/current/work/agents/run-1/source.md"],
         },
     )
-    task.task_workspace_dir = "/tmp/project/data/subagents/old-run"
-    task.agent_run_workspace_dir = "/tmp/project/data/subagents/old-run/agent"
-    task.agent_run_final_report_md = "/tmp/project/data/subagents/old-run/final_report.md"
-    task.allowed_write_roots = ["/tmp/project/data/subagents/old-run"]
+    task.task_workspace_dir = "/tmp/project/tasks/current/work/agents/run-1"
+    task.agent_run_workspace_dir = "/tmp/project/tasks/current/work/agents/run-1/agent"
+    task.agent_run_final_report_md = "/tmp/project/tasks/current/work/agents/run-1/final_report.md"
+    task.allowed_write_roots = ["/tmp/project/tasks/current/work/agents/run-1"]
     manager.save(task)
 
     bundle = build_context_bundle(manager.load(task.id))
     payload = json.dumps(asdict(bundle), ensure_ascii=False)
 
-    assert "/data/subagents/" not in payload
+    assert "/tmp/project/tasks/current/work/agents/run-1/source.md" in payload
+    assert "[internal_legacy_subagent_path_hidden]" not in payload
     assert "source.md" in bundle.goal
-    assert bundle.output_contract["declared_output_refs"] == ["final_report.md"]
+    assert bundle.output_contract["declared_output_refs"] == [
+        "/tmp/project/tasks/current/work/agents/run-1/final_report.md"
+    ]
 
 
 def _assert_core_context_bundle(bundle, task) -> None:

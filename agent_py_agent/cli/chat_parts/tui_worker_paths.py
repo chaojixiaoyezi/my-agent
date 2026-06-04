@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import time
 
+from ...agent.gateway_parts.context_tokens import current_context_token_estimate
 from .gateway_client import (
     ChatRequestContent,
     GatewayChunkPollRequest,
@@ -56,6 +57,7 @@ def _submit_gateway_job(ctx):
             save=not ctx.cfg.args.no_save,
             show_prompt=ctx.job.show_prompt,
             resume_context=resume_context_override(ctx.cfg.args),
+            chat_session_id=ctx.cfg.current_session_id,
         ),
         agent=ctx.cfg.agent,
     )
@@ -101,7 +103,7 @@ def _record_gateway_response(ctx, agent_response_text: str, stream_has_visible_t
             agent_response_text, stream_has_visible_text, ctx.cfg.assistant_outputs, ctx.cfg.agent
         )
     if not _stream_output_contains_response(ctx.cfg, agent_response_text):
-        from .fallback_ui import AssistantResponseRenderRequest, _render_assistant_response
+        from .plain_ui import AssistantResponseRenderRequest, _render_assistant_response
 
         _render_assistant_response(
             AssistantResponseRenderRequest(
@@ -133,14 +135,14 @@ def _print_gateway_timing(ctx, request_id: str, response: dict) -> None:
         ctx,
         f"[耗时 {elapsed:.2f}s; "
         f"工具轮数 {response.get('tool_rounds', 0)}; "
-        f"ctx_tokens~{response.get('cumulative_token_estimate') or response.get('prompt_token_estimate', 0)}; "
+        f"ctx_tokens~{current_context_token_estimate(response)}; "
         f"prompt_tokens~{response.get('prompt_token_estimate', 0)}; "
         f"resume_context={1 if response.get('memory_resume_context_injected') else 0}]",
     )
 
 
 def _worker_local_path(ctx) -> tuple[str, bool]:
-    from .fallback_ui import AssistantResponseRenderRequest, _render_assistant_response
+    from .plain_ui import AssistantResponseRenderRequest, _render_assistant_response
 
     result = ctx.cfg.agent.run(
         ctx.job.user,
@@ -156,9 +158,7 @@ def _worker_local_path(ctx) -> tuple[str, bool]:
     _flush_stream_buf(ctx.cfg.stream_buf_ref)
     _print_local_timing(ctx, result)
     with ctx.cfg.state_lock:
-        ctx.cfg.last_token_estimate_ref[0] = (
-            getattr(result, "cumulative_token_estimate", 0) or result.prompt_token_estimate
-        )
+        ctx.cfg.last_token_estimate_ref[0] = current_context_token_estimate(result)
     if result.response.strip():
         stream_has_visible_text = bool(strip_ansi(ctx.cfg.stream_visible_text_ref[0]).strip())
         if stream_has_visible_text and _stream_output_contains_response(ctx.cfg, result.response):
@@ -186,7 +186,7 @@ def _print_local_timing(ctx, result) -> None:
     _publish_timing(
         ctx,
         f"[耗时 {elapsed:.2f}s; 工具轮数 {result.tool_rounds}; "
-        f"ctx_tokens~{getattr(result, 'cumulative_token_estimate', 0) or result.prompt_token_estimate}; "
+        f"ctx_tokens~{current_context_token_estimate(result)}; "
         f"prompt_tokens~{result.prompt_token_estimate}; "
         f"resume_context={1 if result.memory_resume_context_injected else 0}]",
     )
@@ -208,7 +208,7 @@ def _use_app_status_line(args) -> bool:
         return False
     if getattr(args, "plain", False):
         return False
-    return bool(getattr(args, "app_scrollback", True) or getattr(args, "app", False))
+    return bool(getattr(args, "app_scrollback", True))
 
 
 __all__ = ["_worker_gateway_path", "_worker_local_path"]

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ...subagent import parse_subagent_runner_output
+from ...subagents import parse_subagent_runner_output
 from ...subagents.services.subagent_session_compact import (
     SubagentSessionCompactRequest,
     write_subagent_session_compact,

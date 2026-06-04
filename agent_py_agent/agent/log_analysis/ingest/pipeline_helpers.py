@@ -125,13 +125,13 @@ def _storage_result(result: Any, *, count: int, store: Any | None = None) -> dic
     return {"count": count, "path": str(store_path).replace("\\", "/") if store_path is not None else None}
 
 
-def _storage_summary(infos: list[dict[str, Any]], *, fallback_path: Path) -> dict[str, Any]:
+def _storage_summary(infos: list[dict[str, Any]], *, default_path: Path | str | None) -> dict[str, Any]:
     """Aggregate multiple storage result dicts into a single summary."""
     count = sum(int(info.get("count") or 0) for info in infos)
     paths = sorted({str(info.get("path")) for info in infos if info.get("path")})
-    if not paths:
-        paths = [str(fallback_path)]
-    summary: dict[str, Any] = {"count": count, "path": paths[0]}
+    if not paths and default_path is not None:
+        paths = [str(default_path)]
+    summary: dict[str, Any] = {"count": count, "path": paths[0] if paths else None}
     if len(paths) > 1:
         summary["paths"] = paths
     return summary

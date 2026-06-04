@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import logging
 
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def test_collaboration_tools_are_registered_and_write_case_flow(tmp_path) -> None:
@@ -129,7 +129,6 @@ def test_raise_collaboration_materializes_internal_thread_for_known_local_task(t
 
     open_result = agent.tools.tools["raise_collaboration"].execute(
         {
-            "thread_id": "guessed-thread-id",
             "task_id": child.id,
             "title": "本地任务协作 case",
             "summary": "没有外部会话绑定时也要能落到内部 thread。",
@@ -144,6 +143,30 @@ def test_raise_collaboration_materializes_internal_thread_for_known_local_task(t
     assert linked is not None
     assert linked.thread_id == payload["thread_id"]
     assert linked.channel_bindings[0].channel == "internal"
+
+
+def test_raise_collaboration_unknown_explicit_thread_is_not_rebound(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    child = agent.subagents.create_run(
+        goal="本地协作子代理需要打开一个 case。",
+        allowed_tools=["raise_collaboration"],
+        agent_name="local-source-a",
+    )
+
+    result = agent.tools.tools["raise_collaboration"].execute(
+        {
+            "thread_id": "guessed-thread-id",
+            "task_id": child.id,
+            "title": "本地任务协作 case",
+            "summary": "显式 thread_id 不存在时不能自动串到 task 内部 thread。",
+            "created_by": child.id,
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert payload["error"] == "unknown_thread"
+    assert agent.conversation_store.thread_for_task(child.id) is None
 
 
 def test_raise_collaboration_warns_when_task_thread_binding_save_fails(tmp_path, monkeypatch, caplog) -> None:

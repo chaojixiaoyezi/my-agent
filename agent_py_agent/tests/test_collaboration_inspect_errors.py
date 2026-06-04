@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def test_inspect_collaboration_pending_request_error_is_structured(tmp_path, monkeypatch) -> None:

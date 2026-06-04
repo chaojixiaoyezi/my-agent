@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from agent_py_agent.agent.capability_config import CapabilityConfig
+from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import (
     SubAgentLeadershipRecoveryApplyOptions,

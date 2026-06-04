@@ -29,6 +29,77 @@ def test_target_coverage_ledger_reports_missing_items_without_blocking():
     assert status["should_block"] is False
 
 
+def test_target_coverage_ledger_blocks_required_missing_read_targets(tmp_path):
+    from agent_py_agent.agent.agent_core.target_coverage_ledger import (
+        collect_target_coverage_records,
+        target_coverage_status,
+    )
+
+    source_a = tmp_path / "a.md"
+    source_b = tmp_path / "b.md"
+    source_a.write_text("A", encoding="utf-8")
+    records = collect_target_coverage_records(
+        [
+            {
+                "tool": "read_file",
+                "ok": True,
+                "parameters": {"path": str(source_a)},
+            }
+        ]
+    )
+    status = target_coverage_status(
+        {
+            "scope_label": "source shards",
+            "enforcement": "required",
+            "target_items": [
+                {"target_id": str(source_a), "label": "a"},
+                {"target_id": str(source_b), "label": "b"},
+            ],
+        },
+        coverage_records=records,
+    )
+
+    assert status["covered_count"] == 1
+    assert status["missing_count"] == 1
+    assert status["missing_items"] == [{"target_id": str(source_b), "label": "b"}]
+    assert status["should_block"] is True
+    assert status["recommended_next_action"] == "cover_missing_targets_before_submit"
+
+
+def test_target_coverage_ledger_accepts_delivery_contract_items_alias(tmp_path):
+    from agent_py_agent.agent.agent_core.target_coverage_ledger import (
+        collect_target_coverage_records,
+        target_coverage_status,
+    )
+
+    source_a = tmp_path / "a.md"
+    source_b = tmp_path / "b.md"
+    source_a.write_text("A", encoding="utf-8")
+    source_b.write_text("B", encoding="utf-8")
+    records = collect_target_coverage_records(
+        [
+            {"tool": "read_file", "ok": True, "parameters": {"path": str(source_a)}},
+            {"tool": "read_file", "ok": True, "parameters": {"path": str(source_b)}},
+        ]
+    )
+    status = target_coverage_status(
+        {
+            "scope_label": "source shards",
+            "enforcement": "required",
+            "items": [
+                {"target_id": str(source_a), "source_ref": str(source_a)},
+                {"target_id": str(source_b), "source_ref": str(source_b)},
+            ],
+        },
+        coverage_records=records,
+    )
+
+    assert status["expected_count"] == 2
+    assert status["covered_count"] == 2
+    assert status["missing_count"] == 0
+    assert status["should_block"] is False
+
+
 def test_target_coverage_ledger_collects_records_from_nested_runtime_payloads():
     from agent_py_agent.agent.agent_core.target_coverage_ledger import (
         collect_target_coverage_records,

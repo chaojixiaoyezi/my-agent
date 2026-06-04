@@ -16,7 +16,6 @@ from typing import Any
 
 from .schema import (
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 
@@ -75,7 +74,6 @@ def _result_payload(parts: _ControlPlaneResultParts) -> dict[str, Any]:
             "compact_applies": len(parts.compact_applies),
             "tool_outputs": len(parts.tool_outputs),
         },
-        "reserved": runtime_memory_reserved_fields(CONTROL_PLANE_QUERY_SCHEMA),
     }
 
 
@@ -122,7 +120,6 @@ def _task_run_ref(event: dict[str, Any], include_missing_refs: bool) -> dict[str
         "summary": str(event.get("summary") or ""),
         "refs": dict(refs),
         "missing_refs": missing_refs,
-        "reserved": runtime_memory_reserved_fields(CONTROL_PLANE_TASK_RUN_REF_SCHEMA),
     }
 
 
@@ -157,7 +154,6 @@ def _scope_payload(options: MemoryControlPlaneQueryOptions) -> dict[str, Any]:
         "event_type": options.event_type,
         "include_missing_refs": options.include_missing_refs,
         "limit": options.limit,
-        "reserved": {},
     }
 
 
@@ -207,7 +203,6 @@ def _decode_error(path: Path, line_number: int, exc: json.JSONDecodeError | None
         "path": str(path),
         "line_number": line_number,
         "error": str(exc) if exc else "JSONL row is not an object",
-        "reserved": runtime_memory_reserved_fields(CONTROL_PLANE_DECODE_ERROR_SCHEMA),
     }
 
 

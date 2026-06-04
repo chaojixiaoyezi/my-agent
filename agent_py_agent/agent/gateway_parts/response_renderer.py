@@ -11,6 +11,7 @@ context pressure when available, while JSON mode preserves the raw fields.
 import json
 from typing import Any
 
+from .context_tokens import current_context_token_estimate
 from .io import gateway_response_path, read_json_file_report
 from .paths import GatewayPaths
 from .request_errors import gateway_response_load_error_response
@@ -38,7 +39,7 @@ def print_gateway_response(payload: dict, *, json_mode: bool = False, show_promp
         f"status={payload.get('status', '-')}; "
         f"backend={payload.get('backend', '-')}; "
         f"tool_rounds={payload.get('tool_rounds', 0)}; "
-        f"ctx_tokens≈{payload.get('cumulative_token_estimate') or payload.get('prompt_token_estimate', 0)}; "
+        f"ctx_tokens≈{current_context_token_estimate(payload)}; "
         f"prompt_tokens≈{payload.get('prompt_token_estimate', 0)}; "
         f"resume_context={1 if payload.get('memory_resume_context_injected') else 0}"
     )

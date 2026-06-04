@@ -137,7 +137,6 @@ def _state_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
         "task_name": request.task_name,
         "source": request.source,
         "updated_at": _now_iso(),
-        "reserved": {},
     }
 
 

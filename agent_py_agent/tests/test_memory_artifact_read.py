@@ -4,12 +4,12 @@ import hashlib
 import json
 from pathlib import Path
 
-from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
     ExternalizeToolOutputRequest,
     externalize_tool_output_record,
 )
-from agent_py_agent.agent.tools import ToolRegistry, ToolRegistryParams
+from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+from agent_py_agent.cli.parser import build_parser
 
 
 def test_memory_artifact_read_cli_reads_registered_tool_output_artifact(tmp_path: Path, capsys) -> None:
@@ -274,9 +274,9 @@ def test_read_artifact_short_call_id_without_scope_prefers_latest(tmp_path: Path
     assert payload["run_id"] == "latest-run"
 
 
-def test_read_artifact_hides_legacy_paths_from_internal_tool_archives(tmp_path: Path) -> None:
-    legacy_path = "/repo/data/subagents/tasks/run_1/agents/run_1/final_report.md"
-    raw_content = json.dumps({"workspace_refs": {"final_report": legacy_path}}, ensure_ascii=False)
+def test_read_artifact_preserves_internal_tool_archives_without_path_sanitizer(tmp_path: Path) -> None:
+    path = "/repo/current/tasks/run_1/work/agents/run_1/final_report.md"
+    raw_content = json.dumps({"workspace_refs": {"final_report": path}}, ensure_ascii=False)
     artifact_path = _write_internal_tool_output(tmp_path, "create_subagents", raw_content)
     # Simulate an artifact written before model-visible ref sanitizing existed.
     artifact_payload = json.loads(artifact_path.read_text(encoding="utf-8"))
@@ -289,9 +289,8 @@ def test_read_artifact_hides_legacy_paths_from_internal_tool_archives(tmp_path: 
     payload = json.loads(result.output)
 
     assert result.ok is True
-    assert payload["content_sanitized"] is True
-    assert "/data/subagents/" not in payload["content"]
-    assert "[internal_legacy_subagent_path_hidden]" in payload["content"]
+    assert payload["content"] == raw_content
+    assert "[internal_legacy_subagent_path_hidden]" not in payload["content"]
 
 
 def test_read_artifact_preserves_ordinary_tool_archive_content(tmp_path: Path) -> None:
@@ -303,7 +302,6 @@ def test_read_artifact_preserves_ordinary_tool_archive_content(tmp_path: Path) -
     payload = json.loads(result.output)
 
     assert result.ok is True
-    assert payload["content_sanitized"] is False
     assert payload["content"] == text
 
 

@@ -40,7 +40,7 @@ class RunScope:
     root_run_id: str = ""
     depth: int = 0
     agent_kind: str = ""
-    reserved: dict[str, Any] = field(default_factory=dict)
+    task_load_error: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -60,7 +60,7 @@ class RunScope:
             root_run_id=str(data.get("root_run_id") or ""),
             depth=_int_or_zero(data.get("depth")),
             agent_kind=str(data.get("agent_kind") or ""),
-            reserved=_dict_or_empty(data.get("reserved")),
+            task_load_error=_dict_or_empty(data.get("task_load_error")),
         )
 
 
@@ -72,7 +72,8 @@ class ArtifactRef:
     owner_run_id: str = ""
     hash: str = ""
     summary: str = ""
-    reserved: dict[str, Any] = field(default_factory=dict)
+    size_bytes: int = 0
+    mime_type: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -86,7 +87,8 @@ class ArtifactRef:
             owner_run_id=str(payload.get("owner_run_id") or ""),
             hash=str(payload.get("hash") or ""),
             summary=str(payload.get("summary") or ""),
-            reserved=_dict_or_empty(payload.get("reserved")),
+            size_bytes=_int_or_zero(payload.get("size_bytes")),
+            mime_type=str(payload.get("mime_type") or ""),
         )
 
 
@@ -96,7 +98,6 @@ class PathRef:
     kind: str = "file"
     owner_run_id: str = ""
     source: str = ""
-    reserved: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -108,7 +109,6 @@ class PathRef:
             kind=str(payload.get("kind") or "file"),
             owner_run_id=str(payload.get("owner_run_id") or ""),
             source=str(payload.get("source") or ""),
-            reserved=_dict_or_empty(payload.get("reserved")),
         )
 
 
@@ -120,7 +120,6 @@ class EvidenceRef:
     evidence_refs: list[str] = field(default_factory=list)
     artifact_refs: list[str] = field(default_factory=list)
     confidence: float = 0.0
-    reserved: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -134,7 +133,6 @@ class EvidenceRef:
             evidence_refs=string_list(payload.get("evidence_refs")),
             artifact_refs=string_list(payload.get("artifact_refs")),
             confidence=_float_or_zero(payload.get("confidence")),
-            reserved=_dict_or_empty(payload.get("reserved")),
         )
 
 

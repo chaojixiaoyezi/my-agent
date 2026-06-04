@@ -32,7 +32,15 @@ def _source_ref(item: dict[str, Any]) -> EvidenceSourceRef:
         artifact_ref=str(item.get("artifact_ref") or ""),
         content_sha256=str(item.get("content_sha256") or ""),
         status=str(item.get("status") or "AVAILABLE"),
-        reserved=dict(item.get("reserved")) if isinstance(item.get("reserved"), dict) else {},
+        tool_call_ref=str(item.get("tool_call_ref") or ""),
+        tool_call_id=str(item.get("tool_call_id") or ""),
+        operation_id=str(item.get("operation_id") or ""),
+        tool_result_id=str(item.get("tool_result_id") or ""),
+        http_status=_optional_int(item.get("http_status")),
+        metric_kind=str(item.get("metric_kind") or ""),
+        window_start=str(item.get("window_start") or ""),
+        window_end=str(item.get("window_end") or ""),
+        time_window=dict(item.get("time_window")) if isinstance(item.get("time_window"), dict) else {},
     )
 
 
@@ -46,8 +54,28 @@ def _claim(index: int, item: dict[str, Any]) -> EvidenceClaim:
         verification_status=str(item.get("verification_status") or "VERIFIED"),
         value_type=str(item.get("value_type") or "exact"),
         methodology=str(item.get("methodology") or ""),
-        reserved=dict(item.get("reserved")) if isinstance(item.get("reserved"), dict) else {},
+        metric_kind=str(item.get("metric_kind") or ""),
+        observed_metric_kind=str(item.get("observed_metric_kind") or ""),
+        window_start=str(item.get("window_start") or ""),
+        window_end=str(item.get("window_end") or ""),
+        time_window=dict(item.get("time_window")) if isinstance(item.get("time_window"), dict) else {},
+        limitations=item.get("limitations") or "",
+        uncertainty_notes=item.get("uncertainty_notes") or "",
+        item_path=str(item.get("item_path") or ""),
+        item_key=dict(item.get("item_key")) if isinstance(item.get("item_key"), dict) else {},
+        item_index=_optional_int(item.get("item_index")),
+        group_index=_optional_int(item.get("group_index")),
+        group_name=str(item.get("group_name") or ""),
     )
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 __all__ = ["claims", "source_refs"]

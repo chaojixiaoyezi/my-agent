@@ -10,9 +10,9 @@ compact/resume 交接包使用不同标识。
 import json
 from pathlib import Path
 
-from agent_py_agent.agent.backend import ModelResponse
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 class _LargeReadSaveBackend:
@@ -28,7 +28,7 @@ class _LargeReadSaveBackend:
                 text='[TOOL_CALL]\n{"tool":"read_file","path":"big.txt"}\n[/TOOL_CALL]',
                 backend=self.name,
             )
-        assert "output_artifact_ref:" in prompt
+        assert "output_scoped_call_id:" in prompt
         return ModelResponse(text="已读取并记录大文件线索。", backend=self.name)
 
 

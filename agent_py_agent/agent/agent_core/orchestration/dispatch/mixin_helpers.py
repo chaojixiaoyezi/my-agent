@@ -1,14 +1,14 @@
 
 from __future__ import annotations
 
-"""Helper functions for dispatch mixin facade stages."""
+"""Helper functions for dispatch mixin stages."""
 
 from ....subagents.services.dispatch.params import DispatchRecordParams
 from .params import DispatchContext, DispatchExecutionPlan, DispatchParams
 
 
 def parent_planner_dispatch_record(agent, ctx: DispatchContext):
-    from .subagent_mixin import RunParentPlannerParams
+    from ..._subagent_planner_mixin import RunParentPlannerParams
 
     planner_record = agent.run_parent_planner(
         RunParentPlannerParams(

@@ -25,7 +25,7 @@ def request_scope_snapshot(request: CapabilityRequest) -> dict[str, object]:
         "network_scope": list(request.network_scope),
         "output_budget": dict(request.output_budget),
         "risk_level": request.risk_level,
-        "fallback_attempted": list(request.fallback_attempted),
+        "alternatives_attempted": list(request.alternatives_attempted),
         "escalation_target": request.escalation_target,
     }
 
@@ -84,8 +84,8 @@ def scoped_grant_params(
         network_scope=request.network_scope,
         output_budget=request.output_budget,
         risk_level=request.risk_level,
+        request_scope=request_scope_snapshot(request),
         expires_after_task=True,
-        reserved={"request_scope": request_scope_snapshot(request)},
     )
 
 

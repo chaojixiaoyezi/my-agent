@@ -24,14 +24,13 @@ def node_from_kernel_run(agent: object, row: object) -> dict[str, object]:
 
 def _node_ref_values(payload: dict[str, object]) -> dict[str, list[object]]:
     tool_contract = _dict(payload.get("tool_contract"))
-    reserved = _dict(payload.get("reserved"))
     return {
         "artifact_refs": current_model_ref_list(_list(payload.get("artifact_refs"))),
         "artifact_registry_refs": _current_registry_refs(payload.get("artifact_registry_refs")),
         "evidence_refs": current_model_ref_list(_list(payload.get("evidence_refs"))),
         "blockers": _list(payload.get("blockers")),
-        "needs_capability": _needs_capability(tool_contract, reserved),
-        "recent_tool_trace": _recent_tool_trace(reserved),
+        "needs_capability": _needs_capability(tool_contract, _list(payload.get("needs_capability"))),
+        "recent_tool_trace": _recent_tool_trace(payload.get("recent_tool_trace")),
     }
 
 
@@ -252,9 +251,8 @@ def _dict_list(value: object) -> list[dict[str, object]]:
     return [dict(item) for item in value if isinstance(item, dict)]
 
 
-def _needs_capability(tool_contract: dict[str, object], reserved: dict[str, object]) -> list[str]:
-    explicit = reserved.get("needs_capability")
-    if isinstance(explicit, list):
+def _needs_capability(tool_contract: dict[str, object], explicit: list[object]) -> list[str]:
+    if explicit:
         return [str(item) for item in explicit if str(item or "").strip()]
     needs: list[str] = []
     if _safe_int(tool_contract.get("open_request_count")) > 0:
@@ -264,8 +262,7 @@ def _needs_capability(tool_contract: dict[str, object], reserved: dict[str, obje
     return needs
 
 
-def _recent_tool_trace(reserved: dict[str, object]) -> list[dict[str, object]]:
-    value = reserved.get("recent_tool_trace")
+def _recent_tool_trace(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value[-5:] if isinstance(item, dict)]

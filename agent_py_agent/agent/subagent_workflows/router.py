@@ -116,7 +116,7 @@ def route_workflow(
 
 
 def _disabled_route_decision(fields: _RouteDecisionFields) -> WorkflowRouteDecision:
-    """Build the off-mode route result without lengthening the public facade."""
+    """Build the off-mode route result without lengthening the public API."""
     return _make_route_decision(fields)
 
 
@@ -164,7 +164,7 @@ def _workflow_mode(config: Any, issues: list[str]) -> str:
         if mode in VALID_MODES:
             return mode
 
-    issues.append(f"invalid subagent_workflow_mode {raw_mode!r}; falling back to auto")
+    issues.append(f"invalid subagent_workflow_mode {raw_mode!r}; using default auto")
     return DEFAULT_MODE
 
 
@@ -179,11 +179,8 @@ def _select_template(request: _TemplateSelectionRequest) -> tuple[str, str]:
         return request.preferred_template_id, f"Selected {request.preferred_template_id} for the classified task type."
 
     request.issues.append(f"preferred workflow template not available: {request.preferred_template_id}")
-    if request.available_template_ids:
-        fallback_template_id = request.available_template_ids[0]
-        return fallback_template_id, f"Fell back to available workflow template: {fallback_template_id}."
-
-    request.issues.append("no workflow templates are available")
+    if not request.available_template_ids:
+        request.issues.append("no workflow templates are available")
     return "", "No workflow template could be selected."
 
 

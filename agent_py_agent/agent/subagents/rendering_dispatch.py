@@ -3,7 +3,7 @@ from __future__ import annotations
 
 """markdown renderers for dispatch, watch, and parent planner reports.
 
-这些报告都属于父代理调度视角，单独拆出后 rendering.py 保持兼容入口。
+这些报告都属于父代理调度视角，本模块负责调度相关 markdown 渲染。
 """
 
 from .reports import DispatchReport, DispatchWatchReport, ParentPlannerReport
@@ -48,15 +48,17 @@ def _dispatch_completion_gate_lines(records: list[object]) -> list[str]:
     if not blockers:
         lines.extend([
             "- status: complete_or_no_blockers",
+            "- completion_risk: false",
             "- must_not_report_done: false",
             "- blocking_run_ids: (none)",
         ])
         return lines
     lines.extend([
         "- status: not_complete",
+        "- completion_risk: true",
         "- must_not_report_done: true",
         f"- blocking_run_ids: {', '.join(blockers)}",
-        "- next_action: repair_or_continue_blocking_run_ids before final user-facing completion.",
+        "- next_action: inspect, continue, cancel, takeover, or explain unresolved child runs before final user-facing completion.",
     ])
     return lines
 

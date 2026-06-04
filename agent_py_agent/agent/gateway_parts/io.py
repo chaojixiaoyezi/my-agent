@@ -17,13 +17,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..file_io import append_jsonl
+from ..io import append_jsonl
 from ..runtime_errors import runtime_error_report
 from .paths import GatewayPaths
 
 try:
     import fcntl
-except ImportError:  # pragma: no cover - Windows fallback.
+except ImportError:  # pragma: no cover - Windows import guard.
     fcntl = None
 
 _JSON_FILE_LOCKS: dict[str, threading.Lock] = {}

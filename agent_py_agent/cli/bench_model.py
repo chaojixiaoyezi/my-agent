@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..agent.config import load_config
 from ..agent.model_speed import load_speed_profile, run_speed_benchmark, save_speed_profile
+from ..agent.settings import load_config
 from .common import DEFAULT_CONFIG, make_agent, resolve_workspace_root
 
 

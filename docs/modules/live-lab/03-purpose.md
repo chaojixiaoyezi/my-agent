@@ -12,7 +12,7 @@
 
 ## 为什么这样设计
 
-- 薄入口 `live_agent_lab.py` 让命令稳定，case 可以继续拆分。
+- `live_agent_lab.py` 让命令稳定，case 可以继续按套件拆分。
 - runner/cases/constants 分开，避免所有演练逻辑挤在一个脚本里。
 - 离线 replay 让 LOG 链路不用每次花真实 API 成本也能验证。
 - summary 和 artifacts 让失败可复查，而不是只依赖终端肉眼看。

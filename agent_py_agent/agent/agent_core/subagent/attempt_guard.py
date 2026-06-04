@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from ...runtime_errors import runtime_error_report
-from ...tools import ToolExecutionResult
+from ...tooling.models import ToolExecutionResult
 from ..runner.context import current_subagent_attempt_id, current_subagent_run_id
 
 

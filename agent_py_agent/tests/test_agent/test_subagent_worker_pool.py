@@ -6,12 +6,12 @@ import time
 from pathlib import Path
 
 from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
-from agent_py_agent.agent.backend import BaseBackend, ModelResponse
-from agent_py_agent.agent.capabilities import CapabilityRouter
-from agent_py_agent.agent.capability_config import CapabilityConfig
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.backends import BaseBackend, ModelResponse
+from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.subagent import RecordRunnerResultParams
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
 
 
 def _accepted_result(summary: str) -> ModelResponse:

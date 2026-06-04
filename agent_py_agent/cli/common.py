@@ -12,17 +12,17 @@ import sys
 import time
 from pathlib import Path, PureWindowsPath
 
-from ..agent.capabilities import CapabilityRouter
-from ..agent.config import load_config
+from ..agent.capability import CapabilityRouter
+from ..agent.capability.skills import SkillRegistry
 from ..agent.core import SimpleAgent
+from ..agent.settings import load_config
 from ..agent.settings.services.runtime_config_env import apply_runtime_config_environment
-from ..agent.skills import SkillRegistry
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "config" / "agent_config.yaml"
 DEFAULT_CAPABILITY_CONFIG = ROOT / "config" / "capability_config.yaml"
 CHAT_PROMPT = "你> "
-FALLBACK_CHAT_PROMPT = "user> "
+PLAIN_CHAT_PROMPT = "user> "
 
 
 def add_resume_context_switches(command) -> None:

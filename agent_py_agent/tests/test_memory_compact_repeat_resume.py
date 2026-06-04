@@ -99,13 +99,14 @@ def _write_repeat_tool_output(root: Path) -> str:
     record = externalize_tool_output_record(
         ExternalizeToolOutputRequest(
             root=root,
-            tool="read_file",
+            tool="shell",
             call_id="repeat-1",
             output="完整页面草稿和检查清单\n" + ("家具网站细节\n" * 200),
             ok=True,
             request_id="request-repeat",
             run_id="run-repeat",
             task_id="task-repeat",
+            parameters={"command": "cat workspace/drafts/furniture.md"},
         )
     )
     return str(record["artifact_ref"])
@@ -157,7 +158,7 @@ def test_repeated_compact_apply_resume_preserves_lineage_and_state(tmp_path: Pat
         assert resume["lineage"]["previous_apply_id"] == previous_apply_id
         assert resume["main_context_bundle"]["ref"] == bundle_ref
         assert artifact_ref in resume["recommended_read_paths"]
-        assert resume["continue_packet"]["artifact_read_hints"][0]["fallback_path"] == artifact_ref
+        assert resume["continue_packet"]["artifact_read_hints"][0]["artifact_path"] == artifact_ref
         assert "高端现代家具品牌首页" in json.dumps(resume["work_state"], ensure_ascii=False)
         previous_apply_id = apply_result["apply_id"]
         apply_ids.append(previous_apply_id)

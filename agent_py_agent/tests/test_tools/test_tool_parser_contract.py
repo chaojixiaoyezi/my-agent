@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_py_agent.agent.tools import ToolRegistry, ToolRegistryParams, ToolSpec
+from agent_py_agent.agent.tooling.models import ToolSpec
+from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 
 from .backends import make_tool_registry
 

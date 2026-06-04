@@ -41,7 +41,7 @@ class TestWebSearchTool:
                     {
                         "title": f"{query} result",
                         "url": "https://example.com/result",
-                        "snippet": "fallback provider worked",
+                        "snippet": "provider worked",
                     }
                 ]
 

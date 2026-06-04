@@ -1,5 +1,5 @@
 
-"""本模块负责从 YAML 读取配置并逐字段校验、类型转换和范围限制，坏值写 warning 后回退安全默认值。
+"""本模块负责从 YAML 读取配置并逐字段校验、类型转换和范围限制，坏值写 warning 后采用安全默认值。
 
 新手说明:
 这里包含 load_log_analysis_config（从文件加载配置）、normalize_log_analysis_config（归一化原始配置）。
@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ...settings.config import load_simple_yaml
-from .config_coercers import (  # noqa: F401 — re-export for backward compatibility
+from .config_coercers import (
     _INT_PATTERN,
     _LEVELS,
     _MISSING,
@@ -47,7 +47,7 @@ def load_log_analysis_config(
     missing_ok: True 表示配置文件不存在时返回默认配置；False 表示不存在就抛 FileNotFoundError。
 
     返回说明:
-    返回 LogAnalysisConfig。config.config_warnings 会包含坏值回退记录。
+    返回 LogAnalysisConfig。config.config_warnings 会包含坏值默认值记录。
 
     异常说明:
     missing_ok=False 且文件不存在时抛 FileNotFoundError。YAML 解析错误会由 load_simple_yaml 抛出。"""
@@ -127,7 +127,7 @@ def normalize_log_analysis_config(
     返回 (config, warnings)。config 是最终生效配置，warnings 是 LogAnalysisConfigWarning 列表。
 
     重要边界:
-    如果 query_default_limit 大于 query_max_limit，会回退 query_default_limit，避免默认查询超过最大上限。"""
+    如果 query_default_limit 大于 query_max_limit，会重置 query_default_limit，避免默认查询超过最大上限。"""
     source = values if values is not None else {}
     warnings: list[LogAnalysisConfigWarning] = []
     defaults = LogAnalysisConfig()

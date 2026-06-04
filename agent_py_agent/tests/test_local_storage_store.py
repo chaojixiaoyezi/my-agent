@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_py_agent.agent.local_store import LocalStore
+from agent_py_agent.agent.local_storage import LocalStore
 
 
 @pytest.fixture

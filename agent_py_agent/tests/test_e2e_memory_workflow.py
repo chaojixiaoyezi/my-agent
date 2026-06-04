@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_py_agent.agent.memory import JsonlMemory
+from agent_py_agent.agent.memory_store import JsonlMemory
 from agent_py_agent.agent.memory_store.jsonl import MemoryRecord
 
 

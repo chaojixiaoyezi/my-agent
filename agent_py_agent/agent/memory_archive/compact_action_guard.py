@@ -8,7 +8,6 @@ from typing import Any
 
 from .schema import (
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 
@@ -49,7 +48,6 @@ def build_compact_action_guard(request: CompactActionGuardRequest) -> dict[str, 
         "plan_id": request.consistency_report.get("plan_id", ""),
         "missing_fields": _missing_fields(request.work_state),
         "checks": checks,
-        "reserved": runtime_memory_reserved_fields(COMPACT_ACTION_GUARD_SCHEMA),
     }
 
 

@@ -76,15 +76,8 @@ def build_subagent_continue_packet(request: SubagentContinuePacketRequest, packe
         "work_progress": work_progress,
         "recommended_read_paths": _recommended_read_paths(task, packet_ref, restore_refs),
         "guard": _guard_payload(task),
-        "reserved": _reserved_payload(load_errors),
+        "load_errors": load_errors,
     }
-
-
-def _reserved_payload(load_errors: list[dict[str, object]]) -> dict[str, object]:
-    payload: dict[str, object] = {}
-    if load_errors:
-        payload["load_errors"] = load_errors
-    return payload
 
 
 def _load_errors(values: list[object]) -> list[dict[str, object]]:

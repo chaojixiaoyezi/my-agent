@@ -62,8 +62,8 @@ class TestResolveRouteMode:
         result = _resolve_route_mode(None, mock_config)
         assert result == "strict"
 
-    def test_resolve_route_mode_default_fallback(self):
-        """测试配置为空时的默认回退。"""
+    def test_resolve_route_mode_uses_default(self):
+        """测试配置为空时使用默认 mode。"""
         from agent_py_agent.cli.memory_commands import _resolve_route_mode
 
         mock_config = MagicMock()
@@ -166,7 +166,7 @@ class TestConfigWarnings:
 
         mock_config = MagicMock()
         mock_config.memory_config_warnings = [
-            {"field_name": "memory_hook_enabled", "reason": "配置值无效", "fallback_value": True}
+            {"field_name": "memory_hook_enabled", "reason": "配置值无效", "default_value": True}
         ]
 
         result = _config_warnings(mock_config)

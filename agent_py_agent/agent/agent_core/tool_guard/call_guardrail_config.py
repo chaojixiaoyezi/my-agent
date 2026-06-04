@@ -4,6 +4,7 @@ from __future__ import annotations
 from ...settings.runtime_guard_config import runtime_guard_bool, runtime_guard_int
 
 DEFAULT_REPEAT_FAIL_THRESHOLD = 10
+DEFAULT_READONLY_NO_PROGRESS_THRESHOLD = 3
 
 
 def repeat_fail_threshold(params: object) -> int:
@@ -15,6 +16,19 @@ def repeat_fail_threshold(params: object) -> int:
     return runtime_guard_int(
         "repeat_fail_threshold",
         DEFAULT_REPEAT_FAIL_THRESHOLD,
+        policy=getattr(params, "runtime_guard_policy", None),
+    )
+
+
+def readonly_no_progress_threshold(params: object) -> int:
+    attrs = getattr(params, "task_attributes", None)
+    if isinstance(attrs, dict):
+        parsed = _int_value(attrs.get("readonly_no_progress_threshold"))
+        if parsed >= 0:
+            return parsed
+    return runtime_guard_int(
+        "readonly_no_progress_threshold",
+        DEFAULT_READONLY_NO_PROGRESS_THRESHOLD,
         policy=getattr(params, "runtime_guard_policy", None),
     )
 

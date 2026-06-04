@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""LLM: local E2E for capability grant -> shell gateway -> trash -> fallback report.
+"""LLM: local E2E for capability grant -> shell gateway -> trash -> recovery report.
 
 给人看的解释：
 这个测试把受控工具链路串起来，确保每一步都只写 refs 和受控文件。
@@ -10,11 +10,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_py_agent.agent.subagents.fallback_report import (
-    FallbackReportRequest,
-    write_fallback_report,
-)
 from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.recovery_report import (
+    RecoveryReportRequest,
+    write_recovery_report,
+)
 from agent_py_agent.agent.subagents.services.lifecycle import (
     RecordCapabilityGrantParams,
     RecordCapabilityRequestParams,
@@ -88,8 +88,8 @@ def _archive_stdout_and_report(fixture: ControlledToolsFixture, shell_result):
             actor_run_id=fixture.task.id,
         )
     )
-    fallback = write_fallback_report(
-        FallbackReportRequest(
+    recovery = write_recovery_report(
+        RecoveryReportRequest(
             task_dir=fixture.task_dir,
             run_id=fixture.task.id,
             title="Controlled Tools E2E",
@@ -99,16 +99,16 @@ def _archive_stdout_and_report(fixture: ControlledToolsFixture, shell_result):
             evidence_refs=[shell_result.audit_ref],
         )
     )
-    return trash_result, fallback
+    return trash_result, recovery
 
 
 def test_controlled_tools_local_e2e(tmp_path: Path) -> None:
     fixture = _prepare_controlled_shell_grant(tmp_path)
     shell_result = _run_controlled_shell(tmp_path, fixture)
-    trash_result, fallback = _archive_stdout_and_report(fixture, shell_result)
+    trash_result, recovery = _archive_stdout_and_report(fixture, shell_result)
 
     assert shell_result.executed is True
     assert shell_result.stdout_preview.strip() == "controlled-ok"
     assert trash_result.moved is True
-    assert fallback.written is True
-    assert Path(fallback.markdown_ref).read_text(encoding="utf-8").startswith("# Controlled Tools E2E")
+    assert recovery.written is True
+    assert Path(recovery.markdown_ref).read_text(encoding="utf-8").startswith("# Controlled Tools E2E")

@@ -149,7 +149,7 @@ def _item_evidence_contract_lines(collection: dict[str, object], evidence: objec
         return []
     return [
         f"  - item_evidence_required_fields={', '.join(str(item) for item in evidence_fields)}",
-        "  - item_evidence_shape=field_source_ids 或 row-scoped claims.reserved.item_path",
+        "  - item_evidence_shape=field_source_ids 或 row-scoped claims.item_path",
     ]
 
 

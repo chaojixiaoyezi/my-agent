@@ -93,7 +93,7 @@ def test_tui_status_uses_configured_context_window() -> None:
     assert "50%" in status
 
 
-def test_gateway_timing_reports_cumulative_context_tokens() -> None:
+def test_gateway_timing_reports_current_context_tokens_before_cumulative_ledger() -> None:
     from agent_py_agent.cli.chat_parts.gateway_client import (
         GatewayTimingContext,
         format_gateway_timing,
@@ -103,13 +103,18 @@ def test_gateway_timing_reports_cumulative_context_tokens() -> None:
         GatewayTimingContext(
             request_id="req-1",
             elapsed=1.25,
-            response={"tool_rounds": 2, "prompt_token_estimate": 1200, "cumulative_token_estimate": 9400},
+            response={
+                "tool_rounds": 2,
+                "current_context_token_estimate": 1200,
+                "prompt_token_estimate": 1100,
+                "cumulative_token_estimate": 9_400_000,
+            },
             use_gateway=True,
         )
     )
 
-    assert "ctx_tokens~9400" in timing
-    assert "prompt_tokens~1200" in timing
+    assert "ctx_tokens~1200" in timing
+    assert "prompt_tokens~1100" in timing
 
 
 def test_collapse_response_text_returns_preview_for_long_text() -> None:
@@ -120,6 +125,19 @@ def test_collapse_response_text_returns_preview_for_long_text() -> None:
     assert collapsed is True
     assert "line 0" in preview
     assert "..." in preview
+
+
+def test_plain_stream_shows_tool_progress_after_long_response_is_collapsed(capsys) -> None:
+    from agent_py_agent.cli.chat_parts.plain_ui import _make_chunk_handler
+
+    on_chunk, _started = _make_chunk_handler("agent", 1, preview_chars=5)
+
+    assert on_chunk("abcdef") is True
+    assert on_chunk("[工具] #1 read_file 开始 path=report.md") is True
+
+    out = capsys.readouterr().out
+    assert "[回复较长，后续内容已折叠" in out
+    assert "[工具] #1 read_file 开始" in out
 
 
 def test_startup_banner_marks_gateway_mode() -> None:

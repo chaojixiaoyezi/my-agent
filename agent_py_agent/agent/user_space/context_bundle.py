@@ -104,7 +104,6 @@ def _bundle_payload(request: MainContextBundleRequest) -> dict[str, object]:
             "expected": "build_prompt_and_run_tool_loop",
             "explanation": "Use refs first, read bodies only when needed.",
         },
-        "reserved": {},
     }
     payload.update(main_context_contract_sections(request, home_paths))
     return payload
@@ -117,7 +116,6 @@ def _identity_payload(request: MainContextBundleRequest) -> dict[str, object]:
         "root_run_id": request.root_run_id or request.run_id,
         "parent_run_id": request.parent_run_id,
         "source": request.source or "run",
-        "reserved": {},
     }
 
 
@@ -127,14 +125,13 @@ def _scope_payload(request: MainContextBundleRequest) -> dict[str, object]:
         "run_id": request.run_id,
         "task_id": request.task_id,
         "context_scope": request.context_scope or "default",
-        "reserved": {},
     }
 
 
 def _workspace_refs(request: MainContextBundleRequest, home_paths: Any | None) -> dict[str, object]:
     root = str(Path(request.root).resolve())
     if home_paths is None:
-        return {"primary_workspace_root": root, "reserved": {}}
+        return {"primary_workspace_root": root}
     return {
         "primary_workspace_root": root,
         "my_agent_home": str(Path(home_paths.root).resolve()),
@@ -143,7 +140,6 @@ def _workspace_refs(request: MainContextBundleRequest, home_paths: Any | None) -
         "owner_tasks_root": _resolved_home_attr(home_paths, "owner_tasks_dir"),
         "owner_memory_root": _resolved_home_attr(home_paths, "owner_memory_dir"),
         "owner_artifacts_root": _resolved_home_attr(home_paths, "owner_artifacts_dir"),
-        "reserved": {},
     }
 
 
@@ -151,7 +147,6 @@ def _task_payload(request: MainContextBundleRequest) -> dict[str, object]:
     return {
         "user_prompt_preview": _preview(request.user_prompt, max_chars=240),
         "attributes": dict(request.task_attributes or {}),
-        "reserved": {},
     }
 
 
@@ -160,7 +155,6 @@ def _memory_refs(request: MainContextBundleRequest, home_paths: Any | None) -> d
         "related_memory_count": int(request.memory_count),
         "routed_required_read_paths": list(request.routed_required_read_paths),
         "routed_candidate_paths": list(request.routed_candidate_paths),
-        "reserved": {},
     }
     if home_paths is not None:
         payload.update(
@@ -182,7 +176,6 @@ def _resolved_home_attr(home_paths: Any, attr: str) -> str:
 def _recovery_refs(request: MainContextBundleRequest, home_paths: Any | None) -> dict[str, object]:
     payload: dict[str, object] = {
         "resume_context_injected": bool(request.resume_context_injected),
-        "reserved": {},
     }
     if home_paths is not None:
         archive = Path(home_paths.memory_archive_dir)
@@ -200,7 +193,6 @@ def _tooling_payload(request: MainContextBundleRequest) -> dict[str, object]:
     return {
         "runtime_injection_count_before_bundle": int(request.runtime_injection_count),
         "tool_gateway": "default_tool_registry",
-        "reserved": {},
     }
 
 

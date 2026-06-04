@@ -144,7 +144,7 @@ def test_explicit_template_arg_selects_template_without_keyword_matching():
     assert decision.selected_template_id == "code_feature_split"
 
 
-def test_missing_target_template_records_issue_and_falls_back_to_available_template():
+def test_missing_target_template_records_issue_without_guessing_another_template():
     decision = _route(
         "Fix the API bug and add regression tests",
         config=_Config("auto"),
@@ -152,5 +152,5 @@ def test_missing_target_template_records_issue_and_falls_back_to_available_templ
         workflow_task_type="code_or_bugfix",
     )
 
-    assert decision.selected_template_id == "single_worker_verified"
+    assert decision.selected_template_id == ""
     assert any(issue == "preferred workflow template not available: code_feature_split" for issue in decision.issues)

@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...agent.gateway import (
+from ...agent.gateway_parts import (
     gateway_paths,
     gateway_response_path,
 )

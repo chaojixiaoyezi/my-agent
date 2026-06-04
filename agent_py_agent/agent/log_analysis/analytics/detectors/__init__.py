@@ -6,8 +6,6 @@
   - field_access.py   : 底层字段访问、类型转换、时间工具
   - field_extractors.py: 字段提取器（source_ip、user 等）
   - classifiers.py    : 事件分类、实体比较、弱信号
-  - helpers.py        : 向后兼容的 re-export 模块
-
 所有公开符号均可从本包直接导入。
 """
 
@@ -41,10 +39,6 @@ from .classifiers import (  # noqa: F401
     _unique_texts,
     _weak_signal,
 )
-
-# Re-export from sub-modules for backward compatibility.
-# Existing ``from .detectors import X`` and ``from .analytics.detectors import X``
-# statements will continue to work after the file→package migration.
 from .field_access import (  # noqa: F401
     SUSPICIOUS_CHILD_PROCESSES,
     WEB_PARENT_PROCESSES,
@@ -90,12 +84,6 @@ from .field_extractors import (  # noqa: F401
 from .rules import (  # noqa: F401
     DETECTORS,
     bruteforce_then_success,
-    detect_bruteforce_then_success,
-    detect_multi_source_weak_signal,
-    detect_rare_egress_after_alert,
-    detect_vpn_new_geo_login,
-    detect_waf_attack_success_candidate,
-    detect_web_to_process_anomaly,
     multi_source_weak_signal,
     rare_egress_after_alert,
     run_soft_detectors,
@@ -110,12 +98,6 @@ __all__ = [
     "SUSPICIOUS_CHILD_PROCESSES",
     "WEB_PARENT_PROCESSES",
     "bruteforce_then_success",
-    "detect_bruteforce_then_success",
-    "detect_multi_source_weak_signal",
-    "detect_rare_egress_after_alert",
-    "detect_vpn_new_geo_login",
-    "detect_waf_attack_success_candidate",
-    "detect_web_to_process_anomaly",
     "multi_source_weak_signal",
     "rare_egress_after_alert",
     "run_soft_detectors",

@@ -5,7 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from .rendering import _cprint, _tui_print_banner, progress_bar
+from .rendering import _cprint, progress_bar, startup_banner
 from .tui_activity import format_activity_text
 from .tui_params import (
     MakeTuiAppParams,
@@ -155,7 +155,7 @@ def _show_tui_status(params: TuiHandleCommandParams) -> None:
     else:
         _cprint(f"No active task; {params.pending_jobs_ref[0]} queued task(s).")
     if params.use_gateway:
-        from ...agent.gateway import render_gateway_status
+        from ...agent.gateway_parts import render_gateway_status
 
         for line in render_gateway_status(params.agent, params.paths):
             _cprint(line)
@@ -227,6 +227,7 @@ def _make_tui_app_params(
         shutting_down_ref=run_config.shutting_down_ref,
         running_prompt_ref=run_config.running_prompt_ref,
         stop_event=stop_event,
+        current_session_id=run_config.current_session_id,
     )
 
 
@@ -256,6 +257,7 @@ def _make_start_worker_params(
         stream_visible_text_ref=refs.stream_visible_text_ref,
         last_token_estimate_ref=params.last_token_estimate_ref,
         stop_event=refs.stop_event,
+        current_session_id=params.current_session_id,
     )
 
 
@@ -280,7 +282,7 @@ def run_tui(*, params: TuiRunParams) -> int:
         stop_event=stop_event,
     )
     _start_worker_threads(params=_make_start_worker_params(params, refs))
-    _tui_print_banner(params.agent, params.use_gateway)
+    _print_startup_banner(params.agent.config.agent_name, params.use_gateway)
     _run_tui_loop(
         TuiLoopContext(
             app=app,
@@ -291,6 +293,11 @@ def run_tui(*, params: TuiRunParams) -> int:
         )
     )
     return 0
+
+
+def _print_startup_banner(agent_name: str, use_gateway: bool) -> None:
+    for line in startup_banner(agent_name, use_gateway=use_gateway).splitlines():
+        _cprint(line)
 
 
 def _make_tui_app(*, params: MakeTuiAppParams):

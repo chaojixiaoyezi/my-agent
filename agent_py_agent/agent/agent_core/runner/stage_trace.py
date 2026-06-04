@@ -188,6 +188,8 @@ def _touch_active_heartbeat_chain(manager: Any, task: Any) -> Any:
         try:
             current = manager.load(parent_id)
         except Exception as exc:
+            if _is_external_parent_anchor(current, parent_id):
+                break
             _warn_runner_trace_error(exc, context="runner_stage_trace.heartbeat.parent_load", run_id=parent_id)
             break
     return latest_current
@@ -203,6 +205,20 @@ def _heartbeat_active_task(task: Any) -> bool:
     status = str(getattr(task, "status", "") or "").upper()
     active_attempt = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
     return status == "RUNNING" or bool(active_attempt)
+
+
+def _is_external_parent_anchor(task: Any, parent_id: str) -> bool:
+    root_id = str(getattr(task, "root_id", "") or "").strip()
+    depth = _int_value(getattr(task, "depth", 0))
+    task_id = str(getattr(task, "id", "") or "").strip()
+    return bool(parent_id and parent_id == root_id and parent_id != task_id and depth <= 1)
+
+
+def _int_value(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _detail_trace_payload(manager: Any, task: Any, bundle: RunnerStageTraceBundle) -> dict[str, Any]:

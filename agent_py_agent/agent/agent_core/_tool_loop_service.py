@@ -29,7 +29,6 @@ from .tool_guard.loop_hints import append_tool_guardrail_action_block_hint
 from .tool_limit_closeout import final_response_after_tool_limit
 from .tool_loop.completion import ToolRoundCompletionRequest, completion_response_after_tool_round
 from .tool_loop.empty_response import (
-    empty_model_response_fallback,
     empty_model_response_retry_context,
     should_retry_empty_model_response,
 )
@@ -59,8 +58,10 @@ class _ToolStepRequest:
 
 
 def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
-    effective = getattr(getattr(agent, "config", None), "max_tool_rounds", None)
-    if effective is None:
+    config = getattr(agent, "config", None)
+    if hasattr(config, "max_tool_rounds"):
+        effective = getattr(config, "max_tool_rounds", None)
+    else:
         effective = runtime_guard_int(
             "max_tool_rounds",
             0,
@@ -94,7 +95,7 @@ class ToolLoopService:
                 should_stop,
                 retry_after_empty,
                 empty_response_repairs,
-            ) = self._model_turn_or_fallback(params, tool_rounds, empty_response_repairs)
+            ) = self._model_turn_or_retry(params, tool_rounds, empty_response_repairs)
             if retry_after_empty:
                 continue
             if should_stop:
@@ -122,7 +123,7 @@ class ToolLoopService:
 
         return final_prompt, final_response, tool_rounds
 
-    def _model_turn_or_fallback(
+    def _model_turn_or_retry(
         self,
         params: ToolLoopExecuteParams,
         tool_rounds: int,
@@ -149,15 +150,7 @@ class ToolLoopService:
                     True,
                     empty_response_repairs + 1,
                 )
-            fallback = empty_model_response_fallback(
-                self._agent,
-                params,
-                exc,
-                executed_subagent_orchestration=executed_subagent_orchestration,
-            )
-            if fallback is None:
-                raise
-            return build_tool_loop_prompt(self._agent, params), fallback, True, False, empty_response_repairs
+            raise
 
     def _response_action(
         self,
@@ -192,6 +185,7 @@ class ToolLoopService:
                 request.action.calls,
                 self._execute_one_tool_call,
                 self._record_tool_call,
+                request.current_prompt,
             )
         )
         return request.current_prompt, final_response, next_round

@@ -38,6 +38,7 @@ class TuiWorkerConfig:
     app_ref: list
     last_token_estimate_ref: list
     stop_event: Any
+    current_session_id: str = ""
 
 
 @dataclass

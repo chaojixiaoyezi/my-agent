@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from ..agent.capability_config import load_capability_config
+from ..agent.capability.config import load_capability_config
 from ..agent.subagents.models import SubAgentCapabilityRouteOptions, SubAgentPlanActionsOptions
 from ..agent.subagents.services.actions.options import ActionApplyOptions
 from .common import make_agent, make_capability_router

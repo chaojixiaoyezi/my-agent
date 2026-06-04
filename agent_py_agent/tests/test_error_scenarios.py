@@ -1,4 +1,4 @@
-"""异常场景测试 - dispatch循环异常处理、memory_push异常场景、failure_introspector降级逻辑。"""
+"""异常场景测试 - dispatch循环异常处理、memory_push异常场景、failure_introspector规则主链。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -60,15 +60,14 @@ class TestDispatchLoopExceptions:
         result = dispatch_loop(agent, router=None, max_consecutive_rounds=20)
         assert isinstance(result, DispatchLoopReport)
 
-    def test_llm_call_failure_in_dispatch(self, tmp_path: Path):
-        """LLM 调用失败时的降级处理。"""
+    def test_failure_introspection_without_agent_uses_rules(self, tmp_path: Path):
+        """未绑定 agent 时使用同一条规则主链。"""
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
         from agent_py_agent.agent.agent_core.failure_introspector import (
             FailureIntrospection,
             FailureIntrospector,
         )
 
-        # 模拟 agent 为 None
         introspector = FailureIntrospector(agent=None)
 
         mock_task = MagicMock()
@@ -84,13 +83,12 @@ class TestDispatchLoopExceptions:
             should_retry=True,
         )
 
-        # agent 为 None 时应降级到规则分类
         result = introspector.introspect(mock_task, mock_runner_result, failure_analysis)
         assert isinstance(result, FailureIntrospection)
-        assert result.confidence == 0.3  # 降级后的低置信度
+        assert result.confidence == 0.55
 
-    def test_llm_json_parse_failure(self, tmp_path: Path):
-        """LLM 返回 JSON 解析失败时的降级。"""
+    def test_failure_introspection_does_not_call_agent_run(self, tmp_path: Path):
+        """失败自省不额外调用模型。"""
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
         from agent_py_agent.agent.agent_core.failure_introspector import (
             FailureIntrospection,
@@ -120,7 +118,8 @@ class TestDispatchLoopExceptions:
 
         result = introspector.introspect(mock_task, mock_runner_result, failure_analysis)
         assert isinstance(result, FailureIntrospection)
-        assert result.confidence == 0.3  # 降级后的低置信度
+        assert result.confidence == 0.55
+        agent.run.assert_not_called()
 
     def test_all_tasks_failed_and_no_retry(self, tmp_path: Path):
         """所有任务都失败且不允许重试时的处理。"""
@@ -221,11 +220,11 @@ class TestMemoryPushExceptions:
             pass  # 可能抛出异常，但不应该导致进程崩溃
 
 
-class TestFailureIntrospectorDegradation:
-    """测试 failure_introspector 的降级逻辑。"""
+class TestFailureIntrospectorRulePath:
+    """测试 failure_introspector 的规则主链。"""
 
-    def test_introspector_no_agent_fallback(self, tmp_path: Path):
-        """agent 未设置时降级到规则分类。"""
+    def test_introspector_no_agent_uses_rules(self, tmp_path: Path):
+        """agent 未设置时使用规则分类。"""
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
         from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
@@ -243,11 +242,11 @@ class TestFailureIntrospectorDegradation:
         )
 
         result = introspector.introspect(mock_task, mock_runner_result, analysis)
-        assert result.confidence == 0.3
+        assert result.confidence == 0.55
         assert result.analysis_reason.startswith("规则分类：")
 
-    def test_introspector_llm_exception_fallback(self, tmp_path: Path):
-        """LLM 调用抛出异常时降级。"""
+    def test_introspector_agent_run_is_not_called(self, tmp_path: Path):
+        """失败自省不额外调用模型。"""
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
         from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
@@ -272,11 +271,12 @@ class TestFailureIntrospectorDegradation:
         )
 
         result = introspector.introspect(mock_task, mock_runner_result, analysis)
-        assert result.confidence == 0.3
+        assert result.confidence == 0.55
         assert result.root_cause == "network_issue"
+        agent.run.assert_not_called()
 
-    def test_introspector_invalid_json_response(self, tmp_path: Path):
-        """LLM 返回无效 JSON 时的降级。"""
+    def test_introspector_invalid_json_response_is_ignored(self, tmp_path: Path):
+        """agent 返回内容不参与失败自省。"""
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
         from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
@@ -301,10 +301,11 @@ class TestFailureIntrospectorDegradation:
         )
 
         result = introspector.introspect(mock_task, mock_runner_result, analysis)
-        assert result.confidence == 0.3
+        assert result.confidence == 0.55
+        agent.run.assert_not_called()
 
-    def test_introspector_missing_keys_in_response(self, tmp_path: Path):
-        """LLM 返回 JSON 缺少必需字段时的降级。"""
+    def test_introspector_missing_keys_in_response_is_ignored(self, tmp_path: Path):
+        """模型 JSON 不参与失败主链。"""
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
         from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
@@ -329,9 +330,10 @@ class TestFailureIntrospectorDegradation:
 
         result = introspector.introspect(mock_task, mock_runner_result, analysis)
         assert isinstance(result.analysis_reason, str)
+        agent.run.assert_not_called()
 
-    def test_introspector_fallback_includes_params(self, tmp_path: Path):
-        """降级时包含规则分类的参数建议。"""
+    def test_introspector_rules_include_params(self, tmp_path: Path):
+        """规则分类包含参数建议。"""
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
         from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 

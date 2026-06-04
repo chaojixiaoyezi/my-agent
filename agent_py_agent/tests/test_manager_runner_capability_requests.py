@@ -8,16 +8,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_py_agent.agent.subagents.manager_runner_results import (
-    RecordRunnerResultParams,
-    SubAgentRunnerResultMixin,
-)
+from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
 from agent_py_agent.agent.subagents.models import (
     CapabilityRequest,
     SubAgentParsedOutput,
     SubAgentTask,
 )
 from agent_py_agent.agent.subagents.parsing import parse_subagent_runner_output
+from agent_py_agent.agent.subagents.services.runner_result import SubAgentRunnerResultService
 
 
 def _rrr(run_id: str, **kwargs) -> RecordRunnerResultParams:
@@ -29,10 +27,14 @@ def _rrr(run_id: str, **kwargs) -> RecordRunnerResultParams:
 def capability_manager():
     """创建只覆盖 runner result 能力申请路径的轻量 manager。"""
 
-    class TestManager(SubAgentRunnerResultMixin):
+    class TestManager:
         def __init__(self):
             self._tasks = {}
             self._work_logs = []
+            self.runner_result = SubAgentRunnerResultService(self)
+
+        def record_runner_result(self, params: RecordRunnerResultParams):
+            return self.runner_result.record_runner_result(params)
 
         def load(self, run_id: str) -> SubAgentTask:
             return self._tasks.get(run_id)
@@ -154,8 +156,8 @@ def test_record_runner_result_pending_capability_stays_blocked(capability_manage
     assert capability_task.current_step == "PENDING_CAPABILITY_REQUEST"
 
 
-def test_record_runner_result_recovers_pending_capability_request(capability_manager, capability_task):
-    """pending_steps 兜底出来的能力申请必须进入父级路由队列。"""
+def test_record_runner_result_requires_explicit_pending_capability_request(capability_manager, capability_task):
+    """pending_steps 不会被系统猜成 capability request。"""
     capability_manager._tasks[capability_task.id] = capability_task
     parsed = parse_subagent_runner_output("""[SUBAGENT_RESULT]
 {
@@ -180,13 +182,9 @@ def test_record_runner_result_recovers_pending_capability_request(capability_man
 
     assert result.status == "BLOCKED"
     output = json.loads(Path(capability_task.output_json).read_text(encoding="utf-8"))
-    assert output["next_action"] == "route_capability_request"
-    assert len(capability_task.capability_requests) == 1
-    request = capability_task.capability_requests[0]
-    assert request.status == "OPEN"
-    assert request.needed_capability == "controlled_exec"
-    assert request.requested_tools == ["controlled_exec"]
-    assert request.requested_commands == ["pwd", "python3", "rm"]
+    assert output["structured_output"]["capability_request_count"] == 0
+    assert output["next_action"] != "route_capability_request"
+    assert capability_task.capability_requests == []
 
 
 def test_record_runner_result_keeps_tool_created_open_request_blocked(capability_manager, capability_task):

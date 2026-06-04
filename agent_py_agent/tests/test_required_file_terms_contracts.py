@@ -27,7 +27,7 @@ def test_file_contract_extracts_structured_required_files():
 def test_file_contract_extracts_structured_forbidden_files():
     text = """
     required_files: index.html, item-detail.html
-    forbidden_files: product.html/legacy.html, output.json
+    forbidden_files: product.html/stale.html, output.json
     forbidden_files:
     - RUNNER_RESULT.md
     - execution_context.json
@@ -37,7 +37,7 @@ def test_file_contract_extracts_structured_forbidden_files():
     forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|json|md")
 
     assert required == ["index.html", "item-detail.html"]
-    assert forbidden == ["product.html", "legacy.html", "output.json", "RUNNER_RESULT.md", "execution_context.json"]
+    assert forbidden == ["product.html", "stale.html", "output.json", "RUNNER_RESULT.md", "execution_context.json"]
 
 
 def test_file_contract_ignores_natural_language_file_requirements():

@@ -13,10 +13,10 @@ from agent_py_agent.agent.agent_core.orchestration.dispatch.capability_followup 
     _capability_followup_instruction,
     run_post_runner_capability_followup,
 )
-from agent_py_agent.agent.capabilities import CapabilityRouter
-from agent_py_agent.agent.capability_config import CapabilityConfig
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 from .backends import CapabilityThenAcceptedBackend, IncompleteOutputThenAcceptedBackend
 

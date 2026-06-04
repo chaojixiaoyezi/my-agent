@@ -16,6 +16,9 @@ def evaluate_delivery_closeout_gate(report: dict[str, Any]) -> GateDecision:
     run_id = str(report.get("run_id") or "").strip()
     failed = [_artifact_item_gate(item, run_id=run_id) for item in artifacts if isinstance(item, dict)]
     failed = [decision for decision in failed if not decision.allowed]
+    coverage_decision = _target_coverage_gate(report)
+    if not coverage_decision.allowed:
+        failed.append(coverage_decision)
     if report.get("ok") is not True or failed:
         findings = [finding for decision in failed for finding in decision.findings]
         return GateDecision.repair(
@@ -26,6 +29,31 @@ def evaluate_delivery_closeout_gate(report: dict[str, Any]) -> GateDecision:
     return GateDecision.allow(
         "delivery_closeout",
         evidence={"artifact_count": len(artifacts), "report_ref": str(report.get("report_ref") or "")},
+    )
+
+
+def _target_coverage_gate(report: dict[str, Any]) -> GateDecision:
+    status = report.get("target_coverage_status")
+    if not isinstance(status, dict) or status.get("should_block") is not True:
+        return GateDecision.allow("target_coverage", evidence={"skipped": "not_required_or_complete"})
+    return GateDecision.repair(
+        "target_coverage",
+        [
+            GateFinding(
+                "TARGET_COVERAGE_MISSING",
+                evidence={
+                    "scope_label": str(status.get("scope_label") or ""),
+                    "enforcement": str(status.get("enforcement") or ""),
+                    "missing_count": int(status.get("missing_count") or 0),
+                    "missing_items": list(status.get("missing_items") or [])[:20],
+                },
+            )
+        ],
+        evidence={
+            "expected_count": int(status.get("expected_count") or 0),
+            "covered_count": int(status.get("covered_count") or 0),
+            "missing_count": int(status.get("missing_count") or 0),
+        },
     )
 
 

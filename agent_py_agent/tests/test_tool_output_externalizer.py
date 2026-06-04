@@ -18,6 +18,10 @@ from agent_py_agent.agent.agent_core.tool_context.call_reducer import (
     render_assistant_tool_round_context,
     render_tool_payload_for_live_prompt,
 )
+from agent_py_agent.agent.memory_archive.artifact.reader import (
+    ReadToolOutputArtifactRequest,
+    read_tool_output_artifact,
+)
 from agent_py_agent.agent.memory_archive.runtime.turn_archiver import (
     ArchiveRunTurnParams,
     ArchiveTurnContext,
@@ -46,8 +50,8 @@ def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) ->
             params=params,
             tool_rounds=1,
             idx=1,
-            payload={"tool": "read_file", "path": "large.log"},
-            result=ToolExecutionResult("read_file", True, large_output),
+            payload={"tool": "shell", "command": "cat large.log"},
+            result=ToolExecutionResult("shell", True, large_output),
         )
     )
     record = params.archive_tool_calls[0]
@@ -75,11 +79,11 @@ def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) ->
     assert index[-1]["run_id"] == "run-tool"
     assert index[-1]["scoped_call_id"] == "run-tool:1-1"
     assert large_output not in params.tool_context[-1]
-    assert str(artifact_path) in params.tool_context[-1]
-    assert f"output_artifact_ref: {artifact_path}" in params.tool_context[-1]
+    assert str(artifact_path) not in params.tool_context[-1]
+    assert "output_artifact_ref:" not in params.tool_context[-1]
     assert "output_call_id: 1-1" in params.tool_context[-1]
     assert "output_scoped_call_id: run-tool:1-1" in params.tool_context[-1]
-    assert f'read_artifact", "artifact_ref": "{artifact_path}"' in params.tool_context[-1]
+    assert '"read_artifact", "artifact_ref": "run-tool:1-1"' in params.tool_context[-1]
     assert '"run_id": "run-tool"' in params.tool_context[-1]
     assert "完整工具输出已外置" in params.tool_context[-1]
     assert record["fail_safe_checkpoint_path"] in params.tool_context[-1]
@@ -133,9 +137,9 @@ def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: 
     assert artifact["run_id"] == "runner-42"
 
 
-def test_externalizer_hides_legacy_paths_for_internal_tool_outputs(tmp_path: Path) -> None:
-    legacy_path = "/repo/data/subagents/tasks/run_1/agents/run_1/final_report.md"
-    output = json.dumps({"workspace_refs": {"final_report": legacy_path}}, ensure_ascii=False)
+def test_externalizer_preserves_internal_tool_outputs_without_path_sanitizer(tmp_path: Path) -> None:
+    path = "/repo/current/tasks/run_1/work/agents/run_1/final_report.md"
+    output = json.dumps({"workspace_refs": {"final_report": path}}, ensure_ascii=False)
 
     record = externalize_tool_output_record(
         ExternalizeToolOutputRequest(
@@ -150,12 +154,12 @@ def test_externalizer_hides_legacy_paths_for_internal_tool_outputs(tmp_path: Pat
     )
     artifact = json.loads(Path(record["artifact_ref"]).read_text(encoding="utf-8"))
 
-    assert "/data/subagents/" not in record["output_preview"]
-    assert "/data/subagents/" not in artifact["content"]
-    assert "[internal_legacy_subagent_path_hidden]" in artifact["content"]
+    assert path in record["output_preview"]
+    assert path in artifact["content"]
+    assert "[internal_legacy_subagent_path_hidden]" not in artifact["content"]
 
 
-def test_externalizer_preserves_ordinary_tool_outputs(tmp_path: Path) -> None:
+def test_externalizer_archives_read_file_output_but_keeps_live_inline(tmp_path: Path) -> None:
     output = "用户文档里提到 /repo/data/subagents/tasks/run_1 这个历史路径。"
 
     record = externalize_tool_output_record(
@@ -169,10 +173,79 @@ def test_externalizer_preserves_ordinary_tool_outputs(tmp_path: Path) -> None:
             min_chars=10,
         )
     )
-    artifact = json.loads(Path(record["artifact_ref"]).read_text(encoding="utf-8"))
 
     assert record["output_preview"] == output
+    assert record["output_externalized"] is False
+    assert record["output_path"] == ""
+    assert record["artifact_ref"] == record["source_artifact_ref"]
+    assert record["source_output_archived"] is True
+    assert Path(str(record["source_artifact_ref"])).exists()
+    artifact = json.loads(Path(str(record["source_artifact_ref"])).read_text(encoding="utf-8"))
     assert artifact["content"] == output
+
+
+def test_tool_loop_read_file_archive_does_not_hide_live_result(tmp_path: Path) -> None:
+    agent = SimpleNamespace(root=tmp_path, config=AgentConfig(), session_id="session-live")
+    service = ToolLoopService(agent)
+    params = _tool_loop_params(request_id="req-read", run_id="run-read", task_id="task-read")
+    output = "CPX-001-ABCDEF1234\n" + ("x" * 1300)
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=2,
+            idx=1,
+            payload={"tool": "read_file", "path": "fragment-001.txt"},
+            result=ToolExecutionResult("read_file", True, output),
+        )
+    )
+
+    record = params.archive_tool_calls[0]
+    assert record["output_externalized"] is False
+    assert record["source_output_archived"] is True
+    assert record["artifact_ref"] == record["source_artifact_ref"]
+    assert Path(str(record["source_artifact_ref"])).exists()
+    assert "CPX-001-ABCDEF1234" in params.tool_context[-1]
+    assert "output_scoped_call_id:" in params.tool_context[-1]
+
+
+def test_read_artifact_rejects_cross_run_absolute_tool_output_path(tmp_path: Path) -> None:
+    old_record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="shell",
+            call_id="1-1",
+            output="OLD-RUN-CONTENT",
+            ok=True,
+            run_id="run-old",
+            task_id="run-old",
+            request_id="run-old",
+            min_chars=1,
+        )
+    )
+
+    blocked = read_tool_output_artifact(
+        ReadToolOutputArtifactRequest(
+            root=tmp_path,
+            artifact_ref=str(old_record["artifact_ref"]),
+            run_id="run-new",
+            task_id="run-new",
+            request_id="run-new",
+        )
+    )
+    allowed = read_tool_output_artifact(
+        ReadToolOutputArtifactRequest(
+            root=tmp_path,
+            artifact_ref="run-old:1-1",
+            run_id="run-old",
+            max_chars=40,
+        )
+    )
+
+    assert blocked["ok"] is False
+    assert blocked["error_code"] == "artifact_not_registered"
+    assert allowed["ok"] is True
+    assert allowed["content"] == "OLD-RUN-CONTENT"
 
 
 def test_read_artifact_output_is_not_re_externalized(tmp_path: Path) -> None:
@@ -444,9 +517,8 @@ def test_archive_tool_event_keeps_externalized_output_path(tmp_path: Path) -> No
 def _assert_schema_v2(record: dict[str, object], name: str) -> None:
     assert record["version"] == RUNTIME_MEMORY_SCHEMA_VERSION
     assert record["schema"]["name"] == name
-    assert record["reserved"]["schema_name"] == name
-    assert record["reserved"]["schema_version"] == RUNTIME_MEMORY_SCHEMA_VERSION
-    assert set(record["reserved"]) >= {"extensions", "compat", "future"}
+    assert record["schema"]["version"] == RUNTIME_MEMORY_SCHEMA_VERSION
+    assert "reserved" not in record
 
 
 def _tool_loop_params(*, request_id: str, run_id: str, task_id: str) -> ToolLoopExecuteParams:

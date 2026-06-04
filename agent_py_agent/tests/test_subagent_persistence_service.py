@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.agent.local_store import LocalStore
+from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import EvidencePacket, Finding
 
@@ -152,8 +152,8 @@ def test_subagent_persistence_creates_task_workspace_skeleton(tmp_path) -> None:
 
     task = manager.create_run(
         goal="建立任务级运行记忆空间",
-        thought="旧工单目录不能移动，新空间只做 adapter。",
-        plan=["建 task workspace", "写兼容指针"],
+        thought="当前任务目录直接承载子代理运行工作位。",
+        plan=["建 task workspace", "写当前运行索引"],
     )
     task.status = "RUNNING"
     task.progress = 0.5
@@ -164,9 +164,6 @@ def test_subagent_persistence_creates_task_workspace_skeleton(tmp_path) -> None:
     task_workspace = tmp_path / "tasks" / task.root_id
     work = task_workspace / "work"
     state = json.loads((work / "state.json").read_text(encoding="utf-8"))
-    legacy_ref = json.loads(
-        (work / "agents" / task.id / "legacy_run_ref.json").read_text(encoding="utf-8"),
-    )
     timeline_lines = (work / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
     summary_md = (work / "summaries" / "current_summary.md").read_text(encoding="utf-8")
 
@@ -187,10 +184,8 @@ def test_subagent_persistence_creates_task_workspace_skeleton(tmp_path) -> None:
     assert state["primary_run_id"] == task.id
     assert state["status"] == "RUNNING"
     assert state["progress"] == 0.5
-    assert _path_text(state["legacy"]["task_json"]).endswith(f"{task.id}/task.json")
-    assert legacy_ref["mode"] == "legacy_subagent_work_order_adapter"
-    assert legacy_ref["legacy_task_dir"] == str(tmp_path / task.id)
-    assert legacy_ref["agent_run_workspace_status"] == "phase_1_skeleton"
+    assert "legacy" not in state
+    assert not (work / "agents" / task.id / "legacy_run_ref.json").exists()
     assert any(json.loads(line)["event"] == "task_workspace_synced" for line in timeline_lines)
     assert "已创建 task workspace 骨架。" in summary_md
 
@@ -226,6 +221,45 @@ def test_subagent_persistence_registers_owner_task_run_agent_indexes(tmp_path) -
     assert Path(runs[0]["run_path"]) == Path(task.agent_run_workspace_dir)
     assert [item["agent_id"] for item in agents] == [task.id]
     assert Path(agents[0]["run_path"]) == Path(task.agent_run_workspace_dir)
+
+
+def test_subagent_workspace_sync_deduplicates_unchanged_status_events(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / "subagents")
+    task = manager.create_run(
+        goal="避免重复刷状态",
+        thought="相同状态反复保存时不要把 task timeline 和 shared messages 写爆。",
+        plan=["创建任务", "保存状态"],
+    )
+    task.status = "RUNNING"
+    task.current_step = "READING"
+    task.latest_summary = "最近成功调用工具: list_files"
+
+    manager.save(task)
+    work = tmp_path / "subagents" / "tasks" / task.root_id / "work"
+    baseline_task_timeline_count = len(_read_jsonl(str(work / "timeline.jsonl")))
+    baseline_shared_message_count = len(_read_jsonl(str(work / "shared" / "messages.jsonl")))
+    baseline_agent_timeline_count = len(_read_jsonl(str(work / "agents" / task.id / "timeline.jsonl")))
+
+    task.updated_at += 0.01
+    manager.save(task)
+    task.updated_at += 0.01
+    manager.save(task)
+
+    task_timeline = _read_jsonl(str(work / "timeline.jsonl"))
+    shared_messages = _read_jsonl(str(work / "shared" / "messages.jsonl"))
+    agent_timeline = _read_jsonl(str(work / "agents" / task.id / "timeline.jsonl"))
+
+    assert len(task_timeline) == baseline_task_timeline_count
+    assert len(shared_messages) == baseline_shared_message_count
+    assert len(agent_timeline) == baseline_agent_timeline_count
+
+    task.latest_summary = "最近 write_file codex-analysis.md"
+    task.updated_at += 0.01
+    manager.save(task)
+
+    assert len(_read_jsonl(str(work / "timeline.jsonl"))) == baseline_task_timeline_count + 1
+    assert len(_read_jsonl(str(work / "shared" / "messages.jsonl"))) == baseline_shared_message_count + 1
+    assert len(_read_jsonl(str(work / "agents" / task.id / "timeline.jsonl"))) == baseline_agent_timeline_count + 1
 
 
 def _assert_runtime_workspace_paths(loaded, task_workspace, run_id: str) -> None:
@@ -266,7 +300,6 @@ def _assert_runtime_workspace_paths(loaded, task_workspace, run_id: str) -> None
     assert loaded.agent_run_memory_decisions_jsonl == str(run_workspace / "memory_gate" / "decisions.jsonl")
     assert loaded.agent_run_memory_exports_jsonl == str(run_workspace / "memory_gate" / "exports.jsonl")
     assert loaded.agent_run_skill_spark_gate_json == str(run_workspace / "memory_gate" / "skill_spark_gate.json")
-    assert loaded.legacy_run_ref_json == str(run_workspace / "legacy_run_ref.json")
     assert "/daily/" in _path_text(loaded.daily_ledger_file)
     assert _path_text(loaded.daily_ledger_file).endswith("/events.jsonl")
     assert loaded.daily_ledger_last_event_id.startswith(f"evt-{run_id}-{run_id}-")
@@ -279,7 +312,7 @@ def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> 
 
     task = manager.create_run(
         goal="建立子代理运行工作位",
-        thought="在 task workspace 下生成 run workspace，但旧目录继续兼容。",
+        thought="在 task workspace 下生成当前 run workspace。",
         plan=["写 agent.yaml", "写 run state", "写恢复入口"],
     )
     task.status = "BLOCKED"
@@ -293,7 +326,6 @@ def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> 
     run_workspace = tmp_path / "tasks" / task.root_id / "work" / "agents" / task.id
     run_state = json.loads((run_workspace / "state.json").read_text(encoding="utf-8"))
     checkpoint = json.loads((run_workspace / "checkpoint.json").read_text(encoding="utf-8"))
-    legacy_ref = json.loads((run_workspace / "legacy_run_ref.json").read_text(encoding="utf-8"))
     run_timeline = (run_workspace / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
     run_events = (run_workspace / "events.jsonl").read_text(encoding="utf-8").splitlines()
     run_artifacts = (run_workspace / "artifacts.jsonl").read_text(encoding="utf-8").splitlines()
@@ -313,9 +345,8 @@ def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> 
     assert run_state["run_id"] == task.id
     assert run_state["status"] == "BLOCKED"
     assert run_state["blockers"] == ["缺少日志样本"]
-    assert _path_text(checkpoint["legacy_checkpoint_ref"]).endswith(f"{task.id}/reports/checkpoint.json")
-    assert legacy_ref["legacy_task_dir"] == str(tmp_path / task.id)
-    assert legacy_ref["agent_run_workspace_status"] == "phase_1_skeleton"
+    assert _path_text(checkpoint["task_checkpoint_ref"]).endswith(f"{task.id}/reports/checkpoint.json")
+    assert not (run_workspace / "legacy_run_ref.json").exists()
     assert any(json.loads(line)["event"] == "agent_run_workspace_synced" for line in run_timeline)
     assert any(json.loads(line)["event"] == "agent_run_workspace_synced" for line in run_events)
     assert any(json.loads(line)["kind"] == "final_report" for line in run_artifacts)
@@ -357,7 +388,6 @@ def test_subagent_persistence_appends_daily_event_ledger(tmp_path) -> None:
     assert latest["refs"]["agent_compaction_ledger"] == str(
         tmp_path / "tasks" / task.root_id / "work" / "agents" / task.id / "compactions" / "compaction_ledger.jsonl",
     )
-    assert latest["refs"]["legacy_task_dir"] == str(tmp_path / task.id)
     assert "goal" not in latest
 
 

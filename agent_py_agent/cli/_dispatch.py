@@ -14,8 +14,8 @@ from ..agent.agent_core.orchestration.dispatch.params import (
 from ..agent.agent_core.runner.gate import get_task_timeout, resolve_runner_config
 from ..agent.agent_core.runner.worker import RunSubagentWorkerParams, _run_subagent_worker
 from ..agent.agent_core.subagent import SubagentRunParams
-from ..agent.capability_config import load_capability_config
-from ..agent.config import load_config
+from ..agent.capability.config import load_capability_config
+from ..agent.settings import load_config
 from ..agent.subagent_workflows import (
     WorkflowPlanConstraints,
     WorkflowPlanningResult,

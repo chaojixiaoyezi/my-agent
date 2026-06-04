@@ -10,18 +10,18 @@ from ...runtime_errors import runtime_error_report
 from ..runner.context import current_subagent_run_id
 
 
-def subagent_progress_closeout_response(agent, fallback: ModelResponse) -> ModelResponse | None:
+def subagent_progress_closeout_response(agent, base_response: ModelResponse) -> ModelResponse | None:
     task, load_error = _current_subagent_task(agent)
     if load_error:
-        return _progress_load_error_response(load_error[0], load_error[1], fallback)
+        return _progress_load_error_response(load_error[0], load_error[1], base_response)
     if task is None:
         return None
     progress, progress_load_error = _latest_progress_payload(task)
     if progress_load_error:
-        return _progress_load_error_response(task.id, progress_load_error, fallback)
+        return _progress_load_error_response(task.id, progress_load_error, base_response)
     if not _progress_ready_for_closeout(progress, task):
         return None
-    return _closeout_response(_progress_closeout_payload(progress, task), fallback)
+    return _closeout_response(_progress_closeout_payload(progress, task), base_response)
 
 
 def _current_subagent_task(agent) -> tuple[object | None, tuple[str, BaseException] | None]:
@@ -145,20 +145,20 @@ def _progress_tests(progress: dict[str, object]) -> list[dict[str, object]]:
     ]
 
 
-def _closeout_response(payload: dict[str, object], fallback: ModelResponse) -> ModelResponse:
+def _closeout_response(payload: dict[str, object], base_response: ModelResponse) -> ModelResponse:
     text = (
         "[SUBAGENT_RESULT]\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
         "[/SUBAGENT_RESULT]\n\n"
         "系统检测到 task-local progress 已形成产物引用，已结束工具循环并交回父级汇总。"
     )
-    return ModelResponse(text=text, backend=fallback.backend)
+    return ModelResponse(text=text, backend=base_response.backend)
 
 
 def _progress_load_error_response(
     run_id: str,
     error: BaseException | dict[str, object],
-    fallback: ModelResponse,
+    base_response: ModelResponse,
 ) -> ModelResponse:
     report = (
         error
@@ -174,7 +174,7 @@ def _progress_load_error_response(
         f"{json.dumps(report, ensure_ascii=False, indent=2)}\n"
         "[/SUBAGENT_PROGRESS_LOAD_ERROR]"
     )
-    return ModelResponse(text=text, backend=fallback.backend)
+    return ModelResponse(text=text, backend=base_response.backend)
 
 
 def _same_path(first: object, second: object) -> bool:

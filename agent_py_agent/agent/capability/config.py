@@ -25,7 +25,7 @@ class CapabilityConfig:
     capability_escalation_max_hops: int = 0
     capability_candidate_limit: int = 5
     capability_bundle_max_tokens: int = 3000
-    capability_fallback_max_attempts: int = 3
+    capability_alternative_max_attempts: int = 3
     subagent_heartbeat_timeout: int = 0
     subagent_run_timeout: int = 0
     subagent_due_check_interval: int = 0
@@ -43,12 +43,15 @@ class CapabilityConfig:
 
 
 def load_capability_config(config_path: str | Path) -> CapabilityConfig:
-    """加载能力路由配置，并忽略旧版本暂不认识的字段。"""
+    """加载能力路由配置；未知字段直接报错。"""
 
     path = Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"能力路由配置文件不存在: {path}")
     raw = load_simple_yaml(path)
     allowed = set(CapabilityConfig.__dataclass_fields__.keys())
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError(f"能力路由配置包含未知字段: {', '.join(unknown)}")
     clean = {key: value for key, value in raw.items() if key in allowed}
     return CapabilityConfig(**clean)

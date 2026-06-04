@@ -56,7 +56,7 @@ class WebSearchProvider:
 
 
 class DuckDuckGoHtmlProvider(WebSearchProvider):
-    """DuckDuckGo HTML fallback provider that needs no external API key."""
+    """Built-in DuckDuckGo HTML provider that needs no external API key."""
 
     name = "duckduckgo_html"
 

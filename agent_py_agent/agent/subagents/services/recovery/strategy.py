@@ -54,7 +54,7 @@ class SubagentRecoveryStrategy:
     packet_ref: str = ""
     uses_continue_packet: bool = False
     memory_scope: str = "task_local"
-    fallback_refs: list[str] = field(default_factory=list)
+    recovery_refs: list[str] = field(default_factory=list)
     takeover_refs: list[str] = field(default_factory=list)
     child_run_ids: list[str] = field(default_factory=list)
     address: dict[str, object] = field(default_factory=dict)
@@ -76,7 +76,7 @@ class SubagentRecoveryStrategy:
             "packet_ref": self.packet_ref,
             "uses_continue_packet": self.uses_continue_packet,
             "memory_scope": self.memory_scope,
-            "fallback_refs": list(self.fallback_refs),
+            "recovery_refs": list(self.recovery_refs),
             "takeover_refs": list(self.takeover_refs),
             "child_run_ids": list(self.child_run_ids),
             "address": dict(self.address),
@@ -101,9 +101,9 @@ class _PacketState:
 def build_subagent_recovery_strategy(request: SubagentRecoveryStrategyRequest) -> SubagentRecoveryStrategy:
     task = request.task
     packet = _read_packet_state(request)
-    fallback_refs = _fallback_refs(task)
+    recovery_refs = _recovery_refs(task)
     no_progress_fuse = _no_progress_fuse(task, request.no_progress_attempt_limit)
-    recovery_mode = _recovery_mode(task, packet, fallback_refs, no_progress_fuse)
+    recovery_mode = _recovery_mode(task, packet, recovery_refs, no_progress_fuse)
     action = action_for_recovery_mode(recovery_mode)
     return SubagentRecoveryStrategy(
         run_id=task_text(task, "id"),
@@ -114,7 +114,7 @@ def build_subagent_recovery_strategy(request: SubagentRecoveryStrategyRequest) -
         packet_status=packet.status,
         packet_ref=packet.ref,
         uses_continue_packet=packet.status == "ready" and mode_uses_continue_packet(recovery_mode),
-        fallback_refs=fallback_refs,
+        recovery_refs=recovery_refs,
         takeover_refs=_takeover_refs(task),
         child_run_ids=task_list(task, "child_ids"),
         address=build_task_address(task, all_tasks=request.all_tasks).to_dict(),
@@ -122,7 +122,7 @@ def build_subagent_recovery_strategy(request: SubagentRecoveryStrategyRequest) -
         leadership_recovery=recovery_mode == LEADERSHIP_RECOVERY,
         no_progress_fuse=no_progress_fuse,
         blocked_by=packet.blocked_by,
-        runner_instruction=runner_instruction(task, packet, fallback_refs, recovery_mode),
+        runner_instruction=runner_instruction(task, packet, recovery_refs, recovery_mode),
         packet_load_error=packet.load_error,
     )
 
@@ -191,7 +191,7 @@ def _packet_blockers(task: SubAgentTask, payload: dict[str, Any]) -> list[str]:
 def _recovery_mode(
     task: SubAgentTask,
     packet: _PacketState,
-    fallback_refs: list[str],
+    recovery_refs: list[str],
     no_progress_fuse: bool,
 ) -> str:
     if no_progress_fuse:
@@ -202,7 +202,7 @@ def _recovery_mode(
         return _takeover_mode(packet)
     if packet.status == "ready" and _is_recoverable(task):
         return RERUN_FROM_CONTINUE_PACKET
-    if fallback_refs and _is_recoverable(task):
+    if recovery_refs and _is_recoverable(task):
         return RERUN_FROM_CHECKPOINT
     if _is_closed(task):
         return CLOSED
@@ -229,7 +229,7 @@ def _packet_is_stale(path: Path, request: SubagentRecoveryStrategyRequest) -> bo
         return False
 
 
-def _fallback_refs(task: SubAgentTask) -> list[str]:
+def _recovery_refs(task: SubAgentTask) -> list[str]:
     values = [
         task_text(task, "agent_run_checkpoint_json"),
         task_text(task, "agent_run_summary_md"),

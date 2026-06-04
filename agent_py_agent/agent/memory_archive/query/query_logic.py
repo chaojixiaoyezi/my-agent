@@ -126,7 +126,7 @@ def filter_archive_records(
     context = _ArchiveFilterContext(
         query_text=query_text,
         filters=filters,
-        since_ts=_created_at_sort(values.since or "", fallback=0.0) if values.since else None,
+        since_ts=_created_at_sort(values.since or "", default=0.0) if values.since else None,
         until_ts=_until_timestamp(values.until),
         level=values.level,
     )
@@ -203,7 +203,7 @@ def strip_sort_keys(payload: Any) -> Any:
 def _until_timestamp(until: str | None) -> float | None:
     if not until:
         return None
-    timestamp = _created_at_sort(until, fallback=0.0)
+    timestamp = _created_at_sort(until, default=0.0)
     if _is_date_only(until):
         timestamp += 86399.999999
     return timestamp

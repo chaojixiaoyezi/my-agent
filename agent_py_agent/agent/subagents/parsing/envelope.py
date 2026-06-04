@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-"""Compatibility bridge from legacy subagent result JSON to typed envelopes."""
+"""Bridge subagent result JSON blocks to typed envelopes."""
 
 from dataclasses import dataclass, field
 
@@ -14,7 +14,6 @@ from ...action_protocol import (
 )
 from ...common.value_parsing import text_or_sequence_strings
 from . import parse_subagent_runner_output
-from .values import _string_dict
 
 
 @dataclass(frozen=True)
@@ -29,7 +28,7 @@ class SubagentResultEnvelopeParseRequest:
 def parse_subagent_result_envelope(
     request: SubagentResultEnvelopeParseRequest,
 ) -> SubagentResultEnvelope | None:
-    """把旧子代理结果块转为新的 typed envelope，保持旧 parser 行为不变。"""
+    """把子代理结果块转为 typed envelope。"""
 
     parsed = parse_subagent_runner_output(request.text)
     if not parsed.found or not parsed.ok:
@@ -59,7 +58,6 @@ def parse_subagent_result_envelope(
         blocked_reason=parsed.blocked_reason,
         failure_type=parsed.failure_type,
         scope=request.scope or RunScope(run_id=resolved_run_id),
-        reserved={"source": "legacy_subagent_result"},
     )
 
 
@@ -72,7 +70,8 @@ def _artifact_ref_from_payload(item: dict[str, object], *, owner_run_id: str = "
         owner_run_id=str(item.get("owner_run_id") or owner_run_id),
         hash=str(item.get("hash") or ""),
         summary=str(item.get("summary") or ""),
-        reserved=_string_dict(item.get("reserved", {})),
+        size_bytes=_int_or_zero(item.get("size_bytes")),
+        mime_type=str(item.get("mime_type") or ""),
     )
 
 
@@ -84,7 +83,6 @@ def _evidence_ref_from_payload(item: dict[str, object]) -> EvidenceRef:
         evidence_refs=text_or_sequence_strings(item.get("evidence_refs", [])),
         artifact_refs=text_or_sequence_strings(item.get("artifact_refs", [])),
         confidence=_float_or_zero(item.get("confidence")),
-        reserved=_string_dict(item.get("reserved", {})),
     )
 
 
@@ -93,3 +91,10 @@ def _float_or_zero(value: object) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _int_or_zero(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0

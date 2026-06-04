@@ -9,7 +9,6 @@ Human version:
 """
 
 import json
-from typing import TYPE_CHECKING
 
 from ...common.value_parsing import text_or_sequence_strings
 from ..coverage_records import coverage_records_from_payload
@@ -34,10 +33,6 @@ from .values import (
 from .values import (
     _string_dict as _string_dict,
 )
-
-if TYPE_CHECKING:
-    from ...action_protocol import SubagentResultEnvelope
-    from .envelope import SubagentResultEnvelopeParseRequest
 
 
 def parse_subagent_runner_output(text: str) -> SubAgentParsedOutput:
@@ -72,16 +67,6 @@ def parse_subagent_runner_output(text: str) -> SubAgentParsedOutput:
     return SubAgentParsedOutput(found=True, ok=False, parse_error="未找到可解析的结构化结果。")
 
 
-def parse_subagent_result_envelope(
-    request: SubagentResultEnvelopeParseRequest,
-) -> SubagentResultEnvelope | None:
-    """兼容旧模块入口，调用 typed result envelope bridge。"""
-
-    from .envelope import parse_subagent_result_envelope as _parse
-
-    return _parse(request)
-
-
 def parse_parent_planner_output(text: str) -> ParentPlannerParsedOutput:
     """解析父代理 planner 模型回复中的结构化结果块。"""
 
@@ -95,9 +80,6 @@ def parse_parent_planner_output(text: str) -> ParentPlannerParsedOutput:
                 ok=False,
                 parse_error="缺少 [/PARENT_PLANNER_RESULT] 结束标记。",
             )
-        fallback = _parent_planner_from_alias_result(text)
-        if fallback.found:
-            return fallback
         return ParentPlannerParsedOutput(found=False, ok=False)
 
     parse_errors = []
@@ -115,28 +97,6 @@ def parse_parent_planner_output(text: str) -> ParentPlannerParsedOutput:
             parse_error=parse_errors[0],
         )
     return ParentPlannerParsedOutput(found=True, ok=False, parse_error="未找到可解析的结构化结果。")
-
-
-def _parent_planner_from_alias_result(text: str) -> ParentPlannerParsedOutput:
-    candidates = _extract_subagent_result_blocks(text, "[SUBAGENT_RESULT]", "[/SUBAGENT_RESULT]")
-    for raw in reversed(candidates):
-        payload, error = _parse_runner_json_payload(raw)
-        if error or not _looks_like_parent_planner_payload(payload):
-            continue
-        return _parsed_parent_planner_from_payload(payload)
-    return ParentPlannerParsedOutput(found=False, ok=False)
-
-
-def _looks_like_parent_planner_payload(payload: dict[str, object]) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    has_parent_fields = {"decision", "should_dispatch", "actions"} & set(payload)
-    if len(has_parent_fields) < 2:
-        return False
-    decision = str(payload.get("decision", "") or "").strip().upper()
-    if decision and decision not in {"DISPATCH", "HEARTBEAT_OK", "BLOCKED", "TAKEOVER"}:
-        return False
-    return "status" not in payload and "used_tools" not in payload
 
 
 def _extract_subagent_result_blocks(
@@ -314,3 +274,6 @@ def _extract_first_json_object_text(text: str) -> str:
         if isinstance(payload, dict):
             return text[index : index + end]
     return ""
+
+
+from .envelope import SubagentResultEnvelopeParseRequest, parse_subagent_result_envelope

@@ -2,8 +2,8 @@
 """Canonical state payloads and locator/projection records for subagent runs.
 
 The detailed state lives in task-local ``work/agents/<run_id>/canonical_state``.
-Legacy task/run JSON files and owner projections are only locators or compact
-views, so loaders always jump back to the canonical payload when it exists.
+Task/run JSON files and owner projections are locators or compact views, so
+loaders jump back to the canonical payload when it exists.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from ...common.json_io import write_json_file_atomic
 from ..models import SubAgentTask
 
 CANONICAL_STATE_FILENAME = "canonical_state.json"
@@ -119,7 +120,7 @@ def write_agent_run_state(state: AgentRunState) -> None:
     if state.canonical_path is None:
         return
     state.canonical_path.parent.mkdir(parents=True, exist_ok=True)
-    state.canonical_path.write_text(state.to_json(), encoding="utf-8")
+    write_json_file_atomic(state.canonical_path, state.payload)
 
 
 def _different_path(left: Path, right: Path) -> bool:

@@ -10,10 +10,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.model.context_pressure import (
+    mark_tool_context_digest_consumed,
     preflight_context_pressure_response,
 )
 from agent_py_agent.agent.agent_core.tool_context.window import window_tool_context_params
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.settings import AgentConfig
 
 
 class _AgentStub:
@@ -23,7 +24,7 @@ class _AgentStub:
 
 def test_tool_context_window_requests_compact_for_saved_runs() -> None:
     params = SimpleNamespace(
-        tool_context=[f"entry-{idx}-" + ("x" * 2000) for idx in range(30)],
+        tool_context=[f"entry-{idx}-" + ("x" * 100_000) for idx in range(6)],
         archive_tool_calls=[],
         live_archive_state={},
         save=True,
@@ -33,13 +34,27 @@ def test_tool_context_window_requests_compact_for_saved_runs() -> None:
 
     overflow = params.live_archive_state["tool_context_window_overflow"]
     assert overflow["omitted_count"] > 0
-    assert overflow["original_chars"] > 48_000
+    assert overflow["original_chars"] > 512_000
     assert params.tool_context[0].startswith("[tool-context-window]")
+
+
+def test_tool_context_window_scales_with_model_compact_threshold() -> None:
+    params = SimpleNamespace(
+        tool_context=[f"entry-{idx}-" + ("x" * 35_000) for idx in range(5)],
+        archive_tool_calls=[],
+        live_archive_state={},
+        save=True,
+    )
+
+    window_tool_context_params(_AgentStub(), params)
+
+    assert "tool_context_window_overflow" not in params.live_archive_state
+    assert not params.tool_context[0].startswith("[tool-context-window]")
 
 
 def test_tool_context_window_does_not_request_compact_for_unsaved_runs() -> None:
     params = SimpleNamespace(
-        tool_context=[f"entry-{idx}-" + ("x" * 2000) for idx in range(30)],
+        tool_context=[f"entry-{idx}-" + ("x" * 100_000) for idx in range(6)],
         archive_tool_calls=[],
         live_archive_state={},
         save=False,
@@ -71,3 +86,27 @@ def test_preflight_context_pressure_uses_tool_context_window_signal() -> None:
     assert response.runtime_source == "preflight"
     assert "tool_context_window_overflow=true" in response.text
     assert "tool_context_window_overflow" not in params.live_archive_state
+
+
+def test_preflight_allows_one_digest_turn_for_fresh_tool_results() -> None:
+    agent = SimpleNamespace(
+        config=AgentConfig(auto_save_memory=True),
+        backend=SimpleNamespace(context_window_tokens=1000, name="fake"),
+    )
+    params = SimpleNamespace(
+        context_scope="default",
+        live_archive_state={"pending_tool_context_digest": True},
+    )
+    request = SimpleNamespace(agent=agent, params=params, prompt="系统上下文" * 120, tool_rounds=3)
+
+    response = preflight_context_pressure_response(request)
+
+    assert response is None
+    assert params.live_archive_state["pending_tool_context_digest"] is True
+    assert params.live_archive_state["tool_context_digest_inflight"] is True
+
+    mark_tool_context_digest_consumed(params)
+    response_after_digest = preflight_context_pressure_response(request)
+
+    assert response_after_digest is not None
+    assert response_after_digest.runtime_status == "context_overflow"

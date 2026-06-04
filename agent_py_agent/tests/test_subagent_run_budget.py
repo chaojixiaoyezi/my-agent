@@ -96,7 +96,7 @@ def test_budget_report_reports_dirty_runner_result_json(tmp_path: Path):
 
 
 def test_manager_writes_budget_report_files(tmp_path: Path):
-    """Manager facade should persist JSON and Markdown budget summaries."""
+    """Manager should persist JSON and Markdown budget summaries."""
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(goal="leaf", thought="build", plan=["write"])
     _record_real_runner_result(manager, task.id)

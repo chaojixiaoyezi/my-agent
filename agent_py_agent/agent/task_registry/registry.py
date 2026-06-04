@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..local_store import LocalStore
+    from ..local_storage import LocalStore
 
 
 @dataclass(frozen=True)
@@ -143,8 +143,7 @@ class TaskRegistry:
     def update_task_description(self, task_id: str, description: str) -> bool:
 
         now = time.time()
-        # description 存到 goal 字段的前 100 字符，或者新建专门的 description 字段
-        # 为兼容现有结构，把 description 截断后存到 goal 后面
+        # 当前 registry schema 只有 goal 摘要字段，description 截断后写入 goal。
         truncated = description[:100] if description else ""
         with self._store._connection() as conn:
             # 尝试更新 goal 字段（存 description）

@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-"""bridge legacy subagent work orders into runtime memory task workspaces."""
+"""sync subagent task records into runtime memory task workspaces."""
 
 from pathlib import Path
 
@@ -48,7 +48,6 @@ def _sync_agent_run_paths(task: SubAgentTask, task_workspace_paths) -> None:
     task.agent_run_outbox_dir = str(task_workspace_paths.agent_run.outbox_dir)
     task.agent_run_artifacts_dir = str(task_workspace_paths.agent_run.artifacts_dir)
     task.agent_run_compactions_dir = str(task_workspace_paths.agent_run.compactions_dir)
-    task.legacy_run_ref_json = str(task_workspace_paths.legacy_run_ref_json)
 
 
 def _sync_runtime_refs(task: SubAgentTask, task_workspace_paths) -> None:

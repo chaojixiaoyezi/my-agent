@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from ..tools import ToolExecutionResult
+from ..tooling.models import ToolExecutionResult
 from .parameters import _one_shot_tool_call_key
 from .runner.stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_finished
 from .subagent.attempt_guard import stale_subagent_attempt_result

@@ -23,7 +23,7 @@ from ..io import append_jsonl
 from ._jsonl_indexing import JsonlMemoryIndexMixin
 
 if TYPE_CHECKING:
-    from ..local_store import LocalSearchResult, LocalStore
+    from ..local_storage import LocalSearchResult, LocalStore
 
 
 @dataclass
@@ -163,17 +163,17 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         )
 
     def search(self, query: str, top_k: int = 5) -> list[MemoryRecord]:
-        """搜索记忆，优先使用 LocalStore，失败或无命中时退回 JSONL 关键词搜索。
+        """搜索记忆，优先使用 LocalStore 索引，再读取 JSONL 正式源。
 
         新手说明:
         有 LocalStore 时优先走 SQLite/FTS5。
-        没有索引、索引为空或索引临时失败时，退回 JSONL 关键词检索。
+        没有索引、索引为空或索引临时失败时，继续从 owner JSONL / daily mirror 检索。
 
         query: 搜索文本。
         top_k: 最多返回多少条结果。
 
         返回说明:
-        返回 MemoryRecord 列表。LocalStore 有命中时返回索引结果，否则返回 JSONL fallback 结果。"""
+        返回 MemoryRecord 列表。LocalStore 是检索索引，JSONL 是正式记忆源。"""
 
         records, _load_errors = self.search_report(query, top_k=top_k)
         return records
@@ -188,14 +188,14 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         indexed, load_errors = self._search_local_store_report(query, top_k)
         if len(indexed) >= top_k:
             return indexed[:top_k], load_errors
-        fallback = _merge_search_result_groups(
+        source_records = _merge_search_result_groups(
             (
                 self._search_jsonl(query, top_k),
                 self._search_daily_mirror(query, top_k),
             ),
             top_k=top_k,
         )
-        return _merge_search_result_groups((indexed, fallback), top_k=top_k), load_errors
+        return _merge_search_result_groups((indexed, source_records), top_k=top_k), load_errors
 
     def index_all(self) -> int:
         """把现有 JSONL 记忆补写到 LocalStore 索引。

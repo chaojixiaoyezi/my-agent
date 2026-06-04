@@ -18,7 +18,6 @@ class TestFailureClassificationRequest:
 
     report: TestExecutionReport
     output: dict[str, object] = field(default_factory=dict)
-    reserved: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -46,7 +45,6 @@ class TestFailureClassificationReport:
     counts: dict[str, int]
     items: list[TestFailureClassificationItem] = field(default_factory=list)
     test_execution_ref: str = ""
-    reserved: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -72,7 +70,6 @@ def classify_test_execution_report(
         counts=counts,
         items=items,
         test_execution_ref=str(report.json_path),
-        reserved=_reserved(),
     )
 
 
@@ -95,7 +92,6 @@ def _zero_tests_report(request: TestFailureClassificationRequest) -> TestFailure
         recommended_action=RecoveryAction.REPAIR.value,
         counts={"runner_output_missing_tests": 1},
         test_execution_ref=str(request.report.json_path),
-        reserved=_reserved(),
     )
 
 
@@ -182,12 +178,3 @@ def _short_summary(record) -> str:
 
 def _record_text(record) -> str:
     return "\n".join(str(item or "") for item in (record.error, record.stdout, record.stderr))
-
-
-def _reserved() -> dict[str, Any]:
-    return {
-        "refs_only": True,
-        "reads_artifact_bodies": False,
-        "mutates_task_state": False,
-        "auto_repairs": False,
-    }

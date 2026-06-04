@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from ...subagent import SubAgentExecutionContext
+from ...subagents import SubAgentExecutionContext
 from .prompt_context_summary import runner_context_summary_payload
 
 

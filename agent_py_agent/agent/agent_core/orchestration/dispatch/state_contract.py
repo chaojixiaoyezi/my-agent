@@ -128,8 +128,8 @@ def _attach_state_next_action(state: dict[str, object]) -> None:
         state["suggested_tool_call"] = _dispatch_tool_call(dispatchable, start_runners=True)
         return
     if running:
-        state["next_action"] = "wait_or_inspect_agent_tree"
-        state["suggested_tool_call"] = {"tool": "inspect_agent_tree"}
+        state["next_action"] = "wait_for_subagent_completion_event"
+        state["suggested_tool_call"] = {"tool": "wait", "seconds": 120, "reason": "等待运行中的子代理完成或产出新事件"}
         return
     if load_errors:
         state["next_action"] = "refresh_agent_tree_or_rebuild_state_index"

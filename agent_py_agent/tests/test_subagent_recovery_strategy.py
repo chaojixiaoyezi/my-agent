@@ -56,14 +56,14 @@ def test_recovery_strategy_falls_back_when_packet_is_corrupt(tmp_path: Path) -> 
     assert result.uses_continue_packet is False
     assert result.recommended_action == "recover_from_checkpoint"
     assert result.recovery_mode == "rerun_from_checkpoint"
-    assert task.agent_run_checkpoint_json in result.fallback_refs
-    assert task.agent_run_summary_md in result.fallback_refs
+    assert task.agent_run_checkpoint_json in result.recovery_refs
+    assert task.agent_run_summary_md in result.recovery_refs
     assert result.to_dict()["packet_load_error"]["context"] == "subagent_recovery_strategy.continue_packet"
     assert result.to_dict()["packet_load_error"]["path"] == str(packet_ref)
     assert "latest_continue_packet 读取失败" in result.runner_instruction
 
 
-def test_recovery_strategy_falls_back_when_packet_is_stale(tmp_path: Path) -> None:
+def test_recovery_strategy_uses_recovery_refs_when_packet_is_stale(tmp_path: Path) -> None:
     _, task = _saved_task(tmp_path)
     packet_ref = Path(task.agent_run_latest_session_continue_packet_json)
     os.utime(packet_ref, (100.0, 100.0))
@@ -75,7 +75,7 @@ def test_recovery_strategy_falls_back_when_packet_is_stale(tmp_path: Path) -> No
     assert result.packet_status == "stale"
     assert result.recommended_action == "recover_from_checkpoint"
     assert result.recovery_mode == "rerun_from_checkpoint"
-    assert result.fallback_refs[0] == task.agent_run_checkpoint_json
+    assert result.recovery_refs[0] == task.agent_run_checkpoint_json
 
 
 def test_recovery_strategy_stops_after_repeated_failures(tmp_path: Path) -> None:

@@ -9,8 +9,8 @@ import json
 
 from agent_py_agent.agent.action_protocol import SubagentScheduleEnvelope, decode_action_envelope
 from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def _tool_agent(tmp_path):

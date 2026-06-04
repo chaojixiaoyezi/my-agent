@@ -9,10 +9,9 @@ from ..compact_context_bundle import (
     compact_context_bundle_summary,
     main_context_bundle_source_refs,
 )
-from ..compact_tool_output_refs import tool_output_source_refs
+from ..compact_tool_output_refs import tool_call_source_refs, tool_output_source_refs
 from ..schema import (
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 from .work_state import restore_refs_summary, work_state_summary
@@ -52,7 +51,6 @@ def restore_refs_payload(payload: dict[str, Any], plan: dict[str, Any], paths: d
         "source_refs": _source_refs(plan),
         "apply_refs": compact_apply_refs(paths),
         "content_preserved": True,
-        "reserved": runtime_memory_reserved_fields(COMPACT_RESTORE_REFS_SCHEMA),
     }
     result["source_refs"]["context_bundles"] = main_context_bundle_source_refs(payload.get("main_context_bundle", {}))
     return result
@@ -81,7 +79,6 @@ def apply_bundle_payload(
         "main_context_bundle": compact_context_bundle_summary(payload.get("main_context_bundle", {})),
         "restore_steps": _restore_steps(),
         "content_preserved": True,
-        "reserved": runtime_memory_reserved_fields(COMPACT_APPLY_BUNDLE_SCHEMA),
     }
 
 
@@ -103,7 +100,6 @@ def ledger_record(payload: dict[str, Any]) -> dict[str, Any]:
         "created_at": payload["created_at"],
         "content_preserved": payload["content_preserved"],
         "restore_ready": bool(payload.get("restore_ready") and payload.get("ok", True)),
-        "reserved": runtime_memory_reserved_fields(COMPACT_APPLY_LEDGER_SCHEMA),
     }
 
 
@@ -112,6 +108,7 @@ def _source_refs(plan: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         "archive_files": _file_refs(plan["archive"].get("files", [])),
         "snapshot_files": _file_refs(plan["snapshots"].get("latest", [])),
         "token_ledgers": _file_refs(plan["tokens"].get("latest", [])),
+        "tool_calls": tool_call_source_refs(plan["workspace_root"], plan["scope"]),
         "tool_outputs": tool_output_source_refs(plan["workspace_root"], plan["scope"]),
     }
 
@@ -137,7 +134,6 @@ def _file_refs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "path": str(item.get("path") or item.get("file_path") or ""),
             "size_bytes": int(item.get("size_bytes", 0) or 0),
             "created_at": str(item.get("created_at", "") or ""),
-            "reserved": {},
         })
     return refs
 

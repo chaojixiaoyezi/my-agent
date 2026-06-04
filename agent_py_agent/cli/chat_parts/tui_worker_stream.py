@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+from ...agent.gateway_parts.context_tokens import current_context_token_estimate
 from .renderer import GREEN, strip_ansi, style_text
 
 
@@ -54,7 +55,7 @@ def _update_response_state(
 ) -> str:
     agent_response_text = response.get("response", "")
     with state_lock:
-        last_token_estimate_ref[0] = response.get("cumulative_token_estimate") or response.get("prompt_token_estimate", 0)
+        last_token_estimate_ref[0] = current_context_token_estimate(response)
     return agent_response_text
 
 
@@ -65,7 +66,7 @@ def _maybe_record_response(
     agent,
 ) -> bool:
     if text and (not stream_has_visible_text) and text.strip():
-        from .fallback_ui import AssistantResponseRenderRequest, _render_assistant_response
+        from .plain_ui import AssistantResponseRenderRequest, _render_assistant_response
 
         _render_assistant_response(
             AssistantResponseRenderRequest(text=text, assistant_outputs=assistant_outputs, agent_name=agent.config.agent_name)

@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-"""Work-order path, file, and validation helpers for SubAgentBaseMixin."""
+"""Work-order path, file, and validation helpers for SubAgentManager."""
 
 import time
 from pathlib import Path
@@ -227,7 +227,7 @@ def _skill_sparks_content(task: SubAgentTask) -> str:
 
 
 _WORK_LOG_TMPL = "# WORK_LOG\n\n- {time_str} 创建工单 {task_id}\n"
-_ACTION_RECEIPTS_TMPL = "# ACTION_RECEIPTS\n\n每轮推进后追加一条 receipt.\n\n## Template\n\n- time:\n- action:\n- evidence:\n- failure_or_fallback:\n- next:\n"
+_ACTION_RECEIPTS_TMPL = "# ACTION_RECEIPTS\n\n每轮推进后追加一条 receipt.\n\n## Template\n\n- time:\n- action:\n- evidence:\n- failure_or_alternative:\n- next:\n"
 _ACCEPTANCE_TMPL = "# ACCEPTANCE\n\n## Checks\n{checks}\n\n## Evidence\n\n- 暂无\n"
 _TEST_CHECKLIST_TMPL = "# TEST_CHECKLIST\n\n## From Requirement\n\n- [ ] 原始需求已转成可测试清单\n- [ ] P0/P1 验收标准已明确\n\n## Entrypoints\n\n- [ ] CLI/API/Web/文件入口已实际运行\n- [ ] 异常路径和边界输入已覆盖\n\n## Evidence\n\n- [ ] 测试命令、日志、截图或报告路径已记录\n"
 _BUGS_TMPL = "# BUGS\n\n## Open P0/P1\n\n- 暂无\n\n## Non-blocking\n\n- 暂无\n"

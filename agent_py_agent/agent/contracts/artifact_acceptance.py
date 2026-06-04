@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
@@ -76,7 +77,7 @@ def validate_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceR
         request,
         named_validators=_named_validators(),
         kind_validators=_kind_validators(),
-        fallback=_validate_generic_request,
+        default_validator=_validate_generic_request,
     )
     return validator(request)
 
@@ -219,13 +220,81 @@ def _validate_markdown(
             *markdown_section_findings(path, text, validation_contract or {}),
         ]
     )
+    findings.extend(_required_text_findings(path, text, validation_contract or {}))
     findings.extend(document_quality_artifact_findings(path, validation_contract, workspace_root=path.parent))
     return ArtifactAcceptanceReport(
-        ok=True,
+        ok=not any(item.severity == "hard" for item in findings),
         artifact_ref=str(path),
         artifact_kind="md",
         findings=findings,
     )
+
+
+def _required_text_findings(path: Path, text: str, validation_contract: dict[str, object]) -> list[ArtifactFinding]:
+    findings: list[ArtifactFinding] = []
+    for token in _required_string_items(validation_contract):
+        if token not in text:
+            findings.append(
+                ArtifactFinding(
+                    code="ARTIFACT_REQUIRED_TEXT_MISSING",
+                    severity="hard",
+                    message="Artifact text is missing a required string from validation_contract.",
+                    location=str(path),
+                    value=token[:200],
+                )
+            )
+    for pattern in _required_regex_items(validation_contract):
+        try:
+            matched = re.search(pattern, text, flags=re.MULTILINE) is not None
+        except re.error as exc:
+            findings.append(
+                ArtifactFinding(
+                    code="ARTIFACT_REQUIRED_REGEX_INVALID",
+                    severity="hard",
+                    message=f"validation_contract required regex is invalid: {exc}",
+                    location=str(path),
+                    value=pattern[:200],
+                )
+            )
+            continue
+        if not matched:
+            findings.append(
+                ArtifactFinding(
+                    code="ARTIFACT_REQUIRED_REGEX_MISSING",
+                    severity="hard",
+                    message="Artifact text does not match a required regex from validation_contract.",
+                    location=str(path),
+                    value=pattern[:200],
+                )
+            )
+    return findings
+
+
+def _required_string_items(validation_contract: dict[str, object]) -> list[str]:
+    return _string_items(
+        validation_contract,
+        ("required_strings", "must_contain", "must_include", "required_text"),
+    )
+
+
+def _required_regex_items(validation_contract: dict[str, object]) -> list[str]:
+    return _string_items(
+        validation_contract,
+        ("required_regex", "required_patterns", "must_match"),
+    )
+
+
+def _string_items(validation_contract: dict[str, object], keys: tuple[str, ...]) -> list[str]:
+    items: list[str] = []
+    for key in keys:
+        value = validation_contract.get(key)
+        if isinstance(value, str):
+            if value.strip():
+                items.append(value)
+            continue
+        if isinstance(value, list | tuple | set):
+            items.extend(str(item) for item in value if str(item).strip())
+    return list(dict.fromkeys(items))
 
 
 def _validate_xlsx(

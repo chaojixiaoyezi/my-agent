@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent_py_agent.agent.local_store import LocalStore
+from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import RuntimeIdentity, SecuritySignal
 

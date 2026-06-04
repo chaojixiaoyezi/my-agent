@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from .runtime_errors import runtime_error_report
 
 if TYPE_CHECKING:
-    from .local_store import LocalStore
+    from .local_storage import LocalStore
     from .memory_store import JsonlMemory
 
 
@@ -36,7 +36,7 @@ class MemoryType(str, Enum):
 
     @classmethod
     def from_string(cls, value: str) -> MemoryType:
-        """从字符串创建 MemoryType，兼容旧记忆（无 type 标签的当作 LESSON_GENERAL）。"""
+        """从字符串创建 MemoryType；空值或未知值归入通用 lesson。"""
         if not value:
             return cls.LESSON_GENERAL
         normalized = value.lower().strip()

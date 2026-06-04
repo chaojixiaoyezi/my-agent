@@ -12,7 +12,7 @@ local-rebuild 从文件事实源重建 LocalStore 索引。
 import json
 import sys
 
-from ..agent.gateway import (
+from ..agent.gateway_parts import (
     gateway_paths,
     recover_gateway_processing_requests,
 )

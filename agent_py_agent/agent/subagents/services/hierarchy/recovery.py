@@ -64,7 +64,8 @@ class HierarchyRecoveryResult:
     truncated: bool
     nodes: list[HierarchyRecoveryNode]
     recovery_candidates: list[HierarchyRecoveryNode]
-    reserved: dict[str, object] = field(default_factory=dict)
+    reads_artifact_bodies: bool = False
+    auto_takeover: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -90,7 +91,8 @@ class SubAgentHierarchyRecoveryService:
             truncated=len(scanned) >= max(1, request.max_nodes),
             nodes=visible,
             recovery_candidates=candidates,
-            reserved={"reads_artifact_bodies": False, "auto_takeover": False, "schema_version": 1},
+            reads_artifact_bodies=False,
+            auto_takeover=False,
         )
 
 

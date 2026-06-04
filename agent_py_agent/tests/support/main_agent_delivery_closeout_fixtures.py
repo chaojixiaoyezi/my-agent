@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from agent_py_agent.agent.backend import ModelResponse
+from agent_py_agent.agent.backends import ModelResponse
 
 
 class DeliveryContractBackend:

@@ -15,7 +15,7 @@ class TestBuildSubagentRunnerPrompt:
 
     def _make_context(self, run_id: str, goal: str = "测试任务", **kwargs):
         """创建 SubAgentExecutionContext 的辅助方法。"""
-        from agent_py_agent.agent.subagent import SubAgentExecutionContext
+        from agent_py_agent.agent.subagents import SubAgentExecutionContext
 
         defaults = dict(
             generated_at=1234567890.0,
@@ -205,7 +205,7 @@ class TestBuildSubagentRunnerRepairPrompt:
 
     def _make_context(self, run_id: str, goal: str = "任务", **kwargs):
         """创建 SubAgentExecutionContext 的辅助方法。"""
-        from agent_py_agent.agent.subagent import SubAgentExecutionContext
+        from agent_py_agent.agent.subagents import SubAgentExecutionContext
 
         defaults = dict(
             generated_at=1234567890.0,
@@ -364,7 +364,7 @@ class TestContextJsonSerialization:
 
     def _make_context(self, run_id: str, goal: str = "任务", **kwargs):
         """创建 SubAgentExecutionContext 的辅助方法。"""
-        from agent_py_agent.agent.subagent import SubAgentExecutionContext
+        from agent_py_agent.agent.subagents import SubAgentExecutionContext
 
         defaults = dict(
             generated_at=1234567890.0,
@@ -396,7 +396,7 @@ class TestPromptOutputRequirements:
 
     def _make_context(self, run_id: str, goal: str = "任务", **kwargs):
         """创建 SubAgentExecutionContext 的辅助方法。"""
-        from agent_py_agent.agent.subagent import SubAgentExecutionContext
+        from agent_py_agent.agent.subagents import SubAgentExecutionContext
 
         defaults = dict(
             generated_at=1234567890.0,

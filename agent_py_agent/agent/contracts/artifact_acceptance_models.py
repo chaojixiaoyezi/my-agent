@@ -83,7 +83,7 @@ def artifact_ref_payload(path: str | Path, kind: str = "") -> ArtifactRef:
         path=str(artifact_path),
         kind=suffix_kind,
         hash=digest,
-        reserved={"size_bytes": _artifact_size(artifact_path)},
+        size_bytes=_artifact_size(artifact_path),
     )
 
 

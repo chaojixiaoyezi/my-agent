@@ -360,7 +360,7 @@ def _write_metric_mismatch_source(root: Path) -> None:
     {
       "source_id": "src-current",
       "uri": "https://api.example.invalid/repos/demo",
-      "reserved": {"metric_kind": "point_in_time_total"}
+      "metric_kind": "point_in_time_total"
     }
   ],
   "claims": [
@@ -371,7 +371,7 @@ def _write_metric_mismatch_source(root: Path) -> None:
       "source_ids": ["src-current"],
       "verification_status": "VERIFIED",
       "value_type": "exact",
-      "reserved": {"metric_kind": "point_in_time_total"}
+      "metric_kind": "point_in_time_total"
     }
   ]
 }

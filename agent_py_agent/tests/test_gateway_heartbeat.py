@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import gateway_paths, write_json_file
-from agent_py_agent.agent.gateway_parts import runtime as gateway_runtime
+from agent_py_agent.agent.gateway_parts import lease_service as gateway_runtime
 from agent_py_agent.agent.gateway_parts.logging import _report_gateway_side_effect_error
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def _make_agent(tmp_path):
@@ -40,7 +40,7 @@ def test_heartbeat_marks_alive_on_start(tmp_path):
 
     assert not gateway_runtime.is_heartbeat_alive_for_request(request_id)
 
-    stop_event, thread = gateway_runtime._start_gateway_processing_lease_heartbeat(
+    stop_event, thread = gateway_runtime.start_lease_heartbeat(
         agent, request_path, request_id=request_id
     )
 
@@ -60,7 +60,7 @@ def test_heartbeat_cleanup_on_exit(tmp_path):
     paths.processing.mkdir(parents=True, exist_ok=True)
     write_json_file(request_path, {"id": request_id, "status": "processing"})
 
-    stop_event, thread = gateway_runtime._start_gateway_processing_lease_heartbeat(
+    stop_event, thread = gateway_runtime.start_lease_heartbeat(
         agent, request_path, request_id=request_id
     )
 
@@ -88,7 +88,7 @@ def test_gateway_side_effect_error_is_structured(capsys):
 def test_heartbeat_retry_on_failure(tmp_path, monkeypatch):
     """测试心跳在写入失败后重试 3 次后放弃。
 
-    NOTE: This test is skipped because the heartbeat_loop captures _touch_gateway_processing_lease
+    NOTE: This test is skipped because the heartbeat_loop captures refresh_processing_lease
     at import time, so monkeypatching doesn't affect the already-running thread.
     The actual retry logic is tested via integration tests.
     """
@@ -100,13 +100,13 @@ def test_heartbeat_retry_on_failure(tmp_path, monkeypatch):
     write_json_file(request_path, {"id": request_id, "status": "processing"})
 
     # Use a very short interval to speed up test
-    monkeypatch.setattr(gateway_runtime, "_gateway_processing_lease_interval", lambda agent: 0.01)
+    monkeypatch.setattr(gateway_runtime, "_lease_interval", lambda agent: 0.01)
 
     failure_count = 0
 
     # Mock at the source module where heartbeat_loop actually uses it
-    import agent_py_agent.agent.gateway_parts.lease as lease_module
-    original_touch = lease_module._touch_gateway_processing_lease
+    import agent_py_agent.agent.gateway_parts.lease_service as lease_module
+    original_touch = lease_module.refresh_processing_lease
 
     def failing_touch(*args, **kwargs):
         nonlocal failure_count
@@ -116,9 +116,9 @@ def test_heartbeat_retry_on_failure(tmp_path, monkeypatch):
         return original_touch(*args, **kwargs)
 
     # Patch in the lease module where heartbeat_loop will see it
-    monkeypatch.setattr(lease_module, "_touch_gateway_processing_lease", failing_touch)
+    monkeypatch.setattr(lease_module, "refresh_processing_lease", failing_touch)
 
-    stop_event, thread = gateway_runtime._start_gateway_processing_lease_heartbeat(
+    stop_event, thread = gateway_runtime.start_lease_heartbeat(
         agent, request_path, request_id=request_id
     )
 

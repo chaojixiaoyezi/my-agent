@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,16 +10,18 @@ from ...backends import ModelResponse
 from .._runtime_params import ToolLoopExecuteParams
 from ..tool_guard.local_progress import reset_local_progress_guard
 from .artifacts import _relative_report_ref, _write_report
+from .subagent_aggregation import evaluate_subagent_aggregation_gate
 
 
 def uncontracted_task_output_closeout_response(
     request: object,
     workspace_root: Path,
 ) -> ModelResponse | None:
-    artifacts = _current_run_task_output_artifacts(getattr(request, "params", None))
+    artifacts = _current_run_task_output_artifacts(getattr(request, "params", None), workspace_root=workspace_root)
     if not artifacts:
         return None
     params = request.params
+    delivery_mode = _delivery_mode_for_artifacts(artifacts)
     report = {
         "schema_version": "main_agent_delivery_closeout.v1",
         "ok": True,
@@ -29,31 +32,45 @@ def uncontracted_task_output_closeout_response(
         "workspace_root": str(workspace_root),
         "canonical_artifact_registry_ref": _relative_report_ref(registry_path(workspace_root), workspace_root),
         "artifacts": artifacts,
-        "delivery_mode": "uncontracted_task_output",
-        "message_zh": "没有结构化交付合同，但本轮已写入 task output 下的报告类交付物，且模型显式提交验收；主代理停止继续工具循环。",
+        "delivery_mode": delivery_mode,
+        "message_zh": _message_for_delivery_mode(delivery_mode),
     }
     report_ref = _write_report(workspace_root, report)
     report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
+    decision = evaluate_subagent_aggregation_gate(request)
+    report["subagent_aggregation_gate"] = decision.to_dict()
     _write_report(workspace_root, report)
     reset_local_progress_guard(request.agent, params)
     return ModelResponse(text=_uncontracted_closeout_text(report), backend=request.backend)
 
 
-def _current_run_task_output_artifacts(params: ToolLoopExecuteParams | None) -> list[dict[str, Any]]:
-    output_dir = _task_output_dir(params)
-    if output_dir is None or params is None:
+def _current_run_task_output_artifacts(
+    params: ToolLoopExecuteParams | None,
+    *,
+    workspace_root: Path | None = None,
+) -> list[dict[str, Any]]:
+    if params is None:
+        return []
+    targets = _accepted_output_targets(params)
+    if not targets:
         return []
     artifacts: list[dict[str, Any]] = []
     for record in _successful_write_records(getattr(params, "archive_tool_calls", []) or []):
-        artifacts.extend(_task_output_artifacts_from_record(record, output_dir))
+        artifacts.extend(_task_output_artifacts_from_record(record, targets, workspace_root=workspace_root))
     return _unique_artifact_payloads(artifacts)
 
 
-def _task_output_artifacts_from_record(record: dict[str, Any], output_dir: Path) -> list[dict[str, Any]]:
+def _task_output_artifacts_from_record(
+    record: dict[str, Any],
+    targets: list[dict[str, Any]],
+    *,
+    workspace_root: Path | None = None,
+) -> list[dict[str, Any]]:
     return [
-        _artifact_payload(record, path)
-        for path in _produced_paths(record)
-        if _is_task_output_report(path, output_dir)
+        _artifact_payload(record, path, target)
+        for path in _produced_paths(record, workspace_root=workspace_root)
+        for target in targets
+        if _is_task_output_report(path, target)
     ]
 
 
@@ -63,13 +80,14 @@ def _successful_write_records(records: object) -> list[dict[str, Any]]:
     return [record for record in records if isinstance(record, dict) and _successful_write_record(record)]
 
 
-def _artifact_payload(record: dict[str, Any], path: Path) -> dict[str, Any]:
+def _artifact_payload(record: dict[str, Any], path: Path, target: dict[str, Any]) -> dict[str, Any]:
     return {
         "artifact_id": str(record.get("call_id") or path.name),
         "kind": path.suffix.lower().lstrip(".") or "file",
         "path": str(path),
         "ok": True,
         "source": "current_run_tool_output",
+        "output_scope": str(target["scope"]),
     }
 
 
@@ -82,13 +100,62 @@ def _task_output_dir(params: ToolLoopExecuteParams | None) -> Path | None:
     return Path(text).expanduser().resolve(strict=False) if text else None
 
 
+def _accepted_output_targets(params: ToolLoopExecuteParams) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    task_output = _task_output_dir(params)
+    if task_output is not None:
+        targets.append({"path": task_output, "kind": "dir", "scope": "task_output"})
+    targets.extend(_user_requested_output_targets(params))
+    return _unique_targets(targets)
+
+
+def _user_requested_output_targets(params: ToolLoopExecuteParams) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+    workspace = attrs.get("run_workspace")
+    if isinstance(workspace, dict):
+        dir_text = str(workspace.get("user_requested_output_dir") or "").strip()
+        if dir_text:
+            targets.append(_output_target_for_user_path(Path(dir_text).expanduser(), force_kind="dir"))
+        path_text = str(workspace.get("user_requested_output_path") or "").strip()
+        if path_text:
+            targets.append(_output_target_for_user_path(Path(path_text).expanduser()))
+    prompt_text = "\n".join(
+        text
+        for text in (
+            str(getattr(params, "root_user_prompt", "") or ""),
+            str(getattr(params, "user_prompt", "") or ""),
+        )
+        if text
+    )
+    targets.extend(_output_target_for_user_path(path) for path in _absolute_paths_in_text(prompt_text))
+    return _unique_targets(targets)
+
+
+def _absolute_paths_in_text(text: str) -> list[Path]:
+    if not text:
+        return []
+    paths: list[Path] = []
+    for match in re.finditer(r"(?:~|/)[^\s'\"`<>()\[\]{}，。；;、]+", text):
+        raw = match.group(0).rstrip(".,:;，。；、")
+        if raw:
+            paths.append(Path(raw).expanduser())
+    return paths
+
+
+def _output_target_for_user_path(path: Path, *, force_kind: str | None = None) -> dict[str, Any]:
+    resolved = path.resolve(strict=False)
+    kind = force_kind or ("file" if resolved.suffix else "dir")
+    return {"path": resolved, "kind": kind, "scope": "user_requested_output"}
+
+
 def _successful_write_record(record: dict[str, Any]) -> bool:
     if record.get("ok") is False:
         return False
     return str(record.get("tool") or "").strip() in {"write_file", "apply_patch", "run_command", "controlled_exec"}
 
 
-def _produced_paths(record: dict[str, Any]) -> list[Path]:
+def _produced_paths(record: dict[str, Any], *, workspace_root: Path | None = None) -> list[Path]:
     refs = _record_refs(record)
     paths: list[Path] = []
     for ref in dict.fromkeys(refs):
@@ -97,6 +164,8 @@ def _produced_paths(record: dict[str, Any]) -> list[Path]:
         path = Path(ref).expanduser()
         if path.is_absolute():
             paths.append(path.resolve(strict=False))
+        elif workspace_root is not None:
+            paths.append((workspace_root / path).resolve(strict=False))
     return paths
 
 
@@ -124,17 +193,37 @@ def _first_record_ref(item: dict[str, Any], keys: tuple[str, ...]) -> str:
     return ""
 
 
-def _is_task_output_report(path: Path, output_dir: Path) -> bool:
-    try:
-        path.relative_to(output_dir)
-    except ValueError:
+def _is_task_output_report(path: Path, target: dict[str, Any]) -> bool:
+    output_root = target.get("path")
+    if not isinstance(output_root, Path):
         return False
+    if target.get("kind") == "file":
+        if path != output_root:
+            return False
+    else:
+        try:
+            path.relative_to(output_root)
+        except ValueError:
+            return False
     if not path.is_file():
         return False
     if path.suffix.lower() not in {".md", ".txt", ".json", ".html", ".csv", ".xlsx", ".docx", ".pptx"}:
         return False
     name = path.name.lower()
     return any(marker in name for marker in ("report", "analysis", "summary", "final", "结果", "报告", "分析", "总结"))
+
+
+def _delivery_mode_for_artifacts(artifacts: list[dict[str, Any]]) -> str:
+    scopes = {str(item.get("output_scope") or "") for item in artifacts}
+    if "user_requested_output" in scopes:
+        return "uncontracted_user_requested_output"
+    return "uncontracted_task_output"
+
+
+def _message_for_delivery_mode(delivery_mode: str) -> str:
+    if delivery_mode == "uncontracted_user_requested_output":
+        return "没有结构化交付合同，但本轮已写入用户明确指定路径下的报告类交付物，且模型显式提交验收；主代理停止继续工具循环。"
+    return "没有结构化交付合同，但本轮已写入 task output 下的报告类交付物，且模型显式提交验收；主代理停止继续工具循环。"
 
 
 def _unique_artifact_payloads(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -145,6 +234,24 @@ def _unique_artifact_payloads(artifacts: list[dict[str, Any]]) -> list[dict[str,
         if key and key not in seen:
             seen.add(key)
             result.append(artifact)
+    return result
+
+
+def _unique_targets(targets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    result: list[dict[str, Any]] = []
+    for target in targets:
+        path = target.get("path")
+        if not isinstance(path, Path):
+            continue
+        kind = str(target.get("kind") or "")
+        if kind not in {"file", "dir"}:
+            continue
+        key = (str(path), kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(target)
     return result
 
 

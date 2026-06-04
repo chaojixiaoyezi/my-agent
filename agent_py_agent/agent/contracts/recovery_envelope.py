@@ -18,7 +18,7 @@ def recovery_envelope_from_gate_payload(request: RecoveryEnvelopeRequest) -> Rec
         return None
     normalized = [_finding_payload(item) for item in request.findings if isinstance(item, dict)]
     if not normalized:
-        normalized = [{"code": _fallback_code(request.status), "severity": "P1", "message": "", "evidence": {}}]
+        normalized = [{"code": _default_code(request.status), "severity": "P1", "message": "", "evidence": {}}]
     actions = tuple(_recovery_action(request.gate, request.status, item) for item in normalized)
     envelope_status = _envelope_status(request.status, actions)
     return RecoveryEnvelope(
@@ -148,7 +148,7 @@ def _first_action(actions: tuple[dict[str, Any], ...]) -> str:
     return RecoveryAction.REPORT_BLOCKER.value
 
 
-def _fallback_code(status: str) -> str:
+def _default_code(status: str) -> str:
     normalized = str(status or "").strip().upper()
     if normalized == "NEED_REPAIR":
         return "CONTRACT_REPAIR_REQUIRED"

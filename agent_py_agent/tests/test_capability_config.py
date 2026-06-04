@@ -33,7 +33,7 @@ class TestCapabilityConfigDefaults:
         """验证限制默认值。"""
         config = CapabilityConfig()
         assert config.capability_candidate_limit == 5
-        assert config.capability_fallback_max_attempts == 3
+        assert config.capability_alternative_max_attempts == 3
         assert config.subagent_no_progress_attempt_limit == 4
 
     def test_capability_config_zero_means_unlimited(self):
@@ -83,8 +83,8 @@ class TestLoadCapabilityConfig:
         finally:
             path.unlink()
 
-    def test_load_capability_config_unknown_fields_ignored(self):
-        """验证未知字段被忽略。"""
+    def test_load_capability_config_unknown_fields_rejected(self):
+        """验证未知字段会直接报错。"""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write("enable_capability_routing: true\n")
             f.write("unknown_field: value\n")
@@ -92,9 +92,8 @@ class TestLoadCapabilityConfig:
             path = Path(f.name)
 
         try:
-            config = load_capability_config(path)
-            # unknown_field 应该被忽略，不影响已知字段
-            assert config.enable_capability_routing is True
+            with pytest.raises(ValueError, match="未知字段"):
+                load_capability_config(path)
         finally:
             path.unlink()
 
@@ -195,8 +194,8 @@ class TestCapabilityConfigEdgeCases:
         config = CapabilityConfig(
             capability_candidate_limit=10,
             capability_bundle_max_tokens=5000,
-            capability_fallback_max_attempts=5,
+            capability_alternative_max_attempts=5,
         )
         assert config.capability_candidate_limit == 10
         assert config.capability_bundle_max_tokens == 5000
-        assert config.capability_fallback_max_attempts == 5
+        assert config.capability_alternative_max_attempts == 5

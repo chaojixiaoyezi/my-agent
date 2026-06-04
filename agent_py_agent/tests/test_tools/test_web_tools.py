@@ -4,7 +4,7 @@
 这个文件专门测试统一后的 web_fetch 网页和 HTTP/API 能力，避免文件系统工具测试继续膨胀。
 """
 
-from agent_py_agent.agent.tools import WebFetchTool
+from agent_py_agent.agent.tooling.web import WebFetchTool
 
 from .backends import start_test_server
 

@@ -28,11 +28,13 @@ class FinalizeContext:
     task_id: str
     source: str
     do_save: bool
+    task_attributes: dict | None
     recovery_task_refs: list | None
     recovery_content_paths: list | None
     recovery_next_actions: list | None
     tool_rounds: int = 0
     compact_auto_continue_depth: int = 0
+    compact_auto_no_tool_continue_depth: int = 0
     main_context_bundle_path: str = ""
     main_context_bundle_markdown_path: str = ""
 
@@ -66,6 +68,7 @@ class ToolLoopExecuteParams:
     delivery_contract: dict | None = None
     run_scope: RunScope | None = None
     root_user_prompt: str = ""
+    source: str = "run"
     runtime_guard_policy: object | None = None
 
 
@@ -94,6 +97,7 @@ class ArchiveRunParams:
     run_id: str
     task_id: str
     source: str
+    task_attributes: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -106,3 +110,4 @@ class EstimateTokenParams:
     archive_tool_calls: list
     run_request_id: str
     turn_id: str
+    final_prompt: str = ""

@@ -28,6 +28,7 @@ ROLE_BASE_TOOLS = [
 COORDINATOR_TOOLS = [
     "schedule_child_subagents",
     "dispatch_subagents",
+    "wait",
     "inspect_agent_tree",
     "send_guidance",
     *ROLE_BASE_TOOLS,

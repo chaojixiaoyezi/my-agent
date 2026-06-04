@@ -105,9 +105,8 @@ def append_compact_token_usage(root: Path) -> None:
 def assert_schema_v2(record: dict[str, object], name: str) -> None:
     assert record["version"] == RUNTIME_MEMORY_SCHEMA_VERSION
     assert record["schema"]["name"] == name
-    assert record["reserved"]["schema_name"] == name
-    assert record["reserved"]["schema_version"] == RUNTIME_MEMORY_SCHEMA_VERSION
-    assert set(record["reserved"]) >= {"extensions", "compat", "future"}
+    assert record["schema"]["version"] == RUNTIME_MEMORY_SCHEMA_VERSION
+    assert "reserved" not in record
 
 
 def assert_apply_ids_match(result: dict[str, object], *records: dict[str, object]) -> None:
@@ -133,7 +132,6 @@ def failed_self_check(
         "event_type": "post_compact_self_check",
         "checks": [{"name": "forced_failure", "ok": False, "severity": "hard"}],
         "created_at": now,
-        "reserved": compact_apply_module.runtime_memory_reserved_fields(schema),
     }
 
 

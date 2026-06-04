@@ -11,7 +11,6 @@ from agent_py_agent.agent.log_analysis.ingest.pipeline import (
     DeadLetterWriter,
     IngestPipeline,
     IngestResult,
-    JsonlEventSink,
     default_log_analysis_root,
     file_digest,
     make_batch_id,
@@ -96,34 +95,6 @@ class TestFileDigest:
 
         size, _ = file_digest(path)
         assert size == 0
-
-
-class TestJsonlEventSink:
-    """测试 JSONL 事件写入器"""
-
-    def test_write_events_creates_file(self, tmp_path):
-        """验证写入事件创建 events.jsonl 文件"""
-        sink = JsonlEventSink(tmp_path)
-        events = [{"event_id": "1", "data": "test"}]
-        result = sink.write_events(events)
-
-        assert result["count"] == 1
-        assert Path(result["path"]).exists()
-
-    def test_write_empty_events(self, tmp_path):
-        """验证写入空事件列表"""
-        sink = JsonlEventSink(tmp_path)
-        result = sink.write_events([])
-
-        assert result["count"] == 0
-
-    def test_write_multiple_events(self, tmp_path):
-        """验证写入多条事件"""
-        sink = JsonlEventSink(tmp_path)
-        events = [{"event_id": str(i)} for i in range(5)]
-        result = sink.write_events(events)
-
-        assert result["count"] == 5
 
 
 class TestIngestPipelineInit:

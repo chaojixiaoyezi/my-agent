@@ -13,7 +13,7 @@ import time
 import uuid
 from typing import Any
 
-from ..file_io import append_jsonl
+from ..io import append_jsonl
 from .models import LocalStoreEvent, LocalTimelineItem
 
 

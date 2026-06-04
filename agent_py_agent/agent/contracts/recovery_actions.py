@@ -20,7 +20,6 @@ class RecoveryAction(str, Enum):
     CONTINUE = "continue"
     DISPATCH = "dispatch"
     EXECUTE = "execute"
-    FALLBACK_TO_CHECKPOINT = "fallback_to_checkpoint"
     FIX_PATH = "fix_path"
     FIX_PATH_WITHIN_ALLOWED_ROOTS = "fix_path_within_allowed_roots"
     MANUAL_REVIEW = "manual_review"

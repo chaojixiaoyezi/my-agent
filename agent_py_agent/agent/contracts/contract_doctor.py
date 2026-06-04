@@ -26,12 +26,12 @@ def lint_contract(
     known_verifiers: tuple[str, ...] = DEFAULT_KNOWN_VERIFIERS,
 ) -> ContractDoctorReport:
     findings: list[dict[str, object]] = []
-    normalized = _safe_migrate(contract, findings)
-    _validate_schema(normalized, findings)
-    _validate_field_types(normalized, findings)
-    _validate_unknown_rules(normalized, set(known_verifiers), findings)
-    _validate_conflicts(normalized, findings)
-    _validate_impossible_artifacts(normalized, findings)
+    _validate_version(contract, findings)
+    _validate_schema(contract, findings)
+    _validate_field_types(contract, findings)
+    _validate_unknown_rules(contract, set(known_verifiers), findings)
+    _validate_conflicts(contract, findings)
+    _validate_impossible_artifacts(contract, findings)
     return ContractDoctorReport(
         ok=not findings,
         error_codes=tuple(dict.fromkeys(_text(item.get("code")) for item in findings)),
@@ -40,25 +40,10 @@ def lint_contract(
     )
 
 
-def migrate_contract(contract: dict[str, Any]) -> dict[str, Any]:
+def _validate_version(contract: dict[str, Any], findings: list[dict[str, object]]) -> None:
     version = contract.get("version", CURRENT_VERSION)
-    if version == CURRENT_VERSION:
-        return dict(contract)
-    if version != 1:
-        return dict(contract)
-    migrated = {key: value for key, value in contract.items() if key != "artifact_path"}
-    artifact_path = _text(contract.get("artifact_path"))
-    migrated["version"] = CURRENT_VERSION
-    migrated["artifacts"] = {"required": [{"path": artifact_path}]} if artifact_path else {"required": []}
-    return migrated
-
-
-def _safe_migrate(contract: dict[str, Any], findings: list[dict[str, object]]) -> dict[str, Any]:
-    version = contract.get("version", CURRENT_VERSION)
-    if version not in (1, CURRENT_VERSION):
+    if version != CURRENT_VERSION:
         findings.append(_finding("CONTRACT_VERSION_UNSUPPORTED", {"version": version}))
-        return dict(contract)
-    return migrate_contract(contract)
 
 
 def _validate_schema(contract: dict[str, Any], findings: list[dict[str, object]]) -> None:
@@ -136,4 +121,4 @@ def _optional_int(value: object) -> int:
 def _finding(code: str, extra: dict[str, object] | None = None) -> dict[str, object]:
     return {"code": code, **(extra or {})}
 
-__all__ = ["ContractDoctorReport", "lint_contract", "migrate_contract"]
+__all__ = ["ContractDoctorReport", "lint_contract"]

@@ -16,7 +16,7 @@ my-agent chat
 
 `gateway` 是本地常驻 runtime，`chat` / TUI 只是客户端。用户可以退出聊天界面、重启 gateway、刷新会话；任务树、runner 输出、验收、能力授权、失败原因和调度日志都要落盘，gateway 重启后从任务账本恢复，而不是依赖某个长聊天上下文活着。当前 `my-agent` 不带子命令时已经会自动启动 gateway 并进入 `chat --gateway`，这是默认用户体验。
 
-第一版 gateway 已先落成一个很薄的本地后台控制面：
+gateway 的本地后台控制面入口：
 
 ```text
 my-agent gateway start
@@ -306,7 +306,7 @@ invite:
 - 跨机器 artifact 同步：哪些内容共享，哪些内容只留本机。
 - 组织备份和迁移：导出 org ledger、task ledger、artifact bundle，但不导出本机 secret。
 - Secret 管理：API key、私有工具凭证、员工本机密钥必须本地保存，不进入上级账本。
-- 版本兼容：不同 my-agent 版本之间如何协作。
+- 版本协作：不同 my-agent 版本之间如何明确协议和升级边界。
 - 权限审计：每次 grant、delegation、revoke、reclaim 都要有事件记录。
 - 隐私策略：上级能看到下级汇报，但不能默认看到下级全部私有记忆。
 
@@ -356,5 +356,5 @@ invite:
 - 未来 `gateway` 才是本地常驻 runtime；`chat` / TUI 应该能 attach / detach。
 - 任务状态以落盘账本为准：子代理、孙代理、runner 输出、验收、能力授权和阻塞原因都必须可恢复。
 - 用户层不暴露底层 tick 参数；普通用户只说目标和可选规模限制。
-- 高级用户可以在配置里调策略：任务规模默认 0 表示不设硬上限，runner 并发/启动速率/超时默认 `auto`。
+- 高级用户可以在配置里调策略：任务规模默认 0 表示不设硬上限，runner 并发/启动速率默认 `auto`；runner 外层总超时默认 `off`，需要压测或自动抢救卡死 runner 时再显式设成 `auto` 或固定秒数。
 - 真实 worker pool 做好前，当前 `daemon_max_runners: "auto"` 先映射成保守值 1，避免前台进程一次性同步阻塞太多 runner。

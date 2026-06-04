@@ -48,7 +48,7 @@ def test_kernel_snapshot_reports_corrupt_task_record_instead_of_hiding_it(tmp_pa
 
     assert snapshot.runs == []
     assert any(item.startswith("subagent_load_error:run-bad") for item in snapshot.warnings)
-    errors = snapshot.reserved["load_errors"]
+    errors = snapshot.load_errors
     assert errors[0]["run_id"] == "run-bad"
     assert errors[0]["category"] == "data_parse"
     assert "不要把它当成子代理没产物" in errors[0]["model_message"]

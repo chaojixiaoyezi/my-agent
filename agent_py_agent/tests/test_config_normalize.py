@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from agent_py_agent.agent.settings.config import (
-    HIDDEN_COMPAT_CONFIG_FIELDS,
     INTERNAL_RUNTIME_CONFIG_FIELDS,
     AgentConfig,
     load_simple_yaml,
@@ -176,8 +175,8 @@ class TestNormalizeSubagentAgentConfig:
         assert normalized["subagent_mode"] == "trusted_local_hardening"
         assert any("subagent_mode" in warning for warning in warnings)
 
-    def test_default_config_exposes_only_user_facing_subagent_knobs(self):
-        """验证默认配置只暴露用户能理解的子代理开关和记忆策略。"""
+    def test_default_config_exposes_current_subagent_runtime_knobs(self):
+        """验证默认配置明示当前子代理运行参数，不靠隐藏兼容字段。"""
         config_path = Path(__file__).parents[1] / "config" / "agent_config.yaml"
         visible = load_simple_yaml(config_path)
         exposed = {
@@ -187,6 +186,8 @@ class TestNormalizeSubagentAgentConfig:
             or key in {
                 "enable_subagents",
                 "max_subagents",
+                "task_max_subagents",
+                "task_max_grandchildren",
                 "result_check_execute_tests",
                 "result_check_timeout_seconds",
                 "closeout_for_all_task_nodes",
@@ -195,11 +196,31 @@ class TestNormalizeSubagentAgentConfig:
         assert exposed == {
             "enable_subagents",
             "subagent_mode",
+            "subagent_allowed_tools",
+            "subagent_automation_level",
+            "subagent_board_limit",
+            "subagent_builtin_workflows",
+            "subagent_cli_default_limit",
+            "subagent_context_summary_inline_json_chars",
+            "subagent_context_summary_inline_text_chars",
             "subagent_debug_trace_level",
+            "subagent_descendant_scan_limit",
             "subagent_memory_retention_policy",
             "subagent_memory_delete_after_days",
             "subagent_destroy_summary_required",
+            "subagent_hierarchy_default_max_depth",
+            "subagent_hierarchy_max_children_per_tool_call",
+            "subagent_hierarchy_recovery_max_nodes",
+            "subagent_probe_default_limit",
+            "subagent_watch_interval_seconds",
+            "subagent_workflow_mode",
+            "subagent_workflow_review_rounds",
+            "subagent_spawn_default_count",
+            "subagent_takeover_chain_max_depth",
+            "subagent_user_workflow_dirs",
             "max_subagents",
+            "task_max_subagents",
+            "task_max_grandchildren",
             "subagent_workspace",
             "subagent_role_template_dirs",
             "result_check_execute_tests",
@@ -207,8 +228,8 @@ class TestNormalizeSubagentAgentConfig:
             "closeout_for_all_task_nodes",
         }
 
-    def test_hidden_subagent_compat_limits_default_to_unrestricted(self):
-        """验证隐藏兼容参数默认不再限制层级、单次创建和接管链。"""
+    def test_subagent_hierarchy_limits_default_to_unrestricted(self):
+        """验证层级、单次创建和接管链默认不收紧。"""
         defaults = AgentConfig()
 
         normalized, warnings = normalize_agent_config(
@@ -272,7 +293,6 @@ class TestNormalizeSubagentAgentConfig:
         """验证 provider 空间风险配置可归一化，避免执行层写死危险默认值。"""
         normalized, warnings = normalize_agent_config(
             {
-                "home_runtime_bootstrap_enabled": "true",
                 "home_context_enabled": "false",
                 "home_lesson_auto_read_limit": "4",
                 "daily_memory_mirror_enabled": "true",
@@ -284,7 +304,6 @@ class TestNormalizeSubagentAgentConfig:
             }
         )
         assert warnings == []
-        assert normalized["home_runtime_bootstrap_enabled"] is True
         assert normalized["home_context_enabled"] is False
         assert normalized["home_lesson_auto_read_limit"] == 4
         assert normalized["daily_memory_mirror_enabled"] is True
@@ -375,7 +394,7 @@ class TestNormalizeAgentConfigIntegration:
             "subagent_workflow_config_warnings",
             "config_warnings",
         } | INTERNAL_RUNTIME_CONFIG_FIELDS
-        config_keys = set(AgentConfig.__dataclass_fields__) - internal_keys - HIDDEN_COMPAT_CONFIG_FIELDS
+        config_keys = set(AgentConfig.__dataclass_fields__) - internal_keys
 
         assert sorted(config_keys - yaml_keys) == []
         assert sorted(yaml_keys - config_keys) == []
@@ -418,8 +437,8 @@ class TestConfigWarnings:
         normalized, warnings = normalize_agent_config(data)
         assert any("model_backend" in w for w in warnings)
 
-    def test_warning_message_contains_fallback_value(self):
-        """验证警告消息包含回退值。"""
+    def test_warning_message_contains_default_value(self):
+        """验证警告消息包含默认值。"""
         data = {"model_backend": "bad"}
         normalized, warnings = normalize_agent_config(data)
         assert any("echo" in w for w in warnings)

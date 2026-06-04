@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-"""LLM: tests for failure introspector.
+"""Tests for deterministic failure introspector.
 
 给人看的解释：
-测试 LLM 失败自省器的各种场景：调用成功、JSON解析、参数提取、降级逻辑。
+测试失败自省器从规则分类生成可审计建议，不再在失败路径里额外调用模型。
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -92,19 +92,19 @@ class TestFailureIntrospector:
             should_split=False,
         )
 
-    def test_introspect_with_llm_success(self, mock_agent: MagicMock, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
-        """测试 LLM 调用成功。"""
+    def test_introspect_uses_rules_even_when_agent_present(self, mock_agent: MagicMock, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
+        """失败自省不再额外调用主模型。"""
         introspector = FailureIntrospector(agent=mock_agent)
         result = introspector.introspect(sample_task, sample_result, sample_analysis)
 
-        assert result.analysis_reason == "超时"
-        assert result.root_cause == "timeout"
-        assert result.suggested_params == {"new_timeout_seconds": 200}
+        assert result.analysis_reason == "规则分类：increase_timeout_and_retry"
+        assert result.root_cause == sample_analysis.root_cause
+        assert result.suggested_params == {}
         assert result.should_retry is True
-        assert result.confidence == 0.8
-        mock_agent.run.assert_called_once()
+        assert result.confidence == 0.55
+        mock_agent.run.assert_not_called()
 
-    def test_introspect_with_llm_fenced_json_success(
+    def test_introspect_ignores_model_json_shape(
         self,
         mock_agent: MagicMock,
         sample_task: SubAgentTask,
@@ -124,48 +124,48 @@ class TestFailureIntrospector:
 
         result = introspector.introspect(sample_task, sample_result, sample_analysis)
 
-        assert result.analysis_reason == "服务过载"
-        assert result.root_cause == "infrastructure_overload"
-        assert result.suggested_params == {"retry_after_seconds": 30}
-        assert result.confidence == 0.7
+        assert result.analysis_reason == "规则分类：increase_timeout_and_retry"
+        assert result.root_cause == "timeout"
+        mock_agent.run.assert_not_called()
 
-    def test_introspect_with_llm_json_parse_error(self, mock_agent: MagicMock, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
-        """测试 LLM 返回非 JSON 格式时降级。"""
+    def test_introspect_with_agent_response_noise(self, mock_agent: MagicMock, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
+        """agent 返回内容不影响规则自省。"""
         mock_agent.run.return_value = MagicMock(response="这不是 JSON")
         introspector = FailureIntrospector(agent=mock_agent)
         result = introspector.introspect(sample_task, sample_result, sample_analysis)
 
-        # 降级到规则分类
-        assert result.confidence == 0.3
+        assert result.confidence == 0.55
         assert result.should_retry == sample_analysis.should_retry
+        mock_agent.run.assert_not_called()
 
-    def test_introspect_with_llm_missing_fields(self, mock_agent: MagicMock, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
-        """测试 LLM 返回缺少字段的 JSON。"""
+    def test_introspect_with_agent_missing_fields(self, mock_agent: MagicMock, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
+        """模型 JSON 缺字段不再参与失败主链。"""
         mock_agent.run.return_value = MagicMock(response='{"analysis_reason": "失败"}')
         introspector = FailureIntrospector(agent=mock_agent)
         result = introspector.introspect(sample_task, sample_result, sample_analysis)
 
-        # 缺少字段时使用规则分类的值
         assert result.root_cause == sample_analysis.root_cause
         assert result.should_retry == sample_analysis.should_retry
+        mock_agent.run.assert_not_called()
 
-    def test_introspect_without_agent_fallback(self, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
-        """测试未设置 agent 时降级。"""
+    def test_introspect_without_agent_uses_rules(self, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
+        """未设置 agent 时使用同一条规则主链。"""
         introspector = FailureIntrospector(agent=None)
         result = introspector.introspect(sample_task, sample_result, sample_analysis)
 
-        assert result.confidence == 0.3
+        assert result.confidence == 0.55
         assert result.analysis_reason.startswith("规则分类")
 
     def test_introspect_with_exception(self, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
-        """测试 LLM 调用抛出异常时降级。"""
+        """agent.run 抛异常也不会被调用。"""
         mock_agent = MagicMock()
         mock_agent.run.side_effect = RuntimeError("LLM 调用失败")
         introspector = FailureIntrospector(agent=mock_agent)
         result = introspector.introspect(sample_task, sample_result, sample_analysis)
 
-        assert result.confidence == 0.3
+        assert result.confidence == 0.55
         assert result.analysis_reason.startswith("规则分类")
+        mock_agent.run.assert_not_called()
 
     def test_suggest_params_from_analysis(self, sample_analysis: FailureAnalysis) -> None:
         """测试从规则分析生成建议参数。"""
@@ -193,19 +193,19 @@ class TestFailureIntrospector:
         timeout = introspector._get_current_timeout(sample_task)
         assert timeout == 120.0
 
-    def test_fallback_to_rules_complete(self, sample_analysis: FailureAnalysis) -> None:
-        """测试完整规则分类降级。"""
+    def test_from_rules_complete(self, sample_analysis: FailureAnalysis) -> None:
+        """测试完整规则分类结果。"""
         sample_analysis.should_retry = False
         sample_analysis.should_split = True
         sample_analysis.root_cause = "task_too_large"
 
         introspector = FailureIntrospector()
-        result = introspector._fallback_to_rules(sample_analysis)
+        result = introspector._from_rules(sample_analysis)
 
         assert result.should_retry is False
         assert result.should_split is True
         assert result.root_cause == "task_too_large"
-        assert result.confidence == 0.3
+        assert result.confidence == 0.55
 
     def test_set_agent(self) -> None:
         """测试设置 agent。"""

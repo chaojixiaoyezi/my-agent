@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.local_storage.control_plane_models import (
     AgentEventInput,
     AgentRunRecord,
     AgentRuntimeQueryContext,
 )
-from agent_py_agent.agent.local_store import LocalStore
 
 
 def _parent_run_record() -> AgentRunRecord:
@@ -184,7 +184,7 @@ def test_runtime_query_scope_keeps_takeover_candidates_extensible(tmp_path) -> N
     assert result.context.authorized_scope == "root_task"
     assert result.report.task_id == "task-root"
     assert [item.run_id for item in result.report.runs] == ["run-child", "run-sibling", "run-timeout"]
-    assert result.reserved["takeover_hint"] == "blocked_failed_timeout_runs"
+    assert result.takeover_hint == "blocked_failed_timeout_runs"
 
 
 def test_subagent_save_projects_status_into_control_plane(tmp_path) -> None:

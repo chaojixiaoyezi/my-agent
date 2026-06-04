@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.core import SimpleAgent
-from ..agent.gateway import (
+from ..agent.gateway_parts import (
     gateway_paths,
     gateway_request_counts,
     gateway_stale_processing,

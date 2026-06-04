@@ -19,7 +19,7 @@ from .records import (
 )
 
 if TYPE_CHECKING:
-    from ..local_store import LocalStore
+    from ..local_storage import LocalStore
     from ..settings.config import AgentConfig
 
 
@@ -129,9 +129,9 @@ class AuditLogger:
         report = runtime_error_report(exc, context="audit.local_store.record_event")
         report["entry_id"] = entry.entry_id
         report["action"] = entry.action
-        fallback = self._audit_root / "audit_side_effect_errors.jsonl"
+        side_effect_path = self._audit_root / "audit_side_effect_errors.jsonl"
         try:
-            with fallback.open("a", encoding="utf-8") as handle:
+            with side_effect_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(report, ensure_ascii=False) + "\n")
         except OSError:
             return

@@ -50,6 +50,31 @@ def test_document_quality_contract_is_advisory_not_blocking(tmp_path):
     assert "DOCUMENT_SECTION_MISSING" in {item.code for item in report.findings}
 
 
+def test_markdown_required_strings_are_blocking(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    path = tmp_path / "report.md"
+    path.write_text("# Report\n\nCP-01 | SECRET-01\n", encoding="utf-8")
+
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=path,
+            workspace_root=tmp_path,
+            validation_contract={
+                "required_strings": ["CP-01", "CP-02"],
+                "required_regex": [r"SECRET-01"],
+            },
+        )
+    )
+
+    assert report.ok is False
+    assert "ARTIFACT_REQUIRED_TEXT_MISSING" in {item.code for item in report.findings}
+    assert [item.value for item in report.findings if item.code == "ARTIFACT_REQUIRED_TEXT_MISSING"] == ["CP-02"]
+
+
 def test_html_acceptance_does_not_fail_placeholder_links_by_default(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
@@ -208,7 +233,7 @@ def test_validate_artifact_report_contains_structured_artifact_ref(tmp_path):
     assert ref["path"] == str(path)
     assert ref["kind"] == "json"
     assert ref["hash"]
-    assert ref["reserved"]["size_bytes"] == path.stat().st_size
+    assert ref["size_bytes"] == path.stat().st_size
 
 
 def test_validate_artifact_reports_invalid_json(tmp_path):

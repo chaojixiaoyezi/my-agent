@@ -20,11 +20,15 @@ class SubmitForAcceptanceTool(BaseTool):
         ],
         avoid_when=[
             "还在搜索、读取、分析、写草稿或没有写出目标产物时不要调用",
+            "output_dir 里还混着明显的草稿、日志、子代理分报告或临时材料且没有最终索引时不要调用",
         ],
         keywords=["submit", "acceptance", "final", "done", "验收", "提交", "交付", "完成"],
         parameters={"note": "可选。简短说明你认为可以验收的内容；系统不会把 note 当作通过依据。"},
         parameter_details={
-            "note": "可选字符串。只作为交接说明，真正验收只读取产物、工具记录、合同和运行事实。",
+            "note": (
+                "可选字符串。只作为交接说明，真正验收只读取产物、工具记录、合同和运行事实。"
+                "提交前请确保 output_dir 面向用户是清爽的：最终产物保留，中间材料挪到 work_dir 或由最终产物索引。"
+            ),
         },
         examples=[
             '{"tool": "submit_for_acceptance", "note": "主要产物已经写入 outputs/，请系统验收。"}'

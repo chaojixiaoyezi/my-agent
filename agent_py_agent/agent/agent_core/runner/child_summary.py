@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...runtime_errors import runtime_error_report
-from ...subagent import SubAgentRunnerResult, SubAgentTask
+from ...subagents import SubAgentRunnerResult, SubAgentTask
 
 _RUNNER_CHILD_FINAL_STATUSES = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
 

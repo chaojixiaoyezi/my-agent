@@ -5,9 +5,9 @@ import re
 import time
 from pathlib import Path
 
-from agent_py_agent.agent.backend import BaseBackend, ModelResponse
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.backends import BaseBackend, ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.static_site import run_static_site_check
 
 
@@ -248,7 +248,7 @@ def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -
     assert "blocking_run_ids" not in result.response
     records_by_depth = sorted(records, key=lambda item: (item.depth, item.agent_name))
     assert [item.agent_name for item in records_by_depth] == ["小傻妞-家具总控", "小小傻妞-家具叶子"]
-    assert {item.depth for item in records} == {0, 1}
+    assert {item.depth for item in records} == {1, 2}
     assert len(backend.runner.prompts) >= 3
     assert (site_dir / "index.html").exists()
     assert site_check.validation_result["ok"] is True

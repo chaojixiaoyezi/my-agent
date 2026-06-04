@@ -1,4 +1,3 @@
-from .facade import SubAgentHierarchyService
 from .recovery import (
     HierarchyRecoveryRequest,
     HierarchyRecoveryResult,
@@ -6,6 +5,7 @@ from .recovery import (
 )
 from .scheduler import SubAgentHierarchyScheduler
 from .scheduler_models import HierarchyChildSpec, HierarchyScheduleRequest, HierarchyScheduleResult
+from .service import SubAgentHierarchyService
 
 __all__ = [
     "HierarchyChildSpec",

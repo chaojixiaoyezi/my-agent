@@ -6,7 +6,7 @@ from __future__ import annotations
 新手说明:
 这个包只做"找线索"和"整理恢复依据"。
 命令怎么打印放在 `rendering_adapter.py`，这样查询逻辑可以单独测试，也不会把 CLI 文件堆大。
-`ResumeGuidanceRequest` 从这里 re-export，方便 CLI 和 runtime 统一走 bundle 接口。
+CLI 和 runtime 从本包导入当前 archive/query API。
 """
 
 from .query import (

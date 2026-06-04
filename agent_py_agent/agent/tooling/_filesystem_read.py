@@ -136,6 +136,7 @@ class ReadFileTool(FileSystemTool):
                 "查看某个 Python 文件、配置文件或 Markdown 文档",
                 "定位报错后，按行阅读相关代码",
                 "读取工具返回的大输出保存路径或 tool-output artifact 包装路径",
+                "读取超大单行文本时，用 offset/max_chars 分段继续",
             ],
             avoid_when=[
                 "只想知道关键字在哪些文件出现过时，先用 search_text 更省",
@@ -145,15 +146,20 @@ class ReadFileTool(FileSystemTool):
                 "path": "要读取的文件路径",
                 "start_line": "起始行号，可选",
                 "end_line": "结束行号，可选",
+                "offset": "字符偏移，可选；用于超大单行或按字符分块读取",
+                "max_chars": "本次最多返回多少字符，可选；不会超过系统默认上限",
             },
             parameter_details={
                 "path": "相对工作区的文本文件路径，或系统返回的安全大输出路径；必须是文件而不是目录。",
                 "start_line": "从第几行开始读，默认从第 1 行开始。",
                 "end_line": "读到第几行结束，包含该行；不传时默认读到文件结尾。",
+                "offset": "当文件是一整行大文本或返回 next_offset 时，下一次传入 offset 继续读。",
+                "max_chars": "字符窗口大小；适合大文件分块阅读、摘要、再继续。",
             },
             examples=[
                 '{"tool": "read_file", "path": "agent_py_agent/agent/core.py"}',
                 '{"tool": "read_file", "path": "agent_py_agent/agent/core.py", "start_line": 1, "end_line": 120}',
+                '{"tool": "read_file", "path": "large.log", "offset": 50000, "max_chars": 50000}',
             ],
         )
 

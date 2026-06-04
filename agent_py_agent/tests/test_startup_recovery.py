@@ -119,9 +119,9 @@ class TestDetectActiveWork:
             hot_list=[], recent=[], summary={}
         )
 
-        with patch('agent_py_agent.agent.gateway.gateway_paths', return_value=mock_paths), \
-             patch('agent_py_agent.agent.gateway.gateway_running', return_value=(0, False)), \
-             patch('agent_py_agent.agent.gateway.gateway_request_counts', return_value={"pending": 0, "processing": 0, "done": 0, "failed": 0}):
+        with patch('agent_py_agent.agent.gateway_parts.gateway_paths', return_value=mock_paths), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_running', return_value=(0, False)), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_request_counts', return_value={"pending": 0, "processing": 0, "done": 0, "failed": 0}):
             summary = detect_active_work(mock_agent)
 
         assert summary.gateway_alive is False
@@ -141,9 +141,9 @@ class TestDetectActiveWork:
             hot_list=[], recent=[], summary={}
         )
 
-        with patch('agent_py_agent.agent.gateway.gateway_paths', return_value=mock_paths), \
-             patch('agent_py_agent.agent.gateway.gateway_running', return_value=(12345, True)), \
-             patch('agent_py_agent.agent.gateway.gateway_request_counts', return_value={"pending": 0, "processing": 0, "done": 5, "failed": 0}):
+        with patch('agent_py_agent.agent.gateway_parts.gateway_paths', return_value=mock_paths), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_running', return_value=(12345, True)), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_request_counts', return_value={"pending": 0, "processing": 0, "done": 5, "failed": 0}):
             summary = detect_active_work(mock_agent)
 
         assert summary.gateway_alive is True
@@ -159,9 +159,9 @@ class TestDetectActiveWork:
 
         mock_agent.subagents.build_board.return_value = sample_board
 
-        with patch('agent_py_agent.agent.gateway.gateway_paths', return_value=mock_paths), \
-             patch('agent_py_agent.agent.gateway.gateway_running', return_value=(12345, True)), \
-             patch('agent_py_agent.agent.gateway.gateway_request_counts', return_value={"pending": 1, "processing": 0, "done": 2, "failed": 0}):
+        with patch('agent_py_agent.agent.gateway_parts.gateway_paths', return_value=mock_paths), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_running', return_value=(12345, True)), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_request_counts', return_value={"pending": 1, "processing": 0, "done": 2, "failed": 0}):
             summary = detect_active_work(mock_agent)
 
         assert summary.gateway_alive is True
@@ -185,9 +185,9 @@ class TestDetectActiveWork:
             hot_list=[], recent=[], summary={}
         )
 
-        with patch('agent_py_agent.agent.gateway.gateway_paths', return_value=mock_paths), \
-             patch('agent_py_agent.agent.gateway.gateway_running', return_value=(12345, True)), \
-             patch('agent_py_agent.agent.gateway.gateway_request_counts', return_value={"pending": 0, "processing": 3, "done": 0, "failed": 0}):
+        with patch('agent_py_agent.agent.gateway_parts.gateway_paths', return_value=mock_paths), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_running', return_value=(12345, True)), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_request_counts', return_value={"pending": 0, "processing": 3, "done": 0, "failed": 0}):
             summary = detect_active_work(mock_agent)
 
         assert summary.gateway_alive is True
@@ -206,9 +206,9 @@ class TestDetectActiveWork:
 
         mock_agent.subagents.build_board.return_value = sample_board
 
-        with patch('agent_py_agent.agent.gateway.gateway_paths', return_value=mock_paths), \
-             patch('agent_py_agent.agent.gateway.gateway_running', return_value=(12345, True)), \
-             patch('agent_py_agent.agent.gateway.gateway_request_counts', return_value={"pending": 0, "processing": 1, "done": 0, "failed": 0}):
+        with patch('agent_py_agent.agent.gateway_parts.gateway_paths', return_value=mock_paths), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_running', return_value=(12345, True)), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_request_counts', return_value={"pending": 0, "processing": 1, "done": 0, "failed": 0}):
             summary = detect_active_work(mock_agent)
 
         assert summary.gateway_alive is True
@@ -461,9 +461,9 @@ class TestIntegrationScenarios:
 
         mock_agent.subagents.build_board.return_value = sample_board
 
-        with patch('agent_py_agent.agent.gateway.gateway_paths', return_value=mock_paths), \
-             patch('agent_py_agent.agent.gateway.gateway_running', return_value=(12345, True)), \
-             patch('agent_py_agent.agent.gateway.gateway_request_counts', return_value={"pending": 0, "processing": 1, "done": 0, "failed": 0}):
+        with patch('agent_py_agent.agent.gateway_parts.gateway_paths', return_value=mock_paths), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_running', return_value=(12345, True)), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_request_counts', return_value={"pending": 0, "processing": 1, "done": 0, "failed": 0}):
 
             # 1. 检测
             summary = detect_active_work(mock_agent)
@@ -490,9 +490,9 @@ class TestIntegrationScenarios:
             hot_list=[], recent=[], summary={}
         )
 
-        with patch('agent_py_agent.agent.gateway.gateway_paths', return_value=mock_paths), \
-             patch('agent_py_agent.agent.gateway.gateway_running', return_value=(0, False)), \
-             patch('agent_py_agent.agent.gateway.gateway_request_counts', return_value={"pending": 0, "processing": 0, "done": 0, "failed": 0}):
+        with patch('agent_py_agent.agent.gateway_parts.gateway_paths', return_value=mock_paths), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_running', return_value=(0, False)), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_request_counts', return_value={"pending": 0, "processing": 0, "done": 0, "failed": 0}):
 
             summary = detect_active_work(mock_agent)
 
@@ -508,9 +508,9 @@ class TestIntegrationScenarios:
         mock_paths.pid.write_text("12345")
         mock_paths.state.write_text('{"status": "running"}')
 
-        with patch('agent_py_agent.agent.gateway.gateway_paths', return_value=mock_paths), \
-             patch('agent_py_agent.agent.gateway.gateway_running', return_value=(12345, True)), \
-             patch('agent_py_agent.agent.gateway.gateway_request_counts', return_value={"pending": 0, "processing": 0, "done": 0, "failed": 0}):
+        with patch('agent_py_agent.agent.gateway_parts.gateway_paths', return_value=mock_paths), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_running', return_value=(12345, True)), \
+             patch('agent_py_agent.agent.gateway_parts.gateway_request_counts', return_value={"pending": 0, "processing": 0, "done": 0, "failed": 0}):
 
             # 应该优雅处理 None
             summary = detect_active_work(mock_agent)

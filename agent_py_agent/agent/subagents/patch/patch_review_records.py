@@ -83,7 +83,7 @@ def apply_review_status(update: PatchReviewStatusUpdate) -> None:
 
 
 def append_patch_review_log(manager, record: PatchReviewRecord) -> None:
-    from ...file_io import append_jsonl
+    from ...io import append_jsonl
 
     jsonl = manager.workspace / "subagent_patch_review_log.jsonl"
     append_jsonl(jsonl, serialize_patch_review_record(record))

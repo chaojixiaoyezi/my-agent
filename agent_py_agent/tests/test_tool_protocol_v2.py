@@ -100,7 +100,7 @@ def test_artifact_refs_are_structured_and_not_inferred_from_natural_language():
             path="reports/summary.html",
             kind="html",
             hash="sha256:abc",
-            reserved={"size_bytes": 42},
+            size_bytes=42,
         )
     ]
     assert no_refs.artifact_refs == []

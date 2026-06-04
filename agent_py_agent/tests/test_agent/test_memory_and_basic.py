@@ -8,8 +8,8 @@ run, memory persistence, and subagent workspace file layout.
 import tempfile
 from pathlib import Path
 
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def test_memory_and_run():

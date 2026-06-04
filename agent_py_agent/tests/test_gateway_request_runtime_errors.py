@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.io import gateway_response_path, read_json_file
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
@@ -17,6 +16,7 @@ from agent_py_agent.agent.gateway_parts.request_worker import (
     _finish_claimed_gateway_request,
     _process_gateway_requests,
 )
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def _make_agent(tmp_path: Path) -> tuple[SimpleAgent, object]:

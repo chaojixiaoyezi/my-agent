@@ -16,7 +16,7 @@ class TestCreateSubagentsToolWorkspaceDefaults:
     """测试任务工作区默认写入根和保守调度提示。"""
 
     def test_create_next_action_auto_starts_by_default(self):
-        """创建多个任务后默认直接开跑，下一步只建议看状态。"""
+        """创建多个任务后默认直接开跑，下一步只建议登记非阻塞等待。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -145,6 +145,88 @@ class TestCreateSubagentsToolWorkspaceDefaults:
 
         assert result.ok is True
         assert mock_agent.subagents.create_run.call_count == 2
+
+
+class TestCreateSubagentsToolTaskWorkspaceGuards:
+    """测试当前 task workspace 下的追加派工和协作输出边界。"""
+
+    def test_allows_second_batch_while_task_workspace_children_active(self, tmp_path):
+        from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
+        task_root = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-01" / "all-agent-架构分析"
+        agent._current_run_task_workspace = str(task_root)
+        active = agent.subagents.create_run(
+            params=create_run_params(agent, {"role": "worker"}, "existing child", ["read_file"])
+        )
+        active.status = "RUNNING"
+        agent.subagents.save(active)
+
+        result = CreateSubagentsTool(agent).execute({"items": [{"goal": "补读另一批项目源码", "role": "worker"}]})
+
+        assert result.ok is True
+        payload = json.loads(result.output)
+        assert payload["created"] == 1
+        assert payload["ids"][0] != active.id
+
+    def test_allows_child_staged_output_files_in_task_output(self, tmp_path):
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
+        task_root = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-01" / "all-agent-架构分析"
+        agent._current_run_task_workspace = str(task_root)
+
+        result = CreateSubagentsTool(agent).execute(
+            {
+                "items": [
+                    {
+                        "goal": "阅读项目并写内部草稿",
+                        "role": "worker",
+                        "output_files": [str(task_root / "output" / "agent-group-1-analysis.md")],
+                    }
+                ]
+            }
+        )
+
+        assert result.ok is True
+        created = agent.subagents.list_runs()[-1]
+        assert str(task_root / "output" / "agent-group-1-analysis.md") in created.attributes["output_refs"]
+
+    def test_create_subagents_attaches_current_main_run_lineage(self, tmp_path):
+        from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
+        agent._current_run_params = SimpleNamespace(run_id="run-main", task_id="task-main")
+
+        params = create_run_params(agent, {"role": "worker"}, "分析子项目", ["read_file"])
+
+        assert params.parent_id == "run-main"
+        assert params.root_id == "run-main"
+        assert params.depth == 1
+
+    def test_explicit_create_subagents_lineage_wins(self, tmp_path):
+        from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
+        agent._current_run_params = SimpleNamespace(run_id="run-main", task_id="task-main")
+
+        params = create_run_params(
+            agent,
+            {"role": "worker", "parent_id": "subagent-parent", "root_id": "subagent-root", "depth": 3},
+            "分析孙项目",
+            ["read_file"],
+        )
+
+        assert params.parent_id == "subagent-parent"
+        assert params.root_id == "subagent-root"
+        assert params.depth == 3
 
 
 class TestCreateSubagentsToolWorkspaceRefs:

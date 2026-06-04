@@ -337,8 +337,8 @@ def test_repair_goal_without_contract_keeps_different_targets_separate(tmp_path)
 
 def test_schedule_child_repair_contract_fields_are_persisted_to_child_context(tmp_path):
     from agent_py_agent.agent.agent_core.hierarchy_tools import ScheduleChildSubagentsTool
-    from agent_py_agent.agent.config import AgentConfig
     from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
@@ -358,8 +358,8 @@ def test_schedule_child_repair_contract_fields_are_persisted_to_child_context(tm
 
 def test_schedule_child_repair_contract_reuses_same_scope_with_reworded_goal(tmp_path):
     from agent_py_agent.agent.agent_core.hierarchy_tools import ScheduleChildSubagentsTool
-    from agent_py_agent.agent.config import AgentConfig
     from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
@@ -382,8 +382,8 @@ def test_schedule_child_repair_contract_reuses_same_scope_with_reworded_goal(tmp
 def test_schedule_child_without_idempotency_contract_does_not_reuse_by_goal_text(tmp_path):
     """LLM: schedule_child_subagents cannot use matching goal prose as a reuse key."""
     from agent_py_agent.agent.agent_core.hierarchy_tools import ScheduleChildSubagentsTool
-    from agent_py_agent.agent.config import AgentConfig
     from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])

@@ -44,7 +44,6 @@ def _schema_policy() -> dict[str, Any]:
         "required_reader_policy": "missing_required_field_sets_self_check_false_but_reader_must_degrade",
         "optional_reader_policy": "missing_optional_field_defaults_to_empty",
         "future_fields": "additive_only_until_v2",
-        "reserved": {},
     }
 
 
@@ -57,7 +56,6 @@ def _owner_model(request: Any, home_paths: Any | None) -> dict[str, Any]:
         "parent_run_id": _text(getattr(request, "parent_run_id", "")),
         "task_workspace_refs": _task_workspace_refs(home_paths),
         "memory_scope": "main_agent_home",
-        "reserved": {},
     }
 
 
@@ -76,7 +74,6 @@ def _run_scope(request: Any) -> dict[str, Any]:
         "locked_files": [str(item) for item in locked],
         "path_style": "windows" if os.name == "nt" else "posix",
         "permission_mode": "workspace_scoped",
-        "reserved": {},
     }
 
 
@@ -93,20 +90,18 @@ def _tool_manifest(request: Any) -> dict[str, Any]:
         for item in _sequence(getattr(request, "tool_spec_errors", ()))
         if isinstance(item, dict)
     ]
-    payload["reserved"] = {}
     return payload
 
 
 def _artifact_refs(request: Any) -> dict[str, Any]:
     items = [
-        {"ref": ref, "kind": "artifact_ref", "source": "context_bundle_request", "reserved": {}}
+        {"ref": ref, "kind": "artifact_ref", "source": "context_bundle_request"}
         for ref in _context_texts(getattr(request, "artifact_refs", ()))
     ]
     return {
         "items": items,
         "collection_phase": "pre_tool_loop",
         "body_policy": "refs_only_read_explicitly",
-        "reserved": {},
     }
 
 
@@ -120,7 +115,6 @@ def _acceptance_contract(request: Any) -> dict[str, Any]:
         "items": items,
         "constraints": constraints,
         "latest_tests": latest_tests,
-        "reserved": {},
     }
 
 
@@ -133,7 +127,6 @@ def _self_check(bundle: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": all(item["ok"] for item in checks if item["severity"] == "hard"),
         "checks": checks,
-        "reserved": {},
     }
 
 
@@ -172,7 +165,6 @@ def _prompt_budget(chars: int) -> dict[str, Any]:
         "max_prompt_section_chars": MAIN_CONTEXT_BUNDLE_PROMPT_MAX_CHARS,
         "prompt_section_chars": int(chars),
         "full_json_policy": "persist_to_file_not_prompt",
-        "reserved": {},
     }
 
 

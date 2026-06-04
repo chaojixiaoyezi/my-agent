@@ -87,7 +87,7 @@
 
 已有：`CapabilityRequest`/`CapabilityGrant`/`CapabilityGap`、单个子代理 runner 入口、capability request 路由、grant 后 wake signal 和同 run follow-up。
 
-待做：跨多层级的批量上抛汇总；tool fallback group 和 failure mode 参与排序。
+待做：跨多层级的批量上抛汇总；tool failure mode 和显式 alternative group 参与排序。
 
 ### 本地恢复、诊断、worker 和 adapter 第一版
 
@@ -137,7 +137,7 @@
 
 已落地：标准工单目录模板、`ACTION_RECEIPTS.md`/`TEST_CHECKLIST.md`/`BUGS.md`/`SKILL_USAGE.md`/`HANDOFF.md`。
 
-未落地：顶层任务现场模板、SPEC→TEST_CHECKLIST 追踪链、Tool fallback log、Browser/PWA/Game 自动验收器、数据规模断言器、安全任务隔离策略。
+未落地：顶层任务现场模板、SPEC→TEST_CHECKLIST 追踪链、Tool failure log、Browser/PWA/Game 自动验收器、数据规模断言器、安全任务隔离策略。
 
 ---
 

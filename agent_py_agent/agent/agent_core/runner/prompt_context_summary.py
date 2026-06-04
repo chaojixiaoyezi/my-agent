@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ...model_visible_refs import current_model_ref, current_model_text
-from ...subagent import SubAgentExecutionContext
+from ...subagents import SubAgentExecutionContext
 
 
 def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[str, object]:
@@ -57,10 +57,10 @@ def _read_refs_prompt_payload(context: SubAgentExecutionContext) -> dict[str, ob
     resolved, unresolved = _resolve_read_paths(refs, _read_roots(context))
     hint_resolved, _ = _resolve_read_paths(hints, _read_roots(context))
     return {
-        "required_read_paths": refs[:12],
+        "declared_read_path_count": len(refs),
         "resolved_read_paths": resolved[:12],
-        "unresolved_read_paths": unresolved[:12],
-        "hint_read_paths": hints[:12],
+        "unresolved_read_path_count": len(unresolved),
+        "hint_read_path_count": len(hints),
         "resolved_hint_read_paths": hint_resolved[:12],
         "read_policy": "这些路径是可读线索/授权范围，不是启动前置条件；缺失时记录限制并继续按任务判断。",
     }
@@ -84,10 +84,9 @@ def _runner_identity_payload(context: SubAgentExecutionContext) -> dict[str, obj
 
 
 def _conversation_prompt_payload(bundle: dict[str, object]) -> dict[str, object]:
-    reserved = bundle.get("reserved") if isinstance(bundle, dict) else {}
-    if not isinstance(reserved, dict):
+    if not isinstance(bundle, dict):
         return {}
-    conversation = reserved.get("conversation")
+    conversation = bundle.get("conversation")
     return dict(conversation) if isinstance(conversation, dict) else {}
 
 

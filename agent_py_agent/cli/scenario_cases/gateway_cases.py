@@ -13,8 +13,8 @@ import os
 import time
 from dataclasses import dataclass
 
-from ...agent.backend import ModelResponse
-from ...agent.gateway import (
+from ...agent.backends import ModelResponse
+from ...agent.gateway_parts import (
     _process_gateway_requests,
     gateway_paths,
     gateway_response_path,

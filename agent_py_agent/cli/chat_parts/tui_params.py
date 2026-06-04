@@ -52,6 +52,7 @@ class WorkerConfigParams:
     app_ref: list
     last_token_estimate_ref: list
     stop_event: threading.Event
+    current_session_id: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -77,6 +78,7 @@ class StartWorkerParams:
     stream_visible_text_ref: list
     last_token_estimate_ref: list
     stop_event: threading.Event
+    current_session_id: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -99,6 +101,7 @@ class MakeTuiAppParams:
     shutting_down_ref: list
     running_prompt_ref: list
     stop_event: threading.Event
+    current_session_id: str = ""
 
 
 @dataclasses.dataclass(frozen=True)

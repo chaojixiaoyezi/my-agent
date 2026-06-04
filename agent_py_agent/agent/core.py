@@ -1,13 +1,8 @@
 
 from __future__ import annotations
 
-"""composition root for SimpleAgent after splitting runtime, subagents, dispatch, and tools.
+"""composition root for SimpleAgent runtime, tools, memory, gateway, and subagents."""
 
-以前这个文件把主循环、子代理 runner、父代理 dispatch、工具定义、prompt 模板都堆在一起。
-现在真实逻辑按职责拆到 `agent_core/`，这里只负责组装 SimpleAgent，并保留旧公开导入路径。
-"""
-
-import logging
 from pathlib import Path
 
 from .agent_core import (
@@ -24,6 +19,7 @@ from .agent_core import (
     SimpleAgentRuntimeMixin,
     SimpleAgentSubagentMixin,
     TaskProgressTool,
+    WaitTool,
 )
 from .agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 from .agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS, READ_ONLY_SUBAGENT_TOOLS
@@ -35,12 +31,20 @@ from .agent_core.parameters import (
     _positive_int,
     _sleep_with_stop,
 )
-from .agent_core.planner import (
+from .agent_core.planner_service import (
     PARENT_PLANNER_READ_TOOLS,
-    _build_parent_planner_prompt,
-    _build_parent_planner_state,
-    _combine_runner_instruction,
-    _task_state_for_planner,
+)
+from .agent_core.planner_service import (
+    build_parent_planner_prompt as _build_parent_planner_prompt,
+)
+from .agent_core.planner_service import (
+    build_parent_planner_state as _build_parent_planner_state,
+)
+from .agent_core.planner_service import (
+    combine_runner_instruction as _combine_runner_instruction,
+)
+from .agent_core.planner_service import (
+    task_state_for_planner as _task_state_for_planner,
 )
 from .agent_core.runner.dispatch import (
     RETRYABLE_RUNNER_FAILURE_TYPES,
@@ -64,7 +68,7 @@ from .agent_core.runner.prompts import (
     _build_subagent_runner_repair_prompt,
 )
 from .agent_core.runtime.owner_roots import runtime_owner_root
-from .backend import get_backend
+from .backends import get_backend
 from .capability.runtime_config import default_capability_config_path
 from .collaboration import (
     CollaborationStore,
@@ -73,13 +77,13 @@ from .collaboration import (
     SubmitCollaborationResultTool,
     UpdateCollaborationTool,
 )
-from .config import AgentConfig
 from .conversation import ConversationStore
-from .local_store import LocalStore
-from .memory import JsonlMemory
-from .prompting import PromptBuilder
+from .local_storage import LocalStore
+from .memory_store import JsonlMemory
+from .prompting_parts import PromptBuilder
+from .settings import AgentConfig
 from .settings.runtime_guard_config import runtime_guard_policy
-from .subagent import SubAgentManager
+from .subagents.manager import SubAgentManager
 from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .tooling.registry_payload_normalize import tool_payload_limits_from_config
 from .user_space.home_indexes import register_owner_ref
@@ -94,8 +98,6 @@ from .user_space.runtime_paths import (
     apply_runtime_paths_to_config,
     resolve_runtime_paths_for_agent,
 )
-
-logger = logging.getLogger(__name__)
 
 
 def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -> list[Path]:
@@ -112,7 +114,7 @@ class SimpleAgent(
     SimpleAgentSubagentMixin,
     SimpleAgentDispatchMixin,
 ):
-    """wires config, memory, prompts, backend, tools, and subagent manager into one agent facade.
+    """wires config, memory, prompts, backend, tools, and subagent manager into one agent runtime.
 
     这是用户和 CLI 看到的主代理对象。
     它自己只做依赖组装；具体怎么聊天、怎么跑子代理、怎么 dispatch，已经分别交给 mixin 文件。
@@ -136,9 +138,6 @@ class SimpleAgent(
         self.home_paths = _resolve_home_paths(config)
         self.owner_policy = resolve_effective_owner_policy(self.home_paths)
         self.runtime_path_resolution = resolve_runtime_paths_for_agent(config, self.root, self.home_paths)
-        self.using_legacy_paths = self.runtime_path_resolution.using_legacy_paths
-        if self.using_legacy_paths:
-            logger.warning("using legacy runtime paths: reason=%s root=%s", self.runtime_path_resolution.reason, self.root)
         paths = self.runtime_path_resolution.paths
         apply_runtime_paths_to_config(config, self.runtime_path_resolution)
         self.local_store = LocalStore(
@@ -148,7 +147,7 @@ class SimpleAgent(
             enable_fts=config.local_store_fts_enabled,
         )
         self.memory = JsonlMemory(
-            _owner_memory_jsonl_path(self.home_paths, fallback=paths["memory_path"]),
+            paths["memory_path"],
             local_store=self.local_store,
             daily_mirror_dir=_daily_memory_dir(config, self.home_paths),
         )
@@ -163,12 +162,7 @@ class SimpleAgent(
 
 def _resolve_home_paths(config: AgentConfig):
     root = getattr(config, "my_agent_home", None)
-    if bool(getattr(config, "home_runtime_bootstrap_enabled", True)):
-        paths = ensure_my_agent_home(root)
-        owner = ensure_owner_home(paths.root, owner_identity_from_config(config))
-        _register_owner_ref_if_possible(paths, owner)
-        return home_paths_with_owner(paths, owner)
-    paths = home_paths(root)
+    paths = ensure_my_agent_home(root)
     owner = ensure_owner_home(paths.root, owner_identity_from_config(config))
     _register_owner_ref_if_possible(paths, owner)
     return home_paths_with_owner(paths, owner)
@@ -186,13 +180,6 @@ def _daily_memory_dir(config: AgentConfig, paths):
         return None
     owner_daily = getattr(paths, "owner_memory_daily_dir", None)
     return (owner_daily,) if owner_daily else None
-
-
-def _owner_memory_jsonl_path(paths, *, fallback: Path) -> Path:
-    owner_long_term = getattr(paths, "owner_memory_long_term_dir", None)
-    if owner_long_term:
-        return Path(owner_long_term) / "memory.jsonl"
-    return Path(fallback)
 
 
 def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
@@ -256,17 +243,20 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
 
 
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
-    agent.tools.register(CreateSubagentsTool(agent))
     agent.tools.register(CapabilityRequestTool(agent))
-    agent.tools.register(CancelSubagentsTool(agent))
-    agent.tools.register(InspectAgentTreeTool(agent))
     agent.tools.register(RaiseEventTool(agent))
     agent.tools.register(TaskProgressTool(agent))
-    agent.tools.register(SendGuidanceTool(agent))
     agent.tools.register(RaiseCollaborationTool(agent))
     agent.tools.register(InspectCollaborationTool(agent))
     agent.tools.register(SubmitCollaborationResultTool(agent))
     agent.tools.register(UpdateCollaborationTool(agent))
+    if not agent.config.enable_subagents:
+        return
+    agent.tools.register(CreateSubagentsTool(agent))
+    agent.tools.register(CancelSubagentsTool(agent))
+    agent.tools.register(InspectAgentTreeTool(agent))
+    agent.tools.register(WaitTool(agent))
+    agent.tools.register(SendGuidanceTool(agent))
     agent.tools.register(DispatchSubagentsTool(agent))
     agent.tools.register(ScheduleChildSubagentsTool(agent))
 
@@ -291,4 +281,5 @@ __all__ = [
     "TaskProgressTool",
     "SubmitCollaborationResultTool",
     "UpdateCollaborationTool",
+    "WaitTool",
 ]

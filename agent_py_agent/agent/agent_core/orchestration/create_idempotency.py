@@ -115,7 +115,7 @@ def _same_repair_scope(task: Any, params: CreateRunParams, repair_identity: tupl
         return False
     if _requested_root_id(params) and _text(getattr(task, "root_id", "")) != _requested_root_id(params):
         return False
-    if not _compatible_role(getattr(task, "role", ""), params.role):
+    if not _matching_role(getattr(task, "role", ""), params.role):
         return False
     if _external_write_roots(task) != _params_extra_write_roots(params):
         return False
@@ -129,7 +129,7 @@ def _same_idempotency_scope(task: Any, params: CreateRunParams, idempotency_iden
         return False
     if _requested_root_id(params) and _text(getattr(task, "root_id", "")) != _requested_root_id(params):
         return False
-    if not _compatible_role(getattr(task, "role", ""), params.role):
+    if not _matching_role(getattr(task, "role", ""), params.role):
         return False
     if _normalized_name(getattr(task, "agent_name", "")) != _normalized_name(params.agent_name):
         return False
@@ -145,7 +145,7 @@ def _same_work_scope(task: Any, params: CreateRunParams, work_scope_key: str) ->
         return False
     if _requested_root_id(params) and _text(getattr(task, "root_id", "")) != _requested_root_id(params):
         return False
-    if not _compatible_role(getattr(task, "role", ""), params.role):
+    if not _matching_role(getattr(task, "role", ""), params.role):
         return False
     if _external_write_roots(task) != _params_extra_write_roots(params):
         return False
@@ -162,7 +162,7 @@ def _requested_root_id(params: CreateRunParams) -> str:
     return _text(params.root_id)
 
 
-def _compatible_role(existing: object, requested: object) -> bool:
+def _matching_role(existing: object, requested: object) -> bool:
     existing_text = _text(existing)
     requested_text = _text(requested)
     if not existing_text or not requested_text:

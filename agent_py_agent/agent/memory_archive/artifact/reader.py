@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...model_visible_ref_sanitizer import sanitize_model_visible_tool_output
 from .read_modes import (
     ArtifactContentReadRequest,
     ArtifactContentReadResult,
@@ -83,11 +82,9 @@ def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
     expected = str(payload.get("sha256") or record.get("sha256") or "")
     if expected and digest != expected:
         return _error_payload("artifact_hash_mismatch", artifact_ref, "artifact content hash does not match metadata")
-    tool = str(payload.get("tool") or record.get("tool") or "")
-    model_content = sanitize_model_visible_tool_output(tool, content)
     read_result = read_artifact_content_by_mode(
         ArtifactContentReadRequest(
-            content=model_content,
+            content=content,
             mode=request.mode,
             offset=request.offset,
             max_chars=request.max_chars,
@@ -97,7 +94,6 @@ def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
     if not read_result.ok:
         return _error_payload(read_result.error_code, artifact_ref, read_result.message)
     base = _success_base_payload(read, payload, content, digest)
-    base["content_sanitized"] = model_content != content
     base.update(_success_content_payload(read_result))
     base.update(read_result.metadata or {})
     return base
@@ -154,6 +150,10 @@ def _find_index_record(
     scoped = _scoped_matches(matches, artifact_ref, request)
     if scoped:
         return scoped[-1]
+    if matches and _request_has_scope(request):
+        if resolved_ref is not None and not _request_has_strong_scope(request):
+            return matches[-1]
+        return None
     if matches:
         return matches[-1]
     if resolved_ref is not None:
@@ -186,7 +186,17 @@ def _scoped_matches(
     exact = [record for record in matches if _record_scope_matches_request(record, request)]
     if exact:
         return exact
+    if _request_has_scope(request):
+        return [] if any(_record_has_scope(record) for record in matches) else matches
     return [record for record in matches if _record_has_scope(record)]
+
+
+def _request_has_scope(request: ReadToolOutputArtifactRequest) -> bool:
+    return any(str(getattr(request, key) or "").strip() for key in ("run_id", "task_id", "request_id"))
+
+
+def _request_has_strong_scope(request: ReadToolOutputArtifactRequest) -> bool:
+    return any(str(getattr(request, key) or "").strip() for key in ("task_id", "request_id"))
 
 
 def _record_scope_matches_request(

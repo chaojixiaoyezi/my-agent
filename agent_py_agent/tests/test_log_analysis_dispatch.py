@@ -26,7 +26,7 @@ from agent_py_agent.agent.log_analysis.dispatch import (
 )
 from agent_py_agent.agent.log_analysis.interfaces import DispatchEngine as DispatchEngineProtocol
 from agent_py_agent.agent.log_analysis.models import EvidenceRef
-from agent_py_agent.agent.subagent import SubAgentManager
+from agent_py_agent.agent.subagents.manager import SubAgentManager
 
 
 def _case_fixture() -> dict:

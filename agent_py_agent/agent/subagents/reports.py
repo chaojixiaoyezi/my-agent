@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-"""LLM contract: compatibility exports for subagent report dataclasses."""
+"""Public report dataclass exports for subagent services."""
 
 from .planner_reports import (
     ParentPlannerParsedOutput,

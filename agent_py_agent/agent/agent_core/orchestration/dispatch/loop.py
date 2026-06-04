@@ -6,9 +6,10 @@ from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..capabilities import CapabilityRouter
-    from ..capability_config import CapabilityConfig
-    from ..subagent import SubAgent
+    from agent_py_agent.agent.capability import CapabilityRouter
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+
+    from ..subagents import SubAgent
 
 from ....runtime_errors import runtime_error_report
 from .no_progress import DispatchNoProgressTracker

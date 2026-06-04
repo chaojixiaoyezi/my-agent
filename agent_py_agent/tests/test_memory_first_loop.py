@@ -16,8 +16,6 @@ import pytest
 import agent_py_agent.agent.agent_core.runtime.loop_support as runtime_loop_support
 import agent_py_agent.agent.agent_core.runtime.services as runtime_services
 import agent_py_agent.agent.agent_core.runtime_mixin as runtime_mixin
-from agent_py_agent.__main__ import build_parser
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive import (
     CompressionSnapshot,
@@ -25,7 +23,9 @@ from agent_py_agent.agent.memory_archive import (
     append_raw_event,
     write_compression_snapshot,
 )
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityGapParams
+from agent_py_agent.cli.parser import build_parser
 
 
 def _read_jsonl(path: Path) -> list[dict]:

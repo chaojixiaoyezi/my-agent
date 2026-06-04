@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from agent_py_agent.agent.capabilities import CapabilityRouter
-from agent_py_agent.agent.capability_config import CapabilityConfig, load_capability_config
-from agent_py_agent.agent.skills import SkillRegistry, parse_skill_file
-from agent_py_agent.agent.tools import ToolRegistry, ToolRegistryParams
+from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability.config import CapabilityConfig, load_capability_config
+from agent_py_agent.agent.capability.skills import SkillRegistry, parse_skill_file
+from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 
 
 def test_skill_card_parsing():

@@ -17,7 +17,7 @@ import pytest
 
 from agent_py_agent.agent.agent_core.orchestration.dispatch.mixin import SimpleAgentDispatchMixin
 from agent_py_agent.agent.agent_core.services.notification_service import notify_completed_tasks
-from agent_py_agent.agent.subagent import DispatchReport
+from agent_py_agent.agent.subagents import DispatchReport
 from agent_py_agent.agent.subagents.models import SubAgentRunnerResult, SubAgentTask
 
 

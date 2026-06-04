@@ -42,7 +42,7 @@ Forbidden: source code, `.git/`, config files (`.env`, `settings.json`), agent i
 - PatchApply service, tool registry, gateway renderer, and memory repository all validate through WriteBoundary.
 - Tests must use `tempfile.mkdtemp()` or explicit sandboxes.
 - `.gitignore` blocks memory archives, runtime data, caches, and generated reports.
-- Migration cost: existing write calls must be updated; some legitimate writes may initially need boundary configuration.
+- Adoption cost: write calls must use the boundary API; some legitimate writes may need explicit boundary configuration.
 
 ### References
 

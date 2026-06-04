@@ -33,12 +33,12 @@ class RecoveryDecision:
     action: RecoveryAction | str
     allow_new_run: bool
     reason: str
-    fallback_action: RecoveryAction | str | None = None
+    secondary_action: RecoveryAction | str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "action", recovery_action_value(self.action))
-        if self.fallback_action:
-            object.__setattr__(self, "fallback_action", recovery_action_value(self.fallback_action))
+        if self.secondary_action:
+            object.__setattr__(self, "secondary_action", recovery_action_value(self.secondary_action))
 
 
 def normalize_status(value: object) -> str:
@@ -221,7 +221,7 @@ def run_state_snapshot_from_task(task: object) -> dict[str, object]:
             "action": decision.action,
             "allow_new_run": decision.allow_new_run,
             "reason": decision.reason,
-            "fallback_action": decision.fallback_action or "",
+            "secondary_action": decision.secondary_action or "",
         },
     }
 

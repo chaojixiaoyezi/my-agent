@@ -12,7 +12,7 @@ import json
 import time
 
 from ..agent.backends import ProviderRecoverableError
-from ..agent.gateway import (
+from ..agent.gateway_parts import (
     gateway_paths,
     gateway_request_counts,
     gateway_running,

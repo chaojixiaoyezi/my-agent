@@ -22,7 +22,7 @@ class FindingInput:
 @dataclass(frozen=True)
 class LimitFindingInput:
     base: FindingInput
-    hard_limit: int
+    hard_limit: int | None
 
 
 def near_soft_floor(soft_limit: int) -> int:
@@ -46,6 +46,6 @@ def near_soft_finding(data: FindingInput) -> Finding:
 
 
 def limit_finding(data: LimitFindingInput) -> Finding:
-    severity = "hard" if data.base.value > data.hard_limit else "soft"
+    severity = "hard" if data.hard_limit is not None and data.base.value > data.hard_limit else "soft"
     limit = data.hard_limit if severity == "hard" else data.base.limit
     return Finding(data.base.kind, data.base.rel, data.base.name, data.base.value, limit, severity, data.base.message)

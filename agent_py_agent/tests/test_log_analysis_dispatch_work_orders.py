@@ -7,7 +7,7 @@ from agent_py_agent.agent.log_analysis.dispatch import (
     create_subagent_tasks_from_work_order_plan,
     plan_case_subagent_work_orders,
 )
-from agent_py_agent.agent.subagent import SubAgentManager
+from agent_py_agent.agent.subagents.manager import SubAgentManager
 
 
 def _case_fixture() -> dict:

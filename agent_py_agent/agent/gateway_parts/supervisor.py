@@ -101,8 +101,8 @@ class GatewaySupervisor:
             return
 
         # Import lazily to avoid circular dependencies
-        from ..config import load_config
         from ..core import SimpleAgent
+        from ..settings import load_config
 
         config = load_config(self.config_path)
         roots = _workspace_roots(config.workspace_root, Path(self.config_path).resolve().parent)
@@ -159,7 +159,7 @@ class GatewaySupervisor:
         if self._heartbeat_is_fresh(heartbeat):
             return True
 
-        # Fallback: check PID file directly
+        # Secondary health source: check PID file directly.
         pid_report = get_running_pid_report(self._paths.pid)
         if pid_report.load_error is not None:
             self._record_health_load_error(pid_report.load_error)
@@ -266,8 +266,8 @@ def run_supervisor(
 
 
 def is_supervisor_running(config_path: str) -> bool:
-    from ..config import load_config
     from ..core import SimpleAgent
+    from ..settings import load_config
 
     config = load_config(config_path)
     roots = _workspace_roots(config.workspace_root, Path(config_path).resolve().parent)
@@ -286,8 +286,8 @@ def is_supervisor_running(config_path: str) -> bool:
 
 
 def stop_supervisor(config_path: str, timeout: float = 10.0) -> bool:
-    from ..config import load_config
     from ..core import SimpleAgent
+    from ..settings import load_config
 
     config = load_config(config_path)
     roots = _workspace_roots(config.workspace_root, Path(config_path).resolve().parent)

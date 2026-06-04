@@ -41,7 +41,7 @@ class LabReporter:
     def log_model_preflight(self) -> None:
         """logs backend/key presence without exposing secrets."""
         sys.path.insert(0, str(REPO_ROOT))
-        from agent_py_agent.agent.config import load_config
+        from agent_py_agent.agent.settings import load_config
 
         config = load_config(self._session.config_path)
         self.log("## Config Preflight")

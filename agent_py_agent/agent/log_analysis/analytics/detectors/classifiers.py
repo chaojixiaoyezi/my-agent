@@ -3,7 +3,7 @@
 
 This module provides:
   - Event classification predicates (is_waf_event, is_auth_event, etc.)
-  - Entity comparison functions are re-exported from classifier_entities.py.
+  - Entity comparison helpers from classifier_entities.py.
   - Weak-signal detection helpers
   - Entity extraction and normalization utilities
 """

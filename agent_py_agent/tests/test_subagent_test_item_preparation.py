@@ -379,7 +379,7 @@ def test_static_required_files_from_texts_reads_structured_file_contract():
     files = static_required_files_from_texts([
         "required_files: index.html, items.html, item-detail.html, flow-a.html, flow-b.html",
         "required_files: style.css, app.js",
-        "forbidden_files: product.html, old-product.html, legacy.html",
+        "forbidden_files: product.html, old-product.html, stale.html",
     ])
 
     assert files == [
@@ -396,7 +396,7 @@ def test_static_required_files_from_texts_reads_structured_file_contract():
 def test_static_required_files_from_texts_ignores_natural_language():
     files = static_required_files_from_texts([
         "必须生成 index.html, items.html，还要有 style.css 和 app.js。",
-        "不要创建 legacy.html。",
+        "不要创建 stale.html。",
     ])
 
     assert files == []

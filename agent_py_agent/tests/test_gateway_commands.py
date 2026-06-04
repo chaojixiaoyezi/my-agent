@@ -194,6 +194,39 @@ class TestCmdGatewayStatus:
 
         assert "state_load_error=" in capsys.readouterr().out
 
+    def test_gateway_status_counts_only_request_json_files(self, tmp_path: Path, capsys):
+        from agent_py_agent.cli.gateway_process import cmd_gateway_status
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        state_path = tmp_path / "gateway_state.json"
+        state_path.write_text('{"status": "running"}', encoding="utf-8")
+        inbox = tmp_path / "requests" / "pending"
+        processing = tmp_path / "requests" / "processing"
+        inbox.mkdir(parents=True)
+        processing.mkdir(parents=True)
+        (inbox / "gw-1.json").write_text("{}", encoding="utf-8")
+        (inbox / "gw-1.chunks.jsonl").write_text("{}", encoding="utf-8")
+        (processing / "gw-2.json").write_text("{}", encoding="utf-8")
+        (processing / "gw-2.json.lock").write_text("", encoding="utf-8")
+
+        mock_agent = MagicMock()
+        mock_agent.config = MagicMock()
+        type(mock_agent.config).gateway_port = PropertyMock(return_value=0)
+        mock_paths = MagicMock(root=tmp_path, pid=tmp_path / "gateway.pid", state=state_path)
+        mock_paths.inbox = inbox
+        mock_paths.processing = processing
+
+        with patch("agent_py_agent.cli._gateway_commands.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli._gateway_commands.gateway_paths", return_value=mock_paths), \
+             patch("agent_py_agent.cli._gateway_commands.read_pid_record", return_value={"pid": 123}), \
+             patch("agent_py_agent.cli._gateway_commands.is_pid_alive", return_value=True), \
+             patch("agent_py_agent.cli._gateway_commands.read_runtime_status", return_value={}):
+            assert cmd_gateway_status(args) == 0
+
+        out = capsys.readouterr().out
+        assert "inbox=1 processing=1" in out
+
 
 class TestCmdGatewayRestart:
     """测试 cmd_gateway_restart 命令。"""

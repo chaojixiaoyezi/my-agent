@@ -261,13 +261,13 @@ class TestMemoryConfigWarning:
         warning = MemoryConfigWarning(
             field_name="memory_archive_level",
             raw_value=-1,
-            fallback_value=3,
+            default_value=3,
             reason="expected integer 0-3",
         )
         d = warning.to_dict()
         assert d["field_name"] == "memory_archive_level"
         assert d["raw_value"] == -1
-        assert d["fallback_value"] == 3
+        assert d["default_value"] == 3
         assert d["reason"] == "expected integer 0-3"
 
     def test_memory_config_warning_fields(self):
@@ -275,12 +275,12 @@ class TestMemoryConfigWarning:
         warning = MemoryConfigWarning(
             field_name="test_field",
             raw_value="bad",
-            fallback_value="good",
+            default_value="good",
             reason="test reason",
         )
         assert warning.field_name == "test_field"
         assert warning.raw_value == "bad"
-        assert warning.fallback_value == "good"
+        assert warning.default_value == "good"
         assert warning.reason == "test reason"
 
 

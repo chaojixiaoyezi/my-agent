@@ -37,7 +37,7 @@ class PatchApplyRecordFiles:
     def append_log(record, manager) -> None:
         """Append patch apply record to global audit log."""
 
-        from agent_py_agent.agent.file_io import append_jsonl
+        from agent_py_agent.agent.io import append_jsonl
         from agent_py_agent.agent.subagents.patch.patch_apply_reports import (
             patch_apply_record_to_dict,
         )

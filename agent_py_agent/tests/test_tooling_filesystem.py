@@ -320,7 +320,7 @@ class TestReadFileTool:
         result = tool.execute({"path": "test.txt"})
 
         assert result.ok is True
-        assert "已截断" in result.output
+        assert "PARTIAL view only" in result.output
 
     def test_read_file_empty(self, tmp_path: Path):
         """读取空文件。"""

@@ -22,13 +22,17 @@ def test_metric_window_contract_rejects_inconsistent_claim_windows():
                 "c1",
                 "star_delta",
                 10,
-                reserved={"metric_kind": "period_delta", "window_start": "2026-01-01", "window_end": "2026-01-07"},
+                metric_kind="period_delta",
+                window_start="2026-01-01",
+                window_end="2026-01-07",
             ),
             EvidenceClaim(
                 "c2",
                 "star_delta",
                 11,
-                reserved={"metric_kind": "period_delta", "window_start": "2026-01-08", "window_end": "2026-01-14"},
+                metric_kind="period_delta",
+                window_start="2026-01-08",
+                window_end="2026-01-14",
             ),
         ],
     )
@@ -43,7 +47,8 @@ def test_metric_window_contract_accepts_source_window_when_claim_omits_it():
             EvidenceSourceRef(
                 "src-1",
                 uri="https://example.com/data.json",
-                reserved={"metric_kind": "period_delta", "time_window": {"start": "2026-01-01", "end": "2026-01-07"}},
+                metric_kind="period_delta",
+                time_window={"start": "2026-01-01", "end": "2026-01-07"},
             )
         ],
         [EvidenceClaim("c1", "star_delta", 10, source_ids=["src-1"])],

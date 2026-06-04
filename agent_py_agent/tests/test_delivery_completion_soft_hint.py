@@ -8,9 +8,14 @@ from agent_py_agent.agent.agent_core.delivery_completion_soft_hint import (
 )
 
 
-def _params(*, contract: dict | None = None, task_attributes: dict | None = None) -> ToolLoopExecuteParams:
+def _params(
+    *,
+    contract: dict | None = None,
+    task_attributes: dict | None = None,
+    user_prompt: str = "请完成任务。",
+) -> ToolLoopExecuteParams:
     return ToolLoopExecuteParams(
-        user_prompt="请完成任务。",
+        user_prompt=user_prompt,
         memories=[],
         runtime_injections=[],
         prompt_files=[],
@@ -87,19 +92,38 @@ def test_delivery_completion_hint_ignores_failed_mutating_tool(tmp_path):
     assert params.tool_context == []
 
 
-def test_delivery_completion_hint_ignores_read_only_tool(tmp_path):
+def test_delivery_completion_hint_ignores_read_only_non_target_tool(tmp_path):
     (tmp_path / "output").mkdir()
     (tmp_path / "output" / "report.md").write_text("完成内容", encoding="utf-8")
+    (tmp_path / "notes.md").write_text("过程内容", encoding="utf-8")
     params = _params()
 
     maybe_append_delivery_completion_soft_hint(
         SimpleNamespace(root=str(tmp_path)),
         params,
-        {"tool": "read_file"},
+        {"tool": "read_file", "parameters": {"path": str(tmp_path / "notes.md")}},
         tool_ok=True,
     )
 
     assert params.tool_context == []
+
+
+def test_delivery_completion_hint_after_reading_declared_artifact(tmp_path):
+    report = tmp_path / "output" / "report.md"
+    report.parent.mkdir()
+    report.write_text("完成内容", encoding="utf-8")
+    params = _params()
+
+    maybe_append_delivery_completion_soft_hint(
+        SimpleNamespace(root=str(tmp_path)),
+        params,
+        {"tool": "read_file", "parameters": {"path": str(report)}},
+        tool_ok=True,
+    )
+
+    assert len(params.tool_context) == 1
+    assert "[delivery-completion-soft-hint]" in params.tool_context[0]
+    assert "submit_for_acceptance" in params.tool_context[0]
 
 
 def test_delivery_completion_hint_is_one_shot(tmp_path):
@@ -144,6 +168,63 @@ def test_delivery_completion_hint_for_task_output_report_without_contract(tmp_pa
     assert len(params.tool_context) == 1
     assert "[delivery-completion-soft-hint]" in params.tool_context[0]
     assert str(report) in params.tool_context[0]
+
+
+def test_delivery_completion_hint_for_explicit_user_requested_output_path_without_contract(tmp_path):
+    output_dir = tmp_path / "external-output"
+    report = output_dir / "all-agent-最终验收报告.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("完成内容", encoding="utf-8")
+    params = _params(
+        contract={},
+        user_prompt=f"请把最终报告写到 {report}，写完就提交验收。",
+        task_attributes={
+            "run_workspace": {
+                "output_dir": str(tmp_path / "task" / "output"),
+                "work_dir": str(tmp_path / "task" / "work"),
+                "task_root": str(tmp_path / "task"),
+            }
+        },
+    )
+
+    maybe_append_delivery_completion_soft_hint(
+        SimpleNamespace(root=str(tmp_path)),
+        params,
+        {"tool": "write_file", "path": str(report)},
+        tool_ok=True,
+    )
+
+    assert len(params.tool_context) == 1
+    assert "[delivery-completion-soft-hint]" in params.tool_context[0]
+    assert str(report) in params.tool_context[0]
+
+
+def test_delivery_completion_hint_for_explicit_file_does_not_accept_sibling_report(tmp_path):
+    output_dir = tmp_path / "external-output"
+    requested = output_dir / "requested-final.md"
+    sibling = output_dir / "other-final.md"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_text("完成内容", encoding="utf-8")
+    params = _params(
+        contract={},
+        user_prompt=f"请把最终报告写到 {requested}。",
+        task_attributes={
+            "run_workspace": {
+                "output_dir": str(tmp_path / "task" / "output"),
+                "work_dir": str(tmp_path / "task" / "work"),
+                "task_root": str(tmp_path / "task"),
+            }
+        },
+    )
+
+    maybe_append_delivery_completion_soft_hint(
+        SimpleNamespace(root=str(tmp_path)),
+        params,
+        {"tool": "write_file", "path": str(sibling)},
+        tool_ok=True,
+    )
+
+    assert params.tool_context == []
 
 
 def test_delivery_completion_hint_without_contract_ignores_non_output_scratch_file(tmp_path):

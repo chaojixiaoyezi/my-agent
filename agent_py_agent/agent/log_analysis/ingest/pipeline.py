@@ -1,15 +1,12 @@
 
 from __future__ import annotations
 
-import csv
 import hashlib
-import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ...file_io import append_jsonl
 from ..parsers.base import LogParser, ParserError
 from ..parsers.common import DEFAULT_PAYLOAD_MAX_CHARS, sha256_json, utc_now
 from ..parsers.registry import ParserRegistry, default_registry
@@ -18,7 +15,7 @@ from .dead_letter import DeadLetterWriter
 from .dedup import DedupStore
 
 if TYPE_CHECKING:
-    from .pipeline_stages import EventWriter, ManifestWriter, RecordIteratorFactory
+    from .pipeline_stages import ManifestWriter, RecordIteratorFactory
 
 
 @dataclass(frozen=True)
@@ -68,21 +65,6 @@ class IngestFileOptions:
     file_format: str | None = None
 
 
-class JsonlEventSink:
-    """Fallback event sink used until Worker C's LocalLogStore is available."""
-
-    def __init__(self, root: str | Path):
-        self.root = Path(root)
-        self.events_path = self.root / "events.jsonl"
-
-    def write_events(self, events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-        count = 0
-        for event in events:
-            append_jsonl(self.events_path, dict(event), sort_keys=True)
-            count += 1
-        return {"count": count, "path": str(self.events_path)}
-
-
 class IngestPipeline:
     """Local file ingest pipeline for SecurityAlertV1 CSV/JSONL files."""
 
@@ -106,7 +88,6 @@ class IngestPipeline:
         self.payload_max_chars = ingest_options.payload_max_chars
         self.write_batch_size = max(1, ingest_options.write_batch_size)
         self.registry = ingest_options.registry or default_registry(payload_max_chars=ingest_options.payload_max_chars)
-        self.fallback_sink = JsonlEventSink(self.root)
         self.store = ingest_options.store or self._default_store()
         self.checkpoints = CheckpointStore(self.root)
         self.dedup = DedupStore(self.root / "dedup.sqlite3")
@@ -198,7 +179,7 @@ class IngestPipeline:
         ).iter_records()
 
     def _write_events(self, events: list[dict[str, Any]]) -> dict[str, Any]:
-        """Write events to store or fallback sink (delegated to pipeline_enrich)."""
+        """Write events through the configured store (delegated to pipeline_enrich)."""
         from .pipeline_enrich import write_events as _write_events
 
         return _write_events(self, events)
@@ -295,12 +276,12 @@ def _storage_result(result: Any, *, count: int, store: Any | None = None) -> dic
     return {"count": count, "path": str(store_path).replace("\\", "/") if store_path is not None else None}
 
 
-def _storage_summary(infos: list[dict[str, Any]], *, fallback_path: Path) -> dict[str, Any]:
+def _storage_summary(infos: list[dict[str, Any]], *, default_path: Path | str | None) -> dict[str, Any]:
     count = sum(int(info.get("count") or 0) for info in infos)
     paths = sorted({str(info.get("path")).replace("\\", "/") for info in infos if info.get("path")})
-    if not paths:
-        paths = [str(fallback_path).replace("\\", "/")]
-    summary: dict[str, Any] = {"count": count, "path": paths[0]}
+    if not paths and default_path is not None:
+        paths = [str(default_path).replace("\\", "/")]
+    summary: dict[str, Any] = {"count": count, "path": paths[0] if paths else None}
     if len(paths) > 1:
         summary["paths"] = paths
     return summary

@@ -5,7 +5,7 @@ import json
 import shlex
 from pathlib import Path
 
-from ...backend import ModelResponse
+from ...backends import ModelResponse
 from ..exploration_fuse_config import (
     ExplorationFuseConfig,
     exploration_fuse_config,

@@ -43,7 +43,7 @@ def load_template_store(user_template_dir: str | Path | None = None) -> Workflow
 def load_workflow_templates(
     user_template_dir: str | Path | None = None,
 ) -> tuple[list[WorkflowTemplate], list[WorkflowLoadIssue]]:
-    """Compatibility helper returning sorted templates and issues."""
+    """Return sorted templates and issues."""
 
     store = load_template_store(user_template_dir)
     return store.all(), store.issues

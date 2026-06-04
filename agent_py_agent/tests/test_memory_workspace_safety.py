@@ -38,6 +38,37 @@ def test_subagent_artifact_manifest_blocks_outside_workspace_refs(tmp_path) -> N
     assert "outside artifact body" not in json.dumps(record, ensure_ascii=False)
 
 
+def test_subagent_artifact_manifest_allows_parent_task_output_refs(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / "workspace")
+    task_root = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-03" / "analysis"
+    output_file = task_root / "output" / "child_report.md"
+    output_file.parent.mkdir(parents=True)
+    output_file.write_text("# 子代理阶段报告\n\n已经读取源码。\n", encoding="utf-8")
+
+    task = manager.create_run(
+        goal="允许子代理把协作产物写到父任务 output",
+        thought="父任务 output 是当前任务协作区，不应被 artifact manifest 标成越界。",
+        plan=["写阶段产物", "登记 artifact"],
+        root_id="run-main",
+        parent_id="run-main",
+        depth=1,
+    )
+    task.attributes = {"run_workspace": {"task_root": str(task_root)}}
+    task.task_workspace_dir = str(task_root)
+    task.output_dir = str(task_root / "output")
+    task.artifact_refs = [str(output_file)]
+    manager.save(task)
+
+    loaded = manager.load(task.id)
+    record = _read_jsonl(loaded.task_artifact_manifest_jsonl)[0]
+
+    assert record["ref"] == str(output_file)
+    assert record["resolution_status"] == "resolved"
+    assert record["exists"] is True
+    assert record["size_bytes"] == output_file.stat().st_size
+    assert record["sha256"]
+
+
 def test_subagent_shared_workspace_merges_sibling_facts(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     first = _task_with_shared_fact(manager, "finding-shared-1", "evpkt-shared-1", "第一个 sibling 的发现")

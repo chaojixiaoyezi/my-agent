@@ -80,15 +80,8 @@ def _assert_schema_v2(record: dict[str, object], name: str) -> None:
     assert record["schema"] == {
         "name": name,
         "version": RUNTIME_MEMORY_SCHEMA_VERSION,
-        "reserved_keys": ["extensions", "compat", "future"],
     }
-    assert record["reserved"] == {
-        "schema_name": name,
-        "schema_version": RUNTIME_MEMORY_SCHEMA_VERSION,
-        "extensions": {},
-        "compat": {},
-        "future": {},
-    }
+    assert "reserved" not in record
 
 
 def _read_last_jsonl(path: Path) -> dict[str, object]:
@@ -138,7 +131,7 @@ def _task_fixture(root: Path) -> SimpleNamespace:
         created_at=datetime(2026, 5, 7, 7, 59, tzinfo=timezone.utc).timestamp(),
         latest_summary="control-plane fixture",
         current_step="query refs",
-        task_dir=str(root / "legacy" / "run-control"),
+        task_dir=str(root / "task-space" / "run-control"),
         artifact_refs=["artifact-a"],
         evidence_refs=["evidence-a"],
     )

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..tools import BaseTool, ToolExecutionResult
+from ..tooling.models import BaseTool, ToolExecutionResult
 from .tool_specs import build_submit_collaboration_result_spec
 from .tool_targets import actor_agent_id, collaboration_scope_payload
 from .tool_values import dict_value, dict_values, error, float_value, ok, string_values

@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from ..tools import ToolSpec
+from ..tooling.models import ToolSpec
 
 _CASE_PARAMETERS = {
     "thread_id": "会话线程 ID；不知道时可传 task_id 让系统反查",

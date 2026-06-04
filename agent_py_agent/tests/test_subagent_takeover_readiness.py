@@ -41,11 +41,11 @@ def test_takeover_readiness_packet_collects_refs_without_reading_artifact_body(t
     assert packet["run"]["run_id"] == task.id
     assert packet["run"]["root_id"] == task.root_id
     assert packet["failure_handoff_ref"] == loaded.failure_handoff_json
-    assert packet["context_bundle_refs"]["legacy_context_bundle"] == str(Path(loaded.task_dir) / "context_bundle.json")
+    assert packet["context_bundle_refs"]["task_context_bundle"] == str(Path(loaded.task_dir) / "context_bundle.json")
     assert packet["context_bundle_refs"]["agent_run_context_bundle"] == (
         str(Path(loaded.agent_run_workspace_dir) / "context_bundle.json")
     )
-    assert packet["checkpoint_refs"]["legacy_checkpoint"] == loaded.checkpoint_json
+    assert packet["checkpoint_refs"]["task_checkpoint"] == loaded.checkpoint_json
     assert packet["checkpoint_refs"]["agent_run_checkpoint"] == loaded.agent_run_checkpoint_json
     assert packet["artifact_refs"] == ["reports/blackbox.txt"]
     assert packet["artifact_manifest_ref"] == loaded.agent_run_artifact_manifest_jsonl
@@ -81,7 +81,7 @@ def test_subagent_save_writes_takeover_readiness_packet_files(tmp_path) -> None:
     assert payload["run"]["run_id"] == task.id
     assert payload["failure_handoff_ref"] == loaded.failure_handoff_json
     assert payload["context_bundle_refs"]["agent_run_context_bundle"] in payload["recommended_read_order"]
-    assert payload["reserved"]["reads_artifact_bodies"] is False
+    assert payload["reads_artifact_bodies"] is False
     assert "## 建议读取顺序" in markdown
     assert loaded.takeover_readiness_json in payload["recommended_read_order"]
 
@@ -167,5 +167,5 @@ def test_rescue_packet_records_refs_only_policy_and_escalation_without_artifact_
     assert packet["escalation"]["target"] == "parent"
     assert packet["manual_confirmation"]["required"] is True
     assert packet["recovery_entrypoints"][0] == loaded.takeover_readiness_json
-    assert packet["reserved"]["reads_artifact_bodies"] is False
+    assert packet["reads_artifact_bodies"] is False
     assert "DO_NOT_PULL_ARTIFACT_BODY_INTO_RESCUE_PACKET" not in encoded

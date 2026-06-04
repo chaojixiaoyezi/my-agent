@@ -28,11 +28,10 @@ class CapabilityRequest:
     network_scope: list[str] = field(default_factory=list)
     output_budget: dict[str, object] = field(default_factory=dict)
     risk_level: str = ""
-    fallback_attempted: list[str] = field(default_factory=list)
+    alternatives_attempted: list[str] = field(default_factory=list)
     escalation_target: str = ""
     status: str = "OPEN"
     created_at: float = 0.0
-    reserved: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -54,10 +53,10 @@ class CapabilityGrant:
     network_scope: list[str] = field(default_factory=list)
     output_budget: dict[str, object] = field(default_factory=dict)
     risk_level: str = ""
+    request_scope: dict[str, object] = field(default_factory=dict)
     expires_after_task: bool = True
     expires_at: float = 0.0
     created_at: float = 0.0
-    reserved: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -76,13 +75,13 @@ class CapabilityGap:
     suggested_skill: str = ""
     suggested_tool: str = ""
     requested_scope: dict[str, object] = field(default_factory=dict)
+    constraints: dict[str, str] = field(default_factory=dict)
     escalation_chain: list[str] = field(default_factory=list)
     next_record_refs: list[str] = field(default_factory=list)
     memory_routes: list[dict[str, str]] = field(default_factory=list)
     injected_rule_paths: list[str] = field(default_factory=list)
     status: str = "OPEN"
     created_at: float = 0.0
-    reserved: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass

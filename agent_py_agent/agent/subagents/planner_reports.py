@@ -3,7 +3,7 @@ from __future__ import annotations
 
 """parent-planner report dataclasses split from reports.py.
 
-父级 planner 的记录字段比较多，单独放这里，让 reports.py 继续作为兼容导出入口。
+父级 planner 的记录字段比较多，单独放这里，让 reports.py 保持轻量导出入口。
 """
 
 from dataclasses import dataclass, field

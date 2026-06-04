@@ -13,9 +13,9 @@ from pathlib import Path
 from agent_py_agent.agent.agent_core.delivery_closeout.config import DeliveryCloseoutConfig
 from agent_py_agent.agent.agent_core.exploration_fuse_config import ExplorationFuseConfig
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
-from agent_py_agent.agent.backend import ModelResponse
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests.support.main_agent_delivery_closeout_fixtures import (
     ArtifactFindingRepairBackend,
     CloseoutReworkBackend,

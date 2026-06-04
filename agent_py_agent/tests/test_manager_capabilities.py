@@ -394,9 +394,9 @@ class TestCapabilityGapAndGrant:
 
     def test_record_capability_gap_signature(self, tmp_path: Path):
         """测试 record_capability_gap 方法存在且可调用。"""
-        from agent_py_agent.agent.subagents.manager_lifecycle import SubAgentLifecycleMixin
+        from agent_py_agent.agent.subagents.services.lifecycle import SubAgentLifecycleService
 
-        class MockManager(SubAgentLifecycleMixin):
+        class MockManager:
             def __init__(self):
                 self.workspace = tmp_path
                 self.workspace_root = tmp_path
@@ -404,16 +404,15 @@ class TestCapabilityGapAndGrant:
             def _new_id(self, prefix):
                 return f"{prefix}_001"
 
-        manager = MockManager()
-        # 方法存在即可，不实际调用（需要 load/save 等基础设施）
-        assert hasattr(manager, 'record_capability_gap')
-        assert callable(manager.record_capability_gap)
+        service = SubAgentLifecycleService(MockManager())
+        assert hasattr(service, "record_capability_gap")
+        assert callable(service.record_capability_gap)
 
     def test_record_capability_grant_signature(self, tmp_path: Path):
         """测试 record_capability_grant 方法存在且可调用。"""
-        from agent_py_agent.agent.subagents.manager_lifecycle import SubAgentLifecycleMixin
+        from agent_py_agent.agent.subagents.services.lifecycle import SubAgentLifecycleService
 
-        class MockManager(SubAgentLifecycleMixin):
+        class MockManager:
             def __init__(self):
                 self.workspace = tmp_path
                 self.workspace_root = tmp_path
@@ -421,10 +420,9 @@ class TestCapabilityGapAndGrant:
             def _new_id(self, prefix):
                 return f"{prefix}_001"
 
-        manager = MockManager()
-        # 方法存在即可，不实际调用（需要 load/save 等基础设施）
-        assert hasattr(manager, 'record_capability_grant')
-        assert callable(manager.record_capability_grant)
+        service = SubAgentLifecycleService(MockManager())
+        assert hasattr(service, "record_capability_grant")
+        assert callable(service.record_capability_grant)
 
 
 class TestCapabilityRouteSummary:

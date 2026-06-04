@@ -5,13 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ..capability_config import CapabilityConfig
+from agent_py_agent.agent.capability.config import CapabilityConfig
+
 from ..subagents.models import SubAgentBoardOptions, SubAgentDueCheckOptions
 from .orchestration.dispatch.params import DispatchExecutionPlan
 from .planner_templates import PARENT_PLANNER_RESULT_TEMPLATE
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
+
+PARENT_PLANNER_READ_TOOLS = ["list_files", "read_file", "search_text"]
 
 
 # ---------------------------------------------------------------------------

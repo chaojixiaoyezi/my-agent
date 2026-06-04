@@ -37,12 +37,11 @@ my_agent_owner_kind: "main"
 my_agent_owner_id: "main"
 
 # 家目录运行时开关：
-# - home_runtime_bootstrap_enabled: 启动 SimpleAgent 时自动创建 ~/.my-agent 基础目录和 SOUL/USER/AGENTS/memory 入口文件。
+# - SimpleAgent 启动时固定创建 ~/.my-agent owner home 基础目录和 SOUL/USER/AGENTS/memory 入口文件。
 # - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。
 # - home_lesson_auto_read_limit: 每轮最多自动读取多少个匹配 lesson 文件；0 表示不自动读 lesson。
-# - daily_memory_mirror_enabled: 写旧 memory_path 的同时，镜像一份到 memory/daily/YYYY-MM-DD.jsonl。
+# - daily_memory_mirror_enabled: 写长期记忆时，同时按天追加一份到 owner memory/daily/YYYY-MM-DD.jsonl。
 # - run_task_workspace_enabled: 保存 run 在第一轮模型调用前自动创建 tasks/date/task_slug/output 和 work 等目录，并把路径作为软运行状态提示给模型。
-home_runtime_bootstrap_enabled: true
 home_context_enabled: true
 home_lesson_auto_read_limit: 3
 daily_memory_mirror_enabled: true
@@ -64,7 +63,7 @@ workspace_task_path_template: "tasks/{date}/{task_slug}"
 model_backend: "anthropic_compatible"
 
 # 记忆文件路径：JSONL 格式，每行一条记录
-memory_path: "data/memory.jsonl"
+memory_path: ""
 
 # 本地事实源（第一版）：SQLite + FTS5 + 文件系统 + JSONL
 # - SQLite: 保存结构化索引和审计事件，适合统计、过滤、恢复。
@@ -72,9 +71,9 @@ memory_path: "data/memory.jsonl"
 # - files: 正文和未来大 artifact 放文件系统，避免数据库过胖，也方便人工直接打开。
 # - events.jsonl: 追加式流水账，方便排查“什么时候写了什么”，后续也适合上传同步。
 # 普通用户不需要改这里；高级用户可以把这组路径放到独立数据盘或同步目录。
-local_store_path: "data/local_store/local.db"
-local_store_files_dir: "data/local_store/files"
-local_store_events_path: "data/local_store/events.jsonl"
+local_store_path: ""
+local_store_files_dir: ""
+local_store_events_path: ""
 local_store_fts_enabled: true
 
 # 每轮请求最多带多少条相关记忆进入 prompt
@@ -97,7 +96,7 @@ auto_save_memory: true
 #   off: 不注入恢复块；trigger: 只有明确旧任务语义（继续 README、继续上次、恢复、run_id 等）才触发；
 #     “继续往下做/继续整理/继续完成”这类当前任务内部表达不会触发旧任务恢复；always: 每轮都尝试。
 # - memory_resume_auto_context_limit 表示自动恢复最多拿多少条线索，范围 1-50。
-# - compact 提前提示优先读取当前模型后端暴露的真实上下文窗口；拿不到时按 128K 通用窗口兜底。
+# - compact 提前提示优先读取当前模型后端暴露的真实上下文窗口；拿不到时按 128K 通用窗口估算。
 # - memory_compact_auto_trigger_percent 控制上下文使用到多少百分比时自动 compact：
 #   不写默认 50；0 表示 100；乱填回默认；大于100 => 100；小于50 => 50；50-100 => 按填写值。
 # - 保存型运行默认执行非破坏性 apply + auto resume + guard；save=false 时只生成计划，不写入 compact apply。
@@ -154,9 +153,8 @@ prompt_files:
   - "prompts/default.md"
 
 # 子代理配置
-# - 子代理默认应该像“不同记忆/权限的主代理”一样能独立干活。
+# - 子代理默认应该像“不同职责的主代理”一样能独立干活。
 # - 角色模板只追加职责，不应该拿掉基础读写、汇报和任务目录内执行能力。
-# - 这里保留少量用户能理解的开关；更细的调度/上下文/runner 参数由系统内部自动处理。
 enable_subagents: true
 
 # 子代理运行模式
@@ -169,16 +167,36 @@ subagent_mode: "trusted_local_hardening"
 # 这个值只限制“最多能登记多少个同级子代理”，不强制主代理一定创建这么多。
 # 真实并发仍由调度器按机器和模型情况自动控制；复杂任务可让主代理自行规划拆分方式。
 max_subagents: 50
+task_max_subagents: 0
+task_max_grandchildren: 0
 
-# 子任务旧工单输出目录。
-# - 新的任务级状态和下级代理运行目录会挂到当前 owner task 的 work/agents/。
-# - 这个目录保留给 legacy work-order、兼容恢复和迁移读取，不再作为用户可见任务列表。
-subagent_workspace: "data/subagents"
+# 子代理运行账本目录。
+# - 默认空值表示写入当前 owner home 的工作区运行目录。
+# - 用户明确填写路径时，按填写路径落盘。
+subagent_workspace: ""
+subagent_board_limit: 5
+subagent_allowed_tools: []
 
 # 子代理角色模板目录。
 # - [] 表示自动使用工作区 .agent/subagents/roles（如果存在）+ 内置模板。
 # - 模板只影响职责和检查重点，不应让代理失去基础读写/汇报能力。
 subagent_role_template_dirs: []
+subagent_workflow_mode: "auto"
+subagent_builtin_workflows: true
+subagent_user_workflow_dirs:
+  - ".agent/workflows/user"
+subagent_workflow_review_rounds: 1
+subagent_spawn_default_count: 3
+subagent_cli_default_limit: 20
+subagent_probe_default_limit: 20
+subagent_hierarchy_default_max_depth: 0
+subagent_hierarchy_recovery_max_nodes: 200
+subagent_hierarchy_max_children_per_tool_call: 0
+subagent_descendant_scan_limit: 128
+subagent_takeover_chain_max_depth: 0
+subagent_context_summary_inline_json_chars: 900
+subagent_context_summary_inline_text_chars: 500
+subagent_automation_level: 2
 
 # 子代理调试追踪等级。
 # - 0: 默认关闭
@@ -196,11 +214,9 @@ subagent_memory_retention_policy: "parent_review_or_cleanup"
 subagent_memory_delete_after_days: 0
 subagent_destroy_summary_required: true
 
-# 用户数据隔离配置
-# - user_id: 当前用户标识，默认为 admin
-# - user_data_root: 用户数据根目录，所有用户数据都放在这里
+# 用户身份配置
+# - user_id: 当前本地用户标识，默认为 admin
 user_id: "admin"
-user_data_root: "data/users"
 
 # 多租户鉴权配置
 # - auth_enabled: 是否启用鉴权，默认开启；关闭后所有人都有 admin 权限（方便本地开发）
@@ -215,7 +231,7 @@ admin_user_id: "admin"
 result_check_execute_tests: false
 
 # 结果检查真实执行 tests 时的单条测试超时秒数：
-# - 1 到 300 秒；超过范围会回退默认值。
+# - 1 到 300 秒；超过范围会使用默认值。
 # - `subagents-tests --timeout` 可覆盖单次调用。
 result_check_timeout_seconds: 120
 
@@ -246,17 +262,36 @@ real_run_review_max_log_bytes: 1000000
 # 只重试 runner_error、structured_output_parse_error、tool_result_missing、provider_timeout
 # 这类“执行通道/格式/临时工具结果/模型服务临时超时”问题；能力缺口、验收失败、通道 BROKEN 不自动重跑。
 runner_failure_policy: "auto"
+scheduler_mode: "auto"
+runner_concurrency: "auto"
+runner_start_rate: "auto"
+# create_subagents 自动启动时会用 watch/advance 推进本批 runner。
+# runner_start_rate 只限制每个调度切片启动多少个，后台会继续扫本批剩余项，不应让主代理立刻退出等人。
+
+# runner_timeout_seconds 控制单个 runner 的外层总时长保护：
+# - "off" / "none" / "disabled": 默认，不套外层总时长闹钟；长任务靠心跳、状态、取消/接管工具治理。
+# - "auto": 按任务文本和角色动态计算超时，适合压测或需要自动抢救卡死 runner 的场景。
+# - "120" 这类数字字符串：固定 120 秒。
+runner_timeout_seconds: "off"
+runner_timeout_by_role: []
 
 # runner_concurrency 为 auto 时的并发上限。
 # - 这个值适用于当前 dispatch 批次里要跑的 runner：子代理、孙代理或更深层代理都走同一套 runner。
 # - 0 表示 auto 不额外设上限，直接按本批 job 数跑；一般本地机器建议 4-12。
 runner_auto_concurrency: 8
+dynamic_timeout_safety_margin: 2.0
+dynamic_timeout_min: 30
+dynamic_timeout_max: 600
+max_auto_split_depth: 2
+max_auto_retry_attempts: 3
+model_speed_profile_path: ""
+auto_bench_model_on_first_use: true
 
 # Gateway 本地控制面（第一版）：
 # - gateway 是后台常驻外壳，chat/TUI 后续会作为客户端 attach。
 # - 第一版先用本地文件管理状态：pid、heartbeat、state、stop request 和日志。
 # - 调整这些配置后，重启 gateway 即可生效；任务状态仍保存在 subagent/task 账本里。
-gateway_workspace: "data/gateway"
+gateway_workspace: ""
 gateway_heartbeat_interval: 5
 gateway_stale_seconds: 120
 gateway_stop_timeout: 20
@@ -278,7 +313,7 @@ gateway_request_poll_interval: 1
 # - 1 是最保守默认值；调大后每个 worker 都会创建自己的 agent/backend。
 # - gateway_processing_timeout_seconds 用来判断 processing 请求是否已经卡死。
 # - gateway_request_max_attempts 控制卡死请求最多自动重试几次，超过后归档到 failed。
-gateway_request_workers: 1
+gateway_request_workers: 3
 gateway_processing_timeout_seconds: 900
 gateway_request_max_attempts: 2
 gateway_worker_join_timeout_seconds: 2
@@ -293,7 +328,7 @@ gateway_port: 8420
 
 # 外部聊天工具 / TUI 文件适配器工作区。
 # 第一版 adapter file 会从 inbox 读 JSON 消息，把结果写到 outbox。
-adapter_workspace: "data/adapters/file"
+adapter_workspace: ""
 
 # 飞书（Lark）通道适配器配置
 # - feishu_app_id / feishu_app_secret: 飞书应用凭证，从环境变量或配置文件读取
@@ -324,21 +359,23 @@ provider_space_destructive_actions_use_trash: true
 
 # 会话工作区：
 # - 会话持久化目录，存储 session.json 和会话级别的上下文文件
-# - 每个会话对应一个目录：data/sessions/{session_id}/
+# - 每个会话对应一个目录：<session_workspace>/{session_id}/
 # - session.json 包含会话元数据：session_id、user_id、created_at、updated_at、last_active_channel、metadata
-session_workspace: "data/sessions"
+session_workspace: ""
 
 # 长期主代理线程工作区：
 # - 保存 ConversationThread、MessageLog、ChannelBinding、ThreadTaskLink 和 ProgressPolicy。
 # - 这是后台主代理恢复/定时汇报/跨渠道继续上下文的机器账本。
 # - 不保存真实飞书/微信凭证，也不要求用户按工程字段写任务 prompt。
-conversation_workspace: "data/conversations"
+conversation_workspace: ""
 
 # 长期会话读取和后台唤醒 prompt 预算：
 # - thread/pending/context/recent 这些 limit 只控制一次读取多少条账本记录，不删除原始文件。
 # - background_context_* 只裁剪注入后台主代理 prompt 的副本，不改消息、observation、case 或 agent tree 原文。
 # - background_claim_ttl_seconds 是后台主代理一次唤醒的 lease 有效期；运行中会 heartbeat 续约。
 # - background_claim_heartbeat_interval_seconds=0 表示按 TTL 自动取安全间隔。
+# - subagent_watch_interval_seconds 是 wait 工具登记“稍后查看子代理进度”的默认间隔；非精准闹钟，
+#   主代理忙或用户正在交互时会顺延到下一次后台 tick。非法或低于 60 会按 60 秒，最高 7200 秒。
 conversation_thread_list_limit: 100
 conversation_pending_wake_limit: 100
 conversation_context_recent_limit: 20
@@ -350,6 +387,7 @@ background_context_max_dict_items: 80
 background_context_max_depth: 6
 background_claim_ttl_seconds: 900
 background_claim_heartbeat_interval_seconds: 0
+subagent_watch_interval_seconds: 120
 # 后台主代理唤醒时允许看到和调用的控制工具。
 # - 留空表示使用默认控制工具 profile。
 # - 写了列表就只暴露列表里的工具；执行参数和 prompt 说明共用这一份。
@@ -360,7 +398,7 @@ background_main_agent_allowed_tools: []
 # - 保存通用 case/request/evidence/decision 账本。
 # - 只保存轻量机器事实；大文件、日志、API 返回和截图必须用 evidence_refs 指向外部产物。
 # - 不把日志分析、GitHub 研究、文档生成等任务写成内置专项模板。
-collaboration_workspace: "data/collaboration"
+collaboration_workspace: ""
 # 协作请求自动唤醒 responder 的最大并发数。
 # 普通 dispatch 仍按 dispatch_default_max_runners；只有已有 collaboration request
 # 等待多个代理响应时，才按这个上限一次推进多个 responder，避免协作证据串行排队。
@@ -377,7 +415,7 @@ collaboration_default_deadline_seconds: 120
 # - notification_store_path: 通知存储目录，每个通知一个 JSON 文件
 # - notification_channel_timeout_seconds: 通道多久没活跃视为离线（秒）
 notification_enabled: true
-notification_store_path: "data/notifications"
+notification_store_path: ""
 notification_channel_timeout_seconds: 300
 
 # 并发控制配置：
@@ -390,7 +428,7 @@ task_lock_timeout_seconds: 30
 # - audit_enabled: 是否启用审计日志
 # - audit_log_path: 审计日志存储路径
 audit_enabled: true
-audit_log_path: "data/audit"
+audit_log_path: ""
 
 # 前台 daemon 默认策略（高级 / 过渡期）：
 # - my-agent daemon 会读取这些配置，减少启动时的长参数。
@@ -458,20 +496,29 @@ request_timeout: 240
 # 允许模型最多生成多少 token
 max_tokens: 16314
 
+# 当前模型真实上下文窗口 token 数。compact/preflight 用它计算何时折叠；
+# 不要和 chat_context_window_chars 混用，后者只是聊天界面的字符预算。
+model_context_window_tokens: 200000
+
 # 采样温度
 temperature: 0.2
 
-# Anthropic 兼容协议版本
+# Anthropic API 版本
 anthropic_version: "2023-06-01"
 
 # 是否启用工具调用循环
 enable_tools: true
 
-# 是否启用流式模型响应；关闭后走一次性响应路径，便于排查兼容接口问题。
+# 是否启用流式模型响应；关闭后走一次性响应路径，便于排查模型接口问题。
 stream_enabled: true
 
-# 工具轮数、runner 重试、单代理工具预算集中在 runtime_guard_config.yaml，
-# 避免同一默认值散落多处。需要单任务临时覆盖时，由任务属性显式传入。
+# 工具轮数和单代理工具预算：
+# - 空值表示不额外限制。
+# - 需要单任务临时覆盖时，由任务属性显式传入。
+max_tool_rounds:
+max_tool_calls_per_round:
+tool_agent_budget_window_seconds:
+tool_agent_budget_max_calls:
 
 # 单个代理滚动 artifact 正文读取预算（下面两个参数必须一起看）：
 # - window_seconds=600 + max_chars=240000 表示单个 run_id 最近 10 分钟最多读取 240000 字符正文。

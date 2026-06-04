@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agent_py_agent.agent.file_io import append_jsonl
+from agent_py_agent.agent.io import append_jsonl
 
 _PREVIEW_LIMIT = 240
 

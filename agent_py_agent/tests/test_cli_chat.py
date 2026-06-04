@@ -13,17 +13,17 @@ import pytest
 
 
 class TestCollapseResponseText:
-    """测试 _collapse_response_text 函数。"""
+    """测试 collapse_response_text 函数。"""
 
     def test_short_text_not_collapsed(self):
         """测试短文本不被折叠。
 
         验证短文本返回原始文本和 False。
         """
-        from agent_py_agent.cli.chat import _collapse_response_text
+        from agent_py_agent.cli.chat import collapse_response_text
 
         text = "Hello, this is a short response."
-        result, collapsed = _collapse_response_text(text)
+        result, collapsed = collapse_response_text(text)
 
         assert result == text
         assert collapsed is False
@@ -33,11 +33,11 @@ class TestCollapseResponseText:
 
         验证行数少于阈值时不折叠。
         """
-        from agent_py_agent.cli.chat import _collapse_response_text
+        from agent_py_agent.cli.chat import collapse_response_text
 
         lines = ["line " + str(i) for i in range(5)]
         text = "\n".join(lines)
-        result, collapsed = _collapse_response_text(text)
+        result, collapsed = collapse_response_text(text)
 
         assert collapsed is False
         assert result == text
@@ -47,11 +47,11 @@ class TestCollapseResponseText:
 
         验证超过行数阈值的文本被折叠。
         """
-        from agent_py_agent.cli.chat import _COLLAPSE_PREVIEW_LINES, _collapse_response_text
+        from agent_py_agent.cli.chat import COLLAPSE_PREVIEW_LINES, collapse_response_text
 
-        lines = ["line " + str(i) for i in range(_COLLAPSE_PREVIEW_LINES + 5)]
+        lines = ["line " + str(i) for i in range(COLLAPSE_PREVIEW_LINES + 5)]
         text = "\n".join(lines)
-        result, collapsed = _collapse_response_text(text)
+        result, collapsed = collapse_response_text(text)
 
         assert collapsed is True
         assert "..." in result
@@ -61,11 +61,11 @@ class TestCollapseResponseText:
 
         验证字符数超过阈值时文本被折叠。
         """
-        from agent_py_agent.cli.chat import _collapse_response_text
+        from agent_py_agent.cli.chat import collapse_response_text
 
         # 使用单行长字符文本确保超过 COLLAPSE_PREVIEW_CHARS (900)
         text = "A" * 1000
-        result, collapsed = _collapse_response_text(text)
+        result, collapsed = collapse_response_text(text)
 
         assert collapsed is True
 
@@ -74,80 +74,80 @@ class TestCollapseResponseText:
 
         验证预览文本尾部空白被去除。
         """
-        from agent_py_agent.cli.chat import _collapse_response_text
+        from agent_py_agent.cli.chat import collapse_response_text
 
         text = ("line 1\n" * 20) + "    extra spaces   "
-        result, collapsed = _collapse_response_text(text)
+        result, collapsed = collapse_response_text(text)
 
         if collapsed:
             assert not result.endswith(" ") or result.endswith("...")
 
 
 class TestProgressBar:
-    """测试 _progress_bar 函数。"""
+    """测试 progress_bar 函数。"""
 
-    def test_progress_bar_zero(self):
+    def testprogress_bar_zero(self):
         """测试零进度进度条。
 
         验证 0% 时全是空心方块。
         """
-        from agent_py_agent.cli.chat import _progress_bar
+        from agent_py_agent.cli.chat import progress_bar
 
-        result = _progress_bar(0.0)
+        result = progress_bar(0.0)
         assert result == "░" * 10
 
-    def test_progress_bar_full(self):
+    def testprogress_bar_full(self):
         """测试满进度进度条。
 
         验证 100% 时全是实心方块。
         """
-        from agent_py_agent.cli.chat import _progress_bar
+        from agent_py_agent.cli.chat import progress_bar
 
-        result = _progress_bar(1.0)
+        result = progress_bar(1.0)
         assert result == "█" * 10
 
-    def test_progress_bar_half(self):
+    def testprogress_bar_half(self):
         """测试半进度进度条。
 
         验证 50% 时一半实心一半空心。
         """
-        from agent_py_agent.cli.chat import _progress_bar
+        from agent_py_agent.cli.chat import progress_bar
 
-        result = _progress_bar(0.5)
+        result = progress_bar(0.5)
         assert result == "█" * 5 + "░" * 5
 
-    def test_progress_bar_custom_width(self):
+    def testprogress_bar_custom_width(self):
         """测试自定义宽度进度条。
 
         验证可设置不同宽度。
         """
-        from agent_py_agent.cli.chat import _progress_bar
+        from agent_py_agent.cli.chat import progress_bar
 
-        result = _progress_bar(0.4, width=5)
+        result = progress_bar(0.4, width=5)
         assert result == "█" * 2 + "░" * 3
 
-    def test_progress_bar_rounds_down(self):
+    def testprogress_bar_rounds_down(self):
         """测试进度条向下取整。
 
         验证进度条使用整数填充。
         """
-        from agent_py_agent.cli.chat import _progress_bar
+        from agent_py_agent.cli.chat import progress_bar
 
-        result = _progress_bar(0.33)
+        result = progress_bar(0.33)
         assert result.count("█") == 3
 
 
 class TestStartupBanner:
-    """测试 _startup_banner 函数。"""
+    """测试 startup_banner 函数。"""
 
     def test_banner_local_mode(self):
         """测试本地模式启动横幅。
 
         验证本地模式时显示 "local runtime"。
         """
-        from agent_py_agent.cli.chat import _startup_banner
+        from agent_py_agent.cli.chat import startup_banner
 
-        result = _startup_banner("TestAgent", use_gateway=False)
+        result = startup_banner("TestAgent", use_gateway=False)
 
         assert "TestAgent" in result
         assert "local runtime" in result
@@ -157,9 +157,9 @@ class TestStartupBanner:
 
         验证网关模式时显示 "gateway client"。
         """
-        from agent_py_agent.cli.chat import _startup_banner
+        from agent_py_agent.cli.chat import startup_banner
 
-        result = _startup_banner("TestAgent", use_gateway=True)
+        result = startup_banner("TestAgent", use_gateway=True)
 
         assert "TestAgent" in result
         assert "gateway client" in result
@@ -169,9 +169,9 @@ class TestStartupBanner:
 
         验证横幅包含装饰性字符。
         """
-        from agent_py_agent.cli.chat import _startup_banner
+        from agent_py_agent.cli.chat import startup_banner
 
-        result = _startup_banner("Agent", use_gateway=False)
+        result = startup_banner("Agent", use_gateway=False)
 
         assert "/\\_/\\" in result or "o.o" in result
 
@@ -180,47 +180,47 @@ class TestStartupBanner:
 
         验证 ANSI 颜色会被重置。
         """
-        from agent_py_agent.cli.chat import _startup_banner
+        from agent_py_agent.cli.chat import startup_banner
 
-        result = _startup_banner("Agent", use_gateway=True)
+        result = startup_banner("Agent", use_gateway=True)
 
         assert "\033[0m" in result
 
 
 class TestTerminalRule:
-    """测试 _terminal_rule 函数。"""
+    """测试 terminal_rule 函数。"""
 
-    def test_terminal_rule_default(self):
+    def testterminal_rule_default(self):
         """测试默认终端分隔线。
 
         验证默认使用横线字符。
         """
-        from agent_py_agent.cli.chat import _terminal_rule
+        from agent_py_agent.cli.chat import terminal_rule
 
-        result = _terminal_rule()
+        result = terminal_rule()
 
         assert "─" in result or len(result) > 0
         assert "\033[" in result  # ANSI prefix
 
-    def test_terminal_rule_custom_char(self):
+    def testterminal_rule_custom_char(self):
         """测试自定义字符分隔线。
 
         验证可使用不同字符。
         """
-        from agent_py_agent.cli.chat import _terminal_rule
+        from agent_py_agent.cli.chat import terminal_rule
 
-        result = _terminal_rule(char="=")
+        result = terminal_rule(char="=")
 
         assert "=" in result
 
-    def test_terminal_rule_minimum_width(self):
+    def testterminal_rule_minimum_width(self):
         """测试分隔线最小宽度。
 
         验证最小宽度为 20。
         """
-        from agent_py_agent.cli.chat import _terminal_rule
+        from agent_py_agent.cli.chat import terminal_rule
 
-        result = _terminal_rule(char="-")
+        result = terminal_rule(char="-")
         # 验证ANSI序列存在且结果非空
         assert "\033[" in result
         assert len(result) > 20
@@ -377,10 +377,10 @@ class TestChatCommandArguments:
 class TestChatCommandRuntime:
     """测试 chat 命令运行时分发。"""
 
-    def test_cmd_chat_passes_fallback_config_object(self):
-        """非 TTY fallback 路径应传 RunFallbackConfig，而不是散装 kwargs。"""
+    def test_cmd_chat_passes_plain_config_object(self):
+        """非 TTY plain 路径应传 RunPlainConfig，而不是散装 kwargs。"""
         from agent_py_agent.cli.chat import cmd_chat
-        from agent_py_agent.cli.chat_parts.fallback_state import RunFallbackConfig
+        from agent_py_agent.cli.chat_parts.plain_state import RunPlainConfig
 
         args = SimpleNamespace(
             gateway=False,
@@ -397,16 +397,16 @@ class TestChatCommandRuntime:
         with patch("agent_py_agent.cli.chat.make_agent", return_value=agent), \
              patch("agent_py_agent.cli.chat.SessionManager", return_value=session_manager), \
              patch("agent_py_agent.cli.chat._has_prompt_toolkit", return_value=False), \
-             patch("agent_py_agent.cli.chat.run_fallback", return_value=0) as fallback:
+             patch("agent_py_agent.cli.chat.run_plain", return_value=0) as plain:
             result = cmd_chat(args)
 
         assert result == 0
-        cfg = fallback.call_args.args[0]
-        assert isinstance(cfg, RunFallbackConfig)
+        cfg = plain.call_args.args[0]
+        assert isinstance(cfg, RunPlainConfig)
         assert cfg.agent is agent
         assert cfg.current_session_id == "sess-test"
 
-    def test_cmd_chat_plain_uses_fallback_even_with_prompt_toolkit(self):
+    def test_cmd_chat_plain_uses_plain_even_with_prompt_toolkit(self):
         """--plain 要绕开 TUI，避免 prompt_toolkit 重绘吞掉普通输出。"""
         from agent_py_agent.cli.chat import cmd_chat
 
@@ -427,12 +427,12 @@ class TestChatCommandRuntime:
              patch("agent_py_agent.cli.chat.SessionManager", return_value=session_manager), \
              patch("agent_py_agent.cli.chat._has_prompt_toolkit", return_value=True), \
              patch("agent_py_agent.cli.chat.run_tui", return_value=0) as tui, \
-             patch("agent_py_agent.cli.chat.run_fallback", return_value=0) as fallback:
+             patch("agent_py_agent.cli.chat.run_plain", return_value=0) as plain:
             result = cmd_chat(args)
 
         assert result == 0
         tui.assert_not_called()
-        fallback.assert_called_once()
+        plain.assert_called_once()
 
 
 class TestCollapseEdgeCases:
@@ -443,9 +443,9 @@ class TestCollapseEdgeCases:
 
         验证空字符串返回空字符串和 False。
         """
-        from agent_py_agent.cli.chat import _collapse_response_text
+        from agent_py_agent.cli.chat import collapse_response_text
 
-        result, collapsed = _collapse_response_text("")
+        result, collapsed = collapse_response_text("")
 
         assert result == ""
         assert collapsed is False
@@ -455,9 +455,9 @@ class TestCollapseEdgeCases:
 
         验证单行且短文本不折叠。
         """
-        from agent_py_agent.cli.chat import _collapse_response_text
+        from agent_py_agent.cli.chat import collapse_response_text
 
-        result, collapsed = _collapse_response_text("Short line.")
+        result, collapsed = collapse_response_text("Short line.")
 
         assert collapsed is False
 
@@ -467,16 +467,16 @@ class TestCollapseEdgeCases:
         验证刚好等于阈值时不折叠。
         """
         from agent_py_agent.cli.chat import (
-            _COLLAPSE_PREVIEW_CHARS,
-            _COLLAPSE_PREVIEW_LINES,
-            _collapse_response_text,
+            COLLAPSE_PREVIEW_CHARS,
+            COLLAPSE_PREVIEW_LINES,
+            collapse_response_text,
         )
 
-        lines = ["line " + str(i) for i in range(_COLLAPSE_PREVIEW_LINES)]
+        lines = ["line " + str(i) for i in range(COLLAPSE_PREVIEW_LINES)]
         text = "\n".join(lines)
         # 确保字符数也在阈值内
-        assert len(text) <= _COLLAPSE_PREVIEW_CHARS
+        assert len(text) <= COLLAPSE_PREVIEW_CHARS
 
-        result, collapsed = _collapse_response_text(text)
+        result, collapsed = collapse_response_text(text)
 
         assert collapsed is False

@@ -41,7 +41,6 @@ def _report(status: str, *, explicit: bool, ref: str, mismatches: list[dict[str,
         "explicit_ref": bool(explicit),
         "candidate_ref": ref,
         "mismatches": mismatches,
-        "reserved": {},
     }
 
 

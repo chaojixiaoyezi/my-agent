@@ -51,10 +51,10 @@ def test_backup_manifest_records_owner_refs_without_copying_large_files(tmp_path
     home = ensure_my_agent_home(tmp_path)
     (home.owner_memory_daily_dir / "2026-05-31.jsonl").write_text("{}\n", encoding="utf-8")
 
-    manifest = create_home_backup_manifest(home, reason="schema migration")
+    manifest = create_home_backup_manifest(home, reason="schema change")
 
     assert manifest.manifest_path.exists()
-    assert manifest.reason == "schema migration"
+    assert manifest.reason == "schema change"
     assert str(home.owner_memory_dir) in manifest.included_roots
 
 

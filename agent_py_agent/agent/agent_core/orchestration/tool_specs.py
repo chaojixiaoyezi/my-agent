@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from ...subagents.role_templates import role_template_index_text
-from ...tools import ToolSpec
+from ...tooling.models import ToolSpec
 from .tool_spec_data import (
     _CREATE_EXAMPLES,
     _CREATE_KEYWORDS,
@@ -43,9 +43,12 @@ def build_inspect_agent_tree_spec() -> ToolSpec:
         name="inspect_agent_tree",
         category="orchestration",
         effect="read_only",
-        description="只读查看主代理、子代理、孙代理状态树；不会创建、调度、恢复或验收任务。",
+        description="按需只读查看主代理、子代理、孙代理状态树；不会创建、调度、恢复或验收任务。",
         use_cases=["用户问当前有哪些代理在做什么", "只想看子代理/孙代理状态、心跳、当前工具、产物和阻塞原因"],
-        avoid_when=["用户明确要求继续推进、恢复、重派或执行验收时，应使用 dispatch_subagents"],
+        avoid_when=[
+            "子代理只是正在运行、没有新事实时不要循环查看；用 wait 等完成事件或继续做自己的汇总",
+            "用户明确要求继续推进、恢复、重派或执行验收时，应使用 dispatch_subagents",
+        ],
         keywords=["代理树", "状态树", "看一眼", "子代理状态", "孙代理", "inspect", "agent tree"],
         parameters=_INSPECT_TREE_PARAMETERS,
         examples=[

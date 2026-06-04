@@ -105,19 +105,19 @@ def test_regression_gateway_late_pending_tracking():
         data = json.load(f)
     assert data["request_id"] == "req-123"
 
-def test_regression_chat_fallback_prompt_redraw():
-    """验证 fallback 交互模式在回复后重绘 prompt"""
+def test_regression_chat_plain_prompt_redraw():
+    """验证 plain 交互模式在回复后重绘 prompt"""
     # 修复前：后台线程输出后 stdin 前 prompt 消失
-    # 修复后：worker 完成后调用 redraw_fallback_prompt()
+    # 修复后：worker 完成后调用 redraw_plain_prompt()
     class FakeState:
         def __init__(self):
-            self.fallback_waiting_for_input = True
+            self.plain_waiting_for_input = True
             self.shutting_down = False
 
     state = FakeState()
 
     def should_redraw():
-        return state.fallback_waiting_for_input and not state.shutting_down
+        return state.plain_waiting_for_input and not state.shutting_down
 
     # 正常情况应该重绘
     assert should_redraw() is True
@@ -127,7 +127,7 @@ def test_regression_chat_fallback_prompt_redraw():
     assert should_redraw() is False
 
     # 不是 waiting 状态时不应该重绘
-    state.fallback_waiting_for_input = False
+    state.plain_waiting_for_input = False
     state.shutting_down = False
     assert should_redraw() is False
 

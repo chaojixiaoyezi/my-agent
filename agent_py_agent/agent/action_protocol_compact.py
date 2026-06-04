@@ -35,7 +35,6 @@ class CompactContinuePacketEnvelope:
     schema_version: int = ACTION_PROTOCOL_SCHEMA_VERSION
     kind: str = "compact_continue_packet"
     created_at: str = field(default_factory=_now_iso)
-    reserved: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.operation_id:
@@ -65,5 +64,4 @@ class CompactContinuePacketEnvelope:
             schema_version=int(payload.get("schema_version") or ACTION_PROTOCOL_SCHEMA_VERSION),
             kind=str(payload.get("kind") or "compact_continue_packet"),
             created_at=str(payload.get("created_at") or _now_iso()),
-            reserved=_dict_or_empty(payload.get("reserved")),
         )

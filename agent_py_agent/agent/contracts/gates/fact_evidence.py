@@ -161,9 +161,6 @@ def _source_has_tool_backing(source: dict[str, Any], archive_index: dict[str, se
     backing_refs = archive_index["refs"]
     if _mapping_has_backing_id(source, backing_ids):
         return True
-    reserved = source.get("reserved")
-    if isinstance(reserved, dict) and _mapping_has_backing_id(reserved, backing_ids):
-        return True
     for key in ("artifact_ref", "uri"):
         if (value := _text(source.get(key))) and value in backing_refs:
             return True
@@ -178,10 +175,8 @@ def _mapping_has_backing_id(source: dict[str, Any], backing_ids: set[str]) -> bo
 
 
 def _source_backing_state(source: dict[str, Any]) -> dict[str, str]:
-    reserved = source.get("reserved")
-    reserved_map = reserved if isinstance(reserved, dict) else {}
     return {
-        "tool_call_ref": _text(source.get("tool_call_ref") or reserved_map.get("tool_call_ref")),
+        "tool_call_ref": _text(source.get("tool_call_ref")),
         "artifact_ref": _text(source.get("artifact_ref")),
         "uri": _text(source.get("uri")),
     }

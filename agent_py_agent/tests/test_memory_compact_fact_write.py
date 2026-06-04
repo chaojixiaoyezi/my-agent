@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.memory_archive.compact import MemoryCompactPlanOptions
 from agent_py_agent.agent.memory_archive.compact_apply import (
     MemoryCompactApplyOptions,
@@ -14,6 +13,7 @@ from agent_py_agent.agent.memory_archive.compact_resume import (
     MemoryCompactResumeOptions,
     build_memory_compact_resume,
 )
+from agent_py_agent.cli.parser import build_parser
 from agent_py_agent.tests.memory_compact_support import (
     workspace,
     write_compact_fixture,

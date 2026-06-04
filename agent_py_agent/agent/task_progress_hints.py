@@ -22,7 +22,7 @@ def quality_hints(
     if incoming:
         messages.extend(_incoming_messages(incoming))
         incoming_coverage = normalize_coverage({"coverage": {"targets": incoming}})
-        if incoming_coverage["targets"]:
+        if incoming_coverage["targets"] and not _has_explicit_coverage(coverage):
             coverage = incoming_coverage
     coverage_done_without_evidence = _coverage_done_without_evidence(coverage)
     coverage_incomplete = _coverage_incomplete(coverage)
@@ -120,6 +120,14 @@ def _coverage_target_done(target: dict[str, Any]) -> bool:
         "passed",
         "skipped",
     }
+
+
+def _has_explicit_coverage(coverage: dict[str, Any]) -> bool:
+    return bool(
+        coverage.get("goal")
+        or coverage.get("dimensions")
+        or coverage.get("targets")
+    )
 
 
 def _has_result_signal(item: dict[str, Any]) -> bool:

@@ -9,7 +9,7 @@ runner 真正调用模型前，需要把执行上下文压成明确任务；模�
 
 import json
 
-from ...subagent import SubAgentExecutionContext
+from ...subagents import SubAgentExecutionContext
 from ...subagents.context_bundle import context_gate_prompt_lines
 from ...subagents.role_templates import role_template_detail_text, role_template_index_text
 from ..subagent import compact_continuation as subagent_compact_continuation

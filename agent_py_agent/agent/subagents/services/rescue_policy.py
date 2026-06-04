@@ -130,11 +130,9 @@ def _build_rescue_packet(
             "reason": "rescue_action_is_a_plan_not_auto_execution",
         },
         "recovery_entrypoints": _unique_strings(refs[1:] if refs and refs[0] == issue.task_dir else refs),
-        "reserved": {
-            "reads_artifact_bodies": False,
-            "auto_execute": False,
-            "packet_is_action_plan_index": True,
-        },
+        "reads_artifact_bodies": False,
+        "auto_execute": False,
+        "packet_is_action_plan_index": True,
     }
 
 

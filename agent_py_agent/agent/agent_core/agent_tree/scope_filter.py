@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 
-def scope_main_fallback_snapshot(agent: object, snapshot: object, remembered: set[str]) -> object:
+def scope_main_visible_snapshot(agent: object, snapshot: object, remembered: set[str]) -> object:
     del agent
     if not remembered:
         return snapshot
@@ -40,6 +40,7 @@ def coordination_advice(nodes: list[dict[str, object]], allowed_tools: object = 
         "blocked_child_run_ids": blocked,
         "missing_outputs_while_running_is_failure": False,
         "should_take_over_running_children": False,
+        "suggested_tool_call": _coordination_suggested_tool_call(bool(pending), allowed),
         "next_step_zh": _coordination_next_step(bool(pending), allowed),
     }
 
@@ -107,11 +108,9 @@ def _coordination_next_step(has_pending: bool, allowed_tools: set[str] | None = 
         if _tool_allowed(allowed_tools, "dispatch_subagents"):
             return "如果只是查看状态，直接向用户汇报；只有用户要推进或恢复时才调用 dispatch_subagents。"
         return "如果只是查看状态，直接向用户汇报；本轮没有调度工具时，不要声称已经推进下级代理。"
-    guidance = (
-        "先等待下一轮、稍后再次 inspect_agent_tree，或只给具体 run_id 发 send_guidance。"
-        if _tool_allowed(allowed_tools, "send_guidance")
-        else "先等待下一轮或汇报当前仍有下级代理在运行。"
-    )
+    guidance = "先调用 wait 登记非阻塞提醒，等后台提醒/完成事件后再看；期间可继续自己的工作或回复用户。"
+    if _tool_allowed(allowed_tools, "send_guidance"):
+        guidance += "只有要补充具体指令时，才给具体 run_id 发 send_guidance。"
     dispatch = (
         "只有下级 BLOCKED/FAILED/TIMEOUT、用户明确要求接手，或超过任务约定等待时间时，才考虑补派或接手。"
         if _tool_allowed(allowed_tools, "dispatch_subagents")
@@ -123,4 +122,10 @@ def _coordination_next_step(has_pending: bool, allowed_tools: set[str] | None = 
     )
 
 
-__all__ = ["coordination_advice", "scope_main_fallback_snapshot", "status_buckets", "visible_nodes"]
+def _coordination_suggested_tool_call(has_pending: bool, allowed_tools: set[str] | None) -> dict[str, object] | None:
+    if not has_pending or not _tool_allowed(allowed_tools, "wait"):
+        return None
+    return {"tool": "wait", "seconds": 120, "reason": "等待下级代理完成或产出新进展"}
+
+
+__all__ = ["coordination_advice", "scope_main_visible_snapshot", "status_buckets", "visible_nodes"]

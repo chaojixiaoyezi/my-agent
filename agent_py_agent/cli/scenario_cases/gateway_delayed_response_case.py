@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...agent.agent_core.models import AgentRunResult
-from ...agent.gateway import (
+from ...agent.gateway_parts import (
     _process_gateway_requests,
     gateway_paths,
     gateway_response_path,

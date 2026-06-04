@@ -1,7 +1,7 @@
 import json
 
 from agent_py_agent.agent.agent_core.tool_context.reducer import render_tool_result_for_live_prompt
-from agent_py_agent.agent.tools import ToolExecutionResult
+from agent_py_agent.agent.tooling import ToolExecutionResult
 
 
 def test_dispatch_externalized_result_keeps_compact_next_action_without_read_hint():
@@ -17,7 +17,7 @@ def test_dispatch_externalized_result_keeps_compact_next_action_without_read_hin
     assert "latest_continue_packet.json" in rendered
     assert "child-1" in rendered
     assert "output_scoped_call_id: root-1:1-1" in rendered
-    assert "prefer output_scoped_call_id" in rendered
+    assert "use output_scoped_call_id" in rendered
     assert "records" not in rendered
     assert "read_artifact_hint" not in rendered
     assert len(rendered) < 1400

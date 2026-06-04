@@ -29,7 +29,6 @@ class RuntimeIdentity:
     config_scope: str = "run_override"
     config_overlay_ref: str = ""
     config_promotion_policy: str = "admin_approval_required"
-    reserved: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -89,7 +88,6 @@ class InheritanceManifest:
     dropped: dict[str, object] = field(default_factory=dict)
     policy: dict[str, object] = field(default_factory=dict)
     created_at: float = 0.0
-    reserved: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -105,8 +103,8 @@ class FailureHandoff:
     evidence_refs: list[str] = field(default_factory=list)
     avoid_next_time: list[str] = field(default_factory=list)
     recommended_next_action: str = ""
+    auto_rescue: bool = False
     created_at: float = 0.0
-    reserved: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -118,7 +116,6 @@ class SecuritySignal:
     evidence_refs: list[str] = field(default_factory=list)
     artifact_refs: list[str] = field(default_factory=list)
     created_at: float = 0.0
-    reserved: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -234,7 +231,6 @@ class SubAgentTask:
     agent_run_outbox_dir: str = ""
     agent_run_artifacts_dir: str = ""
     agent_run_compactions_dir: str = ""
-    legacy_run_ref_json: str = ""
     daily_ledger_file: str = ""
     daily_ledger_last_event_id: str = ""
     task_artifact_manifest_jsonl: str = ""

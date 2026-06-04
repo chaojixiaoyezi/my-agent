@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ...agent.agent_core.orchestration.dispatch.params import DispatchExecutionPlan
-from ...agent.capability_config import load_capability_config
+from ...agent.capability.config import load_capability_config
 from ..common import make_capability_router
 from ..scenario_utils import (
     create_scenario_workspace,

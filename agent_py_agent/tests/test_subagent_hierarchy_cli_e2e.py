@@ -8,8 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.agent.config import load_config
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import load_config
 from agent_py_agent.cli.parser import build_parser
 
 

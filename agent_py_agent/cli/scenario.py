@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..agent.agent_core.orchestration.dispatch.params import DispatchExecutionPlan
-from ..agent.capability_config import load_capability_config
+from ..agent.capability.config import load_capability_config
 from .common import make_capability_router
 from .scenario_cases import (
     run_scenario_gateway_cross_day_resume_case,

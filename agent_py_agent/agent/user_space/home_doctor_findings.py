@@ -10,7 +10,6 @@ from .home_doctor_policy import owner_policy_doctor_findings
 def build_doctor_findings(sections: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         *owner_lifecycle_doctor_findings(sections["home"]),
-        *_migration_findings(sections["migration"].actions),
         *_dangling_findings(sections["dangling"]),
         *_compact_index_findings(sections["compact_dangling"]),
         *_compact_index_load_error_findings(sections["compact_index_load_errors"]),
@@ -46,24 +45,6 @@ def repair_plan(findings: list[dict[str, Any]]) -> dict[str, Any]:
         "warn": grouped["warn"],
         "manual": grouped["manual"],
     }
-
-
-def _migration_findings(actions: tuple[Any, ...]) -> list[dict[str, Any]]:
-    if not actions:
-        return []
-    return [
-        {
-            "kind": "migration_pending",
-            "severity": "info",
-            "message": "legacy home data can be copied into owner home",
-            "count": len(actions),
-            "resolution": _resolution(
-                "auto_repair",
-                command="my-agent home-migrate --apply",
-                note="copy legacy memory and task workspace files into the current owner home",
-            ),
-        }
-    ]
 
 
 def _dangling_findings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -147,7 +128,7 @@ def _schema_findings(schema: dict[str, Any]) -> list[dict[str, Any]]:
             "path": str(schema.get("path") or ""),
             "resolution": _resolution(
                 "manual",
-                note="inspect schema_version.json or rerun home bootstrap before trusting migration status",
+                note="inspect schema_version.json or rerun home bootstrap before trusting schema status",
             ),
         }
     ]
@@ -163,7 +144,7 @@ def _backup_findings(backup: dict[str, Any]) -> list[dict[str, Any]]:
             "message": "no owner-home snapshot backup has been recorded yet",
             "resolution": _resolution(
                 "warn",
-                note="create a snapshot before destructive maintenance or schema migration",
+                note="create a snapshot before destructive maintenance or schema changes",
             ),
         }
     ]

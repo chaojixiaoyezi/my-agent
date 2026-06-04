@@ -15,7 +15,6 @@ class AcceptanceContract:
     constraints: list[str] = field(default_factory=list)
     latest_tests: list[str] = field(default_factory=list)
     required_artifact_kinds: list[str] = field(default_factory=list)
-    reserved: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

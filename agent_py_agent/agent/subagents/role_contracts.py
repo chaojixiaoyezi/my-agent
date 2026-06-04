@@ -51,7 +51,7 @@ def apply_role_contract_to_create_params(params: Any, role_template_dirs: object
     template_role = role_template_id_for_role(
         contract_role,
         role_template_dirs,
-        fallback=_fallback_template_role(contract_role),
+        default_id=_default_template_role(contract_role),
     )
     stored_role = _stored_role(original_role, contract_role, template_role, getattr(params, "normalize_role", True))
     effective_role = template_role or contract_role
@@ -62,7 +62,7 @@ def apply_role_contract_to_create_params(params: Any, role_template_dirs: object
     return replace(params, role=stored_role, acceptance_checks=checks, allowed_tools=tools, quality_contract=quality_contract)
 
 
-def _fallback_template_role(role: str) -> str | None:
+def _default_template_role(role: str) -> str | None:
     if role in {"", "general", REPORTER_ROLE, CHECKER_ROLE}:
         return None
     return "worker"

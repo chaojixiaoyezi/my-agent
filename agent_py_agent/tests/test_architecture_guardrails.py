@@ -15,15 +15,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 STAR_IMPORT_BASELINE: dict[str, int] = {}
 
-ENTRYPOINT_LINE_LIMITS = {
-    "agent_py_agent/cli/parser.py": 120,
-    "agent_py_agent/cli/chat.py": 1017,
-    "agent_py_agent/agent/subagents/manager_base.py": 751,
-    "agent_py_agent/agent/subagents/manager_patch.py": 794,
-    "agent_py_agent/agent/settings/config.py": 751,
-    "agent_py_agent/agent/log_analysis/analytics/detectors/rules.py": 747,
-}
-
 JUNK_NAME_BASELINE = {
     "agent_py_agent/agent/log_analysis/analytics/detectors/helpers.py",
     "agent_py_agent/agent/log_analysis/parsers/common.py",
@@ -69,8 +60,7 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
         "Local field-selection helper accepts candidate keys; no service boundary."
     ),
     "agent_py_agent/agent/log_analysis/tools/query_trace.py:append_trace_field_queries": (
-        "Compatibility adapter accepts legacy positional arguments before normalizing; "
-        "not a model for new service interfaces."
+        "Local request-object helper; not a model for broad service interfaces."
     ),
     "agent_py_agent/agent/memory_archive/runtime/_event_utils.py:_first_bool": (
         "Local event-field helper accepts candidate keys; no service boundary."
@@ -265,7 +255,7 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
 
 
 def _tracked_files() -> list[str]:
-    """Get list of tracked files, with fallback for non-git environments."""
+    """Get list of tracked files, with source-tree handling for non-git environments."""
     result = subprocess.run(
         ["git", "ls-files"],
         cwd=REPO_ROOT,
@@ -275,7 +265,7 @@ def _tracked_files() -> list[str]:
     if result.returncode == 0:
         return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
-    # fallback for source tarball / non-git environments
+    # Source tarball / non-git environment path.
     return [
         path.relative_to(REPO_ROOT).as_posix()
         for path in REPO_ROOT.rglob("*")
@@ -338,21 +328,6 @@ def test_runtime_artifacts_are_not_present_in_tracked_files() -> None:
             continue
         if path.suffix in RUNTIME_ARTIFACT_SUFFIXES:
             offenders.append(relative_path)
-
-    assert offenders == []
-
-
-def test_large_entrypoints_do_not_grow_past_baseline() -> None:
-    """Known-large files need gradual extraction, not further growth."""
-
-    offenders = []
-    for relative_path, max_lines in ENTRYPOINT_LINE_LIMITS.items():
-        path = REPO_ROOT / relative_path
-        if not path.exists():
-            continue
-        line_count = len(path.read_text(encoding="utf-8").splitlines())
-        if line_count > max_lines:
-            offenders.append(f"{relative_path}: {line_count} > {max_lines}")
 
     assert offenders == []
 

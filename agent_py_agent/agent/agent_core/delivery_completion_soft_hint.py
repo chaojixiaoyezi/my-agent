@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -20,13 +21,13 @@ def maybe_append_delivery_completion_soft_hint(
 ) -> None:
     if _hint_already_added(params):
         return
-    if not _is_successful_mutation(archive_record, tool_ok=tool_ok):
-        return
     contract = params.delivery_contract if isinstance(params.delivery_contract, dict) else {}
-    if not contract and not _looks_like_task_output_delivery(params, archive_record):
-        return
     workspace_root = Path(getattr(agent, "root", ".")).expanduser().resolve(strict=False)
     target_paths = _required_target_paths(contract, workspace_root)
+    if not _is_successful_delivery_signal(archive_record, tool_ok=tool_ok, target_paths=target_paths):
+        return
+    if not contract and not _looks_like_task_output_delivery(params, archive_record):
+        return
     ready_targets = [str(path) for path in target_paths if path.exists()]
     if target_paths and len(ready_targets) < len(target_paths):
         return
@@ -53,6 +54,17 @@ def maybe_append_delivery_completion_soft_hint(
     )
 
 
+def _is_successful_delivery_signal(
+    record: dict[str, object],
+    *,
+    tool_ok: bool,
+    target_paths: list[Path],
+) -> bool:
+    if _is_successful_mutation(record, tool_ok=tool_ok):
+        return True
+    return _is_successful_target_artifact_read(record, tool_ok=tool_ok, target_paths=target_paths)
+
+
 def _is_successful_mutation(record: dict[str, object], *, tool_ok: bool) -> bool:
     if not tool_ok:
         return False
@@ -60,6 +72,22 @@ def _is_successful_mutation(record: dict[str, object], *, tool_ok: bool) -> bool
     if tool not in _MUTATING_TOOLS:
         return False
     return True
+
+
+def _is_successful_target_artifact_read(
+    record: dict[str, object],
+    *,
+    tool_ok: bool,
+    target_paths: list[Path],
+) -> bool:
+    if not tool_ok or not target_paths:
+        return False
+    tool = str(record.get("tool") or "").strip()
+    if tool not in {"read_file", "read_artifact"}:
+        return False
+    refs = [_path_from_ref(ref) for ref in [*_produced_refs(record), *_record_path_refs(record)]]
+    refs = [path for path in refs if path is not None]
+    return any(ref == target for ref in refs for target in target_paths)
 
 
 def _required_target_paths(contract: dict[str, Any], workspace_root: Path) -> list[Path]:
@@ -87,21 +115,45 @@ def _produced_refs(record: dict[str, object]) -> list[str]:
     return list(dict.fromkeys(refs))
 
 
+def _record_path_refs(record: dict[str, object]) -> list[str]:
+    refs: list[str] = []
+    parameters = record.get("parameters")
+    parameters = parameters if isinstance(parameters, dict) else {}
+    for key in ("path", "file_path", "target_path", "output_path", "artifact_ref", "source_ref"):
+        _append_text(refs, parameters.get(key))
+        _append_text(refs, record.get(key))
+    _append_text(refs, record.get("source_input"))
+    return list(dict.fromkeys(refs))
+
+
+def _path_from_ref(value: object) -> Path | None:
+    text = str(value or "").strip()
+    if not text or "://" in text:
+        return None
+    return Path(text).expanduser().resolve(strict=False)
+
+
 def _looks_like_task_output_delivery(params: ToolLoopExecuteParams, record: dict[str, object]) -> bool:
-    output_dir = _task_output_dir(params)
-    if not output_dir:
+    targets = _accepted_output_targets(params)
+    if not targets:
         return False
     for ref in _produced_refs(record):
         path = Path(ref).expanduser()
         if not path.is_absolute():
             continue
-        try:
-            path.relative_to(output_dir)
-        except ValueError:
-            continue
-        if _looks_like_report_file(path):
+        resolved = path.resolve(strict=False)
+        if _matches_any_target(resolved, targets) and _looks_like_report_file(resolved):
             return True
     return False
+
+
+def _accepted_output_targets(params: ToolLoopExecuteParams) -> list[dict[str, object]]:
+    targets: list[dict[str, object]] = []
+    task_output = _task_output_dir(params)
+    if task_output is not None:
+        targets.append({"path": task_output, "kind": "dir"})
+    targets.extend(_user_requested_output_targets(params))
+    return _unique_targets(targets)
 
 
 def _task_output_dir(params: ToolLoopExecuteParams) -> Path | None:
@@ -115,6 +167,64 @@ def _task_output_dir(params: ToolLoopExecuteParams) -> Path | None:
     if not text:
         return None
     return Path(text).expanduser().resolve(strict=False)
+
+
+def _user_requested_output_targets(params: ToolLoopExecuteParams) -> list[dict[str, object]]:
+    targets: list[dict[str, object]] = []
+    attrs = getattr(params, "task_attributes", None)
+    if isinstance(attrs, dict):
+        workspace = attrs.get("run_workspace")
+        if isinstance(workspace, dict):
+            dir_text = str(workspace.get("user_requested_output_dir") or "").strip()
+            if dir_text:
+                targets.append(_output_target_for_user_path(Path(dir_text).expanduser(), force_kind="dir"))
+            path_text = str(workspace.get("user_requested_output_path") or "").strip()
+            if path_text:
+                targets.append(_output_target_for_user_path(Path(path_text).expanduser()))
+    prompt_text = "\n".join(
+        text
+        for text in (
+            str(getattr(params, "root_user_prompt", "") or ""),
+            str(getattr(params, "user_prompt", "") or ""),
+        )
+        if text
+    )
+    targets.extend(_output_target_for_user_path(path) for path in _absolute_paths_in_text(prompt_text))
+    return _unique_targets(targets)
+
+
+def _absolute_paths_in_text(text: str) -> list[Path]:
+    if not text:
+        return []
+    paths: list[Path] = []
+    for match in re.finditer(r"(?:~|/)[^\s'\"`<>()\[\]{}，。；;、]+", text):
+        raw = match.group(0).rstrip(".,:;，。；、")
+        if raw:
+            paths.append(Path(raw).expanduser())
+    return paths
+
+
+def _output_target_for_user_path(path: Path, *, force_kind: str | None = None) -> dict[str, object]:
+    resolved = path.resolve(strict=False)
+    kind = force_kind or ("file" if resolved.suffix else "dir")
+    return {"path": resolved, "kind": kind}
+
+
+def _matches_any_target(path: Path, targets: list[dict[str, object]]) -> bool:
+    for target in targets:
+        root = target.get("path")
+        if not isinstance(root, Path):
+            continue
+        if target.get("kind") == "file":
+            if path == root:
+                return True
+            continue
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
 
 
 def _looks_like_report_file(path: Path) -> bool:
@@ -161,6 +271,22 @@ def _unique_paths(paths: list[Path]) -> list[Path]:
             continue
         seen.add(key)
         result.append(path)
+    return result
+
+
+def _unique_targets(targets: list[dict[str, object]]) -> list[dict[str, object]]:
+    seen: set[tuple[str, str]] = set()
+    result: list[dict[str, object]] = []
+    for target in targets:
+        path = target.get("path")
+        kind = str(target.get("kind") or "")
+        if not isinstance(path, Path) or kind not in {"file", "dir"}:
+            continue
+        key = (str(path), kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(target)
     return result
 
 

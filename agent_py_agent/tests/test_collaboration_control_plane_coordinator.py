@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def test_coordinator_wakes_main_agent_when_collaboration_request_is_blocked(tmp_path) -> None:

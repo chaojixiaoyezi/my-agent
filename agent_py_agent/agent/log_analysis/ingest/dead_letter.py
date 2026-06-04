@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...file_io import append_jsonl
+from ...io import append_jsonl
 from ..parsers.common import sha256_text, utc_now
 from .checkpoint import safe_source_id
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import time
 
-from ..agent.gateway import (
+from ..agent.gateway_parts import (
     GatewayPaths,
     log_gateway_event,
     terminate_pid,

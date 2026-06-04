@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def test_raise_collaboration_reports_corrupt_explicit_thread(tmp_path) -> None:

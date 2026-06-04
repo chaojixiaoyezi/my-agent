@@ -16,7 +16,6 @@ from ..compact_subagent_owner import (
 )
 from ..schema import (
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 
@@ -62,7 +61,6 @@ def build_blocked_compact_resume(request: BlockedCompactResumeRequest) -> dict[s
         "next_actions": ["Find a valid compact apply id or rerun memory-compact --apply."],
         "context_block": "",
         "subagent_session_compact": _subagent_extension(request),
-        "reserved": runtime_memory_reserved_fields(COMPACT_RESUME_SCHEMA),
     }
 
 
@@ -78,7 +76,6 @@ def _blocked_consistency(request: BlockedCompactResumeRequest) -> dict[str, Any]
         "checks": [{"name": "metadata_loaded", "ok": False, "severity": "hard"}],
         "metadata_load_error": dict(request.metadata_load_error or {}),
         "missing_fields": [],
-        "reserved": runtime_memory_reserved_fields(COMPACT_RESUME_CONSISTENCY_SCHEMA),
     }
 
 

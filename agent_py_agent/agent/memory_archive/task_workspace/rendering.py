@@ -25,11 +25,9 @@ def write_task_yaml_if_missing(path: Path, task_id: str, task: Any, now: float) 
         f'parent_run_id: "{_yaml_quote(str(getattr(task, "parent_id", "")))}"\n'
         f"depth: {int(getattr(task, 'depth', 0) or 0)}\n"
         f'created_at: {float(getattr(task, "created_at", 0.0) or now)}\n'
-        "source: subagent_persistence_adapter\n"
+        "source: subagent_task_workspace\n"
         "objective: |-\n"
         f"{_indent_block(goal or '待填写')}\n"
-        "legacy:\n"
-        f'  task_dir: "{_yaml_quote(str(getattr(task, "task_dir", "")))}"\n'
     )
     path.write_text(content, encoding="utf-8")
 
@@ -46,6 +44,21 @@ def write_summary(path: Path, task_id: str, run_id: str, task: Any) -> None:
         f"- current_step: {getattr(task, 'current_step', '') or getattr(task, 'status', '')}\n\n"
         "## Latest\n\n"
         f"{latest}\n"
+    )
+    path.write_text(content, encoding="utf-8")
+
+
+def write_parent_summary_placeholder(path: Path, task_id: str, child_run_id: str) -> None:
+    """Create a parent task summary without copying child-only status text."""
+
+    content = (
+        "# Current Summary\n\n"
+        f"- task_id: {task_id}\n"
+        f"- primary_run_id: {task_id}\n"
+        "- status: RUNNING\n"
+        "- current_step: waiting_for_child_runs\n\n"
+        "## Latest\n\n"
+        f"子代理 {child_run_id} 已登记，等待父任务汇总。\n"
     )
     path.write_text(content, encoding="utf-8")
 
@@ -71,4 +84,9 @@ def _indent_block(value: str) -> str:
     return "\n".join(f"  {line}" for line in value.splitlines() or [""])
 
 
-__all__ = ["blackboard_content", "write_summary", "write_task_yaml_if_missing"]
+__all__ = [
+    "blackboard_content",
+    "write_parent_summary_placeholder",
+    "write_summary",
+    "write_task_yaml_if_missing",
+]

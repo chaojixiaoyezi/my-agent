@@ -17,23 +17,22 @@ from ..contracts.tool_protocol_v2 import normalize_tool_result
 from .models import ToolExecutionResult
 
 
-def legacy_payloads_to_tool_envelopes(
+def payloads_to_tool_envelopes(
     payloads: list[dict[str, Any]],
     *,
     scope: RunScope | None = None,
-    source: str = "legacy_text_protocol",
+    source: str = "text_protocol",
 ) -> list[ToolCallEnvelope]:
     return [
         tool_call_envelope_from_payload(
             ToolCallEnvelopePayloadRequest(
                 payload=payload,
-                call_id=f"legacy-tool-call-{index}",
+                call_id=f"tool-call-{index}",
                 source=source,
                 scope=scope,
-                reserved={"legacy_index": index},
             )
         )
-        for index, payload in enumerate(_dedupe_legacy_tool_payloads(payloads), start=1)
+        for index, payload in enumerate(_dedupe_tool_payloads(payloads), start=1)
     ]
 
 
@@ -64,10 +63,8 @@ def attach_result_envelope(
         error="" if result.ok else result.output,
         scope=envelope.scope,
         operation_id=envelope.operation_id,
-        reserved={
-            "source": envelope.source,
-            "action_created_at": envelope.created_at,
-        },
+        source=envelope.source,
+        action_created_at=envelope.created_at,
     ).to_dict()
     result.result_envelope["tool_protocol_v2"] = _tool_protocol_v2_payload(result, envelope)
     if not result.ok:
@@ -96,7 +93,7 @@ def _tool_protocol_v2_payload(result: ToolExecutionResult, envelope: ToolCallEnv
     payload: dict[str, object] = {
         "operation_id": envelope.operation_id,
         "tool_name": result.tool,
-        "idempotency_key": str(envelope.reserved.get("idempotency_key") or ""),
+        "idempotency_key": envelope.idempotency_key,
         "status": "succeeded" if result.ok else "failed",
         "output": "" if result.ok else result.output,
         "metadata": {
@@ -115,7 +112,7 @@ def _tool_protocol_v2_payload(result: ToolExecutionResult, envelope: ToolCallEnv
     return normalize_tool_result(payload).to_dict()
 
 
-def _dedupe_legacy_tool_payloads(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _dedupe_tool_payloads(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     unique: list[dict[str, Any]] = []
     for payload in payloads:

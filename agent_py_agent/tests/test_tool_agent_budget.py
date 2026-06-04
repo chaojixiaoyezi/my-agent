@@ -10,6 +10,7 @@ from agent_py_agent.agent.agent_core.tool_guard.agent_budget import (
     ToolAgentBudgetRequest,
     check_tool_agent_budget,
 )
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.settings.config_io import load_simple_yaml
 
 
@@ -44,6 +45,15 @@ def test_tool_agent_budget_uses_shared_runtime_config_defaults():
 
     assert blocked is not None
     assert f"最近 {window_seconds} 秒最多 {max_calls} 次工具调用" in blocked.output
+
+
+def test_tool_agent_budget_agent_config_none_disables_hidden_default():
+    agent = SimpleNamespace(config=AgentConfig(enable_tools=True, memory_path="memory.jsonl"))
+    defaults = load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
+    max_calls = int(defaults["tool_agent_budget_max_calls"])
+
+    for index in range(max_calls + 3):
+        assert check_tool_agent_budget(ToolAgentBudgetRequest(agent, "run-1", "read_file", now=float(index))) is None
 
 
 def test_tool_agent_budget_blocks_after_per_agent_window_limit():

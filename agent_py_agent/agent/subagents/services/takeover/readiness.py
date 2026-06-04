@@ -40,11 +40,9 @@ def build_takeover_readiness_packet(task: SubAgentTask) -> dict[str, object]:
         "recommended_next_action": _recommended_next_action(task),
         "recommended_read_order": read_order,
         "boundary_notes": list(_BOUNDARY_NOTES),
-        "reserved": {
-            "auto_takeover": False,
-            "reads_artifact_bodies": False,
-            "packet_is_recovery_index": True,
-        },
+        "auto_takeover": False,
+        "reads_artifact_bodies": False,
+        "packet_is_recovery_index": True,
     }
 
 
@@ -63,7 +61,7 @@ def render_takeover_readiness_markdown(packet: dict[str, object]) -> str:
             f"- current_step: {packet.get('current_step', '')}",
             f"- failure_handoff_ref: {packet.get('failure_handoff_ref', '') or 'none'}",
             f"- context_bundle: {context_bundle_refs.get('agent_run_context_bundle', '') or 'none'}",
-            f"- legacy_checkpoint: {checkpoint_refs.get('legacy_checkpoint', '') or 'none'}",
+            f"- task_checkpoint: {checkpoint_refs.get('task_checkpoint', '') or 'none'}",
             f"- agent_run_checkpoint: {checkpoint_refs.get('agent_run_checkpoint', '') or 'none'}",
             "",
             "## 建议读取顺序",
@@ -127,7 +125,7 @@ def _run_identity(task: SubAgentTask) -> dict[str, object]:
 
 def _checkpoint_refs(task: SubAgentTask) -> dict[str, str]:
     return {
-        "legacy_checkpoint": task.checkpoint_json or task.checkpoint_ref,
+        "task_checkpoint": task.checkpoint_json or task.checkpoint_ref,
         "agent_run_checkpoint": task.agent_run_checkpoint_json,
         "compact_metadata": task.agent_run_latest_compaction_metadata_json,
         "compact_summary": task.agent_run_latest_compaction_summary_md,
@@ -136,8 +134,8 @@ def _checkpoint_refs(task: SubAgentTask) -> dict[str, str]:
 
 def _context_bundle_refs(task: SubAgentTask) -> dict[str, str]:
     return {
-        "legacy_context_bundle": str(Path(task.task_dir) / "context_bundle.json") if task.task_dir else "",
-        "legacy_context_bundle_md": str(Path(task.task_dir) / "CONTEXT_BUNDLE.md") if task.task_dir else "",
+        "task_context_bundle": str(Path(task.task_dir) / "context_bundle.json") if task.task_dir else "",
+        "task_context_bundle_md": str(Path(task.task_dir) / "CONTEXT_BUNDLE.md") if task.task_dir else "",
         "agent_run_context_bundle": str(Path(task.agent_run_workspace_dir) / "context_bundle.json")
         if task.agent_run_workspace_dir
         else "",
@@ -153,7 +151,7 @@ def _recommended_read_order(task: SubAgentTask) -> list[str]:
         task.failure_handoff_json if task.failure_handoff.run_id else "",
         task.takeover_readiness_json,
         context_refs.get("agent_run_context_bundle", ""),
-        context_refs.get("legacy_context_bundle", ""),
+        context_refs.get("task_context_bundle", ""),
         task.agent_run_checkpoint_json,
         task.checkpoint_json or task.checkpoint_ref,
         task.status_report_json,

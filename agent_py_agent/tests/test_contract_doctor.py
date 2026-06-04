@@ -48,12 +48,11 @@ def test_contract_doctor_rejects_conflicts_and_impossible_rules() -> None:
     assert report.error_codes == ("CONTRACT_RULE_CONFLICT", "CONTRACT_IMPOSSIBLE")
 
 
-def test_contract_doctor_migrates_v1_and_rejects_unknown_version() -> None:
-    from agent_py_agent.agent.contracts.contract_doctor import lint_contract, migrate_contract
+def test_contract_doctor_rejects_non_current_versions() -> None:
+    from agent_py_agent.agent.contracts.contract_doctor import lint_contract
 
-    migrated = migrate_contract({"version": 1, "artifact_path": "output.md"})
+    v1 = lint_contract({"version": 1, "artifact_path": "output.md"})
     unsupported = lint_contract({"version": 99, "artifacts": {"required": []}})
 
-    assert migrated["version"] == 2
-    assert migrated["artifacts"]["required"][0]["path"] == "output.md"
+    assert v1.error_codes == ("CONTRACT_VERSION_UNSUPPORTED",)
     assert unsupported.error_codes == ("CONTRACT_VERSION_UNSUPPORTED",)

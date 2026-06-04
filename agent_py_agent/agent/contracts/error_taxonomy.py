@@ -308,8 +308,8 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         code="COMPACT_REF_MISSING",
         category="compact",
         retryable=False,
-        recommended_action=RecoveryAction.FALLBACK_TO_CHECKPOINT.value,
-        recovery_hint="compact 引用缺失；降级读 checkpoint、summary、raw archive，不要继续自动执行。",
+        recommended_action=RecoveryAction.RECOVER_FROM_CHECKPOINT.value,
+        recovery_hint="compact 引用缺失；读取 checkpoint、summary、raw archive 做恢复，不要继续自动执行。",
     ),
     "NO_PROGRESS": ErrorContract(
         code="NO_PROGRESS",

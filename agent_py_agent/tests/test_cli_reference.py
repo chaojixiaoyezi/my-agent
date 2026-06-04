@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from agent_py_agent.__main__ import build_parser
+from agent_py_agent.cli.parser import build_parser
 
 
 def _collect_subparser_missing(subparser, command, reference):

@@ -7,7 +7,7 @@ from agent_py_agent.agent.agent_core.subagent.finalize_helpers import (
     record_finalized_runner_result,
 )
 from agent_py_agent.agent.agent_core.subagent.params import SubagentFinalizeParams
-from agent_py_agent.agent.subagent import SubAgentParsedOutput
+from agent_py_agent.agent.subagents import SubAgentParsedOutput
 
 
 def _params(run_id: str = "parent"):

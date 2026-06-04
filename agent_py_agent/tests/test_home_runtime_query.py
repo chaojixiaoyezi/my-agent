@@ -3,14 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.agent_core._runtime_params import ArchiveRunParams
 from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
     write_run_task_workspace_if_needed,
 )
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive import RawMemoryEvent, append_raw_event
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.user_space.home_runtime_query import (
     TaskWorkspaceQuery,
     list_task_workspaces,
@@ -19,6 +18,7 @@ from agent_py_agent.agent.user_space.run_workspace import (
     EnsureRunWorkspaceRequest,
     ensure_run_workspace,
 )
+from agent_py_agent.cli.parser import build_parser
 
 
 def _write_config(tmp_path: Path, home: Path) -> Path:
@@ -88,11 +88,11 @@ def test_task_workspace_list_uses_configured_provider_owner_only(tmp_path: Path,
         EnsureRunWorkspaceRequest(
             home=home,
             template="tasks/{date}/{task_slug}",
-            task_name="legacy-task",
-            user_prompt="legacy",
-            request_id="req-legacy",
-            run_id="run-legacy",
-            task_id="legacy-task",
+            task_name="sample-task",
+            user_prompt="previous",
+            request_id="req-sample",
+            run_id="run-previous",
+            task_id="sample-task",
             created_at="2026-05-13T01:00:00+00:00",
         )
     )
@@ -419,39 +419,6 @@ def test_home_status_reports_provider_identity_indexes(tmp_path: Path):
 
     assert status["identity"]["provider_index_files"] == 1
     assert status["identity"]["provider_identity"]["exists"] is True
-
-
-def test_memory_doctor_reports_legacy_migration_advice(tmp_path: Path, capsys):
-    home = tmp_path / "home"
-    config_path = _write_config(tmp_path, home)
-    legacy_daily = home / "memory" / "daily" / "2026-05-13.jsonl"
-    legacy_daily.parent.mkdir(parents=True, exist_ok=True)
-    legacy_daily.write_text('{"content":"legacy"}\n', encoding="utf-8")
-
-    code, payload = _run_cli_json(capsys, config_path, "memory-doctor")
-
-    assert code == 0
-    assert payload["home"]["migration"]["legacy_daily_memory"]["record_count"] == 1
-    assert payload["home_doctor"]["migration"]["pending_count"] >= 1
-    assert payload["home"]["migration"]["legacy_daily_memory"]["target"] == str(
-        home.resolve() / "owners" / "local" / "main" / "memory" / "daily"
-    )
-
-
-def test_home_migrate_apply_copies_legacy_daily_to_owner_home(tmp_path: Path, capsys):
-    home = tmp_path / "home"
-    config_path = _write_config(tmp_path, home)
-    legacy_daily = home / "memory" / "daily" / "2026-05-13.jsonl"
-    legacy_daily.parent.mkdir(parents=True, exist_ok=True)
-    legacy_daily.write_text('{"content":"legacy"}\n', encoding="utf-8")
-
-    code, payload = _run_cli_json(capsys, config_path, "home-migrate", "--apply")
-
-    target = home.resolve() / "owners" / "local" / "main" / "memory" / "daily" / "2026-05-13.jsonl"
-    assert code == 0
-    assert payload["migration"]["applied"] is True
-    assert target.read_text(encoding="utf-8") == legacy_daily.read_text(encoding="utf-8")
-    assert legacy_daily.exists()
 
 
 def test_task_workspace_list_cli_shows_home_tasks(tmp_path: Path, capsys):

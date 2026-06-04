@@ -2,7 +2,7 @@
 """Field normalization helpers for subagent manager data models.
 
 新手说明:
-这个模块从 manager_base.py 中提取出来，负责把外部传入的
+这个模块负责把外部传入的
 松散字典/列表数据规范化成强类型的数据模型实例。主要处理
 QualityContract、ContextManifest 和 context_packs。
 """

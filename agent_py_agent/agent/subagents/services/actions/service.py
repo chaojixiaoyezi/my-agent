@@ -4,7 +4,7 @@ from __future__ import annotations
 """action apply service for subagent tasks.
 
 这里承接动作执行逻辑（apply_actions, _apply_action_item 等）。
-SubAgentManager 通过 facade 方法委托到这里。
+SubAgentManager 通过当前服务组合调用这里。
 """
 
 import time

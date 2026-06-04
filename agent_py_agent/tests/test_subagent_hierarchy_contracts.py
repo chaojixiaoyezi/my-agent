@@ -60,7 +60,7 @@ def test_hierarchy_schedule_preserves_forbidden_file_contract_when_child_goal_su
     child = manager.load(result.created_run_ids[0])
 
     assert child.attributes["forbidden_files"] == [
-        "product.html", "old-product.html", "legacy.html", "obsolete.html",
+        "product.html", "old-product.html", "stale.html", "obsolete.html",
         "output.json", "RUNNER_RESULT.md", "execution_context.json",
     ]
 
@@ -77,7 +77,7 @@ def _forbidden_file_contract_root(manager: SubAgentManager, build):
                 "flow-a.html", "flow-b.html", "flow-done.html", "style.css", "app.js",
             ],
             "forbidden_files": [
-                "product.html", "old-product.html", "legacy.html", "obsolete.html",
+                "product.html", "old-product.html", "stale.html", "obsolete.html",
                 "output.json", "RUNNER_RESULT.md", "execution_context.json",
             ],
         },
@@ -167,7 +167,7 @@ def test_hierarchy_file_contract_skips_forbidden_rename_targets(tmp_path):
         extra_write_roots=[str(build)],
         attributes={
             "required_files": ["index.html", "items.html", "item-detail.html", "style.css", "app.js"],
-            "forbidden_files": ["product.html", "old-product.html", "legacy.html"],
+            "forbidden_files": ["product.html", "old-product.html", "stale.html"],
         },
     )
 
@@ -184,11 +184,11 @@ def test_hierarchy_file_contract_skips_forbidden_rename_targets(tmp_path):
     assert "\n- item-detail.html\n" in required_section
     assert "\n- product.html\n" not in required_section
     assert "\n- old-product.html\n" not in required_section
-    assert "\n- legacy.html\n" not in required_section
+    assert "\n- stale.html\n" not in required_section
     assert "forbidden_files:" in child.goal
     assert "\n- product.html\n" in child.goal
     assert "\n- old-product.html\n" in child.goal
-    assert "\n- legacy.html" in child.goal
+    assert "\n- stale.html" in child.goal
 
 def test_hierarchy_schedule_blocks_leaf_before_explicit_four_layer_chain_reaches_depth_three(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")

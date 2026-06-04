@@ -9,7 +9,6 @@ from typing import Any
 class ActivityTimeoutPolicy:
     idle_timeout_seconds: int
     wall_timeout_seconds: int = 0
-    reserved: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -20,7 +19,6 @@ class ActivitySnapshot:
     latest_checkpoint_ref: str = ""
     latest_recovery_snapshot_ref: str = ""
     active_tool_count: int = 0
-    reserved: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

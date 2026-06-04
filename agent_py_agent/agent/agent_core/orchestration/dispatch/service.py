@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ....capabilities import CapabilityRouter
-from ....capability_config import CapabilityConfig
+from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability.config import CapabilityConfig
+
 from ....subagents.models import (
     SubAgentCapabilityRouteOptions,
     SubAgentDueCheckOptions,

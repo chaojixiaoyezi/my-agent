@@ -19,7 +19,7 @@ from agent_py_agent.agent.agent_core.tool_model_generation import (
     _effective_model_request_timeout_seconds,
     generate_model_response,
 )
-from agent_py_agent.agent.backend import ModelResponse
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderTimeoutError
 
 

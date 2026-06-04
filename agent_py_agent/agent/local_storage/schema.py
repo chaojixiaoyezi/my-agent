@@ -96,8 +96,7 @@ _CONTROL_PLANE_SQL = (
         heartbeat_at REAL NOT NULL DEFAULT 0,
         created_at REAL NOT NULL,
         updated_at REAL NOT NULL,
-        metadata_json TEXT NOT NULL DEFAULT '{}',
-        reserved_json TEXT NOT NULL DEFAULT '{}'
+        metadata_json TEXT NOT NULL DEFAULT '{}'
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_agent_runs_root ON agent_runs(root_task_id)",
@@ -112,8 +111,7 @@ _CONTROL_PLANE_SQL = (
         parent_run_id TEXT NOT NULL DEFAULT '',
         event_type TEXT NOT NULL,
         payload_json TEXT NOT NULL DEFAULT '{}',
-        created_at REAL NOT NULL,
-        reserved_json TEXT NOT NULL DEFAULT '{}'
+        created_at REAL NOT NULL
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_agent_events_root ON agent_events(root_task_id, created_at)",
@@ -130,8 +128,7 @@ _CONTROL_PLANE_SQL = (
         failed_agents INTEGER NOT NULL DEFAULT 0,
         latest_summary TEXT NOT NULL DEFAULT '',
         updated_at REAL NOT NULL,
-        metadata_json TEXT NOT NULL DEFAULT '{}',
-        reserved_json TEXT NOT NULL DEFAULT '{}'
+        metadata_json TEXT NOT NULL DEFAULT '{}'
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_task_rollups_updated ON task_rollups(updated_at)",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """配置解析验证测试。"""
 
-from agent_py_agent.agent.config import load_config
+from agent_py_agent.agent.settings import load_config
 from agent_py_agent.agent.settings.config import normalize_agent_config
 
 
@@ -128,8 +128,8 @@ def test_load_config_warns_on_bad_values(tmp_path):
         ],
     )
     config = load_config(config_path)
-    assert config.model_backend == "echo"  # fallback
-    assert config.request_timeout == 240  # fallback
+    assert config.model_backend == "echo"  # default
+    assert config.request_timeout == 240  # default
     assert len(config.config_warnings) >= 3  # backend + timeout + temperature + unknown key
 
 
@@ -187,12 +187,12 @@ def test_acceptance_real_execution_config_coercion_and_range():
     assert normalized["result_check_timeout_seconds"] == 30
     assert normalized["closeout_for_all_task_nodes"] is True
 
-    fallback, warnings = normalize_agent_config({
+    normalized_default, warnings = normalize_agent_config({
         "result_check_timeout_seconds": "9999",
     })
     defaults_normalized, _ = normalize_agent_config({})
     assert any("result_check_timeout_seconds" in warning for warning in warnings)
-    assert fallback["result_check_timeout_seconds"] == defaults_normalized["result_check_timeout_seconds"]
+    assert normalized_default["result_check_timeout_seconds"] == defaults_normalized["result_check_timeout_seconds"]
 
 
 def test_subagent_debug_trace_level_defaults_to_off():
@@ -208,10 +208,10 @@ def test_subagent_debug_trace_level_accepts_zero_to_five():
     assert warnings == []
     assert normalized["subagent_debug_trace_level"] == 5
 
-    fallback, warnings = normalize_agent_config({"subagent_debug_trace_level": "6"})
+    normalized_default, warnings = normalize_agent_config({"subagent_debug_trace_level": "6"})
     defaults_normalized, _ = normalize_agent_config({})
     assert any("subagent_debug_trace_level" in warning for warning in warnings)
-    assert fallback["subagent_debug_trace_level"] == defaults_normalized["subagent_debug_trace_level"]
+    assert normalized_default["subagent_debug_trace_level"] == defaults_normalized["subagent_debug_trace_level"]
 
 
 def test_subagent_memory_policy_config_is_normalized_without_closed_enum():
@@ -227,12 +227,12 @@ def test_subagent_memory_policy_config_is_normalized_without_closed_enum():
     assert normalized["subagent_memory_delete_after_days"] == 14
     assert normalized["subagent_destroy_summary_required"] is False
 
-    fallback, warnings = normalize_agent_config({
+    normalized_default, warnings = normalize_agent_config({
         "subagent_memory_delete_after_days": "-1",
     })
     defaults_normalized, _ = normalize_agent_config({})
     assert any("subagent_memory_delete_after_days" in warning for warning in warnings)
-    assert fallback["subagent_memory_delete_after_days"] == defaults_normalized["subagent_memory_delete_after_days"]
+    assert normalized_default["subagent_memory_delete_after_days"] == defaults_normalized["subagent_memory_delete_after_days"]
 
 
 def test_lease_config_defaults():

@@ -226,8 +226,8 @@ def test_runtime_memory_routing_uses_home_index_when_project_index_missing(tmp_p
     from agent_py_agent.agent.agent_core.runtime.loop_support import (
         _routed_memory_context_for_request,
     )
-    from agent_py_agent.agent.config import AgentConfig
     from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
 
     home = tmp_path / "home"
     root = tmp_path / "project"

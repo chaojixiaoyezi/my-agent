@@ -162,22 +162,18 @@ class TestQQConversion:
         assert msg.metadata["qq_guild_id"] == "guild_1"
         assert msg.metadata["qq_channel_id"] == "chn_2"
 
-    def test_qq_legacy_format_converted(self) -> None:
+    def test_qq_event_without_official_payload_is_ignored(self) -> None:
         payload = {
             "event": {
                 "user_id": 999,
-                "content": "legacy msg",
+                "content": "plain msg",
                 "msg_id": "old_id",
                 "timestamp": 1111111,
                 "guild_id": "g1",
                 "channel_id": "c1",
             },
         }
-        msg = qq_to_incoming(payload)
-        assert msg is not None
-        assert msg.user_id == "999"
-        assert msg.content == "legacy msg"
-        assert msg.message_id == "old_id"
+        assert qq_to_incoming(payload) is None
 
     def test_qq_empty_content_returns_none(self) -> None:
         payload = {"d": {"author": {"id": "1"}, "content": "  ", "msg_id": "x"}}

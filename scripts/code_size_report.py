@@ -97,8 +97,8 @@ def _recommendations() -> list[str]:
         "## 13. Next Recommendations",
         "- Keep `cli/parser.py` thin and route registration through `cli/commands/`.",
         "- Continue extracting `cli/chat.py` into chat session, input loop, renderer, and gateway client modules.",
-        "- Move SubAgent mixin logic into services and repositories behind the manager facade.",
-        "- Split memory archive query/runtime and log analysis tools by query, rendering, and persistence responsibilities.",
+        "- Keep SubAgent manager as the readable owner of its main lifecycle, with services only where they remove real branching.",
+        "- Split memory archive or log analysis only when one file owns unrelated query, rendering, and persistence responsibilities.",
         "- Run `--write-baseline` to capture current state, then use `--mode strict --baseline` to block only new violations.",
     ]
 

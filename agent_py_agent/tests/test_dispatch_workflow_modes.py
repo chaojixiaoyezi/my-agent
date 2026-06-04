@@ -8,10 +8,10 @@ from __future__ import annotations
 import json
 
 from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
-from agent_py_agent.agent.capabilities import CapabilityRouter
-from agent_py_agent.agent.capability_config import CapabilityConfig
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def test_workflow_plan_mode_persists_plan_only(tmp_path):

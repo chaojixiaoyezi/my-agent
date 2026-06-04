@@ -11,12 +11,12 @@ from typing import TYPE_CHECKING
 from ..runtime_errors import runtime_error_report
 
 if TYPE_CHECKING:
-    from ..local_store import LocalSearchResult
+    from ..local_storage import LocalSearchResult
     from .jsonl import MemoryRecord
 
 
 class JsonlMemoryIndexMixin:
-    """Private LocalStore/search helpers for the JsonlMemory facade."""
+    """Private LocalStore/search helpers for JsonlMemory."""
 
     def _search_jsonl(self, query: str, top_k: int = 5) -> list[MemoryRecord]:
         """Search the JSONL fact stream with simple keyword scoring."""

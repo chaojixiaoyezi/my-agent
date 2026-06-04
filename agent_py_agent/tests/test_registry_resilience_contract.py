@@ -67,6 +67,22 @@ class HugeOutputTool(BaseTool):
         return ToolExecutionResult("huge_output", True, "x" * 25000)
 
 
+class HugeReadFileTool(BaseTool):
+    spec = ToolSpec(
+        name="read_file",
+        category="test",
+        effect="read_only",
+        description="Returns large file content.",
+        use_cases=[],
+        avoid_when=[],
+        keywords=[],
+        parameters={},
+    )
+
+    def execute(self, params):
+        return ToolExecutionResult("read_file", True, "文件正文" * 9000)
+
+
 class PreservedOutputTool(BaseTool):
     spec = ToolSpec(
         name="preserved_output",
@@ -121,6 +137,14 @@ def test_registry_archives_large_tool_output(tmp_path: Path) -> None:
     artifact_ref = payload["artifact_ref"]
     assert payload["truncated"] is True
     assert (tmp_path / artifact_ref).read_text(encoding="utf-8") == "x" * 25000
+
+
+def test_registry_preserves_read_file_output_for_context_compaction(tmp_path: Path) -> None:
+    result = execute_registry_call(_call({"tool": "read_file"}, {"read_file": HugeReadFileTool()}, tmp_path))
+
+    assert result.ok is True
+    assert result.output == "文件正文" * 9000
+    assert result.result_envelope["tool_output_policy"]["preserved"] is True
 
 
 def test_registry_preserves_large_machine_output_when_declared(tmp_path: Path) -> None:

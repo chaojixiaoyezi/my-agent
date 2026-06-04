@@ -19,6 +19,7 @@ class ToolConfig:
 
     enable_tools: bool = True
     max_tool_rounds: int | None = None
+    max_tool_calls_per_round: int | None = None
     tool_agent_budget_window_seconds: int | None = None
     tool_agent_budget_max_calls: int | None = None
     tool_artifact_read_budget_window_seconds: int = 600

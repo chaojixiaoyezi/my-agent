@@ -3,8 +3,8 @@
 
 Human version:
 This is the single source of truth for deliverable files inside one run
-workspace. Legacy payloads may still mention paths, but closeout, boards and
-parents should first resolve those paths through this registry.
+workspace. Closeout, boards, and parents resolve deliverables through this
+registry.
 """
 
 from __future__ import annotations

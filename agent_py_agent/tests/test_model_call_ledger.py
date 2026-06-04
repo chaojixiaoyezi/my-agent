@@ -107,7 +107,7 @@ def test_estimates_prefill_and_first_token_timeout_without_probe_samples() -> No
             input_tokens=2000,
             ledger=ledger,
             options=FirstTokenTimeoutOptions(
-                fallback_prefill_tokens_per_second=500.0,
+                estimated_prefill_tokens_per_second=500.0,
                 base_first_token_seconds=3.0,
                 safety_margin=2.0,
                 min_timeout_seconds=1.0,
@@ -116,7 +116,7 @@ def test_estimates_prefill_and_first_token_timeout_without_probe_samples() -> No
         )
     )
 
-    assert estimate.source == "fallback"
+    assert estimate.source == "estimated_rate"
     assert estimate.prefill_seconds == 4.0
     assert estimate.first_token_seconds == 3.0
     assert estimate.timeout_seconds == 14.0
@@ -153,7 +153,7 @@ def test_first_token_timeout_estimate_clamps_to_bounds() -> None:
             input_tokens=1,
             ledger=ModelCallLedger(),
             options=FirstTokenTimeoutOptions(
-                fallback_prefill_tokens_per_second=10000.0,
+                estimated_prefill_tokens_per_second=10000.0,
                 base_first_token_seconds=0.1,
                 safety_margin=1.0,
                 min_timeout_seconds=5.0,
@@ -166,7 +166,7 @@ def test_first_token_timeout_estimate_clamps_to_bounds() -> None:
             input_tokens=1_000_000,
             ledger=ModelCallLedger(),
             options=FirstTokenTimeoutOptions(
-                fallback_prefill_tokens_per_second=100.0,
+                estimated_prefill_tokens_per_second=100.0,
                 base_first_token_seconds=10.0,
                 safety_margin=2.0,
                 min_timeout_seconds=5.0,
@@ -185,7 +185,7 @@ def test_cache_suspected_mark_for_large_fast_first_token_record() -> None:
             input_tokens=12000,
             ledger=ModelCallLedger(),
             options=FirstTokenTimeoutOptions(
-                fallback_prefill_tokens_per_second=400.0,
+                estimated_prefill_tokens_per_second=400.0,
                 base_first_token_seconds=3.0,
                 safety_margin=1.0,
                 min_timeout_seconds=1.0,

@@ -9,7 +9,7 @@ from ...common.value_parsing import dedupe_strings, string_list
 from ...conversation.store_guidance import normalize_guidance_target_type
 from ...runtime_errors import runtime_error_report
 from ...subagents.kernel import SubagentKernelQuery
-from ...tools import BaseTool, ToolExecutionResult, ToolSpec
+from ...tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 from ..runner.context import current_subagent_run_id
 
 if TYPE_CHECKING:

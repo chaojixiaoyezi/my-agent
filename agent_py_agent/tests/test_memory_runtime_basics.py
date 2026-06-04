@@ -6,8 +6,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from agent_py_agent.agent.agent_core._finalization_service import FinalizationService
+from agent_py_agent.agent.agent_core._runtime_params import EstimateTokenParams
 from agent_py_agent.agent.backends.base import ModelResponse
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive import (
     CompressionSnapshot,
@@ -16,6 +17,7 @@ from agent_py_agent.agent.memory_archive import (
     append_snapshot,
     has_resume_trigger,
 )
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def _write_route(root: Path) -> None:
@@ -53,7 +55,7 @@ class RuntimeOverflowBackend:
 
     def generate(self, prompt: str, on_chunk=None):
         return ModelResponse(
-            text="context overflow fallback response",
+            text="context overflow response",
             backend=self.name,
             runtime_status="blocked",
             runtime_reason="context_overflow",
@@ -247,6 +249,34 @@ def test_run_uses_provider_usage_for_active_compact_budget_not_cumulative(tmp_pa
     assert 700 <= second.turn_token_estimate < 800
     assert second.cumulative_token_estimate >= first.turn_token_estimate + second.turn_token_estimate
     assert second.memory_compact_suggested is False
+
+
+def test_active_compact_budget_excludes_full_archive_tool_history(tmp_path):
+    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    service = FinalizationService(agent)
+    archive_tool_calls = [
+        {
+            "tool": "read_file",
+            "parameters": {"path": f"/tmp/source-{idx}.md"},
+            "output": "x" * 2000,
+        }
+        for idx in range(40)
+    ]
+
+    ledger = service._estimate_token_usage(
+        EstimateTokenParams(
+            user_prompt="短任务",
+            runtime_injections=[],
+            memories=[],
+            final_response=ModelResponse(text="完成", backend="test"),
+            archive_tool_calls=archive_tool_calls,
+            run_request_id="active-budget-archive-history",
+            turn_id="active-budget-archive-history",
+        )
+    )
+
+    assert ledger["turn"] > 10_000
+    assert ledger["active"] < 1_000
 
 
 def test_run_no_save_blocks_persistent_auto_compact_apply(tmp_path):

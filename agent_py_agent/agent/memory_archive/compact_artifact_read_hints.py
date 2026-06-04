@@ -29,12 +29,14 @@ def artifact_read_hint_lines(hints: list[dict[str, Any]]) -> list[str]:
 
 
 def _hint(ref: dict[str, Any]) -> dict[str, Any]:
-    fallback = str(ref.get("path", "") or "")
-    artifact_ref = str(ref.get("scoped_call_id") or ref.get("call_id") or fallback)
+    artifact_path = str(ref.get("path", "") or "")
+    source_path = str(ref.get("source_path") or ref.get("source_input") or artifact_path)
+    artifact_ref = str(ref.get("scoped_call_id") or ref.get("call_id") or artifact_path)
     return {
         "tool": "read_artifact",
         "artifact_ref": artifact_ref,
-        "fallback_path": fallback,
+        "source_path": source_path,
+        "artifact_path": artifact_path,
         "offset": 0,
         "max_chars": DEFAULT_HINT_MAX_CHARS,
         "mode": "slice",
@@ -42,7 +44,6 @@ def _hint(ref: dict[str, Any]) -> dict[str, Any]:
         "source_tool": str(ref.get("tool", "") or ""),
         "sha256": str(ref.get("sha256", "") or ""),
         "size_bytes": int(ref.get("size_bytes", 0) or 0),
-        "reserved": {},
     }
 
 

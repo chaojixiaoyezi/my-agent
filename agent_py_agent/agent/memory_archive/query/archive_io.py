@@ -115,7 +115,7 @@ def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dic
         "source": str(payload.get("source") or derived.get("source") or ""),
         "archive_level": _archive_level_value(payload.get("archive_level", 3)),
         "created_at": created_at,
-        "created_at_sort": _created_at_sort(created_at, fallback=path.stat().st_mtime),
+        "created_at_sort": _created_at_sort(created_at, default=path.stat().st_mtime),
         "content_preview": _archive_preview(payload),
         "content_path": str(payload.get("content_path", "") or ""),
         "content_hash": str(payload.get("content_hash", "") or ""),

@@ -8,6 +8,7 @@ from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import (
 )
 from agent_py_agent.agent.contracts.artifact_collection_mapping import mapping_findings
 from agent_py_agent.agent.contracts.artifact_format_lint import lint_artifact_format
+from agent_py_agent.agent.contracts.gates.artifact.gate import evaluate_delivery_closeout_gate
 from agent_py_agent.agent.contracts.gates.artifact.provenance import (
     evaluate_artifact_provenance_gate,
 )
@@ -107,6 +108,29 @@ def test_artifact_provenance_rejects_stale_source_hash(tmp_path: Path) -> None:
     assert decision.allowed is False
     assert "BUILDER_PROVENANCE_STALE" in decision.finding_codes
     assert decision.to_dict()["recovery"]["actions"][0]["evidence"]["current_state"]
+
+
+def test_delivery_closeout_gate_blocks_required_target_coverage_missing() -> None:
+    decision = evaluate_delivery_closeout_gate(
+        {
+            "ok": True,
+            "report_ref": ".agent_delivery/closeout.json",
+            "run_id": "run-1",
+            "artifacts": [],
+            "target_coverage_status": {
+                "scope_label": "source shards",
+                "enforcement": "required",
+                "expected_count": 2,
+                "covered_count": 1,
+                "missing_count": 1,
+                "missing_items": [{"target_id": "shard-02.md", "label": "shard-02.md"}],
+                "should_block": True,
+            },
+        }
+    )
+
+    assert decision.allowed is False
+    assert "TARGET_COVERAGE_MISSING" in decision.finding_codes
 
 
 def test_artifact_format_lint_reuses_existing_format_validators(tmp_path: Path) -> None:

@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from agent_py_agent.agent.agent_core import provider_transient_auto_resume
-from agent_py_agent.agent.backend import ModelResponse, ProviderTransientError
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.backends import ModelResponse, ProviderTransientError
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 class _TransientThenOkBackend:

@@ -10,7 +10,7 @@ def test_bootstrap_contract_does_not_redirect_pure_inspection_tool_calls(tmp_pat
         ToolLoopResponseDecisionRequest,
         tool_loop_response_decision,
     )
-    from agent_py_agent.agent.backend import ModelResponse
+    from agent_py_agent.agent.backends import ModelResponse
 
     calls = [{"tool": "list_files", "path": "."}]
     params = _params()
@@ -34,7 +34,7 @@ def test_bootstrap_contract_does_not_block_repeated_evidence_calls(tmp_path: Pat
         ToolLoopResponseDecisionRequest,
         tool_loop_response_decision,
     )
-    from agent_py_agent.agent.backend import ModelResponse
+    from agent_py_agent.agent.backends import ModelResponse
 
     calls = [{"tool": "web_search", "query": "project weekly growth", "limit": 5}]
     params = _params()

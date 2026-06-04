@@ -4,7 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
+from ..runtime.context_compactor import runtime_compact_policy
+
 _DEFAULT_MAX_CHARS = 48_000
+_CHARS_PER_TOKEN_WINDOW = 3
 _RECENT_REF_LIMIT = 8
 
 
@@ -51,14 +54,24 @@ def window_tool_context_for_live_prompt(request: ToolContextWindowRequest) -> To
 
 
 def window_tool_context_params(agent: object, params: object) -> None:
+    max_chars = _tool_context_window_max_chars(agent)
     result = window_tool_context_for_live_prompt(
         ToolContextWindowRequest(
             tool_context=getattr(params, "tool_context", []),
             archive_tool_calls=getattr(params, "archive_tool_calls", []),
+            max_chars=max_chars,
         )
     )
     if result.windowed and _persistent_compact_enabled(agent, params):
         _record_tool_context_window_overflow(params, result)
+
+
+def _tool_context_window_max_chars(agent: object) -> int:
+    policy = runtime_compact_policy(agent, save=True)
+    trigger_tokens = int(policy.trigger_tokens or 0)
+    if trigger_tokens <= 0:
+        return _DEFAULT_MAX_CHARS
+    return max(_DEFAULT_MAX_CHARS, trigger_tokens * _CHARS_PER_TOKEN_WINDOW)
 
 
 def _persistent_compact_enabled(agent: object, params: object) -> bool:

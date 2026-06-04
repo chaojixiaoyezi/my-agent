@@ -1,9 +1,9 @@
 
-"""本包把日志分析工单拆成 planning（数据结构和规划）与 creation（任务创建）两个子模块。
+"""日志分析工单公共入口。
 
 新手说明:
-从外部 import 时路径不变，仍然可以用 from ...dispatch.work_orders import plan_case_subagent_work_orders。
-__init__.py 把两个子模块的公开名称全部 re-export，保证拆包后上游代码不需要修改。
+planning 放数据结构和规划，creation 放任务创建。
+外部代码从本包导入当前公开 API。
 """
 
 from .creation import (

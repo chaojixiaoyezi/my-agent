@@ -19,6 +19,7 @@ from .model.call_runtime import (
 from .model.context_pressure import (
     context_pressure_response,
     is_context_window_error,
+    mark_tool_context_digest_consumed,
     preflight_context_pressure_response,
 )
 from .runner.stage_trace import (
@@ -172,6 +173,7 @@ def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerati
             response=response,
         )
     )
+    mark_tool_context_digest_consumed(request.params)
     return response
 
 

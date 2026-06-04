@@ -184,7 +184,8 @@ def _finding_ids(task: Any) -> list[str]:
 
 def _source_refs(task: Any) -> dict[str, str]:
     return {
-        "legacy_task_dir": str(getattr(task, "task_dir", "")),
+        "task_workspace": str(getattr(task, "task_workspace_dir", "")),
+        "agent_run_workspace": str(getattr(task, "agent_run_workspace_dir", "")),
         "output_json": str(getattr(task, "output_json", "")),
         "skill_sparks_file": str(getattr(task, "skill_sparks_file", "")),
         "status_report": str(getattr(task, "status_report_json", "")),

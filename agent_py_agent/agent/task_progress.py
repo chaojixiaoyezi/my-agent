@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .common.value_parsing import string_list
+from .common.value_parsing import dedupe_strings, string_list
 from .runtime_errors import DataCorruptionError, runtime_error_report
 from .task_progress_coverage import (
     coverage_from_update,
@@ -20,6 +20,72 @@ from .task_progress_hints import quality_hints
 
 _SCHEMA_VERSION = "task_progress.v1"
 _KNOWN_STATUSES = ("pending", "in_progress", "done", "skipped", "blocked")
+_DONE_LIKE_STATUSES = {"done", "skipped"}
+_STATUS_ALIASES = {
+    "done": {
+        "done",
+        "complete",
+        "completed",
+        "ok",
+        "passed",
+        "read",
+        "read_done",
+        "finish",
+        "finished",
+        "完成",
+        "已完成",
+        "读完",
+        "已读",
+        "已读取",
+    },
+    "pending": {
+        "pending",
+        "todo",
+        "to_do",
+        "to-read",
+        "to_read",
+        "unread",
+        "not_started",
+        "待处理",
+        "待办",
+        "未读",
+        "待读",
+        "待读取",
+        "未开始",
+    },
+    "in_progress": {
+        "in_progress",
+        "in-progress",
+        "doing",
+        "reading",
+        "processing",
+        "进行中",
+        "读取中",
+        "处理中",
+        "正在读",
+        "正在读取",
+    },
+    "skipped": {
+        "skipped",
+        "skip",
+        "ignored",
+        "忽略",
+        "跳过",
+        "已跳过",
+    },
+    "blocked": {
+        "blocked",
+        "blocker",
+        "failed",
+        "error",
+        "卡住",
+        "阻塞",
+        "失败",
+        "报错",
+    },
+}
+_FACT_FIELDS = ("id", "title", "status", "notes", "result", "outcome", "conclusion", "decision", "summary")
+_EXPLICIT_OVERWRITE_KEYS = ("correction", "overwrite", "replace")
 
 
 def progress_path(root: str | Path, run_id: str) -> Path:
@@ -70,6 +136,11 @@ def task_progress_summary(progress: dict[str, Any]) -> dict[str, Any]:
         for item in normalized["items"]
         if str(item.get("status") or "") not in {"done", "skipped"}
     ][:8]
+    recent_done = [
+        _summary_item(item, include_facts=True)
+        for item in normalized["items"]
+        if _done_like_status(item.get("status"))
+    ][-24:]
     summary = {
         "schema_version": _SCHEMA_VERSION,
         "run_id": normalized["run_id"],
@@ -77,6 +148,7 @@ def task_progress_summary(progress: dict[str, Any]) -> dict[str, Any]:
         "next_action": normalized["next_action"],
         "counts": normalized["counts"],
         "active_items": active,
+        "recent_done_items": recent_done,
         "updated_at": normalized["updated_at"],
         "ref": str(normalized.get("ref") or ""),
     }
@@ -133,6 +205,7 @@ def merge_task_progress(existing: dict[str, Any], update: dict[str, Any], *, run
         incoming=[_normalize_item(item) for item in _list(update.get("items"))],
         coverage=coverage,
     )
+    _apply_soft_next_action_repair(payload, hints)
     if hints["messages"]:
         payload["quality_hints"] = hints
     if coverage["targets"] or coverage["goal"] or coverage["dimensions"]:
@@ -156,7 +229,7 @@ def _normalize_item(value: object) -> dict[str, Any]:
     item = dict(value) if isinstance(value, dict) else {"title": str(value or "").strip()}
     item_id = str(item.get("id") or item.get("title") or "").strip()
     title = str(item.get("title") or item_id).strip()
-    status = str(item.get("status") or "pending").strip() or "pending"
+    status = _normalize_status_value(item.get("status") or "pending")
     result = {
         "id": item_id or _safe_id(title) or "item",
         "title": title,
@@ -172,31 +245,153 @@ def _normalize_item(value: object) -> dict[str, Any]:
     for key in ("updated_at", "owner", "priority"):
         if key in item:
             result[key] = item[key]
+    for key in _EXPLICIT_OVERWRITE_KEYS:
+        if _truthy(item.get(key)):
+            result[key] = True
     return result
 
 
 def _merge_items(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    by_id = {str(item.get("id") or ""): dict(item) for item in existing if str(item.get("id") or "")}
-    order = [str(item.get("id") or "") for item in existing if str(item.get("id") or "")]
+    by_id: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in existing:
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            continue
+        key = _merge_key(item)
+        if key not in by_id:
+            order.append(key)
+            by_id[key] = dict(item)
     for item in incoming:
         item_id = str(item.get("id") or "")
         if not item_id:
             continue
-        if item_id not in by_id:
-            order.append(item_id)
-            by_id[item_id] = item
+        key = _merge_key(item)
+        if key not in by_id:
+            order.append(key)
+            by_id[key] = item
             continue
-        by_id[item_id] = {**by_id[item_id], **{key: value for key, value in item.items() if value not in ("", [], None)}}
+        previous = by_id[key]
+        if _should_preserve_done_facts(previous, item):
+            by_id[key] = _merge_done_item_without_overwriting_facts(previous, item)
+            continue
+        by_id[key] = _merge_item_overlay(previous, item)
     return [by_id[item_id] for item_id in order if item_id in by_id]
 
 
-def _summary_item(item: dict[str, Any]) -> dict[str, Any]:
-    return {
+def _merge_item_overlay(previous: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = {**previous, **{key: value for key, value in incoming.items() if value not in ("", [], None)}}
+    if incoming.get("evidence") or previous.get("evidence"):
+        merged["evidence"] = dedupe_strings([*string_list(previous.get("evidence")), *string_list(incoming.get("evidence"))])
+    return merged
+
+
+def _should_preserve_done_facts(previous: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    return (
+        _done_like_status(previous.get("status"))
+        and not any(_truthy(incoming.get(key)) for key in _EXPLICIT_OVERWRITE_KEYS)
+    )
+
+
+def _merge_done_item_without_overwriting_facts(previous: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = _merge_item_overlay(previous, incoming)
+    for key in _FACT_FIELDS:
+        if previous.get(key) not in ("", [], None):
+            merged[key] = previous[key]
+    merged["evidence"] = dedupe_strings([*string_list(previous.get("evidence")), *string_list(incoming.get("evidence"))])
+    return merged
+
+
+def _apply_soft_next_action_repair(payload: dict[str, Any], hints: dict[str, Any]) -> None:
+    if not _closeoutish_next_action(payload.get("next_action")):
+        return
+    suggestions = [str(item).strip() for item in hints.get("next_suggestions", []) if str(item).strip()]
+    if not suggestions:
+        return
+    original = str(payload.get("next_action") or "").strip()
+    payload["next_action"] = suggestions[0]
+    payload["soft_next_action_repair"] = {
+        "severity": "soft",
+        "blocking": False,
+        "original_next_action": original,
+        "message": "进度账本还存在证据或覆盖提醒，下一步先继续补证据/覆盖项，不要直接提交验收。",
+    }
+
+
+def _closeoutish_next_action(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "submit",
+            "acceptance",
+            "closeout",
+            "final",
+            "提交验收",
+            "验收",
+            "收口",
+            "交付",
+            "完成任务",
+        )
+    )
+
+
+def _summary_item(item: dict[str, Any], *, include_facts: bool = False) -> dict[str, Any]:
+    summary = {
         "id": str(item.get("id") or ""),
         "title": str(item.get("title") or ""),
         "status": str(item.get("status") or ""),
         "next": str(item.get("next") or ""),
     }
+    if include_facts:
+        for key in ("notes", "result", "outcome", "conclusion", "decision", "summary"):
+            text = str(item.get(key) or "").strip()
+            if text:
+                summary[key] = text
+        evidence = string_list(item.get("evidence"))[:8]
+        if evidence:
+            summary["evidence"] = evidence
+    return summary
+
+
+def _done_like_status(value: object) -> bool:
+    return _normalize_status_value(value) in _DONE_LIKE_STATUSES
+
+
+def _normalize_status_value(value: object) -> str:
+    text = str(value or "").strip()
+    normalized = text.lower().replace(" ", "_")
+    for status, aliases in _STATUS_ALIASES.items():
+        if normalized in aliases or text in aliases:
+            return status
+    return text or "pending"
+
+
+def _merge_key(item: dict[str, Any]) -> str:
+    item_id = str(item.get("id") or "").strip()
+    title = str(item.get("title") or "").strip()
+    for value in (item_id, title):
+        if key := _fragment_alias_key(value):
+            return key
+    return item_id
+
+
+def _fragment_alias_key(value: str) -> str:
+    text = str(value or "").strip().lower()
+    match = re.fullmatch(r"(?:fragment|frag)?[-_ ]?(\d{1,6})", text)
+    if not match:
+        return ""
+    return f"fragment-{int(match.group(1)):03d}"
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return bool(value)
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on", "是", "对"}
 
 
 def _counts(items: list[dict[str, Any]]) -> dict[str, int]:

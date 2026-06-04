@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ....common.json_io import read_json_object_report
+from ....common.json_io import read_json_object_report, write_json_file_atomic
 from ....runtime_errors import runtime_error_report
 from ....user_space.task_compact_rollup import sync_task_compact_rollup
 from ...models import (
@@ -72,7 +72,7 @@ class SubAgentListRunsReport:
 
 
 class SubAgentPersistenceService:
-    """Read and write SubAgentTask records for the manager facade."""
+    """Read and write SubAgentTask records for SubAgentManager."""
 
     def __init__(self, manager: Any):
         self.manager = manager
@@ -88,6 +88,11 @@ class SubAgentPersistenceService:
         if not path.exists():
             raise FileNotFoundError(f"子代理记录不存在: {run_id}")
         data = _read_state_payload(path)
+        return self.task_from_payload(data)
+
+    def task_from_payload(self, data: dict[str, Any]) -> SubAgentTask:
+        """Build a normalized task from a canonical state payload."""
+
         data = {key: value for key, value in data.items() if key in _field_names(SubAgentTask)}
         data["capability_requests"] = [
             _normalize_nested_model(CapabilityRequest, item)
@@ -197,9 +202,9 @@ def _prepare_and_write_state(
     write_recovery_output_files(task, checkpoint_artifacts)
     state = build_agent_run_state(task)
     write_agent_run_state(state)
-    locator_payload = json.dumps(build_agent_state_locator(task, state), ensure_ascii=False, indent=2)
-    (task_dir / "task.json").write_text(locator_payload, encoding="utf-8")
-    (task_dir / "run.json").write_text(locator_payload, encoding="utf-8")
+    locator_payload = build_agent_state_locator(task, state)
+    write_json_file_atomic(task_dir / "task.json", locator_payload)
+    write_json_file_atomic(task_dir / "run.json", locator_payload)
     return task_dir, build_owner_agent_projection(task, state)
 
 

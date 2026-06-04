@@ -6,7 +6,7 @@ Live Lab 是为了把“代码测试通过”再往前推一步：用可见、�
 
 ## 讨论过什么
 
-- `scripts/live_agent_lab.py` 做薄入口，具体 case 放到 `scripts/live_lab/`。
+- `scripts/live_agent_lab.py` 作为命令入口，具体 case 放到 `scripts/live_lab/`。
 - smoke 套件先验证可见真实环境测试台能跑起来。
 - log-analysis 套件离线 replay SecurityAlertV1 fixture，不依赖真实 LLM。
 - macOS 可用 `open_live_lab.sh` 新开可见 Terminal，方便观察真实长链路。

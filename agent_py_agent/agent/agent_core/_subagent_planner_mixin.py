@@ -4,14 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..capabilities import CapabilityRouter
-from ..capability_config import CapabilityConfig
+from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability.config import CapabilityConfig
+
 from ..runtime_errors import runtime_error_report
-from ..subagent import ParentPlannerRecord
+from ..subagents import ParentPlannerRecord
 from ..subagents.services.dispatch.params import ParentPlannerRecordParams
 from .orchestration.dispatch.params import DispatchExecutionPlan
-from .planner import _build_parent_planner_prompt, _build_parent_planner_state
 from .planner_service import PlannerPromptParams
+from .planner_service import (
+    build_parent_planner_prompt as _build_parent_planner_prompt,
+)
+from .planner_service import (
+    build_parent_planner_state as _build_parent_planner_state,
+)
 from .planner_templates import PARENT_PLANNER_SYSTEM_PROMPT
 
 

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agent_py_agent.agent.backend import ModelResponse
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.cli.models import GatewayRunContext, GatewayRunOptions
 
 
 class _BackgroundCliBackend:
@@ -39,6 +42,62 @@ def test_background_main_agent_tick_runs_due_policy(tmp_path, capsys) -> None:
     assert "background-main-agent tick reports=1" in output
     assert messages[-1].content == "后台主代理 CLI 汇报。"
     assert "inspect_agent_tree" in backend.prompts[0]
+
+
+def test_gateway_background_loop_runs_due_progress_policy(tmp_path) -> None:
+    from agent_py_agent.cli.gateway_loops import _gateway_background_main_loop
+
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            gateway_request_poll_interval=1,
+            gateway_heartbeat_interval=5,
+        ),
+        tmp_path,
+    )
+    backend = _BackgroundCliBackend()
+    agent.backend = backend
+    current = time.time()
+    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': current - 10})
+    agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "巡检", 'now': current - 9})
+    agent.conversation_store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 1, 'route_channel': "internal", 'route_target': "thread-1", 'now': current - 2})
+    context = GatewayRunContext(
+        agent=agent,
+        paths=SimpleNamespace(),
+        options=GatewayRunOptions(
+            mutate_state=False,
+            start_runners=False,
+            planner=False,
+            interval=1.0,
+            max_runners=0,
+            limit=0,
+            max_cycles=0,
+            max_cards=0,
+            reviewer="",
+            instruction="",
+            probe=False,
+        ),
+        config_path=tmp_path / "config.yaml",
+        note="",
+        take_over_by="",
+        locked_files=[],
+        force_lock=False,
+    )
+    stop_event = threading.Event()
+    worker = threading.Thread(target=_gateway_background_main_loop, args=(context, stop_event), daemon=True)
+
+    with patch("agent_py_agent.cli.gateway_loops.make_agent", return_value=agent):
+        worker.start()
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not backend.prompts:
+            time.sleep(0.05)
+        stop_event.set()
+        worker.join(timeout=2)
+
+    messages = agent.conversation_store.recent_messages(thread.thread_id)
+    assert backend.prompts
+    assert messages[-1].content == "后台主代理 CLI 汇报。"
 
 
 def test_background_main_agent_message_and_bind_task_commands(tmp_path, capsys) -> None:

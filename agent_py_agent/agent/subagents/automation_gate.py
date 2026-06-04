@@ -17,7 +17,6 @@ class SubAgentAutomationGateRequest:
     manual_confirmed: bool = False
     recovery_candidate_count: int = 0
     max_recovery_candidates: int = 0
-    reserved: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -29,7 +28,8 @@ class SubAgentAutomationGateResult:
     guard_status: str
     blocked_by: list[str] = field(default_factory=list)
     recommended_next_step: str = ""
-    reserved: dict[str, object] = field(default_factory=dict)
+    refs_only: bool = False
+    gate_version: int = 1
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -46,7 +46,7 @@ def evaluate_subagent_automation_gate(request: SubAgentAutomationGateRequest) ->
             guard_status="blocked",
             blocked_by=blockers,
             recommended_next_step="request_manual_confirmation",
-            reserved={"refs_only": False, "auto_gate_version": 1},
+            refs_only=False,
         )
     if request.manual_confirmed:
         return SubAgentAutomationGateResult(
@@ -56,7 +56,7 @@ def evaluate_subagent_automation_gate(request: SubAgentAutomationGateRequest) ->
             automatic_execution_allowed=False,
             guard_status="manual_confirmed",
             recommended_next_step="execute_with_audit",
-            reserved={"refs_only": False, "auto_gate_version": 1},
+            refs_only=False,
         )
     auto_allowed = _is_auto_safe(request)
     return SubAgentAutomationGateResult(
@@ -67,7 +67,7 @@ def evaluate_subagent_automation_gate(request: SubAgentAutomationGateRequest) ->
         guard_status="allowed" if auto_allowed else "blocked",
         blocked_by=[] if auto_allowed else ["manual_confirmation_required"],
         recommended_next_step="continue_refs_only" if auto_allowed else "request_manual_confirmation",
-        reserved={"refs_only": auto_allowed, "auto_gate_version": 1},
+        refs_only=auto_allowed,
     )
 
 

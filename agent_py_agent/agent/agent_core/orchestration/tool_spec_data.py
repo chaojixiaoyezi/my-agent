@@ -6,7 +6,20 @@ _CREATE_USE_CASES = [
     "需要把任务拆给多个子代理并行处理",
     "需要不同角色分别研究、实现、检查或汇总",
 ]
-_CREATE_KEYWORDS = ["子代理", "派工", "拆分", "任务", "subagent", "delegate", "spawn"]
+_CREATE_KEYWORDS = [
+    "子代理",
+    "派工",
+    "拆分",
+    "任务",
+    "分别",
+    "分头",
+    "并行",
+    "不同项目",
+    "各项目",
+    "subagent",
+    "delegate",
+    "spawn",
+]
 _CREATE_PARAMETERS = {
     "goal": "单任务目标；批量模式优先用 items",
     "items": "子任务列表，每项可含 goal/role/agent_name/input_refs/output_files/defer_start",
@@ -17,7 +30,7 @@ _CREATE_PARAMETERS = {
     "acceptance_checks": "父代理后续判断完成的标准",
     "plan": "子代理初始步骤",
     "input_refs": "交给子代理读取的文件、URL 或 artifact refs",
-    "output_files": "用户明确指定的目标产物路径",
+    "output_files": "用户明确指定的目标产物路径；没明确指定时不要从输入目录推断",
     "artifact_refs": "已有交付物或参考产物引用",
     "replacement_for_run_ids": "新子代理要接管的旧 run_id",
     "defer_start": "true 表示只建不跑；默认创建后启动",
@@ -30,7 +43,11 @@ _CREATE_PARAMETER_DETAILS = {
     "tool_preset": "省略时自动；none 只表示不覆盖自动策略。",
     "allowed_tools": "一般省略；不完整列表不会剥夺子代理基础读写能力。",
     "input_refs": "这是交给子代理的资料线索；单个子代理自己的输入放在对应 item.input_refs。",
-    "output_files": "只在用户明确保存路径时填写；没有明确路径时可省略。",
+    "output_files": (
+        "只在用户明确保存路径时填写；没有明确路径时可省略。"
+        "阅读/分析目录是 input_refs，不是 output_files。"
+        "当前任务 output_dir 可以用于协作阶段产物，但主代理收口前要整理，只留下最终交付物或清晰索引。"
+    ),
     "replacement_for_run_ids": "用于结构化接管卡住或过时的旧 run。",
     "defer_start": "普通生产任务默认不要传；依赖前置产物的测试/验收/汇总项可传 true。",
 }

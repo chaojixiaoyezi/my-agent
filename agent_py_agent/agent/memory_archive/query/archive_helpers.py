@@ -132,11 +132,11 @@ def _dedupe_strings(values: list[str]) -> list[str]:
     return items
 
 
-def _created_at_sort(value: str, *, fallback: float) -> float:
+def _created_at_sort(value: str, *, default: float) -> float:
 
     text = str(value or "").strip()
     if not text:
-        return fallback
+        return default
     if text.endswith("Z"):
         text = f"{text[:-1]}+00:00"
     try:
@@ -145,7 +145,7 @@ def _created_at_sort(value: str, *, fallback: float) -> float:
         try:
             parsed = datetime.fromisoformat(text[:10])
         except ValueError:
-            return fallback
+            return default
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.timestamp()

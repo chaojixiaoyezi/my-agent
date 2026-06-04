@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...agent.gateway import (
+from ...agent.gateway_parts import (
     GatewayAskParams,
     gateway_chunk_path,
     gateway_paths,
@@ -16,6 +16,7 @@ from ...agent.gateway import (
     render_gateway_status,
     submit_gateway_ask,
 )
+from ...agent.gateway_parts.context_tokens import current_context_token_estimate
 from ...agent.gateway_parts.response_renderer import read_gateway_response_file
 
 
@@ -27,6 +28,7 @@ class ChatRequestContent:
     save: bool
     show_prompt: bool
     resume_context: object
+    chat_session_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,7 @@ class GatewayChunkPollRequest:
     on_chunk: object
     chunks_printed_ref: list[int]
     visible_chunks_ref: list[int] | None = None
+    chunk_offset_ref: list[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,7 @@ def submit_chat_request(
             save=content.save,
             include_prompt=content.show_prompt,
             resume_context=content.resume_context,
+            chat_session_id=content.chat_session_id,
             agent=agent,
         ),
     )
@@ -71,24 +75,27 @@ def submit_chat_request(
 def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     chunks_printed = request.chunks_printed_ref[0]
     visible_chunks = request.visible_chunks_ref[0] if request.visible_chunks_ref else 0
+    chunk_offset = request.chunk_offset_ref[0] if request.chunk_offset_ref else 0
     response = {}
     while time.time() <= request.deadline:
-        chunks_printed, visible_chunks = _poll_chunk_file(
-            request.chunk_path, request.on_chunk, chunks_printed, visible_chunks
+        chunks_printed, visible_chunks, chunk_offset = _poll_chunk_file(
+            request.chunk_path, request.on_chunk, chunks_printed, visible_chunks, chunk_offset
         )
         response = read_gateway_response_file(
             request.response_path,
             context="gateway.chat.response.read",
         )
         if response:
-            chunks_printed, visible_chunks = _poll_chunk_file(
-                request.chunk_path, request.on_chunk, chunks_printed, visible_chunks
+            chunks_printed, visible_chunks, chunk_offset = _poll_chunk_file(
+                request.chunk_path, request.on_chunk, chunks_printed, visible_chunks, chunk_offset
             )
             break
         time.sleep(0.1)
     request.chunks_printed_ref[0] = chunks_printed
     if request.visible_chunks_ref is not None:
         request.visible_chunks_ref[0] = visible_chunks
+    if request.chunk_offset_ref is not None:
+        request.chunk_offset_ref[0] = chunk_offset
     return response
 
 
@@ -97,19 +104,23 @@ def _poll_chunk_file(
     on_chunk: callable,
     chunks_printed: int,
     visible_chunks: int,
-) -> tuple[int, int]:
+    chunk_offset: int,
+) -> tuple[int, int, int]:
     if not chunk_path.exists():
-        return chunks_printed, visible_chunks
+        return chunks_printed, visible_chunks, chunk_offset
     try:
-        lines = chunk_path.read_text(encoding="utf-8").splitlines()
+        with open(chunk_path, encoding="utf-8") as f:
+            f.seek(max(0, chunk_offset))
+            data = f.read()
+            chunk_offset = f.tell()
     except OSError as exc:
         print(f"gateway chat chunk load_error path={chunk_path} message={exc}", file=sys.stderr)
-        return chunks_printed, visible_chunks
-    for cline in lines[chunks_printed:]:
+        return chunks_printed, visible_chunks, 0
+    for cline in data.splitlines():
         consumed, visible = _emit_chunk_line(cline, on_chunk)
         chunks_printed += consumed
         visible_chunks += visible
-    return chunks_printed, visible_chunks
+    return chunks_printed, visible_chunks, chunk_offset
 
 
 def _emit_chunk_line(cline: str, on_chunk: callable) -> tuple[int, int]:
@@ -136,7 +147,7 @@ def check_gateway_alive(paths) -> bool:
 
 
 def format_gateway_timing(ctx: GatewayTimingContext) -> str:
-    ctx_tokens = ctx.response.get("cumulative_token_estimate") or ctx.response.get("prompt_token_estimate", 0)
+    ctx_tokens = current_context_token_estimate(ctx.response)
     if ctx.use_gateway:
         return (
             f"[耗时 {ctx.elapsed:.2f}s; "

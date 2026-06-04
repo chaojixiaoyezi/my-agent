@@ -46,7 +46,7 @@ class ActiveWorkSummary:
 
 def _detect_gateway_state(paths, summary):
     """检测 gateway 状态。"""
-    from .gateway import gateway_running
+    from .gateway_parts import gateway_running
     pid, alive = gateway_running(paths)
     summary.gateway_alive = alive
     summary.gateway_pid = pid
@@ -54,7 +54,7 @@ def _detect_gateway_state(paths, summary):
 
 def _detect_processing_requests(paths, summary):
     """获取 processing 请求列表。"""
-    from .gateway import gateway_request_counts
+    from .gateway_parts import gateway_request_counts
     request_counts = gateway_request_counts(paths)
     summary.stale_request_count = request_counts.get("processing", 0)
     if paths.processing.exists():
@@ -128,7 +128,7 @@ def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
     Returns:
         ActiveWorkSummary 包含 gateway 状态、活跃任务数、遗留请求数和最近任务列表
     """
-    from .gateway import gateway_paths
+    from .gateway_parts import gateway_paths
 
     paths = gateway_paths(agent)
     summary = ActiveWorkSummary()

@@ -4,8 +4,8 @@ import json
 
 
 def test_cancel_subagents_tool_abandons_active_attempt_and_audits(tmp_path):
-    from agent_py_agent.agent.config import AgentConfig
     from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
@@ -37,8 +37,8 @@ def test_cancel_subagents_tool_abandons_active_attempt_and_audits(tmp_path):
 
 
 def test_cancel_subagents_tool_filters_by_root_and_status(tmp_path):
-    from agent_py_agent.agent.config import AgentConfig
     from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     parent, child, done_child = _create_cancel_tree(agent)
@@ -59,6 +59,65 @@ def test_cancel_subagents_tool_filters_by_root_and_status(tmp_path):
     assert agent.subagents.load(parent.id).status == "ABANDONED"
     assert agent.subagents.load(child.id).status == "ABANDONED"
     assert agent.subagents.load(done_child.id).status == "DONE"
+
+
+def test_cancel_subagents_tool_reports_list_runs_failure_for_tree_filters(tmp_path, monkeypatch):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+
+    def broken_list_runs():
+        raise RuntimeError("state index unreadable")
+
+    monkeypatch.setattr(agent.subagents, "list_runs", broken_list_runs)
+
+    result = agent.tools.execute_call(
+        {
+            "tool": "cancel_subagents",
+            "root_id": "run-missing",
+            "reason": "清理子树",
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert payload["ok"] is False
+    assert payload["error"]["context"] == "cancel_subagents.list_runs"
+    assert "state index unreadable" in payload["error"]["message"]
+
+
+def test_cancel_subagents_tool_recovers_from_corrupt_locator(tmp_path):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    task = agent.subagents.create_run(
+        params=CreateRunParams(goal="读项目 A", thought="取消测试", plan=["创建任务"], allowed_tools=["read_file"])
+    )
+    task.status = "RUNNING"
+    agent.subagents.save(task)
+    task_json = agent.subagents.workspace / task.id / "task.json"
+    run_json = agent.subagents.workspace / task.id / "run.json"
+    task_json.write_text(task_json.read_text(encoding="utf-8") + "}", encoding="utf-8")
+    run_json.write_text(run_json.read_text(encoding="utf-8") + "}", encoding="utf-8")
+
+    result = agent.tools.execute_call(
+        {
+            "tool": "cancel_subagents",
+            "run_id": task.id,
+            "reason": "恢复取消",
+        }
+    )
+    payload = json.loads(result.output)
+    loaded = agent.subagents.load(task.id)
+
+    assert result.ok is True
+    assert payload["cancelled"][0]["run_id"] == task.id
+    assert loaded.status == "ABANDONED"
+    assert loaded.attributes["cancel_subagents"]["recovery"]["status"] == "recovered_from_canonical"
+    assert json.loads(task_json.read_text(encoding="utf-8"))["status_mirror"] == "ABANDONED"
 
 
 def _create_cancel_tree(agent):

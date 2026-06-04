@@ -146,7 +146,7 @@ class TestNoProgressDetection:
         assert not decision.findings
 
     def test_warns_on_readonly_no_progress(self):
-        config = ToolGuardrailConfig(repeat_fail_threshold=2)
+        config = ToolGuardrailConfig(readonly_no_progress_threshold=2)
         records = tuple(
             _make_record("read_file", "abc", failed=False, result_hash="same")
             for _ in range(2)
@@ -160,7 +160,7 @@ class TestNoProgressDetection:
         assert any("NO_PROGRESS_WARNING" in f.code for f in decision.findings)
 
     def test_blocks_next_readonly_call_at_three_times_threshold(self):
-        config = ToolGuardrailConfig(repeat_fail_threshold=2)
+        config = ToolGuardrailConfig(readonly_no_progress_threshold=2)
         records = tuple(
             _make_record("read_file", "abc", failed=False, result_hash="same")
             for _ in range(6)

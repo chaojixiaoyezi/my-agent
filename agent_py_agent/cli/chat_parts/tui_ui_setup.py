@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .rendering import _tui_print_banner, set_tui_output_sink, set_tui_stream_sink
+from .rendering import set_tui_output_sink, set_tui_stream_sink
 from .tui import (
     TuiStatusRefs,
     _tui_get_activity_text,
@@ -137,7 +137,7 @@ def _install_transcript_sink(
 def _app_scrollback_enabled(args: Any) -> bool:
     if getattr(args, "plain", False):
         return False
-    return bool(getattr(args, "app_scrollback", True) or getattr(args, "app", False))
+    return bool(getattr(args, "app_scrollback", True))
 
 
 def make_tui_app(params: MakeTuiAppParams):

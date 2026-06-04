@@ -283,4 +283,4 @@ class _LocalStoreRecordLogger:
 
 
 class LocalStoreRecordMixin(_LocalStoreRecordWriter, _LocalStoreRecordLogger):
-    """Compatibility facade for LocalStore record write, lookup, and log APIs."""
+    """LocalStore record write, lookup, and log APIs."""

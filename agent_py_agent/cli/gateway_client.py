@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..agent.gateway import (
+from ..agent.gateway_parts import (
     GatewayAskParams,
     gateway_chunk_path,
     gateway_paths,
@@ -137,15 +137,21 @@ def _handle_active_work_prompt(agent) -> int | None:
     return None
 
 
-def _stream_chunk_lines(chunk_path: Path, chunks_printed: int, spinner) -> int:
+def _stream_chunk_lines(chunk_path: Path, chunks_printed: int, spinner, chunk_offset_ref: list[int] | None = None) -> int:
     if not chunk_path.exists():
         return chunks_printed
     try:
-        lines = chunk_path.read_text(encoding="utf-8").splitlines()
+        with open(chunk_path, encoding="utf-8") as f:
+            if chunk_offset_ref is not None:
+                f.seek(max(0, chunk_offset_ref[0]))
+            data = f.read()
+            if chunk_offset_ref is not None:
+                chunk_offset_ref[0] = f.tell()
     except OSError as exc:
         print(f"gateway stream chunk load_error path={chunk_path} message={exc}", file=sys.stderr)
         return chunks_printed
-    for line in lines[chunks_printed:]:
+    lines = data.splitlines() if chunk_offset_ref is not None else data.splitlines()[chunks_printed:]
+    for line in lines:
         chunks_printed += _write_stream_chunk_line(line, chunks_printed, spinner)
     return chunks_printed
 
@@ -176,24 +182,25 @@ def _write_stream_chunk_line(line: str, chunks_printed: int, spinner) -> int:
     return 1
 
 
-def _flush_stream_chunks(request: GatewayPollRequest, chunks_printed: int) -> int:
+def _flush_stream_chunks(request: GatewayPollRequest, chunks_printed: int, chunk_offset_ref: list[int]) -> int:
     if not request.stream_output:
         return chunks_printed
-    return _stream_chunk_lines(request.chunk_path, chunks_printed, request.spinner)
+    return _stream_chunk_lines(request.chunk_path, chunks_printed, request.spinner, chunk_offset_ref)
 
 
 def _wait_for_gateway_response(request: GatewayPollRequest) -> dict[str, Any]:
     chunks_printed = 0
+    chunk_offset_ref = [0]
     response: dict[str, Any] = {}
 
     while time.time() <= request.deadline:
-        chunks_printed = _flush_stream_chunks(request, chunks_printed)
+        chunks_printed = _flush_stream_chunks(request, chunks_printed, chunk_offset_ref)
         response = read_gateway_response_file(
             request.response_path,
             context="gateway.cli.response.read",
         )
         if response:
-            _flush_stream_chunks(request, chunks_printed)
+            _flush_stream_chunks(request, chunks_printed, chunk_offset_ref)
             break
         time.sleep(0.1)
 

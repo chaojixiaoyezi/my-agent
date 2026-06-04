@@ -24,7 +24,6 @@ from .compact_state_run_intent import (
 )
 from .schema import (
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 
@@ -70,7 +69,6 @@ def build_compaction_state(request: CompactionStateRequest) -> dict[str, Any]:
         "continuation": _continuation_payload(request.work_state),
         "summary_is_authoritative": False,
         "facts_authority": "source_refs_and_work_state",
-        "reserved": runtime_memory_reserved_fields(COMPACT_STATE_SCHEMA),
     }
     return state
 
@@ -113,6 +111,7 @@ def _handoff_base_lines(
         f"- 当前阶段: {work.get('phase') or 'unknown'}",
         f"- 下一步: {work.get('next_step') or 'unknown'}",
         f"- 进度账本: {_progress_line(work.get('task_progress'))}",
+        f"- 最近完成: {_recent_done_line(work.get('task_progress'))}",
         f"- 目标产物: {desired_outputs_line(work.get('desired_outputs'))}",
         f"- 路径意图: {run_intent_line(work.get('run_intent'))}",
         "",
@@ -234,6 +233,9 @@ def _task_progress_payload(value: Any) -> dict[str, Any]:
         "active_items": [dict(item) for item in payload.get("active_items", []) if isinstance(item, dict)]
         if isinstance(payload.get("active_items"), list)
         else [],
+        "recent_done_items": [dict(item) for item in payload.get("recent_done_items", []) if isinstance(item, dict)]
+        if isinstance(payload.get("recent_done_items"), list)
+        else [],
         "ref": str(payload.get("ref") or ""),
     }
 
@@ -247,6 +249,31 @@ def _progress_line(value: Any) -> str:
     if summary and next_action:
         return f"{summary}；下一步：{next_action}{hint}"
     return (summary or next_action or "未记录") + hint
+
+
+def _recent_done_line(value: Any) -> str:
+    progress = _task_progress_payload(value)
+    items = progress.get("recent_done_items", [])
+    if not isinstance(items, list) or not items:
+        return "未记录"
+    parts: list[str] = []
+    for item in items[-8:]:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or item.get("title") or "").strip()
+        fact = _first_text(item, ("result", "outcome", "conclusion", "decision", "summary", "notes"))
+        text = item_id if not fact else f"{item_id}: {fact}"
+        if text.strip():
+            parts.append(text)
+    return "；".join(parts) if parts else "未记录"
+
+
+def _first_text(payload: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        text = str(payload.get(key) or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _items(value: Any, *, key: str = "items") -> list[str]:

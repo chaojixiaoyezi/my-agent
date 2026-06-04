@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-"""Log analysis plugin facade implementing ExtensionPlugin interface.
+"""Log analysis plugin implementing ExtensionPlugin interface.
 
 This module provides LogAnalysisPlugin which wraps the log analysis tools
 and registers them via the ExtensionPlugin protocol.
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 class LogAnalysisPlugin:
-    """ExtensionPlugin facade for log analysis tools.
+    """ExtensionPlugin implementation for log analysis tools.
 
     This class wraps the log analysis tools and registers them via the
     ExtensionPlugin protocol for integration with the agent's extension system."""
@@ -31,7 +31,7 @@ class LogAnalysisPlugin:
 
     def register_tools(self, registry) -> None:
         """Register log analysis tools with the tool registry."""
-        from .tools_register import register_tools
+        from .tools import register_tools
         register_tools(registry, self.store_root)
 
     def register_commands(self, registry) -> None:

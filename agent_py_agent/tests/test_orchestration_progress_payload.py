@@ -59,6 +59,31 @@ def test_runner_context_dispatch_reports_direct_child_progress() -> None:
     assert "继续调用 dispatch_subagents" in payload["direct_children"]["continue_hint"]
 
 
+def test_runner_context_dispatch_suggests_wait_for_running_direct_child() -> None:
+    mock_report = MagicMock()
+    mock_report.dry_run = False
+    mock_report.summary = {"runner": 1}
+    mock_report.records = []
+
+    mock_agent = MagicMock()
+    mock_agent._current_subagent_run_id = "parent-run"
+    mock_agent.config.subagent_workflow_mode = "off"
+    mock_agent.tools.specs.return_value = []
+    mock_agent.dispatch_subagents.return_value = mock_report
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    mock_agent.subagents.list_runs.return_value = [
+        SimpleNamespace(id="parent-run", parent_id="", status="RUNNING"),
+        SimpleNamespace(id="child-running", parent_id="parent-run", status="RUNNING"),
+    ]
+
+    result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False})
+
+    direct = json.loads(result.output)["direct_children"]
+    assert direct["next_action"] == "wait_for_running_direct_children"
+    assert direct["suggested_tool_call"]["tool"] == "wait"
+    assert "不要因为等待而重复" in direct["wait_hint"]
+
+
 def test_runner_context_dispatch_suggests_recovery_child_for_blocked_direct_child() -> None:
     mock_report = MagicMock()
     mock_report.dry_run = False

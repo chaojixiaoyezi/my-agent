@@ -176,7 +176,7 @@ class PatchApplyService:
         applier: str = "parent",
         note: str = "",
     ):
-        """Backward-compatible wrapper for single-task patch application."""
+        """Apply patches for one task."""
         params = params or ApplyPatchTaskParams(
             output=output or {},
             patches=patches or [],
@@ -190,11 +190,11 @@ class PatchApplyService:
         )
 
     def _normalize_patch_apply_spec(self, task, patch):
-        """Backward-compatible wrapper for patch spec normalization."""
+        """Normalize one patch spec for a task."""
         return normalize_patch_apply_spec(self.manager, task, patch)
 
     def _resolve_patch_target(self, raw_path: str):
-        """Backward-compatible wrapper for patch path resolution."""
+        """Resolve a patch path through the manager write boundary."""
         return resolve_patch_target(self.manager, raw_path)
 
 

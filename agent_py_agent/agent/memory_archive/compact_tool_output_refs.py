@@ -5,10 +5,17 @@ import json
 from pathlib import Path
 from typing import Any
 
+_INTERNAL_LEDGER_TOOLS = {"task_progress"}
+
 
 def tool_output_source_refs(workspace: str | Path, scope: dict[str, Any]) -> list[dict[str, Any]]:
     rows = _read_tool_output_index(Path(workspace))
-    return [_source_ref(row) for row in rows if _matches_scope(row, scope)]
+    return [_source_ref(row) for row in rows if _is_tool_output_row(row) and _matches_scope(row, scope)]
+
+
+def tool_call_source_refs(workspace: str | Path, scope: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = _read_tool_output_index(Path(workspace))
+    return [_tool_call_ref(row) for row in rows if _is_tool_call_row(row) and _matches_scope(row, scope)]
 
 
 def tool_output_artifact_refs(restore_refs: dict[str, Any]) -> list[dict[str, Any]]:
@@ -25,11 +32,16 @@ def tool_output_artifact_refs(restore_refs: dict[str, Any]) -> list[dict[str, An
             "parameters": dict(item.get("parameters", {}) if isinstance(item.get("parameters"), dict) else {}),
             "sha256": str(item.get("sha256", "") or ""),
             "size_bytes": int(item.get("size_bytes", 0) or 0),
-            "reserved": {},
         }
         for item in items
-        if item.get("path")
+        if item.get("path") and _is_model_visible_tool_output(item)
     ]
+
+
+def tool_call_refs(restore_refs: dict[str, Any]) -> list[dict[str, Any]]:
+    source_refs = restore_refs.get("source_refs", {}) if isinstance(restore_refs.get("source_refs"), dict) else {}
+    items = source_refs.get("tool_calls", []) if isinstance(source_refs.get("tool_calls"), list) else []
+    return [dict(item) for item in items if isinstance(item, dict)]
 
 
 def _read_tool_output_index(workspace: Path) -> list[dict[str, Any]]:
@@ -51,6 +63,22 @@ def _matches_scope(row: dict[str, Any], scope: dict[str, Any]) -> bool:
     )
 
 
+def _is_tool_output_row(row: dict[str, Any]) -> bool:
+    return (
+        str(row.get("kind") or "") == "tool_output"
+        and bool(str(row.get("path") or "").strip())
+        and _is_model_visible_tool_output(row)
+    )
+
+
+def _is_model_visible_tool_output(row: dict[str, Any]) -> bool:
+    return str(row.get("tool") or "").strip() not in _INTERNAL_LEDGER_TOOLS
+
+
+def _is_tool_call_row(row: dict[str, Any]) -> bool:
+    return str(row.get("kind") or "") == "tool_call"
+
+
 def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
     path = Path(str(row.get("path") or ""))
     return {
@@ -69,7 +97,24 @@ def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
         "task_id": str(row.get("task_id", "") or ""),
         "sha256": str(row.get("sha256", "") or ""),
         "size_bytes": int(row.get("size_bytes", 0) or 0),
-        "reserved": {},
+    }
+
+
+def _tool_call_ref(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": "tool_call",
+        "tool": str(row.get("tool", "") or ""),
+        "call_id": str(row.get("call_id", "") or ""),
+        "scoped_call_id": str(row.get("scoped_call_id", "") or ""),
+        "source_input": str(row.get("source_input") or ""),
+        "source_path": str(row.get("source_input") or ""),
+        "parameters": dict(row.get("parameters", {}) if isinstance(row.get("parameters"), dict) else {}),
+        "request_id": str(row.get("request_id", "") or ""),
+        "run_id": str(row.get("run_id", "") or ""),
+        "task_id": str(row.get("task_id", "") or ""),
+        "sha256": str(row.get("sha256", "") or ""),
+        "size_bytes": int(row.get("size_bytes", 0) or 0),
+        "output_externalized": bool(row.get("output_externalized")),
     }
 
 
@@ -83,4 +128,4 @@ def _json_line(line: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-__all__ = ["tool_output_artifact_refs", "tool_output_source_refs"]
+__all__ = ["tool_call_refs", "tool_call_source_refs", "tool_output_artifact_refs", "tool_output_source_refs"]

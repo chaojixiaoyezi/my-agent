@@ -52,13 +52,13 @@ class TestGet:
         obj = Obj()
         assert _get(obj, "name") == "test"
 
-    def test_get_falls_back_to_default(self):
-        """Test _get falls back to default for missing attribute."""
+    def test_get_returns_default_for_missing_attribute(self):
+        """Test _get returns default for missing attribute."""
         class Obj:
             pass
 
         obj = Obj()
-        assert _get(obj, "missing", "fallback") == "fallback"
+        assert _get(obj, "missing", "default-value") == "default-value"
 
     def test_get_from_object_with_get_method(self):
         """Test _get works with object that has get method - getattr is used."""
@@ -82,7 +82,7 @@ class TestCaseId:
         assert _case_id(case, summary) == "CASE-001"
 
     def test_case_id_from_dict_id(self):
-        """Test extracts case_id from dict using id key as fallback."""
+        """Test extracts case_id from dict using id key."""
         case = {"id": "CASE-ID-FROM-ID"}
         summary = {}
 

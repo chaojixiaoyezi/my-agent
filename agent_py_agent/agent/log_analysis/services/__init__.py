@@ -1,8 +1,5 @@
 
-"""Log analysis config services.
-
-Facade sub-package exposing normalization and coercion services.
-"""
+"""Log analysis config normalization and coercion services."""
 
 from .coercion import (
     append_warning,

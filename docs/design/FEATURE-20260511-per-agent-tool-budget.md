@@ -98,4 +98,4 @@ Status: Implemented
 
 ## Rollback / 回滚方案
 
-把 `tool_agent_budget_max_calls` 或 `tool_agent_budget_window_seconds` 设为 `0` 即可关闭守卫；代码层可移除 `_tool_loop_service.py` 的预算检查调用并保留配置字段兼容。
+把 `tool_agent_budget_max_calls` 或 `tool_agent_budget_window_seconds` 设为 `0` 即可关闭守卫；代码层如移除预算检查，也要同步删除配置、测试和文档。

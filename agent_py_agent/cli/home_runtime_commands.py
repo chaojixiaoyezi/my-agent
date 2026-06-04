@@ -5,7 +5,6 @@ import json
 from typing import Any
 
 from ..agent.user_space.home_index_rebuild import rebuild_home_indexes
-from ..agent.user_space.home_migration import apply_home_migration, plan_home_migration
 from ..agent.user_space.home_retention import apply_owner_retention, plan_owner_retention
 from ..agent.user_space.home_runtime_query import (
     DailyMemoryQuery,
@@ -65,17 +64,6 @@ def cmd_home_status(args) -> int:
     agent = make_agent(args)
     payload = {"ok": True, "home": home_runtime_status(agent.home_paths)}
     _print_home_status(payload, json_output=getattr(args, "json", False))
-    return 0
-
-
-def cmd_home_migrate(args) -> int:
-    agent = make_agent(args)
-    result = apply_home_migration(agent.home_paths) if bool(getattr(args, "apply", False)) else plan_home_migration(agent.home_paths)
-    payload = {"ok": True, "home": str(agent.home_paths.root), "migration": result.to_dict()}
-    if getattr(args, "json", False):
-        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
-    else:
-        _print_home_migrate(payload)
     return 0
 
 
@@ -152,14 +140,6 @@ def _print_home_status(payload: dict[str, Any], *, json_output: bool) -> None:
     print(json.dumps(home["counts"], ensure_ascii=False, sort_keys=True))
 
 
-def _print_home_migrate(payload: dict[str, Any]) -> None:
-    migration = payload["migration"]
-    print("MY-AGENT HOME MIGRATE")
-    print(f"home={payload['home']} applied={migration['applied']} actions={len(migration['actions'])}")
-    for action in migration["actions"]:
-        print(f"- {action['status']} {action['action']}: {action['source']} -> {action['target']}")
-
-
 def _print_home_retention(payload: dict[str, Any]) -> None:
     retention = payload["retention"]
     print("MY-AGENT HOME RETENTION")
@@ -178,9 +158,8 @@ def _print_home_index_rebuild(payload: dict[str, Any]) -> None:
     )
 
 
-__all__ = [
+    __all__ = [
     "cmd_home_index_rebuild",
-    "cmd_home_migrate",
     "cmd_home_retention",
     "cmd_home_status",
     "cmd_memory_daily_list",

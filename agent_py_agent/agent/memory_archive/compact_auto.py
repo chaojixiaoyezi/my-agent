@@ -13,7 +13,6 @@ from .compact_resume import MemoryCompactResumeOptions, build_memory_compact_res
 from .compact_suggest import MemoryCompactSuggestOptions, build_memory_compact_suggestion
 from .schema import (
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 
@@ -29,7 +28,7 @@ class MemoryCompactAutoCycleOptions:
     allow_apply: bool = False
     owner_type: str = "main_agent"
     owner_id: str = ""
-    #  只用 trigger 标记为什么进入 compact；不为兜底触发另建第二套 apply/resume 流程。
+    #  只用 trigger 标记为什么进入 compact；不为强制触发另建第二套 apply/resume 流程。
     trigger_reason: str = "normal_threshold"
     trigger_source: str = "token_budget"
     force_trigger: bool = False
@@ -106,7 +105,6 @@ def _cycle_payload(request: _AutoCyclePayloadOptions) -> dict[str, Any]:
         "apply_id": _apply_id(request.apply_result),
         "allowed_to_continue": bool(resume and resume["action_guard"]["allowed_to_continue"]),
         "next_action": _next_action(request.status),
-        "reserved": runtime_memory_reserved_fields(COMPACT_AUTO_CYCLE_SCHEMA),
     }
 
 

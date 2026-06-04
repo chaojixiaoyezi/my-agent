@@ -24,7 +24,7 @@
 - 创建出的任务带有 allowed tools、evidence refs、quality contract、context pack、最终收口门，解决 worker 自己宣布完成的问题。
 - 任务保持 `PLANNING` / `UNVERIFIED`，解决“创建任务”和“真正执行/验收”混在一起的风险。
 - LOG 的工具边界、体检边界和配置边界现在更适合小白学习，也更方便后续 LLM 在不重新扫全代码的情况下理解参数含义。
-- 注释明确了 security tools 只返回摘要和 evidence refs、doctor 不加载重依赖、配置坏值会 warning 后回退安全默认值。
+- 注释明确了 security tools 只返回摘要和 evidence refs、doctor 不加载重依赖、配置坏值会 warning 后采用安全默认值。
 - LOG query / hunt / trace 工具的 `ToolSpec.effect` 已显式标记为 `read_only`，让统一 Tool Manifest Gate 在 registry 执行前能用结构化字段判断副作用边界。
 
 ## 下一步
@@ -75,10 +75,10 @@
 ## 2026-05-07 hard/soft code-size cleanup
 - 中文说明：这一轮清掉 LOG 的 strict code-size soft，保持 `hard=0`。安全 prompt、query evidence、dispatch queue、ingest、dead-letter、entity graph 和 trace-case 都把多字段输入收进 bundle，避免后续继续长函数/长签名。
 - Cleared the remaining log-analysis strict code-size soft findings while keeping `hard=0`.
-- Security prompt, query evidence, dispatch queue, ingest pipeline, dedup, dead-letter, entity graph, and trace-case helpers now expose explicit bundle params instead of function-level var-keyword compatibility bags.
+- Security prompt, query evidence, dispatch queue, ingest pipeline, dedup, dead-letter, entity graph, and trace-case helpers now expose explicit bundle params instead of wide var-keyword bags.
 - Focused verification covered dispatch, queue, entity graph, dead-letter, ingest, evidence, architecture guardrails, and strict code-size checks.
 - 2026-05-07 high-risk cleanup continued in detector rule helpers and query evidence references; finding construction and evidence metadata now keep multi-field payloads inside explicit params objects.
-- 2026-05-09 LOG work-order apply compatibility updated: LOG-created tasks keep domain-visible `analyst` / `reviewer` roles even though the generic subagent layer now has `reporter` / `checker` aliases; closeout and cannot-self-accept contracts remain enforced through the work-order quality contract.
+- LOG-created tasks keep domain-visible `analyst` / `reviewer` roles; closeout and cannot-self-accept contracts remain enforced through the work-order quality contract.
 - 2026-05-22 LOG tools joined the runtime manifest gate contract: `security_query`, `security_hunt_ip`, and `security_trace_case` declare `effect=read_only` in both tool class entrypoints, so side-effect policy no longer relies on prompt wording.
 - 2026-06-02 LOG analyst/reviewer contract cleanup removed generated template comments and renamed the internal string-list helper to `_compact_string_list`; serialized payloads, evidence-ref requirements, and validation semantics are unchanged.
 ## 2026-05-07 LLM annotation coverage update

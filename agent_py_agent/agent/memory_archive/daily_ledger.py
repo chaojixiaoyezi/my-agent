@@ -18,7 +18,6 @@ from ..io import append_jsonl
 from ._storage_dates import _date_key
 from .schema import (
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 
@@ -127,12 +126,10 @@ def _event_payload(task: Any, workspace_refs: DailyLedgerWorkspaceRefs, now: flo
         "artifact_refs": list(getattr(task, "artifact_refs", []) or []),
         "evidence_refs": list(getattr(task, "evidence_refs", []) or []),
         "search": _search_fields(task),
-        "reserved": runtime_memory_reserved_fields(DAILY_LEDGER_EVENT_SCHEMA),
     }
 
 
 def _refs(task: Any, workspace_refs: DailyLedgerWorkspaceRefs) -> dict[str, str]:
-    legacy_task_dir = str(getattr(task, "task_dir", ""))
     task_workspace_root = workspace_refs.task_workspace_root
     agent_run_workspace_root = workspace_refs.agent_run_workspace_root
     return {
@@ -147,10 +144,8 @@ def _refs(task: Any, workspace_refs: DailyLedgerWorkspaceRefs) -> dict[str, str]
         "agent_compaction_ledger": _path_text(workspace_refs.agent_compaction_ledger_jsonl),
         "agent_memory_gate_candidates": _path_text(workspace_refs.agent_memory_gate_candidates_jsonl),
         "agent_skill_spark_gate": _path_text(workspace_refs.agent_skill_spark_gate_json),
-        "legacy_task_dir": legacy_task_dir,
-        "legacy_task_json": str(Path(legacy_task_dir) / "task.json") if legacy_task_dir else "",
-        "legacy_checkpoint": str(getattr(task, "checkpoint_json", "")),
-        "legacy_status_report": str(getattr(task, "status_report_json", "")),
+        "task_checkpoint": str(getattr(task, "checkpoint_json", "")),
+        "task_status_report": str(getattr(task, "status_report_json", "")),
     }
 
 

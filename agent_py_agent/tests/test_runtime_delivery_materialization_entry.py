@@ -4,10 +4,10 @@ import tempfile
 from pathlib import Path
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
-from agent_py_agent.agent.backend import ModelResponse
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderTransientError
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def test_cli_run_materializes_delivery_contract_before_tool_loop() -> None:

@@ -5,9 +5,8 @@ from __future__ import annotations
 
 Human version:
 This module creates the task-level memory workspace described by the runtime
-memory design without moving existing subagent work-order files. Existing
-subagent runs keep their legacy directories; the task workspace records an
-adapter pointer so later phases can add richer agent-run workspaces safely.
+memory design. Subagent runs live under the current task workspace at
+`work/agents/<run_id>/`.
 """
 
 import time
@@ -53,6 +52,7 @@ from .payloads import (
     write_json,
 )
 from .rendering import (
+    write_parent_summary_placeholder,
     write_summary,
     write_task_yaml_if_missing,
 )
@@ -62,7 +62,7 @@ from .state_merge import TaskStateMergeRequest, next_task_state
 
 @dataclass(frozen=True)
 class TaskWorkspacePaths:
-    """Concrete paths for one task workspace plus one legacy run adapter."""
+    """Concrete paths for one task workspace plus one agent run workspace."""
 
     root: Path
     work_dir: Path
@@ -85,7 +85,6 @@ class TaskWorkspacePaths:
     compact_chain: CompactChainResult
     memory_gate: MemoryGateResult
     daily_ledger: DailyLedgerAppendResult
-    legacy_run_ref_json: Path
 
 
 @dataclass(frozen=True)
@@ -138,20 +137,24 @@ def ensure_subagent_task_workspace(
     """
 
     inputs = _coerce_ensure_request(request, task, workspace=workspace)
-    task_id = str(getattr(inputs.task, "root_id", "") or getattr(inputs.task, "id", "task"))
-    run_id = str(getattr(inputs.task, "id", "") or task_id)
-    root = resolve_task_workspace_root(inputs.workspace, inputs.task, task_id)
+    raw_task_id = str(getattr(inputs.task, "root_id", "") or getattr(inputs.task, "id", "task"))
+    run_id = str(getattr(inputs.task, "id", "") or raw_task_id)
+    root = resolve_task_workspace_root(inputs.workspace, inputs.task, raw_task_id)
+    previous_state = read_json_object(root / "work" / "state.json")
+    task_id = _workspace_task_id(root, inputs.task, raw_task_id, run_id, previous_state)
     path_inputs = _TaskWorkspacePathInputs(root, task_id, run_id)
     now = float(getattr(inputs.task, "updated_at", 0.0) or time.time())
     paths = _paths_for(path_inputs)
     _ensure_directories(paths)
     write_task_yaml_if_missing(paths.task_yaml, task_id, inputs.task, now)
-    previous_state = read_json_object(paths.state_json)
     write_json(
         paths.state_json,
         next_task_state(TaskStateMergeRequest(task_id, run_id, inputs.task, now, previous_state)),
     )
-    write_summary(paths.current_summary, task_id, run_id, inputs.task)
+    if run_id == task_id:
+        write_summary(paths.current_summary, task_id, run_id, inputs.task)
+    elif not paths.current_summary.exists():
+        write_parent_summary_placeholder(paths.current_summary, task_id, run_id)
     shared = sync_shared_workspace(
         SyncSharedWorkspaceRequest(task_workspace_root=paths.work_dir, task=inputs.task, now=now)
     )
@@ -166,6 +169,49 @@ def ensure_subagent_task_workspace(
     runtime_refs = _sync_runtime_refs(_RuntimeSyncInputs(inputs.workspace, inputs.task, paths, now))
     append_timeline(paths.timeline_jsonl, timeline_event(inputs.task, now, previous_state))
     return _paths_for(path_inputs, runtime_refs=runtime_refs, shared=shared)
+
+
+def _workspace_task_id(
+    root: Path,
+    task: Any,
+    raw_task_id: str,
+    run_id: str,
+    previous_state: dict[str, object],
+) -> str:
+    if run_id != raw_task_id:
+        return raw_task_id
+    state_run_id = str(previous_state.get("run_id") or "").strip()
+    state_task_id = str(previous_state.get("task_id") or "").strip()
+    for candidate in (state_run_id, state_task_id):
+        if candidate and candidate != run_id:
+            return candidate
+    yaml_ids = _task_yaml_identity(root / "work" / "task.yaml")
+    for candidate in (yaml_ids.get("run_id", ""), yaml_ids.get("task_id", "")):
+        if candidate and candidate != run_id:
+            return candidate
+    parent_id = str(getattr(task, "parent_id", "") or "").strip()
+    if parent_id and parent_id != run_id:
+        return parent_id
+    return raw_task_id
+
+
+def _task_yaml_identity(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    result: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for line in lines:
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        key = key.strip()
+        if key not in {"task_id", "run_id"}:
+            continue
+        result[key] = value.strip().strip('"').strip("'")
+    return result
 
 
 def _coerce_ensure_request(
@@ -273,7 +319,6 @@ def _paths_for(
         compact_chain=runtime_refs.compact_chain or default_compact_chain_result(agent_adapter_dir),
         memory_gate=runtime_refs.memory_gate or memory_gate_paths(agent_adapter_dir),
         daily_ledger=runtime_refs.daily_ledger or _default_daily_ledger(root),
-        legacy_run_ref_json=agent_adapter_dir / "legacy_run_ref.json",
     )
 
 

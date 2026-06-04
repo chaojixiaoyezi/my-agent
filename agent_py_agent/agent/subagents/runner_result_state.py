@@ -35,7 +35,7 @@ class RunnerAttemptParams:
 
 
 def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
-    """Apply parsed runner status and raw fallback status to a task in place."""
+    """Apply parsed runner status and raw status text to a task in place."""
     task = params.task
     result_meta = params.result_meta
     status_context = params.status_context

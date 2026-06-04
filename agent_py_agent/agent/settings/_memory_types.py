@@ -1,4 +1,4 @@
-"""Dataclasses for effective memory config and fallback warnings."""
+"""Dataclasses for effective memory config and default warnings."""
 
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class MemorySettings:
-    """Effective memory config after validation and fallback normalization."""
+    """Effective memory config after validation and default normalization."""
     memory_archive_level: int = 3
     memory_hook_enabled: bool = True
     memory_hook_archive_level: int = 3
@@ -26,10 +26,10 @@ class MemorySettings:
 
 @dataclass(frozen=True)
 class MemoryConfigWarning:
-    """Structured warning emitted when a memory config value falls back to default."""
+    """Structured warning emitted when a memory config value uses the default."""
     field_name: str
     raw_value: Any
-    fallback_value: Any
+    default_value: Any
     reason: str
 
     def to_dict(self) -> dict[str, Any]:

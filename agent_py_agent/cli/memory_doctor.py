@@ -5,7 +5,7 @@ from __future__ import annotations
 
 新手说明:
 这里放 memory doctor 体检命令入口和它专用的 helper 函数。
-doctor 会告诉你配置最终生效成什么、配置有没有回退 warning、
+doctor 会告诉你配置最终生效成什么、配置有没有默认值 warning、
 默认或指定路由索引能不能读，以及 hook/raw 目录里现在有没有归档文件。
 route 相关的功能在 memory_commands.py。
 """
@@ -204,8 +204,8 @@ def _print_memory_doctor_report(payload: dict[str, Any], *, json_output: bool) -
     for warning in payload["warnings"]:
         field_name = warning.get("field_name", "warning")
         reason = warning.get("reason", warning.get("message", ""))
-        fallback = warning.get("fallback_value", "-")
-        print(f"- {field_name}: {reason} fallback={fallback}")
+        default = warning.get("default_value", "-")
+        print(f"- {field_name}: {reason} default={default}")
     routing = payload["routing"]
     print("Routing")
     print(f"- index={routing['index']['path']} exists={routing['index']['exists']}")
@@ -240,7 +240,6 @@ def _print_home_report(home: dict[str, Any]) -> None:
 def _print_home_doctor_summary(report: dict[str, Any]) -> None:
     print("Home Doctor")
     print(
-        f"- migration_pending={report['migration']['pending_count']} "
-        f"dangling_refs={report['indexes']['dangling_count']} "
+        f"- dangling_refs={report['indexes']['dangling_count']} "
         f"retention_candidates={report['retention']['planned_count']}"
     )

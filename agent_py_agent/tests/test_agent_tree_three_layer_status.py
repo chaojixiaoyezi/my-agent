@@ -30,11 +30,9 @@ def test_agent_tree_node_exposes_liveness_progress_and_evidence_layers():
                         evidence_refs=["trace:web_search:1"],
                         blockers=["需要执行脚本能力"],
                         tool_contract={"open_request_count": 1, "gap_count": 1},
-                        reserved={
-                            "recent_tool_trace": [
-                                {"tool": "web_search", "ok": True, "summary": "查到候选资料"}
-                            ],
-                        },
+                        recent_tool_trace=[
+                            {"tool": "web_search", "ok": True, "summary": "查到候选资料"}
+                        ],
                     )
                 ],
             )
@@ -56,7 +54,7 @@ def test_agent_tree_node_exposes_liveness_progress_and_evidence_layers():
     assert node["recent_tool_trace"] == [{"tool": "web_search", "ok": True, "summary": "查到候选资料"}]
 
 
-def test_agent_tree_workspace_refs_hide_legacy_task_dir():
+def test_agent_tree_workspace_refs_use_current_task_workspace():
     class _Manager:
         def kernel_snapshot(self, query):
             return SubagentKernelSnapshot(
@@ -71,12 +69,10 @@ def test_agent_tree_workspace_refs_hide_legacy_task_dir():
                             "task_dir": "/tmp/home/owners/local/main/tasks/2026-06-01/root-1",
                             "task_workspace": "/tmp/home/owners/local/main/tasks/2026-06-01/root-1",
                             "agent_run_workspace": "/tmp/home/owners/local/main/tasks/2026-06-01/root-1/work/agents/child-1",
-                            "legacy_task_dir": "/tmp/workspace/data/subagents/child-1",
                         },
                     )
                 ],
                 source_refs={
-                    "root_task_dir": "/tmp/workspace/data/subagents/tasks/root-1",
                     "root_task_workspace": "/tmp/home/owners/local/main/tasks/2026-06-01/root-1",
                 },
             )
@@ -89,11 +85,10 @@ def test_agent_tree_workspace_refs_hide_legacy_task_dir():
 
     assert node["workspace_refs"]["agent_work_dir"].endswith("/root-1/work/agents/child-1")
     assert node["workspace_refs"]["task_root"].endswith("/root-1")
-    assert "legacy_task_dir" not in node["workspace_refs"]
     assert "/data/subagents/" not in str(payload)
 
 
-def test_agent_tree_redacts_legacy_subagent_paths_everywhere():
+def test_agent_tree_keeps_current_refs_visible_everywhere():
     class _Manager:
         def kernel_snapshot(self, query):
             return SubagentKernelSnapshot(
@@ -105,14 +100,14 @@ def test_agent_tree_redacts_legacy_subagent_paths_everywhere():
                         task_id="child-1",
                         status="RUNNING",
                         workspace_refs={
-                            "task_workspace": "/tmp/project/data/subagents/tasks/root-1",
-                            "agent_run_workspace": "/tmp/project/data/subagents/tasks/root-1/agents/child-1",
-                            "final_report": "/tmp/project/data/subagents/tasks/root-1/agents/child-1/final_report.md",
+                            "task_workspace": "/tmp/home/owners/local/main/tasks/2026-06-01/root-1",
+                            "agent_run_workspace": "/tmp/home/owners/local/main/tasks/2026-06-01/root-1/work/agents/child-1",
+                            "final_report": "/tmp/home/owners/local/main/tasks/2026-06-01/root-1/work/agents/child-1/final_report.md",
                         },
                     )
                 ],
                 source_refs={
-                    "root_agent_run_workspace": "/tmp/project/data/subagents/tasks/root-1/agents/child-1",
+                    "root_agent_run_workspace": "/tmp/home/owners/local/main/tasks/2026-06-01/root-1/work/agents/child-1",
                 },
             )
 
@@ -121,8 +116,7 @@ def test_agent_tree_redacts_legacy_subagent_paths_everywhere():
 
     payload = agent_tree_status_payload(_Agent())
 
-    assert "/data/subagents/" not in str(payload)
-    assert "[internal_legacy_subagent_path_hidden]" not in str(payload)
+    assert "/tmp/home/owners/local/main/tasks/2026-06-01/root-1" in str(payload)
 
 
 def test_agent_tree_exposes_artifact_registry_refs():
@@ -160,8 +154,8 @@ def test_agent_tree_exposes_artifact_registry_refs():
 
 
 def test_agent_tree_exposes_pending_guidance_layer(tmp_path):
-    from agent_py_agent.agent.config import AgentConfig
     from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     child = agent.subagents.create_run(goal="child", thought="", plan=["child"])
@@ -260,6 +254,41 @@ def test_agent_tree_source_refs_prefer_latest_visible_workspace():
     payload = agent_tree_status_payload(_Agent())
 
     assert payload["source_refs"]["root_task"] == "/tmp/home/tasks/same-slug-run-new"
+
+
+def test_main_agent_tree_defaults_to_current_task_workspace_when_available():
+    """主代理当前 run 有 task workspace 时，默认查树不应混入旧任务子代理。"""
+    from agent_py_agent.agent.subagents.kernel import SubagentKernel
+    from agent_py_agent.agent.subagents.models import SubAgentTask
+
+    current = SubAgentTask(id="current-child", goal="current", thought="", plan=["current"])
+    current.task_workspace_dir = "/tmp/home/tasks/current-task"
+    current.agent_run_workspace_dir = "/tmp/home/tasks/current-task/work/agents/current-child"
+    old = SubAgentTask(id="old-child", goal="old", thought="", plan=["old"])
+    old.task_workspace_dir = "/tmp/home/tasks/old-task"
+    old.agent_run_workspace_dir = "/tmp/home/tasks/old-task/work/agents/old-child"
+
+    class _Manager:
+        seen_query = None
+
+        def list_runs_report(self):
+            from agent_py_agent.agent.subagents.services.persistence import SubAgentListRunsReport
+
+            return SubAgentListRunsReport(runs=[old, current], load_errors=[])
+
+        def kernel_snapshot(self, query):
+            self.seen_query = query
+            return SubagentKernel(self).snapshot(query)
+
+    class _Agent:
+        _current_run_task_workspace = "/tmp/home/tasks/current-task"
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent())
+
+    assert _Agent.subagents.seen_query.scope == "task_workspace"
+    assert [node["run_id"] for node in payload["nodes"]] == ["current-child"]
+    assert payload["scope"] == "task_workspace"
 
 
 def test_subagent_runner_can_only_inspect_own_subtree_even_with_root_params():
@@ -402,8 +431,8 @@ def test_cli_style_main_run_id_falls_back_to_visible_tree_without_agent_attribut
     assert payload["child_result_index"][0]["primary_artifact_refs"] == ["result.md"]
 
 
-def test_cli_main_run_fallback_is_limited_to_current_orchestration_ids():
-    """主代理 run-* 回退不能把旧任务树混进当前 run。"""
+def test_cli_main_run_visible_scope_is_limited_to_current_orchestration_ids():
+    """主代理 run-* 可见树不能把旧任务树混进当前 run。"""
 
     class _Manager:
         def kernel_snapshot(self, query):
@@ -485,11 +514,9 @@ def test_child_result_index_keeps_progress_refs_for_running_child_without_artifa
                             "summary": "/tmp/home/owners/local/main/tasks/2026-06-03/all-agent-架构分析/work/agents/child-running/summary.md",
                             "checkpoint": "/tmp/home/owners/local/main/tasks/2026-06-03/all-agent-架构分析/work/agents/child-running/checkpoint.json",
                         },
-                        reserved={
-                            "recent_tool_trace": [
-                                {"tool": "list_files", "ok": True, "summary": "最近成功调用工具: list_files"}
-                            ],
-                        },
+                        recent_tool_trace=[
+                            {"tool": "list_files", "ok": True, "summary": "最近成功调用工具: list_files"}
+                        ],
                     )
                 ],
             )

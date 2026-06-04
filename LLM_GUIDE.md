@@ -43,7 +43,7 @@ my-agent/                          ← 项目根目录
 │       └── live-lab/
 ├── agent_py_agent/                ← Python 包源码
 │   ├── README.md                  ← 包级使用说明
-│   ├── __main__.py                ← CLI 入口（兼容门面）
+│   ├── __main__.py                ← CLI 入口
 │   ├── agent/                     ← 核心 agent 代码
 │   │   ├── DIRECTORY_GUIDE.md     ← 【必读】目录职责地图
 │   │   ├── agent_core/            ← 主代理编排
@@ -260,7 +260,7 @@ def example(...):
 
 1. 读 `agent/DIRECTORY_GUIDE.md`，确认边界。
 2. 读 `DESIGN_LEDGER.md` "代码体检与后续拆分计划"条目。
-3. 只移动一个低耦合区域，先保持 import 兼容。
+3. 只移动一个低耦合区域，同步迁移调用点，不新增旧入口转发壳。
 4. 跑完整测试后再继续。
 5. 不在同一轮同时改行为和大移动文件。
 

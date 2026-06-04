@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.local_storage.control_plane_models import AgentRuntimeQueryContext
-from agent_py_agent.agent.local_store import LocalStore
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 
 
@@ -46,4 +46,5 @@ def test_shared_progress_panel_combines_runtime_query_rollup_and_inheritance_ref
     assert [item.run_id for item in panel.blocked_runs] == [child.id]
     assert panel.inheritance_manifest_refs == [child.inheritance_manifest_json]
     assert panel.takeover_readiness_refs == [child.takeover_readiness_json]
-    assert panel.reserved["fact_source"] == "task_run_workspace"
+    assert panel.fact_source == "task_run_workspace"
+    assert panel.view == "shared_progress_panel"

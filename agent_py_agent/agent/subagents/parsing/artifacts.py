@@ -5,7 +5,7 @@ from .values import _dict_list
 
 
 def artifact_items_from_payload(payload: dict[str, object]) -> list[dict[str, object]]:
-    """Read artifact refs from the canonical field plus safe compatibility aliases."""
+    """Read artifact refs from the canonical field plus accepted aliases."""
 
     result: list[dict[str, object]] = []
     seen: set[str] = set()

@@ -1,27 +1,11 @@
-"""检测器辅助函数测试 - helpers.py re-export 模块核心逻辑测试。"""
+"""检测器底层辅助函数测试。"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
 import pytest
 
-from agent_py_agent.agent.log_analysis.analytics.detectors.helpers import (
-    SUSPICIOUS_CHILD_PROCESSES,
-    WEB_PARENT_PROCESSES,
-    _asset_ip,
-    _basename,
-    _canonical_time,
-    _clamp_float,
-    _cmdline,
-    _destination_ip,
-    _domain,
-    _dst_port,
-    _event_action,
-    _event_class,
-    _event_dict,
-    _event_time,
-    _field,
-    _host,
+from agent_py_agent.agent.log_analysis.analytics.detectors.classifiers import (
     _is_alert_event,
     _is_auth_event,
     _is_egress_event,
@@ -34,33 +18,53 @@ from agent_py_agent.agent.log_analysis.analytics.detectors.helpers import (
     _is_vpn_event,
     _is_waf_event,
     _normalize_entities,
-    _outcome,
-    _parent_process_name,
-    _parse_time,
-    _path_value,
-    _present,
     _primary_asset,
-    _process_name,
     _same_asset,
     _same_auth_scope,
     _same_source,
     _same_user,
-    _severity,
-    _source_ip,
-    _source_product,
+    _unique_json_values,
+    _unique_texts,
+    _weak_signal,
+)
+from agent_py_agent.agent.log_analysis.analytics.detectors.field_access import (
+    SUSPICIOUS_CHILD_PROCESSES,
+    WEB_PARENT_PROCESSES,
+    _canonical_time,
+    _clamp_float,
+    _event_dict,
+    _event_time,
+    _field,
+    _parse_time,
+    _path_value,
+    _present,
     _text,
     _time_bucket,
     _to_float,
     _to_int,
     _truthy,
-    _unique_json_values,
-    _unique_texts,
-    _user,
-    _victim_ip,
-    _weak_signal,
     _window_for_events,
     _within_after,
     _within_before,
+)
+from agent_py_agent.agent.log_analysis.analytics.detectors.field_extractors import (
+    _asset_ip,
+    _basename,
+    _cmdline,
+    _destination_ip,
+    _domain,
+    _dst_port,
+    _event_action,
+    _event_class,
+    _host,
+    _outcome,
+    _parent_process_name,
+    _process_name,
+    _severity,
+    _source_ip,
+    _source_product,
+    _user,
+    _victim_ip,
 )
 
 

@@ -27,14 +27,6 @@ from .rule_helpers import (
 )
 from .rule_loader import clear_rule_cache, load_rule, preload_rules
 
-# Backward-compatible aliases
-detect_waf_attack_success_candidate = waf_attack_success_candidate
-detect_web_to_process_anomaly = web_to_process_anomaly
-detect_vpn_new_geo_login = vpn_new_geo_login
-detect_bruteforce_then_success = bruteforce_then_success
-detect_rare_egress_after_alert = rare_egress_after_alert
-detect_multi_source_weak_signal = multi_source_weak_signal
-
 DETECTORS = {
     "waf_attack_success_candidate": waf_attack_success_candidate,
     "web_to_process_anomaly": web_to_process_anomaly,
@@ -53,12 +45,6 @@ __all__ = [
     "_query",
     "_stable_id",
     "bruteforce_then_success",
-    "detect_bruteforce_then_success",
-    "detect_multi_source_weak_signal",
-    "detect_rare_egress_after_alert",
-    "detect_vpn_new_geo_login",
-    "detect_waf_attack_success_candidate",
-    "detect_web_to_process_anomaly",
     "multi_source_weak_signal",
     "rare_egress_after_alert",
     "run_soft_detectors",

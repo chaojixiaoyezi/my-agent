@@ -3,6 +3,7 @@ from __future__ import annotations
 
 TOOL_INT_FIELDS = (
     ("max_tool_rounds", 0, None),
+    ("max_tool_calls_per_round", 0, None),
     ("tool_agent_budget_window_seconds", 0, None),
     ("tool_agent_budget_max_calls", 0, None),
     ("tool_artifact_read_budget_window_seconds", 0, None),

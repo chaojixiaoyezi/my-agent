@@ -175,6 +175,10 @@ def _tool_guardrail_config(boundary: dict[str, object] | None, policy: object = 
             boundary_policy.get("repeat_fail_threshold"),
             runtime_guard_int("repeat_fail_threshold", 10, policy=policy),
         ),
+        readonly_no_progress_threshold=_int_value(
+            boundary_policy.get("readonly_no_progress_threshold"),
+            runtime_guard_int("readonly_no_progress_threshold", 3, policy=policy),
+        ),
         terminal_block_enabled=_bool_value(
             boundary_policy.get("terminal_block_enabled"),
             runtime_guard_bool("terminal_block_enabled", False, policy=policy),

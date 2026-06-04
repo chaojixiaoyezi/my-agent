@@ -6,7 +6,7 @@ from __future__ import annotations
 Human version:
 This module writes a conservative compact chain for a subagent run. It records
 checkpoint snapshots and compact metadata without deleting timelines, artifacts,
-or legacy work-order files.
+or task-local work files.
 """
 
 import hashlib
@@ -183,8 +183,7 @@ def _refs(
         "compaction_ledger": str(root / "compactions" / "compaction_ledger.jsonl"),
         "artifact_manifest": str(context.artifact_manifest_jsonl),
         "timeline": str(root / "timeline.jsonl"),
-        "legacy_checkpoint": str(getattr(task, "checkpoint_json", "")),
-        "legacy_task_dir": str(getattr(task, "task_dir", "")),
+        "task_checkpoint": str(getattr(task, "checkpoint_json", "")),
     }
 
 

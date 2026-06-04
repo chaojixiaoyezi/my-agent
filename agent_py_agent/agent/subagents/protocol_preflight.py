@@ -14,14 +14,12 @@ class ToolPreflightResult:
     ok: bool
     issues: list[ProtocolIssue] = field(default_factory=list)
     effective_tools: list[str] = field(default_factory=list)
-    reserved: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "ok": self.ok,
             "issues": [item.to_dict() for item in self.issues],
             "effective_tools": list(self.effective_tools),
-            "reserved": dict(self.reserved),
         }
 
 
@@ -46,7 +44,7 @@ def _missing_tool_issues(allowed: list[str], available: set[str]) -> list[Protoc
             "missing_allowed_tool",
             "tool_contract.allowed_tools",
             f"allowed tool is unavailable: {tool}",
-            reserved={"tool": tool},
+            details={"tool": tool},
         )
         for tool in allowed
         if tool not in available
@@ -92,9 +90,9 @@ def _tool_issue(
     code: str,
     field: str,
     message: str,
-    reserved: dict[str, object] | None = None,
+    details: dict[str, object] | None = None,
 ) -> ProtocolIssue:
-    return ProtocolIssue(kind="ToolContractError", code=code, field=field, message=message, reserved=reserved or {})
+    return ProtocolIssue(kind="ToolContractError", code=code, field=field, message=message, details=details or {})
 
 
 def _ordered_unique(values: list[str]) -> list[str]:

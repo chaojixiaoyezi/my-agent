@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from agent_py_agent.agent.backend import ModelResponse
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     ChannelMessageRuntime,
@@ -9,6 +8,7 @@ from agent_py_agent.agent.conversation import (
     FakeChannelHub,
 )
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 class _EchoOnceBackend:

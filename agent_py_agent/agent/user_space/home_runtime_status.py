@@ -13,7 +13,7 @@ def home_runtime_status_payload(home: MyAgentHomePaths, *, daily_files: int, tas
     payload: dict[str, Any] = {
         "root": str(home.root),
         "entry_files": _entry_file_status(home),
-        "directories": _legacy_directory_status(home),
+        "directories": _directory_status(home),
         "owner_identity": _owner_identity(home),
         "owner": _owner_status(home),
         "identity": _identity_status(home),
@@ -21,7 +21,6 @@ def home_runtime_status_payload(home: MyAgentHomePaths, *, daily_files: int, tas
         "system": _system_status(home),
         "schema": schema.payload,
         "counts": {"daily_files": daily_files, "task_workspaces": task_workspaces},
-        "migration": _migration_status(home),
     }
     if schema.load_error:
         payload["schema_load_error"] = schema.load_error
@@ -48,7 +47,7 @@ def _owner_identity(home: MyAgentHomePaths) -> dict[str, str]:
     }
 
 
-def _legacy_directory_status(home: MyAgentHomePaths) -> dict[str, dict[str, Any]]:
+def _directory_status(home: MyAgentHomePaths) -> dict[str, dict[str, Any]]:
     return {
         "memory_daily": _path_status(home.memory_daily_dir),
         "memory_raw": _path_status(home.memory_raw_dir),
@@ -118,54 +117,9 @@ def _identity_status(home: MyAgentHomePaths) -> dict[str, Any]:
 def _system_status(home: MyAgentHomePaths) -> dict[str, dict[str, Any]]:
     return {
         "schema_version": _path_status(home.system_schema_version_json),
-        "migrations": _path_status(home.system_migrations_dir),
         "doctor": _path_status(home.system_doctor_dir),
+        "backups": _path_status(home.system_backups_dir),
     }
-
-
-def _migration_status(home: MyAgentHomePaths) -> dict[str, dict[str, Any]]:
-    return {
-        "legacy_daily_memory": _legacy_jsonl_migration_status(
-            source=home.memory_daily_dir,
-            target=home.owner_memory_daily_dir,
-        ),
-        "legacy_raw_memory": _legacy_jsonl_migration_status(
-            source=home.memory_raw_dir,
-            target=home.owner_audit_dir,
-        ),
-        "legacy_task_workspaces": _legacy_directory_migration_status(
-            source=home.workspace_tasks_dir,
-            target=home.owner_tasks_dir,
-        ),
-    }
-
-
-def _legacy_jsonl_migration_status(*, source: Path, target: Path) -> dict[str, Any]:
-    files = [path for path in source.glob("*.jsonl") if path.is_file()] if source.exists() else []
-    return {
-        "source": str(source),
-        "target": str(target),
-        "file_count": len(files),
-        "record_count": sum(_jsonl_line_count(path) for path in files),
-        "advice": "migrate_legacy_to_owner_home" if files else "",
-    }
-
-
-def _legacy_directory_migration_status(*, source: Path, target: Path) -> dict[str, Any]:
-    item_count = sum(1 for path in source.rglob("state.json") if path.is_file()) if source.exists() else 0
-    return {
-        "source": str(source),
-        "target": str(target),
-        "item_count": item_count,
-        "advice": "migrate_legacy_to_owner_home" if item_count else "",
-    }
-
-
-def _jsonl_line_count(path: Path) -> int:
-    try:
-        return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
-    except OSError:
-        return 0
 
 
 def _path_status(path: Path) -> dict[str, Any]:

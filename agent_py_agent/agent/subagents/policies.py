@@ -5,8 +5,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..capabilities import CapabilitySearchHit
-from ..capability_config import CapabilityConfig
+from agent_py_agent.agent.capability import CapabilitySearchHit
+from agent_py_agent.agent.capability.config import CapabilityConfig
+
 from .capability_status import is_pending_capability_status
 from .models import CapabilityGrant, CapabilityRequest, SubAgentParsedOutput, SubAgentTask
 from .reports import ActionPlanItem, DueCheckIssue, SubAgentBoardItem
@@ -289,7 +290,7 @@ def _execution_context_instructions() -> list[str]:
     return [
         "只能使用本上下文列出的 allowed_skills、allowed_tools 和 granted_cards。",
         "不要读取或展开全局 skill/tool registry；缺能力时提交 capability_request。",
-        "工具失败要记录 tried/evidence，并优先在已授权能力内换 fallback；无可用 fallback 时上抛。",
+        "工具失败要记录 tried/evidence，并优先在已授权能力内换替代方案；无可用替代方案时上抛。",
         "完成前必须写入可验收 evidence，不能只口头声明完成。",
         "写入只允许发生在 allowed_write_roots 内，禁止写 forbidden_write_roots 和 locked_files。",
         "如果通道损坏、工单文件缺失或任务边界不清，先标记 BLOCKED 并等待父代理处理。",

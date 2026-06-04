@@ -190,7 +190,7 @@ def test_tool_loop_decision_redirects_and_blocks_exploration_fuse(tmp_path: Path
         ToolLoopResponseDecisionRequest,
         tool_loop_response_decision,
     )
-    from agent_py_agent.agent.backend import ModelResponse
+    from agent_py_agent.agent.backends import ModelResponse
 
     agent = _agent(tmp_path)
     calls = [{"tool": "web_fetch", "url": "https://example.test/data.json"}]

@@ -96,7 +96,7 @@ def _load_doctor_config(path: Path) -> tuple[LogAnalysisConfig, list[dict[str, A
         warning = LogAnalysisConfigWarning(
             field_name="config_file",
             raw_value=str(path),
-            fallback_value="safe defaults",
+            default_value="safe defaults",
             reason=f"failed to load config: {type(exc).__name__}: {exc}",
         )
         return config, [warning.to_dict()]

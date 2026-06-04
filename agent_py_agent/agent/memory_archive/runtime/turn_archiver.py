@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable  # noqa: F401  # re-exported for backwards compatibility
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any

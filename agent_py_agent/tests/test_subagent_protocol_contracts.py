@@ -163,24 +163,6 @@ def test_recovery_strategy_exports_address_and_envelope_refs(tmp_path: Path) -> 
     assert strategy["recovery_mode"] == "takeover_from_continue_packet"
 
 
-@pytest.mark.skip(reason="旧 final_closeout_controller 已删除，验收事实走统一 closeout")
-def test_final_closeout_decision_carries_task_envelope_acceptance(tmp_path: Path) -> None:
-    from agent_py_agent.agent.subagents.final_closeout_controller import (
-        build_final_closeout_decision,
-    )
-
-    manager = SubAgentManager(tmp_path)
-    task = manager.create_run(goal="写 index.html", thought="", plan=["写文件"], role="worker")
-    task.acceptance_checks = ["index.html 存在"]
-    Path(task.output_json).write_text(json.dumps({"artifacts": ["index.html"], "tests": []}), encoding="utf-8")
-    manager.save(task)
-
-    decision = build_final_closeout_decision(manager.load(task.id), workspace_root=tmp_path)
-
-    assert decision.reserved["task_envelope"]["address"]["run_id"] == task.id
-    assert decision.reserved["task_envelope"]["acceptance"]["checks"] == ["index.html 存在"]
-
-
 def _make_protocol_tree(tmp_path: Path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="", plan=["派工"], role="coordinator")

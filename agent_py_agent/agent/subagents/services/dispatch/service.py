@@ -4,7 +4,7 @@ from __future__ import annotations
 """dispatch record and reporting service.
 
 这里承接调度记录生成、汇总和写出逻辑。
-SubAgentManager 通过 facade 方法委托到这里。
+SubAgentManager 通过当前服务组合调用这里。
 """
 
 import json

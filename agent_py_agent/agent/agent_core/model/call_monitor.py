@@ -7,7 +7,7 @@ from ...contracts.model_call_ledger import ModelCallLedger, ModelCallRecord
 
 @dataclass(frozen=True)
 class FirstTokenTimeoutOptions:
-    fallback_prefill_tokens_per_second: float = 400.0
+    estimated_prefill_tokens_per_second: float = 400.0
     base_first_token_seconds: float = 3.0
     safety_margin: float = 1.5
     min_timeout_seconds: float = 5.0
@@ -58,7 +58,7 @@ def estimate_first_token_timeout(params: FirstTokenTimeoutParams) -> FirstTokenT
     )
     if probe_estimate is not None:
         return probe_estimate
-    return _estimate_from_fallback(input_tokens=input_tokens, options=params.options)
+    return _estimate_from_estimated_rate(input_tokens=input_tokens, options=params.options)
 
 
 def is_cache_suspected(
@@ -108,12 +108,12 @@ def _estimate_from_required_probes(
     )
 
 
-def _estimate_from_fallback(
+def _estimate_from_estimated_rate(
     *,
     input_tokens: int,
     options: FirstTokenTimeoutOptions,
 ) -> FirstTokenTimeoutEstimate:
-    rate = _positive_or_default(options.fallback_prefill_tokens_per_second, 1.0)
+    rate = _positive_or_default(options.estimated_prefill_tokens_per_second, 1.0)
     prefill_seconds = input_tokens / rate
     first_token_seconds = max(0.0, float(options.base_first_token_seconds))
     timeout_seconds = _clamp_timeout(
@@ -124,7 +124,7 @@ def _estimate_from_fallback(
         timeout_seconds=timeout_seconds,
         prefill_seconds=prefill_seconds,
         first_token_seconds=first_token_seconds,
-        source="fallback",
+        source="estimated_rate",
     )
 
 

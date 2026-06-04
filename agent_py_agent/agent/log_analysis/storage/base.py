@@ -11,58 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
-try:  # Worker A owns these models; keep this module compatible while it lands.
-    from ..models import Case, EvidenceRef, Finding, NormalizedEvent
-except Exception:  # pragma: no cover - exercised only until Worker A's models exist.
-
-    @dataclass
-    class NormalizedEvent:
-        event_id: str
-        source_id: str = ""
-        event_time: str = ""
-        ingest_time: str = ""
-        event_type: str = "custom"
-        raw_ref: str = ""
-        attributes: dict[str, Any] | None = None
-
-    @dataclass
-    class Finding:
-        finding_id: str
-        detector_id: str = ""
-        severity_hint: str = ""
-        risk_score: float = 0.0
-        evidence_refs: list[str] | None = None
-        status: str = "OPEN"
-        attributes: dict[str, Any] | None = None
-
-    @dataclass
-    class Case:
-        case_id: str
-        title: str = ""
-        status: str = "OPEN"
-        priority: str = "P3"
-        risk_score: float = 0.0
-        finding_refs: list[str] | None = None
-        evidence_refs: list[str] | None = None
-        created_at: str = ""
-        updated_at: str = ""
-        attributes: dict[str, Any] | None = None
-
-    @dataclass
-    class EvidenceRef:
-        evidence_id: str
-        kind: str = "query_result"
-        query_id: str = ""
-        uri: str = ""
-        path: str = ""
-        content_hash: str = ""
-        sha256: str = ""
-        row_count: int = 0
-        truncated: bool = False
-        created_at: str = ""
-        summary: str = ""
-        metadata: dict[str, Any] | None = None
-
+from ..models import Case, EvidenceRef, Finding, NormalizedEvent
 
 DEFAULT_QUERY_LIMIT = 100
 MAX_QUERY_LIMIT = 500

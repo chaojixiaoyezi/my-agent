@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 
-from ...agent.backend import ModelResponse
+from ...agent.backends import ModelResponse
 
 
 class ScenarioStructuredRepairBackend:

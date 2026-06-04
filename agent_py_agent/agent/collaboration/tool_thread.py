@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from ..agent_core.runner.context import current_subagent_run_id
 from ..runtime_errors import runtime_error_report
-from ..tools import ToolExecutionResult
+from ..tooling.models import ToolExecutionResult
 from .tool_values import error
 
 if TYPE_CHECKING:
@@ -75,32 +75,7 @@ def _explicit_thread(agent: SimpleAgent, thread_id: str, task_id: str, *, tool_n
         return thread
     if thread is not None:
         return thread_id, task_id
-    if fallback := _fallback_thread(agent, task_id, tool_name):
-        return fallback
     return error(tool_name, "unknown_thread", f"unknown conversation thread: {thread_id}")
-
-
-def _fallback_thread(
-    agent: SimpleAgent,
-    task_id: str,
-    tool_name: str,
-) -> tuple[str, str] | ToolExecutionResult | None:
-    task_fallback = _task_fallback_thread(agent, task_id, tool_name)
-    if task_fallback and not isinstance(task_fallback, ToolExecutionResult):
-        return task_fallback
-    if current := thread_from_current_runner(agent):
-        return current
-    return task_fallback if isinstance(task_fallback, ToolExecutionResult) else None
-
-
-def _task_fallback_thread(
-    agent: SimpleAgent,
-    task_id: str,
-    tool_name: str,
-) -> tuple[str, str] | ToolExecutionResult | None:
-    if not task_id:
-        return None
-    return thread_from_task(agent, task_id, materialize=True, tool_name=tool_name)
 
 
 def _materialize_internal_thread_for_task(
@@ -237,6 +212,6 @@ def _report_load_error(report: dict[str, object], context: str) -> dict[str, obj
     return {"load_error": payload}
 
 
-def _current_runner_or_error(agent: SimpleAgent, fallback_error: ToolExecutionResult) -> tuple[str, str] | ToolExecutionResult:
+def _current_runner_or_error(agent: SimpleAgent, original_error: ToolExecutionResult) -> tuple[str, str] | ToolExecutionResult:
     current = thread_from_current_runner(agent)
-    return current if current else fallback_error
+    return current if current else original_error

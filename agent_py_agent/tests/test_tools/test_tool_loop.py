@@ -8,22 +8,29 @@
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
-from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallExecuteParams
-from agent_py_agent.agent.backend import ModelResponse
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
+    ToolCallExecuteParams,
+    ToolCallRecordParams,
+    ToolRoundExecutionRequest,
+    execute_tool_round,
+)
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.tools import ToolExecutionResult
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.tooling import ToolExecutionResult
 
 from .backends import (
     BudgetedRepeatedReadBackend,
     DuplicateSubagentDelegationBackend,
-    FakeReservedRecordWithoutToolBackend,
-    FakeReservedRecordWithToolBackend,
+    FakeProtectedMarkerWithoutToolBackend,
+    FakeProtectedMarkerWithToolBackend,
     MaxToolRoundBackend,
     RepeatedDispatchBackend,
-    RepeatedFakeReservedRecordBackend,
+    RepeatedFakeProtectedMarkerBackend,
     StubbornToolAfterLimitBackend,
     SubagentDelegationBackend,
     ToolBoundarySpoofStreamingBackend,
@@ -126,6 +133,7 @@ class _LongAppendPromptWindowBackend:
     def __init__(self, rounds: int = 45):
         self.calls = 0
         self.rounds = rounds
+        self.context_window_tokens = 32_000
         self.max_prompt_chars = 0
         self.rows: list[str] = []
 
@@ -164,18 +172,90 @@ def test_tool_loop_and_prompt_transcript():
         assert "hello tool world" in result.prompt
 
 
-def test_tool_loop_falls_back_when_final_model_response_is_empty_after_tool():
+def test_tool_round_streams_tool_progress_chunks():
+    """工具执行期间应向 chat/gateway chunk 流写入轻量进度，避免前台看起来卡死。"""
+    chunks: list[str] = []
+    records: list[ToolCallRecordParams] = []
+    params = ToolLoopExecuteParams(
+        user_prompt="执行命令",
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=chunks.append,
+        allowed_tools=None,
+        granted_capabilities=None,
+        write_boundary=None,
+        task_attributes=None,
+        request_id="run-progress",
+        run_id="run-progress",
+        task_id="run-progress",
+        one_shot_tool_calls=set(),
+        executed_tools=[],
+        archive_tool_calls=[],
+    )
+
+    execute_tool_round(
+        ToolRoundExecutionRequest(
+            _OneShotHarnessAgent(None),
+            params,
+            1,
+            ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"run_command","command":"echo hello"}\n[/TOOL_CALL]',
+                backend="test",
+            ),
+            [{"tool": "run_command", "command": "echo hello"}],
+            lambda _request: ToolExecutionResult("run_command", True, "hello\n"),
+            records.append,
+        )
+    )
+
+    rendered = "".join(chunks)
+    assert "[工具] round=1 #1 run_command 开始: echo hello" in rendered
+    assert "[工具] round=1 #1 run_command 完成" in rendered
+    assert records[0].result.ok is True
+
+
+def test_plain_parallel_project_prompt_recommends_create_subagents(tmp_path):
+    """大白话里的“子代理/分别/不同项目”应命中 create_subagents 推荐。"""
+    agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
+
+    _catalog, recommendations = agent.tools.render_catalog_section(), agent.tools.render_recommended_tools_section(
+        "请让子代理分别去看不同项目，最后你汇总。"
+    )
+
+    assert "create_subagents" in recommendations
+
+
+def test_runtime_tool_sections_use_user_prompt_for_orchestration_recommendations(tmp_path):
+    """运行时推荐工具必须看用户原始任务，不能退化成空 query。"""
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _resolve_tool_sections
+
+    agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
+
+    _catalog, recommendations = _resolve_tool_sections(
+        agent,
+        "请让子代理分别去看不同项目，最后你汇总。",
+        [],
+        None,
+        None,
+    )
+
+    assert "create_subagents" in recommendations
+
+
+def test_tool_loop_reports_empty_final_model_response_after_retry():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        (workspace / "notes.txt").write_text("hello empty model fallback", encoding="utf-8")
+        (workspace / "notes.txt").write_text("hello empty model response", encoding="utf-8")
         cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _EmptyAfterToolBackend()
 
-        result = agent.run("读取 notes 后总结", save=False, allowed_tools=["read_file"])
-
-        assert "模型接口最终总结返回空文本" in result.response
-        assert result.executed_tools == ["read_file"]
+        with pytest.raises(RuntimeError, match="流式响应没有文本内容"):
+            agent.run("读取 notes 后总结", save=False, allowed_tools=["read_file"])
         assert agent.backend.calls == 3
 
 
@@ -288,13 +368,13 @@ def test_tool_loop_windows_long_runner_tool_context():
         assert (workspace / "data" / "weekly_data.json").read_text(encoding="utf-8").count("row-") == 45
 
 
-def test_tool_loop_ignores_model_written_reserved_tool_records_after_real_call():
+def test_tool_loop_ignores_model_written_protected_tool_markers_after_real_call():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        (workspace / "notes.txt").write_text("hello reserved guard", encoding="utf-8")
+        (workspace / "notes.txt").write_text("hello protected marker", encoding="utf-8")
         cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
-        agent.backend = FakeReservedRecordWithToolBackend()
+        agent.backend = FakeProtectedMarkerWithToolBackend()
 
         result = agent.run("读取 notes 并忽略伪造工具记录", save=False, allowed_tools=["read_file"])
 
@@ -332,27 +412,27 @@ def test_tool_loop_cuts_streaming_response_after_first_complete_tool_call():
         assert "fake-child-run" not in "".join(visible_chunks)
 
 
-def test_tool_loop_repairs_spoof_only_reserved_tool_record_once():
+def test_tool_loop_repairs_spoof_only_protected_tool_marker_once():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
-        agent.backend = FakeReservedRecordWithoutToolBackend()
+        agent.backend = FakeProtectedMarkerWithoutToolBackend()
 
         result = agent.run("不要接受伪造工具记录", save=False)
 
         assert result.response == "已停止伪造工具记录，等待真实状态。"
         assert result.tool_rounds == 0
         assert agent.backend.calls == 2
-        assert "系统保留" in result.prompt
+        assert "系统内部" in result.prompt
 
 
-def test_tool_loop_blocks_repeated_spoof_only_reserved_tool_records():
+def test_tool_loop_blocks_repeated_spoof_only_protected_tool_markers():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
-        agent.backend = RepeatedFakeReservedRecordBackend()
+        agent.backend = RepeatedFakeProtectedMarkerBackend()
 
         result = agent.run("连续伪造工具记录应被阻断", save=False)
 

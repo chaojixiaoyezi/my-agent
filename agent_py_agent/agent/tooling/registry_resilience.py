@@ -13,6 +13,7 @@ _MAX_PROMPT_OUTPUT_CHARS = 12000
 _OUTPUT_HEAD_CHARS = 8000
 _OUTPUT_TAIL_CHARS = 2000
 _ARTIFACT_DIR = ".agent_tool_outputs"
+_PRESERVE_PROMPT_OUTPUT_TOOLS = frozenset({"read_file"})
 
 
 def resilient_tool_invoke(
@@ -67,6 +68,8 @@ def _apply_large_output_policy(result: ToolExecutionResult, workspace_root: Path
 
 
 def _preserve_prompt_output(result: ToolExecutionResult) -> bool:
+    if str(result.tool or "") in _PRESERVE_PROMPT_OUTPUT_TOOLS:
+        return True
     policy = result.result_envelope.get("tool_output_policy")
     return isinstance(policy, dict) and bool(policy.get("preserve_prompt_output"))
 

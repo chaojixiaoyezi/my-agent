@@ -24,6 +24,13 @@ class TimeoutFieldsService:
             out[key] = value
             if warn:
                 warnings.append(warn)
+        value, warn = _normalize_subagent_watch_interval(
+            out.get("subagent_watch_interval_seconds"),
+            defaults.subagent_watch_interval_seconds,
+        )
+        out["subagent_watch_interval_seconds"] = value
+        if warn:
+            warnings.append(warn)
         return out, warnings
 
 
@@ -78,3 +85,32 @@ _TIMEOUT_INT_FIELDS = (
     ("watchdog_max_restarts", 0, None),
     ("watchdog_restart_delay", 0, None),
 )
+
+
+def _normalize_subagent_watch_interval(value: object, default: int) -> tuple[int, str | None]:
+    key = "subagent_watch_interval_seconds"
+    if value is None:
+        return int(default), None
+    parsed = _watch_interval_int(value)
+    if parsed is None:
+        detail = "boolean" if isinstance(value, bool) else repr(value)
+        return 60, f"{key}: expected an integer, got {detail}; using 60"
+    if parsed < 60:
+        return 60, f"{key}: expected >= 60, got {parsed}; using 60"
+    if parsed > 7200:
+        return 7200, f"{key}: expected <= 7200, got {parsed}; using 7200"
+    return parsed, None
+
+
+def _watch_interval_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit() or (stripped.startswith("-") and stripped[1:].isdigit()):
+            return int(stripped)
+    if isinstance(value, float) and value == int(value):
+        return int(value)
+    return None

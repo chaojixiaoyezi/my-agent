@@ -11,9 +11,9 @@ import tempfile
 import time
 from pathlib import Path
 
-from agent_py_agent.agent.capability_config import CapabilityConfig
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.services.lifecycle import (
     RecordCapabilityGapParams,
     RecordCapabilityGrantParams,
@@ -214,18 +214,19 @@ def test_subagent_board_scales_and_flags():
         assert (root / "subs" / "SUBAGENT_BOARD.md").exists()
 
 
-def test_subagent_board_hides_legacy_subagent_paths():
+def test_subagent_board_keeps_current_subagent_paths():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        cfg = AgentConfig(subagent_workspace="data/subagents")
+        cfg = AgentConfig(subagent_workspace="tasks/current/work/agents")
         agent = SimpleAgent(cfg, root)
-        agent.subagents.create_run(goal="整理材料", thought="测试旧路径净化", plan=["执行"])
+        agent.subagents.create_run(goal="整理材料", thought="测试当前路径直通", plan=["执行"])
 
         board = agent.subagents.write_board(recent_limit=10)
         board_text = (agent.subagents.workspace / "subagent_board.json").read_text(encoding="utf-8")
 
         assert board.summary["total"] == 1
-        assert "/data/subagents/" not in board_text
+        assert "/tasks/current/work/agents/" in board_text
+        assert "[internal_legacy_subagent_path_hidden]" not in board_text
 
 
 def _make_due_check_stale_active_run(agent):

@@ -10,7 +10,7 @@ from agent_py_agent.agent.agent_core.subagent.compact_continuation import (
 )
 from agent_py_agent.agent.agent_core.subagent.compact_continuation_io import read_json
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.manager_runner_results import RecordRunnerResultParams
+from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
 from agent_py_agent.agent.subagents.models import SubAgentParsedOutput
 
 
@@ -65,7 +65,7 @@ def test_subagent_continue_packet_reports_dirty_output_json(tmp_path: Path) -> N
     loaded = manager.load(task.id)
     packet = json.loads(Path(loaded.agent_run_latest_session_continue_packet_json).read_text(encoding="utf-8"))
 
-    (error,) = packet["reserved"]["load_errors"]
+    (error,) = packet["load_errors"]
     assert error["context"] == "subagent.continue_packet.output_json"
     assert error["path"] == task.output_json
     assert error["category"] == "data_parse"
@@ -92,7 +92,7 @@ def test_subagent_continue_packet_reports_dirty_runtime_refs(tmp_path: Path) -> 
     loaded = manager.load(task.id)
     packet = json.loads(Path(loaded.agent_run_latest_session_continue_packet_json).read_text(encoding="utf-8"))
 
-    contexts = {error["context"] for error in packet["reserved"]["load_errors"]}
+    contexts = {error["context"] for error in packet["load_errors"]}
     assert "subagent.continue_packet.session_compact" in contexts
     assert "subagent.continue_packet.work_progress" in contexts
     assert packet["ready_to_continue"] is True
@@ -156,7 +156,7 @@ def test_runner_prompt_says_empty_continue_packet_can_start_from_goal(tmp_path: 
     assert "start from the task goal instead of reading the packet body" in prompt
 
 
-def test_runner_prompt_falls_back_to_checkpoint_when_continue_packet_is_corrupt(tmp_path: Path) -> None:
+def test_runner_prompt_uses_recovery_refs_when_continue_packet_is_corrupt(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
         goal="继续恢复损坏 packet 的任务",
@@ -179,7 +179,7 @@ def test_runner_prompt_falls_back_to_checkpoint_when_continue_packet_is_corrupt(
     assert "packet_load_error:" in prompt
     assert "subagent_compact_continuation.continue_packet" in prompt
     assert str(packet_ref) in prompt
-    assert "fallback_to: checkpoint/summary/task-local refs" in prompt
+    assert "recovery_refs: checkpoint/summary/task-local refs" in prompt
     assert "agent_run_checkpoint" in prompt
     assert "checkpoint 里还有可用恢复事实" in prompt
 
@@ -207,12 +207,12 @@ def test_prepare_runner_attempt_preserves_corrupt_packet_preflight(tmp_path: Pat
 
     assert "Recovery Preflight" in prompt
     assert "packet_status_before_prepare: corrupt" in prompt
-    assert "fallback_to: checkpoint/summary/task-local refs" in prompt
+    assert "recovery_refs: checkpoint/summary/task-local refs" in prompt
     assert "prepare may regenerate latest_continue_packet" in prompt
     assert "checkpoint 仍然可用" in prompt
 
 
-def test_runner_prompt_falls_back_to_checkpoint_when_continue_packet_is_stale(tmp_path: Path) -> None:
+def test_runner_prompt_uses_recovery_refs_when_continue_packet_is_stale(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
         goal="继续恢复过期 packet 的任务",
@@ -235,7 +235,7 @@ def test_runner_prompt_falls_back_to_checkpoint_when_continue_packet_is_stale(tm
 
     assert "Task-Local Compact Continuation" in prompt
     assert "packet_status: stale" in prompt
-    assert "fallback_to: checkpoint/summary/task-local refs" in prompt
+    assert "recovery_refs: checkpoint/summary/task-local refs" in prompt
     assert "summary 是过期 packet 后的稳定恢复事实" in prompt
 
 

@@ -13,7 +13,7 @@ def render_delivery_contract_section(contract: dict[str, object]) -> str:
     return "\n".join(
         [
             "[tool-system delivery-contract]",
-            json.dumps(contract, ensure_ascii=False, sort_keys=True),
+            json.dumps(_model_visible_contract(contract), ensure_ascii=False, sort_keys=True),
             *_bootstrap_guidance_lines(contract),
             *_artifact_guidance_lines(contract),
             *render_recovery_guidance_lines(contract, _artifact_items(contract)),
@@ -79,6 +79,8 @@ def _artifact_guidance_lines(contract: dict[str, object]) -> list[str]:
     if not artifacts:
         return []
     lines = ["执行要求："]
+    if _has_target_coverage_contract(contract):
+        lines.append("- 这个任务有目标覆盖清单；先用读取、搜索或执行工具覆盖清单里的来源/分片，再写最终产物。未覆盖的 required 目标会导致验收返工。")
     for artifact in artifacts:
         lines.extend(_one_artifact_lines(artifact))
     lines.append("- 如果 required artifact 还不存在，优先对该 artifact 的目标路径动手：创建目录、开始写入或补齐阶段产物。")
@@ -90,6 +92,52 @@ def _artifact_guidance_lines(contract: dict[str, object]) -> list[str]:
     )
     lines.append("- 当你确认交付物已经准备好时，调用 submit_for_acceptance 提交验收；普通最终回复不会触发验收。")
     return lines
+
+
+def _has_target_coverage_contract(contract: dict[str, object]) -> bool:
+    coverage = contract.get("target_coverage_contract")
+    if not isinstance(coverage, dict):
+        return False
+    return bool(_coverage_target_items(coverage))
+
+
+def _model_visible_contract(contract: dict[str, object]) -> dict[str, object]:
+    visible = dict(contract)
+    coverage = visible.get("target_coverage_contract")
+    if isinstance(coverage, dict):
+        visible["target_coverage_contract"] = _model_visible_target_coverage_contract(coverage)
+    return visible
+
+
+def _model_visible_target_coverage_contract(coverage: dict[str, object]) -> dict[str, object]:
+    visible = {
+        key: value
+        for key, value in coverage.items()
+        if key not in {"target_items", "items", "targets"}
+    }
+    targets = _coverage_target_items(coverage)
+    if not targets:
+        return visible
+    preview = _target_preview_items(targets)
+    visible["target_count"] = len(targets)
+    visible["target_items_preview"] = preview
+    if len(preview) < len(targets):
+        visible["targets_omitted"] = len(targets) - len(preview)
+    return visible
+
+
+def _coverage_target_items(coverage: dict[str, object]) -> list[object]:
+    for key in ("target_items", "items", "targets"):
+        value = coverage.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _target_preview_items(targets: list[object]) -> list[object]:
+    if len(targets) <= 8:
+        return list(targets)
+    return [*targets[:5], *targets[-3:]]
 
 
 def _bootstrap_targets(items: object) -> list[str]:

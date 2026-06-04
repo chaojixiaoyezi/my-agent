@@ -53,7 +53,10 @@ class ContextBundleV1:
     tool_preflight: dict[str, object] = field(default_factory=dict)
     collaboration: dict[str, object] = field(default_factory=dict)
     source_refs: dict[str, list[str]] = field(default_factory=dict)
-    reserved: dict[str, object] = field(default_factory=dict)
+    conversation: dict[str, str] = field(default_factory=dict)
+    runner_recovery_preflight: dict[str, object] = field(default_factory=dict)
+    expected_required_files: list[str] = field(default_factory=list)
+    runtime_guidance: list[dict[str, object]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -61,7 +64,6 @@ class ContextGateReport:
     ok: bool
     missing_fields: list[str] = field(default_factory=list)
     blocking_reason: str = ""
-    reserved: dict[str, object] = field(default_factory=dict)
 
 
 def build_context_bundle(task: SubAgentTask) -> ContextBundleV1:
@@ -88,7 +90,9 @@ def build_context_bundle(task: SubAgentTask) -> ContextBundleV1:
         task_envelope=envelope.to_dict(),
         tool_preflight=_tool_preflight(task, envelope),
         source_refs=source_refs(),
-        reserved=_reserved(task),
+        conversation=_conversation_context(task),
+        runner_recovery_preflight=_runner_recovery_preflight(task),
+        expected_required_files=_expected_required_files(task),
     )
 
 
@@ -291,20 +295,16 @@ def _path_terms(value: object) -> list[str]:
     return terms
 
 
-def _reserved(task: SubAgentTask) -> dict[str, object]:
+def _runner_recovery_preflight(task: SubAgentTask) -> dict[str, object]:
     attributes = getattr(task, "attributes", {})
     attributes = attributes if isinstance(attributes, dict) else {}
     preflight = attributes.get("runner_recovery_preflight")
-    reserved: dict[str, object] = _file_contract_reserved(attributes)
-    conversation = _conversation_reserved(attributes)
-    if conversation:
-        reserved["conversation"] = conversation
-    if isinstance(preflight, dict):
-        reserved["runner_recovery_preflight"] = dict(preflight)
-    return reserved
+    return dict(preflight) if isinstance(preflight, dict) else {}
 
 
-def _conversation_reserved(attributes: dict[str, object]) -> dict[str, str]:
+def _conversation_context(task: SubAgentTask) -> dict[str, str]:
+    attributes = getattr(task, "attributes", {})
+    attributes = attributes if isinstance(attributes, dict) else {}
     thread_id = str(attributes.get("conversation_thread_id") or "").strip()
     task_id = str(attributes.get("conversation_task_id") or "").strip()
     payload = {}
@@ -315,11 +315,13 @@ def _conversation_reserved(attributes: dict[str, object]) -> dict[str, str]:
     return payload
 
 
-def _file_contract_reserved(attributes: dict[str, object]) -> dict[str, object]:
+def _expected_required_files(task: SubAgentTask) -> list[str]:
+    attributes = getattr(task, "attributes", {})
+    attributes = attributes if isinstance(attributes, dict) else {}
     required = attributes.get("required_files")
     if not isinstance(required, list):
-        return {}
-    return {"expected_required_files": [str(item).strip() for item in required if str(item or "").strip()]}
+        return []
+    return [str(item).strip() for item in required if str(item or "").strip()]
 
 def _is_missing(value: object) -> bool:
     if value is None:

@@ -12,7 +12,7 @@ from ._gateway_service_handlers import (
     uninstall_systemd,
 )
 
-# Backwards compatibility: expose PROJECT_ROOT
+# Service unit generation constants.
 from ._gateway_service_unit_gen import (
     PROJECT_ROOT,
     generate_launchd_plist_text,

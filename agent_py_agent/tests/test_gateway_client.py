@@ -6,7 +6,6 @@ import json
 import time
 from types import SimpleNamespace
 
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import (
     GatewayPaths,
@@ -16,6 +15,7 @@ from agent_py_agent.agent.gateway_parts import (
     write_gateway_request,
 )
 from agent_py_agent.agent.gateway_parts import runtime as gateway_runtime
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli import gateway_client
 from agent_py_agent.cli.chat_parts.gateway_client import poll_gateway_chunks
 
@@ -186,6 +186,35 @@ def test_chat_gateway_poll_drains_chunks_when_response_is_ready(tmp_path):
     assert visible_chunks_ref == [2]
 
 
+def test_chat_gateway_chunk_poll_reads_only_new_tail(tmp_path):
+    from agent_py_agent.cli.chat_parts import gateway_client as chat_gateway_client
+
+    chunk_path = tmp_path / "req.chunks.jsonl"
+    chunk_path.write_text(json.dumps({"text": "first"}) + "\n", encoding="utf-8")
+    seen: list[str] = []
+
+    chunks, visible, offset = chat_gateway_client._poll_chunk_file(
+        chunk_path,
+        lambda chunk: seen.append(chunk) or True,
+        0,
+        0,
+        0,
+    )
+    with open(chunk_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"text": "second"}) + "\n")
+    chunks, visible, offset = chat_gateway_client._poll_chunk_file(
+        chunk_path,
+        lambda chunk: seen.append(chunk) or True,
+        chunks,
+        visible,
+        offset,
+    )
+
+    assert seen == ["first", "second"]
+    assert chunks == 2
+    assert visible == 2
+
+
 def test_chat_gateway_poll_skips_bad_chunk_line_and_continues(tmp_path):
     from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
 
@@ -248,7 +277,7 @@ def test_chat_gateway_poll_consumes_but_does_not_show_invisible_chunks(tmp_path)
         json.dumps({"text": "   \n"}) + "\n",
         encoding="utf-8",
     )
-    response_path.write_text(json.dumps({"ok": True, "response": "fallback"}), encoding="utf-8")
+    response_path.write_text(json.dumps({"ok": True, "response": "archived response"}), encoding="utf-8")
 
     chunks_printed_ref = [0]
     visible_chunks_ref = [0]
@@ -263,13 +292,13 @@ def test_chat_gateway_poll_consumes_but_does_not_show_invisible_chunks(tmp_path)
         )
     )
 
-    assert response["response"] == "fallback"
+    assert response["response"] == "archived response"
     assert chunks_printed_ref == [1]
     assert visible_chunks_ref == [0]
 
 
-def test_gateway_worker_continues_when_processing_lease_write_fails(tmp_path, monkeypatch):
-    """A lease file write failure must not strand a user request in processing."""
+def test_gateway_worker_reports_processing_lease_write_failure(tmp_path, monkeypatch):
+    """A lease file write failure must surface as a local gateway failure."""
 
     agent = SimpleAgent(
         AgentConfig(
@@ -282,13 +311,13 @@ def test_gateway_worker_continues_when_processing_lease_write_fails(tmp_path, mo
         tmp_path,
     )
     paths = gateway_paths(agent)
-    request_id = "gwreq-lease-fallback"
+    request_id = "gwreq-lease-write-error"
     write_gateway_request(
         paths,
         {
             "id": request_id,
             "kind": "ask",
-            "prompt": "lease fallback should still answer",
+            "prompt": "lease write error should be reported",
             "inject": [],
             "prompt_files": [],
             "save": False,
@@ -304,12 +333,15 @@ def test_gateway_worker_continues_when_processing_lease_write_fails(tmp_path, mo
             raise OSError("simulated long-path lease write failure")
         return None
 
-    monkeypatch.setattr(gateway_runtime, "write_json_file_atomic", fail_processing_lease_write)
+    monkeypatch.setattr("agent_py_agent.agent.gateway_parts.io.write_json_file_atomic", fail_processing_lease_write)
 
     processed = gateway_runtime._process_gateway_requests(agent, paths)
 
     assert processed == 1
     assert gateway_response_path(paths, request_id).exists()
-    assert (paths.done / f"{request_id}.json").exists()
+    assert (paths.failed / f"{request_id}.json").exists()
     assert not (paths.processing / f"{request_id}.json").exists()
-    assert read_json_file(gateway_response_path(paths, request_id))["ok"] is True
+    response = read_json_file(gateway_response_path(paths, request_id))
+    assert response["ok"] is False
+    assert response["error_code"] == "GATEWAY_REQUEST_PROCESSING_STATE_WRITE_ERROR"
+    assert response["processing_state_error"]["context"] == "gateway.worker.processing_state.write"

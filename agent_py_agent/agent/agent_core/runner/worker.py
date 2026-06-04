@@ -7,9 +7,10 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...config import AgentConfig
+from ...settings import AgentConfig
 from ...settings.services.runtime_config_task import apply_task_runtime_config_overlay
-from ...subagent import RecordRunnerResultParams, SubAgentRunnerResult
+from ...subagents.manager_runner_result_payload import RecordRunnerResultParams
+from ...subagents.models import SubAgentRunnerResult
 from ..subagent.params import SubagentRunParams
 from .session_pool import RunnerSessionPoolLease, runner_session_lease
 

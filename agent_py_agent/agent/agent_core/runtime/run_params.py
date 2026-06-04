@@ -15,7 +15,7 @@ _AUTO_MATERIALIZE_SOURCES = {"chat", "cli_run", "gateway"}
 
 
 @dataclass(frozen=True)
-class RunCompatibilityFields:
+class RunKeywordFields:
     inject: list[str] | None = None
     prompt_files: list[str] | None = None
     save: bool | None = None
@@ -37,7 +37,7 @@ class RunCompatibilityFields:
     context_scope: str | None = None
 
 
-def run_params_from_compat(params: RunParams, fields: RunCompatibilityFields) -> RunParams:
+def run_params_from_keywords(params: RunParams, fields: RunKeywordFields) -> RunParams:
     return run_params_from_values(
         params,
         inject=fields.inject,

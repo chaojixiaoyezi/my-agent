@@ -1,7 +1,7 @@
 
 """Security log query functions used by log-analysis tools.
 
-Trace-case query assembly lives in query_trace.py; this file is the public facade.
+Trace-case query assembly lives in query_trace.py; this file is the public tool API.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ def security_hunt_ip(
     limit: int | None = DEFAULT_QUERY_LIMIT,
     max_limit: int | None = None,
 ) -> dict[str, Any]:
-    """Compatibility wrapper for the security_hunt_ip tool name."""
+    """security_hunt_ip tool entry."""
     return hunt_ip(
         ip,
         params=params,
@@ -245,7 +245,7 @@ def security_trace_case(
     max_limit: int | None = None,
     max_queries: int = MAX_TRACE_CASE_QUERIES,
 ) -> dict[str, Any]:
-    """Compatibility wrapper for the security_trace_case tool name."""
+    """security_trace_case tool entry."""
     return trace_case(
         case_id,
         params=params,

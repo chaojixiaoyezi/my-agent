@@ -16,10 +16,18 @@ class EvidenceSourceRef:
     artifact_ref: str = ""
     content_sha256: str = ""
     status: str = "AVAILABLE"
-    reserved: dict[str, Any] = field(default_factory=dict)
+    tool_call_ref: str = ""
+    tool_call_id: str = ""
+    operation_id: str = ""
+    tool_result_id: str = ""
+    http_status: int | None = None
+    metric_kind: str = ""
+    window_start: str = ""
+    window_end: str = ""
+    time_window: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "source_id": self.source_id,
             "source_type": self.source_type,
             "uri": self.uri,
@@ -27,8 +35,22 @@ class EvidenceSourceRef:
             "artifact_ref": self.artifact_ref,
             "content_sha256": self.content_sha256,
             "status": self.status,
-            "reserved": dict(self.reserved),
         }
+        _add_present(
+            payload,
+            {
+                "tool_call_ref": self.tool_call_ref,
+                "tool_call_id": self.tool_call_id,
+                "operation_id": self.operation_id,
+                "tool_result_id": self.tool_result_id,
+                "http_status": self.http_status,
+                "metric_kind": self.metric_kind,
+                "window_start": self.window_start,
+                "window_end": self.window_end,
+                "time_window": self.time_window,
+            },
+        )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -41,10 +63,21 @@ class EvidenceClaim:
     verification_status: str = "VERIFIED"
     value_type: str = "exact"
     methodology: str = ""
-    reserved: dict[str, Any] = field(default_factory=dict)
+    metric_kind: str = ""
+    observed_metric_kind: str = ""
+    window_start: str = ""
+    window_end: str = ""
+    time_window: dict[str, Any] = field(default_factory=dict)
+    limitations: str | list[str] = ""
+    uncertainty_notes: str | list[str] = ""
+    item_path: str = ""
+    item_key: dict[str, Any] = field(default_factory=dict)
+    item_index: int | None = None
+    group_index: int | None = None
+    group_name: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "claim_id": self.claim_id,
             "field": self.field,
             "value": self.value,
@@ -53,8 +86,25 @@ class EvidenceClaim:
             "verification_status": self.verification_status,
             "value_type": self.value_type,
             "methodology": self.methodology,
-            "reserved": dict(self.reserved),
         }
+        _add_present(
+            payload,
+            {
+                "metric_kind": self.metric_kind,
+                "observed_metric_kind": self.observed_metric_kind,
+                "window_start": self.window_start,
+                "window_end": self.window_end,
+                "time_window": self.time_window,
+                "limitations": self.limitations,
+                "uncertainty_notes": self.uncertainty_notes,
+                "item_path": self.item_path,
+                "item_key": self.item_key,
+                "item_index": self.item_index,
+                "group_index": self.group_index,
+                "group_name": self.group_name,
+            },
+        )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -66,7 +116,6 @@ class EvidenceContractRequest:
     allowed_value_types: list[str] = field(default_factory=lambda: ["exact"])
     min_confidence: float = 0.0
     require_methodology_for_estimates: bool = False
-    reserved: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -231,6 +280,19 @@ def _summary(request: EvidenceContractRequest, findings: list[dict[str, Any]]) -
 
 def _finding(code: str, severity: str, message: str, *, details: dict[str, Any] | None = None) -> dict[str, Any]:
     return {"code": code, "severity": severity, "message": message, **dict(details or {})}
+
+
+def _add_present(payload: dict[str, Any], values: dict[str, Any]) -> None:
+    for key, value in values.items():
+        if value is None:
+            continue
+        if isinstance(value, str) and not value:
+            continue
+        if isinstance(value, dict) and not value:
+            continue
+        if isinstance(value, list) and not value:
+            continue
+        payload[key] = value
 
 
 __all__ = [

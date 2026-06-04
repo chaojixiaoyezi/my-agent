@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
-def test_raise_collaboration_uses_current_subagent_run_when_model_invents_task_id(tmp_path) -> None:
+def test_raise_collaboration_uses_current_subagent_run_when_model_invents_task_id_without_thread(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     child = agent.subagents.create_run(
         goal="发现线索后打开协作 case。",
@@ -19,7 +19,6 @@ def test_raise_collaboration_uses_current_subagent_run_when_model_invents_task_i
         payload = json.loads(
             agent.tools.tools["raise_collaboration"].execute(
                 {
-                    "thread_id": "thread-clue-requester",
                     "task_id": "task-clue-1",
                     "title": "通用线索 case",
                     "summary": "模型传了错误 task_id，工具应使用当前 runner 真实 run_id。",

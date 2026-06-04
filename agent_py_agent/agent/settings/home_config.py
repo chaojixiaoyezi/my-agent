@@ -11,7 +11,6 @@ class HomeProviderConfigFields:
     my_agent_owner_kind: str = "main"
     my_agent_owner_id: str = "main"
     workspace_task_path_template: str = "tasks/{date}/{task_slug}"
-    home_runtime_bootstrap_enabled: bool = True
     home_context_enabled: bool = True
     home_lesson_auto_read_limit: int = 3
     daily_memory_mirror_enabled: bool = True

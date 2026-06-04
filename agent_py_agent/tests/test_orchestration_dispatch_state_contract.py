@@ -13,8 +13,8 @@ from agent_py_agent.agent.agent_core.orchestration_tools import (
     CreateSubagentsTool,
     DispatchSubagentsTool,
 )
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def _dispatch_agent_with_state(tasks: dict[str, SimpleNamespace]):
@@ -104,10 +104,25 @@ def test_create_payload_includes_current_turn_run_state(tmp_path):
         state["running_run_ids"] == payload["created_run_ids"]
         or state["verified_run_ids"] == payload["created_run_ids"]
     )
-    assert state["next_action"] in {"wait_or_inspect_agent_tree", "summarize_or_report_verified_runs"}
+    assert state["next_action"] in {"wait_for_subagent_completion_event", "summarize_or_report_verified_runs"}
     envelope = decode_action_envelope(payload["typed_envelope"])
     assert envelope.current_turn_run_state["dispatchable_run_ids"] == []
     assert envelope.dispatch_run_ids == []
+
+
+def test_dispatch_state_running_subagent_suggests_wait_not_polling():
+    tasks = {
+        "running": SimpleNamespace(id="running", status="RUNNING", verification_status="UNVERIFIED"),
+    }
+    payload = json.loads(DispatchSubagentsTool(_dispatch_agent_with_state(tasks)).execute({
+        "dry_run": False,
+        "run_ids": ["running"],
+    }).output)
+
+    state = payload["current_turn_run_state"]
+    assert state["next_action"] == "wait_for_subagent_completion_event"
+    assert state["suggested_tool_call"]["tool"] == "wait"
+    assert state["suggested_tool_call"]["seconds"] >= 10
 
 
 def test_create_payload_includes_stable_operation_contract(tmp_path):
@@ -140,7 +155,7 @@ def test_schedule_child_payload_includes_current_turn_run_state(tmp_path):
         state["running_run_ids"] == payload["created_run_ids"]
         or state["verified_run_ids"] == payload["created_run_ids"]
     )
-    assert state["next_action"] in {"wait_or_inspect_agent_tree", "summarize_or_report_verified_runs"}
+    assert state["next_action"] in {"wait_for_subagent_completion_event", "summarize_or_report_verified_runs"}
     envelope = decode_action_envelope(payload["typed_envelope"])
     assert envelope.current_turn_run_state["dispatchable_run_ids"] == []
     assert envelope.dispatch_run_ids == payload["dispatch_run_ids"]

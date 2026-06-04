@@ -15,7 +15,6 @@ from ..compact_artifact_read_hints import (
 from ..compact_runtime_handoff import render_runtime_handoff_lines, runtime_handoff_payload
 from ..schema import (
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 
@@ -70,7 +69,6 @@ def build_compact_resume_handoff(request: CompactResumeHandoffRequest) -> dict[s
         "completion_prompt": dict(request.completion_prompt),
         "consistency_status": str(request.consistency.get("status", "")),
         "action_guard": _action_guard_payload(request.action_guard),
-        "reserved": runtime_memory_reserved_fields(COMPACT_RESUME_HANDOFF_SCHEMA),
     }
 
 

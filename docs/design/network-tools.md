@@ -4,7 +4,7 @@
 
 ## 两个模型可见工具
 
-`web_search` 只负责找候选来源。它返回标题、URL、摘要、provider 和失败的 provider 列表，不把搜索结果当最终事实。当前内置 DuckDuckGo HTML fallback，后续接 Exa、Parallel、Tavily、Firecrawl 时应走 provider registry，不能写成只认固定后端的封闭枚举。
+`web_search` 只负责找候选来源。它返回标题、URL、摘要、provider 和失败的 provider 列表，不把搜索结果当最终事实。当前内置 DuckDuckGo HTML provider，后续接 Exa、Parallel、Tavily、Firecrawl 时应走 provider registry，不能写成只认固定后端的封闭枚举。
 
 `web_fetch` 负责读取已经确定的 URL。它覆盖三类用法：打开一个网页或文档、批量抽取多个 URL、带 method/header/body 调一个 HTTP/API。HTML 默认转成 Markdown；二进制或文档类内容保存为 artifact，只把路径、hash、大小和 MIME 返回给模型。批量读取时传 `urls` 或 `mode: extract`；API 请求时传 `method`、`headers`、`body`。
 

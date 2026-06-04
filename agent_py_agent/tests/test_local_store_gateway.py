@@ -14,23 +14,22 @@ import threading
 import time
 from pathlib import Path
 
-from agent_py_agent.__main__ import (
+from agent_py_agent.agent.agent_core.models import AgentRunResult
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts import (
     AdapterPaths,
     GatewayAskParams,
     _process_gateway_requests,
-    build_local_doctor_report,
     gateway_paths,
     gateway_stale_processing,
     process_file_adapter_once,
     read_json_file,
-    rebuild_local_store,
     recover_gateway_processing_requests,
     submit_gateway_ask,
     write_json_file,
 )
-from agent_py_agent.agent.agent_core.models import AgentRunResult
-from agent_py_agent.agent.config import AgentConfig
-from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.cli.local_doctor import build_local_doctor_report, rebuild_local_store
 
 
 def test_local_rebuild_indexes_memory_gateway_and_subagents():

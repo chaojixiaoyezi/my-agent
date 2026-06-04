@@ -9,8 +9,8 @@ import json
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.capability_request_tool import CapabilityRequestTool
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.role_templates import ROLE_BASE_TOOLS
 from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (

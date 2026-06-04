@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from agent_py_agent.agent.file_io import append_jsonl
+from agent_py_agent.agent.io import append_jsonl
 
 
 class DispatchWatchLogAppender:

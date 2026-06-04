@@ -229,14 +229,11 @@ def _claim_covers_item_field(
 
 
 def _claim_matches_item_scope(claim: dict[str, object], context: dict[str, object]) -> bool:
-    reserved = claim.get("reserved")
-    if not isinstance(reserved, dict):
-        return False
-    if str(reserved.get("item_path") or "") == str(context.get("item_path") or ""):
+    if str(claim.get("item_path") or "") == str(context.get("item_path") or ""):
         return True
-    if _item_key_matches(reserved.get("item_key"), context.get("item")):
+    if _item_key_matches(claim.get("item_key"), context.get("item")):
         return True
-    return _index_scope_matches(reserved, context)
+    return _index_scope_matches(claim, context)
 
 
 def _item_key_matches(item_key: object, item: object) -> bool:
@@ -245,25 +242,25 @@ def _item_key_matches(item_key: object, item: object) -> bool:
     return all(_same_value(item.get(str(key)), val) for key, val in item_key.items())
 
 
-def _index_scope_matches(reserved: dict[str, object], context: dict[str, object]) -> bool:
-    if "item_index" not in reserved:
+def _index_scope_matches(claim: dict[str, object], context: dict[str, object]) -> bool:
+    if "item_index" not in claim:
         return False
     try:
-        if int(str(reserved.get("item_index"))) != int(str(context.get("item_index"))):
+        if int(str(claim.get("item_index"))) != int(str(context.get("item_index"))):
             return False
         group_index = int(str(context.get("group_index") or -1))
-        return group_index < 0 or _group_scope_matches(reserved, context, group_index)
+        return group_index < 0 or _group_scope_matches(claim, context, group_index)
     except ValueError:
         return False
 
 
-def _group_scope_matches(reserved: dict[str, object], context: dict[str, object], group_index: int) -> bool:
-    if reserved.get("group_index") is not None:
+def _group_scope_matches(claim: dict[str, object], context: dict[str, object], group_index: int) -> bool:
+    if claim.get("group_index") is not None:
         try:
-            return int(str(reserved.get("group_index"))) == group_index
+            return int(str(claim.get("group_index"))) == group_index
         except ValueError:
             return False
-    group_name = str(reserved.get("group_name") or "")
+    group_name = str(claim.get("group_name") or "")
     return bool(group_name and group_name == str(context.get("group_name") or ""))
 
 

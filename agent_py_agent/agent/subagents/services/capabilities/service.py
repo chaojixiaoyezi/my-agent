@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ....capabilities import CapabilityRouter
-from ....capability_config import CapabilityConfig
+from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability.config import CapabilityConfig
+
 from ...capability_route_dispatch import (
     CapabilityNoHitsParams,
     ExistingCapabilityGrantParams,
@@ -31,7 +32,7 @@ from ...policies import _capability_request_query, _select_capability_hits
 from ...reports import CapabilityRouteRecord, CapabilityRouteReport
 
 if TYPE_CHECKING:
-    from ....capabilities import CapabilitySearchHit
+    from agent_py_agent.agent.capability import CapabilitySearchHit
 
 
 def _iter_open_capability_requests(tasks):

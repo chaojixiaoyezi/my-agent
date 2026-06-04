@@ -223,7 +223,7 @@ def _snapshot_payload(
         "latest_tool_progress_ref": str(refs.latest),
         "tool_progress_ledger_ref": str(refs.ledger),
         "output_preview": _clip(request.output, 300),
-        "reserved": {},
+        "load_errors": [],
     }
 
 
@@ -240,20 +240,21 @@ def _output_closeout_snapshot(closeout: _CloseoutSnapshotRequest) -> dict[str, A
         "tool_progress_ledger_ref": str(closeout.refs.ledger),
         "closeout_written_path": closeout.path,
         "closeout_output_preview": _clip(request.output, 300),
-        "reserved": dict(closeout.previous.get("reserved") or {}),
+        "load_errors": _load_error_list(closeout.previous.get("load_errors")),
     })
     return snapshot
 
 
 def _append_load_error(snapshot: dict[str, Any], error: dict[str, object]) -> None:
-    reserved = snapshot.get("reserved")
-    if not isinstance(reserved, dict):
-        reserved = {}
-    load_errors = reserved.get("load_errors")
-    items = list(load_errors) if isinstance(load_errors, list) else []
+    items = _load_error_list(snapshot.get("load_errors"))
     items.append(error)
-    reserved["load_errors"] = items
-    snapshot["reserved"] = reserved
+    snapshot["load_errors"] = items
+
+
+def _load_error_list(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
 
 
 def _is_internal_output_path(task: SubAgentTask, path: str) -> bool:

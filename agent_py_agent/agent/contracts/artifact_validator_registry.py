@@ -24,7 +24,7 @@ def resolve_artifact_validator(
     *,
     named_validators: dict[str, ArtifactValidator],
     kind_validators: dict[str, ArtifactValidator],
-    fallback: ArtifactValidator,
+    default_validator: ArtifactValidator,
 ) -> ArtifactValidator:
     validator_name = validator_name_from_contract(request.validation_contract)
     if validator_name and validator_name in named_validators:
@@ -36,7 +36,7 @@ def resolve_artifact_validator(
         declared_mime=str(validation.get("mime_type") or validation.get("mime") or ""),
     )
     artifact_kind = capability.validator_key or capability.kind or kind_for_path(Path(request.path))
-    return kind_validators.get(artifact_kind, fallback)
+    return kind_validators.get(artifact_kind, default_validator)
 
 
 __all__ = [

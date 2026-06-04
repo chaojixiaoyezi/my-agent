@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ...subagent import SubAgentTask
+from ...subagents import SubAgentTask
 
 
 def _dispatch_patch_review_run_ids(tasks: list[SubAgentTask]) -> list[str]:

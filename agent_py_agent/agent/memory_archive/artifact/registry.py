@@ -124,6 +124,7 @@ def _artifact_records(
         run_id=run_id,
         now=now,
         allowed_roots=_allowed_roots(
+            task,
             task_dir,
             task_workspace_root,
             agent_run_workspace_root,
@@ -162,7 +163,6 @@ def _artifact_record(
         "content_externalized": True,
         "source": "subagent_artifact_refs",
         "created_at": _utc_iso(context.now),
-        "reserved": {},
     }
 
 
@@ -190,10 +190,10 @@ def _resolve_ref(ref: str, allowed_roots: tuple[Path, ...]) -> _ResolvedArtifact
             continue
         if candidate.exists():
             return _ResolvedArtifactRef(candidate, _path_status(candidate))
-    fallback = (allowed_roots[0] / path).resolve(strict=False) if allowed_roots else path
-    if allowed_roots and not _is_under_allowed_root(fallback, allowed_roots):
+    missing_candidate = (allowed_roots[0] / path).resolve(strict=False) if allowed_roots else path
+    if allowed_roots and not _is_under_allowed_root(missing_candidate, allowed_roots):
         return _ResolvedArtifactRef(None, "blocked_outside_workspace")
-    return _ResolvedArtifactRef(fallback, "missing")
+    return _ResolvedArtifactRef(missing_candidate, "missing")
 
 
 def _path_status(path: Path) -> str:
@@ -205,6 +205,7 @@ def _path_status(path: Path) -> str:
 
 
 def _allowed_roots(
+    task: Any,
     task_dir: Path | None,
     task_workspace_root: Path,
     agent_run_workspace_root: Path,
@@ -214,7 +215,11 @@ def _allowed_roots(
         item
         for item in [
             task_dir,
+            getattr(task, "task_workspace_dir", "") or None,
+            getattr(task, "output_dir", "") or None,
             task_workspace_root,
+            task_workspace_root.parent,
+            task_workspace_root.parent / "output",
             agent_run_workspace_root,
             *[Path(str(root)) for root in allowed_write_roots if str(root or "").strip()],
         ]

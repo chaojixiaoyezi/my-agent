@@ -3,7 +3,7 @@
 import json
 from dataclasses import replace
 
-from agent_py_agent.agent.backend import (
+from agent_py_agent.agent.backends import (
     AnthropicCompatibleBackend,
     BackendOptions,
     OpenAICompatibleBackend,

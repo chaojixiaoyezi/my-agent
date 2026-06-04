@@ -14,8 +14,9 @@ from ...contracts.gates.tool.guardrail import (
     result_hash_for_guardrail,
 )
 from ...contracts.tool_protocol_v2 import normalize_tool_call
-from ...tooling import ToolExecutionResult
+from ...tooling.models import ToolExecutionResult
 from .call_guardrail_config import (
+    readonly_no_progress_threshold,
     repeat_fail_threshold,
 )
 from .call_guardrail_config import (
@@ -50,6 +51,7 @@ def tool_guardrail_records(agent: object) -> tuple[dict[str, object], ...]:
 def tool_guardrail_policy(params: object) -> dict[str, object]:
     return {
         "repeat_fail_threshold": repeat_fail_threshold(params),
+        "readonly_no_progress_threshold": readonly_no_progress_threshold(params),
         "terminal_block_enabled": configured_terminal_block_enabled(params),
     }
 

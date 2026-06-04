@@ -104,7 +104,6 @@ def _system_directories(paths: Any) -> tuple[Path, ...]:
         paths.system_metrics_dir,
         paths.system_doctor_dir,
         paths.system_backups_dir,
-        paths.system_migrations_dir,
     )
 
 
@@ -257,7 +256,6 @@ def _system_path_fields(home: Path) -> dict[str, Path]:
         "system_metrics_dir": system_dir / "metrics",
         "system_doctor_dir": system_dir / "doctor",
         "system_backups_dir": system_dir / "backups",
-        "system_migrations_dir": system_dir / "migrations",
     }
 
 
@@ -267,8 +265,7 @@ def _schema_version_payload() -> dict[str, object]:
         "schema_version": HOME_SCHEMA_VERSION,
         "created_at": now,
         "updated_at": now,
-        "migration_level": 0,
-        "compatible_read_versions": ["my-agent-home.v1", HOME_SCHEMA_VERSION],
+        "read_version": HOME_SCHEMA_VERSION,
         "writer_version": HOME_SCHEMA_VERSION,
     }
 

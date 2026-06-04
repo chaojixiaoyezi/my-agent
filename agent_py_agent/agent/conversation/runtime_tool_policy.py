@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 DEFAULT_BACKGROUND_ALLOWED_TOOLS = (
+    "wait",
     "inspect_agent_tree",
     "raise_event",
     "raise_collaboration",
@@ -18,6 +19,7 @@ DEFAULT_BACKGROUND_ALLOWED_TOOLS = (
 )
 
 SCHEDULED_BACKGROUND_ALLOWED_TOOLS = (
+    "wait",
     "inspect_agent_tree",
     "inspect_collaboration",
     "dispatch_subagents",
@@ -25,6 +27,7 @@ SCHEDULED_BACKGROUND_ALLOWED_TOOLS = (
 )
 
 CONTROL_ACTION_DESCRIPTIONS = {
+    "wait": "安全等待一小段时间，避免没有新事实时反复查看状态。",
     "inspect_agent_tree": "只读查看主/子/孙代理状态树。",
     "raise_event": "记录普通进展、阻塞或需要主代理处理的事件。",
     "raise_collaboration": "发起协作；没有 case_id 时开 case，有 question/target 时同步发 request。",

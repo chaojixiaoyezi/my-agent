@@ -111,8 +111,8 @@ def _contract_status_config_defaults(config: object | None) -> object:
     return default_agent_config()
 
 
-def _provided_or_config_int(value: int | None, fallback: object) -> int:
-    source = fallback if value is None else value
+def _provided_or_config_int(value: int | None, default: object) -> int:
+    source = default if value is None else value
     try:
         return max(0, int(source))
     except (TypeError, ValueError):

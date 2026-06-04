@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from queue import Queue
 from typing import Any
 
-from .fallback_state import ChatJob
 from .input_loop import is_show_prompt_command
+from .plain_state import ChatJob
 from .renderer import BLUE, BOLD, style_text
 from .rendering import _cprint
 from .tui import (

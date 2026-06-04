@@ -21,7 +21,7 @@ def test_capability_config_defaults():
     assert config.capability_escalation_max_hops == 0
     assert config.capability_candidate_limit == 5
     assert config.capability_bundle_max_tokens == 3000
-    assert config.capability_fallback_max_attempts == 3
+    assert config.capability_alternative_max_attempts == 3
     assert config.subagent_heartbeat_timeout == 0
     assert config.subagent_run_timeout == 0
     assert config.subagent_due_check_interval == 0
@@ -99,8 +99,8 @@ def test_load_capability_config_partial(tmp_path):
     assert config.capability_escalation_max_hops == 0
 
 
-def test_load_capability_config_ignores_unknown_fields(tmp_path):
-    """测试加载时忽略未知字段。"""
+def test_load_capability_config_rejects_unknown_fields(tmp_path):
+    """测试加载时拒绝未知字段。"""
     config_file = tmp_path / "unknown.yaml"
     config_file.write_text(
         "enable_capability_routing: true\n"
@@ -109,9 +109,8 @@ def test_load_capability_config_ignores_unknown_fields(tmp_path):
         encoding="utf-8",
     )
 
-    # 不应抛出异常
-    config = load_capability_config(config_file)
-    assert config.enable_capability_routing is True
+    with pytest.raises(ValueError, match="未知字段"):
+        load_capability_config(config_file)
 
 
 def test_load_capability_config_empty_file(tmp_path):
@@ -160,7 +159,7 @@ def test_capability_config_integer_fields(tmp_path):
         "capability_escalation_max_hops: 10\n"
         "capability_candidate_limit: 20\n"
         "capability_bundle_max_tokens: 5000\n"
-        "capability_fallback_max_attempts: 5\n"
+        "capability_alternative_max_attempts: 5\n"
         "subagent_heartbeat_timeout: 300\n"
         "subagent_run_timeout: 3600\n"
         "subagent_due_check_interval: 60\n"

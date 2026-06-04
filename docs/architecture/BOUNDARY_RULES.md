@@ -73,7 +73,6 @@ if TYPE_CHECKING:
 # 不直接导入内部模块，通过包的 __init__.py 导入公开 API
 from agent.subagents import SubAgentManager  # 正确
 from agent.subagents.manager import SubAgentManager  # 也可接受
-from agent.subagents.manager_base import SubAgentBaseMixin  # 内部使用可接受
 ```
 
 ### 1.4 Import Validation Tooling / 导入校验工具
@@ -134,8 +133,8 @@ modules = ["agent_py_agent"]
 
 | 模块 | 可写入位置 | 不可写入位置 |
 |---|---|---|
-| `memory_store/` | `owner_home/memory/long_term/`, `owner_home/memory/daily/`；旧 `memory_path` 只做 local/main 兼容读取 | 任何其他路径 |
-| `subagents/services/persistence/` | 保存型 root run 下的子代理详细状态写 task-local `work/agents/<run_id>/canonical_state.json`；默认 locator 写 `owner_home/workspace/runtime/workspaces/<workspace-scope>/subagents/`，显式非默认 `subagent_workspace` 可覆盖；旧 `task.json/run.json` 只镜像同一 payload 供兼容定位；refs-only 投影写 `owner_home/agents/` | 任何其他路径 |
+| `memory_store/` | `owner_home/memory/long_term/`, `owner_home/memory/daily/` | 任何其他路径 |
+| `subagents/services/persistence/` | 保存型 root run 下的子代理详细状态写 task-local `work/agents/<run_id>/canonical_state.json`；默认 locator 写 `owner_home/workspace/runtime/workspaces/<workspace-scope>/subagents/`；refs-only 投影写 `owner_home/agents/` | 任何其他路径 |
 | `memory_archive/` | `owner_home/memory/`, `owner_home/memory_archive/`, task-local `work/compact/` | 任何其他路径 |
 | `audit/` | 默认 `owner_home/logs/audit/`；显式非默认 audit 路径可覆盖 | 任何其他路径 |
 | `local_storage/` | 默认 `owner_home/workspace/runtime/workspaces/<workspace-scope>/local_store/`；显式非默认 local_store 路径可覆盖 | 任何其他路径 |
@@ -144,16 +143,11 @@ modules = ["agent_py_agent"]
 | `tooling/` | 经 `write_boundary` 校验后的路径 | 未校验的路径 |
 | `tests/` | `tmp_path`, 临时目录, 显式 fixture 沙箱 | 任何持久化路径 |
 
-如果 `home_runtime_bootstrap_enabled=false` 或 owner home 缺失导致运行时回退到旧 `data/*`
-路径，启动对象必须暴露 `using_legacy_paths=true` 和原因，并写 warning。旧路径回退是迁移/测试状态，
-不能静默伪装成 owner-home 活跃事实源。
-
 SimpleAgent 启动时会把 runtime resolver 得出的 owner-home 路径回写到 `AgentConfig`。
-这是临时兼容边界：还没完全改造的 session/gateway/notification 代码可以继续读 config 字段，
-但读到的已经是同一套 owner-home 路径。
+普通运行只读这一套 owner-home 路径；repo `data/*` 只能作为测试 fixture 或显式配置路径。
 
-配置默认值也只有一个兜底入口：`agent/settings/defaults.py`。正常运行链路必须使用已经加载并
-归一化后的 `agent.config`；底层模块如果处在兼容路径、测试边界或静态 dataclass 默认值里，不能
+配置默认值只有一个入口：`agent/settings/defaults.py`。正常运行链路必须使用已经加载并
+归一化后的 `agent.config`；底层模块如果处在测试边界或静态 dataclass 默认值里，不能
 直接 `AgentConfig()`，只能通过 `default_agent_config()` / `default_config_value()` 等 helper
 读取 schema 默认值。这样用户改配置时，活跃运行路径不会被某个底层模块偷偷 new 出来的默认对象覆盖。
 加载后的 `AgentConfig` 必须保留来源账本：`config_sources` 说明每个字段由 schema 默认、配置文件或
@@ -163,9 +157,6 @@ owner/workspace/task/run/agent override 必须接同一套来源账本，而不�
 agent runtime override 转成 `RuntimeConfigLayer`，内部模块只消费合并后的 `EffectiveConfig` 或已加载
 `agent.config` 快照。低优先级作用域不能覆盖更高优先级来源，例如 env 注入的密钥；需要强制覆盖时必须
 显式走 runtime layer，并在来源账本里留下 source。
-
-旧 `data/users/<user_id>` 路径只能通过 `user_space/legacy_user_paths.py` 访问。正常运行代码不应新增
-`data/users` 路径模型调用；需要迁移旧数据时走明确的 migration/fallback 入口。
 
 ### 2.4 Gitignore Enforcement / Gitignore 强制规则
 
@@ -199,45 +190,28 @@ config/local*.json
 
 ---
 
-## 3. Size Rules / 代码大小规则
+## 3. Structure Signals / 结构信号
 
-### 3.1 File Size Limits / 文件大小限制
+### 3.1 File Size / 文件大小
 
-| 级别 | 行数限制 | 动作 |
-|---|---|---|
-| SOFT | 400 行 | 警告：考虑拆分 |
-| HARD | 600 行 | 阻断：必须拆分后才能合入新功能 |
-| FROZEN | 当前大小 | 冻结：不允许新增代码，只允许重构拆分 |
+文件行数不再是硬门。为了让主链路清楚、调用更直接，可以合并文件；为了让职责更清楚，也可以拆分文件。判断标准是调用路径、职责边界和排查成本，不是固定行数。
 
-### 3.2 Current Violations / 当前违规文件
+`scripts/check_code_size.py` 会刷新 `CODE_SIZE_REPORT.md`，用于观察趋势；文件总行数不阻断合并。函数、类、参数、嵌套、星号导入、语法错误和新增垃圾文件名仍然可以在 strict 模式阻断。
 
-| 文件 | 行数 | 级别 | 拆分计划 |
-|---|---|---|---|
-| `cli/chat.py` | 989 | FROZEN | -> `chat_parts/` 继续拆分（见 CHAT_REFACTOR_PLAN.md） |
-| `agent_core/orchestration/dispatch/` | 已拆包 | WATCH | 继续保持 facade / runner / loop / record 职责分离 |
-| `memory_archive/query/` | 已拆包 | WATCH | 继续保持 builder/executor/formatter 职责分离 |
-| `subagents/manager_patch.py` | 794 | FROZEN | -> `subagent_services/patch.py` |
-| `settings/config.py` | 751 | FROZEN | -> `shared/config/agent_config.py` + 加载逻辑 |
-| `log_analysis/analytics/detectors/rules.py` | 747 | FROZEN | -> `detectors/rule_engine.py`, `detectors/rule_loader.py` |
-| `subagents/manager_base.py` | 744 | FROZEN | -> `subagents/services/persistence/` + `subagents/services/board/` |
+### 3.2 Consolidation Direction / 合并方向
 
-### 3.3 Function Size Limits / 函数大小限制
+- 删除已经不用的历史入口、空转发层、无效保护层和预留扩展槽。
+- 主链路优先：一个行为应该有一个当前入口、一个当前配置来源、一个清楚的失败返回。
+- 允许较大的文件承载一个完整主链路；不要为了行数把一次流程拆成十几个只有几行的转发文件。
+- 拆分只服务于真实职责边界，例如 provider adapter、gateway queue、artifact registry、subagent persistence。
 
-| 级别 | 行数限制 | 动作 |
-|---|---|---|
-| SOFT | 50 行 | 警告：考虑提取子函数 |
-| HARD | 80 行 | 阻断：必须拆分 |
+### 3.3 Local Complexity / 局部复杂度
 
-### 3.4 Class Size Limits / 类大小限制
+函数长度、嵌套、参数数量和类大小仍是硬门。看到复杂度问题时，优先修主链结构，而不是为了满足文件行数数字继续加转发壳。
 
-| 级别 | 方法数 | 动作 |
-|---|---|---|
-| SOFT | 15 个公开方法 | 警告：考虑职责拆分 |
-| HARD | 25 个公开方法 | 阻断：必须拆分为多个类 |
+### 3.4 Manager Shape / Manager 形态
 
-### 3.5 Mixin Limits / Mixin 限制
-
-当前 `SubAgentManager` 仍由多组 mixin 拼合，公开方法数量已超过 100 个。这是典型的分布式上帝类（distributed god class）。`SubAgentBoardMixin` 已作为第一批迁移对象退出继承链，后续新能力只能走 service composition。
+`SubAgentManager` 可以作为子代理能力的清晰入口，但不再通过多层 mixin 或历史入口扩散职责。可读性优先：入口聚合、内部按真实领域分块，失败直接暴露并写审计。
 
 | 规则 | 限制 | 说明 |
 |---|---|---|

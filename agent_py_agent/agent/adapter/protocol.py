@@ -109,9 +109,9 @@ def qq_to_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
 
 def _qq_message_fields(payload: dict[str, Any]) -> tuple[str, str, object, float, dict[str, Any]]:
     d = payload.get("d", {})
-    if d:
-        return _qq_official_message_fields(d)
-    return _qq_legacy_message_fields(payload.get("event", {}))
+    if not d:
+        raise ValueError("missing qq message payload")
+    return _qq_official_message_fields(d)
 
 
 def _qq_official_message_fields(d: dict[str, Any]) -> tuple[str, str, object, float, dict[str, Any]]:
@@ -122,20 +122,6 @@ def _qq_official_message_fields(d: dict[str, Any]) -> tuple[str, str, object, fl
         "qq_channel_id": d.get("channel_id", ""),
     }
     return user_id, d.get("content", ""), d.get("id", d.get("msg_id", "")), _qq_timestamp(d), metadata
-
-
-def _qq_legacy_message_fields(event: dict[str, Any]) -> tuple[str, str, object, float, dict[str, Any]]:
-    metadata = {
-        "qq_guild_id": event.get("guild_id", ""),
-        "qq_channel_id": event.get("channel_id", ""),
-    }
-    return (
-        str(event.get("user_id", "")),
-        event.get("content", ""),
-        event.get("msg_id", ""),
-        float(event.get("timestamp", time.time())),
-        metadata,
-    )
 
 
 def _qq_timestamp(d: dict[str, Any]) -> float:

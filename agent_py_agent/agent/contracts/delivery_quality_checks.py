@@ -73,20 +73,20 @@ def _metric_estimate_findings(claim: EvidenceClaim, metric_contract: dict[str, A
 
 
 def _metric_kind(claim: EvidenceClaim, sources_by_id: dict[str, EvidenceSourceRef]) -> str:
-    for key in ("metric_kind", "observed_metric_kind"):
-        if kind := _text(claim.reserved.get(key)):
+    for value in (claim.metric_kind, claim.observed_metric_kind):
+        if kind := _text(value):
             return kind
     for source_id in claim.source_ids:
         source = sources_by_id.get(source_id)
-        if source and (kind := _text(source.reserved.get("metric_kind"))):
+        if source and (kind := _text(source.metric_kind)):
             return kind
     return ""
 
 
 def _has_time_window(claim: EvidenceClaim, sources_by_id: dict[str, EvidenceSourceRef]) -> bool:
-    if _time_window_fields(claim.reserved) is not None:
+    if _claim_time_window(claim) is not None:
         return True
-    return any(_time_window_fields(sources_by_id[source_id].reserved) for source_id in claim.source_ids if source_id in sources_by_id)
+    return any(_source_time_window(sources_by_id[source_id]) for source_id in claim.source_ids if source_id in sources_by_id)
 
 
 def _consistent_window_findings(
@@ -106,27 +106,33 @@ def _consistent_window_findings(
 
 
 def _time_window(claim: EvidenceClaim, sources_by_id: dict[str, EvidenceSourceRef]) -> tuple[str, str] | None:
-    if window := _time_window_fields(claim.reserved):
+    if window := _claim_time_window(claim):
         return window
     for source_id in claim.source_ids:
         source = sources_by_id.get(source_id)
-        if source and (window := _time_window_fields(source.reserved)):
+        if source and (window := _source_time_window(source)):
             return window
     return None
 
 
-def _time_window_fields(value: dict[str, Any]) -> tuple[str, str] | None:
-    if _text(value.get("window_start")) and _text(value.get("window_end")):
-        return (_text(value.get("window_start")), _text(value.get("window_end")))
-    window = value.get("time_window")
+def _claim_time_window(claim: EvidenceClaim) -> tuple[str, str] | None:
+    return _time_window_fields(claim.window_start, claim.window_end, claim.time_window)
+
+
+def _source_time_window(source: EvidenceSourceRef) -> tuple[str, str] | None:
+    return _time_window_fields(source.window_start, source.window_end, source.time_window)
+
+
+def _time_window_fields(start: object, end: object, window: object) -> tuple[str, str] | None:
+    if _text(start) and _text(end):
+        return (_text(start), _text(end))
     if isinstance(window, dict) and _text(window.get("start")) and _text(window.get("end")):
         return (_text(window.get("start")), _text(window.get("end")))
     return None
 
 
 def _has_estimate_limitations(claim: EvidenceClaim) -> bool:
-    for key in ("limitations", "uncertainty_notes"):
-        value = claim.reserved.get(key)
+    for value in (claim.limitations, claim.uncertainty_notes):
         if isinstance(value, str) and value.strip():
             return True
         if isinstance(value, list) and any(_text(item) for item in value):

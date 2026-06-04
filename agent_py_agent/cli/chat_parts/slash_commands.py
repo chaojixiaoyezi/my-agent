@@ -30,7 +30,7 @@ def handle_common_slash_command(
     user: str,
     *,
     ctx: SlashCommandContext,
-    include_fallback_help: bool = False,
+    include_plain_help: bool = False,
 ) -> bool:
     handlers: tuple[SlashHandler, ...] = (
         _handle_help_command,
@@ -41,26 +41,26 @@ def handle_common_slash_command(
         _handle_subagents_command,
     )
     for handler in handlers:
-        result = handler(user, ctx, include_fallback_help)
+        result = handler(user, ctx, include_plain_help)
         if result is not None:
             return result
     return False
 
 
 def _handle_help_command(
-    user: str, ctx: SlashCommandContext, include_fallback_help: bool
+    user: str, ctx: SlashCommandContext, include_plain_help: bool
 ) -> bool | None:
     if user != "/help":
         return None
     suffix = "Ctrl+C                        Exit\nOther input                   Send a normal message\n"
-    ctx.print_line(CHAT_HELP_TEXT + (suffix if include_fallback_help else ""))
+    ctx.print_line(CHAT_HELP_TEXT + (suffix if include_plain_help else ""))
     return True
 
 
 def _handle_remember_command(
-    user: str, ctx: SlashCommandContext, include_fallback_help: bool
+    user: str, ctx: SlashCommandContext, include_plain_help: bool
 ) -> bool | None:
-    del include_fallback_help
+    del include_plain_help
     if not user.startswith("/remember "):
         return None
     rec = ctx.agent.remember(user[len("/remember "):], kind="note")
@@ -69,9 +69,9 @@ def _handle_remember_command(
 
 
 def _handle_memory_command(
-    user: str, ctx: SlashCommandContext, include_fallback_help: bool
+    user: str, ctx: SlashCommandContext, include_plain_help: bool
 ) -> bool | None:
-    del include_fallback_help
+    del include_plain_help
     if not user.startswith("/memory"):
         return None
     query = user[len("/memory"):].strip()
@@ -93,9 +93,9 @@ def _print_memory_records(ctx: SlashCommandContext, records) -> None:
 
 
 def _handle_btw_command(
-    user: str, ctx: SlashCommandContext, include_fallback_help: bool
+    user: str, ctx: SlashCommandContext, include_plain_help: bool
 ) -> bool | None:
-    del include_fallback_help
+    del include_plain_help
     if user == "/btw":
         _print_runtime_injections(ctx)
         return True
@@ -120,9 +120,9 @@ def _print_runtime_injections(ctx: SlashCommandContext) -> None:
 
 
 def _handle_prompt_file_command(
-    user: str, ctx: SlashCommandContext, include_fallback_help: bool
+    user: str, ctx: SlashCommandContext, include_plain_help: bool
 ) -> bool | None:
-    del include_fallback_help
+    del include_plain_help
     if not user.startswith("/prompt-file "):
         return None
     ctx.prompt_files.append(user[len("/prompt-file "):].strip())
@@ -131,9 +131,9 @@ def _handle_prompt_file_command(
 
 
 def _handle_subagents_command(
-    user: str, ctx: SlashCommandContext, include_fallback_help: bool
+    user: str, ctx: SlashCommandContext, include_plain_help: bool
 ) -> bool | None:
-    del include_fallback_help
+    del include_plain_help
     if not user.startswith("/subagents "):
         return None
     parts = user.split(maxsplit=2)

@@ -62,9 +62,9 @@ class TestDetectActiveWork:
         mock_gw_paths.return_value = mock_paths
 
         with patch.object(agent.subagents, "build_board", return_value=mock_board), \
-             patch("agent_py_agent.agent.gateway.gateway_paths", return_value=mock_gw_paths), \
-             patch("agent_py_agent.agent.gateway.gateway_running", return_value=(0, False)), \
-             patch("agent_py_agent.agent.gateway.gateway_request_counts", return_value={}):
+             patch("agent_py_agent.agent.gateway_parts.gateway_paths", return_value=mock_gw_paths), \
+             patch("agent_py_agent.agent.gateway_parts.gateway_running", return_value=(0, False)), \
+             patch("agent_py_agent.agent.gateway_parts.gateway_request_counts", return_value={}):
             try:
                 summary = detect_active_work(agent)
                 assert summary.gateway_alive is False
@@ -89,9 +89,9 @@ class TestDetectActiveWork:
         mock_gw_paths.return_value = mock_paths
 
         with patch.object(agent.subagents, "build_board", return_value=mock_board), \
-             patch("agent_py_agent.agent.gateway.gateway_paths", return_value=mock_gw_paths), \
-             patch("agent_py_agent.agent.gateway.gateway_running", return_value=(0, False)), \
-             patch("agent_py_agent.agent.gateway.gateway_request_counts", return_value={}):
+             patch("agent_py_agent.agent.gateway_parts.gateway_paths", return_value=mock_gw_paths), \
+             patch("agent_py_agent.agent.gateway_parts.gateway_running", return_value=(0, False)), \
+             patch("agent_py_agent.agent.gateway_parts.gateway_request_counts", return_value={}):
             try:
                 summary = detect_active_work(agent)
                 assert summary.dispatch_pending is True

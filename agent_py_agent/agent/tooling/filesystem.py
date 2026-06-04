@@ -6,7 +6,7 @@ from typing import Any
 
 from ._filesystem_find import FindFilesTool
 
-# Re-export helpers for backwards compatibility
+# Public filesystem helper imports.
 from ._filesystem_helpers import (
     _MAX_PATH_CHARS,
     _MAX_SEARCH_LINE_CHARS,

@@ -2,7 +2,7 @@
 """本模块定义 LOG 配置的数据模型、默认值和路径解析，所有高风险能力默认关闭。
 
 新手说明:
-这里包含 LogAnalysisConfigWarning（配置回退警告）、LogAnalysisConfig（最终生效配置）
+这里包含 LogAnalysisConfigWarning（配置默认值警告）、LogAnalysisConfig（最终生效配置）
 以及 default_log_analysis_config_path、default_log_analysis_workspace_root、
 resolve_log_analysis_data_dir 三个路径工具函数。
 这些类和函数不负责校验，只描述"配置长什么样"和"默认路径在哪"。
@@ -17,21 +17,21 @@ from typing import Any
 
 @dataclass(frozen=True)
 class LogAnalysisConfigWarning:
-    """记录单个配置字段为什么被回退到安全默认值。
+    """记录单个配置字段为什么采用安全默认值。
 
     新手说明:
     如果用户把 `query_max_limit` 写成 `"many"`，程序不应该直接崩，也不应该乱猜。
-    它会使用默认值，并把 field_name、raw_value、fallback_value、reason 记录成 warning。
+    它会使用默认值，并把 field_name、raw_value、default_value、reason 记录成 warning。
 
     字段说明:
     field_name: 出问题的配置字段名。
     raw_value: 用户原始写入的值。
-    fallback_value: 程序实际采用的安全回退值。
-    reason: 为什么回退，例如 expected an integer。"""
+    default_value: 程序实际采用的安全默认值。
+    reason: 为什么采用默认值，例如 expected an integer。"""
 
     field_name: str
     raw_value: Any
-    fallback_value: Any
+    default_value: Any
     reason: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -43,7 +43,7 @@ class LogAnalysisConfigWarning:
         这个方法没有输入参数，只读取当前 warning 的字段。
 
         返回说明:
-        返回包含 field_name、raw_value、fallback_value、reason 的 dict。"""
+        返回包含 field_name、raw_value、default_value、reason 的 dict。"""
         return asdict(self)
 
 

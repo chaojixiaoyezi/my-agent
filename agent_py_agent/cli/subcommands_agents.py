@@ -5,7 +5,7 @@ from __future__ import annotations
 
 给人看的解释：
 这个文件包含子代理相关子命令的注册函数。
-从 parser_subcommands.py 拆分而来，保持原有逻辑不变。
+子代理命令注册逻辑集中在这里。
 """
 
 import argparse

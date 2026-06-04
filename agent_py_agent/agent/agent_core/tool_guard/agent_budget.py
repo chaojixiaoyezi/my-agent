@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 
 from ...settings.runtime_guard_config import runtime_guard_int
-from ...tools import ToolExecutionResult
+from ...tooling.models import ToolExecutionResult
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,14 @@ def _events_by_run(agent: object) -> dict[str, list[float]]:
 
 
 def _budget_int(config: object, key: str, *, policy: object = None) -> int:
+    if hasattr(config, key):
+        value = getattr(config, key, None)
+        if value is None:
+            return 0
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
     value = getattr(config, key, None)
     if value is None:
         if hasattr(policy, "int_value"):
@@ -63,7 +71,8 @@ def _budget_result(tool_name: str, run_id: str, max_calls: int, window_seconds: 
         False,
         (
             f"单个代理工具预算已达到：run_id={run_id} 最近 {window_seconds} 秒最多 {max_calls} 次工具调用。"
-            "请不要继续请求新工具；先自检是否在重复读取/写入/查询，基于已有工具结果总结当前进展、"
-            "剩余缺口和下一步。如果确实还需要工具，请向父级上报需要继续调度、接管或提高预算的原因。"
+            "请不要继续重复请求新工具；先自检是否已经掌握足够事实。"
+            "如果足够完成当前交付，请立刻用已有工具结果写入交付物并提交验收；"
+            "只有确实缺少关键事实时，才简短说明具体缺口和需要继续调度、接管或提高预算的原因。"
         ),
     )

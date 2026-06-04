@@ -111,7 +111,7 @@ class SubAgentParsedOutput:
     evidence: list[dict[str, object]] = field(default_factory=list)
     evidence_packets: list[dict[str, object]] = field(default_factory=list)
     findings: list[dict[str, object]] = field(default_factory=list)
-    # 字段用途: 保存 covered_run_id -> covered_by_run_id 的覆盖关系，禁止只靠自然语言 fallback 放行。
+    # 字段用途: 保存 covered_run_id -> covered_by_run_id 的覆盖关系，禁止只靠自然语言说明放行。
     coverage_records: list[dict[str, object]] = field(default_factory=list)
     capability_requests: list[dict[str, object]] = field(default_factory=list)
     artifacts: list[dict[str, object]] = field(default_factory=list)

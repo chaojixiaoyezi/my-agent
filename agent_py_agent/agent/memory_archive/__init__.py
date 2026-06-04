@@ -51,10 +51,8 @@ from .models import CompressionSnapshot, RawMemoryEvent
 from .resume_context import ResumeContextResult, build_auto_resume_context, has_resume_trigger
 from .runtime import ArchiveRunTurnResult, archive_run_turn
 from .schema import (
-    RESERVED_FIELD_KEYS,
     RUNTIME_MEMORY_SCHEMA_VERSION,
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 from .shared_workspace import (
@@ -126,7 +124,6 @@ __all__ = [
     "RawMemoryEvent",
     "RecoverySnapshotResult",
     "ResumeContextResult",
-    "RESERVED_FIELD_KEYS",
     "RUNTIME_MEMORY_SCHEMA_VERSION",
     "RuntimeMemorySchemaOptions",
     "SharedWorkspaceResult",
@@ -164,7 +161,6 @@ __all__ = [
     "query_memory_control_plane",
     "raw_event_path_for",
     "register_compression_hook",
-    "runtime_memory_reserved_fields",
     "runtime_memory_schema_payload",
     "shared_workspace_paths",
     "snapshot_path_for",

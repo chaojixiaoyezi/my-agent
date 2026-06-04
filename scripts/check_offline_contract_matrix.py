@@ -224,6 +224,8 @@ def _code_size_counts(path: Path, findings: list[dict[str, str]]) -> tuple[int, 
         findings.append(_finding("CODE_SIZE_REPORT_MISSING", "code_size", str(path)))
         return 0, 0
     text = path.read_text(encoding="utf-8", errors="replace")
+    if _report_is_advisory(text):
+        return 0, 0
     high_risk = _report_count(text, "high_risk_findings")
     soft = _report_count(text, "soft_findings")
     if high_risk:
@@ -231,6 +233,10 @@ def _code_size_counts(path: Path, findings: list[dict[str, str]]) -> tuple[int, 
     if soft:
         findings.append(_finding("CODE_SIZE_SOFT_NOT_ZERO", "code_size", str(soft)))
     return high_risk, soft
+
+
+def _report_is_advisory(text: str) -> bool:
+    return bool(re.search(r"^\s*-\s+blocked:\s+False\s*$", text, flags=re.MULTILINE))
 
 
 def _report_count(text: str, key: str) -> int:

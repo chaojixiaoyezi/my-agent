@@ -17,6 +17,10 @@ class ToolGuardrailConfig:
     repeat_fail_threshold:
         N in the N/2N/3N policy. 0 means unlimited: no action block, only
         fixed soft hints at 50 and 100.
+    readonly_no_progress_threshold:
+        Same N/2N/3N policy for read-only calls returning identical results.
+        This defaults lower because repeated successful reads burn context
+        without adding evidence.
     terminal_block_enabled:
         False by default. When true, the 3N decision may be treated by callers
         as a terminal block; otherwise it is an action-level block asking the
@@ -24,6 +28,7 @@ class ToolGuardrailConfig:
     """
 
     repeat_fail_threshold: int = 10
+    readonly_no_progress_threshold: int = 3
     terminal_block_enabled: bool = False
 
 
@@ -65,7 +70,7 @@ def _repeat_failure_decision(
     facts: ToolGuardrailFacts,
     cfg: ToolGuardrailConfig,
 ) -> GateDecision | None:
-    if _threshold(cfg) < 0:
+    if _repeat_threshold(cfg) < 0:
         return None
     count = _count_repeat_failures(records_list, facts.tool_name, facts.args_hash)
     if count <= 0:
@@ -119,7 +124,7 @@ def _no_progress_decision(
     if count <= 0:
         return None
     evidence = _evidence(facts, count, cfg, "no_progress")
-    if _should_action_block(cfg, count):
+    if _should_action_block(cfg, count, repeat_kind="no_progress"):
         action_evidence = _action_block_evidence(evidence, cfg)
         return GateDecision(
             "tool_guardrail",
@@ -136,7 +141,7 @@ def _no_progress_decision(
             RecoveryAction.CHANGE_STRATEGY.value,
             action_evidence,
         )
-    if _should_hint(cfg, count):
+    if _should_hint(cfg, count, repeat_kind="no_progress"):
         return GateDecision(
             "tool_guardrail",
             "ALLOW",
@@ -230,22 +235,33 @@ def _count_no_progress(records: list[dict[str, object]], tool_name: str, args_ha
     return count
 
 
-def _threshold(cfg: ToolGuardrailConfig) -> int:
+def _threshold(cfg: ToolGuardrailConfig, repeat_kind: str = "failure") -> int:
+    return _no_progress_threshold(cfg) if repeat_kind == "no_progress" else _repeat_threshold(cfg)
+
+
+def _repeat_threshold(cfg: ToolGuardrailConfig) -> int:
     try:
         return max(0, int(cfg.repeat_fail_threshold))
     except (TypeError, ValueError):
         return 10
 
 
-def _should_hint(cfg: ToolGuardrailConfig, count: int) -> bool:
-    threshold = _threshold(cfg)
+def _no_progress_threshold(cfg: ToolGuardrailConfig) -> int:
+    try:
+        return max(0, int(cfg.readonly_no_progress_threshold))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _should_hint(cfg: ToolGuardrailConfig, count: int, repeat_kind: str = "failure") -> bool:
+    threshold = _threshold(cfg, repeat_kind)
     if threshold == 0:
         return count in (50, 100)
     return count in (threshold, threshold * 2)
 
 
-def _should_action_block(cfg: ToolGuardrailConfig, count: int) -> bool:
-    threshold = _threshold(cfg)
+def _should_action_block(cfg: ToolGuardrailConfig, count: int, repeat_kind: str = "failure") -> bool:
+    threshold = _threshold(cfg, repeat_kind)
     return threshold > 0 and count >= threshold * 3
 
 
@@ -262,7 +278,8 @@ def _evidence(
         "failure_class": facts.failure_class,
         "repeat_kind": repeat_kind,
         "count": count,
-        "repeat_fail_threshold": _threshold(cfg),
+        "repeat_fail_threshold": _repeat_threshold(cfg),
+        "readonly_no_progress_threshold": _no_progress_threshold(cfg),
         "terminal_block_enabled": cfg.terminal_block_enabled,
     }
 

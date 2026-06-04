@@ -1,9 +1,9 @@
 
 from __future__ import annotations
 
-"""Subagent kernel facade.
+"""Subagent kernel projection.
 
-这里不是新的调度器，也不是新的事实源。它只是把旧 task.json、run workspace、
+这里不是新的调度器，也不是新的事实源。它只是把 task.json、run workspace、
 control-plane 已有字段整理成一个稳定快照，后续恢复、QA、验收、E2E 都先读这里，
 减少“每个模块自己猜状态”的问题。source_refs 指向最新可见 workspace，避免同 slug
 旧任务把父级带回过期 task_root。
@@ -51,7 +51,11 @@ class SubagentKernel:
             ],
             source_refs=_snapshot_source_refs(selected),
             warnings=warnings,
-            reserved={"query": _query_reserved(query), "load_errors": load_errors},
+            query_root_id=query.root_id,
+            query_run_id=query.run_id,
+            query_include_refs=query.include_refs,
+            query_task_workspace_dir=query.task_workspace_dir,
+            load_errors=load_errors,
         )
 
     def _safe_list_runs_report(self) -> tuple[list[SubAgentTask], list[dict[str, object]]]:
@@ -88,6 +92,8 @@ def _select_tasks(
     warnings: list[str] = []
     if query.scope in {"own_subtree", "subtree"} and query.run_id:
         return _ordered_subtree(tasks, query.run_id), warnings
+    if query.scope == "task_workspace":
+        return _select_task_workspace(tasks, query)
     root_id = query.root_id or _root_for_run(by_id.get(query.run_id))
     if root_id:
         return [task for task in _stable_tasks(tasks) if task.id == root_id or task.root_id == root_id], warnings
@@ -96,6 +102,17 @@ def _select_tasks(
     if query.run_id and query.run_id in by_id:
         return [by_id[query.run_id]], warnings
     return _stable_tasks(tasks), warnings
+
+
+def _select_task_workspace(
+    tasks: list[SubAgentTask],
+    query: SubagentKernelQuery,
+) -> tuple[list[SubAgentTask], list[str]]:
+    task_workspace = str(query.task_workspace_dir or "").strip()
+    if not task_workspace:
+        return _stable_tasks(tasks), ["task_workspace_scope_missing_workspace"]
+    selected = [task for task in _stable_tasks(tasks) if str(task.task_workspace_dir or "").strip() == task_workspace]
+    return selected, [] if selected else ["task_workspace_scope_had_no_subagent_rows"]
 
 
 def _ordered_subtree(tasks: list[SubAgentTask], run_id: str) -> list[SubAgentTask]:
@@ -155,7 +172,9 @@ def _task_to_kernel_run(
         artifact_registry_refs=_artifact_registry_refs(task),
         evidence_refs=list(task.evidence_refs),
         blockers=list(task.blockers),
-        reserved=_task_reserved(task) if include_refs else {},
+        needs_capability=_needs_capability(task) if include_refs else [],
+        recent_tool_trace=_recent_tool_trace(task) if include_refs else [],
+        background_start=_background_start(task) if include_refs else {},
     )
 
 
@@ -210,18 +229,26 @@ def _artifact_registry_refs(task: SubAgentTask, *, limit: int = 12) -> list[dict
     return rows
 
 
-def _task_reserved(task: SubAgentTask) -> dict[str, object]:
+def _recent_tool_trace(task: SubAgentTask) -> list[dict[str, object]]:
     attrs = dict(getattr(task, "attributes", {}) or {})
-    reserved: dict[str, object] = {}
-    if task.task_dir:
-        reserved["task_dir"] = task.task_dir
-    if isinstance(attrs.get("recent_tool_trace"), list):
-        reserved["recent_tool_trace"] = list(attrs["recent_tool_trace"])[-5:]
-    if isinstance(attrs.get("needs_capability"), list):
-        reserved["needs_capability"] = list(attrs["needs_capability"])
-    if isinstance(attrs.get("background_start"), dict):
-        reserved["background_start"] = dict(attrs["background_start"])
-    return reserved
+    value = attrs.get("recent_tool_trace")
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value[-5:] if isinstance(item, dict)]
+
+
+def _needs_capability(task: SubAgentTask) -> list[str]:
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    value = attrs.get("needs_capability")
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item or "").strip()]
+
+
+def _background_start(task: SubAgentTask) -> dict[str, object]:
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    value = attrs.get("background_start")
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _open_capability_requests(task: SubAgentTask) -> list[object]:
@@ -282,12 +309,3 @@ def _latest_workspace_task(tasks: list[SubAgentTask]) -> SubAgentTask:
     with_workspace = [task for task in tasks if str(task.task_workspace_dir or "").strip()]
     candidates = with_workspace or tasks
     return max(candidates, key=lambda task: (float(task.updated_at or 0.0), float(task.created_at or 0.0), task.id))
-
-
-def _query_reserved(query: SubagentKernelQuery) -> dict[str, object]:
-    return {
-        "root_id": query.root_id,
-        "run_id": query.run_id,
-        "include_refs": query.include_refs,
-        **dict(query.reserved),
-    }

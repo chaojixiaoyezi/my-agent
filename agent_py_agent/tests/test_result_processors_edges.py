@@ -234,7 +234,7 @@ def test_process_structured_output_normalizes_evidence_packet_artifact_refs(mock
 
 
 def test_process_structured_output_resolves_refs_from_agent_run_workspace(mock_task, tmp_path):
-    task_dir = tmp_path / "legacy-task"
+    task_dir = tmp_path / "sample-task"
     run_workspace = tmp_path / "tasks" / "parent" / "agents" / "child"
     run_workspace.mkdir(parents=True)
     artifact = run_workspace / "thailand_analysis.md"

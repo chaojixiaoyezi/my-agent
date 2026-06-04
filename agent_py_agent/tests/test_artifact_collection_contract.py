@@ -450,7 +450,7 @@ def _source_ref(source_id: str) -> dict[str, object]:
         "source_id": source_id,
         "uri": "https://example.com",
         "status": "AVAILABLE",
-        "reserved": {"tool_call_id": f"call-{source_id}"},
+        "tool_call_id": f"call-{source_id}",
     }
 
 
@@ -459,4 +459,4 @@ def _claim(field: str, source_id: str) -> dict[str, object]:
 
 
 def _row_claim(field: str, value: object, source_id: str) -> dict[str, object]:
-    return {**_claim(field, source_id), "value": value, "reserved": {"item_path": "sheets[0].rows[0]"}}
+    return {**_claim(field, source_id), "value": value, "item_path": "sheets[0].rows[0]"}

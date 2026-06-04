@@ -76,11 +76,11 @@ def test_run_state_snapshot_projects_verified_done_to_done():
     assert snapshot["can_closeout"] is True
 
 
-def test_run_state_snapshot_normalizes_legacy_planned_status_to_planning():
+def test_run_state_snapshot_normalizes_previous_planned_status_to_planning():
     from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
 
     task = SimpleNamespace(
-        id="run-legacy-planned",
+        id="run-planned",
         status="PLANNED",
         verification_status="UNVERIFIED",
         channel_status="OK",
@@ -112,7 +112,7 @@ def test_run_state_snapshot_projects_approval_wait_to_waiting_for_user():
     assert snapshot["waiting_reason"] == "approval"
     assert snapshot["terminal_outcome"] == "blocked"
     assert snapshot["recovery_decision"]["action"] == "request_approval"
-    assert snapshot["recovery_decision"]["fallback_action"] == "stop"
+    assert snapshot["recovery_decision"]["secondary_action"] == "stop"
 
 
 def test_run_state_snapshot_projects_waiting_for_tool_to_tool_wait_reason():

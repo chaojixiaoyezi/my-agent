@@ -45,5 +45,5 @@ def test_tool_call_scope_reports_subagent_task_load_error() -> None:
     )
 
     assert envelope.scope.run_id == "child-1"
-    assert envelope.scope.reserved["task_load_error"]["context"] == "tool_call_scope.subagents.load"
-    assert "subagent ledger unreadable" in envelope.scope.reserved["task_load_error"]["message"]
+    assert envelope.scope.task_load_error["context"] == "tool_call_scope.subagents.load"
+    assert "subagent ledger unreadable" in envelope.scope.task_load_error["message"]

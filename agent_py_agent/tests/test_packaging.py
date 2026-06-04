@@ -23,8 +23,8 @@ def test_pyproject_exposes_my_agent_console_script():
 
 
 def test_workspace_root_resolves_relative_to_config_file():
-    from agent_py_agent.__main__ import resolve_workspace_root
-    from agent_py_agent.agent.config import load_config
+    from agent_py_agent.agent.settings import load_config
+    from agent_py_agent.cli.common import resolve_workspace_root
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -36,8 +36,8 @@ def test_workspace_root_resolves_relative_to_config_file():
 
 
 def test_empty_workspace_root_resolves_to_current_working_directory():
-    from agent_py_agent.__main__ import resolve_workspace_roots
-    from agent_py_agent.agent.config import load_config
+    from agent_py_agent.agent.settings import load_config
+    from agent_py_agent.cli.common import resolve_workspace_roots
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -54,8 +54,8 @@ def test_empty_workspace_root_resolves_to_current_working_directory():
 
 
 def test_empty_workspace_root_defaults_to_process_cwd(monkeypatch):
-    from agent_py_agent.__main__ import resolve_workspace_root
-    from agent_py_agent.agent.config import load_config
+    from agent_py_agent.agent.settings import load_config
+    from agent_py_agent.cli.common import resolve_workspace_root
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -71,8 +71,8 @@ def test_empty_workspace_root_defaults_to_process_cwd(monkeypatch):
 
 
 def test_foreign_windows_workspace_root_is_ignored_on_posix():
-    from agent_py_agent.__main__ import resolve_workspace_roots
-    from agent_py_agent.agent.config import load_config
+    from agent_py_agent.agent.settings import load_config
+    from agent_py_agent.cli.common import resolve_workspace_roots
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)

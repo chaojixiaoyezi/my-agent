@@ -7,7 +7,7 @@ parent-planner dispatch).
 测试专用后端类，模拟不同场景下模型返回的内容，让测试不依赖真实 LLM。
 """
 
-from agent_py_agent.agent.backend import BaseBackend, ModelResponse
+from agent_py_agent.agent.backends import BaseBackend, ModelResponse
 
 
 class StructuredSubagentBackend(BaseBackend):

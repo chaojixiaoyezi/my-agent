@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 
 from agent_py_agent.agent.collaboration import CollaborationStore
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def test_case_status_reports_dirty_jsonl_rows_without_hiding_good_records(tmp_path) -> None:

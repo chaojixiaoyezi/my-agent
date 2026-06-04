@@ -18,9 +18,9 @@ INSERT INTO agent_runs (
     run_id, root_task_id, parent_run_id, depth, role, agent_name,
     status, progress, current_step, latest_summary, workspace_path,
     checkpoint_ref, latest_compact_ref, compact_count, heartbeat_at,
-    created_at, updated_at, metadata_json, reserved_json
+    created_at, updated_at, metadata_json
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(run_id) DO UPDATE SET
     root_task_id=excluded.root_task_id,
     parent_run_id=excluded.parent_run_id,
@@ -37,25 +37,24 @@ ON CONFLICT(run_id) DO UPDATE SET
     compact_count=excluded.compact_count,
     heartbeat_at=excluded.heartbeat_at,
     updated_at=excluded.updated_at,
-    metadata_json=excluded.metadata_json,
-    reserved_json=excluded.reserved_json
+    metadata_json=excluded.metadata_json
 """
 
 AGENT_EVENT_INSERT_SQL = """
 INSERT INTO agent_events (
     event_id, root_task_id, run_id, parent_run_id,
-    event_type, payload_json, created_at, reserved_json
+    event_type, payload_json, created_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 """
 
 TASK_ROLLUP_UPSERT_SQL = """
 INSERT INTO task_rollups (
     task_id, status, progress, running_agents, blocked_agents,
     completed_agents, failed_agents, latest_summary, updated_at,
-    metadata_json, reserved_json
+    metadata_json
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(task_id) DO UPDATE SET
     status=excluded.status,
     progress=excluded.progress,
@@ -65,8 +64,7 @@ ON CONFLICT(task_id) DO UPDATE SET
     failed_agents=excluded.failed_agents,
     latest_summary=excluded.latest_summary,
     updated_at=excluded.updated_at,
-    metadata_json=excluded.metadata_json,
-    reserved_json=excluded.reserved_json
+    metadata_json=excluded.metadata_json
 """
 
 
@@ -90,7 +88,6 @@ def agent_run_values(record: AgentRunRecord, created_at: float, updated_at: floa
         float(created_at),
         float(updated_at),
         json_dumps(record.metadata),
-        json_dumps(record.reserved),
     )
 
 
@@ -106,7 +103,6 @@ def task_rollup_values(rollup: TaskRollupRecord, updated_at: float) -> tuple[obj
         rollup.latest_summary,
         float(updated_at),
         json_dumps(rollup.metadata),
-        json_dumps(rollup.reserved),
     )
 
 
@@ -130,7 +126,6 @@ def agent_run_from_row(row: sqlite3.Row) -> AgentRunRecord:
         created_at=float(row["created_at"]),
         updated_at=float(row["updated_at"]),
         metadata=json_loads(row["metadata_json"]),
-        reserved=json_loads(row["reserved_json"]),
     )
 
 
@@ -143,7 +138,6 @@ def agent_event_from_row(row: sqlite3.Row) -> AgentEventRecord:
         event_type=row["event_type"],
         payload=json_loads(row["payload_json"]),
         created_at=float(row["created_at"]),
-        reserved=json_loads(row["reserved_json"]),
     )
 
 
@@ -159,7 +153,6 @@ def task_rollup_from_row(row: sqlite3.Row) -> TaskRollupRecord:
         latest_summary=row["latest_summary"],
         updated_at=float(row["updated_at"]),
         metadata=json_loads(row["metadata_json"]),
-        reserved=json_loads(row["reserved_json"]),
     )
 
 

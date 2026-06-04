@@ -26,8 +26,10 @@ class RunParams:
     recovery_next_actions: list[str] | None = None
     on_chunk: object = None
     compact_auto_continue_depth: int = 0
+    compact_auto_no_tool_continue_depth: int = 0
     context_scope: str = "default"
     root_user_prompt: str = ""
+    carried_archive_tool_calls: list[dict[str, object]] | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,7 @@ class RuntimeLoopParams:
     source: str = "run"
     context_scope: str = "default"
     save: bool | None = None
+    carried_archive_tool_calls: list[dict[str, object]] | None = None
 
 
 @dataclass

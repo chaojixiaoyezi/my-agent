@@ -12,7 +12,7 @@ from ..common.value_parsing import (
     non_negative_int,
     string_list,
 )
-from ..tools import ToolExecutionResult
+from ..tooling.models import ToolExecutionResult
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent

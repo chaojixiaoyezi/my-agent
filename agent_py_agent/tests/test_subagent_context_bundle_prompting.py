@@ -25,7 +25,7 @@ def test_context_bundle_output_contract_separates_required_and_forbidden_files(t
         acceptance_checks=["forbidden_files: should-not-count.html"],
         attributes={
             "required_files": ["index.html", "item-detail.html", "style.css", "app.js"],
-            "forbidden_files": ["product.html", "old-product.html", "legacy.html", "obsolete.html"],
+            "forbidden_files": ["product.html", "old-product.html", "stale.html", "obsolete.html"],
         },
     )
     manager.save(task)
@@ -41,7 +41,7 @@ def test_context_bundle_output_contract_separates_required_and_forbidden_files(t
     assert bundle.output_contract["forbidden_files"] == [
         "product.html",
         "old-product.html",
-        "legacy.html",
+        "stale.html",
         "obsolete.html",
     ]
     assert bundle.task_packet["file_contract"]["required_files"] == [
@@ -53,7 +53,7 @@ def test_context_bundle_output_contract_separates_required_and_forbidden_files(t
     assert bundle.task_packet["file_contract"]["forbidden_files"] == [
         "product.html",
         "old-product.html",
-        "legacy.html",
+        "stale.html",
         "obsolete.html",
     ]
     assert bundle.output_contract["file_contract_source"] == "attributes_required_forbidden_fields"
@@ -221,7 +221,7 @@ def test_context_bundle_gate_reports_semantic_file_contract_mismatch(tmp_path) -
                     "required_files": ["index.html"],
                 },
             },
-            "reserved": {"expected_required_files": ["index.html", "style.css"]},
+            "expected_required_files": ["index.html", "style.css"],
         }
     )
 

@@ -225,6 +225,8 @@ def _build_ask_request(context: _AskRequestContext) -> dict:
         "kind": "ask",
         "goal": context.goal,
         "metadata": metadata,
+        "priority": "interactive",
+        "source": f"http:{context.channel}",
         "submitted_at": time.time(),
         "user_id": context.user_id,
     }

@@ -49,7 +49,7 @@ def bounded_query(
 ) -> QueryResult:
     """执行受控查询。
 
-    支持显式关键字兼容；内部统一转换为 BoundedQueryParams。"""
+    支持显式关键字参数；内部统一转换为 BoundedQueryParams。"""
     query_params = _query_inputs(
         params=params,
         file_path=file_path,

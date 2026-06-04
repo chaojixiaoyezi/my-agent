@@ -1,12 +1,24 @@
 
-"""Public facade for subagent orchestration services."""
+"""Subagent orchestration manager."""
 
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
 from .kernel import SubagentKernelMixin
-from .manager_base import SubAgentBaseMixin, SubAgentManagerInitParams
+from .manager_work_orders import (
+    build_work_order_paths,
+    ensure_work_order_files,
+    validate_work_order,
+    write_takeover_file,
+)
+from .models import SubAgentCard, SubAgentTask, TakeoverRecord, WorkOrderValidation
 from .services.actions import SubAgentActionService
-from .services.board.facade import SubAgentBoardFacade
+from .services.base import CreateRunParams, SubAgentBaseService
+from .services.board.service import SubAgentBoardService
 from .services.budget import SubAgentBudgetService
 from .services.capabilities import SubAgentCapabilityService
 from .services.channel_probe import SubAgentChannelProbeService
@@ -15,13 +27,39 @@ from .services.hierarchy import SubAgentHierarchyService
 from .services.indexing import SubAgentIndexingService
 from .services.indexing.params import LocalRecordParams
 from .services.learning import SubAgentLearningService
+from .services.lifecycle import SubAgentLifecycleService
 from .services.memory_gate import SubAgentMemoryGateService
-from .services.patch_apply.facade import SubAgentPatchService
+from .services.patch_apply.service import SubAgentPatchService
+from .services.persistence import SubAgentPersistenceService
 from .services.runner_context import SubAgentRunnerContextService
 from .services.runner_result import SubAgentRunnerResultService
+from .services.takeover.run import SubAgentTakeoverRunService
 from .services.workflow import SubAgentWorkflowService
+from .utils import _new_id
 
-_SERVICE_FACADE_METHODS = {
+if TYPE_CHECKING:
+    from ..local_storage import LocalStore
+
+
+@dataclass(frozen=True)
+class SubAgentManagerInitParams:
+    local_store: LocalStore | None = None
+    # 协作账本依赖；为空时子代理仍按普通无协作上下文运行。
+    collaboration_store: Any | None = None
+    # 长期会话账本依赖；为空时只更新子代理树，不触发父代理后台唤醒。
+    conversation_store: Any | None = None
+    workspace_root: str | Path | None = None
+    workspace_roots: list[str | Path] | None = None
+    role_template_dirs: list[str | Path] | None = None
+    enable_self_learning: bool = False
+    debug_trace_level: int = 0
+    takeover_chain_max_depth: int = 0
+    closeout_for_all_task_nodes: bool = False
+    owner_id: str = ""
+    owner_home_dir: str = ""
+    owner_policy_snapshot: dict[str, object] | None = None
+
+_SERVICE_METHOD_ROUTES = {
     "_to_board_item": ("board", "to_board_item"),
     "_risk_flags": ("board", "risk_flags"),
     "build_board": ("board", "build_board"),
@@ -142,11 +180,8 @@ _SERVICE_FACADE_METHODS = {
 }
 
 
-class SubAgentManager(
-    SubAgentBaseMixin,
-    SubagentKernelMixin,
-):
-    """Compatibility facade over focused subagent services."""
+class SubAgentManager(SubagentKernelMixin):
+    """Coordinate focused subagent services behind one manager."""
 
     def __init__(
         self,
@@ -167,12 +202,8 @@ class SubAgentManager(
         owner_home_dir="",
         owner_policy_snapshot=None,
     ):
-        # collaboration_store 只用于给 runner 注入点名 request refs；为空时保持普通子代理行为。
-        params = params or _legacy_init_params(locals())
-        super().__init__(
-            workspace,
-            params=params,
-        )
+        params = params or _init_params_from_kwargs(locals())
+        _init_manager_state(self, workspace, params)
         _attach_services(self)
 
     @property
@@ -180,7 +211,7 @@ class SubAgentManager(
         return self.indexing
 
     def __getattr__(self, name: str):
-        route = _SERVICE_FACADE_METHODS.get(name)
+        route = _SERVICE_METHOD_ROUTES.get(name)
         if route is not None:
             service_name, method_name = route
             return getattr(getattr(self, service_name), method_name)
@@ -228,8 +259,146 @@ class SubAgentManager(
         )
         return self.indexing.log_local_record(params=params)
 
+    def split(
+        self,
+        goal: str,
+        count: int,
+        *,
+        workflow_mode: str = "off",
+        allowed_tools: list[str] | None = None,
+    ) -> list[SubAgentTask]:
+        return self.base_service.split(
+            goal,
+            count,
+            workflow_mode=workflow_mode,
+            allowed_tools=allowed_tools,
+        )
 
-def _legacy_init_params(values: dict[str, object]) -> SubAgentManagerInitParams:
+    def register_card(self, card: SubAgentCard) -> None:
+        self.cards[card.name] = card
+
+    def create_run(
+        self,
+        *,
+        params: CreateRunParams | None = None,
+        goal: str = "",
+        thought: str = "",
+        plan: list[str] | None = None,
+        agent_name: str = "general",
+        role: str = "general",
+        parent_id: str = "",
+        root_id: str = "",
+        depth: int = 0,
+        allowed_skills: list[str] | None = None,
+        allowed_tools: list[str] | None = None,
+        owner: str = "",
+        supervisor: str = "",
+        final_owner: str = "",
+        acceptance_checks: list[str] | None = None,
+        quality_contract: Any = None,
+        context_manifest: Any = None,
+        context_packs: Any = None,
+        extra_write_roots: list[str] | None = None,
+        workflow_mode: str = "off",
+        attributes: dict[str, object] | None = None,
+        parent_access_mode: str = "",
+        memory_retention_policy: str = "parent_review_or_cleanup",
+        memory_delete_after_days: int = 0,
+        destroy_summary_required: bool = True,
+    ) -> SubAgentTask:
+        params = params or CreateRunParams(
+            goal=goal,
+            thought=thought,
+            plan=plan or [],
+            agent_name=agent_name,
+            role=role,
+            parent_id=parent_id,
+            root_id=root_id,
+            depth=depth,
+            allowed_skills=allowed_skills,
+            allowed_tools=allowed_tools,
+            owner=owner,
+            supervisor=supervisor,
+            final_owner=final_owner,
+            acceptance_checks=acceptance_checks,
+            quality_contract=quality_contract,
+            context_manifest=context_manifest,
+            context_packs=context_packs,
+            extra_write_roots=extra_write_roots,
+            workflow_mode=workflow_mode,
+            attributes=attributes,
+            parent_access_mode=parent_access_mode,
+            memory_retention_policy=memory_retention_policy,
+            memory_delete_after_days=memory_delete_after_days,
+            destroy_summary_required=destroy_summary_required,
+        )
+        return self.base_service.create_run(params=params)
+
+    def record_takeover(
+        self,
+        run_id: str,
+        *,
+        take_over_by: str,
+        reason: str,
+        locked_files: list[str] | None = None,
+    ):
+        return self.base_service.record_takeover(
+            run_id,
+            take_over_by=take_over_by,
+            reason=reason,
+            locked_files=locked_files,
+        )
+
+    def create_takeover_run(self, params):
+        return SubAgentTakeoverRunService(self).create(params)
+
+    def load(self, run_id: str) -> SubAgentTask:
+        return self.persistence.load(run_id)
+
+    def list_runs(self) -> list[SubAgentTask]:
+        return self.persistence.list_runs()
+
+    def list_runs_report(self):
+        return self.persistence.list_runs_report()
+
+    def save(self, task: SubAgentTask) -> None:
+        self.persistence.save(task)
+
+    def save_hierarchy_links(self, task: SubAgentTask) -> None:
+        self.persistence.save(task, preserve_child_links=False)
+
+    def add_child(self, parent_id: str, child_id: str) -> None:
+        try:
+            parent = self.load(parent_id)
+        except FileNotFoundError:
+            return
+        if child_id not in parent.child_ids:
+            parent.child_ids.append(child_id)
+            parent.updated_at = time.time()
+            self.save(parent)
+
+    def _build_work_order_paths(
+        self,
+        run_id: str,
+        task_dir: str | Path | None = None,
+        extra_write_roots: list[str] | None = None,
+    ) -> dict[str, object]:
+        return build_work_order_paths(self, run_id, task_dir, extra_write_roots)
+
+    def _ensure_work_order_files(self, task: SubAgentTask) -> None:
+        ensure_work_order_files(task)
+
+    def _write_takeover_file(self, task: SubAgentTask, record: TakeoverRecord) -> None:
+        write_takeover_file(task, record)
+
+    def validate_work_order(self, run_id: str) -> WorkOrderValidation:
+        return validate_work_order(self, run_id)
+
+    def _new_id(self, prefix: str) -> str:
+        return _new_id(prefix)
+
+
+def _init_params_from_kwargs(values: dict[str, object]) -> SubAgentManagerInitParams:
     return SubAgentManagerInitParams(
         local_store=values.get("local_store"),
         collaboration_store=values.get("collaboration_store"),
@@ -248,8 +417,11 @@ def _legacy_init_params(values: dict[str, object]) -> SubAgentManagerInitParams:
 
 
 def _attach_services(manager: SubAgentManager) -> None:
+    manager.lifecycle = SubAgentLifecycleService(manager)
+    manager.persistence = SubAgentPersistenceService(manager)
+    manager.base_service = SubAgentBaseService(manager)
     manager.actions = SubAgentActionService(manager)
-    manager.board = SubAgentBoardFacade(manager)
+    manager.board = SubAgentBoardService(manager)
     manager.budget = SubAgentBudgetService(manager)
     manager.capability = SubAgentCapabilityService(manager)
     manager.channel_probe = SubAgentChannelProbeService(manager)
@@ -263,3 +435,60 @@ def _attach_services(manager: SubAgentManager) -> None:
     manager.runner_context = SubAgentRunnerContextService(manager)
     manager.runner_result = SubAgentRunnerResultService(manager)
     manager.workflow = SubAgentWorkflowService(manager)
+
+
+def _init_manager_state(manager: SubAgentManager, workspace: str | Path, params: SubAgentManagerInitParams) -> None:
+    manager.workspace = Path(workspace)
+    manager.workspace.mkdir(parents=True, exist_ok=True)
+    manager.cards: dict[str, SubAgentCard] = {}
+    manager.local_store = params.local_store
+    manager.collaboration_store = params.collaboration_store
+    manager.conversation_store = params.conversation_store
+    manager.workspace_root = (
+        Path(params.workspace_root).resolve()
+        if params.workspace_root
+        else manager.workspace.resolve().parent
+    )
+    manager.workspace_roots = _normalized_workspace_roots(manager.workspace_root, params.workspace_roots)
+    manager.role_template_dirs = _normalized_template_dirs(manager.workspace_root, params.role_template_dirs)
+    manager.enable_self_learning = bool(params.enable_self_learning)
+    manager.debug_trace_level = _normalize_debug_trace_level(params.debug_trace_level)
+    manager.takeover_chain_max_depth = max(0, int(params.takeover_chain_max_depth or 0))
+    manager.closeout_for_all_task_nodes = bool(params.closeout_for_all_task_nodes)
+    _apply_owner_scope(manager, params)
+
+
+def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -> list[Path]:
+    resolved: list[Path] = []
+    for raw in [primary, *(roots or [])]:
+        path = Path(raw).resolve()
+        if path not in resolved:
+            resolved.append(path)
+    return resolved
+
+
+def _normalized_template_dirs(primary: Path, dirs: list[str | Path] | None) -> list[Path]:
+    raw_dirs = dirs if dirs else [primary / ".agent" / "subagents" / "roles"]
+    resolved: list[Path] = []
+    for raw in raw_dirs:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = primary / path
+        path = path.resolve()
+        if path not in resolved:
+            resolved.append(path)
+    return resolved
+
+
+def _normalize_debug_trace_level(value: object) -> int:
+    try:
+        level = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(5, level))
+
+
+def _apply_owner_scope(manager: SubAgentManager, params: SubAgentManagerInitParams) -> None:
+    manager.owner_id = str(params.owner_id or "")
+    manager.owner_home_dir = str(params.owner_home_dir or "")
+    manager.owner_policy_snapshot = dict(params.owner_policy_snapshot or {})

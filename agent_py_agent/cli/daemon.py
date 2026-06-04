@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass
 
 from ..agent.agent_core.orchestration.dispatch.params import DispatchExecutionPlan, WatchParams
-from ..agent.capability_config import load_capability_config
+from ..agent.capability.config import load_capability_config
 from ..agent.core import SimpleAgent
 from .common import make_agent, make_capability_router
 from .models import DaemonOptions

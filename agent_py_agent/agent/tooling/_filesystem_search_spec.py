@@ -20,7 +20,7 @@ def build_search_text_spec() -> ToolSpec:
         keywords=["搜索", "查找", "关键字", "grep", "rg", "全文检索", "文本匹配"],
         parameters={
             "query": "要搜索的文本",
-            "pattern": "query 的别名，便于兼容 grep 风格调用",
+            "pattern": "query 的别名，便于按 grep/rg 习惯调用",
             "path": "从哪个目录开始搜，默认是工作区根目录",
             "limit": "本次最多返回多少条匹配，默认使用工具配置上限",
             "offset": "跳过前多少条匹配，用于分页，默认 0",

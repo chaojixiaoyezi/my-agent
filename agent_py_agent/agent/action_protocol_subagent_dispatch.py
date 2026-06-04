@@ -43,7 +43,7 @@ class SubagentDispatchEnvelope:
     schema_version: int = ACTION_PROTOCOL_SCHEMA_VERSION
     kind: str = "subagent_dispatch"
     created_at: str = field(default_factory=_now_iso)
-    reserved: dict[str, Any] = field(default_factory=dict)
+    source: str = ""
 
     def __post_init__(self) -> None:
         if not self.operation_id:
@@ -81,7 +81,7 @@ class SubagentDispatchEnvelope:
             schema_version=int(payload.get("schema_version") or ACTION_PROTOCOL_SCHEMA_VERSION),
             kind=str(payload.get("kind") or "subagent_dispatch"),
             created_at=str(payload.get("created_at") or _now_iso()),
-            reserved=_dict_or_empty(payload.get("reserved")),
+            source=str(payload.get("source") or ""),
         )
 
 
@@ -110,7 +110,7 @@ def subagent_dispatch_envelope_from_payload(
         dispatch_md=str(payload.get("dispatch_md") or ""),
         record_count=len(_dict_list(payload.get("records"))),
         scope=scope or RunScope(),
-        reserved={"source": "dispatch_subagents_tool"},
+        source="dispatch_subagents_tool",
     )
 
 

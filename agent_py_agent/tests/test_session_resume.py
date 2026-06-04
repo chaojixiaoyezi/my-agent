@@ -13,20 +13,6 @@ from agent_py_agent.agent.session.resume import (
 )
 
 
-def _remove_subagent_module():
-    import sys
-
-    return sys.modules.pop("agent_py_agent.agent.subagent", None)
-
-
-def _restore_subagent_module(original):
-    if original is None:
-        return
-    import sys
-
-    sys.modules["agent_py_agent.agent.subagent"] = original
-
-
 class TestResumeSession:
     """Test resume_session function."""
 
@@ -87,11 +73,11 @@ class TestResumeSession:
             # Should not raise, should return session
             assert "session" in result
 
-    def test_handles_missing_subagent_module(self, tmp_path: Path):
-        """Test handles case when subagent module is not available."""
+    def test_handles_missing_subagent_manager(self, tmp_path: Path):
+        """没有当前 subagents manager 时，恢复上下文只返回空子代理列表。"""
         mock_agent = MagicMock()
+        mock_agent.subagents = None
         memory_file = tmp_path / "memory.jsonl"
-        # Write proper JSONL format - one JSON object per line, not wrapped in array
         memory_file.write_text('{"session_id": "test-session", "role": "user", "content": "hello"}\n')
         mock_agent.config.memory_path = str(memory_file)
 
@@ -103,13 +89,9 @@ class TestResumeSession:
             mock_instance.load_session.return_value = mock_session
             MockSM.return_value = mock_instance
 
-            original = _remove_subagent_module()
-            try:
-                result = resume_session(mock_agent, "test-session")
-                # Should complete without raising
-                assert "subagent_context" in result
-            finally:
-                _restore_subagent_module(original)
+            result = resume_session(mock_agent, "test-session")
+
+        assert result["subagent_context"] == []
 
     def test_subagent_context_load_failure_is_model_visible(self, tmp_path: Path):
         """Subagent board read errors should be visible, not disguised as no subagents."""

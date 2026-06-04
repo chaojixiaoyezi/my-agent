@@ -44,13 +44,13 @@ def test_prompt_home_context_reads_owner_entry_files(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
     paths = ensure_my_agent_home(tmp_path)
-    paths.agents_md.write_text("legacy agents\n", encoding="utf-8")
+    paths.agents_md.write_text("current agents\n", encoding="utf-8")
     paths.owner_agents_md.write_text("owner agents\n", encoding="utf-8")
 
     rendered = "\n".join(_home_entry_context_chunks(paths))
 
     assert "owner agents" in rendered
-    assert "legacy agents" not in rendered
+    assert "current agents" not in rendered
 
 
 def test_simple_agent_daily_memory_mirror_uses_owner_home(tmp_path: Path):
@@ -63,9 +63,9 @@ def test_simple_agent_daily_memory_mirror_uses_owner_home(tmp_path: Path):
     agent.memory.add("user", "记录 owner daily", kind="note")
 
     owner_daily = list((home / "owners" / "local" / "main" / "memory" / "daily").glob("*.jsonl"))
-    legacy_daily = list((home / "memory" / "daily").glob("*.jsonl"))
+    previous_daily = list((home / "memory" / "daily").glob("*.jsonl"))
     assert owner_daily
-    assert legacy_daily == []
+    assert previous_daily == []
 
 
 def test_simple_agent_uses_configured_provider_owner_home(tmp_path: Path):
@@ -127,23 +127,16 @@ def test_simple_agent_active_runtime_paths_use_owner_home_for_fresh_install(tmp_
     assert not (repo / "data").exists()
 
 
-def test_simple_agent_reports_legacy_runtime_when_home_runtime_disabled(tmp_path: Path, caplog):
-    import logging
-
+def test_simple_agent_always_uses_owner_home_runtime(tmp_path: Path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings.config import AgentConfig
 
     home = tmp_path / "home"
     workspace = tmp_path / "workspace"
-    caplog.set_level(logging.WARNING)
 
-    agent = SimpleAgent(
-        AgentConfig(my_agent_home=str(home), home_runtime_bootstrap_enabled=False, prompt_files=[]),
-        workspace,
-    )
+    agent = SimpleAgent(AgentConfig(my_agent_home=str(home), prompt_files=[]), workspace)
 
-    assert agent.using_legacy_paths is True
-    assert agent.runtime_path_resolution.using_legacy_paths is True
-    assert agent.runtime_path_resolution.reason == "home_runtime_disabled"
-    assert agent.local_store.db_path == workspace / "data" / "local_store" / "local.db"
-    assert "legacy runtime paths" in caplog.text
+    owner_home = home / "owners" / "local" / "main"
+    assert agent.runtime_path_resolution.reason == "owner_home_runtime"
+    assert agent.local_store.db_path.is_relative_to(owner_home / "workspace" / "runtime" / "workspaces")
+    assert not (workspace / "data").exists()

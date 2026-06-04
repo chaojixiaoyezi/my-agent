@@ -5,8 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent_py_agent.agent.collaboration import AgentCapability
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def test_collaboration_list_summarizes_cases_and_pending_requests(tmp_path, capsys) -> None:

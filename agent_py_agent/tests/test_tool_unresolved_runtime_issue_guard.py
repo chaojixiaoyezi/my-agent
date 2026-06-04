@@ -10,7 +10,7 @@ def test_no_tool_final_redirects_unresolved_artifact_integrity_issue(tmp_path: P
         ToolLoopResponseDecisionRequest,
         tool_loop_response_decision,
     )
-    from agent_py_agent.agent.backend import ModelResponse
+    from agent_py_agent.agent.backends import ModelResponse
 
     params = _params(
         archive_tool_calls=[
@@ -45,7 +45,7 @@ def test_unresolved_runtime_issue_repair_context_does_not_hard_block(tmp_path: P
         ToolLoopResponseDecisionRequest,
         tool_loop_response_decision,
     )
-    from agent_py_agent.agent.backend import ModelResponse
+    from agent_py_agent.agent.backends import ModelResponse
 
     params = _params(
         archive_tool_calls=[
@@ -80,7 +80,7 @@ def test_no_tool_final_allows_after_artifact_integrity_issue_is_cleared(tmp_path
         ToolLoopResponseDecisionRequest,
         tool_loop_response_decision,
     )
-    from agent_py_agent.agent.backend import ModelResponse
+    from agent_py_agent.agent.backends import ModelResponse
 
     params = _params(
         archive_tool_calls=[
@@ -112,7 +112,7 @@ def test_no_tool_final_allows_after_artifact_integrity_issue_is_cleared(tmp_path
 def test_archive_record_keeps_artifact_integrity_failure_envelope(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_call_archive_record import archive_tool_call_record
     from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
-    from agent_py_agent.agent.tools import ToolExecutionResult
+    from agent_py_agent.agent.tooling import ToolExecutionResult
 
     params = _params()
     result = ToolExecutionResult(

@@ -8,7 +8,7 @@ import threading
 import time
 from types import SimpleNamespace
 
-from ..agent.gateway import (
+from ..agent.gateway_parts import (
     _process_gateway_requests,
     gateway_paths,
     gateway_request_counts,

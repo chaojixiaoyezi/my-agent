@@ -24,7 +24,7 @@ source .venv/bin/activate
 # 启用虚拟环境；看到命令行前面有 (.venv) 就对了。
 
 python -m pip install -U pip
-# 升级 pip，减少安装包时遇到旧版本问题。
+# 升级 pip，减少安装包版本问题。
 
 python -m pip install -e .
 # 以可编辑模式安装本项目；改代码后不用重复安装。
@@ -276,13 +276,9 @@ fresh install 下，长期记忆和本地事实源默认属于当前 owner：
 ~/.my-agent/owners/local/main/tasks/<yyyy-mm-dd>/<task-slug>/{output,work}/
 ```
 
-repo 内 `data/*` 只作为历史迁移、测试 fixture 或关闭 home runtime 时的兼容入口。
+repo 内 `data/*` 只保留测试 fixture 或显式指定路径用途，不再是普通运行事实源。
 如果配置里显式把 `local_store_path`、`subagent_workspace`、`gateway_workspace`
-等改成非默认路径，这些显式路径仍会生效；默认 `data/*` 不再代表新安装的活跃事实源。
-SimpleAgent 启动后会把解析好的 owner-home 路径回写到 `AgentConfig`，让还没完成重构的
-gateway/session/notification 等旧入口也读取同一套路径。
-如果运行时因为 `home_runtime_bootstrap_enabled=false` 或 owner home 缺失回退到旧路径，
-`SimpleAgent.using_legacy_paths` 会变成 `true`，并写出 warning，排查时不再静默混用两套账本。
+等改成非默认路径，这些显式路径仍会生效；默认新任务、记忆、gateway 和子代理状态都归当前 owner home。
 
 ```bash
 my-agent memory-list --limit 20
@@ -673,4 +669,3 @@ python3 agent_py_agent/tests/run_tests.py
 | [CODE_SIZE_POLICY.md](CODE_SIZE_POLICY.md) | 代码尺寸限制 |
 | [CLEAN_PACKAGE_POLICY.md](CLEAN_PACKAGE_POLICY.md) | 打包洁净度规范 |
 | [docs/decisions/](docs/decisions/) | 架构决策记录 (ADR) |
-| [docs/architecture/SUBAGENT_SERVICE_REFACTOR_PLAN.md](docs/architecture/SUBAGENT_SERVICE_REFACTOR_PLAN.md) | SubAgent 服务化重构计划 |

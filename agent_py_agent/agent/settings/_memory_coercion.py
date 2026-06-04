@@ -27,7 +27,7 @@ class _FieldSpec:
 class _WarningDraft:
     field_name: str
     raw_value: Any
-    fallback_value: Any
+    default_value: Any
     reason: str
 
 
@@ -140,12 +140,12 @@ def _warn(
     warnings: list[MemoryConfigWarning],
     draft: _WarningDraft,
 ) -> None:
-    """Append one structured fallback warning."""
+    """Append one structured default warning."""
     warnings.append(
         MemoryConfigWarning(
             field_name=draft.field_name,
             raw_value=draft.raw_value,
-            fallback_value=draft.fallback_value,
+            default_value=draft.default_value,
             reason=draft.reason,
         )
     )

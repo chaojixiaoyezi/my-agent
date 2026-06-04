@@ -36,7 +36,7 @@ class NotificationRouter:
             return active_channel
 
         # 策略 3：查用户所有会话，找任意在线通道
-        for channel in self._candidate_fallback_channels(notification.channel):
+        for channel in self._candidate_alternate_channels(notification.channel):
             if self._channel_checker.check(channel, notification.user_id):
                 return channel
 
@@ -62,7 +62,7 @@ class NotificationRouter:
             return None
         return best_channel
 
-    def _candidate_fallback_channels(self, excluded_channel: str) -> tuple[str, ...]:
+    def _candidate_alternate_channels(self, excluded_channel: str) -> tuple[str, ...]:
         return tuple(channel for channel in ("chat", "feishu", "qq") if channel != excluded_channel)
 
     def _eval_session_for_router(self, session_dir: Path, user_id: str, exclude_channel: str | None, timeout: float) -> tuple[str | None, float]:

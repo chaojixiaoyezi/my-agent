@@ -86,7 +86,7 @@ def _register_network_tools(registry: Any, params: Any) -> None:
             ),
         )
     )
-    # controlled_exec is kept as a legacy/internal tool for existing capability
+    # controlled_exec is an internal tool used by capability grants.
     # flows, but ToolRegistry hides it from the default model-facing catalog.
     registry.register(ControlledExecTool())
 

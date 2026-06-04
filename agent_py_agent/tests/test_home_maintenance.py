@@ -19,7 +19,7 @@ def _write_config(tmp_path: Path, home: Path) -> Path:
 
 
 def _run_cli_json(capsys, config_path: Path, *argv: str) -> tuple[int, dict]:
-    from agent_py_agent.__main__ import build_parser
+    from agent_py_agent.cli.parser import build_parser
 
     parser = build_parser()
     args = parser.parse_args(["--config", str(config_path), *argv, "--json"])
@@ -28,35 +28,7 @@ def _run_cli_json(capsys, config_path: Path, *argv: str) -> tuple[int, dict]:
     return code, json.loads(captured.out)
 
 
-def test_home_migration_copies_legacy_memory_raw_and_hooks_to_owner(tmp_path: Path) -> None:
-    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
-    from agent_py_agent.agent.user_space.home_migration import (
-        apply_home_migration,
-        plan_home_migration,
-    )
-
-    home = ensure_my_agent_home(tmp_path)
-    legacy_memory = home.data_dir / "memory.jsonl"
-    legacy_memory.parent.mkdir(parents=True, exist_ok=True)
-    legacy_memory.write_text('{"role":"user","content":"legacy"}\n', encoding="utf-8")
-    home.memory_raw_dir.mkdir(parents=True, exist_ok=True)
-    (home.memory_raw_dir / "2026-05-01.jsonl").write_text('{"raw":1}\n', encoding="utf-8")
-    (home.memory_hooks_dir / "2026-05-01.jsonl").write_text('{"hook":1}\n', encoding="utf-8")
-
-    plan = plan_home_migration(home)
-    assert {action.action for action in plan.actions} >= {"copy_long_term_memory", "copy_raw_memory", "copy_hook_memory"}
-
-    result = apply_home_migration(home)
-
-    statuses = {action.action: action.status for action in result.actions}
-    assert statuses["copy_long_term_memory"] == "copied"
-    assert (home.owner_memory_long_term_dir / "memory.jsonl").read_text(encoding="utf-8") == legacy_memory.read_text(encoding="utf-8")
-    assert (home.owner_audit_dir / "2026-05-01.jsonl").exists()
-    assert (home.owner_memory_hooks_dir / "2026-05-01.jsonl").exists()
-    assert legacy_memory.exists()
-
-
-def test_home_doctor_reports_migration_dangling_index_and_retention_advice(tmp_path: Path) -> None:
+def test_home_doctor_reports_dangling_index_and_retention_advice(tmp_path: Path) -> None:
     from agent_py_agent.agent.user_space.home_doctor import build_home_doctor_report
     from agent_py_agent.agent.user_space.home_indexes import TaskIndexRef, register_task_ref
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
@@ -73,11 +45,10 @@ def test_home_doctor_reports_migration_dangling_index_and_retention_advice(tmp_p
     report = build_home_doctor_report(home)
 
     assert report["ok"] is True
-    assert report["migration"]["pending_count"] >= 1
     assert report["indexes"]["dangling_count"] == 1
     assert report["retention"]["planned_count"] >= 1
     assert any(item["kind"] == "dangling_index" for item in report["findings"])
-    assert report["repair_plan"]["auto_repair_count"] >= 3
+    assert report["repair_plan"]["auto_repair_count"] >= 2
     commands = {item["command"] for item in report["repair_plan"]["auto_repair"]}
     assert "my-agent home-index-rebuild --apply" in commands
     assert "my-agent home-retention --apply" in commands

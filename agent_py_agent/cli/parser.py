@@ -14,26 +14,26 @@ from .commands.background_main_agent import add_background_main_agent_subcommand
 from .commands.bench import add_bench_model_command
 from .commands.collaboration import add_collaboration_subcommands
 from .commands.contracts import add_contracts_subcommand
-from .commands.core import (
+from .commands.guidance import add_guidance_subcommand
+from .commands.learning import add_learning_subcommand
+from .commands.operations import add_operations_subcommands
+from .commands.tasks import add_task_subcommands
+from .common import DEFAULT_CONFIG, configure_stdio
+from .gateway_client import cmd_default
+from .real_e2e_commands import add_real_e2e_subcommand
+from .subcommands_agents import add_subagents_subcommands
+from .subcommands_basic import (
     add_basic_subcommands,
     add_local_store_subcommands,
     add_memory_subcommands,
 )
-from .commands.gateway import (
+from .subcommands_gateway import (
     add_adapter_subcommand,
     add_daemon_subcommand,
     add_gateway_subcommands,
     add_logs_subcommands,
     add_scenario_subcommand,
 )
-from .commands.guidance import add_guidance_subcommand
-from .commands.learning import add_learning_subcommand
-from .commands.operations import add_operations_subcommands
-from .commands.subagents import add_subagents_subcommands
-from .commands.tasks import add_task_subcommands
-from .common import DEFAULT_CONFIG, configure_stdio
-from .gateway_client import cmd_default
-from .real_e2e_commands import add_real_e2e_subcommand
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,11 +46,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         default=str(DEFAULT_CONFIG),
         help="配置文件路径，默认使用 config/agent_config.yaml",
-    )
-    parser.add_argument(
-        "--app",
-        action="store_true",
-        help="兼容参数：默认已启动应用内聊天界面",
     )
     parser.add_argument(
         "--plain",

@@ -1,11 +1,10 @@
 
 from __future__ import annotations
 
-"""public facade for recovery and compression snapshot writes.
+"""public API for recovery and compression snapshot writes.
 
 新手说明:
-这个包的公开导入路径保持不变；具体构造和写入实现拆到内部模块，
-这样 snapshots 入口只负责 hook 注册、参数兼容和 re-export。
+本包负责 compression hook 注册和 snapshot 写入入口；具体构造与文件写入在内部模块。
 """
 
 from collections.abc import Iterable, Mapping

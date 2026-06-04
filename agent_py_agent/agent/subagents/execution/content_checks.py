@@ -74,8 +74,8 @@ def _expected_content_for_cat_item(
         value = str(item.get(key) or "").strip()
         if _usable_expected_literal(value, path):
             return value
-    fallback = artifact_expected_content.get(path, "")
-    return fallback if _usable_expected_literal(fallback, path) else ""
+    expected = artifact_expected_content.get(path, "")
+    return expected if _usable_expected_literal(expected, path) else ""
 
 
 def _usable_expected_literal(value: str, path: Path) -> bool:

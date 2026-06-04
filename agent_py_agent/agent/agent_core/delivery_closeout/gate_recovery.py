@@ -38,6 +38,7 @@ _CLOSEOUT_GATE_KEYS = (
     "state_gate",
     "delivery_quality_gate",
     "fact_evidence_gate",
+    "task_progress_closeout_gate",
     "acceptance_gate",
     "final_closeout_gate",
 )

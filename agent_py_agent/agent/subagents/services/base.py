@@ -4,7 +4,7 @@ from __future__ import annotations
 """base task creation and lifecycle service.
 
 这里承接子代理任务创建、分割、注册卡等基础能力。
-SubAgentManager 通过 facade 方法委托到这里。
+SubAgentManager 通过当前服务组合调用这里。
 运行身份会写 memory scope 和 runtime config scope，供 worker 装载 task overlay。
 """
 
@@ -177,7 +177,7 @@ class SubAgentBaseService:
         """Create a subagent task record.
 
         workflow_mode controls workflow planning:
-          - "off" : default, no workflow (backward compatible)
+          - "off" : default, no workflow
           - "plan" : run workflow planning, write result to task.workflow_plan
           - "auto" : run workflow planning, auto-merge worker spec and closeout into acceptance checklist
         """

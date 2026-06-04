@@ -11,7 +11,7 @@ from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (
     DispatchSubagentsTool,
     _dispatch_capability_config,
 )
-from agent_py_agent.agent.capabilities import CapabilityRouter
+from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.runtime_config import (
     CapabilityConfigPatch,
     CapabilityConfigPatchRequest,
@@ -20,8 +20,8 @@ from agent_py_agent.agent.capability.runtime_config import (
     load_capability_config_snapshot,
     reload_capability_config_if_changed,
 )
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.settings.services.runtime_config_task import (
     apply_task_runtime_config_overlay,
 )

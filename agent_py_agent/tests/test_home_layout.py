@@ -87,7 +87,6 @@ def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Pa
     assert paths.owner_blob_tool_outputs_dir.is_dir()
     assert paths.owner_capability_requests_dir.is_dir()
     assert paths.global_index_dir.is_dir()
-    assert paths.system_migrations_dir.is_dir()
     assert paths.soul_md.read_text(encoding="utf-8") == "custom soul\n"
     assert paths.agents_md.exists()
     assert paths.memory_hot_md.exists()
@@ -106,7 +105,7 @@ def test_ensure_my_agent_home_creates_v2_owner_and_system_files(tmp_path: Path):
     quota = json.loads(paths.owner_quota_json.read_text(encoding="utf-8"))
 
     assert schema["schema_version"] == "my-agent-home.v2"
-    assert "my-agent-home.v1" in schema["compatible_read_versions"]
+    assert schema["read_version"] == "my-agent-home.v2"
     assert permissions["filesystem"]["access_mode"] == "workspace-write"
     assert quota["max_subagents"] == 50
     assert paths.owner_skill_policy_json.exists()

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..runtime_errors import runtime_error_report
-from ..tools import ToolExecutionResult
+from ..tooling.models import ToolExecutionResult
 from .tool_targets import (
     actor_agent_id,
     collaboration_scope_payload,

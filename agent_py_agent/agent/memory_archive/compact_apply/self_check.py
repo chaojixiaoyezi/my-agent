@@ -6,7 +6,6 @@ from typing import Any
 
 from ..schema import (
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 
@@ -27,7 +26,6 @@ def build_self_check_payload(
         "event_type": "post_compact_self_check",
         "checks": checks,
         "created_at": now,
-        "reserved": runtime_memory_reserved_fields(COMPACT_SELF_CHECK_SCHEMA),
     }
 
 
@@ -47,7 +45,6 @@ def build_self_check_failure_payload(
         "failed_checks": [item for item in self_check["checks"] if not item["ok"]],
         "refs": refs,
         "content_preserved": True,
-        "reserved": runtime_memory_reserved_fields(COMPACT_SELF_CHECK_FAILURE_SCHEMA),
     }
 
 

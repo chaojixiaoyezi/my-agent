@@ -5,6 +5,12 @@ from ...backends import ModelResponse
 from ...memory_archive import estimate_tokens
 from ..runtime.context_compactor import runtime_compact_policy
 
+_PENDING_TOOL_CONTEXT_DIGEST_KEY = "pending_tool_context_digest"
+_TOOL_CONTEXT_DIGEST_INFLIGHT_KEY = "tool_context_digest_inflight"
+_TOOL_CONTEXT_CHECKPOINT_REQUIRED_KEY = "tool_context_checkpoint_required"
+_TOOL_CONTEXT_CHECKPOINT_SATISFIED_KEY = "tool_context_checkpoint_satisfied"
+_DIGEST_PROMPT_CEILING_PERCENT = 90
+
 _CONTEXT_ERROR_MARKERS = (
     "context length",
     "context_length",
@@ -42,6 +48,9 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
     threshold = policy.trigger_tokens
     if prompt_tokens < threshold and prompt_tokens < window:
         return None
+    if _can_run_tool_context_digest_turn(request, prompt_tokens=prompt_tokens, window=window):
+        mark_tool_context_digest_inflight(getattr(request, "params", None))
+        return None
     return context_pressure_response(
         request,
         source="preflight",
@@ -53,6 +62,86 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
 def _uses_task_local_compact(request: object) -> bool:
     params = getattr(request, "params", None)
     return str(getattr(params, "context_scope", "") or "") == "task_local"
+
+
+def mark_tool_context_digest_pending(params: object) -> None:
+    state = _live_archive_state(params)
+    if state is not None:
+        state[_PENDING_TOOL_CONTEXT_DIGEST_KEY] = True
+
+
+def mark_tool_context_checkpoint_required(params: object) -> None:
+    state = _live_archive_state(params)
+    if state is None:
+        return
+    state[_TOOL_CONTEXT_CHECKPOINT_REQUIRED_KEY] = True
+    state[_PENDING_TOOL_CONTEXT_DIGEST_KEY] = True
+
+
+def mark_tool_context_checkpoint_satisfied(params: object) -> None:
+    state = _live_archive_state(params)
+    if state is not None and state.get(_TOOL_CONTEXT_CHECKPOINT_REQUIRED_KEY):
+        state[_TOOL_CONTEXT_CHECKPOINT_SATISFIED_KEY] = True
+
+
+def mark_tool_context_digest_consumed(params: object) -> None:
+    state = _live_archive_state(params)
+    if state is None:
+        return
+    if state.pop(_TOOL_CONTEXT_DIGEST_INFLIGHT_KEY, False):
+        state.pop(_PENDING_TOOL_CONTEXT_DIGEST_KEY, None)
+
+
+def mark_tool_context_digest_inflight(params: object) -> None:
+    state = _live_archive_state(params)
+    if state is not None:
+        state[_TOOL_CONTEXT_DIGEST_INFLIGHT_KEY] = True
+
+
+def should_compact_before_more_tool_output(agent: object, params: object, current_prompt: str) -> bool:
+    if _has_pending_tool_context_digest(params):
+        return False
+    if not _has_previous_tool_context(params):
+        return False
+    policy = runtime_compact_policy(agent, save=True)
+    threshold = int(policy.trigger_tokens or 0)
+    if threshold <= 0:
+        return False
+    return estimate_tokens(str(current_prompt or "")) >= threshold
+
+
+def tool_context_checkpoint_satisfied(params: object) -> bool:
+    state = _live_archive_state(params)
+    return bool(state and state.get(_TOOL_CONTEXT_CHECKPOINT_SATISFIED_KEY))
+
+
+def _can_run_tool_context_digest_turn(request: object, *, prompt_tokens: int, window: int) -> bool:
+    params = getattr(request, "params", None)
+    if not _has_pending_tool_context_digest(params):
+        return False
+    if window <= 0:
+        return False
+    ceiling = max(1, int(window * (_DIGEST_PROMPT_CEILING_PERCENT / 100.0)))
+    return prompt_tokens < ceiling
+
+
+def _has_pending_tool_context_digest(params: object) -> bool:
+    state = _live_archive_state(params)
+    return bool(state and state.get(_PENDING_TOOL_CONTEXT_DIGEST_KEY))
+
+
+def _has_previous_tool_context(params: object) -> bool:
+    return any(_is_tool_result_context(item) for item in getattr(params, "tool_context", []) or [])
+
+
+def _is_tool_result_context(value: object) -> bool:
+    text = str(value or "").lstrip()
+    return text.startswith("[tool-record") or "[tool-output-record" in text
+
+
+def _live_archive_state(params: object) -> dict[str, object] | None:
+    state = getattr(params, "live_archive_state", None)
+    return state if isinstance(state, dict) else None
 
 
 def _tool_context_window_overflow(request: object) -> dict[str, object]:
@@ -101,5 +190,11 @@ def _input_tokens(request: object, prompt_tokens: int) -> int:
 __all__ = [
     "context_pressure_response",
     "is_context_window_error",
+    "mark_tool_context_checkpoint_required",
+    "mark_tool_context_checkpoint_satisfied",
+    "mark_tool_context_digest_consumed",
+    "mark_tool_context_digest_pending",
     "preflight_context_pressure_response",
+    "should_compact_before_more_tool_output",
+    "tool_context_checkpoint_satisfied",
 ]

@@ -43,8 +43,9 @@ Shared (models, config, constants, validators -- no business logic)
 
 - Clear ownership: new features belong to a specific layer.
 - Testability: domain logic can be tested without CLI or gateway.
-- Incremental migration: existing code moves layer by layer during refactoring.
-- Some indirection and initial migration cost as existing cross-cutting imports are untangled.
+- Refactoring cost: existing cross-cutting imports need to be untangled at the
+  current boundary.
+- Do not keep long-lived shims for old boundaries.
 - `scripts/check_architecture_boundaries.py` enforces import rules; violations tracked in ARCHITECTURE_EXEMPTIONS.md.
 
 ### References

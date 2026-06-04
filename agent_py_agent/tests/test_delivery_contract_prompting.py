@@ -120,6 +120,37 @@ def test_render_delivery_contract_section_includes_bootstrap_targets():
     assert "write_file" in text
 
 
+def test_render_delivery_contract_section_summarizes_long_target_coverage_list():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    targets = [
+        {
+            "target_id": f"/tmp/source/fragment-{idx:03d}.md",
+            "path": f"/tmp/source/fragment-{idx:03d}.md",
+        }
+        for idx in range(1, 30)
+    ]
+
+    text = render_delivery_contract_section(
+        {
+            "artifacts": [{"kind": "markdown", "path": "outputs/final_report.md"}],
+            "target_coverage_contract": {
+                "scope_label": "all source fragments",
+                "enforcement": "required",
+                "items": targets,
+            },
+        }
+    )
+
+    assert "target_count" in text
+    assert "targets_omitted" in text
+    assert "/tmp/source/fragment-001.md" in text
+    assert "/tmp/source/fragment-029.md" in text
+    assert "/tmp/source/fragment-015.md" not in text
+
+
 def test_render_delivery_contract_section_keeps_research_first_before_skeletons():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,

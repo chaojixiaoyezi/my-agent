@@ -21,7 +21,7 @@ _INT_PATTERN = re.compile(r"-?[0-9]+")
 class ConfigWarningInput:
     field_name: str
     raw_value: Any
-    fallback_value: Any
+    default_value: Any
     reason: str
 
 
@@ -60,7 +60,7 @@ def append_warning(
         LogAnalysisConfigWarning(
             field_name=item.field_name,
             raw_value=item.raw_value,
-            fallback_value=item.fallback_value,
+            default_value=item.default_value,
             reason=item.reason,
         )
     )

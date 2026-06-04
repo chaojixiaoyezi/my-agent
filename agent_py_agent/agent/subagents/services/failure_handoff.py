@@ -26,12 +26,8 @@ def refresh_failure_handoff(task: SubAgentTask) -> FailureHandoff:
         evidence_refs=list(dict.fromkeys(task.evidence_refs)),
         avoid_next_time=_avoid_next_time(task),
         recommended_next_action=_recommended_next_action(task),
+        auto_rescue=False,
         created_at=task.updated_at or task.heartbeat_at or task.created_at or time.time(),
-        reserved={
-            "schema_name": "subagent_failure_handoff",
-            "schema_version": 1,
-            "auto_rescue": False,
-        },
     )
     return task.failure_handoff
 

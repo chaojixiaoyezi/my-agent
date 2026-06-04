@@ -7,17 +7,20 @@ import sys
 import threading
 
 # Gateway imports
-from ..agent.gateway import (
+from ..agent.gateway_parts import (
     gateway_paths,
     render_gateway_status,
     wait_for_gateway_running,
 )
 from ..agent.session import SessionManager, generate_session_id
 
-# Re-export public symbols from chat_parts for backward compatibility
+# Public symbols used by chat CLI tests and helpers.
 from .chat_parts import (
     BLUE,
     BOLD,
+    COLLAPSE_PREVIEW_CHARS,
+    COLLAPSE_PREVIEW_LINES,
+    CONTEXT_WINDOW,
     CYAN,
     GRAY,
     GREEN,
@@ -30,10 +33,8 @@ from .chat_parts import (
     startup_banner,
     terminal_rule,
 )
-from .chat_parts.fallback import FALLBACK_CHAT_PROMPT, run_fallback
-from .chat_parts.fallback_state import RunFallbackConfig
 
-# Backward compatibility imports from chat_parts
+# Chat helper imports from chat_parts.
 from .chat_parts.history import (
     append_conversation_turn,
     build_history_context,
@@ -41,21 +42,14 @@ from .chat_parts.history import (
     chat_history_max_turns,
 )
 from .chat_parts.input_loop import handle_common_slash_command
-from .chat_parts.rendering import (
-    COLLAPSE_PREVIEW_CHARS as _COLLAPSE_PREVIEW_CHARS,
-)
-from .chat_parts.rendering import (
-    COLLAPSE_PREVIEW_LINES as _COLLAPSE_PREVIEW_LINES,
-)
-from .chat_parts.rendering import (
-    CONTEXT_WINDOW as _CONTEXT_WINDOW,
-)
+from .chat_parts.plain import PLAIN_CHAT_PROMPT, run_plain
+from .chat_parts.plain_state import RunPlainConfig
 from .chat_parts.tui import TuiRunParams, run_tui
 from .common import make_agent, resume_context_override
 from .models import ChatJob
 from .thinking_spinner import ThinkingSpinner
 
-# Constants for backward compatibility
+# Chat response style injected into CLI sessions.
 _CHAT_RESPONSE_STYLE_INJECT = (
     "这是 CLI 聊天界面。回答风格要求："
     "1. 不要用模板化欢迎词；"
@@ -158,7 +152,7 @@ def cmd_chat(args) -> int:
             session_manager=session_manager,
             current_session_id=current_session_id,
         ))
-    return run_fallback(RunFallbackConfig(
+    return run_plain(RunPlainConfig(
         agent=agent, args=args, use_gateway=use_gateway, paths=paths,
         runtime_inject=runtime_inject, prompt_files=prompt_files,
         conversation_history=state["conversation_history"],
@@ -170,12 +164,7 @@ def cmd_chat(args) -> int:
     ))
 
 
-# Backward compatibility: re-export from chat_parts for tests
-_collapse_response_text = collapse_response_text
-_progress_bar = progress_bar
-_startup_banner = startup_banner
-_terminal_rule = terminal_rule
 render_gateway_status = render_gateway_status
 wait_for_gateway_running = wait_for_gateway_running
 resume_context_override = resume_context_override
-FALLBACK_CHAT_PROMPT = FALLBACK_CHAT_PROMPT
+PLAIN_CHAT_PROMPT = PLAIN_CHAT_PROMPT

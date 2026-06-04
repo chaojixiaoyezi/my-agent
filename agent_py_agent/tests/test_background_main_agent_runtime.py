@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 import time
 
-from agent_py_agent.agent.backend import ModelResponse
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
@@ -13,6 +12,7 @@ from agent_py_agent.agent.conversation import (
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
+from agent_py_agent.agent.settings import AgentConfig
 
 
 class _CapturingBackend:

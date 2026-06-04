@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Subagent lifecycle service used by the SimpleAgent facade.
+"""Subagent lifecycle service used by SimpleAgent.
 
 The service owns spawn/run/probe/finalize wiring for one subagent attempt.
 SimpleAgent keeps the public method names, while lifecycle behavior lives here

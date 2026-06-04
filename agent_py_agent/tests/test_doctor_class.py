@@ -186,7 +186,7 @@ def test_collect_doctor_status_with_config_warnings():
     mock_warning.to_dict.return_value = {
         "field_name": "data_dir",
         "raw_value": "/invalid",
-        "fallback_value": "/tmp",
+        "default_value": "/tmp",
         "reason": "path not accessible",
     }
     config = _doctor_config(config_warnings=[mock_warning])

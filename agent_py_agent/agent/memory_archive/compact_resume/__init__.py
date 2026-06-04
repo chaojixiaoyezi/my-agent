@@ -20,7 +20,6 @@ from ..compact_subagent_owner import (
 )
 from ..schema import (
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 from .blocked import BlockedCompactResumeRequest, build_blocked_compact_resume
@@ -120,7 +119,6 @@ def _consistency_report(
         "missing_fields": _work_state_missing_fields(artifacts),
         "compaction_gate": compaction_gate,
         "artifact_load_errors": [],
-        "reserved": runtime_memory_reserved_fields(COMPACT_RESUME_CONSISTENCY_SCHEMA),
     }
 
 
@@ -185,7 +183,6 @@ def _resume_payload(request: _ResumePayloadBuildRequest) -> dict[str, Any]:
         "next_actions": parts["next_actions"],
         "context_block": parts["context_block"],
         "subagent_session_compact": parts["subagent_refs"],
-        "reserved": runtime_memory_reserved_fields(COMPACT_RESUME_SCHEMA),
     }
 
 

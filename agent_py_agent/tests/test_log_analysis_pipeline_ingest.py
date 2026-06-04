@@ -1,6 +1,6 @@
 """Tests for agent_py_agent.agent.log_analysis.ingest.pipeline module.
 
-Covers: IngestResult, JsonlEventSink, IngestPipeline, normalize_file_format,
+Covers: IngestResult, IngestPipeline, normalize_file_format,
 file_digest, make_batch_id, _storage_result, _storage_summary, _jsonable_mapping,
 and the top-level ingest_file function.
 """
@@ -27,18 +27,16 @@ class TestIngestPipelineWriteEvents:
         with patch.object(IngestPipeline, "_default_store", return_value=store):
             return IngestPipeline(tmp_path, store=store)
 
-    def test_empty_events_returns_fallback_count_zero(self, tmp_path: Path):
+    def test_empty_events_returns_count_zero(self, tmp_path: Path):
         pipeline = self._make_pipeline(tmp_path)
         result = pipeline._write_events([])
         assert result["count"] == 0
 
-    def test_store_none_uses_fallback_sink(self, tmp_path: Path):
+    def test_store_none_raises_config_error(self, tmp_path: Path):
         pipeline = self._make_pipeline(tmp_path, store=None)
-        # store=None triggers fallback
         pipeline.store = None
-        result = pipeline._write_events([{"id": 1}])
-        assert result["count"] == 1
-        assert "events.jsonl" in result["path"]
+        with pytest.raises(TypeError, match="store is not configured"):
+            pipeline._write_events([{"id": 1}])
 
     def test_store_with_write_events_method(self, tmp_path: Path):
         store = MagicMock()
@@ -72,9 +70,7 @@ class TestIngestPipelineFlushEvents:
     def _make_pipeline(self, tmp_path: Path):
         from agent_py_agent.agent.log_analysis.ingest.pipeline import IngestPipeline
 
-        with patch.object(IngestPipeline, "_default_store", return_value=None):
-            p = IngestPipeline(tmp_path, store=None)
-        return p
+        return IngestPipeline(tmp_path)
 
     def test_empty_events(self, tmp_path: Path):
         pipeline = self._make_pipeline(tmp_path)

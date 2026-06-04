@@ -99,7 +99,7 @@ def _expected_outputs(attrs: dict[str, object]) -> list[str]:
     for key in ("output_files", "output_refs", "artifact_refs"):
         value = attrs.get(key)
         if isinstance(value, list):
-            result.extend(current_model_ref_list(value, basename_for_legacy=True))
+            result.extend(current_model_ref_list(value))
     return list(dict.fromkeys(result))
 
 

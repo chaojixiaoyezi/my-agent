@@ -15,6 +15,7 @@ def test_runtime_guard_configs_share_one_default_file():
 
 def test_runtime_guard_file_contains_tool_repeat_guard_defaults():
     from agent_py_agent.agent.agent_core.tool_guard.call_guardrail_config import (
+        readonly_no_progress_threshold,
         repeat_fail_threshold,
         terminal_block_enabled,
     )
@@ -23,6 +24,7 @@ def test_runtime_guard_file_contains_tool_repeat_guard_defaults():
         task_attributes = {}
 
     assert repeat_fail_threshold(Params()) == 10
+    assert readonly_no_progress_threshold(Params()) == 3
     assert terminal_block_enabled(Params()) is False
 
 
@@ -104,6 +106,18 @@ def test_runtime_guard_file_contains_tool_loop_and_runner_defaults():
     assert _same_run_redispatch_limit(None) == int(defaults["same_run_redispatch_limit"])
 
 
+def test_agent_config_blank_tool_rounds_disables_hidden_runtime_default():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core._tool_loop_service import _effective_max_tool_rounds
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleNamespace(config=AgentConfig(enable_tools=True, memory_path="memory.jsonl"))
+    params = SimpleNamespace(task_attributes={})
+
+    assert _effective_max_tool_rounds(agent, params) == 0
+
+
 def test_runtime_guard_readers_follow_the_same_patched_yaml(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
@@ -130,7 +144,7 @@ def test_runtime_guard_readers_follow_the_same_patched_yaml(tmp_path, monkeypatc
     )
     monkeypatch.setattr(runtime_guard_config, "DEFAULT_RUNTIME_GUARD_CONFIG_PATH", config_path)
 
-    agent = SimpleNamespace(config=SimpleNamespace(max_tool_rounds=None))
+    agent = SimpleNamespace(config=SimpleNamespace())
     params = SimpleNamespace(task_attributes={})
     config = SimpleNamespace()
 
@@ -161,7 +175,7 @@ def test_runtime_guard_readers_prefer_agent_policy_snapshot():
         },
         sources={},
     )
-    agent = SimpleNamespace(config=SimpleNamespace(max_tool_rounds=None), runtime_guard_policy=policy)
+    agent = SimpleNamespace(config=SimpleNamespace(), runtime_guard_policy=policy)
     params = SimpleNamespace(task_attributes={})
     config = SimpleNamespace()
 
@@ -179,6 +193,7 @@ def test_registry_runtime_gate_policy_uses_passed_runtime_policy():
     policy = RuntimeGuardPolicy(
         values={
             "repeat_fail_threshold": 13,
+            "readonly_no_progress_threshold": 4,
             "terminal_block_enabled": True,
             "tool_rate_max_calls": 14,
             "tool_rate_window_seconds": 15,
@@ -193,6 +208,7 @@ def test_registry_runtime_gate_policy_uses_passed_runtime_policy():
     rate = tool_rate_limit_policy(None, policy)
 
     assert guardrail.repeat_fail_threshold == 13
+    assert guardrail.readonly_no_progress_threshold == 4
     assert guardrail.terminal_block_enabled is True
     assert rate.max_calls == 14
     assert rate.window_seconds == 15.0

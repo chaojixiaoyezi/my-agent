@@ -10,7 +10,7 @@ def scheduled_child_agent_name(parent: SubAgentTask, spec: Any, *, sibling_index
     depth = max(1, int(parent.depth or 0) + 1, _parent_visible_lineage_depth(parent) + 1)
     raw_name = str(getattr(spec, "agent_name", "") or "").strip().strip("-")
     source = _agent_name_source(spec)
-    suffix = _agent_name_suffix(source, fallback=getattr(spec, "role", "worker"))
+    suffix = _agent_name_suffix(source, default=getattr(spec, "role", "worker"))
     if _needs_role_index_repair(raw_name) and not _has_trailing_identifier(suffix):
         suffix = f"{suffix}-{max(1, int(sibling_index or 1))}"
     return f"{_lineage_prefix(depth)}-{suffix}"
@@ -20,15 +20,15 @@ def _lineage_prefix(depth: int) -> str:
     return f"{'小' * max(1, depth)}傻妞"
 
 
-def _agent_name_suffix(value: str, fallback: str = "worker") -> str:
+def _agent_name_suffix(value: str, default: str = "worker") -> str:
     text = str(value or "").strip().strip("-") or "worker"
-    fallback_text = str(fallback or "").strip().strip("-") or "worker"
+    default_text = str(default or "").strip().strip("-") or "worker"
     while _has_lineage_prefix(text):
         if "-" not in text:
-            return "worker" if _has_lineage_prefix(fallback_text) else fallback_text
+            return "worker" if _has_lineage_prefix(default_text) else default_text
         text = text.split("-", 1)[1].strip().strip("-") or "worker"
     if _is_placeholder_suffix(text):
-        return "worker" if _has_lineage_prefix(fallback_text) else fallback_text
+        return "worker" if _has_lineage_prefix(default_text) else default_text
     return text
 
 

@@ -22,11 +22,6 @@ class LocalStoreSharedProgressPanelMixin:
             failure_handoff_refs=_failure_handoff_refs(runs),
             takeover_readiness_refs=_takeover_readiness_refs(runs),
             warnings=list(runtime.warnings),
-            reserved={
-                "source": "local_store_control_plane",
-                "fact_source": "task_run_workspace",
-                "view": "shared_progress_panel",
-            },
         )
 
 

@@ -85,8 +85,8 @@ def _worksheet_rows(xml: str, shared_strings: list[str]) -> list[list[str]]:
 
 def _row_values(row: ET.Element, shared_strings: list[str]) -> list[str]:
     values: dict[int, str] = {}
-    for fallback_index, cell in enumerate(row.findall(f"{_SHEET_NS}c")):
-        index = _cell_column_index(cell.get("r"), fallback_index)
+    for default_index, cell in enumerate(row.findall(f"{_SHEET_NS}c")):
+        index = _cell_column_index(cell.get("r"), default_index)
         values[index] = _cell_value(cell, shared_strings)
     return [values.get(index, "") for index in range(max(values) + 1)] if values else []
 
@@ -109,10 +109,10 @@ def _shared_string_value(shared_strings: list[str], index_text: str) -> str:
     return shared_strings[index] if 0 <= index < len(shared_strings) else ""
 
 
-def _cell_column_index(ref: str | None, fallback_index: int) -> int:
+def _cell_column_index(ref: str | None, default_index: int) -> int:
     match = re.match(r"([A-Z]+)", str(ref or ""))
     if not match:
-        return fallback_index
+        return default_index
     index = 0
     for char in match.group(1):
         index = index * 26 + (ord(char) - ord("A") + 1)

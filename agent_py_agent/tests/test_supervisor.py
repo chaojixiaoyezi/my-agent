@@ -370,7 +370,7 @@ def test_is_supervisor_running_no_pid_file():
     with patch.object(sv, "read_pid_file", return_value=None), \
          patch.object(sv, "is_pid_alive", return_value=False), \
          patch("agent_py_agent.agent.core.SimpleAgent"), \
-         patch("agent_py_agent.agent.config.load_config"), \
+         patch("agent_py_agent.agent.settings.load_config"), \
          patch("agent_py_agent.agent.gateway_parts.gateway_paths", return_value=mock_gp):
         result = sv.is_supervisor_running("dummy.yaml")
     assert result is False
@@ -381,7 +381,7 @@ def test_is_supervisor_running_no_pid_file():
 def test_is_supervisor_running_alive(mock_alive, mock_read):
     """测试 supervisor 进程存活时返回运行中。"""
     with patch("agent_py_agent.agent.core.SimpleAgent"), \
-         patch("agent_py_agent.agent.config.load_config"), \
+         patch("agent_py_agent.agent.settings.load_config"), \
          patch("agent_py_agent.agent.gateway_parts.gateway_paths") as mock_gp:
         mock_gp.return_value = MagicMock(root=Path("/tmp"))
         result = sv.is_supervisor_running("dummy.yaml")
@@ -395,7 +395,7 @@ def test_is_supervisor_running_alive(mock_alive, mock_read):
 def test_stop_supervisor_not_running(mock_alive, mock_read):
     """测试 supervisor 未运行时返回成功。"""
     with patch("agent_py_agent.agent.core.SimpleAgent"), \
-         patch("agent_py_agent.agent.config.load_config"), \
+         patch("agent_py_agent.agent.settings.load_config"), \
          patch("agent_py_agent.agent.gateway_parts.gateway_paths") as mock_gp:
         mock_gp.return_value = MagicMock(root=Path("/tmp"))
         result = sv.stop_supervisor("dummy.yaml")

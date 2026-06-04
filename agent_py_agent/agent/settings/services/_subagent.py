@@ -12,7 +12,7 @@ from ..defaults import default_agent_config
 class SubagentWorkflowWarningParams:
     field_name: str
     raw_value: object
-    fallback_value: object
+    default_value: object
     reason: str
 
 
@@ -29,7 +29,7 @@ class SubagentWorkflowWarningService:
             {
                 "field_name": params.field_name,
                 "raw_value": params.raw_value,
-                "fallback_value": params.fallback_value,
+                "default_value": params.default_value,
                 "reason": params.reason,
             }
         )

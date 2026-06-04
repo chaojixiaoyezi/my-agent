@@ -10,7 +10,6 @@ from typing import Any
 from .compact import MemoryCompactPlanOptions, build_memory_compact_plan
 from .schema import (
     RuntimeMemorySchemaOptions,
-    runtime_memory_reserved_fields,
     runtime_memory_schema_payload,
 )
 
@@ -25,7 +24,7 @@ class MemoryCompactSuggestOptions:
     trigger_percent: int = 50
     owner_type: str = "main_agent"
     owner_id: str = ""
-    #  trigger 字段只记录触发来源；正常阈值和兜底救场仍走同一个 compact suggestion。
+    #  trigger 字段只记录触发来源；正常阈值和强制触发仍走同一个 compact suggestion。
     trigger_reason: str = "normal_threshold"
     trigger_source: str = "token_budget"
     force_trigger: bool = False
@@ -56,7 +55,6 @@ def build_memory_compact_suggestion(root: str | Path, options: MemoryCompactSugg
         "risks": list(plan["risks"]),
         "recommended_commands": _recommended_commands(plan, should_prompt),
         "message": _message(status, ratio, trigger_ratio),
-        "reserved": runtime_memory_reserved_fields(COMPACT_SUGGESTION_SCHEMA),
     }
 
 
@@ -122,15 +120,15 @@ def _owner_payload(options: MemoryCompactSuggestOptions) -> dict[str, str]:
 
 def _trigger_payload(options: MemoryCompactSuggestOptions) -> dict[str, Any]:
     return {
-        "reason": _clean_token(options.trigger_reason, fallback="normal_threshold"),
-        "source": _clean_token(options.trigger_source, fallback="token_budget"),
+        "reason": _clean_token(options.trigger_reason, default="normal_threshold"),
+        "source": _clean_token(options.trigger_source, default="token_budget"),
         "forced": bool(options.force_trigger),
     }
 
 
-def _clean_token(value: object, *, fallback: str) -> str:
+def _clean_token(value: object, *, default: str) -> str:
     cleaned = str(value or "").strip()
-    return cleaned[:120] if cleaned else fallback
+    return cleaned[:120] if cleaned else default
 
 
 def _ratio(current_tokens: int, max_context_tokens: int) -> float:

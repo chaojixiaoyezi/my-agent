@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from .fallback import ChatJob, run_fallback
 from .gateway_client import (
     ChatRequestContent,
     check_gateway_alive,
@@ -22,6 +21,7 @@ from .input_loop import (
     is_show_prompt_command,
     parse_expand_target,
 )
+from .plain import ChatJob, run_plain
 from .renderer import (
     BLUE,
     BOLD,
@@ -46,36 +46,19 @@ from .session_state import (
 from .slash_command_types import SlashCommandContext
 from .tui import run_tui
 
-# Import thinking spinner for backward compatibility
+# Optional thinking spinner.
 try:
     from ...cli.thinking_spinner import ThinkingSpinner
 except ImportError:
     ThinkingSpinner = None
 
-# Import gateway helpers for backward compatibility
-from ...agent.gateway import (
+# Gateway helpers used by chat CLI.
+from ...agent.gateway_parts import (
     render_gateway_status,
     wait_for_gateway_running,
 )
 from ...cli.models import ChatJob
-from ..common import CHAT_PROMPT, FALLBACK_CHAT_PROMPT, make_agent, resume_context_override
-
-
-def _collapse_response_text(text: str):
-    return collapse_response_text(text)
-
-
-def _progress_bar(ratio: float, width: int = 10) -> str:
-    return progress_bar(ratio, width)
-
-
-def _startup_banner(agent_name: str, *, use_gateway: bool) -> str:
-    return startup_banner(agent_name, use_gateway=use_gateway)
-
-
-def _terminal_rule(char: str = "─", *, fallback: int = 119) -> str:
-    return terminal_rule(char, fallback=fallback)
-
+from ..common import CHAT_PROMPT, PLAIN_CHAT_PROMPT, make_agent, resume_context_override
 
 __all__ = [
     "BLUE",
@@ -105,7 +88,7 @@ __all__ = [
     "progress_bar",
     "render_gateway_status",
     "resume_context_override",
-    "run_fallback",
+    "run_plain",
     "run_tui",
     "startup_banner",
     "terminal_rule",

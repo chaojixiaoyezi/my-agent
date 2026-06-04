@@ -10,7 +10,7 @@ import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..local_store import LocalStore
+    from ..local_storage import LocalStore
 
 _TASK_STATUS_EMOJI = {
     "PLANNING": "⏳",

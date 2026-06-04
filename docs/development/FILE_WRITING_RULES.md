@@ -42,9 +42,8 @@ utility.  The current runtime policy is:
 3. **Full mode** — `path_access_mode=full` disables the dangerous-root path
    block.  Catastrophic shell commands are still protected by command policy.
 4. **No hidden path whitelist** — `workspace_root` is only the relative path base
-   and default cwd.  Legacy `allowed_write_roots` may exist in old task records,
-   but new prompts and tools must treat it as compatibility context only, not as
-   the authority for ordinary output paths.
+   and default cwd. Ordinary output authority comes from the current path policy,
+   the task workspace, and any explicit user-requested output directory.
 5. **Resolved path check** — symlinks and `..` are resolved before applying the
    dangerous-directory policy.
 

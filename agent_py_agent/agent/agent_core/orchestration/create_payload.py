@@ -121,7 +121,7 @@ def _dispatch_next_action(
     if (auto_start or {}).get("status") == "started":
         return {
             "tool": "inspect_agent_tree",
-            "reason": "create_subagents 已自动启动这些 run；下一步可先做其他汇总准备，只有到验收/接管节点或等待一段时间后再查看状态、读取产物或按需继续推进。",
+            "reason": "create_subagents 已把本批 run 交给后台调度；主代理可以继续准备汇总材料，稍后查看代理树读取已完成结果。",
             "params": {},
         }
     return {
@@ -162,7 +162,7 @@ def _task_attributes(task: object) -> dict[str, object]:
 def _task_attribute_value(key: str, value: object) -> object:
     ref_keys = {"input_refs", "output_refs", "output_files", "artifact_refs", "required_read_paths"}
     if key in ref_keys:
-        return current_model_ref_list(value, basename_for_legacy=True)
+        return current_model_ref_list(value)
     if isinstance(value, str):
         return current_model_text(value)
     return value

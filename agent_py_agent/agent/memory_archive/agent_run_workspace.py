@@ -5,11 +5,11 @@ from __future__ import annotations
 
 Human version:
 Each subagent run now gets a small filesystem workspace under
-`tasks/<task_id>/work/agents/<run_id>/`. The legacy work-order directory remains the
-write-compatible source for existing code; this workspace is the new recovery
-and takeover surface that later phases can grow independently.
+`tasks/<task_id>/work/agents/<run_id>/`. This workspace is the recovery and
+takeover surface for the run.
 """
 
+import json
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -41,7 +41,6 @@ class AgentRunWorkspacePaths:
     compaction_ledger_jsonl: Path
     latest_compaction_summary_md: Path
     latest_compaction_metadata_json: Path
-    legacy_run_ref_json: Path
 
 
 @dataclass(frozen=True)
@@ -74,11 +73,6 @@ def ensure_agent_run_workspace(
     _write_markdown(paths.summary_md, _summary_markdown(inputs.task, inputs.task_id))
     _write_final_report(paths.final_report_md, inputs.task, inputs.task_id)
     _write_findings(paths.findings_jsonl, inputs.task)
-    write_json_object(
-        paths.legacy_run_ref_json,
-        _legacy_run_ref_payload(inputs.task, inputs.task_id, inputs.now),
-        sort_keys=False,
-    )
     event = _timeline_event(inputs.task, inputs.task_id, inputs.now)
     _append_timeline(paths.timeline_jsonl, event)
     _append_timeline(paths.events_jsonl, event)
@@ -130,7 +124,6 @@ def agent_run_workspace_paths(root: Path) -> AgentRunWorkspacePaths:
         compaction_ledger_jsonl=root / "compactions" / "compaction_ledger.jsonl",
         latest_compaction_summary_md=root / "compactions" / "latest_summary.md",
         latest_compaction_metadata_json=root / "compactions" / "latest_metadata.json",
-        legacy_run_ref_json=root / "legacy_run_ref.json",
     )
 
 
@@ -180,26 +173,8 @@ def _checkpoint_payload(task: Any, task_id: str, now: float) -> dict[str, object
         "blockers": list(getattr(task, "blockers", []) or []),
         "artifact_refs": list(getattr(task, "artifact_refs", []) or []),
         "evidence_refs": list(getattr(task, "evidence_refs", []) or []),
-        "legacy_checkpoint_ref": str(getattr(task, "checkpoint_json", "")),
-        "legacy_status_report_ref": str(getattr(task, "status_report_json", "")),
-        "updated_at": now,
-    }
-
-
-def _legacy_run_ref_payload(task: Any, task_id: str, now: float) -> dict[str, object]:
-    task_dir = str(getattr(task, "task_dir", ""))
-    return {
-        "version": 2,
-        "mode": "legacy_subagent_work_order_adapter",
-        "task_id": task_id,
-        "run_id": str(getattr(task, "id", "")),
-        "parent_run_id": str(getattr(task, "parent_id", "")),
-        "depth": int(getattr(task, "depth", 0) or 0),
-        "status": str(getattr(task, "status", "")),
-        "legacy_task_dir": task_dir,
-        "legacy_task_json": str(Path(task_dir) / "task.json") if task_dir else "",
-        "legacy_run_json": str(Path(task_dir) / "run.json") if task_dir else "",
-        "agent_run_workspace_status": "phase_1_skeleton",
+        "task_checkpoint_ref": str(getattr(task, "checkpoint_json", "")),
+        "task_status_report_ref": str(getattr(task, "status_report_json", "")),
         "updated_at": now,
     }
 
@@ -242,7 +217,7 @@ def _task_markdown(task: Any, task_id: str) -> str:
         "# Task\n\n"
         f"- task_id: {task_id}\n"
         f"- run_id: {getattr(task, 'id', '')}\n"
-        f"- legacy_task_dir: {getattr(task, 'task_dir', '')}\n\n"
+        f"- agent_run_workspace: {getattr(task, 'agent_run_workspace_dir', '')}\n\n"
         "## Goal\n\n"
         f"{getattr(task, 'goal', '') or '待填写'}\n\n"
         "## Plan\n\n"
@@ -298,7 +273,37 @@ def _write_markdown(path: Path, content: str) -> None:
 
 
 def _append_timeline(path: Path, payload: dict[str, object]) -> None:
+    if _last_event_signature(path) == _event_signature(payload):
+        return
     append_jsonl_records(path, [payload])
+
+
+def _last_event_signature(path: Path) -> tuple[object, ...] | None:
+    if not path.exists():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        return _event_signature(payload) if isinstance(payload, dict) else None
+    return None
+
+
+def _event_signature(payload: dict[str, object]) -> tuple[object, ...]:
+    return (
+        payload.get("event"),
+        payload.get("task_id"),
+        payload.get("run_id"),
+        payload.get("status"),
+        payload.get("summary"),
+    )
 
 
 def _yaml_quote(value: str) -> str:

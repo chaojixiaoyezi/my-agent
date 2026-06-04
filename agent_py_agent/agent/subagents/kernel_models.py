@@ -10,7 +10,7 @@ class SubagentKernelQuery:
     run_id: str = ""
     scope: str = "root_tree"
     include_refs: bool = True
-    reserved: dict[str, object] = field(default_factory=dict)
+    task_workspace_dir: str = ""
 
 @dataclass(frozen=True)
 class SubagentKernelRun:
@@ -48,7 +48,9 @@ class SubagentKernelRun:
     artifact_registry_refs: list[dict[str, object]] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
-    reserved: dict[str, object] = field(default_factory=dict)
+    needs_capability: list[str] = field(default_factory=list)
+    recent_tool_trace: list[dict[str, object]] = field(default_factory=list)
+    background_start: dict[str, object] = field(default_factory=dict)
 
 @dataclass(frozen=True)
 class SubagentKernelSnapshot:
@@ -63,7 +65,11 @@ class SubagentKernelSnapshot:
     takeover_candidate_run_ids: list[str] = field(default_factory=list)
     source_refs: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
-    reserved: dict[str, object] = field(default_factory=dict)
+    query_root_id: str = ""
+    query_run_id: str = ""
+    query_include_refs: bool = True
+    query_task_workspace_dir: str = ""
+    load_errors: list[dict[str, object]] = field(default_factory=list)
 
 
 __all__ = ["SubagentKernelQuery", "SubagentKernelRun", "SubagentKernelSnapshot"]

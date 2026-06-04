@@ -58,9 +58,9 @@ def _failure_type(issues: list[str]) -> str:
     return "contract"
 
 
-def _ref(case: dict[str, Any], key: str, fallback: str) -> str:
+def _ref(case: dict[str, Any], key: str, default: str) -> str:
     value = str(case.get(key) or "").strip()
-    return value or fallback
+    return value or default
 
 
 __all__ = ["failure_samples_from_case_results"]

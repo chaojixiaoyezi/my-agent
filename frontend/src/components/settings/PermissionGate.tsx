@@ -5,16 +5,16 @@ import { Lock } from "lucide-react";
 export function PermissionGate({
   requireAdmin = false,
   children,
-  fallback,
+  deniedView,
 }: {
   requireAdmin?: boolean;
   children: React.ReactNode;
-  fallback?: React.ReactNode;
+  deniedView?: React.ReactNode;
 }) {
   const isAdmin = useAuthStore((s) => s.isAdmin);
 
   if (requireAdmin && !isAdmin) {
-    if (fallback) return <>{fallback}</>;
+    if (deniedView) return <>{deniedView}</>;
     return (
       <div className="flex items-center gap-2 rounded-xl border border-border bg-black/[0.02] px-4 py-6 text-sm text-ink-tertiary">
         <Lock size={14} />

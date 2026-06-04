@@ -13,17 +13,17 @@ import tempfile
 import threading
 from pathlib import Path
 
-from agent_py_agent.__main__ import (
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts import (
     GatewayAskParams,
     _handle_gateway_request,
     gateway_paths,
     submit_gateway_ask,
 )
-from agent_py_agent.agent.config import AgentConfig
-from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.file_io import append_jsonl
-from agent_py_agent.agent.local_store import LocalStore
-from agent_py_agent.agent.memory import JsonlMemory
+from agent_py_agent.agent.io import append_jsonl
+from agent_py_agent.agent.local_storage import LocalStore
+from agent_py_agent.agent.memory_store import JsonlMemory
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def test_local_store_records_events_and_searches():
@@ -92,20 +92,19 @@ def test_locked_jsonl_append_preserves_complete_lines_under_threads():
         assert len({(item["worker"], item["index"]) for item in records}) == total_threads * per_thread
 
 
-def test_local_store_like_fallback_when_fts_disabled():
+def test_local_store_like_search_when_fts_disabled():
     """LLM: Verify LIKE-based search works when FTS5 is disabled.
 
     新手说明:
-    测试在 FTS5 关闭的情况下，LocalStore 退回到 LIKE 搜索
-    仍然能正确找到包含关键词的记录。
+    测试在 FTS5 关闭的情况下，LocalStore 使用 LIKE 搜索仍然能正确找到包含关键词的记录。
     """
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         store = LocalStore(root / "local.db", enable_fts=False)
         store.upsert_record(
             source_type="note",
-            source_id="fallback",
-            title="fallback demo",
+            source_id="like-source",
+            title="like search demo",
             content="FTS5 关闭时也应该能用 LIKE 搜到关键内容。",
         )
 
@@ -113,7 +112,7 @@ def test_local_store_like_fallback_when_fts_disabled():
         assert stats["fts5_enabled"] is False
         hits = store.search("关键内容", source_type="note")
         assert len(hits) == 1
-        assert hits[0].source_id == "fallback"
+        assert hits[0].source_id == "like-source"
 
 
 def test_local_store_timeline_filters_events():

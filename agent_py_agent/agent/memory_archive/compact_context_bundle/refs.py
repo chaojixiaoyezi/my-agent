@@ -29,11 +29,8 @@ def main_context_bundle_source_refs(payload: dict[str, Any]) -> list[dict[str, A
     if not ref:
         return []
     scope = payload.get("scope", {}) if isinstance(payload.get("scope"), dict) else {}
-    reserved: dict[str, Any] = {}
     load_error = payload.get("load_error")
-    if isinstance(load_error, dict) and load_error:
-        reserved["load_error"] = load_error
-    return [{
+    row = {
         "path": ref,
         "loaded": bool(payload.get("loaded")),
         "schema": str(payload.get("schema", "") or ""),
@@ -41,8 +38,10 @@ def main_context_bundle_source_refs(payload: dict[str, Any]) -> list[dict[str, A
         "run_id": str(scope.get("run_id", "") or ""),
         "task_id": str(scope.get("task_id", "") or ""),
         "size_bytes": _safe_size(Path(ref)),
-        "reserved": reserved,
-    }]
+    }
+    if isinstance(load_error, dict) and load_error:
+        row["load_error"] = load_error
+    return [row]
 
 
 def compact_context_bundle_summary(payload: dict[str, Any]) -> dict[str, Any]:
@@ -79,7 +78,6 @@ def _summary_payload(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
         "recovery_refs": _dict_section(payload, "recovery_refs"),
         "error": "",
         "load_error": {},
-        "reserved": {},
     }
 
 
@@ -97,7 +95,6 @@ def _empty_payload(ref: str) -> dict[str, Any]:
         "recovery_refs": {},
         "error": "",
         "load_error": {},
-        "reserved": {},
     }
 
 

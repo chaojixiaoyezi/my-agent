@@ -17,7 +17,7 @@ from .admin_query_helpers import (
 )
 
 if TYPE_CHECKING:
-    from ..local_store import LocalStore
+    from ..local_storage import LocalStore
     from .cross_channel import CrossChannelSession
     from .manager import SessionManager
 

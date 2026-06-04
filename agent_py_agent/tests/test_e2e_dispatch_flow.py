@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_py_agent.agent.local_store import LocalStore
+from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.subagents.models import TaskStatus
 from agent_py_agent.agent.task_registry import TaskRegistry
 
@@ -303,7 +303,7 @@ class TestDispatchLoopIntegration:
 
         验证 DispatchReport 包含必要的字段。
         """
-        from agent_py_agent.agent.subagent import DispatchReport
+        from agent_py_agent.agent.subagents import DispatchReport
 
         # DispatchReport 需要 generated_at, dry_run, summary, records
         report = DispatchReport(
@@ -322,7 +322,7 @@ class TestDispatchLoopIntegration:
 
         验证 DispatchWatchReport 包含必要的字段。
         """
-        from agent_py_agent.agent.subagent import DispatchWatchReport
+        from agent_py_agent.agent.subagents import DispatchWatchReport
 
         report = DispatchWatchReport(
             generated_at=time.time(),

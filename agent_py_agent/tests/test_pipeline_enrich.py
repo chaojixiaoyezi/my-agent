@@ -100,8 +100,8 @@ class TestStorageSummary:
     def test_single_info_summary(self, tmp_path):
         """验证单条信息汇总"""
         infos = [{"count": 10, "path": "/a/events.jsonl"}]
-        fallback = tmp_path / "fallback.jsonl"
-        summary = _storage_summary(infos, fallback_path=fallback)
+        default_path = tmp_path / "store.jsonl"
+        summary = _storage_summary(infos, default_path=default_path)
 
         assert summary["count"] == 10
         assert summary["path"] == "/a/events.jsonl"
@@ -112,24 +112,24 @@ class TestStorageSummary:
             {"count": 5, "path": "/a/events.jsonl"},
             {"count": 3, "path": "/b/events.jsonl"},
         ]
-        fallback = tmp_path / "fallback.jsonl"
-        summary = _storage_summary(infos, fallback_path=fallback)
+        default_path = tmp_path / "store.jsonl"
+        summary = _storage_summary(infos, default_path=default_path)
 
         assert summary["count"] == 8
         assert "paths" in summary
 
-    def test_empty_infos_use_fallback(self, tmp_path):
-        """验证空信息列表使用 fallback 路径"""
-        fallback = tmp_path / "fallback.jsonl"
-        summary = _storage_summary([], fallback_path=fallback)
+    def test_empty_infos_use_default_path(self, tmp_path):
+        """验证空信息列表使用当前 store 路径"""
+        default_path = tmp_path / "store.jsonl"
+        summary = _storage_summary([], default_path=default_path)
 
-        assert summary["path"] == str(fallback)
+        assert summary["path"] == str(default_path)
 
     def test_info_with_zero_count(self, tmp_path):
         """验证零计数处理"""
         infos = [{"count": 0, "path": "/a/events.jsonl"}]
-        fallback = tmp_path / "fallback.jsonl"
-        summary = _storage_summary(infos, fallback_path=fallback)
+        default_path = tmp_path / "store.jsonl"
+        summary = _storage_summary(infos, default_path=default_path)
 
         assert summary["count"] == 0
 
@@ -137,8 +137,8 @@ class TestStorageSummary:
 class TestWriteEvents:
     """测试事件写入函数"""
 
-    def test_write_empty_to_fallback(self, tmp_path):
-        """验证空事件列表写入 fallback"""
+    def test_write_empty_returns_store_path(self, tmp_path):
+        """验证空事件列表返回当前 store 路径"""
         pipeline = IngestPipeline(root=tmp_path)
         result = write_events(pipeline, [])
 

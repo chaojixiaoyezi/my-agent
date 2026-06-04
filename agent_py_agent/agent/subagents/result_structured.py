@@ -111,10 +111,9 @@ def _create_capability_requests_from_parsed(task, parsed, now):
             network_scope=text_or_sequence_strings(item.get("network_scope", [])),
             output_budget=_object_dict(item.get("output_budget", {})),
             risk_level=str(item.get("risk_level", "") or ""),
-            fallback_attempted=text_or_sequence_strings(item.get("fallback_attempted", [])),
+            alternatives_attempted=text_or_sequence_strings(item.get("alternatives_attempted", [])),
             escalation_target=str(item.get("escalation_target", "") or ""),
             created_at=now,
-            reserved=_object_dict(item.get("reserved", {})),
         )
         if existing := find_equivalent_capability_request(task.capability_requests, request):
             created_ids.append(existing.id)

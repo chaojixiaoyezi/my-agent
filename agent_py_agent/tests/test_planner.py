@@ -15,7 +15,9 @@ class TestCombineRunnerInstruction:
 
     def test_combine_both_non_empty(self):
         """CLI 指令和 planner 指令都存在时合并。"""
-        from agent_py_agent.agent.agent_core.planner import _combine_runner_instruction
+        from agent_py_agent.agent.agent_core.planner_service import (
+            combine_runner_instruction as _combine_runner_instruction,
+        )
 
         result = _combine_runner_instruction("CLI 指令", "Planner 补充")
 
@@ -25,7 +27,9 @@ class TestCombineRunnerInstruction:
 
     def test_combine_only_base(self):
         """只有 CLI 指令时返回 CLI 指令。"""
-        from agent_py_agent.agent.agent_core.planner import _combine_runner_instruction
+        from agent_py_agent.agent.agent_core.planner_service import (
+            combine_runner_instruction as _combine_runner_instruction,
+        )
 
         result = _combine_runner_instruction("只有 CLI", "")
 
@@ -33,7 +37,9 @@ class TestCombineRunnerInstruction:
 
     def test_combine_only_planner(self):
         """只有 planner 指令时返回 planner 指令。"""
-        from agent_py_agent.agent.agent_core.planner import _combine_runner_instruction
+        from agent_py_agent.agent.agent_core.planner_service import (
+            combine_runner_instruction as _combine_runner_instruction,
+        )
 
         result = _combine_runner_instruction("", "只有 Planner")
 
@@ -41,7 +47,9 @@ class TestCombineRunnerInstruction:
 
     def test_combine_both_empty(self):
         """都为空时返回空字符串。"""
-        from agent_py_agent.agent.agent_core.planner import _combine_runner_instruction
+        from agent_py_agent.agent.agent_core.planner_service import (
+            combine_runner_instruction as _combine_runner_instruction,
+        )
 
         result = _combine_runner_instruction("", "")
 
@@ -49,7 +57,9 @@ class TestCombineRunnerInstruction:
 
     def test_combine_strips_whitespace(self):
         """验证空格被正确去除。"""
-        from agent_py_agent.agent.agent_core.planner import _combine_runner_instruction
+        from agent_py_agent.agent.agent_core.planner_service import (
+            combine_runner_instruction as _combine_runner_instruction,
+        )
 
         result = _combine_runner_instruction("  CLI  ", "  Planner  ")
 
@@ -62,7 +72,9 @@ class TestTaskStateForPlanner:
 
     def test_task_state_basic_fields(self):
         """验证基本字段被正确提取。"""
-        from agent_py_agent.agent.agent_core.planner import _task_state_for_planner
+        from agent_py_agent.agent.agent_core.planner_service import (
+            task_state_for_planner as _task_state_for_planner,
+        )
 
         mock_task = MagicMock()
         mock_task.id = "run_123"
@@ -96,7 +108,9 @@ class TestTaskStateForPlanner:
 
     def test_task_state_empty_evidence(self):
         """空 evidence 列表时返回 0。"""
-        from agent_py_agent.agent.agent_core.planner import _task_state_for_planner
+        from agent_py_agent.agent.agent_core.planner_service import (
+            task_state_for_planner as _task_state_for_planner,
+        )
 
         mock_task = MagicMock()
         mock_task.id = "run_empty"
@@ -124,7 +138,9 @@ class TestBuildParentPlannerPrompt:
 
     def test_prompt_contains_mode(self):
         """验证生成的 prompt 包含 mode 信息。"""
-        from agent_py_agent.agent.agent_core.planner import _build_parent_planner_prompt
+        from agent_py_agent.agent.agent_core.planner_service import (
+            build_parent_planner_prompt as _build_parent_planner_prompt,
+        )
 
         state = {
             "gate": {"needs_planner": 1},
@@ -146,7 +162,9 @@ class TestBuildParentPlannerPrompt:
 
     def test_prompt_dry_run_mode(self):
         """验证 dry-run 模式的 prompt 生成。"""
-        from agent_py_agent.agent.agent_core.planner import _build_parent_planner_prompt
+        from agent_py_agent.agent.agent_core.planner_service import (
+            build_parent_planner_prompt as _build_parent_planner_prompt,
+        )
 
         state = {"gate": {"needs_planner": 0}}
 
@@ -162,7 +180,9 @@ class TestBuildParentPlannerPrompt:
 
     def test_prompt_contains_state_snapshot(self):
         """验证 prompt 包含状态快照。"""
-        from agent_py_agent.agent.agent_core.planner import _build_parent_planner_prompt
+        from agent_py_agent.agent.agent_core.planner_service import (
+            build_parent_planner_prompt as _build_parent_planner_prompt,
+        )
 
         state = {
             "gate": {"needs_planner": 1},
@@ -182,7 +202,9 @@ class TestBuildParentPlannerPrompt:
 
     def test_prompt_contains_result_block(self):
         """验证 prompt 包含结果块标记。"""
-        from agent_py_agent.agent.agent_core.planner import _build_parent_planner_prompt
+        from agent_py_agent.agent.agent_core.planner_service import (
+            build_parent_planner_prompt as _build_parent_planner_prompt,
+        )
 
         state = {"gate": {"needs_planner": 1}}
 
@@ -204,8 +226,10 @@ class TestBuildParentPlannerState:
 
     def test_state_contains_gate_summary(self):
         """验证状态包含 gate_summary。"""
-        from agent_py_agent.agent.agent_core.planner import _build_parent_planner_state
-        from agent_py_agent.agent.capability_config import CapabilityConfig
+        from agent_py_agent.agent.agent_core.planner_service import (
+            build_parent_planner_state as _build_parent_planner_state,
+        )
+        from agent_py_agent.agent.capability.config import CapabilityConfig
 
         mock_agent = MagicMock()
         mock_agent.subagents.list_runs.return_value = []
@@ -229,8 +253,10 @@ class TestBuildParentPlannerState:
 
     def test_state_gate_needs_planner_when_active_tasks(self):
         """有活跃任务时 gate.needs_planner 为 1。"""
-        from agent_py_agent.agent.agent_core.planner import _build_parent_planner_state
-        from agent_py_agent.agent.capability_config import CapabilityConfig
+        from agent_py_agent.agent.agent_core.planner_service import (
+            build_parent_planner_state as _build_parent_planner_state,
+        )
+        from agent_py_agent.agent.capability.config import CapabilityConfig
 
         mock_task = MagicMock()
         mock_task.status = "RUNNING"
@@ -261,8 +287,10 @@ class TestBuildParentPlannerState:
 
     def test_state_calculates_open_capability_requests(self):
         """验证 open_capability_requests 数量计算。"""
-        from agent_py_agent.agent.agent_core.planner import _build_parent_planner_state
-        from agent_py_agent.agent.capability_config import CapabilityConfig
+        from agent_py_agent.agent.agent_core.planner_service import (
+            build_parent_planner_state as _build_parent_planner_state,
+        )
+        from agent_py_agent.agent.capability.config import CapabilityConfig
 
         mock_request = MagicMock()
         mock_request.status = "OPEN"
@@ -301,8 +329,10 @@ class TestBuildParentPlannerState:
 
     def test_state_handles_empty_task_list(self):
         """空任务列表时不崩溃。"""
-        from agent_py_agent.agent.agent_core.planner import _build_parent_planner_state
-        from agent_py_agent.agent.capability_config import CapabilityConfig
+        from agent_py_agent.agent.agent_core.planner_service import (
+            build_parent_planner_state as _build_parent_planner_state,
+        )
+        from agent_py_agent.agent.capability.config import CapabilityConfig
 
         mock_agent = MagicMock()
         mock_agent.subagents.list_runs.return_value = []
@@ -333,10 +363,10 @@ class TestRunParentPlannerErrors:
         from agent_py_agent.agent.agent_core.orchestration.dispatch.params import (
             DispatchExecutionPlan,
         )
-        from agent_py_agent.agent.capabilities import CapabilityRouter
-        from agent_py_agent.agent.capability_config import CapabilityConfig
-        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.capability import CapabilityRouter
+        from agent_py_agent.agent.capability.config import CapabilityConfig
         from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
 
@@ -375,7 +405,7 @@ class TestParentPlannerReadTools:
 
     def test_parent_planner_read_tools_defined(self):
         """验证只读工具列表已定义。"""
-        from agent_py_agent.agent.agent_core.planner import PARENT_PLANNER_READ_TOOLS
+        from agent_py_agent.agent.agent_core.planner_service import PARENT_PLANNER_READ_TOOLS
 
         assert isinstance(PARENT_PLANNER_READ_TOOLS, list)
         assert "list_files" in PARENT_PLANNER_READ_TOOLS

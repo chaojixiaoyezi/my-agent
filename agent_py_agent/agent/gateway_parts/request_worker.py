@@ -24,7 +24,10 @@ from .queue_service import (
     materialize_missing_archive,
 )
 from .recovery import _gateway_request_attempts
-from .request_errors import gateway_request_load_error_response
+from .request_errors import (
+    gateway_request_load_error_response,
+    gateway_request_processing_state_error_response,
+)
 from .request_execution import _handle_gateway_request
 from .response_renderer import read_gateway_response_file
 
@@ -40,6 +43,9 @@ class GatewayAskParams:
     save: bool = True
     include_prompt: bool = False
     resume_context: bool | None = None
+    chat_session_id: str = ""
+    channel_user_id: str = "local-cli"
+    canonical_user_id: str = "local-agent"
     agent: SimpleAgent | None = field(default=None, repr=False)
 
 
@@ -74,10 +80,19 @@ def submit_gateway_ask(
         "created_at": time.time(),
         "client_pid": 0,
         "status": "pending",
+        "priority": "interactive",
+        "source": "cli_chat" if params.chat_session_id else "cli_gateway",
         "attempts": 0,
     }
     if params.resume_context is not None:
         payload["resume_context"] = bool(params.resume_context)
+    if params.chat_session_id:
+        payload["conversation"] = {
+            "channel": "chat",
+            "channel_conversation_id": str(params.chat_session_id),
+            "channel_user_id": str(params.channel_user_id or "local-cli"),
+            "canonical_user_id": str(params.canonical_user_id or "local-agent"),
+        }
     request_path = write_gateway_request(paths, payload)
     response_path = gateway_response_path(paths, request_id)
     if params.agent is not None:
@@ -104,10 +119,51 @@ def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: flo
 def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths, *, worker_id: str = "gw-worker") -> int:
     ensure_gateway_folders(paths)
     processed = 0
-    for request_path in sorted(paths.inbox.glob("*.json")):
+    for request_path in _iter_pending_request_paths(paths):
+        if _request_deferred_until_later(request_path):
+            continue
         if _process_gateway_request_path(agent, paths, request_path, worker_id):
             processed += 1
     return processed
+
+
+def _iter_pending_request_paths(paths: GatewayPaths) -> list[Path]:
+    return sorted(paths.inbox.glob("*.json"), key=_pending_request_sort_key)
+
+
+def _pending_request_sort_key(request_path: Path) -> tuple[int, float, str]:
+    payload_report = read_json_file_report(request_path, context="gateway.worker.pending_priority.read")
+    payload = payload_report.payload or {}
+    priority = str(payload.get("priority") or "").strip().lower()
+    is_recovery = priority == "recovery" or bool(payload.get("requeued_at"))
+    created_at = _request_created_at(payload, request_path)
+    return (1 if is_recovery else 0, created_at, request_path.name)
+
+
+def _request_created_at(payload: dict, request_path: Path) -> float:
+    for key in ("created_at", "submitted_at", "requeued_at"):
+        try:
+            value = float(payload.get(key) or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value:
+            return value
+    try:
+        return request_path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _request_deferred_until_later(request_path: Path) -> bool:
+    payload_report = read_json_file_report(request_path, context="gateway.worker.pending_defer.read")
+    payload = payload_report.payload
+    if not payload:
+        return False
+    try:
+        not_before = float(payload.get("not_before_at") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return bool(not_before and time.time() < not_before)
 
 
 def _process_gateway_request_path(
@@ -142,6 +198,7 @@ def _process_gateway_request_path(
 
 
 def _process_claimed_gateway_request(context: _ClaimedGatewayRequestContext) -> dict:
+    from ..runtime_errors import runtime_error_report
     from .io import write_json_file_atomic
     from .logging import _report_gateway_side_effect_error
 
@@ -150,12 +207,10 @@ def _process_claimed_gateway_request(context: _ClaimedGatewayRequestContext) -> 
         write_json_file_atomic(context.processing_path, context.request_payload)
     except OSError as exc:
         _report_gateway_side_effect_error("prepare_gateway_request_lease", context.request_id, exc)
-        _write_processing_payload_fallback(context.processing_path, context.request_payload, context.request_id)
-        return _handle_gateway_request(
-            context.agent,
+        return gateway_request_processing_state_error_response(
             context.processing_path,
-            refresh_lease=False,
-            worker_id=context.worker_id,
+            runtime_error_report(exc, context="gateway.worker.processing_state.write"),
+            request_id=context.request_id,
         )
     return _handle_gateway_request(
         context.agent,
@@ -177,15 +232,6 @@ def _mark_request_processing(request_payload: dict, worker_id: str) -> None:
             "updated_at": lease_now,
         }
     )
-
-
-def _write_processing_payload_fallback(processing_path: Path, request_payload: dict, request_id: str) -> None:
-    from .logging import _report_gateway_side_effect_error
-
-    try:
-        write_json_file(processing_path, request_payload)
-    except OSError as fallback_exc:
-        _report_gateway_side_effect_error("prepare_gateway_request_lease_fallback", request_id, fallback_exc)
 
 
 def _finish_claimed_gateway_request(

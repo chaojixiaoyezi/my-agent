@@ -11,7 +11,7 @@ await page.waitForTimeout(1500);
 
 const html = await page.content();
 const hasErrorBoundary = html.includes('页面渲染出错');
-console.log('Has ErrorBoundary fallback:', hasErrorBoundary);
+console.log('Has ErrorBoundary view:', hasErrorBoundary);
 
 if (hasErrorBoundary) {
   const errorText = await page.locator('pre').textContent().catch(() => 'no pre');

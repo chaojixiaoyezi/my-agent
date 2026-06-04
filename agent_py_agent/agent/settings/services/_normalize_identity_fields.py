@@ -49,7 +49,6 @@ class UserFieldsService:
         warnings: list[str] = []
         out = dict(data)
         _normalize_user_id(out, defaults, warnings)
-        _normalize_user_data_root(out, defaults, warnings)
         _normalize_user_auth(out, defaults, warnings)
         _normalize_admin_user(out, defaults)
         return out, warnings
@@ -62,15 +61,6 @@ def _normalize_user_id(out: dict[str, object], defaults: object, warnings: list[
         return
     out["user_id"] = defaults.user_id
     warnings.append(f"user_id: expected a non-empty string, got {raw_user_id!r}; using default")
-
-
-def _normalize_user_data_root(out: dict[str, object], defaults: object, warnings: list[str]) -> None:
-    raw_user_data_root = out.get("user_data_root", defaults.user_data_root)
-    if isinstance(raw_user_data_root, str) and raw_user_data_root.strip():
-        out["user_data_root"] = raw_user_data_root.strip()
-        return
-    out["user_data_root"] = defaults.user_data_root
-    warnings.append(f"user_data_root: expected a non-empty string, got {raw_user_data_root!r}; using default")
 
 
 def _normalize_user_auth(out: dict[str, object], defaults: object, warnings: list[str]) -> None:

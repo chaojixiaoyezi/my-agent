@@ -32,7 +32,7 @@ from .filter_policy import (
     filter_by_time_window,
 )
 
-# Re-export from query_logic for backward compatibility; resume guidance lives in a bundle module.
+# Public query imports; resume guidance lives in a bundle module.
 from .query_logic import (
     archive_filters_from_args,
     collect_archive_records,
@@ -91,7 +91,7 @@ __all__ = [
     "format_archive_records_table",
     "format_query_response_json",
     "render_resume_guidance",
-    # query_logic (backward compat)
+    # query_logic
     "archive_filters_from_args",
     "build_resume_guidance",
     "filter_archive_records",

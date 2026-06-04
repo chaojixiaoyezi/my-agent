@@ -15,11 +15,17 @@ import threading
 import time
 from types import SimpleNamespace
 
+from ..agent.conversation import (
+    BackgroundMainAgentRuntime,
+    BackgroundMainAgentScheduler,
+    FakeChannelHub,
+)
 from ..agent.core import SimpleAgent
-from ..agent.gateway import (
+from ..agent.gateway_parts import (
     GatewayPaths,
     _process_gateway_requests,
     gateway_request_counts,
+    log_gateway_event,
     recover_gateway_processing_requests,
     write_json_file,
 )
@@ -79,6 +85,69 @@ def _gateway_request_worker_loop(
         if processed:
             continue
         stop_event.wait(poll_interval)
+
+
+def _gateway_background_main_loop(context: GatewayRunContext, stop_event: threading.Event) -> None:
+    try:
+        agent = _gateway_agent_from_context(context)
+        runtime = BackgroundMainAgentRuntime(
+            agent=agent,
+            store=agent.conversation_store,
+            channels=FakeChannelHub(),
+        )
+        scheduler = BackgroundMainAgentScheduler(
+            {
+                "runtime": runtime,
+                "store": agent.conversation_store,
+                "collaboration_store": getattr(agent, "collaboration_store", None),
+            }
+        )
+        poll_interval = _background_main_poll_interval(agent)
+    except Exception as exc:
+        _print_gateway_loop_error("gateway_background_main.initialize", "background-main", exc)
+        return
+
+    while not stop_event.is_set():
+        try:
+            reports = scheduler.tick()
+            if reports:
+                _record_background_main_reports(agent, reports)
+                continue
+        except Exception as exc:
+            _print_gateway_loop_error("gateway_background_main.iteration", "background-main", exc)
+        stop_event.wait(poll_interval)
+
+
+def _record_background_main_reports(agent: SimpleAgent, reports: list[object]) -> None:
+    for report in reports:
+        payload = {
+            "status": "background_reported",
+            "thread_id": str(getattr(report, "thread_id", "") or ""),
+            "task_id": str(getattr(report, "task_id", "") or ""),
+            "reason": str(getattr(report, "reason", "") or ""),
+            "route_channel": str(getattr(report, "route_channel", "") or ""),
+            "route_target": str(getattr(report, "route_target", "") or ""),
+            "created_at": float(getattr(report, "created_at", 0.0) or 0.0),
+        }
+        log_gateway_event(agent, "gateway_background_main_reported", payload)
+        print(
+            "[gateway-background-main] "
+            f"reason={payload['reason']} task={payload['task_id']} thread={payload['thread_id']}",
+            flush=True,
+        )
+
+
+def _background_main_poll_interval(agent: SimpleAgent) -> float:
+    request_interval = _float_config(agent, "gateway_request_poll_interval", default=1.0)
+    heartbeat_interval = _float_config(agent, "gateway_heartbeat_interval", default=5.0)
+    return max(1.0, min(5.0, request_interval, heartbeat_interval))
+
+
+def _float_config(agent: SimpleAgent, key: str, *, default: float) -> float:
+    try:
+        return float(getattr(agent.config, key))
+    except (TypeError, ValueError):
+        return default
 
 
 def _recover_gateway_requests_if_primary(agent: SimpleAgent, paths: GatewayPaths, worker_index: int) -> None:

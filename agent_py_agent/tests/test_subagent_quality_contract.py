@@ -1,11 +1,8 @@
 import json
 from pathlib import Path
 
-from agent_py_agent.agent.subagent import (
-    ContextManifest,
-    QualityContract,
-    SubAgentManager,
-)
+from agent_py_agent.agent.subagents import ContextManifest, QualityContract
+from agent_py_agent.agent.subagents.manager import SubAgentManager
 
 
 def test_create_run_persists_quality_contract(tmp_path):
@@ -45,49 +42,48 @@ def _write_task_json(run_dir: Path, payload: dict) -> None:
     )
 
 
-def _write_legacy_task_json(workspace: Path) -> None:
+def _write_current_task_json(workspace: Path) -> None:
     _write_task_json(
-        workspace / "legacy-run",
+        workspace / "normalized-run",
         {
-            "id": "legacy-run",
-            "goal": "Legacy goal",
-            "thought": "Legacy thought",
+            "id": "normalized-run",
+            "goal": "Normalized goal",
+            "thought": "Normalized thought",
             "plan": ["one"],
-            "capability_requests": {"old": "dict-shape"},
-            "quality_contract": {"quality_bar": "legacy bar", "must_check": "sample"},
-            "context_manifest": {"task_pack_refs": "legacy.md", "token_budget": "42"},
-            "context_packs": {"name": "legacy-pack"},
-            "future_field": "ignored",
+            "capability_requests": [],
+            "quality_contract": {"quality_bar": "current bar", "must_check": ["sample"]},
+            "context_manifest": {"task_pack_refs": ["task-pack.md"], "token_budget": 42},
+            "context_packs": [{"name": "current-pack"}],
         },
     )
 
 
-def _write_bare_legacy_task_json(workspace: Path) -> None:
+def _write_minimal_task_json(workspace: Path) -> None:
     _write_task_json(
-        workspace / "bare-legacy-run",
+        workspace / "minimal-run",
         {
-            "id": "bare-legacy-run",
-            "goal": "Bare legacy goal",
-            "thought": "Bare legacy thought",
+            "id": "minimal-run",
+            "goal": "Minimal goal",
+            "thought": "Minimal thought",
             "plan": ["one"],
         },
     )
 
 
-def test_load_legacy_task_json_is_compatible(tmp_path):
+def test_load_task_json_normalizes_current_payload(tmp_path):
     workspace = tmp_path / "subs"
-    _write_legacy_task_json(workspace)
-    _write_bare_legacy_task_json(workspace)
+    _write_current_task_json(workspace)
+    _write_minimal_task_json(workspace)
     manager = SubAgentManager(workspace)
 
-    task = manager.load("legacy-run")
-    bare_task = manager.load("bare-legacy-run")
+    task = manager.load("normalized-run")
+    bare_task = manager.load("minimal-run")
 
-    assert task.quality_contract.quality_bar == "legacy bar"
+    assert task.quality_contract.quality_bar == "current bar"
     assert task.quality_contract.must_check == ["sample"]
-    assert task.context_manifest.task_pack_refs == ["legacy.md"]
+    assert task.context_manifest.task_pack_refs == ["task-pack.md"]
     assert task.context_manifest.token_budget == 42
-    assert task.context_packs == [{"name": "legacy-pack"}]
+    assert task.context_packs == [{"name": "current-pack"}]
     assert task.capability_requests == []
     assert bare_task.quality_contract.quality_bar == ""
     assert bare_task.context_manifest.core_pack_version == "subagent-quality-contract-v1"

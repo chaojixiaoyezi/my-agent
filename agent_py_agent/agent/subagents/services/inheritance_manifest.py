@@ -34,11 +34,6 @@ def build_inheritance_manifest(parent: SubAgentTask | None, child: SubAgentTask)
         dropped=dropped,
         policy=_default_policy(),
         created_at=child.created_at or time.time(),
-        reserved={
-            "schema_name": "subagent_inheritance_manifest",
-            "schema_version": 1,
-            "future": ["requester_scope", "visibility", "takeover_query", "explicit_drop_rules"],
-        },
     )
 
 

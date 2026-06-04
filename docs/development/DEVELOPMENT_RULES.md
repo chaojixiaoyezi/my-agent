@@ -19,12 +19,12 @@ before changing code.
 
 ---
 
-## 1. Python Version Compatibility / Python 版本兼容性
+## 1. Python Version / Python 版本
 
 - **Target**: Python 3.10+ (`requires-python = ">=3.10"` in pyproject.toml).
 - Do **not** use backslashes inside f-string expressions (PEP 701, only valid in 3.12+).
   Use temporary variables or parenthesised sub-expressions instead.
-- For `tomllib`: use a guarded fallback to `tomli` on Python < 3.11:
+- For `tomllib`: use an import guard for `tomli` on Python < 3.11:
   ```python
   try:
       import tomllib
@@ -60,18 +60,17 @@ before changing code.
 
 ---
 
-## 4. Code Size Limits / 代码尺寸限制
+## 4. Code Shape / 代码形态
 
 | Dimension       | Limit   | Enforcement                                   |
 |-----------------|---------|-----------------------------------------------|
-| New file        | <= 400 lines (test <= 700) | `scripts/check_code_size.py` |
+| File length     | advisory only | `CODE_SIZE_REPORT.md` trend report |
 | New function    | <= 100 lines | `scripts/check_code_size.py`             |
 | New class       | <= 250 lines (Mixin <= 200) | `scripts/check_code_size.py` |
 | Function params | <= 8 (use dataclass bundling if more) | `scripts/check_code_size.py` |
-| Entry-point file | frozen baseline | `test_architecture_guardrails.py` |
 
-- These limits apply to **new** code.  Existing files that exceed limits are tracked
-  as baselines; they must not grow further without a refactoring plan.
+- Whole-file line count is not a hard gate. Merge or split files based on
+  call-path clarity, responsibility boundaries, and debugging cost.
 - If a function approaches 80 lines, start decomposing it into named helpers.
 - Params over 8 must use dataclass bundling: `def f(*, params: SomeParams)`.
 
@@ -93,10 +92,9 @@ before changing code.
 - CLI functions may read `argparse.Namespace`, but must normalize it at the command
   boundary before calling agent/core/manager code.
 - Business services should prefer `def execute(*, request: SomeRequest)` or
-  `def run(*, options: SomeOptions)`. Compatibility wrappers may keep old
-  explicit keyword fields, but they must immediately convert those fields into
-  the same bundle; service-facing product code must not expose function-level
-  `**kwargs`.
+  `def run(*, options: SomeOptions)`. Old explicit keyword fields should be
+  migrated into the same bundle and removed from product-facing service code;
+  service-facing product code must not expose function-level `**kwargs`.
 - Do not add new behavior flags as loose kwargs to an existing service method.
   Extend the existing bundle and update focused tests instead.
 - Bundles should stay small and domain-specific. If a bundle starts mixing unrelated
@@ -148,8 +146,8 @@ before changing code.
 - Agent shell access should use the single model-facing `run_command` tool.
   Command permissions come from the runtime `access_mode` config, not from
   model-authored `grant_id`, `command_allowlist`, `path_scope`, `apply`, or output
-  budget fields.  Legacy `controlled_exec` code may exist during migration, but
-  it must not be introduced into ordinary task prompts or default tool catalogs.
+  budget fields. Historical controlled-exec internals must not be introduced
+  into ordinary task prompts or default tool catalogs.
   Hidden/internal tools must also be blocked at execution time unless the caller
   supplies an explicit internal `allowed_tools` scope; hiding a tool from the
   catalog is not enough.
@@ -205,7 +203,7 @@ before changing code.
   owners/admins may destructively manage their own group space, but destructive
   actions must go to scoped trash and write an audit event. They must not write
   owner home, another user, another group, or provider root metadata unless an
-  explicit admin migration command owns that change.
+  explicit admin maintenance command owns that change.
 
 ## 7.2 Structured Contract Boundary / 结构化合同边界
 
@@ -241,8 +239,8 @@ before changing code.
   看板、closeout 和最终汇报优先读取 registry 记录；模型文本里的路径只能作为
   搜索/恢复提示，不能成为最终产物事实。
 - 同一个产物移动、重建、修复或格式转换时，应更新同一个 `artifact_id` 的最新
-  registry 记录，而不是制造一串互相竞争的“口头路径”。旧 `artifact_refs`
-  字段只作为兼容投影存在，新增逻辑不得把它当作比 registry 更权威的事实源。
+  registry 记录，而不是制造一串互相竞争的“口头路径”。新增逻辑只能把
+  registry 作为交付物事实源。
 - 一个逻辑产物可以是一组文件。比如静态网站可以由 `index.html`、CSS、JS 和本地数据组成；
   这类产物要登记为同一个 `artifact_id` 的 file group。closeout 只读取
   `data/artifacts/registry.jsonl` 里的结构化文件组，不允许再靠扩展名扫描后
@@ -282,7 +280,7 @@ before changing code.
 x = x + 1  # increment x
 
 # GOOD — explains the reason
-x = x + 1  # skip the sentinel row that the legacy exporter always emits
+x = x + 1  # skip the sentinel row emitted by the exporter
 ```
 
 - Do not add mechanical template comments such as `# LLM:` / `# 函数用途:` just to
@@ -344,7 +342,7 @@ do_write()
 1. `python -m compileall -q agent_py_agent scripts` — syntax check.
 2. `python -m pytest agent_py_agent/tests/ -q` — all tests pass.
 3. `ruff check agent_py_agent` — no lint errors.
-4. `python scripts/check_code_size.py` — no size limit violations.
+4. `python scripts/check_code_size.py` — no local-complexity hard violations; whole-file length is advisory.
 5. `git diff --check` — no whitespace errors.
 
 ## 11.1 Subagent Token / Model-Call Budget
@@ -425,8 +423,8 @@ do_write()
   decides the boundary with `access_mode`: `restricted`, `workspace-write`, or
   `full-access`. The model should not have to understand grant ids, command
   allowlists, path scopes, or apply flags just to run an ordinary command.
-  Legacy controlled-exec internals may exist during migration, but they must not
-  be introduced into ordinary prompts or default tool catalogs.
+  Historical controlled-exec internals must not be introduced into ordinary
+  prompts or default tool catalogs.
 - Large generated file bodies must not travel as one giant tool-call JSON
   argument. `write_file.content` goes through `content_transport_policy.py`; the
   default recommended inline size is 12,000 characters and can be tuned with
@@ -566,10 +564,9 @@ do_write()
 - Argparse defaults for behavior-affecting numbers should be `None` when the
   real default comes from config. A literal `0` is allowed only when it is an
   explicit user meaning such as “unlimited”, “disabled”, or “do not execute”.
-- Fallback literals are allowed only at bootstrap or compatibility boundaries:
-  dataclass defaults, parser help text, tests, transparent wrappers, and code
-  paths that must survive missing/broken config. They must mirror YAML defaults
-  and must not become a second independent policy source.
+- Behavior defaults belong in config. Bootstrap code, parser help text, and
+  tests may repeat defaults only when they mirror YAML and cannot become a
+  second independent policy source.
 - Config fields that are intentionally internal do not need frontend exposure
   yet, but they still belong in backend config if changing them affects
   runtime behavior. User-facing frontend config should later read these backend
@@ -605,6 +602,7 @@ do_write()
 ## 12. Reversibility / 可逆性
 
 - Prefer small, reversible changes over broad rewrites.
-- Preserve public CLI names and existing data formats unless an ADR (Architecture
-  Decision Record) in `docs/decisions/` approves the breaking change.
-- When deprecating, add a compatibility shim and a removal timeline.
+- Preserve user-facing CLI names and active data formats unless the user
+  explicitly approves a breaking change.
+- When deleting an old path or field, delete its callers, tests, and docs in the
+  same change. Do not add a new shim or temporary bridge.

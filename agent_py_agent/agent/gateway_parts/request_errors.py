@@ -64,3 +64,36 @@ def gateway_response_load_error_response(
         "tool_rounds": 0,
         "prompt": "",
     }
+
+
+def gateway_request_processing_state_error_response(
+    request_path: Path,
+    processing_error: dict,
+    *,
+    request_id: str,
+    started_at: float | None = None,
+) -> dict:
+    started_at = time.time() if started_at is None else started_at
+    return {
+        "id": request_id,
+        "kind": "unknown",
+        "ok": False,
+        "status": "failed",
+        "created_at": 0,
+        "started_at": started_at,
+        "ended_at": time.time(),
+        "duration_seconds": 0,
+        "response": "",
+        "error_code": "GATEWAY_REQUEST_PROCESSING_STATE_WRITE_ERROR",
+        "error": str(processing_error.get("message") or "gateway request processing state could not be written"),
+        "processing_state_error": processing_error,
+        "backend": "",
+        "used_memories": 0,
+        "tool_rounds": 0,
+        "prompt": "",
+        "request_file": str(request_path),
+        "attempts": 0,
+        "lease_owner": "",
+        "lease_started_at": 0,
+        "lease_heartbeat_at": 0,
+    }

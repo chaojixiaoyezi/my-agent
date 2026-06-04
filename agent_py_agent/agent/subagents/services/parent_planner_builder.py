@@ -89,7 +89,7 @@ class ParentPlannerLogAppender:
         """Write global parent planner audit log entry."""
         from dataclasses import asdict
 
-        from agent_py_agent.agent.file_io import append_jsonl
+        from agent_py_agent.agent.io import append_jsonl
 
         jsonl = workspace / "parent_planner_log.jsonl"
         append_jsonl(jsonl, asdict(record))

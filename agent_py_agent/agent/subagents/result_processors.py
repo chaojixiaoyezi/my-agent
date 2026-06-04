@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-"""Compatibility facade for runner result processing helpers.
+"""Runner result processing helpers.
 
 Structured output and output-payload builders live in focused modules.
 """

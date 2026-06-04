@@ -99,7 +99,6 @@ def _metadata_payload(request: SubagentSessionCompactRequest, refs: dict[str, Pa
         "token_budget": _dict_payload(compact.get("token_budget")),
         "restore_refs": restore_refs,
         "package_refs": {key: str(value) for key, value in refs.items()},
-        "reserved": {},
     }
 
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...subagent import SubAgentExecutionContext
+from ...subagents import SubAgentExecutionContext
 from . import compact_continuation_io as compact_io
 
 _DEFAULT_SNIPPET_CHARS = 1200
@@ -106,14 +106,14 @@ def _packet_lines(path: Path | None, max_chars: int) -> list[str]:
     if status != "ok":
         lines.extend([
             f"- packet_status: {status}",
-            "- fallback_to: checkpoint/summary/task-local refs",
+            "- recovery_refs: checkpoint/summary/task-local refs",
         ])
         lines.extend(compact_io.load_error_lines("packet_load_error", load_error, max_chars))
         return lines + [""]
     if _is_stale_packet(path, payload):
         lines.extend([
             "- packet_status: stale",
-            "- fallback_to: checkpoint/summary/task-local refs",
+            "- recovery_refs: checkpoint/summary/task-local refs",
         ])
         return lines + [""]
     for key in ("ready_to_continue", "continue_mode", "next_action"):
@@ -161,7 +161,7 @@ def _session_compact_lines(refs: dict[str, str], max_chars: int) -> list[str]:
     metadata_ref = refs.get("agent_run_latest_session_compaction_metadata", "")
     summary_ref = refs.get("agent_run_latest_session_compaction_summary", "")
     if not metadata_ref and not summary_ref:
-        metadata_ref = _legacy_session_metadata_ref(refs)
+        metadata_ref = _session_metadata_ref(refs)
         summary_ref = refs.get("agent_run_latest_compaction_summary", "") if metadata_ref else ""
     if not metadata_ref and not summary_ref:
         return []
@@ -182,13 +182,13 @@ def _session_compact_lines(refs: dict[str, str], max_chars: int) -> list[str]:
     return lines + [""]
 
 
-def _legacy_session_metadata_ref(refs: dict[str, str]) -> str:
+def _session_metadata_ref(refs: dict[str, str]) -> str:
     metadata_ref = refs.get("agent_run_latest_compaction_metadata", "")
     if not metadata_ref:
         return ""
     payload, status, _load_error = compact_io.read_json_with_status(
         Path(metadata_ref),
-        context="subagent_compact_continuation.legacy_session_compact_metadata",
+        context="subagent_compact_continuation.session_compact_metadata",
     )
     if status == "ok" and payload.get("schema_version") == "subagent_session_compact.v1":
         return metadata_ref
@@ -220,8 +220,7 @@ def _compact_metadata_bullets(
 def _preflight_lines(context_bundle: dict[str, object], max_chars: int) -> list[str]:
     if not isinstance(context_bundle, dict):
         return []
-    reserved = context_bundle.get("reserved") if isinstance(context_bundle.get("reserved"), dict) else {}
-    preflight = reserved.get("runner_recovery_preflight") if isinstance(reserved, dict) else None
+    preflight = context_bundle.get("runner_recovery_preflight")
     if not isinstance(preflight, dict):
         return []
     status = str(preflight.get("packet_status") or "unknown")
@@ -230,14 +229,14 @@ def _preflight_lines(context_bundle: dict[str, object], max_chars: int) -> list[
         "",
         f"- packet_status_before_prepare: {compact_io.short_value(status, max_chars)}",
         f"- packet_ref_before_prepare: {compact_io.short_value(preflight.get('packet_ref', ''), max_chars)}",
-        "- fallback_to: checkpoint/summary/task-local refs",
+        "- recovery_refs: checkpoint/summary/task-local refs",
     ]
     instruction = str(preflight.get("runner_instruction") or "").strip()
     if instruction:
         lines.append(f"- runner_instruction: {compact_io.short_value(instruction, max_chars)}")
-    refs = preflight.get("fallback_refs")
+    refs = preflight.get("recovery_refs")
     if isinstance(refs, list) and refs:
-        lines.append("- fallback_refs:")
+        lines.append("- recovery_refs:")
         lines.extend(f"  - {compact_io.short_value(item, max_chars)}" for item in refs[:5])
     if preflight.get("save_may_regenerate_continue_packet") is True:
         lines.append("- prepare_note: runner prepare may regenerate latest_continue_packet after this preflight.")

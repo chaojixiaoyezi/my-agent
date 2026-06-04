@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent_py_agent.agent.config import load_config
+from agent_py_agent.agent.settings import load_config
 
 
 def _write_config(tmp_path, lines: list[str]):
@@ -68,7 +68,7 @@ def test_subagent_workflow_config_invalid_mode_falls_back_to_auto(tmp_path):
         {
             "field_name": "subagent_workflow_mode",
             "raw_value": "always",
-            "fallback_value": "auto",
+            "default_value": "auto",
             "reason": "expected one of ['auto', 'manual', 'off']",
         }
     ]
@@ -89,7 +89,7 @@ def test_subagent_workflow_config_invalid_user_dirs_falls_back_to_default(tmp_pa
         {
             "field_name": "subagent_user_workflow_dirs",
             "raw_value": ".agent/workflows/user",
-            "fallback_value": [".agent/workflows/user"],
+            "default_value": [".agent/workflows/user"],
             "reason": "expected a list of non-empty strings",
         }
     ]

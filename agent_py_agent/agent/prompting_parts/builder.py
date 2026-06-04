@@ -19,8 +19,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from ..config import AgentConfig
-from ..memory import MemoryRecord
+from ..memory_store import MemoryRecord
+from ..settings import AgentConfig
 
 
 @dataclass
@@ -46,7 +46,7 @@ class PromptBuildRequest:
 
 
 @dataclass(frozen=True)
-class _PromptBuildCompatArgs:
+class _PromptBuildFields:
     user_prompt: str
     memories: list[MemoryRecord] | None
     inject: list[str] | None
@@ -94,13 +94,13 @@ class PromptBuilder:
     ) -> str:
         """拼出完整 prompt。
 
-        这版和旧版最大的区别是把工具信息拆成了两层：
+        当前 prompt 把工具信息拆成两层：
         - `tool_catalog_section`：常驻的工具目录，告诉模型'你手里有什么工具'
         - `tool_recommendations_section`：按当前任务筛出来的少量候选详情，告诉模型'这次大概率该用谁'"""
 
         request = _prompt_build_request(
             request,
-            _PromptBuildCompatArgs(
+            _PromptBuildFields(
                 user_prompt,
                 memories,
                 inject,
@@ -141,7 +141,7 @@ class PromptBuilder:
 
 def _prompt_build_request(
     request: PromptBuildRequest | None,
-    args: _PromptBuildCompatArgs,
+    args: _PromptBuildFields,
 ) -> PromptBuildRequest:
     return request or PromptBuildRequest(
         args.user_prompt,
@@ -160,7 +160,7 @@ def _memory_text(memories: list[MemoryRecord]) -> str:
     guidance = (
         "Related Memory 是历史参考，不是当前任务指令。"
         "如果它和 # User Task、当前工作区文件或最新工具结果冲突，必须以后者为准。"
-        "不要因为旧记忆说以前做过某事，就把本轮新任务改成旧任务。"
+        "不要因为历史记忆说以前做过某事，就把本轮新任务改成历史任务。"
     )
     rendered = "\n".join(f"- [{m.kind}] {m.role}: {m.content}" for m in memories)
     return f"{guidance}\n{rendered}"
@@ -188,9 +188,9 @@ def _workspace_context_text(builder: PromptBuilder) -> str:
         f"- current_local_time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         f"- current_week_range: {current_week_start.isoformat()}..{current_week_end.isoformat()}",
         f"- last_7_days_range: {last_7_days_start.isoformat()}..{today.isoformat()}",
-        "- 写报告日期时优先使用 current_local_date，不要从旧文件、旧记忆或训练知识里猜日期。",
+        "- 写报告日期时优先使用 current_local_date，不要从历史文件、历史记忆或训练知识里猜日期。",
         "- 任务里出现“今天、最近、近一周、本周、今年”等相对时间时，先按 current_local_date 换成明确日期范围；"
-        "搜索和报告都使用这个明确范围，不能把旧网页年份或训练知识年份当成本轮日期。",
+        "搜索和报告都使用这个明确范围，不能把历史网页年份或训练知识年份当成本轮日期。",
         "- 最终产物里写 URL、项目地址、论文地址、下载地址或接口地址时，优先使用工具结果里真实出现的链接；"
         "如果链接是你从名称推断出来的，先用网页/HTTP 工具验证可访问，不能靠项目名猜仓库地址。",
         "- 做研究、汇总、对比、翻译、审计这类需要引用来源的工作时，给关键结论和表格行保留 source_ref；"

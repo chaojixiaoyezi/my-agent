@@ -68,8 +68,8 @@ def evaluate_filters(
     if not filter_by_level(record, options.level):
         return False
 
-    since_ts = _created_at_sort(options.since or "", fallback=0.0) if options.since else None
-    until_ts = _created_at_sort(options.until or "", fallback=0.0) if options.until else None
+    since_ts = _created_at_sort(options.since or "", default=0.0) if options.since else None
+    until_ts = _created_at_sort(options.until or "", default=0.0) if options.until else None
     if until_ts is not None and _is_date_only(options.until or ""):
         until_ts += 86399.999999
 

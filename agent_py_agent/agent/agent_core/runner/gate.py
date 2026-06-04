@@ -14,7 +14,8 @@ from .timeout_policy import get_task_timeout, resolve_runner_config
 
 if TYPE_CHECKING:
     from ...core import SimpleAgent
-    from ...subagent import RecordRunnerResultParams, SubAgentRunnerResult, SubAgentTask
+    from ...subagents.manager_runner_result_payload import RecordRunnerResultParams
+    from ...subagents.models import SubAgentRunnerResult, SubAgentTask
 
 
 # ---------------------------------------------------------------------------

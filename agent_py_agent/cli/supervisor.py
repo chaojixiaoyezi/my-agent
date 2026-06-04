@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 
-from ..agent.gateway import gateway_paths, gateway_running
+from ..agent.gateway_parts import gateway_paths, gateway_running
 from ..agent.gateway_parts.daemon_control import get_running_pid, read_pid_record
 from ..agent.gateway_parts.supervisor import (
     is_supervisor_running,

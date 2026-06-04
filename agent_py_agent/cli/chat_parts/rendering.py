@@ -102,14 +102,7 @@ def startup_banner(agent_name: str, *, use_gateway: bool) -> str:
     )
 
 
-# Backward-compat wrapper: original signature was _tui_print_banner(agent, use_gateway)
-def _tui_print_banner(agent, use_gateway: bool) -> None:
-    text = startup_banner(agent.config.agent_name, use_gateway=use_gateway)
-    for line in text.splitlines():
-        _cprint(line)
+def terminal_rule(char: str = "─", *, default_width: int = 119) -> str:
 
-
-def terminal_rule(char: str = "─", *, fallback: int = 119) -> str:
-
-    width = max(20, shutil.get_terminal_size(fallback=(fallback, 24)).columns)
+    width = max(20, shutil.get_terminal_size((default_width, 24)).columns)
     return f"{GRAY}{char * width}{RESET}"

@@ -12,9 +12,9 @@ from agent_py_agent.agent.agent_core.runtime.guidance import (
     render_subagent_guidance_section,
 )
 from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
-from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def _tool_loop_params(**overrides) -> ToolLoopExecuteParams:
@@ -273,7 +273,7 @@ def test_dispatch_runner_instruction_writes_guidance_for_explicit_run(tmp_path) 
     assert result.ok is True
     pending = agent.conversation_store.pending_guidance("agent_run", child.id)
     assert pending[0].message == "先汇总已有文件，再继续补缺口。"
-    assert pending[0].metadata["legacy_tool"] == "dispatch_subagents"
+    assert pending[0].metadata["tool_name"] == "dispatch_subagents"
 
 
 def test_dispatch_runner_instruction_reports_guidance_persist_error(tmp_path, monkeypatch) -> None:

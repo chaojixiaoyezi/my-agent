@@ -90,7 +90,7 @@ def create_real_api_subagent_run() -> str:
 
     script = (
         "from pathlib import Path\n"
-        "from agent_py_agent.agent.config import load_config\n"
+        "from agent_py_agent.agent.settings import load_config\n"
         "from agent_py_agent.agent.core import SimpleAgent\n"
         f"cfg = load_config(r'{TEST_CONFIG}')\n"
         "agent = SimpleAgent(cfg, Path('agent_py_agent').resolve())\n"

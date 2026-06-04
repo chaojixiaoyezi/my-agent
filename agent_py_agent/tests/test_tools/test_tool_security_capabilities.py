@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 from agent_py_agent.agent.log_analysis.storage import LocalLogStore
-from agent_py_agent.agent.tools import ToolRegistry, ToolRegistryParams
+from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 
 
 def _make_tool_registry(workspace: Path) -> ToolRegistry:

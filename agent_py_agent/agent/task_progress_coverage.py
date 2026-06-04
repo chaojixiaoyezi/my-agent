@@ -80,7 +80,18 @@ def merge_coverage_targets(existing: list[dict[str, Any]], incoming: list[dict[s
             "checks": {**dict(previous.get("checks") or {}), **dict(item.get("checks") or {})},
             "evidence": dedupe_strings([*string_list(previous.get("evidence")), *string_list(item.get("evidence"))]),
         }
+        if _coverage_target_done(previous) and not _coverage_target_done(item):
+            by_id[item_id]["status"] = previous.get("status") or "done"
+            by_id[item_id]["checks"] = _preserve_done_checks(previous, by_id[item_id])
     return [by_id[item_id] for item_id in order if item_id in by_id]
+
+
+def _preserve_done_checks(previous: dict[str, Any], merged: dict[str, Any]) -> dict[str, str]:
+    checks = dict(merged.get("checks") or {})
+    for key, status in dict(previous.get("checks") or {}).items():
+        if _is_done_status(status):
+            checks[key] = str(status)
+    return checks
 
 
 def _item_as_coverage_target(value: object) -> dict[str, Any]:

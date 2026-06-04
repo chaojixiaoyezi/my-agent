@@ -11,10 +11,10 @@ import tempfile
 import time
 from pathlib import Path
 
-from agent_py_agent.agent.backend import BaseBackend, ModelResponse
-from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.backends import BaseBackend, ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.subagent import parse_subagent_runner_output
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.subagents import parse_subagent_runner_output
 
 from .backends import (
     AcceptedSubagentBackend,
@@ -192,8 +192,8 @@ def test_subagent_runner_parses_structured_output():
         assert "Runner Lessons" in debrief
 
 
-def test_subagent_runner_parse_recovers_pending_capability_request():
-    """LLM: Pending capability status with pending_steps should recover a parent-routable request."""
+def test_subagent_runner_parse_requires_explicit_pending_capability_request():
+    """LLM: Pending capability status without explicit requests should stay unfilled."""
     text = """[SUBAGENT_RESULT]
 {
   "status": "PENDING_CAPABILITY_REQUEST",
@@ -210,11 +210,7 @@ def test_subagent_runner_parse_recovers_pending_capability_request():
 
     parsed = parse_subagent_runner_output(text)
 
-    assert len(parsed.capability_requests) == 1
-    request = parsed.capability_requests[0]
-    assert request["needed_capability"] == "controlled_exec"
-    assert request["requested_tools"] == ["controlled_exec"]
-    assert request["requested_commands"] == ["pwd", "python3", "rm"]
+    assert parsed.capability_requests == []
 
 
 def test_subagent_runner_parse_ignores_empty_pending_capability_request():

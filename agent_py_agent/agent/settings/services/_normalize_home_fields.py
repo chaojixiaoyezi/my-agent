@@ -58,7 +58,6 @@ _HOME_RUNTIME_INT_FIELDS = (
 )
 
 _HOME_RUNTIME_BOOL_FIELDS = (
-    "home_runtime_bootstrap_enabled",
     "home_context_enabled",
     "daily_memory_mirror_enabled",
     "run_task_workspace_enabled",

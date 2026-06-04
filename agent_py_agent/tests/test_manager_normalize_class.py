@@ -182,47 +182,47 @@ class TestNoNaturalWriteDirExtraction:
 
 
 class TestWorkflowModeNormalization:
-    """测试 manager_base.py 中的工作流模式相关函数。"""
+    """测试 manager workflow service 中的工作流模式相关函数。"""
 
     def test_normalize_workflow_mode_value_off(self):
         """off 模式。"""
-        from agent_py_agent.agent.subagents.manager_base import _normalize_workflow_mode_value
+        from agent_py_agent.agent.subagents.services.workflow import _normalize_workflow_mode_value
 
         assert _normalize_workflow_mode_value("off") == "off"
 
     def test_normalize_workflow_mode_value_plan(self):
         """plan 模式。"""
-        from agent_py_agent.agent.subagents.manager_base import _normalize_workflow_mode_value
+        from agent_py_agent.agent.subagents.services.workflow import _normalize_workflow_mode_value
 
         assert _normalize_workflow_mode_value("plan") == "plan"
 
     def test_normalize_workflow_mode_value_auto(self):
         """auto 模式。"""
-        from agent_py_agent.agent.subagents.manager_base import _normalize_workflow_mode_value
+        from agent_py_agent.agent.subagents.services.workflow import _normalize_workflow_mode_value
 
         assert _normalize_workflow_mode_value("auto") == "auto"
 
     def test_normalize_workflow_mode_invalid(self):
         """无效值默认 off。"""
-        from agent_py_agent.agent.subagents.manager_base import _normalize_workflow_mode_value
+        from agent_py_agent.agent.subagents.services.workflow import _normalize_workflow_mode_value
 
         assert _normalize_workflow_mode_value("invalid") == "off"
         assert _normalize_workflow_mode_value(None) == "off"
 
 
 class TestWorkflowWorkerTools:
-    """测试 manager_base.py 中的 _workflow_worker_tools() 函数。"""
+    """测试 manager workflow service 中的 _workflow_worker_tools() 函数。"""
 
     def test_returns_parent_tools_if_provided(self):
         """有父工具时使用父工具。"""
-        from agent_py_agent.agent.subagents.manager_base import _workflow_worker_tools
+        from agent_py_agent.agent.subagents.services.workflow import _workflow_worker_tools
 
         result = _workflow_worker_tools(["custom_tool"], "worker")
         assert result == ["custom_tool"]
 
     def test_review_kind_keeps_baseline_write_tools(self):
         """review 只是角色偏好，不应让子代理失去基础读写能力。"""
-        from agent_py_agent.agent.subagents.manager_base import _workflow_worker_tools
+        from agent_py_agent.agent.subagents.services.workflow import _workflow_worker_tools
 
         result = _workflow_worker_tools([], "review")
         assert "read_file" in result
@@ -230,7 +230,7 @@ class TestWorkflowWorkerTools:
 
     def test_coding_for_worker_kind(self):
         """worker 类型返回编码工具。"""
-        from agent_py_agent.agent.subagents.manager_base import _workflow_worker_tools
+        from agent_py_agent.agent.subagents.services.workflow import _workflow_worker_tools
 
         result = _workflow_worker_tools([], "worker")
         assert "write_file" in result
@@ -238,11 +238,11 @@ class TestWorkflowWorkerTools:
 
 
 class TestWorkflowModes:
-    """测试 manager_base.py 中的工作流模式常量。"""
+    """测试 manager workflow service 中的工作流模式常量。"""
 
     def test_workflow_modes_defined(self):
         """验证工作流模式已定义。"""
-        from agent_py_agent.agent.subagents.manager_base import _WORKFLOW_MODES
+        from agent_py_agent.agent.subagents.services.workflow import _WORKFLOW_MODES
 
         assert "off" in _WORKFLOW_MODES
         assert "plan" in _WORKFLOW_MODES
@@ -250,7 +250,7 @@ class TestWorkflowModes:
 
 
 class TestReadOnlySubagentTools:
-    """测试 manager_base.py 中的只读工具常量。"""
+    """测试 manager workflow service 中的只读工具常量。"""
 
     def test_read_only_tools_defined(self):
         """验证只读工具列表已定义。"""
@@ -264,7 +264,7 @@ class TestReadOnlySubagentTools:
 
 
 class TestCodingSubagentTools:
-    """测试 manager_base.py 中的编码工具常量。"""
+    """测试 manager workflow service 中的编码工具常量。"""
 
     def test_coding_tools_defined(self):
         """验证编码工具列表已定义。"""

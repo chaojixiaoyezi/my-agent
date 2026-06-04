@@ -25,6 +25,7 @@ _TOP_LEVEL_ACTION_KEYS = (
     "allowed_tools",
     "subagent_workspace",
     "completion_status",
+    "completion_risk",
     "must_not_report_done",
     "blocking_run_ids",
     "repair_advice",

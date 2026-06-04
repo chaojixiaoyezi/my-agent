@@ -2,12 +2,16 @@ from __future__ import annotations
 
 """memory 配置安全解析测试。"""
 
+from types import SimpleNamespace
+
+from agent_py_agent.agent.agent_core.model.context_window import resolve_model_context_window_tokens
 from agent_py_agent.agent.agent_core.runtime.context_compactor import (
     compact_trigger_percent,
     compact_trigger_tokens,
 )
-from agent_py_agent.agent.config import load_config
-from agent_py_agent.agent.memory_settings import MemorySettings, normalize_memory_settings
+from agent_py_agent.agent.backends import get_backend
+from agent_py_agent.agent.settings import load_config
+from agent_py_agent.agent.settings.memory import MemorySettings, normalize_memory_settings
 
 
 def test_memory_settings_defaults_have_no_warnings():
@@ -83,7 +87,7 @@ def test_memory_settings_invalid_values_fall_back_with_warnings():
         "memory_resume_auto_context_limit",
         "memory_compact_auto_trigger_percent",
     }
-    assert all(warning.fallback_value is not None for warning in warnings)
+    assert all(warning.default_value is not None for warning in warnings)
 
 
 def test_load_config_normalizes_memory_values_and_keeps_warning_receipts(tmp_path):
@@ -155,3 +159,25 @@ def test_runtime_compact_policy_percent_parser_matches_config_semantics():
     assert compact_trigger_percent(40) == 50
     assert compact_trigger_percent(120) == 100
     assert compact_trigger_tokens(200_000, 50) == 100_000
+
+
+def test_model_context_window_config_reaches_http_backend(tmp_path):
+    config_path = tmp_path / "agent_config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "model_backend: anthropic_compatible",
+                "api_base: https://example.invalid/anthropic",
+                "api_key: test-key",
+                "model_name: test-model",
+                "model_context_window_tokens: 234567",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+    backend = get_backend(config.model_backend, config)
+
+    assert backend.context_window_tokens == 234567
+    assert resolve_model_context_window_tokens(SimpleNamespace(backend=backend)) == 234567

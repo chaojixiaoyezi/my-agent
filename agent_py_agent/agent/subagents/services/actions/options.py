@@ -1,9 +1,9 @@
 
 from __future__ import annotations
 
-"""option objects for subagent action apply.
+"""Option objects for subagent action apply.
 
-动作执行入口保留原有关键字兼容，但内部统一收成 options，避免长参数列表继续扩散。
+动作执行入口统一收成 options，避免长参数列表继续扩散。
 """
 
 from dataclasses import dataclass, replace
@@ -38,7 +38,7 @@ class ActionApplyOptions:
         include_run_ids: list[str] | None = None,
         exclude_run_ids: list[str] | None = None,
     ):
-        """Build the options bundle from explicit legacy fields."""
+        """Build the options bundle from explicit fields."""
 
         base = options or cls()
         updates = {

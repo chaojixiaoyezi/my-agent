@@ -15,6 +15,8 @@ from ...contracts.gates import (
 from ..main_agent_delivery_fact_evidence import fact_evidence_decision
 from .gate_recovery import attach_contract_recovery
 from .quality import delivery_quality_decision
+from .subagent_aggregation import evaluate_subagent_aggregation_gate
+from .task_progress_gate import evaluate_task_progress_closeout_gate
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,8 @@ def attach_closeout_gates(request: CloseoutGateRequest) -> list[Any]:
     gate_decision = _attach_runtime_state_gates(request)
     quality_decision = _attach_quality_gate(request, run_contract_decision)
     fact_decision = _attach_fact_gate(request)
+    task_progress_decision = _attach_task_progress_closeout_gate(request)
+    subagent_decision = _attach_subagent_aggregation_gate(request)
     acceptance_decision = _attach_acceptance_gate(request, gate_decision)
     final_decision = evaluate_final_closeout_gate(request.report)
     request.report["final_closeout_gate"] = final_decision.to_dict()
@@ -39,6 +43,8 @@ def attach_closeout_gates(request: CloseoutGateRequest) -> list[Any]:
         request.report["_state_decision"],
         quality_decision,
         fact_decision,
+        task_progress_decision,
+        subagent_decision,
         acceptance_decision,
         final_decision,
     ]
@@ -91,6 +97,18 @@ def _attach_fact_gate(request: CloseoutGateRequest) -> Any:
         archive_tool_calls=[item for item in archive_calls if isinstance(item, dict)],
     )
     request.report["fact_evidence_gate"] = decision.to_dict()
+    return decision
+
+
+def _attach_subagent_aggregation_gate(request: CloseoutGateRequest) -> Any:
+    decision = evaluate_subagent_aggregation_gate(request.closeout)
+    request.report["subagent_aggregation_gate"] = decision.to_dict()
+    return decision
+
+
+def _attach_task_progress_closeout_gate(request: CloseoutGateRequest) -> Any:
+    decision = evaluate_task_progress_closeout_gate(request.closeout, request.report)
+    request.report["task_progress_closeout_gate"] = decision.to_dict()
     return decision
 
 

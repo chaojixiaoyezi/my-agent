@@ -23,7 +23,7 @@ my-agent --help
 |:---:|------|--------|:---:|
 | 1 | **本文件** (ONBOARDING.md) | 全局地图 | 5 min |
 | 2 | [AGENTS.md](AGENTS.md) | LLM 开发者的行为规范：语言、注释、配置、自学习约束 | 10 min |
-| 3 | [docs/development/DEVELOPMENT_RULES.md](docs/development/DEVELOPMENT_RULES.md) | 编码规则：版本兼容、导入纪律、命名、尺寸限制、写入边界 | 10 min |
+| 3 | [docs/development/DEVELOPMENT_RULES.md](docs/development/DEVELOPMENT_RULES.md) | 编码规则：导入纪律、命名、尺寸限制、写入边界 | 10 min |
 | 4 | [docs/architecture/BOUNDARY_RULES.md](docs/architecture/BOUNDARY_RULES.md) | 分层导入矩阵：谁能导入谁、禁止模式 | 5 min |
 | 5 | [docs/architecture/MODULE_OWNERSHIP.md](docs/architecture/MODULE_OWNERSHIP.md) | 每个模块的职责和状态：新增代码放哪里 | 查表 |
 

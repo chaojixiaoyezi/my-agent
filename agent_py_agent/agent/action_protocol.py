@@ -1,9 +1,9 @@
 
 from __future__ import annotations
 
-"""Typed action protocol public facade.
+"""Typed action protocol public API.
 
-业务代码继续从 `agent.action_protocol` 导入即可；真实定义拆到小文件里，
+业务代码从 `agent.action_protocol` 导入协议类型；具体定义拆到小文件里，
 避免协议层变成超大文件。自然语言回复不在这里获得执行权。
 """
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..agent.gateway import (
+from ..agent.gateway_parts import (
     gateway_paths,
     gateway_request_counts,
     gateway_running,

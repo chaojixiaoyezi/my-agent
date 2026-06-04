@@ -1,9 +1,9 @@
 
-"""本模块读取并归一化可选 LOG 配置，所有高风险能力默认关闭，坏值写 warning 后回退安全默认值。
+"""本模块读取并归一化可选 LOG 配置，所有高风险能力默认关闭，坏值写 warning 后采用安全默认值。
 
 新手说明:
 日志分析涉及 worker、自动派工、ML、集群和响应动作，不能因为配置写错就悄悄打开危险功能。
-这里负责把 YAML 里的字符串、数字、开关整理成 LogAnalysisConfig，并记录哪些字段被回退。
+这里负责把 YAML 里的字符串、数字、开关整理成 LogAnalysisConfig，并记录哪些字段被采用默认值。
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import Any
 
 from ..settings.config import load_simple_yaml
 
-# Re-export public symbols from services so the facade API is preserved.
+# Public config symbols from services.
 from .services import (
     coerce_bool,
     coerce_choice,
@@ -43,21 +43,21 @@ __all__ = [
 
 @dataclass(frozen=True)
 class LogAnalysisConfigWarning:
-    """记录单个配置字段为什么被回退到安全默认值。
+    """记录单个配置字段为什么采用安全默认值。
 
     新手说明:
     如果用户把 `query_max_limit` 写成 `"many"`，程序不应该直接崩，也不应该乱猜。
-    它会使用默认值，并把 field_name、raw_value、fallback_value、reason 记录成 warning。
+    它会使用默认值，并把 field_name、raw_value、default_value、reason 记录成 warning。
 
     字段说明:
     field_name: 出问题的配置字段名。
     raw_value: 用户原始写入的值。
-    fallback_value: 程序实际采用的安全回退值。
-    reason: 为什么回退，例如 expected an integer。"""
+    default_value: 程序实际采用的安全默认值。
+    reason: 为什么采用默认值，例如 expected an integer。"""
 
     field_name: str
     raw_value: Any
-    fallback_value: Any
+    default_value: Any
     reason: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -69,7 +69,7 @@ class LogAnalysisConfigWarning:
         这个方法没有输入参数，只读取当前 warning 的字段。
 
         返回说明:
-        返回包含 field_name、raw_value、fallback_value、reason 的 dict。"""
+        返回包含 field_name、raw_value、default_value、reason 的 dict。"""
         return asdict(self)
 
 
@@ -206,7 +206,7 @@ def load_log_analysis_config(
     missing_ok: True 表示配置文件不存在时返回默认配置；False 表示不存在就抛 FileNotFoundError。
 
     返回说明:
-    返回 LogAnalysisConfig。config.config_warnings 会包含坏值回退记录。
+    返回 LogAnalysisConfig。config.config_warnings 会包含坏值默认值记录。
 
     异常说明:
     missing_ok=False 且文件不存在时抛 FileNotFoundError。YAML 解析错误会由 load_simple_yaml 抛出。"""
@@ -242,7 +242,7 @@ def normalize_log_analysis_config(
     返回 `(config, warnings)`。config 是最终生效配置，warnings 是 LogAnalysisConfigWarning 列表。
 
     重要边界:
-    如果 query_default_limit 大于 query_max_limit，会回退 query_default_limit，避免默认查询超过最大上限。"""
+    如果 query_default_limit 大于 query_max_limit，会重置 query_default_limit，避免默认查询超过最大上限。"""
     config, warnings = normalization.normalize_all(values)
     config.config_warnings = [warning.to_dict() for warning in warnings]
     return config, warnings

@@ -109,7 +109,7 @@ class SkillRegistry:
     def load_body(self, name: str, *, max_chars: int = 0) -> str:
         """读取某个 skill 的正文。
 
-        `max_chars=0` 表示不限制长度。这里先用字符数兜底，后续接 tokenizer
+        `max_chars=0` 表示不限制长度。这里先用字符数估算，后续接 tokenizer
         时可以替换成真正的 token 截断。"""
 
         card = self.get(name)
@@ -233,7 +233,7 @@ def _as_list(value: Any) -> list[str]:
 
 
 def _first_paragraph(body: str) -> str:
-    """从 Markdown 正文里取第一段非标题文本作为兜底描述。"""
+    """从 Markdown 正文里取第一段非标题文本作为默认描述。"""
 
     for block in body.split("\n\n"):
         text = block.strip()

@@ -24,10 +24,7 @@ def semantic_context_missing_fields(bundle: Any) -> list[str]:
 
 
 def _bundle_required_file_terms(bundle: Any) -> list[str]:
-    reserved = getattr(bundle, "reserved", {})
-    if not isinstance(reserved, dict):
-        return []
-    return _dedupe_file_terms(_object_string_list(reserved.get("expected_required_files")))
+    return _dedupe_file_terms(_object_string_list(getattr(bundle, "expected_required_files", [])))
 
 
 def _dedupe_file_terms(values) -> list[str]:

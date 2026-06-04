@@ -12,7 +12,7 @@ from typing import Any, TextIO
 
 try:
     import fcntl
-except ImportError:  # pragma: no cover - Windows fallback.
+except ImportError:  # pragma: no cover - Windows import guard.
     fcntl = None
 
 
