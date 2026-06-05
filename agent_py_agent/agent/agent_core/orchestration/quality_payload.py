@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from ...runtime_errors import runtime_error_report
+from ...subagents.role_templates import role_template_snapshot_for_task
 
-_QA_ROLES = {"tester", "bug_finder"}
 _QUALITY_SCAN_MAX_NODES = 96
 
 
@@ -60,8 +60,7 @@ def _descendant_tasks(agent: Any, parent_run_id: str) -> tuple[list[Any], BaseEx
 
 
 def _qa_failure_signal(item: Any) -> dict[str, object]:
-    role_text = f"{getattr(item, 'role', '')} {getattr(item, 'agent_name', '')}".lower()
-    if not any(role in role_text for role in _QA_ROLES):
+    if not _is_quality_check_task(item):
         return {}
     output_path = _output_json_path(item)
     payload, load_error = _read_output_payload(output_path)
@@ -77,6 +76,15 @@ def _qa_failure_signal(item: Any) -> dict[str, object]:
         "output_ref": str(output_path) if output_path else "",
         "summary": _payload_summary(payload),
     }
+
+
+def _is_quality_check_task(item: Any) -> bool:
+    snapshot = role_template_snapshot_for_task(item)
+    if not snapshot:
+        return False
+    if bool(snapshot.get("can_run_tests")):
+        return True
+    return bool(snapshot.get("depends_on_outputs"))
 
 
 def _output_json_path(item: Any) -> Path | None:
@@ -119,25 +127,16 @@ def _payload_has_negative_signal(item: Any, payload: dict[str, Any]) -> bool:
     structured_status = str(structured.get("status") or payload.get("status") or "").upper()
     if structured_status in {"BLOCKED", "FAILED", "FAIL", "ERROR"}:
         return True
+    if payload.get("ok") is False or structured.get("ok") is False:
+        return True
+    if payload.get("passed") is False or structured.get("passed") is False:
+        return True
     if payload.get("blockers"):
         return True
     for test in payload.get("tests") or []:
         if isinstance(test, dict) and (test.get("ok") is False or test.get("passed") is False):
             return True
-    return _qa_summary_has_negative_signal(payload)
-
-
-def _qa_summary_has_negative_signal(payload: dict[str, Any]) -> bool:
-    structured = payload.get("structured_output") if isinstance(payload.get("structured_output"), dict) else {}
-    text = " ".join(
-        str(value or "")
-        for value in [
-            structured.get("summary"),
-            payload.get("summary"),
-            *(payload.get("acceptance") or [] if isinstance(payload.get("acceptance"), list) else []),
-        ]
-    ).lower()
-    return any(token in text for token in ("缺少", "缺失", "断裂", "失败", "没有效果", "发现缺陷", "missing", "broken", "failed", "error"))
+    return False
 
 
 def _textual_signal_payload(payload: dict[str, Any]) -> dict[str, Any]:

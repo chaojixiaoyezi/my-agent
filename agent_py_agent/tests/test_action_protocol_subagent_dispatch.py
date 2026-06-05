@@ -58,7 +58,6 @@ def test_dispatch_envelope_carries_gate_and_state_contract():
             "blocking_run_ids": ["child-blocked"],
             "unfinished_run_ids": ["child-pending"],
         },
-        "must_not_report_done": True,
         "blocking_run_ids": ["child-blocked"],
         "unfinished_run_ids": ["child-pending"],
         "pending_artifact_refs": ["pending.html"],
@@ -76,7 +75,6 @@ def test_dispatch_envelope_carries_gate_and_state_contract():
 
     assert isinstance(decoded, SubagentDispatchEnvelope)
     assert decoded.completion_status["status"] == "blocked"
-    assert decoded.must_not_report_done is True
     assert decoded.blocking_run_ids == ["child-blocked"]
     assert decoded.unfinished_run_ids == ["child-pending"]
     assert decoded.pending_artifact_refs == ["pending.html"]

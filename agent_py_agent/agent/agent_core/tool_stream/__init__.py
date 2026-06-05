@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .boundary import (
     ToolBoundaryChunkFilter,
+    complete_machine_block_text,
     complete_tool_call_abort_response,
     cut_response_after_first_complete_tool_call,
     first_complete_tool_call_cut_index,
@@ -22,6 +23,7 @@ __all__ = [
     "LongToolContentStreamAbort",
     "MalformedToolProtocolStreamAbort",
     "ToolBoundaryChunkFilter",
+    "complete_machine_block_text",
     "complete_tool_call_abort_response",
     "cut_response_after_first_complete_tool_call",
     "first_complete_tool_call_cut_index",

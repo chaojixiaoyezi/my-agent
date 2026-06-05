@@ -3,6 +3,7 @@ from __future__ import annotations
 
 """takeover and reassignment handlers for subagent action apply."""
 
+from ...role_templates import role_template_snapshot_for_task
 from ..takeover.readiness import takeover_readiness_ref_order
 from .context import (
     ActionHandlerContext,
@@ -130,8 +131,7 @@ def _channel_blocked_takeover_record(service, action, task, ctx: ActionHandlerCo
 def _needs_coordinator_handoff_action(task) -> bool:
     if not getattr(task, "child_ids", None):
         return False
-    role = str(getattr(task, "role", "") or "").lower()
-    if role not in {"coordinator", "lead", "team_lead", "child_coordinator"} and "coordinator" not in role:
+    if not bool(role_template_snapshot_for_task(task).get("can_spawn_children")):
         return False
     status = str(getattr(task, "status", "") or "").upper()
     failure_type = str(getattr(task, "failure_type", "") or "").lower()

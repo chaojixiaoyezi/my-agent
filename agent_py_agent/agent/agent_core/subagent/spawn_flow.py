@@ -22,7 +22,7 @@ class SpawnSubagentsFlowRequest:
 
 
 def spawn_subagents_flow(request: SpawnSubagentsFlowRequest):
-    if is_explicit_root_role(request.options.role):
+    if is_explicit_root_role(request.options.role, _role_template_dirs(request.agent)):
         return _spawn_explicit_root_seed(request)
     if request.options.count is None:
         return _spawn_auto_delegated(request)
@@ -39,6 +39,11 @@ def configured_subagent_allowed_tools(config: object) -> list[str] | None:
         return None
     tools = [str(item).strip() for item in raw_items if item is not None and str(item).strip()]
     return tools or None
+
+
+def _role_template_dirs(agent: object) -> object:
+    subagents = getattr(agent, "subagents", None)
+    return getattr(subagents, "role_template_dirs", None)
 
 
 def effective_max_subagents(value: object, *, default: int) -> int:

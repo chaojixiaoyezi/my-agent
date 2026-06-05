@@ -11,7 +11,11 @@ import json
 
 from ...subagents import SubAgentExecutionContext
 from ...subagents.context_bundle import context_gate_prompt_lines
-from ...subagents.role_templates import role_template_detail_text, role_template_index_text
+from ...subagents.role_templates import (
+    role_template_detail_text,
+    role_template_index_text,
+    role_template_snapshot_for_role,
+)
 from ..subagent import compact_continuation as subagent_compact_continuation
 from .prompt_context_summary import runner_context_summary_payload
 from .prompt_contract_lines import (
@@ -255,12 +259,9 @@ def _is_leaf_worker_context(context: SubAgentExecutionContext) -> bool:
 
 
 def _is_coordinator_context(context: SubAgentExecutionContext) -> bool:
-    role_text = f"{context.role} {context.agent_name}".lower()
     tools = set(context.allowed_tools or [])
-    return (
-        ("coordinator" in role_text or "lead" in role_text)
-        and "schedule_child_subagents" in tools
-    )
+    snapshot = context.role_template or role_template_snapshot_for_role(str(context.role or ""))
+    return bool(snapshot.get("can_spawn_children")) and "schedule_child_subagents" in tools
 
 
 def _build_subagent_runner_repair_prompt(

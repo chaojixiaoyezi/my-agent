@@ -12,11 +12,8 @@ from ...memory_archive import estimate_tokens
 from ...tooling.models import ToolExecutionResult
 from .._runtime_params import ToolLoopExecuteParams
 from ..model.context_pressure import (
-    mark_tool_context_checkpoint_required,
-    mark_tool_context_checkpoint_satisfied,
     mark_tool_context_digest_pending,
     should_compact_before_more_tool_output,
-    tool_context_checkpoint_satisfied,
 )
 from ..runtime.context_compactor import runtime_compact_policy
 from .round_context_archive import append_assistant_tool_round_context
@@ -98,12 +95,16 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     calls = _calls_for_this_execution_round(request)
     subagent_output_written = False
     stateful_orchestration_seen = False
-    executed_count = 0
+    handled_count = 0
     read_since_checkpoint: list[dict[str, object]] = []
     for idx, payload in enumerate(calls, start=1):
         tool_name = _tool_name(payload)
         if _should_defer_for_compact_digest(request, tool_name):
+            _emit_tool_progress(request, idx, payload, "延后")
+            result = _compact_deferred_result(tool_name)
+            request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
             _append_compact_digest_deferred_notice(request, tool_name, idx)
+            handled_count = idx
             break
         started_at = time.monotonic()
         _emit_tool_progress(request, idx, payload, "开始")
@@ -118,10 +119,9 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
         if result.ok and tool_name == "read_file":
             read_since_checkpoint.append(dict(payload) if isinstance(payload, dict) else {})
         if result.ok and tool_name in _CHECKPOINT_TOOLS:
-            mark_tool_context_checkpoint_satisfied(request.params)
             read_since_checkpoint.clear()
         mark_tool_context_digest_pending(request.params)
-        executed_count = idx
+        handled_count = idx
         subagent_output_written = subagent_output_written or is_subagent_output_json_write(
             SubagentOutputWriteCheck(request.agent, request.params, payload, result)
         )
@@ -131,7 +131,7 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
         if _round_context_over_compact_budget(request, before_context_count):
             break
     _append_long_read_fact_reminder(request, read_since_checkpoint)
-    _append_deferred_tool_call_notice(request, executed_count=executed_count)
+    _append_deferred_tool_call_notice(request, handled_count=handled_count)
     return subagent_output_written
 
 
@@ -150,23 +150,20 @@ def _append_compact_digest_deferred_notice(
     tool_name: str,
     idx: int,
 ) -> None:
-    if tool_context_checkpoint_satisfied(request.params):
-        request.params.tool_context.append(
-            "[tool-system]\n"
-            "检查点已经写入；当前上下文已达到 compact 阈值，"
-            f"本轮第 {idx} 个 {tool_name or 'tool'} 调用先不执行。\n"
-            "系统会先走 compact/resume，再继续未执行的读取、搜索或命令；"
-            "不要把这个工具调用当作已经完成。"
-        )
-        return
-    mark_tool_context_checkpoint_required(request.params)
     request.params.tool_context.append(
         "[tool-system]\n"
-        "上一批工具结果已经被模型看到，但当前上下文已达到 compact 阈值；"
-        f"本轮第 {idx} 个 {tool_name or 'tool'} 调用先不执行，避免继续叠加新的大输出。\n"
-        "先把上一批结果里的关键事实、已读范围、剩余步骤写入 task_progress 或当前任务检查点文件；"
-        "写完检查点后，系统再走 compact/resume 并继续未执行的读取、搜索或命令；"
-        "不要把这个工具调用当作已经完成。"
+        "当前上下文已达到 compact 阈值；"
+        f"本轮第 {idx} 个 {tool_name or 'tool'} 调用已登记为 CONTEXT_COMPACT_DEFERRED，实际没有执行。\n"
+        "系统会先走 compact/resume，再继续未执行的读取、搜索或命令；不要把这个工具调用当作已经完成。"
+    )
+
+
+def _compact_deferred_result(tool_name: str) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        tool_name or "unknown",
+        False,
+        "CONTEXT_COMPACT_DEFERRED: 当前上下文需要先 compact/resume；本次工具调用未执行，恢复后从同一目标继续。",
+        error_code="CONTEXT_COMPACT_DEFERRED",
     )
 
 
@@ -212,16 +209,17 @@ def _positiveish_int(value: object) -> int | None:
 def _append_deferred_tool_call_notice(
     request: ToolRoundExecutionRequest,
     *,
-    executed_count: int,
+    handled_count: int,
 ) -> None:
     total = len(request.calls)
-    if executed_count >= total:
+    if handled_count >= total:
         return
-    deferred_count = total - executed_count
+    deferred_count = total - handled_count
     request.params.tool_context.append(
         "[tool-system]\n"
         f"本轮模型请求了 {total} 个工具调用；为了避免单轮工具结果把上下文撑爆，"
-        f"只执行了前 {executed_count} 个，剩余 {deferred_count} 个没有执行。\n"
+        f"只处理到前 {handled_count} 个，剩余 {deferred_count} 个没有执行。\n"
+        "如果某个工具被记录为 CONTEXT_COMPACT_DEFERRED，它只是可审计回执，不代表工具已经执行。\n"
         "下一轮请继续处理未完成的读取、写入或检查；不要把未执行的工具调用当作已经完成。"
     )
 
@@ -230,11 +228,10 @@ def _append_long_read_fact_reminder(
     request: ToolRoundExecutionRequest,
     read_since_checkpoint: list[dict[str, object]],
 ) -> None:
-    if not read_since_checkpoint:
+    chunked_reads = [item for item in read_since_checkpoint if _chunked_read_file_call(item)]
+    if not chunked_reads:
         return
-    if not _looks_like_fact_preserving_long_read(request.current_prompt):
-        return
-    recent = ", ".join(_read_call_pointer(item) for item in read_since_checkpoint[-3:])
+    recent = ", ".join(_read_call_pointer(item) for item in chunked_reads[-3:])
     request.params.tool_context.append(
         "[tool-system:long-read-facts]\n"
         "刚才已经读取了一段或多段正文，但这一轮还没有看到新的 task_progress/write_file 检查点。\n"
@@ -244,31 +241,10 @@ def _append_long_read_fact_reminder(
     )
 
 
-def _looks_like_fact_preserving_long_read(value: str) -> bool:
-    text = str(value or "")
-    if not text:
+def _chunked_read_file_call(payload: dict[str, object]) -> bool:
+    if _tool_name(payload) != "read_file":
         return False
-    read_markers = ("完整读", "完整读取", "读完", "按顺序", "分段读", "分片读", "继续读取")
-    fact_markers = (
-        "每个",
-        "每篇",
-        "每周",
-        "每章",
-        "每发现",
-        "逐项",
-        "逐章",
-        "检查点",
-        "最终报告",
-        "报告里要包含",
-        "别漏",
-        "不要漏",
-        "不能漏",
-        "不漏",
-        "所有",
-        "全部",
-        "全量",
-    )
-    return any(marker in text for marker in read_markers) and any(marker in text for marker in fact_markers)
+    return any(payload.get(key) not in (None, "") for key in ("offset", "max_chars", "start_line", "end_line"))
 
 
 def _read_call_pointer(payload: dict[str, object]) -> str:

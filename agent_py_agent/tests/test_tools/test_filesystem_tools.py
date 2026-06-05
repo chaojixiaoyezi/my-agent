@@ -6,6 +6,7 @@
 """
 
 import base64
+import io
 import tempfile
 import types
 from pathlib import Path
@@ -218,6 +219,18 @@ def test_write_and_apply_patch_tools():
         assert (workspace / "src" / "demo.py").read_text(encoding="utf-8") == "print('a')\nprint('b')\n"
 
 
+def test_write_file_missing_path_is_actionable_tool_argument_error():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        write_tool = WriteFileTool(workspace)
+
+        result = write_tool.execute({"content": "missing path"})
+
+        assert result.ok is False
+        assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+        assert result.recommended_action
+
+
 def test_write_file_rejects_invalid_xlsx_without_overwriting_previous_good_file():
     """LLM: final binary writes should validate package integrity before replacing an existing artifact."""
     with tempfile.TemporaryDirectory() as td:
@@ -419,6 +432,9 @@ def test_read_file_line_mode_honors_request_max_chars_below_tool_cap():
         assert "5: Line 5" in result.output
         assert "PARTIAL view only" in result.output
         assert "limit_chars=40" in result.output
+        assert "recommended_next_max_chars=2000" in result.output
+        assert "next_call=read_file(start_line=" in result.output
+        assert "max_chars=2000" in result.output
         assert "next_start_line=" in result.output
         assert len(result.output) < 260
 
@@ -440,6 +456,34 @@ def test_read_file_single_long_line_reports_next_offset_and_resumes():
         assert second.ok
         assert "NEEDLE-IN-LATE-CHUNK" in second.output
         assert "offset=80" in second.output
+
+
+def test_read_file_char_window_streams_without_full_read(monkeypatch):
+    """LLM: char-window reads should not load the entire file before slicing."""
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        target = workspace / "large.txt"
+        target.write_text("甲" * 200 + "NEEDLE" + "乙" * 200, encoding="utf-8")
+        read_tool = ReadFileTool(workspace, max_chars=80)
+
+        original_read_text = Path.read_text
+
+        def fail_read_text(self, *args, **kwargs):
+            if self == target:
+                raise AssertionError("char-window read_file must stream instead of Path.read_text")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_read_text)
+
+        first = read_tool.execute({"path": "large.txt", "offset": 180, "max_chars": 80})
+        second = read_tool.execute({"path": "large.txt", "offset": 260, "max_chars": 80})
+
+        assert first.ok
+        assert "NEEDLE" in first.output
+        assert "total_chars=406" in first.output
+        assert "next_offset=260" in first.output
+        assert second.ok
+        assert "offset=260" in second.output
 
 
 def test_read_file_start_line_past_eof_reports_total_lines():
@@ -523,6 +567,18 @@ def test_search_text_supports_files_and_count_output_modes(tmp_path: Path):
     assert "b.py: 1" in counts.output
 
 
+def test_search_text_supports_line_numbers_output_mode(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "journal.txt").write_text("===== 章节 001 =====\nnoise\n===== 章节 002 =====\n", encoding="utf-8")
+    tool = SearchTextTool(workspace, max_matches=10)
+
+    result = tool.execute({"query": "===== 章节", "path": "journal.txt", "output_mode": "line_numbers"})
+
+    assert result.ok
+    assert result.output.splitlines() == ["journal.txt:1", "journal.txt:3"]
+
+
 def test_search_text_supports_regex_and_ignore_case(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -565,20 +621,36 @@ def test_search_text_uses_rg_backend_when_available(tmp_path: Path, monkeypatch)
     tool = SearchTextTool(workspace, max_matches=10)
     calls: list[list[str]] = []
 
-    def fake_run(args, **_kwargs):
-        calls.append(args)
-        return types.SimpleNamespace(
-            returncode=0,
-            stdout=(
+    class FakePopen:
+        def __init__(self, args, **_kwargs):
+            self.args = args
+            self.stdout = io.StringIO(
                 '{"type":"match","data":{"path":{"text":"'
                 + str(workspace / "a.py")
                 + '"},"lines":{"text":"Needle one\\n"},"line_number":1}}\n'
-            ),
-            stderr="",
-        )
+            )
+            self.returncode = 0
+            calls.append(args)
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
 
     monkeypatch.setattr(search_mod, "shutil", types.SimpleNamespace(which=lambda _name: "/usr/bin/rg"), raising=False)
-    monkeypatch.setattr(search_mod, "subprocess", types.SimpleNamespace(run=fake_run), raising=False)
+    monkeypatch.setattr(
+        search_mod,
+        "subprocess",
+        types.SimpleNamespace(Popen=FakePopen, PIPE=object(), DEVNULL=None, TimeoutExpired=TimeoutError),
+        raising=False,
+    )
 
     result = tool.execute({"query": "Needle", "file_glob": "*.py", "literal": True})
 
@@ -590,17 +662,88 @@ def test_search_text_uses_rg_backend_when_available(tmp_path: Path, monkeypatch)
     assert "--glob" in calls[0]
 
 
+def test_search_text_streams_rg_and_stops_after_page(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "large.log").write_text("status=ok\n" * 100, encoding="utf-8")
+    tool = SearchTextTool(workspace, max_matches=5)
+    processes: list[object] = []
+
+    class FakePopen:
+        def __init__(self, _args, **_kwargs):
+            self.returncode = None
+            self.terminated = False
+            self.stdout = (
+                f'{{"type":"match","data":{{"path":{{"text":"{workspace / "large.log"}"}},'
+                f'"lines":{{"text":"status=ok {idx}\\n"}},"line_number":{idx}}}}}\n'
+                for idx in range(1, 100)
+            )
+            processes.append(self)
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(search_mod, "shutil", types.SimpleNamespace(which=lambda _name: "/usr/bin/rg"), raising=False)
+    monkeypatch.setattr(
+        search_mod,
+        "subprocess",
+        types.SimpleNamespace(Popen=FakePopen, PIPE=object(), DEVNULL=None, TimeoutExpired=TimeoutError),
+        raising=False,
+    )
+
+    result = tool.execute({"query": "status=", "path": "large.log", "limit": 5})
+
+    assert result.ok
+    assert "large.log:1" in result.output
+    assert "large.log:5" in result.output
+    assert "next_offset=5" in result.output
+    assert processes and processes[0].terminated
+
+
 def test_search_text_treats_rg_no_matches_as_empty_result(tmp_path: Path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "a.py").write_text("Needle one\n", encoding="utf-8")
     tool = SearchTextTool(workspace, max_matches=10)
 
-    def fake_run(_args, **_kwargs):
-        return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+    class FakePopen:
+        stdout = io.StringIO("")
+        returncode = 1
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
 
     monkeypatch.setattr(search_mod, "shutil", types.SimpleNamespace(which=lambda _name: "/usr/bin/rg"), raising=False)
-    monkeypatch.setattr(search_mod, "subprocess", types.SimpleNamespace(run=fake_run), raising=False)
+    monkeypatch.setattr(
+        search_mod,
+        "subprocess",
+        types.SimpleNamespace(Popen=FakePopen, PIPE=object(), DEVNULL=None, TimeoutExpired=TimeoutError),
+        raising=False,
+    )
 
     result = tool.execute({"query": "Missing"})
 

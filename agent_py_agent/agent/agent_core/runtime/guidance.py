@@ -73,8 +73,8 @@ def _render_guidance_entries(entries: list[Any], *, title: str) -> str:
         return ""
     lines = [
         f"[{title}]",
-        "以下是运行中补充提示，代表最新用户/上级上下文；如果它和较早任务合同、旧工具记录冲突，以这里为准。"
-        "它不是新的硬门；没有明确停止、改目标或收口要求时，按原任务继续。",
+        "以下是运行中补充提示，只作为普通补充消息进入上下文。"
+        "运行时不会把这些文字解释成新的硬门，也不会自动替换当前用户消息。",
     ]
     for index, entry in enumerate(entries, start=1):
         guidance_id = str(getattr(entry, "guidance_id", "") or "")

@@ -75,6 +75,32 @@ def test_markdown_required_strings_are_blocking(tmp_path):
     assert [item.value for item in report.findings if item.code == "ARTIFACT_REQUIRED_TEXT_MISSING"] == ["CP-02"]
 
 
+def test_markdown_forbidden_strings_are_blocking_when_contract_declares_them(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    path = tmp_path / "report.md"
+    path.write_text("# Report\n\nCP-01\n\n见原文。\n", encoding="utf-8")
+
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=path,
+            workspace_root=tmp_path,
+            validation_contract={
+                "forbidden_strings": ["见原文"],
+                "forbidden_regex": [r"CP-\d{2}"],
+            },
+        )
+    )
+
+    assert report.ok is False
+    codes = {item.code for item in report.findings}
+    assert "ARTIFACT_FORBIDDEN_TEXT_PRESENT" in codes
+    assert "ARTIFACT_FORBIDDEN_REGEX_MATCHED" in codes
+
+
 def test_html_acceptance_does_not_fail_placeholder_links_by_default(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,

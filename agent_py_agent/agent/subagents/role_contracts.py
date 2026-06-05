@@ -7,8 +7,10 @@ from typing import Any
 from .quality_models import QualityContract
 from .role_templates import (
     ROLE_BASE_TOOLS,
+    ROLE_TEMPLATE_ATTRIBUTE_KEY,
     RoleTemplate,
     role_template_id_for_role,
+    role_template_snapshot,
     template_for_role,
 )
 
@@ -59,7 +61,15 @@ def apply_role_contract_to_create_params(params: Any, role_template_dirs: object
     checks = _acceptance_checks_for_role(effective_role, getattr(params, "acceptance_checks", None), template)
     tools = _allowed_tools_for_role(effective_role, getattr(params, "allowed_tools", None), template)
     quality_contract = _quality_contract_for_role(effective_role, getattr(params, "quality_contract", None), template)
-    return replace(params, role=stored_role, acceptance_checks=checks, allowed_tools=tools, quality_contract=quality_contract)
+    attributes = _attributes_with_role_template(getattr(params, "attributes", None), template)
+    return replace(
+        params,
+        role=stored_role,
+        acceptance_checks=checks,
+        allowed_tools=tools,
+        quality_contract=quality_contract,
+        attributes=attributes,
+    )
 
 
 def _default_template_role(role: str) -> str | None:
@@ -113,6 +123,14 @@ def _quality_contract_for_role(role: str, value: object, template: RoleTemplate 
     if isinstance(value, dict):
         return dict(value)
     return QualityContract()
+
+
+def _attributes_with_role_template(value: object, template: RoleTemplate | None) -> dict[str, object]:
+    attrs = dict(value or {}) if isinstance(value, dict) else {}
+    snapshot = role_template_snapshot(template)
+    if snapshot:
+        attrs[ROLE_TEMPLATE_ATTRIBUTE_KEY] = snapshot
+    return attrs
 
 
 def _list_value(value: object) -> list[object]:

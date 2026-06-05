@@ -45,13 +45,19 @@ def first_complete_tool_call_cut_index(text: str) -> int | None:
 
 
 def cut_response_after_first_complete_tool_call(response: ModelResponse) -> tuple[ModelResponse, bool]:
-    ranges = _complete_machine_block_ranges(response.text)
-    if not ranges:
+    machine_text = complete_machine_block_text(response.text)
+    if not machine_text:
         return response, False
-    machine_text = "\n".join(response.text[start:end].strip() for start, end in ranges)
     if machine_text == response.text.strip():
         return response, False
     return ModelResponse(text=machine_text, backend=response.backend), True
+
+
+def complete_machine_block_text(text: str) -> str:
+    ranges = _complete_machine_block_ranges(text)
+    if not ranges:
+        return ""
+    return "\n".join(text[start:end].strip() for start, end in ranges)
 
 
 def _complete_machine_block_ranges(text: str) -> list[tuple[int, int]]:
@@ -81,6 +87,7 @@ class ToolBoundaryChunkFilter:
     _forwarded: int = 0
     _closed: bool = False
     cut_detected: bool = field(default=False, init=False)
+    cut_index: int | None = field(default=None, init=False)
 
     def __call__(self, chunk: str) -> None:
         if self._closed:
@@ -89,7 +96,7 @@ class ToolBoundaryChunkFilter:
         protocol_abort = malformed_tool_protocol_stream_abort(self._text)
         if protocol_abort is not None:
             raise protocol_abort
-        start_info = _first_marker(self._text, _TOOL_START_MARKERS, 0)
+        start_info = _open_tool_start(self._text)
         abort = long_write_stream_abort(
             self._text,
             max_chars=self.max_inline_content_chars,
@@ -104,13 +111,24 @@ class ToolBoundaryChunkFilter:
                 self._forward_to(len(self._text))
             return
         self.cut_detected = True
+        self.cut_index = cut_index
         if self.on_chunk is not None:
             self._forward_to(cut_index)
         self._closed = True
-        raise CompleteToolCallStreamAbort(text=self._text[:cut_index], cut_index=cut_index)
+
+    def complete_tool_call_abort(self) -> CompleteToolCallStreamAbort | None:
+        text = complete_machine_block_text(self._text)
+        if not text:
+            return None
+        return CompleteToolCallStreamAbort(
+            text=text,
+            cut_index=self.cut_index if self.cut_index is not None else len(text),
+        )
 
     def finish(self) -> None:
         if self.on_chunk is None or self._closed:
+            return
+        if self.cut_detected:
             return
         self._forward_to(len(self._text))
 
@@ -133,11 +151,31 @@ def _first_marker(text: str, markers: tuple[str, ...], cursor: int) -> tuple[int
     return min(hits, key=lambda item: item[0]) if hits else None
 
 
+def _last_marker(text: str, markers: tuple[str, ...]) -> tuple[int, str] | None:
+    hits = [
+        (pos, marker)
+        for marker in markers
+        for pos in [text.rfind(marker)]
+        if pos != -1
+    ]
+    return max(hits, key=lambda item: item[0]) if hits else None
+
+
+def _open_tool_start(text: str) -> tuple[int, str] | None:
+    start_info = _last_marker(text, _TOOL_START_MARKERS)
+    if start_info is None:
+        return None
+    start, marker = start_info
+    if _first_marker(text, _TOOL_END_MARKERS, start + len(marker)) is not None:
+        return None
+    return start_info
+
+
 def malformed_tool_protocol_stream_abort(text: str) -> MalformedToolProtocolStreamAbort | None:
-    start_info = _first_marker(text, _TOOL_START_MARKERS, 0)
+    start_info = _open_tool_start(text)
     near_count = _near_tool_protocol_line_count(text)
     if start_info is None:
-        if near_count <= _MAX_NEAR_TOOL_PROTOCOL_LINES:
+        if _first_marker(text, _TOOL_START_MARKERS, 0) is not None or near_count <= _MAX_NEAR_TOOL_PROTOCOL_LINES:
             return None
         return MalformedToolProtocolStreamAbort(
             start_marker="TOOL_PROTOCOL_LINE",
@@ -155,7 +193,7 @@ def malformed_tool_protocol_stream_abort(text: str) -> MalformedToolProtocolStre
         )
     if first_end is not None:
         return None
-    count = sum(text.count(item) for item in _TOOL_START_MARKERS)
+    count = _open_tool_start_count(text)
     if count > _MAX_UNCLOSED_TOOL_START_MARKERS:
         return MalformedToolProtocolStreamAbort(
             start_marker=marker,
@@ -169,6 +207,22 @@ def malformed_tool_protocol_stream_abort(text: str) -> MalformedToolProtocolStre
         marker_count=near_count,
         limit=_MAX_NEAR_TOOL_PROTOCOL_LINES,
     )
+
+
+def _open_tool_start_count(text: str) -> int:
+    last_end = _last_marker(text, _TOOL_END_MARKERS)
+    cursor = 0 if last_end is None else last_end[0] + len(last_end[1])
+    return sum(_marker_count_after(text, marker, cursor) for marker in _TOOL_START_MARKERS)
+
+
+def _marker_count_after(text: str, marker: str, cursor: int) -> int:
+    count = 0
+    while True:
+        pos = text.find(marker, cursor)
+        if pos == -1:
+            return count
+        count += 1
+        cursor = pos + len(marker)
 
 
 def _near_tool_protocol_line_count(text: str) -> int:

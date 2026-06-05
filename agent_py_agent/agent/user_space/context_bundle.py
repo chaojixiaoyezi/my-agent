@@ -79,7 +79,7 @@ def build_main_context_bundle(request: MainContextBundleRequest) -> MainContextB
 def latest_main_context_bundle_path(home_paths: Any | None) -> str:
     if home_paths is None:
         return ""
-    base = Path(home_paths.memory_archive_dir) / "snapshots" / "context_bundles"
+    base = _memory_archive_root(home_paths) / "snapshots" / "context_bundles"
     if not base.exists():
         return ""
     candidates = _latest_bundle_candidates(base)
@@ -178,7 +178,7 @@ def _recovery_refs(request: MainContextBundleRequest, home_paths: Any | None) ->
         "resume_context_injected": bool(request.resume_context_injected),
     }
     if home_paths is not None:
-        archive = Path(home_paths.memory_archive_dir)
+        archive = _memory_archive_root(home_paths)
         payload.update(
             {
                 "compact_applies_root": str((archive / "compact_applies").resolve()),
@@ -201,7 +201,7 @@ def _write_bundle_files(
     bundle: dict[str, object],
 ) -> tuple[Path, Path]:
     home_paths = request.home_paths
-    base = Path(home_paths.memory_archive_dir) / "snapshots" / "context_bundles" / date.today().isoformat()
+    base = _memory_archive_root(home_paths) / "snapshots" / "context_bundles" / date.today().isoformat()
     base.mkdir(parents=True, exist_ok=True)
     stem = _bundle_stem(request)
     json_path = base / f"{stem}.json"
@@ -221,6 +221,13 @@ def _rewrite_bundle_files(json_path: Path, markdown_path: Path, bundle: dict[str
     json_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     markdown_path.write_text(render_markdown_bundle(bundle, json_path=str(json_path)), encoding="utf-8")
     _write_latest_copies(json_path.parent, json_path, markdown_path)
+
+
+def _memory_archive_root(home_paths: Any) -> Path:
+    owner_home = getattr(home_paths, "owner_home_dir", None)
+    if owner_home:
+        return Path(owner_home) / "memory_archive"
+    return Path(home_paths.memory_archive_dir)
 
 
 def _latest_bundle_candidates(base: Path) -> list[Path]:

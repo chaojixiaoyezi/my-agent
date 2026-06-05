@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from ...action_protocol import subagent_schedule_envelope_from_payload
 from ...contracts.idempotency import idempotency_key, operation_id
 from ...model_visible_refs import current_model_ref, current_model_ref_list, current_model_text
+from ...subagents.role_templates import role_template_snapshot_for_task
 from .child_result_index import child_result_index
 from .create_idempotency import created_tasks, dispatchable_tasks, reused_tasks
 from .dispatch.state_contract import dispatch_state_contract_payload
@@ -186,8 +187,8 @@ def _scheduling_advice(tasks: list, request_params: dict[str, object], auto_star
 
 
 def _is_dependent_quality_role(task: object) -> bool:
-    role = f"{_task_text(task, 'role')} {_task_text(task, 'agent_name')}".casefold().replace("-", "_")
-    return any(token in role for token in ("tester", "bug_finder", "reviewer", "verifier", "qa", "summary", "汇总", "测试", "找错", "验收"))
+    snapshot = role_template_snapshot_for_task(task)
+    return bool(snapshot.get("depends_on_outputs"))
 
 
 def _string_items(value: object) -> list[str]:

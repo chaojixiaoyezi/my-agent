@@ -57,6 +57,12 @@ class _ToolStepRequest:
     current_prompt: str
 
 
+@dataclass(frozen=True)
+class _PendingDeferredToolDrainResult:
+    tool_rounds: int
+    final_response: ModelResponse | None = None
+
+
 def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     config = getattr(agent, "config", None)
     if hasattr(config, "max_tool_rounds"):
@@ -89,6 +95,13 @@ class ToolLoopService:
         empty_response_repairs = 0
 
         while True:
+            pending_result = self._drain_pending_deferred_tool_calls(params, tool_rounds)
+            if pending_result is not None:
+                tool_rounds = pending_result.tool_rounds
+                if pending_result.final_response is not None:
+                    final_response = pending_result.final_response
+                    break
+                continue
             (
                 final_prompt,
                 final_response,
@@ -122,6 +135,33 @@ class ToolLoopService:
                 break
 
         return final_prompt, final_response, tool_rounds
+
+    def _drain_pending_deferred_tool_calls(
+        self,
+        params: ToolLoopExecuteParams,
+        tool_rounds: int,
+    ) -> _PendingDeferredToolDrainResult | None:
+        pending_calls = _pop_pending_deferred_tool_calls(params)
+        if not pending_calls:
+            return None
+        if self._tool_round_limit_reached(params, tool_rounds):
+            final_prompt, final_response = self._final_response_after_tool_limit(params, tool_rounds)
+            del final_prompt
+            return _PendingDeferredToolDrainResult(tool_rounds, final_response)
+        next_round = tool_rounds + 1
+        next_round, final_response = self._run_tool_round(
+            ToolRoundExecutionRequest(
+                self._agent,
+                params,
+                next_round,
+                ModelResponse(text="[PENDING_DEFERRED_TOOL_CALLS]", backend="tool_loop"),
+                pending_calls,
+                self._execute_one_tool_call,
+                self._record_tool_call,
+                "",
+            )
+        )
+        return _PendingDeferredToolDrainResult(next_round, final_response)
 
     def _model_turn_or_retry(
         self,
@@ -273,3 +313,13 @@ def _task_local_progress_context(progress: dict[str, object]) -> str:
             "If next_action mentions output.json, stop product-body writes and close out with structured refs.",
         ]
     )
+
+
+def _pop_pending_deferred_tool_calls(params: ToolLoopExecuteParams) -> list[dict[str, object]]:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return []
+    value = state.pop("pending_deferred_tool_calls", [])
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict) and str(item.get("tool") or "").strip()]

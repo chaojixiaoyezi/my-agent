@@ -17,7 +17,12 @@ CAPTURED_ARTIFACT_REF_LIMIT = 8
 
 def resume_focus_payload(work_state: dict[str, Any], next_actions: list[str]) -> dict[str, Any]:
     coverage_action = full_read_coverage_resume_action(work_state)
-    actions = [coverage_action] if coverage_action else action_first_actions(next_actions, work_state)
+    cursor_action = "" if coverage_action else read_cursor_resume_action(work_state)
+    actions = (
+        ([coverage_action] if coverage_action else [])
+        or ([cursor_action] if cursor_action else [])
+        or action_first_actions(next_actions, work_state)
+    )
     next_step = str(work_state.get("next_step") or "").strip()
     next_action = actions[0] if actions else next_step
     do_not_repeat = [
@@ -25,7 +30,9 @@ def resume_focus_payload(work_state: dict[str, Any], next_actions: list[str]) ->
         "不要重复已经登记的读取、写入或派工；只有验证、修补或缺事实时才重读。",
     ]
     if coverage_action:
-        do_not_repeat.append("完整阅读任务恢复后不要回到 offset=0，也不要用 search_text、run_command、grep 或 awk 代替连续 read_file 覆盖。")
+        do_not_repeat.append("完整阅读任务恢复后不要回到 offset=0；search_text/run_command 可用于定位章节或锚点，但最终覆盖证明必须来自已读取的源片段和 coverage ledger。")
+    elif cursor_action:
+        do_not_repeat.append("恢复后不要回到已登记的 offset/start_line；如果仍需读取同一来源，按机器游标继续。")
     return {
         "next_action": next_action,
         "next_actions": actions,
@@ -48,13 +55,16 @@ def action_first_actions(next_actions: list[str], work_state: dict[str, Any]) ->
 def captured_refs_payload(work_state: dict[str, Any]) -> dict[str, Any]:
     artifact_refs = work_state.get("artifact_refs") if isinstance(work_state.get("artifact_refs"), list) else []
     captured = [artifact_ref_payload(item) for item in artifact_refs[-CAPTURED_ARTIFACT_REF_LIMIT:] if isinstance(item, dict)]
+    full_read_coverage = _read_coverage_payload(work_state.get("read_coverage")) or _full_read_coverage_payload(
+        artifact_refs
+    )
     return {
         "changed_files": sequence_strings(work_state.get("changed_files")),
         "read_files": sequence_strings(work_state.get("read_files")),
         "artifact_refs": captured,
         "artifact_ref_count": len(artifact_refs),
         "omitted_artifact_ref_count": max(0, len(artifact_refs) - len(captured)),
-        "full_read_coverage": _full_read_coverage_payload(artifact_refs),
+        "full_read_coverage": full_read_coverage,
     }
 
 
@@ -68,6 +78,9 @@ def artifact_ref_payload(item: dict[str, Any]) -> dict[str, Any]:
         "source_path": source_path,
         "tool": str(item.get("tool") or ""),
         "kind": str(item.get("kind") or ""),
+        "ok": item.get("ok"),
+        "status": str(item.get("status") or ""),
+        "error_code": str(item.get("error_code") or ""),
         "offset": _optional_int(params.get("offset")),
         "max_chars": _optional_int(params.get("max_chars")),
         "start_line": _optional_int(params.get("start_line")),
@@ -80,15 +93,21 @@ def looks_like_reader_first_recovery_hint(value: str) -> bool:
     if not text:
         return False
     recovery_markers = ("memory-resume", "localstore", "compact_context", "work_state_snapshot", "restore_refs")
-    reader_markers = ("先查看", "先读取", "read ", "inspect ", "查看", "读取")
-    return any(marker in text for marker in recovery_markers) and any(marker in text for marker in reader_markers)
+    return any(marker in text for marker in recovery_markers)
 
 
 def full_read_coverage_resume_action(work_state: dict[str, Any]) -> str:
     if not _work_state_wants_full_read(work_state):
         return ""
-    cursor = _best_read_cursor(work_state.get("artifact_refs"))
-    if not cursor or cursor["covered_until"] >= cursor["total_chars"]:
+    cursor = _best_read_cursor_from_read_coverage(work_state.get("read_coverage"))
+    if not cursor:
+        cursor = _best_read_cursor_from_tool_progress(work_state.get("tool_progress"))
+    if not cursor:
+        cursor = _best_read_cursor(work_state.get("artifact_refs"))
+    if not cursor:
+        return ""
+    total = int(cursor.get("total_chars") or 0)
+    if total > 0 and int(cursor.get("covered_until") or 0) >= total:
         return ""
     source = cursor["source_path"]
     progress_ref = _task_progress_ref(work_state)
@@ -105,26 +124,67 @@ def full_read_coverage_resume_action(work_state: dict[str, Any]) -> str:
         repeat_text = "不要回到 offset=0"
     return (
         f"继续完整阅读 {source}：先沉淀上一段已读出的关键事实，再调用 {read_call}。"
-        f" {progress_text}；{repeat_text}，不要用 search_text/run_command/grep/awk 替代完整阅读。"
+        f" {progress_text}；{repeat_text}。可以用 search_text/run_command 先定位章节或锚点，"
+        "但每个需要进入最终结论的对象仍要有 read_file/read_artifact 源片段或 coverage ledger 证据。"
         " 如果任务要求逐章、逐项、逐检查点汇总，继续维护 work/ 下的事实记录表或 task_progress，最终报告以事实记录表、task_progress 完整账本和源文件证据为准，不要只靠 compact 摘要回忆。"
         f"{progress_clause}"
     )
 
 
+def read_cursor_resume_action(work_state: dict[str, Any]) -> str:
+    cursor = _best_read_cursor_from_read_coverage(work_state.get("read_coverage"))
+    if not cursor:
+        cursor = _best_read_cursor_from_tool_progress(work_state.get("tool_progress"))
+    if not cursor:
+        cursor = _best_read_cursor(work_state.get("artifact_refs"))
+    if not cursor:
+        return ""
+    total = int(cursor.get("total_chars") or 0)
+    covered = int(cursor.get("covered_until") or 0)
+    if total and covered >= total:
+        return ""
+    source = str(cursor.get("source_path") or "")
+    if not source:
+        return ""
+    if cursor.get("kind") == "line_window":
+        line = covered + 1
+        read_call = f'read_file(path="{source}", start_line={line}, max_chars=50000)'
+        progress_text = f"已连续覆盖到第 {covered} 行" + (f"/{total}" if total else "")
+    else:
+        read_call = f'read_file(path="{source}", offset={covered}, max_chars=50000)'
+        progress_text = f"已连续覆盖到 offset={covered}" + (f"/{total}" if total else "")
+    return (
+        f"根据本轮工具读取账本继续 {source}：{progress_text}；"
+        f"如果任务还需要读取这个来源，下一次从 {read_call} 开始。"
+        "不要按旧 next_action 回到已登记范围；先沉淀已读事实，再继续未覆盖部分。"
+    )
+
+
 def _work_state_wants_full_read(work_state: dict[str, Any]) -> bool:
-    texts = [
-        str(work_state.get("goal") or ""),
-        str(work_state.get("next_step") or ""),
-        *sequence_strings(work_state.get("next_actions")),
-    ]
     task_progress = work_state.get("task_progress")
     if isinstance(task_progress, dict):
-        texts.extend([
-            str(task_progress.get("summary") or ""),
-            str(task_progress.get("next_action") or ""),
-        ])
-    joined = "\n".join(texts)
-    return any(marker in joined for marker in ("完整读", "完整读取", "读完", "按顺序慢慢读", "连续 read_file"))
+        coverage = task_progress.get("coverage")
+        if _coverage_requires_full_source_read(coverage):
+            return True
+    coverage = work_state.get("target_coverage_contract")
+    return _coverage_requires_full_source_read(coverage)
+
+
+def _coverage_requires_full_source_read(value: object) -> bool:
+    coverage = value if isinstance(value, dict) else {}
+    if str(coverage.get("coverage_requirement") or "").strip() == "full_source_read":
+        return True
+    targets = coverage.get("targets")
+    if not isinstance(targets, list):
+        targets = coverage.get("active_targets")
+    if not isinstance(targets, list):
+        targets = coverage.get("target_items")
+    if not isinstance(targets, list):
+        return False
+    return any(
+        isinstance(item, dict) and str(item.get("coverage_kind") or "").strip() == "full_source_read"
+        for item in targets
+    )
 
 
 def _task_progress_ref(work_state: dict[str, Any]) -> str:
@@ -137,6 +197,8 @@ def _best_char_cursor(value: object) -> dict[str, int | str]:
     ranges_by_source: dict[str, list[tuple[int, int, int]]] = {}
     for ref in refs:
         if not isinstance(ref, dict) or str(ref.get("tool") or "") != "read_file":
+            continue
+        if not _successful_read_ref(ref):
             continue
         source = _source_path(ref)
         window = _char_window_from_ref(ref)
@@ -157,6 +219,8 @@ def _best_line_cursor(value: object) -> dict[str, int | str]:
     ranges_by_source: dict[str, list[tuple[int, int, int]]] = {}
     for ref in refs:
         if not isinstance(ref, dict) or str(ref.get("tool") or "") != "read_file":
+            continue
+        if not _successful_read_ref(ref):
             continue
         source = _source_path(ref)
         window = _line_window_from_ref(ref)
@@ -183,6 +247,86 @@ def _best_read_cursor(value: object) -> dict[str, int | str]:
     if char_cursor:
         char_cursor["kind"] = "char_window"
     return char_cursor
+
+
+def _best_read_cursor_from_tool_progress(value: object) -> dict[str, int | str]:
+    items = value if isinstance(value, list) else []
+    char_ranges: dict[str, list[tuple[int, int, int]]] = {}
+    line_ranges: dict[str, list[tuple[int, int, int]]] = {}
+    for item in items:
+        if not isinstance(item, dict) or str(item.get("tool") or "") not in {"read_file", "read_artifact"}:
+            continue
+        if not _successful_read_ref(item):
+            continue
+        source = str(item.get("source_path") or "").strip()
+        if not source:
+            continue
+        offset = _optional_int(item.get("offset"))
+        next_offset = _optional_int(item.get("next_offset"))
+        if offset is not None and next_offset is not None:
+            char_ranges.setdefault(source, []).append((offset, next_offset, _optional_int(item.get("total_chars")) or 0))
+        start_line = _optional_int(item.get("start_line"))
+        end_line = _optional_int(item.get("end_line"))
+        if start_line is not None and end_line is not None:
+            line_ranges.setdefault(source, []).append((start_line, end_line, _optional_int(item.get("total_lines")) or 0))
+    best: dict[str, int | str] = {}
+    for source, ranges in char_ranges.items():
+        covered = _covered_prefix_end([(start, end) for start, end, _total in ranges])
+        total = max((total for _start, _end, total in ranges), default=0)
+        if covered and (not best or int(best.get("covered_until") or 0) < covered):
+            best = {"kind": "char_window", "source_path": source, "covered_until": covered, "total_chars": total}
+    if best:
+        return best
+    for source, ranges in line_ranges.items():
+        covered = _covered_line_prefix_end([(start, end) for start, end, _total in ranges])
+        total = max((total for _start, _end, total in ranges), default=0)
+        if covered and (not best or int(best.get("covered_until") or 0) < covered):
+            best = {"kind": "line_window", "source_path": source, "covered_until": covered, "total_chars": total}
+    return best
+
+
+def _best_read_cursor_from_read_coverage(value: object) -> dict[str, int | str]:
+    coverage = value if isinstance(value, dict) else {}
+    primary = coverage.get("primary") if isinstance(coverage.get("primary"), dict) else {}
+    if not primary:
+        return {}
+    source = str(primary.get("source_path") or "").strip()
+    covered = _optional_int(primary.get("covered_until") or primary.get("covered_until_offset") or primary.get("covered_until_line"))
+    total = _optional_int(primary.get("total") or primary.get("total_chars") or primary.get("total_lines")) or 0
+    if not source or covered is None:
+        return {}
+    kind = str(primary.get("kind") or "char_window")
+    return {
+        "kind": "line_window" if kind == "line_window" else "char_window",
+        "source_path": source,
+        "covered_until": covered,
+        "total_chars": total,
+    }
+
+
+def _read_coverage_payload(value: object) -> dict[str, Any]:
+    coverage = value if isinstance(value, dict) else {}
+    primary = coverage.get("primary") if isinstance(coverage.get("primary"), dict) else {}
+    if not primary:
+        return {}
+    source = str(primary.get("source_path") or "").strip()
+    covered = _optional_int(primary.get("covered_until") or primary.get("covered_until_offset") or primary.get("covered_until_line"))
+    total = _optional_int(primary.get("total") or primary.get("total_chars") or primary.get("total_lines")) or 0
+    if not source or covered is None:
+        return {}
+    payload = {
+        "kind": "line_window" if primary.get("kind") == "line_window" else "char_window",
+        "source_path": source,
+        "covered_until": covered,
+        "total_chars": total,
+        "complete": bool(total and covered >= total),
+    }
+    if payload["kind"] == "line_window":
+        payload["covered_until_line"] = covered
+        payload["total_lines"] = total
+    else:
+        payload["covered_until_offset"] = covered
+    return payload
 
 
 def _full_read_coverage_payload(value: object) -> dict[str, Any]:
@@ -212,6 +356,15 @@ def _source_path(ref: dict[str, Any]) -> str:
     return str(ref.get("source_path") or params.get("path") or "").strip()
 
 
+def _successful_read_ref(ref: dict[str, Any]) -> bool:
+    if ref.get("ok") is False:
+        return False
+    if str(ref.get("error_code") or "").strip():
+        return False
+    status = str(ref.get("status") or "").strip().lower()
+    return status not in {"error", "failed", "failure", "deferred", "blocked"}
+
+
 def _optional_int(value: object) -> int | None:
     try:
         return int(value)
@@ -223,7 +376,16 @@ def _char_window_from_ref(ref: dict[str, Any]) -> tuple[int, int, int] | None:
     content = _artifact_content(ref.get("path") or ref.get("artifact_ref"))
     match = CHAR_WINDOW_RE.search(content)
     if not match:
-        return None
+        params = ref.get("parameters") if isinstance(ref.get("parameters"), dict) else {}
+        max_chars = _optional_int(params.get("max_chars"))
+        if max_chars is None:
+            return None
+        offset = _optional_int(params.get("offset"))
+        if offset is None and _optional_int(params.get("start_line")) is None and _optional_int(params.get("end_line")) is None:
+            offset = 0
+        if offset is None:
+            return None
+        return (offset, offset + max_chars, 0)
     offset, chars, total = (int(item) for item in match.groups())
     return (offset, offset + chars, total)
 

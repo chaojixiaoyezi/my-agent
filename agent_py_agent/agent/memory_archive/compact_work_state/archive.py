@@ -131,8 +131,7 @@ def _action_first_items(items: list[str]) -> list[str]:
 def _looks_like_reader_first_recovery_hint(value: str) -> bool:
     text = value.strip().lower()
     recovery_markers = ("memory-resume", "localstore", "compact_context", "work_state_snapshot", "restore_refs")
-    reader_markers = ("先查看", "先读取", "read ", "inspect ", "查看", "读取")
-    return any(marker in text for marker in recovery_markers) and any(marker in text for marker in reader_markers)
+    return any(marker in text for marker in recovery_markers)
 
 
 def _archive_texts(records: list[dict[str, Any]], key: str) -> list[str]:

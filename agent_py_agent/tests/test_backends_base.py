@@ -261,6 +261,38 @@ class TestOpenAICompatibleBackend:
             "after-second",
         ]
 
+    def test_generate_stream_normalizes_cumulative_openai_chunks(self):
+        backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4"))
+        chunks: list[str] = []
+
+        def request_stream_iter(path, payload, headers):
+            yield json.dumps({"choices": [{"delta": {"content": "[TOOL_CALL]\n"}}]})
+            yield json.dumps({"choices": [{"delta": {"content": "[TOOL_CALL]\n{\"tool\""}}]})
+            yield json.dumps({"choices": [{"delta": {"content": "[TOOL_CALL]\n{\"tool\":\"read_file\""}}]})
+            yield json.dumps(
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
+                            }
+                        }
+                    ]
+                }
+            )
+            yield "[DONE]"
+
+        backend.request_stream_iter = request_stream_iter
+        resp = backend.generate("test prompt", on_chunk=chunks.append)
+
+        assert resp.text == '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
+        assert chunks == [
+            "[TOOL_CALL]\n",
+            '{"tool"',
+            ':"read_file"',
+            ',"path":"README.md"}\n[/TOOL_CALL]',
+        ]
+
     def test_generate_stream_collects_openai_usage_chunk(self):
         backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4"))
         backend.request_stream = lambda path, payload, headers: [
@@ -376,6 +408,22 @@ class TestAnthropicCompatibleBackend:
             "chunk-lo",
             "after-second",
         ]
+
+    def test_generate_stream_normalizes_cumulative_anthropic_chunks(self):
+        backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))
+        chunks: list[str] = []
+
+        def request_stream_iter(path, payload, headers):
+            yield json.dumps({"type": "content_block_delta", "delta": {"text": "abc"}})
+            yield json.dumps({"type": "content_block_delta", "delta": {"text": "abcdef"}})
+            yield json.dumps({"type": "content_block_delta", "delta": {"text": "abcdefgh"}})
+            yield json.dumps({"type": "message_stop"})
+
+        backend.request_stream_iter = request_stream_iter
+        resp = backend.generate("test prompt", on_chunk=chunks.append)
+
+        assert resp.text == "abcdefgh"
+        assert chunks == ["abc", "def", "gh"]
 
     def test_generate_stream_retries_once_on_empty_text(self):
         backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))

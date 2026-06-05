@@ -8,7 +8,10 @@ from typing import Any
 
 from ...artifacts.registry import registry_path
 from ...backends import ModelResponse
-from ...contracts.delivery_contract_doctor import ContractDoctorReport, validate_delivery_contract
+from ...contracts.delivery_contract_doctor import (
+    ContractDoctorReport,
+    validate_delivery_contract,
+)
 from .._runtime_params import ToolLoopExecuteParams
 from ..main_agent_delivery_progress_ledger import append_delivery_progress_event
 from ..main_agent_delivery_tool_failure_recovery import attach_tool_failure_recovery_actions
@@ -149,9 +152,38 @@ def _closeout_archive_tool_calls(closeout: MainAgentDeliveryCloseoutRequest) -> 
 
 def _disk_tool_output_records(agent: object, seed_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    scope = _archive_scope(seed_records)
     for index_path in _tool_output_index_paths(agent, seed_records):
         rows.extend(_read_tool_output_index(index_path))
+    if scope:
+        rows = [row for row in rows if _record_matches_archive_scope(row, scope)]
     return rows
+
+
+def _archive_scope(seed_records: list[dict[str, Any]]) -> dict[str, set[str]]:
+    run_ids = {
+        text
+        for record in seed_records
+        if (text := str(record.get("run_id") or "").strip())
+    }
+    task_ids = {
+        text
+        for record in seed_records
+        if (text := str(record.get("task_id") or "").strip())
+    }
+    return {key: value for key, value in {"run_id": run_ids, "task_id": task_ids}.items() if value}
+
+
+def _record_matches_archive_scope(row: dict[str, Any], scope: dict[str, set[str]]) -> bool:
+    run_ids = scope.get("run_id") or set()
+    task_ids = scope.get("task_id") or set()
+    row_run = str(row.get("run_id") or "").strip()
+    row_task = str(row.get("task_id") or "").strip()
+    if run_ids and row_run in run_ids:
+        return True
+    if task_ids and row_task in task_ids:
+        return True
+    return False
 
 
 def _tool_output_index_paths(agent: object, seed_records: list[dict[str, Any]]) -> list[Path]:

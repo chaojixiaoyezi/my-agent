@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from ...role_templates import COORDINATOR_TOOLS
+from ...role_templates import COORDINATOR_TOOLS, role_template_snapshot_for_role
 
 _DEFAULT_LEAF_CODING_TOOLS = [
     "list_files",
@@ -81,8 +81,8 @@ def should_infer_leaf_coding_tools(request: LeafWriteIntentRequest) -> bool:
 
 
 def is_coordinator_spec(spec: Any) -> bool:
-    role_text = f"{getattr(spec, 'role', '')} {getattr(spec, 'agent_name', '')}".lower()
-    return "coordinator" in role_text or "lead" in role_text
+    snapshot = role_template_snapshot_for_role(str(getattr(spec, "role", "") or ""))
+    return bool(snapshot.get("can_spawn_children"))
 
 
 def _leaf_write_tools(tools: list[str]) -> list[str]:

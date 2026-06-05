@@ -108,7 +108,7 @@ def build_task_progress_spec() -> ToolSpec:
             "coverage_targets": "可选。coverage.targets 的简写列表，每项可含 id/name/title/status/checks/expected_fields/fields/fields_needed/missing_fields/evidence/notes/next；也可写成“对象名: 字段A,字段B”。",
         },
         parameter_details={
-            "items": "这是开放清单，不是业务模板。status 可写 pending/in_progress/done/skipped/blocked，也可写更适合当前任务的短状态。长文、长清单、逐章/逐项任务里，优先每个对象写一个 item；notes 写真实读到的短事实，evidence 写文件、offset/行号、artifact_ref 或来源说明。不要只写“章节001-012已覆盖”来代替逐项事实。",
+            "items": "这是开放清单，不是业务模板。status 只用 pending/in_progress/done/skipped/blocked；completed/read/ok 这类说明写 notes/summary，不要写进 status。长文、长清单、逐章/逐项任务里，优先每个对象写一个 item；notes 写真实读到的短事实，evidence 写文件、offset/行号、artifact_ref 或来源说明。不要只写“章节001-012已覆盖”来代替逐项事实。",
             "coverage": "这是开放世界覆盖清单，不限定对象类型。targets 可以是项目、论文、API、日志源、文件、模块或任何当前任务对象；checks 的键由当前任务自己定义；如果你只知道要覆盖哪些字段，也可先填 expected_fields/fields_needed。长任务里建议边读、边分析、边写报告时更新，不要最后一次性随便打钩；范围进度和逐项事实最好分开写。",
         },
         examples=[

@@ -37,6 +37,8 @@ class ExternalizeToolOutputRequest:
     call_id: str
     output: str
     ok: bool
+    status: str = ""
+    error_code: str = ""
     run_id: str = ""
     task_id: str = ""
     request_id: str = ""
@@ -58,7 +60,7 @@ def externalize_tool_output_record(request: ExternalizeToolOutputRequest) -> dic
         if not record.get("output_externalized") and not record.get("source_output_archived"):
             _append_tool_call_index(request, record, digest)
         return record
-    if len(output) >= max(0, int(resolved.min_chars)):
+    if _output_meets_archive_threshold(output, resolved.min_chars):
         path = _write_output_artifact(request, output, digest)
         record.update({
             "output_externalized": True,
@@ -75,7 +77,7 @@ def _archive_bounded_read_file_output(
     output: str,
     resolved: _ResolvedOutputLimits,
 ) -> dict[str, Any]:
-    if len(output) < max(0, int(resolved.min_chars)):
+    if not _output_meets_archive_threshold(output, resolved.min_chars):
         return {
             "source_output_archived": False,
             "source_output_path": "",
@@ -114,6 +116,20 @@ def _request_limit(value: object, default: int) -> int:
     return int(default) if parsed < 0 else max(0, parsed)
 
 
+def _output_meets_archive_threshold(output: str, min_chars: int) -> bool:
+    threshold = max(0, int(min_chars))
+    if threshold <= 0:
+        return True
+    return max(len(output), len(output.encode("utf-8"))) >= threshold
+
+
+def _request_status(request: ExternalizeToolOutputRequest) -> str:
+    status = str(request.status or "").strip()
+    if status:
+        return status
+    return "ok" if request.ok else "error"
+
+
 def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str, *, preview_chars: int) -> dict[str, Any]:
     return {
         "version": TOOL_OUTPUT_RECORD_SCHEMA.version,
@@ -126,6 +142,8 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
         "task_id": request.task_id,
         "scoped_call_id": _scoped_call_id(request),
         "ok": request.ok,
+        "status": _request_status(request),
+        "error_code": str(request.error_code or "").strip(),
         "output_preview": _preview(output, preview_chars),
         "output_hash": digest,
         "output_size_bytes": len(output.encode("utf-8")),
@@ -145,6 +163,8 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
         "call_id": request.call_id,
         "scoped_call_id": _scoped_call_id(request),
         "ok": request.ok,
+        "status": _request_status(request),
+        "error_code": str(request.error_code or "").strip(),
         "request_id": request.request_id,
         "run_id": request.run_id,
         "task_id": request.task_id,
@@ -172,6 +192,9 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
         "request_id": payload["request_id"],
         "run_id": payload["run_id"],
         "task_id": payload["task_id"],
+        "ok": bool(payload.get("ok")),
+        "status": str(payload.get("status") or ""),
+        "error_code": str(payload.get("error_code") or ""),
         "parameters": _safe_parameters(payload.get("parameters")),
         "source_input": str(payload.get("source_input") or ""),
         "path": str(path),
@@ -196,6 +219,9 @@ def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[
         "request_id": request.request_id,
         "run_id": request.run_id,
         "task_id": request.task_id,
+        "ok": request.ok,
+        "status": str(record.get("status") or _request_status(request)),
+        "error_code": str(record.get("error_code") or request.error_code or "").strip(),
         "parameters": _safe_parameters(request.parameters),
         "source_input": _source_input(request.parameters),
         "path": "",

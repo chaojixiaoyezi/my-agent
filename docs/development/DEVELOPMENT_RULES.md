@@ -261,15 +261,49 @@ before changing code.
   runtime 可以提醒模型先把已读片段的对象、事实和 source/offset/行号证据沉淀到
   `task_progress` 或当前任务 work 草稿，再继续读下一段。这个提醒只降低 compact
   摘要漏事实的风险，不改变 closeout 的硬验收边界。
-- 当用户明确要求“完整读完 / 完整读取 / 全文读完 / 从头到尾”某个源文件时，
-  delivery materializer 可以补出 `target_coverage_contract`，把该源文件登记为
-  required `full_source_read`。closeout 只用工具读文件记录里的客观
-  `offset/chars/total_chars` 或 `start_line/end_line/total_lines` 区间验收：从开头
-  连续覆盖到 EOF 才算完成；只读到部分不能因为最终报告存在就通过。这个规则
-  只适用于可机器证明的来源读取覆盖，不能扩展成“报告质量/分析深度”的通用硬门。
+- 普通自然语言里的“完整读完 / 完整读取 / 全文读完 / 从头到尾”不能自动升级成
+  required `full_source_read` 硬合同。它可以驱动进度账本、coverage ledger 和软提示，
+  但默认 chat/cli/gateway 主链路不跑 delivery materializer，不把用户话术转成隐藏验收门。
+- 只有外部调用方显式传入结构化 `delivery_contract.target_coverage_contract`，或当前
+  run 已有结构化覆盖合同时，closeout 才执行机器可证明的覆盖验收。required
+  `full_source_read` 只用工具读文件记录里的客观 `offset/chars/total_chars` 或
+  `start_line/end_line/total_lines` 区间验收：从开头连续覆盖到 EOF 才算完成；只读到
+  部分不能因为最终报告存在就通过。这个规则只适用于显式结构化合同，不能扩展成
+  “报告质量/分析深度”的通用硬门。
+- delivery materializer 如果未来用于离线/显式合同流程，它输出的也只是结构化合同候选；
+  不得在默认运行中根据中文关键词、报告措辞或路径猜测触发修复轮、重物化轮或 closeout
+  阻断。合同医生只能处理已显式存在的结构化合同问题。
+- 运行时事实源必须保存本轮显式 `delivery_contract` 和 `target_coverage` 摘要；compact
+  work state / handoff 也要携带这份结构化覆盖合同。compact 多轮之后不能退化成只靠
+  “继续读到哪里”这类自然语言摘要恢复覆盖要求。
+- compact work state 必须保存工具读取游标。对同一个大文件的多段 `read_file` /
+  `read_artifact` 记录，要保留 `offset/max_chars/next_offset/total_chars` 或
+  `start_line/end_line/next_start_line/total_lines`，不能去重成“这个文件读过一次”。
+  恢复提示只能基于这些机器游标建议下一段，不能提示模型把“文件名出现过”当作完整覆盖。
+- `memory-fact-write` 等人工确认事实只能补充同一个 runtime fact，不能覆盖掉已有的
+  `run_id` / `task_id` / `delivery_contract` / `desired_outputs` /
+  `target_coverage` / `run_intent`。人工验收字段是增量事实，不是替换当前 run 状态。
+- closeout 计算 `target_coverage_status` 时，磁盘 tool-output index 只能补当前
+  run/task 的工具记录；同一 workspace 里旧 run、旧 case 的读取记录不能替本轮覆盖背书。
+- `search_text`、`grep`、目录扫描或 shell 统计可以作为长文本/多文件任务的定位索引，
+  帮模型快速找到章节、锚点或候选范围；但这些命中不能单独满足 required
+  `full_source_read`。进入最终结论的对象仍需要 `read_file`/`read_artifact` 源片段、
+  artifact refs 或 coverage ledger 证据。
+- `target_coverage_contract.target_items[]` 里的单项 `enforcement=required`
+  与顶层 `enforcement=required` 等价。只有顶层
+  `coverage_requirement=full_source_read` 或单项 `coverage_kind=full_source_read`
+  时，source `path` / `source_path` 才必须由连续 `read_file` 覆盖证明关闭；
+  `search_text`、`grep`、`run_command` 可辅助定位，但不能替代 full-source coverage。
 - `task_progress` 里的普通 evidence/coverage 缺口是 advisory。它可以提醒模型补证据、
   补来源或继续完善报告，但不能在没有结构化 required 读取合同时，把“done 项证据
   不够多”或“覆盖清单没填满”升级成 closeout 硬阻断。
+- `task_progress.items[].status` 是机器状态字段。工具入口只接受
+  `pending` / `in_progress` / `done` / `skipped` / `blocked`；`completed`、
+  “已完成”“已验收”“read”“ok”这类自然语言或自定义标签必须写到
+  `notes` / `summary`，不能写入 `status`。
+- 当本轮存在结构化来源覆盖合同时，closeout 可以对最终产物里的机器型 ID 做来源一致性
+  检查：产物中出现而声明来源中不存在的稳定 ID 是硬错误。这个检查只读 source refs、
+  artifact refs 和工具记录，不靠报告自然语言判断“质量好坏”。
 - closeout 返工上下文只能在模型明确调用 `submit_for_acceptance` 且本次验收未通过时
   注入一次。普通工具循环、长任务续跑、compact 续接和后续读写轮次不得反复复读旧
   closeout 失败，避免模型被历史验收噪音带偏。
@@ -424,6 +458,10 @@ do_write()
   `read_artifact mode=search/head/tail` or small slices over full artifact reads.
   `read_file` may read registered `blobs/tool_outputs/*.json` wrappers as
   artifact content.
+- Tool outputs are externalized only when they are large enough to threaten the
+  live prompt. Moderate extraction/search results should stay inline so the next
+  model turn can immediately use the facts, while blob/archive refs still keep
+  the full output auditable for compact and recovery.
 - A budget hit must be a recoverable self-check/handoff signal: return a bounded
   tool result asking the agent to summarize current progress, detect repeated
   tool use, and escalate to its parent if more tools are needed. Do not silently
@@ -502,21 +540,17 @@ do_write()
   coordination, writing, or research, not a one-off action like checking one
   button. Include Chinese fields (`name_zh`, `summary_zh`, `use_when_zh`,
   `output_contract_zh`) so humans and LLMs can both read it.
-- Role selection guidance is part of the delegation contract. Root and
-  coordinator/lead prompts should keep a short index of when to use each broad
-  role, then load details only when dispatching. Worker/writer produce real
-  artifacts; researcher gathers facts; tester verifies behavior; bug_finder
-  searches for defects and counterexamples; checker prepares final closeout
-  recommendations; coordinator/lead splits, broadcasts, corrects, rescues, and
-  summarizes refs without defaulting to writing final product artifacts.
+- Role behavior is template data, not runtime magic. Runtime code may read
+  structured template fields such as `can_spawn_children`, `can_run_tests`,
+  `depends_on_outputs`, and `output_contract`, but it must not hard-code role
+  id lists or infer role behavior from `agent_name` or user prose. `role`
+  selects the template; `agent_name` is only a display name.
 - Explicit QA role requirements are machine contracts, not prose suggestions.
-  If a parent goal or closeout check names `tester`, `bug_finder`, or
-  `checker` (including the Chinese role names), detection must flow through
-  `qa_role_contract.py`. QA roles themselves are terminal reviewer roles and
-  must not be forced to spawn another same-role child just because their own
-  goal contains `tester`, `bug_finder`, or `checker`. Scheduling should expose
-  quality advice for the LLM to choose scope/order, while acceptance verifies
-  real persisted descendant roles instead of trusting summaries.
+  They must come from structured fields such as `required_qa_roles` and role
+  template capability snapshots, not from scanning parent goals or closeout
+  prose. Scheduling should expose quality advice for the LLM to choose
+  scope/order, while acceptance verifies real persisted descendant roles and
+  template snapshots instead of trusting summaries.
 - Runner-context dispatch suggestions must not accidentally re-enable generic
   workflow expansion. When a parent is merely continuing existing direct
   children, the suggested `dispatch_subagents` call should use

@@ -257,6 +257,27 @@ def test_tool_output_externalizer_uses_configured_threshold_and_preview(tmp_path
     assert record["output_preview"] == "abcdef\n... [truncated 10 chars]"
 
 
+def test_tool_output_externalizer_default_keeps_few_kb_output_inline(tmp_path: Path) -> None:
+    from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
+        ExternalizeToolOutputRequest,
+        externalize_tool_output_record,
+    )
+
+    output = "x" * 3500
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="run_command",
+            call_id="1",
+            output=output,
+            ok=True,
+        )
+    )
+
+    assert record["output_externalized"] is False
+    assert record["output_preview"] == output
+
+
 def test_contract_status_summary_can_read_scan_limits_from_config(tmp_path: Path) -> None:
     import json
 

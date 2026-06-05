@@ -116,6 +116,7 @@ def _write_control_plane_fixture(root: Path) -> None:
             task_id="task-control",
             run_id="run-control",
             request_id="req-control",
+            min_chars=0,
         )
     )
 

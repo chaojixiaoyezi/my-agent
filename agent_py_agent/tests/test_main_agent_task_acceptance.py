@@ -32,6 +32,50 @@ def test_task_acceptance_ignores_open_session_for_accepted_target(tmp_path):
     assert report.artifacts[0].ok is True
 
 
+def test_task_acceptance_allows_user_requested_absolute_output_root(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_task_acceptance import (
+        TaskRunAcceptanceRequest,
+        validate_task_artifacts,
+    )
+
+    workspace = tmp_path / "task"
+    requested = tmp_path.parent / f"{tmp_path.name}-requested-output"
+    requested.mkdir()
+    report_path = requested / "report.md"
+    report_path.write_text("finished report with enough detail", encoding="utf-8")
+    expected = tmp_path / "expected_artifacts.json"
+    expected.write_text(
+        json.dumps(
+            {
+                "artifacts": [
+                    {
+                        "artifact_id": "user_requested_report",
+                        "kind": "md",
+                        "preferred_path": str(report_path),
+                        "allowed_output_roots": [str(requested)],
+                        "required": True,
+                        "validation_contract": {"min_size": 10},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = validate_task_artifacts(
+        TaskRunAcceptanceRequest(
+            expected_artifacts_path=expected,
+            task_workspace=workspace,
+            report_path=tmp_path / "acceptance_report.json",
+        )
+    )
+
+    assert report.ok is True
+    assert report.artifacts[0].ok is True
+    findings = report.artifacts[0].report["findings"]
+    assert {item["code"] for item in findings} == set()
+
+
 def _write_valid_workbook(workspace: Path) -> Path:
     from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
     write_xlsx_fixture(workspace, 

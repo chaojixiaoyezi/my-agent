@@ -18,8 +18,6 @@ class _LargeLogMarker:
 def main_large_log_prompt() -> str:
     return textwrap.dedent(
         """
-        这次你自己完成，不要派小傻妞。
-
         logs/huge_app.log 是一个很大的日志文件。请不要把日志全文复制到回复里。
         你要帮我找里面最重要的异常线索，重点关注付款、流程状态、超时、trace id。
         最终把审计结果写到 lab_outputs/large-log-audit/report.md。

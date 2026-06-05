@@ -182,9 +182,9 @@ def test_dispatch_externalized_result_keeps_top_level_completion_gate():
             "completion_status": {
                 "status": "not_complete",
                 "blocking_run_ids": ["child-bad"],
-                "must_not_report_done": True,
+                "completion_risk": True,
             },
-            "must_not_report_done": True,
+            "completion_risk": True,
             "blocking_run_ids": ["child-bad"],
             "next_action": "repair_or_continue_blocking_run_ids",
             "final_closeout_repair_advice": {
@@ -201,7 +201,7 @@ def test_dispatch_externalized_result_keeps_top_level_completion_gate():
     )
 
     assert "not_complete" in rendered
-    assert "must_not_report_done" in rendered
+    assert "completion_risk" in rendered
     assert "child-bad" in rendered
     assert "repair_or_continue_blocking_run_ids" in rendered
     assert "create_subagents" not in rendered

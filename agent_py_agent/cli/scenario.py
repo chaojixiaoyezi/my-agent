@@ -108,8 +108,8 @@ def _cmd_scenario_happy_path(args, paths):
     final_ok = _cmd_scenario_dispatch(
         ScenarioDispatchRequest(agent, args, paths, created_via, gateway_payload)
     )
-    _cmd_scenario_verify_files(agent, args, paths, final_ok)
-    return 0 if final_ok else 2
+    verified_ok = _cmd_scenario_verify_files(agent, args, paths, final_ok)
+    return 0 if verified_ok else 2
 
 
 @dataclass(frozen=True)
@@ -196,6 +196,7 @@ def _cmd_scenario_verify_files(agent, args, paths, final_ok):
     print(f"\nsummary_json={paths.summary_json}")
     print(f"summary_md={paths.summary_md}")
     print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
+    return final_ok
 
 
 def cmd_scenario_test(args) -> int:

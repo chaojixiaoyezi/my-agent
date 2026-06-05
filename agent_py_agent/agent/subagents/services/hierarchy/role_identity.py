@@ -13,5 +13,7 @@ def role_from_child_spec_identity(spec: Any) -> str:
     role = normalize_subagent_role(str(getattr(spec, "role", "") or "").strip())
     if role not in _PLACEHOLDER_ROLES:
         return role
-    template_role = role_template_id_for_role(str(getattr(spec, "agent_name", "") or ""), default_id="")
-    return template_role or "worker"
+    agent_name = normalize_subagent_role(str(getattr(spec, "agent_name", "") or "").strip())
+    if agent_name not in _PLACEHOLDER_ROLES and role_template_id_for_role(agent_name):
+        return agent_name
+    return "worker"

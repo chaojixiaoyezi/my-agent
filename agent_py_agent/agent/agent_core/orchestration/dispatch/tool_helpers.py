@@ -103,7 +103,6 @@ def _dispatch_top_level_guidance(agent: object, report: object, records: list[di
             load_errors,
         ),
         "completion_risk": bool(blockers or unfinished or load_errors),
-        "must_not_report_done": bool(blockers or unfinished or load_errors),
     }
     if blockers:
         payload["blocking_run_ids"] = blockers
@@ -157,7 +156,6 @@ def _dispatch_completion_status(
             "unfinished_run_ids": [],
             "unfinished_load_errors": [],
             "completion_risk": False,
-            "must_not_report_done": False,
         }
     payload: dict[str, object] = {
         "status": "not_complete",
@@ -165,7 +163,6 @@ def _dispatch_completion_status(
         "unfinished_run_ids": unfinished_run_ids,
         "unfinished_load_errors": load_errors,
         "completion_risk": True,
-        "must_not_report_done": True,
         "recommended_next_action": "inspect_or_continue_unfinished_run_ids",
     }
     if load_errors and not (blocking_run_ids or unfinished_run_ids):

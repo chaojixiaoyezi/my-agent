@@ -37,6 +37,7 @@ class FinalizeContext:
     compact_auto_no_tool_continue_depth: int = 0
     main_context_bundle_path: str = ""
     main_context_bundle_markdown_path: str = ""
+    delivery_contract: dict | None = None
 
 
 @dataclass(frozen=True)

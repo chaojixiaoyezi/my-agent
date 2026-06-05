@@ -46,6 +46,7 @@ class WorkStateFieldSources:
     runtime_handoff: dict[str, Any]
     desired_outputs: dict[str, Any]
     run_intent: dict[str, Any]
+    target_coverage: dict[str, Any]
 
 
 def build_work_state_field_sources(request: WorkStateFieldSourceRequest) -> WorkStateFieldSources:
@@ -64,6 +65,7 @@ def build_work_state_field_sources(request: WorkStateFieldSourceRequest) -> Work
     runtime_handoff = build_runtime_handoff(workspace, ids)
     desired_outputs = _field_payload(_field_items(roots, ("task.json",), json_keys=("desired_outputs",)))
     run_intent = compact_run_intent_payload(roots)
+    target_coverage = _object_payload(_field_objects(roots, ("task.json",), json_keys=("target_coverage",)))
     return WorkStateFieldSources(
         goal,
         list(next_actions["items"]),
@@ -75,6 +77,7 @@ def build_work_state_field_sources(request: WorkStateFieldSourceRequest) -> Work
         runtime_handoff,
         desired_outputs,
         run_intent,
+        target_coverage,
     )
 
 
@@ -152,6 +155,35 @@ def _field_payload(source: dict[str, Any]) -> dict[str, Any]:
     return {
         "items": list(source["items"]),
         "source_status": "recorded" if source["items"] else "not_recorded",
+        "source_paths": list(source["source_paths"]),
+    }
+
+
+def _field_objects(roots: list[Path], file_names: tuple[str, ...], *, json_keys: tuple[str, ...]) -> dict[str, Any]:
+    parsed = [_parsed_object(path, json_keys) for root in roots for path in _candidate_files(root, file_names)]
+    parsed.extend(_parsed_object(root / "task.json", json_keys) for root in roots if (root / "task.json").exists())
+    objects = [item for item, _path in parsed if item]
+    return {
+        "objects": objects,
+        "source_paths": dedupe_strings([path for item, path in parsed if item and path]),
+    }
+
+
+def _parsed_object(path: Path, json_keys: tuple[str, ...]) -> tuple[dict[str, Any], str]:
+    payload = _read_json_dict(path)
+    for key in json_keys:
+        value = payload.get(key)
+        if isinstance(value, dict) and value:
+            return dict(value), str(path)
+    return {}, str(path)
+
+
+def _object_payload(source: dict[str, Any]) -> dict[str, Any]:
+    objects = source.get("objects") if isinstance(source.get("objects"), list) else []
+    payload = dict(objects[0]) if objects and isinstance(objects[0], dict) else {}
+    return {
+        "payload": payload,
+        "source_status": "recorded" if payload else "not_recorded",
         "source_paths": list(source["source_paths"]),
     }
 

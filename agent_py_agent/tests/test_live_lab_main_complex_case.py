@@ -42,7 +42,7 @@ def test_main_complex_case_is_registered_as_real_opt_in_suite():
         "main_large_log_audit",
     } <= REAL_CASES
     for prompt in prompts:
-        assert "这次你自己完成，不要派小傻妞" in prompt
+        assert "不要派" not in prompt
         assert "dispatch" not in prompt.lower()
         assert "runner" not in prompt.lower()
         assert "contract" not in prompt.lower()

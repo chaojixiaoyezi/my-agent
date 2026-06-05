@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ...subagents.role_templates import role_template_snapshot_for_task
+
 if TYPE_CHECKING:
     from ...subagents import SubAgentTask
 
@@ -82,41 +84,21 @@ def _runner_timeout_role_keys(task: SubAgentTask) -> list[str]:
     parent_id = str(getattr(task, "parent_id", "") or "")
     root_id = str(getattr(task, "root_id", "") or "")
     role = str(getattr(task, "role", "") or "").strip().lower()
-    if (not parent_id or (run_id and root_id and run_id == root_id)) and _runner_timeout_root_like_role(role):
+    if (not parent_id or (run_id and root_id and run_id == root_id)) and _runner_timeout_root_like_role(role, task):
         keys.append("root")
     if str((getattr(task, "attributes", {}) or {}).get("takeover_source_run_id") or "").strip():
         keys.append("takeover")
     if role:
         keys.append(role)
-        keys.extend(_runner_timeout_role_aliases(role))
+    if role in {"child_worker", "leaf_worker"}:
+        keys.append("worker")
     return keys
 
 
-def _runner_timeout_root_like_role(role: str) -> bool:
-    normalized = str(role or "").strip().lower().replace("-", "_")
-    if not normalized:
+def _runner_timeout_root_like_role(role: str, task: SubAgentTask | None = None) -> bool:
+    if not str(role or "").strip():
         return True
-    return normalized in {"root", "coordinator", "leader", "manager", "planner", "dispatcher"} or normalized.endswith(
-        "_coordinator"
-    )
-
-
-def _runner_timeout_role_aliases(role: str) -> list[str]:
-    aliases: list[str] = []
-    normalized = str(role or "").strip().lower().replace("-", "_")
-    if "worker" in normalized and normalized != "worker":
-        aliases.append("worker")
-    if normalized in {"review", "reviewer", "critic", "qa", "tester"}:
-        aliases.append("tester")
-    if normalized in {"verifier"}:
-        aliases.append("tester")
-    if (
-        ("coordinator" in normalized and normalized != "coordinator")
-        or normalized in {"leader", "manager", "planner", "dispatcher"}
-        or normalized.endswith("_leader")
-    ):
-        aliases.append("coordinator")
-    return aliases
+    return bool(role_template_snapshot_for_task(task).get("can_spawn_children")) if task is not None else False
 
 
 def _runner_timeout_value_disabled(value: object) -> bool:

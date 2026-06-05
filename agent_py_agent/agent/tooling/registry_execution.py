@@ -87,10 +87,11 @@ def parse_registry_tool_calls(
 
     scan_text = mask_protected_control_ranges(text)
     calls = _parse_tool_block_calls(scan_text, payload_limits=payload_limits)
-    calls.extend(malformed_tool_marker_calls(scan_text))
-    calls.extend(parse_write_file_raw_blocks(scan_text))
-    calls.extend(malformed_file_write_raw_block_calls(scan_text))
-    calls.extend(parse_xmlish_tool_calls(scan_text))
+    top_level_text = _mask_ranges(scan_text, _tool_block_ranges(scan_text))
+    calls.extend(malformed_tool_marker_calls(top_level_text))
+    calls.extend(parse_write_file_raw_blocks(top_level_text))
+    calls.extend(malformed_file_write_raw_block_calls(top_level_text))
+    calls.extend(parse_xmlish_tool_calls(top_level_text))
     calls.sort(key=lambda item: item[0])
     return [payload for _, payload in calls]
 
@@ -115,6 +116,34 @@ def _parse_tool_block_calls(
             break
         cursor = _append_closed_tool_block(context, start, body_start, end_info)
     return calls
+
+
+def _tool_block_ranges(scan_text: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    while True:
+        start_info = next_tool_block_start(scan_text, cursor)
+        if start_info is None:
+            return ranges
+        start, marker_start = start_info
+        body_start = start + len(marker_start)
+        end_info = next_tool_block_end(scan_text, body_start)
+        if end_info is None:
+            ranges.append((start, len(scan_text)))
+            return ranges
+        end, marker_end = end_info
+        cursor = end + len(marker_end)
+        ranges.append((start, cursor))
+
+
+def _mask_ranges(text: str, ranges: list[tuple[int, int]]) -> str:
+    if not ranges:
+        return text
+    chars = list(text)
+    for start, end in ranges:
+        for index in range(start, end):
+            chars[index] = " "
+    return "".join(chars)
 
 
 def _append_unclosed_tool_block(

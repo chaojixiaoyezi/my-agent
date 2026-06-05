@@ -14,6 +14,9 @@
 - 用户明确了产物路径时写 `output_files`；没有明确路径时不要强造。
 - 替换旧子代理时使用 `replacement_for_run_ids`，让系统记录结构化接管关系。
 - 模型侧角色索引只展示角色 id、中文说明和能力标签；模板文件路径只留给调试接口，不进入 prompt。
+- `role` 选择角色模板；`agent_name` 只用于人类显示和点名，不参与机器角色判断。
+- 运行时判断使用模板字段，例如 `can_spawn_children`、`depends_on_outputs`、`can_run_tests`；
+  不按 `tester/coordinator/验收/汇总` 这类普通词或显示名做硬判断。
 
 ## inspect_agent_tree
 

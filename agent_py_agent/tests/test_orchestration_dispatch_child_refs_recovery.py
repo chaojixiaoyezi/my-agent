@@ -30,7 +30,10 @@ def test_dispatch_payload_surfaces_qa_repair_advice_from_direct_child(tmp_path: 
     tester_dir.mkdir()
     (tester_dir / "output.json").write_text(
         json.dumps({
-            "structured_output": {"summary": "flow-b.html 缺少到 flow-done.html 的链接，流程断裂。"},
+            "structured_output": {
+                "ok": False,
+                "summary": "flow-b.html 缺少到 flow-done.html 的链接，流程断裂。",
+            },
             "acceptance": ["flow-b.html 到 flow-done.html 链接缺失"],
         }, ensure_ascii=False),
         encoding="utf-8",
@@ -145,7 +148,7 @@ def test_dispatch_payload_surfaces_qa_repair_advice_from_descendant(tmp_path: Pa
     tester_dir = tmp_path / "tester"
     tester_dir.mkdir()
     (tester_dir / "output.json").write_text(
-        json.dumps({"structured_output": {"summary": "发现缺陷：按钮没有效果。"}}, ensure_ascii=False),
+        json.dumps({"structured_output": {"ok": False, "summary": "发现缺陷：按钮没有效果。"}}, ensure_ascii=False),
         encoding="utf-8",
     )
 

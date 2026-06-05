@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import fields, replace
 
 from ...memory_archive import build_auto_resume_context, has_resume_trigger
@@ -294,6 +295,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     one_shot_tool_calls: set[str] = set()
     executed_tools: list[str] = []
     archive_tool_calls: list[dict[str, object]] = list(params.carried_archive_tool_calls or [])
+    live_archive_state = _live_archive_state_from_carried_archive_tool_calls(archive_tool_calls)
     return ToolLoopExecuteParams(
         user_prompt=params.user_prompt,
         root_user_prompt=params.root_user_prompt or params.user_prompt,
@@ -321,5 +323,53 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         archive_tool_calls=archive_tool_calls,
         tool_rounds=tool_rounds,
         save=params.save,
+        live_archive_state=live_archive_state,
         context_scope=params.context_scope,
     )
+
+
+def _live_archive_state_from_carried_archive_tool_calls(records: list[dict[str, object]]) -> dict[str, object]:
+    pending = _pending_deferred_tool_calls(records)
+    if not pending:
+        return {}
+    return {"pending_deferred_tool_calls": pending}
+
+
+def _pending_deferred_tool_calls(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    pending: dict[str, dict[str, object]] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        params = _record_parameters(record)
+        if not params:
+            continue
+        key = _tool_call_key(params)
+        if not key:
+            continue
+        if _is_context_compact_deferred(record):
+            pending[key] = params
+            continue
+        if bool(record.get("ok")) and key in pending:
+            pending.pop(key, None)
+    return list(pending.values())
+
+
+def _record_parameters(record: dict[str, object]) -> dict[str, object]:
+    params = record.get("parameters")
+    if not isinstance(params, dict):
+        return {}
+    tool = str(params.get("tool") or record.get("tool") or "").strip()
+    if not tool:
+        return {}
+    return {**params, "tool": tool}
+
+
+def _is_context_compact_deferred(record: dict[str, object]) -> bool:
+    return str(record.get("error_code") or "").strip() == "CONTEXT_COMPACT_DEFERRED"
+
+
+def _tool_call_key(payload: dict[str, object]) -> str:
+    try:
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        return ""

@@ -1,11 +1,7 @@
 
 from __future__ import annotations
 
-"""main-agent complex E2E cases.
-
-这里的测试不让主代理派小傻妞，而是让主代理自己完成任务。
-这样能先把“单个 my-agent 是否足够硬”测出来，再决定什么时候继续压子代理链路。
-"""
+"""main-agent complex E2E cases."""
 
 import json
 import textwrap
@@ -75,8 +71,6 @@ def _ensure_main_agent_only(lab) -> None:
 def _main_tool_failure_prompt() -> str:
     return textwrap.dedent(
         """
-        这次你自己完成，不要派小傻妞。
-
         请先尝试读取 notes/does-not-exist.md。
         如果这个文件不存在，不要停，也不要假装读到了；请改读 notes/small_task.md 和 README.md。
         然后把你怎么恢复、最终读到了什么、下一步建议，写到 lab_outputs/tool-recovery/report.md。

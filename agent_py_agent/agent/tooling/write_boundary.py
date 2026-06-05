@@ -15,7 +15,6 @@ from ..path_access_policy import PathAccessPolicy
 
 WRITE_TOOL_NAMES = {"write_file", "apply_patch"}
 _MAX_BOUNDARY_PATH_CHARS = 4096
-_PRODUCT_WRITE_DELEGATE_POLICY = "delegate"
 _INTERNAL_OUTPUT_JSON_NAME = "output.json"
 _WRITE_SCOPE_BOUNDARY_KEYS = frozenset(
     {
@@ -26,23 +25,6 @@ _WRITE_SCOPE_BOUNDARY_KEYS = frozenset(
         "product_write_roots",
         "task_dir",
     }
-)
-_REPORT_ARTIFACT_SUFFIXES = (".md", ".txt", ".json", ".jsonl")
-_REPORT_ARTIFACT_NAME_MARKERS = (
-    "acceptance",
-    "audit",
-    "bug",
-    "check",
-    "finding",
-    "handoff",
-    "report",
-    "review",
-    "status",
-    "summary",
-    "test",
-    "验收",
-    "报告",
-    "测试",
 )
 
 
@@ -172,40 +154,6 @@ def _internal_output_json_error(
         f" target={_display_path(target, workspace_root)} "
         f"execution_context.output_json={output_refs[0]}"
     )
-
-
-def _product_write_policy_error(
-    target: Path,
-    write_boundary: dict[str, object],
-    workspace_root: Path,
-    workspace_roots: list[Path],
-) -> str:
-    policy = str(write_boundary.get("product_write_policy") or "").strip().lower()
-    if policy != _PRODUCT_WRITE_DELEGATE_POLICY:
-        return ""
-    product_roots = _boundary_paths(write_boundary.get("product_write_roots"), workspace_root, workspace_roots)
-    if not any(_is_relative_to(target, root) for root in product_roots):
-        return ""
-    if _is_report_artifact_target(target):
-        return ""
-    role = str(write_boundary.get("role") or "coordinator").strip() or "coordinator"
-    return (
-        "业务产物写入被阻止: 当前角色拥有上层覆盖权限用于检查、接管和救援，"
-        "但默认不能直接写最终业务产物。"
-        f" role={role} target={_display_path(target, workspace_root)} "
-        "请创建或调度 worker/writer/leaf_worker 处理该产物；"
-        "当前角色可以把 test_report/acceptance_report/status 等报告证据写到授权目录，"
-        "但不能写 index.html 等业务正文。"
-    )
-
-
-def _is_report_artifact_target(target: Path) -> bool:
-    name = target.name.lower()
-    if name == _INTERNAL_OUTPUT_JSON_NAME:
-        return False
-    if not name.endswith(_REPORT_ARTIFACT_SUFFIXES):
-        return False
-    return any(marker in name for marker in _REPORT_ARTIFACT_NAME_MARKERS)
 
 
 def _forbidden_boundary_error(

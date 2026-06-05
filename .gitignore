@@ -58,6 +58,7 @@ mutation_test_report.json
 MagicMock/
 agent_py_agent/MagicMock/
 validation/live_lab/
+validation/cross_agent_benchmark/
 my-agent-worktrees/
 
 # Local real-run scratch outputs

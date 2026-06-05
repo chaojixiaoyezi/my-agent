@@ -7,8 +7,6 @@ from ..runtime.context_compactor import runtime_compact_policy
 
 _PENDING_TOOL_CONTEXT_DIGEST_KEY = "pending_tool_context_digest"
 _TOOL_CONTEXT_DIGEST_INFLIGHT_KEY = "tool_context_digest_inflight"
-_TOOL_CONTEXT_CHECKPOINT_REQUIRED_KEY = "tool_context_checkpoint_required"
-_TOOL_CONTEXT_CHECKPOINT_SATISFIED_KEY = "tool_context_checkpoint_satisfied"
 _DIGEST_PROMPT_CEILING_PERCENT = 90
 
 _CONTEXT_ERROR_MARKERS = (
@@ -70,20 +68,6 @@ def mark_tool_context_digest_pending(params: object) -> None:
         state[_PENDING_TOOL_CONTEXT_DIGEST_KEY] = True
 
 
-def mark_tool_context_checkpoint_required(params: object) -> None:
-    state = _live_archive_state(params)
-    if state is None:
-        return
-    state[_TOOL_CONTEXT_CHECKPOINT_REQUIRED_KEY] = True
-    state[_PENDING_TOOL_CONTEXT_DIGEST_KEY] = True
-
-
-def mark_tool_context_checkpoint_satisfied(params: object) -> None:
-    state = _live_archive_state(params)
-    if state is not None and state.get(_TOOL_CONTEXT_CHECKPOINT_REQUIRED_KEY):
-        state[_TOOL_CONTEXT_CHECKPOINT_SATISFIED_KEY] = True
-
-
 def mark_tool_context_digest_consumed(params: object) -> None:
     state = _live_archive_state(params)
     if state is None:
@@ -108,11 +92,6 @@ def should_compact_before_more_tool_output(agent: object, params: object, curren
     if threshold <= 0:
         return False
     return estimate_tokens(str(current_prompt or "")) >= threshold
-
-
-def tool_context_checkpoint_satisfied(params: object) -> bool:
-    state = _live_archive_state(params)
-    return bool(state and state.get(_TOOL_CONTEXT_CHECKPOINT_SATISFIED_KEY))
 
 
 def _can_run_tool_context_digest_turn(request: object, *, prompt_tokens: int, window: int) -> bool:
@@ -190,11 +169,8 @@ def _input_tokens(request: object, prompt_tokens: int) -> int:
 __all__ = [
     "context_pressure_response",
     "is_context_window_error",
-    "mark_tool_context_checkpoint_required",
-    "mark_tool_context_checkpoint_satisfied",
     "mark_tool_context_digest_consumed",
     "mark_tool_context_digest_pending",
     "preflight_context_pressure_response",
     "should_compact_before_more_tool_output",
-    "tool_context_checkpoint_satisfied",
 ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 def test_materialized_delivery_contract_accepts_generic_artifacts_without_paths():
     from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
         materialized_delivery_contract,
+        materializer_repair_feedback,
     )
 
     contract = materialized_delivery_contract(
@@ -123,6 +124,7 @@ def test_materialized_delivery_contract_accepts_single_root_artifact_object():
 def test_materialized_delivery_contract_derives_user_requested_output_path_from_prompt():
     from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
         materialized_delivery_contract,
+        materializer_repair_feedback,
     )
 
     contract = materialized_delivery_contract(
@@ -143,8 +145,219 @@ def test_materialized_delivery_contract_derives_user_requested_output_path_from_
             "kind": "md",
         }
     ]
-    coverage = contract["target_coverage_contract"]
-    assert coverage["target_items"][0]["source_ref"] == "data/long_field_journal.txt"
+    assert "target_coverage_contract" not in contract
+    doctor = contract["_contract_doctor"]
+    assert doctor["should_rematerialize"] is True
+    assert doctor["findings"][0]["code"] == "DELIVERY_MATERIALIZER_SOURCE_COVERAGE_UNDECLARED"
+    assert "data/long_field_journal.txt" in materializer_repair_feedback(contract)
+
+
+def test_structural_user_requested_output_contract_ignores_source_coverage_phrases():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        delivery_contract_from_user_requested_outputs,
+    )
+
+    contract = delivery_contract_from_user_requested_outputs(
+        "请完整读完 data/long_field_journal.txt，不要只搜。\n"
+        "最终把报告写到 lab_outputs/compact-stress/report.md。"
+    )
+
+    assert contract == {
+        "schema_version": "delivery_contract.v1",
+        "artifacts": [
+            {
+                "artifact_id": "user_requested_report_md",
+                "preferred_path": "lab_outputs/compact-stress/report.md",
+                "allowed_output_roots": ["lab_outputs/compact-stress"],
+                "required": True,
+                "kind": "md",
+            }
+        ],
+    }
+
+
+def test_materialized_delivery_contract_derives_user_requested_work_artifact_path_from_prompt():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+        materializer_repair_feedback,
+    )
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [
+                {
+                    "artifact_id": "final_report",
+                    "preferred_path": "lab_outputs/compact-stress/report.md",
+                    "kind": "md",
+                    "required": True,
+                }
+            ]
+        },
+        user_prompt=(
+            "请完整分析 data/long_field_journal.txt。\n"
+            "读的时候在 work/章节草稿记录表.md 做一张记录表。\n"
+            "最后把报告写到 lab_outputs/compact-stress/report.md。"
+        ),
+    )
+
+    artifact_paths = [artifact.get("preferred_path") for artifact in contract["artifacts"]]
+    assert artifact_paths == [
+        "lab_outputs/compact-stress/report.md",
+        "work/章节草稿记录表.md",
+    ]
+    work_artifact = contract["artifacts"][1]
+    assert work_artifact["allowed_output_roots"] == ["work"]
+    assert work_artifact["kind"] == "md"
+    assert "data/long_field_journal.txt" in materializer_repair_feedback(contract)
+
+
+def test_materialized_delivery_contract_does_not_treat_source_under_output_named_ancestor_as_output():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+        materializer_repair_feedback,
+    )
+
+    root = "/tmp/cross_agent_benchmark/my_agent_current_after_inline_outputs"
+    source_path = f"{root}/data/long_field_journal.txt"
+    report_path = f"{root}/lab_outputs/compact-stress/report.md"
+
+    contract = materialized_delivery_contract(
+        {},
+        user_prompt=(
+            f"{source_path} 是一个很大的现场记录。请完整分析这个文件。\n"
+            f"最终把报告写到 {report_path}。"
+        ),
+    )
+
+    artifact_paths = [item.get("preferred_path") for item in contract["artifacts"]]
+    assert artifact_paths == [report_path]
+    assert source_path in materializer_repair_feedback(contract)
+
+
+def test_materialized_delivery_contract_does_not_promote_subagent_internal_work_report_from_prompt():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {},
+        user_prompt=(
+            "参考 work/agents/child-1/final_report.md 的内容，"
+            "最后把报告写到 lab_outputs/final.md。"
+        ),
+    )
+
+    artifact_paths = [artifact.get("preferred_path") for artifact in contract["artifacts"]]
+    assert artifact_paths == ["lab_outputs/final.md"]
+
+
+def test_materializer_prompt_keeps_target_coverage_structural_not_hard_by_default():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        build_delivery_requirement_materializer_prompt,
+    )
+
+    prompt = build_delivery_requirement_materializer_prompt(
+        "请完整读完 data/long_field_journal.txt，并写报告。"
+    )
+
+    assert "可以写 target_coverage_contract" in prompt
+    assert "不要仅凭普通自然语言把覆盖要求升级成硬性验收门" in prompt
+    assert "enforcement 设为 required" not in prompt
+
+
+def test_materialized_delivery_contract_derives_absolute_output_path_from_prompt(tmp_path):
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    requested_path = tmp_path.parent / "requested-output" / "report.md"
+
+    contract = materialized_delivery_contract(
+        {},
+        user_prompt=f"请读完项目源码，最后把报告写到 {requested_path}。",
+    )
+
+    assert contract["artifacts"] == [
+        {
+            "artifact_id": "user_requested_report_md",
+            "preferred_path": str(requested_path),
+            "allowed_output_roots": [str(requested_path.parent)],
+            "required": True,
+            "kind": "md",
+        }
+    ]
+
+
+def test_materialized_delivery_contract_does_not_duplicate_absolute_prompt_path(tmp_path):
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    requested_path = tmp_path.parent / "requested-output" / "report.md"
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [
+                {
+                    "artifact_id": "architecture_report",
+                    "kind": "md",
+                    "preferred_path": str(requested_path),
+                }
+            ]
+        },
+        user_prompt=f"请读完项目源码，最后把报告写到 {requested_path}。",
+    )
+
+    assert contract["artifacts"] == [
+        {
+            "artifact_id": "architecture_report",
+            "preferred_path": str(requested_path),
+            "required": True,
+            "kind": "md",
+        }
+    ]
+
+
+def test_materialized_delivery_contract_derives_windows_output_path_from_prompt():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {},
+        user_prompt=r"请读完项目源码，最后把报告写到 C:\Users\alice\agent-output\report.md。",
+    )
+
+    assert contract["artifacts"] == [
+        {
+            "artifact_id": "user_requested_report_md",
+            "preferred_path": r"C:\Users\alice\agent-output\report.md",
+            "allowed_output_roots": [r"C:\Users\alice\agent-output"],
+            "required": True,
+            "kind": "md",
+        }
+    ]
+
+
+def test_materialized_delivery_contract_derives_home_output_path_from_prompt():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {},
+        user_prompt="请读完项目源码，最后把报告写到 ~/agent-output/report.md。",
+    )
+
+    assert contract["artifacts"] == [
+        {
+            "artifact_id": "user_requested_report_md",
+            "preferred_path": "~/agent-output/report.md",
+            "allowed_output_roots": ["~/agent-output"],
+            "required": True,
+            "kind": "md",
+        }
+    ]
 
 
 def test_materialized_delivery_contract_promotes_prompt_output_path_to_existing_artifact():
@@ -160,6 +373,41 @@ def test_materialized_delivery_contract_promotes_prompt_output_path_to_existing_
     assert contract["artifacts"][0]["artifact_id"] == "report"
     assert contract["artifacts"][0]["preferred_path"] == "outputs/final.md"
     assert contract["artifacts"][0]["kind"] == "md"
+
+
+def test_materialized_delivery_contract_corrects_same_name_artifact_to_prompt_path():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    wrong_path = "/tmp/validation/cross_agent_benchmark/20250605-192409/run/lab_outputs/compact-stress/report.md"
+    requested_path = "/tmp/validation/cross_agent_benchmark/20260605-192409/run/lab_outputs/compact-stress/report.md"
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [
+                {
+                    "artifact_id": "final_report",
+                    "kind": "md",
+                    "preferred_path": wrong_path,
+                    "required": True,
+                }
+            ]
+        },
+        user_prompt=f"读完数据后，最终报告写到 {requested_path}",
+    )
+
+    assert contract["artifacts"] == [
+        {
+            "artifact_id": "final_report",
+            "kind": "md",
+            "preferred_path": requested_path,
+            "required": True,
+            "allowed_output_roots": [
+                "/tmp/validation/cross_agent_benchmark/20260605-192409/run/lab_outputs/compact-stress"
+            ],
+        }
+    ]
 
 
 def test_materialized_delivery_contract_does_not_stringify_object_kind():
@@ -339,7 +587,7 @@ def test_materialized_delivery_contract_preserves_generic_target_coverage_contra
     assert [item["target_id"] for item in coverage["target_items"]] == ["2026-W01", "2026-W02"]
 
 
-def test_materialized_delivery_contract_derives_full_source_read_coverage_from_user_prompt():
+def test_materialized_delivery_contract_does_not_derive_coverage_from_prompt_phrases():
     from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
         materialized_delivery_contract,
     )
@@ -361,31 +609,36 @@ def test_materialized_delivery_contract_derives_full_source_read_coverage_from_u
         ),
     )
 
-    coverage = contract["target_coverage_contract"]
-    assert coverage["enforcement"] == "required"
-    assert coverage["coverage_requirement"] == "full_source_read"
-    assert coverage["target_items"] == [
-        {
-            "target_id": "data/long_field_journal.txt",
-            "label": "完整读取 data/long_field_journal.txt",
-            "source_ref": "data/long_field_journal.txt",
-            "coverage_kind": "full_source_read",
-        }
-    ]
+    assert "target_coverage_contract" not in contract
+    assert contract["_contract_doctor"]["findings"][0]["code"] == "DELIVERY_MATERIALIZER_SOURCE_COVERAGE_UNDECLARED"
 
 
-def test_materialized_delivery_contract_ignores_output_path_in_full_read_line():
+def test_materialized_delivery_contract_preserves_structured_full_source_read_coverage():
     from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
         materialized_delivery_contract,
     )
 
     contract = materialized_delivery_contract(
-        {"artifacts": [{"artifact_id": "report", "kind": "md", "preferred_path": "report.md"}]},
+        {
+            "artifacts": [{"artifact_id": "report", "kind": "md", "preferred_path": "report.md"}],
+            "target_coverage_contract": {
+                "scope_label": "source files",
+                "coverage_requirement": "full_source_read",
+                "target_items": [
+                    {
+                        "target_id": "README.md",
+                        "source_ref": "README.md",
+                        "coverage_kind": "full_source_read",
+                    }
+                ],
+            },
+        },
         user_prompt="请完整读完 README.md，最后写到 report.md。",
     )
 
     coverage = contract["target_coverage_contract"]
     assert [item["target_id"] for item in coverage["target_items"]] == ["README.md"]
+    assert "_contract_doctor" not in contract
 
 
 def test_materialized_contract_preserves_artifact_intent_extensions_for_broad_formats():

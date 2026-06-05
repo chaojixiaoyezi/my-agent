@@ -35,7 +35,12 @@ class _LargeReadSaveBackend:
 def test_saved_run_generates_request_id_before_externalized_tool_outputs(tmp_path: Path) -> None:
     (tmp_path / "big.txt").write_text("TRACE-RUN-ID\n" + ("x" * 3000), encoding="utf-8")
     agent = SimpleAgent(
-        AgentConfig(enable_tools=True, memory_path="memory.jsonl", my_agent_home=str(tmp_path / "home")),
+        AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            my_agent_home=str(tmp_path / "home"),
+            tool_output_externalize_min_chars=1,
+        ),
         tmp_path,
     )
     agent.backend = _LargeReadSaveBackend()

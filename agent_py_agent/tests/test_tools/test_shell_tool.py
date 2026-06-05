@@ -64,6 +64,7 @@ def test_shell_tool_timeout(shell_tool: ShellTool) -> None:
         "timeout": 1,
     })
     assert result.ok is False
+    assert result.error_code == "TOOL_TIMEOUT"
     assert "超时" in result.output or "timeout" in result.output.lower()
 
 
@@ -191,14 +192,15 @@ def test_is_dangerous_command_safe() -> None:
 def test_shell_tool_stderr_captured(shell_tool: ShellTool) -> None:
     """Test that stderr is captured in output."""
     result = shell_tool.execute({"command": "ls /nonexistent_directory_12345 2>&1"})
-    # ls to nonexistent dir will fail but our test should capture stderr
-    assert result.ok is True or "No such file" in result.output or "return_code=" in result.output
+    assert result.ok is False
+    assert "No such file" in result.output or "return_code=" in result.output
 
 
 def test_shell_tool_nonzero_return_code(shell_tool: ShellTool) -> None:
     """Test that non-zero return codes are reported correctly."""
     result = shell_tool.execute({"command": "exit 1"})
-    assert result.ok is True  # execution succeeded, but return code is captured
+    assert result.ok is False
+    assert result.error_code == "COMMAND_FAILED"
     assert "return_code=1" in result.output
 
 

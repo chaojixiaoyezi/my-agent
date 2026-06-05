@@ -12,6 +12,7 @@ from typing import Any
 from ....runtime_errors import runtime_error_report
 from ...models import SubAgentTask
 from ...protocol import build_task_address, build_task_envelope
+from ...role_templates import role_template_snapshot_for_task
 from ..task_attribute_reader import task_int, task_list, task_role, task_status, task_text
 from .instructions import runner_instruction
 from .modes import (
@@ -30,7 +31,6 @@ from .modes import (
 _PACKET_SCHEMA_VERSION = "subagent_continue_packet.v1"
 _RECOVERABLE_STATUSES = {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "ERROR"}
 _DEAD_STATUSES = {"TIMEOUT", "CHANNEL_ERROR"}
-_COORDINATOR_ROLES = {"coordinator", "lead", "team_lead", "child_coordinator"}
 _CLOSED_STATUSES = {"DONE", "COMPLETED", "ABANDONED", "TAKEN_OVER"}
 
 
@@ -264,8 +264,11 @@ def _existing_refs(values: list[str]) -> list[str]:
 
 
 def _needs_leadership_recovery(task: SubAgentTask) -> bool:
-    role = task_role(task).lower()
-    return bool(task_list(task, "child_ids")) and (role in _COORDINATOR_ROLES or "coordinator" in role) and _is_dead(task)
+    return (
+        bool(task_list(task, "child_ids"))
+        and bool(role_template_snapshot_for_task(task).get("can_spawn_children"))
+        and _is_dead(task)
+    )
 
 
 def _needs_takeover(task: SubAgentTask) -> bool:

@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 
 from ..role_contracts import normalize_subagent_role
-from ..role_templates import role_template_id_for_role
+from ..role_templates import role_template_id_for_role, role_template_snapshot_for_task
 
 QA_ROLE_ORDER = ("tester", "bug_finder")
 _QA_ROLE_FIELDS = frozenset({"required_qa_roles", "qa_roles"})
@@ -32,21 +32,19 @@ def _task_attributes(task) -> dict[str, object]:
     return attrs if isinstance(attrs, dict) else {}
 
 
-def qa_role_identity_roles(*, role: str, agent_name: str = "") -> set[str]:
+def qa_role_identity_roles(*, role: str) -> set[str]:
     roles: set[str] = set()
-    for value in (role, agent_name):
-        normalized = _role_template_identity(value)
-        if normalized in QA_ROLE_ORDER:
-            roles.add(normalized)
+    normalized = _role_template_identity(role)
+    if normalized in QA_ROLE_ORDER:
+        roles.add(normalized)
     return roles
 
 
 def qa_role_task_is_leaf(task) -> bool:
     role = str(getattr(task, "role", "") or "").lower()
-    agent_name = str(getattr(task, "agent_name", "") or "").lower()
-    if qa_role_identity_roles(role=role, agent_name=agent_name):
+    if bool(role_template_snapshot_for_task(task).get("depends_on_outputs")):
         return True
-    return role == "leaf_worker" or "leaf" in agent_name
+    return role == "leaf_worker"
 
 
 def _role_template_identity(value: object) -> str:

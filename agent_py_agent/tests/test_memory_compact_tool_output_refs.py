@@ -97,6 +97,7 @@ def _write_large_tool_output_artifact(root: Path) -> str:
             request_id="request-tool-ref",
             run_id="run-tool-ref",
             task_id="task-tool-ref",
+            min_chars=1,
             parameters={"command": "python scripts/collect-alpha.py"},
         )
     )
@@ -119,6 +120,38 @@ def _write_task_progress_tool_output_artifact(root: Path) -> str:
         )
     )
     return str(record["output_path"])
+
+
+def _write_read_file_cursor_fixture_with_failed_retry(root: Path) -> None:
+    externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=root,
+            tool="read_file",
+            call_id="read-1",
+            output="[char-window offset=0 chars=100 total_chars=500]\nPARTIAL view only",
+            ok=True,
+            request_id="request-tool-ref",
+            run_id="run-tool-ref",
+            task_id="task-tool-ref",
+            min_chars=0,
+            parameters={"path": "data/big.txt", "offset": 0, "max_chars": 100},
+        )
+    )
+    externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=root,
+            tool="read_file",
+            call_id="read-2",
+            output="CONTEXT_COMPACT_DEFERRED: 当前上下文需要先 compact/resume；本次工具调用未执行。",
+            ok=False,
+            error_code="CONTEXT_COMPACT_DEFERRED",
+            request_id="request-tool-ref",
+            run_id="run-tool-ref",
+            task_id="task-tool-ref",
+            min_chars=1000,
+            parameters={"path": "data/big.txt", "offset": 100, "max_chars": 100},
+        )
+    )
 
 
 def test_compact_apply_and_resume_include_scoped_tool_output_artifact_refs(tmp_path: Path) -> None:
@@ -156,6 +189,37 @@ def test_compact_apply_and_resume_include_scoped_tool_output_artifact_refs(tmp_p
     assert '"tool": "read_artifact"' in resume["context_block"]
     metadata = json.loads(Path(apply_result["refs"]["metadata"]).read_text(encoding="utf-8"))
     assert metadata["restore_refs"]["source_refs"]["tool_outputs"][0]["path"] == artifact_ref
+
+
+def test_compact_apply_does_not_advance_read_cursor_for_failed_tool_call(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _append_raw_tool_ref_event(root)
+    _append_tool_ref_snapshot(root)
+    _append_tool_ref_token_usage(root)
+    _write_read_file_cursor_fixture_with_failed_retry(root)
+
+    apply_result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-tool-ref",
+                request_id="request-tool-ref",
+                run_id="run-tool-ref",
+                task_id="task-tool-ref",
+            ),
+        ),
+    )
+
+    progress = [
+        item
+        for item in apply_result["work_state_snapshot"]["tool_progress"]
+        if item.get("tool") == "read_file" and item.get("source_path") == "data/big.txt"
+    ]
+
+    assert len(progress) == 1
+    assert progress[0]["offset"] == 0
+    assert progress[0]["next_offset"] == 100
+    assert all(item.get("error_code") != "CONTEXT_COMPACT_DEFERRED" for item in progress)
 
 
 def test_compact_apply_does_not_expose_task_progress_tool_output_blobs(tmp_path: Path) -> None:

@@ -129,7 +129,7 @@ class TestTaskProgressCoverageTool:
         ]
         assert payload["coverage"]["counts"]["targets_total"] == 3
         assert payload["coverage"]["counts"]["targets_incomplete"] == 2
-        assert payload["next_action"] != "提交验收"
+        assert payload["next_action"] == "提交验收"
 
     def test_done_coverage_checks_are_not_downgraded_by_later_update(self, tmp_path):
         """已完成覆盖检查不能被后续模糊状态降级。"""
@@ -258,8 +258,8 @@ class TestTaskProgressFactPreservation:
         assert item["result"] == "new"
         assert item["evidence"] == ["old.md", "new.md"]
 
-    def test_fragment_id_aliases_merge_into_one_progress_item(self, tmp_path):
-        """模型在 compact 前后混用 001/frag-001/fragment-001 时，应合并成同一项。"""
+    def test_fragment_id_aliases_do_not_merge_without_explicit_same_id(self, tmp_path):
+        """不同 id 不靠名字猜成同一项；需要合并时必须用同一个结构化 id。"""
         from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
 
         write_task_progress(
@@ -280,13 +280,11 @@ class TestTaskProgressFactPreservation:
 
         payload = read_task_progress(tmp_path, "run-main")
 
-        assert payload["counts"] == {"total": 1, "done": 1}
-        assert payload["items"][0]["id"] == "001"
-        assert payload["items"][0]["status"] == "done"
-        assert payload["items"][0]["notes"] == "CP-001/SECRET-001/KEEP"
+        assert payload["counts"] == {"total": 3, "done": 2, "pending": 1}
+        assert [item["id"] for item in payload["items"]] == ["001", "frag-001", "fragment-001"]
 
-    def test_open_range_item_is_removed_when_child_items_are_done(self, tmp_path):
-        """范围待办被后续逐项完成覆盖后，不应继续卡住 closeout。"""
+    def test_open_range_item_is_not_removed_by_child_item_names(self, tmp_path):
+        """范围待办不会靠标题/编号猜测自动删除。"""
         from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
 
         write_task_progress(
@@ -307,8 +305,8 @@ class TestTaskProgressFactPreservation:
 
         payload = read_task_progress(tmp_path, "run-main")
 
-        assert [item["id"] for item in payload["items"]] == ["ch051", "ch052"]
-        assert payload["counts"] == {"total": 2, "done": 2}
+        assert [item["id"] for item in payload["items"]] == ["ch051-052", "ch051", "ch052"]
+        assert payload["counts"] == {"total": 3, "in_progress": 1, "done": 2}
 
     def test_open_range_item_stays_until_all_child_items_are_done(self, tmp_path):
         """范围里还有缺口时，账本不能因为部分完成就放行。"""
@@ -337,10 +335,10 @@ class TestTaskProgressFactPreservation:
 
 
 class TestTaskProgressContinuationAndAliases:
-    """测试续读游标和模型常见字段别名。"""
+    """测试续读游标和结构化字段处理。"""
 
-    def test_old_open_continuation_item_is_replaced_by_newer_cursor(self, tmp_path):
-        """滚动读大文件时，只保留最新“后续章节待读”游标。"""
+    def test_old_open_continuation_item_is_not_replaced_by_newer_cursor_text(self, tmp_path):
+        """续读游标不会靠自然语言标题自动替换。"""
         from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
 
         write_task_progress(
@@ -362,11 +360,11 @@ class TestTaskProgressContinuationAndAliases:
 
         payload = read_task_progress(tmp_path, "run-main")
 
-        assert [item["id"] for item in payload["items"]] == ["ch011", "ch012", "ch013+"]
-        assert payload["counts"] == {"total": 3, "done": 2, "in_progress": 1}
+        assert [item["id"] for item in payload["items"]] == ["ch011+", "ch011", "ch012", "ch013+"]
+        assert payload["counts"] == {"total": 4, "in_progress": 2, "done": 2}
 
-    def test_old_estimated_open_range_is_replaced_by_newer_cursor(self, tmp_path):
-        """旧估算范围被更晚的读取游标覆盖后，不应继续作为 open 项卡住。"""
+    def test_old_estimated_open_range_is_not_replaced_by_newer_cursor_text(self, tmp_path):
+        """旧估算范围不会靠后续标题自动删除。"""
         from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
 
         write_task_progress(
@@ -388,12 +386,12 @@ class TestTaskProgressContinuationAndAliases:
 
         payload = read_task_progress(tmp_path, "run-main")
 
-        assert "ch005-040" not in [item["id"] for item in payload["items"]]
+        assert "ch005-040" in [item["id"] for item in payload["items"]]
         assert payload["items"][-1]["id"] == "ch013+"
-        assert payload["counts"] == {"total": 9, "done": 8, "in_progress": 1}
+        assert payload["counts"] == {"total": 10, "in_progress": 2, "done": 8}
 
-    def test_task_progress_normalizes_common_done_status_words(self, tmp_path):
-        """真实模型常写 completed/read/已读，这些应计为 done。"""
+    def test_task_progress_keeps_non_schema_statuses_out_of_done_counts(self, tmp_path):
+        """status 只接受固定机器值；其它标签留作普通文本，不替模型猜成 done。"""
         from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
 
         write_task_progress(
@@ -411,8 +409,8 @@ class TestTaskProgressContinuationAndAliases:
 
         payload = read_task_progress(tmp_path, "run-main")
 
-        assert payload["counts"] == {"total": 4, "done": 3, "pending": 1}
-        assert [item["status"] for item in payload["items"]] == ["done", "done", "done", "pending"]
+        assert payload["counts"] == {"total": 4, "other": 4}
+        assert [item["status"] for item in payload["items"]] == ["completed", "read", "已读", "待处理"]
 
     def test_task_progress_summary_carries_recent_done_facts(self, tmp_path):
         """compact 交接要带最近完成事实，而不是只带未完成项。"""
@@ -682,9 +680,9 @@ class TestTaskProgressQualityHints:
         summary = task_progress_summary(readback)
 
         assert readback["quality_hints"]["severity"] == "soft"
-        assert readback["quality_hints"]["result_without_evidence_count"] == 2
+        assert readback["quality_hints"]["result_without_evidence_count"] == 1
         assert "建议补上" in readback["quality_hints"]["messages"][0]
-        assert summary["quality_hints"]["result_without_evidence_ids"] == ["a", "b"]
+        assert summary["quality_hints"]["result_without_evidence_ids"] == ["b"]
         assert payload["items"][1]["result"] == "已经分析完"
         assert readback["quality_hints"]["next_suggestions"]
         assert "不要只打勾" in readback["quality_hints"]["soft_prompt"]
@@ -710,6 +708,28 @@ class TestTaskProgressQualityHints:
         assert payload["soft_feedback"]["severity"] == "soft"
         assert payload["soft_feedback"]["blocking"] is False
         assert "不要只打勾" in payload["soft_feedback"]["message"]
+
+    def test_task_progress_tool_rejects_natural_language_status_values(self, tmp_path):
+        """工具入口不允许普通自然语言污染 status 机器字段。"""
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent._main_agent_run_id = "run-main"
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "action": "update",
+                "items": [{"id": "a", "title": "对象 A", "status": "已完成"}],
+            }
+        )
+        payload = json.loads(result.output)
+
+        assert result.ok is False
+        assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+        assert payload["invalid_statuses"][0]["status"] == "已完成"
+        assert "done" in payload["allowed_statuses"]
 
     def test_update_soft_feedback_marks_failed_or_unseen_evidence_refs(self, tmp_path):
         """已写进进度的本地证据应能对上本轮工具事实，但只给软提醒。"""
@@ -837,8 +857,8 @@ class TestTaskProgressQualityHints:
         assert any("继续补未完成对象" in item for item in hints["next_suggestions"])
         assert "先选一个未完成对象" in hints["soft_prompt"]
 
-    def test_closeout_next_action_is_soft_repaired_when_coverage_is_incomplete(self, tmp_path):
-        """账本还有未完成覆盖项时，不把“提交验收”继续喂给 compact/resume。"""
+    def test_closeout_next_action_is_not_rewritten_from_natural_language_text(self, tmp_path):
+        """next_action 是模型写入内容，系统不靠自然语言关键词改写它。"""
         from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
 
         payload = write_task_progress(
@@ -865,6 +885,6 @@ class TestTaskProgressQualityHints:
         )
         readback = read_task_progress(tmp_path, "run-main")
 
-        assert payload["next_action"].startswith("继续补未完成对象")
-        assert readback["next_action"].startswith("继续补未完成对象")
-        assert payload["soft_next_action_repair"]["original_next_action"] == "提交验收"
+        assert payload["next_action"] == "提交验收"
+        assert readback["next_action"] == "提交验收"
+        assert "soft_next_action_repair" not in payload

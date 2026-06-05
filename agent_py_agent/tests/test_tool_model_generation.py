@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core import tool_model_generation as tool_model_generation_module
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.tool_model_generation import (
     ModelGenerateParams,
@@ -77,6 +78,21 @@ class _StreamingRepeatedToolBackend:
             if on_chunk is not None:
                 on_chunk(part)
         return ModelResponse(text=text, backend=self.name)
+
+
+class _StreamingCompleteThenStallBackend:
+    name = "streaming-complete-then-stall-test-backend"
+
+    def __init__(self) -> None:
+        self.chunks_emitted = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        tool_text = '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
+        self.chunks_emitted += 1
+        if on_chunk is not None:
+            on_chunk(tool_text)
+        time.sleep(0.2)
+        return ModelResponse(text=f"{tool_text}\nlate prose", backend=self.name)
 
 
 class _StreamingLongFileWriteSessionBackend:
@@ -222,7 +238,7 @@ def test_model_generate_salvages_streaming_write_file_append_prefix():
     assert "inline content streaming exceeded" in response.text
 
 
-def test_model_generate_stops_stream_after_first_complete_tool_call():
+def test_model_generate_keeps_all_complete_streaming_tool_blocks():
     backend = _StreamingRepeatedToolBackend()
     agent = SimpleNamespace(
         backend=backend,
@@ -239,8 +255,36 @@ def test_model_generate_stops_stream_after_first_complete_tool_call():
         )
     )
 
+    assert backend.chunks_emitted == 3
+    assert response.text == (
+        '[TOOL_CALL]\n{"tool":"read_file","path":"final.html"}\n[/TOOL_CALL]\n'
+        '[TOOL_CALL]\n{"tool":"write_file","action":"append","session_id":"same","chunk_index":3,"content":"duplicate"}\n[/TOOL_CALL]'
+    )
+
+
+def test_model_generate_returns_complete_tool_block_before_stream_finishes(monkeypatch):
+    monkeypatch.setattr(tool_model_generation_module, "_TOOL_STREAM_COMPLETE_DRAIN_SECONDS", 0.01)
+    monkeypatch.setattr(tool_model_generation_module, "_TOOL_STREAM_POLL_SECONDS", 0.005)
+    backend = _StreamingCompleteThenStallBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(request_timeout=10, tool_write_inline_max_chars=12_000),
+        _current_subagent_run_id="",
+    )
+
+    started = time.monotonic()
+    response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=_tool_loop_params(),
+            prompt="read source",
+            tool_rounds=1,
+        )
+    )
+
+    assert time.monotonic() - started < 0.1
     assert backend.chunks_emitted == 1
-    assert response.text == '[TOOL_CALL]\n{"tool":"read_file","path":"final.html"}\n[/TOOL_CALL]'
+    assert response.text == '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
 
 
 def test_model_generate_records_model_call_ledger_for_streaming_response():

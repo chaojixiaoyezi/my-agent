@@ -21,69 +21,6 @@ from .task_progress_hints import quality_hints
 _SCHEMA_VERSION = "task_progress.v1"
 _KNOWN_STATUSES = ("pending", "in_progress", "done", "skipped", "blocked")
 _DONE_LIKE_STATUSES = {"done", "skipped"}
-_STATUS_ALIASES = {
-    "done": {
-        "done",
-        "complete",
-        "completed",
-        "ok",
-        "passed",
-        "read",
-        "read_done",
-        "finish",
-        "finished",
-        "完成",
-        "已完成",
-        "读完",
-        "已读",
-        "已读取",
-    },
-    "pending": {
-        "pending",
-        "todo",
-        "to_do",
-        "to-read",
-        "to_read",
-        "unread",
-        "not_started",
-        "待处理",
-        "待办",
-        "未读",
-        "待读",
-        "待读取",
-        "未开始",
-    },
-    "in_progress": {
-        "in_progress",
-        "in-progress",
-        "doing",
-        "reading",
-        "processing",
-        "进行中",
-        "读取中",
-        "处理中",
-        "正在读",
-        "正在读取",
-    },
-    "skipped": {
-        "skipped",
-        "skip",
-        "ignored",
-        "忽略",
-        "跳过",
-        "已跳过",
-    },
-    "blocked": {
-        "blocked",
-        "blocker",
-        "failed",
-        "error",
-        "卡住",
-        "阻塞",
-        "失败",
-        "报错",
-    },
-}
 _FACT_FIELDS = ("id", "title", "status", "notes", "result", "outcome", "conclusion", "decision", "summary")
 _EXPLICIT_OVERWRITE_KEYS = ("correction", "overwrite", "replace")
 
@@ -127,6 +64,26 @@ def write_task_progress(root: str | Path, run_id: str, update: dict[str, Any]) -
         merged["load_errors"] = [load_error]
     _write_json_file_atomic(progress_path(root, run_id), merged)
     return merged
+
+
+def invalid_item_statuses(update: dict[str, Any]) -> list[dict[str, str]]:
+    invalid: list[dict[str, str]] = []
+    for index, item in enumerate(_list(update.get("items"))):
+        if not isinstance(item, dict) or "status" not in item:
+            continue
+        raw_status = str(item.get("status") or "").strip()
+        if not raw_status:
+            continue
+        if _normalize_status_value(raw_status) in _KNOWN_STATUSES:
+            continue
+        invalid.append(
+            {
+                "index": str(index),
+                "id": str(item.get("id") or item.get("title") or "").strip(),
+                "status": raw_status,
+            }
+        )
+    return invalid
 
 
 def task_progress_summary(progress: dict[str, Any]) -> dict[str, Any]:
@@ -205,7 +162,6 @@ def merge_task_progress(existing: dict[str, Any], update: dict[str, Any], *, run
         incoming=[_normalize_item(item) for item in _list(update.get("items"))],
         coverage=coverage,
     )
-    _apply_soft_next_action_repair(payload, hints)
     if hints["messages"]:
         payload["quality_hints"] = hints
     if coverage["targets"] or coverage["goal"] or coverage["dimensions"]:
@@ -276,7 +232,6 @@ def _merge_items(existing: list[dict[str, Any]], incoming: list[dict[str, Any]])
             by_id[key] = _merge_done_item_without_overwriting_facts(previous, item)
             continue
         by_id[key] = _merge_item_overlay(previous, item)
-    _remove_superseded_range_items(by_id, order)
     return [by_id[item_id] for item_id in order if item_id in by_id]
 
 
@@ -301,42 +256,6 @@ def _merge_done_item_without_overwriting_facts(previous: dict[str, Any], incomin
             merged[key] = previous[key]
     merged["evidence"] = dedupe_strings([*string_list(previous.get("evidence")), *string_list(incoming.get("evidence"))])
     return merged
-
-
-def _apply_soft_next_action_repair(payload: dict[str, Any], hints: dict[str, Any]) -> None:
-    if not _closeoutish_next_action(payload.get("next_action")):
-        return
-    suggestions = [str(item).strip() for item in hints.get("next_suggestions", []) if str(item).strip()]
-    if not suggestions:
-        return
-    original = str(payload.get("next_action") or "").strip()
-    payload["next_action"] = suggestions[0]
-    payload["soft_next_action_repair"] = {
-        "severity": "soft",
-        "blocking": False,
-        "original_next_action": original,
-        "message": "进度账本还存在证据或覆盖提醒，下一步先继续补证据/覆盖项，不要直接提交验收。",
-    }
-
-
-def _closeoutish_next_action(value: object) -> bool:
-    text = str(value or "").strip().lower()
-    if not text:
-        return False
-    return any(
-        marker in text
-        for marker in (
-            "submit",
-            "acceptance",
-            "closeout",
-            "final",
-            "提交验收",
-            "验收",
-            "收口",
-            "交付",
-            "完成任务",
-        )
-    )
 
 
 def _summary_item(item: dict[str, Any], *, include_facts: bool = False) -> dict[str, Any]:
@@ -364,158 +283,12 @@ def _done_like_status(value: object) -> bool:
 def _normalize_status_value(value: object) -> str:
     text = str(value or "").strip()
     normalized = text.lower().replace(" ", "_")
-    for status, aliases in _STATUS_ALIASES.items():
-        if normalized in aliases or text in aliases:
-            return status
-    return text or "pending"
+    normalized = normalized.replace("-", "_")
+    return normalized if normalized in _KNOWN_STATUSES else text or "pending"
 
 
 def _merge_key(item: dict[str, Any]) -> str:
-    item_id = str(item.get("id") or "").strip()
-    title = str(item.get("title") or "").strip()
-    for value in (item_id, title):
-        if key := _fragment_alias_key(value):
-            return key
-    return item_id
-
-
-def _fragment_alias_key(value: str) -> str:
-    text = str(value or "").strip().lower()
-    match = re.fullmatch(r"(?:fragment|frag)?[-_ ]?(\d{1,6})", text)
-    if not match:
-        return ""
-    return f"fragment-{int(match.group(1)):03d}"
-
-
-def _remove_superseded_range_items(by_id: dict[str, dict[str, Any]], order: list[str]) -> None:
-    done_parts = {
-        part
-        for item in by_id.values()
-        if _done_like_status(item.get("status"))
-        for part in _numeric_item_parts(item)
-    }
-    continuation_starts = [
-        (key, *continuation)
-        for key, item in by_id.items()
-        if not _done_like_status(item.get("status"))
-        if (continuation := _numeric_continuation_key(item))
-    ]
-    _remove_superseded_continuation_items(by_id, order, continuation_starts, done_parts)
-    if not done_parts and not continuation_starts:
-        return
-    for key, item in list(by_id.items()):
-        if _done_like_status(item.get("status")):
-            continue
-        range_key = _numeric_range_key(item)
-        if not range_key:
-            continue
-        prefix, start, end = range_key
-        if start > end or end - start > 2000:
-            continue
-        if all((prefix, number) in done_parts for number in range(start, end + 1)):
-            by_id.pop(key, None)
-            if key in order:
-                order.remove(key)
-            continue
-        if _range_has_newer_continuation(prefix, start, end, continuation_starts, done_parts):
-            by_id.pop(key, None)
-            if key in order:
-                order.remove(key)
-
-
-def _remove_superseded_continuation_items(
-    by_id: dict[str, dict[str, Any]],
-    order: list[str],
-    continuation_starts: list[tuple[str, str, int]],
-    done_parts: set[tuple[str, int]],
-) -> None:
-    by_prefix: dict[str, list[tuple[str, int]]] = {}
-    for key, prefix, start in continuation_starts:
-        by_prefix.setdefault(prefix, []).append((key, start))
-    for prefix, values in by_prefix.items():
-        if len(values) < 2:
-            continue
-        latest_start = max(start for _, start in values)
-        for key, start in values:
-            if start >= latest_start:
-                continue
-            if done_parts and not all((prefix, number) in done_parts for number in range(start, latest_start)):
-                continue
-            by_id.pop(key, None)
-            if key in order:
-                order.remove(key)
-
-
-def _range_has_newer_continuation(
-    prefix: str,
-    start: int,
-    end: int,
-    continuation_starts: list[tuple[str, str, int]],
-    done_parts: set[tuple[str, int]],
-) -> bool:
-    for _key, continuation_prefix, continuation_start in continuation_starts:
-        if continuation_prefix != prefix:
-            continue
-        if continuation_start <= start or continuation_start > end + 1:
-            continue
-        if done_parts and not all((prefix, number) in done_parts for number in range(start, continuation_start)):
-            continue
-        return True
-    return False
-
-
-def _numeric_item_parts(item: dict[str, Any]) -> set[tuple[str, int]]:
-    parts: set[tuple[str, int]] = set()
-    for key in ("id", "title"):
-        text = str(item.get(key) or "")
-        if part := _numeric_item_key(text):
-            parts.add(part)
-    return parts
-
-
-def _numeric_item_key(value: str) -> tuple[str, int] | None:
-    text = str(value or "").strip().lower()
-    match = re.match(r"^([a-z\u4e00-\u9fff_-]*?)[-_ ]?(\d{1,6})(?:\D.*)?$", text)
-    if not match:
-        return None
-    return (_normalize_numeric_prefix(match.group(1)), int(match.group(2)))
-
-
-def _numeric_range_key(item: dict[str, Any]) -> tuple[str, int, int] | None:
-    for key in ("id", "title"):
-        text = str(item.get(key) or "").strip().lower()
-        match = re.match(
-            r"^([a-z\u4e00-\u9fff_-]*?)[-_ ]?(\d{1,6})\s*(?:-|~|至|到)\s*(?:[a-z\u4e00-\u9fff_-]*?[-_ ]?)?(\d{1,6})(?:\D.*)?$",
-            text,
-        )
-        if match:
-            return (_normalize_numeric_prefix(match.group(1)), int(match.group(2)), int(match.group(3)))
-    return None
-
-
-def _numeric_continuation_key(item: dict[str, Any]) -> tuple[str, int] | None:
-    for key in ("id", "title"):
-        text = str(item.get(key) or "").strip().lower()
-        match = re.match(
-            r"^([a-z\u4e00-\u9fff_-]*?)[-_ ]?(\d{1,6})\s*(?:\+|及之后|以后|之后|起|后续)(?:\D.*)?$",
-            text,
-        )
-        if match:
-            return (_normalize_numeric_prefix(match.group(1)), int(match.group(2)))
-    return None
-
-
-def _normalize_numeric_prefix(value: str) -> str:
-    text = str(value or "").strip().lower().replace("_", "-")
-    aliases = {
-        "chapter": "ch",
-        "chap": "ch",
-        "章节": "ch",
-        "fragment": "fragment",
-        "frag": "fragment",
-        "片段": "fragment",
-    }
-    return aliases.get(text, text)
+    return str(item.get("id") or "").strip()
 
 
 def _truthy(value: object) -> bool:
@@ -523,7 +296,7 @@ def _truthy(value: object) -> bool:
         return value
     if isinstance(value, int | float):
         return bool(value)
-    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on", "是", "对"}
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _counts(items: list[dict[str, Any]]) -> dict[str, int]:
@@ -581,5 +354,6 @@ __all__ = [
     "read_task_progress",
     "read_task_progress_report",
     "task_progress_summary",
+    "invalid_item_statuses",
     "write_task_progress",
 ]

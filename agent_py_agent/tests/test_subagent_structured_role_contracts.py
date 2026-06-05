@@ -26,8 +26,8 @@ def test_role_identity_ignores_natural_language_goal():
 def test_role_identity_reads_template_ids_from_structured_identity():
     spec = HierarchyChildSpec(
         goal="检查产物。",
-        role="child",
-        agent_name="小傻妞-tester-1",
+        role="tester",
+        agent_name="小傻妞-任意显示名",
     )
 
     assert role_from_child_spec_identity(spec) == "tester"

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..task_progress import read_task_progress, write_task_progress
+from ..task_progress import invalid_item_statuses, read_task_progress, write_task_progress
 from ..tooling.models import BaseTool, ToolExecutionResult
 from .orchestration.tool_specs import build_task_progress_spec
 from .runner.context import current_subagent_run_id
@@ -27,12 +27,33 @@ class TaskProgressTool(BaseTool):
             run_id = "main"
         root = runtime_owner_root(self.agent)
         if action == "update":
+            if status_error := _invalid_status_result(params):
+                return status_error
             payload = write_task_progress(root, run_id, params)
             payload = _with_write_feedback(payload)
             payload = _with_evidence_source_feedback(self.agent, payload)
         else:
             payload = read_task_progress(root, run_id)
         return ToolExecutionResult("task_progress", True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _invalid_status_result(params: dict[str, object]) -> ToolExecutionResult | None:
+    invalid = invalid_item_statuses(params)
+    if not invalid:
+        return None
+    payload = {
+        "ok": False,
+        "error": "task_progress items[].status must be one of pending/in_progress/done/skipped/blocked.",
+        "invalid_statuses": invalid[:12],
+        "allowed_statuses": ["pending", "in_progress", "done", "skipped", "blocked"],
+        "how_to_fix": "Move labels such as completed/read/ok into notes or summary, and use status=done when the item is complete.",
+    }
+    return ToolExecutionResult(
+        "task_progress",
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code="TOOL_INVALID_ARGUMENTS",
+    )
 
 
 def _normalized_action(value: object) -> str:

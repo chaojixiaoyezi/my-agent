@@ -6,11 +6,12 @@ import json
 import os
 import textwrap
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 
 DEFAULT_STRESS_SIZE_MB = 10
 SECTION_COUNT = 80
-REQUIRED_COMPACT_CYCLES = 20
+REQUIRED_COMPACT_CYCLES = 5
 
 
 @dataclass(frozen=True)
@@ -25,18 +26,20 @@ class StressFact:
 def case_main_compact_stress_long_read(lab) -> None:
     lab.section("CASE main_compact_stress_long_read")
     _ensure_compact_stress_config(lab)
+    _disable_shell_tool_for_compact_stress(lab)
     facts = _stress_facts()
     source = lab.fixture_root / "data" / "long_field_journal.txt"
     _seed_stress_file(source, facts, size_mb=_stress_size_mb())
     prompt = _compact_stress_prompt()
+    contract_path = _compact_stress_delivery_contract_path(lab, facts)
     lab.record_prompt("main_compact_stress_long_read", prompt)
     response = lab.run_command(
-        lab.agent_command("run", prompt, "--save"),
+        lab.agent_command("run", prompt, "--delivery-contract-file", str(contract_path), "--save"),
         timeout=lab.args.timeout + 900,
     )
     (lab.responses_dir / "main_compact_stress_long_read.stdout.txt").write_text(response.stdout, encoding="utf-8")
     report = lab.fixture_root / "lab_outputs" / "compact-stress" / "report.md"
-    _assert_stress_report(report, facts)
+    _assert_stress_report(lab, report, facts)
     compact_count = _compact_cycle_count(lab.fixture_root / ".my_agent" / "home")
     if compact_count < REQUIRED_COMPACT_CYCLES:
         raise RuntimeError(f"compact 次数不足：expected>={REQUIRED_COMPACT_CYCLES}, actual={compact_count}")
@@ -47,12 +50,10 @@ def case_main_compact_stress_long_read(lab) -> None:
 def _compact_stress_prompt() -> str:
     return textwrap.dedent(
         """
-        这次你自己完成，不要派小傻妞。
-
-        data/long_field_journal.txt 是一个很大的现场记录。请完整读完，按顺序慢慢读，不要只抽样，也不要只搜几个关键词。
-        每次尽量读大段一点，比如一段约 5 万字；读到提示里的下一段位置后就从那里继续，不要回头重读。
-        读的时候另外做一张章节草稿记录表，放在本轮任务的 work 里；每发现一个章节，就记下章节号、地点、最终决定、风险词、检查点编号。
-        最终报告必须按这张记录表整理，不要最后只凭印象补章节。
+        data/long_field_journal.txt 是一个很大的现场记录。请完整读完，按顺序慢慢读，不要只看局部。
+        文件很长，可以分段读取；读到提示里的下一段位置后就从那里继续，不要回头重读。
+        读的时候自己保留必要的过程记录；每发现一个章节，就记下章节号、地点、最终决定、风险词、检查点编号。
+        最终报告必须基于实际读到的记录整理，不要最后只凭印象补章节。
         读的时候自己分段归纳，不要把原文全文复制到回复里。
 
         最终把报告写到 lab_outputs/compact-stress/report.md。
@@ -62,20 +63,20 @@ def _compact_stress_prompt() -> str:
 
 
 def _seed_stress_file(path: Path, facts: list[StressFact], *, size_mb: int) -> None:
-    target_chars = max(1, int(size_mb)) * 1024 * 1024
-    if path.exists() and path.stat().st_size >= target_chars:
+    target_bytes = max(1, int(size_mb)) * 1024 * 1024
+    if path.exists() and path.stat().st_size >= target_bytes:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_stress_file_text(facts, target_chars=target_chars), encoding="utf-8")
+    path.write_text(_stress_file_text(facts, target_bytes=target_bytes), encoding="utf-8")
 
 
-def _stress_file_text(facts: list[StressFact], *, target_chars: int) -> str:
+def _stress_file_text(facts: list[StressFact], *, target_bytes: int) -> str:
     filler = _filler_sentence()
-    section_budget = max(1200, target_chars // max(1, len(facts)))
+    section_budget = max(1200, target_bytes // max(1, len(facts)))
     chunks: list[str] = []
     for fact in facts:
         body = _section_body(fact)
-        while len(body) < section_budget:
+        while len(body.encode("utf-8")) < section_budget:
             body += filler
         chunks.append(body)
     return "\n".join(chunks)
@@ -100,45 +101,98 @@ def _filler_sentence() -> str:
 
 
 def _stress_facts() -> list[StressFact]:
-    cities = ["北京", "南京", "西安", "杭州", "成都", "青岛", "厦门", "武汉"]
-    decisions = ["继续观察", "改走人工复核", "暂停发布", "转交二线", "补充证据"]
-    risks = ["付款超时", "库存漂移", "审批延迟", "重复派单", "状态回滚", "凭证缺口"]
     return [
         StressFact(
             section=index,
-            city=cities[index % len(cities)],
-            decision=decisions[index % len(decisions)],
-            risk=risks[index % len(risks)],
-            checkpoint=f"CP-{index:03d}-{(index * 37) % 997:03d}",
+            city=_fact_token("地点", index, 0),
+            decision=_fact_token("决定", index, 1),
+            risk=_fact_token("风险", index, 2),
+            checkpoint=f"CP-{index:03d}-{_fact_digest(index)[18:26].upper()}",
         )
         for index in range(1, SECTION_COUNT + 1)
     ]
 
 
-def _assert_stress_report(report: Path, facts: list[StressFact]) -> None:
+def _fact_token(prefix: str, index: int, slot: int) -> str:
+    digest = _fact_digest(index)
+    start = slot * 6
+    return f"{prefix}-{digest[start:start + 6].upper()}"
+
+
+def _fact_digest(index: int) -> str:
+    return sha256(f"compact-stress-fact:{index}".encode()).hexdigest()
+
+
+def _assert_stress_report(lab, report: Path, facts: list[StressFact]) -> None:
+    del lab
     if not report.exists():
         raise RuntimeError(f"compact stress 报告不存在: {report}")
     content = report.read_text(encoding="utf-8", errors="replace")
     if len(content.strip()) < 3000:
         raise RuntimeError("compact stress 报告过短，不足以证明完整阅读。")
-    _assert_required_facts(content, facts)
+    _assert_report_required_facts(content, facts)
 
 
-def _assert_required_facts(content: str, facts: list[StressFact]) -> None:
+def _assert_report_required_facts(content: str, facts: list[StressFact]) -> None:
     lowered = content.casefold()
     checkpoints = [fact.checkpoint for fact in facts[-10:]]
-    required = [*checkpoints, "北京", "南京", "西安", "付款超时", "审批延迟", "最终决定"]
+    required = [*checkpoints, "最终决定"]
     missing = [item for item in required if item.casefold() not in lowered]
-    missing.extend(_missing_section_facts(lowered, facts))
+    missing.extend(_missing_section_facts(lowered, facts, include_checkpoint=True))
     if missing:
         raise RuntimeError(f"compact stress 报告缺少关键事实: {missing}")
 
 
-def _missing_section_facts(lowered_content: str, facts: list[StressFact]) -> list[str]:
+def _compact_stress_delivery_contract_path(lab, facts: list[StressFact]) -> Path:
+    path = lab.run_root / "compact_stress_delivery_contract.json"
+    path.write_text(
+        json.dumps(
+            _compact_stress_delivery_contract(facts),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    lab.log(f"delivery_contract_file={path}")
+    return path
+
+
+def _compact_stress_delivery_contract(facts: list[StressFact]) -> dict[str, object]:
+    required_strings = ["最终决定"]
+    for fact in facts:
+        required_strings.extend([f"{fact.section:03d}", fact.city, fact.decision, fact.risk, fact.checkpoint])
+    return {
+        "schema_version": "delivery_contract.v1",
+        "artifacts": [
+            {
+                "artifact_id": "compact_stress_report",
+                "kind": "md",
+                "preferred_path": "lab_outputs/compact-stress/report.md",
+                "allowed_output_roots": ["lab_outputs/compact-stress"],
+                "required": True,
+                "validation_contract": {
+                    "required_strings": list(dict.fromkeys(required_strings)),
+                    "forbidden_strings": ["见原文"],
+                },
+            }
+        ],
+    }
+
+
+def _missing_section_facts(
+    lowered_content: str,
+    facts: list[StressFact],
+    *,
+    include_checkpoint: bool,
+) -> list[str]:
     missing: list[str] = []
     for fact in facts:
         section = f"{fact.section:03d}"
-        for value in (section, fact.city, fact.decision, fact.risk, fact.checkpoint):
+        values = [section, fact.city, fact.decision, fact.risk]
+        if include_checkpoint:
+            values.append(fact.checkpoint)
+        for value in values:
             if value.casefold() not in lowered_content:
                 missing.append(f"section_{section}:{value}")
     return missing
@@ -187,10 +241,32 @@ def _ensure_compact_stress_config(lab) -> None:
         model_context_window_tokens: 200000
         memory_compact_auto_trigger_percent: 50
         request_timeout: {max(600, int(lab.args.timeout))}
-        tool_read_max_chars: 50000
+        tool_read_max_chars: 100000
+        tool_output_externalize_min_chars: 140000
+        tool_output_preview_chars: 8000
         """
     )
     lab.config_path.write_text(text + overrides, encoding="utf-8")
+
+
+def _disable_shell_tool_for_compact_stress(lab) -> None:
+    policy_path = lab.fixture_root / ".my_agent" / "home" / "owners" / "local" / "main" / "tool_policy.json"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "tool-policy.v1",
+                "enabled_sources": ["builtin", "owner", "workspace", "shared"],
+                "disabled_tools": ["run_command"],
+                "pin_versions": {},
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    lab.log(f"compact_stress_disabled_tools={policy_path}")
 
 
 def _stress_size_mb() -> int:

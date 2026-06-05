@@ -164,7 +164,16 @@ def _validate_validation_contract(value: object, artifact_location: str) -> tupl
     findings: list[ContractFinding] = []
     if "min_size" in value and not _non_negative_int(value.get("min_size")):
         findings.append(_finding("VALIDATION_CONTRACT_MIN_SIZE_INVALID", "hard", f"{artifact_location}.validation_contract.min_size"))
-    for key in ("required_sections", "required_files", "required_sheets", "required_columns"):
+    for key in (
+        "required_sections",
+        "required_files",
+        "required_sheets",
+        "required_columns",
+        "required_strings",
+        "required_regex",
+        "forbidden_strings",
+        "forbidden_regex",
+    ):
         if key not in value:
             continue
         items = string_items(value.get(key), allow_named_dict=key == "required_columns")

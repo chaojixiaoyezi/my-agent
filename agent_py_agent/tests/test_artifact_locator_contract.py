@@ -20,7 +20,7 @@ def test_artifact_locator_finds_single_required_kind_under_allowed_root(tmp_path
 def test_artifact_locator_accepts_user_requested_absolute_output_root(tmp_path):
     from agent_py_agent.agent.agent_core.artifact_locator import locate_artifact
 
-    requested = tmp_path.parent / "requested-output"
+    requested = tmp_path.parent / f"{tmp_path.name}-requested-output"
     requested.mkdir()
     output = requested / "final_report.md"
     output.write_text("done", encoding="utf-8")
@@ -180,6 +180,43 @@ def test_delivery_closeout_uses_artifact_locator_when_path_is_not_declared(tmp_p
 
     assert report["ok"] is True
     assert report["artifacts"][0]["path"] == str(artifact_path.resolve())
+
+
+def test_delivery_closeout_accepts_user_requested_absolute_preferred_path(tmp_path):
+    from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import (
+        DeliveryContractValidationRequest,
+        _validate_contract_artifacts,
+    )
+
+    requested = tmp_path.parent / f"{tmp_path.name}-preferred-output"
+    requested.mkdir()
+    artifact_path = requested / "report.md"
+    artifact_path.write_text("finished report with enough detail", encoding="utf-8")
+    contract = {
+        "artifacts": [
+            {
+                "artifact_id": "user_requested_report",
+                "kind": "md",
+                "preferred_path": str(artifact_path),
+                "allowed_output_roots": [str(requested)],
+                "validation_contract": {"min_size": 10},
+            }
+        ]
+    }
+
+    report = _validate_contract_artifacts(
+        DeliveryContractValidationRequest(
+            contract=contract,
+            artifacts=contract["artifacts"],
+            workspace_root=tmp_path,
+            params=_empty_tool_loop_params(),
+        )
+    )
+
+    findings = report["artifacts"][0]["acceptance_report"]["findings"]
+    assert report["ok"] is True
+    assert report["artifacts"][0]["path"] == str(artifact_path.resolve())
+    assert {item["code"] for item in findings} == set()
 
 
 def test_delivery_closeout_locates_spreadsheet_artifact_without_declared_path(tmp_path):

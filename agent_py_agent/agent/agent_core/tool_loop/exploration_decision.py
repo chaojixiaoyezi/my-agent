@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from ..tool_guard.exploration_fuse import (
-    exploration_fuse_block_response,
     exploration_fuse_context,
     has_pending_exploration_fuse,
     has_required_exploration_fuse,
@@ -42,8 +41,8 @@ def exploration_fuse_tool_call_decision(
     context = exploration_fuse_context(request.agent, request.counters.exploration_fuse_redirects)
     if context:
         request.params.tool_context.append(context)
-        return ExplorationFuseDecision("continue", None, [], _inc_exploration_fuse(request.counters))
-    return ExplorationFuseDecision("break", exploration_fuse_block_response(request.agent), [], request.counters)
+        return None
+    return None
 
 
 def exploration_fuse_no_tool_call_decision(
@@ -55,8 +54,7 @@ def exploration_fuse_no_tool_call_decision(
     if context:
         request.params.tool_context.append(context)
         return ExplorationFuseDecision("continue", None, [], _inc_exploration_fuse(request.counters))
-    block = exploration_fuse_block_response(request.agent) or request.response
-    return ExplorationFuseDecision("break", block, [], request.counters)
+    return None
 
 
 __all__ = [

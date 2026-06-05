@@ -241,9 +241,42 @@ def _scenario_report_candidates(tasks: list[SubAgentTask], fixture_root: Path) -
 
     candidates = list((fixture_root / "scenario_outputs").glob("*.md"))
     for task in tasks:
+        candidates.extend(_scenario_output_json_artifact_paths(task))
         task_dir = Path(task.task_dir)
         candidates.extend((task_dir / "scenario_outputs").glob("*.md"))
+        if task.agent_run_workspace_dir:
+            candidates.extend((Path(task.agent_run_workspace_dir) / "scenario_outputs").glob("*.md"))
+        if task.task_workspace_dir:
+            candidates.extend((Path(task.task_workspace_dir) / "work" / "agents" / task.id / "scenario_outputs").glob("*.md"))
     return candidates
+
+
+def _scenario_output_json_artifact_paths(task: SubAgentTask) -> list[Path]:
+    output_json = Path(task.output_json) if task.output_json else None
+    if not output_json or not output_json.is_file():
+        return []
+    try:
+        payload = json.loads(output_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, list):
+        return []
+    paths: list[Path] = []
+    for item in artifacts:
+        if not isinstance(item, dict):
+            continue
+        path_text = item.get("path")
+        if not isinstance(path_text, str) or not path_text.strip():
+            registry_ref = item.get("registry_ref")
+            if isinstance(registry_ref, dict):
+                path_text = registry_ref.get("path")
+        if not isinstance(path_text, str) or not path_text.strip():
+            continue
+        candidate = Path(path_text)
+        if candidate.suffix.lower() == ".md":
+            paths.append(candidate)
+    return paths
 
 
 def write_scenario_summary(

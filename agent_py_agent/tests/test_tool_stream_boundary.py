@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from agent_py_agent.agent.agent_core.tool_stream import (
+    CompleteToolCallStreamAbort,
     LongToolContentStreamAbort,
     MalformedToolProtocolStreamAbort,
     ToolBoundaryChunkFilter,
@@ -103,6 +104,32 @@ def test_tool_boundary_preserves_later_raw_write_block_when_trimming_prose() -> 
     assert "然后写完整文件" not in cut.text
     assert "[TOOL_CALL]" in cut.text
     assert "[WRITE_FILE_RAW" in cut.text
+
+
+def test_tool_boundary_stops_stream_inspection_after_complete_tool_call() -> None:
+    forwarded: list[str] = []
+    boundary = ToolBoundaryChunkFilter(forwarded.append)
+
+    boundary('[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]')
+    boundary("\nTOOL_PROTOCOL_LINE\n" * 20)
+
+    assert "".join(forwarded) == '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
+
+
+def test_tool_boundary_complete_abort_returns_complete_machine_blocks() -> None:
+    boundary = ToolBoundaryChunkFilter(None)
+    boundary(
+        '[TOOL_CALL]\n{"tool":"read_file","path":"a.md"}\n[/TOOL_CALL]\n'
+        '[TOOL_CALL]\n{"tool":"read_file","path":"b.md"}\n[/TOOL_CALL]\n'
+        "这段普通解释不应进入工具执行"
+    )
+
+    abort = boundary.complete_tool_call_abort()
+
+    assert isinstance(abort, CompleteToolCallStreamAbort)
+    assert '"path":"a.md"' in abort.text
+    assert '"path":"b.md"' in abort.text
+    assert "普通解释" not in abort.text
 
 
 def test_tool_boundary_aborts_repeated_unclosed_tool_markers() -> None:

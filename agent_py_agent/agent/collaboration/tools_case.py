@@ -162,7 +162,6 @@ def _should_request_collaboration(params: dict[str, object]) -> bool:
         for key in (
             "question",
             "target_agent_ids",
-            "required_capabilities",
             "observed_facts",
             "query_hints",
             "problem_statement",

@@ -49,7 +49,7 @@ class TestShellToolBasics:
         tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
         result = tool.execute({"command": "exit 1"})
 
-        assert result.ok is True  # 命令执行了，只是返回非零
+        assert result.ok is False
         assert "return_code=1" in result.output
 
     def test_capture_stdout_and_stderr(self, tmp_path: Path):

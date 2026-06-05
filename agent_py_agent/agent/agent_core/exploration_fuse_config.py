@@ -19,11 +19,11 @@ _RATIO_HINT_DENOMINATOR = 5
 
 @dataclass(frozen=True)
 class ExplorationFuseConfig:
-    """Config for exploration-only tool loop hints and blocking.
+    """Config for exploration-only tool loop hints.
 
     round_threshold:
-        连续只读/搜索/抓取多少轮后才阻断。默认 300。
-        0 表示不按次数阻断；系统只在 50、150、250 轮做软提醒。
+        连续只读/搜索/抓取多少轮内按比例给软提醒。默认 300。
+        不阻断任务；0 表示只在 50、150、250 轮做固定软提醒。
     unlimited_hint_rounds:
         round_threshold=0 时使用的固定提示轮次。
     local_progress_unlimited_hint_interval:

@@ -13,6 +13,7 @@ from ...artifacts.registry import (
     registry_path,
     resolve_artifact_record_report,
 )
+from ...contracts.artifact_acceptance import validation_workspace_root_for_item
 from ...contracts.artifact_format_lint import lint_artifact_format
 from ...contracts.gates import artifact_provenance_from_archive
 from ..artifact_locator import locate_artifact
@@ -110,6 +111,7 @@ def _validate_contract_artifacts(request: DeliveryContractValidationRequest) -> 
             ], workspace_root=request.workspace_root),
             workspace_root=request.workspace_root,
         )
+        report["ok"] = all(item["ok"] for item in results)
     return report
 
 
@@ -179,7 +181,7 @@ def _validate_artifact_item(
 def _validated_artifact_from_path(request: ArtifactValidationReportRequest) -> dict[str, Any]:
     report = lint_artifact_format(
         path=request.path,
-        workspace_root=request.workspace_root,
+        workspace_root=validation_workspace_root_for_item(request.item, request.path, request.workspace_root),
         validation_contract=_validation_contract(request.item),
     ).to_dict()
     report = with_staged_checkpoint_findings(report, request.item, request.workspace_root)

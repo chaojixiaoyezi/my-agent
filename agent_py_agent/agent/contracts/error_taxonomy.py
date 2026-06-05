@@ -73,6 +73,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="工具超时；缩小读取/搜索范围，或使用更合适的超时配置。",
     ),
+    "COMMAND_FAILED": ErrorContract(
+        code="COMMAND_FAILED",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="shell 命令返回非零状态；读取 stdout/stderr，修正命令或换成更可靠的专用工具。",
+    ),
     "RATE_LIMITED": ErrorContract(
         code="RATE_LIMITED",
         category="model",
@@ -317,6 +324,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action=RecoveryAction.RECOVER_FROM_CHECKPOINT.value,
         recovery_hint="compact 引用缺失；读取 checkpoint、summary、raw archive 做恢复，不要继续自动执行。",
+    ),
+    "CONTEXT_COMPACT_DEFERRED": ErrorContract(
+        code="CONTEXT_COMPACT_DEFERRED",
+        category="compact",
+        retryable=True,
+        recommended_action=RecoveryAction.RECOVER_FROM_CHECKPOINT.value,
+        recovery_hint="当前上下文需要先 compact/resume；这个工具调用已经登记为未执行，恢复后再从同一目标继续。",
     ),
     "NO_PROGRESS": ErrorContract(
         code="NO_PROGRESS",

@@ -51,6 +51,7 @@ class SubAgentExecutionContext:
     context_bundle: dict[str, object] = field(default_factory=dict)
     context_bundle_file: str = ""
     context_bundle_json: str = ""
+    role_template: dict[str, object] = field(default_factory=dict)
     write_boundary: dict[str, object] = field(default_factory=dict)
     pending_requests: list[dict[str, object]] = field(default_factory=list)
     open_gaps: list[dict[str, object]] = field(default_factory=list)

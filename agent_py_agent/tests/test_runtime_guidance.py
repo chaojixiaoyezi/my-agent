@@ -225,8 +225,8 @@ def test_tool_loop_guidance_can_override_earlier_contract_context(tmp_path) -> N
     prompt = build_tool_loop_prompt(agent, params)
 
     assert "GUIDANCE_DELIVERED" in prompt
-    assert "代表最新用户/上级上下文" in prompt
-    assert "如果它和较早任务合同、旧工具记录冲突，以这里为准" in prompt
+    assert "只作为普通补充消息进入上下文" in prompt
+    assert "不会把这些文字解释成新的硬门" in prompt
     assert "用户补充：25次压缩已经够了" in prompt
     assert prompt.rfind("用户补充：25次压缩已经够了") > prompt.find("[tool-system delivery-contract]")
     assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
@@ -281,7 +281,8 @@ def test_real_subagent_runner_prompt_includes_guidance(tmp_path) -> None:
 
     assert "GUIDANCE_DELIVERED" in prompt
     assert "先写阶段文件，再继续扩展。" in prompt
-    assert "代表最新用户/上级上下文" in prompt
+    assert "只作为普通补充消息进入上下文" in prompt
+    assert "不会把这些文字解释成新的硬门" in prompt
     assert agent.conversation_store.pending_guidance("agent_run", child.id) == []
 
 

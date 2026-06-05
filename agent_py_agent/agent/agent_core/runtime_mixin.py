@@ -7,6 +7,7 @@ from __future__ import annotations
 它不处理子代理调度细节，那些已经拆到别的 mixin。
 """
 
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
@@ -204,6 +205,7 @@ class SimpleAgentRuntimeMixin:
             compact_auto_no_tool_continue_depth=rp.compact_auto_no_tool_continue_depth,
             main_context_bundle_path=params.main_context_bundle_path,
             main_context_bundle_markdown_path=params.main_context_bundle_markdown_path,
+            delivery_contract=rp.delivery_contract,
         )
 
     def remember(self, content: str, *, kind: str = "note"):
@@ -265,6 +267,10 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
 
 def _compact_auto_continue_params(params: RunParams, injection: str, source_result) -> RunParams:
     no_tool_depth = params.compact_auto_no_tool_continue_depth + 1 if _result_has_no_tool_progress(source_result) else 0
+    incoming_archive_calls = _merged_archive_tool_calls(
+        getattr(source_result, "archive_tool_calls", None),
+        _pending_deferred_tool_calls_from_result(source_result),
+    )
     return replace(
         params,
         inject=[*_non_compact_auto_injections(params.inject), injection],
@@ -272,7 +278,7 @@ def _compact_auto_continue_params(params: RunParams, injection: str, source_resu
         compact_auto_no_tool_continue_depth=no_tool_depth,
         carried_archive_tool_calls=_merged_archive_tool_calls(
             params.carried_archive_tool_calls,
-            getattr(source_result, "archive_tool_calls", None),
+            incoming_archive_calls,
         ),
     )
 
@@ -302,6 +308,7 @@ def _merged_archive_tool_calls(
             str(record.get("run_id") or ""),
             str(record.get("tool") or ""),
             str(record.get("source_input") or _record_parameter_path(record)),
+            _record_parameters_key(record),
             str(record.get("output_hash") or record.get("sha256") or ""),
             str(record.get("scoped_call_id") or record.get("call_id") or record.get("id") or ""),
         )
@@ -321,3 +328,28 @@ def _record_parameter_path(record: dict[str, object]) -> str:
         if value:
             return value
     return ""
+
+
+def _record_parameters_key(record: dict[str, object]) -> str:
+    params = record.get("parameters")
+    if not isinstance(params, dict):
+        return ""
+    try:
+        return json.dumps(params, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        return ""
+
+
+def _pending_deferred_tool_calls_from_result(source_result) -> list[dict[str, object]]:
+    packet = getattr(source_result, "memory_compact_auto_continue_packet", None)
+    if not isinstance(packet, dict):
+        return []
+    rows = packet.get("pending_deferred_tool_calls")
+    if not isinstance(rows, list):
+        work_state = packet.get("work_state_snapshot")
+        rows = work_state.get("pending_deferred_tool_calls") if isinstance(work_state, dict) else []
+    result: list[dict[str, object]] = []
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict):
+            result.append(dict(row))
+    return result

@@ -79,8 +79,6 @@ def case_main_compact_resume_roundtrip(lab) -> None:
 def _main_artifact_readback_prompt() -> str:
     return textwrap.dedent(
         """
-        这次你自己完成，不要派小傻妞。
-
         data/artifact-readback/source.txt 这个资料比较长。
         请你找出 ALPHA-ANCHOR、OMEGA-ANCHOR、TRACE-ARTIFACT-991 三处附近分别在说什么。
         如果系统一次只给你一部分内容，或者提示内容已经放到外置文件里，请继续按线索读完整，不要猜。

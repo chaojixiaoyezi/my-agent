@@ -89,7 +89,7 @@ def test_tool_round_can_defer_excess_model_tool_calls_to_next_round():
     assert executed == ["/tmp/source-0.md", "/tmp/source-1.md"]
     assert records == executed
     assert any("[tool-system]" in str(item) and "本轮模型请求了 5 个工具调用" in str(item) for item in params.tool_context)
-    assert any("只执行了前 2 个" in str(item) and "剩余 3 个没有执行" in str(item) for item in params.tool_context)
+    assert any("只处理到前 2 个" in str(item) and "剩余 3 个没有执行" in str(item) for item in params.tool_context)
 
 
 def test_tool_round_stops_batch_when_new_tool_context_crosses_compact_budget():
@@ -131,8 +131,9 @@ def test_tool_round_stops_batch_when_new_tool_context_crosses_compact_budget():
     assert any("剩余" in str(item) and "没有执行" in str(item) for item in params.tool_context)
 
 
-def test_tool_round_defers_more_reading_after_digest_reaches_compact_budget():
+def test_tool_round_records_deferred_content_tool_when_context_needs_compact():
     executed: list[str] = []
+    records: list[tuple[str, bool, str, str]] = []
     params = SimpleNamespace(
         task_attributes={},
         tool_context=["[tool-record round=1 index=1]\n[tool-output-record round=1 index=1]\n上一批读取结果"],
@@ -147,6 +148,16 @@ def test_tool_round_defers_more_reading_after_digest_reaches_compact_budget():
         executed.append(str(request.payload["tool"]))
         return ToolExecutionResult("read_file", True, "不应该执行")
 
+    def record_one(record):
+        records.append(
+            (
+                str(record.payload["tool"]),
+                bool(record.result.ok),
+                str(record.result.error_code),
+                str(record.result.output),
+            )
+        )
+
     execute_tool_round(
         ToolRoundExecutionRequest(
             agent=agent,
@@ -155,19 +166,26 @@ def test_tool_round_defers_more_reading_after_digest_reaches_compact_budget():
             response=ModelResponse(text="tool batch", backend="test"),
             calls=[{"tool": "read_file", "path": "next-fragment.md"}],
             execute_one=execute_one,
-            record_one=lambda _record: None,
+            record_one=record_one,
             current_prompt="系统上下文" * 120,
         )
     )
 
     assert executed == []
+    assert records == [
+        (
+            "read_file",
+            False,
+            "CONTEXT_COMPACT_DEFERRED",
+            "CONTEXT_COMPACT_DEFERRED: 当前上下文需要先 compact/resume；本次工具调用未执行，恢复后从同一目标继续。",
+        )
+    ]
     assert any("已达到 compact 阈值" in str(item) for item in params.tool_context)
-    assert params.live_archive_state["tool_context_checkpoint_required"] is True
-    assert params.live_archive_state["pending_tool_context_digest"] is True
-    assert any("只执行了前 0 个" in str(item) for item in params.tool_context)
+    assert "tool_context_checkpoint_required" not in params.live_archive_state
+    assert "pending_tool_context_digest" not in params.live_archive_state
 
 
-def test_tool_round_runs_first_reader_before_digest_checkpoint():
+def test_tool_round_runs_first_reader_before_context_pressure_deferral():
     executed: list[str] = []
     params = SimpleNamespace(
         task_attributes={},
@@ -208,7 +226,7 @@ def test_tool_round_runs_first_reader_before_digest_checkpoint():
     assert "tool_context_checkpoint_required" not in params.live_archive_state
 
 
-def test_tool_round_reminds_long_read_to_checkpoint_facts_before_more_reading():
+def test_tool_round_reminds_chunked_read_to_checkpoint_facts_before_more_reading():
     params = SimpleNamespace(task_attributes={}, tool_context=[], live_archive_state={})
     agent = SimpleNamespace(config=SimpleNamespace(memory_compact_auto_trigger_percent=0))
 
@@ -227,7 +245,7 @@ def test_tool_round_reminds_long_read_to_checkpoint_facts_before_more_reading():
             calls=[{"tool": "read_file", "path": "data/long.txt", "offset": 0, "max_chars": 50000}],
             execute_one=execute_one,
             record_one=record_one,
-            current_prompt="请完整读完文件，最终报告里要包含每个章节的检查点。",
+            current_prompt="",
         )
     )
 
@@ -236,7 +254,7 @@ def test_tool_round_reminds_long_read_to_checkpoint_facts_before_more_reading():
     assert any("data/long.txt@offset=0" in str(item) for item in params.tool_context)
 
 
-def test_tool_round_reminds_long_read_for_no_omission_language():
+def test_tool_round_reminds_chunked_read_without_prompt_language_markers():
     params = SimpleNamespace(task_attributes={}, tool_context=[], live_archive_state={})
     agent = SimpleNamespace(config=SimpleNamespace(memory_compact_auto_trigger_percent=0))
 
@@ -255,7 +273,7 @@ def test_tool_round_reminds_long_read_for_no_omission_language():
             calls=[{"tool": "read_file", "path": "data/long.txt", "offset": 50000, "max_chars": 50000}],
             execute_one=execute_one,
             record_one=record_one,
-            current_prompt="请按顺序读完这个大文件，里面所有事项都不能漏。",
+            current_prompt="",
         )
     )
 
@@ -282,60 +300,20 @@ def test_tool_round_does_not_remind_long_read_after_checkpoint_write():
             ],
             execute_one=execute_one,
             record_one=lambda _record: None,
-            current_prompt="请完整读完文件，最终报告里要包含每个章节的检查点。",
+            current_prompt="",
         )
     )
 
     assert not any("[tool-system:long-read-facts]" in str(item) for item in params.tool_context)
 
 
-def test_tool_round_checkpoint_write_satisfies_deferred_compact_before_more_reading():
+def test_tool_round_defers_more_reading_to_compact_when_previous_results_already_exist():
     executed: list[str] = []
-    params = SimpleNamespace(
-        task_attributes={},
-        tool_context=[],
-        live_archive_state={"tool_context_checkpoint_required": True},
-    )
-    agent = SimpleNamespace(
-        config=SimpleNamespace(memory_compact_auto_trigger_percent=50),
-        backend=SimpleNamespace(context_window_tokens=1000),
-    )
-
-    def execute_one(request):
-        tool_name = str(request.payload["tool"])
-        executed.append(tool_name)
-        return ToolExecutionResult(tool_name, True, "progress recorded")
-
-    def record_one(record):
-        record.params.tool_context.append(record.result.output)
-
-    execute_tool_round(
-        ToolRoundExecutionRequest(
-            agent=agent,
-            params=params,
-            tool_rounds=3,
-            response=ModelResponse(text="tool batch", backend="test"),
-            calls=[{"tool": "task_progress", "action": "update", "summary": "已记录最近一批读取事实"}],
-            execute_one=execute_one,
-            record_one=record_one,
-            current_prompt="系统上下文" * 120,
-        )
-    )
-
-    assert executed == ["task_progress"]
-    assert params.live_archive_state["tool_context_checkpoint_satisfied"] is True
-    assert params.live_archive_state["pending_tool_context_digest"] is True
-
-
-def test_tool_round_compacts_before_more_reading_after_checkpoint_is_written():
-    executed: list[str] = []
+    records: list[tuple[str, bool, str]] = []
     params = SimpleNamespace(
         task_attributes={},
         tool_context=["[tool-record round=3 index=1]\n[tool-output-record round=3 index=1]\n上一批读取结果"],
-        live_archive_state={
-            "tool_context_checkpoint_required": True,
-            "tool_context_checkpoint_satisfied": True,
-        },
+        live_archive_state={},
     )
     agent = SimpleNamespace(
         config=SimpleNamespace(memory_compact_auto_trigger_percent=50),
@@ -346,6 +324,9 @@ def test_tool_round_compacts_before_more_reading_after_checkpoint_is_written():
         executed.append(str(request.payload["tool"]))
         return ToolExecutionResult("read_file", True, "不应该执行")
 
+    def record_one(record):
+        records.append((str(record.payload["tool"]), bool(record.result.ok), str(record.result.error_code)))
+
     execute_tool_round(
         ToolRoundExecutionRequest(
             agent=agent,
@@ -354,14 +335,14 @@ def test_tool_round_compacts_before_more_reading_after_checkpoint_is_written():
             response=ModelResponse(text="tool batch", backend="test"),
             calls=[{"tool": "read_file", "path": "next-fragment.md"}],
             execute_one=execute_one,
-            record_one=lambda _record: None,
+            record_one=record_one,
             current_prompt="系统上下文" * 120,
         )
     )
 
     assert executed == []
-    assert "pending_tool_context_digest" not in params.live_archive_state
-    assert any("检查点已经写入" in str(item) for item in params.tool_context)
+    assert records == [("read_file", False, "CONTEXT_COMPACT_DEFERRED")]
+    assert any("CONTEXT_COMPACT_DEFERRED" in str(item) for item in params.tool_context)
 
 
 def test_tool_round_allows_writes_after_digest_reaches_compact_budget():

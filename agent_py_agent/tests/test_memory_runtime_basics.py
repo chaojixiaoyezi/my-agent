@@ -334,6 +334,87 @@ def test_run_no_save_does_not_write_runtime_fact(tmp_path):
     assert not (tmp_path / "memory_archive" / "runtime_facts").exists()
 
 
+def test_saved_run_runtime_fact_keeps_delivery_contract_outputs(tmp_path):
+    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    requested = tmp_path / "requested-output" / "report.md"
+    contract = {
+        "schema_version": "delivery_contract.v1",
+        "artifacts": [
+            {
+                "artifact_id": "user_requested_report_md",
+                "kind": "md",
+                "preferred_path": str(requested),
+                "allowed_output_roots": [str(requested.parent)],
+                "required": True,
+            }
+        ],
+    }
+
+    agent.run(
+        f"最后把报告写到 {requested}",
+        save=True,
+        request_id="req-contract-output",
+        run_id="run-contract-output",
+        task_id="task-contract-output",
+        source="cli_run",
+        delivery_contract=contract,
+    )
+
+    fact_path = next((tmp_path / "home").rglob("runtime_facts/req-contract-output/task.json"))
+    payload = json.loads(fact_path.read_text(encoding="utf-8"))
+
+    assert payload["desired_outputs"] == [
+        {
+            "artifact_id": "user_requested_report_md",
+            "kind": "md",
+            "target_path": str(requested),
+        }
+    ]
+    assert payload["run_intent"]["desired_outputs"]["items"] == [str(requested)]
+
+
+def test_saved_run_runtime_fact_keeps_target_coverage_contract(tmp_path):
+    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    contract = {
+        "schema_version": "delivery_contract.v1",
+        "artifacts": [
+            {
+                "artifact_id": "report",
+                "kind": "md",
+                "preferred_path": "outputs/report.md",
+                "required": True,
+            }
+        ],
+        "target_coverage_contract": {
+            "coverage_requirement": "full_source_read",
+            "enforcement": "required",
+            "target_items": [
+                {
+                    "target_id": "data/source.txt",
+                    "source_path": "data/source.txt",
+                    "coverage_kind": "full_source_read",
+                }
+            ],
+        },
+    }
+
+    agent.run(
+        "完整读完 data/source.txt 后写报告。",
+        save=True,
+        request_id="req-contract-coverage",
+        run_id="run-contract-coverage",
+        task_id="task-contract-coverage",
+        source="cli_run",
+        delivery_contract=contract,
+    )
+
+    fact_path = next((tmp_path / "home").rglob("runtime_facts/req-contract-coverage/task.json"))
+    payload = json.loads(fact_path.read_text(encoding="utf-8"))
+
+    assert payload["delivery_contract"]["target_coverage_contract"]["coverage_requirement"] == "full_source_read"
+    assert payload["target_coverage"]["target_items"][0]["source_path"] == "data/source.txt"
+
+
 def test_auto_resume_context_is_disabled_by_default(tmp_path):
     """LLM: Tests that auto resume context is disabled by default in agent config."""
     agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)

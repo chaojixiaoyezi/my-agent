@@ -9,10 +9,6 @@ from agent_py_agent.agent.memory_archive.compact_apply import (
     MemoryCompactApplyOptions,
     apply_memory_compact,
 )
-from agent_py_agent.agent.memory_archive.compact_resume import (
-    MemoryCompactResumeOptions,
-    build_memory_compact_resume,
-)
 from agent_py_agent.agent.memory_archive.runtime_fact_source import (
     RuntimeFactSourceRequest,
     write_runtime_fact_source,
@@ -20,31 +16,23 @@ from agent_py_agent.agent.memory_archive.runtime_fact_source import (
 from agent_py_agent.cli.parser import build_parser
 
 
-def test_real_run_runtime_fact_source_allows_complete_compact_resume(tmp_path: Path, capsys) -> None:
+def test_real_run_runtime_fact_source_keeps_prompt_sections_as_goal_only(tmp_path: Path, capsys) -> None:
     config_path = _write_config(tmp_path)
     run_args = build_parser().parse_args(["--config", str(config_path), "run", _explicit_prompt(), "--save"])
 
     assert run_args.func(run_args) == 0
     capsys.readouterr()
-    result = apply_memory_compact(_owner_home(config_path), MemoryCompactApplyOptions(MemoryCompactPlanOptions()))
-    resume = build_memory_compact_resume(
-        _owner_home(config_path),
-        MemoryCompactResumeOptions(apply_ref=result["apply_id"], resume_mode="auto"),
-    )
 
-    assert list((_owner_home(config_path) / "memory_archive" / "runtime_facts").glob("*"))
-    assert result["work_state_snapshot"]["acceptance"]["items"] == ["compact resume can restore explicit facts"]
-    assert result["work_state_snapshot"]["constraints"]["items"] == ["do not touch user config"]
-    assert result["work_state_snapshot"]["latest_tests"]["items"] == [
-        "python3 -m pytest -q agent_py_agent/tests/test_memory_compact.py"
-    ]
-    assert result["work_state_snapshot"]["missing_fields"] == []
-    assert resume["action_guard"]["status"] == "allow_automated_continue"
-    assert resume["action_guard"]["allowed_to_continue"] is True
-    assert resume["completion_prompt"]["status"] == "complete"
+    fact_dirs = list((_owner_home(config_path) / "memory_archive" / "runtime_facts").glob("*"))
+    assert fact_dirs
+    payload = json.loads((fact_dirs[0] / "task.json").read_text(encoding="utf-8"))
+    assert "验收条件" in payload["goal"]
+    assert payload["acceptance"] == []
+    assert payload["constraints"] == []
+    assert payload["latest_tests"] == []
 
 
-def test_runtime_fact_source_stops_sections_at_unknown_headings(tmp_path: Path) -> None:
+def test_runtime_fact_source_does_not_parse_prompt_sections_as_machine_facts(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
 
     write_runtime_fact_source(
@@ -70,12 +58,13 @@ def test_runtime_fact_source_stops_sections_at_unknown_headings(tmp_path: Path) 
     payload = json.loads(
         (root / "memory_archive" / "runtime_facts" / "req-section-stop" / "task.json").read_text(encoding="utf-8")
     )
-    assert payload["acceptance"] == ["only approved acceptance"]
-    assert payload["constraints"] == ["only approved constraint"]
-    assert "do not treat this as acceptance" not in payload["acceptance"]
+    assert payload["acceptance"] == []
+    assert payload["constraints"] == []
+    assert "only approved acceptance" in payload["goal"]
+    assert "only approved constraint" in payload["goal"]
 
 
-def test_runtime_fact_source_reads_compact_auto_continuation_injection(tmp_path: Path) -> None:
+def test_runtime_fact_source_does_not_parse_compact_auto_continuation_markdown(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
 
     write_runtime_fact_source(
@@ -108,9 +97,36 @@ def test_runtime_fact_source_reads_compact_auto_continuation_injection(tmp_path:
             encoding="utf-8"
         )
     )
-    assert payload["acceptance"] == ["compact packet remains complete"]
-    assert payload["constraints"] == ["do not redo completed work"]
-    assert payload["latest_tests"] == ["focused compact continuation test"]
+    assert payload["acceptance"] == []
+    assert payload["constraints"] == []
+    assert payload["latest_tests"] == []
+
+
+def test_runtime_fact_source_keeps_test_commands_from_tool_records(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+
+    write_runtime_fact_source(
+        RuntimeFactSourceRequest(
+            root=root,
+            request_id="req-tool-test",
+            user_prompt="整理测试结果。",
+            archive_tool_calls=[
+                {
+                    "tool": "shell",
+                    "ok": True,
+                    "parameters": {
+                        "command": "python3 -m pytest -q agent_py_agent/tests/test_memory_compact.py"
+                    },
+                }
+            ],
+        )
+    )
+
+    payload = json.loads(
+        (root / "memory_archive" / "runtime_facts" / "req-tool-test" / "task.json").read_text(encoding="utf-8")
+    )
+    assert len(payload["latest_tests"]) == 1
+    assert "pytest" in payload["latest_tests"][0]
 
 
 def test_compact_work_state_does_not_import_workspace_root_checklist(tmp_path: Path) -> None:

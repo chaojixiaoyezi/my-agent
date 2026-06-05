@@ -306,7 +306,8 @@ def test_delivery_repair_context_does_not_leak_into_uncontracted_later_run():
             params=RunParams(save=False),
         )
 
-        assert backend.calls == 2
+        assert backend.calls == 1
+        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert "[DELIVERY_REQUIRED_REPAIR_BLOCKED]" not in result.response
         assert (workspace / "lab_outputs/tool-recovery/report.md").exists()
 

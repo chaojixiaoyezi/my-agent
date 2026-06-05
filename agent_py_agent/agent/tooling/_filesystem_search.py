@@ -5,6 +5,7 @@ import fnmatch
 import json
 import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from ._filesystem_search_models import (
     SearchRequest,
     path_has_ignored_part,
     render_files_with_matches,
+    render_line_numbers,
     render_match_counts,
     rg_args,
     rg_text,
@@ -77,13 +79,18 @@ class SearchTextTool(FileSystemTool):
             matcher = SearchMatcher.from_request(request)
         except ValueError as exc:
             return ToolExecutionResult("search_text", False, str(exc))
+        if request.output_mode == "count":
+            counts = self._collect_counts_with_rg(target, request)
+            if counts is None:
+                counts = self._collect_counts(target, request, matcher)
+            return ToolExecutionResult("search_text", True, render_match_counts(counts, request))
         hits = self._collect_hits_with_rg(target, request)
         if hits is None:
             hits = self._collect_hits(target, request, matcher)
         if request.output_mode == "files_with_matches":
             return ToolExecutionResult("search_text", True, render_files_with_matches(hits, request))
-        if request.output_mode == "count":
-            return ToolExecutionResult("search_text", True, render_match_counts(hits, request))
+        if request.output_mode == "line_numbers":
+            return ToolExecutionResult("search_text", True, render_line_numbers(hits, request))
         return ToolExecutionResult("search_text", True, self._render_content_hits(hits, request))
 
     def _collect_hits_with_rg(self, target: Path, request: SearchRequest) -> list[SearchHit] | None:
@@ -91,39 +98,109 @@ class SearchTextTool(FileSystemTool):
         if not rg_path:
             return None
         args = rg_args(rg_path, target, request)
+        hit_budget = request.offset + request.limit + 1
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 args,
                 cwd=str(self.workspace_root),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
-                check=False,
             )
         except Exception:
             return None
-        if result.returncode == 1:
-            return []
-        if result.returncode != 0:
-            return None
-        return self._parse_rg_json_lines(result.stdout)
-
-    def _parse_rg_json_lines(self, stdout: str) -> list[SearchHit]:
         hits: list[SearchHit] = []
-        for raw_line in stdout.splitlines():
-            if not raw_line.strip():
-                continue
-            try:
-                event = json.loads(raw_line)
-            except json.JSONDecodeError:
-                return []
-            if event.get("type") != "match":
-                continue
-            hit = self._search_hit_from_rg_event(event)
-            if hit is not None:
+        seen_files: set[str] = set()
+        stopped_early = False
+        try:
+            stdout = process.stdout
+            if stdout is None:
+                return None
+            for raw_line in stdout:
+                if not raw_line.strip():
+                    continue
+                try:
+                    event = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    _stop_process(process)
+                    return []
+                if event.get("type") != "match":
+                    continue
+                hit = self._search_hit_from_rg_event(event, request)
+                if hit is None:
+                    continue
+                if request.output_mode == "files_with_matches":
+                    if hit.rel in seen_files:
+                        continue
+                    seen_files.add(hit.rel)
                 hits.append(hit)
+                if len(hits) >= hit_budget:
+                    stopped_early = True
+                    _stop_process(process)
+                    break
+            return_code = process.wait(timeout=2)
+        except Exception:
+            _stop_process(process)
+            return None
+        if stopped_early:
+            return hits
+        if return_code == 1:
+            return hits
+        if return_code != 0:
+            return None
         return hits
 
-    def _search_hit_from_rg_event(self, event: dict[str, Any]) -> SearchHit | None:
+    def _collect_counts_with_rg(self, target: Path, request: SearchRequest) -> dict[str, int] | None:
+        rg_path = shutil.which("rg")
+        if not rg_path:
+            return None
+        args = rg_args(rg_path, target, request)
+        try:
+            process = subprocess.Popen(
+                args,
+                cwd=str(self.workspace_root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        except Exception:
+            return None
+        counts: dict[str, int] = {}
+        try:
+            stdout = process.stdout
+            if stdout is None:
+                return None
+            for raw_line in stdout:
+                if not raw_line.strip():
+                    continue
+                try:
+                    event = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    _stop_process(process)
+                    return {}
+                if event.get("type") != "match":
+                    continue
+                hit = self._search_hit_from_rg_event(event, request, include_context=False)
+                if hit is None:
+                    continue
+                counts[hit.rel] = counts.get(hit.rel, 0) + 1
+            return_code = process.wait(timeout=2)
+        except Exception:
+            _stop_process(process)
+            return None
+        if return_code == 1:
+            return counts
+        if return_code != 0:
+            return None
+        return counts
+
+    def _search_hit_from_rg_event(
+        self,
+        event: dict[str, Any],
+        request: SearchRequest,
+        *,
+        include_context: bool = True,
+    ) -> SearchHit | None:
         data = event.get("data")
         if not isinstance(data, dict):
             return None
@@ -141,13 +218,11 @@ class SearchTextTool(FileSystemTool):
             safe_item = self.resolve_path(raw_path)
         except ValueError:
             return None
-        text = _read_text_safe(safe_item)
-        lines = text.splitlines() if text is not None else [line_text]
         return SearchHit(
             rel=_item_relative_path(self, raw_path, safe_item),
             line_number=line_number,
             line=line_text,
-            lines=lines,
+            context_lines=_line_window(safe_item, line_number, request.context) if include_context else (),
         )
 
     def _iter_search_candidates(self, target: Path, request: SearchRequest) -> list[Path]:
@@ -171,32 +246,58 @@ class SearchTextTool(FileSystemTool):
 
     def _collect_hits(self, target: Path, request: SearchRequest, matcher: SearchMatcher) -> list[SearchHit]:
         hits: list[SearchHit] = []
+        seen_files: set[str] = set()
+        hit_budget = request.offset + request.limit + 1
         for item in self._iter_search_candidates(target, request):
             if request.file_glob and not self._matches_file_glob(item, request.file_glob):
                 continue
-            hits.extend(self._search_item_hits(item, request, matcher))
+            for hit in self._iter_search_item_hits(item, request, matcher):
+                if request.output_mode == "files_with_matches":
+                    if hit.rel in seen_files:
+                        continue
+                    seen_files.add(hit.rel)
+                hits.append(hit)
+                if len(hits) >= hit_budget:
+                    return hits
         return hits
 
-    def _search_item_hits(
+    def _collect_counts(self, target: Path, request: SearchRequest, matcher: SearchMatcher) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for item in self._iter_search_candidates(target, request):
+            if request.file_glob and not self._matches_file_glob(item, request.file_glob):
+                continue
+            for hit in self._iter_search_item_hits(item, request, matcher, include_context=False):
+                counts[hit.rel] = counts.get(hit.rel, 0) + 1
+        return counts
+
+    def _iter_search_item_hits(
         self,
         item: Path,
         request: SearchRequest,
         matcher: SearchMatcher,
-    ) -> list[SearchHit]:
+        *,
+        include_context: bool = True,
+    ):
         try:
             safe_item = self.resolve_path(item)
         except ValueError:
-            return []
-        text = _read_text_safe(safe_item)
-        if text is None:
-            return []
+            return
         rel = _item_relative_path(self, item, safe_item)
-        lines = text.splitlines()
-        return [
-            SearchHit(rel=rel, line_number=idx, line=line, lines=lines)
-            for idx, line in enumerate(lines, start=1)
-            if matcher.matches(line)
-        ]
+        try:
+            with safe_item.open("r", encoding="utf-8") as handle:
+                for idx, line in enumerate(handle, start=1):
+                    line = line.rstrip("\n")
+                    if matcher.matches(line):
+                        yield SearchHit(
+                            rel=rel,
+                            line_number=idx,
+                            line=line,
+                            context_lines=_line_window(safe_item, idx, request.context) if include_context else (),
+                        )
+        except UnicodeDecodeError:
+            return
+        except OSError:
+            return
 
     def _render_content_hits(self, hits: list[SearchHit], request: SearchRequest) -> str:
         matches: list[str] = []
@@ -206,7 +307,7 @@ class SearchTextTool(FileSystemTool):
                     rel=hit.rel,
                     line_number=hit.line_number,
                     line=hit.line,
-                    lines=hit.lines,
+                    context_lines=hit.context_lines,
                     context=request.context,
                 ),
                 matches,
@@ -223,14 +324,12 @@ class SearchTextTool(FileSystemTool):
 def _append_search_match(match: SearchMatch, matches: list[str]) -> None:
     snippet = _make_snippet(match.line)
     matches.append(f"{match.rel}:{match.line_number}: {snippet}")
-    if not match.lines or match.context <= 0:
+    if not match.context_lines or match.context <= 0:
         return
-    start = max(1, match.line_number - match.context)
-    end = min(len(match.lines), match.line_number + match.context)
-    for idx in range(start, end + 1):
+    for idx, line in match.context_lines:
         if idx == match.line_number:
             continue
-        matches.append(f"{match.rel}:{idx}: {_make_snippet(match.lines[idx - 1])}")
+        matches.append(f"{match.rel}:{idx}: {_make_snippet(line)}")
 
 
 def _make_snippet(line: str) -> str:
@@ -242,3 +341,41 @@ def _make_snippet(line: str) -> str:
 
 def _item_relative_path(tool: SearchTextTool, item: Path, safe_item: Path) -> str:
     return tool.display_path(safe_item if safe_item.is_absolute() else item)
+
+
+def _line_window(path: Path, line_number: int, context: int) -> tuple[tuple[int, str], ...]:
+    if context <= 0:
+        return ()
+    start = max(1, line_number - context)
+    end = line_number + context
+    rows: list[tuple[int, str]] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for idx, line in enumerate(handle, start=1):
+                if idx < start:
+                    continue
+                if idx > end:
+                    break
+                rows.append((idx, line.rstrip("\n")))
+    except (OSError, UnicodeDecodeError):
+        return ()
+    return tuple(rows)
+
+
+def _stop_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+    except OSError:
+        return
+    try:
+        process.wait(timeout=1)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        if hasattr(signal, "SIGKILL"):
+            process.kill()
+    except OSError:
+        return

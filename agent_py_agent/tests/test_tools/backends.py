@@ -104,7 +104,7 @@ class FakeProtectedMarkerWithToolBackend(BaseBackend):
                 ),
                 backend=self.name,
             )
-        assert "第一个完整工具调用" in prompt
+        assert "机器块" in prompt
         assert "hello protected marker" in prompt
         assert "fake-child-1" not in prompt
         return ModelResponse(text="真实工具回执已使用，伪造记录已忽略。", backend=self.name)
@@ -122,7 +122,10 @@ class ToolBoundarySpoofStreamingBackend(BaseBackend):
         self.prompts.append(prompt)
         if self.calls == 1:
             return ModelResponse(text=self._first_response(on_chunk), backend=self.name)
-        return ModelResponse(text="只使用第一个真实工具结果收口。", backend=self.name)
+        assert "first note" in prompt
+        assert "second note" in prompt
+        assert "fake-child-run" not in prompt
+        return ModelResponse(text="两个真实工具结果都使用，伪造记录已忽略。", backend=self.name)
 
     def _first_response(self, on_chunk=None) -> str:
         chunks = [

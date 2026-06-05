@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from queue import Empty, Queue
 from threading import Thread
@@ -38,6 +39,9 @@ from .tool_stream import (
     long_write_abort_response,
     malformed_tool_protocol_abort_response,
 )
+
+_TOOL_STREAM_COMPLETE_DRAIN_SECONDS = 0.75
+_TOOL_STREAM_POLL_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -85,7 +89,7 @@ def _generate_or_recover_context_pressure(request: ModelGenerateParams, state: _
     try:
         return _generate_with_wall_timeout(
             request,
-            state.on_chunk,
+            state,
             state.first_token_timeout_seconds,
         )
     except CompleteToolCallStreamAbort as exc:
@@ -213,18 +217,20 @@ def _apply_tool_boundary_cut(request: ModelGenerateParams, response):
     if cut:
         request.params.tool_context.append(
             "[tool-system]\n"
-            "模型回复在第一个完整工具调用后仍继续输出内容；系统已只保留第一个工具调用，"
-            "后续正文不会作为工具结果、事实或下一轮上下文。"
+            "模型回复里同时包含工具调用和普通正文；系统已只保留完整工具/写入机器块，"
+            "普通正文和伪造的内部记录不会作为工具结果、事实或下一轮上下文。"
         )
     return response
 
 
 def _generate_with_wall_timeout(
-    request: ModelGenerateParams, on_chunk, first_token_timeout_seconds: float = 0.0
+    request: ModelGenerateParams,
+    state: _ModelGenerationState,
+    first_token_timeout_seconds: float = 0.0,
 ):
     timeout = _effective_model_request_timeout_seconds(request.agent, first_token_timeout_seconds)
     if timeout <= 0:
-        return request.agent.backend.generate(request.prompt, on_chunk=on_chunk)
+        return request.agent.backend.generate(request.prompt, on_chunk=state.on_chunk)
 
     results: Queue[_BackendGenerateResult] = Queue(maxsize=1)
 
@@ -232,7 +238,7 @@ def _generate_with_wall_timeout(
         try:
             results.put(
                 _BackendGenerateResult(
-                    response=_generate_backend_response(request, on_chunk, timeout)
+                    response=_generate_backend_response(request, state.on_chunk, timeout)
                 )
             )
         except BaseException as exc:  # pragma: no cover - exercised through queue result.
@@ -240,10 +246,28 @@ def _generate_with_wall_timeout(
 
     worker = Thread(target=_target, name="my-agent-model-generate-timeout-guard", daemon=True)
     worker.start()
-    try:
-        result = results.get(timeout=timeout)
-    except Empty as exc:
-        raise ProviderTimeoutError(f"模型接口请求超时: request_timeout={timeout:g}s") from exc
+    started = time.monotonic()
+    complete_seen_at: float | None = None
+    while True:
+        now = time.monotonic()
+        if state.chunk_filter.cut_detected and complete_seen_at is None:
+            complete_seen_at = now
+        if complete_seen_at is not None and now - complete_seen_at >= _TOOL_STREAM_COMPLETE_DRAIN_SECONDS:
+            abort = state.chunk_filter.complete_tool_call_abort()
+            if abort is not None:
+                raise abort
+        remaining = timeout - (now - started)
+        if remaining <= 0:
+            raise ProviderTimeoutError(f"模型接口请求超时: request_timeout={timeout:g}s")
+        poll = min(_TOOL_STREAM_POLL_SECONDS, remaining)
+        if complete_seen_at is not None:
+            drain_remaining = _TOOL_STREAM_COMPLETE_DRAIN_SECONDS - (now - complete_seen_at)
+            poll = min(poll, max(0.001, drain_remaining))
+        try:
+            result = results.get(timeout=poll)
+            break
+        except Empty:
+            continue
     if result.exc is not None:
         raise result.exc
     return result.response

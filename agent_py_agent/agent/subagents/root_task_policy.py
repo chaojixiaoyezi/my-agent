@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-_ROOT_ROLE_MARKERS = ("coordinator", "lead", "root")
+from .role_templates import role_template_snapshot_for_task
 
 
 def is_self_authorized_root_task(task: object) -> bool:
@@ -11,5 +11,4 @@ def is_self_authorized_root_task(task: object) -> bool:
     attrs = getattr(task, "attributes", {}) or {}
     if isinstance(attrs, dict) and bool(attrs.get("self_authorized_root")):
         return True
-    role = str(getattr(task, "role", "") or "").strip().lower()
-    return any(marker in role for marker in _ROOT_ROLE_MARKERS)
+    return bool(role_template_snapshot_for_task(task).get("can_spawn_children"))

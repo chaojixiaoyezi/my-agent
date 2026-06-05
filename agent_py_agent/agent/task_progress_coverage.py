@@ -6,7 +6,7 @@ from typing import Any
 
 from .common.value_parsing import dedupe_strings, string_list
 
-_DONE_STATUSES = {"done", "complete", "completed", "ok", "passed", "skipped"}
+_DONE_STATUSES = {"done", "skipped"}
 
 
 def normalize_coverage(payload: dict[str, Any]) -> dict[str, Any]:
@@ -24,6 +24,12 @@ def normalize_coverage(payload: dict[str, Any]) -> dict[str, Any]:
         "dimensions": dimensions,
         "targets": normalized_targets,
     }
+    requirement = str(coverage.get("coverage_requirement") or payload.get("coverage_requirement") or "").strip()
+    if requirement:
+        normalized["coverage_requirement"] = requirement
+    enforcement = str(coverage.get("enforcement") or payload.get("coverage_enforcement") or "").strip()
+    if enforcement:
+        normalized["enforcement"] = enforcement
     normalized["counts"] = _coverage_counts(normalized_targets)
     return normalized
 
@@ -47,6 +53,10 @@ def merge_coverage(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[s
         "dimensions": dedupe_strings([*existing["dimensions"], *incoming["dimensions"]]),
         "targets": targets,
     }
+    if incoming.get("coverage_requirement") or existing.get("coverage_requirement"):
+        merged["coverage_requirement"] = incoming.get("coverage_requirement") or existing.get("coverage_requirement")
+    if incoming.get("enforcement") or existing.get("enforcement"):
+        merged["enforcement"] = incoming.get("enforcement") or existing.get("enforcement")
     merged["counts"] = _coverage_counts(targets)
     return merged
 
@@ -54,12 +64,17 @@ def merge_coverage(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[s
 def coverage_summary(coverage: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_coverage({"coverage": coverage})
     active = [target for target in normalized["targets"] if not _coverage_target_done(target)][:12]
-    return {
+    summary = {
         "goal": normalized["goal"],
         "dimensions": normalized["dimensions"],
         "counts": normalized["counts"],
         "active_targets": [_coverage_target_summary(target) for target in active],
     }
+    if normalized.get("coverage_requirement"):
+        summary["coverage_requirement"] = normalized["coverage_requirement"]
+    if normalized.get("enforcement"):
+        summary["enforcement"] = normalized["enforcement"]
+    return summary
 
 
 def merge_coverage_targets(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -118,7 +133,7 @@ def _normalize_coverage_target(value: object) -> dict[str, Any]:
         "notes": str(item.get("notes") or "").strip(),
         "next": str(item.get("next") or "").strip(),
     }
-    for key in ("owner", "priority", "updated_at"):
+    for key in ("owner", "priority", "updated_at", "coverage_kind", "source_ref"):
         if key in item:
             result[key] = item[key]
     return result
@@ -185,13 +200,17 @@ def _fields_to_checks(value: object) -> dict[str, str]:
 
 
 def _coverage_target_summary(target: dict[str, Any]) -> dict[str, Any]:
-    return {
+    summary = {
         "id": str(target.get("id") or ""),
         "title": str(target.get("title") or ""),
         "status": str(target.get("status") or ""),
         "checks": dict(target.get("checks") or {}),
         "next": str(target.get("next") or ""),
     }
+    for key in ("coverage_kind", "source_ref"):
+        if target.get(key):
+            summary[key] = str(target.get(key) or "")
+    return summary
 
 
 def _coverage_counts(targets: list[dict[str, Any]]) -> dict[str, int]:
@@ -214,7 +233,7 @@ def _coverage_target_done(target: dict[str, Any]) -> bool:
 
 
 def _is_done_status(value: object) -> bool:
-    return str(value or "").strip().lower() in _DONE_STATUSES
+    return str(value or "").strip().lower().replace("-", "_") in _DONE_STATUSES
 
 
 def _split_field_text(value: str) -> list[str]:

@@ -103,7 +103,14 @@ class WriteFileTool(FileSystemTool):
                     recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
                 )
         except ValueError as exc:
-            return ToolExecutionResult("write_file", False, str(exc))
+            return ToolExecutionResult(
+                "write_file",
+                False,
+                str(exc),
+                error_code="TOOL_INVALID_ARGUMENTS",
+                retryable=True,
+                recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
         target = self.resolve_path(target)
         try:

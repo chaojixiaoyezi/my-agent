@@ -78,13 +78,13 @@ def _top_level_root_role_dispatch(agent, params: dict[str, object]) -> bool:
         runs = agent.subagents.list_runs()
     except Exception:
         return False
-    return any(_is_active_root_role_task(task) for task in runs)
+    return any(_is_active_root_role_task(task, agent) for task in runs)
 
 
-def _is_active_root_role_task(task) -> bool:
+def _is_active_root_role_task(task, agent) -> bool:
     return (
         not str(getattr(task, "parent_id", "") or "").strip()
-        and is_explicit_root_role(str(getattr(task, "role", "") or ""))
+        and is_explicit_root_role(str(getattr(task, "role", "") or ""), getattr(agent.subagents, "role_template_dirs", None))
         and str(getattr(task, "status", "") or "").upper() not in _DISPATCH_FINAL_STATUSES
     )
 

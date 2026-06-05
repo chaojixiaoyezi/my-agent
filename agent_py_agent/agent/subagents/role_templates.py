@@ -22,6 +22,7 @@ from .role_template_tools import (
 )
 
 _ROLE_TEMPLATE_LIST_OPTIONS = StringListOptions(split_commas=True)
+ROLE_TEMPLATE_ATTRIBUTE_KEY = "role_template"
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class RoleTemplate:
     can_accept: bool = False
     can_run_tests: bool = False
     can_spawn_children: bool = False
+    depends_on_outputs: bool = False
     output_contract: dict[str, Any] = field(default_factory=dict)
     output_contract_zh: str = ""
     prompt_zh: str = ""
@@ -89,6 +91,46 @@ def template_for_role(
     user_template_dir: str | Path | Iterable[str | Path] | None = None,
 ) -> RoleTemplate | None:
     return load_role_template_store(user_template_dir=user_template_dir).get(role)
+
+
+def template_for_role_identity(
+    role: str,
+    user_template_dir: str | Path | Iterable[str | Path] | None = None,
+) -> RoleTemplate | None:
+    template_id = role_template_id_for_role(role, user_template_dir, default_id="")
+    return template_for_role(template_id, user_template_dir) if template_id else None
+
+
+def role_template_snapshot(template: RoleTemplate | None) -> dict[str, object]:
+    if template is None:
+        return {}
+    return {
+        "id": template.id,
+        "source": template.source,
+        "source_path": template.source_path,
+        "can_write": template.can_write,
+        "can_accept": template.can_accept,
+        "can_run_tests": template.can_run_tests,
+        "can_spawn_children": template.can_spawn_children,
+        "depends_on_outputs": template.depends_on_outputs,
+        "output_contract": dict(template.output_contract or {}),
+    }
+
+
+def role_template_snapshot_for_role(
+    role: str,
+    user_template_dir: str | Path | Iterable[str | Path] | None = None,
+) -> dict[str, object]:
+    return role_template_snapshot(template_for_role_identity(role, user_template_dir))
+
+
+def role_template_snapshot_for_task(task: object) -> dict[str, object]:
+    attrs = getattr(task, "attributes", {}) or {}
+    if isinstance(attrs, dict):
+        snapshot = attrs.get(ROLE_TEMPLATE_ATTRIBUTE_KEY)
+        if isinstance(snapshot, dict) and snapshot.get("id"):
+            return dict(snapshot)
+    return role_template_snapshot_for_role(str(getattr(task, "role", "") or ""))
 
 
 def role_template_id_for_role(
@@ -156,6 +198,8 @@ def _capability_tags(item: RoleTemplate) -> str:
         tags.append("write")
     if item.can_run_tests:
         tags.append("test")
+    if item.depends_on_outputs:
+        tags.append("depends_on_outputs")
     if item.can_accept:
         tags.append("accept")
     return ",".join(tags) or "read_only"
@@ -298,6 +342,7 @@ def _template_from_payload(payload: dict[str, object], *, source: str, source_pa
         can_accept=bool(payload.get("can_accept", False)),
         can_run_tests=bool(payload.get("can_run_tests", False)),
         can_spawn_children=bool(payload.get("can_spawn_children", False)),
+        depends_on_outputs=bool(payload.get("depends_on_outputs", False)),
         output_contract=dict(payload.get("output_contract") or {}),
         output_contract_zh=str(payload.get("output_contract_zh") or "").strip(),
         prompt_zh=str(payload.get("prompt_zh") or "").strip(),

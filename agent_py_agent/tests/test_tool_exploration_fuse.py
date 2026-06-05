@@ -51,9 +51,8 @@ def test_exploration_fuse_unlimited_mode_emits_crossed_fixed_hint_once(tmp_path:
     assert exploration_fuse_context(agent, redirects=0) == ""
 
 
-def test_exploration_fuse_uses_configured_budget_ratio_hints(tmp_path: Path):
+def test_exploration_fuse_uses_configured_budget_ratio_hints_without_blocking(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_guard.exploration_fuse import (
-        exploration_fuse_block_response,
         exploration_fuse_context,
         has_pending_exploration_fuse,
         has_required_exploration_fuse,
@@ -93,10 +92,9 @@ def test_exploration_fuse_uses_configured_budget_ratio_hints(tmp_path: Path):
 
     for _ in range(59):
         assert has_required_exploration_fuse(agent, calls) is False
-    assert has_required_exploration_fuse(agent, calls) is True
-    assert has_pending_exploration_fuse(agent) is True
+    assert has_required_exploration_fuse(agent, calls) is False
     assert exploration_fuse_context(agent, redirects=0) == ""
-    assert "[EXPLORATION_FUSE_BLOCKED]" in exploration_fuse_block_response(agent).text
+    assert has_pending_exploration_fuse(agent) is False
 
 
 def test_exploration_fuse_zero_threshold_uses_fixed_hints_without_blocking(tmp_path: Path):
@@ -144,7 +142,7 @@ def test_exploration_fuse_resets_when_local_progress_happens(tmp_path: Path):
 
     for _ in range(300):
         has_required_exploration_fuse(agent, calls)
-    assert has_pending_exploration_fuse(agent) is True
+    assert has_pending_exploration_fuse(agent) is False
 
     write_calls = [{"tool": "write_file", "action": "finish", "path": "outputs/checkpoint.md"}]
     assert has_required_exploration_fuse(agent, write_calls) is False
@@ -161,7 +159,7 @@ def test_exploration_fuse_resets_on_structured_writer_and_document_builder(tmp_p
     calls = [{"tool": "web_fetch", "url": "https://example.test/data.json"}]
     for _ in range(300):
         has_required_exploration_fuse(agent, calls)
-    assert has_pending_exploration_fuse(agent) is True
+    assert has_pending_exploration_fuse(agent) is False
 
     assert has_required_exploration_fuse(agent, [{"tool": "write_file", "rows": [{"a": 1}]}]) is False
     assert has_pending_exploration_fuse(agent) is False
@@ -181,7 +179,7 @@ def test_exploration_fuse_run_command_classification_uses_command_token(tmp_path
     assert has_required_exploration_fuse(agent, [{"tool": "run_command", "command": "ls -la"}]) is False
 
 
-def test_tool_loop_decision_redirects_and_blocks_exploration_fuse(tmp_path: Path):
+def test_tool_loop_decision_redirects_exploration_fuse_without_blocking(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_guard.exploration_fuse import (
         has_required_exploration_fuse,
     )
@@ -206,8 +204,9 @@ def test_tool_loop_decision_redirects_and_blocks_exploration_fuse(tmp_path: Path
             counters=ToolLoopRepairCounters(),
         )
     )
-    assert decision.action == "continue"
-    assert decision.counters.exploration_fuse_redirects == 1
+    assert decision.action == "run_tools"
+    assert decision.calls == calls
+    assert decision.counters.exploration_fuse_redirects == 0
     assert any("exploration-fuse" in item for item in params.tool_context)
 
     for _ in range(240):
@@ -222,9 +221,7 @@ def test_tool_loop_decision_redirects_and_blocks_exploration_fuse(tmp_path: Path
         )
     )
     assert final_decision.action == "break"
-    assert "[EXPLORATION_FUSE_BLOCKED]" in final_decision.response.text
-    assert final_decision.response.runtime_status == "blocked"
-    assert final_decision.response.runtime_reason == "EXPLORATION_FUSE"
+    assert final_decision.response.text == "任务完成。"
 
 
 def _agent(root: Path):

@@ -44,14 +44,12 @@ def has_required_exploration_fuse(agent: object, calls: list[dict[str, object]] 
     count = int(state.get("exploration_rounds_without_local_progress") or 0) + 1
     state = _state_with_count(state, count)
     _write_state(agent, state)
-    return _should_prompt_or_block(exploration_fuse_config(agent), state, count)
+    return _should_prompt(exploration_fuse_config(agent), state, count)
 
 
 def has_pending_exploration_fuse(agent: object) -> bool:
-    state = _load_state(agent)
-    config = exploration_fuse_config(agent)
-    count = int(state.get("exploration_rounds_without_local_progress") or 0)
-    return config.round_threshold > 0 and count >= config.round_threshold
+    del agent
+    return False
 
 
 def exploration_fuse_context(agent: object, redirects: int) -> str:
@@ -82,24 +80,8 @@ def exploration_fuse_context(agent: object, redirects: int) -> str:
     )
 
 
-def exploration_fuse_block_response(agent: object) -> ModelResponse:
-    config = exploration_fuse_config(agent)
-    return ModelResponse(
-        text=(
-            f"[EXPLORATION_FUSE_BLOCKED] 模型连续只做抓取/读取/搜索已达到探索额度 {config.round_threshold} 轮，"
-            "仍没有物化新的本地进展；本轮已停止，保留已抓取 artifacts，"
-            "后续应从 checkpoint/source_index/research_notes/script/report 草稿继续。"
-        ),
-        backend=str(getattr(getattr(agent, "backend", None), "name", "") or ""),
-        runtime_status="blocked",
-        runtime_reason="EXPLORATION_FUSE",
-    )
-
-
-def _should_prompt_or_block(config: ExplorationFuseConfig, state: dict[str, object], count: int) -> bool:
-    if config.round_threshold <= 0:
-        return _due_hint_round(config, state, count) is not None
-    return _due_hint_round(config, state, count) is not None or count >= config.round_threshold
+def _should_prompt(config: ExplorationFuseConfig, state: dict[str, object], count: int) -> bool:
+    return _due_hint_round(config, state, count) is not None
 
 
 def _due_hint_round(config: ExplorationFuseConfig, state: dict[str, object], count: int) -> int | None:
@@ -246,7 +228,6 @@ def _delivered_hint_rounds(state: dict[str, object]) -> set[int]:
 
 
 __all__ = [
-    "exploration_fuse_block_response",
     "exploration_fuse_context",
     "has_required_exploration_fuse",
     "has_pending_exploration_fuse",

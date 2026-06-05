@@ -35,6 +35,8 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecu
     artifact_content = tool_output_artifact_content(target, tool.workspace_roots)
     if artifact_content:
         return _numbered_text_result(artifact_content, params, max_chars)
+    if _has_char_window_params(params):
+        return _char_window_file_result(tool, target, params, max_chars)
     try:
         content = target.read_text(encoding="utf-8")
     except UnicodeDecodeError:
@@ -76,6 +78,7 @@ def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) 
         start_line=start_line,
         end_line=end_line,
         max_chars=line_max_chars,
+        continuation_max_chars=max_chars,
     )
     return ToolExecutionResult("read_file", True, result or "(空文件)")
 
@@ -130,14 +133,112 @@ def _char_window_result(content: str, params: dict[str, Any], default_max_chars:
     next_offset = offset + len(window)
     header = f"[char-window offset={offset} chars={len(window)} total_chars={len(content)}]"
     if next_offset < len(content):
+        capped_limit = min(limit, default_max_chars)
+        continuation_max_chars = _continuation_max_chars(capped_limit, default_max_chars)
         footer = (
             "PARTIAL view only; 这不是完整文件。"
-            f" total_chars={len(content)}; next_offset={next_offset}; limit_chars={min(limit, default_max_chars)}。"
-            " 如果本段包含最终报告需要逐项保留的事实，请先把对象、事实和本段 offset/source 证据写入 task_progress 或 work 事实表；"
-            f" 继续读取请调用 read_file(offset={next_offset}, max_chars={min(limit, default_max_chars)})。"
+            f" total_chars={len(content)}; next_offset={next_offset}; limit_chars={capped_limit};"
+            f" recommended_next_max_chars={continuation_max_chars};"
+            f" next_call=read_file(offset={next_offset}, max_chars={continuation_max_chars})。"
+            " 最终报告前先把关键事实和 source offset 写入 task_progress 或 work 表。"
         )
         return ToolExecutionResult("read_file", True, f"{header}\n{window}\n{footer}")
     return ToolExecutionResult("read_file", True, f"{header}\n{window}")
+
+
+def _char_window_file_result(tool, target, params: dict[str, Any], default_max_chars: int) -> ToolExecutionResult:
+    try:
+        offset = _int_param(
+            _bundled_filesystem_param(params, "offset")
+            if _bundled_filesystem_param(params, "offset") is not None
+            else _bundled_filesystem_param(params, "start_char"),
+            name="offset",
+            default=0,
+            min_value=0,
+        )
+        limit = _int_param(
+            _bundled_filesystem_param(params, "max_chars"),
+            name="max_chars",
+            default=default_max_chars,
+            min_value=1,
+        )
+    except ValueError as exc:
+        return ToolExecutionResult("read_file", False, str(exc))
+
+    try:
+        total_chars = _cached_total_chars(tool, target)
+        if offset >= total_chars:
+            return ToolExecutionResult(
+                "read_file",
+                False,
+                f"offset 超出文件末尾：offset={offset}, total_chars={total_chars}。请改用更小的 offset。",
+            )
+        window = _read_char_window(target, offset=offset, limit=min(limit, default_max_chars))
+    except UnicodeDecodeError:
+        return ToolExecutionResult("read_file", False, "文件不是有效 UTF-8 文本，无法读取。")
+    except OSError as exc:
+        return ToolExecutionResult("read_file", False, f"读取文件失败: {exc}")
+
+    next_offset = offset + len(window)
+    header = f"[char-window offset={offset} chars={len(window)} total_chars={total_chars}]"
+    if next_offset < total_chars:
+        capped_limit = min(limit, default_max_chars)
+        continuation_max_chars = _continuation_max_chars(capped_limit, default_max_chars)
+        footer = (
+            "PARTIAL view only; 这不是完整文件。"
+            f" total_chars={total_chars}; next_offset={next_offset}; limit_chars={capped_limit};"
+            f" recommended_next_max_chars={continuation_max_chars};"
+            f" next_call=read_file(offset={next_offset}, max_chars={continuation_max_chars})。"
+            " 最终报告前先把关键事实和 source offset 写入 task_progress 或 work 表。"
+        )
+        return ToolExecutionResult("read_file", True, f"{header}\n{window}\n{footer}")
+    return ToolExecutionResult("read_file", True, f"{header}\n{window}")
+
+
+def _cached_total_chars(tool, target) -> int:
+    stat = target.stat()
+    key = (str(target), stat.st_mtime_ns, stat.st_size)
+    cache = getattr(tool, "_read_file_char_count_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        tool._read_file_char_count_cache = cache
+    cached = cache.get(key)
+    if isinstance(cached, int):
+        return cached
+    total = _count_chars_streaming(target)
+    cache.clear()
+    cache[key] = total
+    return total
+
+
+def _count_chars_streaming(target, *, chunk_size: int = 256 * 1024) -> int:
+    total = 0
+    with target.open("r", encoding="utf-8") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            total += len(chunk)
+    return total
+
+
+def _read_char_window(target, *, offset: int, limit: int, chunk_size: int = 256 * 1024) -> str:
+    parts: list[str] = []
+    remaining_skip = offset
+    remaining_read = limit
+    with target.open("r", encoding="utf-8") as handle:
+        while remaining_skip > 0:
+            skipped = handle.read(min(remaining_skip, chunk_size))
+            if not skipped:
+                return ""
+            remaining_skip -= len(skipped)
+        while remaining_read > 0:
+            chunk = handle.read(min(remaining_read, chunk_size))
+            if not chunk:
+                break
+            parts.append(chunk)
+            remaining_read -= len(chunk)
+    return "".join(parts)
 
 
 def _missing_tool_artifact_typo_hint(tool, raw_path: str) -> str:
@@ -168,6 +269,7 @@ def _render_numbered_read_lines(
     start_line: int,
     end_line: int,
     max_chars: int,
+    continuation_max_chars: int,
 ) -> str:
     rendered: list[str] = []
     used_chars = 0
@@ -175,7 +277,7 @@ def _render_numbered_read_lines(
         item = f"{line_number}: {line}"
         separator = 1 if rendered else 0
         if rendered and used_chars + separator + len(item) > max_chars:
-            rendered.append(_truncated_read_footer(len(lines), line_number, max_chars))
+            rendered.append(_truncated_read_footer(len(lines), line_number, max_chars, continuation_max_chars))
             return "\n".join(rendered)
         if not rendered and len(item) > max_chars:
             return "\n".join([
@@ -184,6 +286,7 @@ def _render_numbered_read_lines(
                     len(lines),
                     min(line_number + 1, len(lines)),
                     max_chars,
+                    continuation_max_chars,
                     next_offset=max_chars,
                 ),
             ])
@@ -196,18 +299,25 @@ def _truncated_read_footer(
     total_lines: int,
     next_start_line: int,
     max_chars: int,
+    continuation_max_chars: int,
     *,
     next_offset: int | None = None,
 ) -> str:
+    next_max_chars = _continuation_max_chars(max_chars, continuation_max_chars)
     footer = (
         "... 已截断；PARTIAL view only; 这不是完整文件。"
-        f" total_lines={total_lines}; next_start_line={next_start_line}; limit_chars={max_chars}。"
-        " 如果本段包含最终报告需要逐项保留的事实，请先把对象、事实和本段行号/source 证据写入 task_progress 或 work 事实表；"
-        f" 继续读取请调用 read_file(start_line={next_start_line})。"
+        f" total_lines={total_lines}; next_start_line={next_start_line}; limit_chars={max_chars};"
+        f" recommended_next_max_chars={next_max_chars};"
+        f" next_call=read_file(start_line={next_start_line}, max_chars={next_max_chars})。"
+        " 最终报告前先把关键事实和 source 行号写入 task_progress 或 work 表。"
     )
     if next_offset is not None:
         footer += f"; next_offset={next_offset}"
     return footer
+
+
+def _continuation_max_chars(current_limit: int, configured_max_chars: int) -> int:
+    return max(1, max(int(current_limit or 0), int(configured_max_chars or 0)))
 
 
 def _past_eof_line_message(start_line: int, total_lines: int) -> str:

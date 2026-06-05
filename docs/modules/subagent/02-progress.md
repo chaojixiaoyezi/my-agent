@@ -13,6 +13,9 @@
 ## 运行约定
 
 - 子代理没有长期个人记忆，只保留 task-local 状态、事件、artifact refs、compact 和候选经验。
-- 子代理模板可以定义简短 persona、description、skills，但当前 runner 仍走现有执行链路。
+- 子代理模板可以定义简短 persona、description、skills 和机器能力字段；当前 runner 仍走现有执行链路。
+- `role` 是模板选择字段，`agent_name` 只是展示名。创建任务时会把模板能力快照写入
+  `attributes.role_template`，后续调度、恢复、timeout 和 runner prompt 只读这个快照或模板字段，
+  不从显示名或普通中文/英文描述里猜角色。
 - capability request/grant/gap 是可观察工作项，不是默认阻断任务的硬门。
 - workflow mode 是显式配置能力，不应该替普通中文任务自动加限制。

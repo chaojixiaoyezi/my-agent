@@ -284,7 +284,7 @@ def test_main_context_bundle_artifacts_can_be_updated_from_tool_output_index(tmp
             root=root,
             tool="read_file",
             call_id="1-1",
-            output="large output\n" + ("x" * 2000),
+            output="large output\n" + ("x" * 25_000),
             ok=True,
             request_id="request-artifact",
             run_id="run-artifact",

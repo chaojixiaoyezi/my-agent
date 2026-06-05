@@ -126,9 +126,9 @@ def test_memory_compact_work_state_promotes_tool_outputs_to_resume_progress(tmp_
 
     assert "/repo/codex-main/README.md" in work_state["read_files"]
     assert work_state["tool_progress"][0]["source_path"] == "/repo/codex-main/README.md"
-    assert "如果已覆盖，直接基于已读内容写入 output" in work_state["next_step"]
+    assert "不能把“文件名出现过”当成完整覆盖证明" in work_state["next_step"]
     assert "/repo/codex-main/README.md" in resume["context_block"]
-    assert "如果已覆盖，直接基于已读内容写入 output" in resume["context_block"]
+    assert "不能把“文件名出现过”当成完整覆盖证明" in resume["context_block"]
 
 
 def test_memory_compact_work_state_promotes_small_tool_calls_to_resume_progress(tmp_path: Path) -> None:
@@ -184,7 +184,299 @@ def test_memory_compact_work_state_promotes_small_tool_calls_to_resume_progress(
     assert "/repo/shard-01.md" in work_state["read_files"]
     assert restore_refs["source_refs"]["tool_calls"][0]["source_path"] == "/repo/START.md"
     assert [item["source_path"] for item in work_state["tool_progress"]] == ["/repo/START.md", "/repo/shard-01.md"]
-    assert "如果已覆盖，直接基于已读内容写入 output" in work_state["next_step"]
+    assert "不能把“文件名出现过”当成完整覆盖证明" in work_state["next_step"]
+
+
+def test_memory_compact_work_state_preserves_read_ranges_for_resume_cursor(tmp_path: Path) -> None:
+    """连续分片读取同一大文件时，compact 续接要保留每段范围，不能压成“读过这个文件”。"""
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    write_task_progress(
+        root,
+        "run-compact",
+        {
+            "summary": "旧摘要只记录到第一段",
+            "next_action": "继续读取 /repo/data/long.txt 的 offset=50000。",
+            "items": [{"id": "old-cursor", "title": "旧游标", "status": "in_progress"}],
+        },
+    )
+    read_1 = root / "blobs" / "tool_outputs" / "read_file-1.json"
+    read_2 = root / "blobs" / "tool_outputs" / "read_file-2.json"
+    read_3 = root / "blobs" / "tool_outputs" / "read_file-3.json"
+    _write_tool_output_index(
+        root,
+        {
+            "call_id": "1-1",
+            "kind": "tool_output",
+            "parameters": {"path": "/repo/data/long.txt", "tool": "read_file", "offset": 0, "max_chars": 50000},
+            "path": str(read_1),
+            "request_id": "request-compact",
+            "run_id": "run-compact",
+            "task_id": "run-compact",
+            "scoped_call_id": "run-compact:1-1",
+            "source_input": "/repo/data/long.txt",
+            "tool": "read_file",
+            "size_bytes": 50000,
+        },
+        {
+            "call_id": "1-2",
+            "kind": "tool_output",
+            "parameters": {"path": "/repo/data/long.txt", "tool": "read_file", "offset": 50000, "max_chars": 50000},
+            "path": str(read_2),
+            "request_id": "request-compact",
+            "run_id": "run-compact",
+            "task_id": "run-compact",
+            "scoped_call_id": "run-compact:1-2",
+            "source_input": "/repo/data/long.txt",
+            "tool": "read_file",
+            "size_bytes": 50000,
+        },
+        {
+            "call_id": "1-3",
+            "kind": "tool_output",
+            "parameters": {"path": "/repo/data/long.txt", "tool": "read_file", "offset": 100000, "max_chars": 50000},
+            "path": str(read_3),
+            "request_id": "request-compact",
+            "run_id": "run-compact",
+            "task_id": "run-compact",
+            "scoped_call_id": "run-compact:1-3",
+            "source_input": "/repo/data/long.txt",
+            "tool": "read_file",
+            "size_bytes": 50000,
+        },
+    )
+    read_1.write_text(
+        '{"content":"[char-window offset=0 chars=50000 total_chars=180000]\\nfirst"}',
+        encoding="utf-8",
+    )
+    read_2.write_text(
+        '{"content":"[char-window offset=50000 chars=50000 total_chars=180000]\\nsecond"}',
+        encoding="utf-8",
+    )
+    read_3.write_text(
+        '{"content":"[char-window offset=100000 chars=50000 total_chars=180000]\\nthird"}',
+        encoding="utf-8",
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-compact",
+                request_id="request-compact",
+                run_id="run-compact",
+                task_id="run-compact",
+            ),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+    reads = [item for item in work_state["tool_progress"] if item["tool"] == "read_file"]
+
+    assert [item["offset"] for item in reads] == [0, 50000, 100000]
+    assert reads[-1]["next_offset"] == 150000
+    assert "offset=150000" in work_state["next_step"]
+    assert "offset=50000" not in work_state["next_step"]
+    assert "如果已覆盖，直接基于已读内容写入 output" not in work_state["next_step"]
+
+
+def test_memory_compact_work_state_keeps_read_coverage_when_tool_progress_is_clipped(tmp_path: Path) -> None:
+    """tool_progress 为了 prompt 体积会裁剪，但续接游标必须来自完整 coverage。"""
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    rows: list[dict[str, object]] = []
+    for index in range(60):
+        offset = index * 1000
+        artifact = root / "blobs" / "tool_outputs" / f"read_file-{index:03d}.json"
+        rows.append(
+            {
+                "call_id": f"1-{index}",
+                "kind": "tool_output",
+                "parameters": {"path": "/repo/data/long.txt", "tool": "read_file", "offset": offset, "max_chars": 1000},
+                "path": str(artifact),
+                "request_id": "request-compact",
+                "run_id": "run-compact",
+                "task_id": "run-compact",
+                "scoped_call_id": f"run-compact:1-{index}",
+                "source_input": "/repo/data/long.txt",
+                "tool": "read_file",
+                "size_bytes": 1000,
+            }
+        )
+    _write_tool_output_index(root, *rows)
+    for index, row in enumerate(rows):
+        path = Path(str(row["path"]))
+        path.write_text(
+            json.dumps(
+                {
+                    "content": (
+                        f"[char-window offset={index * 1000} chars=1000 total_chars=70000]\n"
+                        f"segment {index:03d}"
+                    )
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-compact",
+                request_id="request-compact",
+                run_id="run-compact",
+                task_id="run-compact",
+            ),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+    reads = [item for item in work_state["tool_progress"] if item["tool"] == "read_file"]
+    coverage = work_state["read_coverage"]["primary"]
+    resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=result["apply_id"]))
+
+    assert len(reads) == 48
+    assert reads[0]["offset"] == 12000
+    assert coverage["covered_until_offset"] == 60000
+    assert coverage["range_count"] == 60
+    assert coverage["omitted_range_count"] == 48
+    assert "offset=60000" in work_state["next_step"]
+    assert "offset=0" not in work_state["next_step"]
+    assert "offset=60000" in resume["context_block"]
+    assert 'read_file(path="/repo/data/long.txt", offset=0' not in resume["context_block"]
+
+
+def test_memory_compact_work_state_treats_missing_offset_as_zero_for_read_cursor(tmp_path: Path) -> None:
+    """read_file 不传 offset 时就是从 0 开始，compact 不能把第一段游标丢掉。"""
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    _write_tool_output_index(
+        root,
+        {
+            "call_id": "1-1",
+            "kind": "tool_output",
+            "parameters": {"path": "/repo/data/long.txt", "tool": "read_file", "max_chars": 8000},
+            "path": str(root / "blobs" / "tool_outputs" / "read_file-1.json"),
+            "request_id": "request-compact",
+            "run_id": "run-compact",
+            "task_id": "run-compact",
+            "scoped_call_id": "run-compact:1-1",
+            "source_input": "/repo/data/long.txt",
+            "tool": "read_file",
+            "size_bytes": 8000,
+        },
+        {
+            "call_id": "1-2",
+            "kind": "tool_output",
+            "parameters": {"path": "/repo/data/long.txt", "tool": "read_file", "offset": 8000, "max_chars": 100000},
+            "path": str(root / "blobs" / "tool_outputs" / "read_file-2.json"),
+            "request_id": "request-compact",
+            "run_id": "run-compact",
+            "task_id": "run-compact",
+            "scoped_call_id": "run-compact:1-2",
+            "source_input": "/repo/data/long.txt",
+            "tool": "read_file",
+            "size_bytes": 100000,
+        },
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-compact",
+                request_id="request-compact",
+                run_id="run-compact",
+                task_id="run-compact",
+            ),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+    reads = [item for item in work_state["tool_progress"] if item["tool"] == "read_file"]
+
+    assert [item["offset"] for item in reads] == [0, 8000]
+    assert [item["next_offset"] for item in reads] == [8000, 108000]
+    assert "offset=108000" in work_state["next_step"]
+    assert "offset=0" not in work_state["next_step"]
+
+
+def test_memory_compact_work_state_preserves_line_windows_for_resume_cursor(tmp_path: Path) -> None:
+    """按行分片读大文件时，compact 续接要从下一行继续，不能退回旧行号。"""
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    read_1 = root / "blobs" / "tool_outputs" / "line-read-1.json"
+    read_2 = root / "blobs" / "tool_outputs" / "line-read-2.json"
+    read_3 = root / "blobs" / "tool_outputs" / "line-read-3.json"
+    _write_tool_output_index(
+        root,
+        {
+            "call_id": "1-1",
+            "kind": "tool_output",
+            "parameters": {"path": "/repo/data/line-log.txt", "tool": "read_file", "start_line": 1, "max_chars": 50000},
+            "path": str(read_1),
+            "request_id": "request-compact",
+            "run_id": "run-compact",
+            "task_id": "run-compact",
+            "scoped_call_id": "run-compact:1-1",
+            "source_input": "/repo/data/line-log.txt",
+            "tool": "read_file",
+            "size_bytes": 50000,
+        },
+        {
+            "call_id": "1-2",
+            "kind": "tool_output",
+            "parameters": {"path": "/repo/data/line-log.txt", "tool": "read_file", "start_line": 201, "max_chars": 50000},
+            "path": str(read_2),
+            "request_id": "request-compact",
+            "run_id": "run-compact",
+            "task_id": "run-compact",
+            "scoped_call_id": "run-compact:1-2",
+            "source_input": "/repo/data/line-log.txt",
+            "tool": "read_file",
+            "size_bytes": 50000,
+        },
+        {
+            "call_id": "1-3",
+            "kind": "tool_output",
+            "parameters": {"path": "/repo/data/line-log.txt", "tool": "read_file", "start_line": 401, "max_chars": 50000},
+            "path": str(read_3),
+            "request_id": "request-compact",
+            "run_id": "run-compact",
+            "task_id": "run-compact",
+            "scoped_call_id": "run-compact:1-3",
+            "source_input": "/repo/data/line-log.txt",
+            "tool": "read_file",
+            "size_bytes": 50000,
+        },
+    )
+    read_1.write_text(_line_read_json(1, 200, 201, 1000), encoding="utf-8")
+    read_2.write_text(_line_read_json(201, 400, 401, 1000), encoding="utf-8")
+    read_3.write_text(_line_read_json(401, 600, 601, 1000), encoding="utf-8")
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-compact",
+                request_id="request-compact",
+                run_id="run-compact",
+                task_id="run-compact",
+            ),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+    reads = [item for item in work_state["tool_progress"] if item["tool"] == "read_file"]
+
+    assert [item["start_line"] for item in reads] == [1, 201, 401]
+    assert [item["end_line"] for item in reads] == [200, 400, 600]
+    assert reads[-1]["next_start_line"] == 601
+    assert 'start_line=601' in work_state["next_step"]
+    assert "start_line=201" not in work_state["next_step"]
 
 
 def test_runtime_handoff_finds_real_task_workspace_agents(tmp_path: Path) -> None:
@@ -338,3 +630,18 @@ def _write_tool_output_index(root: Path, *rows: dict[str, object]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}", encoding="utf-8")
     index.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+
+
+def _line_read_json(start: int, end: int, next_start: int, total: int) -> str:
+    return json.dumps(
+        {
+            "content": "\n".join(
+                [
+                    f"{start}: line {start}",
+                    f"{end}: line {end}",
+                    f"PARTIAL view only; total_lines={total}; next_start_line={next_start};",
+                ]
+            )
+        },
+        ensure_ascii=False,
+    )

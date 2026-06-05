@@ -18,7 +18,6 @@ from .exploration_decision import (
 )
 from .repair_counters import (
     ToolLoopRepairCounters,
-    _inc_local_progress,
     _inc_protected_marker,
 )
 from .unresolved_runtime_issue_decision import (
@@ -181,7 +180,7 @@ def _local_progress_no_tool_call_decision(
     )
     if repair_context:
         request.params.tool_context.append(repair_context)
-        return ToolLoopResponseDecision("continue", None, [], _inc_local_progress(request.counters))
+        return None
     return None
 
 
@@ -197,7 +196,6 @@ def _local_progress_tool_call_decision(
     )
     if repair_context:
         request.params.tool_context.append(repair_context)
-        return ToolLoopResponseDecision("continue", None, [], _inc_local_progress(request.counters))
     return None
 
 

@@ -17,6 +17,9 @@ from agent_py_agent.agent.agent_core.finalization_compact_auto import (
     compact_auto_cycle_fields,
 )
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.agent_core.runtime.loop_support import (
+    _pending_deferred_tool_calls,
+)
 from agent_py_agent.agent.agent_core.runtime_mixin import _compact_auto_continue_params
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
@@ -208,6 +211,67 @@ def test_compact_auto_continue_carries_archive_tool_calls_for_closeout_evidence(
     updated = _compact_auto_continue_params(params, "# Compact Auto Continuation\nnew", result)
 
     assert updated.carried_archive_tool_calls == [read_record, next_read_same_call_id, write_record]
+
+
+def test_compact_auto_continue_carries_pending_deferred_calls_from_continue_packet() -> None:
+    first_pending = {
+        "kind": "tool_call",
+        "tool": "read_file",
+        "parameters": {"tool": "read_file", "path": "data/long.txt", "start_line": 19780, "max_chars": 100000},
+        "ok": False,
+        "status": "error",
+        "error_code": "CONTEXT_COMPACT_DEFERRED",
+    }
+    second_pending = {
+        "kind": "tool_call",
+        "tool": "read_file",
+        "parameters": {"tool": "read_file", "path": "data/long.txt", "start_line": 22000, "max_chars": 100000},
+        "ok": False,
+        "status": "error",
+        "error_code": "CONTEXT_COMPACT_DEFERRED",
+    }
+    params = RunParams()
+    result = type(
+        "Result",
+        (),
+        {
+            "tool_rounds": 1,
+            "executed_tools": ["read_file"],
+            "archive_tool_calls": [],
+            "memory_compact_auto_continue_packet": {
+                "pending_deferred_tool_calls": [first_pending, second_pending],
+            },
+        },
+    )()
+
+    updated = _compact_auto_continue_params(params, "# Compact Auto Continuation\nnew", result)
+
+    assert first_pending in updated.carried_archive_tool_calls
+    assert second_pending in updated.carried_archive_tool_calls
+
+
+def test_pending_deferred_tool_calls_keep_only_unexecuted_calls() -> None:
+    deferred_first = {
+        "tool": "read_file",
+        "ok": False,
+        "error_code": "CONTEXT_COMPACT_DEFERRED",
+        "parameters": {"tool": "read_file", "path": "/tmp/source.txt", "offset": 100, "max_chars": 50},
+    }
+    successful_first = {
+        "tool": "read_file",
+        "ok": True,
+        "parameters": {"tool": "read_file", "path": "/tmp/source.txt", "offset": 100, "max_chars": 50},
+    }
+    deferred_second = {
+        "tool": "read_file",
+        "ok": False,
+        "error_code": "CONTEXT_COMPACT_DEFERRED",
+        "parameters": {"tool": "read_file", "path": "/tmp/source.txt", "offset": 150, "max_chars": 50},
+    }
+
+    pending = _pending_deferred_tool_calls([deferred_first, successful_first, deferred_second])
+
+    assert pending == [{"tool": "read_file", "path": "/tmp/source.txt", "offset": 150, "max_chars": 50}]
 
 
 def test_continuation_with_tool_progress_continues_after_normal_threshold_compact() -> None:
@@ -675,6 +739,16 @@ def test_compact_continue_packet_prioritizes_full_read_cursor(tmp_path: Path) ->
                     "summary": "已读到 offset=200",
                     "next_action": "继续读取 data/big.txt 的 offset=200，同时搜索章节标记。",
                     "ref": str(tmp_path / "progress.json"),
+                    "coverage": {
+                        "coverage_requirement": "full_source_read",
+                        "targets": [
+                            {
+                                "id": "data/big.txt",
+                                "source_ref": "data/big.txt",
+                                "coverage_kind": "full_source_read",
+                            }
+                        ],
+                    },
                 },
                 "artifact_refs": [
                     {"kind": "tool_output", "path": str(first), "source_path": "data/big.txt", "tool": "read_file"},
@@ -706,6 +780,182 @@ def test_compact_continue_packet_prioritizes_full_read_cursor(tmp_path: Path) ->
     assert packet["work_state_snapshot"]["task_progress"]["ref"] == str(tmp_path / "progress.json")
 
 
+def test_compact_continue_packet_uses_read_cursor_without_explicit_full_read_contract(tmp_path: Path) -> None:
+    first = tmp_path / "read-1.json"
+    second = tmp_path / "read-2.json"
+    first.write_text(
+        '{"content":"[char-window offset=0 chars=100 total_chars=500]\\nPARTIAL view only"}',
+        encoding="utf-8",
+    )
+    second.write_text(
+        '{"content":"[char-window offset=100 chars=100 total_chars=500]\\nPARTIAL view only"}',
+        encoding="utf-8",
+    )
+    packet = build_compact_continue_packet(
+        CompactContinuePacketRequest(
+            metadata={"apply_id": "apply-read-cursor", "plan_id": "plan-read-cursor"},
+            work_state={
+                "goal": "读取 data/big.txt 并整理报告。",
+                "phase": "compact_apply",
+                "next_step": "继续读取 data/big.txt 的 offset=100。",
+                "next_actions": ["继续读取 data/big.txt 的 offset=100。"],
+                "task_progress": {
+                    "summary": "旧进度只记到 offset=100",
+                    "next_action": "继续读取 data/big.txt 的 offset=100。",
+                    "ref": str(tmp_path / "progress.json"),
+                },
+                "artifact_refs": [
+                    {"kind": "tool_output", "path": str(first), "source_path": "data/big.txt", "tool": "read_file"},
+                    {"kind": "tool_output", "path": str(second), "source_path": "data/big.txt", "tool": "read_file"},
+                ],
+            },
+            consistency={"status": "ok"},
+            action_guard={"allowed_to_continue": True, "status": "allowed"},
+            handoff={},
+            recommended_read_paths=[],
+            next_actions=["继续读取 data/big.txt 的 offset=100。"],
+            subagent_owner_refs={},
+            main_context_bundle={},
+        )
+    )
+
+    focus = packet["resume_focus"]
+
+    assert focus["next_action"].startswith("根据本轮工具读取账本继续 data/big.txt")
+    assert 'read_file(path="data/big.txt", offset=200, max_chars=50000)' in focus["next_action"]
+    assert "offset=100" not in focus["next_action"]
+    assert "按机器游标继续" in " ".join(focus["do_not_repeat"])
+
+
+def test_compact_continue_packet_carries_read_coverage_beyond_clipped_tool_progress() -> None:
+    packet = build_compact_continue_packet(
+        CompactContinuePacketRequest(
+            metadata={"apply_id": "apply-coverage", "plan_id": "plan-coverage"},
+            work_state={
+                "goal": "读取 data/big.txt 并整理报告。",
+                "phase": "compact_apply",
+                "next_step": "继续读取 data/big.txt 的 offset=60000。",
+                "next_actions": ["继续读取 data/big.txt 的 offset=60000。"],
+                "read_coverage": {
+                    "schema_version": 1,
+                    "source_count": 1,
+                    "primary": {
+                        "kind": "char_window",
+                        "source_path": "data/big.txt",
+                        "covered_until": 60000,
+                        "covered_until_offset": 60000,
+                        "total": 70000,
+                        "total_chars": 70000,
+                        "next_offset": 60000,
+                        "complete": False,
+                        "range_count": 60,
+                        "omitted_range_count": 48,
+                    },
+                },
+                "tool_progress": [
+                    {"tool": "read_file", "source_path": "data/big.txt", "offset": offset, "next_offset": offset + 1000}
+                    for offset in range(12000, 60000, 1000)
+                ],
+            },
+            consistency={"status": "ok"},
+            action_guard={"allowed_to_continue": True, "status": "allowed"},
+            handoff={},
+            recommended_read_paths=[],
+            next_actions=["继续读取 data/big.txt 的 offset=60000。"],
+            subagent_owner_refs={},
+            main_context_bundle={},
+        )
+    )
+
+    snapshot = packet["work_state_snapshot"]
+
+    assert snapshot["tool_progress"][0]["offset"] == 12000
+    assert snapshot["read_coverage"]["primary"]["covered_until_offset"] == 60000
+    assert packet["resume_focus"]["next_action"].startswith("根据本轮工具读取账本继续 data/big.txt")
+    assert 'read_file(path="data/big.txt", offset=60000, max_chars=50000)' in packet["resume_focus"]["next_action"]
+
+
+def test_compact_continue_packet_does_not_advance_cursor_for_failed_read(tmp_path: Path) -> None:
+    first = tmp_path / "read-1.json"
+    first.write_text(
+        '{"content":"[char-window offset=0 chars=100 total_chars=500]\\nPARTIAL view only"}',
+        encoding="utf-8",
+    )
+    packet = build_compact_continue_packet(
+        CompactContinuePacketRequest(
+            metadata={"apply_id": "apply-read-cursor-failed", "plan_id": "plan-read-cursor-failed"},
+            work_state={
+                "goal": "读取 data/big.txt 并整理报告。",
+                "phase": "compact_apply",
+                "next_step": "继续读取 data/big.txt。",
+                "artifact_refs": [
+                    {"kind": "tool_output", "path": str(first), "source_path": "data/big.txt", "tool": "read_file"},
+                    {
+                        "kind": "tool_output",
+                        "source_path": "data/big.txt",
+                        "tool": "read_file",
+                        "ok": False,
+                        "status": "error",
+                        "error_code": "CONTEXT_COMPACT_DEFERRED",
+                        "parameters": {"path": "data/big.txt", "offset": 100, "max_chars": 100},
+                    },
+                ],
+            },
+            consistency={"status": "ok"},
+            action_guard={"allowed_to_continue": True, "status": "allowed"},
+            handoff={},
+            recommended_read_paths=[],
+            next_actions=[],
+            subagent_owner_refs={},
+            main_context_bundle={},
+        )
+    )
+
+    focus = packet["resume_focus"]
+
+    assert 'read_file(path="data/big.txt", offset=100, max_chars=50000)' in focus["next_action"]
+    assert "offset=200" not in focus["next_action"]
+
+
+def test_compact_continue_packet_treats_missing_offset_as_zero_for_artifact_cursor() -> None:
+    packet = build_compact_continue_packet(
+        CompactContinuePacketRequest(
+            metadata={"apply_id": "apply-cursor-missing-offset", "plan_id": "plan-cursor-missing-offset"},
+            work_state={
+                "goal": "继续读 data/big.txt。",
+                "phase": "compact_apply",
+                "next_step": "继续读取 data/big.txt。",
+                "artifact_refs": [
+                    {
+                        "kind": "tool_output",
+                        "source_path": "data/big.txt",
+                        "tool": "read_file",
+                        "parameters": {"path": "data/big.txt", "max_chars": 8000},
+                    },
+                    {
+                        "kind": "tool_output",
+                        "source_path": "data/big.txt",
+                        "tool": "read_file",
+                        "parameters": {"path": "data/big.txt", "offset": 8000, "max_chars": 100000},
+                    },
+                ],
+            },
+            consistency={"status": "ok"},
+            action_guard={"allowed_to_continue": True, "status": "allowed"},
+            handoff={},
+            recommended_read_paths=[],
+            next_actions=[],
+            subagent_owner_refs={},
+            main_context_bundle={},
+        )
+    )
+
+    focus = packet["resume_focus"]
+
+    assert 'read_file(path="data/big.txt", offset=108000, max_chars=50000)' in focus["next_action"]
+    assert "offset=0" not in focus["next_action"]
+
+
 def test_compact_continue_packet_prioritizes_full_read_line_cursor(tmp_path: Path) -> None:
     packet = build_compact_continue_packet(
         CompactContinuePacketRequest(
@@ -718,6 +968,16 @@ def test_compact_continue_packet_prioritizes_full_read_line_cursor(tmp_path: Pat
                     "summary": "已读到第 40 行",
                     "next_action": "继续读取 data/line-log.txt。",
                     "ref": str(tmp_path / "progress.json"),
+                    "coverage": {
+                        "coverage_requirement": "full_source_read",
+                        "targets": [
+                            {
+                                "id": "data/line-log.txt",
+                                "source_ref": "data/line-log.txt",
+                                "coverage_kind": "full_source_read",
+                            }
+                        ],
+                    },
                 },
                 "artifact_refs": [
                     _line_read_ref(tmp_path, {"name": "read-lines-1", "start": 1, "end": 2, "next": 3, "max": 40}),

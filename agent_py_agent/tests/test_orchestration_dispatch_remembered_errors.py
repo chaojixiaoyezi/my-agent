@@ -24,8 +24,8 @@ def test_dispatch_guidance_reports_remembered_run_load_errors() -> None:
 
     payload = json.loads(DispatchSubagentsTool(mock_agent).execute({"dry_run": False}).output)
 
-    assert payload["must_not_report_done"] is True
-    assert payload["completion_status"]["must_not_report_done"] is True
+    assert payload["completion_risk"] is True
+    assert payload["completion_status"]["completion_risk"] is True
     assert payload["unfinished_load_errors"][0]["run_id"] == "broken-run"
     assert payload["unfinished_load_errors"][0]["category"] == "data_parse"
     assert payload["next_action"] == "refresh_agent_tree_or_rebuild_state_index"

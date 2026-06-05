@@ -55,6 +55,12 @@ def _validate_command(command: str) -> str:
     return text
 
 
+def _shell_error_code(output: str) -> str:
+    if str(output or "").startswith("TOOL_TIMEOUT:"):
+        return "TOOL_TIMEOUT"
+    return "COMMAND_FAILED"
+
+
 def _timeout_from_params(params: dict[str, Any], default_timeout: int) -> int:
     raw_timeout = params.get("timeout")
     if raw_timeout is None:
@@ -331,6 +337,7 @@ class ShellTool(BaseTool):
             ok,
             output,
             result_envelope={"artifact_protection": artifact_summary},
+            error_code="" if ok else _shell_error_code(output),
         )
 
     def _run_process_text(
@@ -342,17 +349,17 @@ class ShellTool(BaseTool):
         try:
             result = self._run_command(command, target, timeout)
             output = _format_process_result(result, self.max_output_chars)
-            return output, True
+            return output, result.returncode == 0
         except subprocess.TimeoutExpired:
-            return f"命令执行超时 timeout ({timeout}s): {command[:100]}...", False
+            return f"TOOL_TIMEOUT: 命令执行超时 timeout ({timeout}s): {command[:100]}...", False
         except OSError as exc:
-            return f"命令执行失败: {exc}", False
+            return f"COMMAND_FAILED: 命令执行失败: {exc}", False
 
     def _parse_command(self, params: dict[str, Any]) -> str | ToolExecutionResult:
         try:
             return _validate_command(str(params.get("command", "")))
         except ValueError as exc:
-            return ToolExecutionResult(self.spec.name, False, str(exc))
+            return ToolExecutionResult(self.spec.name, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
 
     def _run_command(
         self,

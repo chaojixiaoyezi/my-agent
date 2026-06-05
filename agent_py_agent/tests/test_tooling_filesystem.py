@@ -30,6 +30,22 @@ class TestFileSystemToolBase:
         result = tool.resolve_path(workspace / "another/file.txt")
         assert str(result).startswith(str(workspace))
 
+    def test_resolve_home_path(self, tmp_path: Path, monkeypatch):
+        """~/ 路径按当前用户 home 解析，而不是当作工作区下的普通目录。"""
+        from agent_py_agent.agent.tooling.filesystem import FileSystemTool
+
+        home = tmp_path / "home"
+        workspace = tmp_path / "workspace"
+        home.mkdir()
+        workspace.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        tool = FileSystemTool(workspace)
+
+        result = tool.resolve_path("~/notes/report.md")
+
+        assert result == (home / "notes" / "report.md").resolve(strict=False)
+
     def test_resolve_path_outside_workspace(self, tmp_path: Path):
         """普通工作区外路径不再默认拒绝。"""
         from agent_py_agent.agent.tooling.filesystem import FileSystemTool

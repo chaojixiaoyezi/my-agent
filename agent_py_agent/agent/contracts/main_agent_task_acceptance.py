@@ -5,7 +5,11 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
+from .artifact_acceptance import (
+    ArtifactAcceptanceRequest,
+    validate_artifact,
+    validation_workspace_root_for_item,
+)
 from .artifact_candidate_paths import report_with_candidate_paths
 from .contract_validation_recovery import recovery_for_findings
 from .staged_checkpoint_acceptance import staged_checkpoint_findings
@@ -104,7 +108,7 @@ def _validate_artifact_item(
     report = validate_artifact(
         ArtifactAcceptanceRequest(
             path=path,
-            workspace_root=task_workspace,
+            workspace_root=validation_workspace_root_for_item(item, path, task_workspace),
             validation_contract=_validation_contract(item),
         )
     )

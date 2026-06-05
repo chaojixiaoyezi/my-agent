@@ -11,9 +11,7 @@ TargetAliases = Callable[[object], set[str]]
 
 
 def is_terminal_status(status: str) -> bool:
-    text = str(status or "").strip().lower()
-    markers = ("close", "closed", "resolved", "done", "completed", "finished", "关闭", "已关闭", "解决", "完成")
-    return bool(text and any(marker in text for marker in markers))
+    return _status_text(status) in {"closed", "resolved", "done", "completed", "finished"}
 
 
 def case_window_status(status: str) -> str:
@@ -21,29 +19,26 @@ def case_window_status(status: str) -> str:
 
 
 def is_completed_request_status(status: str) -> bool:
-    text = str(status or "").strip().lower()
-    markers = ("completed", "complete", "done", "finished", "responded", "answered", "fulfilled", "完成", "已响应")
-    return bool(text and any(marker in text for marker in markers))
+    return _status_text(status) in {"completed", "complete", "done", "finished", "responded", "answered", "fulfilled"}
 
 
 def is_blocked_request_status(status: str) -> bool:
-    text = str(status or "").strip().lower()
+    text = _status_text(status)
     if is_timed_out_request_status(text):
         return False
-    markers = ("blocked", "stuck", "failed", "error", "unavailable", "阻塞", "卡住", "失败", "不可用")
-    return bool(text and any(marker in text for marker in markers))
+    return text in {"blocked", "stuck", "failed", "error", "unavailable"}
 
 
 def is_timed_out_request_status(status: str) -> bool:
-    text = str(status or "").strip().lower()
-    markers = ("timeout", "timed_out", "deadline_expired", "expired", "超时", "过期", "到期")
-    return bool(text and any(marker in text for marker in markers))
+    return _status_text(status) in {"timeout", "timed_out", "deadline_expired", "expired"}
 
 
 def is_declined_request_status(status: str) -> bool:
-    text = str(status or "").strip().lower()
-    markers = ("declined", "rejected", "cancelled", "canceled", "skipped", "refused", "拒绝", "驳回", "取消", "跳过")
-    return bool(text and any(marker in text for marker in markers))
+    return _status_text(status) in {"declined", "rejected", "cancelled", "canceled", "skipped", "refused"}
+
+
+def _status_text(status: str) -> str:
+    return str(status or "").strip().lower().replace("-", "_")
 
 
 def request_is_effectively_timed_out(

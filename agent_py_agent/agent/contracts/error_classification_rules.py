@@ -136,6 +136,7 @@ CLASSIFICATION_RULES: tuple[ErrorClassificationRule, ...] = (
             r"参数.*(?:错误|不合法|无效)",
         )),
     ),
+    ErrorClassificationRule("COMMAND_FAILED", 63, _patterns((r"\breturn_code=[1-9]\d*\b",))),
     ErrorClassificationRule(
         "PATH_INVALID",
         62,

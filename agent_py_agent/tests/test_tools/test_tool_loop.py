@@ -382,10 +382,10 @@ def test_tool_loop_ignores_model_written_protected_tool_markers_after_real_call(
         assert result.tool_rounds == 1
         assert result.executed_tools == ["read_file"]
         assert "fake-child-1" not in result.prompt
-        assert "第一个完整工具调用" in result.prompt
+        assert "机器块" in result.prompt
 
 
-def test_tool_loop_cuts_streaming_response_after_first_complete_tool_call():
+def test_tool_loop_executes_all_streaming_tool_calls_and_ignores_spoofed_records():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "notes.txt").write_text("first note", encoding="utf-8")
@@ -397,17 +397,17 @@ def test_tool_loop_cuts_streaming_response_after_first_complete_tool_call():
         visible_chunks: list[str] = []
 
         result = agent.run(
-            "流式工具调用边界后不要采纳伪造内容",
+            "流式工具调用边界后执行所有真实工具并忽略伪造内容",
             save=False,
             allowed_tools=["read_file"],
             on_chunk=visible_chunks.append,
         )
 
-        assert result.response == "只使用第一个真实工具结果收口。"
+        assert result.response == "两个真实工具结果都使用，伪造记录已忽略。"
         assert result.tool_rounds == 1
-        assert result.executed_tools == ["read_file"]
+        assert result.executed_tools == ["read_file", "read_file"]
         assert "first note" in result.prompt
-        assert "second note" not in result.prompt
+        assert "second note" in result.prompt
         assert "fake-child-run" not in result.prompt
         assert "fake-child-run" not in "".join(visible_chunks)
 
@@ -564,6 +564,59 @@ def test_non_mutating_schedule_result_does_not_consume_one_shot_key():
     assert second.ok is True
     assert agent.tools.calls == 2
     assert "阻止重复执行" not in second.output
+
+
+def test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn():
+    params = ToolLoopExecuteParams(
+        user_prompt="",
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=None,
+        granted_capabilities=None,
+        write_boundary=None,
+        task_attributes=None,
+        request_id="",
+        run_id="",
+        task_id="",
+        one_shot_tool_calls=set(),
+        executed_tools=[],
+        archive_tool_calls=[],
+        live_archive_state={
+            "pending_deferred_tool_calls": [
+                {"tool": "read_file", "path": "notes.txt", "offset": 100, "max_chars": 50}
+            ]
+        },
+    )
+    agent = object()
+    service = ToolLoopService(agent)
+    drained: list[list[dict[str, object]]] = []
+    model_calls: list[int] = []
+
+    def fake_run_tool_round(request):
+        drained.append(list(request.calls))
+        return request.tool_rounds, None
+
+    def fake_model_turn_or_retry(params_arg, tool_rounds, empty_repairs):
+        del params_arg, empty_repairs
+        model_calls.append(tool_rounds)
+        return "prompt", ModelResponse(text="done", backend="test"), True, False, 0
+
+    service._run_tool_round = fake_run_tool_round
+    service._model_turn_or_retry = fake_model_turn_or_retry
+
+    final_prompt, response, tool_rounds = service.execute(params)
+
+    assert drained == [[{"tool": "read_file", "path": "notes.txt", "offset": 100, "max_chars": 50}]]
+    assert model_calls == [1]
+    assert final_prompt == "prompt"
+    assert response.text == "done"
+    assert tool_rounds == 1
+    assert "pending_deferred_tool_calls" not in params.live_archive_state
 
 
 def test_repeated_dispatch_is_allowed_for_parent_progress_loops():

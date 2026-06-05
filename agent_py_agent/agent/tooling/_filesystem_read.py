@@ -51,7 +51,7 @@ class FileSystemTool(BaseTool):
     def resolve_path(self, raw_path: str | Path) -> Path:
 
         raw_text = _required_path(raw_path)
-        candidate = Path(raw_text)
+        candidate = Path(raw_text).expanduser()
         if not candidate.is_absolute():
             candidate = self.workspace_root / candidate
         try:
@@ -137,6 +137,7 @@ class ReadFileTool(FileSystemTool):
                 "定位报错后，按行阅读相关代码",
                 "读取工具返回的大输出保存路径或 tool-output artifact 包装路径",
                 "读取超大单行文本时，用 offset/max_chars 分段继续",
+                "大文件已用 search_text 定位章节/锚点后，读取锚点附近源片段作为事实证据",
             ],
             avoid_when=[
                 "只想知道关键字在哪些文件出现过时，先用 search_text 更省",
@@ -159,7 +160,8 @@ class ReadFileTool(FileSystemTool):
             examples=[
                 '{"tool": "read_file", "path": "agent_py_agent/agent/core.py"}',
                 '{"tool": "read_file", "path": "agent_py_agent/agent/core.py", "start_line": 1, "end_line": 120}',
-                '{"tool": "read_file", "path": "large.log", "offset": 50000, "max_chars": 50000}',
+                '{"tool": "read_file", "path": "large.log", "offset": 50000, "max_chars": 100000}',
+                '{"tool": "read_file", "path": "field_journal.txt", "start_line": 2053, "end_line": 2058}',
             ],
         )
 

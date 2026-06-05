@@ -64,15 +64,16 @@ def write_approved_runtime_fact_source(request: ApprovedRuntimeFactSourceRequest
         return ""
     root = request.root / "memory_archive" / "runtime_facts" / _safe_id(request.fact_id)
     root.mkdir(parents=True, exist_ok=True)
-    payload = _approved_fact_payload(request)
-    (root / "task.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    payload = _approved_fact_payload(request, _read_json_dict(root / "task.json"))
+    _write_json_atomic(root / "task.json", payload)
     return str(root)
 
 
 def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
-    sections = _explicit_sections(_fact_source_text(request))
-    latest_tests = dedupe_strings([*sections.tests, *_tool_test_items(request.archive_tool_calls)])
+    latest_tests = dedupe_strings(_tool_test_items(request.archive_tool_calls))
     desired_outputs = runtime_desired_outputs(request.delivery_contract, request.runtime_injections)
+    delivery_contract = _delivery_contract_payload(request.delivery_contract)
+    target_coverage = _target_coverage_payload(request.delivery_contract)
     run_intent = build_run_intent(
         user_prompt=request.user_prompt,
         delivery_contract=request.delivery_contract,
@@ -91,10 +92,12 @@ def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
         "task_id": request.task_id,
         "goal": request.user_prompt.strip(),
         "next_actions": list(request.next_actions),
-        "acceptance": sections.acceptance,
-        "constraints": sections.constraints,
+        "acceptance": [],
+        "constraints": [],
         "latest_tests": latest_tests,
         "desired_outputs": desired_outputs,
+        "delivery_contract": delivery_contract,
+        "target_coverage": target_coverage,
         "run_intent": run_intent,
         "runtime_progress": _runtime_progress_payload(request),
         "run_status": {
@@ -103,6 +106,17 @@ def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
             "response_present": bool(request.response_text.strip()),
         },
     }
+
+
+def _delivery_contract_payload(value: dict[str, Any] | None) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _target_coverage_payload(value: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    coverage = value.get("target_coverage_contract")
+    return dict(coverage) if isinstance(coverage, dict) else {}
 
 
 def _runtime_progress_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
@@ -126,21 +140,6 @@ def _phase_from_status(status: str) -> str:
     return "running"
 
 
-def _fact_source_text(request: RuntimeFactSourceRequest) -> str:
-    continuation_blocks = [
-        text for text in _runtime_injection_texts(request.runtime_injections) if "# Compact Auto Continuation" in text
-    ]
-    return "\n\n".join([request.user_prompt, *continuation_blocks])
-
-
-def _runtime_injection_texts(value: tuple[str, ...] | list[str] | str) -> list[str]:
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, (list, tuple)):
-        return [str(item) for item in value if str(item)]
-    return []
-
-
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
@@ -151,115 +150,63 @@ def _utc_timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def _approved_fact_payload(request: ApprovedRuntimeFactSourceRequest) -> dict[str, Any]:
-    return {
+def _approved_fact_payload(request: ApprovedRuntimeFactSourceRequest, previous: dict[str, Any] | None = None) -> dict[str, Any]:
+    previous = previous if isinstance(previous, dict) else {}
+    payload = _preserved_runtime_fields(previous)
+    payload.update({
         "version": 1,
         "source": "approved_runtime_fact_source",
         "fact_id": request.fact_id,
         "source_apply_id": request.source_apply_id,
-        "goal": request.goal.strip(),
-        "next_actions": dedupe_strings(request.next_actions),
-        "acceptance": dedupe_strings(request.acceptance),
-        "constraints": dedupe_strings(request.constraints),
-        "latest_tests": dedupe_strings(request.latest_tests),
+        "goal": request.goal.strip() or str(previous.get("goal") or "").strip(),
+        "next_actions": _merged_string_items(previous.get("next_actions"), request.next_actions),
+        "acceptance": _merged_string_items(previous.get("acceptance"), request.acceptance),
+        "constraints": _merged_string_items(previous.get("constraints"), request.constraints),
+        "latest_tests": _merged_string_items(previous.get("latest_tests"), request.latest_tests),
         "run_status": {
             "status": "approved_manual_completion",
             "backend": "manual",
             "response_present": False,
         },
-    }
+    })
+    return payload
 
 
-@dataclass(frozen=True)
-class _ExplicitSections:
-    acceptance: list[str]
-    constraints: list[str]
-    tests: list[str]
+def _preserved_runtime_fields(previous: dict[str, Any]) -> dict[str, Any]:
+    preserved: dict[str, Any] = {}
+    for key in (
+        "request_id",
+        "run_id",
+        "task_id",
+        "desired_outputs",
+        "delivery_contract",
+        "target_coverage",
+        "run_intent",
+        "runtime_progress",
+    ):
+        if key in previous:
+            preserved[key] = previous[key]
+    return preserved
 
 
-def _explicit_sections(text: str) -> _ExplicitSections:
-    lines = text.splitlines()
-    buckets = {"acceptance": [], "constraints": [], "tests": []}
-    active = ""
-    for line in lines:
-        label, inline = _section_heading(line)
-        if label:
-            active = label
-            buckets[label].extend(_inline_items(inline))
-            continue
-        if active and _is_section_metadata_line(line):
-            continue
-        if _looks_like_unmatched_heading(line):
-            active = ""
-            continue
-        if active:
-            buckets[active].extend(_line_items(line))
-    return _ExplicitSections(
-        acceptance=dedupe_strings(buckets["acceptance"]),
-        constraints=dedupe_strings(buckets["constraints"]),
-        tests=dedupe_strings(buckets["tests"]),
-    )
+def _merged_string_items(previous: Any, approved: list[str]) -> list[str]:
+    return dedupe_strings([*_value_strings(previous), *approved])
 
 
-def _is_section_metadata_line(line: str) -> bool:
-    text = line.strip().lower()
-    return bool(re.match(r"^(status|source_status|source paths?|source_paths)\s*[:：]", text))
-
-
-def _section_heading(line: str) -> tuple[str, str]:
-    text = line.strip().lstrip("-*# ").strip()
-    match = re.match(r"^(验收条件|验收|acceptance|constraints?|约束|限制|tests?|测试|最近测试)\s*[:：]\s*(.*)$", text, re.I)
-    if not match:
-        return _markdown_section_heading(line, text)
-    return _label_key(match.group(1)), match.group(2).strip()
-
-
-def _markdown_section_heading(line: str, text: str) -> tuple[str, str]:
-    if not line.strip().startswith("#"):
-        return "", ""
-    lowered = text.lower()
-    if lowered in {"acceptance", "验收", "验收条件"}:
-        return "acceptance", ""
-    if lowered in {"constraints", "constraint", "约束", "限制"}:
-        return "constraints", ""
-    if lowered in {"latest tests", "tests", "test", "最近测试", "测试"}:
-        return "tests", ""
-    return "", ""
-
-
-def _looks_like_unmatched_heading(line: str) -> bool:
-    if line.strip().startswith("#"):
-        return True
-    text = line.strip().lstrip("-*# ").strip()
-    if not text:
-        return False
-    if re.match(r"^[^:：]{1,40}\s*[:：]\s*$", text):
-        return True
-    return bool(re.match(r"^[^:：]{1,40}\s*[:：]\s+.+$", text))
-
-
-def _label_key(label: str) -> str:
-    lower = label.lower()
-    if lower in {"acceptance", "验收条件", "验收"}:
-        return "acceptance"
-    if lower in {"constraint", "constraints", "约束", "限制"}:
-        return "constraints"
-    return "tests"
-
-
-def _line_items(line: str) -> list[str]:
-    text = line.strip()
-    for prefix in ("- [x]", "- [X]", "- [ ]", "- ", "* "):
-        if text.startswith(prefix):
-            item = text[len(prefix) :].strip()
-            return [item] if item else []
+def _value_strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list | tuple):
+        return [item for raw in value for item in _value_strings(raw)]
     return []
 
 
-def _inline_items(text: str) -> list[str]:
-    if not text:
-        return []
-    return [item.strip() for item in re.split(r"[;；]", text) if item.strip()]
+def _read_json_dict(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _tool_test_items(tool_calls: list[Any]) -> list[str]:

@@ -1,8 +1,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from ..user_space.run_workspace import EnsureRunWorkspaceRequest, ensure_run_workspace
 from ._runtime_params import ArchiveRunParams
@@ -208,7 +209,7 @@ def _user_requested_dir_from_artifact_path(artifact: dict, paths) -> str:
         return ""
     if _same_or_inside(path, Path(paths.output_dir)):
         return ""
-    return str(path.parent if path.suffix else path)
+    return _output_dir_for_path_text(text)
 
 
 def _user_requested_dir_from_roots(artifact: dict, paths) -> str:
@@ -224,7 +225,7 @@ def _user_requested_dir_from_roots(artifact: dict, paths) -> str:
         except OSError:
             continue
         if not _same_or_inside(path, Path(paths.output_dir)):
-            return str(path)
+            return _output_dir_for_path_text(text)
     return ""
 
 
@@ -257,6 +258,10 @@ def _artifact_with_task_output_paths(artifact: dict, paths) -> dict:
         artifact["allowed_output_roots"] = [
             _rewrite_task_output_root(value, paths) or value for value in roots
         ]
+    if not _has_allowed_output_roots(artifact):
+        explicit_root = _explicit_output_root_from_artifact_path(artifact, paths)
+        if explicit_root:
+            artifact["allowed_output_roots"] = [explicit_root]
     return artifact
 
 
@@ -294,7 +299,46 @@ def _relative_output_suffix(text: str) -> Path | None:
 
 
 def _is_absolute_or_home_path(text: str) -> bool:
-    return text.startswith("/") or text.startswith("~")
+    return text.startswith("/") or text.startswith("~") or _is_windows_absolute_path(text)
+
+
+def _has_allowed_output_roots(artifact: dict) -> bool:
+    roots = artifact.get("allowed_output_roots")
+    return isinstance(roots, list) and any(str(item or "").strip() for item in roots)
+
+
+def _explicit_output_root_from_artifact_path(artifact: dict, paths) -> str:
+    text = str(artifact.get("preferred_path") or artifact.get("path") or "").strip()
+    if not text:
+        return ""
+    if not _is_absolute_or_home_path(text):
+        return ""
+    try:
+        path = Path(text).expanduser()
+    except OSError:
+        return ""
+    if _same_or_inside(path, Path(paths.output_dir)):
+        return ""
+    return _output_dir_for_path_text(text)
+
+
+def _output_dir_for_path_text(text: str) -> str:
+    pure = _pure_path(text)
+    target = pure.parent if pure.suffix else pure
+    result = str(target)
+    return result if result != "." else "."
+
+
+def _pure_path(text: str):
+    return PureWindowsPath(text) if _is_windows_path(text) else Path(text).expanduser()
+
+
+def _is_windows_path(text: str) -> bool:
+    return _is_windows_absolute_path(text) or "\\" in text
+
+
+def _is_windows_absolute_path(text: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", text) or re.match(r"^\\\\[^\\/]+[\\/][^\\/]+", text))
 
 
 def _artifact_declares_output_target(artifact: dict) -> bool:

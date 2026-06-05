@@ -85,6 +85,48 @@ def test_acceptance_submit_uses_disk_write_file_index_for_artifact_provenance(tm
     assert report["artifacts"][0]["provenance"]["proof_kind"] == "tool_output_index"
 
 
+def test_acceptance_submit_does_not_block_materializer_warning_when_contract_is_valid(tmp_path: Path):
+    _write_valid_artifact(tmp_path)
+    params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
+    params.delivery_contract["_contract_doctor"] = {
+        "schema_version": "delivery_contract_doctor.v1",
+        "ok": True,
+        "should_rematerialize": True,
+        "findings": [
+            {
+                "code": "DELIVERY_MATERIALIZER_SOURCE_COVERAGE_UNDECLARED",
+                "severity": "warning",
+                "location": "source_paths",
+                "message": "source coverage not declared",
+                "value": "data/long_field_journal.txt",
+            }
+        ],
+        "repair_actions": [
+            {
+                "code": "DELIVERY_CONTRACT_REMATERIALIZATION_REQUIRED",
+                "recommended_action": "rematerialize_delivery_contract_with_source_coverage_decision",
+                "source_paths": ["data/long_field_journal.txt"],
+            }
+        ],
+    }
+    params.executed_tools.append("submit_for_acceptance")
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=_agent(tmp_path),
+            params=params,
+            response=ModelResponse(text="[TOOL_CALL submit_for_acceptance]", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+    report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+
+    assert response is not None
+    assert "交付验收通过" in response.text
+    assert report["ok"] is True
+
+
 def test_acceptance_submit_blocks_when_required_source_read_is_partial(tmp_path: Path):
     _write_valid_artifact(tmp_path)
     source = tmp_path / "data" / "journal.txt"
@@ -124,6 +166,46 @@ def test_acceptance_submit_blocks_when_required_source_read_is_partial(tmp_path:
     }
     assert "不能替代完整阅读证明" in payload["repair_guidance"]["message_zh"]
     assert "recommended_tool_call" in payload["repair_guidance"]["message_zh"]
+
+
+def test_acceptance_submit_blocks_when_item_level_required_source_read_is_partial(tmp_path: Path):
+    _write_valid_artifact(tmp_path)
+    source = tmp_path / "data" / "journal.txt"
+    source.parent.mkdir()
+    source.write_text("x" * 1000, encoding="utf-8")
+    params = _delivery_params(
+        archive_tool_calls=[
+            _write_file_archive_record(),
+            {
+                "tool": "read_file",
+                "ok": True,
+                "parameters": {"tool": "read_file", "path": str(source), "offset": 0, "max_chars": 100},
+                "output_preview": "[char-window offset=0 chars=100 total_chars=1000]\nPARTIAL view only",
+            },
+            {
+                "tool": "search_text",
+                "ok": True,
+                "parameters": {"tool": "search_text", "path": str(source), "query": "x"},
+                "output_preview": "matches found",
+            },
+        ]
+    )
+    params = replace(
+        params,
+        delivery_contract={
+            **params.delivery_contract,
+            "target_coverage_contract": {
+                "scope_label": "完整读取源文件",
+                "target_items": [{"path": str(source), "enforcement": "required", "coverage_kind": "full_source_read"}],
+            },
+        },
+    )
+    response, report, _ = _submit_acceptance(tmp_path, params)
+
+    assert response is None
+    assert report["target_coverage_status"]["enforcement"] == "required"
+    assert report["target_coverage_status"]["missing_count"] == 1
+    assert report["target_coverage_status"]["should_block"] is True
 
 
 def test_acceptance_submit_uses_disk_tool_output_index_for_coverage_after_compact(tmp_path: Path):
@@ -196,7 +278,49 @@ def test_acceptance_submit_uses_disk_tool_output_index_for_coverage_after_compac
     }
 
 
-def test_acceptance_submit_does_not_close_when_task_progress_has_open_items(tmp_path: Path):
+def test_acceptance_submit_ignores_disk_tool_output_index_from_other_run(tmp_path: Path):
+    _write_valid_artifact(tmp_path)
+    source = tmp_path / "data" / "journal.txt"
+    source.parent.mkdir()
+    source.write_text("\n".join(f"line {line}" for line in range(1, 11)), encoding="utf-8")
+    _write_tool_output_index(
+        tmp_path,
+        [
+            {
+                "tool": "read_file",
+                "ok": True,
+                "run_id": "old-run",
+                "task_id": "old-task",
+                "call_id": "old-read-full",
+                "scoped_call_id": "old-run:old-read-full",
+                "sha256": "old-read-full-sha",
+                "parameters": {"tool": "read_file", "path": str(source)},
+                "output_preview": "\n".join(f"{line}: line {line}" for line in range(1, 11)),
+            }
+        ],
+    )
+    params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
+    params = replace(
+        params,
+        delivery_contract={
+            **params.delivery_contract,
+            "target_coverage_contract": {
+                "scope_label": "完整读取源文件",
+                "enforcement": "required",
+                "coverage_requirement": "full_source_read",
+                "target_items": [{"target_id": str(source), "source_ref": str(source)}],
+            },
+        },
+    )
+
+    response, report, _ = _submit_acceptance(tmp_path, params)
+
+    assert response is None
+    assert report["target_coverage_status"]["missing_count"] == 1
+    assert report["runtime_gate"]["allowed"] is False
+
+
+def test_acceptance_submit_warns_when_task_progress_has_open_items(tmp_path: Path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     _write_valid_artifact(tmp_path)
@@ -207,7 +331,7 @@ def test_acceptance_submit_does_not_close_when_task_progress_has_open_items(tmp_
             "summary": "已读 001-012，剩余 013-060 未读",
             "next_action": "继续读取 fragment-013 到 fragment-060",
             "items": [
-                {"id": "fragment-001", "status": "completed"},
+                {"id": "fragment-001", "status": "done"},
                 {"id": "fragment-013", "status": "in_progress"},
                 {"id": "fragment-014", "status": "pending"},
             ],
@@ -216,14 +340,40 @@ def test_acceptance_submit_does_not_close_when_task_progress_has_open_items(tmp_
     params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
     response, report, payload = _submit_acceptance(tmp_path, params)
 
-    assert response is None
-    assert report["ok"] is False
-    assert report["task_progress_closeout_gate"]["allowed"] is False
+    assert response is not None
+    assert report["ok"] is True
+    assert report["task_progress_closeout_gate"]["allowed"] is True
     assert "TASK_PROGRESS_OPEN_ITEMS" in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }
-    assert payload["failed_gates"][0]["gate"] == "task_progress_closeout"
-    assert "继续读取 fragment-013" in payload["repair_guidance"]["message_zh"]
+    assert payload.get("failed_gates", []) == []
+
+
+def test_acceptance_submit_keeps_completed_progress_items_open(tmp_path: Path):
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    _write_valid_artifact(tmp_path)
+    write_task_progress(
+        tmp_path,
+        "run-1",
+        {
+            "summary": "全部片段已完成",
+            "next_action": "提交验收",
+            "items": [
+                {"id": "fragment-001", "status": "completed", "evidence": ["fragment-001.txt line 12"]},
+                {"id": "fragment-002", "status": "completed", "evidence": ["fragment-002.txt line 18"]},
+            ],
+        },
+    )
+    params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
+    response, report, _payload = _submit_acceptance(tmp_path, params)
+
+    assert response is not None
+    assert report["task_progress_closeout_gate"]["allowed"] is True
+    assert report["task_progress_closeout_gate"]["evidence"]["counts"] == {"total": 2, "other": 2}
+    assert "TASK_PROGRESS_OPEN_ITEMS" in {
+        finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
+    }
 
 
 def test_acceptance_submit_warns_when_done_progress_items_lack_auditable_facts(tmp_path: Path):
@@ -235,7 +385,7 @@ def test_acceptance_submit_warns_when_done_progress_items_lack_auditable_facts(t
         "run-1",
         {
             "items": [
-                {"id": "fragment-001", "status": "done", "notes": "需要从存档上下文恢复"},
+                {"id": "fragment-001", "status": "done"},
                 {"id": "fragment-002", "status": "done", "evidence": ["fragment-002.txt line 12"]},
             ],
         },
@@ -313,7 +463,7 @@ def test_acceptance_submit_warns_on_incomplete_progress_coverage_even_when_items
     }
 
 
-def test_acceptance_submit_warns_on_plain_evidence_text_without_source_ref(tmp_path: Path):
+def test_acceptance_submit_does_not_parse_plain_evidence_text_as_closeout_fact(tmp_path: Path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     _write_valid_artifact(tmp_path)
@@ -347,12 +497,12 @@ def test_acceptance_submit_warns_on_plain_evidence_text_without_source_ref(tmp_p
 
     assert response is not None
     assert report["task_progress_closeout_gate"]["allowed"] is True
-    assert "TASK_PROGRESS_DONE_WITHOUT_EVIDENCE" in {
+    assert "TASK_PROGRESS_DONE_WITHOUT_EVIDENCE" not in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }
 
 
-def test_acceptance_submit_requires_final_artifact_to_include_progress_facts(tmp_path: Path):
+def test_acceptance_submit_does_not_require_final_artifact_to_include_progress_note_tokens(tmp_path: Path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     (tmp_path / "out.txt").write_text("finished artifact without expected facts", encoding="utf-8")
@@ -370,19 +520,16 @@ def test_acceptance_submit_requires_final_artifact_to_include_progress_facts(tmp
         },
     )
     params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
-    response, report, payload = _submit_acceptance(tmp_path, params)
+    response, report, _payload = _submit_acceptance(tmp_path, params)
 
-    assert response is None
-    assert report["task_progress_closeout_gate"]["allowed"] is False
-    assert "TASK_PROGRESS_FACTS_MISSING_FROM_ARTIFACT" in {
+    assert response is not None
+    assert report["task_progress_closeout_gate"]["allowed"] is True
+    assert "TASK_PROGRESS_FACTS_MISSING_FROM_ARTIFACT" not in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }
-    assert payload["repair_guidance"]["final_artifact_paths"] == [str(tmp_path / "out.txt")]
-    assert "不要只修改 task output/work 或 .my_agent 内部副本" in payload["repair_guidance"]["message_zh"]
-    assert "CPX-001-ABCDEF1234" in payload["repair_guidance"]["message_zh"]
 
 
-def test_acceptance_submit_blocks_artifact_fact_token_not_seen_in_source(tmp_path: Path):
+def test_acceptance_submit_does_not_scan_artifact_text_for_task_progress_fact_tokens(tmp_path: Path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     (tmp_path / "out.txt").write_text(
@@ -428,13 +575,14 @@ def test_acceptance_submit_blocks_artifact_fact_token_not_seen_in_source(tmp_pat
     )
     report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
-    assert response is None
-    assert "TASK_PROGRESS_ARTIFACT_FACTS_NOT_SOURCE_BACKED" in {
+    assert response is not None
+    assert report["task_progress_closeout_gate"]["allowed"] is True
+    assert "TASK_PROGRESS_ARTIFACT_FACTS_NOT_SOURCE_BACKED" not in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }
 
 
-def test_acceptance_submit_requires_checkpoint_facts_from_progress_notes(tmp_path: Path):
+def test_acceptance_submit_does_not_parse_checkpoint_facts_from_progress_notes(tmp_path: Path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     (tmp_path / "out.txt").write_text(
@@ -481,13 +629,14 @@ def test_acceptance_submit_requires_checkpoint_facts_from_progress_notes(tmp_pat
     )
     report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
-    assert response is None
-    assert "TASK_PROGRESS_FACTS_MISSING_FROM_ARTIFACT" in {
+    assert response is not None
+    assert report["task_progress_closeout_gate"]["allowed"] is True
+    assert "TASK_PROGRESS_FACTS_MISSING_FROM_ARTIFACT" not in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }
 
 
-def test_acceptance_submit_blocks_short_checkpoint_token_not_seen_in_source(tmp_path: Path):
+def test_acceptance_submit_does_not_block_short_checkpoint_token_not_seen_in_source(tmp_path: Path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     (tmp_path / "out.txt").write_text(
@@ -533,13 +682,14 @@ def test_acceptance_submit_blocks_short_checkpoint_token_not_seen_in_source(tmp_
     )
     report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
-    assert response is None
-    assert "TASK_PROGRESS_ARTIFACT_FACTS_NOT_SOURCE_BACKED" in {
+    assert response is not None
+    assert report["task_progress_closeout_gate"]["allowed"] is True
+    assert "TASK_PROGRESS_ARTIFACT_FACTS_NOT_SOURCE_BACKED" not in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }
 
 
-def test_acceptance_submit_does_not_use_written_artifact_as_source_evidence(tmp_path: Path):
+def test_acceptance_submit_leaves_artifact_source_fact_validation_to_structured_contracts(tmp_path: Path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     (tmp_path / "out.txt").write_text(
@@ -590,13 +740,14 @@ def test_acceptance_submit_does_not_use_written_artifact_as_source_evidence(tmp_
     )
     report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
-    assert response is None
-    assert "TASK_PROGRESS_ARTIFACT_FACTS_NOT_SOURCE_BACKED" in {
+    assert response is not None
+    assert report["task_progress_closeout_gate"]["allowed"] is True
+    assert "TASK_PROGRESS_ARTIFACT_FACTS_NOT_SOURCE_BACKED" not in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }
 
 
-def test_acceptance_submit_checks_artifact_fact_tokens_against_externalized_source_read(tmp_path: Path):
+def test_acceptance_submit_does_not_check_artifact_fact_tokens_against_externalized_source_read(tmp_path: Path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     (tmp_path / "out.txt").write_text("错误编号 CP-027-999", encoding="utf-8")
@@ -643,13 +794,14 @@ def test_acceptance_submit_checks_artifact_fact_tokens_against_externalized_sour
     )
     report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
-    assert response is None
-    assert "TASK_PROGRESS_ARTIFACT_FACTS_NOT_SOURCE_BACKED" in {
+    assert response is not None
+    assert report["task_progress_closeout_gate"]["allowed"] is True
+    assert "TASK_PROGRESS_ARTIFACT_FACTS_NOT_SOURCE_BACKED" not in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }
 
 
-def test_acceptance_submit_blocks_dense_numeric_progress_gap(tmp_path: Path):
+def test_acceptance_submit_does_not_infer_dense_numeric_progress_gap_from_item_names(tmp_path: Path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     items = [
@@ -691,14 +843,10 @@ def test_acceptance_submit_blocks_dense_numeric_progress_gap(tmp_path: Path):
     )
     report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
-    assert response is None
+    assert response is not None
+    assert report["task_progress_closeout_gate"]["allowed"] is True
     finding_codes = {finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]}
-    assert "TASK_PROGRESS_NUMERIC_SEQUENCE_GAP" in finding_codes
-    finding = next(
-        finding for finding in report["task_progress_closeout_gate"]["findings"]
-        if finding["code"] == "TASK_PROGRESS_NUMERIC_SEQUENCE_GAP"
-    )
-    assert finding["evidence"]["missing_items"] == ["ch006"]
+    assert "TASK_PROGRESS_NUMERIC_SEQUENCE_GAP" not in finding_codes
 
 
 def test_acceptance_submit_counts_bare_numeric_progress_items_in_neighbor_sequence(tmp_path: Path):
@@ -752,7 +900,7 @@ def test_acceptance_submit_counts_bare_numeric_progress_items_in_neighbor_sequen
     )
 
 
-def test_acceptance_submit_requires_plain_task_progress_facts_in_final_artifact(tmp_path: Path):
+def test_acceptance_submit_does_not_parse_plain_task_progress_facts_in_final_artifact(tmp_path: Path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     (tmp_path / "out.txt").write_text(
@@ -797,15 +945,13 @@ def test_acceptance_submit_requires_plain_task_progress_facts_in_final_artifact(
         )
     )
     report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
-    payload = _last_tool_context_payload(params)
 
     assert response is None
-    assert report["task_progress_closeout_gate"]["allowed"] is False
-    finding = report["task_progress_closeout_gate"]["findings"][0]
-    assert finding["code"] == "TASK_PROGRESS_FACTS_MISSING_FROM_ARTIFACT"
-    assert "西安" in payload["repair_guidance"]["message_zh"]
-    assert "暂停发布" in payload["repair_guidance"]["message_zh"]
-    assert "审批延迟" in payload["repair_guidance"]["message_zh"]
+    assert report["task_progress_closeout_gate"]["allowed"] is True
+    assert not any(
+        finding["code"] == "TASK_PROGRESS_FACTS_MISSING_FROM_ARTIFACT"
+        for finding in report["task_progress_closeout_gate"]["findings"]
+    )
 
 
 def test_acceptance_submit_splits_chinese_sentence_key_value_facts(tmp_path: Path):
@@ -976,7 +1122,7 @@ def test_acceptance_submit_ignores_placeholder_fact_tokens_in_final_artifact(tmp
     )
 
 
-def test_acceptance_submit_blocks_complete_artifact_sequence_starting_late(tmp_path: Path):
+def test_acceptance_submit_does_not_parse_complete_artifact_sequence_from_text(tmp_path: Path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     rows = []
@@ -1026,14 +1172,12 @@ def test_acceptance_submit_blocks_complete_artifact_sequence_starting_late(tmp_p
         )
     )
     report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
-    payload = _last_tool_context_payload(params)
 
-    assert response is None
-    assert "TASK_PROGRESS_ARTIFACT_NUMERIC_SEQUENCE_GAP" in {
+    assert response is not None
+    assert report["task_progress_closeout_gate"]["allowed"] is True
+    assert "TASK_PROGRESS_ARTIFACT_NUMERIC_SEQUENCE_GAP" not in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }
-    assert "001" in payload["repair_guidance"]["message_zh"]
-    assert "004" in payload["repair_guidance"]["message_zh"]
 
 
 def test_acceptance_submit_does_not_treat_repair_notes_as_required_facts(tmp_path: Path):
@@ -1087,7 +1231,7 @@ def test_acceptance_submit_does_not_treat_repair_notes_as_required_facts(tmp_pat
     )
 
 
-def test_acceptance_submit_requires_progress_facts_to_come_from_source_reads(tmp_path: Path):
+def test_acceptance_submit_does_not_parse_progress_facts_to_validate_source_reads(tmp_path: Path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     (tmp_path / "out.txt").write_text("CPX-001-FAKE1234 SVX-001-FAKE5678 HOLD-FAKE90", encoding="utf-8")
@@ -1132,14 +1276,12 @@ def test_acceptance_submit_requires_progress_facts_to_come_from_source_reads(tmp
         )
     )
     report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
-    payload = _last_tool_context_payload(params)
 
     assert response is None
-    assert report["task_progress_closeout_gate"]["allowed"] is False
-    assert "TASK_PROGRESS_FACTS_NOT_SOURCE_BACKED" in {
+    assert report["task_progress_closeout_gate"]["allowed"] is True
+    assert "TASK_PROGRESS_FACTS_NOT_SOURCE_BACKED" not in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }
-    assert "CPX-001-FAKE1234" in payload["repair_guidance"]["message_zh"]
 
 
 def test_background_wait_tool_round_yields_without_continuing_tool_loop(tmp_path: Path):

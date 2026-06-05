@@ -47,6 +47,8 @@ def _collect_stream_events(
     on_chunk: Callable[[str], None] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     parts: list[str] = []
+    accumulated = ""
+    previous_raw = ""
     usage: dict[str, Any] = {}
     for event in events:
         event_usage = getattr(event, "usage", None)
@@ -55,9 +57,20 @@ def _collect_stream_events(
         content = str(getattr(event, "content", "") or "")
         if not content:
             continue
-        parts.append(content)
-        _emit_chunk(on_chunk, content)
-    return "".join(parts), usage
+        chunk = _stream_delta(previous_raw, content)
+        previous_raw = content
+        if not chunk:
+            continue
+        parts.append(chunk)
+        accumulated += chunk
+        _emit_chunk(on_chunk, chunk)
+    return accumulated, usage
+
+
+def _stream_delta(previous_raw: str, content: str) -> str:
+    if previous_raw and len(content) > len(previous_raw) and content.startswith(previous_raw):
+        return content[len(previous_raw) :]
+    return content
 
 
 def _emit_chunk(on_chunk: Callable[[str], None] | None, content: str) -> None:

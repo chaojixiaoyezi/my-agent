@@ -7,7 +7,6 @@ from .common.value_parsing import dedupe_strings, string_list
 from .task_progress_coverage import normalize_coverage
 
 _RESULT_FIELDS = ("result", "outcome", "conclusion", "decision", "summary")
-_NON_RESULT_STATUSES = {"", "pending", "todo", "in_progress", "doing", "进行中", "未开始", "待处理"}
 
 
 def quality_hints(
@@ -99,7 +98,7 @@ def _coverage_messages(done_without_evidence: list[str], incomplete: list[str]) 
         )
     if incomplete:
         messages.append(
-            "覆盖清单里还有对象没有逐项完成。建议继续补未完成对象，不要只看 README 或目录；优先读核心源码、记录证据，再把结论写进产物。"
+            "覆盖清单里还有对象没有逐项完成。建议继续补未完成对象；先读取或核对对应来源，记录证据，再把结论写进产物。"
         )
     return messages
 
@@ -108,18 +107,10 @@ def _coverage_target_done(target: dict[str, Any]) -> bool:
     checks = dict(target.get("checks") or {})
     if checks:
         return all(
-            str(status or "").strip().lower()
-            in {"done", "complete", "completed", "ok", "passed", "skipped"}
+            str(status or "").strip().lower().replace("-", "_") in {"done", "skipped"}
             for status in checks.values()
         )
-    return str(target.get("status") or "").strip().lower() in {
-        "done",
-        "complete",
-        "completed",
-        "ok",
-        "passed",
-        "skipped",
-    }
+    return str(target.get("status") or "").strip().lower().replace("-", "_") in {"done", "skipped"}
 
 
 def _has_explicit_coverage(coverage: dict[str, Any]) -> bool:
@@ -131,10 +122,7 @@ def _has_explicit_coverage(coverage: dict[str, Any]) -> bool:
 
 
 def _has_result_signal(item: dict[str, Any]) -> bool:
-    if any(str(item.get(key) or "").strip() for key in _RESULT_FIELDS):
-        return True
-    status = str(item.get("status") or "").strip().lower()
-    return status not in _NON_RESULT_STATUSES
+    return any(str(item.get(key) or "").strip() for key in _RESULT_FIELDS)
 
 
 def _next_suggestions(
@@ -145,7 +133,7 @@ def _next_suggestions(
 ) -> list[str]:
     suggestions: list[str] = []
     if coverage_incomplete:
-        suggestions.append("继续补未完成对象：先选一个未完成对象，读核心文件或可靠来源，再更新 checks/evidence。")
+        suggestions.append("继续补未完成对象：先选一个未完成对象，读取或核对对应来源，再更新 checks/evidence。")
     if result_without_evidence or coverage_done_without_evidence:
         suggestions.append("补证据引用：不要只打勾；每个有状态、结果或结论的条目最好写一个文件路径、产物路径、工具结果或来源说明。")
     if coverage_incomplete or result_without_evidence or coverage_done_without_evidence:

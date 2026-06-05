@@ -138,6 +138,51 @@ def _outside_workspace(path: Path, workspace_root: Path | None) -> bool:
         return True
 
 
+def validation_workspace_root_for_item(
+    item: dict[str, object],
+    path: Path,
+    workspace_root: Path,
+) -> Path:
+    resolved_path = path.expanduser().resolve(strict=False)
+    workspace = workspace_root.expanduser().resolve(strict=False)
+    if _path_is_under(resolved_path, workspace):
+        return workspace
+    return _matching_allowed_output_root(item, resolved_path, workspace) or workspace
+
+
+def _matching_allowed_output_root(item: dict[str, object], resolved_path: Path, workspace: Path) -> Path | None:
+    roots = item.get("allowed_output_roots")
+    if not isinstance(roots, list):
+        return None
+    for raw in roots:
+        root = _resolve_allowed_output_root(raw, workspace, resolved_path)
+        if root is not None and _path_is_under(resolved_path, root):
+            return root
+    return None
+
+
+def _resolve_allowed_output_root(raw: object, workspace: Path, resolved_path: Path) -> Path | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        candidate = Path(text).expanduser()
+        root = candidate.resolve(strict=False) if candidate.is_absolute() else (workspace / candidate).resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+    if root == resolved_path and root.suffix:
+        return root.parent
+    return root
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def _outside_workspace_report(path: Path) -> ArtifactAcceptanceReport:
     finding = ArtifactFinding("ARTIFACT_PATH_OUTSIDE_WORKSPACE", "hard", "Artifact path is outside workspace_root.", str(path))
     return ArtifactAcceptanceReport(ok=False, artifact_ref=str(path), artifact_kind=kind_for_path(path), findings=[finding])
@@ -221,6 +266,7 @@ def _validate_markdown(
         ]
     )
     findings.extend(_required_text_findings(path, text, validation_contract or {}))
+    findings.extend(_forbidden_text_findings(path, text, validation_contract or {}))
     findings.extend(document_quality_artifact_findings(path, validation_contract, workspace_root=path.parent))
     return ArtifactAcceptanceReport(
         ok=not any(item.severity == "hard" for item in findings),
@@ -270,17 +316,71 @@ def _required_text_findings(path: Path, text: str, validation_contract: dict[str
     return findings
 
 
+def _forbidden_text_findings(path: Path, text: str, validation_contract: dict[str, object]) -> list[ArtifactFinding]:
+    findings: list[ArtifactFinding] = []
+    for token in _forbidden_string_items(validation_contract):
+        if token in text:
+            findings.append(
+                ArtifactFinding(
+                    code="ARTIFACT_FORBIDDEN_TEXT_PRESENT",
+                    severity="hard",
+                    message="Artifact text contains a forbidden string from validation_contract.",
+                    location=str(path),
+                    value=token[:200],
+                )
+            )
+    for pattern in _forbidden_regex_items(validation_contract):
+        try:
+            matched = re.search(pattern, text, flags=re.MULTILINE) is not None
+        except re.error as exc:
+            findings.append(
+                ArtifactFinding(
+                    code="ARTIFACT_FORBIDDEN_REGEX_INVALID",
+                    severity="hard",
+                    message=f"validation_contract forbidden regex is invalid: {exc}",
+                    location=str(path),
+                    value=pattern[:200],
+                )
+            )
+            continue
+        if matched:
+            findings.append(
+                ArtifactFinding(
+                    code="ARTIFACT_FORBIDDEN_REGEX_MATCHED",
+                    severity="hard",
+                    message="Artifact text matches a forbidden regex from validation_contract.",
+                    location=str(path),
+                    value=pattern[:200],
+                )
+            )
+    return findings
+
+
 def _required_string_items(validation_contract: dict[str, object]) -> list[str]:
     return _string_items(
         validation_contract,
-        ("required_strings", "must_contain", "must_include", "required_text"),
+        ("required_strings",),
     )
 
 
 def _required_regex_items(validation_contract: dict[str, object]) -> list[str]:
     return _string_items(
         validation_contract,
-        ("required_regex", "required_patterns", "must_match"),
+        ("required_regex",),
+    )
+
+
+def _forbidden_string_items(validation_contract: dict[str, object]) -> list[str]:
+    return _string_items(
+        validation_contract,
+        ("forbidden_strings",),
+    )
+
+
+def _forbidden_regex_items(validation_contract: dict[str, object]) -> list[str]:
+    return _string_items(
+        validation_contract,
+        ("forbidden_regex",),
     )
 
 
@@ -417,4 +517,5 @@ __all__ = [
     "artifact_ref_payload",
     "validate_artifact",
     "validate_html_artifact",
+    "validation_workspace_root_for_item",
 ]

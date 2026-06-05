@@ -9,13 +9,15 @@ def build_search_text_spec() -> ToolSpec:
         name="search_text",
         category="filesystem",
         effect="read_only",
-        description="在工作区里搜索纯文本，适合找函数名、配置项和关键字。",
+        description="在工作区里搜索纯文本，适合找函数名、配置项、章节标记、日志锚点和大文件里的候选范围。",
         use_cases=[
             "想找某个函数、类、配置项出现在哪些文件里",
             "先全局搜索，再决定读哪几个文件",
+            "大文件或长记录要逐项汇总时，先定位章节/检查点/锚点，再用 read_file 读取命中附近源片段",
         ],
         avoid_when=[
             "已经知道具体文件并且要看上下文时，直接 read_file 更合适",
+            "需要证明完整覆盖 source 时，search_text 只能定位，不能替代 read_file/read_artifact 证据",
         ],
         keywords=["搜索", "查找", "关键字", "grep", "rg", "全文检索", "文本匹配"],
         parameters={
@@ -28,7 +30,7 @@ def build_search_text_spec() -> ToolSpec:
             "context": "每条命中前后额外展示多少行上下文，默认 0",
             "literal": "是否按普通文本匹配，默认 true；false 时按正则匹配",
             "ignore_case": "是否忽略大小写，默认 false",
-            "output_mode": "输出模式：content、files_with_matches 或 count，默认 content",
+            "output_mode": "输出模式：content、files_with_matches、count 或 line_numbers，默认 content",
             "include_ignored": "是否搜索 .git/node_modules 等常见噪声目录，默认 false",
         },
         parameter_details={
@@ -41,13 +43,15 @@ def build_search_text_spec() -> ToolSpec:
             "context": "需要看命中附近内容时传 1 或 2；越大越占 prompt。",
             "literal": "默认 true，避免把用户普通文字误当正则；传 false 才启用正则。",
             "ignore_case": "大小写不确定时传 true。",
-            "output_mode": "content 返回行内容；files_with_matches 只返回文件；count 返回每个文件命中数。",
+            "output_mode": "content 返回行内容；line_numbers 只返回文件:行号；files_with_matches 只返回文件；count 返回每个文件命中数。",
             "include_ignored": "默认跳过 .git、node_modules 和常见缓存目录；确实要查时传 true。",
         },
         examples=[
             '{"tool": "search_text", "query": "PromptBuilder"}',
             '{"tool": "search_text", "query": "max_tool_rounds", "path": "agent_py_agent", "limit": 20, "offset": 0}',
             '{"tool": "search_text", "query": "class .*Tool", "literal": false, "file_glob": "*.py"}',
+            '{"tool": "search_text", "query": "===== 章节", "path": "data/long_field_journal.txt", "limit": 100}',
+            '{"tool": "search_text", "query": "===== 章节", "path": "data/long_field_journal.txt", "output_mode": "line_numbers", "limit": 100}',
             '{"tool": "search_text", "query": "TODO", "output_mode": "files_with_matches"}',
         ],
     )

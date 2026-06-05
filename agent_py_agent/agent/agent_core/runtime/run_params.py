@@ -6,12 +6,15 @@ from dataclasses import dataclass, replace
 
 from ..delivery_requirement_materializer import (
     build_delivery_requirement_materializer_prompt,
+    delivery_contract_from_user_requested_outputs,
     materialized_delivery_contract,
+    materializer_repair_feedback,
 )
 from ..provider_transient_auto_resume import run_with_provider_transient_auto_resume
 from .loop_support import RunParams, run_params_from_values
 
-_AUTO_MATERIALIZE_SOURCES = {"chat", "cli_run", "gateway"}
+_AUTO_MATERIALIZE_SOURCES: set[str] = set()
+_MAX_MATERIALIZER_REPAIR_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -74,18 +77,33 @@ def run_params_with_request_id(params: RunParams) -> RunParams:
 def run_params_with_materialized_delivery_contract(agent, user_prompt: str, params: RunParams) -> RunParams:
     if params.delivery_contract is not None:
         return params
+    structural_contract = delivery_contract_from_user_requested_outputs(
+        user_prompt,
+        workspace_root=getattr(agent, "root", None),
+    )
+    if _has_materialized_runtime_contract(structural_contract):
+        return replace(params, delivery_contract=structural_contract)
     if not _should_materialize_delivery_contract(params):
         return params
-    prompt = build_delivery_requirement_materializer_prompt(user_prompt)
+    contract = _materialize_delivery_contract(agent, user_prompt, params)
+    for _ in range(_MAX_MATERIALIZER_REPAIR_ATTEMPTS):
+        repair_feedback = materializer_repair_feedback(contract)
+        if not repair_feedback:
+            break
+        contract = _materialize_delivery_contract(agent, user_prompt, params, repair_feedback=repair_feedback)
+    if not _has_materialized_runtime_contract(contract):
+        return params
+    return replace(params, delivery_contract=contract)
+
+
+def _materialize_delivery_contract(agent, user_prompt: str, params: RunParams, *, repair_feedback: str = "") -> dict:
+    prompt = build_delivery_requirement_materializer_prompt(user_prompt, repair_feedback=repair_feedback)
     response = run_with_provider_transient_auto_resume(
         lambda: agent.backend.generate(prompt),
         on_chunk=params.on_chunk if callable(params.on_chunk) else None,
         policy=getattr(agent, "runtime_guard_policy", None),
     )
-    contract = materialized_delivery_contract(response.text, workspace_root=agent.root, user_prompt=user_prompt)
-    if not _has_materialized_runtime_contract(contract):
-        return params
-    return replace(params, delivery_contract=contract)
+    return materialized_delivery_contract(response.text, workspace_root=agent.root, user_prompt=user_prompt)
 
 
 def _should_materialize_delivery_contract(params: RunParams) -> bool:

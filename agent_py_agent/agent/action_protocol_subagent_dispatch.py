@@ -34,7 +34,6 @@ class SubagentDispatchEnvelope:
     completion_status: dict[str, Any] = field(default_factory=dict)
     current_turn_run_state: dict[str, Any] = field(default_factory=dict)
     next_action: str = ""
-    must_not_report_done: bool = False
     dispatch_json: str = ""
     dispatch_md: str = ""
     record_count: int = 0
@@ -72,7 +71,6 @@ class SubagentDispatchEnvelope:
             completion_status=_dict_or_empty(payload.get("completion_status")),
             current_turn_run_state=_dict_or_empty(payload.get("current_turn_run_state")),
             next_action=str(payload.get("next_action") or ""),
-            must_not_report_done=bool(payload.get("must_not_report_done")),
             dispatch_json=str(payload.get("dispatch_json") or ""),
             dispatch_md=str(payload.get("dispatch_md") or ""),
             record_count=int(payload.get("record_count") or 0),
@@ -105,7 +103,6 @@ def subagent_dispatch_envelope_from_payload(
         completion_status=_dict_or_empty(payload.get("completion_status")),
         current_turn_run_state=_dict_or_empty(payload.get("current_turn_run_state")),
         next_action=str(payload.get("next_action") or ""),
-        must_not_report_done=bool(payload.get("must_not_report_done")),
         dispatch_json=str(payload.get("dispatch_json") or ""),
         dispatch_md=str(payload.get("dispatch_md") or ""),
         record_count=len(_dict_list(payload.get("records"))),

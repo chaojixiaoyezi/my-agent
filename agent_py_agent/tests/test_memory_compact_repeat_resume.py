@@ -106,6 +106,7 @@ def _write_repeat_tool_output(root: Path) -> str:
             request_id="request-repeat",
             run_id="run-repeat",
             task_id="task-repeat",
+            min_chars=0,
             parameters={"command": "cat workspace/drafts/furniture.md"},
         )
     )

@@ -37,7 +37,7 @@ def target_coverage_status(
         for item in targets
         if not _target_is_covered(item, coverage_records, contract=contract, base=base)
     ]
-    enforcement = str(contract.get("enforcement") or "advisory").strip().lower()
+    enforcement = _coverage_enforcement(contract, targets)
     should_block = bool(missing) and enforcement in {"required", "strict", "hard", "block", "blocking", "enforced"}
     repair_hints = _repair_hints(missing, coverage_records, base=base)
     return {
@@ -134,7 +134,7 @@ def _target_item_row(item: object) -> dict[str, str]:
     if isinstance(item, dict):
         target_id = str(item.get("target_id") or item.get("id") or item.get("label") or "").strip()
         row = {"target_id": target_id, "label": str(item.get("label") or target_id)} if target_id else {}
-        for key in ("path", "source_path", "artifact_ref", "source_ref"):
+        for key in ("path", "source_path", "artifact_ref", "source_ref", "coverage_kind", "enforcement", "scope"):
             text = str(item.get(key) or "").strip()
             if text:
                 row[key] = text
@@ -483,6 +483,17 @@ def _target_requires_full_source_read(item: dict[str, str], contract: dict[str, 
         str(item.get("coverage_kind") or "").strip() == "full_source_read"
         or str(contract.get("coverage_requirement") or "").strip() == "full_source_read"
     )
+
+
+def _coverage_enforcement(contract: dict[str, Any], targets: list[dict[str, str]]) -> str:
+    top_level = str(contract.get("enforcement") or "").strip().lower()
+    if top_level:
+        return top_level
+    item_values = [str(item.get("enforcement") or "").strip().lower() for item in targets]
+    required_values = {"required", "strict", "hard", "block", "blocking", "enforced"}
+    if any(value in required_values for value in item_values):
+        return "required"
+    return next((value for value in item_values if value), "advisory")
 
 
 def _full_source_read_record_counts(record: dict[str, object]) -> bool:

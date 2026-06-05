@@ -282,8 +282,8 @@ class TestCreateSubagentsToolCoordinatorPlan:
         assert result.ok is True
         assert params.role == "coordinator"
 
-    def test_lineage_agent_name_in_role_field_becomes_name_not_role(self):
-        """模型把“小傻妞-root-coordinator”写进 role 时，应拆成标准 role 和显示名。"""
+    def test_role_field_is_not_repaired_from_display_agent_name(self):
+        """role 是结构化字段；display name 误填到 role 时不再靠中文名字兜底纠错。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -303,6 +303,35 @@ class TestCreateSubagentsToolCoordinatorPlan:
         result = tool.execute({
             "goal": "创建第一层 root coordinator，并使用 schedule_child_subagents 创建下一层。",
             "role": "小傻妞-root-coordinator",
+            "workflow_mode": "auto",
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert params.role == "小傻妞-root-coordinator"
+
+    def test_structured_role_and_agent_name_still_create_coordinator(self):
+        """正确结构是 role 放模板 ID，agent_name 放展示名。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "auto"
+
+        mock_task = MagicMock()
+        mock_task.id = "root_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/root_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "创建第一层 root coordinator，并使用 schedule_child_subagents 创建下一层。",
+            "role": "coordinator",
+            "agent_name": "小傻妞-root-coordinator",
             "workflow_mode": "auto",
         })
 

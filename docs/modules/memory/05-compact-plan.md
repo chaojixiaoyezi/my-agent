@@ -32,4 +32,24 @@ compact 只做一件事：在上下文压力或显式请求下，把当前 run/t
 - compact 后续接优先读 continue packet 和 work state，再按 refs 精读需要的文件。
 - 长文本完整读取的续接不能只靠摘要；continue packet 要从已归档工具输出里恢复
   `offset/total_chars` 或 `start_line/total_lines` 游标，提示下一段从已连续覆盖处继续读。
+- 上下文已经到 compact 阈值且下一步工具会产生正文输出时，本轮工具调用必须登记为
+  `CONTEXT_COMPACT_DEFERRED`，并写入普通工具记录，表示“这次没有执行，compact/resume
+  后继续”。不能静默 break，也不能设置需要模型主动满足的隐藏 checkpoint 门。
+- 即使任务没有 required `full_source_read` 合同，work state 也必须保留已读取的分片范围。
+  同一文件的 `read_file`/`read_artifact` 多段读取不能被压成“读过这个文件”一条记录；恢复
+  提示要列出已登记范围和下一游标，避免 compact 后从 offset=0 重读或凭摘要猜结论。
+- 几 KB 的定位、抽取和统计类工具输出默认留在下一轮上下文；只有大输出才外置到 blob。
+  compact 可以引用 blob/ref，但不能让模型必须先读外置 wrapper 才能看见刚抽出的核心事实。
+- 当前 run 若已有显式结构化 `target_coverage_contract`，它要进入 runtime fact，再进入
+  compact work state 和 handoff；多次 compact 后仍应保留覆盖口径、
+  required/enforcement、目标数量和目标预览。如果 required/enforcement 写在
+  `target_items[]` 单项里，也必须保留，恢复后不能降级为 advisory。
+- 默认 chat/cli/gateway 不因为普通自然语言自动物化覆盖合同。compact/handoff 只保留
+  已存在的结构化合同和机器游标，不把“完整读完”这类话术加工成新的硬验收状态。
+- `memory-fact-write` 只能补充当前 runtime fact 的验收、约束、测试等人工确认字段；
+  它必须保留同一 fact 中已有的 run/task 身份、`delivery_contract`、`desired_outputs`、
+  `target_coverage` 和 `run_intent`，不能整文件覆盖成一份更薄的人工状态。
+- search/grep/shell 统计可以帮助恢复后定位章节、锚点或候选范围；continue packet 不应
+  禁止这些定位动作。但 required full-source coverage 的完成证明只能来自读取窗口、
+  artifact refs 或 coverage ledger，不能只靠搜索命中。
 - 如果当前任务树里已有子代理，continue packet 要列出这些 run_id/status/progress；活跃时提醒主代理先观察、等待或收集结果，全部完成时提醒主代理直接汇总 recent agents。这不是禁止继续派工的硬门。

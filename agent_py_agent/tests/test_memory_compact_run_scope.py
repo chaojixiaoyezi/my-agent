@@ -13,7 +13,9 @@ from agent_py_agent.agent.memory_archive.compact_resume import (
     build_memory_compact_resume,
 )
 from agent_py_agent.agent.memory_archive.runtime_fact_source import (
+    ApprovedRuntimeFactSourceRequest,
     RuntimeFactSourceRequest,
+    write_approved_runtime_fact_source,
     write_runtime_fact_source,
 )
 from agent_py_agent.agent.task_progress import progress_path, write_task_progress
@@ -81,6 +83,126 @@ def test_memory_compact_work_state_carries_desired_outputs(tmp_path: Path) -> No
 
     assert any("target_path" in item and "outputs/final-report.md" in item for item in work_state["desired_outputs"]["items"])
     assert "outputs/final-report.md" in result["handoff_summary"]
+
+
+def test_memory_compact_work_state_carries_target_coverage(tmp_path: Path) -> None:
+    """compact 后必须保留结构化目标覆盖合同，不能只靠 handoff 自然语言续接。"""
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    write_runtime_fact_source(
+        RuntimeFactSourceRequest(
+            root=root,
+            request_id="request-compact",
+            user_prompt="完整读完 data/source.txt 后写报告。",
+            run_id="run-compact",
+            task_id="run-compact",
+            delivery_contract={
+                "artifacts": [
+                    {
+                        "artifact_id": "final_report",
+                        "kind": "markdown",
+                        "preferred_path": "outputs/final-report.md",
+                    }
+                ],
+                "target_coverage_contract": {
+                    "coverage_requirement": "full_source_read",
+                    "enforcement": "required",
+                    "target_items": [
+                        {
+                            "target_id": "data/source.txt",
+                            "source_path": "data/source.txt",
+                            "coverage_kind": "full_source_read",
+                        }
+                    ],
+                },
+            },
+        )
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+    metadata = json.loads(Path(result["refs"]["metadata"]).read_text(encoding="utf-8"))
+
+    coverage = work_state["target_coverage"]
+    assert coverage["source_status"] == "recorded"
+    assert coverage["payload"]["coverage_requirement"] == "full_source_read"
+    assert coverage["payload"]["target_items"][0]["source_path"] == "data/source.txt"
+    assert metadata["compaction_state"]["work"]["target_coverage"]["coverage_requirement"] == "full_source_read"
+    assert "目标覆盖: full_source_read" in result["handoff_summary"]
+    assert "data/source.txt" in result["handoff_summary"]
+
+
+def test_approved_runtime_fact_preserves_delivery_and_coverage(tmp_path: Path) -> None:
+    """人工补验收事实不能覆盖掉同一 run 原有的交付目标和覆盖账本。"""
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    write_runtime_fact_source(
+        RuntimeFactSourceRequest(
+            root=root,
+            request_id="request-compact",
+            user_prompt="完整读完 data/source.txt 后写报告。",
+            run_id="run-compact",
+            task_id="task-compact",
+            delivery_contract={
+                "artifacts": [
+                    {
+                        "artifact_id": "final_report",
+                        "kind": "markdown",
+                        "preferred_path": "outputs/final-report.md",
+                    }
+                ],
+                "target_coverage_contract": {
+                    "coverage_requirement": "full_source_read",
+                    "enforcement": "required",
+                    "target_items": [
+                        {
+                            "target_id": "data/source.txt",
+                            "source_path": "data/source.txt",
+                            "coverage_kind": "full_source_read",
+                        }
+                    ],
+                },
+            },
+        )
+    )
+
+    write_approved_runtime_fact_source(
+        ApprovedRuntimeFactSourceRequest(
+            root=root,
+            fact_id="request-compact",
+            goal="补充 compact 验收事实",
+            next_actions=["继续读取 compact 交接材料"],
+            acceptance=["final-report.md 包含源文件结论"],
+            constraints=["不得猜测未读取内容"],
+            latest_tests=["compact roundtrip passed"],
+            source_apply_id="apply-1",
+        )
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+    fact_payload = json.loads(
+        (root / "memory_archive" / "runtime_facts" / "request-compact" / "task.json").read_text(encoding="utf-8")
+    )
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+
+    assert fact_payload["source"] == "approved_runtime_fact_source"
+    assert fact_payload["run_id"] == "run-compact"
+    assert fact_payload["task_id"] == "task-compact"
+    assert fact_payload["desired_outputs"][0]["target_path"] == "outputs/final-report.md"
+    assert fact_payload["target_coverage"]["target_items"][0]["source_path"] == "data/source.txt"
+    assert work_state["desired_outputs"]["source_status"] == "recorded"
+    assert work_state["target_coverage"]["source_status"] == "recorded"
+    assert work_state["target_coverage"]["payload"]["coverage_requirement"] == "full_source_read"
 
 
 def test_memory_compact_work_state_carries_run_intent_paths(tmp_path: Path) -> None:

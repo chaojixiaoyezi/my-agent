@@ -89,6 +89,7 @@ class FinalizationService:
                     executed_tools=list(ctx.executed_tools or []),
                     latest_archive_refs=_latest_archive_refs(ctx.archive_tool_calls or []),
                     artifact_refs=_artifact_refs(ctx.archive_tool_calls or []),
+                    delivery_contract=ctx.delivery_contract,
                 )
             )
         return written

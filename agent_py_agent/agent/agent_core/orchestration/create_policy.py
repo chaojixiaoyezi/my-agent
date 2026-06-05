@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
-from ...subagents.role_templates import role_template_id_for_role
+from ...subagents.role_templates import role_template_snapshot_for_role
 from ...subagents.services.base import CreateRunParams
 from ..coordinator_seed_tools import explicit_root_allowed_tools
 from ..parameters import _bool_param, _positive_int
@@ -30,12 +30,15 @@ def create_run_params(
 ):
     workflow_mode = tool_workflow_mode(raw_params.get("workflow_mode"), agent.config.subagent_workflow_mode)
     role = _role_from_create_intent(raw_params, goal, agent)
-    is_explicit_root = is_explicit_root_role(role)
+    role_template_dirs = _role_template_dirs(agent)
+    is_explicit_root = is_explicit_root_role(role, role_template_dirs)
     if is_explicit_root:
         workflow_mode = "off"
         allowed_tools = explicit_root_allowed_tools(allowed_tools)
     elif _should_disable_generic_workflow_for_concrete_worker(raw_params, goal, role, workflow_mode):
         workflow_mode = "off"
+        if role not in {"child_worker", "leaf_worker"}:
+            role = "worker"
     return CreateRunParams(
         goal=goal,
         thought=str(raw_params.get("thought") or "根据父代理派工执行，并保留可验收证据。").strip(),
@@ -94,13 +97,11 @@ def _lineage_depth(value: object, *, default: int) -> int:
 
 def _role_from_create_intent(raw_params: dict[str, object], goal: str, agent) -> str:
     role = str(raw_params.get("role") or "worker").strip() or "worker"
-    if _role_field_is_lineage_agent_name(role):
-        return _role_from_lineage_agent_name(role)
-    if is_explicit_root_role(role):
+    if is_explicit_root_role(role, _role_template_dirs(agent)):
         return role
     if _json_child_items(raw_params.get("children")):
         return "coordinator"
-    if role == "worker" and _has_child_dispatch_tool(raw_params) and not _role_identity_is_quality(raw_params):
+    if role == "worker" and _has_child_dispatch_tool(raw_params) and not _role_depends_on_outputs(raw_params, agent):
         return "coordinator"
     return role
 
@@ -112,9 +113,14 @@ def _has_child_dispatch_tool(raw_params: dict[str, object]) -> bool:
     return bool({"schedule_child_subagents", "dispatch_subagents"}.intersection(tools))
 
 
-def _role_identity_is_quality(raw_params: dict[str, object]) -> bool:
-    identity = f"{raw_params.get('role') or ''} {raw_params.get('agent_name') or ''}"
-    return role_template_id_for_role(identity, default_id="") in {"tester", "bug_finder"}
+def _role_depends_on_outputs(raw_params: dict[str, object], agent) -> bool:
+    snapshot = role_template_snapshot_for_role(str(raw_params.get("role") or ""), _role_template_dirs(agent))
+    return bool(snapshot.get("depends_on_outputs"))
+
+
+def _role_template_dirs(agent) -> object:
+    subagents = getattr(agent, "subagents", None)
+    return getattr(subagents, "role_template_dirs", None)
 
 
 def _should_disable_generic_workflow_for_concrete_worker(
@@ -239,18 +245,6 @@ _SCALAR_ATTRIBUTE_FIELDS = (
 )
 
 
-def _role_field_is_lineage_agent_name(role: str) -> bool:
-    text = str(role or "").strip()
-    return "小傻妞" in text
-
-
-def _role_from_lineage_agent_name(role: str) -> str:
-    text = str(role or "").strip().lower().replace("-", "_")
-    parts = [part for part in text.split("_") if part and part not in {"小傻妞", "小小傻妞", "agent", "subagent"}]
-    template_role = role_template_id_for_role("_".join(parts), default_id="")
-    return template_role or "worker"
-
-
 def _root_agent_name(raw_params: dict[str, object], role: str) -> str:
     explicit = str(raw_params.get("agent_name") or "").strip().strip("-")
     if explicit:
@@ -265,10 +259,8 @@ def _root_agent_name(raw_params: dict[str, object], role: str) -> str:
 
 
 def _agent_name_from_role_field(raw_params: dict[str, object]) -> str:
-    role_text = str(raw_params.get("role") or "").strip().strip("-")
-    if not _role_field_is_lineage_agent_name(role_text):
-        return ""
-    return role_text.replace("_", "-")
+    del raw_params
+    return ""
 
 
 def _create_plan(raw_params: dict[str, object]) -> list[str]:

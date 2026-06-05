@@ -56,6 +56,9 @@ def build_compact_continue_packet(request: CompactContinuePacketRequest) -> dict
         "guard": _guard_payload(guard),
         "recommended_read_paths": list(request.recommended_read_paths),
         "artifact_read_hints": artifact_read_hints_from_work_state(request.work_state),
+        "pending_deferred_tool_calls": _pending_deferred_tool_calls_payload(
+            request.work_state.get("pending_deferred_tool_calls")
+        ),
         "next_actions": action_first_actions(request.next_actions, request.work_state),
         "resume_focus": resume_focus_payload(request.work_state, request.next_actions),
         "main_context_bundle": _main_context_bundle_payload(request.main_context_bundle),
@@ -122,7 +125,11 @@ def _work_state_payload(work_state: dict[str, Any], missing: list[str]) -> dict[
         "changed_files": sequence_strings(work_state.get("changed_files")),
         "read_files": sequence_strings(work_state.get("read_files")),
         "task_progress": _task_progress_payload(work_state.get("task_progress")),
+        "read_coverage": _read_coverage_payload(work_state.get("read_coverage")),
         "tool_progress": _tool_progress_payload(work_state.get("tool_progress")),
+        "pending_deferred_tool_calls": _pending_deferred_tool_calls_payload(
+            work_state.get("pending_deferred_tool_calls")
+        ),
         "runtime_handoff": runtime_handoff_payload(work_state.get("runtime_handoff")),
         "captured_refs": captured_refs_payload(work_state),
         "missing_fields": missing,
@@ -314,25 +321,90 @@ def _tool_progress_payload(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list | tuple):
         return []
     rows: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
     for item in value:
         if not isinstance(item, dict):
             continue
         source_path = str(item.get("source_path") or item.get("path") or "").strip()
         artifact_ref = str(item.get("artifact_ref") or item.get("scoped_call_id") or item.get("call_id") or "").strip()
-        key = (str(item.get("tool") or "").strip(), source_path)
-        if key in seen:
+        row = {
+            "tool": str(item.get("tool") or "").strip(),
+            "source_path": source_path,
+            "artifact_ref": artifact_ref,
+            "size_bytes": _positive_int(item.get("size_bytes")),
+            "offset": _optional_int(item.get("offset")),
+            "next_offset": _optional_int(item.get("next_offset")),
+            "total_chars": _optional_int(item.get("total_chars")),
+            "start_line": _optional_int(item.get("start_line")),
+            "end_line": _optional_int(item.get("end_line")),
+            "next_start_line": _optional_int(item.get("next_start_line")),
+            "total_lines": _optional_int(item.get("total_lines")),
+        }
+        rows.append({key: value for key, value in row.items() if value not in ("", [], {}, None)})
+    return rows[-48:]
+
+
+def _read_coverage_payload(value: Any) -> dict[str, Any]:
+    coverage = value if isinstance(value, dict) else {}
+    primary = coverage.get("primary") if isinstance(coverage.get("primary"), dict) else {}
+    if not primary:
+        return {}
+    result = {
+        "schema_version": coverage.get("schema_version", 1),
+        "source_count": _positive_int(coverage.get("source_count")),
+        "primary": {
+            "kind": str(primary.get("kind") or "char_window"),
+            "source_path": str(primary.get("source_path") or ""),
+            "covered_until": _positive_int(primary.get("covered_until")),
+            "covered_until_offset": _positive_int(primary.get("covered_until_offset")),
+            "covered_until_line": _positive_int(primary.get("covered_until_line")),
+            "total": _positive_int(primary.get("total")),
+            "total_chars": _positive_int(primary.get("total_chars")),
+            "total_lines": _positive_int(primary.get("total_lines")),
+            "next_offset": _positive_int(primary.get("next_offset")),
+            "next_start_line": _positive_int(primary.get("next_start_line")),
+            "complete": bool(primary.get("complete")),
+            "range_count": _positive_int(primary.get("range_count")),
+            "omitted_range_count": _positive_int(primary.get("omitted_range_count")),
+        },
+    }
+    result["primary"] = {key: item for key, item in result["primary"].items() if item not in ("", 0, [], {}, None)}
+    return {key: item for key, item in result.items() if item not in ("", 0, [], {}, None)}
+
+
+def _pending_deferred_tool_calls_payload(value: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in value if isinstance(value, list | tuple) else []:
+        if not isinstance(item, dict):
             continue
-        seen.add(key)
+        params = item.get("parameters") if isinstance(item.get("parameters"), dict) else {}
+        tool = str(item.get("tool") or params.get("tool") or "").strip()
+        if not tool:
+            continue
         rows.append(
             {
-                "tool": str(item.get("tool") or "").strip(),
-                "source_path": source_path,
-                "artifact_ref": artifact_ref,
-                "size_bytes": _positive_int(item.get("size_bytes")),
+                "kind": str(item.get("kind") or "tool_call"),
+                "tool": tool,
+                "call_id": str(item.get("call_id") or ""),
+                "scoped_call_id": str(item.get("scoped_call_id") or ""),
+                "source_input": str(item.get("source_input") or item.get("source_path") or params.get("path") or ""),
+                "source_path": str(item.get("source_path") or item.get("source_input") or params.get("path") or ""),
+                "parameters": {**params, "tool": tool},
+                "request_id": str(item.get("request_id") or ""),
+                "run_id": str(item.get("run_id") or ""),
+                "task_id": str(item.get("task_id") or ""),
+                "ok": False,
+                "status": str(item.get("status") or "error"),
+                "error_code": "CONTEXT_COMPACT_DEFERRED",
             }
         )
-    return rows
+    return rows[-12:]
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _positive_int(value: Any) -> int:

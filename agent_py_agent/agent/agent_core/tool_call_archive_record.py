@@ -20,6 +20,7 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
         call_id=call_id,
         output=record.result.output,
         ok=record.result.ok,
+        error_code=str(getattr(record.result, "error_code", "") or ""),
         request_id=record.params.request_id,
         run_id=runtime_run_id(agent, record.params),
         task_id=record.params.task_id,

@@ -13,11 +13,11 @@ def _timeout_config(value: object) -> AgentConfig:
     return config
 
 
-def test_role_timeout_coordinator_alias_matches_child_coordinator():
+def test_role_timeout_uses_exact_structured_role():
     from agent_py_agent.agent.agent_core.runner.gate import get_task_timeout
 
     config = _timeout_config("off")
-    config.runner_timeout_by_role = {"coordinator": "12"}
+    config.runner_timeout_by_role = {"child_coordinator": "12"}
 
     task = MagicMock()
     task.id = "child-coord-run"

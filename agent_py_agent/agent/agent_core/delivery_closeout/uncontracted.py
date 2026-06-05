@@ -70,7 +70,7 @@ def _task_output_artifacts_from_record(
         _artifact_payload(record, path, target)
         for path in _produced_paths(record, workspace_root=workspace_root)
         for target in targets
-        if _is_task_output_report(path, target)
+        if _is_task_output_file(path, target)
     ]
 
 
@@ -193,7 +193,7 @@ def _first_record_ref(item: dict[str, Any], keys: tuple[str, ...]) -> str:
     return ""
 
 
-def _is_task_output_report(path: Path, target: dict[str, Any]) -> bool:
+def _is_task_output_file(path: Path, target: dict[str, Any]) -> bool:
     output_root = target.get("path")
     if not isinstance(output_root, Path):
         return False
@@ -207,10 +207,7 @@ def _is_task_output_report(path: Path, target: dict[str, Any]) -> bool:
             return False
     if not path.is_file():
         return False
-    if path.suffix.lower() not in {".md", ".txt", ".json", ".html", ".csv", ".xlsx", ".docx", ".pptx"}:
-        return False
-    name = path.name.lower()
-    return any(marker in name for marker in ("report", "analysis", "summary", "final", "结果", "报告", "分析", "总结"))
+    return path.suffix.lower() in {".md", ".txt", ".json", ".html", ".csv", ".xlsx", ".docx", ".pptx"}
 
 
 def _delivery_mode_for_artifacts(artifacts: list[dict[str, Any]]) -> str:

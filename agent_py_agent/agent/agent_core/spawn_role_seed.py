@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..subagents import SubAgentTask
-from ..subagents.role_templates import COORDINATOR_TOOLS
+from ..subagents.role_templates import COORDINATOR_TOOLS, role_template_snapshot_for_role
 from ..subagents.services.base import CreateRunParams
 from .subagent.params import SpawnSubagentsParams
 
@@ -31,9 +31,8 @@ def clean_spawn_role(role: str) -> str:
     return str(role or "worker").strip().lower() or "worker"
 
 
-def is_explicit_root_role(role: str) -> bool:
-    text = clean_spawn_role(role)
-    return "coordinator" in text or text.endswith("lead")
+def is_explicit_root_role(role: str, role_template_dirs: object = None) -> bool:
+    return bool(role_template_snapshot_for_role(clean_spawn_role(role), role_template_dirs).get("can_spawn_children"))
 
 
 def spawn_explicit_role_runs(request: SpawnExplicitRoleRequest) -> list[SubAgentTask]:

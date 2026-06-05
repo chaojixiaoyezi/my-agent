@@ -88,7 +88,7 @@ def _missing_required_qa_roles(manager: Any, parent: SubAgentTask, specs: list[A
 def _qa_roles_from_specs(specs: list[Any]) -> set[str]:
     roles: set[str] = set()
     for spec in specs:
-        roles.update(qa_role_identity_roles(role=str(getattr(spec, "role", "")), agent_name=str(getattr(spec, "agent_name", ""))))
+        roles.update(qa_role_identity_roles(role=str(getattr(spec, "role", ""))))
     return roles
 
 
@@ -106,7 +106,7 @@ def _existing_descendant_qa_roles(manager: Any, parent: SubAgentTask) -> set[str
         child = _load_child_for_qa_scan(manager, run_id)
         if child is None:
             continue
-        roles.update(qa_role_identity_roles(role=child.role, agent_name=child.agent_name))
+        roles.update(qa_role_identity_roles(role=child.role))
         queue.extend(child_id for child_id in child.child_ids if child_id not in seen)
     return roles
 

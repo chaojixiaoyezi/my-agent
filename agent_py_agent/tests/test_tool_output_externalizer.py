@@ -43,7 +43,7 @@ from agent_py_agent.agent.tooling.models import ToolExecutionResult
 def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path))
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
-    large_output = "line\n" + ("x" * 1400)
+    large_output = "line\n" + ("x" * 25_000)
 
     service._record_tool_call(
         ToolCallRecordParams(
@@ -69,7 +69,7 @@ def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) ->
     _assert_schema_v2(index[-1], "tool_output_index")
     assert record["output_hash"] == artifact["sha256"]
     assert record["output_size_bytes"] == len(large_output.encode("utf-8"))
-    assert "x" * 700 not in json.dumps(record, ensure_ascii=False)
+    assert "x" * 5000 not in json.dumps(record, ensure_ascii=False)
     assert artifact["content"] == large_output
     assert artifact["request_id"] == "req-tool"
     assert artifact["run_id"] == "run-tool"
@@ -87,6 +87,90 @@ def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) ->
     assert '"run_id": "run-tool"' in params.tool_context[-1]
     assert "完整工具输出已外置" in params.tool_context[-1]
     assert record["fail_safe_checkpoint_path"] in params.tool_context[-1]
+
+
+def test_tool_output_index_preserves_failed_tool_status(tmp_path: Path) -> None:
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="read_file",
+            call_id="1-2",
+            output="CONTEXT_COMPACT_DEFERRED: 当前上下文需要先 compact/resume；本次工具调用未执行。",
+            ok=False,
+            error_code="CONTEXT_COMPACT_DEFERRED",
+            run_id="run-tool",
+            task_id="task-tool",
+            request_id="req-tool",
+            min_chars=0,
+            parameters={"path": "data/big.txt", "offset": 100, "max_chars": 100},
+        )
+    )
+
+    artifact_path = Path(str(record["artifact_ref"]))
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    index = [
+        json.loads(line)
+        for line in (artifact_path.parent / "index.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert record["ok"] is False
+    assert record["status"] == "error"
+    assert record["error_code"] == "CONTEXT_COMPACT_DEFERRED"
+    assert artifact["ok"] is False
+    assert artifact["status"] == "error"
+    assert artifact["error_code"] == "CONTEXT_COMPACT_DEFERRED"
+    assert index[-1]["ok"] is False
+    assert index[-1]["status"] == "error"
+    assert index[-1]["error_code"] == "CONTEXT_COMPACT_DEFERRED"
+
+
+def test_tool_call_index_preserves_short_failed_tool_status(tmp_path: Path) -> None:
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="read_file",
+            call_id="1-3",
+            output="CONTEXT_COMPACT_DEFERRED: 未执行。",
+            ok=False,
+            error_code="CONTEXT_COMPACT_DEFERRED",
+            run_id="run-tool",
+            task_id="task-tool",
+            request_id="req-tool",
+            min_chars=1000,
+            parameters={"path": "data/big.txt", "offset": 100, "max_chars": 100},
+        )
+    )
+    index_path = tmp_path / "blobs" / "tool_outputs" / "index.jsonl"
+    index = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert record["output_externalized"] is False
+    assert "artifact_ref" not in record
+    assert index[-1]["kind"] == "tool_call"
+    assert index[-1]["ok"] is False
+    assert index[-1]["status"] == "error"
+    assert index[-1]["error_code"] == "CONTEXT_COMPACT_DEFERRED"
+
+
+def test_tool_loop_keeps_moderate_tool_output_inline_for_model_context(tmp_path: Path) -> None:
+    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
+    output = "\n".join(f"章节 {idx:03d}: CP-{idx:03d}-{idx:03d}" for idx in range(1, 81))
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=1,
+            idx=1,
+            payload={"tool": "run_command", "command": "extract chapters"},
+            result=ToolExecutionResult("run_command", True, output),
+        )
+    )
+
+    record = params.archive_tool_calls[0]
+    assert len(output) > 1200
+    assert record["output_externalized"] is False
+    assert "章节 080: CP-080-080" in params.tool_context[-1]
 
 
 def test_tool_loop_records_live_raw_archive_for_each_tool_result(tmp_path: Path) -> None:
@@ -118,7 +202,7 @@ def test_tool_loop_records_live_raw_archive_for_each_tool_result(tmp_path: Path)
 def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: Path) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path, _current_subagent_run_id="runner-42"))
     params = _tool_loop_params(request_id="", run_id="", task_id="")
-    large_output = "line\n" + ("x" * 1400)
+    large_output = "line\n" + ("x" * 25_000)
 
     service._record_tool_call(
         ToolCallRecordParams(
@@ -184,11 +268,39 @@ def test_externalizer_archives_read_file_output_but_keeps_live_inline(tmp_path: 
     assert artifact["content"] == output
 
 
+def test_externalizer_archives_read_file_when_utf8_bytes_cross_threshold(tmp_path: Path) -> None:
+    output = "现场记录：" + ("汉" * 60_000)
+
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="read_file",
+            call_id="1-utf8",
+            output=output,
+            ok=True,
+            run_id="run-file",
+            min_chars=100_000,
+            parameters={"path": "data/field_journal.txt", "start_line": 1, "max_chars": 100_000},
+        )
+    )
+
+    artifact_path = Path(str(record["source_artifact_ref"]))
+    index = [json.loads(line) for line in (artifact_path.parent / "index.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    assert len(output) < 100_000
+    assert len(output.encode("utf-8")) >= 100_000
+    assert record["output_externalized"] is False
+    assert record["source_output_archived"] is True
+    assert artifact_path.exists()
+    assert index[-1]["kind"] == "tool_output"
+    assert index[-1]["size_bytes"] == len(output.encode("utf-8"))
+
+
 def test_tool_loop_read_file_archive_does_not_hide_live_result(tmp_path: Path) -> None:
     agent = SimpleNamespace(root=tmp_path, config=AgentConfig(), session_id="session-live")
     service = ToolLoopService(agent)
     params = _tool_loop_params(request_id="req-read", run_id="run-read", task_id="task-read")
-    output = "CPX-001-ABCDEF1234\n" + ("x" * 1300)
+    output = "CPX-001-ABCDEF1234\n" + ("x" * 25_000)
 
     service._record_tool_call(
         ToolCallRecordParams(
@@ -450,7 +562,7 @@ def test_render_tool_payload_keeps_small_payload_readable() -> None:
 def test_tool_loop_writes_fail_safe_checkpoint_before_externalizing_large_output(tmp_path: Path) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path))
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
-    large_output = "danger\n" + ("x" * 1400)
+    large_output = "danger\n" + ("x" * 25_000)
 
     service._record_tool_call(
         ToolCallRecordParams(

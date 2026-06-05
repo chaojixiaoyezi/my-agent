@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from agent_py_agent.agent.tooling.models import ToolSpec
@@ -465,6 +466,24 @@ def test_tool_call_parser_accepts_qwen_xmlish_write_call():
     )
 
     assert calls == [{"tool": "write_file", "path": "notes.txt", "content": "hello & hi"}]
+
+
+def test_tool_call_parser_ignores_tool_like_examples_inside_json_content():
+    registry = _registry()
+    content = (
+        "报告正文里引用协议示例：<tool_call>{JSON}</tool_call>，"
+        "也可能引用 [WRITE_FILE_RAW path=\"bad.md\"]x[/WRITE_FILE_RAW]，"
+        "这些都只是文件内容。"
+    )
+    payload = {"tool": "write_file", "path": "report.md", "content": content}
+
+    calls = registry.parse_tool_calls(
+        "[TOOL_CALL]\n"
+        f"{json.dumps(payload, ensure_ascii=False)}\n"
+        "[/TOOL_CALL]"
+    )
+
+    assert calls == [payload]
 
 
 def test_tool_call_parser_reports_incomplete_qwen_xmlish_call():

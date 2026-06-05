@@ -26,7 +26,7 @@ def maybe_append_delivery_completion_soft_hint(
     target_paths = _required_target_paths(contract, workspace_root)
     if not _is_successful_delivery_signal(archive_record, tool_ok=tool_ok, target_paths=target_paths):
         return
-    if not contract and not _looks_like_task_output_delivery(params, archive_record):
+    if not contract and not _is_task_output_delivery(params, archive_record):
         return
     ready_targets = [str(path) for path in target_paths if path.exists()]
     if target_paths and len(ready_targets) < len(target_paths):
@@ -133,7 +133,7 @@ def _path_from_ref(value: object) -> Path | None:
     return Path(text).expanduser().resolve(strict=False)
 
 
-def _looks_like_task_output_delivery(params: ToolLoopExecuteParams, record: dict[str, object]) -> bool:
+def _is_task_output_delivery(params: ToolLoopExecuteParams, record: dict[str, object]) -> bool:
     targets = _accepted_output_targets(params)
     if not targets:
         return False
@@ -142,7 +142,7 @@ def _looks_like_task_output_delivery(params: ToolLoopExecuteParams, record: dict
         if not path.is_absolute():
             continue
         resolved = path.resolve(strict=False)
-        if _matches_any_target(resolved, targets) and _looks_like_report_file(resolved):
+        if _matches_any_target(resolved, targets) and _is_supported_delivery_file(resolved):
             return True
     return False
 
@@ -227,12 +227,8 @@ def _matches_any_target(path: Path, targets: list[dict[str, object]]) -> bool:
     return False
 
 
-def _looks_like_report_file(path: Path) -> bool:
-    suffix = path.suffix.lower()
-    if suffix not in {".md", ".txt", ".json", ".html", ".csv", ".xlsx", ".docx", ".pptx"}:
-        return False
-    name = path.name.lower()
-    return any(marker in name for marker in ("report", "analysis", "summary", "final", "结果", "报告", "分析", "总结"))
+def _is_supported_delivery_file(path: Path) -> bool:
+    return path.suffix.lower() in {".md", ".txt", ".json", ".html", ".csv", ".xlsx", ".docx", ".pptx"}
 
 
 def _hint_already_added(params: ToolLoopExecuteParams) -> bool:

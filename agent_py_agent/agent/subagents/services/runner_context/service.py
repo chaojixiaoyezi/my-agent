@@ -17,6 +17,7 @@ from ...policies import (
     _dedupe_granted_cards,
     _execution_context_instructions,
 )
+from ...role_templates import role_template_snapshot_for_task
 from ...runner_context_bundle_files import execution_context_bundle, write_context_bundle_files
 from ...runner_rendering import render_execution_context_markdown
 from ...runner_tool_policy import runner_allowed_tools
@@ -161,6 +162,7 @@ class SubAgentRunnerContextService:
             context_bundle=context_bundle,
             context_bundle_file=str(Path(task.task_dir) / "CONTEXT_BUNDLE.md"),
             context_bundle_json=str(Path(task.task_dir) / "context_bundle.json"),
+            role_template=role_template_snapshot_for_task(task),
             write_boundary=self._build_write_boundary(task),
             pending_requests=[
                 asdict(item) for item in task.capability_requests if item.status == "OPEN"

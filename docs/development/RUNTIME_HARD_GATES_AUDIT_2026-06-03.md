@@ -46,11 +46,11 @@ Baseline: `0c9bbc48` (`2026-06-01 09:56:51 +0800`). This audit lists hard gates 
    - Status: removed.
 
 4. `agent_py_agent/agent/agent_core/orchestration/dispatch/state_contract.py`
-   - New hard-ish behavior: `must_not_report_done=true` when remembered runs are unfinished, blocked, or unreadable.
+   - New hard-ish behavior: dispatch used to emit a hard-sounding “do not report done” field when remembered runs were unfinished, blocked, or unreadable.
    - Why it exists: prevent false completion after dispatch.
    - Risk: can make parent loop on status inspection if paired with noisy prompts or stale remembered run ids.
-   - Decision: keep as closeout guidance, not as a mid-task creativity limiter. Continue real testing.
-   - Status: monitor.
+   - Decision: remove that field entirely. Dispatch now reports `completion_risk` and `recommended_next_action`; closeout handles unresolved children as warning evidence.
+   - Status: removed.
 
 5. `agent_py_agent/agent/agent_core/delivery_closeout/subagent_aggregation.py`
    - New hard behavior: main-agent closeout was blocked when current task children were unfinished or failed without explicit handling.

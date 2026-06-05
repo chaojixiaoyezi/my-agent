@@ -182,7 +182,7 @@ class TestTaskProgressRegistryTool:
             {
                 "tool": "task_progress",
                 "action": "update",
-                "items": [{"id": "project-a", "title": "项目 A", "status": "完成"}],
+                "items": [{"id": "project-a", "title": "项目 A", "status": "done", "notes": "完成"}],
             }
         )
         payload = json.loads(result.output)

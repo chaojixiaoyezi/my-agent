@@ -113,6 +113,7 @@ def _handoff_base_lines(
         f"- 进度账本: {_progress_line(work.get('task_progress'))}",
         f"- 最近完成: {_recent_done_line(work.get('task_progress'))}",
         f"- 目标产物: {desired_outputs_line(work.get('desired_outputs'))}",
+        f"- 目标覆盖: {_target_coverage_line(work.get('target_coverage'))}",
         f"- 路径意图: {run_intent_line(work.get('run_intent'))}",
         "",
         "## 用户要求和验收",
@@ -201,6 +202,7 @@ def _work_payload(work_state: dict[str, Any]) -> dict[str, Any]:
         "latest_tests": _items(work_state.get("latest_tests"), key="items"),
         "task_progress": _task_progress_payload(work_state.get("task_progress")),
         "desired_outputs": desired_outputs_payload(work_state.get("desired_outputs")),
+        "target_coverage": _target_coverage_payload(work_state.get("target_coverage")),
         "run_intent": run_intent_payload(work_state.get("run_intent")),
         "runtime_handoff": runtime_handoff_payload(work_state.get("runtime_handoff")),
         "read_files": sequence_strings(work_state.get("read_files")),
@@ -281,6 +283,72 @@ def _items(value: Any, *, key: str = "items") -> list[str]:
     return sequence_strings(payload.get(key))
 
 
+def _target_coverage_payload(value: Any) -> dict[str, Any]:
+    envelope = value if isinstance(value, dict) else {}
+    if "target_count" in envelope or "target_items_preview" in envelope:
+        result = {
+            "source_status": str(envelope.get("source_status") or "recorded"),
+            "source_paths": sequence_strings(envelope.get("source_paths")),
+            "coverage_requirement": str(envelope.get("coverage_requirement") or ""),
+            "enforcement": str(envelope.get("enforcement") or ""),
+            "target_count": _positive_int(envelope.get("target_count")),
+            "target_items_preview": [
+                dict(item) for item in envelope.get("target_items_preview", []) if isinstance(item, dict)
+            ]
+            if isinstance(envelope.get("target_items_preview"), list)
+            else [],
+        }
+        if "targets_omitted" in envelope:
+            result["targets_omitted"] = _positive_int(envelope.get("targets_omitted"))
+        return result
+    payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else envelope
+    targets = _coverage_targets(payload)
+    preview = [dict(item) for item in targets[:8] if isinstance(item, dict)]
+    result = {
+        "source_status": str(envelope.get("source_status") or ("recorded" if payload else "not_recorded")),
+        "source_paths": sequence_strings(envelope.get("source_paths")),
+        "coverage_requirement": str(payload.get("coverage_requirement") or ""),
+        "enforcement": str(payload.get("enforcement") or ""),
+        "target_count": len(targets),
+        "target_items_preview": preview,
+    }
+    if len(preview) < len(targets):
+        result["targets_omitted"] = len(targets) - len(preview)
+    return result
+
+
+def _coverage_targets(payload: dict[str, Any]) -> list[object]:
+    for key in ("target_items", "items", "targets"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return list(value)
+    return []
+
+
+def _target_coverage_line(value: Any) -> str:
+    payload = _target_coverage_payload(value)
+    if payload["source_status"] != "recorded":
+        return "未记录"
+    parts: list[str] = []
+    if payload["coverage_requirement"]:
+        parts.append(str(payload["coverage_requirement"]))
+    if payload["enforcement"]:
+        parts.append(f"enforcement={payload['enforcement']}")
+    parts.append(f"targets={payload['target_count']}")
+    preview = payload.get("target_items_preview")
+    if isinstance(preview, list) and preview:
+        labels: list[str] = []
+        for item in preview[:3]:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("target_id") or item.get("source_path") or item.get("source_ref") or item.get("path") or "")
+            if label:
+                labels.append(label)
+        if labels:
+            parts.append("preview=" + ", ".join(labels))
+    return "；".join(parts)
+
+
 def _inline_items(value: Any) -> str:
     items = value if isinstance(value, list) else _items(value)
     normalized = sequence_strings(items)
@@ -299,8 +367,7 @@ def _action_first_actions(work_state: dict[str, Any]) -> list[str]:
 def _looks_like_reader_first_hint(value: str) -> bool:
     text = value.strip().lower()
     recovery_markers = ("memory-resume", "localstore", "compact_context", "work_state_snapshot", "restore_refs")
-    reader_markers = ("先查看", "先读取", "read ", "inspect ", "查看", "读取")
-    return any(marker in text for marker in recovery_markers) and any(marker in text for marker in reader_markers)
+    return any(marker in text for marker in recovery_markers)
 
 
 def _positive_int(value: Any) -> int:

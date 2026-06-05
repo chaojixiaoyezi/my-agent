@@ -36,7 +36,7 @@ class SearchHit:
     rel: str
     line_number: int
     line: str
-    lines: list[str]
+    context_lines: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,7 +74,7 @@ class SearchMatch:
     rel: str
     line_number: int
     line: str
-    lines: list[str]
+    context_lines: tuple[tuple[int, str], ...]
     context: int
 
 
@@ -160,11 +160,16 @@ def render_files_with_matches(hits: list[SearchHit], request: SearchRequest) -> 
     return "\n".join(page) or "没有找到匹配项"
 
 
-def render_match_counts(hits: list[SearchHit], request: SearchRequest) -> str:
-    counts: dict[str, int] = {}
-    for hit in hits:
-        counts[hit.rel] = counts.get(hit.rel, 0) + 1
+def render_match_counts(counts: dict[str, int], request: SearchRequest) -> str:
     rows = [f"{path}: {count}" for path, count in counts.items()]
+    page = rows[request.offset : request.offset + request.limit]
+    if len(rows) > request.offset + request.limit:
+        page.append(search_page_notice(request.offset + request.limit, request.limit))
+    return "\n".join(page) or "没有找到匹配项"
+
+
+def render_line_numbers(hits: list[SearchHit], request: SearchRequest) -> str:
+    rows = [f"{hit.rel}:{hit.line_number}" for hit in hits]
     page = rows[request.offset : request.offset + request.limit]
     if len(rows) > request.offset + request.limit:
         page.append(search_page_notice(request.offset + request.limit, request.limit))
@@ -182,6 +187,6 @@ def _search_output_mode(params: dict[str, Any]) -> str:
         max_chars=40,
         strip=True,
     ).lower()
-    if output_mode not in {"content", "files_with_matches", "count"}:
-        raise ValueError("output_mode 只能是 content、files_with_matches 或 count")
+    if output_mode not in {"content", "files_with_matches", "count", "line_numbers"}:
+        raise ValueError("output_mode 只能是 content、files_with_matches、count 或 line_numbers")
     return output_mode

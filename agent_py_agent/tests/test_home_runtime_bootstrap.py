@@ -180,6 +180,8 @@ def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
     assert result.main_context_bundle_path
     bundle_path = Path(result.main_context_bundle_path)
     assert bundle_path.exists()
+    assert str(bundle_path).startswith(str(home / "owners" / "local" / "main" / "memory_archive"))
+    assert not (home / "memory_archive" / "snapshots" / "context_bundles").exists()
     payload = json.loads(bundle_path.read_text(encoding="utf-8"))
     assert payload["schema"] == "main_context_bundle.v1"
     assert payload["identity"]["owner_type"] == "main_agent"

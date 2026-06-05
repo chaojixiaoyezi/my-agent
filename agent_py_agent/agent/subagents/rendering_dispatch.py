@@ -49,14 +49,12 @@ def _dispatch_completion_gate_lines(records: list[object]) -> list[str]:
         lines.extend([
             "- status: complete_or_no_blockers",
             "- completion_risk: false",
-            "- must_not_report_done: false",
             "- blocking_run_ids: (none)",
         ])
         return lines
     lines.extend([
         "- status: not_complete",
         "- completion_risk: true",
-        "- must_not_report_done: true",
         f"- blocking_run_ids: {', '.join(blockers)}",
         "- next_action: inspect, continue, cancel, takeover, or explain unresolved child runs before final user-facing completion.",
     ])
