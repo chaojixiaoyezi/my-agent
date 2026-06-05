@@ -159,11 +159,17 @@ def _captured_refs_section(payload: Any) -> str:
     coverage = refs.get("full_read_coverage") if isinstance(refs.get("full_read_coverage"), dict) else {}
     if coverage:
         source = str(coverage.get("source_path") or "").strip()
-        covered = coverage.get("covered_until")
-        total = coverage.get("total_chars")
         complete = coverage.get("complete")
-        if source and isinstance(covered, int) and isinstance(total, int):
-            lines.append(f"- full_read_coverage: source_path={source} covered_until={covered} total_chars={total} complete={complete}")
+        if coverage.get("kind") == "line_window":
+            covered = coverage.get("covered_until_line")
+            total = coverage.get("total_lines")
+            if source and isinstance(covered, int) and isinstance(total, int):
+                lines.append(f"- full_read_coverage: source_path={source} covered_until_line={covered} total_lines={total} complete={complete}")
+        else:
+            covered = coverage.get("covered_until_offset", coverage.get("covered_until"))
+            total = coverage.get("total_chars")
+            if source and isinstance(covered, int) and isinstance(total, int):
+                lines.append(f"- full_read_coverage: source_path={source} covered_until={covered} total_chars={total} complete={complete}")
     artifact_ref_count = refs.get("artifact_ref_count")
     omitted = refs.get("omitted_artifact_ref_count")
     if isinstance(artifact_ref_count, int) and artifact_ref_count > 0:

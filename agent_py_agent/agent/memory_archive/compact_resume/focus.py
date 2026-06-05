@@ -9,6 +9,9 @@ from typing import Any
 from ...common.value_parsing import sequence_strings
 
 CHAR_WINDOW_RE = re.compile(r"\[char-window offset=(\d+) chars=(\d+) total_chars=(\d+)\]")
+LINE_NUMBER_RE = re.compile(r"^(\d+):\s", re.MULTILINE)
+NEXT_START_LINE_RE = re.compile(r"next_start_line=(\d+)")
+TOTAL_LINES_RE = re.compile(r"total_lines=(\d+)")
 CAPTURED_ARTIFACT_REF_LIMIT = 8
 
 
@@ -67,6 +70,8 @@ def artifact_ref_payload(item: dict[str, Any]) -> dict[str, Any]:
         "kind": str(item.get("kind") or ""),
         "offset": _optional_int(params.get("offset")),
         "max_chars": _optional_int(params.get("max_chars")),
+        "start_line": _optional_int(params.get("start_line")),
+        "end_line": _optional_int(params.get("end_line")),
     }
 
 
@@ -82,17 +87,25 @@ def looks_like_reader_first_recovery_hint(value: str) -> bool:
 def full_read_coverage_resume_action(work_state: dict[str, Any]) -> str:
     if not _work_state_wants_full_read(work_state):
         return ""
-    cursor = _best_char_cursor(work_state.get("artifact_refs"))
+    cursor = _best_read_cursor(work_state.get("artifact_refs"))
     if not cursor or cursor["covered_until"] >= cursor["total_chars"]:
         return ""
     source = cursor["source_path"]
-    offset = cursor["covered_until"]
-    total = cursor["total_chars"]
     progress_ref = _task_progress_ref(work_state)
     progress_clause = f" 长清单/逐项事实的完整进度账本在 {progress_ref}；最终汇总前要读取或核对它。" if progress_ref else ""
+    if cursor.get("kind") == "line_window":
+        line = cursor["covered_until"] + 1
+        read_call = f'read_file(path="{source}", start_line={line}, max_chars=50000)'
+        progress_text = f"已连续覆盖 {cursor['covered_until']}/{cursor['total_chars']} 行"
+        repeat_text = "不要回到 start_line=1"
+    else:
+        offset = cursor["covered_until"]
+        read_call = f'read_file(path="{source}", offset={offset}, max_chars=50000)'
+        progress_text = f"已连续覆盖 {offset}/{cursor['total_chars']} 字符"
+        repeat_text = "不要回到 offset=0"
     return (
-        f"继续完整阅读 {source}：先沉淀上一段已读出的关键事实，再调用 read_file(path=\"{source}\", offset={offset}, max_chars=50000)。"
-        f" 已连续覆盖 {offset}/{total} 字符；不要回到 offset=0，不要用 search_text/run_command/grep/awk 替代完整阅读。"
+        f"继续完整阅读 {source}：先沉淀上一段已读出的关键事实，再调用 {read_call}。"
+        f" {progress_text}；{repeat_text}，不要用 search_text/run_command/grep/awk 替代完整阅读。"
         " 如果任务要求逐章、逐项、逐检查点汇总，继续维护 work/ 下的事实记录表或 task_progress，最终报告以事实记录表、task_progress 完整账本和源文件证据为准，不要只靠 compact 摘要回忆。"
         f"{progress_clause}"
     )
@@ -139,18 +152,59 @@ def _best_char_cursor(value: object) -> dict[str, int | str]:
     return best
 
 
+def _best_line_cursor(value: object) -> dict[str, int | str]:
+    refs = value if isinstance(value, list) else []
+    ranges_by_source: dict[str, list[tuple[int, int, int]]] = {}
+    for ref in refs:
+        if not isinstance(ref, dict) or str(ref.get("tool") or "") != "read_file":
+            continue
+        source = _source_path(ref)
+        window = _line_window_from_ref(ref)
+        if not source or not window:
+            continue
+        ranges_by_source.setdefault(source, []).append(window)
+    best: dict[str, int | str] = {}
+    for source, ranges in ranges_by_source.items():
+        total = max(total for _start, _end, total in ranges)
+        covered = _covered_line_prefix_end([(start, end) for start, end, _total in ranges])
+        if not best or int(best.get("covered_until") or 0) < covered:
+            best = {"kind": "line_window", "source_path": source, "covered_until": covered, "total_chars": total}
+    return best
+
+
+def _best_read_cursor(value: object) -> dict[str, int | str]:
+    char_cursor = _best_char_cursor(value)
+    if char_cursor and int(char_cursor.get("covered_until") or 0) < int(char_cursor.get("total_chars") or 0):
+        char_cursor["kind"] = "char_window"
+        return char_cursor
+    line_cursor = _best_line_cursor(value)
+    if line_cursor:
+        return line_cursor
+    if char_cursor:
+        char_cursor["kind"] = "char_window"
+    return char_cursor
+
+
 def _full_read_coverage_payload(value: object) -> dict[str, Any]:
-    cursor = _best_char_cursor(value)
+    cursor = _best_read_cursor(value)
     if not cursor:
         return {}
     covered = int(cursor.get("covered_until") or 0)
     total = int(cursor.get("total_chars") or 0)
-    return {
+    payload = {
         "source_path": str(cursor.get("source_path") or ""),
         "covered_until": covered,
         "total_chars": total,
         "complete": bool(total and covered >= total),
     }
+    if cursor.get("kind") == "line_window":
+        payload["kind"] = "line_window"
+        payload["covered_until_line"] = covered
+        payload["total_lines"] = total
+    else:
+        payload["kind"] = "char_window"
+        payload["covered_until_offset"] = covered
+    return payload
 
 
 def _source_path(ref: dict[str, Any]) -> str:
@@ -174,6 +228,29 @@ def _char_window_from_ref(ref: dict[str, Any]) -> tuple[int, int, int] | None:
     return (offset, offset + chars, total)
 
 
+def _line_window_from_ref(ref: dict[str, Any]) -> tuple[int, int, int] | None:
+    content = _artifact_content(ref.get("path") or ref.get("artifact_ref"))
+    if not content:
+        return None
+    params = ref.get("parameters") if isinstance(ref.get("parameters"), dict) else {}
+    line_numbers = [int(match.group(1)) for match in LINE_NUMBER_RE.finditer(content)]
+    explicit_start = _optional_int(params.get("start_line")) or 0
+    explicit_end = _optional_int(params.get("end_line")) or 0
+    next_start = _regex_int(NEXT_START_LINE_RE, content)
+    total = _regex_int(TOTAL_LINES_RE, content)
+    if total <= 0 or not (line_numbers or explicit_start or explicit_end or next_start):
+        return None
+    start = line_numbers[0] if line_numbers else (explicit_start or 1)
+    end = line_numbers[-1] if line_numbers else explicit_end
+    if next_start:
+        end = min(end or next_start - 1, next_start - 1)
+    if explicit_end and not next_start:
+        end = min(end or explicit_end, explicit_end)
+    if end < start:
+        return None
+    return (start, end, total)
+
+
 def _artifact_content(value: object) -> str:
     text = str(value or "").strip()
     if not text or "://" in text:
@@ -191,10 +268,29 @@ def _artifact_content(value: object) -> str:
     return ""
 
 
+def _regex_int(pattern: re.Pattern[str], text: str) -> int:
+    match = pattern.search(text or "")
+    if not match:
+        return 0
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return 0
+
+
 def _covered_prefix_end(ranges: list[tuple[int, int]]) -> int:
     cursor = 0
     for start, end in sorted(ranges):
         if start > cursor:
+            break
+        cursor = max(cursor, end)
+    return cursor
+
+
+def _covered_line_prefix_end(ranges: list[tuple[int, int]]) -> int:
+    cursor = 0
+    for start, end in sorted(ranges):
+        if start > cursor + 1:
             break
         cursor = max(cursor, end)
     return cursor

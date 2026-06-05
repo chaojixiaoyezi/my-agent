@@ -139,9 +139,10 @@ class FinalizationService:
 
     def _estimate_token_usage(self, params: EstimateTokenParams):
         input_tokens = input_token_usage(params.final_response)
+        prompt_tokens = estimate_tokens(params.final_prompt) if params.final_prompt else 0
         if input_tokens is None:
             if params.final_prompt:
-                input_tokens = estimate_tokens(params.final_prompt)
+                input_tokens = prompt_tokens
             else:
                 input_tokens = (
                     estimate_tokens(params.user_prompt)
@@ -168,7 +169,7 @@ class FinalizationService:
         return {
             "turn": int(ledger["turn_total"]),
             "cumulative": int(ledger["cumulative_tokens"]),
-            "active": int(input_tokens) + int(output_tokens),
+            "active": _active_context_tokens(input_tokens, output_tokens, prompt_tokens),
         }
 
     def _build_agent_run_result(self, params: BuildAgentRunResultParams):
@@ -220,6 +221,10 @@ def _estimate_token_params(ctx: FinalizeContext, run_request_id: str) -> Estimat
         turn_id=turn_id,
         final_prompt=ctx.final_prompt,
     )
+
+
+def _active_context_tokens(input_tokens: int, output_tokens: int, prompt_tokens: int) -> int:
+    return max(int(input_tokens), int(prompt_tokens)) + int(output_tokens)
 
 
 def _snapshot_result_fields() -> dict:

@@ -12,6 +12,7 @@ from agent_py_agent.agent.agent_core.runtime.guidance import (
     render_subagent_guidance_section,
 )
 from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
+from agent_py_agent.agent.agent_core.tool_loop.prompting import build_tool_loop_prompt
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
@@ -203,6 +204,34 @@ def test_tool_loop_injects_pending_guidance_and_marks_delivered(tmp_path) -> Non
     assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
 
 
+def test_tool_loop_guidance_can_override_earlier_contract_context(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "agent_run",
+            "target_id": "main-run-1",
+            "message": "用户补充：25次压缩已经够了，现在停止继续读，写收口总结。",
+            "now": 10.0,
+        }
+    )
+    params = _tool_loop_params(
+        run_id="main-run-1",
+        delivery_contract={
+            "schema_version": "delivery_contract.v1",
+            "artifacts": [{"artifact_id": "report", "path": "output/report.md"}],
+        },
+    )
+
+    prompt = build_tool_loop_prompt(agent, params)
+
+    assert "GUIDANCE_DELIVERED" in prompt
+    assert "代表最新用户/上级上下文" in prompt
+    assert "如果它和较早任务合同、旧工具记录冲突，以这里为准" in prompt
+    assert "用户补充：25次压缩已经够了" in prompt
+    assert prompt.rfind("用户补充：25次压缩已经够了") > prompt.find("[tool-system delivery-contract]")
+    assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
+
+
 def test_tool_loop_reports_thread_guidance_lookup_error(tmp_path, monkeypatch) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     params = _tool_loop_params(task_id="task-1")
@@ -252,6 +281,7 @@ def test_real_subagent_runner_prompt_includes_guidance(tmp_path) -> None:
 
     assert "GUIDANCE_DELIVERED" in prompt
     assert "先写阶段文件，再继续扩展。" in prompt
+    assert "代表最新用户/上级上下文" in prompt
     assert agent.conversation_store.pending_guidance("agent_run", child.id) == []
 
 

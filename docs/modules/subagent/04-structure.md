@@ -48,7 +48,7 @@ SimpleAgent orchestration tool
 
 ## Guidance
 
-运行中补充提示统一落 conversation guidance 账本。目标可以是 agent run、thread、task 或 case。子代理下一轮执行上下文会读取点名给自己的 guidance，并在 runner prompt 中显示。它只是提醒和唤醒，不是验收门，也不自动替模型完成任务。
+运行中补充提示统一落 conversation guidance 账本。目标可以是 agent run、thread、task 或 case。子代理下一轮执行上下文会读取点名给自己的 guidance，并在 runner prompt 中显示。它是最新用户/上级上下文，不是额外验收门，也不自动替模型完成任务；如果它明确要求停止、改目标或收口，应覆盖较早任务合同和旧工具记录。
 
 ## Cancel And Takeover
 

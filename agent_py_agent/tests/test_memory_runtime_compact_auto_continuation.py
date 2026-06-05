@@ -381,6 +381,36 @@ def test_run_auto_compact_apply_returns_after_no_tool_continuation(tmp_path):
     assert result.memory_compact_auto_status == "returned_after_continuation"
 
 
+def test_auto_compact_uses_local_prompt_estimate_when_provider_underreports(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent.backend.context_window_tokens = 200
+    ctx = replace(
+        _finalize_context_for_continuation(tool_rounds=1, executed_tools=["read_file"]),
+        request_id="req-underreported-usage",
+        run_id="run-underreported-usage",
+        task_id="run-underreported-usage",
+        compact_auto_continue_depth=0,
+        final_prompt="完整阅读这些材料并继续推进。\n" + ("很长的上下文片段。" * 400),
+        final_response=ModelResponse(
+            text="我已经记录进度，下一步继续读。",
+            backend="underreported-usage",
+            usage={"input_tokens": 10, "output_tokens": 5},
+        ),
+        routed_context=type(
+            "RoutedContext",
+            (),
+            {"matches": [], "required_read_paths": [], "candidate_paths": []},
+        )(),
+    )
+
+    result = agent._get_services().finalization.finalize(ctx)
+
+    assert result.memory_compact_auto_status == "ready_after_action_guard"
+    assert result.memory_compact_auto_continue_ready is True
+    assert result.memory_compact_auto_apply_id
+    assert result.memory_compact_ratio >= 0.5
+
+
 def test_run_auto_compact_apply_can_repeat_when_continuation_makes_tool_progress(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", enable_tools=True, my_agent_home=str(tmp_path / "home")), tmp_path)
     backend = RepeatingContextOverflowBackend()
@@ -463,6 +493,31 @@ def test_compact_auto_continue_injection_prioritizes_resume_focus_and_captured_r
     assert "END" in rendered
     assert "## Recommended Read Paths" not in rendered
     assert "memory_archive/compact_applies/apply-1.work_state_snapshot.json" not in rendered
+
+
+def test_compact_auto_continue_injection_renders_line_cursor_coverage() -> None:
+    rendered = build_compact_auto_continue_injection(
+        {
+            "apply_id": "apply-line-cursor",
+            "plan_id": "plan-line-cursor",
+            "resume_focus": {
+                "next_action": "继续从下一行读取。",
+                "captured_refs": {
+                    "full_read_coverage": {
+                        "kind": "line_window",
+                        "source_path": "logs/big.txt",
+                        "covered_until_line": 40,
+                        "total_lines": 60,
+                        "complete": False,
+                    }
+                },
+            },
+        }
+    )
+
+    assert "covered_until_line=40" in rendered
+    assert "total_lines=60" in rendered
+    assert "total_chars=60" not in rendered
 
 
 def test_compact_auto_continue_injection_shows_existing_child_agents() -> None:
@@ -649,6 +704,71 @@ def test_compact_continue_packet_prioritizes_full_read_cursor(tmp_path: Path) ->
     assert captured["omitted_artifact_ref_count"] == 0
     assert captured["full_read_coverage"]["covered_until"] == 200
     assert packet["work_state_snapshot"]["task_progress"]["ref"] == str(tmp_path / "progress.json")
+
+
+def test_compact_continue_packet_prioritizes_full_read_line_cursor(tmp_path: Path) -> None:
+    packet = build_compact_continue_packet(
+        CompactContinuePacketRequest(
+            metadata={"apply_id": "apply-full-read-lines", "plan_id": "plan-full-read-lines"},
+            work_state={
+                "goal": "完整读完 data/line-log.txt，按顺序慢慢读。",
+                "phase": "compact_apply",
+                "next_step": "继续读取 data/line-log.txt。",
+                "task_progress": {
+                    "summary": "已读到第 40 行",
+                    "next_action": "继续读取 data/line-log.txt。",
+                    "ref": str(tmp_path / "progress.json"),
+                },
+                "artifact_refs": [
+                    _line_read_ref(tmp_path, {"name": "read-lines-1", "start": 1, "end": 2, "next": 3, "max": 40}),
+                    _line_read_ref(tmp_path, {"name": "read-lines-2", "start": 3, "end": 40, "next": 41, "max": 400}),
+                ],
+            },
+            consistency={"status": "ok"},
+            action_guard={"allowed_to_continue": True, "status": "allowed"},
+            handoff={},
+            recommended_read_paths=[],
+            next_actions=["继续读取 data/line-log.txt。"],
+            subagent_owner_refs={},
+            main_context_bundle={},
+        )
+    )
+
+    focus = packet["resume_focus"]
+    captured = focus["captured_refs"]
+
+    assert focus["next_action"].startswith("继续完整阅读 data/line-log.txt")
+    assert 'read_file(path="data/line-log.txt", start_line=41, max_chars=50000)' in focus["next_action"]
+    assert "已连续覆盖 40/60 行" in focus["next_action"]
+    assert "不要回到 start_line=1" in focus["next_action"]
+    assert captured["full_read_coverage"]["kind"] == "line_window"
+    assert captured["full_read_coverage"]["covered_until_line"] == 40
+    assert captured["full_read_coverage"]["total_lines"] == 60
+
+
+def _line_read_ref(tmp_path: Path, page: dict[str, int | str]) -> dict:
+    artifact = tmp_path / f"{page['name']}.json"
+    start = int(page["start"])
+    max_chars = int(page["max"])
+    artifact.write_text(
+        json.dumps({"content": "\n".join(_line_read_content(page))}),
+        encoding="utf-8",
+    )
+    return {
+        "kind": "tool_output",
+        "path": str(artifact),
+        "source_path": "data/line-log.txt",
+        "tool": "read_file",
+        "parameters": {"path": "data/line-log.txt", "start_line": start, "max_chars": max_chars},
+    }
+
+
+def _line_read_content(page: dict[str, int | str]) -> list[str]:
+    return [
+        f"{page['start']}: line {page['start']}",
+        f"{page['end']}: line {page['end']}",
+        f"... 已截断；PARTIAL view only; 这不是完整文件。 total_lines=60; next_start_line={page['next']}; limit_chars={page['max']}。",
+    ]
 
 
 def test_compact_continue_packet_keeps_captured_refs_compact() -> None:
