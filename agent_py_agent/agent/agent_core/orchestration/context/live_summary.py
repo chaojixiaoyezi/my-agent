@@ -145,12 +145,15 @@ def _result_refs_by_run_lines(value: object) -> list[str]:
         status = f"{item.get('status', '')}/{item.get('verification_status', '')}"
         artifact_ids = _json_inline(item.get("primary_artifact_ids") or [])
         artifacts = _json_inline(item.get("primary_artifact_refs") or [])
+        expected_outputs = _json_inline(item.get("expected_outputs") or [])
+        read_order = _json_inline(item.get("read_order") or [])
         artifact_summaries = item.get("primary_artifact_summaries") or []
         run_closeout_ref = item.get("run_closeout_ref") or item.get("output_json", "")
         summary = _clip(item.get("summary", ""), limit=220)
         lines.append(
             f"  - run_id={run_id} status={status} "
-            f"primary_artifact_ids={artifact_ids} primary_artifact_refs={artifacts}"
+            f"primary_artifact_ids={artifact_ids} primary_artifact_refs={artifacts} "
+            f"expected_outputs={expected_outputs} read_order={read_order}"
         )
         if artifact_summaries:
             lines.append(f"    artifact_summaries={_json_inline(artifact_summaries)}")
@@ -159,8 +162,9 @@ def _result_refs_by_run_lines(value: object) -> list[str]:
         if summary:
             lines.append(f"    summary={summary}")
     lines.append(
-        "- result_ref_policy: read primary_artifact_refs or run_closeout_ref from result_refs_by_run; "
-        "do not guess child filenames."
+        "- result_ref_policy: read read_order first, then primary_artifact_refs/expected_outputs; "
+        "do not guess child filenames; run_closeout_ref and internal final reports are fallback progress refs, "
+        "not the first child result."
     )
     return lines
 

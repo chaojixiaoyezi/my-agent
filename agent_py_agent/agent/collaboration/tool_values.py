@@ -26,7 +26,7 @@ def error(tool: str, code: str, message: str, details: dict[str, Any] | None = N
     payload = {"ok": False, "error": code, "message": message}
     if details:
         payload.update(details)
-    return ToolExecutionResult(tool, False, json.dumps(payload, ensure_ascii=False, indent=2))
+    return ToolExecutionResult(tool, False, json.dumps(payload, ensure_ascii=False, indent=2), error_code=code)
 
 
 def string_values(value: object) -> list[str]:

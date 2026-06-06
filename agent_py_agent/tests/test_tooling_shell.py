@@ -1,10 +1,20 @@
 """Shell 命令执行工具测试 - 命令执行、超时控制、输出捕获。"""
 from __future__ import annotations
 
+import os
+import shlex
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+
+
+def _python_sleep_command(seconds: int) -> str:
+    script = f"import time; time.sleep({seconds})"
+    if os.name == "nt":
+        return f"& {shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
 
 
 class TestShellToolBasics:
@@ -232,7 +242,7 @@ class TestShellToolTimeout:
 
         tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
         result = tool.execute({
-            "command": "sleep 100",
+            "command": _python_sleep_command(100),
             "timeout": 5,
         })
 
@@ -252,7 +262,7 @@ class TestShellToolTimeout:
         mock_run.side_effect = TimeoutError()
 
         tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
-        result = tool.execute({"command": "sleep 100"})
+        result = tool.execute({"command": _python_sleep_command(100)})
 
         call_args = mock_run.call_args
         assert call_args.kwargs.get("timeout") == 30
@@ -286,10 +296,24 @@ class TestShellToolTimeout:
         workspace.mkdir()
 
         tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=1))
-        result = tool.execute({"command": "sleep 100"})
+        result = tool.execute({"command": _python_sleep_command(100)})
 
         assert result.ok is False
         assert "超时" in result.output
+
+    def test_pure_delay_uses_wait_surface(self, tmp_path: Path):
+        """纯等待命令不应占住 shell worker。"""
+        from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
+        result = tool.execute({"command": "sleep 100"})
+
+        assert result.ok is False
+        assert result.error_code == "USE_WAIT_FOR_DELAY"
+        assert '"tool": "wait"' in result.output
 
 
 class TestShellToolValidation:

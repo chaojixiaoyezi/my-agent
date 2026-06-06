@@ -378,6 +378,44 @@ def test_main_agent_tree_defaults_to_visible_children_instead_of_first_remembere
     assert payload["child_result_index"][1]["primary_artifact_refs"] == ["b.md"]
 
 
+def test_agent_tree_result_index_prefers_declared_outputs_over_internal_final_report(tmp_path):
+    """完成的子代理应把声明产物放到父代理读取顺序前面。"""
+
+    output = tmp_path / "work" / "project_analysis.md"
+    output.parent.mkdir(parents=True)
+    output.write_text("result", encoding="utf-8")
+    final_report = tmp_path / "work" / "agents" / "child-1" / "final_report.md"
+    final_report.parent.mkdir(parents=True)
+    final_report.write_text("internal placeholder", encoding="utf-8")
+
+    class _Manager:
+        def kernel_snapshot(self, query):
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                scope=query.scope,
+                runs=[
+                    SubagentKernelRun(
+                        run_id="child-1",
+                        status="DONE",
+                        declared_output_refs=[str(output)],
+                        workspace_refs={"final_report": str(final_report)},
+                    )
+                ],
+            )
+
+    class _Agent:
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent())
+    row = payload["child_result_index"][0]
+
+    assert row["expected_outputs"] == [str(output)]
+    assert row["primary_artifact_refs"] == [str(output)]
+    assert row["read_order"][0] == str(output)
+    assert row["final_report_ref"] == str(final_report)
+    assert payload["nodes"][0]["evidence_layer"]["declared_output_refs"] == [str(output)]
+
+
 def test_main_run_root_query_falls_back_to_visible_tree_when_no_subagent_root_matches():
     """显式传主代理 run_id 时，如果它不是子代理 root，也要返回可见子代理树。"""
 

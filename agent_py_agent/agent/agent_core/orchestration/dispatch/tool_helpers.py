@@ -137,7 +137,7 @@ def _child_result_index_hint(rows: list[dict[str, object]]) -> str:
     if not rows:
         return ""
     return (
-        "先核对 child_result_index 中每个 child 的 summary、final_report_ref 和 artifact refs；"
+        "先核对 child_result_index 中每个 child 的 read_order、primary_artifact_refs 和 expected_outputs；"
         "如果协调汇总和 child 摘要冲突，先修复汇总或继续调度，不要只看输出目录或单个协调产物。"
     )
 

@@ -40,6 +40,16 @@ def list_pending_requests(agent: SimpleAgent, params: dict[str, object]) -> Tool
     if identity_error:
         payload["identity_load_error"] = identity_error
     payload.update(collaboration_scope_payload(agent, params, explicit_keys=("agent_id", "run_id")))
+    if not requests and (_looks_like_run_identity(params) or not _has_explicit_request_identity(params)):
+        return error(
+            "inspect_collaboration",
+            "wrong_status_surface",
+            "inspect_collaboration only reads collaboration cases or pending collaboration requests; use inspect_agent_tree for agent or subagent run status.",
+            {
+                **payload,
+                "suggested_tool_call": _inspect_agent_tree_suggestion(params, identity),
+            },
+        )
     return ok("inspect_collaboration", payload)
 
 
@@ -91,3 +101,30 @@ def _request_overview(agent: SimpleAgent, case_id: str) -> dict[str, object]:
 
 def _load_error(exc: BaseException, context: str) -> dict[str, object]:
     return {"load_error": runtime_error_report(exc, context=context)}
+
+
+def _looks_like_run_identity(params: dict[str, object]) -> bool:
+    for key in ("agent_id", "run_id", "task_id", "root_id"):
+        value = str(params.get(key) or "").strip()
+        if value.startswith(("run-", "subagent-", "task-")):
+            return True
+    return False
+
+
+def _has_explicit_request_identity(params: dict[str, object]) -> bool:
+    return any(str(params.get(key) or "").strip() for key in ("agent_id", "run_id", "agent_name", "agent_role"))
+
+
+def _inspect_agent_tree_suggestion(
+    params: dict[str, object],
+    identity: dict[str, str],
+) -> dict[str, object]:
+    run_id = (
+        str(params.get("run_id") or "").strip()
+        or str(params.get("agent_id") or "").strip()
+        or str(identity.get("agent_id") or "").strip()
+    )
+    suggestion: dict[str, object] = {"tool": "inspect_agent_tree"}
+    if run_id:
+        suggestion["run_id"] = run_id
+    return suggestion

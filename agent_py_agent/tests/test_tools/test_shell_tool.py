@@ -6,6 +6,8 @@ from __future__ import annotations
 测试 run_command 工具：正常执行、超时处理、危险命令拒绝、参数校验。
 """
 
+import json
+import os
 import shlex
 import subprocess
 import sys
@@ -29,6 +31,13 @@ from agent_py_agent.agent.tooling.shell import (
 def shell_tool(tmp_path: Path) -> ShellTool:
     """Create a ShellTool instance for testing."""
     return ShellTool(tmp_path, options=ShellToolOptions(default_timeout=5))
+
+
+def _python_sleep_command(seconds: int) -> str:
+    script = f"import time; time.sleep({seconds})"
+    if os.name == "nt":
+        return f"& {shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
 
 
 def test_shell_tool_echo_hello(shell_tool: ShellTool) -> None:
@@ -60,7 +69,7 @@ def test_shell_tool_with_working_dir(shell_tool: ShellTool, tmp_path: Path) -> N
 def test_shell_tool_timeout(shell_tool: ShellTool) -> None:
     """Test that long-running command is terminated on timeout."""
     result = shell_tool.execute({
-        "command": "sleep 10",
+        "command": _python_sleep_command(10),
         "timeout": 1,
     })
     assert result.ok is False
@@ -70,10 +79,48 @@ def test_shell_tool_timeout(shell_tool: ShellTool) -> None:
 
 def test_shell_tool_default_timeout(shell_tool: ShellTool) -> None:
     """Test that default_timeout is used when timeout is not specified."""
-    # Use a longer sleep but rely on the default 5 second timeout from fixture
-    result = shell_tool.execute({"command": "sleep 10"})
+    result = shell_tool.execute({"command": _python_sleep_command(10)})
     assert result.ok is False
     assert "超时" in result.output or "timeout" in result.output.lower()
+
+
+def test_shell_tool_pure_sleep_suggests_wait(shell_tool: ShellTool) -> None:
+    """Pure delay commands should not block the shell worker."""
+    result = shell_tool.execute({"command": "sleep 30"})
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert result.error_code == "USE_WAIT_FOR_DELAY"
+    assert payload["suggested_tool_call"]["tool"] == "wait"
+    assert payload["suggested_tool_call"]["seconds"] == 60
+
+
+def test_shell_tool_sleep_then_echo_suggests_wait(shell_tool: ShellTool) -> None:
+    """A delay followed only by a marker echo should not block the shell worker."""
+    result = shell_tool.execute({"command": 'sleep 60 && echo "done"'})
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert result.error_code == "USE_WAIT_FOR_DELAY"
+    assert payload["suggested_tool_call"]["tool"] == "wait"
+
+
+def test_shell_tool_routes_internal_agent_status_paths_to_agent_tree(tmp_path: Path) -> None:
+    """Shell should not bypass the agent tree status surface."""
+    workspace = tmp_path / "workspace"
+    state = workspace / "tasks" / "2026-06-06" / "demo" / "work" / "agents" / "subagent-123" / "state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text('{"status":"RUNNING"}', encoding="utf-8")
+    tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=5))
+
+    result = tool.execute({"command": f"cat {shlex.quote(str(state))}"})
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert result.error_code == "WRONG_STATUS_SURFACE"
+    assert payload["error"] == "internal_agent_status_ref"
+    assert payload["suggested_tool_call"]["tool"] == "inspect_agent_tree"
+    assert payload["suggested_tool_call"]["run_id"] == "subagent-123"
 
 
 def test_shell_tool_dangerous_rm_rf_rejected(shell_tool: ShellTool) -> None:

@@ -1,10 +1,16 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ..path_recovery_hints import suggest_workspace_typo_target
-from ._filesystem_helpers import _bundled_filesystem_param, _int_param, _required_path
+from ._filesystem_helpers import (
+    _bundled_filesystem_param,
+    _int_param,
+    _internal_agent_status_ref,
+    _required_path,
+)
 from .filesystem_artifact_guard import tool_output_artifact_content, tool_output_artifact_typo_hint
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
 from .filesystem_structured_read import structured_read_summary
@@ -32,6 +38,14 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecu
         ))
     if not target.is_file():
         return ToolExecutionResult("read_file", False, f"目标不是文件: {tool.display_path(target)}")
+    internal_ref = _internal_agent_status_ref(target)
+    if internal_ref:
+        return ToolExecutionResult(
+            "read_file",
+            False,
+            json.dumps(internal_ref, ensure_ascii=False, indent=2),
+            error_code="WRONG_STATUS_SURFACE",
+        )
     artifact_content = tool_output_artifact_content(target, tool.workspace_roots)
     if artifact_content:
         return _numbered_text_result(artifact_content, params, max_chars)

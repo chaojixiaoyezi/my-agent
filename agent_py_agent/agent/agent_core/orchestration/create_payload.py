@@ -32,6 +32,7 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
     reused = reused_tasks(resolutions)
     dispatchable = dispatchable_tasks(tasks)
     pending_dispatch = _pending_dispatch_tasks(dispatchable, request_params, auto_start)
+    result_index = child_result_index(agent, tasks)
     payload: dict[str, object] = {
         "created": len(created),
         "ids": [task.id for task in tasks],
@@ -40,13 +41,15 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
         "dispatch_run_ids": [task.id for task in pending_dispatch],
         "auto_start": _auto_start_payload(auto_start),
         "next_action": _dispatch_next_action(dispatchable, request_params, auto_start),
+        "status_tool_call": {"tool": "inspect_agent_tree", "params": {}},
+        "wait_tool_call": _wait_tool_call(agent),
         "allowed_tools": request.allowed_tools or "automatic",
         "operation_contract": _operation_contract(request_params, created, reused, pending_dispatch),
         "replacement_records": request.replacement_records or [],
         "conversation_bind_errors": request.conversation_bind_errors or [],
         "scheduling_advice": _scheduling_advice(tasks, request_params, auto_start),
-        "child_result_index": child_result_index(agent, tasks),
-        "subagent_workspace": current_model_ref(getattr(agent.subagents, "workspace", "")),
+        "child_result_index": result_index,
+        "child_output_read_order": _child_output_read_order(result_index),
         "tasks": [_task_payload(task) for task in tasks],
     }
     payload.update(dispatch_state_contract_payload(agent))
@@ -139,8 +142,42 @@ def _task_payload(task: object) -> dict[str, object]:
         "status": _task_text(task, "status"),
         "verification_status": _task_text(task, "verification_status"),
         "task_root": current_model_ref(_task_text(task, "task_workspace_dir")),
-        "agent_work_dir": current_model_ref(_task_text(task, "agent_run_workspace_dir")),
         "attributes": _task_attributes(task),
+    }
+
+
+def _child_output_read_order(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    for row in rows:
+        result.append(
+            {
+                "run_id": str(row.get("run_id") or ""),
+                "agent_name": str(row.get("agent_name") or ""),
+                "role": str(row.get("role") or ""),
+                "status": str(row.get("status") or ""),
+                "expected_outputs": list(row.get("expected_outputs") or []),
+                "read_order": list(row.get("read_order") or []),
+            }
+        )
+    return result
+
+
+def _wait_tool_call(agent: object) -> dict[str, object]:
+    config = getattr(agent, "config", None)
+    try:
+        seconds = int(getattr(config, "subagent_watch_interval_seconds", 120))
+    except (TypeError, ValueError):
+        seconds = 120
+    if seconds < 60:
+        seconds = 60
+    if seconds > 7200:
+        seconds = 7200
+    return {
+        "tool": "wait",
+        "params": {
+            "seconds": seconds,
+            "reason": "wait before checking subagent progress again",
+        },
     }
 
 

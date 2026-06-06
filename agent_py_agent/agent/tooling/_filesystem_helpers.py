@@ -10,6 +10,18 @@ _MAX_PATH_CHARS = 4096
 _MAX_SEARCH_QUERY_CHARS = 4000
 _MAX_SEARCH_LINE_CHARS = 500
 _MAX_WRITE_TEXT_CHARS = 1_000_000
+_INTERNAL_AGENT_STATUS_FILES = frozenset(
+    {
+        "final_report.md",
+        "state.json",
+        "summary.md",
+        "checkpoint.json",
+        "canonical_state.json",
+        "context_bundle.json",
+        "CONTEXT_BUNDLE.md",
+    }
+)
+_INTERNAL_AGENT_STATUS_DIRS = frozenset({"compactions", "progress"})
 
 
 @dataclass(frozen=True)
@@ -118,6 +130,47 @@ def _normalized_workspace_roots(primary: Path, roots: list[Path] | None) -> list
         if path not in resolved:
             resolved.append(path)
     return resolved
+
+
+def _internal_agent_status_ref(
+    path: Path,
+    *,
+    include_agent_directory: bool = False,
+) -> dict[str, object] | None:
+    parts = path.parts
+    for index in range(len(parts) - 1):
+        if parts[index] != "work" or index + 1 >= len(parts) or parts[index + 1] != "agents":
+            continue
+        relative = parts[index + 2 :]
+        if include_agent_directory and not relative:
+            return _internal_agent_status_payload(path, "")
+        if not relative:
+            continue
+        run_id = relative[0]
+        if not str(run_id).startswith(("subagent-", "run-")):
+            continue
+        if include_agent_directory:
+            return _internal_agent_status_payload(path, run_id)
+        leaf = relative[1] if len(relative) > 1 else ""
+        if leaf not in _INTERNAL_AGENT_STATUS_FILES and leaf not in _INTERNAL_AGENT_STATUS_DIRS:
+            continue
+        return _internal_agent_status_payload(path, run_id)
+    return None
+
+
+def _internal_agent_status_payload(path: Path, run_id: str) -> dict[str, object]:
+    suggestion: dict[str, object] = {"tool": "inspect_agent_tree"}
+    if run_id:
+        suggestion["run_id"] = run_id
+    return {
+        "ok": False,
+        "error": "internal_agent_status_ref",
+        "message": "This path is an internal agent status surface. Use inspect_agent_tree for run status, then read child_result_index.read_order or declared output files for child results.",
+        "run_id": run_id,
+        "path": str(path),
+        "suggested_tool_call": suggestion,
+        "result_fields_to_read": ["child_result_index.read_order", "child_result_index.expected_outputs"],
+    }
 
 
 def _is_under_any_root(path: Path, roots: list[Path]) -> bool:

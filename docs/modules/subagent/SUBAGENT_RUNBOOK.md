@@ -7,6 +7,8 @@
 ## 等待
 
 不要高频反复 inspect。使用 `wait` 登记稍后查看。配置下限 60 秒，上限 7200 秒；主代理忙或用户正在交互时顺延。
+不要用 shell `sleep`、`timeout /t` 或 `Start-Sleep` 模拟等待；等待是运行时工具语义，
+这样 compact、用户插话和后台唤醒都能看懂。
 
 `create_subagents` 开了自动启动时，后台会对本批 run_id 跑一轮精确 dispatch，并启动对应 runner；它不走 watch 循环，避免和 gateway/daemon 的观察锁互相抢占。主代理不需要立刻 `wait` 退出当前任务，下一步应该按工具返回的提示 inspect、继续自己能做的部分，或等后台唤醒再看树。
 
@@ -25,6 +27,16 @@
 ## 汇总
 
 子代理内部 `final_report.md` 是证据，不是用户最终交付。父代理读 refs 和必要正文后，把最终报告写当前 task `output/` 或用户指定目录，并在 task workspace 记录索引和验收。
+
+父代理汇总优先顺序：
+
+1. `create_subagents` / `inspect_agent_tree` 暴露的 `child_output_read_order`。
+2. 子代理结构化结果里的 `primary_artifact_refs`、`expected_outputs`、artifact refs。
+3. 只有这些 refs 缺失或损坏时，才读取内部 `work/agents/<run_id>/final_report.md`
+   这类审计文件作为兜底证据。
+
+普通读文件、列目录和 shell 不应把 `work/agents/<run_id>/` 当状态看板；看状态用
+`inspect_agent_tree`。
 
 ## Compact 后
 

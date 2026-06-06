@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,7 @@ from ._filesystem_helpers import (
     _bool_param,
     _bundled_filesystem_param,
     _int_param,
+    _internal_agent_status_ref,
     _optional_path,
     _text_param,
 )
@@ -56,6 +58,14 @@ class ListFilesTool(FileSystemTool):
                 expected_kind="any",
                 retry_tool="list_files",
             ))
+        internal_ref = _internal_agent_status_ref(target, include_agent_directory=True)
+        if internal_ref:
+            return ToolExecutionResult(
+                "list_files",
+                False,
+                json.dumps(internal_ref, ensure_ascii=False, indent=2),
+                error_code="WRONG_STATUS_SURFACE",
+            )
         if target.is_file():
             return ToolExecutionResult("list_files", True, self.display_path(target))
         return self._list_target(target, request)

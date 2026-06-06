@@ -46,7 +46,8 @@ _CREATE_PARAMETER_DETAILS = {
     "output_files": (
         "只在用户明确保存路径时填写；没有明确路径时可省略。"
         "阅读/分析目录是 input_refs，不是 output_files。"
-        "当前任务 output_dir 可以用于协作阶段产物，但主代理收口前要整理，只留下最终交付物或清晰索引。"
+        "协作阶段的中间产物优先放当前任务 work/child_outputs 或工具返回的默认路径；"
+        "output_dir 更适合最终交付，或用户明确要求放到某个普通输出目录时使用。"
     ),
     "replacement_for_run_ids": "用于结构化接管卡住或过时的旧 run。",
     "defer_start": "普通生产任务默认不要传；依赖前置产物的测试/验收/汇总项可传 true。",

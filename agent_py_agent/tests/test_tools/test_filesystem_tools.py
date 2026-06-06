@@ -7,6 +7,7 @@
 
 import base64
 import io
+import json
 import tempfile
 import types
 from pathlib import Path
@@ -273,6 +274,45 @@ def test_filesystem_tools_allow_configured_extra_workspace_root():
         assert "ok" in read_result.output
         assert list_result.ok
         assert "report.txt" in list_result.output
+
+
+def test_read_file_routes_internal_agent_status_refs_to_agent_tree(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    internal = workspace / "tasks" / "2026-06-06" / "demo" / "work" / "agents" / "subagent-123" / "final_report.md"
+    child_output = workspace / "tasks" / "2026-06-06" / "demo" / "work" / "child_outputs" / "subagent-123.md"
+    internal.parent.mkdir(parents=True)
+    child_output.parent.mkdir(parents=True)
+    internal.write_text("internal progress only", encoding="utf-8")
+    child_output.write_text("declared child result", encoding="utf-8")
+    read_tool = ReadFileTool(workspace, max_chars=2000)
+
+    internal_result = read_tool.execute({"path": str(internal)})
+    output_result = read_tool.execute({"path": str(child_output)})
+    payload = json.loads(internal_result.output)
+
+    assert internal_result.ok is False
+    assert internal_result.error_code == "WRONG_STATUS_SURFACE"
+    assert payload["error"] == "internal_agent_status_ref"
+    assert payload["suggested_tool_call"]["tool"] == "inspect_agent_tree"
+    assert payload["suggested_tool_call"]["run_id"] == "subagent-123"
+    assert output_result.ok is True
+    assert "declared child result" in output_result.output
+
+
+def test_list_files_routes_internal_agent_status_dirs_to_agent_tree(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    internal = workspace / "tasks" / "2026-06-06" / "demo" / "work" / "agents" / "subagent-123"
+    internal.mkdir(parents=True)
+    (internal / "state.json").write_text('{"status":"RUNNING"}', encoding="utf-8")
+    list_tool = ListFilesTool(workspace, max_entries=20)
+
+    result = list_tool.execute({"path": str(internal)})
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert result.error_code == "WRONG_STATUS_SURFACE"
+    assert payload["suggested_tool_call"]["tool"] == "inspect_agent_tree"
+    assert payload["suggested_tool_call"]["run_id"] == "subagent-123"
 
 
 def test_filesystem_tool_reports_missing_external_path_without_permission_claim():

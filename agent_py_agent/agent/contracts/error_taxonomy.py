@@ -87,6 +87,20 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="shell 命令返回非零状态；读取 stdout/stderr，修正命令或换成更可靠的专用工具。",
     ),
+    "USE_WAIT_FOR_DELAY": ErrorContract(
+        code="USE_WAIT_FOR_DELAY",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.WAIT.value,
+        recovery_hint="纯延迟等待不要通过 shell 执行；使用 wait 登记进度查看提醒，避免本地进程阻塞。",
+    ),
+    "WRONG_STATUS_SURFACE": ErrorContract(
+        code="WRONG_STATUS_SURFACE",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="当前工具不是这个对象的状态面；按返回的 suggested_tool_call 改用正确状态工具。",
+    ),
     "RATE_LIMITED": ErrorContract(
         code="RATE_LIMITED",
         category="model",

@@ -46,6 +46,7 @@ class SubagentKernelRun:
     tool_contract: dict[str, object] = field(default_factory=dict)
     artifact_refs: list[str] = field(default_factory=list)
     artifact_registry_refs: list[dict[str, object]] = field(default_factory=list)
+    declared_output_refs: list[str] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     needs_capability: list[str] = field(default_factory=list)

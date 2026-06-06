@@ -299,6 +299,44 @@ def test_generic_worker_reuses_same_structured_io_scope_without_goal_text_key(tm
     assert second["tasks"][0]["attributes"]["work_scope_key"]
 
 
+def test_items_without_output_files_get_task_local_child_output_ref(tmp_path):
+    """模型没填 output_files 时，运行时给子代理一个任务内默认结果槽。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    agent._current_run_task_workspace = str(tmp_path / "tasks" / "2026-06-06" / "all-agent-架构分析")
+    tool = CreateSubagentsTool(agent)
+
+    payload = json.loads(tool.execute({
+        "items": [
+            {
+                "goal": "分析 ECC-main 并写报告。",
+                "role": "worker",
+                "agent_name": "ECC analyzer",
+            },
+            {
+                "goal": "分析 pi-main 并写报告。",
+                "role": "worker",
+                "agent_name": "pi analyzer",
+            },
+        ],
+    }).output)
+
+    first = payload["tasks"][0]["attributes"]["output_files"][0]
+    second = payload["tasks"][1]["attributes"]["output_files"][0]
+    assert first.endswith("/work/child_outputs/01-ecc-analyzer-1.md")
+    assert second.endswith("/work/child_outputs/02-pi-analyzer-2.md")
+    assert payload["child_result_index"][0]["expected_outputs"] == [first]
+    assert payload["child_result_index"][0]["read_order"]
+    assert payload["child_output_read_order"][0]["expected_outputs"] == [first]
+    assert payload["child_output_read_order"][0]["read_order"] == payload["child_result_index"][0]["read_order"]
+    assert payload["status_tool_call"] == {"tool": "inspect_agent_tree", "params": {}}
+    assert payload["wait_tool_call"]["tool"] == "wait"
+    assert "subagent_workspace" not in payload
+    assert "agent_work_dir" not in payload["tasks"][0]
+    assert payload["tasks"][0]["attributes"]["system_default_output_ref"] is True
+
+
 def test_same_output_without_structured_inputs_does_not_reuse_different_work(tmp_path):
     """只有同一个输出文件不代表同一任务，避免多个子代理共写总报告时被误合并。"""
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool

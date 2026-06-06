@@ -12,6 +12,10 @@
 - `allowed_tools` 只是工具偏好提示，不是安全边界；基础读写工具由系统按角色和目标补齐。
 - 子代理自己的资料线索写到对应 item 的 `input_refs`，公共资料才放顶层。
 - 用户明确了产物路径时写 `output_files`；没有明确路径时不要强造。
+- 子代理没有声明产物路径时，运行时会给它分配 task-local `work/child_outputs/...`
+  默认产物路径，并在返回值里暴露 `child_output_read_order`。父代理汇总时优先读
+  `child_output_read_order` / `primary_artifact_refs` / `expected_outputs`，不要直接翻
+  `work/agents/<run_id>/` 里的内部状态文件。
 - 替换旧子代理时使用 `replacement_for_run_ids`，让系统记录结构化接管关系。
 - 模型侧角色索引只展示角色 id、中文说明和能力标签；模板文件路径只留给调试接口，不进入 prompt。
 - `role` 选择角色模板；`agent_name` 只用于人类显示和点名，不参与机器角色判断。
@@ -23,6 +27,11 @@
 用途：只读查看主代理、子代理、孙代理状态树。
 
 它不会创建、调度、恢复或验收任务。要推进已有子代理时用 `dispatch_subagents`；只是给运行中的代理补一句话时用 `send_guidance`。
+
+子代理状态、进度、channel 状态和内部 refs 都以这个工具为模型可见状态面。普通文件工具和
+shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`final_report.md`、
+`summary.md`、`compactions/` 等内部文件；这些文件是审计/恢复资料，不是父代理的正常汇总入口。
+如果只是等一会再看进度，用 `wait`，不要用 shell 的 `sleep`。
 
 ## dispatch_subagents
 

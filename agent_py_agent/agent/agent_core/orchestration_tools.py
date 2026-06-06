@@ -8,6 +8,7 @@ from __future__ import annotations
 """
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..settings.defaults import default_config_int
@@ -47,6 +48,7 @@ from .orchestration.tool_specs import build_create_subagents_spec
 from .orchestration.tools.cancel import CancelSubagentsTool as CancelSubagentsTool
 from .orchestration.tools.event import RaiseEventTool as RaiseEventTool
 from .orchestration.tools.status import InspectAgentTreeTool as InspectAgentTreeTool
+from .orchestration.work_scope import add_work_scope_key
 from .orchestration.write_guard import (
     ExternalWriteTargetRequest,
     external_write_target_error,
@@ -193,7 +195,8 @@ class CreateSubagentsTool(BaseTool):
                 item.goal,
                 subagent_allowed_tools(item.params),
             )
-            run_params_by_item.append(indexed_item_params(run_params, index=index, total=len(items)))
+            indexed = indexed_item_params(run_params, index=index, total=len(items))
+            run_params_by_item.append(_with_default_child_output_ref(self.agent, indexed, index=index))
         return run_params_by_item
 
     def _items_payload_request(self, request_params: dict[str, object], items: list[CreateSubagentItem]) -> dict[str, object]:
@@ -238,7 +241,11 @@ class CreateSubagentsTool(BaseTool):
 
     def _count_run_params(self, count: int, run_params: CreateRunParams) -> list[CreateRunParams]:
         return [
-            indexed_count_params(run_params, index=index, count=count)
+            _with_default_child_output_ref(
+                self.agent,
+                indexed_count_params(run_params, index=index, count=count),
+                index=index,
+            )
             for index in range(1, count + 1)
         ]
 
@@ -264,3 +271,47 @@ def _configured_max_subagents(agent) -> int:
         return max(0, int(raw_value))
     except (TypeError, ValueError):
         return _DEFAULT_MAX_SUBAGENTS
+
+
+def _with_default_child_output_ref(agent: object, run_params: CreateRunParams, *, index: int) -> CreateRunParams:
+    attrs = dict(run_params.attributes or {})
+    if _has_structured_output_ref(attrs):
+        return run_params
+    task_root = _current_task_root(agent)
+    if not task_root:
+        return run_params
+    default_ref = str(Path(task_root) / "work" / "child_outputs" / f"{index:02d}-{_output_slug(run_params)}.md")
+    attrs["output_files"] = [default_ref]
+    attrs["system_default_output_ref"] = True
+    add_work_scope_key(attrs)
+    return CreateRunParams(**{**run_params.__dict__, "attributes": attrs})
+
+
+def _has_structured_output_ref(attrs: dict[str, object]) -> bool:
+    for key in ("output_files", "output_refs", "artifact_refs"):
+        value = attrs.get(key)
+        if isinstance(value, list) and any(str(item or "").strip() for item in value):
+            return True
+    return False
+
+
+def _current_task_root(agent: object) -> str:
+    raw = getattr(agent, "_current_run_task_workspace", "")
+    if not isinstance(raw, str | Path):
+        return ""
+    return str(raw).strip()
+
+
+def _output_slug(run_params: CreateRunParams) -> str:
+    base = str(run_params.agent_name or run_params.role or "child").strip()
+    chars: list[str] = []
+    last_dash = False
+    for char in base:
+        if char.isalnum() or char in {"_", "-"}:
+            chars.append(char)
+            last_dash = False
+        elif not last_dash:
+            chars.append("-")
+            last_dash = True
+    slug = "".join(chars).strip("-_").lower()
+    return (slug or "child")[:80]

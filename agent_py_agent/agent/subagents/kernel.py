@@ -171,6 +171,7 @@ def _task_to_kernel_run(
         tool_contract=_tool_contract(task) if include_refs else {},
         artifact_refs=list(task.artifact_refs),
         artifact_registry_refs=_artifact_registry_refs(task),
+        declared_output_refs=_declared_output_refs(task),
         evidence_refs=list(task.evidence_refs),
         blockers=list(task.blockers),
         needs_capability=_needs_capability(task) if include_refs else [],
@@ -228,6 +229,16 @@ def _artifact_registry_refs(task: SubAgentTask, *, limit: int = 12) -> list[dict
         if len(rows) >= limit:
             break
     return rows
+
+
+def _declared_output_refs(task: SubAgentTask) -> list[str]:
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    refs: list[str] = []
+    for key in ("output_files", "output_refs", "artifact_refs"):
+        value = attrs.get(key)
+        if isinstance(value, list):
+            refs.extend(str(item).strip() for item in value if str(item or "").strip())
+    return list(dict.fromkeys(refs))
 
 
 def _recent_tool_trace(task: SubAgentTask) -> list[dict[str, object]]:

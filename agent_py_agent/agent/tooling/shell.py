@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -29,6 +32,13 @@ _ACCESS_MODES = frozenset({"restricted", "workspace-write", "full-access"})
 _ACCESS_MODE_RANK = {"restricted": 0, "workspace-write": 1, "full-access": 2}
 _TOOL_DEADLINE_UNIX_ENV = "MY_AGENT_TOOL_DEADLINE_UNIX"
 _TOOL_DEADLINE_MARGIN_SECONDS_ENV = "MY_AGENT_TOOL_DEADLINE_MARGIN_SECONDS"
+_WAIT_MIN_SECONDS = 60
+_WAIT_MAX_SECONDS = 7200
+_INTERNAL_AGENT_PATH_RE = re.compile(
+    r"(?P<prefix>(?:^|[\s'\";|&])(?:\S*/)?tasks/\S+/work/agents(?:/|\b)|(?:^|[\s'\";|&])work/agents(?:/|\b))",
+    re.I,
+)
+_INTERNAL_AGENT_RUN_RE = re.compile(r"(?<![A-Za-z0-9_-])(?P<run_id>(?:subagent|run)-[A-Za-z0-9_-]+)")
 
 @dataclass(frozen=True)
 class ShellToolOptions:
@@ -53,6 +63,113 @@ def _validate_command(command: str) -> str:
     if len(text) > _MAX_COMMAND_CHARS:
         raise ValueError(f"command 过长，最多 {_MAX_COMMAND_CHARS} 个字符")
     return text
+
+
+def _pure_delay_seconds(command: str) -> int | None:
+    try:
+        tokens = shlex.split(command.strip().rstrip(";"))
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    head = tokens[0].lower()
+    if head == "sleep":
+        return _leading_sleep_delay_seconds(tokens[1:])
+    if head == "timeout":
+        return _timeout_delay_seconds(tokens[1:])
+    if head == "start-sleep":
+        return _start_sleep_delay_seconds(tokens[1:])
+    return None
+
+
+def _leading_sleep_delay_seconds(tokens: list[str]) -> int | None:
+    if len(tokens) == 1:
+        return _delay_token_seconds(tokens[0])
+    if len(tokens) >= 3 and tokens[1] in {"&&", ";"} and tokens[2].lower() in {"echo", "printf", "true"}:
+        return _delay_token_seconds(tokens[0])
+    return None
+
+
+def _delay_token_seconds(value: str) -> int | None:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    multiplier = 1
+    if text.endswith(("s", "m", "h")):
+        suffix = text[-1]
+        text = text[:-1]
+        multiplier = {"s": 1, "m": 60, "h": 3600}[suffix]
+    try:
+        seconds = float(text) * multiplier
+    except ValueError:
+        return None
+    if seconds <= 0 or seconds != seconds:
+        return None
+    return max(1, int(seconds))
+
+
+def _timeout_delay_seconds(tokens: list[str]) -> int | None:
+    positional: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index].lower()
+        if token in {"/t", "-t"} and index + 1 < len(tokens):
+            return _delay_token_seconds(tokens[index + 1])
+        if token in {"/nobreak", "-nobreak"}:
+            index += 1
+            continue
+        positional.append(tokens[index])
+        index += 1
+    return _delay_token_seconds(positional[0]) if len(positional) == 1 else None
+
+
+def _start_sleep_delay_seconds(tokens: list[str]) -> int | None:
+    if len(tokens) == 1:
+        return _delay_token_seconds(tokens[0])
+    for index, token in enumerate(tokens):
+        if token.lower() in {"-seconds", "-s"} and index + 1 < len(tokens):
+            return _delay_token_seconds(tokens[index + 1])
+    return None
+
+
+def _delay_command_result(seconds: int) -> ToolExecutionResult:
+    suggested_seconds = min(_WAIT_MAX_SECONDS, max(_WAIT_MIN_SECONDS, seconds))
+    payload = {
+        "ok": False,
+        "error": "use_wait_for_delay",
+        "message": "run_command does not execute pure delay commands. Use wait so progress watching does not block the local shell.",
+        "requested_seconds": seconds,
+        "suggested_tool_call": {
+            "tool": "wait",
+            "seconds": suggested_seconds,
+            "reason": "wait before checking progress again",
+        },
+    }
+    return ToolExecutionResult(
+        "run_command",
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code="USE_WAIT_FOR_DELAY",
+    )
+
+
+def _internal_agent_status_command(command: str) -> dict[str, object] | None:
+    normalized = command.replace("\\", "/")
+    if not _INTERNAL_AGENT_PATH_RE.search(normalized):
+        return None
+    run_match = _INTERNAL_AGENT_RUN_RE.search(normalized)
+    run_id = run_match.group("run_id") if run_match else ""
+    suggestion: dict[str, object] = {"tool": "inspect_agent_tree"}
+    if run_id:
+        suggestion["run_id"] = run_id
+    return {
+        "ok": False,
+        "error": "internal_agent_status_ref",
+        "message": "Shell commands must not inspect internal work/agents status files. Use inspect_agent_tree for run status, then read child_result_index.read_order or declared output files for child results.",
+        "run_id": run_id,
+        "suggested_tool_call": suggestion,
+        "result_fields_to_read": ["child_result_index.read_order", "child_result_index.expected_outputs"],
+    }
 
 
 def _timeout_from_params(params: dict[str, Any], default_timeout: int) -> int:
@@ -202,6 +319,7 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
             "Use read_file / write_file when only file IO is needed.",
             "Avoid for interactive terminal workflows.",
             "Prefer write_file for file changes instead of shell redirection.",
+            "Use wait for pure delays such as sleep 120 while waiting for subagent progress.",
         ],
         keywords=["shell", "command", "terminal", "bash", "cmd", "script"],
         parameters={
@@ -260,6 +378,17 @@ class ShellTool(BaseTool):
                 ),
                 error_code="COMMAND_POLICY_BLOCKED",
             )
+        internal_status_ref = _internal_agent_status_command(command)
+        if internal_status_ref is not None:
+            return ToolExecutionResult(
+                self.spec.name,
+                False,
+                json.dumps(internal_status_ref, ensure_ascii=False, indent=2),
+                error_code="WRONG_STATUS_SURFACE",
+            )
+        delay_seconds = _pure_delay_seconds(command)
+        if delay_seconds is not None:
+            return _delay_command_result(delay_seconds)
 
         timeout = _timeout_from_params(params, self.default_timeout)
         if timeout <= 0:

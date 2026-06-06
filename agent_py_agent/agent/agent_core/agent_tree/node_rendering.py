@@ -27,6 +27,7 @@ def _node_ref_values(payload: dict[str, object]) -> dict[str, list[object]]:
     return {
         "artifact_refs": current_model_ref_list(_list(payload.get("artifact_refs"))),
         "artifact_registry_refs": _current_registry_refs(payload.get("artifact_registry_refs")),
+        "declared_output_refs": current_model_ref_list(_list(payload.get("declared_output_refs"))),
         "evidence_refs": current_model_ref_list(_list(payload.get("evidence_refs"))),
         "blockers": _list(payload.get("blockers")),
         "needs_capability": _needs_capability(tool_contract, _list(payload.get("needs_capability"))),
@@ -70,6 +71,7 @@ def _node_status(payload: dict[str, object], refs: dict[str, list[object]]) -> d
     return {
         "artifact_refs": refs["artifact_refs"],
         "artifact_registry_refs": refs["artifact_registry_refs"],
+        "declared_output_refs": refs["declared_output_refs"],
         "evidence_refs": refs["evidence_refs"],
         "blockers": refs["blockers"],
         "workspace_refs": _workspace_refs(payload.get("workspace_refs")),
@@ -169,6 +171,7 @@ def _evidence_layer(values: dict[str, list[object]]) -> dict[str, object]:
     return {
         "artifact_refs": values["artifact_refs"],
         "artifact_registry_refs": values["artifact_registry_refs"],
+        "declared_output_refs": values["declared_output_refs"],
         "evidence_refs": values["evidence_refs"],
         "blockers": values["blockers"],
         "needs_capability": values["needs_capability"],

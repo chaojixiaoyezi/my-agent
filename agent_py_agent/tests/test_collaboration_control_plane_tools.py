@@ -343,7 +343,8 @@ def test_inspect_collaboration_identity_load_error_is_visible(tmp_path, monkeypa
     result = agent.tools.tools["inspect_collaboration"].execute({"agent_id": child.id})
     payload = json.loads(result.output)
 
-    assert result.ok is True
+    assert result.ok is False
+    assert payload["error"] == "wrong_status_surface"
     assert payload["agent_id"] == child.id
     assert payload["identity_load_error"]["context"] == "collaboration.identity.subagents.load"
     assert payload["identity_load_error"]["category"] == "io"

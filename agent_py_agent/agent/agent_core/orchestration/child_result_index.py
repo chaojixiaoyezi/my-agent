@@ -24,6 +24,7 @@ def _child_result_row(task: object) -> dict[str, object]:
     expected_outputs = _expected_outputs(attrs)
     output_payload, output_error = _output_payload(task)
     primary_artifact_refs = _primary_artifact_refs(output_payload, artifacts, expected_outputs)
+    final_report_ref = current_model_ref(_task_text(task, "agent_run_final_report_md") or _task_text(task, "output_json"))
     row: dict[str, object] = {
         "run_id": _task_text(task, "id"),
         "parent_run_id": _task_text(task, "parent_id"),
@@ -35,7 +36,8 @@ def _child_result_row(task: object) -> dict[str, object]:
         "expected_outputs": expected_outputs,
         "primary_artifact_refs": primary_artifact_refs,
         "artifact_registry_refs": artifacts,
-        "final_report_ref": current_model_ref(_task_text(task, "agent_run_final_report_md") or _task_text(task, "output_json")),
+        "final_report_ref": final_report_ref,
+        "read_order": _read_order(primary_artifact_refs, expected_outputs, "", final_report_ref),
         "task_root": current_model_ref(_task_text(task, "task_workspace_dir")),
     }
     if output_error is not None:
@@ -46,11 +48,14 @@ def _child_result_row(task: object) -> dict[str, object]:
 def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
     registry_refs = _dict_list(node.get("artifact_registry_refs"))
     artifact_refs = _string_items(node.get("artifact_refs"))
+    expected_outputs = _node_expected_outputs(node)
     workspace_refs = dict(node.get("workspace_refs") or {}) if isinstance(node.get("workspace_refs"), dict) else {}
     recovery_refs = dict(node.get("recovery_refs") or {}) if isinstance(node.get("recovery_refs"), dict) else {}
     progress_layer = dict(node.get("progress_layer") or {}) if isinstance(node.get("progress_layer"), dict) else {}
     primary_refs = [ref for item in registry_refs if (ref := current_model_ref(item.get("path")))]
     primary_refs.extend(current_model_ref_list(artifact_refs))
+    primary_refs.extend(ref for ref in expected_outputs if _looks_like_existing_path(ref))
+    primary_refs = list(dict.fromkeys(primary_refs))
     final_report_ref = current_model_ref(workspace_refs.get("final_report"))
     summary_ref = current_model_ref(recovery_refs.get("summary"))
     checkpoint_ref = current_model_ref(recovery_refs.get("checkpoint"))
@@ -63,12 +68,13 @@ def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
         "status": str(node.get("status") or "").strip(),
         "verification_status": str(node.get("verification_status") or "").strip(),
         "work_scope_key": str(node.get("work_scope_key") or "").strip(),
-        "expected_outputs": [],
-        "primary_artifact_refs": list(dict.fromkeys(primary_refs)),
+        "expected_outputs": expected_outputs,
+        "primary_artifact_refs": primary_refs,
         "artifact_registry_refs": _current_registry_refs(registry_refs),
         "final_report_ref": final_report_ref,
         "summary_ref": summary_ref,
         "checkpoint_ref": checkpoint_ref,
+        "read_order": _read_order(primary_refs, expected_outputs, summary_ref, final_report_ref),
         "task_root": current_model_ref(workspace_refs.get("task_root")),
         "agent_work_dir": current_model_ref(workspace_refs.get("agent_work_dir")),
         "progress": node.get("progress", 0.0),
@@ -101,6 +107,27 @@ def _expected_outputs(attrs: dict[str, object]) -> list[str]:
         if isinstance(value, list):
             result.extend(current_model_ref_list(value))
     return list(dict.fromkeys(result))
+
+
+def _node_expected_outputs(node: dict[str, object]) -> list[str]:
+    refs: list[str] = []
+    for key in ("declared_output_refs", "expected_outputs", "output_refs", "output_files", "artifact_refs"):
+        refs.extend(current_model_ref_list(_string_items(node.get(key))))
+    return list(dict.fromkeys(refs))
+
+
+def _read_order(
+    primary_refs: list[str],
+    expected_outputs: list[str],
+    summary_ref: str,
+    final_report_ref: str,
+) -> list[str]:
+    refs = [*primary_refs, *expected_outputs]
+    if not refs and summary_ref:
+        refs.append(summary_ref)
+    if not refs and final_report_ref:
+        refs.append(final_report_ref)
+    return list(dict.fromkeys(refs))
 
 
 def _primary_artifact_refs(

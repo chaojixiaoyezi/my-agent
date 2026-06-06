@@ -7,6 +7,11 @@
 - `runner_context` 现在直接构造执行上下文、写入边界、runtime guidance 和 runner allowed
   tools；角色模板相关判断留在 `role_templates`。
 - 这轮清理不新增工具、不新增硬门，只减少跨文件跳转和旧入口。
+- 父代理汇总子代理结果时，优先读取创建/树快照返回的 `child_output_read_order`、
+  `primary_artifact_refs` 和 `expected_outputs`。没有声明产物路径的子代理会获得
+  task-local `work/child_outputs/...` 默认产物路径。`work/agents/<run_id>/` 继续作为
+  内部状态、审计和恢复目录；父代理查状态走 `inspect_agent_tree`，等待走 `wait`，
+  不把 shell sleep 或内部目录遍历当成正常控制面。
 
 ## 2026-06-06 状态精确化
 

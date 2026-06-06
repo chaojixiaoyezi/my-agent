@@ -129,7 +129,7 @@ def build_inspect_collaboration_spec() -> ToolSpec:
         effect="read_only",
         description="只读查看协作：传 case_id 看 case；不传 case_id 时列出当前或指定代理的待处理协作请求。",
         use_cases=[],
-        avoid_when=[],
+        avoid_when=["不要用它查看普通 agent/subagent run 的执行状态；run 状态请用 inspect_agent_tree。"],
         keywords=["协作状态", "协作待办", "pending collaboration", "case status", "request discovery"],
         parameters={"case_id": "可选协作 case ID；有则查看 case 状态", **_LIST_REQUESTS_PARAMETERS},
         examples=[],

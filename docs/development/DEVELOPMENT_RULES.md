@@ -648,6 +648,13 @@ do_write()
   as `deliverables`, `files`, `output_files`, `files_modified`, top-level
   `path`, or top-level `file_path` as machine artifact facts. Task-creation
   `output_files` remains a target-path contract, not a result alias.
+- Parent agents should summarize child work from the model-visible result
+  surface: `child_output_read_order`, `primary_artifact_refs`,
+  `expected_outputs`, and artifact refs. Task-local `work/agents/<run_id>/`
+  files are internal audit/recovery state, not the normal parent status or
+  aggregation surface. Use `inspect_agent_tree` for status and `wait` for
+  delayed checks; do not reintroduce shell sleeps or directory scraping as
+  control flow.
 - `create_subagents` must not reject ordinary delegation because of
   domain-specific quality constraints such as button/image/comment rules. Pass
   those constraints as structured task context and validate them through child
