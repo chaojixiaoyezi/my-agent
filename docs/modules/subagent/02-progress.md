@@ -1,5 +1,13 @@
 # Subagent Progress
 
+## 2026-06-06 主链路小跳转清理
+
+- 删除只服务单一调用点的 facade/helper 文件，把能力请求解析、action rescue 渲染、runner
+  guidance 注入、runner tool 过滤和 root task policy 折回当前权威模块。
+- `runner_context` 现在直接构造执行上下文、写入边界、runtime guidance 和 runner allowed
+  tools；角色模板相关判断留在 `role_templates`。
+- 这轮清理不新增工具、不新增硬门，只减少跨文件跳转和旧入口。
+
 ## 2026-06-06 状态精确化
 
 - 子代理运行、恢复、tree、closeout 统一按当前协议状态判断；`COMPLETED`、`SUCCESS`、`ERROR`

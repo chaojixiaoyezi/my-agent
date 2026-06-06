@@ -9,7 +9,6 @@ from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ._runtime_params import ToolLoopExecuteParams
 from .delivery_completion_soft_hint import maybe_append_delivery_completion_soft_hint
-from .orchestration.loop.scope import executed_subagent_orchestration
 from .orchestration.shared_context import (
     refresh_parent_shared_context_cache,
     refresh_parent_shared_context_from_tool_record,

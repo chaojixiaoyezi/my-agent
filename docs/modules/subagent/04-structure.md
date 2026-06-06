@@ -18,6 +18,8 @@ SimpleAgent orchestration tool
 
 - `agent/subagents/manager.py`：子代理 root manager，负责初始化、基础生命周期、工单路径和服务组合。
 - `agent/subagents/kernel.py`：从 canonical state、projection 和 task workspace 生成稳定树快照。
+- `agent/subagents/parsing/`、`agent/subagents/rendering.py`、`agent/subagents/role_templates.py`：
+  放当前子代理协议解析、展示渲染和模板策略；不再保留单独一跳 facade。
 - `agent/agent_core/orchestration/`：主代理模型可见的 `create_subagents`、`dispatch_subagents`、`inspect_agent_tree`、`cancel_subagents` 等工具实现。
 - `agent/agent_core/runner/`：子代理 worker、prompt、session heartbeat、timeout policy。
 
@@ -37,7 +39,7 @@ SimpleAgent orchestration tool
 | `base.py` | create_run/split、owner 继承、runtime config scope |
 | `persistence/` | canonical state 读写、projection、global index、LocalStore 投影 |
 | `dispatch/` | dispatch/watch/parent planner 报告 |
-| `runner_context/` | 执行上下文、写入边界、任务配置 |
+| `runner_context/` | 执行上下文、写入边界、任务配置、runtime guidance、runner allowed tools |
 | `runner_result/` | runner 输出解析、状态和 artifact refs 写回 |
 | `board/` | board、due-check、action-plan |
 | `actions/` | action-plan 应用、取消、接管动作记录 |

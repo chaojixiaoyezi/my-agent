@@ -1,12 +1,11 @@
-
-from __future__ import annotations
-
 """LLM contract: parse and normalize model-produced subagent JSON blocks.
 
 Human version:
 模型输出不可信，可能缺结束标记、JSON 损坏、外面包了 Markdown fence。
 这里集中做解析和规范化，让业务流程只处理干净的结构化对象。
 """
+
+from __future__ import annotations
 
 import json
 
@@ -15,7 +14,6 @@ from ..coverage_records import coverage_records_from_payload
 from ..models import SubAgentParsedOutput
 from ..reports import ParentPlannerParsedOutput
 from .artifacts import artifact_items_from_payload
-from .capability_requests import capability_requests_from_payload
 from .evidence_refs import evidence_packets_with_top_level_refs
 from .partial import extract_partial_subagent_result_text
 from .values import (
@@ -221,6 +219,10 @@ def _parsed_output_from_payload(payload: dict[str, object]) -> SubAgentParsedOut
         next_actions=text_or_sequence_strings(payload.get("next_actions", [])),
         raw_json=payload,
     )
+
+
+def capability_requests_from_payload(payload: dict[str, object]) -> list[dict[str, object]]:
+    return _dict_list(payload.get("capability_requests", []))
 
 
 def _strip_json_fence(raw: str) -> str:

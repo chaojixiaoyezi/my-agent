@@ -1,3 +1,4 @@
+"""Role template loading, snapshots, and runner capability decisions."""
 
 from __future__ import annotations
 
@@ -131,6 +132,16 @@ def role_template_snapshot_for_task(task: object) -> dict[str, object]:
         if isinstance(snapshot, dict) and snapshot.get("id"):
             return dict(snapshot)
     return role_template_snapshot_for_role(str(getattr(task, "role", "") or ""))
+
+
+def is_self_authorized_root_task(task: object) -> bool:
+    parent_id = str(getattr(task, "parent_id", "") or "").strip()
+    if parent_id:
+        return False
+    attrs = getattr(task, "attributes", {}) or {}
+    if isinstance(attrs, dict) and bool(attrs.get("self_authorized_root")):
+        return True
+    return bool(role_template_snapshot_for_task(task).get("can_spawn_children"))
 
 
 def role_template_id_for_role(

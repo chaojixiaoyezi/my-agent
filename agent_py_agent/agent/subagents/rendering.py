@@ -1,7 +1,6 @@
+"""LLM contract: markdown renderers for subagent reports and reviews."""
 
 from __future__ import annotations
-
-"""LLM contract: markdown renderers for subagent reports and reviews."""
 
 from .rendering_dispatch import (
     render_dispatch_markdown,
@@ -14,7 +13,6 @@ from .rendering_patch import (
     render_patch_review_markdown,
     render_patch_review_record_markdown,
 )
-from .rendering_rescue import render_action_rescue_packet_lines
 from .reports import (
     ActionApplyReport,
     ActionPlanReport,
@@ -121,6 +119,19 @@ def render_action_plan_markdown(report: ActionPlanReport) -> str:
             lines.append("  - suggested_commands:")
             lines.extend(f"    - `{command}`" for command in action.suggested_commands[:5])
     return "\n".join(lines) + "\n"
+
+
+def render_action_rescue_packet_lines(packet: dict[str, object]) -> list[str]:
+    retry = packet.get("retry_policy", {})
+    manual = packet.get("manual_confirmation", {})
+    retry_limit = retry.get("max_attempts", 0) if isinstance(retry, dict) else 0
+    manual_required = manual.get("required", True) if isinstance(manual, dict) else True
+    lines = [f"  - rescue_packet: retry_limit={retry_limit} manual_confirmation={manual_required}"]
+    refs = packet.get("recovery_entrypoints", [])
+    if isinstance(refs, list) and refs:
+        lines.append("  - rescue_packet_refs:")
+        lines.extend(f"    - `{ref}`" for ref in refs[:5])
+    return lines
 
 
 def render_action_apply_markdown(report: ActionApplyReport) -> str:

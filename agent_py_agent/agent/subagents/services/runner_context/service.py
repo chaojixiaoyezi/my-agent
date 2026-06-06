@@ -1,7 +1,6 @@
+"""Runner execution-context construction and persistence service."""
 
 from __future__ import annotations
-
-"""Runner execution-context construction and persistence service."""
 
 import json
 import time
@@ -11,16 +10,14 @@ from pathlib import Path
 from ....common.value_parsing import text_or_sequence_strings
 from ...controlled_exec_gateway import controlled_exec_grant_refs
 from ...manager_collaboration_context import collaboration_context_payload
-from ...manager_runtime_guidance import attach_runtime_guidance, runtime_guidance_context
 from ...models import SubAgentExecutionContext, SubAgentTask
 from ...policies import (
     _dedupe_granted_cards,
     _execution_context_instructions,
 )
-from ...role_templates import role_template_snapshot_for_task
+from ...role_templates import is_self_authorized_root_task, role_template_snapshot_for_task
 from ...runner_context_bundle_files import execution_context_bundle, write_context_bundle_files
 from ...runner_rendering import render_execution_context_markdown
-from ...runner_tool_policy import runner_allowed_tools
 from ...utils import (
     _apply_missing_paths,
     _merge_list,
@@ -127,7 +124,7 @@ class SubAgentRunnerContextService:
         _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
         granted_skills, granted_tools, grants = self._extract_granted_caps(task)
         allowed_skills = _merge_list(task.allowed_skills, granted_skills)
-        allowed_tools = runner_allowed_tools(task, _merge_list(task.allowed_tools, granted_tools))
+        allowed_tools = _runner_allowed_tools(task, _merge_list(task.allowed_tools, granted_tools))
         return self._make_execution_context(
             ExecutionContextBuildRequest(
                 task=task,
@@ -145,7 +142,7 @@ class SubAgentRunnerContextService:
         collaboration = collaboration_context_payload(self, task)
         if collaboration:
             context_bundle["collaboration"] = collaboration
-        attach_runtime_guidance(context_bundle, runtime_guidance_context(self, task.id))
+        _attach_runtime_guidance(context_bundle, _runtime_guidance_context(self, task.id))
         return SubAgentExecutionContext(
             **_execution_context_task_fields(task),
             allowed_skills=request.allowed_skills,
@@ -247,6 +244,34 @@ def _granted_filesystem_write_roots(task: object) -> list[str]:
             continue
         roots = _merge_list(roots, text_or_sequence_strings(getattr(grant, "path_scope", []) or []))
     return roots
+
+
+def _runtime_guidance_context(manager: object, run_id: str) -> list[dict[str, object]]:
+    store = getattr(manager, "conversation_store", None)
+    if store is None:
+        return []
+    entries = store.pending_guidance("agent_run", run_id, limit=20)
+    if not entries:
+        return []
+    store.mark_guidance_delivered([entry.guidance_id for entry in entries])
+    return [entry.to_dict() for entry in entries]
+
+
+def _attach_runtime_guidance(bundle: dict[str, object], guidance: list[dict[str, object]]) -> None:
+    if guidance:
+        bundle["runtime_guidance"] = guidance
+
+
+def _runner_allowed_tools(task: SubAgentTask, tools: list[str]) -> list[str]:
+    disabled = {
+        str(item or "").strip()
+        for item in (getattr(task, "effective_permissions", {}) or {}).get("disabled_tools", [])
+        if str(item or "").strip()
+    }
+    filtered = [item for item in tools if str(item or "").strip() not in disabled]
+    if not is_self_authorized_root_task(task):
+        return filtered
+    return [item for item in filtered if item != "capability_request"]
 
 
 # 让子代理能读自己的输入文件，同时不扩大写入权限。

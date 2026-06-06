@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
-from ..subagents.root_task_policy import is_self_authorized_root_task
+from ..subagents.role_templates import is_self_authorized_root_task
 from ..subagents.services.lifecycle import RecordCapabilityRequestParams
 from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 from .orchestration.scope_resolution import (
