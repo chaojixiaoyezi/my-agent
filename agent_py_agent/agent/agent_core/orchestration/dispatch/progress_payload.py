@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from ....runtime_errors import runtime_error_report
 from ....subagents.services.hierarchy.qa_scheduler import qa_orchestration_advice
+from ....subagents.services.recovery.modes import is_rerun_mode
 from ....subagents.services.recovery.strategy import (
     SubagentRecoveryStrategyRequest,
     build_subagent_recovery_strategy,
@@ -174,7 +175,7 @@ def _recovery_dispatch_tool_call(
     if len([item for item in run_ids if item]) != 1 or not primary_strategy:
         return call
     recovery_mode = str(primary_strategy.get("recovery_mode") or "")
-    if not recovery_mode.startswith("rerun_"):
+    if not is_rerun_mode(recovery_mode):
         return call
     call["recovery_mode"] = recovery_mode
     instruction = str(primary_strategy.get("runner_instruction") or "").strip()

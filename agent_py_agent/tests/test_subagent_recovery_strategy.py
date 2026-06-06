@@ -9,6 +9,11 @@ from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
+from agent_py_agent.agent.subagents.services.recovery.modes import (
+    action_for_recovery_mode,
+    is_rerun_mode,
+    is_takeover_mode,
+)
 from agent_py_agent.agent.subagents.services.recovery.strategy import (
     SubagentRecoveryStrategyRequest,
     build_subagent_recovery_strategy,
@@ -142,3 +147,13 @@ def test_recovery_strategy_suggests_leadership_recovery_for_failed_coordinator(t
     assert result.leadership_recovery is True
     assert result.child_run_ids == coordinator.child_ids
     assert "subagents-leadership-recovery-plan" in result.runner_instruction
+
+
+def test_recovery_mode_helpers_accept_only_current_structured_modes() -> None:
+    assert is_rerun_mode("rerun_from_continue_packet") is True
+    assert is_rerun_mode("rerun_from_checkpoint") is True
+    assert is_rerun_mode("rerun_from_old_alias") is False
+    assert is_takeover_mode("takeover_from_continue_packet") is True
+    assert is_takeover_mode("takeover_from_checkpoint") is True
+    assert is_takeover_mode("takeover_from_old_alias") is False
+    assert action_for_recovery_mode("rerun_from_old_alias") == "manual_review"

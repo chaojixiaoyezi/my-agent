@@ -156,6 +156,35 @@ def test_record_runner_result_pending_capability_stays_blocked(capability_manage
     assert capability_task.current_step == "PENDING_CAPABILITY_REQUEST"
 
 
+def test_record_runner_result_does_not_treat_old_tool_wait_status_as_capability_request(
+    capability_manager,
+    capability_task,
+):
+    """旧 WAITING_FOR_TOOL 状态只能 fail closed，不能自动变成能力申请。"""
+    capability_manager._tasks[capability_task.id] = capability_task
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        status="WAITING_FOR_TOOL",
+        summary="等待某个工具，但没有结构化 capability_request。",
+        capability_requests=[],
+        blocked_reason="",
+    )
+
+    result = capability_manager.record_runner_result(_rrr(
+        run_id="run-123",
+        dry_run=False,
+        ok=True,
+        message="旧状态别名",
+        structured_output=parsed,
+    ))
+
+    assert result.status == "BLOCKED"
+    assert capability_task.status == "BLOCKED"
+    assert capability_task.failure_type != "capability_request"
+    assert capability_task.capability_requests == []
+
+
 def test_record_runner_result_requires_explicit_pending_capability_request(capability_manager, capability_task):
     """pending_steps 不会被系统猜成 capability request。"""
     capability_manager._tasks[capability_task.id] = capability_task

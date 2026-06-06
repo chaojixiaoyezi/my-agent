@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Current structured recovery modes.
+
+Recovery dispatch accepts only the explicit modes below. Prefix-like strings
+such as rerun_from_old_alias intentionally fall through to manual review.
+"""
+
 from ....contracts.recovery_actions import RecoveryAction
 
 NO_PROGRESS_LIMIT_REACHED = "no_progress_limit_reached"
@@ -10,6 +16,9 @@ RERUN_FROM_CONTINUE_PACKET = "rerun_from_continue_packet"
 RERUN_FROM_CHECKPOINT = "rerun_from_checkpoint"
 CLOSED = "closed"
 MANUAL_REVIEW_MISSING_REFS = "manual_review_missing_recovery_refs"
+
+RERUN_MODES = frozenset({RERUN_FROM_CONTINUE_PACKET, RERUN_FROM_CHECKPOINT})
+TAKEOVER_MODES = frozenset({TAKEOVER_FROM_CONTINUE_PACKET, TAKEOVER_FROM_CHECKPOINT})
 
 
 def action_for_recovery_mode(mode: str) -> str:
@@ -27,11 +36,11 @@ def action_for_recovery_mode(mode: str) -> str:
 
 
 def is_rerun_mode(mode: str) -> bool:
-    return mode.startswith("rerun_")
+    return mode in RERUN_MODES
 
 
 def is_takeover_mode(mode: str) -> bool:
-    return mode.startswith("takeover_")
+    return mode in TAKEOVER_MODES
 
 
 def mode_uses_continue_packet(mode: str) -> bool:
@@ -43,8 +52,10 @@ __all__ = [
     "LEADERSHIP_RECOVERY",
     "MANUAL_REVIEW_MISSING_REFS",
     "NO_PROGRESS_LIMIT_REACHED",
+    "RERUN_MODES",
     "RERUN_FROM_CHECKPOINT",
     "RERUN_FROM_CONTINUE_PACKET",
+    "TAKEOVER_MODES",
     "TAKEOVER_FROM_CHECKPOINT",
     "TAKEOVER_FROM_CONTINUE_PACKET",
     "action_for_recovery_mode",

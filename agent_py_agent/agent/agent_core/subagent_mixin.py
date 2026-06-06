@@ -174,7 +174,7 @@ class _SubagentLifecycleBase:
                 response_text=failed_result.message,
                 backend="",
                 status=failed_result.status,
-                error_code=failed_result.runner_last_error or failure_type,
+                error_code=failure_type,
                 tool_calls=[],
             )
         )

@@ -527,6 +527,29 @@ def test_case_lifecycle_requires_summary_or_decision_when_closing(tmp_path) -> N
     ]
 
 
+def test_collaboration_status_aliases_do_not_trigger_machine_semantics(tmp_path) -> None:
+    from agent_py_agent.agent.collaboration import CollaborationStore
+    from agent_py_agent.agent.collaboration.request_status import (
+        is_declined_request_status,
+        is_terminal_status,
+        is_timed_out_request_status,
+    )
+
+    store = CollaborationStore(tmp_path / "collaboration")
+    case = store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "生命周期 case", 'summary': "需要后续关闭。", 'created_by': "agent-a", 'now': 10.0})
+
+    resolved = store.record_case_status({'case_id': case.case_id, 'status': "resolved", 'actor_agent_id': "agent-a", 'summary': "", 'now': 12.0})
+
+    assert resolved.status == "resolved"
+    assert is_terminal_status("resolved") is False
+    assert is_terminal_status("close") is False
+    assert is_terminal_status("closed") is True
+    assert is_timed_out_request_status("timed_out") is False
+    assert is_timed_out_request_status("timeout") is True
+    assert is_declined_request_status("rejected") is False
+    assert is_declined_request_status("declined") is True
+
+
 def _assert_empty_close_rejected(store, case_id: str) -> None:
     try:
         store.record_case_status({'case_id': case_id, 'status': "closed", 'actor_agent_id': "agent-a", 'summary': "", 'now': 11.0})
@@ -551,15 +574,15 @@ def test_update_collaboration_tool_records_decision_and_inspect_collaboration(tm
     update_result = agent.tools.tools["update_collaboration"].execute(
         {
             "case_id": case_id,
-            "status": "resolved",
+            "status": "closed",
             "actor_agent_id": "agent-a",
             "summary": "已经完成研判并给出处理结论。",
-            "decision_type": "resolved_by_main_agent",
+            "decision_type": "closed_by_main_agent",
         }
     )
     status = json.loads(agent.tools.tools["inspect_collaboration"].execute({"case_id": case_id}).output)
 
     assert update_result.ok is True
-    assert json.loads(update_result.output)["case"]["status"] == "resolved"
-    assert status["case"]["status"] == "resolved"
+    assert json.loads(update_result.output)["case"]["status"] == "closed"
+    assert status["case"]["status"] == "closed"
     assert status["decision_count"] == 1

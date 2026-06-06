@@ -9,11 +9,11 @@ from .store_common import float_value
 
 TargetAliases = Callable[[object], set[str]]
 
-TERMINAL_CASE_STATUSES = {"close", "closed", "resolved"}
+TERMINAL_CASE_STATUSES = {"closed"}
 COMPLETED_REQUEST_STATUSES = {"completed"}
 BLOCKED_REQUEST_STATUSES = {"blocked"}
-TIMED_OUT_REQUEST_STATUSES = {"timeout", "timed_out"}
-DECLINED_REQUEST_STATUSES = {"declined", "rejected"}
+TIMED_OUT_REQUEST_STATUSES = {"timeout"}
+DECLINED_REQUEST_STATUSES = {"declined"}
 
 
 def is_terminal_status(status: str) -> bool:

@@ -66,7 +66,7 @@ def write_finalized_recovery_snapshot(request: FinalizedRecoverySnapshotRequest)
             response_text=str(request.repair_state["message"]),
             backend=str(request.repair_state["backend_name"]),
             status=request.runner_result.status,
-            error_code=request.runner_result.runner_last_error,
+            error_code=str(getattr(request.runner_result, "failure_type", "") or ""),
             tool_calls=[
                 {"tool": tool_name, "id": f"{request.params.run_id}:{index}", "ok": True}
                 for index, tool_name in enumerate(request.params.result.executed_tools or [], start=1)

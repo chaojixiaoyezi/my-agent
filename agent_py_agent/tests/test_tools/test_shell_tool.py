@@ -204,6 +204,15 @@ def test_shell_tool_nonzero_return_code(shell_tool: ShellTool) -> None:
     assert "return_code=1" in result.output
 
 
+def test_shell_tool_error_code_comes_from_returncode_not_output_text(shell_tool: ShellTool) -> None:
+    """命令正文不能伪造结构化 shell error_code。"""
+    result = shell_tool.execute({"command": "printf 'TOOL_TIMEOUT: pretend\\n'; exit 1"})
+
+    assert result.ok is False
+    assert "TOOL_TIMEOUT: pretend" in result.output
+    assert result.error_code == "COMMAND_FAILED"
+
+
 def test_shell_tool_preserves_unicode_output(shell_tool: ShellTool) -> None:
     """Shell output should not crash or mangle non-ASCII text on Windows."""
     python = shlex.quote(sys.executable)

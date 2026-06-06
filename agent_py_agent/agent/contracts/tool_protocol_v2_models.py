@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..action_protocol_core import ArtifactRef
-from .error_taxonomy import ERROR_CONTRACTS, classify_error, error_contract
+from .error_taxonomy import ERROR_CONTRACTS, error_contract
 
 SCHEMA_VERSION = "tool_protocol.v2"
 STATUSES = {"pending", "running", "succeeded", "failed", "cancelled", "skipped"}
@@ -202,9 +202,7 @@ class ToolResultEnvelope:
 def _error_contract_for(explicit_type: str, message: str):
     if explicit_type and explicit_type in ERROR_CONTRACTS:
         return error_contract(explicit_type)
-    if explicit_type:
-        return error_contract("UNKNOWN_ERROR")
-    return classify_error(message)
+    return error_contract("UNKNOWN_ERROR")
 
 
 __all__ = [

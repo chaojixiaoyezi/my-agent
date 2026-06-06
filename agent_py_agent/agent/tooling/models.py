@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..contracts.error_taxonomy import classify_error, error_contract
+from ..contracts.error_taxonomy import error_contract
 
 
 @dataclass
@@ -116,7 +116,7 @@ class ToolExecutionResult:
             self.recommended_action = ""
             self.recovery_hint = ""
             return
-        contract = error_contract(self.error_code) if self.error_code else classify_error(self.output)
+        contract = error_contract(self.error_code) if self.error_code else error_contract("UNKNOWN_ERROR")
         self.error_code = contract.code
         self.error_category = contract.category
         self.retryable = contract.retryable

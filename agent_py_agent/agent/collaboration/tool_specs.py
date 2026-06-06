@@ -78,9 +78,9 @@ _EVIDENCE_PARAMETERS = {
 }
 _UPDATE_STATUS_PARAMETERS = {
     "case_id": "协作 case ID",
-    "status": "新状态；推荐 open/close 表达收集窗口状态，也可用项目自定义状态；关闭/解决语义必须带摘要",
+    "status": "新状态；推荐 open/closed 表达收集窗口状态，也可用项目自定义状态；closed 必须带摘要",
     "actor_agent_id": "执行状态推进的代理 ID",
-    "summary": "状态推进摘要；关闭/解决类状态必须提供摘要、决策或既有决策",
+    "summary": "状态推进摘要；closed 必须提供摘要、决策或既有决策",
     "decision_type": "可选决策类型，如 triaged_by_main_agent/resolved_by_main_agent",
     "evidence_ids": "可选关联证据包 ID 列表",
 }

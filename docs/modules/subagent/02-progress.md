@@ -16,6 +16,13 @@
   `manual_review`，避免跨版本残留污染当前 run。
 - 缺少结构化 `failure_type` 时，恢复快照不再从 `runner_last_error` 或自由文本错误里猜恢复码；
   工具错误文本分类只保留在工具结果诊断层，不能替代任务状态事实。
+- 恢复 mode 只认当前显式枚举，例如 `rerun_from_continue_packet`、`rerun_from_checkpoint`、
+  `takeover_from_continue_packet`、`takeover_from_checkpoint`；不再用 `rerun_*` / `takeover_*`
+  前缀把未知旧值提升成自动重跑或接管。
+- capability 等待状态只认当前协议 `PENDING_CAPABILITY_REQUEST`，不再把 `NEEDS_TOOL`、
+  `WAITING_FOR_TOOL` 等旧/模糊状态别名自动升级成能力申请。
+- 工具结果没有显式 `error_code` / `error_type` 时，机器错误码统一是 `UNKNOWN_ERROR`；
+  日志里的错误正文可以给模型看，但不能反推出结构化错误码、任务状态或验收结论。
 - `DONE` 仍是唯一已完成状态；`FAILED`、`TIMEOUT`、`CHANNEL_ERROR`、`BLOCKED`
   是可恢复/阻塞状态，恢复器和 strategy 只扫描这些结构化状态。
 - `output.json`、checkpoint 和 QA payload 只读结构化字段、`ok` 布尔、blockers 和 refs；

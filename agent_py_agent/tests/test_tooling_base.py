@@ -148,7 +148,7 @@ class TestToolExecutionResult:
         assert "status=error" in rendered
         assert "文件不存在" in rendered
 
-    def test_execution_result_error_contract_auto_classifies_failure(self):
+    def test_execution_result_requires_structured_error_code_for_contract(self):
         from agent_py_agent.agent.tooling.models import ToolExecutionResult
 
         result = ToolExecutionResult(
@@ -157,14 +157,28 @@ class TestToolExecutionResult:
             output="写入被阻止: 当前路径 outside workspace /tmp/outside.txt",
         )
 
+        assert result.error_code == "UNKNOWN_ERROR"
+        assert result.error_category == "unknown"
+        assert result.retryable is False
+        assert result.recommended_action == "report_blocker"
+        assert "未知失败" in result.recovery_hint
+        rendered = result.render_for_prompt()
+        assert "error_code=UNKNOWN_ERROR" in rendered
+        assert "recommended_action=report_blocker" in rendered
+
+    def test_execution_result_uses_explicit_error_code_contract(self):
+        from agent_py_agent.agent.tooling.models import ToolExecutionResult
+
+        result = ToolExecutionResult(
+            tool="write_file",
+            ok=False,
+            output="写入被阻止: 当前路径 outside workspace /tmp/outside.txt",
+            error_code="PATH_OUTSIDE_WORKSPACE",
+        )
+
         assert result.error_code == "PATH_OUTSIDE_WORKSPACE"
         assert result.error_category == "path"
-        assert result.retryable is False
         assert result.recommended_action == "fix_path_within_allowed_roots"
-        assert "修正路径" in result.recovery_hint
-        rendered = result.render_for_prompt()
-        assert "error_code=PATH_OUTSIDE_WORKSPACE" in rendered
-        assert "recommended_action=fix_path_within_allowed_roots" in rendered
 
     def test_execution_result_ok_has_no_error_contract(self):
         from agent_py_agent.agent.tooling.models import ToolExecutionResult

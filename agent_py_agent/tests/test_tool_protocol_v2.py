@@ -41,7 +41,7 @@ def test_success_result_round_trips_with_operation_and_status():
     assert validate_tool_result(decoded) == []
 
 
-def test_failure_result_classifies_error_and_retry_hint():
+def test_failure_result_requires_structured_error_type_for_retry_hint():
     call = normalize_tool_call(
         {
             "operation_id": "op-write-1",
@@ -61,10 +61,34 @@ def test_failure_result_classifies_error_and_retry_hint():
     )
 
     assert result.error is not None
-    assert result.error.error_type == "PATH_OUTSIDE_WORKSPACE"
-    assert result.error.retry_hint == "fix_path_within_allowed_roots"
+    assert result.error.error_type == "UNKNOWN_ERROR"
+    assert result.error.retry_hint == "report_blocker"
     assert result.error.retryable is False
     assert result.status == "failed"
+
+
+def test_failure_result_uses_explicit_structured_error_type():
+    call = normalize_tool_call(
+        {
+            "operation_id": "op-write-1",
+            "tool_name": "write_file",
+            "input": {"path": "../outside.txt"},
+            "idempotency_key": "idem-write-1",
+        }
+    )
+    result = normalize_tool_result(
+        {
+            "operation_id": call.operation_id,
+            "tool_name": call.tool_name,
+            "status": "failed",
+            "error": {"error_type": "PATH_OUTSIDE_WORKSPACE", "message": "write forbidden"},
+            "idempotency_key": call.idempotency_key,
+        }
+    )
+
+    assert result.error is not None
+    assert result.error.error_type == "PATH_OUTSIDE_WORKSPACE"
+    assert result.error.retry_hint == "fix_path_within_allowed_roots"
 
 
 def test_artifact_refs_are_structured_and_not_inferred_from_natural_language():

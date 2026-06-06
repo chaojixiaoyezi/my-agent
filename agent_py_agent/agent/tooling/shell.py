@@ -55,12 +55,6 @@ def _validate_command(command: str) -> str:
     return text
 
 
-def _shell_error_code(output: str) -> str:
-    if str(output or "").startswith("TOOL_TIMEOUT:"):
-        return "TOOL_TIMEOUT"
-    return "COMMAND_FAILED"
-
-
 def _timeout_from_params(params: dict[str, Any], default_timeout: int) -> int:
     raw_timeout = params.get("timeout")
     if raw_timeout is None:
@@ -324,7 +318,7 @@ class ShellTool(BaseTool):
                 error_code="ARTIFACT_BACKUP_FAILED",
             )
         artifact_summary: dict[str, Any] = {"snapshots": len(artifact_snapshots), "changed": [], "invalid": []}
-        output, ok = self._run_process_text(command, target, timeout)
+        output, ok, error_code = self._run_process_text(command, target, timeout)
         try:
             artifact_summary = reconcile_shell_artifacts(self.workspace_root, artifact_snapshots)
         except OSError as exc:
@@ -337,7 +331,7 @@ class ShellTool(BaseTool):
             ok,
             output,
             result_envelope={"artifact_protection": artifact_summary},
-            error_code="" if ok else _shell_error_code(output),
+            error_code="" if ok else error_code,
         )
 
     def _run_process_text(
@@ -345,15 +339,16 @@ class ShellTool(BaseTool):
         command: str,
         target: Path,
         timeout: int,
-    ) -> tuple[str, bool]:
+    ) -> tuple[str, bool, str]:
         try:
             result = self._run_command(command, target, timeout)
             output = _format_process_result(result, self.max_output_chars)
-            return output, result.returncode == 0
+            ok = result.returncode == 0
+            return output, ok, "" if ok else "COMMAND_FAILED"
         except subprocess.TimeoutExpired:
-            return f"TOOL_TIMEOUT: 命令执行超时 timeout ({timeout}s): {command[:100]}...", False
+            return f"TOOL_TIMEOUT: 命令执行超时 timeout ({timeout}s): {command[:100]}...", False, "TOOL_TIMEOUT"
         except OSError as exc:
-            return f"COMMAND_FAILED: 命令执行失败: {exc}", False
+            return f"COMMAND_FAILED: 命令执行失败: {exc}", False, "COMMAND_FAILED"
 
     def _parse_command(self, params: dict[str, Any]) -> str | ToolExecutionResult:
         try:

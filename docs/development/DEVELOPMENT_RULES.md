@@ -58,6 +58,11 @@ before changing code.
 - 状态别名不做隐式兼容。`completed`、`succeeded`、`ok`、`ERROR`、多语言词表或
   历史标签不能自动升格为当前协议的 `DONE` / `FAILED` / `final`；需要兼容时必须先写
   显式迁移或结构化转换记录，默认按未知值 fail closed。
+- 错误正文不是错误码。工具、runner、gateway 或子代理没有显式 `error_code` /
+  `error_type` 时，运行时只能写 `UNKNOWN_ERROR` 或对应结构化本地失败类型；不能从
+  message、stdout、stderr、summary 里用关键词反推出硬错误码并影响状态、恢复或验收。
+- recovery mode 和 capability status 只认当前协议枚举，不能用字符串前缀、英文词片段、
+  中文词片段或旧别名来触发自动重跑、接管、授权和 closeout 行为。
 - 错误要显性，不要糊成“还能跑”。启动失败、通道断开、子代理挂掉、artifact 丢失、
   config 未生效，都应暴露 typed failure，而不是伪装成 planning/running。
 - 工具不要重复造。已有工具能表达的能力，优先修底层语义或扩展明确参数；只有交互模式
