@@ -9,6 +9,7 @@ runner 写回状态的分支比较多，单独放这里，manager mixin 只负�
 from dataclasses import dataclass
 
 from .capability_status import is_pending_capability_status
+from .model_capabilities import capability_request_counts_as_open
 from .policies import _status_from_structured_output, _verification_from_runner_status
 
 _RUNNER_FAILURE_STATUSES = {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}
@@ -132,7 +133,10 @@ def _should_resolve_stale_capability_requests(task) -> bool:
 
 
 def _has_open_capability_requests(task) -> bool:
-    return any(getattr(request, "status", "") == "OPEN" for request in getattr(task, "capability_requests", []) or [])
+    return any(
+        capability_request_counts_as_open(getattr(request, "status", "OPEN"))
+        for request in getattr(task, "capability_requests", []) or []
+    )
 
 
 def _append_open_request_blocker(task) -> None:
@@ -143,8 +147,8 @@ def _append_open_request_blocker(task) -> None:
 
 def _resolve_stale_capability_requests(task) -> None:
     for request in getattr(task, "capability_requests", []) or []:
-        if getattr(request, "status", "") == "OPEN":
-            request.status = "RESOLVED"
+        if capability_request_counts_as_open(getattr(request, "status", "OPEN")):
+            request.status = "CLOSED"
 
 
 def _apply_unstructured_failure(task, ok, failure_type: str) -> None:

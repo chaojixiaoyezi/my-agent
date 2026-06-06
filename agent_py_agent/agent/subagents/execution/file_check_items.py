@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 
-def expand_file_exists_items(
+def expand_file_check_items(
     tests: list[dict[str, Any]],
     *,
     artifact_paths: list[tuple[str, Path]],
@@ -13,31 +13,31 @@ def expand_file_exists_items(
 ) -> list[dict[str, Any]]:
     expanded: list[dict[str, Any]] = []
     for item in tests:
-        expanded.extend(_expanded_file_exists_item(item, artifact_paths=artifact_paths, workspace_root=workspace_root))
+        expanded.extend(_expanded_file_check_item(item, artifact_paths=artifact_paths, workspace_root=workspace_root))
     return expanded
 
 
-def _expanded_file_exists_item(
+def _expanded_file_check_item(
     item: dict[str, Any],
     *,
     artifact_paths: list[tuple[str, Path]],
     workspace_root: Path,
 ) -> list[dict[str, Any]]:
-    if not _is_file_exists_alias(item):
+    if not _is_file_check_item(item):
         return [item]
     if str(item.get("file_path") or item.get("path") or "").strip():
-        return [_explicit_file_exists_item(item)]
+        return [_explicit_file_check_item(item)]
     if not artifact_paths:
         clone = dict(item)
         clone["validation_method"] = "file_check"
         return [clone]
     return [
-        _file_exists_item_for_target(item, path, artifact_paths=artifact_paths, workspace_root=workspace_root)
+        _file_check_item_for_target(item, path, artifact_paths=artifact_paths, workspace_root=workspace_root)
         for _raw, path in artifact_paths
     ]
 
 
-def _explicit_file_exists_item(item: dict[str, Any]) -> dict[str, Any]:
+def _explicit_file_check_item(item: dict[str, Any]) -> dict[str, Any]:
     clone = dict(item)
     clone["validation_method"] = "file_check"
     if not str(clone.get("file_path") or "").strip() and str(clone.get("path") or "").strip():
@@ -45,12 +45,12 @@ def _explicit_file_exists_item(item: dict[str, Any]) -> dict[str, Any]:
     return clone
 
 
-def _is_file_exists_alias(item: dict[str, Any]) -> bool:
+def _is_file_check_item(item: dict[str, Any]) -> bool:
     method = str(item.get("validation_method") or "command").strip().lower().replace("-", "_")
-    return method in {"file_exists", "path_exists", "artifact_exists"}
+    return method == "file_check"
 
 
-def _file_exists_item_for_target(
+def _file_check_item_for_target(
     item: dict[str, Any],
     path: Path,
     *,

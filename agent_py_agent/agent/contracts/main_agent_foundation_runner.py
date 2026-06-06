@@ -69,13 +69,13 @@ def run_main_agent_foundation(request: MainAgentFoundationRequest) -> MainAgentF
 
 def _case_tool_failure_contracts(workspace: Path) -> MainAgentFoundationCaseResult:
     samples = {
-        "PATH_INVALID": "文件不存在: missing-input.txt",
-        "PATH_OUTSIDE_WORKSPACE": "outside workspace: /tmp/not-allowed.txt",
-        "WRITE_FORBIDDEN": "permission denied while writing protected file",
-        "TOOL_UNAVAILABLE": "unknown tool: browser_magic",
-        "TOOL_INVALID_ARGUMENTS": "invalid argument schema for write_file",
-        "TOOL_TIMEOUT": "tool timed out after 240 seconds",
-        "MODEL_UPSTREAM_FAILED": "anthropic compatible provider returned 502",
+        "PATH_INVALID": "PATH_INVALID: missing-input.txt",
+        "PATH_OUTSIDE_WORKSPACE": "PATH_OUTSIDE_WORKSPACE: /tmp/not-allowed.txt",
+        "WRITE_FORBIDDEN": "WRITE_FORBIDDEN: protected file",
+        "TOOL_UNAVAILABLE": "TOOL_UNAVAILABLE: browser_magic",
+        "TOOL_INVALID_ARGUMENTS": "TOOL_INVALID_ARGUMENTS: write_file",
+        "TOOL_TIMEOUT": "TOOL_TIMEOUT: after 240 seconds",
+        "MODEL_UPSTREAM_FAILED": "MODEL_UPSTREAM_FAILED: provider returned 502",
     }
     observed = {expected: classify_error(message).code for expected, message in samples.items()}
     issues = [

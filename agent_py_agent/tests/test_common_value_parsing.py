@@ -10,10 +10,14 @@ def test_string_list_supports_common_model_parameter_forms() -> None:
     assert string_list("a,b") == ["a,b"]
 
 
-def test_common_numeric_and_bool_parsers_keep_existing_semantics() -> None:
+def test_common_numeric_and_bool_parsers_keep_structured_bool_semantics() -> None:
     from agent_py_agent.agent.common.value_parsing import bool_value, non_negative_int, positive_int
 
-    assert bool_value("apply") is True
-    assert bool_value("dry-run") is False
+    assert bool_value("true") is True
+    assert bool_value("1") is True
+    assert bool_value("false", default=True) is False
+    assert bool_value("0", default=True) is False
+    assert bool_value("apply") is False
+    assert bool_value("dry-run", default=True) is True
     assert positive_int("4", default=1) == 4
     assert non_negative_int("bad", default=3) == 3

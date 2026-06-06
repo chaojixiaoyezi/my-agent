@@ -61,8 +61,8 @@ class TestExecutor:
         method = _validation_method(test)
         if method == "command":
             return self._execute_command(test)
-        if method in {"file_check", "file_exists", "path_exists", "artifact_exists"}:
-            return self._check_file(test, method="file_check" if method != "file_check" else method)
+        if method == "file_check":
+            return self._check_file(test)
         if method == "content_check":
             return self._check_content(test)
         if method == "static_site_check":

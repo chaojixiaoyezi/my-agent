@@ -88,9 +88,9 @@ def bool_value(value: object, *, default: bool = False) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "y", "on", "apply"}:
+    if text in {"1", "true"}:
         return True
-    if text in {"0", "false", "no", "n", "off", "dry-run", "dry_run"}:
+    if text in {"0", "false"}:
         return False
     return default
 

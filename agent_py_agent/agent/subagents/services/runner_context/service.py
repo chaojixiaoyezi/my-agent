@@ -10,6 +10,7 @@ from pathlib import Path
 from ....common.value_parsing import text_or_sequence_strings
 from ...controlled_exec_gateway import controlled_exec_grant_refs
 from ...manager_collaboration_context import collaboration_context_payload
+from ...model_capabilities import capability_request_counts_as_open
 from ...models import SubAgentExecutionContext, SubAgentTask
 from ...policies import (
     _dedupe_granted_cards,
@@ -162,7 +163,9 @@ class SubAgentRunnerContextService:
             role_template=role_template_snapshot_for_task(task),
             write_boundary=self._build_write_boundary(task),
             pending_requests=[
-                asdict(item) for item in task.capability_requests if item.status == "OPEN"
+                asdict(item)
+                for item in task.capability_requests
+                if capability_request_counts_as_open(getattr(item, "status", "OPEN"))
             ],
             open_gaps=[asdict(item) for item in task.capability_gaps if item.status == "OPEN"],
             instructions=_execution_context_instructions(),

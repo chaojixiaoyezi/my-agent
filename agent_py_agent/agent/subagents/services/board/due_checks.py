@@ -6,6 +6,7 @@ from __future__ import annotations
 这里把单任务巡检拆出 board.py，用一个上下文对象承载重复参数，避免每个检查函数都有长参数列表。
 """
 
+from ...model_capabilities import capability_request_counts_as_open
 from ..recovery.strategy import SubagentRecoveryStrategyRequest, build_subagent_recovery_strategy
 from .due_models import (
     DueInspectionContext,
@@ -247,7 +248,9 @@ def _check_capability_gap_issues(ctx: DueInspectionContext):
 def inspect_single_task_due(request: InspectTaskDueRequest):
     """Inspect a single task for due issues. Returns a list of issues."""
     task = request.task
-    open_request_count = sum(1 for item in task.capability_requests if item.status == "OPEN")
+    open_request_count = sum(
+        1 for item in task.capability_requests if capability_request_counts_as_open(getattr(item, "status", "OPEN"))
+    )
     open_gap_count = sum(1 for item in task.capability_gaps if item.status == "OPEN")
     ctx = DueInspectionContext(
         task=task,

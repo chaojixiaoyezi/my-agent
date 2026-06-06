@@ -138,7 +138,7 @@ def _progress_tests(progress: dict[str, object]) -> list[dict[str, object]]:
     return [
         {
             "name": "declared product artifact exists",
-            "validation_method": "file_exists",
+            "validation_method": "file_check",
             "ok": True,
             "summary": "declared output path exists and is non-empty enough for closeout",
         }

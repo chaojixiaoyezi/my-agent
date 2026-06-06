@@ -253,6 +253,79 @@ def test_record_runner_result_keeps_tool_created_open_request_blocked(capability
     assert any("route_capability_request" in item for item in capability_task.blockers)
 
 
+def test_legacy_request_status_does_not_silently_close(capability_manager, capability_task):
+    """旧 capability_request 状态不能被当成当前协议的已处理终态。"""
+    capability_task.capability_requests.append(
+        CapabilityRequest(
+            id="capreq-old",
+            from_run_id=capability_task.id,
+            problem="旧状态残留不应隐藏。",
+            needed_capability="controlled_exec",
+            requested_tools=["controlled_exec"],
+            status="RESOLVED",
+        )
+    )
+    capability_manager._tasks[capability_task.id] = capability_task
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        status="DONE",
+        summary="模型声称完成，但旧状态 request 仍需结构化处理。",
+        capability_requests=[],
+        blocked_reason="",
+    )
+
+    result = capability_manager.record_runner_result(_rrr(
+        run_id="run-123",
+        dry_run=False,
+        ok=True,
+        message="不应进入验收",
+        structured_output=parsed,
+    ))
+
+    assert result.status == "BLOCKED"
+    assert capability_task.status == "BLOCKED"
+    assert capability_task.failure_type == "capability_request"
+    assert capability_task.capability_requests[0].status == "RESOLVED"
+
+
+def test_successful_recovery_closes_current_open_request_with_current_status(capability_manager, capability_task):
+    """从 capability_request 恢复成功后，用当前 CLOSED 状态关闭旧 OPEN 请求。"""
+    capability_task.failure_type = "capability_request"
+    capability_task.capability_requests.append(
+        CapabilityRequest(
+            id="capreq-open",
+            from_run_id=capability_task.id,
+            problem="等待授权后重跑。",
+            needed_capability="controlled_exec",
+            requested_tools=["controlled_exec"],
+            status="OPEN",
+        )
+    )
+    capability_manager._tasks[capability_task.id] = capability_task
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        status="DONE",
+        summary="授权后完成。",
+        capability_requests=[],
+        blocked_reason="",
+    )
+
+    result = capability_manager.record_runner_result(_rrr(
+        run_id="run-123",
+        dry_run=False,
+        ok=True,
+        message="完成",
+        structured_output=parsed,
+    ))
+
+    assert result.status == "DONE"
+    assert capability_task.status == "DONE"
+    assert capability_task.failure_type == ""
+    assert capability_task.capability_requests[0].status == "CLOSED"
+
+
 def test_parse_error_with_tool_created_open_request_stays_capability_blocked(capability_manager, capability_task):
     capability_task.capability_requests.append(
         CapabilityRequest(

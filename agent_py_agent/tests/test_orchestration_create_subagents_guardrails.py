@@ -5,10 +5,10 @@ from unittest.mock import MagicMock
 
 
 class TestCreateSubagentsToolDelegationGuard:
-    """测试派工目标不能反转父级结构化交付约束。"""
+    """测试专项交付约束不会变成 create-time 硬门。"""
 
-    def test_create_subagents_rejects_button_constraint_reversal(self):
-        """派工目标不能把 working_buttons 结构化约束改成 allow_dead_buttons。"""
+    def test_create_subagents_does_not_block_button_constraint_reversal(self):
+        """结构化按钮约束冲突由父代理验收，不在派工入口硬拦。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -17,6 +17,13 @@ class TestCreateSubagentsToolDelegationGuard:
         mock_agent.config.subagent_workflow_mode = "auto"
         mock_agent.subagents.workspace_root = Path("/tmp/project")
         mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
+        mock_task = MagicMock()
+        mock_task.id = "worker_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/worker_001"
+        mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
@@ -27,9 +34,8 @@ class TestCreateSubagentsToolDelegationGuard:
             "constraint_overrides": ["allow_dead_buttons"],
         })
 
-        assert result.ok is False
-        assert "delegation_constraint_conflict" in result.output
-        mock_agent.subagents.create_run.assert_not_called()
+        assert result.ok is True
+        mock_agent.subagents.create_run.assert_called_once()
 
     def test_create_subagents_rejects_hash_anchor_escape_when_user_requires_working_buttons(self):
         """自然语言提到按钮不再触发代码层约束，必须由结构化字段承载。"""
@@ -60,8 +66,8 @@ class TestCreateSubagentsToolDelegationGuard:
         assert result.ok is True
         mock_agent.subagents.create_run.assert_called_once()
 
-    def test_create_subagents_rejects_unverified_remote_images_when_user_requires_no_broken_images(self):
-        """派工目标不能把 verified_images 结构化约束改成 allow_unverified_remote_images。"""
+    def test_create_subagents_does_not_block_image_constraint_reversal(self):
+        """图片类专项约束也不在 create_subagents 入口硬拦。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -70,6 +76,13 @@ class TestCreateSubagentsToolDelegationGuard:
         mock_agent.config.subagent_workflow_mode = "auto"
         mock_agent.subagents.workspace_root = Path("/tmp/project")
         mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
+        mock_task = MagicMock()
+        mock_task.id = "worker_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/worker_001"
+        mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
@@ -80,9 +93,8 @@ class TestCreateSubagentsToolDelegationGuard:
             "constraint_overrides": ["allow_unverified_remote_images"],
         })
 
-        assert result.ok is False
-        assert "delegation_constraint_conflict" in result.output
-        mock_agent.subagents.create_run.assert_not_called()
+        assert result.ok is True
+        mock_agent.subagents.create_run.assert_called_once()
 
 
 class TestCreateSubagentsToolRawPromptRepair:

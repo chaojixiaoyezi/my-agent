@@ -63,15 +63,14 @@ def test_classify_mixed_execution_failures():
     result = classify_test_execution_report(TestFailureClassificationRequest(report=report))
 
     assert result.overall_status == "failed"
-    assert result.primary_category == "assertion_failure"
+    assert result.primary_category == "command_failed"
     assert result.recommended_action == "repair"
-    assert result.counts["assertion_failure"] == 1
+    assert result.counts["command_failed"] == 2
     assert result.counts["command_rejected"] == 1
-    assert result.counts["syntax_or_import_error"] == 1
     assert [item.category for item in result.items] == [
-        "assertion_failure",
+        "command_failed",
         "command_rejected",
-        "syntax_or_import_error",
+        "command_failed",
     ]
 
 
@@ -100,9 +99,29 @@ def test_write_test_failure_classification_refs_only(tmp_path):
     )
 
     text = path.read_text(encoding="utf-8")
-    assert "assertion_failure" in text
+    assert "command_failed" in text
     assert "cart total mismatch" in text
     assert "x" * 500 not in text
+
+
+def test_classify_timeout_from_structured_reason():
+    """LLM: Timeout routing must come from validation_result.reason, not output text."""
+
+    report = _report([
+        TestExecutionRecord(
+            test_name="slow",
+            command="python3 slow.py",
+            executed=False,
+            error="provider text mentions something else",
+            validation_method="command",
+            validation_result={"ok": False, "reason": "timeout"},
+        )
+    ])
+
+    result = classify_test_execution_report(TestFailureClassificationRequest(report=report))
+
+    assert result.primary_category == "timeout"
+    assert result.recommended_action == "takeover"
 
 
 def _report(records: list[TestExecutionRecord]) -> TestExecutionReport:

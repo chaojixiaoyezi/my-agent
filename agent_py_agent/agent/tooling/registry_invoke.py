@@ -138,7 +138,9 @@ def _boundary_bool(boundary: dict[str, object] | None, key: str) -> bool | None:
     value = boundary.get(key)
     if isinstance(value, bool):
         return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true"}
 
 
 def _normalized_roots(primary: Path, roots: list[Path] | None) -> list[Path]:

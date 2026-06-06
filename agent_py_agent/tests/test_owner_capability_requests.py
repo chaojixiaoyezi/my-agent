@@ -33,6 +33,33 @@ def test_owner_capability_request_lifecycle(tmp_path: Path):
     assert rows[-1].status == "expired"
 
 
+def test_owner_capability_request_rejects_unknown_close_status(tmp_path: Path):
+    from agent_py_agent.agent.user_space.capability_requests import (
+        CreateCapabilityRequest,
+        close_capability_request,
+        create_capability_request,
+    )
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path)
+    request = create_capability_request(
+        home,
+        CreateCapabilityRequest(
+            requested_by="agent_sub_1",
+            capability="browser_login",
+            reason="需要登录页面确认结果",
+            task_id="task_1",
+        ),
+    )
+
+    try:
+        close_capability_request(home, request.request_id, status="resolved")
+    except ValueError as exc:
+        assert str(exc) == "capability_request_status_invalid"
+    else:
+        raise AssertionError("unknown capability request status should not be silently closed")
+
+
 def test_owner_capability_requests_report_corrupt_files(tmp_path: Path):
     from agent_py_agent.agent.user_space.capability_requests import list_capability_requests_report
     from agent_py_agent.agent.user_space.home_doctor import build_home_doctor_report

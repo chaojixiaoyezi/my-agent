@@ -15,7 +15,6 @@ from ..subagents.services.base import CreateRunParams
 from ..tooling.models import BaseTool, ToolExecutionResult
 from .hierarchy_tools import ScheduleChildSubagentsTool as ScheduleChildSubagentsTool
 from .orchestration.create_constraints import (
-    delegation_constraint_conflict_error,
     explicit_root_missing_write_root_error,
 )
 from .orchestration.create_idempotency import (
@@ -226,7 +225,7 @@ class CreateSubagentsTool(BaseTool):
         )
         if target_error:
             return target_error
-        return delegation_constraint_conflict_error(params)
+        return ""
 
     def _requested_count(self, params: dict[str, object]) -> int | ToolExecutionResult:
         count = _positive_int(params.get("count"), default=1)

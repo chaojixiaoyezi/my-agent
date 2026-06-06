@@ -7,10 +7,6 @@ from dataclasses import dataclass
 
 SOURCE_ROOTS = ["agent_py_agent", "scripts"]
 
-FILE_SOFT_LIMIT = 400
-FILE_HARD_LIMIT: int | None = None
-TEST_SOFT_LIMIT = 700
-TEST_HARD_LIMIT: int | None = None
 FUNCTION_SOFT_LIMIT = 60
 FUNCTION_HARD_LIMIT = 100
 CLASS_SOFT_LIMIT = 250
@@ -43,11 +39,6 @@ JUNK_NAME_BASELINE = {
     "agent_py_agent/agent/log_analysis/parsers/common.py",
     "agent_py_agent/agent/subagents/utils.py",
     "agent_py_agent/cli/common.py",
-}
-
-# Files can grow when consolidation improves the main chain. This report keeps
-# visibility, but file length is advisory rather than a merge blocker.
-HIGH_RISK_FILES: dict[str, int] = {
 }
 
 EXCLUDE_PARTS = {

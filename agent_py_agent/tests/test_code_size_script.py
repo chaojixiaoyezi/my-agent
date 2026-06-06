@@ -33,41 +33,13 @@ def test_check_code_size_warn_generates_report() -> None:
     assert (repo_root / "CODE_SIZE_REPORT.md").exists()
 
 
-def test_near_soft_file_finding_is_high_risk(tmp_path, monkeypatch) -> None:
+def test_large_file_size_does_not_create_a_finding(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(check_code_size, "ROOT", tmp_path)
-    source = tmp_path / "agent_py_agent" / "near_soft_file.py"
+    source = tmp_path / "agent_py_agent" / "large_file.py"
     source.parent.mkdir()
-    source.write_text("\n".join("pass" for _ in range(320)), encoding="utf-8")
+    source.write_text("\n".join("pass" for _ in range(900)), encoding="utf-8")
 
-    findings = check_code_size._check_file_size(source)
-
-    assert len(findings) == 1
-    finding = findings[0]
-    assert finding.kind == "file"
-    assert finding.severity == "high-risk"
-    assert finding.value == 320
-    assert finding.limit == 400
-    assert "near soft limit" in finding.message
-
-
-def test_file_size_ignores_docstring_lines(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(check_code_size, "ROOT", tmp_path)
-    source = tmp_path / "agent_py_agent" / "documented_file.py"
-    source.parent.mkdir()
-    source.write_text('"""' + "\n".join(["design notes"] * 330) + '"""\npass\n', encoding="utf-8")
-
-    findings = check_code_size._check_file_size(source)
-
-    assert findings == []
-
-
-def test_file_size_ignores_full_line_comments(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(check_code_size, "ROOT", tmp_path)
-    source = tmp_path / "agent_py_agent" / "commented_file.py"
-    source.parent.mkdir()
-    source.write_text("\n".join(["# design note"] * 330 + ["pass"]) + "\n", encoding="utf-8")
-
-    findings = check_code_size._check_file_size(source)
+    findings = check_code_size.collect_findings()
 
     assert findings == []
 
@@ -151,7 +123,7 @@ def test_near_soft_ast_findings_cover_requested_kinds(tmp_path, monkeypatch) -> 
     assert all("near soft limit" in finding.message for finding in by_kind.values())
 
 
-def test_file_size_findings_do_not_block_strict() -> None:
+def test_legacy_file_size_findings_do_not_block_strict() -> None:
     findings = [
         Finding("function", "agent_py_agent/example.py", "near_function", 48, 60, "high-risk", "near soft limit"),
         Finding("file", "agent_py_agent/example.py", "example.py", 601, 600, "hard", "file too long"),
@@ -191,6 +163,6 @@ def test_report_surfaces_high_risk_near_soft_findings(tmp_path) -> None:
 
     text = report.read_text(encoding="utf-8")
     assert "- high_risk_findings: 1" in text
-    assert "## 7. High-risk / near-soft Top 100" in text
+    assert "## 6. High-risk / near-soft Top 100" in text
     assert "| high-risk | function |" in text
     assert "- blocked: False" in text

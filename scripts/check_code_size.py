@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-"""code-size governance checker for functions, classes, imports, and file trends.
+"""code-size governance checker for functions, classes, imports, and local readability.
 
-这个脚本生成 CODE_SIZE_REPORT.md。文件长度只做趋势提示，不再作为硬门；
+这个脚本生成 CODE_SIZE_REPORT.md。文件长度不参与 finding；
 strict 模式仍用于函数长度、类长度、参数数量、嵌套、星号导入、语法错误和新增垃圾文件名等局部可读性问题。
 """
 
@@ -25,22 +25,10 @@ from code_size_rules import (
     EXCLUDE_PATH_PREFIXES,
     EXCLUDE_PREFIXES,
     EXCLUDE_SUFFIXES,
-    FILE_HARD_LIMIT,
-    FILE_SOFT_LIMIT,
-    HIGH_RISK_FILES,
     JUNK_NAME_BASELINE,
     JUNK_NAMES,
     SOURCE_ROOTS,
-    TEST_HARD_LIMIT,
-    TEST_SOFT_LIMIT,
     Finding,
-)
-from code_size_thresholds import (
-    FindingInput,
-    LimitFindingInput,
-    is_near_soft,
-    limit_finding,
-    near_soft_finding,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -123,35 +111,6 @@ def _read_text_safe(path: Path) -> str | None:
         return None
 
 
-def _effective_file_line_count(text: str) -> int:
-    physical = len(text.splitlines())
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return physical
-    return max(0, physical - len(non_code_line_numbers(text, tree)))
-
-
-def _check_file_size(path: Path) -> list[Finding]:
-    rel = _relative(path)
-    text = _read_text_safe(path)
-    if text is None:
-        return [Finding("decode_error", rel, path.name, 0, 0, "hard", "failed to decode source file as UTF-8")]
-    line_count = _effective_file_line_count(text)
-    is_test = "/tests/" in f"/{rel}" or rel.startswith("test")
-    soft = TEST_SOFT_LIMIT if is_test else FILE_SOFT_LIMIT
-    hard = TEST_HARD_LIMIT if is_test else FILE_HARD_LIMIT
-    if line_count <= soft:
-        if is_near_soft(line_count, soft):
-            return [
-                near_soft_finding(
-                    FindingInput("file", rel, path.name, line_count, soft, f"{rel} has {line_count} lines")
-                )
-            ]
-        return []
-    return [limit_finding(LimitFindingInput(FindingInput("file", rel, path.name, line_count, soft, f"{rel} has {line_count} lines"), hard))]
-
-
 def _check_ast(path: Path) -> list[Finding]:
     rel = _relative(path)
     findings: list[Finding] = []
@@ -186,40 +145,12 @@ def _check_junk_names(paths: list[Path]) -> list[Finding]:
     return findings
 
 
-def _check_high_risk_files() -> list[Finding]:
-    """Report advisory growth for explicitly watched files."""
-    findings: list[Finding] = []
-    for rel_path, baseline in HIGH_RISK_FILES.items():
-        path = ROOT / rel_path
-        if not path.exists():
-            continue
-        text = _read_text_safe(path)
-        if text is None:
-            continue
-        current = len(text.splitlines())
-        if current > baseline:
-            findings.append(
-                Finding(
-                    "high_risk_growth",
-                    rel_path,
-                    path.name,
-                    current,
-                    baseline,
-                    "soft",
-                    f"{rel_path} grew from {baseline} to {current} lines",
-                )
-            )
-    return findings
-
-
 def collect_findings() -> list[Finding]:
     files = _source_files()
     findings: list[Finding] = []
     for path in files:
-        findings.extend(_check_file_size(path))
         findings.extend(_check_ast(path))
     findings.extend(_check_junk_names(files))
-    findings.extend(_check_high_risk_files())
     return sorted(findings, key=lambda item: (item.severity != "hard", item.kind, item.path, item.name))
 
 

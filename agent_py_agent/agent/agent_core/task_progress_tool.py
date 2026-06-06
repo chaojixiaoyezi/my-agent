@@ -22,6 +22,8 @@ class TaskProgressTool(BaseTool):
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         action = _normalized_action(params.get("action"))
+        if action_error := _invalid_action_result(action):
+            return action_error
         run_id = _target_run_id(self.agent, params, allow_explicit=action == "read")
         if not run_id:
             run_id = "main"
@@ -58,20 +60,24 @@ def _invalid_status_result(params: dict[str, object]) -> ToolExecutionResult | N
 
 def _normalized_action(value: object) -> str:
     action = str(value or "read").strip().lower()
-    if action in {
-        "update",
-        "create",
-        "init",
-        "initialize",
-        "start",
-        "begin",
-        "set",
-        "save",
-        "record",
-        "write",
-    }:
-        return "update"
-    return "read"
+    return action if action in {"read", "update"} else action or "read"
+
+
+def _invalid_action_result(action: str) -> ToolExecutionResult | None:
+    if action in {"read", "update"}:
+        return None
+    payload = {
+        "ok": False,
+        "error": "task_progress action must be exactly read or update.",
+        "invalid_action": action,
+        "allowed_actions": ["read", "update"],
+    }
+    return ToolExecutionResult(
+        "task_progress",
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code="TOOL_INVALID_ARGUMENTS",
+    )
 
 
 def _target_run_id(agent: object, params: dict[str, object], *, allow_explicit: bool) -> str:

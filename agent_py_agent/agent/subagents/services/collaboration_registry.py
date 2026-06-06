@@ -39,8 +39,6 @@ def collaboration_capabilities_for_task(task: Any) -> list[str]:
         _extend_capabilities(capabilities, value)
     for tool in _string_items(getattr(task, "allowed_tools", [])):
         _add_capability(capabilities, tool)
-        for alias in _capability_aliases_for_tool(tool):
-            _add_capability(capabilities, alias)
     return capabilities
 
 
@@ -61,22 +59,6 @@ def collaboration_sources_for_task(task: Any) -> list[str]:
     for key in ("sources", "source_ids", "source_refs"):
         _extend_capabilities(sources, attrs.get(key))
     return sources
-
-
-def _capability_aliases_for_tool(tool: str) -> list[str]:
-    name = tool.lower()
-    aliases: list[str] = []
-    if any(token in name for token in ("read", "search", "query", "fetch", "list", "get", "http", "browser")):
-        aliases.append("query")
-    if "submit_collaboration_result" in name or ("evidence" in name and any(token in name for token in ("submit", "add", "record"))):
-        aliases.extend(["evidence", "evidence_submission"])
-    if any(token in name for token in ("write", "append", "replace", "save", "create", "structured data")):
-        aliases.extend(["write", "artifact_write"])
-    if any(token in name for token in ("send", "notify", "message")):
-        aliases.append("notify")
-    if any(token in name for token in ("dispatch", "subagent", "delegate")):
-        aliases.append("delegate")
-    return aliases
 
 
 def _extend_capabilities(target: list[str], value: object) -> None:

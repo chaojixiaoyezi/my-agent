@@ -4,12 +4,12 @@ from __future__ import annotations
 def test_error_taxonomy_classifies_failures_and_recommends_recovery() -> None:
     from agent_py_agent.agent.contracts.error_taxonomy import classify_error, error_contract
 
-    path_error = classify_error("write_file failed: path outside workspace /tmp/other")
+    path_error = classify_error("PATH_OUTSIDE_WORKSPACE: /tmp/other")
     assert path_error.code == "PATH_OUTSIDE_WORKSPACE"
     assert path_error.retryable is False
     assert "修正路径" in path_error.recovery_hint
 
-    upstream = classify_error("anthropic compatible provider timeout after 240 seconds")
+    upstream = classify_error("MODEL_UPSTREAM_FAILED: timeout after 240 seconds")
     assert upstream.code == "MODEL_UPSTREAM_FAILED"
     assert upstream.retryable is True
 
@@ -17,7 +17,7 @@ def test_error_taxonomy_classifies_failures_and_recommends_recovery() -> None:
     assert contract.category == "artifact"
     assert contract.recommended_action == "read_artifact_ref"
 
-    approval = classify_error("dangerous command blocked: approval required before execution")
+    approval = classify_error("APPROVAL_REQUIRED: dangerous command blocked before execution")
     assert approval.code == "APPROVAL_REQUIRED"
     assert approval.retryable is True
 
@@ -26,29 +26,33 @@ def test_error_taxonomy_classifies_failures_and_recommends_recovery() -> None:
     assert no_progress.recommended_action == "change_strategy"
 
 
-def test_error_taxonomy_does_not_overclassify_generic_schema_or_path_words() -> None:
+def test_error_taxonomy_requires_explicit_machine_code() -> None:
     from agent_py_agent.agent.contracts.error_taxonomy import classify_error
 
     timeout = classify_error("tool timed out while reading JSON schema documentation")
-    assert timeout.code == "TOOL_TIMEOUT"
+    assert timeout.code == "UNKNOWN_ERROR"
+
+    explicit_timeout = classify_error("tool-timeout: while reading JSON schema documentation")
+    assert explicit_timeout.code == "TOOL_TIMEOUT"
 
     generic_schema = classify_error("report mentions schema and path as documentation headings")
     assert generic_schema.code == "UNKNOWN_ERROR"
 
 
-def test_error_taxonomy_uses_ranked_specific_matches_and_chinese_signals() -> None:
+def test_error_taxonomy_uses_explicit_codes_only() -> None:
     from agent_py_agent.agent.contracts.error_taxonomy import (
         classify_error,
         tool_failure_taxonomy,
     )
 
-    assert classify_error("artifact schema doc says missing rows, but request timed out").code == "TOOL_TIMEOUT"
-    assert classify_error("执行失败：权限不足，无法写入目标目录").code == "WRITE_FORBIDDEN"
-    assert classify_error("工具不存在: magic_search").code == "TOOL_UNAVAILABLE"
-    assert classify_error("请求超时，请稍后重试").code == "TOOL_TIMEOUT"
-    assert classify_error("HTTP 429 rate limit exceeded").code == "RATE_LIMITED"
-    assert classify_error("quota exceeded for provider").code == "QUOTA_EXCEEDED"
-    assert classify_error("service unavailable during maintenance window").code == "MAINTENANCE"
+    assert classify_error("ARTIFACT_MISSING: schema doc has no rows").code == "ARTIFACT_MISSING"
+    assert classify_error("write-forbidden: cannot write target").code == "WRITE_FORBIDDEN"
+    assert classify_error("TOOL_UNAVAILABLE: magic_search").code == "TOOL_UNAVAILABLE"
+    assert classify_error("TOOL_TIMEOUT: retry later").code == "TOOL_TIMEOUT"
+    assert classify_error("RATE_LIMITED: HTTP 429").code == "RATE_LIMITED"
+    assert classify_error("QUOTA_EXCEEDED: provider quota").code == "QUOTA_EXCEEDED"
+    assert classify_error("MAINTENANCE: service window").code == "MAINTENANCE"
+    assert classify_error("请求超时，请稍后重试").code == "UNKNOWN_ERROR"
 
     taxonomy = tool_failure_taxonomy()
     assert taxonomy == sorted(taxonomy)

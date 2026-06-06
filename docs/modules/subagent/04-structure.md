@@ -31,6 +31,10 @@ SimpleAgent orchestration tool
   私有转换表已删除，避免 `WAIT_CHILD` 等历史状态绕过当前协议。
 - 恢复模式和 capability 等待状态也只认当前结构化枚举。未知 `rerun_*` / `takeover_*`
   前缀、`NEEDS_TOOL` 这类旧别名、工具错误正文，都不能触发自动重跑、接管、授权或验收状态变更。
+- capability request 的打开/终态判断集中在 `model_capabilities.py`。`OPEN` 代表待处理，
+  `GRANTED` 代表已授权且可避免重复申请，`GAP` 和 `CLOSED` 是当前终态；旧
+  `RESOLVED`、`APPROVED`、`REJECTED` 不再被 kernel、protocol、runner、board 或
+  runner context 静默当成当前终态。
 - 子代理过程文件：`work/agents/<run_id>/...`。
 - 用户最终交付：主代理汇总后写当前 task `output/`，或用户显式指定的输出目录。
 - owner projection：`owner_home/agents/<run_id>/` 只保存 refs，用于 tree、compact、恢复和跨 session 查找。
@@ -67,6 +71,23 @@ QA 失败只来自任务状态、结构化 `ok: false`、`passed: false`、block
 
 主代理可以用 `cancel_subagents` 按 run_id/root/status 取消下级。取消会写 CANCELLED/ABANDONED、废弃 active attempt、尽量 interrupt/terminate 已知 pid/session，并写审计记录。主代理说明取消/接管原因后，可以继续汇总和验收。
 
+## Create-Time Boundaries
+
+`create_subagents` 只负责结构化派工、目标路径、写入安全和 lineage 记录。业务质量约束
+（例如按钮是否可用、图片是否可验、注释是否允许）可以随任务上下文传递，但不能变成
+派工入口硬门；父代理应在读取子代理 refs 后验收或安排 QA。
+
+## Collaboration Capabilities
+
+子代理模板或创建属性可以显式声明 `capabilities`、`collaboration_capabilities` 或
+`provided_capabilities`。协作路由按这些字段和真实工具名匹配，不从工具名子串、角色说明
+或 summary 自动推断 `query`、`write`、`delegate` 等抽象能力。
+
 ## Artifact Rule
 
 子代理可以写自己的过程产物和协作文件，但最终用户交付由主代理汇总。子代理 `final_report.md` 这类内部文件只作为证据/引用，不会自动变成用户最终交付。
+
+子代理结果回报里的产物入口只认当前结构化字段：`artifacts`、顶层
+`artifact_refs`、`evidence kind=artifact` 和 `evidence_packets[].artifact_refs`。
+`deliverables`、`files_modified`、顶层 `file_path/path` 这类历史别名不会被恢复成
+artifact refs。创建任务时给子代理的 `output_files` 是目标路径合同，不是结果回报别名。

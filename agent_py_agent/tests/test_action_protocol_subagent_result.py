@@ -64,7 +64,7 @@ def test_subagent_result_envelope_does_not_infer_tools_from_summary():
     assert envelope.actual_tools == []
 
 
-def test_subagent_result_accepts_deliverables_alias_for_artifacts():
+def test_subagent_result_ignores_deliverables_alias_for_artifacts():
     text = (
         "[SUBAGENT_RESULT]\n"
         "{"
@@ -80,10 +80,10 @@ def test_subagent_result_accepts_deliverables_alias_for_artifacts():
     parsed = parse_subagent_runner_output(text)
 
     assert parsed.ok
-    assert parsed.artifacts == [{"path": "deliverables/site-output/index.html", "kind": "html"}]
+    assert parsed.artifacts == []
 
 
-def test_subagent_result_envelope_accepts_deliverables_alias_for_artifacts():
+def test_subagent_result_envelope_ignores_deliverables_alias_for_artifacts():
     text = (
         "[SUBAGENT_RESULT]\n"
         "{"
@@ -104,7 +104,7 @@ def test_subagent_result_envelope_accepts_deliverables_alias_for_artifacts():
     )
 
     assert envelope is not None
-    assert envelope.artifact_refs[0].path == "deliverables/site-output/index.html"
+    assert envelope.artifact_refs == []
 
 
 def test_subagent_result_recovers_artifact_from_evidence_path():
@@ -143,7 +143,7 @@ def test_subagent_result_recovers_artifact_from_evidence_packet_refs():
     assert parsed.artifacts == [{"path": "/tmp/site/index.html", "kind": "file", "summary": "HTML exists"}]
 
 
-def test_subagent_result_recovers_artifact_from_files_modified():
+def test_subagent_result_ignores_files_modified_alias():
     text = (
         "[SUBAGENT_RESULT]\n"
         "{"
@@ -157,10 +157,4 @@ def test_subagent_result_recovers_artifact_from_files_modified():
     parsed = parse_subagent_runner_output(text)
 
     assert parsed.ok
-    assert parsed.artifacts == [
-        {
-            "path": "deliverables/site-output/index.html",
-            "kind": "file",
-            "summary": "reported modified artifact",
-        }
-    ]
+    assert parsed.artifacts == []

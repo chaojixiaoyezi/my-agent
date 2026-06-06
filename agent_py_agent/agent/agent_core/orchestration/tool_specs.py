@@ -99,7 +99,7 @@ def build_task_progress_spec() -> ToolSpec:
         avoid_when=["只做一句普通回复、不需要跨轮保存进度时可以不用"],
         keywords=["进度", "清单", "todo", "checkpoint", "继续做", "compact", "任务账本"],
         parameters={
-            "action": "read 或 update；create/init/start/begin/set/save/record/write 会按 update 处理；不填默认 read",
+            "action": "read 或 update；不填默认 read。不要使用 create/init/start/begin/set/save/record/write 这类旧别名。",
             "run_id": "可选。读取指定代理 run 的进度；更新默认写当前代理自己的 run",
             "summary": "可选。当前整体进展一句话",
             "next_action": "可选。下一步最应该做什么",

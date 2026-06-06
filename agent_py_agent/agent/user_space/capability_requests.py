@@ -11,6 +11,8 @@ from uuid import uuid4
 from ..common.json_io import read_json_object_report
 from .home_layout import MyAgentHomePaths
 
+CAPABILITY_REQUEST_STATUSES = frozenset({"open", "approved", "denied", "expired", "cancelled", "closed"})
+
 
 @dataclass(frozen=True)
 class OwnerCapabilityRequest:
@@ -63,7 +65,7 @@ def create_capability_request(home: MyAgentHomePaths, request: CreateCapabilityR
 def close_capability_request(home: MyAgentHomePaths, request_id: str, *, status: str, note: str = "") -> OwnerCapabilityRequest:
     path = home.owner_capability_requests_dir / f"{_safe_id(request_id)}.json"
     payload = _read_payload(path)
-    payload["status"] = _safe_status(status)
+    payload["status"] = _validated_status(status)
     payload["note"] = str(note or "")
     payload["updated_at"] = _now_iso()
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -141,9 +143,11 @@ def _safe_id(value: object) -> str:
     return result.strip("-_") or "unknown"
 
 
-def _safe_status(value: object) -> str:
-    text = str(value or "").strip().lower()
-    return text if text in {"open", "approved", "denied", "expired", "cancelled", "closed"} else "closed"
+def _validated_status(value: object) -> str:
+    text = str(value or "").strip()
+    if text in CAPABILITY_REQUEST_STATUSES:
+        return text
+    raise ValueError("capability_request_status_invalid")
 
 
 def _now_iso() -> str:
@@ -163,6 +167,7 @@ def _parse_time(value: str) -> datetime | None:
 __all__ = [
     "CreateCapabilityRequest",
     "CapabilityRequestsReport",
+    "CAPABILITY_REQUEST_STATUSES",
     "OwnerCapabilityRequest",
     "close_capability_request",
     "create_capability_request",

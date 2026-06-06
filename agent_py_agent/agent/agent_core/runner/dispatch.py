@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from ...settings.defaults import default_config_int
 from ...settings.runtime_guard_config import runtime_guard_int
 from ...subagents import SubAgentTask
+from ...subagents.model_capabilities import capability_request_counts_as_open
 from .candidate_policy import (
     RunnerCandidatePolicy,
     candidate_policy,
@@ -210,7 +211,7 @@ def _is_dispatch_runner_candidate(
         return False
     if task.channel_status == "BROKEN":
         return False
-    if any(item.status == "OPEN" for item in task.capability_requests):
+    if any(capability_request_counts_as_open(getattr(item, "status", "OPEN")) for item in task.capability_requests):
         return False
     if any(item.status == "OPEN" for item in task.capability_gaps):
         return False
@@ -249,7 +250,10 @@ def _can_retry_same_run(
 def _blocked_after_capability_grant(task: SubAgentTask) -> bool:
     if not getattr(task, "capability_grants", None):
         return False
-    if any(item.status == "OPEN" for item in getattr(task, "capability_requests", []) or []):
+    if any(
+        capability_request_counts_as_open(getattr(item, "status", "OPEN"))
+        for item in getattr(task, "capability_requests", []) or []
+    ):
         return False
     if any(item.status == "OPEN" for item in getattr(task, "capability_gaps", []) or []):
         return False

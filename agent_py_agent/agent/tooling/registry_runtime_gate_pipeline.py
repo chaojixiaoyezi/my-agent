@@ -271,9 +271,9 @@ def _bool_value(value: object, default: bool) -> bool:
     if value is None:
         return default
     text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "on"}:
+    if text in {"1", "true"}:
         return True
-    if text in {"0", "false", "no", "off"}:
+    if text in {"0", "false"}:
         return False
     return default
 

@@ -98,11 +98,11 @@ def _case_large_tool_output_artifact(workspace: Path) -> E2ECaseResult:
 
 def _case_tool_failure_taxonomy(workspace: Path) -> E2ECaseResult:
     samples = {
-        "PATH_INVALID": "文件不存在: missing.txt",
-        "PATH_OUTSIDE_WORKSPACE": "outside workspace /tmp/other.txt",
-        "WRITE_FORBIDDEN": "permission denied while writing",
-        "TOOL_UNAVAILABLE": "unknown tool: browser_magic",
-        "MODEL_UPSTREAM_FAILED": "anthropic compatible provider timeout",
+        "PATH_INVALID": "PATH_INVALID: missing.txt",
+        "PATH_OUTSIDE_WORKSPACE": "PATH_OUTSIDE_WORKSPACE: /tmp/other.txt",
+        "WRITE_FORBIDDEN": "WRITE_FORBIDDEN: writing denied",
+        "TOOL_UNAVAILABLE": "TOOL_UNAVAILABLE: browser_magic",
+        "MODEL_UPSTREAM_FAILED": "MODEL_UPSTREAM_FAILED: provider timeout",
     }
     issues = [f"{expected}->{classify_error(message).code}" for expected, message in samples.items() if classify_error(message).code != expected]
     evidence = workspace / "tool_failure_taxonomy" / "classification.txt"

@@ -95,9 +95,9 @@ def _bool_param(value: Any, *, default: bool = False) -> bool:
         return bool(value)
     if isinstance(value, str):
         text = value.strip().lower()
-        if text in {"1", "true", "yes", "y", "on"}:
+        if text in {"1", "true"}:
             return True
-        if text in {"0", "false", "no", "n", "off"}:
+        if text in {"0", "false"}:
             return False
     return default
 

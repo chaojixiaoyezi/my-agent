@@ -439,28 +439,19 @@ def test_prepare_test_items_does_not_duplicate_static_site_check(tmp_path):
     assert [item["validation_method"] for item in prepared] == ["static_site_check"]
 
 
-def test_prepare_test_items_converts_static_site_command_alias(tmp_path):
-    site_dir = tmp_path / "site"
-    site_dir.mkdir()
-    index = site_dir / "index.html"
-    index.write_text("<!doctype html><html><body><a href='#hero'>hero</a><section id='hero'></section></body></html>", encoding="utf-8")
-
+def test_prepare_test_items_does_not_convert_static_site_command_alias(tmp_path):
     prepared = prepare_test_items(
         TestItemPreparationRequest(
             tests=[{"name": "static-site-smoke", "command": "static_site_check"}],
-            output={"artifacts": [{"path": str(index)}]},
+            output={"artifacts": []},
             workspace_root=tmp_path,
         )
     )
 
     assert prepared == [
         {
-            "name": "inferred static site check",
-            "validation_method": "static_site_check",
-            "site_root": "site",
-            "required_files": ["index.html"],
-            "require_complete_html": True,
-            "html_files": ["index.html"],
+            "name": "static-site-smoke",
+            "command": "static_site_check",
         }
     ]
 

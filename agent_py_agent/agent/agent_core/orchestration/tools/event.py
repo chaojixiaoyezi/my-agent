@@ -258,4 +258,6 @@ def _metadata_values(value: object) -> dict[str, object]:
 def _boolish(value: object) -> bool:
     if isinstance(value, bool):
         return value
-    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or "").strip().lower() in {"1", "true"}

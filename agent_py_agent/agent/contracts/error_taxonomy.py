@@ -1,9 +1,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
-from .error_classification_rules import matched_error_codes
 from .recovery_actions import RecoveryAction
 
 
@@ -389,11 +389,21 @@ def error_contract(code: str) -> ErrorContract:
 
 
 def classify_error(message: str) -> ErrorContract:
-    matches = matched_error_codes(str(message or ""), ERROR_CONTRACTS.keys())
+    matches = _explicit_error_code_matches(str(message or ""), ERROR_CONTRACTS.keys())
     if matches:
         _, code = sorted(matches, key=lambda item: (-item[0], item[1]))[0]
         return error_contract(code)
     return error_contract("UNKNOWN_ERROR")
+
+
+def _explicit_error_code_matches(text: str, contract_codes) -> list[tuple[int, str]]:
+    lowered = text.lower()
+    matches: list[tuple[int, str]] = []
+    for code in contract_codes:
+        variants = (code.lower(), code.lower().replace("_", "-"))
+        if any(re.search(rf"(?<![a-z0-9]){re.escape(variant)}(?![a-z0-9])", lowered) for variant in variants):
+            matches.append((1000, code))
+    return matches
 
 
 def tool_failure_taxonomy() -> list[str]:

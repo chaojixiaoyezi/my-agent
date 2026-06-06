@@ -340,7 +340,7 @@ def _register_site_group(tmp_path: Path, site: Path) -> None:
     )
 
 
-def test_subagent_file_path_alias_is_recovered_as_artifact_item():
+def test_subagent_file_path_alias_is_not_recovered_as_artifact_item():
     from agent_py_agent.agent.subagents.parsing.artifacts import artifact_items_from_payload
 
     items = artifact_items_from_payload(
@@ -350,13 +350,7 @@ def test_subagent_file_path_alias_is_recovered_as_artifact_item():
         }
     )
 
-    assert items == [
-        {
-            "path": "/tmp/run/weekly_top20_stars_2026.xlsx",
-            "kind": "file",
-            "summary": "reported file_path artifact",
-        }
-    ]
+    assert items == []
 
 
 def test_subagent_structured_artifact_registers_registry_ref(mock_task, tmp_path: Path):

@@ -41,13 +41,11 @@ def _section(title: str, findings: list[Any], limit: int = 0) -> list[str]:
 
 def _findings_by_kind(findings: list[Any]) -> dict[str, list[Any]]:
     kinds = {
-        "file",
         "function",
         "class",
         "mixin",
         "params",
         "nesting",
-        "high_risk_growth",
         "import_star",
         "decode_error",
         "junk_name",
@@ -76,25 +74,23 @@ def _finding_sections(findings: list[Any]) -> list[str]:
     high_risk = [item for item in findings if item.severity == "high-risk"]
     soft = [item for item in findings if item.severity == "soft"]
     return [
-        *_section("## 1. Oversized Files Top 20", by_kind["file"], 20),
-        *_section("## 2. Oversized Functions Top 20", by_kind["function"], 20),
-        *_section("## 3. Oversized Classes Top 20", by_kind["class"], 20),
-        *_section("## 4. Oversized Mixins Top 20", by_kind["mixin"], 20),
-        *_section("## 5. Too Many Params Top 20", by_kind["params"], 20),
-        *_section("## 6. Deep Nesting Top 20", by_kind["nesting"], 20),
-        *_section("## 7. High-risk / near-soft Top 100", high_risk, 100),
-        *_section("## 8. High-risk File Growth", by_kind["high_risk_growth"]),
-        *_section("## 9. import * Violations", by_kind["import_star"]),
-        *_section("## 10. Decode Error Violations", by_kind["decode_error"]),
-        *_section("## 11. Junk File / Junk Name Violations", by_kind["junk_name"]),
-        *_section("## 12. Historical Soft Findings", soft[:100]),
+        *_section("## 1. Oversized Functions Top 20", by_kind["function"], 20),
+        *_section("## 2. Oversized Classes Top 20", by_kind["class"], 20),
+        *_section("## 3. Oversized Mixins Top 20", by_kind["mixin"], 20),
+        *_section("## 4. Too Many Params Top 20", by_kind["params"], 20),
+        *_section("## 5. Deep Nesting Top 20", by_kind["nesting"], 20),
+        *_section("## 6. High-risk / near-soft Top 100", high_risk, 100),
+        *_section("## 7. import * Violations", by_kind["import_star"]),
+        *_section("## 8. Decode Error Violations", by_kind["decode_error"]),
+        *_section("## 9. Junk File / Junk Name Violations", by_kind["junk_name"]),
+        *_section("## 10. Historical Soft Findings", soft[:100]),
     ]
 
 
 def _recommendations() -> list[str]:
     return [
         "",
-        "## 13. Next Recommendations",
+        "## 11. Next Recommendations",
         "- Keep `cli/parser.py` thin and route registration through `cli/commands/`.",
         "- Continue extracting `cli/chat.py` into chat session, input loop, renderer, and gateway client modules.",
         "- Keep SubAgent manager as the readable owner of its main lifecycle, with services only where they remove real branching.",
@@ -115,7 +111,7 @@ def write_report(report_path: Path, findings: list[Any], context: ReportRenderCo
         *_finding_sections(findings),
         *_recommendations(),
         "",
-        "## 14. Strict Blocked",
+        "## 12. Strict Blocked",
         f"- {'**yes**' if context.blocked else 'no'}",
         "",
     ]

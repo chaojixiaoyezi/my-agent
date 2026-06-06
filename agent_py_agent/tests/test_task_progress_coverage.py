@@ -472,8 +472,8 @@ class TestTaskProgressContinuationAndAliases:
             "值得借鉴的地方": "pending",
         }
 
-    def test_task_progress_accepts_create_action_and_fields_alias(self, tmp_path):
-        """真实模型常写 action=create 和 fields，工具应宽容成 update + checks。"""
+    def test_task_progress_accepts_fields_alias_with_update_action(self, tmp_path):
+        """fields 仍是结构化覆盖输入；action 必须使用当前协议里的 update。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -483,7 +483,7 @@ class TestTaskProgressContinuationAndAliases:
         result = agent.tools.execute_call(
             {
                 "tool": "task_progress",
-                "action": "create",
+                "action": "update",
                 "summary": "开始覆盖五个项目。",
                 "items": [
                     {
@@ -531,11 +531,34 @@ class TestTaskProgressContinuationAndAliases:
         }
 
 
-class TestTaskProgressCoverageAliases:
-    """测试模型常见的 coverage 自然写法。"""
+def test_task_progress_rejects_old_action_aliases(tmp_path):
+    """工具入口不再把 create/init/begin 旧别名偷偷当成 update。"""
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
 
-    def test_task_progress_accepts_init_and_string_coverage_targets(self, tmp_path):
-        """模型用 init 和字符串覆盖清单时，也应写成结构化 coverage。"""
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent._main_agent_run_id = "run-main"
+
+    result = agent.tools.execute_call(
+        {
+            "tool": "task_progress",
+            "action": "create",
+            "summary": "开始覆盖五个项目。",
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert payload["invalid_action"] == "create"
+    assert payload["allowed_actions"] == ["read", "update"]
+
+
+class TestTaskProgressCoverageAliases:
+    """测试开放 coverage 输入仍能归一成结构化账本。"""
+
+    def test_task_progress_accepts_string_coverage_targets(self, tmp_path):
+        """字符串覆盖清单可写成结构化 coverage；action 仍必须是 update。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -545,7 +568,7 @@ class TestTaskProgressCoverageAliases:
         result = agent.tools.execute_call(
             {
                 "tool": "task_progress",
-                "action": "init",
+                "action": "update",
                 "summary": "开始分析五个项目。",
                 "coverage_targets": [
                     "agentscope-main:功能定位,主要模块,优点,缺点,借鉴点",
@@ -562,7 +585,7 @@ class TestTaskProgressCoverageAliases:
         assert payload["coverage"]["counts"]["targets_total"] == 2
 
     def test_task_progress_accepts_fields_needed_and_chinese_target_text(self, tmp_path):
-        """模型用 fields_needed 或中文冒号写覆盖项时，也应归一成 checks。"""
+        """fields_needed 或中文冒号覆盖项也应归一成 checks。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -572,7 +595,7 @@ class TestTaskProgressCoverageAliases:
         result = agent.tools.execute_call(
             {
                 "tool": "task_progress",
-                "action": "begin",
+                "action": "update",
                 "summary": "开始覆盖多个对象。",
                 "items": [
                     {
@@ -624,7 +647,7 @@ class TestTaskProgressCoverageAliases:
         assert "coverage" not in payload
 
     def test_task_progress_accepts_name_and_missing_fields_aliases(self, tmp_path):
-        """模型用 name/missing_fields 和字符串 coverage 时，不应把多个对象合成一个 target。"""
+        """name/missing_fields 和字符串 coverage 不应把多个对象合成一个 target。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -634,7 +657,7 @@ class TestTaskProgressCoverageAliases:
         result = agent.tools.execute_call(
             {
                 "tool": "task_progress",
-                "action": "create",
+                "action": "update",
                 "coverage": "0/2 项目已分析",
                 "coverage_targets": [
                     {"name": "agentscope-main", "status": "pending", "missing_fields": ["主要模块", "借鉴点"]},

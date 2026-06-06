@@ -96,12 +96,12 @@ class TestBoolParam:
 
     def test_bool_param_true_values(self):
         """验证真值解析。"""
-        for val in [True, "true", "yes", "on", "1", "y", "apply"]:
+        for val in [True, "true", "1"]:
             assert _bool_param(val) is True
 
     def test_bool_param_false_values(self):
         """验证假值解析。"""
-        for val in [False, "false", "no", "off", "0", "n", "dry-run", "dry_run"]:
+        for val in [False, "false", "0"]:
             assert _bool_param(val) is False
 
     def test_bool_param_default(self):

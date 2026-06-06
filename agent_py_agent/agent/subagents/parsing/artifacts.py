@@ -5,16 +5,12 @@ from .values import _dict_list
 
 
 def artifact_items_from_payload(payload: dict[str, object]) -> list[dict[str, object]]:
-    """Read artifact refs from the canonical field plus accepted aliases."""
+    """Read artifact refs from the current structured result schema."""
 
     result: list[dict[str, object]] = []
     seen: set[str] = set()
-    for field in ("artifacts", "deliverables", "output_files", "files"):
-        result.extend(_new_artifact_items(payload.get(field, []), seen))
-    for field in ("files_modified", "modified_files", "changed_files", "created_files"):
-        result.extend(_artifact_items_from_string_refs(payload.get(field, []), seen))
+    result.extend(_new_artifact_items(payload.get("artifacts", []), seen))
     result.extend(_artifact_items_from_string_refs(payload.get("artifact_refs", []), seen, summary="reported artifact ref"))
-    result.extend(_top_level_file_path_artifacts(payload, seen))
     result.extend(_artifact_items_from_evidence(payload.get("evidence", []), seen))
     result.extend(_artifact_items_from_evidence_packets(payload.get("evidence_packets", []), seen))
     return result
@@ -61,9 +57,9 @@ def _artifact_items_from_string_refs(
     value: object,
     seen: set[str],
     *,
-    summary: str = "reported modified artifact",
+    summary: str = "reported artifact ref",
 ) -> list[dict[str, object]]:
-    """Return artifact items from string path lists emitted by repair workers."""
+    """Return artifact items from explicit string artifact refs."""
 
     items: list[dict[str, object]] = []
     for ref in _string_refs(value):
@@ -71,17 +67,6 @@ def _artifact_items_from_string_refs(
             continue
         seen.add(ref)
         items.append({"path": ref, "kind": "file", "summary": summary})
-    return items
-
-
-def _top_level_file_path_artifacts(payload: dict[str, object], seen: set[str]) -> list[dict[str, object]]:
-    items: list[dict[str, object]] = []
-    for key in ("file_path", "output_path", "path"):
-        ref = str(payload.get(key) or "").strip()
-        if not ref or ref in seen:
-            continue
-        seen.add(ref)
-        items.append({"path": ref, "kind": "file", "summary": f"reported {key} artifact"})
     return items
 
 

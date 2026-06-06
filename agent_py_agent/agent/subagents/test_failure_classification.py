@@ -115,34 +115,38 @@ def _record_category(record) -> str:
 
 
 def _not_executed_category(record) -> str:
-    return "command_rejected" if _is_command_rejected(record) else "not_executed"
+    reason = _validation_reason(record)
+    if reason == "timeout":
+        return "timeout"
+    return "command_rejected" if reason == "command_rejected" else "not_executed"
 
 
 def _executed_failure_category(record) -> str:
-    text = _record_text(record)
-    if any(token in text for token in ("SyntaxError", "IndentationError", "ImportError", "ModuleNotFoundError")):
-        return "syntax_or_import_error"
-    if any(token in text for token in ("AssertionError", "assert ", "E       assert")):
-        return "assertion_failure"
-    if "timed out" in text.lower() or "timeout" in str(record.error).lower():
+    reason = _validation_reason(record)
+    if reason == "timeout":
         return "timeout"
+    method = str(record.validation_method or "").strip()
+    if method == "command":
+        return "command_failed"
+    if method:
+        return "validation_failed"
     return "runtime_failure"
 
 
-def _is_command_rejected(record) -> bool:
-    reason = str(record.validation_result.get("reason") or "")
-    text = _record_text(record)
-    return reason == "command_rejected" or "高风险 shell 字符" in text or "command_rejected" in text
+def _validation_reason(record) -> str:
+    if not isinstance(record.validation_result, dict):
+        return ""
+    return str(record.validation_result.get("reason") or "").strip()
 
 
 def _primary_category(counts: dict[str, int]) -> str:
     for category in (
-        "assertion_failure",
-        "syntax_or_import_error",
+        "timeout",
+        "command_failed",
+        "validation_failed",
         "runtime_failure",
         "command_rejected",
         "not_executed",
-        "timeout",
         "runner_output_missing_tests",
     ):
         if counts.get(category):
@@ -153,7 +157,7 @@ def _primary_category(counts: dict[str, int]) -> str:
 def _recommended_action(category: str) -> str:
     if category == "passed":
         return RecoveryAction.CLOSEOUT.value
-    if category in {"assertion_failure", "syntax_or_import_error", "runtime_failure"}:
+    if category in {"command_failed", "validation_failed", "runtime_failure"}:
         return RecoveryAction.REPAIR.value
     if category in {"command_rejected", "not_executed", "runner_output_missing_tests"}:
         return RecoveryAction.REPAIR.value

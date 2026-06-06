@@ -21,12 +21,36 @@
   前缀把未知旧值提升成自动重跑或接管。
 - capability 等待状态只认当前协议 `PENDING_CAPABILITY_REQUEST`，不再把 `NEEDS_TOOL`、
   `WAITING_FOR_TOOL` 等旧/模糊状态别名自动升级成能力申请。
+- capability request 自身只认当前状态：`OPEN` 是待处理，`GRANTED` 是已授权，
+  `GAP` 是没有可用能力，`CLOSED` 是本轮已关闭。历史 `RESOLVED`、`APPROVED`、
+  `REJECTED` 不能静默当成已处理终态；它们会继续作为需要人工/路由处理的状态暴露出来。
 - 工具结果没有显式 `error_code` / `error_type` 时，机器错误码统一是 `UNKNOWN_ERROR`；
   日志里的错误正文可以给模型看，但不能反推出结构化错误码、任务状态或验收结论。
 - `DONE` 仍是唯一已完成状态；`FAILED`、`TIMEOUT`、`CHANNEL_ERROR`、`BLOCKED`
   是可恢复/阻塞状态，恢复器和 strategy 只扫描这些结构化状态。
 - `output.json`、checkpoint 和 QA payload 只读结构化字段、`ok` 布尔、blockers 和 refs；
   summary、角色描述、旧状态词只作为展示或软上下文。
+- 子代理结果产物只从当前结构化 schema 进入 artifact refs：`artifacts`、
+  `artifact_refs`、`evidence kind=artifact` 和 `evidence_packets[].artifact_refs`。
+  `deliverables`、`files`、`output_files`、`files_modified`、顶层 `path/file_path`
+  等旧结果别名不再被悄悄恢复成产物；派任务时的 `output_files` 仍是创建子代理的目标路径字段。
+- `create_subagents` 不再用 `working_buttons`、`verified_images`、`no_comments`
+  这类专项交付约束做入口硬拦。它们可以作为结构化任务上下文传给子代理，最终由父代理验收、
+  QA 或 closeout 证据判断，不在派工前阻断主链路。
+- test failure classification 不再从 stdout/stderr 文本里的 `SyntaxError`、`AssertionError`
+  或超时词猜恢复类别。机器分类只读 `executed`、`passed`、`validation_method`、
+  `validation_result.reason` 等结构化字段；输出尾部只保留为人类审计摘要。
+- 全局错误 taxonomy 不再用多语言正则从普通错误正文猜 `TOOL_TIMEOUT`、`WRITE_FORBIDDEN`
+  等机器码。工具/后端/runner 必须产出显式 `error_code` 或 `failure_type`；没有结构化码时就是
+  `UNKNOWN_ERROR`。
+- 测试准备不再把 `command: static_site_check` 解释成验证器选择。验证器入口只认
+  `validation_method`；`command` 是实际执行命令，不承担 schema 选择。
+- 文件存在性验证只认 `validation_method: file_check`。旧的 `file_exists`、
+  `path_exists`、`artifact_exists` 不再作为可执行验证方法别名。
+- 协作能力匹配只读取显式 capability 字段和真实工具名；不再从工具名里的
+  `read/search/write/dispatch` 等字样自动生成 `query/write/delegate` 这类抽象能力。
+- 工具动作布尔参数只认 JSON 布尔、数字和 `true/false/1/0`；`yes/on/apply/run/full`
+  这类普通词不能改变执行行为。
 
 ## 2026-06-04 收敛
 

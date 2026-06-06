@@ -4,13 +4,13 @@ from __future__ import annotations
 import shlex
 from collections.abc import Iterable
 
-_ACTIVE_REQUEST_STATUSES = frozenset({"", "OPEN", "GRANTED", "RESOLVED"})
+from .model_capabilities import capability_request_suppresses_duplicate
 
 
 def find_equivalent_capability_request(requests: Iterable[object], candidate: object):
     target = capability_request_signature(candidate)
     for request in requests or []:
-        if str(getattr(request, "status", "") or "").upper() not in _ACTIVE_REQUEST_STATUSES:
+        if not capability_request_suppresses_duplicate(getattr(request, "status", "")):
             continue
         if capability_request_signature(request) == target:
             return request

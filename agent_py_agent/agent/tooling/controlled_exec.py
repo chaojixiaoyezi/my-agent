@@ -249,7 +249,9 @@ def _string_dict(value: object) -> dict[str, str]:
 def _bool_value(value: object) -> bool:
     if isinstance(value, bool):
         return value
-    return str(value).strip().lower() in {"1", "true", "yes", "y", "apply", "execute", "run", "full"}
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true"}
 
 
 def _boundary_value(write_boundary: dict[str, object] | None, key: str) -> str:

@@ -10,7 +10,7 @@ from typing import Any, ClassVar
 
 from .artifact_integrity_items import expand_artifact_integrity_items
 from .content_checks import CatContentCheckRequest, normalize_cat_content_check
-from .file_exists_items import expand_file_exists_items
+from .file_check_items import expand_file_check_items
 from .inferred_content_items import (
     ContentCheckInferenceRequest,
     inferred_content_check_items,
@@ -69,7 +69,7 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
         artifact_paths=context.artifact_paths,
         workspace_root=workspace_root,
     )
-    prepared = expand_file_exists_items(
+    prepared = expand_file_check_items(
         prepared,
         artifact_paths=context.artifact_paths,
         workspace_root=workspace_root,
@@ -127,25 +127,8 @@ def _prepared_test_item(
 
 def _normalize_validation_method(item: dict[str, Any]) -> None:
     method = str(item.get("validation_method") or "command").strip().lower()
-    if method == "command" and _static_site_command_alias(item.get("command")):
-        item["validation_method"] = "static_site_check"
-        item.pop("command", None)
-        return
     if method in {"pytest", "unittest"} and str(item.get("command") or "").strip():
         item["validation_method"] = "command"
-
-
-def _static_site_command_alias(command: object) -> bool:
-    raw = str(command or "").strip()
-    if not raw:
-        return False
-    try:
-        parts = shlex.split(raw)
-    except ValueError:
-        return False
-    if not parts:
-        return False
-    return parts[0].strip().lower().replace("-", "_") == "static_site_check"
 
 
 def _normalize_leading_cd_command(item: dict[str, Any], workspace_root: Path) -> None:

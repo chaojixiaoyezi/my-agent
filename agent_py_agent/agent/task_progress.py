@@ -295,7 +295,7 @@ def _truthy(value: object) -> bool:
         return value
     if isinstance(value, int | float):
         return bool(value)
-    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+    return str(value or "").strip().lower() in {"1", "true"}
 
 
 def _counts(items: list[dict[str, Any]]) -> dict[str, int]:

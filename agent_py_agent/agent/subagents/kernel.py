@@ -14,6 +14,7 @@ from typing import Any
 
 from .context_bundle_refs import workspace_refs as model_workspace_refs
 from .kernel_models import SubagentKernelQuery, SubagentKernelRun, SubagentKernelSnapshot
+from .model_capabilities import capability_request_counts_as_open
 from .models import SubAgentTask
 from .protocol import build_task_address, build_task_envelope
 
@@ -252,8 +253,7 @@ def _background_start(task: SubAgentTask) -> dict[str, object]:
 
 
 def _open_capability_requests(task: SubAgentTask) -> list[object]:
-    closed = {"CLOSED", "RESOLVED", "REJECTED", "APPROVED", "GRANTED"}
-    return [item for item in task.capability_requests if str(getattr(item, "status", "OPEN") or "OPEN").upper() not in closed]
+    return [item for item in task.capability_requests if capability_request_counts_as_open(getattr(item, "status", "OPEN"))]
 
 
 def _continue_packet_ref(task: SubAgentTask) -> str:

@@ -39,8 +39,10 @@ def terminal_block_enabled(params: object) -> bool:
         value = attrs.get("terminal_block_enabled")
         if isinstance(value, bool):
             return value
+        if isinstance(value, (int, float)):
+            return bool(value)
         text = str(value or "").strip().lower()
-        return text in {"1", "true", "yes", "on"}
+        return text in {"1", "true"}
     else:
         return runtime_guard_bool(
             "terminal_block_enabled",

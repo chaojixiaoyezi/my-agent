@@ -1,7 +1,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
@@ -15,28 +14,6 @@ from .create_target_roots import (
     structured_task_output_write_roots,
 )
 
-_PARENT_CONSTRAINT_FIELDS = {"delegation_constraints", "required_constraints", "hard_constraints"}
-_CHILD_RELAXATION_FIELDS = {"constraint_overrides", "constraint_relaxations", "allowed_relaxations"}
-_CONSTRAINT_ALIAS_MAP = {
-    "working_buttons": "working_buttons",
-    "no_dead_buttons": "working_buttons",
-    "no_broken_buttons": "working_buttons",
-    "verified_images": "verified_images",
-    "verified_images_only": "verified_images",
-    "no_broken_images": "verified_images",
-    "no_comments": "no_comments",
-    "comment_free": "no_comments",
-}
-_RELAXATION_ALIAS_MAP = {
-    "allow_dead_buttons": "working_buttons",
-    "dead_buttons_allowed": "working_buttons",
-    "allow_hash_buttons": "working_buttons",
-    "allow_unverified_remote_images": "verified_images",
-    "allow_remote_images": "verified_images",
-    "allow_broken_images": "verified_images",
-    "allow_comments": "no_comments",
-    "comments_allowed": "no_comments",
-}
 _NON_WORKER_ROLES = {
     "bug_finder",
     "coordinator",
@@ -87,18 +64,6 @@ def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: s
 def explicit_root_missing_write_root_error(agent: object, params: dict[str, object], goal: str) -> str:
     del agent, params, goal
     return ""
-
-
-def delegation_constraint_conflict_error(params: dict[str, object]) -> str:
-    conflicts = sorted(_structured_parent_constraints(params) & _structured_child_relaxations(params))
-    if not conflicts:
-        return ""
-    conflicts_text = ", ".join(conflicts)
-    return (
-        "delegation_constraint_conflict: 派工目标不能削弱或反向改写父级结构化约束。"
-        f"冲突约束: {conflicts_text}。"
-        "请重新调用 create_subagents：保留 delegation_constraints，删除冲突的 constraint_overrides。"
-    )
 
 
 def _structured_output_refs(params: dict[str, object]) -> list[str]:
@@ -160,37 +125,3 @@ def _unique_roots(values: list[str]) -> list[str]:
         if text and text not in result:
             result.append(text)
     return result
-
-
-def _structured_parent_constraints(params: dict[str, object]) -> set[str]:
-    return _structured_tokens(params, _PARENT_CONSTRAINT_FIELDS, _CONSTRAINT_ALIAS_MAP)
-
-
-def _structured_child_relaxations(params: dict[str, object]) -> set[str]:
-    return _structured_tokens(params, _CHILD_RELAXATION_FIELDS, _RELAXATION_ALIAS_MAP)
-
-
-def _structured_tokens(params: dict[str, object], fields: set[str], aliases: dict[str, str]) -> set[str]:
-    found: set[str] = set()
-    for field in fields:
-        found.update(_token_items(params.get(field), aliases))
-    attrs = params.get("attributes")
-    if isinstance(attrs, dict):
-        for field in fields:
-            found.update(_token_items(attrs.get(field), aliases))
-    return found
-
-
-def _token_items(value: object, aliases: dict[str, str]) -> set[str]:
-    if isinstance(value, (list, tuple, set)):
-        return {item for raw in value for item in _token_items(raw, aliases)}
-    cleaned = str(value or "").strip().strip("[]")
-    for prefix in ("-", "*"):
-        if cleaned.startswith(prefix):
-            cleaned = cleaned[1:].strip()
-    tokens = re.split(r"[,，、|]+", cleaned)
-    return {
-        mapped
-        for token in tokens
-        if (mapped := aliases.get(token.strip().strip("'\"`").casefold().replace("-", "_")))
-    }

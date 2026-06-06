@@ -252,16 +252,11 @@ def _unique_archive_tool_calls(records: list[dict[str, Any]]) -> list[Any]:
             str(record.get("call_id") or ""),
             str(record.get("sha256") or ""),
         )
-        fallback_key = (
-            "",
-            str(record.get("tool") or ""),
-            str(record.get("source_input") or record.get("path") or ""),
-            str(record.get("created_at") or ""),
-        )
-        dedupe_key = key if any(key) else fallback_key
-        if dedupe_key in seen:
+        if not any(key):
             continue
-        seen.add(dedupe_key)
+        if key in seen:
+            continue
+        seen.add(key)
         unique.append(record)
     return unique
 

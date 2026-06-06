@@ -5,6 +5,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+CAPABILITY_REQUEST_OPEN_STATUS = "OPEN"
+CAPABILITY_REQUEST_TERMINAL_STATUSES = frozenset({"GRANTED", "GAP", "CLOSED"})
+CAPABILITY_REQUEST_CURRENT_STATUSES = frozenset({
+    CAPABILITY_REQUEST_OPEN_STATUS,
+    *CAPABILITY_REQUEST_TERMINAL_STATUSES,
+})
+
+
+def normalize_capability_request_status(status: object) -> str:
+    normalized = str(status or CAPABILITY_REQUEST_OPEN_STATUS).strip().upper()
+    return normalized or CAPABILITY_REQUEST_OPEN_STATUS
+
+
+def capability_request_counts_as_open(status: object) -> bool:
+    normalized = normalize_capability_request_status(status)
+    return normalized not in CAPABILITY_REQUEST_TERMINAL_STATUSES
+
+
+def capability_request_suppresses_duplicate(status: object) -> bool:
+    normalized = normalize_capability_request_status(status)
+    return normalized == "GRANTED" or capability_request_counts_as_open(normalized)
+
 
 @dataclass
 class CapabilityRequest:

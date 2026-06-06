@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
+from agent_py_agent.agent.agent_core.delivery_closeout.closeout import _unique_archive_tool_calls
 from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
@@ -83,6 +84,20 @@ def test_acceptance_submit_uses_disk_write_file_index_for_artifact_provenance(tm
     assert "交付验收通过" in response.text
     assert report["runtime_gate"]["allowed"] is True
     assert report["artifacts"][0]["provenance"]["proof_kind"] == "tool_output_index"
+
+
+def test_closeout_archive_dedup_ignores_records_without_structured_identity():
+    records = [
+        {"tool": "write_file", "path": "out.txt", "created_at": "1"},
+        {"tool": "write_file", "run_id": "run-1", "parameters": {"path": "out.txt"}},
+        {"tool": "write_file", "run_id": "run-1", "parameters": {"path": "out.txt"}},
+        {"tool": "read_file", "scoped_call_id": "run-1:read-1"},
+    ]
+
+    assert _unique_archive_tool_calls(records) == [
+        {"tool": "write_file", "run_id": "run-1", "parameters": {"path": "out.txt"}},
+        {"tool": "read_file", "scoped_call_id": "run-1:read-1"},
+    ]
 
 
 def test_acceptance_submit_does_not_block_materializer_warning_when_contract_is_valid(tmp_path: Path):

@@ -48,7 +48,6 @@ def _target_tokens_from_output_json(output_json: str) -> set[str]:
     targets: set[str] = set()
     targets.update(_target_tokens_from_output_values(payload.get("artifact_path")))
     targets.update(_target_tokens_from_output_values(payload.get("artifacts")))
-    targets.update(_target_tokens_from_output_values(payload.get("files_modified")))
     targets.update(_target_tokens_from_output_values(payload.get("patches")))
     return targets
 
@@ -67,7 +66,6 @@ def _target_tokens_from_result_json(result_text: str) -> set[str]:
     targets: set[str] = set()
     targets.update(_target_tokens_from_output_values(payload.get("artifact_path")))
     targets.update(_target_tokens_from_output_values(payload.get("artifacts")))
-    targets.update(_target_tokens_from_output_values(payload.get("files_modified")))
     targets.update(_target_tokens_from_output_values(payload.get("patches")))
     return targets
 

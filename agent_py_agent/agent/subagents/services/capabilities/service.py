@@ -27,6 +27,7 @@ from ...capability_route_service import (
     write_capability_route_report_files,
 )
 from ...capability_scope import existing_delete_trash_grant, scoped_grant_params
+from ...model_capabilities import capability_request_counts_as_open
 from ...models import CapabilityRequest, SubAgentCapabilityRouteOptions, SubAgentTask
 from ...policies import _capability_request_query, _select_capability_hits
 from ...reports import CapabilityRouteRecord, CapabilityRouteReport
@@ -40,7 +41,7 @@ def _iter_open_capability_requests(tasks):
         (task, request)
         for task in tasks
         for request in task.capability_requests
-        if request.status == "OPEN"
+        if capability_request_counts_as_open(getattr(request, "status", "OPEN"))
     )
 
 

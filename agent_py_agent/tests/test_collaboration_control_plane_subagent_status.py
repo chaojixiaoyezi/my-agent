@@ -68,14 +68,14 @@ def test_dispatch_candidates_include_done_agent_with_new_collaboration_request(t
     assert [item.id for item in candidates] == [child.id]
 
 
-def test_created_subagent_registers_collaboration_capabilities_for_request_matching(tmp_path) -> None:
+def test_created_subagent_registers_explicit_collaboration_capabilities_for_request_matching(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     child = agent.subagents.create_run(
         goal="响应协作请求并提交证据。",
         agent_name="Agent-B",
         role="worker",
         allowed_tools=["read_file", "search_text", "submit_collaboration_result"],
-        attributes={"capabilities": ["custom-source"]},
+        attributes={"capabilities": ["custom-source", "query", "evidence_submission"]},
     )
     case = agent.collaboration_store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "按能力匹配响应者", 'created_by': "agent-a", 'now': 1.0})
 

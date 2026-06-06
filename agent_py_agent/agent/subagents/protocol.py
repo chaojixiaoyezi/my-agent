@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from dataclasses import field as dataclass_field
 
 from ..model_visible_refs import current_model_ref, current_model_ref_list, current_model_text
+from .model_capabilities import capability_request_counts_as_open
 from .models import SubAgentTask
 from .protocol_write_contract import build_write_contract
 
@@ -233,13 +234,7 @@ def _context_pack_ref(item: object) -> str:
 
 
 def _request_is_open(item: object) -> bool:
-    return str(getattr(item, "status", "OPEN") or "OPEN").upper() not in {
-        "CLOSED",
-        "RESOLVED",
-        "REJECTED",
-        "APPROVED",
-        "GRANTED",
-    }
+    return capability_request_counts_as_open(getattr(item, "status", "OPEN"))
 
 
 __all__ = [

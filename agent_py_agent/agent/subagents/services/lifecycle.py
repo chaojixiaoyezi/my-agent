@@ -1,11 +1,7 @@
 
 from __future__ import annotations
 
-"""lifecycle mutation service for subagent task records.
-
-这里承接能力请求、能力授权、能力缺口、验收证据和基础状态更新。
-SubAgentManager 继续暴露旧方法名，内部逐步改成服务委托。
-"""
+"""Lifecycle mutation service for subagent task records."""
 
 import time
 from dataclasses import dataclass

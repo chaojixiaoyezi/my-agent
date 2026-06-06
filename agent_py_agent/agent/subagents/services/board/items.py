@@ -9,6 +9,7 @@ from typing import Any
 
 from ....model_visible_refs import current_model_ref, current_model_text
 from ....runtime_errors import runtime_error_report
+from ...model_capabilities import capability_request_counts_as_open
 from ...models import SubAgentBoardOptions, SubAgentTask
 from ...reports import SubAgentBoardItem
 from ..task_target_tokens import task_actual_target_tokens
@@ -86,7 +87,9 @@ def board_options(
 
 
 def _board_open_counts(task: SubAgentTask) -> tuple[int, int]:
-    open_request_count = sum(1 for item in task.capability_requests if item.status == "OPEN")
+    open_request_count = sum(
+        1 for item in task.capability_requests if capability_request_counts_as_open(getattr(item, "status", "OPEN"))
+    )
     open_gap_count = sum(1 for item in task.capability_gaps if item.status == "OPEN")
     return open_request_count, open_gap_count
 

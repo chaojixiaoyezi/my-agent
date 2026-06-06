@@ -186,7 +186,7 @@ def test_controlled_exec_tool_apply_full_routes_delete_without_rm_shell_grant(tm
             "tool": "controlled_exec",
             "command": "rm stale.txt",
             "cwd": str(task_dir),
-            "apply": "full",
+            "apply": True,
         },
         allowed_tools=["controlled_exec"],
         write_boundary=boundary,

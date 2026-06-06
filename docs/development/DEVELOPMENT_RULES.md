@@ -63,6 +63,10 @@ before changing code.
   message、stdout、stderr、summary 里用关键词反推出硬错误码并影响状态、恢复或验收。
 - recovery mode 和 capability status 只认当前协议枚举，不能用字符串前缀、英文词片段、
   中文词片段或旧别名来触发自动重跑、接管、授权和 closeout 行为。
+- owner capability request 的状态只认当前协议值；未知值必须报结构化错误，不能自动兜底成
+  `closed` / `expired` / `approved` 这类终态。
+- runtime capability 只能从 `granted_capabilities` 或明确的系统注入 capability token
+  进入；用户 prompt 里的普通文本、协议样短语或工具名都不能自动扩权。
 - 错误要显性，不要糊成“还能跑”。启动失败、通道断开、子代理挂掉、artifact 丢失、
   config 未生效，都应暴露 typed failure，而不是伪装成 planning/running。
 - 工具不要重复造。已有工具能表达的能力，优先修底层语义或扩展明确参数；只有交互模式
@@ -130,7 +134,7 @@ before changing code.
 
 | Dimension       | Limit   | Enforcement                                   |
 |-----------------|---------|-----------------------------------------------|
-| File length     | advisory only | `CODE_SIZE_REPORT.md` trend report |
+| File length     | no limit / no finding | governed by architecture clarity, not line count |
 | New function    | <= 100 lines | `scripts/check_code_size.py`             |
 | New class       | <= 250 lines (Mixin <= 200) | `scripts/check_code_size.py` |
 | Function params | <= 8 (use dataclass bundling if more) | `scripts/check_code_size.py` |
@@ -259,6 +263,10 @@ before changing code.
   normal child capability request lane.  Root self-termination/uninstall policy
   is a future design topic and must not be modeled as an OPEN child capability
   request.
+- Subagent `capability_request.status` is an exact current protocol field:
+  `OPEN`, `GRANTED`, `GAP`, or `CLOSED`.  Historical aliases such as
+  `RESOLVED`, `APPROVED`, or `REJECTED` must not silently close, grant, or route
+  a request as if they were current schema values.
 - Cleanup is allowed inside authorized workspaces when it matches the task:
   temporary files, task trash, generated artifacts, task-local memory, drafts,
   templates, tools, and skills may be removed.  The hard line is uninstalling or
@@ -367,6 +375,8 @@ before changing code.
   `pending` / `in_progress` / `done` / `skipped` / `blocked`；`completed`、
   “已完成”“已验收”“read”“ok”这类自然语言或自定义标签必须写到
   `notes` / `summary`，不能写入 `status`。
+- `task_progress.action` 是工具协议字段，只接受 `read` / `update`；不能把
+  `create` / `init` / `begin` / `write` 等旧别名自动兜底成写入。
 - 当本轮存在结构化来源覆盖合同时，closeout 可以对最终产物里的机器型 ID 做来源一致性
   检查：产物中出现而声明来源中不存在的稳定 ID 是硬错误。这个检查只读 source refs、
   artifact refs 和工具记录，不靠报告自然语言判断“质量好坏”。
@@ -555,6 +565,10 @@ do_write()
   threshold affects runtime behavior, put it in `agent_config.yaml`,
   `AgentConfig`, the normalizer, and the frontend runtime config together; do
   not leave a second hardcoded default in UI/store/tool code.
+- Error taxonomy is keyed by explicit machine codes. A tool, backend, or runner
+  must return structured `error_code` / `failure_type` when it wants recovery
+  routing. Do not classify ordinary stderr, traceback text, provider prose,
+  multilingual phrases, or human summaries into machine error codes.
 - Long-content recovery must be policy-driven. If a write-like tool parse error
   or inline-limit rejection needs to guide the next model turn, put that rule in
   `content_recovery_mode.py` and append a compact `[tool-system]` recovery mode;
@@ -626,6 +640,36 @@ do_write()
   `subagent_allowed_tools=[]` as “role/template/task decides tools”, not “no
   tools”. Only use a non-empty global list for deliberately restricted test
   environments.
+- Subagent result artifacts must come from the current result schema only:
+  `artifacts`, `artifact_refs`, `evidence kind=artifact`, or
+  `evidence_packets[].artifact_refs`. Do not reintroduce old result aliases such
+  as `deliverables`, `files`, `output_files`, `files_modified`, top-level
+  `path`, or top-level `file_path` as machine artifact facts. Task-creation
+  `output_files` remains a target-path contract, not a result alias.
+- `create_subagents` must not reject ordinary delegation because of
+  domain-specific quality constraints such as button/image/comment rules. Pass
+  those constraints as structured task context and validate them through child
+  refs, QA, or closeout evidence. Keep create-time hard stops for true runtime
+  boundaries only, such as invalid schema, dangerous write roots, disabled
+  subagents, or missing required tool arguments.
+- Test/runner failure routing must use structured execution facts such as
+  `executed`, `passed`, `exit_code`, `validation_method`, and
+  `validation_result.reason`. Stdout, stderr, traceback text, and human error
+  summaries may be persisted as bounded audit snippets, but they must not decide
+  recovery category, takeover, closeout, or retry behavior.
+- Test validation kind must come from structured `validation_method`. Do not
+  infer validators from `command` strings such as `static_site_check`; command
+  text is execution input, not a schema selector. File existence validation uses
+  the canonical `validation_method="file_check"`; do not reintroduce
+  `file_exists`, `path_exists`, or `artifact_exists` as executable validator
+  aliases.
+- Collaboration capability matching must use explicit capability fields from
+  task attributes/templates plus exact tool names. Do not infer abstract
+  capabilities such as `query`, `write`, `evidence_submission`, or `delegate`
+  from substrings in tool names or role prose.
+- Tool/action boolean parameters must be JSON booleans, numbers, or the exact
+  strings `true`/`false`/`1`/`0`. Do not treat natural-language words such as
+  `yes`, `on`, `apply`, `execute`, `run`, or `full` as hard action switches.
 
 ## 11.3 Subagent Debug Trace Levels / 子代理调试追踪等级
 
