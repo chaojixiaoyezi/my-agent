@@ -59,12 +59,12 @@ class TestDispatchCandidates:
     def test_ineligible_statuses_are_excluded(self, registry):
         """测试不可调度的状态会被正确排除。
 
-        验证 PAUSED、ABANDONED、COMPLETED、FAILED 状态的任务不会被调度。
+        验证 PAUSED、ABANDONED、DONE、FAILED 状态的任务不会被调度。
         """
         ineligible_statuses = [
             TaskStatus.PAUSED.value,
             TaskStatus.ABANDONED.value,
-            TaskStatus.COMPLETED.value,
+            TaskStatus.DONE.value,
             TaskStatus.FAILED.value,
         ]
 
@@ -150,7 +150,7 @@ class TestMultiTaskDispatch:
         for i in range(10):
             t = threading.Thread(
                 target=update_task,
-                args=(f"concurrent-update-{i}", TaskStatus.COMPLETED.value),
+                args=(f"concurrent-update-{i}", TaskStatus.DONE.value),
             )
             threads.append(t)
             t.start()
@@ -163,7 +163,7 @@ class TestMultiTaskDispatch:
         # 验证所有任务都已更新
         for i in range(10):
             task = registry.lookup_task(f"concurrent-update-{i}")
-            assert task["status"] == TaskStatus.COMPLETED.value
+            assert task["status"] == TaskStatus.DONE.value
 
     def test_dispatch_batch_size_respected(self, registry):
         """测试调度时批次大小会被遵守。
@@ -343,7 +343,7 @@ class TestDispatchLoopIntegration:
         statuses = [
             (TaskStatus.RUNNING.value, "runnable"),
             (TaskStatus.PAUSED.value, "paused"),
-            (TaskStatus.COMPLETED.value, "completed"),
+            (TaskStatus.DONE.value, "done"),
             (TaskStatus.ABANDONED.value, "abandoned"),
             (TaskStatus.FAILED.value, "failed"),
         ]

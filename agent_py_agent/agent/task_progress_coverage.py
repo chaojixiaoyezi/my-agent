@@ -233,7 +233,7 @@ def _coverage_target_done(target: dict[str, Any]) -> bool:
 
 
 def _is_done_status(value: object) -> bool:
-    return str(value or "").strip().lower().replace("-", "_") in _DONE_STATUSES
+    return str(value or "").strip().lower() in _DONE_STATUSES
 
 
 def _split_field_text(value: str) -> list[str]:

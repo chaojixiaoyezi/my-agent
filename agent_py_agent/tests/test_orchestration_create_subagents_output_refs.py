@@ -240,6 +240,38 @@ def test_generic_worker_reuses_structured_idempotency_contract_despite_reworded_
     assert second["reused_run_ids"] == first["created_run_ids"]
 
 
+def test_structured_idempotency_does_not_reuse_completed_alias(tmp_path):
+    """COMPLETED is a historical raw value, not a current reusable terminal state."""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+    contract = {
+        "schema": "subagent_idempotency_contract.v1",
+        "kind": "implementation_slice",
+        "idempotency_key": "home-page-worker",
+        "scope_refs": ["deliverables/home/index.html"],
+    }
+
+    first = json.loads(tool.execute({
+        "goal": "写一个家具品牌首页",
+        "role": "worker",
+        "context_packs": [{"kind": "idempotency_contract", "contract": contract}],
+    }).output)
+    child = agent.subagents.load(first["created_run_ids"][0])
+    child.status = "COMPLETED"
+    agent.subagents.save(child)
+    second = json.loads(tool.execute({
+        "goal": "继续完成高端家具首页",
+        "role": "worker",
+        "context_packs": [{"kind": "idempotency_contract", "contract": contract}],
+    }).output)
+
+    assert second["created_run_ids"]
+    assert second["reused_run_ids"] == []
+    assert second["created_run_ids"] != first["created_run_ids"]
+
+
 def test_generic_worker_reuses_same_structured_io_scope_without_goal_text_key(tmp_path):
     """同一父级同一 input/output 范围复用已有 child；这不是按 goal 文案合并。"""
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool

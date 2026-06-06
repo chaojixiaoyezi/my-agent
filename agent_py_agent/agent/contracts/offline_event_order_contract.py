@@ -5,7 +5,7 @@ from typing import Any
 
 from .offline_contract_report import OfflineContractValidation, finding, text, validation_report
 
-TERMINAL_EVENTS = {"TASK_CANCELLED", "TASK_BLOCKED", "TASK_FAILED", "TASK_SUCCEEDED"}
+TERMINAL_EVENTS = {"TASK_CANCELLED", "TASK_BLOCKED", "TASK_FAILED", "TASK_DONE"}
 TOOL_RESULT_EVENTS = {"TOOL_OK", "TOOL_FAILED"}
 
 

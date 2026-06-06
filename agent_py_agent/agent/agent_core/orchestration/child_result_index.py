@@ -85,7 +85,7 @@ def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
 
 def _readiness_label(status: str, primary_refs: list[str], final_report_ref: str, summary_ref: str) -> str:
     normalized = status.strip().upper()
-    if normalized in {"DONE", "COMPLETED", "SUCCEEDED", "VERIFIED", "ACCEPTED"}:
+    if normalized == "DONE":
         return "result_ready" if (primary_refs or final_report_ref or summary_ref) else "done_without_refs"
     if primary_refs:
         return "partial_artifacts_available"

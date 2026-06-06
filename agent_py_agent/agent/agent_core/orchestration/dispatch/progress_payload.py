@@ -176,6 +176,7 @@ def _recovery_dispatch_tool_call(
     recovery_mode = str(primary_strategy.get("recovery_mode") or "")
     if not recovery_mode.startswith("rerun_"):
         return call
+    call["recovery_mode"] = recovery_mode
     instruction = str(primary_strategy.get("runner_instruction") or "").strip()
     if instruction:
         call["runner_instruction"] = instruction

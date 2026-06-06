@@ -163,6 +163,25 @@ def test_recovery_strategy_exports_address_and_envelope_refs(tmp_path: Path) -> 
     assert strategy["recovery_mode"] == "takeover_from_continue_packet"
 
 
+def test_recovery_strategy_does_not_close_completed_alias(tmp_path: Path) -> None:
+    from agent_py_agent.agent.subagents.services.recovery.strategy import (
+        SubagentRecoveryStrategyRequest,
+        build_subagent_recovery_strategy,
+    )
+
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(goal="继续写页面", thought="", plan=["续写"], role="worker")
+    task.status = "COMPLETED"
+    manager.save(task)
+
+    strategy = build_subagent_recovery_strategy(
+        SubagentRecoveryStrategyRequest(task=manager.load(task.id), all_tasks=manager.list_runs())
+    ).to_dict()
+
+    assert strategy["recovery_mode"] == "manual_review_missing_recovery_refs"
+    assert strategy["recommended_action"] == "manual_review"
+
+
 def _make_protocol_tree(tmp_path: Path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="", plan=["派工"], role="coordinator")

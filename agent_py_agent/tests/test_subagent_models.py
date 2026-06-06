@@ -58,7 +58,7 @@ class TestTaskStatus:
         assert TaskStatus.BLOCKED.value == "BLOCKED"
         assert TaskStatus.PAUSED.value == "PAUSED"
         assert TaskStatus.ABANDONED.value == "ABANDONED"
-        assert TaskStatus.COMPLETED.value == "COMPLETED"
+        assert TaskStatus.DONE.value == "DONE"
         assert TaskStatus.FAILED.value == "FAILED"
 
     def test_task_status_is_string_enum(self):
@@ -71,7 +71,7 @@ class TestTaskStatus:
         """验证不可调度状态集合包含终止状态。"""
         assert "PAUSED" in DISPATCH_INELIGIBLE_STATUSES
         assert "ABANDONED" in DISPATCH_INELIGIBLE_STATUSES
-        assert "COMPLETED" in DISPATCH_INELIGIBLE_STATUSES
+        assert "DONE" in DISPATCH_INELIGIBLE_STATUSES
         assert "FAILED" in DISPATCH_INELIGIBLE_STATUSES
         assert "RUNNING" not in DISPATCH_INELIGIBLE_STATUSES
         assert "PLANNING" not in DISPATCH_INELIGIBLE_STATUSES
@@ -80,8 +80,8 @@ class TestTaskStatus:
     def test_dispatch_ineligible_all_values_are_strings(self):
         """验证 DISPATCH_INELIGIBLE_STATUSES 所有元素都是字符串值。
 
-        Mutation: Missing .value on COMPLETED (e.g., TaskStatus.COMPLETED instead of .value)
-        This would break membership checks since TaskStatus != "COMPLETED"
+        Mutation: Missing .value on DONE (e.g., TaskStatus.DONE instead of .value)
+        This would break membership checks since TaskStatus != "DONE"
         """
         for status in DISPATCH_INELIGIBLE_STATUSES:
             assert isinstance(status, str), f"{status} is not a string, got {type(status).__name__}"
@@ -89,14 +89,14 @@ class TestTaskStatus:
         # All statuses should match their string enum values
         assert "PAUSED" in DISPATCH_INELIGIBLE_STATUSES
         assert "ABANDONED" in DISPATCH_INELIGIBLE_STATUSES
-        assert "COMPLETED" in DISPATCH_INELIGIBLE_STATUSES
+        assert "DONE" in DISPATCH_INELIGIBLE_STATUSES
         assert "FAILED" in DISPATCH_INELIGIBLE_STATUSES
 
     def test_dispatch_ineligible_status_is_not_enum_member(self):
         """验证 DISPATCH_INELIGIBLE_STATUSES 包含字符串值而非枚举成员。"""
-        # The frozenset should contain actual string values like "COMPLETED"
-        # Not enum members like TaskStatus.COMPLETED
-        assert "COMPLETED" in DISPATCH_INELIGIBLE_STATUSES
+        # The frozenset should contain actual string values like "DONE"
+        # Not enum members like TaskStatus.DONE
+        assert "DONE" in DISPATCH_INELIGIBLE_STATUSES
         assert "FAILED" in DISPATCH_INELIGIBLE_STATUSES
         # If mutation removed .value, some elements would be TaskStatus (not str)
         for status in DISPATCH_INELIGIBLE_STATUSES:

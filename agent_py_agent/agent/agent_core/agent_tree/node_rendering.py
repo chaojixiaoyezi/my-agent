@@ -224,7 +224,7 @@ def _timing(payload: dict[str, object]) -> dict[str, float]:
 
 def _not_done_reason(payload: dict[str, object]) -> str:
     status = str(payload.get("status") or "").strip().upper()
-    if status in {"DONE", "COMPLETED", "SUCCEEDED", "VERIFIED", "ACCEPTED"}:
+    if status == "DONE":
         return ""
     failure_type = str(payload.get("failure_type") or "").strip()
     if failure_type:

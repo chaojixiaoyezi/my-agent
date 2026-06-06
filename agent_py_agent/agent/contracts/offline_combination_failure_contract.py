@@ -54,7 +54,7 @@ def _validate_compact_repeat(facts: dict[str, Any], findings: list[dict[str, obj
 
 
 def _validate_parent_child_closeout(facts: dict[str, Any], findings: list[dict[str, object]]) -> None:
-    children_succeeded = any(text(item.get("status")) == "SUCCEEDED" for item in dict_items(facts.get("child_tasks")))
+    children_succeeded = any(text(item.get("status")) == "DONE" for item in dict_items(facts.get("child_tasks")))
     parent = facts.get("parent_artifact")
     if children_succeeded and isinstance(parent, dict) and parent.get("required") is True and parent.get("exists") is not True:
         findings.append(finding("CHILD_OK_PARENT_ARTIFACT_MISSING"))

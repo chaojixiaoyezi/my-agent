@@ -54,7 +54,7 @@ class TaskStatus(str, Enum):
     ABANDONED = "ABANDONED"
     # 状态用途: 旧 run 已由 replacement/takeover run 接管，保留审计但不再进入普通 dispatch 候选。
     TAKEN_OVER = "TAKEN_OVER"
-    COMPLETED = "COMPLETED"
+    DONE = "DONE"
     FAILED = "FAILED"
 
 
@@ -62,7 +62,7 @@ DISPATCH_INELIGIBLE_STATUSES = frozenset({
     TaskStatus.PAUSED.value,
     TaskStatus.ABANDONED.value,
     TaskStatus.TAKEN_OVER.value,
-    TaskStatus.COMPLETED.value,
+    TaskStatus.DONE.value,
     TaskStatus.FAILED.value,
 })
 

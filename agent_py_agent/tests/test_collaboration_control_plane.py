@@ -83,6 +83,7 @@ def test_request_lifecycle_updates_effective_request_and_status_buckets(tmp_path
 
     _mark_request(store, (case.case_id, blocked_request.request_id, "source-b"), "working", 13.0)
     _mark_request(store, (case.case_id, blocked_request.request_id, "source-b"), "blocked", 14.0)
+    _submit_agent_evidence(store, (case.case_id, completed_request.request_id, "source-c"), matched=True, now=14.5)
     _mark_request(store, (case.case_id, completed_request.request_id, "source-c"), "completed", 15.0)
 
     status = store.case_status(case.case_id)
@@ -101,6 +102,22 @@ def test_request_lifecycle_updates_effective_request_and_status_buckets(tmp_path
     assert status["missing_evidence_request_ids"] == [blocked_request.request_id]
     assert status["ready_for_main_agent"] is True
     assert decisions_after == decisions_before
+
+
+def test_completed_request_status_without_evidence_stays_pending(tmp_path) -> None:
+    from agent_py_agent.agent.collaboration import AgentCapability, CollaborationStore
+
+    store = CollaborationStore(tmp_path / "collaboration")
+    store.register_agent(AgentCapability(agent_id="source-b", capabilities=("query",)))
+    case = store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "无证据完成声明", 'created_by': "source-a", 'now': 10.0})
+    request = store.request_collaboration({'case_id': case.case_id, 'requester_agent_id': "source-a", 'target_agent_ids': ("source-b",), 'question': "请查证。", 'now': 11.0})
+
+    store.update_request_status({'case_id': case.case_id, 'request_id': request.request_id, 'status': "completed", 'actor_agent_id': "source-b", 'summary': "声称完成但未提交证据。", 'now': 12.0})
+    status = store.case_status(case.case_id)
+
+    assert status["pending_request_count"] == 1
+    assert status["completed_request_count"] == 0
+    assert status["missing_evidence_request_ids"] == [request.request_id]
 
 
 def test_collaboration_request_preserves_open_world_clue_packet(tmp_path) -> None:
@@ -196,6 +213,11 @@ def test_collaboration_tools_accept_generic_clue_request_and_evidence_response(t
 def _mark_request(store, request_ref: tuple[str, str, str], status: str, now: float) -> None:
     case_id, request_id, actor = request_ref
     store.update_request_status({'case_id': case_id, 'request_id': request_id, 'status': status, 'actor_agent_id': actor, 'summary': "来源暂时不可用，需要主代理换策略或确认。", 'now': now})
+
+
+def _submit_agent_evidence(store, refs: tuple[str, str, str], *, matched: bool, now: float) -> None:
+    case_id, request_id, agent_id = refs
+    store.submit_evidence({'case_id': case_id, 'request_id': request_id, 'source_agent_id': agent_id, 'matched': matched, 'summary': f"{agent_id} checked", 'evidence_refs': (f"artifact://{agent_id}/evidence",), 'now': now})
 
 
 def _submit_generic_miss_evidence(agent: SimpleAgent, case_id: str, request_id: str) -> dict[str, object]:

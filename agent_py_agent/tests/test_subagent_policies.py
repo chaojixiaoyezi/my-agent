@@ -31,6 +31,8 @@ from agent_py_agent.agent.subagents.policies import (
     _route_card_payload,
     _select_capability_hits,
     _severity_weight,
+    _status_from_structured_output,
+    _verification_from_runner_status,
     filter_board_items,
 )
 from agent_py_agent.agent.subagents.reports import ActionPlanItem, DueCheckIssue, SubAgentBoardItem
@@ -141,6 +143,17 @@ def test_filter_board_items_no_filter():
     ]
     filtered = filter_board_items(items)
     assert len(filtered) == 2
+
+
+def test_runner_success_status_is_exact_done_only():
+    parsed = SubAgentParsedOutput(found=True, ok=True, status="SUCCESS")
+
+    assert _status_from_structured_output(parsed) == "BLOCKED"
+    assert _verification_from_runner_status("SUCCESS") == "UNVERIFIED"
+
+    parsed_done = SubAgentParsedOutput(found=True, ok=True, status="DONE")
+    assert _status_from_structured_output(parsed_done) == "DONE"
+    assert _verification_from_runner_status("DONE") == "VERIFIED"
 
 
 # ── _filter_action_plan_items 测试 ────────────────────────────────────────

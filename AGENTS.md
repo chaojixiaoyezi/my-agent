@@ -22,6 +22,7 @@
 - 一个概念一个权威位置。task workspace、memory、artifact、subagent state、compact ledger、config 都必须有唯一 canonical path / canonical schema；projection/index 只能做查找和展示。
 - 配置必须真的生效。用户配置、默认 YAML、dataclass 默认值、测试覆盖不能互相打架；不允许“配置里改了，运行时还读写死值”。
 - 状态和控制必须结构化。停止、取消、暂停、恢复、接管、验收、授权要走 control event/tool 参数/status 字段，不解析普通自然语言触发。
+- 状态别名不隐式兼容。旧标签、多语言词表和模型口头“完成/成功/失败”不能自动变成当前协议状态；确需迁移时要写显式结构化迁移记录。
 - 大输出、compact、resume 是底层能力，不是 prompt 技巧。长文件、长工具输出、长任务必须依赖 chunk、cursor、coverage ledger、archive 和 resume summary。
 - 参考成熟项目先于自己发明。状态/compact 学 会话运行时/代理运行时 的 typed protocol，guidance/wait 学 长期助手 的软引导和 activity-based 思路，subagent template 学 模型助手 Code 的结构化模板。
 - 详细条款以 `docs/development/DEVELOPMENT_RULES.md#0-development-iron-rules--开发铁律` 为准。

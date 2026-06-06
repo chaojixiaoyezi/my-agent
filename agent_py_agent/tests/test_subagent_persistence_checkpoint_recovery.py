@@ -28,6 +28,7 @@ def _create_checkpoint_recovery_task(manager: SubAgentManager, tmp_path: Path):
                 "evidence_ref": "logs/focused.txt",
             },
             {"name": "lint", "ok": True},
+            {"name": "legacy-status-only", "status": "succeeded", "message": "no explicit ok bit"},
         ],
         "next_actions": ["补证据链"],
         "next_action": "请求最终收口",
@@ -60,7 +61,13 @@ def _assert_checkpoint_recovery_artifacts(tmp_path: Path, task) -> None:
             "status": "failed",
             "evidence_ref": "logs/focused.txt",
             "message": "assertion failed",
-        }
+        },
+        {
+            "name": "legacy-status-only",
+            "status": "succeeded",
+            "evidence_ref": "",
+            "message": "no explicit ok bit",
+        },
     ]
     assert next_actions["next_actions"][:2] == ["补证据链", "请求最终收口"]
     assert "runner 已产出材料但证据不足。" in progress_md

@@ -154,6 +154,7 @@ class DispatchSubagentsTool(BaseTool):
                 self.agent,
                 params.get("runner_instruction"),
             ),
+            recovery_mode=str(params.get("recovery_mode") or "").strip(),
             max_cards=_non_negative_int(params.get("max_cards"), default=0),
             probe=not _bool_param(params.get("no_probe"), default=False),
             take_over_by=dispatch_take_over_by_default(self.agent, params),

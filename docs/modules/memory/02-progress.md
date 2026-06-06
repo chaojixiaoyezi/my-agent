@@ -1,5 +1,14 @@
 # Memory Progress
 
+## 2026-06-06 Compact 事实源收敛
+
+- compact/resume 的 read cursor 只认当前工具记录的结构化成功事实：`ok: true`，或无错误且
+  `status` 为空/`ok`。`succeeded`、`completed`、`done` 等旧字符串不再算已读。
+- runtime fact source 的 run phase 只认 `DONE` 为 final；`succeeded` 等旧状态别名保持 running，
+  避免 compact 后把未收口任务误恢复成已完成。
+- raw archive 工具布尔只接受真正 bool 或机器布尔字面量 `true/false/1/0`；`success/error/ok`
+  这类状态词不再变成工具成功/失败事实。
+
 ## 2026-06-04 收敛
 
 - 主代理长期记忆只写当前 owner `memory/long_term/memory.jsonl`。

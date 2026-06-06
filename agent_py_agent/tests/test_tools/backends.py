@@ -320,7 +320,7 @@ class OutputJsonCompletionBackend(BaseBackend):
         if self.calls > 1:
             raise AssertionError("subagent runner should stop after writing output.json")
         payload = {
-            "status": "COMPLETED",
+            "status": "DONE",
             "summary": "output.json completion smoke",
             "artifacts": [{"path": "proof.txt", "kind": "file", "ok": True}],
             "tests": [{"name": "proof exists", "command": "test -f proof.txt"}],

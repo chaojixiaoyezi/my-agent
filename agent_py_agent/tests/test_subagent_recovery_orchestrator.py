@@ -85,6 +85,18 @@ def test_recovery_orchestrator_reports_recoverable_scan_load_error(tmp_path: Pat
     assert payload["load_errors"][0]["error"]["message"]
 
 
+def test_recovery_orchestrator_does_not_scan_error_status_alias(tmp_path: Path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(goal="旧状态别名", thought="", plan=["noop"], role="worker")
+    task.status = "ERROR"
+    manager.save(task)
+
+    report = manager.orchestrate_recovery(params=RecoveryOrchestrationRequest(requested_by="parent-test"))
+
+    assert report.steps == []
+    assert report.summary["total"] == 0
+
+
 def _write_continue_packet(task) -> Path:
     path = Path(task.agent_run_compactions_dir) / "session" / "latest_continue_packet.json"
     path.parent.mkdir(parents=True, exist_ok=True)

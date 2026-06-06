@@ -90,6 +90,7 @@ class DispatchParams:
     reviewer: str = "parent-dispatch"
     note: str = ""
     runner_instruction: str = ""
+    recovery_mode: str = ""
     max_cards: int = 0
     probe: bool = True
     take_over_by: str = ""
@@ -209,6 +210,7 @@ class DispatchContext:
     take_over_by: str
     locked_files: list[str] | None
     router: Any  # CapabilityRouter – forward ref to avoid circular import at module level
+    recovery_mode: str = ""
     parent_run_id: str = ""
     root_id: str = ""
     include_run_ids: list[str] | None = None

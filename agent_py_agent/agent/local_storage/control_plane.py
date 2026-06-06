@@ -35,8 +35,8 @@ from .control_plane_models import (
 
 _RUNNING_STATUSES = {"RUNNING"}
 _BLOCKED_STATUSES = {"BLOCKED"}
-_COMPLETED_STATUSES = {"DONE", "COMPLETED", "ACCEPTED", "VERIFIED"}
-_FAILED_STATUSES = {"FAILED", "ERROR", "TIMEOUT"}
+_DONE_STATUSES = {"DONE"}
+_FAILED_STATUSES = {"FAILED", "TIMEOUT", "CHANNEL_ERROR"}
 _TAKEOVER_CANDIDATE_STATUSES = _BLOCKED_STATUSES | _FAILED_STATUSES
 
 
@@ -220,7 +220,7 @@ def _build_task_rollup(task_id: str, runs: list[AgentRunRecord]) -> TaskRollupRe
         progress=_average_progress(runs),
         running_agents=sum(1 for item in runs if item.status in _RUNNING_STATUSES),
         blocked_agents=sum(1 for item in runs if item.status in _BLOCKED_STATUSES),
-        completed_agents=sum(1 for item in runs if item.status in _COMPLETED_STATUSES),
+            completed_agents=sum(1 for item in runs if item.status in _DONE_STATUSES),
         failed_agents=sum(1 for item in runs if item.status in _FAILED_STATUSES),
         latest_summary=latest_with_summary.latest_summary,
         updated_at=max(item.updated_at for item in runs),

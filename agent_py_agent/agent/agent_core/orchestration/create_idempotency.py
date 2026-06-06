@@ -14,7 +14,7 @@ from ...subagents.services.repair_contract_identity import (
     repair_contract_identity_from_context_packs,
 )
 
-_REUSABLE_STATUSES = {"PLANNING", "PENDING", "RUNNING", "DONE", "COMPLETED", "BLOCKED", "PAUSED"}
+_REUSABLE_STATUSES = {"PLANNING", "PENDING", "RUNNING", "DONE", "BLOCKED", "PAUSED"}
 _GENERIC_AGENT_NAMES = {
     "",
     "general",

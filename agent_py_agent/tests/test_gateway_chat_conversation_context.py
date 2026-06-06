@@ -84,6 +84,27 @@ def test_gateway_chat_followup_reuses_active_root_task_context(tmp_path):
     assert "不要把当前 gateway request id 当成新的 root" in section
 
 
+def test_gateway_chat_followup_does_not_treat_completed_alias_as_active_task(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "conversation": {
+            "channel": "chat",
+            "channel_conversation_id": "session-1",
+            "channel_user_id": "local-cli",
+            "canonical_user_id": "local-agent",
+        }
+    }
+
+    first = _gateway_conversation_context(agent, request, "gw-first", "分析 all-agent 项目")
+    agent.conversation_store.update_task_status({"task_id": "gw-first", "status": "completed"})
+
+    second = _gateway_conversation_context(agent, request, "gw-second", "继续吗")
+
+    assert second.thread_id == first.thread_id
+    assert second.active_task_id == ""
+    assert agent.conversation_store.thread_for_task("gw-second").thread_id == first.thread_id
+
+
 def test_gateway_followup_preserves_current_user_prompt_with_active_task_context(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     request = {

@@ -142,7 +142,7 @@ class TestDispatchLockContention:
 
         tasks = [
             SubAgentTask(id=f"task-{i}", goal=f"Goal {i}", thought=f"Think {i}", plan=["step"],
-                        status=TaskStatus.PLANNING.value if i % 3 == 0 else TaskStatus.COMPLETED.value)
+                        status=TaskStatus.PLANNING.value if i % 3 == 0 else TaskStatus.DONE.value)
             for i in range(100)
         ]
 
@@ -306,12 +306,12 @@ class TestDispatchConcurrencyEdgeCases:
     @pytest.mark.slow
     def test_rapid_status_transitions(self):
         """验证快速状态转换"""
-        # Each complete cycle: PLANNING->RUNNING->BLOCKED->RUNNING->COMPLETED
+        # Each complete cycle: PLANNING->RUNNING->BLOCKED->RUNNING->DONE
         transitions = [
             ("PLANNING", "RUNNING"),
             ("RUNNING", "BLOCKED"),
             ("BLOCKED", "RUNNING"),
-            ("RUNNING", "COMPLETED"),
+            ("RUNNING", "DONE"),
         ]
 
         def do_transitions():

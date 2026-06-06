@@ -362,7 +362,7 @@ def _successful_read_ref(ref: dict[str, Any]) -> bool:
     if str(ref.get("error_code") or "").strip():
         return False
     status = str(ref.get("status") or "").strip().lower()
-    return status not in {"error", "failed", "failure", "deferred", "blocked"}
+    return not status or status == "ok"
 
 
 def _optional_int(value: object) -> int | None:

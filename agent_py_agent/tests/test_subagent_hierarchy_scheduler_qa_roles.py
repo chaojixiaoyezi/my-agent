@@ -149,6 +149,38 @@ def test_hierarchy_schedule_quality_advice_after_implementation_ready(tmp_path):
     assert set(result.quality_advice.suggested_roles) == {"tester", "bug_finder"}
 
 
+def test_hierarchy_schedule_does_not_treat_verification_without_done_as_ready(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    build = tmp_path / "deliverables" / "shop" / "build"
+    parent = _qa_parent(manager, extra_write_roots=[str(build)])
+    worker = manager.create_run(
+        goal=f"实现示例站页面，写到 {build}。",
+        thought="work",
+        plan=["write"],
+        parent_id=parent.id,
+        root_id=parent.id,
+        role="worker",
+        agent_name="小傻妞-shop-worker",
+        extra_write_roots=[str(build)],
+    )
+    worker.status = "RUNNING"
+    worker.verification_status = "VERIFIED"
+    manager.save(worker)
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[],
+            apply=True,
+        )
+    )
+
+    assert result.blocked is False
+    assert result.quality_advice is not None
+    assert result.quality_advice.phase == "implementation_first"
+    assert result.quality_advice.ready_work_refs == []
+
+
 def test_hierarchy_schedule_quality_advice_after_implementation_descendant_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"

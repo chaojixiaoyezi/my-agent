@@ -48,6 +48,41 @@ def test_submit_for_acceptance_without_contract_warns_for_current_task_subagents
         assert gate["evidence"]["unfinished_children"][0]["run_id"] == "subagent-running-1"
 
 
+def test_subagent_aggregation_gate_does_not_treat_completed_alias_as_finished():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        task_root = workspace / "tasks" / "2026-06-03" / "all-agent-架构分析"
+        output_dir = task_root / "output"
+        work_dir = task_root / "work"
+        _write_child_canonical_state(
+            task_root,
+            run_id="subagent-completed-alias",
+            status="COMPLETED",
+            latest_summary="旧状态别名，不应直接当成完成。",
+        )
+        backend = _NoContractTaskOutputReportWithRunningChildBackend(output_dir / "final_analysis_report.md")
+
+        _agent(workspace, backend, max_tool_rounds=3).run(
+            "写一份最终分析报告。",
+            params=RunParams(
+                save=False,
+                task_attributes={
+                    "run_workspace": {
+                        "task_root": str(task_root),
+                        "output_dir": str(output_dir),
+                        "work_dir": str(work_dir),
+                    }
+                },
+            ),
+        )
+        report = _closeout_report(workspace)
+
+        gate = report["subagent_aggregation_gate"]
+        assert gate["allowed"] is True
+        assert gate["findings"][0]["code"] == "SUBAGENTS_UNFINISHED"
+        assert gate["evidence"]["unfinished_children"][0]["run_id"] == "subagent-completed-alias"
+
+
 def _write_child_canonical_state(task_root: Path, *, run_id: str, status: str, latest_summary: str = "") -> None:
     path = task_root / "work" / "agents" / run_id / "canonical_state.json"
     path.parent.mkdir(parents=True, exist_ok=True)

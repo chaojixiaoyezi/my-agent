@@ -13,7 +13,7 @@ from ...common.json_io import read_json_object_report
 from ..models import SubAgentTask
 
 _SCHEMA_VERSION = "subagent_continue_packet.v1"
-_CLOSED_STATUSES = {"ABANDONED", "COMPLETED", "TAKEN_OVER"}
+_CLOSED_STATUSES = {"ABANDONED", "TAKEN_OVER"}
 
 
 @dataclass(frozen=True)

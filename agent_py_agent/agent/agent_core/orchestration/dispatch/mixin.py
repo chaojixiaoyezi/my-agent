@@ -70,6 +70,7 @@ class _DispatchWatchMixin:
         reviewer: str = "parent-dispatch",
         note: str = "",
         runner_instruction: str = "",
+        recovery_mode: str = "",
         max_cards: int = 0,
         probe: bool = True,
         take_over_by: str = "",
@@ -208,6 +209,7 @@ class SimpleAgentDispatchMixin(
         reviewer: str = "parent-dispatch",
         note: str = "",
         runner_instruction: str = "",
+        recovery_mode: str = "",
         max_cards: int = 0,
         probe: bool = True,
         take_over_by: str = "",
@@ -225,6 +227,7 @@ class SimpleAgentDispatchMixin(
             reviewer=reviewer,
             note=note,
             runner_instruction=runner_instruction,
+            recovery_mode=recovery_mode,
             max_cards=max_cards,
             probe=probe,
             take_over_by=take_over_by,
@@ -265,6 +268,7 @@ def _dispatch_params_from_call(
     reviewer: str,
     note: str,
     runner_instruction: str,
+    recovery_mode: str,
     max_cards: int,
     probe: bool,
     take_over_by: str,
@@ -283,6 +287,7 @@ def _dispatch_params_from_call(
         reviewer=reviewer,
         note=note,
         runner_instruction=runner_instruction,
+        recovery_mode=recovery_mode,
         max_cards=max_cards,
         probe=probe,
         take_over_by=take_over_by,
@@ -307,6 +312,7 @@ def _watch_params_from_args(values: Mapping[str, Any]) -> WatchParams:
         reviewer=str(values.get("reviewer") or ""),
         note=str(values.get("note") or ""),
         runner_instruction=str(values.get("runner_instruction") or ""),
+        recovery_mode=str(values.get("recovery_mode") or ""),
         max_cards=int(values.get("max_cards") or 0),
         probe=bool(values.get("probe")),
         take_over_by=str(values.get("take_over_by") or ""),
@@ -330,6 +336,7 @@ def _dispatch_context_from_params(
         normalized_workflow_mode=str(params.workflow_mode or "off").strip().lower(),
         planner=params.planner,
         runner_instruction=params.runner_instruction,
+        recovery_mode=params.recovery_mode,
         max_runners=plan.max_runners,
         limit=params.limit,
         reviewer=params.reviewer,
@@ -352,6 +359,7 @@ def _finalize_scoped_tasks(agent, params: DispatchParams) -> list:
         normalized_workflow_mode="off",
         planner=False,
         runner_instruction="",
+        recovery_mode=params.recovery_mode,
         max_runners=params.execution_plan.max_runners,
         limit=params.limit,
         reviewer=params.reviewer,
@@ -375,8 +383,7 @@ def _planner_dispatch_overrides(params: DispatchParams, records):
         return params.runner_instruction, params.execution_plan.max_runners
     instruction = combine_runner_instruction(
         params.runner_instruction,
-        getattr(planner_record, "message", "").split("instruction:")[-1].strip()
-        if "instruction:" in planner_record.message else "",
+        str(getattr(planner_record, "runner_instruction", "") or "").strip(),
     )
     max_runners = params.execution_plan.max_runners
     if hasattr(planner_record, "suggested_max_runners") and planner_record.suggested_max_runners > 0:

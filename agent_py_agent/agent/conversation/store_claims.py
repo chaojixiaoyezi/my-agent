@@ -140,8 +140,8 @@ def _claim_lease_seconds(value: object) -> int:
 
 
 def _finish_status(value: object) -> str:
-    status = str(value or "finished").strip().lower()
-    return status if status in {"finished", "failed", "cancelled"} else "finished"
+    status = str(value or "").strip().lower()
+    return status if status in {"finished", "failed", "cancelled"} else "failed"
 
 
 def _error_payload(value: object) -> dict[str, Any]:

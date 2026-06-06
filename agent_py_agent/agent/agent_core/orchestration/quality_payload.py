@@ -125,7 +125,7 @@ def _payload_has_negative_signal(item: Any, payload: dict[str, Any]) -> bool:
         return True
     structured = payload.get("structured_output") if isinstance(payload.get("structured_output"), dict) else {}
     structured_status = str(structured.get("status") or payload.get("status") or "").upper()
-    if structured_status in {"BLOCKED", "FAILED", "FAIL", "ERROR"}:
+    if structured_status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
         return True
     if payload.get("ok") is False or structured.get("ok") is False:
         return True

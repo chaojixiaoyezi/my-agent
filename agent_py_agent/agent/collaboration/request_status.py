@@ -9,9 +9,15 @@ from .store_common import float_value
 
 TargetAliases = Callable[[object], set[str]]
 
+TERMINAL_CASE_STATUSES = {"close", "closed", "resolved"}
+COMPLETED_REQUEST_STATUSES = {"completed"}
+BLOCKED_REQUEST_STATUSES = {"blocked"}
+TIMED_OUT_REQUEST_STATUSES = {"timeout", "timed_out"}
+DECLINED_REQUEST_STATUSES = {"declined", "rejected"}
+
 
 def is_terminal_status(status: str) -> bool:
-    return _status_text(status) in {"closed", "resolved", "done", "completed", "finished"}
+    return _status_text(status) in TERMINAL_CASE_STATUSES
 
 
 def case_window_status(status: str) -> str:
@@ -19,26 +25,26 @@ def case_window_status(status: str) -> str:
 
 
 def is_completed_request_status(status: str) -> bool:
-    return _status_text(status) in {"completed", "complete", "done", "finished", "responded", "answered", "fulfilled"}
+    return _status_text(status) in COMPLETED_REQUEST_STATUSES
 
 
 def is_blocked_request_status(status: str) -> bool:
     text = _status_text(status)
     if is_timed_out_request_status(text):
         return False
-    return text in {"blocked", "stuck", "failed", "error", "unavailable"}
+    return text in BLOCKED_REQUEST_STATUSES
 
 
 def is_timed_out_request_status(status: str) -> bool:
-    return _status_text(status) in {"timeout", "timed_out", "deadline_expired", "expired"}
+    return _status_text(status) in TIMED_OUT_REQUEST_STATUSES
 
 
 def is_declined_request_status(status: str) -> bool:
-    return _status_text(status) in {"declined", "rejected", "cancelled", "canceled", "skipped", "refused"}
+    return _status_text(status) in DECLINED_REQUEST_STATUSES
 
 
 def _status_text(status: str) -> str:
-    return str(status or "").strip().lower().replace("-", "_")
+    return str(status or "").strip().lower()
 
 
 def request_is_effectively_timed_out(
@@ -90,7 +96,7 @@ def request_has_required_evidence(
 ) -> bool:
     targets = [str(item) for item in request.target_agent_ids if str(item or "").strip()]
     if len(targets) <= 1:
-        return bool(evidence_sources) or is_completed_request_status(request.status)
+        return bool(evidence_sources)
     return bool(evidence_sources) and all(
         bool(evidence_sources.intersection(target_aliases(target))) for target in targets
     )

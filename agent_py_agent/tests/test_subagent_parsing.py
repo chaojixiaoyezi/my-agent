@@ -87,7 +87,7 @@ class TestParseSubagentRunnerOutput:
         """evidence_packets 数组尾部截断时，保留已闭合且带 refs 的证据包。"""
         text = """[SUBAGENT_RESULT]
 {
-  "status": "COMPLETED",
+  "status": "DONE",
   "summary": "协调节点完成链路和文件检查",
   "evidence_packets": [
     {"id": "evpkt-files", "claim": "文件齐全", "checked_scope": "build", "artifact_refs": ["/tmp/build/index.html"], "evidence_refs": [], "confidence": 1.0},
@@ -97,7 +97,7 @@ class TestParseSubagentRunnerOutput:
         result = parse_subagent_runner_output(text)
         assert result.found is True
         assert result.ok is True
-        assert result.status == "COMPLETED"
+        assert result.status == "DONE"
         assert [item["id"] for item in result.evidence_packets] == ["evpkt-files", "evpkt-chain"]
 
     def test_parse_not_found(self):

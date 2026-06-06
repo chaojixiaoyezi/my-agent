@@ -55,6 +55,9 @@ before changing code.
   配置改了必须真实影响运行链路。
 - 状态机要小而明确。状态字段使用有限、结构化、可审计的值；别名和自然语言说明放
   notes/summary，不进入机器状态。
+- 状态别名不做隐式兼容。`completed`、`succeeded`、`ok`、`ERROR`、多语言词表或
+  历史标签不能自动升格为当前协议的 `DONE` / `FAILED` / `final`；需要兼容时必须先写
+  显式迁移或结构化转换记录，默认按未知值 fail closed。
 - 错误要显性，不要糊成“还能跑”。启动失败、通道断开、子代理挂掉、artifact 丢失、
   config 未生效，都应暴露 typed failure，而不是伪装成 planning/running。
 - 工具不要重复造。已有工具能表达的能力，优先修底层语义或扩展明确参数；只有交互模式

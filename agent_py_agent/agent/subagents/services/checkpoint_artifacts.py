@@ -172,8 +172,7 @@ def _unique_strings(value: object) -> list[str]:
 def _test_passed(item: dict[str, object]) -> bool:
     if "ok" in item:
         return bool(item.get("ok"))
-    status = str(item.get("status") or item.get("result") or "").lower()
-    return status in {"ok", "pass", "passed", "success", "succeeded"}
+    return False
 
 
 def _capability_gap_summary(gap: object) -> str:

@@ -157,7 +157,7 @@ def _apply_unstructured_failure(task, ok, failure_type: str) -> None:
 def _apply_runner_timestamps(task, now: float) -> None:
     if task.status in {"DONE", "FAILED", "BLOCKED", "CHANNEL_ERROR", "TIMEOUT"}:
         task.ended_at = now
-    if str(getattr(task, "status", "") or "").upper() in {"DONE", "COMPLETED"}:
+    if str(getattr(task, "status", "") or "").upper() == "DONE":
         task.progress = 1.0
     elif str(getattr(task, "status", "") or "").upper() == "RUNNING":
         task.progress = max(_safe_progress(getattr(task, "progress", 0.0)), 0.05)

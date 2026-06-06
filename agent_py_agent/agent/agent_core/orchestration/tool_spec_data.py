@@ -82,11 +82,13 @@ _DISPATCH_PARAMETERS = {
     "dry_run": "true 预览，false 真实推进",
     "max_runners": "本轮最多推进几个子代理",
     "run_ids": "精确指定要推进的 run_id 列表",
+    "recovery_mode": "可选。只有恢复策略明确给出时传，例如 rerun_from_continue_packet 或 rerun_from_checkpoint",
 }
 _DISPATCH_PARAMETER_DETAILS = {
     "dry_run": "模型只需要填写这一套预览开关，不要再制造第二套执行字段。",
     "max_runners": "不知道时省略；0 表示不执行。",
     "run_ids": "适合按 create/schedule 返回的 run_id 精确推进。",
+    "recovery_mode": "这是机器字段，不从 runner_instruction 文本猜。普通推进不要填写；恢复建议 payload 给了才原样传入。",
 }
 
 _SCHEDULE_CHILD_USE_CASES = [

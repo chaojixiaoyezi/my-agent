@@ -13,7 +13,7 @@ from .offline_contract_report import (
     validation_report,
 )
 
-TERMINAL_OK = {"SUCCEEDED", "VERIFIED"}
+TERMINAL_OK = {"DONE"}
 
 
 @dataclass(frozen=True)
@@ -126,7 +126,7 @@ def _child_closure_finding(child_id: str, by_id: dict[str, dict[str, Any]]) -> t
     if not child:
         return "TASK_TREE_CHILD_REF_MISSING", {}
     if child.get("critical") is not False and text(child.get("status")) not in TERMINAL_OK:
-        return "TASK_TREE_SUCCEEDED_PARENT_HAS_UNFINISHED_CRITICAL_CHILD", {"child_id": child_id}
+        return "TASK_TREE_DONE_PARENT_HAS_UNFINISHED_CRITICAL_CHILD", {"child_id": child_id}
     return "", {}
 
 

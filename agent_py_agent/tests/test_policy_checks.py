@@ -58,17 +58,20 @@ def test_status_from_structured_output_preserves_fail_states():
         assert _status_from_structured_output(parsed) == status
 
 
-def test_status_from_structured_output_done_becomes_awaiting():
-    """测试 DONE 类状态变成 DONE。"""
-    for status in ["DONE", "COMPLETED", "COMPLETE", "SUCCESS"]:
-        parsed = SubAgentParsedOutput(status=status, capability_requests=[], blocked_reason="")
-        assert _status_from_structured_output(parsed) == "DONE"
-
-
-def test_status_from_structured_output_unknown_becomes_awaiting():
-    """测试未知状态变成 DONE。"""
-    parsed = SubAgentParsedOutput(status="UNKNOWN_STATUS", capability_requests=[], blocked_reason="")
+def test_status_from_structured_output_only_exact_done_completes():
+    """只有当前结构化 DONE 状态能进入完成态。"""
+    parsed = SubAgentParsedOutput(status="DONE", capability_requests=[], blocked_reason="")
     assert _status_from_structured_output(parsed) == "DONE"
+
+    for status in ["COMPLETED", "COMPLETE", "SUCCESS"]:
+        parsed = SubAgentParsedOutput(status=status, capability_requests=[], blocked_reason="")
+        assert _status_from_structured_output(parsed) == "BLOCKED"
+
+
+def test_status_from_structured_output_unknown_becomes_blocked():
+    """未知状态不能被当作完成。"""
+    parsed = SubAgentParsedOutput(status="UNKNOWN_STATUS", capability_requests=[], blocked_reason="")
+    assert _status_from_structured_output(parsed) == "BLOCKED"
 
 
 def test_status_from_structured_output_pending_capability_blocks():

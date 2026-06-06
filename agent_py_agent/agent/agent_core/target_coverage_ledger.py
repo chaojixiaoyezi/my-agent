@@ -145,7 +145,7 @@ def _target_item_row(item: object) -> dict[str, str]:
 
 def _record_counts_as_covered(record: dict[str, object]) -> bool:
     status = str(record.get("status") or "covered").strip().lower()
-    return bool(str(record.get("target_id") or "").strip()) and status in {"covered", "done", "ok", "ready", "hit"}
+    return bool(str(record.get("target_id") or "").strip()) and status == "covered"
 
 
 def _tool_call_coverage_record(value: dict[str, object], base: Path | None) -> dict[str, object]:

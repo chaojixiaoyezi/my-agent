@@ -49,10 +49,6 @@ def normalize_status(value: object) -> str:
         return "PLANNING"
     if text == "QUEUED":
         return "PENDING"
-    if text == "COMPLETED":
-        return "DONE"
-    if text == "ERROR":
-        return "FAILED"
     return text or "PLANNING"
 
 

@@ -9,7 +9,7 @@ from ..base import CreateRunParams
 from ..idempotency_contract_identity import idempotency_contract_identity_from_context_packs
 from ..repair_contract_identity import repair_contract_identity_from_context_packs
 
-_REUSABLE_STATUSES = {"PLANNING", "PENDING", "RUNNING", "DONE", "COMPLETED", "BLOCKED", "PAUSED"}
+_REUSABLE_STATUSES = {"PLANNING", "PENDING", "RUNNING", "DONE", "BLOCKED", "PAUSED"}
 _DISPATCHABLE_STATUSES = {"PLANNING", "PENDING"}
 
 

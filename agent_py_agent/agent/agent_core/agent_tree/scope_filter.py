@@ -29,8 +29,8 @@ def visible_nodes(nodes: list[dict[str, object]], raw_run_ids: object) -> list[d
 
 def coordination_advice(nodes: list[dict[str, object]], allowed_tools: object = None) -> dict[str, object]:
     pending = _run_ids_with_status(nodes, {"CREATED", "QUEUED", "PENDING", "PLANNING", "RUNNING", "AWAITING_ACCEPTANCE"})
-    completed = _run_ids_with_status(nodes, {"DONE", "COMPLETED", "ACCEPTED", "VERIFIED", "SUCCEEDED"})
-    blocked = _run_ids_with_status(nodes, {"BLOCKED", "FAILED", "ERROR", "TIMEOUT"})
+    completed = _run_ids_with_status(nodes, {"DONE"})
+    blocked = _run_ids_with_status(nodes, {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"})
     allowed = _allowed_tool_set(allowed_tools)
     return {
         "schema_version": "agent_tree_coordination_advice.v1",
@@ -76,9 +76,9 @@ def _add_status_bucket(buckets: dict[str, list[str]], run_id: str, status: str) 
     if status == "BLOCKED":
         buckets["blocked"].append(run_id)
         buckets["takeover_candidates"].append(run_id)
-    if status in {"DONE", "COMPLETED", "ACCEPTED", "VERIFIED"}:
+    if status == "DONE":
         buckets["completed"].append(run_id)
-    if status in {"FAILED", "ERROR", "TIMEOUT"}:
+    if status in {"FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
         buckets["failed"].append(run_id)
         buckets["takeover_candidates"].append(run_id)
 

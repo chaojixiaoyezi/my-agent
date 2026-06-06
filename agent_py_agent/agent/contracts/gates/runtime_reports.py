@@ -9,7 +9,7 @@ from .models import GateDecision, GateFinding
 def evaluate_acceptance_closeout_gate(report: dict[str, Any]) -> GateDecision:
     status = str(report.get("final_status") or report.get("status") or "").strip().upper()
     verification = str(report.get("verification_status") or "").strip().upper()
-    if status in {"DONE", "SUCCEEDED", "VERIFIED"} and verification not in {"PASSED", "VERIFIED"}:
+    if status == "DONE" and verification not in {"PASSED", "VERIFIED"}:
         return GateDecision.deny(
             "acceptance_closeout",
             "ACCEPTANCE_VERIFICATION_MISSING",

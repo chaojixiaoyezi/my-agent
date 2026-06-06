@@ -34,6 +34,28 @@ def test_task_compact_rollup_exposes_status_counts_and_actionable_refs(tmp_path:
     assert continue_packet["active_refs"][0] == str(result.rollup_json)
 
 
+def test_task_compact_rollup_keeps_completed_alias_pending(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.task_compact_rollup import sync_task_compact_rollup
+
+    task_root = tmp_path / "tasks" / "task-root"
+    work = task_root / "work"
+    (work / "agents" / "agent-old").mkdir(parents=True)
+    (work / "state.json").write_text(
+        json.dumps({"task_id": "task-root", "status": "RUNNING", "progress": 0.4}),
+        encoding="utf-8",
+    )
+    _write_agent_state(work / "agents" / "agent-old" / "state.json", {"id": "agent-old", "status": "COMPLETED"})
+
+    result = sync_task_compact_rollup(task_root)
+
+    rollup = json.loads(result.rollup_json.read_text(encoding="utf-8"))
+    continue_packet = json.loads((result.compact_package_dir / "continue_packet.json").read_text(encoding="utf-8"))
+    assert rollup["status_counts"] == {"completed": 1}
+    assert rollup["completed_run_ids"] == []
+    assert rollup["pending_run_ids"] == ["agent-old"]
+    assert continue_packet["pending_work"] == ["agent-old: COMPLETED"]
+
+
 def test_task_compact_rollup_reports_corrupt_child_state(tmp_path: Path) -> None:
     from agent_py_agent.agent.user_space.task_compact_rollup import sync_task_compact_rollup
 

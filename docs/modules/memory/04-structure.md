@@ -46,6 +46,8 @@
 - 主代理 compact 读取当前 task workspace、owner memory、tool-output refs 和当前 run 状态。
 - 子代理 compact 读取自己的 task-local canonical state、events、artifact refs 和父级可见 guidance。
 - `rollup_ledger.jsonl` 只在子代理状态签名变化时追加；心跳式保存不应制造新的 compact 包。
+- `read_file` / `read_artifact` 的恢复游标来自结构化工具记录；旧状态词、summary 和人工描述不能证明某段已经读过。
+- compact handoff 的 final/running 判断只读当前协议状态，不能用 `succeeded/completed` 这类别名补齐。
 
 ## Artifact And Raw Output
 
@@ -59,3 +61,4 @@
 - 新字段优先建明确业务字段，不使用通用保留槽承载业务语义。
 - 索引可以重建，不能替代正文事实。
 - memory 只提供事实和检索，不做任务质量硬门。
+- 状态别名必须 fail closed；需要迁移旧数据时写显式迁移记录，不在 compact 读取链路里临时猜。

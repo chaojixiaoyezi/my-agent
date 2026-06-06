@@ -489,6 +489,35 @@ def test_agent_tree_soft_advice_does_not_treat_running_children_as_failed_output
     assert "不要把目标目录暂时为空或占位报告当失败" in payload["policy"]["next_step"]
 
 
+def test_agent_tree_completion_buckets_require_exact_done_status():
+    """Historical success aliases stay visible as raw status, but they must not drive completion."""
+
+    class _Manager:
+        def kernel_snapshot(self, query):
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                scope=query.scope,
+                runs=[
+                    SubagentKernelRun(run_id="child-completed", status="COMPLETED"),
+                    SubagentKernelRun(run_id="child-success", status="SUCCESS"),
+                    SubagentKernelRun(run_id="child-done", status="DONE"),
+                ],
+            )
+
+    class _Agent:
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent())
+
+    assert payload["status_buckets"]["completed"] == ["child-done"]
+    assert payload["coordination_advice"]["completed_child_run_ids"] == ["child-done"]
+    rows = {row["run_id"]: row for row in payload["child_result_index"]}
+    assert rows["child-completed"]["readiness"] == "not_ready"
+    assert rows["child-completed"]["not_done_reason"] == "completed"
+    assert rows["child-success"]["readiness"] == "not_ready"
+    assert rows["child-success"]["not_done_reason"] == "success"
+
+
 def test_child_result_index_keeps_progress_refs_for_running_child_without_artifacts():
     """运行中的子代理即使还没有 artifact，也要给父代理可读的进度 refs。"""
 

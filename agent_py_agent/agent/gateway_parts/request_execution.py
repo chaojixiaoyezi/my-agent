@@ -270,7 +270,7 @@ def _is_root_task_link(link, current_request_id: str) -> bool:
     if not task_id or task_id == current_request_id or task_id.startswith("subagent-"):
         return False
     status = str(getattr(link, "status", "") or "").strip().lower()
-    return status not in {"done", "completed", "closed", "cancelled", "abandoned"}
+    return status == "active"
 
 
 def _bind_gateway_request_task(store, thread_id: str, request_id: str, prompt: str, load_errors: list[dict]) -> None:

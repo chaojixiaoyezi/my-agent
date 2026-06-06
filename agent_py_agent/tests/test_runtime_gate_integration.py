@@ -279,7 +279,7 @@ def test_registry_execution_blocks_duplicate_idempotency_key_before_side_effect(
                             }
                         ),
                         "operation_id": "op-1",
-                        "status": "SUCCEEDED",
+                        "status": "DONE",
                     }
                 ],
             },

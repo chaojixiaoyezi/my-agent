@@ -38,6 +38,8 @@ class DispatchRecordBuilder:
             runner_child_load_errors=params.runner_child_load_errors or [],
             collaboration_candidate_load_errors=params.collaboration_candidate_load_errors or [],
             runner_partial_success=params.runner_partial_success,
+            runner_instruction=params.runner_instruction,
+            suggested_max_runners=params.suggested_max_runners,
             created_at=time.time(),
         )
 

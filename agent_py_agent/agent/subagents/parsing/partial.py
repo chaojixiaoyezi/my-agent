@@ -109,7 +109,7 @@ def _partial_result_is_safe(
     status_text = str(status or "").strip().upper()
     if status_text in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
         return bool(str(blocked_reason or failure_type or "").strip())
-    if status_text not in {"COMPLETED", "DONE", "SUCCESS", "OK"}:
+    if status_text != "DONE":
         return False
     return any(_packet_has_traceable_ref(item) for item in evidence_packets)
 

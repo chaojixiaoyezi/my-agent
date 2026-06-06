@@ -7,7 +7,7 @@ from typing import Any
 from ...contracts.gates.models import GateDecision, GateFinding
 from ...contracts.recovery_actions import RecoveryAction
 
-_SUCCESS_STATUSES = {"DONE", "COMPLETED", "COMPLETE", "SUCCESS", "SUCCEEDED", "ACCEPTED", "VERIFIED"}
+_SUCCESS_STATUSES = {"DONE"}
 _RESOLVED_STATUSES = {"CANCELLED", "ABANDONED", "TAKEN_OVER"}
 _TERMINAL_FAILED_STATUSES = {"FAILED", "BLOCKED", "TIMEOUT", "CHANNEL_ERROR"}
 

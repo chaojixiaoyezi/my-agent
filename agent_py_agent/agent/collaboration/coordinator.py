@@ -4,6 +4,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .models import CaseDecision, new_decision_id
+from .request_status import (
+    is_blocked_request_status,
+    is_declined_request_status,
+    is_timed_out_request_status,
+    request_has_required_evidence,
+)
 from .store_status import CollaborationStore
 
 if TYPE_CHECKING:
@@ -108,11 +114,14 @@ def _mark_expired_requests(store: CollaborationStore, case_id: str, *, now: floa
         deadline = _float(request.deadline_at)
         if deadline <= 0 or deadline > now:
             continue
-        status = str(request.status or "").strip().lower()
-        if status in {"blocked", "timeout", "timed_out", "declined", "rejected", "completed", "done"}:
+        if (
+            is_blocked_request_status(request.status)
+            or is_declined_request_status(request.status)
+            or is_timed_out_request_status(request.status)
+        ):
             continue
         evidence_sources = evidence_sources_by_request.get(request.request_id, set())
-        if _request_has_required_evidence(
+        if request_has_required_evidence(
             request,
             evidence_sources,
             target_aliases=store.agent_identity_aliases,
@@ -140,20 +149,6 @@ def _evidence_sources_by_request(store: CollaborationStore, evidence) -> dict[st
         if request_id and source:
             sources.setdefault(request_id, set()).update(store.agent_identity_aliases(source))
     return sources
-
-
-def _request_has_required_evidence(request, evidence_sources: set[str], *, target_aliases) -> bool:
-    targets = [str(item) for item in getattr(request, "target_agent_ids", ()) if str(item or "").strip()]
-    if len(targets) <= 1:
-        return bool(evidence_sources) or str(getattr(request, "status", "") or "").strip().lower() in {
-            "completed",
-            "complete",
-            "done",
-            "finished",
-        }
-    if not evidence_sources:
-        return False
-    return all(bool(evidence_sources.intersection(target_aliases(target))) for target in targets)
 
 
 def _missing_responder_agent_ids(request, evidence_sources: set[str], *, target_aliases) -> list[str]:

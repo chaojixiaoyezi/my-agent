@@ -33,7 +33,7 @@ def test_child_success_requires_artifacts_and_acceptance() -> None:
                 {
                     "run_id": "child-a",
                     "parent_run_id": "parent",
-                    "status": "SUCCEEDED",
+                    "status": "DONE",
                     "artifact_refs": [],
                     "acceptance": {"ok": False, "evidence_refs": []},
                 }
@@ -95,7 +95,7 @@ def test_child_result_export_must_be_refs_only() -> None:
                 {
                     "run_id": "child-a",
                     "parent_run_id": "parent",
-                    "status": "SUCCEEDED",
+                    "status": "DONE",
                     "artifact_refs": ["artifact://child-a/report"],
                     "acceptance": {"ok": True, "evidence_refs": ["evidence://child-a"]},
                     "export": {"kind": "full_context", "refs": []},
@@ -120,7 +120,7 @@ def test_valid_subagent_parent_closeout_passes() -> None:
                     "run_id": "child-a",
                     "parent_run_id": "parent",
                     "depth": 1,
-                    "status": "VERIFIED",
+                    "status": "DONE",
                     "artifact_refs": ["artifact://child-a/report"],
                     "acceptance": {"ok": True, "evidence_refs": ["evidence://child-a"]},
                     "export": {"kind": "refs_only", "refs": ["artifact://child-a/report"]},

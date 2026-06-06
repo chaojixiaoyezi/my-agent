@@ -18,8 +18,8 @@ from .models import SubAgentTask
 from .protocol import build_task_address, build_task_envelope
 
 _RUNNING_STATUSES = {"RUNNING"}
-_COMPLETED_STATUSES = {"DONE", "COMPLETED", "ACCEPTED", "VERIFIED"}
-_FAILED_STATUSES = {"FAILED", "ERROR", "TIMEOUT"}
+_DONE_STATUSES = {"DONE"}
+_FAILED_STATUSES = {"FAILED", "TIMEOUT", "CHANNEL_ERROR"}
 _BLOCKED_STATUSES = {"BLOCKED"}
 _TAKEOVER_CANDIDATE_STATUSES = _FAILED_STATUSES | _BLOCKED_STATUSES
 
@@ -44,7 +44,7 @@ class SubagentKernel:
             runs=rows,
             running_run_ids=[row.run_id for row in rows if row.status in _RUNNING_STATUSES],
             blocked_run_ids=[row.run_id for row in rows if row.status in _BLOCKED_STATUSES],
-            completed_run_ids=[row.run_id for row in rows if row.status in _COMPLETED_STATUSES],
+            completed_run_ids=[row.run_id for row in rows if row.status in _DONE_STATUSES],
             failed_run_ids=[row.run_id for row in rows if row.status in _FAILED_STATUSES],
             takeover_candidate_run_ids=[
                 row.run_id for row in rows if row.status in _TAKEOVER_CANDIDATE_STATUSES

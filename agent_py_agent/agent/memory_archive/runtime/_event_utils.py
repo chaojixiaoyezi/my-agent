@@ -112,9 +112,9 @@ def _first_bool(payload: Mapping[str, Any], *keys: str) -> bool | None:
 
 def _bool_from_text(value: str) -> bool | None:
     text = value.strip().lower()
-    if text in {"true", "1", "yes", "ok", "success"}:
+    if text in {"true", "1"}:
         return True
-    if text in {"false", "0", "no", "error", "failed", "failure"}:
+    if text in {"false", "0"}:
         return False
     return None
 

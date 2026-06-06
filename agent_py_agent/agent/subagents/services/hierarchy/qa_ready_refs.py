@@ -66,7 +66,7 @@ def _is_ready_implementation_child(child: object) -> bool:
         return False
     status = _text_attr(child, "status").upper()
     verification = _text_attr(child, "verification_status").upper()
-    return status in {"DONE"} or verification in {"VERIFIED"}
+    return status == "DONE"
 
 
 def _load_child(manager: Any, run_id: str) -> object | None:

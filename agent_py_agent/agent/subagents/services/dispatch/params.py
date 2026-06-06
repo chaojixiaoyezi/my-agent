@@ -31,6 +31,8 @@ class DispatchRecordParams:
     runner_child_load_errors: list[dict[str, object]] | None = None
     collaboration_candidate_load_errors: list[dict[str, object]] | None = None
     runner_partial_success: bool = False
+    runner_instruction: str = ""
+    suggested_max_runners: int = 0
 
 
 @dataclass(frozen=True)

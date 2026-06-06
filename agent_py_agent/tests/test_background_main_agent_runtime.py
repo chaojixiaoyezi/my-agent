@@ -454,3 +454,21 @@ def test_background_prompt_includes_recovery_snapshot_for_previous_failed_claim(
     assert "Recovery Snapshot" in prompt
     assert '"previous_claim_status": "failed"' in prompt
     assert '"takeover_advice": "接手前先核对 claim、任务树和产物登记；不要把模型文本里的完成声明当成事实。"' in prompt
+
+
+def test_background_claim_unknown_finish_status_fails_closed(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    claim = store.claim_background_run({'thread_id': thread.thread_id, 'reason': "unknown_status", 'lease_seconds': 10, 'now': 2.0})
+    assert claim is not None
+
+    finished = store.finish_background_run({
+        'thread_id': thread.thread_id,
+        'claim_id': claim["claim_id"],
+        'status': "succeeded",
+        'now': 3.0,
+    })
+
+    assert finished is not None
+    assert finished["status"] == "failed"
+    assert finished["takeover"] == {"allowed": True, "reason": "runtime_failed"}

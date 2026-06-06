@@ -64,6 +64,24 @@ def test_runtime_fact_source_does_not_parse_prompt_sections_as_machine_facts(tmp
     assert "only approved constraint" in payload["goal"]
 
 
+def test_runtime_fact_source_does_not_promote_succeeded_status_alias_to_final(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+
+    write_runtime_fact_source(
+        RuntimeFactSourceRequest(
+            root=root,
+            request_id="req-status-alias",
+            user_prompt="测试状态别名",
+            status="succeeded",
+        )
+    )
+
+    payload = json.loads(
+        (root / "memory_archive" / "runtime_facts" / "req-status-alias" / "task.json").read_text(encoding="utf-8")
+    )
+    assert payload["runtime_progress"]["phase"] == "running"
+
+
 def test_runtime_fact_source_does_not_parse_compact_auto_continuation_markdown(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
 

@@ -73,8 +73,8 @@ class TestTaskLifecycle:
         result = registry.lookup_task(task_id)
         assert result["status"] == TaskStatus.RUNNING.value
 
-    def test_task_running_to_completed_transition(self, registry):
-        """测试任务从 RUNNING 到 COMPLETED 的转换。
+    def test_task_running_to_done_transition(self, registry):
+        """测试任务从 RUNNING 到 DONE 的转换。
 
         验证正常完成流程。
         """
@@ -85,11 +85,11 @@ class TestTaskLifecycle:
             goal="运行中任务",
         )
 
-        ok = registry.update_task_status(task_id, TaskStatus.COMPLETED.value)
+        ok = registry.update_task_status(task_id, TaskStatus.DONE.value)
         assert ok is True
 
         result = registry.lookup_task(task_id)
-        assert result["status"] == TaskStatus.COMPLETED.value
+        assert result["status"] == TaskStatus.DONE.value
 
     def test_task_running_to_failed_transition(self, registry):
         """测试任务从 RUNNING 到 FAILED 的转换。
@@ -154,7 +154,7 @@ class TestTaskLifecycle:
     def test_task_multiple_status_updates(self, registry):
         """测试任务多次状态更新。
 
-        验证状态时间线正确：PLANNING → RUNNING → PAUSED → RUNNING → COMPLETED。
+        验证状态时间线正确：PLANNING → RUNNING → PAUSED → RUNNING → DONE。
         """
         task_id = "task-007"
         registry.register_task(
@@ -169,11 +169,11 @@ class TestTaskLifecycle:
         registry.update_task_status(task_id, TaskStatus.PAUSED.value)
         # PAUSED → RUNNING
         registry.update_task_status(task_id, TaskStatus.RUNNING.value)
-        # RUNNING → COMPLETED
-        registry.update_task_status(task_id, TaskStatus.COMPLETED.value)
+        # RUNNING → DONE
+        registry.update_task_status(task_id, TaskStatus.DONE.value)
 
         result = registry.lookup_task(task_id)
-        assert result["status"] == TaskStatus.COMPLETED.value
+        assert result["status"] == TaskStatus.DONE.value
 
 
 class TestTaskQuery:
@@ -193,7 +193,7 @@ class TestTaskQuery:
         )
         registry.register_task(
             task_id="task-u1-2",
-            status=TaskStatus.COMPLETED.value,
+            status=TaskStatus.DONE.value,
             goal="用户1的另一个任务",
             user_id="user-1",
         )
@@ -361,7 +361,7 @@ class TestTaskStatusTransitionsValidation:
 
         验证对不存在的任务更新状态会返回 False 而不是崩溃。
         """
-        ok = registry.update_task_status("nonexistent-task", TaskStatus.COMPLETED.value)
+        ok = registry.update_task_status("nonexistent-task", TaskStatus.DONE.value)
         assert ok is False
 
     def test_task_timestamps_updated(self, registry):

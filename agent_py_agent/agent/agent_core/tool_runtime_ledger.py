@@ -175,7 +175,7 @@ def _result_ref(record: Mapping[str, object]) -> str:
 def _ledger_status(record: Mapping[str, object], runtime_gate: Mapping[str, object]) -> str:
     if runtime_gate.get("allowed") is not True:
         return "blocked"
-    return "completed" if record.get("ok") is True else "failed"
+    return "done" if record.get("ok") is True else "failed"
 
 
 def _merged_idempotency_rows(existing: object, persisted: tuple[dict[str, str], ...]) -> tuple[dict[str, str], ...]:
@@ -239,7 +239,7 @@ def _apply_rate_limit_record(row: dict[str, object], record: object) -> None:
         row["consecutive_failures"] = int(row["consecutive_failures"]) + 1
         row["total_failures"] = int(row["total_failures"]) + 1
         row["last_failure_at"] = timestamp
-    if status == "completed":
+    if status == "done":
         row["consecutive_failures"] = 0
         row["last_success_at"] = timestamp
 

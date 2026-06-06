@@ -230,7 +230,7 @@ def _idempotency_facts(key: str, args_hash: str, operation_id: str) -> Idempoten
         args_hash,
         operation_id,
         ledger_records=(
-            IdempotencyLedgerRecord("idem-1", "sha256:abc", "op-1", "SUCCEEDED"),
+            IdempotencyLedgerRecord("idem-1", "sha256:abc", "op-1", "DONE"),
         ),
     )
 

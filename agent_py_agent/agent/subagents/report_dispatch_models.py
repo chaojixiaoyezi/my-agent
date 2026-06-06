@@ -33,6 +33,8 @@ class DispatchRecord:
     runner_child_load_errors: list[dict[str, object]] = field(default_factory=list)
     collaboration_candidate_load_errors: list[dict[str, object]] = field(default_factory=list)
     runner_partial_success: bool = False
+    runner_instruction: str = ""
+    suggested_max_runners: int = 0
     created_at: float = 0.0
 
 

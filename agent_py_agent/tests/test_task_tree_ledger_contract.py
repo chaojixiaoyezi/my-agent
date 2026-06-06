@@ -20,7 +20,7 @@ def test_task_tree_ledger_rejects_parent_success_with_failed_child() -> None:
 
     result = validate_task_tree_ledger(tree)
 
-    assert result.error_codes == ("TASK_TREE_SUCCEEDED_PARENT_HAS_UNFINISHED_CRITICAL_CHILD",)
+    assert result.error_codes == ("TASK_TREE_DONE_PARENT_HAS_UNFINISHED_CRITICAL_CHILD",)
 
 
 def _valid_task_tree() -> dict[str, object]:
@@ -28,9 +28,9 @@ def _valid_task_tree() -> dict[str, object]:
         "tree_id": "tree-1",
         "root_task_id": "task-root",
         "nodes": [
-            _node("task-root", "", "SUCCEEDED", {"child_ids": ["task-read", "task-report"]}),
-            _node("task-read", "task-root", "SUCCEEDED"),
-            _node("task-report", "task-root", "VERIFIED", {"dependency_ids": ["task-read"]}),
+            _node("task-root", "", "DONE", {"child_ids": ["task-read", "task-report"]}),
+            _node("task-read", "task-root", "DONE"),
+            _node("task-report", "task-root", "DONE", {"dependency_ids": ["task-read"]}),
         ],
         "edges": [
             {"from_task_id": "task-root", "to_task_id": "task-read", "kind": "parent_child"},

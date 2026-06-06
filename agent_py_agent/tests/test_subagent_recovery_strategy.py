@@ -45,6 +45,15 @@ def test_recovery_strategy_prefers_task_local_continue_packet(tmp_path: Path) ->
     assert result.to_dict()["memory_scope"] == "task_local"
 
 
+def test_recovery_strategy_does_not_treat_error_alias_as_recoverable(tmp_path: Path) -> None:
+    _, task = _saved_task(tmp_path, status="ERROR")
+
+    result = build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(task=task))
+
+    assert result.recovery_mode == "manual_review_missing_recovery_refs"
+    assert result.uses_continue_packet is False
+
+
 def test_recovery_strategy_falls_back_when_packet_is_corrupt(tmp_path: Path) -> None:
     _, task = _saved_task(tmp_path)
     packet_ref = Path(task.agent_run_latest_session_continue_packet_json)

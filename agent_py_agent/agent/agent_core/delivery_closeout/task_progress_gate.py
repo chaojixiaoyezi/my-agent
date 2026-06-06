@@ -223,7 +223,7 @@ def _coverage_incomplete_findings(progress: dict[str, Any]) -> list[GateFinding]
 
 
 def _status_text(value: object) -> str:
-    return str(value or "").strip().lower().replace("-", "_")
+    return str(value or "").strip().lower()
 
 
 def _compact_item(item: dict[str, Any]) -> dict[str, str]:

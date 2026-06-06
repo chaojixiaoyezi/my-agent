@@ -9,7 +9,7 @@ from ...recovery_actions import RecoveryAction
 from ..models import GateDecision
 from .manifest import SIDE_EFFECT_TOOL_EFFECTS
 
-_COMPLETED_STATUSES = {"SUCCEEDED", "DONE", "COMPLETED", "ALLOW", "OK"}
+_DONE_STATUSES = {"DONE"}
 _IN_FLIGHT_STATUSES = {"RUNNING", "PENDING", "WAITING_FOR_TOOL", "DISPATCHED"}
 
 
@@ -78,7 +78,7 @@ def _replay_decision(
     record: IdempotencyLedgerRecord,
 ) -> GateDecision | None:
     status = record.status.upper()
-    if status in _COMPLETED_STATUSES:
+    if status in _DONE_STATUSES:
         return GateDecision.block(
             "idempotency_ledger",
             "IDEMPOTENCY_REPLAY_REUSE_PREVIOUS_RESULT",

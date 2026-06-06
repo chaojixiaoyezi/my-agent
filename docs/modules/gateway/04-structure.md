@@ -30,4 +30,6 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
 
 - request/response/history 损坏要显式报告 load_error，不能渲染成“没有记录”。
 - worker 秒退、参数错、import 错要立即标记失败状态，不能伪装成 processing/planning。
+- conversation task link 只有 `status=active` 才会注入当前请求上下文；其他状态按非活跃处理，
+  不用自然语言或旧状态别名猜测。
 - 多 chat/gateway client 共享同一队列时，本地 IO 不应成为瓶颈；慢点应主要来自模型或外部服务。

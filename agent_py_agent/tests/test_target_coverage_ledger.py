@@ -29,6 +29,21 @@ def test_target_coverage_ledger_reports_missing_items_without_blocking():
     assert status["should_block"] is False
 
 
+def test_target_coverage_ledger_requires_exact_covered_status():
+    from agent_py_agent.agent.agent_core.target_coverage_ledger import target_coverage_status
+
+    status = target_coverage_status(
+        {"target_items": [{"target_id": "source-a"}, {"target_id": "source-b"}]},
+        coverage_records=[
+            {"target_id": "source-a", "status": "ok"},
+            {"target_id": "source-b", "status": "covered"},
+        ],
+    )
+
+    assert status["covered_count"] == 1
+    assert status["missing_items"] == [{"target_id": "source-a", "label": "source-a"}]
+
+
 def test_target_coverage_ledger_blocks_required_missing_read_targets(tmp_path):
     from agent_py_agent.agent.agent_core.target_coverage_ledger import (
         collect_target_coverage_records,

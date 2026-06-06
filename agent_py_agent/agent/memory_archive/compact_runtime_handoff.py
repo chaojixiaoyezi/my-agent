@@ -222,7 +222,8 @@ def _agent_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _active_status(row: dict[str, Any]) -> bool:
-    return str(row.get("status") or "").lower() not in {"completed", "done", "succeeded"}
+    status = str(row.get("status") or "").strip().upper()
+    return status not in {"DONE", "ABANDONED", "TAKEN_OVER"}
 
 
 def _short_guidance(row: dict[str, Any]) -> dict[str, Any]:

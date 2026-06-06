@@ -118,7 +118,7 @@ def _recoverable_run_ids(manager: Any, limit: int) -> tuple[list[str], list[dict
     ids: list[str] = []
     for task in tasks:
         status = str(getattr(task, "status", "") or "").upper()
-        if status in {"BLOCKED", "FAILED", "TIMEOUT", "ERROR", "CHANNEL_ERROR"}:
+        if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
             ids.append(str(getattr(task, "id", "") or ""))
     return [item for item in ids if item][:limit], []
 
@@ -146,6 +146,7 @@ def _dispatch_step(strategy: SubagentRecoveryStrategy) -> RecoveryOrchestrationS
         "dry_run": False,
         "run_ids": [strategy.run_id],
         "workflow_mode": "off",
+        "recovery_mode": strategy.recovery_mode,
     }
     if strategy.runner_instruction:
         call["runner_instruction"] = strategy.runner_instruction

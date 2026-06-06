@@ -36,6 +36,8 @@ def parent_planner_dispatch_record(agent, ctx: DispatchContext):
             ok=planner_record.ok,
             message=planner_record.message,
             evidence_paths=planner_record.evidence_paths,
+            runner_instruction=planner_record.runner_instruction,
+            suggested_max_runners=planner_record.suggested_max_runners,
         ),
     )
 

@@ -35,7 +35,7 @@ def test_local_store_persists_runtime_gate_records_for_replay(tmp_path):
             args_hash="sha256:args",
             approval_id="",
             result_ref="artifact://run-1/op-1",
-            status="completed",
+            status="done",
         )
     )
 
@@ -61,7 +61,7 @@ def test_local_store_projects_runtime_gate_records_to_idempotency_ledger(tmp_pat
             idempotency_key="idem-1",
             args_hash="sha256:args",
             result_ref="artifact://run-1/op-1",
-            status="completed",
+            status="done",
         )
     )
 
@@ -71,7 +71,7 @@ def test_local_store_projects_runtime_gate_records_to_idempotency_ledger(tmp_pat
         {
             "idempotency_key": "idem-1",
             "args_hash": "sha256:args",
-            "status": "completed",
+            "status": "done",
             "result_ref": "artifact://run-1/op-1",
         },
     )
@@ -96,7 +96,7 @@ def test_local_store_runtime_gate_operation_id_is_idempotent(tmp_path):
             **{
                 **base.__dict__,
                 "runtime_gate": {"gate": "runtime_tool_gateway", "allowed": True},
-                "status": "completed",
+                "status": "done",
                 "result_ref": "artifact://run-1/op-1",
             }
         )
@@ -105,7 +105,7 @@ def test_local_store_runtime_gate_operation_id_is_idempotent(tmp_path):
     records = store.list_runtime_gate_ledger(run_id="run-1")
 
     assert len(records) == 1
-    assert records[0].status == "completed"
+    assert records[0].status == "done"
     assert records[0].result_ref == "artifact://run-1/op-1"
 
 
@@ -239,7 +239,7 @@ def test_execute_traced_tool_call_injects_persisted_idempotency_ledger(tmp_path)
             idempotency_key="idem-old",
             args_hash="sha256:old",
             result_ref="artifact://run-1/op-old",
-            status="completed",
+            status="done",
         )
     )
     tools = _CapturingTools()
@@ -258,7 +258,7 @@ def test_execute_traced_tool_call_injects_persisted_idempotency_ledger(tmp_path)
         {
             "idempotency_key": "idem-old",
             "args_hash": "sha256:old",
-            "status": "completed",
+            "status": "done",
             "result_ref": "artifact://run-1/op-old",
         },
     )
@@ -294,6 +294,31 @@ def test_write_boundary_injects_tool_rate_limit_records(tmp_path):
             "total_failures": 1,
         },
     )
+
+
+def test_tool_rate_limit_records_reset_failures_on_done_status(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    for status, timestamp in (("failed", 10.0), ("done", 20.0)):
+        store.record_runtime_gate_ledger(
+            RuntimeGateLedgerRecord(
+                run_id="run-1",
+                task_id="task-1",
+                operation_id=f"op-{status}",
+                tool="web_fetch",
+                parameters={"url": "https://example.test/a"},
+                runtime_gate={"gate": "tool_execution", "allowed": status == "done"},
+                args_hash="sha256:fetch-a",
+                status=status,
+                created_at=timestamp,
+            )
+        )
+    agent = SimpleNamespace(local_store=store)
+
+    boundary = write_boundary_with_runtime_ledger(agent, _loop_params(run_id="run-1", write_boundary={}))
+
+    assert boundary["tool_rate_limit_records"][0]["consecutive_failures"] == 0
+    assert boundary["tool_rate_limit_records"][0]["last_success_at"] == 20.0
+    assert boundary["tool_rate_limit_records"][0]["total_failures"] == 1
 
 
 class _CapturingTools:

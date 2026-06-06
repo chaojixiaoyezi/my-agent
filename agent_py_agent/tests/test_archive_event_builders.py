@@ -213,16 +213,22 @@ class TestFirstBool:
         assert result is False
 
     def test_string_true_values(self):
-        """验证字符串真值"""
-        for val in ("true", "1", "yes", "ok", "success"):
+        """验证机器布尔字符串真值"""
+        for val in ("true", "1"):
             payload = {"status": val}
             assert _first_bool(payload, "status") is True
 
     def test_string_false_values(self):
-        """验证字符串假值"""
-        for val in ("false", "0", "no", "error", "failed"):
+        """验证机器布尔字符串假值"""
+        for val in ("false", "0"):
             payload = {"status": val}
             assert _first_bool(payload, "status") is False
+
+    def test_status_words_do_not_become_booleans(self):
+        """验证状态词不会伪装成工具布尔事实"""
+        for val in ("yes", "ok", "success", "no", "error", "failed", "failure"):
+            payload = {"status": val}
+            assert _first_bool(payload, "status") is None
 
     def test_returns_none_when_no_match(self):
         """验证无匹配返回 None"""

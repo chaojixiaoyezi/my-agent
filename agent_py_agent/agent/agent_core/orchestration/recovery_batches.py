@@ -75,6 +75,9 @@ def _suggested_tool_call(mode: str, run_ids: list[str], items: list[dict[str, ob
 
 def _rerun_tool_call(run_ids: list[str], items: list[dict[str, object]]) -> dict[str, object]:
     call = _dispatch_tool_call(run_ids, start_runners=True)
+    mode = str(items[0].get("recovery_mode") or "") if len(items) == 1 else ""
+    if mode:
+        call["recovery_mode"] = mode
     if len(run_ids) == 1 and len(items) == 1:
         instruction = str(items[0].get("runner_instruction") or "").strip()
         if instruction:

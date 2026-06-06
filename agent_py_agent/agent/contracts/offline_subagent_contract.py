@@ -8,8 +8,8 @@ from ..common.value_parsing import sequence_strings
 from ..common.value_parsing import text_value as _text
 from .contract_validation_recovery import recovery_for_findings
 
-SUCCESS_STATUSES = {"SUCCEEDED", "VERIFIED", "DONE"}
-ACTIVE_PARENT_CLOSEOUT_STATUSES = {"VERIFYING", "SUCCEEDED", "VERIFIED", "DONE"}
+SUCCESS_STATUSES = {"DONE"}
+ACTIVE_PARENT_CLOSEOUT_STATUSES = {"VERIFYING", "DONE"}
 
 
 @dataclass(frozen=True)

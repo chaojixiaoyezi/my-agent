@@ -107,10 +107,10 @@ def _coverage_target_done(target: dict[str, Any]) -> bool:
     checks = dict(target.get("checks") or {})
     if checks:
         return all(
-            str(status or "").strip().lower().replace("-", "_") in {"done", "skipped"}
+            str(status or "").strip().lower() in {"done", "skipped"}
             for status in checks.values()
         )
-    return str(target.get("status") or "").strip().lower().replace("-", "_") in {"done", "skipped"}
+    return str(target.get("status") or "").strip().lower() in {"done", "skipped"}
 
 
 def _has_explicit_coverage(coverage: dict[str, Any]) -> bool:

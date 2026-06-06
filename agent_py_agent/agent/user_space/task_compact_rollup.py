@@ -186,7 +186,7 @@ def _continue_packet_payload(rollup: dict[str, object]) -> dict[str, object]:
     pending = [
         f"{row.get('run_id')}: {row.get('status')}"
         for row in rollup.get("child_runs", [])
-        if isinstance(row, dict) and str(row.get("status") or "").upper() not in {"DONE", "COMPLETED", "SUCCEEDED"}
+        if isinstance(row, dict) and str(row.get("status") or "").upper() != "DONE"
     ]
     return {
         "schema_version": "continue-packet.v1",
@@ -256,17 +256,17 @@ def _status_groups(child_runs: list[dict[str, object]]) -> dict[str, list[str]]:
 
 def _status_bucket(value: object) -> str:
     status = str(value or "").strip().upper()
-    if status in {"DONE", "COMPLETED", "SUCCEEDED", "SUCCESS"}:
+    if status == "DONE":
         return "done"
-    if status in {"BLOCKED", "WAITING_HUMAN", "WAITING_INPUT"}:
+    if status == "BLOCKED":
         return "blocked"
-    if status in {"FAILED", "ERROR"}:
+    if status in {"FAILED", "CHANNEL_ERROR"}:
         return "failed"
-    if status in {"TIMEOUT", "TIMED_OUT"}:
+    if status == "TIMEOUT":
         return "timeout"
-    if status in {"RUNNING", "IN_PROGRESS", "WORKING"}:
+    if status == "RUNNING":
         return "running"
-    if status in {"PENDING", "QUEUED", "CREATED"}:
+    if status in {"PENDING", "PLANNING", "QUEUED", "CREATED"}:
         return "pending"
     return status.lower() or "unknown"
 

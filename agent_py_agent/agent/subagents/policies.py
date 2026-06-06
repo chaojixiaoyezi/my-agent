@@ -246,13 +246,13 @@ def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
         return "BLOCKED"
     if status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
         return status
-    if status in {"DONE", "COMPLETED", "COMPLETE", "SUCCESS"}:
+    if status == "DONE":
         return "DONE"
-    return "DONE"
+    return "BLOCKED"
 
 
 def _verification_from_runner_status(status: str) -> str:
-    if status.upper() in {"DONE", "COMPLETED", "COMPLETE", "SUCCESS"}:
+    if status.upper() == "DONE":
         return "VERIFIED"
     return "UNVERIFIED"
 def _runner_next_action(*, params: RunnerNextActionParams) -> str:

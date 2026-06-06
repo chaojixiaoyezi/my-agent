@@ -282,8 +282,7 @@ def _done_like_status(value: object) -> bool:
 
 def _normalize_status_value(value: object) -> str:
     text = str(value or "").strip()
-    normalized = text.lower().replace(" ", "_")
-    normalized = normalized.replace("-", "_")
+    normalized = text.lower()
     return normalized if normalized in _KNOWN_STATUSES else text or "pending"
 
 

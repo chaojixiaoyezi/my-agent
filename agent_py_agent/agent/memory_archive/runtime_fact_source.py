@@ -132,11 +132,11 @@ def _runtime_progress_payload(request: RuntimeFactSourceRequest) -> dict[str, An
 
 
 def _phase_from_status(status: str) -> str:
-    lowered = str(status or "").strip().lower()
-    if lowered in {"ok", "succeeded", "done"}:
+    normalized = str(status or "").strip().upper()
+    if normalized == "DONE":
         return "final"
-    if lowered in {"failed", "timeout", "interrupted"}:
-        return lowered
+    if normalized in {"FAILED", "TIMEOUT", "INTERRUPTED"}:
+        return normalized.lower()
     return "running"
 
 

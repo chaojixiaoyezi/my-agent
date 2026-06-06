@@ -1,5 +1,14 @@
 # Subagent Progress
 
+## 2026-06-06 状态精确化
+
+- 子代理运行、恢复、tree、closeout 统一按当前协议状态判断；`COMPLETED`、`SUCCESS`、`ERROR`
+  等旧标签不再隐式兼容成 `DONE` 或 `FAILED`。
+- `DONE` 仍是唯一已完成状态；`FAILED`、`TIMEOUT`、`CHANNEL_ERROR`、`BLOCKED`
+  是可恢复/阻塞状态，恢复器和 strategy 只扫描这些结构化状态。
+- `output.json`、checkpoint 和 QA payload 只读结构化字段、`ok` 布尔、blockers 和 refs；
+  summary、角色描述、旧状态词只作为展示或软上下文。
+
 ## 2026-06-04 收敛
 
 - 删除旧 manager mixin 和过渡转发文件，`SubAgentManager` 现在直接拥有初始化、基础生命周期和工单路径。

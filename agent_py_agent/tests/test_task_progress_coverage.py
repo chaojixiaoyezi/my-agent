@@ -403,14 +403,15 @@ class TestTaskProgressContinuationAndAliases:
                     {"id": "b", "status": "read"},
                     {"id": "c", "status": "已读"},
                     {"id": "d", "status": "待处理"},
+                    {"id": "e", "status": "in-progress"},
                 ]
             },
         )
 
         payload = read_task_progress(tmp_path, "run-main")
 
-        assert payload["counts"] == {"total": 4, "other": 4}
-        assert [item["status"] for item in payload["items"]] == ["completed", "read", "已读", "待处理"]
+        assert payload["counts"] == {"total": 5, "other": 5}
+        assert [item["status"] for item in payload["items"]] == ["completed", "read", "已读", "待处理", "in-progress"]
 
     def test_task_progress_summary_carries_recent_done_facts(self, tmp_path):
         """compact 交接要带最近完成事实，而不是只带未完成项。"""

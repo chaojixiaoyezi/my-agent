@@ -24,6 +24,7 @@ SimpleAgent orchestration tool
 ## 状态和路径
 
 - 权威状态：当前 task workspace 的 `work/agents/<run_id>/canonical_state.json`。
+- 状态机：完成只写 `DONE`；失败/阻塞只写当前协议枚举，不把旧标签或自然语言别名提升为机器状态。
 - 子代理过程文件：`work/agents/<run_id>/...`。
 - 用户最终交付：主代理汇总后写当前 task `output/`，或用户显式指定的输出目录。
 - owner projection：`owner_home/agents/<run_id>/` 只保存 refs，用于 tree、compact、恢复和跨 session 查找。
@@ -45,6 +46,12 @@ SimpleAgent orchestration tool
 | `capabilities/` | capability request/grant/gap 路由 |
 | `memory_gate/` | 子代理 task-local 候选经验，不自动写长期记忆 |
 | `workflow.py` | workflow mode、模板计划、worker tool 选择 |
+
+## Recovery And QA Signals
+
+恢复器只根据 `BLOCKED`、`FAILED`、`TIMEOUT`、`CHANNEL_ERROR` 等结构化状态和 refs 行动。
+QA 失败只来自任务状态、结构化 `ok: false`、`passed: false`、blockers、测试记录或读取错误；
+`ERROR`、`FAILED` 这类写在 summary/旧 payload 里的普通词不会自动触发 repair wave。
 
 ## Guidance
 

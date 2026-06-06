@@ -54,9 +54,9 @@ def _tree() -> dict[str, object]:
         "tree_id": "tree-small-real-1",
         "root_task_id": "task-root",
         "nodes": [
-            _node("task-root", "", "VERIFIED", {"child_ids": ["task-read", "task-report"]}),
-            _node("task-read", "task-root", "SUCCEEDED"),
-            _node("task-report", "task-root", "VERIFIED", {"dependency_ids": ["task-read"]}),
+            _node("task-root", "", "DONE", {"child_ids": ["task-read", "task-report"]}),
+            _node("task-read", "task-root", "DONE"),
+            _node("task-report", "task-root", "DONE", {"dependency_ids": ["task-read"]}),
         ],
         "edges": [
             {"from_task_id": "task-root", "to_task_id": "task-read", "kind": "parent_child"},

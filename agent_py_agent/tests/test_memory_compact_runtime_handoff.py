@@ -44,6 +44,42 @@ def test_memory_compact_work_state_reads_runtime_handoff(tmp_path: Path) -> None
     assert "写报告时逐个对象收口" in resume["context_block"]
 
 
+def test_memory_compact_runtime_handoff_keeps_completed_alias_active(tmp_path: Path) -> None:
+    """旧别名不能让 compact 误以为子代理已结束；只有 DONE 才关闭。"""
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    guidance_dir = root / "workspace" / "runtime" / "workspaces" / "project-1" / "conversations" / "guidance"
+    guidance_dir.mkdir(parents=True, exist_ok=True)
+    for run_id, status in (("run-child-alias", "completed"), ("run-child-done", "DONE")):
+        run_dir = root / "tasks" / "2026-06-01" / "run-compact" / "work" / "agents" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "canonical_state.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "parent_run_id": "run-compact",
+                    "status": status,
+                    "last_progress_summary": "state fixture",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+    active_ids = {row["run_id"] for row in work_state["runtime_handoff"]["agent_tree"]["active_agents"]}
+
+    assert "run-child-alias" in active_ids
+    assert "run-child-done" not in active_ids
+
+
 def test_memory_compact_runtime_guidance_overrides_stale_progress_next_step(tmp_path: Path) -> None:
     """compact 后续接应优先最近运行中提示，避免旧进度 next_step 把任务带回旧方向。"""
     from agent_py_agent.agent.task_progress import write_task_progress
@@ -185,6 +221,50 @@ def test_memory_compact_work_state_promotes_small_tool_calls_to_resume_progress(
     assert restore_refs["source_refs"]["tool_calls"][0]["source_path"] == "/repo/START.md"
     assert [item["source_path"] for item in work_state["tool_progress"]] == ["/repo/START.md", "/repo/shard-01.md"]
     assert "不能把“文件名出现过”当成完整覆盖证明" in work_state["next_step"]
+
+
+def test_memory_compact_work_state_does_not_promote_succeeded_status_alias_read(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    artifact = root / "blobs" / "tool_outputs" / "read_file-alias.json"
+    _write_tool_output_index(
+        root,
+        {
+            "call_id": "1-1",
+            "kind": "tool_output",
+            "parameters": {"path": "/repo/status-alias.txt", "tool": "read_file", "offset": 0, "max_chars": 100},
+            "path": str(artifact),
+            "request_id": "request-compact",
+            "run_id": "run-compact",
+            "task_id": "run-compact",
+            "scoped_call_id": "run-compact:1-1",
+            "source_input": "/repo/status-alias.txt",
+            "tool": "read_file",
+            "status": "succeeded",
+            "size_bytes": 100,
+        },
+    )
+    artifact.write_text(
+        json.dumps({"content": "[char-window offset=0 chars=100 total_chars=200]\nfirst"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-compact",
+                request_id="request-compact",
+                run_id="run-compact",
+                task_id="run-compact",
+            ),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+
+    assert "/repo/status-alias.txt" not in work_state["read_files"]
+    assert all(item["source_path"] != "/repo/status-alias.txt" for item in work_state["tool_progress"])
 
 
 def test_memory_compact_work_state_preserves_read_ranges_for_resume_cursor(tmp_path: Path) -> None:

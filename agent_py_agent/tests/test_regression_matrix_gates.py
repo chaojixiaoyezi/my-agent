@@ -253,7 +253,7 @@ class TestScenario8IdempotencyDuplicate:
             idempotency_key="key-1",
             args_hash="hash1",
             operation_id="op-1",
-            status="COMPLETED",
+            status="DONE",
         )
         facts = IdempotencyLedgerFacts(
             tool_name="write_file",

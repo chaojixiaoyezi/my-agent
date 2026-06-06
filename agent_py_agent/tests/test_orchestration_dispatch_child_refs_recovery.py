@@ -58,6 +58,30 @@ def test_dispatch_payload_surfaces_qa_repair_advice_from_direct_child(tmp_path: 
     assert direct["qa_repair_advice"]["suggested_tool_call"]["children"][0]["role"] == "worker"
 
 
+def test_dispatch_payload_ignores_qa_status_error_alias_without_structured_failure(tmp_path: Path):
+    tester_dir = tmp_path / "tester"
+    tester_dir.mkdir()
+    (tester_dir / "output.json").write_text(
+        json.dumps({"structured_output": {"status": "ERROR", "summary": "old alias only"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    payload = _dispatch_payload_with_direct_children([
+        SimpleNamespace(
+            id="tester-alias",
+            parent_id="root",
+            role="tester",
+            agent_name="qa",
+            status="DONE",
+            verification_status="VERIFIED",
+            task_dir=str(tester_dir),
+        )
+    ])
+
+    assert payload["direct_children"].get("needs_repair_wave") is not True
+    assert "qa_repair_advice" not in payload["direct_children"]
+
+
 def test_dispatch_payload_reports_qa_scan_failure(tmp_path: Path):
     class BrokenSubagents:
         workspace = tmp_path

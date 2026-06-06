@@ -94,6 +94,25 @@ def test_run_state_snapshot_normalizes_previous_planned_status_to_planning():
     assert snapshot["can_dispatch"] is True
 
 
+def test_run_state_snapshot_does_not_promote_completed_alias_to_done():
+    from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
+
+    task = SimpleNamespace(
+        id="run-completed-alias",
+        status="COMPLETED",
+        verification_status="VERIFIED",
+        channel_status="OK",
+        has_progress=True,
+    )
+
+    snapshot = run_state_snapshot_from_task(task)
+
+    assert snapshot["status"] == "COMPLETED"
+    assert snapshot["lifecycle_phase"] == "COMPLETED"
+    assert snapshot["can_closeout"] is False
+    assert snapshot["recovery_decision"]["action"] == "manual_review"
+
+
 def test_run_state_snapshot_projects_approval_wait_to_waiting_for_user():
     from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
 

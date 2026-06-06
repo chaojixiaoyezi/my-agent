@@ -15,7 +15,11 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
-from agent_py_agent.agent.agent_core.orchestration.dispatch.mixin import SimpleAgentDispatchMixin
+from agent_py_agent.agent.agent_core.orchestration.dispatch.mixin import (
+    SimpleAgentDispatchMixin,
+    _planner_dispatch_overrides,
+)
+from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
 from agent_py_agent.agent.agent_core.services.notification_service import notify_completed_tasks
 from agent_py_agent.agent.subagents import DispatchReport
 from agent_py_agent.agent.subagents.models import SubAgentRunnerResult, SubAgentTask
@@ -158,6 +162,25 @@ class TestDispatchMixinFailureIntrospection:
         )
 
         assert delivered == ["task-1"]
+
+
+def test_planner_dispatch_overrides_use_structured_runner_instruction_field() -> None:
+    params = DispatchParams(
+        planner=True,
+        runner_instruction="base",
+        max_runners=3,
+    )
+    record = MagicMock()
+    record.step = "parent_planner"
+    record.message = "planner summary without instruction marker"
+    record.runner_instruction = "structured follow-up"
+    record.suggested_max_runners = 2
+
+    instruction, max_runners = _planner_dispatch_overrides(params, [record])
+
+    assert "base" in instruction
+    assert "structured follow-up" in instruction
+    assert max_runners == 2
 
     def test_apply_introspection_params_timeout(self, sample_task: SubAgentTask) -> None:
         """测试应用超参数调整。"""

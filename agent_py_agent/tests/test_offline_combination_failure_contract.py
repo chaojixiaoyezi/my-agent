@@ -31,7 +31,7 @@ def test_combination_rejects_compact_repeat_and_parent_missing_artifact() -> Non
     result = validate_combination_failures(
         {
             "compact": {"after_compact_repeated_action": True},
-            "child_tasks": [{"status": "SUCCEEDED"}],
+            "child_tasks": [{"status": "DONE"}],
             "parent_artifact": {"required": True, "exists": False},
         }
     )

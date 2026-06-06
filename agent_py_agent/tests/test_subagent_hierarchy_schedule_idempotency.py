@@ -72,6 +72,22 @@ def test_schedule_child_reuses_verified_child_without_dispatching(tmp_path):
     assert second.items[0].reason == "reused"
 
 
+def test_schedule_child_does_not_reuse_completed_alias(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    root = manager.create_run(goal="root", thought="root", plan=["root"])
+    parent = manager.create_run(goal="parent", thought="parent", plan=["parent"], parent_id=root.id, root_id=root.id)
+    first = _schedule_one(manager, parent.id, "写条目列表页面", key="product-list")
+    child = manager.load(first.created_run_ids[0])
+    child.status = "COMPLETED"
+    manager.save(child)
+
+    second = _schedule_one(manager, parent.id, "继续条目列表页面", key="product-list")
+
+    assert second.created_run_ids
+    assert second.reused_run_ids == []
+    assert second.created_run_ids != first.created_run_ids
+
+
 def test_schedule_child_tool_payload_exposes_reused_and_dispatch_ids(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
