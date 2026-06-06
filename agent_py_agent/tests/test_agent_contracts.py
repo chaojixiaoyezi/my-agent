@@ -135,7 +135,7 @@ def test_run_state_snapshot_from_task_like_object() -> None:
     assert snapshot["schema_version"] == "state_machine.v1"
     assert snapshot["status"] == "TIMEOUT"
     assert snapshot["verification_status"] == "NEEDS_CLOSEOUT"
-    assert snapshot["failure_type"] == "TOOL_TIMEOUT"
+    assert snapshot["failure_type"] == "UNKNOWN_ERROR"
     assert snapshot["can_dispatch"] is False
     assert snapshot["can_closeout"] is False
     assert snapshot["recovery_decision"]["action"] == "repair"

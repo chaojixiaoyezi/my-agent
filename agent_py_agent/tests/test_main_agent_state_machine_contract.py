@@ -76,7 +76,7 @@ def test_run_state_snapshot_projects_verified_done_to_done():
     assert snapshot["can_closeout"] is True
 
 
-def test_run_state_snapshot_normalizes_previous_planned_status_to_planning():
+def test_run_state_snapshot_does_not_promote_previous_planned_status_alias():
     from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
 
     task = SimpleNamespace(
@@ -89,9 +89,10 @@ def test_run_state_snapshot_normalizes_previous_planned_status_to_planning():
 
     snapshot = run_state_snapshot_from_task(task)
 
-    assert snapshot["status"] == "PLANNING"
-    assert snapshot["lifecycle_phase"] == "PLANNING"
-    assert snapshot["can_dispatch"] is True
+    assert snapshot["status"] == "PLANNED"
+    assert snapshot["lifecycle_phase"] == "PLANNED"
+    assert snapshot["can_dispatch"] is False
+    assert snapshot["recovery_decision"]["action"] == "manual_review"
 
 
 def test_run_state_snapshot_does_not_promote_completed_alias_to_done():
@@ -169,4 +170,23 @@ def test_run_state_snapshot_projects_timeout_to_timeout_terminal_outcome():
     assert snapshot["lifecycle_phase"] == "BLOCKED"
     assert snapshot["waiting_reason"] == "none"
     assert snapshot["terminal_outcome"] == "timed_out"
+    assert snapshot["recovery_decision"]["action"] == "repair"
+    assert snapshot["failure_type"] == "UNKNOWN_ERROR"
+
+
+def test_run_state_snapshot_does_not_classify_free_text_runner_error():
+    from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
+
+    task = SimpleNamespace(
+        id="run-text-error",
+        status="FAILED",
+        verification_status="UNVERIFIED",
+        channel_status="OK",
+        runner_last_error="tool timed out after 240 seconds",
+        has_progress=True,
+    )
+
+    snapshot = run_state_snapshot_from_task(task)
+
+    assert snapshot["failure_type"] == "UNKNOWN_ERROR"
     assert snapshot["recovery_decision"]["action"] == "repair"

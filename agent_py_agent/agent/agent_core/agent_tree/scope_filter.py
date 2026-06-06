@@ -28,7 +28,7 @@ def visible_nodes(nodes: list[dict[str, object]], raw_run_ids: object) -> list[d
 
 
 def coordination_advice(nodes: list[dict[str, object]], allowed_tools: object = None) -> dict[str, object]:
-    pending = _run_ids_with_status(nodes, {"CREATED", "QUEUED", "PENDING", "PLANNING", "RUNNING", "AWAITING_ACCEPTANCE"})
+    pending = _run_ids_with_status(nodes, {"PENDING", "PLANNING", "RUNNING", "AWAITING_ACCEPTANCE"})
     completed = _run_ids_with_status(nodes, {"DONE"})
     blocked = _run_ids_with_status(nodes, {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"})
     allowed = _allowed_tool_set(allowed_tools)

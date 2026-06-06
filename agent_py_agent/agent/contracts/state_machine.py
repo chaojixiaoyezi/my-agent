@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from .error_taxonomy import classify_error, error_contract
+from .error_taxonomy import error_contract
 from .recovery_actions import RecoveryAction, recovery_action_value
 
 SCHEMA_VERSION = "state_machine.v1"
@@ -43,12 +43,6 @@ class RecoveryDecision:
 
 def normalize_status(value: object) -> str:
     text = str(value or "").strip().upper()
-    if text == "WAIT_CHILD":
-        return "WAITING_FOR_CHILD"
-    if text == "PLANNED":
-        return "PLANNING"
-    if text == "QUEUED":
-        return "PENDING"
     return text or "PLANNING"
 
 
@@ -226,8 +220,7 @@ def _failure_type_from_task(task: object) -> str:
     raw = str(getattr(task, "failure_type", "") or "").strip()
     if raw:
         return error_contract(raw).code
-    message = str(getattr(task, "runner_last_error", "") or getattr(task, "error", "") or "").strip()
-    return classify_error(message).code if message else "UNKNOWN_ERROR"
+    return "UNKNOWN_ERROR"
 
 
 def _int_attr(task: object, name: str) -> int:

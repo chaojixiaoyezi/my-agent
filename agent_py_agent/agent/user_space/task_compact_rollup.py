@@ -266,7 +266,7 @@ def _status_bucket(value: object) -> str:
         return "timeout"
     if status == "RUNNING":
         return "running"
-    if status in {"PENDING", "PLANNING", "QUEUED", "CREATED"}:
+    if status in {"PENDING", "PLANNING"}:
         return "pending"
     return status.lower() or "unknown"
 

@@ -27,6 +27,8 @@ SimpleAgent orchestration tool
 
 - 权威状态：当前 task workspace 的 `work/agents/<run_id>/canonical_state.json`。
 - 状态机：完成只写 `DONE`；失败/阻塞只写当前协议枚举，不把旧标签或自然语言别名提升为机器状态。
+- 状态判断走共享 `contracts/state_machine.py` 和 canonical state；旧 `subagents/state_machine.py`
+  私有转换表已删除，避免 `WAIT_CHILD` 等历史状态绕过当前协议。
 - 子代理过程文件：`work/agents/<run_id>/...`。
 - 用户最终交付：主代理汇总后写当前 task `output/`，或用户显式指定的输出目录。
 - owner projection：`owner_home/agents/<run_id>/` 只保存 refs，用于 tree、compact、恢复和跨 session 查找。
