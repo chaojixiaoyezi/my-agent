@@ -51,6 +51,7 @@ owners/<provider>/<owner>/
 tasks/<date>/<task-slug>/
 |-- output/                          # 最终交付物
 `-- work/
+    |-- run_workspace.json           # 当前任务目录身份；复用目录只认它和 task.yaml
     |-- state.json                   # 主代理 task 状态
     |-- timeline.jsonl               # 本任务多轮运行时间线
     |-- compact/                     # task rollup 和 compact 包
@@ -60,6 +61,7 @@ tasks/<date>/<task-slug>/
 ```
 
 如果用户明确指定普通输出目录，最终报告可以写到用户目录；当前 task `output/` / `work/` 仍记录本轮索引、验收和过程证据。
+`work/state.json` 只是运行状态，不再作为旧目录身份兜底，避免旧 run 污染当前任务目录。
 
 ## Subagent Workspace
 

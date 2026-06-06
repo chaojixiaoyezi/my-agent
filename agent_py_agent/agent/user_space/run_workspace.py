@@ -252,9 +252,6 @@ def _workspace_identity(root: Path) -> dict[str, object]:
     identity = _read_json_object(root / "work" / "run_workspace.json")
     if identity:
         return identity
-    legacy_state = _read_json_object(root / "work" / "state.json")
-    if _looks_like_legacy_workspace_identity(legacy_state):
-        return legacy_state
     return _read_task_yaml_identity(root / "work" / "task.yaml")
 
 
@@ -266,10 +263,6 @@ def _read_json_object(path: Path) -> dict[str, object]:
     except (OSError, json.JSONDecodeError, TypeError):
         return {}
     return payload if isinstance(payload, dict) else {}
-
-
-def _looks_like_legacy_workspace_identity(payload: dict[str, object]) -> bool:
-    return any(str(payload.get(key) or "").strip() for key in ("request_id", "run_id"))
 
 
 def _read_task_yaml_identity(path: Path) -> dict[str, object]:

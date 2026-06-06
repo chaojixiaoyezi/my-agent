@@ -109,6 +109,27 @@ def test_same_prompt_new_run_gets_separate_task_workspace(tmp_path: Path):
     assert any('"run_id": "run-two"' in line for line in timelines[1])
 
 
+def test_workspace_identity_does_not_reuse_old_state_json(tmp_path: Path):
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    owner_tasks = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat()
+    old_task = owner_tasks / "分析-all-agent-项目并写中文报告"
+    old_work = old_task / "work"
+    old_work.mkdir(parents=True)
+    (old_work / "state.json").write_text(
+        json.dumps({"request_id": "req-one", "primary_run_id": "run-one"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    agent = SimpleAgent(cfg, repo)
+
+    agent.run("分析 all-agent 项目并写中文报告", request_id="req-one", run_id="run-one")
+
+    assert not (old_work / "run_workspace.json").exists()
+    new_task = owner_tasks / "分析-all-agent-项目并写中文报告-run-one"
+    assert (new_task / "work" / "run_workspace.json").exists()
+
+
 def test_long_project_prompt_gets_short_relevant_task_workspace_name(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"

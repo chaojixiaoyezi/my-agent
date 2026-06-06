@@ -6,10 +6,10 @@
 from __future__ import annotations
 
 from agent_py_agent.agent.subagents.models import SubAgentTask
-from agent_py_agent.agent.subagents.services.hierarchy.role_identity import (
+from agent_py_agent.agent.subagents.services.hierarchy.scheduled_role import (
     role_from_child_spec_identity,
+    scheduled_child_role,
 )
-from agent_py_agent.agent.subagents.services.hierarchy.scheduled_role import scheduled_child_role
 from agent_py_agent.agent.subagents.services.hierarchy.scheduler_models import HierarchyChildSpec
 
 

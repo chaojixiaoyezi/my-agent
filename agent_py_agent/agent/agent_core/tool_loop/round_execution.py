@@ -16,7 +16,11 @@ from ..model.context_pressure import (
     should_compact_before_more_tool_output,
 )
 from ..runtime.context_compactor import runtime_compact_policy
-from .round_context_archive import append_assistant_tool_round_context
+from ..runtime.live_archive import archive_assistant_tool_round_if_enabled
+from ..tool_context.call_reducer import (
+    AssistantToolRoundContextRequest,
+    render_assistant_tool_round_context,
+)
 from .round_subagent_output import (
     SubagentOutputWriteCheck,
     is_subagent_output_json_write,
@@ -91,7 +95,7 @@ class ToolRoundExecutionRequest:
 
 def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     before_context_count = len(getattr(request.params, "tool_context", []) or [])
-    append_assistant_tool_round_context(request)
+    _append_assistant_tool_round_context(request)
     calls = _calls_for_this_execution_round(request)
     subagent_output_written = False
     stateful_orchestration_seen = False
@@ -142,6 +146,22 @@ def _should_defer_for_compact_digest(request: ToolRoundExecutionRequest, tool_na
         request.agent,
         request.params,
         request.current_prompt,
+    )
+
+
+def _append_assistant_tool_round_context(request: ToolRoundExecutionRequest) -> None:
+    rendered = render_assistant_tool_round_context(
+        AssistantToolRoundContextRequest(request.response.text, request.calls)
+    )
+    request.params.tool_context.append(
+        f"[assistant-tool-round-{request.tool_rounds}]\n{rendered}"
+    )
+    archive_assistant_tool_round_if_enabled(
+        request.agent,
+        request.params,
+        tool_round=request.tool_rounds,
+        response_text=request.response.text,
+        tool_calls=request.calls,
     )
 
 

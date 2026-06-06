@@ -14,7 +14,6 @@ from .builder_repair import (
     append_failed_builder_output_actions,
 )
 from .collection_repair import append_collection_value_repair_actions
-from .recovery_codes import recovery_error_code
 from .recovery_models import RecoveryActionLedger
 from .staging_recovery import (
     append_contract_staging_recovery_actions,
@@ -55,11 +54,22 @@ def _append_failure_recovery_actions(
         )
     )
     for finding in failed_findings(report):
-        recovery_contract = error_contract(recovery_error_code(str(finding.get("code") or "")))
+        recovery_contract = error_contract(_recovery_error_code(str(finding.get("code") or "")))
         if recovery_contract.code in ledger.seen:
             continue
         ledger.seen.add(recovery_contract.code)
         ledger.actions.append(_recovery_contract_action(recovery_contract))
+
+
+def _recovery_error_code(code: str) -> str:
+    upper = str(code or "").upper()
+    if upper in {"ARTIFACT_MISSING", "ARTIFACT_EMPTY"}:
+        return "ARTIFACT_MISSING"
+    if upper.startswith(("STAGED_", "PATH_", "SPREADSHEET_SOURCE_", "EVIDENCE_")):
+        return upper
+    if upper.startswith(("XLSX_", "CSV_", "JSON_", "PDF_", "HTML_")):
+        return "ACCEPTANCE_FAILED"
+    return "ACCEPTANCE_FAILED"
 
 
 def _generic_recovery_action(code: str) -> dict[str, object]:

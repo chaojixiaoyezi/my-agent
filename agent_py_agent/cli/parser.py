@@ -13,12 +13,12 @@ import argparse
 from .commands.background_main_agent import add_background_main_agent_subcommands
 from .commands.bench import add_bench_model_command
 from .commands.collaboration import add_collaboration_subcommands
-from .commands.contracts import add_contracts_subcommand
 from .commands.guidance import add_guidance_subcommand
 from .commands.learning import add_learning_subcommand
 from .commands.operations import add_operations_subcommands
 from .commands.tasks import add_task_subcommands
 from .common import DEFAULT_CONFIG, configure_stdio
+from .contracts_commands import add_contracts_subcommand
 from .gateway_client import cmd_default
 from .real_e2e_commands import add_real_e2e_subcommand
 from .subcommands_agents import add_subagents_subcommands
