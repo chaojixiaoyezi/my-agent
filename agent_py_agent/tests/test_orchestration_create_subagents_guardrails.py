@@ -100,8 +100,8 @@ class TestCreateSubagentsToolDelegationGuard:
 class TestCreateSubagentsToolRawPromptRepair:
     """测试 root seed 能从原始用户 prompt 补回结构化硬合同。"""
 
-    def test_explicit_coordinator_seed_without_name_gets_lineage_prefix(self):
-        """模型没传 agent_name 时，第一层 root/coordinator 也必须有小傻妞前缀。"""
+    def test_explicit_coordinator_seed_without_name_gets_default_display_name(self):
+        """模型没传 agent_name 时，第一层 root/coordinator 使用结构化默认展示名。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -125,7 +125,7 @@ class TestCreateSubagentsToolRawPromptRepair:
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
-        assert params.agent_name == "小傻妞-coordinator"
+        assert params.agent_name == "agent-d1-coordinator"
 
     def test_explicit_coordinator_seed_inherits_raw_user_file_and_hierarchy_contract(self):
         """root/coordinator 机器合同必须来自工具参数 attributes，而不是原始用户 prompt。"""

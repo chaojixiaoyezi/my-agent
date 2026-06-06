@@ -8,13 +8,11 @@ from typing import Any
 from ..common.json_io import write_json_file
 from .failure_sample_capture import failure_samples_from_case_results
 from .real_tool_dry_run_contract import validate_real_tool_dry_run_probes
-from .shadow_mode_runtime_contract import validate_shadow_mode_runtime
 from .small_real_acceptance_gate import validate_small_real_acceptance_gate
 from .small_real_acceptance_probes import (
     controlled_exec_grant,
     controlled_exec_probe,
     read_file_probe,
-    shadow_runtime_facts,
     small_real_registry,
 )
 
@@ -93,7 +91,6 @@ def run_small_real_acceptance(
     cases = [
         _run_real_read_file(run_context),
         _run_controlled_exec_dry_run(run_context),
-        _run_shadow_mode_runtime(run_context),
     ]
     cases = tuple(case for case in cases if not selected or case.case_id in selected)
     gate = validate_small_real_acceptance_gate({"cases": [case.gate_case for case in cases]})
@@ -168,27 +165,6 @@ def _tool_probe_case(
             artifact_refs=[probe_ref],
             verification_refs=[verification_ref],
             tool_probe_refs=[probe_ref],
-            issues=list(validation.error_codes),
-        ),
-    )
-
-
-def _run_shadow_mode_runtime(context: _SmallRunContext) -> SmallRealCaseResult:
-    case_dir = _case_dir(context.workspace, "shadow_mode_runtime")
-    comparison_ref = _write_artifact_json_ref(case_dir / "human-review.json", {"agreement": True}, root=context.workspace)
-    facts = shadow_runtime_facts(context.probe_refs, comparison_ref)
-    validation = validate_shadow_mode_runtime(facts)
-    facts_ref = _write_artifact_json_ref(case_dir / "shadow-runtime.json", facts, root=context.workspace)
-    verification_ref = _write_artifact_json_ref(case_dir / "verification.json", _validation_dict(validation), root=context.workspace)
-    return _case_result(
-        context.workspace,
-        _CaseOutcome(
-            case_id="shadow_mode_runtime",
-            status="PASSED" if validation.ok else "FAILED",
-            case_dir=case_dir,
-            artifact_refs=[facts_ref, comparison_ref],
-            verification_refs=[verification_ref],
-            tool_probe_refs=[str(item["contract_ref"]) for item in context.probe_refs],
             issues=list(validation.error_codes),
         ),
     )

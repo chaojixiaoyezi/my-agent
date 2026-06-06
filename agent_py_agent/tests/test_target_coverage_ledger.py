@@ -1,6 +1,26 @@
 from __future__ import annotations
 
 
+def _char_window(offset: int, chars: int, total: int) -> dict[str, object]:
+    return {
+        "kind": "char_window",
+        "offset": offset,
+        "chars": chars,
+        "next_offset": offset + chars,
+        "total_chars": total,
+    }
+
+
+def _line_window(start: int, end: int, total: int) -> dict[str, object]:
+    return {
+        "kind": "line_window",
+        "start_line": start,
+        "end_line": end,
+        "next_start_line": end + 1 if end < total else 0,
+        "total_lines": total,
+    }
+
+
 def test_target_coverage_ledger_reports_missing_items_without_blocking():
     from agent_py_agent.agent.agent_core.target_coverage_ledger import target_coverage_status
 
@@ -79,6 +99,24 @@ def test_target_coverage_ledger_blocks_required_missing_read_targets(tmp_path):
     assert status["missing_items"] == [{"target_id": str(source_b), "label": "b"}]
     assert status["should_block"] is True
     assert status["recommended_next_action"] == "cover_missing_targets_before_submit"
+
+
+def test_target_coverage_ledger_legacy_enforcement_aliases_do_not_block():
+    from agent_py_agent.agent.agent_core.target_coverage_ledger import target_coverage_status
+
+    for enforcement in ("strict", "hard", "block", "blocking", "enforced"):
+        status = target_coverage_status(
+            {
+                "scope_label": "source shards",
+                "enforcement": enforcement,
+                "target_items": [{"target_id": "source-a"}],
+            },
+            coverage_records=[],
+        )
+
+        assert status["enforcement"] == "advisory"
+        assert status["missing_count"] == 1
+        assert status["should_block"] is False
 
 
 def test_target_coverage_ledger_ignores_delivery_contract_items_alias(tmp_path):
@@ -161,7 +199,7 @@ def test_target_coverage_ledger_does_not_count_partial_char_window_as_full_read(
                 "tool": "read_file",
                 "ok": True,
                 "parameters": {"path": str(source), "offset": 0, "max_chars": 100},
-                "output_preview": "[char-window offset=0 chars=100 total_chars=1000]\nPARTIAL view only",
+                "read_window": _char_window(0, 100, 1000),
             }
         ]
     )
@@ -188,6 +226,47 @@ def test_target_coverage_ledger_does_not_count_partial_char_window_as_full_read(
     ]
 
 
+def test_target_coverage_ledger_uses_structured_read_window_without_output_text(tmp_path):
+    from agent_py_agent.agent.agent_core.target_coverage_ledger import (
+        collect_target_coverage_records,
+        target_coverage_status,
+    )
+
+    source = tmp_path / "journal.txt"
+    source.write_text("x" * 1000, encoding="utf-8")
+    records = collect_target_coverage_records(
+        [
+            {
+                "tool": "read_file",
+                "ok": True,
+                "parameters": {"path": str(source), "offset": 0, "max_chars": 100},
+                "read_window": {
+                    "kind": "char_window",
+                    "offset": 0,
+                    "chars": 100,
+                    "next_offset": 100,
+                    "total_chars": 1000,
+                },
+            }
+        ]
+    )
+    status = target_coverage_status(
+        {
+            "scope_label": "完整读取源文件",
+            "enforcement": "required",
+            "target_items": [{"target_id": str(source), "source_ref": str(source)}],
+        },
+        coverage_records=records,
+    )
+
+    assert status["covered_count"] == 0
+    assert status["repair_hints"][0]["recommended_tool_call"] == {
+        "tool": "read_file",
+        "path": str(source),
+        "offset": 100,
+    }
+
+
 def test_target_coverage_ledger_merges_char_windows_to_cover_full_source(tmp_path):
     from agent_py_agent.agent.agent_core.target_coverage_ledger import (
         collect_target_coverage_records,
@@ -202,13 +281,13 @@ def test_target_coverage_ledger_merges_char_windows_to_cover_full_source(tmp_pat
                 "tool": "read_file",
                 "ok": True,
                 "parameters": {"path": str(source), "offset": 0, "max_chars": 100},
-                "output_preview": "[char-window offset=0 chars=100 total_chars=150]\nPARTIAL view only",
+                "read_window": _char_window(0, 100, 150),
             },
             {
                 "tool": "read_file",
                 "ok": True,
                 "parameters": {"path": str(source), "offset": 100, "max_chars": 100},
-                "output_preview": "[char-window offset=100 chars=50 total_chars=150]",
+                "read_window": _char_window(100, 50, 150),
             },
         ]
     )
@@ -226,7 +305,7 @@ def test_target_coverage_ledger_merges_char_windows_to_cover_full_source(tmp_pat
     assert status["should_block"] is False
 
 
-def test_target_coverage_ledger_reads_externalized_read_file_artifact(tmp_path):
+def test_target_coverage_ledger_reads_structured_window_from_externalized_record(tmp_path):
     from agent_py_agent.agent.agent_core.target_coverage_ledger import (
         collect_target_coverage_records,
         target_coverage_status,
@@ -234,18 +313,14 @@ def test_target_coverage_ledger_reads_externalized_read_file_artifact(tmp_path):
 
     source = tmp_path / "journal.txt"
     source.write_text("x" * 1000, encoding="utf-8")
-    artifact = tmp_path / "read_file-output.json"
-    artifact.write_text(
-        '{"content":"[char-window offset=0 chars=100 total_chars=1000]\\nPARTIAL view only"}',
-        encoding="utf-8",
-    )
     records = collect_target_coverage_records(
         [
             {
                 "tool": "read_file",
                 "ok": True,
                 "parameters": {"path": str(source), "offset": 0, "max_chars": 100},
-                "source_artifact_ref": str(artifact),
+                "source_artifact_ref": str(tmp_path / "read_file-output.json"),
+                "read_window": _char_window(0, 100, 1000),
             }
         ]
     )
@@ -271,27 +346,19 @@ def test_target_coverage_ledger_reads_externalized_output_from_index_path(tmp_pa
 
     source = tmp_path / "journal.txt"
     source.write_text("x" * 150, encoding="utf-8")
-    blob_a = tmp_path / "read-a.json"
-    blob_b = tmp_path / "read-b.json"
-    blob_a.write_text(
-        '{"content":"[char-window offset=0 chars=100 total_chars=150]\\nfirst"}',
-        encoding="utf-8",
-    )
-    blob_b.write_text(
-        '{"content":"[char-window offset=100 chars=50 total_chars=150]\\nsecond"}',
-        encoding="utf-8",
-    )
     records = collect_target_coverage_records(
         [
             {
                 "tool": "read_file",
                 "parameters": {"path": str(source), "offset": 0, "max_chars": 100},
-                "path": str(blob_a),
+                "path": str(tmp_path / "read-a.json"),
+                "read_window": _char_window(0, 100, 150),
             },
             {
                 "tool": "read_file",
                 "parameters": {"path": str(source), "offset": 100, "max_chars": 100},
-                "path": str(blob_b),
+                "path": str(tmp_path / "read-b.json"),
+                "read_window": _char_window(100, 50, 150),
             },
         ]
     )
@@ -324,14 +391,7 @@ def test_target_coverage_ledger_does_not_count_truncated_line_read_as_full_sourc
                 "tool": "read_file",
                 "ok": True,
                 "parameters": {"path": str(source)},
-                "output_preview": "\n".join(
-                    [
-                        "1: line 1",
-                        "2: line 2",
-                        "... 已截断；PARTIAL view only; 这不是完整文件。 total_lines=10; "
-                        "next_start_line=3; limit_chars=30。 继续读取请调用 read_file(start_line=3)。",
-                    ]
-                ),
+                "read_window": _line_window(1, 2, 10),
             }
         ]
     )
@@ -372,13 +432,13 @@ def test_target_coverage_ledger_merges_line_windows_to_cover_full_source(tmp_pat
                 "tool": "read_file",
                 "ok": True,
                 "parameters": {"path": str(source), "start_line": 1, "end_line": 3},
-                "output_preview": "1: line 1\n2: line 2\n3: line 3",
+                "read_window": _line_window(1, 3, 5),
             },
             {
                 "tool": "read_file",
                 "ok": True,
                 "parameters": {"path": str(source), "start_line": 4, "end_line": 5},
-                "output_preview": "4: line 4\n5: line 5",
+                "read_window": _line_window(4, 5, 5),
             },
         ]
     )
@@ -410,7 +470,7 @@ def test_target_coverage_ledger_does_not_count_bare_line_range_as_full_source(tm
                 "tool": "read_file",
                 "ok": True,
                 "parameters": {"path": str(source), "start_line": 1, "end_line": 3},
-                "output_preview": "1: line 1\n2: line 2\n3: line 3",
+                "read_window": _line_window(1, 3, 10),
             }
         ]
     )
@@ -489,13 +549,13 @@ def test_full_source_read_window_is_not_deduped_by_later_search_text(tmp_path):
                 "tool": "read_file",
                 "ok": True,
                 "parameters": {"path": str(source), "offset": 0, "max_chars": 100},
-                "output_preview": "[char-window offset=0 chars=100 total_chars=150]",
+                "read_window": _char_window(0, 100, 150),
             },
             {
                 "tool": "read_file",
                 "ok": True,
                 "parameters": {"path": str(source), "offset": 100, "max_chars": 100},
-                "output_preview": "[char-window offset=100 chars=50 total_chars=150]",
+                "read_window": _char_window(100, 50, 150),
             },
             {
                 "tool": "search_text",
@@ -543,7 +603,7 @@ def test_full_source_read_matches_relative_read_file_against_workspace_root(tmp_
                 "tool": "read_file",
                 "ok": True,
                 "parameters": {"path": "data/journal.txt"},
-                "output_preview": "1: a\n2: b\n3: c",
+                "read_window": _line_window(1, 3, 3),
             }
         ],
         workspace_root=tmp_path,

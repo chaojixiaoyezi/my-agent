@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING
 
 from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.config import CapabilityConfig
-from agent_py_agent.agent.capability.runtime_config import (
-    CapabilityConfigSnapshot,
+from agent_py_agent.agent.capability.runtime_config_models import CapabilityConfigSnapshot
+from agent_py_agent.agent.capability.runtime_config_reload import (
     default_capability_config_path,
     load_capability_config_snapshot,
     reload_capability_config_if_changed,

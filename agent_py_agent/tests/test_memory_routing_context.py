@@ -236,6 +236,15 @@ def test_runtime_memory_routing_uses_home_index_when_project_index_missing(tmp_p
         AgentConfig(my_agent_home=str(home), memory_rule_routing_enabled=True, prompt_files=[]),
         root,
     )
+    lesson = agent.home_paths.owner_memory_lessons_dir / "real-tests.md"
+    lesson.write_text("真实测试规则：用普通中文提示词，不写专项模板。", encoding="utf-8")
+    agent.home_paths.owner_memory_routing_index_md.write_text(
+        "## real-tests\n"
+        "topic: 真实测试\n"
+        "trigger_keywords: 真实测试, 普通中文提示词, 专项模板\n"
+        "authority_path: memory/lessons/real-tests.md\n",
+        encoding="utf-8",
+    )
 
     context = _routed_memory_context_for_request(
         agent,

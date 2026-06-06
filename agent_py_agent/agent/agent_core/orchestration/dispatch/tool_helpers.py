@@ -5,7 +5,7 @@ from pathlib import Path
 
 from agent_py_agent.agent.capability.config import CapabilityConfig
 
-from ....capability.runtime_config import (
+from ....capability.runtime_config_reload import (
     default_capability_config_path,
     load_capability_config_snapshot,
 )

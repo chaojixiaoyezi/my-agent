@@ -101,8 +101,8 @@ def test_create_payload_includes_current_turn_run_state(tmp_path):
     assert payload["dispatch_run_ids"] == []
     assert state["dispatchable_run_ids"] == []
     assert (
-        state["running_run_ids"] == payload["created_run_ids"]
-        or state["verified_run_ids"] == payload["created_run_ids"]
+        sorted(state["running_run_ids"]) == sorted(payload["created_run_ids"])
+        or sorted(state["verified_run_ids"]) == sorted(payload["created_run_ids"])
     )
     assert state["next_action"] in {"wait_for_subagent_completion_event", "summarize_or_report_verified_runs"}
     envelope = decode_action_envelope(payload["typed_envelope"])

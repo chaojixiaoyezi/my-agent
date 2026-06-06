@@ -7,6 +7,7 @@
 
 ## 已完成
 
+- 2026-06-07：删除旧 `log_analysis/tools_plugin.py` facade，LOG 工具只保留当前 registry/tool class 主链路。
 - SecurityAlertV1 CSV / JSONL 接入、checkpoint、dedup、dead letter 已有基础实现。
 - 本地 JSONL store、受控 query、hunt、trace 已接入 CLI 和工具层。
 - 软检测器、case merge、route draft、first response report、forensic package 已有基础链路。

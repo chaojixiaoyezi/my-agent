@@ -9,9 +9,9 @@ from pathlib import Path
 def test_real_task_acceptance_reports_candidate_artifact_paths(tmp_path):
     from openpyxl import Workbook
 
-    from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
-        RealTaskAcceptanceRequest,
-        validate_real_task_artifacts,
+    from agent_py_agent.agent.contracts.main_agent_task_acceptance import (
+        TaskRunAcceptanceRequest,
+        validate_task_artifacts,
     )
 
     workspace = tmp_path / "task"
@@ -39,8 +39,8 @@ def test_real_task_acceptance_reports_candidate_artifact_paths(tmp_path):
         encoding="utf-8",
     )
 
-    report = validate_real_task_artifacts(
-        RealTaskAcceptanceRequest(
+    report = validate_task_artifacts(
+        TaskRunAcceptanceRequest(
             expected_artifacts_path=expected,
             task_workspace=workspace,
             report_path=tmp_path / "acceptance_report.json",
@@ -55,9 +55,9 @@ def test_real_task_acceptance_reports_candidate_artifact_paths(tmp_path):
 
 
 def test_real_task_acceptance_rejects_invalid_candidate_artifact(tmp_path):
-    from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
-        RealTaskAcceptanceRequest,
-        validate_real_task_artifacts,
+    from agent_py_agent.agent.contracts.main_agent_task_acceptance import (
+        TaskRunAcceptanceRequest,
+        validate_task_artifacts,
     )
     from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
@@ -71,8 +71,8 @@ def test_real_task_acceptance_rejects_invalid_candidate_artifact(tmp_path):
     expected = tmp_path / "expected_artifacts.json"
     _write_candidate_expected_artifacts(expected)
 
-    report = validate_real_task_artifacts(
-        RealTaskAcceptanceRequest(
+    report = validate_task_artifacts(
+        TaskRunAcceptanceRequest(
             expected_artifacts_path=expected,
             task_workspace=workspace,
             report_path=tmp_path / "acceptance_report.json",
@@ -86,9 +86,9 @@ def test_real_task_acceptance_rejects_invalid_candidate_artifact(tmp_path):
 
 
 def test_real_task_acceptance_ignores_open_session_for_accepted_target(tmp_path):
-    from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
-        RealTaskAcceptanceRequest,
-        validate_real_task_artifacts,
+    from agent_py_agent.agent.contracts.main_agent_task_acceptance import (
+        TaskRunAcceptanceRequest,
+        validate_task_artifacts,
     )
     from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
@@ -112,8 +112,8 @@ def test_real_task_acceptance_ignores_open_session_for_accepted_target(tmp_path)
     expected = tmp_path / "expected_artifacts.json"
     _write_candidate_expected_artifacts(expected)
 
-    report = validate_real_task_artifacts(
-        RealTaskAcceptanceRequest(
+    report = validate_task_artifacts(
+        TaskRunAcceptanceRequest(
             expected_artifacts_path=expected,
             task_workspace=workspace,
             report_path=tmp_path / "acceptance_report.json",
@@ -149,9 +149,9 @@ def _write_candidate_expected_artifacts(path: Path) -> None:
 
 
 def test_real_task_acceptance_validates_staged_checkpoints(tmp_path):
-    from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
-        RealTaskAcceptanceRequest,
-        validate_real_task_artifacts,
+    from agent_py_agent.agent.contracts.main_agent_task_acceptance import (
+        TaskRunAcceptanceRequest,
+        validate_task_artifacts,
     )
 
     workspace = tmp_path / "task"
@@ -160,8 +160,8 @@ def test_real_task_acceptance_validates_staged_checkpoints(tmp_path):
     (stage_dir / "source_data.json").write_text(json.dumps({"top10": []}), encoding="utf-8")
     expected = _write_staged_expected_artifacts(tmp_path)
 
-    report = validate_real_task_artifacts(
-        RealTaskAcceptanceRequest(
+    report = validate_task_artifacts(
+        TaskRunAcceptanceRequest(
             expected_artifacts_path=expected,
             task_workspace=workspace,
             report_path=tmp_path / "acceptance_report.json",
@@ -173,9 +173,9 @@ def test_real_task_acceptance_validates_staged_checkpoints(tmp_path):
 
 
 def test_real_task_acceptance_treats_skeleton_only_staged_json_as_no_rows(tmp_path):
-    from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
-        RealTaskAcceptanceRequest,
-        validate_real_task_artifacts,
+    from agent_py_agent.agent.contracts.main_agent_task_acceptance import (
+        TaskRunAcceptanceRequest,
+        validate_task_artifacts,
     )
 
     workspace = tmp_path / "task"
@@ -194,8 +194,8 @@ def test_real_task_acceptance_treats_skeleton_only_staged_json_as_no_rows(tmp_pa
     )
     expected = _write_staged_expected_artifacts(tmp_path)
 
-    report = validate_real_task_artifacts(
-        RealTaskAcceptanceRequest(
+    report = validate_task_artifacts(
+        TaskRunAcceptanceRequest(
             expected_artifacts_path=expected,
             task_workspace=workspace,
             report_path=tmp_path / "acceptance_report.json",
@@ -207,9 +207,9 @@ def test_real_task_acceptance_treats_skeleton_only_staged_json_as_no_rows(tmp_pa
 
 
 def test_real_task_acceptance_reports_invalid_staged_json(tmp_path):
-    from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
-        RealTaskAcceptanceRequest,
-        validate_real_task_artifacts,
+    from agent_py_agent.agent.contracts.main_agent_task_acceptance import (
+        TaskRunAcceptanceRequest,
+        validate_task_artifacts,
     )
 
     workspace = tmp_path / "task"
@@ -218,8 +218,8 @@ def test_real_task_acceptance_reports_invalid_staged_json(tmp_path):
     (stage_dir / "source_data.json").write_text('[{"记录名":"demo","语言":"Py', encoding="utf-8")
     expected = _write_staged_expected_artifacts(tmp_path)
 
-    report = validate_real_task_artifacts(
-        RealTaskAcceptanceRequest(
+    report = validate_task_artifacts(
+        TaskRunAcceptanceRequest(
             expected_artifacts_path=expected,
             task_workspace=workspace,
             report_path=tmp_path / "acceptance_report.json",

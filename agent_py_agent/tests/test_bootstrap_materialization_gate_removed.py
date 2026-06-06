@@ -79,7 +79,7 @@ def _params():
         archive_tool_calls=[],
         delivery_contract={
             "bootstrap_contract": {
-                "enforcement": "hard",
+                "enforcement": "required",
                 "materialization_targets": [
                     {
                         "target_type": "checkpoint",

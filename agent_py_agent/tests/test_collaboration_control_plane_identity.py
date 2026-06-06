@@ -168,7 +168,7 @@ def test_pending_requests_for_agent_ignores_closed_cases(tmp_path) -> None:
     store = CollaborationStore(tmp_path / "collaboration")
     case = store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "已关闭的协作窗口", 'created_by': "agent-a", 'now': 1.0})
     store.request_collaboration({'case_id': case.case_id, 'requester_agent_id': "agent-a", 'target_agent_ids': ("agent-b",), 'question': "这条请求已经随 case 关闭。", 'now': 2.0})
-    store.update_case_status(case.case_id, status="close", now=3.0)
+    store.update_case_status(case.case_id, status="closed", now=3.0)
 
     assert store.pending_requests_for_agent(agent_id="agent-b") == []
 

@@ -119,8 +119,8 @@ class TestCreateSubagentsItemsMode:
             "读取 README.md 并写证据报告",
         ]
         assert [params.agent_name for params in created_params] == [
-            "小傻妞-worker-1",
-            "小傻妞-worker-2",
+            "agent-d1-worker-1",
+            "agent-d1-worker-2",
         ]
         assert payload["created"] == 2
 

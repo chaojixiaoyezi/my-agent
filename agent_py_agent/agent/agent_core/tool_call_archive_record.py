@@ -27,6 +27,7 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
         min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
         preview_chars=_config_int(agent, "tool_output_preview_chars"),
         parameters=record.payload,
+        result_envelope=getattr(record.result, "result_envelope", None),
     )
     output_record = externalize_tool_output_record(request)
     output_record.update(write_tool_output_fail_safe_checkpoint(request))
@@ -192,7 +193,17 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
     envelope = getattr(result, "result_envelope", None)
     if not isinstance(envelope, dict):
         return {}
-    keys = ("artifact_ref", "source_ref", "path", "target_path", "output_path", "session_id", "action", "status")
+    keys = (
+        "artifact_ref",
+        "source_ref",
+        "path",
+        "target_path",
+        "output_path",
+        "session_id",
+        "action",
+        "status",
+        "read_window",
+    )
     compact = {key: envelope[key] for key in keys if key in envelope}
     artifact_integrity = _compact_artifact_integrity(envelope.get("artifact_integrity"))
     if artifact_integrity:

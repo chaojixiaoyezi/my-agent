@@ -290,7 +290,7 @@ def test_subagent_runner_can_schedule_children_from_current_node_context():
         assert child.parent_id == task.id
         assert child.root_id == task.id
         assert child.depth == 1
-        assert child.agent_name == "小傻妞-child-catalog"
+        assert child.agent_name == "child-catalog"
         assert "schedule_child_subagents" in child.allowed_tools
 
 

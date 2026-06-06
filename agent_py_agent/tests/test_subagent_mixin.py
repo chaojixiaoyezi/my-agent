@@ -44,6 +44,25 @@ class TestSubagentMixinSpawn:
         assert len(result) == 2
         mixin.subagents.split.assert_called_once()
 
+    def test_spawn_subagents_without_count_uses_configured_default(self) -> None:
+        """没有 count 时，工具调用本身就是明确创建意图，不再靠复杂度估算决定是否创建。"""
+        mixin = SimpleAgentSubagentMixin()
+        mixin.config = MagicMock()
+        mixin.config.enable_subagents = True
+        mixin.config.max_subagents = 10
+        mixin.config.subagent_spawn_default_count = 4
+        mixin.config.subagent_workflow_mode = "off"
+        mixin.config.subagent_allowed_tools = []
+        mixin.subagents = MagicMock()
+        mock_task = MagicMock()
+        mixin.subagents.split.return_value = [mock_task, mock_task, mock_task, mock_task]
+
+        result = mixin.spawn_subagents("测试目标")
+
+        assert len(result) == 4
+        mixin.subagents.split.assert_called_once()
+        assert mixin.subagents.split.call_args.args[1] == 4
+
     def test_spawn_subagents_passes_configured_allowed_tools(self) -> None:
         """测试 spawn 时把配置里的默认工具白名单写入子任务。"""
         mixin = SimpleAgentSubagentMixin()

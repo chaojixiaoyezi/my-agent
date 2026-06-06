@@ -6,8 +6,11 @@ from pathlib import Path
 from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import (
     _validate_artifact_item,
 )
+from agent_py_agent.agent.contracts.artifact_acceptance import (
+    ArtifactAcceptanceRequest,
+    validate_artifact,
+)
 from agent_py_agent.agent.contracts.artifact_collection_mapping import mapping_findings
-from agent_py_agent.agent.contracts.artifact_format_lint import lint_artifact_format
 from agent_py_agent.agent.contracts.gates.artifact.gate import evaluate_delivery_closeout_gate
 from agent_py_agent.agent.contracts.gates.artifact.provenance import (
     evaluate_artifact_provenance_gate,
@@ -133,11 +136,13 @@ def test_delivery_closeout_gate_blocks_required_target_coverage_missing() -> Non
     assert "TARGET_COVERAGE_MISSING" in decision.finding_codes
 
 
-def test_artifact_format_lint_reuses_existing_format_validators(tmp_path: Path) -> None:
+def test_artifact_acceptance_reuses_existing_format_validators(tmp_path: Path) -> None:
     broken = tmp_path / "broken.json"
     broken.write_text("{bad json", encoding="utf-8")
 
-    report = lint_artifact_format(path=broken, workspace_root=tmp_path, validation_contract={})
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(path=broken, workspace_root=tmp_path, validation_contract={})
+    )
 
     assert report.ok is False
     assert report.artifact_kind == "json"

@@ -45,6 +45,7 @@ class ExternalizeToolOutputRequest:
     min_chars: int = -1
     preview_chars: int = -1
     parameters: dict[str, Any] | None = None
+    result_envelope: dict[str, Any] | None = None
 
 
 def externalize_tool_output_record(request: ExternalizeToolOutputRequest) -> dict[str, Any]:
@@ -131,7 +132,7 @@ def _request_status(request: ExternalizeToolOutputRequest) -> str:
 
 
 def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str, *, preview_chars: int) -> dict[str, Any]:
-    return {
+    record = {
         "version": TOOL_OUTPUT_RECORD_SCHEMA.version,
         "schema": runtime_memory_schema_payload(TOOL_OUTPUT_RECORD_SCHEMA),
         "tool": request.tool,
@@ -150,6 +151,9 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
         "output_externalized": False,
         "output_path": "",
     }
+    if read_window := _read_window_from_envelope(request.result_envelope):
+        record["read_window"] = read_window
+    return record
 
 
 def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, digest: str) -> Path:
@@ -169,6 +173,7 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
         "run_id": request.run_id,
         "task_id": request.task_id,
         "parameters": _safe_parameters(request.parameters),
+        **({"read_window": read_window} if (read_window := _read_window_from_envelope(request.result_envelope)) else {}),
         "source_input": _source_input(request.parameters),
         "sha256": digest,
         "size_bytes": len(output.encode("utf-8")),
@@ -196,6 +201,7 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
         "status": str(payload.get("status") or ""),
         "error_code": str(payload.get("error_code") or ""),
         "parameters": _safe_parameters(payload.get("parameters")),
+        **({"read_window": payload["read_window"]} if isinstance(payload.get("read_window"), dict) else {}),
         "source_input": str(payload.get("source_input") or ""),
         "path": str(path),
         "sha256": payload["sha256"],
@@ -223,6 +229,7 @@ def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[
         "status": str(record.get("status") or _request_status(request)),
         "error_code": str(record.get("error_code") or request.error_code or "").strip(),
         "parameters": _safe_parameters(request.parameters),
+        **({"read_window": record["read_window"]} if isinstance(record.get("read_window"), dict) else {}),
         "source_input": _source_input(request.parameters),
         "path": "",
         "sha256": digest,
@@ -258,6 +265,75 @@ def _preview(output: str, max_chars: int) -> str:
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _read_window_from_envelope(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    window = value.get("read_window")
+    if not isinstance(window, dict):
+        return {}
+    kind = str(window.get("kind") or "").strip()
+    if kind == "char_window":
+        return _char_window(window)
+    if kind == "line_window":
+        return _line_window(window)
+    return {}
+
+
+def _char_window(window: dict[str, object]) -> dict[str, object]:
+    offset = _optional_nonnegative_int(window.get("offset"))
+    chars = _optional_nonnegative_int(window.get("chars"))
+    total = _optional_nonnegative_int(window.get("total_chars"))
+    next_offset = _optional_nonnegative_int(window.get("next_offset"))
+    if offset is None or total is None:
+        return {}
+    if chars is None and next_offset is not None:
+        chars = max(0, next_offset - offset)
+    if next_offset is None and chars is not None:
+        next_offset = offset + chars
+    if chars is None or next_offset is None:
+        return {}
+    return {
+        "kind": "char_window",
+        "offset": offset,
+        "chars": chars,
+        "next_offset": next_offset,
+        "total_chars": total,
+        "complete": bool(window.get("complete")) or bool(total and next_offset >= total),
+    }
+
+
+def _line_window(window: dict[str, object]) -> dict[str, object]:
+    start = _optional_positive_int(window.get("start_line"))
+    end = _optional_nonnegative_int(window.get("end_line"))
+    total = _optional_nonnegative_int(window.get("total_lines"))
+    next_start = _optional_nonnegative_int(window.get("next_start_line"))
+    if start is None or end is None or total is None:
+        return {}
+    if next_start is None:
+        next_start = end + 1 if end < total else 0
+    return {
+        "kind": "line_window",
+        "start_line": start,
+        "end_line": end,
+        "next_start_line": next_start,
+        "total_lines": total,
+        "complete": bool(window.get("complete")) or bool(total and start <= 1 and end >= total),
+    }
+
+
+def _optional_nonnegative_int(value: object) -> int | None:
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _optional_positive_int(value: object) -> int | None:
+    number = _optional_nonnegative_int(value)
+    return number if number and number > 0 else None
 
 
 def _is_bounded_read_artifact_output(request: ExternalizeToolOutputRequest, output: str) -> bool:

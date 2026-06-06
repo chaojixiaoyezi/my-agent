@@ -190,8 +190,6 @@ def _preserved_tail_refs(metadata: dict[str, Any], paths: dict[str, Path]) -> di
 
 def _work_payload(work_state: dict[str, Any]) -> dict[str, Any]:
     next_step = str(work_state.get("next_step") or "")
-    if _looks_like_reader_first_hint(next_step):
-        next_step = ""
     return {
         "goal": str(work_state.get("goal") or ""),
         "phase": str(work_state.get("phase") or ""),
@@ -358,13 +356,7 @@ def _bullet_items(value: Any) -> list[str]:
 
 
 def _action_first_actions(work_state: dict[str, Any]) -> list[str]:
-    return [item for item in sequence_strings(work_state.get("next_actions")) if not _looks_like_reader_first_hint(item)]
-
-
-def _looks_like_reader_first_hint(value: str) -> bool:
-    text = value.strip().lower()
-    recovery_markers = ("memory-resume", "localstore", "compact_context", "work_state_snapshot", "restore_refs")
-    return any(marker in text for marker in recovery_markers)
+    return sequence_strings(work_state.get("next_actions"))
 
 
 def _positive_int(value: Any) -> int:

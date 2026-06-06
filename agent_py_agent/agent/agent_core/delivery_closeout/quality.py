@@ -103,7 +103,7 @@ def _merge_quality_contract(base: dict[str, Any], incoming: dict[str, Any]) -> d
 
 def _quality_enforcement_required(contract: dict[str, Any]) -> bool:
     value = str(contract.get("enforcement") or contract.get("mode") or "").strip().lower()
-    return value in {"required", "hard", "block", "blocking"}
+    return value == "required"
 
 
 def _merge_evidence_contract(base: object, incoming: object) -> dict[str, Any]:

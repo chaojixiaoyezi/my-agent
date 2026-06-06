@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,12 +22,12 @@ _GENERIC_AGENT_NAMES = {
     "worker",
     "subagent",
     "agent",
-    "小傻妞",
-    "小傻妞-worker",
-    "小傻妞-general",
-    "小傻妞-researcher",
-    "小傻妞-writer",
-    "小傻妞-tester",
+    "child",
+    "agent-d1-worker",
+    "agent-d1-general",
+    "agent-d1-researcher",
+    "agent-d1-writer",
+    "agent-d1-tester",
 }
 _GENERIC_LINEAGE_ROLES = {
     "worker",
@@ -38,6 +39,7 @@ _GENERIC_LINEAGE_ROLES = {
     "coordinator",
     "leaf-worker",
 }
+_INDEXED_SYSTEM_AGENT_RE = re.compile(r"^agent-d\d+-(?P<role>[a-z0-9_-]+)-(?P<index>\d+)$")
 
 
 @dataclass(frozen=True)
@@ -212,17 +214,10 @@ def _is_generic_agent_name(value: object) -> bool:
 
 def _is_indexed_generic_agent_name(value: object) -> bool:
     name = _normalized_name(value)
-    parts = name.split("-")
-    if len(parts) < 3 or not parts[-1].isdigit():
+    match = _INDEXED_SYSTEM_AGENT_RE.match(name)
+    if not match:
         return False
-    prefix = parts[0]
-    role = "-".join(parts[1:-1])
-    return _is_lineage_prefix(prefix) and role in _GENERIC_LINEAGE_ROLES
-
-
-def _is_lineage_prefix(value: str) -> bool:
-    text = str(value or "").strip()
-    return len(text) >= 2 and text.endswith("傻妞") and set(text[:-2]) == {"小"}
+    return match.group("role") in _GENERIC_LINEAGE_ROLES
 
 
 def _status(task: Any) -> str:

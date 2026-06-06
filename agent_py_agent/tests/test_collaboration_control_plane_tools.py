@@ -542,6 +542,9 @@ def test_collaboration_status_aliases_do_not_trigger_machine_semantics(tmp_path)
     resolved = store.record_case_status({'case_id': case.case_id, 'status': "resolved", 'actor_agent_id': "agent-a", 'summary': "", 'now': 12.0})
 
     assert resolved.status == "resolved"
+    assert store.overview()["open_case_count"] == 1
+    store.record_case_status({'case_id': case.case_id, 'status': "closed", 'actor_agent_id': "agent-a", 'summary': "明确关闭。", 'decision_type': "closed_by_main_agent", 'now': 13.0})
+    assert store.overview()["closed_case_count"] == 1
     assert is_terminal_status("resolved") is False
     assert is_terminal_status("close") is False
     assert is_terminal_status("closed") is True

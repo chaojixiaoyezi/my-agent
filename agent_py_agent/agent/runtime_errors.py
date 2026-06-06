@@ -7,6 +7,27 @@ from typing import Any
 
 _MAX_ERROR_TEXT = 300
 
+_SUBAGENT_LEDGER_CONTEXTS = {
+    "background_dispatch.agent_tree",
+    "cancel_subagents.load",
+    "subagents.load",
+    "subagents.list_runs",
+    "schedule_child_subagents.load",
+}
+_SUBAGENT_LEDGER_CONTEXT_SUFFIXES = (
+    ".subagents.load",
+    ".subagents.save",
+    ".subagents.list_runs",
+    ".child_status.load",
+)
+_GUIDANCE_CONTEXT_PREFIXES = (
+    "conversation.guidance.",
+    "runtime_guidance.",
+    "agent_tree.guidance.",
+    "send_guidance.",
+    "dispatch.guidance.",
+)
+
 
 class RecoverableRuntimeError(RuntimeError):
     """A runtime failure that should be reported to the model or parent agent."""
@@ -63,7 +84,10 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
             exc,
             _template(
                 "data_corruption",
-                "账本或状态文件读取失败；请先刷新状态或让父代理重建索引，不要把它当成子代理没产物。",
+                _context_model_message(
+                    context,
+                    default="账本或状态文件读取失败；请先刷新状态或重建索引，不要把它当成没有数据。",
+                ),
                 "persistent agent ledger/state is corrupted or unreadable",
             ),
             context=context,
@@ -142,9 +166,26 @@ def _builtin_category(exc: BaseException) -> str:
 
 
 def _local_failure_model_message(context: str) -> str:
+    return _context_model_message(
+        context,
+        default="本地状态或路径读取失败；请检查路径、权限、编码或刷新状态后继续。",
+    )
+
+
+def _context_model_message(context: str, *, default: str) -> str:
     normalized = str(context or "").strip()
-    if normalized == "subagents.load" or ("subagent" in normalized and "load" in normalized):
+    if _is_subagent_ledger_context(normalized):
         return "子代理账本读取失败；请刷新代理树或重建索引，不要把它当成子代理没产物。"
-    if "guidance" in normalized:
+    if _is_guidance_context(normalized):
         return "运行中补充提示读取失败；请刷新会话或提示账本，不要把它当成没有用户补充提示。"
-    return "本地状态或路径读取失败；请检查路径、权限、编码或刷新代理树后继续。"
+    return default
+
+
+def _is_subagent_ledger_context(context: str) -> bool:
+    return context in _SUBAGENT_LEDGER_CONTEXTS or any(
+        context.endswith(suffix) for suffix in _SUBAGENT_LEDGER_CONTEXT_SUFFIXES
+    )
+
+
+def _is_guidance_context(context: str) -> bool:
+    return any(context.startswith(prefix) for prefix in _GUIDANCE_CONTEXT_PREFIXES)

@@ -110,6 +110,25 @@ class TestAuditLogger(unittest.TestCase):
         self.assertEqual(entry.action, "CREATE_TASK")
         self.assertFalse((self.audit_path / "audit.jsonl").exists())
 
+    def test_audit_string_off_is_not_a_machine_disable_value(self):
+        """审计开关只接受明确 false/0；off/no 不再作为兜底禁用值。"""
+        class MockConfig:
+            audit_log_path = str(self.audit_path)
+            audit_enabled = "off"
+
+        logger = AuditLogger(MockConfig())
+        logger.log(
+            LogParams(
+                action=AuditAction.CREATE_TASK,
+                user_id="test-user",
+                channel="chat",
+                target_type="task",
+                target_id="task-123",
+            )
+        )
+
+        self.assertTrue((self.audit_path / "audit.jsonl").exists())
+
     def test_log_writes_jsonl(self):
         """测试写入 JSONL 格式。"""
         logger = AuditLogger(self.config)

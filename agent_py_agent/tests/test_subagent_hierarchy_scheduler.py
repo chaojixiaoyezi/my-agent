@@ -79,7 +79,7 @@ def test_hierarchy_schedule_apply_builds_two_child_four_grandchild_tree(tmp_path
     assert sum(len(manager.load(child_id).child_ids) for child_id in first.created_run_ids) == 4
 
 
-def test_hierarchy_schedule_repairs_literal_lineage_wildcard_names(tmp_path):
+def test_hierarchy_schedule_repairs_literal_wildcard_names_with_default_display_name(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root", thought="orchestrate", plan=["plan"])
     child = manager.create_run(
@@ -107,9 +107,7 @@ def test_hierarchy_schedule_repairs_literal_lineage_wildcard_names(tmp_path):
     )
     leaf = manager.load(result.created_run_ids[0])
 
-    assert leaf.agent_name.startswith("小小小傻妞-")
-    assert "*" not in leaf.agent_name
-    assert leaf.agent_name.endswith("leaf_worker")
+    assert leaf.agent_name == "agent-d3-leaf-worker-1"
 
 
 def test_hierarchy_schedule_blocks_leaf_when_four_layer_token_has_no_space(tmp_path):

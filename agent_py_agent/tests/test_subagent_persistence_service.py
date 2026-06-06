@@ -91,6 +91,40 @@ def test_subagent_save_keeps_canonical_state_when_projection_fails(tmp_path) -> 
     assert any(item["step"] == "local_store_projection" and item["status"] == "failed" for item in ledger)
 
 
+def test_subagent_projection_does_not_publish_takeover_readiness_for_error_status_alias(tmp_path) -> None:
+    from agent_py_agent.agent.subagents.services.control_plane_projection import (
+        sync_subagent_control_plane_projection,
+    )
+
+    class CaptureLocalStore:
+        def __init__(self) -> None:
+            self.record = None
+
+        def upsert_agent_run(self, record) -> None:  # noqa: ANN001
+            self.record = record
+
+        def record_agent_event(self, _event) -> None:  # noqa: ANN001
+            pass
+
+        def rebuild_task_rollup(self, _task_id) -> None:  # noqa: ANN001
+            pass
+
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="旧 ERROR 状态不投影为可接管",
+        thought="control-plane 只能投影当前状态协议。",
+        plan=["创建", "投影"],
+    )
+    task.status = "ERROR"
+    task.takeover_readiness_json = str(tmp_path / "takeover_readiness.json")
+    store = CaptureLocalStore()
+
+    sync_subagent_control_plane_projection(store, task)
+
+    assert store.record is not None
+    assert "takeover_readiness_ref" not in store.record.metadata
+
+
 def test_subagent_projection_rebuild_replays_from_canonical_state(tmp_path) -> None:
     from agent_py_agent.agent.subagents.services.persistence.projections import (
         rebuild_derived_projections,
@@ -260,6 +294,59 @@ def test_subagent_workspace_sync_deduplicates_unchanged_status_events(tmp_path) 
     assert len(_read_jsonl(str(work / "timeline.jsonl"))) == baseline_task_timeline_count + 1
     assert len(_read_jsonl(str(work / "shared" / "messages.jsonl"))) == baseline_shared_message_count + 1
     assert len(_read_jsonl(str(work / "agents" / task.id / "timeline.jsonl"))) == baseline_agent_timeline_count + 1
+
+
+def test_subagent_task_workspace_identity_does_not_reuse_old_state_or_yaml(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / "subagents")
+    task_root = tmp_path / "subagents" / "tasks" / "current-task"
+    work = task_root / "work"
+    work.mkdir(parents=True)
+    (work / "state.json").write_text(
+        json.dumps({"task_id": "old-task", "primary_run_id": "old-run", "run_id": "old-run"}),
+        encoding="utf-8",
+    )
+    (work / "task.yaml").write_text(
+        'version: 1\ntask_id: "old-task"\nprimary_run_id: "old-run"\n',
+        encoding="utf-8",
+    )
+
+    task = manager.create_run(
+        goal="当前任务身份不能被旧文件带偏",
+        thought="只信当前 task/root 结构化字段。",
+        plan=["创建当前任务"],
+        attributes={"run_workspace": {"task_root": str(task_root)}},
+    )
+    loaded = manager.load(task.id)
+    state = json.loads((work / "state.json").read_text(encoding="utf-8"))
+    task_yaml = (work / "task.yaml").read_text(encoding="utf-8")
+
+    assert loaded.task_workspace_dir == str(task_root)
+    assert loaded.agent_run_workspace_dir == str(work / "agents" / task.id)
+    assert state["task_id"] == task.id
+    assert state["primary_run_id"] == task.id
+    assert 'task_id: "old-task"' not in task_yaml
+    assert f'task_id: "{task.id}"' in task_yaml
+    assert f'primary_run_id: "{task.id}"' in task_yaml
+
+
+def test_child_save_does_not_overwrite_parent_task_yaml(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / "subagents")
+    parent = manager.create_run(goal="父任务", thought="建根", plan=["root"])
+    parent_yaml = Path(parent.task_workspace_task_yaml).read_text(encoding="utf-8")
+
+    child = manager.create_run(
+        goal="子任务",
+        thought="共享父 task workspace",
+        plan=["child"],
+        parent_id=parent.id,
+        root_id=parent.root_id,
+    )
+    after_child_yaml = Path(parent.task_workspace_task_yaml).read_text(encoding="utf-8")
+
+    assert child.task_workspace_dir == parent.task_workspace_dir
+    assert after_child_yaml == parent_yaml
+    assert f'primary_run_id: "{parent.id}"' in after_child_yaml
+    assert f'primary_run_id: "{child.id}"' not in after_child_yaml
 
 
 def _assert_runtime_workspace_paths(loaded, task_workspace, run_id: str) -> None:

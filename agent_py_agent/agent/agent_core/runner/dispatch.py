@@ -204,7 +204,7 @@ def _resolve_runner_timeout_seconds(value: object) -> float:
 
     if isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized in {"", "auto", "off", "none", "disabled", "false", "no"}:
+        if normalized in {"auto", "off"}:
             return 0.0
         try:
             parsed = float(normalized)

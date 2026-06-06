@@ -60,7 +60,19 @@ def _streaming_write_abort_limit(_tool: str, max_chars: int | None) -> int:
 
 
 def recovered_write_abort_payload(exc: LongToolContentStreamAbort) -> dict[str, object] | None:
-    return None
+    return {
+        "tool": "__parse_error__",
+        "error_code": "TOOL_INLINE_CONTENT_STREAM_ABORTED",
+        "error": (
+            f"{exc.tool}.content inline content streaming exceeded {exc.limit} chars; "
+            "工具调用缺少结束标记"
+        ),
+        "source_tool": exc.tool,
+        "path": exc.path,
+        "content_field_present": True,
+        "streaming_content_chars": exc.chars,
+        "streaming_content_limit": exc.limit,
+    }
 
 
 def _json_tool(raw: str) -> str:

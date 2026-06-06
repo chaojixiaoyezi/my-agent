@@ -12,17 +12,25 @@ from pathlib import Path
 from typing import Any
 
 
-def write_task_yaml_if_missing(path: Path, task_id: str, task: Any, now: float) -> None:
-    """Write the task workspace identity file once, preserving manual edits."""
+def write_task_yaml(
+    path: Path,
+    task_id: str,
+    task: Any,
+    now: float,
+    *,
+    primary_run_id: str | None = None,
+    parent_run_id: str | None = None,
+) -> None:
+    """Write the current task workspace identity file."""
 
-    if path.exists():
-        return
     goal = str(getattr(task, "goal", ""))
+    primary = str(primary_run_id if primary_run_id is not None else getattr(task, "id", ""))
+    parent = str(parent_run_id if parent_run_id is not None else getattr(task, "parent_id", ""))
     content = (
         "version: 1\n"
         f'task_id: "{_yaml_quote(task_id)}"\n'
-        f'primary_run_id: "{_yaml_quote(str(getattr(task, "id", "")))}"\n'
-        f'parent_run_id: "{_yaml_quote(str(getattr(task, "parent_id", "")))}"\n'
+        f'primary_run_id: "{_yaml_quote(primary)}"\n'
+        f'parent_run_id: "{_yaml_quote(parent)}"\n'
         f"depth: {int(getattr(task, 'depth', 0) or 0)}\n"
         f'created_at: {float(getattr(task, "created_at", 0.0) or now)}\n'
         "source: subagent_task_workspace\n"
@@ -88,5 +96,5 @@ __all__ = [
     "blackboard_content",
     "write_parent_summary_placeholder",
     "write_summary",
-    "write_task_yaml_if_missing",
+    "write_task_yaml",
 ]

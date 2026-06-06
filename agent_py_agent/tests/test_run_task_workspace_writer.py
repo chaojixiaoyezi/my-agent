@@ -86,6 +86,46 @@ def test_attach_run_task_workspace_context_preserves_user_requested_output_root(
     assert updated.delivery_contract["task_workspace"]["user_requested_output_dir"] == str(user_dir)
 
 
+def test_attach_run_task_workspace_context_resolves_relative_user_output_root_to_project(tmp_path):
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        attach_run_task_workspace_context,
+    )
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    repo = tmp_path / "repo"
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), repo)
+    params = RunParams(
+        save=True,
+        request_id="req-1",
+        run_id="run-1",
+        task_id="task-1",
+        delivery_contract={
+            "schema_version": "delivery_contract.v1",
+            "artifacts": [
+                {
+                    "artifact_id": "report",
+                    "kind": "md",
+                    "preferred_path": "lab_outputs/compact-stress/report.md",
+                    "allowed_output_roots": ["lab_outputs/compact-stress"],
+                }
+            ],
+        },
+    )
+
+    updated = attach_run_task_workspace_context(agent, params, "报告写到 lab_outputs/compact-stress/report.md")
+
+    workspace = updated.task_attributes["run_workspace"]
+    artifact = updated.delivery_contract["artifacts"][0]
+    expected_root = str((repo / "lab_outputs" / "compact-stress").resolve(strict=False))
+    expected_report = str((repo / "lab_outputs" / "compact-stress" / "report.md").resolve(strict=False))
+    assert artifact["preferred_path"] == expected_report
+    assert artifact["allowed_output_roots"] == [expected_root]
+    assert workspace["output_dir"] != expected_root
+    assert updated.delivery_contract["task_workspace"]["user_requested_output_dir"] == expected_root
+
+
 def test_attach_run_task_workspace_context_preserves_user_requested_absolute_artifact_path(tmp_path):
     from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
         attach_run_task_workspace_context,

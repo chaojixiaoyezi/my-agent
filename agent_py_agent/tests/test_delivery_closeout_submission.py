@@ -19,6 +19,26 @@ from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
 from agent_py_agent.agent.backends import ModelResponse
 
 
+def _char_window(offset: int, chars: int, total: int) -> dict[str, object]:
+    return {
+        "kind": "char_window",
+        "offset": offset,
+        "chars": chars,
+        "next_offset": offset + chars,
+        "total_chars": total,
+    }
+
+
+def _line_window(start: int, end: int, total: int) -> dict[str, object]:
+    return {
+        "kind": "line_window",
+        "start_line": start,
+        "end_line": end,
+        "next_start_line": end + 1 if end < total else 0,
+        "total_lines": total,
+    }
+
+
 def test_tool_round_without_acceptance_submit_does_not_run_delivery_closeout(tmp_path: Path):
     _write_valid_artifact(tmp_path)
     params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
@@ -235,7 +255,7 @@ def test_acceptance_submit_blocks_when_required_source_read_is_partial(tmp_path:
                 "tool": "read_file",
                 "ok": True,
                 "parameters": {"tool": "read_file", "path": str(source), "offset": 0, "max_chars": 100},
-                "output_preview": "[char-window offset=0 chars=100 total_chars=1000]\nPARTIAL view only",
+                "read_window": _char_window(0, 100, 1000),
             },
         ]
     )
@@ -276,7 +296,7 @@ def test_acceptance_submit_blocks_when_item_level_required_source_read_is_partia
                 "tool": "read_file",
                 "ok": True,
                 "parameters": {"tool": "read_file", "path": str(source), "offset": 0, "max_chars": 100},
-                "output_preview": "[char-window offset=0 chars=100 total_chars=1000]\nPARTIAL view only",
+                "read_window": _char_window(0, 100, 1000),
             },
             {
                 "tool": "search_text",
@@ -329,6 +349,7 @@ def test_acceptance_submit_uses_disk_tool_output_index_for_coverage_after_compac
                 "sha256": "read-full-window-sha",
                 "parameters": {"tool": "read_file", "path": str(source), "start_line": 1, "end_line": 500},
                 "source_input": str(source),
+                "read_window": _line_window(1, 500, 1000),
             }
         ],
     )

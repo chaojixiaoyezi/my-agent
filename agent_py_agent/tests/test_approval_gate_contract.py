@@ -81,8 +81,9 @@ def test_approval_gate_rejects_action_if_bound_args_change():
     assert decision.status == "BLOCKED"
     assert decision.error_code == "APPROVAL_BINDING_MISMATCH"
     payload = decision.to_dict()
-    assert payload["recovery"]["status"] == "needs_user_input"
-    assert payload["recovery"]["actions"][0]["recommended_action"] == "request_user_input"
+    assert payload["recovery"]["status"] == "blocked"
+    assert payload["recovery"]["terminal"] is True
+    assert payload["recovery"]["actions"][0]["recommended_action"] == "report_blocker"
 
 
 def test_approval_gate_rejects_denied_expired_unauthorized_and_replayed_records():
@@ -110,10 +111,14 @@ def test_approval_gate_rejects_denied_expired_unauthorized_and_replayed_records(
     unauthorized = ApprovalRecord("ap-1", "block_ip", "h1", "run-1", "guest", "APPROVED")
     replayed = ApprovalRecord("ap-1", "block_ip", "h1", "run-1", "admin", "APPROVED", used=True)
 
-    assert evaluate_approval_gate(base, approvals=(denied,), policy=policy).error_code == "APPROVAL_REJECTED"
-    assert evaluate_approval_gate(base, approvals=(expired,), policy=policy).error_code == "APPROVAL_EXPIRED"
-    assert (
-        evaluate_approval_gate(base, approvals=(unauthorized,), policy=policy).error_code
-        == "APPROVER_NOT_AUTHORIZED"
-    )
-    assert evaluate_approval_gate(base, approvals=(replayed,), policy=policy).error_code == "APPROVAL_ALREADY_USED"
+    for record, expected_code in (
+        (denied, "APPROVAL_REJECTED"),
+        (expired, "APPROVAL_EXPIRED"),
+        (unauthorized, "APPROVER_NOT_AUTHORIZED"),
+        (replayed, "APPROVAL_ALREADY_USED"),
+    ):
+        decision = evaluate_approval_gate(base, approvals=(record,), policy=policy)
+        assert decision.error_code == expected_code
+        payload = decision.to_dict()
+        assert payload["recovery"]["status"] == "blocked"
+        assert payload["recovery"]["terminal"] is True

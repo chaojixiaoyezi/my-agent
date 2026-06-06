@@ -4,8 +4,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .workspace_roots import derived_workspace_roots_from_subagent_path
-
 _ROOT_ATTRIBUTES = (
     "output_dir",
     "reports_dir",
@@ -25,7 +23,13 @@ def artifact_candidate_roots(task: Any, *, include_workspace_roots: bool = True)
     for value in _root_values(task):
         _append_existing_root(roots, value)
     if include_workspace_roots:
-        _append_derived_workspace_roots(roots)
+        _append_declared_workspace_roots(roots, task)
+    return roots
+
+
+def declared_workspace_roots(task: Any) -> list[Path]:
+    roots: list[Path] = []
+    _append_declared_workspace_roots(roots, task)
     return roots
 
 
@@ -52,18 +56,24 @@ def _append_existing_root(roots: list[Path], value: object) -> None:
         roots.append(root)
 
 
-def _append_derived_workspace_roots(roots: list[Path]) -> None:
-    for workspace in _derived_workspace_roots(roots):
-        _append_existing_workspace_root(roots, workspace)
+def _append_declared_workspace_roots(roots: list[Path], task: Any) -> None:
+    attrs = getattr(task, "attributes", {}) or {}
+    if not isinstance(attrs, dict):
+        return
+    for value in [attrs.get("workspace_root"), *list(attrs.get("workspace_roots") or [])]:
+        _append_existing_workspace_root(roots, _path(value))
 
 
-def _derived_workspace_roots(roots: list[Path]) -> list[Path]:
-    derived: list[Path] = []
-    for root in list(roots):
-        derived.extend(derived_workspace_roots_from_subagent_path(root))
-    return derived
-
-
-def _append_existing_workspace_root(roots: list[Path], workspace: Path) -> None:
-    if workspace.exists() and workspace.is_dir() and workspace not in roots:
+def _append_existing_workspace_root(roots: list[Path], workspace: Path | None) -> None:
+    if workspace is not None and workspace.exists() and workspace.is_dir() and workspace not in roots:
         roots.append(workspace)
+
+
+def _path(value: object) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return Path(text).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None

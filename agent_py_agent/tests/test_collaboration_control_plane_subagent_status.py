@@ -95,6 +95,7 @@ def test_collaboration_overview_counts_ready_and_blocked_cases(tmp_path) -> None
 
     assert overview["case_count"] == 2
     assert overview["open_case_count"] == 1
+    assert overview["closed_case_count"] == 1
     assert overview["blocked_request_count"] == 1
     assert overview["ready_case_count"] == 1
     assert overview["readiness"]["ready"] is False

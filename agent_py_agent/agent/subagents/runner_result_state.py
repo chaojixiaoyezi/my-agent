@@ -112,7 +112,7 @@ def _apply_structured_failure_state(task, current_failure_type: str, parsed) -> 
     if is_pending_capability_status(str(getattr(parsed, "status", "") or "")):
         task.failure_type = "capability_request"
         return
-    if parsed.capability_requests or parsed.blocked_reason:
+    if parsed.capability_requests:
         task.failure_type = "capability_request"
         return
     if _should_resolve_stale_capability_requests(task):

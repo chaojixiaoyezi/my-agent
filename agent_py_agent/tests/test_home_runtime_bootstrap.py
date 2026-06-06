@@ -60,6 +60,9 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     assert workspace["request_id"] == "req-1"
     assert workspace["run_id"] == "run-1"
     assert workspace["task_id"] == "示例网站 E2E"
+    assert workspace["task_root"] == str(task_root)
+    assert workspace["output_dir"] == str(task_root / "output")
+    assert workspace["work_dir"] == str(task_root / "work")
     assert workspace["owner_id"] == "local/main"
     assert workspace["owner_home"] == str((home / "owners" / "local" / "main").resolve())
     assert state["primary_run_id"] == "run-1"
@@ -118,6 +121,10 @@ def test_workspace_identity_does_not_reuse_old_state_json(tmp_path: Path):
     old_work.mkdir(parents=True)
     (old_work / "state.json").write_text(
         json.dumps({"request_id": "req-one", "primary_run_id": "run-one"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (old_work / "task.yaml").write_text(
+        'task_id: "分析-all-agent-项目并写中文报告"\nrequest_id: "req-one"\nrun_id: "run-one"\n',
         encoding="utf-8",
     )
     cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])

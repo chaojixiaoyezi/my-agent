@@ -35,6 +35,7 @@ def tool_output_artifact_refs(restore_refs: dict[str, Any]) -> list[dict[str, An
             "error_code": str(item.get("error_code") or ""),
             "sha256": str(item.get("sha256", "") or ""),
             "size_bytes": int(item.get("size_bytes", 0) or 0),
+            "read_window": dict(item.get("read_window", {}) if isinstance(item.get("read_window"), dict) else {}),
         }
         for item in items
         if item.get("path") and _is_model_visible_tool_output(item)
@@ -103,6 +104,7 @@ def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
         "error_code": str(row.get("error_code") or ""),
         "sha256": str(row.get("sha256", "") or ""),
         "size_bytes": int(row.get("size_bytes", 0) or 0),
+        "read_window": dict(row.get("read_window", {}) if isinstance(row.get("read_window"), dict) else {}),
     }
 
 
@@ -124,6 +126,7 @@ def _tool_call_ref(row: dict[str, Any]) -> dict[str, Any]:
         "sha256": str(row.get("sha256", "") or ""),
         "size_bytes": int(row.get("size_bytes", 0) or 0),
         "output_externalized": bool(row.get("output_externalized")),
+        "read_window": dict(row.get("read_window", {}) if isinstance(row.get("read_window"), dict) else {}),
     }
 
 

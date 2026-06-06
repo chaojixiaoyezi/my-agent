@@ -152,6 +152,44 @@ def test_tool_call_index_preserves_short_failed_tool_status(tmp_path: Path) -> N
     assert index[-1]["error_code"] == "CONTEXT_COMPACT_DEFERRED"
 
 
+def test_tool_output_index_preserves_read_file_window_metadata(tmp_path: Path) -> None:
+    read_window = {
+        "kind": "char_window",
+        "offset": 100,
+        "chars": 50,
+        "next_offset": 150,
+        "total_chars": 500,
+        "complete": False,
+    }
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="read_file",
+            call_id="1-4",
+            output="window body",
+            ok=True,
+            run_id="run-tool",
+            task_id="task-tool",
+            request_id="req-tool",
+            min_chars=0,
+            parameters={"path": "data/big.txt", "offset": 100, "max_chars": 50},
+            result_envelope={"read_window": read_window},
+        )
+    )
+
+    artifact_path = Path(str(record["artifact_ref"]))
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    index = [
+        json.loads(line)
+        for line in (artifact_path.parent / "index.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert record["read_window"] == read_window
+    assert artifact["read_window"] == read_window
+    assert index[-1]["read_window"] == read_window
+
+
 def test_tool_loop_keeps_moderate_tool_output_inline_for_model_context(tmp_path: Path) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path))
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
@@ -465,9 +503,11 @@ def test_tool_loop_enters_long_content_recovery_after_truncated_write_parse_erro
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
     payload = {
         "tool": "__parse_error__",
-        "error_code": "TOOL_CALL_UNCLOSED",
+        "error_code": "TOOL_INLINE_CONTENT_STREAM_ABORTED",
         "error": "工具调用缺少结束标记 [/TOOL_CALL]",
-        "raw": '{"tool":"write_file","path":"site/app.js","content":"const data = ',
+        "source_tool": "write_file",
+        "path": "site/app.js",
+        "content_field_present": True,
     }
     output = (
         "工具调用缺少结束标记 [/TOOL_CALL]。如果上一轮是 write_file/apply_patch 且 "
@@ -481,16 +521,52 @@ def test_tool_loop_enters_long_content_recovery_after_truncated_write_parse_erro
             tool_rounds=2,
             idx=1,
             payload=payload,
-            result=ToolExecutionResult("__parse_error__", False, output),
+            result=ToolExecutionResult(
+                "__parse_error__",
+                False,
+                output,
+                error_code="TOOL_INLINE_CONTENT_STREAM_ABORTED",
+            ),
         )
     )
 
     live_context = "\n".join(params.tool_context)
     assert "long_content_recovery_mode" in live_context
-    assert "write_file 写短骨架" in live_context
-    assert "apply_patch 分块追加" in live_context
+    assert "WRITE_FILE_RAW" in live_context
+    assert "write_file.content" in live_context
     assert f"不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符" in live_context
     assert "site/app.js" in live_context
+
+
+def test_tool_loop_does_not_enter_long_content_recovery_from_raw_parse_error_text(
+    tmp_path: Path,
+) -> None:
+    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
+    payload = {
+        "tool": "__parse_error__",
+        "error_code": "TOOL_INLINE_CONTENT_STREAM_ABORTED",
+        "error": "工具调用缺少结束标记 [/TOOL_CALL]",
+        "raw": '{"tool":"write_file","path":"site/app.js","content":"const data = ',
+    }
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=2,
+            idx=1,
+            payload=payload,
+            result=ToolExecutionResult(
+                "__parse_error__",
+                False,
+                "工具调用缺少结束标记 [/TOOL_CALL]",
+                error_code="TOOL_INLINE_CONTENT_STREAM_ABORTED",
+            ),
+        )
+    )
+
+    live_context = "\n".join(params.tool_context)
+    assert "long_content_recovery_mode" not in live_context
 
 
 def test_tool_loop_enters_structured_json_recovery_after_truncated_parse_error(
@@ -523,7 +599,7 @@ def test_tool_loop_enters_structured_json_recovery_after_truncated_parse_error(
     assert "outputs/report/source_data.json" in live_context
 
 
-def test_tool_loop_enters_long_content_recovery_after_inline_write_rejection(
+def test_tool_loop_does_not_enter_long_content_recovery_from_inline_write_message_only(
     tmp_path: Path,
 ) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path))
@@ -546,10 +622,7 @@ def test_tool_loop_enters_long_content_recovery_after_inline_write_rejection(
     )
 
     live_context = "\n".join(params.tool_context)
-    assert "long_content_recovery_mode" in live_context
-    assert "WRITE_FILE_RAW" in live_context
-    assert "apply_patch" in live_context
-    assert "site/app.css" in live_context
+    assert "long_content_recovery_mode" not in live_context
 
 
 def test_render_tool_payload_keeps_small_payload_readable() -> None:

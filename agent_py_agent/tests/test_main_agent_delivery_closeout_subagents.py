@@ -38,7 +38,8 @@ def test_submit_for_acceptance_without_contract_warns_for_current_task_subagents
         )
         report = _task_closeout_report(task_root)
 
-        assert backend.calls == 2
+        assert backend.calls == 1
+        assert result.tool_rounds == 1
         assert backend.saw_subagent_rework is False
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert report["ok"] is True

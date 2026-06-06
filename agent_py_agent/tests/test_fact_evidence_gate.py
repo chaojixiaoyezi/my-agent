@@ -98,6 +98,23 @@ def test_delivery_closeout_reports_fact_evidence_gate_findings_as_warnings(tmp_p
     assert progress_events[-1]["ok"] is True
 
 
+def test_fact_evidence_legacy_enforcement_aliases_stay_advisory(tmp_path: Path) -> None:
+    for enforcement in ("hard", "block", "blocking"):
+        params = _fact_evidence_closeout_params(tmp_path)
+        params.delivery_contract["fact_evidence_contract"]["enforcement"] = enforcement
+        agent = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(workspace_root=tmp_path))
+
+        response = main_agent_delivery_closeout_response(
+            MainAgentDeliveryCloseoutRequest(agent=agent, params=params, backend="test")
+        )
+        report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+
+        assert response is not None
+        assert report["fact_evidence_gate"]["status"] == "ALLOW"
+        assert "FACT_SOURCE_TOOL_BACKING_MISSING" in report["fact_evidence_gate"]["evidence"]["warning_codes"]
+        assert report["final_closeout_gate"]["allowed"] is True
+
+
 def _fact_evidence_closeout_params(tmp_path: Path):
     (tmp_path / "out.txt").write_text("finished artifact", encoding="utf-8")
     (tmp_path / "source_data.json").write_text(json.dumps(_unbacked_fact_payload(), ensure_ascii=False), encoding="utf-8")

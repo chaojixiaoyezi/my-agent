@@ -113,7 +113,8 @@ def test_tool_catalog_format_example_does_not_bias_to_path_param():
     catalog = registry.render_catalog_section()
 
     assert '{"tool": "tool_name", "path": "example"}' not in catalog
-    assert '{"tool": "tool_name", "parameter_name": "parameter_value"}' in catalog
+    assert '{"tool": "tool_name", "parameter_name": "parameter_value"}' not in catalog
+    assert '{"tool": "read_file", "path": "README.md"}' in catalog
     assert '"actual_parameter_name": "actual_value"' not in catalog
     assert '"param_name": "param_value"' not in catalog
     assert "不要写 param_name、args、arguments" in catalog
@@ -151,10 +152,11 @@ def test_tool_catalog_uses_configured_categories_offset_and_notice():
     )
 
     catalog = registry.render_catalog_section()
+    catalog_entries = catalog.split("# Tool Catalog", 1)[1]
 
-    assert "find_files" in catalog
-    assert "list_files" not in catalog
-    assert "read_file" not in catalog
+    assert "find_files" in catalog_entries
+    assert "list_files" not in catalog_entries
+    assert "read_file" not in catalog_entries
     assert "示例：" not in catalog
     assert "next_offset=2" in catalog
 
@@ -179,6 +181,17 @@ def test_tool_executor_rejects_model_param_name_bundle(tmp_path: Path):
 
     assert not result.ok
     assert "bundle recovered" not in result.output
+
+
+def test_tool_executor_rejects_unknown_parameter_name_without_defaulting_to_workspace(tmp_path: Path):
+    """LLM: unknown fields must not be silently ignored by tools with default parameters."""
+    registry = make_tool_registry(tmp_path)
+
+    result = registry.execute_call({"tool": "list_files", "parameter_name": {"path": "."}})
+
+    assert not result.ok
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert "parameter_name" in result.output
 
 
 def test_tool_call_parser_keeps_orchestration_params_flat():

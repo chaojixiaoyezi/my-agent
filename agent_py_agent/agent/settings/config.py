@@ -216,7 +216,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     subagent_takeover_chain_max_depth: int = 0
     subagent_context_summary_inline_json_chars: int = 900
     subagent_context_summary_inline_text_chars: int = 500
-    subagent_automation_level: int = 2
     subagent_debug_trace_level: int = 0
     subagent_memory_retention_policy: str = "parent_review_or_cleanup"
     subagent_memory_delete_after_days: int = 0

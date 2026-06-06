@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
@@ -14,7 +15,6 @@ from .artifact_acceptance_models import (
     artifact_ref_payload,
     kind_for_path,
 )
-from .artifact_binary_signature import binary_signature_finding
 from .artifact_capabilities import artifact_capability
 from .artifact_collection_contract import collection_contract_findings
 from .artifact_csv_acceptance import validate_csv_artifact
@@ -32,11 +32,9 @@ from .artifact_structured_contracts import (
     markdown_section_findings,
     text_size_findings,
 )
-from .artifact_validator_registry import (
-    ArtifactValidator,
-    resolve_artifact_validator,
-)
 from .artifact_xlsx_contract import xlsx_contract_findings
+
+ArtifactValidator = Callable[[ArtifactAcceptanceRequest], ArtifactAcceptanceReport]
 
 
 def validate_html_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
@@ -73,13 +71,38 @@ def validate_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceR
         return _outside_workspace_report(path)
     if not path.exists():
         return _missing_report(path, kind=_request_capability(request).kind)
-    validator = resolve_artifact_validator(
+    validator = _resolve_artifact_validator(
         request,
         named_validators=_named_validators(),
         kind_validators=_kind_validators(),
         default_validator=_validate_generic_request,
     )
     return validator(request)
+
+
+def _resolve_artifact_validator(
+    request: ArtifactAcceptanceRequest,
+    *,
+    named_validators: dict[str, ArtifactValidator],
+    kind_validators: dict[str, ArtifactValidator],
+    default_validator: ArtifactValidator,
+) -> ArtifactValidator:
+    validator_name = _validator_name_from_contract(request.validation_contract)
+    if validator_name and validator_name in named_validators:
+        return named_validators[validator_name]
+    validation = request.validation_contract or {}
+    capability = artifact_capability(
+        Path(request.path),
+        declared_kind=str(validation.get("artifact_kind") or validation.get("kind") or ""),
+        declared_mime=str(validation.get("mime_type") or validation.get("mime") or ""),
+    )
+    artifact_kind = capability.validator_key or capability.kind or kind_for_path(Path(request.path))
+    return kind_validators.get(artifact_kind, default_validator)
+
+
+def _validator_name_from_contract(validation_contract: dict[str, object] | None) -> str:
+    value = (validation_contract or {}).get("validator")
+    return str(value or "").strip().lower()
 
 
 def _named_validators() -> dict[str, ArtifactValidator]:
@@ -500,6 +523,27 @@ def _validate_generic(path: Path) -> ArtifactAcceptanceReport:
     if finding is not None:
         return _report_with_finding(path, kind_for_path(path), finding)
     return ArtifactAcceptanceReport(ok=True, artifact_ref=str(path), artifact_kind=kind_for_path(path))
+
+
+def binary_signature_finding(path: Path) -> ArtifactFinding | None:
+    expected = {
+        "png": (b"\x89PNG\r\n\x1a\n",),
+        "zip": (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"),
+        "gz": (b"\x1f\x8b",),
+        "gzip": (b"\x1f\x8b",),
+    }.get(kind_for_path(path))
+    if expected is None:
+        return None
+    data = path.read_bytes()[:8]
+    if any(data.startswith(signature) for signature in expected):
+        return None
+    return ArtifactFinding(
+        code="ARTIFACT_INVALID_SIGNATURE",
+        severity="hard",
+        message="Artifact bytes do not match the expected file signature.",
+        location=str(path),
+        value=kind_for_path(path),
+    )
 
 
 def _report_with_finding(path: Path, kind: str, finding: ArtifactFinding) -> ArtifactAcceptanceReport:

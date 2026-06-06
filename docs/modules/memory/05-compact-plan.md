@@ -35,6 +35,10 @@ compact 只做一件事：在上下文压力或显式请求下，把当前 run/t
 - 上下文已经到 compact 阈值且下一步工具会产生正文输出时，本轮工具调用必须登记为
   `CONTEXT_COMPACT_DEFERRED`，并写入普通工具记录，表示“这次没有执行，compact/resume
   后继续”。不能静默 break，也不能设置需要模型主动满足的隐藏 checkpoint 门。
+- 同一模型轮里已经执行了前几个正文工具、随后才达到 compact 阈值时，剩余未执行的正文
+  读取/检索工具也要逐个登记为 `CONTEXT_COMPACT_DEFERRED`。compact 后由
+  `pending_deferred_tool_calls` 续跑这些结构化调用，不能只靠一句“还有几个没执行”的提示
+  让模型自己重造。
 - 即使任务没有 required `full_source_read` 合同，work state 也必须保留已读取的分片范围。
   同一文件的 `read_file`/`read_artifact` 多段读取不能被压成“读过这个文件”一条记录；恢复
   提示要列出已登记范围和下一游标，避免 compact 后从 offset=0 重读或凭摘要猜结论。

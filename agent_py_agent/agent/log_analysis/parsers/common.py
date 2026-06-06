@@ -11,7 +11,14 @@ from typing import Any
 
 DEFAULT_PAYLOAD_MAX_CHARS = 512
 
-SECURITY_ALERT_V1_BASE_KEYS: tuple[str, ...] = ("alert_id", "event_time", "source_id", "source_product")
+SECURITY_ALERT_V1_BASE_KEYS: tuple[str, ...] = (
+    "event_id",
+    "dedup_key",
+    "alert_id",
+    "event_time",
+    "source_id",
+    "source_product",
+)
 
 SECURITY_ALERT_V1_ALERT_KEYS: tuple[str, ...] = (
     "alert_type",
@@ -89,6 +96,8 @@ EXTRA_FIELD_NAME_MAP: dict[str, str] = {
     "告警ID": "alert_id",
     "告警编号": "alert_id",
     "事件ID": "alert_id",
+    "事件去重键": "dedup_key",
+    "去重键": "dedup_key",
     "事件时间": "event_time",
     "告警时间": "event_time",
     "发生时间": "event_time",
@@ -219,8 +228,8 @@ def normalize_security_alert_v1(
     event["parser_confidence"] = parser_confidence(raw_fields, mapping_source)
 
     dedup_hash = event_fingerprint(event)
-    event["dedup_key"] = f"sha256:{dedup_hash}"
-    event["event_id"] = f"evt-{dedup_hash[:24]}"
+    event["dedup_key"] = str(clean_value(event.get("dedup_key")) or f"sha256:{dedup_hash}")
+    event["event_id"] = str(clean_value(event.get("event_id")) or f"evt-{dedup_hash[:24]}")
     return event
 
 

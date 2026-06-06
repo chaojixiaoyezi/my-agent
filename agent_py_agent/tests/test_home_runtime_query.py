@@ -129,6 +129,66 @@ def test_task_workspace_list_reports_corrupt_task_state(tmp_path: Path, capsys):
     assert payload["tasks"][0]["state_load_error"]["path"] == str(paths.state_json)
 
 
+def test_task_workspace_list_ignores_legacy_root_state_json(tmp_path: Path, capsys):
+    home = tmp_path / "home"
+    config_path = _write_config(tmp_path, home)
+    owner_home = home / "owners" / "local" / "main"
+    paths = ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=owner_home,
+            template="tasks/{date}/{task_slug}",
+            task_name="current-task",
+            user_prompt="current",
+            request_id="req-current",
+            run_id="run-current",
+            task_id="current-task",
+            created_at="2026-05-13T01:00:00+00:00",
+        )
+    )
+    legacy_root = owner_home / "tasks" / "2026-05-13" / "legacy-root-task"
+    legacy_root.mkdir(parents=True)
+    (legacy_root / "state.json").write_text(
+        json.dumps({"task_id": "legacy-root-task", "status": "RUNNING"}),
+        encoding="utf-8",
+    )
+
+    code, payload = _run_cli_json(capsys, config_path, "task-workspace-list", "--date", "2026-05-13")
+
+    assert code == 0
+    assert [task["state"]["task_id"] for task in payload["tasks"]] == ["current-task"]
+    assert payload["tasks"][0]["state_path"] == str(paths.state_json)
+
+
+def test_task_workspace_list_ignores_legacy_root_tasks_tree(tmp_path: Path, capsys):
+    home = tmp_path / "home"
+    config_path = _write_config(tmp_path, home)
+    owner_home = home / "owners" / "local" / "main"
+    paths = ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=owner_home,
+            template="tasks/{date}/{task_slug}",
+            task_name="owner-task",
+            user_prompt="owner",
+            request_id="req-owner-current",
+            run_id="run-owner-current",
+            task_id="owner-task",
+            created_at="2026-05-13T01:00:00+00:00",
+        )
+    )
+    legacy_work = home / "tasks" / "2026-05-13" / "legacy-shared-task" / "work"
+    legacy_work.mkdir(parents=True)
+    (legacy_work / "state.json").write_text(
+        json.dumps({"task_id": "legacy-shared-task", "status": "RUNNING"}),
+        encoding="utf-8",
+    )
+
+    code, payload = _run_cli_json(capsys, config_path, "task-workspace-list", "--date", "2026-05-13")
+
+    assert code == 0
+    assert [task["state"]["task_id"] for task in payload["tasks"]] == ["owner-task"]
+    assert payload["tasks"][0]["state_path"] == str(paths.state_json)
+
+
 def test_owner_tool_policy_isolated_per_provider_user(tmp_path: Path):
     home = tmp_path / "home"
     user_a = SimpleAgent(
@@ -179,7 +239,7 @@ def test_memory_resume_reads_home_task_workspace_by_task_id(tmp_path: Path, caps
     agent = SimpleAgent(AgentConfig(my_agent_home=str(home), prompt_files=[]), tmp_path / "workspace")
     paths = ensure_run_workspace(
         EnsureRunWorkspaceRequest(
-            home=agent.home_paths.root,
+            home=agent.home_paths.owner_home_dir,
             template=agent.config.workspace_task_path_template,
             task_name="示例网站 E2E",
             user_prompt="继续示例网站",
@@ -321,8 +381,8 @@ def test_memory_doctor_reports_home_runtime_status(tmp_path: Path, capsys):
     assert payload["home"]["directories"]["memory_daily"]["exists"] is True
     assert payload["home"]["owner"]["tasks"]["exists"] is True
     assert payload["home"]["directories"]["workspace_tasks"]["exists"] is False
-    assert payload["routing"]["index"]["path"] == str(home.resolve() / "memory" / "routing" / "INDEX.md")
-    assert payload["routing"]["route_count"] >= 1
+    assert payload["routing"]["index"]["path"] == str(home.resolve() / "owners" / "local" / "main" / "memory" / "routing" / "INDEX.md")
+    assert payload["routing"]["route_count"] == 0
     assert payload["ok"] is True
 
 
@@ -427,7 +487,7 @@ def test_task_workspace_list_cli_shows_home_tasks(tmp_path: Path, capsys):
     agent = SimpleAgent(AgentConfig(my_agent_home=str(home), prompt_files=[]), tmp_path / "workspace")
     paths = ensure_run_workspace(
         EnsureRunWorkspaceRequest(
-            home=agent.home_paths.root,
+            home=agent.home_paths.owner_home_dir,
             template=agent.config.workspace_task_path_template,
             task_name="调试任务",
             user_prompt="调试",
@@ -472,9 +532,10 @@ def test_run_workspace_creates_v2_task_ledgers(tmp_path: Path):
 
 def test_task_workspace_payload_uses_single_output_name(tmp_path: Path):
     home = tmp_path / "home"
+    agent = SimpleAgent(AgentConfig(my_agent_home=str(home), prompt_files=[]), tmp_path / "workspace")
     paths = ensure_run_workspace(
         EnsureRunWorkspaceRequest(
-            home=home,
+            home=agent.home_paths.owner_home_dir,
             template="tasks/{date}/{task_slug}",
             task_name="目录命名",
             user_prompt="检查目录命名",
@@ -485,7 +546,7 @@ def test_task_workspace_payload_uses_single_output_name(tmp_path: Path):
         )
     )
 
-    items = list_task_workspaces(home, TaskWorkspaceQuery(date_key="2026-05-13"))
+    items = list_task_workspaces(agent.home_paths, TaskWorkspaceQuery(date_key="2026-05-13"))
 
     assert items[0]["output_dir"] == str(paths.output_dir)
     assert "outputs_dir" not in items[0]

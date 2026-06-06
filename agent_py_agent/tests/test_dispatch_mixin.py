@@ -101,8 +101,6 @@ class TestDispatchMixinFailureIntrospection:
         """测试失败自省成功执行。"""
         mixin = SimpleAgentDispatchMixin()
         mixin.subagents = MagicMock()
-        mixin.run = MagicMock()  # FailureIntrospector needs agent.run
-
         # 模拟 load 返回的 task 并设置 attributes
         sample_task.attributes = {}
         mixin.subagents.load.return_value = sample_task
@@ -119,7 +117,7 @@ class TestDispatchMixinFailureIntrospection:
         mock_introspection.confidence = 0.8
         mock_introspector.introspect.return_value = mock_introspection
 
-        with patch('agent_py_agent.agent.agent_core.failure_introspector.FailureIntrospector', return_value=mock_introspector):
+        with patch("agent_py_agent.agent.agent_core.orchestration.dispatch.mixin.FailureIntrospector", return_value=mock_introspector):
             mixin._handle_failure_introspection("test-task-1", sample_task, sample_result)
 
         assert "failure_introspection_data" in sample_task.attributes

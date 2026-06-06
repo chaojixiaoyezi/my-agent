@@ -5,11 +5,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .delivery_contract_fields import string_items
 from .recovery_actions import RecoveryAction
 
 SCHEMA_VERSION = "delivery_contract.v1"
 DOCTOR_SCHEMA_VERSION = "delivery_contract_doctor.v1"
+_NAMED_FIELD_KEYS = ("column_name", "name", "field", "key", "label", "title")
 _ARTIFACT_PATH_KEYS = ("preferred_path", "path")
 _ROOT_LIST_KEYS = ("allowed_output_roots", "search_roots", "artifact_roots")
 _EXTENSION_KEYS = (
@@ -176,7 +176,7 @@ def _validate_validation_contract(value: object, artifact_location: str) -> tupl
     ):
         if key not in value:
             continue
-        items = string_items(value.get(key), allow_named_dict=key == "required_columns")
+        items = _string_items(value.get(key), allow_named_dict=key == "required_columns")
         if not items:
             findings.append(_finding("VALIDATION_CONTRACT_STRING_LIST_INVALID", "hard", f"{artifact_location}.validation_contract.{key}"))
             continue
@@ -279,6 +279,29 @@ def _has_extension_intent(artifact: dict[str, Any]) -> bool:
 
 def _is_nonempty_string_list(value: object) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value)
+
+
+def _string_items(value: object, *, allow_named_dict: bool = False) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = [_string_item(item, allow_named_dict=allow_named_dict) for item in value]
+    return [item for item in items if item]
+
+
+def _string_item(value: object, *, allow_named_dict: bool) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not allow_named_dict or not isinstance(value, dict):
+        return ""
+    return _named_string_item(value)
+
+
+def _named_string_item(value: dict[str, Any]) -> str:
+    for key in _NAMED_FIELD_KEYS:
+        item = str(value.get(key) or "").strip()
+        if item:
+            return item
+    return ""
 
 
 def _extension_value(value: object) -> bool:

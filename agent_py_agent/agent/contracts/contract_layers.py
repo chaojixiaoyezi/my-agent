@@ -19,8 +19,6 @@ _FORMAT_VALIDATOR_NAMES = {
     "artifact_collection_contract",
     "artifact_collection_evidence",
     "artifact_collection_mapping",
-    "artifact_validator_registry",
-    "main_agent_real_task_acceptance",
     "main_agent_task_acceptance",
 }
 _OFFLINE_PREFIXES = (
@@ -28,7 +26,6 @@ _OFFLINE_PREFIXES = (
     "failure_sample",
     "live_llm_fake_tool",
     "llm_activation",
-    "shadow_mode",
     "dry_run_mainline",
     "real_tool_dry_run",
 )

@@ -67,7 +67,7 @@ def test_workflow_auto_mode_spawns_worker_children(tmp_path):
     assert len(children) == 3
     assert {child.workflow_phase_id for child in children} == {"design_contract", "implementation", "tests"}
     assert all(child.parent_id == loaded.id for child in children)
-    assert all(child.agent_name.startswith("小小傻妞-") for child in children)
+    assert {child.agent_name for child in children} == {"design_contract", "implementation", "tests"}
     assert all(not hasattr(child, "workflow_depends_on") for child in children)
 
 

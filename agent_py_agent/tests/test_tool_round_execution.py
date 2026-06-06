@@ -92,9 +92,43 @@ def test_tool_round_can_defer_excess_model_tool_calls_to_next_round():
     assert any("只处理到前 2 个" in str(item) and "剩余 3 个没有执行" in str(item) for item in params.tool_context)
 
 
+def test_tool_round_does_not_limit_model_tool_calls_by_default():
+    calls = [{"tool": "read_file", "path": f"/tmp/source-{idx}.md"} for idx in range(4)]
+    executed: list[str] = []
+    params = SimpleNamespace(
+        task_attributes={},
+        tool_context=[],
+    )
+
+    def execute_one(request):
+        path = str(request.payload["path"])
+        executed.append(path)
+        return ToolExecutionResult("read_file", True, f"read {path}")
+
+    def record_one(record):
+        record.params.tool_context.append(f"[tool-record]\n{record.result.output}")
+
+    completed = execute_tool_round(
+        ToolRoundExecutionRequest(
+            agent=SimpleNamespace(config=SimpleNamespace(max_tool_calls_per_round=None)),
+            params=params,
+            tool_rounds=1,
+            response=ModelResponse(text="tool round", backend="test"),
+            calls=calls,
+            execute_one=execute_one,
+            record_one=record_one,
+        )
+    )
+
+    assert completed is False
+    assert executed == ["/tmp/source-0.md", "/tmp/source-1.md", "/tmp/source-2.md", "/tmp/source-3.md"]
+    assert not any("剩余" in str(item) and "没有执行" in str(item) for item in params.tool_context)
+
+
 def test_tool_round_stops_batch_when_new_tool_context_crosses_compact_budget():
     calls = [{"tool": "read_file", "path": f"fragment-{idx}.md"} for idx in range(10)]
     executed: list[str] = []
+    records: list[tuple[str, bool, str]] = []
     params = SimpleNamespace(
         task_attributes={},
         tool_context=[],
@@ -110,6 +144,13 @@ def test_tool_round_stops_batch_when_new_tool_context_crosses_compact_budget():
         return ToolExecutionResult("read_file", True, "片段正文" * 40)
 
     def record_one(record):
+        records.append(
+            (
+                str(record.payload.get("path") or ""),
+                bool(record.result.ok),
+                str(record.result.error_code or ""),
+            )
+        )
         record.params.tool_context.append(
             f"[tool-record round={record.tool_rounds} index={record.idx}]\n{record.result.output}"
         )
@@ -128,7 +169,11 @@ def test_tool_round_stops_batch_when_new_tool_context_crosses_compact_budget():
     )
 
     assert 0 < len(executed) < len(calls)
+    deferred = [item for item in records if item[2] == "CONTEXT_COMPACT_DEFERRED"]
+    assert len(deferred) == len(calls) - len(executed)
+    assert all(item[0].startswith("fragment-") and item[1] is False for item in deferred)
     assert any("剩余" in str(item) and "没有执行" in str(item) for item in params.tool_context)
+    assert any("已登记为 CONTEXT_COMPACT_DEFERRED" in str(item) for item in params.tool_context)
 
 
 def test_tool_round_records_deferred_content_tool_when_context_needs_compact():

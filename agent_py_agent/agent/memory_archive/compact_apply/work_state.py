@@ -4,7 +4,6 @@ from __future__ import annotations
 """work-state snapshot helpers for compact apply."""
 
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,10 +16,6 @@ from ..schema import (
 )
 
 COMPACT_WORK_STATE_SNAPSHOT_SCHEMA = RuntimeMemorySchemaOptions("compact_work_state_snapshot")
-CHAR_WINDOW_RE = re.compile(r"\[char-window offset=(\d+) chars=(\d+) total_chars=(\d+)\]")
-NEXT_START_LINE_RE = re.compile(r"next_start_line=(\d+)")
-TOTAL_LINES_RE = re.compile(r"total_lines=(\d+)")
-LINE_NUMBER_RE = re.compile(r"^(\d+):\s", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -249,26 +244,64 @@ def _read_cursor_fields(ref: dict[str, Any], parameters: dict[str, Any]) -> dict
         "start_line": _optional_int(parameters.get("start_line")),
         "end_line": _optional_int(parameters.get("end_line")),
     }
-    content = _artifact_content(ref.get("path") or ref.get("artifact_ref"))
-    if window := _char_window_from_content(content):
-        offset, next_offset, total_chars = window
+    window = _read_window_from_ref(ref)
+    if window.get("kind") == "char_window":
+        offset = int(window["offset"])
+        next_offset = int(window["next_offset"])
+        total_chars = int(window["total_chars"])
         fields["offset"] = offset
-        fields["chars"] = next_offset - offset
+        fields["chars"] = int(window.get("chars") or max(0, next_offset - offset))
         fields["next_offset"] = next_offset
         fields["total_chars"] = total_chars
         fields["max_chars"] = fields["max_chars"] or next_offset - offset
-    elif fields["max_chars"]:
+    elif window.get("kind") == "line_window":
+        fields["start_line"] = int(window["start_line"])
+        fields["end_line"] = int(window["end_line"])
+        fields["next_start_line"] = int(window.get("next_start_line") or 0)
+        fields["total_lines"] = int(window["total_lines"])
+    if not fields.get("next_offset") and fields["max_chars"]:
         if fields["offset"] is None and fields["start_line"] is None and fields["end_line"] is None:
             fields["offset"] = 0
         if fields["offset"] is not None:
             fields["next_offset"] = int(fields["offset"]) + int(fields["max_chars"])
-    if line_window := _line_window_from_content(content, parameters):
-        start_line, end_line, total_lines = line_window
-        fields["start_line"] = start_line
-        fields["end_line"] = end_line
-        fields["next_start_line"] = end_line + 1
-        fields["total_lines"] = total_lines
     return {key: value for key, value in fields.items() if value is not None}
+
+
+def _read_window_from_ref(ref: dict[str, Any]) -> dict[str, Any]:
+    window = ref.get("read_window")
+    if not isinstance(window, dict):
+        envelope = ref.get("tool_result_envelope")
+        window = envelope.get("read_window") if isinstance(envelope, dict) else {}
+    if not isinstance(window, dict):
+        return {}
+    kind = str(window.get("kind") or "").strip()
+    if kind == "char_window":
+        offset = _optional_int(window.get("offset"))
+        next_offset = _optional_int(window.get("next_offset"))
+        total_chars = _optional_int(window.get("total_chars"))
+        if offset is None or next_offset is None or total_chars is None:
+            return {}
+        return {
+            "kind": kind,
+            "offset": offset,
+            "chars": _optional_int(window.get("chars")) or max(0, next_offset - offset),
+            "next_offset": next_offset,
+            "total_chars": total_chars,
+        }
+    if kind == "line_window":
+        start_line = _optional_int(window.get("start_line"))
+        end_line = _optional_int(window.get("end_line"))
+        total_lines = _optional_int(window.get("total_lines"))
+        if start_line is None or end_line is None or total_lines is None:
+            return {}
+        return {
+            "kind": kind,
+            "start_line": start_line,
+            "end_line": end_line,
+            "next_start_line": _optional_int(window.get("next_start_line")) or 0,
+            "total_lines": total_lines,
+        }
+    return {}
 
 
 def _tool_read_files_from_progress(progress: list[dict[str, Any]]) -> list[str]:
@@ -533,62 +566,6 @@ def _optional_int(value: object) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _char_window_from_content(content: str) -> tuple[int, int, int] | None:
-    match = CHAR_WINDOW_RE.search(content)
-    if not match:
-        return None
-    offset, chars, total = (int(item) for item in match.groups())
-    return (offset, offset + chars, total)
-
-
-def _line_window_from_content(content: str, parameters: dict[str, Any]) -> tuple[int, int, int] | None:
-    if not content:
-        return None
-    line_numbers = [int(match.group(1)) for match in LINE_NUMBER_RE.finditer(content)]
-    explicit_start = _optional_int(parameters.get("start_line")) or 0
-    explicit_end = _optional_int(parameters.get("end_line")) or 0
-    next_start = _regex_int(NEXT_START_LINE_RE, content)
-    total = _regex_int(TOTAL_LINES_RE, content)
-    if total <= 0 or not (line_numbers or explicit_start or explicit_end or next_start):
-        return None
-    start = line_numbers[0] if line_numbers else (explicit_start or 1)
-    end = line_numbers[-1] if line_numbers else explicit_end
-    if next_start:
-        end = min(end or next_start - 1, next_start - 1)
-    if explicit_end and not next_start:
-        end = min(end or explicit_end, explicit_end)
-    if end < start:
-        return None
-    return (start, end, total)
-
-
-def _regex_int(pattern: re.Pattern[str], content: str) -> int:
-    match = pattern.search(content)
-    if not match:
-        return 0
-    try:
-        return int(match.group(1))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _artifact_content(value: object) -> str:
-    text = str(value or "").strip()
-    if not text or "://" in text:
-        return ""
-    try:
-        payload = json.loads(Path(text).expanduser().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ""
-    if not isinstance(payload, dict):
-        return ""
-    for key in ("content", "output", "text", "result", "output_preview"):
-        item = payload.get(key)
-        if isinstance(item, str):
-            return item
-    return ""
 
 
 def _work_state_restore_refs(paths: dict[str, Path], restore_refs: dict[str, Any]) -> dict[str, Any]:

@@ -9,21 +9,41 @@ from pathlib import Path
 from typing import Any
 
 from ..common.value_parsing import StringListOptions, string_list
-from .role_template_resolution import resolve_role_template_id
-from .role_template_tools import (
-    ARTIFACT_BUILDER_TOOLS,
-    CAPABILITY_REQUEST_TOOL,
-    COORDINATOR_TOOLS,
-    READ_ONLY_TOOLS,
-    REPORT_WRITE_TOOLS,
-    ROLE_BASE_TOOLS,
-    WEB_TOOLS,
-    WORKER_READ_TOOLS,
-    WORKER_WRITE_TOOLS,
-)
 
 _ROLE_TEMPLATE_LIST_OPTIONS = StringListOptions(split_commas=True)
 ROLE_TEMPLATE_ATTRIBUTE_KEY = "role_template"
+WEB_TOOLS = ["web_search", "web_fetch"]
+READ_ONLY_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", *WEB_TOOLS]
+WORKER_READ_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", *WEB_TOOLS]
+ARTIFACT_BUILDER_TOOLS: list[str] = []
+WORKER_WRITE_TOOLS = ["write_file", "apply_patch"]
+REPORT_WRITE_TOOLS = ["write_file", "apply_patch"]
+SHELL_TOOL = "run_command"
+CAPABILITY_REQUEST_TOOL = "capability_request"
+MAIN_EVENT_TOOLS = ["raise_event"]
+COLLABORATION_TOOLS = [
+    "raise_collaboration",
+    "inspect_collaboration",
+    "submit_collaboration_result",
+    "update_collaboration",
+]
+ROLE_BASE_TOOLS = [
+    *READ_ONLY_TOOLS,
+    *REPORT_WRITE_TOOLS,
+    SHELL_TOOL,
+    "inspect_agent_tree",
+    *MAIN_EVENT_TOOLS,
+    *COLLABORATION_TOOLS,
+    CAPABILITY_REQUEST_TOOL,
+]
+COORDINATOR_TOOLS = [
+    "schedule_child_subagents",
+    "dispatch_subagents",
+    "wait",
+    "inspect_agent_tree",
+    "send_guidance",
+    *ROLE_BASE_TOOLS,
+]
 
 
 @dataclass(frozen=True)
@@ -152,6 +172,41 @@ def role_template_id_for_role(
 ) -> str:
     store = load_role_template_store(user_template_dir=user_template_dir)
     return resolve_role_template_id(store, role, default_id=default_id)
+
+
+def resolve_role_template_id(store: Any, role: str, *, default_id: str | None = None) -> str:
+    cleaned = _clean_id(role)
+    if not cleaned:
+        return _valid_template_default(store, default_id)
+    exact = store.get(cleaned)
+    if exact is not None:
+        return exact.id
+    match = _best_template_id_match(store, cleaned)
+    if match:
+        return match
+    return _valid_template_default(store, default_id)
+
+
+def _best_template_id_match(store: Any, cleaned_role: str) -> str:
+    matches = [
+        template.id
+        for template in store.all()
+        if _contains_template_token(cleaned_role, template.id)
+    ]
+    return max(matches, key=len, default="")
+
+
+def _contains_template_token(cleaned_role: str, template_id: str) -> bool:
+    haystack = f"_{cleaned_role}_"
+    needle = f"_{_clean_id(template_id)}_"
+    return needle in haystack
+
+
+def _valid_template_default(store: Any, default_id: str | None) -> str:
+    cleaned = _clean_id(default_id)
+    if cleaned and store.get(cleaned):
+        return cleaned
+    return ""
 
 
 def role_template_index_text(

@@ -69,7 +69,7 @@ from .agent_core.runner.prompts import (
 )
 from .agent_core.runtime.owner_roots import runtime_owner_root
 from .backends import get_backend
-from .capability.runtime_config import default_capability_config_path
+from .capability.runtime_config_reload import default_capability_config_path
 from .collaboration import (
     CollaborationStore,
     InspectCollaborationTool,

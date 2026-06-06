@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 from ....runtime_errors import runtime_error_report
-from ....subagents.services.hierarchy.qa_scheduler import qa_orchestration_advice
+from ....subagents.services.hierarchy.qa_scheduler import (
+    qa_orchestration_advice,
+    quality_advice_payload,
+)
 from ....subagents.services.recovery.modes import is_rerun_mode
 from ....subagents.services.recovery.strategy import (
     SubagentRecoveryStrategyRequest,
     build_subagent_recovery_strategy,
 )
 from ...runner.context import current_subagent_run_id
-from ..quality_advice_payload import quality_advice_payload
 from ..quality_payload import quality_repair_advice_payload
 from ..recovery_batches import (
     recovery_batches_from_strategies,

@@ -98,19 +98,7 @@ def _task_state_files(paths: MyAgentHomePaths, date_key: str | None) -> list[Pat
 
 def _task_workspace_roots(paths: MyAgentHomePaths) -> tuple[Path, ...]:
     owner_tasks = getattr(paths, "owner_tasks_dir", None)
-    roots = [Path(owner_tasks)] if owner_tasks else []
-    if _is_local_main_owner(paths):
-        roots.append(paths.root / "tasks")
-        roots.append(paths.workspace_tasks_dir)
-    return tuple(dict.fromkeys(roots))
-
-
-def _is_local_main_owner(paths: MyAgentHomePaths) -> bool:
-    return (
-        str(getattr(paths, "owner_provider", "") or "local") == "local"
-        and str(getattr(paths, "owner_kind", "") or "main") == "main"
-        and str(getattr(paths, "owner_id", "") or "local/main") == "local/main"
-    )
+    return (Path(owner_tasks),) if owner_tasks else ()
 
 
 def _task_state_files_under(root: Path, date_key: str | None) -> list[Path]:
@@ -122,18 +110,17 @@ def _task_state_files_under(root: Path, date_key: str | None) -> list[Path]:
         if not date_dir.exists():
             continue
         state_files.extend(sorted(date_dir.glob("*/work/state.json"), reverse=True))
-        state_files.extend(sorted(date_dir.glob("*/state.json"), reverse=True))
     return state_files
 
 
 def _task_workspace_payload(state_path: Path) -> dict[str, Any]:
-    root = state_path.parent.parent if state_path.parent.name == "work" else state_path.parent
+    root = state_path.parent.parent
     work = root / "work"
     state_report = read_json_object_report(state_path, context="home_runtime_query.task_state")
     workspace_path = work / "run_workspace.json"
     workspace_report = read_json_object_report(workspace_path, context="home_runtime_query.run_workspace")
-    timeline = work / "timeline.jsonl" if (work / "timeline.jsonl").exists() else root / "timeline.jsonl"
-    compact_root = work / "compact" if (work / "compact").exists() else root / "compact"
+    timeline = work / "timeline.jsonl"
+    compact_root = work / "compact"
     state_payload = (
         state_report.payload
         if state_report.load_error
@@ -147,7 +134,7 @@ def _task_workspace_payload(state_path: Path) -> dict[str, Any]:
         "state_path": str(state_path),
         "workspace_path": str(workspace_path),
         "timeline_path": str(timeline),
-        "task_yaml_path": str(work / "task.yaml" if (work / "task.yaml").exists() else root / "task.yaml"),
+        "task_yaml_path": str(work / "task.yaml"),
         "output_dir": str(root / "output"),
         "work_dir": str(work),
         "runtime_dir": str(work / "runtime"),

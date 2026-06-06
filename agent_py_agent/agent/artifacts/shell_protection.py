@@ -16,7 +16,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_py_agent.agent.contracts.artifact_format_lint import lint_artifact_format
+from agent_py_agent.agent.contracts.artifact_acceptance import (
+    ArtifactAcceptanceRequest,
+    validate_artifact,
+)
 
 from .registry import ArtifactRegistration, latest_artifact_records, register_artifact
 
@@ -163,7 +166,7 @@ def _post_shell_status(
         return "unchanged", []
     if path.stat().st_size == 0:
         return "invalid_after_shell", [{"code": "ARTIFACT_EMPTY_AFTER_SHELL", "message": "artifact is empty"}]
-    report = lint_artifact_format(path=path, workspace_root=workspace_root)
+    report = validate_artifact(ArtifactAcceptanceRequest(path=path, workspace_root=workspace_root))
     findings = [_finding_to_dict(finding) for finding in report.findings]
     return ("changed_ready" if report.ok else "invalid_after_shell", findings)
 

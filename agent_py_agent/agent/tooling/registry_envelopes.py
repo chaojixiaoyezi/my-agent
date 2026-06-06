@@ -55,7 +55,8 @@ def attach_result_envelope(
     if envelope is None:
         return result
     result.call_id = envelope.call_id
-    result.result_envelope = ToolCallResultEnvelope(
+    existing = dict(result.result_envelope) if isinstance(result.result_envelope, dict) else {}
+    protocol_payload = ToolCallResultEnvelope(
         call_id=envelope.call_id,
         tool=result.tool,
         ok=result.ok,
@@ -66,6 +67,7 @@ def attach_result_envelope(
         source=envelope.source,
         action_created_at=envelope.created_at,
     ).to_dict()
+    result.result_envelope = {**existing, **protocol_payload}
     result.result_envelope["tool_protocol_v2"] = _tool_protocol_v2_payload(result, envelope)
     if not result.ok:
         result.result_envelope.update(_error_contract_payload(result))

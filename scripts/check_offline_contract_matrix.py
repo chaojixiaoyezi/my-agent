@@ -121,14 +121,6 @@ REQUIRED_AREAS = {
         "agent_py_agent/agent/contracts/real_tool_dry_run_contract.py",
         "agent_py_agent/tests/test_real_tool_dry_run_contract.py",
     ),
-    "shadow_mode": (
-        "agent_py_agent/agent/contracts/shadow_mode_contract.py",
-        "agent_py_agent/tests/test_shadow_mode_contract.py",
-    ),
-    "shadow_mode_runtime": (
-        "agent_py_agent/agent/contracts/shadow_mode_runtime_contract.py",
-        "agent_py_agent/tests/test_shadow_mode_runtime_contract.py",
-    ),
     "task_tree_ledger": (
         "agent_py_agent/agent/contracts/task_tree_ledger_contract.py",
         "agent_py_agent/tests/test_task_tree_ledger_contract.py",

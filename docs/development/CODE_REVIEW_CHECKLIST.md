@@ -45,8 +45,8 @@ risk reduction over formalism.
 
 ## 4. File Writing / 文件写入
 
-- [ ] **Write boundary** — all writes go through `safe_write()` or a repository,
-      not `Path.write_text()`.
+- [ ] **Write boundary** — durable writes go through a repository, common JSON/text writer,
+      or current write-boundary tool, not ad hoc `Path.write_text()`.
 - [ ] **No path traversal** — user-supplied paths are validated against workspace root.
 - [ ] **No system path writes** — no writes to `/etc`, `/usr`, `/var`, `/tmp`.
 - [ ] **Atomic writes** — durable writes use the temp + fsync + `os.replace` pattern.

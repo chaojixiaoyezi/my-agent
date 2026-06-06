@@ -221,6 +221,33 @@ class TestHttpRequestValidation:
         assert result.error_code == "NETWORK_ALWAYS_BLOCKED_IP"
         mock_urlopen.assert_not_called()
 
+    @patch("urllib.request.urlopen")
+    def test_web_fetch_env_private_resolution_requires_explicit_true(self, mock_urlopen, monkeypatch):
+        """私网解析放行的 env 开关只接受明确 true/1，不接受 yes/on 这类普通词。"""
+        from agent_py_agent.agent.tooling.web import WebFetchTool
+
+        monkeypatch.setenv("MY_AGENT_ALLOW_PRIVATE_URLS", "on")
+        tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_private_resolver)
+        blocked = tool.execute({"url": "https://api.public.example.test/items"})
+
+        assert blocked.ok is False
+        assert blocked.error_code == "NETWORK_PRIVATE_IP_BLOCKED"
+        mock_urlopen.assert_not_called()
+
+        monkeypatch.setenv("MY_AGENT_ALLOW_PRIVATE_URLS", "true")
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {"Content-Type": "text/plain"}
+        mock_response.read.return_value = b"ok"
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        allowed = tool.execute({"url": "https://api.public.example.test/items"})
+
+        assert allowed.ok is True
+        mock_urlopen.assert_called_once()
+
     def test_web_fetch_header_name_invalid(self, tmp_path: Path):
         """无效请求头名称被拒绝。"""
         from agent_py_agent.agent.tooling.web import WebFetchTool
@@ -255,4 +282,3 @@ class TestHttpRequestValidation:
 
         assert result.ok is False
         assert "HTTP 500" in result.output
-

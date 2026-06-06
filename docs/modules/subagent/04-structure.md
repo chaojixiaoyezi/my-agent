@@ -39,6 +39,8 @@ SimpleAgent orchestration tool
 - 用户最终交付：主代理汇总后写当前 task `output/`，或用户显式指定的输出目录。
 - owner projection：`owner_home/agents/<run_id>/` 只保存 refs，用于 tree、compact、恢复和跨 session 查找。
 - task rollup：`work/compact/task_rollup.json` 汇总子代理状态和 refs，父代理恢复时先读这里。
+- `agent_name` 是展示名，不是层级或角色事实。默认展示名使用 `agent-d<depth>-<role>-<index>`；
+  深度、权限、模板和状态仍只读结构化字段，不能从显示名、中文叫法或英文别名里反推。
 
 ## Services
 

@@ -240,7 +240,7 @@ def _route_card_payload(hit: CapabilitySearchHit) -> dict[str, str]:
     }
 def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
     status = parsed.status.upper().strip()
-    if parsed.capability_requests or parsed.blocked_reason:
+    if parsed.capability_requests:
         return "BLOCKED"
     if is_pending_capability_status(status):
         return "BLOCKED"

@@ -1,6 +1,6 @@
-"""policy_checks 模块测试。
+"""subagent policy status/action mapping tests.
 
-测试 policy_checks.py 中的纯策略函数：
+测试 policies.py 中的纯策略函数：
 _status_from_structured_output、_verification_from_runner_status、_runner_next_action 等。
 """
 from __future__ import annotations
@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentParsedOutput
-from agent_py_agent.agent.subagents.policy_checks import (
+from agent_py_agent.agent.subagents.policies import (
     RunnerNextActionParams,
     _action_for_issue,
     _commands_for_action,
@@ -41,14 +41,14 @@ def test_status_from_structured_output_blocked_by_capability():
     assert _status_from_structured_output(parsed) == "BLOCKED"
 
 
-def test_status_from_structured_output_blocked_by_reason():
-    """测试有 blocked_reason 时变成 BLOCKED。"""
+def test_status_from_structured_output_blocked_reason_does_not_override_status():
+    """blocked_reason is explanatory text; status remains the structured authority."""
     parsed = SubAgentParsedOutput(
-        status="RUNNING",
+        status="DONE",
         capability_requests=[],
         blocked_reason="等待资源",
     )
-    assert _status_from_structured_output(parsed) == "BLOCKED"
+    assert _status_from_structured_output(parsed) == "DONE"
 
 
 def test_status_from_structured_output_preserves_fail_states():

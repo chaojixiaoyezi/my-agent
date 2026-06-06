@@ -1,5 +1,20 @@
 # Memory Progress
 
+## 2026-06-07 恢复模式结构化边界
+
+- 长 `write_file.content` 流式中断由 tool-stream 边界写结构化
+  `source_tool`、`path`、`content_field_present`、`streaming_content_*`
+  字段；后续 long content recovery 只读取这些字段。
+- parse error 的 `raw` 和工具错误正文只保留为诊断/展示文本，不再用正则从里面猜
+  `tool/path/content` 来触发恢复模式，避免恢复流转依赖未解析正文或自然语言提示。
+- 普通 `write_file` 失败输出里提到 “inline content 过长” 也不会单独触发机器恢复；
+  要触发恢复必须由上游工具/流边界提供结构化错误码和字段。
+- compact/resume 不再根据 `memory-resume`、`LocalStore`、`restore_refs` 等文本片段过滤
+  `next_action` / `next_actions`；机器续接优先级只由结构化 read coverage、cursor、
+  `resume_focus` 和 work_state 字段决定。
+- 主代理 task workspace 复用只认当前 `work/run_workspace.json`；`work/task.yaml` 是可读说明，
+  不再作为旧目录身份兜底。
+
 ## 2026-06-06 Compact 事实源收敛
 
 - compact/resume 的 read cursor 只认当前工具记录的结构化成功事实：`ok: true`，或无错误且
@@ -8,6 +23,9 @@
   避免 compact 后把未收口任务误恢复成已完成。
 - raw archive 工具布尔只接受真正 bool 或机器布尔字面量 `true/false/1/0`；`success/error/ok`
   这类状态词不再变成工具成功/失败事实。
+- task progress 的 items、coverage 和 soft quality hints 已收回 `task_progress.py` 单入口。
+  进度状态只认结构化 `pending/in_progress/done/skipped/blocked`；未知值保留为普通状态文本并归入
+  `other`，不会被多语言自然词猜成已完成或阻塞。
 
 ## 2026-06-04 收敛
 

@@ -22,7 +22,6 @@ from .persistence.model_normalizers import (
     _normalize_context_packs,
     _normalize_quality_contract,
 )
-from .runtime_config_scope import apply_config_overlay_ref, runtime_config_scope
 
 if TYPE_CHECKING:
     from ..models import ContextManifest, QualityContract, SubAgentCard
@@ -127,6 +126,42 @@ def _memory_scope(task: Any, params: CreateRunParams) -> dict[str, object]:
         "delete_after_days": _nonnegative_int(params.memory_delete_after_days),
         "destroy_summary_required": bool(params.destroy_summary_required),
         "auto_promote_to_parent_memory": False,
+    }
+
+
+def apply_config_overlay_ref(task: Any, params: CreateRunParams, *, parent_task: Any | None) -> None:
+    attrs = params.attributes if isinstance(params.attributes, dict) else {}
+    explicit = str(attrs.get("config_overlay_ref") or attrs.get("runtime_config_overlay_ref") or "").strip()
+    inherited = inherited_config_overlay_ref(params, parent_task=parent_task)
+    overlay_ref = explicit or inherited
+    if overlay_ref:
+        task.runtime_identity.config_overlay_ref = overlay_ref
+    scope = str(attrs.get("config_scope") or attrs.get("runtime_config_scope") or "").strip()
+    if scope:
+        task.runtime_identity.config_scope = scope
+    elif overlay_ref:
+        task.runtime_identity.config_scope = "run"
+
+
+def inherited_config_overlay_ref(params: CreateRunParams, *, parent_task: Any | None) -> str:
+    parent_id = str(params.parent_id or "").strip()
+    if not parent_id or parent_task is None:
+        return ""
+    attrs = params.attributes if isinstance(params.attributes, dict) else {}
+    if attrs.get("inherit_config_overlay_ref") is False:
+        return ""
+    identity = getattr(parent_task, "runtime_identity", None)
+    return str(attrs.get("parent_config_overlay_ref") or getattr(identity, "config_overlay_ref", "") or "").strip()
+
+
+def runtime_config_scope(task: Any) -> dict[str, object]:
+    identity = task.runtime_identity
+    return {
+        "schema_version": "runtime_config_scope.v1",
+        "scope": identity.config_scope or "run_override",
+        "overlay_ref": identity.config_overlay_ref,
+        "promotion_policy": identity.config_promotion_policy,
+        "loaded_as": "run_layer" if identity.config_overlay_ref else "base_config",
     }
 
 
@@ -238,6 +273,10 @@ class SubAgentBaseService:
         workflow_plan_dict = prepared["workflow_plan_dict"]
 
         parent_task = _load_parent_task(self.manager, params.parent_id)
+        task_attrs = {
+            **dict(params.attributes or {}),
+            **_manager_workspace_attrs(self.manager),
+        }
         task = SubAgentTask(
             id=run_id,
             goal=params.goal,
@@ -269,7 +308,7 @@ class SubAgentBaseService:
             workflow_mode=prepared["normalized_workflow_mode"],
             workflow_template_id=str((workflow_plan_dict or {}).get("selected_template_id") or ""),
             workflow_plan=workflow_plan_dict or {},
-            attributes=dict(params.attributes or {}),
+            attributes=task_attrs,
             **prepared["paths"],
         )
         _apply_runtime_identity_and_memory_scope(task, params, parent_task=parent_task)
@@ -337,3 +376,14 @@ class SubAgentBaseService:
         self.manager.save(task)
         self.manager._write_takeover_file(task, record)
         return record
+
+
+def _manager_workspace_attrs(manager: Any) -> dict[str, object]:
+    root = getattr(manager, "workspace_root", None)
+    roots = getattr(manager, "workspace_roots", None)
+    attrs: dict[str, object] = {}
+    if root:
+        attrs["workspace_root"] = str(root)
+    if isinstance(roots, list):
+        attrs["workspace_roots"] = [str(item) for item in roots if str(item or "").strip()]
+    return attrs

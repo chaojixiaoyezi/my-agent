@@ -207,8 +207,8 @@ before changing code.
 
 ## 7. Write Boundary / 写入边界
 
-- All file writes must go through a repository or the write-boundary utility
-  (`tooling/filesystem.py`).  Business code must **not** call `Path.write_text()` or
+- All file writes must go through a repository, common JSON/text writer, or the current
+  write-boundary implementation (`agent.tooling._filesystem_write`).  Business code must **not** call `Path.write_text()` or
   `open(..., "w")` directly.
 - The write boundary no longer treats `workspace_root` as the only valid output
   location.  `workspace_root` is the default cwd and relative-path base; ordinary
@@ -399,6 +399,11 @@ before changing code.
 - If a feature needs a new hard requirement, add a structured field/schema first,
   document it, and add a regression that proves the same natural-language phrase
   alone does not trigger the hard behavior.
+- Tool-call validity is a structured contract, not a prompt convention. Model-facing
+  examples must use real top-level fields from a real tool; placeholder keys such
+  as `parameter_name` are forbidden. The registry must reject unknown top-level
+  tool parameters with `TOOL_INVALID_ARGUMENTS` unless the field is declared as an
+  internal, non-rendered parameter for CLI/test/runtime plumbing.
 
 ---
 
@@ -525,6 +530,11 @@ do_write()
   focused tests for touched areas, full pytest when feasible, ruff, doc sync,
   strict code-size, and `git diff --check`. If not pushing remote, use the
   smaller local checklist appropriate to the change risk.
+- Do not push small cleanup slices to remote `main` just because combined churn
+  is large. A remote push is allowed only when the current diff has more than
+  5000 insertions or more than 5000 deletions as separate counters; additions
+  and deletions must not be added together to meet this threshold. User
+  overrides and urgent fixes still require the strict remote-submit profile.
 - Runtime, memory, compact, tool, orchestration, contract, or subagent behavior
   changes must update the matching project docs in the same patch. Do not leave
   behavior changes only in code or tests; future agents use the docs to avoid
@@ -737,6 +747,9 @@ do_write()
 - Behavior defaults belong in config. Bootstrap code, parser help text, and
   tests may repeat defaults only when they mirror YAML and cannot become a
   second independent policy source.
+- Security-sensitive env/config switches must prefer explicit machine tokens
+  such as `true/false` or `1/0`. Do not let everyday words such as `yes` or
+  `on` widen network, filesystem, or execution boundaries.
 - Config fields that are intentionally internal do not need frontend exposure
   yet, but they still belong in backend config if changing them affects
   runtime behavior. User-facing frontend config should later read these backend

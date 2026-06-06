@@ -19,7 +19,7 @@ def unresolved_runtime_issue_context(params: object, redirects: int) -> str:
     envelope = {
         "unresolved_runtime_issues": issues[:8],
         "repair_attempt": redirects + 1,
-        "required_next_action": "repair_revalidate_or_report_real_blocker",
+        "suggested_next_action": "repair_revalidate_or_report_real_blocker",
         "final_response_allowed": False,
         "suggested_rework": [
             "先定位失败工具、失败 target 和 blocker_codes。",

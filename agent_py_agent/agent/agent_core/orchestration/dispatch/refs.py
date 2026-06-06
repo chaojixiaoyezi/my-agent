@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from ....model_visible_refs import current_model_ref, current_model_ref_list, current_model_text
 from ....runtime_errors import runtime_error_report
-from .load_errors import load_task_result, task_load_error_row
+
+
+@dataclass(frozen=True)
+class _TaskLoadResult:
+    task: object
+    error: BaseException | None = None
 
 
 def related_task_refs(agent: object, report: object, attr: str, *, limit: int = 20) -> list[str]:
@@ -28,9 +34,9 @@ def related_task_result_refs(agent: object, report: object, *, per_run_artifact_
         if list_error:
             rows.append(_list_runs_error_row(list_error))
     for run_id in run_ids:
-        loaded = load_task_result(agent, run_id)
+        loaded = _load_task_result(agent, run_id)
         if loaded.error:
-            rows.append(task_load_error_row(run_id, loaded.error))
+            rows.append(_task_load_error_row(run_id, loaded.error))
             continue
         if not _has_task_identity(loaded.task, run_id):
             continue
@@ -69,6 +75,25 @@ def _list_runs_error_row(exc: BaseException) -> dict[str, object]:
         "primary_artifact_summaries": [],
         "evidence_refs": [],
         "load_error": runtime_error_report(exc, context="subagents.list_runs"),
+    }
+
+def _load_task_result(agent: object, run_id: str) -> _TaskLoadResult:
+    try:
+        return _TaskLoadResult(agent.subagents.load(run_id))
+    except Exception as exc:
+        return _TaskLoadResult(object(), exc)
+
+def _task_load_error_row(run_id: str, exc: BaseException) -> dict[str, object]:
+    return {
+        "run_id": str(run_id or ""),
+        "status": "LOAD_FAILED",
+        "summary": "子代理账本读取失败；这不是子代理无产物。",
+        "primary_artifact_ids": [],
+        "primary_artifact_refs": [],
+        "primary_artifact_registry_refs": [],
+        "primary_artifact_summaries": [],
+        "evidence_refs": [],
+        "load_error": runtime_error_report(exc, context="subagents.load"),
     }
 
 def _task_sort_key(task: object) -> tuple[int, float, str]:

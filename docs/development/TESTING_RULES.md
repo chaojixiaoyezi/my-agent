@@ -72,8 +72,8 @@ Recommended subdirectories for the contract-driven main-agent workflow:
 # CORRECT
 def test_write_something(tmp_path):
     target = tmp_path / "output.json"
-    safe_write(target, '{"key": "value"}')
-    assert target.read_text() == '{"key": "value"}'
+    write_json_object(target, {"key": "value"})
+    assert json.loads(target.read_text()) == {"key": "value"}
 
 # WRONG -- writes to project directory
 def test_write_something():
@@ -148,6 +148,10 @@ strict local gate below. This rule still applies when GitHub Actions is disabled
 blocked by billing, or intentionally deferred until the next quota cycle.
 
 推送远端分支、更新远端 PR、或合并到 `main` 前，必须跑下面的本地严格 gate。GitHub Actions 被关闭、被账单阻塞、或计划下个月再开时，也不能跳过这一步。
+
+Remote `main` pushes should be batched by one-sided churn: push only when the
+current diff has more than 5000 insertions or more than 5000 deletions. Do not
+add insertions and deletions together to satisfy this threshold.
 
 ```bash
 python3 -m pytest -q --tb=short                          # Full test suite

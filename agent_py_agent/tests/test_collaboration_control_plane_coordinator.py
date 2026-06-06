@@ -17,7 +17,7 @@ def test_coordinator_wakes_main_agent_when_collaboration_request_is_blocked(tmp_
     assert len(decisions) == 1
     assert decisions[0].requires_main_agent is True
     assert decisions[0].metadata["blocked_request_count"] == 1
-    assert store.load_case(case.case_id).status == "close"
+    assert store.load_case(case.case_id).status == "closed"
     wake = conversation.pending_wake_signals()[0]
     assert wake.thread_id == thread.thread_id
     assert wake.urgency == "normal"
@@ -32,7 +32,7 @@ def test_coordinator_closes_urgent_case_to_existing_wake_queue(tmp_path) -> None
 
     assert len(decisions) == 1
     assert decisions[0].requires_main_agent is True
-    assert store.load_case(case.case_id).status == "close"
+    assert store.load_case(case.case_id).status == "closed"
     wake = conversation.pending_wake_signals()[0]
     assert wake.thread_id == thread.thread_id
     assert wake.root_task_id == "task-1"

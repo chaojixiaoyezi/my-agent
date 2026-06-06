@@ -219,9 +219,9 @@ def _coerce_bool(raw: object) -> bool:
     if isinstance(raw, bool):
         return raw
     text = str(raw).strip().lower()
-    if text in {"true", "yes", "on", "1"}:
+    if text in {"true", "1"}:
         return True
-    if text in {"false", "no", "off", "0"}:
+    if text in {"false", "0"}:
         return False
     raise ValueError(f"invalid bool: {raw!r}")
 

@@ -131,6 +131,7 @@ def append_long_content_recovery_context(record: ToolCallRecordParams) -> None:
             payload=record.payload,
             result_tool=record.result.tool,
             result_ok=record.result.ok,
+            result_error_code=record.result.error_code,
             output=record.result.output,
         )
     )

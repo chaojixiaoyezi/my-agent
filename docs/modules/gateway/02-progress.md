@@ -5,6 +5,8 @@
 - 删除 `agent/gateway_parts/runtime.py` 聚合层。
 - adapter 直接调用 `request_worker`，processing 恢复直接调用 `lease_service`。
 - `agent/gateway_parts/__init__.py` 仍是包级公开入口；内部实现不再通过 `runtime.py` 多跳转发。
+- CLI/gateway/TUI 状态行的当前上下文 token 展示归 `response_renderer.py`，不再通过单函数
+  `context_tokens.py` 跳转。
 
 ## 2026-06-06 会话上下文精确化
 

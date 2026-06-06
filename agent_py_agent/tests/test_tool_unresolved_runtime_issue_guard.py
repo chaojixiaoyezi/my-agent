@@ -38,6 +38,47 @@ def test_no_tool_final_redirects_unresolved_artifact_integrity_issue(tmp_path: P
     assert any("unresolved-runtime-issues" in item for item in params.tool_context)
 
 
+def test_runtime_status_response_breaks_before_repair_redirects(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_loop.repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+        ToolLoopResponseDecisionRequest,
+        tool_loop_response_decision,
+    )
+    from agent_py_agent.agent.backends import ModelResponse
+
+    params = _params(
+        archive_tool_calls=[
+            _artifact_integrity_archive_record(
+                ok=False,
+                artifact_ok=False,
+                path="app.js",
+                codes=["STATIC_SITE_MISSING_DOM_ID_HITS"],
+            )
+        ]
+    )
+    response = ModelResponse(
+        text="当前上下文已达到压缩条件。",
+        backend="fake",
+        runtime_status="context_overflow",
+        runtime_reason="context_overflow",
+        runtime_source="preflight",
+    )
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=_agent(tmp_path),
+            params=params,
+            response=response,
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "break"
+    assert decision.response is response
+    assert decision.counters.unresolved_runtime_issue_redirects == 0
+    assert params.tool_context == []
+
+
 def test_unresolved_runtime_issue_repair_context_does_not_hard_block(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_guard import unresolved_runtime_issue as guard
     from agent_py_agent.agent.agent_core.tool_loop.repair_counters import ToolLoopRepairCounters

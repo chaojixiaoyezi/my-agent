@@ -1,17 +1,11 @@
 
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
 from typing import Any
 
 from ...common.value_parsing import sequence_strings
 
-CHAR_WINDOW_RE = re.compile(r"\[char-window offset=(\d+) chars=(\d+) total_chars=(\d+)\]")
-LINE_NUMBER_RE = re.compile(r"^(\d+):\s", re.MULTILINE)
-NEXT_START_LINE_RE = re.compile(r"next_start_line=(\d+)")
-TOTAL_LINES_RE = re.compile(r"total_lines=(\d+)")
 CAPTURED_ARTIFACT_REF_LIMIT = 8
 
 
@@ -43,11 +37,10 @@ def resume_focus_payload(work_state: dict[str, Any], next_actions: list[str]) ->
 
 def action_first_actions(next_actions: list[str], work_state: dict[str, Any]) -> list[str]:
     candidates = sequence_strings(next_actions) or sequence_strings(work_state.get("next_actions"))
-    filtered = [item for item in candidates if not looks_like_reader_first_recovery_hint(item)]
-    if filtered:
-        return filtered
+    if candidates:
+        return candidates
     next_step = str(work_state.get("next_step") or "").strip()
-    if next_step and not looks_like_reader_first_recovery_hint(next_step):
+    if next_step:
         return [next_step]
     return []
 
@@ -86,14 +79,6 @@ def artifact_ref_payload(item: dict[str, Any]) -> dict[str, Any]:
         "start_line": _optional_int(params.get("start_line")),
         "end_line": _optional_int(params.get("end_line")),
     }
-
-
-def looks_like_reader_first_recovery_hint(value: str) -> bool:
-    text = value.strip().lower()
-    if not text:
-        return False
-    recovery_markers = ("memory-resume", "localstore", "compact_context", "work_state_snapshot", "restore_refs")
-    return any(marker in text for marker in recovery_markers)
 
 
 def full_read_coverage_resume_action(work_state: dict[str, Any]) -> str:
@@ -373,71 +358,68 @@ def _optional_int(value: object) -> int | None:
 
 
 def _char_window_from_ref(ref: dict[str, Any]) -> tuple[int, int, int] | None:
-    content = _artifact_content(ref.get("path") or ref.get("artifact_ref"))
-    match = CHAR_WINDOW_RE.search(content)
-    if not match:
-        params = ref.get("parameters") if isinstance(ref.get("parameters"), dict) else {}
-        max_chars = _optional_int(params.get("max_chars"))
-        if max_chars is None:
-            return None
-        offset = _optional_int(params.get("offset"))
-        if offset is None and _optional_int(params.get("start_line")) is None and _optional_int(params.get("end_line")) is None:
-            offset = 0
-        if offset is None:
-            return None
-        return (offset, offset + max_chars, 0)
-    offset, chars, total = (int(item) for item in match.groups())
-    return (offset, offset + chars, total)
+    structured = _read_window_from_ref(ref)
+    if structured.get("kind") == "char_window":
+        offset = int(structured["offset"])
+        next_offset = int(structured["next_offset"])
+        total_chars = int(structured["total_chars"])
+        return (offset, next_offset, total_chars)
+    params = ref.get("parameters") if isinstance(ref.get("parameters"), dict) else {}
+    max_chars = _optional_int(params.get("max_chars"))
+    if max_chars is None:
+        return None
+    offset = _optional_int(params.get("offset"))
+    if offset is None and _optional_int(params.get("start_line")) is None and _optional_int(params.get("end_line")) is None:
+        offset = 0
+    if offset is None:
+        return None
+    return (offset, offset + max_chars, 0)
 
 
 def _line_window_from_ref(ref: dict[str, Any]) -> tuple[int, int, int] | None:
-    content = _artifact_content(ref.get("path") or ref.get("artifact_ref"))
-    if not content:
-        return None
-    params = ref.get("parameters") if isinstance(ref.get("parameters"), dict) else {}
-    line_numbers = [int(match.group(1)) for match in LINE_NUMBER_RE.finditer(content)]
-    explicit_start = _optional_int(params.get("start_line")) or 0
-    explicit_end = _optional_int(params.get("end_line")) or 0
-    next_start = _regex_int(NEXT_START_LINE_RE, content)
-    total = _regex_int(TOTAL_LINES_RE, content)
-    if total <= 0 or not (line_numbers or explicit_start or explicit_end or next_start):
-        return None
-    start = line_numbers[0] if line_numbers else (explicit_start or 1)
-    end = line_numbers[-1] if line_numbers else explicit_end
-    if next_start:
-        end = min(end or next_start - 1, next_start - 1)
-    if explicit_end and not next_start:
-        end = min(end or explicit_end, explicit_end)
-    if end < start:
-        return None
-    return (start, end, total)
+    structured = _read_window_from_ref(ref)
+    if structured.get("kind") == "line_window":
+        return (
+            int(structured["start_line"]),
+            int(structured["end_line"]),
+            int(structured["total_lines"]),
+        )
+    return None
 
 
-def _artifact_content(value: object) -> str:
-    text = str(value or "").strip()
-    if not text or "://" in text:
-        return ""
-    try:
-        payload = json.loads(Path(text).expanduser().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ""
-    if not isinstance(payload, dict):
-        return ""
-    for key in ("content", "output", "text", "result", "output_preview"):
-        item = payload.get(key)
-        if isinstance(item, str):
-            return item
-    return ""
-
-
-def _regex_int(pattern: re.Pattern[str], text: str) -> int:
-    match = pattern.search(text or "")
-    if not match:
-        return 0
-    try:
-        return int(match.group(1))
-    except ValueError:
-        return 0
+def _read_window_from_ref(ref: dict[str, Any]) -> dict[str, Any]:
+    window = ref.get("read_window")
+    if not isinstance(window, dict):
+        envelope = ref.get("tool_result_envelope")
+        window = envelope.get("read_window") if isinstance(envelope, dict) else {}
+    if not isinstance(window, dict):
+        return {}
+    kind = str(window.get("kind") or "").strip()
+    if kind == "char_window":
+        offset = _optional_int(window.get("offset"))
+        next_offset = _optional_int(window.get("next_offset"))
+        total_chars = _optional_int(window.get("total_chars"))
+        if offset is None or next_offset is None or total_chars is None:
+            return {}
+        return {
+            "kind": kind,
+            "offset": offset,
+            "next_offset": next_offset,
+            "total_chars": total_chars,
+        }
+    if kind == "line_window":
+        start_line = _optional_int(window.get("start_line"))
+        end_line = _optional_int(window.get("end_line"))
+        total_lines = _optional_int(window.get("total_lines"))
+        if start_line is None or end_line is None or total_lines is None:
+            return {}
+        return {
+            "kind": kind,
+            "start_line": start_line,
+            "end_line": end_line,
+            "total_lines": total_lines,
+        }
+    return {}
 
 
 def _covered_prefix_end(ranges: list[tuple[int, int]]) -> int:
@@ -463,6 +445,5 @@ __all__ = [
     "captured_refs_payload",
     "CAPTURED_ARTIFACT_REF_LIMIT",
     "full_read_coverage_resume_action",
-    "looks_like_reader_first_recovery_hint",
     "resume_focus_payload",
 ]

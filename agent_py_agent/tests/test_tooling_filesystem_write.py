@@ -6,14 +6,12 @@ import base64
 import json
 from pathlib import Path
 
+from agent_py_agent.agent.tooling._filesystem_patch import ApplyPatchTool
+from agent_py_agent.agent.tooling._filesystem_read import filesystem_access_options
+from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool, WriteFileToolOptions
 from agent_py_agent.agent.tooling.content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
     write_file_content_parameter_detail,
-)
-from agent_py_agent.agent.tooling.filesystem import (
-    ApplyPatchTool,
-    WriteFileTool,
-    WriteFileToolOptions,
 )
 
 
@@ -95,8 +93,6 @@ def test_write_file_allows_non_dangerous_external_path(tmp_path: Path) -> None:
 
 
 def test_write_file_blocks_configured_dangerous_root(tmp_path: Path) -> None:
-    from agent_py_agent.agent.tooling.filesystem import filesystem_access_options
-
     workspace = tmp_path / "workspace"
     danger = tmp_path / "danger"
     workspace.mkdir()

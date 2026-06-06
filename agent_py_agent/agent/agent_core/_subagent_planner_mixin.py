@@ -214,5 +214,5 @@ def _planner_record_status(parsed, state: dict) -> tuple[bool, str, str, str]:
     if not parsed.found:
         return False, "PARSE_ERROR", "父代理 planner 有模型回复，但缺少结构化结果，不能当作 OK。", "缺少 [PARENT_PLANNER_RESULT] 结构化结果块。"
     if parsed.decision == "HEARTBEAT_OK" and state["gate"].get("needs_planner", 0):
-        return False, decision, "状态门禁发现仍有待处理事项，禁止 planner 只返回 HEARTBEAT_OK。", parse_error or "planner gate blocked HEARTBEAT_OK"
+        return False, decision, "状态快照仍有待处理事项，planner 只返回了 HEARTBEAT_OK；请给出推进建议。", parse_error or "planner_empty_heartbeat_with_pending_work"
     return ok, decision, message, parse_error

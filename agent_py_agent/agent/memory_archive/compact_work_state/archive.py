@@ -114,7 +114,7 @@ def _archive_next_actions(records: list[dict[str, Any]]) -> list[str]:
         if str(record.get("action") or "") != "assistant_tool_round":
             continue
         hint = str(record.get("content") or record.get("content_preview") or "").strip()
-        if hint and not _looks_like_raw_tool_step(hint) and not _looks_like_reader_first_recovery_hint(hint):
+        if hint and not _looks_like_raw_tool_step(hint):
             return [hint]
     return []
 
@@ -125,13 +125,7 @@ def _looks_like_raw_tool_step(value: str) -> bool:
 
 
 def _action_first_items(items: list[str]) -> list[str]:
-    return [item for item in items if not _looks_like_reader_first_recovery_hint(item)]
-
-
-def _looks_like_reader_first_recovery_hint(value: str) -> bool:
-    text = value.strip().lower()
-    recovery_markers = ("memory-resume", "localstore", "compact_context", "work_state_snapshot", "restore_refs")
-    return any(marker in text for marker in recovery_markers)
+    return list(items)
 
 
 def _archive_texts(records: list[dict[str, Any]], key: str) -> list[str]:

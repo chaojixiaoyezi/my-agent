@@ -74,6 +74,8 @@ def test_exploration_fuse_uses_configured_budget_ratio_hints_without_blocking(tm
     assert "建议先写出" in context
     assert "下一轮优先做一次本地落地动作" in context
     assert "保存来源索引、阶段笔记、检查点、草稿、结构化数据或目标产物" in context
+    assert "suggested_next_action" in context
+    assert "required_next_action" not in context
     assert "materialize_local_progress" in context
     assert "write_file" in context
 
@@ -87,8 +89,8 @@ def test_exploration_fuse_uses_configured_budget_ratio_hints_without_blocking(tm
     assert has_required_exploration_fuse(agent, calls) is True
     urgent_context = exploration_fuse_context(agent, redirects=0)
     assert "80%" in urgent_context
-    assert "请尽快" in urgent_context
-    assert "下一轮必须优先物化本地进展" in urgent_context
+    assert "建议尽快" in urgent_context
+    assert "下一轮优先考虑物化本地进展" in urgent_context
 
     for _ in range(59):
         assert has_required_exploration_fuse(agent, calls) is False

@@ -150,6 +150,8 @@ def _tool_calls_decision(
 
 
 def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:
+    if _is_runtime_status_response(request.response):
+        return ToolLoopResponseDecision("break", request.response, [], request.counters)
     local_progress_decision = _local_progress_no_tool_call_decision(request)
     if local_progress_decision is not None:
         return local_progress_decision
@@ -167,6 +169,16 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         return ToolLoopResponseDecision("continue", None, [], _inc_protected_marker(request.counters))
     final = protected_tool_marker_block_response(request.response.backend)
     return ToolLoopResponseDecision("break", final, [], request.counters)
+
+
+def _is_runtime_status_response(response: object) -> bool:
+    status = str(getattr(response, "runtime_status", "") or "").strip().lower()
+    if status and status != "ok":
+        return True
+    for field in ("runtime_reason", "runtime_source"):
+        if str(getattr(response, field, "") or "").strip():
+            return True
+    return False
 
 
 def _local_progress_no_tool_call_decision(

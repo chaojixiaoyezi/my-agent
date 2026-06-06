@@ -74,10 +74,12 @@ def test_long_write_abort_response_returns_parse_error_not_hidden_writer() -> No
 
     payload = json.loads(response.text.split("\n", 2)[1])
     assert payload["tool"] == "__parse_error__"
-    assert payload["raw"] == (
-        '{"tool": "write_file", "path": "outputs/site/index.html", '
-        '"content": "...streaming content omitted..."}'
-    )
+    assert payload["source_tool"] == "write_file"
+    assert payload["path"] == "outputs/site/index.html"
+    assert payload["content_field_present"] is True
+    assert payload["streaming_content_chars"] == 5000
+    assert payload["streaming_content_limit"] == 4000
+    assert "raw" not in payload
 
 
 def test_tool_boundary_preserves_later_raw_write_block_when_trimming_prose() -> None:

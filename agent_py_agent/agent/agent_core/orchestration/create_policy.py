@@ -4,13 +4,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
+from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, bool_value, string_list
+from ...settings.defaults import DEFAULT_COMMAND_ACCESS_MODE
 from ...subagents.role_templates import COORDINATOR_TOOLS, role_template_snapshot_for_role
 from ...subagents.services.base import CreateRunParams
 from ..parameters import _bool_param, _positive_int
 from ..runner.ref_fields import params_input_refs, params_output_refs
 from ..spawn_role_seed import is_explicit_root_role
-from .create_config import config_access_mode, config_bool, config_int, config_string
 from .create_constraints import (
     resolved_extra_write_roots,
     role_allows_direct_product_work,
@@ -27,6 +27,7 @@ def create_run_params(
     goal: str,
     allowed_tools: list[str] | None,
 ):
+    raw_params = _params_with_task_output_defaults(raw_params, agent)
     workflow_mode = tool_workflow_mode(raw_params.get("workflow_mode"), agent.config.subagent_workflow_mode)
     role = _role_from_create_intent(raw_params, goal, agent)
     role_template_dirs = _role_template_dirs(agent)
@@ -55,14 +56,14 @@ def create_run_params(
         workflow_mode=workflow_mode,
         attributes=_create_attributes(raw_params, agent),
         **_lineage_fields(raw_params, agent),
-        parent_access_mode=config_access_mode(agent),
-        memory_retention_policy=config_string(
+        parent_access_mode=_config_access_mode(agent),
+        memory_retention_policy=_config_string(
             agent,
             "subagent_memory_retention_policy",
             "parent_review_or_cleanup",
         ),
-        memory_delete_after_days=config_int(agent, "subagent_memory_delete_after_days", 0),
-        destroy_summary_required=config_bool(agent, "subagent_destroy_summary_required", True),
+        memory_delete_after_days=_config_int(agent, "subagent_memory_delete_after_days", 0),
+        destroy_summary_required=_config_bool(agent, "subagent_destroy_summary_required", True),
     )
 
 
@@ -128,6 +129,32 @@ def _role_template_dirs(agent) -> object:
     return getattr(subagents, "role_template_dirs", None)
 
 
+def _config_access_mode(agent) -> str:
+    value = getattr(getattr(agent, "config", None), "access_mode", DEFAULT_COMMAND_ACCESS_MODE)
+    text = str(value).strip() if isinstance(value, str) else ""
+    return text or DEFAULT_COMMAND_ACCESS_MODE
+
+
+def _config_string(agent, key: str, default: str) -> str:
+    value = getattr(getattr(agent, "config", None), key, default)
+    text = str(value).strip() if isinstance(value, str) else ""
+    return text or default
+
+
+def _config_int(agent, key: str, default: int) -> int:
+    value = getattr(getattr(agent, "config", None), key, default)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, parsed)
+
+
+def _config_bool(agent, key: str, default: bool) -> bool:
+    value = getattr(getattr(agent, "config", None), key, default)
+    return bool_value(value, default=default)
+
+
 def _should_disable_generic_workflow_for_concrete_worker(
     raw_params: dict[str, object],
     goal: str,
@@ -165,6 +192,110 @@ def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, o
     add_current_conversation_attrs(attrs, agent)
     _add_current_task_workspace(attrs, agent)
     return attrs
+
+
+def _params_with_task_output_defaults(raw_params: dict[str, object], agent=None) -> dict[str, object]:
+    task_output_dir = _current_task_output_dir(agent)
+    workspace_output_dir = _primary_workspace_output_dir(agent)
+    if not task_output_dir or not workspace_output_dir or _has_user_requested_output_dir(raw_params, agent):
+        return raw_params
+    updated = dict(raw_params)
+    changed = False
+    for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
+        if key not in updated:
+            continue
+        value, value_changed = _rebase_output_ref_value(updated.get(key), workspace_output_dir, task_output_dir)
+        if value_changed:
+            updated[key] = value
+            changed = True
+    attrs = updated.get("attributes")
+    if isinstance(attrs, dict):
+        next_attrs = dict(attrs)
+        attrs_changed = False
+        for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
+            if key not in next_attrs:
+                continue
+            value, value_changed = _rebase_output_ref_value(next_attrs.get(key), workspace_output_dir, task_output_dir)
+            if value_changed:
+                next_attrs[key] = value
+                attrs_changed = True
+        if attrs_changed:
+            updated["attributes"] = next_attrs
+            changed = True
+    return updated if changed else raw_params
+
+
+def _rebase_output_ref_value(value: object, workspace_output_dir: Path, task_output_dir: Path) -> tuple[object, bool]:
+    if isinstance(value, list):
+        changed = False
+        items: list[object] = []
+        for item in value:
+            next_item, item_changed = _rebase_output_ref_value(item, workspace_output_dir, task_output_dir)
+            items.append(next_item)
+            changed = changed or item_changed
+        return items, changed
+    if not isinstance(value, str):
+        return value, False
+    text = value.strip()
+    if not text:
+        return value, False
+    try:
+        path = Path(text).expanduser()
+    except OSError:
+        return value, False
+    if not path.is_absolute():
+        return value, False
+    resolved = path.resolve(strict=False)
+    if not _same_or_inside(resolved, workspace_output_dir):
+        return value, False
+    suffix = resolved.relative_to(workspace_output_dir)
+    return str((task_output_dir / suffix).resolve(strict=False)), True
+
+
+def _current_task_output_dir(agent) -> Path | None:
+    task_root = _current_task_root(agent)
+    if not task_root:
+        return None
+    return (Path(task_root).expanduser() / "output").resolve(strict=False)
+
+
+def _primary_workspace_output_dir(agent) -> Path | None:
+    root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", "")
+    if not isinstance(root, (str, Path)) or not str(root).strip():
+        return None
+    try:
+        return (Path(root).expanduser().resolve(strict=False) / "output").resolve(strict=False)
+    except OSError:
+        return None
+
+
+def _has_user_requested_output_dir(raw_params: dict[str, object], agent=None) -> bool:
+    if str(raw_params.get("user_requested_output_dir") or "").strip():
+        return True
+    attrs = raw_params.get("attributes")
+    if isinstance(attrs, dict) and _mapping_has_user_requested_output_dir(attrs):
+        return True
+    current = getattr(agent, "_current_run_params", None) if agent is not None else None
+    current_attrs = getattr(current, "task_attributes", None)
+    return isinstance(current_attrs, dict) and _mapping_has_user_requested_output_dir(current_attrs)
+
+
+def _mapping_has_user_requested_output_dir(value: dict[str, object]) -> bool:
+    if str(value.get("user_requested_output_dir") or "").strip():
+        return True
+    workspace = value.get("run_workspace")
+    if isinstance(workspace, dict) and str(workspace.get("user_requested_output_dir") or "").strip():
+        return True
+    workspace = value.get("task_workspace")
+    return isinstance(workspace, dict) and bool(str(workspace.get("user_requested_output_dir") or "").strip())
+
+
+def _same_or_inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _add_current_task_workspace(attrs: dict[str, object], agent=None) -> None:
@@ -260,7 +391,7 @@ def _root_agent_name(raw_params: dict[str, object], role: str) -> str:
     suffix = str(role or "worker").strip().replace("_", "-").strip("-") or "worker"
     if suffix in {"general", "child"}:
         suffix = "worker"
-    return f"小傻妞-{suffix}"
+    return f"agent-d1-{suffix}"
 
 
 def _agent_name_from_role_field(raw_params: dict[str, object]) -> str:

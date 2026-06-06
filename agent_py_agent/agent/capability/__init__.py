@@ -19,13 +19,15 @@ from .router import (
     score_card,
     tokenize,
 )
-from .runtime_config import (
+from .runtime_config_models import (
     CapabilityConfigPatch,
     CapabilityConfigPatchRequest,
     CapabilityConfigPatchResult,
     CapabilityConfigReloadResult,
     CapabilityConfigSnapshot,
-    apply_capability_config_patch,
+)
+from .runtime_config_patch import apply_capability_config_patch
+from .runtime_config_reload import (
     capability_config_version,
     default_capability_config_path,
     load_capability_config_snapshot,

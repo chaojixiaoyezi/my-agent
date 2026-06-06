@@ -29,7 +29,12 @@ class RuntimeGuardPolicy:
         value = self.values.get(key, default)
         if isinstance(value, bool):
             return value
-        return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+        normalized = str(value or "").strip().lower()
+        if normalized in {"1", "true"}:
+            return True
+        if normalized in {"0", "false"}:
+            return False
+        return default
 
     def float_tuple_value(self, key: str, default: tuple[float, ...]) -> tuple[float, ...]:
         value = self.values.get(key, default)

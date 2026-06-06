@@ -10,7 +10,7 @@ from ...subagents.services.subagent_session_compact import (
     SubagentSessionCompactRequest,
     write_subagent_session_compact,
 )
-from ..runner.identity_prompt import subagent_runner_system_prompt
+from ..runner.prompts import subagent_runner_system_prompt
 from .session_compact_payload import subagent_session_compact_payload_from_result
 
 _SUMMARY_PREVIEW_CHARS = 800

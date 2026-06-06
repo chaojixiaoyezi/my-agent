@@ -52,6 +52,7 @@ def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: s
     target_roots = []
     if _has_structured_write_intent(params, goal):
         target_roots.extend(structured_output_write_roots(agent, params))
+        target_roots.extend(_current_task_output_write_roots(agent, params))
         if _has_repair_write_intent(params):
             target_roots.extend(context_target_write_roots(agent, params))
         target_roots.extend(structured_task_output_write_roots(agent, params))
@@ -110,7 +111,52 @@ def _default_workspace_product_root(agent: object, params: dict[str, object], go
     if isinstance(workspace, str | Path) and root == Path(workspace).expanduser().resolve(strict=False):
         return ""
     roots = agent_workspace_roots(agent, root)
-    return str(root) if any(is_relative_to(root, item) for item in roots) else ""
+    if not any(is_relative_to(root, item) for item in roots):
+        return ""
+    return str(root) if _has_output_ref_inside_workspace(params, root, roots) else ""
+
+
+def _has_output_ref_inside_workspace(params: dict[str, object], root: Path, roots: list[Path]) -> bool:
+    for ref in params_output_refs(params):
+        path = _output_ref_path(ref, root)
+        if path is not None and any(is_relative_to(path, workspace_root) for workspace_root in roots):
+            return True
+    return False
+
+
+def _current_task_output_write_roots(agent: object, params: dict[str, object]) -> list[str]:
+    task_root = _current_task_root(agent)
+    if not task_root:
+        return []
+    task_output = (Path(task_root).expanduser() / "output").resolve(strict=False)
+    roots: list[str] = []
+    for ref in params_output_refs(params):
+        path = _output_ref_path(ref, task_output)
+        if path is not None and is_relative_to(path, task_output):
+            text = str(path.parent)
+            if text not in roots:
+                roots.append(text)
+    return roots
+
+
+def _current_task_root(agent: object) -> str:
+    raw = getattr(agent, "_current_run_task_workspace", "")
+    if not isinstance(raw, str | Path):
+        return ""
+    return str(raw).strip()
+
+
+def _output_ref_path(ref: str, root: Path) -> Path | None:
+    text = str(ref or "").strip()
+    if not text or "://" in text:
+        return None
+    try:
+        path = Path(text).expanduser()
+    except OSError:
+        return None
+    if not path.is_absolute():
+        path = root / path
+    return path.resolve(strict=False)
 
 
 def _manager_has_real_workspace(agent: object) -> bool:

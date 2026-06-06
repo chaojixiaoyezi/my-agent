@@ -5,7 +5,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ...agent.gateway_parts.context_tokens import current_context_token_estimate
+from ...agent.gateway_parts.response_renderer import current_context_token_estimate
 from .gateway_client import (
     ChatRequestContent,
     GatewayChunkPollRequest,

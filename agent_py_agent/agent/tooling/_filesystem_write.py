@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..contracts.artifact_format_lint import lint_artifact_format
+from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from ..contracts.recovery_actions import RecoveryAction
 from ..run_intent import reference_write_feedback
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _required_path, _text_param
@@ -302,7 +302,7 @@ _PREWRITE_VALIDATED_SUFFIXES = {
 def _validate_final_artifact_candidate(candidate: Path, target: Path) -> None:
     if target.suffix.lower() not in _PREWRITE_VALIDATED_SUFFIXES:
         return
-    report = lint_artifact_format(path=candidate, workspace_root=target.parent)
+    report = validate_artifact(ArtifactAcceptanceRequest(path=candidate, workspace_root=target.parent))
     if report.ok:
         return
     codes = ",".join(finding.code for finding in report.findings if finding.code)

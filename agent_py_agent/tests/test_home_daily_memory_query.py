@@ -138,6 +138,20 @@ def test_memory_daily_list_cli_reports_corrupt_daily_rows(tmp_path: Path, capsys
     assert payload["load_errors"][0]["line"] == 2
 
 
+def test_memory_daily_list_ignores_legacy_root_daily_memory(tmp_path: Path, capsys):
+    home = tmp_path / "home"
+    config_path = _write_config(tmp_path, home)
+    _write_daily_record(home)
+    legacy_daily = home / "memory" / "daily" / "2026-05-13.jsonl"
+    legacy_daily.parent.mkdir(parents=True)
+    legacy_daily.write_text('{"role":"user","kind":"note","content":"legacy root daily"}\n', encoding="utf-8")
+
+    code, payload = _run_cli_json(capsys, config_path, "memory-daily-list", "daily", "--date", "2026-05-13")
+
+    assert code == 0
+    assert [record["content"] for record in payload["records"]] == []
+
+
 def test_memory_daily_list_uses_configured_provider_owner(tmp_path: Path, capsys):
     home = tmp_path / "home"
     config_path = _write_provider_config(tmp_path, home)

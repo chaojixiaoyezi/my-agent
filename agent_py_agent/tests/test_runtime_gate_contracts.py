@@ -137,7 +137,7 @@ def test_gate_decision_recovery_envelope_marks_approval_as_user_input():
     assert recovery["actions"][0]["recommended_action"] == "request_user_input"
 
 
-def test_tool_call_gate_accepts_legacy_payload_only_after_structured_normalization():
+def test_tool_call_gate_accepts_runtime_tool_payload_after_structured_normalization():
     decision = evaluate_tool_call_gate(
         {"tool": "read_file", "path": "README.md"},
         available_tools={"read_file"},

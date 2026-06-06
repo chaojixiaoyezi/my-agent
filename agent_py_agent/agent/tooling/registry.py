@@ -8,10 +8,12 @@ from __future__ import annotations
 再按授权和写入边界把请求分发给真正的工具。
 """
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..contracts.tool_manifest_contract import tool_manifest_payload
 from ..log_analysis.capabilities import SECURITY_TOOL_NAMES
 from ..settings.defaults import default_config_int
 from .artifact import ReadArtifactTool
@@ -25,7 +27,6 @@ from .models import (
     ToolSpec,
 )
 from .registry_bootstrap import build_tool_retriever, register_base_tools
-from .registry_catalog import CatalogRenderConfig, render_catalog_entries
 from .registry_execution import (
     ExecuteRegistryCallParams,
     allowed_tool_set,
@@ -33,9 +34,7 @@ from .registry_execution import (
     parse_registry_tool_calls,
     security_tools_visible,
 )
-from .registry_list_tools import ListToolsTool
 from .registry_payload_normalize import ToolPayloadNormalizeLimits
-from .registry_prompt import render_tool_catalog_section
 
 _allowed_tool_set = allowed_tool_set
 _DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec"})
@@ -43,6 +42,18 @@ _DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec"})
 
 def _agent_config_int(key: str) -> int:
     return default_config_int(key)
+
+
+@dataclass(frozen=True)
+class CatalogRenderConfig:
+    mode: str
+    offset: int
+    limit: int
+    categories: list[str]
+    include_examples: bool
+    entry_max_chars: int
+    show_truncated_notice: bool
+    detail_max_chars: int
 
 
 @dataclass(frozen=True)
@@ -85,6 +96,40 @@ class ToolRegistryParams:
     artifact_root: Path | None = None
     runtime_fact_roots: list[Path] | None = None
     runtime_guard_policy: object | None = None
+
+
+class ListToolsTool(BaseTool):
+
+    def __init__(self, registry: Any):
+        self.registry = registry
+        self.spec = ToolSpec(
+            name="list_tools",
+            category="system",
+            effect="read_only",
+            description="列出当前执行上下文可见的工具清单。",
+            use_cases=[
+                "不确定当前有哪些工具时，先查询机器可读工具清单",
+                "需要确认 run_command、write_file、apply_patch 等工具是否可用",
+            ],
+            avoid_when=[
+                "已经知道要用哪个工具时，直接调用目标工具",
+            ],
+            keywords=["list_tools", "tools", "工具清单", "tool manifest", "available tools"],
+            parameters={},
+            examples=['{"tool": "list_tools"}'],
+        )
+
+    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+        specs = self.registry.specs(include_orchestration=True)
+        payload = tool_manifest_payload(specs, owner_type="main_agent")
+        payload["tool_failure_taxonomy"] = payload["failure_taxonomy"]
+        return ToolExecutionResult(
+            "list_tools",
+            True,
+            json.dumps(payload, ensure_ascii=False),
+            result_envelope={"tool_output_policy": {"preserve_prompt_output": True}},
+        )
+
 
 class ToolRegistry:
 
@@ -159,7 +204,7 @@ class ToolRegistry:
             include_orchestration=True,
         )
         entries = render_catalog_entries(specs, self._catalog_render_config())
-        return render_tool_catalog_section(
+        return _render_tool_catalog_section(
             entries,
             tool_content_transport_protocol(self._write_inline_max_chars()),
         )
@@ -267,3 +312,71 @@ class ToolRegistry:
                 runtime_guard_policy=self.runtime_guard_policy,
             )
         )
+
+
+def _render_tool_catalog_section(entries: list[str], content_transport_protocol: str) -> str:
+    if not entries:
+        entries = ["- none：当前执行上下文没有授权任何工具；缺能力时请上抛 capability_request。"]
+    return (
+        _tool_call_protocol()
+        + "\n\n"
+        + content_transport_protocol
+        + "\n\n"
+        "# Tool Catalog\n"
+        + "\n".join(entries)
+    )
+
+
+def _tool_call_protocol() -> str:
+    return (
+        "# Tools\n"
+        "当你需要看文件、改代码、查网页或测接口时，可以调用工具。\n"
+        "工具调用格式必须严格写成：\n"
+        "[TOOL_CALL]\n"
+        '{"tool": "read_file", "path": "README.md"}\n'
+        "[/TOOL_CALL]\n"
+        "必须把工具参数直接放在同一个 JSON 对象里；不要写 param_name、args、arguments 或其他包裹参数。\n"
+        "必须使用 Tool Catalog 里该工具自己的参数名；不要把 path 当作所有工具的默认参数。\n"
+        "可以连续写多个 [TOOL_CALL] 块。拿到工具结果后，再输出最终答案，不要把工具调用块留在最后回复里。"
+    )
+
+
+def render_catalog_entries(specs: list[ToolSpec], config: CatalogRenderConfig) -> list[str]:
+    filtered = _filter_catalog_specs(specs, config.categories)
+    if config.mode == "off":
+        return ["- disabled：tool_catalog_mode=off，当前 prompt 不注入工具目录。"]
+    if config.mode == "retrieval_only":
+        return ["- retrieval_only：工具目录精简隐藏，请依赖 Recommended Tools 或显式工具名调用。"]
+    page = filtered[config.offset : config.offset + max(0, config.limit)]
+    entries = [_render_catalog_spec(spec, config) for spec in page]
+    if config.show_truncated_notice:
+        notice = _catalog_page_notice(config, total=len(filtered), returned=len(page))
+        if notice:
+            entries.append(notice)
+    return entries
+
+
+def _filter_catalog_specs(specs: list[ToolSpec], categories: list[str]) -> list[ToolSpec]:
+    if not categories:
+        return specs
+    allowed_categories = set(categories)
+    return [spec for spec in specs if spec.category in allowed_categories]
+
+
+def _render_catalog_spec(spec: ToolSpec, config: CatalogRenderConfig) -> str:
+    if config.mode == "full":
+        return spec.render_detail_entry(max_chars=config.detail_max_chars)
+    return spec.render_catalog_entry(
+        include_examples=config.include_examples,
+        max_chars=config.entry_max_chars,
+    )
+
+
+def _catalog_page_notice(config: CatalogRenderConfig, *, total: int, returned: int) -> str:
+    next_offset = config.offset + returned
+    if total <= next_offset:
+        return ""
+    return (
+        f"- more_tools：工具目录已分页，next_offset={next_offset} limit={config.limit} total={total}。"
+        " 如需更多工具，请调大 tool_catalog_limit 或 tool_catalog_offset。"
+    )

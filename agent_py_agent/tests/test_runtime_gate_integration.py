@@ -109,7 +109,7 @@ def test_registry_execution_blocks_when_runtime_rate_limit_is_exhausted(tmp_path
                 "tool_rate_limit_records": [
                     {
                         "tool_name": "echo",
-                        "args_hash": _args_hash_for_legacy_payload(payload),
+                        "args_hash": _args_hash_for_runtime_tool_payload(payload),
                         "attempt_timestamps": [9.0],
                     }
                 ],
@@ -138,7 +138,7 @@ def test_registry_execution_zero_rate_limit_policy_is_unlimited(tmp_path):
                 "tool_rate_limit_records": [
                     {
                         "tool_name": "echo",
-                        "args_hash": _args_hash_for_legacy_payload(payload),
+                        "args_hash": _args_hash_for_runtime_tool_payload(payload),
                         "attempt_timestamps": [1.0, 2.0, 3.0],
                         "consecutive_failures": 9,
                         "last_failure_at": 9.0,
@@ -585,6 +585,28 @@ def test_delivery_closeout_blocks_metric_quality_contract_mismatch_when_enforcem
     assert report["final_closeout_gate"]["allowed"] is False
 
 
+def test_delivery_quality_legacy_enforcement_aliases_stay_advisory(tmp_path):
+    for enforcement in ("hard", "block", "blocking"):
+        case_root = tmp_path / enforcement
+        case_root.mkdir()
+        (case_root / "out.txt").write_text("finished artifact", encoding="utf-8")
+        _write_point_in_time_quality_source(case_root)
+        params = _delivery_closeout_params(archive_tool_calls=[_write_file_archive_record()])
+        _add_metric_quality_contract(params)
+        params.delivery_contract["delivery_quality_contract"]["enforcement"] = enforcement
+        agent = SimpleNamespace(root=case_root, tools=SimpleNamespace(workspace_root=case_root))
+
+        response = main_agent_delivery_closeout_response(
+            MainAgentDeliveryCloseoutRequest(agent=agent, params=params, backend="test")
+        )
+        report = json.loads((case_root / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+
+        assert response is not None
+        assert report["delivery_quality_gate"]["status"] == "ALLOW"
+        assert "METRIC_KIND_MISMATCH" in report["delivery_quality_gate"]["evidence"]["warning_codes"]
+        assert report["final_closeout_gate"]["allowed"] is True
+
+
 def test_delivery_closeout_derives_quality_gate_from_artifact_validation_contract(tmp_path):
     output = tmp_path / "out.txt"
     output.write_text("finished artifact", encoding="utf-8")
@@ -776,7 +798,7 @@ def _write_file_archive_record() -> dict[str, object]:
     }
 
 
-def _args_hash_for_legacy_payload(payload: dict[str, object]) -> str:
+def _args_hash_for_runtime_tool_payload(payload: dict[str, object]) -> str:
     protocol_keys = {
         "artifact_refs",
         "call_id",

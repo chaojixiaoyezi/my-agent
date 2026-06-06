@@ -19,6 +19,26 @@ from agent_py_agent.agent.memory_archive.compact_work_state import (
 from agent_py_agent.tests.memory_compact_support import write_compact_fixture
 
 
+def _char_window(offset: int, chars: int, total: int) -> dict[str, object]:
+    return {
+        "kind": "char_window",
+        "offset": offset,
+        "chars": chars,
+        "next_offset": offset + chars,
+        "total_chars": total,
+    }
+
+
+def _line_window(start: int, end: int, total: int) -> dict[str, object]:
+    return {
+        "kind": "line_window",
+        "start_line": start,
+        "end_line": end,
+        "next_start_line": end + 1 if end < total else 0,
+        "total_lines": total,
+    }
+
+
 def test_memory_compact_work_state_reads_runtime_handoff(tmp_path: Path) -> None:
     """compact 应携带通用运行交接：最近引导和可见下级状态，而不是只恢复任务目标。"""
     root = tmp_path / "workspace"
@@ -244,6 +264,7 @@ def test_memory_compact_work_state_does_not_promote_succeeded_status_alias_read(
             "source_input": "/repo/status-alias.txt",
             "tool": "read_file",
             "status": "succeeded",
+            "read_window": _char_window(0, 100, 200),
             "size_bytes": 100,
         },
     )
@@ -301,6 +322,7 @@ def test_memory_compact_work_state_preserves_read_ranges_for_resume_cursor(tmp_p
             "scoped_call_id": "run-compact:1-1",
             "source_input": "/repo/data/long.txt",
             "tool": "read_file",
+            "read_window": _char_window(0, 50000, 180000),
             "size_bytes": 50000,
         },
         {
@@ -314,6 +336,7 @@ def test_memory_compact_work_state_preserves_read_ranges_for_resume_cursor(tmp_p
             "scoped_call_id": "run-compact:1-2",
             "source_input": "/repo/data/long.txt",
             "tool": "read_file",
+            "read_window": _char_window(50000, 50000, 180000),
             "size_bytes": 50000,
         },
         {
@@ -327,6 +350,7 @@ def test_memory_compact_work_state_preserves_read_ranges_for_resume_cursor(tmp_p
             "scoped_call_id": "run-compact:1-3",
             "source_input": "/repo/data/long.txt",
             "tool": "read_file",
+            "read_window": _char_window(100000, 50000, 180000),
             "size_bytes": 50000,
         },
     )
@@ -385,6 +409,7 @@ def test_memory_compact_work_state_keeps_read_coverage_when_tool_progress_is_cli
                 "scoped_call_id": f"run-compact:1-{index}",
                 "source_input": "/repo/data/long.txt",
                 "tool": "read_file",
+                "read_window": _char_window(offset, 1000, 70000),
                 "size_bytes": 1000,
             }
         )
@@ -507,6 +532,7 @@ def test_memory_compact_work_state_preserves_line_windows_for_resume_cursor(tmp_
             "scoped_call_id": "run-compact:1-1",
             "source_input": "/repo/data/line-log.txt",
             "tool": "read_file",
+            "read_window": _line_window(1, 200, 1000),
             "size_bytes": 50000,
         },
         {
@@ -520,6 +546,7 @@ def test_memory_compact_work_state_preserves_line_windows_for_resume_cursor(tmp_
             "scoped_call_id": "run-compact:1-2",
             "source_input": "/repo/data/line-log.txt",
             "tool": "read_file",
+            "read_window": _line_window(201, 400, 1000),
             "size_bytes": 50000,
         },
         {
@@ -533,6 +560,7 @@ def test_memory_compact_work_state_preserves_line_windows_for_resume_cursor(tmp_
             "scoped_call_id": "run-compact:1-3",
             "source_input": "/repo/data/line-log.txt",
             "tool": "read_file",
+            "read_window": _line_window(401, 600, 1000),
             "size_bytes": 50000,
         },
     )

@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+from ...backends.errors import is_empty_provider_response_error
 from .._runtime_params import ToolLoopExecuteParams
 
 
@@ -25,4 +26,4 @@ def empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
 
 
 def is_empty_model_response_error(exc: Exception) -> bool:
-    return "没有文本内容" in str(exc)
+    return is_empty_provider_response_error(exc)

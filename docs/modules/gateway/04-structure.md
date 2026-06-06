@@ -12,6 +12,7 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/gateway_parts/recovery.py`：processing 恢复，直接读取 `lease_service` 判断 heartbeat。
 - `agent/gateway_parts/http_handlers.py`：HTTP 入口。
 - `agent/gateway_parts/response_renderer.py`：响应渲染。
+- 旧 `chunk_service.py` / `context_tokens.py` facade 已删除；请求正文压缩、上下文显示和响应渲染走当前 request execution / renderer 主链路。
 - `cli/_gateway_*`、`cli/gateway_*`：启动、停止、状态、客户端命令。
 
 ## 路径

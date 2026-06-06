@@ -10,7 +10,7 @@ from ...models import SubAgentTask
 from ...policies import _is_active
 from ..recovery.strategy import SubagentRecoveryStrategyRequest, build_subagent_recovery_strategy
 
-RECOVERY_STATUSES = frozenset({"BLOCKED", "FAILED", "TIMEOUT", "ERROR", "CHANNEL_ERROR"})
+RECOVERY_STATUSES = frozenset({"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"})
 
 
 @dataclass(frozen=True)

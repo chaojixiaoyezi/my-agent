@@ -12,7 +12,7 @@ from typing import Any
 from ...local_storage.control_plane_models import AgentEventInput, AgentRunRecord
 from ..models import SubAgentTask
 
-_TAKEOVER_READINESS_STATUSES = {"BLOCKED", "FAILED", "TIMEOUT", "ERROR"}
+_TAKEOVER_READINESS_STATUSES = {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}
 
 
 def sync_subagent_control_plane_projection(local_store: Any, task: SubAgentTask) -> None:

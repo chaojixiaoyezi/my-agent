@@ -43,7 +43,7 @@ def test_hierarchy_schedule_infers_coordinator_role_from_tools(tmp_path):
     assert grandchild.role == "grandchild_coordinator"
 
 
-def test_hierarchy_schedule_applies_depth_agent_name_prefixes(tmp_path):
+def test_hierarchy_schedule_preserves_explicit_display_names(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root", thought="split", plan=["plan"], agent_name="root")
 
@@ -73,18 +73,18 @@ def test_hierarchy_schedule_applies_depth_agent_name_prefixes(tmp_path):
     )
     great_grandchild = manager.load(great_result.created_run_ids[0])
 
-    assert child.agent_name == "小傻妞-catalog-lead"
-    assert child.owner == "小傻妞-catalog-lead"
-    assert child_result.items[0].agent_name == "小傻妞-catalog-lead"
-    assert grandchild.agent_name == "小小傻妞-product-worker"
-    assert grandchild.owner == "小小傻妞-product-worker"
-    assert grand_result.items[0].agent_name == "小小傻妞-product-worker"
-    assert great_grandchild.agent_name == "小小小傻妞-sku-leaf"
-    assert great_grandchild.owner == "小小小傻妞-sku-leaf"
-    assert great_result.items[0].agent_name == "小小小傻妞-sku-leaf"
+    assert child.agent_name == "catalog-lead"
+    assert child.owner == "catalog-lead"
+    assert child_result.items[0].agent_name == "catalog-lead"
+    assert grandchild.agent_name == "小傻妞-product-worker"
+    assert grandchild.owner == "小傻妞-product-worker"
+    assert grand_result.items[0].agent_name == "小傻妞-product-worker"
+    assert great_grandchild.agent_name == "sku-leaf"
+    assert great_grandchild.owner == "sku-leaf"
+    assert great_result.items[0].agent_name == "sku-leaf"
 
 
-def test_hierarchy_schedule_advances_from_parent_lineage_prefix(tmp_path):
+def test_hierarchy_schedule_does_not_infer_depth_from_parent_display_name(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root", thought="split", plan=["plan"], agent_name="小傻妞-shop-root")
 
@@ -97,11 +97,11 @@ def test_hierarchy_schedule_advances_from_parent_lineage_prefix(tmp_path):
     )
     child = manager.load(result.created_run_ids[0])
 
-    assert child.agent_name == "小小傻妞-coord-r78"
-    assert result.items[0].agent_name == "小小傻妞-coord-r78"
+    assert child.agent_name == "coord-r78"
+    assert result.items[0].agent_name == "coord-r78"
 
 
-def test_hierarchy_schedule_repairs_bare_lineage_agent_name(tmp_path):
+def test_hierarchy_schedule_preserves_bare_explicit_display_name(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root", thought="split", plan=["plan"], agent_name="root")
     child = manager.create_run(
@@ -122,8 +122,8 @@ def test_hierarchy_schedule_repairs_bare_lineage_agent_name(tmp_path):
     )
     grandchild = manager.load(result.created_run_ids[0])
 
-    assert grandchild.agent_name == "小小傻妞-coordinator-1"
-    assert result.items[0].agent_name == "小小傻妞-coordinator-1"
+    assert grandchild.agent_name == "小小傻妞"
+    assert result.items[0].agent_name == "小小傻妞"
 
 
 def test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools(tmp_path):

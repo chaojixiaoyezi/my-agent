@@ -247,7 +247,7 @@ def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -
     assert "已交付" in result.response
     assert "blocking_run_ids" not in result.response
     records_by_depth = sorted(records, key=lambda item: (item.depth, item.agent_name))
-    assert [item.agent_name for item in records_by_depth] == ["小傻妞-家具总控", "小小傻妞-家具叶子"]
+    assert [item.agent_name for item in records_by_depth] == ["小傻妞-家具总控", "家具叶子"]
     assert {item.depth for item in records} == {1, 2}
     assert len(backend.runner.prompts) >= 3
     assert (site_dir / "index.html").exists()

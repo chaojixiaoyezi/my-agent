@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from difflib import SequenceMatcher
 
 from ..recovery_actions import RecoveryAction
 from ..state_machine_transitions import transition_contract
-from ..tool_name_resolution import suggested_tool_name
 from ..tool_protocol_v2 import normalize_tool_call, validate_tool_call
 from .models import GateDecision, GateFinding
 from .tool.effects import ToolGatePolicy, tool_effect_decision
+
+_SUGGESTION_THRESHOLD = 0.74
 
 
 def evaluate_tool_call_gate(
@@ -112,6 +114,34 @@ def _string_set(values: Iterable[str] | None) -> set[str] | None:
     if values is None:
         return None
     return {str(item).strip() for item in values if str(item).strip()}
+
+
+def suggested_tool_name(raw_name: object, available_tools: Iterable[str] | None) -> str:
+    """Return a single close suggestion for diagnostics; callers must not execute it automatically."""
+    raw = _normalized_tool_key(str(raw_name or ""))
+    available = _available_tool_names(available_tools)
+    if not raw or not available:
+        return ""
+    scored = sorted(
+        (
+            (SequenceMatcher(None, raw, _normalized_tool_key(name)).ratio(), name)
+            for name in available
+        ),
+        reverse=True,
+    )
+    if not scored or scored[0][0] < _SUGGESTION_THRESHOLD:
+        return ""
+    if len(scored) > 1 and scored[0][0] == scored[1][0]:
+        return ""
+    return scored[0][1]
+
+
+def _available_tool_names(values: Iterable[str] | None) -> set[str]:
+    return {str(item).strip() for item in values or [] if str(item).strip()}
+
+
+def _normalized_tool_key(value: str) -> str:
+    return value.strip().lower().replace("-", "_").replace(".", "_").replace("/", "_")
 
 
 __all__ = ["evaluate_state_transition_gate", "evaluate_tool_call_gate"]

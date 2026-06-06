@@ -45,6 +45,9 @@
 
 - 主代理 compact 读取当前 task workspace、owner memory、tool-output refs 和当前 run 状态。
 - 子代理 compact 读取自己的 task-local canonical state、events、artifact refs 和父级可见 guidance。
+- task workspace 查询只认当前 owner 下的 `tasks/<date>/<task-slug>/work/state.json` 和
+  `work/run_workspace.json`；根目录旧 `tasks/*/state.json`、旧 daily memory 和旧 root route index
+  不再作为当前 owner 的事实源。
 - `rollup_ledger.jsonl` 只在子代理状态签名变化时追加；心跳式保存不应制造新的 compact 包。
 - `read_file` / `read_artifact` 的恢复游标来自结构化工具记录；旧状态词、summary 和人工描述不能证明某段已经读过。
 - compact handoff 的 final/running 判断只读当前协议状态，不能用 `succeeded/completed` 这类别名补齐。
@@ -55,6 +58,8 @@
   work-state snapshot。
 - compact resume 的入口集中组装 consistency、recommended paths、handoff、completion prompt 和 continue
   packet；`completion.py`、`handoff.py`、`focus.py`、`failsafe.py`、`blocked.py`、`io.py` 分别保留为真实职责边界。
+- `compact_resume/focus.py`、`compact_state.py` 和 `compact_work_state/archive.py` 只消费结构化工具记录、
+  coverage/cursor/refs；普通 summary、next_action 或多语言状态词不能证明读取范围完成。
 - task-local fact 文件只读当前模板名：`ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md`、`failing_tests.json`。文件名必须精确匹配，不能因为 mac/Windows 大小写行为把旧小写文件当成当前事实源。
 
 ## Artifact And Raw Output

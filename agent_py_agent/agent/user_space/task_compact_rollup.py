@@ -10,7 +10,6 @@ from typing import Any
 from ..common.json_io import JsonObjectReadReport, read_json_object_report, write_json_object
 from .compact_layout import CompactPackageRequest, ensure_compact_package
 from .owner_compact_indexes import sync_owner_compact_indexes
-from .task_compact_index import current_or_first_compact_index
 from .task_compact_rollup_signature import RollupEventRequest, append_rollup_event_if_changed
 
 
@@ -138,18 +137,45 @@ def _rollup_payload(
 
 
 def _task_work_root(task_root: Path) -> Path:
-    work = task_root / "work"
-    return work if work.exists() else task_root
+    return task_root / "work"
+
+
+def current_or_first_compact_index(compact_root: Path) -> int:
+    latest = compact_root / "latest.txt"
+    if latest.exists():
+        parsed = compact_index_from_name(latest.read_text(encoding="utf-8").strip())
+        if parsed:
+            return parsed
+    latest_link = compact_root / "latest"
+    if latest_link.exists() or latest_link.is_symlink():
+        try:
+            parsed = compact_index_from_name(latest_link.resolve().name)
+        except OSError:
+            parsed = compact_index_from_name(latest_link.name)
+        if parsed:
+            return parsed
+    existing = sorted(compact_root.glob("compact_[0-9][0-9][0-9][0-9]"))
+    if existing:
+        return compact_index_from_name(existing[-1].name) or 1
+    return 1
+
+
+def compact_index_from_name(value: str) -> int:
+    text = str(value or "").strip()
+    if not text.startswith("compact_"):
+        return 0
+    try:
+        return int(text.rsplit("_", 1)[-1])
+    except ValueError:
+        return 0
 
 
 def _agents_root(task_root: Path) -> Path:
-    work_agents = task_root / "work" / "agents"
-    return work_agents if work_agents.exists() else task_root / "agents"
+    return task_root / "work" / "agents"
 
 
 def _task_state_path(task_root: Path) -> Path:
-    work_state = task_root / "work" / "state.json"
-    return work_state if work_state.exists() else task_root / "state.json"
+    return task_root / "work" / "state.json"
 
 
 def _work_state_payload(rollup: dict[str, object]) -> dict[str, object]:

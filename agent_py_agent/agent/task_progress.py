@@ -10,18 +10,12 @@ from typing import Any
 
 from .common.value_parsing import dedupe_strings, string_list
 from .runtime_errors import DataCorruptionError, runtime_error_report
-from .task_progress_coverage import (
-    coverage_from_update,
-    coverage_summary,
-    merge_coverage,
-    normalize_coverage,
-)
-from .task_progress_hints import quality_hints
 
 _SCHEMA_VERSION = "task_progress.v1"
 _KNOWN_STATUSES = ("pending", "in_progress", "done", "skipped", "blocked")
 _DONE_LIKE_STATUSES = {"done", "skipped"}
 _FACT_FIELDS = ("id", "title", "status", "notes", "result", "outcome", "conclusion", "decision", "summary")
+_RESULT_FIELDS = ("result", "outcome", "conclusion", "decision", "summary")
 _EXPLICIT_OVERWRITE_KEYS = ("correction", "overwrite", "replace")
 
 
@@ -167,6 +161,294 @@ def merge_task_progress(existing: dict[str, Any], update: dict[str, Any], *, run
     if coverage["targets"] or coverage["goal"] or coverage["dimensions"]:
         payload["coverage"] = coverage
     return payload
+
+
+def normalize_coverage(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_coverage = payload.get("coverage")
+    coverage = dict(raw_coverage) if isinstance(raw_coverage, dict) else {}
+    dimensions = string_list(coverage.get("dimensions"))
+    normalized_targets = [
+        target for item in _list(coverage.get("targets"))
+        if (target := _normalize_coverage_target(item))
+    ]
+    normalized = {
+        "goal": str(coverage.get("goal") or "").strip(),
+        "dimensions": dimensions,
+        "targets": normalized_targets,
+    }
+    requirement = str(coverage.get("coverage_requirement") or "").strip()
+    if requirement:
+        normalized["coverage_requirement"] = requirement
+    enforcement = str(coverage.get("enforcement") or "").strip()
+    if enforcement:
+        normalized["enforcement"] = enforcement
+    normalized["counts"] = _coverage_counts(normalized_targets)
+    return normalized
+
+
+def coverage_from_update(update: dict[str, Any]) -> dict[str, Any]:
+    return normalize_coverage(update)
+
+
+def merge_coverage(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    existing = normalize_coverage({"coverage": existing})
+    incoming = normalize_coverage({"coverage": incoming})
+    targets = _merge_coverage_targets(existing["targets"], incoming["targets"])
+    merged = {
+        "goal": incoming["goal"] or existing["goal"],
+        "dimensions": dedupe_strings([*existing["dimensions"], *incoming["dimensions"]]),
+        "targets": targets,
+    }
+    if incoming.get("coverage_requirement") or existing.get("coverage_requirement"):
+        merged["coverage_requirement"] = incoming.get("coverage_requirement") or existing.get("coverage_requirement")
+    if incoming.get("enforcement") or existing.get("enforcement"):
+        merged["enforcement"] = incoming.get("enforcement") or existing.get("enforcement")
+    merged["counts"] = _coverage_counts(targets)
+    return merged
+
+
+def coverage_summary(coverage: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_coverage({"coverage": coverage})
+    active = [target for target in normalized["targets"] if not _coverage_target_done(target)][:12]
+    summary = {
+        "goal": normalized["goal"],
+        "dimensions": normalized["dimensions"],
+        "counts": normalized["counts"],
+        "active_targets": [_coverage_target_summary(target) for target in active],
+    }
+    if normalized.get("coverage_requirement"):
+        summary["coverage_requirement"] = normalized["coverage_requirement"]
+    if normalized.get("enforcement"):
+        summary["enforcement"] = normalized["enforcement"]
+    return summary
+
+
+def _merge_coverage_targets(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id = {str(item.get("id") or ""): dict(item) for item in existing if str(item.get("id") or "")}
+    order = [str(item.get("id") or "") for item in existing if str(item.get("id") or "")]
+    for item in incoming:
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            continue
+        if item_id not in by_id:
+            order.append(item_id)
+            by_id[item_id] = item
+            continue
+        previous = by_id[item_id]
+        by_id[item_id] = {
+            **previous,
+            **{key: value for key, value in item.items() if value not in ("", [], {}, None)},
+            "checks": {**dict(previous.get("checks") or {}), **dict(item.get("checks") or {})},
+            "evidence": dedupe_strings([*string_list(previous.get("evidence")), *string_list(item.get("evidence"))]),
+        }
+        if _coverage_target_done(previous) and not _coverage_target_done(item):
+            by_id[item_id]["status"] = previous.get("status") or "done"
+            by_id[item_id]["checks"] = _preserve_done_checks(previous, by_id[item_id])
+    return [by_id[item_id] for item_id in order if item_id in by_id]
+
+
+def _preserve_done_checks(previous: dict[str, Any], merged: dict[str, Any]) -> dict[str, str]:
+    checks = dict(merged.get("checks") or {})
+    for key, status in dict(previous.get("checks") or {}).items():
+        if _done_like_status(status):
+            checks[key] = str(status)
+    return checks
+
+
+def _normalize_coverage_target(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    item = dict(value)
+    target_id = str(item.get("id") or "").strip()
+    title = str(item.get("title") or target_id).strip()
+    result = {
+        "id": target_id or _safe_id(title) or "target",
+        "title": title,
+        "status": str(item.get("status") or "pending").strip() or "pending",
+        "checks": _normalize_target_checks(item),
+        "evidence": string_list(item.get("evidence")),
+        "notes": str(item.get("notes") or "").strip(),
+        "next": str(item.get("next") or "").strip(),
+    }
+    for key in ("owner", "priority", "updated_at", "coverage_kind", "source_ref"):
+        if key in item:
+            result[key] = item[key]
+    return result
+
+
+def _normalize_target_checks(item: dict[str, Any]) -> dict[str, str]:
+    return _normalize_checks(item.get("checks"))
+
+
+def _normalize_checks(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key).strip(): str(status or "pending").strip() or "pending"
+        for key, status in value.items()
+        if str(key).strip()
+    }
+
+
+def _coverage_target_summary(target: dict[str, Any]) -> dict[str, Any]:
+    summary = {
+        "id": str(target.get("id") or ""),
+        "title": str(target.get("title") or ""),
+        "status": str(target.get("status") or ""),
+        "checks": dict(target.get("checks") or {}),
+        "next": str(target.get("next") or ""),
+    }
+    for key in ("coverage_kind", "source_ref"):
+        if target.get(key):
+            summary[key] = str(target.get(key) or "")
+    return summary
+
+
+def _coverage_counts(targets: list[dict[str, Any]]) -> dict[str, int]:
+    checks = [status for target in targets for status in dict(target.get("checks") or {}).values()]
+    return {
+        "targets_total": len(targets),
+        "targets_done": sum(1 for target in targets if _coverage_target_done(target)),
+        "targets_incomplete": sum(1 for target in targets if not _coverage_target_done(target)),
+        "checks_total": len(checks),
+        "checks_done": sum(1 for status in checks if _done_like_status(status)),
+        "checks_incomplete": sum(1 for status in checks if not _done_like_status(status)),
+    }
+
+
+def _coverage_target_done(target: dict[str, Any]) -> bool:
+    checks = dict(target.get("checks") or {})
+    if checks:
+        return all(_done_like_status(status) for status in checks.values())
+    return _done_like_status(target.get("status"))
+
+
+def quality_hints(
+    items: list[dict[str, Any]],
+    *,
+    incoming: list[dict[str, Any]] | None = None,
+    coverage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    coverage = normalize_coverage({"coverage": coverage or {}})
+    result_without_evidence = _items_with_result_without_evidence(items)
+    messages = _result_messages(result_without_evidence)
+    if incoming:
+        messages.extend(_incoming_messages(incoming))
+        incoming_coverage = normalize_coverage({"coverage": {"targets": incoming}})
+        if incoming_coverage["targets"] and not _has_explicit_coverage(coverage):
+            coverage = incoming_coverage
+    coverage_done_without_evidence = _coverage_done_without_evidence(coverage)
+    coverage_incomplete = _coverage_incomplete(coverage)
+    messages.extend(_coverage_messages(coverage_done_without_evidence, coverage_incomplete))
+    next_suggestions = _next_suggestions(
+        result_without_evidence=result_without_evidence,
+        coverage_done_without_evidence=coverage_done_without_evidence,
+        coverage_incomplete=coverage_incomplete,
+    )
+    return {
+        "severity": "soft",
+        "result_without_evidence_count": len(result_without_evidence),
+        "result_without_evidence_ids": result_without_evidence[:20],
+        "done_without_evidence_count": len(result_without_evidence),
+        "done_without_evidence_ids": result_without_evidence[:20],
+        "coverage_done_without_evidence_count": len(coverage_done_without_evidence),
+        "coverage_done_without_evidence_ids": coverage_done_without_evidence[:20],
+        "coverage_incomplete_count": len(coverage_incomplete),
+        "coverage_incomplete_ids": coverage_incomplete[:20],
+        "next_suggestions": next_suggestions,
+        "soft_prompt": _soft_prompt(next_suggestions),
+        "messages": dedupe_strings(messages),
+    }
+
+
+def _items_with_result_without_evidence(items: list[dict[str, Any]]) -> list[str]:
+    return [
+        str(item.get("id") or "")
+        for item in items
+        if _has_result_signal(item) and not string_list(item.get("evidence"))
+    ]
+
+
+def _coverage_done_without_evidence(coverage: dict[str, Any]) -> list[str]:
+    return [
+        str(target.get("id") or "")
+        for target in coverage.get("targets", [])
+        if _coverage_target_done(target) and not string_list(target.get("evidence"))
+    ]
+
+
+def _coverage_incomplete(coverage: dict[str, Any]) -> list[str]:
+    return [
+        str(target.get("id") or "")
+        for target in coverage.get("targets", [])
+        if not _coverage_target_done(target)
+    ]
+
+
+def _result_messages(result_without_evidence: list[str]) -> list[str]:
+    if not result_without_evidence:
+        return []
+    return [
+        "有些条目已经写了状态、结果或结论，但没有 evidence。建议补上看过的文件、产物路径、工具结果或简短证据引用；这只是软提醒，不会阻断任务。"
+    ]
+
+
+def _incoming_messages(incoming: list[dict[str, Any]]) -> list[str]:
+    batch_result_without_evidence = [
+        str(item.get("id") or "")
+        for item in incoming
+        if _has_result_signal(item) and not string_list(item.get("evidence"))
+    ]
+    if len(batch_result_without_evidence) < 3:
+        return []
+    return ["这次一次性写了多项状态、结果或结论，但缺少 evidence。长任务更稳的做法是边读、边分析、边写报告时同步更新进度和证据。"]
+
+
+def _coverage_messages(done_without_evidence: list[str], incomplete: list[str]) -> list[str]:
+    messages: list[str] = []
+    if done_without_evidence:
+        messages.append(
+            "覆盖清单里有对象看起来已完成，但缺少 evidence。建议补上读过的文件、资料来源或写入报告的位置；这只是软提醒，不会阻断任务。"
+        )
+    if incomplete:
+        messages.append(
+            "覆盖清单里还有对象没有逐项完成。建议继续补未完成对象；先读取或核对对应来源，记录证据，再把结论写进产物。"
+        )
+    return messages
+
+
+def _has_explicit_coverage(coverage: dict[str, Any]) -> bool:
+    return bool(
+        coverage.get("goal")
+        or coverage.get("dimensions")
+        or coverage.get("targets")
+    )
+
+
+def _has_result_signal(item: dict[str, Any]) -> bool:
+    return any(str(item.get(key) or "").strip() for key in _RESULT_FIELDS)
+
+
+def _next_suggestions(
+    *,
+    result_without_evidence: list[str],
+    coverage_done_without_evidence: list[str],
+    coverage_incomplete: list[str],
+) -> list[str]:
+    suggestions: list[str] = []
+    if coverage_incomplete:
+        suggestions.append("继续补未完成对象：先选一个未完成对象，读取或核对对应来源，再更新 checks/evidence。")
+    if result_without_evidence or coverage_done_without_evidence:
+        suggestions.append("补证据引用：不要只打勾；每个有状态、结果或结论的条目最好写一个文件路径、产物路径、工具结果或来源说明。")
+    if coverage_incomplete or result_without_evidence or coverage_done_without_evidence:
+        suggestions.append("写报告时同步推进账本：读过什么、分析了什么、写进报告哪里，都用 task_progress 轻量记录。")
+    return dedupe_strings(suggestions)
+
+
+def _soft_prompt(suggestions: list[str]) -> str:
+    if not suggestions:
+        return ""
+    return "软提醒，不会阻断任务：" + "；".join(suggestions)
 
 
 def _empty_progress(run_id: str) -> dict[str, Any]:

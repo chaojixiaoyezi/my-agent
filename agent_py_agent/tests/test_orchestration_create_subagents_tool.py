@@ -96,6 +96,28 @@ class TestCreateSubagentsToolExecute:
         # 应该最多只创建 max_subagents 个
         assert mock_agent.subagents.create_run.call_count <= 2
 
+    def test_count_mode_uses_single_child_when_count_missing(self):
+        """模型调用 create_subagents 但没传 count 时，保持单 child；多个 child 必须传 count 或 items。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_spawn_default_count = 4
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_task = MagicMock()
+        mock_task.id = "run_1"
+        mock_task.goal = ""
+        mock_task.status = "PENDING"
+        mock_task.verification_status = "PENDING"
+        mock_task.task_dir = "/tmp"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        result = CreateSubagentsTool(mock_agent).execute({"goal": "测试"})
+
+        assert result.ok is True
+        assert mock_agent.subagents.create_run.call_count == 1
+
     def test_count_mode_uses_agent_config_default_when_max_subagents_missing(self):
         """轻量配置对象缺少 max_subagents 时，count 模式也使用 AgentConfig 默认值。"""
         from types import SimpleNamespace

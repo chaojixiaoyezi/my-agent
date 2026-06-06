@@ -1,23 +1,29 @@
 
 from __future__ import annotations
 
+import re
+
 from .recovery_actions import RecoveryAction
+
+_APPROVAL_WAIT_CODES = {"APPROVAL_REQUIRED", "APPROVAL_NOT_FOUND", "APPROVAL_PENDING"}
 
 
 def action_status(status: str, code: str) -> str:
     upper_status = str(status or "").strip().upper()
-    if hard_stop_code(code):
+    normalized_code = _normalized_code(code)
+    if hard_stop_code(normalized_code):
         return "blocked"
-    if code.startswith("APPROVAL_") or code == "TOOL_NOT_ALLOWED" or upper_status in {"NEED_APPROVAL", "WAITING_HUMAN"}:
+    if normalized_code in _APPROVAL_WAIT_CODES or normalized_code == "TOOL_NOT_ALLOWED" or upper_status in {"NEED_APPROVAL", "WAITING_HUMAN"}:
         return "needs_user_input"
-    if upper_status == "RECOVERING" or recovering_code(code):
+    if upper_status == "RECOVERING" or recovering_code(normalized_code):
         return "recovering"
-    if upper_status in {"NEED_REPAIR", "DENY", "BLOCKED"} and repairable_code(code):
+    if upper_status in {"NEED_REPAIR", "DENY", "BLOCKED"} and repairable_code(normalized_code):
         return "repair_required"
     return "blocked"
 
 
 def repairable_code(code: str) -> bool:
+    code = _normalized_code(code)
     return code.startswith(
         (
             "ACCEPTANCE_",
@@ -62,6 +68,7 @@ def repairable_code(code: str) -> bool:
 
 
 def recovering_code(code: str) -> bool:
+    code = _normalized_code(code)
     return code.startswith(("AUDIT_", "RECOVERY_", "RUNLOG_", "SCOPE_")) or code in {
         "REQUEST_ID_MISSING",
         "RUN_ID_MISSING",
@@ -76,10 +83,20 @@ def recovering_code(code: str) -> bool:
 
 
 def hard_stop_code(code: str) -> bool:
-    return code in {"APPROVAL_REJECTED", "USER_CANCELLED", "STATE_CHECKSUM_MISMATCH"}
+    code = _normalized_code(code)
+    return code in {
+        "APPROVAL_ALREADY_USED",
+        "APPROVAL_BINDING_MISMATCH",
+        "APPROVAL_EXPIRED",
+        "APPROVAL_REJECTED",
+        "APPROVER_NOT_AUTHORIZED",
+        "STATE_CHECKSUM_MISMATCH",
+        "USER_CANCELLED",
+    }
 
 
 def recovery_category(code: str) -> str:
+    code = _normalized_code(code)
     if code.startswith(("ARTIFACT_", "BUILDER_", "DOCUMENT_", "DOCX_", "HTML_", "XLSX_", "CSV_", "JSON_", "PDF_", "MARKDOWN_", "SPREADSHEET_", "STATIC_SITE_")):
         return "artifact"
     if code.startswith(("EVIDENCE_", "FACT_", "METRIC_", "LANGUAGE_", "COLLABORATION_", "COLLECTION_", "TASK_PROGRESS_", "TARGET_COVERAGE_")):
@@ -98,6 +115,8 @@ def recovery_category(code: str) -> str:
 
 
 def recommended_action(code: str, status: str) -> str:
+    code = _normalized_code(code)
+    status = str(status or "").strip().lower()
     if status == "needs_user_input":
         return RecoveryAction.REQUEST_USER_INPUT.value
     if status == "recovering":
@@ -142,6 +161,13 @@ def next_status(status: str) -> str:
         "recovering": "RECOVERING",
         "blocked": "BLOCKED",
     }.get(status, "BLOCKED")
+
+
+def _normalized_code(code: str) -> str:
+    text = str(code or "").strip().upper()
+    if not re.match(r"^[A-Z0-9_-]+$", text):
+        return text
+    return text.replace("-", "_")
 
 
 __all__ = [

@@ -4,8 +4,8 @@ import json
 import time
 from pathlib import Path
 
-from agent_py_agent.agent.gateway_parts.chunk_service import close_chunk_stream
 from agent_py_agent.agent.gateway_parts.paths import GatewayPaths, gateway_chunk_path
+from agent_py_agent.agent.gateway_parts.request_execution import close_chunk_stream
 
 
 def _make_paths(tmp_path: Path) -> GatewayPaths:

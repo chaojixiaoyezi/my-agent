@@ -17,8 +17,6 @@ from ...runner.context import current_subagent_run_id
 from ..create_idempotency import dispatchable_tasks
 from ..dispatch.params import DispatchExecutionPlan, DispatchParams
 from ..dispatch.tool_helpers import _dispatch_capability_config
-from .launch_health import mark_background_channel_failure, process_startup_returncode
-from .marks import attach_mark_errors, mark_background_start
 
 
 @dataclass(frozen=True)
@@ -159,6 +157,79 @@ def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchReques
     except Exception:
         log_handle.close()
         raise
+
+
+def process_startup_returncode(process: subprocess.Popen) -> int | None:
+    poll = getattr(process, "poll", None)
+    if not callable(poll):
+        return None
+    for index in range(6):
+        returncode = poll()
+        if returncode is not None:
+            return int(returncode)
+        if index < 5:
+            time.sleep(0.05)
+    return None
+
+
+def mark_background_channel_failure(request: _BackgroundDispatchRequest, *, error: str) -> list[dict[str, object]]:
+    manager = getattr(getattr(request, "agent", None), "subagents", None)
+    mark_errors: list[dict[str, object]] = []
+    for run_id in request.run_ids:
+        try:
+            task = manager.load(run_id)
+            task.status = "CHANNEL_ERROR"
+            task.channel_status = "BROKEN"
+            task.failure_type = "background_dispatch_startup"
+            task.result = error
+            task.updated_at = time.time()
+            manager.save(task)
+        except Exception as exc:
+            mark_errors.append(
+                {"run_id": str(run_id), **runtime_error_report(exc, context="background_dispatch.channel_failure.save")}
+            )
+    return mark_errors
+
+
+def mark_background_start(
+    request: _BackgroundDispatchRequest,
+    *,
+    status: str,
+    error: str = "",
+) -> list[dict[str, object]]:
+    now = time.time()
+    manager = getattr(getattr(request, "agent", None), "subagents", None)
+    mark_errors: list[dict[str, object]] = []
+    for run_id in list(getattr(request, "run_ids", []) or []):
+        try:
+            task = manager.load(run_id)
+        except Exception as exc:
+            mark_errors.append(_background_mark_error(str(run_id), exc, "background_dispatch.mark_start.load"))
+            continue
+        if getattr(task, "id", "") != run_id:
+            continue
+        attrs = dict(getattr(task, "attributes", {}) or {})
+        attrs["background_start"] = {
+            "launch_id": str(getattr(request, "launch_id", "") or ""),
+            "status": status,
+            "updated_at": now,
+            "error": error,
+        }
+        task.attributes = attrs
+        try:
+            manager.save(task)
+        except Exception as exc:
+            mark_errors.append(_background_mark_error(str(run_id), exc, "background_dispatch.mark_start.save"))
+    return mark_errors
+
+
+def attach_mark_errors(payload: dict[str, object], errors: list[dict[str, object]]) -> None:
+    if errors:
+        payload["background_mark_errors"] = errors
+
+
+def _background_mark_error(run_id: str, exc: BaseException, context: str) -> dict[str, object]:
+    return {"run_id": run_id, **runtime_error_report(exc, context=context)}
 
 
 def _background_dispatch_command(agent, request: _BackgroundDispatchRequest) -> list[str]:

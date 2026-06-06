@@ -28,10 +28,10 @@ Baseline: `0c9bbc48` (`2026-06-01 09:56:51 +0800`). This audit lists hard gates 
 ## Convert To Softer Runtime Behavior
 
 1. `runner_timeout_seconds` / `runner_timeout_by_role`
-   - New hard behavior: default `auto` with `worker=300`, `tester=300`, `coordinator=600`, `root=600`, `default=300`.
+   - Historical hard behavior: a short-lived default used `auto` with `worker=300`, `tester=300`, `coordinator=600`, `root=600`, `default=300`.
    - Observed problem: deep source-reading subagents timed out after about 300 seconds even though they were still doing real work.
    - Decision: default back to no outer total-deadline. Use heartbeat, status, `cancel_subagents`, and takeover for stuck runs.
-   - Status: changed to `runner_timeout_seconds: "off"` and empty `runner_timeout_by_role`.
+   - Current status: `runner_timeout_seconds: "off"` and empty `runner_timeout_by_role`; accepted config values are `off`, `auto`, or a non-negative number.
 
 2. `agent_py_agent/agent/agent_core/orchestration/create_active_guard.py`
    - New hard behavior: if the current task already had active children, second-batch `create_subagents` was rejected unless explicitly marked additional/replacement.

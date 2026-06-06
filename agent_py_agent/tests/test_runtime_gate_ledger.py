@@ -296,7 +296,7 @@ def test_write_boundary_injects_tool_rate_limit_records(tmp_path):
     )
 
 
-def test_write_boundary_carries_current_task_workspace_aliases(tmp_path):
+def test_write_boundary_carries_current_task_workspace_roots(tmp_path):
     task_root = tmp_path / "home" / "tasks" / "today" / "task"
     params = _loop_params(
         write_boundary={},

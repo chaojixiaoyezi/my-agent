@@ -1,15 +1,7 @@
-
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
 from typing import Any
-
-CHAR_WINDOW_RE = re.compile(r"\[char-window offset=(\d+) chars=(\d+) total_chars=(\d+)\]")
-LINE_NUMBER_RE = re.compile(r"^(\d+):\s", re.MULTILINE)
-TOTAL_LINES_RE = re.compile(r"total_lines=(\d+)")
-NEXT_START_LINE_RE = re.compile(r"next_start_line=(\d+)")
 
 
 def collect_target_coverage_records(
@@ -38,7 +30,7 @@ def target_coverage_status(
         if not _target_is_covered(item, coverage_records, contract=contract, base=base)
     ]
     enforcement = _coverage_enforcement(contract, targets)
-    should_block = bool(missing) and enforcement in {"required", "strict", "hard", "block", "blocking", "enforced"}
+    should_block = bool(missing) and enforcement == "required"
     repair_hints = _repair_hints(missing, coverage_records, base=base)
     return {
         "scope_label": str(contract.get("scope_label") or ""),
@@ -168,122 +160,47 @@ def _tool_call_coverage_record(value: dict[str, object], base: Path | None) -> d
 
 
 def _read_file_window_fields(value: dict[str, object], source: str, base: Path | None) -> dict[str, object]:
-    text = _tool_output_text(value)
-    metadata = _char_window_metadata(text)
-    if not metadata:
-        return _line_window_fields(text, value, source, base)
-    start = metadata["offset"]
-    end = start + metadata["chars"]
-    total = metadata["total_chars"]
-    return {
-        "coverage_kind": "char_window",
-        "status": "covered" if start == 0 and end >= total else "partial",
-        "start_offset": start,
-        "end_offset": end,
-        "total_chars": total,
-    }
+    del source, base
+    if fields := _structured_read_window_fields(value):
+        return fields
+    return {}
 
 
-def _line_window_fields(text: str, value: dict[str, object], source: str, base: Path | None) -> dict[str, object]:
-    metadata = _line_window_metadata(text, value, source, base)
-    if not metadata:
+def _structured_read_window_fields(value: dict[str, object]) -> dict[str, object]:
+    window = value.get("read_window")
+    if not isinstance(window, dict):
+        envelope = value.get("tool_result_envelope")
+        window = envelope.get("read_window") if isinstance(envelope, dict) else {}
+    if not isinstance(window, dict):
         return {}
-    start = metadata["start_line"]
-    end = metadata["end_line"]
-    total = metadata["total_lines"]
-    return {
-        "coverage_kind": "line_window",
-        "status": "covered" if total > 0 and start == 1 and end >= total else "partial",
-        "start_line": start,
-        "end_line": end,
-        "total_lines": total,
-    }
-
-
-def _tool_output_text(value: dict[str, object]) -> str:
-    inline = _inline_output_text(value)
-    if inline:
-        return inline
-    return _artifact_output_text(value)
-
-
-def _inline_output_text(value: dict[str, object]) -> str:
-    for key in ("output", "content", "text", "result", "output_preview"):
-        item = value.get(key)
-        if isinstance(item, str) and item:
-            return item
-    return ""
-
-
-def _artifact_output_text(value: dict[str, object]) -> str:
-    for key in ("source_artifact_ref", "source_output_path", "artifact_ref", "output_path", "path"):
-        text = _read_tool_output_artifact(value.get(key))
-        if text:
-            return text
-    return ""
-
-
-def _read_tool_output_artifact(value: object) -> str:
-    path = _safe_artifact_path(value)
-    if path is None:
-        return ""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ""
-    if not isinstance(payload, dict):
-        return ""
-    for key in ("content", "output", "text", "result", "output_preview"):
-        item = payload.get(key)
-        if isinstance(item, str) and item:
-            return item
-    return ""
-
-
-def _safe_artifact_path(value: object, base: Path | None = None) -> Path | None:
-    text = str(value or "").strip()
-    if not text or "://" in text:
-        return None
-    try:
-        path = Path(text).expanduser()
-        if not path.is_absolute() and base is not None:
-            path = base / path
-        path = path.resolve(strict=False)
-    except OSError:
-        return None
-    return path if path.is_file() else None
-
-
-def _char_window_metadata(text: str) -> dict[str, int]:
-    if not text:
-        return {}
-    match = CHAR_WINDOW_RE.search(text)
-    if not match:
-        return {}
-    offset, chars, total = (int(item) for item in match.groups())
-    return {"offset": offset, "chars": chars, "total_chars": total}
-
-
-def _line_window_metadata(text: str, value: dict[str, object], source: str, base: Path | None) -> dict[str, int]:
-    parameters = value.get("parameters")
-    params = parameters if isinstance(parameters, dict) else {}
-    line_numbers = [int(match.group(1)) for match in LINE_NUMBER_RE.finditer(text or "")]
-    explicit_start = _optional_positive_int(params.get("start_line"))
-    explicit_end = _optional_positive_int(params.get("end_line"))
-    next_start = _regex_int(NEXT_START_LINE_RE, text)
-    total = _regex_int(TOTAL_LINES_RE, text) or _source_line_count(source, base)
-    has_line_shape = bool(line_numbers or explicit_start or explicit_end or next_start)
-    if not has_line_shape:
-        return {}
-    start = line_numbers[0] if line_numbers else (explicit_start or 1)
-    end = line_numbers[-1] if line_numbers else (explicit_end or 0)
-    if next_start:
-        end = min(end or next_start - 1, next_start - 1)
-    if explicit_end and not next_start:
-        end = min(end or explicit_end, explicit_end)
-    if end <= 0:
-        return {}
-    return {"start_line": start, "end_line": end, "total_lines": total}
+    kind = str(window.get("kind") or "").strip()
+    if kind == "char_window":
+        offset = _optional_positive_or_zero_int(window.get("offset"))
+        next_offset = _optional_positive_or_zero_int(window.get("next_offset"))
+        total = _optional_positive_or_zero_int(window.get("total_chars"))
+        if offset is None or next_offset is None or total is None:
+            return {}
+        return {
+            "coverage_kind": "char_window",
+            "status": "covered" if offset == 0 and next_offset >= total else "partial",
+            "start_offset": offset,
+            "end_offset": next_offset,
+            "total_chars": total,
+        }
+    if kind == "line_window":
+        start = _optional_positive_int(window.get("start_line"))
+        end = _optional_positive_or_zero_int(window.get("end_line"))
+        total = _optional_positive_or_zero_int(window.get("total_lines"))
+        if start <= 0 or end is None or total is None:
+            return {}
+        return {
+            "coverage_kind": "line_window",
+            "status": "covered" if total > 0 and start == 1 and end >= total else "partial",
+            "start_line": start,
+            "end_line": end,
+            "total_lines": total,
+        }
+    return {}
 
 
 def _optional_positive_int(value: object) -> int:
@@ -294,25 +211,12 @@ def _optional_positive_int(value: object) -> int:
     return number if number > 0 else 0
 
 
-def _regex_int(pattern: re.Pattern[str], text: str) -> int:
-    match = pattern.search(text or "")
-    if not match:
-        return 0
+def _optional_positive_or_zero_int(value: object) -> int | None:
     try:
-        return int(match.group(1))
-    except ValueError:
-        return 0
-
-
-def _source_line_count(source: str, base: Path | None) -> int:
-    path = _safe_artifact_path(source, base)
-    if path is None:
-        return 0
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            return sum(1 for _ in handle)
-    except OSError:
-        return 0
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
 
 
 def _merge_read_file_windows(records: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -478,13 +382,16 @@ def _target_requires_full_source_read(item: dict[str, str], contract: dict[str, 
 
 def _coverage_enforcement(contract: dict[str, Any], targets: list[dict[str, str]]) -> str:
     top_level = str(contract.get("enforcement") or "").strip().lower()
-    if top_level:
-        return top_level
-    item_values = [str(item.get("enforcement") or "").strip().lower() for item in targets]
-    required_values = {"required", "strict", "hard", "block", "blocking", "enforced"}
-    if any(value in required_values for value in item_values):
+    if top_level == "required":
         return "required"
-    return next((value for value in item_values if value), "advisory")
+    if top_level == "advisory":
+        return top_level
+    if top_level:
+        return "advisory"
+    item_values = [str(item.get("enforcement") or "").strip().lower() for item in targets]
+    if any(value == "required" for value in item_values):
+        return "required"
+    return "advisory"
 
 
 def _full_source_read_record_counts(record: dict[str, object]) -> bool:

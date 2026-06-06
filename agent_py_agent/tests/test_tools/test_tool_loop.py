@@ -19,6 +19,7 @@ from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     execute_tool_round,
 )
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.backends.errors import ProviderResponseError
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling import ToolExecutionResult
@@ -104,7 +105,7 @@ class _EmptyAfterToolBackend:
                 text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
                 backend=self.name,
             )
-        raise RuntimeError("Anthropic-compatible 流式响应没有文本内容")
+        raise ProviderResponseError("Anthropic-compatible 流式响应没有文本内容", error_code="MODEL_EMPTY_RESPONSE")
 
 
 class _EmptyThenFinalAfterToolBackend:
@@ -121,7 +122,7 @@ class _EmptyThenFinalAfterToolBackend:
                 backend=self.name,
             )
         if self.calls == 2:
-            raise RuntimeError("Anthropic-compatible 流式响应没有文本内容")
+            raise ProviderResponseError("Anthropic-compatible 流式响应没有文本内容", error_code="MODEL_EMPTY_RESPONSE")
         assert "上一轮模型接口返回了空文本" in prompt
         assert "hello empty repair" in prompt
         return ModelResponse(text="已根据工具结果继续完成。", backend=self.name)
@@ -254,7 +255,7 @@ def test_tool_loop_reports_empty_final_model_response_after_retry():
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _EmptyAfterToolBackend()
 
-        with pytest.raises(RuntimeError, match="流式响应没有文本内容"):
+        with pytest.raises(ProviderResponseError, match="流式响应没有文本内容"):
             agent.run("读取 notes 后总结", save=False, allowed_tools=["read_file"])
         assert agent.backend.calls == 3
 

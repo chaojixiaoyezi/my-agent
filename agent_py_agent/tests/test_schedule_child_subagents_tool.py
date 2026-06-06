@@ -11,7 +11,7 @@ from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 
 
-def test_runner_context_schedule_bare_lineage_name_returns_payload_not_index_error(tmp_path):
+def test_runner_context_schedule_bare_display_name_returns_payload_not_index_error(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
     child = agent.subagents.create_run(
@@ -36,7 +36,7 @@ def test_runner_context_schedule_bare_lineage_name_returns_payload_not_index_err
 
     assert result.ok is True
     assert payload["created_run_ids"]
-    assert agent.subagents.load(payload["created_run_ids"][0]).agent_name == "小小傻妞-coordinator-1"
+    assert agent.subagents.load(payload["created_run_ids"][0]).agent_name == "小小傻妞"
 
 
 def test_schedule_load_failure_reports_recoverable_error_instead_of_dropping_child():

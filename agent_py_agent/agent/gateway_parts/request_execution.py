@@ -7,6 +7,7 @@ Gateway responses expose both per-turn and cumulative token estimates. CLI/TUI
 status should use the cumulative field when showing current context pressure.
 """
 
+import json
 import threading
 import time
 from dataclasses import dataclass
@@ -20,7 +21,6 @@ from .audit_service import (
     audit_request_completed,
     audit_request_processing,
 )
-from .chunk_service import close_chunk_stream, open_chunk_stream, write_chunk
 from .io import gateway_response_path, read_json_file, read_json_file_report
 from .lease_service import refresh_processing_lease, start_lease_heartbeat
 from .paths import gateway_chunk_path, gateway_paths
@@ -32,6 +32,26 @@ if TYPE_CHECKING:
     from ...core import SimpleAgent
 
 _EMPTY_PROMPT_MESSAGE = "gateway ask prompt/goal cannot be empty"
+
+
+def open_chunk_stream(chunk_path: Path) -> tuple[Path, float]:
+    chunk_path.parent.mkdir(parents=True, exist_ok=True)
+    return chunk_path, time.time()
+
+
+def write_chunk(chunk_path: Path, text: str) -> None:
+    try:
+        line = json.dumps({"t": time.time(), "text": text}, ensure_ascii=False)
+        with open(chunk_path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
+
+
+def close_chunk_stream(chunk_path: Path) -> None:
+    # Keep the chunk file after completion so clients that observe the final
+    # response first can still drain the last streamed tokens.
+    return
 
 
 @dataclass(frozen=True)

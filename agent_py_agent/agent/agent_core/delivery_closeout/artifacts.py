@@ -13,9 +13,13 @@ from ...artifacts.registry import (
     registry_path,
     resolve_artifact_record_report,
 )
-from ...contracts.artifact_acceptance import validation_workspace_root_for_item
-from ...contracts.artifact_format_lint import lint_artifact_format
+from ...contracts.artifact_acceptance import (
+    ArtifactAcceptanceRequest,
+    validate_artifact,
+    validation_workspace_root_for_item,
+)
 from ...contracts.gates import artifact_provenance_from_archive
+from ...contracts.staged_checkpoint_acceptance import staged_checkpoint_findings
 from ..artifact_locator import locate_artifact
 from ..target_coverage_ledger import collect_target_coverage_records, target_coverage_status
 from .artifact_models import (
@@ -28,11 +32,6 @@ from .groups import (
     _artifact_path,
     validate_artifact_group_record,
 )
-from .registry_errors import (
-    registry_read_errors_from_artifacts,
-    with_registry_read_errors,
-)
-from .staged_findings import with_staged_checkpoint_findings
 
 CLOSEOUT_DIR = ".agent_delivery"
 CLOSEOUT_REPORT = "closeout.json"
@@ -121,6 +120,29 @@ def _request_archive_tool_calls(request: DeliveryContractValidationRequest) -> l
     return list(getattr(request.params, "archive_tool_calls", []) or [])
 
 
+def registry_read_errors_from_artifacts(results: list[dict[str, Any]]) -> list[dict[str, object]]:
+    errors: list[dict[str, object]] = []
+    for item in results:
+        value = item.get("registry_read_errors")
+        if isinstance(value, list):
+            errors.extend(error for error in value if isinstance(error, dict))
+    return errors
+
+
+def with_registry_read_errors(
+    artifact_report: dict[str, Any],
+    errors: list[dict[str, object]],
+) -> dict[str, Any]:
+    if not errors:
+        return artifact_report
+    updated = dict(artifact_report)
+    updated["registry_read_errors"] = errors
+    acceptance = updated.get("acceptance_report")
+    if isinstance(acceptance, dict):
+        updated["acceptance_report"] = {**acceptance, "registry_read_errors": errors}
+    return updated
+
+
 def _existing_report(workspace_root: Path) -> dict[str, Any]:
     path = workspace_root / CLOSEOUT_DIR / CLOSEOUT_REPORT
     if not path.exists():
@@ -179,10 +201,12 @@ def _validate_artifact_item(
 
 
 def _validated_artifact_from_path(request: ArtifactValidationReportRequest) -> dict[str, Any]:
-    report = lint_artifact_format(
-        path=request.path,
-        workspace_root=validation_workspace_root_for_item(request.item, request.path, request.workspace_root),
-        validation_contract=_validation_contract(request.item),
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=request.path,
+            workspace_root=validation_workspace_root_for_item(request.item, request.path, request.workspace_root),
+            validation_contract=_validation_contract(request.item),
+        )
     ).to_dict()
     report = with_staged_checkpoint_findings(report, request.item, request.workspace_root)
     registry_record = request.registry_record
@@ -217,6 +241,38 @@ def _validated_artifact_from_path(request: ArtifactValidationReportRequest) -> d
         workspace_root=request.workspace_root,
     )
     return artifact
+
+
+def with_staged_checkpoint_findings(
+    report: dict[str, Any],
+    item: dict[str, Any],
+    workspace_root: Path,
+) -> dict[str, Any]:
+    staged_findings = staged_checkpoint_findings([item], workspace_root)
+    if not staged_findings:
+        return report
+    findings = report.get("findings")
+    merged_findings = list(findings) if isinstance(findings, list) else []
+    merged_findings.extend(_public_staged_finding(finding) for finding in staged_findings)
+    updated = dict(report)
+    updated["findings"] = merged_findings
+    updated["ok"] = bool(report.get("ok"))
+    return updated
+
+
+def _public_staged_finding(finding: dict[str, object]) -> dict[str, str]:
+    public_keys = {"code", "severity", "message", "location", "value"}
+    details = {key: value for key, value in finding.items() if key not in public_keys}
+    value = finding.get("value")
+    if value is None and details:
+        value = json.dumps(details, ensure_ascii=False, sort_keys=True)
+    return {
+        "code": str(finding.get("code") or ""),
+        "severity": "warning",
+        "message": str(finding.get("message") or ""),
+        "location": str(finding.get("location") or ""),
+        "value": str(value or ""),
+    }
 
 
 def _registry_record_for_item(

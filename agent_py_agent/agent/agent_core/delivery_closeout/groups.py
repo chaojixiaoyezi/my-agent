@@ -10,7 +10,7 @@ from ...artifacts.registry import (
     ArtifactRegistryRecord,
     register_artifact_group,
 )
-from ...contracts.artifact_format_lint import lint_artifact_format
+from ...contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from ...contracts.gates import artifact_provenance_from_archive
 
 
@@ -86,10 +86,12 @@ def _member_reports(
     valid_paths: list[Path],
 ) -> list[dict[str, Any]]:
     return [
-        lint_artifact_format(
-            path=path,
-            workspace_root=workspace_root,
-            validation_contract=_member_validation_contract(item, path),
+        validate_artifact(
+            ArtifactAcceptanceRequest(
+                path=path,
+                workspace_root=workspace_root,
+                validation_contract=_member_validation_contract(item, path),
+            )
         ).to_dict()
         for path in valid_paths
     ]

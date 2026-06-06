@@ -16,9 +16,10 @@ from agent_py_agent.agent.user_space.task_compact_rollup import sync_task_compac
 
 def test_task_workspace_payload_exposes_compact_rollup_refs(tmp_path: Path) -> None:
     home = tmp_path / "home"
+    owner_home = home / "owners" / "local" / "main"
     paths = ensure_run_workspace(
         EnsureRunWorkspaceRequest(
-            home=home,
+            home=owner_home,
             template="tasks/{date}/{task_slug}",
             task_name="多子代理恢复",
             user_prompt="恢复多子代理任务",
@@ -41,9 +42,10 @@ def test_task_workspace_payload_exposes_compact_rollup_refs(tmp_path: Path) -> N
 
 def test_task_workspace_payload_reports_broken_compact_latest_pointer(tmp_path: Path) -> None:
     home = tmp_path / "home"
+    owner_home = home / "owners" / "local" / "main"
     paths = ensure_run_workspace(
         EnsureRunWorkspaceRequest(
-            home=home,
+            home=owner_home,
             template="tasks/{date}/{task_slug}",
             task_name="多子代理恢复",
             user_prompt="恢复多子代理任务",

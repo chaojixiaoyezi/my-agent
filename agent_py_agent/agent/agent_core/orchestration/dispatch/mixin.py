@@ -92,9 +92,7 @@ class _DispatchFailureMixin:
             analyzer = SubAgentFailureAnalyzer()
             failure_analysis = analyzer.analyze(task, runner_result)
 
-            from ...failure_introspector import FailureIntrospector
-
-            introspector = FailureIntrospector(agent=self)
+            introspector = FailureIntrospector()
             introspection = introspector.introspect(task, runner_result, failure_analysis)
 
             task.attributes["failure_introspection_data"] = {
@@ -129,7 +127,7 @@ class _DispatchFailureMixin:
         if applied:
             import logging
 
-            logging.getLogger(__name__).info(f"Applied LLM introspection params to {task.id}: {applied}")
+            logging.getLogger(__name__).info(f"Applied failure introspection params to {task.id}: {applied}")
         return task
 
     def _update_pending_work_state(self) -> None:

@@ -57,6 +57,28 @@ def test_task_compact_rollup_keeps_completed_alias_pending(tmp_path: Path) -> No
     assert continue_packet["pending_work"] == ["agent-old: COMPLETED"]
 
 
+def test_task_compact_rollup_ignores_legacy_root_state_json(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.task_compact_rollup import sync_task_compact_rollup
+
+    task_root = tmp_path / "tasks" / "task-root"
+    work = task_root / "work"
+    work.mkdir(parents=True)
+    (task_root / "state.json").write_text(
+        json.dumps({"task_id": "legacy-task", "status": "DONE", "progress": 1.0}),
+        encoding="utf-8",
+    )
+    (work / "state.json").write_text(
+        json.dumps({"task_id": "current-task", "status": "RUNNING", "progress": 0.4}),
+        encoding="utf-8",
+    )
+
+    result = sync_task_compact_rollup(task_root)
+
+    rollup = json.loads(result.rollup_json.read_text(encoding="utf-8"))
+    assert rollup["task_id"] == "current-task"
+    assert rollup["status"] == "RUNNING"
+
+
 def test_task_compact_rollup_reports_corrupt_child_state(tmp_path: Path) -> None:
     from agent_py_agent.agent.user_space.task_compact_rollup import sync_task_compact_rollup
 

@@ -340,7 +340,7 @@ def _register_site_group(tmp_path: Path, site: Path) -> None:
     )
 
 
-def test_subagent_file_path_alias_is_not_recovered_as_artifact_item():
+def test_subagent_file_path_field_is_not_recovered_as_artifact_item():
     from agent_py_agent.agent.subagents.parsing.artifacts import artifact_items_from_payload
 
     items = artifact_items_from_payload(
@@ -367,7 +367,7 @@ def test_subagent_structured_artifact_registers_registry_ref(mock_task, tmp_path
     mock_task.task_dir = str(task_dir)
     mock_task.output_dir = str(task_dir)
     mock_task.reports_dir = str(task_dir / "reports")
-    mock_task.attributes = {}
+    mock_task.attributes = {"workspace_root": str(tmp_path)}
 
     result = _process_structured_output(
         mock_task,
@@ -388,7 +388,7 @@ def test_subagent_structured_artifact_registers_registry_ref(mock_task, tmp_path
 
 
 def test_write_file_result_exposes_machine_path_for_registry(tmp_path: Path):
-    from agent_py_agent.agent.tooling.filesystem import WriteFileTool
+    from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
 
     result = WriteFileTool(tmp_path).execute({"path": "outputs/report.md", "content": "hello"})
 
@@ -402,7 +402,7 @@ def test_tool_archive_registers_write_file_artifact(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_call_archive_record import archive_tool_call_record
     from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
     from agent_py_agent.agent.artifacts.registry import latest_artifact_records
-    from agent_py_agent.agent.tooling.filesystem import WriteFileTool
+    from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
 
     result = WriteFileTool(tmp_path).execute({"path": "outputs/report.md", "content": "hello"})
     params = _empty_tool_loop_params()

@@ -332,6 +332,17 @@ class TestTaskLockManager(unittest.TestCase):
         self.assertEqual(manager.get_active_locks(), [])
         self.assertEqual(manager.cleanup(), 0)
 
+    def test_task_lock_string_off_is_not_a_machine_disable_value(self):
+        """保护性锁开关只接受明确 false/0；off/no 不再作为兜底禁用值。"""
+        class MockConfig:
+            concurrency_lock_enabled = "off"
+            task_lock_timeout_seconds = 1
+
+        manager = TaskLockManager(MockConfig())
+        manager.acquire_read("task-1")
+        self.assertEqual(manager.get_active_locks(), ["task-1"])
+        manager.release_read("task-1")
+
     def test_with_lock_exception_handling(self):
         """测试锁内函数抛出异常时锁也会释放。"""
         def raise_error():

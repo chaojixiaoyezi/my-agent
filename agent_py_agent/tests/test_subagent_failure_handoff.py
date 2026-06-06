@@ -40,6 +40,22 @@ def test_subagent_save_writes_failure_handoff_for_failed_run(tmp_path) -> None:
     assert projected.metadata["failure_handoff_ref"] == loaded.failure_handoff_json
 
 
+def test_subagent_save_does_not_write_failure_handoff_for_error_status_alias(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="旧状态别名不驱动失败交接",
+        thought="ERROR 不是当前子代理状态协议。",
+        plan=["保存", "确认不生成 failure handoff"],
+    )
+    task.status = "ERROR"
+    manager.save(task)
+
+    loaded = manager.load(task.id)
+
+    assert loaded.failure_handoff.run_id == ""
+    assert not Path(loaded.failure_handoff_json).exists()
+
+
 def test_subagent_save_removes_failure_handoff_after_successful_retry(tmp_path) -> None:
     manager = SubAgentManager(tmp_path / "subagents")
     task = manager.create_run(

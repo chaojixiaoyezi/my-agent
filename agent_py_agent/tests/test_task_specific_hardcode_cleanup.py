@@ -9,9 +9,6 @@ from agent_py_agent.agent.contracts.sample_neutrality import (
     find_sample_neutrality_violations,
 )
 from agent_py_agent.agent.subagents.policies import _default_forbidden_write_roots as policy_roots
-from agent_py_agent.agent.subagents.policy_checks import (
-    _default_forbidden_write_roots as check_roots,
-)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -111,5 +108,4 @@ def test_hierarchy_domain_stopwords_are_user_and_task_neutral() -> None:
 
 
 def test_default_forbidden_write_roots_do_not_hardcode_reference_project_dirs() -> None:
-    for roots in (policy_roots(), check_roots()):
-        assert all(not str(root).endswith(".openclaw") for root in roots)
+    assert all(not str(root).endswith(".openclaw") for root in policy_roots())

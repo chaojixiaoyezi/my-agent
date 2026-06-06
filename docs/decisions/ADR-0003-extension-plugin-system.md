@@ -39,7 +39,7 @@ Extensions are discovered via entry points or explicit registration in `agent/ex
 - Clear contract: extensions know what they can register.
 - Core depends on interface; extensions can be replaced without core changes.
 - Discovery mechanism: new extensions found automatically.
-- Initial refactoring: existing log_analysis must be restructured into LogAnalysisPlugin.
+- Current log_analysis security tools register through the canonical tool registry bootstrap; do not keep an unused LogAnalysisPlugin facade before extension discovery is wired.
 - Extensions must not add top-level runtime directories or import from `cli/` directly.
 
 ### References

@@ -1,4 +1,4 @@
-"""Focused tests for fixed 小傻妞 lineage naming contracts."""
+"""Focused tests for default subagent display-name contracts."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def test_top_level_items_get_fixed_lineage_names(tmp_path):
     }).output)
 
     names = [agent.subagents.load(run_id).agent_name for run_id in payload["created_run_ids"]]
-    assert names == ["小傻妞-worker-1", "小傻妞-tester-2"]
+    assert names == ["agent-d1-worker-1", "agent-d1-tester-2"]
 
 
 def test_count_fanout_gets_fixed_lineage_names(tmp_path):
@@ -44,10 +44,10 @@ def test_count_fanout_gets_fixed_lineage_names(tmp_path):
     }).output)
 
     names = [agent.subagents.load(run_id).agent_name for run_id in payload["created_run_ids"]]
-    assert names == ["小傻妞-worker-1", "小傻妞-worker-2"]
+    assert names == ["agent-d1-worker-1", "agent-d1-worker-2"]
 
 
-def test_scheduled_children_get_next_lineage_prefix_and_index(tmp_path):
+def test_scheduled_children_get_structured_depth_name_and_index(tmp_path):
     from agent_py_agent.agent.subagents.manager import SubAgentManager
     from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
         HierarchyChildSpec,
@@ -75,4 +75,4 @@ def test_scheduled_children_get_next_lineage_prefix_and_index(tmp_path):
     )
 
     names = [manager.load(run_id).agent_name for run_id in result.created_run_ids]
-    assert names == ["小小傻妞-worker-1", "小小傻妞-tester-2"]
+    assert names == ["agent-d2-worker-1", "agent-d2-tester-2"]

@@ -44,6 +44,32 @@ def test_tool_registry_result_envelope_preserves_call_operation_id(tmp_path):
     assert result.result_envelope["operation_id"] == "op:read_file:stable-123"
 
 
+def test_tool_registry_result_envelope_preserves_tool_structured_fields(tmp_path):
+    (tmp_path / "notes.txt").write_text("hello typed protocol\nsecond line", encoding="utf-8")
+    registry = make_tool_registry(tmp_path)
+    envelope = ToolCallEnvelope(
+        call_id="call-read-structured",
+        source="text_protocol",
+        tool_name="read_file",
+        input={"path": "notes.txt"},
+        operation_id="op:read_file:structured",
+        scope=RunScope(task_id="task-1", run_id="run-1"),
+    )
+
+    result = registry.execute_call(envelope)
+
+    assert result.ok is True
+    assert result.result_envelope["operation_id"] == "op:read_file:structured"
+    assert result.result_envelope["read_window"] == {
+        "kind": "line_window",
+        "start_line": 1,
+        "end_line": 2,
+        "next_start_line": 0,
+        "total_lines": 2,
+        "complete": True,
+    }
+
+
 def test_tool_registry_rejects_non_tool_call_envelope_kind(tmp_path):
     registry = make_tool_registry(tmp_path)
     envelope = {

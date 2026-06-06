@@ -1,4 +1,4 @@
-"""Runner timeout alias tests kept separate from the large dispatch test module."""
+"""Runner timeout policy tests kept separate from the large dispatch test module."""
 
 from __future__ import annotations
 
@@ -29,3 +29,21 @@ def test_role_timeout_uses_exact_structured_role():
     task.plan = []
 
     assert get_task_timeout(task, 0.0, config) == 12.0
+
+
+def test_runner_timeout_config_rejects_old_disable_words():
+    from agent_py_agent.agent.settings import normalize_agent_config
+
+    normalized, warnings = normalize_agent_config({"runner_timeout_seconds": "disabled"})
+
+    assert normalized["runner_timeout_seconds"] == "off"
+    assert any("runner_timeout_seconds" in warning for warning in warnings)
+
+
+def test_runner_timeout_config_rejects_non_finite_numbers():
+    from agent_py_agent.agent.settings import normalize_agent_config
+
+    normalized, warnings = normalize_agent_config({"runner_timeout_seconds": "inf"})
+
+    assert normalized["runner_timeout_seconds"] == "off"
+    assert any("runner_timeout_seconds" in warning for warning in warnings)

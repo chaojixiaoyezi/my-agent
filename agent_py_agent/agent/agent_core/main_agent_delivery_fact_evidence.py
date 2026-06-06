@@ -71,7 +71,7 @@ def fact_evidence_payload_ref(contract: dict[str, Any]) -> str:
 
 def _fact_evidence_enforcement_required(contract: dict[str, Any]) -> bool:
     value = str(contract.get("enforcement") or contract.get("mode") or "").strip().lower()
-    return value in {"required", "hard", "block", "blocking"}
+    return value == "required"
 
 
 __all__ = [

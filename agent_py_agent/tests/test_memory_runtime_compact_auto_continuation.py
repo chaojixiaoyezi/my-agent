@@ -751,8 +751,32 @@ def test_compact_continue_packet_prioritizes_full_read_cursor(tmp_path: Path) ->
                     },
                 },
                 "artifact_refs": [
-                    {"kind": "tool_output", "path": str(first), "source_path": "data/big.txt", "tool": "read_file"},
-                    {"kind": "tool_output", "path": str(second), "source_path": "data/big.txt", "tool": "read_file"},
+                    {
+                        "kind": "tool_output",
+                        "path": str(first),
+                        "source_path": "data/big.txt",
+                        "tool": "read_file",
+                        "read_window": {
+                            "kind": "char_window",
+                            "offset": 0,
+                            "chars": 100,
+                            "next_offset": 100,
+                            "total_chars": 500,
+                        },
+                    },
+                    {
+                        "kind": "tool_output",
+                        "path": str(second),
+                        "source_path": "data/big.txt",
+                        "tool": "read_file",
+                        "read_window": {
+                            "kind": "char_window",
+                            "offset": 100,
+                            "chars": 100,
+                            "next_offset": 200,
+                            "total_chars": 500,
+                        },
+                    },
                 ],
             },
             consistency={"status": "ok"},
@@ -805,8 +829,32 @@ def test_compact_continue_packet_uses_read_cursor_without_explicit_full_read_con
                     "ref": str(tmp_path / "progress.json"),
                 },
                 "artifact_refs": [
-                    {"kind": "tool_output", "path": str(first), "source_path": "data/big.txt", "tool": "read_file"},
-                    {"kind": "tool_output", "path": str(second), "source_path": "data/big.txt", "tool": "read_file"},
+                    {
+                        "kind": "tool_output",
+                        "path": str(first),
+                        "source_path": "data/big.txt",
+                        "tool": "read_file",
+                        "read_window": {
+                            "kind": "char_window",
+                            "offset": 0,
+                            "chars": 100,
+                            "next_offset": 100,
+                            "total_chars": 500,
+                        },
+                    },
+                    {
+                        "kind": "tool_output",
+                        "path": str(second),
+                        "source_path": "data/big.txt",
+                        "tool": "read_file",
+                        "read_window": {
+                            "kind": "char_window",
+                            "offset": 100,
+                            "chars": 100,
+                            "next_offset": 200,
+                            "total_chars": 500,
+                        },
+                    },
                 ],
             },
             consistency={"status": "ok"},
@@ -889,7 +937,19 @@ def test_compact_continue_packet_does_not_advance_cursor_for_failed_read(tmp_pat
                 "phase": "compact_apply",
                 "next_step": "继续读取 data/big.txt。",
                 "artifact_refs": [
-                    {"kind": "tool_output", "path": str(first), "source_path": "data/big.txt", "tool": "read_file"},
+                    {
+                        "kind": "tool_output",
+                        "path": str(first),
+                        "source_path": "data/big.txt",
+                        "tool": "read_file",
+                        "read_window": {
+                            "kind": "char_window",
+                            "offset": 0,
+                            "chars": 100,
+                            "next_offset": 100,
+                            "total_chars": 500,
+                        },
+                    },
                     {
                         "kind": "tool_output",
                         "source_path": "data/big.txt",
@@ -1020,6 +1080,13 @@ def _line_read_ref(tmp_path: Path, page: dict[str, int | str]) -> dict:
         "source_path": "data/line-log.txt",
         "tool": "read_file",
         "parameters": {"path": "data/line-log.txt", "start_line": start, "max_chars": max_chars},
+        "read_window": {
+            "kind": "line_window",
+            "start_line": start,
+            "end_line": int(page["end"]),
+            "next_start_line": int(page["next"]),
+            "total_lines": 60,
+        },
     }
 
 
@@ -1070,7 +1137,7 @@ def test_compact_continue_packet_keeps_captured_refs_compact() -> None:
     assert captured["artifact_refs"][0]["artifact_ref"] == "artifacts/read-12.json"
 
 
-def test_compact_continue_packet_ignores_reader_first_recovery_actions() -> None:
+def test_compact_continue_packet_preserves_recorded_next_actions() -> None:
     packet = build_compact_continue_packet(
         CompactContinuePacketRequest(
             metadata={"apply_id": "apply-reader-first", "plan_id": "plan-reader-first"},
@@ -1093,8 +1160,8 @@ def test_compact_continue_packet_ignores_reader_first_recovery_actions() -> None
         )
     )
 
-    assert packet["resume_focus"]["next_action"] == "合并已有研究笔记"
-    assert all("memory-resume" not in item for item in packet["resume_focus"]["next_actions"])
+    assert packet["resume_focus"]["next_action"] == "如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"
+    assert packet["resume_focus"]["next_actions"] == ["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"]
 
 
 def test_default_run_recovery_next_actions_are_action_first() -> None:

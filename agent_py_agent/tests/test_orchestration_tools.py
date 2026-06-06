@@ -333,8 +333,58 @@ class TestInspectAgentTreeTool:
         assert "inspect_agent_tree_recent_duplicate" in second["warnings"]
         assert "不要高频轮询" in second["policy"]["next_step"]
         assert second["policy"]["suggested_tool_call"]["tool"] == "wait"
+        assert second["policy"]["suggested_tool_call"]["seconds"] == 120
         assert second["direct_children"]["suggested_tool_call"]["tool"] == "wait"
         assert "tasks" not in second
+
+    def test_repeated_tree_inspection_uses_configured_watch_interval(self, tmp_path):
+        """代理树重复查看 cooldown 应跟随 subagent_watch_interval_seconds。"""
+        import json
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+        manager = SubAgentManager(tmp_path)
+        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
+        mock_agent = MagicMock()
+        mock_agent.config = SimpleNamespace(subagent_watch_interval_seconds=240)
+        mock_agent.subagents = manager
+
+        tool = InspectAgentTreeTool(mock_agent)
+        tool.execute({"root_id": child.id})
+        second = json.loads(tool.execute({"root_id": child.id}).output)
+
+        assert second["cooldown_seconds"] == 240
+        assert second["policy"]["suggested_tool_call"]["seconds"] == 240
+        assert second["direct_children"]["suggested_tool_call"]["seconds"] == 240
+
+    def test_tree_inspection_cooldown_does_not_hide_status_changes(self, tmp_path):
+        """cooldown 只能压缩没变化的树，不能把已完成子代理继续显示成运行中。"""
+        import json
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+        manager = SubAgentManager(tmp_path)
+        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
+        child.status = "RUNNING"
+        manager.save(child)
+        mock_agent = MagicMock()
+        mock_agent.subagents = manager
+
+        tool = InspectAgentTreeTool(mock_agent)
+        first = json.loads(tool.execute({"root_id": child.id}).output)
+        child.status = "DONE"
+        child.progress = 1.0
+        child.artifact_refs = ["/tmp/report.md"]
+        manager.save(child)
+        second = json.loads(tool.execute({"root_id": child.id}).output)
+
+        assert "cooldown_active" not in first
+        assert "cooldown_active" not in second
+        assert second["nodes"][0]["status"] == "DONE"
+        assert second["child_result_index"][0]["primary_artifact_refs"] == ["/tmp/report.md"]
 
     def test_tree_inspection_suggests_wait_for_pending_children(self, tmp_path):
         """普通查看代理树时，运行中的子代理应引导到 wait，而不是继续轮询。"""
@@ -667,4 +717,4 @@ class TestScheduleChildSubagentsTool:
         assert result.ok
         assert payload["dry_run"] is False
         assert child.parent_id == root.id
-        assert child.agent_name == "小傻妞-页面组"
+        assert child.agent_name == "页面组"

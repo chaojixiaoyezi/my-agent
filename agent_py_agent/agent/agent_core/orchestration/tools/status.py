@@ -21,14 +21,14 @@ class InspectAgentTreeTool(BaseTool):
         self.spec = build_inspect_agent_tree_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
-        cached = _cached_payload(self.agent, params)
-        if cached is not None:
+        payload = agent_tree_status_payload(self.agent, params)
+        cooldown = _cooldown_payload_for_current(self.agent, params, payload)
+        if cooldown is not None:
             return ToolExecutionResult(
                 "inspect_agent_tree",
                 True,
-                json.dumps(cached, ensure_ascii=False, indent=2),
+                json.dumps(cooldown, ensure_ascii=False, indent=2),
             )
-        payload = agent_tree_status_payload(self.agent, params)
         _remember_payload(self.agent, params, payload)
         return ToolExecutionResult(
             "inspect_agent_tree",
@@ -37,7 +37,11 @@ class InspectAgentTreeTool(BaseTool):
         )
 
 
-def _cached_payload(agent: SimpleAgent, params: dict[str, object]) -> dict[str, object] | None:
+def _cooldown_payload_for_current(
+    agent: SimpleAgent,
+    params: dict[str, object],
+    current_payload: dict[str, object],
+) -> dict[str, object] | None:
     key = _cache_key(params)
     cache = getattr(agent, "_inspect_agent_tree_recent_cache", None)
     if not isinstance(cache, dict):
@@ -45,11 +49,14 @@ def _cached_payload(agent: SimpleAgent, params: dict[str, object]) -> dict[str, 
     row = cache.get(key)
     if not isinstance(row, dict):
         return None
-    cooldown_seconds = _cooldown_seconds(params)
+    cooldown_seconds = _cooldown_seconds(agent, params)
     age = time.time() - float(row.get("created_at", 0.0) or 0.0)
     if age < 0 or age > cooldown_seconds:
         return None
-    payload = _cooldown_payload(row.get("payload"))
+    previous_payload = row.get("payload")
+    if _payload_change_signature(previous_payload) != _payload_change_signature(current_payload):
+        return None
+    payload = _cooldown_payload(current_payload, cooldown_seconds)
     payload["cooldown_active"] = True
     payload["cooldown_seconds"] = cooldown_seconds
     payload["cooldown_age_seconds"] = round(age, 3)
@@ -58,7 +65,8 @@ def _cached_payload(agent: SimpleAgent, params: dict[str, object]) -> dict[str, 
         warnings.append("inspect_agent_tree_recent_duplicate")
     payload["warnings"] = warnings
     policy = dict(payload.get("policy") if isinstance(payload.get("policy"), dict) else {})
-    wait_call = {"tool": "wait", "seconds": max(120, int(cooldown_seconds) or 0), "reason": "inspect_agent_tree cooldown"}
+    wait_seconds = max(60, int(cooldown_seconds) or 0)
+    wait_call = {"tool": "wait", "seconds": wait_seconds, "reason": "inspect_agent_tree cooldown"}
     policy["next_step"] = "刚刚已经查看过同一代理树；除非需要验收、接管或已有新事实，否则先推进汇总/等待子代理产物，不要高频轮询。"
     policy["suggested_tool_call"] = wait_call
     payload["policy"] = policy
@@ -68,24 +76,89 @@ def _cached_payload(agent: SimpleAgent, params: dict[str, object]) -> dict[str, 
     return payload
 
 
-def _cooldown_payload(value: object) -> dict[str, object]:
+def _cooldown_payload(value: object, cooldown_seconds: float) -> dict[str, object]:
     previous = value if isinstance(value, dict) else {}
-    direct = previous.get("direct_children") if isinstance(previous.get("direct_children"), dict) else {}
+    status = previous.get("status_buckets") if isinstance(previous.get("status_buckets"), dict) else {}
+    nodes = previous.get("nodes") if isinstance(previous.get("nodes"), list) else []
+    wait_seconds = max(60, int(cooldown_seconds) or 0)
     return {
         "schema_version": previous.get("schema_version", "agent_tree_status.v1"),
         "root_id": previous.get("root_id", ""),
         "status": "POLL_COOLDOWN",
         "summary": "同一代理树刚刚已经检查过；cooldown 内不重复返回完整树，避免父代理高频轮询或误判后重复派工。",
         "direct_children": {
-            "total": direct.get("total", 0),
-            "by_status": direct.get("by_status", {}),
-            "running_run_ids": direct.get("running_run_ids", []),
-            "planning_run_ids": direct.get("planning_run_ids", []),
-            "unfinished_run_ids": direct.get("unfinished_run_ids", []),
+            "total": len(nodes),
+            "by_status": {
+                "running": status.get("running", []),
+                "blocked": status.get("blocked", []),
+                "completed": status.get("completed", []),
+                "failed": status.get("failed", []),
+            },
+            "running_run_ids": status.get("running", []),
+            "planning_run_ids": _node_ids_with_status(nodes, {"PLANNING", "PENDING"}),
+            "unfinished_run_ids": _unfinished_run_ids(nodes),
             "next_action": "wait_for_subagents_or_read_completed_refs",
-            "suggested_tool_call": {"tool": "wait", "seconds": 120, "reason": "等待子代理完成事件"},
+            "suggested_tool_call": {"tool": "wait", "seconds": wait_seconds, "reason": "等待子代理完成事件"},
         },
     }
+
+
+def _payload_change_signature(value: object) -> tuple[tuple[object, ...], ...]:
+    payload = value if isinstance(value, dict) else {}
+    nodes = payload.get("nodes") if isinstance(payload.get("nodes"), list) else []
+    rows: list[tuple[object, ...]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        rows.append(
+            (
+                str(node.get("run_id") or ""),
+                str(node.get("status") or "").strip().upper(),
+                str(node.get("verification_status") or "").strip().upper(),
+                _safe_float(node.get("progress")),
+                str(node.get("current_step") or ""),
+                str(node.get("current_tool") or ""),
+                tuple(str(item) for item in _list(node.get("artifact_refs"))),
+                tuple(str(item) for item in _list(node.get("declared_output_refs"))),
+                str(node.get("latest_summary") or ""),
+                str(node.get("last_progress_summary") or ""),
+            )
+        )
+    return tuple(sorted(rows))
+
+
+def _node_ids_with_status(nodes: list[object], statuses: set[str]) -> list[str]:
+    ids: list[str] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        status = str(node.get("status") or "").strip().upper()
+        run_id = str(node.get("run_id") or "")
+        if run_id and status in statuses:
+            ids.append(run_id)
+    return ids
+
+
+def _unfinished_run_ids(nodes: list[object]) -> list[str]:
+    return [
+        str(node.get("run_id") or "")
+        for node in nodes
+        if isinstance(node, dict)
+        if str(node.get("run_id") or "")
+        if str(node.get("status") or "").strip().upper()
+        not in {"DONE", "CANCELLED", "ABANDONED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}
+    ]
+
+
+def _safe_float(value: object) -> float:
+    try:
+        return round(float(value or 0.0), 6)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _list(value: object) -> list[object]:
+    return list(value) if isinstance(value, list) else []
 
 
 def _remember_payload(agent: SimpleAgent, params: dict[str, object], payload: dict[str, object]) -> None:
@@ -108,10 +181,17 @@ def _cache_key(params: dict[str, object]) -> str:
     return json.dumps(normalized, ensure_ascii=False, sort_keys=True, default=str)
 
 
-def _cooldown_seconds(params: dict[str, object]) -> float:
-    raw = params.get("cooldown_seconds", 30)
+def _cooldown_seconds(agent: SimpleAgent, params: dict[str, object]) -> float:
+    raw = params.get("cooldown_seconds", _configured_watch_interval(agent))
     try:
-        value = float(raw or 0)
+        value = float(raw or 0) if isinstance(raw, int | float | str) else 120.0
     except (TypeError, ValueError):
-        value = 30.0
-    return max(0.0, min(value, 300.0))
+        value = 120.0
+    if value <= 0:
+        return 0.0
+    return max(60.0, min(value, 7200.0))
+
+
+def _configured_watch_interval(agent: SimpleAgent) -> object:
+    config = getattr(agent, "config", None)
+    return getattr(config, "subagent_watch_interval_seconds", 120)

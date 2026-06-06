@@ -81,7 +81,7 @@ def _tool_event_payload(
 def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[str, object] | None:
     boundary = getattr(params, "write_boundary", None)
     merged = dict(boundary) if isinstance(boundary, dict) else {}
-    _attach_task_workspace_aliases(merged, params)
+    _attach_task_workspace_roots(merged, params)
     guardrail_rows = tool_guardrail_records(agent)
     if guardrail_rows:
         merged["tool_guardrail_records"] = _merged_tool_guardrail_rows(
@@ -106,7 +106,7 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     return merged or boundary
 
 
-def _attach_task_workspace_aliases(boundary: dict[str, object], params: object) -> None:
+def _attach_task_workspace_roots(boundary: dict[str, object], params: object) -> None:
     workspace = _run_workspace(params)
     if not workspace:
         return

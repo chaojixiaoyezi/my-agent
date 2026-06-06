@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import math
+
 from ._coercion import CoercionService
 
 
@@ -29,6 +31,13 @@ class TimeoutFieldsService:
             defaults.subagent_watch_interval_seconds,
         )
         out["subagent_watch_interval_seconds"] = value
+        if warn:
+            warnings.append(warn)
+        value, warn = _normalize_runner_timeout_seconds(
+            out.get("runner_timeout_seconds"),
+            defaults.runner_timeout_seconds,
+        )
+        out["runner_timeout_seconds"] = value
         if warn:
             warnings.append(warn)
         return out, warnings
@@ -114,3 +123,38 @@ def _watch_interval_int(value: object) -> int | None:
     if isinstance(value, float) and value == int(value):
         return int(value)
     return None
+
+
+def _normalize_runner_timeout_seconds(value: object, default: object) -> tuple[str, str | None]:
+    key = "runner_timeout_seconds"
+    if value is None:
+        return str(default), None
+    if isinstance(value, bool):
+        return str(default), f"{key}: expected 'off', 'auto', or a non-negative number, got boolean; using default {default!r}"
+    if isinstance(value, (int, float)):
+        if math.isfinite(float(value)) and value >= 0:
+            return _format_timeout_number(value), None
+        return str(default), f"{key}: expected >= 0, got {value}; using default {default!r}"
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if stripped in {"off", "auto"}:
+            return stripped, None
+        parsed = _timeout_float(stripped)
+        if parsed is not None and math.isfinite(parsed) and parsed >= 0:
+            return _format_timeout_number(parsed), None
+    return str(default), f"{key}: expected 'off', 'auto', or a non-negative number, got {value!r}; using default {default!r}"
+
+
+def _timeout_float(value: str) -> float | None:
+    try:
+        parsed = float(value)
+    except ValueError:
+        return None
+    return parsed
+
+
+def _format_timeout_number(value: int | float) -> str:
+    parsed = float(value)
+    if parsed == int(parsed):
+        return str(int(parsed))
+    return str(parsed)

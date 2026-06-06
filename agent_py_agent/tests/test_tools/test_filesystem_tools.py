@@ -13,14 +13,12 @@ import types
 from pathlib import Path
 
 from agent_py_agent.agent.tooling import _filesystem_search as search_mod
-from agent_py_agent.agent.tooling.filesystem import (
-    ApplyPatchTool,
-    FindFilesTool,
-    ListFilesTool,
-    ReadFileTool,
-    SearchTextTool,
-    WriteFileTool,
-)
+from agent_py_agent.agent.tooling._filesystem_find import FindFilesTool
+from agent_py_agent.agent.tooling._filesystem_list import ListFilesTool
+from agent_py_agent.agent.tooling._filesystem_patch import ApplyPatchTool
+from agent_py_agent.agent.tooling._filesystem_read import ReadFileTool
+from agent_py_agent.agent.tooling._filesystem_search import SearchTextTool
+from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
 from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
 from .backends import make_tool_registry
@@ -522,6 +520,14 @@ def test_read_file_char_window_streams_without_full_read(monkeypatch):
         assert "NEEDLE" in first.output
         assert "total_chars=406" in first.output
         assert "next_offset=260" in first.output
+        assert first.result_envelope["read_window"] == {
+            "kind": "char_window",
+            "offset": 180,
+            "chars": 80,
+            "next_offset": 260,
+            "total_chars": 406,
+            "complete": False,
+        }
         assert second.ok
         assert "offset=260" in second.output
 

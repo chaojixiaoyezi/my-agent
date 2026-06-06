@@ -1,14 +1,48 @@
 # Subagent Progress
 
+## 2026-06-07 真实 all-agent 子代理对照
+
+- 真实运行目录：
+  `validation/real_runs/20260607-000144-subagents-all-agent`。
+- Prompt 使用普通中文：主代理找几个帮手分头阅读 `/Users/example/study-agent/all-agent`
+  下的项目，最后由主代理核对、合并报告并提交验收。
+- 运行完成并 `submit_for_acceptance` 通过：`tool_rounds=51`、
+  `ctx_tokens≈137464`，任务内触发真实 compact 1 次，compact 后继续读取子代理产物并完成提交。
+- 子代理链路可跑通：task workspace 下产生 14 个子代理目录，最终均为 `DONE`；
+  `output/` 下生成综合报告和 12 份项目分报告。
+- 暴露的真实问题：
+  - 主代理会高频重复 `inspect_agent_tree` / `list_files output`，虽然已有 `wait` 工具，
+    但 `inspect_agent_tree` 的重复查看 cooldown 默认只有 30 秒，模型一轮往返常常刚好越过该窗口。
+  - `read_file` 读目录时返回过泛的失败面，真实 run 中表现为 `UNKNOWN_ERROR`，不利于自动改用
+    `list_files`。
+  - 无结构化交付合同时，uncontracted closeout 只能验收“本轮写了报告”，不能证明用户列出的
+    每个项目都被等质量覆盖；本 run 中 `letta-main` 路径不存在，最终 note 仍说“13 个项目全部完成”，
+    但独立分报告实际是 12 份。
+  - `my_agent_main.md` 只有 25 行，说明父代理汇总时会过度相信子报告存在，缺少覆盖质量结构化索引。
+- 已修复：
+  - `inspect_agent_tree` 重复查看 cooldown 默认改为读取
+    `subagent_watch_interval_seconds`，仍允许显式 `cooldown_seconds: 0` 关闭；这是软提示和缓存摘要，
+    不是硬门。
+  - `read_file` 遇到目录返回 `PATH_IS_DIRECTORY` 和建议的 `list_files` 调用，不再给泛化未知错误。
+  - 默认配置 `workspace_root` 改回空值，保持“未配置时使用启动目录”的主链路语义。
+
 ## 2026-06-06 主链路小跳转清理
 
 - 删除只服务单一调用点的 facade/helper 文件，把能力请求解析、action rescue 渲染、runner
   guidance 注入、runner tool 过滤和 root task policy 折回当前权威模块。
+- 真实主代理 all-agent 阅读任务暴露了工具协议示例污染：目录示例仍写
+  `parameter_name` 占位字段，模型会照抄成错误工具参数。当前工具协议示例改为真实
+  `read_file` 顶层参数；registry 统一拒绝未知顶层参数并返回 `TOOL_INVALID_ARGUMENTS`，
+  不再让 `list_files` 这类有默认值的工具静默把错参当成功。内部字段通过
+  `ToolSpec.internal_parameters` 隐藏声明，不展示给模型。
 - persistence 保存链路继续收直：`identity`、`security`、`status_report`、`failure_handoff`、
   `inheritance`、`output_load_errors`、`recovery_outputs` 等只服务持久化保存的私有 helper
   已折回 `persistence/service.py`；`thought.md` 渲染折回 projection 写入点。
 - session progress 写入链路继续收直：工具结果路径提取不再放单独 `paths.py`，而是跟
   `record_subagent_tool_progress` 保持在同一入口里，方便排查“工具写了什么、进度如何投影”。
+- subagent markdown 渲染继续收直：dispatch/watch/parent planner 和 patch review/apply
+  渲染不再通过 `rendering_dispatch.py`、`rendering_patch.py` 两个中转文件跳转，统一由
+  `subagents/rendering.py` 持有。
 - `runner_context` 现在直接构造执行上下文、写入边界、runtime guidance 和 runner allowed
   tools；角色模板相关判断留在 `role_templates`。
 - 这轮清理不新增工具、不新增硬门，只减少跨文件跳转和旧入口。
@@ -21,7 +55,7 @@
 ## 2026-06-06 状态精确化
 
 - 子代理运行、恢复、tree、closeout 统一按当前协议状态判断；`COMPLETED`、`SUCCESS`、`ERROR`
-  等旧标签不再隐式兼容成 `DONE` 或 `FAILED`。
+  等旧标签只保留为原始审计文本，不再隐式兼容成 `DONE`、`FAILED` 或 `CHANNEL_ERROR`。
 - 派发状态投影遇到旧标签或未知状态时，仍保留原始 status 供审计，但不会给父代理
   `summarize_or_report_verified_runs` 这类收口建议；必须先检查 agent tree 或人工处理。
 - 恢复状态机不再把 `PLANNED`、`QUEUED`、`WAIT_CHILD` 旧别名提升成当前协议状态；旧状态进入
@@ -38,8 +72,18 @@
   `REJECTED` 不能静默当成已处理终态；它们会继续作为需要人工/路由处理的状态暴露出来。
 - 工具结果没有显式 `error_code` / `error_type` 时，机器错误码统一是 `UNKNOWN_ERROR`；
   日志里的错误正文可以给模型看，但不能反推出结构化错误码、任务状态或验收结论。
+- 本地运行时失败的模型提示只读取结构化 `context` code，例如 `*.subagents.load`
+- 子代理 task workspace 的身份只来自当前 `root_id` / `id` / `parent_id` 和明确的
+  `run_workspace.task_root`；已有 `work/state.json` / `work/task.yaml` 不再反推本轮
+  task_id，避免同名旧目录污染当前子代理树。
+  或 `conversation.guidance.*`。普通错误文本或自由格式 context 里出现
+  `subagent/load/guidance` 这类词，不会改变失败类型、任务状态或验收语义。
 - `DONE` 仍是唯一已完成状态；`FAILED`、`TIMEOUT`、`CHANNEL_ERROR`、`BLOCKED`
   是可恢复/阻塞状态，恢复器和 strategy 只扫描这些结构化状态。
+- `blocked_reason` 只是解释字段：它可以写入 blockers、报告和父代理提示，但不能单独把
+  `DONE`、`RUNNING` 或未知状态改成 `BLOCKED`，也不能把 `failure_type` 猜成
+  `capability_request`。需要阻塞时必须写结构化 `status=BLOCKED`、`failure_type`
+  或正式 `capability_requests`。
 - `output.json`、checkpoint 和 QA payload 只读结构化字段、`ok` 布尔、blockers 和 refs；
   summary、角色描述、旧状态词只作为展示或软上下文。
 - 子代理结果产物只从当前结构化 schema 进入 artifact refs：`artifacts`、
@@ -81,5 +125,7 @@
 - `role` 是模板选择字段，`agent_name` 只是展示名。创建任务时会把模板能力快照写入
   `attributes.role_template`，后续调度、恢复、timeout 和 runner prompt 只读这个快照或模板字段，
   不从显示名或普通中文/英文描述里猜角色。
+- 默认 `agent_name` 也只作为展示标签，格式为 `agent-d<depth>-<role>-<index>`；多层级调度只用
+  `depth` / `parent_id` / `root_id` 等结构化字段，不再从默认名或用户叫法里解析层级。
 - capability request/grant/gap 是可观察工作项，不是默认阻断任务的硬门。
 - workflow mode 是显式配置能力，不应该替普通中文任务自动加限制。

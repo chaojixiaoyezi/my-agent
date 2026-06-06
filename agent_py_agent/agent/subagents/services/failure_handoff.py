@@ -7,7 +7,7 @@ import time
 
 from ..models import FailureHandoff, SubAgentTask
 
-_HANDOFF_STATUSES = {"FAILED", "ERROR", "TIMEOUT", "BLOCKED"}
+_HANDOFF_STATUSES = {"FAILED", "TIMEOUT", "CHANNEL_ERROR", "BLOCKED"}
 _HIGH_RISK_FAILURE_TYPES = {"tool_output_context_overflow", "context_overflow", "blackbox_output_overflow"}
 
 

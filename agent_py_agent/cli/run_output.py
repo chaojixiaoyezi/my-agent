@@ -7,7 +7,7 @@ from ..agent.backends import (
     ProviderRecoverableError,
     provider_recoverable_report,
 )
-from ..agent.gateway_parts.context_tokens import current_context_token_estimate
+from ..agent.gateway_parts.response_renderer import current_context_token_estimate
 from .thinking_spinner import ThinkingSpinner
 
 

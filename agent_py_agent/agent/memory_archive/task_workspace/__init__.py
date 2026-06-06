@@ -54,9 +54,8 @@ from .payloads import (
 from .rendering import (
     write_parent_summary_placeholder,
     write_summary,
-    write_task_yaml_if_missing,
+    write_task_yaml,
 )
-from .roots import resolve_task_workspace_root
 from .state_merge import TaskStateMergeRequest, next_task_state
 
 
@@ -124,6 +123,29 @@ def task_workspace_path(workspace: str | Path, task_id: str) -> Path:
     return Path(workspace) / "tasks" / safe_path_segment(task_id, default="task", replacement="_")
 
 
+def resolve_task_workspace_root(workspace: str | Path, task: Any, task_id: str) -> Path:
+    task_root = _task_root_from_attrs(getattr(task, "attributes", {}) or {})
+    if task_root:
+        return Path(task_root)
+    existing = str(getattr(task, "task_workspace_dir", "") or "").strip()
+    if existing and Path(existing).name == _task_segment(task_id):
+        return Path(existing)
+    return Path(workspace) / "tasks" / _task_segment(task_id)
+
+
+def _task_root_from_attrs(attrs: Any) -> str:
+    if not isinstance(attrs, dict):
+        return ""
+    run_workspace = attrs.get("run_workspace")
+    if not isinstance(run_workspace, dict):
+        return ""
+    return str(run_workspace.get("task_root") or "").strip()
+
+
+def _task_segment(value: str) -> str:
+    return safe_path_segment(value, default="task", replacement="_")
+
+
 def ensure_subagent_task_workspace(
     request: EnsureSubagentTaskWorkspaceRequest | str | Path | None = None,
     task: Any | None = None,
@@ -141,12 +163,12 @@ def ensure_subagent_task_workspace(
     run_id = str(getattr(inputs.task, "id", "") or raw_task_id)
     root = resolve_task_workspace_root(inputs.workspace, inputs.task, raw_task_id)
     previous_state = read_json_object(root / "work" / "state.json")
-    task_id = _workspace_task_id(root, inputs.task, raw_task_id, run_id, previous_state)
+    task_id = _workspace_task_id(inputs.task, raw_task_id, run_id)
     path_inputs = _TaskWorkspacePathInputs(root, task_id, run_id)
     now = float(getattr(inputs.task, "updated_at", 0.0) or time.time())
     paths = _paths_for(path_inputs)
     _ensure_directories(paths)
-    write_task_yaml_if_missing(paths.task_yaml, task_id, inputs.task, now)
+    _sync_task_workspace_identity(paths, task_id, run_id, inputs.task, now)
     write_json(
         paths.state_json,
         next_task_state(TaskStateMergeRequest(task_id, run_id, inputs.task, now, previous_state)),
@@ -172,46 +194,25 @@ def ensure_subagent_task_workspace(
 
 
 def _workspace_task_id(
-    root: Path,
     task: Any,
     raw_task_id: str,
     run_id: str,
-    previous_state: dict[str, object],
 ) -> str:
     if run_id != raw_task_id:
         return raw_task_id
-    state_run_id = str(previous_state.get("run_id") or "").strip()
-    state_task_id = str(previous_state.get("task_id") or "").strip()
-    for candidate in (state_run_id, state_task_id):
-        if candidate and candidate != run_id:
-            return candidate
-    yaml_ids = _task_yaml_identity(root / "work" / "task.yaml")
-    for candidate in (yaml_ids.get("run_id", ""), yaml_ids.get("task_id", "")):
-        if candidate and candidate != run_id:
-            return candidate
     parent_id = str(getattr(task, "parent_id", "") or "").strip()
     if parent_id and parent_id != run_id:
         return parent_id
     return raw_task_id
 
 
-def _task_yaml_identity(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-    result: dict[str, str] = {}
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return {}
-    for line in lines:
-        key, sep, value = line.partition(":")
-        if not sep:
-            continue
-        key = key.strip()
-        if key not in {"task_id", "run_id"}:
-            continue
-        result[key] = value.strip().strip('"').strip("'")
-    return result
+def _sync_task_workspace_identity(paths: TaskWorkspacePaths, task_id: str, run_id: str, task: Any, now: float) -> None:
+    if run_id == task_id:
+        write_task_yaml(paths.task_yaml, task_id, task, now, primary_run_id=run_id)
+        return
+    if paths.task_yaml.exists():
+        return
+    write_task_yaml(paths.task_yaml, task_id, task, now, primary_run_id=task_id, parent_run_id="")
 
 
 def _coerce_ensure_request(

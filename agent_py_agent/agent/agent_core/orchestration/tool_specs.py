@@ -34,6 +34,7 @@ def build_create_subagents_spec() -> ToolSpec:
         keywords=_CREATE_KEYWORDS,
         parameters=_CREATE_PARAMETERS,
         parameter_details=_with_role_template_index(_CREATE_PARAMETER_DETAILS),
+        internal_parameters=["dry_run", "extra_write_roots"],
         examples=_CREATE_EXAMPLES,
     )
 
@@ -130,6 +131,7 @@ def build_dispatch_subagents_spec() -> ToolSpec:
         keywords=["调度", "推进", "运行", "验收", "派工", "dispatch", "subagent", "acceptance"],
         parameters=_DISPATCH_PARAMETERS,
         parameter_details=_DISPATCH_PARAMETER_DETAILS,
+        internal_parameters=["apply", "start_runners", "execute_runners", "no_probe"],
         examples=[
             '{"tool":"dispatch_subagents","dry_run":true,"max_runners":1}',
             '{"tool":"dispatch_subagents","dry_run":false,"run_ids":["child-phase-a","child-phase-b"],"max_runners":2}',

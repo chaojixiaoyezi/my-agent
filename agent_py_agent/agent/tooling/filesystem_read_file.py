@@ -36,6 +36,20 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecu
             retry_tool="read_file",
         ))
     if not target.is_file():
+        if target.is_dir():
+            payload = {
+                "ok": False,
+                "error": "PATH_IS_DIRECTORY",
+                "path": tool.display_path(target),
+                "message": "目标是目录，不是文件；请先用 list_files 查看目录，再读取具体文件。",
+                "suggested_tool_call": {"tool": "list_files", "path": tool.display_path(target), "max_depth": 1},
+            }
+            return ToolExecutionResult(
+                "read_file",
+                False,
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                error_code="PATH_IS_DIRECTORY",
+            )
         return ToolExecutionResult("read_file", False, f"目标不是文件: {tool.display_path(target)}")
     internal_ref = _internal_agent_status_ref(target)
     if internal_ref:
@@ -86,14 +100,15 @@ def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) 
         return ToolExecutionResult("read_file", False, error)
     if not lines:
         return ToolExecutionResult("read_file", True, "(空文件)")
-    result = _render_numbered_read_lines(
+    result, read_window = _render_numbered_read_lines(
         lines=lines,
         start_line=start_line,
         end_line=end_line,
         max_chars=line_max_chars,
         continuation_max_chars=max_chars,
     )
-    return ToolExecutionResult("read_file", True, result or "(空文件)")
+    envelope = {"read_window": read_window} if read_window else {}
+    return ToolExecutionResult("read_file", True, result or "(空文件)", result_envelope=envelope)
 
 
 def _has_char_window_params(params: dict[str, Any]) -> bool:
@@ -151,8 +166,18 @@ def _char_window_result(content: str, params: dict[str, Any], default_max_chars:
             f" next_call=read_file(offset={next_offset}, max_chars={continuation_max_chars})。"
             " 最终报告前先把关键事实和 source offset 写入 task_progress 或 work 表。"
         )
-        return ToolExecutionResult("read_file", True, f"{header}\n{window}\n{footer}")
-    return ToolExecutionResult("read_file", True, f"{header}\n{window}")
+        return ToolExecutionResult(
+            "read_file",
+            True,
+            f"{header}\n{window}\n{footer}",
+            result_envelope={"read_window": _char_read_window(offset, len(window), len(content))},
+        )
+    return ToolExecutionResult(
+        "read_file",
+        True,
+        f"{header}\n{window}",
+        result_envelope={"read_window": _char_read_window(offset, len(window), len(content))},
+    )
 
 
 def _char_window_file_result(tool, target, params: dict[str, Any], default_max_chars: int) -> ToolExecutionResult:
@@ -196,8 +221,18 @@ def _char_window_file_result(tool, target, params: dict[str, Any], default_max_c
             f" next_call=read_file(offset={next_offset}, max_chars={continuation_max_chars})。"
             " 最终报告前先把关键事实和 source offset 写入 task_progress 或 work 表。"
         )
-        return ToolExecutionResult("read_file", True, f"{header}\n{window}\n{footer}")
-    return ToolExecutionResult("read_file", True, f"{header}\n{window}")
+        return ToolExecutionResult(
+            "read_file",
+            True,
+            f"{header}\n{window}\n{footer}",
+            result_envelope={"read_window": _char_read_window(offset, len(window), total_chars)},
+        )
+    return ToolExecutionResult(
+        "read_file",
+        True,
+        f"{header}\n{window}",
+        result_envelope={"read_window": _char_read_window(offset, len(window), total_chars)},
+    )
 
 
 def _offset_out_of_range_result(offset: int, total_chars: int) -> ToolExecutionResult:
@@ -284,29 +319,58 @@ def _render_numbered_read_lines(
     end_line: int,
     max_chars: int,
     continuation_max_chars: int,
-) -> str:
+) -> tuple[str, dict[str, int | bool | str]]:
     rendered: list[str] = []
     used_chars = 0
+    last_line = start_line - 1
     for line_number, line in enumerate(lines[start_line - 1 : end_line], start=start_line):
         item = f"{line_number}: {line}"
         separator = 1 if rendered else 0
         if rendered and used_chars + separator + len(item) > max_chars:
             rendered.append(_truncated_read_footer(len(lines), line_number, max_chars, continuation_max_chars))
-            return "\n".join(rendered)
+            return "\n".join(rendered), _line_read_window(start_line, last_line, len(lines))
         if not rendered and len(item) > max_chars:
-            return "\n".join([
-                item[:max_chars],
-                _truncated_read_footer(
-                    len(lines),
-                    min(line_number + 1, len(lines)),
-                    max_chars,
-                    continuation_max_chars,
-                    next_offset=max_chars,
-                ),
-            ])
+            return (
+                "\n".join([
+                    item[:max_chars],
+                    _truncated_read_footer(
+                        len(lines),
+                        min(line_number + 1, len(lines)),
+                        max_chars,
+                        continuation_max_chars,
+                        next_offset=max_chars,
+                    ),
+                ]),
+                _line_read_window(start_line, line_number, len(lines)),
+            )
         rendered.append(item)
         used_chars += separator + len(item)
-    return "\n".join(rendered)
+        last_line = line_number
+    return "\n".join(rendered), _line_read_window(start_line, last_line, len(lines))
+
+
+def _char_read_window(offset: int, chars: int, total_chars: int) -> dict[str, int | bool | str]:
+    next_offset = offset + chars
+    return {
+        "kind": "char_window",
+        "offset": offset,
+        "chars": chars,
+        "next_offset": next_offset,
+        "total_chars": total_chars,
+        "complete": bool(total_chars and next_offset >= total_chars),
+    }
+
+
+def _line_read_window(start_line: int, end_line: int, total_lines: int) -> dict[str, int | bool | str]:
+    end_line = max(0, end_line)
+    return {
+        "kind": "line_window",
+        "start_line": start_line,
+        "end_line": end_line,
+        "next_start_line": end_line + 1 if end_line < total_lines else 0,
+        "total_lines": total_lines,
+        "complete": bool(total_lines and start_line <= 1 and end_line >= total_lines),
+    }
 
 
 def _truncated_read_footer(

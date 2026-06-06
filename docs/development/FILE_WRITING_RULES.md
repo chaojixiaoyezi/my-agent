@@ -48,13 +48,17 @@ utility.  The current runtime policy is:
    dangerous-directory policy.
 
 ```python
-# CORRECT — go through the write boundary
-from agent_py_agent.tooling.filesystem import safe_write
-safe_write(target_path, content)
+# CORRECT — runtime code uses the shared atomic writer
+from agent_py_agent.agent.common.json_io import write_json_file_atomic
 
-# WRONG — direct filesystem access from business code
+write_json_file_atomic(target_path, payload)
+
+# WRONG — direct durable writes from business code
 target_path.write_text(content)  # FORBIDDEN in business code
 ```
+
+Model-visible file changes should use the `write_file` / `apply_patch` tools so
+the tool gateway can record provenance, path policy, and audit events.
 
 ---
 
@@ -72,8 +76,9 @@ For any durable write (RuntimeData, Audit), use the atomic pattern:
 Why: a crash mid-write should never leave a half-written file.  `os.replace` is
 atomic on POSIX and will not corrupt the target if the process is killed.
 
-The `safe_write()` helper in `tooling/filesystem.py` implements this pattern.
-Do not re-implement it elsewhere.
+Use existing repository writers, `agent_py_agent.agent.common.json_io` helpers,
+or the current filesystem write tool implementation in
+`agent.tooling._filesystem_write`. Do not add a facade just to wrap writes.
 
 ---
 
@@ -96,7 +101,7 @@ Instead, use the appropriate repository or service:
 | Write audit event           | `Audit` class                  |
 | Write config change         | `ConfigManager`                |
 | Write temp/test file        | pytest `tmp_path` fixture      |
-| Write generated artifact    | `safe_write()` with explicit path |
+| Write generated artifact    | model-facing `write_file` / `apply_patch`, or the owning service writer |
 
 ---
 
@@ -133,7 +138,7 @@ accidental commits of runtime artifacts (`.pyc`, `.coverage`, `__pycache__`, etc
 ```python
 def test_something(tmp_path):
     target = tmp_path / "output.json"
-    safe_write(target, '{"key": "value"}')
+    write_json_object(target, {"key": "value"})
     assert target.exists()
 ```
 
@@ -159,6 +164,6 @@ Before adding a new write path:
 1. Determine the storage class (see table above).
 2. Document the path, format, and lifecycle in a design note.
 3. Add the path to `.gitignore` if it is RuntimeData, Audit, or GeneratedArtifact.
-4. Implement through `safe_write()` or an existing repository.
+4. Implement through an existing repository, common JSON/text writer, or current write-boundary tool.
 5. Add a test that exercises the write using `tmp_path`.
 6. Update the architecture guardrails baseline if needed.

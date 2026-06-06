@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from agent_py_agent.agent.agent_core.orchestration.child_result_index import child_result_index
-from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.manager import SubAgentManager, SubAgentManagerInitParams
 from agent_py_agent.agent.subagents.models import SubAgentBoardOptions
 from agent_py_agent.agent.subagents.services.agent_run_state import STATE_LOCATOR_SCHEMA_VERSION
 
@@ -90,6 +90,37 @@ def test_subagent_projections_read_canonical_state_not_legacy_locator(tmp_path) 
     assert board.items[0].artifact_refs == ["final.md"]
     assert index[0]["primary_artifact_refs"] == ["final.md"]
     assert index[0]["artifact_registry_refs"][0]["artifact_id"] == "art-final"
+
+
+def test_owner_agent_projection_surfaces_result_refs(tmp_path) -> None:
+    owner_home = tmp_path / "owner-home"
+    manager = SubAgentManager(tmp_path / "subagents", params=SubAgentManagerInitParams(owner_home_dir=str(owner_home)))
+    task = manager.create_run(
+        goal="公开结果 refs",
+        thought="owner state should be enough for parent inspection.",
+        plan=["run", "save"],
+    )
+    task.status = "DONE"
+    task.verification_status = "VERIFIED"
+    task.artifact_refs = ["reports/final.md"]
+    task.attributes = {"output_refs": ["reports/final.md"]}
+    task.output_json = str(tmp_path / "subagents" / task.id / "output.json")
+    task.runner_result_json = str(tmp_path / "subagents" / task.id / "reports" / "runner_result.json")
+    task.runner_result_file = str(tmp_path / "subagents" / task.id / "RUNNER_RESULT.md")
+    task.agent_run_final_report_md = str(tmp_path / "subagents" / task.id / "final_report.md")
+
+    manager.save(task)
+
+    projection = json.loads((owner_home / "agents" / task.id / "state.json").read_text(encoding="utf-8"))
+    refs = json.loads((owner_home / "agents" / task.id / "refs.json").read_text(encoding="utf-8"))
+
+    assert projection["status"] == "DONE"
+    assert projection["artifact_refs"] == ["reports/final.md"]
+    assert projection["declared_output_refs"] == ["reports/final.md"]
+    assert projection["runner_result_ref"].endswith("reports/runner_result.json")
+    assert projection["output_json_ref"].endswith("output.json")
+    assert refs["runner_result"].endswith("reports/runner_result.json")
+    assert refs["artifact_refs"] == ["reports/final.md"]
 
 
 def test_child_result_index_surfaces_broken_output_json(tmp_path) -> None:

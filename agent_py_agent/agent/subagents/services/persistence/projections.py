@@ -154,6 +154,10 @@ def _write_owner_agent_projection(manager: Any, task: SubAgentTask, projection: 
         "agent_run_workspace_dir": task.agent_run_workspace_dir,
         "compact_dir": task.agent_run_compactions_dir,
         "final_report": task.agent_run_final_report_md,
+        "output_json": task.output_json,
+        "runner_result": task.runner_result_json,
+        "result_file": task.runner_result_file,
+        "artifact_refs": list(getattr(task, "artifact_refs", []) or []),
         "updated_at": task.updated_at,
     }
     write_json_file_atomic(root / "refs.json", refs)

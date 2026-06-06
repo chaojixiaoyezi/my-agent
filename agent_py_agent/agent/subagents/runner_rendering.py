@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 from ..common.value_parsing import dedupe_strings
+from .context_bundle import context_gate_prompt_lines
 from .models import (
     ChannelProbeReport,
     ChannelProbeResult,
     SubAgentExecutionContext,
 )
-from .runner_rendering_context import render_context_bundle_section
 from .runner_rendering_context_packs import render_context_packs_section
-from .runner_rendering_sections import render_evidence_item_lines, render_granted_card_lines
 from .runner_result_rendering import render_runner_result_markdown
 
 
@@ -49,6 +48,33 @@ def _render_execution_context_header(context):
         "## Plan",
         "",
     ]
+
+
+def _render_context_bundle_section(context: SubAgentExecutionContext) -> list[str]:
+    refs = context.context_bundle.get("workspace_refs") if isinstance(context.context_bundle, dict) else {}
+    if not isinstance(refs, dict):
+        refs = {}
+    lines = [
+        "",
+        "## Context Bundle",
+        "",
+        f"- context_bundle_json: {context.context_bundle_json or 'none'}",
+        f"- context_bundle_file: {context.context_bundle_file or 'none'}",
+        f"- agent_work_dir: {refs.get('agent_work_dir') or 'none'}",
+        f"- agent_run_context_bundle_json: {_run_workspace_bundle_ref(refs, 'context_bundle.json')}",
+        f"- agent_run_context_bundle_file: {_run_workspace_bundle_ref(refs, 'CONTEXT_BUNDLE.md')}",
+    ]
+    lines.extend(context_gate_prompt_lines(context.context_bundle))
+    return lines
+
+
+def _run_workspace_bundle_ref(refs: dict[str, object], name: str) -> str:
+    workspace = str(refs.get("agent_work_dir") or refs.get("agent_run_workspace") or "").strip()
+    if not workspace:
+        return "none"
+    return f"{workspace.rstrip('/')}/{name}"
+
+
 def _render_capabilities_section(context):
     lines = ["## Allowed Capabilities", ""]
     lines.append(f"- skills: {', '.join(context.allowed_skills) or 'none'}")
@@ -61,10 +87,26 @@ def _render_capabilities_section(context):
     lines.extend(["", "## Granted Cards", ""])
     if context.granted_cards:
         for card in context.granted_cards:
-            lines.extend(render_granted_card_lines(card))
+            lines.extend(_render_granted_card_lines(card))
     else:
         lines.append("- none")
     return lines
+
+
+def _render_granted_card_lines(card: dict[str, object]) -> list[str]:
+    lines = [
+        f"- [{card.get('kind', 'unknown')}] {card.get('name', 'unknown')} "
+        f"risk={card.get('risk_level', 'unknown')} source={card.get('source', 'unknown')}"
+    ]
+    if card.get("description"):
+        lines.append(f"  - description: {card['description']}")
+    if card.get("path"):
+        lines.append(f"  - path: {card['path']}")
+    if card.get("reasons"):
+        lines.append(f"  - reasons: {card['reasons']}")
+    return lines
+
+
 def _render_write_boundary_section(context):
     lines = ["", "## Write Boundary", ""]
     allowed_roots = context.write_boundary.get("allowed_write_roots") or []
@@ -81,6 +123,18 @@ def _render_write_boundary_section(context):
         f"- forbidden_write_roots: {', '.join(forbidden_roots) if forbidden_roots else 'none'}"
     )
     lines.append(f"- locked_files: {', '.join(locked_files) if locked_files else 'none'}")
+    return lines
+
+
+def _render_evidence_item_lines(item: dict[str, object]) -> list[str]:
+    status = "OK" if item.get("ok") else "FAIL"
+    lines = [f"- [{status}] {item.get('kind', 'unknown')}: {item.get('summary', '')}"]
+    if item.get("command"):
+        lines.append(f"  - command: `{item['command']}`")
+    if item.get("path"):
+        lines.append(f"  - path: {item['path']}")
+    if item.get("url"):
+        lines.append(f"  - url: {item['url']}")
     return lines
 
 
@@ -143,11 +197,13 @@ def _render_context_manifest_section(manifest):
     lines.append("- omitted_context:")
     lines.extend(f"  - {item}" for item in manifest.omitted_context or ["none"])
     return lines
+
+
 def _render_evidence_section(context):
     lines = ["", "## Evidence", ""]
     if context.evidence:
         for item in context.evidence:
-            lines.extend(render_evidence_item_lines(item))
+            lines.extend(_render_evidence_item_lines(item))
     else:
         lines.append("- 暂无")
     return lines
@@ -164,6 +220,8 @@ def _render_pending_requests_section(context):
     else:
         lines.append("- none")
     return lines
+
+
 def _render_open_gaps_section(context):
     lines = ["", "## Open Capability Gaps", ""]
     if context.open_gaps:
@@ -175,10 +233,12 @@ def _render_open_gaps_section(context):
     else:
         lines.append("- none")
     return lines
+
+
 def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     lines = _render_execution_context_header(context)
     lines.extend(f"- {item}" for item in context.plan or ["未设置"])
-    lines.extend(render_context_bundle_section(context))
+    lines.extend(_render_context_bundle_section(context))
     lines.extend(_render_capabilities_section(context))
     lines.extend(_render_write_boundary_section(context))
     lines.extend(_render_declared_outputs_section(context))
@@ -221,6 +281,8 @@ def render_channel_probe_markdown(report: ChannelProbeReport) -> str:
         for check in failed[:5]:
             lines.append(f"  - [{check.severity}] {check.name}: {check.summary} {check.error}".rstrip())
     return "\n".join(lines) + "\n"
+
+
 def render_single_channel_probe_markdown(result: ChannelProbeResult) -> str:
     lines = [
         "# CHANNEL PROBE",

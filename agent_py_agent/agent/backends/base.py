@@ -224,7 +224,10 @@ class AnthropicCompatibleBackend(HttpBackend):
             if text or attempt > 0 or not _anthropic_has_thinking_without_text(obj):
                 break
         if not text:
-            raise ProviderResponseError(f"Anthropic-compatible 响应没有文本内容: {_response_preview(obj)}")
+            raise ProviderResponseError(
+                f"Anthropic-compatible 响应没有文本内容: {_response_preview(obj)}",
+                error_code="MODEL_EMPTY_RESPONSE",
+            )
         return ModelResponse(text=text, backend=self.name, usage=usage_dict(obj.get("usage")))
 
     def _generate_stream(
@@ -239,7 +242,10 @@ class AnthropicCompatibleBackend(HttpBackend):
             if text or attempt > 0:
                 break
         if not text:
-            raise ProviderResponseError("Anthropic-compatible 流式响应没有文本内容")
+            raise ProviderResponseError(
+                "Anthropic-compatible 流式响应没有文本内容",
+                error_code="MODEL_EMPTY_RESPONSE",
+            )
         return ModelResponse(text=text, backend=self.name, usage=usage)
 
     def _stream_text_once(

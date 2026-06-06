@@ -376,8 +376,9 @@ class TestAnthropicCompatibleBackend:
         mock_urlopen.return_value = mock_response
 
         backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3", stream_enabled=False))
-        with pytest.raises(ProviderResponseError, match="没有文本内容"):
+        with pytest.raises(ProviderResponseError, match="没有文本内容") as exc_info:
             backend.generate("test")
+        assert exc_info.value.error_code == "MODEL_EMPTY_RESPONSE"
 
     def test_generate_stream_calls_on_chunk_during_iteration(self):
         backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))
@@ -458,8 +459,9 @@ class TestAnthropicCompatibleBackend:
 
         backend.request_stream = request_stream
 
-        with pytest.raises(ProviderResponseError, match="流式响应没有文本内容"):
+        with pytest.raises(ProviderResponseError, match="流式响应没有文本内容") as exc_info:
             backend.generate("test prompt", on_chunk=None)
+        assert exc_info.value.error_code == "MODEL_EMPTY_RESPONSE"
 
         assert stream_calls == [1, 2]
 
@@ -475,8 +477,9 @@ class TestAnthropicCompatibleBackend:
 
         backend.request_stream_iter = request_stream_iter
 
-        with pytest.raises(ProviderResponseError, match="流式响应没有文本内容"):
+        with pytest.raises(ProviderResponseError, match="流式响应没有文本内容") as exc_info:
             backend.generate("test prompt", on_chunk=chunks.append)
+        assert exc_info.value.error_code == "MODEL_EMPTY_RESPONSE"
 
         assert chunks == []
         assert stream_calls == [1, 2]

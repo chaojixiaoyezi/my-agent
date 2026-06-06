@@ -2,6 +2,16 @@ from __future__ import annotations
 
 from ...subagents.services.base import CreateRunParams
 
+_PLACEHOLDER_AGENT_NAMES = {
+    "",
+    "general",
+    "worker",
+    "subagent",
+    "agent",
+    "child",
+}
+_DEFAULT_DEPTH = 1
+
 
 def indexed_count_params(run_params: CreateRunParams, *, index: int, count: int) -> CreateRunParams:
     task_goal = f"{run_params.goal} / 子任务{index}" if count > 1 else run_params.goal
@@ -27,26 +37,15 @@ def indexed_item_params(run_params: CreateRunParams, *, index: int, total: int) 
 def indexed_agent_name(agent_name: str, *, role: str, index: int, require_index: bool = False) -> str:
     name = str(agent_name or "").strip()
     if needs_system_lineage_name(name):
-        return f"小傻妞-{role_suffix(role)}-{index}"
+        return f"agent-d{_DEFAULT_DEPTH}-{role_suffix(role)}-{index}"
     if require_index and not has_trailing_identifier(name):
         return f"{name}-{index}"
     return name
 
 
 def needs_system_lineage_name(agent_name: str) -> bool:
-    text = str(agent_name or "").strip().strip("-")
-    return text in {
-        "",
-        "general",
-        "worker",
-        "subagent",
-        "agent",
-        "小傻妞",
-        "小傻妞-general",
-        "小傻妞-worker",
-        "小傻妞-subagent",
-        "小傻妞-agent",
-    } or text.endswith("傻妞")
+    text = str(agent_name or "").strip().strip("-").casefold()
+    return text in _PLACEHOLDER_AGENT_NAMES
 
 
 def role_suffix(role: str) -> str:

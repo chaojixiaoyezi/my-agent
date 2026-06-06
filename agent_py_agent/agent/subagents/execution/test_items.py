@@ -8,16 +8,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
-from .artifact_integrity_items import expand_artifact_integrity_items
 from .content_checks import CatContentCheckRequest, normalize_cat_content_check
-from .file_check_items import expand_file_check_items
 from .inferred_content_items import (
     ContentCheckInferenceRequest,
     inferred_content_check_items,
 )
-from .pytest_items import artifact_pytest_items
 from .static_site_items import StaticSiteTestItemsRequest, inferred_static_site_items
-from .test_checklists import drop_non_executable_model_checklist_items
 
 
 @dataclass(frozen=True)
@@ -242,7 +238,153 @@ def _workspace_path(value: object, workspace_root: Path) -> Path | None:
 
 
 def _artifact_pytest_items(context: TestItemPreparationContext) -> list[dict[str, Any]]:
-    return artifact_pytest_items(context.artifact_paths, workspace_root=context.workspace_root)
+    items: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    for _raw, path in context.artifact_paths:
+        if path in seen or not _is_pytest_artifact(path):
+            continue
+        seen.add(path)
+        items.append({
+            "name": f"artifact pytest {path.name}",
+            "validation_method": "command",
+            "command": f"python3 -m pytest {path.name} -q",
+            "working_dir": _relative_or_absolute(path.parent, context.workspace_root),
+        })
+    return items
+
+
+def _is_pytest_artifact(path: Path) -> bool:
+    return path.is_file() and path.suffix == ".py" and path.name.startswith("test_")
+
+
+def expand_artifact_integrity_items(
+    tests: list[dict[str, Any]],
+    *,
+    artifact_paths: list[tuple[str, Path]],
+    workspace_root: Path,
+) -> list[dict[str, Any]]:
+    expanded: list[dict[str, Any]] = []
+    for item in tests:
+        expanded.extend(_expanded_artifact_integrity_item(item, artifact_paths=artifact_paths, workspace_root=workspace_root))
+    return expanded
+
+
+def _expanded_artifact_integrity_item(
+    item: dict[str, Any],
+    *,
+    artifact_paths: list[tuple[str, Path]],
+    workspace_root: Path,
+) -> list[dict[str, Any]]:
+    if not _needs_artifact_integrity_targets(item) or not artifact_paths:
+        return [item]
+    return [
+        _artifact_integrity_item_for_target(item, path, artifact_paths=artifact_paths, workspace_root=workspace_root)
+        for _raw, path in artifact_paths
+    ]
+
+
+def _needs_artifact_integrity_targets(item: dict[str, Any]) -> bool:
+    method = str(item.get("validation_method") or "command").strip().lower()
+    if method != "artifact_integrity":
+        return False
+    return not str(item.get("file_path") or "").strip()
+
+
+def _artifact_integrity_item_for_target(
+    item: dict[str, Any],
+    path: Path,
+    *,
+    artifact_paths: list[tuple[str, Path]],
+    workspace_root: Path,
+) -> dict[str, Any]:
+    clone = dict(item)
+    clone["file_path"] = _relative_or_absolute(path, workspace_root)
+    if len(artifact_paths) > 1:
+        clone["name"] = f"{str(item.get('name') or 'artifact integrity').strip()} {path.name}"
+    return clone
+
+
+def expand_file_check_items(
+    tests: list[dict[str, Any]],
+    *,
+    artifact_paths: list[tuple[str, Path]],
+    workspace_root: Path,
+) -> list[dict[str, Any]]:
+    expanded: list[dict[str, Any]] = []
+    for item in tests:
+        expanded.extend(_expanded_file_check_item(item, artifact_paths=artifact_paths, workspace_root=workspace_root))
+    return expanded
+
+
+def _expanded_file_check_item(
+    item: dict[str, Any],
+    *,
+    artifact_paths: list[tuple[str, Path]],
+    workspace_root: Path,
+) -> list[dict[str, Any]]:
+    if not _is_file_check_item(item):
+        return [item]
+    if str(item.get("file_path") or "").strip():
+        return [_explicit_file_check_item(item)]
+    if not artifact_paths:
+        clone = dict(item)
+        clone["validation_method"] = "file_check"
+        return [clone]
+    return [
+        _file_check_item_for_target(item, path, artifact_paths=artifact_paths, workspace_root=workspace_root)
+        for _raw, path in artifact_paths
+    ]
+
+
+def _explicit_file_check_item(item: dict[str, Any]) -> dict[str, Any]:
+    clone = dict(item)
+    clone["validation_method"] = "file_check"
+    return clone
+
+
+def _is_file_check_item(item: dict[str, Any]) -> bool:
+    method = str(item.get("validation_method") or "command").strip().lower().replace("-", "_")
+    return method == "file_check"
+
+
+def _file_check_item_for_target(
+    item: dict[str, Any],
+    path: Path,
+    *,
+    artifact_paths: list[tuple[str, Path]],
+    workspace_root: Path,
+) -> dict[str, Any]:
+    clone = dict(item)
+    clone["validation_method"] = "file_check"
+    clone["file_path"] = _relative_or_absolute(path, workspace_root)
+    if len(artifact_paths) > 1:
+        clone["name"] = f"{str(item.get('name') or 'file exists').strip()} {path.name}"
+    return clone
+
+
+def drop_non_executable_model_checklist_items(tests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item for item in tests if not _non_executable_model_checklist_item(item)]
+
+
+def _non_executable_model_checklist_item(item: dict[str, Any]) -> bool:
+    method = str(item.get("validation_method") or "command").strip().lower() or "command"
+    if method == "command":
+        return not str(item.get("command") or "").strip()
+    if method == "file_check":
+        return not str(item.get("file_path") or "").strip()
+    if method == "content_check":
+        return not str(item.get("file_path") or "").strip() or not _content_pattern_value(item)
+    if method == "static_site_check":
+        return not str(item.get("site_root") or "").strip()
+    return False
+
+
+def _content_pattern_value(item: dict[str, Any]) -> str:
+    for key in ("content_equals", "expected_content", "content_pattern"):
+        value = str(item.get(key) or "")
+        if value:
+            return value
+    return ""
 
 
 def _find_workspace_suffix(relative_path: Path, workspace_root: Path) -> Path | None:

@@ -60,15 +60,15 @@ class TestDispatchLoopExceptions:
         result = dispatch_loop(agent, router=None, max_consecutive_rounds=20)
         assert isinstance(result, DispatchLoopReport)
 
-    def test_failure_introspection_without_agent_uses_rules(self, tmp_path: Path):
-        """未绑定 agent 时使用同一条规则主链。"""
+    def test_failure_introspection_uses_rules(self, tmp_path: Path):
+        """失败自省使用同一条规则主链。"""
         from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
         from agent_py_agent.agent.agent_core.failure_introspector import (
             FailureIntrospection,
             FailureIntrospector,
         )
 
-        introspector = FailureIntrospector(agent=None)
+        introspector = FailureIntrospector()
 
         mock_task = MagicMock()
         mock_task.goal = "测试任务"
@@ -99,7 +99,7 @@ class TestDispatchLoopExceptions:
         # 模拟 LLM 返回无效 JSON
         agent.run.return_value = MagicMock(response="这不是有效的JSON格式")
 
-        introspector = FailureIntrospector(agent=agent)
+        introspector = FailureIntrospector()
 
         mock_task = MagicMock()
         mock_task.goal = "测试任务"
@@ -223,12 +223,12 @@ class TestMemoryPushExceptions:
 class TestFailureIntrospectorRulePath:
     """测试 failure_introspector 的规则主链。"""
 
-    def test_introspector_no_agent_uses_rules(self, tmp_path: Path):
-        """agent 未设置时使用规则分类。"""
+    def test_introspector_uses_rules(self, tmp_path: Path):
+        """失败自省使用规则分类。"""
         from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
         from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
-        introspector = FailureIntrospector(agent=None)
+        introspector = FailureIntrospector()
 
         mock_task = MagicMock()
         mock_runner_result = MagicMock()
@@ -253,7 +253,7 @@ class TestFailureIntrospectorRulePath:
         agent = MagicMock()
         agent.run.side_effect = RuntimeError("LLM API failed")
 
-        introspector = FailureIntrospector(agent=agent)
+        introspector = FailureIntrospector()
 
         mock_task = MagicMock()
         mock_task.goal = "测试"
@@ -283,7 +283,7 @@ class TestFailureIntrospectorRulePath:
         agent = MagicMock()
         agent.run.return_value = MagicMock(response="This is not JSON at all")
 
-        introspector = FailureIntrospector(agent=agent)
+        introspector = FailureIntrospector()
 
         mock_task = MagicMock()
         mock_task.goal = "测试"
@@ -313,7 +313,7 @@ class TestFailureIntrospectorRulePath:
         # JSON 缺少必需字段
         agent.run.return_value = MagicMock(response='{"analysis_reason": "测试"}')
 
-        introspector = FailureIntrospector(agent=agent)
+        introspector = FailureIntrospector()
 
         mock_task = MagicMock()
         mock_task.goal = "测试"
@@ -337,7 +337,7 @@ class TestFailureIntrospectorRulePath:
         from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
         from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
-        introspector = FailureIntrospector(agent=None)
+        introspector = FailureIntrospector()
 
         mock_task = MagicMock()
         mock_runner_result = MagicMock()

@@ -15,10 +15,13 @@ from pathlib import Path
 from ..artifacts.registry import ArtifactRegistration, register_artifact
 from ..runtime_errors import runtime_error_report
 from .models import EvidencePacket, SubAgentTask
-from .result_artifact_roots import artifact_candidate_roots, artifact_suffix_roots
+from .result_artifact_roots import (
+    artifact_candidate_roots,
+    artifact_suffix_roots,
+    declared_workspace_roots,
+)
 from .services.agent_run_state import read_agent_state_payload
 from .utils import _merge_list, _new_id
-from .workspace_roots import derived_workspace_roots_from_subagent_path
 
 
 def artifact_ref(item: dict[str, object]) -> str:
@@ -81,20 +84,13 @@ def _append_task_registry_ref(task: SubAgentTask, record: dict[str, object]) -> 
 
 
 def _registry_workspace_root(task: SubAgentTask, path: Path | None) -> Path | None:
-    candidates: list[Path] = []
-    for value in (
-        getattr(task, "task_dir", ""),
-        getattr(task, "agent_run_workspace_dir", ""),
-        getattr(task, "task_workspace_dir", ""),
-        path or "",
-    ):
-        candidates.extend(derived_workspace_roots_from_subagent_path(Path(str(value)).expanduser()))
-    for candidate in candidates:
+    if path is not None:
+        for candidate in [*declared_workspace_roots(task), *artifact_candidate_roots(task)]:
+            if _is_relative_to(path, candidate):
+                return candidate
+    for candidate in artifact_suffix_roots(task):
         if candidate.exists() and candidate.is_dir():
             return candidate
-    task_dir = _existing_local_path(getattr(task, "task_dir", ""))
-    if task_dir is not None:
-        return task_dir if task_dir.is_dir() else task_dir.parent
     return path.parent if path is not None else None
 
 
@@ -233,6 +229,14 @@ def _safe_path_name(text: str) -> str:
 
 def _path_has_suffix(path: Path, parts: tuple[str, ...]) -> bool:
     return len(path.parts) >= len(parts) and path.parts[-len(parts):] == parts
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _artifact_claim(item: dict[str, object], ref: str) -> str:

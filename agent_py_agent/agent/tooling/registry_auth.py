@@ -23,6 +23,23 @@ def registry_auth_error(
     return _tool_auth_error(tool_name, context)
 
 
+def registry_auth_error_code(tool_name: str, context: ToolAuthContext) -> str:
+    if tool_name in context.disabled:
+        return "TOOL_NOT_ALLOWED"
+    if context.allowed is None and tool_name in context.default_hidden:
+        return "TOOL_NOT_ALLOWED"
+    if context.allowed is not None and tool_name not in context.allowed:
+        return "TOOL_NOT_ALLOWED"
+    if tool_name in context.security_tool_names and not _security_tool_call_authorized(
+        tool_name,
+        context.expose_security_tools,
+        allowed=context.allowed,
+        granted_capabilities=context.granted_capabilities,
+    ):
+        return "TOOL_NOT_ALLOWED"
+    return ""
+
+
 def allowed_tool_set(allowed_tools: list[str] | None) -> set[str] | None:
     if allowed_tools is None:
         return None
@@ -75,4 +92,10 @@ def _security_tool_call_authorized(
     )
 
 
-__all__ = ["ToolAuthContext", "allowed_tool_set", "registry_auth_error", "security_tools_visible"]
+__all__ = [
+    "ToolAuthContext",
+    "allowed_tool_set",
+    "registry_auth_error",
+    "registry_auth_error_code",
+    "security_tools_visible",
+]

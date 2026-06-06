@@ -66,7 +66,7 @@ def exploration_fuse_context(agent: object, redirects: int) -> str:
         "exploration_fuse_hint_round": hint_round,
         "exploration_fuse_round_threshold": config.round_threshold,
         "exploration_rounds_without_local_progress": count,
-        "required_next_action": "materialize_local_progress",
+        "suggested_next_action": "materialize_local_progress",
         "productive_tool_names": sorted(_LOCAL_PROGRESS_TOOL_NAMES),
     }
     message = _hint_message(config, count, hint_round, percent)
@@ -111,7 +111,7 @@ def _hint_message(config: ExplorationFuseConfig, count: int, hint_round: int, pe
     if percent >= 80:
         return (
             f"{visibility} 当前连续只读/检索进度为 {percent}%（{count}/{config.round_threshold} 轮）。"
-            f"请尽快执行本地落地动作；下一轮必须优先物化本地进展。{action_hint}"
+            f"建议尽快执行本地落地动作；下一轮优先考虑物化本地进展。{action_hint}"
             "如果还要继续远程抓取，也要同步留下本地进展。"
         )
     return (

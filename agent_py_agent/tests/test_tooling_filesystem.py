@@ -6,17 +6,20 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_py_agent.agent.tooling._filesystem_list import ListFilesTool
+from agent_py_agent.agent.tooling._filesystem_read import (
+    FileSystemTool,
+    ReadFileTool,
+    filesystem_access_options,
+)
+from agent_py_agent.agent.tooling._filesystem_search import SearchTextTool
+
 
 class TestFileSystemToolBase:
     """测试 FileSystemTool 基类的路径解析和安全边界。"""
 
     def test_resolve_path_within_workspace(self, tmp_path: Path):
         """路径在工作区内时应正确解析。"""
-        from agent_py_agent.agent.tooling.filesystem import (
-            FileSystemTool,
-            filesystem_access_options,
-        )
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
@@ -32,8 +35,6 @@ class TestFileSystemToolBase:
 
     def test_resolve_home_path(self, tmp_path: Path, monkeypatch):
         """~/ 路径按当前用户 home 解析，而不是当作工作区下的普通目录。"""
-        from agent_py_agent.agent.tooling.filesystem import FileSystemTool
-
         home = tmp_path / "home"
         workspace = tmp_path / "workspace"
         home.mkdir()
@@ -48,8 +49,6 @@ class TestFileSystemToolBase:
 
     def test_resolve_path_outside_workspace(self, tmp_path: Path):
         """普通工作区外路径不再默认拒绝。"""
-        from agent_py_agent.agent.tooling.filesystem import FileSystemTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         outside = tmp_path / "outside"
@@ -61,8 +60,6 @@ class TestFileSystemToolBase:
 
     def test_resolve_path_with_parent_traversal(self, tmp_path: Path):
         """../ 现在按真实目标走危险目录策略，不按工作区硬拦。"""
-        from agent_py_agent.agent.tooling.filesystem import FileSystemTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
@@ -75,8 +72,6 @@ class TestFileSystemToolBase:
     def test_resolve_path_with_symlink_outside(self, tmp_path: Path):
         """符号链接指向普通外部目录时不再默认拒绝。"""
         import sys
-
-        from agent_py_agent.agent.tooling.filesystem import FileSystemTool
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
@@ -101,11 +96,6 @@ class TestFileSystemToolBase:
 
     def test_resolve_path_blocks_configured_dangerous_root(self, tmp_path: Path):
         """危险目录仍会被统一策略拒绝。"""
-        from agent_py_agent.agent.tooling.filesystem import (
-            FileSystemTool,
-            filesystem_access_options,
-        )
-
         workspace = tmp_path / "workspace"
         danger = tmp_path / "danger"
         workspace.mkdir()
@@ -117,8 +107,6 @@ class TestFileSystemToolBase:
 
     def test_display_path_within_workspace(self, tmp_path: Path):
         """工作区内的路径应显示相对路径。"""
-        from agent_py_agent.agent.tooling.filesystem import FileSystemTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         subdir = workspace / "subdir"
@@ -131,8 +119,6 @@ class TestFileSystemToolBase:
 
     def test_display_path_outside_workspace(self, tmp_path: Path):
         """工作区外路径显示绝对路径，方便模型按真实路径继续修。"""
-        from agent_py_agent.agent.tooling.filesystem import FileSystemTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         tool = FileSystemTool(workspace)
@@ -147,8 +133,6 @@ class TestListFilesTool:
 
     def test_list_files_basic(self, tmp_path: Path):
         """基本目录列表功能。"""
-        from agent_py_agent.agent.tooling.filesystem import ListFilesTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         (workspace / "file1.txt").write_text("content1")
@@ -166,8 +150,6 @@ class TestListFilesTool:
 
     def test_list_files_nonexistent_path(self, tmp_path: Path):
         """列出不存在的目录。"""
-        from agent_py_agent.agent.tooling.filesystem import ListFilesTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
@@ -179,8 +161,6 @@ class TestListFilesTool:
 
     def test_list_files_recursive(self, tmp_path: Path):
         """递归列出目录。"""
-        from agent_py_agent.agent.tooling.filesystem import ListFilesTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         (workspace / "file1.txt").write_text("content1")
@@ -197,8 +177,6 @@ class TestListFilesTool:
 
     def test_list_files_max_entries(self, tmp_path: Path):
         """最大条目数限制。"""
-        from agent_py_agent.agent.tooling.filesystem import ListFilesTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         for i in range(20):
@@ -214,8 +192,6 @@ class TestListFilesTool:
 
     def test_list_files_single_file(self, tmp_path: Path):
         """列出单个文件。"""
-        from agent_py_agent.agent.tooling.filesystem import ListFilesTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         test_file = workspace / "test.txt"
@@ -232,8 +208,6 @@ class TestReadFileTool:
 
     def test_read_file_basic(self, tmp_path: Path):
         """基本文件读取功能。"""
-        from agent_py_agent.agent.tooling.filesystem import ReadFileTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         test_file = workspace / "test.txt"
@@ -247,8 +221,6 @@ class TestReadFileTool:
 
     def test_read_file_nonexistent(self, tmp_path: Path):
         """读取不存在的文件。"""
-        from agent_py_agent.agent.tooling.filesystem import ReadFileTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
@@ -258,11 +230,26 @@ class TestReadFileTool:
         assert result.ok is False
         assert "不存在" in result.output
 
+    def test_read_file_directory_returns_structured_error(self, tmp_path: Path):
+        """读取目录时给明确错误码和下一步工具建议。"""
+        import json
+
+        workspace = tmp_path / "workspace"
+        target = workspace / "src"
+        target.mkdir(parents=True)
+
+        tool = ReadFileTool(workspace, max_chars=10000)
+        result = tool.execute({"path": "src"})
+        payload = json.loads(result.output)
+
+        assert result.ok is False
+        assert result.error_code == "PATH_IS_DIRECTORY"
+        assert payload["error"] == "PATH_IS_DIRECTORY"
+        assert payload["suggested_tool_call"] == {"tool": "list_files", "path": "src", "max_depth": 1}
+
     def test_read_file_missing_target_ignores_retired_write_session_state(self, tmp_path: Path):
         """旧 file_write_sessions 状态不再影响普通 read_file 缺失错误。"""
         import json
-
-        from agent_py_agent.agent.tooling.filesystem import ReadFileTool
 
         workspace = tmp_path / "workspace"
         session_dir = workspace / ".agent_write_files" / "session-open"
@@ -293,8 +280,6 @@ class TestReadFileTool:
 
     def test_read_file_with_line_range(self, tmp_path: Path):
         """按行范围读取文件。"""
-        from agent_py_agent.agent.tooling.filesystem import ReadFileTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         test_file = workspace / "test.txt"
@@ -310,8 +295,6 @@ class TestReadFileTool:
 
     def test_read_file_invalid_line_range(self, tmp_path: Path):
         """无效的行列范围。"""
-        from agent_py_agent.agent.tooling.filesystem import ReadFileTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         test_file = workspace / "test.txt"
@@ -325,8 +308,6 @@ class TestReadFileTool:
 
     def test_read_file_truncation(self, tmp_path: Path):
         """超长文件应被截断。"""
-        from agent_py_agent.agent.tooling.filesystem import ReadFileTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         test_file = workspace / "test.txt"
@@ -340,8 +321,6 @@ class TestReadFileTool:
 
     def test_read_file_offset_beyond_end_has_structured_error_code(self, tmp_path: Path):
         """按字符窗口读取越界时应给明确错误码，方便日志定位。"""
-        from agent_py_agent.agent.tooling.filesystem import ReadFileTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         (workspace / "test.txt").write_text("short", encoding="utf-8")
@@ -355,8 +334,6 @@ class TestReadFileTool:
 
     def test_read_file_empty(self, tmp_path: Path):
         """读取空文件。"""
-        from agent_py_agent.agent.tooling.filesystem import ReadFileTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         test_file = workspace / "empty.txt"
@@ -371,8 +348,6 @@ class TestReadFileTool:
     def test_read_file_summarizes_subagent_continue_packet(self, tmp_path: Path):
         """子代理恢复包默认摘要读取，避免把大量 refs 直接塞回 prompt。"""
         import json
-
-        from agent_py_agent.agent.tooling.filesystem import ReadFileTool
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
@@ -407,8 +382,6 @@ class TestReadFileTool:
         """显式按行读取时保留普通 read_file 行号行为，方便调试原始 packet。"""
         import json
 
-        from agent_py_agent.agent.tooling.filesystem import ReadFileTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         packet = workspace / "latest_continue_packet.json"
@@ -435,8 +408,6 @@ class TestSearchTextTool:
 
     def test_search_text_basic(self, tmp_path: Path):
         """基本文本搜索功能。"""
-        from agent_py_agent.agent.tooling.filesystem import SearchTextTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         (workspace / "file1.txt").write_text("Hello World")
@@ -451,8 +422,6 @@ class TestSearchTextTool:
 
     def test_search_text_no_matches(self, tmp_path: Path):
         """无匹配结果。"""
-        from agent_py_agent.agent.tooling.filesystem import SearchTextTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         (workspace / "file.txt").write_text("Hello World")
@@ -465,8 +434,6 @@ class TestSearchTextTool:
 
     def test_search_text_nonexistent_path(self, tmp_path: Path):
         """搜索不存在的路径。"""
-        from agent_py_agent.agent.tooling.filesystem import SearchTextTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
@@ -478,8 +445,6 @@ class TestSearchTextTool:
 
     def test_search_text_max_matches(self, tmp_path: Path):
         """最大匹配数限制。"""
-        from agent_py_agent.agent.tooling.filesystem import SearchTextTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         for i in range(50):
@@ -495,8 +460,6 @@ class TestSearchTextTool:
 
     def test_search_text_path_traversal_blocked(self, tmp_path: Path):
         """搜索时防止路径穿越。"""
-        from agent_py_agent.agent.tooling.filesystem import SearchTextTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
@@ -507,8 +470,6 @@ class TestSearchTextTool:
 
     def test_search_text_with_subdirectory(self, tmp_path: Path):
         """搜索子目录中的文件。"""
-        from agent_py_agent.agent.tooling.filesystem import SearchTextTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         subdir = workspace / "subdir"
@@ -523,8 +484,6 @@ class TestSearchTextTool:
 
     def test_search_text_rejects_filesystem_bundle_path(self, tmp_path: Path):
         """filesystem.path bundle 不是当前协议，不能退回全工作区搜索。"""
-        from agent_py_agent.agent.tooling.filesystem import SearchTextTool
-
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         (workspace / "outside.txt").write_text("needle")

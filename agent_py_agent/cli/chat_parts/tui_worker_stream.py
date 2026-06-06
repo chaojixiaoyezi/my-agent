@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from ...agent.gateway_parts.context_tokens import current_context_token_estimate
+from ...agent.gateway_parts.response_renderer import current_context_token_estimate
 from .renderer import GREEN, strip_ansi, style_text
 
 

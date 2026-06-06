@@ -20,7 +20,7 @@ auto_detect_work_on_startup: true
 # - 场景测试、外部聊天工具或未来多项目模式可以把它指向某个独立目录。
 # - memory_path、subagent_workspace、gateway_workspace、prompt_files 和文件工具都会以这个目录为基础。
 # - 这就是“测试不能影响当前开发仓库”的关键开关。
-workspace_root: ["", "C:/Users/41542/Desktop/2026年工作/5月","/Users/xiaoyezi/my-claude-code"]
+workspace_root: ""
 
 # my-agent 家目录：
 # - 默认 ~/.my-agent，作为本机固定 profile/home 目录。
@@ -197,7 +197,6 @@ subagent_descendant_scan_limit: 128
 subagent_takeover_chain_max_depth: 0
 subagent_context_summary_inline_json_chars: 900
 subagent_context_summary_inline_text_chars: 500
-subagent_automation_level: 2
 
 # 子代理调试追踪等级。
 # - 0: 默认关闭
@@ -270,7 +269,7 @@ runner_start_rate: "auto"
 # runner_start_rate 只限制每个调度切片启动多少个，后台会继续扫本批剩余项，不应让主代理立刻退出等人。
 
 # runner_timeout_seconds 控制单个 runner 的外层总时长保护：
-# - "off" / "none" / "disabled": 默认，不套外层总时长闹钟；长任务靠心跳、状态、取消/接管工具治理。
+# - "off": 默认，不套外层总时长闹钟；长任务靠心跳、状态、取消/接管工具治理。
 # - "auto": 按任务文本和角色动态计算超时，适合压测或需要自动抢救卡死 runner 的场景。
 # - "120" 这类数字字符串：固定 120 秒。
 runner_timeout_seconds: "off"

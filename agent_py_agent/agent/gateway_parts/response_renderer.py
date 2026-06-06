@@ -11,10 +11,31 @@ context pressure when available, while JSON mode preserves the raw fields.
 import json
 from typing import Any
 
-from .context_tokens import current_context_token_estimate
 from .io import gateway_response_path, read_json_file_report
 from .paths import GatewayPaths
 from .request_errors import gateway_response_load_error_response
+
+
+def current_context_token_estimate(payload: Any) -> int:
+    """Return the token estimate humans expect for current context pressure."""
+    for key in (
+        "current_context_token_estimate",
+        "prompt_token_estimate",
+        "turn_token_estimate",
+        "cumulative_token_estimate",
+    ):
+        value = _int_value(payload, key)
+        if value > 0:
+            return value
+    return 0
+
+
+def _int_value(payload: Any, key: str) -> int:
+    raw = payload.get(key) if isinstance(payload, dict) else getattr(payload, key, 0)
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def print_gateway_response(payload: dict, *, json_mode: bool = False, show_prompt: bool = False) -> int:

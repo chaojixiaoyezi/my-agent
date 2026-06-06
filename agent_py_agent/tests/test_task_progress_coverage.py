@@ -587,8 +587,8 @@ def test_task_progress_rejects_old_action_aliases(tmp_path):
 class TestTaskProgressCoverageRejectedAliases:
     """测试旧 coverage 输入不会被隐式归一成机器账本。"""
 
-    def test_task_progress_ignores_string_coverage_targets(self, tmp_path):
-        """字符串 coverage_targets 不再被解析成结构化 coverage。"""
+    def test_task_progress_rejects_string_coverage_targets(self, tmp_path):
+        """字符串 coverage_targets 不再被解析成结构化 coverage，也不再静默吞掉。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -608,12 +608,11 @@ class TestTaskProgressCoverageRejectedAliases:
         )
         payload = json.loads(result.output)
 
-        assert result.ok is True
-        assert payload["summary"] == "开始分析五个项目。"
-        assert "coverage" not in payload
+        assert result.ok is False
+        assert payload["invalid_fields"] == ["coverage_targets"]
 
-    def test_task_progress_ignores_fields_needed_and_chinese_target_text(self, tmp_path):
-        """fields_needed 和中文冒号覆盖项不再生成 checks。"""
+    def test_task_progress_rejects_fields_needed_and_chinese_target_text(self, tmp_path):
+        """fields_needed 和中文冒号覆盖项不再生成 checks，也不再作为顶层旧字段通过。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -639,9 +638,8 @@ class TestTaskProgressCoverageRejectedAliases:
         )
         payload = json.loads(result.output)
 
-        assert result.ok is True
-        assert "coverage" not in payload
-        assert payload["items"][0]["id"] == "free-code-main"
+        assert result.ok is False
+        assert payload["invalid_fields"] == ["coverage_targets"]
 
     def test_task_progress_notes_do_not_create_implicit_coverage_checks(self, tmp_path):
         """notes 是事实或备注；不要靠冒号文本猜 coverage checks。"""
@@ -692,8 +690,8 @@ class TestTaskProgressCoverageRejectedAliases:
         assert result.ok is True
         assert payload["items"][0]["notes"] == ""
 
-    def test_task_progress_ignores_name_and_missing_fields_aliases(self, tmp_path):
-        """name/missing_fields 和字符串 coverage 不再生成 target。"""
+    def test_task_progress_rejects_name_and_missing_fields_aliases(self, tmp_path):
+        """name/missing_fields 和字符串 coverage 不再生成 target，也不再作为顶层旧字段通过。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -713,8 +711,8 @@ class TestTaskProgressCoverageRejectedAliases:
         )
         payload = json.loads(result.output)
 
-        assert result.ok is True
-        assert "coverage" not in payload
+        assert result.ok is False
+        assert payload["invalid_fields"] == ["coverage_targets"]
 
 
 class TestTaskProgressQualityHints:

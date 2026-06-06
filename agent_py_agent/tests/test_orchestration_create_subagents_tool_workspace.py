@@ -195,6 +195,71 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
         created = agent.subagents.list_runs()[-1]
         assert str(task_root / "output" / "agent-group-1-analysis.md") in created.attributes["output_refs"]
 
+    def test_rebases_unrequested_workspace_output_dir_to_current_task_output(self, tmp_path):
+        from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        workspace = tmp_path / "all-agent"
+        workspace.mkdir()
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"),
+            workspace,
+        )
+        task_root = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-01" / "all-agent-架构分析"
+        agent._current_run_task_workspace = str(task_root)
+
+        params = create_run_params(
+            agent,
+            {
+                "role": "worker",
+                "input_refs": [str(workspace / "codex-main")],
+                "output_files": [str(workspace / "output" / "codex-analysis.md")],
+            },
+            "分析 codex-main",
+            ["read_file", "write_file"],
+        )
+
+        expected = str((task_root / "output" / "codex-analysis.md").resolve(strict=False))
+        assert params.attributes["output_refs"] == [expected]
+        assert params.extra_write_roots == [str((task_root / "output").resolve(strict=False))]
+
+    def test_does_not_rebase_stale_owner_task_output_dir_to_current_task_output(self, tmp_path):
+        from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        workspace = tmp_path / "all-agent"
+        workspace.mkdir()
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"),
+            workspace,
+        )
+        current_task = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-07" / "all-agent-架构分析"
+        stale_output = (
+            tmp_path
+            / "home"
+            / "owners"
+            / "local"
+            / "main"
+            / "tasks"
+            / "2026-06-01"
+            / "all-agent-架构分析"
+            / "output"
+            / "analyzer-1-report.md"
+        )
+        agent._current_run_task_workspace = str(current_task)
+
+        params = create_run_params(
+            agent,
+            {"role": "worker", "output_files": [str(stale_output)]},
+            "分析 codex-main",
+            ["read_file", "write_file"],
+        )
+
+        assert params.attributes["output_refs"] == [str(stale_output)]
+        assert params.extra_write_roots == []
+
     def test_create_subagents_attaches_current_main_run_lineage(self, tmp_path):
         from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
         from agent_py_agent.agent.core import SimpleAgent

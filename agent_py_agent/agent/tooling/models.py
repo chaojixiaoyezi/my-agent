@@ -21,6 +21,7 @@ class ToolSpec:
     keywords: list[str]
     parameters: dict[str, str]
     parameter_details: dict[str, str] = field(default_factory=dict)
+    internal_parameters: list[str] = field(default_factory=list)
     examples: list[str] = field(default_factory=list)
     effect: str = ""
     default_mode: str = ""

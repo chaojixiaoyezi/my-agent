@@ -207,7 +207,6 @@ class SubagentAdvancedFieldsService:
             out,
             defaults,
             (
-                ("subagent_automation_level", 1, 3),
                 ("subagent_debug_trace_level", 0, 5),
                 ("result_check_timeout_seconds", 1, 300),
                 ("dynamic_timeout_min", 10, None),

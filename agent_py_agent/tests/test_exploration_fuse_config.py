@@ -70,3 +70,22 @@ def test_runtime_guard_policy_records_values_and_sources(tmp_path: Path):
     assert snapshot["run_id"] == "run-1"
     assert snapshot["sources"]["terminal_block_enabled"] == str(path)
     assert snapshot["sources"]["repeat_fail_threshold"] == "runtime_override"
+
+
+def test_runtime_guard_policy_bool_values_require_machine_tokens():
+    from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
+
+    policy = RuntimeGuardPolicy(
+        values={
+            "explicit_true": "true",
+            "explicit_false": "false",
+            "ordinary_on": "on",
+            "ordinary_off": "off",
+        },
+        sources={},
+    )
+
+    assert policy.bool_value("explicit_true", False) is True
+    assert policy.bool_value("explicit_false", True) is False
+    assert policy.bool_value("ordinary_on", False) is False
+    assert policy.bool_value("ordinary_off", True) is True

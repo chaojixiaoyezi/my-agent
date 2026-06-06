@@ -231,13 +231,22 @@ class CreateSubagentsTool(BaseTool):
         return ""
 
     def _requested_count(self, params: dict[str, object]) -> int | ToolExecutionResult:
-        count = _positive_int(params.get("count"), default=1)
+        if _has_count_param(params):
+            count = _positive_int(params.get("count"), default=0)
+        else:
+            count = self._default_requested_count(params)
         if count <= 0:
             return ToolExecutionResult("create_subagents", False, "count 必须大于 0。")
         max_subagents = _configured_max_subagents(self.agent)
         if max_subagents > 0:
             count = min(count, max_subagents)
         return count
+
+    def _default_requested_count(self, params: dict[str, object]) -> int:
+        replacement_count = len(_string_list(params.get("replacement_for_run_ids")))
+        if replacement_count:
+            return replacement_count
+        return 1
 
     def _count_run_params(self, count: int, run_params: CreateRunParams) -> list[CreateRunParams]:
         return [
@@ -271,6 +280,23 @@ def _configured_max_subagents(agent) -> int:
         return max(0, int(raw_value))
     except (TypeError, ValueError):
         return _DEFAULT_MAX_SUBAGENTS
+
+
+def _has_count_param(params: dict[str, object]) -> bool:
+    if "count" not in params:
+        return False
+    value = params.get("count")
+    return str(value or "").strip() != ""
+
+
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, list | tuple | set):
+        raw_items = value
+    else:
+        return []
+    return [str(item).strip() for item in raw_items if str(item).strip()]
 
 
 def _with_default_child_output_ref(agent: object, run_params: CreateRunParams, *, index: int) -> CreateRunParams:

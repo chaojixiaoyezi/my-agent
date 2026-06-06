@@ -171,7 +171,10 @@ def _prompt_budget(chars: int) -> dict[str, Any]:
 def _task_workspace_refs(home_paths: Any | None) -> dict[str, str]:
     if home_paths is None:
         return {}
-    owner_tasks = Path(getattr(home_paths, "owner_tasks_dir", home_paths.workspace_tasks_dir)).resolve()
+    owner_tasks_dir = getattr(home_paths, "owner_tasks_dir", None)
+    if owner_tasks_dir is None:
+        return {}
+    owner_tasks = Path(owner_tasks_dir).resolve()
     return {
         "owner_tasks_root": str(owner_tasks),
     }

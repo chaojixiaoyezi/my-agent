@@ -30,8 +30,8 @@ class CollaborationStore(CollaborationRequestStore):
         return {
             "schema_version": "collaboration_overview.v1",
             "case_count": len(statuses),
-            "open_case_count": sum(1 for status in statuses if case_status_text(status) == "open"),
-            "close_case_count": sum(1 for status in statuses if case_status_text(status) == "close"),
+            "open_case_count": sum(1 for status in statuses if _case_window_status(status) == "open"),
+            "closed_case_count": sum(1 for status in statuses if _case_window_status(status) == "closed"),
             "ready_case_count": len(ready_cases),
             "request_count": _sum_status(statuses, "request_count"),
             "pending_request_count": _sum_status(statuses, "pending_request_count"),
@@ -235,6 +235,10 @@ def _missing_evidence_request_ids(snapshot: _CaseSnapshot) -> list[str]:
 
 def _sum_status(statuses: list[dict[str, Any]], key: str) -> int:
     return sum(int(status.get(key) or 0) for status in statuses)
+
+
+def _case_window_status(status: dict[str, Any]) -> str:
+    return case_window_status(case_status_text(status))
 
 
 def _missing_count(statuses: list[dict[str, Any]]) -> int:

@@ -66,6 +66,14 @@ def build_owner_agent_projection(task: SubAgentTask, state: AgentRunState) -> di
         "current_tool": task.current_tool,
         "last_progress_at": task.last_progress_at,
         "last_progress_summary": task.last_progress_summary,
+        "artifact_refs": list(getattr(task, "artifact_refs", []) or []),
+        "evidence_refs": list(getattr(task, "evidence_refs", []) or []),
+        "declared_output_refs": _declared_output_refs(task),
+        "output_json_ref": str(getattr(task, "output_json", "") or ""),
+        "runner_result_ref": str(getattr(task, "runner_result_json", "") or ""),
+        "result_file_ref": str(getattr(task, "runner_result_file", "") or ""),
+        "final_report_ref": str(getattr(task, "agent_run_final_report_md", "") or ""),
+        "latest_tool_progress_ref": _latest_tool_progress_ref(task),
         "canonical_state_ref": str(state.canonical_path or ""),
         "task_workspace_dir": task.task_workspace_dir,
         "agent_run_workspace_dir": task.agent_run_workspace_dir,
@@ -121,6 +129,30 @@ def write_agent_run_state(state: AgentRunState) -> None:
         return
     state.canonical_path.parent.mkdir(parents=True, exist_ok=True)
     write_json_file_atomic(state.canonical_path, state.payload)
+
+
+def _declared_output_refs(task: SubAgentTask) -> list[str]:
+    attrs = getattr(task, "attributes", {}) or {}
+    refs: list[str] = []
+    if isinstance(attrs, dict):
+        for key in ("output_refs", "output_files", "artifact_refs"):
+            refs.extend(_string_list(attrs.get(key)))
+    refs.extend(str(item) for item in getattr(task, "artifact_refs", []) or [])
+    return list(dict.fromkeys(item for item in refs if item))
+
+
+def _latest_tool_progress_ref(task: SubAgentTask) -> str:
+    workspace = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
+    return str(Path(workspace) / "progress" / "latest_tool_progress.json") if workspace else ""
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, list):
+        return [text for item in value if (text := str(item or "").strip())]
+    return []
 
 
 def _different_path(left: Path, right: Path) -> bool:

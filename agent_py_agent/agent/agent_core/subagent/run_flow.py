@@ -118,7 +118,7 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
 
 
 def _run_subagent_model_turn(lifecycle, prompt: str, context):
-    from ..runner.identity_prompt import subagent_runner_system_prompt
+    from ..runner.prompts import subagent_runner_system_prompt
 
     return lifecycle.agent.run(
         prompt,

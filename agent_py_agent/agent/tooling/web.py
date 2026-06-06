@@ -80,7 +80,7 @@ def _effective_allow_private_resolution(value: bool | None) -> bool:
     if value is not None:
         return bool(value)
     raw = os.environ.get("MY_AGENT_ALLOW_PRIVATE_URLS", "")
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return raw.strip().lower() in {"1", "true"}
 
 
 def _format_http_error(tool: str, exc: urllib.error.HTTPError, max_chars: int) -> ToolExecutionResult:

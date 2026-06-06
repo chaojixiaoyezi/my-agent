@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 def runner_timeout_disabled(config: Any) -> bool:
     raw_value = getattr(config, "runner_timeout_seconds", "off")
     if isinstance(raw_value, str):
-        return raw_value.strip().lower() in {"off", "none", "disabled", "false", "no", "0"}
+        return raw_value.strip().lower() in {"off", "0"}
     try:
         return float(raw_value) == 0.0
     except (TypeError, ValueError):
@@ -103,7 +103,7 @@ def _runner_timeout_root_like_role(role: str, task: SubAgentTask | None = None) 
 
 def _runner_timeout_value_disabled(value: object) -> bool:
     if isinstance(value, str):
-        return value.strip().lower() in {"off", "none", "disabled", "false", "no", "0"}
+        return value.strip().lower() in {"off", "0"}
     try:
         return float(value) == 0.0
     except (TypeError, ValueError):

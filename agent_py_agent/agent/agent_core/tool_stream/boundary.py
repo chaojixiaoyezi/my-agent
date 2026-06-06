@@ -322,7 +322,7 @@ def long_write_abort_response(exc: LongToolContentStreamAbort, *, backend: str) 
     )
     payload = {
         "tool": "__parse_error__",
-        "error_code": "TOOL_CALL_UNCLOSED",
+        "error_code": "TOOL_INLINE_CONTENT_STREAM_ABORTED",
         "error": (
             f"{exc.tool}.content inline content streaming exceeded {exc.limit} chars; "
             "工具调用缺少结束标记"

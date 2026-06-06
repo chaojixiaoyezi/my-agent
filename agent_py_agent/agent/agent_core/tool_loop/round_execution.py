@@ -133,6 +133,7 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
             stateful_orchestration_seen or tool_name in _STATEFUL_ORCHESTRATION_TOOLS
         )
         if _round_context_over_compact_budget(request, before_context_count):
+            _record_remaining_content_calls_as_deferred(request, calls, start_idx=idx + 1)
             break
     _append_long_read_fact_reminder(request, read_since_checkpoint)
     _append_deferred_tool_call_notice(request, handled_count=handled_count)
@@ -185,6 +186,28 @@ def _compact_deferred_result(tool_name: str) -> ToolExecutionResult:
         "CONTEXT_COMPACT_DEFERRED: 当前上下文需要先 compact/resume；本次工具调用未执行，恢复后从同一目标继续。",
         error_code="CONTEXT_COMPACT_DEFERRED",
     )
+
+
+def _record_remaining_content_calls_as_deferred(
+    request: ToolRoundExecutionRequest,
+    calls: list[dict[str, object]],
+    *,
+    start_idx: int,
+) -> None:
+    deferred = 0
+    for idx, payload in enumerate(calls[start_idx - 1:], start=start_idx):
+        tool_name = _tool_name(payload)
+        if tool_name not in _CONTENT_OUTPUT_TOOLS:
+            continue
+        result = _compact_deferred_result(tool_name)
+        request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
+        deferred += 1
+    if deferred:
+        request.params.tool_context.append(
+            "[tool-system]\n"
+            f"本轮剩余 {deferred} 个内容读取/检索工具已登记为 CONTEXT_COMPACT_DEFERRED；"
+            "compact/resume 后系统会按这些结构化记录继续，不需要凭记忆重造调用。"
+        )
 
 
 def _calls_for_this_execution_round(request: ToolRoundExecutionRequest) -> list[dict[str, object]]:

@@ -56,21 +56,6 @@ def controlled_exec_probe(result: ToolExecutionResult) -> dict[str, object]:
     }
 
 
-def shadow_runtime_facts(
-    probe_refs: list[dict[str, object]],
-    comparison_ref: str,
-) -> dict[str, object]:
-    return {
-        "run_id": "shadow-run-small-real",
-        "stage": "shadow_mode",
-        "mode": "shadow",
-        "real_tool_probe_refs": list(probe_refs),
-        "comparison_artifacts": [{"artifact_ref": f"artifact://{comparison_ref}", "exists": True}],
-        "shadow_facts": _shadow_facts(comparison_ref),
-        "executed_actions": [],
-    }
-
-
 def controlled_exec_grant(root: Path) -> dict[str, object]:
     return {
         "grant_id": "grant-small-real",
@@ -81,33 +66,6 @@ def controlled_exec_grant(root: Path) -> dict[str, object]:
         "network_scope": [],
         "output_budget": {"stdout_bytes": 200, "stderr_bytes": 200},
         "risk_level": "low",
-    }
-
-
-def _shadow_facts(comparison_ref: str) -> dict[str, object]:
-    return {
-        "mode": "shadow",
-        "risk": {"score": 50},
-        "evidence_refs": [{"evidence_id": "EV-1", "source_type": "tool_result", "source_ref": "tool://read-file-success"}],
-        "recommended_actions": [_recommended_action(comparison_ref)],
-        "dry_run_results": [{"action_id": "ACT-1", "mode": "dry_run", "ok": True, "result_ref": "artifact://shadow/dry-run.json"}],
-        "executed_actions": [],
-        "human_review": {
-            "review_id": "HR-1",
-            "review_ref": f"artifact://{comparison_ref}",
-            "decision": "agree",
-            "agreement": True,
-        },
-    }
-
-
-def _recommended_action(comparison_ref: str) -> dict[str, object]:
-    return {
-        "action_id": "ACT-1",
-        "effect": "dangerous",
-        "mode": "dry_run",
-        "operator_review_ref": f"artifact://{comparison_ref}",
-        "approval_draft_ref": "artifact://shadow/approval.json",
     }
 
 
@@ -123,6 +81,5 @@ __all__ = [
     "controlled_exec_grant",
     "controlled_exec_probe",
     "read_file_probe",
-    "shadow_runtime_facts",
     "small_real_registry",
 ]

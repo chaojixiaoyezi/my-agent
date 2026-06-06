@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 from .home_doctor_capability_requests import capability_request_doctor_findings
-from .home_doctor_lifecycle import owner_lifecycle_doctor_findings
 from .home_doctor_policy import owner_policy_doctor_findings
 
 
@@ -61,6 +60,22 @@ def _dangling_findings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             ),
         }
         for record in records
+    ]
+
+
+def owner_lifecycle_doctor_findings(home_status: dict[str, Any]) -> list[dict[str, Any]]:
+    lifecycle = home_status.get("owner", {}).get("lifecycle", {})
+    load_error = lifecycle.get("load_error") if isinstance(lifecycle, dict) else None
+    if not isinstance(load_error, dict):
+        return []
+    return [
+        {
+            "kind": "owner_lifecycle_load_error",
+            "path": load_error.get("path") or lifecycle.get("path", ""),
+            "status": "UNKNOWN",
+            "note": "owner lifecycle status is unreadable; do not treat this owner as confirmed active",
+            "load_error": load_error,
+        }
     ]
 
 

@@ -35,6 +35,15 @@ def test_error_taxonomy_requires_explicit_machine_code() -> None:
     explicit_timeout = classify_error("tool-timeout: while reading JSON schema documentation")
     assert explicit_timeout.code == "TOOL_TIMEOUT"
 
+    mentioned_timeout = classify_error("The available taxonomy includes TOOL_TIMEOUT for reference.")
+    assert mentioned_timeout.code == "UNKNOWN_ERROR"
+
+    keyed_timeout = classify_error("error_code=TOOL_TIMEOUT message=while reading docs")
+    assert keyed_timeout.code == "TOOL_TIMEOUT"
+
+    finding_timeout = classify_error("runtime gate denied: findings=TOOL_TIMEOUT")
+    assert finding_timeout.code == "TOOL_TIMEOUT"
+
     generic_schema = classify_error("report mentions schema and path as documentation headings")
     assert generic_schema.code == "UNKNOWN_ERROR"
 

@@ -78,7 +78,11 @@ def attach_run_task_workspace_context(agent, params, user_prompt: str):
     injection = _workspace_prompt_section(result)
     next_inject = _append_once(list(getattr(params, "inject", None) or []), injection)
     next_attrs = _task_attributes_with_workspace(getattr(params, "task_attributes", None), result)
-    next_contract = _delivery_contract_with_workspace(getattr(params, "delivery_contract", None), result)
+    next_contract = _delivery_contract_with_workspace(
+        getattr(params, "delivery_contract", None),
+        result,
+        primary_workspace_root=_primary_workspace_root(agent),
+    )
     agent._current_run_task_workspace = str(result.root)
     return replace(params, inject=next_inject, task_attributes=next_attrs, delivery_contract=next_contract)
 
@@ -347,7 +351,12 @@ def _task_attributes_with_workspace(attrs: object, paths) -> dict:
     return result
 
 
-def _delivery_contract_with_workspace(contract: object, paths):
+def _primary_workspace_root(agent) -> Path:
+    root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", ".")
+    return Path(root).expanduser().resolve(strict=False)
+
+
+def _delivery_contract_with_workspace(contract: object, paths, *, primary_workspace_root: Path | None = None):
     if not isinstance(contract, dict):
         return contract
     result = dict(contract)
@@ -357,32 +366,39 @@ def _delivery_contract_with_workspace(contract: object, paths):
         "work_dir": str(paths.work_dir),
     }
     artifacts = result.get("artifacts")
-    user_requested_output_dir = _user_requested_output_dir(artifacts, paths)
+    user_requested_output_dir = _user_requested_output_dir(artifacts, paths, primary_workspace_root)
     if user_requested_output_dir:
         task_workspace["user_requested_output_dir"] = user_requested_output_dir
     result["task_workspace"] = task_workspace
     if isinstance(artifacts, list):
-        result["artifacts"] = [_artifact_with_default_output_root(item, paths) for item in artifacts]
+        result["artifacts"] = [
+            _artifact_with_default_output_root(
+                item,
+                paths,
+                primary_workspace_root=primary_workspace_root,
+            )
+            for item in artifacts
+        ]
     return result
 
 
-def _user_requested_output_dir(artifacts: object, paths) -> str:
+def _user_requested_output_dir(artifacts: object, paths, primary_workspace_root: Path | None) -> str:
     if not isinstance(artifacts, list):
         return ""
     for item in artifacts:
         if not isinstance(item, dict):
             continue
-        if directory := _user_requested_dir_from_artifact_path(item, paths):
+        if directory := _user_requested_dir_from_artifact_path(item, paths, primary_workspace_root):
             return directory
-        if directory := _user_requested_dir_from_roots(item, paths):
+        if directory := _user_requested_dir_from_roots(item, paths, primary_workspace_root):
             return directory
     return ""
 
 
-def _user_requested_dir_from_artifact_path(artifact: dict, paths) -> str:
+def _user_requested_dir_from_artifact_path(artifact: dict, paths, primary_workspace_root: Path | None = None) -> str:
     text = str(artifact.get("preferred_path") or artifact.get("path") or "").strip()
     if not text or not _is_absolute_or_home_path(text):
-        return ""
+        return _relative_user_requested_dir(text, primary_workspace_root)
     try:
         path = Path(text).expanduser()
     except OSError:
@@ -392,13 +408,17 @@ def _user_requested_dir_from_artifact_path(artifact: dict, paths) -> str:
     return _output_dir_for_path_text(text)
 
 
-def _user_requested_dir_from_roots(artifact: dict, paths) -> str:
+def _user_requested_dir_from_roots(artifact: dict, paths, primary_workspace_root: Path | None = None) -> str:
     roots = artifact.get("allowed_output_roots")
     if not isinstance(roots, list):
         return ""
     for value in roots:
         text = str(value or "").strip()
-        if not text or not _is_absolute_or_home_path(text):
+        if not text:
+            continue
+        if not _is_absolute_or_home_path(text):
+            if directory := _relative_user_requested_dir(text, primary_workspace_root):
+                return directory
             continue
         try:
             path = Path(text).expanduser()
@@ -409,6 +429,14 @@ def _user_requested_dir_from_roots(artifact: dict, paths) -> str:
     return ""
 
 
+def _relative_user_requested_dir(text: str, primary_workspace_root: Path | None) -> str:
+    relative = _safe_non_output_relative_path(text)
+    if relative is None or primary_workspace_root is None:
+        return ""
+    target = relative.parent if relative.suffix else relative
+    return str((primary_workspace_root / target).resolve(strict=False))
+
+
 def _same_or_inside(path: Path, root: Path) -> bool:
     try:
         path.resolve(strict=False).relative_to(root.resolve(strict=False))
@@ -417,32 +445,60 @@ def _same_or_inside(path: Path, root: Path) -> bool:
         return False
 
 
-def _artifact_with_default_output_root(item: object, paths) -> object:
+def _artifact_with_default_output_root(item: object, paths, *, primary_workspace_root: Path | None = None) -> object:
     if not isinstance(item, dict):
         return item
     artifact = dict(item)
-    artifact = _artifact_with_task_output_paths(artifact, paths)
+    artifact = _artifact_with_task_output_paths(
+        artifact,
+        paths,
+        primary_workspace_root=primary_workspace_root,
+    )
     if _artifact_declares_output_target(artifact):
         return artifact
     artifact["allowed_output_roots"] = [str(paths.output_dir)]
     return artifact
 
 
-def _artifact_with_task_output_paths(artifact: dict, paths) -> dict:
+def _artifact_with_task_output_paths(
+    artifact: dict,
+    paths,
+    *,
+    primary_workspace_root: Path | None = None,
+) -> dict:
     for key in ("preferred_path", "path"):
-        rewritten = _rewrite_task_output_path(artifact.get(key), paths)
+        rewritten = _rewrite_user_requested_relative_path(artifact.get(key), primary_workspace_root)
+        if not rewritten:
+            rewritten = _rewrite_task_output_path(artifact.get(key), paths)
         if rewritten:
             artifact[key] = rewritten
     roots = artifact.get("allowed_output_roots")
     if isinstance(roots, list):
         artifact["allowed_output_roots"] = [
-            _rewrite_task_output_root(value, paths) or value for value in roots
+            _rewrite_user_requested_relative_root(value, primary_workspace_root)
+            or _rewrite_task_output_root(value, paths)
+            or value
+            for value in roots
         ]
     if not _has_allowed_output_roots(artifact):
-        explicit_root = _explicit_output_root_from_artifact_path(artifact, paths)
+        explicit_root = _explicit_output_root_from_artifact_path(artifact, paths, primary_workspace_root)
         if explicit_root:
             artifact["allowed_output_roots"] = [explicit_root]
     return artifact
+
+
+def _rewrite_user_requested_relative_path(value: object, primary_workspace_root: Path | None) -> str:
+    relative = _safe_non_output_relative_path(str(value or "").strip())
+    if relative is None or primary_workspace_root is None:
+        return ""
+    return str((primary_workspace_root / relative).resolve(strict=False))
+
+
+def _rewrite_user_requested_relative_root(value: object, primary_workspace_root: Path | None) -> str:
+    relative = _safe_non_output_relative_path(str(value or "").strip())
+    if relative is None or primary_workspace_root is None:
+        return ""
+    return str((primary_workspace_root / relative).resolve(strict=False))
 
 
 def _rewrite_task_output_path(value: object, paths) -> str:
@@ -478,6 +534,22 @@ def _relative_output_suffix(text: str) -> Path | None:
     return None
 
 
+def _safe_non_output_relative_path(text: str) -> Path | None:
+    if not text or _is_absolute_or_home_path(text):
+        return None
+    if _relative_output_suffix(text) is not None:
+        return None
+    normalized = text.replace("\\", "/").strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if not normalized or normalized == "." or normalized.startswith("../") or normalized == "..":
+        return None
+    path = Path(normalized)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    return path
+
+
 def _is_absolute_or_home_path(text: str) -> bool:
     return text.startswith("/") or text.startswith("~") or _is_windows_absolute_path(text)
 
@@ -487,10 +559,16 @@ def _has_allowed_output_roots(artifact: dict) -> bool:
     return isinstance(roots, list) and any(str(item or "").strip() for item in roots)
 
 
-def _explicit_output_root_from_artifact_path(artifact: dict, paths) -> str:
+def _explicit_output_root_from_artifact_path(
+    artifact: dict,
+    paths,
+    primary_workspace_root: Path | None = None,
+) -> str:
     text = str(artifact.get("preferred_path") or artifact.get("path") or "").strip()
     if not text:
         return ""
+    if directory := _relative_user_requested_dir(text, primary_workspace_root):
+        return directory
     if not _is_absolute_or_home_path(text):
         return ""
     try:

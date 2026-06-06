@@ -74,7 +74,7 @@ class CollaborationCoordinator:
         wake_signal_id = self._raise_case_observation(case, context, now=now)
         decision = _case_close_decision(case, context, wake_signal_id, now)
         self.store.append_decision(decision)
-        self.store.update_case_status(case.case_id, status="close", now=now)
+        self.store.update_case_status(case.case_id, status="closed", now=now)
         return decision
 
     def _raise_case_observation(self, case, context: dict, *, now: float) -> str:
@@ -209,7 +209,7 @@ def _case_close_metadata(request: _CloseMetadataRequest) -> dict:
         "response_coverage": request.status.get("response_coverage") or {},
         "missing_responder_agent_ids_by_request": request.missing,
         "unavailable_target_agent_ids_by_request": request.unavailable,
-        "case_window_status": "close",
+        "case_window_status": "closed",
         **_status_counts(request.status),
     }
 

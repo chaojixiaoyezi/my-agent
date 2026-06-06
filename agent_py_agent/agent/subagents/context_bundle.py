@@ -12,8 +12,6 @@ from .context_bundle_contracts import (
     task_packet,
 )
 from .context_bundle_refs import lineage, safe_string_ref, workspace_refs
-from .context_bundle_semantic import semantic_context_missing_fields
-from .context_bundle_sources import source_refs
 from .controlled_exec_gateway import controlled_exec_grant_refs
 from .models import SubAgentTask
 from .protocol import build_task_envelope
@@ -89,7 +87,7 @@ def build_context_bundle(task: SubAgentTask) -> ContextBundleV1:
         task_packet=task_packet(task),
         task_envelope=envelope.to_dict(),
         tool_preflight=_tool_preflight(task, envelope),
-        source_refs=source_refs(),
+        source_refs=_source_refs(),
         conversation=_conversation_context(task),
         runner_recovery_preflight=_runner_recovery_preflight(task),
         expected_required_files=_expected_required_files(task),
@@ -102,7 +100,7 @@ def validate_context_bundle(bundle: ContextBundleV1) -> ContextGateReport:
         for field_name in REQUIRED_CONTEXT_BUNDLE_FIELDS
         if _is_missing(getattr(bundle, field_name))
     ]
-    semantic_missing = [] if missing else semantic_context_missing_fields(bundle)
+    semantic_missing = [] if missing else _semantic_context_missing_fields(bundle)
     missing.extend(semantic_missing)
     blocking_reason = ""
     if missing:
@@ -112,6 +110,60 @@ def validate_context_bundle(bundle: ContextBundleV1) -> ContextGateReport:
         missing_fields=missing,
         blocking_reason=blocking_reason,
     )
+
+
+def _semantic_context_missing_fields(bundle: ContextBundleV1) -> list[str]:
+    expected = _dedupe_file_terms(_object_string_list(bundle.expected_required_files))
+    if not expected:
+        return []
+    output_required = set(_object_string_list(bundle.output_contract.get("required_files")))
+    packet = bundle.task_packet if isinstance(bundle.task_packet, dict) else {}
+    file_contract = packet.get("file_contract") if isinstance(packet.get("file_contract"), dict) else {}
+    packet_required = set(_object_string_list(file_contract.get("required_files")))
+    missing: list[str] = []
+    for filename in expected:
+        if filename not in output_required:
+            missing.append(f"output_contract.required_files:{filename}")
+        if filename not in packet_required:
+            missing.append(f"task_packet.file_contract.required_files:{filename}")
+    return missing
+
+
+def _dedupe_file_terms(values: list[str]) -> list[str]:
+    terms: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in terms:
+            terms.append(text)
+    return terms
+
+
+def _object_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [text for item in value if (text := str(item or "").strip())]
+
+
+def _source_refs() -> dict[str, list[str]]:
+    return {
+        "goal": ["task.goal"],
+        "thought": ["task.thought"],
+        "plan": ["task.plan"],
+        "acceptance_checks": ["task.acceptance_checks"],
+        "permissions": ["task.allowed_tools", "task.allowed_skills", "task.capability_grants"],
+        "constraints": ["task.allowed_write_roots", "task.forbidden_write_roots", "task.locked_files"],
+        "workspace_refs": ["task.task_dir", "task.task_workspace_dir", "task.agent_run_workspace_dir"],
+        "output_contract": [
+            "task.output_json",
+            "task.runner_result_json",
+            "task.agent_run_final_report_md",
+            "task.goal",
+            "task.thought",
+            "task.acceptance_checks",
+        ],
+        "lineage": ["task.root_id", "task.parent_id", "task.depth", "task.inheritance_manifest_json"],
+        "context_packs": ["task.context_packs"],
+    }
 
 
 def render_context_bundle_markdown(bundle: ContextBundleV1, gate: ContextGateReport) -> str:

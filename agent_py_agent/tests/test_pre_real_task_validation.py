@@ -34,11 +34,10 @@ def test_small_real_acceptance_runner_executes_bounded_wrapper_cases(tmp_path: P
     report = run_small_real_acceptance(SmallRealAcceptanceRunRequest(workspace=tmp_path))
 
     assert report.ok is True
-    assert report.summary == {"failed": 0, "passed": 3, "total": 3}
+    assert report.summary == {"failed": 0, "passed": 2, "total": 2}
     assert {case.case_id for case in report.cases} == {
         "real_read_file",
         "controlled_exec_dry_run",
-        "shadow_mode_runtime",
     }
     assert all(case.status == "PASSED" for case in report.cases)
     assert all(case.gate_case["real_execution_allowed"] is False for case in report.cases)

@@ -33,7 +33,7 @@
 1. `create_subagents` / `inspect_agent_tree` 暴露的 `child_output_read_order`。
 2. 子代理结构化结果里的 `primary_artifact_refs`、`expected_outputs`、artifact refs。
 3. 只有这些 refs 缺失或损坏时，才读取内部 `work/agents/<run_id>/final_report.md`
-   这类审计文件作为兜底证据。
+   这类审计文件做损坏修复证据；正常主链路不能依赖它。
 
 普通读文件、列目录和 shell 不应把 `work/agents/<run_id>/` 当状态看板；看状态用
 `inspect_agent_tree`。

@@ -55,8 +55,8 @@ def test_resolve_index_path_expands_user():
     assert str(result).startswith(str(Path.home()))
 
 
-def test_resolve_index_path_falls_back_to_home_route_index(tmp_path):
-    """项目没有路由索引时，默认使用 ~/.my-agent 里的 HOT/lessons 路由索引。"""
+def test_resolve_index_path_falls_back_to_owner_route_index(tmp_path):
+    """项目没有路由索引时，默认使用当前 owner 的 HOT/lessons 路由索引。"""
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
     root = tmp_path / "project"
@@ -65,7 +65,7 @@ def test_resolve_index_path_falls_back_to_home_route_index(tmp_path):
 
     result = _resolve_index_path(root, None, home_paths=home)
 
-    assert result == home.memory_routing_index_md
+    assert result == home.owner_memory_routing_index_md
 
 
 def test_resolve_index_path_falls_back_to_provider_owner_route_index(tmp_path):

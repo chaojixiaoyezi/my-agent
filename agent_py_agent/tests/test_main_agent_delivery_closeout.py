@@ -90,6 +90,7 @@ def test_tool_loop_closes_out_from_structured_run_params_delivery_contract():
         )
 
         assert backend.calls == 1
+        assert result.tool_rounds == 1
         assert "output/html_report/index.html" in backend.prompts[0]
         assert "[tool-system delivery-contract]" in backend.prompts[0]
         assert "不得引用 http/https 外部" in backend.prompts[0]
@@ -129,6 +130,7 @@ def test_submit_for_acceptance_without_contract_persists_non_terminal_closeout_r
         report = _closeout_report(workspace)
 
         assert backend.calls == 2
+        assert result.tool_rounds == 1
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
         assert report["ok"] is False
         assert report["non_terminal"] is True
@@ -159,7 +161,8 @@ def test_submit_for_acceptance_without_contract_closes_after_current_task_output
         )
         report = _closeout_report(task_root)
 
-        assert backend.calls == 2
+        assert backend.calls == 1
+        assert result.tool_rounds == 1
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert not (workspace / ".agent_delivery" / "closeout.json").exists()
         assert report["ok"] is True

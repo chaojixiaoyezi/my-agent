@@ -20,7 +20,8 @@ agent_py_agent/agent/log_analysis/
 |-- cases/                    # case 合并、证据、调度
 |-- agents/                   # analyst / reviewer 合同和 prompt
 |-- dispatch/                 # 受控 analyst work order / queue / engine
-|-- tools.py                  # security_query / hunt / trace 工具封装，返回摘要和 evidence refs
+|-- tools.py                  # security_query / hunt / trace 当前工具封装，返回摘要和 evidence refs
+|-- tools/                    # query / trace 等内部 helper；不再保留 tools_plugin facade
 `-- reports.py                # first response report 和取证包渲染
 ```
 
@@ -32,7 +33,7 @@ agent_py_agent/agent/log_analysis/
 - `parsers/security_alert_v1.py`：把 CSV / JSONL 变成统一事件。
 - `storage/__init__.py`：使用 lazy import 解决 `query → evidence → base` 循环依赖。
 - `storage/local_store.py` 和 `storage/query.py`：保存事件并按条件查回来。
-- `tools.py`：把 query、hunt、trace 包装成 agent 工具，只返回摘要、预览行和 evidence refs。
+- `tools.py`：把 query、hunt、trace 包装成 agent 工具，只返回摘要、预览行和 evidence refs；旧 `tools_plugin.py` facade 已删除。
 - `tools/tool_classes.py`：query、hunt、trace 的 BaseTool 入口；每个工具 spec 都声明 `effect=read_only`，供统一 Tool Manifest Gate 和 side-effect gate 消费。
 - `analytics/detectors.py`：从事件里找可疑 finding。
 - `cases/case_store.py` 和 `reports.py`：把 finding 汇成 case，再变成可读报告。

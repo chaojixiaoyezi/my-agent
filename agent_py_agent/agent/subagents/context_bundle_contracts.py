@@ -2,21 +2,18 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 from typing import NamedTuple
 
 from ..model_visible_refs import current_model_ref, current_model_text
-from .context_bundle_file_roots import (
-    add_file_root_term,
-    file_level_write_root_terms,
-    is_contract_file_path,
-)
-from .context_bundle_internal_roots import internal_root_texts, path_is_internal
 from .context_bundle_refs import safe_string_ref, workspace_refs
 from .models import SubAgentTask
 from .required_file_terms import (
     clean_file_contract_term,
 )
+
+_SAFE_FILE_SUFFIX_RE = re.compile(r"^\.[a-z0-9][a-z0-9._+-]{0,63}$")
 
 
 class _TaskContractComponents(NamedTuple):
@@ -319,6 +316,70 @@ def _compact_list(value: object) -> str:
     if not isinstance(value, list) or not value:
         return "none"
     return ", ".join(str(item) for item in value)
+
+
+def file_level_write_root_terms(task: SubAgentTask) -> list[str]:
+    terms: list[str] = []
+    task_dir = Path(str(getattr(task, "task_dir", "") or ""))
+    for raw in getattr(task, "allowed_write_roots", []) or []:
+        path = Path(str(raw or "").strip().replace("\\", "/"))
+        if not is_contract_file_path(path) or _is_internal_task_file(path, task_dir):
+            continue
+        add_file_root_term(terms, path.name)
+        if len(path.parts) >= 2:
+            add_file_root_term(terms, "/".join(path.parts[-2:]))
+    return terms
+
+
+def is_contract_file_path(path: Path) -> bool:
+    return bool(path.name and _SAFE_FILE_SUFFIX_RE.fullmatch(path.suffix.lower()))
+
+
+def add_file_root_term(terms: list[str], value: str) -> None:
+    text = str(value or "").strip()
+    if text and text not in terms:
+        terms.append(text)
+
+
+def internal_root_texts(task: object) -> set[str]:
+    fields = (
+        "task_dir",
+        "data_dir",
+        "output_dir",
+        "tests_dir",
+        "reports_dir",
+        "logs_dir",
+        "scratch_dir",
+        "task_workspace_dir",
+        "agent_run_workspace_dir",
+        "agent_run_artifacts_dir",
+    )
+    return {_resolved_path_text(getattr(task, field, "")) for field in fields if _path_text(getattr(task, field, ""))}
+
+
+def path_is_internal(path: str, internal_roots: set[str]) -> bool:
+    resolved = _resolved_path_text(path)
+    return any(resolved == root or resolved.startswith(f"{root}/") for root in internal_roots if root)
+
+
+def _is_internal_task_file(path: Path, task_dir: Path) -> bool:
+    if not str(task_dir):
+        return False
+    try:
+        return path.resolve().is_relative_to(task_dir.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _path_text(value: object) -> str:
+    if isinstance(value, Path):
+        return str(value)
+    return value if isinstance(value, str) else ""
+
+
+def _resolved_path_text(value: object) -> str:
+    text = _path_text(value)
+    return str(Path(text).expanduser().resolve(strict=False)) if text else ""
 
 
 def _model_visible_file_terms(value: object) -> list[str]:

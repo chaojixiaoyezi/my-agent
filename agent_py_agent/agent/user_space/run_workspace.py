@@ -71,9 +71,9 @@ def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePath
         paths.summaries_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
-    _write_task_yaml_if_missing(paths.task_yaml, request)
+    _write_task_yaml(paths.task_yaml, request)
     paths.workspace_json.write_text(
-        json.dumps(_workspace_identity_payload(request), ensure_ascii=False, indent=2, sort_keys=True),
+        json.dumps(_workspace_identity_payload(request, paths), ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
     _write_seed_file(paths.collab_blackboard_md, "# Blackboard\n\n")
@@ -111,9 +111,7 @@ def run_workspace_paths(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths
     )
 
 
-def _write_task_yaml_if_missing(path: Path, request: EnsureRunWorkspaceRequest) -> None:
-    if path.exists():
-        return
+def _write_task_yaml(path: Path, request: EnsureRunWorkspaceRequest) -> None:
     task_id = request.task_id if request.task_id and not looks_like_machine_id(request.task_id) else _workspace_task_name(request)
     text = (
         f'task_id: "{_yaml_escape(task_id)}"\n'
@@ -127,12 +125,15 @@ def _write_task_yaml_if_missing(path: Path, request: EnsureRunWorkspaceRequest) 
     path.write_text(text, encoding="utf-8")
 
 
-def _workspace_identity_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
+def _workspace_identity_payload(request: EnsureRunWorkspaceRequest, paths: RunWorkspacePaths) -> dict[str, object]:
     return {
         "schema_version": "run_workspace.v1",
         "request_id": request.request_id,
         "run_id": request.run_id,
         "task_id": request.task_id,
+        "task_root": str(paths.root),
+        "output_dir": str(paths.output_dir),
+        "work_dir": str(paths.work_dir),
         "task_title": _workspace_task_name(request),
         "prompt_fingerprint": prompt_fingerprint(request.user_prompt),
         "owner_id": request.owner_id,
@@ -249,10 +250,7 @@ def _workspace_matches_request(root: Path, request: EnsureRunWorkspaceRequest) -
 
 
 def _workspace_identity(root: Path) -> dict[str, object]:
-    identity = _read_json_object(root / "work" / "run_workspace.json")
-    if identity:
-        return identity
-    return _read_task_yaml_identity(root / "work" / "task.yaml")
+    return _read_json_object(root / "work" / "run_workspace.json")
 
 
 def _read_json_object(path: Path) -> dict[str, object]:
@@ -263,24 +261,6 @@ def _read_json_object(path: Path) -> dict[str, object]:
     except (OSError, json.JSONDecodeError, TypeError):
         return {}
     return payload if isinstance(payload, dict) else {}
-
-
-def _read_task_yaml_identity(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    values: dict[str, object] = {}
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return {}
-    for line in lines:
-        key, sep, raw_value = line.partition(":")
-        if not sep:
-            continue
-        key = key.strip()
-        if key in {"request_id", "run_id", "task_id", "task_title", "owner_id", "owner_home", "source"}:
-            values[key] = raw_value.strip().strip('"')
-    return values
 
 
 def _identity_values(request: EnsureRunWorkspaceRequest) -> dict[str, str]:

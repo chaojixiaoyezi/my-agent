@@ -18,6 +18,11 @@ class ProviderTransientError(ProviderRecoverableError):
 class ProviderResponseError(ProviderRecoverableError):
     """The provider responded, but the payload did not match the expected schema."""
 
+    def __init__(self, message: str, *, error_code: str = "", details: object | None = None):
+        super().__init__(message)
+        self.error_code = str(error_code or "").strip()
+        self.details = details
+
 
 def is_provider_recoverable_error(exc: BaseException) -> bool:
     """Return True for typed provider failures that should not be treated as task bugs."""
@@ -32,6 +37,11 @@ def is_provider_timeout_error(exc: BaseException) -> bool:
 def is_provider_transient_error(exc: BaseException) -> bool:
     """Return True when the model-provider failure is temporary or rate-limited."""
     return isinstance(exc, ProviderTransientError)
+
+
+def is_empty_provider_response_error(exc: BaseException) -> bool:
+    """Return True when the provider returned a syntactically valid but empty model message."""
+    return isinstance(exc, ProviderResponseError) and exc.error_code == "MODEL_EMPTY_RESPONSE"
 
 
 def provider_recoverable_report(exc: BaseException, *, timeout_seconds: object = "") -> str:

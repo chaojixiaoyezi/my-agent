@@ -131,7 +131,12 @@ def _release_lock_twice(lock: threading.RLock) -> None:
 def _lock_enabled(config: AgentConfig | None) -> bool:
     raw_value = getattr(config, "concurrency_lock_enabled", True)
     if isinstance(raw_value, str):
-        return raw_value.strip().lower() not in {"false", "no", "off", "0"}
+        normalized = raw_value.strip().lower()
+        if normalized in {"false", "0"}:
+            return False
+        if normalized in {"true", "1"}:
+            return True
+        return True
     return bool(raw_value)
 
 

@@ -9,17 +9,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .controlled_exec import ControlledExecToolRequest, execute_controlled_exec_tool
 from .models import BaseTool, ToolExecutionResult
-from .registry_tool_dispatch import AuthorizedToolDispatchRequest, execute_authorized_tool
 from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
 
+_MAX_EXCEPTION_MESSAGE_CHARS = 500
 _BOUNDARY_FILESYSTEM_TOOL_NAMES = WRITE_TOOL_NAMES | {
     "find_files",
     "list_files",
     "read_file",
     "search_text",
 }
-_TASK_PATH_ALIAS_TOOL_NAMES = _BOUNDARY_FILESYSTEM_TOOL_NAMES
+_TASK_WORKSPACE_RELATIVE_PATH_TOOL_NAMES = _BOUNDARY_FILESYSTEM_TOOL_NAMES
 
 
 @dataclass(frozen=True)
@@ -35,13 +36,22 @@ class RegistryToolInvokeRequest:
     path_dangerous_roots: list[str] | None = None
 
 
+@dataclass(frozen=True)
+class AuthorizedToolDispatchRequest:
+    tool_name: str
+    tool: BaseTool
+    tool_params: dict[str, Any]
+    workspace_root: Path
+    write_boundary: dict[str, object] | None
+
+
 def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionResult:
     tool = request.tools.get(request.tool_name)
     if tool is None:
         return ToolExecutionResult(request.tool_name, False, f"未知工具: {request.tool_name}")
 
     tool_params = _tool_params_for_execution(request.payload, request.tool_name, request.allowed_tools)
-    tool_params = _with_task_workspace_path_aliases(tool_params, request)
+    tool_params = _with_task_workspace_relative_path(tool_params, request)
     workspace_roots = _workspace_roots_for_invocation(request)
     boundary_error = validate_write_boundary(
         request.tool_name,
@@ -83,20 +93,20 @@ def _tool_params_for_execution(
     return params
 
 
-def _with_task_workspace_path_aliases(
+def _with_task_workspace_relative_path(
     params: dict[str, Any],
     request: RegistryToolInvokeRequest,
 ) -> dict[str, Any]:
-    if request.tool_name not in _TASK_PATH_ALIAS_TOOL_NAMES or not isinstance(request.write_boundary, dict):
+    if request.tool_name not in _TASK_WORKSPACE_RELATIVE_PATH_TOOL_NAMES or not isinstance(request.write_boundary, dict):
         return params
     raw = params.get("path")
-    rewritten = _task_workspace_alias_path(raw, request.write_boundary)
+    rewritten = _task_workspace_relative_path(raw, request.write_boundary)
     if not rewritten:
         return params
     return {**params, "path": rewritten}
 
 
-def _task_workspace_alias_path(raw: object, boundary: dict[str, object]) -> str:
+def _task_workspace_relative_path(raw: object, boundary: dict[str, object]) -> str:
     text = str(raw or "").strip()
     if not text or _is_absolute_or_home_path(text):
         return ""
@@ -127,7 +137,7 @@ def _is_absolute_or_home_path(text: str) -> bool:
     )
 
 
-# 避免上层 path gate 放行后底层文件工具仍按旧 workspace 拒绝。
+# Keep the low-level filesystem tools aligned with the current task workspace roots.
 def _workspace_roots_for_invocation(request: RegistryToolInvokeRequest) -> list[Path] | None:
     roots = _normalized_roots(request.workspace_root, request.workspace_roots)
     if request.tool_name not in _BOUNDARY_FILESYSTEM_TOOL_NAMES or not isinstance(request.write_boundary, dict):
@@ -203,6 +213,47 @@ def _boundary_bool(boundary: dict[str, object] | None, key: str) -> bool | None:
     if isinstance(value, (int, float)):
         return bool(value)
     return str(value).strip().lower() in {"1", "true"}
+
+
+def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolExecutionResult:
+    if request.tool_name == "controlled_exec":
+        return execute_controlled_exec_tool(
+            ControlledExecToolRequest(
+                params=request.tool_params,
+                workspace_root=request.workspace_root,
+                write_boundary=request.write_boundary,
+            )
+        )
+    try:
+        return request.tool.execute(_tool_params_with_runtime_boundary(request))
+    except Exception as exc:
+        return ToolExecutionResult(request.tool_name, False, _format_tool_exception(exc))
+
+
+def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -> dict[str, Any]:
+    if request.tool_name != "run_command" or not isinstance(request.write_boundary, dict):
+        return request.tool_params
+    shell_mode = str(request.write_boundary.get("shell_access_mode") or "").strip()
+    if not shell_mode:
+        return request.tool_params
+    params = dict(request.tool_params)
+    params["__access_mode"] = shell_mode
+    return params
+
+
+def _format_tool_exception(exc: Exception) -> str:
+    if isinstance(exc, ValueError):
+        message = _truncate(str(exc), _MAX_EXCEPTION_MESSAGE_CHARS)
+        return f"工具执行失败: {message or exc.__class__.__name__}"
+    if isinstance(exc, (OSError, UnicodeError)):
+        return f"工具执行失败: {exc.__class__.__name__}；请检查路径、权限或文件编码。"
+    return f"工具执行失败: {exc.__class__.__name__}；请检查参数后重试。"
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n... 已截断"
 
 
 def _normalized_roots(primary: Path, roots: list[Path] | None) -> list[Path]:

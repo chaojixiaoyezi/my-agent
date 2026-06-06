@@ -38,6 +38,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="目标路径不存在；优先使用工具返回的 candidate_paths，或者用 list_files/search_text 重新定位。",
     ),
+    "PATH_IS_DIRECTORY": ErrorContract(
+        code="PATH_IS_DIRECTORY",
+        category="path",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="目标是目录而不是文件；先用 list_files 查看目录，再选择具体文件 read_file。",
+    ),
     "WRITE_FORBIDDEN": ErrorContract(
         code="WRITE_FORBIDDEN",
         category="permission",
@@ -59,12 +66,33 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
         recovery_hint="工具不可用；查看 ToolManifest，换可执行工具或申请能力。",
     ),
+    "TOOL_NOT_ALLOWED": ErrorContract(
+        code="TOOL_NOT_ALLOWED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
+        recovery_hint="工具未授权；换用已授权工具，或通过能力/权限链路申请。",
+    ),
     "TOOL_INVALID_ARGUMENTS": ErrorContract(
         code="TOOL_INVALID_ARGUMENTS",
         category="tool",
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="工具参数不合法；按工具 schema 修参数后可重试。",
+    ),
+    "TOOL_CALL_UNCLOSED": ErrorContract(
+        code="TOOL_CALL_UNCLOSED",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="工具调用协议未闭合；重新输出一个完整工具调用，避免在 JSON 外混入正文。",
+    ),
+    "TOOL_INLINE_CONTENT_STREAM_ABORTED": ErrorContract(
+        code="TOOL_INLINE_CONTENT_STREAM_ABORTED",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="流式工具调用里的 inline content 过长并被提前截断；改用 WRITE_FILE_RAW、data_base64、apply_patch 或更小 content 块。",
     ),
     "OFFSET_OUT_OF_RANGE": ErrorContract(
         code="OFFSET_OUT_OF_RANGE",
@@ -417,14 +445,29 @@ def classify_error(message: str) -> ErrorContract:
     return error_contract("UNKNOWN_ERROR")
 
 
-def _explicit_error_code_matches(text: str, contract_codes) -> list[tuple[int, str]]:
-    lowered = text.lower()
+def _explicit_error_code_matches(text: str, contract_codes: object) -> list[tuple[int, str]]:
     matches: list[tuple[int, str]] = []
     for code in contract_codes:
-        variants = (code.lower(), code.lower().replace("_", "-"))
-        if any(re.search(rf"(?<![a-z0-9]){re.escape(variant)}(?![a-z0-9])", lowered) for variant in variants):
-            matches.append((1000, code))
+        if any(_has_explicit_error_code(text, variant) for variant in _code_variants(code)):
+            matches.append((1000, str(code)))
     return matches
+
+
+def _code_variants(code: object) -> tuple[str, str]:
+    upper = str(code or "").upper()
+    return (upper, upper.replace("_", "-"))
+
+
+def _has_explicit_error_code(text: str, variant: str) -> bool:
+    escaped = re.escape(variant)
+    return bool(
+        re.search(rf"(?im)^\s*{escaped}\s*(?::|=|-|\b)", text)
+        or re.search(
+            rf"(?i)(?<![A-Z0-9_-])(?:error_code|error_type|code|finding|findings)\s*[:=]\s*"
+            rf"(?:\[?\s*)?[\"']?{escaped}(?![A-Z0-9_-])",
+            text,
+        )
+    )
 
 
 def tool_failure_taxonomy() -> list[str]:

@@ -16,8 +16,10 @@ from ...agent.gateway_parts import (
     render_gateway_status,
     submit_gateway_ask,
 )
-from ...agent.gateway_parts.context_tokens import current_context_token_estimate
-from ...agent.gateway_parts.response_renderer import read_gateway_response_file
+from ...agent.gateway_parts.response_renderer import (
+    current_context_token_estimate,
+    read_gateway_response_file,
+)
 
 
 @dataclass

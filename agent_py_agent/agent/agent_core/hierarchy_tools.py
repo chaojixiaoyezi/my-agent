@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from ..action_protocol import subagent_schedule_envelope_from_payload
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ..runtime_errors import runtime_error_report
+from ..subagents.services.hierarchy.qa_scheduler import quality_advice_payload
 from ..subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
@@ -20,7 +21,6 @@ from .orchestration.lifecycle import (
     CreatedSubagentLifecycleRequest,
     publish_created_subagents,
 )
-from .orchestration.quality_advice_payload import quality_advice_payload
 from .orchestration.tool_specs import build_schedule_child_subagents_spec
 from .orchestration.write_guard import ExternalWriteTargetRequest, external_write_target_error
 from .parameters import _bool_param, _non_negative_int

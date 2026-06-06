@@ -25,14 +25,13 @@ from .tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .tool_context.reducer import render_tool_result_for_live_prompt
 from .tool_guard.call_guardrail import record_tool_guard_observation
 from .tool_guard.loop_hints import append_tool_guardrail_action_block_hint
-from .tool_limit_closeout import final_response_after_tool_limit
 from .tool_loop.completion import ToolRoundCompletionRequest, completion_response_after_tool_round
 from .tool_loop.empty_response import (
     empty_model_response_retry_context,
     should_retry_empty_model_response,
 )
 from .tool_loop.prompting import build_tool_loop_prompt, next_tool_loop_model_response
-from .tool_loop.recovery import append_long_content_recovery_context
+from .tool_loop.recovery import append_long_content_recovery_context, without_tool_call_after_limit
 from .tool_loop.response_decision import (
     ToolLoopRepairCounters,
     ToolLoopResponseDecisionRequest,
@@ -45,7 +44,14 @@ from .tool_loop.round_execution import (
     execute_tool_round,
 )
 from .tool_loop.tool_call import execute_one_tool_call
+from .tool_model_generation import ModelGenerateParams, generate_model_response
 from .tool_runtime_ledger import persist_tool_runtime_ledger
+
+_ORCHESTRATION_TOOLS = {
+    "create_subagents",
+    "dispatch_subagents",
+    "schedule_child_subagents",
+}
 
 
 @dataclass(frozen=True)
@@ -157,7 +163,7 @@ class ToolLoopService:
                 pending_calls,
                 self._execute_one_tool_call,
                 self._record_tool_call,
-                "",
+                _deferred_drain_prompt(self._agent, params),
             )
         )
         return _PendingDeferredToolDrainResult(next_round, final_response)
@@ -250,7 +256,19 @@ class ToolLoopService:
         return limit > 0 and tool_rounds >= limit
 
     def _final_response_after_tool_limit(self, params: ToolLoopExecuteParams, tool_rounds: int):
-        return final_response_after_tool_limit(self._agent, params, tool_rounds)
+        params.tool_context.append("[tool-system]\n已达到最大工具轮数限制，停止继续调用工具。")
+        if _executed_subagent_orchestration(params):
+            params.tool_context.append("[tool-system]\n子代理调度状态请通过 dispatch_subagents/tree 状态结果继续查看；系统不再替主代理生成最终结论。")
+        final_prompt = build_tool_loop_prompt(self._agent, params)
+        final_response = generate_model_response(
+            ModelGenerateParams(
+                agent=self._agent,
+                params=params,
+                prompt=final_prompt,
+                tool_rounds=tool_rounds,
+            )
+        )
+        return final_prompt, without_tool_call_after_limit(self._agent, final_response)
 
     def _execute_one_tool_call(self, request: ToolCallExecuteParams):
         return execute_one_tool_call(self._agent, request)
@@ -314,6 +332,10 @@ def _task_local_progress_context(progress: dict[str, object]) -> str:
     )
 
 
+def _executed_subagent_orchestration(params: ToolLoopExecuteParams) -> bool:
+    return any(str(item or "") in _ORCHESTRATION_TOOLS for item in params.executed_tools or [])
+
+
 def _pop_pending_deferred_tool_calls(params: ToolLoopExecuteParams) -> list[dict[str, object]]:
     state = getattr(params, "live_archive_state", None)
     if not isinstance(state, dict):
@@ -322,3 +344,10 @@ def _pop_pending_deferred_tool_calls(params: ToolLoopExecuteParams) -> list[dict
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value if isinstance(item, dict) and str(item.get("tool") or "").strip()]
+
+
+def _deferred_drain_prompt(agent: object, params: ToolLoopExecuteParams) -> str:
+    try:
+        return build_tool_loop_prompt(agent, params)
+    except Exception:
+        return ""

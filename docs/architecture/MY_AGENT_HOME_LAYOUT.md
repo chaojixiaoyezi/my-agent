@@ -52,7 +52,7 @@ tasks/<date>/<task-slug>/
 |-- .agent_delivery/                 # 当前任务系统验收报告，如 closeout.json
 |-- output/                          # 最终交付物
 `-- work/
-    |-- run_workspace.json           # 当前任务目录身份；复用目录只认它和 task.yaml
+    |-- run_workspace.json           # 当前任务目录身份；复用目录只认它
     |-- state.json                   # 主代理 task 状态
     |-- timeline.jsonl               # 本任务多轮运行时间线
     |-- refs/artifacts/manifest.json # 当前任务最终产物索引和验收引用
@@ -63,7 +63,7 @@ tasks/<date>/<task-slug>/
 ```
 
 如果用户明确指定普通输出目录，最终报告可以写到用户目录；当前 task `output/` / `work/` 仍记录本轮索引、验收和过程证据。
-`work/state.json` 只是运行状态，不再作为旧目录身份兜底，避免旧 run 污染当前任务目录。
+`work/state.json` 和 `work/task.yaml` 只是当前任务状态/可读说明，不再作为旧目录身份兜底，避免旧 run 污染当前任务目录。
 
 ## Subagent Workspace
 

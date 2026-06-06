@@ -53,10 +53,7 @@ def _coerce_home_paths(paths: MyAgentHomePaths | str | Path) -> MyAgentHomePaths
 
 def _daily_memory_dirs(paths: MyAgentHomePaths) -> tuple[Path, ...]:
     owner_daily = getattr(paths, "owner_memory_daily_dir", None)
-    dirs = [Path(owner_daily)] if owner_daily else []
-    if _is_local_main_owner(paths):
-        dirs.append(paths.memory_daily_dir)
-    return tuple(dict.fromkeys(dirs))
+    return (Path(owner_daily),) if owner_daily else ()
 
 
 def _read_daily_file_report(path: Path, request: DailyMemoryQuery) -> DailyMemoryRecordsReport:
@@ -131,14 +128,6 @@ def _daily_memory_load_error(path: Path, exc: BaseException, *, line_no: int) ->
     if line_no:
         report["line"] = line_no
     return report
-
-
-def _is_local_main_owner(paths: MyAgentHomePaths) -> bool:
-    return (
-        str(getattr(paths, "owner_provider", "") or "local") == "local"
-        and str(getattr(paths, "owner_kind", "") or "main") == "main"
-        and str(getattr(paths, "owner_id", "") or "local/main") == "local/main"
-    )
 
 
 def _text_contains(value: dict[str, Any], query: str) -> bool:

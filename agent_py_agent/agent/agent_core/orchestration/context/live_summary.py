@@ -4,8 +4,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..summary_action_lines import top_level_action_lines
-
 _ORCHESTRATION_TOOLS = {
     "inspect_collaboration",
     "create_subagents",
@@ -17,6 +15,37 @@ _ORCHESTRATION_TOOLS = {
 }
 _MAX_INLINE_JSON = 900
 _MAX_INLINE_TEXT = 500
+_TOP_LEVEL_ACTION_KEYS = (
+    "blocked",
+    "reason",
+    "created",
+    "case_id",
+    "request_id",
+    "case_ref",
+    "request_ref",
+    "target_agent_ids",
+    "required_capabilities",
+    "request_count",
+    "request_history_count",
+    "evidence_count",
+    "participant_count",
+    "decision_count",
+    "case_window",
+    "collection_result",
+    "requires_main_agent",
+    "allowed_tools",
+    "subagent_workspace",
+    "completion_status",
+    "completion_risk",
+    "blocking_run_ids",
+    "repair_advice",
+    "created_run_ids",
+    "planned_count",
+    "runner_selection_recovery",
+    "quality_advice",
+    "current_turn_run_state",
+    "next_action",
+)
 
 
 def orchestration_live_summary(result, archive_record: dict[str, object]) -> str:
@@ -72,6 +101,14 @@ def _render_orchestration_summary(
     lines.extend(_summary_lines(payload))
     lines.extend(_archive_pointer_lines(archive_record, include_read_hint=False))
     return "\n".join(lines)
+
+
+def top_level_action_lines(payload: dict[str, Any]) -> list[str]:
+    return [
+        f"- {key}: {_json_inline(payload.get(key))}"
+        for key in _TOP_LEVEL_ACTION_KEYS
+        if key in payload and payload.get(key) not in (None, "", [], {})
+    ]
 
 
 def _direct_children_lines(value: object) -> list[str]:

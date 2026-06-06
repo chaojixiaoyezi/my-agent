@@ -22,12 +22,6 @@ class FailureIntrospection:
 
 class FailureIntrospector:
 
-    def __init__(self, agent: object | None = None) -> None:
-        self._agent = agent
-
-    def set_agent(self, agent: object) -> None:
-        self._agent = agent
-
     def introspect(
         self,
         task: SubAgentTask,

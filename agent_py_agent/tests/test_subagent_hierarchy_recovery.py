@@ -163,6 +163,28 @@ def test_hierarchy_recovery_packet_includes_unfinished_child_after_parent_timeou
     assert "subagents-recovery-tree" in child.recommended_command
 
 
+def test_hierarchy_recovery_packet_ignores_error_status_alias(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    root = manager.create_run(goal="root", thought="orchestrate", plan=["split"])
+    child = manager.hierarchy.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            apply=True,
+            child_specs=[HierarchyChildSpec(goal="child old alias", role="worker", agent_name="child")],
+        )
+    ).created_run_ids[0]
+    child_task = manager.load(child)
+    child_task.status = "ERROR"
+    manager.save(child_task)
+
+    result = manager.hierarchy.build_hierarchy_recovery_packet(
+        params=HierarchyRecoveryRequest(root_run_id=root.id, include_healthy=False)
+    )
+
+    assert result.recovery_candidate_count == 0
+    assert [item.run_id for item in result.nodes] == [root.id]
+
+
 def test_hierarchy_recovery_packet_marks_failed_middle_leader_with_strategy(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="orchestrate", plan=["split"], role="coordinator")

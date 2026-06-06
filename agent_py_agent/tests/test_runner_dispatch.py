@@ -320,12 +320,10 @@ class TestResolveRunnerTimeoutSeconds:
     """测试 _resolve_runner_timeout_seconds() 函数。"""
 
     def test_off_returns_zero(self):
-        """off/disabled 等禁用超时。"""
+        """off 禁用超时。"""
         from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_timeout_seconds
 
         assert _resolve_runner_timeout_seconds("off") == 0.0
-        assert _resolve_runner_timeout_seconds("disabled") == 0.0
-        assert _resolve_runner_timeout_seconds("none") == 0.0
 
     def test_auto_returns_zero(self):
         """auto 默认不启用超时。"""

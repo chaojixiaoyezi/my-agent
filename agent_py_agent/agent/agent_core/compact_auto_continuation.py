@@ -124,8 +124,6 @@ def _resume_focus(packet: dict[str, Any], work_state: dict[str, Any]) -> dict[st
         return dict(focus)
     next_actions = _action_first_items(_items(packet.get("next_actions")) or _items(work_state.get("next_actions")))
     next_step = str(work_state.get("next_step") or "").strip()
-    if _looks_like_reader_first_recovery_hint(next_step):
-        next_step = ""
     return {
         "next_action": next_actions[0] if next_actions else next_step,
         "next_actions": next_actions,
@@ -409,13 +407,7 @@ def _prefixed_lines(label: str, values: list[str]) -> list[str]:
 
 
 def _action_first_items(items: list[str]) -> list[str]:
-    return [item for item in items if not _looks_like_reader_first_recovery_hint(item)]
-
-
-def _looks_like_reader_first_recovery_hint(value: str) -> bool:
-    text = value.strip().lower()
-    recovery_markers = ("memory-resume", "localstore", "compact_context", "work_state_snapshot", "restore_refs")
-    return any(marker in text for marker in recovery_markers)
+    return list(items)
 
 
 def _list_section(title: str, values: Any) -> str:

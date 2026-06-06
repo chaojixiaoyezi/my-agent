@@ -7,6 +7,7 @@ Structured output and output-payload builders live in focused modules.
 """
 
 import json
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -14,7 +15,6 @@ from .models import SubAgentParsedOutput, SubAgentRunnerResult, SubAgentTask
 from .parsing import _dict_list
 from .policies import _status_from_structured_output, _verification_from_runner_status
 from .result_contexts import OutputPayloadContext, RunnerResultContext
-from .result_debrief import _append_runner_debrief_content
 from .result_payloads import _build_output_payload
 from .result_structured import (
     _create_capability_requests_from_parsed,
@@ -27,6 +27,7 @@ from .result_structured import (
     merge_actual_tools_for_unparsed,
 )
 from .result_structured_evidence import process_evidence_items as _process_evidence_items
+from .runner_rendering import _render_runner_item_line
 
 
 def _build_runner_result(ctx: RunnerResultContext) -> SubAgentRunnerResult:
@@ -92,6 +93,43 @@ def _write_runner_result_files(
         json.dumps(asdict(result), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _append_runner_debrief_content(
+    task: SubAgentTask,
+    parsed: SubAgentParsedOutput,
+) -> None:
+    """Append structured runner output sections to the task DEBRIEF file."""
+
+    sections: list[str] = []
+    if parsed.artifacts:
+        sections.append("## Runner Artifacts")
+        sections.extend(_render_runner_item_line(item) for item in parsed.artifacts)
+    if parsed.tests:
+        sections.append("## Runner Tests")
+        sections.extend(_render_runner_item_line(item) for item in parsed.tests)
+    if parsed.patches:
+        sections.append("## Runner Patches")
+        sections.extend(_render_runner_item_line(item) for item in parsed.patches)
+    if parsed.lessons:
+        sections.append("## Runner Lessons")
+        sections.extend(f"- {item}" for item in parsed.lessons)
+    if parsed.next_actions:
+        sections.append("## Runner Next Actions")
+        sections.extend(f"- {item}" for item in parsed.next_actions)
+    if not sections:
+        return
+
+    path = Path(task.debrief_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text("# DEBRIEF\n\n", encoding="utf-8")
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\n## Runner Structured Output\n\n")
+        handle.write(f"- created_at: {time.time()}\n")
+        handle.write(f"- run_id: {task.id}\n\n")
+        handle.write("\n\n".join(sections))
+        handle.write("\n")
 
 
 __all__ = [

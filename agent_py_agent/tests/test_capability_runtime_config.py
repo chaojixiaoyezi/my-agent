@@ -12,10 +12,12 @@ from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (
     _dispatch_capability_config,
 )
 from agent_py_agent.agent.capability import CapabilityRouter
-from agent_py_agent.agent.capability.runtime_config import (
+from agent_py_agent.agent.capability.runtime_config_models import (
     CapabilityConfigPatch,
     CapabilityConfigPatchRequest,
-    apply_capability_config_patch,
+)
+from agent_py_agent.agent.capability.runtime_config_patch import apply_capability_config_patch
+from agent_py_agent.agent.capability.runtime_config_reload import (
     capability_config_version,
     load_capability_config_snapshot,
     reload_capability_config_if_changed,
@@ -162,6 +164,37 @@ def test_capability_config_patch_service_applies_safe_patch(tmp_path):
     assert "subagent_run_timeout: 1800" in config_path.read_text(encoding="utf-8")
 
 
+def test_capability_config_bool_patch_requires_machine_tokens(tmp_path):
+    config_path = tmp_path / "capability_config.yaml"
+    _write_config(config_path, run_timeout=900)
+
+    rejected = apply_capability_config_patch(
+        CapabilityConfigPatchRequest(
+            config_path=config_path,
+            apply=True,
+            patches=[CapabilityConfigPatch(field="capability_grant_expires_after_task", value="off")],
+        )
+    )
+
+    assert rejected.ok is False
+    assert rejected.applied is False
+    assert rejected.blocked_fields == ["capability_grant_expires_after_task"]
+    assert "capability_grant_expires_after_task" not in config_path.read_text(encoding="utf-8")
+
+    applied = apply_capability_config_patch(
+        CapabilityConfigPatchRequest(
+            config_path=config_path,
+            apply=True,
+            patches=[CapabilityConfigPatch(field="capability_grant_expires_after_task", value="false")],
+        )
+    )
+
+    assert applied.ok is True
+    assert applied.applied is True
+    assert applied.changed_fields == ["capability_grant_expires_after_task"]
+    assert "capability_grant_expires_after_task: false" in config_path.read_text(encoding="utf-8")
+
+
 def test_capability_config_patch_tool_is_not_model_visible(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
 
@@ -220,5 +253,5 @@ def test_task_config_overlay_ref_loads_as_runtime_layer(tmp_path):
 
     effective = apply_task_runtime_config_overlay(agent.config, task, workspace_root=tmp_path)
 
-    assert effective.runner_timeout_seconds == 123
+    assert effective.runner_timeout_seconds == "123"
     assert any(str(item.get("source", "")).endswith("overlays/runner.yaml") for item in effective.config_layers)

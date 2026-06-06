@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.result_artifact_evidence import normalize_artifact_ref
 
 
 def test_subagent_persistence_resolves_allowed_product_artifacts(tmp_path) -> None:
@@ -35,6 +36,45 @@ def test_subagent_persistence_resolves_allowed_product_artifacts(tmp_path) -> No
     assert record["exists"] is True
     assert record["resolution_status"] == "resolved"
     assert record["size_bytes"] == artifact_path.stat().st_size
+
+
+def test_subagent_artifact_ref_uses_declared_workspace_root(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / ".my-agent" / "subagents", workspace_root=tmp_path)
+    task = manager.create_run(goal="登记项目根相对产物", thought="", plan=["write"])
+    artifact_path = tmp_path / "outputs" / "report.md"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("ok\n", encoding="utf-8")
+
+    assert normalize_artifact_ref(task, "outputs/report.md") == str(artifact_path)
+
+
+def test_subagent_artifact_ref_does_not_infer_workspace_from_stale_subagent_path(tmp_path) -> None:
+    current = tmp_path / "current"
+    old = tmp_path / "old"
+    manager = SubAgentManager(current / ".my-agent" / "subagents", workspace_root=current)
+    task = manager.create_run(goal="不要从旧路径反推根目录", thought="", plan=["write"])
+    task.task_dir = str(old / ".my-agent" / "subagents" / task.id)
+    stale_artifact = old / "outputs" / "report.md"
+    stale_artifact.parent.mkdir(parents=True)
+    stale_artifact.write_text("old\n", encoding="utf-8")
+
+    assert normalize_artifact_ref(task, "outputs/report.md") == "outputs/report.md"
+
+
+def test_subagent_workspace_root_attribute_comes_from_current_manager(tmp_path) -> None:
+    current = tmp_path / "current"
+    old = tmp_path / "old"
+    manager = SubAgentManager(current / ".my-agent" / "subagents", workspace_root=current)
+
+    task = manager.create_run(
+        goal="结构化 workspace root 不能被旧参数覆盖",
+        thought="",
+        plan=["write"],
+        attributes={"workspace_root": str(old), "workspace_roots": [str(old)]},
+    )
+
+    assert task.attributes["workspace_root"] == str(current.resolve())
+    assert task.attributes["workspace_roots"] == [str(current.resolve())]
 
 
 def _read_jsonl(path: str) -> list[dict[str, object]]:

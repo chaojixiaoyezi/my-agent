@@ -84,10 +84,7 @@ class TestEmptyInputCases:
         from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
         from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
-        agent = MagicMock()
-        agent.run.return_value = MagicMock(response='{"analysis_reason": "测试中文", "root_cause": "unknown", "should_retry": true}')
-
-        introspector = FailureIntrospector(agent=agent)
+        introspector = FailureIntrospector()
 
         mock_task = MagicMock()
         mock_task.goal = "测试中文目标 🎉" * 100
@@ -216,10 +213,7 @@ class TestParameterBoundaryCases:
             FailureIntrospector,
         )
 
-        agent = MagicMock()
-        agent.run.return_value = MagicMock(response='{"analysis_reason": "test", "root_cause": "ok", "should_retry": true}')
-
-        introspector = FailureIntrospector(agent=agent)
+        introspector = FailureIntrospector()
 
         mock_task = MagicMock()
         mock_task.goal = "test"
@@ -298,10 +292,7 @@ class TestParameterBoundaryCases:
         from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
         from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
-        agent = MagicMock()
-        agent.run.return_value = MagicMock(response='{"analysis_reason": "empty", "root_cause": "no_goal", "should_retry": false}')
-
-        introspector = FailureIntrospector(agent=agent)
+        introspector = FailureIntrospector()
 
         mock_task = MagicMock()
         mock_task.goal = ""

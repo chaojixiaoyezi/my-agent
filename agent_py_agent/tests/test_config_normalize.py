@@ -197,7 +197,6 @@ class TestNormalizeSubagentAgentConfig:
             "enable_subagents",
             "subagent_mode",
             "subagent_allowed_tools",
-            "subagent_automation_level",
             "subagent_board_limit",
             "subagent_builtin_workflows",
             "subagent_cli_default_limit",

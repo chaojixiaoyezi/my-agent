@@ -13,9 +13,6 @@ from agent_py_agent.agent.contracts.effective_contract_snapshot import (
 )
 from agent_py_agent.agent.contracts.evidence_contract import EvidenceContractReport
 from agent_py_agent.agent.contracts.gates import GateDecision, GateFinding
-from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
-    RealTaskAcceptanceReport,
-)
 from agent_py_agent.agent.contracts.main_agent_task_acceptance import (
     TaskRunAcceptanceReport,
 )
@@ -110,12 +107,6 @@ def test_acceptance_reports_include_recovery_when_rejected() -> None:
             report_ref="acceptance.json",
             runtime_findings=[{"code": "STAGED_CHECKPOINT_MISSING"}],
         ),
-        RealTaskAcceptanceReport(
-            ok=False,
-            summary={},
-            report_ref="acceptance.json",
-            runtime_findings=[{"code": "STAGED_CHECKPOINT_MISSING"}],
-        ),
     ]
 
     for report in reports:
@@ -131,6 +122,36 @@ def test_approval_waiting_failures_request_user_input_instead_of_blocking() -> N
         assert recovery["status"] == "needs_user_input"
         assert recovery["requires_user"] is True
         assert recovery["next_status"] == "WAITING_APPROVAL"
+
+
+def test_approval_terminal_failures_block_instead_of_waiting_for_language() -> None:
+    for code in [
+        "APPROVAL_ALREADY_USED",
+        "APPROVAL_BINDING_MISMATCH",
+        "APPROVAL_EXPIRED",
+        "APPROVAL_REJECTED",
+        "APPROVER_NOT_AUTHORIZED",
+    ]:
+        recovery = ApprovalGateDecision(False, "BLOCKED", code, "approval-1").to_dict()["recovery"]
+        assert recovery["status"] == "blocked"
+        assert recovery["requires_user"] is False
+        assert recovery["terminal"] is True
+        assert recovery["next_status"] == "BLOCKED"
+
+
+def test_recovery_classification_normalizes_structured_codes_only() -> None:
+    from agent_py_agent.agent.contracts.recovery_classification import (
+        action_status,
+        recommended_action,
+        recovery_category,
+    )
+
+    assert action_status("WAITING_HUMAN", "approval-required") == "needs_user_input"
+    assert action_status("BLOCKED", "approval-rejected") == "blocked"
+    assert action_status("NEED_REPAIR", "artifact-missing") == "repair_required"
+    assert recovery_category("path-outside-workspace") == "path"
+    assert recommended_action("tool-invalid-arguments", "repair_required") == "repair_tool_arguments"
+    assert action_status("", "approval rejected") == "blocked"
 
 
 def test_gate_decision_failures_use_consistent_recovery_statuses() -> None:

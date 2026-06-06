@@ -92,9 +92,9 @@ class TestFailureIntrospector:
             should_split=False,
         )
 
-    def test_introspect_uses_rules_even_when_agent_present(self, mock_agent: MagicMock, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
-        """失败自省不再额外调用主模型。"""
-        introspector = FailureIntrospector(agent=mock_agent)
+    def test_introspect_uses_rules_without_agent_state(self, mock_agent: MagicMock, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
+        """失败自省是纯规则投影，不持有 agent，也不调用主模型。"""
+        introspector = FailureIntrospector()
         result = introspector.introspect(sample_task, sample_result, sample_analysis)
 
         assert result.analysis_reason == "规则分类：increase_timeout_and_retry"
@@ -102,6 +102,7 @@ class TestFailureIntrospector:
         assert result.suggested_params == {}
         assert result.should_retry is True
         assert result.confidence == 0.55
+        assert not hasattr(introspector, "_agent")
         mock_agent.run.assert_not_called()
 
     def test_introspect_ignores_model_json_shape(
@@ -120,7 +121,7 @@ class TestFailureIntrospector:
                 "```"
             )
         )
-        introspector = FailureIntrospector(agent=mock_agent)
+        introspector = FailureIntrospector()
 
         result = introspector.introspect(sample_task, sample_result, sample_analysis)
 
@@ -131,7 +132,7 @@ class TestFailureIntrospector:
     def test_introspect_with_agent_response_noise(self, mock_agent: MagicMock, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
         """agent 返回内容不影响规则自省。"""
         mock_agent.run.return_value = MagicMock(response="这不是 JSON")
-        introspector = FailureIntrospector(agent=mock_agent)
+        introspector = FailureIntrospector()
         result = introspector.introspect(sample_task, sample_result, sample_analysis)
 
         assert result.confidence == 0.55
@@ -141,7 +142,7 @@ class TestFailureIntrospector:
     def test_introspect_with_agent_missing_fields(self, mock_agent: MagicMock, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
         """模型 JSON 缺字段不再参与失败主链。"""
         mock_agent.run.return_value = MagicMock(response='{"analysis_reason": "失败"}')
-        introspector = FailureIntrospector(agent=mock_agent)
+        introspector = FailureIntrospector()
         result = introspector.introspect(sample_task, sample_result, sample_analysis)
 
         assert result.root_cause == sample_analysis.root_cause
@@ -149,8 +150,8 @@ class TestFailureIntrospector:
         mock_agent.run.assert_not_called()
 
     def test_introspect_without_agent_uses_rules(self, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
-        """未设置 agent 时使用同一条规则主链。"""
-        introspector = FailureIntrospector(agent=None)
+        """使用同一条规则主链。"""
+        introspector = FailureIntrospector()
         result = introspector.introspect(sample_task, sample_result, sample_analysis)
 
         assert result.confidence == 0.55
@@ -160,7 +161,7 @@ class TestFailureIntrospector:
         """agent.run 抛异常也不会被调用。"""
         mock_agent = MagicMock()
         mock_agent.run.side_effect = RuntimeError("LLM 调用失败")
-        introspector = FailureIntrospector(agent=mock_agent)
+        introspector = FailureIntrospector()
         result = introspector.introspect(sample_task, sample_result, sample_analysis)
 
         assert result.confidence == 0.55
@@ -207,11 +208,7 @@ class TestFailureIntrospector:
         assert result.root_cause == "task_too_large"
         assert result.confidence == 0.55
 
-    def test_set_agent(self) -> None:
-        """测试设置 agent。"""
+    def test_no_agent_state(self) -> None:
+        """失败自省器不再保留 agent 状态。"""
         introspector = FailureIntrospector()
-        assert introspector._agent is None
-
-        mock_agent = MagicMock()
-        introspector.set_agent(mock_agent)
-        assert introspector._agent is mock_agent
+        assert not hasattr(introspector, "_agent")
