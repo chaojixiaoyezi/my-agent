@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_py_agent.agent.capability import CapabilityRouter
@@ -18,7 +19,6 @@ from ..run_scope import (
     remember_dispatched_orchestration_run_ids,
     remember_orchestration_run_ids,
 )
-from ..runner_instruction import resolved_runner_instruction
 from ..scope_resolution import dispatch_scope_resolution, scope_resolution_payload
 from ..tool_specs import build_dispatch_subagents_spec
 from ..workflow_mode import tool_workflow_mode
@@ -62,6 +62,23 @@ class DispatchToolRequest:
 
     model_params: dict[str, object]
     dispatch_params: DispatchParams
+
+
+def resolved_runner_instruction(agent: object, value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    workspace_root = _agent_workspace_root(agent)
+    if workspace_root:
+        text = text.replace("{workspace_root}", workspace_root).replace("{{workspace_root}}", workspace_root)
+    return text
+
+
+def _agent_workspace_root(agent: object) -> str:
+    raw = getattr(getattr(agent, "subagents", None), "workspace_root", None)
+    if not isinstance(raw, str | Path):
+        return ""
+    return str(Path(raw).expanduser().resolve(strict=False))
 
 
 class DispatchSubagentsTool(BaseTool):

@@ -22,7 +22,7 @@ from .store_common import now
 from .store_requests import CollaborationRequestStore
 
 
-class CollaborationStatusStore(CollaborationRequestStore):
+class CollaborationStore(CollaborationRequestStore):
     def overview(self) -> dict[str, Any]:
         statuses = [self.case_status(case.case_id) for case in self.list_cases()]
         ready_cases = [case_overview_row(status) for status in statuses if bool(status.get("ready_for_main_agent"))]
@@ -54,7 +54,7 @@ class CollaborationStatusStore(CollaborationRequestStore):
 
 
 class _CaseSnapshot:
-    def __init__(self, store: CollaborationStatusStore, case_id: str):
+    def __init__(self, store: CollaborationStore, case_id: str):
         self.case = store.load_case(case_id)
         self.requests, request_errors = store.case_requests_report(case_id)
         request_history, _request_history_errors = store.case_request_history_report(case_id)
@@ -74,7 +74,7 @@ class _CaseSnapshot:
         self.has_required_evidence = self._required_evidence_index()
 
     @classmethod
-    def from_store(cls, store: CollaborationStatusStore, case_id: str) -> _CaseSnapshot:
+    def from_store(cls, store: CollaborationStore, case_id: str) -> _CaseSnapshot:
         return cls(store, case_id)
 
     def _required_evidence_index(self) -> dict[str, bool]:
@@ -247,3 +247,6 @@ def _overview_blocker(row: dict[str, Any]) -> dict[str, Any]:
 
 def _readiness(blockers: list[dict[str, Any]]) -> dict[str, Any]:
     return {"ready": not blockers, "blocker_count": len(blockers), "blockers": blockers[-20:], "next_action": "run_background_main_agent_or_review_ready_cases" if blockers else "no_collaboration_blockers"}
+
+
+__all__ = ["CollaborationStore"]

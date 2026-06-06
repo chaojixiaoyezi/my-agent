@@ -11,7 +11,7 @@ from .models import BackgroundMainAgentReport, WakeSignal
 from .runtime_context import context_markdown
 from .runtime_tool_policy import BackgroundToolPolicyRequest, background_allowed_tools
 from .runtime_utils import background_prompt, default_route_target, now, wake_signal_payload
-from .store import ConversationStore
+from .store_context import ConversationStore
 
 
 @dataclass(frozen=True)

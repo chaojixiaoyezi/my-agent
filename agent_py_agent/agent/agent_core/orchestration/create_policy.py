@@ -5,9 +5,8 @@ import json
 from pathlib import Path
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
-from ...subagents.role_templates import role_template_snapshot_for_role
+from ...subagents.role_templates import COORDINATOR_TOOLS, role_template_snapshot_for_role
 from ...subagents.services.base import CreateRunParams
-from ..coordinator_seed_tools import explicit_root_allowed_tools
 from ..parameters import _bool_param, _positive_int
 from ..runner.ref_fields import params_input_refs, params_output_refs
 from ..spawn_role_seed import is_explicit_root_role
@@ -86,6 +85,12 @@ def _current_run_id(agent) -> str:
     if current is None:
         return ""
     return str(getattr(current, "run_id", "") or getattr(current, "task_id", "") or "").strip()
+
+
+def explicit_root_allowed_tools(allowed_tools: list[str] | None) -> list[str] | None:
+    if allowed_tools is None:
+        return None
+    return list(dict.fromkeys([*allowed_tools, *COORDINATOR_TOOLS]))
 
 
 def _lineage_depth(value: object, *, default: int) -> int:

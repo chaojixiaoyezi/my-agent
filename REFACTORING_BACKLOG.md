@@ -13,6 +13,17 @@ LLM: keep this file current. Do not copy old split plans back in.
 
 ## Active Items
 
+## Completed Cleanup
+
+- 2026-06-06: 删除第一批只转发/影子入口。
+  - `delivery_contract_prompting_recovery_bool.py` 并入唯一调用方 `delivery_contract_prompting_staged.py`。
+  - `coordinator_seed_tools.py` 并入 `orchestration/create_policy.py`。
+  - `orchestration/runner_instruction.py` 并入 `orchestration/dispatch/tool.py`。
+  - `tooling/filesystem_write.py` 删除，测试和调用改走 `tooling/filesystem.py` 主入口。
+  - `cli/memory_commands.py` 删除；实际 Python 导入一直走 `cli/memory_commands/__init__.py`，该文件只是同名影子入口。
+  - `conversation/store.py` 和 `collaboration/store.py` 删除，公开 Store 类放回真实实现文件。
+  - 已验证：focused pytest、py_compile、doc sync 均通过。
+
 1. `agent_py_agent/agent/subagents/manager.py`
    - 当前定位：子代理管理主入口，允许比以前更大。
    - 下一步只在职责明显分叉时拆；不要再拆出基础 manager 薄层。

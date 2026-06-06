@@ -19,6 +19,64 @@ before changing code.
 
 ---
 
+## 0. Development Iron Rules / 开发铁律
+
+本节是所有开发工作的总纲。后面的合同、状态、写入、测试和注释规则都必须服从这里。
+
+### 0.1 Natural Language Boundary / 自然语言边界
+
+- 自然语言只表达意图，不当机器事实源。用户 prompt、模型 summary、报告正文、
+  guidance、角色描述和展示文案都不能直接变成任务状态、验收结果、权限、路由或硬门结论。
+- 硬判断必须来自结构化证据。运行时决策只能读取工具返回、exit code、schema 字段、
+  refs、artifact registry、coverage ledger、run/subagent status、显式配置、文件系统事实
+  或结构化 control event。
+- 禁止用关键词猜用户意思。不要用“完成 / 失败 / 停止 / 不要停 / blocked / done”
+  这类中英文词表改变状态；反话、错别字、多语言和上下文都会让它失真。
+- 软提示可以有，硬门不能靠提示词。prompt 可以提醒模型补证据、看子代理、提交验收；
+  但底层必须通过结构化状态和工具记录保证链路可恢复、可审计、可验收。
+- 停止、取消、暂停、恢复、接管、验收、授权这类控制动作必须走结构化入口；
+  不能靠解析一句普通自然语言来触发。
+- 模型输出不能自己证明自己。模型说“完成了”“已验证”只算说明，必须有当前 run 的
+  产物记录、验收记录、工具记录或状态记录背书。
+- 子代理模板、role description、skills 描述只影响 LLM 工作风格；runtime 不能从这些
+  prose 里推断权限、能力、验收门或状态机。
+- 当前用户消息优先于旧记忆、旧上下文和旧报告。历史内容只能辅助理解，不能覆盖本轮
+  用户明确要求。
+
+### 0.2 Code Elegance and Main Chain / 代码优雅和主链路
+
+- 主链路优先，兜底最后。主链路没跑顺之前，不加 fallback、旧路径兼容、影子入口或
+  “还能跑”的旁路。
+- 一个概念只允许一个权威位置。task workspace、memory、artifact、subagent state、
+  compact ledger、config 都必须有唯一 canonical path / canonical schema。
+- 不同时保留新旧两套路由。旧字段、旧目录、旧 facade、旧 fallback 确认不用就删；
+  迁移必须短期、显式、有删除条件。
+- 配置必须单一来源。用户配置、默认 YAML、dataclass 默认值和测试覆盖不能互相打架；
+  配置改了必须真实影响运行链路。
+- 状态机要小而明确。状态字段使用有限、结构化、可审计的值；别名和自然语言说明放
+  notes/summary，不进入机器状态。
+- 错误要显性，不要糊成“还能跑”。启动失败、通道断开、子代理挂掉、artifact 丢失、
+  config 未生效，都应暴露 typed failure，而不是伪装成 planning/running。
+- 工具不要重复造。已有工具能表达的能力，优先修底层语义或扩展明确参数；只有交互模式
+  真的不同才新增工具。
+- 安全门可以硬，业务门要软。危险路径、危险命令、越权写入、破坏运行时可以硬拦；
+  深度不足、子代理未汇总、报告质量问题应进入 warning、返工提示、证据要求或 closeout。
+- 跨平台从第一天考虑。路径用 `pathlib` 和配置解析，不写死 macOS 家目录；Windows、
+  Linux、macOS 都应能解释用户目录、相对路径和工作目录。
+- 大输出和 compact 是底层能力，不是 prompt 技巧。大文件、大工具输出、长任务必须依赖
+  chunk、cursor、coverage ledger、archive、resume summary，不靠模型口头记忆。
+- 真实测试优先于漂亮单测。runtime、gateway、subagent、compact 这类能力必须用真实
+  LLM、真实 PTY、真实长任务验收；单测只能证明局部。
+- 参考成熟项目先于自己发明。状态/compact 学 会话运行时/代理运行时 的 typed protocol，
+  guidance/wait 学 长期助手 的软引导和 activity-based 思路，subagent template 学
+  模型助手 Code 的结构化模板。
+- 代码可以长，但链路要直。文件行数不是硬门；比起十几个只转发的 facade，一个清楚的
+  核心文件更容易排查。
+- 每次改语义，文档同步。路径、状态、compact、验收、工具、配置、架构边界或长期规则
+  有变化时，同一轮 diff 必须更新对应文档；没有文档变更也要说明原因。
+
+---
+
 ## 1. Python Version / Python 版本
 
 - **Target**: Python 3.10+ (`requires-python = ">=3.10"` in pyproject.toml).

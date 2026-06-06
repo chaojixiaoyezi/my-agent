@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import json
 
-from .delivery_contract_prompting_recovery_bool import _json_bool
-
 
 def _staged_json_no_rows_lines(
     finding: dict[str, object], artifact_items: list[dict[str, object]]
@@ -27,6 +25,10 @@ def _staged_json_no_rows_lines(
     ]
     lines.extend(_collection_contract_lines(validation))
     return lines
+
+
+def _json_bool(value: object, *, default: bool) -> str:
+    return "true" if bool(default if value is None else value) else "false"
 
 
 def _staged_json_invalid_lines(

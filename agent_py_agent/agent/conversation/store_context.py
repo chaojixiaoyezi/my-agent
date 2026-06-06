@@ -6,7 +6,7 @@ from typing import Any
 from .store_claims import ConversationClaimStore
 
 
-class ConversationContextStore(ConversationClaimStore):
+class ConversationStore(ConversationClaimStore):
     def context_bundle(self, thread_id: str, *, recent_limit: int = 20) -> dict[str, Any]:
         bundle, _load_errors = self.context_bundle_report(thread_id, recent_limit=recent_limit)
         return bundle
@@ -30,3 +30,6 @@ class ConversationContextStore(ConversationClaimStore):
             "observations": [item.to_dict() for item in observations],
             "guidance": [item.to_dict() for item in guidance],
         }, [*message_errors, *task_errors, *observation_errors, *guidance_errors]
+
+
+__all__ = ["ConversationStore"]

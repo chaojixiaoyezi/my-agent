@@ -16,7 +16,7 @@ from .runtime_utils import (
     observations_by_thread,
 )
 from .runtime_worker import BackgroundMainAgentRuntime
-from .store import ConversationStore
+from .store_context import ConversationStore
 
 if TYPE_CHECKING:
     from ..collaboration import CollaborationStore

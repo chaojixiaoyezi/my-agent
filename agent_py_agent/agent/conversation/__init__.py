@@ -19,7 +19,7 @@ from .runtime import (
     BackgroundRunRequest,
     ChannelMessageRuntime,
 )
-from .store import ConversationStore
+from .store_context import ConversationStore
 
 __all__ = [
     "BackgroundMainAgentReport",

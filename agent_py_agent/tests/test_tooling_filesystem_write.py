@@ -10,7 +10,7 @@ from agent_py_agent.agent.tooling.content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
     write_file_content_parameter_detail,
 )
-from agent_py_agent.agent.tooling.filesystem_write import (
+from agent_py_agent.agent.tooling.filesystem import (
     ApplyPatchTool,
     WriteFileTool,
     WriteFileToolOptions,

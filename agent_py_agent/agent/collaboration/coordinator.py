@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .models import CaseDecision, new_decision_id
-from .store import CollaborationStore
+from .store_status import CollaborationStore
 
 if TYPE_CHECKING:
     from ..conversation import ConversationStore

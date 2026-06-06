@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
+from agent_py_agent.agent.agent_core.orchestration.create_policy import explicit_root_allowed_tools
+
 
 def test_explicit_root_allowed_tools_merges_parent_grants():
-    from agent_py_agent.agent.agent_core.coordinator_seed_tools import explicit_root_allowed_tools
-
     result = explicit_root_allowed_tools(["read_file", "run_command"])
 
     assert result is not None

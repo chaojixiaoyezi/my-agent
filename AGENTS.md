@@ -13,7 +13,18 @@
 - Python 主链路优先使用标准库；新增第三方依赖必须说明原因、收益和替代方案。
 - 不要把真实 API Key、Token、Cookie、个人路径等敏感信息写进仓库。
 - 只改和当前任务有关的文件，不顺手重构无关模块。
-- 铁律：代码不得依赖普通自然语言文本作为机器事实来源。用户 prompt、模型 summary、报告正文和展示文案可以给 LLM 或人看，但运行时路由、权限、验收、恢复、派工、产物归属等硬判断必须读取结构化字段、状态码、refs、schema、工具结果或文件系统事实。
+
+## 开发铁律总纲
+
+- 自然语言负责沟通，不负责机器决策。用户 prompt、模型 summary、报告正文、guidance、角色描述和展示文案只能作为 LLM/人类上下文；运行时路由、权限、验收、恢复、派工、产物归属、状态变更必须读取结构化字段、状态码、refs、schema、工具结果、显式配置或文件系统事实。
+- 硬门只守安全和客观事实。危险路径、危险命令、越权写入、破坏运行时、产物不存在、格式打不开这类可以硬拦；任务深度、报告质量、子代理汇总节奏、覆盖充分性这类默认走 warning、返工提示、证据要求或 closeout，不前置卡死主链路。
+- 主链路优先，兜底最后。主链路没跑顺之前，不加 fallback、旧路径兼容、影子入口、只转发 facade 或“还能跑”的旁路；确定不用的旧字段、旧目录、旧兼容分支要删。
+- 一个概念一个权威位置。task workspace、memory、artifact、subagent state、compact ledger、config 都必须有唯一 canonical path / canonical schema；projection/index 只能做查找和展示。
+- 配置必须真的生效。用户配置、默认 YAML、dataclass 默认值、测试覆盖不能互相打架；不允许“配置里改了，运行时还读写死值”。
+- 状态和控制必须结构化。停止、取消、暂停、恢复、接管、验收、授权要走 control event/tool 参数/status 字段，不解析普通自然语言触发。
+- 大输出、compact、resume 是底层能力，不是 prompt 技巧。长文件、长工具输出、长任务必须依赖 chunk、cursor、coverage ledger、archive 和 resume summary。
+- 参考成熟项目先于自己发明。状态/compact 学 会话运行时/代理运行时 的 typed protocol，guidance/wait 学 长期助手 的软引导和 activity-based 思路，subagent template 学 模型助手 Code 的结构化模板。
+- 详细条款以 `docs/development/DEVELOPMENT_RULES.md#0-development-iron-rules--开发铁律` 为准。
 
 ## 架构铁律
 
