@@ -3,16 +3,21 @@ from __future__ import annotations
 
 """manual resume support for memory-compact --apply artifacts."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ...common.value_parsing import dedupe_strings
 from ..compact_action_guard import (
     CompactActionGuardOptions,
     CompactActionGuardRequest,
     build_compact_action_guard,
 )
 from ..compact_context_bundle import compact_context_bundle_summary
+from ..compact_continue_packet import (
+    CompactContinuePacketRequest,
+    build_compact_continue_packet,
+)
 from ..compact_gate_bridge import evaluate_post_compaction_state
 from ..compact_subagent_owner import (
     CompactSubagentOwnerRequest,
@@ -23,18 +28,22 @@ from ..schema import (
     runtime_memory_schema_payload,
 )
 from .blocked import BlockedCompactResumeRequest, build_blocked_compact_resume
+from .completion import (
+    CompactCompletionPromptRequest,
+    build_compact_completion_prompt,
+)
 from .failsafe import collect_fail_safe_checkpoint_report
+from .handoff import (
+    CompactResumeHandoffRequest,
+    build_compact_resume_handoff,
+    render_compact_resume_context_block,
+)
 from .io import (
     read_compact_apply_artifacts,
     read_compact_apply_artifacts_report,
     read_json_object,
     read_json_object_report,
     resolve_compact_metadata_path,
-)
-from .paths import recommended_compact_resume_paths
-from .payloads import (
-    CompactResumePayloadPartsRequest,
-    build_compact_resume_payload_parts,
 )
 
 COMPACT_RESUME_SCHEMA = RuntimeMemorySchemaOptions("compact_resume")
@@ -60,6 +69,31 @@ class _ResumePayloadBuildRequest:
     artifact_load_errors: list[dict[str, object]]
     consistency: dict[str, Any]
     action_guard: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _CompactResumePayloadPartsRequest:
+    metadata: dict[str, Any]
+    artifacts: dict[str, Any]
+    artifact_load_errors: list[dict[str, object]]
+    consistency: dict[str, Any]
+    action_guard: dict[str, Any]
+    recommended: list[str]
+    next_actions: list[str]
+    subagent_refs: dict[str, Any]
+    fail_safe_checkpoints: list[dict[str, Any]]
+    fail_safe_checkpoint_load_errors: list[dict[str, Any]]
+    main_context_bundle: dict[str, Any]
+    compaction_state: dict[str, Any] = field(default_factory=dict)
+    handoff_summary: str = ""
+
+
+@dataclass(frozen=True)
+class _CompactResumePayloadParts:
+    handoff: dict[str, Any]
+    completion_prompt: dict[str, Any]
+    context_block: str
+    continue_packet: dict[str, Any]
 
 
 def build_memory_compact_resume(root: str | Path, options: MemoryCompactResumeOptions) -> dict[str, Any]:
@@ -197,8 +231,8 @@ def _resume_payload_parts(request: _ResumePayloadBuildRequest) -> dict[str, Any]
     next_actions = _next_actions(consistency)
     subagent_refs = _subagent_extension(request.workspace, request.options)
     main_context_bundle = compact_context_bundle_summary(metadata.get("main_context_bundle", {}))
-    payload_parts = build_compact_resume_payload_parts(
-        CompactResumePayloadPartsRequest(
+    payload_parts = _build_compact_resume_payload_parts(
+        _CompactResumePayloadPartsRequest(
             metadata=metadata,
             artifacts=artifacts,
             consistency=consistency,
@@ -227,6 +261,81 @@ def _resume_payload_parts(request: _ResumePayloadBuildRequest) -> dict[str, Any]
         "context_block": payload_parts.context_block,
         "continue_packet": payload_parts.continue_packet,
     }
+
+
+def _build_compact_resume_payload_parts(request: _CompactResumePayloadPartsRequest) -> _CompactResumePayloadParts:
+    completion_prompt = build_compact_completion_prompt(
+        CompactCompletionPromptRequest(
+            apply_id=str(request.metadata.get("apply_id", "")),
+            plan_id=str(request.metadata.get("plan_id", "")),
+            work_state=request.artifacts["work_state"],
+        )
+    )
+    handoff = build_compact_resume_handoff(
+        CompactResumeHandoffRequest(
+            metadata=request.metadata,
+            work_state=request.artifacts["work_state"],
+            consistency=request.consistency,
+            action_guard=request.action_guard,
+            recommended_read_paths=request.recommended,
+            next_actions=request.next_actions,
+            fail_safe_checkpoints=request.fail_safe_checkpoints,
+            fail_safe_checkpoint_load_errors=request.fail_safe_checkpoint_load_errors,
+            artifact_load_errors=request.artifact_load_errors,
+            completion_prompt=completion_prompt,
+            main_context_bundle=request.main_context_bundle,
+            compaction_state=request.compaction_state,
+            handoff_summary=request.handoff_summary,
+        )
+    )
+    return _CompactResumePayloadParts(
+        handoff=handoff,
+        completion_prompt=completion_prompt,
+        context_block=render_compact_resume_context_block(handoff),
+        continue_packet=_continue_packet(request, handoff),
+    )
+
+
+def _continue_packet(request: _CompactResumePayloadPartsRequest, handoff: dict[str, Any]) -> dict[str, Any]:
+    return build_compact_continue_packet(
+        CompactContinuePacketRequest(
+            metadata=request.metadata,
+            work_state=request.artifacts["work_state"],
+            consistency=request.consistency,
+            action_guard=request.action_guard,
+            handoff=handoff,
+            recommended_read_paths=request.recommended,
+            next_actions=request.next_actions,
+            subagent_owner_refs=request.subagent_refs,
+            main_context_bundle=request.main_context_bundle,
+            compaction_state=request.compaction_state,
+            handoff_summary=request.handoff_summary,
+        )
+    )
+
+
+def recommended_compact_resume_paths(
+    metadata: dict[str, Any], artifacts: dict[str, Any], fail_safe_checkpoints: list[dict[str, Any]]
+) -> list[str]:
+    refs = metadata.get("refs", {}) if isinstance(metadata.get("refs"), dict) else {}
+    paths = [str(value) for value in refs.values() if value]
+    paths.extend(str(item.get("path", "") or "") for item in fail_safe_checkpoints)
+    paths.extend(_context_bundle_paths(metadata))
+    paths.extend(_source_paths(artifacts["restore_refs"]))
+    return dedupe_strings(paths)
+
+
+def _source_paths(restore_refs: dict[str, Any]) -> list[str]:
+    source_refs = restore_refs.get("source_refs", {}) if isinstance(restore_refs, dict) else {}
+    return [str(item.get("path", "")) for group in source_refs.values() for item in group if item.get("path")]
+
+
+def _context_bundle_paths(metadata: dict[str, Any]) -> list[str]:
+    payload = metadata.get("main_context_bundle", {})
+    if not isinstance(payload, dict):
+        return []
+    ref = str(payload.get("ref", "") or "")
+    return [ref] if ref else []
 
 
 def _handoff_summary_payload(artifacts: dict[str, Any]) -> dict[str, Any]:

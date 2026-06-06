@@ -20,7 +20,7 @@ def test_delivery_closeout_prefers_checkpoint_quality_actions_before_builder():
 
     assert "STAGED_JSON_NO_ROWS" in actions
     assert actions["STAGED_JSON_NO_ROWS"]["recommended_action"] == "write_non_empty_structured_rows"
-    assert actions["STAGED_JSON_NO_ROWS"]["checkpoint_ref"] == "outputs/table_report/source_data.json"
+    assert actions["STAGED_JSON_NO_ROWS"]["checkpoint_ref"] == "output/table_report/source_data.json"
     assert actions["STAGED_JSON_NO_ROWS"]["writer_tool"] == "write_file"
     assert "checkpoint_shape_hint" in actions["STAGED_JSON_NO_ROWS"]
     assert actions["STAGED_JSON_NO_ROWS"]["required_columns"] == ["记录名", "地址", "指标值", "中文说明", "说明依据"]
@@ -87,7 +87,7 @@ def test_delivery_closeout_requires_staged_json_evidence_before_builder():
 
     assert "EVIDENCE_REQUIRED_FIELD_MISSING" in actions
     assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["recommended_action"] == "repair_evidence_refs"
-    assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["checkpoint_ref"] == "outputs/table_report/source_data.json"
+    assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["checkpoint_ref"] == "output/table_report/source_data.json"
     assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["required_fields"] == ["指标值"]
     assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["writer_tool"] == "write_file"
     assert "claims" in actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["evidence_shape_hint"]
@@ -98,7 +98,7 @@ def test_delivery_closeout_missing_source_checkpoint_prefers_auditable_collectio
     contract = xlsx_delivery_contract()
     artifact = contract["artifacts"][0]
     artifact["validation_contract"]["collection_contract"] = {
-        "source_json_ref": "outputs/table_report/source_data.json",
+        "source_json_ref": "output/table_report/source_data.json",
         "required_item_evidence_fields": ["记录名", "地址", "指标值"],
         "require_completion_evidence": True,
         "require_item_evidence": True,
@@ -112,7 +112,7 @@ def test_delivery_closeout_missing_source_checkpoint_prefers_auditable_collectio
         _, actions = _enriched_report(Path(td).resolve(), contract)
 
     action = actions["STAGING_CHECKPOINT_MISSING"]
-    assert action["checkpoint_ref"] == "outputs/table_report/source_data.json"
+    assert action["checkpoint_ref"] == "output/table_report/source_data.json"
     assert action["checkpoint_materialization_mode"] == "source_evidence_first"
     assert action["requires_auditable_source_evidence"] is True
     assert action["writer_tool"] == "write_file"
@@ -158,7 +158,7 @@ def test_delivery_closeout_adds_generic_staging_builder_action_for_ready_source(
     assert "STAGING_BUILDER_READY" in actions
     assert actions["STAGING_BUILDER_READY"]["recommended_action"] == "write_target_artifact"
     assert actions["STAGING_BUILDER_READY"]["builder_tool"] == "write_file"
-    assert actions["STAGING_BUILDER_READY"]["source_ref"] == "outputs/table_report/source_data.json"
+    assert actions["STAGING_BUILDER_READY"]["source_ref"] == "output/table_report/source_data.json"
 
 
 def test_delivery_closeout_warns_for_failed_existing_workbook_content_shape():
@@ -171,7 +171,7 @@ def test_delivery_closeout_warns_for_failed_existing_workbook_content_shape():
         write_xlsx_fixture(
             workspace,
             {
-                "path": "outputs/table_report/table_report.xlsx",
+                "path": "output/table_report/table_report.xlsx",
                 "sheets": [
                     {
                         "name": "week-1",
@@ -203,7 +203,7 @@ def test_delivery_closeout_reports_invalid_checkpoint_json():
 
     assert "STAGED_JSON_INVALID" in actions
     assert actions["STAGED_JSON_INVALID"]["recommended_action"] == "repair_structured_checkpoint_json"
-    assert actions["STAGED_JSON_INVALID"]["checkpoint_ref"] == "outputs/table_report/source_data.json"
+    assert actions["STAGED_JSON_INVALID"]["checkpoint_ref"] == "output/table_report/source_data.json"
     assert "parse_error" in actions["STAGED_JSON_INVALID"]
     assert actions["STAGED_JSON_INVALID"]["writer_tool"] == "write_file"
     assert "STAGING_BUILDER_READY" not in actions
@@ -293,7 +293,7 @@ def test_delivery_closeout_keeps_larger_static_site_finding_batches():
                 {
                     "artifact_id": "site",
                     "kind": "web_project",
-                    "path": str(workspace / "outputs/site"),
+                    "path": str(workspace / "output/site"),
                     "validation_contract": {
                         "validator": "static_site_check",
                         "required_files": ["index.html", "app.js"],
@@ -301,7 +301,7 @@ def test_delivery_closeout_keeps_larger_static_site_finding_batches():
                 }
             ]
         }
-        site = workspace / "outputs/site"
+        site = workspace / "output/site"
         site.mkdir(parents=True)
         (site / "index.html").write_text(
             '<!doctype html><html><body><script src="app.js"></script></body></html>',
@@ -422,7 +422,7 @@ def _failed_custom_root_artifact_report(workspace: Path) -> dict[str, object]:
 
 
 def _write_source(workspace: Path, source_content: str) -> None:
-    source = workspace / "outputs/table_report/source_data.json"
+    source = workspace / "output/table_report/source_data.json"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(source_content, encoding="utf-8")
 

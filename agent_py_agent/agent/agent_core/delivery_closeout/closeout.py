@@ -15,6 +15,10 @@ from ...contracts.delivery_contract_doctor import (
 from .._runtime_params import ToolLoopExecuteParams
 from ..main_agent_delivery_progress_ledger import append_delivery_progress_event
 from ..main_agent_delivery_tool_failure_recovery import attach_tool_failure_recovery_actions
+from ..run_task_workspace_writer import (
+    current_run_task_workspace_root,
+    sync_run_task_workspace_closeout,
+)
 from ..runtime.owner_roots import runtime_archive_roots
 from ..tool_guard.local_progress import reset_local_progress_guard
 from .artifacts import (
@@ -49,7 +53,7 @@ class MainAgentDeliveryCloseoutRequest:
 
 def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequest) -> ModelResponse | None:
     contract = _delivery_contract(request.params)
-    workspace_root = _workspace_root(request.agent)
+    workspace_root = _workspace_root(request.agent, request.params)
     if not contract:
         if response := uncontracted_task_output_closeout_response(request, workspace_root):
             return response
@@ -80,6 +84,7 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     append_delivery_progress_event(workspace_root, report, blocked=not gates_allowed)
     if not gates_allowed:
         return _failed_delivery_response(request, report, contract, workspace_root)
+    sync_run_task_workspace_closeout(request.agent, request.params, report)
     reset_local_progress_guard(request.agent, request.params)
     return ModelResponse(text=_closeout_text(report), backend=request.backend)
 
@@ -105,6 +110,7 @@ def _no_artifact_closeout_response(
         report["ok"] = False
         _write_report(workspace_root, report)
         return _failed_delivery_response(request, report, contract, workspace_root)
+    sync_run_task_workspace_closeout(request.agent, request.params, report)
     reset_local_progress_guard(request.agent, request.params)
     return ModelResponse(text=_closeout_text(report), backend=request.backend)
 
@@ -500,7 +506,10 @@ def _failed_artifact_payload(item: dict[str, Any]) -> dict[str, object]:
     }
 
 
-def _workspace_root(agent: object) -> Path:
+def _workspace_root(agent: object, params: object | None = None) -> Path:
+    task_root = current_run_task_workspace_root(agent, params)
+    if task_root is not None:
+        return task_root
     root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", ".")
     return Path(root).expanduser().resolve()
 

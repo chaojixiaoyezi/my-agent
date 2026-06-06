@@ -72,6 +72,9 @@ def _attach_direct_child_next_action(children: dict[str, object]) -> None:
     if children["needs_more_dispatch"]:
         children.update(_unfinished_child_payload(children))
         return
+    if children.get("needs_status_review"):
+        children.update(_status_review_payload(children.get("unverified_run_ids") or []))
+        return
     if children.get("quality_advice"):
         children["ready_for_closeout"] = False
         children.update(_quality_wave_payload(children["quality_advice"]))
@@ -110,6 +113,19 @@ def _continue_dispatch_payload(run_ids: list[str]) -> dict[str, object]:
         "continue_hint": (
             "仍有直接 child 处于 PLANNING，且没有 RUNNING 子代理；这通常是限速、串行调度或显式 defer_start 造成的。"
             "继续调用 dispatch_subagents，不要把 PLANNING 直接判为失败。"
+        ),
+    }
+
+
+def _status_review_payload(run_ids: list[object]) -> dict[str, object]:
+    ids = [str(item) for item in run_ids if str(item)]
+    return {
+        "next_action": "inspect_unverified_direct_children",
+        "suggested_tool_call": {"tool": "inspect_agent_tree"},
+        "unverified_run_ids": ids,
+        "status_review_hint": (
+            "存在直接 child 的状态不是当前协议完成、运行、待派发或可恢复状态；"
+            "先查看 agent tree 和 canonical state，不要把旧状态别名当成完成。"
         ),
     }
 
@@ -280,6 +296,7 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
     planning_ids: list[str] = []
     running_ids: list[str] = []
     recovery_ids: list[str] = []
+    unverified_ids: list[str] = []
     for item in direct_children:
         status = str(getattr(item, "status", "") or "UNKNOWN").upper()
         item_id = str(getattr(item, "id", "") or "")
@@ -290,8 +307,22 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
             running_ids.append(item_id)
         if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
             recovery_ids.append(item_id)
+        if status not in {
+            "DONE",
+            "CANCELLED",
+            "ABANDONED",
+            "TAKEN_OVER",
+            "PLANNING",
+            "RUNNING",
+            "BLOCKED",
+            "FAILED",
+            "TIMEOUT",
+            "CHANNEL_ERROR",
+        }:
+            unverified_ids.append(item_id)
     unfinished_ids = [item for item in [*planning_ids, *running_ids] if item]
     recovery_ids = [item for item in recovery_ids if item]
+    unverified_ids = [item for item in unverified_ids if item]
     return {
         "direct_children": {
             "parent_run_id": parent_run_id,
@@ -300,10 +331,12 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
             "planning_run_ids": [item for item in planning_ids if item],
             "running_run_ids": [item for item in running_ids if item],
             "recovery_run_ids": recovery_ids,
+            "unverified_run_ids": unverified_ids,
             "unfinished_run_ids": unfinished_ids,
             "needs_more_dispatch": bool(unfinished_ids),
             "needs_recovery": bool(recovery_ids),
-            "ready_for_closeout": bool(direct_children) and not unfinished_ids and not recovery_ids,
+            "needs_status_review": bool(unverified_ids),
+            "ready_for_closeout": bool(direct_children) and not unfinished_ids and not recovery_ids and not unverified_ids,
         }
     }
 

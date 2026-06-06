@@ -5,9 +5,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ...artifacts.registry import registry_path
+from ...artifacts.registry import ArtifactRegistration, register_artifact, registry_path
 from ...backends import ModelResponse
 from .._runtime_params import ToolLoopExecuteParams
+from ..run_task_workspace_writer import sync_run_task_workspace_closeout
 from ..tool_guard.local_progress import reset_local_progress_guard
 from .artifacts import _relative_report_ref, _write_report
 from .subagent_aggregation import evaluate_subagent_aggregation_gate
@@ -17,10 +18,16 @@ def uncontracted_task_output_closeout_response(
     request: object,
     workspace_root: Path,
 ) -> ModelResponse | None:
-    artifacts = _current_run_task_output_artifacts(getattr(request, "params", None), workspace_root=workspace_root)
+    artifacts = _current_run_task_output_artifacts(
+        getattr(request, "params", None),
+        workspace_root=_tool_workspace_root(getattr(request, "agent", None)),
+    )
+    if not artifacts:
+        artifacts = _current_run_task_output_artifacts(getattr(request, "params", None), workspace_root=workspace_root)
     if not artifacts:
         return None
     params = request.params
+    artifacts = _registered_artifacts(artifacts, workspace_root, params)
     delivery_mode = _delivery_mode_for_artifacts(artifacts)
     report = {
         "schema_version": "main_agent_delivery_closeout.v1",
@@ -40,6 +47,7 @@ def uncontracted_task_output_closeout_response(
     decision = evaluate_subagent_aggregation_gate(request)
     report["subagent_aggregation_gate"] = decision.to_dict()
     _write_report(workspace_root, report)
+    sync_run_task_workspace_closeout(request.agent, params, report)
     reset_local_progress_guard(request.agent, params)
     return ModelResponse(text=_uncontracted_closeout_text(report), backend=request.backend)
 
@@ -58,6 +66,43 @@ def _current_run_task_output_artifacts(
     for record in _successful_write_records(getattr(params, "archive_tool_calls", []) or []):
         artifacts.extend(_task_output_artifacts_from_record(record, targets, workspace_root=workspace_root))
     return _unique_artifact_payloads(artifacts)
+
+
+def _registered_artifacts(
+    artifacts: list[dict[str, Any]],
+    workspace_root: Path,
+    params: ToolLoopExecuteParams,
+) -> list[dict[str, Any]]:
+    registered: list[dict[str, Any]] = []
+    for item in artifacts:
+        record = register_artifact(
+            ArtifactRegistration(
+                workspace_root=workspace_root,
+                path=str(item.get("path") or ""),
+                artifact_id=str(item.get("artifact_id") or ""),
+                run_id=str(getattr(params, "run_id", "") or ""),
+                task_id=str(getattr(params, "task_id", "") or ""),
+                agent_id=str(getattr(params, "run_id", "") or ""),
+                kind=str(item.get("kind") or ""),
+                source=str(item.get("source") or "current_run_tool_output"),
+                created_by_tool="closeout",
+                status="ready",
+                metadata={"output_scope": str(item.get("output_scope") or "")},
+            )
+        )
+        registered.append({**item, "registry_ref": record.to_dict()})
+    return registered
+
+
+def _tool_workspace_root(agent: object | None) -> Path | None:
+    root = getattr(getattr(agent, "tools", None), "workspace_root", None) if agent is not None else None
+    root = root or (getattr(agent, "root", None) if agent is not None else None)
+    if not root:
+        return None
+    try:
+        return Path(root).expanduser().resolve(strict=False)
+    except OSError:
+        return None
 
 
 def _task_output_artifacts_from_record(

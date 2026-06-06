@@ -14,6 +14,9 @@ from .store_common import float_value
 from .store_common import now as current_time
 from .store_progress import ConversationProgressStore
 
+_FINISH_STATUSES = {"finished", "failed", "cancelled"}
+_INVALID_FINISH_STATUS = "invalid_status"
+
 
 @dataclass(frozen=True)
 class BackgroundClaimPayload:
@@ -82,8 +85,14 @@ class ConversationClaimStore(ConversationProgressStore):
         claim_id = str(request.get("claim_id") or "")
         self._require_thread(thread_id)
         current = current_time(request.get("now"))
-        status = _finish_status(request.get("status"))
+        raw_status = request.get("status")
+        status = _finish_status(raw_status)
         error = _error_payload(request.get("error"))
+        if status == _INVALID_FINISH_STATUS and not error:
+            error = {
+                "type": "InvalidBackgroundClaimStatus",
+                "message": f"unsupported background claim finish status: {raw_status!r}",
+            }
         task_id = str(request.get("task_id") or "")
         runtime_facts = request.get("runtime_facts") if isinstance(request.get("runtime_facts"), dict) else {}
         finished = False
@@ -141,7 +150,7 @@ def _claim_lease_seconds(value: object) -> int:
 
 def _finish_status(value: object) -> str:
     status = str(value or "").strip().lower()
-    return status if status in {"finished", "failed", "cancelled"} else "failed"
+    return status if status in _FINISH_STATUSES else _INVALID_FINISH_STATUS
 
 
 def _error_payload(value: object) -> dict[str, Any]:
@@ -161,6 +170,8 @@ def _takeover_payload(status: str) -> dict[str, Any]:
         return {"allowed": True, "reason": "runtime_failed"}
     if status == "cancelled":
         return {"allowed": True, "reason": "runtime_cancelled"}
+    if status == _INVALID_FINISH_STATUS:
+        return {"allowed": True, "reason": "runtime_invalid_status"}
     return {"allowed": False, "reason": "run_finished"}
 
 

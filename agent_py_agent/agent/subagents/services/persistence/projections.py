@@ -20,7 +20,6 @@ from ...models import SubAgentTask
 from ..agent_run_state import build_agent_run_state, build_owner_agent_projection
 from ..control_plane_projection import sync_subagent_control_plane_projection
 from ..owner_indexes import register_owner_runtime_indexes
-from .rendering import render_thought_markdown
 
 
 @dataclass(frozen=True)
@@ -95,6 +94,36 @@ def _write_status_report(task: SubAgentTask) -> None:
     if not task.status_report_json:
         return
     write_json_file_atomic(Path(task.status_report_json), asdict(task.latest_status_report))
+
+
+def render_thought_markdown(task: SubAgentTask) -> str:
+    return (
+        "# Thought\n\n"
+        f"{task.thought}\n\n"
+        "## Plan\n"
+        + "\n".join(f"- {item}" for item in task.plan)
+        + "\n\n"
+        "## Capability Boundary\n"
+        f"- Agent: {task.agent_name}\n"
+        f"- Role: {task.role}\n"
+        f"- Owner: {task.owner or 'none'}\n"
+        f"- Supervisor: {task.supervisor or 'none'}\n"
+        f"- Final owner: {task.final_owner or 'none'}\n"
+        f"- Parent: {task.parent_id or 'none'}\n"
+        f"- Depth: {task.depth}\n"
+        f"- Allowed skills: {', '.join(task.allowed_skills) or 'none'}\n"
+        f"- Allowed tools: {', '.join(task.allowed_tools) or 'none'}\n\n"
+        "## Write Boundary\n"
+        f"- Task dir: {task.task_dir}\n"
+        f"- Allowed write roots: {', '.join(task.allowed_write_roots) or 'none'}\n"
+        f"- Forbidden write roots: {', '.join(task.forbidden_write_roots) or 'none'}\n\n"
+        "## Acceptance Checks\n"
+        + "\n".join(f"- {item}" for item in task.acceptance_checks or ["未设置"])
+        + "\n\n"
+        "## Evidence\n"
+        + "\n".join(f"- [{item.kind}] {item.summary}" for item in task.evidence or [])
+        + ("\n" if task.evidence else "- 暂无\n")
+    )
 
 
 def _sync_local_store_projection(manager: Any, task: SubAgentTask) -> None:

@@ -125,6 +125,23 @@ def test_dispatch_state_running_subagent_suggests_wait_not_polling():
     assert state["suggested_tool_call"]["seconds"] >= 10
 
 
+def test_dispatch_state_completed_alias_does_not_suggest_closeout():
+    tasks = {
+        "alias": SimpleNamespace(id="alias", status="COMPLETED", verification_status="VERIFIED"),
+    }
+    payload = json.loads(DispatchSubagentsTool(_dispatch_agent_with_state(tasks)).execute({
+        "dry_run": False,
+        "run_ids": ["alias"],
+    }).output)
+
+    state = payload["current_turn_run_state"]
+    assert state["by_status"] == {"COMPLETED": 1}
+    assert state["verified_run_ids"] == []
+    assert state["unfinished_run_ids"] == ["alias"]
+    assert state["next_action"] == "inspect_unverified_or_unknown_run_ids"
+    assert state["suggested_tool_call"] == {"tool": "inspect_agent_tree"}
+
+
 def test_create_payload_includes_stable_operation_contract(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     params = {"goal": "写一个高端现代家具品牌首页 index.html", "role": "worker"}

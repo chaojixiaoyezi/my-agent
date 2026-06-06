@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_py_agent.agent.agent_core.runner.candidate_policy import RunnerCandidatePolicy
+from agent_py_agent.agent.agent_core.runner.dispatch import RunnerCandidatePolicy
 
 
 def test_execute_runner_uses_worker_even_when_timeout_disabled(monkeypatch, tmp_path):

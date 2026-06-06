@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from ....subagents.services.recovery.modes import is_rerun_mode
-from ...runner.candidate_policy import RunnerCandidatePolicy
 from ...runner.dispatch import (
+    RunnerCandidatePolicy,
     _dispatch_runner_candidates,
     _is_dispatch_runner_candidate,
     _runner_retry_reason,

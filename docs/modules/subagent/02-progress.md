@@ -4,6 +4,11 @@
 
 - 删除只服务单一调用点的 facade/helper 文件，把能力请求解析、action rescue 渲染、runner
   guidance 注入、runner tool 过滤和 root task policy 折回当前权威模块。
+- persistence 保存链路继续收直：`identity`、`security`、`status_report`、`failure_handoff`、
+  `inheritance`、`output_load_errors`、`recovery_outputs` 等只服务持久化保存的私有 helper
+  已折回 `persistence/service.py`；`thought.md` 渲染折回 projection 写入点。
+- session progress 写入链路继续收直：工具结果路径提取不再放单独 `paths.py`，而是跟
+  `record_subagent_tool_progress` 保持在同一入口里，方便排查“工具写了什么、进度如何投影”。
 - `runner_context` 现在直接构造执行上下文、写入边界、runtime guidance 和 runner allowed
   tools；角色模板相关判断留在 `role_templates`。
 - 这轮清理不新增工具、不新增硬门，只减少跨文件跳转和旧入口。
@@ -17,6 +22,8 @@
 
 - 子代理运行、恢复、tree、closeout 统一按当前协议状态判断；`COMPLETED`、`SUCCESS`、`ERROR`
   等旧标签不再隐式兼容成 `DONE` 或 `FAILED`。
+- 派发状态投影遇到旧标签或未知状态时，仍保留原始 status 供审计，但不会给父代理
+  `summarize_or_report_verified_runs` 这类收口建议；必须先检查 agent tree 或人工处理。
 - 恢复状态机不再把 `PLANNED`、`QUEUED`、`WAIT_CHILD` 旧别名提升成当前协议状态；旧状态进入
   `manual_review`，避免跨版本残留污染当前 run。
 - 缺少结构化 `failure_type` 时，恢复快照不再从 `runner_last_error` 或自由文本错误里猜恢复码；

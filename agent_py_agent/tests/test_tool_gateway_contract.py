@@ -215,3 +215,62 @@ def test_tool_gateway_parses_write_file_raw_content_block(tmp_path: Path):
     result = registry.execute_call(calls[0])
     assert result.ok is True
     assert (tmp_path / "out" / "index.html").read_text(encoding="utf-8") == html
+
+
+def test_tool_gateway_maps_task_output_alias_from_write_boundary(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    task_output = tmp_path / "home" / "tasks" / "today" / "task" / "output"
+    task_work = task_output.parent / "work"
+    workspace.mkdir()
+    registry = _registry(workspace)
+    boundary = {"task_output_dir": str(task_output), "task_work_dir": str(task_work)}
+
+    result = registry.execute_call(
+        {"tool": "write_file", "path": "output/report.md", "content": "hello"},
+        write_boundary=boundary,
+    )
+
+    assert result.ok is True
+    assert (task_output / "report.md").read_text(encoding="utf-8") == "hello"
+    assert not (workspace / "output" / "report.md").exists()
+    readback = registry.execute_call(
+        {"tool": "read_file", "path": "output/report.md"},
+        write_boundary=boundary,
+    )
+    assert readback.ok is True
+    assert "hello" in readback.output
+
+
+def test_tool_gateway_parses_raw_block_with_literal_tool_markers(tmp_path: Path):
+    registry = _registry(tmp_path)
+    content = (
+        "# 报告\n\n"
+        "正文会直接提到 `[TOOL_CALL]` 和 `[/TOOL_CALL]`，这些只是文档内容。\n"
+        "[TOOL_CALL]\n"
+        '{"tool":"read_file","path":"README.md"}\n'
+        "[/TOOL_CALL]\n"
+    )
+
+    calls = registry.parse_tool_calls(
+        '[WRITE_FILE_RAW path="out/report.md"]\n'
+        f"{content}"
+        "[/WRITE_FILE_RAW]"
+    )
+
+    assert calls == [
+        {
+            "tool": "write_file",
+            "path": "out/report.md",
+            "content": content.rstrip("\n"),
+        }
+    ]
+
+
+def test_tool_gateway_ignores_inline_raw_marker_example(tmp_path: Path):
+    registry = _registry(tmp_path)
+
+    calls = registry.parse_tool_calls(
+        '普通说明：`[WRITE_FILE_RAW path="..."]...[/WRITE_FILE_RAW]` 只是文档示例。'
+    )
+
+    assert calls == []

@@ -220,8 +220,8 @@ def dispatch_loop(
 
 def _final_pending_runner_count(agent) -> tuple[int, dict[str, object]]:
     try:
-        from ...runner.candidate_policy import RunnerCandidatePolicy
         from ...runner.dispatch import (
+            RunnerCandidatePolicy,
             _dispatch_runner_candidates,
             _runner_max_attempts,
             _same_run_redispatch_limit,

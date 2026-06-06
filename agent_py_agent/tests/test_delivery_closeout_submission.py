@@ -60,6 +60,87 @@ def test_tool_round_with_acceptance_submit_runs_delivery_closeout(tmp_path: Path
     assert (tmp_path / ".agent_delivery" / "closeout.json").exists()
 
 
+def test_acceptance_submit_syncs_task_workspace_closeout_state_and_manifest(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    task_root = tmp_path / "home" / "tasks" / "2026-06-06" / "source-review"
+    output_dir = task_root / "output"
+    work_dir = task_root / "work"
+    output_dir.mkdir(parents=True)
+    work_dir.mkdir(parents=True)
+    artifact = output_dir / "report.md"
+    artifact.write_text("# done\n", encoding="utf-8")
+    (work_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "task_id": "task-1",
+                "primary_run_id": "run-1",
+                "status": "RUNNING",
+                "artifact_refs": [],
+                "evidence_refs": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "refs" / "artifacts").mkdir(parents=True)
+    (work_dir / "refs" / "artifacts" / "manifest.json").write_text(
+        json.dumps({"version": 1, "artifacts": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    write_record = _write_file_archive_record()
+    write_record["parameters"] = {"tool": "write_file", "path": str(artifact)}
+    write_record["artifact_ref"] = str(artifact)
+    params = replace(
+        _delivery_params(archive_tool_calls=[write_record]),
+        task_attributes={
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(output_dir),
+                "work_dir": str(work_dir),
+            }
+        },
+        delivery_contract={
+            "case_id": "task-workspace-artifact",
+            "task_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(output_dir),
+                "work_dir": str(work_dir),
+            },
+            "artifacts": [{"artifact_id": "report", "path": str(artifact), "kind": "md"}],
+        },
+    )
+    params.executed_tools.append("submit_for_acceptance")
+    agent = _agent(repo_root)
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="[TOOL_CALL submit_for_acceptance]", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+
+    assert response is not None
+    assert "交付验收通过" in response.text
+    assert not (repo_root / ".agent_delivery" / "closeout.json").exists()
+    report = json.loads((task_root / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    assert report["workspace_root"] == str(task_root.resolve(strict=False))
+    state = json.loads((work_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "DONE"
+    assert state["verification_status"] == "VERIFIED"
+    assert state["progress"] == 1.0
+    assert str(artifact) in state["artifact_refs"]
+    assert state["delivery_closeout"]["report_ref"] == ".agent_delivery/closeout.json"
+    manifest = json.loads((work_dir / "refs" / "artifacts" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["closeout_report_ref"] == ".agent_delivery/closeout.json"
+    assert [item["path"] for item in manifest["artifacts"]] == [str(artifact)]
+    assert (task_root / "data" / "artifacts" / "registry.jsonl").exists()
+
+
 def test_acceptance_submit_uses_disk_write_file_index_for_artifact_provenance(tmp_path: Path):
     _write_valid_artifact(tmp_path)
     _write_tool_output_index(
@@ -1465,7 +1546,7 @@ def test_existing_closeout_context_does_not_make_plain_text_submit(tmp_path: Pat
 def test_failed_closeout_does_not_intercept_read_tools_with_delivery_repair_gate(tmp_path: Path):
     _write_builder_ready_closeout(tmp_path)
     params = _delivery_params(archive_tool_calls=[])
-    agent = _agent_with_calls(tmp_path, [{"tool": "list_files", "path": "outputs/report"}])
+    agent = _agent_with_calls(tmp_path, [{"tool": "list_files", "path": "output/report"}])
 
     decision = tool_loop_response_decision(
         ToolLoopResponseDecisionRequest(
@@ -1477,7 +1558,7 @@ def test_failed_closeout_does_not_intercept_read_tools_with_delivery_repair_gate
     )
 
     assert decision.action == "run_tools"
-    assert decision.calls == [{"tool": "list_files", "path": "outputs/report"}]
+    assert decision.calls == [{"tool": "list_files", "path": "output/report"}]
     assert not any("delivery-required-repair" in item for item in params.tool_context)
 
 
@@ -1586,8 +1667,8 @@ def _write_builder_ready_closeout(root: Path) -> None:
                             "code": "STAGING_BUILDER_READY",
                             "recommended_action": "invoke_builder_tool",
                             "builder_tool": "write_file",
-                            "source_ref": "outputs/report/source.json",
-                            "output_ref": "outputs/report/report.xlsx",
+                            "source_ref": "output/report/source.json",
+                            "output_ref": "output/report/report.xlsx",
                         }
                     ]
                 },

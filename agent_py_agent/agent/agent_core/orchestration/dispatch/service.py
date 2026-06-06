@@ -207,8 +207,8 @@ def make_patch_review_records(agent: Any, patch_run_ids: list[str], params: Any)
 
 
 def update_pending_work_state(agent) -> bool:
-    from ...runner.candidate_policy import RunnerCandidatePolicy
     from ...runner.dispatch import (
+        RunnerCandidatePolicy,
         _dispatch_runner_candidates,
         _runner_max_attempts,
         _same_run_redispatch_limit,

@@ -7,20 +7,17 @@ dispatch 阶段不应该把"谁能跑、能不能重试、并发 worker 怎么�
 这个文件专门处理 runner 相关的规则和小工具。
 """
 
+import json
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ...settings.defaults import default_config_int
 from ...settings.runtime_guard_config import runtime_guard_int
 from ...subagents import SubAgentTask
 from ...subagents.model_capabilities import capability_request_requires_parent_resolution
-from .candidate_policy import (
-    RunnerCandidatePolicy,
-    candidate_policy,
-    runner_launch_in_progress,
-)
 from .dispatch_record import RunnerDispatchRecordParams
 from .dispatch_record import runner_dispatch_record as _runner_dispatch_record
-from .patch_review import _dispatch_patch_review_run_ids, _task_has_runner_patches
 from .worker import RunSubagentWorkerParams, _run_subagent_worker
 
 if TYPE_CHECKING:
@@ -44,6 +41,44 @@ CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES = {
     "missing_capability",
     "write_permission_blocked",
 }
+
+
+@dataclass(frozen=True)
+class RunnerCandidatePolicy:
+    runner_max_attempts: int = 1
+    same_run_redispatch_limit: int | None = None
+    background_launch_id: str = ""
+
+
+def candidate_policy(policy: RunnerCandidatePolicy | None = None) -> RunnerCandidatePolicy:
+    return policy or RunnerCandidatePolicy()
+
+
+def runner_launch_in_progress(task: object, policy: RunnerCandidatePolicy) -> bool:
+    if _runner_active_attempt_id(task):
+        return True
+    return _background_start_active(task, background_launch_id=policy.background_launch_id)
+
+
+def _runner_active_attempt_id(task: object) -> str:
+    value = getattr(task, "runner_active_attempt_id", "")
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def _background_start_active(task: object, *, background_launch_id: str = "") -> bool:
+    attrs = getattr(task, "attributes", {}) or {}
+    if not isinstance(attrs, dict):
+        return False
+    background = attrs.get("background_start")
+    if not isinstance(background, dict):
+        return False
+    status = str(background.get("status") or "").strip().lower()
+    if background_launch_id and str(background.get("launch_id") or "").strip() == str(background_launch_id).strip():
+        return False
+    return status in {"launching", "running"}
+
 
 def _runner_max_attempts(policy: str, *, runtime_policy: object = None) -> int:
 
@@ -92,6 +127,24 @@ def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
 
 def _retry_count_after_initial_attempt(attempts: int) -> int:
     return max(0, int(attempts) - 1)
+
+
+def _dispatch_patch_review_run_ids(tasks: list[SubAgentTask]) -> list[str]:
+    run_ids: list[str] = []
+    for task in tasks:
+        if task.status != "DONE":
+            continue
+        if _task_has_runner_patches(task):
+            run_ids.append(task.id)
+    return run_ids
+
+
+def _task_has_runner_patches(task: SubAgentTask) -> bool:
+    try:
+        payload = json.loads(Path(task.output_json).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(payload.get("patches"), list) and bool(payload.get("patches"))
 
 
 def _resolve_runner_concurrency(value: object, job_count: int, *, auto_limit: object = None) -> int:

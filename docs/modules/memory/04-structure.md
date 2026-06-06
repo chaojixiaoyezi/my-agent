@@ -48,6 +48,13 @@
 - `rollup_ledger.jsonl` 只在子代理状态签名变化时追加；心跳式保存不应制造新的 compact 包。
 - `read_file` / `read_artifact` 的恢复游标来自结构化工具记录；旧状态词、summary 和人工描述不能证明某段已经读过。
 - compact handoff 的 final/running 判断只读当前协议状态，不能用 `succeeded/completed` 这类别名补齐。
+- compact rollup/handoff 的机器统计桶只使用当前协议状态或 `unknown`；旧状态原文只留在 child row / refs
+  里做证据展示，不能扩散成新的机器状态。
+- compact apply 的 id、metadata、restore refs、bundle、ledger、self-check 和 context markdown 属于同一条
+  apply 链路，集中在 `compact_apply/__init__.py`；`compact_apply/work_state.py` 只负责构建续接所需的
+  work-state snapshot。
+- compact resume 的入口集中组装 consistency、recommended paths、handoff、completion prompt 和 continue
+  packet；`completion.py`、`handoff.py`、`focus.py`、`failsafe.py`、`blocked.py`、`io.py` 分别保留为真实职责边界。
 - task-local fact 文件只读当前模板名：`ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md`、`failing_tests.json`。文件名必须精确匹配，不能因为 mac/Windows 大小写行为把旧小写文件当成当前事实源。
 
 ## Artifact And Raw Output

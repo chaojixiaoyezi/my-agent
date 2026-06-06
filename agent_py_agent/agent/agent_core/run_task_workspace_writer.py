@@ -1,13 +1,28 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
+from typing import Any
 
+from ..common.json_io import append_jsonl_records, write_json_file_atomic
 from ..user_space.run_workspace import EnsureRunWorkspaceRequest, ensure_run_workspace
 from ._runtime_params import ArchiveRunParams
 from .run_task_workspace_index import register_saved_run_task_ref
+
+
+def current_run_task_workspace_root(agent, params: object | None = None) -> Path | None:
+    for text in _task_workspace_root_candidates(agent, params):
+        if not text:
+            continue
+        try:
+            return Path(text).expanduser().resolve(strict=False)
+        except OSError:
+            continue
+    return None
 
 
 def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
@@ -43,6 +58,19 @@ def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
     return str(result.root)
 
 
+def sync_run_task_workspace_closeout(agent, params: object, report: dict[str, Any]) -> str:
+    root = current_run_task_workspace_root(agent, params)
+    if root is None:
+        return ""
+    work_dir = root / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    now = _now_iso()
+    _write_closeout_state(work_dir / "state.json", params, report, now)
+    _write_closeout_manifest(work_dir / "refs" / "artifacts" / "manifest.json", params, report, now)
+    _append_closeout_timeline(work_dir / "timeline.jsonl", params, report, now)
+    return str(root)
+
+
 def attach_run_task_workspace_context(agent, params, user_prompt: str):
     if not _should_create_workspace(agent, params):
         return params
@@ -60,9 +88,7 @@ def _should_create_workspace(agent, params) -> bool:
         return False
     if str(getattr(params, "context_scope", "") or "").strip().lower() in {"task_local", "control_plane"}:
         return False
-    auto_save = bool(getattr(agent.config, "auto_save_memory", True))
-    do_save = auto_save if getattr(params, "save", None) is None else bool(getattr(params, "save", None))
-    return bool(do_save and getattr(agent, "home_paths", None) is not None)
+    return bool(getattr(agent, "home_paths", None) is not None)
 
 
 def _ensure_workspace_for_run(agent, params, user_prompt: str):
@@ -130,6 +156,160 @@ def _existing_workspace_paths(attrs: object) -> _ExistingWorkspacePaths | None:
     output_dir = Path(str(workspace.get("output_dir") or root / "output"))
     work_dir = Path(str(workspace.get("work_dir") or root / "work"))
     return _ExistingWorkspacePaths(root=root, output_dir=output_dir, work_dir=work_dir)
+
+
+def _task_workspace_root_candidates(agent, params: object | None) -> list[str]:
+    attrs = getattr(params, "task_attributes", None) if params is not None else None
+    contract = getattr(params, "delivery_contract", None) if params is not None else None
+    return [
+        _workspace_root_from_mapping(contract, "task_workspace"),
+        _workspace_root_from_mapping(attrs, "run_workspace"),
+        str(getattr(agent, "_current_run_task_workspace", "") or "").strip(),
+    ]
+
+
+def _workspace_root_from_mapping(value: object, key: str) -> str:
+    if not isinstance(value, dict):
+        return ""
+    workspace = value.get(key)
+    if not isinstance(workspace, dict):
+        return ""
+    root = str(workspace.get("task_root") or "").strip()
+    if root:
+        return root
+    for field in ("output_dir", "work_dir"):
+        text = str(workspace.get(field) or "").strip()
+        if not text:
+            continue
+        try:
+            path = Path(text).expanduser()
+        except OSError:
+            continue
+        if field == "output_dir":
+            return str(path.parent)
+        if field == "work_dir":
+            return str(path.parent)
+    return ""
+
+
+def _write_closeout_state(path: Path, params: object, report: dict[str, Any], now: str) -> None:
+    state = _read_json(path)
+    artifacts = _closeout_artifacts(report)
+    artifact_refs = _unique_strings(
+        [*list(state.get("artifact_refs", []) or []), *[str(item.get("path") or "") for item in artifacts]]
+    )
+    evidence_refs = _unique_strings([*list(state.get("evidence_refs", []) or []), str(report.get("report_ref") or "")])
+    state.update(
+        {
+            "version": int(state.get("version") or 1),
+            "task_id": str(state.get("task_id") or getattr(params, "task_id", "") or getattr(params, "run_id", "") or ""),
+            "primary_run_id": str(
+                state.get("primary_run_id") or getattr(params, "run_id", "") or getattr(params, "request_id", "") or ""
+            ),
+            "status": "DONE" if bool(report.get("ok")) else "FAILED",
+            "verification_status": "VERIFIED" if bool(report.get("ok")) else "FAILED",
+            "progress": 1.0 if bool(report.get("ok")) else float(state.get("progress") or 0.0),
+            "latest_summary": _closeout_summary(report),
+            "artifact_refs": artifact_refs,
+            "evidence_refs": evidence_refs,
+            "delivery_closeout": {
+                "ok": bool(report.get("ok")),
+                "report_ref": str(report.get("report_ref") or ""),
+                "artifact_count": len(artifacts),
+                "run_id": str(getattr(params, "run_id", "") or ""),
+                "request_id": str(getattr(params, "request_id", "") or ""),
+            },
+            "updated_at": now,
+        }
+    )
+    write_json_file_atomic(path, state, sort_keys=False)
+
+
+def _write_closeout_manifest(path: Path, params: object, report: dict[str, Any], now: str) -> None:
+    manifest = _read_json(path)
+    manifest.update(
+        {
+            "version": int(manifest.get("version") or 1),
+            "request_id": str(manifest.get("request_id") or getattr(params, "request_id", "") or ""),
+            "run_id": str(manifest.get("run_id") or getattr(params, "run_id", "") or ""),
+            "task_id": str(manifest.get("task_id") or getattr(params, "task_id", "") or ""),
+            "artifacts": [_manifest_artifact(item) for item in _closeout_artifacts(report)],
+            "closeout_report_ref": str(report.get("report_ref") or ""),
+            "updated_at": now,
+        }
+    )
+    write_json_file_atomic(path, manifest, sort_keys=False)
+
+
+def _append_closeout_timeline(path: Path, params: object, report: dict[str, Any], now: str) -> None:
+    append_jsonl_records(
+        path,
+        [
+            {
+                "event_type": "delivery_closeout_synced",
+                "request_id": str(getattr(params, "request_id", "") or ""),
+                "run_id": str(getattr(params, "run_id", "") or ""),
+                "task_id": str(getattr(params, "task_id", "") or ""),
+                "status": "DONE" if bool(report.get("ok")) else "FAILED",
+                "verification_status": "VERIFIED" if bool(report.get("ok")) else "FAILED",
+                "closeout_report_ref": str(report.get("report_ref") or ""),
+                "artifact_count": len(_closeout_artifacts(report)),
+                "created_at": now,
+            }
+        ],
+        sort_keys=True,
+    )
+
+
+def _closeout_artifacts(report: dict[str, Any]) -> list[dict[str, Any]]:
+    artifacts = report.get("artifacts")
+    return [item for item in artifacts if isinstance(item, dict)] if isinstance(artifacts, list) else []
+
+
+def _manifest_artifact(item: dict[str, Any]) -> dict[str, Any]:
+    registry_ref = item.get("registry_ref") if isinstance(item.get("registry_ref"), dict) else {}
+    acceptance = item.get("acceptance_report") if isinstance(item.get("acceptance_report"), dict) else {}
+    return {
+        "artifact_id": str(item.get("artifact_id") or registry_ref.get("artifact_id") or ""),
+        "kind": str(item.get("kind") or registry_ref.get("kind") or ""),
+        "path": str(item.get("path") or registry_ref.get("path") or ""),
+        "ok": bool(item.get("ok")),
+        "registry_ref": registry_ref,
+        "acceptance_ok": bool(acceptance.get("ok", item.get("ok"))),
+        "finding_codes": _finding_codes(acceptance),
+    }
+
+
+def _finding_codes(report: dict[str, Any]) -> list[str]:
+    findings = report.get("findings")
+    if not isinstance(findings, list):
+        return []
+    return [str(item.get("code") or "") for item in findings if isinstance(item, dict) and item.get("code")]
+
+
+def _closeout_summary(report: dict[str, Any]) -> str:
+    if bool(report.get("ok")):
+        count = len(_closeout_artifacts(report))
+        return f"交付验收通过，已登记 {count} 个最终产物。"
+    return "交付验收未通过，已记录 closeout 报告。"
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _unique_strings(values: list[object]) -> list[str]:
+    return list(dict.fromkeys(text for value in values if (text := str(value or "").strip())))
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _workspace_prompt_section(paths) -> str:
@@ -351,4 +531,9 @@ def _artifact_declares_output_target(artifact: dict) -> bool:
     return False
 
 
-__all__ = ["attach_run_task_workspace_context", "write_run_task_workspace_if_needed"]
+__all__ = [
+    "attach_run_task_workspace_context",
+    "current_run_task_workspace_root",
+    "sync_run_task_workspace_closeout",
+    "write_run_task_workspace_if_needed",
+]

@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..subagents.models import SubAgentRunnerResult, SubAgentTask
-from .failure_analyzer import FailureAnalysis
+from .failure_analysis_service import FailureAnalysis
 
 
 @dataclass

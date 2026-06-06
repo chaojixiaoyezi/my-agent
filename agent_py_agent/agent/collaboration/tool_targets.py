@@ -94,7 +94,7 @@ def request_identity_report(agent: SimpleAgent, params: dict[str, object]) -> tu
     agent_name = str(params.get("agent_name") or "").strip()
     agent_role = str(params.get("agent_role") or "").strip()
     load_error = None
-    if agent_id and not (agent_name and agent_role):
+    if agent_id and not (agent_name and agent_role) and _is_known_subagent_run(agent, agent_id):
         agent_name, agent_role, load_error = _loaded_task_identity_report(
             agent,
             agent_id,
@@ -148,6 +148,11 @@ def subagent_tasks_report(agent: SimpleAgent) -> tuple[list[object], dict[str, o
         return list(manager.list_runs()), None
     except Exception as exc:
         return [], runtime_error_report(exc, context="raise_collaboration.target_runtime")
+
+
+def _is_known_subagent_run(agent: SimpleAgent, run_id: str) -> bool:
+    rows, _load_error = subagent_tasks_report(agent)
+    return any(str(getattr(task, "id", "") or "") == run_id for task in rows)
 
 
 def _resolve_raw_targets_report(agent: SimpleAgent, raw: list[str]) -> tuple[list[str], list[dict[str, object]]]:

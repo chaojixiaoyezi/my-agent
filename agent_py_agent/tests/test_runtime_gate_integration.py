@@ -388,6 +388,10 @@ def test_tool_round_auto_closeout_for_uncontracted_task_output_report(tmp_path):
     assert response is not None
     assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in response.text
     assert "uncontracted_task_output" in response.text
+    registry = task_root / "data" / "artifacts" / "registry.jsonl"
+    rows = [json.loads(line) for line in registry.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert rows[-1]["path"] == str(output)
+    assert rows[-1]["status"] == "ready"
 
 
 def test_finalization_auto_closeout_for_final_response_after_uncontracted_task_output(tmp_path):
@@ -447,6 +451,53 @@ def test_tool_round_auto_closeout_for_relative_uncontracted_task_output_report(t
     assert response is not None
     assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in response.text
     assert "uncontracted_task_output" in response.text
+
+
+def test_tool_round_auto_closeout_resolves_output_alias_archive_record(tmp_path):
+    task_root = tmp_path / "tasks" / "2026-06-06" / "task"
+    output_dir = task_root / "output"
+    output = output_dir / "report.md"
+    output.parent.mkdir(parents=True)
+    output.write_text("finished artifact", encoding="utf-8")
+    params = replace(
+        _delivery_closeout_params(
+            archive_tool_calls=[
+                {
+                    **_write_file_archive_record(),
+                    "parameters": {"tool": "write_file", "path": "output/report.md"},
+                    "path": "output/report.md",
+                }
+            ]
+        ),
+        delivery_contract=None,
+        task_attributes={
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(output_dir),
+                "work_dir": str(task_root / "work"),
+            }
+        },
+    )
+    params.executed_tools.append("submit_for_acceptance")
+    agent = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(workspace_root=tmp_path))
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+
+    assert response is not None
+    assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in response.text
+    report = json.loads((task_root / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    assert report["artifacts"][0]["path"] == str(output)
+    registry = task_root / "data" / "artifacts" / "registry.jsonl"
+    rows = [json.loads(line) for line in registry.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert rows[-1]["path"] == str(output)
 
 
 def test_tool_round_auto_closeout_for_uncontracted_user_requested_output_report(tmp_path):

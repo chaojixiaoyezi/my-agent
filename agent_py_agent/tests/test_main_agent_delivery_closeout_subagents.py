@@ -6,7 +6,7 @@ from pathlib import Path
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.backends import ModelResponse
-from agent_py_agent.tests.test_main_agent_delivery_closeout import _agent, _closeout_report
+from agent_py_agent.tests.test_main_agent_delivery_closeout import _agent
 
 
 def test_submit_for_acceptance_without_contract_warns_for_current_task_subagents():
@@ -36,7 +36,7 @@ def test_submit_for_acceptance_without_contract_warns_for_current_task_subagents
                 },
             ),
         )
-        report = _closeout_report(workspace)
+        report = _task_closeout_report(task_root)
 
         assert backend.calls == 2
         assert backend.saw_subagent_rework is False
@@ -75,7 +75,7 @@ def test_subagent_aggregation_gate_does_not_treat_completed_alias_as_finished():
                 },
             ),
         )
-        report = _closeout_report(workspace)
+        report = _task_closeout_report(task_root)
 
         gate = report["subagent_aggregation_gate"]
         assert gate["allowed"] is True
@@ -99,6 +99,10 @@ def _write_child_canonical_state(task_root: Path, *, run_id: str, status: str, l
         ),
         encoding="utf-8",
     )
+
+
+def _task_closeout_report(task_root: Path) -> dict[str, object]:
+    return json.loads((task_root / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
 
 class _NoContractTaskOutputReportWithRunningChildBackend:

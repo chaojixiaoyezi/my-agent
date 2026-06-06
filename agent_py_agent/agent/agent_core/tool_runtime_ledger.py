@@ -81,6 +81,7 @@ def _tool_event_payload(
 def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[str, object] | None:
     boundary = getattr(params, "write_boundary", None)
     merged = dict(boundary) if isinstance(boundary, dict) else {}
+    _attach_task_workspace_aliases(merged, params)
     guardrail_rows = tool_guardrail_records(agent)
     if guardrail_rows:
         merged["tool_guardrail_records"] = _merged_tool_guardrail_rows(
@@ -103,6 +104,43 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     if rate_rows:
         merged["tool_rate_limit_records"] = _merged_rate_limit_rows(merged.get("tool_rate_limit_records"), rate_rows)
     return merged or boundary
+
+
+def _attach_task_workspace_aliases(boundary: dict[str, object], params: object) -> None:
+    workspace = _run_workspace(params)
+    if not workspace:
+        return
+    for source_key, target_key in (
+        ("task_root", "task_root"),
+        ("output_dir", "task_output_dir"),
+        ("work_dir", "task_work_dir"),
+        ("user_requested_output_dir", "user_requested_output_dir"),
+    ):
+        text = _text(workspace.get(source_key))
+        if text and not _text(boundary.get(target_key)):
+            boundary[target_key] = text
+    for key in ("output_dir", "work_dir"):
+        text = _text(workspace.get(key))
+        if text:
+            _append_boundary_path(boundary, "allowed_write_roots", text)
+
+
+def _run_workspace(params: object) -> dict[str, object]:
+    attrs = getattr(params, "task_attributes", None)
+    if isinstance(attrs, dict) and isinstance(attrs.get("run_workspace"), dict):
+        return dict(attrs["run_workspace"])
+    contract = getattr(params, "delivery_contract", None)
+    if isinstance(contract, dict) and isinstance(contract.get("task_workspace"), dict):
+        return dict(contract["task_workspace"])
+    return {}
+
+
+def _append_boundary_path(boundary: dict[str, object], key: str, path: str) -> None:
+    existing = boundary.get(key)
+    values = [str(item) for item in existing] if isinstance(existing, list) else []
+    if path not in values:
+        values.append(path)
+    boundary[key] = values
 
 
 def runtime_gate_ledger_record_from_archive(archive_record: dict[str, object]) -> RuntimeGateLedgerRecord | None:

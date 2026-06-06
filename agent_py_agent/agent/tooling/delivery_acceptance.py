@@ -31,7 +31,7 @@ class SubmitForAcceptanceTool(BaseTool):
             ),
         },
         examples=[
-            '{"tool": "submit_for_acceptance", "note": "主要产物已经写入 outputs/，请系统验收。"}'
+            '{"tool": "submit_for_acceptance", "note": "主要产物已经写入 output/，请系统验收。"}'
         ],
         effect="read_only",
         default_mode="real",

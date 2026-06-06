@@ -22,8 +22,7 @@ from .write_abort import (
 
 _TOOL_START_MARKERS = ("[TOOL_CALL]",)
 _TOOL_END_MARKERS = ("[/TOOL_CALL]",)
-_MACHINE_BLOCK_PATTERNS = (
-    re.compile(r"\[TOOL_CALL\].*?\[/TOOL_CALL\]", re.DOTALL),
+_RAW_MACHINE_BLOCK_PATTERNS = (
     re.compile(r"\[WRITE_FILE_RAW[^\]]*\].*?\[/WRITE_FILE_RAW\]", re.DOTALL),
 )
 _MAX_UNCLOSED_TOOL_START_MARKERS = 1
@@ -60,11 +59,28 @@ def complete_machine_block_text(text: str) -> str:
 
 
 def _complete_machine_block_ranges(text: str) -> list[tuple[int, int]]:
-    ranges: list[tuple[int, int]] = []
-    for pattern in _MACHINE_BLOCK_PATTERNS:
+    ranges: list[tuple[int, int]] = _complete_tool_call_block_ranges(text)
+    for pattern in _RAW_MACHINE_BLOCK_PATTERNS:
         ranges.extend((match.start(), match.end()) for match in pattern.finditer(text))
     ranges.sort(key=lambda item: item[0])
     return _non_overlapping_ranges(ranges)
+
+
+def _complete_tool_call_block_ranges(text: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    while True:
+        start_info = _first_marker(text, _TOOL_START_MARKERS, cursor)
+        if start_info is None:
+            return ranges
+        start, start_marker = start_info
+        body_start = start + len(start_marker)
+        end_info = _first_marker(text, _TOOL_END_MARKERS, body_start)
+        if end_info is None:
+            return ranges
+        end, end_marker = end_info
+        cursor = end + len(end_marker)
+        ranges.append((start, cursor))
 
 
 def _non_overlapping_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -144,7 +160,7 @@ def _first_marker(text: str, markers: tuple[str, ...], cursor: int) -> tuple[int
     hits = [
         (pos, marker)
         for marker in markers
-        for pos in [text.find(marker, cursor)]
+        for pos in [_first_protocol_marker_pos(text, marker, cursor)]
         if pos != -1
     ]
     return min(hits, key=lambda item: item[0]) if hits else None
@@ -154,10 +170,36 @@ def _last_marker(text: str, markers: tuple[str, ...]) -> tuple[int, str] | None:
     hits = [
         (pos, marker)
         for marker in markers
-        for pos in [text.rfind(marker)]
+        for pos in [_last_protocol_marker_pos(text, marker)]
         if pos != -1
     ]
     return max(hits, key=lambda item: item[0]) if hits else None
+
+
+def _first_protocol_marker_pos(text: str, marker: str, cursor: int) -> int:
+    while True:
+        pos = text.find(marker, cursor)
+        if pos == -1:
+            return -1
+        if _marker_starts_protocol_line(text, pos):
+            return pos
+        cursor = pos + len(marker)
+
+
+def _last_protocol_marker_pos(text: str, marker: str) -> int:
+    cursor = len(text)
+    while True:
+        pos = text.rfind(marker, 0, cursor)
+        if pos == -1:
+            return -1
+        if _marker_starts_protocol_line(text, pos):
+            return pos
+        cursor = pos
+
+
+def _marker_starts_protocol_line(text: str, pos: int) -> bool:
+    line_start = text.rfind("\n", 0, pos) + 1
+    return not text[line_start:pos].strip()
 
 
 def _open_tool_start(text: str) -> tuple[int, str] | None:
@@ -187,7 +229,7 @@ def malformed_tool_protocol_stream_abort(text: str) -> MalformedToolProtocolStre
     if next_start is not None and (first_end is None or next_start[0] < first_end[0]):
         return MalformedToolProtocolStreamAbort(
             start_marker=marker,
-            marker_count=sum(text.count(item) for item in _TOOL_START_MARKERS),
+            marker_count=_protocol_marker_count(text, _TOOL_START_MARKERS, 0),
             limit=_MAX_UNCLOSED_TOOL_START_MARKERS,
         )
     if first_end is not None:
@@ -211,13 +253,17 @@ def malformed_tool_protocol_stream_abort(text: str) -> MalformedToolProtocolStre
 def _open_tool_start_count(text: str) -> int:
     last_end = _last_marker(text, _TOOL_END_MARKERS)
     cursor = 0 if last_end is None else last_end[0] + len(last_end[1])
-    return sum(_marker_count_after(text, marker, cursor) for marker in _TOOL_START_MARKERS)
+    return _protocol_marker_count(text, _TOOL_START_MARKERS, cursor)
 
 
-def _marker_count_after(text: str, marker: str, cursor: int) -> int:
+def _protocol_marker_count(text: str, markers: tuple[str, ...], cursor: int) -> int:
+    return sum(_one_protocol_marker_count(text, marker, cursor) for marker in markers)
+
+
+def _one_protocol_marker_count(text: str, marker: str, cursor: int) -> int:
     count = 0
     while True:
-        pos = text.find(marker, cursor)
+        pos = _first_protocol_marker_pos(text, marker, cursor)
         if pos == -1:
             return count
         count += 1

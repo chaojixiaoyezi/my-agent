@@ -279,7 +279,7 @@ class TestFailureAnalysisMemories:
 
     def test_failure_analysis_has_relevant_memories(self, tmp_path: Path):
         """FailureAnalysis 包含 relevant_memories 字段。"""
-        from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
+        from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
 
         analysis = FailureAnalysis(
             failure_type="timeout",
@@ -292,7 +292,7 @@ class TestFailureAnalysisMemories:
 
     def test_failure_analysis_default_empty_memories(self, tmp_path: Path):
         """FailureAnalysis 默认 relevant_memories 为空列表。"""
-        from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
+        from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
 
         analysis = FailureAnalysis(
             failure_type="timeout",

@@ -8,8 +8,8 @@ from typing import Any
 from .registry_payload_normalize import parse_error_payload
 
 _WRITE_FILE_BLOCK_RE = re.compile(
-    r"\[WRITE_FILE_RAW(?P<attrs>[^\]]*)\](?P<content>.*?)\[/WRITE_FILE_RAW\]",
-    re.DOTALL,
+    r"^[ \t]*\[WRITE_FILE_RAW(?P<attrs>[^\]]*)\](?P<content>.*?)^[ \t]*\[/WRITE_FILE_RAW\]",
+    re.DOTALL | re.MULTILINE,
 )
 _RAW_BLOCK_MARKERS = ("WRITE_FILE_RAW",)
 _ATTR_RE = re.compile(
@@ -30,8 +30,12 @@ def parse_write_file_raw_blocks(text: str) -> list[tuple[int, dict[str, Any]]]:
     return calls
 
 
+def write_file_raw_block_ranges(text: str) -> list[tuple[int, int]]:
+    return [(match.start(), match.end()) for match in _WRITE_FILE_BLOCK_RE.finditer(text)]
+
+
 def malformed_file_write_raw_block_calls(text: str) -> list[tuple[int, dict[str, Any]]]:
-    valid_ranges = _valid_raw_block_ranges(text)
+    valid_ranges = write_file_raw_block_ranges(text)
     calls: list[tuple[int, dict[str, Any]]] = []
     for marker in _RAW_BLOCK_MARKERS:
         calls.extend(_malformed_raw_marker_calls(text, marker, valid_ranges))
@@ -77,11 +81,6 @@ def _block_content(content: str) -> str:
     if content.endswith("\n"):
         content = content[:-1]
     return content
-
-
-def _valid_raw_block_ranges(text: str) -> list[tuple[int, int]]:
-    return [(match.start(), match.end()) for match in _WRITE_FILE_BLOCK_RE.finditer(text)]
-
 
 def _position_in_ranges(pos: int, ranges: list[tuple[int, int]]) -> bool:
     return any(start <= pos < end for start, end in ranges)
@@ -143,4 +142,5 @@ def _raw_block_sample(text: str, pos: int) -> str:
 __all__ = [
     "malformed_file_write_raw_block_calls",
     "parse_write_file_raw_blocks",
+    "write_file_raw_block_ranges",
 ]

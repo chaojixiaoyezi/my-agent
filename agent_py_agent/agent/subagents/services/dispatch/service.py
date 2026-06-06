@@ -11,8 +11,16 @@ import json
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from agent_py_agent.agent.io import append_jsonl
+
+from ...reports import (
+    DispatchRecord,
+    DispatchReport,
+    DispatchWatchRecord,
+    DispatchWatchReport,
+)
 from ..indexing.params import IndexReportParams
 from .params import (
     DispatchRecordParams,
@@ -20,15 +28,6 @@ from .params import (
     DispatchWatchRecordParams,
 )
 
-if TYPE_CHECKING:
-    from ...reports import (
-        DispatchRecord,
-        DispatchReport,
-        DispatchWatchRecord,
-        DispatchWatchReport,
-        ParentPlannerRecord,
-        ParentPlannerReport,
-    )
 
 class SubAgentDispatchService:
 
@@ -58,9 +57,7 @@ class SubAgentDispatchService:
         return self._make_dispatch_record(params)
 
     def _make_dispatch_record(self, params: DispatchRecordParams) -> DispatchRecord:
-        from .record_builder import DispatchRecordBuilder
-
-        return DispatchRecordBuilder.make_record(self.manager, params)
+        return _make_dispatch_record(self.manager, params)
 
     def build_dispatch_report(
         self,
@@ -68,10 +65,7 @@ class SubAgentDispatchService:
         *,
         dry_run: bool,
     ) -> DispatchReport:
-        from ...reports import DispatchReport
-        from .record_builder import DispatchRecordBuilder
-
-        summary = DispatchRecordBuilder.build_summary(records)
+        summary = _dispatch_summary(records)
         return DispatchReport(
             generated_at=time.time(),
             dry_run=dry_run,
@@ -96,10 +90,8 @@ class SubAgentDispatchService:
             encoding="utf-8",
         )
         if append_log:
-            from .log_appender import DispatchLogAppender
-
             for record in report.records:
-                DispatchLogAppender.append(record, self.manager.workspace)
+                _append_dispatch_log(record, self.manager.workspace)
         for record in report.records:
             self.manager.indexing.index_dispatch_record(record)
         self.manager.indexing.index_report(
@@ -112,9 +104,7 @@ class SubAgentDispatchService:
         return _trace_written_dispatch_report(self.manager, report)
 
     def _append_dispatch_log(self, record: DispatchRecord) -> None:
-        from .log_appender import DispatchLogAppender
-
-        DispatchLogAppender.append(record, self.manager.workspace)
+        _append_dispatch_log(record, self.manager.workspace)
 
     def make_dispatch_watch_record(
         self,
@@ -130,12 +120,10 @@ class SubAgentDispatchService:
         ended_at: float = 0.0,
         evidence_paths: list[str] | None = None,
     ) -> DispatchWatchRecord:
-        from .watch_builder import DispatchWatchBuilder
-
         params = params or _dispatch_watch_record_params(
             locals(),
         )
-        return DispatchWatchBuilder.make_record(self.manager, params=params)
+        return _make_dispatch_watch_record(self.manager, params)
 
     def build_dispatch_watch_report(
         self,
@@ -143,10 +131,7 @@ class SubAgentDispatchService:
         *,
         dry_run: bool,
     ) -> DispatchWatchReport:
-        from ...reports import DispatchWatchReport
-        from .watch_builder import DispatchWatchBuilder
-
-        summary = DispatchWatchBuilder.build_summary(records)
+        summary = _dispatch_watch_summary(records)
         return DispatchWatchReport(
             generated_at=time.time(),
             dry_run=dry_run,
@@ -200,9 +185,115 @@ class SubAgentDispatchService:
         return path
 
     def append_dispatch_watch_log(self, record: DispatchWatchRecord) -> None:
-        from .watch_log_appender import DispatchWatchLogAppender
+        _append_dispatch_watch_log(record, self.manager.workspace, self.manager)
 
-        DispatchWatchLogAppender.append(record, self.manager.workspace, self.manager)
+
+def _make_dispatch_record(manager: Any, params: DispatchRecordParams) -> DispatchRecord:
+    return DispatchRecord(
+        id=manager._new_id("dispatch"),
+        step=params.step,
+        action=params.action,
+        run_id=params.run_id,
+        dry_run=params.dry_run,
+        applied=params.applied,
+        ok=params.ok,
+        message=params.message,
+        before_status=params.before_status,
+        after_status=params.after_status,
+        before_verification_status=params.before_verification_status,
+        after_verification_status=params.after_verification_status,
+        evidence_paths=params.evidence_paths or [],
+        # 字段用途: 让父级看到 runner 真实创建的下级数量、id 和角色，后续按 refs 继续处理。
+        runner_summary=params.runner_summary,
+        runner_created_child_count=params.runner_created_child_count,
+        runner_created_child_ids=params.runner_created_child_ids or [],
+        runner_created_roles=params.runner_created_roles or [],
+        runner_child_status_counts=params.runner_child_status_counts or {},
+        runner_unfinished_child_ids=params.runner_unfinished_child_ids or [],
+        runner_child_load_errors=params.runner_child_load_errors or [],
+        collaboration_candidate_load_errors=params.collaboration_candidate_load_errors or [],
+        runner_partial_success=params.runner_partial_success,
+        runner_instruction=params.runner_instruction,
+        suggested_max_runners=params.suggested_max_runners,
+        created_at=time.time(),
+    )
+
+
+def _dispatch_summary(records: list[DispatchRecord]) -> dict[str, int]:
+    summary: dict[str, int] = {"total": len(records)}
+    for record in records:
+        summary[record.step] = summary.get(record.step, 0) + 1
+        summary[record.action] = summary.get(record.action, 0) + 1
+        summary["ok" if record.ok else "failed"] = summary.get(
+            "ok" if record.ok else "failed", 0,
+        ) + 1
+        summary["applied" if record.applied else "dry_run"] = summary.get(
+            "applied" if record.applied else "dry_run", 0,
+        ) + 1
+        summary["runner_created_children"] = summary.get(
+            "runner_created_children", 0,
+        ) + int(record.runner_created_child_count or 0)
+    return summary
+
+
+def _append_dispatch_log(record: DispatchRecord, workspace: Path) -> None:
+    jsonl = workspace / "subagent_dispatch_log.jsonl"
+    append_jsonl(jsonl, asdict(record))
+
+    markdown = workspace / "DISPATCH_LOG.md"
+    if not markdown.exists():
+        markdown.write_text("# DISPATCH LOG\n\n", encoding="utf-8")
+    with markdown.open("a", encoding="utf-8") as handle:
+        status = "OK" if record.ok else "FAIL"
+        run = record.run_id or "global"
+        handle.write(
+            f"- [{status}] {record.id} step={record.step} action={record.action} "
+            f"run={run} applied={record.applied} message={record.message}\n"
+        )
+
+
+def _make_dispatch_watch_record(manager: Any, params: DispatchWatchRecordParams) -> DispatchWatchRecord:
+    return DispatchWatchRecord(
+        id=manager._new_id("watch"),
+        cycle=params.cycle,
+        dry_run=params.dry_run,
+        ok=params.ok,
+        message=params.message,
+        dispatch_record_count=params.dispatch_record_count,
+        dispatch_summary=params.dispatch_summary or {},
+        started_at=params.started_at,
+        ended_at=params.ended_at,
+        evidence_paths=params.evidence_paths or [],
+    )
+
+
+def _dispatch_watch_summary(records: list[DispatchWatchRecord]) -> dict[str, int]:
+    summary: dict[str, int] = {"total": len(records)}
+    for record in records:
+        summary["ok" if record.ok else "failed"] = summary.get(
+            "ok" if record.ok else "failed", 0,
+        ) + 1
+        summary["dry_run" if record.dry_run else "applied"] = summary.get(
+            "dry_run" if record.dry_run else "applied", 0,
+        ) + 1
+        summary["dispatch_records"] = summary.get("dispatch_records", 0) + record.dispatch_record_count
+    return summary
+
+
+def _append_dispatch_watch_log(record: DispatchWatchRecord, workspace: Path, manager: Any) -> None:
+    jsonl = workspace / "subagent_dispatch_watch_log.jsonl"
+    append_jsonl(jsonl, asdict(record))
+
+    markdown = workspace / "DISPATCH_WATCH_LOG.md"
+    if not markdown.exists():
+        markdown.write_text("# DISPATCH WATCH LOG\n\n", encoding="utf-8")
+    with markdown.open("a", encoding="utf-8") as handle:
+        status = "OK" if record.ok else "FAIL"
+        handle.write(
+            f"- [{status}] {record.id} cycle={record.cycle} "
+            f"records={record.dispatch_record_count} message={record.message}\n"
+        )
+    manager.indexing.index_dispatch_watch_record(record)
 
 
 def _dispatch_record_params(values: dict[str, object]) -> DispatchRecordParams:

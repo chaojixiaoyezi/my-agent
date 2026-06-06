@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
+from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
 from agent_py_agent.agent.agent_core.failure_introspector import (
     FailureIntrospection,
     FailureIntrospector,

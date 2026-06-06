@@ -49,11 +49,13 @@ owners/<provider>/<owner>/
 
 ```text
 tasks/<date>/<task-slug>/
+|-- .agent_delivery/                 # 当前任务系统验收报告，如 closeout.json
 |-- output/                          # 最终交付物
 `-- work/
     |-- run_workspace.json           # 当前任务目录身份；复用目录只认它和 task.yaml
     |-- state.json                   # 主代理 task 状态
     |-- timeline.jsonl               # 本任务多轮运行时间线
+    |-- refs/artifacts/manifest.json # 当前任务最终产物索引和验收引用
     |-- compact/                     # task rollup 和 compact 包
     |-- artifacts/                   # manifest 和任务级 artifact refs
     |-- guidance/                    # 运行中补充提示投影

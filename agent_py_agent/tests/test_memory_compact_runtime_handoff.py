@@ -74,8 +74,11 @@ def test_memory_compact_runtime_handoff_keeps_completed_alias_active(tmp_path: P
     )
 
     work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+    counts = work_state["runtime_handoff"]["agent_tree"]["counts"]
     active_ids = {row["run_id"] for row in work_state["runtime_handoff"]["agent_tree"]["active_agents"]}
 
+    assert counts["unknown"] == 1
+    assert "completed" not in counts
     assert "run-child-alias" in active_ids
     assert "run-child-done" not in active_ids
 

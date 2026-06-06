@@ -43,7 +43,12 @@ def _agent(
     max_tool_rounds: int = 5,
     delivery_closeout_config: DeliveryCloseoutConfig | None = None,
 ) -> SimpleAgent:
-    cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=max_tool_rounds)
+    cfg = AgentConfig(
+        enable_tools=True,
+        memory_path="memory.jsonl",
+        max_tool_rounds=max_tool_rounds,
+        run_task_workspace_enabled=False,
+    )
     agent = SimpleAgent(cfg, workspace)
     agent.backend = backend
     if delivery_closeout_config is not None:
@@ -67,7 +72,7 @@ def test_tool_loop_closes_out_after_delivery_contract_passes():
         assert backend.calls == 1
         assert result.tool_rounds == 1
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert (workspace / "outputs/html_report/index.html").exists()
+        assert (workspace / "output/html_report/index.html").exists()
         assert (workspace / ".agent_delivery/closeout.json").exists()
 
 
@@ -85,7 +90,7 @@ def test_tool_loop_closes_out_from_structured_run_params_delivery_contract():
         )
 
         assert backend.calls == 1
-        assert "outputs/html_report/index.html" in backend.prompts[0]
+        assert "output/html_report/index.html" in backend.prompts[0]
         assert "[tool-system delivery-contract]" in backend.prompts[0]
         assert "不得引用 http/https 外部" in backend.prompts[0]
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
@@ -152,13 +157,16 @@ def test_submit_for_acceptance_without_contract_closes_after_current_task_output
                 },
             ),
         )
-        report = _closeout_report(workspace)
+        report = _closeout_report(task_root)
 
         assert backend.calls == 2
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
+        assert not (workspace / ".agent_delivery" / "closeout.json").exists()
         assert report["ok"] is True
         assert report["delivery_mode"] == "uncontracted_task_output"
         assert report["artifacts"][0]["path"] == str((output_dir / "final_analysis_report.md").resolve(strict=False))
+        assert report["artifacts"][0]["registry_ref"]["status"] == "ready"
+        assert (task_root / "data" / "artifacts" / "registry.jsonl").exists()
 
 
 def test_tool_loop_does_not_block_immediately_on_malformed_validation_contract_with_artifact_target():
@@ -174,7 +182,7 @@ def test_tool_loop_does_not_block_immediately_on_malformed_validation_contract_w
                         {
                             "artifact_id": "report",
                             "kind": "xlsx",
-                            "preferred_path": "outputs/report.xlsx",
+                            "preferred_path": "output/report.xlsx",
                             "validation_contract": {"required_columns": ""},
                         }
                     ],
@@ -217,7 +225,7 @@ def test_tool_loop_does_not_close_out_when_delivery_contract_fails():
         assert repair["recommended_action"] == "repair_artifact_against_findings"
         assert "write_file" in repair["write_tools"]
         assert "HTML_INCOMPLETE_DOCUMENT" in repair["finding_codes"]
-        assert any(str(path).endswith("outputs/html_report/index.html") for path in repair["repair_targets"])
+        assert any(str(path).endswith("output/html_report/index.html") for path in repair["repair_targets"])
 
 
 def test_tool_loop_repairs_failed_artifact_findings_before_closeout():
@@ -245,7 +253,7 @@ def test_tool_loop_repairs_missing_artifact_to_contract_path_before_closeout():
 
         assert backend.calls == 3
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert (workspace / "outputs/html_report/index.html").exists()
+        assert (workspace / "output/html_report/index.html").exists()
         assert _closeout_report(workspace)["ok"] is True
 
 
@@ -326,13 +334,13 @@ def test_tool_loop_keeps_running_while_bootstrap_targets_are_still_missing():
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert "[MAIN_AGENT_DELIVERY_BLOCKED]" not in result.response
         assert report["ok"] is True
-        assert (workspace / "outputs/static_site/index.html").exists()
-        assert (workspace / "outputs/static_site/app.js").read_text(encoding="utf-8") == 'console.log("shop ready");'
+        assert (workspace / "output/static_site/index.html").exists()
+        assert (workspace / "output/static_site/app.js").read_text(encoding="utf-8") == 'console.log("shop ready");'
 
 
 def _write_site_index(workspace: Path) -> None:
-    (workspace / "outputs/static_site").mkdir(parents=True)
-    (workspace / "outputs/static_site/index.html").write_text(
+    (workspace / "output/static_site").mkdir(parents=True)
+    (workspace / "output/static_site/index.html").write_text(
         "<!doctype html><html><body><main>Sample</main></body></html>",
         encoding="utf-8",
     )
@@ -452,7 +460,7 @@ class MalformedDeliveryContractBackend:
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
-                text='[TOOL_CALL]\n{"tool":"write_file","path":"outputs/draft.md","content":"draft"}\n[/TOOL_CALL]',
+                text='[TOOL_CALL]\n{"tool":"write_file","path":"output/draft.md","content":"draft"}\n[/TOOL_CALL]',
                 backend=self.name,
             )
         if self.calls == 2:
@@ -478,7 +486,7 @@ class ValidationContractStringListBackend:
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
-                text='[TOOL_CALL]\n{"tool":"write_file","path":"outputs/report.xlsx","content":"placeholder"}\n[/TOOL_CALL]',
+                text='[TOOL_CALL]\n{"tool":"write_file","path":"output/report.xlsx","content":"placeholder"}\n[/TOOL_CALL]',
                 backend=self.name,
             )
         if self.calls == 2:
@@ -504,12 +512,12 @@ def _write_stale_xlsx_closeout(workspace: Path) -> None:
             "failure_fingerprint": "failed-xlsx",
             "work_progress_fingerprint": "empty-source",
             "pending_materialization_targets": [
-                {"workspace_relative_path": "outputs/table_report/table_report.xlsx", "exists": False}
+                {"workspace_relative_path": "output/table_report/table_report.xlsx", "exists": False}
             ],
             "recovery_actions": [
                 {
                     "category": "artifact",
-                    "checkpoint_ref": "outputs/table_report/source_data.json",
+                    "checkpoint_ref": "output/table_report/source_data.json",
                     "code": "STAGED_JSON_NO_ROWS",
                     "recommended_action": "write_non_empty_structured_rows",
                     "required_columns": ["记录名", "地址", "指标值", "中文说明", "说明依据"],

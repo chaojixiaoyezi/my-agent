@@ -7,7 +7,7 @@ my-agent 当前有 `SubAgentFailureAnalyzer`（规则分类器），但它只做
 - 失败后停住等人催
 - 不分析原因，不会调参
 
-目标：在 failure_analyzer 分类之后，增加 LLM 自省层，分析失败原因并自动调参。
+目标：在 `failure_analysis_service.py` 的规则分类之后，增加自省层，分析失败原因并自动调参。
 
 ---
 
@@ -41,7 +41,7 @@ class FailureIntrospector:
         self,
         task: SubAgentTask,
         runner_result: SubAgentRunnerResult,
-        failure_analysis: FailureAnalysis,  # 来自现有的 failure_analyzer
+        failure_analysis: FailureAnalysis,  # 来自 failure_analysis_service
     ) -> FailureIntrospection:
         """LLM 分析失败原因并返回调参建议。"""
 ```
@@ -92,7 +92,7 @@ def _call_llm_introspect(self, task, runner_result, failure_analysis):
 
 ```python
 # 在 dispatch_mixin.py 的 _handle_runner_failure 或类似位置
-failure_analysis = self.failure_analyzer.analyze(task, runner_result)
+failure_analysis = self.failure_analysis_service.analyze(task, runner_result)
 
 # 新增：调用 LLM 自省
 introspection = self.failure_introspector.introspect(task, runner_result, failure_analysis)
@@ -173,7 +173,7 @@ prompt += f"\n相关记忆：{relevant_memories}"
 
 ## 约束
 
-- 不要改动现有 `failure_analyzer.py`，保持规则分类不变
+- 规则分类入口在 `failure_analysis_service.py`；不要再新增 facade 包装文件。
 - LLM 调用要设 `save=False`，避免污染主对话记忆
 - LLM 输出要求严格 JSON，解析失败要降级到规则分类
 - 已有 749 tests 要继续通过

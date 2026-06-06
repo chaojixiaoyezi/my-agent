@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from types import SimpleNamespace
@@ -127,6 +128,35 @@ class _StreamingTokenBackend:
         if on_chunk is not None:
             on_chunk("hello")
         return ModelResponse(text="hello world", backend=self.name)
+
+
+class _StreamingLiteralProtocolMarkerContentBackend:
+    name = "streaming-literal-protocol-marker-content-test-backend"
+
+    def __init__(self) -> None:
+        self.chunks_emitted = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        payload = {
+            "tool": "write_file",
+            "path": "outputs/report.md",
+            "content": (
+                "# 报告\n\n"
+                "正文会原样提到 `[TOOL_CALL]` 和 `[/TOOL_CALL]`，"
+                "它们只是文档内容，不是新的工具调用。"
+            ),
+        }
+        text = "[TOOL_CALL]\n" + json.dumps(payload, ensure_ascii=False) + "\n[/TOOL_CALL]"
+        parts = [
+            text[:80],
+            text[80:140],
+            text[140:],
+        ]
+        for part in parts:
+            self.chunks_emitted += 1
+            if on_chunk is not None:
+                on_chunk(part)
+        return ModelResponse(text=text, backend=self.name)
 
 
 class _TimeoutAwareBackend:
@@ -318,6 +348,29 @@ def test_model_generate_records_model_call_ledger_for_streaming_response():
     assert records[0].model == "test-model"
     assert records[0].metadata["tool_rounds"] == 2
     assert "first_token_timeout_estimate" in records[0].metadata
+
+
+def test_model_generate_keeps_literal_protocol_markers_inside_write_content():
+    backend = _StreamingLiteralProtocolMarkerContentBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(request_timeout=10, tool_write_inline_max_chars=12_000),
+        _current_subagent_run_id="",
+    )
+
+    response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=_tool_loop_params(),
+            prompt="write report",
+            tool_rounds=1,
+        )
+    )
+
+    assert backend.chunks_emitted >= 2
+    assert '"tool": "__parse_error__"' not in response.text
+    assert "`[TOOL_CALL]`" in response.text
+    assert "`[/TOOL_CALL]`" in response.text
 
 
 def test_effective_model_timeout_uses_dynamic_config_only_when_present():

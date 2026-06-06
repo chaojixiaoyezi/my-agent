@@ -33,6 +33,14 @@ shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`fi
 `summary.md`、`compactions/` 等内部文件；这些文件是审计/恢复资料，不是父代理的正常汇总入口。
 如果只是等一会再看进度，用 `wait`，不要用 shell 的 `sleep`。
 
+## inspect_collaboration
+
+用途：只读查看协作 case，或列出当前/指定代理的待处理协作请求。
+
+它不是子代理运行状态面。没有待处理协作请求时返回正常空结果，不把“没有请求”当工具失败；
+如果参数里有结构化 `run_id` / `task_id` / `root_id`，或指定了真实存在的子代理 run id，
+返回值会附带 `suggested_tool_call: inspect_agent_tree`，让模型直接切到代理树状态面。
+
 ## dispatch_subagents
 
 用途：推进、恢复或重跑已有子代理。

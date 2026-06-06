@@ -22,7 +22,7 @@ class DeliveryContractBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    '{"tool":"write_file","path":"outputs/html_report/index.html",'
+                    '{"tool":"write_file","path":"output/html_report/index.html",'
                     '"content":"<!doctype html><html><head><title>Maison</title></head><body>'
                     '<a href=\\"#story\\">Story</a>'
                     '<section id=\\"story\\">Done</section></body></html>"}\n'
@@ -49,7 +49,7 @@ class FailedDeliveryContractBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    '{"tool":"write_file","path":"outputs/html_report/index.html",'
+                    '{"tool":"write_file","path":"output/html_report/index.html",'
                     '"content":"<!doctype html><html><head><link rel=\\"stylesheet\\" href=\\"https://fonts.example/font.css\\"></head><body><main>Bad</main>"}\n'
                     "[/TOOL_CALL]"
                 ),
@@ -74,7 +74,7 @@ class IncompleteDeliveryContractBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    '{"tool":"write_file","path":"outputs/html_report/index.html",'
+                    '{"tool":"write_file","path":"output/html_report/index.html",'
                     '"content":"<!doctype html><html><head><link rel=\\"stylesheet\\" '
                     'href=\\"https://fonts.example/font.css\\"><style>body{color:#111}"}\n'
                     "[/TOOL_CALL]"
@@ -98,7 +98,7 @@ class ArtifactFindingRepairBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    '{"tool":"write_file","path":"outputs/html_report/index.html",'
+                    '{"tool":"write_file","path":"output/html_report/index.html",'
                     '"content":"<!doctype html><html><head><link rel=\\"stylesheet\\" '
                     'href=\\"https://fonts.example/font.css\\"></head><body><main>Bad</main>"}\n'
                     "[/TOOL_CALL]"
@@ -113,7 +113,7 @@ class ArtifactFindingRepairBackend:
             assert "HTML_EXTERNAL_RESOURCE_REF" in prompt
             assert "repair_required" in prompt
             return _write_file_response(
-                "outputs/html_report/index.html",
+                "output/html_report/index.html",
                 '<!doctype html><html><head><title>Maison</title><style>body{color:#111}</style></head><body><main>Ready</main></body></html>',
                 self.name,
             )
@@ -132,7 +132,7 @@ class MissingArtifactRepairBackend:
         self.calls += 1
         if self.calls == 1:
             return _write_file_response(
-                "outputs/wrong_homepage/index.html",
+                "output/wrong_homepage/index.html",
                 '<!doctype html><html><head><title>Wrong</title></head><body><main>Wrong path</main></body></html>',
                 self.name,
             )
@@ -143,7 +143,7 @@ class MissingArtifactRepairBackend:
             assert "ARTIFACT_MISSING" in prompt
             assert "repair_required" in prompt
             return _write_file_response(
-                "outputs/html_report/index.html",
+                "output/html_report/index.html",
                 '<!doctype html><html><head><title>Maison</title></head><body><main>Correct path</main></body></html>',
                 self.name,
             )
@@ -165,7 +165,7 @@ class OpenWriteSessionDeliveryBackend:
         session_id = session_id_from_prompt(prompt)
         if self.calls == 1:
             return ModelResponse(
-                text='[TOOL_CALL]\n{"tool":"write_file","action":"begin","target_path":"outputs/static_site/app.js"}\n[/TOOL_CALL]',
+                text='[TOOL_CALL]\n{"tool":"write_file","action":"begin","target_path":"output/static_site/app.js"}\n[/TOOL_CALL]',
                 backend=self.name,
             )
         if self.calls == 2:
@@ -193,7 +193,7 @@ class NoProgressDeliveryBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    '{"tool":"write_file","path":"outputs/html_report/index.html",'
+                    '{"tool":"write_file","path":"output/html_report/index.html",'
                     '"content":"<!doctype html><html><head><link rel=\\"stylesheet\\" href=\\"https://fonts.example/font.css\\"></head><body><main>Bad</main>"}\n'
                     "[/TOOL_CALL]"
                 ),
@@ -213,16 +213,16 @@ class PendingTargetsDeliveryBackend:
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
-            return _write_file_response("outputs/static_site/index.html", '<!doctype html><html><body><script src="app.js"></script></body></html>', self.name)
+            return _write_file_response("output/static_site/index.html", '<!doctype html><html><body><script src="app.js"></script></body></html>', self.name)
         if self.calls == 2:
             return _submit_for_acceptance_response("站点初版已写入，请系统验收。", self.name)
         if self.calls == 3:
             assert "pending_materialization_targets" in prompt
-            assert "outputs/static_site/app.js" in prompt
-            return ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file","path":"outputs/static_site/index.html"}\n[/TOOL_CALL]', backend=self.name)
+            assert "output/static_site/app.js" in prompt
+            return ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file","path":"output/static_site/index.html"}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 4:
             assert "no_progress_block_threshold" in prompt
-            return _write_file_response("outputs/static_site/app.js", 'console.log("shop ready");', self.name)
+            return _write_file_response("output/static_site/app.js", 'console.log("shop ready");', self.name)
         if self.calls == 5:
             return _submit_for_acceptance_response("缺失文件已补齐，请系统验收。", self.name)
         raise AssertionError("pending targets should complete before any blocked closeout")
@@ -240,7 +240,7 @@ class CloseoutReworkBackend:
         self.calls += 1
         if self.calls == 1:
             return _write_structured_json_response(
-                "outputs/table_report/source_data.json",
+                "output/table_report/source_data.json",
                 '{"generated_at":"2026-05-20","sheets":[{"name":"数据清单","rows":[]}]}',
                 self.name,
             )
@@ -252,11 +252,11 @@ class CloseoutReworkBackend:
         if self.calls == 3:
             assert "repair_guidance" in prompt
             assert "STAGED_JSON_NO_ROWS" in prompt
-            return ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file","path":"outputs/table_report/source_data.json"}\n[/TOOL_CALL]', backend=self.name)
+            return ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file","path":"output/table_report/source_data.json"}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 4:
             assert "STAGED_JSON_NO_ROWS" in prompt
             return _write_structured_json_response(
-                "outputs/table_report/source_data.json",
+                "output/table_report/source_data.json",
                 _valid_workbook_source_json(),
                 self.name,
             )
@@ -277,7 +277,7 @@ class LocalProgressRedirectBackend:
         self.calls += 1
         artifact_ref = str(Path("blobs/tool_outputs/demo.json").resolve())
         if self.calls == 1:
-            return _write_file_response("outputs/table_report/source_data.json", _empty_workbook_source_json(), self.name)
+            return _write_file_response("output/table_report/source_data.json", _empty_workbook_source_json(), self.name)
         if self.calls == 2:
             return _submit_for_acceptance_response("阶段数据已写入，请系统验收。", self.name)
         if self.calls == 3:
@@ -285,7 +285,7 @@ class LocalProgressRedirectBackend:
         if self.calls == 4:
             assert "local-progress-guard" in prompt
             return _write_structured_json_response(
-                "outputs/table_report/source_data.json",
+                "output/table_report/source_data.json",
                 _valid_workbook_source_json(),
                 self.name,
             )
@@ -311,7 +311,7 @@ class RecoveryAttemptRepairBackend:
             assert "repair_guidance" in prompt
             assert "LOCAL_PROGRESS_GUARD_BLOCKED" not in prompt
             return _write_structured_json_response(
-                "outputs/table_report/source_data.json",
+                "output/table_report/source_data.json",
                 _valid_workbook_source_json(),
                 self.name,
             )
@@ -333,10 +333,10 @@ class WrongToolDuringOpenSessionBackend:
         self.calls += 1
         session_id = session_id_from_prompt(prompt)
         if self.calls == 1:
-            return ModelResponse(text='[TOOL_CALL]\n{"tool":"write_file","action":"begin","target_path":"outputs/static_site/app.js"}\n[/TOOL_CALL]', backend=self.name)
+            return ModelResponse(text='[TOOL_CALL]\n{"tool":"write_file","action":"begin","target_path":"output/static_site/app.js"}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 2:
             self.session_id = session_id
-            return _write_file_response("outputs/static_site/app.js", "should not run", self.name)
+            return _write_file_response("output/static_site/app.js", "should not run", self.name)
         if self.calls == 3:
             assert "open_write_files" in prompt
             return _session_append_response(session_id or self.session_id, 'console.log("ok");', self.name)
@@ -358,7 +358,7 @@ def delivery_contract() -> dict[str, object]:
             {
                 "artifact_id": "homepage_html",
                 "kind": "html",
-                "preferred_path": "outputs/html_report/index.html",
+                "preferred_path": "output/html_report/index.html",
                 "required": True,
                 "validation_contract": {
                     "validator": "artifact_acceptance",
@@ -383,7 +383,7 @@ def web_project_delivery_contract() -> dict[str, object]:
             {
                 "artifact_id": "static_site_root",
                 "kind": "web_project",
-                "preferred_path": "outputs/static_site",
+                "preferred_path": "output/static_site",
                 "required": True,
                 "validation_contract": {
                     "validator": "static_site_check",
@@ -401,7 +401,7 @@ def xlsx_delivery_contract() -> dict[str, object]:
             {
                 "artifact_id": "table_report_workbook",
                 "kind": "xlsx",
-                "preferred_path": "outputs/table_report/table_report.xlsx",
+                "preferred_path": "output/table_report/table_report.xlsx",
                 "required": True,
                 "validation_contract": _xlsx_validation_contract(),
             }
@@ -416,9 +416,9 @@ def session_id_from_prompt(prompt: str) -> str:
 
 def _static_site_targets() -> list[dict[str, object]]:
     return [
-        {"artifact_id": "static_site_root", "kind": "web_project", "target_type": "artifact", "workspace_relative_path": "outputs/static_site"},
-        {"artifact_id": "static_site_root", "kind": "web_project", "target_type": "required_file", "workspace_relative_path": "outputs/static_site/index.html"},
-        {"artifact_id": "static_site_root", "kind": "web_project", "target_type": "required_file", "workspace_relative_path": "outputs/static_site/app.js"},
+        {"artifact_id": "static_site_root", "kind": "web_project", "target_type": "artifact", "workspace_relative_path": "output/static_site"},
+        {"artifact_id": "static_site_root", "kind": "web_project", "target_type": "required_file", "workspace_relative_path": "output/static_site/index.html"},
+        {"artifact_id": "static_site_root", "kind": "web_project", "target_type": "required_file", "workspace_relative_path": "output/static_site/app.js"},
     ]
 
 
@@ -428,14 +428,14 @@ def _xlsx_validation_contract() -> dict[str, object]:
         "required_columns": ["记录名", "地址", "指标值", "中文说明", "说明依据"],
         "staging_contract": {
             "builder_tool": "write_file",
-            "source_json_ref": "outputs/table_report/source_data.json",
-            "workbook_ref": "outputs/table_report/table_report.xlsx",
+            "source_json_ref": "output/table_report/source_data.json",
+            "workbook_ref": "output/table_report/table_report.xlsx",
             "checkpoint_shape_hints": {
-                "outputs/table_report/source_data.json": '{"sheets":[{"name":"数据清单","columns":["记录名","地址","指标值","中文说明","说明依据"],"rows":[{"记录名":"..."}]}]}'
+                "output/table_report/source_data.json": '{"sheets":[{"name":"数据清单","columns":["记录名","地址","指标值","中文说明","说明依据"],"rows":[{"记录名":"..."}]}]}'
             },
             "checkpoint_refs": [
-                "outputs/table_report/source_data.json",
-                "outputs/table_report/table_report.xlsx",
+                "output/table_report/source_data.json",
+                "output/table_report/table_report.xlsx",
             ],
         },
     }
@@ -484,7 +484,7 @@ def _submit_for_acceptance_response(note: str, backend: str) -> ModelResponse:
 
 def _workbook_builder_response(backend: str) -> ModelResponse:
     return ModelResponse(
-        text='[TOOL_CALL]\n{"tool":"write_file","source_json_path":"outputs/table_report/source_data.json","path":"outputs/table_report/table_report.xlsx"}\n[/TOOL_CALL]',
+        text='[TOOL_CALL]\n{"tool":"write_file","source_json_path":"output/table_report/source_data.json","path":"output/table_report/table_report.xlsx"}\n[/TOOL_CALL]',
         backend=backend,
     )
 

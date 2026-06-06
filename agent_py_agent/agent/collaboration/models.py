@@ -15,6 +15,8 @@ from .model_helpers import (
 )
 
 SCHEMA_VERSION = "collaboration.v1"
+AGENT_CAPABILITY_STATUS_AVAILABLE = "available"
+AGENT_CAPABILITY_STATUS_UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -23,7 +25,7 @@ class AgentCapability:
     role: str = ""
     capabilities: tuple[str, ...] = ()
     sources: tuple[str, ...] = ()
-    status: str = "available"
+    status: str = AGENT_CAPABILITY_STATUS_AVAILABLE
     load: float = 0.0
     updated_at: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -43,7 +45,7 @@ class AgentCapability:
             role=str(data.get("role") or ""),
             capabilities=_tuple_of_strings(data.get("capabilities")),
             sources=_tuple_of_strings(data.get("sources")),
-            status=str(data.get("status") or "available"),
+            status=str(data.get("status") or AGENT_CAPABILITY_STATUS_UNKNOWN),
             load=_float(data.get("load")),
             updated_at=_float(data.get("updated_at")),
             metadata=metadata if isinstance(metadata, dict) else {},

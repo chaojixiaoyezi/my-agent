@@ -119,7 +119,19 @@ def _append_collection_source_evidence_action(
     source_path = _artifact_path(source_ref, context.workspace_root)
     if source_path is None or not source_path.exists() or source_path.suffix.lower() != ".json":
         return False
-    return append_staged_evidence_actions(
+    before = len(context.ledger.actions)
+    append_checkpoint_quality_action(
+        CheckpointQualityActionRequest(
+            context.ledger,
+            source_ref,
+            source_path,
+            required_columns=context.required_columns,
+            required_sheets_min=context.required_sheets_min,
+            checkpoint_shape_hint=_checkpoint_shape_hint(context.staging, source_ref),
+            validation_contract=validation_contract,
+        )
+    )
+    evidence_repaired = append_staged_evidence_actions(
         StagedEvidenceActionRequest(
             context.ledger,
             source_ref,
@@ -127,6 +139,7 @@ def _append_collection_source_evidence_action(
             validation_contract,
         )
     )
+    return evidence_repaired or len(context.ledger.actions) > before
 
 
 def _collection_source_ref(validation_contract: dict[str, object]) -> str:

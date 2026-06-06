@@ -216,9 +216,18 @@ def _agent_related_to_scope(row: dict[str, Any], id_set: set[str]) -> bool:
 def _agent_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {"total": len(rows)}
     for row in rows:
-        status = str(row.get("status") or "unknown").strip().lower() or "unknown"
+        status = _agent_status_bucket(row.get("status"))
         counts[status] = counts.get(status, 0) + 1
     return counts
+
+
+def _agent_status_bucket(value: object) -> str:
+    status = str(value or "").strip().upper()
+    if status in {"DONE", "RUNNING", "PLANNING", "PENDING", "BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
+        return status.lower()
+    if status in {"ABANDONED", "TAKEN_OVER"}:
+        return status.lower()
+    return "unknown"
 
 
 def _active_status(row: dict[str, Any]) -> bool:

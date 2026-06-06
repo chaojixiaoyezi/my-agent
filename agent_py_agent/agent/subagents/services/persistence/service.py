@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ....common.json_io import read_json_object_report, write_json_file_atomic
+from ....common.value_parsing import sequence_strings
 from ....runtime_errors import runtime_error_report
 from ....user_space.task_compact_rollup import sync_task_compact_rollup
 from ...models import (
@@ -23,6 +24,11 @@ from ...models import (
     CapabilityGrant,
     CapabilityRequest,
     ChannelProbeCheck,
+    FailureHandoff,
+    InheritanceManifest,
+    RuntimeIdentity,
+    SecuritySignal,
+    StatusReport,
     SubAgentTask,
     TakeoverRecord,
     VerificationEvidence,
@@ -36,11 +42,10 @@ from ..agent_run_state import (
     write_agent_run_state,
 )
 from ..checkpoint_artifacts import build_checkpoint_artifact_payloads
+from ..compact_continue_packet import SubagentContinuePacketRequest, write_subagent_continue_packet
 from ..failure_handoff import refresh_failure_handoff
+from ..takeover.readiness import write_takeover_readiness_files
 from ..task_workspace_adapter import sync_task_workspace_fields
-from .failure_handoff import normalize_failure_handoff, write_failure_handoff
-from .identity import normalize_runtime_identity
-from .inheritance import normalize_inheritance_manifest, write_inheritance_manifest
 from .model_normalizers import (
     _field_names,
     _normalize_context_manifest,
@@ -51,11 +56,7 @@ from .model_normalizers import (
     _normalize_quality_contract,
     _normalize_status_report,
 )
-from .output_load_errors import append_agent_run_checkpoint_load_error, append_checkpoint_load_error
 from .projections import sync_derived_projections
-from .recovery_outputs import write_recovery_output_files
-from .security import normalize_security_signal
-from .status_report import build_status_report
 
 
 @dataclass(frozen=True)
@@ -218,6 +219,181 @@ def _set_canonical_state_ref(task: SubAgentTask) -> None:
 
 def _read_state_payload(path: Path) -> dict[str, Any]:
     return read_agent_state_payload(path)
+
+
+def build_status_report(task: SubAgentTask) -> StatusReport:
+    previous = task.latest_status_report if isinstance(task.latest_status_report, StatusReport) else StatusReport()
+    progress = max(0.0, min(1.0, _safe_float(task.progress)))
+    return StatusReport(
+        run_id=task.id,
+        version=max(0, int(previous.version or 0)) + 1,
+        state=task.status,
+        progress=progress,
+        current_step=task.current_step or task.status,
+        summary_delta=_summary_delta(task),
+        budget_used=dict(task.budget_used or {}),
+        artifact_refs=list(dict.fromkeys(task.artifact_refs)),
+        evidence_refs=list(dict.fromkeys(task.evidence_refs)),
+        blockers=list(dict.fromkeys(task.blockers)),
+        checkpoint_ref=task.checkpoint_ref,
+        next_recommended_action=(task.blockers[0] if task.blockers else ""),
+        updated_at=task.updated_at or task.heartbeat_at or task.created_at,
+    )
+
+
+def normalize_runtime_identity(value: object) -> RuntimeIdentity:
+    if isinstance(value, RuntimeIdentity):
+        return value
+    if not isinstance(value, dict):
+        return RuntimeIdentity()
+    payload = {key: value[key] for key in _field_names(RuntimeIdentity) if key in value}
+    return RuntimeIdentity(**payload)
+
+
+def normalize_security_signal(value: object) -> SecuritySignal:
+    if isinstance(value, SecuritySignal):
+        return value
+    if not isinstance(value, dict):
+        return SecuritySignal()
+    payload = {key: value[key] for key in _field_names(SecuritySignal) if key in value}
+    for key in ("evidence_refs", "artifact_refs"):
+        payload[key] = sequence_strings(payload.get(key))
+    payload["created_at"] = _safe_float(payload.get("created_at"))
+    return SecuritySignal(**payload)
+
+
+def normalize_inheritance_manifest(value: object) -> InheritanceManifest:
+    if isinstance(value, InheritanceManifest):
+        return value
+    if not isinstance(value, dict):
+        return InheritanceManifest()
+    payload = {key: value[key] for key in _field_names(InheritanceManifest) if key in value}
+    for key in ("inherited", "overridden", "dropped", "policy"):
+        payload[key] = _dict_value(payload.get(key))
+    payload["created_at"] = _safe_float(payload.get("created_at"))
+    return InheritanceManifest(**payload)
+
+
+def write_inheritance_manifest(task: SubAgentTask) -> None:
+    if not task.inheritance_manifest_json:
+        return
+    Path(task.inheritance_manifest_json).write_text(
+        json.dumps(asdict(task.inheritance_manifest), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def normalize_failure_handoff(value: object) -> FailureHandoff:
+    if isinstance(value, FailureHandoff):
+        return value
+    if not isinstance(value, dict):
+        return FailureHandoff()
+    payload = {key: value[key] for key in _field_names(FailureHandoff) if key in value}
+    for key in ("artifact_refs", "evidence_refs", "avoid_next_time"):
+        payload[key] = sequence_strings(payload.get(key), allow_scalar=True)
+    payload["created_at"] = _safe_float(payload.get("created_at"))
+    return FailureHandoff(**payload)
+
+
+def write_failure_handoff(task: SubAgentTask) -> None:
+    if not task.failure_handoff_json:
+        return
+    path = Path(task.failure_handoff_json)
+    if not task.failure_handoff.run_id:
+        path.unlink(missing_ok=True)
+        return
+    path.write_text(
+        json.dumps(asdict(task.failure_handoff), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def append_checkpoint_load_error(
+    checkpoint_artifacts: dict[str, object],
+    error: dict[str, object],
+) -> None:
+    checkpoint = checkpoint_artifacts.get("checkpoint_json")
+    if isinstance(checkpoint, dict):
+        _append_load_error(checkpoint, error)
+
+
+def append_agent_run_checkpoint_load_error(task: SubAgentTask, error: dict[str, object]) -> None:
+    path_text = str(getattr(task, "agent_run_checkpoint_json", "") or "").strip()
+    if not path_text:
+        return
+    path = Path(path_text)
+    report = read_json_object_report(
+        path,
+        context="subagent.persistence.agent_run_checkpoint",
+    )
+    checkpoint = dict(report.payload)
+    if report.load_error:
+        _append_load_error(checkpoint, report.load_error)
+    _append_load_error(checkpoint, error)
+    path.write_text(json.dumps(checkpoint, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def write_recovery_output_files(task: SubAgentTask, checkpoint_artifacts: dict[str, object]) -> None:
+    for field_name, artifact_payload in checkpoint_artifacts.items():
+        _write_checkpoint_artifact(getattr(task, field_name, ""), artifact_payload)
+    write_takeover_readiness_files(task)
+    output_payload, output_load_error = _output_payload_report(task)
+    write_subagent_continue_packet(
+        SubagentContinuePacketRequest(
+            task,
+            output_payload,
+            load_errors=tuple(error for error in (output_load_error,) if error),
+        )
+    )
+
+
+def _summary_delta(task: SubAgentTask) -> dict[str, list[str]]:
+    return {
+        "facts_added": [task.latest_summary] if task.latest_summary else [],
+        "facts_invalidated": [],
+        "decisions_changed": [],
+        "open_questions": list(task.blockers),
+    }
+
+
+def _dict_value(value: object) -> dict[str, object]:
+    return value if isinstance(value, dict) else {}
+
+
+def _append_load_error(checkpoint: dict[str, Any], error: dict[str, object]) -> None:
+    load_errors = checkpoint.get("load_errors")
+    items = list(load_errors) if isinstance(load_errors, list) else []
+    items.append(error)
+    checkpoint["load_errors"] = items
+
+
+def _write_checkpoint_artifact(path_text: str, artifact_payload: object) -> None:
+    if not path_text:
+        return
+    path = Path(path_text)
+    if isinstance(artifact_payload, str):
+        path.write_text(artifact_payload, encoding="utf-8")
+        return
+    path.write_text(json.dumps(artifact_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _output_payload_report(task: SubAgentTask) -> tuple[dict[str, object], dict[str, object] | None]:
+    if not task.output_json:
+        return {}, None
+    path = Path(task.output_json)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return {}, _output_load_error(path, exc)
+    if not isinstance(payload, dict):
+        return {}, _output_load_error(path, ValueError(f"output_json is {type(payload).__name__}, expected object"))
+    return payload, None
+
+
+def _output_load_error(path: Path, exc: BaseException) -> dict[str, object]:
+    report = runtime_error_report(exc, context="subagent.continue_packet.output_json")
+    report["path"] = str(path)
+    return report
 
 
 def _sync_task_rollup_if_possible(task: SubAgentTask) -> None:

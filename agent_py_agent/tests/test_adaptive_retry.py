@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import pytest
 
-from agent_py_agent.agent.agent_core.adaptive_retry import (
+from agent_py_agent.agent.agent_core.failure_analysis_service import (
+    FailureAnalysis,
     adaptive_retry,
     estimate_split_count,
     should_auto_split,
     split_task,
 )
-from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
 from agent_py_agent.agent.subagents.models import SubAgentTask
 
 

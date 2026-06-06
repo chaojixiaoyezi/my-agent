@@ -3,6 +3,7 @@ from __future__ import annotations
 
 """failure analysis service — all _analyze_* methods extracted here."""
 
+import time
 from dataclasses import dataclass, field
 
 from ..subagents.models import SubAgentRunnerResult, SubAgentTask
@@ -193,3 +194,136 @@ class FailureAnalysisService:
             should_retry=False, should_split=False, should_adjust_timeout=False,
             split_suggestions=[], relevant_memories=[],
         )
+
+
+class SubAgentFailureAnalyzer:
+    def __init__(self, max_timeout: float = _MAX_TIMEOUT, max_retry_attempts: int = _MAX_RETRY_ATTEMPTS):
+        self._service = FailureAnalysisService(max_timeout, max_retry_attempts)
+
+    def analyze(
+        self,
+        task: SubAgentTask,
+        runner_result: SubAgentRunnerResult,
+    ) -> FailureAnalysis:
+        failure_type = task.failure_type or ""
+
+        if failure_type == "runner_timeout":
+            return self._service.analyze_timeout(task, runner_result)
+        if failure_type == "capability_request":
+            return self._service.analyze_capability(task, runner_result)
+        if failure_type == "structured_output_parse_error":
+            return self._service.analyze_parse_error(task, runner_result)
+        if failure_type in {"tool_result_missing", "tool_error"}:
+            return self._service.analyze_tool_failure(task, runner_result)
+        if failure_type in {"model_error", "api_error"}:
+            return self._service.analyze_model_error(task, runner_result)
+        if task.channel_status == "BROKEN":
+            return self._service.analyze_channel_broken(task, runner_result)
+        if task.verification_status == "FAILED" and task.status == "BLOCKED":
+            return self._service.analyze_verification_failed(task, runner_result)
+
+        return self._service.analyze_generic_failure(task, runner_result)
+
+    def suggest_splits(self, task: SubAgentTask) -> list[str]:
+        return _suggest_splits(task)
+
+    def _suggest_splits(self, task: SubAgentTask) -> list[str]:
+        return self.suggest_splits(task)
+
+
+def adaptive_retry(
+    task: SubAgentTask,
+    analysis: FailureAnalysis,
+    max_split_depth: int = 2,
+) -> SubAgentTask | list[SubAgentTask]:
+    if not analysis.should_retry and not analysis.should_split:
+        return []
+
+    if analysis.should_split:
+        if task.depth >= max_split_depth:
+            return []
+        return split_task(task, analysis.split_suggestions)
+
+    if analysis.should_adjust_timeout and analysis.new_timeout_seconds:
+        task.attributes["dynamic_timeout_seconds"] = analysis.new_timeout_seconds
+        task.runner_attempts = 0
+        task.status = "PLANNING"
+        task.failure_type = ""
+        return [task]
+
+    task.runner_attempts = 0
+    task.status = "PLANNING"
+    task.failure_type = ""
+    return [task]
+
+
+def split_task(task: SubAgentTask, suggestions: list[str]) -> list[SubAgentTask]:
+    subtasks = [
+        _build_split_subtask(task, suggestions, index, suggestion)
+        for index, suggestion in enumerate(suggestions)
+    ]
+    _mark_task_split(task, subtasks)
+    return subtasks
+
+
+def _build_split_subtask(
+    task: SubAgentTask,
+    suggestions: list[str],
+    index: int,
+    suggestion: str,
+) -> SubAgentTask:
+    subtask = SubAgentTask(
+        id=f"{task.id}-part-{index+1:02d}",
+        goal=f"{task.goal} - 第{index+1}部分：{suggestion}",
+        thought=task.thought,
+        plan=_split_subtask_plan(task, suggestions, index),
+        agent_name=task.agent_name,
+        role=task.role,
+        owner=task.owner,
+        supervisor=task.supervisor,
+        parent_id=task.id,
+        root_id=task.root_id or task.id,
+        depth=task.depth + 1,
+        allowed_skills=list(task.allowed_skills),
+        allowed_tools=list(task.allowed_tools),
+        workflow_mode=task.workflow_mode,
+        created_at=time.time(),
+        updated_at=time.time(),
+    )
+    if task.context_manifest:
+        subtask.context_manifest = task.context_manifest
+    return subtask
+
+
+def _split_subtask_plan(task: SubAgentTask, suggestions: list[str], index: int) -> list[str]:
+    if task.plan and suggestions:
+        step_per_subtask = max(1, len(task.plan) // len(suggestions))
+        start_idx = index * step_per_subtask
+        return task.plan[start_idx : start_idx + step_per_subtask]
+    return task.plan if index == 0 else []
+
+
+def _mark_task_split(task: SubAgentTask, subtasks: list[SubAgentTask]) -> None:
+    task.status = "SPLIT"
+    task.attributes["split_into"] = [subtask.id for subtask in subtasks]
+    task.child_ids = [subtask.id for subtask in subtasks]
+    task.updated_at = time.time()
+
+
+def should_auto_split(task: SubAgentTask, max_depth: int = 2) -> bool:
+    if task.depth >= max_depth:
+        return False
+    if len(task.plan) <= 3:
+        return False
+    return task.failure_type == "runner_timeout" and task.runner_attempts >= 2
+
+
+def estimate_split_count(task: SubAgentTask) -> int:
+    plan_length = len(task.plan)
+    if plan_length <= 3:
+        return 1
+    if plan_length <= 6:
+        return 2
+    if plan_length <= 10:
+        return 3
+    return max(3, plan_length // 4)

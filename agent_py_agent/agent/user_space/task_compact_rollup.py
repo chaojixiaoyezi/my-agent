@@ -268,7 +268,7 @@ def _status_bucket(value: object) -> str:
         return "running"
     if status in {"PENDING", "PLANNING"}:
         return "pending"
-    return status.lower() or "unknown"
+    return "unknown"
 
 
 def _unique_strings(values) -> list[str]:

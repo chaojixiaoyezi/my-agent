@@ -86,7 +86,7 @@ class _DispatchWatchMixin:
 class _DispatchFailureMixin:
     def _handle_failure_introspection(self, run_id, task_before, runner_result):
         try:
-            from ...failure_analyzer import SubAgentFailureAnalyzer
+            from ...failure_analysis_service import SubAgentFailureAnalyzer
 
             task = self.subagents.load(run_id)
             analyzer = SubAgentFailureAnalyzer()

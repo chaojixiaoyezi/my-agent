@@ -3,6 +3,7 @@ from __future__ import annotations
 
 """Execute an authorized registry tool after parsing and auth checks."""
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,10 +14,12 @@ from .registry_tool_dispatch import AuthorizedToolDispatchRequest, execute_autho
 from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
 
 _BOUNDARY_FILESYSTEM_TOOL_NAMES = WRITE_TOOL_NAMES | {
+    "find_files",
     "list_files",
     "read_file",
     "search_text",
 }
+_TASK_PATH_ALIAS_TOOL_NAMES = _BOUNDARY_FILESYSTEM_TOOL_NAMES
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,7 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
         return ToolExecutionResult(request.tool_name, False, f"未知工具: {request.tool_name}")
 
     tool_params = _tool_params_for_execution(request.payload, request.tool_name, request.allowed_tools)
+    tool_params = _with_task_workspace_path_aliases(tool_params, request)
     workspace_roots = _workspace_roots_for_invocation(request)
     boundary_error = validate_write_boundary(
         request.tool_name,
@@ -79,12 +83,64 @@ def _tool_params_for_execution(
     return params
 
 
+def _with_task_workspace_path_aliases(
+    params: dict[str, Any],
+    request: RegistryToolInvokeRequest,
+) -> dict[str, Any]:
+    if request.tool_name not in _TASK_PATH_ALIAS_TOOL_NAMES or not isinstance(request.write_boundary, dict):
+        return params
+    raw = params.get("path")
+    rewritten = _task_workspace_alias_path(raw, request.write_boundary)
+    if not rewritten:
+        return params
+    return {**params, "path": rewritten}
+
+
+def _task_workspace_alias_path(raw: object, boundary: dict[str, object]) -> str:
+    text = str(raw or "").strip()
+    if not text or _is_absolute_or_home_path(text):
+        return ""
+    normalized = text.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    for prefix, root_key in (("output", "task_output_dir"), ("work", "task_work_dir")):
+        if normalized == prefix:
+            suffix = ""
+        elif normalized.startswith(prefix + "/"):
+            suffix = normalized[len(prefix) + 1 :]
+        else:
+            continue
+        root = str(boundary.get(root_key) or "").strip()
+        if not root:
+            return ""
+        try:
+            base = Path(root).expanduser().resolve(strict=False)
+        except OSError:
+            return ""
+        return str((base / suffix).resolve(strict=False)) if suffix else str(base)
+    return ""
+
+
+def _is_absolute_or_home_path(text: str) -> bool:
+    return text.startswith("/") or text.startswith("~") or bool(
+        re.match(r"^[A-Za-z]:[\\/]", text) or re.match(r"^\\\\[^\\/]+[\\/][^\\/]+", text)
+    )
+
+
 # 避免上层 path gate 放行后底层文件工具仍按旧 workspace 拒绝。
 def _workspace_roots_for_invocation(request: RegistryToolInvokeRequest) -> list[Path] | None:
     roots = _normalized_roots(request.workspace_root, request.workspace_roots)
     if request.tool_name not in _BOUNDARY_FILESYSTEM_TOOL_NAMES or not isinstance(request.write_boundary, dict):
         return roots
-    for key in ("allowed_read_roots", "allowed_write_roots", "product_write_roots", "task_dir"):
+    for key in (
+        "allowed_read_roots",
+        "allowed_write_roots",
+        "product_write_roots",
+        "task_dir",
+        "task_root",
+        "task_output_dir",
+        "task_work_dir",
+    ):
         _append_boundary_roots(roots, request.write_boundary.get(key), request.workspace_root)
     return roots
 

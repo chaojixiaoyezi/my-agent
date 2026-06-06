@@ -276,7 +276,7 @@ class TestWatchDispatchInputState:
     def test_watch_dispatch_input_state_reports_list_runs_error(self):
         from types import SimpleNamespace
 
-        from agent_py_agent.agent.agent_core.services.watch_cycle_observe import (
+        from agent_py_agent.agent.agent_core.services.watch_service import (
             _watch_dispatch_input_state,
         )
 
@@ -295,7 +295,7 @@ class TestWatchDispatchInputState:
     def test_watch_dispatch_input_state_reports_available_runs(self):
         from types import SimpleNamespace
 
-        from agent_py_agent.agent.agent_core.services.watch_cycle_observe import (
+        from agent_py_agent.agent.agent_core.services.watch_service import (
             _watch_dispatch_input_state,
         )
 

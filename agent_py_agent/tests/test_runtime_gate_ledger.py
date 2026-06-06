@@ -296,6 +296,28 @@ def test_write_boundary_injects_tool_rate_limit_records(tmp_path):
     )
 
 
+def test_write_boundary_carries_current_task_workspace_aliases(tmp_path):
+    task_root = tmp_path / "home" / "tasks" / "today" / "task"
+    params = _loop_params(
+        write_boundary={},
+        task_attributes={
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(task_root / "output"),
+                "work_dir": str(task_root / "work"),
+            }
+        },
+    )
+
+    boundary = write_boundary_with_runtime_ledger(SimpleNamespace(local_store=None), params)
+
+    assert boundary["task_root"] == str(task_root)
+    assert boundary["task_output_dir"] == str(task_root / "output")
+    assert boundary["task_work_dir"] == str(task_root / "work")
+    assert str(task_root / "output") in boundary["allowed_write_roots"]
+    assert str(task_root / "work") in boundary["allowed_write_roots"]
+
+
 def test_tool_rate_limit_records_reset_failures_on_done_status(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     for status, timestamp in (("failed", 10.0), ("done", 20.0)):

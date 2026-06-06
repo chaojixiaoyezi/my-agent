@@ -165,7 +165,7 @@ def calculate_dynamic_timeout(
 
 ### 4. 失败分析器
 
-新增 `SubAgentFailureAnalyzer`，分析子代理失败原因并给出建议。
+在 `failure_analysis_service.py` 中维护 `SubAgentFailureAnalyzer`，分析子代理失败原因并给出建议。
 
 **关键设计**：每次失败后不是机械重试，而是引入 LLM 分析现状，根据分析结果决定下一步。
 
@@ -469,14 +469,14 @@ my-agent estimate-task "翻译这篇文档"
 
 ### 第三阶段：失败分析和自适应重派（LLM 驱动）
 
-1. 实现 `SubAgentFailureAnalyzer` 失败分析器
+1. 在 `failure_analysis_service.py` 实现 `SubAgentFailureAnalyzer` 失败分析器
    - `_build_analysis_prompt()`: 构建失败分析 prompt，包含任务信息、runner 输出、失败证据
    - `_parse_llm_analysis()`: 解析 LLM 返回的 JSON，映射到 FailureAnalysis
    - `_build_give_up_analysis()`: 超过 max_auto_retry_attempts 时构建放弃结果
-2. 实现 `adaptive_retry()` 自适应重派逻辑
+2. 在 `failure_analysis_service.py` 维护 `adaptive_retry()` 自适应重派逻辑
    - 根据 FailureAnalysis 的 should_retry/should_split/should_give_up 决定下一步
    - 调整后重试时更新 goal/plan/timeout
-3. 实现 `split_task()` 任务拆分逻辑
+3. 在同一服务文件维护 `split_task()` 任务拆分逻辑
 4. 集成到 dispatch 循环
 5. 新增 `max_auto_retry_attempts` 配置项（默认 3）
 

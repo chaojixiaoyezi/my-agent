@@ -8,7 +8,7 @@ from typing import Any
 from ..gateway_parts.io import update_json_file_atomic
 from ..runtime_errors import runtime_error_report
 from .identity import agent_identity_keys
-from .models import AgentCapability
+from .models import AGENT_CAPABILITY_STATUS_AVAILABLE, AgentCapability
 from .store_evidence import CollaborationEvidenceStore
 
 
@@ -75,6 +75,6 @@ class CollaborationCapabilityStore(CollaborationEvidenceStore):
     def _matches(self, capability: AgentCapability, required: set[str], exclude_agent_id: str) -> bool:
         if capability.agent_id == exclude_agent_id:
             return False
-        if capability.status not in {"available", "idle", "ready", ""}:
+        if capability.status != AGENT_CAPABILITY_STATUS_AVAILABLE:
             return False
         return not required or required.issubset(set(capability.capabilities))

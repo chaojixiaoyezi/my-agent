@@ -35,6 +35,7 @@ from .registry_envelopes import (
 from .registry_file_write_blocks import (
     malformed_file_write_raw_block_calls,
     parse_write_file_raw_blocks,
+    write_file_raw_block_ranges,
 )
 from .registry_invoke import RegistryToolInvokeRequest, invoke_registry_tool
 from .registry_malformed_markers import malformed_tool_marker_calls
@@ -86,14 +87,34 @@ def parse_registry_tool_calls(
 ) -> list[dict[str, Any]]:
 
     scan_text = mask_protected_control_ranges(text)
-    calls = _parse_tool_block_calls(scan_text, payload_limits=payload_limits)
-    top_level_text = _mask_ranges(scan_text, _tool_block_ranges(scan_text))
+    raw_ranges = _top_level_raw_block_ranges(scan_text)
+    calls = _top_level_raw_block_calls(scan_text)
+    scan_without_raw = _mask_ranges(scan_text, raw_ranges)
+    calls.extend(_parse_tool_block_calls(scan_without_raw, payload_limits=payload_limits))
+    top_level_text = _mask_ranges(scan_without_raw, _tool_block_ranges(scan_without_raw))
     calls.extend(malformed_tool_marker_calls(top_level_text))
-    calls.extend(parse_write_file_raw_blocks(top_level_text))
     calls.extend(malformed_file_write_raw_block_calls(top_level_text))
     calls.extend(parse_xmlish_tool_calls(top_level_text))
     calls.sort(key=lambda item: item[0])
     return [payload for _, payload in calls]
+
+
+def _top_level_raw_block_ranges(scan_text: str) -> list[tuple[int, int]]:
+    tool_ranges = _tool_block_ranges(scan_text)
+    return [
+        raw_range
+        for raw_range in write_file_raw_block_ranges(scan_text)
+        if not _position_in_ranges(raw_range[0], tool_ranges)
+    ]
+
+
+def _top_level_raw_block_calls(scan_text: str) -> list[tuple[int, dict[str, Any]]]:
+    tool_ranges = _tool_block_ranges(scan_text)
+    return [
+        item
+        for item in parse_write_file_raw_blocks(scan_text)
+        if not _position_in_ranges(item[0], tool_ranges)
+    ]
 
 
 def _parse_tool_block_calls(
@@ -144,6 +165,10 @@ def _mask_ranges(text: str, ranges: list[tuple[int, int]]) -> str:
         for index in range(start, end):
             chars[index] = " "
     return "".join(chars)
+
+
+def _position_in_ranges(pos: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(start <= pos < end for start, end in ranges)
 
 
 def _append_unclosed_tool_block(

@@ -30,6 +30,33 @@ def test_attach_run_task_workspace_context_defaults_contract_output_root(tmp_pat
     assert updated.delivery_contract["task_workspace"]["work_dir"] == workspace["work_dir"]
 
 
+def test_attach_run_task_workspace_context_no_save_still_creates_task_workspace(tmp_path):
+    from pathlib import Path
+
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        attach_run_task_workspace_context,
+    )
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    params = RunParams(
+        save=False,
+        request_id="req-nosave",
+        run_id="run-nosave",
+        task_id="task-nosave",
+    )
+
+    updated = attach_run_task_workspace_context(agent, params, "临时诊断但仍然需要任务工作目录")
+
+    workspace = updated.task_attributes["run_workspace"]
+    assert workspace["task_root"]
+    assert Path(workspace["output_dir"]).name == "output"
+    assert Path(workspace["work_dir"]).name == "work"
+    assert "# Current Task Workspace" in "\n".join(updated.inject)
+
+
 def test_attach_run_task_workspace_context_preserves_user_requested_output_root(tmp_path):
     from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
         attach_run_task_workspace_context,

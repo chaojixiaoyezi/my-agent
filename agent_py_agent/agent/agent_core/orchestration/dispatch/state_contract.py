@@ -117,6 +117,7 @@ def _attach_state_next_action(state: dict[str, object]) -> None:
     blocked = list(state.get("blocked_run_ids") or [])
     dispatchable = list(state.get("dispatchable_run_ids") or [])
     running = list(state.get("running_run_ids") or [])
+    unfinished = list(state.get("unfinished_run_ids") or [])
     missing = list(state.get("missing_run_ids") or [])
     load_errors = list(state.get("task_load_errors") or [])
     if blocked:
@@ -137,6 +138,10 @@ def _attach_state_next_action(state: dict[str, object]) -> None:
         return
     if missing:
         state["next_action"] = "refresh_agent_tree_for_missing_run_ids"
+        state["suggested_tool_call"] = {"tool": "inspect_agent_tree"}
+        return
+    if unfinished:
+        state["next_action"] = "inspect_unverified_or_unknown_run_ids"
         state["suggested_tool_call"] = {"tool": "inspect_agent_tree"}
         return
     state["next_action"] = "summarize_or_report_verified_runs"

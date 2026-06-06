@@ -50,9 +50,10 @@ def test_task_compact_rollup_keeps_completed_alias_pending(tmp_path: Path) -> No
 
     rollup = json.loads(result.rollup_json.read_text(encoding="utf-8"))
     continue_packet = json.loads((result.compact_package_dir / "continue_packet.json").read_text(encoding="utf-8"))
-    assert rollup["status_counts"] == {"completed": 1}
+    assert rollup["status_counts"] == {"unknown": 1}
     assert rollup["completed_run_ids"] == []
     assert rollup["pending_run_ids"] == ["agent-old"]
+    assert rollup["child_runs"][0]["status"] == "COMPLETED"
     assert continue_packet["pending_work"] == ["agent-old: COMPLETED"]
 
 

@@ -458,6 +458,7 @@ def test_tool_call_parser_ignores_tool_like_examples_inside_json_content():
     registry = _registry()
     content = (
         "报告正文里引用协议示例：<tool_call>{JSON}</tool_call>，"
+        "也可能引用 [TOOL_CALL] 和 [/TOOL_CALL]，"
         "也可能引用 [WRITE_FILE_RAW path=\"bad.md\"]x[/WRITE_FILE_RAW]，"
         "这些都只是文件内容。"
     )

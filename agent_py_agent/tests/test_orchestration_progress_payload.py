@@ -84,6 +84,33 @@ def test_runner_context_dispatch_suggests_wait_for_running_direct_child() -> Non
     assert "不要因为等待而重复" in direct["wait_hint"]
 
 
+def test_runner_context_dispatch_keeps_completed_alias_under_status_review() -> None:
+    mock_report = MagicMock()
+    mock_report.dry_run = False
+    mock_report.summary = {"runner": 1}
+    mock_report.records = []
+
+    mock_agent = MagicMock()
+    mock_agent._current_subagent_run_id = "parent-run"
+    mock_agent.config.subagent_workflow_mode = "off"
+    mock_agent.tools.specs.return_value = []
+    mock_agent.dispatch_subagents.return_value = mock_report
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    mock_agent.subagents.list_runs.return_value = [
+        SimpleNamespace(id="parent-run", parent_id="", status="RUNNING"),
+        SimpleNamespace(id="child-alias", parent_id="parent-run", status="COMPLETED"),
+    ]
+
+    result = DispatchSubagentsTool(mock_agent).execute({"dry_run": False})
+
+    direct = json.loads(result.output)["direct_children"]
+    assert direct["ready_for_closeout"] is False
+    assert direct["needs_status_review"] is True
+    assert direct["unverified_run_ids"] == ["child-alias"]
+    assert direct["next_action"] == "inspect_unverified_direct_children"
+    assert direct["suggested_tool_call"] == {"tool": "inspect_agent_tree"}
+
+
 def test_runner_context_dispatch_suggests_recovery_child_for_blocked_direct_child() -> None:
     mock_report = MagicMock()
     mock_report.dry_run = False

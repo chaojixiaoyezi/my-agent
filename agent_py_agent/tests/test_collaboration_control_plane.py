@@ -58,6 +58,33 @@ def test_capability_registry_matches_agents_without_task_specific_types(tmp_path
     assert [item.agent_id for item in matches] == ["api-owner-1"]
 
 
+def test_capability_registry_only_matches_explicit_available_status(tmp_path) -> None:
+    from agent_py_agent.agent.collaboration import AgentCapability, CollaborationStore
+    from agent_py_agent.agent.collaboration.models import AGENT_CAPABILITY_STATUS_UNKNOWN
+
+    store = CollaborationStore(tmp_path / "collaboration")
+    for status in ("available", "idle", "ready", ""):
+        store.register_agent(AgentCapability(agent_id=f"source-{status or 'blank'}", capabilities=("query",), status=status))
+    store.capabilities_path.write_text(
+        json.dumps(
+            {
+                "available": AgentCapability(agent_id="source-available", capabilities=("query",)).to_dict(),
+                "missing-status": {"agent_id": "source-missing", "capabilities": ["query"]},
+                "idle": AgentCapability(agent_id="source-idle", capabilities=("query",), status="idle").to_dict(),
+                "ready": AgentCapability(agent_id="source-ready", capabilities=("query",), status="ready").to_dict(),
+                "blank": AgentCapability(agent_id="source-blank", capabilities=("query",), status="").to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = {item.agent_id: item for item in store.agent_capabilities()}
+    matches = store.match_agents(required_capabilities=["query"], limit=10)
+
+    assert loaded["source-missing"].status == AGENT_CAPABILITY_STATUS_UNKNOWN
+    assert [item.agent_id for item in matches] == ["source-available"]
+
+
 def test_case_request_and_evidence_flow_is_refs_first(tmp_path) -> None:
     from agent_py_agent.agent.collaboration import AgentCapability, CollaborationStore
 

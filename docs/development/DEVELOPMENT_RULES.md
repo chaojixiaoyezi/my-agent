@@ -49,6 +49,8 @@ before changing code.
   “还能跑”的旁路。
 - 一个概念只允许一个权威位置。task workspace、memory、artifact、subagent state、
   compact ledger、config 都必须有唯一 canonical path / canonical schema。
+- `--no-save` 只表示不写长期记忆、raw archive 等可持久对话记录；不能关闭 task
+  workspace。一次真实任务仍要有 `tasks/<date>/<task-slug>/{output,work}` 工作现场。
 - 不同时保留新旧两套路由。旧字段、旧目录、旧 facade、旧 fallback 确认不用就删；
   迁移必须短期、显式、有删除条件。
 - 配置必须单一来源。用户配置、默认 YAML、dataclass 默认值和测试覆盖不能互相打架；
@@ -321,7 +323,8 @@ before changing code.
   这类产物要登记为同一个 `artifact_id` 的 file group。closeout 只读取
   `data/artifacts/registry.jsonl` 里的结构化文件组，不允许再靠扩展名扫描后
   把“多文件产物”误判成“候选太多”，也不允许新增第二套 artifact manifest 账本。
-- `.agent_delivery/closeout.json` 是系统验收报告，不是产物账本；模型手写的
+- 当前任务的 `.agent_delivery/closeout.json` 是系统验收报告，不是产物账本；它归属
+  `tasks/<date>/<task-slug>/`，不能写回输入源码仓库来冒充当前任务收口。模型手写的
   `closeout.json`、`.artifact_manifest.json`、`artifacts_manifest.json` 都不能成为交付事实源。
 - 如果任务明确不需要落盘产物，应使用 `requires_artifact: false` 或
   `delivery_mode: message`。这类任务可以通过 closeout 结束，但不能把“无产物”
