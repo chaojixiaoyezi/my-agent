@@ -9,8 +9,7 @@ from pathlib import Path
 import pytest
 
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.gateway_parts import gateway_paths, write_json_file
-from agent_py_agent.agent.gateway_parts import lease_service as gateway_runtime
+from agent_py_agent.agent.gateway_parts import gateway_paths, lease_service, write_json_file
 from agent_py_agent.agent.gateway_parts.logging import _report_gateway_side_effect_error
 from agent_py_agent.agent.settings import AgentConfig
 
@@ -38,15 +37,15 @@ def test_heartbeat_marks_alive_on_start(tmp_path):
     paths.processing.mkdir(parents=True, exist_ok=True)
     write_json_file(request_path, {"id": request_id, "status": "processing"})
 
-    assert not gateway_runtime.is_heartbeat_alive_for_request(request_id)
+    assert not lease_service.is_heartbeat_alive_for_request(request_id)
 
-    stop_event, thread = gateway_runtime.start_lease_heartbeat(
+    stop_event, thread = lease_service.start_lease_heartbeat(
         agent, request_path, request_id=request_id
     )
 
     # Give thread a moment to start
     time.sleep(0.1)
-    assert gateway_runtime.is_heartbeat_alive_for_request(request_id)
+    assert lease_service.is_heartbeat_alive_for_request(request_id)
 
     stop_event.set()
     thread.join(timeout=2)
@@ -60,18 +59,18 @@ def test_heartbeat_cleanup_on_exit(tmp_path):
     paths.processing.mkdir(parents=True, exist_ok=True)
     write_json_file(request_path, {"id": request_id, "status": "processing"})
 
-    stop_event, thread = gateway_runtime.start_lease_heartbeat(
+    stop_event, thread = lease_service.start_lease_heartbeat(
         agent, request_path, request_id=request_id
     )
 
     time.sleep(0.1)
-    assert gateway_runtime.is_heartbeat_alive_for_request(request_id)
+    assert lease_service.is_heartbeat_alive_for_request(request_id)
 
     stop_event.set()
     thread.join(timeout=2)
 
     # After stop, liveness should be cleaned up
-    assert not gateway_runtime.is_heartbeat_alive_for_request(request_id)
+    assert not lease_service.is_heartbeat_alive_for_request(request_id)
 
 
 def test_gateway_side_effect_error_is_structured(capsys):
@@ -100,7 +99,7 @@ def test_heartbeat_retry_on_failure(tmp_path, monkeypatch):
     write_json_file(request_path, {"id": request_id, "status": "processing"})
 
     # Use a very short interval to speed up test
-    monkeypatch.setattr(gateway_runtime, "_lease_interval", lambda agent: 0.01)
+    monkeypatch.setattr(lease_service, "_lease_interval", lambda agent: 0.01)
 
     failure_count = 0
 
@@ -118,7 +117,7 @@ def test_heartbeat_retry_on_failure(tmp_path, monkeypatch):
     # Patch in the lease module where heartbeat_loop will see it
     monkeypatch.setattr(lease_module, "refresh_processing_lease", failing_touch)
 
-    stop_event, thread = gateway_runtime.start_lease_heartbeat(
+    stop_event, thread = lease_service.start_lease_heartbeat(
         agent, request_path, request_id=request_id
     )
 
@@ -127,7 +126,7 @@ def test_heartbeat_retry_on_failure(tmp_path, monkeypatch):
 
     # Should have attempted 3 failures then abandoned
     assert failure_count == 3, f"Expected 3 failures but got {failure_count}"
-    assert not gateway_runtime.is_heartbeat_alive_for_request(request_id)
+    assert not lease_service.is_heartbeat_alive_for_request(request_id)
 
 
 def test_stale_check_respects_heartbeat_liveness(tmp_path):
@@ -152,7 +151,7 @@ def test_stale_check_respects_heartbeat_liveness(tmp_path):
     })
 
     # Register heartbeat as alive
-    gateway_runtime._active_heartbeat_request_ids.add(request_id)
+    lease_service._active_heartbeat_request_ids.add(request_id)
 
     try:
         # Even with old lease, should NOT requeue because heartbeat is alive
@@ -162,7 +161,7 @@ def test_stale_check_respects_heartbeat_liveness(tmp_path):
         assert summary["requeued"] == 0
         assert summary["checked"] == 1
     finally:
-        gateway_runtime._active_heartbeat_request_ids.discard(request_id)
+        lease_service._active_heartbeat_request_ids.discard(request_id)
 
 
 def test_stale_check_with_lease_stale_seconds_param(tmp_path):
@@ -219,7 +218,7 @@ def test_stale_check_heartbeat_alive_prevents_requeue_even_with_old_heartbeat(tm
     })
 
     # Register heartbeat as alive (thread running)
-    gateway_runtime._active_heartbeat_request_ids.add(request_id)
+    lease_service._active_heartbeat_request_ids.add(request_id)
     try:
         # Even with lease_stale_seconds=60 and heartbeat 100s old, should NOT requeue
         summary = recover_gateway_processing_requests(
@@ -229,4 +228,4 @@ def test_stale_check_heartbeat_alive_prevents_requeue_even_with_old_heartbeat(tm
         assert summary["requeued"] == 0
         assert summary["failed"] == 0
     finally:
-        gateway_runtime._active_heartbeat_request_ids.discard(request_id)
+        lease_service._active_heartbeat_request_ids.discard(request_id)

@@ -1,5 +1,11 @@
 # Gateway Progress
 
+## 2026-06-06 入口收敛
+
+- 删除 `agent/gateway_parts/runtime.py` 聚合层。
+- adapter 直接调用 `request_worker`，processing 恢复直接调用 `lease_service`。
+- `agent/gateway_parts/__init__.py` 仍是包级公开入口；内部实现不再通过 `runtime.py` 多跳转发。
+
 ## 2026-06-06 会话上下文精确化
 
 - gateway conversation follow-up 只把 `status=active` 的 task link 当作活跃任务。

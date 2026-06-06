@@ -5,6 +5,7 @@ from __future__ import annotations
 
 gateway 如果崩在半路，请求会留在 processing 目录。
 这个文件专门处理这种'卡住的请求'：能重试就退回 pending，重试太多就写失败响应并归档。
+processing liveness 直接读取 lease_service，不再经过 runtime 聚合层。
 """
 
 import time
@@ -179,7 +180,7 @@ def _processing_request_stale(
     request_path: Path,
     context: _RecoveryContext,
 ) -> bool:
-    from .runtime import is_heartbeat_alive_for_request
+    from .lease_service import is_heartbeat_alive_for_request
 
     request_id = str(payload.get("id") or request_path.stem)
     lease_at = gateway_processing_lease_at(payload, request_path)

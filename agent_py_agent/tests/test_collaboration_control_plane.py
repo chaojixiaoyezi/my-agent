@@ -253,7 +253,7 @@ def test_raise_collaboration_tool_accepts_relative_deadline_seconds(tmp_path, mo
             }
         ).output
     )["case_id"]
-    monkeypatch.setattr("agent_py_agent.agent.collaboration.tools.time.time", lambda: 100.0)
+    monkeypatch.setattr("agent_py_agent.agent.collaboration.tool_values.time.time", lambda: 100.0)
 
     result = agent.tools.tools["raise_collaboration"].execute(
         {

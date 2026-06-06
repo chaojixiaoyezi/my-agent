@@ -14,7 +14,7 @@ from agent_py_agent.agent.gateway_parts import (
     read_json_file,
     write_gateway_request,
 )
-from agent_py_agent.agent.gateway_parts import runtime as gateway_runtime
+from agent_py_agent.agent.gateway_parts.request_worker import _process_gateway_requests
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli import gateway_client
 from agent_py_agent.cli.chat_parts.gateway_client import poll_gateway_chunks
@@ -335,7 +335,7 @@ def test_gateway_worker_reports_processing_lease_write_failure(tmp_path, monkeyp
 
     monkeypatch.setattr("agent_py_agent.agent.gateway_parts.io.write_json_file_atomic", fail_processing_lease_write)
 
-    processed = gateway_runtime._process_gateway_requests(agent, paths)
+    processed = _process_gateway_requests(agent, paths)
 
     assert processed == 1
     assert gateway_response_path(paths, request_id).exists()

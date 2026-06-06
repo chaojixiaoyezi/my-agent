@@ -4,10 +4,9 @@ from __future__ import annotations
 import time as time_module
 from dataclasses import dataclass
 
-from ..memory_archive import estimate_tokens
+from ..memory_archive import estimate_tokens, write_compression_snapshot
 from ..memory_archive.snapshots import CompressionSnapshotInput
 from ._runtime_params import CompressionContext
-from .runtime import services as runtime_services
 
 
 @dataclass(frozen=True)
@@ -30,7 +29,7 @@ class CompressionService:
             return ctx.memories, "", "", False
 
         try:
-            hook_result = runtime_services.write_compression_snapshot(
+            hook_result = write_compression_snapshot(
                 self._agent.root,
                 params=self._snapshot_input(ctx),
             )

@@ -11,6 +11,10 @@ import json
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
+from ._compression_service import CompressionService
+from ._finalization_service import FinalizationService
+from ._runtime_params import FinalizeContext
+from ._tool_loop_service import ToolLoopService
 from .compact_auto_continuation import (
     compact_auto_continuation_decision,
     mark_compact_auto_continued,
@@ -31,7 +35,6 @@ from .runtime.run_params import (
     run_params_with_materialized_delivery_contract,
     run_params_with_request_id,
 )
-from .runtime.services import CompressionService, FinalizationService, ToolLoopService
 
 
 @dataclass
@@ -176,7 +179,6 @@ class SimpleAgentRuntimeMixin:
         return _run_with_params(self, user_prompt, params)
 
     def _build_finalize_context(self, params: FinalizeParams):
-        from .runtime.services import FinalizeContext
         rp = params.run_params
         return FinalizeContext(
             user_prompt=params.user_prompt,

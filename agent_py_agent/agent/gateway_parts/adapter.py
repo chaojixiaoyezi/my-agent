@@ -6,6 +6,7 @@ from __future__ import annotations
 外部聊天工具或 TUI 可以往 adapter inbox 丢 JSON。
 这个文件负责取走这些消息，转成 gateway ask，请求完成后再把回复写到 outbox。
 它是外部文件协议和内部 gateway 协议之间的转换层。
+gateway ask 入口直接来自 request_worker，不再经过 runtime 聚合层。
 """
 
 import time
@@ -18,7 +19,7 @@ from .io import read_json_file, read_json_file_report, write_json_file
 from .logging import _report_gateway_side_effect_error
 from .paths import AdapterPaths, GatewayPaths
 from .recovery import _archive_gateway_request
-from .runtime import GatewayAskParams, submit_gateway_ask, wait_for_gateway_response
+from .request_worker import GatewayAskParams, submit_gateway_ask, wait_for_gateway_response
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent

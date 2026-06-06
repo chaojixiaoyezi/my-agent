@@ -5,13 +5,13 @@
 
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.runtime.guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 from agent_py_agent.agent.agent_core.tool_guard.agent_budget import (
     ToolAgentBudgetRequest,
     check_tool_agent_budget,
 )
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.settings.config_io import load_simple_yaml
+from agent_py_agent.agent.settings.runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 
 
 def _agent(max_calls: int = 2, window_seconds: int = 600):

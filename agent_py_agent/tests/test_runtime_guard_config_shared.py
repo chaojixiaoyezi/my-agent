@@ -64,11 +64,11 @@ def test_tool_rate_limit_boundary_policy_overrides_shared_defaults():
 
 
 def test_runtime_guard_file_contains_tool_agent_budget_defaults():
-    from agent_py_agent.agent.agent_core.runtime.guard_config import (
-        DEFAULT_RUNTIME_GUARD_CONFIG_PATH,
-    )
     from agent_py_agent.agent.agent_core.tool_guard.agent_budget import _budget_int
     from agent_py_agent.agent.settings.config_io import load_simple_yaml
+    from agent_py_agent.agent.settings.runtime_guard_config import (
+        DEFAULT_RUNTIME_GUARD_CONFIG_PATH,
+    )
 
     class Config:
         pass
@@ -85,10 +85,10 @@ def test_runtime_guard_file_contains_tool_loop_and_runner_defaults():
         _runner_max_attempts,
         _same_run_redispatch_limit,
     )
-    from agent_py_agent.agent.agent_core.runtime.guard_config import (
+    from agent_py_agent.agent.settings.config_io import load_simple_yaml
+    from agent_py_agent.agent.settings.runtime_guard_config import (
         DEFAULT_RUNTIME_GUARD_CONFIG_PATH,
     )
-    from agent_py_agent.agent.settings.config_io import load_simple_yaml
 
     class Agent:
         class Config:

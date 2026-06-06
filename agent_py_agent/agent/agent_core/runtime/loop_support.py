@@ -7,6 +7,7 @@ from dataclasses import fields, replace
 from ...memory_archive import build_auto_resume_context, has_resume_trigger
 from ...memory_routing import RouteContextOptions, build_routed_memory_context
 from ...user_space.home_memory_routes import runtime_route_root_and_index
+from .._runtime_params import CompressionContext, ToolLoopExecuteParams
 from .capabilities import resolve_runtime_capabilities
 from .context_bundle import build_runtime_main_context_bundle
 from .live_archive import write_runtime_fact_start_if_enabled
@@ -20,7 +21,6 @@ from .loop_models import (
     RuntimeLoopResult,
     RuntimeToolLoopSeed,
 )
-from .services import CompressionContext, ToolLoopExecuteParams
 
 _RUN_PARAM_FIELD_NAMES = tuple(field.name for field in fields(RunParams))
 

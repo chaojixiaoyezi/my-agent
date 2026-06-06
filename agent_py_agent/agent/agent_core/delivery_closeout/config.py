@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ...settings.config_io import load_simple_yaml
-from ..runtime.guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
+from ...settings.runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 
 DEFAULT_DELIVERY_CLOSEOUT_RETRY_LIMIT = 0
 DEFAULT_DELIVERY_CLOSEOUT_CONFIG_PATH = DEFAULT_RUNTIME_GUARD_CONFIG_PATH
