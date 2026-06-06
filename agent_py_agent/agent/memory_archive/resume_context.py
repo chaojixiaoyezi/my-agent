@@ -29,68 +29,6 @@ from .query import (
 from .resume_brief import build_resume_brief
 
 _ID_PATTERN = re.compile(r"(subagent-[A-Za-z0-9_.:-]+|gwreq-[A-Za-z0-9_.:-]+|request-[A-Za-z0-9_.:-]+)")
-_EXPLICIT_RESUME_KEYWORDS = (
-    "刚刚",
-    "上次",
-    "上回",
-    "之前",
-    "昨天",
-    "前面",
-    "旧任务",
-    "历史任务",
-    "恢复",
-    "找回",
-    "断片",
-    "还没完",
-    "resume",
-    "recover",
-    "memory-resume",
-    "handoff",
-    "gateway",
-    "request_id",
-    "run_id",
-    "subagent-",
-    "gwreq-",
-)
-_CONTINUE_WORDS = ("继续", "接着")
-_CURRENT_TASK_CONTINUE_PHRASES = (
-    "继续往下",
-    "继续向下",
-    "继续看",
-    "继续读",
-    "继续阅读",
-    "继续分析",
-    "继续整理",
-    "继续写",
-    "继续推进",
-    "继续完成",
-    "继续处理",
-    "继续工作",
-    "继续做",
-    "接着往下",
-    "接着看",
-    "接着读",
-    "接着分析",
-    "接着整理",
-    "接着写",
-    "接着做",
-)
-_CONTINUE_WITH_EXPLICIT_TARGET = re.compile(
-    r"(^|[\s,，。.!！?？:：;；/\\])(?:继续|接着)\s*"
-    r"(?:[A-Za-z0-9_.:/-]{3,}|README|上次|上回|刚刚|昨天|之前|前面|那个|这个|旧任务|历史任务|handoff|gateway)",
-    re.IGNORECASE,
-)
-_STOP_TERMS = {
-    "继续",
-    "接着",
-    "刚刚",
-    "上次",
-    "那个",
-    "这个",
-    "任务",
-    "恢复",
-    "找回",
-}
 
 
 @dataclass(frozen=True)
@@ -125,11 +63,12 @@ def build_auto_resume_context(
     if not effective_enabled:
         return ResumeContextResult(reason="disabled")
     mode = str(getattr(agent.config, "memory_resume_auto_context_mode", "trigger") or "trigger").strip().lower()
-    if enabled is True and mode == "off":
-        mode = "trigger"
+    explicit_enabled = enabled is True
+    if explicit_enabled and mode == "off":
+        mode = "always"
     if mode == "off":
         return ResumeContextResult(reason="off")
-    if mode != "always" and not _has_resume_trigger(user_prompt):
+    if not explicit_enabled and mode != "always" and not _has_resume_trigger(user_prompt):
         return ResumeContextResult(reason="no_trigger")
     try:
         return _build_resume_context(agent, user_prompt)
@@ -248,9 +187,9 @@ def _candidate_queries(user_prompt: str) -> list[str]:
     _append(values, text)
     for token in re.split(r"[\s,，。.!！?？:：;；/\\]+", text):
         token = token.strip().strip("`'\"")
-        if not token or token in _STOP_TERMS:
+        if not token:
             continue
-        if len(token) >= 3 or any(ord(ch) > 127 for ch in token):
+        if len(token) >= 3:
             _append(values, token)
     return values
 
@@ -258,16 +197,7 @@ def _candidate_queries(user_prompt: str) -> list[str]:
 def _has_resume_trigger(user_prompt: str) -> bool:
 
     text = str(user_prompt or "")
-    lowered = text.lower()
-    if _ID_PATTERN.search(text):
-        return True
-    if any(keyword.lower() in lowered for keyword in _EXPLICIT_RESUME_KEYWORDS):
-        return True
-    if not any(word in text for word in _CONTINUE_WORDS):
-        return False
-    if any(phrase in text for phrase in _CURRENT_TASK_CONTINUE_PHRASES):
-        return False
-    return bool(_CONTINUE_WITH_EXPLICIT_TARGET.search(text))
+    return bool(_ID_PATTERN.search(text))
 
 
 def has_resume_trigger(user_prompt: str) -> bool:

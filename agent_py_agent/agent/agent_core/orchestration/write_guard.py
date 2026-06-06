@@ -56,8 +56,6 @@ def _structured_write_targets(params: dict[str, object]) -> list[str]:
 def _target_sources(params: dict[str, object]) -> list[object]:
     return [
         params.get("extra_write_roots"),
-        params.get("write_roots"),
-        params.get("target_roots"),
         params_output_refs(params),
     ]
 

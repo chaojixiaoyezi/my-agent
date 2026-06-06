@@ -41,7 +41,7 @@ def parse_subagent_result_envelope(
     ]
     evidence_refs = [_evidence_ref_from_payload(item) for item in parsed.evidence_packets]
     return SubagentResultEnvelope(
-        result_id=request.result_id or str(payload.get("result_id") or payload.get("id") or ""),
+        result_id=request.result_id or str(payload.get("result_id") or ""),
         run_id=resolved_run_id,
         status=parsed.status,
         summary=parsed.summary,
@@ -62,9 +62,8 @@ def parse_subagent_result_envelope(
 
 
 def _artifact_ref_from_payload(item: dict[str, object], *, owner_run_id: str = "") -> ArtifactRef:
-    artifact_id = str(item.get("artifact_id") or item.get("id") or item.get("path") or "")
     return ArtifactRef(
-        artifact_id=artifact_id,
+        artifact_id=str(item.get("artifact_id") or ""),
         path=str(item.get("path") or ""),
         kind=str(item.get("kind") or "file"),
         owner_run_id=str(item.get("owner_run_id") or owner_run_id),
@@ -77,7 +76,7 @@ def _artifact_ref_from_payload(item: dict[str, object], *, owner_run_id: str = "
 
 def _evidence_ref_from_payload(item: dict[str, object]) -> EvidenceRef:
     return EvidenceRef(
-        evidence_id=str(item.get("evidence_id") or item.get("id") or ""),
+        evidence_id=str(item.get("evidence_id") or ""),
         claim=str(item.get("claim") or ""),
         checked_scope=str(item.get("checked_scope") or ""),
         evidence_refs=text_or_sequence_strings(item.get("evidence_refs", [])),

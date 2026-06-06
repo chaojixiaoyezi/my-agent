@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from .execution import TestExecutionRecord, TestExecutor
+from .execution.executor import TestExecutor
+from .execution.records import TestExecutionRecord
 from .model_capabilities import (
     CapabilityGap,
     CapabilityGrant,

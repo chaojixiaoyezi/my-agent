@@ -7,7 +7,7 @@ from typing import Any
 
 from ..gateway_parts.io import update_json_file_atomic
 from ..runtime_errors import runtime_error_report
-from .identity import agent_identity_aliases, capability_identity_aliases
+from .identity import agent_identity_keys
 from .models import AgentCapability
 from .store_evidence import CollaborationEvidenceStore
 
@@ -41,11 +41,8 @@ class CollaborationCapabilityStore(CollaborationEvidenceStore):
             return [], _capability_roster_load_error(self.capabilities_path, exc)
         return [AgentCapability.from_dict(item) for item in data.values() if isinstance(item, dict)], None
 
-    def agent_identity_aliases(self, values: object = ()) -> set[str]:
-        aliases = agent_identity_aliases(values)
-        if aliases:
-            aliases.update(self._registered_aliases_for(aliases))
-        return aliases
+    def agent_identity_keys(self, values: object = ()) -> set[str]:
+        return agent_identity_keys(values)
 
     def match_agents(
         self,
@@ -74,14 +71,6 @@ class CollaborationCapabilityStore(CollaborationEvidenceStore):
         matches.sort(key=lambda item: (item.load, item.agent_id))
         matches = matches if limit <= 0 else matches[:limit]
         return matches, load_error
-
-    def _registered_aliases_for(self, aliases: set[str]) -> set[str]:
-        result: set[str] = set()
-        for capability in self.agent_capabilities():
-            capability_aliases = capability_identity_aliases(capability)
-            if aliases.intersection(capability_aliases):
-                result.update(capability_aliases)
-        return result
 
     def _matches(self, capability: AgentCapability, required: set[str], exclude_agent_id: str) -> bool:
         if capability.agent_id == exclude_agent_id:

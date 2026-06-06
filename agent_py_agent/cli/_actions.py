@@ -55,7 +55,7 @@ def cmd_subagents_apply_actions(args) -> int:
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
     options = _subagents_action_apply_options(args, agent=agent)
-    report = agent.subagents.write_action_apply_report(
+    report = agent.subagents.actions.write_action_apply_report(
         capability_config,
         options=options,
     )
@@ -97,7 +97,7 @@ def cmd_subagents_route_capabilities(args) -> int:
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
     options = _subagents_capability_route_options(args, agent=agent)
-    report = agent.subagents.write_capability_route_report(
+    report = agent.subagents.capability.write_capability_route_report(
         router,
         capability_config,
         params=SubAgentCapabilityRouteOptions(

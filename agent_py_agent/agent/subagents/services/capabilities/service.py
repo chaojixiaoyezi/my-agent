@@ -7,26 +7,20 @@ from typing import TYPE_CHECKING
 from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.config import CapabilityConfig
 
-from ...capability_route_dispatch import (
+from ...capability_route_service import (
     CapabilityNoHitsParams,
     ExistingCapabilityGrantParams,
+    RouteCapabilityApplyParams,
     WouldCapabilityGrantParams,
+    build_capability_route_report,
+    extract_selected_hits_data,
+    route_capability_apply,
     route_capability_no_hits,
     route_existing_capability_grant,
     route_would_capability_grant,
-)
-from ...capability_route_helpers import (
-    RouteCapabilityApplyParams,
-    RouteCapabilityGrantParams,
-    _mark_capability_request_status,
-    _route_capability_grant,
-)
-from ...capability_route_service import (
-    build_capability_route_report,
-    extract_selected_hits_data,
     write_capability_route_report_files,
 )
-from ...capability_scope import existing_delete_trash_grant, scoped_grant_params
+from ...capability_scope import existing_delete_trash_grant
 from ...model_capabilities import capability_request_counts_as_open
 from ...models import CapabilityRequest, SubAgentCapabilityRouteOptions, SubAgentTask
 from ...policies import _capability_request_query, _select_capability_hits
@@ -64,7 +58,7 @@ class SubAgentCapabilityService:
         options = _capability_route_options(params, apply=apply, run_ids=run_ids, limit=limit)
         cfg = config or CapabilityConfig()
         records: list[CapabilityRouteRecord] = []
-        selected_runs = self.manager._select_runs(options.run_ids)
+        selected_runs = self.manager.indexing.select_runs(options.run_ids)
         for task, request in _iter_open_capability_requests(selected_runs):
             query = _capability_request_query(task, request)
             hits = router.search(query, limit=cfg.capability_candidate_limit)
@@ -98,44 +92,6 @@ class SubAgentCapabilityService:
         write_capability_route_report_files(self.manager, report, apply=options.apply)
         return report
 
-    def _route_capability_apply(
-        self,
-        *,
-        params: RouteCapabilityApplyParams,
-    ) -> CapabilityRouteRecord:
-        grant = self.manager.record_capability_grant(
-            params.task.id,
-            scoped_grant_params(
-                params.request,
-                routed_skills=params.granted_skills,
-                routed_tools=params.granted_tools,
-                selected_cards=params.selected_cards,
-                hit_count=len(params.selected_hits),
-            ),
-        )
-        _mark_capability_request_status(self.manager, params.task.id, params.request.id, "GRANTED")
-        routed_task = self.manager.load(params.task.id)
-        self.manager._append_task_work_log(
-            routed_task,
-            f"capability_route: request {params.request.id} 已生成 grant {grant.id}，"
-            f"skills={','.join(params.granted_skills) or 'none'} "
-            f"tools={','.join(params.granted_tools) or 'none'}。",
-        )
-        return _route_capability_grant(
-            params=RouteCapabilityGrantParams(
-                task=params.task,
-                request=params.request,
-                query=params.query,
-                hits=params.hits,
-                selected_hits=params.selected_hits,
-                granted_skills=params.granted_skills,
-                granted_tools=params.granted_tools,
-                selected_cards=params.selected_cards,
-                reasons=params.reasons,
-                grant=grant,
-            )
-        )
-
     def _route_capability_request(
         self,
         task: SubAgentTask,
@@ -164,8 +120,9 @@ class SubAgentCapabilityService:
                     task, request, query, hits, granted_skills, granted_tools, selected_cards, reasons
                 )
             )
-        return self._route_capability_apply(
-            params=RouteCapabilityApplyParams(
+        return route_capability_apply(
+            self.manager,
+            RouteCapabilityApplyParams(
                 task=task,
                 request=request,
                 query=query,

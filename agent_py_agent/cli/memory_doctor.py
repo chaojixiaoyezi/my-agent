@@ -175,7 +175,7 @@ def _route_payload(route: MemoryRoute) -> dict[str, Any]:
         "route_id": route.route_id,
         "topic": route.topic,
         "trigger_keywords": route.trigger_keywords,
-        "aliases": route.aliases,
+        "related_terms": route.related_terms,
         "when_to_read": route.when_to_read,
         "authority_path": route.authority_path,
         "scope": route.scope,

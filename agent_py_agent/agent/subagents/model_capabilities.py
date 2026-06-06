@@ -11,6 +11,12 @@ CAPABILITY_REQUEST_CURRENT_STATUSES = frozenset({
     CAPABILITY_REQUEST_OPEN_STATUS,
     *CAPABILITY_REQUEST_TERMINAL_STATUSES,
 })
+_EXPLICIT_PENDING_CAPABILITY_STATUSES = frozenset({"PENDING_CAPABILITY_REQUEST"})
+
+
+def is_pending_capability_status(status: str) -> bool:
+    normalized = str(status or "").upper().strip()
+    return normalized in _EXPLICIT_PENDING_CAPABILITY_STATUSES
 
 
 def normalize_capability_request_status(status: object) -> str:
@@ -18,9 +24,18 @@ def normalize_capability_request_status(status: object) -> str:
     return normalized or CAPABILITY_REQUEST_OPEN_STATUS
 
 
+def capability_request_status_is_current(status: object) -> bool:
+    return normalize_capability_request_status(status) in CAPABILITY_REQUEST_CURRENT_STATUSES
+
+
 def capability_request_counts_as_open(status: object) -> bool:
     normalized = normalize_capability_request_status(status)
-    return normalized not in CAPABILITY_REQUEST_TERMINAL_STATUSES
+    return normalized == CAPABILITY_REQUEST_OPEN_STATUS
+
+
+def capability_request_requires_parent_resolution(status: object) -> bool:
+    normalized = normalize_capability_request_status(status)
+    return normalized == CAPABILITY_REQUEST_OPEN_STATUS or normalized not in CAPABILITY_REQUEST_CURRENT_STATUSES
 
 
 def capability_request_suppresses_duplicate(status: object) -> bool:

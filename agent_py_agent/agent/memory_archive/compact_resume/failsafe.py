@@ -95,7 +95,7 @@ def _tool_output_refs(value: Any) -> list[dict[str, Any]]:
     for item in value:
         if isinstance(item, dict):
             refs.append({
-                "tool": str(item.get("tool") or item.get("name") or ""),
+                "tool": str(item.get("tool") or ""),
                 "id": str(item.get("id") or item.get("tool_call_id") or ""),
                 "ok": item.get("ok"),
                 "output_hash": str(item.get("output_hash", "") or ""),

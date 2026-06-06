@@ -91,7 +91,7 @@ def _read_request_from_params(
 ) -> ReadToolOutputArtifactRequest:
     return ReadToolOutputArtifactRequest(
         root=root,
-        artifact_ref=str(params.get("artifact_ref") or params.get("path") or ""),
+        artifact_ref=str(params.get("artifact_ref") or ""),
         offset=int(params.get("offset", 0) or 0),
         max_chars=int(params.get("max_chars", default_read_chars) or 0),
         mode=str(params.get("mode") or "slice"),

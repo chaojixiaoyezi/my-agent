@@ -74,10 +74,7 @@ def _target_tokens_from_output_values(value: Any) -> set[str]:
     if isinstance(value, str):
         return set(_target_tokens_from_text(value))
     if isinstance(value, dict):
-        values = [
-            value.get(key)
-            for key in ("path", "file", "file_path", "artifact_path", "ref", "href")
-        ]
+        values = [value.get(key) for key in ("path", "artifact_path")]
         return {token for item in values for token in _target_tokens_from_output_values(item)}
     if isinstance(value, list):
         return {token for item in value for token in _target_tokens_from_output_values(item)}

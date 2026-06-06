@@ -25,7 +25,7 @@ def _expanded_file_check_item(
 ) -> list[dict[str, Any]]:
     if not _is_file_check_item(item):
         return [item]
-    if str(item.get("file_path") or item.get("path") or "").strip():
+    if str(item.get("file_path") or "").strip():
         return [_explicit_file_check_item(item)]
     if not artifact_paths:
         clone = dict(item)
@@ -40,8 +40,6 @@ def _expanded_file_check_item(
 def _explicit_file_check_item(item: dict[str, Any]) -> dict[str, Any]:
     clone = dict(item)
     clone["validation_method"] = "file_check"
-    if not str(clone.get("file_path") or "").strip() and str(clone.get("path") or "").strip():
-        clone["file_path"] = clone["path"]
     return clone
 
 

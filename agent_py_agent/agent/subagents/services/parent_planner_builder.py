@@ -103,4 +103,4 @@ class ParentPlannerLogAppender:
                 f"- [{status}] {record.id} decision={record.decision} "
                 f"triggered={record.triggered} message={record.message}\n"
             )
-        manager._index_parent_planner_record(record)
+        manager.indexing.index_parent_planner_record(record)

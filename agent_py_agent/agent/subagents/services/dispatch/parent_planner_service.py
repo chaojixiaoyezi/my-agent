@@ -78,8 +78,8 @@ class SubAgentParentPlannerService:
             for record in report.records:
                 ParentPlannerLogAppender.append(record, self.manager.workspace, self.manager)
         for record in report.records:
-            self.manager._index_parent_planner_record(record)
-        self.manager._index_report(
+            self.manager.indexing.index_parent_planner_record(record)
+        self.manager.indexing.index_report(
             IndexReportParams(
                 "parent_planner_report", "latest",
                 "Parent planner report", report,

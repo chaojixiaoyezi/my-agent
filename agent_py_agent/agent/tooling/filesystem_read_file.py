@@ -6,7 +6,6 @@ from typing import Any
 
 from ..path_recovery_hints import suggest_workspace_typo_target
 from ._filesystem_helpers import (
-    _bundled_filesystem_param,
     _int_param,
     _internal_agent_status_ref,
     _required_path,
@@ -19,7 +18,7 @@ from .models import ToolExecutionResult
 
 def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecutionResult:
     try:
-        raw_path = _required_path(_bundled_filesystem_param(params, "path"))
+        raw_path = _required_path(params.get("path"))
         target = tool.resolve_path(raw_path)
     except ValueError as exc:
         return ToolExecutionResult("read_file", False, str(exc))
@@ -65,10 +64,10 @@ def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) 
     if _has_char_window_params(params):
         return _char_window_result(content, params, max_chars)
     lines = content.splitlines()
-    raw_end_line = _bundled_filesystem_param(params, "end_line")
+    raw_end_line = params.get("end_line")
     try:
         start_line = _int_param(
-            _bundled_filesystem_param(params, "start_line"),
+            params.get("start_line"),
             name="start_line",
             default=1,
             min_value=1,
@@ -98,20 +97,20 @@ def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) 
 
 
 def _has_char_window_params(params: dict[str, Any]) -> bool:
-    if _bundled_filesystem_param(params, "offset") is not None:
+    if params.get("offset") is not None:
         return True
-    if _bundled_filesystem_param(params, "start_char") is not None:
+    if params.get("start_char") is not None:
         return True
-    if _bundled_filesystem_param(params, "start_line") is not None:
+    if params.get("start_line") is not None:
         return False
-    if _bundled_filesystem_param(params, "end_line") is not None:
+    if params.get("end_line") is not None:
         return False
-    return _bundled_filesystem_param(params, "max_chars") is not None
+    return params.get("max_chars") is not None
 
 
 def _line_max_chars(params: dict[str, Any], default_max_chars: int) -> int:
     requested = _int_param(
-        _bundled_filesystem_param(params, "max_chars"),
+        params.get("max_chars"),
         name="max_chars",
         default=default_max_chars,
         min_value=1,
@@ -122,15 +121,15 @@ def _line_max_chars(params: dict[str, Any], default_max_chars: int) -> int:
 def _char_window_result(content: str, params: dict[str, Any], default_max_chars: int) -> ToolExecutionResult:
     try:
         offset = _int_param(
-            _bundled_filesystem_param(params, "offset")
-            if _bundled_filesystem_param(params, "offset") is not None
-            else _bundled_filesystem_param(params, "start_char"),
+            params.get("offset")
+            if params.get("offset") is not None
+            else params.get("start_char"),
             name="offset",
             default=0,
             min_value=0,
         )
         limit = _int_param(
-            _bundled_filesystem_param(params, "max_chars"),
+            params.get("max_chars"),
             name="max_chars",
             default=default_max_chars,
             min_value=1,
@@ -159,15 +158,15 @@ def _char_window_result(content: str, params: dict[str, Any], default_max_chars:
 def _char_window_file_result(tool, target, params: dict[str, Any], default_max_chars: int) -> ToolExecutionResult:
     try:
         offset = _int_param(
-            _bundled_filesystem_param(params, "offset")
-            if _bundled_filesystem_param(params, "offset") is not None
-            else _bundled_filesystem_param(params, "start_char"),
+            params.get("offset")
+            if params.get("offset") is not None
+            else params.get("start_char"),
             name="offset",
             default=0,
             min_value=0,
         )
         limit = _int_param(
-            _bundled_filesystem_param(params, "max_chars"),
+            params.get("max_chars"),
             name="max_chars",
             default=default_max_chars,
             min_value=1,

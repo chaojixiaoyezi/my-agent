@@ -5,7 +5,7 @@ from __future__ import annotations
 
 
 def next_tool_block_start(text: str, cursor: int) -> tuple[int, str] | None:
-    start_markers = ["[TOOL_CALL]", "[SUBAGENT_CALL]"]
+    start_markers = ["[TOOL_CALL]"]
     starts = [
         (pos, marker)
         for marker in start_markers
@@ -16,7 +16,7 @@ def next_tool_block_start(text: str, cursor: int) -> tuple[int, str] | None:
 
 
 def next_tool_block_end(text: str, start_at: int) -> tuple[int, str] | None:
-    end_markers = ["[/TOOL_CALL]", "[/SUBAGENT_CALL]"]
+    end_markers = ["[/TOOL_CALL]"]
     ends = [
         (pos, marker)
         for marker in end_markers

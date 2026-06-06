@@ -24,7 +24,7 @@ def test_memory_route_basic():
     assert route.route_id == "test-route"
     assert route.topic == "测试主题"
     assert route.trigger_keywords == []
-    assert route.aliases == []
+    assert route.related_terms == []
 
 
 def test_memory_route_default_values():
@@ -43,7 +43,7 @@ def test_memory_route_full_fields():
         route_id="full-route",
         topic="完整主题",
         trigger_keywords=["kw1", "kw2"],
-        aliases=["alias1", "alias2"],
+        related_terms=["related_term1", "related_term2"],
         when_to_read="需要数据分析时",
         authority_path="rules/analysis.md",
         inject_mode="always",
@@ -55,7 +55,7 @@ def test_memory_route_full_fields():
         source_path="/path/to/index",
     )
     assert route.trigger_keywords == ["kw1", "kw2"]
-    assert route.aliases == ["alias1", "alias2"]
+    assert route.related_terms == ["related_term1", "related_term2"]
     assert route.inject_mode == "always"
     assert route.priority == 80
 
@@ -76,16 +76,16 @@ def test_memory_route_authority_file_strips_whitespace():
 
 
 def test_memory_route_trigger_terms():
-    """测试 trigger_terms 合并关键词和别名。"""
+    """测试 trigger_terms 合并关键词和相关词。"""
     route = MemoryRoute(
         route_id="r1",
         topic="t",
         trigger_keywords=["kw1"],
-        aliases=["alias1"],
+        related_terms=["related_term1"],
     )
     terms = route.trigger_terms()
     assert "kw1" in terms
-    assert "alias1" in terms
+    assert "related_term1" in terms
 
 
 def test_memory_route_trigger_terms_removes_duplicates():
@@ -94,7 +94,7 @@ def test_memory_route_trigger_terms_removes_duplicates():
         route_id="r1",
         topic="t",
         trigger_keywords=["same"],
-        aliases=["same"],
+        related_terms=["same"],
     )
     terms = route.trigger_terms()
     assert terms.count("same") == 1
@@ -126,8 +126,8 @@ def test_memory_route_match_with_lists():
     match = MemoryRouteMatch(
         route=route,
         score=8.5,
-        reasons=["精确命中别名", "命中主题"],
-        matched_terms=["别名1", "主题"],
+        reasons=["精确命中相关词", "命中主题"],
+        matched_terms=["相关词1", "主题"],
     )
 
     assert len(match.reasons) == 2

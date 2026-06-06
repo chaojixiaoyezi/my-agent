@@ -22,7 +22,7 @@ from .workspace_roots import derived_workspace_roots_from_subagent_path
 
 
 def artifact_ref(item: dict[str, object]) -> str:
-    return str(item.get("path") or item.get("uri") or item.get("artifact_id") or "").strip()
+    return str(item.get("path") or "").strip()
 
 
 def normalize_artifact_items(task: SubAgentTask, artifacts: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -39,11 +39,9 @@ def _normalized_artifact_item(task: SubAgentTask, item: object) -> dict[str, obj
     if not isinstance(item, dict):
         return None
     copied = dict(item)
-    for key in ("path", "file_path", "ref", "href"):
-        resolved = normalize_artifact_ref(task, copied.get(key))
-        if resolved:
-            copied[key] = resolved
-            break
+    resolved = normalize_artifact_ref(task, copied.get("path"))
+    if resolved:
+        copied["path"] = resolved
     return copied
 
 
@@ -57,7 +55,7 @@ def _with_registry_ref(task: SubAgentTask, item: dict[str, object]) -> dict[str,
         ArtifactRegistration(
             workspace_root=root,
             path=path,
-            artifact_id=str(item.get("artifact_id") or item.get("id") or ""),
+            artifact_id=str(item.get("artifact_id") or ""),
             run_id=str(getattr(task, "id", "") or ""),
             task_id=str(getattr(task, "root_id", "") or getattr(task, "id", "") or ""),
             agent_id=str(getattr(task, "id", "") or ""),

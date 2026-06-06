@@ -42,7 +42,7 @@ def test_runner_dispatch_record_carries_created_child_summary():
         SimpleNamespace(role="researcher"),
         SimpleNamespace(role="worker"),
     ]
-    agent.subagents.make_dispatch_record.side_effect = lambda *, params: params
+    agent.subagents.dispatch.make_dispatch_record.side_effect = lambda *, params: params
 
     record = _runner_dispatch_record(
         RunnerDispatchRecordParams(
@@ -73,7 +73,7 @@ def test_runner_dispatch_record_marks_partial_success_children():
         SimpleNamespace(role="worker", status="DONE"),
         SimpleNamespace(role="tester", status="PLANNING"),
     ]
-    agent.subagents.make_dispatch_record.side_effect = lambda *, params: params
+    agent.subagents.dispatch.make_dispatch_record.side_effect = lambda *, params: params
 
     record = _runner_dispatch_record(
         RunnerDispatchRecordParams(
@@ -97,7 +97,7 @@ def test_runner_dispatch_record_surfaces_child_load_error():
     after = SimpleNamespace(status="DONE", verification_status="VERIFIED", child_ids=["child-broken"])
     agent = MagicMock()
     agent.subagents.load.side_effect = ValueError("child ledger broken")
-    agent.subagents.make_dispatch_record.side_effect = lambda *, params: params
+    agent.subagents.dispatch.make_dispatch_record.side_effect = lambda *, params: params
 
     record = _runner_dispatch_record(
         RunnerDispatchRecordParams(

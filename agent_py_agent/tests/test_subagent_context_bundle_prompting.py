@@ -244,7 +244,7 @@ def test_write_execution_context_persists_context_bundle_files(tmp_path) -> None
     task.acceptance_checks = ["proof.txt 存在"]
     manager.save(task)
 
-    context = manager.write_execution_context(task.id)
+    context = manager.runner_context.write_execution_context(task.id)
     bundle_json = Path(context.context_bundle_json)
     bundle_md = Path(context.context_bundle_file)
     payload = json.loads(bundle_json.read_text(encoding="utf-8"))
@@ -261,7 +261,7 @@ def test_context_gate_prompt_lines_block_missing_required_fields(tmp_path) -> No
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(goal="", thought="", plan=[])
     manager.save(task)
-    context = manager.write_execution_context(task.id)
+    context = manager.runner_context.write_execution_context(task.id)
 
     lines = context_gate_prompt_lines(context.context_bundle)
     rendered = "\n".join(lines)
@@ -279,7 +279,7 @@ def test_runner_prompt_includes_context_gate_status(tmp_path) -> None:
     task = manager.create_run(goal="写 proof.txt", thought="生成证明文件", plan=["写文件"])
     task.acceptance_checks = ["proof.txt 存在"]
     manager.save(task)
-    context = manager.write_execution_context(task.id)
+    context = manager.runner_context.write_execution_context(task.id)
 
     prompt = _build_subagent_runner_prompt(context)
 
@@ -302,7 +302,7 @@ def test_runner_prompt_includes_task_envelope_and_preflight_status(tmp_path) -> 
     task.allowed_tools = ["read_file", "write_file", "controlled_exec"]
     task.acceptance_checks = ["build/index.html 存在"]
     manager.save(task)
-    context = manager.write_execution_context(task.id)
+    context = manager.runner_context.write_execution_context(task.id)
 
     prompt = _build_subagent_runner_prompt(context)
 
@@ -335,7 +335,7 @@ def test_runner_prompt_describes_scoped_capability_request_loop(tmp_path) -> Non
         )
     ]
     manager.save(task)
-    context = manager.write_execution_context(task.id)
+    context = manager.runner_context.write_execution_context(task.id)
 
     prompt = _build_subagent_runner_prompt(context)
 

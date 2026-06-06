@@ -26,7 +26,7 @@ def test_subagent_effective_permission_snapshot_never_inherits_full_shell(tmp_pa
 
     loaded_root = manager.load(root.id)
     loaded_child = manager.load(child.id)
-    context = manager.build_execution_context(child.id)
+    context = manager.runner_context.build_execution_context(child.id)
 
     assert loaded_root.effective_permissions["parent_access_mode"] == "full-access"
     assert loaded_root.effective_permissions["shell_access_mode"] == "workspace-write"

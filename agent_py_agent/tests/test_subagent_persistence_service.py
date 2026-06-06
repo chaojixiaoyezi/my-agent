@@ -142,7 +142,7 @@ def test_subagent_task_has_session_and_thread_identity(tmp_path) -> None:
     assert loaded_child.root_subagent_session_id == root.root_subagent_session_id
     assert loaded_child.subagent_session_id != root.subagent_session_id
 
-    context = manager.build_execution_context(child.id)
+    context = manager.runner_context.build_execution_context(child.id)
     assert context.subagent_session_id == loaded_child.subagent_session_id
     assert context.parent_subagent_session_id == root.subagent_session_id
 

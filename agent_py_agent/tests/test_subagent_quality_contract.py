@@ -101,7 +101,7 @@ def test_execution_context_contains_quality_contract_and_manifest(tmp_path):
         context_packs=[{"name": "task-pack", "path": "spec.md"}],
     )
 
-    context = manager.write_execution_context(task.id)
+    context = manager.runner_context.write_execution_context(task.id)
     payload = json.loads(Path(context.execution_context_json).read_text(encoding="utf-8"))
 
     assert context.quality_contract.user_visible_goal == "Working patch"
@@ -119,7 +119,7 @@ def test_execution_context_markdown_states_result_handoff_rule(tmp_path):
         plan=["inspect"],
     )
 
-    context = manager.write_execution_context(task.id)
+    context = manager.runner_context.write_execution_context(task.id)
     text = Path(context.execution_context_file).read_text(encoding="utf-8")
 
     assert "hand results back to the caller" in text

@@ -111,7 +111,7 @@ def test_runner_prompt_uses_generated_task_local_continue_packet(tmp_path: Path)
     task.latest_summary = "页面骨架已经存在，剩余验收证据。"
     manager.save(task)
 
-    context = manager.build_execution_context(task.id)
+    context = manager.runner_context.build_execution_context(task.id)
     prompt = _build_subagent_runner_prompt(context)
 
     assert "Task-Local Compact Continuation" in prompt
@@ -149,7 +149,7 @@ def test_runner_prompt_says_empty_continue_packet_can_start_from_goal(tmp_path: 
     )
     manager.save(task)
 
-    prompt = _build_subagent_runner_prompt(manager.build_execution_context(task.id))
+    prompt = _build_subagent_runner_prompt(manager.runner_context.build_execution_context(task.id))
 
     assert "work_progress: none" in prompt
     assert "because work_progress/session_compact are empty" in prompt
@@ -172,7 +172,7 @@ def test_runner_prompt_uses_recovery_refs_when_continue_packet_is_corrupt(tmp_pa
     packet_ref = Path(loaded.agent_run_latest_session_continue_packet_json)
     packet_ref.write_text("{not valid json", encoding="utf-8")
 
-    prompt = _build_subagent_runner_prompt(manager.build_execution_context(task.id))
+    prompt = _build_subagent_runner_prompt(manager.runner_context.build_execution_context(task.id))
 
     assert "Task-Local Compact Continuation" in prompt
     assert "packet_status: unreadable_json" in prompt
@@ -201,8 +201,8 @@ def test_prepare_runner_attempt_preserves_corrupt_packet_preflight(tmp_path: Pat
     packet_ref = Path(loaded.agent_run_latest_session_continue_packet_json)
     packet_ref.write_text("{not valid json", encoding="utf-8")
 
-    prepared = manager.prepare_runner_attempt(task.id)
-    context = manager.build_execution_context(prepared.id)
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    context = manager.runner_context.build_execution_context(prepared.id)
     prompt = _build_subagent_runner_prompt(context)
 
     assert "Recovery Preflight" in prompt
@@ -231,7 +231,7 @@ def test_runner_prompt_uses_recovery_refs_when_continue_packet_is_stale(tmp_path
     packet_ref.write_text(json.dumps(packet, ensure_ascii=False), encoding="utf-8")
     assert _is_stale_packet(packet_ref, read_json(packet_ref))
 
-    prompt = _build_subagent_runner_prompt(manager.build_execution_context(task.id))
+    prompt = _build_subagent_runner_prompt(manager.runner_context.build_execution_context(task.id))
 
     assert "Task-Local Compact Continuation" in prompt
     assert "packet_status: stale" in prompt
@@ -255,7 +255,7 @@ def test_runner_prompt_uses_checkpoint_when_continue_packet_is_missing(tmp_path:
     packet_ref = Path(loaded.agent_run_latest_session_continue_packet_json)
     packet_ref.unlink()
 
-    prompt = _build_subagent_runner_prompt(manager.build_execution_context(task.id))
+    prompt = _build_subagent_runner_prompt(manager.runner_context.build_execution_context(task.id))
 
     assert "Task-Local Compact Continuation" in prompt
     assert "### Continue Packet" not in prompt
@@ -271,9 +271,9 @@ def test_timeout_runner_result_refreshes_recovery_packets(tmp_path: Path) -> Non
         plan=["开始执行", "失败后接续"],
         role="worker",
     )
-    manager.prepare_runner_attempt(task.id, retry_reason="")
+    manager.lifecycle.prepare_runner_attempt(task.id, retry_reason="")
 
-    manager.record_runner_result(
+    manager.runner_result.record_runner_result(
         RecordRunnerResultParams(
             run_id=task.id,
             dry_run=False,
@@ -309,7 +309,7 @@ def test_subagent_runner_result_writes_task_local_session_compact_package(tmp_pa
         role="worker",
         root_id="root-session-compact",
     )
-    manager.prepare_runner_attempt(task.id)
+    manager.lifecycle.prepare_runner_attempt(task.id)
 
     _record_session_compact_result(
         manager,
@@ -355,7 +355,7 @@ def test_session_compact_refs_do_not_overwrite_checkpoint_compact_latest_refs(tm
     )
     checkpoint_metadata_ref = Path(manager.load(task.id).agent_run_latest_compaction_metadata_json)
 
-    manager.prepare_runner_attempt(task.id)
+    manager.lifecycle.prepare_runner_attempt(task.id)
     _record_session_compact_result(
         manager,
         task.id,
@@ -387,7 +387,7 @@ def test_runner_prompt_includes_task_local_session_compact_package(tmp_path: Pat
         plan=["读本地 compact metadata", "继续实现"],
         role="worker",
     )
-    manager.prepare_runner_attempt(task.id)
+    manager.lifecycle.prepare_runner_attempt(task.id)
     _record_session_compact_result(
         manager,
         task.id,
@@ -398,7 +398,7 @@ def test_runner_prompt_includes_task_local_session_compact_package(tmp_path: Pat
         },
     )
 
-    prompt = _build_subagent_runner_prompt(manager.build_execution_context(task.id))
+    prompt = _build_subagent_runner_prompt(manager.runner_context.build_execution_context(task.id))
 
     assert "Session Compact Package" in prompt
     assert "subagent_session_compact.v1" in prompt
@@ -419,7 +419,7 @@ def _record_session_compact_result(
         "auto_status": "needs_user_confirmation",
         **compact,
     }
-    manager.record_runner_result(
+    manager.runner_result.record_runner_result(
         RecordRunnerResultParams(
             run_id=run_id,
             dry_run=False,

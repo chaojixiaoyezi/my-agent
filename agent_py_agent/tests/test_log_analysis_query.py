@@ -10,8 +10,8 @@ from agent_py_agent.agent.log_analysis.storage import (
     MAX_QUERY_LIMIT,
     LocalLogStore,
     QueryCriteria,
-    execute_security_query,
 )
+from agent_py_agent.agent.log_analysis.storage.query import execute_security_query
 from agent_py_agent.agent.log_analysis.tools import hunt_ip, security_query, trace_case
 from agent_py_agent.agent.log_analysis.tools.query_functions import SecurityQueryParams
 

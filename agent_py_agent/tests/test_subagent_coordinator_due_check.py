@@ -126,7 +126,7 @@ def test_due_check_reports_stale_planning_coordinator_without_runner_timeout(tmp
     old = time.time() - 120
     mixin._tasks = [_coordinator_task(mixin, old=old), _running_child_task(mixin, old=old)]
 
-    report = mixin.due_check(CapabilityConfig(subagent_heartbeat_timeout=1, subagent_run_timeout=1))
+    report = mixin.board.due_check(CapabilityConfig(subagent_heartbeat_timeout=1, subagent_run_timeout=1))
 
     timeout_issues = {
         (issue.run_id, issue.kind)
@@ -156,7 +156,7 @@ def test_due_check_reports_unfinished_children_after_parent_timeout(tmp_path: Pa
         _planning_child_after_parent_timeout(mixin, old=old),
     ]
 
-    report = mixin.due_check(CapabilityConfig(subagent_heartbeat_timeout=3600, subagent_run_timeout=3600))
+    report = mixin.board.due_check(CapabilityConfig(subagent_heartbeat_timeout=3600, subagent_run_timeout=3600))
 
     issues = {(issue.run_id, issue.kind): issue for issue in report.issues}
     issue = issues[("root_timeout", "parent_timeout_with_unfinished_children")]
@@ -173,7 +173,7 @@ def test_due_check_dead_coordinator_prefers_leadership_recovery_over_status_time
         _planning_child_after_parent_timeout(mixin, old=old),
     ]
 
-    report = mixin.due_check(CapabilityConfig(subagent_heartbeat_timeout=3600, subagent_run_timeout=3600))
+    report = mixin.board.due_check(CapabilityConfig(subagent_heartbeat_timeout=3600, subagent_run_timeout=3600))
 
     issues = {(issue.run_id, issue.kind): issue for issue in report.issues}
     assert ("root_timeout_coord", "coordinator_needs_leadership_recovery") in issues
@@ -188,7 +188,7 @@ def test_plan_actions_reports_stale_coordinator_leadership_recovery(tmp_path: Pa
     mixin = _BoardTestMixin(workspace=tmp_path)
     mixin._tasks = [_coordinator_task(mixin, old=time.time() - 120)]
 
-    report = mixin.plan_actions(CapabilityConfig(subagent_heartbeat_timeout=1))
+    report = mixin.board.plan_actions(CapabilityConfig(subagent_heartbeat_timeout=1))
 
     actions = {(action.run_id, action.action): action for action in report.actions}
     assert ("root_coord", "recover_coordinator_leadership") in actions
@@ -204,7 +204,7 @@ def test_plan_actions_dead_coordinator_uses_leadership_recovery_not_takeover(tmp
         _planning_child_after_parent_timeout(mixin, old=old),
     ]
 
-    report = mixin.plan_actions(CapabilityConfig(subagent_heartbeat_timeout=3600, subagent_run_timeout=3600))
+    report = mixin.board.plan_actions(CapabilityConfig(subagent_heartbeat_timeout=3600, subagent_run_timeout=3600))
 
     actions = {(action.run_id, action.action): action for action in report.actions}
     assert ("root_timeout_coord", "recover_coordinator_leadership") in actions
@@ -221,7 +221,7 @@ def test_plan_actions_reports_parent_timeout_child_recovery(tmp_path: Path):
         _planning_child_after_parent_timeout(mixin, old=old),
     ]
 
-    report = mixin.plan_actions(CapabilityConfig(subagent_heartbeat_timeout=3600, subagent_run_timeout=3600))
+    report = mixin.board.plan_actions(CapabilityConfig(subagent_heartbeat_timeout=3600, subagent_run_timeout=3600))
 
     actions = {(action.run_id, action.action): action for action in report.actions}
     action = actions[("root_timeout", "recover_child_after_parent_timeout")]

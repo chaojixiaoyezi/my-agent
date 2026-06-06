@@ -123,7 +123,7 @@ class CollaborationRequestStore(CollaborationCaseStore):
         return requests
 
     def pending_requests_for_agent_report(self, *, agent_id: str, agent_name: str = "", agent_role: str = "", limit: int = 10) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        identities = self.agent_identity_aliases((agent_id, agent_name, agent_role))
+        identities = self.agent_identity_keys((agent_id, agent_name, agent_role))
         rows, load_errors = self._pending_request_rows_for_identities_report(identities) if identities else ([], [])
         rows.sort(key=lambda item: (str(item.get("priority") or ""), float(item.get("created_at") or 0.0)))
         return (rows if limit <= 0 else rows[:limit]), load_errors
@@ -184,8 +184,8 @@ class CollaborationRequestStore(CollaborationCaseStore):
         status_text = request_data.status_text
         if not (is_completed_request_status(status_text) and len(request.target_agent_ids) > 1):
             return status_text
-        sources = evidence_sources_by_request(self.case_evidence(request.case_id), aliases=self.agent_identity_aliases).get(request.request_id, set())
-        if request_has_required_evidence(request, sources, target_aliases=self.agent_identity_aliases):
+        sources = evidence_sources_by_request(self.case_evidence(request.case_id), identity_keys=self.agent_identity_keys).get(request.request_id, set())
+        if request_has_required_evidence(request, sources, target_identity_keys=self.agent_identity_keys):
             return status_text
         request_data.metadata["partial_completion_by"] = str(request_data.kwargs.get("actor_agent_id") or "")
         request_data.metadata["partial_completion_summary"] = str(request_data.kwargs.get("summary") or "")
@@ -220,7 +220,7 @@ class CollaborationRequestStore(CollaborationCaseStore):
     def _pending_rows_for_case_report(self, case, identities: set[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         evidence, evidence_errors = self.case_evidence_report(case.case_id)
         requests, request_errors = self.case_requests_report(case.case_id)
-        evidence_sources = evidence_sources_by_request(evidence, aliases=self.agent_identity_aliases)
+        evidence_sources = evidence_sources_by_request(evidence, identity_keys=self.agent_identity_keys)
         return [
             pending_request_row(case, request)
             for request in requests
@@ -228,8 +228,8 @@ class CollaborationRequestStore(CollaborationCaseStore):
         ], [*evidence_errors, *request_errors]
 
     def _request_waits_for_identity(self, request: CollaborationRequest, identities: set[str], evidence_sources: dict[str, set[str]]) -> bool:
-        target_aliases = self.agent_identity_aliases(request.target_agent_ids)
-        if not identities.intersection(target_aliases):
+        target_identity_keys = self.agent_identity_keys(request.target_agent_ids)
+        if not identities.intersection(target_identity_keys):
             return False
         if identities.intersection(evidence_sources.get(request.request_id, set())):
             return False

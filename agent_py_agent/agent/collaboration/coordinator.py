@@ -124,13 +124,13 @@ def _mark_expired_requests(store: CollaborationStore, case_id: str, *, now: floa
         if request_has_required_evidence(
             request,
             evidence_sources,
-            target_aliases=store.agent_identity_aliases,
+            target_identity_keys=store.agent_identity_keys,
         ):
             continue
         missing_responders = _missing_responder_agent_ids(
             request,
             evidence_sources,
-            target_aliases=store.agent_identity_aliases,
+            target_identity_keys=store.agent_identity_keys,
         )
         store.update_request_status({'case_id': case_id, 'request_id': request.request_id, 'status': "timeout", 'actor_agent_id': "collaboration_coordinator", 'summary': "协作请求超过 deadline，已标记为 timeout；主代理可带部分结果、未响应名单和限制继续推进。", 'now': now, 'metadata': {
                 "timeout": {
@@ -147,14 +147,14 @@ def _evidence_sources_by_request(store: CollaborationStore, evidence) -> dict[st
         request_id = str(getattr(item, "request_id", "") or "")
         source = str(getattr(item, "source_agent_id", "") or "")
         if request_id and source:
-            sources.setdefault(request_id, set()).update(store.agent_identity_aliases(source))
+            sources.setdefault(request_id, set()).update(store.agent_identity_keys(source))
     return sources
 
 
-def _missing_responder_agent_ids(request, evidence_sources: set[str], *, target_aliases) -> list[str]:
+def _missing_responder_agent_ids(request, evidence_sources: set[str], *, target_identity_keys) -> list[str]:
     missing: list[str] = []
     for target in [str(item) for item in getattr(request, "target_agent_ids", ()) if str(item or "").strip()]:
-        if evidence_sources.intersection(target_aliases(target)):
+        if evidence_sources.intersection(target_identity_keys(target)):
             continue
         if target not in missing:
             missing.append(target)

@@ -117,7 +117,7 @@ def run_static_site_check(test: dict[str, Any], workspace_root: Path) -> TestExe
 
 
 def _resolve_site_root(test: dict[str, Any], workspace_root: Path) -> tuple[Path, str]:
-    raw = str(test.get("site_root") or test.get("root_dir") or test.get("file_path") or ".").strip()
+    raw = str(test.get("site_root") or ".").strip()
     workspace = workspace_root.expanduser().resolve()
     candidate = Path(raw).expanduser()
     path = candidate.resolve() if candidate.is_absolute() else (workspace / candidate).resolve()

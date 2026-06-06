@@ -375,10 +375,10 @@ def test_recovery_replay_gate_requires_snapshot_scope_and_effective_contract():
 
 def test_recovery_lineage_gate_requires_explicit_previous_artifact_refs():
     missing = evaluate_recovery_lineage_gate(
-        {"previous_artifact_refs": [{"path": "out.txt", "source_run_id": "", "operation_id": ""}]}
+        {"previous_artifact_refs": [{"artifact_ref": "out.txt", "source_run_id": "", "operation_id": ""}]}
     )
     passed = evaluate_recovery_lineage_gate(
-        {"previous_artifact_refs": [{"path": "out.txt", "source_run_id": "run-old", "operation_id": "op-old"}]}
+        {"previous_artifact_refs": [{"artifact_ref": "out.txt", "source_run_id": "run-old", "operation_id": "op-old"}]}
     )
 
     assert missing.allowed is False

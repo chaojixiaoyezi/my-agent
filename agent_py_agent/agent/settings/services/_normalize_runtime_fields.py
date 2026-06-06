@@ -101,7 +101,7 @@ def _normalize_path_access_fields(out: dict[str, object], defaults: object) -> l
     mode = normalize_path_access_mode(raw_mode)
     warnings: list[str] = []
     normalized_raw = str(raw_mode or "").strip().lower().replace("_", "-")
-    known_values = {"normal", "restricted", "workspace-write", "full", "full-access", "all", "open", ""}
+    known_values = {"normal", "full", ""}
     if normalized_raw not in known_values:
         warnings.append(
             f"path_access_mode: unknown value {raw_mode!r}; using {mode!r}"

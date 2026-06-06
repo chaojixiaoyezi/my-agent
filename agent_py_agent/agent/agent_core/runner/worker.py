@@ -116,7 +116,7 @@ def _attach_worker_local_store(worker, local_store: object | None) -> None:
 
 
 def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams):
-    prepared = worker.subagents.prepare_runner_attempt(
+    prepared = worker.subagents.lifecycle.prepare_runner_attempt(
         params.run_id, retry_reason=params.retry_reason
     )
     attempt_id = prepared.runner_active_attempt_id
@@ -143,7 +143,7 @@ def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams):
     thread.join(params.timeout_seconds)
     if thread.is_alive():
         timeout_message = f"runner timed out after {params.timeout_seconds:.2f}s"
-        timeout_result = worker.subagents.record_runner_result(
+        timeout_result = worker.subagents.runner_result.record_runner_result(
             RecordRunnerResultParams(
                 run_id=params.run_id,
                 attempt_id=attempt_id,
@@ -155,7 +155,7 @@ def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams):
                 failure_type="runner_timeout",
             )
         )
-        worker.subagents.abandon_runner_attempt(params.run_id, attempt_id, reason=timeout_message)
+        worker.subagents.lifecycle.abandon_runner_attempt(params.run_id, attempt_id, reason=timeout_message)
         return timeout_result
     if "error" in payload:
         raise payload["error"]  # type: ignore[misc]

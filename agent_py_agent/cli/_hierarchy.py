@@ -46,7 +46,7 @@ def cmd_subagents_hierarchy(args) -> int:
         print(str(exc))
         return 2
     agent = make_agent(args)
-    result = agent.subagents.schedule_child_runs(
+    result = agent.subagents.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=args.run_id,
             child_specs=child_specs,
@@ -66,7 +66,7 @@ def cmd_subagents_hierarchy(args) -> int:
 def cmd_subagents_recovery_tree(args) -> int:
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
-    result = agent.subagents.build_hierarchy_recovery_packet(
+    result = agent.subagents.hierarchy.build_hierarchy_recovery_packet(
         params=HierarchyRecoveryRequest(
             root_run_id=args.run_id,
             requested_by=args.requested_by or "parent",

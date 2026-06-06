@@ -59,14 +59,14 @@ def case_model_call_ledger_timeout(workspace: Path) -> MainAgentFoundationCaseRe
 def case_tool_protocol_v2_envelope(workspace: Path) -> MainAgentFoundationCaseResult:
     call = normalize_tool_call(
         {
-            "tool": "read_file",
+            "tool_name": "read_file",
             "input": {"path": "missing.txt"},
             "artifact_refs": [{"artifact_id": "input-ref", "path": "missing.txt"}],
         }
     )
     result = normalize_tool_result(
         {
-            "tool": "read_file",
+            "tool_name": "read_file",
             "ok": False,
             "operation_ref": call.operation_ref().to_dict(),
             "error": {"error_type": "PATH_INVALID", "message": "missing.txt"},

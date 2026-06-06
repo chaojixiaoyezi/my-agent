@@ -92,9 +92,7 @@ def apply_patch_task(manager, task, *, params: ApplyPatchTaskParams) -> PatchApp
     """Execute single task patch apply dry-run or real apply."""
     now = time.time()
     prepared = _prepare_patch_apply(manager, task, params)
-    from agent_py_agent.agent.subagents.services.patch_apply.decision import PatchApplyDecision
-
-    decision, ok, message = PatchApplyDecision.decide(
+    decision, ok, message = _decide_patch_apply(
         params.patches, prepared.patch_specs, prepared.blocked_count, params.apply
     )
     applied_count, rollback_performed, test_results, decision, ok, message = _execute_apply_if_ready(
@@ -124,6 +122,16 @@ def apply_patch_task(manager, task, *, params: ApplyPatchTaskParams) -> PatchApp
             applied_count=applied_count,
         )
     )
+
+
+def _decide_patch_apply(patches, patch_specs, blocked_count, apply):
+    if not patches:
+        return ("NO_PATCHES", False, "没有 patch 可以 apply。")
+    if blocked_count:
+        return ("REJECT", False, f"{blocked_count} 项 patch/test 不满足 apply 条件。")
+    if not apply:
+        return ("WOULD_APPLY", True, f"dry-run: 将 apply {len(patch_specs)} 个 patch。")
+    return ("APPLIED", True, f"已 apply {len(patch_specs)} 个 patch。")
 
 
 def _prepare_patch_apply(manager, task, params: ApplyPatchTaskParams) -> _PreparedPatchApply:
@@ -222,7 +230,7 @@ def _execute_apply(ctx: _ExecuteApplyContext):
             spec["audit"]["message"] = f"apply 失败: {exc}"
             spec["patch_ref"]["apply_status"] = spec["audit"]["apply_status"]
         ctx.decision, ctx.ok, ctx.message = "ROLLBACK", False, f"patch apply 失败，已回滚: {exc}"
-        ctx.manager._append_task_work_log(ctx.task, f"patch_apply: rollback applier={ctx.applier} error={exc}")
+        ctx.manager.actions._append_task_work_log(ctx.task, f"patch_apply: rollback applier={ctx.applier} error={exc}")
     return applied_count, rollback_performed, test_results, ctx.decision, ctx.ok, ctx.message
 
 

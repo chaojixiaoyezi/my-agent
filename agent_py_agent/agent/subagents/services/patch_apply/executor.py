@@ -86,7 +86,7 @@ def _write_patch_apply_success(params: PatchApplyParams, applied_count: int, tes
         json.dumps(output, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    params.manager._append_task_work_log(
+    params.manager.actions._append_task_work_log(
         params.task,
         f"patch_apply: applied={applied_count} tests={len(test_results)} applier={params.applier}",
     )

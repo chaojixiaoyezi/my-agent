@@ -141,7 +141,7 @@ def test_subagent_debug_trace_records_runner_result_when_enabled(tmp_path):
     manager = SubAgentManager(tmp_path, debug_trace_level=2)
     task = manager.create_run(goal="write proof file", thought="observe", plan=["create"])
 
-    manager.record_runner_result(
+    manager.runner_result.record_runner_result(
         RecordRunnerResultParams(
             run_id=task.id,
             dry_run=False,
@@ -173,7 +173,7 @@ def test_subagent_debug_trace_records_hierarchy_schedule_when_enabled(tmp_path):
     manager = SubAgentManager(tmp_path, debug_trace_level=2)
     root = manager.create_run(goal="root", thought="split", plan=["plan"])
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[
@@ -230,7 +230,7 @@ def test_subagent_debug_trace_records_due_action_and_recovery_reports_at_level_t
     """等级 3 记录 due/action/recovery 摘要，便于定位父超时子树恢复卡点。"""
     manager = SubAgentManager(tmp_path, debug_trace_level=3)
     root = manager.create_run(goal="root", thought="split", plan=["dispatch"])
-    child_id = manager.schedule_child_runs(
+    child_id = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[HierarchyChildSpec(goal="child waits", agent_name="child", role="coordinator")],
@@ -241,9 +241,9 @@ def test_subagent_debug_trace_records_due_action_and_recovery_reports_at_level_t
     root_task.status = "TIMEOUT"
     manager.save(root_task)
 
-    manager.due_check()
-    manager.plan_actions()
-    manager.build_hierarchy_recovery_packet(
+    manager.board.due_check()
+    manager.board.plan_actions()
+    manager.hierarchy.build_hierarchy_recovery_packet(
         params=HierarchyRecoveryRequest(root_run_id=root.id, include_healthy=False)
     )
 
@@ -263,7 +263,7 @@ def test_subagent_debug_trace_records_dispatch_reports_at_level_three(tmp_path):
     """等级 3 记录 dispatch/watch 摘要，但不复制报告正文。"""
     manager = SubAgentManager(tmp_path, debug_trace_level=3)
     task = manager.create_run(goal="dispatch target", thought="observe", plan=["dispatch"])
-    record = manager.make_dispatch_record(
+    record = manager.dispatch.make_dispatch_record(
         step="runner",
         action="run_subagent",
         run_id=task.id,
@@ -271,8 +271,8 @@ def test_subagent_debug_trace_records_dispatch_reports_at_level_three(tmp_path):
         ok=True,
         message="planned",
     )
-    manager.write_dispatch_report(manager.build_dispatch_report([record], dry_run=True))
-    watch = manager.make_dispatch_watch_record(
+    manager.dispatch.write_dispatch_report(manager.dispatch.build_dispatch_report([record], dry_run=True))
+    watch = manager.dispatch.make_dispatch_watch_record(
         cycle=1,
         dry_run=True,
         ok=True,
@@ -280,7 +280,7 @@ def test_subagent_debug_trace_records_dispatch_reports_at_level_three(tmp_path):
         dispatch_record_count=1,
         dispatch_summary={"run_subagent": 1},
     )
-    manager.write_dispatch_watch_report(manager.build_dispatch_watch_report([watch], dry_run=True))
+    manager.dispatch.write_dispatch_watch_report(manager.dispatch.build_dispatch_watch_report([watch], dry_run=True))
 
     records = _trace_records(tmp_path)
     by_type = {record["event_type"]: record for record in records}

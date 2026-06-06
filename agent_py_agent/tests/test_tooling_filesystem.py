@@ -521,8 +521,8 @@ class TestSearchTextTool:
         assert result.ok is True
         assert "inner.txt" in result.output
 
-    def test_search_text_accepts_filesystem_bundle_path(self, tmp_path: Path):
-        """search_text 兼容模型常见的 filesystem.path bundle，并且不会退回全工作区。"""
+    def test_search_text_rejects_filesystem_bundle_path(self, tmp_path: Path):
+        """filesystem.path bundle 不是当前协议，不能退回全工作区搜索。"""
         from agent_py_agent.agent.tooling.filesystem import SearchTextTool
 
         workspace = tmp_path / "workspace"
@@ -535,6 +535,7 @@ class TestSearchTextTool:
         tool = SearchTextTool(workspace, max_matches=100)
         result = tool.execute({"query": "needle", "filesystem": {"path": "scoped"}})
 
-        assert result.ok is True
-        assert "inside.txt" in result.output
+        assert result.ok is False
+        assert "top-level path" in result.output
+        assert "inside.txt" not in result.output
         assert "outside.txt" not in result.output

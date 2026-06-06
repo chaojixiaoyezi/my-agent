@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from agent_py_agent.agent.subagents.execution import (
+from agent_py_agent.agent.subagents.execution.test_items import (
     TestItemPreparationRequest,
     prepare_test_items,
 )

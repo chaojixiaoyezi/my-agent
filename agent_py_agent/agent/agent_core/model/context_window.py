@@ -7,6 +7,9 @@ DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
 
 
 def resolve_model_context_window_tokens(agent: object) -> int:
+    configured = _configured_context_window(agent)
+    if configured > 0:
+        return configured
     backend = getattr(agent, "backend", None)
     if backend is None:
         return DEFAULT_CONTEXT_WINDOW_TOKENS
@@ -20,6 +23,27 @@ def resolve_model_context_window_tokens(agent: object) -> int:
         return direct
     metadata_window = _window_from_backend_metadata(backend)
     return metadata_window if metadata_window > 0 else DEFAULT_CONTEXT_WINDOW_TOKENS
+
+
+def _configured_context_window(agent: object) -> int:
+    config = getattr(agent, "config", None)
+    if not _context_window_explicitly_configured(config):
+        return 0
+    return _positive_int(getattr(config, "model_context_window_tokens", 0))
+
+
+def _context_window_explicitly_configured(config: object) -> bool:
+    if config is None or not hasattr(config, "model_context_window_tokens"):
+        return False
+    sources = getattr(config, "config_sources", None)
+    if sources is None:
+        return True
+    if not isinstance(sources, Mapping):
+        return False
+    source = sources.get("model_context_window_tokens")
+    if not isinstance(source, Mapping):
+        return False
+    return str(source.get("source") or "") != "schema_default"
 
 
 def _window_from_backend_metadata(backend: object) -> int:

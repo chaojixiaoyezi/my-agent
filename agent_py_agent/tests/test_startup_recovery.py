@@ -115,7 +115,7 @@ class TestDetectActiveWork:
 
     def test_gateway_not_exists(self, mock_agent, mock_paths):
         """测试 gateway 不存在时的返回值。"""
-        mock_agent.subagents.build_board.return_value = Mock(
+        mock_agent.subagents.board.build_board.return_value = Mock(
             hot_list=[], recent=[], summary={}
         )
 
@@ -137,7 +137,7 @@ class TestDetectActiveWork:
         mock_paths.pid.write_text("12345")
         mock_paths.state.write_text('{"status": "running"}')
 
-        mock_agent.subagents.build_board.return_value = Mock(
+        mock_agent.subagents.board.build_board.return_value = Mock(
             hot_list=[], recent=[], summary={}
         )
 
@@ -157,7 +157,7 @@ class TestDetectActiveWork:
         mock_paths.pid.write_text("12345")
         mock_paths.state.write_text('{"status": "running"}')
 
-        mock_agent.subagents.build_board.return_value = sample_board
+        mock_agent.subagents.board.build_board.return_value = sample_board
 
         with patch('agent_py_agent.agent.gateway_parts.gateway_paths', return_value=mock_paths), \
              patch('agent_py_agent.agent.gateway_parts.gateway_running', return_value=(12345, True)), \
@@ -181,7 +181,7 @@ class TestDetectActiveWork:
         (mock_paths.processing / "req-002.json").write_text("{}")
         (mock_paths.processing / "req-003.json").write_text("{}")
 
-        mock_agent.subagents.build_board.return_value = Mock(
+        mock_agent.subagents.board.build_board.return_value = Mock(
             hot_list=[], recent=[], summary={}
         )
 
@@ -204,7 +204,7 @@ class TestDetectActiveWork:
         mock_paths.processing.mkdir(parents=True)
         (mock_paths.processing / "req-001.json").write_text("{}")
 
-        mock_agent.subagents.build_board.return_value = sample_board
+        mock_agent.subagents.board.build_board.return_value = sample_board
 
         with patch('agent_py_agent.agent.gateway_parts.gateway_paths', return_value=mock_paths), \
              patch('agent_py_agent.agent.gateway_parts.gateway_running', return_value=(12345, True)), \
@@ -459,7 +459,7 @@ class TestIntegrationScenarios:
         mock_paths.processing.mkdir(parents=True)
         (mock_paths.processing / "req-001.json").write_text("{}")
 
-        mock_agent.subagents.build_board.return_value = sample_board
+        mock_agent.subagents.board.build_board.return_value = sample_board
 
         with patch('agent_py_agent.agent.gateway_parts.gateway_paths', return_value=mock_paths), \
              patch('agent_py_agent.agent.gateway_parts.gateway_running', return_value=(12345, True)), \
@@ -486,7 +486,7 @@ class TestIntegrationScenarios:
     def test_config_disables_detection(self, mock_agent, mock_paths):
         """测试配置关闭检测时不执行检测。"""
         mock_agent.config.auto_detect_work_on_startup = False
-        mock_agent.subagents.build_board.return_value = Mock(
+        mock_agent.subagents.board.build_board.return_value = Mock(
             hot_list=[], recent=[], summary={}
         )
 
@@ -502,7 +502,7 @@ class TestIntegrationScenarios:
     def test_malformed_board_handling(self, mock_agent, mock_paths):
         """测试异常 board 处理。"""
         # 模拟 build_board 返回无效对象
-        mock_agent.subagents.build_board.return_value = None
+        mock_agent.subagents.board.build_board.return_value = None
 
         # 创建 pid 和 state 文件
         mock_paths.pid.write_text("12345")

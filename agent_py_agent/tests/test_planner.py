@@ -233,9 +233,9 @@ class TestBuildParentPlannerState:
 
         mock_agent = MagicMock()
         mock_agent.subagents.list_runs.return_value = []
-        mock_agent.subagents.build_board.return_value = MagicMock(summary={})
-        mock_agent.subagents.due_check.return_value = MagicMock(summary={"total": 0})
-        mock_agent.subagents.plan_actions.return_value = MagicMock(summary={"total": 0})
+        mock_agent.subagents.board.build_board.return_value = MagicMock(summary={})
+        mock_agent.subagents.board.due_check.return_value = MagicMock(summary={"total": 0})
+        mock_agent.subagents.board.plan_actions.return_value = MagicMock(summary={"total": 0})
         mock_agent.subagents.review_acceptances.return_value = MagicMock(records=[])
 
         state = _build_parent_planner_state(
@@ -268,9 +268,9 @@ class TestBuildParentPlannerState:
 
         mock_agent = MagicMock()
         mock_agent.subagents.list_runs.return_value = [mock_task]
-        mock_agent.subagents.build_board.return_value = MagicMock(summary={})
-        mock_agent.subagents.due_check.return_value = MagicMock(summary={"total": 0}, issues=[])
-        mock_agent.subagents.plan_actions.return_value = MagicMock(summary={"total": 0}, actions=[])
+        mock_agent.subagents.board.build_board.return_value = MagicMock(summary={})
+        mock_agent.subagents.board.due_check.return_value = MagicMock(summary={"total": 0}, issues=[])
+        mock_agent.subagents.board.plan_actions.return_value = MagicMock(summary={"total": 0}, actions=[])
         mock_agent.subagents.review_acceptances.return_value = MagicMock(records=[])
 
         state = _build_parent_planner_state(
@@ -310,9 +310,9 @@ class TestBuildParentPlannerState:
 
         mock_agent = MagicMock()
         mock_agent.subagents.list_runs.return_value = [mock_task]
-        mock_agent.subagents.build_board.return_value = MagicMock(summary={})
-        mock_agent.subagents.due_check.return_value = MagicMock(summary={"total": 0}, issues=[])
-        mock_agent.subagents.plan_actions.return_value = MagicMock(summary={"total": 0}, actions=[])
+        mock_agent.subagents.board.build_board.return_value = MagicMock(summary={})
+        mock_agent.subagents.board.due_check.return_value = MagicMock(summary={"total": 0}, issues=[])
+        mock_agent.subagents.board.plan_actions.return_value = MagicMock(summary={"total": 0}, actions=[])
         mock_agent.subagents.review_acceptances.return_value = MagicMock(records=[])
 
         state = _build_parent_planner_state(
@@ -336,9 +336,9 @@ class TestBuildParentPlannerState:
 
         mock_agent = MagicMock()
         mock_agent.subagents.list_runs.return_value = []
-        mock_agent.subagents.build_board.return_value = MagicMock(summary={})
-        mock_agent.subagents.due_check.return_value = MagicMock(summary={"total": 0}, issues=[])
-        mock_agent.subagents.plan_actions.return_value = MagicMock(summary={"total": 0}, actions=[])
+        mock_agent.subagents.board.build_board.return_value = MagicMock(summary={})
+        mock_agent.subagents.board.due_check.return_value = MagicMock(summary={"total": 0}, issues=[])
+        mock_agent.subagents.board.plan_actions.return_value = MagicMock(summary={"total": 0}, actions=[])
         mock_agent.subagents.review_acceptances.return_value = MagicMock(records=[])
 
         state = _build_parent_planner_state(

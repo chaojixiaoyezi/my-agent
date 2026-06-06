@@ -68,7 +68,7 @@ class ScheduleChildSubagentsTool(BaseTool):
         if target_error:
             return _schedule_error(target_error)
         try:
-            result = self.agent.subagents.schedule_child_runs(
+            result = self.agent.subagents.hierarchy.schedule_child_runs(
                 params=_schedule_request(
                     ScheduleRequestBuildParams(self.agent, parent_run_id, child_specs, params)
                 )
@@ -114,7 +114,7 @@ def _schedule_request(request: ScheduleRequestBuildParams) -> HierarchyScheduleR
         apply=_schedule_apply_default(request.raw_params),
         requested_by=request.parent_run_id,
         max_children=_non_negative_int(request.raw_params.get("max_children"), default=0),
-        max_depth=_schedule_max_depth(request.agent, request.parent_run_id, request.raw_params),
+        max_depth=_schedule_max_depth(request.raw_params),
     )
 
 
@@ -300,14 +300,5 @@ def _hierarchy_target_error(agent, specs: list[HierarchyChildSpec]) -> str:
     return ""
 
 
-def _schedule_max_depth(agent, parent_run_id: str, params: dict[str, object]) -> int:
-    parsed = _non_negative_int(params.get("max_depth"), default=0)
-    if "max_depth" not in params:
-        return parsed
-    try:
-        parent_depth = int(agent.subagents.load(parent_run_id).depth)
-    except Exception:
-        return parsed
-    if parsed <= parent_depth:
-        return parent_depth + max(1, parsed)
-    return parsed
+def _schedule_max_depth(params: dict[str, object]) -> int:
+    return _non_negative_int(params.get("max_depth"), default=0)

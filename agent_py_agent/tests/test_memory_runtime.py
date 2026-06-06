@@ -27,7 +27,7 @@ def _write_route(root: Path) -> None:
 ## memory.routing
 topic: 长期规则索引
 trigger_keywords: 长期规则, 规则索引
-aliases: memory index
+related_terms: memory index
 when_to_read: 用户讨论长期规则或 memory index 时读取
 authority_path: references/memory/routing.md
 scope: global
@@ -293,12 +293,13 @@ def test_auto_resume_context_is_disabled_by_default(tmp_path):
     assert "### Auto Recovery Context" not in result.prompt
 
 
-def test_auto_resume_context_injects_on_trigger_when_enabled(tmp_path):
+def test_auto_resume_context_injects_when_always_mode_enabled(tmp_path):
     agent = SimpleAgent(
         _test_config(
             tmp_path,
             model_backend="echo",
             memory_resume_auto_context_enabled=True,
+            memory_resume_auto_context_mode="always",
             memory_resume_auto_context_limit=3,
         ),
         tmp_path,
@@ -346,6 +347,7 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
             tmp_path,
             model_backend="echo",
             memory_resume_auto_context_enabled=True,
+            memory_resume_auto_context_mode="always",
             memory_resume_auto_context_limit=5,
         ),
         tmp_path,
@@ -383,6 +385,7 @@ def test_auto_resume_context_recovers_cross_day_gateway_request(tmp_path):
             tmp_path,
             model_backend="echo",
             memory_resume_auto_context_enabled=True,
+            memory_resume_auto_context_mode="always",
             memory_resume_auto_context_limit=5,
         ),
         tmp_path,

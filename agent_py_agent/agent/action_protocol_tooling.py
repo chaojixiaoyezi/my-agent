@@ -27,8 +27,8 @@ class ToolCallEnvelopePayloadRequest:
 class ToolCallEnvelope:
     call_id: str
     source: str
-    tool: str
-    args: dict[str, Any]
+    tool_name: str
+    input: dict[str, Any]
     scope: RunScope = field(default_factory=RunScope)
     operation_id: str = ""
     idempotency_key: str = ""
@@ -50,8 +50,8 @@ class ToolCallEnvelope:
         return cls(
             call_id=str(payload.get("call_id") or ""),
             source=str(payload.get("source") or ""),
-            tool=str(payload.get("tool") or ""),
-            args=_dict_or_empty(payload.get("args")),
+            tool_name=str(payload.get("tool_name") or ""),
+            input=_dict_or_empty(payload.get("input")),
             scope=RunScope.from_dict(payload.get("scope")),
             operation_id=str(payload.get("operation_id") or ""),
             idempotency_key=str(payload.get("idempotency_key") or ""),
@@ -108,12 +108,12 @@ class ToolCallResultEnvelope:
 def tool_call_envelope_from_payload(request: ToolCallEnvelopePayloadRequest) -> ToolCallEnvelope:
     payload = request.payload
     tool = str(payload.get("tool") or "").strip()
-    args = {key: value for key, value in payload.items() if key not in {"tool", "idempotency_key"}}
+    input_payload = {key: value for key, value in payload.items() if key not in {"tool", "idempotency_key"}}
     return ToolCallEnvelope(
         call_id=request.call_id,
         source=request.source,
-        tool=tool,
-        args=args,
+        tool_name=tool,
+        input=input_payload,
         scope=request.scope or RunScope(),
         idempotency_key=str(payload.get("idempotency_key") or ""),
     )

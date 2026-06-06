@@ -35,7 +35,6 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
     result_index = child_result_index(agent, tasks)
     payload: dict[str, object] = {
         "created": len(created),
-        "ids": [task.id for task in tasks],
         "created_run_ids": [task.id for task in created],
         "reused_run_ids": [task.id for task in reused],
         "dispatch_run_ids": [task.id for task in pending_dispatch],

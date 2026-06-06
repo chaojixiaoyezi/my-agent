@@ -1,10 +1,10 @@
 
 from __future__ import annotations
 
-"""normalize memory-related runtime config with safe defaults and default warnings.
+"""Normalize memory-related runtime config with safe defaults and warnings.
 
-用户会手动改配置文件，所以这里专门负责把 memory 配置"洗干净"。
-具体字段和底层 coercion 已拆到内部模块，本文件保持历史 public imports。
+用户会手动改配置文件，所以这里是 memory 配置的当前入口；底层 coercion
+只负责字段转换和 warning 生成。
 """
 
 from collections.abc import Mapping

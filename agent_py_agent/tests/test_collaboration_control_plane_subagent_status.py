@@ -18,7 +18,7 @@ def test_subagent_execution_context_includes_targeted_collaboration_requests(tmp
     case = agent.collaboration_store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "需要 B 补证据", 'summary': "A 已打开 case，等待 B 响应。", 'created_by': "agent-a", 'now': 1.0})
     request = agent.collaboration_store.request_collaboration({'case_id': case.case_id, 'requester_agent_id': "agent-a", 'target_agent_ids': (child.id,), 'question': "请补一条证据引用。", 'now': 2.0})
 
-    context = agent.subagents.write_execution_context(child.id)
+    context = agent.subagents.runner_context.write_execution_context(child.id)
 
     collaboration = context.context_bundle.get("collaboration")
     assert isinstance(collaboration, dict)
@@ -39,7 +39,7 @@ def test_subagent_execution_context_includes_role_targeted_collaboration_request
     case = agent.collaboration_store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "需要 agent-b 补证据", 'created_by': "agent-a", 'now': 1.0})
     request = agent.collaboration_store.request_collaboration({'case_id': case.case_id, 'requester_agent_id': "agent-a", 'target_agent_ids': ("agent-b",), 'question': "请 agent-b 补一条证据引用。", 'now': 2.0})
 
-    context = agent.subagents.write_execution_context(child.id)
+    context = agent.subagents.runner_context.write_execution_context(child.id)
 
     targeted = context.context_bundle["collaboration"]["targeted_requests"]
     assert targeted[0]["request_id"] == request.request_id

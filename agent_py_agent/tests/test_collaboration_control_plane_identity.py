@@ -133,7 +133,7 @@ def test_pending_requests_for_agent_returns_targeted_unanswered_request_refs(tmp
     ]
 
 
-def test_pending_requests_for_agent_matches_generated_agent_name_alias(tmp_path) -> None:
+def test_pending_requests_for_agent_does_not_guess_generated_agent_name(tmp_path) -> None:
     from agent_py_agent.agent.collaboration import CollaborationStore
 
     store = CollaborationStore(tmp_path / "collaboration")
@@ -142,7 +142,8 @@ def test_pending_requests_for_agent_matches_generated_agent_name_alias(tmp_path)
 
     requests = store.pending_requests_for_agent(agent_id="subagent-2", agent_name="Agent-B-2")
 
-    assert [item["request_id"] for item in requests] == [request.request_id]
+    assert request.request_id
+    assert requests == []
 
 
 def test_pending_requests_for_agent_matches_agent_role_identity(tmp_path) -> None:
@@ -153,7 +154,7 @@ def test_pending_requests_for_agent_matches_agent_role_identity(tmp_path) -> Non
     request = store.request_collaboration({'case_id': case.case_id, 'requester_agent_id': "agent-a", 'target_agent_ids': ("agent-b",), 'question': "请 B 角色补证据。", 'now': 2.0})
 
     requests = store.pending_requests_for_agent(
-        agent_id="subagent-2",
+        agent_id="agent-b",
         agent_name="Agent-B-2",
         agent_role="agent-b",
     )

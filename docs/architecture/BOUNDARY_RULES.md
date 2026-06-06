@@ -328,7 +328,7 @@ class DispatchMixin:
 | 规则 | 说明 |
 |---|---|
 | 不提交敏感配置 | `.env`, API key 文件必须在 `.gitignore` |
-| 配置归一化 | `config_normalize.py` 过滤未知字段，防止注入 |
+| 配置归一化 | `settings/normalize.py` 过滤未知字段，防止注入 |
 | 配置校验 | `AgentConfig` 使用 dataclass 类型检查 |
 | 配置隔离 | 运行时配置覆盖不修改磁盘上的配置文件 |
 

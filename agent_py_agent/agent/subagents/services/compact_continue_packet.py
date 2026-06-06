@@ -182,7 +182,6 @@ def _next_action(task: SubAgentTask, output_payload: dict[str, object]) -> str:
     candidates = [
         task.current_step,
         *_strings(output_payload.get("next_actions")),
-        output_payload.get("next_action"),
         task.latest_status_report.next_recommended_action if task.latest_status_report else "",
         f"resolve blocker: {task.blockers[0]}" if task.blockers else "",
         "resume runner from task-local checkpoint",

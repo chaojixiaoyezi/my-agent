@@ -10,7 +10,6 @@ from typing import Any
 
 from ._filesystem_helpers import (
     _bool_param,
-    _bundled_filesystem_param,
     _int_param,
     _internal_agent_status_ref,
     _optional_path,
@@ -135,24 +134,24 @@ class _ListFilesRequest:
 
 def _list_files_request_from_params(params: dict[str, Any], max_entries: int) -> _ListFilesRequest:
     return _ListFilesRequest(
-        raw_path=_optional_path(_bundled_filesystem_param(params, "path", "."), default="."),
-        recursive=_bool_param(_bundled_filesystem_param(params, "recursive", False), default=False),
+        raw_path=_optional_path(params.get("path", "."), default="."),
+        recursive=_bool_param(params.get("recursive", False), default=False),
         limit=min(
-            _int_param(_bundled_filesystem_param(params, "limit"), name="limit", default=max_entries, min_value=1),
+            _int_param(params.get("limit"), name="limit", default=max_entries, min_value=1),
             max_entries,
         ),
-        offset=_int_param(_bundled_filesystem_param(params, "offset"), name="offset", default=0, min_value=0),
-        max_depth=_int_param(_bundled_filesystem_param(params, "max_depth"), name="max_depth", default=0, min_value=0),
+        offset=_int_param(params.get("offset"), name="offset", default=0, min_value=0),
+        max_depth=_int_param(params.get("max_depth"), name="max_depth", default=0, min_value=0),
         file_glob=_text_param(
-            _bundled_filesystem_param(params, "file_glob", ""),
+            params.get("file_glob", ""),
             name="file_glob",
             max_chars=200,
             allow_empty=True,
             strip=True,
         ),
-        include_dirs=_bool_param(_bundled_filesystem_param(params, "include_dirs", True), default=True),
-        include_files=_bool_param(_bundled_filesystem_param(params, "include_files", True), default=True),
-        include_ignored=_bool_param(_bundled_filesystem_param(params, "include_ignored", False), default=False),
+        include_dirs=_bool_param(params.get("include_dirs", True), default=True),
+        include_files=_bool_param(params.get("include_files", True), default=True),
+        include_ignored=_bool_param(params.get("include_ignored", False), default=False),
     )
 
 

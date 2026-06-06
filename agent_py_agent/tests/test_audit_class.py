@@ -74,7 +74,12 @@ class TestAuditLogger:
 
     def test_log_creates_entry(self, tmp_path: Path):
         """log 方法创建审计条目。"""
-        from agent_py_agent.agent.audit.logger import AuditAction, AuditLogger, AuditStatus
+        from agent_py_agent.agent.audit.logger import (
+            AuditAction,
+            AuditLogger,
+            AuditStatus,
+            LogParams,
+        )
 
         class MockConfig:
             audit_log_path = str(tmp_path / "audit")
@@ -82,12 +87,14 @@ class TestAuditLogger:
         logger = AuditLogger(MockConfig())
 
         entry = logger.log(
-            action=AuditAction.CREATE_TASK,
-            user_id="user1",
-            channel="chat",
-            target_type="task",
-            target_id="task_001",
-            status=AuditStatus.SUCCESS,
+            LogParams(
+                action=AuditAction.CREATE_TASK,
+                user_id="user1",
+                channel="chat",
+                target_type="task",
+                target_id="task_001",
+                status=AuditStatus.SUCCESS,
+            )
         )
 
         assert entry is not None
@@ -96,7 +103,12 @@ class TestAuditLogger:
 
     def test_log_writes_to_file(self, tmp_path: Path):
         """日志写入文件。"""
-        from agent_py_agent.agent.audit.logger import AuditAction, AuditLogger, AuditStatus
+        from agent_py_agent.agent.audit.logger import (
+            AuditAction,
+            AuditLogger,
+            AuditStatus,
+            LogParams,
+        )
 
         class MockConfig:
             audit_log_path = str(tmp_path / "audit")
@@ -104,12 +116,14 @@ class TestAuditLogger:
         logger = AuditLogger(MockConfig())
 
         logger.log(
-            action=AuditAction.CREATE_TASK,
-            user_id="user1",
-            channel="chat",
-            target_type="task",
-            target_id="task_001",
-            status=AuditStatus.SUCCESS,
+            LogParams(
+                action=AuditAction.CREATE_TASK,
+                user_id="user1",
+                channel="chat",
+                target_type="task",
+                target_id="task_001",
+                status=AuditStatus.SUCCESS,
+            )
         )
 
         audit_file = tmp_path / "audit" / "audit.jsonl"
@@ -120,7 +134,12 @@ class TestAuditLogger:
 
     def test_log_path_can_be_file(self, tmp_path: Path):
         """audit_log_path 指向文件时直接写该文件，兼容旧配置。"""
-        from agent_py_agent.agent.audit.logger import AuditAction, AuditLogger, AuditStatus
+        from agent_py_agent.agent.audit.logger import (
+            AuditAction,
+            AuditLogger,
+            AuditStatus,
+            LogParams,
+        )
 
         audit_file = tmp_path / "custom-audit.jsonl"
 
@@ -129,12 +148,14 @@ class TestAuditLogger:
 
         logger = AuditLogger(MockConfig())
         logger.log(
-            action=AuditAction.CREATE_TASK,
-            user_id="user1",
-            channel="chat",
-            target_type="task",
-            target_id="task_001",
-            status=AuditStatus.SUCCESS,
+            LogParams(
+                action=AuditAction.CREATE_TASK,
+                user_id="user1",
+                channel="chat",
+                target_type="task",
+                target_id="task_001",
+                status=AuditStatus.SUCCESS,
+            )
         )
 
         assert audit_file.exists()
@@ -244,15 +265,15 @@ class TestAuditLogger:
 
     def test_multiple_logs_append_to_file(self, tmp_path: Path):
         """多次写入追加到文件。"""
-        from agent_py_agent.agent.audit.logger import AuditAction, AuditLogger
+        from agent_py_agent.agent.audit.logger import AuditAction, AuditLogger, LogParams
 
         class MockConfig:
             audit_log_path = str(tmp_path / "audit")
 
         logger = AuditLogger(MockConfig())
 
-        logger.log(action=AuditAction.CREATE_TASK, user_id="u1", channel="c1", target_type="t", target_id="1")
-        logger.log(action=AuditAction.UPDATE_TASK, user_id="u2", channel="c2", target_type="t", target_id="2")
+        logger.log(LogParams(action=AuditAction.CREATE_TASK, user_id="u1", channel="c1", target_type="t", target_id="1"))
+        logger.log(LogParams(action=AuditAction.UPDATE_TASK, user_id="u2", channel="c2", target_type="t", target_id="2"))
 
         audit_file = tmp_path / "audit" / "audit.jsonl"
         lines = audit_file.read_text(encoding="utf-8").strip().split("\n")

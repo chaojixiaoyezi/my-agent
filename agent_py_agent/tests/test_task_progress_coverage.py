@@ -62,27 +62,31 @@ class TestTaskProgressCoverageTool:
             tmp_path,
             "run-main",
             {
-                "coverage_targets": [
-                    {
-                        "id": "codex-main",
-                        "title": "Codex",
-                        "checks": {"读基础信息": "done", "分析结构": "pending"},
-                        "evidence": ["codex-main/README.md"],
-                    }
-                ]
+                "coverage": {
+                    "targets": [
+                        {
+                            "id": "codex-main",
+                            "title": "Codex",
+                            "checks": {"读基础信息": "done", "分析结构": "pending"},
+                            "evidence": ["codex-main/README.md"],
+                        }
+                    ]
+                }
             },
         )
         write_task_progress(
             tmp_path,
             "run-main",
             {
-                "coverage_targets": [
-                    {
-                        "id": "codex-main",
-                        "checks": {"分析结构": "done", "写进报告": "done"},
-                        "evidence": ["codex-main/README.md", "codex-main/core"],
-                    }
-                ]
+                "coverage": {
+                    "targets": [
+                        {
+                            "id": "codex-main",
+                            "checks": {"分析结构": "done", "写进报告": "done"},
+                            "evidence": ["codex-main/README.md", "codex-main/core"],
+                        }
+                    ]
+                }
             },
         )
 
@@ -101,11 +105,13 @@ class TestTaskProgressCoverageTool:
             tmp_path,
             "run-main",
             {
-                "coverage_targets": [
-                    {"id": "fragment-001", "checks": {"读文件": "done"}, "evidence": ["fragment-001.txt"]},
-                    {"id": "fragment-002", "checks": {"读文件": "pending"}},
-                    {"id": "fragment-003", "checks": {"读文件": "pending"}},
-                ]
+                "coverage": {
+                    "targets": [
+                        {"id": "fragment-001", "checks": {"读文件": "done"}, "evidence": ["fragment-001.txt"]},
+                        {"id": "fragment-002", "checks": {"读文件": "pending"}},
+                        {"id": "fragment-003", "checks": {"读文件": "pending"}},
+                    ]
+                }
             },
         )
         write_task_progress(
@@ -113,9 +119,11 @@ class TestTaskProgressCoverageTool:
             "run-main",
             {
                 "summary": "误以为只有一个文件。",
-                "coverage_targets": [
-                    {"id": "fragment-001", "checks": {"读文件": "done"}, "evidence": ["fragment-001.txt"]}
-                ],
+                "coverage": {
+                    "targets": [
+                        {"id": "fragment-001", "checks": {"读文件": "done"}, "evidence": ["fragment-001.txt"]}
+                    ]
+                },
                 "next_action": "提交验收",
             },
         )
@@ -139,27 +147,31 @@ class TestTaskProgressCoverageTool:
             tmp_path,
             "run-main",
             {
-                "coverage_targets": [
-                    {
-                        "id": "fragment-001",
-                        "status": "done",
-                        "checks": {"读文件": "done", "写报告": "done"},
-                        "evidence": ["fragment-001.txt", "final_report.md"],
-                    }
-                ]
+                "coverage": {
+                    "targets": [
+                        {
+                            "id": "fragment-001",
+                            "status": "done",
+                            "checks": {"读文件": "done", "写报告": "done"},
+                            "evidence": ["fragment-001.txt", "final_report.md"],
+                        }
+                    ]
+                }
             },
         )
         write_task_progress(
             tmp_path,
             "run-main",
             {
-                "coverage_targets": [
-                    {
-                        "id": "fragment-001",
-                        "status": "pending",
-                        "checks": {"读文件": "pending"},
-                    }
-                ]
+                "coverage": {
+                    "targets": [
+                        {
+                            "id": "fragment-001",
+                            "status": "pending",
+                            "checks": {"读文件": "pending"},
+                        }
+                    ]
+                }
             },
         )
 
@@ -445,20 +457,28 @@ class TestTaskProgressContinuationAndAliases:
         assert summary["recent_done_items"][0]["result"] == "CP-001-10001 / SECRET-001-20001 / KEEP"
         assert summary["recent_done_items"][0]["evidence"] == ["fragment-001.txt:1-120"]
 
-    def test_coverage_targets_accept_expected_fields_as_pending_checks(self, tmp_path):
-        """模型用 expected_fields 表达覆盖项时，也应归一成 checks。"""
+    def test_coverage_targets_use_explicit_checks(self, tmp_path):
+        """覆盖账本只从显式 checks 建立检查项。"""
         from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
 
         write_task_progress(
             tmp_path,
             "run-main",
             {
-                "coverage_targets": [
-                    {
-                        "id": "codex-main",
-                        "expected_fields": ["做什么的", "主要模块", "优点", "缺点", "值得借鉴的地方"],
-                    }
-                ]
+                "coverage": {
+                    "targets": [
+                        {
+                            "id": "codex-main",
+                            "checks": {
+                                "做什么的": "pending",
+                                "主要模块": "pending",
+                                "优点": "pending",
+                                "缺点": "pending",
+                                "值得借鉴的地方": "pending",
+                            },
+                        }
+                    ]
+                }
             },
         )
 
@@ -472,8 +492,8 @@ class TestTaskProgressContinuationAndAliases:
             "值得借鉴的地方": "pending",
         }
 
-    def test_task_progress_accepts_fields_alias_with_update_action(self, tmp_path):
-        """fields 仍是结构化覆盖输入；action 必须使用当前协议里的 update。"""
+    def test_task_progress_accepts_explicit_coverage_checks_with_update_action(self, tmp_path):
+        """coverage checks 是当前结构化覆盖输入；action 必须使用 update。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -485,14 +505,22 @@ class TestTaskProgressContinuationAndAliases:
                 "tool": "task_progress",
                 "action": "update",
                 "summary": "开始覆盖五个项目。",
-                "items": [
-                    {
-                        "id": "agentscope",
-                        "title": "agentscope-main分析",
-                        "status": "in_progress",
-                        "fields": ["功能", "主要模块", "优点", "缺点", "借鉴点"],
-                    }
-                ],
+                "coverage": {
+                    "targets": [
+                        {
+                            "id": "agentscope",
+                            "title": "agentscope-main分析",
+                            "status": "in_progress",
+                            "checks": {
+                                "功能": "pending",
+                                "主要模块": "pending",
+                                "优点": "pending",
+                                "缺点": "pending",
+                                "借鉴点": "pending",
+                            },
+                        }
+                    ]
+                },
             }
         )
         payload = json.loads(result.output)
@@ -501,8 +529,8 @@ class TestTaskProgressContinuationAndAliases:
         assert payload["summary"] == "开始覆盖五个项目。"
         assert payload["coverage"]["targets"][0]["checks"]["功能"] == "pending"
 
-    def test_task_progress_accepts_fields_dict_as_checks(self, tmp_path):
-        """模型把 fields 写成字段到状态的字典时，应直接当 checks。"""
+    def test_task_progress_accepts_checks_dict(self, tmp_path):
+        """checks 必须显式写成字段到状态的字典。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -513,12 +541,14 @@ class TestTaskProgressContinuationAndAliases:
             {
                 "tool": "task_progress",
                 "action": "update",
-                "items": [
-                    {
-                        "id": "agentscope",
-                        "fields": {"功能描述": "pending", "主要模块": "pending", "优点": "done"},
-                    }
-                ],
+                "coverage": {
+                    "targets": [
+                        {
+                            "id": "agentscope",
+                            "checks": {"功能描述": "pending", "主要模块": "pending", "优点": "done"},
+                        }
+                    ]
+                },
             }
         )
         payload = json.loads(result.output)
@@ -554,11 +584,11 @@ def test_task_progress_rejects_old_action_aliases(tmp_path):
     assert payload["allowed_actions"] == ["read", "update"]
 
 
-class TestTaskProgressCoverageAliases:
-    """测试开放 coverage 输入仍能归一成结构化账本。"""
+class TestTaskProgressCoverageRejectedAliases:
+    """测试旧 coverage 输入不会被隐式归一成机器账本。"""
 
-    def test_task_progress_accepts_string_coverage_targets(self, tmp_path):
-        """字符串覆盖清单可写成结构化 coverage；action 仍必须是 update。"""
+    def test_task_progress_ignores_string_coverage_targets(self, tmp_path):
+        """字符串 coverage_targets 不再被解析成结构化 coverage。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -580,12 +610,10 @@ class TestTaskProgressCoverageAliases:
 
         assert result.ok is True
         assert payload["summary"] == "开始分析五个项目。"
-        assert payload["coverage"]["targets"][0]["id"] == "agentscope-main"
-        assert payload["coverage"]["targets"][0]["checks"]["主要模块"] == "pending"
-        assert payload["coverage"]["counts"]["targets_total"] == 2
+        assert "coverage" not in payload
 
-    def test_task_progress_accepts_fields_needed_and_chinese_target_text(self, tmp_path):
-        """fields_needed 或中文冒号覆盖项也应归一成 checks。"""
+    def test_task_progress_ignores_fields_needed_and_chinese_target_text(self, tmp_path):
+        """fields_needed 和中文冒号覆盖项不再生成 checks。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -612,13 +640,11 @@ class TestTaskProgressCoverageAliases:
         payload = json.loads(result.output)
 
         assert result.ok is True
-        by_id = {target["id"]: target for target in payload["coverage"]["targets"]}
-        assert by_id["free-code-main"]["checks"]["借鉴点"] == "pending"
-        assert by_id["hermes-agent-main"]["checks"]["主要模块"] == "pending"
-        assert payload["coverage"]["counts"]["targets_total"] == 2
+        assert "coverage" not in payload
+        assert payload["items"][0]["id"] == "free-code-main"
 
     def test_task_progress_notes_do_not_create_implicit_coverage_checks(self, tmp_path):
-        """note/notes 是事实或备注；不要靠冒号文本猜 coverage checks。"""
+        """notes 是事实或备注；不要靠冒号文本猜 coverage checks。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -634,7 +660,7 @@ class TestTaskProgressCoverageAliases:
                         "id": "agentscope-main",
                         "title": "分析 agentscope-main",
                         "status": "in_progress",
-                        "note": "待分析：做什么、主要模块、优点、缺点、借鉴点",
+                        "notes": "待分析：做什么、主要模块、优点、缺点、借鉴点",
                     }
                 ],
             }
@@ -646,8 +672,28 @@ class TestTaskProgressCoverageAliases:
         assert item["notes"] == "待分析：做什么、主要模块、优点、缺点、借鉴点"
         assert "coverage" not in payload
 
-    def test_task_progress_accepts_name_and_missing_fields_aliases(self, tmp_path):
-        """name/missing_fields 和字符串 coverage 不应把多个对象合成一个 target。"""
+    def test_task_progress_note_alias_is_ignored(self, tmp_path):
+        """note 不再被提升成 notes。"""
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent._main_agent_run_id = "run-main"
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "action": "update",
+                "items": [{"id": "agentscope-main", "status": "in_progress", "note": "旧字段"}],
+            }
+        )
+        payload = json.loads(result.output)
+
+        assert result.ok is True
+        assert payload["items"][0]["notes"] == ""
+
+    def test_task_progress_ignores_name_and_missing_fields_aliases(self, tmp_path):
+        """name/missing_fields 和字符串 coverage 不再生成 target。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -668,12 +714,7 @@ class TestTaskProgressCoverageAliases:
         payload = json.loads(result.output)
 
         assert result.ok is True
-        assert payload["coverage"]["goal"] == "0/2 项目已分析"
-        assert [target["id"] for target in payload["coverage"]["targets"]] == [
-            "agentscope-main",
-            "codex-main",
-        ]
-        assert payload["coverage"]["targets"][0]["checks"]["借鉴点"] == "pending"
+        assert "coverage" not in payload
 
 
 class TestTaskProgressQualityHints:

@@ -110,7 +110,7 @@ def test_move_to_space_trash_moves_target_and_records_audit(tmp_path: Path):
 
 def test_provider_space_quota_from_agent_config():
     from agent_py_agent.agent.settings.config import AgentConfig
-    from agent_py_agent.agent.settings.config_normalize import normalize_agent_config
+    from agent_py_agent.agent.settings.normalize import normalize_agent_config
     from agent_py_agent.agent.user_space.provider_space import provider_quota_from_agent_config
 
     normalized, warnings = normalize_agent_config(
@@ -130,7 +130,7 @@ def test_provider_space_quota_from_agent_config():
 
 def test_provider_trash_retention_from_agent_config_purges_old_days(tmp_path: Path):
     from agent_py_agent.agent.settings.config import AgentConfig
-    from agent_py_agent.agent.settings.config_normalize import normalize_agent_config
+    from agent_py_agent.agent.settings.normalize import normalize_agent_config
     from agent_py_agent.agent.user_space.provider_space import (
         ProviderSpaceIdentity,
         ensure_provider_space,

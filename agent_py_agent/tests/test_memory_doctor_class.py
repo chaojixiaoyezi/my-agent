@@ -361,7 +361,7 @@ def test_route_payload_basic():
         route_id="route-1",
         topic="测试主题",
         trigger_keywords=["测试", "关键词"],
-        aliases=["alias1"],
+        related_terms=["related1"],
         when_to_read="需要时读取",
         authority_path="rules/test.md",
         scope="project",

@@ -52,7 +52,7 @@ def cmd_status(args) -> int:
     limit = _config_int(agent, args, "limit", "cli_status_limit")
     paths = gateway_paths(agent)
     local_stats = agent.local_store.stats()
-    board = agent.subagents.build_board(
+    board = agent.subagents.board.build_board(
         options=SubAgentBoardOptions(
             recent_limit=limit,
             include_child_status_counts=False,

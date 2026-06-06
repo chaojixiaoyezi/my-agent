@@ -116,31 +116,22 @@ def _records_from_registry_row(row: dict[str, object]) -> list[dict[str, object]
 
 
 def _target_items(contract: dict[str, Any]) -> list[dict[str, str]]:
-    raw = _first_list(contract, ("target_items", "items", "targets"))
+    raw = contract.get("target_items")
     if not isinstance(raw, list):
         return []
     return [row for item in raw if (row := _target_item_row(item))]
 
 
-def _first_list(payload: dict[str, Any], keys: tuple[str, ...]) -> object:
-    for key in keys:
-        value = payload.get(key)
-        if isinstance(value, list):
-            return value
-    return None
-
-
 def _target_item_row(item: object) -> dict[str, str]:
-    if isinstance(item, dict):
-        target_id = str(item.get("target_id") or item.get("id") or item.get("label") or "").strip()
-        row = {"target_id": target_id, "label": str(item.get("label") or target_id)} if target_id else {}
-        for key in ("path", "source_path", "artifact_ref", "source_ref", "coverage_kind", "enforcement", "scope"):
-            text = str(item.get(key) or "").strip()
-            if text:
-                row[key] = text
-        return row
-    target_id = str(item or "").strip()
-    return {"target_id": target_id, "label": target_id} if target_id else {}
+    if not isinstance(item, dict):
+        return {}
+    target_id = str(item.get("target_id") or "").strip()
+    row = {"target_id": target_id, "label": str(item.get("label") or target_id)} if target_id else {}
+    for key in ("source_path", "artifact_ref", "source_ref", "coverage_kind", "enforcement", "scope"):
+        text = str(item.get(key) or "").strip()
+        if text:
+            row[key] = text
+    return row
 
 
 def _record_counts_as_covered(record: dict[str, object]) -> bool:

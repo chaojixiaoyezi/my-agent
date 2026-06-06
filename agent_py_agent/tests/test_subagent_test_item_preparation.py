@@ -1,6 +1,6 @@
 """测试子代理验收测试项目录推断。"""
 
-from agent_py_agent.agent.subagents.execution import (
+from agent_py_agent.agent.subagents.execution.test_items import (
     TestItemPreparationRequest,
     prepare_test_items,
 )

@@ -13,7 +13,7 @@ from agent_py_agent.agent.subagents.run_budget import (
 
 
 def _record_real_runner_result(manager: SubAgentManager, run_id: str) -> None:
-    manager.record_runner_result(
+    manager.runner_result.record_runner_result(
         RecordRunnerResultParams(
             run_id=run_id,
             dry_run=False,
@@ -64,7 +64,7 @@ def test_budget_report_skips_dry_runs_by_default(tmp_path: Path):
     """Dry-run prompts should not inflate real model-call budgets unless requested."""
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(goal="dry", thought="preview", plan=["prompt"])
-    manager.record_runner_result(
+    manager.runner_result.record_runner_result(
         RecordRunnerResultParams(
             run_id=task.id,
             dry_run=True,
@@ -101,7 +101,7 @@ def test_manager_writes_budget_report_files(tmp_path: Path):
     task = manager.create_run(goal="leaf", thought="build", plan=["write"])
     _record_real_runner_result(manager, task.id)
 
-    report = manager.write_run_budget_report(
+    report = manager.budget.write_run_budget_report(
         params=SubagentRunBudgetRequest(manager=manager, max_model_calls=1)
     )
 

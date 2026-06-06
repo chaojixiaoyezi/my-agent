@@ -2,8 +2,7 @@ from __future__ import annotations
 
 """Current structured recovery modes.
 
-Recovery dispatch accepts only the explicit modes below. Prefix-like strings
-such as rerun_from_old_alias intentionally fall through to manual review.
+Recovery dispatch accepts only the explicit protocol modes below.
 """
 
 from ....contracts.recovery_actions import RecoveryAction

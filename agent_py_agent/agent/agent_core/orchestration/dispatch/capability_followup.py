@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from ....runtime_errors import runtime_error_report
-from .mixin_helpers import run_dispatch_runner_stage
+from .runner_batches import run_dispatch_runner_stage
 from .service import make_capability_route_records
 
 

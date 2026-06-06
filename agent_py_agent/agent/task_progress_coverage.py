@@ -12,22 +12,20 @@ _DONE_STATUSES = {"done", "skipped"}
 def normalize_coverage(payload: dict[str, Any]) -> dict[str, Any]:
     raw_coverage = payload.get("coverage")
     coverage = dict(raw_coverage) if isinstance(raw_coverage, dict) else {}
-    dimensions = string_list(coverage.get("dimensions") or payload.get("coverage_dimensions"))
-    targets = _list(coverage.get("targets")) or _list(payload.get("coverage_targets"))
-    normalized_targets = [_normalize_coverage_target(item) for item in targets]
+    dimensions = string_list(coverage.get("dimensions"))
+    normalized_targets = [
+        target for item in _list(coverage.get("targets"))
+        if (target := _normalize_coverage_target(item))
+    ]
     normalized = {
-        "goal": str(
-            coverage.get("goal")
-            or payload.get("coverage_goal")
-            or (raw_coverage if isinstance(raw_coverage, str) else "")
-        ).strip(),
+        "goal": str(coverage.get("goal") or "").strip(),
         "dimensions": dimensions,
         "targets": normalized_targets,
     }
-    requirement = str(coverage.get("coverage_requirement") or payload.get("coverage_requirement") or "").strip()
+    requirement = str(coverage.get("coverage_requirement") or "").strip()
     if requirement:
         normalized["coverage_requirement"] = requirement
-    enforcement = str(coverage.get("enforcement") or payload.get("coverage_enforcement") or "").strip()
+    enforcement = str(coverage.get("enforcement") or "").strip()
     if enforcement:
         normalized["enforcement"] = enforcement
     normalized["counts"] = _coverage_counts(normalized_targets)
@@ -35,13 +33,7 @@ def normalize_coverage(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def coverage_from_update(update: dict[str, Any]) -> dict[str, Any]:
-    coverage = normalize_coverage(update)
-    item_targets = [_item_as_coverage_target(item) for item in _list(update.get("items"))]
-    item_targets = [target for target in item_targets if target]
-    if item_targets:
-        coverage["targets"] = merge_coverage_targets(coverage["targets"], item_targets)
-        coverage["counts"] = _coverage_counts(coverage["targets"])
-    return coverage
+    return normalize_coverage(update)
 
 
 def merge_coverage(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
@@ -109,21 +101,12 @@ def _preserve_done_checks(previous: dict[str, Any], merged: dict[str, Any]) -> d
     return checks
 
 
-def _item_as_coverage_target(value: object) -> dict[str, Any]:
+def _normalize_coverage_target(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    fields = _fields_to_checks(_first_present(value, ("fields", "expected_fields", "fields_needed")))
-    if not fields:
-        return {}
     item = dict(value)
-    item["checks"] = fields
-    return _normalize_coverage_target(item)
-
-
-def _normalize_coverage_target(value: object) -> dict[str, Any]:
-    item = dict(value) if isinstance(value, dict) else _coverage_target_from_text(value)
-    target_id = str(item.get("id") or item.get("name") or item.get("title") or "").strip()
-    title = str(item.get("title") or item.get("name") or target_id).strip()
+    target_id = str(item.get("id") or "").strip()
+    title = str(item.get("title") or target_id).strip()
     result = {
         "id": target_id or _safe_id(title) or "target",
         "title": title,
@@ -139,35 +122,13 @@ def _normalize_coverage_target(value: object) -> dict[str, Any]:
     return result
 
 
-def _coverage_target_from_text(value: object) -> dict[str, Any]:
-    text = str(value or "").strip()
-    if not text:
-        return {"title": ""}
-    delimiter = ":" if ":" in text else "：" if "：" in text else ""
-    if delimiter:
-        target_id, fields_text = text.split(delimiter, 1)
-        return {
-            "id": target_id.strip(),
-            "title": target_id.strip(),
-            "checks": dict.fromkeys(_split_field_text(fields_text), "pending"),
-        }
-    return {"title": text}
-
-
 def _normalize_target_checks(item: dict[str, Any]) -> dict[str, str]:
-    checks = _normalize_checks(item.get("checks"))
-    if checks:
-        return checks
-    return _fields_to_checks(
-        _first_present(item, ("expected_fields", "fields", "fields_needed", "missing_fields"))
-    )
+    return _normalize_checks(item.get("checks"))
 
 
 def _normalize_checks(value: object) -> dict[str, str]:
     if isinstance(value, dict):
         return _checks_from_mapping(value)
-    if isinstance(value, list | tuple):
-        return _checks_from_sequence(value)
     return {}
 
 
@@ -177,26 +138,6 @@ def _checks_from_mapping(value: dict) -> dict[str, str]:
         for key, status in value.items()
         if str(key).strip()
     }
-
-
-def _checks_from_sequence(value: list | tuple) -> dict[str, str]:
-    checks: dict[str, str] = {}
-    for item in value:
-        key = _check_key(item) if isinstance(item, dict) else str(item).strip()
-        if key:
-            status = str(item.get("status") or "pending").strip() if isinstance(item, dict) else "pending"
-            checks[key] = status or "pending"
-    return checks
-
-
-def _check_key(item: dict[str, Any]) -> str:
-    return str(item.get("id") or item.get("title") or item.get("name") or "").strip()
-
-
-def _fields_to_checks(value: object) -> dict[str, str]:
-    if isinstance(value, dict):
-        return _normalize_checks(value)
-    return dict.fromkeys(string_list(value), "pending")
 
 
 def _coverage_target_summary(target: dict[str, Any]) -> dict[str, Any]:
@@ -234,21 +175,6 @@ def _coverage_target_done(target: dict[str, Any]) -> bool:
 
 def _is_done_status(value: object) -> bool:
     return str(value or "").strip().lower() in _DONE_STATUSES
-
-
-def _split_field_text(value: str) -> list[str]:
-    text = str(value or "").strip()
-    for separator in ("，", "、", ";", "；", "|"):
-        text = text.replace(separator, ",")
-    return [item.strip() for item in text.split(",") if item.strip()]
-
-
-def _first_present(payload: dict[str, Any], keys: tuple[str, ...]) -> object:
-    for key in keys:
-        value = payload.get(key)
-        if value not in (None, "", [], {}):
-            return value
-    return None
 
 
 def _list(value: object) -> list:

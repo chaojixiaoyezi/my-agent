@@ -107,9 +107,15 @@ class DispatchEngine:
         self.queue = queue or InvestigationQueue()
         self.budget = budget if isinstance(budget, DispatchBudget) else DispatchBudget.from_mapping(budget)
 
-    def submit_case(self, case: Any) -> DispatchResult:
+    def enqueue_case(
+        self,
+        case: Any,
+        *,
+        context: Mapping[str, Any] | None = None,
+    ) -> DispatchResult:
         """Add a case to the queue and dispatch only when budget allows."""
 
+        _ = context
         summary_obj = summarize_case(case)
         summary = summary_obj.to_dict()
         case_id = _case_id(case, summary)
@@ -138,20 +144,6 @@ class DispatchEngine:
         agent_id = f"analyst-{request.request_id}"
         self.queue.mark_dispatched(request.request_id, agent_id=agent_id)
         return DispatchResult(request=request, dispatched=True, reason="dispatched", agent_id=agent_id)
-
-    def enqueue_case(
-        self,
-        case: Any,
-        *,
-        context: Mapping[str, Any] | None = None,
-    ) -> DispatchResult:
-        """Public protocol alias for submit_case.
-
-        The current local engine does not need context to enqueue a case, but
-        accepting it keeps the pluggable interface stable."""
-
-        _ = context
-        return self.submit_case(case)
 
     def health(self) -> dict[str, Any]:
         return build_health_summary(queue=self.queue, budget=self.budget).to_dict()

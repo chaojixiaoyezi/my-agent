@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,6 +19,7 @@ def _capability_service(tmp_path: Path, selected_runs=None):
             self.workspace = tmp_path
             self.workspace_root = tmp_path
             self._selected_runs = list(selected_runs or [])
+            self.indexing = SimpleNamespace(select_runs=self._select_runs)
 
         def _select_runs(self, run_ids):
             return list(self._selected_runs)
@@ -253,7 +255,7 @@ class TestCapabilityModels:
         """已有 controlled_exec grant 时，裸 rm 追加申请应复用旧 grant，不生成空白 shell grant。"""
         manager, task, grant, rm_request = _manager_with_rm_reuse_request(tmp_path)
 
-        record = manager._route_capability_request(
+        record = manager.capability._route_capability_request(
             task=manager.load(task.id),
             request=rm_request,
             query="rm stale.txt controlled_exec",
@@ -279,7 +281,7 @@ def _manager_with_rm_reuse_request(tmp_path: Path):
 
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(goal="controlled exec task", thought="trash deletes", plan=["grant"])
-    first_request = manager.record_capability_request(
+    first_request = manager.lifecycle.record_capability_request(
         task.id,
         RecordCapabilityRequestParams(
             problem="need controlled exec",
@@ -290,7 +292,7 @@ def _manager_with_rm_reuse_request(tmp_path: Path):
             path_scope=[str(tmp_path)],
         ),
     )
-    grant = manager.record_capability_grant(
+    grant = manager.lifecycle.record_capability_grant(
         task.id,
         RecordCapabilityGrantParams(
             request_id=first_request.id,
@@ -300,7 +302,7 @@ def _manager_with_rm_reuse_request(tmp_path: Path):
             path_scope=[str(tmp_path)],
         ),
     )
-    rm_request = manager.record_capability_request(
+    rm_request = manager.lifecycle.record_capability_request(
         task.id,
         RecordCapabilityRequestParams(
             problem="rm not in shell allowlist",

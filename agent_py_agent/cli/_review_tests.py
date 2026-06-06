@@ -4,14 +4,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..agent.common.json_io import JsonObjectReadReport, read_json_object_report
-from ..agent.subagents.execution import (
+from ..agent.subagents.execution.executor import TestExecutor
+from ..agent.subagents.execution.report import (
     TestExecutionReportOptions,
-    TestExecutor,
-    TestItemPreparationRequest,
     load_test_execution_report,
-    prepare_test_items,
     write_test_execution_report,
 )
+from ..agent.subagents.execution.test_items import TestItemPreparationRequest, prepare_test_items
 from ..agent.subagents.test_failure_classification import (
     TestFailureClassificationRequest,
     classify_test_execution_report,

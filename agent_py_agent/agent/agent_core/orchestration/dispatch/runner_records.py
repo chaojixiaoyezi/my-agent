@@ -6,7 +6,7 @@ from .params import DispatchContext
 
 
 def collaboration_candidate_load_error_record(agent, ctx: DispatchContext, load_errors: list[dict[str, object]]):
-    return agent.subagents.make_dispatch_record(
+    return agent.subagents.dispatch.make_dispatch_record(
         params=DispatchRecordParams(
             step="collaboration_candidates",
             action="candidate_scan_load_error",
@@ -24,7 +24,7 @@ def collaboration_candidate_load_error_record(agent, ctx: DispatchContext, load_
 
 def dry_runner_record(agent, ctx: DispatchContext, runner_snapshot: tuple[object, object, str]):
     task, before, retry_reason = runner_snapshot
-    return agent.subagents.make_dispatch_record(
+    return agent.subagents.dispatch.make_dispatch_record(
         params=DispatchRecordParams(
             step="runner",
             action="retry_runner" if retry_reason else "execute_runner",
@@ -49,7 +49,7 @@ def dry_runner_message(retry_reason: str) -> str:
 
 
 def multi_runner_instruction_record(agent, ctx: DispatchContext, evidence_paths: list[str]):
-    return agent.subagents.make_dispatch_record(
+    return agent.subagents.dispatch.make_dispatch_record(
         params=DispatchRecordParams(
             step="runner_instruction",
             action="ignore_multi_runner_instruction",

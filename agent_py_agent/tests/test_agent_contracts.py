@@ -199,7 +199,7 @@ def test_acceptance_contract_evaluates_artifacts_tests_and_state(tmp_path) -> No
         validate_artifact,
     )
     from agent_py_agent.agent.contracts.state_machine import RunStateFacts
-    from agent_py_agent.agent.subagents.execution import TestExecutionRecord
+    from agent_py_agent.agent.subagents.execution.records import TestExecutionRecord
 
     artifact = tmp_path / "report.json"
     artifact.write_text('{"ok": true}', encoding="utf-8")

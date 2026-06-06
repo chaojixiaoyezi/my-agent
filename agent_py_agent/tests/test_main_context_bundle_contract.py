@@ -103,6 +103,35 @@ def test_runtime_context_bundle_surfaces_tool_spec_load_error(tmp_path: Path) ->
     assert "读取失败" in errors[0]["model_message"]
 
 
+def test_main_context_bundle_ignores_old_acceptance_attribute_names(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    result = build_main_context_bundle(
+        MainContextBundleRequest(
+            root=root,
+            home_paths=ensure_my_agent_home(tmp_path / "home"),
+            user_prompt="验收条件仍然只是用户原话，不是 task_attributes 字段。",
+            request_id="request-old-attrs",
+            run_id="run-old-attrs",
+            task_id="task-old-attrs",
+            task_attributes={
+                "acceptance_criteria": ["旧 acceptance_criteria"],
+                "tests": ["旧 tests"],
+                "验收条件": ["旧中文验收条件"],
+                "约束": ["旧中文约束"],
+                "最近测试": ["旧中文最近测试"],
+            },
+            save=False,
+        )
+    )
+
+    contract = result.bundle["acceptance_contract"]
+    assert contract["source_status"] == "not_recorded"
+    assert contract["items"] == []
+    assert contract["constraints"] == []
+    assert contract["latest_tests"] == []
+
+
 def _build_contract_bundle_result(tmp_path: Path):
     root = tmp_path / "workspace"
     root.mkdir()

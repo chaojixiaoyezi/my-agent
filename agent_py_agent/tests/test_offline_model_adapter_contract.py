@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 
-def test_model_adapter_normalizes_legacy_tool_call_ids() -> None:
+def test_model_adapter_normalizes_current_tool_call_envelope() -> None:
     from agent_py_agent.agent.contracts.tool_protocol_v2 import (
         normalize_tool_call,
         validate_tool_call,
     )
 
-    envelope = normalize_tool_call({"tool": "read_file", "args": {"path": "input.txt"}})
+    envelope = normalize_tool_call({"tool_name": "read_file", "input": {"path": "input.txt"}})
 
     assert envelope.operation_id
     assert envelope.idempotency_key

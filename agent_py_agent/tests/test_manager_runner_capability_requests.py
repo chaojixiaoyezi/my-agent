@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
+from agent_py_agent.agent.subagents.model_capabilities import (
+    capability_request_counts_as_open,
+    capability_request_suppresses_duplicate,
+)
 from agent_py_agent.agent.subagents.models import (
     CapabilityRequest,
     SubAgentParsedOutput,
@@ -31,6 +36,9 @@ def capability_manager():
         def __init__(self):
             self._tasks = {}
             self._work_logs = []
+            self.actions = SimpleNamespace(_append_task_work_log=self._append_task_work_log)
+            self.indexing = SimpleNamespace(index_runner_result=self._index_runner_result)
+            self.learning = SimpleNamespace(record_learning_candidates=self.record_learning_candidates)
             self.runner_result = SubAgentRunnerResultService(self)
 
         def record_runner_result(self, params: RecordRunnerResultParams):
@@ -55,6 +63,12 @@ def capability_manager():
             return []
 
     return TestManager()
+
+
+def test_legacy_capability_request_status_is_not_current_open_request():
+    assert capability_request_counts_as_open("OPEN") is True
+    assert capability_request_counts_as_open("RESOLVED") is False
+    assert capability_request_suppresses_duplicate("RESOLVED") is False
 
 
 @pytest.fixture
@@ -140,7 +154,7 @@ def test_record_runner_result_pending_capability_stays_blocked(capability_manage
         blocked_reason="",
     )
 
-    result = capability_manager.record_runner_result(_rrr(
+    result = capability_manager.runner_result.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
@@ -171,7 +185,7 @@ def test_record_runner_result_does_not_treat_old_tool_wait_status_as_capability_
         blocked_reason="",
     )
 
-    result = capability_manager.record_runner_result(_rrr(
+    result = capability_manager.runner_result.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
@@ -201,7 +215,7 @@ def test_record_runner_result_requires_explicit_pending_capability_request(capab
 }
 [/SUBAGENT_RESULT]""")
 
-    result = capability_manager.record_runner_result(_rrr(
+    result = capability_manager.runner_result.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
@@ -238,7 +252,7 @@ def test_record_runner_result_keeps_tool_created_open_request_blocked(capability
         blocked_reason="",
     )
 
-    result = capability_manager.record_runner_result(_rrr(
+    result = capability_manager.runner_result.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
@@ -275,7 +289,7 @@ def test_legacy_request_status_does_not_silently_close(capability_manager, capab
         blocked_reason="",
     )
 
-    result = capability_manager.record_runner_result(_rrr(
+    result = capability_manager.runner_result.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
@@ -312,7 +326,7 @@ def test_successful_recovery_closes_current_open_request_with_current_status(cap
         blocked_reason="",
     )
 
-    result = capability_manager.record_runner_result(_rrr(
+    result = capability_manager.runner_result.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
@@ -349,7 +363,7 @@ def test_parse_error_with_tool_created_open_request_stays_capability_blocked(cap
         blocked_reason="",
     )
 
-    result = capability_manager.record_runner_result(_rrr(
+    result = capability_manager.runner_result.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
@@ -395,7 +409,7 @@ def test_record_runner_result_dedupes_parsed_request_against_tool_request(capabi
         blocked_reason="waiting for grant",
     )
 
-    result = capability_manager.record_runner_result(_rrr(
+    result = capability_manager.runner_result.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
@@ -419,7 +433,7 @@ def test_parse_error_still_records_actual_tool_facts(capability_manager, capabil
         parse_error="缺少 [/SUBAGENT_RESULT] 结束标记。",
     )
 
-    result = capability_manager.record_runner_result(_rrr(
+    result = capability_manager.runner_result.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,

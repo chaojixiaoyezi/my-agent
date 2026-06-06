@@ -20,7 +20,7 @@ class MemoryRoute:
     route_id: str
     topic: str
     trigger_keywords: list[str] = field(default_factory=list)
-    aliases: list[str] = field(default_factory=list)
+    related_terms: list[str] = field(default_factory=list)
     when_to_read: str = ""
     authority_path: str = ""
     inject_mode: str = "on_hit"
@@ -37,7 +37,7 @@ class MemoryRoute:
 
     def trigger_terms(self) -> list[str]:
 
-        return dedupe_strings([*self.trigger_keywords, *self.aliases])
+        return dedupe_strings([*self.trigger_keywords, *self.related_terms])
 
 
 @dataclass

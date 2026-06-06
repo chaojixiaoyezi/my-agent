@@ -256,7 +256,7 @@ def _detail_trace_payload(manager: Any, task: Any, bundle: RunnerStageTraceBundl
 def _tool_name(payload: Any) -> str:
     if not isinstance(payload, dict):
         return "unknown"
-    return str(payload.get("tool") or payload.get("name") or "unknown")
+    return str(payload.get("tool") or "unknown")
 
 
 def _payload_keys(payload: Any) -> list[str]:

@@ -15,7 +15,7 @@ from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
 
 
 def _schedule_one(manager: SubAgentManager, parent_id: str, goal: str, *, key: str = ""):
-    return manager.schedule_child_runs(
+    return manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent_id,
             child_specs=[HierarchyChildSpec(goal=goal, role="worker", context_packs=_packs(key))],

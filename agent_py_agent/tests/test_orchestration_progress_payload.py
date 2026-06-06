@@ -167,7 +167,7 @@ def test_runner_context_dispatch_reports_quality_advice_parent_load_error() -> N
 def test_runner_context_dispatch_includes_packet_first_recovery_strategy(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(goal="父任务", thought="派 child", plan=["schedule"], role="coordinator")
-    child_id = manager.schedule_child_runs(
+    child_id = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             apply=True,
@@ -211,7 +211,7 @@ def test_runner_context_dispatch_includes_packet_first_recovery_strategy(tmp_pat
 def test_runner_context_dispatch_batches_multiple_recovery_strategies_without_shared_instruction(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(goal="父任务", thought="派多个 child", plan=["schedule"], role="coordinator")
-    created = manager.schedule_child_runs(
+    created = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             apply=True,
@@ -254,7 +254,7 @@ def test_runner_context_dispatch_batches_multiple_recovery_strategies_without_sh
 def test_runner_context_dispatch_splits_mixed_recovery_batches(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(goal="父任务", thought="派多个 child", plan=["schedule"], role="coordinator")
-    blocked_id, timeout_id = manager.schedule_child_runs(
+    blocked_id, timeout_id = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             apply=True,

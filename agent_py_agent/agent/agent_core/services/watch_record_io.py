@@ -20,7 +20,7 @@ class LimitIdleResultRequest:
 
 
 def write_watch_stopped(agent: Any, cycle: int, lock_path, token: str) -> None:
-    agent.subagents.write_dispatch_watch_heartbeat(
+    agent.subagents.dispatch.write_dispatch_watch_heartbeat(
         params=DispatchWatchHeartbeatParams(
             cycle=cycle,
             status="stopped",
@@ -60,7 +60,7 @@ def append_watch_record(
 
 
 def write_watch_heartbeat(agent: Any, params: Any, *, status: str, message: str) -> None:
-    agent.subagents.write_dispatch_watch_heartbeat(
+    agent.subagents.dispatch.write_dispatch_watch_heartbeat(
         params=DispatchWatchHeartbeatParams(
             cycle=params.cycle,
             status=status,
@@ -73,7 +73,7 @@ def write_watch_heartbeat(agent: Any, params: Any, *, status: str, message: str)
 
 def write_idle_by_limit(agent: Any, params: Any, message: str) -> None:
     message = f"{message} 已达到最大连续空转轮数 ({params.max_consecutive})，进入空闲等待。"
-    agent.subagents.write_dispatch_watch_heartbeat(
+    agent.subagents.dispatch.write_dispatch_watch_heartbeat(
         params=DispatchWatchHeartbeatParams(
             cycle=params.cycle,
             status="idle_by_limit",

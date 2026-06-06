@@ -19,7 +19,7 @@ def test_hierarchy_schedule_allows_duplicate_coordinator_domains(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="shopping root", thought="orchestrate", plan=["plan"])
 
-    first = manager.schedule_child_runs(
+    first = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[
@@ -37,7 +37,7 @@ def test_hierarchy_schedule_allows_duplicate_coordinator_domains(tmp_path):
             apply=True,
         )
     )
-    duplicate = manager.schedule_child_runs(
+    duplicate = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[
@@ -71,7 +71,7 @@ def test_hierarchy_schedule_allows_generic_numbered_checker_siblings(tmp_path):
         parent_id=root.id, root_id=root.id, depth=1,
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[
@@ -98,7 +98,7 @@ def test_hierarchy_schedule_duplicate_domain_ignores_shared_filesystem_paths(tmp
         depth=1,
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[
@@ -139,7 +139,7 @@ def test_hierarchy_schedule_duplicate_domain_ignores_depth_markers(tmp_path):
         depth=1,
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[
@@ -166,7 +166,7 @@ def test_hierarchy_schedule_allows_duplicate_verified_leaf_targets(tmp_path):
     manager = SubAgentManager(tmp_path)
     parent = _auth_parent_with_verified_leaf(manager)
 
-    duplicate = manager.schedule_child_runs(
+    duplicate = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -180,7 +180,7 @@ def test_hierarchy_schedule_allows_duplicate_verified_leaf_targets(tmp_path):
             apply=True,
         )
     )
-    sibling = manager.schedule_child_runs(
+    sibling = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -206,7 +206,7 @@ def test_hierarchy_schedule_allows_explicit_repair_leaf_for_existing_target(tmp_
     manager = SubAgentManager(tmp_path)
     parent = _shared_parent_with_verified_leaf(manager)
 
-    repair = manager.schedule_child_runs(
+    repair = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -246,7 +246,7 @@ def test_hierarchy_schedule_allows_active_duplicate_repair_child(tmp_path):
 
 
 def _schedule_repair_worker(manager: SubAgentManager, parent_id: str, goal: str, agent_name: str):
-    return manager.schedule_child_runs(
+    return manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent_id,
             child_specs=[HierarchyChildSpec(goal=goal, role="worker", agent_name=agent_name)],
@@ -259,7 +259,7 @@ def test_hierarchy_schedule_allows_leaf_referencing_shared_assets(tmp_path):
     manager = SubAgentManager(tmp_path)
     parent = _shared_parent_with_verified_leaf(manager)
 
-    cart = manager.schedule_child_runs(
+    cart = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[

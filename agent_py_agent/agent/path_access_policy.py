@@ -27,8 +27,7 @@ DEFAULT_DANGEROUS_PATH_ROOTS = (
     "~/.kube",
     "~/.docker",
 )
-_FULL_ALIASES = {"full", "full-access", "full_access", "all", "open"}
-_NORMAL_ALIASES = {"", "normal", "workspace-write", "workspace_write", "restricted"}
+_VALID_MODES = {PATH_ACCESS_MODE_NORMAL, PATH_ACCESS_MODE_FULL}
 
 
 @dataclass(frozen=True)
@@ -82,11 +81,7 @@ class PathAccessPolicy:
 
 def normalize_path_access_mode(value: object) -> str:
     text = str(value or "").strip().lower()
-    if text in _FULL_ALIASES:
-        return PATH_ACCESS_MODE_FULL
-    if text in _NORMAL_ALIASES:
-        return PATH_ACCESS_MODE_NORMAL
-    return PATH_ACCESS_MODE_NORMAL
+    return text if text in _VALID_MODES else PATH_ACCESS_MODE_NORMAL
 
 
 def _normalized_root(value: object) -> Path | None:

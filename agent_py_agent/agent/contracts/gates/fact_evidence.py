@@ -136,7 +136,7 @@ def _collect_archive_ids(record: dict[str, Any], ids: set[str]) -> None:
 
 
 def _collect_id_keys(source: dict[str, Any], ids: set[str]) -> None:
-    for key in ("scoped_call_id", "tool_call_id", "call_id", "id", "operation_id", "idempotency_key"):
+    for key in ("scoped_call_id", "operation_id"):
         if value := _text(source.get(key)):
             ids.add(value)
 
@@ -168,10 +168,8 @@ def _source_has_tool_backing(source: dict[str, Any], archive_index: dict[str, se
 
 
 def _mapping_has_backing_id(source: dict[str, Any], backing_ids: set[str]) -> bool:
-    for key in ("tool_call_ref", "tool_call_id", "call_id", "operation_id"):
-        if (value := _text(source.get(key))) and value in backing_ids:
-            return True
-    return False
+    value = _text(source.get("tool_call_ref"))
+    return bool(value and value in backing_ids)
 
 
 def _source_backing_state(source: dict[str, Any]) -> dict[str, str]:

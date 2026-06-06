@@ -75,10 +75,33 @@ def evaluate_state_transition_gate(from_status: object, to_status: object) -> Ga
 def _payload_for_tool_protocol(payload: object) -> object:
     if not isinstance(payload, dict):
         return payload
-    if "tool" not in payload or any(key in payload for key in ("args", "arguments", "input")):
+    if "tool_name" in payload and "input" in payload:
         return payload
-    args = {key: value for key, value in payload.items() if key not in {"tool", "kind"}}
-    return {**payload, "args": args}
+    if "tool" not in payload:
+        return payload
+    result = {
+        "tool_name": str(payload.get("tool") or ""),
+        "input": _runtime_tool_input(payload),
+    }
+    for key in ("schema_version", "operation_id", "idempotency_key", "artifact_refs", "metadata", "call_id"):
+        if key in payload:
+            result[key] = payload[key]
+    return result
+
+
+def _runtime_tool_input(payload: dict[str, object]) -> dict[str, object]:
+    protocol_keys = {
+        "artifact_refs",
+        "call_id",
+        "idempotency_key",
+        "kind",
+        "metadata",
+        "operation_id",
+        "run_id",
+        "schema_version",
+        "tool",
+    }
+    return {key: value for key, value in payload.items() if key not in protocol_keys}
 
 
 def _tool_protocol_code(code: str) -> str:

@@ -158,7 +158,7 @@ def _append_session_ledger(path: Path, metadata: dict[str, Any], refs: dict[str,
 
 
 def _next_action(task: SubAgentTask, output_payload: dict[str, object]) -> str:
-    for item in [*sequence_strings(output_payload.get("next_actions"), allow_scalar=True), output_payload.get("next_action"), task.current_step]:
+    for item in [*sequence_strings(output_payload.get("next_actions"), allow_scalar=True), task.current_step]:
         text = str(item or "").strip()
         if text:
             return text

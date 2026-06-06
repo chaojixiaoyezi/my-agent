@@ -15,8 +15,8 @@ from ..storage import (
     LocalLogStore,
     QueryCriteria,
     QueryResult,
-    execute_security_query,
 )
+from ..storage.query import execute_security_query
 from .query_trace import (
     MAX_TRACE_CASE_QUERIES,
     TraceCaseParams,

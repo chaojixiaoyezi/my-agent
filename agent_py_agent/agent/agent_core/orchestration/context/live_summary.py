@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ...tool_context.recovery_summary import strategy_preview
 from ..summary_action_lines import top_level_action_lines
 
 _ORCHESTRATION_TOOLS = {
@@ -110,8 +109,27 @@ def _direct_children_recovery_lines(value: dict[str, Any]) -> list[str]:
     if value.get("recovery_batches"):
         lines.append(f"- recovery_batches: {_json_inline(value.get('recovery_batches'))}")
     if value.get("recovery_strategies"):
-        lines.append(f"- recovery_strategy_preview: {_json_inline(strategy_preview(value.get('recovery_strategies')))}")
+        lines.append(f"- recovery_strategy_preview: {_json_inline(_strategy_preview(value.get('recovery_strategies')))}")
     return lines
+
+
+def _strategy_preview(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    preview: list[dict[str, object]] = []
+    for item in value[:3]:
+        if not isinstance(item, dict):
+            continue
+        preview.append(
+            {
+                "run_id": item.get("run_id", ""),
+                "recommended_action": item.get("recommended_action", ""),
+                "packet_status": item.get("packet_status", ""),
+                "uses_continue_packet": bool(item.get("uses_continue_packet", False)),
+                "runner_instruction": _clip(item.get("runner_instruction", ""), limit=220),
+            }
+        )
+    return preview
 
 
 def _direct_children_repair_lines(value: dict[str, Any]) -> list[str]:
@@ -163,7 +181,7 @@ def _result_refs_by_run_lines(value: object) -> list[str]:
             lines.append(f"    summary={summary}")
     lines.append(
         "- result_ref_policy: read read_order first, then primary_artifact_refs/expected_outputs; "
-        "do not guess child filenames; run_closeout_ref and internal final reports are fallback progress refs, "
+        "do not guess child filenames; run_closeout_ref and internal final reports are diagnostic progress refs, "
         "not the first child result."
     )
     return lines

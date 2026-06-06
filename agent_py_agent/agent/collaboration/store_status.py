@@ -69,8 +69,8 @@ class _CaseSnapshot:
             *decision_errors,
         ]
         self.current = now()
-        self.aliases = store.agent_identity_aliases
-        self.evidence_sources_by_request = evidence_sources_by_request(self.evidence, aliases=self.aliases)
+        self.identity_keys = store.agent_identity_keys
+        self.evidence_sources_by_request = evidence_sources_by_request(self.evidence, identity_keys=self.identity_keys)
         self.has_required_evidence = self._required_evidence_index()
 
     @classmethod
@@ -82,7 +82,7 @@ class _CaseSnapshot:
             item.request_id: request_has_required_evidence(
                 item,
                 self.evidence_sources_by_request.get(item.request_id, set()),
-                target_aliases=self.aliases,
+                target_identity_keys=self.identity_keys,
             )
             for item in self.requests
             if item.request_id
@@ -114,12 +114,12 @@ def _status_payload(snapshot: _CaseSnapshot, groups: dict[str, list[Any]]) -> di
     coverage = case_response_coverage(
         snapshot.requests,
         snapshot.evidence_sources_by_request,
-        target_aliases=snapshot.aliases,
+        target_identity_keys=snapshot.identity_keys,
     )
     missing = missing_responder_agent_ids_by_request(
         snapshot.requests,
         snapshot.evidence_sources_by_request,
-        target_aliases=snapshot.aliases,
+        target_identity_keys=snapshot.identity_keys,
     )
     unavailable = unavailable_target_agent_ids_by_request(snapshot.requests)
     return {

@@ -113,7 +113,7 @@ def test_send_guidance_tool_can_target_direct_child_scope(tmp_path) -> None:
     result = SendGuidanceTool(agent).execute(
         {
             "target_scope": "children",
-            "run_id": root.id,
+            "root_id": root.id,
             "message": "先按新要求补证据，完成后继续原任务。",
         }
     )
@@ -141,7 +141,7 @@ def test_send_guidance_scope_resolution_failure_does_not_target_parent(tmp_path,
     result = SendGuidanceTool(agent).execute(
         {
             "target_scope": "children",
-            "run_id": root.id,
+            "root_id": root.id,
             "message": "请所有孩子补充证据。",
         }
     )

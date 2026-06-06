@@ -36,7 +36,7 @@ class SubagentLifecycleService:
     def prepare_attempt(self, run_id: str, *, dry_run: bool, active_attempt_id: str, retry_reason: str) -> str:
         if dry_run or active_attempt_id:
             return active_attempt_id
-        prepared = self.agent.subagents.prepare_runner_attempt(run_id, retry_reason=retry_reason)
+        prepared = self.agent.subagents.lifecycle.prepare_runner_attempt(run_id, retry_reason=retry_reason)
         return prepared.runner_active_attempt_id
 
     def build_prompt(self, run_id: str, max_cards: int, instruction: str):

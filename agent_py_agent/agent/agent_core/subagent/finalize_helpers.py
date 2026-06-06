@@ -31,7 +31,7 @@ def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
     params = request.params
     structured = request.structured
     repair_state = request.repair_state
-    return request.agent.subagents.record_runner_result(
+    return request.agent.subagents.runner_result.record_runner_result(
         RecordRunnerResultParams(
             run_id=params.run_id,
             attempt_id=params.active_attempt_id,

@@ -78,7 +78,7 @@ _EVIDENCE_PARAMETERS = {
 }
 _UPDATE_STATUS_PARAMETERS = {
     "case_id": "协作 case ID",
-    "status": "新状态；推荐 open/closed 表达收集窗口状态，也可用项目自定义状态；closed 必须带摘要",
+    "status": "新状态；机器只识别 open/closed 作为收集窗口状态；其他值只记录展示，不驱动关闭判断；closed 必须带摘要",
     "actor_agent_id": "执行状态推进的代理 ID",
     "summary": "状态推进摘要；closed 必须提供摘要、决策或既有决策",
     "decision_type": "可选决策类型，如 triaged_by_main_agent/resolved_by_main_agent",
@@ -87,7 +87,7 @@ _UPDATE_STATUS_PARAMETERS = {
 _UPDATE_REQUEST_PARAMETERS = {
     "case_id": "协作 case ID",
     "request_id": "协作请求 ID",
-    "status": "请求状态；开放世界字段，如 working/completed/blocked，也可用项目自定义状态",
+    "status": "请求状态；机器只识别 completed/blocked/timeout/declined；其他值都按等待中展示，不驱动完成或阻塞判断",
     "actor_agent_id": "更新请求状态的代理 ID",
     "summary": "状态更新摘要，说明已完成、阻塞原因或下一步需要什么",
     "target_agent_ids": "可选；需要换路时写新的目标代理列表，系统会把它落到请求目标上",

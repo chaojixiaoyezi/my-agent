@@ -84,10 +84,10 @@ def build_failing_tests_payload(task: SubAgentTask, output_payload: dict[str, ob
             continue
         failing.append(
             {
-                "name": str(item.get("name") or item.get("command") or item.get("id") or "unnamed"),
-                "status": str(item.get("status") or item.get("result") or "failed"),
-                "evidence_ref": str(item.get("evidence_ref") or item.get("path") or ""),
-                "message": str(item.get("message") or item.get("summary") or ""),
+                "name": str(item.get("name") or "unnamed"),
+                "status": str(item.get("status") or "failed"),
+                "evidence_ref": str(item.get("evidence_ref") or ""),
+                "message": str(item.get("message") or ""),
             }
         )
     return {"run_id": task.id, "failing_tests": failing, "updated_at": task.updated_at or task.created_at}
@@ -99,7 +99,6 @@ def build_next_actions_payload(task: SubAgentTask, output_payload: dict[str, obj
     actions = _unique_strings(
         [
             *sequence_strings(output_payload.get("next_actions"), allow_scalar=True),
-            output_payload.get("next_action"),
             task.latest_status_report.next_recommended_action if task.latest_status_report else "",
             *[f"resolve blocker: {item}" for item in task.blockers],
         ]

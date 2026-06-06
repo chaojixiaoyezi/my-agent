@@ -122,7 +122,7 @@ class TestExecutor:
         return ""
 
     def _check_file(self, test: dict[str, Any], *, method: str = "file_check") -> TestExecutionRecord:
-        path, error = self._resolve_test_path(test.get("file_path") or test.get("path"))
+        path, error = self._resolve_test_path(test.get("file_path"))
         if error:
             return _file_record(test, method, error=error)
         exists = path.exists() and path.is_file()
@@ -159,7 +159,7 @@ class TestExecutor:
         )
 
     def _check_artifact_integrity(self, test: dict[str, Any]) -> TestExecutionRecord:
-        path, error = self._resolve_test_path(test.get("file_path") or test.get("path"))
+        path, error = self._resolve_test_path(test.get("file_path"))
         if error:
             return _file_record(test, "artifact_integrity", error=error, path=path)
         artifact_integrity = importlib.import_module("agent_py_agent.agent.tooling.artifact_integrity")
@@ -245,16 +245,8 @@ def _content_match_is_exact(test: dict[str, Any]) -> bool:
 
 def _content_match_expects_absent(test: dict[str, Any]) -> bool:
     mode = str(test.get("match_mode") or "").strip().lower()
-    if mode in {
-        "not_contains",
-        "not_exists",
-        "not_exist",
-        "absent",
-        "missing",
-        "not_present",
-        "does_not_contain",
-    }:
+    if mode == "not_contains":
         return True
-    if bool(test.get("expect_absent") or test.get("negate") or test.get("should_not_contain")):
+    if bool(test.get("expect_absent")):
         return True
     return False

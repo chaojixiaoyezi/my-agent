@@ -60,7 +60,7 @@ def _apply_explicit_reassign(service, action, task, ctx: ActionHandlerContext):
     if not take_over_by:
         return _missing_takeover_target_record(service, action, task, ctx)
     if task.channel_status != "OK":
-        service.manager.probe_channel(action.run_id)
+        service.manager.channel_probe.probe_channel(action.run_id)
         task = service.manager.load(action.run_id)
     if task.channel_status != "OK":
         return _channel_blocked_takeover_record(service, action, task, ctx)

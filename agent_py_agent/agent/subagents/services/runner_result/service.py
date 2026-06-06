@@ -91,9 +91,6 @@ class SubAgentRunnerResultService:
     def __init__(self, manager):
         self.manager = manager
 
-    def __getattr__(self, name: str):
-        return getattr(self.manager, name)
-
     def _build_and_persist_result(
         self,
         ctx: BuildAndPersistContext,
@@ -180,32 +177,32 @@ class SubAgentRunnerResultService:
             text = str(blocker or "").strip()
             if text and text not in task.blockers:
                 task.blockers.append(text)
-        _apply_task_node_closeout_feedback(self, task, result, output_payload)
-        self.save(task)
+        _apply_task_node_closeout_feedback(self.manager, task, result, output_payload)
+        self.manager.save(task)
         if parsed.found and parsed.ok:
             _runner_append_debrief(task, parsed)
         learning_candidates = []
         if not params.dry_run and parsed.found and parsed.ok and params.lessons:
-            learning_candidates = self.record_learning_candidates(task, params.lessons)
-        self._append_task_work_log(
+            learning_candidates = self.manager.learning.record_learning_candidates(task, params.lessons)
+        self.manager.actions._append_task_work_log(
             task,
             f"subagent_runner: dry_run={params.dry_run} ok={result.ok} status={task.status} "
             f"message={result.message} learning_candidates={len(learning_candidates)}",
         )
-        self._index_runner_result(result, output_payload)
+        self.manager.indexing.index_runner_result(result, output_payload)
         return len(learning_candidates)
 
     def record_runner_result(
         self,
         params: RecordRunnerResultParams,
     ) -> SubAgentRunnerResult:
-        task = self.load(params.run_id)
+        task = self.manager.load(params.run_id)
         stale_result = self._check_stale_runner_result(task, params.attempt_id, params.dry_run)
         if stale_result:
             return stale_result
 
-        _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
-        self.save(task)
+        _apply_missing_paths(task, self.manager._build_work_order_paths(task.id, task.task_dir or None))
+        self.manager.save(task)
         now = time.time()
 
         extracted = self._extract_parsed_output(task, params.structured_output, now, params.actual_tools)
@@ -223,12 +220,12 @@ class SubAgentRunnerResultService:
             SubagentSessionCompactRequest(task, params.session_compact or {}, output_payload)
         )
         if session_refs:
-            self.save(task)
+            self.manager.save(task)
         from ...debug_trace import SubAgentRunnerTraceRequest, trace_runner_result
         from ...runner_completion_wake import notify_parent_on_runner_result
 
-        trace_runner_result(SubAgentRunnerTraceRequest(self, task, result, params))
-        notify_parent_on_runner_result(self, task, result, output_payload)
+        trace_runner_result(SubAgentRunnerTraceRequest(self.manager, task, result, params))
+        notify_parent_on_runner_result(self.manager, task, result, output_payload)
         return result
 
     def _runner_result_build_context(

@@ -21,9 +21,6 @@ from .capability_followup import (
     run_post_runner_capability_followup,
 )
 from .collection_records import collect_dispatch_records
-from .mixin_helpers import (
-    run_dispatch_runner_stage,
-)
 from .params import (
     DispatchContext,
     DispatchExecutionPlan,
@@ -33,7 +30,7 @@ from .params import (
     merge_dispatch_params,
     merge_watch_params,
 )
-from .runner_batches import execute_runner_jobs
+from .runner_batches import execute_runner_jobs, run_dispatch_runner_stage
 from .runner_selection import scoped_runner_tasks
 from .service import (
     make_patch_review_records,
@@ -175,8 +172,8 @@ class _DispatchReportMixin:
 
     def _build_and_write_report(self, records, execution_plan: DispatchExecutionPlan):
         mutate_state = bool(execution_plan.mutate_state)
-        report = self.subagents.build_dispatch_report(records, dry_run=not mutate_state)
-        report = self.subagents.write_dispatch_report(report, append_log=mutate_state)
+        report = self.subagents.dispatch.build_dispatch_report(records, dry_run=not mutate_state)
+        report = self.subagents.dispatch.write_dispatch_report(report, append_log=mutate_state)
         if mutate_state:
             notify_completed_tasks(self, records)
         self._has_pending_work = update_pending_work_state(self)

@@ -33,7 +33,7 @@ def test_items_mode_payload_rebinds_stale_self_output_run_id(tmp_path):
         }],
     })
     payload = json.loads(result.output)
-    run_id = payload["ids"][0]
+    run_id = payload["created_run_ids"][0]
     loaded = mock_agent.subagents.load(run_id)
 
     assert result.ok is True
@@ -114,7 +114,7 @@ def test_repair_task_uses_required_read_target_as_product_root(tmp_path):
         "required_read_paths": [str(report), str(target)],
     })
     payload = json.loads(result.output)
-    task = agent.subagents.load(payload["ids"][0])
+    task = agent.subagents.load(payload["created_run_ids"][0])
 
     assert result.ok is True
     assert task.allowed_write_roots == [
@@ -136,7 +136,7 @@ def test_goal_absolute_target_file_normalizes_write_root_to_parent(tmp_path):
         "extra_write_roots": [str(target)],
     })
     payload = json.loads(result.output)
-    task = agent.subagents.load(payload["ids"][0])
+    task = agent.subagents.load(payload["created_run_ids"][0])
 
     assert result.ok is True
     assert task.allowed_write_roots == [
@@ -159,7 +159,7 @@ def test_repair_contract_fields_are_persisted_to_child_context(tmp_path):
         "context_packs": [{"kind": "repair_contract", "summary": "同一个 run 内修复、执行、验证"}],
     })
     payload = json.loads(result.output)
-    task = agent.subagents.load(payload["ids"][0])
+    task = agent.subagents.load(payload["created_run_ids"][0])
 
     assert result.ok is True
     assert task.context_manifest.required_read_paths == [test_ref]
@@ -177,7 +177,7 @@ def test_repair_contract_idempotency_does_not_merge_different_scope(tmp_path):
     assert first["created_run_ids"]
     assert second["created_run_ids"]
     assert second["reused_run_ids"] == []
-    assert first["ids"] != second["ids"]
+    assert first["created_run_ids"] != second["created_run_ids"]
 
 
 def test_repair_contract_idempotency_reuses_same_scope_with_reworded_goal(tmp_path):
@@ -208,7 +208,7 @@ def test_generic_worker_without_idempotency_contract_does_not_reuse_by_goal_text
     assert first["created_run_ids"]
     assert second["created_run_ids"]
     assert second["reused_run_ids"] == []
-    assert first["ids"] != second["ids"]
+    assert first["created_run_ids"] != second["created_run_ids"]
 
 
 def test_generic_worker_reuses_structured_idempotency_contract_despite_reworded_goal(tmp_path):
@@ -402,7 +402,7 @@ def test_repair_goal_without_contract_keeps_different_targets_separate(tmp_path)
     assert first["created_run_ids"]
     assert second["created_run_ids"]
     assert second["reused_run_ids"] == []
-    assert first["ids"] != second["ids"]
+    assert first["created_run_ids"] != second["created_run_ids"]
 
 
 def test_schedule_child_repair_contract_fields_are_persisted_to_child_context(tmp_path):

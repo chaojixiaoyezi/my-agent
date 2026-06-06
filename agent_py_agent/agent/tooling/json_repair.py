@@ -63,8 +63,8 @@ def _load_write_file_json_with_trailing_body(raw: str) -> Any | None:
         return None
     if not isinstance(payload, dict):
         return None
-    tool = str(payload.get("tool") or "").strip().lower()
-    if tool not in {"write_file", "write_file_raw", "write"}:
+    tool = str(payload.get("tool") or "").strip()
+    if tool != "write_file":
         return None
     if str(payload.get("content") or "").strip():
         return None

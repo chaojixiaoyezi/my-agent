@@ -279,7 +279,7 @@ def _controlled_exec_boundary(workspace):
                 "command_allowlist": ["pwd"],
                 "path_scope": [str(workspace)],
                 "network_scope": [],
-                "output_budget": {"timeout_seconds": 5, "max_stdout_bytes": 1024},
+                "output_budget": {"timeout_seconds": 5, "stdout_bytes": 1024},
                 "constraints": {"delete_policy": "trash_only"},
             }
         ],

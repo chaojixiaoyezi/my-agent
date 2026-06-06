@@ -54,7 +54,7 @@ class SubAgentChannelProbeService:
         result.checks.append(self.write_channel_probe_files(task, result))
         result.channel_status = _channel_status(result.checks)
         self.update_task_from_probe(task, result.checks, now)
-        self.manager._index_channel_probe(result)
+        self.manager.indexing.index_channel_probe(result)
         return result
 
     def probe_channels(
@@ -99,7 +99,7 @@ class SubAgentChannelProbeService:
             render_channel_probe_markdown(report),
             encoding="utf-8",
         )
-        self.manager._index_report(
+        self.manager.indexing.index_report(
             IndexReportParams(
                 "subagent_channel_probe_report",
                 "latest",

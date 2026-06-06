@@ -36,7 +36,7 @@ def test_explicit_coordinator_product_delivery_uses_output_files_without_extra_w
     assert params.extra_write_roots == [str(Path("/tmp/project/build").resolve(strict=False))]
 
 
-def test_create_subagents_spec_does_not_require_legacy_write_roots():
+def test_create_subagents_spec_does_not_require_write_root_parameters():
     spec = build_create_subagents_spec()
     rendered = "\n".join([
         spec.description,

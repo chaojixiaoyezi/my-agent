@@ -7,21 +7,21 @@ from typing import Any
 from .models import CollaborationRequest
 from .request_status import unavailable_target_agent_ids
 
-TargetAliases = Callable[[object], set[str]]
+TargetIdentityKeys = Callable[[object], set[str]]
 
 
 def case_response_coverage(
     requests: list[CollaborationRequest],
     evidence_sources_by_request: dict[str, set[str]],
     *,
-    target_aliases: TargetAliases,
+    target_identity_keys: TargetIdentityKeys,
     sample_limit: int = 20,
 ) -> dict[str, Any]:
     rows = [
         _request_coverage_row(
             request,
             evidence_sources_by_request.get(request.request_id, set()),
-            target_aliases=target_aliases,
+            target_identity_keys=target_identity_keys,
             sample_limit=sample_limit,
         )
         for request in requests
@@ -43,11 +43,11 @@ def _request_coverage_row(
     request: CollaborationRequest,
     evidence_sources: set[str],
     *,
-    target_aliases: TargetAliases,
+    target_identity_keys: TargetIdentityKeys,
     sample_limit: int,
 ) -> dict[str, Any]:
     targets = _unique_strings(request.target_agent_ids)
-    responded = _responded_targets(targets, evidence_sources, target_aliases=target_aliases)
+    responded = _responded_targets(targets, evidence_sources, target_identity_keys=target_identity_keys)
     unavailable = _unique_strings(unavailable_target_agent_ids(request))
     missing = [target for target in targets if target not in responded]
     return {
@@ -69,12 +69,12 @@ def _responded_targets(
     targets: list[str],
     evidence_sources: set[str],
     *,
-    target_aliases: TargetAliases,
+    target_identity_keys: TargetIdentityKeys,
 ) -> list[str]:
     return [
         target
         for target in targets
-        if evidence_sources.intersection(target_aliases(target))
+        if evidence_sources.intersection(target_identity_keys(target))
     ]
 
 

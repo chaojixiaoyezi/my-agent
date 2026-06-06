@@ -234,7 +234,7 @@ def _tool_call_refs(value: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         refs.append({
-            "tool": str(item.get("tool") or item.get("name") or ""),
+            "tool": str(item.get("tool") or ""),
             "id": str(item.get("id") or item.get("tool_call_id") or ""),
             "ok": item.get("ok"),
             "output_hash": str(item.get("output_hash", "") or ""),

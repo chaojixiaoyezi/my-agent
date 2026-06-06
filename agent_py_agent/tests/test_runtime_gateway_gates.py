@@ -198,7 +198,7 @@ def _approval_record() -> dict[str, object]:
     return {
         "approval_id": "approval-1",
         "status": "APPROVED",
-        "tool": "controlled_exec",
+        "tool_name": "controlled_exec",
         "run_id": "run-1",
         "operation_id": "op-1",
         "idempotency_key": "idem-1",

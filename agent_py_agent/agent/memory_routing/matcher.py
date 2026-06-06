@@ -32,10 +32,10 @@ def score_route(normalized_query: str, route: MemoryRoute) -> tuple[float, list[
     reasons: list[str] = []
     matched_terms: list[str] = []
     acc = _ScoreAccumulator(reasons, matched_terms)
-    alias_score, alias_exact, alias_fuzzy = _score_terms(
+    related_term_score, related_term_exact, related_term_fuzzy = _score_terms(
         normalized_query,
-        route.aliases,
-        spec=_TermScoreSpec("精确命中别名", "模糊命中别名", 20.0, 10.0, 2.0, 1.5),
+        route.related_terms,
+        spec=_TermScoreSpec("精确命中相关词", "模糊命中相关词", 20.0, 10.0, 2.0, 1.5),
         acc=acc,
     )
     keyword_score, keyword_exact, keyword_fuzzy = _score_terms(
@@ -44,9 +44,9 @@ def score_route(normalized_query: str, route: MemoryRoute) -> tuple[float, list[
         spec=_TermScoreSpec("精确命中关键词", "模糊命中关键词", 16.0, 8.0, 1.5, 1.0),
         acc=acc,
     )
-    score = alias_score + keyword_score
-    exact_hit = alias_exact or keyword_exact
-    fuzzy_hit = alias_fuzzy or keyword_fuzzy
+    score = related_term_score + keyword_score
+    exact_hit = related_term_exact or keyword_exact
+    fuzzy_hit = related_term_fuzzy or keyword_fuzzy
 
     topic_score, topic_hit = _score_topic(normalized_query, route, acc)
     score += topic_score

@@ -39,7 +39,7 @@ def _run_readonly_watch_cycle(agent, params: RunSingleWatchCycleParams, *, start
     )
     store_record = not params.idle_record_already_written
     if store_record:
-        agent.subagents.append_dispatch_watch_log(record)
+        agent.subagents.dispatch.append_dispatch_watch_log(record)
     more_cycles, message = watch_sleep_state(params, message)
     write_watch_heartbeat(
         agent,
@@ -70,7 +70,7 @@ def _run_idle_watch_cycle(agent, params: RunSingleWatchCycleParams, *, started_a
     )
     store_record = not params.idle_record_already_written
     if store_record:
-        agent.subagents.append_dispatch_watch_log(record)
+        agent.subagents.dispatch.append_dispatch_watch_log(record)
     more_cycles, message = watch_sleep_state(params, message)
     write_watch_heartbeat(
         agent,
@@ -112,7 +112,7 @@ def _run_watch_input_load_error_cycle(
         evidence_paths=[],
     )
     store_record = True
-    agent.subagents.append_dispatch_watch_log(record)
+    agent.subagents.dispatch.append_dispatch_watch_log(record)
     more_cycles, message = watch_sleep_state(params, message)
     write_watch_heartbeat(
         agent,

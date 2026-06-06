@@ -18,13 +18,13 @@ from .planner_service import build_parent_planner_state as _build_parent_planner
 from .runner.prompts import (
     _build_subagent_runner_prompt,
 )
-from .subagent import SubagentLifecycleService
 from .subagent.finalize_helpers import (
     FinalizedRecoverySnapshotRequest,
     FinalizedRunnerRecordRequest,
     record_finalized_runner_result,
     write_finalized_recovery_snapshot,
 )
+from .subagent.lifecycle_service import SubagentLifecycleService
 from .subagent.params import (
     SpawnSubagentsParams,
     SubagentFinalizeParams,
@@ -113,12 +113,12 @@ class _SubagentLifecycleBase:
         return self._get_subagent_lifecycle_service().run_subagent(options)
 
     def _build_subagent_prompt(self, run_id, max_cards, instruction):
-        context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
+        context = self.subagents.runner_context.write_execution_context(run_id, max_cards=max_cards)
         prompt = _build_subagent_runner_prompt(context, instruction)
         return context, prompt
 
     def _record_subagent_dry_run(self, run_id, active_attempt_id, prompt):
-        return self.subagents.record_runner_result(
+        return self.subagents.runner_result.record_runner_result(
             RecordRunnerResultParams(
                 run_id=run_id,
                 attempt_id=active_attempt_id,
@@ -132,13 +132,13 @@ class _SubagentLifecycleBase:
     def _probe_subagent_channel(self, params: SubagentProbeParams):
         if not params.probe:
             return None
-        probe_result = self.subagents.probe_channel(params.run_id)
+        probe_result = self.subagents.channel_probe.probe_channel(params.run_id)
         if probe_result.channel_status != "BROKEN":
             return None
         context, prompt = self._build_subagent_prompt(
             params.run_id, params.max_cards, params.instruction
         )
-        return self.subagents.record_runner_result(
+        return self.subagents.runner_result.record_runner_result(
             RecordRunnerResultParams(
                 run_id=params.run_id,
                 attempt_id=params.active_attempt_id,
@@ -154,7 +154,7 @@ class _SubagentLifecycleBase:
 
     def _handle_subagent_run_failure(self, params: SubagentRunFailureParams):
         failure_type = _subagent_run_failure_type(params.exc)
-        failed_result = self.subagents.record_runner_result(
+        failed_result = self.subagents.runner_result.record_runner_result(
             RecordRunnerResultParams(
                 run_id=params.run_id,
                 attempt_id=params.active_attempt_id,

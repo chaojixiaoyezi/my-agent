@@ -37,7 +37,7 @@ def test_runtime_config_rejects_artifact_dir_outside_workspace(tmp_path: Path) -
     assert result.error_codes == ("CONFIG_ARTIFACT_DIR_OUTSIDE_WORKSPACE",)
 
 
-def test_runtime_config_treats_allowed_write_roots_as_legacy_context(tmp_path: Path) -> None:
+def test_runtime_config_ignores_allowed_write_roots_as_unknown_config(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
 
     result = validate_runtime_config(

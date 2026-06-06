@@ -28,11 +28,12 @@ _TRUNCATED_WRITE_HINT = (
 
 def parse_error_message(payload: dict[str, Any]) -> str:
     error = str(payload.get("error") or "工具调用解析失败")
+    error_code = str(payload.get("error_code") or "").strip()
     hint = f"{error}。{_PARSE_RETRY_HINT}"
-    if "缺少结束标记" in error:
+    if error_code == "TOOL_CALL_UNCLOSED":
         hint = f"{hint}{_TRUNCATED_PAYLOAD_HINT}"
     raw = str(payload.get("raw") or "")
     is_write_payload = '"write_file"' in raw
-    if "缺少结束标记" in error and is_write_payload and '"content"' in raw:
+    if error_code == "TOOL_CALL_UNCLOSED" and is_write_payload and '"content"' in raw:
         hint = f"{hint}{_TRUNCATED_WRITE_HINT}"
     return hint

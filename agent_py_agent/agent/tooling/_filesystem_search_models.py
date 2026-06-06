@@ -9,7 +9,6 @@ from typing import Any
 from ._filesystem_helpers import (
     _MAX_SEARCH_QUERY_CHARS,
     _bool_param,
-    _bundled_filesystem_param,
     _int_param,
     _optional_path,
     _text_param,
@@ -79,8 +78,10 @@ class SearchMatch:
 
 
 def search_request_from_params(params: dict[str, Any], max_matches: int) -> SearchRequest:
+    if isinstance(params.get("filesystem"), dict):
+        raise ValueError("filesystem bundle is not current search_text syntax; use top-level path instead.")
     query = _text_param(
-        _bundled_filesystem_param(params, "query", _bundled_filesystem_param(params, "pattern")),
+        params.get("query"),
         name="query",
         max_chars=_MAX_SEARCH_QUERY_CHARS,
         strip=True,
@@ -88,24 +89,24 @@ def search_request_from_params(params: dict[str, Any], max_matches: int) -> Sear
     output_mode = _search_output_mode(params)
     return SearchRequest(
         query=query,
-        raw_path=_optional_path(_bundled_filesystem_param(params, "path", "."), default="."),
+        raw_path=_optional_path(params.get("path", "."), default="."),
         limit=min(
-            _int_param(_bundled_filesystem_param(params, "limit"), name="limit", default=max_matches, min_value=1),
+            _int_param(params.get("limit"), name="limit", default=max_matches, min_value=1),
             max_matches,
         ),
-        offset=_int_param(_bundled_filesystem_param(params, "offset"), name="offset", default=0, min_value=0),
-        context=_int_param(_bundled_filesystem_param(params, "context"), name="context", default=0, min_value=0),
+        offset=_int_param(params.get("offset"), name="offset", default=0, min_value=0),
+        context=_int_param(params.get("context"), name="context", default=0, min_value=0),
         file_glob=_text_param(
-            _bundled_filesystem_param(params, "file_glob", ""),
+            params.get("file_glob", ""),
             name="file_glob",
             max_chars=200,
             allow_empty=True,
             strip=True,
         ),
-        literal=_bool_param(_bundled_filesystem_param(params, "literal"), default=True),
-        ignore_case=_bool_param(_bundled_filesystem_param(params, "ignore_case"), default=False),
+        literal=_bool_param(params.get("literal"), default=True),
+        ignore_case=_bool_param(params.get("ignore_case"), default=False),
         output_mode=output_mode,
-        include_ignored=_bool_param(_bundled_filesystem_param(params, "include_ignored"), default=False),
+        include_ignored=_bool_param(params.get("include_ignored"), default=False),
     )
 
 
@@ -182,7 +183,7 @@ def search_page_notice(seen: int, limit: int) -> str:
 
 def _search_output_mode(params: dict[str, Any]) -> str:
     output_mode = _text_param(
-        _bundled_filesystem_param(params, "output_mode", "content"),
+        params.get("output_mode", "content"),
         name="output_mode",
         max_chars=40,
         strip=True,

@@ -97,7 +97,7 @@ def cmd_subagent_context(args) -> int:
 
     agent = make_agent(args)
     options = _subagent_context_options(args)
-    context = agent.subagents.write_execution_context(options.run_id, max_cards=options.max_cards)
+    context = agent.subagents.runner_context.write_execution_context(options.run_id, max_cards=options.max_cards)
     print("SUBAGENT EXECUTION CONTEXT")
     print(
         f"run_id={context.run_id} skills={len(context.allowed_skills)} "

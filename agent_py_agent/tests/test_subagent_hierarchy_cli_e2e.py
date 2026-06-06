@@ -65,9 +65,9 @@ def _create_child_runs(parser, config_path: Path, root_id: str, capsys) -> dict[
 
 
 def _write_hierarchy_contexts(agent: SimpleAgent, root_id: str, run_ids: list[str]) -> None:
-    agent.subagents.write_execution_context(root_id)
+    agent.subagents.runner_context.write_execution_context(root_id)
     for run_id in run_ids:
-        agent.subagents.write_execution_context(run_id)
+        agent.subagents.runner_context.write_execution_context(run_id)
 
 
 def _mark_blocked_child(agent: SimpleAgent, run_id: str):

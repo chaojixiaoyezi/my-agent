@@ -4,6 +4,9 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
+DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS = 12_000
+DEFAULT_COMMAND_ACCESS_MODE = "workspace-write"
+
 
 @lru_cache(maxsize=1)
 def default_agent_config() -> Any:
@@ -31,6 +34,8 @@ def default_config_bool(key: str) -> bool:
 
 
 __all__ = [
+    "DEFAULT_COMMAND_ACCESS_MODE",
+    "DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS",
     "default_agent_config",
     "default_config_bool",
     "default_config_float",

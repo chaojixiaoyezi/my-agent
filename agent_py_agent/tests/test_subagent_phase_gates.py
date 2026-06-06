@@ -69,7 +69,7 @@ def _attach_tmp_workspace(tmp_path, tasks) -> None:
 def test_root_with_coordinators_can_still_create_direct_leaf(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root delegates", thought="plan", plan=["plan"], role="coordinator")
-    first = manager.schedule_child_runs(
+    first = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[
@@ -79,7 +79,7 @@ def test_root_with_coordinators_can_still_create_direct_leaf(tmp_path):
         )
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[

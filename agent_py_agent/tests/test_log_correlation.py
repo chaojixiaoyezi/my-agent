@@ -410,9 +410,9 @@ def test_build_route_draft_merges_evidence_refs():
     assert set(draft.evidence_refs) == {"ev-case-1", "ev-case-2", "ev-f1-1"}
 
 
-def test_draft_route_alias():
+def test_draft_route_field_name():
     """测试 draft_route 是 build_route_draft 的别名。"""
-    case = CaseRecord(case_id="case-1", title="alias test")
+    case = CaseRecord(case_id="case-1", title="field_name test")
 
     draft1 = draft_route(case)
     draft2 = build_route_draft(case)
@@ -422,9 +422,9 @@ def test_draft_route_alias():
     assert draft1.generated_at[:19] == draft2.generated_at[:19]
 
 
-def test_route_from_case_alias():
+def test_route_from_case_field_name():
     """测试 route_from_case 是 build_route_draft 的别名。"""
-    case = CaseRecord(case_id="case-1", title="alias test 2")
+    case = CaseRecord(case_id="case-1", title="field_name test 2")
 
     draft = route_from_case(case)
 

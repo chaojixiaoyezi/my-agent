@@ -13,7 +13,6 @@ _TOP_LEVEL_ACTION_KEYS = (
     "request_ref",
     "target_agent_ids",
     "required_capabilities",
-    "ids",
     "request_count",
     "request_history_count",
     "evidence_count",

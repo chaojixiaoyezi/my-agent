@@ -13,8 +13,8 @@ def test_subagent_result_text_converts_to_typed_envelope():
         '"status":"DONE",'
         '"summary":"display only",'
         '"used_tools":["fake_from_model"],'
-        '"artifacts":[{"path":"out.txt","kind":"file","summary":"output"}],'
-        '"evidence_packets":[{"id":"evpkt-1","claim":"output exists",'
+        '"artifacts":[{"artifact_id":"artifact-1","path":"out.txt","kind":"file","summary":"output"}],'
+        '"evidence_packets":[{"evidence_id":"evpkt-1","claim":"output exists",'
         '"artifact_refs":["out.txt"],"evidence_refs":["report.json"],"confidence":0.8}],'
         '"tests":[{"name":"static","ok":true}],'
         '"next_actions":["parent verify"]'
@@ -39,7 +39,9 @@ def test_subagent_result_text_converts_to_typed_envelope():
     assert envelope.status == "DONE"
     assert envelope.summary == "display only"
     assert envelope.actual_tools == ["read_file"]
+    assert envelope.artifact_refs[0].artifact_id == "artifact-1"
     assert envelope.artifact_refs[0].path == "out.txt"
+    assert envelope.evidence_refs[0].evidence_id == "evpkt-1"
     assert envelope.evidence_refs[0].claim == "output exists"
     assert envelope.tests == [{"name": "static", "ok": True}]
     assert envelope.next_actions == ["parent verify"]

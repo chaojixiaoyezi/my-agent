@@ -300,9 +300,11 @@ before changing code.
   It may guide the model, but product code must not treat a prose phrase as the
   only source of truth for routing, permission, acceptance, or recovery.
 - Tool syntax and error syntax are different from business intent. It is OK to
-  parse command forms such as `cat file`, XML-ish tool markers, Python traceback
-  names, path strings, file extensions, and protocol tokens because those are
-  machine syntax or diagnostics, not guesses about what the user meant.
+  parse current protocol markers, Python traceback names, path strings, file
+  extensions, and protocol tokens because those are machine syntax or
+  diagnostics, not guesses about what the user meant. Runtime code must not
+  execute misspelled tool names, old tool aliases, wrapped parameter bundles, or
+  shell-like command phrases as if they were current tool calls.
 - 读路径不存在不是权限缺口，也不是任务终止信号。`read_file`、
   `list_files`、`search_text` 这类只读工具必须优先返回结构化
   `path_not_found` 和工作区内 `candidate_paths`，让模型自己确认候选或继续搜索。

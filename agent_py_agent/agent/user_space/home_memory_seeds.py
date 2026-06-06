@@ -38,7 +38,7 @@ _MEMORY_ROUTE_SECTIONS = (
     """## memory.hot
 topic: always-loaded high-frequency memory
 trigger_keywords: memory-hot, HOT, 高频教训, 铁律, 启动记忆
-aliases: hot memory, memory hot
+related_terms: hot memory, memory hot
 when_to_read: Always read this first when reasoning about durable project behavior.
 authority_path: memory-hot.md
 inject_mode: summary
@@ -48,7 +48,7 @@ stale_check: review when project rules change""",
     """## lessons.real-tests
 topic: real my-agent task testing prompt style
 trigger_keywords: 真实测试, 真实LLM, 普通中文, 提示词, 不要专业术语
-aliases: real task prompt, live task
+related_terms: real task prompt, live task
 when_to_read: Read before creating or debugging real my-agent task tests.
 authority_path: memory/lessons/real-tests.md
 inject_mode: summary
@@ -58,7 +58,7 @@ stale_check: review after major runtime changes""",
     """## lessons.compact
 topic: long task compact and continuation
 trigger_keywords: compact, 上下文压缩, 续接, 长任务, 多轮压缩
-aliases: compaction, resume after compact
+related_terms: compaction, resume after compact
 when_to_read: Read when changing or debugging context compaction and continuation.
 authority_path: memory/lessons/compact.md
 inject_mode: summary
@@ -68,7 +68,7 @@ stale_check: review after memory runtime changes""",
     """## lessons.subagents
 topic: subagent delegation and collaboration
 trigger_keywords: 子代理, 孙代理, 协作, 派工, 多代理, agent tree
-aliases: subagent collaboration, delegation
+related_terms: subagent collaboration, delegation
 when_to_read: Read when changing delegation, collaboration, or agent-tree behavior.
 authority_path: memory/lessons/subagents.md
 inject_mode: summary
@@ -78,7 +78,7 @@ stale_check: review after subagent runtime changes""",
     """## lessons.artifacts
 topic: artifact delivery and closeout behavior
 trigger_keywords: 产物, closeout, 验收, 交付, xlsx, pdf, word
-aliases: delivery quality, artifact validation
+related_terms: delivery quality, artifact validation
 when_to_read: Read when changing delivery, artifact registry, or closeout behavior.
 authority_path: memory/lessons/artifacts.md
 inject_mode: summary
@@ -88,7 +88,7 @@ stale_check: review after tool or delivery changes""",
     """## lessons.open-world
 topic: open-world concepts and auditable defaults
 trigger_keywords: 开放世界, 文件格式, 产物类型, MIME, 协议, 后缀
-aliases: open world, extensible formats
+related_terms: open world, extensible formats
 when_to_read: Read before adding mappings for file types, artifact kinds, protocols, or MIME types.
 authority_path: memory/lessons/open-world.md
 inject_mode: summary

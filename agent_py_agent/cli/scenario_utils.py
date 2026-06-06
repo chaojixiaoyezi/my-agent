@@ -196,7 +196,7 @@ def print_scenario_step(index: int, title: str) -> None:
 
 def print_scenario_board(agent: SimpleAgent, *, limit: int) -> None:
 
-    board = agent.subagents.write_board(options=SubAgentBoardOptions(recent_limit=limit))
+    board = agent.subagents.board.write_board(options=SubAgentBoardOptions(recent_limit=limit))
     print("board_summary=" + json.dumps(board.summary, ensure_ascii=False, sort_keys=True))
     for item in board.items[:limit]:
         print(

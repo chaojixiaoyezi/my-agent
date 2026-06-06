@@ -41,7 +41,7 @@ class CapabilityRequestTool(BaseTool):
         if isinstance(request, ToolExecutionResult):
             return request
         try:
-            record = self.agent.subagents.record_capability_request(request.run_id, request.params)
+            record = self.agent.subagents.lifecycle.record_capability_request(request.run_id, request.params)
         except FileNotFoundError:
             return _capability_error(f"run_id 不存在: {request.run_id}")
         payload = {
@@ -150,7 +150,7 @@ def _capability_params(params: dict[str, object]) -> dict[str, object]:
 
 
 def _needed_capability(params: dict[str, object], tools: list[str], commands: list[str]) -> str:
-    explicit = str(params.get("needed_capability") or params.get("capability") or "").strip()
+    explicit = str(params.get("needed_capability") or "").strip()
     if explicit:
         return explicit
     if "controlled_exec" in tools:
@@ -177,13 +177,6 @@ def _string_dict(value: object) -> dict[str, str]:
 def _object_dict(value: object) -> dict[str, object]:
     if isinstance(value, dict):
         return {str(key): item for key, item in value.items()}
-    if isinstance(value, str) and value.strip().startswith("{"):
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError:
-            return {}
-        if isinstance(parsed, dict):
-            return {str(key): item for key, item in parsed.items()}
     return {}
 
 

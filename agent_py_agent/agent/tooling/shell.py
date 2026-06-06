@@ -244,7 +244,13 @@ def _working_dir_from_params(
     working_dir = str(params.get("working_dir", "")).strip()
     target = Path(working_dir).expanduser() if working_dir else workspace_root
     if not target.is_dir():
-        return workspace_root
+        field = "working_dir" if working_dir else "workspace_root"
+        return ToolExecutionResult(
+            "run_command",
+            False,
+            f"COMMAND_ACCESS_DENIED: {field} does not exist or is not a directory: {target}",
+            error_code="PATH_NOT_FOUND",
+        )
     mode = _normalize_access_mode(access_mode)
     if mode == "full-access":
         return target

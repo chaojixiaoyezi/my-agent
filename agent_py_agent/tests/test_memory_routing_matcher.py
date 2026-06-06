@@ -136,28 +136,28 @@ def test_dedupe_empty_list():
 
 # ── score_route 测试 ───────────────────────────────────────────────────────
 
-def test_score_route_exact_alias_match():
-    """测试精确别名匹配。"""
+def test_score_route_exact_related_term_match():
+    """测试精确相关词匹配。"""
     route = MemoryRoute(
         route_id="r1",
         topic="测试主题",
-        aliases=["数据分析"],
+        related_terms=["数据分析"],
     )
     score, reasons, terms = score_route("数据分析", route)
     assert score > 0
-    assert "精确命中别名" in reasons[0]
+    assert "精确命中相关词" in reasons[0]
 
 
-def test_score_route_fuzzy_alias_match():
-    """测试模糊别名匹配。"""
+def test_score_route_fuzzy_related_term_match():
+    """测试模糊相关词匹配。"""
     route = MemoryRoute(
         route_id="r1",
         topic="测试",
-        aliases=["数据"],
+        related_terms=["数据"],
     )
     score, reasons, terms = score_route("数据分析工具", route)
     assert score > 0
-    assert any("模糊命中别名" in r for r in reasons)
+    assert any("模糊命中相关词" in r for r in reasons)
 
 
 def test_score_route_exact_keyword_match():

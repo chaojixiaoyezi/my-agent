@@ -15,7 +15,6 @@ from .records import (
     AuditStatus,
     LogParams,
     enum_value,
-    normalize_log_params,
 )
 
 if TYPE_CHECKING:
@@ -52,31 +51,11 @@ class AuditLogger:
 
     def log(
         self,
-        params: LogParams | AuditAction | str = None,
-        *,
-        action: AuditAction | str | None = None,
-        user_id: str = "",
-        channel: str = "",
-        target_type: str = "",
-        target_id: str = "",
-        status: AuditStatus | str = AuditStatus.SUCCESS,
-        details: dict[str, Any] | None = None,
-        ip_address: str = "",
-        user_agent: str = "",
+        params: LogParams,
     ) -> AuditEntry:
-        log_params = normalize_log_params(
-            params,
-            action=action,
-            user_id=user_id,
-            channel=channel,
-            target_type=target_type,
-            target_id=target_id,
-            status=status,
-            details=details,
-            ip_address=ip_address,
-            user_agent=user_agent,
-        )
-        entry = self._entry_from_params(log_params)
+        if not isinstance(params, LogParams):
+            raise TypeError("AuditLogger.log() requires LogParams")
+        entry = self._entry_from_params(params)
         if not self.enabled:
             return entry
         self._write_to_file(entry)

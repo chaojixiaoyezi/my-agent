@@ -107,9 +107,9 @@ def _artifact_refs(request: Any) -> dict[str, Any]:
 
 def _acceptance_contract(request: Any) -> dict[str, Any]:
     attrs = getattr(request, "task_attributes", None) if isinstance(getattr(request, "task_attributes", None), dict) else {}
-    items = _context_texts(attrs.get("acceptance") or attrs.get("acceptance_criteria") or attrs.get("验收条件"))
-    constraints = _context_texts(attrs.get("constraints") or attrs.get("约束"))
-    latest_tests = _context_texts(attrs.get("latest_tests") or attrs.get("tests") or attrs.get("最近测试"))
+    items = _context_texts(attrs.get("acceptance"))
+    constraints = _context_texts(attrs.get("constraints"))
+    latest_tests = _context_texts(attrs.get("latest_tests"))
     return {
         "source_status": "explicit_from_task_attributes" if items or constraints or latest_tests else "not_recorded",
         "items": items,

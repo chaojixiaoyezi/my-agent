@@ -33,7 +33,7 @@ def _write_route_index(root: Path) -> Path:
 ## memory.routing
 topic: 长期规则索引
 trigger_keywords: 长期规则, 规则索引
-aliases: memory index, 规则导航
+related_terms: memory index, 规则导航
 when_to_read: 用户讨论 memory index 或长期规则路由时读取
 authority_path: references/memory/routing.md
 scope: global

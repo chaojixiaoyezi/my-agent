@@ -16,7 +16,7 @@ def test_context_bundle_is_mirrored_into_agent_run_workspace(tmp_path) -> None:
     task.acceptance_checks = ["agent workspace 有 context_bundle.json"]
     manager.save(task)
 
-    context = manager.write_execution_context(task.id)
+    context = manager.runner_context.write_execution_context(task.id)
     agent_workspace = Path(context.context_bundle["workspace_refs"]["agent_work_dir"])
     workspace_json = agent_workspace / "context_bundle.json"
     workspace_md = agent_workspace / "CONTEXT_BUNDLE.md"
@@ -79,7 +79,7 @@ def _create_context_bundle_hierarchy(manager: SubAgentManager):
 
 
 def _write_and_load_context_bundle_payloads(manager: SubAgentManager, tasks) -> dict[str, dict[str, object]]:
-    contexts = {task.id: manager.write_execution_context(task.id) for task in tasks}
+    contexts = {task.id: manager.runner_context.write_execution_context(task.id) for task in tasks}
     return {
         run_id: json.loads(Path(context.context_bundle_json).read_text(encoding="utf-8"))
         for run_id, context in contexts.items()

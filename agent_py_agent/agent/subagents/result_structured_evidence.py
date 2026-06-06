@@ -125,9 +125,9 @@ def _evidence_ok(item: dict[str, object]) -> bool:
         return True
     kind = str(item.get("kind", "") or "").lower()
     pattern = str(item.get("content_pattern", "") or "").strip()
-    mode = str(item.get("match_mode") or item.get("mode") or "").strip().lower()
-    explicit_absent = bool(item.get("expect_absent") or item.get("negate") or item.get("should_not_contain"))
-    return kind == "content_check" and bool(pattern) and (explicit_absent or mode in {"not_contains", "not_exists", "absent"})
+    mode = str(item.get("match_mode") or "").strip().lower()
+    explicit_absent = bool(item.get("expect_absent"))
+    return kind == "content_check" and bool(pattern) and (explicit_absent or mode == "not_contains")
 
 
 def _string_refs(value: object) -> list[str]:

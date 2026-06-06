@@ -211,7 +211,14 @@ def test_acceptance_submit_blocks_when_item_level_required_source_read_is_partia
             **params.delivery_contract,
             "target_coverage_contract": {
                 "scope_label": "完整读取源文件",
-                "target_items": [{"path": str(source), "enforcement": "required", "coverage_kind": "full_source_read"}],
+                "target_items": [
+                    {
+                        "target_id": str(source),
+                        "source_ref": str(source),
+                        "enforcement": "required",
+                        "coverage_kind": "full_source_read",
+                    }
+                ],
             },
         },
     )

@@ -75,7 +75,7 @@ def sync_derived_projections(
     )
     run_step("owner_agent_projection", lambda: _write_owner_agent_projection(manager, task, owner_projection))
     run_step("owner_runtime_indexes", lambda: register_owner_runtime_indexes(manager, task))
-    run_step("manager_index", lambda: manager._index_task(task))
+    run_step("manager_index", lambda: manager.indexing.index_task(task))
     run_step("local_store_projection", lambda: _sync_local_store_projection(manager, task))
     _append_projection_ledger(task_dir, records)
     _write_projection_warnings(task_dir, records)

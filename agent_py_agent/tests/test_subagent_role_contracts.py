@@ -1,6 +1,6 @@
 """LLM: focused tests for stable reporter/checker role contracts.
 
-函数/模块用途: 验证通用子代理角色不再只是自由字符串，旧 analyst/reviewer 也能映射到新角色边界。
+函数/模块用途: 验证通用子代理角色不再只是自由字符串，同时旧 analyst/reviewer 不会被隐式改写。
 """
 
 from __future__ import annotations
@@ -18,9 +18,9 @@ from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
 )
 
 
-def test_role_aliases_normalize_legacy_names():
-    assert normalize_subagent_role("analyst") == REPORTER_ROLE
-    assert normalize_subagent_role("reviewer") == CHECKER_ROLE
+def test_role_normalization_does_not_map_legacy_names():
+    assert normalize_subagent_role("analyst") == "analyst"
+    assert normalize_subagent_role("reviewer") == "reviewer"
     assert normalize_subagent_role("reporter") == REPORTER_ROLE
     assert normalize_subagent_role("checker") == CHECKER_ROLE
     assert normalize_subagent_role("custom-reviewer") == "custom-reviewer"
@@ -68,7 +68,7 @@ def test_unknown_llm_role_falls_back_to_worker_template(tmp_path):
 def test_create_run_applies_reporter_contract(tmp_path):
     manager = SubAgentManager(tmp_path)
 
-    task = manager.create_run(goal="collect evidence", thought="report only", plan=["read", "report"], role="analyst")
+    task = manager.create_run(goal="collect evidence", thought="report only", plan=["read", "report"], role="reporter")
 
     assert task.role == REPORTER_ROLE
     assert any("evidence_refs" in check for check in task.acceptance_checks)
@@ -77,7 +77,7 @@ def test_create_run_applies_reporter_contract(tmp_path):
 def test_create_run_applies_checker_contract(tmp_path):
     manager = SubAgentManager(tmp_path)
 
-    task = manager.create_run(goal="verify evidence", thought="check only", plan=["inspect"], role="reviewer")
+    task = manager.create_run(goal="verify evidence", thought="check only", plan=["inspect"], role="checker")
 
     assert task.role == CHECKER_ROLE
     assert "read_file" in task.allowed_tools
@@ -90,13 +90,13 @@ def test_hierarchy_scheduler_applies_role_contracts_to_children(tmp_path):
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(goal="root", thought="orchestrate", plan=["split"])
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             apply=True,
             child_specs=[
-                HierarchyChildSpec(goal="write report", role="analyst", agent_name="analyst-a"),
-                HierarchyChildSpec(goal="check report", role="reviewer", agent_name="reviewer-a"),
+                HierarchyChildSpec(goal="write report", role="reporter", agent_name="reporter-a"),
+                HierarchyChildSpec(goal="check report", role="checker", agent_name="checker-a"),
             ],
         )
     )

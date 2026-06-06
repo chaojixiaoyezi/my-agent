@@ -55,7 +55,7 @@ class SubagentResultEnvelope:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> SubagentResultEnvelope:
         return cls(
-            result_id=str(payload.get("result_id") or payload.get("id") or ""),
+            result_id=str(payload.get("result_id") or ""),
             run_id=str(payload.get("run_id") or ""),
             status=str(payload.get("status") or ""),
             summary=str(payload.get("summary") or ""),
@@ -110,7 +110,7 @@ class SubagentScheduleEnvelope:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> SubagentScheduleEnvelope:
         return cls(
-            schedule_id=str(payload.get("schedule_id") or payload.get("id") or ""),
+            schedule_id=str(payload.get("schedule_id") or ""),
             tool=str(payload.get("tool") or ""),
             created_run_ids=string_list(payload.get("created_run_ids")),
             reused_run_ids=string_list(payload.get("reused_run_ids")),
@@ -182,7 +182,7 @@ def subagent_schedule_envelope_from_payload(
         dry_run=bool(payload.get("dry_run")),
         blocked=bool(payload.get("blocked")),
         reason=str(payload.get("reason") or ""),
-        items=_dict_list(payload.get("items") or payload.get("tasks")),
+        items=_dict_list(payload.get("items")),
         scope=scope or RunScope(run_id=parent_run_id, root_task_id=root_id),
         source="subagent_orchestration_tool",
     )
@@ -195,14 +195,7 @@ def _jsonish_value(value: object, *, default: object) -> object:
 
 
 def _schedule_created_run_ids(payload: dict[str, Any]) -> list[str]:
-    ids = string_list(payload.get("created_run_ids") or payload.get("ids"))
-    if ids:
-        return ids
-    return [
-        str(item.get("id") or item.get("run_id"))
-        for item in _dict_list(payload.get("tasks") or payload.get("items"))
-        if str(item.get("id") or item.get("run_id") or "").strip()
-    ]
+    return string_list(payload.get("created_run_ids"))
 
 
 def _schedule_envelope_id(tool: str, run_ids: list[str], parent_run_id: str, root_id: str) -> str:

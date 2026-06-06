@@ -42,13 +42,13 @@ def cmd_guidance_send(args) -> int:
 
 
 def _target_from_args(args) -> tuple[str, str]:
-    aliases = (
+    direct_flags = (
         ("run_id", "agent_run"),
         ("thread_id", "thread"),
         ("task_id", "task"),
         ("case_id", "case"),
     )
-    for attr, target_type in aliases:
+    for attr, target_type in direct_flags:
         value = str(getattr(args, attr, "") or "").strip()
         if value:
             return target_type, value

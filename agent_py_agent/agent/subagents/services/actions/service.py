@@ -99,7 +99,7 @@ class SubAgentActionService:
             render_action_apply_markdown(report),
             encoding="utf-8",
         )
-        self.manager._index_report(
+        self.manager.indexing.index_report(
             IndexReportParams(
                 "subagent_action_apply_report",
                 "latest",
@@ -111,11 +111,11 @@ class SubAgentActionService:
         return report
 
     def _apply_action_plan_records(self, config: Any, opts: ActionApplyOptions) -> list[ActionApplyRecord]:
-        plan = self.manager.plan_actions(
+        plan = self.manager.board.plan_actions(
             config,
             params=_plan_options_from_action_options(config, opts),
         )
-        actions = self.manager._filter_action_plan_items(
+        actions = self.manager.board.filter_action_plan_items(
             plan.actions,
             action_filter=opts.action_filter,
             run_id=opts.run_id,

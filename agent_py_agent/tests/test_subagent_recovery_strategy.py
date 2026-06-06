@@ -127,7 +127,7 @@ def test_recovery_strategy_suggests_leadership_recovery_for_failed_coordinator(t
         plan=["派工"],
         role="coordinator",
     )
-    manager.schedule_child_runs(
+    manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=coordinator.id,
             apply=True,

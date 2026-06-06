@@ -80,7 +80,7 @@ def execute_controlled_exec_tool(request: ControlledExecToolRequest) -> ToolExec
         command=command,
         workspace_root=request.workspace_root,
         grant=grant,
-        cwd=request.params.get("cwd") or request.params.get("working_dir") or "",
+        cwd=request.params.get("cwd") or "",
         task_dir=_boundary_value(request.write_boundary, "task_dir"),
         artifact_dir=_boundary_value(request.write_boundary, "controlled_exec_artifact_dir"),
         apply=_bool_value(request.params.get("apply")),
@@ -232,12 +232,7 @@ def _trash_payload(trash_result, grant_id: str, reason: str) -> str:
 def _output_budget(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         return {}
-    budget = dict(value)
-    if "stdout_bytes" not in budget and "max_stdout_bytes" in budget:
-        budget["stdout_bytes"] = budget["max_stdout_bytes"]
-    if "stderr_bytes" not in budget and "max_stderr_bytes" in budget:
-        budget["stderr_bytes"] = budget["max_stderr_bytes"]
-    return budget
+    return dict(value)
 
 
 def _string_dict(value: object) -> dict[str, str]:

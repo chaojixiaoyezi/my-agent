@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from agent_py_agent.agent.subagents.execution import TestExecutor
+from agent_py_agent.agent.subagents.execution.executor import TestExecutor
 from agent_py_agent.tests.static_site_validator_fixtures import _write_site
 
 

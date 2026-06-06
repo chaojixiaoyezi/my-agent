@@ -35,8 +35,8 @@ def test_stale_attempt_guard_blocks_abandoned_runner_tools(tmp_path):
         plan=["write"],
         allowed_tools=["write_file"],
     )
-    prepared = manager.prepare_runner_attempt(task.id)
-    manager.abandon_runner_attempt(task.id, prepared.runner_active_attempt_id, reason="timeout")
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    manager.lifecycle.abandon_runner_attempt(task.id, prepared.runner_active_attempt_id, reason="timeout")
     agent = SimpleNamespace(
         subagents=manager,
         _current_subagent_run_id=task.id,
@@ -80,8 +80,8 @@ def test_stale_attempt_guard_stops_tool_loop_before_next_model_call(tmp_path):
         plan=["write"],
         allowed_tools=["write_file"],
     )
-    prepared = manager.prepare_runner_attempt(task.id)
-    manager.abandon_runner_attempt(task.id, prepared.runner_active_attempt_id, reason="timeout")
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    manager.lifecycle.abandon_runner_attempt(task.id, prepared.runner_active_attempt_id, reason="timeout")
     agent = SimpleNamespace(
         config=SimpleNamespace(max_tool_rounds=0),
         backend=_ExplodingBackend(),

@@ -8,7 +8,7 @@ from typing import Any
 from ...recovery_actions import RecoveryAction
 from ..models import GateDecision, GateFinding
 
-_WRITE_ARTIFACT_TOOLS = {"write_file", "create_file", "replace_file", "edit_file", "append_file"}
+_WRITE_ARTIFACT_TOOLS = {"write_file"}
 
 
 def evaluate_artifact_provenance_gate(item: dict[str, Any], *, run_id: str = "") -> GateDecision:
@@ -30,7 +30,7 @@ def evaluate_artifact_provenance_gate(item: dict[str, Any], *, run_id: str = "")
             [GateFinding(code) for code in warnings],
             recommended_action=RecoveryAction.RECORD_PROVENANCE.value,
             evidence={
-                "artifact_ref": str(provenance.get("artifact_ref") or provenance.get("path") or ""),
+                "artifact_ref": str(provenance.get("artifact_ref") or ""),
                 "tool_name": str(provenance.get("tool_name") or ""),
                 "operation_id": str(provenance.get("operation_id") or ""),
                 "run_id": provenance_run_id,
@@ -41,7 +41,7 @@ def evaluate_artifact_provenance_gate(item: dict[str, Any], *, run_id: str = "")
     return GateDecision.allow(
         "artifact_provenance",
         evidence={
-            "artifact_ref": str(provenance.get("artifact_ref") or provenance.get("path") or ""),
+            "artifact_ref": str(provenance.get("artifact_ref") or ""),
             "tool_name": str(provenance.get("tool_name") or ""),
             "operation_id": str(provenance.get("operation_id") or ""),
             "run_id": provenance_run_id,
@@ -84,7 +84,7 @@ def _current_run_provenance_warnings(item: dict[str, Any], provenance: dict[str,
             ("ARTIFACT_PROVENANCE_TOOL_MISSING", provenance.get("tool_name")),
             ("ARTIFACT_PROVENANCE_OPERATION_MISSING", provenance.get("operation_id")),
             ("ARTIFACT_PROVENANCE_IDEMPOTENCY_MISSING", provenance.get("idempotency_key")),
-            ("ARTIFACT_PROVENANCE_REF_MISSING", provenance.get("artifact_ref") or provenance.get("path") or item.get("path")),
+            ("ARTIFACT_PROVENANCE_REF_MISSING", provenance.get("artifact_ref")),
         )
         if not str(value or "").strip()
     ]
@@ -127,7 +127,7 @@ def _hash_chain_findings(item: dict[str, Any], provenance: dict[str, Any]) -> li
     source_hashes = provenance.get("source_artifact_hashes")
     if isinstance(source_hashes, dict):
         findings.extend(_source_hash_findings(source_hashes))
-    artifact_ref = str(provenance.get("artifact_ref") or provenance.get("path") or item.get("path") or "").strip()
+    artifact_ref = str(provenance.get("artifact_ref") or "").strip()
     if output_finding := _output_hash_finding(artifact_ref, str(provenance.get("build_output_hash") or "")):
         findings.append(output_finding)
     if input_finding := _build_input_hash_finding(source_hashes, str(provenance.get("build_input_hash") or "")):
@@ -231,7 +231,7 @@ def _provenance_from_record(
             return _write_record_provenance(record, artifact_path=artifact_path, current_run_id=current_run_id)
         return {"ok": False, "code": "ARTIFACT_TOOL_GATE_MISSING"}
     run_id = str(record.get("run_id") or "").strip()
-    tool_name = str(evidence.get("tool_name") or record.get("tool") or "").strip()
+    tool_name = str(evidence.get("tool_name") or "").strip()
     return {
         "ok": True,
         "artifact_ref": str(artifact_path),
@@ -240,7 +240,7 @@ def _provenance_from_record(
         "tool_name": tool_name,
         "operation_id": str(evidence.get("operation_id") or record.get("operation_id") or ""),
         "idempotency_key": str(evidence.get("idempotency_key") or record.get("idempotency_key") or ""),
-        "call_id": str(record.get("call_id") or record.get("id") or ""),
+        "call_id": str(record.get("call_id") or ""),
         "created_by_current_run": bool(current_run_id and run_id == current_run_id),
     }
 
@@ -258,7 +258,7 @@ def _record_is_current_run_artifact_write(
     if not artifact_path.is_file():
         return False
     params = _mapping(record.get("parameters"))
-    target = params.get("path") or params.get("file_path") or params.get("target_path")
+    target = params.get("path")
     return bool(str(target or "").strip())
 
 
@@ -268,7 +268,7 @@ def _write_record_provenance(
     artifact_path: Path,
     current_run_id: str,
 ) -> dict[str, Any]:
-    call_id = str(record.get("scoped_call_id") or record.get("call_id") or record.get("id") or "").strip()
+    call_id = str(record.get("scoped_call_id") or record.get("call_id") or "").strip()
     sha = str(record.get("sha256") or "").strip()
     tool_name = str(record.get("tool") or "").strip()
     return {

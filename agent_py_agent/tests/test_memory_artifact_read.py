@@ -90,6 +90,33 @@ def test_read_artifact_tool_reads_explicit_slice_from_registered_artifact(tmp_pa
     assert payload["reads_artifact_body"] is True
 
 
+def test_read_artifact_tool_requires_artifact_ref_parameter(tmp_path: Path) -> None:
+    artifact_path = _write_externalized_tool_output(tmp_path, content="abcdef" * 300)
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=tmp_path,
+            max_chars=1000,
+            max_entries=20,
+            max_matches=20,
+            web_max_chars=1000,
+            http_timeout=5,
+            catalog_limit=20,
+            retrieval_limit=10,
+            vector_search_enabled=False,
+        )
+    )
+
+    result = registry.execute_call({
+        "tool": "read_artifact",
+        "path": str(artifact_path),
+        "offset": 2,
+        "max_chars": 5,
+    })
+
+    assert result.ok is False
+    assert "artifact_ref" in result.output
+
+
 def test_read_artifact_supports_head_tail_and_search_modes(tmp_path: Path) -> None:
     content = "alpha first\nbeta middle\nneedle here\nbeta after\nomega last"
     artifact_path = _write_externalized_tool_output(tmp_path, content=content)

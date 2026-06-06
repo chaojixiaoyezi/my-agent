@@ -21,26 +21,26 @@ def test_subagent_memory_gate_explicit_export_and_retention_flow(tmp_path) -> No
     skill_candidate = next(item for item in candidates if item["candidate_type"] == "skill_spark")
     memory_candidate = next(item for item in candidates if item["candidate_type"] == "memory_candidate")
 
-    manager.review_memory_gate_candidate(
+    manager.memory_gate.review_memory_gate_candidate(
         task.id,
         MemoryGateReviewRequest(candidate_id=memory_candidate["candidate_id"], decision="approve_memory"),
     )
-    manager.review_memory_gate_candidate(
+    manager.memory_gate.review_memory_gate_candidate(
         task.id,
         MemoryGateReviewRequest(candidate_id=skill_candidate["candidate_id"], decision="approve_skill"),
     )
-    memory_result = manager.export_memory_gate_candidates_to_memory(
+    memory_result = manager.memory_gate.export_memory_gate_candidates_to_memory(
         task.id,
         memory_path=tmp_path / "main_memory.jsonl",
         request=MemoryGateExportRequest(candidate_id=memory_candidate["candidate_id"], reviewer="parent-test"),
     )
-    skill_result = manager.export_memory_gate_candidates_to_skill_drafts(
+    skill_result = manager.memory_gate.export_memory_gate_candidates_to_skill_drafts(
         task.id,
         output_dir=None,
         request=MemoryGateExportRequest(candidate_id=skill_candidate["candidate_id"], reviewer="parent-test"),
     )
-    retention = manager.run_memory_gate_retention(task.id, MemoryGateRetentionRequest(apply=True))
-    verifier = manager.verify_memory_gate_boundary(task.id)
+    retention = manager.memory_gate.run_memory_gate_retention(task.id, MemoryGateRetentionRequest(apply=True))
+    verifier = manager.memory_gate.verify_memory_gate_boundary(task.id)
     after_export = _read_jsonl(loaded.agent_run_memory_candidates_jsonl)
     memory_lines = (tmp_path / "main_memory.jsonl").read_text(encoding="utf-8").splitlines()
     review_queue = _read_jsonl(loaded.agent_run_memory_review_queue_jsonl)

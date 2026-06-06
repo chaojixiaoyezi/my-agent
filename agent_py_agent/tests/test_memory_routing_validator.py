@@ -37,7 +37,7 @@ class TestMemoryRouteModel:
     def test_memory_route_defaults(self):
         route = MemoryRoute(route_id="r1", topic="t")
         assert route.trigger_keywords == []
-        assert route.aliases == []
+        assert route.related_terms == []
         assert route.authority_path == ""
         assert route.inject_mode == "on_hit"
         assert route.scope == "global"
@@ -81,11 +81,11 @@ class TestMemoryRouteModel:
         )
         assert route.trigger_terms() == ["apple", "banana"]
 
-    def test_memory_route_trigger_terms_aliases_only(self):
+    def test_memory_route_trigger_terms_related_terms_only(self):
         route = MemoryRoute(
             route_id="r1",
             topic="t",
-            aliases=["x", "y"],
+            related_terms=["x", "y"],
         )
         assert route.trigger_terms() == ["x", "y"]
 
@@ -94,17 +94,17 @@ class TestMemoryRouteModel:
             route_id="r1",
             topic="t",
             trigger_keywords=["kw1"],
-            aliases=["alias1"],
+            related_terms=["related_term1"],
         )
         result = route.trigger_terms()
-        assert result == ["kw1", "alias1"]
+        assert result == ["kw1", "related_term1"]
 
     def test_memory_route_trigger_terms_deduplicates(self):
         route = MemoryRoute(
             route_id="r1",
             topic="t",
             trigger_keywords=["word"],
-            aliases=["word"],
+            related_terms=["word"],
         )
         result = route.trigger_terms()
         assert result == ["word"]
@@ -114,7 +114,7 @@ class TestMemoryRouteModel:
             route_id="r1",
             topic="t",
             trigger_keywords=["  spaced  "],
-            aliases=["  trimmed  "],
+            related_terms=["  trimmed  "],
         )
         result = route.trigger_terms()
         assert "spaced" in result
@@ -129,7 +129,7 @@ class TestMemoryRouteModel:
             route_id="r1",
             topic="t",
             trigger_keywords=["first", "second"],
-            aliases=["third", "fourth"],
+            related_terms=["third", "fourth"],
         )
         result = route.trigger_terms()
         assert result == ["first", "second", "third", "fourth"]
@@ -256,19 +256,19 @@ class TestValidateRoutesSingleValid:
         findings = validate_routes([route], tmp_path)
         assert findings == []
 
-    def test_validate_routes_valid_with_aliases(self, tmp_path):
+    def test_validate_routes_valid_with_related_terms(self, tmp_path):
         af = tmp_path / "af.md"
         af.write_text("c", encoding="utf-8")
         route = MemoryRoute(
             route_id="r1",
             topic="topic",
             source_file="af.md",
-            aliases=["alias1"],
+            related_terms=["related_term1"],
         )
         findings = validate_routes([route], tmp_path)
         assert findings == []
 
-    def test_validate_routes_valid_with_both_trigger_and_aliases(self, tmp_path):
+    def test_validate_routes_valid_with_both_trigger_and_related_terms(self, tmp_path):
         af = tmp_path / "af.md"
         af.write_text("c", encoding="utf-8")
         route = MemoryRoute(
@@ -276,7 +276,7 @@ class TestValidateRoutesSingleValid:
             topic="topic",
             source_file="af.md",
             trigger_keywords=["kw"],
-            aliases=["als"],
+            related_terms=["als"],
         )
         findings = validate_routes([route], tmp_path)
         assert findings == []
@@ -317,12 +317,12 @@ class TestValidateRoutesErrors:
         findings = validate_routes([route], tmp_path)
         assert any("topic is empty" in f for f in findings)
 
-    def test_validate_routes_both_keywords_and_aliases_empty(self, tmp_path):
+    def test_validate_routes_both_keywords_and_related_terms_empty(self, tmp_path):
         af = tmp_path / "af.md"
         af.write_text("c", encoding="utf-8")
         route = MemoryRoute(route_id="r1", topic="t", source_file="af.md")
         findings = validate_routes([route], tmp_path)
-        assert any("trigger_keywords and aliases are both empty" in f for f in findings)
+        assert any("trigger_keywords and related_terms are both empty" in f for f in findings)
 
     def test_validate_routes_invalid_inject_mode(self, tmp_path):
         af = tmp_path / "af.md"
@@ -348,14 +348,14 @@ class TestValidateRoutesErrors:
         findings = validate_routes([route], tmp_path)
         assert any("duplicate keyword" in f for f in findings)
 
-    def test_validate_routes_duplicate_keyword_in_aliases(self, tmp_path):
+    def test_validate_routes_duplicate_keyword_in_related_terms(self, tmp_path):
         af = tmp_path / "af.md"
         af.write_text("c", encoding="utf-8")
         route = MemoryRoute(
             route_id="r1",
             topic="t",
             source_file="af.md",
-            aliases=["term", "term"],
+            related_terms=["term", "term"],
         )
         findings = validate_routes([route], tmp_path)
         assert any("duplicate keyword" in f for f in findings)
@@ -364,8 +364,8 @@ class TestValidateRoutesErrors:
         af = tmp_path / "af.md"
         af.write_text("c", encoding="utf-8")
         routes = [
-            MemoryRoute(route_id="r1", topic="t1", source_file="af.md", aliases=["conflict"]),
-            MemoryRoute(route_id="r2", topic="t2", source_file="af.md", aliases=["conflict"]),
+            MemoryRoute(route_id="r1", topic="t1", source_file="af.md", related_terms=["conflict"]),
+            MemoryRoute(route_id="r2", topic="t2", source_file="af.md", related_terms=["conflict"]),
         ]
         findings = validate_routes(routes, tmp_path)
         assert any("keyword conflict" in f for f in findings)
@@ -434,7 +434,7 @@ class TestValidateRoutesMixed:
         af = tmp_path / "af.md"
         af.write_text("c", encoding="utf-8")
         routes = [
-            MemoryRoute(route_id="valid1", topic="t1", source_file="af.md", aliases=["als"]),
+            MemoryRoute(route_id="valid1", topic="t1", source_file="af.md", related_terms=["als"]),
             MemoryRoute(route_id="", topic="t2", source_file="af.md"),
             MemoryRoute(route_id="valid2", topic="t3", source_file="af.md", trigger_keywords=["kw"]),
         ]

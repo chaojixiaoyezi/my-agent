@@ -110,10 +110,9 @@ def _fact_required_fields(contract: dict[str, Any]) -> list[str]:
 
 
 def _quality_contract(contract: dict[str, Any]) -> dict[str, Any]:
-    for key in ("delivery_quality_contract", "quality_contract", "data_contract"):
-        value = contract.get(key)
-        if isinstance(value, dict):
-            return value
+    value = contract.get("delivery_quality_contract")
+    if isinstance(value, dict):
+        return value
     return {}
 
 

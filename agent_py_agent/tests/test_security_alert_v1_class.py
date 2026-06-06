@@ -232,7 +232,7 @@ class TestParserConfidence:
             "field4": "v4",
             "field5": "v5",
         }
-        mapping_source = {"field1": "alias"}
+        mapping_source = {"field1": "field_name"}
         conf = parser_confidence(raw_fields, mapping_source)
         # ratio = 1/5 = 0.2, mapped_count < 5, >= 1
         # confidence = min(0.86, 0.65 + 0.2*0.2) = min(0.86, 0.69) = 0.69

@@ -8,8 +8,8 @@ def test_tool_registry_executes_typed_tool_call_envelope(tmp_path):
     envelope = ToolCallEnvelope(
         call_id="call-read-1",
         source="text_protocol",
-        tool="read_file",
-        args={"path": "notes.txt"},
+        tool_name="read_file",
+        input={"path": "notes.txt"},
         scope=RunScope(task_id="task-1", run_id="run-1"),
     )
 
@@ -32,8 +32,8 @@ def test_tool_registry_result_envelope_preserves_call_operation_id(tmp_path):
     envelope = ToolCallEnvelope(
         call_id="call-read-2",
         source="text_protocol",
-        tool="read_file",
-        args={"path": "notes.txt"},
+        tool_name="read_file",
+        input={"path": "notes.txt"},
         operation_id="op:read_file:stable-123",
         scope=RunScope(task_id="task-1", run_id="run-1"),
     )
@@ -66,8 +66,8 @@ def test_tool_registry_error_envelope_includes_error_contract(tmp_path):
     envelope = ToolCallEnvelope(
         call_id="call-missing-1",
         source="text_protocol",
-        tool="read_file",
-        args={"path": "missing.txt"},
+        tool_name="read_file",
+        input={"path": "missing.txt"},
         scope=RunScope(task_id="task-1", run_id="run-1"),
     )
 

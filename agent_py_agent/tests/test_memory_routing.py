@@ -24,7 +24,7 @@ def test_load_json_routes_and_match_chinese_trigger(tmp_path):
                         "route_id": "memory.compression",
                         "topic": "上下文压缩",
                         "trigger_keywords": ["压缩前", "上下文压缩", "hook 记忆"],
-                        "aliases": ["compression memory"],
+                        "related_terms": ["compression memory"],
                         "when_to_read": "讨论上下文压缩、压缩前落盘、恢复快照时读取",
                         "authority_path": "references/memory/compression.md",
                         "scope": "global",
@@ -49,7 +49,7 @@ def test_load_json_routes_and_match_chinese_trigger(tmp_path):
     assert validate_routes(routes, tmp_path) == []
 
 
-def test_markdown_routes_match_alias(tmp_path):
+def test_markdown_routes_match_related_term(tmp_path):
     rules_dir = tmp_path / "references" / "memory"
     rules_dir.mkdir(parents=True)
     (rules_dir / "routing.md").write_text("长期规则走 index。", encoding="utf-8")
@@ -60,7 +60,7 @@ def test_markdown_routes_match_alias(tmp_path):
 ## memory.routing
 topic: 长期规则索引
 trigger_keywords: 长期规则, 规则索引
-aliases: memory index, 规则导航
+related_terms: memory index, 规则导航
 when_to_read: 用户讨论长期规则、memory 导航、index 到 authority file 时读取
 authority_path: references/memory/routing.md
 scope: global
@@ -76,7 +76,7 @@ last_verified_at: 2026-04-30
 
     assert hits[0].route.route_id == "memory.routing"
     assert "memory index" in hits[0].matched_terms
-    assert any("别名" in reason for reason in hits[0].reasons)
+    assert any("相关词" in reason for reason in hits[0].reasons)
 
 
 def test_markdown_routes_split_common_human_list_separators(tmp_path):
@@ -85,7 +85,7 @@ def test_markdown_routes_split_common_human_list_separators(tmp_path):
         """## memory.human-list
 topic: 人工索引
 trigger_keywords: 英文逗号, 中文逗号，英文分号; 中文分号；竖线|最后一个
-aliases: alpha|beta，gamma
+related_terms: alpha|beta，gamma
 authority_path: references/memory/human-list.md
 """,
         encoding="utf-8",
@@ -101,7 +101,7 @@ authority_path: references/memory/human-list.md
         "竖线",
         "最后一个",
     ]
-    assert routes[0].aliases == ["alpha", "beta", "gamma"]
+    assert routes[0].related_terms == ["alpha", "beta", "gamma"]
 
 
 def test_match_routes_honors_limit_and_priority():
@@ -193,14 +193,14 @@ def test_validate_routes_reports_missing_file_and_empty_triggers(tmp_path):
             route_id="memory.missing",
             topic="缺文件",
             trigger_keywords=[],
-            aliases=[],
+            related_terms=[],
             authority_path="references/memory/missing.md",
         )
     ]
 
     findings = validate_routes(routes, tmp_path)
 
-    assert any("trigger_keywords and aliases are both empty" in finding for finding in findings)
+    assert any("trigger_keywords and related_terms are both empty" in finding for finding in findings)
     assert any("authority_path does not exist" in finding for finding in findings)
 
 
@@ -218,7 +218,7 @@ def test_validate_routes_reports_duplicate_route_id(tmp_path):
         MemoryRoute(
             route_id="memory.duplicate",
             topic="规则 B",
-            aliases=["rule"],
+            related_terms=["rule"],
             authority_path="references/rule.md",
         ),
     ]

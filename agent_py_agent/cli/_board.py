@@ -46,7 +46,7 @@ def cmd_spawn(args) -> int:
 def cmd_subagents(args) -> int:
 
     agent = make_agent(args)
-    board = agent.subagents.write_board(
+    board = agent.subagents.board.write_board(
         options=SubAgentBoardOptions(
             recent_limit=_subagent_config_int(agent, args, "limit", "subagent_cli_default_limit"),
             status=args.status or "",

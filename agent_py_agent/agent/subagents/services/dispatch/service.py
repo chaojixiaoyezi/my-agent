@@ -101,8 +101,8 @@ class SubAgentDispatchService:
             for record in report.records:
                 DispatchLogAppender.append(record, self.manager.workspace)
         for record in report.records:
-            self.manager._index_dispatch_record(record)
-        self.manager._index_report(
+            self.manager.indexing.index_dispatch_record(record)
+        self.manager.indexing.index_report(
             IndexReportParams(
                 "subagent_dispatch_report", "latest",
                 "Subagent dispatch report", report,
@@ -165,7 +165,7 @@ class SubAgentDispatchService:
             render_dispatch_watch_markdown(report),
             encoding="utf-8",
         )
-        self.manager._index_report(
+        self.manager.indexing.index_report(
             IndexReportParams(
                 "subagent_dispatch_watch_report", "latest",
                 "Subagent dispatch watch report", report,

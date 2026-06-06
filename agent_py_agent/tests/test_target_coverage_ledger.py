@@ -81,7 +81,7 @@ def test_target_coverage_ledger_blocks_required_missing_read_targets(tmp_path):
     assert status["recommended_next_action"] == "cover_missing_targets_before_submit"
 
 
-def test_target_coverage_ledger_accepts_delivery_contract_items_alias(tmp_path):
+def test_target_coverage_ledger_ignores_delivery_contract_items_alias(tmp_path):
     from agent_py_agent.agent.agent_core.target_coverage_ledger import (
         collect_target_coverage_records,
         target_coverage_status,
@@ -109,8 +109,8 @@ def test_target_coverage_ledger_accepts_delivery_contract_items_alias(tmp_path):
         coverage_records=records,
     )
 
-    assert status["expected_count"] == 2
-    assert status["covered_count"] == 2
+    assert status["expected_count"] == 0
+    assert status["covered_count"] == 0
     assert status["missing_count"] == 0
     assert status["should_block"] is False
 

@@ -174,7 +174,7 @@ def test_reviewer_known_refs_accepts_evidence_ref_dataclass_boundary():
 def test_dispatch_engine_default_budget_only_writes_pending_queue():
     engine = DispatchEngine()
 
-    result = engine.submit_case(_case_fixture())
+    result = engine.enqueue_case(_case_fixture())
 
     assert not result.dispatched
     assert result.request.status == PENDING_INVESTIGATION
@@ -210,7 +210,7 @@ def test_dispatch_engine_respects_enabled_budget():
         )
     )
 
-    result = engine.submit_case(_case_fixture())
+    result = engine.enqueue_case(_case_fixture())
 
     assert result.dispatched
     assert result.agent_id.startswith("analyst-logdisp-")
@@ -219,7 +219,7 @@ def test_dispatch_engine_respects_enabled_budget():
 
 def test_dispatch_engine_builds_security_tool_names_for_analyst_input():
     engine = DispatchEngine()
-    result = engine.submit_case(_case_fixture())
+    result = engine.enqueue_case(_case_fixture())
 
     analyst_input = engine.build_analyst_input(result.request)
 
@@ -365,7 +365,7 @@ def test_case_summary_is_compact_and_excludes_raw_events_and_transcript():
 
 def test_health_summary_exposes_backlogs_prompt_switch_and_budget():
     engine = DispatchEngine()
-    engine.submit_case(_case_fixture())
+    engine.enqueue_case(_case_fixture())
 
     summary = build_health_summary(
         cases=[_case_fixture()],

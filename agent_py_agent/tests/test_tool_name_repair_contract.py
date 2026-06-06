@@ -25,7 +25,7 @@ class EchoTool(BaseTool):
         return ToolExecutionResult("echo", True, json.dumps(params, sort_keys=True))
 
 
-def test_registry_resolves_case_insensitive_tool_names():
+def test_registry_rejects_case_insensitive_tool_names_without_executing():
     result = execute_registry_call(
         ExecuteRegistryCallParams(
             payload={"tool": "Echo", "value": 1},
@@ -37,8 +37,10 @@ def test_registry_resolves_case_insensitive_tool_names():
         )
     )
 
-    assert result.ok is True
-    assert result.tool == "echo"
+    assert result.ok is False
+    runtime_gate = result.result_envelope["runtime_gate"]
+    assert runtime_gate["findings"][0]["code"] == "TOOL_NOT_REGISTERED"
+    assert runtime_gate["findings"][0]["evidence"]["suggested_tool_name"] == "echo"
 
 
 def test_registry_unknown_tool_returns_repair_suggestion_without_executing():

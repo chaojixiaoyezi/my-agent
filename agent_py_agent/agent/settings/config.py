@@ -17,10 +17,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config_internal_fields import INTERNAL_RUNTIME_CONFIG_FIELDS
+from ..path_access_policy import DEFAULT_DANGEROUS_PATH_ROOTS, DEFAULT_PATH_ACCESS_MODE
 from .config_io import load_simple_yaml, parse_scalar
-from .config_sources import merge_agent_config_sources, public_config_keys
-from .home_config import HomeProviderConfigFields
+from .config_sources import (
+    INTERNAL_RUNTIME_CONFIG_FIELDS,
+    merge_agent_config_sources,
+    public_config_keys,
+)
+from .defaults import DEFAULT_COMMAND_ACCESS_MODE, DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
 from .memory import normalize_agent_memory_config
 from .normalize import (
     _coerce_bool_config,
@@ -30,8 +34,6 @@ from .normalize import (
     normalize_agent_config,
     normalize_subagent_workflow_config,
 )
-from .runtime_budget_config import RuntimeBudgetConfigFields
-from .tool_config import ToolConfig
 
 __all__ = [
     "AgentConfig",
@@ -60,7 +62,95 @@ _LOG_LEVELS = {
 
 
 @dataclass
-class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigFields):
+class _HomeProviderConfigFields:
+    my_agent_home: str = "~/.my-agent"
+    my_agent_owner_provider: str = "local"
+    my_agent_owner_kind: str = "main"
+    my_agent_owner_id: str = "main"
+    workspace_task_path_template: str = "tasks/{date}/{task_slug}"
+    home_context_enabled: bool = True
+    home_lesson_auto_read_limit: int = 3
+    daily_memory_mirror_enabled: bool = True
+    run_task_workspace_enabled: bool = True
+    external_knowledge_index_file_name: str = "MY_AGENT_INDEX.md"
+    external_knowledge_directory_roots: list[str] = field(default_factory=list)
+    external_knowledge_api_sources: list[str] = field(default_factory=list)
+    external_knowledge_database_sources: list[str] = field(default_factory=list)
+    provider_space_default_max_storage_mb: int = 2048
+    provider_space_max_download_file_mb: int = 200
+    provider_space_trash_retention_days: int = 30
+    provider_space_destructive_actions_use_trash: bool = True
+
+
+@dataclass
+class _ToolConfigFields:
+    enable_tools: bool = True
+    max_tool_rounds: int | None = None
+    max_tool_calls_per_round: int | None = None
+    tool_agent_budget_window_seconds: int | None = None
+    tool_agent_budget_max_calls: int | None = None
+    tool_artifact_read_budget_window_seconds: int = 600
+    tool_artifact_read_budget_max_chars: int = 240_000
+    tool_output_externalize_min_chars: int = 20_000
+    tool_output_preview_chars: int = 4_000
+    tool_payload_max_fields: int = 64
+    tool_payload_max_field_name_chars: int = 128
+    tool_payload_max_name_chars: int = 128
+    tool_payload_parse_error_raw_chars: int = 1000
+    tool_read_max_chars: int = 50_000
+    tool_write_inline_max_chars: int = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
+    tool_list_max_entries: int = 200
+    tool_search_max_matches: int = 50
+    tool_web_max_chars: int = 100_000
+    tool_http_timeout: int = 30
+    path_access_mode: str = DEFAULT_PATH_ACCESS_MODE
+    path_dangerous_roots: list[str] = field(default_factory=lambda: list(DEFAULT_DANGEROUS_PATH_ROOTS))
+    access_mode: str = DEFAULT_COMMAND_ACCESS_MODE
+    tool_shell_timeout: int = 240
+    tool_shell_output_max_chars: int = 12_000
+    stream_enabled: bool = True
+    tool_catalog_limit: int = 20
+    tool_catalog_mode: str = "compact"
+    tool_catalog_offset: int = 0
+    tool_catalog_categories: list[str] = field(default_factory=list)
+    # Default prompt catalog stays compact: examples and long parameter notes
+    # remain available through list_tools or the recommended-tool details.
+    tool_catalog_include_examples: bool = False
+    tool_catalog_entry_max_chars: int = 700
+    tool_catalog_show_truncated_notice: bool = True
+    tool_detail_max_chars: int = 4000
+    tool_retrieval_limit: int = 3
+    tool_vector_search_enabled: bool = True
+
+
+@dataclass
+class _RuntimeBudgetConfigFields:
+    contract_status_max_scan_files: int = 1000
+    contract_status_max_report_bytes: int = 2_000_000
+    contract_status_recent_findings_limit: int = 20
+    skill_guard_max_files: int = 50
+    skill_guard_max_size_kb: int = 1024
+    small_real_acceptance_max_runtime_seconds: int = 900
+    real_run_review_max_report_bytes: int = 5_000_000
+    real_run_review_max_log_bytes: int = 1_000_000
+    runner_auto_concurrency: int = 8
+    conversation_thread_list_limit: int = 100
+    conversation_pending_wake_limit: int = 100
+    conversation_context_recent_limit: int = 20
+    conversation_unhandled_observation_limit: int = 20
+    background_pending_wake_prompt_limit: int = 20
+    background_context_max_string_chars: int = 1200
+    background_context_max_list_items: int = 20
+    background_context_max_dict_items: int = 80
+    background_context_max_depth: int = 6
+    background_claim_ttl_seconds: int = 900
+    background_claim_heartbeat_interval_seconds: int = 0
+    subagent_watch_interval_seconds: int = 120
+    background_main_agent_allowed_tools: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
     agent_name: str = "myagent"
     system_prompt: str = "你是一个谨慎、可扩展、会记录记忆、会在必要时调用工具的 Python CLI 智能体。先理解任务，再给出结构化回答。"

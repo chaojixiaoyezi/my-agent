@@ -83,6 +83,39 @@ def test_capability_request_tool_scopes_cross_run_writes_to_current_runner(tmp_p
     assert manager.load(other.id).capability_requests == []
 
 
+def test_capability_request_tool_ignores_capability_alias(tmp_path):
+    agent, manager, task = _agent_with_current_run(tmp_path)
+
+    result = CapabilityRequestTool(agent).execute(
+        {
+            "problem": "旧字段不应当成正式能力名。",
+            "capability": "controlled_exec",
+        }
+    )
+
+    assert result.ok is True
+    request = manager.load(task.id).capability_requests[0]
+    assert request.needed_capability == "capability"
+
+
+def test_capability_request_tool_does_not_parse_stringified_object_fields(tmp_path):
+    agent, manager, task = _agent_with_current_run(tmp_path)
+
+    result = CapabilityRequestTool(agent).execute(
+        {
+            "problem": "字符串 JSON 不应作为结构字段。",
+            "needed_capability": "controlled_exec",
+            "output_budget": '{"stdout_bytes": 1024}',
+            "constraints": '{"delete_policy":"trash_only"}',
+        }
+    )
+
+    assert result.ok is True
+    request = manager.load(task.id).capability_requests[0]
+    assert request.output_budget == {}
+    assert request.constraints == {}
+
+
 def test_capability_request_tool_blocks_root_run_requests(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(
@@ -149,7 +182,7 @@ def test_capability_request_tool_is_available_to_role_and_leaf_defaults(tmp_path
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -187,8 +220,8 @@ def test_root_execution_context_hides_capability_request_tool(tmp_path):
         allowed_tools=["read_file", "write_file", "capability_request"],
     )
 
-    root_context = manager.build_execution_context(root.id)
-    child_context = manager.build_execution_context(child.id)
+    root_context = manager.runner_context.build_execution_context(root.id)
+    child_context = manager.runner_context.build_execution_context(child.id)
 
     assert "capability_request" not in root_context.allowed_tools
     assert "capability_request" in child_context.allowed_tools
@@ -204,6 +237,6 @@ def test_top_level_worker_context_keeps_capability_request(tmp_path):
         allowed_tools=["read_file", "write_file", "capability_request"],
     )
 
-    context = manager.build_execution_context(worker.id)
+    context = manager.runner_context.build_execution_context(worker.id)
 
     assert "capability_request" in context.allowed_tools

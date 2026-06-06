@@ -32,7 +32,7 @@ def _needs_artifact_targets(item: dict[str, Any]) -> bool:
     method = str(item.get("validation_method") or "command").strip().lower()
     if method != "artifact_integrity":
         return False
-    return not str(item.get("file_path") or item.get("path") or "").strip()
+    return not str(item.get("file_path") or "").strip()
 
 
 def _item_for_target(

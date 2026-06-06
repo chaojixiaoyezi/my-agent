@@ -24,7 +24,7 @@ class TestPlanActions:
                 return DueCheckReport(generated_at=time.time(), summary={"total": 0}, issues=[])
 
         mixin = TestMixin(workspace=tmp_path)
-        report = mixin.plan_actions()
+        report = mixin.board.plan_actions()
 
         assert report.summary["total"] == 0
 
@@ -72,7 +72,7 @@ class TestPlanActions:
         )
         mixin._tasks = [first, second]
 
-        report = mixin.plan_actions(params=SubAgentPlanActionsOptions(root_id="root-a"))
+        report = mixin.board.plan_actions(params=SubAgentPlanActionsOptions(root_id="root-a"))
 
         assert {action.run_id for action in report.actions} == {"run_failed_a"}
 
@@ -118,7 +118,7 @@ class TestPlanActions:
         )
         mixin._tasks = [first, second]
 
-        report = mixin.plan_actions(params=SubAgentPlanActionsOptions(include_run_ids=["target_run"]))
+        report = mixin.board.plan_actions(params=SubAgentPlanActionsOptions(include_run_ids=["target_run"]))
 
         assert {action.run_id for action in report.actions} == {"target_run"}
 
@@ -156,7 +156,7 @@ class TestPlanActions:
         )
         mixin._tasks = [task]
 
-        report = mixin.plan_actions(CapabilityConfig(subagent_no_progress_attempt_limit=4))
+        report = mixin.board.plan_actions(CapabilityConfig(subagent_no_progress_attempt_limit=4))
 
         assert [action.action for action in report.actions] == ["stop_no_progress_and_escalate"]
         assert report.actions[0].source_issue_kinds == ["no_progress_fuse"]
@@ -178,7 +178,7 @@ class TestWriteBoard:
                 return []
 
         mixin = TestMixin(workspace=tmp_path)
-        mixin.write_board()
+        mixin.board.write_board()
 
         assert (tmp_path / "subagent_board.json").exists()
         assert (tmp_path / "SUBAGENT_BOARD.md").exists()
@@ -220,7 +220,7 @@ class TestBoardHotList:
         )
         mixin._tasks = [task]
 
-        assert len(mixin.build_board().hot_list) > 0
+        assert len(mixin.board.build_board().hot_list) > 0
 
 
 class TestBoardRecent:
@@ -261,6 +261,6 @@ class TestBoardRecent:
                 )
             )
 
-        board = mixin.build_board(recent_limit=3)
+        board = mixin.board.build_board(recent_limit=3)
 
         assert len(board.recent) == 3

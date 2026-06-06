@@ -29,7 +29,7 @@ def test_hierarchy_schedule_preserves_shopping_file_contract_when_child_goal_onl
         },
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[
@@ -85,7 +85,7 @@ def _forbidden_file_contract_root(manager: SubAgentManager, build):
 
 
 def _schedule_forbidden_contract_child(manager: SubAgentManager, root_id: str, build):
-    return manager.schedule_child_runs(params=HierarchyScheduleRequest(
+    return manager.hierarchy.schedule_child_runs(params=HierarchyScheduleRequest(
         parent_run_id=root_id,
         child_specs=[HierarchyChildSpec(
             goal=(
@@ -110,7 +110,7 @@ def test_hierarchy_schedule_preserves_no_space_four_layer_contract_without_forci
     assert "4层链路要求" in child.goal
     assert "depth=3" in child.goal
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[HierarchyChildSpec(goal="直接写完整页面", role="leaf_worker", agent_name="小小傻妞-页面编写员")],
@@ -137,7 +137,7 @@ def _create_no_space_four_layer_child(manager: SubAgentManager, build):
             ],
         },
     )
-    child_result = manager.schedule_child_runs(
+    child_result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[
@@ -171,7 +171,7 @@ def test_hierarchy_file_contract_skips_forbidden_rename_targets(tmp_path):
         },
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[HierarchyChildSpec(goal=f"继续页面分工，产物目录 {build}", role="child_coordinator")],
@@ -197,7 +197,7 @@ def test_hierarchy_schedule_blocks_leaf_before_explicit_four_layer_chain_reaches
         thought="root",
         plan=["plan"],
     )
-    child_result = manager.schedule_child_runs(
+    child_result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[HierarchyChildSpec(goal="继续协调", role="child_coordinator", agent_name="lead")],
@@ -206,7 +206,7 @@ def test_hierarchy_schedule_blocks_leaf_before_explicit_four_layer_chain_reaches
     )
     child = manager.load(child_result.created_run_ids[0])
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[HierarchyChildSpec(goal="直接写页面", role="worker", agent_name="page-worker")],
@@ -225,7 +225,7 @@ def test_hierarchy_schedule_allows_coordinator_name_with_writer_before_depth_thr
         thought="root",
         plan=["plan"],
     )
-    child_result = manager.schedule_child_runs(
+    child_result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[
@@ -236,7 +236,7 @@ def test_hierarchy_schedule_allows_coordinator_name_with_writer_before_depth_thr
     )
     child = manager.load(child_result.created_run_ids[0])
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[

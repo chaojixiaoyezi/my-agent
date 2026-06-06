@@ -1,55 +1,7 @@
-from importlib import import_module
-from typing import Any
+"""Subagent test-execution package.
 
-_EXPORTS = {
-    "artifact_pytest_items": "pytest_items",
-    "CatContentCheckRequest": "content_checks",
-    "ContentCheckInferenceRequest": "inferred_content_items",
-    "drop_non_executable_model_checklist_items": "test_checklists",
-    "expand_artifact_integrity_items": "artifact_integrity_items",
-    "expand_file_check_items": "file_check_items",
-    "inferred_content_check_items": "inferred_content_items",
-    "inferred_static_site_items": "static_site_items",
-    "load_test_execution_report": "report",
-    "normalize_cat_content_check": "content_checks",
-    "prepare_test_items": "test_items",
-    "render_test_execution_markdown": "report",
-    "StaticSiteTestItemsRequest": "static_site_items",
-    "TestExecutionRecord": "records",
-    "TestExecutionReport": "report",
-    "TestExecutionReportOptions": "report",
-    "TestExecutor": "executor",
-    "TestItemPreparationContext": "test_items",
-    "TestItemPreparationRequest": "test_items",
-    "write_test_execution_report": "report",
-}
+Import concrete execution helpers from their owning modules, for example
+``execution.report`` or ``execution.test_items``.
+"""
 
-__all__ = [
-    "CatContentCheckRequest",
-    "ContentCheckInferenceRequest",
-    "StaticSiteTestItemsRequest",
-    "TestExecutionRecord",
-    "TestExecutionReport",
-    "TestExecutionReportOptions",
-    "TestExecutor",
-    "TestItemPreparationContext",
-    "TestItemPreparationRequest",
-    "artifact_pytest_items",
-    "drop_non_executable_model_checklist_items",
-    "expand_artifact_integrity_items",
-    "expand_file_check_items",
-    "inferred_content_check_items",
-    "inferred_static_site_items",
-    "load_test_execution_report",
-    "normalize_cat_content_check",
-    "prepare_test_items",
-    "render_test_execution_markdown",
-    "write_test_execution_report",
-]
-
-
-def __getattr__(name: str) -> Any:
-    module_name = _EXPORTS.get(name)
-    if module_name:
-        return getattr(import_module(f"{__name__}.{module_name}"), name)
-    raise AttributeError(name)
+__all__: list[str] = []

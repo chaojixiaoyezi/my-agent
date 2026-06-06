@@ -6,7 +6,7 @@ from agent_py_agent.agent.tooling.registry_payload_normalize import (
 )
 
 
-def test_normalize_tool_payload_unwraps_shell_bundle_for_run_command() -> None:
+def test_normalize_tool_payload_keeps_shell_bundle_as_explicit_field() -> None:
     payload, error = normalize_tool_payload(
         {
             "tool": "run_command",
@@ -21,13 +21,15 @@ def test_normalize_tool_payload_unwraps_shell_bundle_for_run_command() -> None:
     assert not error
     assert payload == {
         "tool": "run_command",
-        "command": "mkdir -p outputs/site",
-        "working_dir": "/tmp/demo",
-        "timeout": 10,
+        "shell": {
+            "command": "mkdir -p outputs/site",
+            "working_dir": "/tmp/demo",
+            "timeout": 10,
+        },
     }
 
 
-def test_normalize_tool_payload_unwraps_args_bundle() -> None:
+def test_normalize_tool_payload_keeps_args_bundle_as_explicit_field() -> None:
     payload, error = normalize_tool_payload(
         {
             "tool": "run_command",
@@ -41,12 +43,14 @@ def test_normalize_tool_payload_unwraps_args_bundle() -> None:
     assert not error
     assert payload == {
         "tool": "run_command",
-        "command": "mkdir -p outputs/site",
-        "working_dir": "/tmp/demo",
+        "args": {
+            "command": "mkdir -p outputs/site",
+            "working_dir": "/tmp/demo",
+        },
     }
 
 
-def test_normalize_tool_payload_unwraps_arguments_json_string() -> None:
+def test_normalize_tool_payload_keeps_arguments_json_string_as_explicit_field() -> None:
     payload, error = normalize_tool_payload(
         {
             "tool": "write_file",
@@ -57,12 +61,11 @@ def test_normalize_tool_payload_unwraps_arguments_json_string() -> None:
     assert not error
     assert payload == {
         "tool": "write_file",
-        "path": "outputs/report.txt",
-        "content": "ok",
+        "arguments": '{"file_path":"outputs/report.txt","content":"ok"}',
     }
 
 
-def test_normalize_tool_payload_rejects_bad_arguments_json_string() -> None:
+def test_normalize_tool_payload_does_not_parse_arguments_json_string() -> None:
     payload, error = normalize_tool_payload(
         {
             "tool": "write_file",
@@ -70,11 +73,11 @@ def test_normalize_tool_payload_rejects_bad_arguments_json_string() -> None:
         }
     )
 
-    assert payload is None
-    assert "arguments 参数包 JSON 解析失败" in error
+    assert not error
+    assert payload == {"tool": "write_file", "arguments": '{"path":"outputs/report.txt"'}
 
 
-def test_normalize_tool_payload_maps_write_file_raw_aliases() -> None:
+def test_normalize_tool_payload_keeps_write_file_raw_tool_names_unmodified() -> None:
     upper, upper_error = normalize_tool_payload(
         {"tool": "WRITE_FILE_RAW", "path": "outputs/a.txt", "content": "hello"}
     )
@@ -84,15 +87,14 @@ def test_normalize_tool_payload_maps_write_file_raw_aliases() -> None:
 
     assert not upper_error
     assert not lower_error
-    assert upper is not None and upper["tool"] == "write_file"
-    assert lower is not None and lower["tool"] == "write_file"
+    assert upper is not None and upper["tool"] == "WRITE_FILE_RAW"
+    assert lower is not None and lower["tool"] == "write_file_raw"
 
 
-def test_parse_tool_block_payload_recovers_write_file_raw_trailing_body() -> None:
+def test_parse_tool_block_payload_rejects_json_write_file_raw_trailing_body() -> None:
     payload = parse_tool_block_payload(
         '{"tool":"WRITE_FILE_RAW","path":"outputs/index.html"}\n<html><body>ok</body></html>\n'
     )
 
-    assert payload["tool"] == "write_file"
-    assert payload["path"] == "outputs/index.html"
-    assert payload["content"] == "<html><body>ok</body></html>\n"
+    assert payload["tool"] == "__parse_error__"
+    assert payload["error_code"] == "TOOL_CALL_JSON_INVALID"

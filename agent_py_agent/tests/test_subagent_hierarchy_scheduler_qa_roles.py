@@ -32,7 +32,7 @@ def test_hierarchy_schedule_advises_required_qa_roles_without_auto_creation(tmp_
     build = tmp_path / "deliverables" / "shop" / "build"
     parent = _qa_parent(manager, extra_write_roots=[str(build)])
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -68,7 +68,7 @@ def test_hierarchy_schedule_advice_omits_existing_qa_roles(tmp_path):
         role="tester",
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -95,7 +95,7 @@ def test_hierarchy_schedule_defers_auto_qa_until_implementation_ready(tmp_path):
     build = tmp_path / "deliverables" / "shop" / "build"
     parent = _qa_parent(manager, extra_write_roots=[str(build)])
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -134,7 +134,7 @@ def test_hierarchy_schedule_quality_advice_after_implementation_ready(tmp_path):
     worker.verification_status = "VERIFIED"
     manager.save(worker)
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[],
@@ -167,7 +167,7 @@ def test_hierarchy_schedule_does_not_treat_verification_without_done_as_ready(tm
     worker.verification_status = "VERIFIED"
     manager.save(worker)
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[],
@@ -209,7 +209,7 @@ def test_hierarchy_schedule_quality_advice_after_implementation_descendant_ready
     leaf.verification_status = "VERIFIED"
     manager.save(leaf)
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[],

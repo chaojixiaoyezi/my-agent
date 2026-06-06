@@ -56,7 +56,7 @@ class ArchiveLiveToolCallParams:
 def archive_assistant_tool_round(params: ArchiveAssistantToolRoundParams) -> ArchiveRunTurnResult:
     timestamp = params.created_at or utc_now_iso()
     tool_names = [
-        str(item.get("tool") or item.get("name") or "unknown")
+        str(item.get("tool") or "unknown")
         for item in params.tool_calls or []
         if isinstance(item, dict)
     ]

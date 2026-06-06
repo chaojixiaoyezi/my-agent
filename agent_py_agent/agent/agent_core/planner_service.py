@@ -79,9 +79,9 @@ def _collect_parent_planner_context(agent: SimpleAgent, params: PlannerStatePara
 
     tasks = agent.subagents.list_runs()
     board_limit = params.limit if params.limit > 0 else len(tasks)
-    board = agent.subagents.build_board(options=SubAgentBoardOptions(recent_limit=board_limit))
-    due_report = agent.subagents.due_check(params=SubAgentDueCheckOptions(config=params.cfg))
-    action_plan = agent.subagents.plan_actions(params.cfg)
+    board = agent.subagents.board.build_board(options=SubAgentBoardOptions(recent_limit=board_limit))
+    due_report = agent.subagents.board.due_check(params=SubAgentDueCheckOptions(config=params.cfg))
+    action_plan = agent.subagents.board.plan_actions(params.cfg)
     runner_candidates = _dispatch_runner_candidates(tasks, params.max_runners)
     patch_run_ids = _limit_items(_dispatch_patch_review_run_ids(tasks), params.limit)
     active_tasks = _active_planner_tasks(tasks)

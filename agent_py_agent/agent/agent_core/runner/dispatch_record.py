@@ -24,7 +24,7 @@ class RunnerDispatchRecordParams:
 
 
 def runner_dispatch_record(params: RunnerDispatchRecordParams):
-    return params.agent.subagents.make_dispatch_record(
+    return params.agent.subagents.dispatch.make_dispatch_record(
         params=DispatchRecordParams(
             step="runner",
             action=_runner_action(params),

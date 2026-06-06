@@ -274,7 +274,7 @@ def _refresh_continue_packet(task: SubAgentTask, snapshot: dict[str, Any]) -> No
             task,
             {
                 "summary": task.latest_summary,
-                "next_action": task.current_step,
+                "next_actions": [task.current_step] if task.current_step else [],
                 "work_progress": snapshot,
             },
         )

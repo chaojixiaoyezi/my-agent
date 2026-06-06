@@ -136,7 +136,7 @@ def test_runner_result_is_ignored_after_takeover(tmp_path) -> None:
     manager.save(source)
     first = manager.create_takeover_run(TakeoverRunRequest(source_run_id=source.id, reason="first"))
 
-    result = manager.record_runner_result(
+    result = manager.runner_result.record_runner_result(
         RecordRunnerResultParams(
             run_id=source.id,
             dry_run=False,

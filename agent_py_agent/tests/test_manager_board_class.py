@@ -82,7 +82,7 @@ class TestBuildBoard:
                 return []
 
         mixin = TestMixin(workspace=tmp_path)
-        board = mixin.build_board()
+        board = mixin.board.build_board()
 
         assert board.summary["total"] == 0
         assert board.items == []
@@ -128,7 +128,7 @@ class TestBuildBoard:
         )
         mixin._tasks = [task1]
 
-        board = mixin.build_board()
+        board = mixin.board.build_board()
 
         assert board.summary["total"] == 1
         assert board.summary.get("RUNNING", 0) == 1
@@ -146,7 +146,7 @@ class TestBuildBoard:
         mixin.save(root_a)
         mixin.save(root_b)
 
-        board = mixin.build_board(options=SubAgentBoardOptions(root_id="root-a"))
+        board = mixin.board.build_board(options=SubAgentBoardOptions(root_id="root-a"))
 
         assert board.summary["total"] == 1
         assert board.summary.get("FAILED", 0) == 0
@@ -197,7 +197,7 @@ class TestToBoardItem:
             **mixin._build_work_order_paths("run_board"),
         )
 
-        item = mixin._to_board_item(task)
+        item = mixin.board.to_board_item(task)
 
         assert item.id == "run_board"
         assert item.status == "RUNNING"
@@ -214,7 +214,7 @@ class TestToBoardItem:
             raise OSError("child ledger unreadable")
 
         mixin.load = broken_load
-        item = mixin._to_board_item(task)
+        item = mixin.board.to_board_item(task)
 
         assert item.child_status_counts["load_error"] == 1
         assert item.child_status_load_errors[0]["child_id"] == "child-bad"
@@ -260,7 +260,7 @@ class TestRiskFlags:
             **mixin._build_work_order_paths("run_blocked"),
         )
 
-        flags = mixin._risk_flags(task, open_request_count=0, open_gap_count=0)
+        flags = mixin.board.risk_flags(task, open_request_count=0, open_gap_count=0)
 
         assert "blocked" in flags
 
@@ -269,7 +269,7 @@ class TestRiskFlags:
         request = _make_open_capability_request("run_req")
         task = _make_board_task(mixin, "run_req", capability_requests=[request])
 
-        flags = mixin._risk_flags(task, open_request_count=1, open_gap_count=0)
+        flags = mixin.board.risk_flags(task, open_request_count=1, open_gap_count=0)
 
         assert "open_capability_request" in flags
 
@@ -309,7 +309,7 @@ class TestRiskFlags:
             **mixin._build_work_order_paths("run_broken"),
         )
 
-        flags = mixin._risk_flags(task, open_request_count=0, open_gap_count=0)
+        flags = mixin.board.risk_flags(task, open_request_count=0, open_gap_count=0)
 
         assert "channel_broken" in flags
 
@@ -331,7 +331,7 @@ class TestDueCheck:
                 return []
 
         mixin = TestMixin(workspace=tmp_path)
-        report = mixin.due_check()
+        report = mixin.board.due_check()
 
         assert report.summary["total"] == 0
         assert report.issues == []
@@ -377,7 +377,7 @@ class TestDueCheck:
         )
         mixin._tasks = [task]
 
-        report = mixin.due_check()
+        report = mixin.board.due_check()
 
         assert report.summary["total"] > 0
 
@@ -424,7 +424,7 @@ class TestDueCheck:
         )
         mixin._tasks = [first, second]
 
-        report = mixin.due_check(params=SubAgentDueCheckOptions(root_id="root-a"))
+        report = mixin.board.due_check(params=SubAgentDueCheckOptions(root_id="root-a"))
 
         assert {issue.run_id for issue in report.issues} == {"run_failed_a"}
 
@@ -469,7 +469,7 @@ class TestDueCheck:
         )
         mixin._tasks = [first, second]
 
-        report = mixin.due_check(params=SubAgentDueCheckOptions(include_run_ids=["target_run"]))
+        report = mixin.board.due_check(params=SubAgentDueCheckOptions(include_run_ids=["target_run"]))
 
         assert {issue.run_id for issue in report.issues} == {"target_run"}
 
@@ -509,7 +509,7 @@ class TestDueCheck:
         Path(task.agent_run_checkpoint_json).write_text("{}", encoding="utf-8")
         mixin._tasks = [task]
 
-        report = mixin.due_check(CapabilityConfig(subagent_no_progress_attempt_limit=4))
+        report = mixin.board.due_check(CapabilityConfig(subagent_no_progress_attempt_limit=4))
 
         assert [issue.kind for issue in report.issues] == ["no_progress_fuse"]
         assert report.issues[0].suggested_action == "stop_no_progress_and_escalate"

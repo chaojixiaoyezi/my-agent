@@ -84,7 +84,7 @@ class SubAgentLeadershipRecoveryPlanner:
         )
 
     def _stale_coordinators(self, request: SubAgentLeadershipRecoveryPlanOptions) -> list[SubAgentTask]:
-        due_report = self.manager.due_check(
+        due_report = self.manager.board.due_check(
             params=SubAgentDueCheckOptions(config=request.config, root_id=request.root_id)
         )
         coordinators: list[SubAgentTask] = []

@@ -58,10 +58,10 @@ def _target_coverage_gate(report: dict[str, Any]) -> GateDecision:
 
 
 def evaluate_artifact_report_gate(report: dict[str, Any]) -> GateDecision:
-    artifact_ref = str(report.get("artifact_ref") or report.get("path") or "").strip()
+    artifact_ref = str(report.get("artifact_ref") or "").strip()
     if not artifact_ref:
         return GateDecision.deny("artifact_report", "ARTIFACT_REF_MISSING")
-    if str(report.get("artifact_kind") or report.get("kind") or "").strip() == "":
+    if str(report.get("artifact_kind") or "").strip() == "":
         return GateDecision.deny("artifact_report", "ARTIFACT_KIND_MISSING", evidence={"artifact_ref": artifact_ref})
     findings = _artifact_findings(report)
     hard = [finding for finding in findings if str(finding.severity).lower() in {"hard", "p0", "p1"}]

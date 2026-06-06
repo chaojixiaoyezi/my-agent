@@ -41,9 +41,6 @@ class SubAgentRunnerContextService:
     def __init__(self, manager):
         self.manager = manager
 
-    def __getattr__(self, name: str):
-        return getattr(self.manager, name)
-
     def _extract_granted_caps(self, task: SubAgentTask) -> tuple[list[str], list[str], list[dict[str, object]]]:
         """Extract skills, tools, and grants from capability grants."""
         granted_skills: list[str] = []
@@ -121,8 +118,8 @@ class SubAgentRunnerContextService:
     ) -> SubAgentExecutionContext:
         """生成单个子代理执行器可读取的最小上下文。"""
 
-        task = self.load(run_id)
-        _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
+        task = self.manager.load(run_id)
+        _apply_missing_paths(task, self.manager._build_work_order_paths(task.id, task.task_dir or None))
         granted_skills, granted_tools, grants = self._extract_granted_caps(task)
         allowed_skills = _merge_list(task.allowed_skills, granted_skills)
         allowed_tools = _runner_allowed_tools(task, _merge_list(task.allowed_tools, granted_tools))
@@ -140,10 +137,10 @@ class SubAgentRunnerContextService:
         task = request.task
         controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
         context_bundle = execution_context_bundle(task)
-        collaboration = collaboration_context_payload(self, task)
+        collaboration = collaboration_context_payload(self.manager, task)
         if collaboration:
             context_bundle["collaboration"] = collaboration
-        _attach_runtime_guidance(context_bundle, _runtime_guidance_context(self, task.id))
+        _attach_runtime_guidance(context_bundle, _runtime_guidance_context(self.manager, task.id))
         return SubAgentExecutionContext(
             **_execution_context_task_fields(task),
             allowed_skills=request.allowed_skills,
@@ -179,9 +176,9 @@ class SubAgentRunnerContextService:
     ) -> SubAgentExecutionContext:
         """写出子代理执行上下文 JSON 和 Markdown。"""
 
-        task = self.load(run_id)
-        _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
-        self.save(task)
+        task = self.manager.load(run_id)
+        _apply_missing_paths(task, self.manager._build_work_order_paths(task.id, task.task_dir or None))
+        self.manager.save(task)
         context = self.build_execution_context(run_id, max_cards=max_cards)
         Path(context.execution_context_json).write_text(
             json.dumps(asdict(context), ensure_ascii=False, indent=2),
@@ -192,12 +189,12 @@ class SubAgentRunnerContextService:
             encoding="utf-8",
         )
         write_context_bundle_files(context)
-        task = self.load(run_id)
-        self._append_task_work_log(
+        task = self.manager.load(run_id)
+        self.manager.actions._append_task_work_log(
             task,
             f"execution_context: 已生成执行上下文，cards={len(context.granted_cards)}。",
         )
-        self._index_execution_context(context)
+        self.manager.indexing.index_execution_context(context)
         return context
 
 

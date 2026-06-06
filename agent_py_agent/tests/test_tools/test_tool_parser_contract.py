@@ -113,9 +113,10 @@ def test_tool_catalog_format_example_does_not_bias_to_path_param():
     catalog = registry.render_catalog_section()
 
     assert '{"tool": "tool_name", "path": "example"}' not in catalog
-    assert '"actual_parameter_name": "actual_value"' in catalog
+    assert '{"tool": "tool_name", "parameter_name": "parameter_value"}' in catalog
+    assert '"actual_parameter_name": "actual_value"' not in catalog
     assert '"param_name": "param_value"' not in catalog
-    assert "不要写 param_name" in catalog
+    assert "不要写 param_name、args、arguments" in catalog
 
 
 def test_tool_catalog_includes_global_large_content_protocol():
@@ -158,26 +159,26 @@ def test_tool_catalog_uses_configured_categories_offset_and_notice():
     assert "next_offset=2" in catalog
 
 
-def test_tool_call_parser_unwraps_model_param_name_bundle():
-    """LLM: tolerate models that wrap real tool parameters in a literal param_name bundle."""
+def test_tool_call_parser_keeps_model_param_name_bundle_unmodified():
+    """LLM: wrapped params are malformed current protocol, not a hidden compatibility shape."""
     registry = make_tool_registry(Path.cwd())
 
     calls = registry.parse_tool_calls(
         '[TOOL_CALL]\n{"tool":"read_file","param_name":{"path":"README.md"}}\n[/TOOL_CALL]'
     )
 
-    assert calls == [{"tool": "read_file", "path": "README.md"}]
+    assert calls == [{"tool": "read_file", "param_name": {"path": "README.md"}}]
 
 
-def test_tool_executor_unwraps_model_param_name_bundle(tmp_path: Path):
-    """LLM: direct execution should also recover literal param_name bundles before tool dispatch."""
+def test_tool_executor_rejects_model_param_name_bundle(tmp_path: Path):
+    """LLM: direct execution must not recover literal param_name bundles before dispatch."""
     (tmp_path / "notes.txt").write_text("bundle recovered", encoding="utf-8")
     registry = make_tool_registry(tmp_path)
 
     result = registry.execute_call({"tool": "read_file", "param_name": {"path": "notes.txt"}})
 
-    assert result.ok
-    assert "bundle recovered" in result.output
+    assert not result.ok
+    assert "bundle recovered" not in result.output
 
 
 def test_tool_call_parser_keeps_orchestration_params_flat():
@@ -191,18 +192,18 @@ def test_tool_call_parser_keeps_orchestration_params_flat():
     assert calls == [{"tool": "inspect_agent_tree", "scope": "root_tree"}]
 
 
-def test_tool_executor_unwraps_model_filesystem_bundle(tmp_path: Path):
-    """LLM: filesystem category wrappers should be flattened before file tool execution."""
+def test_tool_executor_rejects_model_filesystem_bundle(tmp_path: Path):
+    """LLM: filesystem category wrappers are not current tool payload syntax."""
     (tmp_path / "notes.txt").write_text("category bundle recovered", encoding="utf-8")
     registry = make_tool_registry(tmp_path)
 
     result = registry.execute_call({"tool": "read_file", "filesystem": {"path": "notes.txt"}})
 
-    assert result.ok
-    assert "category bundle recovered" in result.output
+    assert not result.ok
+    assert "category bundle recovered" not in result.output
 
 
-def test_tool_call_parser_unwraps_actual_parameter_name_bundle():
+def test_tool_call_parser_keeps_actual_parameter_name_bundle_unmodified():
     registry = make_tool_registry(Path.cwd())
 
     calls = registry.parse_tool_calls(
@@ -211,52 +212,51 @@ def test_tool_call_parser_unwraps_actual_parameter_name_bundle():
         '[/TOOL_CALL]'
     )
 
-    assert calls == [{"tool": "run_command", "command": "echo ok", "working_dir": "/tmp"}]
+    assert calls == [{"tool": "run_command", "actual_parameter_name": {"command": "echo ok", "working_dir": "/tmp"}}]
 
 
-def test_tool_executor_unwraps_arguments_bundle(tmp_path: Path):
+def test_tool_executor_rejects_arguments_bundle(tmp_path: Path):
     registry = make_tool_registry(tmp_path)
 
     result = registry.execute_call(
         {"tool": "write_file", "arguments": {"path": "notes.txt", "content": "wrapped"}}
     )
 
-    assert result.ok
-    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "wrapped"
+    assert not result.ok
+    assert not (tmp_path / "notes.txt").exists()
 
 
-def test_tool_call_parser_canonicalizes_json_tool_and_param_aliases():
+def test_tool_call_parser_keeps_json_tool_and_param_aliases_unmodified():
     registry = make_tool_registry(Path.cwd())
 
     calls = registry.parse_tool_calls(
         '[TOOL_CALL]\n{"tool":"write","file_path":"notes.txt","content":"ok"}\n[/TOOL_CALL]'
     )
 
-    assert calls == [{"tool": "write_file", "path": "notes.txt", "content": "ok"}]
+    assert calls == [{"tool": "write", "file_path": "notes.txt", "content": "ok"}]
 
 
-def test_tool_executor_canonicalizes_json_aliases(tmp_path: Path):
+def test_tool_executor_rejects_json_aliases(tmp_path: Path):
     registry = make_tool_registry(tmp_path)
 
     result = registry.execute_call({"tool": "write", "file_path": "notes.txt", "content": "alias ok"})
 
-    assert result.ok
-    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "alias ok"
+    assert not result.ok
+    assert not (tmp_path / "notes.txt").exists()
 
 
-def test_tool_call_parser_rejects_conflicting_canonical_aliases():
+def test_tool_call_parser_does_not_canonicalize_conflicting_aliases():
     registry = make_tool_registry(Path.cwd())
 
     calls = registry.parse_tool_calls(
         '[TOOL_CALL]\n{"tool":"read_file","path":"A.md","file_path":"B.md"}\n[/TOOL_CALL]'
     )
 
-    assert calls[0]["tool"] == "__parse_error__"
-    assert "conflicting parameter aliases" in calls[0]["error"]
+    assert calls == [{"tool": "read_file", "path": "A.md", "file_path": "B.md"}]
 
 
-def test_tool_call_parser_unwraps_model_memory_bundle():
-    """LLM: memory/read_artifact wrappers should flatten to stable tool params."""
+def test_tool_call_parser_keeps_model_memory_bundle_unmodified():
+    """LLM: memory/read_artifact wrappers are not tool gateway payload syntax."""
     registry = make_tool_registry(Path.cwd())
 
     calls = registry.parse_tool_calls(
@@ -265,9 +265,7 @@ def test_tool_call_parser_unwraps_model_memory_bundle():
         '[/TOOL_CALL]'
     )
 
-    assert calls == [
-        {"tool": "read_artifact", "artifact_ref": "/tmp/out.json", "offset": 0, "max_chars": 4000}
-    ]
+    assert calls == [{"tool": "read_artifact", "memory": {"artifact_ref": "/tmp/out.json", "offset": 0, "max_chars": 4000}}]
 
 
 def test_tool_call_parser_recovers_single_extra_trailing_brace():
@@ -419,26 +417,18 @@ def test_tool_spec_catalog_entry_includes_first_example():
     assert '"children":[]' in entry
 
 
-def test_tool_call_parser_accepts_subagent_call_alias():
-    """LLM: verify that [SUBAGENT_CALL] opening tag is accepted as an alias for [TOOL_CALL].
-
-    新手说明:
-    有些模型输出 [SUBAGENT_CALL]，解析器应该和 [TOOL_CALL] 一视同仁。
-    """
+def test_tool_call_parser_ignores_subagent_call_alias():
+    """LLM: [SUBAGENT_CALL] is not a current executable tool marker."""
     registry = _registry()
     calls = registry.parse_tool_calls(
         '[SUBAGENT_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
     )
 
-    assert calls == [{"tool": "read_file", "path": "README.md"}]
+    assert calls == []
 
 
-def test_tool_call_parser_accepts_qwen_xmlish_read_call():
-    """LLM: verify that Qwen-style XML-ish function call for read is parsed correctly.
-
-    新手说明:
-    Qwen 模型可能输出 <function=read> 格式的工具调用，需要正确映射到 read_file。
-    """
+def test_tool_call_parser_keeps_xmlish_read_alias_unmodified():
+    """LLM: XML-ish transport does not canonicalize tool or parameter names."""
     registry = _registry()
     calls = registry.parse_tool_calls(
         "\n"
@@ -448,15 +438,11 @@ def test_tool_call_parser_accepts_qwen_xmlish_read_call():
         ""
     )
 
-    assert calls == [{"tool": "read_file", "path": "README.md"}]
+    assert calls == [{"tool": "read", "file_path": "README.md"}]
 
 
-def test_tool_call_parser_accepts_qwen_xmlish_write_call():
-    """LLM: verify that Qwen-style XML-ish function call for write handles HTML entities.
-
-    新手说明:
-    Qwen 写文件调用里 &amp; 应该被解码成 &。
-    """
+def test_tool_call_parser_keeps_xmlish_write_alias_unmodified():
+    """LLM: XML-ish transport decodes values but keeps current-protocol names exact."""
     registry = _registry()
     calls = registry.parse_tool_calls(
         '<function name="write">'
@@ -465,7 +451,7 @@ def test_tool_call_parser_accepts_qwen_xmlish_write_call():
         "</function>"
     )
 
-    assert calls == [{"tool": "write_file", "path": "notes.txt", "content": "hello & hi"}]
+    assert calls == [{"tool": "write", "file_path": "notes.txt", "content": "hello & hi"}]
 
 
 def test_tool_call_parser_ignores_tool_like_examples_inside_json_content():
@@ -498,7 +484,7 @@ def test_tool_call_parser_reports_incomplete_qwen_xmlish_call():
         "<function=read><parameter=file_path>B.md</parameter>"
     )
 
-    assert calls[0] == {"tool": "read_file", "path": "A.md"}
+    assert calls[0] == {"tool": "read", "file_path": "A.md"}
     assert calls[1]["tool"] == "__parse_error__"
     assert "missing a closing " in calls[1]["error"]
     assert "B.md" in calls[1]["raw"]

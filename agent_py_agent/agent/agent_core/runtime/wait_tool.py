@@ -17,7 +17,7 @@ class WaitTool(BaseTool):
         self.spec = build_wait_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
-        interval = _seconds(params.get("seconds") or params.get("interval_seconds"), self.agent)
+        interval = _seconds(params.get("seconds"), self.agent)
         target = _target(self.agent, params)
         if isinstance(target, ToolExecutionResult):
             return target

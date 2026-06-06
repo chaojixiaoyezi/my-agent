@@ -29,11 +29,11 @@ def test_items_mode_reuses_existing_contract_children_and_returns_dispatch_contr
     first = json.loads(tool.execute({"items": _pipeline_items("weekly_star_data.md")}).output)
     second = json.loads(tool.execute({"items": _pipeline_items("weekly_data.md")}).output)
 
-    assert first["created_run_ids"] == first["ids"]
+    assert first["created_run_ids"] == first["created_run_ids"]
     assert second["created_run_ids"] == []
-    assert second["reused_run_ids"] == first["ids"]
+    assert second["reused_run_ids"] == first["created_run_ids"]
     assert second["dispatch_run_ids"] == []
-    assert second["auto_start"]["run_ids"] == first["ids"]
+    assert second["auto_start"]["run_ids"] == first["created_run_ids"]
     assert second["next_action"]["tool"] == "inspect_agent_tree"
     assert len(agent.subagents.list_runs()) == 3
 
@@ -44,15 +44,15 @@ def test_reused_done_children_are_excluded_from_dispatch_contract(tmp_path):
     agent = _workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
     first = json.loads(tool.execute({"items": _pipeline_items("weekly_star_data.md")}).output)
-    done = agent.subagents.load(first["ids"][0])
+    done = agent.subagents.load(first["created_run_ids"][0])
     done.status = "DONE"
     done.verification_status = "VERIFIED"
     agent.subagents.save(done)
     second = json.loads(tool.execute({"items": _pipeline_items("weekly_data.md")}).output)
 
-    assert second["reused_run_ids"] == first["ids"]
+    assert second["reused_run_ids"] == first["created_run_ids"]
     assert second["dispatch_run_ids"] == []
-    assert second["auto_start"]["run_ids"] == first["ids"][1:]
+    assert second["auto_start"]["run_ids"] == first["created_run_ids"][1:]
     assert second["next_action"]["tool"] == "inspect_agent_tree"
 
 
@@ -67,8 +67,8 @@ def test_count_fanout_creates_requested_number_of_sibling_runs(tmp_path):
         "agent_name": "小傻妞-隔离测试",
     }).output)
 
-    assert payload["created_run_ids"] == payload["ids"]
-    assert len(payload["ids"]) == 2
+    assert payload["created_run_ids"] == payload["created_run_ids"]
+    assert len(payload["created_run_ids"]) == 2
     assert len(agent.subagents.list_runs()) == 2
 
 
@@ -84,9 +84,9 @@ def test_items_mode_fixture_worker_names_do_not_trigger_repair_dedupe(tmp_path):
         "count": 2,
     }).output)
 
-    assert payload["created_run_ids"] == payload["ids"]
+    assert payload["created_run_ids"] == payload["created_run_ids"]
     assert payload["reused_run_ids"] == []
-    assert len(set(payload["ids"])) == 2
+    assert len(set(payload["created_run_ids"])) == 2
     assert len(agent.subagents.list_runs()) == 2
 
 
@@ -102,9 +102,9 @@ def test_items_mode_indexed_generic_names_create_distinct_siblings(tmp_path):
         "count": 2,
     }).output)
 
-    assert len(payload["ids"]) == 2
-    assert len(set(payload["ids"])) == 2
-    assert payload["created_run_ids"] == payload["ids"]
+    assert len(payload["created_run_ids"]) == 2
+    assert len(set(payload["created_run_ids"])) == 2
+    assert payload["created_run_ids"] == payload["created_run_ids"]
     assert payload["reused_run_ids"] == []
 
 
@@ -122,9 +122,9 @@ def test_generic_single_worker_reuses_explicit_idempotency_contract(tmp_path):
     second = json.loads(CreateSubagentsTool(agent).execute(params).output)
 
     assert second["created_run_ids"] == []
-    assert second["reused_run_ids"] == first["ids"]
+    assert second["reused_run_ids"] == first["created_run_ids"]
     assert second["dispatch_run_ids"] == []
-    assert second["auto_start"]["run_ids"] == first["ids"]
+    assert second["auto_start"]["run_ids"] == first["created_run_ids"]
     assert len(agent.subagents.list_runs()) == 1
 
 
@@ -149,7 +149,7 @@ def test_generic_worker_reuses_system_derived_output_ref_contract(tmp_path):
     }).output)
 
     assert second["created_run_ids"] == []
-    assert second["reused_run_ids"] == first["ids"]
+    assert second["reused_run_ids"] == first["created_run_ids"]
     assert len(agent.subagents.list_runs()) == 1
 
 
@@ -161,8 +161,8 @@ def test_generic_default_name_does_not_reuse_different_goal(tmp_path):
     first = json.loads(tool.execute({"goal": "写 index1.html", "role": "worker"}).output)
     second = json.loads(tool.execute({"goal": "写 index2.html", "role": "worker"}).output)
 
-    assert first["ids"] != second["ids"]
-    assert second["created_run_ids"] == second["ids"]
+    assert first["created_run_ids"] != second["created_run_ids"]
+    assert second["created_run_ids"] == second["created_run_ids"]
     assert second["reused_run_ids"] == []
     assert len(agent.subagents.list_runs()) == 2
 
@@ -181,11 +181,11 @@ def test_repeated_count_fanout_reuses_indexed_children_with_contract(tmp_path):
     first = json.loads(CreateSubagentsTool(agent).execute(params).output)
     second = json.loads(CreateSubagentsTool(agent).execute(params).output)
 
-    assert len(first["ids"]) == 2
+    assert len(first["created_run_ids"]) == 2
     assert second["created_run_ids"] == []
-    assert second["reused_run_ids"] == first["ids"]
+    assert second["reused_run_ids"] == first["created_run_ids"]
     assert second["dispatch_run_ids"] == []
-    assert second["auto_start"]["run_ids"] == first["ids"]
+    assert second["auto_start"]["run_ids"] == first["created_run_ids"]
     assert len(agent.subagents.list_runs()) == 2
 
 
@@ -195,7 +195,7 @@ def test_all_reused_done_children_return_non_dispatch_next_action(tmp_path):
     agent = _workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
     first = json.loads(tool.execute({"items": _pipeline_items("weekly_star_data.md")}).output)
-    for run_id in first["ids"]:
+    for run_id in first["created_run_ids"]:
         task = agent.subagents.load(run_id)
         task.status = "DONE"
         task.verification_status = "VERIFIED"

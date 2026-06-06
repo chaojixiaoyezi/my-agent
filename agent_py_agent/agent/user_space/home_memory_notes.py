@@ -80,7 +80,7 @@ def _ensure_lesson_route(index_path: Path, slug: str, topic: str, trigger_keywor
         f"\n\n## {route_id}\n"
         f"topic: {topic or slug}\n"
         f"trigger_keywords: {keywords}\n"
-        f"aliases: {slug}\n"
+        f"related_terms: {slug}\n"
         f"when_to_read: Read when the current task mentions this lesson topic.\n"
         f"authority_path: memory/lessons/{slug}.md\n"
         f"inject_mode: summary\n"

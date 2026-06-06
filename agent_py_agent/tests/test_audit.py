@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from agent_py_agent.agent.audit import AuditAction, AuditLogger, AuditQuery
-from agent_py_agent.agent.audit.logger import AuditStatus
+from agent_py_agent.agent.audit.logger import AuditStatus, LogParams
 
 _AUDIT_QUERY_ROWS = (
     ("audit_1", 100, "CREATE_TASK", "alice", "chat", "task-1", "success"),
@@ -77,11 +77,13 @@ class TestAuditLogger(unittest.TestCase):
         """测试记录日志创建文件。"""
         logger = AuditLogger(self.config)
         entry = logger.log(
-            action=AuditAction.CREATE_TASK,
-            user_id="test-user",
-            channel="chat",
-            target_type="task",
-            target_id="task-123",
+            LogParams(
+                action=AuditAction.CREATE_TASK,
+                user_id="test-user",
+                channel="chat",
+                target_type="task",
+                target_id="task-123",
+            )
         )
 
         self.assertTrue(self.audit_path.exists())
@@ -96,11 +98,13 @@ class TestAuditLogger(unittest.TestCase):
 
         logger = AuditLogger(MockConfig())
         entry = logger.log(
-            action=AuditAction.CREATE_TASK,
-            user_id="test-user",
-            channel="chat",
-            target_type="task",
-            target_id="task-123",
+            LogParams(
+                action=AuditAction.CREATE_TASK,
+                user_id="test-user",
+                channel="chat",
+                target_type="task",
+                target_id="task-123",
+            )
         )
 
         self.assertEqual(entry.action, "CREATE_TASK")
@@ -111,19 +115,23 @@ class TestAuditLogger(unittest.TestCase):
         logger = AuditLogger(self.config)
 
         entry1 = logger.log(
-            action=AuditAction.CREATE_TASK,
-            user_id="user-1",
-            channel="chat",
-            target_type="task",
-            target_id="task-1",
+            LogParams(
+                action=AuditAction.CREATE_TASK,
+                user_id="user-1",
+                channel="chat",
+                target_type="task",
+                target_id="task-1",
+            )
         )
 
         entry2 = logger.log(
-            action=AuditAction.DISPATCH,
-            user_id="user-2",
-            channel="feishu",
-            target_type="task",
-            target_id="task-2",
+            LogParams(
+                action=AuditAction.DISPATCH,
+                user_id="user-2",
+                channel="feishu",
+                target_type="task",
+                target_id="task-2",
+            )
         )
 
         audit_file = self.audit_path / "audit.jsonl"
@@ -141,12 +149,14 @@ class TestAuditLogger(unittest.TestCase):
         logger = AuditLogger(self.config)
 
         entry = logger.log(
-            action=AuditAction.UPDATE_TASK,
-            user_id="test-user",
-            channel="chat",
-            target_type="task",
-            target_id="task-456",
-            details={"status_before": "pending", "status_after": "running"},
+            LogParams(
+                action=AuditAction.UPDATE_TASK,
+                user_id="test-user",
+                channel="chat",
+                target_type="task",
+                target_id="task-456",
+                details={"status_before": "pending", "status_after": "running"},
+            )
         )
 
         audit_file = self.audit_path / "audit.jsonl"

@@ -131,14 +131,14 @@ def test_artifact_refs_are_structured_and_not_inferred_from_natural_language():
 
 
 def test_idempotency_key_is_stable_for_equivalent_call_inputs():
-    left = normalize_tool_call({"tool": "read_file", "args": {"path": "README.md", "limit": 20}})
+    left = normalize_tool_call({"tool_name": "read_file", "input": {"path": "README.md", "limit": 20}})
     right = normalize_tool_call({"tool_name": "read_file", "input": {"limit": 20, "path": "README.md"}})
 
     assert left.idempotency_key == right.idempotency_key
     assert left.operation_id == right.operation_id
 
 
-def test_legacy_fields_convert_to_v2_envelopes():
+def test_old_tool_and_args_fields_do_not_convert_to_v2_envelopes():
     call = normalize_tool_call(
         {
             "call_id": "call-123",
@@ -157,15 +157,16 @@ def test_legacy_fields_convert_to_v2_envelopes():
 
     assert call.schema_version == "tool_protocol.v2"
     assert call.operation_id == "tool_call:call-123"
-    assert call.tool_name == "read_file"
-    assert call.input == {"path": "README.md"}
+    assert call.tool_name == ""
+    assert call.input == {}
+    assert "tool_name_required" in validate_tool_call(call)
     assert result.operation_id == "tool_call:call-123"
     assert result.status == "succeeded"
-    assert result.output == {"output_ref": "memory_archive/artifacts/tool-call-123.txt"}
-    assert result.idempotency_key.startswith("idem:read_file:")
+    assert result.output is None
+    assert "tool_name_required" in validate_tool_result(result)
 
 
-def test_legacy_flat_tool_status_argument_does_not_become_protocol_status():
+def test_flat_tool_status_argument_does_not_become_protocol_status_or_input():
     call = normalize_tool_call(
         {
             "tool": "update_collaboration",
@@ -175,8 +176,22 @@ def test_legacy_flat_tool_status_argument_does_not_become_protocol_status():
     )
 
     assert call.status == "pending"
-    assert call.input["status"] == "needs_replan"
-    assert validate_tool_call(call) == []
+    assert call.input == {}
+    assert "tool_name_required" in validate_tool_call(call)
+
+
+def test_invalid_protocol_status_is_not_silently_defaulted_to_pending():
+    call = normalize_tool_call(
+        {
+            "schema_version": "tool_protocol.v2",
+            "tool_name": "read_file",
+            "input": {"path": "README.md"},
+            "status": "done-ish",
+        }
+    )
+
+    assert call.status == "done-ish"
+    assert "status_invalid" in validate_tool_call(call)
 
 
 def test_unknown_error_downgrades_to_unknown_error():
@@ -188,7 +203,7 @@ def test_unknown_error_downgrades_to_unknown_error():
 
 
 def test_serialized_payloads_are_json_objects_not_free_text():
-    call = normalize_tool_call({"tool": "read_file", "args": {"path": "README.md"}})
+    call = normalize_tool_call({"tool_name": "read_file", "input": {"path": "README.md"}})
     result = ToolResultEnvelope.success(call, output={"ok": True})
 
     call_payload = json.loads(serialize_tool_call(call))

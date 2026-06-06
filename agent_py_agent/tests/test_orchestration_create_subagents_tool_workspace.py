@@ -169,7 +169,7 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
         assert result.ok is True
         payload = json.loads(result.output)
         assert payload["created"] == 1
-        assert payload["ids"][0] != active.id
+        assert payload["created_run_ids"][0] != active.id
 
     def test_allows_child_staged_output_files_in_task_output(self, tmp_path):
         from agent_py_agent.agent.core import SimpleAgent

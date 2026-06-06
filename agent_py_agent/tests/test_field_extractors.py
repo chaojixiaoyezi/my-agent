@@ -31,7 +31,7 @@ class TestSourceProduct:
         event = {"source_product": "WAF"}
         assert _source_product(event) == "waf"
 
-    def test_source_product_alias(self):
+    def test_source_product_field_name(self):
         """验证别名映射。"""
         event = {"product": "EDR"}
         assert _source_product(event) == "edr"
@@ -50,7 +50,7 @@ class TestEventClass:
         event = {"event_class": "Alert"}
         assert _event_class(event) == "alert"
 
-    def test_event_class_alias(self):
+    def test_event_class_field_name(self):
         """验证别名映射。"""
         event = {"category": "Network"}
         assert _event_class(event) == "network"
@@ -69,7 +69,7 @@ class TestEventAction:
         event = {"event_action": "EXECUTE"}
         assert _event_action(event) == "execute"
 
-    def test_event_action_alias(self):
+    def test_event_action_field_name(self):
         """验证别名映射。"""
         event = {"action": "Connect"}
         assert _event_action(event) == "connect"
@@ -88,7 +88,7 @@ class TestOutcome:
         event = {"event_outcome": "SUCCESS"}
         assert _outcome(event) == "success"
 
-    def test_outcome_alias(self):
+    def test_outcome_field_name(self):
         """验证别名映射。"""
         event = {"login_result": "failure"}
         assert _outcome(event) == "failure"
@@ -107,7 +107,7 @@ class TestSeverity:
         event = {"severity": "HIGH"}
         assert _severity(event) == "high"
 
-    def test_severity_alias(self):
+    def test_severity_field_name(self):
         """验证别名映射。"""
         event = {"severity_hint": "critical"}
         assert _severity(event) == "critical"
@@ -145,7 +145,7 @@ class TestDestinationIP:
         event = {"dst_ip": "8.8.8.8"}
         assert _destination_ip(event) == "8.8.8.8"
 
-    def test_destination_ip_alias(self):
+    def test_destination_ip_field_name(self):
         """验证别名映射。"""
         event = {"destination_ip": "1.2.3.4"}
         assert _destination_ip(event) == "1.2.3.4"
@@ -164,7 +164,7 @@ class TestVictimIP:
         event = {"victim_ip": "192.168.1.1"}
         assert _victim_ip(event) == "192.168.1.1"
 
-    def test_victim_ip_alias(self):
+    def test_victim_ip_field_name(self):
         """验证别名映射。"""
         event = {"asset_ip": "10.10.10.10"}
         assert _victim_ip(event) == "10.10.10.10"
@@ -202,7 +202,7 @@ class TestHost:
         event = {"host": "server-01"}
         assert _host(event) == "server-01"
 
-    def test_host_alias(self):
+    def test_host_field_name(self):
         """验证别名映射。"""
         event = {"hostname": "web-server"}
         assert _host(event) == "web-server"
@@ -221,7 +221,7 @@ class TestUser:
         event = {"user": "admin"}
         assert _user(event) == "admin"
 
-    def test_user_alias(self):
+    def test_user_field_name(self):
         """验证别名映射。"""
         event = {"username": "root"}
         assert _user(event) == "root"
@@ -240,7 +240,7 @@ class TestDomain:
         event = {"domain": "evil.com"}
         assert _domain(event) == "evil.com"
 
-    def test_domain_alias(self):
+    def test_domain_field_name(self):
         """验证别名映射。"""
         event = {"dns_query": "malware.com"}
         assert _domain(event) == "malware.com"
@@ -302,7 +302,7 @@ class TestParentProcessName:
         event = {"process.parent_name": "nginx"}
         assert _parent_process_name(event) == "nginx"
 
-    def test_parent_process_name_alias(self):
+    def test_parent_process_name_field_name(self):
         """验证别名映射。"""
         event = {"parent_process_name": "apache2"}
         assert _parent_process_name(event) == "apache2"

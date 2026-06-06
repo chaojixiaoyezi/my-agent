@@ -251,10 +251,8 @@ def _tool_metadata(
     for key in ("output_hash", "output_preview", "output_path", "output_externalized", "output_size_bytes"):
         if key in tool_call:
             metadata[key] = tool_call[key]
-    for key in ("parameters", "params", "arguments", "args"):
-        if key in tool_call:
-            metadata[key] = tool_call[key]
-            break
+    if "parameters" in tool_call:
+        metadata["parameters"] = tool_call["parameters"]
     return metadata
 
 

@@ -43,7 +43,7 @@ class OperationRef:
         data = payload if isinstance(payload, dict) else {}
         return cls(
             operation_id=str(data.get("operation_id", "")),
-            tool_name=str(data.get("tool_name") or data.get("tool") or ""),
+            tool_name=str(data.get("tool_name") or ""),
             idempotency_key=str(data.get("idempotency_key", "")),
             schema_version=str(data.get("schema_version") or SCHEMA_VERSION),
         )
@@ -71,8 +71,8 @@ class ToolError:
         if isinstance(payload, ToolError):
             return payload
         data = payload if isinstance(payload, dict) else {"message": str(payload or "")}
-        message = str(data.get("message") or data.get("error") or data.get("detail") or "")
-        explicit_type = str(data.get("error_type") or data.get("code") or "").upper()
+        message = str(data.get("message") or "")
+        explicit_type = str(data.get("error_type") or "").upper()
         contract = _error_contract_for(explicit_type, message)
         details = data.get("details") or {}
         return cls(

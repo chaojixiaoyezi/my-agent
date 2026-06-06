@@ -39,7 +39,7 @@ def _agent(*, child_ids: list[str] | None = None):
         SimpleNamespace(
             subagents=SimpleNamespace(
                 load=load,
-                record_runner_result=record_runner_result,
+                runner_result=SimpleNamespace(record_runner_result=record_runner_result),
             )
         ),
         captured,

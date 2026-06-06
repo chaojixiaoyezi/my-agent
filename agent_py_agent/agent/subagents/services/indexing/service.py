@@ -58,11 +58,6 @@ class SubAgentIndexingService:
         params: LocalRecordParams,
     ) -> None:
         """Write a subagent event to LocalStore; failures do not affect the file ledger."""
-        if "_log_local_record" in self.manager.__dict__:
-            self.manager._log_local_record(
-                params=params,
-            )
-            return
         if not hasattr(self.manager, "local_store"):
             return
         if self.manager.local_store is None:
@@ -143,16 +138,16 @@ class SubAgentIndexingService:
         index_patch_review_via(self, record)
 
     def index_dispatch_record(self, record: DispatchRecord) -> None:
-        _index_dispatch_record_via(self.manager, record)
+        _index_dispatch_record_via(self, record)
 
     def index_dispatch_watch_record(self, record: DispatchWatchRecord) -> None:
-        _index_dispatch_watch_record_via(self.manager, record)
+        _index_dispatch_watch_record_via(self, record)
 
     def index_parent_planner_record(self, record: ParentPlannerRecord) -> None:
-        _index_parent_planner_record_via(self.manager, record)
+        _index_parent_planner_record_via(self, record)
 
     def index_execution_context(self, context: SubAgentExecutionContext) -> None:
-        _index_execution_context_via(self.manager, context)
+        _index_execution_context_via(self, context)
 
     def index_runner_result(self, result: SubAgentRunnerResult, output_payload: dict[str, object]) -> None:
         index_runner_result_via(self, result, output_payload)

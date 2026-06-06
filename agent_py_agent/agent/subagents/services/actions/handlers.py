@@ -15,7 +15,7 @@ from .params import RecordAfterTaskActionParams
 def apply_probe_or_repair_channel(service, action, task, ctx: ActionHandlerContext):
     from ...reports import ActionApplyRecord
 
-    result = service.manager.probe_channel(action.run_id)
+    result = service.manager.channel_probe.probe_channel(action.run_id)
     task = service.manager.load(action.run_id)
     return ActionApplyRecord(
         id=service.manager._new_id("apply"), action_id=action.id, run_id=action.run_id, action=action.action,

@@ -48,6 +48,7 @@
 - `rollup_ledger.jsonl` 只在子代理状态签名变化时追加；心跳式保存不应制造新的 compact 包。
 - `read_file` / `read_artifact` 的恢复游标来自结构化工具记录；旧状态词、summary 和人工描述不能证明某段已经读过。
 - compact handoff 的 final/running 判断只读当前协议状态，不能用 `succeeded/completed` 这类别名补齐。
+- task-local fact 文件只读当前模板名：`ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md`、`failing_tests.json`。文件名必须精确匹配，不能因为 mac/Windows 大小写行为把旧小写文件当成当前事实源。
 
 ## Artifact And Raw Output
 
@@ -62,3 +63,4 @@
 - 索引可以重建，不能替代正文事实。
 - memory 只提供事实和检索，不做任务质量硬门。
 - 状态别名必须 fail closed；需要迁移旧数据时写显式迁移记录，不在 compact 读取链路里临时猜。
+- main context bundle 的结构化验收字段只认 `acceptance`、`constraints`、`latest_tests`；中文字段名和旧别名只作为普通用户文本保留，不进入机器验收合同。

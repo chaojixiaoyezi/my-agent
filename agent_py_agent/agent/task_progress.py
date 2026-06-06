@@ -190,7 +190,7 @@ def _normalize_item(value: object) -> dict[str, Any]:
         "id": item_id or _safe_id(title) or "item",
         "title": title,
         "status": status,
-        "notes": str(item.get("notes") or item.get("note") or "").strip(),
+        "notes": str(item.get("notes") or "").strip(),
         "next": str(item.get("next") or "").strip(),
         "evidence": string_list(item.get("evidence")),
     }

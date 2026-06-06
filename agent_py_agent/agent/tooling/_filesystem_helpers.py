@@ -114,15 +114,6 @@ def _bool_param(value: Any, *, default: bool = False) -> bool:
     return default
 
 
-def _bundled_filesystem_param(params: dict[str, Any], key: str, default: Any = None) -> Any:
-    if key in params:
-        return params.get(key)
-    filesystem = params.get("filesystem")
-    if isinstance(filesystem, dict) and key in filesystem:
-        return filesystem.get(key)
-    return default
-
-
 def _normalized_workspace_roots(primary: Path, roots: list[Path] | None) -> list[Path]:
     resolved: list[Path] = []
     for raw in [primary, *(roots or [])]:

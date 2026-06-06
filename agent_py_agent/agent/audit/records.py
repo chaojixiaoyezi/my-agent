@@ -76,39 +76,6 @@ class LogParams:
     user_agent: str = ""
 
 
-def normalize_log_params(
-    params: LogParams | AuditAction | str | None,
-    *,
-    action: AuditAction | str | None = None,
-    user_id: str = "",
-    channel: str = "",
-    target_type: str = "",
-    target_id: str = "",
-    status: AuditStatus | str = AuditStatus.SUCCESS,
-    details: dict[str, Any] | None = None,
-    ip_address: str = "",
-    user_agent: str = "",
-) -> LogParams:
-    """把新旧两种 log 调用形式统一成 LogParams。"""
-
-    if isinstance(params, LogParams):
-        return params
-    action_value = params if params is not None else action
-    if action_value is not None:
-        return LogParams(
-            action=action_value,
-            user_id=user_id,
-            channel=channel,
-            target_type=target_type,
-            target_id=target_id,
-            status=status,
-            details=details,
-            ip_address=ip_address,
-            user_agent=user_agent,
-        )
-    raise TypeError("log() requires LogParams or action")
-
-
 def enum_value(value: Any) -> Any:
     return value.value if isinstance(value, Enum) else value
 
@@ -119,5 +86,4 @@ __all__ = [
     "AuditStatus",
     "LogParams",
     "enum_value",
-    "normalize_log_params",
 ]

@@ -176,6 +176,42 @@ def test_compact_work_state_does_not_import_workspace_root_checklist(tmp_path: P
     assert work_state["read_files"] == []
 
 
+def test_compact_work_state_ignores_old_fact_source_names(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    request_id = "req-old-test-sources"
+    write_runtime_fact_source(
+        RuntimeFactSourceRequest(
+            root=root,
+            request_id=request_id,
+            user_prompt="整理 compact 测试来源。",
+            response_text="running",
+            backend="echo",
+            status="running",
+        )
+    )
+    fact_dir = root / "memory_archive" / "runtime_facts" / request_id
+    (fact_dir / "acceptance.md").write_text("- old lowercase acceptance\n", encoding="utf-8")
+    (fact_dir / "constraints.md").write_text("- old lowercase constraints\n", encoding="utf-8")
+    (fact_dir / "test_checklist.md").write_text("- old lowercase checklist\n", encoding="utf-8")
+    (fact_dir / "next_actions.json").write_text(
+        json.dumps({"latest_tests": ["old next action latest_tests"], "tests": ["old tests"]}),
+        encoding="utf-8",
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            MemoryCompactPlanOptions(request_id=request_id, run_id=request_id, task_id=request_id)
+        ),
+    )
+
+    work_state = result["work_state_snapshot"]
+    assert work_state["acceptance"]["items"] == []
+    assert work_state["constraints"]["items"] == []
+    assert work_state["latest_tests"]["items"] == []
+    assert work_state["latest_tests"]["source_paths"] == []
+
+
 def _write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(

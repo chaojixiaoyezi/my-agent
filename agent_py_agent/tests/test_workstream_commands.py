@@ -75,7 +75,7 @@ class TestStatusCommandsForWorkstream:
         mock_agent.config.gateway_stale_seconds = 300
         mock_agent.config.auto_detect_work_on_startup = False
         mock_agent.local_store.stats.return_value = {"record_count": 100, "event_count": 50, "fts5_enabled": True, "db_path": str(tmp_path / "store.db")}
-        mock_agent.subagents.build_board.return_value = MagicMock(summary={"total": 0}, hot_list=[], recent=[])
+        mock_agent.subagents.board.build_board.return_value = MagicMock(summary={"total": 0}, hot_list=[], recent=[])
         mock_agent.local_store.timeline.return_value = []
 
         with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
@@ -103,7 +103,7 @@ class TestStatusCommandsForWorkstream:
         mock_agent.config.gateway_stale_seconds = 300
         mock_agent.config.auto_detect_work_on_startup = False
         mock_agent.local_store.stats.return_value = {"record_count": 100, "event_count": 50, "fts5_enabled": True, "db_path": str(tmp_path / "store.db")}
-        mock_agent.subagents.build_board.return_value = MagicMock(summary={"total": 0}, hot_list=[], recent=[])
+        mock_agent.subagents.board.build_board.return_value = MagicMock(summary={"total": 0}, hot_list=[], recent=[])
         mock_agent.local_store.timeline.return_value = []
 
         with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \

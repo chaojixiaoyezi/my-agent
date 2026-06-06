@@ -9,7 +9,6 @@ from typing import Any
 
 from ._filesystem_helpers import (
     _bool_param,
-    _bundled_filesystem_param,
     _int_param,
     _optional_path,
     _text_param,
@@ -125,18 +124,18 @@ class _FindFilesRequest:
 def _find_files_request_from_params(params: dict[str, Any], max_matches: int) -> _FindFilesRequest:
     return _FindFilesRequest(
         pattern=_text_param(
-            _bundled_filesystem_param(params, "pattern"),
+            params.get("pattern"),
             name="pattern",
             max_chars=300,
             strip=True,
         ),
-        raw_path=_optional_path(_bundled_filesystem_param(params, "path", "."), default="."),
+        raw_path=_optional_path(params.get("path", "."), default="."),
         limit=min(
-            _int_param(_bundled_filesystem_param(params, "limit"), name="limit", default=max_matches, min_value=1),
+            _int_param(params.get("limit"), name="limit", default=max_matches, min_value=1),
             max_matches,
         ),
-        offset=_int_param(_bundled_filesystem_param(params, "offset"), name="offset", default=0, min_value=0),
-        include_ignored=_bool_param(_bundled_filesystem_param(params, "include_ignored", False), default=False),
+        offset=_int_param(params.get("offset"), name="offset", default=0, min_value=0),
+        include_ignored=_bool_param(params.get("include_ignored", False), default=False),
     )
 
 

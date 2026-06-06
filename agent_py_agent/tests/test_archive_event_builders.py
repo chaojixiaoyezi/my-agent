@@ -267,7 +267,7 @@ class TestNormalizeToolCall:
 
     def test_dict_passthrough(self):
         """验证字典直接返回"""
-        call = {"tool_name": "read", "args": {}}
+        call = {"tool_name": "read", "input": {}}
         result = _normalize_tool_call(call)
         assert result == call
 
@@ -276,9 +276,9 @@ class TestNormalizeToolCall:
         @dataclass
         class ToolCall:
             tool_name: str
-            args: dict
+            input: dict
 
-        call = ToolCall(tool_name="read", args={})
+        call = ToolCall(tool_name="read", input={})
         result = _normalize_tool_call(call)
         assert isinstance(result, dict)
         assert result["tool_name"] == "read"
@@ -288,7 +288,7 @@ class TestNormalizeToolCall:
         class ToolCall:
             def __init__(self):
                 self.tool_name = "read"
-                self.args = {}
+                self.input = {}
 
         call = ToolCall()
         result = _normalize_tool_call(call)
@@ -357,3 +357,12 @@ class TestToolMetadata:
         result = _tool_metadata(tool_call, facts=facts)
 
         assert "parameters" in result
+
+    def test_noncanonical_parameter_bundles_are_not_promoted(self):
+        """旧参数包裹字段不会被归档器提升成当前 parameters。"""
+        tool_call = {"tool_name": "read", "args": {"path": "/data"}}
+        facts = _ToolFacts(tool_name="read", tool_call_id="", tool_success=True, status="ok", error_code="", backend="openai")
+        result = _tool_metadata(tool_call, facts=facts)
+
+        assert "parameters" not in result
+        assert "args" not in result

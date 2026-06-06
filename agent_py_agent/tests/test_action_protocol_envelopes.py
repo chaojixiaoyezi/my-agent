@@ -28,8 +28,8 @@ def test_tool_call_envelope_round_trips_with_explicit_scope_fields():
     envelope = ToolCallEnvelope(
         call_id="call-1",
         source="text_protocol",
-        tool="read_file",
-        args={"path": "README.md"},
+        tool_name="read_file",
+        input={"path": "README.md"},
         scope=scope,
         idempotency_key="idem-1",
     )
@@ -47,7 +47,7 @@ def test_tool_call_envelope_round_trips_with_explicit_scope_fields():
     assert decoded.call_id == "call-1"
     assert decoded.operation_id == "tool_call:call-1"
     assert decoded.scope.owner_type == "subagent_run"
-    assert decoded.args == {"path": "README.md"}
+    assert decoded.input == {"path": "README.md"}
 
 
 def test_tool_call_envelope_from_payload_separates_tool_name_from_args():
@@ -59,8 +59,8 @@ def test_tool_call_envelope_from_payload_separates_tool_name_from_args():
         )
     )
 
-    assert envelope.tool == "write_file"
-    assert envelope.args == {"path": "out.txt", "content": "hello"}
+    assert envelope.tool_name == "write_file"
+    assert envelope.input == {"path": "out.txt", "content": "hello"}
     assert envelope.call_id == "call-write"
     assert envelope.operation_id == "tool_call:call-write"
     assert envelope.source == "text_protocol"

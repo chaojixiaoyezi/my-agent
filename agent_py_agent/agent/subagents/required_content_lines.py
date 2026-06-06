@@ -59,8 +59,6 @@ def _content_files_from_attributes(attributes: dict[str, Any]) -> dict[str, list
     raw = attributes.get("required_content_files")
     if isinstance(raw, dict):
         return _content_files_from_mapping(raw)
-    if isinstance(raw, list):
-        return _content_files_from_rows(raw)
     return {}
 
 
@@ -69,20 +67,6 @@ def _content_files_from_mapping(raw: dict[object, object]) -> dict[str, list[str
     for key, value in raw.items():
         file_key = _clean_file_key(key)
         lines = dedupe_strings(_required_content_line_list(value))[:100]
-        if file_key and lines:
-            items[file_key] = lines
-    return dict(list(items.items())[:50])
-
-
-def _content_files_from_rows(rows: list[object]) -> dict[str, list[str]]:
-    items: dict[str, list[str]] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        file_key = _clean_file_key(row.get("path") or row.get("file") or row.get("file_path"))
-        lines = dedupe_strings(
-            _required_content_line_list(row.get("lines") or row.get("required_content_lines") or row.get("required_lines"))
-        )[:100]
         if file_key and lines:
             items[file_key] = lines
     return dict(list(items.items())[:50])

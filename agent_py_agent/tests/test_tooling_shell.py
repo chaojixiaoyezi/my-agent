@@ -374,8 +374,8 @@ class TestShellToolValidation:
 class TestShellToolEdgeCases:
     """测试边界情况。"""
 
-    def test_invalid_working_dir_fallback(self, tmp_path: Path):
-        """无效工作目录回退到工作区。"""
+    def test_invalid_working_dir_is_rejected(self, tmp_path: Path):
+        """无效工作目录不会回退到工作区执行。"""
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
         workspace = tmp_path / "workspace"
@@ -387,7 +387,8 @@ class TestShellToolEdgeCases:
             "working_dir": "/nonexistent/path",
         })
 
-        assert result.ok is True
+        assert result.ok is False
+        assert result.error_code == "PATH_NOT_FOUND"
 
     @patch("subprocess.run")
     def test_os_error_handled(self, mock_run, tmp_path: Path):

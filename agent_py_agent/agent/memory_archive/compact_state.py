@@ -318,11 +318,8 @@ def _target_coverage_payload(value: Any) -> dict[str, Any]:
 
 
 def _coverage_targets(payload: dict[str, Any]) -> list[object]:
-    for key in ("target_items", "items", "targets"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            return list(value)
-    return []
+    value = payload.get("target_items")
+    return list(value) if isinstance(value, list) else []
 
 
 def _target_coverage_line(value: Any) -> str:

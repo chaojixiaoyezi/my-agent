@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from .models import BaseTool, ToolExecutionResult
-from .registry_params import tool_params_for_execution
 from .registry_tool_dispatch import AuthorizedToolDispatchRequest, execute_authorized_tool
 from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
 
@@ -38,11 +37,7 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
     if tool is None:
         return ToolExecutionResult(request.tool_name, False, f"未知工具: {request.tool_name}")
 
-    tool_params = tool_params_for_execution(
-        request.payload,
-        request.tool_name,
-        request.allowed_tools,
-    )
+    tool_params = _tool_params_for_execution(request.payload, request.tool_name, request.allowed_tools)
     workspace_roots = _workspace_roots_for_invocation(request)
     boundary_error = validate_write_boundary(
         request.tool_name,
@@ -71,6 +66,17 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
             )
         ),
     )
+
+
+def _tool_params_for_execution(
+    normalized_payload: dict[str, Any],
+    tool_name: str,
+    allowed_tools: list[str] | None,
+) -> dict[str, Any]:
+    params = {key: value for key, value in normalized_payload.items() if key != "tool"}
+    if tool_name == "read_file" and allowed_tools is not None:
+        params["__allowed_tools"] = list(allowed_tools)
+    return params
 
 
 # 避免上层 path gate 放行后底层文件工具仍按旧 workspace 拒绝。

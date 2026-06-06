@@ -58,11 +58,11 @@ def test_load_routes_calls_load_memory_routes(tmp_path):
         encoding="utf-8",
     )
 
-    routes_from_alias = load_routes(index_file)
+    routes_from_related_term = load_routes(index_file)
     routes_from_main = load_memory_routes(index_file)
 
-    assert len(routes_from_alias) == 1
-    assert routes_from_alias[0].route_id == routes_from_main[0].route_id
+    assert len(routes_from_related_term) == 1
+    assert routes_from_related_term[0].route_id == routes_from_main[0].route_id
 
 
 def test_load_memory_routes_nonexistent():
@@ -132,11 +132,11 @@ def test_parse_json_routes_dict_with_empty_routes():
 
 def test_parse_json_routes_with_list_fields():
     """测试解析包含列表字段的路由。"""
-    text = '[{"route_id": "r1", "trigger_keywords": ["kw1", "kw2"], "aliases": ["a1", "a2"]}]'
+    text = '[{"route_id": "r1", "trigger_keywords": ["kw1", "kw2"], "related_terms": ["a1", "a2"]}]'
     routes = parse_json_routes(text, source_path="test.json")
 
     assert routes[0].trigger_keywords == ["kw1", "kw2"]
-    assert routes[0].aliases == ["a1", "a2"]
+    assert routes[0].related_terms == ["a1", "a2"]
 
 
 def test_parse_json_routes_comma_separated_keywords():
@@ -220,17 +220,17 @@ def test_parse_markdown_routes_comments_skipped():
     assert len(routes) == 2
 
 
-def test_parse_markdown_routes_aliases():
-    """测试解析别名。"""
+def test_parse_markdown_routes_related_terms():
+    """测试解析相关词。"""
     text = (
-        "## alias-route\n"
-        "topic: 别名路由\n"
-        "aliases: 别名1, 别名2\n"
+        "## related_term-route\n"
+        "topic: 相关词路由\n"
+        "related_terms: 相关词1, 相关词2\n"
     )
     routes = parse_markdown_routes(text)
 
-    assert "别名1" in routes[0].aliases
-    assert "别名2" in routes[0].aliases
+    assert "相关词1" in routes[0].related_terms
+    assert "相关词2" in routes[0].related_terms
 
 
 def test_parse_markdown_routes_authority_path():

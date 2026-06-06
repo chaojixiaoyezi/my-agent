@@ -232,12 +232,12 @@ def test_registry_execution_rejects_mismatched_approval_binding(tmp_path):
             write_boundary={
                 "run_id": "run-1",
                 "tool_effects": {"echo": "dangerous"},
-                "approved_actions": [
-                    {
-                        "approval_id": "approval-1",
-                        "status": "APPROVED",
-                        "tool": "echo",
-                        "run_id": "run-1",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval-1",
+                            "status": "APPROVED",
+                            "tool_name": "echo",
+                            "run_id": "run-1",
                         "operation_id": "op-1",
                         "idempotency_key": "idem-echo-dangerous",
                         "args_hash": "sha256:not-this-call",
@@ -277,8 +277,6 @@ def test_registry_execution_blocks_duplicate_idempotency_key_before_side_effect(
                             {
                                 "value": 1,
                                 "mode": "real",
-                                "operation_id": "op-2",
-                                "idempotency_key": "idem-echo-mutating",
                             }
                         ),
                         "operation_id": "op-1",
@@ -728,5 +726,16 @@ def _write_file_archive_record() -> dict[str, object]:
 
 
 def _args_hash_for_legacy_payload(payload: dict[str, object]) -> str:
-    args = {key: value for key, value in payload.items() if key not in {"tool", "kind"}}
-    return args_hash_for_call(normalize_tool_call({**payload, "args": args}).input)
+    protocol_keys = {
+        "artifact_refs",
+        "call_id",
+        "idempotency_key",
+        "kind",
+        "metadata",
+        "operation_id",
+        "run_id",
+        "schema_version",
+        "tool",
+    }
+    args = {key: value for key, value in payload.items() if key not in protocol_keys}
+    return args_hash_for_call(normalize_tool_call({"tool_name": str(payload.get("tool") or ""), "input": args}).input)

@@ -24,7 +24,7 @@ def parse_write_file_raw_blocks(text: str) -> list[tuple[int, dict[str, Any]]]:
         attrs = _parse_attrs(match.group("attrs"))
         error = _write_attrs_error(attrs)
         if error:
-            calls.append((match.start(), parse_error_payload(error, match.group(0))))
+            calls.append((match.start(), parse_error_payload(error, match.group(0), error_code="WRITE_FILE_RAW_INVALID")))
             continue
         calls.append((match.start(), _write_file_payload(attrs, match.group("content"))))
     return calls
@@ -94,7 +94,14 @@ def _malformed_raw_marker_calls(
 ) -> list[tuple[int, dict[str, Any]]]:
     opener = f"[{marker}"
     return [
-        (pos, parse_error_payload(_malformed_raw_block_error(marker), _raw_block_sample(text, pos)))
+        (
+            pos,
+            parse_error_payload(
+                _malformed_raw_block_error(marker),
+                _raw_block_sample(text, pos),
+                error_code="WRITE_FILE_RAW_MALFORMED",
+            ),
+        )
         for pos in _raw_marker_positions(text, opener)
         if not _position_in_ranges(pos, valid_ranges) and _looks_like_raw_block_opener(text, pos, opener)
     ]
@@ -126,7 +133,7 @@ def _malformed_raw_block_error(marker: str) -> str:
 def _raw_block_sample(text: str, pos: int) -> str:
     candidates = [
         idx + len(marker)
-        for marker in ("[/WRITE_FILE_RAW]", "[/TOOL_CALL]", "[/SUBAGENT_CALL]")
+        for marker in ("[/WRITE_FILE_RAW]", "[/TOOL_CALL]")
         if (idx := text.find(marker, pos)) != -1
     ]
     end = min(candidates) if candidates else len(text)

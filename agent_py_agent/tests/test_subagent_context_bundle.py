@@ -236,7 +236,7 @@ def test_context_bundle_exposes_controlled_exec_grant_refs(tmp_path) -> None:
             command_allowlist=["pwd", "python3"],
             path_scope=[str(tmp_path / "workspace")],
             network_scope=["api.example.com"],
-            output_budget={"max_stdout_bytes": 4096},
+            output_budget={"stdout_bytes": 4096},
             constraints={"delete_policy": "trash_only"},
         )
     ]
@@ -252,7 +252,7 @@ def test_context_bundle_exposes_controlled_exec_grant_refs(tmp_path) -> None:
             "command_allowlist": ["pwd", "python3"],
             "path_scope": [str(tmp_path / "workspace")],
             "network_scope": ["api.example.com"],
-            "output_budget": {"max_stdout_bytes": 4096},
+            "output_budget": {"stdout_bytes": 4096},
             "risk_level": "",
             "constraints": {"delete_policy": "trash_only"},
             "delete_policy": {

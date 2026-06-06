@@ -26,9 +26,9 @@ def cmd_learn_list(args) -> int:
     code, agent = _ensure_learning_enabled(args)
     if code:
         return code
-    candidates = agent.subagents.list_learning_candidates()
+    candidates = agent.subagents.learning.list_learning_candidates()
     print("LEARNING DRAFTS")
-    print(f"total={len(candidates)} dir={agent.subagents.learning_drafts_dir()}")
+    print(f"total={len(candidates)} dir={agent.subagents.learning.learning_drafts_dir()}")
     if not candidates:
         print("暂时没有 learning draft。")
         return 0
@@ -44,7 +44,7 @@ def cmd_learn_accept(args) -> int:
     code, agent = _ensure_learning_enabled(args)
     if code:
         return code
-    candidate = agent.subagents.set_learning_candidate_status(args.candidate_id, "accepted")
+    candidate = agent.subagents.learning.set_learning_candidate_status(args.candidate_id, "accepted")
     print(
         f"accepted {candidate.id} confidence={candidate.confidence:.2f} "
         f"occurrences={candidate.occurrence_count}"
@@ -56,7 +56,7 @@ def cmd_learn_reject(args) -> int:
     code, agent = _ensure_learning_enabled(args)
     if code:
         return code
-    candidate = agent.subagents.set_learning_candidate_status(args.candidate_id, "rejected")
+    candidate = agent.subagents.learning.set_learning_candidate_status(args.candidate_id, "rejected")
     print(
         f"rejected {candidate.id} confidence={candidate.confidence:.2f} "
         f"occurrences={candidate.occurrence_count}"
@@ -68,7 +68,7 @@ def cmd_learn_stats(args) -> int:
     code, agent = _ensure_learning_enabled(args)
     if code:
         return code
-    payload = agent.subagents.learning_stats()
+    payload = agent.subagents.learning.learning_stats()
     if getattr(args, "json", False):
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0

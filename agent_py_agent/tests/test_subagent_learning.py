@@ -75,13 +75,13 @@ def _create_agent_with_learning(tmp_path: Path) -> SimpleAgent:
 def _run_and_record_lesson(agent: SimpleAgent, goal: str, thought: str, lesson_text: str):
     task = agent.subagents.create_run(goal=goal, thought=thought, plan=["执行", "沉淀 lesson"])
     parsed = _parsed_output_with_lessons(lesson_text)
-    agent.subagents.record_runner_result(_rrr(task.id, dry_run=False, ok=True, message="done", structured_output=parsed))
+    agent.subagents.runner_result.record_runner_result(_rrr(task.id, dry_run=False, ok=True, message="done", structured_output=parsed))
     return task
 
 
 def _setup_learning_candidate(agent: SimpleAgent, config_path: Path) -> tuple:
     task = _run_and_record_lesson(agent, "产出 learning draft", "记录 lesson。", "先读现有测试，再补最小回归，再改实现")
-    return agent.subagents.list_learning_candidates()[0]
+    return agent.subagents.learning.list_learning_candidates()[0]
 
 
 def test_record_runner_result_generates_and_dedupes_learning_candidates(tmp_path):
@@ -89,7 +89,7 @@ def test_record_runner_result_generates_and_dedupes_learning_candidates(tmp_path
     first = _run_and_record_lesson(agent, "总结 lessons", "记录经验。", "先写失败复现，再改代码，最后补最小回归测试")
     second = _run_and_record_lesson(agent, "再次总结 lessons", "复用同一条经验。", "先复现失败，再改代码，最后补一个最小回归测试")
 
-    candidates = agent.subagents.list_learning_candidates()
+    candidates = agent.subagents.learning.list_learning_candidates()
     assert len(candidates) == 1
     candidate = candidates[0]
     assert candidate.status == "draft"
@@ -116,7 +116,7 @@ def test_learning_candidate_does_not_merge_short_lesson_into_long_report(tmp_pat
         ),
     )
 
-    candidates = agent.subagents.list_learning_candidates()
+    candidates = agent.subagents.learning.list_learning_candidates()
     assert len(candidates) == 2
     assert sorted(run for item in candidates for run in item.source_runs) == sorted([first.id, second.id])
 
@@ -137,7 +137,7 @@ def test_learn_cli_lists_accepts_rejects_and_reports_stats(tmp_path, capsys):
     assert args.func(args) == 0
     output = capsys.readouterr().out
     assert f"accepted {candidate.id}" in output
-    assert agent.subagents.load_learning_candidate(candidate.id).status == "accepted"
+    assert agent.subagents.learning.load_learning_candidate(candidate.id).status == "accepted"
 
     args = parser.parse_args(["--config", str(config_path), "learn", "stats", "--json"])
     assert args.func(args) == 0
@@ -150,7 +150,7 @@ def test_learn_cli_lists_accepts_rejects_and_reports_stats(tmp_path, capsys):
     assert args.func(args) == 0
     output = capsys.readouterr().out
     assert f"rejected {candidate.id}" in output
-    assert agent.subagents.load_learning_candidate(candidate.id).status == "rejected"
+    assert agent.subagents.learning.load_learning_candidate(candidate.id).status == "rejected"
 
 
 def test_learn_cli_requires_enable_self_learning(tmp_path, capsys):

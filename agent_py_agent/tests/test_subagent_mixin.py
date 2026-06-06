@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, NonCallableMock, PropertyMock, patch
 
 import pytest
 
-from agent_py_agent.agent.agent_core.subagent import config_workflow_dispatch_mode
+from agent_py_agent.agent.agent_core.subagent.lifecycle_service import config_workflow_dispatch_mode
 from agent_py_agent.agent.agent_core.subagent.params import SpawnSubagentsParams
 from agent_py_agent.agent.agent_core.subagent.spawn_flow import configured_subagent_allowed_tools
 from agent_py_agent.agent.agent_core.subagent_mixin import SimpleAgentSubagentMixin
@@ -164,11 +164,11 @@ class TestSubagentMixinRun:
     def test_run_subagent_dry_run(self, mock_mixin: SimpleAgentSubagentMixin) -> None:
         """测试 dry-run 模式。"""
         mock_mixin.subagents = MagicMock()
-        mock_mixin.subagents.prepare_runner_attempt.return_value = MagicMock(
+        mock_mixin.subagents.lifecycle.prepare_runner_attempt.return_value = MagicMock(
             runner_active_attempt_id=""
         )
 
-        mock_mixin.subagents.write_execution_context.return_value = MagicMock(
+        mock_mixin.subagents.runner_context.write_execution_context.return_value = MagicMock(
             allowed_tools=["tool1"],
             write_boundary={},
             goal="test goal",
@@ -177,7 +177,7 @@ class TestSubagentMixinRun:
         # 创建一个真实的 MagicMock 用于 record_runner_result 返回值
         mock_result = MagicMock()
         mock_result.run_id = "test-run"
-        mock_mixin.subagents.record_runner_result.return_value = mock_result
+        mock_mixin.subagents.runner_result.record_runner_result.return_value = mock_result
 
         with patch(
             "agent_py_agent.agent.agent_core.subagent_mixin._build_subagent_runner_prompt"
@@ -191,24 +191,24 @@ class TestSubagentMixinRun:
             )
 
         assert result.run_id == "test-run"
-        mock_mixin.subagents.record_runner_result.assert_called_once()
-        call_params = mock_mixin.subagents.record_runner_result.call_args[0][0]
+        mock_mixin.subagents.runner_result.record_runner_result.assert_called_once()
+        call_params = mock_mixin.subagents.runner_result.record_runner_result.call_args[0][0]
         assert call_params.dry_run is True
 
     def test_run_subagent_with_attempt_id(self, mock_mixin: SimpleAgentSubagentMixin) -> None:
         """测试带 attempt_id 的 run。"""
         mock_mixin.subagents = MagicMock()
-        mock_mixin.subagents.prepare_runner_attempt.return_value = MagicMock(
+        mock_mixin.subagents.lifecycle.prepare_runner_attempt.return_value = MagicMock(
             runner_active_attempt_id="attempt-123"
         )
-        mock_mixin.subagents.write_execution_context.return_value = MagicMock(
+        mock_mixin.subagents.runner_context.write_execution_context.return_value = MagicMock(
             allowed_tools=[],
             write_boundary={},
             goal="goal",
         )
         mock_result = MagicMock()
         mock_result.run_id = "run-id"
-        mock_mixin.subagents.record_runner_result.return_value = mock_result
+        mock_mixin.subagents.runner_result.record_runner_result.return_value = mock_result
 
         with patch(
             "agent_py_agent.agent.agent_core.subagent_mixin._build_subagent_runner_prompt"
@@ -226,18 +226,18 @@ class TestSubagentMixinRun:
     def test_run_subagent_channel_broken(self, mock_mixin: SimpleAgentSubagentMixin) -> None:
         """测试通道健康检查失败。"""
         mock_mixin.subagents = MagicMock()
-        mock_mixin.subagents.prepare_runner_attempt.return_value = MagicMock(
+        mock_mixin.subagents.lifecycle.prepare_runner_attempt.return_value = MagicMock(
             runner_active_attempt_id=""
         )
-        mock_mixin.subagents.write_execution_context.return_value = MagicMock(
+        mock_mixin.subagents.runner_context.write_execution_context.return_value = MagicMock(
             allowed_tools=[],
             write_boundary={},
             goal="goal",
         )
-        mock_mixin.subagents.probe_channel.return_value = MagicMock(channel_status="BROKEN")
+        mock_mixin.subagents.channel_probe.probe_channel.return_value = MagicMock(channel_status="BROKEN")
         mock_result = MagicMock()
         mock_result.run_id = "test"
-        mock_mixin.subagents.record_runner_result.return_value = mock_result
+        mock_mixin.subagents.runner_result.record_runner_result.return_value = mock_result
 
         with patch(
             "agent_py_agent.agent.agent_core.subagent_mixin._build_subagent_runner_prompt"
@@ -250,8 +250,8 @@ class TestSubagentMixinRun:
                 probe=True,
             )
 
-        mock_mixin.subagents.record_runner_result.assert_called_once()
-        call_params = mock_mixin.subagents.record_runner_result.call_args[0][0]
+        mock_mixin.subagents.runner_result.record_runner_result.assert_called_once()
+        call_params = mock_mixin.subagents.runner_result.record_runner_result.call_args[0][0]
         assert call_params.status == "CHANNEL_ERROR"
         assert call_params.ok is False
 
@@ -277,9 +277,9 @@ class TestSubagentMixinParentPlanner:
         mock_record = MagicMock()
         mock_record.decision = "HEARTBEAT_OK"
         mock_record.triggered = False
-        mock_mixin.subagents.make_parent_planner_record.return_value = mock_record
-        mock_mixin.subagents.build_parent_planner_report.return_value = MagicMock()
-        mock_mixin.subagents.write_parent_planner_report.return_value = None
+        mock_mixin.subagents.parent_planner.make_parent_planner_record.return_value = mock_record
+        mock_mixin.subagents.parent_planner.build_parent_planner_report.return_value = MagicMock()
+        mock_mixin.subagents.parent_planner.write_parent_planner_report.return_value = None
 
         with patch(
             "agent_py_agent.agent.agent_core._subagent_planner_mixin._build_parent_planner_state"

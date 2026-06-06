@@ -22,7 +22,6 @@ def build_search_text_spec() -> ToolSpec:
         keywords=["搜索", "查找", "关键字", "grep", "rg", "全文检索", "文本匹配"],
         parameters={
             "query": "要搜索的文本",
-            "pattern": "query 的别名，便于按 grep/rg 习惯调用",
             "path": "从哪个目录开始搜，默认是工作区根目录",
             "limit": "本次最多返回多少条匹配，默认使用工具配置上限",
             "offset": "跳过前多少条匹配，用于分页，默认 0",
@@ -35,7 +34,6 @@ def build_search_text_spec() -> ToolSpec:
         },
         parameter_details={
             "query": "必填，默认按文本包含关系匹配；需要正则时传 literal=false。",
-            "pattern": "可选，和 query 等价；同时传时 query 优先。",
             "path": "可选，把搜索范围缩小到某个子目录时更高效。",
             "limit": "分页大小；命中很多时先看小批量，再用 next_offset 继续。",
             "offset": "上一页返回 next_offset 后，下一次传入这里继续看。",

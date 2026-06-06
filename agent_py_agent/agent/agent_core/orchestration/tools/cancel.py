@@ -353,7 +353,7 @@ def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, obj
     reason = str(params.get("reason") or "cancel_subagents").strip()
     attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
     if attempt_id:
-        task = agent.subagents.abandon_runner_attempt(task.id, attempt_id, reason=reason)
+        task = agent.subagents.lifecycle.abandon_runner_attempt(task.id, attempt_id, reason=reason)
     now = time.time()
     attrs = dict(getattr(task, "attributes", {}) or {})
     pid_report = _terminate_task_pid(task, bool(params.get("kill_process", True)))
@@ -375,7 +375,7 @@ def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, obj
     task.updated_at = now
     task.runner_active_attempt_id = ""
     agent.subagents.save(task)
-    agent.subagents._append_task_work_log(task, f"cancel_subagents: status=CANCELLED/ABANDONED reason={reason}")
+    agent.subagents.actions._append_task_work_log(task, f"cancel_subagents: status=CANCELLED/ABANDONED reason={reason}")
     return {
         "run_id": task.id,
         "status": task.status,

@@ -18,7 +18,7 @@ def test_recovery_orchestrator_records_dispatch_step_for_continue_packet(tmp_pat
     _write_continue_packet(task)
     manager.save(task)
 
-    report = manager.orchestrate_recovery(
+    report = manager.hierarchy.orchestrate_recovery(
         params=RecoveryOrchestrationRequest(run_ids=[task.id], apply=False, requested_by="parent-test")
     )
 
@@ -48,7 +48,7 @@ def test_recovery_orchestrator_can_apply_idempotent_takeover_run(tmp_path: Path)
     Path(task.agent_run_checkpoint_json).write_text("{}", encoding="utf-8")
     manager.save(task)
 
-    report = manager.orchestrate_recovery(
+    report = manager.hierarchy.orchestrate_recovery(
         params=RecoveryOrchestrationRequest(run_ids=[task.id], apply=True, requested_by="parent-test")
     )
 
@@ -91,7 +91,7 @@ def test_recovery_orchestrator_does_not_scan_error_status_alias(tmp_path: Path) 
     task.status = "ERROR"
     manager.save(task)
 
-    report = manager.orchestrate_recovery(params=RecoveryOrchestrationRequest(requested_by="parent-test"))
+    report = manager.hierarchy.orchestrate_recovery(params=RecoveryOrchestrationRequest(requested_by="parent-test"))
 
     assert report.steps == []
     assert report.summary["total"] == 0

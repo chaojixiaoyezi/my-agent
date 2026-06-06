@@ -14,7 +14,7 @@ from .capabilities import (
 from .config import LogAnalysisConfig, load_log_analysis_config, normalize_log_analysis_config
 from .doctor import collect_doctor_status
 from .models import (
-    SECURITY_ALERT_V1_FIELD_ALIASES,
+    SECURITY_ALERT_V1_FIELD_NAME_MAP,
     Case,
     CaseRecord,
     Checkpoint,
@@ -45,7 +45,7 @@ __all__ = [
     "NormalizedEvent",
     "QueryResult",
     "RawBatch",
-    "SECURITY_ALERT_V1_FIELD_ALIASES",
+    "SECURITY_ALERT_V1_FIELD_NAME_MAP",
     "SecurityAlertV1",
     "SecurityCase",
     "SourceSpec",

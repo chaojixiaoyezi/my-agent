@@ -28,7 +28,7 @@ def test_takeover_readiness_packet_collects_refs_without_reading_artifact_body(t
     task.blockers = ["工具输出过大"]
     task.artifact_refs = ["reports/blackbox.txt"]
     task.evidence_refs = ["reports/status_report.json"]
-    manager.write_execution_context(task.id)
+    manager.runner_context.write_execution_context(task.id)
     manager.save(task)
 
     loaded = manager.load(task.id)
@@ -71,7 +71,7 @@ def test_subagent_save_writes_takeover_readiness_packet_files(tmp_path) -> None:
     task.latest_summary = "等待父级接管。"
     task.blockers = ["缺少权限"]
     task.artifact_refs = ["output.json"]
-    manager.write_execution_context(task.id)
+    manager.runner_context.write_execution_context(task.id)
     manager.save(task)
 
     loaded = manager.load(task.id)

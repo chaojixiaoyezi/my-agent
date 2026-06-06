@@ -34,11 +34,11 @@ def make_due_check_record(agent: Any, ctx: Any):
         exclude_run_ids=list(ctx.exclude_run_ids or []),
     )
     due_report = (
-        agent.subagents.write_due_check(params=options)
+        agent.subagents.board.write_due_check(params=options)
         if ctx.mutate_state
-        else agent.subagents.due_check(params=options)
+        else agent.subagents.board.due_check(params=options)
     )
-    return agent.subagents.make_dispatch_record(
+    return agent.subagents.dispatch.make_dispatch_record(
         params=DispatchRecordParams(
             step="due_check",
             action="scan",
@@ -53,12 +53,12 @@ def make_due_check_record(agent: Any, ctx: Any):
 
 def make_leadership_recovery_plan_record(agent, cfg):
     options = SubAgentLeadershipRecoveryPlanOptions(config=cfg, write_report=True)
-    plan = agent.subagents.write_leadership_recovery_plan(params=options)
+    plan = agent.subagents.hierarchy.write_leadership_recovery_plan(params=options)
     affected = plan.summary.get("stale_coordinators", 0) + plan.summary.get("failed_parent_nodes", 0)
     if affected <= 0:
         return None
     plan_ref = str(agent.subagents.workspace / "subagent_leadership_recovery_plan.json")
-    return agent.subagents.make_dispatch_record(
+    return agent.subagents.dispatch.make_dispatch_record(
         params=DispatchRecordParams(
             step="leadership_recovery_plan",
             action="inspect_refs",
@@ -101,12 +101,12 @@ def _action_apply_options(ctx: Any) -> ActionApplyOptions:
 
 def _action_apply_report(agent: Any, ctx: Any, options: ActionApplyOptions):
     if ctx.mutate_state:
-        return agent.subagents.write_action_apply_report(ctx.cfg, options=options)
-    return agent.subagents.apply_actions(ctx.cfg, options=options)
+        return agent.subagents.actions.write_action_apply_report(ctx.cfg, options=options)
+    return agent.subagents.actions.apply_actions(ctx.cfg, options=options)
 
 
 def _action_apply_dispatch_record(agent: Any, item):
-    return agent.subagents.make_dispatch_record(
+    return agent.subagents.dispatch.make_dispatch_record(
         params=DispatchRecordParams(
             step="action_apply",
             action=item.action,
@@ -130,13 +130,13 @@ def make_capability_route_records(agent: Any, ctx: Any, *, mutate_state: bool | 
         limit=ctx.limit,
     )
     route_report = (
-        agent.subagents.write_capability_route_report(
+        agent.subagents.capability.write_capability_route_report(
             ctx.router,
             ctx.cfg,
             params=options,
         )
         if should_apply
-        else agent.subagents.route_capability_requests(
+        else agent.subagents.capability.route_capability_requests(
             ctx.router,
             ctx.cfg,
             params=options,
@@ -144,7 +144,7 @@ def make_capability_route_records(agent: Any, ctx: Any, *, mutate_state: bool | 
     )
     for item in route_report.records:
         records.append(
-            agent.subagents.make_dispatch_record(
+            agent.subagents.dispatch.make_dispatch_record(
                 params=DispatchRecordParams(
                     step="capability_route",
                     action=item.status.lower(),
@@ -167,7 +167,7 @@ def make_patch_review_records(agent: Any, patch_run_ids: list[str], params: Any)
         return []
     records = []
     patch_report = (
-        agent.subagents.write_patch_review_report(
+        agent.subagents.patch.write_patch_review_report(
             patch_run_ids,
             apply=True,
             reviewer=params.reviewer,
@@ -175,7 +175,7 @@ def make_patch_review_records(agent: Any, patch_run_ids: list[str], params: Any)
             limit=params.limit,
         )
         if params.mutate_state
-        else agent.subagents.review_patches(
+        else agent.subagents.patch.review_patches(
             patch_run_ids,
             apply=False,
             reviewer=params.reviewer,
@@ -185,7 +185,7 @@ def make_patch_review_records(agent: Any, patch_run_ids: list[str], params: Any)
     )
     for item in patch_report.records:
         records.append(
-            agent.subagents.make_dispatch_record(
+            agent.subagents.dispatch.make_dispatch_record(
                 params=DispatchRecordParams(
                     step="patch_review",
                     action=item.decision.lower(),
@@ -243,4 +243,4 @@ def make_dispatch_watch_record(
     agent,
     params: DispatchWatchRecordParams,
 ) -> DispatchWatchRecord:
-    return agent.subagents.make_dispatch_watch_record(params=params)
+    return agent.subagents.dispatch.make_dispatch_watch_record(params=params)

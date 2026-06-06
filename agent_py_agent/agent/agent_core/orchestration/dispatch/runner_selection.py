@@ -82,7 +82,7 @@ def invalid_include_run_ids_record(agent, ctx: DispatchContext, all_tasks: list,
     visible_tasks = scope_visible_runner_tasks(all_tasks, ctx)
     visible_ids = [task.id for task in visible_tasks]
     suggestions = run_id_suffix_suggestions(invalid, visible_ids)
-    return agent.subagents.make_dispatch_record(
+    return agent.subagents.dispatch.make_dispatch_record(
         params=DispatchRecordParams(
             step="runner_selection",
             action="invalid_run_ids",

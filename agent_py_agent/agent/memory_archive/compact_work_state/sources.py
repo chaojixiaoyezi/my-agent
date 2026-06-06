@@ -23,9 +23,9 @@ from ...task_progress import progress_path, read_task_progress_report, task_prog
 from ..compact_runtime_handoff import build_runtime_handoff
 from .run_intent_sources import compact_run_intent_payload
 
-_ACCEPTANCE_FILES = ("ACCEPTANCE.md", "acceptance.md")
-_CONSTRAINT_FILES = ("CONSTRAINTS.md", "constraints.md")
-_TEST_FILES = ("TEST_CHECKLIST.md", "test_checklist.md", "failing_tests.json", "next_actions.json")
+_ACCEPTANCE_FILES = ("ACCEPTANCE.md",)
+_CONSTRAINT_FILES = ("CONSTRAINTS.md",)
+_TEST_FILES = ("TEST_CHECKLIST.md", "failing_tests.json")
 
 
 @dataclass(frozen=True)
@@ -57,9 +57,7 @@ def build_work_state_field_sources(request: WorkStateFieldSourceRequest) -> Work
     next_actions = _field_items(roots, ("task.json", "next_actions.json"), json_keys=("next_actions",))
     acceptance = _field_payload(_field_items(roots, _ACCEPTANCE_FILES, json_keys=("acceptance_checks", "acceptance")))
     constraints = _field_payload(_field_items(roots, _CONSTRAINT_FILES, json_keys=("constraints", "hard_constraints")))
-    latest_tests = _test_payload(
-        _field_items(roots, _TEST_FILES, json_keys=("latest_tests", "tests", "failing_tests", "test_status"))
-    )
+    latest_tests = _test_payload(_field_items(roots, _TEST_FILES, json_keys=("latest_tests", "failing_tests")))
     read_files = dedupe_strings([*acceptance["source_paths"], *constraints["source_paths"], *latest_tests["source_paths"]])
     task_progress = _first_task_progress([workspace, *roots], ids)
     runtime_handoff = build_runtime_handoff(workspace, ids)
@@ -201,7 +199,11 @@ def _test_payload(source: dict[str, Any]) -> dict[str, Any]:
 
 
 def _candidate_files(root: Path, file_names: tuple[str, ...]) -> list[Path]:
-    return [path for name in file_names if (path := root / name).exists() and path.is_file()]
+    try:
+        entries = {path.name: path for path in root.iterdir() if path.is_file()}
+    except OSError:
+        return []
+    return [entries[name] for name in file_names if name in entries]
 
 
 def _items_from_file(path: Path, json_keys: tuple[str, ...]) -> list[str]:

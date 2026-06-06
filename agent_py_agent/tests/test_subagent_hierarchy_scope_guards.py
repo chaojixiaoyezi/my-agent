@@ -27,7 +27,7 @@ def test_hierarchy_schedule_allows_forbidden_sibling_scope_hint(tmp_path):
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -65,7 +65,7 @@ def test_hierarchy_schedule_allows_depth_limit_text_without_scope_block(tmp_path
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -101,7 +101,7 @@ def test_hierarchy_schedule_forbidden_scope_ignores_parent_thought(tmp_path):
         allowed_tools=["schedule_child_subagents"],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[HierarchyChildSpec(goal="创建 leaf_worker_arithmetic 并写 solution.py")],
@@ -135,7 +135,7 @@ def test_hierarchy_schedule_allows_qa_before_implementation_ready(tmp_path):
         allowed_tools=["schedule_child_subagents"],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -182,7 +182,7 @@ def test_hierarchy_schedule_allows_qa_after_implementation_ready(tmp_path):
     child.verification_status = "VERIFIED"
     manager.save(child)
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[HierarchyChildSpec(goal="检查示例流程", role="tester", agent_name="小小小傻妞-tester")],
@@ -230,7 +230,7 @@ def test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready(tmp_
     leaf.verification_status = "VERIFIED"
     manager.save(leaf)
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[HierarchyChildSpec(goal="检查完整示例流程", role="tester", agent_name="小傻妞-tester")],
@@ -260,7 +260,7 @@ def test_hierarchy_schedule_allows_different_declared_work_topics(tmp_path):
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[HierarchyChildSpec(goal="创建 arithmetic worker。")],

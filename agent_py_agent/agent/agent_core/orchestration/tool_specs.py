@@ -104,12 +104,11 @@ def build_task_progress_spec() -> ToolSpec:
             "summary": "可选。当前整体进展一句话",
             "next_action": "可选。下一步最应该做什么",
             "items": "可选。进度项列表，每项可含 id/title/status/evidence/notes/next",
-            "coverage": "可选。覆盖账本，含 goal/dimensions/targets；用于记录哪些对象已覆盖到哪些检查点；也可先写一句当前覆盖进度。",
-            "coverage_targets": "可选。coverage.targets 的简写列表，每项可含 id/name/title/status/checks/expected_fields/fields/fields_needed/missing_fields/evidence/notes/next；也可写成“对象名: 字段A,字段B”。",
+            "coverage": "可选。覆盖账本，含 goal/dimensions/targets；targets 每项使用 id/title/status/checks/evidence/notes/next。",
         },
         parameter_details={
             "items": "这是开放清单，不是业务模板。status 只用 pending/in_progress/done/skipped/blocked；completed/read/ok 这类说明写 notes/summary，不要写进 status。长文、长清单、逐章/逐项任务里，优先每个对象写一个 item；notes 写真实读到的短事实，evidence 写文件、offset/行号、artifact_ref 或来源说明。不要只写“章节001-012已覆盖”来代替逐项事实。",
-            "coverage": "这是开放世界覆盖清单，不限定对象类型。targets 可以是项目、论文、API、日志源、文件、模块或任何当前任务对象；checks 的键由当前任务自己定义；如果你只知道要覆盖哪些字段，也可先填 expected_fields/fields_needed。长任务里建议边读、边分析、边写报告时更新，不要最后一次性随便打钩；范围进度和逐项事实最好分开写。",
+            "coverage": "这是开放世界覆盖清单，不限定对象类型。targets 可以是项目、论文、API、日志源、文件、模块或任何当前任务对象；checks 必须是对象映射，键由当前任务自己定义，值只写 pending/in_progress/done/skipped/blocked。长任务里建议边读、边分析、边写报告时更新，不要最后一次性随便打钩；范围进度和逐项事实最好分开写。",
         },
         examples=[
             '{"tool":"task_progress","action":"update","summary":"已读完两个项目","next_action":"继续读第三个项目","items":[{"id":"project-a","title":"阅读项目A","status":"done","evidence":["project-a/README.md","project-a/src/core.py"]}]}',

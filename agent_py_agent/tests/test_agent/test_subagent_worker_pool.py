@@ -126,7 +126,7 @@ def test_dispatch_parallel_runner_pool_does_not_broadcast_specific_instruction(m
 
     def fake_worker(params):
         captured.append((params.run_id, params.instruction))
-        return agent.subagents.record_runner_result(
+        return agent.subagents.runner_result.record_runner_result(
             RecordRunnerResultParams(
                 run_id=params.run_id,
                 dry_run=False,
@@ -172,7 +172,7 @@ def test_dispatch_single_runner_keeps_specific_instruction(monkeypatch, tmp_path
 
     def fake_worker(params):
         captured.append(params.instruction)
-        return agent.subagents.record_runner_result(
+        return agent.subagents.runner_result.record_runner_result(
             RecordRunnerResultParams(
                 run_id=params.run_id,
                 dry_run=False,
@@ -217,7 +217,7 @@ def _parent_child_pair(agent):
 def _capture_runner_ids(monkeypatch, agent, captured: list[str]) -> None:
     def fake_worker(params):
         captured.append(params.run_id)
-        return agent.subagents.record_runner_result(
+        return agent.subagents.runner_result.record_runner_result(
             RecordRunnerResultParams(
                 run_id=params.run_id,
                 dry_run=False,

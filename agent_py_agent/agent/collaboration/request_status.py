@@ -7,7 +7,7 @@ from typing import Any
 from .models import CollaborationCase, CollaborationRequest, EvidencePacket
 from .store_common import float_value
 
-TargetAliases = Callable[[object], set[str]]
+TargetIdentityKeys = Callable[[object], set[str]]
 
 TERMINAL_CASE_STATUSES = {"closed"}
 COMPLETED_REQUEST_STATUSES = {"completed"}
@@ -78,13 +78,13 @@ def request_response_status(
     return "waiting"
 
 
-def evidence_sources_by_request(evidence: list[EvidencePacket], *, aliases: TargetAliases) -> dict[str, set[str]]:
+def evidence_sources_by_request(evidence: list[EvidencePacket], *, identity_keys: TargetIdentityKeys) -> dict[str, set[str]]:
     result: dict[str, set[str]] = {}
     for item in evidence:
         request_id = str(getattr(item, "request_id", "") or "")
         source = str(getattr(item, "source_agent_id", "") or "")
         if request_id and source:
-            result.setdefault(request_id, set()).update(aliases(source))
+            result.setdefault(request_id, set()).update(identity_keys(source))
     return result
 
 
@@ -92,13 +92,13 @@ def request_has_required_evidence(
     request: CollaborationRequest,
     evidence_sources: set[str],
     *,
-    target_aliases: TargetAliases,
+    target_identity_keys: TargetIdentityKeys,
 ) -> bool:
     targets = [str(item) for item in request.target_agent_ids if str(item or "").strip()]
     if len(targets) <= 1:
         return bool(evidence_sources)
     return bool(evidence_sources) and all(
-        bool(evidence_sources.intersection(target_aliases(target))) for target in targets
+        bool(evidence_sources.intersection(target_identity_keys(target))) for target in targets
     )
 
 
@@ -106,11 +106,11 @@ def missing_responder_agent_ids(
     request: CollaborationRequest,
     evidence_sources: set[str],
     *,
-    target_aliases: TargetAliases,
+    target_identity_keys: TargetIdentityKeys,
 ) -> list[str]:
     missing: list[str] = []
     for target in [str(item) for item in request.target_agent_ids if str(item or "").strip()]:
-        if not evidence_sources.intersection(target_aliases(target)):
+        if not evidence_sources.intersection(target_identity_keys(target)):
             missing.append(target)
     return list(dict.fromkeys(missing))
 
@@ -119,10 +119,10 @@ def missing_responder_agent_ids_by_request(
     requests: list[CollaborationRequest],
     evidence_sources: dict[str, set[str]],
     *,
-    target_aliases: TargetAliases,
+    target_identity_keys: TargetIdentityKeys,
 ) -> dict[str, list[str]]:
     rows = (
-        (request.request_id, missing_responder_agent_ids(request, evidence_sources.get(request.request_id, set()), target_aliases=target_aliases))
+        (request.request_id, missing_responder_agent_ids(request, evidence_sources.get(request.request_id, set()), target_identity_keys=target_identity_keys))
         for request in requests
     )
     return {request_id: missing for request_id, missing in rows if missing}

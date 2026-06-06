@@ -1,7 +1,7 @@
 """Tests for parent-owned classification of subagent test execution outcomes."""
 
-from agent_py_agent.agent.subagents.execution import (
-    TestExecutionRecord,
+from agent_py_agent.agent.subagents.execution.records import TestExecutionRecord
+from agent_py_agent.agent.subagents.execution.report import (
     TestExecutionReport,
     TestExecutionReportOptions,
     write_test_execution_report,

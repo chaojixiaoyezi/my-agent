@@ -127,7 +127,7 @@ def normalized_tool_mode(mode: object, effect: object) -> str:
 def approved_action_id(facts: ApprovalBindingFacts) -> str:
     for item in facts.approved_actions:
         if _approved_action_matches(item, facts):
-            return str(item.get("approval_id") or item.get("id") or "").strip()
+            return str(item.get("approval_id") or "").strip()
     return ""
 
 
@@ -140,7 +140,7 @@ def _effect_facts(value: ToolEffectFacts | Mapping[str, object]) -> ToolEffectFa
     if isinstance(value, ToolEffectFacts):
         return value
     return ToolEffectFacts(
-        tool_name=str(value.get("tool_name") or value.get("tool") or ""),
+        tool_name=str(value.get("tool_name") or ""),
         effect=value.get("effect", ""),
         mode=value.get("mode", ""),
         idempotency_key=value.get("idempotency_key", ""),
@@ -164,7 +164,7 @@ def _approved_action_matches(
     status = str(item.get("status") or "").strip().upper()
     if status and status != "APPROVED":
         return False
-    if str(item.get("tool") or item.get("tool_name") or "").strip() != facts.tool_name:
+    if str(item.get("tool_name") or "").strip() != facts.tool_name:
         return False
     key = str(item.get("idempotency_key") or "").strip()
     if not key or key != facts.idempotency_key:

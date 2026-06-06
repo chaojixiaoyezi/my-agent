@@ -176,7 +176,7 @@ def test_rebuild_subagent_index_basic():
     count = rebuild_subagent_index(mock_agent)
 
     assert count >= 1
-    mock_agent.subagents._index_task.assert_called_once_with(mock_task)
+    mock_agent.subagents.indexing.index_task.assert_called_once_with(mock_task)
 
 
 def test_rebuild_subagent_index_with_existing_files(tmp_path):

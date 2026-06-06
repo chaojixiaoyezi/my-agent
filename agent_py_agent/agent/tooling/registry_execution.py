@@ -7,6 +7,7 @@ ToolRegistry 本身保持'服务台'职责；这里集中放工具调用解析�
 避免注册表类继续变厚。
 """
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,6 @@ from ..action_protocol import (
     RunScope,
     ToolCallEnvelope,
 )
-from ..contracts.tool_name_resolution import resolve_dispatch_tool_name
 from .models import BaseTool, ToolExecutionResult
 from .parse_error_hint import parse_error_message
 from .parser import parse_xmlish_tool_calls
@@ -155,7 +155,12 @@ def _append_unclosed_tool_block(
     payload = parse_tool_block_payload(raw, limits=context.payload_limits)
     context.calls.append((
         start,
-        parse_error_payload("工具调用缺少结束标记 [/TOOL_CALL]", raw, limits=context.payload_limits)
+        parse_error_payload(
+            "工具调用缺少结束标记 [/TOOL_CALL]",
+            raw,
+            limits=context.payload_limits,
+            error_code="TOOL_CALL_UNCLOSED",
+        )
         if payload.get("tool") == "__parse_error__"
         else payload,
     ))
@@ -176,7 +181,12 @@ def _append_closed_tool_block(
         malformed_raw = context.scan_text[body_start:nested_start].strip().strip("`")
         context.calls.append((
             start,
-            parse_error_payload("工具调用缺少结束标记 [/TOOL_CALL]", malformed_raw, limits=context.payload_limits),
+            parse_error_payload(
+                "工具调用缺少结束标记 [/TOOL_CALL]",
+                malformed_raw,
+                limits=context.payload_limits,
+                error_code="TOOL_CALL_UNCLOSED",
+            ),
         ))
         return nested_start
     context.calls.append((start, payload))
@@ -204,7 +214,9 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     normalized_payload = _normalized_payload_or_error(call, envelope)
     if isinstance(normalized_payload, ToolExecutionResult):
         return normalized_payload
-    normalized_payload = _with_resolved_dispatch_tool_name(normalized_payload, call)
+    wrapped_error = _same_name_wrapper_error(normalized_payload, envelope)
+    if wrapped_error:
+        return wrapped_error
     gate_decision = tool_call_gate_decision(normalized_payload, call)
     if not gate_decision.allowed:
         return runtime_gate_block_result(normalized_payload, gate_decision, envelope)
@@ -249,14 +261,30 @@ def _normalized_payload_or_error(
     return prepared
 
 
-def _with_resolved_dispatch_tool_name(
+def _same_name_wrapper_error(
     payload: dict[str, Any],
-    call: ExecuteRegistryCallParams,
-) -> dict[str, Any]:
-    resolved = resolve_dispatch_tool_name(payload.get("tool"), call.tools.keys())
-    if not resolved or resolved == payload.get("tool"):
-        return payload
-    return {**payload, "tool": resolved}
+    envelope: ToolCallEnvelope | None,
+) -> ToolExecutionResult | None:
+    tool_text = str(payload.get("tool") or "").strip()
+    if not tool_text:
+        return None
+    if not isinstance(payload.get(tool_text), dict):
+        return None
+    body = {
+        "ok": False,
+        "error": "tool parameters must be top-level current fields; same-name wrapper objects are not accepted.",
+        "invalid_field": tool_text,
+        "how_to_fix": f"Move fields from {tool_text} to the top level next to tool.",
+    }
+    return attach_result_envelope(
+        ToolExecutionResult(
+            tool_text,
+            False,
+            json.dumps(body, ensure_ascii=False, indent=2),
+            error_code="TOOL_INVALID_ARGUMENTS",
+        ),
+        envelope,
+    )
 
 
 def _invoke_registry_with_envelope(

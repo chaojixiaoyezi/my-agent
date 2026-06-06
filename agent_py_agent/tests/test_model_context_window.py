@@ -9,6 +9,21 @@ def _agent(config: object, backend: object | None = None) -> object:
     return SimpleNamespace(config=config, backend=backend)
 
 
+def test_configured_context_window_is_used_without_backend() -> None:
+    agent = _agent(SimpleNamespace(model_context_window_tokens=200_000), None)
+
+    assert resolve_model_context_window_tokens(agent) == 200_000
+
+
+def test_configured_context_window_overrides_backend_default() -> None:
+    agent = _agent(
+        SimpleNamespace(model_context_window_tokens=200_000),
+        SimpleNamespace(context_window_tokens=128_000),
+    )
+
+    assert resolve_model_context_window_tokens(agent) == 200_000
+
+
 def test_backend_context_window_attribute_is_used() -> None:
     agent = _agent(
         SimpleNamespace(model_name="MiniMax-M2.7", max_tokens=16_000),
@@ -18,7 +33,7 @@ def test_backend_context_window_attribute_is_used() -> None:
     assert resolve_model_context_window_tokens(agent) == 270_000
 
 
-def test_backend_context_window_aliases_are_used() -> None:
+def test_backend_provider_max_context_tokens_is_used() -> None:
     agent = _agent(
         SimpleNamespace(model_name="other-model", max_tokens=16_000),
         SimpleNamespace(max_context_tokens=128_000),

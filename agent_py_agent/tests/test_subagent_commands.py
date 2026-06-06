@@ -32,7 +32,7 @@ class TestCmdSubagents:
         mock_board.summary = {"total": 0}
         mock_board.hot_list = []
         mock_board.recent = []
-        mock_agent.subagents.write_board.return_value = mock_board
+        mock_agent.subagents.board.write_board.return_value = mock_board
 
         with patch("agent_py_agent.cli._board.make_agent", return_value=mock_agent):
             result = cmd_subagents(args)
@@ -57,12 +57,12 @@ class TestCmdSubagents:
         mock_board.summary = {"total": 0}
         mock_board.hot_list = []
         mock_board.recent = []
-        mock_agent.subagents.write_board.return_value = mock_board
+        mock_agent.subagents.board.write_board.return_value = mock_board
 
         with patch("agent_py_agent.cli._board.make_agent", return_value=mock_agent):
             assert cmd_subagents(args) == 0
 
-        options = mock_agent.subagents.write_board.call_args.kwargs["options"]
+        options = mock_agent.subagents.board.write_board.call_args.kwargs["options"]
         assert options.root_id == "root-a"
         assert options.status == "RUNNING"
         assert options.owner == "alice"
@@ -100,7 +100,7 @@ class TestCmdSubagents:
         mock_board.hot_list = [mock_item]
         mock_board.recent = []
         mock_agent = MagicMock()
-        mock_agent.subagents.write_board.return_value = mock_board
+        mock_agent.subagents.board.write_board.return_value = mock_board
 
         with patch("agent_py_agent.cli._board.make_agent", return_value=mock_agent):
             result = cmd_subagents(args)
@@ -247,13 +247,13 @@ class TestCmdSubagentsApplyActions:
         mock_report = MagicMock()
         mock_report.summary = {"total": 0}
         mock_report.records = []
-        mock_agent.subagents.write_action_apply_report.return_value = mock_report
+        mock_agent.subagents.actions.write_action_apply_report.return_value = mock_report
 
         with patch("agent_py_agent.cli._actions.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli._actions.load_capability_config", return_value=MagicMock()):
             result = cmd_subagents_apply_actions(args)
             assert result == 0
-        call_kwargs = mock_agent.subagents.write_action_apply_report.call_args.kwargs
+        call_kwargs = mock_agent.subagents.actions.write_action_apply_report.call_args.kwargs
         assert call_kwargs["options"].apply is False
         assert call_kwargs["options"].locked_files == []
 
@@ -278,7 +278,7 @@ class TestCmdSubagentsRouteCapabilities:
         mock_report = MagicMock()
         mock_report.summary = {"total": 0}
         mock_report.records = []
-        mock_agent.subagents.write_capability_route_report.return_value = mock_report
+        mock_agent.subagents.capability.write_capability_route_report.return_value = mock_report
 
         with patch("agent_py_agent.cli._actions.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli._actions.load_capability_config", return_value=MagicMock()), \

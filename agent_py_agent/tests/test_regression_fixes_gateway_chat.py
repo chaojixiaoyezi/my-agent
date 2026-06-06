@@ -25,28 +25,25 @@ import pytest
 # Regression 1: max_tool_rounds from task_attributes (a413083)
 # ============================================================
 
-def test_regression_xml_tool_call_parse_read():
-    """验证 XML-ish tool_call 能解析 read 别名"""
+def test_regression_xml_tool_call_keeps_tool_name_exact():
+    """验证 XML-ish tool_call 不再自动映射 read/write 等旧别名"""
     from agent_py_agent.agent.tooling.parser import _normalize_xmlish_tool_name
 
-    # XML-ish 格式：<tool_call><function=read><parameter=file_path>...
-    # 修复前：read、write、search 等别名不会被归一化
-    # 修复后：被归一化为标准工具名 read_file、write_file、search_text
-    assert _normalize_xmlish_tool_name("read") == "read_file"
-    assert _normalize_xmlish_tool_name("write") == "write_file"
-    assert _normalize_xmlish_tool_name("search") == "search_text"
-    assert _normalize_xmlish_tool_name("list") == "list_files"
+    assert _normalize_xmlish_tool_name("read") == "read"
+    assert _normalize_xmlish_tool_name("write") == "write"
+    assert _normalize_xmlish_tool_name("search") == "search"
+    assert _normalize_xmlish_tool_name("list") == "list"
+    assert _normalize_xmlish_tool_name("read_file") == "read_file"
 
-def test_regression_xml_tool_call_param_aliases():
-    """验证 XML-ish 参数别名归一化"""
+def test_regression_xml_tool_call_keeps_parameter_name_exact():
+    """验证 XML-ish 参数名不再自动映射成 path"""
     from agent_py_agent.agent.tooling.parser import _normalize_xmlish_parameter_name
 
-    # 修复前：file_path、filepath、filename、file 不会被统一
-    # 修复后：统一归一化为 path
-    assert _normalize_xmlish_parameter_name("file_path") == "path"
-    assert _normalize_xmlish_parameter_name("filepath") == "path"
-    assert _normalize_xmlish_parameter_name("filename") == "path"
-    assert _normalize_xmlish_parameter_name("file") == "path"
+    assert _normalize_xmlish_parameter_name("file_path") == "file_path"
+    assert _normalize_xmlish_parameter_name("filepath") == "filepath"
+    assert _normalize_xmlish_parameter_name("filename") == "filename"
+    assert _normalize_xmlish_parameter_name("file") == "file"
+    assert _normalize_xmlish_parameter_name("path") == "path"
 
 def test_regression_qq_adapter_urllib_import():
     """验证 QQ adapter 的 urllib import 在文件顶部（可在任何函数外导入）"""

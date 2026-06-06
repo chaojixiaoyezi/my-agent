@@ -90,8 +90,6 @@ class PatchApplyService:
         limit=0,
     ) -> PatchApplyReport:
         """Execute the independent patch-apply audit chain for runner-declared file writes."""
-        from agent_py_agent.agent.subagents.services.patch_apply.summary import PatchApplySummary
-
         opts = _patch_apply_options(
             options,
             apply=apply,
@@ -103,7 +101,7 @@ class PatchApplyService:
         return PatchApplyReport(
             generated_at=time.time(),
             dry_run=not opts.apply,
-            summary=PatchApplySummary.build(records),
+            summary=_patch_apply_summary(records),
             records=records,
         )
 
@@ -134,7 +132,7 @@ class PatchApplyService:
             encoding="utf-8",
         )
         self._write_apply_records(report, apply=opts.apply)
-        self.manager._index_report(
+        self.manager.indexing.index_report(
             IndexReportParams(
                 "subagent_patch_apply_report",
                 "latest",
@@ -153,7 +151,7 @@ class PatchApplyService:
 
         for record in report.records:
             PatchApplyRecordFiles.write_record(record, self.manager)
-            self.manager._index_dataclass_record(
+            self.manager.indexing._index_dataclass_record(
                 DataclassRecordIndexParams(
                     "subagent_patch_apply",
                     record.id,
@@ -200,7 +198,7 @@ class PatchApplyService:
 
 def _collect_patch_apply_records(service: PatchApplyService, run_ids, opts: PatchApplyOptions):
     records = []
-    for task in service.manager._select_runs(run_ids):
+    for task in service.manager.indexing.select_runs(run_ids):
         record = _patch_apply_record_for_task(service, task, run_ids, opts)
         if record is None:
             continue
@@ -271,6 +269,19 @@ def _apply_patch_record(params: _PatchApplyRecordParams):
             note=opts.note,
         ),
     )
+
+
+def _patch_apply_summary(records: list[PatchApplyRecord]) -> dict[str, int]:
+    summary = {"total": len(records)}
+    for record in records:
+        summary[record.decision] = summary.get(record.decision, 0) + 1
+        ok_key = "ok" if record.ok else "failed"
+        mode_key = "dry_run" if record.dry_run else "applied"
+        summary[ok_key] = summary.get(ok_key, 0) + 1
+        summary[mode_key] = summary.get(mode_key, 0) + 1
+        if record.rollback_performed:
+            summary["rolled_back"] = summary.get("rolled_back", 0) + 1
+    return summary
 
 
 def _write_patch_apply_report_json(manager, report: PatchApplyReport) -> None:

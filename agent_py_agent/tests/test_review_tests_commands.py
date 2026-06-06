@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent_py_agent.agent.subagents.execution import (
+from agent_py_agent.agent.subagents.execution.records import TestExecutionRecord
+from agent_py_agent.agent.subagents.execution.report import (
     TestExecutionReportOptions,
     write_test_execution_report,
 )
-from agent_py_agent.agent.subagents.execution.records import TestExecutionRecord
 from agent_py_agent.cli import _review_tests
 
 

@@ -59,6 +59,7 @@ MagicMock/
 agent_py_agent/MagicMock/
 validation/live_lab/
 validation/cross_agent_benchmark/
+validation/real_runs/
 my-agent-worktrees/
 
 # Local real-run scratch outputs

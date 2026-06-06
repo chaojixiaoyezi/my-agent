@@ -78,7 +78,7 @@ def _manifest_facts(value: ToolManifestFacts | Mapping[str, object]) -> ToolMani
     if isinstance(value, ToolManifestFacts):
         return value
     return ToolManifestFacts(
-        tool_name=str(value.get("tool_name") or value.get("tool") or ""),
+        tool_name=str(value.get("tool_name") or ""),
         effect=value.get("effect", ""),
         parameters=value.get("parameters") if "parameters" in value else value.get("input_schema"),
         mode=value.get("mode", ""),

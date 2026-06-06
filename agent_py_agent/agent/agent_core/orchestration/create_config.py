@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ...settings.tool_config import DEFAULT_COMMAND_ACCESS_MODE
+from ...settings.defaults import DEFAULT_COMMAND_ACCESS_MODE
 
 
 def config_access_mode(agent) -> str:

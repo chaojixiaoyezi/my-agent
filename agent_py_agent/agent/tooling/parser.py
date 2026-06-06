@@ -1,10 +1,10 @@
 
 from __future__ import annotations
 
-"""parses non-JSON XML-ish tool-call dialects into canonical tool payloads.
+"""parses non-JSON XML-ish tool-call dialects into tool payloads.
 
 有些模型不会严格输出 `[TOOL_CALL]{json}[/TOOL_CALL]`，而是吐出像 XML 的格式。
-这个文件专门把那种格式翻译成统一的工具调用字典。
+这个文件只翻译结构外壳，工具名和参数名必须已经是当前协议字段。
 翻译失败时也不会让主流程崩掉，而是返回一个可处理的 parse error。
 """
 
@@ -43,29 +43,6 @@ _XMLISH_PARAMETER_NAME_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-_XMLISH_TOOL_ALIASES = {
-    "cat": "read_file",
-    "web_fetch": "web_fetch",
-    "grep": "search_text",
-    "list": "list_files",
-    "list_files": "list_files",
-    "ls": "list_files",
-    "open": "read_file",
-    "read": "read_file",
-    "read_file": "read_file",
-    "patch": "apply_patch",
-    "search": "search_text",
-    "search_text": "search_text",
-    "write": "write_file",
-    "write_file": "write_file",
-}
-
-_XMLISH_PARAMETER_ALIASES = {
-    "file": "path",
-    "file_path": "path",
-    "filepath": "path",
-    "filename": "path",
-}
 _MAX_XMLISH_RAW_CHARS = 1000
 
 
@@ -204,13 +181,11 @@ def _parse_xmlish_tool_call_body(body: str, raw: str) -> dict[str, Any]:
 
 
 def _normalize_xmlish_tool_name(name: str) -> str:
-    cleaned = name.strip().lower().replace("-", "_")
-    return _XMLISH_TOOL_ALIASES.get(cleaned, cleaned)
+    return name.strip()
 
 
 def _normalize_xmlish_parameter_name(name: str) -> str:
-    cleaned = name.strip().lower().replace("-", "_")
-    return _XMLISH_PARAMETER_ALIASES.get(cleaned, cleaned)
+    return name.strip()
 
 
 def _decode_xmlish_parameter_value(value: str) -> Any:

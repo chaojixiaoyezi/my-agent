@@ -1,7 +1,7 @@
-"""Tests for settings/config_normalize.py: config normalization, old field compatibility, and error messages.
+"""Tests for settings/normalize.py: config normalization and error messages.
 
 给人看的解释：
-测试配置归一化模块：配置归一化、旧字段兼容、错误提示。
+测试配置归一化模块：配置归一化和错误提示。
 """
 import tempfile
 from pathlib import Path
@@ -13,7 +13,7 @@ from agent_py_agent.agent.settings.config import (
     AgentConfig,
     load_simple_yaml,
 )
-from agent_py_agent.agent.settings.config_normalize import (
+from agent_py_agent.agent.settings.normalize import (
     normalize_agent_config,
     normalize_subagent_workflow_config,
 )
@@ -312,6 +312,16 @@ class TestNormalizeSubagentAgentConfig:
         assert normalized["provider_space_max_download_file_mb"] == 64
         assert normalized["provider_space_trash_retention_days"] == 45
         assert normalized["provider_space_destructive_actions_use_trash"] is True
+
+    def test_path_access_mode_only_accepts_current_values(self):
+        """验证路径访问策略只认 normal/full，不把旧写法静默升格。"""
+        normalized, warnings = normalize_agent_config({"path_access_mode": "full-access"})
+        assert normalized["path_access_mode"] == "normal"
+        assert any("path_access_mode" in warning for warning in warnings)
+
+        normalized, warnings = normalize_agent_config({"path_access_mode": "full"})
+        assert normalized["path_access_mode"] == "full"
+        assert warnings == []
 
     def test_normalize_empty_dict(self):
         """验证空字典使用所有默认值。"""

@@ -97,7 +97,7 @@ def append_patch_review_log(manager, record: PatchReviewRecord) -> None:
             f"- [{status}] {record.id} run={record.run_id} decision={record.decision} "
             f"applied={record.applied} message={record.message}\n"
         )
-    manager._index_patch_review(record)
+    manager.indexing.index_patch_review(record)
 
 
 def _apply_approved_patches(update: PatchReviewStatusUpdate) -> None:

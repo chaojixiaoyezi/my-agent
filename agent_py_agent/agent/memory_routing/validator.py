@@ -64,8 +64,8 @@ def _validate_route_identity(
 def _validate_route_shape(route: MemoryRoute, label: str, findings: list[str]) -> None:
     if not route.topic.strip():
         findings.append(f"route '{label}': topic is empty")
-    if not route.trigger_keywords and not route.aliases:
-        findings.append(f"route '{label}': trigger_keywords and aliases are both empty")
+    if not route.trigger_keywords and not route.related_terms:
+        findings.append(f"route '{label}': trigger_keywords and related_terms are both empty")
     if route.inject_mode not in VALID_INJECT_MODES:
         findings.append(f"route '{label}': inject_mode must be one of {sorted(VALID_INJECT_MODES)}")
 
@@ -78,7 +78,7 @@ def _validate_route_terms(
 ) -> None:
     seen_terms: set[str] = set()
     context = _TermValidationContext(label, seen_terms, keyword_owners, findings)
-    for term in [*route.trigger_keywords, *route.aliases]:
+    for term in [*route.trigger_keywords, *route.related_terms]:
         normalized = term.strip().lower()
         if not normalized:
             continue

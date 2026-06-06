@@ -4,7 +4,7 @@ from __future__ import annotations
 def test_external_knowledge_config_normalizes_flat_fields():
     from agent_py_agent.agent.external_knowledge.config import external_knowledge_config_from_agent
     from agent_py_agent.agent.settings.config import AgentConfig
-    from agent_py_agent.agent.settings.config_normalize import normalize_agent_config
+    from agent_py_agent.agent.settings.normalize import normalize_agent_config
 
     normalized, warnings = normalize_agent_config(
         {

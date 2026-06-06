@@ -80,7 +80,7 @@ def test_subagent_projections_read_canonical_state_not_legacy_locator(tmp_path) 
 
     loaded = manager.load(task.id)
     snapshot = manager.kernel_snapshot()
-    board = manager.build_board(options=SubAgentBoardOptions(include_child_status_counts=False))
+    board = manager.board.build_board(options=SubAgentBoardOptions(include_child_status_counts=False))
     index = child_result_index(object(), [loaded])
 
     assert loaded.status == "DONE"

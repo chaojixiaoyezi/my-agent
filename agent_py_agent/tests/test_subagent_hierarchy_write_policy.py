@@ -22,7 +22,7 @@ def test_hierarchy_schedule_keeps_report_roles_with_parent_write_coverage(tmp_pa
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[
@@ -52,7 +52,7 @@ def test_hierarchy_schedule_does_not_grant_parent_task_dir_to_children(tmp_path)
         allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -81,7 +81,7 @@ def test_hierarchy_schedule_keeps_report_goal_product_root_writable_for_recovery
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[
@@ -110,7 +110,7 @@ def test_hierarchy_schedule_recovers_report_role_from_child_agent_name(tmp_path)
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[
@@ -149,7 +149,7 @@ def test_hierarchy_schedule_grants_worker_path_written_by_child_spec(tmp_path):
         allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=coordinator.id,
             child_specs=[
@@ -183,7 +183,7 @@ def test_hierarchy_schedule_blocks_sibling_path_drift(tmp_path):
         extra_write_roots=[str(deliverables / "build")],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -215,7 +215,7 @@ def test_hierarchy_schedule_allows_child_path_under_parent_root(tmp_path):
         extra_write_roots=[str(deliverables / "build")],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -247,7 +247,7 @@ def test_hierarchy_schedule_ignores_url_image_sources_in_write_roots(tmp_path):
         allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=coordinator.id,
             child_specs=[
@@ -282,7 +282,7 @@ def test_hierarchy_schedule_preserves_coordinator_orchestration_tools(tmp_path):
         allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[

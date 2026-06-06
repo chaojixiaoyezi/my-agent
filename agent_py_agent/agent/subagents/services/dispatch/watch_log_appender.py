@@ -26,4 +26,4 @@ class DispatchWatchLogAppender:
                 f"- [{status}] {record.id} cycle={record.cycle} "
                 f"records={record.dispatch_record_count} message={record.message}\n"
             )
-        manager._index_dispatch_watch_record(record)
+        manager.indexing.index_dispatch_watch_record(record)

@@ -20,11 +20,10 @@ from .write_abort import (
     recovered_write_abort_payload,
 )
 
-_TOOL_START_MARKERS = ("[TOOL_CALL]", "[SUBAGENT_CALL]")
-_TOOL_END_MARKERS = ("[/TOOL_CALL]", "[/SUBAGENT_CALL]")
+_TOOL_START_MARKERS = ("[TOOL_CALL]",)
+_TOOL_END_MARKERS = ("[/TOOL_CALL]",)
 _MACHINE_BLOCK_PATTERNS = (
     re.compile(r"\[TOOL_CALL\].*?\[/TOOL_CALL\]", re.DOTALL),
-    re.compile(r"\[SUBAGENT_CALL\].*?\[/SUBAGENT_CALL\]", re.DOTALL),
     re.compile(r"\[WRITE_FILE_RAW[^\]]*\].*?\[/WRITE_FILE_RAW\]", re.DOTALL),
 )
 _MAX_UNCLOSED_TOOL_START_MARKERS = 1
@@ -234,6 +233,7 @@ def malformed_tool_protocol_abort_response(
 ) -> ModelResponse:
     payload = {
         "tool": "__parse_error__",
+        "error_code": "TOOL_CALL_UNCLOSED",
         "error": (
             f"模型连续输出 {exc.marker_count} 个未闭合 {exc.start_marker} 工具协议标记；"
             "工具调用缺少结束标记"
@@ -276,6 +276,7 @@ def long_write_abort_response(exc: LongToolContentStreamAbort, *, backend: str) 
     )
     payload = {
         "tool": "__parse_error__",
+        "error_code": "TOOL_CALL_UNCLOSED",
         "error": (
             f"{exc.tool}.content inline content streaming exceeded {exc.limit} chars; "
             "工具调用缺少结束标记"

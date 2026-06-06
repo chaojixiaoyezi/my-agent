@@ -298,30 +298,30 @@ def test_raise_collaboration_target_runtime_error_is_visible(tmp_path, monkeypat
     assert status["requests"][0]["metadata"]["target_runtime_load_error"]["category"] == "data_parse"
 
 
-def test_raise_collaboration_target_alias_error_is_visible(tmp_path, monkeypatch) -> None:
+def test_raise_collaboration_target_identity_error_is_visible(tmp_path, monkeypatch) -> None:
     agent = _agent_with_task(tmp_path)
-    original_aliases = agent.collaboration_store.agent_identity_aliases
+    original_identity_keys = agent.collaboration_store.agent_identity_keys
 
-    def broken_aliases(_text):
+    def broken_identity_keys(_text):
         raise ValueError("identity index broken")
 
-    monkeypatch.setattr(agent.collaboration_store, "agent_identity_aliases", broken_aliases)
+    monkeypatch.setattr(agent.collaboration_store, "agent_identity_keys", broken_identity_keys)
 
     result = agent.tools.tools["raise_collaboration"].execute(
         {
             "task_id": "task-1",
-            "title": "目标别名解析失败 case",
-            "summary": "目标别名索引坏了不能伪装成正常找不到目标。",
+            "title": "目标身份解析失败 case",
+            "summary": "目标身份索引坏了不能伪装成正常找不到目标。",
             "target_agent_ids": ["agent-b"],
             "question": "请补充证据。",
         }
     )
     payload = json.loads(result.output)
-    monkeypatch.setattr(agent.collaboration_store, "agent_identity_aliases", original_aliases)
+    monkeypatch.setattr(agent.collaboration_store, "agent_identity_keys", original_identity_keys)
     status = json.loads(agent.tools.tools["inspect_collaboration"].execute({"case_id": payload["case_id"]}).output)
 
     assert result.ok is True
-    assert payload["target_resolution_errors"][0]["context"] == "raise_collaboration.agent_identity_aliases"
+    assert payload["target_resolution_errors"][0]["context"] == "raise_collaboration.agent_identity_keys"
     assert payload["target_resolution_errors"][0]["category"] == "data_parse"
     assert status["requests"][0]["metadata"]["target_resolution_errors"][0]["message"] == "identity index broken"
 
@@ -424,7 +424,7 @@ def test_update_collaboration_case_reports_decision_load_error(tmp_path, monkeyp
 def test_targeted_collaboration_request_carries_clue_packet_to_responder_context(tmp_path) -> None:
     agent, responder, request = _targeted_clue_request(tmp_path)
 
-    context = agent.subagents.build_execution_context(responder.id)
+    context = agent.subagents.runner_context.build_execution_context(responder.id)
     targeted = context.context_bundle["collaboration"]["targeted_requests"][0]
 
     assert (targeted["request_id"], targeted["observed_facts"][0]["kind"], targeted["query_hints"][0]["hint_id"], targeted["response_contract"]["allow_not_matched"]) == (request.request_id, "caller-defined-kind", "hint-1", True)

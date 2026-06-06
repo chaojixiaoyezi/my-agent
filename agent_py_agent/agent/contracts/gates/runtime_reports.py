@@ -7,7 +7,7 @@ from .models import GateDecision, GateFinding
 
 
 def evaluate_acceptance_closeout_gate(report: dict[str, Any]) -> GateDecision:
-    status = str(report.get("final_status") or report.get("status") or "").strip().upper()
+    status = str(report.get("final_status") or "").strip().upper()
     verification = str(report.get("verification_status") or "").strip().upper()
     if status == "DONE" and verification not in {"PASSED", "VERIFIED"}:
         return GateDecision.deny(
@@ -94,9 +94,9 @@ def evaluate_recovery_lineage_gate(snapshot: dict[str, Any]) -> GateDecision:
         if not isinstance(ref, dict):
             findings.append(GateFinding("RECOVERY_ARTIFACT_LINEAGE_INVALID", evidence={"index": index}))
             continue
-        source_run_id = str(ref.get("source_run_id") or ref.get("run_id") or "").strip()
-        operation_id = str(ref.get("operation_id") or ref.get("source_operation_id") or "").strip()
-        path = str(ref.get("path") or ref.get("artifact_ref") or "").strip()
+        source_run_id = str(ref.get("source_run_id") or "").strip()
+        operation_id = str(ref.get("operation_id") or "").strip()
+        path = str(ref.get("artifact_ref") or "").strip()
         if not path or not source_run_id or not operation_id:
             findings.append(
                 GateFinding(
@@ -118,7 +118,7 @@ def gate_payload_findings(payload: dict[str, Any], *, default_code: str) -> list
 
 
 def is_tool_audit_record(record: dict[str, Any]) -> bool:
-    return str(record.get("type") or "tool_result") == "tool_result" or str(record.get("tool") or "").strip() != ""
+    return str(record.get("type") or "") == "tool_result" or str(record.get("tool") or "").strip() != ""
 
 
 def validate_tool_audit_record(index: int, record: dict[str, Any], findings: list[GateFinding]) -> None:

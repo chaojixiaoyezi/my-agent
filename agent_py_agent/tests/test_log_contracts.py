@@ -213,16 +213,16 @@ class TestAnalystInputValidation:
         assert input_obj.case_summary == "Summary from mapping"
         assert "ev-003" in input_obj.evidence_refs
 
-    def test_from_mapping_with_aliases(self):
+    def test_from_mapping_with_field_names(self):
         """测试 from_mapping 支持别名"""
         payload = {
-            "id": "case-alias-001",  # case_id 别名
-            "summary": "Summary via alias",  # case_summary 别名
+            "id": "case-field_name-001",  # case_id 别名
+            "summary": "Summary via field_name",  # case_summary 别名
             "evidence": ["ev-004"],  # evidence_refs 别名
         }
         input_obj = AnalystInput.from_mapping(payload)
-        assert input_obj.case_id == "case-alias-001"
-        assert input_obj.case_summary == "Summary via alias"
+        assert input_obj.case_id == "case-field_name-001"
+        assert input_obj.case_summary == "Summary via field_name"
 
 
 # ============================================================
@@ -255,11 +255,11 @@ class TestAnalystReportValidation:
             report.validate()
         assert "facts" in str(exc_info.value).lower() or "gaps" in str(exc_info.value).lower()
 
-    def test_from_mapping_with_hypotheses_alias(self):
+    def test_from_mapping_with_hypotheses_field_name(self):
         """测试 from_mapping 支持 hypotheses 作为 inferences 别名"""
         payload = {
             "case_id": "case-003",
-            "summary": "Report via hypothesis alias",
+            "summary": "Report via hypothesis field_name",
             "evidence_refs": ["ev-005"],
             "hypotheses": ["hypothesis 1"],  # inferences 的别名
             "facts": ["fact 1"],

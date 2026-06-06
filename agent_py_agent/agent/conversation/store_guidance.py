@@ -10,15 +10,17 @@ from ..runtime_errors import runtime_error_report
 from .models import new_id
 from .models_guidance import GuidanceEntry
 from .store_common import now as current_time
-from .store_common import read_jsonl_report, safe_file_stem
+from .store_common import read_jsonl_report
 from .store_observations import ConversationObservationStore
+
+GUIDANCE_TARGET_TYPES = {"agent_run", "thread", "task", "case"}
 
 
 class ConversationGuidanceStore(ConversationObservationStore):
     def append_guidance(self, request: dict[str, Any]) -> GuidanceEntry:
-        target_type = normalize_guidance_target_type(request.get("target_type") or request.get("type"))
-        target_id = str(request.get("target_id") or request.get("id") or "").strip()
-        message = str(request.get("message") or request.get("body") or request.get("prompt") or "").strip()
+        target_type = normalize_guidance_target_type(request.get("target_type"))
+        target_id = str(request.get("target_id") or "").strip()
+        message = str(request.get("message") or "").strip()
         if not target_type or not target_id:
             raise ValueError("target_type and target_id are required")
         if not message:
@@ -62,6 +64,8 @@ class ConversationGuidanceStore(ConversationObservationStore):
         include_delivered: bool = True,
     ) -> tuple[list[GuidanceEntry], list[dict[str, Any]]]:
         normalized_type = normalize_guidance_target_type(target_type)
+        if not normalized_type:
+            return [], [{"code": "GUIDANCE_TARGET_TYPE_INVALID", "target_type": str(target_type or "")}]
         delivered = self._read_guidance_delivered()
         report = read_jsonl_report(
             self._guidance_path(normalized_type, str(target_id)),
@@ -116,20 +120,8 @@ class ConversationGuidanceStore(ConversationObservationStore):
 
 
 def normalize_guidance_target_type(value: object) -> str:
-    text = str(value or "").strip().lower().replace("-", "_")
-    aliases = {
-        "run": "agent_run",
-        "runner": "agent_run",
-        "subagent": "agent_run",
-        "subagent_run": "agent_run",
-        "agent": "agent_run",
-        "agent_run": "agent_run",
-        "thread": "thread",
-        "conversation": "thread",
-        "task": "task",
-        "case": "case",
-    }
-    return aliases.get(text, safe_file_stem(text))
+    text = str(value or "").strip()
+    return text if text in GUIDANCE_TARGET_TYPES else ""
 
 
 def _with_guidance_delivered_at(entry: GuidanceEntry, delivered: dict[str, float]) -> GuidanceEntry:

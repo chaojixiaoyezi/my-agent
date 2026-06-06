@@ -165,10 +165,10 @@ class PatchReviewService:
         )
         for record in report.records:
             write_patch_review_record_files(self.manager, record)
-            self.manager._index_patch_review(record)
+            self.manager.indexing.index_patch_review(record)
             if opts.apply:
                 append_patch_review_log(self.manager, record)
-        self.manager._index_report(
+        self.manager.indexing.index_report(
             IndexReportParams(
                 "subagent_patch_review_report",
                 "latest",
@@ -213,7 +213,10 @@ class PatchReviewService:
                 json.dumps(output, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            self.manager._append_task_work_log(task, f"patch_review: {'approved' if ok else 'blocked'}={len(reviewed_patches)} reviewer={opts.reviewer}")
+            self.manager.actions._append_task_work_log(
+                task,
+                f"patch_review: {'approved' if ok else 'blocked'}={len(reviewed_patches)} reviewer={opts.reviewer}",
+            )
 
         return PatchReviewRecord(
             id=_new_id("patchreview"), run_id=task.id, dry_run=not opts.apply,
@@ -226,7 +229,7 @@ class PatchReviewService:
 
 def _collect_patch_review_records(service: PatchReviewService, run_ids, opts: PatchReviewOptions):
     records = []
-    for task in service.manager._select_runs(run_ids):
+    for task in service.manager.indexing.select_runs(run_ids):
         record = _patch_review_record_for_task(service, task, run_ids, opts)
         if record is None:
             continue

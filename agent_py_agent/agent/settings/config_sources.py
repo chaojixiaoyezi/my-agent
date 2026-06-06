@@ -5,8 +5,13 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
-from .config_internal_fields import INTERNAL_RUNTIME_CONFIG_FIELDS
 from .config_layers import ConfigLayer, EffectiveConfig, merge_config_layers
+
+INTERNAL_RUNTIME_CONFIG_FIELDS = {
+    "config_layers",
+    "config_path",
+    "config_sources",
+}
 
 
 def public_config_keys(config_cls: type) -> set[str]:
@@ -47,4 +52,4 @@ def _env_override_values(clean: dict[str, object], schema_defaults: dict[str, ob
     return ConfigLayer(source=f"env:{env_name}", priority=80, values=values)
 
 
-__all__ = ["merge_agent_config_sources", "public_config_keys"]
+__all__ = ["INTERNAL_RUNTIME_CONFIG_FIELDS", "merge_agent_config_sources", "public_config_keys"]

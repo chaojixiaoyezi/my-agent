@@ -381,7 +381,7 @@ def test_build_routed_memory_context_route_validation(tmp_path):
     """测试路由验证发现的问题进入 findings。"""
     index_file = tmp_path / "memory" / "routing" / "INDEX.md"
     index_file.parent.mkdir(parents=True)
-    # 缺少触发词和别名的路由
+    # 缺少触发词和相关词的路由
     index_file.write_text(
         "## empty-route\ntopic: 无触发词\n",
         encoding="utf-8",

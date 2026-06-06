@@ -50,13 +50,14 @@ def _needs_long_content_recovery(request: LongContentRecoveryRequest) -> bool:
 
 
 def _parse_error_mentions_long_write(payload: object, output: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("error_code") or "").strip() != "TOOL_CALL_UNCLOSED":
+        return False
     text = f"{_payload_text(payload)}\n{output}"
     if "write_file" not in text:
         return False
-    return "content" in text and any(
-        marker in text
-        for marker in ("缺少结束标记", "太长", "截断", "分块追加", "不超过")
-    )
+    return "content" in text
 
 
 def _target_path(payload: object) -> str:

@@ -15,7 +15,7 @@ from typing import Any
 
 from .models import MemoryRoute
 
-LIST_FIELDS = {"trigger_keywords", "aliases"}
+LIST_FIELDS = {"trigger_keywords", "related_terms"}
 
 
 def load_memory_routes(index_path: str | Path) -> list[MemoryRoute]:
@@ -94,7 +94,7 @@ def _route_from_mapping(data: dict[str, Any], *, source_path: str | Path = "") -
         route_id=str(data.get("route_id") or "").strip(),
         topic=str(data.get("topic") or "").strip(),
         trigger_keywords=_as_list(data.get("trigger_keywords")),
-        aliases=_as_list(data.get("aliases")),
+        related_terms=_as_list(data.get("related_terms")),
         when_to_read=str(data.get("when_to_read") or "").strip(),
         authority_path=str(data.get("authority_path") or "").strip(),
         inject_mode=str(data.get("inject_mode") or "on_hit").strip().lower(),

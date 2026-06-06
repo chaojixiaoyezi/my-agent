@@ -27,7 +27,7 @@ def evaluate_approval_binding_gate(facts: ApprovalBindingFacts | Mapping[str, ob
         if _binding_identity(action) == _binding_identity_from_facts(item):
             return GateDecision.allow(
                 "approval_binding",
-                evidence={"approval_id": str(action.get("approval_id") or action.get("id") or "")},
+                evidence={"approval_id": str(action.get("approval_id") or "")},
             )
         return GateDecision.deny("approval_binding", "APPROVAL_BINDING_MISMATCH", evidence=_safe_action_evidence(action))
     return GateDecision.need_approval("approval_binding", "APPROVAL_REQUIRED", evidence={"tool_name": item.tool_name})
@@ -44,7 +44,7 @@ def _base_identity_matches(action: Mapping[object, object], facts: ApprovalBindi
     status = str(action.get("status") or "").strip().upper()
     if status and status != "APPROVED":
         return False
-    tool = str(action.get("tool") or action.get("tool_name") or "").strip()
+    tool = str(action.get("tool_name") or "").strip()
     key = str(action.get("idempotency_key") or "").strip()
     return bool(tool == facts.tool_name and key and key == facts.idempotency_key)
 
@@ -72,7 +72,7 @@ def _binding_facts(value: ApprovalBindingFacts | Mapping[str, object]) -> Approv
         return value
     actions = value.get("approved_actions")
     return ApprovalBindingFacts(
-        tool_name=str(value.get("tool_name") or value.get("tool") or ""),
+        tool_name=str(value.get("tool_name") or ""),
         run_id=str(value.get("run_id") or ""),
         operation_id=str(value.get("operation_id") or ""),
         idempotency_key=str(value.get("idempotency_key") or ""),
@@ -83,8 +83,8 @@ def _binding_facts(value: ApprovalBindingFacts | Mapping[str, object]) -> Approv
 
 def _safe_action_evidence(action: Mapping[object, object]) -> dict[str, object]:
     return {
-        "approval_id": str(action.get("approval_id") or action.get("id") or ""),
-        "tool_name": str(action.get("tool") or action.get("tool_name") or ""),
+        "approval_id": str(action.get("approval_id") or ""),
+        "tool_name": str(action.get("tool_name") or ""),
         "run_id": str(action.get("run_id") or ""),
         "operation_id": str(action.get("operation_id") or ""),
         "idempotency_key": str(action.get("idempotency_key") or ""),

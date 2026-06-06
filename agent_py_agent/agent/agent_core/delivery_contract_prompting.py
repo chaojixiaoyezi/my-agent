@@ -113,7 +113,7 @@ def _model_visible_target_coverage_contract(coverage: dict[str, object]) -> dict
     visible = {
         key: value
         for key, value in coverage.items()
-        if key not in {"target_items", "items", "targets"}
+        if key != "target_items"
     }
     targets = _coverage_target_items(coverage)
     if not targets:
@@ -127,11 +127,8 @@ def _model_visible_target_coverage_contract(coverage: dict[str, object]) -> dict
 
 
 def _coverage_target_items(coverage: dict[str, object]) -> list[object]:
-    for key in ("target_items", "items", "targets"):
-        value = coverage.get(key)
-        if isinstance(value, list):
-            return value
-    return []
+    value = coverage.get("target_items")
+    return list(value) if isinstance(value, list) else []
 
 
 def _target_preview_items(targets: list[object]) -> list[object]:

@@ -24,7 +24,7 @@ def test_hierarchy_schedule_infers_coordinator_role_from_tools(tmp_path):
         depth=1,
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[
@@ -47,7 +47,7 @@ def test_hierarchy_schedule_applies_depth_agent_name_prefixes(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root", thought="split", plan=["plan"], agent_name="root")
 
-    child_result = manager.schedule_child_runs(
+    child_result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[HierarchyChildSpec(goal="catalog child", agent_name="catalog-lead", role="coordinator")],
@@ -55,7 +55,7 @@ def test_hierarchy_schedule_applies_depth_agent_name_prefixes(tmp_path):
         )
     )
     child = manager.load(child_result.created_run_ids[0])
-    grand_result = manager.schedule_child_runs(
+    grand_result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[HierarchyChildSpec(goal="product grandchild", agent_name="小傻妞-product-worker", role="worker")],
@@ -63,7 +63,7 @@ def test_hierarchy_schedule_applies_depth_agent_name_prefixes(tmp_path):
         )
     )
     grandchild = manager.load(grand_result.created_run_ids[0])
-    great_result = manager.schedule_child_runs(
+    great_result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=grandchild.id,
             child_specs=[HierarchyChildSpec(goal="sku great grandchild", agent_name="sku-leaf", role="worker")],
@@ -88,7 +88,7 @@ def test_hierarchy_schedule_advances_from_parent_lineage_prefix(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root", thought="split", plan=["plan"], agent_name="小傻妞-shop-root")
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[HierarchyChildSpec(goal="继续协调页面任务", agent_name="coord-r78", role="coordinator")],
@@ -113,7 +113,7 @@ def test_hierarchy_schedule_repairs_bare_lineage_agent_name(tmp_path):
         depth=1,
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[HierarchyChildSpec(goal="继续协调页面任务", agent_name="小小傻妞", role="coordinator")],
@@ -138,7 +138,7 @@ def test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools(tmp_
         depth=1,
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[
@@ -179,7 +179,7 @@ def test_hierarchy_schedule_keeps_write_intent_as_leaf_role(tmp_path):
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -212,7 +212,7 @@ def test_hierarchy_schedule_keeps_orchestration_tools_for_leaf_write_tasks(tmp_p
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -246,7 +246,7 @@ def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_pa
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[

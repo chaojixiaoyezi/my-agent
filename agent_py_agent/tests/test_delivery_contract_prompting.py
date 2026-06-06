@@ -128,7 +128,7 @@ def test_render_delivery_contract_section_summarizes_long_target_coverage_list()
     targets = [
         {
             "target_id": f"/tmp/source/fragment-{idx:03d}.md",
-            "path": f"/tmp/source/fragment-{idx:03d}.md",
+            "source_ref": f"/tmp/source/fragment-{idx:03d}.md",
         }
         for idx in range(1, 30)
     ]
@@ -139,7 +139,7 @@ def test_render_delivery_contract_section_summarizes_long_target_coverage_list()
             "target_coverage_contract": {
                 "scope_label": "all source fragments",
                 "enforcement": "required",
-                "items": targets,
+                "target_items": targets,
             },
         }
     )

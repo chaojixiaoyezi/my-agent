@@ -74,8 +74,8 @@ def attach_result_envelope(
 
 def payload_from_tool_call_envelope(envelope: ToolCallEnvelope) -> dict[str, Any]:
     return {
-        "tool": envelope.tool,
-        **dict(envelope.args),
+        "tool": envelope.tool_name,
+        **dict(envelope.input),
     }
 
 

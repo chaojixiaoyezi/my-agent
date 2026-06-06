@@ -88,7 +88,7 @@ def test_leadership_recovery_plan_splits_children_across_candidate_leaders(tmp_p
     leader_a = _leader(manager, root.id, "leader a")
     leader_b = _leader(manager, root.id, "leader b")
 
-    report = manager.plan_leadership_recovery(
+    report = manager.hierarchy.plan_leadership_recovery(
         params=SubAgentLeadershipRecoveryPlanOptions(
             config=CapabilityConfig(subagent_heartbeat_timeout=1),
             root_id=root.id,
@@ -115,7 +115,7 @@ def test_leadership_recovery_plan_reports_unassigned_children_when_capacity_runs
     _, children = _stale_coordinator(manager, root.id, child_count=5)
     leader = _leader(manager, root.id, "leader")
 
-    report = manager.plan_leadership_recovery(
+    report = manager.hierarchy.plan_leadership_recovery(
         params=SubAgentLeadershipRecoveryPlanOptions(
             config=CapabilityConfig(subagent_heartbeat_timeout=1),
             root_id=root.id,
@@ -138,7 +138,7 @@ def test_leadership_recovery_apply_reparents_only_requested_child_subset(tmp_pat
     coordinator, children = _stale_coordinator(manager, root.id, child_count=4)
     leader = _leader(manager, root.id, "leader")
 
-    report = manager.apply_leadership_recovery(
+    report = manager.hierarchy.apply_leadership_recovery(
         params=SubAgentLeadershipRecoveryApplyOptions(
             root_id=root.id,
             coordinator_id=coordinator.id,
@@ -167,7 +167,7 @@ def test_leadership_recovery_apply_blocks_non_direct_child_without_mutation(tmp_
     leader = _leader(manager, root.id, "leader")
     outside = manager.create_run(goal="outside", thought="other", plan=["other"], root_id=root.id)
 
-    report = manager.apply_leadership_recovery(
+    report = manager.hierarchy.apply_leadership_recovery(
         params=SubAgentLeadershipRecoveryApplyOptions(
             root_id=root.id,
             coordinator_id=coordinator.id,
@@ -196,7 +196,7 @@ def test_leadership_recovery_plan_treats_failed_parent_as_recovery_source(tmp_pa
     manager.save_hierarchy_links(failed_leader)
     replacement = _leader(manager, root.id, "replacement")
 
-    report = manager.plan_leadership_recovery(
+    report = manager.hierarchy.plan_leadership_recovery(
         params=SubAgentLeadershipRecoveryPlanOptions(
             config=CapabilityConfig(subagent_heartbeat_timeout=1),
             root_id=root.id,
@@ -220,7 +220,7 @@ def test_leadership_recovery_plan_respects_existing_leader_capacity(tmp_path):
     _make_child(manager, leader, root.id, "existing one")
     _make_child(manager, leader, root.id, "existing two")
 
-    report = manager.plan_leadership_recovery(
+    report = manager.hierarchy.plan_leadership_recovery(
         params=SubAgentLeadershipRecoveryPlanOptions(
             config=CapabilityConfig(subagent_heartbeat_timeout=1),
             root_id=root.id,
@@ -239,7 +239,7 @@ def test_leadership_recovery_plan_respects_existing_leader_capacity(tmp_path):
 def test_leadership_recovery_apply_large_tree_1_4_16_48(tmp_path):
     """Recovery apply should handle a 1 main / 4 child / 16 grandchild / 48 great-grandchild tree."""
     manager, root, coordinators, grandchildren, great_grandchildren, leaders = _large_recovery_tree(tmp_path)
-    plan = manager.plan_leadership_recovery(
+    plan = manager.hierarchy.plan_leadership_recovery(
         params=SubAgentLeadershipRecoveryPlanOptions(
             config=CapabilityConfig(subagent_heartbeat_timeout=1),
             root_id=root.id,
@@ -296,7 +296,7 @@ def _mark_stale(manager: SubAgentManager, run_id: str) -> None:
 
 def _apply_plan_assignments(manager: SubAgentManager, root_id: str, plan) -> None:
     for assignment in plan.assignments:
-        manager.apply_leadership_recovery(
+        manager.hierarchy.apply_leadership_recovery(
             params=SubAgentLeadershipRecoveryApplyOptions(
                 root_id=root_id,
                 coordinator_id=assignment.coordinator_id,

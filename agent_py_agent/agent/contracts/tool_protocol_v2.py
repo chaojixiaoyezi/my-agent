@@ -23,14 +23,12 @@ def normalize_tool_call(payload: Any) -> ToolCallEnvelope:
     if isinstance(payload, ToolCallEnvelope):
         return payload
     data = _loads_if_json(payload)
-    tool_name = str(data.get("tool_name") or data.get("tool") or "")
+    tool_name = str(data.get("tool_name") or "")
     raw_input = data.get("input")
-    if raw_input is None:
-        raw_input = data.get("args") or data.get("arguments")
     raw_status = str(data.get("status") or "").lower()
-    status = raw_status if raw_status in STATUSES else "pending"
+    status = _call_status(data, raw_status, raw_input)
     if raw_input is None:
-        raw_input = _flat_call_input(data, include_status=bool(raw_status and raw_status not in STATUSES))
+        raw_input = {}
     input_payload = json_stable(raw_input if isinstance(raw_input, dict) else {"value": raw_input})
     call_id = str(data.get("call_id") or "")
     operation_id = str(data.get("operation_id") or "")
@@ -41,7 +39,7 @@ def normalize_tool_call(payload: Any) -> ToolCallEnvelope:
     idempotency_key = str(data.get("idempotency_key") or "")
     if not idempotency_key:
         idempotency_key = build_idempotency_key(tool_name or "unknown_tool", input_payload)
-    refs = _normalize_artifact_refs(data.get("artifact_refs") or data.get("artifacts") or [])
+    refs = _normalize_artifact_refs(data.get("artifact_refs") or [])
     metadata = data.get("metadata") or {}
     return ToolCallEnvelope(
         operation_id=operation_id,
@@ -62,7 +60,7 @@ def normalize_tool_result(payload: Any) -> ToolResultEnvelope:
     tool_name, operation_id = _result_identity(data)
     status = _status_from_result(data)
     idempotency_key = _result_idempotency_key(data, tool_name, operation_id, status)
-    refs = _normalize_artifact_refs(data.get("artifact_refs") or data.get("artifacts") or [])
+    refs = _normalize_artifact_refs(data.get("artifact_refs") or [])
     metadata = data.get("metadata") or {}
     return ToolResultEnvelope(
         operation_id=operation_id,
@@ -130,25 +128,28 @@ def deserialize_tool_result(payload: str | bytes | dict[str, Any]) -> ToolResult
     return normalize_tool_result(payload)
 
 
-def _flat_call_input(data: dict[str, Any], *, include_status: bool) -> dict[str, Any]:
-    protocol_keys = {
-        "args",
-        "arguments",
-        "artifact_refs",
-        "artifacts",
-        "call_id",
-        "idempotency_key",
-        "input",
-        "kind",
-        "metadata",
-        "operation_id",
-        "schema_version",
-        "tool",
-        "tool_name",
-    }
-    if not include_status:
-        protocol_keys.add("status")
-    return {key: value for key, value in data.items() if key not in protocol_keys}
+def _call_status(data: dict[str, Any], raw_status: str, raw_input: Any) -> str:
+    if not raw_status:
+        return "pending"
+    if raw_status in STATUSES:
+        return raw_status
+    if raw_input is None and not _looks_like_protocol_envelope(data):
+        return "pending"
+    return raw_status
+
+
+def _looks_like_protocol_envelope(data: dict[str, Any]) -> bool:
+    return any(
+        key in data
+        for key in (
+            "schema_version",
+            "operation_id",
+            "idempotency_key",
+            "input",
+            "artifact_refs",
+            "metadata",
+        )
+    )
 
 
 def _loads_if_json(payload: Any) -> dict[str, Any]:
@@ -164,7 +165,7 @@ def _loads_if_json(payload: Any) -> dict[str, Any]:
 
 
 def _result_identity(data: dict[str, Any]) -> tuple[str, str]:
-    tool_name = str(data.get("tool_name") or data.get("tool") or "")
+    tool_name = str(data.get("tool_name") or "")
     call_id = str(data.get("call_id") or "")
     operation_id = str(data.get("operation_id") or "")
     if not operation_id and call_id:
@@ -186,15 +187,13 @@ def _result_error(data: dict[str, Any], status: str) -> ToolError | None:
     if error_payload is None and status == "failed":
         error_payload = {
             "error_type": data.get("error_type", ""),
-            "message": data.get("message") or data.get("detail") or "",
+            "message": data.get("message") or "",
             "retry_hint": data.get("retry_hint", ""),
         }
     return ToolError.from_payload(error_payload) if error_payload is not None else None
 
 
 def _result_output(data: dict[str, Any]) -> Any:
-    if data.get("output") is None and "output_ref" in data:
-        return {"output_ref": data.get("output_ref")}
     return data.get("output")
 
 
@@ -229,19 +228,19 @@ def _artifact_ref_from_payload(payload: Any) -> ArtifactRef:
         return ArtifactRef(artifact_id=payload, path=payload)
     if not isinstance(payload, dict):
         return ArtifactRef(artifact_id="", path="")
-    path = str(payload.get("path") or payload.get("uri") or payload.get("ref") or "")
+    path = str(payload.get("path") or "")
     size = payload.get("size_bytes")
     try:
         size_bytes = max(0, int(size or 0))
     except (TypeError, ValueError):
         size_bytes = 0
-    mime_type = str(payload.get("mime_type") or payload.get("content_type") or "")
+    mime_type = str(payload.get("mime_type") or "")
     return ArtifactRef(
-        artifact_id=str(payload.get("artifact_id") or payload.get("id") or path),
+        artifact_id=str(payload.get("artifact_id") or ""),
         path=path,
         kind=str(payload.get("kind") or "generic"),
         owner_run_id=str(payload.get("owner_run_id") or ""),
-        hash=str(payload.get("hash") or payload.get("digest") or ""),
+        hash=str(payload.get("hash") or ""),
         summary=str(payload.get("summary") or ""),
         size_bytes=size_bytes,
         mime_type=mime_type,
@@ -261,8 +260,6 @@ def _artifact_ref_findings(refs: list[ArtifactRef]) -> list[str]:
 def _status_from_result(data: dict[str, Any]) -> str:
     if data.get("status"):
         return str(data["status"]).lower()
-    if "ok" in data:
-        return "succeeded" if bool(data["ok"]) else "failed"
     return "succeeded" if data.get("error") is None else "failed"
 
 

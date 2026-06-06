@@ -36,7 +36,7 @@ def _prepare_controlled_shell_grant(tmp_path: Path) -> ControlledToolsFixture:
     manager = SubAgentManager(tmp_path / "subs")
     task = manager.create_run(goal="controlled tools", thought="exercise primitives", plan=["run"])
     task_dir = Path(task.task_dir)
-    request = manager.record_capability_request(
+    request = manager.lifecycle.record_capability_request(
         task.id,
         RecordCapabilityRequestParams(
             problem="需要运行一个受控 Python 命令验证输出。",
@@ -47,7 +47,7 @@ def _prepare_controlled_shell_grant(tmp_path: Path) -> ControlledToolsFixture:
             output_budget={"stdout_bytes": 64, "stderr_bytes": 64},
         ),
     )
-    grant = manager.record_capability_grant(
+    grant = manager.lifecycle.record_capability_grant(
         task.id,
         RecordCapabilityGrantParams(
             request_id=request.id,

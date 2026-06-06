@@ -21,7 +21,7 @@ def test_subagent_lifecycle_service_records_capabilities_and_status(tmp_path) ->
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(goal="service lifecycle", thought="keep API", plan=["record"])
 
-    request = manager.record_capability_request(
+    request = manager.lifecycle.record_capability_request(
         task.id,
         RecordCapabilityRequestParams(
             problem="need search",
@@ -34,7 +34,7 @@ def test_subagent_lifecycle_service_records_capabilities_and_status(tmp_path) ->
             risk_level="low",
         ),
     )
-    grant = manager.record_capability_grant(
+    grant = manager.lifecycle.record_capability_grant(
         task.id,
         RecordCapabilityGrantParams(
             request_id=request.id,
@@ -47,8 +47,8 @@ def test_subagent_lifecycle_service_records_capabilities_and_status(tmp_path) ->
             risk_level="low",
         ),
     )
-    evidence = manager.record_evidence(task.id, RecordEvidenceParams(kind="test", summary="passed"))
-    updated = manager.set_status(task.id, "DONE", require_evidence=True)
+    evidence = manager.lifecycle.record_evidence(task.id, RecordEvidenceParams(kind="test", summary="passed"))
+    updated = manager.lifecycle.set_status(task.id, "DONE", require_evidence=True)
 
     loaded = manager.load(task.id)
     assert manager.lifecycle is not None
@@ -68,7 +68,7 @@ def test_subagent_lifecycle_service_records_capabilities_and_status(tmp_path) ->
 def test_subagent_lifecycle_service_loads_current_capability_fields(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(goal="capability fields", thought="load current fields", plan=["record"])
-    request = manager.record_capability_request(
+    request = manager.lifecycle.record_capability_request(
         task.id,
         RecordCapabilityRequestParams(
             problem="need shell",
@@ -97,8 +97,8 @@ def test_subagent_lifecycle_service_dedupes_equivalent_capability_requests(tmp_p
         risk_level="low",
     )
 
-    first = manager.record_capability_request(task.id, params)
-    second = manager.record_capability_request(
+    first = manager.lifecycle.record_capability_request(task.id, params)
+    second = manager.lifecycle.record_capability_request(
         task.id,
         RecordCapabilityRequestParams(
             problem="same request in different words",
@@ -122,7 +122,7 @@ def test_subagent_lifecycle_service_blocks_done_without_evidence(tmp_path) -> No
     task = manager.create_run(goal="service lifecycle", thought="keep API", plan=["record"])
 
     with pytest.raises(ValueError):
-        manager.set_status(task.id, "DONE", require_evidence=True)
+        manager.lifecycle.set_status(task.id, "DONE", require_evidence=True)
 
 
 def test_subagent_lifecycle_service_records_memory_route_load_error(tmp_path, monkeypatch) -> None:
@@ -139,7 +139,7 @@ def test_subagent_lifecycle_service_records_memory_route_load_error(tmp_path, mo
 
     monkeypatch.setattr(lifecycle, "load_routes", broken_load_routes)
 
-    gap = manager.record_capability_gap(
+    gap = manager.lifecycle.record_capability_gap(
         task.id,
         RecordCapabilityGapParams(
             missing_capability="search",

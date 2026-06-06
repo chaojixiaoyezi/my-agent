@@ -6,8 +6,8 @@ from typing import Any
 from .registry_markers import next_tool_block_end
 from .registry_payload_normalize import parse_error_payload
 
-_MALFORMED_OPENERS = ("[TOOL_CALL", "[SUBAGENT_CALL")
-_VALID_OPENERS = ("[TOOL_CALL]", "[SUBAGENT_CALL]")
+_MALFORMED_OPENERS = ("[TOOL_CALL",)
+_VALID_OPENERS = ("[TOOL_CALL]",)
 
 
 def malformed_tool_marker_calls(text: str) -> list[tuple[int, dict[str, Any]]]:
@@ -17,6 +17,7 @@ def malformed_tool_marker_calls(text: str) -> list[tuple[int, dict[str, Any]]]:
             parse_error_payload(
                 "工具调用开始标记格式错误，缺少 ]",
                 _malformed_marker_raw(text, pos),
+                error_code="TOOL_CALL_MARKER_MALFORMED",
             ),
         )
         for opener in _MALFORMED_OPENERS

@@ -8,8 +8,11 @@ runner 写回状态的分支比较多，单独放这里，manager mixin 只负�
 
 from dataclasses import dataclass
 
-from .capability_status import is_pending_capability_status
-from .model_capabilities import capability_request_counts_as_open
+from .model_capabilities import (
+    capability_request_counts_as_open,
+    capability_request_requires_parent_resolution,
+    is_pending_capability_status,
+)
 from .policies import _status_from_structured_output, _verification_from_runner_status
 
 _RUNNER_FAILURE_STATUSES = {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}
@@ -134,7 +137,7 @@ def _should_resolve_stale_capability_requests(task) -> bool:
 
 def _has_open_capability_requests(task) -> bool:
     return any(
-        capability_request_counts_as_open(getattr(request, "status", "OPEN"))
+        capability_request_requires_parent_resolution(getattr(request, "status", "OPEN"))
         for request in getattr(task, "capability_requests", []) or []
     )
 

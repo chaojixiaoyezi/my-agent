@@ -35,7 +35,7 @@ def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = 
     _record_runner_recovery_preflight(task, strategy, previous)
     manager.save(task)
     suffix = f" retry_reason={retry_reason}" if retry_reason else ""
-    manager._append_task_work_log(
+    manager.actions._append_task_work_log(
         task,
         f"runner_attempt: start previous={previous} attempt={task.runner_attempts + 1} "
         f"attempt_id={attempt_id}{suffix}",
@@ -61,7 +61,7 @@ def abandon_runner_attempt(
     task.updated_at = time.time()
     manager.save(task)
     if reason:
-        manager._append_task_work_log(
+        manager.actions._append_task_work_log(
             task,
             f"runner_attempt: abandon attempt_id={normalized} reason={reason}",
         )

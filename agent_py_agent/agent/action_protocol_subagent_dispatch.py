@@ -56,7 +56,7 @@ class SubagentDispatchEnvelope:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> SubagentDispatchEnvelope:
         return cls(
-            dispatch_id=str(payload.get("dispatch_id") or payload.get("id") or ""),
+            dispatch_id=str(payload.get("dispatch_id") or ""),
             tool=str(payload.get("tool") or "dispatch_subagents"),
             dry_run=bool(payload.get("dry_run")),
             summary=dict(payload.get("summary") or {}),

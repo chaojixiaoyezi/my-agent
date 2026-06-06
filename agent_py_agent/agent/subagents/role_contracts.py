@@ -17,25 +17,6 @@ from .role_templates import (
 REPORTER_ROLE = "reporter"
 CHECKER_ROLE = "checker"
 
-ROLE_ALIASES = {
-    "analyst": REPORTER_ROLE,
-    "analysis": REPORTER_ROLE,
-    "report": REPORTER_ROLE,
-    "reporter": REPORTER_ROLE,
-    "reviewer": CHECKER_ROLE,
-    "verifier": CHECKER_ROLE,
-    "checker": CHECKER_ROLE,
-    "bug-finder": "bug_finder",
-    "bugfinder": "bug_finder",
-    "bug_finder": "bug_finder",
-    "tester": "tester",
-    "test": "tester",
-    "coordinator": "coordinator",
-    "worker": "worker",
-    "researcher": "researcher",
-    "writer": "writer",
-}
-
 REPORTER_ACCEPTANCE_CHECK = "Reporter output must cite evidence_refs or artifact_refs for each user-visible claim."
 CHECKER_ACCEPTANCE_CHECK = "Checker must verify reporter evidence refs and write concrete findings."
 
@@ -44,7 +25,7 @@ def normalize_subagent_role(role: str) -> str:
     cleaned = str(role or "").strip().lower()
     if not cleaned:
         return "general"
-    return ROLE_ALIASES.get(cleaned, cleaned)
+    return cleaned
 
 
 def apply_role_contract_to_create_params(params: Any, role_template_dirs: object = None):

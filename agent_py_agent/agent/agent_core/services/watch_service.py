@@ -123,8 +123,8 @@ def watch_subagents(
         )
         write_watch_stopped(agent, cycle, lock_path, lock.token)
 
-    report = agent.subagents.build_dispatch_watch_report(records, dry_run=params.preview_only)
-    return agent.subagents.write_dispatch_watch_report(report)
+    report = agent.subagents.dispatch.build_dispatch_watch_report(records, dry_run=params.preview_only)
+    return agent.subagents.dispatch.write_dispatch_watch_report(report)
 
 
 def _run_watch_cycles(
@@ -272,7 +272,7 @@ def _run_advancing_watch_cycle(
     )
     store_record = had_progress or not _watch_repeated_no_progress(params, dispatch_report)
     if store_record:
-        agent.subagents.append_dispatch_watch_log(record)
+        agent.subagents.dispatch.append_dispatch_watch_log(record)
     _update_dispatch_rounds(agent, had_progress)
 
     if params.max_consecutive > 0 and agent._consecutive_dispatch_rounds >= params.max_consecutive:

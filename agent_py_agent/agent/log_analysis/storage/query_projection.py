@@ -8,7 +8,7 @@ from typing import Any
 
 from .base import QueryCriteria, event_time_value, nested_get, parse_event_time, stable_digest
 
-FIELD_ALIASES = {
+FIELD_NAME_MAP = {
     "attacker_ip": ("attacker_ip", "src_ip"),
     "victim_ip": ("victim_ip", "dst_ip"),
     "domain": ("domain", "host", "sni", "dns_query"),
@@ -67,11 +67,11 @@ def sanitize_event_for_preview(row: dict[str, Any]) -> dict[str, Any]:
 def query_matches(row: dict[str, Any], criteria: QueryCriteria) -> bool:
     if not _matches_time(row, criteria.start_time, criteria.end_time):
         return False
-    for field, aliases in FIELD_ALIASES.items():
+    for field, field_names in FIELD_NAME_MAP.items():
         expected = getattr(criteria, field)
         if expected in (None, ""):
             continue
-        if not _matches_any_alias(row, aliases, str(expected)):
+        if not _matches_any_field_name(row, field_names, str(expected)):
             return False
     return True
 
@@ -91,10 +91,10 @@ def _matches_time(row: dict[str, Any], start_time: str | None, end_time: str | N
     return True
 
 
-def _matches_any_alias(row: dict[str, Any], aliases: tuple[str, ...], expected: str) -> bool:
+def _matches_any_field_name(row: dict[str, Any], field_names: tuple[str, ...], expected: str) -> bool:
     expected_normalized = expected.lower()
-    for alias in aliases:
-        actual = nested_get(row, alias)
+    for field_name in field_names:
+        actual = nested_get(row, field_name)
         if actual is None:
             continue
         if str(actual).lower() == expected_normalized:
@@ -104,15 +104,15 @@ def _matches_any_alias(row: dict[str, Any], aliases: tuple[str, ...], expected: 
 
 def _top_counts(rows: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
     counter: Counter[str] = Counter()
-    aliases = FIELD_ALIASES.get(field, (field,))
+    field_names = FIELD_NAME_MAP.get(field, (field,))
     for row in rows:
-        _count_first_alias(counter, row, aliases)
+        _count_first_field_name(counter, row, field_names)
     return [{"value": value, "count": count} for value, count in counter.most_common(5)]
 
 
-def _count_first_alias(counter: Counter[str], row: dict[str, Any], aliases: tuple[str, ...]) -> None:
-    for alias in aliases:
-        value = nested_get(row, alias)
+def _count_first_field_name(counter: Counter[str], row: dict[str, Any], field_names: tuple[str, ...]) -> None:
+    for field_name in field_names:
+        value = nested_get(row, field_name)
         if value not in (None, ""):
             counter[str(value)] += 1
             return

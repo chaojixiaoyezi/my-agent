@@ -58,10 +58,9 @@ def delivery_quality_decision(
 
 
 def delivery_quality_contract(contract: dict[str, Any]) -> dict[str, Any]:
-    for key in ("delivery_quality_contract", "quality_contract", "data_contract"):
-        value = contract.get(key)
-        if isinstance(value, dict):
-            return dict(value)
+    value = contract.get("delivery_quality_contract")
+    if isinstance(value, dict):
+        return dict(value)
     return _artifact_validation_quality_contract(contract)
 
 
@@ -175,9 +174,8 @@ def load_delivery_quality_payload(contract: dict[str, Any], workspace_root: Path
 
 
 def delivery_quality_payload_ref(contract: dict[str, Any]) -> str:
-    for key in ("delivery_quality_payload_ref", "quality_payload_ref", "source_data_ref"):
-        if ref := str(contract.get(key) or "").strip():
-            return ref
+    if ref := str(contract.get("delivery_quality_payload_ref") or "").strip():
+        return ref
     for item in _required_artifacts(contract):
         ref = staging_payload_ref(item)
         if ref:

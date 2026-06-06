@@ -7,10 +7,7 @@ from typing import Any
 
 from ..contracts.gates import GateDecision, GateFinding, evaluate_fact_evidence_gate
 from ..contracts.recovery_actions import RecoveryAction
-from .delivery_closeout.quality import (
-    delivery_quality_payload_ref,
-    workspace_relative_json_path,
-)
+from .delivery_closeout.quality import workspace_relative_json_path
 
 
 def fact_evidence_decision(
@@ -69,10 +66,7 @@ def load_fact_evidence_payload(contract: dict[str, Any], workspace_root: Path) -
 
 
 def fact_evidence_payload_ref(contract: dict[str, Any]) -> str:
-    for key in ("fact_evidence_payload_ref", "evidence_payload_ref", "source_data_ref"):
-        if ref := str(contract.get(key) or "").strip():
-            return ref
-    return delivery_quality_payload_ref(contract)
+    return str(contract.get("fact_evidence_payload_ref") or "").strip()
 
 
 def _fact_evidence_enforcement_required(contract: dict[str, Any]) -> bool:

@@ -63,7 +63,7 @@ def _build_single_workflow_records(agent, task, workflow_mode, apply):
     if not apply:
         return _build_dry_run_workflow_records(agent, task, workflow_mode, preview)
 
-    planned = agent.subagents.ensure_workflow_plan(task.id, workflow_mode=workflow_mode)
+    planned = agent.subagents.workflow.plan_workflow(task.id, workflow_mode=workflow_mode)
     records = [_workflow_plan_record(agent, task, planned)]
     if workflow_mode == "auto" and planned.workflow_plan.get("ok"):
         records.append(_workflow_spawn_record(agent, task, planned))
@@ -73,7 +73,7 @@ def _build_single_workflow_records(agent, task, workflow_mode, apply):
 def _build_dry_run_workflow_records(agent, task, workflow_mode, preview):
     worker_count = len(preview.get("workers") or []) if isinstance(preview, dict) else 0
     records = [
-        agent.subagents.make_dispatch_record(
+        agent.subagents.dispatch.make_dispatch_record(
             params=DispatchRecordParams(
                 step="workflow",
                 action="plan_workflow",
@@ -95,7 +95,7 @@ def _build_dry_run_workflow_records(agent, task, workflow_mode, preview):
     ]
     if workflow_mode == "auto" and preview.get("ok"):
         records.append(
-            agent.subagents.make_dispatch_record(
+            agent.subagents.dispatch.make_dispatch_record(
                 params=DispatchRecordParams(
                     step="workflow",
                     action="spawn_workflow_workers",
@@ -116,7 +116,7 @@ def _build_dry_run_workflow_records(agent, task, workflow_mode, preview):
 
 
 def _workflow_plan_record(agent, task, planned):
-    return agent.subagents.make_dispatch_record(
+    return agent.subagents.dispatch.make_dispatch_record(
         params=DispatchRecordParams(
             step="workflow",
             action="plan_workflow",
@@ -149,8 +149,8 @@ def _workflow_plan_ok(plan: object) -> bool:
 
 def _workflow_spawn_record(agent, task, planned):
     before_child_count = len(planned.workflow_child_run_ids)
-    planned, created_children = agent.subagents.realize_workflow_plan(task.id)
-    return agent.subagents.make_dispatch_record(
+    planned, created_children = agent.subagents.workflow.realize_workflow_plan(task.id)
+    return agent.subagents.dispatch.make_dispatch_record(
         params=DispatchRecordParams(
             step="workflow",
             action="spawn_workflow_workers",

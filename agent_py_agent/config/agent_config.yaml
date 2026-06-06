@@ -93,8 +93,9 @@ auto_save_memory: true
 # - memory_rule_auto_read_limit 表示每轮最多自动读取多少条规则正文；0 表示不自动读取。
 # - memory_resume_auto_context_enabled 默认关闭，避免普通请求因为恢复检索变慢。
 # - memory_resume_auto_context_mode:
-#   off: 不注入恢复块；trigger: 只有明确旧任务语义（继续 README、继续上次、恢复、run_id 等）才触发；
-#     “继续往下做/继续整理/继续完成”这类当前任务内部表达不会触发旧任务恢复；always: 每轮都尝试。
+#   off: 不注入恢复块；trigger: 只在用户消息里带 request/run/subagent/gwreq 等结构化恢复 ID 时触发；
+#     普通自然语言“继续、上次、昨天、恢复”等不会参与判断；需要人工明确恢复时用 --resume-context。
+#   always: 每轮都尝试注入恢复块，适合专门的恢复/排障会话。
 # - memory_resume_auto_context_limit 表示自动恢复最多拿多少条线索，范围 1-50。
 # - compact 提前提示优先读取当前模型后端暴露的真实上下文窗口；拿不到时按 128K 通用窗口估算。
 # - memory_compact_auto_trigger_percent 控制上下文使用到多少百分比时自动 compact：

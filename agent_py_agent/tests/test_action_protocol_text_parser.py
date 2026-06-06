@@ -13,8 +13,8 @@ def test_text_tool_call_parser_returns_typed_envelopes():
     assert envelopes[0].kind == "tool_call"
     assert envelopes[0].source == "text_protocol"
     assert envelopes[0].call_id == "tool-call-1"
-    assert envelopes[0].tool == "read_file"
-    assert envelopes[0].args == {"path": "README.md"}
+    assert envelopes[0].tool_name == "read_file"
+    assert envelopes[0].input == {"path": "README.md"}
     assert envelopes[0].scope.task_id == "task-1"
     assert envelopes[0].source == "text_protocol"
 
@@ -31,8 +31,8 @@ def test_text_tool_call_parser_masks_subagent_result_text():
 
     envelopes = parse_registry_tool_call_envelopes(text)
 
-    assert [item.tool for item in envelopes] == ["search_text"]
-    assert envelopes[0].args == {"query": "needle"}
+    assert [item.tool_name for item in envelopes] == ["search_text"]
+    assert envelopes[0].input == {"query": "needle"}
 
 
 def test_xmlish_parser_returns_typed_envelopes():
@@ -44,5 +44,5 @@ def test_xmlish_parser_returns_typed_envelopes():
     )
 
     assert len(envelopes) == 1
-    assert envelopes[0].tool == "write_file"
-    assert envelopes[0].args == {"path": "out.txt", "content": "hello"}
+    assert envelopes[0].tool_name == "write_file"
+    assert envelopes[0].input == {"path": "out.txt", "content": "hello"}

@@ -105,10 +105,12 @@ def _tool_identity(payload: dict[str, object]) -> tuple[str, str]:
 
 
 def _payload_for_guardrail(payload: dict[str, object]) -> dict[str, object]:
-    if "tool" not in payload or any(key in payload for key in ("args", "arguments", "input")):
+    if "tool_name" in payload and "input" in payload:
         return payload
-    args = {key: value for key, value in payload.items() if key not in {"tool", "kind"}}
-    return {**payload, "args": args}
+    if "tool" not in payload:
+        return payload
+    input_payload = {key: value for key, value in payload.items() if key not in {"tool", "kind"}}
+    return {"tool_name": str(payload.get("tool") or ""), "input": input_payload}
 
 
 def _records_without_readonly_no_progress(records: tuple[dict[str, object], ...]) -> tuple[dict[str, object], ...]:

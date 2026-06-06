@@ -23,8 +23,7 @@ def resolved_target_agent_ids(agent: SimpleAgent, params: dict[str, object]) -> 
 def resolved_target_agent_ids_report(agent: SimpleAgent, params: dict[str, object]) -> tuple[list[str], list[dict[str, object]]]:
     raw = string_values(params.get("target_agent_ids"))
     routing = dict_value(params.get("routing_requirements"))
-    for key in ("target_agent_ids", "agent_ids", "run_ids", "responder_agent_ids"):
-        raw.extend(string_values(routing.get(key)))
+    raw.extend(string_values(routing.get("target_agent_ids")))
     return _resolve_raw_targets_report(agent, raw)
 
 
@@ -176,31 +175,30 @@ def _matching_subagent_run_ids_report(agent: SimpleAgent, target: str) -> tuple[
     text = str(target or "").strip()
     if not text:
         return [], []
-    aliases, alias_error = _target_aliases_report(agent, text)
+    identity_keys, identity_error = _target_identity_keys_report(agent, text)
     tasks, list_error = subagent_tasks_report(agent)
-    errors = [item for item in (alias_error, list_error) if item]
-    return [run_id for task in tasks if (run_id := _matching_task_run_id(task, aliases))], errors
+    errors = [item for item in (identity_error, list_error) if item]
+    return [run_id for task in tasks if (run_id := _matching_task_run_id(task, identity_keys))], errors
 
 
-def _target_aliases(agent: SimpleAgent, text: str) -> set[str]:
-    aliases, _error = _target_aliases_report(agent, text)
-    return aliases
+def _target_identity_keys(agent: SimpleAgent, text: str) -> set[str]:
+    identity_keys, _error = _target_identity_keys_report(agent, text)
+    return identity_keys
 
 
-def _target_aliases_report(agent: SimpleAgent, text: str) -> tuple[set[str], dict[str, object] | None]:
+def _target_identity_keys_report(agent: SimpleAgent, text: str) -> tuple[set[str], dict[str, object] | None]:
     try:
-        return agent.collaboration_store.agent_identity_aliases(text), None
+        return agent.collaboration_store.agent_identity_keys(text), None
     except Exception as exc:
-        return {text, text.lower()}, runtime_error_report(
+        return {text}, runtime_error_report(
             exc,
-            context="raise_collaboration.agent_identity_aliases",
+            context="raise_collaboration.agent_identity_keys",
         )
 
 
-def _matching_task_run_id(task: object, aliases: set[str]) -> str:
+def _matching_task_run_id(task: object, identity_keys: set[str]) -> str:
     run_id = str(getattr(task, "id", "") or "").strip()
-    values = {run_id, run_id.lower(), str(getattr(task, "agent_name", "") or "").strip(), str(getattr(task, "role", "") or "").strip()}
-    return run_id if run_id and aliases.intersection(item.lower() if item else item for item in values if item) else ""
+    return run_id if run_id and run_id in identity_keys else ""
 
 
 def _runtime_row(target: str, task: object | None) -> dict[str, str]:

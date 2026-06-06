@@ -465,6 +465,7 @@ def test_tool_loop_enters_long_content_recovery_after_truncated_write_parse_erro
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
     payload = {
         "tool": "__parse_error__",
+        "error_code": "TOOL_CALL_UNCLOSED",
         "error": "工具调用缺少结束标记 [/TOOL_CALL]",
         "raw": '{"tool":"write_file","path":"site/app.js","content":"const data = ',
     }
@@ -499,6 +500,7 @@ def test_tool_loop_enters_structured_json_recovery_after_truncated_parse_error(
     params = _tool_loop_params(request_id="req-json", run_id="run-json", task_id="task-json")
     payload = {
         "tool": "__parse_error__",
+        "error_code": "TOOL_CALL_UNCLOSED",
         "error": "工具调用缺少结束标记 [/TOOL_CALL]",
         "raw": '{"tool":"write_file","path":"outputs/report/source_data.json","sheets":[{"rows":[',
     }

@@ -46,7 +46,9 @@ def test_collaboration_candidate_load_error_record_is_model_visible() -> None:
         router=None,
     )
     agent = SimpleNamespace(
-        subagents=SimpleNamespace(make_dispatch_record=lambda *, params: params)
+        subagents=SimpleNamespace(
+            dispatch=SimpleNamespace(make_dispatch_record=lambda *, params: params),
+        )
     )
     load_errors = [{"run_id": "agent-a", "context": "collaboration.requests.read"}]
 

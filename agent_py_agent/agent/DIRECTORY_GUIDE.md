@@ -91,7 +91,7 @@ gateway 文件协议层。放 gateway 路径、JSON 队列 IO、进程状态、p
 
 长期规则路由层。负责把用户输入确定性匹配到 memory routing index，再解析出应该查看的 authority file，并提供受 root 边界保护的短正文读取 context。
 
-允许：route index 加载、关键词/别名匹配、soft/strict path resolution、read receipt 结构、索引诊断、runtime 规则 context 构建。
+允许：route index 加载、关键词/相关词匹配、soft/strict path resolution、read receipt 结构、索引诊断、runtime 规则 context 构建。
 
 不允许：修改长期规则文件、越过 root 读取文件、替代 RAG 或任务状态核验、直接改主循环。
 

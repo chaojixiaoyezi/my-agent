@@ -20,12 +20,12 @@ from agent_py_agent.tests.test_subagent_hierarchy_scheduler import _child_specs
 def test_hierarchy_schedule_blocks_explicit_depth_and_child_limits(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="orchestrate", plan=["plan"])
-    child_result = manager.schedule_child_runs(
+    child_result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(parent_run_id=root.id, child_specs=_child_specs(1), apply=True)
     )
     child_id = child_result.created_run_ids[0]
 
-    too_deep = manager.schedule_child_runs(
+    too_deep = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child_id,
             child_specs=_child_specs(1),
@@ -37,7 +37,7 @@ def test_hierarchy_schedule_blocks_explicit_depth_and_child_limits(tmp_path):
     assert too_deep.reason == "max_depth_exceeded:1"
     assert manager.load(child_id).child_ids == []
 
-    too_many = manager.schedule_child_runs(
+    too_many = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=_child_specs(2),
@@ -53,12 +53,12 @@ def test_hierarchy_schedule_blocks_explicit_depth_and_child_limits(tmp_path):
 def test_hierarchy_schedule_allows_mixed_coordinator_and_leaf_children(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="orchestrate", plan=["plan"])
-    child = manager.schedule_child_runs(
+    child = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(parent_run_id=root.id, child_specs=_child_specs(1), apply=True)
     )
     parent_id = child.created_run_ids[0]
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent_id,
             child_specs=[
@@ -78,14 +78,14 @@ def test_hierarchy_schedule_default_depth_is_unlimited(tmp_path):
     """默认不再因为固定层数阻断，只有显式 max_depth 才挡。"""
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="orchestrate", plan=["plan"])
-    child = manager.schedule_child_runs(
+    child = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(parent_run_id=root.id, child_specs=_child_specs(1), apply=True)
     )
-    grandchild = manager.schedule_child_runs(
+    grandchild = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(parent_run_id=child.created_run_ids[0], child_specs=_child_specs(1), apply=True)
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=grandchild.created_run_ids[0],
             child_specs=_child_specs(1),

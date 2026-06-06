@@ -5,8 +5,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ._filesystem_helpers import _bundled_filesystem_param
-
 
 def structured_read_summary(target: Path, content: str, params: dict[str, Any]) -> str:
     if target.name != "latest_continue_packet.json" or _has_explicit_line_range(params):
@@ -21,10 +19,7 @@ def structured_read_summary(target: Path, content: str, params: dict[str, Any]) 
 
 
 def _has_explicit_line_range(params: dict[str, Any]) -> bool:
-    return (
-        _bundled_filesystem_param(params, "start_line") is not None
-        or _bundled_filesystem_param(params, "end_line") is not None
-    )
+    return params.get("start_line") is not None or params.get("end_line") is not None
 
 
 def _subagent_continue_packet_summary(payload: dict[str, Any], target: Path) -> str:

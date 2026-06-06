@@ -79,23 +79,20 @@ def build_send_guidance_spec() -> ToolSpec:
         avoid_when=["需要真正推进、重跑或恢复子代理时继续用 dispatch_subagents；第一次派工继续用 create_subagents"],
         keywords=["补充提示", "引导", "纠偏", "催一下", "steer", "guidance", "message"],
         parameters={
-            "target": "目标对象，可写 {type,id}；type 常见值 agent_run/thread/task/case，未知类型也会按原名保存",
-            "target_type": "不使用 target 时可直接写 target_type",
+            "target": "目标对象，必须写 {type,id}；type 只接受 agent_run/thread/task/case",
+            "target_type": "不使用 target 时可直接写 target_type，只接受 agent_run/thread/task/case",
             "target_id": "不使用 target 时可直接写 target_id",
-            "run_id": "agent_run 目标别名",
             "run_ids": "多个 agent_run 目标；适合给一批已知子代理同一句补充提示",
-            "target_scope": "批量目标；children/direct_children 表示某 run 的直接孩子，descendants/subtree 表示某 run 的整棵下级",
-            "thread_id": "thread 目标别名",
-            "task_id": "task 目标别名",
-            "case_id": "case 目标别名",
+            "target_scope": "批量目标；children 表示 root_id 的直接孩子，descendants 表示 root_id 的整棵下级",
+            "root_id": "target_scope 的根 run_id",
             "message": "要给目标下一轮看的补充提示，必须是具体可执行的人话",
             "priority": "软优先级文本，默认 normal",
             "delivery": "投递方式提示，默认 next_turn",
         },
         examples=[
             '{"tool":"send_guidance","target":{"type":"agent_run","id":"child-1"},"message":"换一个数据来源核对，不要重复查同一个页面。"}',
-            '{"tool":"send_guidance","target_scope":"children","run_id":"parent-1","message":"按用户补充要求补证据，完成后继续原任务。"}',
-            '{"tool":"send_guidance","thread_id":"thread-1","message":"用户补充：最终报告里要把未命中的来源也写清楚。"}',
+            '{"tool":"send_guidance","target_scope":"children","root_id":"parent-1","message":"按用户补充要求补证据，完成后继续原任务。"}',
+            '{"tool":"send_guidance","target":{"type":"thread","id":"thread-1"},"message":"用户补充：最终报告里要把未命中的来源也写清楚。"}',
         ],
     )
 
@@ -132,7 +129,7 @@ def _guidance_request(agent: object, params: dict[str, object]) -> GuidanceToolR
     target_type, target_id = _target_from_params(params)
     message = str(params.get("message") or "").strip()
     if not target_type or not target_id:
-        return _guidance_error("缺少 target；请提供 target:{type,id}、run_id、thread_id、task_id 或 case_id。")
+        return _guidance_error("缺少 target；请提供 target:{type,id}，或 target_type + target_id。")
     if not message:
         return _guidance_error("缺少 message；send_guidance 只记录具体补充提示。")
     sender = str(params.get("sender") or current_subagent_run_id(agent) or "main_agent").strip()
@@ -149,21 +146,21 @@ def _guidance_request(agent: object, params: dict[str, object]) -> GuidanceToolR
 
 
 def _target_run_ids(agent: object, params: dict[str, object]) -> list[str] | ToolExecutionResult:
-    explicit = string_list(params.get("run_ids") or params.get("target_run_ids") or params.get("agent_run_ids"))
+    explicit = string_list(params.get("run_ids"))
     if explicit:
         return dedupe_strings(explicit)
-    scope = str(params.get("target_scope") or "").strip().lower()
+    scope = str(params.get("target_scope") or "").strip()
     if not scope:
         return []
     resolved = _target_scope_rows(agent, params, scope)
     if isinstance(resolved, ToolExecutionResult):
         return resolved
     rows, anchor = resolved
-    if scope in {"children", "direct_children", "child", "direct"}:
+    if scope == "children":
         return _direct_child_run_ids(rows, anchor)
-    if scope in {"descendants", "subtree", "all_children", "all_descendants"}:
+    if scope == "descendants":
         return _descendant_run_ids(rows, anchor)
-    return _guidance_error("未知 target_scope；请使用 children/direct_children 或 descendants/subtree，或直接传 run_ids。")
+    return _guidance_error("未知 target_scope；请使用 children 或 descendants，或直接传 run_ids。")
 
 
 def _target_scope_rows(agent: object, params: dict[str, object], scope: str) -> tuple[list[object], str] | ToolExecutionResult:
@@ -171,7 +168,7 @@ def _target_scope_rows(agent: object, params: dict[str, object], scope: str) -> 
     if manager is None or not callable(getattr(type(manager), "kernel_snapshot", None)):
         return _guidance_error("target_scope 需要可读取的子代理树；请先用显式 run_ids，或刷新代理树后再发。")
     anchor = (
-        str(params.get("run_id") or params.get("root_id") or "").strip()
+        str(params.get("root_id") or "").strip()
         or current_subagent_run_id(agent)
         or str(getattr(agent, "_main_agent_run_id", "") or "").strip()
     )
@@ -217,24 +214,13 @@ def _descendant_run_ids(rows: list[object], anchor: str) -> list[str]:
 def _target_from_params(params: dict[str, object]) -> tuple[str, str]:
     target = params.get("target")
     if isinstance(target, dict):
-        target_type = normalize_guidance_target_type(target.get("type") or target.get("target_type"))
-        target_id = str(target.get("id") or target.get("target_id") or "").strip()
+        target_type = normalize_guidance_target_type(target.get("type"))
+        target_id = str(target.get("id") or "").strip()
         if target_type and target_id:
             return target_type, target_id
-    alias_pairs = (
-        ("run_id", "agent_run"),
-        ("agent_run_id", "agent_run"),
-        ("thread_id", "thread"),
-        ("task_id", "task"),
-        ("case_id", "case"),
-    )
-    for key, target_type in alias_pairs:
-        value = str(params.get(key) or "").strip()
-        if value:
-            return target_type, value
     return (
-        normalize_guidance_target_type(params.get("target_type") or params.get("type")),
-        str(params.get("target_id") or params.get("id") or "").strip(),
+        normalize_guidance_target_type(params.get("target_type")),
+        str(params.get("target_id") or "").strip(),
     )
 
 

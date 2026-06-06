@@ -279,7 +279,7 @@ priority: 40
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), root)
     task = agent.subagents.create_run(goal="检查 API 调用", thought="需要鉴权能力。", plan=["分析"])
 
-    gap = agent.subagents.record_capability_gap(
+    gap = agent.subagents.lifecycle.record_capability_gap(
         task.id,
         RecordCapabilityGapParams(
             missing_capability="authenticated_api_check",

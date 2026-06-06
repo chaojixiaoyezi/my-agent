@@ -644,7 +644,7 @@ def _normalize_delivery_quality_contract(contract: dict[str, Any]) -> None:
         if not isinstance(item, dict):
             continue
         metric = dict(item)
-        field = str(metric.get("field") or metric.get("name") or metric.get("column") or "").strip()
+        field = str(metric.get("field") or "").strip()
         if field:
             metric["field"] = field
         normalized.append(metric)

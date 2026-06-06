@@ -149,7 +149,7 @@ def _collect_runner_future_result(params: ConcurrentRunnerParams, future, run_id
     try:
         return future.result()
     except Exception as exc:
-        return params.agent.subagents.record_runner_result(
+        return params.agent.subagents.runner_result.record_runner_result(
             RecordRunnerResultParams(
                 run_id=run_id,
                 dry_run=False,

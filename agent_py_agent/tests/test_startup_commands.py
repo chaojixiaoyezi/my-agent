@@ -141,7 +141,7 @@ class TestCmdDaemon:
 
 def test_startup_recovery_preserves_active_task_detection_errors() -> None:
     agent = MagicMock()
-    agent.subagents.build_board.side_effect = TypeError("bad board payload")
+    agent.subagents.board.build_board.side_effect = TypeError("bad board payload")
     summary = ActiveWorkSummary()
 
     _detect_active_tasks(agent, summary)

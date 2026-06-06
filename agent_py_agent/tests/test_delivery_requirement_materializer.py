@@ -697,7 +697,7 @@ def test_materialized_workbook_staging_infers_kind_from_output_path_and_metric_n
             "delivery_quality_contract": {
                 "metric_contracts": [
                     {
-                        "name": "指标值",
+                        "field": "指标值",
                         "type": "number",
                     }
                 ]

@@ -42,7 +42,7 @@ def test_subagent_channel_probe_report():
         )
         Path(second.output_json).unlink()
 
-        report = agent.subagents.write_channel_probe_report([first.id, second.id])
+        report = agent.subagents.channel_probe.write_channel_probe_report([first.id, second.id])
         statuses = {result.run_id: result.channel_status for result in report.results}
 
         assert statuses[first.id] == "OK"
@@ -98,17 +98,17 @@ def test_subagent_action_plan_dry_run():
 
         stale = _make_stale_task(agent)
         fake_done = agent.subagents.create_run(goal="无证据完成任务", thought="模拟假完成。", plan=["标记完成"])
-        agent.subagents.set_status(fake_done.id, "DONE")
+        agent.subagents.lifecycle.set_status(fake_done.id, "DONE")
 
         request_task = agent.subagents.create_run(goal="等待能力路由任务", thought="模拟缺少工具。", plan=["请求能力"])
-        agent.subagents.record_capability_request(request_task.id, RecordCapabilityRequestParams(problem="缺少真实入口验收工具。", needed_capability="browser_smoke_test"))
+        agent.subagents.lifecycle.record_capability_request(request_task.id, RecordCapabilityRequestParams(problem="缺少真实入口验收工具。", needed_capability="browser_smoke_test"))
 
         broken = agent.subagents.create_run(goal="坏通道任务", thought="模拟 output.json 损坏。", plan=["probe"])
         Path(broken.output_json).unlink()
-        agent.subagents.probe_channel(broken.id)
+        agent.subagents.channel_probe.probe_channel(broken.id)
 
         cap = CapabilityConfig(subagent_heartbeat_timeout=1, subagent_run_timeout=1, subagent_min_evidence_for_done=1)
-        report = agent.subagents.write_action_plan(cap)
+        report = agent.subagents.board.write_action_plan(cap)
         actions = {(item.run_id, item.action): item for item in report.actions}
 
         assert (stale.id, "takeover_or_reassign") in actions
@@ -145,14 +145,14 @@ def test_subagent_action_apply_dry_run_and_apply():
 
         # Test dry-run does not mutate
         fake_done = agent.subagents.create_run(goal="需要补证据", thought="模拟缺证据完成。", plan=["标记完成"])
-        agent.subagents.set_status(fake_done.id, "DONE")
-        dry_report = agent.subagents.write_action_apply_report(cap, action_filter="reopen_for_evidence", run_id=fake_done.id)
+        agent.subagents.lifecycle.set_status(fake_done.id, "DONE")
+        dry_report = agent.subagents.actions.write_action_apply_report(cap, action_filter="reopen_for_evidence", run_id=fake_done.id)
         assert dry_report.dry_run and dry_report.records[0].applied is False
         assert dry_report.records[0].rescue_strategy == "reopen_and_request_missing_evidence"
         assert agent.subagents.load(fake_done.id).status == "DONE"
 
         # Test apply reopens
-        apply_report = agent.subagents.write_action_apply_report(cap, apply=True, action_filter="reopen_for_evidence", run_id=fake_done.id)
+        apply_report = agent.subagents.actions.write_action_apply_report(cap, apply=True, action_filter="reopen_for_evidence", run_id=fake_done.id)
         reopened = agent.subagents.load(fake_done.id)
         assert not apply_report.dry_run and apply_report.records[0].applied
         assert reopened.status == "BLOCKED" and reopened.failure_type == "missing_evidence"
@@ -161,7 +161,7 @@ def test_subagent_action_apply_dry_run_and_apply():
 
         # Test dead-run takeover creates a replacement run without asking for a manual owner
         stale = _make_stale_task(agent)
-        takeover = agent.subagents.write_action_apply_report(cap, apply=True, action_filter="takeover_or_reassign", run_id=stale.id)
+        takeover = agent.subagents.actions.write_action_apply_report(cap, apply=True, action_filter="takeover_or_reassign", run_id=stale.id)
         taken = agent.subagents.load(stale.id)
         assert takeover.records[0].ok and taken.status == "TAKEN_OVER"
         replacement = agent.subagents.load(taken.takeover_by)
@@ -179,7 +179,7 @@ def test_subagent_action_apply_recovers_coordinator_leadership():
         agent = SimpleAgent(cfg, root)
         coordinator, child, grandchild, leader = _make_coordinator_handoff_fixture(agent)
 
-        missing = agent.subagents.write_action_apply_report(
+        missing = agent.subagents.actions.write_action_apply_report(
             CapabilityConfig(subagent_heartbeat_timeout=1),
             apply=True,
             action_filter="recover_coordinator_leadership",
@@ -187,7 +187,7 @@ def test_subagent_action_apply_recovers_coordinator_leadership():
         )
         assert not missing.records[0].ok
 
-        applied = agent.subagents.write_action_apply_report(
+        applied = agent.subagents.actions.write_action_apply_report(
             CapabilityConfig(subagent_heartbeat_timeout=1),
             apply=True,
             action_filter="recover_coordinator_leadership",
@@ -233,7 +233,7 @@ def test_subagent_action_apply_excludes_active_parent_from_takeover():
         stale_child.heartbeat_at = time.time() - 30
         agent.subagents.save(stale_child)
 
-        report = agent.subagents.write_action_apply_report(
+        report = agent.subagents.actions.write_action_apply_report(
             cap,
             options=ActionApplyOptions(
                 apply=True,
@@ -271,7 +271,7 @@ def test_subagent_action_apply_parent_timeout_child_recovery_is_record_only():
         timed_out.status = "TIMEOUT"
         agent.subagents.save(timed_out)
 
-        report = agent.subagents.write_action_apply_report(
+        report = agent.subagents.actions.write_action_apply_report(
             CapabilityConfig(subagent_heartbeat_timeout=3600, subagent_run_timeout=3600),
             apply=True,
             action_filter="recover_child_after_parent_timeout",
@@ -300,7 +300,7 @@ def test_subagent_action_apply_repairs_work_order():
         )
         Path(task.output_json).unlink()
 
-        report = agent.subagents.write_action_apply_report(
+        report = agent.subagents.actions.write_action_apply_report(
             CapabilityConfig(),
             apply=True,
             action_filter="repair_work_order",
@@ -314,7 +314,7 @@ def test_subagent_action_apply_repairs_work_order():
 
 
 def _record_scoped_web_fetch(agent, task_id: str, root: Path):
-    return agent.subagents.record_capability_request(
+    return agent.subagents.lifecycle.record_capability_request(
         task_id,
         RecordCapabilityRequestParams(
             problem="当前需要请求 REST API 并检查 HTTP 状态码和 JSON 返回。",
@@ -359,11 +359,11 @@ def test_subagent_capability_route_grants_tool():
             tool_specs=agent.tools.specs(),
         )
 
-        dry = agent.subagents.write_capability_route_report(router, apply=False, run_ids=[task.id])
+        dry = agent.subagents.capability.write_capability_route_report(router, apply=False, run_ids=[task.id])
         assert dry.records[0].status == "WOULD_GRANT"
         assert agent.subagents.load(task.id).capability_requests[0].status == "OPEN"
 
-        applied = agent.subagents.write_capability_route_report(router, apply=True, run_ids=[task.id])
+        applied = agent.subagents.capability.write_capability_route_report(router, apply=True, run_ids=[task.id])
         routed = agent.subagents.load(task.id)
 
         assert applied.records[0].status == "GRANTED"
@@ -405,7 +405,7 @@ risk_level: low
             thought="需要 API skill。",
             plan=["请求能力"],
         )
-        agent.subagents.record_capability_request(
+        agent.subagents.lifecycle.record_capability_request(
             task.id,
             RecordCapabilityRequestParams(
                 problem="需要检查 REST API 返回和错误码。",
@@ -418,7 +418,7 @@ risk_level: low
             skill_registry=skills,
         )
 
-        report = agent.subagents.write_capability_route_report(router, apply=True, run_ids=[task.id])
+        report = agent.subagents.capability.write_capability_route_report(router, apply=True, run_ids=[task.id])
         routed = agent.subagents.load(task.id)
 
         assert report.records[0].status == "GRANTED"
@@ -437,7 +437,7 @@ def test_subagent_capability_route_creates_gap_when_no_match():
             thought="模拟没有匹配能力。",
             plan=["请求能力"],
         )
-        agent.subagents.record_capability_request(
+        agent.subagents.lifecycle.record_capability_request(
             task.id,
             RecordCapabilityRequestParams(
                 problem="需要 zzz_unmatched_capability_999 完成一个不存在的能力。",
@@ -453,7 +453,7 @@ def test_subagent_capability_route_creates_gap_when_no_match():
             tool_specs=agent.tools.specs(),
         )
 
-        report = agent.subagents.write_capability_route_report(router, apply=True, run_ids=[task.id])
+        report = agent.subagents.capability.write_capability_route_report(router, apply=True, run_ids=[task.id])
         routed = agent.subagents.load(task.id)
 
         assert report.records[0].status == "GAP"
@@ -476,18 +476,18 @@ def test_subagent_execution_context_uses_only_grants():
             plan=["读取代码", "请求能力", "写验收证据"],
             allowed_tools=["read_file"], acceptance_checks=["必须有接口检查证据"],
         )
-        request = agent.subagents.record_capability_request(
+        request = agent.subagents.lifecycle.record_capability_request(
             task.id, RecordCapabilityRequestParams(problem="需要发起 HTTP GET 检查接口状态。", needed_capability="web_fetch", expected_output="接口状态码和摘要"),
         )
-        agent.subagents.record_capability_grant(task.id, RecordCapabilityGrantParams(
+        agent.subagents.lifecycle.record_capability_grant(task.id, RecordCapabilityGrantParams(
             request_id=request.id, skills=["api-check"], tools=["web_fetch"],
             capability_cards=[{"id": "tool:web_fetch", "kind": "tool", "name": "web_fetch",
                                "description": "发起 HTTP 请求并返回状态码和响应摘要", "risk_level": "low", "source": "builtin", "path": ""}],
             reason="父代理授权低风险接口健康检查。",
         ))
-        agent.subagents.record_evidence(task.id, RecordEvidenceParams(kind="command", summary="接口 smoke test 通过", command="python3 smoke_api.py"))
+        agent.subagents.lifecycle.record_evidence(task.id, RecordEvidenceParams(kind="command", summary="接口 smoke test 通过", command="python3 smoke_api.py"))
 
-        context = agent.subagents.write_execution_context(task.id, max_cards=1)
+        context = agent.subagents.runner_context.write_execution_context(task.id, max_cards=1)
         payload = json.loads(Path(context.execution_context_json).read_text(encoding="utf-8"))
         markdown = Path(context.execution_context_file).read_text(encoding="utf-8")
 

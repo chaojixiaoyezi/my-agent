@@ -26,7 +26,7 @@ from .collaboration_candidates import (
     collaboration_request_runner_candidates_report,
 )
 from .limiter import limit_runner_jobs
-from .params import DispatchContext, RunnerBatchContext
+from .params import DispatchContext, DispatchParams, RunnerBatchContext
 from .runner_candidates import (
     _runner_candidates_for_context,
 )
@@ -41,6 +41,30 @@ from .runner_selection import (
     scoped_current_turn_runner_tasks,
     scoped_runner_tasks,
 )
+
+
+def run_dispatch_runner_stage(
+    agent=None,
+    *,
+    ctx: DispatchContext | None = None,
+    params: DispatchParams | None = None,
+    records: list | None = None,
+) -> list:
+    if agent is None or ctx is None or params is None:
+        raise TypeError("run_dispatch_runner_stage requires agent, ctx, and params")
+    batch_ctx = RunnerBatchContext(
+        pending_runner_jobs=[],
+        runner_concurrency=0,
+        runner_timeout_seconds=0,
+        effective_runner_instruction=ctx.runner_instruction,
+        max_cards=params.max_cards,
+        probe=params.probe,
+        records=list(records or []),
+        execution_plan=ctx.execution_plan,
+    )
+    records = execute_runner_jobs(agent, ctx, batch_ctx)
+    ctx.runner_instruction = batch_ctx.effective_runner_instruction
+    return records
 
 
 def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) -> list:

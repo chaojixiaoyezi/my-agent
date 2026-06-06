@@ -49,7 +49,7 @@ class CompactContinuePacketEnvelope:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> CompactContinuePacketEnvelope:
         return cls(
-            packet_id=str(payload.get("packet_id") or payload.get("id") or ""),
+            packet_id=str(payload.get("packet_id") or ""),
             apply_id=str(payload.get("apply_id") or ""),
             plan_id=str(payload.get("plan_id") or ""),
             ready_to_continue=bool(payload.get("ready_to_continue")),

@@ -216,10 +216,31 @@ def _tool_rate_limit_decision(payload: dict[str, Any], call: object, tool_name: 
 
 
 def _payload_for_rate_limit(payload: dict[str, Any]) -> dict[str, Any]:
-    if "tool" not in payload or any(key in payload for key in ("args", "arguments", "input")):
+    if "tool_name" in payload and "input" in payload:
         return payload
-    args = {key: value for key, value in payload.items() if key not in {"tool", "kind"}}
-    return {**payload, "args": args}
+    result: dict[str, Any] = {
+        "tool_name": str(payload.get("tool") or ""),
+        "input": _runtime_tool_input(payload),
+    }
+    for key in ("schema_version", "operation_id", "idempotency_key", "artifact_refs", "metadata", "call_id"):
+        if key in payload:
+            result[key] = payload[key]
+    return result
+
+
+def _runtime_tool_input(payload: dict[str, Any]) -> dict[str, Any]:
+    protocol_keys = {
+        "artifact_refs",
+        "call_id",
+        "idempotency_key",
+        "kind",
+        "metadata",
+        "operation_id",
+        "run_id",
+        "schema_version",
+        "tool",
+    }
+    return {key: value for key, value in payload.items() if key not in protocol_keys}
 
 
 def _tool_execution_action(call: object, tool_name: str) -> str:

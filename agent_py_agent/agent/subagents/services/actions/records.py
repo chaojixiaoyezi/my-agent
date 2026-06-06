@@ -156,7 +156,7 @@ def append_action_apply_log(manager: Any, record: ActionApplyRecord) -> None:
             f"- [{status}] {record.id} run={record.run_id} action={record.action} "
             f"applied={record.applied} message={record.message}\n"
         )
-    manager._index_action_apply(record)
+    manager.indexing.index_action_apply(record)
 
 
 def append_task_work_log(manager: Any, task: SubAgentTask, message: str) -> None:
@@ -166,7 +166,7 @@ def append_task_work_log(manager: Any, task: SubAgentTask, message: str) -> None
         path.write_text("# WORK_LOG\n\n", encoding="utf-8")
     with path.open("a", encoding="utf-8") as handle:
         handle.write(f"- {time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
-    manager._log_local_record(
+    manager.indexing.log_local_record(
         params=LocalRecordParams(
             source_type="subagent_work_log",
             source_id=f"{task.id}:{time.time():.6f}",

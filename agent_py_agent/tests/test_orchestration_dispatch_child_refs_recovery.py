@@ -132,7 +132,7 @@ def test_dispatch_payload_treats_broken_qa_output_as_failure(tmp_path: Path):
 def test_dispatch_payload_prefers_packet_recovery_over_qa_repair(tmp_path: Path):
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(goal="父任务", thought="派 tester", plan=["schedule"], role="coordinator")
-    tester_id = manager.schedule_child_runs(
+    tester_id = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             apply=True,

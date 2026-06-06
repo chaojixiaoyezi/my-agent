@@ -1,6 +1,6 @@
-"""LLM: Tool gateway contract tests for tolerant aliases and bounded shell output.
+"""LLM: Tool gateway contract tests for exact tool protocol and bounded shell output.
 
-函数/模块用途: 验证工具网关把自然别名归一为正式工具参数，并阻止大 shell 输出直接撑爆上下文。
+函数/模块用途: 验证工具网关拒绝旧工具写法，并阻止大 shell 输出直接撑爆上下文。
 """
 
 from __future__ import annotations
@@ -31,16 +31,16 @@ def _registry(root: Path, *, shell_output_max_chars: int = 80, access_mode: str 
     )
 
 
-def test_tool_gateway_canonicalizes_shell_aliases(tmp_path: Path):
+def test_tool_gateway_rejects_shell_alias(tmp_path: Path):
     result = _registry(tmp_path).execute_call({
         "tool": "shell",
         "cmd": f'{sys.executable} -c "print(123)"',
         "cwd": str(tmp_path),
     })
 
-    assert result.ok
-    assert result.tool == "run_command"
-    assert "123" in result.output
+    assert result.ok is False
+    assert result.tool == "shell"
+    assert "TOOL_NOT_REGISTERED" in result.output
 
 
 def test_tool_gateway_hides_controlled_exec_from_default_catalog(tmp_path: Path):
@@ -152,15 +152,14 @@ def test_run_command_shell_access_override_uses_normal_path_policy(tmp_path: Pat
     assert "return_code=0" in result.output
 
 
-def test_tool_gateway_canonicalizes_read_artifact_aliases(tmp_path: Path):
+def test_tool_gateway_preserves_unknown_read_artifact_parameters_unmodified(tmp_path: Path):
     registry = _registry(tmp_path)
 
     payload = registry.parse_tool_calls(
         '[TOOL_CALL]\n{"tool":"read_artifact","ref":"run-1:2-1","limit":123}\n[/TOOL_CALL]'
     )[0]
 
-    assert payload["artifact_ref"] == "run-1:2-1"
-    assert payload["max_chars"] == 123
+    assert payload == {"tool": "read_artifact", "ref": "run-1:2-1", "limit": 123}
 
 
 def test_tool_gateway_reports_malformed_write_file_raw_marker(tmp_path: Path):

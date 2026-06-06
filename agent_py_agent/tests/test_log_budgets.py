@@ -86,8 +86,8 @@ class TestDispatchBudgetFromMapping:
     @pytest.mark.parametrize("payload,expected_attr,expected_val", [
         ({"dispatch_budget_per_hour": 50}, "analyst_agent_budget_per_hour", 50),
         ({"auto_dispatch_enabled": True}, "case_auto_dispatch_enabled", True),
-    ], ids=["budget_alias", "dispatch_alias"])
-    def test_aliases(self, payload, expected_attr, expected_val):
+    ], ids=["budget_field_name", "dispatch_field_name"])
+    def test_field_names(self, payload, expected_attr, expected_val):
         """验证别名解析。"""
         budget = DispatchBudget.from_mapping(payload)
         assert getattr(budget, expected_attr) == expected_val

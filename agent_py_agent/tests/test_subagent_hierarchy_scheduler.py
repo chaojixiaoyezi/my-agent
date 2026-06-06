@@ -32,7 +32,7 @@ def test_hierarchy_schedule_dry_run_previews_without_writing_children(tmp_path):
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(goal="parent", thought="split safely", plan=["plan"])
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(parent_run_id=parent.id, child_specs=_child_specs(2))
     )
 
@@ -50,7 +50,7 @@ def test_hierarchy_schedule_apply_builds_two_child_four_grandchild_tree(tmp_path
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="orchestrate", plan=["plan"])
 
-    first = manager.schedule_child_runs(
+    first = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=_child_specs(2, prefix="child"),
@@ -62,7 +62,7 @@ def test_hierarchy_schedule_apply_builds_two_child_four_grandchild_tree(tmp_path
     assert len(first.created_run_ids) == 2
 
     for child_id in first.created_run_ids:
-        grand = manager.schedule_child_runs(
+        grand = manager.hierarchy.schedule_child_runs(
             params=HierarchyScheduleRequest(
                 parent_run_id=child_id,
                 child_specs=_child_specs(2, prefix="grand"),
@@ -91,7 +91,7 @@ def test_hierarchy_schedule_repairs_literal_lineage_wildcard_names(tmp_path):
         depth=2,
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[
@@ -135,7 +135,7 @@ def test_hierarchy_schedule_blocks_leaf_when_four_layer_token_has_no_space(tmp_p
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[
@@ -168,7 +168,7 @@ def test_hierarchy_schedule_allows_internal_task_dir_context_with_product_root(t
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -200,7 +200,7 @@ def test_hierarchy_schedule_inherits_parent_extra_write_roots(tmp_path):
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(parent_run_id=root.id, child_specs=_child_specs(1), apply=True)
     )
     child = manager.load(result.created_run_ids[0])
@@ -229,7 +229,7 @@ def test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables(t
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[
@@ -251,7 +251,7 @@ def test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables(t
     assert str(deliverables) in leaf.allowed_write_roots
 
 
-def test_hierarchy_schedule_normalizes_model_write_alias_for_leaf_tasks(tmp_path):
+def test_hierarchy_schedule_does_not_normalize_model_write_alias_for_leaf_tasks(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     parent = manager.create_run(
@@ -262,7 +262,7 @@ def test_hierarchy_schedule_normalizes_model_write_alias_for_leaf_tasks(tmp_path
         extra_write_roots=[str(deliverables)],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
@@ -278,7 +278,7 @@ def test_hierarchy_schedule_normalizes_model_write_alias_for_leaf_tasks(tmp_path
     )
     leaf = manager.load(result.created_run_ids[0])
 
-    assert "write" not in leaf.allowed_tools
+    assert "write" in leaf.allowed_tools
     assert "write_file" in leaf.allowed_tools
     assert "read_artifact" in leaf.allowed_tools
     assert "apply_patch" in leaf.allowed_tools
@@ -293,7 +293,7 @@ def test_hierarchy_schedule_carries_parent_context_to_child_thought(tmp_path):
         plan=["plan"],
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(parent_run_id=root.id, child_specs=_child_specs(1), apply=True)
     )
     child = manager.load(result.created_run_ids[0])
@@ -341,7 +341,7 @@ def test_hierarchy_schedule_keeps_sibling_scope_out_of_child_handoff(tmp_path):
         },
     )
 
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[
@@ -380,7 +380,7 @@ def test_hierarchy_schedule_keeps_exact_file_contract_when_child_goal_only_has_d
         },
     )
 
-    child_result = manager.schedule_child_runs(
+    child_result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[
@@ -459,7 +459,7 @@ def _controlled_exec_contract_root(manager: SubAgentManager, deliverables):
 
 
 def _schedule_controlled_exec_contract_leaf(manager: SubAgentManager, child_id: str):
-    grand_result = manager.schedule_child_runs(
+    grand_result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child_id,
             child_specs=[
@@ -474,7 +474,7 @@ def _schedule_controlled_exec_contract_leaf(manager: SubAgentManager, child_id: 
             max_depth=3,
         )
     )
-    leaf_result = manager.schedule_child_runs(
+    leaf_result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=grand_result.created_run_ids[0],
             child_specs=[
@@ -491,7 +491,7 @@ def _schedule_controlled_exec_contract_leaf(manager: SubAgentManager, child_id: 
     return manager.load(leaf_result.created_run_ids[0])
 
 def _schedule_vague_child(manager: SubAgentManager, parent_id: str):
-    return manager.schedule_child_runs(
+    return manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent_id,
             child_specs=[
@@ -508,7 +508,7 @@ def _schedule_vague_child(manager: SubAgentManager, parent_id: str):
 
 
 def _schedule_vague_leaf(manager: SubAgentManager, parent_id: str):
-    return manager.schedule_child_runs(
+    return manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent_id,
             child_specs=[

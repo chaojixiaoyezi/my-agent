@@ -110,7 +110,7 @@ class _ParentPlannerMixin:
         )
 
     def _make_heartbeat_ok_record(self, dry_run, gate_summary):
-        record = self.subagents.make_parent_planner_record(
+        record = self.subagents.parent_planner.make_parent_planner_record(
             params=ParentPlannerRecordParams(
                 dry_run=dry_run,
                 triggered=False,
@@ -121,8 +121,8 @@ class _ParentPlannerMixin:
                 summary="no work",
             ),
         )
-        report = self.subagents.build_parent_planner_report([record], dry_run=dry_run)
-        self.subagents.write_parent_planner_report(report, append_log=False)
+        report = self.subagents.parent_planner.build_parent_planner_report([record], dry_run=dry_run)
+        self.subagents.parent_planner.write_parent_planner_report(report, append_log=False)
         return record
 
     def _execute_planner_llm(self, params: PlannerLLMParams):
@@ -133,7 +133,7 @@ class _ParentPlannerMixin:
                 params.runner_instruction,
             ),
         )
-        self.subagents.write_parent_planner_exchange(prompt)
+        self.subagents.parent_planner.write_parent_planner_exchange(prompt)
         try:
             response = self.run(
                 prompt,
@@ -151,7 +151,7 @@ class _ParentPlannerMixin:
         return PlannerLLMResult(response=response)
 
     def _make_planner_error_record(self, params: PlannerErrorRecordParams):
-        record = self.subagents.make_parent_planner_record(
+        record = self.subagents.parent_planner.make_parent_planner_record(
             params=ParentPlannerRecordParams(
                 dry_run=not params.mutate_state,
                 triggered=True,
@@ -164,21 +164,21 @@ class _ParentPlannerMixin:
                 evidence_paths=[],
             ),
         )
-        report = self.subagents.build_parent_planner_report([record], dry_run=not params.mutate_state)
-        self.subagents.write_parent_planner_report(report, append_log=params.mutate_state)
+        report = self.subagents.parent_planner.build_parent_planner_report([record], dry_run=not params.mutate_state)
+        self.subagents.parent_planner.write_parent_planner_report(report, append_log=params.mutate_state)
         return record
 
     def _build_planner_record(self, params: PlannerRecordBuildParams):
         from ..subagents.parsing import parse_parent_planner_output
 
-        prompt_path, response_path = self.subagents.write_parent_planner_exchange(
+        prompt_path, response_path = self.subagents.parent_planner.write_parent_planner_exchange(
             params.result.prompt,
             params.result.response,
         )
         parsed = parse_parent_planner_output(params.result.response)
         ok, decision, message, parse_error = _planner_record_status(parsed, params.state)
 
-        record = self.subagents.make_parent_planner_record(
+        record = self.subagents.parent_planner.make_parent_planner_record(
             params=ParentPlannerRecordParams(
                 dry_run=not params.mutate_state,
                 triggered=True,
@@ -201,8 +201,8 @@ class _ParentPlannerMixin:
                 evidence_paths=[prompt_path, response_path],
             ),
         )
-        report = self.subagents.build_parent_planner_report([record], dry_run=not params.mutate_state)
-        self.subagents.write_parent_planner_report(report, append_log=params.mutate_state)
+        report = self.subagents.parent_planner.build_parent_planner_report([record], dry_run=not params.mutate_state)
+        self.subagents.parent_planner.write_parent_planner_report(report, append_log=params.mutate_state)
         return record
 
 

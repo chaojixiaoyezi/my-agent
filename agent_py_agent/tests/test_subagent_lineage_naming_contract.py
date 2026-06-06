@@ -29,7 +29,7 @@ def test_top_level_items_get_fixed_lineage_names(tmp_path):
         ]
     }).output)
 
-    names = [agent.subagents.load(run_id).agent_name for run_id in payload["ids"]]
+    names = [agent.subagents.load(run_id).agent_name for run_id in payload["created_run_ids"]]
     assert names == ["小傻妞-worker-1", "小傻妞-tester-2"]
 
 
@@ -43,7 +43,7 @@ def test_count_fanout_gets_fixed_lineage_names(tmp_path):
         "role": "worker",
     }).output)
 
-    names = [agent.subagents.load(run_id).agent_name for run_id in payload["ids"]]
+    names = [agent.subagents.load(run_id).agent_name for run_id in payload["created_run_ids"]]
     assert names == ["小傻妞-worker-1", "小傻妞-worker-2"]
 
 
@@ -63,7 +63,7 @@ def test_scheduled_children_get_next_lineage_prefix_and_index(tmp_path):
         role="coordinator",
         depth=1,
     )
-    result = manager.schedule_child_runs(
+    result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[

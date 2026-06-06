@@ -33,7 +33,7 @@ def test_subagent_memory_gate_review_preserves_decision_across_save(tmp_path) ->
     loaded = manager.load(task.id)
     candidate_id = _read_jsonl(loaded.agent_run_memory_candidates_jsonl)[0]["candidate_id"]
 
-    result = manager.review_memory_gate_candidate(
+    result = manager.memory_gate.review_memory_gate_candidate(
         task.id,
         MemoryGateReviewRequest(
             candidate_id=candidate_id,

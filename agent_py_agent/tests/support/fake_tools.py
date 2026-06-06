@@ -34,7 +34,7 @@ class FakeToolRunner:
     def _policy_error(self, tool: str, params: dict[str, object]) -> dict[str, object] | None:
         if self.policy is None:
             return None
-        decision = validate_tool_call_policy({"tool": tool, "args": params}, self.policy)
+        decision = validate_tool_call_policy({"tool_name": tool, "input": params}, self.policy)
         if decision.ok:
             return None
         return {

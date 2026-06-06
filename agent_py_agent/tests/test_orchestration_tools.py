@@ -121,8 +121,8 @@ class TestTaskProgressRegistryTool:
         owner_home = Path(agent.home_paths.owner_home_dir)
         assert (owner_home / "memory_archive" / "task_progress" / "run-main" / "progress.json").exists()
 
-    def test_registry_accepts_tool_name_wrapped_payload(self, tmp_path):
-        """模型常把参数包放进同名字段，注册表应统一拆包后再执行。"""
+    def test_registry_rejects_tool_name_wrapped_payload(self, tmp_path):
+        """同名 wrapper 不是当前工具协议，不能被静默忽略或拆包执行。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
@@ -140,9 +140,10 @@ class TestTaskProgressRegistryTool:
             }
         )
 
-        assert result.ok is True
+        assert result.ok is False
         payload = json.loads(result.output)
-        assert payload["summary"] == "已读目录。"
+        assert payload["invalid_field"] == "task_progress"
+        assert "top-level current fields" in payload["error"]
 
     def test_registry_scope_drives_task_progress_run_id(self, tmp_path):
         """真实工具循环注入的 run_scope 应决定进度账本归属，不能落到 main。"""
@@ -154,8 +155,8 @@ class TestTaskProgressRegistryTool:
         envelope = ToolCallEnvelope(
             call_id="call-1",
             source="test",
-            tool="task_progress",
-            args={
+            tool_name="task_progress",
+            input={
                 "action": "update",
                 "summary": "读完第一批项目。",
                 "items": [{"id": "batch-1", "title": "第一批", "status": "done"}],
@@ -392,6 +393,22 @@ class TestInspectAgentTreeTool:
         assert defaulted["interval_seconds"] == 240
         assert capped["interval_seconds"] == 7200
 
+    def test_wait_tool_ignores_interval_seconds_alias(self, tmp_path):
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", subagent_workspace="subs", subagent_watch_interval_seconds=180),
+            tmp_path,
+        )
+
+        payload = json.loads(
+            agent.tools.tools["wait"].execute({"task_id": "task-alias", "interval_seconds": 600}).output
+        )
+
+        assert payload["ok"] is True
+        assert payload["interval_seconds"] == 180
+
     def test_wait_tool_sleeps_for_cli_run_without_burning_rounds(self, tmp_path, monkeypatch):
         from types import SimpleNamespace
 
@@ -575,8 +592,8 @@ class TestScheduleChildSubagentsTool:
         assert not result.ok
         assert "顶层派工请使用 create_subagents" in result.output
 
-    def test_runner_context_max_depth_can_mean_one_more_layer(self, tmp_path):
-        """模型在 depth=1 传 max_depth=1 时，按“再开一层”兼容处理。"""
+    def test_runner_context_max_depth_uses_absolute_depth_limit(self, tmp_path):
+        """显式 max_depth 是绝对深度限制，不按“再开一层”兼容处理。"""
         import json
 
         from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
@@ -599,11 +616,11 @@ class TestScheduleChildSubagentsTool:
             }
         )
         payload = json.loads(result.output)
-        leaf = agent.subagents.load(payload["created_run_ids"][0])
 
         assert result.ok
-        assert leaf.parent_id == child.id
-        assert leaf.depth == 2
+        assert payload["blocked"] is True
+        assert payload["reason"] == "max_depth_exceeded:1"
+        assert payload["created_run_ids"] == []
 
     def test_runner_context_schedule_defaults_to_apply_direct_child(self, tmp_path):
         """runner 内部省略 dry_run 时，应真实创建当前节点的直接 child。"""

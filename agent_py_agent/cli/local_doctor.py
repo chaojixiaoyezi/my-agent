@@ -203,7 +203,7 @@ def rebuild_subagent_index(agent: SimpleAgent) -> int:
 
     count = 0
     for task in agent.subagents.list_runs():
-        agent.subagents._index_task(task)
+        agent.subagents.indexing.index_task(task)
         count += 1
         task_dir = Path(task.task_dir)
         for rel_path, source_type in {

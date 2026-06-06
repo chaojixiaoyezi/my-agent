@@ -40,16 +40,16 @@ def test_subagent_capability_records():
             depth=1, allowed_tools=["read_file"],
         )
 
-        request = agent.subagents.record_capability_request(
+        request = agent.subagents.lifecycle.record_capability_request(
             child.id, RecordCapabilityRequestParams(
                 problem="当前只有 read_file，无法确认接口是否可访问。",
                 needed_capability="http_check", expected_output="判断接口状态码和返回体", tried=["read_file"],
             ),
         )
-        grant = agent.subagents.record_capability_grant(child.id, RecordCapabilityGrantParams(
+        grant = agent.subagents.lifecycle.record_capability_grant(child.id, RecordCapabilityGrantParams(
             request_id=request.id, tools=["web_fetch"], reason="允许低风险 GET 检查。",
         ))
-        gap = agent.subagents.record_capability_gap(child.id, RecordCapabilityGapParams(
+        gap = agent.subagents.lifecycle.record_capability_gap(child.id, RecordCapabilityGapParams(
             missing_capability="authenticated_api_check", why_failed="缺少登录态和安全授权。",
             attempted_tools=["web_fetch"], suggested_skill="api-auth-debugging",
         ))
@@ -79,13 +79,13 @@ def test_subagent_fake_done_requires_evidence():
         )
 
         try:
-            agent.subagents.set_status(task.id, "DONE", require_evidence=True)
+            agent.subagents.lifecycle.set_status(task.id, "DONE", require_evidence=True)
         except ValueError as exc:
             assert "缺少验收证据" in str(exc)
         else:
             raise AssertionError("没有验收证据时不应该允许 DONE")
 
-        evidence = agent.subagents.record_evidence(
+        evidence = agent.subagents.lifecycle.record_evidence(
             task.id,
             RecordEvidenceParams(
                 kind="command",
@@ -93,7 +93,7 @@ def test_subagent_fake_done_requires_evidence():
                 command="python3 smoke_test.py",
             ),
         )
-        done = agent.subagents.set_status(
+        done = agent.subagents.lifecycle.set_status(
             task.id,
             "DONE",
             result="按钮交互已完成并通过 smoke test。",
@@ -194,16 +194,16 @@ def test_subagent_board_scales_and_flags():
                 final_owner="final-owner",
             )
             created.append(task)
-        agent.subagents.record_capability_request(
+        agent.subagents.lifecycle.record_capability_request(
             created[3].id,
             RecordCapabilityRequestParams(
                 problem="缺少网页检索能力。",
                 needed_capability="web_search",
             ),
         )
-        agent.subagents.set_status(created[7].id, "DONE")
-        agent.subagents.set_status(created[11].id, "BLOCKED", failure_type="tool_failure")
-        board = agent.subagents.write_board(recent_limit=10)
+        agent.subagents.lifecycle.set_status(created[7].id, "DONE")
+        agent.subagents.lifecycle.set_status(created[11].id, "BLOCKED", failure_type="tool_failure")
+        board = agent.subagents.board.write_board(recent_limit=10)
 
         assert board.summary["total"] == 25
         assert len(board.recent) == 10
@@ -221,7 +221,7 @@ def test_subagent_board_keeps_current_subagent_paths():
         agent = SimpleAgent(cfg, root)
         agent.subagents.create_run(goal="整理材料", thought="测试当前路径直通", plan=["执行"])
 
-        board = agent.subagents.write_board(recent_limit=10)
+        board = agent.subagents.board.write_board(recent_limit=10)
         board_text = (agent.subagents.workspace / "subagent_board.json").read_text(encoding="utf-8")
 
         assert board.summary["total"] == 1
@@ -237,14 +237,14 @@ def _make_due_check_stale_active_run(agent):
         owner="worker-a",
         final_owner="final-owner",
     )
-    agent.subagents.record_capability_request(
+    agent.subagents.lifecycle.record_capability_request(
         active.id,
         RecordCapabilityRequestParams(
             problem="当前工具无法验证真实入口。",
             needed_capability="browser_smoke_test",
         ),
     )
-    agent.subagents.record_capability_gap(
+    agent.subagents.lifecycle.record_capability_gap(
         active.id,
         RecordCapabilityGapParams(
             missing_capability="browser_smoke_test",
@@ -265,7 +265,7 @@ def _make_due_check_done_without_evidence(agent):
         thought="没有证据就标记完成。",
         plan=["标记完成"],
     )
-    agent.subagents.set_status(done.id, "DONE")
+    agent.subagents.lifecycle.set_status(done.id, "DONE")
 
 
 def test_subagent_due_check_report():
@@ -277,7 +277,7 @@ def test_subagent_due_check_report():
         _make_due_check_stale_active_run(agent)
         _make_due_check_done_without_evidence(agent)
 
-        report = agent.subagents.write_due_check(
+        report = agent.subagents.board.write_due_check(
             CapabilityConfig(
                 subagent_heartbeat_timeout=1,
                 subagent_run_timeout=1,
@@ -310,7 +310,7 @@ def test_subagent_channel_probe_records_status():
             plan=["probe", "记录结果"],
         )
 
-        ok_result = agent.subagents.probe_channel(task.id)
+        ok_result = agent.subagents.channel_probe.probe_channel(task.id)
         ok_loaded = agent.subagents.load(task.id)
 
         assert ok_result.channel_status == "OK"
@@ -320,7 +320,7 @@ def test_subagent_channel_probe_records_status():
         assert Path(ok_loaded.channel_probe_file).exists()
 
         Path(ok_loaded.output_json).unlink()
-        broken_result = agent.subagents.probe_channel(task.id)
+        broken_result = agent.subagents.channel_probe.probe_channel(task.id)
         broken_loaded = agent.subagents.load(task.id)
         failed_names = {check.name for check in broken_result.checks if not check.ok}
 

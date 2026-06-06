@@ -81,7 +81,7 @@ class ArtifactRef:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> ArtifactRef:
         return cls(
-            artifact_id=str(payload.get("artifact_id") or payload.get("id") or ""),
+            artifact_id=str(payload.get("artifact_id") or ""),
             path=str(payload.get("path") or ""),
             kind=str(payload.get("kind") or "file"),
             owner_run_id=str(payload.get("owner_run_id") or ""),
@@ -127,7 +127,7 @@ class EvidenceRef:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> EvidenceRef:
         return cls(
-            evidence_id=str(payload.get("evidence_id") or payload.get("id") or ""),
+            evidence_id=str(payload.get("evidence_id") or ""),
             claim=str(payload.get("claim") or ""),
             checked_scope=str(payload.get("checked_scope") or ""),
             evidence_refs=string_list(payload.get("evidence_refs")),

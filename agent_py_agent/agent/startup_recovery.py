@@ -64,7 +64,7 @@ def _detect_processing_requests(paths, summary):
 def _detect_active_tasks(agent, summary):
     """检测未完成的子代理任务和最近任务列表。"""
     try:
-        board = agent.subagents.build_board(
+        board = agent.subagents.board.build_board(
             options=SubAgentBoardOptions(
                 recent_limit=3,
                 include_child_status_counts=False,

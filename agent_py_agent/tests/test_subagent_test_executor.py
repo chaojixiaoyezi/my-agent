@@ -167,7 +167,7 @@ def test_test_executor_content_check_does_not_infer_negative_from_name(tmp_path)
     assert record.validation_result["expect_absent"] is False
 
 
-def test_test_executor_content_check_supports_not_exists_match_mode(tmp_path):
+def test_test_executor_content_check_supports_explicit_expect_absent(tmp_path):
     (tmp_path / "page.html").write_text("<a href='index1.html'>首页</a>\n", encoding="utf-8")
     executor = TestExecutor(tmp_path)
 
@@ -176,7 +176,7 @@ def test_test_executor_content_check_supports_not_exists_match_mode(tmp_path):
         "validation_method": "content_check",
         "file_path": "page.html",
         "content_pattern": "href=\"#\"",
-        "match_mode": "not_exists",
+        "expect_absent": True,
     })
 
     assert record.executed is True

@@ -75,7 +75,7 @@ class TestField:
         event = {"source": "value"}
         assert _field(event, "source") == "value"
 
-    def test_field_alias_fallback(self):
+    def test_field_field_name_fallback(self):
         """验证嵌套 bag 中查找字段。"""
         event = {"attributes": {"source": "id-1"}}
         assert _field(event, "source") == "id-1"

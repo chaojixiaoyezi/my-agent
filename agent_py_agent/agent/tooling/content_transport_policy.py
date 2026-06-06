@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..settings.tool_config import DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
+from ..settings.defaults import DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
 
 MAX_INLINE_WRITE_CONTENT_CHARS = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
 STREAMING_INLINE_WRITE_ABORT_CHARS = 32_000
