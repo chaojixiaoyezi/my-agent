@@ -152,6 +152,9 @@ class SubAgentBoardOptions:
 
     recent_limit: int = 20
     include_child_status_counts: bool = True
+    status: str = ""
+    owner: str = ""
+    root_id: str = ""
 
 
 __all__ = [

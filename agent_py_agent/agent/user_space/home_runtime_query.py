@@ -130,14 +130,22 @@ def _task_workspace_payload(state_path: Path) -> dict[str, Any]:
     root = state_path.parent.parent if state_path.parent.name == "work" else state_path.parent
     work = root / "work"
     state_report = read_json_object_report(state_path, context="home_runtime_query.task_state")
+    workspace_path = work / "run_workspace.json"
+    workspace_report = read_json_object_report(workspace_path, context="home_runtime_query.run_workspace")
     timeline = work / "timeline.jsonl" if (work / "timeline.jsonl").exists() else root / "timeline.jsonl"
     compact_root = work / "compact" if (work / "compact").exists() else root / "compact"
+    state_payload = (
+        state_report.payload
+        if state_report.load_error
+        else _state_with_workspace_identity(state_report.payload, workspace_report.payload)
+    )
     return {
         "root": str(root),
         "date": root.parent.name,
         "slug": root.name,
         "exists": root.exists(),
         "state_path": str(state_path),
+        "workspace_path": str(workspace_path),
         "timeline_path": str(timeline),
         "task_yaml_path": str(work / "task.yaml" if (work / "task.yaml").exists() else root / "task.yaml"),
         "output_dir": str(root / "output"),
@@ -147,13 +155,26 @@ def _task_workspace_payload(state_path: Path) -> dict[str, Any]:
         "logs_dir": str(work / "logs"),
         "compact_dir": str(compact_root),
         "compact": task_compact_payload(compact_root),
-        "state": state_report.payload,
+        "state": state_payload,
+        "workspace": workspace_report.payload,
         "state_load_error": state_report.load_error or {},
+        "workspace_load_error": workspace_report.load_error or {},
     }
+
+
+def _state_with_workspace_identity(state: dict[str, Any], workspace: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(state) if isinstance(state, dict) else {}
+    if not isinstance(workspace, dict):
+        return payload
+    for key in ("request_id", "run_id", "task_id", "task_title", "prompt_fingerprint", "owner_id", "owner_home", "task_name", "source"):
+        if not payload.get(key) and workspace.get(key):
+            payload[key] = workspace[key]
+    return payload
 
 
 def _task_workspace_ref_matches(item: dict[str, Any], ref: str) -> bool:
     state = item.get("state", {}) if isinstance(item.get("state"), dict) else {}
+    workspace = item.get("workspace", {}) if isinstance(item.get("workspace"), dict) else {}
     candidates = [
         item.get("slug", ""),
         safe_task_slug(ref),
@@ -161,12 +182,17 @@ def _task_workspace_ref_matches(item: dict[str, Any], ref: str) -> bool:
         state.get("task_name", ""),
         state.get("run_id", ""),
         state.get("request_id", ""),
+        workspace.get("task_id", ""),
+        workspace.get("task_name", ""),
+        workspace.get("run_id", ""),
+        workspace.get("request_id", ""),
     ]
     return ref in {str(value) for value in candidates} or safe_task_slug(ref) == str(item.get("slug") or "")
 
 
 def _recommended_task_reads(item: dict[str, Any]) -> list[str]:
     paths = [
+        item.get("workspace_path", ""),
         item.get("state_path", ""),
         item.get("timeline_path", ""),
         item.get("task_yaml_path", ""),

@@ -38,6 +38,35 @@ class TestCmdSubagents:
             result = cmd_subagents(args)
             assert result == 0
 
+    def test_cmd_subagents_passes_scope_to_board_builder(self, tmp_path: Path):
+        """CLI 范围参数应直接传给 board 生成，避免写出全局看板后再二次过滤。"""
+        from agent_py_agent.cli.subagents import cmd_subagents
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.capability_config = str(tmp_path / "capability.yaml")
+        args.limit = 10
+        args.all = False
+        args.status = "RUNNING"
+        args.owner = "alice"
+        args.root_id = "root-a"
+        args.skill_dir = None
+
+        mock_agent = MagicMock()
+        mock_board = MagicMock()
+        mock_board.summary = {"total": 0}
+        mock_board.hot_list = []
+        mock_board.recent = []
+        mock_agent.subagents.write_board.return_value = mock_board
+
+        with patch("agent_py_agent.cli._board.make_agent", return_value=mock_agent):
+            assert cmd_subagents(args) == 0
+
+        options = mock_agent.subagents.write_board.call_args.kwargs["options"]
+        assert options.root_id == "root-a"
+        assert options.status == "RUNNING"
+        assert options.owner == "alice"
+
     def test_cmd_subagents_with_items(self, tmp_path: Path):
         """显示带有子代理项的看板。"""
         from agent_py_agent.cli.subagents import cmd_subagents

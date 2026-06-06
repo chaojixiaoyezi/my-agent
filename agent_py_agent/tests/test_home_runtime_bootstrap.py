@@ -55,12 +55,14 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     assert (task_root / "work" / "runtime").is_dir()
     assert (task_root / "work" / "agents").is_dir()
     assert (task_root / "work" / "task.yaml").exists()
+    workspace = json.loads((task_root / "work" / "run_workspace.json").read_text(encoding="utf-8"))
     state = json.loads((task_root / "work" / "state.json").read_text(encoding="utf-8"))
-    assert state["request_id"] == "req-1"
-    assert state["run_id"] == "run-1"
-    assert state["task_id"] == "示例网站 E2E"
-    assert state["owner_id"] == "local/main"
-    assert state["owner_home"] == str((home / "owners" / "local" / "main").resolve())
+    assert workspace["request_id"] == "req-1"
+    assert workspace["run_id"] == "run-1"
+    assert workspace["task_id"] == "示例网站 E2E"
+    assert workspace["owner_id"] == "local/main"
+    assert workspace["owner_home"] == str((home / "owners" / "local" / "main").resolve())
+    assert state["primary_run_id"] == "run-1"
     assert (task_root / "work" / "timeline.jsonl").read_text(encoding="utf-8").strip()
     assert not (home / "tasks").exists()
 
@@ -78,12 +80,12 @@ def test_saved_run_uses_prompt_slug_when_only_machine_ids_are_available(tmp_path
     assert len(task_dirs) == 1
     assert task_dirs[0].name not in {"gw-123", "run-456"}
     assert not task_dirs[0].name.startswith(("gw-", "run-", "req-"))
-    state = json.loads((task_dirs[0] / "work" / "state.json").read_text(encoding="utf-8"))
-    assert state["request_id"] == "gw-123"
-    assert state["run_id"] == "run-456"
+    workspace = json.loads((task_dirs[0] / "work" / "run_workspace.json").read_text(encoding="utf-8"))
+    assert workspace["request_id"] == "gw-123"
+    assert workspace["run_id"] == "run-456"
 
 
-def test_same_prompt_new_run_reuses_task_workspace(tmp_path: Path):
+def test_same_prompt_new_run_gets_separate_task_workspace(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
@@ -95,15 +97,16 @@ def test_same_prompt_new_run_reuses_task_workspace(tmp_path: Path):
 
     date_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat()
     task_dirs = sorted(item for item in date_root.iterdir() if item.is_dir())
-    states = [json.loads((item / "work" / "state.json").read_text(encoding="utf-8")) for item in task_dirs]
-    timeline = (task_dirs[0] / "work" / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
-    assert len(task_dirs) == 1
+    workspaces = [json.loads((item / "work" / "run_workspace.json").read_text(encoding="utf-8")) for item in task_dirs]
+    timelines = [(item / "work" / "timeline.jsonl").read_text(encoding="utf-8").splitlines() for item in task_dirs]
+    assert len(task_dirs) == 2
     assert task_dirs[0].name == "分析-all-agent-项目并写中文报告"
-    assert states[0]["run_id"] == "run-two"
-    assert states[0]["prompt_fingerprint"]
-    assert len(timeline) == 2
-    assert any('"run_id": "run-one"' in line for line in timeline)
-    assert any('"run_id": "run-two"' in line for line in timeline)
+    assert task_dirs[1].name == "分析-all-agent-项目并写中文报告-run-two"
+    assert [workspace["run_id"] for workspace in workspaces] == ["run-one", "run-two"]
+    assert all(workspace["prompt_fingerprint"] for workspace in workspaces)
+    assert all(len(timeline) == 1 for timeline in timelines)
+    assert any('"run_id": "run-one"' in line for line in timelines[0])
+    assert any('"run_id": "run-two"' in line for line in timelines[1])
 
 
 def test_long_project_prompt_gets_short_relevant_task_workspace_name(tmp_path: Path):
@@ -120,10 +123,10 @@ def test_long_project_prompt_gets_short_relevant_task_workspace_name(tmp_path: P
 
     task_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "all-agent-架构分析"
     assert (task_root / "output").is_dir()
-    state = json.loads((task_root / "work" / "state.json").read_text(encoding="utf-8"))
+    workspace = json.loads((task_root / "work" / "run_workspace.json").read_text(encoding="utf-8"))
     task_yaml = (task_root / "work" / "task.yaml").read_text(encoding="utf-8")
-    assert state["task_title"] == "all-agent-架构分析"
-    assert state["prompt_fingerprint"]
+    assert workspace["task_title"] == "all-agent-架构分析"
+    assert workspace["prompt_fingerprint"]
     assert 'task_id: "all-agent-架构分析"' in task_yaml
 
 

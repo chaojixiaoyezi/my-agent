@@ -243,7 +243,11 @@ python3 -m agent_py_agent spawn-subagents "实现一个功能并验收" --count 
 python3 -m agent_py_agent subagents
 python3 -m agent_py_agent subagents --all
 python3 -m agent_py_agent subagents --status BLOCKED
+python3 -m agent_py_agent subagents --root-id <root_run_id>
 ```
+
+`--root-id`、`--status`、`--owner` 会在生成看板时直接收窄范围；终端输出、
+`subagent_board.json` 和 `SUBAGENT_BOARD.md` 都反映同一个范围，便于排查单棵代理树。
 
 查看单个 run：
 

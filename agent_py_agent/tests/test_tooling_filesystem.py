@@ -338,6 +338,21 @@ class TestReadFileTool:
         assert result.ok is True
         assert "PARTIAL view only" in result.output
 
+    def test_read_file_offset_beyond_end_has_structured_error_code(self, tmp_path: Path):
+        """按字符窗口读取越界时应给明确错误码，方便日志定位。"""
+        from agent_py_agent.agent.tooling.filesystem import ReadFileTool
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "test.txt").write_text("short", encoding="utf-8")
+
+        tool = ReadFileTool(workspace, max_chars=100)
+        result = tool.execute({"path": "test.txt", "offset": 99, "max_chars": 10})
+
+        assert result.ok is False
+        assert result.error_code == "OFFSET_OUT_OF_RANGE"
+        assert "offset 超出文件末尾" in result.output
+
     def test_read_file_empty(self, tmp_path: Path):
         """读取空文件。"""
         from agent_py_agent.agent.tooling.filesystem import ReadFileTool

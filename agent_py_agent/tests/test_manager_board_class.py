@@ -133,6 +133,27 @@ class TestBuildBoard:
         assert board.summary["total"] == 1
         assert board.summary.get("RUNNING", 0) == 1
 
+    def test_build_board_filters_summary_by_root_id(self, tmp_path: Path):
+        """指定 root_id 时，summary/hot/recent/items 都只反映这一棵树。"""
+        from agent_py_agent.agent.subagents.models import SubAgentBoardOptions
+
+        mixin = _make_board_mixin(tmp_path)
+        root_a = _make_board_task(mixin, "child-a")
+        root_a.root_id = "root-a"
+        root_b = _make_board_task(mixin, "child-b")
+        root_b.root_id = "root-b"
+        root_b.status = "FAILED"
+        mixin.save(root_a)
+        mixin.save(root_b)
+
+        board = mixin.build_board(options=SubAgentBoardOptions(root_id="root-a"))
+
+        assert board.summary["total"] == 1
+        assert board.summary.get("FAILED", 0) == 0
+        assert [item.id for item in board.items] == ["child-a"]
+        assert [item.id for item in board.recent] == ["child-a"]
+        assert board.hot_list == []
+
 
 class TestToBoardItem:
     """测试 _to_board_item() 方法。"""

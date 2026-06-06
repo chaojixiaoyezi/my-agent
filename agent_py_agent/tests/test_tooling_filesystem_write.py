@@ -72,6 +72,17 @@ def test_write_file_requires_exactly_one_payload(tmp_path: Path) -> None:
     assert "二选一" in duplicate.output
 
 
+def test_write_file_ignores_empty_optional_data_base64_when_content_is_present(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = WriteFileTool(workspace)
+
+    result = tool.execute({"path": "out.txt", "content": "hello", "data_base64": ""})
+
+    assert result.ok
+    assert (workspace / "out.txt").read_text(encoding="utf-8") == "hello"
+
+
 def test_write_file_allows_non_dangerous_external_path(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

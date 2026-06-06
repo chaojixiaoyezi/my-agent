@@ -185,7 +185,7 @@ def _artifact_integrity_envelope(web_decision: Any, target: Path) -> dict[str, o
 
 def _write_payload(params: dict[str, Any]) -> tuple[str | None, bytes]:
     has_text = "content" in params and params.get("content") is not None
-    has_base64 = "data_base64" in params and params.get("data_base64") is not None
+    has_base64 = _has_base64_payload(params)
     if has_text == has_base64:
         raise ValueError(
             "write_file 的 content 和 data_base64 必须二选一，且只能提供其中一个。"
@@ -205,6 +205,15 @@ def _write_payload(params: dict[str, Any]) -> tuple[str | None, bytes]:
         allow_empty=True,
     )
     return content, content.encode("utf-8")
+
+
+def _has_base64_payload(params: dict[str, Any]) -> bool:
+    if "data_base64" not in params or params.get("data_base64") is None:
+        return False
+    value = params.get("data_base64")
+    if isinstance(value, str) and not value.strip():
+        return False
+    return True
 
 
 def _content_policy(raw_path: str, content: str | None, max_chars: int) -> Any | None:

@@ -43,6 +43,104 @@ def test_task_workspace_path_template_sanitizes_task_name(tmp_path: Path):
     assert path == tmp_path / "tasks" / "2026-05-13" / "示例网站-e2e-main"
 
 
+def test_run_workspace_same_slug_different_prompt_gets_unique_dir(tmp_path: Path):
+    from agent_py_agent.agent.user_space.run_workspace import (
+        EnsureRunWorkspaceRequest,
+        ensure_run_workspace,
+    )
+
+    first = ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=tmp_path,
+            template="tasks/{date}/{task_slug}",
+            task_name="all-agent 源码分析",
+            user_prompt="请你自己分析 all-agent。",
+            created_at="2026-06-06T00:00:00+00:00",
+        )
+    )
+    second = ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=tmp_path,
+            template="tasks/{date}/{task_slug}",
+            task_name="all-agent 源码分析",
+            user_prompt="请找帮手一起分析 all-agent。",
+            created_at="2026-06-06T00:00:00+00:00",
+        )
+    )
+
+    assert second.root != first.root
+    assert second.root.name == f"{first.root.name}-2"
+
+
+def test_run_workspace_reuses_same_structured_request_id(tmp_path: Path):
+    from agent_py_agent.agent.user_space.run_workspace import (
+        EnsureRunWorkspaceRequest,
+        ensure_run_workspace,
+    )
+
+    first = ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=tmp_path,
+            template="tasks/{date}/{task_slug}",
+            task_name="all-agent 源码分析",
+            user_prompt="请你自己分析 all-agent。",
+            request_id="req-same",
+            created_at="2026-06-06T00:00:00+00:00",
+        )
+    )
+    second = ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=tmp_path,
+            template="tasks/{date}/{task_slug}",
+            task_name="all-agent 源码分析",
+            user_prompt="请找帮手一起分析 all-agent。",
+            request_id="req-same",
+            created_at="2026-06-06T00:00:00+00:00",
+        )
+    )
+
+    assert second.root == first.root
+
+
+def test_run_workspace_identity_survives_task_state_updates(tmp_path: Path):
+    import json
+
+    from agent_py_agent.agent.user_space.run_workspace import (
+        EnsureRunWorkspaceRequest,
+        ensure_run_workspace,
+    )
+
+    first = ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=tmp_path,
+            template="tasks/{date}/{task_slug}",
+            task_name="all-agent 架构分析",
+            user_prompt="请你自己分析 all-agent。",
+            request_id="req-a",
+            run_id="run-a",
+            created_at="2026-06-06T00:00:00+00:00",
+        )
+    )
+    first.state_json.write_text(
+        json.dumps({"task_id": "run-a", "primary_run_id": "run-a", "status": "RUNNING"}),
+        encoding="utf-8",
+    )
+    second = ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=tmp_path,
+            template="tasks/{date}/{task_slug}",
+            task_name="all-agent 架构分析",
+            user_prompt="请找帮手一起分析 all-agent。",
+            request_id="req-b",
+            run_id="run-b",
+            created_at="2026-06-06T00:00:00+00:00",
+        )
+    )
+
+    assert second.root != first.root
+    assert second.root.name == f"{first.root.name}-run-b"
+
+
 def test_home_paths_exposes_core_dirs_without_creating(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import home_paths
 

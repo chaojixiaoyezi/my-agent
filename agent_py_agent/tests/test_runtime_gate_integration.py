@@ -5,6 +5,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core._finalization_service import FinalizationService
+from agent_py_agent.agent.agent_core._runtime_params import FinalizeContext
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.delivery_closeout.closeout import (
     MainAgentDeliveryCloseoutRequest,
@@ -17,6 +19,8 @@ from agent_py_agent.agent.agent_core.tool_loop.completion import (
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.contracts.gates.tool.effects import args_hash_for_call
 from agent_py_agent.agent.contracts.tool_protocol_v2 import normalize_tool_call
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 from agent_py_agent.agent.tooling.registry_execution import (
     ExecuteRegistryCallParams,
@@ -389,6 +393,21 @@ def test_tool_round_auto_closeout_for_uncontracted_task_output_report(tmp_path):
     assert "uncontracted_task_output" in response.text
 
 
+def test_finalization_auto_closeout_for_final_response_after_uncontracted_task_output(tmp_path):
+    task_root = tmp_path / "tasks" / "2026-06-06" / "all-agent-run-1"
+    output_dir = task_root / "output"
+    output = output_dir / "all-agent-源码分析报告.md"
+    output.parent.mkdir(parents=True)
+    output.write_text("finished artifact", encoding="utf-8")
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+
+    result = FinalizationService(agent).finalize(_finalize_context_with_task_output(task_root, output_dir, output))
+
+    assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
+    assert "uncontracted_task_output" in result.response
+    assert result.memory_compact_auto_status == "skipped_after_delivery_complete"
+
+
 def test_tool_round_auto_closeout_for_relative_uncontracted_task_output_report(tmp_path):
     task_root = tmp_path / "tasks" / "2026-06-03" / "all-agent"
     output_dir = task_root / "output"
@@ -658,6 +677,35 @@ def _delivery_closeout_params(*, archive_tool_calls: list[dict[str, object]]) ->
             "case_id": "generic-artifact",
             "artifacts": [{"artifact_id": "out", "path": "out.txt", "kind": "txt"}],
         },
+    )
+
+
+def _finalize_context_with_task_output(task_root: Path, output_dir: Path, output: Path) -> FinalizeContext:
+    archive_record = {**_write_file_archive_record(), "parameters": {"tool": "write_file", "path": str(output)}, "path": str(output)}
+    return FinalizeContext(
+        user_prompt="分析 all-agent 项目并写报告",
+        final_prompt="",
+        final_response=ModelResponse(text=f"已完成，报告在 {output}", backend="test"),
+        memories=[],
+        executed_tools=["write_file"],
+        archive_tool_calls=[archive_record],
+        routed_context=SimpleNamespace(matches=[], required_read_paths=[], candidate_paths=[]),
+        resume_context_result=None,
+        runtime_injections=[],
+        compression_snapshot_id="",
+        compression_snapshot_path="",
+        compression_applied=False,
+        request_id="req-1",
+        run_id="run-1",
+        task_id="task-1",
+        source="test",
+        do_save=False,
+        task_attributes={"run_workspace": {"task_root": str(task_root), "output_dir": str(output_dir), "work_dir": str(task_root / "work")}},
+        recovery_task_refs=None,
+        recovery_content_paths=None,
+        recovery_next_actions=None,
+        tool_rounds=3,
+        delivery_contract=None,
     )
 
 

@@ -414,8 +414,8 @@ def test_run_auto_compact_continuation_reuses_original_task_workspace(tmp_path):
     date_roots = list((agent.home_paths.owner_tasks_dir).glob("*/*"))
     task_names = sorted(path.name for path in date_roots if path.is_dir())
     assert task_names == ["分析-all-agent-项目并写中文报告"]
-    state = json.loads((date_roots[0] / "work" / "state.json").read_text(encoding="utf-8"))
-    assert state["run_id"] == "run-workspace-continuation"
+    workspace = json.loads((date_roots[0] / "work" / "run_workspace.json").read_text(encoding="utf-8"))
+    assert workspace["run_id"] == "run-workspace-continuation"
 
 
 def test_run_auto_compact_apply_returns_after_no_tool_continuation(tmp_path):

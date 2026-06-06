@@ -7,7 +7,6 @@ from dataclasses import asdict, is_dataclass
 
 from ..agent.agent_core.subagent import SpawnSubagentsParams
 from ..agent.subagents.models import SubAgentBoardOptions
-from ..agent.subagents.policies import filter_board_items
 from .common import make_agent
 from .shared_progress import (
     format_shared_progress_lines,
@@ -48,14 +47,14 @@ def cmd_subagents(args) -> int:
 
     agent = make_agent(args)
     board = agent.subagents.write_board(
-        options=SubAgentBoardOptions(recent_limit=_subagent_config_int(agent, args, "limit", "subagent_cli_default_limit")),
+        options=SubAgentBoardOptions(
+            recent_limit=_subagent_config_int(agent, args, "limit", "subagent_cli_default_limit"),
+            status=args.status or "",
+            owner=args.owner or "",
+            root_id=args.root_id or "",
+        ),
     )
-    items = filter_board_items(
-        board.items if args.all else board.hot_list or board.recent,
-        status=args.status or "",
-        owner=args.owner or "",
-        root_id=args.root_id or "",
-    )
+    items = board.items if args.all else board.hot_list or board.recent
     print("SUBAGENT BOARD")
     print(f"total={board.summary.get('total', 0)} hot={len(board.hot_list)}")
     print("summary=" + json.dumps(board.summary, ensure_ascii=False, sort_keys=True))

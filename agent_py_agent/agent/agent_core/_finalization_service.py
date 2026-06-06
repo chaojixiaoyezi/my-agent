@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time as time_module
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 from ..memory_archive import (
     archive_run_turn,
@@ -20,7 +21,13 @@ from ._runtime_params import (
     ArchiveRunParams,
     EstimateTokenParams,
     FinalizeContext,
+    ToolLoopExecuteParams,
 )
+from .delivery_closeout.closeout import (
+    MainAgentDeliveryCloseoutRequest,
+    main_agent_delivery_closeout_response,
+)
+from .delivery_closeout.uncontracted import _current_run_task_output_artifacts
 from .finalization_compact_auto import compact_auto_cycle_fields
 from .model.usage import input_token_usage, output_token_usage
 from .models import AgentRunResult
@@ -43,6 +50,7 @@ class FinalizationService:
 
     def finalize(self, ctx: FinalizeContext):
         assert ctx.final_response is not None
+        ctx = self._with_final_delivery_closeout_if_ready(ctx)
         run_request_id = ctx.request_id or f"run-{time_module.time_ns()}"
 
         archive_params = ArchiveRunParams(
@@ -64,6 +72,23 @@ class FinalizationService:
         return self._build_agent_run_result(
             BuildAgentRunResultParams(ctx, archive_result, token_ledger, run_request_id)
         )
+
+    def _with_final_delivery_closeout_if_ready(self, ctx: FinalizeContext) -> FinalizeContext:
+        if _delivery_complete(ctx.final_response):
+            return ctx
+        params = _tool_loop_params_from_finalize_context(ctx)
+        if not _has_final_closeout_candidate(params, self._agent):
+            return ctx
+        response = main_agent_delivery_closeout_response(
+            MainAgentDeliveryCloseoutRequest(
+                agent=self._agent,
+                params=params,
+                backend=str(getattr(ctx.final_response, "backend", "") or ""),
+            )
+        )
+        if response is None:
+            return ctx
+        return replace(ctx, final_response=response)
 
     def _write_runtime_fact_source_if_needed(self, ctx: FinalizeContext, run_request_id: str) -> str:
         if not ctx.do_save:
@@ -279,3 +304,58 @@ def _memory_archive_preview_limits(config) -> dict[int, int]:
         2: int(getattr(config, "memory_archive_preview_level_2_chars", 512) or 0),
         3: int(getattr(config, "memory_archive_preview_level_3_chars", 160) or 0),
     }
+
+
+def _tool_loop_params_from_finalize_context(ctx: FinalizeContext) -> ToolLoopExecuteParams:
+    return ToolLoopExecuteParams(
+        user_prompt=ctx.user_prompt,
+        memories=ctx.memories,
+        runtime_injections=ctx.runtime_injections,
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=None,
+        granted_capabilities=None,
+        write_boundary=None,
+        task_attributes=ctx.task_attributes,
+        request_id=ctx.request_id,
+        run_id=ctx.run_id,
+        task_id=ctx.task_id,
+        one_shot_tool_calls=set(),
+        executed_tools=list(ctx.executed_tools or []),
+        archive_tool_calls=list(ctx.archive_tool_calls or []),
+        tool_rounds=ctx.tool_rounds,
+        save=ctx.do_save,
+        context_scope="default",
+        delivery_contract=ctx.delivery_contract,
+        source=ctx.source,
+    )
+
+
+def _has_final_closeout_candidate(params: ToolLoopExecuteParams, agent: object) -> bool:
+    if _delivery_contract_present(params):
+        return _has_successful_delivery_record(params)
+    workspace_root = Path(getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", "."))
+    return bool(_current_run_task_output_artifacts(params, workspace_root=workspace_root.expanduser().resolve(strict=False)))
+
+
+def _delivery_contract_present(params: ToolLoopExecuteParams) -> bool:
+    if isinstance(params.delivery_contract, dict) and params.delivery_contract:
+        return True
+    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+    return isinstance(attrs.get("delivery_contract"), dict) and bool(attrs.get("delivery_contract"))
+
+
+def _has_successful_delivery_record(params: ToolLoopExecuteParams) -> bool:
+    for record in list(params.archive_tool_calls or []):
+        if not isinstance(record, dict) or record.get("ok") is False:
+            continue
+        if str(record.get("tool") or "").strip() in {"write_file", "apply_patch", "run_command", "controlled_exec", "read_file", "read_artifact"}:
+            return True
+    return False
+
+
+def _delivery_complete(final_response: object) -> bool:
+    return "[MAIN_AGENT_DELIVERY_COMPLETE]" in str(getattr(final_response, "text", "") or "")

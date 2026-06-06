@@ -35,6 +35,7 @@ class RunWorkspacePaths:
     compact_dir: Path
     summaries_dir: Path
     task_yaml: Path
+    workspace_json: Path
     state_json: Path
     timeline_jsonl: Path
 
@@ -71,14 +72,15 @@ def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePath
     ):
         directory.mkdir(parents=True, exist_ok=True)
     _write_task_yaml_if_missing(paths.task_yaml, request)
+    paths.workspace_json.write_text(
+        json.dumps(_workspace_identity_payload(request), ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
     _write_seed_file(paths.collab_blackboard_md, "# Blackboard\n\n")
     _write_seed_file(paths.collab_messages_jsonl, "")
     _write_seed_file(paths.collab_findings_jsonl, "")
     _write_seed_json(paths.artifact_manifest_json, _artifact_manifest_payload(request))
-    paths.state_json.write_text(
-        json.dumps(_state_payload(request), ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    _write_seed_json(paths.state_json, _task_state_payload(request))
     append_jsonl(paths.timeline_jsonl, _timeline_payload(request), sort_keys=True)
     return paths
 
@@ -103,6 +105,7 @@ def run_workspace_paths(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths
         compact_dir=work / "compact",
         summaries_dir=work / "summaries",
         task_yaml=work / "task.yaml",
+        workspace_json=work / "run_workspace.json",
         state_json=work / "state.json",
         timeline_jsonl=work / "timeline.jsonl",
     )
@@ -124,9 +127,9 @@ def _write_task_yaml_if_missing(path: Path, request: EnsureRunWorkspaceRequest) 
     path.write_text(text, encoding="utf-8")
 
 
-def _state_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
+def _workspace_identity_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
     return {
-        "version": 1,
+        "schema_version": "run_workspace.v1",
         "request_id": request.request_id,
         "run_id": request.run_id,
         "task_id": request.task_id,
@@ -136,6 +139,25 @@ def _state_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
         "owner_home": request.owner_home,
         "task_name": request.task_name,
         "source": request.source,
+        "updated_at": _now_iso(),
+    }
+
+
+def _task_state_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
+    run_id = str(request.run_id or request.request_id or request.task_id or "").strip()
+    return {
+        "version": 1,
+        "task_id": request.task_id or run_id,
+        "primary_run_id": run_id,
+        "status": "RUNNING",
+        "verification_status": "",
+        "progress": 0.0,
+        "current_step": "",
+        "latest_summary": "",
+        "blockers": [],
+        "artifact_refs": [],
+        "evidence_refs": [],
+        "child_run_ids": [],
         "updated_at": _now_iso(),
     }
 
@@ -209,16 +231,11 @@ def _resolve_run_workspace_root(request: EnsureRunWorkspaceRequest) -> Path:
 
 
 def _workspace_matches_request(root: Path, request: EnsureRunWorkspaceRequest) -> bool:
-    state_path = root / "work" / "state.json"
-    if not state_path.exists():
+    if not root.exists():
         return True
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
+    state = _workspace_identity(root)
+    if not state:
         return False
-    prompt_fingerprint_value = prompt_fingerprint(request.user_prompt)
-    if prompt_fingerprint_value and str(state.get("prompt_fingerprint") or "") == prompt_fingerprint_value:
-        return True
     request_values = _identity_values(request)
     state_values = {
         "request_id": str(state.get("request_id") or "").strip(),
@@ -226,9 +243,51 @@ def _workspace_matches_request(root: Path, request: EnsureRunWorkspaceRequest) -
         "task_id": str(state.get("task_id") or "").strip(),
     }
     for key, value in request_values.items():
-        if value and state_values.get(key) and state_values[key] != value:
-            return False
-    return True
+        if value and state_values.get(key) == value:
+            return True
+    return False
+
+
+def _workspace_identity(root: Path) -> dict[str, object]:
+    identity = _read_json_object(root / "work" / "run_workspace.json")
+    if identity:
+        return identity
+    legacy_state = _read_json_object(root / "work" / "state.json")
+    if _looks_like_legacy_workspace_identity(legacy_state):
+        return legacy_state
+    return _read_task_yaml_identity(root / "work" / "task.yaml")
+
+
+def _read_json_object(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _looks_like_legacy_workspace_identity(payload: dict[str, object]) -> bool:
+    return any(str(payload.get(key) or "").strip() for key in ("request_id", "run_id"))
+
+
+def _read_task_yaml_identity(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    values: dict[str, object] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for line in lines:
+        key, sep, raw_value = line.partition(":")
+        if not sep:
+            continue
+        key = key.strip()
+        if key in {"request_id", "run_id", "task_id", "task_title", "owner_id", "owner_home", "source"}:
+            values[key] = raw_value.strip().strip('"')
+    return values
 
 
 def _identity_values(request: EnsureRunWorkspaceRequest) -> dict[str, str]:

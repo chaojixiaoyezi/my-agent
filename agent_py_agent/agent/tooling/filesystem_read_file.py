@@ -124,11 +124,7 @@ def _char_window_result(content: str, params: dict[str, Any], default_max_chars:
     except ValueError as exc:
         return ToolExecutionResult("read_file", False, str(exc))
     if offset >= len(content):
-        return ToolExecutionResult(
-            "read_file",
-            False,
-            f"offset 超出文件末尾：offset={offset}, total_chars={len(content)}。请改用更小的 offset。",
-        )
+        return _offset_out_of_range_result(offset, len(content))
     window = content[offset : offset + min(limit, default_max_chars)]
     next_offset = offset + len(window)
     header = f"[char-window offset={offset} chars={len(window)} total_chars={len(content)}]"
@@ -168,11 +164,7 @@ def _char_window_file_result(tool, target, params: dict[str, Any], default_max_c
     try:
         total_chars = _cached_total_chars(tool, target)
         if offset >= total_chars:
-            return ToolExecutionResult(
-                "read_file",
-                False,
-                f"offset 超出文件末尾：offset={offset}, total_chars={total_chars}。请改用更小的 offset。",
-            )
+            return _offset_out_of_range_result(offset, total_chars)
         window = _read_char_window(target, offset=offset, limit=min(limit, default_max_chars))
     except UnicodeDecodeError:
         return ToolExecutionResult("read_file", False, "文件不是有效 UTF-8 文本，无法读取。")
@@ -193,6 +185,15 @@ def _char_window_file_result(tool, target, params: dict[str, Any], default_max_c
         )
         return ToolExecutionResult("read_file", True, f"{header}\n{window}\n{footer}")
     return ToolExecutionResult("read_file", True, f"{header}\n{window}")
+
+
+def _offset_out_of_range_result(offset: int, total_chars: int) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        "read_file",
+        False,
+        f"offset 超出文件末尾：offset={offset}, total_chars={total_chars}。请改用更小的 offset。",
+        error_code="OFFSET_OUT_OF_RANGE",
+    )
 
 
 def _cached_total_chars(tool, target) -> int:

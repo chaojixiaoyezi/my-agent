@@ -219,8 +219,8 @@ def _delivery_mode_for_artifacts(artifacts: list[dict[str, Any]]) -> str:
 
 def _message_for_delivery_mode(delivery_mode: str) -> str:
     if delivery_mode == "uncontracted_user_requested_output":
-        return "没有结构化交付合同，但本轮已写入用户明确指定路径下的报告类交付物，且模型显式提交验收；主代理停止继续工具循环。"
-    return "没有结构化交付合同，但本轮已写入 task output 下的报告类交付物，且模型显式提交验收；主代理停止继续工具循环。"
+        return "没有结构化交付合同，但本轮已写入用户明确指定路径下的报告类交付物，且通过当前 run 产物验收；主代理停止继续工具循环。"
+    return "没有结构化交付合同，但本轮已写入 task output 下的报告类交付物，且通过当前 run 产物验收；主代理停止继续工具循环。"
 
 
 def _unique_artifact_payloads(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:

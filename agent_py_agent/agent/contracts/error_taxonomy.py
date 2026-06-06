@@ -66,6 +66,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="工具参数不合法；按工具 schema 修参数后可重试。",
     ),
+    "OFFSET_OUT_OF_RANGE": ErrorContract(
+        code="OFFSET_OUT_OF_RANGE",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="读取 offset 超出文件末尾；根据 total_chars 改用更小 offset，或确认该文件已经读完。",
+    ),
     "TOOL_TIMEOUT": ErrorContract(
         code="TOOL_TIMEOUT",
         category="tool",

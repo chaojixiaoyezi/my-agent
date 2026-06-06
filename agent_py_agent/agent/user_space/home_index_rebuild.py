@@ -131,7 +131,27 @@ class _AgentRefsReport:
 
 
 def _task_state_reports_for_owner(owner: OwnerHomeResult) -> list[tuple[Path, dict[str, Any], dict[str, object] | None]]:
-    return [_read_json_report(path, context="home_index_rebuild.task_state") for path in _task_state_paths(owner.home_dir)]
+    return [_task_state_report(path) for path in _task_state_paths(owner.home_dir)]
+
+
+def _task_state_report(path: Path) -> tuple[Path, dict[str, Any], dict[str, object] | None]:
+    state_path, state, state_error = _read_json_report(path, context="home_index_rebuild.task_state")
+    _workspace_path, workspace, workspace_error = _read_json_report(
+        path.parent / "run_workspace.json",
+        context="home_index_rebuild.run_workspace",
+    )
+    payload = _state_with_workspace_identity(state, workspace)
+    return state_path, payload, state_error or workspace_error
+
+
+def _state_with_workspace_identity(state: dict[str, Any], workspace: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(state) if isinstance(state, dict) else {}
+    if not isinstance(workspace, dict):
+        return payload
+    for key in ("request_id", "run_id", "task_id", "task_title", "prompt_fingerprint", "owner_id", "owner_home", "task_name", "source"):
+        if not payload.get(key) and workspace.get(key):
+            payload[key] = workspace[key]
+    return payload
 
 
 def _task_refs_for_owner(
@@ -159,8 +179,6 @@ def _run_refs_for_owner(
 ) -> list[RunIndexRef]:
     refs: list[RunIndexRef] = []
     for state_path, payload, load_error in state_reports:
-        if load_error:
-            continue
         run_id = str(payload.get("run_id") or "")
         if not run_id:
             continue
@@ -171,7 +189,7 @@ def _run_refs_for_owner(
                 run_id=run_id,
                 task_id=task_id,
                 run_path=state_path.parent,
-                status=str(payload.get("status") or "active"),
+                status="UNKNOWN" if load_error else str(payload.get("status") or "active"),
             )
         )
     return refs

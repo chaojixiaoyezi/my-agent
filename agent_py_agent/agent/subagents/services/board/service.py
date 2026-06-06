@@ -9,7 +9,7 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from ...models import SubAgentBoardOptions, SubAgentDueCheckOptions, SubAgentPlanActionsOptions
-from ...policies import _filter_action_plan_items, _issue_weight, _risk_weight
+from ...policies import _filter_action_plan_items, _issue_weight, _risk_weight, filter_board_items
 from ...rendering import (
     render_action_plan_markdown,
     render_board_markdown,
@@ -66,6 +66,12 @@ class SubAgentBoardService:
             )
             for task in tasks
         ]
+        items = filter_board_items(
+            items,
+            status=board_options.status,
+            owner=board_options.owner,
+            root_id=board_options.root_id,
+        )
         summary: dict[str, int] = {"total": len(items)}
         for item in items:
             summary[item.status] = summary.get(item.status, 0) + 1
