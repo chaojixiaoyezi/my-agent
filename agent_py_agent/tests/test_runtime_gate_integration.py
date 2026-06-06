@@ -6,8 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._finalization_service import FinalizationService
-from agent_py_agent.agent.agent_core._runtime_params import FinalizeContext
-from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
+from agent_py_agent.agent.agent_core._runtime_params import FinalizeContext, ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.delivery_closeout.closeout import (
     MainAgentDeliveryCloseoutRequest,
     main_agent_delivery_closeout_response,
