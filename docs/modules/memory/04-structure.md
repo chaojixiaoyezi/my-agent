@@ -50,9 +50,17 @@
   不再作为当前 owner 的事实源。
 - `rollup_ledger.jsonl` 只在子代理状态签名变化时追加；心跳式保存不应制造新的 compact 包。
 - `read_file` / `read_artifact` 的恢复游标来自结构化工具记录；旧状态词、summary 和人工描述不能证明某段已经读过。
-- compact handoff 的 final/running 判断只读当前协议状态，不能用 `succeeded/completed` 这类别名补齐。
+- compact work-state 的 `read_coverage` 同时保留 `primary` 主游标和 `sources` 多源覆盖摘要；
+  多文件/多项目任务恢复时先看 `sources` 判断每个 source_path 的覆盖范围，不能只按一个最大文件游标续接。
+- `list_files`、`find_files`、`search_text` 的分页续接来自结构化 `page_window`；
+  `next_offset` 可以继续展示在工具正文里给人看，但 compact/resume 只能从 `page_window` 恢复下一页位置。
+- compact handoff 的 final/running/terminal 判断只读当前协议状态：`DONE` 是 final，
+  `FAILED`、`TIMEOUT`、`CHANNEL_ERROR`、`CANCELLED`、`ABANDONED` 是 terminal；
+  不能用 `succeeded/completed` 这类别名补齐。
 - compact rollup/handoff 的机器统计桶只使用当前协议状态或 `unknown`；旧状态原文只留在 child row / refs
   里做证据展示，不能扩散成新的机器状态。
+- task compact rollup 的 `pending_run_ids` / continue packet `pending_work` 只放还需要父代理行动的状态；
+  `CANCELLED`、`ABANDONED`、`TAKEN_OVER` 这类已处理终端状态只留在 status_counts 和 child rows。
 - compact apply 的 id、metadata、restore refs、bundle、ledger、self-check 和 context markdown 属于同一条
   apply 链路，集中在 `compact_apply/__init__.py`；`compact_apply/work_state.py` 只负责构建续接所需的
   work-state snapshot。

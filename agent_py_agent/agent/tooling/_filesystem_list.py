@@ -73,6 +73,7 @@ class ListFilesTool(FileSystemTool):
         iterator = _iter_list_candidates(target, recursive=request.recursive, include_ignored=request.include_ignored)
         entries: list[str] = []
         seen = 0
+        returned = 0
         paged_notice_added = False
         for item in iterator:
             if not self._list_item_visible(item, root=target, request=request):
@@ -88,12 +89,27 @@ class ListFilesTool(FileSystemTool):
                 break
             suffix = "/" if item.is_dir() else ""
             entries.append(self.display_path(item) + suffix)
+            returned += 1
             seen += 1
         if entries and len(entries) >= request.limit and not paged_notice_added:
             entries.append(
                 f"... 本页已满，next_offset={seen} limit={request.limit}；如需确认还有没有结果，可继续传入 offset={seen}"
             )
-        return ToolExecutionResult("list_files", True, "\n".join(entries) or "目录为空")
+        return ToolExecutionResult(
+            "list_files",
+            True,
+            "\n".join(entries) or "目录为空",
+            result_envelope={
+                "page_window": _offset_page_window(
+                    tool="list_files",
+                    source_path=self.display_path(target),
+                    offset=request.offset,
+                    limit=request.limit,
+                    returned=returned,
+                    has_more=paged_notice_added,
+                )
+            },
+        )
 
     def _list_item_visible(
         self,
@@ -174,6 +190,28 @@ def _iter_list_candidates(target: Path, *, recursive: bool, include_ignored: boo
 def _path_sort_key(path: Path) -> tuple[str, str]:
     text = path.as_posix()
     return (text.lower(), text)
+
+
+def _offset_page_window(
+    *,
+    tool: str,
+    source_path: str,
+    offset: int,
+    limit: int,
+    returned: int,
+    has_more: bool,
+) -> dict[str, int | bool | str]:
+    next_offset = offset + returned if has_more else 0
+    return {
+        "kind": "offset_page",
+        "tool": tool,
+        "source_path": source_path,
+        "offset": offset,
+        "limit": limit,
+        "returned": returned,
+        "next_offset": next_offset,
+        "complete": not has_more,
+    }
 
 
 def build_list_files_spec() -> ToolSpec:

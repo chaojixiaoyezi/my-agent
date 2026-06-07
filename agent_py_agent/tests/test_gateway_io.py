@@ -241,6 +241,37 @@ class TestGatewayRequestCounts:
         result = gateway_request_counts(paths)
         assert result["pending"] == 3
 
+    def test_counts_can_skip_archive_directories_for_hot_paths(self, tmp_path: Path):
+        """热路径可只统计活跃队列，避免心跳反复扫描历史响应目录。"""
+        from agent_py_agent.agent.gateway_parts.io import gateway_request_counts
+        from agent_py_agent.agent.gateway_parts.paths import GatewayPaths
+
+        paths = GatewayPaths(
+            root=tmp_path / "gateway",
+            pid=tmp_path / "gateway/gateway.pid",
+            adapter_pid=tmp_path / "gateway/adapter.pid",
+            state=tmp_path / "gateway/state.json",
+            heartbeat=tmp_path / "gateway/heartbeat.json",
+            stop_request=tmp_path / "gateway/stop.request",
+            log=tmp_path / "gateway/gateway.log",
+            inbox=tmp_path / "gateway/inbox",
+            processing=tmp_path / "gateway/processing",
+            done=tmp_path / "gateway/done",
+            failed=tmp_path / "gateway/failed",
+            responses=tmp_path / "gateway/responses",
+            history=tmp_path / "gateway/history.jsonl",
+        )
+        for folder, prefix in ((paths.inbox, "pending"), (paths.processing, "processing"), (paths.done, "done"), (paths.responses, "response")):
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / f"{prefix}.json").write_text("{}", encoding="utf-8")
+
+        hot_counts = gateway_request_counts(paths, include_archives=False)
+        full_counts = gateway_request_counts(paths)
+
+        assert hot_counts == {"pending": 1, "processing": 1}
+        assert full_counts["done"] == 1
+        assert full_counts["responses"] == 1
+
 
 class TestGatewayResponsePath:
     """测试 gateway_response_path() 函数。"""

@@ -75,7 +75,36 @@ def test_failure_sample_capture_converts_failed_case_to_replay_refs() -> None:
     result = validate_failure_sample_library(samples)
 
     assert result.ok is True
+    assert samples[0]["failure_type"] == "artifact_contract"
     assert samples[0]["expected_error_codes"] == ["ARTIFACT_MISSING"]
+
+
+def test_failure_sample_capture_does_not_classify_from_issue_prose() -> None:
+    from agent_py_agent.agent.contracts.failure_sample_capture import (
+        failure_samples_from_case_results,
+    )
+    from agent_py_agent.agent.contracts.small_real_acceptance_runner import (
+        SmallRealCaseResult,
+    )
+
+    samples = failure_samples_from_case_results(
+        (
+            SmallRealCaseResult(
+                case_id="prose_issue",
+                status="FAILED",
+                complexity="small",
+                workspace_ref="workspace://isolated/prose_issue",
+                artifact_refs=[],
+                verification_refs=[],
+                tool_probe_refs=[],
+                gate_case={"case_id": "prose_issue"},
+                issues=["artifact timeout in prose is not a structured code"],
+            ),
+        )
+    )
+
+    assert samples[0]["failure_type"] == "contract"
+    assert samples[0]["expected_error_codes"] == ["artifact timeout in prose is not a structured code"]
 
 
 def test_task_tree_and_long_task_scenarios_materialize_refs(tmp_path: Path) -> None:

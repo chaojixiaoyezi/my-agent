@@ -3,10 +3,13 @@ from __future__ import annotations
 from ....contracts.error_taxonomy import error_contract
 from ....contracts.state_machine import run_state_snapshot_from_task
 from ....runtime_errors import runtime_error_report
+from ....subagents.models import (
+    SUBAGENT_DISPATCH_READY_STATUSES,
+    SUBAGENT_FAILURE_STATUSES,
+    TaskStatus,
+    task_status_in,
+)
 from ..run_scope import remembered_orchestration_run_ids
-
-_RUNNING_STATUSES = {"RUNNING"}
-_BLOCKED_STATUSES = {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}
 
 
 def dispatch_state_contract_payload(agent: object) -> dict[str, object]:
@@ -79,12 +82,12 @@ def _append_task_state(buckets: dict[str, object], task: object) -> None:
     by_status = buckets["by_status"]
     by_status[status] = by_status.get(status, 0) + 1
     _append_if(buckets["dispatchable"], run_id, bool(snapshot["can_dispatch"]) and not background_running)
-    _append_if(buckets["running"], run_id, status in _RUNNING_STATUSES or background_running)
-    _append_if(buckets["blocked"], run_id, status in _BLOCKED_STATUSES)
+    _append_if(buckets["running"], run_id, task_status_in(status, {TaskStatus.RUNNING.value}) or background_running)
+    _append_if(buckets["blocked"], run_id, task_status_in(status, SUBAGENT_FAILURE_STATUSES))
     verified = bool(snapshot["can_closeout"])
     _append_if(buckets["verified"], run_id, verified)
     _append_if(buckets["unfinished"], run_id, not verified)
-    if status in _BLOCKED_STATUSES:
+    if task_status_in(status, SUBAGENT_FAILURE_STATUSES):
         _append_recovery_recommendation(buckets, snapshot)
 
 
@@ -171,7 +174,7 @@ def _run_id(task: object) -> str:
 
 def _background_start_running(task: object, status: str) -> bool:
     attrs = getattr(task, "attributes", {}) or {}
-    if not isinstance(attrs, dict) or status not in {"PLANNING", "PENDING"}:
+    if not isinstance(attrs, dict) or not task_status_in(status, SUBAGENT_DISPATCH_READY_STATUSES):
         return False
     background = attrs.get("background_start")
     if not isinstance(background, dict):

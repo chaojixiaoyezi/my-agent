@@ -15,14 +15,14 @@ from typing import Any
 from .context_bundle_refs import workspace_refs as model_workspace_refs
 from .kernel_models import SubagentKernelQuery, SubagentKernelRun, SubagentKernelSnapshot
 from .model_capabilities import capability_request_counts_as_open
-from .models import SubAgentTask
+from .models import (
+    SUBAGENT_BLOCKED_STATUSES,
+    SUBAGENT_FAILED_RESULT_STATUSES,
+    SubAgentTask,
+    TaskStatus,
+    task_status_in,
+)
 from .protocol import build_task_address, build_task_envelope
-
-_RUNNING_STATUSES = {"RUNNING"}
-_DONE_STATUSES = {"DONE"}
-_FAILED_STATUSES = {"FAILED", "TIMEOUT", "CHANNEL_ERROR"}
-_BLOCKED_STATUSES = {"BLOCKED"}
-_TAKEOVER_CANDIDATE_STATUSES = _FAILED_STATUSES | _BLOCKED_STATUSES
 
 
 class SubagentKernel:
@@ -43,12 +43,15 @@ class SubagentKernel:
             root_id=root_id,
             scope=query.scope,
             runs=rows,
-            running_run_ids=[row.run_id for row in rows if row.status in _RUNNING_STATUSES],
-            blocked_run_ids=[row.run_id for row in rows if row.status in _BLOCKED_STATUSES],
-            completed_run_ids=[row.run_id for row in rows if row.status in _DONE_STATUSES],
-            failed_run_ids=[row.run_id for row in rows if row.status in _FAILED_STATUSES],
+            # Snapshot buckets use the shared TaskStatus sets; display text never drives lifecycle facts.
+            running_run_ids=[row.run_id for row in rows if task_status_in(row.status, {TaskStatus.RUNNING.value})],
+            blocked_run_ids=[row.run_id for row in rows if task_status_in(row.status, SUBAGENT_BLOCKED_STATUSES)],
+            completed_run_ids=[row.run_id for row in rows if task_status_in(row.status, {TaskStatus.DONE.value})],
+            failed_run_ids=[row.run_id for row in rows if task_status_in(row.status, SUBAGENT_FAILED_RESULT_STATUSES)],
             takeover_candidate_run_ids=[
-                row.run_id for row in rows if row.status in _TAKEOVER_CANDIDATE_STATUSES
+                row.run_id
+                for row in rows
+                if task_status_in(row.status, SUBAGENT_FAILED_RESULT_STATUSES | SUBAGENT_BLOCKED_STATUSES)
             ],
             source_refs=_snapshot_source_refs(selected),
             warnings=warnings,

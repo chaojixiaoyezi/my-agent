@@ -1,12 +1,7 @@
 
 from __future__ import annotations
 
-"""daemon control - fork to background, PID file management, graceful shutdown, scoped locks.
-
-缁欎汉鐪嬬殑瑙ｉ噴锛?
-杩欎釜鏂囦欢澶勭悊 daemon 灞傞潰鐨勬帶鍒讹細鎬庝箞 fork 鍒板悗鍙般€佹€庝箞妫€娴嬮噸澶嶅惎鍔ㄣ€佹€庝箞浼橀泤鍏抽棴銆?
-杩樺寘鍚?长期助手 椋庢牸鐨勫姛鑳斤細start time tracking 妫€娴?PID 閲嶇敤銆乻coped locks 闃叉澶氬疄渚嬪啿绐併€?
-"""
+"""Daemon control: background fork, PID files, graceful shutdown, and scoped locks."""
 
 import json
 import os
@@ -25,9 +20,8 @@ from .daemon_metadata import (
     _utc_now_iso,
     _write_json_file,
 )
-
-# Re-export from process_control for convenience
-from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
+from .process_control import is_pid_alive as _is_pid_alive
+from .process_control import wait_for_pid_exit as _wait_for_pid_exit
 from .runtime_status import WriteRuntimeStatusParams, read_runtime_status, write_runtime_status
 from .scoped_locks import (
     _get_lock_dir,
@@ -98,7 +92,7 @@ def check_already_running(pid_path: Path) -> tuple[bool, int | None]:
     existing_pid = read_pid_file(pid_path)
     if existing_pid is None:
         return False, None
-    if is_pid_alive(existing_pid):
+    if _is_pid_alive(existing_pid):
         return True, existing_pid
     # Stale PID file - process is dead
     return False, None
@@ -165,7 +159,7 @@ def get_running_pid_report(pid_path: Path, *, cleanup_stale: bool = True) -> Run
         return RunningPidReport(None)
 
     # while macOS/Linux keep the POSIX liveness path.
-    if not is_pid_alive(pid):
+    if not _is_pid_alive(pid):
         _cleanup_stale_pid_file(pid_path, cleanup_stale)
         return RunningPidReport(None)
 
@@ -221,7 +215,7 @@ def daemonize(pid_path: Path) -> bool:
         time.sleep(0.5)
         # Check if child wrote its PID
         child_pid = read_pid_file(pid_path)
-        if child_pid and is_pid_alive(child_pid):
+        if child_pid and _is_pid_alive(child_pid):
             return True  # Parent should exit
         return True
 
@@ -246,7 +240,7 @@ def request_graceful_shutdown(
     pid_path: Path, stop_request_path: Path, reason: str = "user request"
 ) -> bool:
     existing_pid = read_pid_file(pid_path)
-    if not existing_pid or not is_pid_alive(existing_pid):
+    if not existing_pid or not _is_pid_alive(existing_pid):
         return False
 
     # Write stop request
@@ -259,7 +253,7 @@ def request_graceful_shutdown(
 
 
 def wait_for_shutdown(pid: int, timeout: float) -> bool:
-    return wait_for_pid_exit(pid, timeout)
+    return _wait_for_pid_exit(pid, timeout)
 
 
 def install_signal_handler(handler) -> None:

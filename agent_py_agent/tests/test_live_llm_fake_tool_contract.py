@@ -16,7 +16,7 @@ def test_live_llm_fake_tool_trial_accepts_verified_fake_tool_run() -> None:
                 "tool_trace_ref": "artifact://trial/tool_trace.jsonl",
                 "contract_hash": "abc123",
             },
-            "final_claim": {"status": "succeeded"},
+            "final_claim": {"claimed_success": True},
             "verifier": {"ok": True},
             "metrics": {
                 "unknown_tool_count": 0,
@@ -41,7 +41,7 @@ def test_live_llm_fake_tool_trial_rejects_fake_completion_and_tool_boundary_viol
             "real_llm": True,
             "tool_mode": "fake",
             "refs": {"prompt_ref": "artifact://trial/prompt.md"},
-            "final_claim": {"status": "succeeded"},
+            "final_claim": {"claimed_success": True, "status": "succeeded"},
             "verifier": {"ok": False},
             "metrics": {
                 "unknown_tool_count": 1,
@@ -60,3 +60,32 @@ def test_live_llm_fake_tool_trial_rejects_fake_completion_and_tool_boundary_viol
         "LIVE_LLM_TOOL_FAILURE_CLAIMED_SUCCESS",
         "LIVE_LLM_DRY_RUN_CLAIMED_REAL",
     )
+
+
+def test_live_llm_fake_tool_trial_does_not_treat_status_text_as_success_claim() -> None:
+    from agent_py_agent.agent.contracts.live_llm_fake_tool_contract import (
+        validate_live_llm_fake_tool_trial,
+    )
+
+    result = validate_live_llm_fake_tool_trial(
+        {
+            "real_llm": True,
+            "tool_mode": "fake",
+            "refs": {
+                "prompt_ref": "artifact://trial/prompt.md",
+                "response_ref": "artifact://trial/response.json",
+                "tool_trace_ref": "artifact://trial/tool_trace.jsonl",
+                "contract_hash": "abc123",
+            },
+            "final_claim": {"status": "succeeded"},
+            "verifier": {"ok": False},
+            "metrics": {
+                "unknown_tool_count": 0,
+                "schema_error_count": 0,
+                "tool_failure_claimed_success": False,
+                "dry_run_claimed_real": False,
+            },
+        }
+    )
+
+    assert "LIVE_LLM_FAKE_COMPLETION_REJECTED" not in result.error_codes

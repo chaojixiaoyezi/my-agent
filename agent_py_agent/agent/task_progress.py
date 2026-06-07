@@ -12,8 +12,8 @@ from .common.value_parsing import dedupe_strings, string_list
 from .runtime_errors import DataCorruptionError, runtime_error_report
 
 _SCHEMA_VERSION = "task_progress.v1"
-_KNOWN_STATUSES = ("pending", "in_progress", "done", "skipped", "blocked")
-_DONE_LIKE_STATUSES = {"done", "skipped"}
+TASK_PROGRESS_KNOWN_STATUSES = ("pending", "in_progress", "done", "skipped", "blocked")
+TASK_PROGRESS_CLOSED_STATUSES = frozenset({"done", "skipped"})
 _FACT_FIELDS = ("id", "title", "status", "notes", "result", "outcome", "conclusion", "decision", "summary")
 _RESULT_FIELDS = ("result", "outcome", "conclusion", "decision", "summary")
 _EXPLICIT_OVERWRITE_KEYS = ("correction", "overwrite", "replace")
@@ -68,7 +68,7 @@ def invalid_item_statuses(update: dict[str, Any]) -> list[dict[str, str]]:
         raw_status = str(item.get("status") or "").strip()
         if not raw_status:
             continue
-        if _normalize_status_value(raw_status) in _KNOWN_STATUSES:
+        if normalize_task_progress_status(raw_status) in TASK_PROGRESS_KNOWN_STATUSES:
             continue
         invalid.append(
             {
@@ -90,7 +90,7 @@ def task_progress_summary(progress: dict[str, Any]) -> dict[str, Any]:
     recent_done = [
         _summary_item(item, include_facts=True)
         for item in normalized["items"]
-        if _done_like_status(item.get("status"))
+        if task_progress_status_is_closed(item.get("status"))
     ][-24:]
     summary = {
         "schema_version": _SCHEMA_VERSION,
@@ -250,7 +250,7 @@ def _merge_coverage_targets(existing: list[dict[str, Any]], incoming: list[dict[
 def _preserve_done_checks(previous: dict[str, Any], merged: dict[str, Any]) -> dict[str, str]:
     checks = dict(merged.get("checks") or {})
     for key, status in dict(previous.get("checks") or {}).items():
-        if _done_like_status(status):
+        if task_progress_status_is_closed(status):
             checks[key] = str(status)
     return checks
 
@@ -311,16 +311,16 @@ def _coverage_counts(targets: list[dict[str, Any]]) -> dict[str, int]:
         "targets_done": sum(1 for target in targets if _coverage_target_done(target)),
         "targets_incomplete": sum(1 for target in targets if not _coverage_target_done(target)),
         "checks_total": len(checks),
-        "checks_done": sum(1 for status in checks if _done_like_status(status)),
-        "checks_incomplete": sum(1 for status in checks if not _done_like_status(status)),
+        "checks_done": sum(1 for status in checks if task_progress_status_is_closed(status)),
+        "checks_incomplete": sum(1 for status in checks if not task_progress_status_is_closed(status)),
     }
 
 
 def _coverage_target_done(target: dict[str, Any]) -> bool:
     checks = dict(target.get("checks") or {})
     if checks:
-        return all(_done_like_status(status) for status in checks.values())
-    return _done_like_status(target.get("status"))
+        return all(task_progress_status_is_closed(status) for status in checks.values())
+    return task_progress_status_is_closed(target.get("status"))
 
 
 def quality_hints(
@@ -467,7 +467,7 @@ def _normalize_item(value: object) -> dict[str, Any]:
     item = dict(value) if isinstance(value, dict) else {"title": str(value or "").strip()}
     item_id = str(item.get("id") or item.get("title") or "").strip()
     title = str(item.get("title") or item_id).strip()
-    status = _normalize_status_value(item.get("status") or "pending")
+    status = normalize_task_progress_status(item.get("status") or "pending")
     result = {
         "id": item_id or _safe_id(title) or "item",
         "title": title,
@@ -526,7 +526,7 @@ def _merge_item_overlay(previous: dict[str, Any], incoming: dict[str, Any]) -> d
 
 def _should_preserve_done_facts(previous: dict[str, Any], incoming: dict[str, Any]) -> bool:
     return (
-        _done_like_status(previous.get("status"))
+        task_progress_status_is_closed(previous.get("status"))
         and not any(_truthy(incoming.get(key)) for key in _EXPLICIT_OVERWRITE_KEYS)
     )
 
@@ -558,14 +558,18 @@ def _summary_item(item: dict[str, Any], *, include_facts: bool = False) -> dict[
     return summary
 
 
-def _done_like_status(value: object) -> bool:
-    return _normalize_status_value(value) in _DONE_LIKE_STATUSES
+def task_progress_status_is_closed(value: object) -> bool:
+    return normalize_task_progress_status(value) in TASK_PROGRESS_CLOSED_STATUSES
 
 
-def _normalize_status_value(value: object) -> str:
+def task_progress_status_is_done(value: object) -> bool:
+    return normalize_task_progress_status(value) == "done"
+
+
+def normalize_task_progress_status(value: object) -> str:
     text = str(value or "").strip()
     normalized = text.lower()
-    return normalized if normalized in _KNOWN_STATUSES else text or "pending"
+    return normalized if normalized in TASK_PROGRESS_KNOWN_STATUSES else text or "pending"
 
 
 def _merge_key(item: dict[str, Any]) -> str:
@@ -584,7 +588,7 @@ def _counts(items: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {"total": len(items)}
     for item in items:
         status = str(item.get("status") or "pending").strip() or "pending"
-        key = status if status in _KNOWN_STATUSES else "other"
+        key = status if status in TASK_PROGRESS_KNOWN_STATUSES else "other"
         counts[key] = counts.get(key, 0) + 1
     return counts
 

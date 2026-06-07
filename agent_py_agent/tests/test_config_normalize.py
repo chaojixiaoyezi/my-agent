@@ -269,6 +269,20 @@ class TestNormalizeSubagentAgentConfig:
         assert normalized["task_lock_timeout_seconds"] == AgentConfig().task_lock_timeout_seconds
         assert len(warnings) > 0
 
+    def test_normalize_gateway_request_poll_interval_accepts_fractional_seconds(self):
+        """gateway 请求 worker 的空闲轮询间隔支持小数秒，避免配置写了不生效。"""
+        normalized, warnings = normalize_agent_config({"gateway_request_poll_interval": "0.2"})
+
+        assert normalized["gateway_request_poll_interval"] == 0.2
+        assert warnings == []
+
+    def test_normalize_gateway_request_poll_interval_rejects_too_small_values(self):
+        """过小轮询间隔回到默认值，避免误配造成本地空转。"""
+        normalized, warnings = normalize_agent_config({"gateway_request_poll_interval": 0.01})
+
+        assert normalized["gateway_request_poll_interval"] == AgentConfig().gateway_request_poll_interval
+        assert len(warnings) > 0
+
     def test_normalize_runtime_bool_strings(self):
         """验证运行期布尔开关里的字符串 false 不会在业务代码里变成真值。"""
         data = {

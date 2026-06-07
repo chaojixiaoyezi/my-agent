@@ -13,6 +13,10 @@ from typing import TYPE_CHECKING
 
 from ..settings.defaults import default_config_int
 from ..subagents.services.base import CreateRunParams
+from ..subagents.services.hierarchy.agent_names import (
+    agent_name_has_trailing_identifier,
+    is_placeholder_agent_name,
+)
 from ..tooling.models import BaseTool, ToolExecutionResult
 from .hierarchy_tools import ScheduleChildSubagentsTool as ScheduleChildSubagentsTool
 from .orchestration.create_constraints import (
@@ -35,7 +39,6 @@ from .orchestration.lifecycle import (
     CreatedSubagentLifecycleRequest,
     publish_created_subagents,
 )
-from .orchestration.lineage_names import indexed_count_params, indexed_item_params
 from .orchestration.replacements import record_create_replacements
 from .orchestration.shared_context import append_parent_shared_context
 from .orchestration.sibling_roster import attach_sibling_roster
@@ -61,6 +64,48 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 _DEFAULT_MAX_SUBAGENTS = default_config_int("max_subagents")
+_DEFAULT_DEPTH = 1
+
+
+def _indexed_count_params(run_params: CreateRunParams, *, index: int, count: int) -> CreateRunParams:
+    task_goal = f"{run_params.goal} / 子任务{index}" if count > 1 else run_params.goal
+    task_name = _indexed_agent_name(
+        run_params.agent_name,
+        role=run_params.role,
+        index=index,
+        require_index=count > 1,
+    )
+    return CreateRunParams(**{**run_params.__dict__, "goal": task_goal, "agent_name": task_name})
+
+
+def _indexed_item_params(run_params: CreateRunParams, *, index: int, total: int) -> CreateRunParams:
+    task_name = _indexed_agent_name(
+        run_params.agent_name,
+        role=run_params.role,
+        index=index,
+        require_index=total > 1,
+    )
+    return CreateRunParams(**{**run_params.__dict__, "agent_name": task_name})
+
+
+def _indexed_agent_name(agent_name: str, *, role: str, index: int, require_index: bool = False) -> str:
+    name = str(agent_name or "").strip()
+    if _needs_system_lineage_name(name):
+        return f"agent-d{_DEFAULT_DEPTH}-{_role_suffix(role)}-{index}"
+    if require_index and not agent_name_has_trailing_identifier(name):
+        return f"{name}-{index}"
+    return name
+
+
+def _needs_system_lineage_name(agent_name: str) -> bool:
+    return is_placeholder_agent_name(agent_name)
+
+
+def _role_suffix(role: str) -> str:
+    suffix = str(role or "worker").strip().replace("_", "-").strip("-") or "worker"
+    if suffix in {"general", "child", "subagent", "agent"}:
+        return "worker"
+    return suffix
 
 
 class CreateSubagentsTool(BaseTool):
@@ -195,7 +240,7 @@ class CreateSubagentsTool(BaseTool):
                 item.goal,
                 subagent_allowed_tools(item.params),
             )
-            indexed = indexed_item_params(run_params, index=index, total=len(items))
+            indexed = _indexed_item_params(run_params, index=index, total=len(items))
             run_params_by_item.append(_with_default_child_output_ref(self.agent, indexed, index=index))
         return run_params_by_item
 
@@ -250,10 +295,11 @@ class CreateSubagentsTool(BaseTool):
 
     def _count_run_params(self, count: int, run_params: CreateRunParams) -> list[CreateRunParams]:
         return [
-            _with_default_child_output_ref(
+            _with_count_child_output_ref(
                 self.agent,
-                indexed_count_params(run_params, index=index, count=count),
+                _indexed_count_params(run_params, index=index, count=count),
                 index=index,
+                count=count,
             )
             for index in range(1, count + 1)
         ]
@@ -313,12 +359,43 @@ def _with_default_child_output_ref(agent: object, run_params: CreateRunParams, *
     return CreateRunParams(**{**run_params.__dict__, "attributes": attrs})
 
 
+def _with_count_child_output_ref(
+    agent: object,
+    run_params: CreateRunParams,
+    *,
+    index: int,
+    count: int,
+) -> CreateRunParams:
+    if count <= 1:
+        return _with_default_child_output_ref(agent, run_params, index=index)
+    attrs = dict(run_params.attributes or {})
+    shared_outputs = _structured_shared_output_refs(attrs)
+    if not shared_outputs:
+        return _with_default_child_output_ref(agent, run_params, index=index)
+    for key, values in shared_outputs.items():
+        attrs[f"shared_requested_{key}"] = values
+        attrs.pop(key, None)
+    attrs["shared_output_split_policy"] = "count_mode_task_local_child_outputs"
+    add_work_scope_key(attrs)
+    split_params = CreateRunParams(**{**run_params.__dict__, "attributes": attrs})
+    return _with_default_child_output_ref(agent, split_params, index=index)
+
+
 def _has_structured_output_ref(attrs: dict[str, object]) -> bool:
     for key in ("output_files", "output_refs", "artifact_refs"):
         value = attrs.get(key)
         if isinstance(value, list) and any(str(item or "").strip() for item in value):
             return True
     return False
+
+
+def _structured_shared_output_refs(attrs: dict[str, object]) -> dict[str, list[str]]:
+    shared: dict[str, list[str]] = {}
+    for key in ("output_files", "output_refs"):
+        values = _string_list(attrs.get(key))
+        if values:
+            shared[key] = values
+    return shared
 
 
 def _current_task_root(agent: object) -> str:

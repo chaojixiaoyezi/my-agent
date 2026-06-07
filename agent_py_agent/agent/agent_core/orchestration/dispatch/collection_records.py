@@ -39,7 +39,7 @@ def _planner_and_workflow_records(agent, ctx) -> list:
 
 
 def parent_planner_dispatch_record(agent, ctx):
-    from ..._subagent_planner_mixin import RunParentPlannerParams
+    from ...subagent.params import RunParentPlannerParams
 
     planner_record = agent.run_parent_planner(
         RunParentPlannerParams(

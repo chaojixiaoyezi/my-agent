@@ -6,10 +6,12 @@ from typing import Any
 
 from ...contracts.gates.models import GateDecision, GateFinding
 from ...contracts.recovery_actions import RecoveryAction
-
-_SUCCESS_STATUSES = {"DONE"}
-_RESOLVED_STATUSES = {"CANCELLED", "ABANDONED", "TAKEN_OVER"}
-_TERMINAL_FAILED_STATUSES = {"FAILED", "BLOCKED", "TIMEOUT", "CHANNEL_ERROR"}
+from ...subagents.models import (
+    SUBAGENT_FAILURE_STATUSES,
+    SUBAGENT_RESOLVED_TERMINAL_STATUSES,
+    TaskStatus,
+    task_status_in,
+)
 
 
 def evaluate_subagent_aggregation_gate(closeout: object) -> GateDecision:
@@ -173,11 +175,14 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _is_unfinished(item: dict[str, Any]) -> bool:
     status = _status(item)
-    return status not in _SUCCESS_STATUSES | _RESOLVED_STATUSES | _TERMINAL_FAILED_STATUSES
+    return not task_status_in(
+        status,
+        {TaskStatus.DONE.value} | SUBAGENT_RESOLVED_TERMINAL_STATUSES | SUBAGENT_FAILURE_STATUSES,
+    )
 
 
 def _is_unresolved_failure(item: dict[str, Any]) -> bool:
-    return _status(item) in _TERMINAL_FAILED_STATUSES
+    return task_status_in(_status(item), SUBAGENT_FAILURE_STATUSES)
 
 
 def _status(item: dict[str, Any]) -> str:

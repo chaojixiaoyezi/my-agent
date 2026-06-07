@@ -245,7 +245,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_stale_seconds: int = 120
     gateway_stop_timeout: int = 20
     gateway_request_timeout: int = 300
-    gateway_request_poll_interval: int = 1
+    gateway_request_poll_interval: float = 0.2
     gateway_request_workers: int = 3
     gateway_processing_timeout_seconds: int = 900
     gateway_request_max_attempts: int = 2

@@ -11,14 +11,17 @@ from pathlib import Path
 from ...agent.gateway_parts import (
     GatewayAskParams,
     gateway_chunk_path,
+    gateway_chunk_path_candidates,
     gateway_paths,
     gateway_running,
     render_gateway_status,
     submit_gateway_ask,
 )
 from ...agent.gateway_parts.response_renderer import (
+    GatewayResponsePollState,
     current_context_token_estimate,
     read_gateway_response_file,
+    read_gateway_response_file_when_ready,
 )
 
 
@@ -79,12 +82,14 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     visible_chunks = request.visible_chunks_ref[0] if request.visible_chunks_ref else 0
     chunk_offset = request.chunk_offset_ref[0] if request.chunk_offset_ref else 0
     response = {}
+    response_poll_state = GatewayResponsePollState()
     while time.time() <= request.deadline:
         chunks_printed, visible_chunks, chunk_offset = _poll_chunk_file(
             request.chunk_path, request.on_chunk, chunks_printed, visible_chunks, chunk_offset
         )
-        response = read_gateway_response_file(
+        response = read_gateway_response_file_when_ready(
             request.response_path,
+            state=response_poll_state,
             context="gateway.chat.response.read",
         )
         if response:
@@ -108,21 +113,29 @@ def _poll_chunk_file(
     visible_chunks: int,
     chunk_offset: int,
 ) -> tuple[int, int, int]:
-    if not chunk_path.exists():
+    readable_chunk_path = _readable_chunk_path(chunk_path)
+    if readable_chunk_path is None:
         return chunks_printed, visible_chunks, chunk_offset
     try:
-        with open(chunk_path, encoding="utf-8") as f:
+        with open(readable_chunk_path, encoding="utf-8") as f:
             f.seek(max(0, chunk_offset))
             data = f.read()
             chunk_offset = f.tell()
     except OSError as exc:
-        print(f"gateway chat chunk load_error path={chunk_path} message={exc}", file=sys.stderr)
+        print(f"gateway chat chunk load_error path={readable_chunk_path} message={exc}", file=sys.stderr)
         return chunks_printed, visible_chunks, 0
     for cline in data.splitlines():
         consumed, visible = _emit_chunk_line(cline, on_chunk)
         chunks_printed += consumed
         visible_chunks += visible
     return chunks_printed, visible_chunks, chunk_offset
+
+
+def _readable_chunk_path(chunk_path: Path) -> Path | None:
+    for candidate in gateway_chunk_path_candidates(chunk_path):
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _emit_chunk_line(cline: str, on_chunk: callable) -> tuple[int, int]:

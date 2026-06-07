@@ -1,16 +1,25 @@
 
 from __future__ import annotations
 
+"""Hierarchy recovery decisions using canonical TaskStatus facts."""
+
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ...models import SubAgentTask
+from ...models import (
+    SUBAGENT_FAILURE_STATUSES,
+    SubAgentTask,
+    TaskStatus,
+    task_has_status,
+    task_is_handled_after_parent_timeout,
+    task_status_in,
+)
 from ...policies import _is_active
 from ..recovery.strategy import SubagentRecoveryStrategyRequest, build_subagent_recovery_strategy
 
-RECOVERY_STATUSES = frozenset({"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"})
+RECOVERY_STATUSES = SUBAGENT_FAILURE_STATUSES
 
 
 @dataclass(frozen=True)
@@ -224,20 +233,12 @@ def _parent_timeout_child_reason(
     task: SubAgentTask,
     task_index: dict[str, SubAgentTask] | None,
 ) -> str:
-    if _child_is_closed_for_parent_timeout(task):
+    if task_is_handled_after_parent_timeout(task):
         return ""
     parent = (task_index or {}).get(str(task.parent_id or ""))
-    if parent is None or str(parent.status or "").upper() != "TIMEOUT":
+    if parent is None or not task_has_status(parent, TaskStatus.TIMEOUT):
         return ""
     return f"parent_timeout_unfinished_child:{parent.id}"
-
-
-def _child_is_closed_for_parent_timeout(task: SubAgentTask) -> bool:
-    status = str(task.status or "").upper()
-    verification = str(task.verification_status or "").upper()
-    if status == "DONE" and verification == "VERIFIED":
-        return True
-    return status in {"TAKEN_OVER", "ABANDONED"}
 
 
 def _recommended_command(task: SubAgentTask, reason: str) -> str:
@@ -257,7 +258,7 @@ def _recommended_command(task: SubAgentTask, reason: str) -> str:
 def _active_stale_reasons(task: SubAgentTask, request: HierarchyRecoveryRequest) -> list[str]:
     status = str(task.status or "").upper()
     has_active_attempt = bool(str(task.runner_active_attempt_id or "").strip())
-    if not (_is_active(status) and (status == "RUNNING" or has_active_attempt)):
+    if not (_is_active(status) and (task_status_in(status, {TaskStatus.RUNNING.value}) or has_active_attempt)):
         return []
     now = float(request.now or time.time())
     reasons: list[str] = []

@@ -84,8 +84,34 @@ class FindFilesTool(FileSystemTool):
 
     def _find_in_single_file(self, target: Path, request: _FindFilesRequest) -> ToolExecutionResult:
         if _matches_find_pattern(self.display_path(target), target.name, request.pattern):
-            return ToolExecutionResult("find_files", True, self.display_path(target))
-        return ToolExecutionResult("find_files", True, "没有找到匹配文件")
+            return ToolExecutionResult(
+                "find_files",
+                True,
+                self.display_path(target),
+                result_envelope={
+                    "page_window": _offset_page_window(
+                        source_path=self.display_path(target),
+                        offset=request.offset,
+                        limit=request.limit,
+                        returned=1,
+                        has_more=False,
+                    )
+                },
+            )
+        return ToolExecutionResult(
+            "find_files",
+            True,
+            "没有找到匹配文件",
+            result_envelope={
+                "page_window": _offset_page_window(
+                    source_path=self.display_path(target),
+                    offset=request.offset,
+                    limit=request.limit,
+                    returned=0,
+                    has_more=False,
+                )
+            },
+        )
 
     def _find_in_directory(self, target: Path, request: _FindFilesRequest) -> ToolExecutionResult:
         results: list[str] = []
@@ -104,12 +130,38 @@ class FindFilesTool(FileSystemTool):
             results.append(rel)
             seen += 1
         if not results:
-            return ToolExecutionResult("find_files", True, "没有找到匹配文件")
+            return ToolExecutionResult(
+                "find_files",
+                True,
+                "没有找到匹配文件",
+                result_envelope={
+                    "page_window": _offset_page_window(
+                        source_path=self.display_path(target),
+                        offset=request.offset,
+                        limit=request.limit,
+                        returned=0,
+                        has_more=False,
+                    )
+                },
+            )
         if limit_reached:
             results.append(
                 f"... 已截断，next_offset={seen} limit={request.limit}；继续查找请再次调用 find_files 并传入 offset={seen}"
             )
-        return ToolExecutionResult("find_files", True, "\n".join(results))
+        return ToolExecutionResult(
+            "find_files",
+            True,
+            "\n".join(results),
+            result_envelope={
+                "page_window": _offset_page_window(
+                    source_path=self.display_path(target),
+                    offset=request.offset,
+                    limit=request.limit,
+                    returned=seen - request.offset,
+                    has_more=limit_reached,
+                )
+            },
+        )
 
 
 @dataclass(frozen=True)
@@ -151,3 +203,23 @@ def _iter_find_candidates(target: Path, *, include_ignored: bool) -> list[Path]:
 
 def _matches_find_pattern(display_path: str, basename: str, pattern: str) -> bool:
     return fnmatch.fnmatch(display_path, pattern) or fnmatch.fnmatch(basename, pattern)
+
+
+def _offset_page_window(
+    *,
+    source_path: str,
+    offset: int,
+    limit: int,
+    returned: int,
+    has_more: bool,
+) -> dict[str, int | bool | str]:
+    return {
+        "kind": "offset_page",
+        "tool": "find_files",
+        "source_path": source_path,
+        "offset": offset,
+        "limit": limit,
+        "returned": returned,
+        "next_offset": offset + returned if has_more else 0,
+        "complete": not has_more,
+    }

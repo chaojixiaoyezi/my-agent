@@ -83,15 +83,36 @@ class SearchTextTool(FileSystemTool):
             counts = self._collect_counts_with_rg(target, request)
             if counts is None:
                 counts = self._collect_counts(target, request, matcher)
-            return ToolExecutionResult("search_text", True, render_match_counts(counts, request))
+            return ToolExecutionResult(
+                "search_text",
+                True,
+                render_match_counts(counts, request),
+                result_envelope={"page_window": self._page_window(target, request, total_items=len(counts))},
+            )
         hits = self._collect_hits_with_rg(target, request)
         if hits is None:
             hits = self._collect_hits(target, request, matcher)
         if request.output_mode == "files_with_matches":
-            return ToolExecutionResult("search_text", True, render_files_with_matches(hits, request))
+            total_items = len(dict.fromkeys(hit.rel for hit in hits))
+            return ToolExecutionResult(
+                "search_text",
+                True,
+                render_files_with_matches(hits, request),
+                result_envelope={"page_window": self._page_window(target, request, total_items=total_items)},
+            )
         if request.output_mode == "line_numbers":
-            return ToolExecutionResult("search_text", True, render_line_numbers(hits, request))
-        return ToolExecutionResult("search_text", True, self._render_content_hits(hits, request))
+            return ToolExecutionResult(
+                "search_text",
+                True,
+                render_line_numbers(hits, request),
+                result_envelope={"page_window": self._page_window(target, request, total_items=len(hits))},
+            )
+        return ToolExecutionResult(
+            "search_text",
+            True,
+            self._render_content_hits(hits, request),
+            result_envelope={"page_window": self._page_window(target, request, total_items=len(hits))},
+        )
 
     def _collect_hits_with_rg(self, target: Path, request: SearchRequest) -> list[SearchHit] | None:
         rg_path = shutil.which("rg")
@@ -319,6 +340,21 @@ class SearchTextTool(FileSystemTool):
     def _matches_file_glob(self, item: Path, file_glob: str) -> bool:
         display = self.display_path(item)
         return fnmatch.fnmatch(item.name, file_glob) or fnmatch.fnmatch(display, file_glob)
+
+    def _page_window(self, target: Path, request: SearchRequest, *, total_items: int) -> dict[str, int | bool | str]:
+        returned = max(0, min(request.limit, total_items - request.offset))
+        has_more = total_items > request.offset + request.limit
+        return {
+            "kind": "offset_page",
+            "tool": "search_text",
+            "source_path": self.display_path(target),
+            "offset": request.offset,
+            "limit": request.limit,
+            "returned": returned,
+            "next_offset": request.offset + returned if has_more else 0,
+            "complete": not has_more,
+            "output_mode": request.output_mode,
+        }
 
 
 def _append_search_match(match: SearchMatch, matches: list[str]) -> None:

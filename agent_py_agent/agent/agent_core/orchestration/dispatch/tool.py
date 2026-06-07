@@ -13,6 +13,7 @@ from ....action_protocol import subagent_dispatch_envelope_from_payload
 from ....common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ....model_visible_refs import current_model_ref
 from ....runtime_errors import runtime_error_report
+from ....subagents.services.workflow import tool_workflow_mode
 from ....tooling.models import BaseTool, ToolExecutionResult
 from ...parameters import _bool_param, _non_negative_int
 from ..run_scope import (
@@ -21,7 +22,6 @@ from ..run_scope import (
 )
 from ..scope_resolution import dispatch_scope_resolution, scope_resolution_payload
 from ..tool_specs import build_dispatch_subagents_spec
-from ..workflow_mode import tool_workflow_mode
 from .no_progress import dispatch_no_progress_payload
 from .params import DispatchExecutionPlan, DispatchParams
 from .payload import (

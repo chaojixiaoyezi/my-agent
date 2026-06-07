@@ -51,6 +51,29 @@ class SubagentFinalizeParams:
     prompt: str
 
 
+@dataclass(frozen=True)
+class RecoverySnapshotParams:
+    run_id: str
+    user_prompt: str
+    response_text: str
+    backend: str
+    status: str
+    error_code: str
+    tool_calls: list[dict[str, object]]
+
+
+@dataclass(frozen=True)
+class RunParentPlannerParams:
+    router: object
+    capability_config: object | None
+    execution_plan: object
+    max_runners: int
+    limit: int
+    reviewer: str
+    note: str
+    runner_instruction: str
+
+
 def subagent_run_params(
     params: SubagentRunParams | None,
     *,

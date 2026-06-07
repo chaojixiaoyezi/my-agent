@@ -7,6 +7,7 @@ from typing import Any
 
 from ...common.value_parsing import text_value as _text
 from ...contracts.state_machine import RunStateFacts, can_dispatch
+from ...subagents.models import SUBAGENT_REUSABLE_STATUSES, task_status_in
 from ...subagents.services.base import CreateRunParams
 from ...subagents.services.idempotency_contract_identity import (
     idempotency_contract_identity_from_context_packs,
@@ -15,7 +16,6 @@ from ...subagents.services.repair_contract_identity import (
     repair_contract_identity_from_context_packs,
 )
 
-_REUSABLE_STATUSES = {"PLANNING", "PENDING", "RUNNING", "DONE", "BLOCKED", "PAUSED"}
 _GENERIC_AGENT_NAMES = {
     "",
     "general",
@@ -111,7 +111,7 @@ def dispatchable_tasks(tasks: list[Any]) -> list[Any]:
 
 
 def _same_repair_scope(task: Any, params: CreateRunParams, repair_identity: tuple[object, ...]) -> bool:
-    if _status(task) not in _REUSABLE_STATUSES:
+    if not task_status_in(_status(task), SUBAGENT_REUSABLE_STATUSES):
         return False
     if _text(getattr(task, "parent_id", "")) != _text(params.parent_id):
         return False
@@ -125,7 +125,7 @@ def _same_repair_scope(task: Any, params: CreateRunParams, repair_identity: tupl
 
 
 def _same_idempotency_scope(task: Any, params: CreateRunParams, idempotency_identity: tuple[object, ...]) -> bool:
-    if _status(task) not in _REUSABLE_STATUSES:
+    if not task_status_in(_status(task), SUBAGENT_REUSABLE_STATUSES):
         return False
     if _text(getattr(task, "parent_id", "")) != _text(params.parent_id):
         return False
@@ -141,7 +141,7 @@ def _same_idempotency_scope(task: Any, params: CreateRunParams, idempotency_iden
 
 
 def _same_work_scope(task: Any, params: CreateRunParams, work_scope_key: str) -> bool:
-    if _status(task) not in _REUSABLE_STATUSES:
+    if not task_status_in(_status(task), SUBAGENT_REUSABLE_STATUSES):
         return False
     if _text(getattr(task, "parent_id", "")) != _text(params.parent_id):
         return False

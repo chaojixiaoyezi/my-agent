@@ -1,27 +1,13 @@
 
 from __future__ import annotations
 
-from ...backends import ModelResponse
+from ...backends import ModelResponse, is_provider_context_window_error
 from ...memory_archive import estimate_tokens
 from ..runtime.context_compactor import runtime_compact_policy
 
 _PENDING_TOOL_CONTEXT_DIGEST_KEY = "pending_tool_context_digest"
 _TOOL_CONTEXT_DIGEST_INFLIGHT_KEY = "tool_context_digest_inflight"
 _DIGEST_PROMPT_CEILING_PERCENT = 90
-
-_CONTEXT_ERROR_MARKERS = (
-    "context length",
-    "context_length",
-    "context window",
-    "context_window",
-    "maximum context",
-    "max context",
-    "input too long",
-    "prompt too long",
-    "too many tokens",
-    "token limit",
-)
-
 
 def preflight_context_pressure_response(request: object) -> ModelResponse | None:
     if _uses_task_local_compact(request):
@@ -156,8 +142,7 @@ def context_pressure_response(
 
 
 def is_context_window_error(exc: BaseException) -> bool:
-    text = str(exc).lower()
-    return any(marker in text for marker in _CONTEXT_ERROR_MARKERS)
+    return is_provider_context_window_error(exc)
 
 
 def _input_tokens(request: object, prompt_tokens: int) -> int:

@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from ...subagents import parse_subagent_runner_output
 from ...subagents.services.subagent_session_compact import (
     SubagentSessionCompactRequest,
+    subagent_session_compact_payload_from_result,
     write_subagent_session_compact,
 )
 from ..runner.prompts import subagent_runner_system_prompt
-from .session_compact_payload import subagent_session_compact_payload_from_result
 
 _SUMMARY_PREVIEW_CHARS = 800
 

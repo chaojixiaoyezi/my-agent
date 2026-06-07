@@ -74,7 +74,7 @@ def _gateway_request_worker_loop(
         _print_gateway_loop_error("gateway_request_worker.initialize", str(worker_index), exc)
         return
 
-    poll_interval = max(1, int(agent.config.gateway_request_poll_interval))
+    poll_interval = _gateway_request_poll_interval(agent)
     while not stop_event.is_set():
         try:
             _recover_gateway_requests_if_primary(agent, paths, worker_index)
@@ -143,6 +143,10 @@ def _background_main_poll_interval(agent: SimpleAgent) -> float:
     return max(1.0, min(5.0, request_interval, heartbeat_interval))
 
 
+def _gateway_request_poll_interval(agent: SimpleAgent) -> float:
+    return max(0.05, _float_config(agent, "gateway_request_poll_interval", default=0.2))
+
+
 def _float_config(agent: SimpleAgent, key: str, *, default: float) -> float:
     try:
         return float(getattr(agent.config, key))
@@ -194,7 +198,7 @@ def _write_gateway_heartbeat(
             "interval": options.interval,
             "max_runners": options.max_runners,
             "max_cycles": options.max_cycles,
-            "request_counts": gateway_request_counts(paths),
+            "request_counts": gateway_request_counts(paths, include_archives=False),
         },
     )
 

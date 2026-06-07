@@ -5,9 +5,16 @@ from __future__ import annotations
 
 import time
 
-from ..models import FailureHandoff, SubAgentTask
+from ..models import (
+    SUBAGENT_FAILED_RESULT_STATUSES,
+    FailureHandoff,
+    SubAgentTask,
+    TaskStatus,
+    task_has_failure_status,
+    task_has_status,
+    task_status_in,
+)
 
-_HANDOFF_STATUSES = {"FAILED", "TIMEOUT", "CHANNEL_ERROR", "BLOCKED"}
 _HIGH_RISK_FAILURE_TYPES = {"tool_output_context_overflow", "context_overflow", "blackbox_output_overflow"}
 
 
@@ -33,15 +40,15 @@ def refresh_failure_handoff(task: SubAgentTask) -> FailureHandoff:
 
 
 def should_write_failure_handoff(task: SubAgentTask) -> bool:
-    return task.status in _HANDOFF_STATUSES or bool(task.failure_type)
+    return task_has_failure_status(task) or bool(task.failure_type)
 
 
 def _risk_level(task: SubAgentTask) -> str:
     if task.failure_type in _HIGH_RISK_FAILURE_TYPES:
         return "high"
-    if task.status in {"FAILED", "TIMEOUT"}:
+    if task_status_in(task.status, SUBAGENT_FAILED_RESULT_STATUSES):
         return "high"
-    if task.status == "BLOCKED":
+    if task_has_status(task, TaskStatus.BLOCKED):
         return "medium"
     return "low"
 

@@ -51,6 +51,7 @@ def captured_refs_payload(work_state: dict[str, Any]) -> dict[str, Any]:
     full_read_coverage = _read_coverage_payload(work_state.get("read_coverage")) or _full_read_coverage_payload(
         artifact_refs
     )
+    source_coverage = _source_coverage_payload(work_state.get("read_coverage"))
     return {
         "changed_files": sequence_strings(work_state.get("changed_files")),
         "read_files": sequence_strings(work_state.get("read_files")),
@@ -58,6 +59,9 @@ def captured_refs_payload(work_state: dict[str, Any]) -> dict[str, Any]:
         "artifact_ref_count": len(artifact_refs),
         "omitted_artifact_ref_count": max(0, len(artifact_refs) - len(captured)),
         "full_read_coverage": full_read_coverage,
+        "source_coverage": source_coverage[:12],
+        "source_coverage_count": len(source_coverage),
+        "omitted_source_coverage_count": max(0, len(source_coverage) - 12),
     }
 
 
@@ -314,6 +318,12 @@ def _read_coverage_payload(value: object) -> dict[str, Any]:
     return payload
 
 
+def _source_coverage_payload(value: object) -> list[dict[str, Any]]:
+    coverage = value if isinstance(value, dict) else {}
+    sources = coverage.get("sources") if isinstance(coverage.get("sources"), list) else []
+    return [payload for item in sources if (payload := _read_coverage_payload({"primary": item}))]
+
+
 def _full_read_coverage_payload(value: object) -> dict[str, Any]:
     cursor = _best_read_cursor(value)
     if not cursor:
@@ -342,12 +352,12 @@ def _source_path(ref: dict[str, Any]) -> str:
 
 
 def _successful_read_ref(ref: dict[str, Any]) -> bool:
-    if ref.get("ok") is False:
+    if ref.get("ok") is not True:
         return False
     if str(ref.get("error_code") or "").strip():
         return False
     status = str(ref.get("status") or "").strip().lower()
-    return not status or status == "ok"
+    return status in {"", "ok"}
 
 
 def _optional_int(value: object) -> int | None:

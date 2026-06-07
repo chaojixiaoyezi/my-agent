@@ -350,7 +350,7 @@ def _delivery_contract_present(params: ToolLoopExecuteParams) -> bool:
 
 def _has_successful_delivery_record(params: ToolLoopExecuteParams) -> bool:
     for record in list(params.archive_tool_calls or []):
-        if not isinstance(record, dict) or record.get("ok") is False:
+        if not isinstance(record, dict) or record.get("ok") is not True:
             continue
         if str(record.get("tool") or "").strip() in {"write_file", "apply_patch", "run_command", "controlled_exec", "read_file", "read_artifact"}:
             return True

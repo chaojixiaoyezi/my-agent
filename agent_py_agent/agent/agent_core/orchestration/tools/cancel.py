@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""cancel_subagents control tool with TaskStatus-backed status filters."""
+
 import json
 import os
 import signal
@@ -9,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ....runtime_errors import runtime_error_report
+from ....subagents.models import normalize_task_status, task_status_in
 from ....subagents.services.agent_run_state import canonical_state_path_from_payload
 from ....tooling.models import BaseTool, ToolExecutionResult
 from ...agent_tree.status import agent_tree_status_payload
@@ -50,6 +53,13 @@ class _ListRunsForCancelResult:
     error_payload: dict[str, object]
 
 
+@dataclass(frozen=True)
+class _StatusFilterResult:
+    ok: bool
+    statuses: set[str]
+    error_payload: dict[str, object]
+
+
 class CancelSubagentsTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
@@ -67,7 +77,14 @@ class CancelSubagentsTool(BaseTool):
         if not run_ids:
             return ToolExecutionResult("cancel_subagents", False, "缺少 run_id/run_ids/root_id/status，未取消任何子代理。")
         dry_run = bool(params.get("dry_run"))
-        status_filter = _status_filter(params.get("status"))
+        status_filter_result = _status_filter(params.get("status"))
+        if not status_filter_result.ok:
+            return ToolExecutionResult(
+                "cancel_subagents",
+                False,
+                json.dumps(status_filter_result.error_payload, ensure_ascii=False, indent=2),
+            )
+        status_filter = status_filter_result.statuses
         targets = _filter_existing_targets(self.agent, run_ids, status_filter)
         if dry_run:
             return self._payload_result(_CancelPayloadRequest(True, params, _dry_run_targets(targets), [], [], True))
@@ -106,7 +123,10 @@ class CancelSubagentsTool(BaseTool):
 def _resolve_run_ids(agent: SimpleAgent, params: dict[str, object]) -> _ResolveRunIdsResult:
     explicit = _explicit_run_ids(params)
     root_id = str(params.get("root_id") or "").strip()
-    status_filter = _status_filter(params.get("status"))
+    status_filter_result = _status_filter(params.get("status"))
+    if not status_filter_result.ok:
+        return _ResolveRunIdsResult(False, [], status_filter_result.error_payload)
+    status_filter = status_filter_result.statuses
     ids = list(explicit)
     if root_id:
         tasks_result = _list_runs_for_cancel(agent)
@@ -119,7 +139,7 @@ def _resolve_run_ids(agent: SimpleAgent, params: dict[str, object]) -> _ResolveR
         if not tasks_result.ok:
             return _ResolveRunIdsResult(False, [], tasks_result.error_payload)
         tasks = tasks_result.tasks
-        ids.extend(str(task.id) for task in tasks if str(task.status or "").upper() in status_filter)
+        ids.extend(str(task.id) for task in tasks if task_status_in(task.status, status_filter))
     return _ResolveRunIdsResult(True, _dedupe(ids), {})
 
 
@@ -148,14 +168,36 @@ def _explicit_run_ids(params: dict[str, object]) -> list[str]:
     return [item for item in ids if item]
 
 
-def _status_filter(value: object) -> set[str]:
+def _status_filter(value: object) -> _StatusFilterResult:
     if not value:
-        return set()
+        return _StatusFilterResult(True, set(), {})
+    statuses: set[str] = set()
+    invalid: list[str] = []
+    for item in _status_filter_values(value):
+        try:
+            statuses.add(normalize_task_status(item))
+        except ValueError:
+            invalid.append(str(item))
+    if invalid:
+        return _StatusFilterResult(
+            False,
+            set(),
+            {
+                "ok": False,
+                "error": "invalid_status_filter",
+                "invalid_statuses": invalid,
+                "message": "status 只接受当前 TaskStatus 协议值。",
+            },
+        )
+    return _StatusFilterResult(True, statuses, {})
+
+
+def _status_filter_values(value: object) -> list[str]:
     if isinstance(value, str):
-        return {part.strip().upper() for part in value.split(",") if part.strip()}
+        return [part.strip() for part in value.split(",") if part.strip()]
     if isinstance(value, list):
-        return {str(part).strip().upper() for part in value if str(part).strip()}
-    return {str(value).strip().upper()} if str(value).strip() else set()
+        return [str(part).strip() for part in value if str(part).strip()]
+    return [str(value).strip()] if str(value).strip() else []
 
 
 def _subtree_ids(tasks: list[SubAgentTask], root_id: str) -> list[str]:
@@ -185,7 +227,7 @@ def _filter_existing_targets(agent: SimpleAgent, run_ids: list[str], status_filt
         if task is None:
             targets.append({"run_id": run_id, "error": item.get("error")})
             continue
-        if status_filter and str(getattr(task, "status", "") or "").upper() not in status_filter:
+        if status_filter and not task_status_in(getattr(task, "status", ""), status_filter):
             continue
         targets.append(item)
     return targets

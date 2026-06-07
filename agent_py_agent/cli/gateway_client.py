@@ -6,6 +6,7 @@ from __future__ import annotations
 给人看的解释：
 这个文件是 gateway 的'客户端侧'：确保后台进程启动、投递 ask 请求、读取某个请求结果。
 真正的进程生命周期在 gateway_process.py。
+响应文件轮询走 gateway response_renderer 的统一状态读取，避免 chat/gateway 两套读响应逻辑漂移。
 """
 
 import argparse
@@ -19,6 +20,7 @@ from typing import Any
 from ..agent.gateway_parts import (
     GatewayAskParams,
     gateway_chunk_path,
+    gateway_chunk_path_candidates,
     gateway_paths,
     gateway_response_path,
     gateway_running,
@@ -28,7 +30,12 @@ from ..agent.gateway_parts import (
     wait_for_gateway_response,
     wait_for_gateway_running,
 )
-from ..agent.gateway_parts.response_renderer import read_gateway_response_file
+from ..agent.gateway_parts.response_renderer import (
+    GatewayResponsePollState,
+    read_gateway_response_file,
+    # Keep CLI ask polling on the same response-state reader used by chat/TUI.
+    read_gateway_response_file_when_ready,
+)
 from .chat import cmd_chat
 from .common import make_agent, resume_context_override
 from .gateway_process import cmd_gateway_start
@@ -138,22 +145,30 @@ def _handle_active_work_prompt(agent) -> int | None:
 
 
 def _stream_chunk_lines(chunk_path: Path, chunks_printed: int, spinner, chunk_offset_ref: list[int] | None = None) -> int:
-    if not chunk_path.exists():
+    readable_chunk_path = _readable_chunk_path(chunk_path)
+    if readable_chunk_path is None:
         return chunks_printed
     try:
-        with open(chunk_path, encoding="utf-8") as f:
+        with open(readable_chunk_path, encoding="utf-8") as f:
             if chunk_offset_ref is not None:
                 f.seek(max(0, chunk_offset_ref[0]))
             data = f.read()
             if chunk_offset_ref is not None:
                 chunk_offset_ref[0] = f.tell()
     except OSError as exc:
-        print(f"gateway stream chunk load_error path={chunk_path} message={exc}", file=sys.stderr)
+        print(f"gateway stream chunk load_error path={readable_chunk_path} message={exc}", file=sys.stderr)
         return chunks_printed
     lines = data.splitlines() if chunk_offset_ref is not None else data.splitlines()[chunks_printed:]
     for line in lines:
         chunks_printed += _write_stream_chunk_line(line, chunks_printed, spinner)
     return chunks_printed
+
+
+def _readable_chunk_path(chunk_path: Path) -> Path | None:
+    for candidate in gateway_chunk_path_candidates(chunk_path):
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _write_stream_chunk_line(line: str, chunks_printed: int, spinner) -> int:
@@ -192,11 +207,13 @@ def _wait_for_gateway_response(request: GatewayPollRequest) -> dict[str, Any]:
     chunks_printed = 0
     chunk_offset_ref = [0]
     response: dict[str, Any] = {}
+    response_poll_state = GatewayResponsePollState()
 
     while time.time() <= request.deadline:
         chunks_printed = _flush_stream_chunks(request, chunks_printed, chunk_offset_ref)
-        response = read_gateway_response_file(
+        response = read_gateway_response_file_when_ready(
             request.response_path,
+            state=response_poll_state,
             context="gateway.cli.response.read",
         )
         if response:

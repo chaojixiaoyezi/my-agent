@@ -65,6 +65,8 @@ before changing code.
   message、stdout、stderr、summary 里用关键词反推出硬错误码并影响状态、恢复或验收。
 - recovery mode 和 capability status 只认当前协议枚举，不能用字符串前缀、英文词片段、
   中文词片段或旧别名来触发自动重跑、接管、授权和 closeout 行为。
+- collaboration case/request status 也只走当前协议枚举和 normalize helper；`resolved`、
+  `done`、`rejected` 这类展示词只能保留为文本，不能驱动关闭、完成、阻塞或唤醒。
 - owner capability request 的状态只认当前协议值；未知值必须报结构化错误，不能自动兜底成
   `closed` / `expired` / `approved` 这类终态。
 - runtime capability 只能从 `granted_capabilities` 或明确的系统注入 capability token
@@ -269,6 +271,11 @@ before changing code.
   `OPEN`, `GRANTED`, `GAP`, or `CLOSED`.  Historical aliases such as
   `RESOLVED`, `APPROVED`, or `REJECTED` must not silently close, grant, or route
   a request as if they were current schema values.
+- Subagent task lifecycle decisions must use the shared `TaskStatus` /
+  `VerificationStatus` helpers in `subagents.models` for done/verified,
+  failure, ended, dispatch-ineligible, and handled terminal checks.  Do not
+  recreate local status alias tables or prose-based state transitions in
+  dispatch, recovery, compact, board, or closeout modules.
 - Cleanup is allowed inside authorized workspaces when it matches the task:
   temporary files, task trash, generated artifacts, task-local memory, drafts,
   templates, tools, and skills may be removed.  The hard line is uninstalling or

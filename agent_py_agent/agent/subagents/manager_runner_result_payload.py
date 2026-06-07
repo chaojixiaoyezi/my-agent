@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .models import SubAgentParsedOutput, SubAgentTask
+from .models import SUBAGENT_FAILURE_STATUSES, SubAgentParsedOutput, SubAgentTask, task_status_in
 from .result_contexts import OutputPayloadContext
 from .result_processors import _build_output_payload
 from .runner_result_state import RunnerResultFieldParams, apply_runner_result_fields
@@ -139,7 +139,7 @@ class _CapDataParams:
 
 def _runner_compute_blockers(ok, status, parsed, message):
     """Compute blockers list based on task state."""
-    if not ok or status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
+    if not ok or task_status_in(status, SUBAGENT_FAILURE_STATUSES):
         return [parsed.blocked_reason or message]
     return []
 

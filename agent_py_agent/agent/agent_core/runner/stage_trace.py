@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...runtime_errors import runtime_error_report
+from ...subagents.models import TaskStatus, task_has_status
 from .context import current_subagent_run_id
 
 _LOGGER = logging.getLogger(__name__)
@@ -202,9 +203,8 @@ def _warn_runner_trace_error(exc: Exception, *, context: str, run_id: str) -> No
 
 
 def _heartbeat_active_task(task: Any) -> bool:
-    status = str(getattr(task, "status", "") or "").upper()
     active_attempt = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
-    return status == "RUNNING" or bool(active_attempt)
+    return task_has_status(task, TaskStatus.RUNNING) or bool(active_attempt)
 
 
 def _is_external_parent_anchor(task: Any, parent_id: str) -> bool:

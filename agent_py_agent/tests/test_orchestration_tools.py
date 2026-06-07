@@ -337,6 +337,35 @@ class TestInspectAgentTreeTool:
         assert second["direct_children"]["suggested_tool_call"]["tool"] == "wait"
         assert "tasks" not in second
 
+    def test_repeated_tree_inspection_skips_full_kernel_render_when_state_unchanged(self, tmp_path):
+        """cooldown 内 task 状态没变时，不再完整读取和渲染代理树。"""
+        import json
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+        manager = SubAgentManager(tmp_path)
+        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
+        original_snapshot = manager.kernel_snapshot
+        calls = []
+
+        def counted_snapshot(query=None):
+            calls.append(query)
+            return original_snapshot(query)
+
+        manager.kernel_snapshot = counted_snapshot
+        mock_agent = MagicMock()
+        mock_agent.subagents = manager
+
+        tool = InspectAgentTreeTool(mock_agent)
+        first = json.loads(tool.execute({"root_id": child.id}).output)
+        second = json.loads(tool.execute({"root_id": child.id}).output)
+
+        assert "cooldown_active" not in first
+        assert second["cooldown_active"] is True
+        assert second["cooldown_source"] == "cached_tree_state_fingerprint"
+        assert len(calls) == 1
+
     def test_repeated_tree_inspection_uses_configured_watch_interval(self, tmp_path):
         """代理树重复查看 cooldown 应跟随 subagent_watch_interval_seconds。"""
         import json

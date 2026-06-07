@@ -17,6 +17,7 @@ from ..schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_schema_payload,
 )
+from .focus import captured_refs_payload
 
 COMPACT_RESUME_HANDOFF_SCHEMA = RuntimeMemorySchemaOptions("compact_resume_handoff")
 
@@ -55,6 +56,7 @@ def build_compact_resume_handoff(request: CompactResumeHandoffRequest) -> dict[s
         "latest_tests": _tests_payload(work_state.get("latest_tests")),
         "changed_files": sequence_strings(work_state.get("changed_files")),
         "read_files": sequence_strings(work_state.get("read_files")),
+        "captured_refs": captured_refs_payload(work_state),
         "artifact_read_hints": artifact_read_hints_from_work_state(work_state),
         "source_load_errors": _load_error_payloads(work_state.get("source_load_errors", [])),
         "artifact_load_errors": _load_error_payloads(request.artifact_load_errors),
@@ -95,6 +97,7 @@ def render_compact_resume_context_block(handoff: dict[str, Any]) -> str:
     _extend_handoff_summary(lines, handoff.get("handoff_summary", {}))
     _extend_main_context_bundle(lines, handoff.get("main_context_bundle", {}))
     lines.extend(render_runtime_handoff_lines(handoff.get("runtime_handoff", {})))
+    _extend_captured_refs(lines, handoff.get("captured_refs", {}))
     _extend_section(lines, "Fail Safe Checkpoints", _fail_safe_checkpoint_lines(handoff["fail_safe_checkpoints"]))
     _extend_section(
         lines,
@@ -108,6 +111,45 @@ def render_compact_resume_context_block(handoff: dict[str, Any]) -> str:
     _extend_section(lines, "Next Actions", handoff["next_actions"])
     _extend_completion_prompt(lines, handoff.get("completion_prompt", {}))
     return "\n".join(lines)
+
+
+def _extend_captured_refs(lines: list[str], value: Any) -> None:
+    refs = value if isinstance(value, dict) else {}
+    if not refs:
+        return
+    rows: list[str] = []
+    coverage = refs.get("full_read_coverage") if isinstance(refs.get("full_read_coverage"), dict) else {}
+    if coverage:
+        line = _coverage_line("full_read_coverage", coverage)
+        if line:
+            rows.append(line)
+    source_coverage = refs.get("source_coverage") if isinstance(refs.get("source_coverage"), list) else []
+    rows.extend(
+        line
+        for item in source_coverage[:12]
+        if isinstance(item, dict) and (line := _coverage_line("source_coverage", item))
+    )
+    omitted = refs.get("omitted_source_coverage_count")
+    if isinstance(omitted, int) and omitted > 0:
+        rows.append(f"source_coverage_omitted: {omitted}")
+    rows.extend(f"read_file: {item}" for item in sequence_strings(refs.get("read_files"))[:16])
+    _extend_section(lines, "Captured Read Coverage", rows)
+
+
+def _coverage_line(label: str, item: dict[str, Any]) -> str:
+    source = str(item.get("source_path") or "").strip()
+    if not source:
+        return ""
+    complete = item.get("complete")
+    if item.get("kind") == "line_window":
+        covered = item.get("covered_until_line", item.get("covered_until"))
+        total = item.get("total_lines", item.get("total_chars"))
+        next_value = item.get("next_start_line")
+        return f"{label}: source_path={source} covered_until_line={covered} total_lines={total} next_start_line={next_value} complete={complete}"
+    covered = item.get("covered_until_offset", item.get("covered_until"))
+    total = item.get("total_chars")
+    next_value = item.get("next_offset")
+    return f"{label}: source_path={source} covered_until={covered} total_chars={total} next_offset={next_value} complete={complete}"
 
 
 def _items_payload(value: Any) -> dict[str, Any]:

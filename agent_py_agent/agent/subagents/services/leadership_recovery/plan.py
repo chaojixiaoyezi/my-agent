@@ -7,7 +7,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...models import SubAgentDueCheckOptions, SubAgentLeadershipRecoveryPlanOptions, SubAgentTask
+from ...models import (
+    SUBAGENT_DEAD_STATUSES,
+    SubAgentDueCheckOptions,
+    SubAgentLeadershipRecoveryPlanOptions,
+    SubAgentTask,
+    TaskStatus,
+    task_status_in,
+)
 
 
 @dataclass(frozen=True)
@@ -232,15 +239,24 @@ def _is_scope_root(task: SubAgentTask, root_id: str) -> bool:
 
 
 def _leader_is_available(leader: SubAgentTask) -> bool:
-    status = str(leader.status or "").upper()
     channel = str(leader.channel_status or "").upper()
-    return status not in {"FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER", "ABANDONED"} and channel != "BROKEN"
+    unavailable_statuses = frozenset({
+        TaskStatus.FAILED.value,
+        TaskStatus.TAKEN_OVER.value,
+        TaskStatus.ABANDONED.value,
+        *SUBAGENT_DEAD_STATUSES,
+    })
+    return not task_status_in(leader.status, unavailable_statuses) and channel != "BROKEN"
 
 
 def _parent_is_failed_recovery_source(task: SubAgentTask) -> bool:
-    status = str(task.status or "").upper()
     channel = str(task.channel_status or "").upper()
-    return status in {"FAILED", "TIMEOUT", "CHANNEL_ERROR", "ABANDONED"} or channel == "BROKEN"
+    failed_source_statuses = frozenset({
+        TaskStatus.FAILED.value,
+        TaskStatus.ABANDONED.value,
+        *SUBAGENT_DEAD_STATUSES,
+    })
+    return task_status_in(task.status, failed_source_statuses) or channel == "BROKEN"
 
 
 def _future_subset_apply_command(coordinator_id: str, leader_id: str, child_ids: list[str]) -> str:

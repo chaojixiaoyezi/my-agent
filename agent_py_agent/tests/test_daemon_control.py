@@ -86,7 +86,7 @@ def test_check_already_running_no_file(tmp_pid_path):
     assert existing_pid is None
 
 
-@patch.object(dc, "is_pid_alive", return_value=False)
+@patch.object(dc, "_is_pid_alive", return_value=False)
 def test_check_already_running_stale_pid(mock_alive, tmp_pid_path):
     """测试陈旧 PID 文件（进程已死）返回未运行。"""
     tmp_pid_path.write_text("99999", encoding="utf-8")
@@ -95,7 +95,7 @@ def test_check_already_running_stale_pid(mock_alive, tmp_pid_path):
     mock_alive.assert_called_once_with(99999)
 
 
-@patch.object(dc, "is_pid_alive", return_value=True)
+@patch.object(dc, "_is_pid_alive", return_value=True)
 def test_check_already_running_alive(mock_alive, tmp_pid_path):
     """测试进程存活时返回已运行。"""
     tmp_pid_path.write_text("12345", encoding="utf-8")
@@ -150,7 +150,7 @@ def test_get_running_pid_report_bad_json_keeps_pid_file(tmp_pid_path):
     assert tmp_pid_path.exists()
 
 
-@patch.object(dc, "is_pid_alive", return_value=False)
+@patch.object(dc, "_is_pid_alive", return_value=False)
 def test_get_running_pid_invalid_pid_cleanup(mock_alive, tmp_pid_path):
     """测试无效 PID 会清理文件。"""
     record = {"pid": 99999, "start_time": 12345}
@@ -291,7 +291,7 @@ def test_write_runtime_status_merge_platform(tmp_path):
 # ── 优雅关闭测试 ──────────────────────────────────────────────────────────
 
 
-@patch.object(dc, "is_pid_alive", return_value=False)
+@patch.object(dc, "_is_pid_alive", return_value=False)
 def test_request_graceful_shutdown_not_running(mock_alive, tmp_pid_path, tmp_path):
     """测试网关未运行时请求关闭返回 False。"""
     stop_path = tmp_path / "stop.json"
@@ -299,7 +299,7 @@ def test_request_graceful_shutdown_not_running(mock_alive, tmp_pid_path, tmp_pat
     assert result is False
 
 
-@patch.object(dc, "is_pid_alive", return_value=True)
+@patch.object(dc, "_is_pid_alive", return_value=True)
 @patch.object(dc, "read_pid_file", return_value=12345)
 def test_request_graceful_shutdown_success(mock_read, mock_alive, tmp_pid_path, tmp_path):
     """测试成功请求优雅关闭。"""

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .runtime_errors import runtime_error_report
-from .subagents.models import SubAgentBoardOptions
+from .subagents.models import SubAgentBoardOptions, TaskStatus, task_status_in
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -70,8 +70,13 @@ def _detect_active_tasks(agent, summary):
                 include_child_status_counts=False,
             )
         )
-        final_statuses = {"DONE", "FAILED", "CANCELLED", "TIMEOUT"}
-        active_tasks = [item for item in board.hot_list if item.status not in final_statuses]
+        final_statuses = frozenset({
+            TaskStatus.DONE.value,
+            TaskStatus.FAILED.value,
+            TaskStatus.CANCELLED.value,
+            TaskStatus.TIMEOUT.value,
+        })
+        active_tasks = [item for item in board.hot_list if not task_status_in(item.status, final_statuses)]
         summary.active_task_count = len(active_tasks)
         summary.recent_tasks = [
             {

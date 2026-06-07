@@ -4,7 +4,11 @@ import json
 import time
 from pathlib import Path
 
-from agent_py_agent.agent.gateway_parts.paths import GatewayPaths, gateway_chunk_path
+from agent_py_agent.agent.gateway_parts.paths import (
+    GatewayPaths,
+    gateway_chunk_path,
+    gateway_chunk_path_candidates,
+)
 from agent_py_agent.agent.gateway_parts.request_execution import close_chunk_stream
 
 
@@ -32,6 +36,17 @@ def test_gateway_chunk_path_is_in_processing(tmp_path):
     paths = _make_paths(tmp_path)
     chunk_path = gateway_chunk_path(paths, "req-123")
     assert chunk_path == paths.processing / "req-123.chunks.jsonl"
+
+
+def test_gateway_chunk_path_candidates_include_archives(tmp_path):
+    paths = _make_paths(tmp_path)
+    chunk_path = gateway_chunk_path(paths, "req-123")
+
+    assert gateway_chunk_path_candidates(chunk_path) == (
+        paths.processing / "req-123.chunks.jsonl",
+        paths.done / "req-123.chunks.jsonl",
+        paths.failed / "req-123.chunks.jsonl",
+    )
 
 
 def test_chunk_file_write_and_read(tmp_path):

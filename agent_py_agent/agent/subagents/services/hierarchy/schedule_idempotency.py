@@ -1,16 +1,16 @@
 
 from __future__ import annotations
 
+"""Schedule idempotency using shared TaskStatus lifecycle sets."""
+
 from dataclasses import dataclass
 from typing import Any
 
 from ....common.value_parsing import text_value
+from ...models import SUBAGENT_DISPATCH_READY_STATUSES, SUBAGENT_REUSABLE_STATUSES, task_status_in
 from ..base import CreateRunParams
 from ..idempotency_contract_identity import idempotency_contract_identity_from_context_packs
 from ..repair_contract_identity import repair_contract_identity_from_context_packs
-
-_REUSABLE_STATUSES = {"PLANNING", "PENDING", "RUNNING", "DONE", "BLOCKED", "PAUSED"}
-_DISPATCHABLE_STATUSES = {"PLANNING", "PENDING"}
 
 
 @dataclass(frozen=True)
@@ -45,11 +45,11 @@ def reused_scheduled_children(resolutions: list[ScheduledChildResolution]) -> li
 
 
 def dispatchable_scheduled_children(resolutions: list[ScheduledChildResolution]) -> list[Any]:
-    return [item.task for item in resolutions if _status(item.task) in _DISPATCHABLE_STATUSES]
+    return [item.task for item in resolutions if task_status_in(_status(item.task), SUBAGENT_DISPATCH_READY_STATUSES)]
 
 
 def _same_schedule_contract(task: Any, params: CreateRunParams) -> bool:
-    if _status(task) not in _REUSABLE_STATUSES:
+    if not task_status_in(_status(task), SUBAGENT_REUSABLE_STATUSES):
         return False
     if text_value(getattr(task, "parent_id", "")) != text_value(params.parent_id):
         return False

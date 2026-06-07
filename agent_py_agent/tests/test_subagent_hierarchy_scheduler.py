@@ -318,11 +318,14 @@ def test_hierarchy_schedule_carries_parent_boundary_into_vague_child_goal(tmp_pa
     assert "创建 leaf worker，实现 add(a,b) 并写测试" in child.goal
     assert str(deliverables / "leaf_outputs" / "proof" / "solution.py") in child.goal
     assert "继承父级目标/边界" in child.goal
+    assert "inherited_parent_context=true" not in child.goal
+    assert child.attributes.get("inherited_parent_context") is True
 
     leaf_result = _schedule_vague_leaf(manager, child.id)
     leaf = manager.load(leaf_result.created_run_ids[0])
 
     assert str(deliverables / "leaf_outputs" / "proof" / "solution.py") in leaf.goal
+    assert leaf.attributes.get("inherited_parent_context") is True
     assert "write_file" in leaf.allowed_tools
 
 

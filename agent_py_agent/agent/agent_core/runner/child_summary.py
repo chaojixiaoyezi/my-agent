@@ -5,8 +5,7 @@ from typing import Any
 
 from ...runtime_errors import runtime_error_report
 from ...subagents import SubAgentRunnerResult, SubAgentTask
-
-_RUNNER_CHILD_FINAL_STATUSES = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
+from ...subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 
 
 def runner_child_summary_fields(agent: Any, after: SubAgentTask, result: SubAgentRunnerResult) -> dict[str, object]:
@@ -56,7 +55,7 @@ def _runner_child_status_counts(child_states: list[dict[str, object]]) -> dict[s
 def _runner_unfinished_child_ids(child_states: list[dict[str, object]]) -> list[str]:
     return [
         str(item["id"]) for item in child_states
-        if item["id"] and str(item["status"]) not in _RUNNER_CHILD_FINAL_STATUSES
+        if item["id"] and not task_status_in(item["status"], SUBAGENT_ENDED_STATUSES)
     ]
 
 

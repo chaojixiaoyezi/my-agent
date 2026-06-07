@@ -153,6 +153,8 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
     }
     if read_window := _read_window_from_envelope(request.result_envelope):
         record["read_window"] = read_window
+    if page_window := _page_window_from_envelope(request.result_envelope):
+        record["page_window"] = page_window
     return record
 
 
@@ -174,6 +176,7 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
         "task_id": request.task_id,
         "parameters": _safe_parameters(request.parameters),
         **({"read_window": read_window} if (read_window := _read_window_from_envelope(request.result_envelope)) else {}),
+        **({"page_window": page_window} if (page_window := _page_window_from_envelope(request.result_envelope)) else {}),
         "source_input": _source_input(request.parameters),
         "sha256": digest,
         "size_bytes": len(output.encode("utf-8")),
@@ -202,6 +205,7 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
         "error_code": str(payload.get("error_code") or ""),
         "parameters": _safe_parameters(payload.get("parameters")),
         **({"read_window": payload["read_window"]} if isinstance(payload.get("read_window"), dict) else {}),
+        **({"page_window": payload["page_window"]} if isinstance(payload.get("page_window"), dict) else {}),
         "source_input": str(payload.get("source_input") or ""),
         "path": str(path),
         "sha256": payload["sha256"],
@@ -230,6 +234,7 @@ def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[
         "error_code": str(record.get("error_code") or request.error_code or "").strip(),
         "parameters": _safe_parameters(request.parameters),
         **({"read_window": record["read_window"]} if isinstance(record.get("read_window"), dict) else {}),
+        **({"page_window": record["page_window"]} if isinstance(record.get("page_window"), dict) else {}),
         "source_input": _source_input(request.parameters),
         "path": "",
         "sha256": digest,
@@ -279,6 +284,40 @@ def _read_window_from_envelope(value: object) -> dict[str, object]:
     if kind == "line_window":
         return _line_window(window)
     return {}
+
+
+def _page_window_from_envelope(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    window = value.get("page_window")
+    if not isinstance(window, dict):
+        return {}
+    if str(window.get("kind") or "").strip() != "offset_page":
+        return {}
+    tool = str(window.get("tool") or "").strip()
+    source_path = str(window.get("source_path") or "").strip()
+    offset = _optional_nonnegative_int(window.get("offset"))
+    limit = _optional_positive_int(window.get("limit"))
+    returned = _optional_nonnegative_int(window.get("returned"))
+    next_offset = _optional_nonnegative_int(window.get("next_offset"))
+    if not tool or not source_path or offset is None or limit is None or returned is None:
+        return {}
+    if next_offset is None:
+        next_offset = 0 if bool(window.get("complete")) else offset + returned
+    payload: dict[str, object] = {
+        "kind": "offset_page",
+        "tool": tool,
+        "source_path": source_path,
+        "offset": offset,
+        "limit": limit,
+        "returned": returned,
+        "next_offset": next_offset,
+        "complete": bool(window.get("complete")) or next_offset <= 0,
+    }
+    output_mode = str(window.get("output_mode") or "").strip()
+    if output_mode:
+        payload["output_mode"] = output_mode
+    return payload
 
 
 def _char_window(window: dict[str, object]) -> dict[str, object]:

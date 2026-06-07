@@ -1,8 +1,12 @@
 
 from __future__ import annotations
 
+"""Ready-child refs derived from current subagent status protocol facts."""
+
 from pathlib import Path
 from typing import Any
+
+from ...models import TaskStatus, task_has_status
 
 _READY_SCAN_MAX_NODES = 64
 
@@ -64,9 +68,7 @@ def _is_ready_implementation_child(child: object) -> bool:
     identity = f"{_text_attr(child, 'role')} {_text_attr(child, 'agent_name')}".lower().replace("-", "_")
     if not any(token in identity for token in {"worker", "writer", "coder", "leaf"}):
         return False
-    status = _text_attr(child, "status").upper()
-    verification = _text_attr(child, "verification_status").upper()
-    return status == "DONE"
+    return task_has_status(child, TaskStatus.DONE)
 
 
 def _load_child(manager: Any, run_id: str) -> object | None:

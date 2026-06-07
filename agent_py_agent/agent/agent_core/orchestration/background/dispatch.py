@@ -307,7 +307,7 @@ def _remember_background_result(agent, launch_id: str, result: dict[str, object]
     if not isinstance(registry, dict):
         return
     item = dict(registry.get(launch_id) or {})
-    status = "finished" if result.get("ok", True) else "failed"
+    status = "finished" if result.get("ok") is True else "failed"
     item.update({"status": status, "result": result, "finished_at": time.time()})
     registry[launch_id] = item
 

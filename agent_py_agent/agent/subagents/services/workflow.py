@@ -50,6 +50,12 @@ def _normalize_workflow_mode_value(value: object) -> str:
     return "off"
 
 
+def tool_workflow_mode(explicit_mode: object, config_mode: object) -> str:
+    """Normalize model-visible workflow mode without letting config auto-run dispatch."""
+    del config_mode
+    return _normalize_workflow_mode_value(explicit_mode)
+
+
 def _workflow_worker_tools(parent_tools: list[str], worker_kind: str) -> list[str]:
     if parent_tools:
         return list(parent_tools)

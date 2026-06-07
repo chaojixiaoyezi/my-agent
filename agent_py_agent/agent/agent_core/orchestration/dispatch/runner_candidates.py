@@ -1,6 +1,12 @@
 
 from __future__ import annotations
 
+from ....subagents.models import (
+    TaskStatus,
+    VerificationStatus,
+    normalize_verification_status,
+    task_status_in,
+)
 from ....subagents.services.recovery.modes import is_rerun_mode
 from ...runner.dispatch import (
     RunnerCandidatePolicy,
@@ -84,9 +90,11 @@ def _included_recovery_runner_tasks(tasks: list, ctx: DispatchContext) -> list:
 
 
 def _can_rerun_from_recovery_instruction(task: object) -> bool:
-    status = str(getattr(task, "status", "") or "").upper()
-    verification = str(getattr(task, "verification_status", "") or "").upper()
-    if status not in {"BLOCKED", "FAILED"} or verification == "VERIFIED":
+    recoverable_statuses = frozenset({TaskStatus.BLOCKED.value, TaskStatus.FAILED.value})
+    if (
+        not task_status_in(getattr(task, "status", ""), recoverable_statuses)
+        or _verification_status(task) == VerificationStatus.VERIFIED.value
+    ):
         return False
     if _terminal_recovery_code_present(task):
         return False
@@ -97,6 +105,13 @@ def _can_rerun_from_recovery_instruction(task: object) -> bool:
     if any(getattr(item, "status", "") == "OPEN" for item in getattr(task, "capability_gaps", []) or []):
         return False
     return True
+
+
+def _verification_status(task: object) -> str:
+    try:
+        return normalize_verification_status(getattr(task, "verification_status", ""))
+    except ValueError:
+        return ""
 
 
 def _terminal_recovery_code_present(task: object) -> bool:

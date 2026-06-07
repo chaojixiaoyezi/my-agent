@@ -9,10 +9,17 @@ from ..agent_core.orchestration.scope_resolution import (
     scope_resolution_payload,
 )
 from ..runtime_errors import runtime_error_report
+from ..subagents.models import (
+    SUBAGENT_DEAD_STATUSES,
+    SUBAGENT_HANDLED_TERMINAL_STATUSES,
+    task_status_in,
+)
 from .tool_values import dict_value, string_values
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
+
+_UNAVAILABLE_TARGET_STATUSES = SUBAGENT_DEAD_STATUSES | SUBAGENT_HANDLED_TERMINAL_STATUSES
 
 
 def resolved_target_agent_ids(agent: SimpleAgent, params: dict[str, object]) -> list[str]:
@@ -218,7 +225,7 @@ def _unavailable_reason(status: str, channel_status: str) -> str:
         return "unknown_target"
     if channel_status == "BROKEN":
         return "channel_broken"
-    return status.lower() if status in {"ABANDONED", "CHANNEL_ERROR", "TIMEOUT", "TAKEN_OVER"} else ""
+    return status.lower() if task_status_in(status, _UNAVAILABLE_TARGET_STATUSES) else ""
 
 
 def _status_payload(row: dict[str, str]) -> dict[str, str]:

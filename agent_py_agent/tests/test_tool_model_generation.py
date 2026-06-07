@@ -22,7 +22,7 @@ from agent_py_agent.agent.agent_core.tool_model_generation import (
     generate_model_response,
 )
 from agent_py_agent.agent.backends import ModelResponse
-from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+from agent_py_agent.agent.backends.errors import ProviderContextWindowError, ProviderTimeoutError
 
 
 class _BlockingBackend:
@@ -128,6 +128,20 @@ class _StreamingTokenBackend:
         if on_chunk is not None:
             on_chunk("hello")
         return ModelResponse(text="hello world", backend=self.name)
+
+
+class _PlainRuntimeContextTextBackend:
+    name = "plain-runtime-context-text-test-backend"
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        raise RuntimeError("ordinary exception text mentions context length but is not a provider code")
+
+
+class _ProviderContextWindowBackend:
+    name = "provider-context-window-test-backend"
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        raise ProviderContextWindowError("HTTP 400: prompt too long")
 
 
 class _StreamingLiteralProtocolMarkerContentBackend:
@@ -243,6 +257,46 @@ def test_model_generate_aborts_streaming_write_file_content_over_inline_limit():
     assert '"tool": "__parse_error__"' in response.text
     assert "inline content streaming exceeded" in response.text
     assert "site/index.html" in response.text
+
+
+def test_model_generate_does_not_compact_from_plain_exception_text():
+    backend = _PlainRuntimeContextTextBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(request_timeout=10),
+        _current_subagent_run_id="",
+    )
+
+    with pytest.raises(RuntimeError, match="context length"):
+        generate_model_response(
+            ModelGenerateParams(
+                agent=agent,
+                params=_tool_loop_params(),
+                prompt="hello",
+                tool_rounds=0,
+            )
+        )
+
+
+def test_model_generate_compacts_from_typed_provider_context_window_error():
+    backend = _ProviderContextWindowBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(request_timeout=10),
+        _current_subagent_run_id="",
+    )
+
+    response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=_tool_loop_params(),
+            prompt="hello",
+            tool_rounds=0,
+        )
+    )
+
+    assert response.runtime_status == "context_overflow"
+    assert response.runtime_source == "provider_error"
 
 
 def test_model_generate_salvages_streaming_write_file_append_prefix():

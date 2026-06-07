@@ -16,6 +16,13 @@ from ...settings.defaults import default_config_int
 from ...settings.runtime_guard_config import runtime_guard_int
 from ...subagents import SubAgentTask
 from ...subagents.model_capabilities import capability_request_requires_parent_resolution
+from ...subagents.models import (
+    TaskStatus,
+    VerificationStatus,
+    normalize_verification_status,
+    task_has_status,
+    task_status_in,
+)
 from .dispatch_record import RunnerDispatchRecordParams
 from .dispatch_record import runner_dispatch_record as _runner_dispatch_record
 from .worker import RunSubagentWorkerParams, _run_subagent_worker
@@ -113,7 +120,12 @@ def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
 
     if runner_max_attempts == 1:
         return ""
-    if task.status not in {"BLOCKED", "FAILED", "TIMEOUT"}:
+    retryable_statuses = frozenset({
+        TaskStatus.BLOCKED.value,
+        TaskStatus.FAILED.value,
+        TaskStatus.TIMEOUT.value,
+    })
+    if not task_status_in(task.status, retryable_statuses):
         return ""
     failure_type = _runner_failure_type(task)
     if failure_type not in RETRYABLE_RUNNER_FAILURE_TYPES:
@@ -132,7 +144,7 @@ def _retry_count_after_initial_attempt(attempts: int) -> int:
 def _dispatch_patch_review_run_ids(tasks: list[SubAgentTask]) -> list[str]:
     run_ids: list[str] = []
     for task in tasks:
-        if task.status != "DONE":
+        if not task_has_status(task, TaskStatus.DONE):
             continue
         if _task_has_runner_patches(task):
             run_ids.append(task.id)
@@ -252,15 +264,11 @@ def _is_dispatch_runner_candidate(
     effective_policy = candidate_policy(policy)
     if runner_launch_in_progress(task, effective_policy):
         return False
-    if task.status == "RUNNING":
+    if task_has_status(task, TaskStatus.RUNNING):
         return False
-    if task.status in {
-        "DONE",
-        "CHANNEL_ERROR",
-        "TAKEN_OVER",
-    }:
+    if task_status_in(task.status, {TaskStatus.DONE.value, TaskStatus.CHANNEL_ERROR.value, TaskStatus.TAKEN_OVER.value}):
         return False
-    if task.verification_status == "VERIFIED":
+    if _task_verification_status(task) == VerificationStatus.VERIFIED.value:
         return False
     if task.channel_status == "BROKEN":
         return False
@@ -271,7 +279,7 @@ def _is_dispatch_runner_candidate(
         return False
     if any(item.status == "OPEN" for item in task.capability_gaps):
         return False
-    if task.status == "BLOCKED":
+    if task_has_status(task, TaskStatus.BLOCKED):
         if _blocked_after_capability_grant(task):
             return True
         return _can_retry_same_run(
@@ -279,13 +287,20 @@ def _is_dispatch_runner_candidate(
             effective_policy.runner_max_attempts,
             effective_policy.same_run_redispatch_limit,
         )
-    if task.status in {"FAILED", "TIMEOUT"}:
+    if task_status_in(task.status, {TaskStatus.FAILED.value, TaskStatus.TIMEOUT.value}):
         return _can_retry_same_run(
             task,
             effective_policy.runner_max_attempts,
             effective_policy.same_run_redispatch_limit,
         )
-    return task.status == "PLANNING"
+    return task_has_status(task, TaskStatus.PLANNING)
+
+
+def _task_verification_status(task: SubAgentTask) -> str:
+    try:
+        return normalize_verification_status(getattr(task, "verification_status", ""))
+    except ValueError:
+        return ""
 
 
 def _can_retry_same_run(

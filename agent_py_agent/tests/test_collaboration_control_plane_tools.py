@@ -298,6 +298,33 @@ def test_raise_collaboration_target_runtime_error_is_visible(tmp_path, monkeypat
     assert status["requests"][0]["metadata"]["target_runtime_load_error"]["category"] == "data_parse"
 
 
+def test_raise_collaboration_target_availability_uses_subagent_status_protocol(tmp_path) -> None:
+    agent = _agent_with_task(tmp_path)
+    targets = [_child_with_status(agent, status) for status in ("TIMEOUT", "CHANNEL_ERROR", "ABANDONED", "TAKEN_OVER")]
+    cancelled = _child_with_status(agent, "CANCELLED")
+    broken_channel = _child_with_status(agent, "RUNNING", channel_status="BROKEN")
+
+    result = agent.tools.tools["raise_collaboration"].execute(
+        {
+            "task_id": "task-1",
+            "title": "目标状态 case",
+            "summary": "协作目标状态应来自子代理状态协议。",
+            "target_agent_ids": [*(target.id for target in targets), cancelled.id, broken_channel.id],
+            "question": "请补充证据。",
+        }
+    )
+    payload = json.loads(result.output)
+    unavailable = {
+        item["agent_id"]: item["reason"]
+        for item in payload["unavailable_targets"]
+    }
+
+    assert result.ok is True
+    assert {unavailable[target.id] for target in targets} == {"timeout", "channel_error", "abandoned", "taken_over"}
+    assert unavailable[broken_channel.id] == "channel_broken"
+    assert cancelled.id in payload["available_target_run_ids"]
+
+
 def test_raise_collaboration_target_identity_error_is_visible(tmp_path, monkeypatch) -> None:
     agent = _agent_with_task(tmp_path)
     original_identity_keys = agent.collaboration_store.agent_identity_keys
@@ -499,6 +526,18 @@ def _reroute_tool_fixture(tmp_path) -> tuple[SimpleAgent, str, str]:
     return agent, case_id, request_id
 
 
+def _child_with_status(agent: SimpleAgent, status: str, *, channel_status: str = ""):
+    child = agent.subagents.create_run(
+        goal=f"协作目标 {status}",
+        allowed_tools=["inspect_collaboration"],
+        agent_name=f"target-{status.lower()}",
+    )
+    child.status = status
+    child.channel_status = channel_status
+    agent.subagents.save(child)
+    return child
+
+
 def _reroute_case_params() -> dict[str, object]:
     return {
         "task_id": "task-1",
@@ -534,6 +573,8 @@ def test_collaboration_status_aliases_do_not_trigger_machine_semantics(tmp_path)
         is_declined_request_status,
         is_terminal_status,
         is_timed_out_request_status,
+        normalize_case_status,
+        normalize_request_status,
     )
 
     store = CollaborationStore(tmp_path / "collaboration")
@@ -552,6 +593,10 @@ def test_collaboration_status_aliases_do_not_trigger_machine_semantics(tmp_path)
     assert is_timed_out_request_status("timeout") is True
     assert is_declined_request_status("rejected") is False
     assert is_declined_request_status("declined") is True
+    assert normalize_case_status("closed") == "closed"
+    assert normalize_case_status("resolved") == ""
+    assert normalize_request_status("completed") == "completed"
+    assert normalize_request_status("done") == ""
 
 
 def _assert_empty_close_rejected(store, case_id: str) -> None:

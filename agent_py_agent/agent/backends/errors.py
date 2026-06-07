@@ -24,6 +24,13 @@ class ProviderResponseError(ProviderRecoverableError):
         self.details = details
 
 
+class ProviderContextWindowError(ProviderResponseError):
+    """The provider rejected the request because the input exceeded its context window."""
+
+    def __init__(self, message: str, *, details: object | None = None):
+        super().__init__(message, error_code="MODEL_CONTEXT_WINDOW_EXCEEDED", details=details)
+
+
 def is_provider_recoverable_error(exc: BaseException) -> bool:
     """Return True for typed provider failures that should not be treated as task bugs."""
     return isinstance(exc, ProviderRecoverableError)
@@ -42,6 +49,11 @@ def is_provider_transient_error(exc: BaseException) -> bool:
 def is_empty_provider_response_error(exc: BaseException) -> bool:
     """Return True when the provider returned a syntactically valid but empty model message."""
     return isinstance(exc, ProviderResponseError) and exc.error_code == "MODEL_EMPTY_RESPONSE"
+
+
+def is_provider_context_window_error(exc: BaseException) -> bool:
+    """Return True for typed provider context-window failures."""
+    return isinstance(exc, ProviderContextWindowError)
 
 
 def provider_recoverable_report(exc: BaseException, *, timeout_seconds: object = "") -> str:

@@ -67,6 +67,28 @@ def test_child_timeout_blocks_parent_with_specific_code() -> None:
     assert result.error_codes == ("CHILD_TIMEOUT",)
 
 
+def test_child_timed_out_alias_is_not_a_current_timeout_status() -> None:
+    from agent_py_agent.agent.contracts.offline_subagent_contract import validate_subagent_contract
+
+    result = validate_subagent_contract(
+        {
+            "parent": {"run_id": "parent", "status": "VERIFYING", "required_child_run_ids": ["child-timeout"]},
+            "children": [
+                {
+                    "run_id": "child-timeout",
+                    "parent_run_id": "parent",
+                    "status": "TIMED_OUT",
+                    "artifact_refs": [],
+                    "acceptance": {"ok": False, "evidence_refs": []},
+                }
+            ],
+        }
+    )
+
+    assert result.ok is False
+    assert result.error_codes == ("CHILD_NOT_SUCCESSFUL",)
+
+
 def test_explicit_subagent_depth_and_child_limits_are_enforced() -> None:
     from agent_py_agent.agent.contracts.offline_subagent_contract import validate_subagent_contract
 

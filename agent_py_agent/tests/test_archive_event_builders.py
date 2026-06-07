@@ -8,6 +8,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_py_agent.agent.memory_archive.runtime.event_builders import (
+    EventIdentity,
+    ToolCallContext,
     _apply_archive_level_to_message_event,
     _apply_archive_level_to_tool_event,
     _canonical_json,
@@ -235,6 +237,22 @@ class TestFirstBool:
         payload = {"other": "value"}
         result = _first_bool(payload, "success", "ok")
         assert result is None
+
+    def test_success_alias_not_used_for_tool_event_success(self):
+        """旧 success 字段不能成为 runtime 工具成功事实。"""
+        event = _tool_event(
+            EventIdentity(sequence=1, session_id="session-1", request_id="request-1", run_id="run-1", task_id="task-1"),
+            ToolCallContext(
+                backend="test",
+                tool_call={"tool": "read_file", "id": "1-1", "success": True},
+                source="test",
+                archive_level=3,
+                created_at="2026-06-07T00:00:00+08:00",
+            ),
+        )
+
+        assert event.tool_success is None
+        assert event.status == "unknown"
 
 
 class TestToolStatus:

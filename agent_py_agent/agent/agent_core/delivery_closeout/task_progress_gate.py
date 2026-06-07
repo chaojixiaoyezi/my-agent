@@ -5,9 +5,13 @@ from typing import Any
 
 from ...contracts.gates.models import GateDecision, GateFinding
 from ...contracts.recovery_actions import RecoveryAction
-from ...task_progress import progress_path, read_task_progress, task_progress_summary
-
-_CLOSED_STATUSES = {"done", "skipped"}
+from ...task_progress import (
+    progress_path,
+    read_task_progress,
+    task_progress_status_is_closed,
+    task_progress_status_is_done,
+    task_progress_summary,
+)
 
 
 def evaluate_task_progress_closeout_gate(closeout: object, report: dict[str, Any] | None = None) -> GateDecision:
@@ -147,7 +151,7 @@ def _open_items(progress: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         item
         for item in items
-        if isinstance(item, dict) and _status_text(item.get("status") or "pending") not in _CLOSED_STATUSES
+        if isinstance(item, dict) and not task_progress_status_is_closed(item.get("status") or "pending")
     ]
 
 
@@ -162,7 +166,7 @@ def _empty_done_advisory_findings(items: list[dict[str, Any]]) -> list[GateFindi
     empty_done = [
         item
         for item in items
-        if _status_text(item.get("status")) == "done"
+        if task_progress_status_is_done(item.get("status"))
         and not str(item.get("notes") or "").strip()
         and not str(item.get("result") or item.get("outcome") or item.get("conclusion") or "").strip()
         and not _list(item.get("evidence"))
@@ -199,8 +203,8 @@ def _coverage_incomplete_findings(progress: dict[str, Any]) -> list[GateFinding]
         if not isinstance(target, dict):
             continue
         target_counts = dict(target.get("checks") or {})
-        checks_open = [name for name, status in target_counts.items() if _status_text(status) not in _CLOSED_STATUSES]
-        if checks_open or _status_text(target.get("status") or "pending") not in _CLOSED_STATUSES:
+        checks_open = [name for name, status in target_counts.items() if not task_progress_status_is_closed(status)]
+        if checks_open or not task_progress_status_is_closed(target.get("status") or "pending"):
             active.append(
                 {
                     "id": str(target.get("id") or target.get("title") or ""),
@@ -220,10 +224,6 @@ def _coverage_incomplete_findings(progress: dict[str, Any]) -> list[GateFinding]
             },
         )
     ]
-
-
-def _status_text(value: object) -> str:
-    return str(value or "").strip().lower()
 
 
 def _compact_item(item: dict[str, Any]) -> dict[str, str]:

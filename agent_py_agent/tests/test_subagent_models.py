@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.agent.subagents.result_structured_evidence import process_evidence_items
 
 
 def test_simple_agent_passes_closeout_task_node_config(tmp_path):
@@ -25,8 +27,31 @@ def test_simple_agent_passes_closeout_task_node_config(tmp_path):
     assert agent.subagents.closeout_for_all_task_nodes is True
 
 
+def test_subagent_evidence_without_explicit_ok_is_not_success() -> None:
+    task = SubAgentTask(id="child-1", goal="check", thought="", plan=[])
+    parsed = SimpleNamespace(
+        evidence=[
+            {"kind": "note", "summary": "missing ok"},
+            {
+                "kind": "content_check",
+                "summary": "absence is expected",
+                "ok": False,
+                "content_pattern": "needle",
+                "match_mode": "not_contains",
+            },
+        ]
+    )
+
+    count = process_evidence_items(parsed, task, now=1.0)
+
+    assert count == 2
+    assert task.evidence[0].ok is False
+    assert task.evidence[1].ok is True
+
+
 from agent_py_agent.agent.subagents.models import (
     DISPATCH_INELIGIBLE_STATUSES,
+    SUBAGENT_TASK_STATUSES,
     CapabilityGap,
     CapabilityGrant,
     CapabilityRequest,
@@ -45,6 +70,7 @@ from agent_py_agent.agent.subagents.models import (
     TaskStatus,
     VerificationEvidence,
     WorkOrderValidation,
+    normalize_task_status,
 )
 
 
@@ -54,12 +80,16 @@ class TestTaskStatus:
     def test_task_status_values(self):
         """验证 TaskStatus 所有枚举值存在且唯一。"""
         assert TaskStatus.PLANNING.value == "PLANNING"
+        assert TaskStatus.PENDING.value == "PENDING"
         assert TaskStatus.RUNNING.value == "RUNNING"
         assert TaskStatus.BLOCKED.value == "BLOCKED"
         assert TaskStatus.PAUSED.value == "PAUSED"
         assert TaskStatus.ABANDONED.value == "ABANDONED"
+        assert TaskStatus.CANCELLED.value == "CANCELLED"
         assert TaskStatus.DONE.value == "DONE"
         assert TaskStatus.FAILED.value == "FAILED"
+        assert TaskStatus.TIMEOUT.value == "TIMEOUT"
+        assert TaskStatus.CHANNEL_ERROR.value == "CHANNEL_ERROR"
 
     def test_task_status_is_string_enum(self):
         """验证 TaskStatus 是字符串枚举。"""
@@ -71,10 +101,14 @@ class TestTaskStatus:
         """验证不可调度状态集合包含终止状态。"""
         assert "PAUSED" in DISPATCH_INELIGIBLE_STATUSES
         assert "ABANDONED" in DISPATCH_INELIGIBLE_STATUSES
+        assert "CANCELLED" in DISPATCH_INELIGIBLE_STATUSES
         assert "DONE" in DISPATCH_INELIGIBLE_STATUSES
         assert "FAILED" in DISPATCH_INELIGIBLE_STATUSES
+        assert "TIMEOUT" in DISPATCH_INELIGIBLE_STATUSES
+        assert "CHANNEL_ERROR" in DISPATCH_INELIGIBLE_STATUSES
         assert "RUNNING" not in DISPATCH_INELIGIBLE_STATUSES
         assert "PLANNING" not in DISPATCH_INELIGIBLE_STATUSES
+        assert "PENDING" not in DISPATCH_INELIGIBLE_STATUSES
         assert "BLOCKED" not in DISPATCH_INELIGIBLE_STATUSES
 
     def test_dispatch_ineligible_all_values_are_strings(self):
@@ -91,6 +125,17 @@ class TestTaskStatus:
         assert "ABANDONED" in DISPATCH_INELIGIBLE_STATUSES
         assert "DONE" in DISPATCH_INELIGIBLE_STATUSES
         assert "FAILED" in DISPATCH_INELIGIBLE_STATUSES
+
+    def test_normalize_task_status_accepts_current_protocol_only(self):
+        assert normalize_task_status("done") == "DONE"
+        assert normalize_task_status("channel_error") == "CHANNEL_ERROR"
+        assert "COMPLETED" not in SUBAGENT_TASK_STATUSES
+        try:
+            normalize_task_status("completed")
+        except ValueError as exc:
+            assert str(exc) == "subagent_status_invalid"
+        else:
+            raise AssertionError("non-protocol status must fail closed")
 
     def test_dispatch_ineligible_status_is_not_enum_member(self):
         """验证 DISPATCH_INELIGIBLE_STATUSES 包含字符串值而非枚举成员。"""

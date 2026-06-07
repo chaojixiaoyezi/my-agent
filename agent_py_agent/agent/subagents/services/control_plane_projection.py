@@ -10,9 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...local_storage.control_plane_models import AgentEventInput, AgentRunRecord
-from ..models import SubAgentTask
-
-_TAKEOVER_READINESS_STATUSES = {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}
+from ..models import SubAgentTask, task_has_failure_status
 
 
 def sync_subagent_control_plane_projection(local_store: Any, task: SubAgentTask) -> None:
@@ -68,7 +66,7 @@ def _agent_run_metadata(task: SubAgentTask) -> dict[str, object]:
         metadata["inheritance_manifest_ref"] = task.inheritance_manifest_json
     if task.failure_handoff.run_id:
         metadata["failure_handoff_ref"] = task.failure_handoff_json
-    if task.takeover_readiness_json and task.status in _TAKEOVER_READINESS_STATUSES:
+    if task.takeover_readiness_json and task_has_failure_status(task):
         metadata["takeover_readiness_ref"] = task.takeover_readiness_json
     return metadata
 

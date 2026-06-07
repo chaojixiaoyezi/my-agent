@@ -41,6 +41,26 @@ def _apply_bool_fields(
     return warnings
 
 
+def _apply_float_fields(
+    out: dict[str, object],
+    defaults: object,
+    specs: tuple[tuple[str, float | None, float | None], ...],
+) -> list[str]:
+    warnings: list[str] = []
+    for key, min_val, max_val in specs:
+        coerced, warn = CoercionService.coerce_float(
+            key,
+            out.get(key),
+            getattr(defaults, key),
+            min_val=min_val,
+            max_val=max_val,
+        )
+        out[key] = coerced
+        if warn:
+            warnings.append(warn)
+    return warnings
+
+
 def _apply_choice_field(
     out: dict[str, object],
     defaults: object,
@@ -111,18 +131,19 @@ class GatewayFieldsService:
         ("gateway_stale_seconds", 30, None),
         ("gateway_stop_timeout", 1, None),
         ("gateway_request_timeout", 1, None),
-        ("gateway_request_poll_interval", 1, None),
         ("gateway_request_workers", 3, None),
         ("gateway_processing_timeout_seconds", 30, None),
         ("gateway_request_max_attempts", 0, None),
         ("gateway_port", 0, 65535),
     )
+    _FLOAT_FIELD_SPECS = (("gateway_request_poll_interval", 0.05, None),)
 
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         """Normalize gateway-related config fields."""
         out = dict(data)
         warnings = _apply_int_fields(out, defaults, GatewayFieldsService._INT_FIELD_SPECS)
+        warnings.extend(_apply_float_fields(out, defaults, GatewayFieldsService._FLOAT_FIELD_SPECS))
         return out, warnings
 
 

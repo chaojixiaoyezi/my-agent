@@ -2,12 +2,44 @@
 from __future__ import annotations
 
 from ....common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
+from ....subagents.models import TaskStatus, task_has_status, task_is_dispatch_ineligible
 from ...parameters import _bool_param, _non_negative_int
 from ...runner.context import current_subagent_run_id
 from ...spawn_role_seed import is_explicit_root_role
-from .run_ids import dispatch_include_run_ids_param
+from ..run_scope import remembered_orchestration_run_ids
 
-_DISPATCH_FINAL_STATUSES = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
+
+def dispatch_include_run_ids_param(params: dict[str, object], *, agent: object | None = None) -> list[str]:
+    ids = _explicit_run_ids_from_params(params)
+    for run_id in _direct_children_run_ids(params, agent):
+        _append_unique_id(ids, run_id)
+    return ids
+
+
+def _explicit_run_ids_from_params(params: dict[str, object]) -> list[str]:
+    ids: list[str] = []
+    for run_id in _run_id_list_value(params.get("run_ids")):
+        _append_unique_id(ids, run_id)
+    return ids
+
+
+def _run_id_list_value(value: object) -> list[str]:
+    if isinstance(value, (bool, int, float)):
+        return []
+    return string_list(value, TOOL_TEXT_LIST_OPTIONS)
+
+
+def _direct_children_run_ids(params: dict[str, object], agent: object | None) -> list[str]:
+    if not _bool_param(params.get("direct_children"), default=False):
+        return []
+    if agent is None or current_subagent_run_id(agent):
+        return []
+    return sorted(remembered_orchestration_run_ids(agent))
+
+
+def _append_unique_id(ids: list[str], run_id: str) -> None:
+    if run_id and run_id not in ids:
+        ids.append(run_id)
 
 
 def dispatch_apply_default(agent, params: dict[str, object], *, dry_run: bool | None = None) -> bool:
@@ -85,7 +117,7 @@ def _is_active_root_role_task(task, agent) -> bool:
     return (
         not str(getattr(task, "parent_id", "") or "").strip()
         and is_explicit_root_role(str(getattr(task, "role", "") or ""), getattr(agent.subagents, "role_template_dirs", None))
-        and str(getattr(task, "status", "") or "").upper() not in _DISPATCH_FINAL_STATUSES
+        and not task_is_dispatch_ineligible(task)
     )
 
 
@@ -139,9 +171,8 @@ def _parent_id_for_run(agent, run_id: str) -> str:
 
 
 def _is_active_ancestor(task) -> bool:
-    status = str(getattr(task, "status", "") or "").upper()
     active_attempt = _safe_run_id(getattr(task, "runner_active_attempt_id", ""))
-    return status == "RUNNING" or bool(active_attempt)
+    return task_has_status(task, TaskStatus.RUNNING) or bool(active_attempt)
 
 
 def _safe_run_id(value: object) -> str:

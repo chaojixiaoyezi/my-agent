@@ -9,7 +9,17 @@ from agent_py_agent.agent.capability import CapabilitySearchHit
 from agent_py_agent.agent.capability.config import CapabilityConfig
 
 from .model_capabilities import is_pending_capability_status
-from .models import CapabilityGrant, CapabilityRequest, SubAgentParsedOutput, SubAgentTask
+from .models import (
+    SUBAGENT_ENDED_STATUSES,
+    SUBAGENT_FAILURE_STATUSES,
+    CapabilityGrant,
+    CapabilityRequest,
+    SubAgentParsedOutput,
+    SubAgentTask,
+    TaskStatus,
+    VerificationStatus,
+    task_status_in,
+)
 from .reports import ActionPlanItem, DueCheckIssue, SubAgentBoardItem
 
 
@@ -241,20 +251,20 @@ def _route_card_payload(hit: CapabilitySearchHit) -> dict[str, str]:
 def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
     status = parsed.status.upper().strip()
     if parsed.capability_requests:
-        return "BLOCKED"
+        return TaskStatus.BLOCKED.value
     if is_pending_capability_status(status):
-        return "BLOCKED"
-    if status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
+        return TaskStatus.BLOCKED.value
+    if task_status_in(status, SUBAGENT_FAILURE_STATUSES):
         return status
-    if status == "DONE":
-        return "DONE"
-    return "BLOCKED"
+    if task_status_in(status, {TaskStatus.DONE.value}):
+        return TaskStatus.DONE.value
+    return TaskStatus.BLOCKED.value
 
 
 def _verification_from_runner_status(status: str) -> str:
-    if status.upper() == "DONE":
-        return "VERIFIED"
-    return "UNVERIFIED"
+    if task_status_in(status, {TaskStatus.DONE.value}):
+        return VerificationStatus.VERIFIED.value
+    return VerificationStatus.UNVERIFIED.value
 def _runner_next_action(*, params: RunnerNextActionParams) -> str:
     if params.dry_run:
         return ""
@@ -296,14 +306,7 @@ def _execution_context_instructions() -> list[str]:
         "如果通道损坏、工单文件缺失或任务边界不清，先标记 BLOCKED 并等待父代理处理。",
     ]
 def _is_active(status: str) -> bool:
-    return status.upper() not in {
-        "DONE",
-        "FAILED",
-        "BLOCKED",
-        "TIMEOUT",
-        "CHANNEL_ERROR",
-        "TAKEN_OVER",
-    }
+    return not task_status_in(status, SUBAGENT_ENDED_STATUSES)
 def _default_forbidden_write_roots() -> list[str]:
     home = Path.home()
     return [

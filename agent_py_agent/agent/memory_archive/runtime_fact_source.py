@@ -1,7 +1,11 @@
 
 from __future__ import annotations
 
-"""run-local fact source writer for compact/resume."""
+"""run-local fact source writer for compact/resume.
+
+Run phase facts are derived from current protocol statuses only; old success
+aliases remain raw text so compact cannot silently finish a live run.
+"""
 
 import json
 import re
@@ -135,7 +139,7 @@ def _phase_from_status(status: str) -> str:
     normalized = str(status or "").strip().upper()
     if normalized == "DONE":
         return "final"
-    if normalized in {"FAILED", "TIMEOUT", "INTERRUPTED"}:
+    if normalized in {"FAILED", "TIMEOUT", "CHANNEL_ERROR", "CANCELLED", "ABANDONED", "INTERRUPTED"}:
         return normalized.lower()
     return "running"
 

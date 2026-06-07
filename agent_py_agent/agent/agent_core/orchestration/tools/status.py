@@ -5,6 +5,12 @@ import json
 import time
 from typing import TYPE_CHECKING
 
+from ....subagents.models import (
+    SUBAGENT_FAILED_RESULT_STATUSES,
+    SUBAGENT_RESOLVED_TERMINAL_STATUSES,
+    TaskStatus,
+    task_status_in,
+)
 from ....tooling.models import BaseTool, ToolExecutionResult
 from ...agent_tree.status import agent_tree_status_payload
 from ..tool_specs import (
@@ -21,6 +27,13 @@ class InspectAgentTreeTool(BaseTool):
         self.spec = build_inspect_agent_tree_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+        cached = _cached_cooldown_payload_before_render(self.agent, params)
+        if cached is not None:
+            return ToolExecutionResult(
+                "inspect_agent_tree",
+                True,
+                json.dumps(cached, ensure_ascii=False, indent=2),
+            )
         payload = agent_tree_status_payload(self.agent, params)
         cooldown = _cooldown_payload_for_current(self.agent, params, payload)
         if cooldown is not None:
@@ -64,16 +77,49 @@ def _cooldown_payload_for_current(
     if "inspect_agent_tree_recent_duplicate" not in warnings:
         warnings.append("inspect_agent_tree_recent_duplicate")
     payload["warnings"] = warnings
-    policy = dict(payload.get("policy") if isinstance(payload.get("policy"), dict) else {})
+    _apply_cooldown_wait_policy(payload, cooldown_seconds)
+    return payload
+
+
+def _cached_cooldown_payload_before_render(agent: SimpleAgent, params: dict[str, object]) -> dict[str, object] | None:
+    key = _cache_key(params)
+    cache = getattr(agent, "_inspect_agent_tree_recent_cache", None)
+    if not isinstance(cache, dict):
+        return None
+    row = cache.get(key)
+    if not isinstance(row, dict):
+        return None
+    cooldown_seconds = _cooldown_seconds(agent, params)
+    age = time.time() - float(row.get("created_at", 0.0) or 0.0)
+    if age < 0 or age > cooldown_seconds:
+        return None
+    fingerprint = _tree_state_fingerprint(agent)
+    if not fingerprint or fingerprint != row.get("tree_state_fingerprint"):
+        return None
+    previous_payload = row.get("payload")
+    payload = _cooldown_payload(previous_payload, cooldown_seconds)
+    payload["cooldown_active"] = True
+    payload["cooldown_seconds"] = cooldown_seconds
+    payload["cooldown_age_seconds"] = round(age, 3)
+    payload["cooldown_source"] = "cached_tree_state_fingerprint"
+    warnings = list(payload.get("warnings") if isinstance(payload.get("warnings"), list) else [])
+    if "inspect_agent_tree_recent_duplicate" not in warnings:
+        warnings.append("inspect_agent_tree_recent_duplicate")
+    payload["warnings"] = warnings
+    _apply_cooldown_wait_policy(payload, cooldown_seconds)
+    return payload
+
+
+def _apply_cooldown_wait_policy(payload: dict[str, object], cooldown_seconds: float) -> None:
     wait_seconds = max(60, int(cooldown_seconds) or 0)
     wait_call = {"tool": "wait", "seconds": wait_seconds, "reason": "inspect_agent_tree cooldown"}
+    policy = dict(payload.get("policy") if isinstance(payload.get("policy"), dict) else {})
     policy["next_step"] = "刚刚已经查看过同一代理树；除非需要验收、接管或已有新事实，否则先推进汇总/等待子代理产物，不要高频轮询。"
     policy["suggested_tool_call"] = wait_call
     payload["policy"] = policy
     direct_children = dict(payload.get("direct_children") if isinstance(payload.get("direct_children"), dict) else {})
     direct_children["suggested_tool_call"] = wait_call
     payload["direct_children"] = direct_children
-    return payload
 
 
 def _cooldown_payload(value: object, cooldown_seconds: float) -> dict[str, object]:
@@ -95,7 +141,10 @@ def _cooldown_payload(value: object, cooldown_seconds: float) -> dict[str, objec
                 "failed": status.get("failed", []),
             },
             "running_run_ids": status.get("running", []),
-            "planning_run_ids": _node_ids_with_status(nodes, {"PLANNING", "PENDING"}),
+            "planning_run_ids": _node_ids_with_status(
+                nodes,
+                {TaskStatus.PLANNING.value, TaskStatus.PENDING.value},
+            ),
             "unfinished_run_ids": _unfinished_run_ids(nodes),
             "next_action": "wait_for_subagents_or_read_completed_refs",
             "suggested_tool_call": {"tool": "wait", "seconds": wait_seconds, "reason": "等待子代理完成事件"},
@@ -139,14 +188,21 @@ def _node_ids_with_status(nodes: list[object], statuses: set[str]) -> list[str]:
     return ids
 
 
+def _poll_inactive_statuses() -> frozenset[str]:
+    return frozenset({
+        TaskStatus.DONE.value,
+        *SUBAGENT_RESOLVED_TERMINAL_STATUSES,
+        *SUBAGENT_FAILED_RESULT_STATUSES,
+    })
+
+
 def _unfinished_run_ids(nodes: list[object]) -> list[str]:
     return [
         str(node.get("run_id") or "")
         for node in nodes
         if isinstance(node, dict)
         if str(node.get("run_id") or "")
-        if str(node.get("status") or "").strip().upper()
-        not in {"DONE", "CANCELLED", "ABANDONED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}
+        if not task_status_in(node.get("status"), _poll_inactive_statuses())
     ]
 
 
@@ -169,6 +225,7 @@ def _remember_payload(agent: SimpleAgent, params: dict[str, object], payload: di
     cache[_cache_key(params)] = {
         "created_at": time.time(),
         "payload": payload,
+        "tree_state_fingerprint": _tree_state_fingerprint(agent),
     }
 
 
@@ -195,3 +252,22 @@ def _cooldown_seconds(agent: SimpleAgent, params: dict[str, object]) -> float:
 def _configured_watch_interval(agent: SimpleAgent) -> object:
     config = getattr(agent, "config", None)
     return getattr(config, "subagent_watch_interval_seconds", 120)
+
+
+def _tree_state_fingerprint(agent: SimpleAgent) -> tuple[tuple[str, int, int], ...]:
+    manager = getattr(agent, "subagents", None)
+    workspace = getattr(manager, "workspace", None)
+    if workspace is None:
+        return ()
+    try:
+        task_files = sorted(workspace.glob("*/task.json"))
+    except OSError:
+        return ()
+    rows: list[tuple[str, int, int]] = []
+    for path in task_files:
+        try:
+            stat = path.stat()
+        except OSError:
+            return ()
+        rows.append((path.parent.name, int(stat.st_mtime_ns), int(stat.st_size)))
+    return tuple(rows)

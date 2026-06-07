@@ -1,6 +1,12 @@
 
 from __future__ import annotations
 
+"""Hierarchy prompt context and structured inheritance metadata.
+
+Machine state such as inherited parent context lives in task attributes; the goal
+text remains only the model-readable task handoff.
+"""
+
 from typing import TYPE_CHECKING
 
 from ...models import SubAgentTask
@@ -20,6 +26,7 @@ _INHERITED_ATTRIBUTE_FIELDS = (
     "required_tool_evidence",
     "required_tools",
 )
+_INHERITED_CONTEXT_ATTRIBUTE = "inherited_parent_context"
 
 
 def inherited_hierarchy_thought(parent: SubAgentTask, *, child_goal: str = "") -> str:
@@ -43,7 +50,7 @@ def scheduled_child_goal(
     write_roots: list[str] | None = None,
 ) -> str:
     goal = str(spec.goal or "").strip()
-    if not parent.goal or goal_carries_parent_scope(parent, goal):
+    if not parent.goal or _spec_carries_parent_scope(spec):
         return goal
     inherited = _inherited_goal_context(parent, goal, write_roots=write_roots)
     if not inherited:
@@ -51,13 +58,8 @@ def scheduled_child_goal(
     return "\n\n".join([goal, inherited])
 
 
-def goal_carries_parent_scope(parent: SubAgentTask, goal: str) -> bool:
-    del parent
-    return _has_inherited_parent_context_flag(goal)
-
-
-def _has_inherited_parent_context_flag(goal: str) -> bool:
-    return any(raw.strip() == "inherited_parent_context=true" for raw in str(goal or "").splitlines())
+def _spec_carries_parent_scope(spec: HierarchyChildSpec) -> bool:
+    return dict(getattr(spec, "attributes", {}) or {}).get(_INHERITED_CONTEXT_ATTRIBUTE) is True
 
 
 def relevant_parent_context(parent_goal: str, child_goal: str, *, limit: int = 800) -> str:
@@ -72,7 +74,6 @@ def _inherited_goal_context(
     write_roots: list[str] | None = None,
 ) -> str:
     lines = [
-        "inherited_parent_context=true",
         "继承父级目标/边界（只作为背景，不代表当前子任务要执行父级全部目标）：",
         "当前子任务只执行上方 goal，不要展开父级其它 sibling 目标。",
     ]
@@ -116,6 +117,8 @@ def _relevant_file_terms(parent: SubAgentTask, child_goal: str) -> list[str]:
 def inherited_hierarchy_attributes(parent: SubAgentTask, spec: HierarchyChildSpec) -> dict[str, object]:
     attrs = dict(getattr(spec, "attributes", {}) or {})
     parent_attrs = _task_attributes(parent)
+    if parent.goal and _INHERITED_CONTEXT_ATTRIBUTE not in attrs:
+        attrs[_INHERITED_CONTEXT_ATTRIBUTE] = True
     for field in _INHERITED_ATTRIBUTE_FIELDS:
         if field not in attrs and parent_attrs.get(field) not in (None, "", [], {}):
             attrs[field] = parent_attrs[field]

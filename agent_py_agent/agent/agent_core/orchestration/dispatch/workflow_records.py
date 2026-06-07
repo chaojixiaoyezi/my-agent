@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+from ....subagents.models import task_is_dispatch_ineligible
 from ....subagents.services.dispatch.params import DispatchRecordParams
 from ....subagents.services.workflow import (
     _try_workflow_plan,
@@ -24,7 +25,7 @@ def build_workflow_records(
         if not task.parent_id
         and not task.workflow_parent_run_id
         and _task_allows_dispatch_workflow(task, override_task_off)
-        and task.status not in {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
+        and not task_is_dispatch_ineligible(task)
     ]
     if ctx.limit > 0:
         workflow_candidates = workflow_candidates[: ctx.limit]

@@ -1,7 +1,11 @@
 
 from __future__ import annotations
 
-"""Refs-first recovery strategy for failed or stalled subagent runs."""
+"""Refs-first recovery strategy for failed or stalled subagent runs.
+
+Recovery eligibility reads the current TaskStatus protocol only; unknown raw
+status text remains audit data and never drives rerun, takeover, or closeout.
+"""
 
 import json
 import time
@@ -10,11 +14,16 @@ from pathlib import Path
 from typing import Any
 
 from ....runtime_errors import runtime_error_report
-from ...models import SubAgentTask
+from ...models import (
+    SUBAGENT_DEAD_STATUSES,
+    SUBAGENT_FAILURE_STATUSES,
+    SUBAGENT_RECOVERY_CLOSED_STATUSES,
+    SubAgentTask,
+    task_status_in,
+)
 from ...protocol import build_task_address, build_task_envelope
 from ...role_templates import role_template_snapshot_for_task
 from ..task_attribute_reader import task_int, task_list, task_role, task_status, task_text
-from .instructions import runner_instruction
 from .modes import (
     CLOSED,
     LEADERSHIP_RECOVERY,
@@ -29,9 +38,6 @@ from .modes import (
 )
 
 _PACKET_SCHEMA_VERSION = "subagent_continue_packet.v1"
-_RECOVERABLE_STATUSES = {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}
-_DEAD_STATUSES = {"TIMEOUT", "CHANNEL_ERROR"}
-_CLOSED_STATUSES = {"DONE", "ABANDONED", "TAKEN_OVER"}
 
 
 @dataclass(frozen=True)
@@ -122,8 +128,67 @@ def build_subagent_recovery_strategy(request: SubagentRecoveryStrategyRequest) -
         leadership_recovery=recovery_mode == LEADERSHIP_RECOVERY,
         no_progress_fuse=no_progress_fuse,
         blocked_by=packet.blocked_by,
-        runner_instruction=runner_instruction(task, packet, recovery_refs, recovery_mode),
+        runner_instruction=_runner_instruction(task, packet, recovery_refs, recovery_mode),
         packet_load_error=packet.load_error,
+    )
+
+
+def _runner_instruction(task: Any, packet: Any, recovery_refs: list[str], recovery_mode: str) -> str:
+    if recovery_mode == NO_PROGRESS_LIMIT_REACHED:
+        return "连续恢复没有进展：不要继续自动重试，也不要继续扩容；请汇总 refs 后等待父级/用户决策。"
+    if recovery_mode == LEADERSHIP_RECOVERY:
+        return (
+            "coordinator/lead 已失联或失败：请调用 subagents-leadership-recovery-plan 选择新 leader，"
+            "再分批接管其 child_run_ids，不要重复重启失联 coordinator。"
+        )
+    if recovery_mode in {TAKEOVER_FROM_CONTINUE_PACKET, TAKEOVER_FROM_CHECKPOINT}:
+        return _takeover_instruction(task, packet, recovery_refs)
+    if getattr(packet, "status", "") == "ready":
+        return _packet_instruction(task, packet)
+    if recovery_refs:
+        return _recovery_refs_instruction(task, packet, recovery_refs)
+    return "缺少可用恢复 refs：请先生成 checkpoint/summary/continue packet，再继续。"
+
+
+def _packet_instruction(task: Any, packet: Any) -> str:
+    return (
+        f"恢复 run {task.id}：先读取 task-local latest_continue_packet.json：{packet.ref}，"
+        "再按 packet.recommended_read_paths 读取最少必要 refs。不要重新从用户目标开始规划，"
+        "不要读取主代理 SOUL/USER/memory，只接着 current_step/next_action 执行。"
+    )
+
+
+def _recovery_refs_instruction(task: Any, packet: Any, recovery_refs: list[str]) -> str:
+    refs = ", ".join(recovery_refs[:4])
+    prefix = _packet_load_prefix(packet)
+    return (
+        f"恢复 run {task_text(task, 'id')}：{prefix}latest_continue_packet 不可用，改读 checkpoint/summary recovery_refs：{refs}。"
+        "只根据这些 task-local refs 接续，不要重读主代理长期记忆。"
+    )
+
+
+def _packet_load_prefix(packet: Any) -> str:
+    error = getattr(packet, "load_error", None)
+    if not isinstance(error, dict) or not error:
+        return ""
+    category = str(error.get("category") or "").strip()
+    context = str(error.get("context") or "").strip()
+    path = str(error.get("path") or getattr(packet, "ref", "") or "").strip()
+    parts = ["latest_continue_packet 读取失败"]
+    if category:
+        parts.append(f"category={category}")
+    if context:
+        parts.append(f"context={context}")
+    if path:
+        parts.append(f"path={path}")
+    return "；".join(parts) + "。"
+
+
+def _takeover_instruction(task: Any, packet: Any, recovery_refs: list[str]) -> str:
+    source = packet.ref if getattr(packet, "status", "") == "ready" else ", ".join(recovery_refs[:3])
+    return (
+        f"原 run {task_text(task, 'id')} 看起来已挂死：创建 takeover run 接管同一个任务目录 {task_text(task, 'task_dir')} "
+        f"和同一批 artifacts refs。恢复入口：{source}。不要重写健康分支。"
     )
 
 
@@ -278,15 +343,19 @@ def _needs_takeover(task: SubAgentTask) -> bool:
 def _is_dead(task: SubAgentTask) -> bool:
     status = task_status(task)
     failure_type = task_text(task, "failure_type").lower()
-    return status in _DEAD_STATUSES or failure_type in {"runner_timeout", "channel_error", "runner_channel_failed"}
+    return task_status_in(status, SUBAGENT_DEAD_STATUSES) or failure_type in {
+        "runner_timeout",
+        "channel_error",
+        "runner_channel_failed",
+    }
 
 
 def _is_recoverable(task: SubAgentTask) -> bool:
-    return task_status(task) in _RECOVERABLE_STATUSES
+    return task_status_in(task_status(task), SUBAGENT_FAILURE_STATUSES)
 
 
 def _is_closed(task: SubAgentTask) -> bool:
-    return task_status(task) in _CLOSED_STATUSES
+    return task_status_in(task_status(task), SUBAGENT_RECOVERY_CLOSED_STATUSES)
 
 
 def _no_progress_fuse(task: SubAgentTask, attempt_limit: int) -> bool:

@@ -15,10 +15,9 @@ from typing import Any
 from ..agent.common.json_io import JsonObjectReadReport, read_json_object_report
 from ..agent.gateway_parts.daemon_control import (
     get_running_pid,
-    is_pid_alive,
     remove_pid_file_if_owned,
 )
-from ..agent.gateway_parts.process_control import terminate_pid, wait_for_pid_exit
+from ..agent.gateway_parts.process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
 from .models import AdapterOptions
 
 

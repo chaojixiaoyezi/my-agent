@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from ...subagents.models import SUBAGENT_FAILED_RESULT_STATUSES, TaskStatus, task_status_in
+
 
 def scope_main_visible_snapshot(agent: object, snapshot: object, remembered: set[str]) -> object:
     del agent
@@ -28,9 +30,9 @@ def visible_nodes(nodes: list[dict[str, object]], raw_run_ids: object) -> list[d
 
 
 def coordination_advice(nodes: list[dict[str, object]], allowed_tools: object = None) -> dict[str, object]:
-    pending = _run_ids_with_status(nodes, {"PENDING", "PLANNING", "RUNNING", "AWAITING_ACCEPTANCE"})
-    completed = _run_ids_with_status(nodes, {"DONE"})
-    blocked = _run_ids_with_status(nodes, {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"})
+    pending = _run_ids_with_status(nodes, {TaskStatus.PENDING.value, TaskStatus.PLANNING.value, TaskStatus.RUNNING.value})
+    completed = _run_ids_with_status(nodes, {TaskStatus.DONE.value})
+    blocked = _run_ids_with_status(nodes, {TaskStatus.BLOCKED.value} | SUBAGENT_FAILED_RESULT_STATUSES)
     allowed = _allowed_tool_set(allowed_tools)
     return {
         "schema_version": "agent_tree_coordination_advice.v1",
@@ -71,14 +73,14 @@ def _row_touches_selected(row: object, selected: set[str]) -> bool:
 def _add_status_bucket(buckets: dict[str, list[str]], run_id: str, status: str) -> None:
     if not run_id:
         return
-    if status == "RUNNING":
+    if task_status_in(status, {TaskStatus.RUNNING.value}):
         buckets["running"].append(run_id)
-    if status == "BLOCKED":
+    if task_status_in(status, {TaskStatus.BLOCKED.value}):
         buckets["blocked"].append(run_id)
         buckets["takeover_candidates"].append(run_id)
-    if status == "DONE":
+    if task_status_in(status, {TaskStatus.DONE.value}):
         buckets["completed"].append(run_id)
-    if status in {"FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
+    if task_status_in(status, SUBAGENT_FAILED_RESULT_STATUSES):
         buckets["failed"].append(run_id)
         buckets["takeover_candidates"].append(run_id)
 
@@ -87,7 +89,7 @@ def _run_ids_with_status(nodes: list[dict[str, object]], statuses: set[str]) -> 
     return [
         str(node.get("run_id") or "")
         for node in nodes
-        if str(node.get("run_id") or "") and str(node.get("status") or "").strip().upper() in statuses
+        if str(node.get("run_id") or "") and task_status_in(node.get("status"), statuses)
     ]
 
 

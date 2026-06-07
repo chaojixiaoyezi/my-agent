@@ -34,6 +34,21 @@ def test_safe_agent_tree_error_is_structured(monkeypatch):
     assert "刷新代理树" in error["model_message"]
 
 
+def test_background_result_without_explicit_ok_is_failed():
+    """后台 dispatch 结果必须明确 ok=True 才能标 finished。"""
+    import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
+
+    agent = SimpleNamespace(
+        _background_subagent_dispatches={
+            "launch-1": {"run_ids": ["child-1"], "thread_name": "thread-1", "status": "running"}
+        }
+    )
+
+    background_dispatch._remember_background_result(agent, "launch-1", {"summary": "missing ok"})
+
+    assert agent._background_subagent_dispatches["launch-1"]["status"] == "failed"
+
+
 def test_start_background_dispatch_reports_mark_errors(monkeypatch):
     """后台启动状态写不进子代理账本时，父代理要能看到结构化错误。"""
     import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch

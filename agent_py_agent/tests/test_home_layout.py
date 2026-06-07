@@ -43,6 +43,26 @@ def test_task_workspace_path_template_sanitizes_task_name(tmp_path: Path):
     assert path == tmp_path / "tasks" / "2026-05-13" / "示例网站-e2e-main"
 
 
+def test_concise_task_title_uses_path_basename_without_host_home() -> None:
+    from agent_py_agent.agent.user_space.task_title import concise_task_title
+
+    title = concise_task_title(
+        "你现在只做一件事：认真阅读 /Users/example/study-agent/all-agent 下面的项目，分析架构。"
+    )
+
+    assert title == "all-agent-架构分析"
+
+
+def test_concise_task_title_handles_windows_paths() -> None:
+    from agent_py_agent.agent.user_space.task_title import concise_task_title
+
+    title = concise_task_title(
+        r"请阅读 C:\Users\ada\study-agent\all-agent 下面的项目，分析架构并写报告。"
+    )
+
+    assert title == "all-agent-架构分析"
+
+
 def test_run_workspace_same_slug_different_prompt_gets_unique_dir(tmp_path: Path):
     from agent_py_agent.agent.user_space.run_workspace import (
         EnsureRunWorkspaceRequest,

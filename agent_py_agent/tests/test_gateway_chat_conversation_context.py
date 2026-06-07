@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 
 from agent_py_agent.agent.agent_core._runtime_params import ArchiveRunParams
-from agent_py_agent.agent.agent_core.run_task_workspace_index import register_saved_run_task_ref
 from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+    register_saved_run_task_ref,
     write_run_task_workspace_if_needed,
 )
 from agent_py_agent.agent.core import SimpleAgent

@@ -65,6 +65,25 @@ class TestPostJson:
         with pytest.raises(RuntimeError, match="HTTP 401"):
             post_json(_request(api_key="bad-key"))
 
+    @patch("urllib.request.urlopen")
+    def test_http_context_window_error_is_typed_provider_error(self, mock_urlopen):
+        """验证上下文窗口错误在 provider HTTP 边界结构化，核心层不用猜异常文本。"""
+        from agent_py_agent.agent.backends.errors import ProviderContextWindowError
+        from agent_py_agent.agent.backends.gateway_helpers import post_json
+
+        body = BytesIO(b'{"error":{"message":"prompt too long for context window"}}')
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://api.example.com",
+            400,
+            "Bad Request",
+            {"Content-Type": "application/json"},
+            body,
+        )
+
+        with pytest.raises(ProviderContextWindowError) as exc_info:
+            post_json(_request())
+        assert exc_info.value.error_code == "MODEL_CONTEXT_WINDOW_EXCEEDED"
+
     @patch("agent_py_agent.agent.backends.gateway_helpers.time.sleep")
     @patch("urllib.request.urlopen")
     def test_retryable_http_error_retries_before_wrapping(self, mock_urlopen, mock_sleep):

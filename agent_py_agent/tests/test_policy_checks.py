@@ -485,7 +485,7 @@ def test_commands_for_action_no_progress_fuse():
 
 def test_is_active_terminal():
     """终态返回 False。"""
-    for status in ["DONE", "FAILED", "BLOCKED", "TIMEOUT", "CHANNEL_ERROR", "DONE", "TAKEN_OVER"]:
+    for status in ["DONE", "FAILED", "BLOCKED", "TIMEOUT", "CHANNEL_ERROR", "CANCELLED", "ABANDONED", "TAKEN_OVER"]:
         assert _is_active(status) is False
 
 

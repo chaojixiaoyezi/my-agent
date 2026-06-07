@@ -2,6 +2,12 @@
 from __future__ import annotations
 
 from ....runtime_errors import runtime_error_report
+from ....subagents.models import (
+    SUBAGENT_FAILURE_STATUSES,
+    SUBAGENT_TASK_STATUSES,
+    TaskStatus,
+    task_status_in,
+)
 from ....subagents.services.hierarchy.qa_scheduler import (
     qa_orchestration_advice,
     quality_advice_payload,
@@ -303,24 +309,13 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
         status = str(getattr(item, "status", "") or "UNKNOWN").upper()
         item_id = str(getattr(item, "id", "") or "")
         by_status[status] = by_status.get(status, 0) + 1
-        if status == "PLANNING":
+        if task_status_in(status, {TaskStatus.PLANNING.value}):
             planning_ids.append(item_id)
-        if status == "RUNNING":
+        if task_status_in(status, {TaskStatus.RUNNING.value}):
             running_ids.append(item_id)
-        if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
+        if task_status_in(status, SUBAGENT_FAILURE_STATUSES):
             recovery_ids.append(item_id)
-        if status not in {
-            "DONE",
-            "CANCELLED",
-            "ABANDONED",
-            "TAKEN_OVER",
-            "PLANNING",
-            "RUNNING",
-            "BLOCKED",
-            "FAILED",
-            "TIMEOUT",
-            "CHANNEL_ERROR",
-        }:
+        if not task_status_in(status, SUBAGENT_TASK_STATUSES):
             unverified_ids.append(item_id)
     unfinished_ids = [item for item in [*planning_ids, *running_ids] if item]
     recovery_ids = [item for item in recovery_ids if item]

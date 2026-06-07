@@ -202,7 +202,7 @@ def _tool_event_fields(
     """Normalize tool-call facts before creating the archive event."""
     tool_name = _first_text(tool_call, "tool_name", "tool", "name") or "unknown"
     tool_call_id = _first_text(tool_call, "tool_call_id", "call_id", "id")
-    tool_success = _first_bool(tool_call, "tool_success", "success", "ok")
+    tool_success = _first_bool(tool_call, "tool_success", "ok")
     status = _tool_status(tool_call, tool_success)
     error_code = _first_text(tool_call, "error_code", "code")
     metadata = _tool_metadata(

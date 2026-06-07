@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_py_agent.agent.agent_core.orchestration.workflow_mode import tool_workflow_mode
+from agent_py_agent.agent.subagents.services.workflow import tool_workflow_mode
 
 
 @pytest.mark.parametrize(

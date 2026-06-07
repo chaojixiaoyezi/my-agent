@@ -16,7 +16,7 @@ from .io import (
     read_json_file_report,
     write_json_file,
 )
-from .paths import GatewayPaths
+from .paths import GatewayPaths, gateway_chunk_path
 from .queue_service import (
     archive_request,
     claim_request,
@@ -57,6 +57,12 @@ class _ClaimedGatewayRequestContext:
     request_payload: dict
     request_id: str
     worker_id: str
+
+
+@dataclass(frozen=True)
+class _PendingGatewayRequest:
+    path: Path
+    payload: dict
 
 
 def submit_gateway_ask(
@@ -119,25 +125,43 @@ def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: flo
 def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths, *, worker_id: str = "gw-worker") -> int:
     ensure_gateway_folders(paths)
     processed = 0
-    for request_path in _iter_pending_request_paths(paths):
-        if _request_deferred_until_later(request_path):
+    for request in _iter_pending_requests(paths):
+        if _request_deferred_until_later(request):
             continue
-        if _process_gateway_request_path(agent, paths, request_path, worker_id):
+        if _process_gateway_request_path(agent, paths, request.path, worker_id):
             processed += 1
     return processed
 
 
 def _iter_pending_request_paths(paths: GatewayPaths) -> list[Path]:
-    return sorted(paths.inbox.glob("*.json"), key=_pending_request_sort_key)
+    return [entry.path for entry in _iter_pending_requests(paths)]
+
+
+def _iter_pending_requests(paths: GatewayPaths) -> list[_PendingGatewayRequest]:
+    entries = [
+        _PendingGatewayRequest(
+            path=request_path,
+            payload=read_json_file_report(
+                request_path,
+                context="gateway.worker.pending_scan.read",
+            ).payload,
+        )
+        for request_path in paths.inbox.glob("*.json")
+    ]
+    return sorted(entries, key=_pending_request_entry_sort_key)
 
 
 def _pending_request_sort_key(request_path: Path) -> tuple[int, float, str]:
     payload_report = read_json_file_report(request_path, context="gateway.worker.pending_priority.read")
-    payload = payload_report.payload or {}
+    return _pending_request_entry_sort_key(_PendingGatewayRequest(request_path, payload_report.payload or {}))
+
+
+def _pending_request_entry_sort_key(request: _PendingGatewayRequest) -> tuple[int, float, str]:
+    payload = request.payload or {}
     priority = str(payload.get("priority") or "").strip().lower()
     is_recovery = priority == "recovery" or bool(payload.get("requeued_at"))
-    created_at = _request_created_at(payload, request_path)
-    return (1 if is_recovery else 0, created_at, request_path.name)
+    created_at = _request_created_at(payload, request.path)
+    return (1 if is_recovery else 0, created_at, request.path.name)
 
 
 def _request_created_at(payload: dict, request_path: Path) -> float:
@@ -154,9 +178,8 @@ def _request_created_at(payload: dict, request_path: Path) -> float:
         return 0.0
 
 
-def _request_deferred_until_later(request_path: Path) -> bool:
-    payload_report = read_json_file_report(request_path, context="gateway.worker.pending_defer.read")
-    payload = payload_report.payload
+def _request_deferred_until_later(request: _PendingGatewayRequest) -> bool:
+    payload = request.payload
     if not payload:
         return False
     try:
@@ -240,6 +263,8 @@ def _finish_claimed_gateway_request(
     request_id: str,
     response: dict,
 ) -> None:
+    target_folder = paths.done if response.get("ok") else paths.failed
+    _attach_archived_chunk_stream(paths, request_id, target_folder, response)
     response_path = gateway_response_path(paths, str(response.get("id", processing_path.stem)))
     final_request_load_error = _write_final_request_archive_payload(processing_path, response)
     if final_request_load_error is not None:
@@ -247,10 +272,35 @@ def _finish_claimed_gateway_request(
     if not response_path.exists():
         write_json_file(response_path, response)
     append_gateway_history(paths, response)
-    target_folder = paths.done if response.get("ok") else paths.failed
     archived = archive_request(processing_path, target_folder, request_id)
     if not archived and not processing_path.exists():
         materialize_missing_archive(target_folder, request_id, response)
+
+
+def _attach_archived_chunk_stream(paths: GatewayPaths, request_id: str, target_folder: Path, response: dict) -> None:
+    archived_path, archive_error = _archive_gateway_chunk_stream(paths, request_id, target_folder)
+    if archived_path is not None:
+        response["chunk_stream_path"] = str(archived_path)
+    if archive_error is not None:
+        response["chunk_stream_archive_error"] = archive_error
+
+
+def _archive_gateway_chunk_stream(paths: GatewayPaths, request_id: str, target_folder: Path) -> tuple[Path | None, dict | None]:
+    chunk_path = gateway_chunk_path(paths, request_id)
+    if not chunk_path.exists():
+        return None, None
+    target_folder.mkdir(parents=True, exist_ok=True)
+    target = target_folder / chunk_path.name
+    try:
+        chunk_path.replace(target)
+    except OSError as exc:
+        from ..runtime_errors import runtime_error_report
+
+        report = runtime_error_report(exc, context="gateway.worker.chunk_stream.archive")
+        report["path"] = str(chunk_path)
+        report["target_path"] = str(target)
+        return None, report
+    return target, None
 
 
 def _write_final_request_archive_payload(processing_path: Path, response: dict) -> dict | None:

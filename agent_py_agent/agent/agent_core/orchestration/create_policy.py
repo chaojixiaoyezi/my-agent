@@ -8,6 +8,7 @@ from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, bool_value, string_l
 from ...settings.defaults import DEFAULT_COMMAND_ACCESS_MODE
 from ...subagents.role_templates import COORDINATOR_TOOLS, role_template_snapshot_for_role
 from ...subagents.services.base import CreateRunParams
+from ...subagents.services.workflow import tool_workflow_mode
 from ..parameters import _bool_param, _positive_int
 from ..runner.ref_fields import params_input_refs, params_output_refs
 from ..spawn_role_seed import is_explicit_root_role
@@ -18,7 +19,6 @@ from .create_constraints import (
 from .create_context import create_context_manifest, create_context_packs
 from .create_conversation import add_current_conversation_attrs
 from .work_scope import add_work_scope_key
-from .workflow_mode import tool_workflow_mode
 
 
 def create_run_params(

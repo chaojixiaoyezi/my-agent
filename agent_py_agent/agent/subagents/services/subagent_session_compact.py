@@ -27,6 +27,25 @@ class SubagentSessionCompactRequest:
     output_payload: dict[str, object]
 
 
+def subagent_session_compact_payload_from_result(result: object) -> dict[str, object]:
+    if not bool(getattr(result, "memory_compact_suggested", False)):
+        return {}
+    return {
+        "suggested": True,
+        "status": str(getattr(result, "memory_compact_status", "") or ""),
+        "auto_status": str(getattr(result, "memory_compact_auto_status", "") or ""),
+        "ratio": float(getattr(result, "memory_compact_ratio", 0.0) or 0.0),
+        "message": str(getattr(result, "memory_compact_message", "") or ""),
+        "commands": list(getattr(result, "memory_compact_commands", []) or []),
+        "token_budget": {
+            "current_tokens": int(getattr(result, "cumulative_token_estimate", 0) or 0),
+            "turn_tokens": int(getattr(result, "turn_token_estimate", 0) or 0),
+            "prompt_tokens": int(getattr(result, "prompt_token_estimate", 0) or 0),
+        },
+        "continue_packet": dict(getattr(result, "memory_compact_auto_continue_packet", None) or {}),
+    }
+
+
 def write_subagent_session_compact(request: SubagentSessionCompactRequest) -> dict[str, str]:
     if not _should_write(request.compact_payload):
         return {}
@@ -181,4 +200,8 @@ def _safe_id(value: str) -> str:
     return cleaned[:48] or "run"
 
 
-__all__ = ["SubagentSessionCompactRequest", "write_subagent_session_compact"]
+__all__ = [
+    "SubagentSessionCompactRequest",
+    "subagent_session_compact_payload_from_result",
+    "write_subagent_session_compact",
+]

@@ -20,6 +20,9 @@ SimpleAgent orchestration tool
 - `agent/subagents/kernel.py`：从 canonical state、projection 和 task workspace 生成稳定树快照。
 - `agent/subagents/parsing/`、`agent/subagents/rendering.py`、`agent/subagents/role_templates.py`：
   放当前子代理协议解析、展示渲染和模板策略；不再保留单独一跳 facade。
+- `agent/agent_core/subagent_mixin.py`：子代理生命周期入口，包含 run/finalize、结构化修复、
+  recovery snapshot 和 parent planner 记录；旧私有 repair/planner mixin 不再作为跳转层存在。
+- `agent/agent_core/subagent/params.py`：子代理生命周期和 parent planner 参数类的权威位置。
 - `agent/agent_core/orchestration/`：主代理模型可见的 `create_subagents`、`dispatch_subagents`、`inspect_agent_tree`、`cancel_subagents` 等工具实现。
 - `agent/agent_core/runner/`：子代理 worker、prompt、session heartbeat、timeout policy。
 
@@ -27,8 +30,12 @@ SimpleAgent orchestration tool
 
 - 权威状态：当前 task workspace 的 `work/agents/<run_id>/canonical_state.json`。
 - 状态机：完成只写 `DONE`；失败/阻塞只写当前协议枚举，不把旧标签或自然语言别名提升为机器状态。
-- 状态判断走共享 `contracts/state_machine.py` 和 canonical state；旧 `subagents/state_machine.py`
-  私有转换表已删除，避免 `WAIT_CHILD` 等历史状态绕过当前协议。
+- 状态判断走 canonical state 和 `subagents.models` 中的 `TaskStatus` /
+  `VerificationStatus` helper；旧 `subagents/state_machine.py` 私有转换表已删除，
+  避免 `WAIT_CHILD` 等历史状态绕过当前协议。
+- 恢复候选、agent tree bucket、due-check、leadership recovery 和 runner 结果
+  payload 不再各自维护失败/完成状态集合；这些机器判断从 `subagents.models`
+  读取当前协议集合，未知旧标签只保留为审计文本。
 - 恢复模式和 capability 等待状态也只认当前结构化枚举。未知 `rerun_*` / `takeover_*`
   前缀、`NEEDS_TOOL` 这类旧别名、工具错误正文，都不能触发自动重跑、接管、授权或验收状态变更。
 - capability request 的打开/终态判断集中在 `model_capabilities.py`。`OPEN` 代表待处理，
@@ -41,6 +48,8 @@ SimpleAgent orchestration tool
 - task rollup：`work/compact/task_rollup.json` 汇总子代理状态和 refs，父代理恢复时先读这里。
 - `agent_name` 是展示名，不是层级或角色事实。默认展示名使用 `agent-d<depth>-<role>-<index>`；
   深度、权限、模板和状态仍只读结构化字段，不能从显示名、中文叫法或英文别名里反推。
+- 层级继承状态写在 `attributes.inherited_parent_context`；`goal` 只承载给模型阅读的任务说明和
+  父级边界摘要，不承担机器状态判断。
 
 ## Services
 
@@ -62,6 +71,9 @@ SimpleAgent orchestration tool
 ## Recovery And QA Signals
 
 恢复器只根据 `BLOCKED`、`FAILED`、`TIMEOUT`、`CHANNEL_ERROR` 等结构化状态和 refs 行动。
+dispatch、runner summary、parent-timeout recovery、compact continue packet 和 board risk
+使用同一组状态 helper 判断 done/verified、failure、ended、dispatch-ineligible 和 handled terminal，
+不在各自模块维护额外的状态别名表。
 QA 失败只来自任务状态、结构化 `ok: false`、`passed: false`、blockers、测试记录或读取错误；
 `ERROR`、`FAILED` 这类写在 summary/旧 payload 里的普通词不会自动触发 repair wave。
 
@@ -93,3 +105,9 @@ QA 失败只来自任务状态、结构化 `ok: false`、`passed: false`、block
 `artifact_refs`、`evidence kind=artifact` 和 `evidence_packets[].artifact_refs`。
 `deliverables`、`files_modified`、顶层 `file_path/path` 这类历史别名不会被恢复成
 artifact refs。创建任务时给子代理的 `output_files` 是目标路径合同，不是结果回报别名。
+
+`create_subagents` 的 `count > 1` 模式会复制同一份任务说明；如果模型同时给了共享
+`output_files` / `output_refs`，运行时会把原共享目标登记为 `shared_requested_output_*`，
+并给每个 child 分配 task-local `work/child_outputs/...` 独立目标，避免多个 worker
+覆盖同一个文件。需要多个 child 精确写不同业务文件时，优先用 `items` 给每个 child
+显式声明自己的输出路径。

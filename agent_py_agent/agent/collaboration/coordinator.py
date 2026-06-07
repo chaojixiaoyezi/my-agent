@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from .models import CaseDecision, new_decision_id
 from .request_status import (
+    CollaborationRequestStatus,
     is_blocked_request_status,
     is_declined_request_status,
     is_timed_out_request_status,
@@ -132,7 +133,7 @@ def _mark_expired_requests(store: CollaborationStore, case_id: str, *, now: floa
             evidence_sources,
             target_identity_keys=store.agent_identity_keys,
         )
-        store.update_request_status({'case_id': case_id, 'request_id': request.request_id, 'status': "timeout", 'actor_agent_id': "collaboration_coordinator", 'summary': "协作请求超过 deadline，已标记为 timeout；主代理可带部分结果、未响应名单和限制继续推进。", 'now': now, 'metadata': {
+        store.update_request_status({'case_id': case_id, 'request_id': request.request_id, 'status': CollaborationRequestStatus.TIMEOUT.value, 'actor_agent_id': "collaboration_coordinator", 'summary': "协作请求超过 deadline，已标记为 timeout；主代理可带部分结果、未响应名单和限制继续推进。", 'now': now, 'metadata': {
                 "timeout": {
                     "deadline_at": deadline,
                     "timed_out_at": now,

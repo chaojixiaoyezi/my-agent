@@ -61,6 +61,30 @@ def test_cancel_subagents_tool_filters_by_root_and_status(tmp_path):
     assert agent.subagents.load(done_child.id).status == "DONE"
 
 
+def test_cancel_subagents_tool_rejects_old_status_filter_alias(tmp_path):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    parent, child, _done_child = _create_cancel_tree(agent)
+
+    result = agent.tools.execute_call(
+        {
+            "tool": "cancel_subagents",
+            "root_id": parent.id,
+            "status": ["completed"],
+            "reason": "旧别名不能驱动取消筛选",
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert payload["error"] == "invalid_status_filter"
+    assert payload["invalid_statuses"] == ["completed"]
+    assert agent.subagents.load(parent.id).status == "RUNNING"
+    assert agent.subagents.load(child.id).status == "PLANNING"
+
+
 def test_cancel_subagents_tool_reports_list_runs_failure_for_tree_filters(tmp_path, monkeypatch):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig

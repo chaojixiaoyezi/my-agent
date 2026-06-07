@@ -92,6 +92,38 @@ def test_runner_dispatch_record_marks_partial_success_children():
     assert record.runner_unfinished_child_ids == ["child-b"]
 
 
+def test_runner_dispatch_record_does_not_mark_handled_terminal_children_unfinished():
+    before = SimpleNamespace(status="PLANNING", verification_status="UNVERIFIED")
+    after = SimpleNamespace(
+        status="DONE",
+        verification_status="VERIFIED",
+        child_ids=["child-cancelled", "child-abandoned", "child-taken-over", "child-paused"],
+    )
+    agent = MagicMock()
+    agent.subagents.load.side_effect = [
+        SimpleNamespace(role="worker", status="CANCELLED"),
+        SimpleNamespace(role="worker", status="ABANDONED"),
+        SimpleNamespace(role="worker", status="TAKEN_OVER"),
+        SimpleNamespace(role="worker", status="PAUSED"),
+    ]
+    agent.subagents.dispatch.make_dispatch_record.side_effect = lambda *, params: params
+
+    record = _runner_dispatch_record(
+        RunnerDispatchRecordParams(
+            agent=agent,
+            run_id="root",
+            before=before,
+            after=after,
+            result=_runner_result(),
+            retry_reason="",
+            start_runner=True,
+        )
+    )
+
+    assert record.runner_child_status_counts == {"ABANDONED": 1, "CANCELLED": 1, "PAUSED": 1, "TAKEN_OVER": 1}
+    assert record.runner_unfinished_child_ids == ["child-paused"]
+
+
 def test_runner_dispatch_record_surfaces_child_load_error():
     before = SimpleNamespace(status="PLANNING", verification_status="UNVERIFIED")
     after = SimpleNamespace(status="DONE", verification_status="VERIFIED", child_ids=["child-broken"])

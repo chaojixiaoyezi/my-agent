@@ -348,9 +348,17 @@ def _read_coverage_payload(value: Any) -> dict[str, Any]:
     primary = coverage.get("primary") if isinstance(coverage.get("primary"), dict) else {}
     if not primary:
         return {}
+    raw_sources = coverage.get("sources") if isinstance(coverage.get("sources"), list) else []
+    sources = [
+        row
+        for item in raw_sources
+        if (row := _read_coverage_source_payload(item))
+    ]
     result = {
         "schema_version": coverage.get("schema_version", 1),
         "source_count": _positive_int(coverage.get("source_count")),
+        "omitted_source_count": _positive_int(coverage.get("omitted_source_count")),
+        "sources": sources[:24],
         "primary": {
             "kind": str(primary.get("kind") or "char_window"),
             "source_path": str(primary.get("source_path") or ""),
@@ -369,6 +377,28 @@ def _read_coverage_payload(value: Any) -> dict[str, Any]:
     }
     result["primary"] = {key: item for key, item in result["primary"].items() if item not in ("", 0, [], {}, None)}
     return {key: item for key, item in result.items() if item not in ("", 0, [], {}, None)}
+
+
+def _read_coverage_source_payload(item: Any) -> dict[str, Any]:
+    source = item if isinstance(item, dict) else {}
+    if not source:
+        return {}
+    result = {
+        "kind": str(source.get("kind") or "char_window"),
+        "source_path": str(source.get("source_path") or ""),
+        "covered_until": _positive_int(source.get("covered_until")),
+        "covered_until_offset": _positive_int(source.get("covered_until_offset")),
+        "covered_until_line": _positive_int(source.get("covered_until_line")),
+        "total": _positive_int(source.get("total")),
+        "total_chars": _positive_int(source.get("total_chars")),
+        "total_lines": _positive_int(source.get("total_lines")),
+        "next_offset": _positive_int(source.get("next_offset")),
+        "next_start_line": _positive_int(source.get("next_start_line")),
+        "complete": bool(source.get("complete")),
+        "range_count": _positive_int(source.get("range_count")),
+        "omitted_range_count": _positive_int(source.get("omitted_range_count")),
+    }
+    return {key: value for key, value in result.items() if value not in ("", 0, [], {}, None)}
 
 
 def _pending_deferred_tool_calls_payload(value: Any) -> list[dict[str, Any]]:

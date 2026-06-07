@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..runtime_errors import runtime_error_report
+from .io import gateway_request_counts
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,7 @@ def handle_status(handler, server) -> None:
         handler._send_json(500, {"error": "server not initialized"})
         return
     state, state_load_error = _read_state_report(server.paths.state)
-    counts = _request_counts(server.paths)
+    counts = gateway_request_counts(server.paths, include_archives=False)
     response = {
         "status": state.get("status", "unknown"),
         "pid": state.get("pid"),
@@ -95,19 +96,6 @@ def _state_load_error(state_path, exc: BaseException) -> dict[str, Any]:
     report = runtime_error_report(exc, context="gateway.http_state.read")
     report["path"] = str(state_path)
     return report
-
-
-def _request_counts(paths) -> dict[str, int]:
-    counts = {"pending": 0, "processing": 0, "done": 0, "failed": 0}
-    for name, dir_path in (
-        ("pending", paths.inbox),
-        ("processing", paths.processing),
-        ("done", paths.done),
-        ("failed", paths.failed),
-    ):
-        if dir_path.exists():
-            counts[name] = len(list(dir_path.iterdir()))
-    return counts
 
 
 def handle_result(handler, server) -> None:

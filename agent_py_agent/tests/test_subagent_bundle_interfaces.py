@@ -123,3 +123,22 @@ def test_lifecycle_set_status_accepts_params_bundle():
 
     assert updated.status == "DONE"
     assert updated.result == "complete"
+
+
+def test_lifecycle_set_status_rejects_non_protocol_status():
+    from agent_py_agent.agent.subagents.services.lifecycle import (
+        SetStatusParams,
+        SubAgentLifecycleService,
+    )
+
+    task = _LifecycleTask(id="run-status")
+    manager = SimpleNamespace(load=lambda run_id: task, save=lambda task: None)
+    service = SubAgentLifecycleService(manager)
+
+    try:
+        service.set_status(SetStatusParams(run_id="run-status", status="completed"))
+    except ValueError as exc:
+        assert str(exc) == "subagent_status_invalid"
+    else:
+        raise AssertionError("non-protocol status must not be written to task.status")
+    assert task.status == "RUNNING"

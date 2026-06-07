@@ -89,8 +89,9 @@ def _render_orchestration_summary(
     payload: dict[str, Any],
     archive_record: dict[str, object],
 ) -> str:
+    ok = archive_record.get("ok") is True
     lines = [
-        f"[tool={tool}; status={'ok' if archive_record.get('ok', True) else 'error'}]",
+        f"[tool={tool}; status={'ok' if ok else 'error'}]",
         f"{heading}:",
         "- policy: refs-first orchestration output; do not read artifact/file bodies unless a specific evidence ref requires it.",
     ]
@@ -322,7 +323,7 @@ def _source_artifact_record(payload: dict[str, Any]) -> dict[str, object]:
         "scoped_call_id": str(payload.get("scoped_call_id") or ""),
         "output_hash": str(payload.get("sha256") or ""),
         "output_size_bytes": int(payload.get("size_bytes") or payload.get("content_chars") or 0),
-        "ok": bool(payload.get("ok", True)),
+        "ok": payload.get("ok") is True,
     }
 
 

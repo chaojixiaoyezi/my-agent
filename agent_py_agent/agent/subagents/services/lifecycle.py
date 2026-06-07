@@ -1,7 +1,11 @@
 
 from __future__ import annotations
 
-"""Lifecycle mutation service for subagent task records."""
+"""Lifecycle mutation service for subagent task records.
+
+Manual status mutations pass through the current TaskStatus protocol instead
+of accepting old success/failure aliases.
+"""
 
 import time
 from dataclasses import dataclass
@@ -11,11 +15,14 @@ from ...memory_routing import load_routes, match_routes, resolve_required_paths
 from ...runtime_errors import runtime_error_report
 from ..capability_request_identity import find_equivalent_capability_request
 from ..models import (
+    SUBAGENT_WAKE_STATUSES,
     CapabilityGap,
     CapabilityGrant,
     CapabilityRequest,
     SubAgentTask,
     VerificationEvidence,
+    normalize_task_status,
+    task_status_in,
 )
 from ..utils import _merge_list
 from .lifecycle_capability_records import (
@@ -221,7 +228,7 @@ class SubAgentLifecycleService:
             )
 
         task = self.manager.load(status_params.run_id)
-        normalized = status_params.status.upper()
+        normalized = normalize_task_status(status_params.status)
         if status_params.require_evidence and normalized == "DONE" and not task.evidence:
             raise ValueError("缺少验收证据，不能标记为 DONE。")
         task.status = normalized
@@ -229,7 +236,7 @@ class SubAgentLifecycleService:
             task.result = status_params.result
         if status_params.failure_type:
             task.failure_type = status_params.failure_type
-        if normalized in {"DONE", "FAILED", "BLOCKED", "CHANNEL_ERROR", "TIMEOUT"}:
+        if task_status_in(normalized, SUBAGENT_WAKE_STATUSES):
             task.ended_at = time.time()
         task.updated_at = time.time()
         self.manager.save(task)

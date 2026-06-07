@@ -195,7 +195,7 @@ def _output_target_for_user_path(path: Path, *, force_kind: str | None = None) -
 
 
 def _successful_write_record(record: dict[str, Any]) -> bool:
-    if record.get("ok") is False:
+    if record.get("ok") is not True:
         return False
     return str(record.get("tool") or "").strip() in {"write_file", "apply_patch", "run_command", "controlled_exec"}
 

@@ -14,18 +14,26 @@
   `resume_focus` 和 work_state 字段决定。
 - 主代理 task workspace 复用只认当前 `work/run_workspace.json`；`work/task.yaml` 是可读说明，
   不再作为旧目录身份兜底。
+- compact work-state 的 read coverage 从单一 primary 游标扩展为 `primary + sources`：
+  primary 用于下一步优先续接，sources 用于多文件/多项目覆盖审计和 resume context 展示。
+- `list_files`、`find_files`、`search_text` 统一写结构化 `page_window`，tool output 归档和
+  compact work-state 从该字段恢复分页 offset；机器续接不再依赖输出正文里的 `next_offset` 文案。
 
 ## 2026-06-06 Compact 事实源收敛
 
 - compact/resume 的 read cursor 只认当前工具记录的结构化成功事实：`ok: true`，或无错误且
   `status` 为空/`ok`。`succeeded`、`completed`、`done` 等旧字符串不再算已读。
-- runtime fact source 的 run phase 只认 `DONE` 为 final；`succeeded` 等旧状态别名保持 running，
-  避免 compact 后把未收口任务误恢复成已完成。
+- runtime fact source 的 run phase 只认当前结构化状态：`DONE` 是 final；
+  `FAILED`、`TIMEOUT`、`CHANNEL_ERROR`、`CANCELLED`、`ABANDONED` 是 terminal；
+  `succeeded` 等旧状态别名保持 running，避免 compact 后把旧残留误恢复成已完成。
 - raw archive 工具布尔只接受真正 bool 或机器布尔字面量 `true/false/1/0`；`success/error/ok`
   这类状态词不再变成工具成功/失败事实。
 - task progress 的 items、coverage 和 soft quality hints 已收回 `task_progress.py` 单入口。
   进度状态只认结构化 `pending/in_progress/done/skipped/blocked`；未知值保留为普通状态文本并归入
   `other`，不会被多语言自然词猜成已完成或阻塞。
+- task compact rollup 复用当前 `TaskStatus` 协议分组；`CANCELLED`、`ABANDONED`、
+  `TAKEN_OVER` 只计入状态统计和审计，不再进入 `pending_run_ids` 或 continue packet
+  `pending_work`。
 
 ## 2026-06-04 收敛
 

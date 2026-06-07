@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from ...common.value_parsing import sequence_strings
+from ..models import SUBAGENT_FAILURE_STATUSES, TaskStatus, task_status_in
 
 
 def extract_partial_subagent_result_text(text: str) -> str:
@@ -106,10 +107,9 @@ def _partial_result_is_safe(
     blocked_reason: object,
     failure_type: object,
 ) -> bool:
-    status_text = str(status or "").strip().upper()
-    if status_text in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
+    if task_status_in(status, SUBAGENT_FAILURE_STATUSES):
         return bool(str(blocked_reason or failure_type or "").strip())
-    if status_text != "DONE":
+    if not task_status_in(status, {TaskStatus.DONE.value}):
         return False
     return any(_packet_has_traceable_ref(item) for item in evidence_packets)
 

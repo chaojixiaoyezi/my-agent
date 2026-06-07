@@ -23,8 +23,15 @@
   - `inspect_agent_tree` 重复查看 cooldown 默认改为读取
     `subagent_watch_interval_seconds`，仍允许显式 `cooldown_seconds: 0` 关闭；这是软提示和缓存摘要，
     不是硬门。
+  - `inspect_agent_tree` 在 cooldown 内先比较 task-local `task.json` 的 mtime/size 指纹；
+    树状态没变时直接返回上次的紧凑提示，不再完整读取和渲染整棵树。任一 task 状态文件变化时仍回到完整
+    kernel snapshot，避免隐藏新进展。
   - `read_file` 遇到目录返回 `PATH_IS_DIRECTORY` 和建议的 `list_files` 调用，不再给泛化未知错误。
   - 默认配置 `workspace_root` 改回空值，保持“未配置时使用启动目录”的主链路语义。
+  - `create_subagents` 的 `count > 1` 模式不再把同一个 `output_files` /
+    `output_refs` 复制给所有 child。共享目标会记录到 `shared_requested_output_*`，
+    每个 child 获得 task-local `work/child_outputs/...` 独立结果槽，避免真实 runner
+    把多个子代理产物写成同一个文件。
 
 ## 2026-06-06 主链路小跳转清理
 
@@ -45,17 +52,32 @@
   `subagents/rendering.py` 持有。
 - `runner_context` 现在直接构造执行上下文、写入边界、runtime guidance 和 runner allowed
   tools；角色模板相关判断留在 `role_templates`。
+- `subagent_mixin.py` 现在直接持有 run/finalize、结构化修复、recovery snapshot 和 parent
+  planner 记录链路；旧 `_subagent_repair_mixin.py`、`_subagent_planner_mixin.py`
+  两个私有跳转层已删除，跨模块参数类统一放在 `agent_core/subagent/params.py`。
 - 这轮清理不新增工具、不新增硬门，只减少跨文件跳转和旧入口。
 - 父代理汇总子代理结果时，优先读取创建/树快照返回的 `child_output_read_order`、
   `primary_artifact_refs` 和 `expected_outputs`。没有声明产物路径的子代理会获得
-  task-local `work/child_outputs/...` 默认产物路径。`work/agents/<run_id>/` 继续作为
-  内部状态、审计和恢复目录；父代理查状态走 `inspect_agent_tree`，等待走 `wait`，
-  不把 shell sleep 或内部目录遍历当成正常控制面。
+  task-local `work/child_outputs/...` 默认产物路径；`count > 1` 批量复制出来的共享
+  `output_files` / `output_refs` 也会被拆成这样的独立结果槽。`work/agents/<run_id>/`
+  继续作为内部状态、审计和恢复目录；父代理查状态走 `inspect_agent_tree`，等待走
+  `wait`，不把 shell sleep 或内部目录遍历当成正常控制面。
 
 ## 2026-06-06 状态精确化
 
 - 子代理运行、恢复、tree、closeout 统一按当前协议状态判断；`COMPLETED`、`SUCCESS`、`ERROR`
   等旧标签只保留为原始审计文本，不再隐式兼容成 `DONE`、`FAILED` 或 `CHANNEL_ERROR`。
+- 显式写入子代理状态时只能使用当前 `TaskStatus` 协议值；`completed`、`succeeded`
+  这类旧成功别名会 fail closed，不会静默改写任务状态。
+- dispatch workflow 候选和 runner 子结果摘要继续收敛到当前 `TaskStatus` /
+  `DISPATCH_INELIGIBLE_STATUSES`；`CANCELLED`、`ABANDONED`、`TAKEN_OVER`
+  不再被漏判成未完成子代理，`PAUSED` 仍按未完成保留给父代理处理。
+- remembered run unfinished、parent-timeout recovery、compact continue packet 和 board risk
+  也改为调用 `subagents.models` 的共享状态 helper；旧大小写/别名状态不会在这些链路里
+  被各模块单独解释成完成、失败或可收口。
+- agent tree 展示、due-check、leadership recovery、recovery orchestration、runner
+  payload 和 QA repair payload 也不再维护本地失败状态集合；机器判断统一走
+  `TaskStatus` / `SUBAGENT_FAILURE_STATUSES`，展示文案只消费已经归一的状态。
 - 派发状态投影遇到旧标签或未知状态时，仍保留原始 status 供审计，但不会给父代理
   `summarize_or_report_verified_runs` 这类收口建议；必须先检查 agent tree 或人工处理。
 - 恢复状态机不再把 `PLANNED`、`QUEUED`、`WAIT_CHILD` 旧别名提升成当前协议状态；旧状态进入
@@ -80,6 +102,8 @@
   `subagent/load/guidance` 这类词，不会改变失败类型、任务状态或验收语义。
 - `DONE` 仍是唯一已完成状态；`FAILED`、`TIMEOUT`、`CHANNEL_ERROR`、`BLOCKED`
   是可恢复/阻塞状态，恢复器和 strategy 只扫描这些结构化状态。
+- offline subagent closeout contract 也只认当前 `TIMEOUT`；`TIMED_OUT` 这类旧别名
+  只能作为异常/未知状态处理，不能触发 `CHILD_TIMEOUT` 语义。
 - `blocked_reason` 只是解释字段：它可以写入 blockers、报告和父代理提示，但不能单独把
   `DONE`、`RUNNING` 或未知状态改成 `BLOCKED`，也不能把 `failure_type` 猜成
   `capability_request`。需要阻塞时必须写结构化 `status=BLOCKED`、`failure_type`
@@ -127,5 +151,7 @@
   不从显示名或普通中文/英文描述里猜角色。
 - 默认 `agent_name` 也只作为展示标签，格式为 `agent-d<depth>-<role>-<index>`；多层级调度只用
   `depth` / `parent_id` / `root_id` 等结构化字段，不再从默认名或用户叫法里解析层级。
+- 层级继承标记只写 `attributes.inherited_parent_context=true`；给模型阅读的 `goal`
+  不再塞 `inherited_parent_context=true` 这类内部机器标记。
 - capability request/grant/gap 是可观察工作项，不是默认阻断任务的硬门。
 - workflow mode 是显式配置能力，不应该替普通中文任务自动加限制。

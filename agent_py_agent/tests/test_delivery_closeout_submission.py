@@ -39,6 +39,15 @@ def _line_window(start: int, end: int, total: int) -> dict[str, object]:
     }
 
 
+def test_uncontracted_write_record_requires_explicit_ok() -> None:
+    from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import (
+        _successful_write_record,
+    )
+
+    assert _successful_write_record({"tool": "write_file", "path": "out.txt"}) is False
+    assert _successful_write_record({"tool": "write_file", "path": "out.txt", "ok": True}) is True
+
+
 def test_tool_round_without_acceptance_submit_does_not_run_delivery_closeout(tmp_path: Path):
     _write_valid_artifact(tmp_path)
     params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])

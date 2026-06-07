@@ -48,14 +48,18 @@ def _case_dict(result: object) -> dict[str, Any]:
 
 
 def _failure_type(issues: list[str]) -> str:
-    first = issues[0].lower().strip()
-    if "artifact" in first:
+    first = _error_code(issues[0])
+    if first.startswith("ARTIFACT_"):
         return "artifact_contract"
-    if "tool" in first:
+    if first.startswith("TOOL_"):
         return "tool_contract"
-    if "timeout" in first:
+    if first.endswith("_TIMEOUT") or first == "TIMEOUT":
         return "timeout"
     return "contract"
+
+
+def _error_code(value: object) -> str:
+    return str(value or "").strip().upper()
 
 
 def _ref(case: dict[str, Any], key: str, default: str) -> str:

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ...runtime_errors import runtime_error_report
+from ...subagents.models import TaskStatus, task_status_in
 from .timeout_policy import get_task_timeout, resolve_runner_config
 
 if TYPE_CHECKING:
@@ -169,7 +170,7 @@ def _collect_runner_future_result(params: ConcurrentRunnerParams, future, run_id
 
 def handle_runner_failure(params: RunnerFailureParams) -> str:
     failure_type = str(params.result.status or "").strip().upper()
-    if failure_type not in {"BLOCKED", "TIMEOUT"}:
+    if not task_status_in(failure_type, {TaskStatus.BLOCKED.value, TaskStatus.TIMEOUT.value}):
         return params.effective_instruction
 
     # Set pending work flag

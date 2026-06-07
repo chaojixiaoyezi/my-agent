@@ -207,7 +207,7 @@ def gateway_response_path(paths: GatewayPaths, request_id: str) -> Path:
     return paths.responses / f"{request_id}.json"
 
 
-def gateway_request_counts(paths: GatewayPaths) -> dict[str, int]:
+def gateway_request_counts(paths: GatewayPaths, *, include_archives: bool = True) -> dict[str, int]:
 
     def count_json(path: Path) -> int:
         try:
@@ -215,13 +215,19 @@ def gateway_request_counts(paths: GatewayPaths) -> dict[str, int]:
         except OSError:
             return 0
 
-    return {
+    counts = {
         "pending": count_json(paths.inbox),
         "processing": count_json(paths.processing),
-        "done": count_json(paths.done),
-        "failed": count_json(paths.failed),
-        "responses": count_json(paths.responses),
     }
+    if include_archives:
+        counts.update(
+            {
+                "done": count_json(paths.done),
+                "failed": count_json(paths.failed),
+                "responses": count_json(paths.responses),
+            }
+        )
+    return counts
 
 
 def write_gateway_request(paths: GatewayPaths, payload: dict) -> Path:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..backends import ModelResponse
+from ..backends.errors import is_empty_provider_response_error
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ._runtime_params import ToolLoopExecuteParams
@@ -26,10 +27,6 @@ from .tool_context.reducer import render_tool_result_for_live_prompt
 from .tool_guard.call_guardrail import record_tool_guard_observation
 from .tool_guard.loop_hints import append_tool_guardrail_action_block_hint
 from .tool_loop.completion import ToolRoundCompletionRequest, completion_response_after_tool_round
-from .tool_loop.empty_response import (
-    empty_model_response_retry_context,
-    should_retry_empty_model_response,
-)
 from .tool_loop.prompting import build_tool_loop_prompt, next_tool_loop_model_response
 from .tool_loop.recovery import append_long_content_recovery_context, without_tool_call_after_limit
 from .tool_loop.response_decision import (
@@ -85,6 +82,26 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
         return max(0, int(effective))
     except (TypeError, ValueError):
         return 0
+
+
+def _should_retry_empty_model_response(
+    params: ToolLoopExecuteParams,
+    exc: Exception,
+    empty_response_repairs: int,
+) -> bool:
+    return is_empty_provider_response_error(exc) and bool(params.executed_tools) and empty_response_repairs < 1
+
+
+def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
+    tools = ", ".join(str(item) for item in params.executed_tools[-6:]) or "(none)"
+    return "\n".join(
+        [
+            "[tool-system]",
+            "上一轮模型接口返回了空文本；真实工具调用和工具结果已经保留在上方 tool-record/tool-output-record 中。",
+            f"recent_executed_tools: {tools}",
+            "请基于这些已完成结果继续：任务未完成就调用下一步工具，任务已完成才给最终回答。不要从头重复读取同一批材料。",
+        ]
+    )
 
 
 class ToolLoopService:
@@ -186,8 +203,8 @@ class ToolLoopService:
             )
             return prompt, response, False, False, empty_response_repairs
         except Exception as exc:
-            if should_retry_empty_model_response(params, exc, empty_response_repairs):
-                params.tool_context.append(empty_model_response_retry_context(params))
+            if _should_retry_empty_model_response(params, exc, empty_response_repairs):
+                params.tool_context.append(_empty_model_response_retry_context(params))
                 return (
                     build_tool_loop_prompt(self._agent, params),
                     None,

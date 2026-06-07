@@ -178,6 +178,20 @@ class TestDispatchSubagentsToolExecute:
 
         assert ids == ["current-worker"]
 
+    def test_dispatch_blocking_records_require_explicit_ok(self):
+        """缺 ok 的 runner 记录不能当成成功跳过。"""
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.tool_helpers import (
+            _blocking_run_ids,
+        )
+
+        ids = _blocking_run_ids([
+            {"run_id": "child-missing-ok"},
+            {"run_id": "child-ok", "ok": True},
+            {"run_id": "child-failed", "ok": False},
+        ])
+
+        assert ids == ["child-missing-ok", "child-failed"]
+
     def test_runner_timeout_off_removes_default_runtime_thresholds(self):
         """runner 不限时时不再保留隐藏心跳/运行超时墙。"""
         from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (

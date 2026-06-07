@@ -8,9 +8,27 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import JsonObjectReadReport, read_json_object_report, write_json_object
+from ..subagents.models import TaskStatus, normalize_task_status
 from .compact_layout import CompactPackageRequest, ensure_compact_package
 from .owner_compact_indexes import sync_owner_compact_indexes
 from .task_compact_rollup_signature import RollupEventRequest, append_rollup_event_if_changed
+
+_ACTIONABLE_STATUS_BUCKETS = frozenset({"pending", "running", "paused", "blocked", "failed", "timeout", "unknown"})
+_BLOCKED_STATUS_BUCKETS = frozenset({"blocked", "failed", "timeout"})
+_STATUS_BUCKETS_BY_PROTOCOL = {
+    TaskStatus.DONE.value: "done",
+    TaskStatus.BLOCKED.value: "blocked",
+    TaskStatus.FAILED.value: "failed",
+    TaskStatus.CHANNEL_ERROR.value: "failed",
+    TaskStatus.TIMEOUT.value: "timeout",
+    TaskStatus.RUNNING.value: "running",
+    TaskStatus.PENDING.value: "pending",
+    TaskStatus.PLANNING.value: "pending",
+    TaskStatus.PAUSED.value: "paused",
+    TaskStatus.CANCELLED.value: "cancelled",
+    TaskStatus.ABANDONED.value: "abandoned",
+    TaskStatus.TAKEN_OVER.value: "taken_over",
+}
 
 
 @dataclass(frozen=True)
@@ -212,7 +230,7 @@ def _continue_packet_payload(rollup: dict[str, object]) -> dict[str, object]:
     pending = [
         f"{row.get('run_id')}: {row.get('status')}"
         for row in rollup.get("child_runs", [])
-        if isinstance(row, dict) and str(row.get("status") or "").upper() != "DONE"
+        if isinstance(row, dict) and _status_bucket(row.get("status")) in _ACTIONABLE_STATUS_BUCKETS
     ]
     return {
         "schema_version": "continue-packet.v1",
@@ -267,34 +285,28 @@ def _status_counts(child_runs: list[dict[str, object]]) -> dict[str, int]:
 
 
 def _status_groups(child_runs: list[dict[str, object]]) -> dict[str, list[str]]:
-    groups = {"completed": [], "pending": [], "blocked": []}
+    return {
+        "completed": _run_ids_with_status(child_runs, {"done"}),
+        "pending": _run_ids_with_status(child_runs, _ACTIONABLE_STATUS_BUCKETS),
+        "blocked": _run_ids_with_status(child_runs, _BLOCKED_STATUS_BUCKETS),
+    }
+
+
+def _run_ids_with_status(child_runs: list[dict[str, object]], statuses: frozenset[str] | set[str]) -> list[str]:
+    result: list[str] = []
     for row in child_runs:
-        run_id = str(row.get("run_id") or "")
-        status = _status_bucket(row.get("status"))
-        if status == "done":
-            groups["completed"].append(run_id)
-        else:
-            groups["pending"].append(run_id)
-        if status in {"blocked", "failed", "timeout"}:
-            groups["blocked"].append(run_id)
-    return groups
+        if _status_bucket(row.get("status")) in statuses:
+            result.append(str(row.get("run_id") or ""))
+    return result
 
 
 def _status_bucket(value: object) -> str:
-    status = str(value or "").strip().upper()
-    if status == "DONE":
-        return "done"
-    if status == "BLOCKED":
-        return "blocked"
-    if status in {"FAILED", "CHANNEL_ERROR"}:
-        return "failed"
-    if status == "TIMEOUT":
-        return "timeout"
-    if status == "RUNNING":
-        return "running"
-    if status in {"PENDING", "PLANNING"}:
-        return "pending"
-    return "unknown"
+    # Rollup grouping is derived from the current TaskStatus protocol only.
+    try:
+        status = normalize_task_status(value)
+    except ValueError:
+        return "unknown"
+    return _STATUS_BUCKETS_BY_PROTOCOL[status]
 
 
 def _unique_strings(values) -> list[str]:

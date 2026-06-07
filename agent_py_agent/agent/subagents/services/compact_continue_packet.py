@@ -1,7 +1,11 @@
 
 from __future__ import annotations
 
-"""Task-local subagent continue packet writer."""
+"""Task-local subagent continue packet writer.
+
+Continuation readiness uses current TaskStatus/VerificationStatus helpers;
+unknown raw status text and free-form summaries are audit data only.
+"""
 
 import hashlib
 import json
@@ -10,10 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from ...common.json_io import read_json_object_report
-from ..models import SubAgentTask
+from ..models import SUBAGENT_HANDLED_TERMINAL_STATUSES, SubAgentTask, task_needs_continuation
 
 _SCHEMA_VERSION = "subagent_continue_packet.v1"
-_CLOSED_STATUSES = {"ABANDONED", "TAKEN_OVER"}
+_CLOSED_STATUSES = SUBAGENT_HANDLED_TERMINAL_STATUSES
 
 
 @dataclass(frozen=True)
@@ -171,11 +175,7 @@ def _path_exists_or_is_future_ref(path_text: str, task: SubAgentTask) -> bool:
 
 
 def _ready_to_continue(task: SubAgentTask) -> bool:
-    status = str(task.status or "").upper()
-    verification = str(task.verification_status or "").upper()
-    if status in _CLOSED_STATUSES:
-        return False
-    return not (status == "DONE" and verification == "VERIFIED")
+    return task_needs_continuation(task, closed_statuses=_CLOSED_STATUSES)
 
 
 def _next_action(task: SubAgentTask, output_payload: dict[str, object]) -> str:

@@ -157,6 +157,25 @@ def test_gateway_stream_chunk_skips_bad_line_and_continues(tmp_path, capsys):
     assert "gateway stream chunk load_error" in captured.err
 
 
+def test_gateway_stream_reads_archived_chunk_file(tmp_path, capsys):
+    class Spinner:
+        def stop(self) -> None:
+            pass
+
+    processing = tmp_path / "requests" / "processing"
+    done = tmp_path / "requests" / "done"
+    done.mkdir(parents=True)
+    chunk_path = processing / "req.chunks.jsonl"
+    archived_chunk_path = done / "req.chunks.jsonl"
+    archived_chunk_path.write_text(json.dumps({"text": "ARCHIVED"}) + "\n", encoding="utf-8")
+
+    consumed = gateway_client._stream_chunk_lines(chunk_path, 0, Spinner(), [0])
+
+    captured = capsys.readouterr()
+    assert consumed == 1
+    assert captured.out == "ARCHIVED"
+
+
 def test_chat_gateway_poll_drains_chunks_when_response_is_ready(tmp_path):
     from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
 
@@ -215,6 +234,31 @@ def test_chat_gateway_chunk_poll_reads_only_new_tail(tmp_path):
     assert visible == 2
 
 
+def test_chat_gateway_chunk_poll_reads_archived_tail(tmp_path):
+    from agent_py_agent.cli.chat_parts import gateway_client as chat_gateway_client
+
+    processing = tmp_path / "requests" / "processing"
+    done = tmp_path / "requests" / "done"
+    done.mkdir(parents=True)
+    chunk_path = processing / "req.chunks.jsonl"
+    archived_chunk_path = done / "req.chunks.jsonl"
+    archived_chunk_path.write_text(json.dumps({"text": "archived"}) + "\n", encoding="utf-8")
+    seen: list[str] = []
+
+    chunks, visible, offset = chat_gateway_client._poll_chunk_file(
+        chunk_path,
+        lambda chunk: seen.append(chunk) or True,
+        0,
+        0,
+        0,
+    )
+
+    assert seen == ["archived"]
+    assert chunks == 1
+    assert visible == 1
+    assert offset > 0
+
+
 def test_chat_gateway_poll_skips_bad_chunk_line_and_continues(tmp_path):
     from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
 
@@ -266,6 +310,53 @@ def test_chat_gateway_poll_reports_bad_response_json(tmp_path):
 
     assert response["error_code"] == "GATEWAY_RESPONSE_LOAD_ERROR"
     assert response["response_load_error"]["context"] == "gateway.chat.response.read"
+
+
+def test_gateway_response_poll_state_reads_only_when_file_changes(tmp_path):
+    from agent_py_agent.agent.gateway_parts.response_renderer import (
+        GatewayResponsePollState,
+        read_gateway_response_file_when_ready,
+    )
+
+    response_path = tmp_path / "response.json"
+    state = GatewayResponsePollState()
+
+    assert (
+        read_gateway_response_file_when_ready(
+            response_path,
+            state=state,
+            context="gateway.test.response.read",
+        )
+        == {}
+    )
+
+    response_path.write_text(json.dumps({"ok": True, "response": "first"}), encoding="utf-8")
+    assert (
+        read_gateway_response_file_when_ready(
+            response_path,
+            state=state,
+            context="gateway.test.response.read",
+        )["response"]
+        == "first"
+    )
+    assert (
+        read_gateway_response_file_when_ready(
+            response_path,
+            state=state,
+            context="gateway.test.response.read",
+        )
+        == {}
+    )
+
+    response_path.write_text(json.dumps({"ok": True, "response": "second", "extra": "changed"}), encoding="utf-8")
+    assert (
+        read_gateway_response_file_when_ready(
+            response_path,
+            state=state,
+            context="gateway.test.response.read",
+        )["response"]
+        == "second"
+    )
 
 
 def test_chat_gateway_poll_consumes_but_does_not_show_invisible_chunks(tmp_path):

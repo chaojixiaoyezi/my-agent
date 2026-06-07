@@ -9,6 +9,7 @@ from pathlib import Path
 from agent_py_agent.agent.agent_core._finalization_service import FinalizationService
 from agent_py_agent.agent.agent_core._runtime_params import EstimateTokenParams
 from agent_py_agent.agent.backends.base import ModelResponse
+from agent_py_agent.agent.backends.errors import ProviderContextWindowError
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive import (
     CompressionSnapshot,
@@ -85,7 +86,7 @@ class RaisingContextBackend:
 
     def generate(self, prompt: str, on_chunk=None):
         self.calls += 1
-        raise RuntimeError("maximum context length exceeded")
+        raise ProviderContextWindowError("maximum context length exceeded")
 
 
 class NeverCalledBackend:

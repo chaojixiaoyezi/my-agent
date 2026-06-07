@@ -5,8 +5,8 @@ import logging
 from typing import Any
 
 from ..runtime_errors import runtime_error_report
+from .models import SUBAGENT_WAKE_STATUSES, task_status_in
 
-_WAKE_STATUSES = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "BLOCKED"}
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -15,7 +15,7 @@ def notify_parent_on_runner_result(manager: Any, task: Any, result: Any, output_
     if store is None or bool(getattr(result, "dry_run", False)):
         return
     status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").upper()
-    if status not in _WAKE_STATUSES:
+    if not task_status_in(status, SUBAGENT_WAKE_STATUSES):
         return
     task_id = str(getattr(task, "id", "") or getattr(result, "run_id", "") or "").strip()
     if not task_id:

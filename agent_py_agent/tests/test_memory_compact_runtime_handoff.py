@@ -103,6 +103,39 @@ def test_memory_compact_runtime_handoff_keeps_completed_alias_active(tmp_path: P
     assert "run-child-done" not in active_ids
 
 
+def test_memory_compact_runtime_handoff_does_not_keep_failed_terminal_active(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    for run_id, status in (("run-child-channel", "CHANNEL_ERROR"), ("run-child-timeout", "TIMEOUT")):
+        run_dir = root / "tasks" / "2026-06-01" / "run-compact" / "work" / "agents" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "canonical_state.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "parent_run_id": "run-compact",
+                    "status": status,
+                    "last_progress_summary": "terminal fixture",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+    active_ids = {row["run_id"] for row in work_state["runtime_handoff"]["agent_tree"]["active_agents"]}
+
+    assert "run-child-channel" not in active_ids
+    assert "run-child-timeout" not in active_ids
+
+
 def test_memory_compact_runtime_guidance_overrides_stale_progress_next_step(tmp_path: Path) -> None:
     """compact 后续接应优先最近运行中提示，避免旧进度 next_step 把任务带回旧方向。"""
     from agent_py_agent.agent.task_progress import write_task_progress
@@ -291,6 +324,51 @@ def test_memory_compact_work_state_does_not_promote_succeeded_status_alias_read(
     assert all(item["source_path"] != "/repo/status-alias.txt" for item in work_state["tool_progress"])
 
 
+def test_memory_compact_work_state_requires_explicit_ok_for_read_progress(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    artifact = root / "blobs" / "tool_outputs" / "read_file-missing-ok.json"
+    _write_tool_output_index(
+        root,
+        {
+            "call_id": "1-1",
+            "kind": "tool_output",
+            "parameters": {"path": "/repo/missing-ok.txt", "tool": "read_file", "offset": 0, "max_chars": 100},
+            "path": str(artifact),
+            "request_id": "request-compact",
+            "run_id": "run-compact",
+            "task_id": "run-compact",
+            "scoped_call_id": "run-compact:1-1",
+            "source_input": "/repo/missing-ok.txt",
+            "tool": "read_file",
+            "ok": None,
+            "read_window": _char_window(0, 100, 200),
+            "size_bytes": 100,
+        },
+    )
+    artifact.write_text(
+        json.dumps({"content": "[char-window offset=0 chars=100 total_chars=200]\nfirst"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-compact",
+                request_id="request-compact",
+                run_id="run-compact",
+                task_id="run-compact",
+            ),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+
+    assert "/repo/missing-ok.txt" not in work_state["read_files"]
+    assert all(item["source_path"] != "/repo/missing-ok.txt" for item in work_state["tool_progress"])
+
+
 def test_memory_compact_work_state_preserves_read_ranges_for_resume_cursor(tmp_path: Path) -> None:
     """连续分片读取同一大文件时，compact 续接要保留每段范围，不能压成“读过这个文件”。"""
     from agent_py_agent.agent.task_progress import write_task_progress
@@ -455,6 +533,137 @@ def test_memory_compact_work_state_keeps_read_coverage_when_tool_progress_is_cli
     assert "offset=0" not in work_state["next_step"]
     assert "offset=60000" in resume["context_block"]
     assert 'read_file(path="/repo/data/long.txt", offset=0' not in resume["context_block"]
+
+
+def test_memory_compact_work_state_keeps_per_source_read_coverage(tmp_path: Path) -> None:
+    """多文件阅读任务 compact 后要保留每个源文件的覆盖游标，而不只保留一个 primary。"""
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    _write_tool_output_index(
+        root,
+        {
+            "call_id": "1-1",
+            "kind": "tool_output",
+            "parameters": {"path": "/repo/project-a/README.md", "tool": "read_file", "offset": 0, "max_chars": 1000},
+            "path": str(root / "blobs" / "tool_outputs" / "project-a-readme.json"),
+            "request_id": "request-compact",
+            "run_id": "run-compact",
+            "task_id": "run-compact",
+            "scoped_call_id": "run-compact:1-1",
+            "source_input": "/repo/project-a/README.md",
+            "tool": "read_file",
+            "read_window": _char_window(0, 1000, 1000),
+            "size_bytes": 1000,
+        },
+        {
+            "call_id": "1-2",
+            "kind": "tool_output",
+            "parameters": {"path": "/repo/project-b/core.py", "tool": "read_file", "offset": 0, "max_chars": 500},
+            "path": str(root / "blobs" / "tool_outputs" / "project-b-core.json"),
+            "request_id": "request-compact",
+            "run_id": "run-compact",
+            "task_id": "run-compact",
+            "scoped_call_id": "run-compact:1-2",
+            "source_input": "/repo/project-b/core.py",
+            "tool": "read_file",
+            "read_window": _char_window(0, 500, 2000),
+            "size_bytes": 500,
+        },
+        {
+            "call_id": "1-3",
+            "kind": "tool_output",
+            "parameters": {"path": "/repo/project-c/routes.py", "tool": "read_file", "start_line": 1, "max_chars": 500},
+            "path": str(root / "blobs" / "tool_outputs" / "project-c-routes.json"),
+            "request_id": "request-compact",
+            "run_id": "run-compact",
+            "task_id": "run-compact",
+            "scoped_call_id": "run-compact:1-3",
+            "source_input": "/repo/project-c/routes.py",
+            "tool": "read_file",
+            "read_window": _line_window(1, 40, 120),
+            "size_bytes": 500,
+        },
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-compact",
+                request_id="request-compact",
+                run_id="run-compact",
+                task_id="run-compact",
+            ),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+    resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=result["apply_id"]))
+    sources = {
+        item["source_path"]: item
+        for item in work_state["read_coverage"]["sources"]
+    }
+
+    assert work_state["read_coverage"]["source_count"] == 3
+    assert sources["/repo/project-a/README.md"]["complete"] is True
+    assert sources["/repo/project-b/core.py"]["covered_until_offset"] == 500
+    assert sources["/repo/project-b/core.py"]["next_offset"] == 500
+    assert sources["/repo/project-c/routes.py"]["covered_until_line"] == 40
+    assert "source_coverage: source_path=/repo/project-b/core.py" in resume["context_block"]
+    assert "source_coverage: source_path=/repo/project-c/routes.py" in resume["context_block"]
+
+
+def test_memory_compact_work_state_resumes_paginated_search_from_page_window(tmp_path: Path) -> None:
+    """分页搜索的续接游标来自结构化 page_window，而不是从工具输出文字里猜。"""
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    _write_tool_output_index(
+        root,
+        {
+            "call_id": "1-1",
+            "kind": "tool_output",
+            "parameters": {"query": "Agent", "path": "/repo", "tool": "search_text", "offset": 0, "limit": 25},
+            "path": str(root / "blobs" / "tool_outputs" / "search-page-1.json"),
+            "request_id": "request-compact",
+            "run_id": "run-compact",
+            "task_id": "run-compact",
+            "scoped_call_id": "run-compact:1-1",
+            "source_input": "/repo",
+            "tool": "search_text",
+            "page_window": {
+                "kind": "offset_page",
+                "tool": "search_text",
+                "source_path": "/repo",
+                "offset": 0,
+                "limit": 25,
+                "returned": 25,
+                "next_offset": 25,
+                "complete": False,
+                "output_mode": "content",
+            },
+            "size_bytes": 2048,
+        },
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-compact",
+                request_id="request-compact",
+                run_id="run-compact",
+                task_id="run-compact",
+            ),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+    resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=result["apply_id"]))
+
+    assert work_state["tool_progress"][0]["tool"] == "search_text"
+    assert work_state["tool_progress"][0]["next_offset"] == 25
+    assert 'search_text(query="Agent", path="/repo", offset=25, limit=25' in work_state["next_step"]
+    assert 'search_text(query="Agent", path="/repo", offset=25, limit=25' in resume["context_block"]
 
 
 def test_memory_compact_work_state_treats_missing_offset_as_zero_for_read_cursor(tmp_path: Path) -> None:
@@ -733,14 +942,18 @@ def _write_runtime_handoff_sources(root: Path) -> None:
 def _write_tool_output_index(root: Path, *rows: dict[str, object]) -> None:
     index = root / "blobs" / "tool_outputs" / "index.jsonl"
     index.parent.mkdir(parents=True, exist_ok=True)
-    for row in rows:
+    normalized_rows: list[dict[str, object]] = []
+    for original in rows:
+        row = {"ok": True, "status": "ok", **original}
         raw_path = str(row.get("path") or "").strip()
         if not raw_path:
+            normalized_rows.append(row)
             continue
         path = Path(raw_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}", encoding="utf-8")
-    index.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+        normalized_rows.append(row)
+    index.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in normalized_rows) + "\n", encoding="utf-8")
 
 
 def _line_read_json(start: int, end: int, next_start: int, total: int) -> str:

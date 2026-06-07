@@ -68,6 +68,17 @@ def gateway_chunk_path(paths: GatewayPaths, request_id: str) -> Path:
     return paths.processing / f"{request_id}.chunks.jsonl"
 
 
+def gateway_chunk_path_candidates(chunk_path: Path) -> tuple[Path, ...]:
+    if chunk_path.parent.name != "processing":
+        return (chunk_path,)
+    request_root = chunk_path.parent.parent
+    return (
+        chunk_path,
+        request_root / "done" / chunk_path.name,
+        request_root / "failed" / chunk_path.name,
+    )
+
+
 def adapter_paths(agent: SimpleAgent) -> AdapterPaths:
 
     root = agent.root / agent.config.adapter_workspace

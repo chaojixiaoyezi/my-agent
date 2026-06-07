@@ -93,6 +93,18 @@ def test_registry_execution_records_runtime_gate_allow_for_executed_tool(tmp_pat
     assert "tool_rate_limit" in result.result_envelope["runtime_gate"]["evidence"]["executed_gates"]
 
 
+def test_finalization_delivery_record_requires_explicit_ok() -> None:
+    from agent_py_agent.agent.agent_core._finalization_service import (
+        _has_successful_delivery_record,
+    )
+
+    missing_ok = _delivery_closeout_params(archive_tool_calls=[{"tool": "write_file", "path": "out.txt"}])
+    explicit_ok = _delivery_closeout_params(archive_tool_calls=[{"tool": "write_file", "path": "out.txt", "ok": True}])
+
+    assert _has_successful_delivery_record(missing_ok) is False
+    assert _has_successful_delivery_record(explicit_ok) is True
+
+
 def test_registry_execution_blocks_when_runtime_rate_limit_is_exhausted(tmp_path):
     payload = {"tool": "echo", "value": 1}
     result = execute_registry_call(

@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from .errors import ProviderTimeoutError, ProviderTransientError
+from .errors import ProviderContextWindowError, ProviderTimeoutError, ProviderTransientError
 
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 409, 425, 429, 502, 503, 504, 529})
 _RETRYABLE_HTTP_DELAYS_SECONDS = (2.0, 5.0, 15.0)
@@ -31,6 +31,21 @@ _RETRYABLE_NETWORK_ERROR_MARKERS = frozenset(
         "connection aborted",
         "broken pipe",
         "temporarily unavailable",
+    }
+)
+_CONTEXT_WINDOW_HTTP_STATUS_CODES = frozenset({400, 413, 422})
+_CONTEXT_WINDOW_ERROR_MARKERS = frozenset(
+    {
+        "context length",
+        "context_length",
+        "context window",
+        "context_window",
+        "maximum context",
+        "max context",
+        "input too long",
+        "prompt too long",
+        "too many tokens",
+        "token limit",
     }
 )
 
@@ -172,6 +187,11 @@ def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
     """Classify provider HTTP errors at the backend boundary."""
     detail = exc.read().decode("utf-8", "replace")
     code = int(getattr(exc, "code", 0) or 0)
+    if code in _CONTEXT_WINDOW_HTTP_STATUS_CODES and _provider_error_indicates_context_window(detail):
+        return ProviderContextWindowError(
+            f"HTTP {exc.code}: {detail}",
+            details={"status_code": code, "provider_error": _provider_error_payload(detail)},
+        )
     if code in _RETRYABLE_HTTP_STATUS_CODES or code >= 500:
         return ProviderTransientError(f"HTTP {exc.code}: {detail}")
     return RuntimeError(f"HTTP {exc.code}: {detail}")
@@ -226,6 +246,20 @@ def _network_error_text(exc: BaseException) -> str:
         str(exc),
     ]
     return " ".join(part for part in parts if part).strip() or exc.__class__.__name__
+
+
+def _provider_error_indicates_context_window(detail: str) -> bool:
+    payload = _provider_error_payload(detail)
+    structured_text = json.dumps(payload, ensure_ascii=False, sort_keys=True) if payload else ""
+    text = f"{structured_text} {detail or ''}".lower()
+    return any(marker in text for marker in _CONTEXT_WINDOW_ERROR_MARKERS)
+
+
+def _provider_error_payload(detail: str) -> object:
+    try:
+        return json.loads(detail)
+    except (TypeError, ValueError):
+        return {}
 
 
 def _stream_deadline(timeout: int) -> float:

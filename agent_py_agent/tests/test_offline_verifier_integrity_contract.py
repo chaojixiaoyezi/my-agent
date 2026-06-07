@@ -39,6 +39,23 @@ def test_verifier_rejects_missing_and_stale_evidence_refs() -> None:
     assert result.error_codes == ("EVIDENCE_REF_MISSING", "EVIDENCE_STALE")
 
 
+def test_verifier_ignores_legacy_success_alias_for_tool_trace() -> None:
+    from agent_py_agent.agent.contracts.offline_verifier_integrity_contract import (
+        validate_verifier_integrity,
+    )
+
+    result = validate_verifier_integrity(
+        {
+            "evidence_claims": [{"source_tool": "query_logs", "evidence_ref": "EV-1"}],
+            "tool_trace": [{"tool": "query_logs", "operation_id": "op-1", "success": True}],
+            "evidence_store_refs": ["EV-1"],
+        }
+    )
+
+    assert result.ok is False
+    assert result.error_codes == ("EVIDENCE_TOOL_TRACE_MISSING",)
+
+
 def test_core_verifier_timeout_and_llm_dependency_are_failures() -> None:
     from agent_py_agent.agent.contracts.offline_verifier_integrity_contract import (
         validate_verifier_integrity,

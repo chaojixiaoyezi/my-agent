@@ -592,6 +592,40 @@ def test_search_text_supports_limit_offset_and_glob(tmp_path: Path):
     assert "a.py:2" in result.output
     assert "b.md" not in result.output
     assert "next_offset" not in result.output
+    assert result.result_envelope["page_window"] == {
+        "kind": "offset_page",
+        "tool": "search_text",
+        "source_path": ".",
+        "offset": 1,
+        "limit": 1,
+        "returned": 1,
+        "next_offset": 0,
+        "complete": True,
+        "output_mode": "content",
+    }
+
+
+def test_search_text_returns_structured_page_window_when_more_matches_remain(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.py").write_text("needle one\nneedle two\n", encoding="utf-8")
+    tool = SearchTextTool(workspace, max_matches=10)
+
+    result = tool.execute({"query": "needle", "path": ".", "limit": 1})
+
+    assert result.ok
+    assert "next_offset=1" in result.output
+    assert result.result_envelope["page_window"] == {
+        "kind": "offset_page",
+        "tool": "search_text",
+        "source_path": ".",
+        "offset": 0,
+        "limit": 1,
+        "returned": 1,
+        "next_offset": 1,
+        "complete": False,
+        "output_mode": "content",
+    }
 
 
 def test_search_text_supports_files_and_count_output_modes(tmp_path: Path):
@@ -803,6 +837,7 @@ def test_list_files_supports_limit_offset_depth_and_glob(tmp_path: Path):
     (workspace / "a.py").write_text("a", encoding="utf-8")
     (workspace / "b.py").write_text("b", encoding="utf-8")
     (workspace / "c.md").write_text("c", encoding="utf-8")
+    (workspace / "d.py").write_text("d", encoding="utf-8")
     nested = workspace / "nested"
     nested.mkdir()
     (nested / "deep.py").write_text("d", encoding="utf-8")
@@ -823,8 +858,19 @@ def test_list_files_supports_limit_offset_depth_and_glob(tmp_path: Path):
     assert "b.py" in result.output
     assert "a.py" not in result.output
     assert "c.md" not in result.output
+    assert "d.py" not in result.output
     assert "nested/deep.py" not in result.output
     assert "next_offset=2" in result.output
+    assert result.result_envelope["page_window"] == {
+        "kind": "offset_page",
+        "tool": "list_files",
+        "source_path": ".",
+        "offset": 1,
+        "limit": 1,
+        "returned": 1,
+        "next_offset": 2,
+        "complete": False,
+    }
 
 
 def test_list_files_sorts_entries_and_skips_common_noise_dirs(tmp_path: Path):
@@ -867,6 +913,32 @@ def test_find_files_finds_glob_matches_and_skips_common_noise_dirs(tmp_path: Pat
     assert "src/a.py" in result.output
     assert "src/b.md" not in result.output
     assert "node_modules" not in result.output
+    assert result.result_envelope["page_window"]["complete"] is True
+
+
+def test_find_files_returns_structured_page_window_when_more_matches_remain(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    src = workspace / "src"
+    src.mkdir()
+    for name in ("a.py", "b.py", "c.py"):
+        (src / name).write_text(name, encoding="utf-8")
+    tool = FindFilesTool(workspace, max_matches=20)
+
+    result = tool.execute({"pattern": "**/*.py", "path": ".", "limit": 2})
+
+    assert result.ok
+    assert "next_offset=2" in result.output
+    assert result.result_envelope["page_window"] == {
+        "kind": "offset_page",
+        "tool": "find_files",
+        "source_path": ".",
+        "offset": 0,
+        "limit": 2,
+        "returned": 2,
+        "next_offset": 2,
+        "complete": False,
+    }
 
 
 def test_find_files_is_registered_in_base_registry(tmp_path: Path):

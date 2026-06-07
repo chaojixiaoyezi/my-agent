@@ -7,6 +7,7 @@ from typing import Any
 
 from ....io import append_jsonl
 from ....runtime_errors import runtime_error_report
+from ...models import SUBAGENT_FAILURE_STATUSES, task_status_in
 from ..takeover.run import TakeoverRunRequest
 from .modes import CLOSED, LEADERSHIP_RECOVERY, is_rerun_mode, is_takeover_mode
 from .strategy import (
@@ -117,8 +118,7 @@ def _recoverable_run_ids(manager: Any, limit: int) -> tuple[list[str], list[dict
         return [], [_runtime_load_error(exc, "subagent_recovery_orchestration.list_recoverable_runs")]
     ids: list[str] = []
     for task in tasks:
-        status = str(getattr(task, "status", "") or "").upper()
-        if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
+        if task_status_in(getattr(task, "status", ""), SUBAGENT_FAILURE_STATUSES):
             ids.append(str(getattr(task, "id", "") or ""))
     return [item for item in ids if item][:limit], []
 

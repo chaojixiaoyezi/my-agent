@@ -352,7 +352,7 @@ def ledger_record(payload: dict[str, Any]) -> dict[str, Any]:
         "main_context_bundle_match": dict(payload.get("main_context_bundle_match", {})),
         "created_at": payload["created_at"],
         "content_preserved": payload["content_preserved"],
-        "restore_ready": bool(payload.get("restore_ready") and payload.get("ok", True)),
+        "restore_ready": bool(payload.get("restore_ready") and payload.get("ok") is True),
     }
 
 

@@ -1,7 +1,11 @@
 
 from __future__ import annotations
 
-"""helpers for subagent board item construction."""
+"""Helpers for subagent board item construction.
+
+Risk flags use the current TaskStatus helpers; unknown raw status text remains
+audit data and cannot become a board machine fact.
+"""
 
 import time
 from pathlib import Path
@@ -10,7 +14,14 @@ from typing import Any
 from ....model_visible_refs import current_model_ref, current_model_text
 from ....runtime_errors import runtime_error_report
 from ...model_capabilities import capability_request_counts_as_open
-from ...models import SubAgentBoardOptions, SubAgentTask
+from ...models import (
+    SubAgentBoardOptions,
+    SubAgentTask,
+    TaskStatus,
+    task_has_failure_status,
+    task_has_status,
+    task_is_done_verified,
+)
 from ...reports import SubAgentBoardItem
 from ..task_target_tokens import task_actual_target_tokens
 
@@ -21,11 +32,11 @@ def build_risk_flags(
     open_gap_count: int,
 ) -> list[str]:
     flags: list[str] = []
-    if task.status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
+    if task_has_failure_status(task):
         flags.append(task.status.lower())
-    if task.status == "DONE" and not task.evidence:
+    if task_has_status(task, TaskStatus.DONE) and not task.evidence:
         flags.append("done_without_evidence")
-    if task.status == "DONE" and task.verification_status != "VERIFIED":
+    if task_has_status(task, TaskStatus.DONE) and not task_is_done_verified(task):
         flags.append("done_without_verification")
     if open_request_count:
         flags.append("open_capability_request")

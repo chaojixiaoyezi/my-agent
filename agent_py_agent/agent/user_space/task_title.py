@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import re
-from pathlib import Path
+from pathlib import PurePosixPath, PureWindowsPath
+
+_PATH_RE = re.compile(
+    r"(?:[A-Za-z]:[\\/][^\s，。；;：、)）\]】\"'<>`]+|~[/\\][^\s，。；;：、)）\]】\"'<>`]+|/[^\s，。；;：、)）\]】\"'<>`]+)"
+)
+_TRAILING_PATH_PUNCTUATION = ".,;:，。；：、)）]】\"'<>`"
 
 
 def prompt_fingerprint(prompt: str) -> str:
@@ -24,7 +29,7 @@ def concise_task_title(text: str) -> str:
     first = _first_meaningful_line(raw)
     first = re.sub(r"^(你现在|现在)?只做一件事[:：]?", "", first).strip()
     first = re.sub(r"^(请|帮我|麻烦)?(你)?", "", first).strip()
-    first = first.replace("/Users/xiaoyezi/", "")
+    first = _replace_paths_with_names(first)
     first = re.sub(r"\s+", "-", first)
     first = collapse_dashes("".join(workspace_slug_char(char) for char in first.lower())).strip("-_")
     return (first[:32].strip("-_") or "task")
@@ -69,11 +74,9 @@ def _first_meaningful_line(text: str) -> str:
 
 
 def _title_from_paths(text: str) -> str:
-    paths = re.findall(r"(/[\w.\- \u4e00-\u9fff/]+)", text)
     names: list[str] = []
-    for item in paths:
-        path = re.split(r"(?:下面|下|目录|里|中|，|。|；|:|：)", item.strip(), maxsplit=1)[0].rstrip("/")
-        name = Path(path).name.strip()
+    for item in _path_candidates(text):
+        name = _path_name(item)
         if name and name not in names:
             names.append(name)
         if len(names) >= 2:
@@ -97,6 +100,30 @@ def _action_label(text: str) -> str:
     if "readme" in lowered:
         return "readme"
     return ""
+
+
+def _path_candidates(text: str) -> list[str]:
+    return [_clean_path_candidate(match.group(0)) for match in _PATH_RE.finditer(str(text or ""))]
+
+
+def _clean_path_candidate(value: str) -> str:
+    return str(value or "").strip().rstrip(_TRAILING_PATH_PUNCTUATION)
+
+
+def _path_name(value: str) -> str:
+    text = _clean_path_candidate(value).rstrip("/\\")
+    if not text:
+        return ""
+    if re.match(r"^[A-Za-z]:[\\/]", text) or "\\" in text:
+        return PureWindowsPath(text).name.strip()
+    return PurePosixPath(text).name.strip()
+
+
+def _replace_paths_with_names(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        return _path_name(match.group(0)) or ""
+
+    return _PATH_RE.sub(replace, str(text or ""))
 
 
 __all__ = [

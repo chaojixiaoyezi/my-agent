@@ -359,10 +359,10 @@ class TestRunParentPlannerErrors:
     """测试父代理 planner 调用异常能留给父代理查看。"""
 
     def test_parent_planner_runtime_error_is_recorded(self, tmp_path, monkeypatch):
-        from agent_py_agent.agent.agent_core._subagent_planner_mixin import RunParentPlannerParams
         from agent_py_agent.agent.agent_core.orchestration.dispatch.params import (
             DispatchExecutionPlan,
         )
+        from agent_py_agent.agent.agent_core.subagent.params import RunParentPlannerParams
         from agent_py_agent.agent.capability import CapabilityRouter
         from agent_py_agent.agent.capability.config import CapabilityConfig
         from agent_py_agent.agent.core import SimpleAgent
@@ -371,7 +371,7 @@ class TestRunParentPlannerErrors:
         agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
 
         monkeypatch.setattr(
-            "agent_py_agent.agent.agent_core._subagent_planner_mixin._build_parent_planner_state",
+            "agent_py_agent.agent.agent_core.subagent_mixin._build_parent_planner_state",
             lambda *args, **kwargs: {"gate": {"needs_planner": 1, "active_tasks": 1}, "tasks": []},
         )
 

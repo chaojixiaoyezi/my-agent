@@ -39,7 +39,7 @@ def _validate_trial_shape(
 def _validate_completion_claim(facts: dict[str, Any], findings: list[dict[str, object]]) -> None:
     claim = facts.get("final_claim") if isinstance(facts.get("final_claim"), dict) else {}
     verifier = facts.get("verifier") if isinstance(facts.get("verifier"), dict) else {}
-    if text(claim.get("status")).lower() == "succeeded" and verifier.get("ok") is not True:
+    if claim.get("claimed_success") is True and verifier.get("ok") is not True:
         findings.append(finding("LIVE_LLM_FAKE_COMPLETION_REJECTED"))
 
 

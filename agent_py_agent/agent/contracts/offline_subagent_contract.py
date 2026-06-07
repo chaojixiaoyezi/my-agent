@@ -6,10 +6,11 @@ from typing import Any
 
 from ..common.value_parsing import sequence_strings
 from ..common.value_parsing import text_value as _text
+from ..subagents.models import TaskStatus
 from .contract_validation_recovery import recovery_for_findings
 
-SUCCESS_STATUSES = {"DONE"}
-ACTIVE_PARENT_CLOSEOUT_STATUSES = {"VERIFYING", "DONE"}
+SUCCESS_STATUSES = {TaskStatus.DONE.value}
+ACTIVE_PARENT_CLOSEOUT_STATUSES = {"VERIFYING", TaskStatus.DONE.value}
 
 
 @dataclass(frozen=True)
@@ -108,7 +109,7 @@ def _validate_required_children(
         if child is None:
             findings.append(_finding("CHILD_MISSING", {"child_run_id": child_id}))
             continue
-        if _status(child.get("status")) in {"TIMEOUT", "TIMED_OUT"}:
+        if _status(child.get("status")) == TaskStatus.TIMEOUT.value:
             findings.append(_finding("CHILD_TIMEOUT", {"child_run_id": child_id}))
             continue
         if _status(child.get("status")) not in SUCCESS_STATUSES:

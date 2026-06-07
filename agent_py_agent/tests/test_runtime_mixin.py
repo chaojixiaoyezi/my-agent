@@ -6,9 +6,18 @@ from __future__ import annotations
 测试 SimpleAgentRuntimeMixin 的 run() 方法、memory 压缩、token 估算等功能。
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
+
+
+def test_run_exit_code_rejects_old_success_alias() -> None:
+    from agent_py_agent.cli.run_output import run_exit_code
+
+    assert run_exit_code(SimpleNamespace(runtime_status="ok")) == 0
+    assert run_exit_code(SimpleNamespace(runtime_status="")) == 0
+    assert run_exit_code(SimpleNamespace(runtime_status="succeeded")) == 2
 
 
 class TestRuntimeMixinCompress:

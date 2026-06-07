@@ -12,6 +12,7 @@ import uuid
 from dataclasses import replace
 from typing import Any
 
+from ..subagents.models import SUBAGENT_FAILED_RESULT_STATUSES, TaskStatus, task_status_in
 from .control_plane_codec import (
     AGENT_EVENT_INSERT_SQL,
     AGENT_RUN_UPSERT_SQL,
@@ -33,10 +34,10 @@ from .control_plane_models import (
     TaskRollupRecord,
 )
 
-_RUNNING_STATUSES = {"RUNNING"}
-_BLOCKED_STATUSES = {"BLOCKED"}
-_DONE_STATUSES = {"DONE"}
-_FAILED_STATUSES = {"FAILED", "TIMEOUT", "CHANNEL_ERROR"}
+_RUNNING_STATUSES = frozenset({TaskStatus.RUNNING.value})
+_BLOCKED_STATUSES = frozenset({TaskStatus.BLOCKED.value})
+_DONE_STATUSES = frozenset({TaskStatus.DONE.value})
+_FAILED_STATUSES = SUBAGENT_FAILED_RESULT_STATUSES
 _TAKEOVER_CANDIDATE_STATUSES = _BLOCKED_STATUSES | _FAILED_STATUSES
 
 
@@ -146,7 +147,7 @@ class LocalStoreControlPlaneMixin:
         return AgentTreeReport(task_id=root.root_task_id, runs=descendants, rollup=rollup)
 
     def list_blocked_runs(self, task_id: str) -> list[AgentRunRecord]:
-        return [item for item in self._agent_runs_for_task(task_id) if item.status in _BLOCKED_STATUSES]
+        return [item for item in self._agent_runs_for_task(task_id) if task_status_in(item.status, _BLOCKED_STATUSES)]
 
     def query_agent_runtime(self, context: AgentRuntimeQueryContext) -> AgentRuntimeQueryResult:
         normalized, warnings = _normalize_runtime_query_context(self, context)
@@ -218,10 +219,10 @@ def _build_task_rollup(task_id: str, runs: list[AgentRunRecord]) -> TaskRollupRe
         task_id=task_id,
         status=latest.status,
         progress=_average_progress(runs),
-        running_agents=sum(1 for item in runs if item.status in _RUNNING_STATUSES),
-        blocked_agents=sum(1 for item in runs if item.status in _BLOCKED_STATUSES),
-            completed_agents=sum(1 for item in runs if item.status in _DONE_STATUSES),
-        failed_agents=sum(1 for item in runs if item.status in _FAILED_STATUSES),
+        running_agents=sum(1 for item in runs if task_status_in(item.status, _RUNNING_STATUSES)),
+        blocked_agents=sum(1 for item in runs if task_status_in(item.status, _BLOCKED_STATUSES)),
+        completed_agents=sum(1 for item in runs if task_status_in(item.status, _DONE_STATUSES)),
+        failed_agents=sum(1 for item in runs if task_status_in(item.status, _FAILED_STATUSES)),
         latest_summary=latest_with_summary.latest_summary,
         updated_at=max(item.updated_at for item in runs),
     )
@@ -250,7 +251,7 @@ def _select_subtree(runs: list[AgentRunRecord], root_run_id: str) -> list[AgentR
 
 
 def _takeover_candidate_runs(runs: list[AgentRunRecord]) -> list[AgentRunRecord]:
-    return [item for item in runs if item.status in _TAKEOVER_CANDIDATE_STATUSES]
+    return [item for item in runs if task_status_in(item.status, _TAKEOVER_CANDIDATE_STATUSES)]
 
 
 def _runs_by_parent(runs: list[AgentRunRecord]) -> dict[str, list[AgentRunRecord]]:

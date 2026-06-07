@@ -5,11 +5,15 @@ from __future__ import annotations
 
 The handoff may point to recent guidance and active child agents, but its
 suggestion must not teach the parent to poll subagents every model turn.
+Only current protocol states decide whether a child is active; terminal
+failure/cancel states stay visible as recent evidence, not runnable work.
 """
 
 import json
 from pathlib import Path
 from typing import Any
+
+from ..subagents.models import TaskStatus, task_status_in
 
 
 def build_runtime_handoff(workspace: Path, ids: list[str]) -> dict[str, Any]:
@@ -223,16 +227,35 @@ def _agent_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 def _agent_status_bucket(value: object) -> str:
     status = str(value or "").strip().upper()
-    if status in {"DONE", "RUNNING", "PLANNING", "PENDING", "BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
-        return status.lower()
-    if status in {"ABANDONED", "TAKEN_OVER"}:
+    bucket_statuses = frozenset({
+        TaskStatus.DONE.value,
+        TaskStatus.RUNNING.value,
+        TaskStatus.PLANNING.value,
+        TaskStatus.PENDING.value,
+        TaskStatus.BLOCKED.value,
+        TaskStatus.FAILED.value,
+        TaskStatus.TIMEOUT.value,
+        TaskStatus.CHANNEL_ERROR.value,
+        TaskStatus.ABANDONED.value,
+        TaskStatus.TAKEN_OVER.value,
+    })
+    if task_status_in(status, bucket_statuses):
         return status.lower()
     return "unknown"
 
 
 def _active_status(row: dict[str, Any]) -> bool:
-    status = str(row.get("status") or "").strip().upper()
-    return status not in {"DONE", "ABANDONED", "TAKEN_OVER"}
+    # Terminal child states stay in recent evidence but must not be resumed as active work.
+    inactive_statuses = frozenset({
+        TaskStatus.DONE.value,
+        TaskStatus.FAILED.value,
+        TaskStatus.TIMEOUT.value,
+        TaskStatus.CHANNEL_ERROR.value,
+        TaskStatus.CANCELLED.value,
+        TaskStatus.ABANDONED.value,
+        TaskStatus.TAKEN_OVER.value,
+    })
+    return not task_status_in(row.get("status"), inactive_statuses)
 
 
 def _short_guidance(row: dict[str, Any]) -> dict[str, Any]:

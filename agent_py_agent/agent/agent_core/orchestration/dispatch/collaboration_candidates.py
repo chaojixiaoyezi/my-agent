@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ....runtime_errors import runtime_error_report
+from ....subagents.models import TaskStatus, task_status_in
 
 
 @dataclass(frozen=True)
@@ -74,8 +75,14 @@ def _candidate_reported_load_error(task: object, load_errors: list[dict[str, obj
 
 
 def _can_run_for_collaboration_request(task: object) -> bool:
-    status = str(getattr(task, "status", "") or "").upper()
-    if status in {"RUNNING", "TAKEN_OVER", "ABANDONED", "CHANNEL_ERROR", "TIMEOUT"}:
+    unavailable_statuses = frozenset({
+        TaskStatus.RUNNING.value,
+        TaskStatus.TAKEN_OVER.value,
+        TaskStatus.ABANDONED.value,
+        TaskStatus.CHANNEL_ERROR.value,
+        TaskStatus.TIMEOUT.value,
+    })
+    if task_status_in(getattr(task, "status", ""), unavailable_statuses):
         return False
     if str(getattr(task, "channel_status", "") or "").upper() == "BROKEN":
         return False

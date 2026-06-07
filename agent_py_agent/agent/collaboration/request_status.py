@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from enum import Enum
 from typing import Any
 
 from .models import CollaborationCase, CollaborationRequest, EvidencePacket
@@ -9,42 +10,77 @@ from .store_common import float_value
 
 TargetIdentityKeys = Callable[[object], set[str]]
 
-TERMINAL_CASE_STATUSES = {"closed"}
-COMPLETED_REQUEST_STATUSES = {"completed"}
-BLOCKED_REQUEST_STATUSES = {"blocked"}
-TIMED_OUT_REQUEST_STATUSES = {"timeout"}
-DECLINED_REQUEST_STATUSES = {"declined"}
+
+class CollaborationCaseStatus(str, Enum):
+    """Current collaboration case lifecycle values understood by machines."""
+
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+class CollaborationRequestStatus(str, Enum):
+    """Current collaboration request lifecycle values understood by machines."""
+
+    OPEN = "open"
+    PENDING = "pending"
+    COMPLETED = "completed"
+    BLOCKED = "blocked"
+    TIMEOUT = "timeout"
+    DECLINED = "declined"
+
+
+class CollaborationResponseStatus(str, Enum):
+    """Derived response buckets; not written back as request status."""
+
+    RESPONDED = "responded"
+    UNAVAILABLE = "unavailable"
+    UNANSWERED = "unanswered"
+    WAITING = "waiting"
+
+
+def normalize_case_status(status: str) -> str:
+    text = _status_text(status)
+    return text if text in _CASE_STATUS_VALUES else ""
+
+
+def normalize_request_status(status: str) -> str:
+    text = _status_text(status)
+    return text if text in _REQUEST_STATUS_VALUES else ""
 
 
 def is_terminal_status(status: str) -> bool:
-    return _status_text(status) in TERMINAL_CASE_STATUSES
+    return normalize_case_status(status) == CollaborationCaseStatus.CLOSED.value
 
 
 def case_window_status(status: str) -> str:
-    return "closed" if is_terminal_status(status) else "open"
+    return CollaborationCaseStatus.CLOSED.value if is_terminal_status(status) else CollaborationCaseStatus.OPEN.value
 
 
 def is_completed_request_status(status: str) -> bool:
-    return _status_text(status) in COMPLETED_REQUEST_STATUSES
+    return normalize_request_status(status) == CollaborationRequestStatus.COMPLETED.value
 
 
 def is_blocked_request_status(status: str) -> bool:
-    text = _status_text(status)
+    text = normalize_request_status(status)
     if is_timed_out_request_status(text):
         return False
-    return text in BLOCKED_REQUEST_STATUSES
+    return text == CollaborationRequestStatus.BLOCKED.value
 
 
 def is_timed_out_request_status(status: str) -> bool:
-    return _status_text(status) in TIMED_OUT_REQUEST_STATUSES
+    return normalize_request_status(status) == CollaborationRequestStatus.TIMEOUT.value
 
 
 def is_declined_request_status(status: str) -> bool:
-    return _status_text(status) in DECLINED_REQUEST_STATUSES
+    return normalize_request_status(status) == CollaborationRequestStatus.DECLINED.value
 
 
 def _status_text(status: str) -> str:
     return str(status or "").strip().lower()
+
+
+_CASE_STATUS_VALUES = frozenset(status.value for status in CollaborationCaseStatus)
+_REQUEST_STATUS_VALUES = frozenset(status.value for status in CollaborationRequestStatus)
 
 
 def request_is_effectively_timed_out(
@@ -70,12 +106,12 @@ def request_response_status(
     has_required_evidence: bool,
 ) -> str:
     if has_required_evidence:
-        return "responded"
+        return CollaborationResponseStatus.RESPONDED.value
     if is_blocked_request_status(request.status) or is_declined_request_status(request.status):
-        return "unavailable"
+        return CollaborationResponseStatus.UNAVAILABLE.value
     if request_is_effectively_timed_out(request, now=now, has_required_evidence=False):
-        return "unanswered"
-    return "waiting"
+        return CollaborationResponseStatus.UNANSWERED.value
+    return CollaborationResponseStatus.WAITING.value
 
 
 def evidence_sources_by_request(evidence: list[EvidencePacket], *, identity_keys: TargetIdentityKeys) -> dict[str, set[str]]:

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ....runtime_errors import runtime_error_report
-from ...models import SubAgentTask
+from ...models import SUBAGENT_HANDLED_TERMINAL_STATUSES, SubAgentTask, task_status_in
 from .refs import (
     default_takeover_plan,
     source_refs,
@@ -108,7 +108,7 @@ def _existing_takeover_by_source_ref(manager: Any, source_run_id: str) -> tuple[
         attrs = getattr(task, "attributes", {}) or {}
         if str(attrs.get("takeover_source_run_id") or "").strip() != source_id:
             continue
-        if str(getattr(task, "status", "") or "").upper() in {"ABANDONED", "TAKEN_OVER"}:
+        if task_status_in(getattr(task, "status", ""), SUBAGENT_HANDLED_TERMINAL_STATUSES):
             continue
         candidates.append(task)
     candidates.sort(key=lambda item: item.created_at or item.updated_at or 0.0)

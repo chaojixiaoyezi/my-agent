@@ -91,7 +91,7 @@ def _validate_verifier_runtime(facts: dict[str, Any], findings: list[dict[str, o
 def _successful_tool_names(value: object) -> set[str]:
     tools: set[str] = set()
     for item in _dict_items(value):
-        ok = item.get("ok") is True or item.get("success") is True
+        ok = item.get("ok") is True
         tool = _text(item.get("tool"))
         if ok and tool:
             tools.add(tool)

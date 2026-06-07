@@ -1,19 +1,28 @@
 
 from __future__ import annotations
 
-"""Response rendering for gateway CLI output.
+"""Response rendering and response-file polling for gateway CLI output.
 
 This module is derived from runtime.py split. It contains response display
 functions that were previously in that file. Human status lines show cumulative
 context pressure when available, while JSON mode preserves the raw fields.
+Client polling also lives here so chat/TUI/gateway ask share one response-file
+load-error path and one stat-based "read only when changed" check.
 """
 
 import json
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .io import gateway_response_path, read_json_file_report
 from .paths import GatewayPaths
 from .request_errors import gateway_response_load_error_response
+
+
+@dataclass
+class GatewayResponsePollState:
+    stat_signature: tuple[int, int] | None = None
 
 
 def current_context_token_estimate(payload: Any) -> int:
@@ -86,3 +95,25 @@ def read_gateway_response_file(
     if report.load_error is not None:
         return gateway_response_load_error_response(response_path, report.load_error, request_id=request_id)
     return report.payload
+
+
+def read_gateway_response_file_when_ready(
+    response_path,
+    *,
+    state: GatewayResponsePollState,
+    request_id: str | None = None,
+    context: str = "gateway.response.read",
+) -> dict[str, Any]:
+    path = Path(response_path)
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return read_gateway_response_file(path, request_id=request_id, context=context)
+
+    signature = (int(stat.st_mtime_ns), int(stat.st_size))
+    if state.stat_signature == signature:
+        return {}
+    state.stat_signature = signature
+    return read_gateway_response_file(path, request_id=request_id, context=context)

@@ -756,6 +756,8 @@ def test_compact_continue_packet_prioritizes_full_read_cursor(tmp_path: Path) ->
                         "path": str(first),
                         "source_path": "data/big.txt",
                         "tool": "read_file",
+                        "ok": True,
+                        "status": "ok",
                         "read_window": {
                             "kind": "char_window",
                             "offset": 0,
@@ -769,6 +771,8 @@ def test_compact_continue_packet_prioritizes_full_read_cursor(tmp_path: Path) ->
                         "path": str(second),
                         "source_path": "data/big.txt",
                         "tool": "read_file",
+                        "ok": True,
+                        "status": "ok",
                         "read_window": {
                             "kind": "char_window",
                             "offset": 100,
@@ -834,6 +838,8 @@ def test_compact_continue_packet_uses_read_cursor_without_explicit_full_read_con
                         "path": str(first),
                         "source_path": "data/big.txt",
                         "tool": "read_file",
+                        "ok": True,
+                        "status": "ok",
                         "read_window": {
                             "kind": "char_window",
                             "offset": 0,
@@ -847,6 +853,8 @@ def test_compact_continue_packet_uses_read_cursor_without_explicit_full_read_con
                         "path": str(second),
                         "source_path": "data/big.txt",
                         "tool": "read_file",
+                        "ok": True,
+                        "status": "ok",
                         "read_window": {
                             "kind": "char_window",
                             "offset": 100,
@@ -942,6 +950,8 @@ def test_compact_continue_packet_does_not_advance_cursor_for_failed_read(tmp_pat
                         "path": str(first),
                         "source_path": "data/big.txt",
                         "tool": "read_file",
+                        "ok": True,
+                        "status": "ok",
                         "read_window": {
                             "kind": "char_window",
                             "offset": 0,
@@ -990,12 +1000,16 @@ def test_compact_continue_packet_treats_missing_offset_as_zero_for_artifact_curs
                         "kind": "tool_output",
                         "source_path": "data/big.txt",
                         "tool": "read_file",
+                        "ok": True,
+                        "status": "ok",
                         "parameters": {"path": "data/big.txt", "max_chars": 8000},
                     },
                     {
                         "kind": "tool_output",
                         "source_path": "data/big.txt",
                         "tool": "read_file",
+                        "ok": True,
+                        "status": "ok",
                         "parameters": {"path": "data/big.txt", "offset": 8000, "max_chars": 100000},
                     },
                 ],
@@ -1079,6 +1093,8 @@ def _line_read_ref(tmp_path: Path, page: dict[str, int | str]) -> dict:
         "path": str(artifact),
         "source_path": "data/line-log.txt",
         "tool": "read_file",
+        "ok": True,
+        "status": "ok",
         "parameters": {"path": "data/line-log.txt", "start_line": start, "max_chars": max_chars},
         "read_window": {
             "kind": "line_window",

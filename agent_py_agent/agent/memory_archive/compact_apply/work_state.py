@@ -188,6 +188,13 @@ def _tool_progress_dedupe_scope(item: dict[str, Any]) -> str:
         scoped_call_id = str(item.get("scoped_call_id") or "").strip()
         if scoped_call_id:
             return f"call:{scoped_call_id}"
+    if tool in {"list_files", "find_files", "search_text"}:
+        return (
+            f"page:{item.get('offset') if item.get('offset') is not None else ''}:"
+            f"{item.get('next_offset') if item.get('next_offset') is not None else ''}:"
+            f"{item.get('query') or item.get('pattern') or item.get('file_glob') or ''}:"
+            f"{item.get('output_mode') or ''}"
+        )
     return "source"
 
 
@@ -202,14 +209,18 @@ def _merge_cursor_fields(existing: dict[str, Any], item: dict[str, Any]) -> None
         "end_line",
         "next_start_line",
         "total_lines",
+        "limit",
+        "returned",
     ):
         if existing.get(key) is None and item.get(key) is not None:
             existing[key] = item[key]
+    if "complete" not in existing and "complete" in item:
+        existing["complete"] = item["complete"]
 
 
 def _tool_progress_item(ref: dict[str, Any]) -> dict[str, Any]:
     tool = str(ref.get("tool") or "").strip()
-    if tool not in {"read_file", "list_files", "find_files", "run_command", "read_artifact", "write_file"}:
+    if tool not in {"read_file", "list_files", "find_files", "search_text", "run_command", "read_artifact", "write_file"}:
         return {}
     parameters = ref.get("parameters", {}) if isinstance(ref.get("parameters"), dict) else {}
     source_path = str(ref.get("source_path") or parameters.get("path") or parameters.get("command") or "").strip()
@@ -225,16 +236,20 @@ def _tool_progress_item(ref: dict[str, Any]) -> dict[str, Any]:
         if not _successful_read_ref(ref):
             return {}
         item.update(_read_cursor_fields(ref, parameters))
+    if tool in {"list_files", "find_files", "search_text"}:
+        if not _successful_read_ref(ref):
+            return {}
+        item.update(_page_cursor_fields(ref, parameters))
     return item
 
 
 def _successful_read_ref(ref: dict[str, Any]) -> bool:
-    if ref.get("ok") is False:
+    if ref.get("ok") is not True:
         return False
     if str(ref.get("error_code") or "").strip():
         return False
     status = str(ref.get("status") or "").strip().lower()
-    return not status or status == "ok"
+    return status in {"", "ok"}
 
 
 def _read_cursor_fields(ref: dict[str, Any], parameters: dict[str, Any]) -> dict[str, Any]:
@@ -304,6 +319,61 @@ def _read_window_from_ref(ref: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _page_cursor_fields(ref: dict[str, Any], parameters: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "offset": _optional_int(parameters.get("offset")),
+        "limit": _optional_int(parameters.get("limit")),
+    }
+    window = _page_window_from_ref(ref)
+    if window:
+        fields.update({
+            "offset": int(window["offset"]),
+            "limit": int(window["limit"]),
+            "returned": int(window["returned"]),
+            "next_offset": int(window["next_offset"]),
+            "complete": bool(window["complete"]),
+        })
+        if window.get("output_mode"):
+            fields["output_mode"] = str(window.get("output_mode") or "")
+    for key in ("query", "pattern", "file_glob", "output_mode"):
+        value = str(parameters.get(key) or "").strip()
+        if value:
+            fields[key] = value
+    for key in ("recursive", "max_depth", "include_dirs", "include_files", "include_ignored", "literal", "ignore_case", "context"):
+        if key in parameters:
+            fields[key] = parameters[key]
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+def _page_window_from_ref(ref: dict[str, Any]) -> dict[str, Any]:
+    window = ref.get("page_window")
+    if not isinstance(window, dict):
+        envelope = ref.get("tool_result_envelope")
+        window = envelope.get("page_window") if isinstance(envelope, dict) else {}
+    if not isinstance(window, dict) or str(window.get("kind") or "").strip() != "offset_page":
+        return {}
+    offset = _optional_int(window.get("offset"))
+    limit = _optional_int(window.get("limit"))
+    returned = _optional_int(window.get("returned"))
+    next_offset = _optional_int(window.get("next_offset"))
+    if offset is None or limit is None or returned is None:
+        return {}
+    if next_offset is None:
+        next_offset = 0 if bool(window.get("complete")) else offset + returned
+    payload: dict[str, Any] = {
+        "kind": "offset_page",
+        "offset": offset,
+        "limit": limit,
+        "returned": returned,
+        "next_offset": next_offset,
+        "complete": bool(window.get("complete")) or next_offset <= 0,
+    }
+    output_mode = str(window.get("output_mode") or "").strip()
+    if output_mode:
+        payload["output_mode"] = output_mode
+    return payload
+
+
 def _tool_read_files_from_progress(progress: list[dict[str, Any]]) -> list[str]:
     return [
         str(item.get("source_path") or "")
@@ -317,17 +387,14 @@ def _read_coverage_payload(progress: list[dict[str, Any]]) -> dict[str, Any]:
     cursor = _best_read_cursor(read_items)
     if not cursor:
         return {}
+    sources = _source_read_coverage(read_items)
     primary = _read_cursor_payload(cursor)
     return {
         "schema_version": 1,
         "primary": primary,
-        "source_count": len(
-            {
-                str(item.get("source_path") or "")
-                for item in read_items
-                if str(item.get("source_path") or "").strip()
-            }
-        ),
+        "sources": sources[:24],
+        "source_count": len(sources),
+        "omitted_source_count": max(0, len(sources) - 24),
     }
 
 
@@ -357,6 +424,25 @@ def _read_cursor_payload(cursor: dict[str, Any]) -> dict[str, Any]:
         payload["total_chars"] = total
         payload["next_offset"] = covered_until if not payload["complete"] else 0
     return {key: value for key, value in payload.items() if value not in ("", [], {}, None)}
+
+
+def _source_read_coverage(read_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for item in read_items:
+        source = str(item.get("source_path") or "").strip()
+        if not source:
+            continue
+        if source not in grouped:
+            order.append(source)
+            grouped[source] = []
+        grouped[source].append(item)
+    rows: list[dict[str, Any]] = []
+    for source in order:
+        cursor = _best_read_cursor(grouped[source])
+        if cursor:
+            rows.append(_read_cursor_payload(cursor))
+    return rows
 
 
 def _read_coverage_next_action(coverage: dict[str, Any]) -> str:
@@ -401,8 +487,14 @@ def _tool_progress_next_action(progress: list[dict[str, Any]]) -> str:
     read_items = [item for item in progress if item.get("tool") in {"read_file", "read_artifact"}]
     if cursor_action := _read_cursor_next_action(read_items):
         return cursor_action
+    if page_action := _page_cursor_next_action(progress):
+        return page_action
     reads = [str(item.get("source_path") or "") for item in read_items]
-    scans = [str(item.get("source_path") or "") for item in progress if item.get("tool") in {"list_files", "find_files", "run_command"}]
+    scans = [
+        str(item.get("source_path") or "")
+        for item in progress
+        if item.get("tool") in {"list_files", "find_files", "search_text", "run_command"}
+    ]
     if not reads and not scans:
         return ""
     recent = dedupe_strings([*reads[-6:], *scans[-4:]])[-8:]
@@ -454,6 +546,58 @@ def _read_cursor_next_action_from_cursor(cursor: dict[str, Any]) -> str:
             "不要重读已登记范围，当前也没有完整覆盖证明，不能宣布完成。"
         )
     return f"已从本轮工具记录恢复到：{coverage_text}{next_text}"
+
+
+def _page_cursor_next_action(progress: list[dict[str, Any]]) -> str:
+    for item in reversed(progress):
+        if item.get("tool") not in {"list_files", "find_files", "search_text"}:
+            continue
+        next_offset = _optional_int(item.get("next_offset"))
+        if bool(item.get("complete")) or next_offset is None or next_offset <= 0:
+            continue
+        limit = _optional_int(item.get("limit")) or 50
+        call = _page_resume_call(item, next_offset=next_offset, limit=limit)
+        if not call:
+            continue
+        source = str(item.get("source_path") or "").strip()
+        returned = _optional_int(item.get("returned")) or 0
+        return (
+            f"已从本轮工具记录恢复到：{item.get('tool')} 已查看 {source} 的分页 "
+            f"offset={item.get('offset')} limit={limit} returned={returned}。"
+            f"下一步优先继续 {call}；不要从 offset=0 重来，也不要把当前分页当成完整覆盖证明。"
+        )
+    return ""
+
+
+def _page_resume_call(item: dict[str, Any], *, next_offset: int, limit: int) -> str:
+    tool = str(item.get("tool") or "").strip()
+    source = str(item.get("source_path") or "").strip()
+    if not source:
+        return ""
+    if tool == "list_files":
+        args = [f"path={_json_arg(source)}", f"offset={next_offset}", f"limit={limit}"]
+        for key in ("recursive", "max_depth", "file_glob", "include_dirs", "include_files", "include_ignored"):
+            if key in item:
+                args.append(f"{key}={_json_arg(item[key])}")
+        return f"list_files({', '.join(args)})"
+    if tool == "find_files":
+        pattern = str(item.get("pattern") or "").strip()
+        args = [f"pattern={_json_arg(pattern)}", f"path={_json_arg(source)}", f"offset={next_offset}", f"limit={limit}"]
+        if "include_ignored" in item:
+            args.append(f"include_ignored={_json_arg(item['include_ignored'])}")
+        return f"find_files({', '.join(args)})"
+    if tool == "search_text":
+        query = str(item.get("query") or "").strip()
+        args = [f"query={_json_arg(query)}", f"path={_json_arg(source)}", f"offset={next_offset}", f"limit={limit}"]
+        for key in ("output_mode", "file_glob", "literal", "ignore_case", "context", "include_ignored"):
+            if key in item:
+                args.append(f"{key}={_json_arg(item[key])}")
+        return f"search_text({', '.join(args)})"
+    return ""
+
+
+def _json_arg(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _best_read_cursor(read_items: list[dict[str, Any]]) -> dict[str, Any]:

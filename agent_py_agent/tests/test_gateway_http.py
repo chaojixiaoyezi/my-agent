@@ -117,6 +117,27 @@ class TestGatewayHTTPIntegration:
         except Exception as e:
             pytest.skip(f"HTTP server not reachable: {e}")
 
+    def test_status_endpoint_uses_hot_request_counts(self, http_server, mock_paths: MockGatewayPaths):
+        """GET /status only reports hot queue counts for frequent polling."""
+        import urllib.request
+
+        _, port = http_server
+        mock_paths.inbox.mkdir(parents=True, exist_ok=True)
+        mock_paths.processing.mkdir(parents=True, exist_ok=True)
+        mock_paths.done.mkdir(parents=True, exist_ok=True)
+        mock_paths.failed.mkdir(parents=True, exist_ok=True)
+        mock_paths.responses.mkdir(parents=True, exist_ok=True)
+        (mock_paths.inbox / "gw-1.json").write_text("{}", encoding="utf-8")
+        (mock_paths.processing / "gw-2.json").write_text("{}", encoding="utf-8")
+        (mock_paths.done / "gw-old.json").write_text("{}", encoding="utf-8")
+        (mock_paths.failed / "gw-failed.json").write_text("{}", encoding="utf-8")
+        (mock_paths.responses / "gw-response.json").write_text("{}", encoding="utf-8")
+
+        with urllib.request.urlopen(f"http://localhost:{port}/status", timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+        assert data["requests"] == {"pending": 1, "processing": 1}
+
     def test_ask_endpoint(self, http_server, mock_paths: MockGatewayPaths):
         """POST /ask creates a pending request."""
         import urllib.request

@@ -32,7 +32,14 @@ from .logging import (
     log_gateway_event,
     log_gateway_payload,
 )
-from .paths import AdapterPaths, GatewayPaths, adapter_paths, gateway_chunk_path, gateway_paths
+from .paths import (
+    AdapterPaths,
+    GatewayPaths,
+    adapter_paths,
+    gateway_chunk_path,
+    gateway_chunk_path_candidates,
+    gateway_paths,
+)
 from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
 from .queue_service import (
     ensure_gateway_folders,
@@ -70,6 +77,7 @@ __all__ = [
     "check_late_responses",
     "gateway_paths",
     "gateway_chunk_path",
+    "gateway_chunk_path_candidates",
     "gateway_request_counts",
     "gateway_response_path",
     "gateway_running",

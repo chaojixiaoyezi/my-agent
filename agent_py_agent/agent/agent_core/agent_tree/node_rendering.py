@@ -7,6 +7,7 @@ from typing import Any
 
 from ...model_visible_refs import current_model_ref, current_model_ref_list, current_model_text
 from ...runtime_errors import runtime_error_report
+from ...subagents.models import TaskStatus, task_status_in
 from .progress import attach_task_progress
 
 
@@ -227,7 +228,7 @@ def _timing(payload: dict[str, object]) -> dict[str, float]:
 
 def _not_done_reason(payload: dict[str, object]) -> str:
     status = str(payload.get("status") or "").strip().upper()
-    if status == "DONE":
+    if task_status_in(payload.get("status"), {TaskStatus.DONE.value}):
         return ""
     failure_type = str(payload.get("failure_type") or "").strip()
     if failure_type:

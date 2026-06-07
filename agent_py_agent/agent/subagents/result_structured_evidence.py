@@ -120,7 +120,7 @@ def _finding_dict(finding: Finding) -> dict[str, object]:
 
 
 def _evidence_ok(item: dict[str, object]) -> bool:
-    raw_ok = bool(item.get("ok", True))
+    raw_ok = item.get("ok") is True
     if raw_ok:
         return True
     kind = str(item.get("kind", "") or "").lower()

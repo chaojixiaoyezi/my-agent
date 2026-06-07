@@ -305,9 +305,9 @@ gateway_stop_timeout: 20
 # - responses：模型响应，`gateway result <request_id>` 读取这里。
 # - gateway_requests.jsonl：一行一条审计日志。
 # gateway_request_timeout 是 CLI 等待结果的默认时长，单位秒。
-# gateway_request_poll_interval 是后台 worker 多久检查一次 pending，单位秒。
+# gateway_request_poll_interval 是后台 worker 空闲时多久检查一次 pending，单位秒，可填小数。
 gateway_request_timeout: 300
-gateway_request_poll_interval: 1
+gateway_request_poll_interval: 0.2
 # gateway request worker 池：
 # - gateway_request_workers 控制本地 ask 队列并发处理数。
 # - 1 是最保守默认值；调大后每个 worker 都会创建自己的 agent/backend。

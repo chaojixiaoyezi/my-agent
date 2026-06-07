@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ...model_visible_refs import current_model_ref, current_model_ref_list
 from ...runtime_errors import runtime_error_report
+from ...subagents.models import TaskStatus, task_status_in
 
 
 def child_result_index(agent: object, tasks: list[object]) -> list[dict[str, object]]:
@@ -90,14 +91,15 @@ def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
 
 
 def _readiness_label(status: str, primary_refs: list[str], final_report_ref: str, summary_ref: str) -> str:
-    normalized = status.strip().upper()
-    if normalized == "DONE":
+    if task_status_in(status, {TaskStatus.DONE.value}):
         return "result_ready" if (primary_refs or final_report_ref or summary_ref) else "done_without_refs"
     if primary_refs:
         return "partial_artifacts_available"
     if final_report_ref or summary_ref:
         return "progress_refs_available"
-    return "running_no_result_yet" if normalized in {"RUNNING", "PLANNING"} else "not_ready"
+    if task_status_in(status, {TaskStatus.RUNNING.value, TaskStatus.PLANNING.value}):
+        return "running_no_result_yet"
+    return "not_ready"
 
 
 def _expected_outputs(attrs: dict[str, object]) -> list[str]:

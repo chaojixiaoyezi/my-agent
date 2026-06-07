@@ -8,6 +8,7 @@ from ..io.jsonl import append_jsonl
 from .identity import request_update_targets
 from .models import CaseDecision, CollaborationRequest, new_decision_id, new_request_id
 from .request_status import (
+    CollaborationRequestStatus,
     evidence_sources_by_request,
     is_blocked_request_status,
     is_completed_request_status,
@@ -189,7 +190,7 @@ class CollaborationRequestStore(CollaborationCaseStore):
             return status_text
         request_data.metadata["partial_completion_by"] = str(request_data.kwargs.get("actor_agent_id") or "")
         request_data.metadata["partial_completion_summary"] = str(request_data.kwargs.get("summary") or "")
-        return "pending"
+        return CollaborationRequestStatus.PENDING.value
 
     def _add_rerouted_participants(self, case_id: str, old: CollaborationRequest, updated: CollaborationRequest, kwargs: dict[str, Any]) -> None:
         for agent_id in updated.target_agent_ids:

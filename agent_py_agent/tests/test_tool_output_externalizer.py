@@ -190,6 +190,47 @@ def test_tool_output_index_preserves_read_file_window_metadata(tmp_path: Path) -
     assert index[-1]["read_window"] == read_window
 
 
+def test_tool_output_index_preserves_page_window_metadata(tmp_path: Path) -> None:
+    page_window = {
+        "kind": "offset_page",
+        "tool": "search_text",
+        "source_path": ".",
+        "offset": 20,
+        "limit": 20,
+        "returned": 20,
+        "next_offset": 40,
+        "complete": False,
+        "output_mode": "content",
+    }
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="search_text",
+            call_id="1-5",
+            output="page body",
+            ok=True,
+            run_id="run-tool",
+            task_id="task-tool",
+            request_id="req-tool",
+            min_chars=0,
+            parameters={"query": "needle", "path": ".", "offset": 20, "limit": 20},
+            result_envelope={"page_window": page_window},
+        )
+    )
+
+    artifact_path = Path(str(record["artifact_ref"]))
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    index = [
+        json.loads(line)
+        for line in (artifact_path.parent / "index.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert record["page_window"] == page_window
+    assert artifact["page_window"] == page_window
+    assert index[-1]["page_window"] == page_window
+
+
 def test_tool_loop_keeps_moderate_tool_output_inline_for_model_context(tmp_path: Path) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path))
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")

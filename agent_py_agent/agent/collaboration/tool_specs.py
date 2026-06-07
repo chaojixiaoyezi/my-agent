@@ -81,7 +81,7 @@ _UPDATE_STATUS_PARAMETERS = {
     "status": "新状态；机器只识别 open/closed 作为收集窗口状态；其他值只记录展示，不驱动关闭判断；closed 必须带摘要",
     "actor_agent_id": "执行状态推进的代理 ID",
     "summary": "状态推进摘要；closed 必须提供摘要、决策或既有决策",
-    "decision_type": "可选决策类型，如 triaged_by_main_agent/resolved_by_main_agent",
+    "decision_type": "可选决策类型，如 triaged_by_main_agent/closed_by_main_agent",
     "evidence_ids": "可选关联证据包 ID 列表",
 }
 _UPDATE_REQUEST_PARAMETERS = {

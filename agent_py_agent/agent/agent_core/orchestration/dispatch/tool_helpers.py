@@ -10,6 +10,7 @@ from ....capability.runtime_config_reload import (
     load_capability_config_snapshot,
 )
 from ....runtime_errors import runtime_error_report
+from ....subagents.models import task_is_done_verified
 from ..run_scope import remembered_orchestration_run_ids
 from .refs import related_task_refs
 from .scope import dispatch_include_run_ids_param
@@ -182,9 +183,7 @@ def _unfinished_remembered_run_ids(agent: object) -> tuple[list[str], list[dict[
         except Exception as exc:
             load_errors.append(_run_load_error(run_id, exc))
             continue
-        status = str(getattr(task, "status", "") or "").strip().upper()
-        verification = str(getattr(task, "verification_status", "") or "").strip().upper()
-        if status != "DONE" or verification != "VERIFIED":
+        if not task_is_done_verified(task):
             unfinished.append(run_id)
     return unfinished[:20], load_errors[:20]
 
@@ -199,7 +198,7 @@ def _blocking_run_ids(
 ) -> list[str]:
     ids: list[str] = []
     for record in records:
-        if bool(record.get("ok", True)):
+        if record.get("ok") is True:
             continue
         run_id = str(record.get("run_id") or "").strip()
         if run_id and run_id not in ids:

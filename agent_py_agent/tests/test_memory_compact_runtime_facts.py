@@ -82,6 +82,24 @@ def test_runtime_fact_source_does_not_promote_succeeded_status_alias_to_final(tm
     assert payload["runtime_progress"]["phase"] == "running"
 
 
+def test_runtime_fact_source_records_channel_error_as_terminal_phase(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+
+    write_runtime_fact_source(
+        RuntimeFactSourceRequest(
+            root=root,
+            request_id="req-channel-error",
+            user_prompt="测试通道错误状态",
+            status="CHANNEL_ERROR",
+        )
+    )
+
+    payload = json.loads(
+        (root / "memory_archive" / "runtime_facts" / "req-channel-error" / "task.json").read_text(encoding="utf-8")
+    )
+    assert payload["runtime_progress"]["phase"] == "channel_error"
+
+
 def test_runtime_fact_source_does_not_parse_compact_auto_continuation_markdown(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
 

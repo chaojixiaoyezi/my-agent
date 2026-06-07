@@ -32,3 +32,32 @@ def test_build_workflow_records_respects_task_workflow_off(monkeypatch: pytest.M
     )
 
     assert result == []
+
+
+@pytest.mark.parametrize("status", ["CANCELLED", "ABANDONED", "PAUSED"])
+def test_build_workflow_records_skips_dispatch_ineligible_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    task = SimpleNamespace(
+        id=f"worker-{status.lower()}",
+        parent_id="",
+        workflow_parent_run_id="",
+        status=status,
+        workflow_mode="auto",
+    )
+    agent = SimpleNamespace()
+    ctx = SimpleNamespace(normalized_workflow_mode="auto", limit=20, mutate_state=True)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError(f"workflow planner should not run for {status}")
+
+    monkeypatch.setattr(workflow_records, "_try_workflow_plan", fail_if_called)
+
+    result = workflow_records.build_workflow_records(
+        agent,
+        ctx,
+        [task],
+    )
+
+    assert result == []

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ...runtime_errors import runtime_error_report
+from ...subagents.models import SUBAGENT_FAILURE_STATUSES, task_status_in
 from ...subagents.role_templates import role_template_snapshot_for_task
 
 _QUALITY_SCAN_MAX_NODES = 96
@@ -120,12 +121,11 @@ def _read_output_payload(path: Path | None) -> tuple[dict[str, Any], BaseExcepti
 
 
 def _payload_has_negative_signal(item: Any, payload: dict[str, Any]) -> bool:
-    status = str(getattr(item, "status", "") or "").upper()
-    if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
+    if task_status_in(getattr(item, "status", ""), SUBAGENT_FAILURE_STATUSES):
         return True
     structured = payload.get("structured_output") if isinstance(payload.get("structured_output"), dict) else {}
     structured_status = str(structured.get("status") or payload.get("status") or "").upper()
-    if structured_status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
+    if task_status_in(structured_status, SUBAGENT_FAILURE_STATUSES):
         return True
     if payload.get("ok") is False or structured.get("ok") is False:
         return True

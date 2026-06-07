@@ -63,6 +63,7 @@ tasks/<date>/<task-slug>/
 ```
 
 如果用户明确指定普通输出目录，最终报告可以写到用户目录；当前 task `output/` / `work/` 仍记录本轮索引、验收和过程证据。
+`task-slug` 来自结构化 task name 或当前用户请求的短标题；其中 macOS/Linux/Windows 绝对路径只取 basename，不把本机 home 前缀写进任务目录名。
 `work/state.json` 和 `work/task.yaml` 只是当前任务状态/可读说明，不再作为旧目录身份兜底，避免旧 run 污染当前任务目录。
 
 ## Subagent Workspace
