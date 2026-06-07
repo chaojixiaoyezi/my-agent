@@ -77,7 +77,7 @@ def list_capability_requests(home: MyAgentHomePaths, *, status: str = "") -> lis
 
 
 def list_capability_requests_report(home: MyAgentHomePaths, *, status: str = "") -> CapabilityRequestsReport:
-    wanted = str(status or "").strip().lower()
+    wanted = str(status or "").strip()
     rows: list[OwnerCapabilityRequest] = []
     load_errors: list[dict[str, object]] = []
     if not home.owner_capability_requests_dir.exists():
@@ -88,7 +88,7 @@ def list_capability_requests_report(home: MyAgentHomePaths, *, status: str = "")
             load_errors.append(load_error)
             continue
         item = _request_from_payload(path, payload)
-        if not wanted or item.status.lower() == wanted:
+        if not wanted or item.status == wanted:
             rows.append(item)
     return CapabilityRequestsReport(rows, load_errors)
 

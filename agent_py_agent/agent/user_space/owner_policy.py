@@ -194,7 +194,6 @@ def owner_disk_usage(home: MyAgentHomePaths) -> OwnerDiskUsage:
         home.owner_workspace_dir,
         home.owner_artifacts_dir,
         home.owner_audit_dir,
-        home.owner_blobs_dir,
         home.owner_cache_dir,
         home.owner_tmp_dir,
         home.owner_logs_dir,

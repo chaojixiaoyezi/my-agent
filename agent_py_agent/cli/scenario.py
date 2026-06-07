@@ -127,6 +127,7 @@ def _cmd_scenario_dispatch(request: ScenarioDispatchRequest):
     print_scenario_step(3, "父代理调度 runner 和收口")
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
+    deadline = _scenario_dispatch_deadline(args)
     final_ok = False
     for cycle in range(1, args.max_cycles + 1):
         print(f"\n--- dispatch cycle {cycle}/{args.max_cycles} ---")
@@ -140,7 +141,53 @@ def _cmd_scenario_dispatch(request: ScenarioDispatchRequest):
             wait_seconds = _scenario_dispatch_wait_seconds(args)
             print(f"仍有子代理 RUNNING，等待 {wait_seconds:.1f}s 后继续检查。")
             time.sleep(wait_seconds)
+    if not final_ok:
+        final_ok = _cmd_scenario_observe_until_done(agent, args, deadline)
     return final_ok
+
+
+def _cmd_scenario_observe_until_done(agent, args, deadline: float) -> bool:
+    while scenario_tasks_active(agent, args.count) and _scenario_before_deadline(deadline):
+        wait_seconds = min(
+            _scenario_dispatch_wait_seconds(args),
+            max(0.0, deadline - _scenario_now()),
+        )
+        if wait_seconds <= 0:
+            break
+        print(f"主动 dispatch 轮次已用完，仍有子代理未结束，继续观察 {wait_seconds:.1f}s。")
+        time.sleep(wait_seconds)
+        print_scenario_board(agent, limit=args.count + 5)
+        if scenario_tasks_verified(agent, args.count):
+            return True
+    return scenario_tasks_verified(agent, args.count)
+
+
+def _scenario_dispatch_deadline(args) -> float:
+    return _scenario_now() + _scenario_dispatch_total_wait_seconds(args)
+
+
+def _scenario_dispatch_total_wait_seconds(args) -> float:
+    wait_seconds = _scenario_dispatch_wait_seconds(args)
+    try:
+        cycles = int(getattr(args, "max_cycles", 1) or 1)
+    except (TypeError, ValueError):
+        cycles = 1
+    try:
+        timeout = float(getattr(args, "timeout", 0) or 0)
+    except (TypeError, ValueError):
+        timeout = 0.0
+    return max(wait_seconds * max(cycles, 1), timeout + 60.0, 60.0)
+
+
+def _scenario_before_deadline(deadline: float) -> bool:
+    return _scenario_now() < deadline
+
+
+def _scenario_now() -> float:
+    monotonic = getattr(time, "monotonic", None)
+    if callable(monotonic):
+        return float(monotonic())
+    return 0.0
 
 
 def _scenario_dispatch_wait_seconds(args) -> float:

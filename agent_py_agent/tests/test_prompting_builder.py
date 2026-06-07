@@ -477,6 +477,7 @@ class TestBuildFullPrompt:
         )
         assert result.index("# System") < result.index("# Related Memory")
         assert result.index("# Related Memory") < result.index("# Dynamic Prompt Files")
+        assert result.index("# Workspace Context") < result.index("# Runtime Injection")
         assert result.index("# Runtime Injection") < result.index("# Tools")
 
     def test_build_with_user_task_section(self, tmp_path):

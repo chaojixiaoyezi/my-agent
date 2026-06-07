@@ -7,6 +7,7 @@
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -138,6 +139,27 @@ class ToolBoundarySpoofStreamingBackend(BaseBackend):
             if on_chunk is not None:
                 on_chunk(chunk)
         return "".join(chunks)
+
+
+class DelayedSecondToolStreamingBackend(BaseBackend):
+    name = "fake_delayed_second_tool_streaming_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            first = '[TOOL_CALL]\n{"tool":"read_file","path":"first.txt"}\n[/TOOL_CALL]'
+            second = '\n[TOOL_CALL]\n{"tool":"read_file","path":"second.txt"}\n[/TOOL_CALL]'
+            if on_chunk is not None:
+                on_chunk(first)
+                time.sleep(0.85)
+                on_chunk(second)
+            return ModelResponse(text=first + second, backend=self.name)
+        assert "first body" in prompt
+        assert "second body" in prompt
+        return ModelResponse(text="两个文件都读到了。", backend=self.name)
 
 
 class FakeProtectedMarkerWithoutToolBackend(BaseBackend):

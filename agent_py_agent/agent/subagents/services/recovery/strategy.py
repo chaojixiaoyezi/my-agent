@@ -23,7 +23,6 @@ from ...models import (
 )
 from ...protocol import build_task_address, build_task_envelope
 from ...role_templates import role_template_snapshot_for_task
-from ..task_attribute_reader import task_int, task_list, task_role, task_status, task_text
 from .modes import (
     CLOSED,
     LEADERSHIP_RECOVERY,
@@ -234,6 +233,39 @@ def _packet_load_error(path: Path, exc: BaseException) -> dict[str, object]:
     report = runtime_error_report(exc, context="subagent_recovery_strategy.continue_packet")
     report["path"] = str(path)
     return report
+
+
+def task_text(task: Any, name: str) -> str:
+    value = getattr(task, name, "")
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, int | float):
+        return str(value)
+    return ""
+
+
+def task_status(task: Any) -> str:
+    return task_text(task, "status")
+
+
+def task_role(task: Any) -> str:
+    return task_text(task, "role")
+
+
+def task_int(task: Any, name: str) -> int:
+    try:
+        return max(0, int(getattr(task, name, 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def task_list(task: Any, name: str) -> list[str]:
+    value = getattr(task, name, [])
+    if not isinstance(value, list | tuple | set):
+        return []
+    return [str(item) for item in value if str(item or "").strip()]
 
 
 def _packet_blockers(task: SubAgentTask, payload: dict[str, Any]) -> list[str]:

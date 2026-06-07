@@ -10,7 +10,7 @@ from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.config import CapabilityConfig
 
 from ....subagents import DispatchReport, DispatchWatchReport
-from ...failure_introspector import FailureIntrospector
+from ...failure_analysis_service import FailureIntrospector
 from ...planner_service import combine_runner_instruction
 from ...runner.dispatch import (
     _dispatch_patch_review_run_ids,

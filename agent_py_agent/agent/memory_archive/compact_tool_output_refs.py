@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .tool_output_externalizer import tool_output_index_paths_for_lookup
+
 _INTERNAL_LEDGER_TOOLS = {"task_progress"}
 
 
@@ -50,13 +52,13 @@ def tool_call_refs(restore_refs: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _read_tool_output_index(workspace: Path) -> list[dict[str, Any]]:
-    path = workspace / "blobs" / "tool_outputs" / "index.jsonl"
-    if not path.exists():
-        return []
     rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if payload := _json_line(line):
-            rows.append(payload)
+    for path in tool_output_index_paths_for_lookup(workspace):
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if payload := _json_line(line):
+                rows.append(payload)
     return rows
 
 

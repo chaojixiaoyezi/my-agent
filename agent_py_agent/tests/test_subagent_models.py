@@ -127,15 +127,16 @@ class TestTaskStatus:
         assert "FAILED" in DISPATCH_INELIGIBLE_STATUSES
 
     def test_normalize_task_status_accepts_current_protocol_only(self):
-        assert normalize_task_status("done") == "DONE"
-        assert normalize_task_status("channel_error") == "CHANNEL_ERROR"
+        assert normalize_task_status("DONE") == "DONE"
+        assert normalize_task_status("CHANNEL_ERROR") == "CHANNEL_ERROR"
         assert "COMPLETED" not in SUBAGENT_TASK_STATUSES
-        try:
-            normalize_task_status("completed")
-        except ValueError as exc:
-            assert str(exc) == "subagent_status_invalid"
-        else:
-            raise AssertionError("non-protocol status must fail closed")
+        for value in ("done", "channel_error", "completed"):
+            try:
+                normalize_task_status(value)
+            except ValueError as exc:
+                assert str(exc) == "subagent_status_invalid"
+            else:
+                raise AssertionError("non-protocol status must fail closed")
 
     def test_dispatch_ineligible_status_is_not_enum_member(self):
         """验证 DISPATCH_INELIGIBLE_STATUSES 包含字符串值而非枚举成员。"""

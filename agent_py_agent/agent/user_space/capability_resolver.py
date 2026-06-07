@@ -129,7 +129,7 @@ def _revoked_result_report(home: MyAgentHomePaths, name: str, *, kind: str) -> _
     records = [*shared.records, *draft.records]
     load_errors = [*shared.load_errors, *draft.load_errors]
     for row in records:
-        status = str(row.get("status") or "").strip().lower()
+        status = str(row.get("status") or "").strip()
         if status in {"revoked", "disabled", "revoked_for_security"}:
             return _RevokedCheckReport(
                 CapabilityResolveResult(

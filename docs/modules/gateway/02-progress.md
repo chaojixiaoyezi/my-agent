@@ -21,6 +21,8 @@
   `requests/done/` 或 `requests/failed/`，response 记录 `chunk_stream_path`；
   chat/TUI 和 `gateway ask` 会从 processing/done/failed 候选路径补读，避免 response
   先出现时丢最后一段流式输出，也避免 processing 被历史 chunk 污染。
+- `submit_gateway_ask()` 统一使用 gateway UUID 请求 ID 生成器，不再用毫秒时间戳拼 `gw-*`。
+  多个 chat/TUI/gateway client 同一毫秒提交时，请求文件不能互相覆盖。
 
 ## 2026-06-06 入口收敛
 

@@ -114,6 +114,26 @@ def test_run_state_snapshot_does_not_promote_completed_alias_to_done():
     assert snapshot["recovery_decision"]["action"] == "manual_review"
 
 
+def test_run_state_snapshot_does_not_promote_lowercase_protocol_text():
+    from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
+
+    task = SimpleNamespace(
+        id="run-lowercase-done",
+        status="done",
+        verification_status="verified",
+        channel_status="ok",
+        has_progress=True,
+    )
+
+    snapshot = run_state_snapshot_from_task(task)
+
+    assert snapshot["status"] == "done"
+    assert snapshot["verification_status"] == "verified"
+    assert snapshot["channel_status"] == "ok"
+    assert snapshot["can_closeout"] is False
+    assert snapshot["recovery_decision"]["action"] == "manual_review"
+
+
 def test_run_state_snapshot_projects_approval_wait_to_waiting_for_user():
     from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
 

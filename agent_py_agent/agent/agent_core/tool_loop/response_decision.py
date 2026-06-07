@@ -10,20 +10,14 @@ from ..tool_guard.local_progress import (
     has_required_local_progress_guard,
     local_progress_guard_context,
 )
-from .exploration_decision import (
-    ExplorationFuseDecision,
-    ExplorationFuseDecisionRequest,
-    exploration_fuse_no_tool_call_decision,
-    exploration_fuse_tool_call_decision,
+from ..tool_guard.exploration_fuse import (
+    exploration_fuse_context,
+    has_pending_exploration_fuse,
+    has_required_exploration_fuse,
 )
-from .repair_counters import (
-    ToolLoopRepairCounters,
-    _inc_protected_marker,
-)
-from .unresolved_runtime_issue_decision import (
-    UnresolvedRuntimeIssueDecision,
-    UnresolvedRuntimeIssueDecisionRequest,
-    unresolved_runtime_issue_no_tool_call_decision,
+from ..tool_guard.unresolved_runtime_issue import (
+    has_unresolved_runtime_issues,
+    unresolved_runtime_issue_context,
 )
 
 _PROTECTED_TOOL_MARKERS = (
@@ -31,6 +25,43 @@ _PROTECTED_TOOL_MARKERS = (
     "[tool-output-record",
     "[/tool-call]",
 )
+
+
+@dataclass(frozen=True)
+class ToolLoopRepairCounters:
+    __test__: ClassVar[bool] = False
+
+    protected_marker_repairs: int = 0
+    local_progress_redirects: int = 0
+    exploration_fuse_redirects: int = 0
+    unresolved_runtime_issue_redirects: int = 0
+
+
+def _inc_protected_marker(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
+    return ToolLoopRepairCounters(
+        protected_marker_repairs=counters.protected_marker_repairs + 1,
+        local_progress_redirects=counters.local_progress_redirects,
+        exploration_fuse_redirects=counters.exploration_fuse_redirects,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+    )
+
+
+def _inc_exploration_fuse(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
+    return ToolLoopRepairCounters(
+        protected_marker_repairs=counters.protected_marker_repairs,
+        local_progress_redirects=counters.local_progress_redirects,
+        exploration_fuse_redirects=counters.exploration_fuse_redirects + 1,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+    )
+
+
+def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
+    return ToolLoopRepairCounters(
+        protected_marker_repairs=counters.protected_marker_repairs,
+        local_progress_redirects=counters.local_progress_redirects,
+        exploration_fuse_redirects=counters.exploration_fuse_redirects,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects + 1,
+    )
 
 
 @dataclass(frozen=True)
@@ -50,6 +81,47 @@ class ToolLoopResponseDecision:
     action: str
     response: object
     calls: list[dict[str, object]]
+    counters: ToolLoopRepairCounters
+
+
+@dataclass(frozen=True)
+class ExplorationFuseDecision:
+    __test__: ClassVar[bool] = False
+
+    action: str
+    response: object
+    calls: list[dict[str, object]]
+    counters: ToolLoopRepairCounters
+
+
+@dataclass(frozen=True)
+class ExplorationFuseDecisionRequest:
+    __test__: ClassVar[bool] = False
+
+    agent: object
+    params: object
+    response: object
+    counters: ToolLoopRepairCounters
+    calls: list[dict[str, object]]
+
+
+@dataclass(frozen=True)
+class UnresolvedRuntimeIssueDecision:
+    __test__: ClassVar[bool] = False
+
+    action: str
+    response: object
+    calls: list[dict[str, object]]
+    counters: ToolLoopRepairCounters
+
+
+@dataclass(frozen=True)
+class UnresolvedRuntimeIssueDecisionRequest:
+    __test__: ClassVar[bool] = False
+
+    agent: object
+    params: object
+    response: object
     counters: ToolLoopRepairCounters
 
 
@@ -172,7 +244,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
 
 
 def _is_runtime_status_response(response: object) -> bool:
-    status = str(getattr(response, "runtime_status", "") or "").strip().lower()
+    status = str(getattr(response, "runtime_status", "") or "").strip()
     if status and status != "ok":
         return True
     for field in ("runtime_reason", "runtime_source"):
@@ -189,6 +261,7 @@ def _local_progress_no_tool_call_decision(
     repair_context = local_progress_guard_context(
         request.agent,
         request.counters.local_progress_redirects,
+        request.params,
     )
     if repair_context:
         request.params.tool_context.append(repair_context)
@@ -205,10 +278,55 @@ def _local_progress_tool_call_decision(
     repair_context = local_progress_guard_context(
         request.agent,
         request.counters.local_progress_redirects,
+        request.params,
     )
     if repair_context:
         request.params.tool_context.append(repair_context)
     return None
+
+
+def exploration_fuse_tool_call_decision(
+    request: ExplorationFuseDecisionRequest,
+) -> ExplorationFuseDecision | None:
+    if not has_required_exploration_fuse(request.agent, request.calls, request.params):
+        return None
+    context = exploration_fuse_context(request.agent, request.counters.exploration_fuse_redirects, request.params)
+    if context:
+        request.params.tool_context.append(context)
+        return None
+    return None
+
+
+def exploration_fuse_no_tool_call_decision(
+    request: ExplorationFuseDecisionRequest,
+) -> ExplorationFuseDecision | None:
+    if not has_pending_exploration_fuse(request.agent):
+        return None
+    context = exploration_fuse_context(request.agent, request.counters.exploration_fuse_redirects, request.params)
+    if context:
+        request.params.tool_context.append(context)
+        return ExplorationFuseDecision("continue", None, [], _inc_exploration_fuse(request.counters))
+    return None
+
+
+def unresolved_runtime_issue_no_tool_call_decision(
+    request: UnresolvedRuntimeIssueDecisionRequest,
+) -> UnresolvedRuntimeIssueDecision | None:
+    if not has_unresolved_runtime_issues(request.params):
+        return None
+    repair_context = unresolved_runtime_issue_context(
+        request.params,
+        request.counters.unresolved_runtime_issue_redirects,
+    )
+    if repair_context:
+        request.params.tool_context.append(repair_context)
+        return UnresolvedRuntimeIssueDecision(
+            "continue",
+            None,
+            [],
+            _inc_unresolved_runtime_issue(request.counters),
+        )
+    return UnresolvedRuntimeIssueDecision("break", request.response, [], request.counters)
 
 
 def _exploration_decision(decision: ExplorationFuseDecision) -> ToolLoopResponseDecision:

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .quality_models import ContextManifest, QualityContract
+from .model_task import ContextManifest, QualityContract
 
 
 @dataclass

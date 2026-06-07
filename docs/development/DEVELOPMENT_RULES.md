@@ -51,6 +51,9 @@ before changing code.
   compact ledger、config 都必须有唯一 canonical path / canonical schema。
 - `--no-save` 只表示不写长期记忆、raw archive 等可持久对话记录；不能关闭 task
   workspace。一次真实任务仍要有 `tasks/<date>/<task-slug>/{output,work}` 工作现场。
+- 输入工作区和任务产物目录必须分开。用户给的相对源码/资料/输入路径默认相对真实
+  workspace/cwd；task workspace 的 `task_root`、`output_dir`、`work_dir` 只负责本轮
+  交付物、草稿、审计和子代理过程文件，不能变成普通输入路径的默认根。
 - 不同时保留新旧两套路由。旧字段、旧目录、旧 facade、旧 fallback 确认不用就删；
   迁移必须短期、显式、有删除条件。
 - 配置必须单一来源。用户配置、默认 YAML、dataclass 默认值和测试覆盖不能互相打架；
@@ -60,6 +63,8 @@ before changing code.
 - 状态别名不做隐式兼容。`completed`、`succeeded`、`ok`、`ERROR`、多语言词表或
   历史标签不能自动升格为当前协议的 `DONE` / `FAILED` / `final`；需要兼容时必须先写
   显式迁移或结构化转换记录，默认按未知值 fail closed。
+- 状态协议值必须精确匹配。`done`、`timeout`、`verified`、`ok` 这类大小写变体也不能在
+  验收、恢复、auto-resume 或 transition 合同里自动改写成 `DONE` / `TIMEOUT` / `VERIFIED` / `OK`。
 - 错误正文不是错误码。工具、runner、gateway 或子代理没有显式 `error_code` /
   `error_type` 时，运行时只能写 `UNKNOWN_ERROR` 或对应结构化本地失败类型；不能从
   message、stdout、stderr、summary 里用关键词反推出硬错误码并影响状态、恢复或验收。
@@ -270,12 +275,19 @@ before changing code.
 - Subagent `capability_request.status` is an exact current protocol field:
   `OPEN`, `GRANTED`, `GAP`, or `CLOSED`.  Historical aliases such as
   `RESOLVED`, `APPROVED`, or `REJECTED` must not silently close, grant, or route
-  a request as if they were current schema values.
+  a request as if they were current schema values. Case variants such as `open`
+  or `granted` are not protocol values for this field.
 - Subagent task lifecycle decisions must use the shared `TaskStatus` /
   `VerificationStatus` helpers in `subagents.models` for done/verified,
   failure, ended, dispatch-ineligible, and handled terminal checks.  Do not
   recreate local status alias tables or prose-based state transitions in
   dispatch, recovery, compact, board, or closeout modules.
+- Machine status protocols must be exact per field.  Main/subagent run states
+  use uppercase protocol values such as `DONE`; task progress, collaboration,
+  tool protocol, and compact health use their documented lowercase protocol
+  values such as `done`, `completed`, `succeeded`, or `ok`. Do not call
+  `.upper()` or `.lower()` to make a status participate in completion,
+  recovery, dispatch, compact resume, or closeout decisions.
 - Cleanup is allowed inside authorized workspaces when it matches the task:
   temporary files, task trash, generated artifacts, task-local memory, drafts,
   templates, tools, and skills may be removed.  The hard line is uninstalling or
@@ -356,6 +368,13 @@ before changing code.
   `start_line/end_line/total_lines` 区间验收：从开头连续覆盖到 EOF 才算完成；只读到
   部分不能因为最终报告存在就通过。这个规则只适用于显式结构化合同，不能扩展成
   “报告质量/分析深度”的通用硬门。
+- 自动收口提示不能只看最终产物文件是否存在。当前 run 有 required
+  `target_coverage_contract` 时，自动 closeout 必须等结构化 coverage 完成后才触发；
+  覆盖未完成时只允许模型继续工作或显式 submit 后拿到结构化返工信息，不能在同一缺口上
+  每轮自动反复验收。
+- finalization 阶段也遵守同一规则：普通 `read_file` / `read_artifact` 只证明读取进度，
+  不能单独作为“有交付候选”的信号；required artifact 路径尚未出现或 required coverage
+  仍 blocking 时，不得在 compact/finalize 后自动 closeout。
 - delivery materializer 如果未来用于离线/显式合同流程，它输出的也只是结构化合同候选；
   不得在默认运行中根据中文关键词、报告措辞或路径猜测触发修复轮、重物化轮或 closeout
   阻断。合同医生只能处理已显式存在的结构化合同问题。
@@ -397,6 +416,10 @@ before changing code.
   一套验收入口生成 `[MAIN_AGENT_DELIVERY_COMPLETE]`。失败返工上下文仍只能注入一次；
   普通工具循环、长任务续跑、compact 续接和后续读写轮次不得反复复读旧 closeout 失败，
   避免模型被历史验收噪音带偏。
+- 子代理 finalize 也遵守这条权威顺序：当前 run 的
+  `[MAIN_AGENT_DELIVERY_COMPLETE]` 成功块是 runtime 结构化验收事实，可以直接转成
+  `DONE` / `VERIFIED` 子代理结果；后置 `SUBAGENT_RESULT` repair 不能覆盖已经通过的
+  task output closeout。
 - `write_file` 写入常见二进制交付物时必须先写临时文件并做客观格式验证，验证
   通过后再原子替换目标文件。验证失败时保留旧文件，并返回结构化错误让模型
   自己换方法修复；不要用坏候选覆盖上一次可打开的交付物。
@@ -556,7 +579,7 @@ do_write()
   the budget. Read these two fields as one policy: "within this many seconds,
   this run may read up to this many artifact body chars." Prefer
   `read_artifact mode=search/head/tail` or small slices over full artifact reads.
-  `read_file` may read registered `blobs/tool_outputs/*.json` wrappers as
+  `read_file` may read registered task `work/blobs/tool_outputs/*.json` wrappers as
   artifact content.
 - Tool outputs are externalized only when they are large enough to threaten the
   live prompt. Moderate extraction/search results should stay inline so the next
@@ -585,6 +608,13 @@ do_write()
   the file and return only paths/summaries. Streaming stdout/stderr can improve
   observability, but it is not a fix for an oversized or malformed tool-call
   JSON block.
+- Streaming tool-call boundaries are an observability and cleanup layer, not a
+  one-tool execution limiter. If a model streams a complete `[TOOL_CALL]` and
+  then continues with more machine blocks in the same assistant turn, the
+  runtime must wait for the assistant turn to finish and execute the full parsed
+  batch. It may suppress post-tool prose from the live UI and trim non-machine
+  text before parsing, but it must not abort the provider request just because
+  the first complete tool block arrived.
 - Tool prompt budgets must be long-term config-backed. If a tool/catalog/search
   threshold affects runtime behavior, put it in `agent_config.yaml`,
   `AgentConfig`, the normalizer, and the frontend runtime config together; do
@@ -648,7 +678,9 @@ do_write()
   structured template fields such as `can_spawn_children`, `can_run_tests`,
   `depends_on_outputs`, and `output_contract`, but it must not hard-code role
   id lists or infer role behavior from `agent_name` or user prose. `role`
-  selects the template; `agent_name` is only a display name.
+  selects the template; `agent_name` is only a display name. Template selection
+  may use exact template ids and documented aliases, but not substring matching
+  such as treating `qa_tester` as `tester`.
 - Explicit QA role requirements are machine contracts, not prose suggestions.
   They must come from structured fields such as `required_qa_roles` and role
   template capability snapshots, not from scanning parent goals or closeout

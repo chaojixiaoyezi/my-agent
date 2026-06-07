@@ -451,6 +451,28 @@ def _read_artifact_payload(
     )
 
 
+def test_read_artifact_finds_task_work_index_from_owner_root(tmp_path: Path) -> None:
+    owner = tmp_path / "owner"
+    task_work = owner / "tasks" / "2026-06-07" / "demo" / "work"
+    artifact_path = _write_externalized_tool_output(
+        task_work,
+        content="TASK-WORK-CONTENT",
+        call_id="1-1",
+        run_id="run-task",
+    )
+
+    payload = _read_artifact_payload(
+        owner,
+        artifact_path,
+        {"max_chars": 100},
+    )
+
+    assert payload["ok"] is True
+    assert payload["content"] == "TASK-WORK-CONTENT"
+    assert artifact_path.is_relative_to(task_work)
+    assert not (owner / "blobs" / "tool_outputs" / "index.jsonl").exists()
+
+
 def _write_externalized_tool_output(
     root: Path,
     *,

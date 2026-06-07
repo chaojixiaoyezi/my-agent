@@ -5,14 +5,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .capability_requests import list_capability_requests_report
 from .home_backup import latest_home_backup_snapshots_report
-from .home_doctor_capability_requests import capability_requests_doctor_payload
-from .home_doctor_findings import build_doctor_findings, repair_plan
-from .home_doctor_policy import owner_policy_doctor_payload
 from .home_indexes import dangling_index_refs
 from .home_layout import MyAgentHomePaths
 from .home_retention import plan_owner_retention
 from .home_runtime_query import home_runtime_status
+from .owner_policy import read_owner_policy_bundle_report
 from .owner_compact_indexes import dangling_owner_compact_index_refs_report
 from .temporary_grants import list_temporary_grants
 
@@ -74,6 +73,227 @@ def _doctor_report(home: MyAgentHomePaths, sections: dict[str, Any], findings: l
     }
 
 
+def build_doctor_findings(sections: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        *_owner_lifecycle_findings(sections["home"]),
+        *_dangling_findings(sections["dangling"]),
+        *_compact_index_findings(sections["compact_dangling"]),
+        *_compact_index_load_error_findings(sections["compact_index_load_errors"]),
+        *_retention_findings(sections["retention"].actions),
+        *_schema_findings(sections["schema"]),
+        *_backup_findings(sections["backup"]),
+        *_owner_policy_findings(sections["owner_policy"]),
+        *_capability_request_findings(sections["capability_requests"]),
+        *_temporary_grant_findings(sections["temporary_grants"]),
+    ]
+
+
+def repair_plan(findings: list[dict[str, Any]]) -> dict[str, Any]:
+    grouped: dict[str, list[dict[str, Any]]] = {"auto_repair": [], "warn": [], "manual": []}
+    for finding in findings:
+        resolution = finding.get("resolution") if isinstance(finding.get("resolution"), dict) else {}
+        action_class = str(resolution.get("action_class") or "manual")
+        if action_class not in grouped:
+            action_class = "manual"
+        grouped[action_class].append(
+            {
+                "kind": str(finding.get("kind") or ""),
+                "message": str(finding.get("message") or ""),
+                "command": str(resolution.get("command") or ""),
+                "note": str(resolution.get("note") or ""),
+            }
+        )
+    return {
+        "auto_repair_count": len(grouped["auto_repair"]),
+        "warn_count": len(grouped["warn"]),
+        "manual_count": len(grouped["manual"]),
+        "auto_repair": grouped["auto_repair"],
+        "warn": grouped["warn"],
+        "manual": grouped["manual"],
+    }
+
+
+def _owner_lifecycle_findings(home_status: dict[str, Any]) -> list[dict[str, Any]]:
+    lifecycle = home_status.get("owner", {}).get("lifecycle", {})
+    load_error = lifecycle.get("load_error") if isinstance(lifecycle, dict) else None
+    if not isinstance(load_error, dict):
+        return []
+    return [
+        {
+            "kind": "owner_lifecycle_load_error",
+            "path": load_error.get("path") or lifecycle.get("path", ""),
+            "status": "UNKNOWN",
+            "note": "owner lifecycle status is unreadable; do not treat this owner as confirmed active",
+            "load_error": load_error,
+        }
+    ]
+
+
+def _dangling_findings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "kind": "dangling_index",
+            "severity": "warning",
+            "message": "global index points to a missing path",
+            "missing_path": str(record.get("missing_path") or ""),
+            "resolution": _resolution(
+                "auto_repair",
+                command="my-agent home-index-rebuild --apply",
+                note="rebuild owner/task/run/agent indexes from existing owner homes",
+            ),
+        }
+        for record in records
+    ]
+
+
+def _compact_index_findings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "kind": "dangling_compact_index",
+            "severity": "warning",
+            "message": "owner compact index points to a missing task rollup or compact package",
+            "pointer": str(record.get("pointer") or ""),
+            "field": str(record.get("field") or ""),
+            "missing_path": str(record.get("missing_path") or ""),
+            "resolution": _resolution(
+                "manual",
+                note="resync the affected task compact rollup after confirming the task workspace still exists",
+            ),
+        }
+        for record in records
+    ]
+
+
+def _compact_index_load_error_findings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "kind": "compact_index_pointer_unreadable",
+            "severity": "warning",
+            "message": "owner compact index pointer is not valid JSON",
+            "path": str(record.get("path") or ""),
+            "error": str(record.get("error") or ""),
+            "resolution": _resolution(
+                "manual",
+                note="remove the unreadable pointer or regenerate task compact rollup after confirming the task workspace",
+            ),
+        }
+        for record in records
+    ]
+
+
+def _retention_findings(actions: tuple[Any, ...]) -> list[dict[str, Any]]:
+    if not actions:
+        return []
+    return [
+        {
+            "kind": "retention_candidate",
+            "severity": "info",
+            "message": "retention policy has expired files to clean",
+            "count": len(actions),
+            "resolution": _resolution(
+                "auto_repair",
+                command="my-agent home-retention --apply",
+                note="delete only files selected by the explicit owner retention policy",
+            ),
+        }
+    ]
+
+
+def _schema_findings(schema: dict[str, Any]) -> list[dict[str, Any]]:
+    if schema.get("ok"):
+        return []
+    return [
+        {
+            "kind": "schema_version_unreadable",
+            "severity": "warning",
+            "message": str(schema.get("error") or "schema_version missing"),
+            "path": str(schema.get("path") or ""),
+            "resolution": _resolution(
+                "manual",
+                note="inspect schema_version.json or rerun home bootstrap before trusting schema status",
+            ),
+        }
+    ]
+
+
+def _backup_findings(backup: dict[str, Any]) -> list[dict[str, Any]]:
+    if int(backup.get("snapshot_count") or 0) > 0:
+        return []
+    return [
+        {
+            "kind": "backup_snapshot_missing",
+            "severity": "info",
+            "message": "no owner-home snapshot backup has been recorded yet",
+            "resolution": _resolution(
+                "warn",
+                note="create a snapshot before destructive maintenance or schema changes",
+            ),
+        }
+    ]
+
+
+def _owner_policy_findings(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    errors = payload.get("load_errors") if isinstance(payload.get("load_errors"), list) else []
+    return [
+        {
+            "kind": "owner_policy_load_error",
+            "severity": "warning",
+            "message": "owner policy file could not be read; defaults may be incomplete",
+            "context": str(error.get("context") or ""),
+            "path": str(error.get("path") or ""),
+            "resolution": {
+                "action_class": "manual",
+                "note": "inspect the owner policy file before trusting permissions, quota, retention, skills or tools",
+            },
+        }
+        for error in errors
+        if isinstance(error, dict)
+    ]
+
+
+def _capability_request_findings(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    count = int(payload.get("open_count") or 0)
+    if count <= 0:
+        return []
+    return [
+        {
+            "kind": "capability_request_open",
+            "severity": "info",
+            "message": "owner has open capability requests",
+            "count": count,
+            "resolution": {
+                "action_class": "manual",
+                "note": "review or expire pending capability requests; do not auto-approve them",
+            },
+        }
+    ]
+
+
+def _temporary_grant_findings(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    count = int(payload.get("active_count") or 0)
+    if count <= 0:
+        return []
+    return [
+        {
+            "kind": "temporary_grant_active",
+            "severity": "info",
+            "message": "owner has active temporary grants",
+            "count": count,
+            "resolution": _resolution(
+                "warn",
+                note="verify active grants are still intended; expired grants are handled by retention/doctor lifecycle",
+            ),
+        }
+    ]
+
+
+def _resolution(action_class: str, *, command: str = "", note: str = "") -> dict[str, str]:
+    payload = {"action_class": action_class, "note": note}
+    if command:
+        payload["command"] = command
+    return payload
+
+
 def _schema_payload(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -98,16 +318,37 @@ def _backup_payload(home: MyAgentHomePaths) -> dict[str, Any]:
 
 
 def _owner_policy_payload(home: MyAgentHomePaths) -> dict[str, Any]:
-    return owner_policy_doctor_payload(home)
+    report = read_owner_policy_bundle_report(home)
+    return {
+        "ok": not report.load_errors,
+        "load_errors": list(report.load_errors),
+    }
 
 
 def _capability_requests_payload(home: MyAgentHomePaths) -> dict[str, Any]:
-    return capability_requests_doctor_payload(home)
+    report = list_capability_requests_report(home)
+    rows = report.requests
+    open_rows = [row for row in rows if row.status == "open"]
+    return {
+        "total_count": len(rows),
+        "open_count": len(open_rows),
+        "load_errors": report.load_errors,
+        "open": [
+            {
+                "request_id": row.request_id,
+                "capability": row.capability,
+                "requested_by": row.requested_by,
+                "task_id": row.task_id,
+                "expires_at": row.expires_at,
+            }
+            for row in open_rows
+        ],
+    }
 
 
 def _temporary_grants_payload(home: MyAgentHomePaths) -> dict[str, Any]:
     rows = list_temporary_grants(home)
-    active_rows = [row for row in rows if row.status.lower() == "active"]
+    active_rows = [row for row in rows if row.status == "active"]
     return {
         "total_count": len(rows),
         "active_count": len(active_rows),

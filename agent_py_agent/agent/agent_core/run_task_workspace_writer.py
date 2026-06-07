@@ -25,6 +25,18 @@ def current_run_task_workspace_root(agent, params: object | None = None) -> Path
     return None
 
 
+def current_run_task_work_dir(agent, params: object | None = None) -> Path | None:
+    for text in _task_workspace_work_dir_candidates(agent, params):
+        if not text:
+            continue
+        try:
+            return Path(text).expanduser().resolve(strict=False)
+        except OSError:
+            continue
+    root = current_run_task_workspace_root(agent, params)
+    return root / "work" if root is not None else None
+
+
 def write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
     if not bool(getattr(agent.config, "run_task_workspace_enabled", True)):
         return ""
@@ -107,13 +119,14 @@ def attach_run_task_workspace_context(agent, params, user_prompt: str):
     if not _should_create_workspace(agent, params):
         return params
     result = _ensure_workspace_for_run(agent, params, user_prompt)
-    injection = _workspace_prompt_section(result)
+    primary_workspace_root = _primary_workspace_root(agent)
+    injection = _workspace_prompt_section(result, primary_workspace_root=primary_workspace_root)
     next_inject = _append_once(list(getattr(params, "inject", None) or []), injection)
     next_attrs = _task_attributes_with_workspace(getattr(params, "task_attributes", None), result)
     next_contract = _delivery_contract_with_workspace(
         getattr(params, "delivery_contract", None),
         result,
-        primary_workspace_root=_primary_workspace_root(agent),
+        primary_workspace_root=primary_workspace_root,
     )
     agent._current_run_task_workspace = str(result.root)
     return replace(params, inject=next_inject, task_attributes=next_attrs, delivery_contract=next_contract)
@@ -204,6 +217,18 @@ def _task_workspace_root_candidates(agent, params: object | None) -> list[str]:
     ]
 
 
+def _task_workspace_work_dir_candidates(agent, params: object | None) -> list[str]:
+    attrs = getattr(params, "task_attributes", None) if params is not None else None
+    contract = getattr(params, "delivery_contract", None) if params is not None else None
+    return [
+        _workspace_work_dir_from_mapping(contract, "task_workspace"),
+        _workspace_work_dir_from_mapping(attrs, "run_workspace"),
+        str(Path(getattr(agent, "_current_run_task_workspace", "") or "") / "work")
+        if str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
+        else "",
+    ]
+
+
 def _workspace_root_from_mapping(value: object, key: str) -> str:
     if not isinstance(value, dict):
         return ""
@@ -226,6 +251,19 @@ def _workspace_root_from_mapping(value: object, key: str) -> str:
         if field == "work_dir":
             return str(path.parent)
     return ""
+
+
+def _workspace_work_dir_from_mapping(value: object, key: str) -> str:
+    if not isinstance(value, dict):
+        return ""
+    workspace = value.get(key)
+    if not isinstance(workspace, dict):
+        return ""
+    work_dir = str(workspace.get("work_dir") or "").strip()
+    if work_dir:
+        return work_dir
+    root = str(workspace.get("task_root") or "").strip()
+    return str(Path(root) / "work") if root else ""
 
 
 def _write_closeout_state(path: Path, params: object, report: dict[str, Any], now: str) -> None:
@@ -348,14 +386,18 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _workspace_prompt_section(paths) -> str:
+def _workspace_prompt_section(paths, *, primary_workspace_root: Path) -> str:
     return "\n".join(
         [
             "# Current Task Workspace",
+            f"- source_workspace_root: {primary_workspace_root}",
+            f"- relative_input_root: {primary_workspace_root}",
             "- 本轮任务已有独立任务目录；没有用户明确指定其他输出目录时，最终交付物写到 output_dir。",
             "- output_dir 可以作为协作时的共享产物区；代码、报告分片、子代理阶段产物可以先放这里方便联调和汇总。",
             "- 收口前请整理 output_dir：最终只保留用户需要看的交付物；明显的草稿、日志、子代理分报告和临时材料挪到 work_dir 或在最终报告里做索引。",
             "- work_dir 用于草稿、日志、中间材料和过程文件，也适合保存被挪走的过程产物。",
+            "- 用户给的相对输入路径、源码路径和资料路径默认相对 relative_input_root 读取。",
+            "- task_root/output_dir/work_dir 是任务产物和过程文件位置，不是相对输入路径的默认根。",
             "- 用户让你阅读、分析、扫描的项目/源码/资料目录是输入目录，不是默认交付目录。",
             "- 不要因为输入目录下面可以新建 output/，就把它当成本轮输出目录。",
             "- 输入目录里的 output/、reports/ 或旧报告只能当线索；除非用户明确要求复用，不能当成本轮已完成证据。",
@@ -643,6 +685,7 @@ def _artifact_declares_output_target(artifact: dict) -> bool:
 
 __all__ = [
     "attach_run_task_workspace_context",
+    "current_run_task_work_dir",
     "current_run_task_workspace_root",
     "sync_run_task_workspace_closeout",
     "write_run_task_workspace_if_needed",

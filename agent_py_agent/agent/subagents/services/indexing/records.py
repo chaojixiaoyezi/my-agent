@@ -4,10 +4,42 @@ from __future__ import annotations
 """record-specific LocalStore indexing helpers for SubAgentIndexingService."""
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Any
 
-from .params import DataclassRecordIndexParams, LocalRecordParams
+
+@dataclass(frozen=True)
+class LocalRecordParams:
+    """Bundle of log_local_record parameters."""
+
+    source_type: str
+    source_id: str
+    title: str
+    content: str
+    event_type: str
+    metadata: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class IndexReportParams:
+    """Bundle of report indexing fields."""
+
+    source_type: str
+    source_id: str
+    title: str
+    report: object
+    event_type: str
+
+
+@dataclass(frozen=True)
+class DataclassRecordIndexParams:
+    """Bundle of dataclass record indexing fields."""
+
+    source_type: str
+    source_id: str
+    title: str
+    record: object
+    event_type: str
 
 
 def index_dataclass_record_via(

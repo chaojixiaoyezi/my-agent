@@ -18,7 +18,17 @@ from agent_py_agent.agent.subagents.patch.patch_apply_audit import (
     PatchApplyRecordPayload,
     build_patch_apply_record,
 )
+from agent_py_agent.agent.subagents.patch.patch_apply_helpers import (
+    run_patch_apply_tests,
+    validate_patch_test_command,
+)
+from agent_py_agent.agent.subagents.patch.patch_file_ops import (
+    PatchFileApplyContext,
+    do_apply_patches,
+    rollback_patch_apply,
+)
 from agent_py_agent.agent.subagents.patch.patch_renderer import build_unified_diff
+from agent_py_agent.agent.subagents.parsing import _dict_list
 from agent_py_agent.agent.subagents.reports import PatchApplyRecord
 from agent_py_agent.agent.subagents.utils import _new_id
 from agent_py_agent.agent.tooling.write_boundary import validate_write_boundary
@@ -52,6 +62,47 @@ class ApplyPatchTaskParams:
 
 
 @dataclass
+class PatchApplyParams:
+    """Bundle for PatchApplyExecutor.execute parameters."""
+
+    patch_specs: list
+    review_status_updates: list
+    task: Any
+    manager: Any
+    applier: str
+    note: str
+    test_commands: list
+
+
+class PatchApplyExecutor:
+    """Execute patch apply with rollback support."""
+
+    @staticmethod
+    def execute(params: PatchApplyParams):
+        touched_files = {}
+        applied_count = 0
+        rollback_performed = False
+        test_results = []
+
+        try:
+            applied_count, touched_files = do_apply_patches(
+                PatchFileApplyContext(params.patch_specs, params.task, params.applier, params.note)
+            )
+            test_results = _run_patch_apply_tests(params)
+            _write_patch_apply_success(params, applied_count, test_results)
+        except Exception as exc:
+            rollback_performed = bool(touched_files)
+            rollback_patch_apply(touched_files)
+            for spec in params.patch_specs:
+                spec["audit"]["apply_status"] = "ROLLED_BACK" if rollback_performed else "FAILED"
+                spec["audit"]["message"] = f"apply 失败: {exc}"
+                spec["patch_ref"]["apply_status"] = spec["audit"]["apply_status"]
+            raise RuntimeError(str(exc)) from exc
+
+        return applied_count, touched_files, rollback_performed, test_results
+
+
+@dataclass
 class _PreparedPatchApply:
     patch_entries: list
     patch_specs: list
@@ -81,11 +132,17 @@ class BaseAuditParams:
 
 
 def extract_patch_test_info(task, output):
-    from agent_py_agent.agent.subagents.services.patch_apply.test_commands import (
-        PatchApplyTestCommands,
-    )
-
-    return PatchApplyTestCommands.extract_with_audit_entries(task, output)
+    commands, blocked_reasons = _extract_patch_test_commands(task, output)
+    entries = [
+        {
+            "path": "",
+            "status": "test_command",
+            "apply_status": "BLOCKED",
+            "message": reason,
+        }
+        for reason in blocked_reasons
+    ]
+    return commands, len(blocked_reasons), entries
 
 
 def apply_patch_task(manager, task, *, params: ApplyPatchTaskParams) -> PatchApplyRecord:
@@ -208,10 +265,6 @@ def _execute_apply(ctx: _ExecuteApplyContext):
     """Execute the patch apply and handle rollback on failure."""
     applied_count, rollback_performed, test_results = 0, False, []
     try:
-        from agent_py_agent.agent.subagents.services.patch_apply.executor import (
-            PatchApplyExecutor,
-            PatchApplyParams,
-        )
         applied_count, _, rollback_performed, test_results = PatchApplyExecutor.execute(
             PatchApplyParams(
                 patch_specs=ctx.patch_specs,
@@ -234,10 +287,86 @@ def _execute_apply(ctx: _ExecuteApplyContext):
     return applied_count, rollback_performed, test_results, ctx.decision, ctx.ok, ctx.message
 
 
+def _extract_patch_test_commands(task, output: dict) -> tuple[list[str], list[str]]:
+    commands: list[str] = []
+    blocked: list[str] = []
+    for command in _task_patch_test_commands(task):
+        _append_validated_test_command(command, commands, blocked)
+    for test in _dict_list(output.get("tests", [])):
+        command = str(test.get("command") or "").strip()
+        _append_validated_test_command(command, commands, blocked)
+    return commands, blocked
+
+
+def _append_validated_test_command(command: str, commands: list[str], blocked: list[str]) -> None:
+    if not command:
+        return
+    problem = validate_patch_test_command(command)
+    if problem:
+        blocked.append(problem)
+    elif command not in commands:
+        commands.append(command)
+
+
+def _task_patch_test_commands(task) -> list[str]:
+    attrs = getattr(task, "attributes", {}) or {}
+    if not isinstance(attrs, dict):
+        return []
+    commands: list[str] = []
+    for field_name in ("patch_test_commands", "test_commands"):
+        commands.extend(_string_items(attrs.get(field_name)))
+    return commands
+
+
+def _string_items(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple)):
+        return [text for item in value if (text := str(item or "").strip())]
+    return []
+
+
+def _run_patch_apply_tests(params: PatchApplyParams) -> list:
+    if not params.test_commands:
+        return []
+    test_results = run_patch_apply_tests(params.test_commands, params.manager.workspace_root)
+    failed = [item for item in test_results if not item.get("ok")]
+    if failed:
+        raise RuntimeError(f"{len(failed)} 个 apply 后测试失败。")
+    return test_results
+
+
+def _write_patch_apply_success(params: PatchApplyParams, applied_count: int, test_results: list) -> None:
+    read_report = read_json_object_report(
+        Path(params.task.output_json),
+        parse_nested_string=True,
+        context="patch_apply.success_output_json",
+    )
+    output = dict(read_report.payload)
+    if read_report.load_error is not None:
+        _append_load_error(output, read_report.load_error)
+    output["patches"] = params.review_status_updates
+    Path(params.task.output_json).write_text(
+        json.dumps(output, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    params.manager.actions._append_task_work_log(
+        params.task,
+        f"patch_apply: applied={applied_count} tests={len(test_results)} applier={params.applier}",
+    )
+
+
+def _append_load_error(output: dict[str, object], load_error: dict[str, object]) -> None:
+    existing = output.get("load_errors")
+    items = list(existing) if isinstance(existing, list) else []
+    items.append(load_error)
+    output["load_errors"] = items
+
+
 def normalize_patch_apply_spec(manager, task, patch: dict) -> dict:
     """Normalize patch spec with write boundary enforcement."""
     raw_path = str(patch.get("path") or "").strip()
-    status = str(patch.get("status") or "").strip().lower()
+    status = str(patch.get("status") or "").strip()
     patch_type = _patch_type(patch)
     content = _patch_content(patch)
     diff_text = _patch_diff_text(patch)

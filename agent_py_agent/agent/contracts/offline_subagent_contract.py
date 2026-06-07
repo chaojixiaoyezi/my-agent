@@ -183,7 +183,7 @@ def _optional_int(value: object) -> int | None:
 
 
 def _status(value: object) -> str:
-    return _text(value).upper()
+    return _text(value)
 
 
 __all__ = ["OfflineSubagentValidation", "validate_subagent_contract"]

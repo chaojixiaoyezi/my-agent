@@ -215,8 +215,8 @@ def _matching_task_run_id(task: object, identity_keys: set[str]) -> str:
 
 def _runtime_row(target: str, task: object | None) -> dict[str, str]:
     run_id = str(target or "").strip()
-    status = str(getattr(task, "status", "") or "").upper() if task is not None else "UNKNOWN"
-    channel = str(getattr(task, "channel_status", "") or "").upper() if task is not None else ""
+    status = str(getattr(task, "status", "") or "").strip() if task is not None else "UNKNOWN"
+    channel = str(getattr(task, "channel_status", "") or "").strip() if task is not None else ""
     return {"agent_id": run_id, "agent_name": str(getattr(task, "agent_name", "") or ""), "status": status, "channel_status": channel, "unavailable_reason": _unavailable_reason(status, channel)}
 
 

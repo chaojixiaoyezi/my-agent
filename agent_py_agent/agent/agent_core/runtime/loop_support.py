@@ -6,10 +6,11 @@ from dataclasses import fields, replace
 
 from ...memory_archive import build_auto_resume_context, has_resume_trigger
 from ...memory_routing import RouteContextOptions, build_routed_memory_context
-from ...user_space.home_memory_routes import runtime_route_root_and_index
+from ...runtime_errors import runtime_error_report
+from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
+from ...user_space.home_layout import runtime_route_root_and_index
 from .._runtime_params import CompressionContext, ToolLoopExecuteParams
 from .capabilities import resolve_runtime_capabilities
-from .context_bundle import build_runtime_main_context_bundle
 from .live_archive import write_runtime_fact_start_if_enabled
 from .loop_models import (
     CompressionLoopResult,
@@ -165,6 +166,59 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     )
 
 
+def build_runtime_main_context_bundle(
+    agent,
+    request: RuntimeContextRequest,
+    *,
+    memories: list,
+    runtime_injections: list,
+    routed_context,
+    resume_context_injected: bool,
+    task_local: bool,
+):
+    if task_local:
+        return None
+    auto_save = bool(getattr(agent.config, "auto_save_memory", True))
+    do_save = auto_save if request.save is None else bool(request.save)
+    tool_specs, tool_spec_errors = _tool_specs_for_context(agent, request)
+    return build_main_context_bundle(
+        MainContextBundleRequest(
+            root=agent.root,
+            home_paths=getattr(agent, "home_paths", None),
+            user_prompt=request.user_prompt,
+            request_id=request.request_id,
+            run_id=request.run_id,
+            task_id=request.task_id,
+            source=request.source,
+            context_scope=request.context_scope,
+            save=do_save,
+            memory_count=len(memories),
+            runtime_injection_count=len(runtime_injections),
+            routed_required_read_paths=tuple(getattr(routed_context, "required_read_paths", ()) or ()),
+            routed_candidate_paths=tuple(getattr(routed_context, "candidate_paths", ()) or ()),
+            resume_context_injected=resume_context_injected,
+            task_attributes=request.task_attributes,
+            workspace_roots=tuple(str(item) for item in getattr(agent, "workspace_roots", []) or ()),
+            write_boundary=request.write_boundary,
+            allowed_tools=tuple(request.allowed_tools or ()),
+            granted_capabilities=tuple(request.granted_capabilities or ()),
+            tool_specs=tuple(tool_specs),
+            tool_spec_errors=tuple(tool_spec_errors),
+        )
+    )
+
+
+def _tool_specs_for_context(agent, request: RuntimeContextRequest) -> tuple[list[object], list[dict[str, object]]]:
+    try:
+        return agent.tools.specs(
+            allowed_tools=request.allowed_tools,
+            granted_capabilities=request.granted_capabilities,
+            include_orchestration=True,
+        ), []
+    except Exception as exc:
+        return [], [runtime_error_report(exc, context="main_context_bundle.tool_specs")]
+
+
 def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *, task_local: bool):
     route_mode = str(getattr(agent.config, "memory_rule_routing_mode", "soft") or "soft")
     route_enabled = (
@@ -183,6 +237,7 @@ def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *,
             limit=max(route_auto_read_limit, 5),
         ),
     )
+
 
 def _resume_context_for_request(agent, request: RuntimeContextRequest, *, task_local: bool):
     result = build_auto_resume_context(

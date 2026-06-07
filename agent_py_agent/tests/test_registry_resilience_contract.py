@@ -136,7 +136,32 @@ def test_registry_archives_large_tool_output(tmp_path: Path) -> None:
     payload = result.result_envelope["tool_output_policy"]
     artifact_ref = payload["artifact_ref"]
     assert payload["truncated"] is True
+    assert artifact_ref.startswith("work/blobs/tool_outputs/")
     assert (tmp_path / artifact_ref).read_text(encoding="utf-8") == "x" * 25000
+    assert not (tmp_path / ".agent_tool_outputs").exists()
+
+
+def test_registry_archives_large_tool_output_under_task_work_dir(tmp_path: Path) -> None:
+    source_workspace = tmp_path / "source"
+    source_workspace.mkdir()
+    task_root = tmp_path / "home" / "tasks" / "2026-06-07" / "demo"
+    task_work = task_root / "work"
+    result = execute_registry_call(
+        _call(
+            {"tool": "huge_output"},
+            {"huge_output": HugeOutputTool()},
+            source_workspace,
+            write_boundary={"task_root": str(task_root), "task_work_dir": str(task_work)},
+        )
+    )
+
+    assert result.ok is True
+    payload = result.result_envelope["tool_output_policy"]
+    artifact_ref = payload["artifact_ref"]
+    assert artifact_ref.startswith("work/blobs/tool_outputs/")
+    assert (task_root / artifact_ref).read_text(encoding="utf-8") == "x" * 25000
+    assert not (source_workspace / ".agent_tool_outputs").exists()
+    assert not (source_workspace / "work" / "blobs" / "tool_outputs").exists()
 
 
 def test_registry_preserves_read_file_output_for_context_compaction(tmp_path: Path) -> None:
@@ -156,7 +181,13 @@ def test_registry_preserves_large_machine_output_when_declared(tmp_path: Path) -
     assert result.result_envelope["tool_output_policy"]["preserved"] is True
 
 
-def _call(payload: dict[str, object], tools: dict[str, BaseTool], workspace: Path) -> ExecuteRegistryCallParams:
+def _call(
+    payload: dict[str, object],
+    tools: dict[str, BaseTool],
+    workspace: Path,
+    *,
+    write_boundary: dict[str, object] | None = None,
+) -> ExecuteRegistryCallParams:
     return ExecuteRegistryCallParams(
         payload=payload,
         tools=tools,
@@ -164,4 +195,5 @@ def _call(payload: dict[str, object], tools: dict[str, BaseTool], workspace: Pat
         workspace_roots=[workspace],
         expose_security_tools=False,
         security_tool_names=set(),
+        write_boundary=write_boundary,
     )

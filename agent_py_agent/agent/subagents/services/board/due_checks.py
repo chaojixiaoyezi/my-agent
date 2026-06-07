@@ -363,7 +363,7 @@ def check_run_timeout_issues(ctx: DueInspectionContext, run_timeout):
 
 
 def is_runtime_timeout_candidate(task) -> bool:
-    status = str(task.status or "").upper()
+    status = str(task.status or "").strip()
     if is_parked_planning_coordinator(task):
         return False
     return _is_active(status)

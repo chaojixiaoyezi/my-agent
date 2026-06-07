@@ -18,11 +18,10 @@ _TASK_STATUS_EMOJI = {
     "BLOCKED": "⚠️",
     "PAUSED": "⏸️",
     "ABANDONED": "🗑️",
-    "COMPLETED": "✅",
     "FAILED": "❌",
     "DONE": "✅",
     "TIMEOUT": "⏰",
-    "SPLIT": "🔀",
+    "TAKEN_OVER": "🔀",
 }
 
 

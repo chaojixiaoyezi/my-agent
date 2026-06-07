@@ -191,6 +191,32 @@ def test_compact_apply_and_resume_include_scoped_tool_output_artifact_refs(tmp_p
     assert metadata["restore_refs"]["source_refs"]["tool_outputs"][0]["path"] == artifact_ref
 
 
+def test_compact_apply_finds_task_work_tool_output_index_from_owner_root(tmp_path: Path) -> None:
+    root = tmp_path / "owner"
+    task_work = root / "tasks" / "2026-06-07" / "demo" / "work"
+    _append_raw_tool_ref_event(root)
+    _append_tool_ref_snapshot(root)
+    _append_tool_ref_token_usage(root)
+    artifact_ref = _write_large_tool_output_artifact(task_work)
+
+    apply_result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-tool-ref",
+                request_id="request-tool-ref",
+                run_id="run-tool-ref",
+                task_id="task-tool-ref",
+            ),
+        ),
+    )
+
+    tool_refs = apply_result["restore_refs"]["source_refs"]["tool_outputs"]
+    assert tool_refs[0]["path"] == artifact_ref
+    assert Path(artifact_ref).is_relative_to(task_work)
+    assert not (root / "blobs" / "tool_outputs" / "index.jsonl").exists()
+
+
 def test_compact_apply_does_not_advance_read_cursor_for_failed_tool_call(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     _append_raw_tool_ref_event(root)

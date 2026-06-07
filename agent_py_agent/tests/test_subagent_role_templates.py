@@ -89,7 +89,7 @@ def test_user_role_template_can_extend_catalog(tmp_path):
     assert any("PPT润色子代理" in check for check in task.acceptance_checks)
 
 
-def test_user_template_role_can_be_selected_from_natural_name(tmp_path):
+def test_user_template_role_can_be_selected_by_explicit_id(tmp_path):
     template_dir = tmp_path / "templates"
     template_dir.mkdir()
     (template_dir / "ppt_polisher.json").write_text(
@@ -119,10 +119,10 @@ def test_user_template_role_can_be_selected_from_natural_name(tmp_path):
         goal="检查三份 PPT 草稿",
         thought="polish",
         plan=["read", "report"],
-        role="slide_ppt_polisher_lead",
+        role="ppt_polisher",
     )
 
-    assert task.role == "slide_ppt_polisher_lead"
+    assert task.role == "ppt_polisher"
     assert "list_files" in task.allowed_tools
     assert "read_file" in task.allowed_tools
     assert "write_file" in task.allowed_tools

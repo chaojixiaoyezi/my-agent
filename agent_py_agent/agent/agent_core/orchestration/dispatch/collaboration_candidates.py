@@ -84,7 +84,7 @@ def _can_run_for_collaboration_request(task: object) -> bool:
     })
     if task_status_in(getattr(task, "status", ""), unavailable_statuses):
         return False
-    if str(getattr(task, "channel_status", "") or "").upper() == "BROKEN":
+    if str(getattr(task, "channel_status", "") or "") == "BROKEN":
         return False
     if any(getattr(item, "status", "") == "OPEN" for item in getattr(task, "capability_requests", []) or []):
         return False

@@ -23,8 +23,7 @@ from .events import LocalStoreEventMixin
 from .maintenance import LocalStoreMaintenanceMixin
 from .models import PREVIEW_CHARS, LocalSearchResult, LocalStoreEvent, LocalTimelineItem
 from .records import LocalRecordInput, LocalRecordLogInput, LocalStoreRecordMixin
-from .runtime_gate_ledger import LocalStoreRuntimeGateLedgerMixin
-from .runtime_gate_models import RuntimeGateLedgerRecord
+from .runtime_gate_ledger import LocalStoreRuntimeGateLedgerMixin, RuntimeGateLedgerRecord
 from .schema import LocalStoreSchemaMixin
 from .search import LocalStoreSearchMixin
 from .store import LocalStore

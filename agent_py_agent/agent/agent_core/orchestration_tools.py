@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from ..settings.defaults import default_config_int
 from ..subagents.services.base import CreateRunParams
-from ..subagents.services.hierarchy.agent_names import (
+from ..subagents.services.hierarchy.scheduled_role import (
     agent_name_has_trailing_identifier,
     is_placeholder_agent_name,
 )

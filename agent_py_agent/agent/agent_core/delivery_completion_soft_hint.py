@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
 from ._runtime_params import ToolLoopExecuteParams
+from .delivery_closeout.uncontracted import _absolute_paths_in_text
+from .target_coverage_ledger import collect_target_coverage_records, target_coverage_status
 
 _HINT_MARKER = "[delivery-completion-soft-hint]"
 _MUTATING_TOOLS = {"write_file", "apply_patch", "run_command", "controlled_exec"}
@@ -24,7 +25,15 @@ def maybe_append_delivery_completion_soft_hint(
     contract = params.delivery_contract if isinstance(params.delivery_contract, dict) else {}
     workspace_root = Path(getattr(agent, "root", ".")).expanduser().resolve(strict=False)
     target_paths = _required_target_paths(contract, workspace_root)
-    if not _is_successful_delivery_signal(archive_record, tool_ok=tool_ok, target_paths=target_paths):
+    completion_signal = _is_successful_delivery_signal(archive_record, tool_ok=tool_ok, target_paths=target_paths)
+    if _target_coverage_blocks_auto_closeout(params, workspace_root):
+        return
+    if not completion_signal and not _coverage_completion_signal(
+        params,
+        tool_ok=tool_ok,
+        target_paths=target_paths,
+        workspace_root=workspace_root,
+    ):
         return
     if not contract and not _is_task_output_delivery(params, archive_record):
         return
@@ -193,17 +202,6 @@ def _user_requested_output_targets(params: ToolLoopExecuteParams) -> list[dict[s
     return _unique_targets(targets)
 
 
-def _absolute_paths_in_text(text: str) -> list[Path]:
-    if not text:
-        return []
-    paths: list[Path] = []
-    for match in re.finditer(r"(?:~|/)[^\s'\"`<>()\[\]{}，。；;、]+", text):
-        raw = match.group(0).rstrip(".,:;，。；、")
-        if raw:
-            paths.append(Path(raw).expanduser())
-    return paths
-
-
 def _output_target_for_user_path(path: Path, *, force_kind: str | None = None) -> dict[str, object]:
     resolved = path.resolve(strict=False)
     kind = force_kind or ("file" if resolved.suffix else "dir")
@@ -233,6 +231,70 @@ def _is_supported_delivery_file(path: Path) -> bool:
 
 def _hint_already_added(params: ToolLoopExecuteParams) -> bool:
     return any(str(item).startswith(_HINT_MARKER) for item in params.tool_context)
+
+
+def target_coverage_blocks_delivery_auto_closeout(agent: object, params: ToolLoopExecuteParams) -> bool:
+    workspace_root = Path(getattr(agent, "root", ".")).expanduser().resolve(strict=False)
+    return _target_coverage_blocks_auto_closeout(params, workspace_root)
+
+
+def _coverage_completion_signal(
+    params: ToolLoopExecuteParams,
+    *,
+    tool_ok: bool,
+    target_paths: list[Path],
+    workspace_root: Path | None,
+) -> bool:
+    if not tool_ok or not target_paths:
+        return False
+    coverage = _target_coverage_contract(params)
+    if not coverage:
+        return False
+    return _coverage_status_complete(_current_target_coverage_status(params, coverage, workspace_root))
+
+
+def _target_coverage_blocks_auto_closeout(params: ToolLoopExecuteParams, workspace_root: Path | None) -> bool:
+    coverage = _target_coverage_contract(params)
+    if not coverage:
+        return False
+    return _coverage_status_blocks(_current_target_coverage_status(params, coverage, workspace_root))
+
+
+def _target_coverage_contract(params: ToolLoopExecuteParams) -> dict[str, Any]:
+    contract = params.delivery_contract if isinstance(params.delivery_contract, dict) else {}
+    coverage = contract.get("target_coverage_contract")
+    return dict(coverage) if isinstance(coverage, dict) else {}
+
+
+def _current_target_coverage_status(
+    params: ToolLoopExecuteParams,
+    coverage_contract: dict[str, Any],
+    workspace_root: Path | None,
+) -> dict[str, object]:
+    return target_coverage_status(
+        coverage_contract,
+        coverage_records=collect_target_coverage_records(
+            list(getattr(params, "archive_tool_calls", []) or []),
+            workspace_root=workspace_root,
+        ),
+        workspace_root=workspace_root,
+    )
+
+
+def _coverage_status_blocks(status: dict[str, object]) -> bool:
+    return status.get("should_block") is True
+
+
+def _coverage_status_complete(status: dict[str, object]) -> bool:
+    return _positive_int(status.get("expected_count")) > 0 and _positive_int(status.get("missing_count")) == 0
+
+
+def _positive_int(value: object) -> int:
+    try:
+        number = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
 
 
 def _append_text(items: list[str], value: object) -> None:
@@ -286,4 +348,4 @@ def _unique_targets(targets: list[dict[str, object]]) -> list[dict[str, object]]
     return result
 
 
-__all__ = ["maybe_append_delivery_completion_soft_hint"]
+__all__ = ["maybe_append_delivery_completion_soft_hint", "target_coverage_blocks_delivery_auto_closeout"]

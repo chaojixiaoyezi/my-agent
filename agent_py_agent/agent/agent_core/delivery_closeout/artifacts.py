@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,12 +22,8 @@ from ...contracts.artifact_acceptance import (
 from ...contracts.gates import artifact_provenance_from_archive
 from ...contracts.staged_checkpoint_acceptance import staged_checkpoint_findings
 from ..artifact_locator import locate_artifact
+from .._runtime_params import ToolLoopExecuteParams
 from ..target_coverage_ledger import collect_target_coverage_records, target_coverage_status
-from .artifact_models import (
-    ArtifactPathFailureRequest,
-    ArtifactValidationReportRequest,
-    DeliveryContractValidationRequest,
-)
 from .groups import (
     ArtifactGroupValidationRequest,
     _artifact_path,
@@ -35,6 +32,36 @@ from .groups import (
 
 CLOSEOUT_DIR = ".agent_delivery"
 CLOSEOUT_REPORT = "closeout.json"
+
+
+@dataclass(frozen=True)
+class DeliveryContractValidationRequest:
+    contract: dict[str, Any]
+    artifacts: list[dict[str, Any]]
+    workspace_root: Path
+    params: ToolLoopExecuteParams
+    archive_tool_calls: list[Any] | None = None
+
+
+@dataclass(frozen=True)
+class ArtifactPathFailureRequest:
+    item: dict[str, Any]
+    raw_path: str
+    code: str
+    workspace_root: Path | None = None
+    locator_findings: list[dict[str, object]] | None = None
+    registry_read_errors: list[dict[str, object]] | None = None
+
+
+@dataclass(frozen=True)
+class ArtifactValidationReportRequest:
+    item: dict[str, Any]
+    path: Path
+    workspace_root: Path
+    registry_record: ArtifactRegistryRecord | None
+    registry_read_errors: list[dict[str, object]]
+    archive_tool_calls: list[Any]
+    run_id: str
 
 
 def _required_artifacts(contract: dict[str, Any]) -> list[dict[str, Any]]:

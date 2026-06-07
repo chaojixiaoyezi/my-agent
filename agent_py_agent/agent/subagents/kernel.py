@@ -9,11 +9,11 @@ control-plane 已有字段整理成一个稳定快照，后续恢复、QA、验�
 旧任务把父级带回过期 task_root。
 """
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .context_bundle_refs import workspace_refs as model_workspace_refs
-from .kernel_models import SubagentKernelQuery, SubagentKernelRun, SubagentKernelSnapshot
 from .model_capabilities import capability_request_counts_as_open
 from .models import (
     SUBAGENT_BLOCKED_STATUSES,
@@ -23,6 +23,77 @@ from .models import (
     task_status_in,
 )
 from .protocol import build_task_address, build_task_envelope
+
+
+@dataclass(frozen=True)
+class SubagentKernelQuery:
+    root_id: str = ""
+    run_id: str = ""
+    scope: str = "root_tree"
+    include_refs: bool = True
+    task_workspace_dir: str = ""
+
+
+@dataclass(frozen=True)
+class SubagentKernelRun:
+    run_id: str = ""
+    task_id: str = ""
+    session_id: str = ""
+    thread_id: str = ""
+    root_id: str = ""
+    root_run_id: str = ""
+    parent_task_id: str = ""
+    parent_id: str = ""
+    parent_run_id: str = ""
+    depth: int = 0
+    agent_kind: str = ""
+    role: str = ""
+    agent_name: str = ""
+    status: str = ""
+    verification_status: str = ""
+    failure_type: str = ""
+    progress: float = 0.0
+    current_step: str = ""
+    current_tool: str = ""
+    heartbeat_at: float = 0.0
+    updated_at: float = 0.0
+    last_progress_at: float = 0.0
+    last_progress_summary: str = ""
+    latest_summary: str = ""
+    child_ids: list[str] = field(default_factory=list)
+    address: dict[str, object] = field(default_factory=dict)
+    task_envelope: dict[str, object] = field(default_factory=dict)
+    workspace_refs: dict[str, str] = field(default_factory=dict)
+    recovery_refs: dict[str, str] = field(default_factory=dict)
+    tool_contract: dict[str, object] = field(default_factory=dict)
+    artifact_refs: list[str] = field(default_factory=list)
+    artifact_registry_refs: list[dict[str, object]] = field(default_factory=list)
+    declared_output_refs: list[str] = field(default_factory=list)
+    evidence_refs: list[str] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    needs_capability: list[str] = field(default_factory=list)
+    recent_tool_trace: list[dict[str, object]] = field(default_factory=list)
+    background_start: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SubagentKernelSnapshot:
+    schema_version: str
+    root_id: str = ""
+    scope: str = ""
+    runs: list[SubagentKernelRun] = field(default_factory=list)
+    running_run_ids: list[str] = field(default_factory=list)
+    blocked_run_ids: list[str] = field(default_factory=list)
+    completed_run_ids: list[str] = field(default_factory=list)
+    failed_run_ids: list[str] = field(default_factory=list)
+    takeover_candidate_run_ids: list[str] = field(default_factory=list)
+    source_refs: dict[str, str] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    query_root_id: str = ""
+    query_run_id: str = ""
+    query_include_refs: bool = True
+    query_task_workspace_dir: str = ""
+    load_errors: list[dict[str, object]] = field(default_factory=list)
 
 
 class SubagentKernel:

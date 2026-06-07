@@ -13,14 +13,16 @@ import time
 from dataclasses import dataclass, replace
 
 from agent_py_agent.agent.common.json_io import read_json_object_report
+from agent_py_agent.agent.io import append_jsonl
 from agent_py_agent.agent.subagents.reports import PatchApplyRecord, PatchApplyReport
-from agent_py_agent.agent.subagents.services.indexing.params import (
+from agent_py_agent.agent.subagents.services.indexing.records import (
     DataclassRecordIndexParams,
     IndexReportParams,
 )
 from agent_py_agent.agent.subagents.utils import _new_id
 
 from .patch_apply_reports import patch_apply_record_to_dict
+from .patch_renderer import render_patch_apply_record_markdown
 from .patch_apply_task import (
     ApplyPatchTaskParams,
     apply_patch_task,
@@ -145,12 +147,8 @@ class PatchApplyService:
 
     def _write_apply_records(self, report: PatchApplyReport, *, apply: bool) -> None:
         """Persist per-run patch apply records and append apply logs when requested."""
-        from agent_py_agent.agent.subagents.services.patch_apply.record_files import (
-            PatchApplyRecordFiles,
-        )
-
         for record in report.records:
-            PatchApplyRecordFiles.write_record(record, self.manager)
+            _write_patch_apply_record_file(record, self.manager)
             self.manager.indexing._index_dataclass_record(
                 DataclassRecordIndexParams(
                     "subagent_patch_apply",
@@ -161,7 +159,7 @@ class PatchApplyService:
                 ),
             )
             if apply:
-                PatchApplyRecordFiles.append_log(record, self.manager)
+                _append_patch_apply_log(record, self.manager)
 
     def _apply_patch_task(
         self,
@@ -295,3 +293,32 @@ def _write_patch_apply_report_json(manager, report: PatchApplyReport) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _write_patch_apply_record_file(record: PatchApplyRecord, manager) -> None:
+    try:
+        task = manager.load(record.run_id)
+    except FileNotFoundError:
+        return
+    record_json = task.reports_dir_path / "patch_apply.json"
+    record_md = task.task_dir_path / "PATCH_APPLY.md"
+    record_json.write_text(
+        json.dumps(patch_apply_record_to_dict(record), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    record_md.write_text(render_patch_apply_record_markdown(record), encoding="utf-8")
+
+
+def _append_patch_apply_log(record: PatchApplyRecord, manager) -> None:
+    jsonl = manager.workspace / "subagent_patch_apply_log.jsonl"
+    append_jsonl(jsonl, patch_apply_record_to_dict(record))
+
+    markdown = manager.workspace / "PATCH_APPLY_LOG.md"
+    if not markdown.exists():
+        markdown.write_text("# PATCH APPLY LOG\n\n", encoding="utf-8")
+    with markdown.open("a", encoding="utf-8") as handle:
+        status = "OK" if record.ok else "FAIL"
+        handle.write(
+            f"- [{status}] {record.id} run={record.run_id} decision={record.decision} "
+            f"rollback={record.rollback_performed} message={record.message}\n"
+        )

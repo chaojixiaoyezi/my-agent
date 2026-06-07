@@ -77,6 +77,8 @@ def run_params_with_request_id(params: RunParams) -> RunParams:
 def run_params_with_materialized_delivery_contract(agent, user_prompt: str, params: RunParams) -> RunParams:
     if params.delivery_contract is not None:
         return params
+    if _is_internal_context_scope(params.context_scope):
+        return params
     structural_contract = delivery_contract_from_user_requested_outputs(
         user_prompt,
         workspace_root=getattr(agent, "root", None),
@@ -108,6 +110,10 @@ def _materialize_delivery_contract(agent, user_prompt: str, params: RunParams, *
 
 def _should_materialize_delivery_contract(params: RunParams) -> bool:
     return str(params.source or "").strip() in _AUTO_MATERIALIZE_SOURCES
+
+
+def _is_internal_context_scope(value: object) -> bool:
+    return str(value or "").strip().lower() in {"task_local", "control_plane"}
 
 
 def _has_materialized_runtime_contract(contract: dict) -> bool:

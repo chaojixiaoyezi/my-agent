@@ -594,6 +594,7 @@ def _invoke_registry_with_envelope(
             spec=call.tools[tool_name].spec,
             payload=payload,
             workspace_root=call.workspace_root,
+            write_boundary=call.write_boundary,
         ),
         envelope,
     )

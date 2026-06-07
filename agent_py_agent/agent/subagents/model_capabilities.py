@@ -15,12 +15,12 @@ _EXPLICIT_PENDING_CAPABILITY_STATUSES = frozenset({"PENDING_CAPABILITY_REQUEST"}
 
 
 def is_pending_capability_status(status: str) -> bool:
-    normalized = str(status or "").upper().strip()
+    normalized = str(status or "").strip()
     return normalized in _EXPLICIT_PENDING_CAPABILITY_STATUSES
 
 
 def normalize_capability_request_status(status: object) -> str:
-    normalized = str(status or CAPABILITY_REQUEST_OPEN_STATUS).strip().upper()
+    normalized = str(status or CAPABILITY_REQUEST_OPEN_STATUS).strip()
     return normalized or CAPABILITY_REQUEST_OPEN_STATUS
 
 

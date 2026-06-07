@@ -54,7 +54,11 @@ def test_attach_run_task_workspace_context_no_save_still_creates_task_workspace(
     assert workspace["task_root"]
     assert Path(workspace["output_dir"]).name == "output"
     assert Path(workspace["work_dir"]).name == "work"
-    assert "# Current Task Workspace" in "\n".join(updated.inject)
+    injection = "\n".join(updated.inject)
+    assert "# Current Task Workspace" in injection
+    assert f"source_workspace_root: {tmp_path}" in injection
+    assert f"relative_input_root: {tmp_path}" in injection
+    assert "不是相对输入路径的默认根" in injection
 
 
 def test_attach_run_task_workspace_context_preserves_user_requested_output_root(tmp_path):

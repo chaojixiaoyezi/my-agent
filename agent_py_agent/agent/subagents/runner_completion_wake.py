@@ -14,7 +14,7 @@ def notify_parent_on_runner_result(manager: Any, task: Any, result: Any, output_
     store = getattr(manager, "conversation_store", None)
     if store is None or bool(getattr(result, "dry_run", False)):
         return
-    status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").upper()
+    status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").strip()
     if not task_status_in(status, SUBAGENT_WAKE_STATUSES):
         return
     task_id = str(getattr(task, "id", "") or getattr(result, "run_id", "") or "").strip()
@@ -74,7 +74,7 @@ def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict
 
 
 def _record_wake_error(manager: Any, task: Any, result: Any, exc: BaseException) -> None:
-    status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").upper()
+    status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").strip()
     attrs = dict(getattr(task, "attributes", {}) or {})
     attrs["runner_completion_wake_error"] = {
         "status": status,

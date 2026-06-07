@@ -9,15 +9,15 @@ _APPROVAL_WAIT_CODES = {"APPROVAL_REQUIRED", "APPROVAL_NOT_FOUND", "APPROVAL_PEN
 
 
 def action_status(status: str, code: str) -> str:
-    upper_status = str(status or "").strip().upper()
+    protocol_status = str(status or "").strip()
     normalized_code = _normalized_code(code)
     if hard_stop_code(normalized_code):
         return "blocked"
-    if normalized_code in _APPROVAL_WAIT_CODES or normalized_code == "TOOL_NOT_ALLOWED" or upper_status in {"NEED_APPROVAL", "WAITING_HUMAN"}:
+    if normalized_code in _APPROVAL_WAIT_CODES or normalized_code == "TOOL_NOT_ALLOWED" or protocol_status in {"NEED_APPROVAL", "WAITING_HUMAN"}:
         return "needs_user_input"
-    if upper_status == "RECOVERING" or recovering_code(normalized_code):
+    if protocol_status == "RECOVERING" or recovering_code(normalized_code):
         return "recovering"
-    if upper_status in {"NEED_REPAIR", "DENY", "BLOCKED"} and repairable_code(normalized_code):
+    if protocol_status in {"NEED_REPAIR", "DENY", "BLOCKED"} and repairable_code(normalized_code):
         return "repair_required"
     return "blocked"
 
@@ -116,7 +116,7 @@ def recovery_category(code: str) -> str:
 
 def recommended_action(code: str, status: str) -> str:
     code = _normalized_code(code)
-    status = str(status or "").strip().lower()
+    status = str(status or "").strip()
     if status == "needs_user_input":
         return RecoveryAction.REQUEST_USER_INPUT.value
     if status == "recovering":

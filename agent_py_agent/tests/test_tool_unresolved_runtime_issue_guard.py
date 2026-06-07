@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 
 def test_no_tool_final_redirects_unresolved_artifact_integrity_issue(tmp_path: Path):
-    from agent_py_agent.agent.agent_core.tool_loop.repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop.response_decision import ToolLoopRepairCounters
     from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
         ToolLoopResponseDecisionRequest,
         tool_loop_response_decision,
@@ -39,7 +39,7 @@ def test_no_tool_final_redirects_unresolved_artifact_integrity_issue(tmp_path: P
 
 
 def test_runtime_status_response_breaks_before_repair_redirects(tmp_path: Path):
-    from agent_py_agent.agent.agent_core.tool_loop.repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop.response_decision import ToolLoopRepairCounters
     from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
         ToolLoopResponseDecisionRequest,
         tool_loop_response_decision,
@@ -81,7 +81,7 @@ def test_runtime_status_response_breaks_before_repair_redirects(tmp_path: Path):
 
 def test_unresolved_runtime_issue_repair_context_does_not_hard_block(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_guard import unresolved_runtime_issue as guard
-    from agent_py_agent.agent.agent_core.tool_loop.repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop.response_decision import ToolLoopRepairCounters
     from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
         ToolLoopResponseDecisionRequest,
         tool_loop_response_decision,
@@ -116,7 +116,7 @@ def test_unresolved_runtime_issue_repair_context_does_not_hard_block(tmp_path: P
 
 
 def test_no_tool_final_allows_after_artifact_integrity_issue_is_cleared(tmp_path: Path):
-    from agent_py_agent.agent.agent_core.tool_loop.repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop.response_decision import ToolLoopRepairCounters
     from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
         ToolLoopResponseDecisionRequest,
         tool_loop_response_decision,
@@ -148,6 +148,31 @@ def test_no_tool_final_allows_after_artifact_integrity_issue_is_cleared(tmp_path
     assert decision.action == "break"
     assert decision.response is response
     assert params.tool_context == []
+
+
+def test_read_result_with_path_does_not_clear_artifact_integrity_issue(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_guard import unresolved_runtime_issue as guard
+
+    params = _params(
+        archive_tool_calls=[
+            _artifact_integrity_archive_record(
+                ok=False,
+                artifact_ok=False,
+                path="app.js",
+                codes=["STATIC_SITE_MISSING_DOM_ID_HITS"],
+            ),
+            {
+                "tool": "read_file",
+                "ok": True,
+                "tool_result_envelope": {
+                    "path": "app.js",
+                    "target_path": "app.js",
+                },
+            },
+        ]
+    )
+
+    assert guard.unresolved_runtime_issues(params)
 
 
 def test_archive_record_keeps_artifact_integrity_failure_envelope(tmp_path: Path):

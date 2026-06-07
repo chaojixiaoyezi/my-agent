@@ -3,13 +3,10 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 
 from ...tooling.content_transport_policy import (
     streaming_inline_write_abort_limit,
-)
-from .models import (
-    LongToolContentAbortPayload,
-    LongToolContentStreamAbort,
 )
 
 _WRITE_TOOL_NAMES = {"write_file"}
@@ -17,6 +14,33 @@ _JSON_TOOL_RE = re.compile(r'"tool"\s*:\s*"(?P<tool>write_file)"')
 _JSON_PATH_RE = re.compile(r'"(?:path|target_path)"\s*:\s*"(?P<path>(?:\\.|[^"\\]){0,240})"')
 _JSON_SESSION_RE = re.compile(r'"session_id"\s*:\s*"(?P<session_id>(?:\\.|[^"\\]){0,80})"')
 _JSON_CONTENT_RE = re.compile(r'"content"\s*:\s*"')
+
+
+@dataclass(frozen=True)
+class LongToolContentAbortPayload:
+    tool: str
+    path: str
+    chars: int
+    limit: int
+    action: str = ""
+    session_id: str = ""
+    chunk_index: int | None = None
+    content_prefix: str = ""
+
+
+class LongToolContentStreamAbort(RuntimeError):
+    def __init__(self, payload: LongToolContentAbortPayload) -> None:
+        super().__init__(
+            f"{payload.tool}.content inline content streaming exceeded {payload.limit} chars for {payload.path or '<unknown>'}"
+        )
+        self.tool = payload.tool
+        self.path = payload.path
+        self.chars = payload.chars
+        self.limit = payload.limit
+        self.action = payload.action
+        self.session_id = payload.session_id
+        self.chunk_index = payload.chunk_index
+        self.content_prefix = payload.content_prefix
 
 
 def long_write_stream_abort(
@@ -122,6 +146,7 @@ def _json_session(raw: str) -> str:
         session_id = match.group("session_id")
     return f"session_id={session_id}" if session_id else ""
 
+
 def _streamed_json_string_prefix(text: str, *, max_chars: int) -> str:
     raw_parts: list[str] = []
     escaped = False
@@ -149,6 +174,8 @@ def _streamed_json_string_prefix(text: str, *, max_chars: int) -> str:
 
 
 __all__ = [
+    "LongToolContentAbortPayload",
+    "LongToolContentStreamAbort",
     "long_write_stream_abort",
     "recovered_write_abort_payload",
 ]

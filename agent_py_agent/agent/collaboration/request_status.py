@@ -76,7 +76,7 @@ def is_declined_request_status(status: str) -> bool:
 
 
 def _status_text(status: str) -> str:
-    return str(status or "").strip().lower()
+    return str(status or "").strip()
 
 
 _CASE_STATUS_VALUES = frozenset(status.value for status in CollaborationCaseStatus)

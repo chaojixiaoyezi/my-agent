@@ -11,9 +11,20 @@ SCHEMA_VERSION = "state_machine.v1"
 DISPATCHABLE_STATES = {"PLANNING", "PENDING"}
 ACTIVE_STATES = {"RUNNING", "WAITING_FOR_TOOL", "WAITING_FOR_CHILD", "WAITING_FOR_USER", "REPAIRING", "TAKING_OVER"}
 TERMINAL_STATES = {"DONE", "FAILED", "CANCELLED", "ABANDONED", "TIMEOUT", "CHANNEL_ERROR"}
+WAITING_STATES = {"WAITING_FOR_TOOL", "WAITING_FOR_CHILD", "WAITING_FOR_USER", "VERIFYING"}
+BLOCKED_STATES = {"BLOCKED"}
+REGISTERED_STATES = frozenset({
+    *DISPATCHABLE_STATES,
+    *ACTIVE_STATES,
+    *WAITING_STATES,
+    *BLOCKED_STATES,
+    *TERMINAL_STATES,
+})
 REPAIRABLE_STATES = {"BLOCKED", "FAILED"}
 VERIFIED_STATES = {"VERIFIED"}
+VERIFICATION_STATES = {"UNVERIFIED", "VERIFIED", "FAILED"}
 HEALTHY_CHANNEL_STATES = {"", "OK", "UNKNOWN"}
+CHANNEL_STATES = {"", "OK", "UNKNOWN", "BROKEN"}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -42,16 +53,24 @@ class RecoveryDecision:
 
 
 def normalize_status(value: object) -> str:
-    text = str(value or "").strip().upper()
-    return text or "PLANNING"
+    text = str(value or "").strip()
+    if not text:
+        return "PLANNING"
+    return text if text in REGISTERED_STATES else text
 
 
 def normalize_verification(value: object) -> str:
-    return str(value or "UNVERIFIED").strip().upper() or "UNVERIFIED"
+    text = str(value or "").strip()
+    if not text:
+        return "UNVERIFIED"
+    return text if text in VERIFICATION_STATES else text
 
 
 def normalize_channel(value: object) -> str:
-    return str(value or "UNKNOWN").strip().upper() or "UNKNOWN"
+    text = str(value or "").strip()
+    if not text:
+        return "UNKNOWN"
+    return text if text in CHANNEL_STATES else text
 
 
 def can_dispatch(facts: RunStateFacts, *, force: bool = False) -> bool:

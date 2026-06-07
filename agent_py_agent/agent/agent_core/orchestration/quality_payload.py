@@ -124,7 +124,7 @@ def _payload_has_negative_signal(item: Any, payload: dict[str, Any]) -> bool:
     if task_status_in(getattr(item, "status", ""), SUBAGENT_FAILURE_STATUSES):
         return True
     structured = payload.get("structured_output") if isinstance(payload.get("structured_output"), dict) else {}
-    structured_status = str(structured.get("status") or payload.get("status") or "").upper()
+    structured_status = str(structured.get("status") or payload.get("status") or "").strip()
     if task_status_in(structured_status, SUBAGENT_FAILURE_STATUSES):
         return True
     if payload.get("ok") is False or structured.get("ok") is False:

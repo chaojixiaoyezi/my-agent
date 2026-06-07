@@ -187,7 +187,7 @@ class TestSplitTask:
 
         split_task(task, ["部分1", "部分2", "部分3"])
 
-        assert task.status == "SPLIT"
+        assert task.status == "TAKEN_OVER"
         assert "split_into" in task.attributes
 
 

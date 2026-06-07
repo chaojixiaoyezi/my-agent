@@ -127,7 +127,7 @@ def _target_item_row(item: object) -> dict[str, str]:
 
 
 def _record_counts_as_covered(record: dict[str, object]) -> bool:
-    status = str(record.get("status") or "covered").strip().lower()
+    status = str(record.get("status") or "covered").strip()
     return bool(str(record.get("target_id") or "").strip()) and status == "covered"
 
 

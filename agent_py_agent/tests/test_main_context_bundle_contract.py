@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.runtime.context_bundle import build_runtime_main_context_bundle
+from agent_py_agent.agent.agent_core.runtime.loop_support import build_runtime_main_context_bundle
 from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeContextRequest
 from agent_py_agent.agent.memory_archive import (
     CompressionSnapshot,

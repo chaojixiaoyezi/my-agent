@@ -10,6 +10,11 @@ from scripts.live_lab.main_agent_artifact_case import (
     _latest_artifact_readback_fact_id,
     _main_artifact_readback_prompt,
 )
+from scripts.live_lab.main_agent_compact_stress import (
+    _compact_stress_delivery_contract,
+    _ensure_compact_stress_config,
+    _stress_facts,
+)
 from scripts.live_lab.main_agent_complex_case import (
     _assert_large_log_report,
     _assert_tool_recovery_report,
@@ -35,11 +40,13 @@ def test_main_complex_case_is_registered_as_real_opt_in_suite():
         "main_large_log_audit",
     ]
     assert SUITES["main-artifact"] == ["health", "main_artifact_readback", "main_compact_resume_roundtrip"]
+    assert SUITES["compact-stress"] == ["health", "main_compact_stress_long_read"]
     assert {
         "main_tool_failure_recovery",
         "main_artifact_readback",
         "main_compact_resume_roundtrip",
         "main_large_log_audit",
+        "main_compact_stress_long_read",
     } <= REAL_CASES
     for prompt in prompts:
         assert "不要派" not in prompt
@@ -70,6 +77,47 @@ def test_main_complex_config_disables_subagents_in_isolated_config(tmp_path):
     assert "enable_subagents: false" in text
     assert f'my_agent_home: "{session.fixture_root / ".my_agent" / "home"}"' in text
     assert source.read_text(encoding="utf-8") == "model_backend: echo\nenable_subagents: true\n"
+
+
+def test_compact_stress_config_uses_realistic_context_threshold(tmp_path):
+    source = tmp_path / "agent_config.yaml"
+    source.write_text("model_backend: echo\nmemory_compact_auto_trigger_percent: 50\n", encoding="utf-8")
+    args = SimpleNamespace(
+        config=str(source),
+        runs_dir=str(tmp_path / "runs"),
+        run_id="compact-stress-config",
+        real_llm=False,
+        count=1,
+        timeout=180,
+    )
+    session = LabSessionManager(args)
+    session.setup()
+    lab = SimpleNamespace(config_path=session.config_path, args=args)
+
+    _ensure_compact_stress_config(lab)
+
+    text = session.config_path.read_text(encoding="utf-8")
+    assert "# compact-stress overrides" in text
+    assert "model_context_window_tokens: 200000" in text
+    assert "memory_compact_auto_trigger_percent: 70" in text
+    assert "tool_read_max_chars: 100000" in text
+    assert source.read_text(encoding="utf-8") == "model_backend: echo\nmemory_compact_auto_trigger_percent: 50\n"
+
+
+def test_compact_stress_contract_requires_full_source_coverage():
+    contract = _compact_stress_delivery_contract(_stress_facts())
+
+    coverage = contract["target_coverage_contract"]
+    assert coverage["coverage_requirement"] == "full_source_read"
+    assert coverage["enforcement"] == "required"
+    assert coverage["target_items"] == [
+        {
+            "target_id": "data/long_field_journal.txt",
+            "source_path": "data/long_field_journal.txt",
+            "coverage_kind": "full_source_read",
+            "enforcement": "required",
+        }
+    ]
 
 
 def test_main_complex_artifact_gates_accept_complete_outputs(tmp_path):

@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from .quality_models import QualityContract
+from .model_task import QualityContract
 from .role_templates import (
     ROLE_BASE_TOOLS,
     ROLE_TEMPLATE_ATTRIBUTE_KEY,

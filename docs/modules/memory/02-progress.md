@@ -40,7 +40,7 @@
 - 主代理长期记忆只写当前 owner `memory/long_term/memory.jsonl`。
 - 每日工作记忆写当前 owner `memory/daily/YYYY-MM-DD.jsonl`。
 - raw archive 写当前 owner `audit/YYYY-MM-DD.jsonl`。
-- 大工具输出写当前 owner `blobs/tool_outputs/`。
+- 大工具输出写当前 task `work/blobs/tool_outputs/`。
 - 保存型任务写 `tasks/<date>/<task-slug>/{output,work}/`；任务名来自短标题，不直接截取整段 prompt。
 - 子代理只保留 task-local 状态、事件、artifact refs 和 compact，不拥有长期记忆。
 - 普通恢复、compact、tree 和 doctor 走当前 owner/task/run/agent refs，不再扫描 repo `data/*` 作为事实源。

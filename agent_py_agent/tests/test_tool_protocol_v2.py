@@ -194,6 +194,31 @@ def test_invalid_protocol_status_is_not_silently_defaulted_to_pending():
     assert "status_invalid" in validate_tool_call(call)
 
 
+def test_protocol_status_case_variants_stay_invalid():
+    call = normalize_tool_call(
+        {
+            "schema_version": "tool_protocol.v2",
+            "tool_name": "read_file",
+            "input": {"path": "README.md"},
+            "status": "PENDING",
+        }
+    )
+    result = normalize_tool_result(
+        {
+            "schema_version": "tool_protocol.v2",
+            "operation_id": "op-uppercase",
+            "tool_name": "read_file",
+            "status": "SUCCEEDED",
+            "output": {"ok": True},
+        }
+    )
+
+    assert call.status == "PENDING"
+    assert result.status == "SUCCEEDED"
+    assert "status_invalid" in validate_tool_call(call)
+    assert "status_invalid" in validate_tool_result(result)
+
+
 def test_unknown_error_downgrades_to_unknown_error():
     error = ToolError.from_payload({"error_type": "ALIEN_SIGNAL", "message": "strange failure"})
 

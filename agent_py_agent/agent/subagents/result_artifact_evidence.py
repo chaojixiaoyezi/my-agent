@@ -18,7 +18,6 @@ from .models import EvidencePacket, SubAgentTask
 from .result_artifact_roots import (
     artifact_candidate_roots,
     artifact_suffix_roots,
-    declared_workspace_roots,
 )
 from .services.agent_run_state import read_agent_state_payload
 from .utils import _merge_list, _new_id
@@ -84,13 +83,12 @@ def _append_task_registry_ref(task: SubAgentTask, record: dict[str, object]) -> 
 
 
 def _registry_workspace_root(task: SubAgentTask, path: Path | None) -> Path | None:
-    if path is not None:
-        for candidate in [*declared_workspace_roots(task), *artifact_candidate_roots(task)]:
-            if _is_relative_to(path, candidate):
-                return candidate
-    for candidate in artifact_suffix_roots(task):
-        if candidate.exists() and candidate.is_dir():
-            return candidate
+    task_workspace = _existing_local_path(getattr(task, "task_workspace_dir", ""))
+    if task_workspace is not None and task_workspace.is_dir():
+        return task_workspace
+    task_dir = _existing_local_path(getattr(task, "task_dir", ""))
+    if task_dir is not None:
+        return task_dir if task_dir.is_dir() else task_dir.parent
     return path.parent if path is not None else None
 
 
@@ -229,14 +227,6 @@ def _safe_path_name(text: str) -> str:
 
 def _path_has_suffix(path: Path, parts: tuple[str, ...]) -> bool:
     return len(path.parts) >= len(parts) and path.parts[-len(parts):] == parts
-
-
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
 
 
 def _artifact_claim(item: dict[str, object], ref: str) -> str:

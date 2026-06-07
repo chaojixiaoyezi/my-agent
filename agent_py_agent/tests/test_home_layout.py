@@ -176,7 +176,6 @@ def test_home_paths_exposes_core_dirs_without_creating(tmp_path: Path):
     assert paths.owner_memory_store_jsonl == paths.owner_home_dir / "memory" / "store.jsonl"
     assert paths.owner_memory_ops_jsonl == paths.owner_home_dir / "memory" / "ops.jsonl"
     assert paths.owner_audit_dir == paths.owner_home_dir / "audit"
-    assert paths.owner_blob_tool_outputs_dir == paths.owner_home_dir / "blobs" / "tool_outputs"
     assert paths.global_index_active_tasks_jsonl == tmp_path / "global_index" / "active_tasks.jsonl"
     assert paths.system_schema_version_json == tmp_path / "system" / "schema_version.json"
     assert not paths.config_dir.exists()
@@ -202,7 +201,7 @@ def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Pa
     assert paths.owner_memory_store_jsonl.exists()
     assert paths.owner_memory_ops_jsonl.exists()
     assert paths.owner_audit_dir.is_dir()
-    assert paths.owner_blob_tool_outputs_dir.is_dir()
+    assert not (paths.owner_home_dir / "blobs").exists()
     assert paths.owner_capability_requests_dir.is_dir()
     assert paths.global_index_dir.is_dir()
     assert paths.soul_md.read_text(encoding="utf-8") == "custom soul\n"

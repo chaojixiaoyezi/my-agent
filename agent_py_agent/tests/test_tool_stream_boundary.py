@@ -5,16 +5,14 @@ from __future__ import annotations
 import json
 
 from agent_py_agent.agent.agent_core.tool_stream import (
-    CompleteToolCallStreamAbort,
+    LongToolContentAbortPayload,
     LongToolContentStreamAbort,
     MalformedToolProtocolStreamAbort,
     ToolBoundaryChunkFilter,
+    complete_machine_block_text,
     cut_response_after_first_complete_tool_call,
     long_write_abort_response,
     malformed_tool_protocol_abort_response,
-)
-from agent_py_agent.agent.agent_core.tool_stream.models import (
-    LongToolContentAbortPayload,
 )
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.tooling.content_transport_policy import (
@@ -118,7 +116,7 @@ def test_tool_boundary_stops_stream_inspection_after_complete_tool_call() -> Non
     assert "".join(forwarded) == '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
 
 
-def test_tool_boundary_complete_abort_returns_complete_machine_blocks() -> None:
+def test_tool_boundary_collects_complete_machine_blocks_without_abort() -> None:
     boundary = ToolBoundaryChunkFilter(None)
     boundary(
         '[TOOL_CALL]\n{"tool":"read_file","path":"a.md"}\n[/TOOL_CALL]\n'
@@ -126,12 +124,11 @@ def test_tool_boundary_complete_abort_returns_complete_machine_blocks() -> None:
         "这段普通解释不应进入工具执行"
     )
 
-    abort = boundary.complete_tool_call_abort()
+    machine_text = complete_machine_block_text(boundary._text)
 
-    assert isinstance(abort, CompleteToolCallStreamAbort)
-    assert '"path":"a.md"' in abort.text
-    assert '"path":"b.md"' in abort.text
-    assert "普通解释" not in abort.text
+    assert '"path":"a.md"' in machine_text
+    assert '"path":"b.md"' in machine_text
+    assert "普通解释" not in machine_text
 
 
 def test_tool_boundary_aborts_repeated_unclosed_tool_markers() -> None:

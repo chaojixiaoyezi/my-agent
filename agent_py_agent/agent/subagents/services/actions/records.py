@@ -4,14 +4,14 @@ from __future__ import annotations
 """Action apply record and log helpers."""
 
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..indexing.params import LocalRecordParams
+from ..indexing.records import LocalRecordParams
 from ..rescue_policy import action_rescue_record_fields
-from .context import ActionHandlerContext
 from .handlers import (
+    ActionHandlerContext,
     apply_probe_or_repair_channel,
     apply_record_only_action,
     apply_reopen_for_evidence,
@@ -19,7 +19,6 @@ from .handlers import (
     apply_stop_no_progress_and_escalate,
 )
 from .leadership import apply_recover_coordinator_leadership
-from .options import ActionApplyOptions
 from .takeover import apply_takeover_or_reassign
 
 if TYPE_CHECKING:
@@ -41,6 +40,51 @@ ACTION_DISPATCH = {
     "classify_blocker": apply_record_only_action,
     "stop_no_progress_and_escalate": apply_stop_no_progress_and_escalate,
 }
+
+
+@dataclass(frozen=True)
+class ActionApplyOptions:
+    """User-selected filters and apply flags for action execution."""
+
+    apply: bool = False
+    action_filter: str = ""
+    run_id: str = ""
+    take_over_by: str = ""
+    locked_files: list[str] | None = None
+    limit: int = 0
+    root_id: str = ""
+    include_run_ids: list[str] | None = None
+    exclude_run_ids: list[str] | None = None
+
+    @classmethod
+    def from_values(
+        cls,
+        options: ActionApplyOptions | None = None,
+        *,
+        apply: bool | None = None,
+        action_filter: str | None = None,
+        run_id: str | None = None,
+        take_over_by: str | None = None,
+        locked_files: list[str] | None = None,
+        limit: int | None = None,
+        root_id: str | None = None,
+        include_run_ids: list[str] | None = None,
+        exclude_run_ids: list[str] | None = None,
+    ):
+        base = options or cls()
+        updates = {
+            "apply": apply,
+            "action_filter": action_filter,
+            "run_id": run_id,
+            "take_over_by": take_over_by,
+            "locked_files": locked_files,
+            "limit": limit,
+            "root_id": root_id,
+            "include_run_ids": include_run_ids,
+            "exclude_run_ids": exclude_run_ids,
+        }
+        clean = {key: value for key, value in updates.items() if value is not None}
+        return replace(base, **clean)
 
 
 @dataclass(frozen=True)

@@ -242,7 +242,7 @@ def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[
         "output_externalized": False,
         "created_at": created_at,
     }
-    index_path = Path(request.root) / "blobs" / "tool_outputs" / "index.jsonl"
+    index_path = tool_output_root(request.root) / "index.jsonl"
     index_path.parent.mkdir(parents=True, exist_ok=True)
     with index_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
@@ -250,14 +250,44 @@ def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[
 
 def _artifact_path(request: ExternalizeToolOutputRequest, digest: str) -> Path:
     return (
-        Path(request.root)
-        / "blobs"
-        / "tool_outputs"
+        tool_output_root(request.root)
         / (
             f"{safe_path_segment(request.tool, default='item', replacement='_')}-"
             f"{safe_path_segment(request.call_id, default='item', replacement='_')}-{digest[:12]}.json"
         )
     )
+
+
+def tool_output_root(root: str | Path) -> Path:
+    return Path(root) / "blobs" / "tool_outputs"
+
+
+def tool_output_roots_for_lookup(root: str | Path) -> tuple[Path, ...]:
+    base = Path(root)
+    roots = [tool_output_root(base)]
+    tasks_root = base / "tasks"
+    if tasks_root.is_dir():
+        roots.extend(sorted(tasks_root.glob("*/*/work/blobs/tool_outputs")))
+    return _unique_paths(roots)
+
+
+def tool_output_index_paths_for_lookup(root: str | Path) -> tuple[Path, ...]:
+    return tuple(item / "index.jsonl" for item in tool_output_roots_for_lookup(root))
+
+
+def _unique_paths(paths: list[Path]) -> tuple[Path, ...]:
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        try:
+            resolved = path.expanduser().resolve(strict=False)
+        except OSError:
+            continue
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            unique.append(resolved)
+    return tuple(unique)
 
 
 def _preview(output: str, max_chars: int) -> str:
@@ -451,4 +481,10 @@ def _scoped_call_id(request: ExternalizeToolOutputRequest) -> str:
     return f"{scope}:{request.call_id}" if scope else request.call_id
 
 
-__all__ = ["ExternalizeToolOutputRequest", "externalize_tool_output_record"]
+__all__ = [
+    "ExternalizeToolOutputRequest",
+    "externalize_tool_output_record",
+    "tool_output_index_paths_for_lookup",
+    "tool_output_root",
+    "tool_output_roots_for_lookup",
+]

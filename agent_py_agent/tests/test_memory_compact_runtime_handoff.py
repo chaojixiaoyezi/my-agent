@@ -282,29 +282,39 @@ def test_memory_compact_work_state_promotes_small_tool_calls_to_resume_progress(
 def test_memory_compact_work_state_does_not_promote_succeeded_status_alias_read(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     write_compact_fixture(root)
-    artifact = root / "blobs" / "tool_outputs" / "read_file-alias.json"
-    _write_tool_output_index(
-        root,
-        {
-            "call_id": "1-1",
-            "kind": "tool_output",
-            "parameters": {"path": "/repo/status-alias.txt", "tool": "read_file", "offset": 0, "max_chars": 100},
-            "path": str(artifact),
-            "request_id": "request-compact",
-            "run_id": "run-compact",
-            "task_id": "run-compact",
-            "scoped_call_id": "run-compact:1-1",
-            "source_input": "/repo/status-alias.txt",
-            "tool": "read_file",
-            "status": "succeeded",
-            "read_window": _char_window(0, 100, 200),
-            "size_bytes": 100,
-        },
-    )
-    artifact.write_text(
-        json.dumps({"content": "[char-window offset=0 chars=100 total_chars=200]\nfirst"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    entries = []
+    for index, (source_path, status) in enumerate(
+        (
+            ("/repo/status-alias.txt", "succeeded"),
+            ("/repo/status-uppercase.txt", "OK"),
+        ),
+        start=1,
+    ):
+        artifact = root / "blobs" / "tool_outputs" / f"read_file-alias-{index}.json"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        entries.append(
+            {
+                "call_id": f"1-{index}",
+                "kind": "tool_output",
+                "parameters": {"path": source_path, "tool": "read_file", "offset": 0, "max_chars": 100},
+                "path": str(artifact),
+                "request_id": "request-compact",
+                "run_id": "run-compact",
+                "task_id": "run-compact",
+                "scoped_call_id": f"run-compact:1-{index}",
+                "source_input": source_path,
+                "tool": "read_file",
+                "ok": True,
+                "status": status,
+                "read_window": _char_window(0, 100, 200),
+                "size_bytes": 100,
+            }
+        )
+        artifact.write_text(
+            json.dumps({"content": "[char-window offset=0 chars=100 total_chars=200]\nfirst"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    _write_tool_output_index(root, *entries)
 
     result = apply_memory_compact(
         root,
@@ -321,7 +331,9 @@ def test_memory_compact_work_state_does_not_promote_succeeded_status_alias_read(
     work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
 
     assert "/repo/status-alias.txt" not in work_state["read_files"]
+    assert "/repo/status-uppercase.txt" not in work_state["read_files"]
     assert all(item["source_path"] != "/repo/status-alias.txt" for item in work_state["tool_progress"])
+    assert all(item["source_path"] != "/repo/status-uppercase.txt" for item in work_state["tool_progress"])
 
 
 def test_memory_compact_work_state_requires_explicit_ok_for_read_progress(tmp_path: Path) -> None:

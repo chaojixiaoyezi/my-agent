@@ -161,7 +161,7 @@ def _approved_action_matches(
 ) -> bool:
     if not isinstance(item, Mapping):
         return False
-    status = str(item.get("status") or "").strip().upper()
+    status = str(item.get("status") or "").strip()
     if status and status != "APPROVED":
         return False
     if str(item.get("tool_name") or "").strip() != facts.tool_name:

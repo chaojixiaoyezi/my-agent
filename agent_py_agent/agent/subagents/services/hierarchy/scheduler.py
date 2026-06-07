@@ -7,13 +7,12 @@ from ...debug_trace import trace_hierarchy_schedule
 from ...models import SubAgentTask
 from ..base import CreateRunParams
 from . import context as hctx
-from .agent_names import scheduled_child_agent_name
 from .qa_scheduler import qa_orchestration_advice
 from .schedule_idempotency import (
     ScheduledChildResolution,
     resolve_scheduled_child,
 )
-from .scheduled_role import child_context_manifest, child_context_packs, scheduled_child_role
+from .scheduled_role import child_context_manifest, child_context_packs, scheduled_child_agent_name, scheduled_child_role
 from .scheduler_models import (
     HierarchyChildSpec,
     HierarchyCreateChildRequest,

@@ -151,6 +151,32 @@ def test_exploration_fuse_resets_when_local_progress_happens(tmp_path: Path):
     assert has_pending_exploration_fuse(agent) is False
 
 
+def test_exploration_fuse_state_prefers_current_task_work_dir(tmp_path: Path):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.agent_core.tool_guard.exploration_fuse import has_required_exploration_fuse
+
+    workspace_root = tmp_path / "source-workspace"
+    task_root = tmp_path / "tasks" / "2026-06-07" / "read-code"
+    work_dir = task_root / "work"
+    params = replace(
+        _params(),
+        task_attributes={
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(task_root / "output"),
+                "work_dir": str(work_dir),
+            }
+        },
+    )
+    agent = SimpleNamespace(root=workspace_root)
+
+    assert has_required_exploration_fuse(agent, [{"tool": "read_file", "path": "input.txt"}], params) is False
+
+    assert (work_dir / ".agent_delivery" / "exploration_fuse.json").exists()
+    assert not (workspace_root / ".agent_delivery" / "exploration_fuse.json").exists()
+
+
 def test_exploration_fuse_resets_on_structured_writer_and_document_builder(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_guard.exploration_fuse import (
         has_pending_exploration_fuse,
@@ -185,7 +211,7 @@ def test_tool_loop_decision_redirects_exploration_fuse_without_blocking(tmp_path
     from agent_py_agent.agent.agent_core.tool_guard.exploration_fuse import (
         has_required_exploration_fuse,
     )
-    from agent_py_agent.agent.agent_core.tool_loop.repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop.response_decision import ToolLoopRepairCounters
     from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
         ToolLoopResponseDecisionRequest,
         tool_loop_response_decision,

@@ -8,7 +8,8 @@ from typing import Any
 from ...model_visible_refs import current_model_ref, current_model_ref_list, current_model_text
 from ...runtime_errors import runtime_error_report
 from ...subagents.models import TaskStatus, task_status_in
-from .progress import attach_task_progress
+from ...task_progress import progress_path, read_task_progress, task_progress_summary
+from ..runtime.owner_roots import runtime_owner_root
 
 
 def node_from_kernel_run(agent: object, row: object) -> dict[str, object]:
@@ -111,6 +112,26 @@ def _progress_layer(agent: object, payload: dict[str, object]) -> dict[str, obje
     }
     attach_task_progress(agent, str(payload.get("run_id") or ""), layer)
     return layer
+
+
+def attach_task_progress(agent: object, run_id: str, layer: dict[str, object]) -> None:
+    root = _progress_root(agent)
+    if not root or not run_id:
+        return
+    path = progress_path(root, run_id)
+    if not path.exists():
+        return
+    progress = read_task_progress(root, run_id)
+    summary = task_progress_summary({**progress, "ref": str(path)})
+    if summary["summary"] or summary["next_action"] or summary["counts"].get("total", 0):
+        layer["task_progress"] = summary
+
+
+def _progress_root(agent: object):
+    try:
+        return runtime_owner_root(agent)
+    except AttributeError:
+        return None
 
 
 def _workspace_refs(value: object) -> dict[str, object]:
@@ -227,7 +248,7 @@ def _timing(payload: dict[str, object]) -> dict[str, float]:
 
 
 def _not_done_reason(payload: dict[str, object]) -> str:
-    status = str(payload.get("status") or "").strip().upper()
+    status = str(payload.get("status") or "").strip()
     if task_status_in(payload.get("status"), {TaskStatus.DONE.value}):
         return ""
     failure_type = str(payload.get("failure_type") or "").strip()

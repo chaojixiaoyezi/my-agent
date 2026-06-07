@@ -11,7 +11,7 @@ import time
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
-from ..indexing.params import IndexReportParams
+from ..indexing.records import IndexReportParams
 from .params import ParentPlannerRecordParams
 
 if TYPE_CHECKING:

@@ -18,7 +18,7 @@ from .patch_renderer import (
     render_patch_review_markdown,
     render_patch_review_record_markdown,
 )
-from .patch_service import PatchReviewOptions, PatchReviewService, PatchReviewTaskRequest
+from .patch_service import PatchReviewOptions, PatchReviewService, PatchReviewTaskRequest, SubAgentPatchService
 
 __all__ = [
     "PatchApplyOptions",
@@ -26,6 +26,7 @@ __all__ = [
     "PatchReviewOptions",
     "PatchReviewService",
     "PatchReviewTaskRequest",
+    "SubAgentPatchService",
     "build_unified_diff",
     "render_patch_apply_markdown",
     "render_patch_apply_record_markdown",

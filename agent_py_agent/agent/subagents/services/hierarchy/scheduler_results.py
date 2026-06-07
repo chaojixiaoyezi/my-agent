@@ -5,14 +5,13 @@ import time
 
 from ...models import SubAgentTask
 from . import context as hctx
-from .agent_names import scheduled_child_agent_name
 from .schedule_idempotency import (
     ScheduledChildResolution,
     created_scheduled_children,
     dispatchable_scheduled_children,
     reused_scheduled_children,
 )
-from .scheduled_role import scheduled_child_role
+from .scheduled_role import scheduled_child_agent_name, scheduled_child_role
 from .scheduler_models import (
     HierarchyResultBuildRequest,
     HierarchyScheduledItem,

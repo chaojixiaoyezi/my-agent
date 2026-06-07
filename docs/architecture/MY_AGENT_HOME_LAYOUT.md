@@ -29,7 +29,6 @@ owners/<provider>/<owner>/
 |   |-- lessons/*.md                 # 较长经验
 |   `-- routing/INDEX.md             # 人类可读路由索引
 |-- audit/YYYY-MM-DD.jsonl           # raw turn/tool/gateway 黑盒流水
-|-- blobs/tool_outputs/              # 大工具输出正文和索引
 |-- tasks/<date>/<task-slug>/
 |   |-- output/                      # 最终交付物；显式外部交付时保存索引/验收记录
 |   `-- work/                        # 状态、timeline、compact、草稿、子代理账本
@@ -50,12 +49,15 @@ owners/<provider>/<owner>/
 ```text
 tasks/<date>/<task-slug>/
 |-- .agent_delivery/                 # 当前任务系统验收报告，如 closeout.json
+|-- data/artifacts/registry.jsonl     # 当前任务产物结构化账本；可登记外部用户目录产物
 |-- output/                          # 最终交付物
 `-- work/
+    |-- .agent_delivery/             # 只读/本地进展等运行中软提示状态
     |-- run_workspace.json           # 当前任务目录身份；复用目录只认它
     |-- state.json                   # 主代理 task 状态
     |-- timeline.jsonl               # 本任务多轮运行时间线
     |-- refs/artifacts/manifest.json # 当前任务最终产物索引和验收引用
+    |-- blobs/tool_outputs/          # 当前 run 的大工具输出正文
     |-- compact/                     # task rollup 和 compact 包
     |-- artifacts/                   # manifest 和任务级 artifact refs
     |-- guidance/                    # 运行中补充提示投影
@@ -63,6 +65,7 @@ tasks/<date>/<task-slug>/
 ```
 
 如果用户明确指定普通输出目录，最终报告可以写到用户目录；当前 task `output/` / `work/` 仍记录本轮索引、验收和过程证据。
+用户让主代理读取、分析或扫描的相对源码/资料路径默认相对真实 workspace/cwd；task workspace 不是输入路径默认根。
 `task-slug` 来自结构化 task name 或当前用户请求的短标题；其中 macOS/Linux/Windows 绝对路径只取 basename，不把本机 home 前缀写进任务目录名。
 `work/state.json` 和 `work/task.yaml` 只是当前任务状态/可读说明，不再作为旧目录身份兜底，避免旧 run 污染当前任务目录。
 
@@ -76,6 +79,7 @@ work/agents/<run_id>/
 |-- events.jsonl                     # 子代理审计事件
 |-- artifacts.jsonl                  # 子代理产物 refs
 |-- compact/                         # 子代理 compact 包
+|-- memory/hooks/YYYY-MM-DD.jsonl     # 子代理 task-local recovery snapshot；不进入长期记忆
 |-- context_bundle.json              # 执行上下文 refs
 |-- summary.md                       # 可读摘要
 `-- final_report.md                  # 子代理内部报告；不是用户最终交付

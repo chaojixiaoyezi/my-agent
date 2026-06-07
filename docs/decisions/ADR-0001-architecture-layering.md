@@ -18,17 +18,17 @@ The project has grown into a multi-module system with CLI, orchestration, subage
 Adopt a layered architecture with downward-only dependency flow:
 
 ```
-Interfaces (contracts: ExtensionPlugin, Repository, WriteBoundary)
+Interfaces (contracts: ExtensionPlugin, WriteBoundary, typed service payloads)
     v
 Application (cli/, gateway.py -- thin entry points)
     v
 Domain (agent_core/, subagents/, memory*, session/ -- business logic)
     v
-Infrastructure (local_store, memory_store/, backends/, clients/)
+Infrastructure (local_storage/, memory_store/, backends/, io/)
     v
 Extensions (log_analysis/, plugins -- optional capabilities)
     v
-Shared (models, config, constants, validators -- no business logic)
+Shared (models, config, constants -- no business logic)
 ```
 
 ### Dependency Rules

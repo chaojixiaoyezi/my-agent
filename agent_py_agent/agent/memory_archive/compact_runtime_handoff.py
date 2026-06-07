@@ -226,7 +226,7 @@ def _agent_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _agent_status_bucket(value: object) -> str:
-    status = str(value or "").strip().upper()
+    status = str(value or "").strip()
     bucket_statuses = frozenset({
         TaskStatus.DONE.value,
         TaskStatus.RUNNING.value,

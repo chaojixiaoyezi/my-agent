@@ -221,8 +221,8 @@ def _is_indexed_generic_agent_name(value: object) -> bool:
 
 
 def _status(task: Any) -> str:
-    return _text(getattr(task, "status", "")).upper()
+    return _text(getattr(task, "status", ""))
 
 
 def _verification(task: Any) -> str:
-    return _text(getattr(task, "verification_status", "")).upper()
+    return _text(getattr(task, "verification_status", ""))

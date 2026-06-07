@@ -15,6 +15,8 @@ from .home_memory_seeds import (
     default_memory_route_index_md,
 )
 
+DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
+
 
 @dataclass(frozen=True)
 class MyAgentHomePaths:
@@ -92,9 +94,6 @@ class MyAgentHomePaths:
     owner_workspace_dir: Path
     owner_artifacts_dir: Path
     owner_audit_dir: Path
-    owner_blobs_dir: Path
-    owner_blob_tool_outputs_dir: Path
-    owner_blob_files_dir: Path
     owner_data_dir: Path
     owner_logs_dir: Path
     owner_cache_dir: Path
@@ -122,6 +121,12 @@ class MyAgentHomePaths:
     owner_provider: str = ""
     owner_kind: str = ""
     owner_id: str = ""
+
+
+@dataclass(frozen=True)
+class RouteIndexTarget:
+    path: Path
+    authority_root: Path
 
 
 def resolve_my_agent_home(value: str | Path | None = None, env: Mapping[str, str] | None = None) -> Path:
@@ -270,3 +275,24 @@ def task_workspace_path(
     if path.is_absolute():
         return path
     return Path(home) / path
+
+
+def resolve_route_index_target(root: Path, raw_index: str | None, *, home_paths: object | None = None) -> RouteIndexTarget:
+    candidate = Path(raw_index).expanduser() if raw_index else DEFAULT_ROUTE_INDEX
+    if candidate.is_absolute():
+        return RouteIndexTarget(path=candidate.resolve(), authority_root=root)
+    workspace_index = (root / candidate).resolve()
+    if raw_index or workspace_index.exists() or home_paths is None:
+        return RouteIndexTarget(path=workspace_index, authority_root=root)
+    home_index = getattr(home_paths, "owner_memory_routing_index_md", None)
+    home_root = getattr(home_paths, "owner_home_dir", None)
+    if home_index is not None and home_root is not None:
+        return RouteIndexTarget(path=Path(home_index).resolve(), authority_root=Path(home_root).resolve())
+    return RouteIndexTarget(path=workspace_index, authority_root=root)
+
+
+def runtime_route_root_and_index(agent) -> tuple[Path, str]:
+    target = resolve_route_index_target(agent.root, None, home_paths=getattr(agent, "home_paths", None))
+    if target.authority_root == agent.root:
+        return target.authority_root, DEFAULT_ROUTE_INDEX.as_posix()
+    return target.authority_root, DEFAULT_ROUTE_INDEX.as_posix()

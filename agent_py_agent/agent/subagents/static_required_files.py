@@ -6,10 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.value_parsing import dedupe_strings, sequence_strings
-from .required_file_terms import (
-    labeled_required_file_terms_from_text,
-    required_file_terms_from_text,
-)
+from .required_file_terms import required_file_terms_from_text
 
 _STATIC_FILE_SUFFIXES = {".html", ".htm", ".css", ".js"}
 _REQUIRED_DOM_IDS_RE = re.compile(r"\brequired_dom_ids?\s*[:=]\s*([^\n。；;]+)", re.IGNORECASE)
@@ -19,10 +16,7 @@ def static_required_files_from_texts(texts: list[object]) -> list[str]:
     matches = [
         match
         for value in texts
-        for match in [
-            *required_file_terms_from_text(str(value or ""), extensions=r"html?|css|js"),
-            *labeled_required_file_terms_from_text(str(value or ""), extensions=r"html?|css|js"),
-        ]
+        for match in required_file_terms_from_text(str(value or ""), extensions=r"html?|css|js")
     ]
     return dedupe_strings(matches)[:50]
 

@@ -306,7 +306,7 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
     recovery_ids: list[str] = []
     unverified_ids: list[str] = []
     for item in direct_children:
-        status = str(getattr(item, "status", "") or "UNKNOWN").upper()
+        status = str(getattr(item, "status", "") or "UNKNOWN")
         item_id = str(getattr(item, "id", "") or "")
         by_status[status] = by_status.get(status, 0) + 1
         if task_status_in(status, {TaskStatus.PLANNING.value}):

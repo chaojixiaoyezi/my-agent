@@ -97,7 +97,7 @@ auto_save_memory: true
 #     普通自然语言“继续、上次、昨天、恢复”等不会参与判断；需要人工明确恢复时用 --resume-context。
 #   always: 每轮都尝试注入恢复块，适合专门的恢复/排障会话。
 # - memory_resume_auto_context_limit 表示自动恢复最多拿多少条线索，范围 1-50。
-# - compact 提前提示优先读取当前模型后端暴露的真实上下文窗口；拿不到时按 128K 通用窗口估算。
+# - compact 提前提示优先读取当前模型后端暴露的真实上下文窗口；拿不到时按 200K 通用窗口估算。
 # - memory_compact_auto_trigger_percent 控制上下文使用到多少百分比时自动 compact：
 #   不写默认 50；0 表示 100；乱填回默认；大于100 => 100；小于50 => 50；50-100 => 按填写值。
 # - 保存型运行默认执行非破坏性 apply + auto resume + guard；save=false 时只生成计划，不写入 compact apply。

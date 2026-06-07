@@ -21,7 +21,7 @@ from ...reports import (
     DispatchWatchRecord,
     DispatchWatchReport,
 )
-from ..indexing.params import IndexReportParams
+from ..indexing.records import IndexReportParams
 from .params import (
     DispatchRecordParams,
     DispatchWatchHeartbeatParams,

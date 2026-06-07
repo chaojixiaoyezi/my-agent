@@ -77,7 +77,7 @@ def _replay_decision(
     key: str,
     record: IdempotencyLedgerRecord,
 ) -> GateDecision | None:
-    status = record.status.upper()
+    status = str(record.status or "").strip()
     if status in _DONE_STATUSES:
         return GateDecision.block(
             "idempotency_ledger",

@@ -45,6 +45,23 @@ def workspace_refs(task: SubAgentTask) -> dict[str, str]:
     }
 
 
+def runtime_task_attributes(task: SubAgentTask) -> dict[str, object]:
+    attrs = getattr(task, "attributes", {}) or {}
+    result = dict(attrs) if isinstance(attrs, dict) else {}
+    task_root = safe_string_ref(task, "task_workspace_dir") or safe_string_ref(task, "task_dir")
+    if task_root:
+        root = Path(task_root)
+        result["run_workspace"] = {
+            "task_root": str(root),
+            "output_dir": str(root / "output"),
+            "work_dir": str(root / "work"),
+        }
+    agent_work = safe_string_ref(task, "agent_run_workspace_dir")
+    if agent_work:
+        result["agent_run_workspace_dir"] = agent_work
+    return result
+
+
 def latest_continue_packet_ref(task: SubAgentTask) -> str:
     explicit = safe_string_ref(task, "agent_run_latest_session_continue_packet_json")
     if explicit:

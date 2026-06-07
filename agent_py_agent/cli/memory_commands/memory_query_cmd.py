@@ -15,7 +15,7 @@ from ...agent.memory_routing import (
     resolve_required_paths,
     validate_routes,
 )
-from ...agent.user_space.home_memory_routes import DEFAULT_ROUTE_INDEX, resolve_route_index_target
+from ...agent.user_space.home_layout import DEFAULT_ROUTE_INDEX, resolve_route_index_target
 
 
 @dataclass(frozen=True)

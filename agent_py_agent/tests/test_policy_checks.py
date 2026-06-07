@@ -86,8 +86,11 @@ def test_status_from_structured_output_pending_capability_blocks():
 
 def test_status_from_structured_output_strips_whitespace():
     """测试状态值去除空白。"""
-    parsed = SubAgentParsedOutput(status="  done  ", capability_requests=[], blocked_reason="")
+    parsed = SubAgentParsedOutput(status="  DONE  ", capability_requests=[], blocked_reason="")
     assert _status_from_structured_output(parsed) == "DONE"
+
+    parsed_lower = SubAgentParsedOutput(status="  done  ", capability_requests=[], blocked_reason="")
+    assert _status_from_structured_output(parsed_lower) == "BLOCKED"
 
 
 # ── _verification_from_runner_status 测试 ─────────────────────────────────

@@ -12,6 +12,7 @@ from .audit_service import audit_request_queued
 from .io import (
     append_gateway_history,
     gateway_response_path,
+    new_gateway_request_id,
     read_json_file,
     read_json_file_report,
     write_json_file,
@@ -72,8 +73,8 @@ def submit_gateway_ask(
 ) -> tuple[str, Path, Path]:
     from .io import write_gateway_request
 
-    request_id_obj = str(time.time() * 1000)[:13]
-    request_id = f"gw-{request_id_obj}"
+    # Request IDs join queue files, responses, chunk streams, and audits across clients.
+    request_id = new_gateway_request_id()
 
     payload = {
         "id": request_id,

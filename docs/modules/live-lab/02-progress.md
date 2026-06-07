@@ -1,8 +1,9 @@
 # Live Lab Progress
 
-当前 Live Lab 已包含 `compact-stress` 真实压测入口，用来验证主代理在约 3MB 长文本、200K 上下文窗口、50% 自动 compact 条件下，能否多次 compact 后继续同一任务并产出完整报告。需要更长档位时可用 `MY_AGENT_COMPACT_STRESS_SIZE_MB=10` 或 `50` 单独跑。
-该 suite 默认把 `tool_read_max_chars` 设为 100000，让 200K 上下文窗口下的长文本读取以较大页推进，避免测试人为制造过多模型往返。
+当前 Live Lab 已包含 `compact-stress` 真实压测入口，用来验证主代理在约 10MB 长文本、200K 上下文窗口、70% 自动 compact 条件下，能否多次 compact 后继续同一任务并产出完整报告。需要更长档位时可用 `MY_AGENT_COMPACT_STRESS_SIZE_MB=50` 单独跑。
+该 suite 默认把 `tool_read_max_chars` 设为 100000，让 200K 上下文窗口下的长文本读取以较大页推进，避免测试人为制造过多模型往返；验收合同同时要求 `read_file` coverage ledger 连续覆盖源文件，防止只靠局部搜索或口头声明通过。
 2026-06-07 起，compact stress 的固定事实 token 和章节标记只存在于 Live Lab fixture 里，用来验证长文本覆盖和 compact 续接；生产 runtime 不用这些自然语言 marker 做状态判断。
+同日补充：自动 closeout 的软提示和 finalization 自动验收都必须服从显式 `target_coverage_contract` 的结构化完成状态；源文件覆盖未完成或 required artifact 尚未写出时，不因普通 `read_file` 进度反复自动 submit。
 
 运行示例：
 

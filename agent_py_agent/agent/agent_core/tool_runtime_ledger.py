@@ -272,7 +272,7 @@ def _apply_rate_limit_record(row: dict[str, object], record: object) -> None:
     timestamp = float(getattr(record, "created_at", 0.0) or getattr(record, "updated_at", 0.0) or 0.0)
     if timestamp > 0:
         row["attempt_timestamps"].append(timestamp)
-    status = _text(getattr(record, "status", "")).lower()
+    status = _text(getattr(record, "status", ""))
     if status == "failed":
         row["consecutive_failures"] = int(row["consecutive_failures"]) + 1
         row["total_failures"] = int(row["total_failures"]) + 1

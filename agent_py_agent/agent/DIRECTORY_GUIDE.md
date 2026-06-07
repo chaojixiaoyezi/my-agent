@@ -39,14 +39,6 @@
 
 不允许：真正执行工具、直接跑模型、绕过补丁服务直接修改配置或 subagent 状态。
 
-### `clients/`
-
-未来外部服务客户端层，当前只保留目录定义。
-
-用途：当以后接 GitHub、Slack、数据库、浏览器、远端 agent、MCP server 时，把“怎么请求外部服务”放这里。
-
-边界：client 只处理协议、鉴权、超时、重试、错误映射；业务决策放 service/agent_core/gateway/subagents。
-
 ### `gateway_parts/`
 
 gateway 文件协议层。放 gateway 路径、JSON 队列 IO、进程状态、processing 恢复、请求执行、adapter 转换和索引日志。
@@ -95,14 +87,6 @@ gateway 文件协议层。放 gateway 路径、JSON 队列 IO、进程状态、p
 
 不允许：修改长期规则文件、越过 root 读取文件、替代 RAG 或任务状态核验、直接改主循环。
 
-### `observability/`
-
-未来可观测性层，当前只保留目录定义。
-
-用途：统一 request_id、耗时、状态、错误码、日志结构、metrics、trace。
-
-边界：它提供记录和格式标准，不做业务决策，不吞异常。
-
 ### `prompting_parts/`
 
 Prompt 构造层。放系统 prompt、记忆、工具目录、推荐工具、工具 transcript、未来上下文压缩策略。
@@ -110,22 +94,6 @@ Prompt 构造层。放系统 prompt、记忆、工具目录、推荐工具、工
 允许：把上下文拼成模型可见文本、prompt 文件读取、上下文预算策略。
 
 不允许：直接执行工具、直接改记忆、直接处理 gateway 文件队列。
-
-### `repositories/`
-
-未来仓储层，当前只保留目录定义。
-
-用途：当某个领域的数据访问变复杂时，把“怎么读写这个领域的数据”放这里，向 service 提供稳定接口。
-
-边界：repository 只负责持久化和查询，不负责业务状态决策。当前 LocalStore 仍在 `local_storage/`，不强行搬。
-
-### `security/`
-
-未来安全边界层，当前只保留目录定义。
-
-用途：集中放输入净化、权限策略、路径权限、模型输出可信度、安全默认规则。
-
-边界：高风险执行前的硬门禁可以在这里抽象；具体工具实现仍在 `tooling/`，subagent 工单策略仍在 `subagents/`。
 
 ### `settings/`
 
@@ -151,19 +119,11 @@ Prompt 构造层。放系统 prompt、记忆、工具目录、推荐工具、工
 
 不允许：父代理 dispatch 决策、subagent 验收规则、CLI 交互。
 
-### `validators/`
-
-未来跨领域校验层，当前只保留目录定义。
-
-用途：当某些验证规则跨 gateway/subagent/tooling/local_storage 多处复用时，放到这里。
-
-边界：validator 返回明确结果和错误码，不负责修复、不直接写状态。
-
 ## 新模块放置决策
 
 判断一个新文件放哪里，可以按这个顺序问：
 
-1. 它是不是外部协议客户端？放 `backends/` 或 `clients/`。
+1. 它是不是模型后端或协议适配？放 `backends/`。
 2. 它是不是主代理流程编排？放 `agent_core/`。
 3. 它是不是子代理领域规则？放 `subagents/`。
 4. 它是不是工具实现或工具安全边界？放 `tooling/`。

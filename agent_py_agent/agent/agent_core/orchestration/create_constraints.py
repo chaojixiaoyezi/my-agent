@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
+from ...subagents.role_templates import role_template_snapshot_for_role
 from ..runner.ref_fields import params_output_refs
 from .create_target_roots import (
     agent_workspace_roots,
@@ -14,25 +15,18 @@ from .create_target_roots import (
     structured_task_output_write_roots,
 )
 
-_NON_WORKER_ROLES = {
-    "bug_finder",
-    "coordinator",
-    "critic",
-    "qa",
-    "reviewer",
-    "root",
-    "tester",
-    "verifier",
-}
-
-
-def role_allows_direct_product_work(role: str) -> bool:
+def role_allows_direct_product_work(role: str, role_template_dirs: object = None) -> bool:
     normalized = str(role or "worker").strip().lower().replace("-", "_")
     if not normalized:
         return True
-    if normalized in _NON_WORKER_ROLES:
+    snapshot = role_template_snapshot_for_role(normalized, role_template_dirs)
+    if not snapshot:
+        return True
+    if bool(snapshot.get("can_spawn_children")):
         return False
-    return not any(part in normalized for part in _NON_WORKER_ROLES)
+    if bool(snapshot.get("depends_on_outputs")) or bool(snapshot.get("can_run_tests")):
+        return False
+    return bool(snapshot.get("can_write"))
 
 
 def merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]:

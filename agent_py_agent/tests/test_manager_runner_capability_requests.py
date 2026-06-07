@@ -13,6 +13,7 @@ from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordR
 from agent_py_agent.agent.subagents.model_capabilities import (
     capability_request_counts_as_open,
     capability_request_suppresses_duplicate,
+    is_pending_capability_status,
 )
 from agent_py_agent.agent.subagents.models import (
     CapabilityRequest,
@@ -67,6 +68,9 @@ def capability_manager():
 
 def test_legacy_capability_request_status_is_not_current_open_request():
     assert capability_request_counts_as_open("OPEN") is True
+    assert capability_request_counts_as_open("open") is False
+    assert capability_request_suppresses_duplicate("granted") is False
+    assert is_pending_capability_status("pending_capability_request") is False
     assert capability_request_counts_as_open("RESOLVED") is False
     assert capability_request_suppresses_duplicate("RESOLVED") is False
 

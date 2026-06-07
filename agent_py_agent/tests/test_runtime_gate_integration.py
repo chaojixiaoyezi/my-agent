@@ -100,9 +100,11 @@ def test_finalization_delivery_record_requires_explicit_ok() -> None:
 
     missing_ok = _delivery_closeout_params(archive_tool_calls=[{"tool": "write_file", "path": "out.txt"}])
     explicit_ok = _delivery_closeout_params(archive_tool_calls=[{"tool": "write_file", "path": "out.txt", "ok": True}])
+    source_read = _delivery_closeout_params(archive_tool_calls=[{"tool": "read_file", "path": "source.txt", "ok": True}])
 
     assert _has_successful_delivery_record(missing_ok) is False
     assert _has_successful_delivery_record(explicit_ok) is True
+    assert _has_successful_delivery_record(source_read) is False
 
 
 def test_registry_execution_blocks_when_runtime_rate_limit_is_exhausted(tmp_path):
@@ -419,6 +421,63 @@ def test_finalization_auto_closeout_for_final_response_after_uncontracted_task_o
     assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
     assert "uncontracted_task_output" in result.response
     assert result.memory_compact_auto_status == "skipped_after_delivery_complete"
+
+
+def test_finalization_waits_for_required_coverage_and_artifact_before_auto_closeout(tmp_path):
+    task_root = tmp_path / "tasks" / "2026-06-07" / "long-read"
+    output_dir = task_root / "output"
+    output_dir.mkdir(parents=True)
+    source = tmp_path / "data" / "source.txt"
+    source.parent.mkdir()
+    source.write_text("abcdef", encoding="utf-8")
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    ctx = replace(
+        _finalize_context_with_task_output(task_root, output_dir, output_dir / "report.md"),
+        final_response=ModelResponse(text="继续读取中", backend="test"),
+        executed_tools=["read_file"],
+        archive_tool_calls=[
+            {
+                "tool": "read_file",
+                "ok": True,
+                "run_id": "run-1",
+                "task_id": "task-1",
+                "parameters": {"path": str(source)},
+                "read_window": {
+                    "kind": "char_window",
+                    "offset": 0,
+                    "next_offset": 3,
+                    "total_chars": 6,
+                },
+            }
+        ],
+        delivery_contract={
+            "artifacts": [
+                {
+                    "artifact_id": "report",
+                    "required": True,
+                    "preferred_path": str(output_dir / "report.md"),
+                    "kind": "md",
+                }
+            ],
+            "target_coverage_contract": {
+                "enforcement": "required",
+                "coverage_requirement": "full_source_read",
+                "target_items": [
+                    {
+                        "target_id": str(source),
+                        "source_path": str(source),
+                        "coverage_kind": "full_source_read",
+                        "enforcement": "required",
+                    }
+                ],
+            },
+        },
+    )
+
+    result = FinalizationService(agent).finalize(ctx)
+
+    assert result.response == "继续读取中"
+    assert not (tmp_path / ".agent_delivery" / "closeout.json").exists()
 
 
 def test_tool_round_auto_closeout_for_relative_uncontracted_task_output_report(tmp_path):

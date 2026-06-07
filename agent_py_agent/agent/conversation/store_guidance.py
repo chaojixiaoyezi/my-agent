@@ -1,19 +1,51 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from ..gateway_parts.io import read_json_file, update_json_file_atomic
 from ..io.jsonl import append_jsonl
 from ..runtime_errors import runtime_error_report
 from .models import new_id
-from .models_guidance import GuidanceEntry
 from .store_common import now as current_time
 from .store_common import read_jsonl_report
 from .store_observations import ConversationObservationStore
 
 GUIDANCE_TARGET_TYPES = {"agent_run", "thread", "task", "case"}
+
+
+@dataclass(frozen=True)
+class GuidanceEntry:
+    guidance_id: str
+    target_type: str
+    target_id: str
+    message: str
+    sender: str = ""
+    priority: str = "normal"
+    delivery: str = "next_turn"
+    created_at: float = 0.0
+    delivered_at: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "GuidanceEntry":
+        metadata = data.get("metadata")
+        return cls(
+            guidance_id=str(data.get("guidance_id") or ""),
+            target_type=str(data.get("target_type") or ""),
+            target_id=str(data.get("target_id") or ""),
+            message=str(data.get("message") or ""),
+            sender=str(data.get("sender") or ""),
+            priority=str(data.get("priority") or "normal"),
+            delivery=str(data.get("delivery") or "next_turn"),
+            created_at=float(data.get("created_at") or 0.0),
+            delivered_at=float(data.get("delivered_at") or 0.0),
+            metadata=metadata if isinstance(metadata, dict) else {},
+        )
 
 
 class ConversationGuidanceStore(ConversationObservationStore):

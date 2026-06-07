@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ...models import TaskStatus, task_has_status
+from ...role_templates import role_template_snapshot_for_task
 
 _READY_SCAN_MAX_NODES = 64
 
@@ -57,6 +58,7 @@ def _ready_ref_payload(child: object) -> dict[str, object]:
         "output_refs": _existing_refs(
             [
                 _text_attr(child, "output_json"),
+                _text_attr(child, "agent_run_final_report_md"),
                 _text_attr(child, "final_report_md"),
                 _text_attr(child, "runner_result_json"),
             ]
@@ -65,10 +67,23 @@ def _ready_ref_payload(child: object) -> dict[str, object]:
 
 
 def _is_ready_implementation_child(child: object) -> bool:
-    identity = f"{_text_attr(child, 'role')} {_text_attr(child, 'agent_name')}".lower().replace("-", "_")
-    if not any(token in identity for token in {"worker", "writer", "coder", "leaf"}):
+    if not task_has_status(child, TaskStatus.DONE):
         return False
-    return task_has_status(child, TaskStatus.DONE)
+    if not _has_ready_ref(child):
+        return False
+    snapshot = role_template_snapshot_for_task(child)
+    if not snapshot:
+        return False
+    if bool(snapshot.get("depends_on_outputs")) or bool(snapshot.get("can_run_tests")):
+        return False
+    if bool(snapshot.get("can_spawn_children")):
+        return False
+    return bool(snapshot.get("can_write"))
+
+
+def _has_ready_ref(child: object) -> bool:
+    payload = _ready_ref_payload(child)
+    return bool(payload["artifact_refs"] or payload["output_refs"])
 
 
 def _load_child(manager: Any, run_id: str) -> object | None:

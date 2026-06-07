@@ -6,7 +6,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from ..subagents.models import SubAgentRunnerResult, SubAgentTask
+from ..subagents.models import SubAgentRunnerResult, SubAgentTask, TaskStatus
 
 
 @dataclass
@@ -22,6 +22,49 @@ class FailureAnalysis:
     new_timeout_seconds: float | None = None
     split_suggestions: list[str] = field(default_factory=list)
     relevant_memories: list[str] = field(default_factory=list)
+
+
+@dataclass
+class FailureIntrospection:
+
+    analysis_reason: str = ""
+    root_cause: str = ""
+    suggested_params: dict = field(default_factory=dict)
+    should_retry: bool = True
+    should_split: bool = False
+    confidence: float = 0.5
+
+
+class FailureIntrospector:
+
+    def introspect(
+        self,
+        task: SubAgentTask,
+        runner_result: SubAgentRunnerResult,
+        failure_analysis: FailureAnalysis,
+    ) -> FailureIntrospection:
+        return self._from_rules(failure_analysis)
+
+    def _from_rules(self, failure_analysis: FailureAnalysis) -> FailureIntrospection:
+        return FailureIntrospection(
+            analysis_reason=f"规则分类：{failure_analysis.suggested_action}",
+            root_cause=failure_analysis.root_cause,
+            suggested_params=self._suggest_params_from_analysis(failure_analysis),
+            should_retry=failure_analysis.should_retry,
+            should_split=failure_analysis.should_split,
+            confidence=0.55,
+        )
+
+    def _suggest_params_from_analysis(self, analysis: FailureAnalysis) -> dict:
+        params = {}
+        if analysis.should_adjust_timeout and analysis.new_timeout_seconds:
+            params["new_timeout_seconds"] = analysis.new_timeout_seconds
+        if analysis.should_split and analysis.split_suggestions:
+            params["split_suggestions"] = analysis.split_suggestions
+        return params
+
+    def _get_current_timeout(self, task: SubAgentTask) -> float:
+        return _get_current_timeout(task)
 
 
 _MAX_TIMEOUT = 600.0
@@ -304,7 +347,7 @@ def _split_subtask_plan(task: SubAgentTask, suggestions: list[str], index: int) 
 
 
 def _mark_task_split(task: SubAgentTask, subtasks: list[SubAgentTask]) -> None:
-    task.status = "SPLIT"
+    task.status = TaskStatus.TAKEN_OVER.value
     task.attributes["split_into"] = [subtask.id for subtask in subtasks]
     task.child_ids = [subtask.id for subtask in subtasks]
     task.updated_at = time.time()

@@ -6,28 +6,23 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from ...common.value_parsing import sequence_strings
+from ..execution.executor_helpers import _test_name, _utc_now_iso
 from ..execution.records import TestExecutionRecord
-from .dom_checks import (
-    InertControlCheckRequest,
-    form_binding_hits,
-    inert_control_hits,
-    missing_dom_id_hits,
+
+REMOTE_SCHEMES = {"http", "https", "mailto", "tel", "data", "javascript"}
+_VALIDATE_FORM_CALL_RE = re.compile(r"validateForm\(\s*['\"]([^'\"]+)['\"]\s*\)")
+_GET_ELEMENT_BY_ID_RE = re.compile(r"getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)")
+_QUERY_SELECTOR_ID_RE = re.compile(r"querySelector(?:All)?\(\s*['\"]#([A-Za-z0-9_-]+)['\"]\s*\)")
+_TEMPLATE_ID_ATTR_RE = re.compile(r"\bid\s*=\s*['\"]([A-Za-z0-9_-]+)['\"]")
+_ASSIGNED_GET_ELEMENT_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*document\.getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)\s*;"
 )
-from .html_parser import StaticSiteHTMLParser
-from .js_api_checks import missing_window_app_method_hits
-from .path_checks import (
-    broken_refs,
-    inside,
-    local_script_refs,
-    rel,
-    small_text,
-    unique_paths,
-)
-from .records import static_site_failure_summary, static_site_record
 
 
 @dataclass
@@ -105,6 +100,60 @@ class StaticSiteHtmlScanRequest:
     state: StaticSiteScanState
 
 
+@dataclass(frozen=True)
+class InertControlCheckRequest:
+    controls: list[dict[str, object]]
+    rel_path: str
+    html_text: str
+    element_ids: set[str]
+
+
+class StaticSiteHTMLParser(HTMLParser):
+    """Extract local refs and basic controls from HTML."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.refs: list[tuple[str, str]] = []
+        self.controls: list[dict[str, object]] = []
+        self.element_ids: list[str] = []
+        self.form_ids: list[str] = []
+        self._current_control: dict[str, object] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr_map = {key.lower(): value or "" for key, value in attrs}
+        for ref_attr in ("href", "src", "action"):
+            if attr_map.get(ref_attr):
+                self.refs.append((ref_attr, attr_map[ref_attr]))
+        if attr_map.get("id"):
+            self.element_ids.append(attr_map["id"])
+        if tag == "form" and attr_map.get("id"):
+            self.form_ids.append(attr_map["id"])
+        if tag in {"button", "a", "input", "select", "textarea"}:
+            control = {
+                "tag": tag,
+                "href": attr_map.get("href", ""),
+                "onclick": attr_map.get("onclick", ""),
+                "type": attr_map.get("type", ""),
+                "disabled": "disabled" in attr_map,
+                "text": "",
+            }
+            if tag == "input":
+                control["text"] = attr_map.get("aria-label") or attr_map.get("placeholder") or attr_map.get("value") or ""
+                self.controls.append(control)
+                return
+            self._current_control = control
+
+    def handle_data(self, data: str) -> None:
+        if self._current_control is not None:
+            text = str(self._current_control.get("text") or "")
+            self._current_control["text"] = (text + data).strip()[:80]
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._current_control and self._current_control.get("tag") == tag:
+            self.controls.append(dict(self._current_control))
+            self._current_control = None
+
+
 def run_static_site_check(test: dict[str, Any], workspace_root: Path) -> TestExecutionRecord:
     site_root, error = _resolve_site_root(test, workspace_root)
     if error:
@@ -114,6 +163,274 @@ def run_static_site_check(test: dict[str, Any], workspace_root: Path) -> TestExe
     result = _scan_site(test, site_root)
     error_text = "" if result.ok else static_site_failure_summary(result)
     return static_site_record(test, result, executed=True, error=error_text)
+
+
+def static_site_record(
+    test: dict[str, Any],
+    result: Any,
+    *,
+    executed: bool,
+    error: str,
+) -> TestExecutionRecord:
+    return TestExecutionRecord(
+        test_name=_test_name(test),
+        executed=executed,
+        exit_code=0 if result.ok and executed else 1,
+        executed_at=_utc_now_iso(),
+        error=error,
+        validation_method="static_site_check",
+        validation_result=result.to_dict(),
+    )
+
+
+def static_site_failure_summary(result: Any) -> str:
+    parts: list[str] = []
+    for field_name in (
+        "missing_required_files",
+        "placeholder_hits",
+        "broken_local_refs",
+        "html_structure_hits",
+        "inert_control_hits",
+        "form_binding_hits",
+        "missing_dom_id_hits",
+        "missing_js_api_hits",
+    ):
+        values = getattr(result, field_name, [])
+        if values:
+            parts.append(f"{field_name}={len(values)}")
+    return "; ".join(parts)
+
+
+def broken_refs(refs: list[tuple[str, str]], html_file: Path, site_root: Path) -> list[str]:
+    broken: list[str] = []
+    for attr, ref in refs:
+        target = local_ref_target(ref, html_file, site_root)
+        if target is not None and not target.exists():
+            broken.append(f"{rel(html_file, site_root)}:{attr}={ref}")
+    return broken
+
+
+def local_ref_target(ref: str, html_file: Path, site_root: Path) -> Path | None:
+    cleaned = ref.strip()
+    if not cleaned or cleaned.startswith("#") or cleaned.startswith("//"):
+        return None
+    parsed = urlsplit(cleaned)
+    if parsed.scheme.lower() in REMOTE_SCHEMES:
+        return None
+    path_part = parsed.path.strip()
+    if not path_part:
+        return None
+    candidate = _local_candidate(path_part, html_file, site_root)
+    if candidate.is_dir():
+        candidate = candidate / "index.html"
+    return candidate if inside(candidate, site_root) else None
+
+
+def local_script_refs(refs: list[tuple[str, str]], html_file: Path, site_root: Path) -> list[Path]:
+    paths: list[Path] = []
+    for attr, ref in refs:
+        if attr != "src":
+            continue
+        target = local_ref_target(ref, html_file, site_root)
+        if target is not None and target.suffix.lower() == ".js" and target.exists():
+            paths.append(target)
+    return paths
+
+
+def unique_paths(paths: list[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return unique
+
+
+def small_text(path: Path, max_bytes: int = 262144) -> str:
+    try:
+        if path.stat().st_size > max_bytes:
+            return ""
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def rel(path: Path, root: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _local_candidate(path_part: str, html_file: Path, site_root: Path) -> Path:
+    if path_part.startswith("/"):
+        return (site_root / path_part.lstrip("/")).resolve()
+    return (html_file.parent / path_part).resolve()
+
+
+def form_binding_hits(form_ids: set[str], script_text: str) -> list[str]:
+    hits: list[str] = []
+    for form_id in sorted(set(_VALIDATE_FORM_CALL_RE.findall(script_text or ""))):
+        if form_id not in form_ids:
+            hits.append(f"validateForm:{form_id}")
+    return hits
+
+
+def missing_dom_id_hits(
+    element_ids: set[str],
+    script_text: str,
+    *,
+    allow_optional_missing: bool = True,
+) -> list[str]:
+    available_ids = set(element_ids) | template_declared_dom_ids(script_text)
+    hits = _missing_get_element_hits(available_ids, script_text, allow_optional_missing=allow_optional_missing)
+    hits.extend(_missing_query_selector_hits(available_ids, script_text))
+    return hits
+
+
+def template_declared_dom_ids(script_text: str) -> set[str]:
+    return {item for item in _TEMPLATE_ID_ATTR_RE.findall(script_text or "") if item}
+
+
+def inert_control_hits(request: InertControlCheckRequest) -> list[str]:
+    hits: list[str] = []
+    has_script_handlers = "addEventListener" in request.html_text
+    for control in request.controls:
+        hits.extend(_inert_control_hit(control, request, has_script_handlers))
+    return hits
+
+
+def _missing_get_element_hits(
+    element_ids: set[str],
+    script_text: str,
+    *,
+    allow_optional_missing: bool,
+) -> list[str]:
+    hits: list[str] = []
+    for target in sorted(set(_GET_ELEMENT_BY_ID_RE.findall(script_text or ""))):
+        if target in element_ids:
+            continue
+        if _is_optionally_guarded_dom_lookup(script_text, target):
+            continue
+        hits.append(f"getElementById:{target}")
+    return hits
+
+
+def _missing_query_selector_hits(element_ids: set[str], script_text: str) -> list[str]:
+    return [
+        f"querySelector:{target}"
+        for target in sorted(set(_QUERY_SELECTOR_ID_RE.findall(script_text or "")))
+        if target not in element_ids
+    ]
+
+
+def _get_element_assignment_vars(script_text: str) -> dict[str, list[str]]:
+    mapping: dict[str, list[str]] = {}
+    for match in _ASSIGNED_GET_ELEMENT_RE.finditer(script_text or ""):
+        var_name, target = match.groups()
+        mapping.setdefault(target, []).append(var_name)
+    return mapping
+
+
+def _is_optionally_guarded_dom_lookup(script_text: str, target: str) -> bool:
+    for var_name in _get_element_assignment_vars(script_text).get(target, []):
+        escaped = re.escape(var_name)
+        if re.search(rf"\b{escaped}\s*&&", script_text) or re.search(rf"if\s*\(\s*{escaped}\s*\)", script_text):
+            return True
+    return False
+
+
+def _inert_control_hit(
+    control: dict[str, object],
+    request: InertControlCheckRequest,
+    has_script_handlers: bool,
+) -> list[str]:
+    tag = str(control.get("tag") or "")
+    text = str(control.get("text") or "").strip()
+    href = str(control.get("href") or "").strip()
+    onclick = str(control.get("onclick") or "").strip()
+    button_type = str(control.get("type") or "").strip().lower()
+    disabled = bool(control.get("disabled"))
+    if disabled and tag in {"button", "input", "select", "textarea"}:
+        return [f"{request.rel_path}:{tag}:{text or '<empty>'} disabled"]
+    if tag == "a" and not onclick and _anchor_is_inert(href, request.element_ids):
+        return [f"{request.rel_path}:a:{text or '<empty>'} href={href or '<empty>'}"]
+    if tag == "button" and not onclick and button_type not in {"submit", "reset"} and not has_script_handlers:
+        return [f"{request.rel_path}:button:{text or '<empty>'}"]
+    return []
+
+
+def _anchor_is_inert(href: str, element_ids: set[str]) -> bool:
+    cleaned = href.strip()
+    if not cleaned or cleaned == "#":
+        return True
+    if cleaned.startswith("#"):
+        return cleaned[1:] not in element_ids
+    return False
+
+
+def missing_window_app_method_hits(script_text: str) -> list[str]:
+    refs = _referenced_window_app_methods(script_text)
+    if not refs:
+        return []
+    exported = _exported_window_app_methods(script_text)
+    return [f"app.{name}" for name in sorted(refs - exported)]
+
+
+def _referenced_window_app_methods(script_text: str) -> set[str]:
+    return {
+        name
+        for name in re.findall(r"\bapp\.([A-Za-z_$][\w$]*)\s*\(", script_text or "")
+        if name not in {"addEventListener"}
+    }
+
+
+def _exported_window_app_methods(script_text: str) -> set[str]:
+    text = script_text or ""
+    names = {match.group(1) for match in re.finditer(r"\bwindow\.app\.([A-Za-z_$][\w$]*)\s*=", text)}
+    for body in re.findall(r"\bwindow\.app\s*=\s*\{(?P<body>.*?)\}\s*;", text, flags=re.DOTALL):
+        names.update(_object_property_names(body))
+    for body in re.findall(
+        r"\b(?:const|let|var)\s+app\s*=\s*\{(?P<body>.*?)\}\s*;",
+        text,
+        flags=re.DOTALL,
+    ):
+        names.update(_object_property_names(body))
+    for body in re.findall(
+        r"\b(?:const|let|var)\s+app\s*=\s*\{(?P<body>.*?)\}\s*;\s*window\.app\s*=\s*app\s*;",
+        text,
+        flags=re.DOTALL,
+    ):
+        names.update(_object_property_names(body))
+    return names
+
+
+def _object_property_names(body: str) -> set[str]:
+    names: set[str] = set()
+    cleaned = re.sub(r"//.*?$|/\*.*?\*/", "", body or "", flags=re.MULTILINE | re.DOTALL)
+    for chunk in cleaned.split(","):
+        item = chunk.strip()
+        if not item:
+            continue
+        match = re.match(r"([A-Za-z_$][\w$]*)\s*:", item)
+        if match:
+            names.add(match.group(1))
+            continue
+        match = re.match(r"([A-Za-z_$][\w$]*)\s*(?:\(|$)", item)
+        if match:
+            names.add(match.group(1))
+    return names
 
 
 def _resolve_site_root(test: dict[str, Any], workspace_root: Path) -> tuple[Path, str]:

@@ -11,7 +11,7 @@ from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
 )
-from agent_py_agent.agent.agent_core.tool_loop.repair_counters import ToolLoopRepairCounters
+from agent_py_agent.agent.agent_core.tool_loop.response_decision import ToolLoopRepairCounters
 from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
     ToolLoopResponseDecisionRequest,
     tool_loop_response_decision,
@@ -46,6 +46,40 @@ def test_uncontracted_write_record_requires_explicit_ok() -> None:
 
     assert _successful_write_record({"tool": "write_file", "path": "out.txt"}) is False
     assert _successful_write_record({"tool": "write_file", "path": "out.txt", "ok": True}) is True
+
+
+def test_uncontracted_prompt_path_tokens_ignore_urls_and_keep_explicit_paths() -> None:
+    from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import (
+        _absolute_path_tokens_in_text,
+        _absolute_paths_in_text,
+    )
+
+    text = "参考 https://example.com/a/b，把报告写到 ~/agent-output/final.md 和 /tmp/final.md。"
+
+    tokens = _absolute_path_tokens_in_text(text)
+
+    assert not any("example.com" in token for token in tokens)
+    assert "~/agent-output/final.md" in tokens
+    assert "/tmp/final.md" in tokens
+    assert [str(path) for path in _absolute_paths_in_text(text)] == [
+        str(Path("~/agent-output/final.md").expanduser()),
+        "/tmp/final.md",
+    ]
+
+
+def test_uncontracted_prompt_path_token_supports_windows_absolute_forms() -> None:
+    from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import (
+        _absolute_path_tokens_in_text,
+        _is_absolute_path_token,
+    )
+
+    tokens = _absolute_path_tokens_in_text(r"写到 C:\Users\alice\out.md 和 \\server\share\out.md")
+
+    assert r"C:\Users\alice\out.md" in tokens
+    assert r"\\server\share\out.md" in tokens
+    assert _is_absolute_path_token(r"C:\Users\alice\out.md", platform_name="nt") is True
+    assert _is_absolute_path_token(r"\\server\share\out.md", platform_name="nt") is True
+    assert _is_absolute_path_token(r"C:\Users\alice\out.md", platform_name="posix") is False
 
 
 def test_tool_round_without_acceptance_submit_does_not_run_delivery_closeout(tmp_path: Path):
@@ -87,6 +121,68 @@ def test_tool_round_with_acceptance_submit_runs_delivery_closeout(tmp_path: Path
     assert response is not None
     assert "交付验收通过" in response.text
     assert (tmp_path / ".agent_delivery" / "closeout.json").exists()
+
+
+def test_tool_round_auto_closeout_hint_waits_for_required_target_coverage(tmp_path: Path):
+    _write_valid_artifact(tmp_path)
+    source = tmp_path / "source.txt"
+    source.write_text("abcdef", encoding="utf-8")
+    params = replace(
+        _delivery_params(
+            archive_tool_calls=[
+                _write_file_archive_record(),
+                _read_file_coverage_archive_record(source, offset=0, next_offset=3, total=6),
+            ]
+        ),
+        delivery_contract=_delivery_contract_with_required_source_coverage(source),
+    )
+    params.tool_context.append("[delivery-completion-soft-hint]\n{}")
+    agent = _agent(tmp_path)
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+
+    assert response is None
+    assert not (tmp_path / ".agent_delivery" / "closeout.json").exists()
+
+
+def test_tool_round_auto_closeout_hint_runs_after_required_target_coverage(tmp_path: Path):
+    _write_valid_artifact(tmp_path)
+    source = tmp_path / "source.txt"
+    source.write_text("abcdef", encoding="utf-8")
+    params = replace(
+        _delivery_params(
+            archive_tool_calls=[
+                _write_file_archive_record(),
+                _read_file_coverage_archive_record(source, offset=0, next_offset=6, total=6),
+            ]
+        ),
+        delivery_contract=_delivery_contract_with_required_source_coverage(source),
+    )
+    params.tool_context.append("[delivery-completion-soft-hint]\n{}")
+    agent = _agent(tmp_path)
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+
+    report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    assert report["target_coverage_status"]["should_block"] is False
+    assert report["target_coverage_status"]["missing_count"] == 0
+    assert response is None or "交付验收通过" in response.text
 
 
 def test_acceptance_submit_syncs_task_workspace_closeout_state_and_manifest(tmp_path: Path):
@@ -1826,5 +1922,42 @@ def _write_file_archive_record() -> dict[str, object]:
                 "operation_id": "op-write-1",
                 "idempotency_key": "idem-write-1",
             },
+        },
+    }
+
+
+def _delivery_contract_with_required_source_coverage(source: Path) -> dict[str, object]:
+    contract = dict(_delivery_params(archive_tool_calls=[]).delivery_contract or {})
+    contract["target_coverage_contract"] = {
+        "enforcement": "required",
+        "coverage_requirement": "full_source_read",
+        "target_items": [
+            {
+                "target_id": str(source),
+                "source_path": str(source),
+                "coverage_kind": "full_source_read",
+                "enforcement": "required",
+            }
+        ],
+    }
+    return contract
+
+
+def _read_file_coverage_archive_record(source: Path, *, offset: int, next_offset: int, total: int) -> dict[str, object]:
+    call_id = f"read-{offset}-{next_offset}-{total}"
+    return {
+        "tool": "read_file",
+        "run_id": "run-1",
+        "task_id": "task-1",
+        "call_id": call_id,
+        "scoped_call_id": f"run-1:{call_id}",
+        "sha256": f"{call_id}-sha",
+        "ok": True,
+        "parameters": {"path": str(source)},
+        "read_window": {
+            "kind": "char_window",
+            "offset": offset,
+            "next_offset": next_offset,
+            "total_chars": total,
         },
     }

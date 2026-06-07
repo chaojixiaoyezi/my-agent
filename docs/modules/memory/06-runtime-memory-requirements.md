@@ -5,7 +5,7 @@
 - 主代理长期记忆写当前 owner `memory/long_term/memory.jsonl`。
 - 每日工作记忆写当前 owner `memory/daily/YYYY-MM-DD.jsonl`。
 - raw turn/tool/gateway 审计写当前 owner `audit/YYYY-MM-DD.jsonl`。
-- 大工具输出写当前 owner `blobs/tool_outputs/`。
+- 大工具输出写当前 task `work/blobs/tool_outputs/`。
 - task workspace 固定为 `tasks/<date>/<task-slug>/{output,work}/`。
 - 子代理状态固定为 task-local `work/agents/<run_id>/canonical_state.json`。
 - 所有索引记录都要能追到正文事实路径。

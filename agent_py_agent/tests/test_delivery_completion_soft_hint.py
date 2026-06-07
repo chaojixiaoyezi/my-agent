@@ -126,6 +126,48 @@ def test_delivery_completion_hint_after_reading_declared_artifact(tmp_path):
     assert "submit_for_acceptance" in params.tool_context[0]
 
 
+def test_delivery_completion_hint_waits_for_required_target_coverage(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("abcdef", encoding="utf-8")
+    report = tmp_path / "output" / "report.md"
+    report.parent.mkdir()
+    report.write_text("初稿", encoding="utf-8")
+    write_record = {"tool": "write_file", "ok": True, "path": str(report)}
+    params = _params(contract=_contract_with_required_source_coverage(source))
+    params.archive_tool_calls.append(write_record)
+
+    maybe_append_delivery_completion_soft_hint(
+        SimpleNamespace(root=str(tmp_path)),
+        params,
+        write_record,
+        tool_ok=True,
+    )
+
+    assert params.tool_context == []
+
+
+def test_delivery_completion_hint_after_required_target_coverage_complete(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("abcdef", encoding="utf-8")
+    report = tmp_path / "output" / "report.md"
+    report.parent.mkdir()
+    report.write_text("终稿", encoding="utf-8")
+    read_record = _read_window_record(source, offset=0, next_offset=6, total=6)
+    params = _params(contract=_contract_with_required_source_coverage(source))
+    params.archive_tool_calls.extend([{"tool": "write_file", "ok": True, "path": str(report)}, read_record])
+
+    maybe_append_delivery_completion_soft_hint(
+        SimpleNamespace(root=str(tmp_path)),
+        params,
+        read_record,
+        tool_ok=True,
+    )
+
+    assert len(params.tool_context) == 1
+    assert "[delivery-completion-soft-hint]" in params.tool_context[0]
+    assert str(report) in params.tool_context[0]
+
+
 def test_delivery_completion_hint_is_one_shot(tmp_path):
     (tmp_path / "output").mkdir()
     (tmp_path / "output" / "report.md").write_text("完成内容", encoding="utf-8")
@@ -225,6 +267,44 @@ def test_delivery_completion_hint_for_explicit_file_does_not_accept_sibling_repo
     )
 
     assert params.tool_context == []
+
+
+def _contract_with_required_source_coverage(source: object) -> dict[str, object]:
+    return {
+        "artifacts": [
+            {
+                "artifact_id": "report",
+                "required": True,
+                "preferred_path": "output/report.md",
+            }
+        ],
+        "target_coverage_contract": {
+            "enforcement": "required",
+            "coverage_requirement": "full_source_read",
+            "target_items": [
+                {
+                    "target_id": str(source),
+                    "source_path": str(source),
+                    "coverage_kind": "full_source_read",
+                    "enforcement": "required",
+                }
+            ],
+        },
+    }
+
+
+def _read_window_record(source: object, *, offset: int, next_offset: int, total: int) -> dict[str, object]:
+    return {
+        "tool": "read_file",
+        "ok": True,
+        "parameters": {"path": str(source)},
+        "read_window": {
+            "kind": "char_window",
+            "offset": offset,
+            "next_offset": next_offset,
+            "total_chars": total,
+        },
+    }
 
 
 def test_delivery_completion_hint_without_contract_ignores_non_output_scratch_file(tmp_path):

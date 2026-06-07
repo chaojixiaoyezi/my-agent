@@ -162,8 +162,8 @@ def _payload_change_signature(value: object) -> tuple[tuple[object, ...], ...]:
         rows.append(
             (
                 str(node.get("run_id") or ""),
-                str(node.get("status") or "").strip().upper(),
-                str(node.get("verification_status") or "").strip().upper(),
+                str(node.get("status") or "").strip(),
+                str(node.get("verification_status") or "").strip(),
                 _safe_float(node.get("progress")),
                 str(node.get("current_step") or ""),
                 str(node.get("current_tool") or ""),
@@ -181,7 +181,7 @@ def _node_ids_with_status(nodes: list[object], statuses: set[str]) -> list[str]:
     for node in nodes:
         if not isinstance(node, dict):
             continue
-        status = str(node.get("status") or "").strip().upper()
+        status = str(node.get("status") or "").strip()
         run_id = str(node.get("run_id") or "")
         if run_id and status in statuses:
             ids.append(run_id)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,15 @@ from ..run_task_workspace_writer import sync_run_task_workspace_closeout
 from ..tool_guard.local_progress import reset_local_progress_guard
 from .artifacts import _relative_report_ref, _write_report
 from .subagent_aggregation import evaluate_subagent_aggregation_gate
+
+_PATH_TOKEN_RE = re.compile(
+    r"(?P<path>"
+    r"~[\\/][^\s'\"`<>()\[\]{}，。；;、]+"
+    r"|(?<![:/])/(?!/)[^\s'\"`<>()\[\]{}，。；;、]+"
+    r"|(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s'\"`<>()\[\]{}，。；;、]+"
+    r"|\\\\[^\s'\"`<>()\[\]{}，。；;、]+"
+    r")"
+)
 
 
 def uncontracted_task_output_closeout_response(
@@ -181,11 +191,43 @@ def _absolute_paths_in_text(text: str) -> list[Path]:
     if not text:
         return []
     paths: list[Path] = []
-    for match in re.finditer(r"(?:~|/)[^\s'\"`<>()\[\]{}，。；;、]+", text):
-        raw = match.group(0).rstrip(".,:;，。；、")
-        if raw:
+    for raw in _absolute_path_tokens_in_text(text):
+        if _is_absolute_path_token(raw, platform_name=os.name):
             paths.append(Path(raw).expanduser())
     return paths
+
+
+def _absolute_path_tokens_in_text(text: str) -> list[str]:
+    source = str(text or "")
+    tokens: list[str] = []
+    for match in _PATH_TOKEN_RE.finditer(source):
+        if _is_inside_url_token(source, match.start()):
+            continue
+        raw = _clean_path_token(match.group("path"))
+        if raw:
+            tokens.append(raw)
+    return tokens
+
+
+def _is_inside_url_token(text: str, start: int) -> bool:
+    prefix = text[:start]
+    token_start = max(prefix.rfind(" "), prefix.rfind("\t"), prefix.rfind("\n")) + 1
+    return "://" in prefix[token_start:]
+
+
+def _is_absolute_path_token(token: str, *, platform_name: str) -> bool:
+    text = str(token or "").strip()
+    if not text:
+        return False
+    if text.startswith("~"):
+        return True
+    if platform_name == "nt":
+        return bool(re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith("\\\\"))
+    return text.startswith("/")
+
+
+def _clean_path_token(value: str) -> str:
+    return str(value or "").strip().rstrip(".,;，。；、")
 
 
 def _output_target_for_user_path(path: Path, *, force_kind: str | None = None) -> dict[str, Any]:

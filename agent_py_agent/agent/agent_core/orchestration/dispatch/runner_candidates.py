@@ -98,7 +98,7 @@ def _can_rerun_from_recovery_instruction(task: object) -> bool:
         return False
     if _terminal_recovery_code_present(task):
         return False
-    if str(getattr(task, "channel_status", "") or "").upper() == "BROKEN":
+    if str(getattr(task, "channel_status", "") or "") == "BROKEN":
         return False
     if any(getattr(item, "status", "") == "OPEN" for item in getattr(task, "capability_requests", []) or []):
         return False

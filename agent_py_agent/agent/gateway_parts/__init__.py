@@ -55,10 +55,10 @@ from .recovery import (
     _gateway_processing_started_at,
     _gateway_request_attempts,
     _write_gateway_failure_response,
+    gateway_stale_processing,
     recover_gateway_processing_requests,
     requeue_gateway_processing_requests,
 )
-from .recovery_stale import gateway_stale_processing
 from .request_worker import (
     GatewayAskParams,
     _handle_gateway_request,

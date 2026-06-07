@@ -137,7 +137,7 @@ def _append_parent_subagent_cross_day_resume_clues(root: Path, task) -> None:
             speaker="assistant",
             target="parent",
             action="subagent_runner_result",
-            status=str(task.status).lower(),
+            status=str(task.status),
             content_preview="parent subagent cross-day resume: runner finished and waits for closeout",
             source="subagent_run",
             created_at="2026-04-29T23:55:00+00:00",
@@ -168,7 +168,7 @@ def _append_subagent_snapshot(root: Path, task) -> None:
                     "request_id": f"subagent-run:{task.id}",
                     "run_id": task.id,
                     "task_id": task.id,
-                    "status": str(task.status).lower(),
+                    "status": str(task.status),
                 }
             ],
             task_refs=[task.id],

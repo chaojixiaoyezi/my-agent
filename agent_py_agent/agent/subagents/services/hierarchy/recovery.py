@@ -213,7 +213,7 @@ def _recovery_reason(
     *,
     task_index: dict[str, SubAgentTask] | None = None,
 ) -> str:
-    status = str(task.status or "").upper()
+    status = str(task.status or "").strip()
     if status in RECOVERY_STATUSES:
         return f"status:{status}"
     if task.failure_type:
@@ -256,7 +256,7 @@ def _recommended_command(task: SubAgentTask, reason: str) -> str:
 
 
 def _active_stale_reasons(task: SubAgentTask, request: HierarchyRecoveryRequest) -> list[str]:
-    status = str(task.status or "").upper()
+    status = str(task.status or "").strip()
     has_active_attempt = bool(str(task.runner_active_attempt_id or "").strip())
     if not (_is_active(status) and (task_status_in(status, {TaskStatus.RUNNING.value}) or has_active_attempt)):
         return []

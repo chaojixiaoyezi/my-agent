@@ -26,7 +26,7 @@ from ..runner_rendering import (
     render_single_channel_probe_markdown,
 )
 from ..utils import _apply_missing_paths
-from .indexing.params import IndexReportParams
+from .indexing.records import IndexReportParams
 
 
 class SubAgentChannelProbeService:

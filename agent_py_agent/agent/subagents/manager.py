@@ -25,11 +25,11 @@ from .services.channel_probe import SubAgentChannelProbeService
 from .services.dispatch import SubAgentDispatchService, SubAgentParentPlannerService
 from .services.hierarchy import SubAgentHierarchyService
 from .services.indexing import SubAgentIndexingService
-from .services.indexing.params import LocalRecordParams
+from .services.indexing.records import LocalRecordParams
 from .services.learning import SubAgentLearningService
 from .services.lifecycle import SubAgentLifecycleService
 from .services.memory_gate import SubAgentMemoryGateService
-from .services.patch_apply.service import SubAgentPatchService
+from .patch.patch_service import SubAgentPatchService
 from .services.persistence import SubAgentPersistenceService
 from .services.runner_context import SubAgentRunnerContextService
 from .services.runner_result import SubAgentRunnerResultService

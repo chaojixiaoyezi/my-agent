@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .._runtime_params import ToolLoopExecuteParams
 from ..exploration_fuse_config import exploration_fuse_config
+from ..run_task_workspace_writer import current_run_task_work_dir, current_run_task_workspace_root
 from .local_progress_hints import (
     HintDeliveryInput,
     due_hint_round,
@@ -36,10 +37,10 @@ _RUN_COMMAND_EXPLORATION_PREFIXES = ("curl ", "find ", "ls", "pwd", "rg ", "cat 
 
 
 def has_required_local_progress_guard(agent: object, params: ToolLoopExecuteParams, calls: list[dict[str, object]] | None) -> bool:
-    payload = _guard_payload(agent)
+    payload = _guard_payload(agent, params)
     if not payload:
         return False
-    state = _load_state(agent)
+    state = _load_state(agent, params)
     recovery_sig = recovery_signature(params)
     fingerprint = str(payload.get("work_progress_fingerprint") or "")
     failure_fingerprint = str(payload.get("failure_fingerprint") or "")
@@ -56,25 +57,25 @@ def has_required_local_progress_guard(agent: object, params: ToolLoopExecutePara
         }
     if _is_local_progressive_call(payload, calls):
         state["exploration_rounds_without_local_progress"] = 0
-        _write_state(agent, state)
+        _write_state(agent, state, params)
         return False
     if not _is_exploration_only_call(calls):
-        _write_state(agent, state)
+        _write_state(agent, state, params)
         return False
     count = int(state.get("exploration_rounds_without_local_progress") or 0) + 1
     state["exploration_rounds_without_local_progress"] = count
-    _write_state(agent, state)
+    _write_state(agent, state, params)
     config = exploration_fuse_config(agent)
     return should_prompt(config, state, count)
 
 
-def local_progress_guard_context(agent: object, redirects: int) -> str:
+def local_progress_guard_context(agent: object, redirects: int, params: ToolLoopExecuteParams | None = None) -> str:
     del redirects
-    payload = _guard_payload(agent)
+    payload = _guard_payload(agent, params)
     config = exploration_fuse_config(agent)
     if not payload:
         return ""
-    state = _load_state(agent)
+    state = _load_state(agent, params)
     count = int(state.get("exploration_rounds_without_local_progress") or 0)
     hint_round = due_hint_round(config, state, count)
     if hint_round is None:
@@ -88,7 +89,9 @@ def local_progress_guard_context(agent: object, redirects: int) -> str:
         "recovery_actions": payload.get("recovery_actions", []),
         "work_progress_fingerprint": payload.get("work_progress_fingerprint", ""),
     }
-    mark_hint_delivered(HintDeliveryInput(agent, state, config, hint_round, _write_state))
+    mark_hint_delivered(
+        HintDeliveryInput(agent, state, config, hint_round, lambda target, value: _write_state(target, value, params))
+    )
     return "\n".join(
         [
             "[tool-system local-progress-guard]",
@@ -107,11 +110,12 @@ def reset_local_progress_guard(agent: object, params: ToolLoopExecuteParams | No
             "recovery_signature": recovery_sig,
             "work_progress_fingerprint": "",
         },
+        params,
     )
 
 
-def _guard_payload(agent: object) -> dict[str, object]:
-    report = _closeout_report(agent)
+def _guard_payload(agent: object, params: ToolLoopExecuteParams | None = None) -> dict[str, object]:
+    report = _closeout_report(agent, params)
     if not report or report.get("ok") is True:
         return {}
     progress = report.get("delivery_progress")
@@ -137,8 +141,11 @@ def _guard_payload(agent: object) -> dict[str, object]:
     }
 
 
-def _closeout_report(agent: object) -> dict[str, object]:
-    path = Path(getattr(agent, "root", ".")).resolve() / ".agent_delivery" / "closeout.json"
+def _closeout_report(agent: object, params: ToolLoopExecuteParams | None = None) -> dict[str, object]:
+    root = current_run_task_workspace_root(agent, params)
+    if root is None:
+        root = Path(getattr(agent, "root", ".")).resolve()
+    path = root / ".agent_delivery" / "closeout.json"
     if not path.exists():
         return {}
     try:
@@ -148,12 +155,15 @@ def _closeout_report(agent: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
-def _state_path(agent: object) -> Path:
-    return Path(getattr(agent, "root", ".")).resolve() / _STATE_DIR / _STATE_FILE
+def _state_path(agent: object, params: ToolLoopExecuteParams | None = None) -> Path:
+    root = current_run_task_work_dir(agent, params)
+    if root is None:
+        root = Path(getattr(agent, "root", ".")).resolve()
+    return root / _STATE_DIR / _STATE_FILE
 
 
-def _load_state(agent: object) -> dict[str, object]:
-    path = _state_path(agent)
+def _load_state(agent: object, params: ToolLoopExecuteParams | None = None) -> dict[str, object]:
+    path = _state_path(agent, params)
     if not path.exists():
         return {}
     try:
@@ -163,8 +173,8 @@ def _load_state(agent: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
-def _write_state(agent: object, payload: dict[str, object]) -> None:
-    path = _state_path(agent)
+def _write_state(agent: object, payload: dict[str, object], params: ToolLoopExecuteParams | None = None) -> None:
+    path = _state_path(agent, params)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 

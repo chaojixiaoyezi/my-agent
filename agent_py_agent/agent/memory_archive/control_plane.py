@@ -18,6 +18,7 @@ from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_schema_payload,
 )
+from .tool_output_externalizer import tool_output_index_paths_for_lookup
 
 CONTROL_PLANE_QUERY_SCHEMA = RuntimeMemorySchemaOptions("control_plane_query")
 CONTROL_PLANE_TASK_RUN_REF_SCHEMA = RuntimeMemorySchemaOptions("control_plane_task_run_ref")
@@ -91,7 +92,10 @@ def _compact_applies(workspace: Path) -> list[dict[str, Any]]:
 
 
 def _tool_outputs(workspace: Path) -> list[dict[str, Any]]:
-    return _read_jsonl(workspace / "blobs" / "tool_outputs" / "index.jsonl")
+    rows: list[dict[str, Any]] = []
+    for path in tool_output_index_paths_for_lookup(workspace):
+        rows.extend(_read_jsonl(path))
+    return rows
 
 
 def _task_run_refs(

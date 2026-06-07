@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from queue import Empty, Queue
 from threading import Thread
 
+from ..backends import ModelResponse
 from ..backends.errors import ProviderTimeoutError
 from ._runtime_params import ToolLoopExecuteParams
 from .model.call_runtime import (
@@ -30,18 +31,16 @@ from .runner.stage_trace import (
     trace_runner_model_response_received,
 )
 from .tool_stream import (
-    CompleteToolCallStreamAbort,
     LongToolContentStreamAbort,
     MalformedToolProtocolStreamAbort,
     ToolBoundaryChunkFilter,
-    complete_tool_call_abort_response,
     cut_response_after_first_complete_tool_call,
     long_write_abort_response,
     malformed_tool_protocol_abort_response,
 )
 
-_TOOL_STREAM_COMPLETE_DRAIN_SECONDS = 0.75
 _TOOL_STREAM_POLL_SECONDS = 0.05
+_TOOL_STREAM_COMPLETE_DRAIN_SECONDS = 1.2
 
 
 @dataclass(frozen=True)
@@ -91,11 +90,6 @@ def _generate_or_recover_context_pressure(request: ModelGenerateParams, state: _
             request,
             state,
             state.first_token_timeout_seconds,
-        )
-    except CompleteToolCallStreamAbort as exc:
-        return complete_tool_call_abort_response(
-            exc,
-            backend=str(getattr(request.agent.backend, "name", "") or ""),
         )
     except LongToolContentStreamAbort as exc:
         return long_write_abort_response(
@@ -247,30 +241,44 @@ def _generate_with_wall_timeout(
     worker = Thread(target=_target, name="my-agent-model-generate-timeout-guard", daemon=True)
     worker.start()
     started = time.monotonic()
-    complete_seen_at: float | None = None
+    tool_block_completed_at: float | None = None
     while True:
         now = time.monotonic()
-        if state.chunk_filter.cut_detected and complete_seen_at is None:
-            complete_seen_at = now
-        if complete_seen_at is not None and now - complete_seen_at >= _TOOL_STREAM_COMPLETE_DRAIN_SECONDS:
-            abort = state.chunk_filter.complete_tool_call_abort()
-            if abort is not None:
-                raise abort
         remaining = timeout - (now - started)
         if remaining <= 0:
             raise ProviderTimeoutError(f"模型接口请求超时: request_timeout={timeout:g}s")
         poll = min(_TOOL_STREAM_POLL_SECONDS, remaining)
-        if complete_seen_at is not None:
-            drain_remaining = _TOOL_STREAM_COMPLETE_DRAIN_SECONDS - (now - complete_seen_at)
-            poll = min(poll, max(0.001, drain_remaining))
         try:
             result = results.get(timeout=poll)
             break
         except Empty:
+            tool_block_completed_at = _tool_block_completed_at(state, tool_block_completed_at)
+            if _complete_tool_block_wait_elapsed(tool_block_completed_at):
+                return _complete_stream_tool_response(request, state)
             continue
     if result.exc is not None:
         raise result.exc
     return result.response
+
+
+def _tool_block_completed_at(state: _ModelGenerationState, current: float | None) -> float | None:
+    if current is not None:
+        return current
+    if state.chunk_filter.cut_detected and state.chunk_filter.complete_tool_text():
+        return time.monotonic()
+    return None
+
+
+def _complete_tool_block_wait_elapsed(completed_at: float | None) -> bool:
+    if completed_at is None:
+        return False
+    return time.monotonic() - completed_at >= _TOOL_STREAM_COMPLETE_DRAIN_SECONDS
+
+
+def _complete_stream_tool_response(request: ModelGenerateParams, state: _ModelGenerationState) -> ModelResponse:
+    text = state.chunk_filter.complete_tool_text()
+    backend = str(getattr(request.agent.backend, "name", "") or "")
+    return ModelResponse(text=text, backend=backend)
 
 
 def _generate_backend_response(request: ModelGenerateParams, on_chunk, timeout: float):

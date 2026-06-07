@@ -1,4 +1,4 @@
-"""异常场景测试 - dispatch循环异常处理、memory_push异常场景、failure_introspector规则主链。"""
+"""异常场景测试 - dispatch循环异常处理、memory_push异常场景、failure_analysis规则主链。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -63,7 +63,7 @@ class TestDispatchLoopExceptions:
     def test_failure_introspection_uses_rules(self, tmp_path: Path):
         """失败自省使用同一条规则主链。"""
         from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
-        from agent_py_agent.agent.agent_core.failure_introspector import (
+        from agent_py_agent.agent.agent_core.failure_analysis_service import (
             FailureIntrospection,
             FailureIntrospector,
         )
@@ -90,7 +90,7 @@ class TestDispatchLoopExceptions:
     def test_failure_introspection_does_not_call_agent_run(self, tmp_path: Path):
         """失败自省不额外调用模型。"""
         from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
-        from agent_py_agent.agent.agent_core.failure_introspector import (
+        from agent_py_agent.agent.agent_core.failure_analysis_service import (
             FailureIntrospection,
             FailureIntrospector,
         )
@@ -221,12 +221,12 @@ class TestMemoryPushExceptions:
 
 
 class TestFailureIntrospectorRulePath:
-    """测试 failure_introspector 的规则主链。"""
+    """测试 failure_analysis_service 的规则自省主链。"""
 
     def test_introspector_uses_rules(self, tmp_path: Path):
         """失败自省使用规则分类。"""
         from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
+        from agent_py_agent.agent.agent_core.failure_analysis_service import FailureIntrospector
 
         introspector = FailureIntrospector()
 
@@ -248,7 +248,7 @@ class TestFailureIntrospectorRulePath:
     def test_introspector_agent_run_is_not_called(self, tmp_path: Path):
         """失败自省不额外调用模型。"""
         from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
+        from agent_py_agent.agent.agent_core.failure_analysis_service import FailureIntrospector
 
         agent = MagicMock()
         agent.run.side_effect = RuntimeError("LLM API failed")
@@ -278,7 +278,7 @@ class TestFailureIntrospectorRulePath:
     def test_introspector_invalid_json_response_is_ignored(self, tmp_path: Path):
         """agent 返回内容不参与失败自省。"""
         from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
+        from agent_py_agent.agent.agent_core.failure_analysis_service import FailureIntrospector
 
         agent = MagicMock()
         agent.run.return_value = MagicMock(response="This is not JSON at all")
@@ -307,7 +307,7 @@ class TestFailureIntrospectorRulePath:
     def test_introspector_missing_keys_in_response_is_ignored(self, tmp_path: Path):
         """模型 JSON 不参与失败主链。"""
         from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
+        from agent_py_agent.agent.agent_core.failure_analysis_service import FailureIntrospector
 
         agent = MagicMock()
         # JSON 缺少必需字段
@@ -335,7 +335,7 @@ class TestFailureIntrospectorRulePath:
     def test_introspector_rules_include_params(self, tmp_path: Path):
         """规则分类包含参数建议。"""
         from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
+        from agent_py_agent.agent.agent_core.failure_analysis_service import FailureIntrospector
 
         introspector = FailureIntrospector()
 

@@ -29,7 +29,7 @@ SimpleAgent orchestration tool
 ## 状态和路径
 
 - 权威状态：当前 task workspace 的 `work/agents/<run_id>/canonical_state.json`。
-- 状态机：完成只写 `DONE`；失败/阻塞只写当前协议枚举，不把旧标签或自然语言别名提升为机器状态。
+- 状态机：完成只写 `DONE`；失败/阻塞只写当前协议枚举，不把旧标签、大小写变体或自然语言别名提升为机器状态。
 - 状态判断走 canonical state 和 `subagents.models` 中的 `TaskStatus` /
   `VerificationStatus` helper；旧 `subagents/state_machine.py` 私有转换表已删除，
   避免 `WAIT_CHILD` 等历史状态绕过当前协议。
@@ -38,6 +38,8 @@ SimpleAgent orchestration tool
   读取当前协议集合，未知旧标签只保留为审计文本。
 - 恢复模式和 capability 等待状态也只认当前结构化枚举。未知 `rerun_*` / `takeover_*`
   前缀、`NEEDS_TOOL` 这类旧别名、工具错误正文，都不能触发自动重跑、接管、授权或验收状态变更。
+- 自适应重试拆分父任务时不再写历史自定义状态 `SPLIT`；父任务进入当前协议
+  `TAKEN_OVER`，拆分关系只记录在结构化 `attributes.split_into` 和 `child_ids`。
 - capability request 的打开/终态判断集中在 `model_capabilities.py`。`OPEN` 代表待处理，
   `GRANTED` 代表已授权且可避免重复申请，`GAP` 和 `CLOSED` 是当前终态；旧
   `RESOLVED`、`APPROVED`、`REJECTED` 不再被 kernel、protocol、runner、board 或
@@ -48,6 +50,8 @@ SimpleAgent orchestration tool
 - task rollup：`work/compact/task_rollup.json` 汇总子代理状态和 refs，父代理恢复时先读这里。
 - `agent_name` 是展示名，不是层级或角色事实。默认展示名使用 `agent-d<depth>-<role>-<index>`；
   深度、权限、模板和状态仍只读结构化字段，不能从显示名、中文叫法或英文别名里反推。
+- `role` 选择角色模板时只认明确模板 id 和当前内置别名（例如 `child_coordinator` -> `coordinator`、
+  `leaf_worker` -> `worker`）；不做“字符串里包含 tester/worker 就套模板”的宽匹配。
 - 层级继承状态写在 `attributes.inherited_parent_context`；`goal` 只承载给模型阅读的任务说明和
   父级边界摘要，不承担机器状态判断。
 

@@ -4,19 +4,49 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from .model_helpers import (
-    _float,
-    _tuple_of_dicts,
-    _tuple_of_strings,
-    new_case_id,
-    new_decision_id,
-    new_evidence_id,
-    new_request_id,
-)
+from ..conversation.models import new_id
 
 SCHEMA_VERSION = "collaboration.v1"
 AGENT_CAPABILITY_STATUS_AVAILABLE = "available"
 AGENT_CAPABILITY_STATUS_UNKNOWN = "unknown"
+
+
+def new_case_id() -> str:
+    return new_id("case")
+
+
+def new_request_id() -> str:
+    return new_id("creq")
+
+
+def new_evidence_id() -> str:
+    return new_id("ev")
+
+
+def new_decision_id() -> str:
+    return new_id("cdec")
+
+
+def _tuple_of_strings(value: object) -> tuple[str, ...]:
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value if str(item or "").strip())
+    if value is None:
+        return ()
+    text = str(value).strip()
+    return (text,) if text else ()
+
+
+def _tuple_of_dicts(value: object) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(dict(item) for item in value if isinstance(item, dict))
+
+
+def _float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 @dataclass(frozen=True)

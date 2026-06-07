@@ -8,8 +8,7 @@ from ..orchestration.child_result_index import child_result_index_from_nodes
 from ..orchestration.run_scope import remembered_orchestration_run_ids
 from ..orchestration.scope_resolution import scope_resolution_payload, tree_scope_resolution
 from ..runner.context import current_subagent_run_id
-from .node_rendering import node_from_kernel_run
-from .progress import attach_task_progress
+from .node_rendering import attach_task_progress, node_from_kernel_run
 from .scope_filter import (
     coordination_advice,
     scope_main_visible_snapshot,

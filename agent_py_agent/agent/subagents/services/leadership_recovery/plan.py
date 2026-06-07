@@ -239,7 +239,7 @@ def _is_scope_root(task: SubAgentTask, root_id: str) -> bool:
 
 
 def _leader_is_available(leader: SubAgentTask) -> bool:
-    channel = str(leader.channel_status or "").upper()
+    channel = str(leader.channel_status or "").strip()
     unavailable_statuses = frozenset({
         TaskStatus.FAILED.value,
         TaskStatus.TAKEN_OVER.value,
@@ -250,7 +250,7 @@ def _leader_is_available(leader: SubAgentTask) -> bool:
 
 
 def _parent_is_failed_recovery_source(task: SubAgentTask) -> bool:
-    channel = str(task.channel_status or "").upper()
+    channel = str(task.channel_status or "").strip()
     failed_source_statuses = frozenset({
         TaskStatus.FAILED.value,
         TaskStatus.ABANDONED.value,

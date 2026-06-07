@@ -91,7 +91,7 @@ class TestAdaptiveRetry:
         assert result[1].id == "test-task-1-part-02"
         assert result[0].parent_id == sample_task.id
         assert result[1].parent_id == sample_task.id
-        assert sample_task.status == "SPLIT"
+        assert sample_task.status == "TAKEN_OVER"
 
     def test_adaptive_retry_split_depth_limit(self, sample_task: SubAgentTask) -> None:
         """测试拆分深度限制。"""
@@ -161,7 +161,7 @@ class TestSplitTask:
         assert result[1].parent_id == sample_task.id
         assert result[0].depth == 1
         assert result[1].depth == 1
-        assert sample_task.status == "SPLIT"
+        assert sample_task.status == "TAKEN_OVER"
         assert "split_into" in sample_task.attributes
 
     def test_split_task_inherit_plan(self, sample_task: SubAgentTask) -> None:

@@ -213,7 +213,7 @@ def test_subagent_action_apply_recovers_coordinator_leadership():
 
 def test_subagent_action_apply_excludes_active_parent_from_takeover():
     """LLM: Parent dispatch must never apply takeover_or_reassign to the active parent run itself."""
-    from agent_py_agent.agent.subagents.services.actions.options import ActionApplyOptions
+    from agent_py_agent.agent.subagents.services.actions import ActionApplyOptions
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)

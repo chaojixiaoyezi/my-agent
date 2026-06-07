@@ -12,7 +12,7 @@ from ....subagents.models import (
     SubAgentDueCheckOptions,
     SubAgentLeadershipRecoveryPlanOptions,
 )
-from ....subagents.services.actions.options import ActionApplyOptions
+from ....subagents.services.actions import ActionApplyOptions
 from ....subagents.services.dispatch.params import DispatchRecordParams, DispatchWatchRecordParams
 from .workflow_records import build_workflow_records
 

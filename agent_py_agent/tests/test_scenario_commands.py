@@ -184,6 +184,52 @@ class TestScenarioDispatchLoop:
         assert scenario._cmd_scenario_dispatch(request) is True
         assert sleeps and sleeps[0] > 0
 
+    def test_dispatch_observes_after_cycles_when_background_runner_finishes(self, monkeypatch):
+        """主动 dispatch 轮次用完后，后台 runner 仍可在总预算内完成。"""
+        import agent_py_agent.cli.scenario as scenario
+
+        now = {"value": 1000.0}
+        sleeps: list[float] = []
+        verified = iter([False, False, True])
+        args = SimpleNamespace(
+            capability_config="capability.yaml",
+            skill_dir=None,
+            max_cycles=1,
+            count=1,
+            max_runners=1,
+            dry_run=False,
+            planner=False,
+            timeout=300,
+        )
+        report = SimpleNamespace(summary={}, records=[])
+        request = scenario.ScenarioDispatchRequest(
+            agent=SimpleNamespace(),
+            args=args,
+            paths=SimpleNamespace(config="agent.yaml"),
+            created_via="gateway",
+            gateway_payload={},
+        )
+
+        monkeypatch.setattr(scenario, "load_capability_config", lambda _path: object())
+        monkeypatch.setattr(scenario, "make_capability_router", lambda *_args, **_kwargs: object())
+        monkeypatch.setattr(scenario, "_run_scenario_dispatch_cycle", lambda *_args, **_kwargs: report)
+        monkeypatch.setattr(scenario, "print_dispatch_report", lambda _report: None)
+        monkeypatch.setattr(scenario, "print_scenario_board", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(scenario, "scenario_tasks_verified", lambda *_args, **_kwargs: next(verified))
+        monkeypatch.setattr(scenario, "scenario_tasks_active", lambda *_args, **_kwargs: True, raising=False)
+        monkeypatch.setattr(
+            scenario,
+            "time",
+            SimpleNamespace(
+                monotonic=lambda: now["value"],
+                sleep=lambda seconds: (sleeps.append(seconds), now.__setitem__("value", now["value"] + seconds)),
+            ),
+            raising=False,
+        )
+
+        assert scenario._cmd_scenario_dispatch(request) is True
+        assert sleeps
+
 
 class TestRunScenarioSuite:
     """测试 run_scenario_suite 函数。"""

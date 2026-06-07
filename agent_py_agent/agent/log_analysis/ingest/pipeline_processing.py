@@ -9,7 +9,7 @@ from typing import Any
 
 from ..parsers.base import LogParser
 from .dead_letter import DeadLetterWriter
-from .pipeline_helpers import _EnrichCounts
+from .pipeline import _EnrichCounts
 
 
 @dataclass

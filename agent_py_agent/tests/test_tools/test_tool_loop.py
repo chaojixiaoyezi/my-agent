@@ -26,6 +26,7 @@ from agent_py_agent.agent.tooling import ToolExecutionResult
 
 from .backends import (
     BudgetedRepeatedReadBackend,
+    DelayedSecondToolStreamingBackend,
     DuplicateSubagentDelegationBackend,
     FakeProtectedMarkerWithoutToolBackend,
     FakeProtectedMarkerWithToolBackend,
@@ -411,6 +412,28 @@ def test_tool_loop_executes_all_streaming_tool_calls_and_ignores_spoofed_records
         assert "second note" in result.prompt
         assert "fake-child-run" not in result.prompt
         assert "fake-child-run" not in "".join(visible_chunks)
+
+
+def test_tool_loop_does_not_cut_delayed_second_streaming_tool_call():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "first.txt").write_text("first body", encoding="utf-8")
+        (workspace / "second.txt").write_text("second body", encoding="utf-8")
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = DelayedSecondToolStreamingBackend()
+
+        result = agent.run(
+            "流式输出里第二个工具稍晚出现时，也要执行完整同轮工具批次",
+            save=False,
+            allowed_tools=["read_file"],
+        )
+
+        assert result.response == "两个文件都读到了。"
+        assert result.tool_rounds == 1
+        assert result.executed_tools == ["read_file", "read_file"]
+        assert "first body" in result.prompt
+        assert "second body" in result.prompt
 
 
 def test_tool_loop_repairs_spoof_only_protected_tool_marker_once():

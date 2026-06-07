@@ -146,8 +146,9 @@ def _successful_artifact_write_facts(record: dict[str, object]) -> list[dict[str
 
 def _is_successful_artifact_write(record: dict[str, object], envelope: dict[str, object]) -> bool:
     tool = str(record.get("tool") or "")
-    status = str(envelope.get("status") or "")
-    action = str(envelope.get("action") or "")
+    action = str(envelope.get("action") or envelope.get("operation") or "")
+    if tool not in _ARTIFACT_WRITE_TOOLS and action not in _ARTIFACT_WRITE_ACTIONS:
+        return False
     return bool(_target_refs(envelope))
 
 
@@ -231,3 +232,16 @@ __all__ = [
     "unresolved_runtime_issue_context",
     "unresolved_runtime_issues",
 ]
+
+
+_ARTIFACT_WRITE_TOOLS = frozenset({
+    "apply_patch",
+    "write_file",
+})
+_ARTIFACT_WRITE_ACTIONS = frozenset({
+    "apply_patch",
+    "create_file",
+    "replace_file",
+    "update_file",
+    "write_file",
+})

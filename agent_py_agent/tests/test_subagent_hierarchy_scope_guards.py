@@ -178,8 +178,12 @@ def test_hierarchy_schedule_allows_qa_after_implementation_ready(tmp_path):
         extra_write_roots=[str(build)],
     )
     child = manager.load(manager.load(parent.id).child_ids[0])
+    artifact = build / "index.html"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("ready\n", encoding="utf-8")
     child.status = "DONE"
     child.verification_status = "VERIFIED"
+    child.artifact_refs = [str(artifact)]
     manager.save(child)
 
     result = manager.hierarchy.schedule_child_runs(
@@ -226,8 +230,12 @@ def test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready(tmp_
         agent_name="小小傻妞-leaf",
         extra_write_roots=[str(build)],
     )
+    artifact = build / "index.html"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("ready\n", encoding="utf-8")
     leaf.status = "DONE"
     leaf.verification_status = "VERIFIED"
+    leaf.artifact_refs = [str(artifact)]
     manager.save(leaf)
 
     result = manager.hierarchy.schedule_child_runs(

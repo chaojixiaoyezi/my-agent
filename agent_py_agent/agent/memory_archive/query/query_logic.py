@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -20,30 +20,37 @@ from .archive_io import (
     _read_archive_file,
 )
 from .resume_guidance import ResumeGuidanceRequest, build_resume_guidance
-from .task_sources import task_recovery_read_paths
 
 __all__ = [
+    "ArchiveFilterOptions",
+    "ArchiveQueryRequest",
+    "ArchiveQueryResponse",
     "CollectArchiveRecordsParams",
     "FilterArchiveRecordsParams",
+    "RawArchiveCollectOptions",
+    "ResumeContext",
     "ResumeGuidanceRequest",
+    "apply_filters",
     "archive_filters_from_args",
     "build_resume_guidance",
     "collect_archive_records",
+    "collect_gateway_payloads",
+    "collect_raw_archive_records",
     "collect_resume_task_ids",
+    "collect_task_payloads",
+    "evaluate_filters",
+    "execute_archive_query",
+    "filter_by_fields",
+    "filter_by_level",
+    "filter_by_query_text",
+    "filter_by_time_window",
     "filter_archive_records",
     "local_hit_payload",
+    "paginate_records",
     "resume_local_query",
     "strip_sort_keys",
+    "task_recovery_read_paths",
 ]
-
-
-@dataclass(frozen=True)
-class _ArchiveFilterContext:
-    query_text: str
-    filters: dict[str, str]
-    since_ts: float | None
-    until_ts: float | None
-    level: int | None
 
 
 @dataclass(frozen=True)
@@ -62,6 +69,138 @@ class FilterArchiveRecordsParams:
     since: str | None = None
     until: str | None = None
     level: int | None = None
+
+
+@dataclass(frozen=True)
+class ArchiveFilterOptions:
+    query: str
+    filters: dict[str, str]
+    since: str | None
+    until: str | None
+    level: int | None = None
+
+
+@dataclass
+class ArchiveQueryRequest:
+    """normalized query parameters for archive search."""
+
+    query: str = ""
+    since: str | None = None
+    until: str | None = None
+    level: int | None = None
+    layer: str = "all"
+    date_key: str | None = None
+    limit: int = 100
+    filters: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class ArchiveQueryResponse:
+    """normalized archive search response with pagination info."""
+
+    records: list[dict[str, Any]] = field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 100
+    has_more: bool = False
+
+    @property
+    def pages(self) -> int:
+        """Return total number of pages."""
+        if self.page_size <= 0:
+            return 1
+        return (self.total + self.page_size - 1) // self.page_size
+
+
+@dataclass(frozen=True)
+class RawArchiveCollectOptions:
+    layer: str
+    date_key: str | None
+    limit: int
+    level: int | None = None
+
+
+@dataclass
+class ResumeContext:
+    """context object for memory resume operations."""
+
+    archive_matches: list[dict[str, Any]] = field(default_factory=list)
+    local_hits: list[dict[str, Any]] = field(default_factory=list)
+    task_payloads: list[dict[str, Any]] = field(default_factory=list)
+    gateway_payloads: list[dict[str, Any]] = field(default_factory=list)
+    guidance: dict[str, Any] = field(default_factory=dict)
+
+
+def execute_archive_query(
+    root: Path,
+    request: ArchiveQueryRequest,
+) -> ArchiveQueryResponse:
+
+    records = collect_raw_archive_records(
+        root,
+        RawArchiveCollectOptions(request.layer, request.date_key, request.limit, request.level),
+    )
+    filtered = apply_filters(
+        records,
+        ArchiveFilterOptions(
+            query=request.query,
+            filters=request.filters,
+            since=request.since,
+            until=request.until,
+            level=request.level,
+        ),
+    )
+    return paginate_records(
+        filtered,
+        page=request.page if hasattr(request, "page") else 1,
+        page_size=request.page_size if hasattr(request, "page_size") else 100,
+    )
+
+
+def collect_raw_archive_records(
+    root: Path,
+    options: RawArchiveCollectOptions,
+) -> list[dict[str, Any]]:
+    return collect_archive_records(
+        root,
+        params=CollectArchiveRecordsParams(
+            layer=options.layer,
+            date_key=options.date_key,
+            limit=options.limit,
+            level=options.level,
+        ),
+    )
+
+
+def apply_filters(
+    records: list[dict[str, Any]],
+    options: ArchiveFilterOptions,
+) -> list[dict[str, Any]]:
+    return [
+        record
+        for record in records
+        if evaluate_filters(record, options=options)
+    ]
+
+
+def paginate_records(
+    records: list[dict[str, Any]],
+    *,
+    page: int = 1,
+    page_size: int = 100,
+) -> ArchiveQueryResponse:
+
+    total = len(records)
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_records = records[start:end]
+    return ArchiveQueryResponse(
+        records=page_records,
+        total=total,
+        page=page,
+        page_size=page_size,
+        has_more=end < total,
+    )
 
 
 def collect_archive_records(
@@ -120,21 +259,73 @@ def filter_archive_records(
     level: int | None = None,
 ) -> list[dict[str, Any]]:
     values = params or FilterArchiveRecordsParams(query, filters, since, until, level)
-    query = str(values.query)
-    filters = dict(values.filters or {})
-    query_text = query.strip().lower()
-    context = _ArchiveFilterContext(
-        query_text=query_text,
-        filters=filters,
-        since_ts=_created_at_sort(values.since or "", default=0.0) if values.since else None,
-        until_ts=_until_timestamp(values.until),
-        level=values.level,
+    return apply_filters(
+        records,
+        ArchiveFilterOptions(
+            query=str(values.query),
+            filters=dict(values.filters or {}),
+            since=values.since,
+            until=values.until,
+            level=values.level,
+        ),
     )
-    return [
-        record
-        for record in records
-        if _archive_record_matches(record, context)
-    ]
+
+
+def filter_by_fields(record: dict[str, Any], filters: dict[str, str]) -> bool:
+
+    for field_name, value in filters.items():
+        if str(record.get(field_name, "")) != value:
+            return False
+    return True
+
+
+def filter_by_level(record: dict[str, Any], level: int | None) -> bool:
+
+    if level is None:
+        return True
+    return int(record.get("archive_level", -1)) == int(level)
+
+
+def filter_by_time_window(
+    record: dict[str, Any],
+    since_ts: float | None,
+    until_ts: float | None,
+) -> bool:
+
+    created_at = float(record.get("created_at_sort", 0.0) or 0.0)
+    if since_ts is not None and created_at < since_ts:
+        return False
+    if until_ts is not None and created_at > until_ts:
+        return False
+    return True
+
+
+def filter_by_query_text(record: dict[str, Any], query_text: str) -> bool:
+
+    if not query_text:
+        return True
+    return query_text in _archive_search_text(record)
+
+
+def evaluate_filters(
+    record: dict[str, Any],
+    options: ArchiveFilterOptions,
+) -> bool:
+    if not filter_by_fields(record, options.filters):
+        return False
+    if not filter_by_level(record, options.level):
+        return False
+
+    since_ts = _created_at_sort(options.since or "", default=0.0) if options.since else None
+    until_ts = _created_at_sort(options.until or "", default=0.0) if options.until else None
+    if until_ts is not None and _is_date_only(options.until or ""):
+        until_ts += 86399.999999
+
+    if not filter_by_time_window(record, since_ts, until_ts):
+        return False
+    if not filter_by_query_text(record, options.query.strip().lower()):
+        return False
+    return True
 
 def resume_local_query(args, archive_matches: list[dict[str, Any]]) -> str:
     for value in (args.query, args.run_id, args.request_id, args.session_id, args.task_id):
@@ -200,33 +391,6 @@ def strip_sort_keys(payload: Any) -> Any:
         return {key: strip_sort_keys(value) for key, value in payload.items() if key != "created_at_sort"}
     return payload
 
-def _until_timestamp(until: str | None) -> float | None:
-    if not until:
-        return None
-    timestamp = _created_at_sort(until, default=0.0)
-    if _is_date_only(until):
-        timestamp += 86399.999999
-    return timestamp
-
-def _archive_record_matches(
-    record: dict[str, Any],
-    context: _ArchiveFilterContext,
-) -> bool:
-    created_at = float(record.get("created_at_sort", 0.0) or 0.0)
-    return (
-        _matches_filters(record, context.filters)
-        and _matches_level(record, context.level)
-        and (context.since_ts is None or created_at >= context.since_ts)
-        and (context.until_ts is None or created_at <= context.until_ts)
-        and (not context.query_text or context.query_text in _archive_search_text(record))
-    )
-
-def _matches_filters(record: dict[str, Any], filters: dict[str, str]) -> bool:
-    return all(str(record.get(field, "")) == value for field, value in filters.items())
-
-def _matches_level(record: dict[str, Any], level: int | None) -> bool:
-    return level is None or int(record.get("archive_level", -1)) == int(level)
-
 def _first_record_id(record: dict[str, Any]) -> str:
     for field in ("run_id", "task_id", "request_id", "session_id"):
         text = str(record.get(field, "") or "").strip()
@@ -271,6 +435,27 @@ def _missing_or_home_task_payload(agent, run_id: str) -> dict[str, Any]:
     if payload is not None:
         return payload
     return {"run_id": run_id, "exists": False, "error": "task not found"}
+
+
+def task_recovery_read_paths(task: Any) -> list[str]:
+    """Return compact-first task fact sources for resume."""
+
+    return _dedupe_strings(
+        [
+            getattr(task, "checkpoint_json", ""),
+            getattr(task, "status_report_json", ""),
+            getattr(task, "progress_md", ""),
+            getattr(task, "decision_ledger_json", ""),
+            getattr(task, "failing_tests_json", ""),
+            getattr(task, "next_actions_json", ""),
+            getattr(task, "status_file", ""),
+            getattr(task, "work_log_file", ""),
+            getattr(task, "handoff_file", ""),
+            getattr(task, "acceptance_file", ""),
+            getattr(task, "test_checklist_file", ""),
+            getattr(task, "output_json", ""),
+        ]
+    )
 
 
 def _task_read_paths(task) -> list[str]:

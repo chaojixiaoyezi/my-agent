@@ -9,9 +9,7 @@ from typing import Any
 
 from ..parsers.base import LogParser
 from .dead_letter import DeadLetterWriter
-from .pipeline import IngestResult
-from .pipeline_helpers import WriteManifestParams, _EnrichCounts
-from .pipeline_helpers import write_manifest as _write_manifest
+from .pipeline import IngestResult, WriteManifestParams, _EnrichCounts, write_manifest
 
 
 @dataclass
@@ -67,7 +65,7 @@ def finalize_prepared_ingest(request: PreparedFinalize) -> IngestResult:
 
 def finalize_ingest_result(params: FinalizeIngestParams) -> IngestResult:
     """Write manifest, finish dedup batch, commit checkpoint, return IngestResult."""
-    manifest_path = _write_manifest(_manifest_params(params))
+    manifest_path = write_manifest(_manifest_params(params))
     _finish_dedup_batch(params, manifest_path)
     checkpoint = _commit_checkpoint(params)
 

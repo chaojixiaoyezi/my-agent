@@ -32,6 +32,10 @@
     `output_refs` 复制给所有 child。共享目标会记录到 `shared_requested_output_*`，
     每个 child 获得 task-local `work/child_outputs/...` 独立结果槽，避免真实 runner
     把多个子代理产物写成同一个文件。
+  - 子代理 runner finalize 现在优先识别当前 run 的
+    `[MAIN_AGENT_DELIVERY_COMPLETE]` 成功块：如果 runtime closeout 已经验收 task
+    output 产物，就合成标准 `DONE` / `VERIFIED` 子代理结果，不再进入
+    `SUBAGENT_RESULT` repair 轮把 task output 误判成源目录缺文件。
 
 ## 2026-06-06 主链路小跳转清理
 

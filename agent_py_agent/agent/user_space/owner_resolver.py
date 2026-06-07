@@ -69,9 +69,6 @@ class OwnerHomeResult:
     workspace_dir: Path
     artifacts_dir: Path
     audit_dir: Path
-    blobs_dir: Path
-    blob_tool_outputs_dir: Path
-    blob_files_dir: Path
     data_dir: Path
     logs_dir: Path
     cache_dir: Path
@@ -145,9 +142,6 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
         owner_workspace_dir=owner.workspace_dir,
         owner_artifacts_dir=owner.artifacts_dir,
         owner_audit_dir=owner.audit_dir,
-        owner_blobs_dir=owner.blobs_dir,
-        owner_blob_tool_outputs_dir=owner.blob_tool_outputs_dir,
-        owner_blob_files_dir=owner.blob_files_dir,
         owner_data_dir=owner.data_dir,
         owner_logs_dir=owner.logs_dir,
         owner_cache_dir=owner.cache_dir,
@@ -200,9 +194,6 @@ def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> O
         workspace_dir=home_dir / "workspace",
         artifacts_dir=home_dir / "artifacts",
         audit_dir=home_dir / "audit",
-        blobs_dir=home_dir / "blobs",
-        blob_tool_outputs_dir=home_dir / "blobs" / "tool_outputs",
-        blob_files_dir=home_dir / "blobs" / "files",
         data_dir=home_dir / "data",
         logs_dir=home_dir / "logs",
         cache_dir=home_dir / "cache",
@@ -233,8 +224,6 @@ def _owner_directories(result: OwnerHomeResult) -> tuple[Path, ...]:
         result.workspace_dir,
         result.artifacts_dir,
         result.audit_dir,
-        result.blob_tool_outputs_dir,
-        result.blob_files_dir,
         result.data_dir,
         result.logs_dir,
         result.cache_dir,

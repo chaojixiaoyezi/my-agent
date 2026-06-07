@@ -6,10 +6,70 @@ from __future__ import annotations
 每个 handler 只处理一种动作写回，公共审计字段放在 ActionHandlerContext 里。
 """
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .context import ActionHandlerContext
-from .params import RecordAfterTaskActionParams
+if TYPE_CHECKING:
+    from ...models import SubAgentTask
+    from ...reports import ActionPlanItem
+
+
+@dataclass(frozen=True)
+class ActionHandlerContext:
+    """Common audit fields for one action application."""
+
+    before_status: str
+    before_channel_status: str
+    now: float
+    take_over_by: str = ""
+    locked_files: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class CoordinatorHandoffErrorRequest:
+    service: object
+    action: object
+    task: object
+    ctx: ActionHandlerContext
+    message: str
+
+
+@dataclass(frozen=True)
+class RecordAfterTaskActionParams:
+    """Params bundle for creating a post-mutation action apply record."""
+
+    action: ActionPlanItem
+    task: SubAgentTask
+    before_status: str
+    before_channel_status: str
+    message: str
+    evidence_paths: list[str] | None = None
+
+
+def coordinator_handoff_error_record(request: CoordinatorHandoffErrorRequest):
+    from ...reports import ActionApplyRecord
+
+    service = request.service
+    action = request.action
+    task = request.task
+    ctx = request.ctx
+    return ActionApplyRecord(
+        id=service.manager._new_id("apply"),
+        action_id=action.id,
+        run_id=action.run_id,
+        action=action.action,
+        dry_run=False,
+        applied=False,
+        ok=False,
+        message=request.message,
+        before_status=ctx.before_status,
+        after_status=ctx.before_status,
+        before_channel_status=ctx.before_channel_status,
+        after_channel_status=ctx.before_channel_status,
+        evidence_paths=[task.task_dir],
+        created_at=ctx.now,
+    )
 
 
 def apply_probe_or_repair_channel(service, action, task, ctx: ActionHandlerContext):

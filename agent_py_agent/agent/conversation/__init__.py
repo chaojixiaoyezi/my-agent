@@ -12,10 +12,10 @@ from .models import (
     ThreadTaskLink,
     WakeSignal,
 )
-from .models_guidance import GuidanceEntry
 from .runtime_channel import ChannelMessageRuntime
 from .runtime_scheduler import BackgroundMainAgentScheduler
 from .runtime_worker import BackgroundMainAgentRuntime, BackgroundRunRequest
+from .store_guidance import GuidanceEntry
 from .store_context import ConversationStore
 
 __all__ = [

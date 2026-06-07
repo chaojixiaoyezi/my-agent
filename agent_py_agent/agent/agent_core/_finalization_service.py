@@ -27,7 +27,9 @@ from .delivery_closeout.closeout import (
     MainAgentDeliveryCloseoutRequest,
     main_agent_delivery_closeout_response,
 )
+from .delivery_closeout.artifacts import _required_artifacts
 from .delivery_closeout.uncontracted import _current_run_task_output_artifacts
+from .delivery_completion_soft_hint import target_coverage_blocks_delivery_auto_closeout
 from .finalization_compact_auto import compact_auto_cycle_fields
 from .model.usage import input_token_usage, output_token_usage
 from .models import AgentRunResult
@@ -336,6 +338,10 @@ def _tool_loop_params_from_finalize_context(ctx: FinalizeContext) -> ToolLoopExe
 
 def _has_final_closeout_candidate(params: ToolLoopExecuteParams, agent: object) -> bool:
     if _delivery_contract_present(params):
+        if target_coverage_blocks_delivery_auto_closeout(agent, params):
+            return False
+        if not _required_delivery_artifacts_present(params, agent):
+            return False
         return _has_successful_delivery_record(params)
     workspace_root = Path(getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", "."))
     return bool(_current_run_task_output_artifacts(params, workspace_root=workspace_root.expanduser().resolve(strict=False)))
@@ -348,11 +354,40 @@ def _delivery_contract_present(params: ToolLoopExecuteParams) -> bool:
     return isinstance(attrs.get("delivery_contract"), dict) and bool(attrs.get("delivery_contract"))
 
 
+def _required_delivery_artifacts_present(params: ToolLoopExecuteParams, agent: object) -> bool:
+    artifacts = _required_artifacts(_delivery_contract(params))
+    if not artifacts:
+        return True
+    paths = [_contract_artifact_path(item, _candidate_workspace_root(agent)) for item in artifacts]
+    return bool(paths) and all(path is not None and path.exists() for path in paths)
+
+
+def _delivery_contract(params: ToolLoopExecuteParams) -> dict[str, object]:
+    if isinstance(params.delivery_contract, dict):
+        return dict(params.delivery_contract)
+    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+    value = attrs.get("delivery_contract")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _candidate_workspace_root(agent: object) -> Path:
+    root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", ".")
+    return Path(root).expanduser().resolve(strict=False)
+
+
+def _contract_artifact_path(item: dict[str, object], workspace_root: Path) -> Path | None:
+    raw_path = str(item.get("preferred_path") or item.get("path") or "").strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path).expanduser()
+    return path.resolve(strict=False) if path.is_absolute() else (workspace_root / path).resolve(strict=False)
+
+
 def _has_successful_delivery_record(params: ToolLoopExecuteParams) -> bool:
     for record in list(params.archive_tool_calls or []):
         if not isinstance(record, dict) or record.get("ok") is not True:
             continue
-        if str(record.get("tool") or "").strip() in {"write_file", "apply_patch", "run_command", "controlled_exec", "read_file", "read_artifact"}:
+        if str(record.get("tool") or "").strip() in {"write_file", "apply_patch", "run_command", "controlled_exec"}:
             return True
     return False
 

@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-"""Subagent task and learning-candidate dataclasses."""
+"""Subagent task, quality, and learning-candidate dataclasses."""
 
 from dataclasses import dataclass, field
 
@@ -11,8 +11,93 @@ from .model_capabilities import (
     CapabilityRequest,
     VerificationEvidence,
 )
-from .model_records import ChannelProbeCheck, TakeoverRecord
-from .quality_models import ContextManifest, QualityContract
+
+
+@dataclass
+class QualityContract:
+    """Structured quality bar passed from the parent session to a worker."""
+
+    user_visible_goal: str = ""
+    benchmark_sample: str = ""
+    quality_bar: str = ""
+    failure_conditions: list[str] = field(default_factory=list)
+    forbidden_delivery: list[str] = field(default_factory=list)
+    must_check: list[str] = field(default_factory=list)
+    sampling_plan: list[str] = field(default_factory=list)
+    evidence_required: list[str] = field(default_factory=list)
+    risk_report_required: str = ""
+    allowed_degradation: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ContextManifest:
+    """Manifest describing the focused context packs given to a worker."""
+
+    core_pack_version: str = "subagent-quality-contract-v1"
+    task_pack_refs: list[str] = field(default_factory=list)
+    role_pack: str = ""
+    required_read_paths: list[str] = field(default_factory=list)
+    hint_read_paths: list[str] = field(default_factory=list)
+    quality_contract_ref: str = ""
+    omitted_context: list[str] = field(default_factory=list)
+    token_budget: int = 0
+
+
+@dataclass
+class WorkOrderValidation:
+    """Validation result for a subagent work-order directory."""
+
+    run_id: str
+    ok: bool
+    missing: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class TakeoverRecord:
+    """Record of a parent/supervisor taking over a subagent task."""
+
+    id: str
+    run_id: str
+    take_over_by: str
+    reason: str
+    locked_files: list[str] = field(default_factory=list)
+    previous_owner: str = ""
+    created_at: float = 0.0
+
+
+@dataclass
+class ChannelProbeCheck:
+    """One health check item in a channel probe."""
+
+    name: str
+    ok: bool
+    summary: str
+    severity: str = "P1"
+    evidence_path: str = ""
+    error: str = ""
+    created_at: float = 0.0
+
+
+@dataclass
+class ChannelProbeResult:
+    """Channel probe result for one subagent run."""
+
+    run_id: str
+    channel_status: str
+    checks: list[ChannelProbeCheck]
+    task_dir: str = ""
+    goal: str = ""
+    created_at: float = 0.0
+
+
+@dataclass
+class ChannelProbeReport:
+    """Batch channel probe report."""
+
+    generated_at: float
+    summary: dict[str, int]
+    results: list[ChannelProbeResult]
 
 
 @dataclass

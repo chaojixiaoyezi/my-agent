@@ -64,7 +64,7 @@ def list_temporary_grants(home: MyAgentHomePaths, *, status: str = "") -> list[O
 
 
 def list_temporary_grants_report(home: MyAgentHomePaths, *, status: str = "") -> TemporaryGrantsReport:
-    wanted = str(status or "").strip().lower()
+    wanted = str(status or "").strip()
     grants: list[OwnerTemporaryGrant] = []
     load_errors: list[dict[str, object]] = []
     for path in sorted(home.owner_temporary_grants_dir.glob("*.json")):
@@ -73,7 +73,7 @@ def list_temporary_grants_report(home: MyAgentHomePaths, *, status: str = "") ->
             load_errors.append(report.load_error)
             continue
         row = _grant_from_payload(path, report.payload)
-        if not wanted or row.status.lower() == wanted:
+        if not wanted or row.status == wanted:
             grants.append(row)
     return TemporaryGrantsReport(grants, load_errors)
 

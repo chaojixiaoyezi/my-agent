@@ -26,14 +26,14 @@ def test_role_normalization_does_not_map_legacy_names():
     assert normalize_subagent_role("custom-reviewer") == "custom-reviewer"
 
 
-def test_natural_hierarchy_role_names_resolve_to_template_ids():
+def test_structured_hierarchy_role_aliases_resolve_to_template_ids():
     assert role_template_id_for_role("child_coordinator") == "coordinator"
     assert role_template_id_for_role("grandchild-coordinator") == "coordinator"
     assert role_template_id_for_role("leaf_worker") == "worker"
-    assert role_template_id_for_role("qa_tester") == "tester"
+    assert role_template_id_for_role("qa_tester") == ""
 
 
-def test_create_run_uses_template_defaults_after_natural_role_resolution(tmp_path):
+def test_create_run_uses_template_defaults_after_structured_role_alias(tmp_path):
     manager = SubAgentManager(tmp_path)
 
     task = manager.create_run(

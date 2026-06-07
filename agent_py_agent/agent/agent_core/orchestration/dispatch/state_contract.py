@@ -179,4 +179,4 @@ def _background_start_running(task: object, status: str) -> bool:
     background = attrs.get("background_start")
     if not isinstance(background, dict):
         return False
-    return str(background.get("status") or "").strip().lower() in {"launching", "running"}
+    return str(background.get("status") or "").strip() in {"launching", "running"}

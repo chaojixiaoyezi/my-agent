@@ -7,6 +7,7 @@ from ..artifacts.registry import ArtifactRegistration, register_artifact
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..settings.defaults import default_config_int
 from .runtime.owner_roots import runtime_owner_root
+from .run_task_workspace_writer import current_run_task_work_dir, current_run_task_workspace_root
 from .tool_loop.recovery import runtime_run_id, runtime_run_scope
 from .tool_loop.round_execution import ToolCallRecordParams
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
@@ -15,7 +16,7 @@ from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dict[str, object]:
     call_id = f"{record.tool_rounds}-{record.idx}"
     request = ExternalizeToolOutputRequest(
-        root=runtime_owner_root(agent),
+        root=_tool_output_archive_root(agent, record.params),
         tool=record.result.tool,
         call_id=call_id,
         output=record.result.output,
@@ -43,6 +44,13 @@ def _config_int(agent: object, key: str) -> int:
         return int(getattr(agent.config, key))
     except (AttributeError, TypeError, ValueError):
         return default_config_int(key)
+
+
+def _tool_output_archive_root(agent: object, params: object) -> Path:
+    work_dir = current_run_task_work_dir(agent, params)
+    if work_dir is not None:
+        return work_dir
+    return runtime_owner_root(agent)
 
 
 def _attach_gate_and_refs(output_record: dict[str, object], result: object) -> None:
@@ -73,7 +81,7 @@ def _register_tool_result_artifacts(
         return
     scope = output_record.get("run_scope")
     scope = scope if isinstance(scope, dict) else {}
-    workspace_root = Path(getattr(agent, "root", ".")).expanduser().resolve(strict=False)
+    workspace_root = _artifact_registry_root(agent, record.params)
     for ref in refs:
         if not isinstance(ref, dict):
             continue
@@ -97,6 +105,13 @@ def _register_tool_result_artifacts(
         output_record.setdefault("artifact_registry_refs", [])
         if isinstance(output_record["artifact_registry_refs"], list):
             output_record["artifact_registry_refs"].append(registered.to_dict())
+
+
+def _artifact_registry_root(agent: object, params: object) -> Path:
+    task_root = current_run_task_workspace_root(agent, params)
+    if task_root is not None:
+        return task_root
+    return runtime_owner_root(agent)
 
 
 def _existing_file_ref(value: object) -> Path | None:

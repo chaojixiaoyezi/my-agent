@@ -35,7 +35,7 @@ def create_run_params(
     if is_explicit_root:
         workflow_mode = "off"
         allowed_tools = explicit_root_allowed_tools(allowed_tools)
-    elif _should_disable_generic_workflow_for_concrete_worker(raw_params, goal, role, workflow_mode):
+    elif _should_disable_generic_workflow_for_concrete_worker(raw_params, goal, role, workflow_mode, role_template_dirs):
         workflow_mode = "off"
         if role not in {"child_worker", "leaf_worker"}:
             role = "worker"
@@ -160,10 +160,11 @@ def _should_disable_generic_workflow_for_concrete_worker(
     goal: str,
     role: str,
     workflow_mode: str,
+    role_template_dirs: object = None,
 ) -> bool:
     if workflow_mode != "auto":
         return False
-    if not role_allows_direct_product_work(role):
+    if not role_allows_direct_product_work(role, role_template_dirs):
         return False
     if _positive_int(raw_params.get("count"), default=1) <= 0:
         return False

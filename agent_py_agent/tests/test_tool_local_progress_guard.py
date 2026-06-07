@@ -92,6 +92,33 @@ def test_local_progress_guard_resets_when_work_progress_fingerprint_changes(tmp_
     assert has_required_local_progress_guard(agent, params, exploratory_calls) is False
 
 
+def test_local_progress_guard_state_prefers_current_task_work_dir(tmp_path: Path):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.agent_core.tool_guard.local_progress import has_required_local_progress_guard
+
+    workspace_root = tmp_path / "source-workspace"
+    task_root = tmp_path / "tasks" / "2026-06-07" / "delivery"
+    work_dir = task_root / "work"
+    _write_closeout(task_root, _closeout_payload(work_progress_fingerprint="same-progress"))
+    params = replace(
+        _params(),
+        task_attributes={
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(task_root / "output"),
+                "work_dir": str(work_dir),
+            }
+        },
+    )
+    agent = SimpleNamespace(root=workspace_root)
+
+    assert has_required_local_progress_guard(agent, params, [{"tool": "read_file", "path": "input.txt"}]) is False
+
+    assert (work_dir / ".agent_delivery" / "local_progress_guard.json").exists()
+    assert not (workspace_root / ".agent_delivery" / "local_progress_guard.json").exists()
+
+
 def test_local_progress_guard_allows_local_progressive_calls(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_guard.local_progress import (
         has_required_local_progress_guard,

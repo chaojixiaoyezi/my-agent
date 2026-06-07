@@ -96,7 +96,7 @@ def _collect_transition_findings(
 
 
 def _collect_terminal_action_findings(snapshot: StateEventLedgerSnapshot, findings: list[GateFinding]) -> None:
-    status = str(snapshot.current_status or "").strip().upper()
+    status = str(snapshot.current_status or "").strip()
     action = str(snapshot.next_action or "").strip().lower()
     if status in _TERMINAL_STATUSES and action in _ACTION_EVENTS:
         findings.append(GateFinding("STATE_EVENT_LEDGER_TERMINAL_ACTION_BLOCKED", evidence={"status": status}))

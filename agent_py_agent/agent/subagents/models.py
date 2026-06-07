@@ -19,30 +19,29 @@ from .model_capabilities import (
     CapabilityRequest,
     VerificationEvidence,
 )
-from .model_records import (
-    ChannelProbeCheck,
-    ChannelProbeReport,
-    ChannelProbeResult,
-    TakeoverRecord,
-    WorkOrderValidation,
-)
 from .model_runtime import (
     SubAgentExecutionContext,
     SubAgentParsedOutput,
     SubAgentRunnerResult,
 )
 from .model_task import (
+    ChannelProbeCheck,
+    ChannelProbeReport,
+    ChannelProbeResult,
+    ContextManifest,
     EvidencePacket,
     FailureHandoff,
     Finding,
     InheritanceManifest,
     LearningCandidate,
+    QualityContract,
     RuntimeIdentity,
     SecuritySignal,
     StatusReport,
     SubAgentTask,
+    TakeoverRecord,
+    WorkOrderValidation,
 )
-from .quality_models import ContextManifest, QualityContract
 
 
 class TaskStatus(str, Enum):
@@ -143,7 +142,7 @@ SUBAGENT_DISPATCH_READY_STATUSES = frozenset({
 
 def normalize_task_status(value: object) -> str:
     """Return a current protocol status or fail closed for unknown raw text."""
-    text = str(value or "").strip().upper()
+    text = str(value or "").strip()
     if text in SUBAGENT_TASK_STATUSES:
         return text
     raise ValueError("subagent_status_invalid")
@@ -151,7 +150,7 @@ def normalize_task_status(value: object) -> str:
 
 def normalize_verification_status(value: object) -> str:
     """Return a current verification status or fail closed for unknown raw text."""
-    text = str(value or "").strip().upper()
+    text = str(value or "").strip()
     if text in SUBAGENT_VERIFICATION_STATUSES:
         return text
     raise ValueError("subagent_verification_status_invalid")

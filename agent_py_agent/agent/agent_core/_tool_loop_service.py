@@ -6,9 +6,11 @@ from dataclasses import dataclass
 
 from ..backends import ModelResponse
 from ..backends.errors import is_empty_provider_response_error
+from ..prompting_parts.builder import ToolSections
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ._runtime_params import ToolLoopExecuteParams
+from .delivery_contract_prompting import render_delivery_contract_section
 from .delivery_completion_soft_hint import maybe_append_delivery_completion_soft_hint
 from .orchestration.shared_context import (
     refresh_parent_shared_context_cache,
@@ -16,18 +18,25 @@ from .orchestration.shared_context import (
 )
 from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
 from .runner.context import current_task_attributes
+from .runner.stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_started
 from .runtime.live_archive import (
     archive_tool_call_if_enabled,
     update_runtime_fact_progress_if_enabled,
 )
+from .runtime.guidance import inject_pending_guidance
 from .subagent.attempt_guard import stale_subagent_attempt_message
 from .tool_call_archive_record import archive_tool_call_record
+from .tool_call_runtime import (
+    ToolCallRuntimeRequest,
+    execute_traced_tool_call,
+    guarded_tool_call_result,
+)
 from .tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .tool_context.reducer import render_tool_result_for_live_prompt
 from .tool_guard.call_guardrail import record_tool_guard_observation
 from .tool_guard.loop_hints import append_tool_guardrail_action_block_hint
+from .tool_context.window import window_tool_context_params
 from .tool_loop.completion import ToolRoundCompletionRequest, completion_response_after_tool_round
-from .tool_loop.prompting import build_tool_loop_prompt, next_tool_loop_model_response
 from .tool_loop.recovery import append_long_content_recovery_context, without_tool_call_after_limit
 from .tool_loop.response_decision import (
     ToolLoopRepairCounters,
@@ -40,7 +49,7 @@ from .tool_loop.round_execution import (
     ToolRoundExecutionRequest,
     execute_tool_round,
 )
-from .tool_loop.tool_call import execute_one_tool_call
+from .tool_loop.recovery import payload_with_runtime_scope
 from .tool_model_generation import ModelGenerateParams, generate_model_response
 from .tool_runtime_ledger import persist_tool_runtime_ledger
 
@@ -102,6 +111,80 @@ def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
             "请基于这些已完成结果继续：任务未完成就调用下一步工具，任务已完成才给最终回答。不要从头重复读取同一批材料。",
         ]
     )
+
+
+def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
+    inject_pending_guidance(agent, params)
+    window_tool_context_params(agent, params)
+    return agent.prompts.build(
+        params.user_prompt,
+        params.memories,
+        inject=_runtime_injections_with_delivery_contract(params),
+        prompt_files=params.prompt_files,
+        system_prompt_override=params.system_prompt_override,
+        context_scope=params.context_scope,
+        tools=ToolSections(
+            tool_catalog_section=params.tool_catalog_section,
+            tool_recommendations_section=params.tool_recommendations_section,
+            tool_context=params.tool_context,
+        ),
+    )
+
+
+def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams) -> list:
+    if not isinstance(params.delivery_contract, dict):
+        return params.runtime_injections
+    return [*params.runtime_injections, render_delivery_contract_section(params.delivery_contract)]
+
+
+def next_tool_loop_model_response(agent, params: ToolLoopExecuteParams, tool_rounds: int):
+    prompt = build_tool_loop_prompt(agent, params)
+    response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt=prompt,
+            tool_rounds=tool_rounds,
+        )
+    )
+    return prompt, response
+
+
+def execute_one_tool_call(agent, request: ToolCallExecuteParams):
+    sentinel = object()
+    previous = getattr(agent, "_current_tool_loop_params", sentinel)
+    agent._current_tool_loop_params = request.params
+    try:
+        return _execute_scoped_tool_call(agent, request)
+    finally:
+        _restore_tool_loop_params(agent, previous, sentinel)
+
+
+def _execute_scoped_tool_call(agent, request: ToolCallExecuteParams):
+    payload = payload_with_runtime_scope(agent, request.params, request.payload)
+    trace_request = RunnerToolStageTraceRequest(
+        agent=agent,
+        params=request.params,
+        tool_rounds=request.tool_rounds,
+        idx=request.idx,
+        payload=payload,
+    )
+    trace_runner_tool_call_started(trace_request)
+    runtime_request = ToolCallRuntimeRequest(agent, request, payload, trace_request)
+    guard_result = guarded_tool_call_result(runtime_request)
+    if guard_result is not None:
+        return guard_result
+    return execute_traced_tool_call(runtime_request)
+
+
+def _restore_tool_loop_params(agent, previous: object, sentinel: object) -> None:
+    if previous is sentinel:
+        try:
+            delattr(agent, "_current_tool_loop_params")
+        except AttributeError:
+            pass
+        return
+    agent._current_tool_loop_params = previous
 
 
 class ToolLoopService:

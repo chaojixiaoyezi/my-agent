@@ -1,4 +1,4 @@
-"""检测器规则测试 - rules.py 规则匹配、告警触发、阈值判断。"""
+"""检测器规则测试 - 包入口规则匹配、告警触发、阈值判断。"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_py_agent.agent.log_analysis.analytics.baselines import SecurityBaselines
-from agent_py_agent.agent.log_analysis.analytics.detectors.rules import (
+from agent_py_agent.agent.log_analysis.analytics.detectors import (
     DETECTORS,
     _dedupe_findings,
     _evidence_id,

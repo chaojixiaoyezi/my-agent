@@ -289,7 +289,7 @@ def _is_root_task_link(link, current_request_id: str) -> bool:
     task_id = str(getattr(link, "task_id", "") or "").strip()
     if not task_id or task_id == current_request_id or task_id.startswith("subagent-"):
         return False
-    status = str(getattr(link, "status", "") or "").strip().lower()
+    status = str(getattr(link, "status", "") or "").strip()
     return status == "active"
 
 

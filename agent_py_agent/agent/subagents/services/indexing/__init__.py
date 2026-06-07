@@ -1,6 +1,6 @@
 """Subagent indexing service package."""
 
-from .params import DataclassRecordIndexParams, IndexReportParams, LocalRecordParams
+from .records import DataclassRecordIndexParams, IndexReportParams, LocalRecordParams
 from .service import SubAgentIndexingService
 
 __all__ = [

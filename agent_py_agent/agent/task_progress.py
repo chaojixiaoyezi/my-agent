@@ -568,8 +568,7 @@ def task_progress_status_is_done(value: object) -> bool:
 
 def normalize_task_progress_status(value: object) -> str:
     text = str(value or "").strip()
-    normalized = text.lower()
-    return normalized if normalized in TASK_PROGRESS_KNOWN_STATUSES else text or "pending"
+    return text if text in TASK_PROGRESS_KNOWN_STATUSES else text or "pending"
 
 
 def _merge_key(item: dict[str, Any]) -> str:

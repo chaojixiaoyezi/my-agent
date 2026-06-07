@@ -6,6 +6,7 @@ from typing import ClassVar
 
 from ...backends import ModelResponse
 from .._runtime_params import ToolLoopExecuteParams
+from ..delivery_completion_soft_hint import target_coverage_blocks_delivery_auto_closeout
 from ..delivery_closeout.closeout import (
     MainAgentDeliveryCloseoutRequest,
     main_agent_delivery_closeout_response,
@@ -77,7 +78,9 @@ def _soft_wait_response(request: ToolRoundCompletionRequest) -> ModelResponse:
 def _round_delivery_auto_closeout_ready(request: ToolRoundCompletionRequest) -> bool:
     if _round_submitted_for_acceptance(request):
         return False
-    return any(str(item).startswith("[delivery-completion-soft-hint]") for item in getattr(request.params, "tool_context", []) or [])
+    if not any(str(item).startswith("[delivery-completion-soft-hint]") for item in getattr(request.params, "tool_context", []) or []):
+        return False
+    return not target_coverage_blocks_delivery_auto_closeout(request.agent, request.params)
 
 
 def _is_task_local_round(request: ToolRoundCompletionRequest) -> bool:

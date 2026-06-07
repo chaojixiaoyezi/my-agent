@@ -120,6 +120,52 @@ def test_runtime_materialization_entry_does_not_repair_structural_output_contrac
         assert params.delivery_contract["artifacts"][0]["preferred_path"] == "lab_outputs/compact-stress/report.md"
 
 
+def test_runtime_materialization_skips_task_local_internal_prompt_paths() -> None:
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_materialized_delivery_contract,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        backend = _SlowRepairingCoverageMaterializerBackend()
+        agent = SimpleNamespace(backend=backend, root=workspace, runtime_guard_policy=None)
+        prompt = (
+            "内部执行上下文示例：execution_context.output、output.json、runner_result.json；"
+            "真正任务是读取 input.txt 并写 output/summary.md。"
+        )
+
+        params = run_params_with_materialized_delivery_contract(
+            agent,
+            prompt,
+            RunParams(source="subagent_run", save=True, context_scope="task_local"),
+        )
+
+        assert backend.materializer_calls == 0
+        assert backend.prompts == []
+        assert params.delivery_contract is None
+
+
+def test_runtime_materialization_skips_control_plane_internal_prompt_paths() -> None:
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_materialized_delivery_contract,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        backend = _SlowRepairingCoverageMaterializerBackend()
+        agent = SimpleNamespace(backend=backend, root=workspace, runtime_guard_policy=None)
+
+        params = run_params_with_materialized_delivery_contract(
+            agent,
+            "父级 planner 内部模板里可能出现 output.json，但这不是用户交付物。",
+            RunParams(source="planner", save=True, context_scope="control_plane"),
+        )
+
+        assert backend.materializer_calls == 0
+        assert backend.prompts == []
+        assert params.delivery_contract is None
+
+
 class _MaterializingDeliveryBackend:
     name = "fake_materializing_delivery_backend"
 

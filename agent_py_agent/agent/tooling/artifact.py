@@ -79,7 +79,7 @@ class ReadArtifactTool(BaseTool):
         ],
         keywords=["artifact", "tool_output", "externalized", "read_artifact", "checkpoint"],
         parameters={
-            "artifact_ref": "artifact path、sha256、scoped_call_id 或 call_id；必须能在 tool_outputs/index.jsonl 中命中",
+            "artifact_ref": "artifact path、sha256、scoped_call_id 或 call_id；必须能在当前 task work 的 tool_outputs/index.jsonl 中命中",
             "offset": "从正文第几个字符开始读取，默认 0",
             "max_chars": "最多读取多少字符；0 表示读取全部，默认读取 agent_config.yaml 的 memory_artifact_default_read_chars",
             "mode": "读取模式：slice/head/tail/search；默认 slice",
@@ -89,7 +89,7 @@ class ReadArtifactTool(BaseTool):
             "request_id": "可选；读取短 call_id 时用于限制当前请求作用域，通常由系统自动注入",
         },
         examples=[
-            '{"tool": "read_artifact", "artifact_ref": "C:/repo/blobs/tool_outputs/read_file-call-abc.json", "offset": 0, "max_chars": 4000}',
+            '{"tool": "read_artifact", "artifact_ref": "run-123:2-1", "offset": 0, "max_chars": 4000}',
         ],
     )
 
@@ -134,7 +134,7 @@ def _read_request_from_params(
     default_read_chars: int,
 ) -> ReadToolOutputArtifactRequest:
     return ReadToolOutputArtifactRequest(
-        root=root,
+        root=_artifact_read_root(root, params),
         artifact_ref=str(params.get("artifact_ref") or ""),
         offset=int(params.get("offset", 0) or 0),
         max_chars=int(params.get("max_chars", default_read_chars) or 0),
@@ -144,6 +144,16 @@ def _read_request_from_params(
         task_id=str(params.get("task_id") or ""),
         request_id=str(params.get("request_id") or ""),
     )
+
+
+def _artifact_read_root(root: Path, params: dict[str, Any]) -> Path:
+    task_work = str(params.get("__task_work_dir") or "").strip()
+    if not task_work:
+        return root
+    try:
+        return Path(task_work).expanduser().resolve(strict=False)
+    except OSError:
+        return root
 
 
 def _config_int(key: str, value: int | None) -> int:

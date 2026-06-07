@@ -44,8 +44,18 @@ utility.  The current runtime policy is:
 4. **No hidden path whitelist** — `workspace_root` is only the relative path base
    and default cwd. Ordinary output authority comes from the current path policy,
    the task workspace, and any explicit user-requested output directory.
+   Relative source/input reads use the real workspace/cwd; task workspace paths
+   are for task outputs, work files, audits, and child-agent process files.
 5. **Resolved path check** — symlinks and `..` are resolved before applying the
    dangerous-directory policy.
+6. **No runtime ledger pollution in source workspaces** — subagent runner guard
+   state, recovery snapshots, and artifact registries must be rooted in the
+   current task workspace or agent work dir. User/source workspaces may contain
+   requested product files, but not `.agent_delivery`, `memory/hooks`, or
+   `data/artifacts` runtime ledgers created by the framework.
+7. **Large tool outputs are task work data** — complete large tool outputs are
+   archived under the current task `work/blobs/tool_outputs/`; they must not be
+   written into hidden directories inside the user/source workspace.
 
 ```python
 # CORRECT — runtime code uses the shared atomic writer

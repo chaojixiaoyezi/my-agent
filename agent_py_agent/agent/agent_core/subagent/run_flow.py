@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..runner.context import restore_current_subagent_context, set_current_subagent_context
+from ...subagents.context_bundle_refs import runtime_task_attributes
 from .params import (
     SubagentFinalizeParams,
     SubagentProbeParams,
@@ -81,15 +82,16 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
     agent = lifecycle.agent
     options = bundle.options
     task_for_attrs = agent.subagents.load(options.run_id)
+    task_attributes = runtime_task_attributes(task_for_attrs)
     previous_context = set_current_subagent_context(
         agent,
         run_id=options.run_id,
         attempt_id=bundle.active_attempt_id,
-        task_attributes=task_for_attrs.attributes,
+        task_attributes=task_attributes,
     )
 
     try:
-        result = _run_subagent_model_turn(lifecycle, bundle.prompt, bundle.context)
+        result = _run_subagent_model_turn(lifecycle, bundle.prompt, bundle.context, task_attributes)
         continued = continue_subagent_session_if_needed(agent, bundle, result)
         result = continued.result
         bundle = continued.bundle
@@ -117,7 +119,7 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
     )
 
 
-def _run_subagent_model_turn(lifecycle, prompt: str, context):
+def _run_subagent_model_turn(lifecycle, prompt: str, context, task_attributes: dict[str, object]):
     from ..runner.prompts import subagent_runner_system_prompt
 
     return lifecycle.agent.run(
@@ -127,6 +129,7 @@ def _run_subagent_model_turn(lifecycle, prompt: str, context):
         write_boundary=context.write_boundary,
         run_id=context.run_id,
         task_id=context.root_id or context.run_id,
+        task_attributes=task_attributes,
         system_prompt_override=subagent_runner_system_prompt(context),
         source="subagent_run_model_turn",
         context_scope="task_local",

@@ -416,14 +416,26 @@ class TestTaskProgressContinuationAndAliases:
                     {"id": "c", "status": "已读"},
                     {"id": "d", "status": "待处理"},
                     {"id": "e", "status": "in-progress"},
+                    {"id": "f", "status": "DONE"},
+                    {"id": "g", "status": "Done"},
+                    {"id": "h", "status": "IN_PROGRESS"},
                 ]
             },
         )
 
         payload = read_task_progress(tmp_path, "run-main")
 
-        assert payload["counts"] == {"total": 5, "other": 5}
-        assert [item["status"] for item in payload["items"]] == ["completed", "read", "已读", "待处理", "in-progress"]
+        assert payload["counts"] == {"total": 8, "other": 8}
+        assert [item["status"] for item in payload["items"]] == [
+            "completed",
+            "read",
+            "已读",
+            "待处理",
+            "in-progress",
+            "DONE",
+            "Done",
+            "IN_PROGRESS",
+        ]
 
     def test_task_progress_summary_carries_recent_done_facts(self, tmp_path):
         """compact 交接要带最近完成事实，而不是只带未完成项。"""
@@ -784,7 +796,10 @@ class TestTaskProgressQualityHints:
             {
                 "tool": "task_progress",
                 "action": "update",
-                "items": [{"id": "a", "title": "对象 A", "status": "已完成"}],
+                "items": [
+                    {"id": "a", "title": "对象 A", "status": "已完成"},
+                    {"id": "b", "title": "对象 B", "status": "DONE"},
+                ],
             }
         )
         payload = json.loads(result.output)
@@ -792,6 +807,7 @@ class TestTaskProgressQualityHints:
         assert result.ok is False
         assert result.error_code == "TOOL_INVALID_ARGUMENTS"
         assert payload["invalid_statuses"][0]["status"] == "已完成"
+        assert payload["invalid_statuses"][1]["status"] == "DONE"
         assert "done" in payload["allowed_statuses"]
 
     def test_update_soft_feedback_marks_failed_or_unseen_evidence_refs(self, tmp_path):

@@ -11,12 +11,12 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from ...models import SubAgentPlanActionsOptions
-from ..indexing.params import IndexReportParams
+from ..indexing.records import IndexReportParams
 from ..rescue_policy import action_rescue_record_fields
-from .options import ActionApplyOptions
-from .params import RecordAfterTaskActionParams
+from .handlers import RecordAfterTaskActionParams
 from .records import (
     ACTION_DISPATCH,
+    ActionApplyOptions,
     ActionRecordContext,
     action_apply_summary,
     action_handler_context,

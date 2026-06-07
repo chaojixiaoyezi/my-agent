@@ -152,6 +152,8 @@ def test_recovery_classification_normalizes_structured_codes_only() -> None:
     assert recovery_category("path-outside-workspace") == "path"
     assert recommended_action("tool-invalid-arguments", "repair_required") == "repair_tool_arguments"
     assert action_status("", "approval rejected") == "blocked"
+    assert action_status("need_repair", "artifact-missing") == "blocked"
+    assert recommended_action("unknown-finding", "NEEDS_USER_INPUT") == "repair_against_contract_findings"
 
 
 def test_gate_decision_failures_use_consistent_recovery_statuses() -> None:

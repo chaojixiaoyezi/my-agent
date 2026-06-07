@@ -41,7 +41,7 @@ def approval_id_for_binding(facts: ApprovalBindingFacts | Mapping[str, object]) 
 
 
 def _base_identity_matches(action: Mapping[object, object], facts: ApprovalBindingFacts) -> bool:
-    status = str(action.get("status") or "").strip().upper()
+    status = str(action.get("status") or "").strip()
     if status and status != "APPROVED":
         return False
     tool = str(action.get("tool_name") or "").strip()

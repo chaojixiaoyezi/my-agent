@@ -54,6 +54,33 @@ def test_query_memory_control_plane_returns_scoped_runtime_refs(tmp_path: Path) 
     assert result["tool_outputs"][0]["path"].endswith(".json")
 
 
+def test_query_memory_control_plane_finds_task_work_tool_outputs(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    task_work = root / "tasks" / "2026-06-07" / "demo" / "work"
+    externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=task_work,
+            tool="read_file",
+            call_id="1-1",
+            output="x" * 1300,
+            ok=True,
+            task_id="task-control",
+            run_id="run-control",
+            request_id="req-control",
+            min_chars=0,
+        )
+    )
+
+    result = query_memory_control_plane(
+        root,
+        MemoryControlPlaneQueryOptions(task_id="task-control", run_id="run-control"),
+    )
+
+    assert result["counts"]["tool_outputs"] == 1
+    assert result["tool_outputs"][0]["path"].startswith(str(task_work))
+    assert not (root / "blobs" / "tool_outputs" / "index.jsonl").exists()
+
+
 def test_query_memory_control_plane_filters_daily_events_and_missing_refs(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     _write_control_plane_fixture(root)

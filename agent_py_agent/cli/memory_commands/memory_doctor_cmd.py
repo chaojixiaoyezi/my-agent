@@ -12,8 +12,8 @@ from ...agent.memory_archive import (
     raw_event_path_for,
     snapshot_path_for,
 )
+from ...agent.user_space.home_layout import DEFAULT_ROUTE_INDEX, resolve_route_index_target
 
-DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
 RECENT_ARCHIVE_FILE_LIMIT = 5
 
 
@@ -26,7 +26,7 @@ def cmd_memory_doctor(args) -> int:
     else:
         from ..common import make_agent
         agent = make_agent(args)
-    index_path = _resolve_index_path(agent.root, args.index)
+    index_path = _resolve_index_path(agent.root, args.index, home_paths=getattr(agent, "home_paths", None))
     warnings = _config_warnings(agent.config)
     routing = _build_routing_doctor(agent.root, index_path)
     archive = _build_archive_doctor(agent.root, agent.config)
@@ -42,11 +42,8 @@ def cmd_memory_doctor(args) -> int:
     return 0
 
 
-def _resolve_index_path(root: Path, raw_index: str | None) -> Path:
-    candidate = Path(raw_index).expanduser() if raw_index else DEFAULT_ROUTE_INDEX
-    if candidate.is_absolute():
-        return candidate.resolve()
-    return (root / candidate).resolve()
+def _resolve_index_path(root: Path, raw_index: str | None, *, home_paths: object | None = None) -> Path:
+    return resolve_route_index_target(root, raw_index, home_paths=home_paths).path
 
 
 def _normalize_warning_item(item: Any) -> dict[str, Any]:

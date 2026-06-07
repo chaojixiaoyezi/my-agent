@@ -27,14 +27,10 @@ if TYPE_CHECKING:
         SubAgentRunnerResult,
     )
 
-from .dispatch_records import (
-    _index_dispatch_record_via,
-    _index_dispatch_watch_record_via,
-    _index_execution_context_via,
-    _index_parent_planner_record_via,
-)
-from .params import DataclassRecordIndexParams, IndexReportParams, LocalRecordParams
 from .records import (
+    DataclassRecordIndexParams,
+    IndexReportParams,
+    LocalRecordParams,
     index_action_apply_via,
     index_capability_route_via,
     index_channel_probe_via,
@@ -202,6 +198,54 @@ def _load_eligible_run(
     except FileNotFoundError:
         return None
     return None if task.status in ineligible_statuses else task
+
+
+def _index_dispatch_record_via(
+    service: SubAgentIndexingService,
+    record: DispatchRecord,
+) -> None:
+    title = f"Dispatch {record.step}/{record.action} {record.run_id or 'global'}"
+    service._index_dataclass_record(
+        DataclassRecordIndexParams(
+            "subagent_dispatch", record.id, title, record, "subagent_dispatch_logged",
+        ),
+    )
+
+
+def _index_dispatch_watch_record_via(
+    service: SubAgentIndexingService,
+    record: DispatchWatchRecord,
+) -> None:
+    title = f"Dispatch watch cycle {record.cycle}"
+    service._index_dataclass_record(
+        DataclassRecordIndexParams(
+            "subagent_dispatch_watch", record.id, title, record, "subagent_dispatch_watch_logged",
+        ),
+    )
+
+
+def _index_parent_planner_record_via(
+    service: SubAgentIndexingService,
+    record: ParentPlannerRecord,
+) -> None:
+    title = f"Parent planner {record.decision}"
+    service._index_dataclass_record(
+        DataclassRecordIndexParams(
+            "parent_planner", record.id, title, record, "parent_planner_logged",
+        ),
+    )
+
+
+def _index_execution_context_via(
+    service: SubAgentIndexingService,
+    context: SubAgentExecutionContext,
+) -> None:
+    title = f"Execution context {context.run_id}"
+    service._index_dataclass_record(
+        DataclassRecordIndexParams(
+            "subagent_execution_context", context.run_id, title, context, "subagent_execution_context_written",
+        ),
+    )
 
 
 def _task_index_header_lines(task: SubAgentTask) -> list[str]:

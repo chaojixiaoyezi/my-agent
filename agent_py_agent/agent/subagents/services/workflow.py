@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...runtime_errors import runtime_error_report
 from .base import CreateRunParams
-from .hierarchy.agent_names import scheduled_child_agent_name
+from .hierarchy.scheduled_role import scheduled_child_agent_name
 
 if TYPE_CHECKING:
     from agent_py_agent.agent.capability.config import CapabilityConfig

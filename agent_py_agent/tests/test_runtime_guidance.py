@@ -12,7 +12,7 @@ from agent_py_agent.agent.agent_core.runtime.guidance import (
     render_subagent_guidance_section,
 )
 from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
-from agent_py_agent.agent.agent_core.tool_loop.prompting import build_tool_loop_prompt
+from agent_py_agent.agent.agent_core._tool_loop_service import build_tool_loop_prompt
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig

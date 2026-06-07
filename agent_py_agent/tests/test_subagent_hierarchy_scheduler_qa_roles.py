@@ -27,6 +27,14 @@ def _qa_parent(manager: SubAgentManager, *, extra_write_roots: list[str] | None 
     )
 
 
+def _mark_ready_with_artifact(task, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("ready\n", encoding="utf-8")
+    task.status = "DONE"
+    task.verification_status = "VERIFIED"
+    task.artifact_refs = [str(path)]
+
+
 def test_hierarchy_schedule_advises_required_qa_roles_without_auto_creation(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
@@ -130,8 +138,7 @@ def test_hierarchy_schedule_quality_advice_after_implementation_ready(tmp_path):
         agent_name="小傻妞-shop-worker",
         extra_write_roots=[str(build)],
     )
-    worker.status = "DONE"
-    worker.verification_status = "VERIFIED"
+    _mark_ready_with_artifact(worker, build / "index.html")
     manager.save(worker)
 
     result = manager.hierarchy.schedule_child_runs(
@@ -205,8 +212,7 @@ def test_hierarchy_schedule_quality_advice_after_implementation_descendant_ready
         agent_name="小小傻妞-shop-worker",
         extra_write_roots=[str(build)],
     )
-    leaf.status = "DONE"
-    leaf.verification_status = "VERIFIED"
+    _mark_ready_with_artifact(leaf, build / "index.html")
     manager.save(leaf)
 
     result = manager.hierarchy.schedule_child_runs(

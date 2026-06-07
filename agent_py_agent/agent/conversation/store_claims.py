@@ -149,7 +149,7 @@ def _claim_lease_seconds(value: object) -> int:
 
 
 def _finish_status(value: object) -> str:
-    status = str(value or "").strip().lower()
+    status = str(value or "").strip()
     return status if status in _FINISH_STATUSES else _INVALID_FINISH_STATUS
 
 

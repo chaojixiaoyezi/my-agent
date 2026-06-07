@@ -43,7 +43,7 @@ def _candidate_confidence(occurrence_count: int) -> float:
 
 
 def _normalize_candidate(payload: dict[str, object]) -> LearningCandidate:
-    status = str(payload.get("status", "draft") or "draft").strip().lower()
+    status = str(payload.get("status", "draft") or "draft").strip()
     if status not in _LEARNING_STATUSES:
         status = "draft"
     lesson = str(payload.get("lesson", "") or "").strip()
@@ -143,7 +143,7 @@ class SubAgentLearningService:
         return created_or_updated
 
     def set_learning_candidate_status(self, candidate_id: str, status: str) -> LearningCandidate:
-        normalized = str(status or "").strip().lower()
+        normalized = str(status or "").strip()
         if normalized not in _LEARNING_STATUSES:
             raise ValueError(f"unsupported learning candidate status: {status}")
         candidate = self.load_learning_candidate(candidate_id)

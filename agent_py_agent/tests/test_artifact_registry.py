@@ -365,6 +365,7 @@ def test_subagent_structured_artifact_registers_registry_ref(mock_task, tmp_path
     mock_task.id = "run-1"
     mock_task.root_id = "root-1"
     mock_task.task_dir = str(task_dir)
+    mock_task.task_workspace_dir = str(tmp_path)
     mock_task.output_dir = str(task_dir)
     mock_task.reports_dir = str(task_dir / "reports")
     mock_task.attributes = {"workspace_root": str(tmp_path)}

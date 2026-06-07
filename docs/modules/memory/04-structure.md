@@ -14,7 +14,6 @@
 |   |-- lessons/*.md                      # 较长经验/教训
 |   `-- routing/INDEX.md                  # 人类可读路由索引
 |-- audit/YYYY-MM-DD.jsonl                # raw turn/tool/gateway 黑盒流水
-|-- blobs/tool_outputs/                   # 大工具输出正文和索引
 |-- tasks/<date>/<task-slug>/
 |   |-- output/                           # 最终交付物或索引/验收记录
 |   `-- work/                             # 过程状态、compact、子代理账本、草稿
@@ -73,7 +72,7 @@
 ## Artifact And Raw Output
 
 - raw turn/tool/gateway 流水写 `audit/YYYY-MM-DD.jsonl`。
-- 大工具输出写 `blobs/tool_outputs/`，prompt 中只放摘要和 refs。
+- 大工具输出写当前 task `work/blobs/tool_outputs/`，prompt 中只放摘要和 refs。
 - 用户最终交付写当前 task `output/`，或用户显式指定目录；task `output/work` 仍记录索引和验收。
 
 ## Design Rules

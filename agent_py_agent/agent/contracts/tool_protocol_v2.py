@@ -25,7 +25,7 @@ def normalize_tool_call(payload: Any) -> ToolCallEnvelope:
     data = _loads_if_json(payload)
     tool_name = str(data.get("tool_name") or "")
     raw_input = data.get("input")
-    raw_status = str(data.get("status") or "").lower()
+    raw_status = str(data.get("status") or "")
     status = _call_status(data, raw_status, raw_input)
     if raw_input is None:
         raw_input = {}
@@ -259,7 +259,7 @@ def _artifact_ref_findings(refs: list[ArtifactRef]) -> list[str]:
 
 def _status_from_result(data: dict[str, Any]) -> str:
     if data.get("status"):
-        return str(data["status"]).lower()
+        return str(data["status"])
     return "succeeded" if data.get("error") is None else "failed"
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..backends import is_provider_timeout_error, is_provider_transient_error
 from ..capability.config import CapabilityConfig
@@ -22,6 +23,7 @@ from .planner_service import (
 from .planner_service import build_parent_planner_state as _build_parent_planner_state
 from .planner_templates import PARENT_PLANNER_SYSTEM_PROMPT
 from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
+from .runtime.owner_roots import runtime_owner_root
 from .runner.prompts import (
     _append_runner_repair_failure,
     _append_runner_repair_prompt,
@@ -32,6 +34,7 @@ from .runner.prompts import (
 from .subagent.finalize_helpers import (
     FinalizedRecoverySnapshotRequest,
     FinalizedRunnerRecordRequest,
+    parsed_output_from_delivery_complete_response,
     record_finalized_runner_result,
     write_finalized_recovery_snapshot,
 )
@@ -283,7 +286,7 @@ class _SubagentLifecycleBase:
         except (FileNotFoundError, TypeError):
             task = None
         write_recovery_snapshot(
-            self.root,
+            _subagent_recovery_snapshot_root(self, task),
             params=_recovery_snapshot_input(self, snapshot, _recovery_content_paths(task)),
         )
 
@@ -318,6 +321,11 @@ class _SubagentLifecycleBase:
     def _finalize_subagent_run(self, params: SubagentFinalizeParams):
         structured = parse_subagent_runner_output(params.result.response)
         repair_state = _initial_repair_state(params.result)
+        if not (structured.found and structured.ok):
+            delivery_structured = parsed_output_from_delivery_complete_response(params.result.response)
+            if delivery_structured is not None:
+                structured = delivery_structured
+                repair_state["message"] = "runner 已完成模型调用，运行时 delivery closeout 已通过。"
         if not (structured.found and structured.ok):
             repair_state = self._handle_subagent_repair(
                 SubagentRepairParams(
@@ -558,6 +566,14 @@ def _recovery_content_paths(task) -> list[str]:
         task.output_json,
         task.handoff_file,
     ]
+
+
+def _subagent_recovery_snapshot_root(agent, task: SubAgentTask | None) -> Path:
+    raw_workspace = getattr(task, "agent_run_workspace_dir", "") if task is not None else ""
+    workspace = str(raw_workspace).strip() if isinstance(raw_workspace, str | Path) else ""
+    if workspace:
+        return Path(workspace).expanduser().resolve(strict=False)
+    return runtime_owner_root(agent)
 
 
 def _recovery_snapshot_input(

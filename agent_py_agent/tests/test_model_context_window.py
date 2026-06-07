@@ -59,7 +59,7 @@ def test_backend_metadata_method_window_is_used() -> None:
     assert resolve_model_context_window_tokens(_agent(SimpleNamespace(), MetadataBackend())) == 96_000
 
 
-def test_unknown_model_window_uses_generic_128k_fallback() -> None:
+def test_unknown_model_window_uses_generic_200k_fallback() -> None:
     agent = _agent(SimpleNamespace(model_name="unknown", max_tokens=4096), SimpleNamespace())
 
-    assert resolve_model_context_window_tokens(agent) == 128_000
+    assert resolve_model_context_window_tokens(agent) == 200_000

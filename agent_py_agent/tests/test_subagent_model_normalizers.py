@@ -1,4 +1,4 @@
-"""subagents/manager_normalize.py 单元测试。
+"""subagents/services/persistence/model_normalizers.py 单元测试。
 
 测试数据归一化、字段校验、默认值填充。
 """
@@ -16,7 +16,7 @@ class TestFieldNames:
 
     def test_returns_field_names_set(self):
         """验证返回字段名集合。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _field_names
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _field_names
         from agent_py_agent.agent.subagents.models import QualityContract
 
         result = _field_names(QualityContract)
@@ -87,7 +87,7 @@ class TestNormalizeQualityContract:
 
     def test_returns_same_instance(self):
         """已是 QualityContract 直接返回。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _normalize_quality_contract
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_quality_contract
         from agent_py_agent.agent.subagents.models import QualityContract
 
         original = QualityContract()
@@ -96,7 +96,7 @@ class TestNormalizeQualityContract:
 
     def test_returns_default_for_non_dict(self):
         """非字典返回默认实例。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _normalize_quality_contract
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_quality_contract
         from agent_py_agent.agent.subagents.models import QualityContract
 
         result = _normalize_quality_contract(123)
@@ -104,7 +104,7 @@ class TestNormalizeQualityContract:
 
     def test_normalizes_dict_fields(self):
         """规范化和过滤字典字段。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _normalize_quality_contract
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_quality_contract
 
         data = {
             "failure_conditions": ["cond1", "cond2"],
@@ -122,7 +122,7 @@ class TestNormalizeContextManifest:
 
     def test_returns_same_instance(self):
         """已是 ContextManifest 直接返回。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _normalize_context_manifest
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_context_manifest
         from agent_py_agent.agent.subagents.models import ContextManifest
 
         original = ContextManifest()
@@ -131,7 +131,7 @@ class TestNormalizeContextManifest:
 
     def test_returns_default_for_non_dict(self):
         """非字典返回默认实例。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _normalize_context_manifest
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_context_manifest
         from agent_py_agent.agent.subagents.models import ContextManifest
 
         result = _normalize_context_manifest("invalid")
@@ -139,7 +139,7 @@ class TestNormalizeContextManifest:
 
     def test_token_budget_to_int(self):
         """token_budget 转换为整数。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _normalize_context_manifest
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_context_manifest
 
         result = _normalize_context_manifest({"token_budget": "5000"})
         assert result.token_budget == 5000
@@ -150,14 +150,14 @@ class TestNormalizeContextPacks:
 
     def test_dict_wrapped_in_list(self):
         """字典包装成列表。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _normalize_context_packs
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_context_packs
 
         result = _normalize_context_packs({"key": "value"})
         assert result == [{"key": "value"}]
 
     def test_list_passes_through(self):
         """列表原样返回。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _normalize_context_packs
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_context_packs
 
         data = [{"key": "val1"}, {"key": "val2"}]
         result = _normalize_context_packs(data)
@@ -165,20 +165,20 @@ class TestNormalizeContextPacks:
 
     def test_non_dict_filtered(self):
         """非字典元素被过滤。"""
-        from agent_py_agent.agent.subagents.manager_normalize import _normalize_context_packs
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_context_packs
 
         result = _normalize_context_packs([{"key": "val"}, "string", None, 123])
         assert len(result) == 1
 
 
 class TestNoNaturalWriteDirExtraction:
-    """确认 manager_normalize 不再从自然语言目标里抽写入根。"""
+    """确认当前 normalization 模块不再从自然语言目标里抽写入根。"""
 
     def test_extract_write_dirs_api_removed(self):
         """写入根必须来自 extra_write_roots/workspace/refs，不再有自然语言兜底 API。"""
-        import agent_py_agent.agent.subagents.manager_normalize as manager_normalize
+        import agent_py_agent.agent.subagents.services.persistence.model_normalizers as model_normalizers
 
-        assert not hasattr(manager_normalize, "_extract_write_dirs")
+        assert not hasattr(model_normalizers, "_extract_write_dirs")
 
 
 class TestWorkflowModeNormalization:

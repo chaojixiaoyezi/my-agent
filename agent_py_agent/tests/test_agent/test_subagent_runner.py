@@ -60,6 +60,65 @@ class PromptCaptureAcceptedBackend(BaseBackend):
         )
 
 
+class DeliveryCloseoutOnlyBackend(BaseBackend):
+    """测试用后端：原始 runner 回复只有运行时 closeout 成功块，没有 SUBAGENT_RESULT。"""
+
+    name = "delivery_closeout_only_backend"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.prompts.append(prompt)
+        if len(self.prompts) == 1:
+            payload = {
+                "ok": True,
+                "case_id": "",
+                "report_ref": ".agent_delivery/closeout.json",
+                "delivery_mode": "uncontracted_task_output",
+                "artifacts": [
+                    {
+                        "artifact_id": "artifact-summary-md",
+                        "kind": "file",
+                        "path": "output/summary.md",
+                        "ok": True,
+                    }
+                ],
+            }
+            return ModelResponse(
+                text=(
+                    "[MAIN_AGENT_DELIVERY_COMPLETE]\n"
+                    f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
+                    "[/MAIN_AGENT_DELIVERY_COMPLETE]\n"
+                    "交付验收通过。"
+                ),
+                backend=self.name,
+            )
+
+        return ModelResponse(
+            text=(
+                "[SUBAGENT_RESULT]\n"
+                "{\n"
+                '  "status": "BLOCKED",\n'
+                '  "summary": "repair 不应覆盖已经通过的 closeout。",\n'
+                '  "used_tools": [],\n'
+                '  "used_skills": [],\n'
+                '  "evidence_packets": [],\n'
+                '  "capability_requests": [],\n'
+                '  "artifacts": [],\n'
+                '  "tests": [],\n'
+                '  "patches": [],\n'
+                '  "lessons": [],\n'
+                '  "next_actions": [],\n'
+                '  "blocked_reason": "repair should not run",\n'
+                '  "failure_type": ""\n'
+                "}\n"
+                "[/SUBAGENT_RESULT]"
+            ),
+            backend=self.name,
+        )
+
+
 def test_subagent_runner_dry_run_and_execute():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -99,7 +158,7 @@ def test_subagent_runner_dry_run_and_execute():
         assert "read_file [filesystem" in prompt
         assert "write_file [filesystem" not in prompt
         assert "echo 后端" in response
-        _assert_subagent_recovery_snapshot(root, task.id, loaded.status_file)
+        _assert_subagent_recovery_snapshot(Path(loaded.agent_run_workspace_dir), task.id, loaded.status_file)
 
 
 def test_subagent_runner_uses_child_system_prompt_not_parent_root_identity():
@@ -341,6 +400,38 @@ def test_subagent_runner_repairs_missing_structured_output():
         assert runner_json["structured_repair_ok"] is True
         assert output_json["structured_output"]["repair_attempted"] is True
         assert output_json["structured_output"]["repair_ok"] is True
+
+
+def test_subagent_runner_uses_delivery_closeout_before_repair():
+    """运行时 closeout 成功是当前 run 产物证明，不应再被 repair 回合误判覆盖。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        backend = DeliveryCloseoutOnlyBackend()
+        agent.backend = backend
+        task = agent.subagents.create_run(
+            goal="写 output/summary.md",
+            thought="runtime closeout 已经接受任务 output 产物。",
+            plan=["写产物", "closeout"],
+            allowed_tools=[],
+            acceptance_checks=["summary.md 存在"],
+        )
+
+        result = agent.run_subagent(task.id, dry_run=False, probe=False)
+        loaded = agent.subagents.load(task.id)
+        output_json = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
+
+        assert len(backend.prompts) == 1
+        assert result.ok
+        assert result.status == "DONE"
+        assert result.verification_status == "VERIFIED"
+        assert result.structured_output_found
+        assert result.structured_output_ok
+        assert not result.structured_repair_attempted
+        assert result.artifact_count == 1
+        assert output_json["artifacts"][0]["path"] == "output/summary.md"
+        assert output_json["structured_output"]["repair_attempted"] is False
 
 
 def test_subagent_runner_does_not_override_coordinator_tool_limit_status():

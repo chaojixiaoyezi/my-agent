@@ -177,6 +177,19 @@ def _compact_stress_delivery_contract(facts: list[StressFact]) -> dict[str, obje
                 },
             }
         ],
+        "target_coverage_contract": {
+            "scope_label": "long_field_journal",
+            "coverage_requirement": "full_source_read",
+            "enforcement": "required",
+            "target_items": [
+                {
+                    "target_id": "data/long_field_journal.txt",
+                    "source_path": "data/long_field_journal.txt",
+                    "coverage_kind": "full_source_read",
+                    "enforcement": "required",
+                }
+            ],
+        },
     }
 
 
@@ -239,7 +252,7 @@ def _ensure_compact_stress_config(lab) -> None:
         max_tool_rounds: 0
         max_tool_calls_per_round:
         model_context_window_tokens: 200000
-        memory_compact_auto_trigger_percent: 50
+        memory_compact_auto_trigger_percent: 70
         request_timeout: {max(600, int(lab.args.timeout))}
         tool_read_max_chars: 100000
         tool_output_externalize_min_chars: 140000

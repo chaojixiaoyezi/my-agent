@@ -2,7 +2,8 @@
 """Soft detector package for local log analysis.
 
 本包是日志分析检测器的主入口，包含：
-  - rules.py          : 高层检测器规则（WAF/VPN/暴力破解等）和 Finding 构造
+  - rule_evaluator.py : 高层检测器规则（WAF/VPN/暴力破解等）
+  - rule_helpers.py   : Finding 构造和查询辅助
   - field_access.py   : 底层字段访问、类型转换、时间工具
   - field_extractors.py: 字段提取器（source_ip、user 等）
   - classifiers.py    : 事件分类、实体比较、弱信号
@@ -81,8 +82,7 @@ from .field_extractors import (  # noqa: F401
     _user,
     _victim_ip,
 )
-from .rules import (  # noqa: F401
-    DETECTORS,
+from .rule_evaluator import (  # noqa: F401
     bruteforce_then_success,
     multi_source_weak_signal,
     rare_egress_after_alert,
@@ -91,6 +91,24 @@ from .rules import (  # noqa: F401
     waf_attack_success_candidate,
     web_to_process_anomaly,
 )
+from .rule_helpers import (  # noqa: F401
+    _dedupe_findings,
+    _evidence_id,
+    _evidence_ref,
+    _make_finding,
+    _query,
+    _stable_id,
+)
+from .rule_loader import clear_rule_cache, load_rule, preload_rules  # noqa: F401
+
+DETECTORS = {
+    "waf_attack_success_candidate": waf_attack_success_candidate,
+    "web_to_process_anomaly": web_to_process_anomaly,
+    "vpn_new_geo_login": vpn_new_geo_login,
+    "bruteforce_then_success": bruteforce_then_success,
+    "rare_egress_after_alert": rare_egress_after_alert,
+    "multi_source_weak_signal": multi_source_weak_signal,
+}
 
 __all__ = [
     "DETECTORS",
@@ -98,10 +116,19 @@ __all__ = [
     "SUSPICIOUS_CHILD_PROCESSES",
     "WEB_PARENT_PROCESSES",
     "bruteforce_then_success",
+    "clear_rule_cache",
+    "load_rule",
     "multi_source_weak_signal",
+    "preload_rules",
     "rare_egress_after_alert",
     "run_soft_detectors",
     "vpn_new_geo_login",
     "waf_attack_success_candidate",
     "web_to_process_anomaly",
+    "_dedupe_findings",
+    "_evidence_id",
+    "_evidence_ref",
+    "_make_finding",
+    "_query",
+    "_stable_id",
 ]

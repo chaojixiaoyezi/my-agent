@@ -199,8 +199,12 @@ def test_runner_context_schedule_without_children_returns_quality_advice(tmp_pat
         role="worker",
         extra_write_roots=[str(build)],
     )
+    artifact = build / "index.html"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("ready\n", encoding="utf-8")
     worker.status = "DONE"
     worker.verification_status = "VERIFIED"
+    worker.artifact_refs = [str(artifact)]
     agent.subagents.save(worker)
     agent._current_subagent_run_id = root.id
 

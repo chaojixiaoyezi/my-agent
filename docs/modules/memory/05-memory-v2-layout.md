@@ -11,7 +11,6 @@ owner_home/
 |-- memory/lessons/*.md
 |-- memory/routing/INDEX.md
 |-- audit/YYYY-MM-DD.jsonl
-|-- blobs/tool_outputs/
 |-- tasks/<date>/<task-slug>/{output,work}/
 |-- agents/<run_id>/
 |-- compact/
@@ -23,7 +22,7 @@ owner_home/
 - grep/RAG/vector：优先 `memory/long_term/memory.jsonl`、`memory/daily/`、`memory/lessons/`。
 - 运行恢复：优先 task `work/compact/` 和 `work/agents/<run_id>/`。
 - 审计：`audit/YYYY-MM-DD.jsonl`。
-- 大文件正文：`blobs/tool_outputs/`。
+- 大工具输出正文：当前 task `work/blobs/tool_outputs/`。
 
 ## 不做
 

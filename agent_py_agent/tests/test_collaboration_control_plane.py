@@ -147,6 +147,24 @@ def test_completed_request_status_without_evidence_stays_pending(tmp_path) -> No
     assert status["missing_evidence_request_ids"] == [request.request_id]
 
 
+def test_request_status_case_variants_do_not_drive_status_buckets() -> None:
+    from agent_py_agent.agent.collaboration.request_status import (
+        is_blocked_request_status,
+        is_completed_request_status,
+        is_declined_request_status,
+        is_timed_out_request_status,
+    )
+
+    assert is_completed_request_status("completed") is True
+    assert is_blocked_request_status("blocked") is True
+    assert is_timed_out_request_status("timeout") is True
+    assert is_declined_request_status("declined") is True
+    assert is_completed_request_status("COMPLETED") is False
+    assert is_blocked_request_status("BLOCKED") is False
+    assert is_timed_out_request_status("TIMEOUT") is False
+    assert is_declined_request_status("DECLINED") is False
+
+
 def test_collaboration_request_preserves_open_world_clue_packet(tmp_path) -> None:
     store, case, request = _open_world_clue_case(tmp_path)
     status = store.case_status(case.case_id)

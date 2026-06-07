@@ -6,7 +6,7 @@ import json
 
 from ..agent.capability.config import load_capability_config
 from ..agent.subagents.models import SubAgentCapabilityRouteOptions, SubAgentPlanActionsOptions
-from ..agent.subagents.services.actions.options import ActionApplyOptions
+from ..agent.subagents.services.actions import ActionApplyOptions
 from .common import make_agent, make_capability_router
 from .models import SubagentsCapabilityRouteOptions, SubagentsPlanActionsOptions
 

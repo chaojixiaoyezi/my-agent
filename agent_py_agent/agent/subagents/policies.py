@@ -249,7 +249,7 @@ def _route_card_payload(hit: CapabilitySearchHit) -> dict[str, str]:
         "reasons": "；".join(hit.reasons[:4]),
     }
 def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
-    status = parsed.status.upper().strip()
+    status = parsed.status.strip()
     if parsed.capability_requests:
         return TaskStatus.BLOCKED.value
     if is_pending_capability_status(status):

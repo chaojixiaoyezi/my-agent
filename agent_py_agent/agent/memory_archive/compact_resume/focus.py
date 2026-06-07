@@ -356,7 +356,7 @@ def _successful_read_ref(ref: dict[str, Any]) -> bool:
         return False
     if str(ref.get("error_code") or "").strip():
         return False
-    status = str(ref.get("status") or "").strip().lower()
+    status = str(ref.get("status") or "").strip()
     return status in {"", "ok"}
 
 

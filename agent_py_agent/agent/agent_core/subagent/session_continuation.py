@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ...subagents import parse_subagent_runner_output
+from ...subagents.context_bundle_refs import runtime_task_attributes
 from ...subagents.services.subagent_session_compact import (
     SubagentSessionCompactRequest,
     subagent_session_compact_payload_from_result,
@@ -83,6 +84,7 @@ def _rebuild_bundle(agent, bundle: object, depth: int) -> object:
 
 
 def _run_model_turn(agent, prompt: str, context):
+    task = agent.subagents.load(context.run_id)
     return agent.run(
         prompt,
         save=False,
@@ -90,6 +92,7 @@ def _run_model_turn(agent, prompt: str, context):
         write_boundary=context.write_boundary,
         run_id=context.run_id,
         task_id=context.root_id or context.run_id,
+        task_attributes=runtime_task_attributes(task),
         system_prompt_override=subagent_runner_system_prompt(context),
         source="subagent_run_model_turn",
         context_scope="task_local",

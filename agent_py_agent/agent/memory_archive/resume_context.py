@@ -4,7 +4,7 @@ from __future__ import annotations
 """builds optional auto-injected recovery context from memory archive evidence.
 
 新手说明:
-这个文件负责'用户说继续时，要不要自动把恢复线索塞进 prompt'。
+这个文件负责'用户带结构化 run/request/subagent 引用时，要不要自动把恢复线索塞进 prompt'。
 它只读归档、LocalStore 和任务事实源，不写任何业务状态；默认配置关闭，避免拖慢普通对话。
 """
 

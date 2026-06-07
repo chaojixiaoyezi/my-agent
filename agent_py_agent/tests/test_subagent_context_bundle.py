@@ -10,6 +10,7 @@ from agent_py_agent.agent.subagents.context_bundle import (
     context_gate_prompt_lines,
     validate_context_bundle,
 )
+from agent_py_agent.agent.subagents.context_bundle_refs import runtime_task_attributes
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import CapabilityGrant
 
@@ -93,6 +94,29 @@ def test_context_bundle_keeps_current_subagent_paths_in_model_visible_payload(tm
     assert bundle.output_contract["declared_output_refs"] == [
         "/tmp/project/tasks/current/work/agents/run-1/final_report.md"
     ]
+
+
+def test_runtime_task_attributes_include_run_workspace_paths(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / "subagents")
+    task = manager.create_run(
+        goal="读取 input.txt 写摘要。",
+        thought="需要带上当前 task workspace。",
+        plan=["读", "写"],
+        role="worker",
+        attributes={"existing": "kept"},
+    )
+    task.task_workspace_dir = str(tmp_path / "tasks" / task.id)
+    task.agent_run_workspace_dir = str(tmp_path / "tasks" / task.id / "work" / "agents" / task.id)
+
+    attrs = runtime_task_attributes(task)
+
+    assert attrs["existing"] == "kept"
+    assert attrs["agent_run_workspace_dir"] == task.agent_run_workspace_dir
+    assert attrs["run_workspace"] == {
+        "task_root": task.task_workspace_dir,
+        "output_dir": str(Path(task.task_workspace_dir) / "output"),
+        "work_dir": str(Path(task.task_workspace_dir) / "work"),
+    }
 
 
 def _assert_core_context_bundle(bundle, task) -> None:

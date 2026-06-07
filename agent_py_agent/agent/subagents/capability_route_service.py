@@ -20,7 +20,7 @@ from .capability_scope import (
 from .policies import _route_card_payload
 from .rendering import render_capability_route_markdown
 from .reports import CapabilityRouteRecord, CapabilityRouteReport
-from .services.indexing.params import IndexReportParams
+from .services.indexing.records import IndexReportParams
 from .services.lifecycle import RecordCapabilityGapParams
 from .utils import _merge_list, _new_id
 

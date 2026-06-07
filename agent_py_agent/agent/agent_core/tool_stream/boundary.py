@@ -10,12 +10,8 @@ from ...backends import ModelResponse
 from ...tooling.content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
 )
-from .models import (
-    CompleteToolCallStreamAbort,
-    LongToolContentStreamAbort,
-    MalformedToolProtocolStreamAbort,
-)
 from .write_abort import (
+    LongToolContentStreamAbort,
     long_write_stream_abort,
     recovered_write_abort_payload,
 )
@@ -28,6 +24,14 @@ _RAW_MACHINE_BLOCK_PATTERNS = (
 _MAX_UNCLOSED_TOOL_START_MARKERS = 1
 _MAX_NEAR_TOOL_PROTOCOL_LINES = 7
 _NEAR_TOOL_PROTOCOL_LINE_RE = re.compile(r"(?m)^\s*(?:\[|<)?\s*TOOL(?:\b|_|\])")
+
+
+class MalformedToolProtocolStreamAbort(RuntimeError):
+    def __init__(self, *, start_marker: str, marker_count: int, limit: int) -> None:
+        super().__init__(f"tool protocol emitted {marker_count} unclosed {start_marker} markers")
+        self.start_marker = start_marker
+        self.marker_count = marker_count
+        self.limit = limit
 
 
 def first_complete_tool_call_cut_index(text: str) -> int | None:
@@ -105,8 +109,6 @@ class ToolBoundaryChunkFilter:
     cut_index: int | None = field(default=None, init=False)
 
     def __call__(self, chunk: str) -> None:
-        if self._closed:
-            return
         self._text += str(chunk or "")
         protocol_abort = malformed_tool_protocol_stream_abort(self._text)
         if protocol_abort is not None:
@@ -125,20 +127,12 @@ class ToolBoundaryChunkFilter:
             if self.on_chunk is not None:
                 self._forward_to(len(self._text))
             return
-        self.cut_detected = True
-        self.cut_index = cut_index
-        if self.on_chunk is not None:
+        if not self.cut_detected:
+            self.cut_detected = True
+            self.cut_index = cut_index
+        if self.on_chunk is not None and not self._closed:
             self._forward_to(cut_index)
         self._closed = True
-
-    def complete_tool_call_abort(self) -> CompleteToolCallStreamAbort | None:
-        text = complete_machine_block_text(self._text)
-        if not text:
-            return None
-        return CompleteToolCallStreamAbort(
-            text=text,
-            cut_index=self.cut_index if self.cut_index is not None else len(text),
-        )
 
     def finish(self) -> None:
         if self.on_chunk is None or self._closed:
@@ -146,6 +140,11 @@ class ToolBoundaryChunkFilter:
         if self.cut_detected:
             return
         self._forward_to(len(self._text))
+
+    def complete_tool_text(self) -> str:
+        if self.cut_index is None:
+            return ""
+        return self._text[: self.cut_index].strip()
 
     def _forward_to(self, end: int) -> None:
         if end <= self._forwarded:
@@ -299,12 +298,6 @@ def malformed_tool_protocol_abort_response(
         "[/TOOL_CALL]",
         backend=backend,
     )
-
-
-def complete_tool_call_abort_response(
-    exc: CompleteToolCallStreamAbort, *, backend: str
-) -> ModelResponse:
-    return ModelResponse(text=exc.text, backend=backend)
 
 
 def long_write_abort_response(exc: LongToolContentStreamAbort, *, backend: str) -> ModelResponse:

@@ -149,7 +149,7 @@ def _first_action(actions: tuple[dict[str, Any], ...]) -> str:
 
 
 def _default_code(status: str) -> str:
-    normalized = str(status or "").strip().upper()
+    normalized = str(status or "").strip()
     if normalized == "NEED_REPAIR":
         return "CONTRACT_REPAIR_REQUIRED"
     if normalized == "NEED_APPROVAL":

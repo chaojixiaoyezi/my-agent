@@ -5,12 +5,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .context import (
+from .handlers import (
     ActionHandlerContext,
     CoordinatorHandoffErrorRequest,
+    RecordAfterTaskActionParams,
     coordinator_handoff_error_record,
 )
-from .params import RecordAfterTaskActionParams
 
 
 @dataclass(frozen=True)

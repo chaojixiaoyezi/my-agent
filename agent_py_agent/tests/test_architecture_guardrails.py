@@ -161,11 +161,6 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
         "_structured_next_step_text",
         "_looks_like_tool_round_limit_text",
     ],
-    "agent_py_agent/agent/subagents/manager_normalize.py": [
-        "_extract_write_dirs",
-        "_iter_write_dir_matches",
-        "_write_dir_candidate_matches",
-    ],
     "agent_py_agent/agent/subagents/services/hierarchy/write_policy.py": [
         "_extract_write_dirs",
     ],
@@ -250,6 +245,17 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
     "agent_py_agent/agent/subagents/execution/test_items.py": [
         "artifact_summaries",
         "_artifact_summaries_by_path",
+    ],
+    "agent_py_agent/agent/subagents/required_file_terms.py": [
+        "labeled_required_file_terms_from_text",
+        "task_contract_required_file_terms_from_text",
+        "task_contract_forbidden_file_terms_from_text",
+        "_LABELED_REQUIRED_FIELDS",
+        "_LABELED_FORBIDDEN_FIELDS",
+        "_terms_from_labeled_fields",
+    ],
+    "agent_py_agent/agent/subagents/static_required_files.py": [
+        "labeled_required_file_terms_from_text",
     ],
 }
 

@@ -15,6 +15,7 @@ from agent_py_agent.agent.gateway_parts import (
     write_gateway_request,
 )
 from agent_py_agent.agent.gateway_parts.request_worker import _process_gateway_requests
+from agent_py_agent.agent.gateway_parts.request_worker import GatewayAskParams, submit_gateway_ask
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli import gateway_client
 from agent_py_agent.cli.chat_parts.gateway_client import poll_gateway_chunks
@@ -24,6 +25,31 @@ def test_default_gateway_entry_can_reach_chat_handler():
     """默认 gateway 入口必须能找到 chat 处理函数。"""
 
     assert callable(gateway_client.cmd_chat)
+
+
+def test_submit_gateway_ask_uses_collision_safe_ids(tmp_path, monkeypatch):
+    """Concurrent chat submits must not overwrite requests created in the same millisecond."""
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            gateway_workspace="gateway",
+            local_store_path="local_store/local.db",
+            local_store_files_dir="local_store/files",
+            local_store_events_path="local_store/events.jsonl",
+        ),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    monkeypatch.setattr("agent_py_agent.agent.gateway_parts.request_worker.time.time", lambda: 1234567890.123)
+
+    ids = [
+        submit_gateway_ask(paths, params=GatewayAskParams(prompt=f"message {index}", save=False))[0]
+        for index in range(20)
+    ]
+
+    assert len(set(ids)) == len(ids)
+    assert len(list(paths.inbox.glob("*.json"))) == len(ids)
 
 
 def test_gateway_json_polling_suppresses_stream_chunks(tmp_path, capsys):

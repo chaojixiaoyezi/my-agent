@@ -231,14 +231,22 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolExecu
 
 
 def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -> dict[str, Any]:
-    if request.tool_name != "run_command" or not isinstance(request.write_boundary, dict):
-        return request.tool_params
-    shell_mode = str(request.write_boundary.get("shell_access_mode") or "").strip()
-    if not shell_mode:
+    if not isinstance(request.write_boundary, dict):
         return request.tool_params
     params = dict(request.tool_params)
-    params["__access_mode"] = shell_mode
+    if request.tool_name == "run_command":
+        shell_mode = str(request.write_boundary.get("shell_access_mode") or "").strip()
+        if shell_mode:
+            params["__access_mode"] = shell_mode
+    if request.tool_name == "read_artifact":
+        _copy_boundary_path(params, request.write_boundary, "__task_work_dir", "task_work_dir")
     return params
+
+
+def _copy_boundary_path(params: dict[str, Any], boundary: dict[str, object], target_key: str, source_key: str) -> None:
+    text = str(boundary.get(source_key) or "").strip()
+    if text:
+        params[target_key] = text
 
 
 def _format_tool_exception(exc: Exception) -> str:

@@ -222,6 +222,9 @@ def _tool_output_index_paths(agent: object, seed_records: list[dict[str, Any]]) 
     for record in seed_records:
         for key in ("path", "artifact_ref", "source_artifact_ref", "source_output_path", "output_path"):
             paths.extend(_index_path_from_artifact_ref(record.get(key)))
+    task_root = current_run_task_workspace_root(agent)
+    if task_root is not None:
+        paths.append(task_root / "work" / "blobs" / "tool_outputs" / "index.jsonl")
     for root in runtime_archive_roots(agent):
         paths.append(Path(root) / "blobs" / "tool_outputs" / "index.jsonl")
     return _unique_existing_paths(paths)

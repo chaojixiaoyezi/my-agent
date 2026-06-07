@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
+DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
 
 
 def resolve_model_context_window_tokens(agent: object) -> int:

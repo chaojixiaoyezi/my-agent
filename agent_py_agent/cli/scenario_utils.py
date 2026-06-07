@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.core import SimpleAgent
-from ..agent.subagents.models import SubAgentBoardOptions, SubAgentTask
+from ..agent.subagents.models import SubAgentBoardOptions, SubAgentTask, TaskStatus
 from .common import ROOT, make_agent
 from .scenario_workspace import ScenarioConfigRequest, write_scenario_config, write_scenario_fixture
 
@@ -221,7 +221,12 @@ def scenario_tasks_active(agent: SimpleAgent, expected_count: int) -> bool:
     tasks = agent.subagents.list_runs()
     if len(tasks) < expected_count:
         return False
-    return any(task.status == "RUNNING" for task in tasks[:expected_count])
+    active_statuses = {
+        TaskStatus.PLANNING.value,
+        TaskStatus.PENDING.value,
+        TaskStatus.RUNNING.value,
+    }
+    return any(task.status in active_statuses for task in tasks[:expected_count])
 
 
 def collect_scenario_report_files(agent: SimpleAgent, fixture_root: Path, expected_count: int) -> list[Path]:

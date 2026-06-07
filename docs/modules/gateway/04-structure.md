@@ -46,6 +46,9 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
   不用自然语言或旧状态别名猜测。
 - gateway 内部实现直接引用 owner 模块：ask 队列走 `request_worker`，lease/heartbeat 走
   `lease_service`，不保留单独的 `runtime.py` re-export 层。
+- gateway ask 请求 ID 由 `new_gateway_request_id()` 生成；所有 CLI/chat/adapter 入口都应走
+  `submit_gateway_ask()` 或同一生成器，不能用时间戳截断值自行拼 ID。ID 是队列、response、
+  chunk stream 和审计记录的结构化关联键。
 - gateway request worker 空闲轮询间隔由 `gateway_request_poll_interval` 控制，单位秒，可填小数；
   默认 `0.2`，配置小于 `0.05` 会回到默认值。
 - 多 chat/gateway client 共享同一队列时，本地 IO 不应成为瓶颈；慢点应主要来自模型或外部服务。

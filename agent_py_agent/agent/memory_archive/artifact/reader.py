@@ -13,6 +13,7 @@ from .read_modes import (
     ArtifactContentReadResult,
     read_artifact_content_by_mode,
 )
+from ..tool_output_externalizer import tool_output_index_paths_for_lookup, tool_output_roots_for_lookup
 
 
 @dataclass(frozen=True)
@@ -255,13 +256,13 @@ def _error_payload(error_code: str, artifact_ref: str, message: str) -> dict[str
 
 def _index_records_for_root(root: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for index_path in [directory / "index.jsonl" for directory in _tool_output_roots(root)]:
+    for index_path in tool_output_index_paths_for_lookup(root):
         records.extend(_index_records(index_path))
     return records
 
 
 def _tool_output_roots(root: Path) -> tuple[Path, ...]:
-    return (root / "blobs" / "tool_outputs",)
+    return tool_output_roots_for_lookup(root)
 
 
 def _is_under_allowed_root(path: Path, root: Path) -> bool:

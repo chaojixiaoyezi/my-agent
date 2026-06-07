@@ -5,7 +5,7 @@ import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from ..parsers.base import LogParser, ParserError
 from ..parsers.common import DEFAULT_PAYLOAD_MAX_CHARS, sha256_json, utc_now
@@ -13,10 +13,6 @@ from ..parsers.registry import ParserRegistry, default_registry
 from .checkpoint import CheckpointStore, safe_source_id, write_json_atomic
 from .dead_letter import DeadLetterWriter
 from .dedup import DedupStore
-
-if TYPE_CHECKING:
-    from .pipeline_stages import ManifestWriter, RecordIteratorFactory
-
 
 @dataclass(frozen=True)
 class IngestResult:
@@ -47,6 +43,38 @@ class _RecordIteratorRequest:
     source_id: str
     source_product: str | None
     dead_letters: DeadLetterWriter
+
+
+@dataclass(frozen=True)
+class _EnrichCounts:
+    parsed_count: int
+    duplicate_count: int
+    skipped_count: int
+    first_event_time: str | None
+    last_event_time: str | None
+
+
+@dataclass(frozen=True)
+class WriteManifestParams:
+    pipeline: Any
+    batch_id: str
+    source_id: str
+    source_path: Path
+    file_format: str
+    parser: LogParser
+    started_at: str
+    content_hash: str
+    size_bytes: int
+    first_event_time: str | None
+    last_event_time: str | None
+    parsed_count: int
+    stored_count: int
+    duplicate_count: int
+    skipped_count: int
+    dead_letter_count: int
+    dead_letter_refs: list[dict[str, Any]]
+    cursor_before: Mapping[str, Any]
+    storage_info: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -285,6 +313,49 @@ def _storage_summary(infos: list[dict[str, Any]], *, default_path: Path | str | 
     if len(paths) > 1:
         summary["paths"] = paths
     return summary
+
+
+def write_manifest(params: WriteManifestParams) -> Path:
+    safe_source = safe_source_id(params.source_id)
+    manifest_path = params.pipeline.root / "manifests" / safe_source / f"{params.batch_id}.json"
+    cursor_after = {
+        "path": str(params.source_path),
+        "format": params.file_format,
+        "size_bytes": params.size_bytes,
+        "content_hash": params.content_hash,
+        "batch_id": params.batch_id,
+    }
+    manifest = {
+        "batch_id": params.batch_id,
+        "source_id": params.source_id,
+        "source_kind": "file",
+        "source_path": str(params.source_path),
+        "format": params.file_format,
+        "parser_id": params.parser.parser_id,
+        "parser_schema": params.parser.schema,
+        "received_at": params.started_at,
+        "completed_at": utc_now(),
+        "time_range": [params.first_event_time, params.last_event_time],
+        "raw_refs": [str(params.source_path)],
+        "size_bytes": params.size_bytes,
+        "content_hash": params.content_hash,
+        "cursor_before": dict(params.cursor_before),
+        "cursor_after": cursor_after,
+        "dedup_policy": "source_event_fingerprint",
+        "checkpoint_policy": "after_durable_write",
+        "status": "stored",
+        "counts": {
+            "parsed": params.parsed_count,
+            "stored": params.stored_count,
+            "duplicates": params.duplicate_count,
+            "skipped": params.skipped_count,
+            "dead_letter": params.dead_letter_count,
+        },
+        "storage": dict(params.storage_info),
+        "dead_letter_refs": params.dead_letter_refs,
+    }
+    write_json_atomic(manifest_path, manifest)
+    return manifest_path
 
 
 def _jsonable_mapping(mapping: Mapping[Any, Any]) -> dict[str, Any]:

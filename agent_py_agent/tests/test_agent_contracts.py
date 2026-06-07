@@ -137,8 +137,8 @@ def test_run_state_snapshot_from_task_like_object() -> None:
     snapshot = run_state_snapshot_from_task(
         SimpleNamespace(
             id="run-1",
-            status="timeout",
-            verification_status="needs_closeout",
+            status="TIMEOUT",
+            verification_status="UNVERIFIED",
             runner_last_error="tool timed out after 240 seconds",
             runner_attempts="2",
         )
@@ -147,7 +147,7 @@ def test_run_state_snapshot_from_task_like_object() -> None:
     assert snapshot["run_id"] == "run-1"
     assert snapshot["schema_version"] == "state_machine.v1"
     assert snapshot["status"] == "TIMEOUT"
-    assert snapshot["verification_status"] == "NEEDS_CLOSEOUT"
+    assert snapshot["verification_status"] == "UNVERIFIED"
     assert snapshot["failure_type"] == "UNKNOWN_ERROR"
     assert snapshot["can_dispatch"] is False
     assert snapshot["can_closeout"] is False

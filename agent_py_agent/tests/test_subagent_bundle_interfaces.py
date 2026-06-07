@@ -115,7 +115,7 @@ def test_lifecycle_set_status_accepts_params_bundle():
     updated = service.set_status(
         SetStatusParams(
             run_id="run-status",
-            status="done",
+            status="DONE",
             result="complete",
             require_evidence=True,
         )
