@@ -22,13 +22,13 @@ from agent_py_agent.agent.subagents.services.indexing.records import (
 from agent_py_agent.agent.subagents.utils import _new_id
 
 from .patch_apply_reports import patch_apply_record_to_dict
-from .patch_renderer import render_patch_apply_record_markdown
 from .patch_apply_task import (
     ApplyPatchTaskParams,
     apply_patch_task,
     normalize_patch_apply_spec,
     resolve_patch_target,
 )
+from .patch_renderer import render_patch_apply_record_markdown
 
 
 @dataclass(frozen=True)

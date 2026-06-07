@@ -4,8 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..runner.context import restore_current_subagent_context, set_current_subagent_context
 from ...subagents.context_bundle_refs import runtime_task_attributes
+from ..runner.context import restore_current_subagent_context, set_current_subagent_context
 from .params import (
     SubagentFinalizeParams,
     SubagentProbeParams,

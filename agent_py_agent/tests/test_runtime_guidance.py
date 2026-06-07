@@ -6,13 +6,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
+from agent_py_agent.agent.agent_core._tool_loop_service import build_tool_loop_prompt
 from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import DispatchSubagentsTool
 from agent_py_agent.agent.agent_core.runtime.guidance import (
     inject_pending_guidance,
     render_subagent_guidance_section,
 )
 from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
-from agent_py_agent.agent.agent_core._tool_loop_service import build_tool_loop_prompt
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig

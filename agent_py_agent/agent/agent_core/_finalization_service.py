@@ -23,11 +23,11 @@ from ._runtime_params import (
     FinalizeContext,
     ToolLoopExecuteParams,
 )
+from .delivery_closeout.artifacts import _required_artifacts
 from .delivery_closeout.closeout import (
     MainAgentDeliveryCloseoutRequest,
     main_agent_delivery_closeout_response,
 )
-from .delivery_closeout.artifacts import _required_artifacts
 from .delivery_closeout.uncontracted import _current_run_task_output_artifacts
 from .delivery_completion_soft_hint import target_coverage_blocks_delivery_auto_closeout
 from .finalization_compact_auto import compact_auto_cycle_fields

@@ -14,8 +14,11 @@ from agent_py_agent.agent.gateway_parts import (
     read_json_file,
     write_gateway_request,
 )
-from agent_py_agent.agent.gateway_parts.request_worker import _process_gateway_requests
-from agent_py_agent.agent.gateway_parts.request_worker import GatewayAskParams, submit_gateway_ask
+from agent_py_agent.agent.gateway_parts.request_worker import (
+    GatewayAskParams,
+    _process_gateway_requests,
+    submit_gateway_ask,
+)
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli import gateway_client
 from agent_py_agent.cli.chat_parts.gateway_client import poll_gateway_chunks

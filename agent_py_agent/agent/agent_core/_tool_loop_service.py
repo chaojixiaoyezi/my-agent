@@ -10,8 +10,8 @@ from ..prompting_parts.builder import ToolSections
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ._runtime_params import ToolLoopExecuteParams
-from .delivery_contract_prompting import render_delivery_contract_section
 from .delivery_completion_soft_hint import maybe_append_delivery_completion_soft_hint
+from .delivery_contract_prompting import render_delivery_contract_section
 from .orchestration.shared_context import (
     refresh_parent_shared_context_cache,
     refresh_parent_shared_context_from_tool_record,
@@ -19,11 +19,11 @@ from .orchestration.shared_context import (
 from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
 from .runner.context import current_task_attributes
 from .runner.stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_started
+from .runtime.guidance import inject_pending_guidance
 from .runtime.live_archive import (
     archive_tool_call_if_enabled,
     update_runtime_fact_progress_if_enabled,
 )
-from .runtime.guidance import inject_pending_guidance
 from .subagent.attempt_guard import stale_subagent_attempt_message
 from .tool_call_archive_record import archive_tool_call_record
 from .tool_call_runtime import (
@@ -33,11 +33,15 @@ from .tool_call_runtime import (
 )
 from .tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .tool_context.reducer import render_tool_result_for_live_prompt
+from .tool_context.window import window_tool_context_params
 from .tool_guard.call_guardrail import record_tool_guard_observation
 from .tool_guard.loop_hints import append_tool_guardrail_action_block_hint
-from .tool_context.window import window_tool_context_params
 from .tool_loop.completion import ToolRoundCompletionRequest, completion_response_after_tool_round
-from .tool_loop.recovery import append_long_content_recovery_context, without_tool_call_after_limit
+from .tool_loop.recovery import (
+    append_long_content_recovery_context,
+    payload_with_runtime_scope,
+    without_tool_call_after_limit,
+)
 from .tool_loop.response_decision import (
     ToolLoopRepairCounters,
     ToolLoopResponseDecisionRequest,
@@ -49,7 +53,6 @@ from .tool_loop.round_execution import (
     ToolRoundExecutionRequest,
     execute_tool_round,
 )
-from .tool_loop.recovery import payload_with_runtime_scope
 from .tool_model_generation import ModelGenerateParams, generate_model_response
 from .tool_runtime_ledger import persist_tool_runtime_ledger
 

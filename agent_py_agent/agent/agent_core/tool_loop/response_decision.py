@@ -6,14 +6,14 @@ from typing import ClassVar
 
 from ...backends import ModelResponse
 from .._runtime_params import ToolLoopExecuteParams
-from ..tool_guard.local_progress import (
-    has_required_local_progress_guard,
-    local_progress_guard_context,
-)
 from ..tool_guard.exploration_fuse import (
     exploration_fuse_context,
     has_pending_exploration_fuse,
     has_required_exploration_fuse,
+)
+from ..tool_guard.local_progress import (
+    has_required_local_progress_guard,
+    local_progress_guard_context,
 )
 from ..tool_guard.unresolved_runtime_issue import (
     has_unresolved_runtime_issues,

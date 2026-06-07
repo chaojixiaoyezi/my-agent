@@ -23,7 +23,6 @@ from .planner_service import (
 from .planner_service import build_parent_planner_state as _build_parent_planner_state
 from .planner_templates import PARENT_PLANNER_SYSTEM_PROMPT
 from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
-from .runtime.owner_roots import runtime_owner_root
 from .runner.prompts import (
     _append_runner_repair_failure,
     _append_runner_repair_prompt,
@@ -31,6 +30,7 @@ from .runner.prompts import (
     _build_subagent_runner_prompt,
     _build_subagent_runner_repair_prompt,
 )
+from .runtime.owner_roots import runtime_owner_root
 from .subagent.finalize_helpers import (
     FinalizedRecoverySnapshotRequest,
     FinalizedRunnerRecordRequest,

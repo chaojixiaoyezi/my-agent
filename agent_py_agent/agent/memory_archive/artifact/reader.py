@@ -8,12 +8,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..tool_output_externalizer import (
+    tool_output_index_paths_for_lookup,
+    tool_output_roots_for_lookup,
+)
 from .read_modes import (
     ArtifactContentReadRequest,
     ArtifactContentReadResult,
     read_artifact_content_by_mode,
 )
-from ..tool_output_externalizer import tool_output_index_paths_for_lookup, tool_output_roots_for_lookup
 
 
 @dataclass(frozen=True)

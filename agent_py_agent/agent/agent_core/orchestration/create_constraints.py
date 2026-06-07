@@ -15,6 +15,7 @@ from .create_target_roots import (
     structured_task_output_write_roots,
 )
 
+
 def role_allows_direct_product_work(role: str, role_template_dirs: object = None) -> bool:
     normalized = str(role or "worker").strip().lower().replace("-", "_")
     if not normalized:

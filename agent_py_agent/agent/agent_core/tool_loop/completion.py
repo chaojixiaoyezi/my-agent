@@ -6,11 +6,11 @@ from typing import ClassVar
 
 from ...backends import ModelResponse
 from .._runtime_params import ToolLoopExecuteParams
-from ..delivery_completion_soft_hint import target_coverage_blocks_delivery_auto_closeout
 from ..delivery_closeout.closeout import (
     MainAgentDeliveryCloseoutRequest,
     main_agent_delivery_closeout_response,
 )
+from ..delivery_completion_soft_hint import target_coverage_blocks_delivery_auto_closeout
 from ..subagent.progress_closeout import subagent_progress_closeout_response
 from .round_execution import subagent_output_json_response
 

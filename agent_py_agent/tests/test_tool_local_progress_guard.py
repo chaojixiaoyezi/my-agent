@@ -95,7 +95,9 @@ def test_local_progress_guard_resets_when_work_progress_fingerprint_changes(tmp_
 def test_local_progress_guard_state_prefers_current_task_work_dir(tmp_path: Path):
     from dataclasses import replace
 
-    from agent_py_agent.agent.agent_core.tool_guard.local_progress import has_required_local_progress_guard
+    from agent_py_agent.agent.agent_core.tool_guard.local_progress import (
+        has_required_local_progress_guard,
+    )
 
     workspace_root = tmp_path / "source-workspace"
     task_root = tmp_path / "tasks" / "2026-06-07" / "delivery"

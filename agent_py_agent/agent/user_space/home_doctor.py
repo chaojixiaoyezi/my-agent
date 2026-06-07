@@ -11,8 +11,8 @@ from .home_indexes import dangling_index_refs
 from .home_layout import MyAgentHomePaths
 from .home_retention import plan_owner_retention
 from .home_runtime_query import home_runtime_status
-from .owner_policy import read_owner_policy_bundle_report
 from .owner_compact_indexes import dangling_owner_compact_index_refs_report
+from .owner_policy import read_owner_policy_bundle_report
 from .temporary_grants import list_temporary_grants
 
 

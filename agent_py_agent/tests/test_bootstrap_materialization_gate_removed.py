@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 
 def test_bootstrap_contract_does_not_redirect_pure_inspection_tool_calls(tmp_path: Path):
-    from agent_py_agent.agent.agent_core.tool_loop.response_decision import ToolLoopRepairCounters
     from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+        ToolLoopRepairCounters,
         ToolLoopResponseDecisionRequest,
         tool_loop_response_decision,
     )
@@ -29,8 +29,8 @@ def test_bootstrap_contract_does_not_redirect_pure_inspection_tool_calls(tmp_pat
 
 
 def test_bootstrap_contract_does_not_block_repeated_evidence_calls(tmp_path: Path):
-    from agent_py_agent.agent.agent_core.tool_loop.response_decision import ToolLoopRepairCounters
     from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+        ToolLoopRepairCounters,
         ToolLoopResponseDecisionRequest,
         tool_loop_response_decision,
     )

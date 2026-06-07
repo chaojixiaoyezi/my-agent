@@ -16,6 +16,7 @@ from .manager_work_orders import (
     write_takeover_file,
 )
 from .models import SubAgentCard, SubAgentTask, TakeoverRecord, WorkOrderValidation
+from .patch.patch_service import SubAgentPatchService
 from .services.actions import SubAgentActionService
 from .services.base import CreateRunParams, SubAgentBaseService
 from .services.board.service import SubAgentBoardService
@@ -29,7 +30,6 @@ from .services.indexing.records import LocalRecordParams
 from .services.learning import SubAgentLearningService
 from .services.lifecycle import SubAgentLifecycleService
 from .services.memory_gate import SubAgentMemoryGateService
-from .patch.patch_service import SubAgentPatchService
 from .services.persistence import SubAgentPersistenceService
 from .services.runner_context import SubAgentRunnerContextService
 from .services.runner_result import SubAgentRunnerResultService

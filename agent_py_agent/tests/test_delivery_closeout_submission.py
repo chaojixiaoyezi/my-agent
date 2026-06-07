@@ -11,8 +11,8 @@ from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
 )
-from agent_py_agent.agent.agent_core.tool_loop.response_decision import ToolLoopRepairCounters
 from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+    ToolLoopRepairCounters,
     ToolLoopResponseDecisionRequest,
     tool_loop_response_decision,
 )

@@ -21,8 +21,8 @@ from ...contracts.artifact_acceptance import (
 )
 from ...contracts.gates import artifact_provenance_from_archive
 from ...contracts.staged_checkpoint_acceptance import staged_checkpoint_findings
-from ..artifact_locator import locate_artifact
 from .._runtime_params import ToolLoopExecuteParams
+from ..artifact_locator import locate_artifact
 from ..target_coverage_ledger import collect_target_coverage_records, target_coverage_status
 from .groups import (
     ArtifactGroupValidationRequest,

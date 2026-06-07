@@ -32,7 +32,7 @@ class GuidanceEntry:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "GuidanceEntry":
+    def from_dict(cls, data: dict[str, Any]) -> GuidanceEntry:
         metadata = data.get("metadata")
         return cls(
             guidance_id=str(data.get("guidance_id") or ""),

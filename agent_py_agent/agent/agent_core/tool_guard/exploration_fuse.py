@@ -6,13 +6,13 @@ import shlex
 from pathlib import Path
 
 from ...backends import ModelResponse
-from ..run_task_workspace_writer import current_run_task_work_dir
 from ..exploration_fuse_config import (
     ExplorationFuseConfig,
     exploration_fuse_config,
     exploration_fuse_hint_rounds,
     exploration_fuse_used_percent,
 )
+from ..run_task_workspace_writer import current_run_task_work_dir
 
 _STATE_DIR = ".agent_delivery"
 _STATE_FILE = "exploration_fuse.json"

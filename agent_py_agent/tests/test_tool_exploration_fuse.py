@@ -154,7 +154,9 @@ def test_exploration_fuse_resets_when_local_progress_happens(tmp_path: Path):
 def test_exploration_fuse_state_prefers_current_task_work_dir(tmp_path: Path):
     from dataclasses import replace
 
-    from agent_py_agent.agent.agent_core.tool_guard.exploration_fuse import has_required_exploration_fuse
+    from agent_py_agent.agent.agent_core.tool_guard.exploration_fuse import (
+        has_required_exploration_fuse,
+    )
 
     workspace_root = tmp_path / "source-workspace"
     task_root = tmp_path / "tasks" / "2026-06-07" / "read-code"
@@ -211,8 +213,8 @@ def test_tool_loop_decision_redirects_exploration_fuse_without_blocking(tmp_path
     from agent_py_agent.agent.agent_core.tool_guard.exploration_fuse import (
         has_required_exploration_fuse,
     )
-    from agent_py_agent.agent.agent_core.tool_loop.response_decision import ToolLoopRepairCounters
     from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+        ToolLoopRepairCounters,
         ToolLoopResponseDecisionRequest,
         tool_loop_response_decision,
     )

@@ -6,8 +6,8 @@ from pathlib import Path
 from ..artifacts.registry import ArtifactRegistration, register_artifact
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..settings.defaults import default_config_int
-from .runtime.owner_roots import runtime_owner_root
 from .run_task_workspace_writer import current_run_task_work_dir, current_run_task_workspace_root
+from .runtime.owner_roots import runtime_owner_root
 from .tool_loop.recovery import runtime_run_id, runtime_run_scope
 from .tool_loop.round_execution import ToolCallRecordParams
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint

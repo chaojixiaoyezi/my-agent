@@ -81,8 +81,10 @@ class TestEmptyInputCases:
 
     def test_unicode_goal_handling(self, tmp_path: Path):
         """Unicode 目标字符串的处理。"""
-        from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
-        from agent_py_agent.agent.agent_core.failure_analysis_service import FailureIntrospector
+        from agent_py_agent.agent.agent_core.failure_analysis_service import (
+            FailureAnalysis,
+            FailureIntrospector,
+        )
 
         introspector = FailureIntrospector()
 
@@ -207,8 +209,8 @@ class TestParameterBoundaryCases:
 
     def test_max_tool_rounds_negative(self, tmp_path: Path):
         """max_tool_rounds 为负数时的处理。"""
-        from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
         from agent_py_agent.agent.agent_core.failure_analysis_service import (
+            FailureAnalysis,
             FailureIntrospection,
             FailureIntrospector,
         )
@@ -289,8 +291,10 @@ class TestParameterBoundaryCases:
 
     def test_empty_string_goal(self, tmp_path: Path):
         """空字符串目标的处理。"""
-        from agent_py_agent.agent.agent_core.failure_analysis_service import FailureAnalysis
-        from agent_py_agent.agent.agent_core.failure_analysis_service import FailureIntrospector
+        from agent_py_agent.agent.agent_core.failure_analysis_service import (
+            FailureAnalysis,
+            FailureIntrospector,
+        )
 
         introspector = FailureIntrospector()
 

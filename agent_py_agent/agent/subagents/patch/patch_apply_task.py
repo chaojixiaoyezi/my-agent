@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_py_agent.agent.common.json_io import read_json_object_report
+from agent_py_agent.agent.subagents.parsing import _dict_list
 from agent_py_agent.agent.subagents.patch.patch_apply_audit import (
     PatchApplyRecordPayload,
     build_patch_apply_record,
@@ -28,7 +29,6 @@ from agent_py_agent.agent.subagents.patch.patch_file_ops import (
     rollback_patch_apply,
 )
 from agent_py_agent.agent.subagents.patch.patch_renderer import build_unified_diff
-from agent_py_agent.agent.subagents.parsing import _dict_list
 from agent_py_agent.agent.subagents.reports import PatchApplyRecord
 from agent_py_agent.agent.subagents.utils import _new_id
 from agent_py_agent.agent.tooling.write_boundary import validate_write_boundary

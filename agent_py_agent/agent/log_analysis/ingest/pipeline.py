@@ -14,6 +14,7 @@ from .checkpoint import CheckpointStore, safe_source_id, write_json_atomic
 from .dead_letter import DeadLetterWriter
 from .dedup import DedupStore
 
+
 @dataclass(frozen=True)
 class IngestResult:
     batch_id: str

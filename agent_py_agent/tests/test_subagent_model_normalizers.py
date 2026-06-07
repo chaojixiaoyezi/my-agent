@@ -16,8 +16,10 @@ class TestFieldNames:
 
     def test_returns_field_names_set(self):
         """验证返回字段名集合。"""
-        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _field_names
         from agent_py_agent.agent.subagents.models import QualityContract
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _field_names,
+        )
 
         result = _field_names(QualityContract)
         assert isinstance(result, set)
@@ -87,8 +89,10 @@ class TestNormalizeQualityContract:
 
     def test_returns_same_instance(self):
         """已是 QualityContract 直接返回。"""
-        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_quality_contract
         from agent_py_agent.agent.subagents.models import QualityContract
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _normalize_quality_contract,
+        )
 
         original = QualityContract()
         result = _normalize_quality_contract(original)
@@ -96,15 +100,19 @@ class TestNormalizeQualityContract:
 
     def test_returns_default_for_non_dict(self):
         """非字典返回默认实例。"""
-        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_quality_contract
         from agent_py_agent.agent.subagents.models import QualityContract
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _normalize_quality_contract,
+        )
 
         result = _normalize_quality_contract(123)
         assert isinstance(result, QualityContract)
 
     def test_normalizes_dict_fields(self):
         """规范化和过滤字典字段。"""
-        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_quality_contract
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _normalize_quality_contract,
+        )
 
         data = {
             "failure_conditions": ["cond1", "cond2"],
@@ -122,8 +130,10 @@ class TestNormalizeContextManifest:
 
     def test_returns_same_instance(self):
         """已是 ContextManifest 直接返回。"""
-        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_context_manifest
         from agent_py_agent.agent.subagents.models import ContextManifest
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _normalize_context_manifest,
+        )
 
         original = ContextManifest()
         result = _normalize_context_manifest(original)
@@ -131,15 +141,19 @@ class TestNormalizeContextManifest:
 
     def test_returns_default_for_non_dict(self):
         """非字典返回默认实例。"""
-        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_context_manifest
         from agent_py_agent.agent.subagents.models import ContextManifest
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _normalize_context_manifest,
+        )
 
         result = _normalize_context_manifest("invalid")
         assert isinstance(result, ContextManifest)
 
     def test_token_budget_to_int(self):
         """token_budget 转换为整数。"""
-        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_context_manifest
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _normalize_context_manifest,
+        )
 
         result = _normalize_context_manifest({"token_budget": "5000"})
         assert result.token_budget == 5000
@@ -150,14 +164,18 @@ class TestNormalizeContextPacks:
 
     def test_dict_wrapped_in_list(self):
         """字典包装成列表。"""
-        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_context_packs
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _normalize_context_packs,
+        )
 
         result = _normalize_context_packs({"key": "value"})
         assert result == [{"key": "value"}]
 
     def test_list_passes_through(self):
         """列表原样返回。"""
-        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_context_packs
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _normalize_context_packs,
+        )
 
         data = [{"key": "val1"}, {"key": "val2"}]
         result = _normalize_context_packs(data)
@@ -165,7 +183,9 @@ class TestNormalizeContextPacks:
 
     def test_non_dict_filtered(self):
         """非字典元素被过滤。"""
-        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import _normalize_context_packs
+        from agent_py_agent.agent.subagents.services.persistence.model_normalizers import (
+            _normalize_context_packs,
+        )
 
         result = _normalize_context_packs([{"key": "val"}, "string", None, 123])
         assert len(result) == 1
