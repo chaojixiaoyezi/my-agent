@@ -5,7 +5,7 @@ from __future__ import annotations
 Recovery dispatch accepts only the explicit protocol modes below.
 """
 
-from ....contracts.recovery_actions import RecoveryAction
+from ....contracts.recovery import RecoveryAction
 
 NO_PROGRESS_LIMIT_REACHED = "no_progress_limit_reached"
 LEADERSHIP_RECOVERY = "leadership_recovery"

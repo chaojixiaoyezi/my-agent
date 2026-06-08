@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
-from ..contracts.recovery_actions import RecoveryAction
+from ..contracts.recovery import RecoveryAction
 from ..run_intent import reference_write_feedback
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _required_path, _text_param
 from ._filesystem_read import FileSystemAccessOptions, FileSystemTool

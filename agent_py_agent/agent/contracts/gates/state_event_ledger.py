@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from ..recovery_actions import RecoveryAction
+from ..recovery import RecoveryAction
 from ..state_machine_transitions import transition_contract
 from .models import GateDecision, GateFinding
 

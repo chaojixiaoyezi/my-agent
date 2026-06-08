@@ -7,7 +7,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from ..contracts.delivery_contract_doctor import validate_delivery_contract
-from ..contracts.recovery_actions import RecoveryAction
+from ..contracts.recovery import RecoveryAction
 
 SCHEMA_VERSION = "delivery_contract.v1"
 MATERIALIZER_SCHEMA_VERSION = "delivery_requirement_materializer.v1"

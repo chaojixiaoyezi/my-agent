@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .recovery_actions import RecoveryAction
+from .recovery import RecoveryAction
 
 SCHEMA_VERSION = "delivery_contract.v1"
 DOCTOR_SCHEMA_VERSION = "delivery_contract_doctor.v1"

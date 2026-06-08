@@ -140,7 +140,7 @@ def test_approval_terminal_failures_block_instead_of_waiting_for_language() -> N
 
 
 def test_recovery_classification_normalizes_structured_codes_only() -> None:
-    from agent_py_agent.agent.contracts.recovery_classification import (
+    from agent_py_agent.agent.contracts.recovery import (
         action_status,
         recommended_action,
         recovery_category,

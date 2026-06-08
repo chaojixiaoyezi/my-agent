@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ...contracts.recovery_actions import RecoveryAction
+from ...contracts.recovery import RecoveryAction
 from .artifacts import (
     _artifact_path,
     _required_artifacts,

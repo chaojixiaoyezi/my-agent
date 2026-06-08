@@ -8,7 +8,7 @@ from typing import Any
 
 from ...contracts.error_taxonomy import error_contract
 from ...contracts.gates import GateDecision, GateFinding, evaluate_fact_evidence_gate
-from ...contracts.recovery_actions import RecoveryAction
+from ...contracts.recovery import RecoveryAction
 from ...contracts.staged_checkpoint_acceptance import (
     StagedEvidenceRequest,
     staged_json_evidence_findings,

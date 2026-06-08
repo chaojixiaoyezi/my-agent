@@ -5,7 +5,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from ...recovery_actions import RecoveryAction
+from ...recovery import RecoveryAction
 from ..models import GateDecision, GateFinding
 
 _WRITE_ARTIFACT_TOOLS = {"write_file"}

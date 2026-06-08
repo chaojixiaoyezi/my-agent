@@ -5,7 +5,7 @@ from typing import Any
 
 from ..common.value_parsing import sequence_strings
 from ..contracts.gates.compaction_gate import CompactionGateFacts, evaluate_compaction_gate
-from ..contracts.recovery_actions import RecoveryAction
+from ..contracts.recovery import RecoveryAction
 
 
 def build_compaction_gate_state(

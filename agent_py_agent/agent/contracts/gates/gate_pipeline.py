@@ -4,7 +4,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from ..recovery_actions import RecoveryAction
+from ..recovery import RecoveryAction
 from .models import GateContext, GateDecision, GateFinding, GateValidator
 from .registry import GateRegistry
 

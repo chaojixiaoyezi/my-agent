@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
-from ..contracts.recovery_actions import RecoveryAction
+from ..contracts.recovery import RecoveryAction
 from .execution.report import TestExecutionReport
 
 

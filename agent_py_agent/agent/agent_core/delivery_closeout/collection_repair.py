@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ...contracts.recovery_actions import RecoveryAction
+from ...contracts.recovery import RecoveryAction
 from .artifact_repair import _artifact_validation_contract, artifact_findings
 from .recovery_models import RecoveryActionLedger
 

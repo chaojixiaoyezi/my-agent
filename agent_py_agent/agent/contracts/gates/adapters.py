@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from difflib import SequenceMatcher
 
-from ..recovery_actions import RecoveryAction
+from ..recovery import RecoveryAction
 from ..state_machine_transitions import transition_contract
 from ..tool_protocol_v2 import normalize_tool_call, validate_tool_call
 from .models import GateDecision, GateFinding

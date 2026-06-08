@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from ...recovery_actions import RecoveryAction
+from ...recovery import RecoveryAction
 from ..models import GateDecision
 from .manifest import SIDE_EFFECT_TOOL_EFFECTS
 

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ...contracts.gates.models import GateDecision, GateFinding
-from ...contracts.recovery_actions import RecoveryAction
+from ...contracts.recovery import RecoveryAction
 from ...subagents.models import (
     SUBAGENT_FAILURE_STATUSES,
     SUBAGENT_RESOLVED_TERMINAL_STATUSES,

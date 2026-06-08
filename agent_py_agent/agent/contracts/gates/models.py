@@ -5,8 +5,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..recovery_actions import RecoveryAction
-from ..recovery_envelope import RecoveryEnvelopeRequest, recovery_envelope_from_gate_payload
+from ..recovery import RecoveryAction
+from ..recovery import RecoveryEnvelopeRequest, recovery_envelope_from_gate_payload
 
 GateValidator = Callable[["GateContext"], "GateDecision"]
 

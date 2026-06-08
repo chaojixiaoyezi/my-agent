@@ -12,7 +12,7 @@ from ...contracts.gates import (
     append_delivery_quality_gate_trace,
     evaluate_delivery_quality_gate,
 )
-from ...contracts.recovery_actions import RecoveryAction
+from ...contracts.recovery import RecoveryAction
 from .artifacts import _required_artifacts
 
 

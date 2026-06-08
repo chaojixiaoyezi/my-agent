@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ...contracts.recovery_actions import RecoveryAction
+from ...contracts.recovery import RecoveryAction
 from .recovery_models import RecoveryActionLedger
 
 _MAX_FINDING_VALUES_PER_ACTION = 64

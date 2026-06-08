@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from ...recovery_actions import RecoveryAction
+from ...recovery import RecoveryAction
 from ..models import GateDecision, GateFinding
 
 

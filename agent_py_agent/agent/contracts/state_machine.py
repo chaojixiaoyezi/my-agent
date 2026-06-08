@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 
 from .error_taxonomy import error_contract
-from .recovery_actions import RecoveryAction, recovery_action_value
+from .recovery import RecoveryAction, recovery_action_value
 
 SCHEMA_VERSION = "state_machine.v1"
 DISPATCHABLE_STATES = {"PLANNING", "PENDING"}

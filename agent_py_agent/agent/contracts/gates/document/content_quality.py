@@ -8,7 +8,7 @@ from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile
 
 from ....common.value_parsing import sequence_strings
-from ...recovery_actions import RecoveryAction
+from ...recovery import RecoveryAction
 from ..models import GateDecision, GateFinding
 from .content_extractors import (
     DocumentContentFacts,
