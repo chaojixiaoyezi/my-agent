@@ -13,7 +13,12 @@ from ..memory_archive.snapshots import RecoverySnapshotInput
 from ..runtime_errors import runtime_error_report
 from ..subagents import ParentPlannerRecord
 from ..subagents.manager_runner_result_payload import RecordRunnerResultParams
-from ..subagents.models import SubAgentRunnerResult, SubAgentTask
+from ..subagents.models import (
+    FailureType,
+    SubAgentRunnerResult,
+    SubAgentTask,
+    task_status_reason_code,
+)
 from ..subagents.parsing import parse_parent_planner_output, parse_subagent_runner_output
 from ..subagents.services.dispatch.params import ParentPlannerRecordParams
 from .planner_service import PlannerPromptParams
@@ -205,7 +210,7 @@ class _SubagentLifecycleBase:
                 prompt=prompt,
                 status="CHANNEL_ERROR",
                 verification_status="UNVERIFIED",
-                failure_type="channel",
+                failure_type=FailureType.CHANNEL.value,
             )
         )
 
@@ -593,7 +598,7 @@ def _recovery_snapshot_input(
         request_id=f"subagent-run:{snapshot.run_id}",
         run_id=snapshot.run_id,
         task_id=snapshot.run_id,
-        status=str(snapshot.status).lower() or "unknown",
+        status=task_status_reason_code(snapshot.status) or "unknown",
         error_code=snapshot.error_code,
         tool_calls=snapshot.tool_calls,
         task_refs=[snapshot.run_id],
@@ -627,7 +632,7 @@ def _planner_record_status(parsed, state: dict) -> tuple[bool, str, str, str]:
 
 def _subagent_run_failure_type(exc: BaseException) -> str:
     if is_provider_timeout_error(exc):
-        return "provider_timeout"
+        return FailureType.PROVIDER_TIMEOUT.value
     if is_provider_transient_error(exc):
-        return "transient_error"
-    return "runner_error"
+        return FailureType.TRANSIENT_ERROR.value
+    return FailureType.RUNNER_ERROR.value

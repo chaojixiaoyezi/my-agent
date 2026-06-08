@@ -129,7 +129,7 @@ def test_context_bundle_ignores_source_markdown_inputs_for_required_files(tmp_pa
         ),
         thought="vietnam.md 是输入资料，不是需要创建的报告文件。",
         plan=["读取越南资料", "整理市场机会", "输出分析结论"],
-        role="leaf_worker",
+        role="worker",
         acceptance_checks=["分析覆盖市场机会、渠道和风险", "不把输入资料当成产物"],
     )
     task.allowed_write_roots = [str(Path(task.task_dir) / "reports")]

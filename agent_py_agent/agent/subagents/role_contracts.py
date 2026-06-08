@@ -54,9 +54,8 @@ def apply_role_contract_to_create_params(params: Any, role_template_dirs: object
 
 
 def _default_template_role(role: str) -> str | None:
-    if role in {"", "general", REPORTER_ROLE, CHECKER_ROLE}:
-        return None
-    return "worker"
+    del role
+    return None
 
 
 def _stored_role(original_role: str, contract_role: str, template_role: str, normalize_role: object) -> str:

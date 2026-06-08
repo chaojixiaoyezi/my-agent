@@ -98,3 +98,12 @@ def test_parse_tool_block_payload_rejects_json_write_file_raw_trailing_body() ->
 
     assert payload["tool"] == "__parse_error__"
     assert payload["error_code"] == "TOOL_CALL_JSON_INVALID"
+
+
+def test_parse_tool_block_payload_rejects_json_write_file_trailing_body() -> None:
+    payload = parse_tool_block_payload(
+        '{"tool":"write_file","path":"outputs/index.html","content":""}\n<html><body>ok</body></html>\n'
+    )
+
+    assert payload["tool"] == "__parse_error__"
+    assert payload["error_code"] == "TOOL_CALL_JSON_INVALID"

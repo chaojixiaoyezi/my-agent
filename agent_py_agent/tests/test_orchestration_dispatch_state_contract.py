@@ -135,11 +135,15 @@ def test_dispatch_state_completed_alias_does_not_suggest_closeout():
     }).output)
 
     state = payload["current_turn_run_state"]
-    assert state["by_status"] == {"COMPLETED": 1}
+    assert state["by_status"] == {"BLOCKED": 1}
+    assert state["blocked_run_ids"] == ["alias"]
     assert state["verified_run_ids"] == []
     assert state["unfinished_run_ids"] == ["alias"]
-    assert state["next_action"] == "inspect_unverified_or_unknown_run_ids"
-    assert state["suggested_tool_call"] == {"tool": "inspect_agent_tree"}
+    assert state["next_action"] == "inspect_or_rescue_blocked_run_ids"
+    assert state["suggested_tool_call"]["tool"] == "dispatch_subagents"
+    assert state["suggested_tool_call"]["dry_run"] is True
+    assert state["recovery_recommendations"][0]["failure_type"] == "STATE_STATUS_INVALID"
+    assert state["recovery_recommendations"][0]["recommended_action"] == "manual_review"
 
 
 def test_create_payload_includes_stable_operation_contract(tmp_path):

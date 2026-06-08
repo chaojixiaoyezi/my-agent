@@ -42,6 +42,10 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
 
 - request/response/history 损坏要显式报告 load_error，不能渲染成“没有记录”。
 - worker 秒退、参数错、import 错要立即标记失败状态，不能伪装成 processing/planning。
+- CLI `gateway ask` 和 HTTP `/ask` 都必须写 `conversation` 结构化字段；本地 CLI 默认使用
+  `gateway-cli/default`，HTTP 使用请求体里的 `conversation_id` / `session_id` /
+  `thread_id`，缺省为 `default`。后续请求靠这个字段续接 thread/task link，
+  不靠自然语言判断“上一轮任务”。
 - conversation task link 只有 `status=active` 才会注入当前请求上下文；其他状态按非活跃处理，
   不用自然语言或旧状态别名猜测。
 - gateway 内部实现直接引用 owner 模块：ask 队列走 `request_worker`，lease/heartbeat 走

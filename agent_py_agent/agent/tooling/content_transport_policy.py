@@ -8,7 +8,8 @@ from ..settings.defaults import DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
 MAX_INLINE_WRITE_CONTENT_CHARS = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
 STREAMING_INLINE_WRITE_ABORT_CHARS = 32_000
 RECOMMENDED_WRITE_CHUNK_CHARS = "1500-2000"
-RECOVERY_WRITE_CHUNK_CHARS = 800
+RECOVERY_WRITE_CHUNK_CHARS = 2000
+RECOVERY_STREAMING_INLINE_WRITE_ABORT_CHARS = STREAMING_INLINE_WRITE_ABORT_CHARS
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ def tool_content_transport_protocol(max_inline_chars: int = MAX_INLINE_WRITE_CON
         "# Tool Content Transport Protocol\n"
         f"- 大内容边界：write_file.content 单次推荐不超过 {limit} 字符。\n"
         "- 如果要生成完整 HTML/CSS/JS、长脚本、长报告或大段数据，不要把完整大文件正文塞进一个 JSON 工具参数。\n"
+        "- 长文本报告可以先用 write_file 覆盖写入标题/目录，再用同一个 write_file 的 mode=\"append\" 分段追加后续章节。\n"
         "- 写完整单文件成品时可以用独立成行的 WRITE_FILE_RAW 原文块一次提交整份文件，避免 JSON 转义、chunk 错位和忘记 finish：\n"
         "[WRITE_FILE_RAW path=\"output/file.html\"]\n"
         "<!doctype html>\n"
@@ -69,9 +71,10 @@ def tool_content_transport_protocol(max_inline_chars: int = MAX_INLINE_WRITE_CON
         "[/WRITE_FILE_RAW]\n"
         "- 注意：这是 [TOOL_CALL] 外的原文块协议，opener 和 closer 必须独立成行；它不是 JSON 工具名，普通文本报告优先用 write_file.content。\n"
         "- WRITE_FILE_RAW 会被系统转换成 write_file；正文只按机器 marker 边界读取，不做自然语言判断。\n"
+        "- WRITE_FILE_RAW 也支持结构化属性 mode=\"append\"，用于把长文件分块追加到同一路径。\n"
         "- PDF、XLSX、图片、压缩包等二进制产物用脚本生成后，通过 write_file.data_base64 写入最终文件。\n"
-        f"- 如果上一轮工具调用解析失败、超时或被截断，下一轮每块降到 {RECOVERY_WRITE_CHUNK_CHARS} 字符以内，"
-        "闭合工具调用后等待结果。\n"
+        f"- 如果上一轮工具调用解析失败、超时或被截断，下一轮建议每块降到 {RECOVERY_WRITE_CHUNK_CHARS} 字符以内；"
+        "这是恢复建议，不是流式截断上限。完整闭合的中等长度写入会先交给工具层处理。\n"
         "- 修改已有文件时优先用 apply_patch；需要脚本生成大文件时，直接用 run_command，"
         "由运行时 access_mode 决定命令是否能在目标目录执行。"
     )
@@ -133,7 +136,7 @@ def long_content_transport_hint(request: LongContentTransportHintRequest) -> str
         f"{request.tool_name}.{request.field_name} inline content 超过推荐值：{request.actual_chars} 字符，"
         f"推荐最多 {limit} 字符。{target}\n"
         "本次工具调用已被合法解析时，工具层会保留内容并写入文件；长期规则仍是不要把大文件正文塞进一个 JSON 工具参数。\n"
-        f"请改用独立成行的 [WRITE_FILE_RAW path=\"...\"] 原文块或 write_file.data_base64 提交完整产物；普通文本 content 建议 "
+        f"请改用 write_file mode=\"append\" 分段追加、独立成行的 [WRITE_FILE_RAW path=\"...\" mode=\"append\"] 原文块或 write_file.data_base64 提交完整产物；普通文本 content 建议 "
         f"{RECOMMENDED_WRITE_CHUNK_CHARS} 字符，工具解析失败后降到不超过 "
         f"{RECOVERY_WRITE_CHUNK_CHARS} 字符。\n"
         "修改已有文件时优先用 apply_patch；需要脚本生成大文件时，直接用 run_command，"

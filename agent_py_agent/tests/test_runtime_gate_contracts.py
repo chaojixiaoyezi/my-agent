@@ -82,7 +82,7 @@ def test_gate_decision_exposes_action_and_operator_semantics():
 
 
 def test_contract_recovery_exposes_rework_loop_for_repairable_gate_failure():
-    from agent_py_agent.agent.agent_core.delivery_closeout.gate_recovery import (
+    from agent_py_agent.agent.agent_core.delivery_closeout.recovery import (
         attach_contract_recovery,
     )
 
@@ -110,8 +110,21 @@ def test_task_progress_open_items_are_repairable_not_terminal():
 
     assert recovery["status"] == "repair_required"
     assert recovery["terminal"] is False
+
+
+def test_source_fact_identifier_repair_is_not_terminal():
+    decision = GateDecision.repair(
+        "source_fact_consistency",
+        [GateFinding("SOURCE_CODE_IDENTIFIER_NOT_READ", message="补源码证据")],
+    )
+
+    recovery = decision.to_dict()["recovery"]
+
+    assert recovery["status"] == "repair_required"
+    assert recovery["terminal"] is False
     assert recovery["can_auto_repair"] is True
-    assert recovery["actions"][0]["recommended_action"] == "continue"
+    assert recovery["actions"][0]["retryable"] is True
+    assert recovery["actions"][0]["recommended_action"] == "repair_evidence_refs"
 
 
 def test_target_coverage_missing_is_repairable_not_terminal():
@@ -262,6 +275,59 @@ def test_artifact_provenance_accepts_materialized_write_record_with_failed_post_
     )
 
     assert decision.allowed is True
+
+
+def test_artifact_provenance_prefers_latest_current_run_write_over_read(tmp_path: Path):
+    from agent_py_agent.agent.contracts.gates import artifact_provenance_from_archive
+
+    artifact_path = tmp_path / "output" / "final_report.md"
+    artifact_path.parent.mkdir()
+    artifact_path.write_text("final report", encoding="utf-8")
+
+    provenance = artifact_provenance_from_archive(
+        {"path": str(artifact_path), "ok": True},
+        [
+            {
+                "tool": "read_file",
+                "ok": True,
+                "run_id": "run-1",
+                "call_id": "read-1",
+                "created_at": "2026-06-08T02:25:26+00:00",
+                "parameters": {"path": str(artifact_path.relative_to(tmp_path))},
+                "runtime_gate": {
+                    "allowed": True,
+                    "status": "ALLOW",
+                    "evidence": {
+                        "tool_name": "read_file",
+                        "operation_id": "op-read",
+                        "idempotency_key": "idem-read",
+                    },
+                },
+            },
+            {
+                "tool": "write_file",
+                "ok": True,
+                "run_id": "run-1",
+                "call_id": "write-1",
+                "created_at": "2026-06-08T02:40:00+00:00",
+                "parameters": {"path": str(artifact_path.relative_to(tmp_path))},
+                "runtime_gate": {
+                    "allowed": True,
+                    "status": "ALLOW",
+                    "evidence": {
+                        "tool_name": "write_file",
+                        "operation_id": "op-write",
+                        "idempotency_key": "idem-write",
+                    },
+                },
+            },
+        ],
+        run_id="run-1",
+        workspace_root=tmp_path,
+    )
+
+    assert provenance["tool_name"] == "write_file"
+    assert provenance["created_at"] == "2026-06-08T02:40:00+00:00"
 
 
 def test_final_closeout_gate_requires_run_artifact_state_and_acceptance_gates():

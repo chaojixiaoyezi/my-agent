@@ -203,6 +203,60 @@ def test_dispatch_single_runner_keeps_specific_instruction(monkeypatch, tmp_path
     assert captured == ["你是 auth-coordinator，只能写 auth 页面。"]
 
 
+def test_dispatch_worker_reuses_parent_runtime_context_config(monkeypatch, tmp_path):
+    """子代理 runner 默认复用主代理上下文和 compact 配置，不另开一套常规参数。"""
+
+    captured: list[tuple[int, int, str]] = []
+    cfg = AgentConfig(
+        model_backend="worker-pool-test",
+        subagent_workspace="subs",
+        runner_concurrency="1",
+        runner_start_rate="1",
+        runner_timeout_seconds="off",
+        model_context_window_tokens=200_000,
+        memory_compact_auto_trigger_percent=70,
+    )
+    monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: CountingAcceptedBackend())
+    agent = SimpleAgent(cfg, tmp_path)
+    task = agent.subagents.create_run(goal="读取大项目并写报告", thought="等待 worker。", plan=["执行"])
+
+    def fake_worker(params):
+        captured.append(
+            (
+                params.config.model_context_window_tokens,
+                params.config.memory_compact_auto_trigger_percent,
+                params.config.runner_timeout_seconds,
+            )
+        )
+        return agent.subagents.runner_result.record_runner_result(
+            RecordRunnerResultParams(
+                run_id=params.run_id,
+                dry_run=False,
+                ok=True,
+                message="done",
+                status="DONE",
+                verification_status="VERIFIED",
+            )
+        )
+
+    monkeypatch.setattr("agent_py_agent.agent.agent_core.runner.dispatch._run_subagent_worker", fake_worker)
+
+    router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+    agent.dispatch_subagents(
+        router,
+        CapabilityConfig(),
+        params=DispatchParams(
+            apply=True,
+            start_runners=True,
+            include_run_ids=[task.id],
+            max_runners=1,
+            probe=False,
+        ),
+    )
+
+    assert captured == [(200_000, 70, "off")]
+
+
 def _parent_child_pair(agent):
     parent = agent.subagents.create_run(
         goal="cart coordinator", thought="create cart worker", plan=["dispatch child"], role="coordinator",

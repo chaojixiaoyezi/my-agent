@@ -26,9 +26,9 @@ def test_schedule_tool_allows_three_child_batches_by_default(tmp_path):
     result = tool.execute(
         {
             "children": [
-                {"goal": "写 index.html", "role": "leaf_worker", "agent_name": "index"},
-                {"goal": "写 flow-a.html", "role": "leaf_worker", "agent_name": "cart"},
-                {"goal": "写 flow-b.html", "role": "leaf_worker", "agent_name": "checkout"},
+                {"goal": "写 index.html", "role": "worker", "agent_name": "index"},
+                {"goal": "写 flow-a.html", "role": "worker", "agent_name": "cart"},
+                {"goal": "写 flow-b.html", "role": "worker", "agent_name": "checkout"},
             ]
         }
     )
@@ -46,8 +46,8 @@ def test_schedule_tool_allows_two_child_batches(tmp_path):
     result = tool.execute(
         {
             "children": [
-                {"goal": "写 index.html", "role": "leaf_worker", "agent_name": "index"},
-                {"goal": "写 flow-a.html", "role": "leaf_worker", "agent_name": "cart"},
+                {"goal": "写 index.html", "role": "worker", "agent_name": "index"},
+                {"goal": "写 flow-a.html", "role": "worker", "agent_name": "cart"},
             ]
         }
     )

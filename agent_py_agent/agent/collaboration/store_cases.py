@@ -11,7 +11,11 @@ from .models import (
     new_case_id,
     new_decision_id,
 )
-from .request_status import is_terminal_status
+from .request_status import (
+    canonical_case_status_for_update,
+    case_status_protocol_metadata,
+    is_terminal_status,
+)
 from .store_capabilities import CollaborationCapabilityStore
 from .store_common import now as current_time
 from .store_common import strings
@@ -50,9 +54,28 @@ class CollaborationCaseStore(CollaborationCapabilityStore):
         cases.sort(key=lambda item: item.created_at)
         return cases
 
-    def update_case_status(self, case_id: str, *, status: str, now: float | None = None) -> CollaborationCase:
+    def update_case_status(
+        self,
+        case_id: str,
+        *,
+        status: str,
+        now: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> CollaborationCase:
         case = self.load_case(case_id)
-        updated = replace(case, status=str(status or case.status), updated_at=now if now is not None else __import__("time").time())
+        next_metadata = dict(case.metadata)
+        next_metadata.pop("raw_case_status", None)
+        next_metadata.pop("case_status_protocol_error", None)
+        if metadata:
+            next_metadata.update(metadata)
+        raw_status = str(status or case.status)
+        next_metadata.update(case_status_protocol_metadata(raw_status))
+        updated = replace(
+            case,
+            status=canonical_case_status_for_update(raw_status),
+            updated_at=now if now is not None else __import__("time").time(),
+            metadata=next_metadata,
+        )
         self._write_case(updated)
         return updated
 
@@ -69,9 +92,12 @@ class CollaborationCaseStore(CollaborationCapabilityStore):
             "metadata": request.get("metadata") or {},
             "now": request.get("now"),
         }
-        self._validate_terminal_case_status(case_id, status_text, kwargs)
-        updated = self.update_case_status(case_id, status=status_text, now=kwargs.get("now"))
-        self._append_status_decision(case_id, status_text, kwargs)
+        canonical_status = canonical_case_status_for_update(status_text)
+        protocol_metadata = case_status_protocol_metadata(status_text)
+        kwargs["metadata"] = {**kwargs["metadata"], **protocol_metadata}
+        self._validate_terminal_case_status(case_id, canonical_status, kwargs)
+        updated = self.update_case_status(case_id, status=canonical_status, now=kwargs.get("now"), metadata=protocol_metadata)
+        self._append_status_decision(case_id, canonical_status, kwargs)
         return updated
 
     def _all_cases(self) -> list[CollaborationCase]:

@@ -10,6 +10,7 @@ from .delivery_closeout.uncontracted import _absolute_paths_in_text
 from .target_coverage_ledger import collect_target_coverage_records, target_coverage_status
 
 _HINT_MARKER = "[delivery-completion-soft-hint]"
+_COVERAGE_BLOCK_MARKER = "[delivery-coverage-check]"
 _MUTATING_TOOLS = {"write_file", "apply_patch", "run_command", "controlled_exec"}
 
 
@@ -26,8 +27,11 @@ def maybe_append_delivery_completion_soft_hint(
     workspace_root = Path(getattr(agent, "root", ".")).expanduser().resolve(strict=False)
     target_paths = _required_target_paths(contract, workspace_root)
     completion_signal = _is_successful_delivery_signal(archive_record, tool_ok=tool_ok, target_paths=target_paths)
-    if _target_coverage_blocks_auto_closeout(params, workspace_root):
+    coverage_status = _current_target_coverage_status_for_params(params, workspace_root)
+    if _coverage_status_blocks(coverage_status):
+        _replace_coverage_block_context(params, coverage_status)
         return
+    _drop_coverage_block_context(params)
     if not completion_signal and not _coverage_completion_signal(
         params,
         tool_ok=tool_ok,
@@ -233,6 +237,36 @@ def _hint_already_added(params: ToolLoopExecuteParams) -> bool:
     return any(str(item).startswith(_HINT_MARKER) for item in params.tool_context)
 
 
+def _replace_coverage_block_context(params: ToolLoopExecuteParams, status: dict[str, object]) -> None:
+    _drop_coverage_block_context(params)
+    params.tool_context.append(
+        "\n".join(
+            [
+                _COVERAGE_BLOCK_MARKER,
+                json.dumps(
+                    {
+                        "target_coverage_status": status,
+                        "repair_guidance": {
+                            "mode": "coverage_rework",
+                            "recommended_next_action": status.get("recommended_next_action", ""),
+                            "repair_hints": status.get("repair_hints", []),
+                        },
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "当前来源覆盖清单还没完成；先按 repair_hints 的 recommended_tool_call 补齐，再更新最终产物。",
+            ]
+        )
+    )
+
+
+def _drop_coverage_block_context(params: ToolLoopExecuteParams) -> None:
+    params.tool_context[:] = [
+        item for item in params.tool_context if not str(item).startswith(_COVERAGE_BLOCK_MARKER)
+    ]
+
+
 def target_coverage_blocks_delivery_auto_closeout(agent: object, params: ToolLoopExecuteParams) -> bool:
     workspace_root = Path(getattr(agent, "root", ".")).expanduser().resolve(strict=False)
     return _target_coverage_blocks_auto_closeout(params, workspace_root)
@@ -254,10 +288,17 @@ def _coverage_completion_signal(
 
 
 def _target_coverage_blocks_auto_closeout(params: ToolLoopExecuteParams, workspace_root: Path | None) -> bool:
+    return _coverage_status_blocks(_current_target_coverage_status_for_params(params, workspace_root))
+
+
+def _current_target_coverage_status_for_params(
+    params: ToolLoopExecuteParams,
+    workspace_root: Path | None,
+) -> dict[str, object]:
     coverage = _target_coverage_contract(params)
     if not coverage:
-        return False
-    return _coverage_status_blocks(_current_target_coverage_status(params, coverage, workspace_root))
+        return {}
+    return _current_target_coverage_status(params, coverage, workspace_root)
 
 
 def _target_coverage_contract(params: ToolLoopExecuteParams) -> dict[str, Any]:

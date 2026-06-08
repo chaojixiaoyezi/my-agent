@@ -46,16 +46,16 @@ def test_memory_compact_auto_cycle_respects_single_trigger_percent(tmp_path: Pat
     assert not (root / "memory_archive" / "compact_applies").exists()
 
 
-def test_memory_compact_auto_cycle_default_trigger_is_50_percent(tmp_path: Path) -> None:
+def test_memory_compact_auto_cycle_default_trigger_is_70_percent(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     write_compact_fixture(root)
 
-    below = run_memory_compact_auto_cycle(root, _auto_cycle_options(current_tokens=49, max_context_tokens=100))
-    reached = run_memory_compact_auto_cycle(root, _auto_cycle_options(current_tokens=50, max_context_tokens=100))
+    below = run_memory_compact_auto_cycle(root, _auto_cycle_options(current_tokens=69, max_context_tokens=100))
+    reached = run_memory_compact_auto_cycle(root, _auto_cycle_options(current_tokens=70, max_context_tokens=100))
 
     assert below["suggestion"]["status"] == "ok"
     assert below["suggestion"]["should_prompt"] is False
-    assert below["suggestion"]["token_budget"]["auto_trigger_percent"] == 50
+    assert below["suggestion"]["token_budget"]["auto_trigger_percent"] == 70
     assert reached["suggestion"]["status"] == "ready_to_compact"
     assert reached["suggestion"]["should_prompt"] is True
 
@@ -406,7 +406,7 @@ def _auto_cycle_options(**overrides: object) -> MemoryCompactAutoCycleOptions:
     values = {
         "current_tokens": 8000,
         "max_context_tokens": 10000,
-        "trigger_percent": 50,
+        "trigger_percent": 70,
         "allow_apply": False,
         "trigger_reason": "normal_threshold",
         "trigger_source": "token_budget",

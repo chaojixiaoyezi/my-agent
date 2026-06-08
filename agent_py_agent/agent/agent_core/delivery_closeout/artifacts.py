@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ class DeliveryContractValidationRequest:
     workspace_root: Path
     params: ToolLoopExecuteParams
     archive_tool_calls: list[Any] | None = None
+    coverage_workspace_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,7 @@ class ArtifactValidationReportRequest:
     item: dict[str, Any]
     path: Path
     workspace_root: Path
+    reference_roots: tuple[Path, ...]
     registry_record: ArtifactRegistryRecord | None
     registry_read_errors: list[dict[str, object]]
     archive_tool_calls: list[Any]
@@ -78,35 +81,34 @@ def _required_artifacts(contract: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _artifact_declares_input_role(item: dict[str, Any]) -> bool:
-    role = " ".join(
+    roles = [
         str(item.get(key) or "").strip().lower()
-        for key in ("artifact_role", "role", "purpose", "usage")
-    )
-    if not role:
-        return False
-    return any(
-        marker in role
-        for marker in (
-            "input",
-            "source",
-            "reference",
-            "read_only",
-            "readonly",
-            "evidence",
-            "lookup",
-            "search",
+        for key in ("artifact_role", "role")
+        if str(item.get(key) or "").strip()
+    ]
+    intent = item.get("artifact_intent")
+    if isinstance(intent, dict):
+        roles.extend(
+            str(intent.get(key) or "").strip().lower()
+            for key in ("artifact_role", "role")
+            if str(intent.get(key) or "").strip()
         )
-    )
+    return any(role in _INPUT_ARTIFACT_ROLES for role in roles)
+
+
+_INPUT_ARTIFACT_ROLES = frozenset({"input", "source", "reference", "read_only", "evidence", "lookup", "search"})
 
 
 def _validate_contract_artifacts(request: DeliveryContractValidationRequest) -> dict[str, Any]:
     archive_tool_calls = _request_archive_tool_calls(request)
+    reference_roots = _artifact_reference_roots(request)
     results = [
         _validate_artifact_item(
             item,
             request.workspace_root,
             archive_tool_calls=archive_tool_calls,
             run_id=str(getattr(request.params, "run_id", "") or ""),
+            reference_roots=reference_roots,
         )
         for item in request.artifacts
     ]
@@ -129,22 +131,144 @@ def _validate_contract_artifacts(request: DeliveryContractValidationRequest) -> 
         report["registry_read_errors"] = registry_read_errors
     coverage_contract = request.contract.get("target_coverage_contract")
     if isinstance(coverage_contract, dict):
+        coverage_root = request.coverage_workspace_root or request.workspace_root
+        coverage_records = collect_target_coverage_records([
+            *archive_tool_calls,
+            *results,
+        ], workspace_root=coverage_root)
         report["target_coverage_status"] = target_coverage_status(
             coverage_contract,
-            coverage_records=collect_target_coverage_records([
-                *archive_tool_calls,
-                *results,
-            ], workspace_root=request.workspace_root),
-            workspace_root=request.workspace_root,
+            coverage_records=coverage_records,
+            workspace_root=coverage_root,
         )
-        report["ok"] = all(item["ok"] for item in results)
+        if freshness := _target_coverage_freshness_status(results, report["target_coverage_status"], coverage_records):
+            report["target_coverage_freshness_status"] = freshness
+            if freshness.get("should_block") is True:
+                report["ok"] = False
     return report
+
+
+def _target_coverage_freshness_status(
+    artifacts: list[dict[str, Any]],
+    coverage_status: dict[str, object],
+    coverage_records: list[dict[str, object]],
+) -> dict[str, object]:
+    if coverage_status.get("should_block") is True:
+        return {}
+    if str(coverage_status.get("enforcement") or "").strip() != "required":
+        return {}
+    if int(coverage_status.get("expected_count") or 0) <= 0:
+        return {}
+    latest_coverage = _latest_required_coverage_created_at(coverage_records)
+    artifact_rows = _artifact_created_at_rows(artifacts)
+    if latest_coverage is None or not artifact_rows:
+        return {
+            "checked": False,
+            "should_block": False,
+            "reason": "created_at_evidence_missing",
+        }
+    stale = [
+        {
+            "artifact_id": row["artifact_id"],
+            "path": row["path"],
+            "artifact_created_at": _isoformat_utc(row["created_at"]),
+        }
+        for row in artifact_rows
+        if row["created_at"] < latest_coverage
+    ]
+    return {
+        "checked": True,
+        "should_block": bool(stale),
+        "latest_required_coverage_created_at": _isoformat_utc(latest_coverage),
+        "stale_artifacts": stale,
+        "recommended_next_action": (
+            "update_final_artifacts_after_latest_required_coverage_then_submit"
+            if stale
+            else "submit_or_finish"
+        ),
+    }
+
+
+def _latest_required_coverage_created_at(records: list[dict[str, object]]) -> datetime | None:
+    values = [
+        parsed
+        for record in records
+        if str(record.get("tool") or "").strip() == "read_file"
+        and str(record.get("status") or "").strip() == "covered"
+        if (parsed := _parse_created_at(record.get("created_at"))) is not None
+    ]
+    return max(values) if values else None
+
+
+def _artifact_created_at_rows(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in artifacts:
+        if item.get("ok") is not True:
+            continue
+        provenance = item.get("provenance")
+        if not isinstance(provenance, dict):
+            continue
+        created_at = _parse_created_at(provenance.get("created_at"))
+        if created_at is None:
+            continue
+        rows.append({
+            "artifact_id": str(item.get("artifact_id") or ""),
+            "path": str(item.get("path") or ""),
+            "created_at": created_at,
+        })
+    return rows
+
+
+def _parse_created_at(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _isoformat_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat()
 
 
 def _request_archive_tool_calls(request: DeliveryContractValidationRequest) -> list[Any]:
     if request.archive_tool_calls is not None:
         return list(request.archive_tool_calls)
     return list(getattr(request.params, "archive_tool_calls", []) or [])
+
+
+def _artifact_reference_roots(request: DeliveryContractValidationRequest) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    _append_reference_root(roots, request.coverage_workspace_root)
+    task_workspace = request.contract.get("task_workspace")
+    if isinstance(task_workspace, dict):
+        for key in ("source_workspace_root", "relative_input_root"):
+            _append_reference_root(roots, task_workspace.get(key))
+    for key in ("source_roots", "reference_roots"):
+        values = request.contract.get(key)
+        if isinstance(values, list):
+            for value in values:
+                _append_reference_root(roots, value)
+    return tuple(roots)
+
+
+def _append_reference_root(roots: list[Path], value: object) -> None:
+    text = str(value or "").strip()
+    if not text:
+        return
+    try:
+        root = Path(text).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return
+    if root.exists() and root not in roots:
+        roots.append(root)
 
 
 def registry_read_errors_from_artifacts(results: list[dict[str, Any]]) -> list[dict[str, object]]:
@@ -187,6 +311,7 @@ def _validate_artifact_item(
     *,
     archive_tool_calls: list[Any] | None = None,
     run_id: str = "",
+    reference_roots: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
     raw_path = str(item.get("preferred_path") or item.get("path") or "")
     registry_record, registry_read_errors = _registry_record_for_item(item, workspace_root)
@@ -219,6 +344,7 @@ def _validate_artifact_item(
             item=item,
             path=path,
             workspace_root=workspace_root,
+            reference_roots=reference_roots,
             registry_record=registry_record,
             registry_read_errors=registry_read_errors,
             archive_tool_calls=list(archive_tool_calls or []),
@@ -233,9 +359,15 @@ def _validated_artifact_from_path(request: ArtifactValidationReportRequest) -> d
             path=request.path,
             workspace_root=validation_workspace_root_for_item(request.item, request.path, request.workspace_root),
             validation_contract=_validation_contract(request.item),
+            reference_roots=request.reference_roots,
         )
     ).to_dict()
     report = with_staged_checkpoint_findings(report, request.item, request.workspace_root)
+    if partial_finding := _latest_partial_write_finding(request.path, request.archive_tool_calls, request.workspace_root):
+        findings = report.get("findings")
+        merged_findings = list(findings) if isinstance(findings, list) else []
+        merged_findings.append(partial_finding)
+        report = {**report, "ok": False, "findings": merged_findings}
     registry_record = request.registry_record
     registered = register_artifact(
         ArtifactRegistration(
@@ -364,6 +496,57 @@ def _path_failure(request: ArtifactPathFailureRequest) -> dict[str, Any]:
 def _validation_contract(item: dict[str, Any]) -> dict[str, object]:
     value = item.get("validation_contract")
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _latest_partial_write_finding(
+    path: Path,
+    archive_tool_calls: list[Any],
+    workspace_root: Path,
+) -> dict[str, str]:
+    record = _latest_write_record_for_path(path, archive_tool_calls, workspace_root)
+    parameters = record.get("parameters") if isinstance(record, dict) else {}
+    if isinstance(parameters, dict) and parameters.get("__partial_unclosed_write") is True:
+        return {
+            "code": "ARTIFACT_LAST_WRITE_PARTIAL_UNCLOSED",
+            "severity": "hard",
+            "message": "Final artifact path was last written by an incomplete partial write chunk.",
+            "location": str(path),
+            "value": str(record.get("call_id") or record.get("scoped_call_id") or ""),
+            "action_zh": "最终交付物最后一次写入是半截分片；请用完整 write_file 覆盖或补成完整文件后再提交验收。",
+        }
+    return {}
+
+
+def _latest_write_record_for_path(
+    path: Path,
+    archive_tool_calls: list[Any],
+    workspace_root: Path,
+) -> dict[str, Any]:
+    expected = _canonical_artifact_path(path, workspace_root)
+    latest: dict[str, Any] = {}
+    for record in archive_tool_calls:
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("tool") or record.get("tool_name") or "").strip() != "write_file":
+            continue
+        parameters = record.get("parameters")
+        parameters = parameters if isinstance(parameters, dict) else {}
+        raw_path = str(parameters.get("path") or record.get("source_input") or record.get("path") or "").strip()
+        if not raw_path:
+            continue
+        if _canonical_artifact_path(Path(raw_path), workspace_root) == expected:
+            latest = record
+    return latest
+
+
+def _canonical_artifact_path(path: Path, workspace_root: Path) -> str:
+    try:
+        expanded = path.expanduser()
+        if not expanded.is_absolute():
+            expanded = workspace_root / expanded
+        return str(expanded.resolve(strict=False))
+    except OSError:
+        return str(path)
 
 
 def _registry_validation_metadata(report: dict[str, Any]) -> dict[str, Any]:

@@ -166,6 +166,7 @@ def build_cancel_subagents_spec() -> ToolSpec:
         parameter_details={
             "root_id": "root_id 会匹配 root 自己以及 child_ids 递归子树；如果没有 run_id/run_ids/root_id/status，工具会返回错误，避免误取消全部。",
             "status": "status 只作为过滤条件；传 status 但不传 run_id/root_id 时，会匹配当前子代理账本里所有该状态任务。",
+            "load_errors": "只取消能通过当前 canonical loader 正常读取的 run；账本损坏时返回结构化 load error，不做私有目录扫描兜底。",
         },
         examples=[
             '{"tool":"cancel_subagents","run_ids":["subagent-1","subagent-2"],"reason":"用户要求停止"}',

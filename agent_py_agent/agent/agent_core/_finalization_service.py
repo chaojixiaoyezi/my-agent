@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import time as time_module
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from ..backends import ModelResponse
 from ..memory_archive import (
     archive_run_turn,
     estimate_tokens,
@@ -33,7 +35,10 @@ from .delivery_completion_soft_hint import target_coverage_blocks_delivery_auto_
 from .finalization_compact_auto import compact_auto_cycle_fields
 from .model.usage import input_token_usage, output_token_usage
 from .models import AgentRunResult
-from .run_task_workspace_writer import write_run_task_workspace_if_needed
+from .run_task_workspace_writer import (
+    current_run_task_workspace_root,
+    write_run_task_workspace_if_needed,
+)
 from .runtime.owner_roots import runtime_archive_roots
 
 
@@ -89,6 +94,12 @@ class FinalizationService:
             )
         )
         if response is None:
+            if failed_response := _failed_final_closeout_response(
+                self._agent,
+                params,
+                backend=str(getattr(ctx.final_response, "backend", "") or ""),
+            ):
+                return replace(ctx, final_response=failed_response)
             return ctx
         return replace(ctx, final_response=response)
 
@@ -345,6 +356,72 @@ def _has_final_closeout_candidate(params: ToolLoopExecuteParams, agent: object) 
         return _has_successful_delivery_record(params)
     workspace_root = Path(getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", "."))
     return bool(_current_run_task_output_artifacts(params, workspace_root=workspace_root.expanduser().resolve(strict=False)))
+
+
+def _failed_final_closeout_response(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    *,
+    backend: str,
+) -> ModelResponse | None:
+    report = _latest_closeout_report(agent, params)
+    if not report or report.get("ok") is not False:
+        return None
+    payload = {
+        "ok": False,
+        "report_ref": str(report.get("report_ref") or ".agent_delivery/closeout.json"),
+        "delivery_mode": str(report.get("delivery_mode") or ""),
+        "failed_artifacts": _failed_final_artifacts(report),
+        "failed_gates": {
+            key: value
+            for key, value in {
+                "target_coverage_projection_gate": report.get("target_coverage_projection_gate"),
+                "task_progress_closeout_gate": report.get("task_progress_closeout_gate"),
+                "subagent_aggregation_gate": report.get("subagent_aggregation_gate"),
+            }.items()
+            if isinstance(value, dict) and value.get("allowed") is False
+        },
+        "contract_recovery": report.get("contract_recovery", {}),
+    }
+    return ModelResponse(
+        text=(
+            "[MAIN_AGENT_DELIVERY_REWORK_REQUIRED]\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n[/MAIN_AGENT_DELIVERY_REWORK_REQUIRED]\n"
+            "交付验收未通过。本轮不能声明任务完成；请按 failed_artifacts、failed_gates 或 contract_recovery 修复后重新提交验收。"
+        ),
+        backend=backend,
+    )
+
+
+def _latest_closeout_report(agent: object, params: ToolLoopExecuteParams) -> dict[str, object]:
+    root = current_run_task_workspace_root(agent, params) or _candidate_workspace_root(agent)
+    path = root / ".agent_delivery" / "closeout.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _failed_final_artifacts(report: dict[str, object]) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    artifacts = report.get("artifacts")
+    if not isinstance(artifacts, list):
+        return result
+    for item in artifacts:
+        if not isinstance(item, dict) or item.get("ok") is True:
+            continue
+        result.append(
+            {
+                "artifact_id": str(item.get("artifact_id") or ""),
+                "path": str(item.get("path") or ""),
+                "findings": item.get("acceptance_report", {}).get("findings", [])
+                if isinstance(item.get("acceptance_report"), dict)
+                else [],
+            }
+        )
+    return result
 
 
 def _delivery_contract_present(params: ToolLoopExecuteParams) -> bool:

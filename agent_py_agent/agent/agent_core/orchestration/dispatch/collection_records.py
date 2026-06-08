@@ -12,6 +12,13 @@ from .service import (
     make_leadership_recovery_plan_record,
 )
 
+_PARENT_PLANNER_ACTIONS = {
+    "DISPATCH": "dispatch",
+    "HEARTBEAT_OK": "heartbeat_ok",
+    "PLANNER_ERROR": "planner_error",
+    "PARSE_ERROR": "parse_error",
+}
+
 
 def collect_dispatch_records(agent, ctx):
     records = []
@@ -61,7 +68,7 @@ def parent_planner_dispatch_record(agent, ctx):
     return agent.subagents.dispatch.make_dispatch_record(
         params=DispatchRecordParams(
             step="parent_planner",
-            action=planner_record.decision.lower(),
+            action=_parent_planner_action(planner_record.decision),
             dry_run=ctx.preview_only,
             applied=False,
             ok=planner_record.ok,
@@ -71,6 +78,10 @@ def parent_planner_dispatch_record(agent, ctx):
             suggested_max_runners=planner_record.suggested_max_runners,
         ),
     )
+
+
+def _parent_planner_action(decision: object) -> str:
+    return _PARENT_PLANNER_ACTIONS.get(str(decision or "").strip(), "unknown")
 
 
 def _due_and_leadership_records(agent, ctx) -> list:

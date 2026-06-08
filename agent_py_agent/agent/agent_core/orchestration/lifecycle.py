@@ -61,6 +61,7 @@ def _bind_tasks_to_conversation(agent: object, tasks: list[object]) -> list[dict
                     "thread_id": thread_id,
                     "task_id": _task_id(task),
                     "goal": str(getattr(task, "goal", "") or ""),
+                    "task_path": str(getattr(task, "task_dir", "") or ""),
                 }
             )
         except Exception as exc:

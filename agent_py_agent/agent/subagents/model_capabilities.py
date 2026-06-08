@@ -34,6 +34,7 @@ def capability_request_counts_as_open(status: object) -> bool:
 
 
 def capability_request_requires_parent_resolution(status: object) -> bool:
+    """True for current OPEN and invalid legacy/raw statuses that must fail closed."""
     normalized = normalize_capability_request_status(status)
     return normalized == CAPABILITY_REQUEST_OPEN_STATUS or normalized not in CAPABILITY_REQUEST_CURRENT_STATUSES
 

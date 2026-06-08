@@ -63,7 +63,7 @@ def test_hierarchy_schedule_allows_mixed_coordinator_and_leaf_children(tmp_path)
             parent_run_id=parent_id,
             child_specs=[
                 HierarchyChildSpec(goal="create next coordinator", role="coordinator"),
-                HierarchyChildSpec(goal="write final proof", role="leaf_worker"),
+                HierarchyChildSpec(goal="write final proof", role="worker"),
             ],
             apply=True,
         )

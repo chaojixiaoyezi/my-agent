@@ -243,8 +243,10 @@ def test_coordinator_template_says_parent_authority_covers_children_without_disa
     assert "继承产物写入根" in detail
     assert "可以直接完成" in detail
     assert "需要多人视角" in detail
-    assert "child_coordinator" in detail
-    assert "worker/writer/leaf_worker" in detail
+    assert "coordinator" in detail
+    assert "worker/writer" in detail
+    assert "child_coordinator" not in detail
+    assert "leaf_worker" not in detail
     assert "send_guidance" in detail
 
 
@@ -308,7 +310,7 @@ def test_all_builtin_role_contracts_are_applied_on_create_run(tmp_path):
         assert ("schedule_child_subagents" in task.allowed_tools) is template.can_spawn_children
 
 
-def test_all_builtin_runner_prompts_load_current_role_template():
+def test_coordinator_runner_prompt_loads_role_catalog_without_current_worker_details():
     store = load_role_template_store()
 
     for template_id in BUILTIN_ROLE_IDS:
@@ -327,10 +329,10 @@ def test_all_builtin_runner_prompts_load_current_role_template():
         )
         prompt = _build_subagent_runner_prompt(context)
 
-        assert template.prompt_zh in prompt
         if template_id == "coordinator":
             assert "模板详情" in prompt
             assert "你是找茬子代理" in prompt
         else:
-            assert "当前角色模板详情" in prompt
+            assert template.prompt_zh not in prompt
+            assert "当前角色模板详情" not in prompt
             _assert_other_role_prompts_absent(prompt, store=store, template_id=template_id)

@@ -137,77 +137,6 @@ def _target_preview_items(targets: list[object]) -> list[object]:
     return [*targets[:5], *targets[-3:]]
 
 
-def _bootstrap_targets(items: object) -> list[str]:
-    if not isinstance(items, list):
-        return []
-    lines: list[str] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        relative = str(item.get("workspace_relative_path") or "").strip()
-        target_type = str(item.get("target_type") or "").strip()
-        if relative:
-            lines.append(f"{target_type or 'target'}: {relative}")
-    return lines
-
-
-def _bootstrap_actions(items: object) -> list[dict[str, object]]:
-    if not isinstance(items, list):
-        return []
-    return [dict(item) for item in items if isinstance(item, dict)]
-
-
-def _startup_action_lines(actions: list[dict[str, object]]) -> list[str]:
-    lines: list[str] = []
-    for action in sorted(actions, key=lambda item: int(item.get("priority", 0))):
-        lines.extend(_startup_action_line_group(action))
-    return lines
-
-
-def _startup_action_line_group(action: dict[str, object]) -> list[str]:
-    code = str(action.get("action") or "").strip()
-    if code == "materialize_target":
-        return ["- 先创建目录并开始写入第一个目标路径，再继续补齐其余内容。"]
-    if code == "materialize_checkpoint":
-        return _materialize_checkpoint_lines(action)
-    if code == "invoke_builder_tool":
-        return _builder_startup_lines(action)
-    return []
-
-
-def _materialize_checkpoint_lines(action: dict[str, object]) -> list[str]:
-    checkpoint_ref = str(action.get("checkpoint_ref") or "").strip()
-    if not checkpoint_ref:
-        return []
-    if action.get("research_first") is True or action.get("requires_auditable_source_evidence") is True:
-        fields = ", ".join(str(item) for item in action.get("required_structured_fields", []) if str(item).strip())
-        suffix = f"，必须包含 {fields}" if fields else ""
-        if action.get("research_first") is True:
-            return [
-                f"- 先完成来源采集/读取，再写 checkpoint: {checkpoint_ref}",
-                f"- 这是来源型 checkpoint，优先用采集/转换工具物化{suffix}。",
-            ]
-        return [
-            f"- 先真实写出 checkpoint: {checkpoint_ref}",
-            f"- 这是来源型 checkpoint，优先用采集/转换工具物化{suffix}。",
-        ]
-    return [
-        f"- 先真实写出 checkpoint: {checkpoint_ref}",
-        f"- 如果资料还没收全，可以给 {checkpoint_ref} 写阶段草稿，再继续抓取/整理。",
-    ]
-
-
-def _builder_startup_lines(action: dict[str, object]) -> list[str]:
-    builder = str(action.get("builder_tool") or "").strip()
-    if not builder:
-        return []
-    source_ref = str(action.get("source_ref") or "").strip()
-    output_ref = str(action.get("output_ref") or "").strip()
-    if source_ref and output_ref:
-        return [f"- 阶段数据就绪后，用通用工具生成 {output_ref}；来源参考 {source_ref}，不要依赖固定 builder 工具。"]
-    return ["- 阶段数据就绪后，用通用写入/命令工具生成后续产物，不要依赖固定 builder 工具。"]
-
-
 def _one_artifact_lines(artifact: dict[str, object]) -> list[str]:
     contract = artifact.get("validation_contract") if isinstance(artifact.get("validation_contract"), dict) else {}
     requirements = contract.get("quality_requirements") if isinstance(contract.get("quality_requirements"), dict) else {}
@@ -230,10 +159,6 @@ def _one_artifact_lines(artifact: dict[str, object]) -> list[str]:
     return lines
 
 
-def _artifact_target_path(artifact: dict[str, object]) -> str:
-    return str(artifact.get("preferred_path") or artifact.get("path") or "").strip()
-
-
 def _staging_lines(contract: dict[str, object]) -> list[str]:
     staging = contract.get("staging_contract")
     if not isinstance(staging, dict):
@@ -253,14 +178,6 @@ def _staging_lines(contract: dict[str, object]) -> list[str]:
         if source_ref.lower().endswith(".json"):
             lines.append("- JSON checkpoint 用 write_file 写完整 JSON；大批量数据可用授权命令/脚本生成后写入。")
     return lines
-
-
-def _builder_source_param(staging: dict[str, object], builder_tool: str) -> str:
-    for key in ("source_param", "source_param_name", "input_param"):
-        value = str(staging.get(key) or "").strip()
-        if value:
-            return value
-    return "source_ref"
 
 
 def _staging_source_ref(staging: dict[str, object]) -> str:

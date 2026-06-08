@@ -1,11 +1,19 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import ClassVar
 
 from ...backends import ModelResponse
+from ...tooling.content_recovery_mode import (
+    long_content_recovery_block_context,
+    long_content_recovery_payload_too_large,
+    long_content_recovery_state_from_records,
+)
 from .._runtime_params import ToolLoopExecuteParams
+from ..run_task_workspace_writer import current_run_task_workspace_root
 from ..tool_guard.exploration_fuse import (
     exploration_fuse_context,
     has_pending_exploration_fuse,
@@ -211,6 +219,12 @@ def _tool_calls_decision(
     request: ToolLoopResponseDecisionRequest,
     calls: list[dict[str, object]],
 ) -> ToolLoopResponseDecision:
+    long_content_recovery = _long_content_recovery_tool_call_decision(request, calls)
+    if long_content_recovery is not None:
+        return long_content_recovery
+    target_coverage_rework = _target_coverage_rework_tool_call_decision(request, calls)
+    if target_coverage_rework is not None:
+        return target_coverage_rework
     local_progress_tools = _local_progress_tool_call_decision(request, calls)
     if local_progress_tools is not None:
         return local_progress_tools
@@ -219,6 +233,156 @@ def _tool_calls_decision(
         return _exploration_decision(exploration_fuse)
     clean_response = sanitize_protected_tool_marker_response(request.response)
     return ToolLoopResponseDecision("run_tools", clean_response, calls, request.counters)
+
+
+def _long_content_recovery_tool_call_decision(
+    request: ToolLoopResponseDecisionRequest,
+    calls: list[dict[str, object]],
+) -> ToolLoopResponseDecision | None:
+    state = long_content_recovery_state_from_records(request.params.archive_tool_calls)
+    if not state.active:
+        return None
+    max_inline_chars = _agent_tool_write_inline_max_chars(request.agent)
+    for call in calls:
+        if long_content_recovery_payload_too_large(call, state, max_inline_chars=max_inline_chars):
+            request.params.tool_context.append(
+                long_content_recovery_block_context(call, state, max_inline_chars=max_inline_chars)
+            )
+            return ToolLoopResponseDecision("continue", None, [], request.counters)
+    return None
+
+
+def _agent_tool_write_inline_max_chars(agent: object) -> int | None:
+    value = getattr(getattr(agent, "config", None), "tool_write_inline_max_chars", None)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _target_coverage_rework_tool_call_decision(
+    request: ToolLoopResponseDecisionRequest,
+    calls: list[dict[str, object]],
+) -> ToolLoopResponseDecision | None:
+    report = _latest_closeout_report(request.agent, request.params)
+    status = report.get("target_coverage_status") if isinstance(report, dict) else {}
+    if not isinstance(status, dict) or status.get("should_block") is not True:
+        return None
+    if not _has_premature_delivery_call(calls, report):
+        return None
+    if _has_missing_coverage_exploration_call(calls, status):
+        return None
+    request.params.tool_context.append(_target_coverage_rework_context(status, calls))
+    return ToolLoopResponseDecision("continue", None, [], request.counters)
+
+
+def _latest_closeout_report(agent: object, params: ToolLoopExecuteParams) -> dict[str, object]:
+    root = current_run_task_workspace_root(agent, params)
+    if root is None:
+        root = Path(getattr(agent, "root", ".")).resolve()
+    path = root / ".agent_delivery" / "closeout.json"
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _has_premature_delivery_call(calls: list[dict[str, object]], report: dict[str, object]) -> bool:
+    final_paths = _final_artifact_paths_from_report(report)
+    for call in calls:
+        tool = _call_tool(call)
+        if tool == "submit_for_acceptance":
+            return True
+        if tool == "write_file" and _call_path_matches(call, final_paths):
+            return True
+    return False
+
+
+def _final_artifact_paths_from_report(report: dict[str, object]) -> set[str]:
+    paths: set[str] = set()
+    artifacts = report.get("artifacts")
+    if not isinstance(artifacts, list):
+        return paths
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        path = _normalized_path_text(artifact.get("path"))
+        if path:
+            paths.add(path)
+    return paths
+
+
+def _call_path_matches(call: dict[str, object], final_paths: set[str]) -> bool:
+    if not final_paths:
+        return False
+    return _normalized_path_text(call.get("path")) in final_paths
+
+
+def _has_missing_coverage_exploration_call(calls: list[dict[str, object]], status: dict[str, object]) -> bool:
+    missing_roots = _missing_source_roots(status)
+    if not missing_roots:
+        return False
+    for call in calls:
+        tool = _call_tool(call)
+        if tool not in {"list_files", "read_file", "search_text", "find_files"}:
+            continue
+        path = _normalized_path_text(call.get("path") or call.get("query"))
+        if _path_under_any(path, missing_roots):
+            return True
+    return False
+
+
+def _missing_source_roots(status: dict[str, object]) -> set[str]:
+    roots: set[str] = set()
+    for key in ("missing_items", "repair_hints"):
+        items = status.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for field in ("source_ref", "source_path", "target_id"):
+                if path := _normalized_path_text(item.get(field)):
+                    roots.add(path)
+    return roots
+
+
+def _path_under_any(path: str, roots: set[str]) -> bool:
+    if not path:
+        return False
+    return any(path == root or path.startswith(root.rstrip("/\\") + "/") for root in roots)
+
+
+def _normalized_path_text(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return str(Path(text).expanduser().resolve(strict=False))
+    except OSError:
+        return text
+
+
+def _call_tool(call: dict[str, object]) -> str:
+    return str(call.get("tool") or call.get("tool_name") or "").strip()
+
+
+def _target_coverage_rework_context(status: dict[str, object], calls: list[dict[str, object]]) -> str:
+    payload = {
+        "blocked_tools": [_call_tool(call) for call in calls if _call_tool(call)],
+        "missing_count": int(status.get("missing_count") or 0),
+        "repair_hints": list(status.get("repair_hints") or [])[:8],
+        "required_next_tools": ["list_files", "read_file"],
+    }
+    return (
+        "[tool-system target-coverage-rework-guard]\n"
+        + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        + "\n当前 closeout 仍缺 required source coverage。先按 repair_hints 对缺失源码目录执行 list_files/read_file；"
+        "不要读取旧报告、写最终交付物或 submit_for_acceptance。补齐覆盖后，再更新最终交付物并提交验收。"
+    )
 
 
 def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:

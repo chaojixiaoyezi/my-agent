@@ -168,6 +168,30 @@ class TestMakeAgent:
                 result = make_agent(args)
                 assert result is not None
 
+    def test_make_agent_uses_explicit_workspace_root_override(self, tmp_path: Path):
+        """内部后台命令传 workspace root 时，不能再被当前 cwd 污染。"""
+        from agent_py_agent.cli.common import make_agent
+
+        explicit_root = tmp_path / "real-workspace"
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("workspace_root: .\n", encoding="utf-8")
+
+        args = MagicMock()
+        args.config = str(config_file)
+        args.workspace_root = str(explicit_root)
+
+        with patch("agent_py_agent.cli.common.load_config") as mock_load:
+            mock_config = MagicMock()
+            mock_config.workspace_root = ""
+            mock_load.return_value = mock_config
+
+            with patch("agent_py_agent.cli.common.SimpleAgent") as mock_agent_cls:
+                make_agent(args)
+
+        expected = explicit_root.resolve()
+        assert mock_config.workspace_root == str(expected)
+        assert mock_agent_cls.call_args.args[1] == expected
+
 
 class TestCapabilityConfig:
     """测试能力配置加载。"""

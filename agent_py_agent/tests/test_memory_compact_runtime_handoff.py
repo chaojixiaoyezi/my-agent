@@ -551,51 +551,7 @@ def test_memory_compact_work_state_keeps_per_source_read_coverage(tmp_path: Path
     """多文件阅读任务 compact 后要保留每个源文件的覆盖游标，而不只保留一个 primary。"""
     root = tmp_path / "workspace"
     write_compact_fixture(root)
-    _write_tool_output_index(
-        root,
-        {
-            "call_id": "1-1",
-            "kind": "tool_output",
-            "parameters": {"path": "/repo/project-a/README.md", "tool": "read_file", "offset": 0, "max_chars": 1000},
-            "path": str(root / "blobs" / "tool_outputs" / "project-a-readme.json"),
-            "request_id": "request-compact",
-            "run_id": "run-compact",
-            "task_id": "run-compact",
-            "scoped_call_id": "run-compact:1-1",
-            "source_input": "/repo/project-a/README.md",
-            "tool": "read_file",
-            "read_window": _char_window(0, 1000, 1000),
-            "size_bytes": 1000,
-        },
-        {
-            "call_id": "1-2",
-            "kind": "tool_output",
-            "parameters": {"path": "/repo/project-b/core.py", "tool": "read_file", "offset": 0, "max_chars": 500},
-            "path": str(root / "blobs" / "tool_outputs" / "project-b-core.json"),
-            "request_id": "request-compact",
-            "run_id": "run-compact",
-            "task_id": "run-compact",
-            "scoped_call_id": "run-compact:1-2",
-            "source_input": "/repo/project-b/core.py",
-            "tool": "read_file",
-            "read_window": _char_window(0, 500, 2000),
-            "size_bytes": 500,
-        },
-        {
-            "call_id": "1-3",
-            "kind": "tool_output",
-            "parameters": {"path": "/repo/project-c/routes.py", "tool": "read_file", "start_line": 1, "max_chars": 500},
-            "path": str(root / "blobs" / "tool_outputs" / "project-c-routes.json"),
-            "request_id": "request-compact",
-            "run_id": "run-compact",
-            "task_id": "run-compact",
-            "scoped_call_id": "run-compact:1-3",
-            "source_input": "/repo/project-c/routes.py",
-            "tool": "read_file",
-            "read_window": _line_window(1, 40, 120),
-            "size_bytes": 500,
-        },
-    )
+    _write_multi_source_read_coverage_index(root)
 
     result = apply_memory_compact(
         root,
@@ -617,12 +573,79 @@ def test_memory_compact_work_state_keeps_per_source_read_coverage(tmp_path: Path
     }
 
     assert work_state["read_coverage"]["source_count"] == 3
+    assert work_state["read_coverage"]["incomplete_source_count"] == 2
+    assert [
+        item["source_path"]
+        for item in work_state["read_coverage"]["incomplete_sources"]
+    ] == ["/repo/project-b/core.py", "/repo/project-c/routes.py"]
+    assert 'read_file(path="/repo/project-b/core.py", offset=500, max_chars=50000)' in work_state["next_step"]
+    assert 'read_file(path="/repo/project-a/README.md", offset=1000' not in work_state["next_step"]
     assert sources["/repo/project-a/README.md"]["complete"] is True
     assert sources["/repo/project-b/core.py"]["covered_until_offset"] == 500
     assert sources["/repo/project-b/core.py"]["next_offset"] == 500
     assert sources["/repo/project-c/routes.py"]["covered_until_line"] == 40
+    assert "incomplete_source_coverage: source_path=/repo/project-b/core.py" in resume["context_block"]
     assert "source_coverage: source_path=/repo/project-b/core.py" in resume["context_block"]
     assert "source_coverage: source_path=/repo/project-c/routes.py" in resume["context_block"]
+
+
+def _write_multi_source_read_coverage_index(root: Path) -> None:
+    _write_tool_output_index(
+        root,
+        _read_file_index_row(
+            root,
+            {
+                "call_id": "1-1",
+                "source": "/repo/project-a/README.md",
+                "output_name": "project-a-readme.json",
+                "parameters": {"offset": 0, "max_chars": 1000},
+                "read_window": _char_window(0, 1000, 1000),
+                "size_bytes": 1000,
+            },
+        ),
+        _read_file_index_row(
+            root,
+            {
+                "call_id": "1-2",
+                "source": "/repo/project-b/core.py",
+                "output_name": "project-b-core.json",
+                "parameters": {"offset": 0, "max_chars": 500},
+                "read_window": _char_window(0, 500, 2000),
+                "size_bytes": 500,
+            },
+        ),
+        _read_file_index_row(
+            root,
+            {
+                "call_id": "1-3",
+                "source": "/repo/project-c/routes.py",
+                "output_name": "project-c-routes.json",
+                "parameters": {"start_line": 1, "max_chars": 500},
+                "read_window": _line_window(1, 40, 120),
+                "size_bytes": 500,
+            },
+        ),
+    )
+
+
+def _read_file_index_row(root: Path, spec: dict[str, object]) -> dict[str, object]:
+    call_id = str(spec["call_id"])
+    source = str(spec["source"])
+    parameters = spec["parameters"] if isinstance(spec.get("parameters"), dict) else {}
+    return {
+        "call_id": call_id,
+        "kind": "tool_output",
+        "parameters": {"path": source, "tool": "read_file", **parameters},
+        "path": str(root / "blobs" / "tool_outputs" / str(spec["output_name"])),
+        "request_id": "request-compact",
+        "run_id": "run-compact",
+        "task_id": "run-compact",
+        "scoped_call_id": f"run-compact:{call_id}",
+        "source_input": source,
+        "tool": "read_file",
+        "read_window": spec["read_window"],
+        "size_bytes": spec["size_bytes"],
+    }
 
 
 def test_memory_compact_work_state_resumes_paginated_search_from_page_window(tmp_path: Path) -> None:

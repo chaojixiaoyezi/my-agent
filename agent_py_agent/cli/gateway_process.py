@@ -96,8 +96,12 @@ def _resolve_gateway_options(agent, args):
     )
 
 
-def _gateway_start_options_from_args(args) -> GatewayStartOptions:
-    return GatewayStartOptions(config=Path(args.config), force_lock=bool(args.force_lock))
+def _gateway_start_options_from_args(args, *, workspace_root: str | Path = "") -> GatewayStartOptions:
+    return GatewayStartOptions(
+        config=Path(args.config),
+        force_lock=bool(args.force_lock),
+        workspace_root=str(workspace_root or ""),
+    )
 
 
 def _gateway_run_context_from_args(request: _GatewayRunBuildRequest) -> GatewayRunContext:
@@ -205,6 +209,8 @@ def _gateway_start_command(options: GatewayStartOptions) -> list[str]:
         "gateway",
         "run",
     ]
+    if options.workspace_root:
+        command.extend(["--workspace-root", str(Path(options.workspace_root).expanduser().resolve())])
     if options.force_lock:
         command.append("--force-lock")
     return command
@@ -424,7 +430,7 @@ def cmd_gateway_start(args) -> int:
             terminate_pid(pid)
             wait_for_pid_exit(pid, 5)
     _clear_gateway_stop_request(paths)
-    command = _gateway_start_command(_gateway_start_options_from_args(args))
+    command = _gateway_start_command(_gateway_start_options_from_args(args, workspace_root=agent.root))
     process = _spawn_gateway_process(paths, command, cwd=ROOT.parent)
     _write_gateway_start_files(paths, pid=process.pid, command=command)
     wait_for_gateway_running(paths, timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 10) or 10))
@@ -620,7 +626,6 @@ __all__ = [
     "cmd_gateway_run",
     "gateway_running",
     "get_running_pid",
-    "is_pid_alive",
     "gateway_paths",
     "make_agent",
     "read_json_file",
@@ -628,7 +633,6 @@ __all__ = [
     "read_runtime_status",
     "remove_pid_file_if_owned",
     "terminate_pid",
-    "wait_for_pid_exit",
     "wait_for_gateway_running",
     "gateway_request_counts",
     "install_service",

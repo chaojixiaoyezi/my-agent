@@ -140,8 +140,9 @@
 
 - 删除旧 manager mixin 和过渡转发文件，`SubAgentManager` 现在直接拥有初始化、基础生命周期和工单路径。
 - `SubAgentBoardService`、`SubAgentPatchService`、`SubAgentHierarchyService` 直接作为当前服务入口，不再保留单独转发文件。
+- CLI 子代理命令注册合并到 `cli/subagents.py`，不再保留单独的 registration / hierarchy 注册 facade。
 - 子代理状态继续以 task-local canonical state 为权威；owner projection 和 global index 只做查找。
-- `cancel_subagents` 是父代理处理卡住下级的控制面：可取消、废弃 attempt、记录审计，再由父代理接管或汇总。
+- `cancel_subagents` 是父代理处理卡住下级的控制面：可取消、废弃 attempt、记录审计，再由父代理接管或汇总；如果 canonical loader 读不到该 run，会返回结构化 load error，不用旧路径扫描假装取消成功。
 - `inspect_agent_tree` 重复查看只给紧凑提示和直接摘要；需要等待时用 `wait` 登记下次查看间隔，不把轮询做成硬门。
 - `create_subagents` 不再因为已经有活跃子代理就默认拒绝第二批；父代理可以先派一批，后面按需要继续派。
 - 子代理可以写 task workspace 里的协作产物；最终交付由主代理汇总到 `output/` 或用户指定目录。

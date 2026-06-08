@@ -126,7 +126,7 @@ def test_run_state_machine_warns_and_uses_structured_recovery_actions(caplog) ->
     with caplog.at_level("WARNING"):
         unknown = recovery_decision(RunStateFacts(status="PAUSED", failure_type="UNKNOWN_ERROR"))
     assert unknown.action == "manual_review"
-    assert "unhandled recovery state" in caplog.text
+    assert "unhandled recovery state" not in caplog.text
 
 
 def test_run_state_snapshot_from_task_like_object() -> None:
@@ -152,6 +152,48 @@ def test_run_state_snapshot_from_task_like_object() -> None:
     assert snapshot["can_dispatch"] is False
     assert snapshot["can_closeout"] is False
     assert snapshot["recovery_decision"]["action"] == "repair"
+
+
+def test_run_state_snapshot_keeps_structured_subagent_failure_types() -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.contracts.state_machine import (
+        RunStateFacts,
+        recovery_decision,
+        run_state_snapshot_from_task,
+    )
+
+    timeout = run_state_snapshot_from_task(
+        SimpleNamespace(
+            id="run-timeout",
+            status="TIMEOUT",
+            verification_status="UNVERIFIED",
+            channel_status="OK",
+            failure_type="runner_timeout",
+            runner_attempts="1",
+            runner_max_attempts="3",
+        )
+    )
+    assert timeout["failure_type"] == "RUNNER_TIMEOUT"
+    assert timeout["recovery_decision"]["action"] == "repair"
+
+    missing_evidence = run_state_snapshot_from_task(
+        SimpleNamespace(
+            id="run-evidence",
+            status="BLOCKED",
+            verification_status="UNVERIFIED",
+            channel_status="OK",
+            failure_type="missing_evidence",
+            runner_attempts="0",
+            runner_max_attempts="2",
+        )
+    )
+    assert missing_evidence["failure_type"] == "MISSING_EVIDENCE"
+    assert missing_evidence["recovery_decision"]["action"] == "repair_evidence_refs"
+
+    no_progress = recovery_decision(RunStateFacts(status="BLOCKED", failure_type="no_progress_fuse"))
+    assert no_progress.action == "change_strategy"
+    assert no_progress.secondary_action == "stop"
 
 
 def test_idempotency_contract_stable_keys_and_operation_shapes() -> None:

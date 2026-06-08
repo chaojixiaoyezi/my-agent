@@ -9,12 +9,14 @@ from .identity import request_update_targets
 from .models import CaseDecision, CollaborationRequest, new_decision_id, new_request_id
 from .request_status import (
     CollaborationRequestStatus,
+    canonical_request_status_for_update,
     evidence_sources_by_request,
     is_blocked_request_status,
     is_completed_request_status,
     is_declined_request_status,
     pending_request_row,
     request_has_required_evidence,
+    request_status_protocol_metadata,
 )
 from .store_cases import CollaborationCaseStore
 from .store_common import dict_items, read_jsonl_report, strings
@@ -163,12 +165,16 @@ class CollaborationRequestStore(CollaborationCaseStore):
     def _updated_request_snapshot(self, request: CollaborationRequest, status_text: str, kwargs: dict[str, Any]) -> CollaborationRequest:
         current = current_time(kwargs.get("now"))
         metadata = self._next_request_metadata(request, status_text, kwargs)
+        canonical_status = canonical_request_status_for_update(status_text)
         targets = request_update_targets(explicit_targets=kwargs.get("target_agent_ids"), metadata=kwargs.get("metadata") or {})
-        status = self._covered_status(_CoveredStatusRequest(request, targets, status_text, metadata, kwargs))
+        status = self._covered_status(_CoveredStatusRequest(request, targets, canonical_status, metadata, kwargs))
         return replace(request, target_agent_ids=targets or request.target_agent_ids, status=status, updated_at=current, metadata=metadata)
 
     def _next_request_metadata(self, request: CollaborationRequest, status_text: str, kwargs: dict[str, Any]) -> dict[str, Any]:
         metadata = {**request.metadata, **(kwargs.get("metadata") or {})}
+        metadata.pop("raw_request_status", None)
+        metadata.pop("request_status_protocol_error", None)
+        metadata.update(request_status_protocol_metadata(status_text))
         summary = str(kwargs.get("summary") or "").strip()
         if kwargs.get("actor_agent_id"):
             metadata["last_actor_agent_id"] = str(kwargs.get("actor_agent_id") or "")

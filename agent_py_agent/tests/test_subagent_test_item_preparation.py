@@ -489,7 +489,7 @@ def test_prepare_test_items_converts_cat_content_assertion_to_content_check(tmp_
     prepared = prepare_test_items(
         TestItemPreparationRequest(
             tests=[{
-                "name": "leaf_worker_proof_content",
+                "name": "worker_proof_content",
                 "validation_method": "command",
                 "command": f"cat {artifact}",
                 "expected_content": "context-lineage-ok",
@@ -517,14 +517,14 @@ def test_prepare_test_items_does_not_parse_summary_for_cat_content(tmp_path):
     prepared = prepare_test_items(
         TestItemPreparationRequest(
             tests=[{
-                "name": "leaf_worker_proof_content",
+                "name": "worker_proof_content",
                 "validation_method": "command",
                 "command": f"cat {artifact}",
                 "summary": "需父代理独立验证文件内容是否为context-lineage-ok",
             }],
             output={"artifacts": [{
                 "path": str(artifact),
-                "summary": "leaf_worker 写入的目标产物，内容应为context-lineage-ok",
+                "summary": "worker 写入的目标产物，内容应为context-lineage-ok",
             }]},
             workspace_root=tmp_path,
         )

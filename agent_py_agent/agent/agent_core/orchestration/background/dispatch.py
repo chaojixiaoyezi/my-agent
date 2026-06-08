@@ -11,6 +11,7 @@ from pathlib import Path
 from agent_py_agent.agent.capability import CapabilityRouter
 
 from ....runtime_errors import runtime_error_report
+from ....subagents.models import FailureType
 from ...agent_tree.status import agent_tree_status_payload
 from ...parameters import _bool_param
 from ...runner.context import current_subagent_run_id
@@ -27,6 +28,7 @@ class _BackgroundDispatchRequest:
     router: object
     cfg: object
     params: DispatchParams
+    backend_override: object | None = None
 
 
 def auto_start_tasks(agent, tasks: list, request_params: dict[str, object]) -> dict[str, object]:
@@ -67,7 +69,15 @@ def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
         run_ids,
         background_launch_id=launch_id,
     )
-    request = _BackgroundDispatchRequest(agent, run_ids, launch_id, router, cfg, dispatch_params)
+    request = _BackgroundDispatchRequest(
+        agent,
+        run_ids,
+        launch_id,
+        router,
+        cfg,
+        dispatch_params,
+        _captured_backend_override(agent),
+    )
     mark_errors = mark_background_start(request, status="launching")
     if _use_inprocess_autostart(agent):
         return _start_inprocess_dispatch(agent, request, mark_errors)
@@ -80,7 +90,7 @@ def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
             "status": "failed",
             "dispatch_mode": "background",
             "background_backend": "process",
-            "failure_type": "background_dispatch_startup",
+            "failure_type": FailureType.BACKGROUND_DISPATCH_STARTUP.value,
             "run_ids": run_ids,
             "launch_id": launch_id,
             "pid": process.pid,
@@ -109,6 +119,15 @@ def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
 
 def _use_inprocess_autostart(agent) -> bool:
     return str(getattr(getattr(agent, "config", None), "model_backend", "") or "").strip() == "echo"
+
+
+def _captured_backend_override(agent) -> object | None:
+    explicit = getattr(agent, "_subagent_worker_backend_override", None)
+    if explicit is not None:
+        return explicit
+    if _use_inprocess_autostart(agent):
+        return getattr(agent, "backend", None)
+    return None
 
 
 def _start_inprocess_dispatch(
@@ -180,7 +199,7 @@ def mark_background_channel_failure(request: _BackgroundDispatchRequest, *, erro
             task = manager.load(run_id)
             task.status = "CHANNEL_ERROR"
             task.channel_status = "BROKEN"
-            task.failure_type = "background_dispatch_startup"
+            task.failure_type = FailureType.BACKGROUND_DISPATCH_STARTUP.value
             task.result = error
             task.updated_at = time.time()
             manager.save(task)
@@ -241,6 +260,8 @@ def _background_dispatch_command(agent, request: _BackgroundDispatchRequest) -> 
         "--config",
         _config_path(agent),
         "subagents-dispatch",
+        "--workspace-root",
+        _workspace_root_arg(agent),
         "--apply",
         "--start-runners",
         "--max-runners",
@@ -257,6 +278,17 @@ def _background_dispatch_command(agent, request: _BackgroundDispatchRequest) -> 
     for run_id in request.run_ids:
         command.extend(["--run-id", run_id])
     return command
+
+
+def _workspace_root_arg(agent) -> str:
+    root = getattr(agent, "root", None)
+    if isinstance(root, (str, Path)) and str(root).strip():
+        return str(Path(root).expanduser().resolve())
+    manager = getattr(agent, "subagents", None)
+    workspace_root = getattr(manager, "workspace_root", None)
+    if isinstance(workspace_root, (str, Path)) and str(workspace_root).strip():
+        return str(Path(workspace_root).expanduser().resolve())
+    return str(_project_root())
 
 
 def _config_path(agent) -> str:
@@ -277,6 +309,10 @@ def _background_log_path(agent, launch_id: str) -> str:
 
 
 def _background_dispatch_worker(request: _BackgroundDispatchRequest) -> None:
+    previous_backend_override = getattr(request.agent, "_subagent_worker_backend_override", None)
+    previous_present = hasattr(request.agent, "_subagent_worker_backend_override")
+    if request.backend_override is not None:
+        request.agent._subagent_worker_backend_override = request.backend_override
     try:
         mark_background_start(request, status="running")
         report = request.agent.dispatch_subagents(request.router, request.cfg, params=request.params)
@@ -285,6 +321,15 @@ def _background_dispatch_worker(request: _BackgroundDispatchRequest) -> None:
         mark_background_start(request, status="failed", error=error)
         _remember_background_result(request.agent, request.launch_id, {"ok": False, "error": error})
         return
+    finally:
+        if request.backend_override is not None:
+            if previous_present:
+                request.agent._subagent_worker_backend_override = previous_backend_override
+            else:
+                try:
+                    delattr(request.agent, "_subagent_worker_backend_override")
+                except AttributeError:
+                    pass
     mark_background_start(request, status="finished")
     _remember_background_result(request.agent, request.launch_id, _auto_start_report(request.run_ids, report))
 

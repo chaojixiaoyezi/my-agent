@@ -98,6 +98,36 @@ def register_saved_run_task_ref(agent, result, params) -> None:
                 status="active",
             ),
         )
+        _sync_conversation_task_workspace(agent, params, task_id, result.root)
+    except OSError:
+        return
+
+
+def _sync_conversation_task_workspace(agent, run_params, task_id: str, task_root: Path) -> None:
+    store = getattr(agent, "conversation_store", None)
+    if store is None or not callable(getattr(store, "bind_task", None)):
+        return
+    attrs = getattr(run_params, "task_attributes", None)
+    attrs = attrs if isinstance(attrs, dict) else {}
+    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+    if not thread_id:
+        try:
+            thread = store.thread_for_task(str(task_id))
+        except Exception:
+            thread = None
+        thread_id = str(getattr(thread, "thread_id", "") or "").strip()
+    if not thread_id:
+        return
+    try:
+        store.bind_task(
+            {
+                "thread_id": thread_id,
+                "task_id": str(task_id),
+                "goal": str(getattr(run_params, "user_prompt", "") or task_id),
+                "status": "active",
+                "task_path": str(task_root),
+            }
+        )
     except OSError:
         return
 
@@ -210,7 +240,11 @@ def _existing_workspace_paths(attrs: object) -> _ExistingWorkspacePaths | None:
 def _task_workspace_root_candidates(agent, params: object | None) -> list[str]:
     attrs = getattr(params, "task_attributes", None) if params is not None else None
     contract = getattr(params, "delivery_contract", None) if params is not None else None
+    subagent_root = _subagent_run_workspace(agent, params)
+    internal_root = _internal_agent_run_workspace(params, attrs)
     return [
+        subagent_root,
+        internal_root,
         _workspace_root_from_mapping(contract, "task_workspace"),
         _workspace_root_from_mapping(attrs, "run_workspace"),
         str(getattr(agent, "_current_run_task_workspace", "") or "").strip(),
@@ -220,13 +254,39 @@ def _task_workspace_root_candidates(agent, params: object | None) -> list[str]:
 def _task_workspace_work_dir_candidates(agent, params: object | None) -> list[str]:
     attrs = getattr(params, "task_attributes", None) if params is not None else None
     contract = getattr(params, "delivery_contract", None) if params is not None else None
+    subagent_root = _subagent_run_workspace(agent, params)
+    internal_root = _internal_agent_run_workspace(params, attrs)
     return [
+        subagent_root,
+        internal_root,
         _workspace_work_dir_from_mapping(contract, "task_workspace"),
         _workspace_work_dir_from_mapping(attrs, "run_workspace"),
         str(Path(getattr(agent, "_current_run_task_workspace", "") or "") / "work")
         if str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
         else "",
     ]
+
+
+def _internal_agent_run_workspace(params: object | None, attrs: object) -> str:
+    if str(getattr(params, "context_scope", "") or "").strip().lower() not in {"task_local", "control_plane"}:
+        return ""
+    if not isinstance(attrs, dict):
+        return ""
+    return str(attrs.get("agent_run_workspace_dir") or "").strip()
+
+
+def _subagent_run_workspace(agent, params: object | None) -> str:
+    run_id = str(getattr(params, "run_id", "") or "").strip()
+    if not run_id:
+        return ""
+    manager = getattr(agent, "subagents", None)
+    if manager is None or not callable(getattr(manager, "load", None)):
+        return ""
+    try:
+        task = manager.load(run_id)
+    except Exception:
+        return ""
+    return str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
 
 
 def _workspace_root_from_mapping(value: object, key: str) -> str:
@@ -439,6 +499,9 @@ def _delivery_contract_with_workspace(contract: object, paths, *, primary_worksp
         "output_dir": str(paths.output_dir),
         "work_dir": str(paths.work_dir),
     }
+    if primary_workspace_root is not None:
+        task_workspace["source_workspace_root"] = str(primary_workspace_root)
+        task_workspace["relative_input_root"] = str(primary_workspace_root)
     artifacts = result.get("artifacts")
     user_requested_output_dir = _user_requested_output_dir(artifacts, paths, primary_workspace_root)
     if user_requested_output_dir:

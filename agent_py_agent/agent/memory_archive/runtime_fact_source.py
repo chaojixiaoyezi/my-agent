@@ -136,7 +136,7 @@ def _runtime_progress_payload(request: RuntimeFactSourceRequest) -> dict[str, An
 
 
 def _phase_from_status(status: str) -> str:
-    normalized = str(status or "").strip().upper()
+    normalized = str(status or "").strip()
     if normalized == "DONE":
         return "final"
     if normalized in {"FAILED", "TIMEOUT", "CHANNEL_ERROR", "CANCELLED", "ABANDONED", "INTERRUPTED"}:

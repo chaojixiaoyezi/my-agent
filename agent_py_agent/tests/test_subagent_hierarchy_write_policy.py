@@ -165,7 +165,7 @@ def test_hierarchy_schedule_grants_worker_path_written_by_child_spec(tmp_path):
     )
     worker = manager.load(result.created_run_ids[0])
 
-    assert worker.role == "leaf_worker"
+    assert worker.role == "worker"
     assert str(deliverables / "build") in worker.allowed_write_roots
     assert "write_file" in worker.allowed_tools
 

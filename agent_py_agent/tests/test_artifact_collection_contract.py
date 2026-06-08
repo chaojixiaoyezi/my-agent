@@ -278,6 +278,41 @@ def test_collection_contract_rejects_required_item_placeholder_values(tmp_path: 
     assert "__FILL_3_date__" in placeholder.value
 
 
+def test_collection_contract_keeps_plain_language_values_as_values(tmp_path: Path) -> None:
+    (tmp_path / "source_index.json").write_text(
+        json.dumps(
+            {
+                "completion_evidence": {"source": "fixture"},
+                "rows": [
+                    {
+                        "date": "未知",
+                        "title": "Paper 1",
+                        "url": "https://example.com/1",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    findings = collection_contract_findings(
+        {
+            "collection_contract": {
+                "source_json_ref": "source_index.json",
+                "items_path": "rows",
+                "min_items_total": 1,
+                "required_item_fields": ["title", "url", "date"],
+                "require_completion_evidence": True,
+            }
+        },
+        tmp_path,
+    )
+
+    assert "COLLECTION_ITEM_PLACEHOLDER_VALUE" not in {finding.code for finding in findings}
+    assert "COLLECTION_ITEM_REQUIRED_FIELD_MISSING" not in {finding.code for finding in findings}
+
+
 def test_collection_contract_accepts_sheets_rows_when_flat_items_path_is_missing(tmp_path: Path) -> None:
     source_id = "src-web"
     (tmp_path / "source_index.json").write_text(

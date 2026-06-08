@@ -87,7 +87,7 @@ The following controls already existed in the 2026-05-31 baseline and should not
 ## Not A Hard Gate But A Major Behavior Change
 
 1. `memory_compact_auto_trigger_percent`
-   - Change: default was 90 at baseline, now 50.
-   - Effect: compact happens much earlier and more often.
-   - Decision: useful for compact stress testing; probably too aggressive as the normal long-task default.
-   - Status: keep only while testing compact behavior, then reconsider.
+   - Change: default was 90 at baseline, briefly moved to 50 for compact stress, now 70.
+   - Effect: compact still happens before provider overflow, but normal long tasks keep more live context than the 50% test setting.
+   - Decision: 50 is only a temporary stress override; the normal runtime default is 70.
+   - Status: keep 70 as the current main-chain default unless real LLM evidence shows it should move again.

@@ -8,6 +8,7 @@ from pathlib import Path
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli.scenario_utils import (
+    build_scenario_prompt,
     build_scenario_runner_instruction,
     collect_scenario_report_files,
 )
@@ -75,6 +76,16 @@ def test_runner_instruction_mentions_write_boundary_target():
 
     assert "allowed_write_roots" in instruction
     assert "task_dir/scenario_outputs/<run_id>.md" in instruction
+
+
+def test_scenario_main_prompt_stays_plain_user_language():
+    """真实主代理场景 prompt 不应把内部工具/协议名直接塞给模型。"""
+
+    prompt = build_scenario_prompt(2)
+
+    assert "2 个帮手" in prompt
+    for internal in ("create_subagents", "dispatch_subagents", "start_runners", "SUBAGENT_RESULT"):
+        assert internal not in prompt
 
 
 def test_write_scenario_config_persists_runner_stress_overrides(tmp_path):

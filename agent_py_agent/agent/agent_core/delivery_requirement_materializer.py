@@ -27,6 +27,8 @@ def build_delivery_requirement_materializer_prompt(user_prompt: str, *, repair_f
         "不要让系统去找 .cad、.document 这类假后缀。\n"
         "如果用户要求表格列，请写入 artifacts[].validation_contract.required_columns；事实型数字、排名、时间窗"
         "请写入 delivery_quality_contract.metric_contracts。\n"
+        "用户用普通自然语言描述的报告维度、分析角度和对比口径只作为内容意图，不要写入"
+        "validation_contract.required_sections；只有外部结构化合同已经显式给出这些字段时才保留。\n"
         "分析型字段请放入 artifacts[].llm_generated_fields，例如解释、理由、建议、结论、判断、摘要这类需要模型撰写的列；"
         "不要把它们映射到来源 API 的普通 description 字段。\n"
         "如果外部调用方显式需要把覆盖范围结构化，可以写 target_coverage_contract，里面只放目标清单和覆盖口径；"
@@ -62,6 +64,9 @@ def materialized_delivery_contract(
     _normalize_delivery_quality_contract(contract)
     _derive_fact_evidence_contract(contract)
     _derive_user_requested_output_artifacts(contract, user_prompt)
+    _derive_prompt_directory_coverage_contract(contract, user_prompt, workspace_root)
+    _derive_prompt_report_artifact_contract(contract, user_prompt)
+    _normalize_target_coverage_contract(contract, user_prompt, workspace_root)
     _preserve_explicit_bootstrap_contract(contract)
     _attach_source_contract_repair_diagnostics(contract, user_prompt)
     if findings:
@@ -90,6 +95,9 @@ _PATH_RE = re.compile(
     rf"(?P<path>(?:(?:[A-Za-z]:[\\/])|(?:\\\\{_PATH_SEGMENT}[\\/]{_PATH_SEGMENT}[\\/])|(?:~[\\/])|/)?"
     rf"(?:{_PATH_SEGMENT}[\\/])*{_PATH_SEGMENT}\.[A-Za-z0-9]{{1,12}})"
 )
+_ABSOLUTE_OR_HOME_PATH_RE = re.compile(
+    rf"(?<![A-Za-z0-9_.~-])(?P<path>(?:[A-Za-z]:[\\/]|~[\\/]|/)(?:{_PATH_SEGMENT}[\\/])*{_PATH_SEGMENT})"
+)
 
 
 def delivery_contract_from_user_requested_outputs(
@@ -101,6 +109,24 @@ def delivery_contract_from_user_requested_outputs(
     if not artifacts:
         return {}
     contract = {"schema_version": SCHEMA_VERSION, "artifacts": artifacts}
+    _derive_prompt_directory_coverage_contract(contract, user_prompt, workspace_root)
+    _attach_source_contract_repair_diagnostics(contract, user_prompt)
+    doctor = validate_delivery_contract(contract, workspace_root=workspace_root)
+    return dict(doctor.normalized_contract or contract)
+
+
+def delivery_contract_from_user_prompt_structure(
+    user_prompt: str,
+    *,
+    workspace_root: Path | None = None,
+) -> dict[str, Any]:
+    contract = delivery_contract_from_user_requested_outputs(user_prompt, workspace_root=workspace_root)
+    if not contract:
+        contract = {"schema_version": SCHEMA_VERSION, "artifacts": []}
+        _derive_prompt_directory_coverage_contract(contract, user_prompt, workspace_root)
+        _derive_prompt_report_artifact_contract(contract, user_prompt)
+        if not isinstance(contract.get("target_coverage_contract"), dict):
+            return {}
     doctor = validate_delivery_contract(contract, workspace_root=workspace_root)
     return dict(doctor.normalized_contract or contract)
 
@@ -163,13 +189,18 @@ def _has_source_modeling_contract(contract: dict[str, Any]) -> bool:
 def _user_referenced_source_paths(user_prompt: str, artifacts: object = None) -> list[str]:
     output_paths = {*_declared_artifact_paths(artifacts), *_structural_output_path_candidates(user_prompt)}
     paths: list[str] = []
-    for match in _PATH_RE.finditer(str(user_prompt or "")):
-        path = match.group("path")
+    for path in _path_candidates(str(user_prompt or "")):
         if path in output_paths:
             continue
         if _looks_like_output_path(path):
             continue
         paths.append(path)
+    return list(dict.fromkeys(paths))
+
+
+def _path_candidates(text: str) -> list[str]:
+    paths = [match.group("path") for match in _PATH_RE.finditer(text)]
+    paths.extend(match.group("path") for match in _ABSOLUTE_OR_HOME_PATH_RE.finditer(text))
     return list(dict.fromkeys(paths))
 
 
@@ -232,7 +263,25 @@ def _structural_output_path_candidates(user_prompt: str) -> list[str]:
             continue
         if _looks_like_output_path(path) or _looks_like_user_work_artifact_path(path):
             paths.append(path)
-    return list(dict.fromkeys(paths))
+    return _drop_shadowed_basename_paths(list(dict.fromkeys(paths)))
+
+
+def _drop_shadowed_basename_paths(paths: list[str]) -> list[str]:
+    result: list[str] = []
+    for path in paths:
+        if _is_shadowed_basename_path(path, paths):
+            continue
+        result.append(path)
+    return result
+
+
+def _is_shadowed_basename_path(path: str, paths: list[str]) -> bool:
+    if _output_parent(path) != ".":
+        return False
+    name = _path_name(path)
+    if not name:
+        return False
+    return any(other != path and _path_name(other) == name and _output_parent(other) != "." for other in paths)
 
 
 def _declared_artifact_paths(artifacts: object) -> list[str]:
@@ -336,6 +385,41 @@ def _user_requested_output_artifact(path: str) -> dict[str, Any]:
     return artifact
 
 
+def _derive_prompt_report_artifact_contract(contract: dict[str, Any], user_prompt: str) -> None:
+    artifacts = contract.get("artifacts")
+    if isinstance(artifacts, list):
+        if any(_is_report_artifact(artifact) for artifact in artifacts):
+            return
+    if not _prompt_requests_final_report(user_prompt):
+        return
+    if not isinstance(artifacts, list):
+        artifacts = []
+        contract["artifacts"] = artifacts
+    artifacts.append(
+        {
+            "artifact_id": "final_report",
+            "kind": "md",
+            "allowed_output_roots": ["output"],
+            "required": True,
+        }
+    )
+
+
+def _is_report_artifact(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    kind = str(value.get("kind") or "").strip().lower().lstrip(".")
+    if kind in {"md", "markdown", "txt", "docx", "pdf", "html"}:
+        return True
+    path = str(value.get("preferred_path") or value.get("path") or "").strip().lower()
+    return path.endswith((".md", ".markdown", ".txt", ".docx", ".pdf", ".html", ".htm"))
+
+
+def _prompt_requests_final_report(user_prompt: str) -> bool:
+    text = str(user_prompt or "")
+    return bool(re.search(r"(?:最后|最终|生成|输出|写(?:成|出)?|整理(?:成)?)\S{0,20}报告", text))
+
+
 def _artifact_id_from_output_path(path: str) -> str:
     raw = _path_name(path) or "artifact"
     text = re.sub(r"[^A-Za-z0-9]+", "_", raw).strip("_").lower()
@@ -413,6 +497,7 @@ def _artifact_contract(item: dict[str, Any]) -> dict[str, Any]:
         "accepted_extension",
         "accepted_extensions",
         "artifact_intent",
+        "artifact_role",
         "artifact_id",
         "content_type",
         "extension",
@@ -494,6 +579,7 @@ def _artifact_intent(intent: dict[str, Any]) -> dict[str, Any]:
         "mime_type",
         "preferred_extension",
         "preferred_extensions",
+        "artifact_role",
         "role",
     }
     result = {key: intent[key] for key in allowed if key in intent}
@@ -537,23 +623,22 @@ def _string_items(value: object) -> list[str]:
 
 
 def _artifact_declares_input_role(item: dict[str, Any]) -> bool:
-    role = " ".join(
+    roles = [
         str(item.get(key) or "").strip().lower()
-        for key in ("artifact_role", "role", "purpose", "usage")
-    )
-    if not role:
-        return False
-    input_markers = (
-        "input",
-        "source",
-        "reference",
-        "read_only",
-        "readonly",
-        "evidence",
-        "lookup",
-        "search",
-    )
-    return any(marker in role for marker in input_markers)
+        for key in ("artifact_role", "role")
+        if str(item.get(key) or "").strip()
+    ]
+    intent = item.get("artifact_intent")
+    if isinstance(intent, dict):
+        roles.extend(
+            str(intent.get(key) or "").strip().lower()
+            for key in ("artifact_role", "role")
+            if str(intent.get(key) or "").strip()
+        )
+    return any(role in _INPUT_ARTIFACT_ROLES for role in roles)
+
+
+_INPUT_ARTIFACT_ROLES = frozenset({"input", "source", "reference", "read_only", "evidence", "lookup", "search"})
 
 
 def _is_internal_work_artifact(artifact: dict[str, Any]) -> bool:
@@ -652,6 +737,200 @@ def _normalize_delivery_quality_contract(contract: dict[str, Any]) -> None:
     contract["delivery_quality_contract"] = quality
 
 
+def _normalize_target_coverage_contract(
+    contract: dict[str, Any],
+    user_prompt: str,
+    workspace_root: Path | None,
+) -> None:
+    coverage = contract.get("target_coverage_contract")
+    if not isinstance(coverage, dict):
+        return
+    if isinstance(coverage.get("target_items"), list):
+        return
+    projects = _string_items(coverage.get("target_projects") or coverage.get("projects"))
+    if not projects:
+        return
+    base = _target_coverage_base_path(coverage, user_prompt, contract.get("artifacts"), workspace_root)
+    coverage["target_items"] = [_project_coverage_item(project, base) for project in projects]
+    coverage.setdefault("scope_label", "source projects")
+    coverage.setdefault("enforcement", "required")
+    contract["target_coverage_contract"] = coverage
+
+
+def _derive_prompt_directory_coverage_contract(
+    contract: dict[str, Any],
+    user_prompt: str,
+    workspace_root: Path | None,
+) -> None:
+    coverage = contract.get("target_coverage_contract")
+    if isinstance(coverage, dict) and isinstance(coverage.get("target_items"), list):
+        return
+    if isinstance(coverage, dict) and (coverage.get("target_projects") or coverage.get("projects")):
+        return
+    items: list[dict[str, Any]] = []
+    for root in _source_directories_from_prompt(user_prompt, contract.get("artifacts"), workspace_root):
+        children = _mentioned_child_directories(root, user_prompt) or _project_child_directories(root)
+        if children:
+            items.extend(_project_coverage_item(child.name, str(root)) for child in children)
+        elif not items:
+            items.append(_project_coverage_item(root.name, str(root.parent)))
+    if not items:
+        return
+    contract["target_coverage_contract"] = {
+        "scope_label": "source directories",
+        "enforcement": "required",
+        "target_items": items,
+    }
+
+
+def _source_directories_from_prompt(
+    user_prompt: str,
+    artifacts: object,
+    workspace_root: Path | None,
+) -> list[Path]:
+    roots: list[Path] = []
+    for raw in _user_referenced_source_paths(user_prompt, artifacts):
+        path = _resolve_source_path(raw, workspace_root)
+        if path is not None and path.is_dir() and path not in roots:
+            roots.append(path)
+    return roots
+
+
+def _resolve_source_path(raw: str, workspace_root: Path | None) -> Path | None:
+    if not raw:
+        return None
+    try:
+        path = Path(raw).expanduser()
+        if not path.is_absolute() and workspace_root is not None:
+            path = Path(workspace_root).expanduser() / path
+        return path.resolve(strict=False)
+    except OSError:
+        return None
+
+
+def _mentioned_child_directories(root: Path, user_prompt: str) -> list[Path]:
+    try:
+        children = _sorted_directories(root)
+    except OSError:
+        return []
+    excluded = _excluded_child_directory_names(children)
+    return [
+        child
+        for child in children
+        if child.name in user_prompt
+        and child.name not in excluded
+        and not _looks_like_output_path(child.name)
+        and not _looks_like_non_source_child_dir(child.name)
+    ]
+
+
+def _project_child_directories(root: Path) -> list[Path]:
+    try:
+        children = _sorted_directories(root)
+    except OSError:
+        return []
+    candidates = [
+        child
+        for child in children
+        if not _looks_like_output_path(child.name)
+        and not _looks_like_non_source_child_dir(child.name)
+        and _looks_like_project_root(child)
+    ]
+    return candidates if len(candidates) >= 2 else []
+
+
+def _sorted_directories(root: Path) -> list[Path]:
+    return sorted((item for item in root.iterdir() if item.is_dir()), key=lambda item: (item.name.casefold(), item.name))
+
+
+def _looks_like_project_root(path: Path) -> bool:
+    marker_names = {
+        ".git",
+        "README",
+        "README.md",
+        "README.rst",
+        "pyproject.toml",
+        "setup.py",
+        "requirements.txt",
+        "package.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "Cargo.toml",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "Makefile",
+    }
+    try:
+        names = {item.name for item in path.iterdir()}
+    except OSError:
+        return False
+    if marker_names.intersection(names):
+        return True
+    return any((path / name).is_dir() for name in ("src", "lib", "app", "packages"))
+
+
+def _excluded_child_directory_names(children: list[Path]) -> set[str]:
+    names = {child.name for child in children}
+    return {name for name in names if _looks_like_non_source_child_dir(name)}
+
+
+def _looks_like_non_source_child_dir(name: str) -> bool:
+    lowered = name.lower()
+    if lowered.startswith(("_backup", ".agent")):
+        return True
+    return lowered in {
+        "all_agent_total_code_module_reports",
+        "data",
+        "local_store",
+        "memory",
+        "memory_archive",
+        "notes",
+        "output",
+        "outputs",
+        "subagents",
+        "tmp",
+        "笔记",
+    }
+
+
+def _target_coverage_base_path(
+    coverage: dict[str, Any],
+    user_prompt: str,
+    artifacts: object,
+    workspace_root: Path | None,
+) -> str:
+    candidates = [
+        *_user_referenced_source_paths(user_prompt, artifacts),
+        str(coverage.get("base_path") or "").strip(),
+        str(workspace_root or "").strip(),
+    ]
+    for candidate in candidates:
+        if _path_is_existing_dir(candidate):
+            return candidate
+    return next((candidate for candidate in candidates if candidate), "")
+
+
+def _path_is_existing_dir(value: str) -> bool:
+    if not value:
+        return False
+    try:
+        return Path(value).expanduser().is_dir()
+    except OSError:
+        return False
+
+
+def _project_coverage_item(project: str, base: str) -> dict[str, Any]:
+    source_ref = str((Path(base).expanduser() / project).resolve(strict=False)) if base else project
+    return {
+        "target_id": project,
+        "label": project,
+        "source_ref": source_ref,
+        "coverage_kind": "source_file_under_dir",
+        "min_read_count": 2,
+    }
+
+
 def _preserve_explicit_bootstrap_contract(contract: dict[str, Any]) -> None:
     bootstrap = contract.get("bootstrap_contract")
     if not isinstance(bootstrap, dict):
@@ -741,6 +1020,7 @@ __all__ = [
     "MATERIALIZER_SCHEMA_VERSION",
     "SCHEMA_VERSION",
     "build_delivery_requirement_materializer_prompt",
+    "delivery_contract_from_user_prompt_structure",
     "materialized_delivery_contract",
     "materializer_repair_feedback",
 ]

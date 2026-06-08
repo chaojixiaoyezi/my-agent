@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 
 from ..delivery_requirement_materializer import (
     build_delivery_requirement_materializer_prompt,
-    delivery_contract_from_user_requested_outputs,
+    delivery_contract_from_user_prompt_structure,
     materialized_delivery_contract,
     materializer_repair_feedback,
 )
@@ -79,23 +79,38 @@ def run_params_with_materialized_delivery_contract(agent, user_prompt: str, para
         return params
     if _is_internal_context_scope(params.context_scope):
         return params
-    structural_contract = delivery_contract_from_user_requested_outputs(
-        user_prompt,
+    contract_prompt = _delivery_contract_prompt(user_prompt, params)
+    structural_contract = delivery_contract_from_user_prompt_structure(
+        contract_prompt,
         workspace_root=getattr(agent, "root", None),
     )
     if _has_materialized_runtime_contract(structural_contract):
+        if _should_repair_structural_contract(structural_contract):
+            repaired = _materialize_delivery_contract(agent, contract_prompt, params)
+            for _ in range(_MAX_MATERIALIZER_REPAIR_ATTEMPTS):
+                repair_feedback = materializer_repair_feedback(repaired)
+                if not repair_feedback:
+                    break
+                repaired = _materialize_delivery_contract(agent, contract_prompt, params, repair_feedback=repair_feedback)
+            if _has_materialized_runtime_contract(repaired):
+                return replace(params, delivery_contract=repaired)
         return replace(params, delivery_contract=structural_contract)
     if not _should_materialize_delivery_contract(params):
         return params
-    contract = _materialize_delivery_contract(agent, user_prompt, params)
+    contract = _materialize_delivery_contract(agent, contract_prompt, params)
     for _ in range(_MAX_MATERIALIZER_REPAIR_ATTEMPTS):
         repair_feedback = materializer_repair_feedback(contract)
         if not repair_feedback:
             break
-        contract = _materialize_delivery_contract(agent, user_prompt, params, repair_feedback=repair_feedback)
+        contract = _materialize_delivery_contract(agent, contract_prompt, params, repair_feedback=repair_feedback)
     if not _has_materialized_runtime_contract(contract):
         return params
     return replace(params, delivery_contract=contract)
+
+
+def _delivery_contract_prompt(user_prompt: str, params: RunParams) -> str:
+    root_prompt = str(getattr(params, "root_user_prompt", "") or "").strip()
+    return root_prompt or user_prompt
 
 
 def _materialize_delivery_contract(agent, user_prompt: str, params: RunParams, *, repair_feedback: str = "") -> dict:
@@ -126,3 +141,7 @@ def _has_materialized_runtime_contract(contract: dict) -> bool:
             isinstance(contract.get("bootstrap_contract"), dict),
         )
     )
+
+
+def _should_repair_structural_contract(contract: dict) -> bool:
+    return bool(materializer_repair_feedback(contract))

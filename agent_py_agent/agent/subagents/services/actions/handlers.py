@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ...models import FailureType
+
 if TYPE_CHECKING:
     from ...models import SubAgentTask
     from ...reports import ActionPlanItem
@@ -108,7 +110,7 @@ def apply_repair_work_order(service, action, task, ctx: ActionHandlerContext):
 
 def apply_reopen_for_evidence(service, action, task, ctx: ActionHandlerContext):
     task.status = "BLOCKED"
-    task.failure_type = "missing_evidence"
+    task.failure_type = FailureType.MISSING_EVIDENCE.value
     task.verification_status = "UNVERIFIED"
     task.updated_at = ctx.now
     task.result = task.result or "缺少验收证据，等待补充 evidence 后再完成。"
@@ -123,7 +125,7 @@ def apply_reopen_for_evidence(service, action, task, ctx: ActionHandlerContext):
 
 
 def apply_stop_no_progress_and_escalate(service, action, task, ctx: ActionHandlerContext):
-    task.failure_type = "no_progress_fuse"
+    task.failure_type = FailureType.NO_PROGRESS_FUSE.value
     blocker = "no_progress_fuse: 连续恢复没有进展，已停止自动重试和扩容。"
     if blocker not in task.blockers:
         task.blockers.append(blocker)

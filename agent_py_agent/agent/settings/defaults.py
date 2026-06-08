@@ -6,6 +6,7 @@ from typing import Any
 
 DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS = 12_000
 DEFAULT_COMMAND_ACCESS_MODE = "workspace-write"
+DEFAULT_MODEL_MAX_TOKENS = 16_314
 
 
 @lru_cache(maxsize=1)
@@ -35,6 +36,7 @@ def default_config_bool(key: str) -> bool:
 
 __all__ = [
     "DEFAULT_COMMAND_ACCESS_MODE",
+    "DEFAULT_MODEL_MAX_TOKENS",
     "DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS",
     "default_agent_config",
     "default_config_bool",

@@ -14,8 +14,9 @@
   `resume_focus` 和 work_state 字段决定。
 - 主代理 task workspace 复用只认当前 `work/run_workspace.json`；`work/task.yaml` 是可读说明，
   不再作为旧目录身份兜底。
-- compact work-state 的 read coverage 从单一 primary 游标扩展为 `primary + sources`：
-  primary 用于下一步优先续接，sources 用于多文件/多项目覆盖审计和 resume context 展示。
+- compact work-state 的 read coverage 从单一 primary 游标扩展为
+  `primary + sources + incomplete_sources`：`incomplete_sources` 用于多文件/多项目任务的
+  下一段续接队列，`sources` 用于覆盖审计和 resume context 展示。
 - `list_files`、`find_files`、`search_text` 统一写结构化 `page_window`，tool output 归档和
   compact work-state 从该字段恢复分页 offset；机器续接不再依赖输出正文里的 `next_offset` 文案。
 

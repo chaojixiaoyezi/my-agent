@@ -35,7 +35,8 @@ from .models import GatewayRunContext, GatewayRunOptions
 
 
 def _gateway_agent_from_context(context: GatewayRunContext) -> SimpleAgent:
-    return make_agent(SimpleNamespace(config=str(context.config_path)))
+    root = getattr(context.agent, "root", "")
+    return make_agent(SimpleNamespace(config=str(context.config_path), workspace_root=str(root or "")))
 
 
 def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_event: threading.Event) -> None:

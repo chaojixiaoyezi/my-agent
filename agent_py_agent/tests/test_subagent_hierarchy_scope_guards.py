@@ -51,7 +51,7 @@ def test_hierarchy_schedule_allows_depth_limit_text_without_scope_block(tmp_path
     root = manager.create_run(goal="root", thought="root", plan=["root"], extra_write_roots=[str(deliverables)])
     parent = manager.create_run(
         goal=(
-            "depth=1 coordinator。必须覆盖四层链路，depth=3 leaf_worker 最终执行。"
+            "depth=1 coordinator。必须覆盖四层链路，depth=3 worker 最终执行。"
             "不要创建 depth>=4 的下级。"
         ),
         thought="child coordinator",
@@ -59,7 +59,7 @@ def test_hierarchy_schedule_allows_depth_limit_text_without_scope_block(tmp_path
         parent_id=root.id,
         root_id=root.id,
         depth=1,
-        role="child_coordinator",
+        role="coordinator",
         agent_name="小傻妞-A",
         allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
         extra_write_roots=[str(deliverables)],
@@ -71,10 +71,10 @@ def test_hierarchy_schedule_allows_depth_limit_text_without_scope_block(tmp_path
             child_specs=[
                 HierarchyChildSpec(
                     goal=(
-                        "构建 depth=2 coordinator，继续创建 depth=3 leaf_worker。"
+                        "构建 depth=2 coordinator，继续创建 depth=3 worker。"
                         f"最终交付到 {deliverables}/controlled_exec_refs.json。"
                     ),
-                    role="child_coordinator",
+                    role="coordinator",
                     agent_name="小小傻妞-A",
                     allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
                 )
@@ -104,7 +104,7 @@ def test_hierarchy_schedule_forbidden_scope_ignores_parent_thought(tmp_path):
     result = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
-            child_specs=[HierarchyChildSpec(goal="创建 leaf_worker_arithmetic 并写 solution.py")],
+            child_specs=[HierarchyChildSpec(goal="创建 worker_arithmetic 并写 solution.py")],
             apply=True,
         )
     )
@@ -173,7 +173,7 @@ def test_hierarchy_schedule_allows_qa_after_implementation_ready(tmp_path):
         parent_id=parent.id,
         root_id=root.id,
         depth=3,
-        role="leaf_worker",
+        role="worker",
         agent_name="小小小傻妞-leaf",
         extra_write_roots=[str(build)],
     )
@@ -216,7 +216,7 @@ def test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready(tmp_
         parent_id=root.id,
         root_id=root.id,
         depth=1,
-        role="child_coordinator",
+        role="coordinator",
         extra_write_roots=[str(build)],
     )
     leaf = manager.create_run(
@@ -226,7 +226,7 @@ def test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready(tmp_
         parent_id=coordinator.id,
         root_id=root.id,
         depth=2,
-        role="leaf_worker",
+        role="worker",
         agent_name="小小傻妞-leaf",
         extra_write_roots=[str(build)],
     )
@@ -260,7 +260,7 @@ def test_hierarchy_schedule_allows_different_declared_work_topics(tmp_path):
         thought="text only",
         plan=["plan"],
         agent_name="text-lead",
-        role="child_coordinator",
+        role="coordinator",
         parent_id=root.id,
         root_id=root.id,
         depth=1,

@@ -29,25 +29,26 @@ def direct_children_progress_payload(agent) -> dict[str, object]:
     parent_run_id = current_subagent_run_id(agent)
     if not parent_run_id:
         return {}
-    direct_children, load_error = _direct_children(agent, parent_run_id)
+    direct_children, all_tasks, load_error = _direct_children(agent, parent_run_id)
     if load_error:
         return {"direct_children": _children_load_error_payload(parent_run_id, load_error)}
     payload = _progress_payload(parent_run_id, direct_children)
     payload["direct_children"].update(quality_repair_advice_payload(agent, parent_run_id))
     _attach_quality_advice(agent, parent_run_id, payload["direct_children"])
-    _attach_recovery_strategies(agent, payload["direct_children"])
+    _attach_recovery_strategies(agent, payload["direct_children"], all_tasks)
     _attach_direct_child_next_action(payload["direct_children"])
     return payload
 
 
-def _direct_children(agent, parent_run_id: str) -> tuple[list, BaseException | None]:
+def _direct_children(agent, parent_run_id: str) -> tuple[list, list, BaseException | None]:
     try:
+        all_tasks = list(agent.subagents.list_runs())
         return [
-            item for item in agent.subagents.list_runs()
+            item for item in all_tasks
             if str(getattr(item, "parent_id", "")) == parent_run_id
-        ], None
+        ], all_tasks, None
     except Exception as exc:
-        return [], exc
+        return [], [], exc
 
 
 def _children_load_error_payload(parent_run_id: str, exc: BaseException) -> dict[str, object]:
@@ -233,24 +234,13 @@ def _attach_quality_advice(agent, parent_run_id: str, children: dict[str, object
     children["quality_advice"] = quality_advice_payload(advice)
 
 
-def _attach_recovery_strategies(agent, children: dict[str, object]) -> None:
+def _attach_recovery_strategies(agent, children: dict[str, object], all_tasks: list) -> None:
     strategies: list[dict[str, object]] = []
-    load_errors: list[dict[str, object]] = []
-    all_tasks, all_tasks_error = _safe_all_tasks(agent)
-    if all_tasks_error:
-        children["recovery_context_load_error"] = runtime_error_report(
-            all_tasks_error,
-            context="direct_children.recovery_context.list_runs",
-        )
     for run_id in children.get("recovery_run_ids") or []:
-        task, load_error = _load_recovery_task(agent, str(run_id))
-        if load_error:
-            load_errors.append(_recovery_task_load_error(str(run_id), load_error))
+        task = _task_by_run_id(all_tasks, str(run_id))
         if task is None:
             continue
         strategies.append(build_subagent_recovery_strategy(_strategy_request(agent, task, all_tasks)).to_dict())
-    if load_errors:
-        children["recovery_load_errors"] = load_errors
     if not strategies:
         return
     children["recovery_strategies"] = strategies
@@ -259,26 +249,8 @@ def _attach_recovery_strategies(agent, children: dict[str, object]) -> None:
     children["recovery_batches"] = recovery_batches_from_strategies(strategies)
 
 
-def _load_recovery_task(agent, run_id: str):
-    try:
-        task = agent.subagents.load(run_id)
-    except Exception as exc:
-        return None, exc
-    return (task, None) if str(getattr(task, "id", "") or "") == run_id else (None, None)
-
-
-def _safe_all_tasks(agent) -> tuple[list, BaseException | None]:
-    try:
-        return list(agent.subagents.list_runs()), None
-    except Exception as exc:
-        return [], exc
-
-
-def _recovery_task_load_error(run_id: str, exc: BaseException) -> dict[str, object]:
-    return {
-        "run_id": run_id,
-        **runtime_error_report(exc, context="direct_children.recovery_task.load"),
-    }
+def _task_by_run_id(all_tasks: list, run_id: str):
+    return next((task for task in all_tasks if str(getattr(task, "id", "") or "") == run_id), None)
 
 
 def _strategy_request(agent, task, all_tasks: list | None = None) -> SubagentRecoveryStrategyRequest:

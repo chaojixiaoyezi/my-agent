@@ -96,6 +96,83 @@ class TestTaskProgressTool:
         assert payload["counts"]["in_progress"] == 1
         assert payload["items"][0]["evidence"] == ["A/README.md"]
 
+    def test_closeout_blocks_when_done_evidence_is_missing_from_artifact(self, tmp_path):
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.delivery_closeout.task_progress_gate import (
+            evaluate_task_progress_closeout_gate,
+        )
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+        from agent_py_agent.agent.task_progress import write_task_progress
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        run_id = "run-main"
+        agent._main_agent_run_id = run_id
+        write_task_progress(
+            agent.home_paths.owner_home_dir,
+            run_id,
+            {
+                "items": [
+                    {"id": "project-a", "status": "done", "evidence": ["project-a/src/core.py"]},
+                    {"id": "project-b", "status": "done", "evidence": ["project-b/README.md"]},
+                    {"id": "project-c", "status": "done", "evidence": ["project-c/src/index.ts"]},
+                ],
+            },
+        )
+        artifact = tmp_path / "output" / "report.md"
+        artifact.parent.mkdir()
+        artifact.write_text("# Report\n\nA short table without source refs.\n", encoding="utf-8")
+
+        decision = evaluate_task_progress_closeout_gate(
+            SimpleNamespace(agent=agent, params=SimpleNamespace(run_id=run_id)),
+            {"artifacts": [{"ok": True, "path": str(artifact)}]},
+        )
+
+        assert decision.allowed is False
+        assert decision.finding_codes == ("TASK_PROGRESS_EVIDENCE_NOT_IN_ARTIFACT",)
+
+    def test_closeout_allows_when_done_evidence_is_projected_into_artifact(self, tmp_path):
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.delivery_closeout.task_progress_gate import (
+            evaluate_task_progress_closeout_gate,
+        )
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+        from agent_py_agent.agent.task_progress import write_task_progress
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        run_id = "run-main"
+        agent._main_agent_run_id = run_id
+        write_task_progress(
+            agent.home_paths.owner_home_dir,
+            run_id,
+            {
+                "items": [
+                    {"id": "project-a", "status": "done", "evidence": ["project-a/src/core.py"]},
+                    {"id": "project-b", "status": "done", "evidence": ["project-b/README.md"]},
+                    {"id": "project-c", "status": "done", "evidence": ["project-c/src/index.ts"]},
+                ],
+            },
+        )
+        artifact = tmp_path / "output" / "report.md"
+        artifact.parent.mkdir()
+        artifact.write_text(
+            "# Report\n\n"
+            "- project-a/src/core.py\n"
+            "- project-b/README.md\n"
+            "- project-c/src/index.ts\n",
+            encoding="utf-8",
+        )
+
+        decision = evaluate_task_progress_closeout_gate(
+            SimpleNamespace(agent=agent, params=SimpleNamespace(run_id=run_id)),
+            {"artifacts": [{"ok": True, "path": str(artifact)}]},
+        )
+
+        assert decision.allowed is True
+
 
 class TestTaskProgressRegistryTool:
     """测试 task_progress 经过真实工具注册表时的行为。"""
@@ -714,7 +791,7 @@ class TestScheduleChildSubagentsTool:
         agent._current_subagent_run_id = root.id
         tool = ScheduleChildSubagentsTool(agent)
 
-        result = tool.execute({"children": [{"goal": "leaf", "role": "leaf_worker", "agent_name": "leaf"}]})
+        result = tool.execute({"children": [{"goal": "leaf", "role": "worker", "agent_name": "leaf"}]})
         payload = json.loads(result.output)
 
         assert result.ok

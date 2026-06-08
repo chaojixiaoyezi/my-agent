@@ -50,7 +50,8 @@ def test_runtime_config_ignores_allowed_write_roots_as_unknown_config(tmp_path: 
         }
     )
 
-    assert result.ok is True
+    assert result.ok is False
+    assert "CONFIG_UNKNOWN_FIELD" in result.error_codes
     assert "CONFIG_ALLOWED_WRITE_ROOT_DANGEROUS" not in result.error_codes
 
 
@@ -75,5 +76,5 @@ def test_contract_mutation_removing_required_markdown_section_fails(tmp_path: Pa
     report_path.write_text("# Summary\nok\n", encoding="utf-8")
     result = validate_artifact(ArtifactAcceptanceRequest(path=report_path, workspace_root=tmp_path, validation_contract=contract))
 
-    assert result.ok is True
+    assert result.ok is False
     assert [item.code for item in result.findings] == ["MARKDOWN_REQUIRED_SECTION_MISSING"]

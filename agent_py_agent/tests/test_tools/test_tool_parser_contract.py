@@ -258,6 +258,35 @@ def test_tool_executor_rejects_json_aliases(tmp_path: Path):
     assert not (tmp_path / "notes.txt").exists()
 
 
+def test_tool_call_parser_repairs_markdown_escapes_inside_json_strings():
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls(
+        "[TOOL_CALL]\n"
+        r'{"tool":"write_file","path":"output/openclaude\_main.md",'
+        r'"content":"# openclaude\_main\nA\|B"}'
+        "\n[/TOOL_CALL]"
+    )
+
+    assert calls == [
+        {
+            "tool": "write_file",
+            "path": r"output/openclaude\_main.md",
+            "content": "# openclaude\\_main\nA\\|B",
+        }
+    ]
+
+
+def test_tool_call_parser_keeps_valid_json_escapes_unchanged():
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL]\n{"tool":"write_file","path":"out.txt","content":"line 1\\nline 2"}\n[/TOOL_CALL]'
+    )
+
+    assert calls == [{"tool": "write_file", "path": "out.txt", "content": "line 1\nline 2"}]
+
+
 def test_tool_call_parser_does_not_canonicalize_conflicting_aliases():
     registry = make_tool_registry(Path.cwd())
 
@@ -289,6 +318,25 @@ def test_tool_call_parser_recovers_single_extra_trailing_brace():
     )
 
     assert calls == [{"tool": "read_file", "path": "README.md"}]
+
+
+def test_tool_call_parser_recovers_extra_trailing_closing_bracket():
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL]\n'
+        '{"tool":"task_progress","action":"update","items":[{"id":"080","status":"done"}]}\n'
+        "]\n"
+        '[/TOOL_CALL]'
+    )
+
+    assert calls == [
+        {
+            "tool": "task_progress",
+            "action": "update",
+            "items": [{"id": "080", "status": "done"}],
+        }
+    ]
 
 
 def test_tool_call_parser_recovers_detached_top_level_fields():
@@ -404,11 +452,10 @@ def test_parse_error_hint_recommends_append_for_truncated_write():
     result = registry.execute_call(calls[0])
 
     assert calls[0]["tool"] == "__parse_error__"
+    assert calls[0]["error_code"] == "TOOL_CALL_UNCLOSED"
+    assert calls[0]["previous_write_committed"] is False
     assert result.ok is False
-    assert "WRITE_FILE_RAW" in result.output
-    assert "1500-2000 字符" in result.output
-    assert "不超过 800 字符" in result.output
-    assert "只能输出 1 个 write_file" in result.output
+    assert "mode=\"append\"" in result.output
 
 
 def test_tool_spec_catalog_entry_includes_first_example():

@@ -25,6 +25,7 @@ SimpleAgent orchestration tool
 - `agent/agent_core/subagent/params.py`：子代理生命周期和 parent planner 参数类的权威位置。
 - `agent/agent_core/orchestration/`：主代理模型可见的 `create_subagents`、`dispatch_subagents`、`inspect_agent_tree`、`cancel_subagents` 等工具实现。
 - `agent/agent_core/runner/`：子代理 worker、prompt、session heartbeat、timeout policy。
+- `cli/subagents.py`：子代理 CLI 命令和注册入口，包含基础、监控、层级和 leadership recovery 命令；不再通过单独 registration / hierarchy 注册文件跳转。
 
 ## 状态和路径
 
@@ -38,6 +39,10 @@ SimpleAgent orchestration tool
   读取当前协议集合，未知旧标签只保留为审计文本。
 - 恢复模式和 capability 等待状态也只认当前结构化枚举。未知 `rerun_*` / `takeover_*`
   前缀、`NEEDS_TOOL` 这类旧别名、工具错误正文，都不能触发自动重跑、接管、授权或验收状态变更。
+- 子代理 runner 默认复用主代理当前 `AgentConfig`，包括 `model_context_window_tokens`、
+  `memory_compact_auto_trigger_percent`、`runner_timeout_seconds`、runner 并发和工具预算。
+  只有任务自己携带结构化 `config_overlay_ref` 时才形成 run/task layer 覆盖；不要为
+  子代理 compact 或常规真实测试另建第二套参数。
 - 自适应重试拆分父任务时不再写历史自定义状态 `SPLIT`；父任务进入当前协议
   `TAKEN_OVER`，拆分关系只记录在结构化 `attributes.split_into` 和 `child_ids`。
 - capability request 的打开/终态判断集中在 `model_capabilities.py`。`OPEN` 代表待处理，
@@ -50,8 +55,8 @@ SimpleAgent orchestration tool
 - task rollup：`work/compact/task_rollup.json` 汇总子代理状态和 refs，父代理恢复时先读这里。
 - `agent_name` 是展示名，不是层级或角色事实。默认展示名使用 `agent-d<depth>-<role>-<index>`；
   深度、权限、模板和状态仍只读结构化字段，不能从显示名、中文叫法或英文别名里反推。
-- `role` 选择角色模板时只认明确模板 id 和当前内置别名（例如 `child_coordinator` -> `coordinator`、
-  `leaf_worker` -> `worker`）；不做“字符串里包含 tester/worker 就套模板”的宽匹配。
+- `role` 选择角色模板时只认明确模板 id；不做“字符串里包含 tester/worker 就套模板”的宽匹配，
+  也不再把旧层级别名静默映射成当前模板。
 - 层级继承状态写在 `attributes.inherited_parent_context`；`goal` 只承载给模型阅读的任务说明和
   父级边界摘要，不承担机器状态判断。
 
@@ -87,7 +92,7 @@ QA 失败只来自任务状态、结构化 `ok: false`、`passed: false`、block
 
 ## Cancel And Takeover
 
-主代理可以用 `cancel_subagents` 按 run_id/root/status 取消下级。取消会写 CANCELLED/ABANDONED、废弃 active attempt、尽量 interrupt/terminate 已知 pid/session，并写审计记录。主代理说明取消/接管原因后，可以继续汇总和验收。
+主代理可以用 `cancel_subagents` 按 run_id/root/status 取消下级。取消会写 CANCELLED/ABANDONED、废弃 active attempt、尽量 interrupt/terminate 已知 pid/session，并写审计记录。该工具只处理能被当前 canonical loader 正常读取的 run；账本损坏时返回结构化 load error，不私自扫描旧 locator 或其他目录兜底。主代理说明取消/接管原因后，可以继续汇总和验收。
 
 ## Create-Time Boundaries
 

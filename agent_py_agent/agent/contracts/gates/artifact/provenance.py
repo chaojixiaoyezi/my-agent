@@ -104,7 +104,9 @@ def artifact_provenance_from_archive(
     if artifact_path is None:
         return {"ok": False, "code": "ARTIFACT_PATH_INVALID"}
     old_run_match: dict[str, Any] | None = None
-    for record in archive_tool_calls:
+    current_run_writes: list[tuple[str, int, dict[str, Any]]] = []
+    current_run_matches: list[tuple[str, int, dict[str, Any]]] = []
+    for index, record in enumerate(archive_tool_calls):
         if not isinstance(record, dict):
             continue
         if not _record_targets_artifact(record, artifact_path, workspace_root):
@@ -115,8 +117,17 @@ def artifact_provenance_from_archive(
         if provenance.get("ok") is not True:
             continue
         if provenance.get("run_id") == run_id:
-            return provenance
+            row = (str(record.get("created_at") or ""), index, provenance)
+            if _record_is_current_run_artifact_write(record, artifact_path=artifact_path, current_run_id=run_id):
+                current_run_writes.append(row)
+            else:
+                current_run_matches.append(row)
+            continue
         old_run_match = old_run_match or provenance
+    if current_run_writes:
+        return max(current_run_writes, key=lambda row: (row[0], row[1]))[2]
+    if current_run_matches:
+        return max(current_run_matches, key=lambda row: (row[0], row[1]))[2]
     if old_run_match:
         return {**old_run_match, "created_by_current_run": False, "code": "ARTIFACT_PROVENANCE_RUN_MISMATCH"}
     return {"ok": False, "code": "ARTIFACT_PROVENANCE_MISSING"}
@@ -242,6 +253,7 @@ def _provenance_from_record(
         "idempotency_key": str(evidence.get("idempotency_key") or record.get("idempotency_key") or ""),
         "call_id": str(record.get("call_id") or ""),
         "created_by_current_run": bool(current_run_id and run_id == current_run_id),
+        "created_at": str(record.get("created_at") or ""),
     }
 
 
@@ -283,6 +295,7 @@ def _write_record_provenance(
         "created_by_current_run": True,
         "build_output_hash": _file_hash(artifact_path),
         "proof_kind": "tool_output_index",
+        "created_at": str(record.get("created_at") or ""),
     }
 
 

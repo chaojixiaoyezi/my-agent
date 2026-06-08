@@ -37,7 +37,7 @@ def create_run_params(
         allowed_tools = explicit_root_allowed_tools(allowed_tools)
     elif _should_disable_generic_workflow_for_concrete_worker(raw_params, goal, role, workflow_mode, role_template_dirs):
         workflow_mode = "off"
-        if role not in {"child_worker", "leaf_worker"}:
+        if role != "worker":
             role = "worker"
     return CreateRunParams(
         goal=goal,
@@ -71,7 +71,8 @@ def _lineage_fields(raw_params: dict[str, object], agent) -> dict[str, object]:
     explicit_parent = str(raw_params.get("parent_id") or "").strip()
     explicit_root = str(raw_params.get("root_id") or "").strip()
     explicit_depth = raw_params.get("depth")
-    parent_id = explicit_parent or _current_run_id(agent)
+    conversation_root = _current_conversation_task_id(agent)
+    parent_id = explicit_parent or conversation_root or _current_run_id(agent)
     root_id = explicit_root or parent_id
     depth = _lineage_depth(explicit_depth, default=1 if parent_id else 0)
     return {
@@ -86,6 +87,14 @@ def _current_run_id(agent) -> str:
     if current is None:
         return ""
     return str(getattr(current, "run_id", "") or getattr(current, "task_id", "") or "").strip()
+
+
+def _current_conversation_task_id(agent) -> str:
+    current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None) if current is not None else None
+    if not isinstance(attrs, dict):
+        return ""
+    return str(attrs.get("conversation_task_id") or "").strip()
 
 
 def explicit_root_allowed_tools(allowed_tools: list[str] | None) -> list[str] | None:

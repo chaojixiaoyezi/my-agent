@@ -45,7 +45,7 @@ def print_run_result(result, *, show_prompt: bool, streamed_text: str = "") -> N
 
 def run_exit_code(result) -> int:
     raw_status = getattr(result, "runtime_status", "ok")
-    status = raw_status.strip().lower() if isinstance(raw_status, str) else "ok"
+    status = raw_status.strip() if isinstance(raw_status, str) else "ok"
     return 0 if status in {"", "ok"} else 2
 
 

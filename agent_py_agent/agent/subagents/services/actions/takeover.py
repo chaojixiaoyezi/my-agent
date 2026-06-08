@@ -3,7 +3,12 @@ from __future__ import annotations
 
 """takeover and reassignment handlers for subagent action apply."""
 
-from ...models import SUBAGENT_DEAD_STATUSES, task_status_in
+from ...models import (
+    SUBAGENT_DEAD_FAILURE_TYPES,
+    SUBAGENT_DEAD_STATUSES,
+    known_failure_type,
+    task_status_in,
+)
 from ...role_templates import role_template_snapshot_for_task
 from ..takeover.readiness import takeover_readiness_ref_order
 from .handlers import (
@@ -134,24 +139,16 @@ def _needs_coordinator_handoff_action(task) -> bool:
         return False
     if not bool(role_template_snapshot_for_task(task).get("can_spawn_children")):
         return False
-    failure_type = str(getattr(task, "failure_type", "") or "").lower()
-    return task_status_in(getattr(task, "status", ""), SUBAGENT_DEAD_STATUSES) or failure_type in {
-        "runner_timeout",
-        "channel_error",
-        "runner_channel_failed",
-    }
+    failure_type = known_failure_type(getattr(task, "failure_type", ""))
+    return task_status_in(getattr(task, "status", ""), SUBAGENT_DEAD_STATUSES) or failure_type in SUBAGENT_DEAD_FAILURE_TYPES
 
 
 def _should_create_takeover_run(action, task) -> bool:
     triggers = {item for item in str(getattr(action, "rescue_trigger", "") or "").split(",") if item}
     if triggers & {"run_timeout", "heartbeat_stale", "status_timeout"}:
         return True
-    failure_type = str(getattr(task, "failure_type", "") or "").lower()
-    return task_status_in(getattr(task, "status", ""), SUBAGENT_DEAD_STATUSES) or failure_type in {
-        "runner_timeout",
-        "channel_error",
-        "runner_channel_failed",
-    }
+    failure_type = known_failure_type(getattr(task, "failure_type", ""))
+    return task_status_in(getattr(task, "status", ""), SUBAGENT_DEAD_STATUSES) or failure_type in SUBAGENT_DEAD_FAILURE_TYPES
 
 
 def _takeover_action_evidence(service, task, result) -> list[str]:

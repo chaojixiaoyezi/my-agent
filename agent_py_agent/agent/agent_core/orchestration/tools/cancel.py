@@ -7,12 +7,10 @@ import os
 import signal
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ....runtime_errors import runtime_error_report
-from ....subagents.models import normalize_task_status, task_status_in
-from ....subagents.services.agent_run_state import canonical_state_path_from_payload
+from ....subagents.models import FailureType, normalize_task_status, task_status_in
 from ....tooling.models import BaseTool, ToolExecutionResult
 from ...agent_tree.status import agent_tree_status_payload
 from ..tool_specs import build_cancel_subagents_spec
@@ -36,7 +34,6 @@ class _CancelPayloadRequest:
 class _CancelOneRequest:
     task: SubAgentTask
     params: dict[str, object]
-    recovery: object | None = None
 
 
 @dataclass(frozen=True)
@@ -98,7 +95,7 @@ class CancelSubagentsTool(BaseTool):
                 continue
             try:
                 cancelled.append(
-                    _cancel_one(self.agent, _CancelOneRequest(task=task, params=params, recovery=item.get("recovery")))
+                    _cancel_one(self.agent, _CancelOneRequest(task=task, params=params))
                 )
             except Exception as exc:  # pragma: no cover - defensive persistence/process edge cases.
                 failed.append({"run_id": getattr(task, "id", ""), **runtime_error_report(exc, context="cancel_subagents.cancel_one")})
@@ -237,145 +234,7 @@ def _load_cancel_target(agent: SimpleAgent, run_id: str) -> dict[str, object]:
     try:
         return {"run_id": run_id, "task": agent.subagents.load(run_id)}
     except Exception as exc:
-        recovered = recover_cancel_target(agent, run_id, exc)
-        return {"run_id": run_id, **recovered}
-
-
-def recover_cancel_target(agent: object, run_id: str, original_exc: BaseException) -> dict[str, object]:
-    original_error = runtime_error_report(original_exc, context="cancel_subagents.load")
-    recovered = _recover_from_locators(agent, run_id, original_error)
-    if recovered:
-        return recovered
-    recovered = _recover_from_canonical_scan(agent, run_id, original_error)
-    if recovered:
-        return recovered
-    return {"task": None, "error": original_error}
-
-
-def _recover_from_locators(agent: object, run_id: str, original_error: dict[str, object]) -> dict[str, object]:
-    for locator_path in _cancel_locator_candidates(agent, run_id):
-        locator, locator_error = _read_json_object_tolerant(locator_path)
-        if not locator:
-            continue
-        task = _task_from_payload_or_canonical(agent, run_id, locator)
-        if task is None:
-            continue
-        return {
-            "task": task,
-            "recovery": {
-                "status": "recovered_from_canonical",
-                "locator_path": str(locator_path),
-                "canonical_state_ref": str(canonical_state_path_from_payload(locator) or ""),
-                "original_error": original_error,
-                "locator_load_error": locator_error,
-            },
-        }
-    return {}
-
-
-def _recover_from_canonical_scan(agent: object, run_id: str, original_error: dict[str, object]) -> dict[str, object]:
-    for canonical_path in _canonical_state_candidates(agent, run_id):
-        task = _task_from_payload(agent, run_id, _read_json_object(canonical_path))
-        if task is None:
-            continue
-        return {
-            "task": task,
-            "recovery": {
-                "status": "recovered_from_canonical_scan",
-                "canonical_state_ref": str(canonical_path),
-                "original_error": original_error,
-            },
-        }
-    return {}
-
-
-def _task_from_payload_or_canonical(agent: object, run_id: str, payload: dict[str, object]) -> SubAgentTask | None:
-    canonical_path = canonical_state_path_from_payload(payload)
-    if canonical_path and canonical_path.exists():
-        task = _task_from_payload(agent, run_id, _read_json_object(canonical_path))
-        if task is not None:
-            return task
-    return _task_from_payload(agent, run_id, payload)
-
-
-def _task_from_payload(agent: object, run_id: str, payload: dict[str, object]) -> SubAgentTask | None:
-    if not payload or str(payload.get("id") or payload.get("run_id") or "") != run_id:
-        return None
-    try:
-        return agent.subagents.persistence.task_from_payload(dict(payload))
-    except Exception:
-        return None
-
-
-def _cancel_locator_candidates(agent: object, run_id: str) -> list[Path]:
-    candidates = [
-        Path(agent.subagents.workspace) / run_id / "task.json",
-        Path(agent.subagents.workspace) / run_id / "run.json",
-    ]
-    owner_home = _owner_home(agent)
-    if owner_home:
-        candidates.extend(
-            [
-                owner_home / "agents" / run_id / "state.json",
-                owner_home / "agents" / run_id / "refs.json",
-            ]
-        )
-    return [path for path in candidates if path.exists()]
-
-
-def _canonical_state_candidates(agent: object, run_id: str) -> list[Path]:
-    owner_home = _owner_home(agent)
-    if not owner_home:
-        return []
-    return sorted((owner_home / "tasks").glob(f"*/*/work/agents/{run_id}/canonical_state.json"))
-
-
-def _owner_home(agent: object) -> Path | None:
-    raw = str(getattr(agent.subagents, "owner_home_dir", "") or "")
-    if not raw:
-        raw = str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "")
-    return Path(raw) if raw else None
-
-
-def _read_json_object(path: Path) -> dict[str, object]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _read_json_object_tolerant(path: Path) -> tuple[dict[str, object], dict[str, object] | None]:
-    try:
-        raw = path.read_text(encoding="utf-8")
-        payload = json.loads(raw)
-        return (payload if isinstance(payload, dict) else {}), None
-    except (OSError, UnicodeDecodeError) as exc:
-        return {}, _locator_error_report(path, exc)
-    except json.JSONDecodeError as exc:
-        return _decode_with_trailing_recovery(path, raw, exc)
-
-
-def _decode_with_trailing_recovery(
-    path: Path,
-    raw: str,
-    exc: json.JSONDecodeError,
-) -> tuple[dict[str, object], dict[str, object]]:
-    report = _locator_error_report(path, exc)
-    try:
-        payload, end = json.JSONDecoder().raw_decode(raw)
-    except json.JSONDecodeError:
-        return {}, report
-    if not isinstance(payload, dict):
-        return {}, report
-    report["trailing_bytes"] = len(raw[end:])
-    return payload, report
-
-
-def _locator_error_report(path: Path, exc: BaseException) -> dict[str, object]:
-    report = runtime_error_report(exc, context="cancel_subagents.recover_locator")
-    report["path"] = str(path)
-    return report
+        return {"run_id": run_id, "task": None, "error": runtime_error_report(exc, context="cancel_subagents.load")}
 
 
 def _dry_run_targets(targets: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -408,11 +267,9 @@ def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, obj
         "abandoned_attempt_id": attempt_id,
         "pid_report": pid_report,
     }
-    if isinstance(request.recovery, dict):
-        attrs["cancel_subagents"]["recovery"] = request.recovery
     task.attributes = attrs
     task.status = "ABANDONED"
-    task.failure_type = "cancelled"
+    task.failure_type = FailureType.CANCELLED.value
     task.ended_at = now
     task.updated_at = now
     task.runner_active_attempt_id = ""

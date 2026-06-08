@@ -10,6 +10,7 @@ from ..models import (
     FailureHandoff,
     SubAgentTask,
     TaskStatus,
+    failure_type_from_task_status,
     task_has_failure_status,
     task_has_status,
     task_status_in,
@@ -25,7 +26,7 @@ def refresh_failure_handoff(task: SubAgentTask) -> FailureHandoff:
     task.failure_handoff = FailureHandoff(
         run_id=task.id,
         status=task.status,
-        failure_type=task.failure_type or task.status.lower(),
+        failure_type=task.failure_type or failure_type_from_task_status(task.status),
         risk_level=_risk_level(task),
         warning=task.latest_summary or _default_warning(task),
         last_safe_checkpoint_ref=task.checkpoint_json or task.checkpoint_ref,

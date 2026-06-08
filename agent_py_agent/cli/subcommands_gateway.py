@@ -211,6 +211,7 @@ def _add_gateway_run_subcommand(gateway_sub):
     gateway_run.add_argument("--limit", type=int, help="覆盖配置：每个阶段最多处理多少条记录，0 表示不限制")
     gateway_run.add_argument("--max-cycles", type=int, help="覆盖配置：最多循环次数，0 表示持续运行")
     gateway_run.add_argument("--force-lock", action="store_true", help="强制覆盖已有 watch lock")
+    gateway_run.add_argument("--workspace-root", default="", help=argparse.SUPPRESS)
     gateway_run.add_argument("--reviewer", help="覆盖配置：patch/acceptance 审核者标识")
     gateway_run.add_argument("--note", help="写入调度关联审核记录的备注")
     gateway_run.add_argument("--instruction", help="覆盖配置：给 runner 的额外指令")

@@ -8,11 +8,16 @@ from typing import Any
 
 from ...artifacts.registry import ArtifactRegistration, register_artifact, registry_path
 from ...backends import ModelResponse
+from ...contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from .._runtime_params import ToolLoopExecuteParams
 from ..run_task_workspace_writer import sync_run_task_workspace_closeout
+from ..target_coverage_ledger import collect_target_coverage_records, target_coverage_status
 from ..tool_guard.local_progress import reset_local_progress_guard
 from .artifacts import _relative_report_ref, _write_report
+from .evidence import target_coverage_projection_decision, target_coverage_projection_repair_message
+from .recovery import attach_contract_recovery, failed_gate_payloads
 from .subagent_aggregation import evaluate_subagent_aggregation_gate
+from .task_progress_gate import evaluate_task_progress_closeout_gate, task_progress_repair_message
 
 _PATH_TOKEN_RE = re.compile(
     r"(?P<path>"
@@ -54,12 +59,148 @@ def uncontracted_task_output_closeout_response(
     }
     report_ref = _write_report(workspace_root, report)
     report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
+    artifact_blocks = any(item.get("ok") is not True for item in artifacts)
+    coverage_status = _uncontracted_target_coverage_status(request, workspace_root)
+    if coverage_status:
+        report["target_coverage_status"] = coverage_status
+    projection_decision = target_coverage_projection_decision(report)
+    report["target_coverage_projection_gate"] = projection_decision.to_dict()
+    task_progress_decision = evaluate_task_progress_closeout_gate(request, report)
+    report["task_progress_closeout_gate"] = task_progress_decision.to_dict()
     decision = evaluate_subagent_aggregation_gate(request)
     report["subagent_aggregation_gate"] = decision.to_dict()
+    decisions = [projection_decision, task_progress_decision, decision]
+    coverage_blocks = coverage_status.get("should_block") is True if coverage_status else False
+    if coverage_blocks:
+        _attach_uncontracted_target_coverage_recovery(report)
+    if artifact_blocks:
+        _attach_uncontracted_artifact_recovery(report)
+    if artifact_blocks or coverage_blocks or not all(item.allowed for item in decisions):
+        report["ok"] = False
+        attach_contract_recovery(report, decisions, contract={})
+        _write_report(workspace_root, report)
+        _append_uncontracted_repair_context(params, report)
+        return None
     _write_report(workspace_root, report)
     sync_run_task_workspace_closeout(request.agent, params, report)
     reset_local_progress_guard(request.agent, params)
     return ModelResponse(text=_uncontracted_closeout_text(report), backend=request.backend)
+
+
+def _append_uncontracted_repair_context(params: ToolLoopExecuteParams, report: dict[str, Any]) -> None:
+    message = (
+        task_progress_repair_message(report)
+        or target_coverage_projection_repair_message(report)
+        or _uncontracted_target_coverage_repair_message(report)
+        or "当前交付物还没有通过结构化收口检查；请按 failed_gates 修复后重新提交。"
+    )
+    params.tool_context.append(
+        "[delivery-closeout-check]\n"
+        + json.dumps(
+            {
+                "ok": False,
+                "report_ref": report.get("report_ref", ""),
+                "failed_gates": failed_gate_payloads(report),
+                "failed_artifacts": [
+                    _closeout_artifact_payload(item)
+                    for item in report.get("artifacts", [])
+                    if isinstance(item, dict) and item.get("ok") is not True
+                ],
+                "target_coverage_status": report.get("target_coverage_status", {}),
+                "repair_guidance": {
+                    "mode": "closeout_rework",
+                    "message_zh": message,
+                    "submit_when_ready": "submit_for_acceptance",
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+
+def _uncontracted_target_coverage_status(
+    request: object,
+    workspace_root: Path,
+) -> dict[str, object]:
+    params = getattr(request, "params", None)
+    contract = _delivery_contract(params)
+    coverage = contract.get("target_coverage_contract")
+    if not isinstance(coverage, dict):
+        return {}
+    coverage_root = _tool_workspace_root(getattr(request, "agent", None)) or workspace_root
+    return target_coverage_status(
+        coverage,
+        coverage_records=collect_target_coverage_records(
+            list(getattr(params, "archive_tool_calls", []) or []),
+            workspace_root=coverage_root,
+        ),
+        workspace_root=coverage_root,
+    )
+
+
+def _delivery_contract(params: ToolLoopExecuteParams | None) -> dict[str, Any]:
+    if params is None:
+        return {}
+    value = params.delivery_contract
+    if isinstance(value, dict):
+        return dict(value)
+    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+    value = attrs.get("delivery_contract")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _attach_uncontracted_target_coverage_recovery(report: dict[str, Any]) -> None:
+    recovery = report.setdefault("contract_recovery", {})
+    if not isinstance(recovery, dict):
+        recovery = {}
+        report["contract_recovery"] = recovery
+    actions = recovery.get("required_actions")
+    if not isinstance(actions, list):
+        actions = []
+    actions.extend(
+        action
+        for action in (
+            "cover_missing_targets_before_submit",
+            "update_final_artifact_after_required_coverage",
+            "submit_for_acceptance_after_coverage_is_complete",
+        )
+        if action not in actions
+    )
+    recovery["required_actions"] = actions
+
+
+def _attach_uncontracted_artifact_recovery(report: dict[str, Any]) -> None:
+    recovery = report.setdefault("contract_recovery", {})
+    if not isinstance(recovery, dict):
+        recovery = {}
+        report["contract_recovery"] = recovery
+    actions = recovery.get("required_actions")
+    if not isinstance(actions, list):
+        actions = []
+    actions.extend(
+        action
+        for action in (
+            "rewrite_partial_final_artifacts_with_complete_write",
+            "submit_for_acceptance_after_final_artifacts_are_complete",
+        )
+        if action not in actions
+    )
+    recovery["required_actions"] = actions
+
+
+def _uncontracted_target_coverage_repair_message(report: dict[str, Any]) -> str:
+    status = report.get("target_coverage_status")
+    if not isinstance(status, dict) or status.get("should_block") is not True:
+        return ""
+    hints = status.get("repair_hints") if isinstance(status.get("repair_hints"), list) else []
+    hint_text = json.dumps(hints[:3], ensure_ascii=False, sort_keys=True)
+    return (
+        "当前验收失败是因为目录/来源覆盖清单还没完成。"
+        "下一步按 target_coverage_status.repair_hints 的 recommended_tool_call 补读缺失目标；"
+        "补完后更新最终交付物，再 submit_for_acceptance。"
+        f" 当前可执行游标：{hint_text}"
+    )
 
 
 def _current_run_task_output_artifacts(
@@ -73,8 +214,16 @@ def _current_run_task_output_artifacts(
     if not targets:
         return []
     artifacts: list[dict[str, Any]] = []
-    for record in _successful_write_records(getattr(params, "archive_tool_calls", []) or []):
-        artifacts.extend(_task_output_artifacts_from_record(record, targets, workspace_root=workspace_root))
+    archive_tool_calls = list(getattr(params, "archive_tool_calls", []) or [])
+    for record in _successful_write_records(archive_tool_calls):
+        artifacts.extend(
+            _task_output_artifacts_from_record(
+                record,
+                targets,
+                workspace_root=workspace_root,
+                archive_tool_calls=archive_tool_calls,
+            )
+        )
     return _unique_artifact_payloads(artifacts)
 
 
@@ -96,7 +245,7 @@ def _registered_artifacts(
                 kind=str(item.get("kind") or ""),
                 source=str(item.get("source") or "current_run_tool_output"),
                 created_by_tool="closeout",
-                status="ready",
+                status="ready" if item.get("ok") is True else "invalid",
                 metadata={"output_scope": str(item.get("output_scope") or "")},
             )
         )
@@ -120,9 +269,10 @@ def _task_output_artifacts_from_record(
     targets: list[dict[str, Any]],
     *,
     workspace_root: Path | None = None,
+    archive_tool_calls: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
     return [
-        _artifact_payload(record, path, target)
+        _artifact_payload(record, path, target, archive_tool_calls=archive_tool_calls or [], workspace_root=workspace_root)
         for path in _produced_paths(record, workspace_root=workspace_root)
         for target in targets
         if _is_task_output_file(path, target)
@@ -135,15 +285,136 @@ def _successful_write_records(records: object) -> list[dict[str, Any]]:
     return [record for record in records if isinstance(record, dict) and _successful_write_record(record)]
 
 
-def _artifact_payload(record: dict[str, Any], path: Path, target: dict[str, Any]) -> dict[str, Any]:
+def _artifact_payload(
+    record: dict[str, Any],
+    path: Path,
+    target: dict[str, Any],
+    *,
+    archive_tool_calls: list[Any],
+    workspace_root: Path | None,
+) -> dict[str, Any]:
+    acceptance_report = _artifact_acceptance_report(path, target)
+    findings = list(acceptance_report.get("findings") if isinstance(acceptance_report.get("findings"), list) else [])
+    if finding := _partial_unclosed_artifact_finding(record, path):
+        findings.append(finding)
+    if finding := _unrecovered_unclosed_write_finding(record, path, archive_tool_calls, workspace_root):
+        findings.append(finding)
+    ok = bool(acceptance_report.get("ok")) and not any(str(item.get("severity") or "") == "hard" for item in findings)
+    acceptance_report = {**acceptance_report, "ok": ok}
+    if findings:
+        acceptance_report["findings"] = findings
     return {
         "artifact_id": str(record.get("call_id") or path.name),
         "kind": path.suffix.lower().lstrip(".") or "file",
         "path": str(path),
-        "ok": True,
+        "ok": ok,
+        "acceptance_report": acceptance_report,
         "source": "current_run_tool_output",
         "output_scope": str(target["scope"]),
     }
+
+
+def _artifact_acceptance_report(path: Path, target: dict[str, Any]) -> dict[str, Any]:
+    return validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=path,
+            workspace_root=_validation_root_for_target(path, target),
+            validation_contract={},
+        )
+    ).to_dict()
+
+
+def _validation_root_for_target(path: Path, target: dict[str, Any]) -> Path:
+    root = target.get("path")
+    if isinstance(root, Path):
+        return root if target.get("kind") == "dir" else root.parent
+    return path.parent
+
+
+def _partial_unclosed_artifact_finding(record: dict[str, Any], path: Path) -> dict[str, str]:
+    params = record.get("parameters")
+    if not isinstance(params, dict) or params.get("__partial_unclosed_write") is not True:
+        return {}
+    return {
+        "code": "ARTIFACT_LAST_WRITE_PARTIAL_UNCLOSED",
+        "severity": "hard",
+        "message": "Final artifact path was last written by an incomplete partial write chunk.",
+        "location": str(path),
+        "value": str(record.get("call_id") or record.get("scoped_call_id") or ""),
+        "action_zh": "最终交付物最后一次写入是半截分片；请用完整 write_file 覆盖或补成完整文件后再提交验收。",
+    }
+
+
+def _unrecovered_unclosed_write_finding(
+    record: dict[str, Any],
+    path: Path,
+    archive_tool_calls: list[Any],
+    workspace_root: Path | None,
+) -> dict[str, str]:
+    parse_errors = [
+        item
+        for item in archive_tool_calls
+        if isinstance(item, dict)
+        and str(item.get("tool") or "") == "__parse_error__"
+        and str(item.get("error_code") or "") == "TOOL_CALL_UNCLOSED"
+        and _record_targets_path(item, path, workspace_root)
+    ]
+    if len(parse_errors) < 2:
+        return {}
+    params = record.get("parameters")
+    params = params if isinstance(params, dict) else {}
+    if str(params.get("mode") or "overwrite") != "overwrite":
+        return {}
+    content = str(params.get("content") or "")
+    max_chunk = _max_recovery_chunk_chars(parse_errors)
+    if max_chunk <= 0 or len(content) > max_chunk * 2:
+        return {}
+    return {
+        "code": "ARTIFACT_UNCLOSED_WRITE_RECOVERY_INCOMPLETE",
+        "severity": "hard",
+        "message": "Final artifact was accepted after repeated unclosed write_file attempts, but the latest overwrite is still only a small recovery chunk.",
+        "location": str(path),
+        "value": str(record.get("call_id") or record.get("scoped_call_id") or ""),
+        "action_zh": "同一个最终文件多次长写入未闭合，最后只覆盖成一个小分片；请用 overwrite 写完整开头后，再用 mode=append 按 write_recovery.max_chunk_chars 分块续写，直到文件结构完整后再验收。",
+    }
+
+
+def _record_targets_path(record: dict[str, Any], path: Path, workspace_root: Path | None) -> bool:
+    params = record.get("parameters")
+    params = params if isinstance(params, dict) else {}
+    raw = str(params.get("path") or "").strip()
+    if not raw:
+        recovery = params.get("write_recovery")
+        if isinstance(recovery, dict):
+            raw = str(recovery.get("path") or "").strip()
+    if not raw:
+        raw = str(record.get("source_input") or "").strip()
+    if not raw or raw == "__parse_error__":
+        return False
+    return _canonical_path(Path(raw), workspace_root) == _canonical_path(path, workspace_root)
+
+
+def _canonical_path(path: Path, workspace_root: Path | None) -> str:
+    try:
+        expanded = path.expanduser()
+        if not expanded.is_absolute() and workspace_root is not None:
+            expanded = workspace_root / expanded
+        return str(expanded.resolve(strict=False))
+    except OSError:
+        return str(path)
+
+
+def _max_recovery_chunk_chars(records: list[dict[str, Any]]) -> int:
+    values: list[int] = []
+    for record in records:
+        params = record.get("parameters")
+        recovery = params.get("write_recovery") if isinstance(params, dict) else None
+        if isinstance(recovery, dict):
+            try:
+                values.append(int(recovery.get("max_chunk_chars") or 0))
+            except (TypeError, ValueError):
+                pass
+    return max(values) if values else 0
 
 
 def _task_output_dir(params: ToolLoopExecuteParams | None) -> Path | None:
@@ -311,14 +582,16 @@ def _message_for_delivery_mode(delivery_mode: str) -> str:
 
 
 def _unique_artifact_payloads(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[str] = set()
-    result: list[dict[str, Any]] = []
+    order: list[str] = []
+    by_path: dict[str, dict[str, Any]] = {}
     for artifact in artifacts:
         key = str(artifact.get("path") or "")
-        if key and key not in seen:
-            seen.add(key)
-            result.append(artifact)
-    return result
+        if not key:
+            continue
+        if key not in by_path:
+            order.append(key)
+        by_path[key] = artifact
+    return [by_path[key] for key in order]
 
 
 def _unique_targets(targets: list[dict[str, Any]]) -> list[dict[str, Any]]:

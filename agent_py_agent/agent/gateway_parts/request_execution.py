@@ -10,12 +10,11 @@ status should use the cumulative field when showing current context pressure.
 import json
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..agent_core.runtime_mixin import RunParams
-from ..user_space.home_indexes import latest_task_refs
 from .audit_service import (
     AuditRequestCompletedParams,
     audit_request_completed,
@@ -32,6 +31,8 @@ if TYPE_CHECKING:
     from ...core import SimpleAgent
 
 _EMPTY_PROMPT_MESSAGE = "gateway ask prompt/goal cannot be empty"
+_CHUNK_STREAM_FLUSH_INTERVAL_SECONDS = 0.08
+_CHUNK_STREAM_FLUSH_CHARS = 128
 
 
 def open_chunk_stream(chunk_path: Path) -> tuple[Path, float]:
@@ -52,6 +53,45 @@ def close_chunk_stream(chunk_path: Path) -> None:
     # Keep the chunk file after completion so clients that observe the final
     # response first can still drain the last streamed tokens.
     return
+
+
+@dataclass
+class BufferedChunkStreamWriter:
+    chunk_path: Path
+    flush_interval_seconds: float = _CHUNK_STREAM_FLUSH_INTERVAL_SECONDS
+    flush_chars: int = _CHUNK_STREAM_FLUSH_CHARS
+    _buffer: list[str] = field(default_factory=list)
+    _buffer_chars: int = 0
+    _last_flush_at: float = field(default_factory=time.monotonic)
+
+    def write(self, text: str) -> None:
+        if not text:
+            return
+        self._buffer.append(text)
+        self._buffer_chars += len(text)
+        if self._should_flush(text):
+            self.flush()
+
+    def flush(self) -> None:
+        if not self._buffer:
+            return
+        text = "".join(self._buffer)
+        self._buffer.clear()
+        self._buffer_chars = 0
+        self._last_flush_at = time.monotonic()
+        write_chunk(self.chunk_path, text)
+
+    def close(self) -> None:
+        self.flush()
+        close_chunk_stream(self.chunk_path)
+
+    def _should_flush(self, latest_text: str) -> bool:
+        if self._buffer_chars >= max(1, int(self.flush_chars)):
+            return True
+        if latest_text.endswith("\n"):
+            return True
+        elapsed = time.monotonic() - self._last_flush_at
+        return elapsed >= max(0.0, float(self.flush_interval_seconds))
 
 
 @dataclass(frozen=True)
@@ -227,6 +267,19 @@ def _gateway_recovery_task_refs(conversation: _GatewayConversationContext) -> li
 
 
 def _root_user_prompt(prompt: str, conversation: _GatewayConversationContext) -> str:
+    active_goal = conversation.active_task_goal.strip()
+    current = prompt.strip()
+    if active_goal and current and active_goal != current:
+        return "\n\n".join(
+            [
+                "活跃任务原始需求：",
+                active_goal,
+                "当前用户后续消息：",
+                current,
+            ]
+        )
+    if active_goal:
+        return active_goal
     return prompt
 
 
@@ -258,7 +311,7 @@ def _gateway_conversation_context(
     active_link = _active_thread_task(agent, thread.thread_id, request_id, load_errors)
     if active_link is None:
         _bind_gateway_request_task(store, thread.thread_id, request_id, prompt, load_errors)
-    workspace = _task_workspace_for(agent, active_link.task_id if active_link is not None else "")
+    workspace = _task_workspace_for(active_link)
     return _GatewayConversationContext(
         thread_id=thread.thread_id,
         active_task_id=active_link.task_id if active_link is not None else "",
@@ -307,22 +360,17 @@ def _bind_gateway_request_task(store, thread_id: str, request_id: str, prompt: s
         load_errors.append(_conversation_error(exc, "gateway.conversation.bind_request_task"))
 
 
-def _task_workspace_for(agent: SimpleAgent, task_id: str) -> Path | None:
-    if not task_id:
+def _task_workspace_for(active_link: object | None) -> Path | None:
+    if active_link is None:
         return None
-    home_paths = getattr(agent, "home_paths", None)
-    if home_paths is None:
+    task_path = str(getattr(active_link, "task_path", "") or "").strip()
+    if not task_path:
         return None
-    owner_id = str(getattr(home_paths, "owner_id", "") or "")
     try:
-        refs = latest_task_refs(home_paths, owner_id=owner_id, limit=200)
-    except Exception:
+        path = Path(task_path).expanduser().resolve(strict=False)
+    except OSError:
         return None
-    for ref in refs:
-        if str(ref.get("task_id") or "") == task_id:
-            path = Path(str(ref.get("task_path") or ""))
-            return path if path.exists() else None
-    return None
+    return path if path.exists() else None
 
 
 def _conversation_prompt_section(conversation: _GatewayConversationContext) -> str:
@@ -500,9 +548,10 @@ def _handle_gateway_request(
     )
     chunk_path = gateway_chunk_path(gateway_paths(agent), context["request_id"])
     chunk_path_abs, _ = open_chunk_stream(chunk_path)
+    chunk_writer = BufferedChunkStreamWriter(chunk_path_abs)
 
     try:
-        _execute_gateway_request_body({**context, "agent": agent}, lambda chunk: write_chunk(chunk_path_abs, chunk))
+        _execute_gateway_request_body({**context, "agent": agent}, chunk_writer.write)
     except Exception as exc:
         response.update(
             {
@@ -514,7 +563,7 @@ def _handle_gateway_request(
         )
     finally:
         _stop_gateway_request_lease(lease_stop, lease_thread)
-        close_chunk_stream(chunk_path_abs)
+        chunk_writer.close()
     _finalize_gateway_response(context, response)
     _complete_gateway_request_audit(agent, context, request_path, response)
     return response

@@ -75,6 +75,99 @@ def test_markdown_required_strings_are_blocking(tmp_path):
     assert [item.value for item in report.findings if item.code == "ARTIFACT_REQUIRED_TEXT_MISSING"] == ["CP-02"]
 
 
+def test_markdown_required_sections_accept_numbered_headings(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    path = tmp_path / "report.md"
+    path.write_text(
+        "# 报告\n\n## 一、架构\n\n架构内容。\n\n## 三、对比\n\n对比内容。\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=path,
+            workspace_root=tmp_path,
+            validation_contract={"required_sections": ["架构", "对比"]},
+        )
+    )
+
+    assert report.ok is True
+    assert "MARKDOWN_REQUIRED_SECTION_MISSING" not in {item.code for item in report.findings}
+
+
+def test_markdown_trailing_empty_heading_is_blocking(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    path = tmp_path / "report.md"
+    path.write_text("# Report\n\nIntro.\n\n## Next Section", encoding="utf-8")
+
+    report = validate_artifact(ArtifactAcceptanceRequest(path=path, workspace_root=tmp_path))
+
+    assert report.ok is False
+    assert "MARKDOWN_TRAILING_EMPTY_HEADING" in {item.code for item in report.findings}
+
+
+def test_markdown_unclosed_code_fence_is_blocking(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    path = tmp_path / "report.md"
+    path.write_text("# Report\n\n```python\nprint('half')\n", encoding="utf-8")
+
+    report = validate_artifact(ArtifactAcceptanceRequest(path=path, workspace_root=tmp_path))
+
+    assert report.ok is False
+    assert "MARKDOWN_CODE_FENCE_UNCLOSED" in {item.code for item in report.findings}
+
+
+def test_markdown_local_reference_check_rejects_missing_tree_file(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    source_root = tmp_path / "all-agent"
+    existing = source_root / "openclaude-main" / "src" / "QueryEngine.ts"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("export class QueryEngine {}\n", encoding="utf-8")
+    (source_root / "openclaude-main" / "README.md").write_text("# openclaude\n", encoding="utf-8")
+
+    report_path = tmp_path / "output" / "report.md"
+    report_path.parent.mkdir()
+    report_path.write_text(
+        "# Report\n\n"
+        "```\n"
+        "openclaude-main/\n"
+        "├── src/                  # source files\n"
+        "│   ├── QueryEngine.ts    # existing file\n"
+        "│   └── Agent.ts          # missing file\n"
+        "└── README.md             # existing file\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=report_path,
+            workspace_root=tmp_path,
+            reference_roots=(source_root,),
+        )
+    )
+
+    assert report.ok is False
+    missing = [item for item in report.findings if item.code == "MARKDOWN_LOCAL_REF_MISSING"]
+    assert [item.value for item in missing] == ["openclaude-main/src/Agent.ts"]
+
+
 def test_markdown_forbidden_strings_are_blocking_when_contract_declares_them(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,

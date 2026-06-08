@@ -4,7 +4,7 @@ from __future__ import annotations
 """public LocalStore support package split by schema, records, search, events, and maintenance.
 
 LocalStore 已经拆成几个职责清楚的小文件。
-外部仍然从 `agent.local_store` 导入主类；这里主要给内部组合类使用。
+外部和内部都从当前 `agent.local_storage` 包导入主类。
 """
 
 from .control_plane import LocalStoreControlPlaneMixin

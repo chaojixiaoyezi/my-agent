@@ -82,6 +82,24 @@ def test_runtime_fact_source_does_not_promote_succeeded_status_alias_to_final(tm
     assert payload["runtime_progress"]["phase"] == "running"
 
 
+def test_runtime_fact_source_does_not_promote_lowercase_done_to_final(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+
+    write_runtime_fact_source(
+        RuntimeFactSourceRequest(
+            root=root,
+            request_id="req-lowercase-done",
+            user_prompt="测试小写状态文本",
+            status="done",
+        )
+    )
+
+    payload = json.loads(
+        (root / "memory_archive" / "runtime_facts" / "req-lowercase-done" / "task.json").read_text(encoding="utf-8")
+    )
+    assert payload["runtime_progress"]["phase"] == "running"
+
+
 def test_runtime_fact_source_records_channel_error_as_terminal_phase(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
 

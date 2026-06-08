@@ -52,6 +52,7 @@ def captured_refs_payload(work_state: dict[str, Any]) -> dict[str, Any]:
         artifact_refs
     )
     source_coverage = _source_coverage_payload(work_state.get("read_coverage"))
+    incomplete_source_coverage = _incomplete_source_coverage_payload(work_state.get("read_coverage"))
     return {
         "changed_files": sequence_strings(work_state.get("changed_files")),
         "read_files": sequence_strings(work_state.get("read_files")),
@@ -59,6 +60,9 @@ def captured_refs_payload(work_state: dict[str, Any]) -> dict[str, Any]:
         "artifact_ref_count": len(artifact_refs),
         "omitted_artifact_ref_count": max(0, len(artifact_refs) - len(captured)),
         "full_read_coverage": full_read_coverage,
+        "incomplete_source_coverage": incomplete_source_coverage[:12],
+        "incomplete_source_coverage_count": len(incomplete_source_coverage),
+        "omitted_incomplete_source_coverage_count": max(0, len(incomplete_source_coverage) - 12),
         "source_coverage": source_coverage[:12],
         "source_coverage_count": len(source_coverage),
         "omitted_source_coverage_count": max(0, len(source_coverage) - 12),
@@ -276,7 +280,11 @@ def _best_read_cursor_from_tool_progress(value: object) -> dict[str, int | str]:
 
 def _best_read_cursor_from_read_coverage(value: object) -> dict[str, int | str]:
     coverage = value if isinstance(value, dict) else {}
-    primary = coverage.get("primary") if isinstance(coverage.get("primary"), dict) else {}
+    incomplete = _first_incomplete_source(coverage)
+    if incomplete:
+        primary = incomplete
+    else:
+        primary = coverage.get("primary") if isinstance(coverage.get("primary"), dict) else {}
     if not primary:
         return {}
     source = str(primary.get("source_path") or "").strip()
@@ -322,6 +330,35 @@ def _source_coverage_payload(value: object) -> list[dict[str, Any]]:
     coverage = value if isinstance(value, dict) else {}
     sources = coverage.get("sources") if isinstance(coverage.get("sources"), list) else []
     return [payload for item in sources if (payload := _read_coverage_payload({"primary": item}))]
+
+
+def _incomplete_source_coverage_payload(value: object) -> list[dict[str, Any]]:
+    coverage = value if isinstance(value, dict) else {}
+    rows = coverage.get("incomplete_sources")
+    if not isinstance(rows, list):
+        sources = coverage.get("sources") if isinstance(coverage.get("sources"), list) else []
+        rows = [
+            item
+            for item in sources
+            if isinstance(item, dict) and item.get("complete") is not True
+        ]
+    return [payload for item in rows if (payload := _read_coverage_payload({"primary": item}))]
+
+
+def _first_incomplete_source(coverage: dict[str, Any]) -> dict[str, Any]:
+    return next((row for row in _coverage_source_rows(coverage) if _is_incomplete_source(row)), {})
+
+
+def _coverage_source_rows(coverage: dict[str, Any]) -> list[object]:
+    rows = coverage.get("incomplete_sources")
+    if isinstance(rows, list):
+        return rows
+    rows = coverage.get("sources")
+    return rows if isinstance(rows, list) else []
+
+
+def _is_incomplete_source(row: object) -> bool:
+    return isinstance(row, dict) and row.get("complete") is not True
 
 
 def _full_read_coverage_payload(value: object) -> dict[str, Any]:

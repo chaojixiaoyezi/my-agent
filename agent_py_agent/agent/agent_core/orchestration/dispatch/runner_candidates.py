@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from ....subagents.models import (
+    FailureType,
     TaskStatus,
     VerificationStatus,
+    known_failure_type,
     normalize_verification_status,
     task_status_in,
 )
@@ -115,9 +117,9 @@ def _verification_status(task: object) -> str:
 
 
 def _terminal_recovery_code_present(task: object) -> bool:
-    failure_type = str(getattr(task, "failure_type", "") or "").strip().lower()
+    failure_type = known_failure_type(getattr(task, "failure_type", ""))
     terminal_codes = {
-        "takeover_chain_exhausted",
-        "no_progress_fuse",
+        FailureType.TAKEOVER_CHAIN_EXHAUSTED.value,
+        FailureType.NO_PROGRESS_FUSE.value,
     }
     return failure_type in terminal_codes

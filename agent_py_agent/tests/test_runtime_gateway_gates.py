@@ -91,6 +91,49 @@ def test_tool_call_gate_applies_side_effect_policy_from_structured_facts():
     assert decision.finding_codes == ("APPROVAL_REQUIRED",)
 
 
+def test_tool_call_gate_does_not_treat_tool_specific_mode_as_execution_mode():
+    overwrite = evaluate_tool_call_gate(
+        {
+            "tool": "write_file",
+            "path": "out/report.md",
+            "mode": "overwrite",
+            "content": "# Report\n",
+            "idempotency_key": "idem-write-overwrite",
+        },
+        available_tools={"write_file"},
+        allowed_tools=["write_file"],
+        policy=ToolGatePolicy(tool_effects={"write_file": "mutating"}),
+    )
+    append = evaluate_tool_call_gate(
+        {
+            "tool": "write_file",
+            "path": "out/report.md",
+            "mode": "append",
+            "content": "\nbody\n",
+            "idempotency_key": "idem-write-append",
+        },
+        available_tools={"write_file"},
+        allowed_tools=["write_file"],
+        policy=ToolGatePolicy(tool_effects={"write_file": "mutating"}),
+    )
+    invalid_execution_mode = evaluate_tool_call_gate(
+        {
+            "tool": "write_file",
+            "path": "out/report.md",
+            "execution_mode": "overwrite",
+            "content": "# Report\n",
+            "idempotency_key": "idem-write-invalid-exec-mode",
+        },
+        available_tools={"write_file"},
+        allowed_tools=["write_file"],
+        policy=ToolGatePolicy(tool_effects={"write_file": "mutating"}),
+    )
+
+    assert overwrite.allowed is True
+    assert append.allowed is True
+    assert invalid_execution_mode.finding_codes == ("TOOL_MODE_INVALID",)
+
+
 def test_path_url_command_gate_blocks_escape_private_url_and_shell_operators(tmp_path: Path):
     workspace = _workspace_with_symlink_escape(tmp_path)
 

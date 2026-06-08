@@ -52,6 +52,11 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
 
     tool_params = _tool_params_for_execution(request.payload, request.tool_name, request.allowed_tools)
     tool_params = _with_task_workspace_relative_path(tool_params, request)
+    tool_params = _with_task_artifact_append_continuation(tool_params, request)
+    partial_error = _partial_unclosed_write_error(tool_params, request)
+    if partial_error:
+        return ToolExecutionResult(request.tool_name, False, partial_error, error_code="TOOL_INVALID_ARGUMENTS")
+    tool_params = _without_internal_partial_write_marker(tool_params)
     workspace_roots = _workspace_roots_for_invocation(request)
     boundary_error = validate_write_boundary(
         request.tool_name,
@@ -129,6 +134,81 @@ def _task_workspace_relative_path(raw: object, boundary: dict[str, object]) -> s
             return ""
         return str((base / suffix).resolve(strict=False)) if suffix else str(base)
     return ""
+
+
+def _with_task_artifact_append_continuation(
+    params: dict[str, Any],
+    request: RegistryToolInvokeRequest,
+) -> dict[str, Any]:
+    if request.tool_name != "write_file" or not isinstance(request.write_boundary, dict):
+        return params
+    if "mode" in params:
+        return params
+    if "content" not in params or params.get("content") is None:
+        return params
+    target = _resolved_invocation_path(params.get("path"), request.workspace_root)
+    artifact_roots = [
+        root
+        for root in (
+            _resolved_boundary_path(request.write_boundary.get("task_output_dir"), request.workspace_root),
+            _resolved_boundary_path(request.write_boundary.get("task_work_dir"), request.workspace_root),
+        )
+        if root is not None
+    ]
+    if target is None or not any(_is_relative_to(target, root) for root in artifact_roots):
+        return params
+    if not target.exists() or not target.is_file():
+        return params
+    return {**params, "mode": "append", "__implicit_task_artifact_append": True}
+
+
+def _partial_unclosed_write_error(params: dict[str, Any], request: RegistryToolInvokeRequest) -> str:
+    if request.tool_name != "write_file" or params.get("__partial_unclosed_write") is not True:
+        return ""
+    target = _resolved_invocation_path(params.get("path"), request.workspace_root)
+    if target is None:
+        return "未闭合 write_file.content 缺少可解析路径；请重新输出完整工具调用。"
+    return "未闭合 write_file.content 不能写入任何目标文件；请输出完整闭合的工具调用，或用 mode=append 分块续写完整闭合的小块。"
+
+
+def _without_internal_partial_write_marker(params: dict[str, Any]) -> dict[str, Any]:
+    if "__partial_unclosed_write" not in params:
+        return params
+    return {key: value for key, value in params.items() if key != "__partial_unclosed_write"}
+
+
+def _resolved_invocation_path(raw: object, workspace_root: Path) -> Path | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = workspace_root / path
+        return path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _resolved_boundary_path(raw: object, workspace_root: Path) -> Path | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = workspace_root / path
+        return path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _is_absolute_or_home_path(text: str) -> bool:

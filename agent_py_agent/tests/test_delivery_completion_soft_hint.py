@@ -143,7 +143,10 @@ def test_delivery_completion_hint_waits_for_required_target_coverage(tmp_path):
         tool_ok=True,
     )
 
-    assert params.tool_context == []
+    assert len(params.tool_context) == 1
+    assert "[delivery-coverage-check]" in params.tool_context[0]
+    assert "target_coverage_status" in params.tool_context[0]
+    assert "cover_missing_targets_before_submit" in params.tool_context[0]
 
 
 def test_delivery_completion_hint_after_required_target_coverage_complete(tmp_path):
@@ -155,6 +158,7 @@ def test_delivery_completion_hint_after_required_target_coverage_complete(tmp_pa
     read_record = _read_window_record(source, offset=0, next_offset=6, total=6)
     params = _params(contract=_contract_with_required_source_coverage(source))
     params.archive_tool_calls.extend([{"tool": "write_file", "ok": True, "path": str(report)}, read_record])
+    params.tool_context.append("[delivery-coverage-check]\n{\"stale\": true}")
 
     maybe_append_delivery_completion_soft_hint(
         SimpleNamespace(root=str(tmp_path)),
@@ -165,6 +169,7 @@ def test_delivery_completion_hint_after_required_target_coverage_complete(tmp_pa
 
     assert len(params.tool_context) == 1
     assert "[delivery-completion-soft-hint]" in params.tool_context[0]
+    assert "[delivery-coverage-check]" not in params.tool_context[0]
     assert str(report) in params.tool_context[0]
 
 

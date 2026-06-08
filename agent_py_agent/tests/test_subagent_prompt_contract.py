@@ -15,7 +15,7 @@ def test_runner_prompt_tells_leaf_to_defer_command_execution_to_parent():
         goal="实现算法并生成 test_solution.py",
         thought="",
         plan=[],
-        role="leaf_worker",
+        role="worker",
         allowed_tools=["write_file", "read_file"],
         acceptance_checks=["生成 test_solution.py 并建议 pytest 命令"],
     )
@@ -38,7 +38,7 @@ def test_runner_prompt_tells_leaf_to_chunk_long_file_writes():
         goal="写 style.css 和 app.js",
         thought="",
         plan=[],
-        role="leaf_worker",
+        role="worker",
         allowed_tools=["write_file", "apply_patch"],
         acceptance_checks=["CSS/JS 必须存在"],
     )
@@ -59,7 +59,7 @@ def test_runner_prompt_tells_controlled_exec_leaf_to_apply_and_report_refs():
         goal="用 controlled_exec 执行 pwd、python3 大输出、rm sentinel.txt",
         thought="",
         plan=[],
-        role="leaf_worker",
+        role="worker",
         allowed_tools=["controlled_exec", "write_file"],
         controlled_exec_grants=[
             {
@@ -87,10 +87,10 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
     context = SubAgentExecutionContext(
         run_id="child-1",
         generated_at=1.0,
-        goal="创建 leaf_worker_text 写入 solution.py、test_solution.py、README.md",
+        goal="创建 worker_text 写入 solution.py、test_solution.py、README.md",
         thought="",
         plan=[],
-        role="child_coordinator",
+        role="coordinator",
         allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree", "read_file"],
         acceptance_checks=["leaf 必须写出三个文件"],
     )
@@ -161,7 +161,7 @@ def test_runner_prompt_keeps_role_template_details_out_of_leaf_prompt():
         goal="写一个 proof.txt",
         thought="",
         plan=[],
-        role="leaf_worker",
+        role="worker",
         allowed_tools=["write_file", "read_file"],
         acceptance_checks=["proof.txt 必须存在"],
     )
@@ -172,8 +172,8 @@ def test_runner_prompt_keeps_role_template_details_out_of_leaf_prompt():
     assert "你是找茬子代理" not in prompt
 
 
-def test_runner_prompt_loads_current_role_template_for_worker():
-    """执行型子代理应拿到自己的角色提示片段，但不加载其他角色全集。"""
+def test_runner_prompt_keeps_worker_template_details_compact():
+    """执行型子代理不额外加载当前模板详情，避免每个 worker prompt 变厚。"""
     context = SubAgentExecutionContext(
         run_id="worker-1",
         generated_at=1.0,
@@ -187,8 +187,8 @@ def test_runner_prompt_loads_current_role_template_for_worker():
 
     prompt = _build_subagent_runner_prompt(context)
 
-    assert "当前角色模板详情" in prompt
-    assert "你是执行子代理" in prompt
+    assert "当前角色模板详情" not in prompt
+    assert "你是执行子代理" not in prompt
     assert "你是找茬子代理" not in prompt
 
 
@@ -297,7 +297,7 @@ def _compact_continuation_context(tmp_path: Path) -> SubAgentExecutionContext:
         goal="继续示例网站子任务",
         thought="",
         plan=["从 checkpoint 接续"],
-        role="leaf_worker",
+        role="worker",
         task_dir=str(tmp_path / "subagents" / "leaf-compact"),
         context_bundle={
             "gate": {"ok": True, "missing_fields": []},

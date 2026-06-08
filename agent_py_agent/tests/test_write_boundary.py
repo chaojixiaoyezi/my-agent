@@ -273,7 +273,7 @@ class TestValidateWriteBoundaryAllowedRoots:
             {"path": str(product / "index.html")},
             workspace_root=tmp_path,
             write_boundary={
-                "role": "leaf_worker",
+                "role": "worker",
                 "allowed_write_roots": [str(product)],
                 "product_write_roots": [str(product)],
                 "product_write_policy": "direct",
@@ -291,7 +291,7 @@ class TestValidateWriteBoundaryAllowedRoots:
             {"path": str(product / "output.json")},
             workspace_root=tmp_path,
             write_boundary={
-                "role": "leaf_worker",
+                "role": "worker",
                 "allowed_write_roots": [str(task_dir), str(product)],
                 "product_write_roots": [str(product)],
                 "product_write_policy": "direct",
@@ -312,7 +312,7 @@ class TestValidateWriteBoundaryAllowedRoots:
             {"path": str(output_json)},
             workspace_root=tmp_path,
             write_boundary={
-                "role": "leaf_worker",
+                "role": "worker",
                 "allowed_write_roots": [str(task_dir), str(product)],
                 "product_write_roots": [str(product)],
                 "product_write_policy": "direct",

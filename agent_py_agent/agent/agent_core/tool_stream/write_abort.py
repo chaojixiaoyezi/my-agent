@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from ...tooling.content_transport_policy import (
+    RECOVERY_WRITE_CHUNK_CHARS,
     streaming_inline_write_abort_limit,
 )
 
@@ -96,6 +97,8 @@ def recovered_write_abort_payload(exc: LongToolContentStreamAbort) -> dict[str, 
         "content_field_present": True,
         "streaming_content_chars": exc.chars,
         "streaming_content_limit": exc.limit,
+        "previous_write_committed": False,
+        "write_recovery": _write_recovery_payload(exc),
     }
 
 
@@ -171,6 +174,27 @@ def _streamed_json_string_prefix(text: str, *, max_chars: int) -> str:
         return str(json.loads(f'"{raw_prefix}"'))
     except json.JSONDecodeError:
         return raw_prefix.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
+
+
+def _write_recovery_payload(exc: LongToolContentStreamAbort) -> dict[str, object]:
+    path = exc.path
+    return {
+        "strategy": "restart_same_file_with_append_chunks",
+        "path": path,
+        "max_chunk_chars": RECOVERY_WRITE_CHUNK_CHARS,
+        "first_tool_call": {
+            "tool": exc.tool,
+            "path": path,
+            "mode": "overwrite",
+            "content": f"<first chunk <= {RECOVERY_WRITE_CHUNK_CHARS} chars>",
+        },
+        "next_tool_call": {
+            "tool": exc.tool,
+            "path": path,
+            "mode": "append",
+            "content": f"<next chunk <= {RECOVERY_WRITE_CHUNK_CHARS} chars>",
+        },
+    }
 
 
 __all__ = [

@@ -18,6 +18,12 @@ from agent_py_agent.agent.agent_core.tool_context.call_reducer import (
     render_assistant_tool_round_context,
     render_tool_payload_for_live_prompt,
 )
+from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+    ToolLoopRepairCounters,
+    ToolLoopResponseDecisionRequest,
+    tool_loop_response_decision,
+)
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.memory_archive.artifact.reader import (
     ReadToolOutputArtifactRequest,
     read_tool_output_artifact,
@@ -36,6 +42,7 @@ from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.tooling.content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
     RECOVERY_WRITE_CHUNK_CHARS,
+    STREAMING_INLINE_WRITE_ABORT_CHARS,
 )
 from agent_py_agent.agent.tooling.models import ToolExecutionResult
 
@@ -574,9 +581,197 @@ def test_tool_loop_enters_long_content_recovery_after_truncated_write_parse_erro
     live_context = "\n".join(params.tool_context)
     assert "long_content_recovery_mode" in live_context
     assert "WRITE_FILE_RAW" in live_context
-    assert "write_file.content" in live_context
+    assert 'mode="overwrite"' in live_context
+    assert 'mode="append"' in live_context
     assert f"不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符" in live_context
     assert "site/app.js" in live_context
+
+
+def test_tool_loop_enters_long_content_recovery_after_unclosed_write_file_parse_error(
+    tmp_path: Path,
+) -> None:
+    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
+    payload = {
+        "tool": "__parse_error__",
+        "error_code": "TOOL_CALL_UNCLOSED",
+        "error": "工具调用缺少结束标记 [/TOOL_CALL]",
+        "source_tool": "write_file",
+        "path": "reports/final.md",
+        "content_field_present": True,
+        "previous_write_committed": False,
+        "write_recovery": {
+            "strategy": "restart_same_file_with_append_chunks",
+            "first_tool_call": {"tool": "write_file", "path": "reports/final.md", "mode": "overwrite"},
+            "next_tool_call": {"tool": "write_file", "path": "reports/final.md", "mode": "append"},
+        },
+    }
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=2,
+            idx=1,
+            payload=payload,
+            result=ToolExecutionResult(
+                "__parse_error__",
+                False,
+                "工具调用缺少结束标记 [/TOOL_CALL]",
+                error_code="TOOL_CALL_UNCLOSED",
+            ),
+        )
+    )
+
+    live_context = "\n".join(params.tool_context)
+    assert "long_content_recovery_mode" in live_context
+    assert "reports/final.md" in live_context
+    assert 'mode="overwrite"' in live_context
+    assert 'mode="append"' in live_context
+
+
+def test_tool_loop_allows_complete_write_payload_above_recovery_chunk_recommendation(
+    tmp_path: Path,
+) -> None:
+    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
+    params.archive_tool_calls.append(
+        {
+            "tool": "__parse_error__",
+            "error_code": "TOOL_CALL_UNCLOSED",
+            "parameters": {
+                "tool": "__parse_error__",
+                "error_code": "TOOL_CALL_UNCLOSED",
+                "source_tool": "write_file",
+                "path": "reports/final.md",
+                "content_field_present": True,
+                "write_recovery": {"strategy": "restart_same_file_with_append_chunks"},
+            },
+        }
+    )
+
+    class _Tools:
+        def parse_tool_calls(self, _text: str):
+            return [
+                {
+                    "tool": "write_file",
+                    "path": "reports/final.md",
+                    "mode": "append",
+                    "content": "A" * (RECOVERY_WRITE_CHUNK_CHARS + 1),
+                }
+            ]
+
+    agent = SimpleNamespace(
+        root=tmp_path,
+        config=SimpleNamespace(enable_tools=True),
+        tools=_Tools(),
+    )
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="tool call", backend="test"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "run_tools"
+    assert decision.calls
+    assert decision.calls[0]["tool"] == "write_file"
+    assert "blocked_large_write" not in "\n".join(params.tool_context)
+
+
+def test_tool_loop_blocks_write_payload_above_recovery_inline_hard_limit(
+    tmp_path: Path,
+) -> None:
+    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
+    params.archive_tool_calls.append(
+        {
+            "tool": "__parse_error__",
+            "error_code": "TOOL_CALL_UNCLOSED",
+            "parameters": {
+                "tool": "__parse_error__",
+                "error_code": "TOOL_CALL_UNCLOSED",
+                "source_tool": "write_file",
+                "path": "reports/final.md",
+                "content_field_present": True,
+                "write_recovery": {"strategy": "restart_same_file_with_append_chunks"},
+            },
+        }
+    )
+
+    class _Tools:
+        def parse_tool_calls(self, _text: str):
+            return [
+                {
+                    "tool": "write_file",
+                    "path": "reports/final.md",
+                    "mode": "append",
+                    "content": "A" * (STREAMING_INLINE_WRITE_ABORT_CHARS + 1),
+                }
+            ]
+
+    agent = SimpleNamespace(
+        root=tmp_path,
+        config=SimpleNamespace(enable_tools=True),
+        tools=_Tools(),
+    )
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="tool call", backend="test"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "continue"
+    assert decision.calls == []
+    assert "long_content_recovery_mode: blocked_large_write" in params.tool_context[-1]
+    assert f"max_chunk_chars: {RECOVERY_WRITE_CHUNK_CHARS}" in params.tool_context[-1]
+    assert f"max_inline_chars: {STREAMING_INLINE_WRITE_ABORT_CHARS}" in params.tool_context[-1]
+
+
+def test_tool_loop_enters_long_content_recovery_from_structured_raw_write_recovery(
+    tmp_path: Path,
+) -> None:
+    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
+    payload = {
+        "tool": "__parse_error__",
+        "error_code": "WRITE_FILE_RAW_MALFORMED",
+        "error": "WRITE_FILE_RAW 原文块格式错误，缺少结束标记 [/WRITE_FILE_RAW]",
+        "source_tool": "WRITE_FILE_RAW",
+        "path": "reports/final.md",
+        "previous_write_committed": False,
+        "write_recovery": {
+            "strategy": "restart_same_file_with_append_chunks",
+            "path": "reports/final.md",
+            "first_tool_call": {"tool": "write_file", "path": "reports/final.md", "mode": "overwrite"},
+            "next_tool_call": {"tool": "write_file", "path": "reports/final.md", "mode": "append"},
+        },
+    }
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=2,
+            idx=1,
+            payload=payload,
+            result=ToolExecutionResult(
+                "__parse_error__",
+                False,
+                "WRITE_FILE_RAW 原文块格式错误",
+                error_code="WRITE_FILE_RAW_MALFORMED",
+            ),
+        )
+    )
+
+    live_context = "\n".join(params.tool_context)
+    assert "long_content_recovery_mode" in live_context
+    assert "reports/final.md" in live_context
+    assert 'mode="overwrite"' in live_context
+    assert 'mode="append"' in live_context
 
 
 def test_tool_loop_does_not_enter_long_content_recovery_from_raw_parse_error_text(

@@ -11,7 +11,9 @@ from pathlib import Path
 
 from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.models import EvidencePacket, Finding
+from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
+from agent_py_agent.agent.subagents.models import EvidencePacket, Finding, SubAgentParsedOutput
+from agent_py_agent.agent.subagents.services.base import CreateRunParams
 
 
 def _path_text(path: str) -> str:
@@ -510,6 +512,49 @@ def test_subagent_persistence_writes_artifact_manifests(tmp_path) -> None:
     assert missing["exists"] is False
     assert missing["sha256"] == ""
     assert missing["resolution_status"] == "missing"
+
+
+def test_runner_result_materializes_missing_declared_child_output(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    declared_output = tmp_path / "tasks" / "root-run" / "work" / "child_outputs" / "01-worker.md"
+    task = manager.create_run(
+        params=CreateRunParams(
+            goal="分析一个源码项目并交回报告",
+            thought="把结构化成功结果写入父级声明的 child output 槽。",
+            plan=["阅读", "总结", "交回"],
+            root_id="root-run",
+            attributes={"output_files": [str(declared_output)]},
+        )
+    )
+
+    result = manager.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=task.id,
+            dry_run=False,
+            ok=True,
+            message="done",
+            structured_output=SubAgentParsedOutput(
+                found=True,
+                ok=True,
+                status="DONE",
+                summary="已完成源码项目分析，入口文件和核心模块都已记录。",
+                findings=[
+                    {"claim": "核心模块已覆盖", "evidence_refs": ["read_file:core.py"]},
+                ],
+                next_actions=["父代理读取 child output 后汇总。"],
+            ),
+        )
+    )
+
+    loaded = manager.load(task.id)
+    output_payload = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
+
+    assert result.ok is True
+    assert declared_output.exists()
+    body = declared_output.read_text(encoding="utf-8")
+    assert "已完成源码项目分析" in body
+    assert str(declared_output) in loaded.artifact_refs
+    assert output_payload["artifacts"][0]["path"] == str(declared_output)
 
 
 def test_subagent_persistence_writes_compact_checkpoint_chain(tmp_path) -> None:

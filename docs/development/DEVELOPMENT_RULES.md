@@ -68,10 +68,16 @@ before changing code.
 - 错误正文不是错误码。工具、runner、gateway 或子代理没有显式 `error_code` /
   `error_type` 时，运行时只能写 `UNKNOWN_ERROR` 或对应结构化本地失败类型；不能从
   message、stdout、stderr、summary 里用关键词反推出硬错误码并影响状态、恢复或验收。
+- 不同结构化协议之间可以做显式映射，但映射源必须是当前协议枚举。例如 subagent
+  `failure_type=runner_timeout` 可以映射到 error taxonomy 的 `RUNNER_TIMEOUT`；
+  `runner_last_error`、stdout/stderr、报告正文和用户提示词不能参与这个映射。
 - recovery mode 和 capability status 只认当前协议枚举，不能用字符串前缀、英文词片段、
   中文词片段或旧别名来触发自动重跑、接管、授权和 closeout 行为。
 - collaboration case/request status 也只走当前协议枚举和 normalize helper；`resolved`、
   `done`、`rejected` 这类展示词只能保留为文本，不能驱动关闭、完成、阻塞或唤醒。
+  写入协作账本时，非协议状态只能落到 metadata 的 raw/status_protocol_error 字段，
+  `case.status` / `request.status` 必须保持 `open` / `pending` 等协议值；底层 store
+  update 方法也不能绕过这条规则。
 - owner capability request 的状态只认当前协议值；未知值必须报结构化错误，不能自动兜底成
   `closed` / `expired` / `approved` 这类终态。
 - runtime capability 只能从 `granted_capabilities` 或明确的系统注入 capability token
@@ -82,6 +88,10 @@ before changing code.
   真的不同才新增工具。
 - 安全门可以硬，业务门要软。危险路径、危险命令、越权写入、破坏运行时可以硬拦；
   深度不足、子代理未汇总、报告质量问题应进入 warning、返工提示、证据要求或 closeout。
+- 结构化 delivery contract 明确列出的 artifact 格式要求不算主观质量评分，例如
+  `required_sections`、`required_columns`、`required_fields`、`min_size`。这些要求必须
+  作为结构化验收事实处理；普通自然语言里的报告维度、分析角度和对比口径不能自动升级成
+  格式硬门，更细的文风、深度和内容厚度继续走 advisory/返工反馈。
 - 跨平台从第一天考虑。路径用 `pathlib` 和配置解析，不写死 macOS 家目录；Windows、
   Linux、macOS 都应能解释用户目录、相对路径和工作目录。
 - 大输出和 compact 是底层能力，不是 prompt 技巧。大文件、大工具输出、长任务必须依赖
@@ -288,6 +298,8 @@ before changing code.
   values such as `done`, `completed`, `succeeded`, or `ok`. Do not call
   `.upper()` or `.lower()` to make a status participate in completion,
   recovery, dispatch, compact resume, or closeout decisions.
+  Unknown task-progress status values normalize to `pending` and preserve the
+  original text only in `raw_status` / `status_protocol_error`.
 - Cleanup is allowed inside authorized workspaces when it matches the task:
   temporary files, task trash, generated artifacts, task-local memory, drafts,
   templates, tools, and skills may be removed.  The hard line is uninstalling or
@@ -352,6 +364,9 @@ before changing code.
   文件包是否能被真实 reader 打开、hash/registry 状态和工具运行错误。文档厚度、
   覆盖比例、证据充分性、推荐理由质量、字段是否“有用”等业务质量，只能作为
   `warning` / advisory 返给模型或人工；不能直接把任务硬挡死。
+- 最终 Markdown 如果引用明确本地源码路径，路径存在性属于文件系统事实，可以硬验收；
+  检查必须基于结构化源码根/reference root，不能从自然语言段落、技术栈描述或报告口吻
+  猜测路径上下文。
 - “全部 / 每个 / 所有 / 每周 / 每个项目”这类业务覆盖要求默认属于进度账本和
   coverage ledger 的软管理范围。系统可以提醒哪些条目缺证据、缺引用或只到
   README 级，但不能把这类业务质量塞进 closeout 变成硬门。
@@ -361,13 +376,30 @@ before changing code.
   摘要漏事实的风险，不改变 closeout 的硬验收边界。
 - 普通自然语言里的“完整读完 / 完整读取 / 全文读完 / 从头到尾”不能自动升级成
   required `full_source_read` 硬合同。它可以驱动进度账本、coverage ledger 和软提示，
-  但默认 chat/cli/gateway 主链路不跑 delivery materializer，不把用户话术转成隐藏验收门。
+  但默认 chat/cli/gateway 主链路不能靠用户话术转成隐藏验收门。
+- 用户 prompt 中的结构化路径和文件系统事实可以派生源码目录覆盖合同。例如用户给出一个
+  项目集合目录时，runtime 可以把其中像源码项目的子目录展开成
+  `target_coverage_contract.target_items[]`；这不是关键词语义判断，不能从“不要停/别漏”
+  这类普通话术推状态或验收结果。
 - 只有外部调用方显式传入结构化 `delivery_contract.target_coverage_contract`，或当前
-  run 已有结构化覆盖合同时，closeout 才执行机器可证明的覆盖验收。required
+  run 已通过结构化路径/文件系统事实派生覆盖合同时，closeout 才执行机器可证明的覆盖验收。required
   `full_source_read` 只用工具读文件记录里的客观 `offset/chars/total_chars` 或
   `start_line/end_line/total_lines` 区间验收：从开头连续覆盖到 EOF 才算完成；只读到
   部分不能因为最终报告存在就通过。这个规则只适用于显式结构化合同，不能扩展成
   “报告质量/分析深度”的通用硬门。
+- 对显式 required 覆盖合同，最终交付物还必须晚于最后一次必要 `read_file` 覆盖记录。这个
+  freshness 检查只看工具账本 `created_at` 和 artifact provenance，不读取报告正文，也不按
+  普通自然语言猜测“是否已经吸收证据”。如果报告早于最后证据，closeout 只要求更新最终交付物后
+  重新验收。
+- 对显式 required 覆盖合同，closeout 可以检查 coverage ledger 里的 `read_file` 源码证据是否
+  投影到最终 artifact。这个门只比对机器型文件/模块 token 与当前 run 交付物文本，防止“读了很多
+  文件但最终报告完全没承接证据”的假收口；它不是报告质量评分，少量遗漏只能作为 advisory。
+- 当 closeout 已经返回 `target_coverage_status.should_block=true`，后续工具轮必须先对缺失源码目录
+  执行结构化补覆盖动作；没有缺失目录 `list_files/read_file/search` 时，不能继续写最终产物或
+  `submit_for_acceptance`。这是防止“报告存在但覆盖缺失”的返工空转，不是内容质量硬门。
+- 从 prompt 自动派生源码目录 coverage 时，必须过滤 task/output/data/memory/local_store/backup/.agent*
+  等内部、生成、缓存或备份目录；不能通过解析“不要分析/排除/跳过”等普通自然语言片段来决定
+  required coverage target。这个过滤只用于避免错误派生验收目标，不能反过来当作任务完成状态判断。
 - 自动收口提示不能只看最终产物文件是否存在。当前 run 有 required
   `target_coverage_contract` 时，自动 closeout 必须等结构化 coverage 完成后才触发；
   覆盖未完成时只允许模型继续工作或显式 submit 后拿到结构化返工信息，不能在同一缺口上
@@ -401,7 +433,21 @@ before changing code.
   `search_text`、`grep`、`run_command` 可辅助定位，但不能替代 full-source coverage。
 - `task_progress` 里的普通 evidence/coverage 缺口是 advisory。它可以提醒模型补证据、
   补来源或继续完善报告，但不能在没有结构化 required 读取合同时，把“done 项证据
-  不够多”或“覆盖清单没填满”升级成 closeout 硬阻断。
+  不够多”或“覆盖清单没填满”升级成前置硬阻断。
+- closeout 可以阻断“已登记证据没有进入交付物”的结构化不一致：如果当前 run 的
+  `task_progress.items[]` 关闭项已经登记 evidence，最终交付物必须承接这些 evidence
+  里的机器型文件、模块或 artifact 引用。这个门只比对账本 token 与 artifact 文本，
+  不用自然语言判断报告质量；缺失时要求重写或追加最终交付物后重新
+  `submit_for_acceptance`。
+- closeout 也可以阻断 required coverage ledger 与最终交付物之间的结构化不一致：当前 run
+  已读取的源码文件如果大量没有出现在最终 artifact 中，`target_coverage_projection_gate`
+  应返回 `NEED_REPAIR`，让模型把 source refs 写进报告后重新验收。
+  `target_coverage_contract.target_items[]` 里的显式 label、target id 或项目目录名也属于
+  结构化投影项；不能只列源文件名却漏掉 required 目标本身。
+- `submit_for_acceptance` / closeout 是收口动作边界。当前 run 的
+  `task_progress.items[]` 仍有非关闭状态时，closeout 必须返回 `NEED_REPAIR`，
+  不得标记任务完成；这不是终止任务，而是让模型继续处理、改成 `done/skipped`，
+  或用结构化 `blocked` 说明原因后重新提交。
 - `task_progress.items[].status` 是机器状态字段。工具入口只接受
   `pending` / `in_progress` / `done` / `skipped` / `blocked`；`completed`、
   “已完成”“已验收”“read”“ok”这类自然语言或自定义标签必须写到
@@ -603,11 +649,36 @@ do_write()
   default recommended inline size is 12,000 characters and can be tuned with
   `tool_write_inline_max_chars`. If a valid parsed tool call exceeds that
   configured recommendation, the tool should preserve the content and return a
-  warning; future calls should use smaller `write_file` writes, `apply_patch`
-  for local diffs, or `run_command` under the current `access_mode` to generate
-  the file and return only paths/summaries. Streaming stdout/stderr can improve
-  observability, but it is not a fix for an oversized or malformed tool-call
-  JSON block.
+  warning; future calls should use smaller `write_file` writes, explicit
+  `write_file mode=append` chunks for long reports, `WRITE_FILE_RAW
+  mode="append"` blocks for raw text chunks, `apply_patch` for local diffs, or
+  `run_command` under the current `access_mode` to generate the file and return
+  only paths/summaries. Streaming stdout/stderr can improve observability, but
+  it is not a fix for an oversized or malformed tool-call JSON block.
+- For current task output/work files, repeated `write_file` calls to the same
+  existing path are treated as continuation when `mode` is omitted: the registry
+  rewrites that call to append. This only protects task-scoped artifacts; ordinary
+  workspace files still use overwrite-by-default unless `mode="append"` is set.
+- Implicit task output/work append must return model-visible soft feedback that
+  names the rewrite and says explicit `mode="overwrite"` is required for a clean
+  replacement. Do not make the model infer this from file contents.
+- Never commit an unclosed `write_file.content` as a partial artifact. Incomplete
+  JSON content in any directory, including current task output/work, and malformed
+  `WRITE_FILE_RAW` blocks must return structured parse errors with
+  `write_recovery`, then continue through bounded complete overwrite/append
+  chunks. A malformed or unclosed tool call is not an action boundary and must not
+  mutate the final artifact path.
+- Final closeout must use the latest write record for each output path. If the
+  latest `write_file` record for a final artifact still has
+  `__partial_unclosed_write=true` from older records or abnormal internal input,
+  contracted and uncontracted closeout must mark that artifact invalid and ask for
+  a complete overwrite/append before acceptance.
+- Final closeout must also run baseline artifact acceptance for uncontracted
+  task output artifacts. A markdown artifact ending at an empty heading, an
+  unclosed fenced code block, or a small overwrite after repeated
+  `TOOL_CALL_UNCLOSED` recovery records is not a complete deliverable. Block it
+  using file structure and tool records; do not infer completion from prose in
+  the report body or model summary.
 - Streaming tool-call boundaries are an observability and cleanup layer, not a
   one-tool execution limiter. If a model streams a complete `[TOOL_CALL]` and
   then continues with more machine blocks in the same assistant turn, the
@@ -623,11 +694,16 @@ do_write()
   must return structured `error_code` / `failure_type` when it wants recovery
   routing. Do not classify ordinary stderr, traceback text, provider prose,
   multilingual phrases, or human summaries into machine error codes.
-- Long-content recovery must be policy-driven. If a write-like tool parse error
-  or inline-limit rejection needs to guide the next model turn, put that rule in
-  `content_recovery_mode.py` and append a compact `[tool-system]` recovery mode;
-  do not copy another long Chinese hint into the tool loop, parser, or individual
-  tool class.
+- Long-content recovery must be policy-driven and structured. If a write-like
+  tool parse error or inline-limit abort needs to guide the next model turn, the
+  parser/tool-stream layer should return compact machine fields such as
+  `previous_write_committed=false`, `write_recovery.strategy`, and concrete
+  overwrite/append tool-call shapes. Do not copy another long Chinese hint into
+  the tool loop or infer recovery from ordinary prose.
+- `write_recovery.max_chunk_chars` is a retry recommendation, not the streaming
+  hard stop. A complete medium-sized `write_file`/`WRITE_FILE_RAW` block above
+  the recommended chunk size should reach the normal tool boundary and either
+  execute with a warning or fail through the shared inline hard limit.
 - Provider/network timeouts must be typed and recoverable. HTTP backends should
   raise `ProviderTimeoutError` for request/stream timeouts, runners should record
   `failure_type=provider_timeout`, and CLI entry points should print a compact
@@ -709,6 +785,9 @@ do_write()
   aggregation surface. Use `inspect_agent_tree` for status and `wait` for
   delayed checks; do not reintroduce shell sleeps or directory scraping as
   control flow.
+- Background subagent dispatch must inherit the parent agent's current
+  `workspace_root` as a structured runtime field. Do not let the background
+  process cwd pick the subagent tree; cwd is only for loading code.
 - `create_subagents` must not reject ordinary delegation because of
   domain-specific quality constraints such as button/image/comment rules. Pass
   those constraints as structured task context and validate them through child

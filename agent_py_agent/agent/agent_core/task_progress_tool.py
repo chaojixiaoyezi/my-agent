@@ -5,7 +5,12 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..task_progress import invalid_item_statuses, read_task_progress, write_task_progress
+from ..task_progress import (
+    invalid_coverage_statuses,
+    invalid_item_statuses,
+    read_task_progress,
+    write_task_progress,
+)
 from ..tooling.models import BaseTool, ToolExecutionResult
 from .orchestration.tool_specs import build_task_progress_spec
 from .runner.context import current_subagent_run_id
@@ -41,14 +46,16 @@ class TaskProgressTool(BaseTool):
 
 def _invalid_status_result(params: dict[str, object]) -> ToolExecutionResult | None:
     invalid = invalid_item_statuses(params)
-    if not invalid:
+    invalid_coverage = invalid_coverage_statuses(params)
+    if not invalid and not invalid_coverage:
         return None
     payload = {
         "ok": False,
-        "error": "task_progress items[].status must be one of pending/in_progress/done/skipped/blocked.",
+        "error": "task_progress status fields must be one of pending/in_progress/done/skipped/blocked.",
         "invalid_statuses": invalid[:12],
+        "invalid_coverage_statuses": invalid_coverage[:12],
         "allowed_statuses": ["pending", "in_progress", "done", "skipped", "blocked"],
-        "how_to_fix": "Move labels such as completed/read/ok into notes or summary, and use status=done when the item is complete.",
+        "how_to_fix": "Move labels such as completed/read/ok into notes or summary, and use status=done when the item/check is complete.",
     }
     return ToolExecutionResult(
         "task_progress",
@@ -59,7 +66,7 @@ def _invalid_status_result(params: dict[str, object]) -> ToolExecutionResult | N
 
 
 def _normalized_action(value: object) -> str:
-    action = str(value or "read").strip().lower()
+    action = str(value or "read").strip()
     return action if action in {"read", "update"} else action or "read"
 
 

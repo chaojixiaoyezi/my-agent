@@ -13,7 +13,7 @@ import argparse
 from .chat import cmd_chat
 from .common import DEFAULT_CAPABILITY_CONFIG, add_resume_context_switches
 from .context_bundle_commands import cmd_context_bundle
-from .home_runtime_subcommands import add_home_runtime_subcommands
+from .home_runtime_commands import add_home_runtime_subcommands
 from .local_commands import (
     cmd_local_index_memory,
     cmd_local_search,

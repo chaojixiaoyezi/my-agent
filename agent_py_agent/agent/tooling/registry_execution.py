@@ -8,6 +8,7 @@ ToolRegistry 本身保持'服务台'职责；这里集中放工具调用解析�
 """
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -68,16 +69,20 @@ _TRUNCATED_PAYLOAD_HINT = (
 )
 _TRUNCATED_WRITE_HINT = (
     "如果上一轮是 write_file 且 content 太长，不要重复输出完整 content；"
-    "优先用独立成行的 [WRITE_FILE_RAW path=\"...\"]...[/WRITE_FILE_RAW] 原文块或 write_file.data_base64 提交完整产物；"
-    "不要把 WRITE_FILE_RAW 当 JSON tool 名；"
+    "下一轮只输出 1 个完整机器写入块，优先用独立成行的 WRITE_FILE_RAW mode=\"append\" 原文块；"
+    "如果继续用 JSON write_file，先用 mode=\"overwrite\" 写第一小块，再用同一路径 mode=\"append\" 逐块追加；"
     f"正常分块时单次 content 建议 {RECOMMENDED_WRITE_CHUNK_CHARS} 字符。"
     "如果已经连续解析失败，下一轮只能输出 1 个 write_file 工具调用，"
     f"content 降到不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符，闭合 [/TOOL_CALL] 后再继续下一块。"
+    "只有内容能完整闭合时才使用 WRITE_FILE_RAW 原文块；不要把 WRITE_FILE_RAW 当 JSON tool 名。"
 )
 _MALFORMED_OPENERS = ("[TOOL_CALL",)
 _VALID_OPENERS = ("[TOOL_CALL]",)
 _START_MARKERS = ("[TOOL_CALL]",)
 _END_MARKERS = ("[/TOOL_CALL]",)
+_WRITE_FILE_TOOL_RE = re.compile(r'"tool"\s*:\s*"write_file"')
+_WRITE_FILE_PATH_RE = re.compile(r'"(?:path|target_path)"\s*:\s*"(?P<path>(?:\\.|[^"\\]){0,240})"')
+_WRITE_FILE_CONTENT_RE = re.compile(r'"content"\s*:')
 
 
 @dataclass(frozen=True)
@@ -328,14 +333,10 @@ def _append_unclosed_tool_block(
 ) -> None:
     raw = context.scan_text[body_start:].strip().strip("`")
     payload = parse_tool_block_payload(raw, limits=context.payload_limits)
+    error_payload = _unclosed_tool_call_parse_error(raw, context.payload_limits)
     context.calls.append((
         start,
-        parse_error_payload(
-            "工具调用缺少结束标记 [/TOOL_CALL]",
-            raw,
-            limits=context.payload_limits,
-            error_code="TOOL_CALL_UNCLOSED",
-        )
+        error_payload
         if payload.get("tool") == "__parse_error__"
         else payload,
     ))
@@ -356,12 +357,7 @@ def _append_closed_tool_block(
         malformed_raw = context.scan_text[body_start:nested_start].strip().strip("`")
         context.calls.append((
             start,
-            parse_error_payload(
-                "工具调用缺少结束标记 [/TOOL_CALL]",
-                malformed_raw,
-                limits=context.payload_limits,
-                error_code="TOOL_CALL_UNCLOSED",
-            ),
+            _unclosed_tool_call_parse_error(malformed_raw, context.payload_limits),
         ))
         return nested_start
     context.calls.append((start, payload))
@@ -492,9 +488,65 @@ def parse_error_message(payload: dict[str, Any]) -> str:
         hint = f"{hint}{_TRUNCATED_PAYLOAD_HINT}"
     raw = str(payload.get("raw") or "")
     is_write_payload = '"write_file"' in raw
-    if error_code in {"TOOL_CALL_UNCLOSED", "TOOL_INLINE_CONTENT_STREAM_ABORTED"} and is_write_payload and '"content"' in raw:
+    has_write_recovery = isinstance(payload.get("write_recovery"), dict)
+    if error_code in {"TOOL_CALL_UNCLOSED", "TOOL_INLINE_CONTENT_STREAM_ABORTED"} and is_write_payload and '"content"' in raw or has_write_recovery:
         hint = f"{hint}{_TRUNCATED_WRITE_HINT}"
     return hint
+
+
+def _unclosed_tool_call_parse_error(
+    raw: str,
+    limits: ToolPayloadNormalizeLimits | None,
+) -> dict[str, Any]:
+    payload = parse_error_payload(
+        "工具调用缺少结束标记 [/TOOL_CALL]",
+        raw,
+        limits=limits,
+        error_code="TOOL_CALL_UNCLOSED",
+    )
+    payload.update(_write_file_unclosed_recovery_fields(raw))
+    return payload
+
+
+def _write_file_unclosed_recovery_fields(raw: str) -> dict[str, object]:
+    if _WRITE_FILE_TOOL_RE.search(raw) is None or _WRITE_FILE_CONTENT_RE.search(raw) is None:
+        return {}
+    path = _write_file_path(raw)
+    recovery: dict[str, object] = {
+        "strategy": "restart_same_file_with_append_chunks",
+        "max_chunk_chars": RECOVERY_WRITE_CHUNK_CHARS,
+        "first_tool_call": {
+            "tool": "write_file",
+            "path": path,
+            "mode": "overwrite",
+            "content": f"<first chunk <= {RECOVERY_WRITE_CHUNK_CHARS} chars>",
+        },
+        "next_tool_call": {
+            "tool": "write_file",
+            "path": path,
+            "mode": "append",
+            "content": f"<next chunk <= {RECOVERY_WRITE_CHUNK_CHARS} chars>",
+        },
+    }
+    if path:
+        recovery["path"] = path
+    return {
+        "source_tool": "write_file",
+        "path": path,
+        "content_field_present": True,
+        "previous_write_committed": False,
+        "write_recovery": recovery,
+    }
+
+
+def _write_file_path(raw: str) -> str:
+    match = _WRITE_FILE_PATH_RE.search(raw)
+    if match is None:
+        return ""
+    try:
+        return str(json.loads(f'"{match.group("path")}"'))
+    except json.JSONDecodeError:
+        return match.group("path")
 
 
 def _same_name_wrapper_error(

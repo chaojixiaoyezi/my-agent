@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,6 +63,7 @@ class WriteFileTool(FileSystemTool):
             use_cases=[
                 "新建代码文件、配置文件、文档或二进制产物",
                 "已经明确要重写某个文件的完整内容",
+                "长报告可以先覆盖写入标题，再用 mode=append 分段追加后续章节",
             ],
             avoid_when=[
                 "只想局部改已有文件时优先用 apply_patch",
@@ -72,14 +74,18 @@ class WriteFileTool(FileSystemTool):
                 "path": "要写入的文件路径",
                 "content": "完整文本内容；和 data_base64 二选一",
                 "data_base64": "完整二进制内容的 base64；和 content 二选一",
+                "mode": "可选。overwrite 覆盖写入（默认）或 append 追加到文件末尾",
             },
             parameter_details={
                 "path": "相对工作区的目标文件路径；缺失父目录会自动创建。",
                 "content": write_file_content_parameter_detail(self.max_inline_content_chars),
                 "data_base64": "可选。用于 PDF、XLSX、图片、压缩包等二进制文件；传入后按原始字节写入。",
+                "mode": "可选，精确值 overwrite 或 append。append 会原子地保留已有内容并把本次 payload 追加到末尾；不接受 completed/continue 等别名。当前 task output/work 下同一路径已存在且省略 mode 时，运行时会按续写保护追加；显式 mode=overwrite 才替换该任务产物文件。",
             },
+            internal_parameters=["__implicit_task_artifact_append", "__partial_unclosed_write"],
             examples=[
                 '{"tool": "write_file", "path": "src/demo.py", "content": "print(\\"hello\\")\\n"}',
+                '{"tool": "write_file", "path": "output/report.md", "mode": "append", "content": "\\n## 下一节\\n..."}',
                 '{"tool": "write_file", "path": "output/report.pdf", "data_base64": "JVBERi0xLjQK..."}',
             ],
         )
@@ -88,6 +94,7 @@ class WriteFileTool(FileSystemTool):
         try:
             raw_path = _required_path(params.get("path"))
             content, data = _write_payload(params)
+            write_mode = _write_mode(params)
             content_policy = _content_policy(raw_path, content, self.max_inline_content_chars)
             if content_policy and not content_policy.allowed:
                 return ToolExecutionResult("write_file", False, content_policy.message)
@@ -114,7 +121,7 @@ class WriteFileTool(FileSystemTool):
         target.parent.mkdir(parents=True, exist_ok=True)
         target = self.resolve_path(target)
         try:
-            _atomic_write_bytes(target, data)
+            _atomic_write_bytes(target, data, mode=write_mode)
         except ValueError as exc:
             return ToolExecutionResult(
                 "write_file",
@@ -125,7 +132,14 @@ class WriteFileTool(FileSystemTool):
                 recommended_action=RecoveryAction.REWRITE_ARTIFACT_BYTES.value,
             )
         web_decision = check_web_project_post_write(target, self.workspace_root)
-        output = _write_output(self.display_path(target), target, content, content_policy)
+        output = _write_output(
+            self.display_path(target),
+            target,
+            content,
+            content_policy,
+            mode=write_mode,
+            implicit_append=params.get("__implicit_task_artifact_append") is True,
+        )
         output, feedback = _attach_reference_write_feedback(self.workspace_root, target, output, self.runtime_fact_roots)
         result = _write_result("write_file", target, output, web_decision)
         if feedback:
@@ -216,6 +230,15 @@ def _has_base64_payload(params: dict[str, Any]) -> bool:
     return True
 
 
+def _write_mode(params: dict[str, Any]) -> str:
+    raw = str(params.get("mode") or "overwrite").strip()
+    if raw in {"overwrite", "append"}:
+        return raw
+    if raw == "write":
+        raise ValueError('write_file.mode 不接受 "write"。新建或覆盖文件时省略 mode，或显式使用 mode="overwrite"；追加时使用 mode="append"。')
+    raise ValueError("write_file.mode 必须精确为 overwrite 或 append。")
+
+
 def _content_policy(raw_path: str, content: str | None, max_chars: int) -> Any | None:
     if content is None:
         return None
@@ -254,8 +277,17 @@ def _write_output(
     target: Path,
     content: str | None,
     content_policy: Any | None,
+    *,
+    mode: str,
+    implicit_append: bool = False,
 ) -> str:
-    notes = [f"已写入文件: {display_path}"]
+    action = "已追加文件" if mode == "append" else "已写入文件"
+    notes = [f"{action}: {display_path}"]
+    if implicit_append:
+        notes.append(
+            "续写保护：当前 task output/work 中同一路径已存在且本次未显式传 mode，"
+            "运行时已按 append 处理。若你要替换为干净最终版，请下一次显式传 mode=\"overwrite\"。"
+        )
     if content_policy and content_policy.message:
         notes.append(content_policy.message)
     if content is not None:
@@ -265,11 +297,14 @@ def _write_output(
     return "\n".join(notes)
 
 
-def _atomic_write_bytes(target: Path, data: bytes) -> None:
+def _atomic_write_bytes(target: Path, data: bytes, *, mode: str = "overwrite") -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=_temp_suffix_for(target), dir=str(target.parent))
     try:
         with os.fdopen(fd, "wb") as file:
+            if mode == "append" and target.exists():
+                with target.open("rb") as existing:
+                    shutil.copyfileobj(existing, file)
             file.write(data)
             file.flush()
             os.fsync(file.fileno())

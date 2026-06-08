@@ -14,6 +14,7 @@ class ArtifactAcceptanceRequest:
     path: Path
     workspace_root: Path | None = None
     validation_contract: dict[str, object] | None = None
+    reference_roots: tuple[Path | str, ...] = ()
 
 
 @dataclass(frozen=True)

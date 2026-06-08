@@ -12,6 +12,7 @@ import pytest
 from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
 from agent_py_agent.agent.subagents.model_capabilities import (
     capability_request_counts_as_open,
+    capability_request_requires_parent_resolution,
     capability_request_suppresses_duplicate,
     is_pending_capability_status,
 )
@@ -73,6 +74,8 @@ def test_legacy_capability_request_status_is_not_current_open_request():
     assert is_pending_capability_status("pending_capability_request") is False
     assert capability_request_counts_as_open("RESOLVED") is False
     assert capability_request_suppresses_duplicate("RESOLVED") is False
+    assert capability_request_requires_parent_resolution("RESOLVED") is True
+    assert capability_request_requires_parent_resolution("pending") is True
 
 
 @pytest.fixture

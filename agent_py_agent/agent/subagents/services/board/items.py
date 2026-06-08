@@ -21,6 +21,7 @@ from ...models import (
     task_has_failure_status,
     task_has_status,
     task_is_done_verified,
+    task_status_reason_code,
 )
 from ...reports import SubAgentBoardItem
 from ..task_target_tokens import task_actual_target_tokens
@@ -33,7 +34,7 @@ def build_risk_flags(
 ) -> list[str]:
     flags: list[str] = []
     if task_has_failure_status(task):
-        flags.append(task.status.lower())
+        flags.append(task_status_reason_code(task.status))
     if task_has_status(task, TaskStatus.DONE) and not task.evidence:
         flags.append("done_without_evidence")
     if task_has_status(task, TaskStatus.DONE) and not task_is_done_verified(task):

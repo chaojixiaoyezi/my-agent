@@ -279,4 +279,7 @@ def test_plain_language_background_scenario_can_rework_blocked_collaboration(tmp
 
     assert len(reports) == 1
     assert reports[0].response == "我已经看到阻塞点，会换来源或补派代理继续推进。"
-    assert agent.collaboration_store.load_case(case.case_id).status == "needs_replan"
+    updated_case = agent.collaboration_store.load_case(case.case_id)
+    assert updated_case.status == "open"
+    assert updated_case.metadata["raw_case_status"] == "needs_replan"
+    assert updated_case.metadata["case_status_protocol_error"] == "COLLABORATION_CASE_STATUS_INVALID"

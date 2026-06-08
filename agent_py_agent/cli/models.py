@@ -64,6 +64,7 @@ class GatewayStartOptions:
 
     config: Path
     force_lock: bool
+    workspace_root: str = ""
 
 
 @dataclass(frozen=True)

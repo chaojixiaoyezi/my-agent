@@ -14,7 +14,8 @@
 - 用户明确了产物路径时写 `output_files`；没有明确路径时不要强造。
 - 子代理没有声明产物路径时，运行时会给它分配 task-local `work/child_outputs/...`
   默认产物路径，并在返回值里暴露 `child_output_read_order`。父代理汇总时优先读
-  `child_output_read_order` / `primary_artifact_refs` / `expected_outputs`，不要直接翻
+  `child_output_read_order` / `primary_artifact_refs` / `expected_outputs`，同时可参考
+  `primary_artifact_stats` 里的大小、行数和字符数判断是否需要补读或重派；不要直接翻
   `work/agents/<run_id>/` 里的内部状态文件。
 - 替换旧子代理时使用 `replacement_for_run_ids`，让系统记录结构化接管关系。
 - 模型侧角色索引只展示角色 id、中文说明和能力标签；模板文件路径只留给调试接口，不进入 prompt。
@@ -31,6 +32,11 @@
 子代理状态、进度、channel 状态和内部 refs 都以这个工具为模型可见状态面。普通文件工具和
 shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`final_report.md`、
 `summary.md`、`compactions/` 等内部文件；这些文件是审计/恢复资料，不是父代理的正常汇总入口。
+如果父代理误读这些内部路径，文件工具会返回 `WRONG_STATUS_SURFACE` / `internal_agent_status_ref`
+类结果，并附带 `child_result_index_row`。父代理应改读其中的 `read_order`、
+`primary_artifact_refs` 或声明产物，不要继续猜内部目录。
+运行中或规划中的子代理不会把内部 `final_report.md` 放入父代理的 `read_order`；只有完成后
+缺少更好的结构化产物时，它才会作为兜底审计 refs 出现在读取顺序里。
 如果只是等一会再看进度，用 `wait`，不要用 shell 的 `sleep`。
 
 ## inspect_collaboration
@@ -48,6 +54,8 @@ shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`fi
 关键原则：
 
 - 查看状态只用 `inspect_agent_tree`，不要为了看一眼触发调度。
+- 后台自动 dispatch 必须使用创建这些 run_id 的同一个 `workspace_root`；cwd 只服务
+  Python 模块加载，不能决定子代理树归属。
 - `dry_run` 是唯一预览开关，`true` 只预览，`false` 真实推进。
 - `run_ids` 用于精确指定要推进的子代理。
 - `max_runners` 控制本轮最多推进几个，不知道时省略。

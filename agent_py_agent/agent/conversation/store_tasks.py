@@ -17,7 +17,14 @@ class ConversationTaskStore(ConversationMessageStore):
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
         task_id = str(request.get("task_id") or "")
-        link = ThreadTaskLink(thread_id=thread.thread_id, task_id=task_id, goal=str(request.get("goal") or ""), status=str(request.get("status") or "active"), created_at=current_time(request.get("now")))
+        link = ThreadTaskLink(
+            thread_id=thread.thread_id,
+            task_id=task_id,
+            goal=str(request.get("goal") or ""),
+            status=str(request.get("status") or "active"),
+            created_at=current_time(request.get("now")),
+            task_path=str(request.get("task_path") or ""),
+        )
         write_json_file_atomic(self._task_path(task_id), link.to_dict())
         self._write_thread(_thread_with_task(thread, task_id, link.created_at))
         return link

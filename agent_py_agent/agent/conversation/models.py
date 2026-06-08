@@ -72,6 +72,7 @@ class ThreadTaskLink:
     goal: str
     status: str = "active"
     created_at: float = 0.0
+    task_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -84,6 +85,7 @@ class ThreadTaskLink:
             goal=str(data.get("goal") or ""),
             status=str(data.get("status") or "active"),
             created_at=float(data.get("created_at") or 0.0),
+            task_path=str(data.get("task_path") or ""),
         )
 
 

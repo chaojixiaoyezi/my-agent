@@ -41,10 +41,7 @@ def qa_role_identity_roles(*, role: str) -> set[str]:
 
 
 def qa_role_task_is_leaf(task) -> bool:
-    role = str(getattr(task, "role", "") or "").lower()
-    if bool(role_template_snapshot_for_task(task).get("depends_on_outputs")):
-        return True
-    return role == "leaf_worker"
+    return bool(role_template_snapshot_for_task(task).get("depends_on_outputs"))
 
 
 def _role_template_identity(value: object) -> str:

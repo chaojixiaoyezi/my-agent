@@ -89,8 +89,10 @@ def test_run_state_snapshot_does_not_promote_previous_planned_status_alias():
 
     snapshot = run_state_snapshot_from_task(task)
 
-    assert snapshot["status"] == "PLANNED"
-    assert snapshot["lifecycle_phase"] == "PLANNED"
+    assert snapshot["status"] == "BLOCKED"
+    assert snapshot["raw_status"] == "PLANNED"
+    assert snapshot["status_protocol_error"] == "STATE_STATUS_INVALID"
+    assert snapshot["lifecycle_phase"] == "BLOCKED"
     assert snapshot["can_dispatch"] is False
     assert snapshot["recovery_decision"]["action"] == "manual_review"
 
@@ -108,8 +110,10 @@ def test_run_state_snapshot_does_not_promote_completed_alias_to_done():
 
     snapshot = run_state_snapshot_from_task(task)
 
-    assert snapshot["status"] == "COMPLETED"
-    assert snapshot["lifecycle_phase"] == "COMPLETED"
+    assert snapshot["status"] == "BLOCKED"
+    assert snapshot["raw_status"] == "COMPLETED"
+    assert snapshot["status_protocol_error"] == "STATE_STATUS_INVALID"
+    assert snapshot["lifecycle_phase"] == "BLOCKED"
     assert snapshot["can_closeout"] is False
     assert snapshot["recovery_decision"]["action"] == "manual_review"
 
@@ -127,9 +131,15 @@ def test_run_state_snapshot_does_not_promote_lowercase_protocol_text():
 
     snapshot = run_state_snapshot_from_task(task)
 
-    assert snapshot["status"] == "done"
-    assert snapshot["verification_status"] == "verified"
-    assert snapshot["channel_status"] == "ok"
+    assert snapshot["status"] == "BLOCKED"
+    assert snapshot["verification_status"] == "UNVERIFIED"
+    assert snapshot["channel_status"] == "BROKEN"
+    assert snapshot["raw_status"] == "done"
+    assert snapshot["raw_verification_status"] == "verified"
+    assert snapshot["raw_channel_status"] == "ok"
+    assert snapshot["status_protocol_error"] == "STATE_STATUS_INVALID"
+    assert snapshot["verification_protocol_error"] == "STATE_VERIFICATION_STATUS_INVALID"
+    assert snapshot["channel_protocol_error"] == "STATE_CHANNEL_STATUS_INVALID"
     assert snapshot["can_closeout"] is False
     assert snapshot["recovery_decision"]["action"] == "manual_review"
 

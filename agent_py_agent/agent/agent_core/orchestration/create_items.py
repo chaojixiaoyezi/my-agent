@@ -99,13 +99,13 @@ def _item_protocol_error(raw_items: object) -> str:
     for index, item in enumerate(items, start=1):
         if not isinstance(item, dict):
             continue
-        bad_key = _old_replacement_key(item)
+        bad_key = _unsupported_replacement_key(item)
         if bad_key:
             return f"items[{index}] 接管关系只接受 replacement_for_run_ids；请移除 {bad_key}。"
     return ""
 
 
-def _old_replacement_key(params: dict[str, object]) -> str:
+def _unsupported_replacement_key(params: dict[str, object]) -> str:
     for key in ("replaces_run_ids", "supersedes_run_ids"):
         if key in params:
             return key

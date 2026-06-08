@@ -17,7 +17,7 @@ from .content_extractors import (
     meaningful_char_count,
 )
 
-_PLACEHOLDERS = ("待补充", "暂无", "示例", "TODO", "TBD", "N/A", "NA", "__FILL", "UNKNOWN")
+_DEFAULT_PLACEHOLDER_TOKENS = ("__FILL", "__TODO__", "PLACEHOLDER", "TODO", "TBD", "TO_BE_FILLED")
 _FINDING_MESSAGES = {
     "DOCUMENT_SECTION_TOO_THIN": "Document section content is thinner than the declared contract.",
     "DOCUMENT_PLACEHOLDER_RATIO_EXCEEDED": "Document contains too much placeholder content.",
@@ -77,9 +77,9 @@ def _required_section_findings(path: Path, facts: DocumentContentFacts, contract
     required = sequence_strings(contract.get("required_sections"))
     min_chars = _int_value(contract.get("min_chars_per_section"))
     findings: list[GateFinding] = []
-    sections = {_normalized_heading(section.heading): section for section in facts.sections}
+    sections = {_normalized_markdown_heading(section.heading): section for section in facts.sections}
     for name in required:
-        section = sections.get(_normalized_heading(name))
+        section = sections.get(_normalized_markdown_heading(name))
         if section is None:
             findings.append(
                 _finding(
@@ -117,7 +117,7 @@ def _placeholder_findings(path: Path, facts: DocumentContentFacts, contract: dic
     max_ratio = _float_value(contract.get("max_placeholder_ratio"), default=0.0)
     if max_ratio <= 0:
         return []
-    ratio, hits = _placeholder_ratio(facts.text)
+    ratio, hits = _placeholder_ratio(facts.text, _placeholder_tokens(contract))
     if ratio <= max_ratio:
         return []
     return [
@@ -221,15 +221,46 @@ def _finding(
     )
 
 
-def _placeholder_ratio(text: str) -> tuple[float, list[str]]:
+def _placeholder_tokens(contract: dict[str, Any]) -> list[str]:
+    tokens = [*_DEFAULT_PLACEHOLDER_TOKENS, *sequence_strings(contract.get("placeholder_tokens"))]
+    seen: set[str] = set()
+    unique: list[str] = []
+    for token in tokens:
+        normalized = token.strip()
+        key = normalized.casefold()
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        unique.append(normalized)
+    return unique
+
+
+def _placeholder_ratio(text: str, tokens: list[str]) -> tuple[float, list[str]]:
     total = max(meaningful_char_count(text), 1)
-    hits = [token for token in _PLACEHOLDERS for _ in re.finditer(re.escape(token), text, re.I)]
+    hits = [token for token in tokens for _ in re.finditer(re.escape(token), text, re.I)]
     chars = sum(len(item) for item in hits)
     return chars / total, hits
 
 
-def _normalized_heading(value: str) -> str:
-    return re.sub(r"\s+", "", value).lower()
+_LEADING_MARKDOWN_SECTION_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:[一二三四五六七八九十百千]+|[IVXLCDM]+)\s*[、.．:：)）\\-]\s*"
+    r"|(?:第\s*[一二三四五六七八九十百千0-9]+\s*[章节部篇]?)\s*[、.．:：)）\\-]?\s*"
+    r"|(?:\d+(?:\.\d+)*)\s*[、.．:：)）\\-]?\s*"
+    r")",
+    re.I,
+)
+
+
+def _normalized_markdown_heading(value: str) -> str:
+    text = str(value or "").strip()
+    previous = ""
+    while text and text != previous:
+        previous = text
+        text = _LEADING_MARKDOWN_SECTION_RE.sub("", text).strip()
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[、,，.．:：;；\\-—_（）()\\[\\]【】]+", "", text)
+    return text.casefold()
 
 
 def _int_value(value: object, *, default: int = 0) -> int:

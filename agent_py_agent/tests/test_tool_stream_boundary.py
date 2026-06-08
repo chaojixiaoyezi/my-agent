@@ -77,6 +77,10 @@ def test_long_write_abort_response_returns_parse_error_not_hidden_writer() -> No
     assert payload["content_field_present"] is True
     assert payload["streaming_content_chars"] == 5000
     assert payload["streaming_content_limit"] == 4000
+    assert payload["previous_write_committed"] is False
+    assert payload["write_recovery"]["strategy"] == "restart_same_file_with_append_chunks"
+    assert payload["write_recovery"]["first_tool_call"]["mode"] == "overwrite"
+    assert payload["write_recovery"]["next_tool_call"]["mode"] == "append"
     assert "raw" not in payload
 
 
@@ -114,6 +118,14 @@ def test_tool_boundary_stops_stream_inspection_after_complete_tool_call() -> Non
     boundary("\nTOOL_PROTOCOL_LINE\n" * 20)
 
     assert "".join(forwarded) == '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
+
+
+def test_tool_boundary_ignores_near_tool_protocol_lines_without_exact_marker() -> None:
+    boundary = ToolBoundaryChunkFilter(None)
+
+    boundary("\nTOOL_PROTOCOL_LINE\n" * 20)
+
+    assert boundary.complete_tool_text() == ""
 
 
 def test_tool_boundary_collects_complete_machine_blocks_without_abort() -> None:

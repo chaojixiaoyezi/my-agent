@@ -49,6 +49,47 @@ def test_background_result_without_explicit_ok_is_failed():
     assert agent._background_subagent_dispatches["launch-1"]["status"] == "failed"
 
 
+def test_background_dispatch_worker_uses_captured_backend_override():
+    """in-process auto-start 要使用创建时捕获的 backend，不能吃到后续全局 backend 改动。"""
+    import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
+
+    captured_backend = object()
+    seen: dict[str, object] = {}
+    task = SimpleNamespace(id="child-1", attributes={})
+
+    class Manager:
+        def load(self, run_id):
+            assert run_id == "child-1"
+            return task
+
+        def save(self, next_task):
+            seen["last_background_status"] = next_task.attributes["background_start"]["status"]
+
+    class Agent:
+        subagents = Manager()
+
+        def dispatch_subagents(self, *_args, **_kwargs):
+            seen["backend_override"] = getattr(self, "_subagent_worker_backend_override", None)
+            return SimpleNamespace(summary="ok", records=[])
+
+    agent = Agent()
+    request = background_dispatch._BackgroundDispatchRequest(
+        agent=agent,
+        run_ids=["child-1"],
+        launch_id="launch-1",
+        router=object(),
+        cfg=object(),
+        params=object(),
+        backend_override=captured_backend,
+    )
+
+    background_dispatch._background_dispatch_worker(request)
+
+    assert seen["backend_override"] is captured_backend
+    assert seen["last_background_status"] == "finished"
+    assert not hasattr(agent, "_subagent_worker_backend_override")
+
+
 def test_start_background_dispatch_reports_mark_errors(monkeypatch):
     """后台启动状态写不进子代理账本时，父代理要能看到结构化错误。"""
     import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch

@@ -21,7 +21,7 @@ class MemorySettings:
     memory_resume_auto_context_enabled: bool = False
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
-    memory_compact_auto_trigger_percent: int = 50
+    memory_compact_auto_trigger_percent: int = 70
 
 
 @dataclass(frozen=True)

@@ -11,6 +11,7 @@ from ..models import (
     ChannelProbeCheck,
     ChannelProbeReport,
     ChannelProbeResult,
+    FailureType,
     SubAgentChannelProbeOptions,
     SubAgentTask,
 )
@@ -157,7 +158,7 @@ class SubAgentChannelProbeService:
         task.last_probe_at = now
         task.updated_at = now
         if task.channel_status == "BROKEN":
-            task.failure_type = "channel"
+            task.failure_type = FailureType.CHANNEL.value
         self.manager.save(task)
 
     def write_channel_probe_files(

@@ -23,6 +23,9 @@
   先出现时丢最后一段流式输出，也避免 processing 被历史 chunk 污染。
 - `submit_gateway_ask()` 统一使用 gateway UUID 请求 ID 生成器，不再用毫秒时间戳拼 `gw-*`。
   多个 chat/TUI/gateway client 同一毫秒提交时，请求文件不能互相覆盖。
+- 普通 CLI `gateway ask` 不再提交孤立 request：默认带 `gateway-cli/default` conversation；
+  HTTP `/ask` 也会从结构化会话字段生成 conversation。worker 执行 follow-up 时可直接注入
+  active task root/output/work，避免续接请求新建空任务目录后反复找不到上一轮产物。
 
 ## 2026-06-06 入口收敛
 

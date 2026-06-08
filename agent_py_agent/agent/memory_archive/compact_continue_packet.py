@@ -354,11 +354,20 @@ def _read_coverage_payload(value: Any) -> dict[str, Any]:
         for item in raw_sources
         if (row := _read_coverage_source_payload(item))
     ]
+    raw_incomplete_sources = coverage.get("incomplete_sources") if isinstance(coverage.get("incomplete_sources"), list) else []
+    incomplete_sources = [
+        row
+        for item in raw_incomplete_sources
+        if (row := _read_coverage_source_payload(item))
+    ] or [row for row in sources if row.get("complete") is not True]
     result = {
         "schema_version": coverage.get("schema_version", 1),
         "source_count": _positive_int(coverage.get("source_count")),
         "omitted_source_count": _positive_int(coverage.get("omitted_source_count")),
         "sources": sources[:24],
+        "incomplete_source_count": _positive_int(coverage.get("incomplete_source_count")) or len(incomplete_sources),
+        "omitted_incomplete_source_count": _positive_int(coverage.get("omitted_incomplete_source_count")),
+        "incomplete_sources": incomplete_sources[:24],
         "primary": {
             "kind": str(primary.get("kind") or "char_window"),
             "source_path": str(primary.get("source_path") or ""),

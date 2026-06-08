@@ -417,7 +417,9 @@ def test_update_collaboration_request_keeps_update_when_overview_fails(tmp_path,
     payload = json.loads(result.output)
 
     assert result.ok is True
-    assert payload["request"]["status"] == "working"
+    assert payload["request"]["status"] == "pending"
+    assert payload["request"]["metadata"]["raw_request_status"] == "working"
+    assert payload["request"]["metadata"]["request_status_protocol_error"] == "COLLABORATION_REQUEST_STATUS_INVALID"
     assert payload["overview"]["overview_load_error"]["context"] == "update_collaboration.case_status"
 
 
@@ -559,7 +561,9 @@ def test_case_lifecycle_requires_summary_or_decision_when_closing(tmp_path) -> N
     closed = store.record_case_status({'case_id': case.case_id, 'status': "closed", 'actor_agent_id': "agent-a", 'summary': "证据已收口，结论已同步。", 'decision_type': "closed_by_main_agent", 'now': 13.0})
     decisions = store.case_decisions(case.case_id)
 
-    assert updated.status == "triaged"
+    assert updated.status == "open"
+    assert updated.metadata["raw_case_status"] == "triaged"
+    assert updated.metadata["case_status_protocol_error"] == "COLLABORATION_CASE_STATUS_INVALID"
     assert closed.status == "closed"
     assert [item.summary for item in decisions] == [
         "已完成初步研判，等待更多证据。",
@@ -582,7 +586,9 @@ def test_collaboration_status_aliases_do_not_trigger_machine_semantics(tmp_path)
 
     resolved = store.record_case_status({'case_id': case.case_id, 'status': "resolved", 'actor_agent_id': "agent-a", 'summary': "", 'now': 12.0})
 
-    assert resolved.status == "resolved"
+    assert resolved.status == "open"
+    assert resolved.metadata["raw_case_status"] == "resolved"
+    assert resolved.metadata["case_status_protocol_error"] == "COLLABORATION_CASE_STATUS_INVALID"
     assert store.overview()["open_case_count"] == 1
     store.record_case_status({'case_id': case.case_id, 'status': "closed", 'actor_agent_id': "agent-a", 'summary': "明确关闭。", 'decision_type': "closed_by_main_agent", 'now': 13.0})
     assert store.overview()["closed_case_count"] == 1

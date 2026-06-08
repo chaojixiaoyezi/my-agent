@@ -23,6 +23,7 @@ from agent_py_agent.agent.agent_core.tool_model_generation import (
 )
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderContextWindowError, ProviderTimeoutError
+from agent_py_agent.agent.tooling.content_transport_policy import RECOVERY_WRITE_CHUNK_CHARS
 
 
 class _BlockingBackend:
@@ -50,6 +51,28 @@ class _StreamingLongWriteBackend:
             "A" * 128,
             "B" * 128,
             "C" * 128,
+        ]
+        text = ""
+        for part in parts:
+            self.chunks_emitted += 1
+            text += part
+            if on_chunk is not None:
+                on_chunk(part)
+        return ModelResponse(text=text, backend=self.name)
+
+
+class _StreamingRecoveryLongWriteBackend:
+    name = "streaming-recovery-long-write-test-backend"
+
+    def __init__(self) -> None:
+        self.chunks_emitted = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        parts = [
+            '[TOOL_CALL]\n'
+            '{"tool":"write_file","path":"reports/final.md","content":"',
+            "A" * (RECOVERY_WRITE_CHUNK_CHARS + 1),
+            "B" * 5000,
         ]
         text = ""
         for part in parts:
@@ -173,6 +196,19 @@ class _StreamingLiteralProtocolMarkerContentBackend:
         return ModelResponse(text=text, backend=self.name)
 
 
+class _NonStreamingUnclosedLongWriteBackend:
+    name = "non-streaming-unclosed-long-write-test-backend"
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        del prompt, on_chunk
+        text = (
+            '[TOOL_CALL]\n'
+            '{"tool":"write_file","path":"outputs/report.md","content":"'
+            + ("A" * 400)
+        )
+        return ModelResponse(text=text, backend=self.name)
+
+
 class _TimeoutAwareBackend:
     name = "timeout-aware-test-backend"
     model_name = "test-model"
@@ -259,6 +295,84 @@ def test_model_generate_aborts_streaming_write_file_content_over_inline_limit():
     assert "site/index.html" in response.text
 
 
+def test_model_generate_does_not_use_recovery_chunk_as_stream_abort_limit():
+    backend = _StreamingRecoveryLongWriteBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(request_timeout=10, tool_write_inline_max_chars=50_000),
+        _current_subagent_run_id="",
+    )
+    params = _tool_loop_params()
+    params.archive_tool_calls.append(
+        {
+            "tool": "__parse_error__",
+            "error_code": "TOOL_CALL_UNCLOSED",
+            "parameters": {
+                "tool": "__parse_error__",
+                "error_code": "TOOL_CALL_UNCLOSED",
+                "source_tool": "write_file",
+                "path": "reports/final.md",
+                "content_field_present": True,
+                "write_recovery": {"strategy": "restart_same_file_with_append_chunks"},
+            },
+        }
+    )
+
+    response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt="continue writing report",
+            tool_rounds=3,
+        )
+    )
+
+    assert backend.chunks_emitted == 3
+    assert '"tool": "__parse_error__"' not in response.text
+    assert "reports/final.md" in response.text
+    assert len(response.text) > RECOVERY_WRITE_CHUNK_CHARS
+
+
+def test_model_generate_uses_configured_stream_limit_during_long_write_recovery():
+    backend = _StreamingRecoveryLongWriteBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(request_timeout=10, tool_write_inline_max_chars=4_000),
+        _current_subagent_run_id="",
+    )
+    params = _tool_loop_params()
+    params.archive_tool_calls.append(
+        {
+            "tool": "__parse_error__",
+            "error_code": "TOOL_CALL_UNCLOSED",
+            "parameters": {
+                "tool": "__parse_error__",
+                "error_code": "TOOL_CALL_UNCLOSED",
+                "source_tool": "write_file",
+                "path": "reports/final.md",
+                "content_field_present": True,
+                "write_recovery": {"strategy": "restart_same_file_with_append_chunks"},
+            },
+        }
+    )
+
+    response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt="continue writing report",
+            tool_rounds=3,
+        )
+    )
+
+    payload = json.loads(response.text.split("\n", 2)[1])
+    assert 1 < backend.chunks_emitted < 4
+    assert payload["tool"] == "__parse_error__"
+    assert payload["error_code"] == "TOOL_INLINE_CONTENT_STREAM_ABORTED"
+    assert payload["path"] == "reports/final.md"
+    assert payload["streaming_content_limit"] == 4_000
+
+
 def test_model_generate_does_not_compact_from_plain_exception_text():
     backend = _PlainRuntimeContextTextBackend()
     agent = SimpleNamespace(
@@ -320,6 +434,33 @@ def test_model_generate_salvages_streaming_write_file_append_prefix():
     assert '"tool": "__parse_error__"' in response.text
     assert "homepage-v1" in response.text
     assert "inline content streaming exceeded" in response.text
+
+
+def test_model_generate_recovers_unclosed_long_write_after_full_response():
+    backend = _NonStreamingUnclosedLongWriteBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(request_timeout=0, tool_write_inline_max_chars=120),
+        _current_subagent_run_id="",
+    )
+
+    response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=_tool_loop_params(),
+            prompt="write long report",
+            tool_rounds=1,
+        )
+    )
+
+    payload = json.loads(response.text.split("\n", 2)[1])
+    assert payload["tool"] == "__parse_error__"
+    assert payload["error_code"] == "TOOL_INLINE_CONTENT_STREAM_ABORTED"
+    assert payload["source_tool"] == "write_file"
+    assert payload["path"] == "outputs/report.md"
+    assert payload["previous_write_committed"] is False
+    assert payload["write_recovery"]["first_tool_call"]["mode"] == "overwrite"
+    assert payload["write_recovery"]["next_tool_call"]["mode"] == "append"
 
 
 def test_model_generate_keeps_all_complete_streaming_tool_blocks():

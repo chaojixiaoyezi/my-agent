@@ -115,7 +115,7 @@ def _apply_rejected_patches(update: PatchReviewStatusUpdate) -> None:
 
 
 def _apply_rejected_patch_status(item: dict, *, reviewer: str, now: float, note: str) -> None:
-    if str(item.get("status", "")).lower() == "applied":
+    if str(item.get("status", "")) == "applied":
         return
     item["review_status"] = "NEEDS_ACTION"
     item["reviewed_by"] = reviewer

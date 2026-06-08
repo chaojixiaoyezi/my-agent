@@ -26,19 +26,25 @@ def _child_result_row(task: object) -> dict[str, object]:
     output_payload, output_error = _output_payload(task)
     primary_artifact_refs = _primary_artifact_refs(output_payload, artifacts, expected_outputs)
     final_report_ref = current_model_ref(_task_text(task, "agent_run_final_report_md") or _task_text(task, "output_json"))
+    status = _task_text(task, "status")
     row: dict[str, object] = {
         "run_id": _task_text(task, "id"),
         "parent_run_id": _task_text(task, "parent_id"),
         "root_run_id": _task_text(task, "root_id") or _task_text(task, "id"),
         "agent_name": _task_text(task, "agent_name"),
         "role": _task_text(task, "role"),
-        "status": _task_text(task, "status"),
+        "status": status,
         "work_scope_key": str(attrs.get("work_scope_key") or ""),
         "expected_outputs": expected_outputs,
         "primary_artifact_refs": primary_artifact_refs,
+        "primary_artifact_stats": _artifact_stats(primary_artifact_refs),
         "artifact_registry_refs": artifacts,
         "final_report_ref": final_report_ref,
-        "read_order": _read_order(primary_artifact_refs, expected_outputs, "", final_report_ref),
+        "read_order": _read_order(
+            primary_artifact_refs,
+            "",
+            final_report_ref if task_status_in(status, {TaskStatus.DONE.value}) else "",
+        ),
         "task_root": current_model_ref(_task_text(task, "task_workspace_dir")),
     }
     if output_error is not None:
@@ -60,22 +66,28 @@ def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
     final_report_ref = current_model_ref(workspace_refs.get("final_report"))
     summary_ref = current_model_ref(recovery_refs.get("summary"))
     checkpoint_ref = current_model_ref(recovery_refs.get("checkpoint"))
+    status = str(node.get("status") or "").strip()
     return {
         "run_id": str(node.get("run_id") or "").strip(),
         "parent_run_id": str(node.get("parent_run_id") or "").strip(),
         "root_run_id": str(node.get("root_run_id") or node.get("root_id") or "").strip(),
         "agent_name": str(node.get("agent_name") or "").strip(),
         "role": str(node.get("role") or "").strip(),
-        "status": str(node.get("status") or "").strip(),
+        "status": status,
         "verification_status": str(node.get("verification_status") or "").strip(),
         "work_scope_key": str(node.get("work_scope_key") or "").strip(),
         "expected_outputs": expected_outputs,
         "primary_artifact_refs": primary_refs,
+        "primary_artifact_stats": _artifact_stats(primary_refs),
         "artifact_registry_refs": _current_registry_refs(registry_refs),
         "final_report_ref": final_report_ref,
         "summary_ref": summary_ref,
         "checkpoint_ref": checkpoint_ref,
-        "read_order": _read_order(primary_refs, expected_outputs, summary_ref, final_report_ref),
+        "read_order": _read_order(
+            primary_refs,
+            summary_ref if task_status_in(status, {TaskStatus.DONE.value}) else "",
+            final_report_ref if task_status_in(status, {TaskStatus.DONE.value}) else "",
+        ),
         "task_root": current_model_ref(workspace_refs.get("task_root")),
         "agent_work_dir": current_model_ref(workspace_refs.get("agent_work_dir")),
         "progress": node.get("progress", 0.0),
@@ -120,11 +132,10 @@ def _node_expected_outputs(node: dict[str, object]) -> list[str]:
 
 def _read_order(
     primary_refs: list[str],
-    expected_outputs: list[str],
     summary_ref: str,
     final_report_ref: str,
 ) -> list[str]:
-    refs = [*primary_refs, *expected_outputs]
+    refs = [*primary_refs]
     if not refs and summary_ref:
         refs.append(summary_ref)
     if not refs and final_report_ref:
@@ -212,6 +223,26 @@ def _looks_like_existing_path(value: str) -> bool:
         return Path(text).expanduser().is_file()
     except OSError:
         return False
+
+
+def _artifact_stats(paths: list[str]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for raw in paths:
+        path = Path(raw).expanduser()
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        row: dict[str, object] = {"path": str(raw), "size_bytes": stat.st_size}
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            rows.append(row)
+            continue
+        row["line_count"] = len(text.splitlines())
+        row["char_count"] = len(text)
+        rows.append(row)
+    return rows
 
 
 def _dict_list(value: object) -> list[dict[str, object]]:

@@ -71,6 +71,29 @@ class TestGatewayHTTPHandler:
         assert request_id.startswith("req_")
         assert "_" in request_id
 
+    def test_build_ask_request_carries_conversation_context(self):
+        from agent_py_agent.agent.gateway_parts.http_handlers import (
+            _AskRequestContext,
+            _build_ask_request,
+        )
+
+        request = _build_ask_request(
+            _AskRequestContext(
+                body={"metadata": {}, "conversation_id": "room-1"},
+                goal="继续看后台任务",
+                request_id="req_1",
+                user_id="user-1",
+                channel="feishu",
+            )
+        )
+
+        assert request["conversation"] == {
+            "channel": "feishu",
+            "channel_conversation_id": "room-1",
+            "channel_user_id": "user-1",
+            "canonical_user_id": "user-1",
+        }
+
 
 class TestGatewayHTTPIntegration:
     """Integration tests for HTTP service with actual server."""

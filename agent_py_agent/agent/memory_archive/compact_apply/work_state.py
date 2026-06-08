@@ -388,6 +388,7 @@ def _read_coverage_payload(progress: list[dict[str, Any]]) -> dict[str, Any]:
     if not cursor:
         return {}
     sources = _source_read_coverage(read_items)
+    incomplete_sources = _incomplete_read_sources(sources)
     primary = _read_cursor_payload(cursor)
     return {
         "schema_version": 1,
@@ -395,6 +396,9 @@ def _read_coverage_payload(progress: list[dict[str, Any]]) -> dict[str, Any]:
         "sources": sources[:24],
         "source_count": len(sources),
         "omitted_source_count": max(0, len(sources) - 24),
+        "incomplete_sources": incomplete_sources[:24],
+        "incomplete_source_count": len(incomplete_sources),
+        "omitted_incomplete_source_count": max(0, len(incomplete_sources) - 24),
     }
 
 
@@ -445,8 +449,14 @@ def _source_read_coverage(read_items: list[dict[str, Any]]) -> list[dict[str, An
     return rows
 
 
+def _incomplete_read_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [source for source in sources if source and source.get("complete") is not True]
+
+
 def _read_coverage_next_action(coverage: dict[str, Any]) -> str:
-    primary = coverage.get("primary") if isinstance(coverage.get("primary"), dict) else {}
+    primary = _first_incomplete_source(coverage) or (
+        coverage.get("primary") if isinstance(coverage.get("primary"), dict) else {}
+    )
     if not primary:
         return ""
     source = str(primary.get("source_path") or "")
@@ -463,6 +473,22 @@ def _read_coverage_next_action(coverage: dict[str, Any]) -> str:
         "ranges": ranges,
     }
     return _read_cursor_next_action_from_cursor(cursor)
+
+
+def _first_incomplete_source(coverage: dict[str, Any]) -> dict[str, Any]:
+    return next((row for row in _coverage_source_rows(coverage) if _is_incomplete_source(row)), {})
+
+
+def _coverage_source_rows(coverage: dict[str, Any]) -> list[object]:
+    rows = coverage.get("incomplete_sources")
+    if isinstance(rows, list):
+        return rows
+    rows = coverage.get("sources")
+    return rows if isinstance(rows, list) else []
+
+
+def _is_incomplete_source(row: object) -> bool:
+    return isinstance(row, dict) and row.get("complete") is not True
 
 
 def _coverage_ranges(primary: dict[str, Any]) -> list[tuple[int, int, int]]:

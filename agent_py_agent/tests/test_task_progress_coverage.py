@@ -425,8 +425,18 @@ class TestTaskProgressContinuationAndAliases:
 
         payload = read_task_progress(tmp_path, "run-main")
 
-        assert payload["counts"] == {"total": 8, "other": 8}
+        assert payload["counts"] == {"total": 8, "pending": 8}
         assert [item["status"] for item in payload["items"]] == [
+            "pending",
+            "pending",
+            "pending",
+            "pending",
+            "pending",
+            "pending",
+            "pending",
+            "pending",
+        ]
+        assert [item["raw_status"] for item in payload["items"]] == [
             "completed",
             "read",
             "已读",
@@ -436,6 +446,7 @@ class TestTaskProgressContinuationAndAliases:
             "Done",
             "IN_PROGRESS",
         ]
+        assert {item["status_protocol_error"] for item in payload["items"]} == {"TASK_PROGRESS_STATUS_INVALID"}
 
     def test_task_progress_summary_carries_recent_done_facts(self, tmp_path):
         """compact 交接要带最近完成事实，而不是只带未完成项。"""
@@ -809,6 +820,38 @@ class TestTaskProgressQualityHints:
         assert payload["invalid_statuses"][0]["status"] == "已完成"
         assert payload["invalid_statuses"][1]["status"] == "DONE"
         assert "done" in payload["allowed_statuses"]
+
+    def test_task_progress_tool_rejects_coverage_status_aliases(self, tmp_path):
+        """coverage 里的机器状态也只接受当前 schema 值，不吃自然语言或别名。"""
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent._main_agent_run_id = "run-main"
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "action": "update",
+                "coverage": {
+                    "targets": [
+                        {
+                            "id": "paper-1",
+                            "status": "已完成",
+                            "checks": {"读取": "DONE", "翻译": "done"},
+                        }
+                    ]
+                },
+            }
+        )
+        payload = json.loads(result.output)
+
+        assert result.ok is False
+        assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+        invalid = payload["invalid_coverage_statuses"]
+        assert [item["status"] for item in invalid] == ["已完成", "DONE"]
+        assert invalid[0]["field"] == "coverage.targets[0].status"
+        assert invalid[1]["field"] == "coverage.targets[0].checks.读取"
 
     def test_update_soft_feedback_marks_failed_or_unseen_evidence_refs(self, tmp_path):
         """已写进进度的本地证据应能对上本轮工具事实，但只给软提醒。"""

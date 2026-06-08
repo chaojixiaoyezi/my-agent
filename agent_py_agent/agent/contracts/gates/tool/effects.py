@@ -149,10 +149,20 @@ def _effect_facts(value: ToolEffectFacts | Mapping[str, object]) -> ToolEffectFa
 
 
 def _explicit_payload_mode(payload: dict[str, object]) -> object:
-    for key in ("mode", "execution_mode"):
-        if str(payload.get(key) or "").strip():
-            return payload.get(key)
+    execution_mode = str(payload.get("execution_mode") or "").strip()
+    if execution_mode:
+        return payload.get("execution_mode")
+    mode = str(payload.get("mode") or "").strip()
+    if mode and _looks_like_execution_mode(mode):
+        return payload.get("mode")
     return ""
+
+
+def _looks_like_execution_mode(value: object) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return normalized_tool_mode(text, "mutating") in {"read_only", "dry_run", "real"}
 
 
 def _approved_action_matches(

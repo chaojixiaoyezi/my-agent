@@ -147,7 +147,7 @@ def test_subagent_schedule_envelope_unifies_create_and_child_schedule_payloads()
                     "parent_id": "parent-1",
                     "root_id": "root-1",
                     "depth": 2,
-                    "role": "leaf_worker",
+                    "role": "worker",
                     "agent_name": "小小傻妞-leaf",
                     "goal": "write file",
                 }

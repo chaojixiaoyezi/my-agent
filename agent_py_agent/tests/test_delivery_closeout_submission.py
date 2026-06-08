@@ -48,6 +48,29 @@ def test_uncontracted_write_record_requires_explicit_ok() -> None:
     assert _successful_write_record({"tool": "write_file", "path": "out.txt", "ok": True}) is True
 
 
+def test_required_artifacts_ignore_purpose_text_for_input_detection() -> None:
+    from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import _required_artifacts
+
+    contract = {
+        "artifacts": [
+            {
+                "artifact_id": "source_summary",
+                "kind": "md",
+                "purpose": "source-backed final reference report",
+                "preferred_path": "output/source_summary.md",
+            },
+            {
+                "artifact_id": "source_payload",
+                "artifact_role": "source",
+                "kind": "json",
+                "preferred_path": "work/source_payload.json",
+            },
+        ]
+    }
+
+    assert [item["artifact_id"] for item in _required_artifacts(contract)] == ["source_summary"]
+
+
 def test_uncontracted_prompt_path_tokens_ignore_urls_and_keep_explicit_paths() -> None:
     from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import (
         _absolute_path_tokens_in_text,
@@ -194,7 +217,7 @@ def test_acceptance_submit_syncs_task_workspace_closeout_state_and_manifest(tmp_
     output_dir.mkdir(parents=True)
     work_dir.mkdir(parents=True)
     artifact = output_dir / "report.md"
-    artifact.write_text("# done\n", encoding="utf-8")
+    artifact.write_text("# done\n\nArtifact body.\n", encoding="utf-8")
     (work_dir / "state.json").write_text(
         json.dumps(
             {
@@ -266,6 +289,299 @@ def test_acceptance_submit_syncs_task_workspace_closeout_state_and_manifest(tmp_
     assert (task_root / "data" / "artifacts" / "registry.jsonl").exists()
 
 
+def test_target_coverage_closeout_uses_primary_workspace_when_run_has_task_workspace(tmp_path: Path):
+    case = _task_workspace_source_coverage_case(tmp_path)
+    case.params.executed_tools.append("submit_for_acceptance")
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=_agent(case.repo_root),
+            params=case.params,
+            response=ModelResponse(text="[TOOL_CALL submit_for_acceptance]", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+
+    report = json.loads((case.task_root / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    assert report["target_coverage_status"]["missing_count"] == 0
+    assert report["target_coverage_status"]["should_block"] is False
+    assert response is not None
+    assert "交付验收通过" in response.text
+
+
+def test_uncontracted_closeout_blocks_when_coverage_evidence_not_projected(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    task_root, output_dir, work_dir = _make_task_workspace(tmp_path)
+    sources = [
+        _write_source_file(repo_root, "alpha/src/engine.py", "print('alpha')"),
+        _write_source_file(repo_root, "beta/src/runner.ts", "export const beta = 1"),
+        _write_source_file(repo_root, "gamma/src/main.rs", "fn main() {}"),
+        _write_source_file(repo_root, "delta/src/agent_loop.ts", "export const loop = 12345"),
+        _write_source_file(repo_root, "epsilon/src/planner.py", "class Planner: pass"),
+    ]
+    artifact = output_dir / "report.md"
+    artifact.write_text("# 总览\n只写了泛泛总结，没有列出源码文件。\n", encoding="utf-8")
+    write_record = _write_file_archive_record()
+    write_record["parameters"] = {"tool": "write_file", "path": str(artifact)}
+    write_record["artifact_ref"] = str(artifact)
+    read_records = [
+        _read_file_coverage_archive_record(source, offset=0, next_offset=len(source.read_text()), total=len(source.read_text()))
+        for source in sources
+    ]
+    params = replace(
+        _delivery_params(archive_tool_calls=[write_record, *read_records]),
+        task_attributes={"run_workspace": _workspace_attrs(task_root, output_dir, work_dir)},
+        delivery_contract={
+            "case_id": "coverage-projection",
+            "task_workspace": _workspace_attrs(task_root, output_dir, work_dir),
+            "artifacts": [{"artifact_id": "report", "path": str(artifact), "kind": "md"}],
+            "target_coverage_contract": {
+                "enforcement": "required",
+                "target_items": [{"target_id": str(source), "source_path": str(source)} for source in sources],
+            },
+        },
+    )
+
+    response, report, payload = _submit_acceptance(task_root, params)
+
+    assert response is None
+    assert report["target_coverage_status"]["missing_count"] == 0
+    assert report["target_coverage_projection_gate"]["allowed"] is False
+    assert "TARGET_COVERAGE_EVIDENCE_NOT_IN_ARTIFACT" in {
+        finding["code"] for finding in report["target_coverage_projection_gate"]["findings"]
+    }
+    assert "target_coverage_projection" in {
+        gate["gate"] for gate in payload["failed_gates"] if isinstance(gate, dict)
+    }
+
+
+def test_uncontracted_closeout_allows_when_coverage_evidence_is_projected(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    task_root, output_dir, work_dir = _make_task_workspace(tmp_path)
+    sources = [
+        _write_source_file(repo_root, "alpha/src/engine.py", "print('alpha')"),
+        _write_source_file(repo_root, "beta/src/runner.ts", "export const beta = 1"),
+        _write_source_file(repo_root, "gamma/src/main.rs", "fn main() {}"),
+        _write_source_file(repo_root, "delta/src/agent_loop.ts", "export const loop = 12345"),
+        _write_source_file(repo_root, "epsilon/src/planner.py", "class Planner: pass"),
+    ]
+    artifact = output_dir / "report.md"
+    artifact.write_text(
+        "# 源码报告\n"
+        "- engine.py\n"
+        "- runner.ts\n"
+        "- main.rs\n"
+        "- agent_loop.ts\n"
+        "- planner.py\n",
+        encoding="utf-8",
+    )
+    write_record = _write_file_archive_record()
+    write_record["parameters"] = {"tool": "write_file", "path": str(artifact)}
+    write_record["artifact_ref"] = str(artifact)
+    read_records = [
+        _read_file_coverage_archive_record(source, offset=0, next_offset=len(source.read_text()), total=len(source.read_text()))
+        for source in sources
+    ]
+    params = replace(
+        _delivery_params(archive_tool_calls=[write_record, *read_records]),
+        task_attributes={"run_workspace": _workspace_attrs(task_root, output_dir, work_dir)},
+        delivery_contract={
+            "case_id": "coverage-projection",
+            "task_workspace": _workspace_attrs(task_root, output_dir, work_dir),
+            "artifacts": [{"artifact_id": "report", "path": str(artifact), "kind": "md"}],
+            "target_coverage_contract": {
+                "enforcement": "required",
+                "target_items": [{"target_id": str(source), "source_path": str(source)} for source in sources],
+            },
+        },
+    )
+
+    response, report, _payload = _submit_acceptance(task_root, params)
+
+    assert response is not None
+    assert report["target_coverage_status"]["missing_count"] == 0
+    assert report["target_coverage_projection_gate"]["allowed"] is True
+    assert "交付验收通过" in response.text
+
+
+def test_closeout_blocks_code_identifier_claim_not_seen_in_read_source(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    task_root, output_dir, work_dir = _make_task_workspace(tmp_path)
+    source = _write_source_file(
+        repo_root,
+        "alpha/src/engine.py",
+        "class RealEngine:\n    def runTask(self):\n        return 'ok'\n",
+    )
+    artifact = output_dir / "report.md"
+    artifact.write_text(
+        "# 源码报告\n"
+        "- alpha-main: engine.py\n"
+        "- 已核对 `RealEngine` 和 `GhostManager`。\n",
+        encoding="utf-8",
+    )
+    write_record = _write_file_archive_record()
+    write_record["parameters"] = {"tool": "write_file", "path": str(artifact)}
+    write_record["artifact_ref"] = str(artifact)
+    params = replace(
+        _delivery_params(
+            archive_tool_calls=[
+                write_record,
+                _read_file_coverage_archive_record(
+                    source,
+                    offset=0,
+                    next_offset=len(source.read_text(encoding="utf-8")),
+                    total=len(source.read_text(encoding="utf-8")),
+                ),
+            ]
+        ),
+        task_attributes={"run_workspace": _workspace_attrs(task_root, output_dir, work_dir)},
+        delivery_contract={
+            "case_id": "source-fact-consistency",
+            "task_workspace": _workspace_attrs(task_root, output_dir, work_dir),
+            "artifacts": [{"artifact_id": "report", "path": str(artifact), "kind": "md"}],
+            "target_coverage_contract": {
+                "enforcement": "required",
+                "target_items": [
+                    {
+                        "target_id": "alpha-main",
+                        "label": "alpha-main",
+                        "source_ref": str(source),
+                        "coverage_kind": "full_source_read",
+                    }
+                ],
+            },
+        },
+    )
+
+    response, report, payload = _submit_acceptance(task_root, params)
+
+    assert response is None
+    gate = report["source_fact_consistency_gate"]
+    assert gate["allowed"] is False
+    assert gate["evidence"]["unsupported_identifiers"] == ["GhostManager"]
+    assert "SOURCE_CODE_IDENTIFIER_NOT_READ" in {finding["code"] for finding in gate["findings"]}
+    assert "source_fact_consistency" in {
+        gate["gate"] for gate in payload["failed_gates"] if isinstance(gate, dict)
+    }
+
+
+def test_closeout_allows_code_identifier_claim_seen_in_read_source(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    task_root, output_dir, work_dir = _make_task_workspace(tmp_path)
+    source = _write_source_file(
+        repo_root,
+        "alpha/src/engine.py",
+        "class RealEngine:\n    def runTask(self):\n        return 'ok'\n",
+    )
+    artifact = output_dir / "report.md"
+    artifact.write_text(
+        "# 源码报告\n"
+        "- alpha-main: engine.py\n"
+        "- 已核对 `RealEngine` 和 `runTask`。\n",
+        encoding="utf-8",
+    )
+    write_record = _write_file_archive_record()
+    write_record["parameters"] = {"tool": "write_file", "path": str(artifact)}
+    write_record["artifact_ref"] = str(artifact)
+    params = replace(
+        _delivery_params(
+            archive_tool_calls=[
+                write_record,
+                _read_file_coverage_archive_record(
+                    source,
+                    offset=0,
+                    next_offset=len(source.read_text(encoding="utf-8")),
+                    total=len(source.read_text(encoding="utf-8")),
+                ),
+            ]
+        ),
+        task_attributes={"run_workspace": _workspace_attrs(task_root, output_dir, work_dir)},
+        delivery_contract={
+            "case_id": "source-fact-consistency",
+            "task_workspace": _workspace_attrs(task_root, output_dir, work_dir),
+            "artifacts": [{"artifact_id": "report", "path": str(artifact), "kind": "md"}],
+            "target_coverage_contract": {
+                "enforcement": "required",
+                "target_items": [
+                    {
+                        "target_id": "alpha-main",
+                        "label": "alpha-main",
+                        "source_ref": str(source),
+                        "coverage_kind": "full_source_read",
+                    }
+                ],
+            },
+        },
+    )
+
+    response, report, _payload = _submit_acceptance(task_root, params)
+
+    assert response is not None
+    assert report["source_fact_consistency_gate"]["allowed"] is True
+    assert report["source_fact_consistency_gate"]["evidence"]["unsupported_count"] == 0
+    assert "交付验收通过" in response.text
+
+
+def test_uncontracted_closeout_blocks_when_required_target_label_not_projected(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    task_root, output_dir, work_dir = _make_task_workspace(tmp_path)
+    project_sources = {
+        "alpha-main": _write_source_file(repo_root, "alpha-main/src/engine.py", "print('alpha')"),
+        "beta-main": _write_source_file(repo_root, "beta-main/src/runner.ts", "export const beta = 1"),
+        "gamma-main": _write_source_file(repo_root, "gamma-main/src/main.rs", "fn main() {}"),
+        "delta-main": _write_source_file(repo_root, "delta-main/src/agent_loop.ts", "export const loop = 12345"),
+        "epsilon-main": _write_source_file(repo_root, "epsilon-main/src/planner.py", "class Planner: pass"),
+    }
+    artifact = output_dir / "report.md"
+    artifact.write_text(
+        "# 源码报告\n"
+        "- alpha-main: engine.py\n"
+        "- beta-main: runner.ts\n"
+        "- gamma-main: main.rs\n"
+        "- delta-main: agent_loop.ts\n"
+        "- planner.py\n",
+        encoding="utf-8",
+    )
+    write_record = _write_file_archive_record()
+    write_record["parameters"] = {"tool": "write_file", "path": str(artifact)}
+    write_record["artifact_ref"] = str(artifact)
+    read_records = [
+        _read_file_coverage_archive_record(source, offset=0, next_offset=len(source.read_text()), total=len(source.read_text()))
+        for source in project_sources.values()
+    ]
+    params = replace(
+        _delivery_params(archive_tool_calls=[write_record, *read_records]),
+        task_attributes={"run_workspace": _workspace_attrs(task_root, output_dir, work_dir)},
+        delivery_contract={
+            "case_id": "coverage-projection-labels",
+            "task_workspace": _workspace_attrs(task_root, output_dir, work_dir),
+            "artifacts": [{"artifact_id": "report", "path": str(artifact), "kind": "md"}],
+            "target_coverage_contract": {
+                "enforcement": "required",
+                "target_items": [
+                    {
+                        "target_id": name,
+                        "label": name,
+                        "source_ref": str(source.parent.parent),
+                    }
+                    for name, source in project_sources.items()
+                ],
+            },
+        },
+    )
+
+    response, report, payload = _submit_acceptance(task_root, params)
+
+    assert response is None
+    projection = report["target_coverage_projection_gate"]
+    assert projection["allowed"] is False
+    assert projection["evidence"]["required_missing_count"] == 1
+    assert projection["evidence"]["required_missing_items"][0]["tokens"] == ["epsilon-main"]
+    assert "target_coverage_projection" in {
+        gate["gate"] for gate in payload["failed_gates"] if isinstance(gate, dict)
+    }
+
+
 def test_acceptance_submit_uses_disk_write_file_index_for_artifact_provenance(tmp_path: Path):
     _write_valid_artifact(tmp_path)
     _write_tool_output_index(
@@ -290,6 +606,227 @@ def test_acceptance_submit_uses_disk_write_file_index_for_artifact_provenance(tm
     assert "交付验收通过" in response.text
     assert report["runtime_gate"]["allowed"] is True
     assert report["artifacts"][0]["provenance"]["proof_kind"] == "tool_output_index"
+
+
+def test_acceptance_submit_blocks_artifact_when_latest_write_is_partial_unclosed(tmp_path: Path):
+    _write_valid_artifact(tmp_path)
+    write_record = _write_file_archive_record()
+    write_record["call_id"] = "partial-write"
+    write_record["parameters"] = {
+        "tool": "write_file",
+        "path": "out.txt",
+        "__partial_unclosed_write": True,
+    }
+    params = _delivery_params(archive_tool_calls=[write_record])
+
+    response, report, payload = _submit_acceptance(tmp_path, params)
+
+    assert response is None
+    assert report["ok"] is False
+    assert report["artifacts"][0]["ok"] is False
+    findings = report["artifacts"][0]["acceptance_report"]["findings"]
+    assert "ARTIFACT_LAST_WRITE_PARTIAL_UNCLOSED" in {finding["code"] for finding in findings}
+    assert payload["failed_gates"][0]["gate"] == "delivery_closeout"
+
+
+def test_uncontracted_task_output_uses_latest_write_and_blocks_partial(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import (
+        _current_run_task_output_artifacts,
+    )
+
+    task_root, output_dir, work_dir = _make_task_workspace(tmp_path)
+    artifact = _write_task_report(output_dir)
+    first = _write_file_archive_record()
+    first["call_id"] = "first"
+    first["parameters"] = {"tool": "write_file", "path": str(artifact)}
+    partial = _write_file_archive_record()
+    partial["call_id"] = "partial"
+    partial["parameters"] = {
+        "tool": "write_file",
+        "path": str(artifact),
+        "__partial_unclosed_write": True,
+    }
+    params = replace(
+        _delivery_params(archive_tool_calls=[first, partial]),
+        task_attributes={"run_workspace": _workspace_attrs(task_root, output_dir, work_dir)},
+    )
+
+    artifacts = _current_run_task_output_artifacts(params, workspace_root=tmp_path)
+
+    assert len(artifacts) == 1
+    assert artifacts[0]["artifact_id"] == "partial"
+    assert artifacts[0]["ok"] is False
+    findings = artifacts[0]["acceptance_report"]["findings"]
+    assert "ARTIFACT_LAST_WRITE_PARTIAL_UNCLOSED" in {finding["code"] for finding in findings}
+
+
+def test_uncontracted_task_output_blocks_markdown_trailing_heading(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import (
+        _current_run_task_output_artifacts,
+    )
+
+    task_root, output_dir, work_dir = _make_task_workspace(tmp_path)
+    artifact = output_dir / "report.md"
+    artifact.write_text("# Report\n\nIntro.\n\n## Next Section", encoding="utf-8")
+    write_record = _write_file_archive_record()
+    write_record["call_id"] = "tail-heading"
+    write_record["parameters"] = {
+        "tool": "write_file",
+        "path": str(artifact),
+        "content": artifact.read_text(encoding="utf-8"),
+    }
+    params = replace(
+        _delivery_params(archive_tool_calls=[write_record]),
+        task_attributes={"run_workspace": _workspace_attrs(task_root, output_dir, work_dir)},
+    )
+
+    artifacts = _current_run_task_output_artifacts(params, workspace_root=tmp_path)
+
+    assert len(artifacts) == 1
+    assert artifacts[0]["ok"] is False
+    findings = artifacts[0]["acceptance_report"]["findings"]
+    assert "MARKDOWN_TRAILING_EMPTY_HEADING" in {finding["code"] for finding in findings}
+
+
+def test_uncontracted_task_output_blocks_short_overwrite_after_unclosed_write_recovery(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import (
+        _current_run_task_output_artifacts,
+    )
+
+    task_root, output_dir, work_dir = _make_task_workspace(tmp_path)
+    artifact = output_dir / "report.md"
+    artifact.write_text("# Report\n\nIntro.\n", encoding="utf-8")
+    parse_error = {
+        "tool": "__parse_error__",
+        "ok": False,
+        "error_code": "TOOL_CALL_UNCLOSED",
+        "parameters": {
+            "path": str(artifact),
+            "write_recovery": {
+                "path": str(artifact),
+                "max_chunk_chars": 800,
+                "strategy": "restart_same_file_with_append_chunks",
+            },
+        },
+    }
+    second_parse_error = {**parse_error, "call_id": "parse-2"}
+    write_record = _write_file_archive_record()
+    write_record["call_id"] = "short-overwrite"
+    write_record["parameters"] = {
+        "tool": "write_file",
+        "path": str(artifact),
+        "mode": "overwrite",
+        "content": artifact.read_text(encoding="utf-8"),
+    }
+    params = replace(
+        _delivery_params(archive_tool_calls=[parse_error, second_parse_error, write_record]),
+        task_attributes={"run_workspace": _workspace_attrs(task_root, output_dir, work_dir)},
+    )
+
+    artifacts = _current_run_task_output_artifacts(params, workspace_root=tmp_path)
+
+    assert len(artifacts) == 1
+    assert artifacts[0]["ok"] is False
+    findings = artifacts[0]["acceptance_report"]["findings"]
+    assert "ARTIFACT_UNCLOSED_WRITE_RECOVERY_INCOMPLETE" in {finding["code"] for finding in findings}
+
+
+def test_acceptance_submit_blocks_report_missing_materialized_required_sections(tmp_path: Path):
+    task_root, output_dir, work_dir = _make_task_workspace(tmp_path)
+    report_path = output_dir / "架构分析报告.md"
+    report_path.write_text(
+        "# all-agent 目录项目架构分析报告\n\n"
+        "## 一、概述\n\n"
+        "本报告覆盖多个项目，分析维度包括架构、模块、主要功能、实现方式、优点、缺点、适合学习的地方和对比。\n\n"
+        "## 二、源码覆盖清单\n\n"
+        "| 项目 | 文件 |\n| --- | --- |\n| ECC-main | README.md |\n",
+        encoding="utf-8",
+    )
+    write_record = _write_file_archive_record()
+    write_record["parameters"] = {"tool": "write_file", "path": str(report_path)}
+    write_record["artifact_ref"] = str(report_path)
+    params = replace(
+        _delivery_params(archive_tool_calls=[write_record]),
+        task_attributes={"run_workspace": _workspace_attrs(task_root, output_dir, work_dir)},
+        delivery_contract={
+            "case_id": "project-analysis-report",
+            "artifacts": [
+                {
+                    "artifact_id": "final_report",
+                    "kind": "md",
+                    "allowed_output_roots": ["output"],
+                    "validation_contract": {
+                        "required_sections": ["架构", "模块", "主要功能", "实现方式", "优点", "缺点", "适合学习的地方", "对比"],
+                    },
+                }
+            ],
+        },
+    )
+
+    response, closeout, payload = _submit_acceptance(task_root, params)
+
+    assert response is None
+    assert closeout["ok"] is False
+    findings = closeout["artifacts"][0]["acceptance_report"]["findings"]
+    assert "MARKDOWN_REQUIRED_SECTION_MISSING" in {finding["code"] for finding in findings}
+    assert "架构" in findings[0]["value"]
+    assert payload["failed_artifacts"][0]["path"] == str(report_path)
+
+
+def test_closeout_markdown_validation_checks_source_workspace_tree_refs(tmp_path: Path):
+    source_root = tmp_path / "all-agent"
+    existing = _write_source_file(source_root, "openclaude-main/src/QueryEngine.ts", "export class QueryEngine {}\n")
+    (existing.parent.parent / "README.md").write_text("# openclaude\n", encoding="utf-8")
+    task_root, output_dir, work_dir = _make_task_workspace(tmp_path)
+    report_path = output_dir / "架构分析报告.md"
+    report_path.write_text(
+        "# all-agent 架构报告\n\n"
+        "```\n"
+        "openclaude-main/\n"
+        "├── src/                  # source files\n"
+        "│   ├── QueryEngine.ts    # existing file\n"
+        "│   └── Agent.ts          # missing file\n"
+        "└── README.md             # existing file\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    write_record = _write_file_archive_record()
+    write_record["parameters"] = {"tool": "write_file", "path": str(report_path)}
+    write_record["artifact_ref"] = str(report_path)
+
+    from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import (
+        DeliveryContractValidationRequest,
+        _validate_contract_artifacts,
+    )
+
+    contract = {
+        "case_id": "source-workspace-tree-refs",
+        "task_workspace": _workspace_attrs(task_root, output_dir, work_dir),
+        "artifacts": [
+            {
+                "artifact_id": "final_report",
+                "kind": "md",
+                "path": str(report_path),
+                "allowed_output_roots": [str(output_dir)],
+            }
+        ],
+    }
+    closeout = _validate_contract_artifacts(
+        DeliveryContractValidationRequest(
+            contract=contract,
+            artifacts=contract["artifacts"],
+            workspace_root=task_root,
+            params=SimpleNamespace(request_id="req-1", run_id="run-1", task_id="task-1"),
+            archive_tool_calls=[write_record],
+            coverage_workspace_root=source_root,
+        )
+    )
+
+    assert closeout["ok"] is False
+    findings = closeout["artifacts"][0]["acceptance_report"]["findings"]
+    assert [finding["value"] for finding in findings if finding["code"] == "MARKDOWN_LOCAL_REF_MISSING"] == [
+        "openclaude-main/src/Agent.ts"
+    ]
 
 
 def test_closeout_archive_dedup_ignores_records_without_structured_identity():
@@ -507,6 +1044,31 @@ def test_acceptance_submit_uses_disk_tool_output_index_for_coverage_after_compac
     }
 
 
+def test_acceptance_submit_blocks_stale_artifact_after_required_source_coverage(tmp_path: Path):
+    _write_valid_artifact(tmp_path)
+    source = tmp_path / "data" / "source.txt"
+    source.parent.mkdir()
+    source.write_text("abcdef", encoding="utf-8")
+    write_record = _write_file_archive_record()
+    write_record["created_at"] = "2026-06-07T00:00:01+00:00"
+    read_record = _read_file_coverage_archive_record(source, offset=0, next_offset=6, total=6)
+    read_record["created_at"] = "2026-06-07T00:00:02+00:00"
+    params = replace(
+        _delivery_params(archive_tool_calls=[write_record, read_record]),
+        delivery_contract=_delivery_contract_with_required_source_coverage(source),
+    )
+
+    response, report, payload = _submit_acceptance(tmp_path, params)
+
+    assert response is None
+    freshness = report["target_coverage_freshness_status"]
+    assert freshness["should_block"] is True
+    assert freshness["latest_required_coverage_created_at"] == "2026-06-07T00:00:02+00:00"
+    assert freshness["stale_artifacts"][0]["path"].endswith("out.txt")
+    assert report["runtime_gate"]["allowed"] is False
+    assert "更新最终交付物" in payload["repair_guidance"]["message_zh"]
+
+
 def test_acceptance_submit_ignores_disk_tool_output_index_from_other_run(tmp_path: Path):
     _write_valid_artifact(tmp_path)
     source = tmp_path / "data" / "journal.txt"
@@ -549,7 +1111,7 @@ def test_acceptance_submit_ignores_disk_tool_output_index_from_other_run(tmp_pat
     assert report["runtime_gate"]["allowed"] is False
 
 
-def test_acceptance_submit_warns_when_task_progress_has_open_items(tmp_path: Path):
+def test_acceptance_submit_repairs_when_task_progress_has_open_items(tmp_path: Path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     _write_valid_artifact(tmp_path)
@@ -569,16 +1131,18 @@ def test_acceptance_submit_warns_when_task_progress_has_open_items(tmp_path: Pat
     params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
     response, report, payload = _submit_acceptance(tmp_path, params)
 
-    assert response is not None
-    assert report["ok"] is True
-    assert report["task_progress_closeout_gate"]["allowed"] is True
+    assert response is None
+    assert report["ok"] is False
+    assert report["task_progress_closeout_gate"]["allowed"] is False
+    assert report["task_progress_closeout_gate"]["status"] == "NEED_REPAIR"
     assert "TASK_PROGRESS_OPEN_ITEMS" in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }
-    assert payload.get("failed_gates", []) == []
+    assert payload["failed_gates"][0]["gate"] == "task_progress_closeout"
+    assert payload["repair_guidance"]["mode"] == "closeout_rework"
 
 
-def test_acceptance_submit_keeps_completed_progress_items_open(tmp_path: Path):
+def test_acceptance_submit_requires_canonical_done_status_for_completed_items(tmp_path: Path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     _write_valid_artifact(tmp_path)
@@ -597,9 +1161,11 @@ def test_acceptance_submit_keeps_completed_progress_items_open(tmp_path: Path):
     params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
     response, report, _payload = _submit_acceptance(tmp_path, params)
 
-    assert response is not None
-    assert report["task_progress_closeout_gate"]["allowed"] is True
-    assert report["task_progress_closeout_gate"]["evidence"]["counts"] == {"total": 2, "other": 2}
+    assert response is None
+    assert report["ok"] is False
+    assert report["task_progress_closeout_gate"]["allowed"] is False
+    assert report["task_progress_closeout_gate"]["status"] == "NEED_REPAIR"
+    assert report["task_progress_closeout_gate"]["evidence"]["counts"] == {"total": 2, "pending": 2}
     assert "TASK_PROGRESS_OPEN_ITEMS" in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }
@@ -1688,6 +2254,50 @@ def test_failed_closeout_does_not_intercept_read_tools_with_delivery_repair_gate
     assert not any("delivery-required-repair" in item for item in params.tool_context)
 
 
+def test_target_coverage_rework_guard_blocks_premature_final_write(tmp_path: Path):
+    source = tmp_path / "repo" / "project-a"
+    source.mkdir(parents=True)
+    _write_target_coverage_missing_closeout(tmp_path, source)
+    output = tmp_path / "out.txt"
+    params = _delivery_params(archive_tool_calls=[])
+    agent = _agent_with_calls(tmp_path, [{"tool": "write_file", "path": str(output), "content": "done"}])
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="CALL_WRITE", backend="test"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "continue"
+    assert decision.calls == []
+    assert any("target-coverage-rework-guard" in item for item in params.tool_context)
+
+
+def test_target_coverage_rework_guard_allows_missing_source_read(tmp_path: Path):
+    source = tmp_path / "repo" / "project-a"
+    source.mkdir(parents=True)
+    _write_target_coverage_missing_closeout(tmp_path, source)
+    read_path = source / "main.py"
+    params = _delivery_params(archive_tool_calls=[])
+    agent = _agent_with_calls(tmp_path, [{"tool": "read_file", "path": str(read_path)}])
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="CALL_READ", backend="test"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "run_tools"
+    assert decision.calls == [{"tool": "read_file", "path": str(read_path)}]
+    assert not any("target-coverage-rework-guard" in item for item in params.tool_context)
+
+
 def test_no_tool_final_answer_does_not_close_when_valid_without_submit(tmp_path: Path):
     _write_valid_artifact(tmp_path)
     params = _delivery_params(archive_tool_calls=[_write_file_archive_record()])
@@ -1805,6 +2415,33 @@ def _write_builder_ready_closeout(root: Path) -> None:
     )
 
 
+def _write_target_coverage_missing_closeout(root: Path, source: Path) -> None:
+    delivery_dir = root / ".agent_delivery"
+    delivery_dir.mkdir(parents=True, exist_ok=True)
+    (delivery_dir / "closeout.json").write_text(
+        json.dumps(
+            {
+                "ok": False,
+                "artifacts": [{"path": str(root / "out.txt"), "ok": True}],
+                "target_coverage_status": {
+                    "should_block": True,
+                    "missing_count": 1,
+                    "missing_items": [{"target_id": "project-a", "source_ref": str(source)}],
+                    "repair_hints": [
+                        {
+                            "target_id": "project-a",
+                            "source_ref": str(source),
+                            "recommended_tool_call": {"tool": "list_files", "path": str(source)},
+                        }
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
 def _last_tool_context_payload(params: ToolLoopExecuteParams) -> dict[str, object]:
     return json.loads(params.tool_context[-1].split("\n", 1)[1])
 
@@ -1886,6 +2523,76 @@ def _delivery_params(*, archive_tool_calls: list[dict[str, object]]) -> ToolLoop
             "artifacts": [{"artifact_id": "out", "path": "out.txt", "kind": "txt"}],
         },
     )
+
+
+def _task_workspace_source_coverage_case(root: Path):
+    repo_root = root / "repo"
+    source = _write_source_file(repo_root, "data/source.txt", "abcdef")
+    task_root, output_dir, work_dir = _make_task_workspace(root)
+    artifact = _write_task_report(output_dir)
+    params = replace(
+        _delivery_params(archive_tool_calls=_source_coverage_archive_calls(source, artifact)),
+        task_attributes={"run_workspace": _workspace_attrs(task_root, output_dir, work_dir)},
+        delivery_contract=_relative_source_coverage_contract(task_root, output_dir, work_dir, artifact),
+    )
+    return SimpleNamespace(repo_root=repo_root, task_root=task_root, params=params)
+
+
+def _write_source_file(root: Path, relative: str, content: str) -> Path:
+    path = root / relative
+    path.parent.mkdir(parents=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _make_task_workspace(root: Path) -> tuple[Path, Path, Path]:
+    task_root = root / "home" / "tasks" / "2026-06-07" / "source-review"
+    output_dir = task_root / "output"
+    work_dir = task_root / "work"
+    output_dir.mkdir(parents=True)
+    work_dir.mkdir(parents=True)
+    return task_root, output_dir, work_dir
+
+
+def _write_task_report(output_dir: Path) -> Path:
+    artifact = output_dir / "report.md"
+    artifact.write_text("# done\n\nArtifact body.\n", encoding="utf-8")
+    return artifact
+
+
+def _source_coverage_archive_calls(source: Path, artifact: Path) -> list[dict[str, object]]:
+    write_record = _write_file_archive_record()
+    write_record["parameters"] = {"tool": "write_file", "path": str(artifact)}
+    write_record["artifact_ref"] = str(artifact)
+    return [write_record, _read_file_coverage_archive_record(source, offset=0, next_offset=6, total=6)]
+
+
+def _workspace_attrs(task_root: Path, output_dir: Path, work_dir: Path) -> dict[str, str]:
+    return {
+        "task_root": str(task_root),
+        "output_dir": str(output_dir),
+        "work_dir": str(work_dir),
+    }
+
+
+def _relative_source_coverage_contract(task_root: Path, output_dir: Path, work_dir: Path, artifact: Path):
+    return {
+        "case_id": "task-workspace-relative-source-coverage",
+        "task_workspace": _workspace_attrs(task_root, output_dir, work_dir),
+        "artifacts": [{"artifact_id": "report", "path": str(artifact), "kind": "md"}],
+        "target_coverage_contract": {
+            "enforcement": "required",
+            "coverage_requirement": "full_source_read",
+            "target_items": [
+                {
+                    "target_id": "data/source.txt",
+                    "source_path": "data/source.txt",
+                    "coverage_kind": "full_source_read",
+                    "enforcement": "required",
+                }
+            ],
+        },
+    }
 
 
 def _message_delivery_params(

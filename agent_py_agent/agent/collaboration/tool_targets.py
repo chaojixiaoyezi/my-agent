@@ -13,6 +13,7 @@ from ..subagents.models import (
     SUBAGENT_DEAD_STATUSES,
     SUBAGENT_HANDLED_TERMINAL_STATUSES,
     task_status_in,
+    task_status_reason_code,
 )
 from .tool_values import dict_value, string_values
 
@@ -225,7 +226,7 @@ def _unavailable_reason(status: str, channel_status: str) -> str:
         return "unknown_target"
     if channel_status == "BROKEN":
         return "channel_broken"
-    return status.lower() if task_status_in(status, _UNAVAILABLE_TARGET_STATUSES) else ""
+    return task_status_reason_code(status) if task_status_in(status, _UNAVAILABLE_TARGET_STATUSES) else ""
 
 
 def _status_payload(row: dict[str, str]) -> dict[str, str]:

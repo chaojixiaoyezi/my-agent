@@ -123,6 +123,19 @@ def _extend_captured_refs(lines: list[str], value: Any) -> None:
         line = _coverage_line("full_read_coverage", coverage)
         if line:
             rows.append(line)
+    incomplete_source_coverage = (
+        refs.get("incomplete_source_coverage")
+        if isinstance(refs.get("incomplete_source_coverage"), list)
+        else []
+    )
+    rows.extend(
+        line
+        for item in incomplete_source_coverage[:12]
+        if isinstance(item, dict) and (line := _coverage_line("incomplete_source_coverage", item))
+    )
+    omitted_incomplete = refs.get("omitted_incomplete_source_coverage_count")
+    if isinstance(omitted_incomplete, int) and omitted_incomplete > 0:
+        rows.append(f"incomplete_source_coverage_omitted: {omitted_incomplete}")
     source_coverage = refs.get("source_coverage") if isinstance(refs.get("source_coverage"), list) else []
     rows.extend(
         line

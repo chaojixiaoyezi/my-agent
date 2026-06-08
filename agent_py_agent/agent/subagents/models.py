@@ -70,8 +70,64 @@ class VerificationStatus(str, Enum):
     FAILED = "FAILED"
 
 
+class FailureType(str, Enum):
+    """Current structured runner failure types used by subagent orchestration."""
+
+    API_ERROR = "api_error"
+    BACKGROUND_DISPATCH_STARTUP = "background_dispatch_startup"
+    CANCELLED = "cancelled"
+    CAPABILITY_REQUEST = "capability_request"
+    CHANNEL = "channel"
+    CHANNEL_BROKEN = "channel_broken"
+    CHANNEL_ERROR = "channel_error"
+    MISSING_CAPABILITY = "missing_capability"
+    MISSING_EVIDENCE = "missing_evidence"
+    MODEL_ERROR = "model_error"
+    NO_PROGRESS_FUSE = "no_progress_fuse"
+    PERMISSION_BLOCKED = "permission_blocked"
+    PROVIDER_TIMEOUT = "provider_timeout"
+    RUNNER_CHANNEL_FAILED = "runner_channel_failed"
+    RUNNER_ERROR = "runner_error"
+    RUNNER_TIMEOUT = "runner_timeout"
+    RUNNER_WORKER_ERROR = "runner_worker_error"
+    STRUCTURED_OUTPUT_PARSE_ERROR = "structured_output_parse_error"
+    STATUS_BLOCKED = "status_blocked"
+    STATUS_FAILED = "status_failed"
+    TAKEOVER_CHAIN_EXHAUSTED = "takeover_chain_exhausted"
+    TOOL_ERROR = "tool_error"
+    TOOL_FAILURE = "tool_failure"
+    TOOL_OUTPUT_CONTEXT_OVERFLOW = "tool_output_context_overflow"
+    TOOL_RESULT_MISSING = "tool_result_missing"
+    TRANSIENT_ERROR = "transient_error"
+    VERIFICATION_FAILED = "verification_failed"
+    WRITE_PERMISSION_BLOCKED = "write_permission_blocked"
+
+
 SUBAGENT_TASK_STATUSES = frozenset(status.value for status in TaskStatus)
 SUBAGENT_VERIFICATION_STATUSES = frozenset(status.value for status in VerificationStatus)
+SUBAGENT_FAILURE_TYPES = frozenset(item.value for item in FailureType)
+RETRYABLE_RUNNER_FAILURE_TYPES = frozenset({
+    FailureType.RUNNER_ERROR.value,
+    FailureType.STRUCTURED_OUTPUT_PARSE_ERROR.value,
+    FailureType.TOOL_RESULT_MISSING.value,
+    FailureType.MODEL_ERROR.value,
+    FailureType.API_ERROR.value,
+    FailureType.TRANSIENT_ERROR.value,
+    FailureType.PROVIDER_TIMEOUT.value,
+    FailureType.RUNNER_TIMEOUT.value,
+})
+CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES = frozenset({
+    FailureType.CAPABILITY_REQUEST.value,
+    FailureType.PERMISSION_BLOCKED.value,
+    FailureType.MISSING_CAPABILITY.value,
+    FailureType.WRITE_PERMISSION_BLOCKED.value,
+})
+SUBAGENT_DEAD_FAILURE_TYPES = frozenset({
+    FailureType.RUNNER_TIMEOUT.value,
+    FailureType.CHANNEL_ERROR.value,
+    FailureType.RUNNER_CHANNEL_FAILED.value,
+    FailureType.CHANNEL_BROKEN.value,
+})
 DISPATCH_INELIGIBLE_STATUSES = frozenset({
     TaskStatus.PAUSED.value,
     TaskStatus.ABANDONED.value,
@@ -154,6 +210,60 @@ def normalize_verification_status(value: object) -> str:
     if text in SUBAGENT_VERIFICATION_STATUSES:
         return text
     raise ValueError("subagent_verification_status_invalid")
+
+
+def normalize_failure_type(value: object) -> str:
+    """Return the lowercase raw failure type; callers decide whether it is known."""
+    return str(value or "").strip().lower()
+
+
+def known_failure_type(value: object) -> str:
+    """Return a current structured failure type, or empty for unknown raw text."""
+    text = normalize_failure_type(value)
+    return text if text in SUBAGENT_FAILURE_TYPES else ""
+
+
+_TASK_STATUS_FAILURE_TYPES = {
+    TaskStatus.BLOCKED.value: FailureType.STATUS_BLOCKED.value,
+    TaskStatus.FAILED.value: FailureType.STATUS_FAILED.value,
+    TaskStatus.TIMEOUT.value: FailureType.RUNNER_TIMEOUT.value,
+    TaskStatus.CHANNEL_ERROR.value: FailureType.CHANNEL_ERROR.value,
+    TaskStatus.CANCELLED.value: FailureType.CANCELLED.value,
+}
+
+
+_TASK_STATUS_REASON_CODES = {
+    TaskStatus.PLANNING.value: "planning",
+    TaskStatus.PENDING.value: "pending",
+    TaskStatus.RUNNING.value: "running",
+    TaskStatus.BLOCKED.value: "blocked",
+    TaskStatus.PAUSED.value: "paused",
+    TaskStatus.ABANDONED.value: "abandoned",
+    TaskStatus.CANCELLED.value: "cancelled",
+    TaskStatus.TAKEN_OVER.value: "taken_over",
+    TaskStatus.DONE.value: "done",
+    TaskStatus.FAILED.value: "failed",
+    TaskStatus.TIMEOUT.value: "timeout",
+    TaskStatus.CHANNEL_ERROR.value: "channel_error",
+}
+
+
+def failure_type_from_task_status(value: object) -> str:
+    """Map a current task status to an explicit failure type without guessing."""
+    try:
+        status = normalize_task_status(value)
+    except ValueError:
+        return ""
+    return _TASK_STATUS_FAILURE_TYPES.get(status, "")
+
+
+def task_status_reason_code(value: object) -> str:
+    """Return a stable reason code for a current task status."""
+    try:
+        status = normalize_task_status(value)
+    except ValueError:
+        return ""
+    return _TASK_STATUS_REASON_CODES.get(status, "")
 
 
 def task_status_in(value: object, statuses: frozenset[str] | set[str]) -> bool:

@@ -39,6 +39,45 @@ def test_write_file_overwrites_atomically(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "new"
 
 
+def test_write_file_appends_atomically(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "report.md"
+    target.write_text("# Report\n", encoding="utf-8")
+    tool = WriteFileTool(workspace)
+
+    result = tool.execute({"path": "report.md", "mode": "append", "content": "\n## Section\nbody\n"})
+
+    assert result.ok
+    assert "已追加文件" in result.output
+    assert target.read_text(encoding="utf-8") == "# Report\n\n## Section\nbody\n"
+
+
+def test_write_file_rejects_unknown_mode(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = WriteFileTool(workspace)
+
+    result = tool.execute({"path": "report.md", "mode": "continue", "content": "body"})
+
+    assert not result.ok
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert "overwrite 或 append" in result.output
+
+
+def test_write_file_rejects_write_mode_with_repair_hint(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = WriteFileTool(workspace)
+
+    result = tool.execute({"path": "report.md", "mode": "write", "content": "body"})
+
+    assert not result.ok
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert "新建或覆盖文件时省略 mode" in result.output
+    assert "mode=\"overwrite\"" in result.output
+
+
 def test_write_file_writes_binary_base64(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

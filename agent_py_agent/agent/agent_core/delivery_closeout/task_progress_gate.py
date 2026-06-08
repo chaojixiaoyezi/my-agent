@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,6 @@ from ...task_progress import (
 
 
 def evaluate_task_progress_closeout_gate(closeout: object, report: dict[str, Any] | None = None) -> GateDecision:
-    del report
     root = _progress_root(closeout)
     run_id = _run_id(closeout)
     if not root or not run_id:
@@ -28,6 +28,9 @@ def evaluate_task_progress_closeout_gate(closeout: object, report: dict[str, Any
     open_items = _open_items(progress)
     if open_items:
         return _open_progress_decision(open_items, run_id, path, summary)
+    evidence_decision = _artifact_evidence_projection_decision(report or {}, progress, run_id, path, summary)
+    if evidence_decision is not None:
+        return evidence_decision
     return _closed_progress_decision(run_id, path, summary, progress)
 
 
@@ -99,12 +102,10 @@ def _open_progress_decision(
             "next_action": next_action,
         },
     )
-    return GateDecision(
+    return GateDecision.repair(
         "task_progress_closeout",
-        "ALLOW",
-        True,
         (finding,),
-        recommended_action=RecoveryAction.REPAIR.value,
+        recommended_action=RecoveryAction.CONTINUE.value,
         evidence={
             "checked": True,
             "run_id": run_id,
@@ -117,6 +118,62 @@ def _open_progress_decision(
                 "continue_open_task_progress_items",
                 "read_or_finish_remaining_sources",
                 "submit_for_acceptance_after_open_items_are_done_or_skipped",
+            ],
+        },
+    )
+
+
+def _artifact_evidence_projection_decision(
+    report: dict[str, Any],
+    progress: dict[str, Any],
+    run_id: str,
+    path: Path,
+    summary: dict[str, Any],
+) -> GateDecision | None:
+    item_tokens = _done_item_evidence_tokens(progress)
+    if len(_unique_projected_tokens(item_tokens)) < 3:
+        return None
+    artifact_text = _artifact_text(report)
+    if not artifact_text.strip():
+        return None
+    missing = [
+        {"id": item_id, "evidence_tokens": tokens[:8]}
+        for item_id, tokens in item_tokens
+        if not _any_token_present(artifact_text, tokens)
+    ]
+    if not missing:
+        return None
+    finding = GateFinding(
+        "TASK_PROGRESS_EVIDENCE_NOT_IN_ARTIFACT",
+        "medium",
+        message=(
+            f"进度账本里有 {len(missing)} 个 done 项的证据没有出现在最终交付物中；"
+            "请把对应文件、模块或来源引用写进最终报告后再提交。"
+        ),
+        evidence={
+            "run_id": run_id,
+            "progress_ref": str(path),
+            "missing_count": len(missing),
+            "checked_done_items": len(item_tokens),
+            "missing_items": missing[:20],
+            "artifact_paths": _artifact_paths(report)[:12],
+            "counts": summary.get("counts", {}),
+        },
+    )
+    return GateDecision.repair(
+        "task_progress_closeout",
+        (finding,),
+        recommended_action=RecoveryAction.CONTINUE.value,
+        evidence={
+            "checked": True,
+            "run_id": run_id,
+            "progress_ref": str(path),
+            "missing_evidence_projection_count": len(missing),
+            "checked_done_items": len(item_tokens),
+            "required_actions": [
+                "copy_task_progress_evidence_refs_into_final_artifact",
+                "rewrite_or_append_final_artifact_with_source_file_refs",
+                "submit_for_acceptance_after_final_artifact_mentions_evidence",
             ],
         },
     )
@@ -153,6 +210,83 @@ def _open_items(progress: dict[str, Any]) -> list[dict[str, Any]]:
         for item in items
         if isinstance(item, dict) and not task_progress_status_is_closed(item.get("status") or "pending")
     ]
+
+
+def _done_item_evidence_tokens(progress: dict[str, Any]) -> list[tuple[str, list[str]]]:
+    rows: list[tuple[str, list[str]]] = []
+    for item in progress.get("items", []) if isinstance(progress.get("items"), list) else []:
+        if not isinstance(item, dict) or not task_progress_status_is_done(item.get("status")):
+            continue
+        tokens = _evidence_tokens(item.get("evidence"))
+        if tokens:
+            rows.append((_item_id(item), tokens))
+    return rows
+
+
+_EVIDENCE_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_.@/-])"
+    r"(?P<token>[A-Za-z0-9_.@/-]+"
+    r"(?:\.(?:py|pyi|ts|tsx|js|jsx|mjs|cjs|rs|go|md|mdx|toml|json|yaml|yml|txt|java|kt|swift|c|cc|cpp|h|hpp|cs|rb|php|scala|sh|sql|html|css|vue|svelte)|/[A-Za-z0-9_.@/-]+))"
+    r"(?![A-Za-z0-9_.@/-])"
+)
+
+
+def _evidence_tokens(value: object) -> list[str]:
+    tokens: list[str] = []
+    for item in _list(value):
+        text = str(item or "")
+        for match in _EVIDENCE_TOKEN_RE.finditer(text):
+            tokens.extend(_token_variants(match.group("token").strip("/")))
+    return _dedupe_tokens(tokens)
+
+
+def _token_variants(token: str) -> list[str]:
+    variants = [token]
+    if "/" in token:
+        variants.extend(part for part in token.split("/") if "." in part)
+    return variants
+
+
+def _dedupe_tokens(tokens: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for token in tokens:
+        clean = token.strip()
+        if len(clean) < 4 or clean in seen:
+            continue
+        seen.add(clean)
+        deduped.append(clean)
+    return deduped
+
+
+def _unique_projected_tokens(item_tokens: list[tuple[str, list[str]]]) -> list[str]:
+    return _dedupe_tokens([token for _item_id, tokens in item_tokens for token in tokens])
+
+
+def _artifact_text(report: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for path in _artifact_paths(report):
+        try:
+            if Path(path).is_file():
+                parts.append(Path(path).read_text(encoding="utf-8", errors="ignore")[:200_000])
+        except OSError:
+            continue
+    return "\n".join(parts)
+
+
+def _artifact_paths(report: dict[str, Any]) -> list[str]:
+    paths: list[str] = []
+    for item in report.get("artifacts", []) if isinstance(report.get("artifacts"), list) else []:
+        if not isinstance(item, dict) or item.get("ok") is not True:
+            continue
+        path = str(item.get("path") or "").strip()
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _any_token_present(text: str, tokens: list[str]) -> bool:
+    return any(token and token in text for token in tokens)
 
 
 def _advisory_findings(progress: dict[str, Any]) -> list[GateFinding]:

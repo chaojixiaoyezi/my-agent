@@ -1,6 +1,6 @@
 """LLM: Focused tests for hierarchy scheduler role/tool repair.
 
-函数/模块用途: 验证模型写错 role 或 tool 名时，层级调度器仍能保持 coordinator/leaf 权限边界。
+函数/模块用途: 验证模型写错 role 或 tool 名时，层级调度器仍能保持 coordinator/worker 权限边界。
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def test_hierarchy_schedule_infers_coordinator_role_from_tools(tmp_path):
             parent_run_id=child.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal="创建三个 leaf worker 并调度执行。",
+                    goal="创建三个 worker 并调度执行。",
                     agent_name="child-01-grandchild-01",
                     role="worker",
                     allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
@@ -40,7 +40,7 @@ def test_hierarchy_schedule_infers_coordinator_role_from_tools(tmp_path):
     )
     grandchild = manager.load(result.created_run_ids[0])
 
-    assert grandchild.role == "grandchild_coordinator"
+    assert grandchild.role == "coordinator"
 
 
 def test_hierarchy_schedule_preserves_explicit_display_names(tmp_path):
@@ -143,7 +143,7 @@ def test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools(tmp_
             parent_run_id=child.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal="创建三个 leaf worker，自己只写协调计划和 evidence.json。",
+                    goal="创建三个 worker，自己只写协调计划和 evidence.json。",
                     agent_name="child-01-grandchild-01",
                     role="worker",
                     allowed_tools=[
@@ -160,11 +160,11 @@ def test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools(tmp_
     )
     grandchild = manager.load(result.created_run_ids[0])
 
-    assert grandchild.role == "grandchild_coordinator"
+    assert grandchild.role == "coordinator"
     assert "write_file" in grandchild.allowed_tools
 
 
-def test_hierarchy_schedule_keeps_write_intent_as_leaf_role(tmp_path):
+def test_hierarchy_schedule_keeps_write_intent_as_worker_role(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     root = manager.create_run(goal="root", thought="split", plan=["plan"], extra_write_roots=[str(deliverables)])
@@ -184,7 +184,7 @@ def test_hierarchy_schedule_keeps_write_intent_as_leaf_role(tmp_path):
             parent_run_id=parent.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal=f"实现 normalize_text 并写入 {deliverables}/leaf_outputs/leaf_normalize/solution.py。",
+                    goal=f"实现 normalize_text 并写入 {deliverables}/worker_outputs/normalize/solution.py。",
                     agent_name="leaf-normalize",
                     role="worker",
                     allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
@@ -193,15 +193,15 @@ def test_hierarchy_schedule_keeps_write_intent_as_leaf_role(tmp_path):
             apply=True,
         )
     )
-    leaf = manager.load(result.created_run_ids[0])
+    worker = manager.load(result.created_run_ids[0])
 
-    assert leaf.role == "leaf_worker"
-    assert "write_file" in leaf.allowed_tools
-    assert "schedule_child_subagents" in leaf.allowed_tools
-    assert "dispatch_subagents" in leaf.allowed_tools
+    assert worker.role == "worker"
+    assert "write_file" in worker.allowed_tools
+    assert "schedule_child_subagents" in worker.allowed_tools
+    assert "dispatch_subagents" in worker.allowed_tools
 
 
-def test_hierarchy_schedule_keeps_orchestration_tools_for_leaf_write_tasks(tmp_path):
+def test_hierarchy_schedule_keeps_orchestration_tools_for_worker_write_tasks(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     parent = manager.create_run(
@@ -217,7 +217,7 @@ def test_hierarchy_schedule_keeps_orchestration_tools_for_leaf_write_tasks(tmp_p
             parent_run_id=parent.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal=f"写入 {deliverables}/leaf_outputs/leaf_text/solution.py 和 test_solution.py。",
+                    goal=f"写入 {deliverables}/worker_outputs/text/solution.py 和 test_solution.py。",
                     agent_name="leaf-text",
                     role="worker",
                     allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree", "write"],
@@ -226,13 +226,13 @@ def test_hierarchy_schedule_keeps_orchestration_tools_for_leaf_write_tasks(tmp_p
             apply=True,
         )
     )
-    leaf = manager.load(result.created_run_ids[0])
+    worker = manager.load(result.created_run_ids[0])
 
-    assert leaf.role == "leaf_worker"
-    assert "write_file" in leaf.allowed_tools
-    assert "schedule_child_subagents" in leaf.allowed_tools
-    assert "dispatch_subagents" in leaf.allowed_tools
-    assert "inspect_agent_tree" in leaf.allowed_tools
+    assert worker.role == "worker"
+    assert "write_file" in worker.allowed_tools
+    assert "schedule_child_subagents" in worker.allowed_tools
+    assert "dispatch_subagents" in worker.allowed_tools
+    assert "inspect_agent_tree" in worker.allowed_tools
 
 
 def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_path):
@@ -251,9 +251,9 @@ def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_pa
             parent_run_id=parent.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal="创建 leaf worker 写 solution.py，但当前节点只是 coordinator。",
+                    goal="创建 worker 写 solution.py，但当前节点只是 coordinator。",
                     agent_name="arithmetic-lead",
-                    role="child_coordinator",
+                    role="coordinator",
                     allowed_tools=[
                         "schedule_child_subagents",
                         "dispatch_subagents",
@@ -268,7 +268,7 @@ def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_pa
     )
     coordinator = manager.load(result.created_run_ids[0])
 
-    assert coordinator.role == "child_coordinator"
+    assert coordinator.role == "coordinator"
     assert "schedule_child_subagents" in coordinator.allowed_tools
     assert "dispatch_subagents" in coordinator.allowed_tools
     assert "write_file" in coordinator.allowed_tools

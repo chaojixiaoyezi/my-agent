@@ -21,7 +21,7 @@ class MemoryCompactSuggestOptions:
     current_tokens: int
     max_context_tokens: int
     plan_options: MemoryCompactPlanOptions
-    trigger_percent: int = 50
+    trigger_percent: int = 70
     owner_type: str = "main_agent"
     owner_id: str = ""
     #  trigger 字段只记录触发来源；正常阈值和强制触发仍走同一个 compact suggestion。

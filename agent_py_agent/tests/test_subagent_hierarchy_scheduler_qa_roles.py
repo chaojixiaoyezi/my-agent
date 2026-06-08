@@ -57,7 +57,7 @@ def test_hierarchy_schedule_advises_required_qa_roles_without_auto_creation(tmp_
 
     assert result.blocked is False
     assert result.planned_count == 1
-    assert roles <= {"worker", "leaf_worker"}
+    assert roles <= {"worker"}
     assert result.quality_advice is not None
     assert result.quality_advice.phase == "implementation_first"
     assert set(result.quality_advice.suggested_roles) == {"tester", "bug_finder"}
@@ -82,7 +82,7 @@ def test_hierarchy_schedule_advice_omits_existing_qa_roles(tmp_path):
             child_specs=[
                 HierarchyChildSpec(
                     goal="协调登录模块实现。",
-                    role="child_coordinator",
+                    role="coordinator",
                     agent_name="小傻妞-login-lead",
                     allowed_tools=ORCHESTRATION_TOOLS,
                 )
@@ -119,7 +119,7 @@ def test_hierarchy_schedule_defers_auto_qa_until_implementation_ready(tmp_path):
     roles = {manager.load(run_id).role for run_id in result.created_run_ids}
 
     assert result.blocked is False
-    assert roles <= {"worker", "leaf_worker"}
+    assert roles <= {"worker"}
     assert roles
     assert len(manager.load(parent.id).child_ids) == 1
 
@@ -198,7 +198,7 @@ def test_hierarchy_schedule_quality_advice_after_implementation_descendant_ready
         plan=["delegate"],
         parent_id=parent.id,
         root_id=parent.id,
-        role="child_coordinator",
+        role="coordinator",
         agent_name="小傻妞-shop-lead",
         extra_write_roots=[str(build)],
     )
@@ -208,7 +208,7 @@ def test_hierarchy_schedule_quality_advice_after_implementation_descendant_ready
         plan=["write"],
         parent_id=coordinator.id,
         root_id=parent.id,
-        role="leaf_worker",
+        role="worker",
         agent_name="小小傻妞-shop-worker",
         extra_write_roots=[str(build)],
     )

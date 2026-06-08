@@ -98,7 +98,7 @@ def test_hierarchy_schedule_repairs_literal_wildcard_names_with_default_display_
                 HierarchyChildSpec(
                     goal="leaf does controlled exec",
                     agent_name="小小小傻妞-*-*",
-                    role="leaf_worker",
+                    role="worker",
                 )
             ],
             apply=True,
@@ -107,14 +107,14 @@ def test_hierarchy_schedule_repairs_literal_wildcard_names_with_default_display_
     )
     leaf = manager.load(result.created_run_ids[0])
 
-    assert leaf.agent_name == "agent-d3-leaf-worker-1"
+    assert leaf.agent_name == "agent-d3-worker-1"
 
 
 def test_hierarchy_schedule_blocks_leaf_when_four_layer_token_has_no_space(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     root = manager.create_run(
-        goal=f"必须覆盖4层链路，depth=3 leaf_worker 最终写 {deliverables}/refs.json。",
+        goal=f"必须覆盖4层链路，depth=3 worker 最终写 {deliverables}/refs.json。",
         thought="split",
         plan=["delegate"],
         extra_write_roots=[str(deliverables)],
@@ -122,14 +122,14 @@ def test_hierarchy_schedule_blocks_leaf_when_four_layer_token_has_no_space(tmp_p
     child = manager.create_run(
         goal=(
             "depth=1 coordinator，继承父级目标/边界：必须覆盖4层链路，"
-            "depth=3 leaf_worker 最终执行 controlled_exec。"
+            "depth=3 worker 最终执行 controlled_exec。"
         ),
         thought="split",
         plan=["delegate"],
         parent_id=root.id,
         root_id=root.id,
         depth=1,
-        role="child_coordinator",
+        role="coordinator",
         extra_write_roots=[str(deliverables)],
     )
 
@@ -138,9 +138,9 @@ def test_hierarchy_schedule_blocks_leaf_when_four_layer_token_has_no_space(tmp_p
             parent_run_id=child.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal=f"depth=2 leaf_worker 直接写 {deliverables}/refs.json。",
+                    goal=f"depth=2 worker 直接写 {deliverables}/refs.json。",
                     agent_name="小小傻妞-r07-d2",
-                    role="leaf_worker",
+                    role="worker",
                 )
             ],
             apply=True,
@@ -161,7 +161,7 @@ def test_hierarchy_schedule_allows_internal_task_dir_context_with_product_root(t
         goal=f"协调下层，把最终报告写到 {deliverables}/report.md。",
         thought="split",
         plan=["delegate"],
-        role="child_coordinator",
+        role="coordinator",
         depth=1,
         extra_write_roots=[str(deliverables)],
     )
@@ -176,7 +176,7 @@ def test_hierarchy_schedule_allows_internal_task_dir_context_with_product_root(t
                         f"最终用户产物仍写到 {deliverables}/report.md。"
                     ),
                     agent_name="小小傻妞-r07-d2",
-                    role="child_coordinator",
+                    role="coordinator",
                 )
             ],
             apply=True,
@@ -267,7 +267,7 @@ def test_hierarchy_schedule_does_not_normalize_model_write_alias_for_leaf_tasks(
                 HierarchyChildSpec(
                     goal=f"写入 {deliverables}/proof.txt，内容为 trace-hierarchy-ok。",
                     agent_name="leaf-writer",
-                    role="leaf_worker",
+                    role="worker",
                     allowed_tools=["write", "read_file", "list_files"],
                 )
             ],
@@ -338,7 +338,7 @@ def test_hierarchy_schedule_keeps_sibling_scope_out_of_child_handoff(tmp_path):
         plan=["plan"],
         extra_write_roots=[str(deliverables)],
         attributes={
-            "required_files": [str(deliverables / "leaf_outputs" / "leaf_worker_arithmetic" / "solution.py")],
+            "required_files": [str(deliverables / "leaf_outputs" / "worker_arithmetic" / "solution.py")],
         },
     )
 
@@ -347,8 +347,8 @@ def test_hierarchy_schedule_keeps_sibling_scope_out_of_child_handoff(tmp_path):
             parent_run_id=root.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal="arithmetic领域：创建leaf_worker_arithmetic，写入solution.py",
-                    role="child_coordinator",
+                    goal="arithmetic领域：创建worker_arithmetic，写入solution.py",
+                    role="coordinator",
                     agent_name="arithmetic-lead",
                     allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
                 )
@@ -358,9 +358,9 @@ def test_hierarchy_schedule_keeps_sibling_scope_out_of_child_handoff(tmp_path):
     )
     child = manager.load(result.created_run_ids[0])
 
-    assert "leaf_worker_arithmetic" in child.goal
-    assert "leaf_worker_text" not in child.goal
-    assert "leaf_worker_text" not in child.thought
+    assert "worker_arithmetic" in child.goal
+    assert "worker_text" not in child.goal
+    assert "worker_text" not in child.thought
     assert "当前子任务只执行" in child.goal
 
 
@@ -374,7 +374,7 @@ def test_hierarchy_schedule_keeps_exact_file_contract_when_child_goal_only_has_d
         extra_write_roots=[str(deliverables)],
         attributes={
             "required_files": [
-                str(deliverables / "leaf_outputs" / "leaf_worker_arithmetic" / "solution.py"),
+                str(deliverables / "leaf_outputs" / "worker_arithmetic" / "solution.py"),
                 "test_solution.py",
                 "README.md",
             ]
@@ -386,8 +386,8 @@ def test_hierarchy_schedule_keeps_exact_file_contract_when_child_goal_only_has_d
             parent_run_id=root.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal=f"创建 arithmetic leaf_worker，产物写至 {deliverables}/leaf_outputs/leaf_worker_arithmetic/",
-                    role="child_coordinator",
+                    goal=f"创建 arithmetic worker，产物写至 {deliverables}/leaf_outputs/worker_arithmetic/",
+                    role="coordinator",
                     agent_name="arithmetic-lead",
                     allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
                 )
@@ -397,15 +397,15 @@ def test_hierarchy_schedule_keeps_exact_file_contract_when_child_goal_only_has_d
     )
     child = manager.load(child_result.created_run_ids[0])
 
-    assert "leaf_worker_arithmetic/solution.py" in child.goal
+    assert "worker_arithmetic/solution.py" in child.goal
     assert "test_solution.py" in child.goal
     assert "README.md" in child.goal
-    assert "leaf_worker_text" not in child.goal
+    assert "worker_text" not in child.goal
 
     leaf_result = _schedule_vague_leaf(manager, child.id)
     leaf = manager.load(leaf_result.created_run_ids[0])
 
-    assert "leaf_worker_arithmetic/solution.py" in leaf.goal
+    assert "worker_arithmetic/solution.py" in leaf.goal
     assert "test_solution.py" in leaf.goal
     assert "README.md" in leaf.goal
 
@@ -437,7 +437,7 @@ def _controlled_exec_contract_root(manager: SubAgentManager, deliverables):
     return manager.create_run(
         goal=(
             f"在 {deliverables} 交付 controlled_exec 验收包。"
-            "depth=3 leaf_worker 必须先写 sentinel.txt，然后提交 capability_request："
+            "depth=3 worker 必须先写 sentinel.txt，然后提交 capability_request："
             "requested_tools=[\"controlled_exec\"], requested_commands=[\"pwd\",\"python3\",\"rm\"], "
             "path_scope 限定 task_dir，output_budget 包含 stdout_bytes/stderr_bytes。"
             "grant 后必须用 controlled_exec 执行 pwd、大输出 python3，并验证 rm 走 task_trash/move_to_task_trash；"
@@ -465,8 +465,8 @@ def _schedule_controlled_exec_contract_leaf(manager: SubAgentManager, child_id: 
             parent_run_id=child_id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal="继续创建 depth=3 leaf_worker，保留 controlled_exec 合同。",
-                    role="child_coordinator",
+                    goal="继续创建 depth=3 worker，保留 controlled_exec 合同。",
+                    role="coordinator",
                     agent_name="grand-lead",
                     allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
                 )
@@ -481,7 +481,7 @@ def _schedule_controlled_exec_contract_leaf(manager: SubAgentManager, child_id: 
             child_specs=[
                 HierarchyChildSpec(
                     goal="执行 leaf 工作。",
-                    role="leaf_worker",
+                    role="worker",
                     agent_name="leaf",
                 )
             ],
@@ -498,7 +498,7 @@ def _schedule_vague_child(manager: SubAgentManager, parent_id: str):
             child_specs=[
                 HierarchyChildSpec(
                     goal="创建 leaf worker，实现 add(a,b) 并写测试",
-                    role="child_coordinator",
+                    role="coordinator",
                     agent_name="child",
                     allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
                 )
@@ -515,7 +515,7 @@ def _schedule_vague_leaf(manager: SubAgentManager, parent_id: str):
             child_specs=[
                 HierarchyChildSpec(
                     goal="实现 add(a,b)",
-                    role="leaf_worker",
+                    role="worker",
                     agent_name="leaf",
                 )
             ],

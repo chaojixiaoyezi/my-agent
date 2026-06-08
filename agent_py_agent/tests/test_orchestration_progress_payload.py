@@ -140,7 +140,7 @@ def test_runner_context_dispatch_suggests_recovery_child_for_blocked_direct_chil
     assert "child-blocked" in suggestion["children"][0]["goal"]
 
 
-def test_runner_context_dispatch_reports_recovery_child_load_error() -> None:
+def test_runner_context_dispatch_reuses_list_snapshot_for_recovery() -> None:
     mock_report = MagicMock()
     mock_report.dry_run = False
     mock_report.summary = {}
@@ -162,8 +162,8 @@ def test_runner_context_dispatch_reports_recovery_child_load_error() -> None:
 
     direct_children = json.loads(result.output)["direct_children"]
     assert direct_children["needs_recovery"] is True
-    assert direct_children["recovery_load_errors"][0]["run_id"] == "child-broken"
-    assert direct_children["recovery_load_errors"][0]["context"] == "direct_children.recovery_task.load"
+    assert direct_children["next_action"] == "inspect_or_rescue_direct_children"
+    assert "recovery_load_errors" not in direct_children
 
 
 def test_runner_context_dispatch_reports_quality_advice_parent_load_error() -> None:

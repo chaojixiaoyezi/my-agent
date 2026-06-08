@@ -456,8 +456,8 @@ class TestCreateSubagentsToolWorkerWorkflow:
         assert params.role == "worker"
         assert params.workflow_mode == "off"
 
-    def test_single_file_child_worker_is_not_repaired_to_coordinator(self):
-        """用户允许多层派工时，单文件 child_worker 仍应保持交付角色。"""
+    def test_single_file_worker_is_not_repaired_to_coordinator(self):
+        """用户允许多层派工时，单文件 worker 仍应保持交付角色。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -479,7 +479,7 @@ class TestCreateSubagentsToolWorkerWorkflow:
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
             "goal": "在 /tmp/project/artifacts/index1.html 创建一个单文件 HTML 页面。",
-            "role": "child_worker",
+            "role": "worker",
             "workflow_mode": "auto",
             "extra_write_roots": ["/tmp/project/artifacts"],
             "output_files": ["index1.html"],
@@ -487,7 +487,7 @@ class TestCreateSubagentsToolWorkerWorkflow:
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
-        assert params.role == "child_worker"
+        assert params.role == "worker"
         assert params.workflow_mode == "off"
 
     def test_repeated_concrete_file_goal_is_not_blocked_by_hidden_split_gate(self):
@@ -504,7 +504,7 @@ class TestCreateSubagentsToolWorkerWorkflow:
                 "在 /tmp/project/artifacts 创建 index1.html 和 index2.html 两个单文件 HTML 页面。"
             ),
             "count": 2,
-            "role": "leaf_worker",
+            "role": "worker",
             "workflow_mode": "auto",
             "extra_write_roots": ["/tmp/project/artifacts"],
             "output_files": ["index1.html", "index2.html"],

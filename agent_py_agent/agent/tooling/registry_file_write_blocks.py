@@ -5,6 +5,7 @@ import json
 import re
 from typing import Any
 
+from .content_transport_policy import RECOVERY_WRITE_CHUNK_CHARS
 from .registry_payload_normalize import parse_error_payload
 
 _WRITE_FILE_BLOCK_RE = re.compile(
@@ -68,11 +69,14 @@ def _write_attrs_error(attrs: dict[str, str]) -> str:
 
 
 def _write_file_payload(attrs: dict[str, str], content: str) -> dict[str, Any]:
-    return {
+    payload = {
         "tool": "write_file",
         "path": attrs["path"],
         "content": _block_content(content),
     }
+    if mode := str(attrs.get("mode") or "").strip():
+        payload["mode"] = mode
+    return payload
 
 
 def _block_content(content: str) -> str:
@@ -92,18 +96,19 @@ def _malformed_raw_marker_calls(
     valid_ranges: list[tuple[int, int]],
 ) -> list[tuple[int, dict[str, Any]]]:
     opener = f"[{marker}"
-    return [
-        (
-            pos,
-            parse_error_payload(
-                _malformed_raw_block_error(marker),
-                _raw_block_sample(text, pos),
-                error_code="WRITE_FILE_RAW_MALFORMED",
-            ),
+    calls: list[tuple[int, dict[str, Any]]] = []
+    for pos in _raw_marker_positions(text, opener):
+        if _position_in_ranges(pos, valid_ranges) or not _looks_like_raw_block_opener(text, pos, opener):
+            continue
+        sample = _raw_block_sample(text, pos)
+        payload = parse_error_payload(
+            _malformed_raw_block_error(marker),
+            sample,
+            error_code="WRITE_FILE_RAW_MALFORMED",
         )
-        for pos in _raw_marker_positions(text, opener)
-        if not _position_in_ranges(pos, valid_ranges) and _looks_like_raw_block_opener(text, pos, opener)
-    ]
+        payload.update(_raw_write_recovery_fields(sample))
+        calls.append((pos, payload))
+    return calls
 
 
 def _raw_marker_positions(text: str, opener: str) -> list[int]:
@@ -137,6 +142,36 @@ def _raw_block_sample(text: str, pos: int) -> str:
     ]
     end = min(candidates) if candidates else len(text)
     return text[pos:end].strip()
+
+
+def _raw_write_recovery_fields(sample: str) -> dict[str, object]:
+    header_end = sample.find("]")
+    attrs = _parse_attrs(sample[len("[WRITE_FILE_RAW") : header_end if header_end >= 0 else len(sample)])
+    path = str(attrs.get("path") or "").strip()
+    if not path:
+        return {}
+    return {
+        "source_tool": "WRITE_FILE_RAW",
+        "path": path,
+        "previous_write_committed": False,
+        "write_recovery": {
+            "strategy": "restart_same_file_with_append_chunks",
+            "path": path,
+            "max_chunk_chars": RECOVERY_WRITE_CHUNK_CHARS,
+            "first_tool_call": {
+                "tool": "write_file",
+                "path": path,
+                "mode": "overwrite",
+                "content": f"<first chunk <= {RECOVERY_WRITE_CHUNK_CHARS} chars>",
+            },
+            "next_tool_call": {
+                "tool": "write_file",
+                "path": path,
+                "mode": "append",
+                "content": f"<next chunk <= {RECOVERY_WRITE_CHUNK_CHARS} chars>",
+            },
+        },
+    }
 
 
 __all__ = [

@@ -90,8 +90,6 @@ def _runner_timeout_role_keys(task: SubAgentTask) -> list[str]:
         keys.append("takeover")
     if role:
         keys.append(role)
-    if role in {"child_worker", "leaf_worker"}:
-        keys.append("worker")
     return keys
 
 

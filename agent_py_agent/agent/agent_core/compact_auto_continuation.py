@@ -168,13 +168,8 @@ def _captured_refs_section(payload: Any) -> str:
             total = coverage.get("total_chars")
             if source and isinstance(covered, int) and isinstance(total, int):
                 lines.append(f"- full_read_coverage: source_path={source} covered_until={covered} total_chars={total} complete={complete}")
-    source_coverage = refs.get("source_coverage") if isinstance(refs.get("source_coverage"), list) else []
-    for item in source_coverage[:12]:
-        if isinstance(item, dict) and (line := _source_coverage_line(item)):
-            lines.append(f"- source_coverage: {line}")
-    omitted_source_coverage = refs.get("omitted_source_coverage_count")
-    if isinstance(omitted_source_coverage, int) and omitted_source_coverage > 0:
-        lines.append(f"- source_coverage_omitted: {omitted_source_coverage}")
+    lines.extend(_source_coverage_lines(refs, "incomplete_source_coverage"))
+    lines.extend(_source_coverage_lines(refs, "source_coverage"))
     artifact_ref_count = refs.get("artifact_ref_count")
     omitted = refs.get("omitted_artifact_ref_count")
     if isinstance(artifact_ref_count, int) and artifact_ref_count > 0:
@@ -191,6 +186,19 @@ def _captured_refs_section(payload: Any) -> str:
     if len(lines) == 1:
         lines.append("- <none>")
     return "\n".join(lines)
+
+
+def _source_coverage_lines(refs: dict[str, Any], key: str) -> list[str]:
+    rows = refs.get(key) if isinstance(refs.get(key), list) else []
+    lines = [
+        f"- {key}: {line}"
+        for item in rows[:12]
+        if isinstance(item, dict) and (line := _source_coverage_line(item))
+    ]
+    omitted = refs.get(f"omitted_{key}_count")
+    if isinstance(omitted, int) and omitted > 0:
+        lines.append(f"- {key}_omitted: {omitted}")
+    return lines
 
 
 def _source_coverage_line(item: dict[str, Any]) -> str:

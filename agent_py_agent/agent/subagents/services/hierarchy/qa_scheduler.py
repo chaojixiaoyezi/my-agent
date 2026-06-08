@@ -75,7 +75,7 @@ def qa_orchestration_advice(
         return QaOrchestrationAdvice(
             phase="implementation_first",
             llm_next_step=(
-                "先创建或继续 dispatch worker/writer/leaf_worker，等至少一个实现节点有可测试产物后，"
+                "先创建或继续 dispatch worker/writer，等至少一个实现节点有可测试产物后，"
                 "再由 LLM 选择局部 QA、整体检查或 repair 组合。"
             ),
             guardrails=_quality_guardrails(),

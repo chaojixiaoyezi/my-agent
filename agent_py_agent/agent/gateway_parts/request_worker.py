@@ -50,6 +50,9 @@ class GatewayAskParams:
     agent: SimpleAgent | None = field(default=None, repr=False)
 
 
+_DEFAULT_GATEWAY_CLI_SESSION_ID = "default"
+
+
 @dataclass(frozen=True)
 class _ClaimedGatewayRequestContext:
 
@@ -93,13 +96,7 @@ def submit_gateway_ask(
     }
     if params.resume_context is not None:
         payload["resume_context"] = bool(params.resume_context)
-    if params.chat_session_id:
-        payload["conversation"] = {
-            "channel": "chat",
-            "channel_conversation_id": str(params.chat_session_id),
-            "channel_user_id": str(params.channel_user_id or "local-cli"),
-            "canonical_user_id": str(params.canonical_user_id or "local-agent"),
-        }
+    payload["conversation"] = _gateway_conversation_payload(params)
     request_path = write_gateway_request(paths, payload)
     response_path = gateway_response_path(paths, request_id)
     if params.agent is not None:
@@ -110,6 +107,16 @@ def submit_gateway_ask(
             response_path,
         )
     return request_id, request_path, response_path
+
+
+def _gateway_conversation_payload(params: GatewayAskParams) -> dict:
+    session_id = str(params.chat_session_id or _DEFAULT_GATEWAY_CLI_SESSION_ID)
+    return {
+        "channel": "chat" if params.chat_session_id else "gateway-cli",
+        "channel_conversation_id": session_id,
+        "channel_user_id": str(params.channel_user_id or "local-cli"),
+        "canonical_user_id": str(params.canonical_user_id or "local-agent"),
+    }
 
 
 def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: float) -> dict:

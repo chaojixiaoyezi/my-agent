@@ -22,7 +22,7 @@ from agent_py_agent.agent.contracts.gates.document.content_quality import (
 
 def test_document_content_quality_rejects_thin_required_sections(tmp_path: Path) -> None:
     report = tmp_path / "report.md"
-    report.write_text("# 摘要\n这是一段足够的摘要内容。\n\n# 结果\n待补充\n", encoding="utf-8")
+    report.write_text("# 摘要\n这是一段足够的摘要内容。\n\n# 结果\n__FILL__\n", encoding="utf-8")
 
     decision = evaluate_document_content_quality_gate(
         artifact_ref=str(report),
@@ -151,7 +151,7 @@ def test_artifact_acceptance_reuses_existing_format_validators(tmp_path: Path) -
 
 def test_closeout_artifact_validation_reports_v3_document_quality_as_warning(tmp_path: Path) -> None:
     report = tmp_path / "handoff.md"
-    report.write_text("# 摘要\n很好。\n\n# 结果\n待补充\n", encoding="utf-8")
+    report.write_text("# 摘要\n很好。\n\n# 结果\n__FILL__\n", encoding="utf-8")
 
     artifact = _validate_artifact_item(
         {
@@ -176,3 +176,31 @@ def test_closeout_artifact_validation_reports_v3_document_quality_as_warning(tmp
     assert "DOCUMENT_SECTION_TOO_THIN" in codes
     assert "DOCUMENT_PLACEHOLDER_RATIO_EXCEEDED" in codes
     assert {finding["severity"] for finding in artifact["acceptance_report"]["findings"]} == {"warning"}
+
+
+def test_document_content_quality_uses_contract_tokens_for_plain_language_placeholders(tmp_path: Path) -> None:
+    report = tmp_path / "report.md"
+    report.write_text("# 摘要\n这是一段足够的摘要内容。\n\n# 结果\n待补充\n", encoding="utf-8")
+
+    default_decision = evaluate_document_content_quality_gate(
+        artifact_ref=str(report),
+        workspace_root=tmp_path,
+        contract={
+            "required_sections": ["摘要", "结果"],
+            "min_chars_per_section": 2,
+            "max_placeholder_ratio": 0.05,
+        },
+    )
+    explicit_decision = evaluate_document_content_quality_gate(
+        artifact_ref=str(report),
+        workspace_root=tmp_path,
+        contract={
+            "required_sections": ["摘要", "结果"],
+            "min_chars_per_section": 2,
+            "max_placeholder_ratio": 0.05,
+            "placeholder_tokens": ["待补充"],
+        },
+    )
+
+    assert "DOCUMENT_PLACEHOLDER_RATIO_EXCEEDED" not in default_decision.finding_codes
+    assert "DOCUMENT_PLACEHOLDER_RATIO_EXCEEDED" in explicit_decision.finding_codes

@@ -55,8 +55,21 @@ def _reconfigure_stdio_stream(stream_name: str, reconfigure) -> None:
 def make_agent(args) -> SimpleAgent:
 
     config = apply_runtime_config_environment(load_config(args.config))
+    explicit_root = _explicit_workspace_root(args)
+    if explicit_root is not None:
+        config.workspace_root = str(explicit_root)
     roots = resolve_workspace_roots(config, args.config)
     return SimpleAgent(config, roots[0], workspace_roots=roots)
+
+
+def _explicit_workspace_root(args) -> Path | None:
+    raw = getattr(args, "workspace_root", None)
+    if not isinstance(raw, (str, Path)):
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    return Path(text).expanduser().resolve()
 
 
 def resolve_workspace_root(config, config_path: str | Path, *, current_dir: str | Path | None = None) -> Path:

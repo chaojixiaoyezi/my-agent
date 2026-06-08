@@ -91,18 +91,12 @@ def install_scenario_backend(agent: SimpleAgent, backend: object) -> None:
 def build_scenario_prompt(count: int) -> str:
 
     return (
-        "这是 my-agent 隔离全流程场景测试。你必须通过工具创建子代理工单，"
-        "不要自己直接完成任务。\n\n"
-        "本阶段只允许创建工单和查看看板；禁止调用 dispatch_subagents，禁止 start_runners，"
-        "不要启动 runner，runner 会由下一阶段父代理调度。\n\n"
-        "请只调用一次 create_subagents，参数必须满足：\n"
-        f"- count: {count}\n"
-        "- tool_preset: coding\n"
-        "- goal: 在隔离 fixture 项目中读取 README.md，并在子代理 task_dir/scenario_outputs/ 写入自己的证据报告\n"
-        "- acceptance_checks: 必须有 read_file 证据；必须有 write_file 证据；必须交回真实产物和证据\n"
-        "- plan: 读取 README.md；从执行上下文读取 task_dir；写入 task_dir/scenario_outputs/<run_id>.md；"
-        "输出 SUBAGENT_RESULT；等待收口\n\n"
-        "创建后可以调用 subagent_board 看一眼状态，然后用一句话汇报创建了几个子代理。"
+        "这是一个隔离测试项目，请找几个帮手一起完成，最后由你检查他们交回来的结果。\n\n"
+        f"请安排 {count} 个帮手分别去读当前项目里的 README.md。"
+        "每个帮手都要在自己的任务目录里写一份 3-6 行中文证据报告，"
+        "说明自己确实读到了 README.md，并写清楚报告文件放在哪里。\n\n"
+        "你这一轮只负责把事情分配清楚，并简单看一下有没有成功分配出去；"
+        "不要自己替他们读 README.md，也不要自己直接写最终报告。"
     )
 
 

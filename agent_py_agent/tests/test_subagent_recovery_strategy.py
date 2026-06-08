@@ -26,7 +26,7 @@ def _saved_task(tmp_path: Path, *, status: str = "BLOCKED"):
         goal="继续示例网站 checkout 任务",
         thought="需要从本地恢复包接着做。",
         plan=["读恢复包", "继续实现"],
-        role="leaf_worker",
+        role="worker",
     )
     task.status = status
     task.current_step = "继续补 checkout QA 证据"

@@ -71,9 +71,6 @@ def _has_structured_write_intent(params: dict[str, object], goal: str) -> bool:
         return True
     if isinstance(params.get("repair_contract"), dict):
         return True
-    role = str(params.get("role") or "").casefold().replace("-", "_")
-    if "repair" in role:
-        return True
     packs = params.get("context_packs")
     if not isinstance(packs, list):
         return False
@@ -85,9 +82,6 @@ def _has_structured_write_intent(params: dict[str, object], goal: str) -> bool:
 
 def _has_repair_write_intent(params: dict[str, object]) -> bool:
     if isinstance(params.get("repair_contract"), dict):
-        return True
-    role = str(params.get("role") or "").casefold().replace("-", "_")
-    if "repair" in role:
         return True
     packs = params.get("context_packs")
     if not isinstance(packs, list):

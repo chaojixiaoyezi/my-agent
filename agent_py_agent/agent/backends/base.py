@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..settings.defaults import DEFAULT_MODEL_MAX_TOKENS
 from .errors import ProviderResponseError
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
 from .usage_metadata import (
@@ -43,7 +44,7 @@ class BackendOptions:
     api_key: str
     model_name: str
     request_timeout: int = 240
-    max_tokens: int = 1024
+    max_tokens: int = DEFAULT_MODEL_MAX_TOKENS
     context_window_tokens: int = 0
     temperature: float = 0.2
     stream_enabled: bool = True

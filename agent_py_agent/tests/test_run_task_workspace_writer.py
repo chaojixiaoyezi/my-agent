@@ -1,6 +1,83 @@
 from __future__ import annotations
 
 
+def test_task_local_workspace_root_prefers_agent_run_workspace_over_parent_task_root(tmp_path):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        current_run_task_work_dir,
+        current_run_task_workspace_root,
+    )
+
+    parent_root = tmp_path / "tasks" / "parent"
+    agent_root = parent_root / "work" / "agents" / "child-1"
+    params = SimpleNamespace(
+        context_scope="task_local",
+        task_attributes={
+            "run_workspace": {
+                "task_root": str(parent_root),
+                "output_dir": str(parent_root / "output"),
+                "work_dir": str(parent_root / "work"),
+            },
+            "agent_run_workspace_dir": str(agent_root),
+        },
+        delivery_contract={
+            "task_workspace": {
+                "task_root": str(parent_root),
+                "output_dir": str(parent_root / "output"),
+                "work_dir": str(parent_root / "work"),
+            }
+        },
+    )
+
+    agent = SimpleNamespace(_current_run_task_workspace=str(parent_root))
+
+    assert current_run_task_workspace_root(agent, params) == agent_root.resolve(strict=False)
+    assert current_run_task_work_dir(agent, params) == agent_root.resolve(strict=False)
+    assert current_run_task_workspace_root(agent, params) != Path(parent_root).resolve(strict=False)
+
+
+def test_subagent_run_id_workspace_root_prefers_loaded_agent_workspace_even_without_task_local_scope(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        current_run_task_work_dir,
+        current_run_task_workspace_root,
+    )
+
+    parent_root = tmp_path / "tasks" / "parent"
+    agent_root = parent_root / "work" / "agents" / "subagent-1"
+
+    class Subagents:
+        def load(self, run_id):
+            assert run_id == "subagent-1"
+            return SimpleNamespace(agent_run_workspace_dir=str(agent_root))
+
+    agent = SimpleNamespace(subagents=Subagents(), _current_run_task_workspace=str(parent_root))
+    params = SimpleNamespace(
+        run_id="subagent-1",
+        context_scope="default",
+        task_attributes={
+            "run_workspace": {
+                "task_root": str(parent_root),
+                "output_dir": str(parent_root / "output"),
+                "work_dir": str(parent_root / "work"),
+            }
+        },
+        delivery_contract={
+            "task_workspace": {
+                "task_root": str(parent_root),
+                "output_dir": str(parent_root / "output"),
+                "work_dir": str(parent_root / "work"),
+            }
+        },
+    )
+
+    assert current_run_task_workspace_root(agent, params) == agent_root.resolve(strict=False)
+    assert current_run_task_work_dir(agent, params) == agent_root.resolve(strict=False)
+
+
 def test_attach_run_task_workspace_context_defaults_contract_output_root(tmp_path):
     from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
         attach_run_task_workspace_context,

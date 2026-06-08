@@ -82,7 +82,7 @@ class TestBuildSubagentRunnerPrompt:
 
         context = self._make_context(
             "run_write_parent",
-            role="leaf_worker",
+            role="worker",
             task_dir="/tmp",
             allowed_tools=["write_file", "apply_patch"],
         )

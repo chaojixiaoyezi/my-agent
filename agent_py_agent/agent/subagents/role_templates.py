@@ -44,16 +44,6 @@ COORDINATOR_TOOLS = [
     "send_guidance",
     *ROLE_BASE_TOOLS,
 ]
-ROLE_TEMPLATE_ALIASES = {
-    "child_coordinator": "coordinator",
-    "grandchild_coordinator": "coordinator",
-    "lead": "coordinator",
-    "leader": "coordinator",
-    "child_worker": "worker",
-    "leaf_worker": "worker",
-}
-
-
 @dataclass(frozen=True)
 class RoleTemplate:
     id: str
@@ -189,9 +179,6 @@ def resolve_role_template_id(store: Any, role: str, *, default_id: str | None = 
     exact = store.get(cleaned)
     if exact is not None:
         return exact.id
-    alias = ROLE_TEMPLATE_ALIASES.get(cleaned, "")
-    if alias and store.get(alias):
-        return alias
     return _valid_template_default(store, default_id)
 
 

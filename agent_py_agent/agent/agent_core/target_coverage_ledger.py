@@ -1,7 +1,86 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
+
+_MAX_SOURCE_CANDIDATE_SCAN = 2000
+_MAX_SOURCE_CANDIDATES = 40
+_IGNORED_SOURCE_DIR_NAMES = {
+    ".cache",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".next",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "target",
+    "vendor",
+    "venv",
+}
+_SOURCE_CANDIDATE_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cs",
+    ".go",
+    ".h",
+    ".hpp",
+    ".java",
+    ".js",
+    ".jsx",
+    ".kt",
+    ".md",
+    ".mjs",
+    ".mts",
+    ".php",
+    ".py",
+    ".rs",
+    ".rst",
+    ".sh",
+    ".swift",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".yaml",
+    ".yml",
+}
+_CODE_CANDIDATE_SUFFIXES = _SOURCE_CANDIDATE_SUFFIXES - {".md", ".rst", ".toml", ".json", ".yaml", ".yml"}
+_SOURCE_CANDIDATE_NAMES = {
+    "Cargo.toml",
+    "go.mod",
+    "package.json",
+    "pyproject.toml",
+    "README",
+    "README.md",
+    "README.rst",
+    "requirements.txt",
+    "setup.py",
+}
+_ENTRYLIKE_STEMS = {
+    "__init__",
+    "agent",
+    "app",
+    "assistant",
+    "cli",
+    "client",
+    "index",
+    "lib",
+    "main",
+    "mod",
+    "server",
+}
+_SOURCE_DIR_PARTS = {"app", "cmd", "crates", "lib", "packages", "src"}
+_ROOT_README_NAMES = {"README", "README.md", "README.rst"}
 
 
 def collect_target_coverage_records(
@@ -40,10 +119,22 @@ def target_coverage_status(
         "missing_count": len(missing),
         "missing_items": missing[:50],
         "repair_hints": repair_hints[:50],
+        "target_items": targets[:100],
         "coverage_records": coverage_records[:100],
+        "source_fact_records": _source_fact_records(coverage_records),
         "should_block": should_block,
         "recommended_next_action": _recommended_next_action(should_block, repair_hints),
     }
+
+
+def _source_fact_records(coverage_records: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        dict(record)
+        for record in coverage_records
+        if str(record.get("tool") or "").strip() == "read_file"
+        and str(record.get("status") or "").strip() == "covered"
+        and str(record.get("source_ref") or record.get("target_id") or "").strip()
+    ]
 
 
 def _collect_records(value: object, records: list[dict[str, object]], base: Path | None) -> None:
@@ -119,7 +210,7 @@ def _target_item_row(item: object) -> dict[str, str]:
         return {}
     target_id = str(item.get("target_id") or "").strip()
     row = {"target_id": target_id, "label": str(item.get("label") or target_id)} if target_id else {}
-    for key in ("source_path", "artifact_ref", "source_ref", "coverage_kind", "enforcement", "scope"):
+    for key in ("source_path", "artifact_ref", "source_ref", "coverage_kind", "enforcement", "scope", "min_read_count"):
         text = str(item.get(key) or "").strip()
         if text:
             row[key] = text
@@ -154,6 +245,8 @@ def _tool_call_coverage_record(value: dict[str, object], base: Path | None) -> d
         "source_ref": source,
         "tool": tool,
     }
+    if created_at := str(value.get("created_at") or "").strip():
+        record["created_at"] = created_at
     if tool == "read_file":
         record.update(_read_file_window_fields(value, source, base))
     return record
@@ -262,6 +355,7 @@ def _merged_char_window_record(records: list[dict[str, object]]) -> dict[str, ob
         "covered_until_offset": covered_until,
         "total_chars": total,
         "read_ranges": [{"start": start, "end": end} for start, end in ranges[:20]],
+        **_latest_created_at_field(records),
     }
 
 
@@ -279,7 +373,17 @@ def _merged_line_window_record(records: list[dict[str, object]]) -> dict[str, ob
         "covered_until_line": covered_until,
         "total_lines": total,
         "read_ranges": [{"start": start, "end": end} for start, end in ranges[:20]],
+        **_latest_created_at_field(records),
     }
+
+
+def _latest_created_at_field(records: list[dict[str, object]]) -> dict[str, object]:
+    values = sorted(
+        text
+        for record in records
+        if (text := str(record.get("created_at") or "").strip())
+    )
+    return {"created_at": values[-1]} if values else {}
 
 
 def _is_window_record(record: dict[str, object]) -> bool:
@@ -360,6 +464,8 @@ def _target_is_covered(
     contract: dict[str, Any],
     base: Path | None,
 ) -> bool:
+    if _target_requires_source_file_under_dir(item):
+        return _source_file_under_dir_covered(item, records, base)
     item_keys = _target_keys(item, base)
     for record in records:
         if not item_keys.intersection(_coverage_keys(record, base)):
@@ -378,6 +484,55 @@ def _target_requires_full_source_read(item: dict[str, str], contract: dict[str, 
         str(item.get("coverage_kind") or "").strip() == "full_source_read"
         or str(contract.get("coverage_requirement") or "").strip() == "full_source_read"
     )
+
+
+def _target_requires_source_file_under_dir(item: dict[str, str]) -> bool:
+    return str(item.get("coverage_kind") or "").strip() == "source_file_under_dir"
+
+
+def _source_file_under_dir_covered(
+    item: dict[str, str],
+    records: list[dict[str, object]],
+    base: Path | None,
+) -> bool:
+    source = str(item.get("source_ref") or item.get("source_path") or item.get("target_id") or "").strip()
+    if not source:
+        return False
+    target = _canonical_ref(source, base)
+    return len(_read_files_under_target(target, records, base)) >= _effective_min_read_count(item, target, base)
+
+
+def _read_files_under_target(
+    target: str,
+    coverage_records: list[dict[str, object]],
+    base: Path | None = None,
+) -> set[str]:
+    read_files: set[str] = set()
+    for record in coverage_records:
+        if str(record.get("tool") or "").strip() != "read_file":
+            continue
+        record_source = str(record.get("source_ref") or record.get("target_id") or "").strip()
+        if not record_source:
+            continue
+        canonical = _canonical_ref(record_source, base)
+        if canonical == target or canonical.startswith(target.rstrip("/\\") + "/"):
+            read_files.add(canonical)
+    return read_files
+
+
+def _min_read_count(item: dict[str, str]) -> int:
+    try:
+        return max(1, int(str(item.get("min_read_count") or "1").strip()))
+    except ValueError:
+        return 1
+
+
+def _effective_min_read_count(item: dict[str, str], target: str, base: Path | None = None) -> int:
+    requested = _min_read_count(item)
+    candidates = _source_file_candidates_under_target(target, base)
+    if not candidates:
+        return requested
+    return max(1, min(requested, len(candidates)))
 
 
 def _coverage_enforcement(contract: dict[str, Any], targets: list[dict[str, str]]) -> str:
@@ -424,9 +579,139 @@ def _repair_hints(
 ) -> list[dict[str, object]]:
     hints: list[dict[str, object]] = []
     for item in missing:
+        if hint := _source_file_under_dir_hint(item, coverage_records, base):
+            hints.append(hint)
+            continue
         if hint := _partial_read_hint(item, coverage_records, base):
             hints.append(hint)
     return hints
+
+
+def _source_file_under_dir_hint(
+    item: dict[str, str],
+    coverage_records: list[dict[str, object]],
+    base: Path | None = None,
+) -> dict[str, object]:
+    if not _target_requires_source_file_under_dir(item):
+        return {}
+    source = str(item.get("source_ref") or item.get("source_path") or item.get("target_id") or "").strip()
+    if not source:
+        return {}
+    target = _canonical_ref(source, base)
+    read_files = sorted(_read_files_under_target(target, coverage_records, base))
+    candidate_files = [
+        candidate
+        for candidate in _source_file_candidates_under_target(target, base)
+        if candidate not in read_files
+    ]
+    if read_files:
+        candidate_files = sorted(candidate_files, key=_repair_candidate_sort_key)
+    needed = max(1, _effective_min_read_count(item, target, base) - len(read_files))
+    recommended_read_calls = [
+        {"tool": "read_file", "path": candidate}
+        for candidate in candidate_files[:needed]
+    ]
+    recommended = (
+        recommended_read_calls[0]
+        if recommended_read_calls
+        else {"tool": "list_files", "path": source, "recursive": True, "limit": 50}
+    )
+    return {
+        "target_id": str(item.get("target_id") or ""),
+        "source_ref": source,
+        "coverage_kind": "source_file_under_dir",
+        "current_read_count": len(read_files),
+        "min_read_count": _effective_min_read_count(item, target, base),
+        "read_files": read_files[:20],
+        "candidate_read_files": candidate_files[:10],
+        "recommended_tool_call": recommended,
+        "recommended_tool_calls": recommended_read_calls,
+    }
+
+
+def _source_file_candidates_under_target(target: str, base: Path | None = None) -> list[str]:
+    path = _local_path_from_ref(target, base)
+    if path is None or not path.is_dir():
+        return []
+    candidates: list[Path] = []
+    scanned = 0
+    try:
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [
+                dirname
+                for dirname in dirs
+                if dirname not in _IGNORED_SOURCE_DIR_NAMES and not dirname.startswith(".")
+            ]
+            for name in files:
+                scanned += 1
+                if scanned > _MAX_SOURCE_CANDIDATE_SCAN:
+                    break
+                candidate = Path(root) / name
+                if _looks_like_source_candidate(candidate):
+                    candidates.append(candidate)
+            if scanned > _MAX_SOURCE_CANDIDATE_SCAN:
+                break
+    except OSError:
+        return []
+    sorted_candidates = sorted(
+        candidates,
+        key=lambda candidate: _source_candidate_sort_key(candidate, path),
+    )
+    return [str(candidate.resolve(strict=False)) for candidate in sorted_candidates[:_MAX_SOURCE_CANDIDATES]]
+
+
+def _local_path_from_ref(value: object, base: Path | None = None) -> Path | None:
+    text = str(value or "").strip()
+    if not text or "://" in text:
+        return None
+    try:
+        path = Path(text).expanduser()
+        if not path.is_absolute() and base is not None:
+            path = base / path
+        return path.resolve(strict=False)
+    except OSError:
+        return None
+
+
+def _looks_like_source_candidate(path: Path) -> bool:
+    name = path.name
+    if name.endswith((".lock", ".map", ".min.js")):
+        return False
+    return name in _SOURCE_CANDIDATE_NAMES or path.suffix.lower() in _SOURCE_CANDIDATE_SUFFIXES
+
+
+def _source_candidate_sort_key(path: Path, root: Path) -> tuple[int, int, int, str]:
+    try:
+        relative = path.relative_to(root)
+        parts = relative.parts
+    except ValueError:
+        parts = path.parts
+    name = path.name
+    stem = path.stem
+    is_root_file = len(parts) == 1
+    if name in _ROOT_README_NAMES and is_root_file:
+        kind_rank = 0
+    elif name in {"package.json", "pyproject.toml", "go.mod", "Cargo.toml", "setup.py"}:
+        kind_rank = 1
+    elif path.suffix.lower() in _SOURCE_CANDIDATE_SUFFIXES - {".md", ".rst"}:
+        kind_rank = 2
+    elif name.startswith("README"):
+        kind_rank = 3
+    else:
+        kind_rank = 4
+    source_part_rank = 0 if any(part in _SOURCE_DIR_PARTS for part in parts) else 1
+    entry_rank = 0 if stem in _ENTRYLIKE_STEMS else 1
+    return (kind_rank, source_part_rank, entry_rank, "/".join(parts))
+
+
+def _repair_candidate_sort_key(value: str) -> tuple[int, str]:
+    path = Path(value)
+    suffix = path.suffix.lower()
+    if suffix in _CODE_CANDIDATE_SUFFIXES:
+        return (0, value)
+    if path.name in {"package.json", "pyproject.toml", "go.mod", "Cargo.toml", "setup.py"}:
+        return (1, value)
+    return (2, value)
 
 
 def _partial_read_hint(

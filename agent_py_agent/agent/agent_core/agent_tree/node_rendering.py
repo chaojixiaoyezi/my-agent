@@ -7,7 +7,7 @@ from typing import Any
 
 from ...model_visible_refs import current_model_ref, current_model_ref_list, current_model_text
 from ...runtime_errors import runtime_error_report
-from ...subagents.models import TaskStatus, task_status_in
+from ...subagents.models import TaskStatus, task_status_in, task_status_reason_code
 from ...task_progress import progress_path, read_task_progress, task_progress_summary
 from ..runtime.owner_roots import runtime_owner_root
 
@@ -263,7 +263,7 @@ def _not_done_reason(payload: dict[str, object]) -> str:
     current_step = str(payload.get("current_step") or "").strip()
     if current_step:
         return f"current_step:{current_step}"
-    return status.lower() or "not_done"
+    return task_status_reason_code(status) or f"raw_status:{status}" if status else "not_done"
 
 
 def _list(value: object) -> list:

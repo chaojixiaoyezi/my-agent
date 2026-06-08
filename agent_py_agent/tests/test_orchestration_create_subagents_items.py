@@ -254,7 +254,7 @@ class TestCreateSubagentsItemsMode:
         result = CreateSubagentsTool(mock_agent).execute({
             "items": [{
                 "goal": "分析印尼市场",
-                "role": "grandchild_worker",
+                "role": "grandworker",
                 "agent_name": "小小傻妞-印尼市场",
             }],
         })

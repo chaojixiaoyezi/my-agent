@@ -15,10 +15,12 @@ from typing import Any
 
 from ....runtime_errors import runtime_error_report
 from ...models import (
+    SUBAGENT_DEAD_FAILURE_TYPES,
     SUBAGENT_DEAD_STATUSES,
     SUBAGENT_FAILURE_STATUSES,
     SUBAGENT_RECOVERY_CLOSED_STATUSES,
     SubAgentTask,
+    known_failure_type,
     task_status_in,
 )
 from ...protocol import build_task_address, build_task_envelope
@@ -374,12 +376,8 @@ def _needs_takeover(task: SubAgentTask) -> bool:
 
 def _is_dead(task: SubAgentTask) -> bool:
     status = task_status(task)
-    failure_type = task_text(task, "failure_type").lower()
-    return task_status_in(status, SUBAGENT_DEAD_STATUSES) or failure_type in {
-        "runner_timeout",
-        "channel_error",
-        "runner_channel_failed",
-    }
+    failure_type = known_failure_type(task_text(task, "failure_type"))
+    return task_status_in(status, SUBAGENT_DEAD_STATUSES) or failure_type in SUBAGENT_DEAD_FAILURE_TYPES
 
 
 def _is_recoverable(task: SubAgentTask) -> bool:

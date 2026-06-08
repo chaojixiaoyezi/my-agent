@@ -344,8 +344,9 @@ def test_subagent_runner_can_schedule_children_from_current_node_context():
 
         assert result.ok
         assert result.structured_output_ok
-        assert len(backend.prompts) == 2
+        assert len(backend.prompts) == 3
         assert len(loaded.child_ids) == 1
+        assert child.status == "DONE"
         assert child.parent_id == task.id
         assert child.root_id == task.id
         assert child.depth == 1

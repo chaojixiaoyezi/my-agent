@@ -29,6 +29,8 @@ from .artifact_staged_evidence import staged_source_evidence_findings
 from .artifact_static_site_contract import validate_static_site_artifact
 from .artifact_structured_contracts import (
     json_contract_findings,
+    markdown_integrity_findings,
+    markdown_local_reference_findings,
     markdown_section_findings,
     text_size_findings,
 )
@@ -216,7 +218,12 @@ def _validate_json_request(request: ArtifactAcceptanceRequest) -> ArtifactAccept
 
 
 def _validate_markdown_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
-    return _validate_markdown(Path(request.path), request.validation_contract)
+    return _validate_markdown(
+        Path(request.path),
+        request.validation_contract,
+        workspace_root=request.workspace_root,
+        reference_roots=request.reference_roots,
+    )
 
 
 def _validate_text_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
@@ -277,20 +284,23 @@ def _validate_json(path: Path, validation_contract: dict[str, object] | None = N
 def _validate_markdown(
     path: Path,
     validation_contract: dict[str, object] | None = None,
+    *,
+    workspace_root: Path | None = None,
+    reference_roots: tuple[Path | str, ...] = (),
 ) -> ArtifactAcceptanceReport:
     text = path.read_text(encoding="utf-8", errors="replace")
     if not text:
         finding = ArtifactFinding(code="ARTIFACT_EMPTY", severity="hard", message="Artifact is empty.")
         return _report_with_finding(path, "md", finding)
-    findings = advisory_artifact_findings(
-        [
-            *text_size_findings(path, text, validation_contract or {}),
-            *markdown_section_findings(path, text, validation_contract or {}),
-        ]
-    )
+    findings = [
+        *text_size_findings(path, text, validation_contract or {}),
+        *markdown_section_findings(path, text, validation_contract or {}),
+    ]
+    findings.extend(markdown_integrity_findings(path, text))
+    findings.extend(markdown_local_reference_findings(path, text, reference_roots=reference_roots))
     findings.extend(_required_text_findings(path, text, validation_contract or {}))
     findings.extend(_forbidden_text_findings(path, text, validation_contract or {}))
-    findings.extend(document_quality_artifact_findings(path, validation_contract, workspace_root=path.parent))
+    findings.extend(document_quality_artifact_findings(path, validation_contract, workspace_root=workspace_root or path.parent))
     return ArtifactAcceptanceReport(
         ok=not any(item.severity == "hard" for item in findings),
         artifact_ref=str(path),

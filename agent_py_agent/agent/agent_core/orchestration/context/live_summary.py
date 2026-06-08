@@ -218,7 +218,8 @@ def _result_refs_by_run_lines(value: object) -> list[str]:
         if summary:
             lines.append(f"    summary={summary}")
     lines.append(
-        "- result_ref_policy: read read_order first, then primary_artifact_refs/expected_outputs; "
+        "- result_ref_policy: read read_order first, then primary_artifact_refs; "
+        "expected_outputs are declared targets, not readable results until they exist or are registered; "
         "do not guess child filenames; run_closeout_ref and internal final reports are diagnostic progress refs, "
         "not the first child result."
     )

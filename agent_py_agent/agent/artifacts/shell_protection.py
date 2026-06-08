@@ -51,7 +51,7 @@ def snapshot_ready_artifacts(workspace_root: str | Path) -> list[ShellArtifactSn
     backup_root = root / "data" / "artifacts" / "shell_backups" / str(time.time_ns())
     snapshots: list[ShellArtifactSnapshot] = []
     for record in records.values():
-        if str(record.status or "").lower() != "ready":
+        if str(record.status or "") != "ready":
             continue
         path = Path(record.path).expanduser().resolve(strict=False)
         if not path.is_file():

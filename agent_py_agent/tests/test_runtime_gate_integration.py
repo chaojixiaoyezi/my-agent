@@ -423,6 +423,36 @@ def test_finalization_auto_closeout_for_final_response_after_uncontracted_task_o
     assert result.memory_compact_auto_status == "skipped_after_delivery_complete"
 
 
+def test_finalization_replaces_done_claim_when_uncontracted_closeout_fails(tmp_path):
+    task_root = tmp_path / "tasks" / "2026-06-08" / "all-agent-run-1"
+    output_dir = task_root / "output"
+    output = output_dir / "all-agent-源码分析报告.md"
+    output.parent.mkdir(parents=True)
+    output.write_text("partial artifact", encoding="utf-8")
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    ctx = _finalize_context_with_task_output(task_root, output_dir, output)
+    partial_record = {
+        **ctx.archive_tool_calls[0],
+        "parameters": {
+            **ctx.archive_tool_calls[0]["parameters"],
+            "__partial_unclosed_write": True,
+        },
+    }
+    ctx = replace(
+        ctx,
+        final_response=ModelResponse(text="任务已完成并提交验收。", backend="test"),
+        archive_tool_calls=[partial_record],
+    )
+
+    result = FinalizationService(agent).finalize(ctx)
+
+    assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
+    assert "[MAIN_AGENT_DELIVERY_REWORK_REQUIRED]" in result.response
+    assert "ARTIFACT_LAST_WRITE_PARTIAL_UNCLOSED" in result.response
+    report = json.loads((task_root / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    assert report["ok"] is False
+
+
 def test_finalization_waits_for_required_coverage_and_artifact_before_auto_closeout(tmp_path):
     task_root = tmp_path / "tasks" / "2026-06-07" / "long-read"
     output_dir = task_root / "output"

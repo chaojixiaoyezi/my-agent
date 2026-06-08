@@ -134,7 +134,6 @@ def cmd_task_search(args) -> int:
     for task in all_tasks:
         goal = task.get("goal", "").lower()
         task_id = task.get("task_id", "").lower()
-        status = task.get("status", "").lower()
         # 简单模糊匹配：query 是 goal 的子串，或 query 长度 >= 3 时 goal 包含 query
         if query in goal or query in task_id or len(query) >= 3 and any(word in goal for word in query.split()):
             matched.append(task)

@@ -42,6 +42,9 @@ compact 只做一件事：在上下文压力或显式请求下，把当前 run/t
 - 即使任务没有 required `full_source_read` 合同，work state 也必须保留已读取的分片范围。
   同一文件的 `read_file`/`read_artifact` 多段读取不能被压成“读过这个文件”一条记录；恢复
   提示要列出已登记范围和下一游标，避免 compact 后从 offset=0 重读或凭摘要猜结论。
+- 多文件/多项目任务不能只保留一个“最大进度”的 primary 游标；work state 和 continue
+  packet 必须携带 `incomplete_sources`，恢复时优先续接未完成来源，再用完整 `sources`
+  做覆盖审计。
 - 几 KB 的定位、抽取和统计类工具输出默认留在下一轮上下文；只有大输出才外置到 blob。
   compact 可以引用 blob/ref，但不能让模型必须先读外置 wrapper 才能看见刚抽出的核心事实。
 - 当前 run 若已有显式结构化 `target_coverage_contract`，它要进入 runtime fact，再进入

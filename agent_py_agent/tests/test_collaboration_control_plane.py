@@ -165,6 +165,64 @@ def test_request_status_case_variants_do_not_drive_status_buckets() -> None:
     assert is_declined_request_status("DECLINED") is False
 
 
+def test_non_protocol_request_status_is_metadata_not_machine_status(tmp_path) -> None:
+    from agent_py_agent.agent.collaboration import AgentCapability, CollaborationStore
+
+    store = CollaborationStore(tmp_path / "collaboration")
+    store.register_agent(AgentCapability(agent_id="source-b", capabilities=("query",)))
+    case = store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "非协议请求状态", 'created_by': "source-a", 'now': 10.0})
+    request = store.request_collaboration({'case_id': case.case_id, 'requester_agent_id': "source-a", 'target_agent_ids': ("source-b",), 'question': "请查证。", 'now': 11.0})
+
+    updated = store.update_request_status({'case_id': case.case_id, 'request_id': request.request_id, 'status': "COMPLETED", 'actor_agent_id': "source-b", 'summary': "大写完成不属于协议状态。", 'now': 12.0})
+    status = store.case_status(case.case_id)
+
+    assert updated.status == "pending"
+    assert updated.metadata["raw_request_status"] == "COMPLETED"
+    assert updated.metadata["request_status_protocol_error"] == "COLLABORATION_REQUEST_STATUS_INVALID"
+    assert status["requests"][0]["status"] == "pending"
+    assert status["completed_request_count"] == 0
+    assert status["pending_request_count"] == 1
+
+
+def test_non_protocol_case_status_is_metadata_not_collection_window_status(tmp_path) -> None:
+    from agent_py_agent.agent.collaboration import CollaborationStore
+
+    store = CollaborationStore(tmp_path / "collaboration")
+    case = store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "非协议 case 状态", 'created_by': "source-a", 'now': 10.0})
+
+    updated = store.record_case_status({'case_id': case.case_id, 'status': "CLOSED", 'summary': "大写关闭不属于协议状态。", 'now': 11.0})
+    status = store.case_status(case.case_id)
+
+    assert updated.status == "open"
+    assert updated.metadata["raw_case_status"] == "CLOSED"
+    assert updated.metadata["case_status_protocol_error"] == "COLLABORATION_CASE_STATUS_INVALID"
+    assert [item.case_id for item in store.list_cases(status="open")] == [case.case_id]
+    assert status["case"]["status"] == "open"
+    assert status["case_window"]["status"] == "open"
+
+
+def test_low_level_case_status_update_keeps_invalid_status_out_of_machine_state(tmp_path) -> None:
+    from agent_py_agent.agent.collaboration import CollaborationStore
+
+    store = CollaborationStore(tmp_path / "collaboration")
+    case = store.open_case(
+        {
+            'thread_id': "thread-1",
+            'task_id': "task-1",
+            'title': "底层状态更新",
+            'created_by': "source-a",
+            'now': 10.0,
+        }
+    )
+
+    updated = store.update_case_status(case.case_id, status="resolved", now=11.0)
+
+    assert updated.status == "open"
+    assert updated.metadata["raw_case_status"] == "resolved"
+    assert updated.metadata["case_status_protocol_error"] == "COLLABORATION_CASE_STATUS_INVALID"
+    assert [item.case_id for item in store.list_cases(status="open")] == [case.case_id]
+
+
 def test_collaboration_request_preserves_open_world_clue_packet(tmp_path) -> None:
     store, case, request = _open_world_clue_case(tmp_path)
     status = store.case_status(case.case_id)

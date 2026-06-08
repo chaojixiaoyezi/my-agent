@@ -9,6 +9,8 @@ from .request_status import (
     is_blocked_request_status,
     is_declined_request_status,
     is_timed_out_request_status,
+    is_urgent_priority,
+    normalize_runtime_priority,
     request_has_required_evidence,
 )
 from .store_status import CollaborationStore
@@ -82,7 +84,7 @@ class CollaborationCoordinator:
         observation = self.conversation_store.append_observation({'thread_id': case.thread_id, 'event_type': "collaboration_case_closed", 'summary': context["summary"], 'urgency': case.priority, 'source_agent_id': case.created_by, 'root_task_id': case.task_id, 'evidence_refs': context["evidence_refs"], 'requires_main_agent': True, 'requires_llm_report': True, 'now': now, 'metadata': context["metadata"]})
         if not _should_wake_main(case, context["status"]):
             return ""
-        wake = self.conversation_store.raise_wake_signal({'thread_id': case.thread_id, 'observation': observation, 'urgency': "urgent" if str(case.priority).lower() == "urgent" else "normal", 'reason': "collaboration_case_closed", 'dedupe_key': f"case:{case.case_id}:closed", 'now': now, 'metadata': context["wake_metadata"]})
+        wake = self.conversation_store.raise_wake_signal({'thread_id': case.thread_id, 'observation': observation, 'urgency': normalize_runtime_priority(case.priority), 'reason': "collaboration_case_closed", 'dedupe_key': f"case:{case.case_id}:closed", 'now': now, 'metadata': context["wake_metadata"]})
         return wake.wake_signal_id
 
 
@@ -92,7 +94,7 @@ def _should_close_case(priority, status, policy, now: float) -> bool:
     evidence_count = int(status.get("evidence_count") or 0)
     min_evidence = (
         policy.urgent_min_evidence_packets
-        if str(priority).lower() == "urgent"
+        if is_urgent_priority(priority)
         else policy.normal_min_evidence_packets
     )
     if evidence_count >= max(0, min_evidence):
@@ -249,7 +251,7 @@ def _status_counts(status: dict) -> dict:
 
 
 def _should_wake_main(case, status: dict) -> bool:
-    return bool(status.get("ready_for_main_agent")) or str(case.priority).lower() == "urgent"
+    return bool(status.get("ready_for_main_agent")) or is_urgent_priority(case.priority)
 
 
 def _summary_facts(

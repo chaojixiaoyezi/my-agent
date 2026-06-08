@@ -39,7 +39,7 @@ def _should_follow_up(ctx: Any) -> bool:
 def _created_grant(records: list) -> bool:
     return any(
         str(getattr(item, "step", "")) == "capability_route"
-        and str(getattr(item, "action", "")).lower() == "granted"
+        and str(getattr(item, "action", "")) == "granted"
         for item in records
     )
 
@@ -68,7 +68,7 @@ def _granted_run_ids(records: list) -> list[str]:
     for item in records:
         if str(getattr(item, "step", "")) != "capability_route":
             continue
-        if str(getattr(item, "action", "")).lower() != "granted":
+        if str(getattr(item, "action", "")) != "granted":
             continue
         run_id = str(getattr(item, "run_id", "") or "").strip()
         if run_id and run_id not in run_ids:

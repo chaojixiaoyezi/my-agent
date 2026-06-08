@@ -64,6 +64,29 @@ def test_target_coverage_ledger_requires_exact_covered_status():
     assert status["missing_items"] == [{"target_id": "source-a", "label": "source-a"}]
 
 
+def test_target_coverage_status_keeps_full_source_fact_records_when_display_records_are_truncated():
+    from agent_py_agent.agent.agent_core.target_coverage_ledger import target_coverage_status
+
+    records = [
+        {
+            "target_id": f"source-{index}",
+            "source_ref": f"/tmp/source-{index}.py",
+            "status": "covered",
+            "tool": "read_file",
+        }
+        for index in range(120)
+    ]
+
+    status = target_coverage_status(
+        {"target_items": [{"target_id": "source-119"}]},
+        coverage_records=records,
+    )
+
+    assert len(status["coverage_records"]) == 100
+    assert len(status["source_fact_records"]) == 120
+    assert status["source_fact_records"][-1]["source_ref"] == "/tmp/source-119.py"
+
+
 def test_target_coverage_ledger_blocks_required_missing_read_targets(tmp_path):
     from agent_py_agent.agent.agent_core.target_coverage_ledger import (
         collect_target_coverage_records,
@@ -301,6 +324,71 @@ def test_target_coverage_ledger_merges_char_windows_to_cover_full_source(tmp_pat
     )
 
     assert status["covered_count"] == 1
+    assert status["missing_count"] == 0
+    assert status["should_block"] is False
+
+
+def test_target_coverage_requires_read_files_under_source_directory(tmp_path):
+    from agent_py_agent.agent.agent_core.target_coverage_ledger import (
+        collect_target_coverage_records,
+        target_coverage_status,
+    )
+
+    project = tmp_path / "all-agent" / "ECC-main"
+    project.mkdir(parents=True)
+    readme = project / "README.md"
+    core = project / "src" / "core.ts"
+    core.parent.mkdir()
+    readme.write_text("readme", encoding="utf-8")
+    core.write_text("core", encoding="utf-8")
+
+    contract = {
+        "enforcement": "required",
+        "target_items": [
+            {
+                "target_id": "ECC-main",
+                "source_ref": str(project),
+                "coverage_kind": "source_file_under_dir",
+                "min_read_count": 2,
+            }
+        ],
+    }
+    only_listed = collect_target_coverage_records(
+        [{"tool": "list_files", "parameters": {"path": str(project)}, "ok": True}],
+        workspace_root=tmp_path,
+    )
+    status = target_coverage_status(contract, coverage_records=only_listed, workspace_root=tmp_path)
+    assert status["missing_count"] == 1
+    assert status["should_block"] is True
+
+    one_file = collect_target_coverage_records(
+        [{"tool": "read_file", "parameters": {"path": str(readme)}, "ok": True}],
+        workspace_root=tmp_path,
+    )
+    status = target_coverage_status(contract, coverage_records=one_file, workspace_root=tmp_path)
+    assert status["missing_count"] == 1
+    assert status["repair_hints"] == [
+        {
+            "target_id": "ECC-main",
+            "source_ref": str(project),
+            "coverage_kind": "source_file_under_dir",
+            "current_read_count": 1,
+            "min_read_count": 2,
+            "read_files": [str(readme.resolve())],
+            "candidate_read_files": [str(core.resolve())],
+            "recommended_tool_call": {"tool": "read_file", "path": str(core.resolve())},
+            "recommended_tool_calls": [{"tool": "read_file", "path": str(core.resolve())}],
+        }
+    ]
+
+    two_files = collect_target_coverage_records(
+        [
+            {"tool": "read_file", "parameters": {"path": str(readme)}, "ok": True},
+            {"tool": "read_file", "parameters": {"path": str(core)}, "ok": True},
+        ],
+        workspace_root=tmp_path,
+    )
+    status = target_coverage_status(contract, coverage_records=two_files, workspace_root=tmp_path)
     assert status["missing_count"] == 0
     assert status["should_block"] is False
 

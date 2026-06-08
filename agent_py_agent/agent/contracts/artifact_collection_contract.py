@@ -399,8 +399,6 @@ def _is_placeholder_value(value: object) -> bool:
         return True
     if upper in {"__FILL__", "__TODO__", "PLACEHOLDER", "TODO", "TBD", "TO_BE_FILLED"}:
         return True
-    if text in {"待补充", "待定", "未知", "暂无", "无", "..."}:
-        return True
     return upper.startswith("{") and upper.endswith("}") and len(upper) <= 80
 
 

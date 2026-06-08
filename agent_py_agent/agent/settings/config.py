@@ -24,7 +24,11 @@ from .config_sources import (
     merge_agent_config_sources,
     public_config_keys,
 )
-from .defaults import DEFAULT_COMMAND_ACCESS_MODE, DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
+from .defaults import (
+    DEFAULT_COMMAND_ACCESS_MODE,
+    DEFAULT_MODEL_MAX_TOKENS,
+    DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS,
+)
 from .memory import normalize_agent_memory_config
 from .normalize import (
     _coerce_bool_config,
@@ -171,7 +175,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_resume_auto_context_enabled: bool = False
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
-    memory_compact_auto_trigger_percent: int = 50
+    memory_compact_auto_trigger_percent: int = 70
     memory_artifact_default_read_chars: int = 4000
     memory_archive_preview_level_0_chars: int = 2048
     memory_archive_preview_level_1_chars: int = 1024
@@ -306,7 +310,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     api_key_env: str = "AGENT_API_KEY"
     model_name: str = "gpt-4o-mini"
     request_timeout: int = 240
-    max_tokens: int = 1024
+    max_tokens: int = DEFAULT_MODEL_MAX_TOKENS
     model_context_window_tokens: int = 200_000
     temperature: str = "0.2"
     anthropic_version: str = "2023-06-01"

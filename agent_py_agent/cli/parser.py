@@ -10,20 +10,20 @@ from __future__ import annotations
 
 import argparse
 
+from .background_main_agent import add_background_main_agent_subcommands
 from .commands import (
     add_bench_model_command,
+    add_collaboration_subcommands,
     add_guidance_subcommand,
     add_learning_subcommand,
     add_operations_subcommands,
     add_task_subcommands,
 )
-from .commands.background_main_agent import add_background_main_agent_subcommands
-from .commands.collaboration import add_collaboration_subcommands
 from .common import DEFAULT_CONFIG, configure_stdio
 from .contracts_commands import add_contracts_subcommand
 from .gateway_client import cmd_default
 from .real_e2e_commands import add_real_e2e_subcommand
-from .subcommands_agents import add_subagents_subcommands
+from .subagents import add_subagents_subcommands
 from .subcommands_basic import (
     add_basic_subcommands,
     add_local_store_subcommands,

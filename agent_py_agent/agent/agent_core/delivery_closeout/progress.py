@@ -7,10 +7,11 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from ..main_agent_delivery_progress_roots import work_progress_roots
-from .artifacts import _artifact_path
+from .artifacts import CLOSEOUT_DIR, _artifact_path
 from .config import delivery_closeout_config
-from .recovery import _recovery_actions
+from .recovery import _recovery_actions, failed_gate_payloads
+
+PROGRESS_LEDGER = "progress_ledger.jsonl"
 
 
 @dataclass(frozen=True)
@@ -311,3 +312,155 @@ def _dir_signature(path: Path, workspace_root: Path) -> str:
         separators=(",", ":"),
     )
     return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def work_progress_roots(workspace_root: Path, contract: dict[str, Any]) -> list[Path]:
+    roots = [workspace_root / "outputs", workspace_root / "scripts", workspace_root / "data"]
+    roots.extend(_contract_progress_paths(workspace_root, contract))
+    return _dedupe_paths(roots)
+
+
+def _contract_progress_paths(workspace_root: Path, contract: dict[str, Any]) -> list[Path]:
+    return [
+        *_artifact_progress_paths(workspace_root, contract.get("artifacts")),
+        *_bootstrap_progress_paths(workspace_root, contract.get("bootstrap_contract")),
+    ]
+
+
+def _artifact_progress_paths(workspace_root: Path, artifacts: object) -> list[Path]:
+    paths: list[Path] = []
+    for item in _dict_items(artifacts):
+        paths.extend(_resolved_contract_paths(workspace_root, item, ("preferred_path", "path")))
+        paths.extend(_validation_progress_paths(workspace_root, item.get("validation_contract")))
+    return paths
+
+
+def _validation_progress_paths(workspace_root: Path, validation: object) -> list[Path]:
+    if not isinstance(validation, dict):
+        return []
+    return _staging_progress_paths(workspace_root, validation.get("staging_contract"))
+
+
+def _bootstrap_progress_paths(workspace_root: Path, bootstrap: object) -> list[Path]:
+    if not isinstance(bootstrap, dict):
+        return []
+    paths: list[Path] = []
+    for target in _dict_items(bootstrap.get("materialization_targets")):
+        paths.extend(_resolved_contract_paths(workspace_root, target, ("workspace_relative_path", "path")))
+    return paths
+
+
+def _staging_progress_paths(workspace_root: Path, staging: object) -> list[Path]:
+    if not isinstance(staging, dict):
+        return []
+    paths = _resolved_contract_paths(
+        workspace_root,
+        staging,
+        _staging_ref_keys(staging),
+    )
+    paths.extend(_checkpoint_progress_paths(workspace_root, staging.get("checkpoint_refs")))
+    return paths
+
+
+def _staging_ref_keys(staging: dict[str, Any]) -> tuple[str, ...]:
+    keys = [
+        str(staging.get("source_ref_key") or "").strip(),
+        str(staging.get("input_ref_key") or "").strip(),
+        str(staging.get("output_ref_key") or "").strip(),
+        "source_json_ref",
+        "source_markdown_ref",
+        "source_ref",
+        "input_ref",
+        "workbook_ref",
+        "pdf_ref",
+        "output_ref",
+        "artifact_ref",
+    ]
+    return tuple(dict.fromkeys(key for key in keys if key))
+
+
+def _checkpoint_progress_paths(workspace_root: Path, refs: object) -> list[Path]:
+    if not isinstance(refs, list):
+        return []
+    return [
+        path
+        for ref in refs
+        if isinstance(ref, str)
+        for path in [_artifact_path(ref, workspace_root)]
+        if path is not None
+    ]
+
+
+def _resolved_contract_paths(workspace_root: Path, payload: dict[str, Any], keys: tuple[str, ...]) -> list[Path]:
+    return [
+        path
+        for key in keys
+        for value in [payload.get(key)]
+        if isinstance(value, str)
+        for path in [_artifact_path(value, workspace_root)]
+        if path is not None
+    ]
+
+
+def _dict_items(value: object) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        marker = str(path)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        deduped.append(path)
+    return deduped
+
+
+def append_delivery_progress_event(
+    workspace_root: Path,
+    report: dict[str, Any],
+    *,
+    blocked: bool,
+) -> Path:
+    path = workspace_root / CLOSEOUT_DIR / PROGRESS_LEDGER
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.open("a", encoding="utf-8").write(
+        json.dumps(
+            progress_event_payload(report, blocked=blocked),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    return path
+
+
+def progress_event_payload(report: dict[str, Any], *, blocked: bool) -> dict[str, Any]:
+    progress = report.get("delivery_progress")
+    progress_payload = progress if isinstance(progress, dict) else {}
+    return {
+        "schema_version": "delivery_progress_ledger.v1",
+        "event_type": "delivery_closeout_progress",
+        "case_id": str(report.get("case_id") or ""),
+        "request_id": str(report.get("request_id") or ""),
+        "run_id": str(report.get("run_id") or ""),
+        "task_id": str(report.get("task_id") or ""),
+        "ok": bool(report.get("ok") is True and not failed_gate_payloads(report)),
+        "blocked": bool(blocked),
+        "failure_fingerprint": str(progress_payload.get("failure_fingerprint") or ""),
+        "work_progress_fingerprint": str(progress_payload.get("work_progress_fingerprint") or ""),
+        "unchanged_failure_count": _safe_int(progress_payload.get("unchanged_failure_count")),
+        "no_progress_block_threshold": _safe_int(progress_payload.get("no_progress_block_threshold")),
+        "failed_gates": failed_gate_payloads(report),
+        "recovery_actions": [dict(item) for item in progress_payload.get("recovery_actions", []) if isinstance(item, dict)]
+        if isinstance(progress_payload.get("recovery_actions"), list)
+        else [],
+        "pending_materialization_targets": [
+            dict(item) for item in progress_payload.get("pending_materialization_targets", []) if isinstance(item, dict)
+        ]
+        if isinstance(progress_payload.get("pending_materialization_targets"), list)
+        else [],
+    }

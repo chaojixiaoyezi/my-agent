@@ -1260,6 +1260,7 @@ my-agent subagents-dispatch --watch --planner --interval 30
 | `--note <text>` | - | 写入调度关联审核记录的备注。 |
 | `--instruction <text>` | - | 给本轮 runner 的额外指令。 |
 | `--background-launch-id <id>` | - | 内部字段：`create_subagents` 后台启动时写回任务树生命周期，普通用户不需要手填。 |
+| `--workspace-root <path>` | - | 内部字段：后台自动 dispatch 继承父代理当前工作区，普通用户不需要手填。 |
 | `--max-cards <n>` | `0` | runner 最多注入多少张能力卡，`0` 表示不限制。 |
 | `--no-probe` | `false` | 执行 runner 前不做通道健康检查。 |
 | `--take-over-by <name>` | - | 接管动作的接管者，apply takeover 时必填。 |
@@ -1503,6 +1504,9 @@ my-agent gateway ask "总结一下当前项目状态"
 ```
 
 适合短任务、确认 gateway 能否正常调用模型、或者临时让后台主代理回答一句话。
+普通 `gateway ask` 默认写入本地 `gateway-cli/default` 会话；同一 owner/workspace
+下的后续 ask 会通过结构化 conversation task link 找到活跃任务树和 task output/work，
+不会靠自然语言猜“刚刚那个任务”。
 
 异步用法：只发任务，不等结果。
 
@@ -1537,6 +1541,7 @@ my-agent gateway result gwreq-1777442684-0b7ac8cb
 | `restart` | `--force` | 停止超时后强制终止旧进程。 |
 | `restart` | `--force-lock` | 重启后传给内部 daemon。 |
 | `logs` | `--lines <n>` | 显示最后多少行日志，`0` 表示全部。 |
+| `run` | `--workspace-root <path>` | 内部字段：`start` 把父进程当前工作区传给后台 gateway，普通用户不需要手填。 |
 | `ask` | `--inject <text>` | 给本次 gateway 请求动态注入 prompt，可多次传入。 |
 | `ask` | `--prompt-file <path>` | 给本次请求追加 prompt 文件，可多次传入。 |
 | `ask` | `--no-save` | 不把本次 gateway 对话保存进记忆。 |

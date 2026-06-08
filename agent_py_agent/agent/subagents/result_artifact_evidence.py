@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from ..artifacts.registry import ArtifactRegistration, register_artifact
 from ..runtime_errors import runtime_error_report
@@ -35,6 +36,34 @@ def normalize_artifact_items(task: SubAgentTask, artifacts: list[dict[str, objec
             copied = _with_registry_ref(task, copied)
             normalized.append(copied)
     return normalized
+
+
+def materialize_missing_declared_output_artifacts(
+    task: SubAgentTask,
+    parsed: Any,
+    artifacts: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Write structured successful runner results into missing declared output slots."""
+
+    declared = _declared_output_refs(task)
+    if not declared:
+        return []
+    existing_refs = {artifact_ref(item) for item in artifacts}
+    materialized: list[dict[str, object]] = []
+    for ref in declared:
+        target = _materializable_declared_output_path(task, ref)
+        if target is None or target.exists() or str(target) in existing_refs:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_render_declared_output_markdown(task, parsed, ref), encoding="utf-8")
+        materialized.append(
+            {
+                "path": str(target),
+                "kind": "md",
+                "summary": "materialized structured subagent result for declared output",
+            }
+        )
+    return materialized
 
 
 def _normalized_artifact_item(task: SubAgentTask, item: object) -> dict[str, object] | None:
@@ -80,6 +109,110 @@ def _append_task_registry_ref(task: SubAgentTask, record: dict[str, object]) -> 
     rows.append(record)
     attrs["artifact_registry_refs"] = rows
     task.attributes = attrs
+
+
+def _declared_output_refs(task: SubAgentTask) -> list[str]:
+    attrs = getattr(task, "attributes", {}) or {}
+    if not isinstance(attrs, dict):
+        return []
+    refs: list[str] = []
+    for field in ("output_files", "output_refs"):
+        value = attrs.get(field)
+        if isinstance(value, str):
+            refs.append(value)
+        elif isinstance(value, list):
+            refs.extend(str(item or "") for item in value)
+    return list(dict.fromkeys(item.strip() for item in refs if item.strip()))
+
+
+def _materializable_declared_output_path(task: SubAgentTask, ref: str) -> Path | None:
+    if not ref or "://" in ref:
+        return None
+    try:
+        path = Path(ref).expanduser()
+    except OSError:
+        return None
+    if not path.is_absolute():
+        path = _relative_declared_output_path(task, path)
+    if path is None:
+        return None
+    resolved = path.resolve(strict=False)
+    return resolved if _inside_allowed_declared_output_root(task, resolved) else None
+
+
+def _relative_declared_output_path(task: SubAgentTask, path: Path) -> Path | None:
+    task_workspace = str(getattr(task, "task_workspace_dir", "") or "").strip()
+    if task_workspace:
+        return Path(task_workspace).expanduser() / path
+    task_dir = str(getattr(task, "task_dir", "") or "").strip()
+    return Path(task_dir).expanduser().parent / path if task_dir else None
+
+
+def _inside_allowed_declared_output_root(task: SubAgentTask, path: Path) -> bool:
+    roots = [
+        _path_or_none(getattr(task, "task_workspace_dir", "")),
+        _path_or_none(getattr(task, "agent_run_workspace_dir", "")),
+        _path_or_none(getattr(task, "task_dir", "")),
+    ]
+    for root in roots:
+        if root is not None and _same_or_inside(path, root if root.is_dir() else root.parent):
+            return True
+    return False
+
+
+def _path_or_none(value: object) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return Path(text).expanduser().resolve(strict=False)
+    except OSError:
+        return None
+
+
+def _same_or_inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def _render_declared_output_markdown(task: SubAgentTask, parsed: Any, original_ref: str) -> str:
+    lines = [
+        "# Subagent Result",
+        "",
+        f"- run_id: {getattr(task, 'id', '')}",
+        f"- status: {getattr(parsed, 'status', '')}",
+        f"- declared_output_ref: {original_ref}",
+        "",
+    ]
+    summary = str(getattr(parsed, "summary", "") or "").strip()
+    if summary:
+        lines.extend(["## Summary", "", summary, ""])
+    _append_structured_list(lines, "Findings", getattr(parsed, "findings", []) or [])
+    _append_structured_list(lines, "Evidence Packets", getattr(parsed, "evidence_packets", []) or [])
+    _append_structured_list(lines, "Artifacts", getattr(parsed, "artifacts", []) or [])
+    next_actions = [str(item or "").strip() for item in getattr(parsed, "next_actions", []) or [] if str(item or "").strip()]
+    if next_actions:
+        lines.extend(["## Next Actions", ""])
+        lines.extend(f"- {item}" for item in next_actions)
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _append_structured_list(lines: list[str], title: str, items: list[object]) -> None:
+    rows = [item for item in items if item]
+    if not rows:
+        return
+    lines.extend([f"## {title}", ""])
+    for item in rows:
+        if isinstance(item, dict):
+            body = json.dumps(item, ensure_ascii=False, sort_keys=True)
+        else:
+            body = str(item)
+        lines.append(f"- {body}")
+    lines.append("")
 
 
 def _registry_workspace_root(task: SubAgentTask, path: Path | None) -> Path | None:

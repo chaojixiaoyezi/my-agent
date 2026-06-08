@@ -145,12 +145,12 @@ def test_hierarchy_schedule_duplicate_domain_ignores_depth_markers(tmp_path):
             child_specs=[
                 HierarchyChildSpec(
                     goal="创建 depth=3 孙孙节点完成 index.html/register.html/style.css/app.js。",
-                    role="child_coordinator",
+                    role="coordinator",
                     agent_name="小小傻妞-前端协调A",
                 ),
                 HierarchyChildSpec(
                     goal="创建 depth=3 孙孙节点完成 login.html/flow-a.html/flow-b.html。",
-                    role="child_coordinator",
+                    role="coordinator",
                     agent_name="小小傻妞-前端协调B",
                 ),
             ],
@@ -172,7 +172,7 @@ def test_hierarchy_schedule_allows_duplicate_verified_leaf_targets(tmp_path):
             child_specs=[
                 HierarchyChildSpec(
                     goal="rewrite register.html and login.html",
-                    role="leaf_worker",
+                    role="worker",
                     agent_name="auth-leaf-writer",
                     attributes={"output_refs": ["deliverables/shop/build/register.html", "deliverables/shop/build/login.html"]},
                 )
@@ -186,7 +186,7 @@ def test_hierarchy_schedule_allows_duplicate_verified_leaf_targets(tmp_path):
             child_specs=[
                 HierarchyChildSpec(
                     goal="write password-reset.html",
-                    role="leaf_worker",
+                    role="worker",
                     agent_name="password-reset-leaf",
                 )
             ],
@@ -212,7 +212,7 @@ def test_hierarchy_schedule_allows_explicit_repair_leaf_for_existing_target(tmp_
             child_specs=[
                 HierarchyChildSpec(
                     goal="修复 app.js，补齐 getUrlParam 和 setUrlParam 函数。",
-                    role="leaf_worker",
+                    role="worker",
                     agent_name="app-js-repair-worker",
                 )
             ],
@@ -273,7 +273,7 @@ def test_hierarchy_schedule_allows_leaf_referencing_shared_assets(tmp_path):
                         "- flow-a.html 引入 style.css 和 app.js\n"
                         "- flow-b.html 链接到 flow-done.html"
                     ),
-                    role="leaf_worker",
+                    role="worker",
                     agent_name="小小小傻妞-cart-writer",
                 )
             ],
@@ -304,7 +304,7 @@ def _auth_parent_with_verified_leaf(manager: SubAgentManager):
         parent_id=parent.id,
         root_id=root.id,
         depth=2,
-        role="leaf_worker",
+        role="worker",
         agent_name="auth-worker",
     )
     _mark_leaf_verified_with_artifacts(
@@ -334,7 +334,7 @@ def _shared_parent_with_verified_leaf(manager: SubAgentManager):
         parent_id=parent.id,
         root_id=root.id,
         depth=2,
-        role="leaf_worker",
+        role="worker",
         agent_name="app-js-worker",
     )
     _mark_leaf_verified_with_artifacts(

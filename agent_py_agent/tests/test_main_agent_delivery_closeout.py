@@ -13,9 +13,11 @@ from pathlib import Path
 from agent_py_agent.agent.agent_core.delivery_closeout.config import DeliveryCloseoutConfig
 from agent_py_agent.agent.agent_core.exploration_fuse_config import ExplorationFuseConfig
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.task_progress import write_task_progress
 from agent_py_agent.tests.support.main_agent_delivery_closeout_fixtures import (
     ArtifactFindingRepairBackend,
     CloseoutReworkBackend,
@@ -47,6 +49,7 @@ def _agent(
         enable_tools=True,
         memory_path="memory.jsonl",
         max_tool_rounds=max_tool_rounds,
+        my_agent_home=str(workspace / ".my-agent"),
         run_task_workspace_enabled=False,
     )
     agent = SimpleAgent(cfg, workspace)
@@ -170,6 +173,117 @@ def test_submit_for_acceptance_without_contract_closes_after_current_task_output
         assert report["artifacts"][0]["path"] == str((output_dir / "final_analysis_report.md").resolve(strict=False))
         assert report["artifacts"][0]["registry_ref"]["status"] == "ready"
         assert (task_root / "data" / "artifacts" / "registry.jsonl").exists()
+
+
+def test_uncontracted_task_output_closeout_repairs_when_task_progress_is_open():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        task_root = workspace / "tasks" / "2026-06-03" / "all-agent-架构分析"
+        output_dir = task_root / "output"
+        work_dir = task_root / "work"
+        run_id = "run-open-progress"
+        backend = NoContractTaskOutputReportBackend(output_dir / "final_analysis_report.md")
+        agent = _agent(workspace, backend, max_tool_rounds=3)
+        write_task_progress(
+            runtime_owner_root(agent),
+            run_id,
+            {
+                "summary": "源码已读，最终报告仍在写",
+                "next_action": "继续生成最终报告",
+                "items": [
+                    {"id": "read-sources", "status": "done", "evidence": ["README.md"]},
+                    {"id": "write-final-report", "status": "in_progress"},
+                ],
+            },
+        )
+
+        result = agent.run(
+            "写一份最终分析报告。",
+            params=RunParams(
+                save=False,
+                run_id=run_id,
+                task_attributes={
+                    "run_workspace": {
+                        "task_root": str(task_root),
+                        "output_dir": str(output_dir),
+                        "work_dir": str(work_dir),
+                    }
+                },
+            ),
+        )
+        report = _closeout_report(task_root)
+
+        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
+        assert report["ok"] is False
+        assert report["task_progress_closeout_gate"]["allowed"] is False
+        assert report["task_progress_closeout_gate"]["status"] == "NEED_REPAIR"
+        assert "TASK_PROGRESS_OPEN_ITEMS" in {
+            finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
+        }
+
+
+def test_coverage_only_contract_blocks_task_output_closeout_until_sources_are_read():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        source_root = workspace / "sources"
+        source_a = source_root / "A-main"
+        source_b = source_root / "B-main"
+        source_a.mkdir(parents=True)
+        source_b.mkdir()
+        readme_a = source_a / "README.md"
+        readme_b = source_b / "README.md"
+        readme_a.write_text("A architecture", encoding="utf-8")
+        readme_b.write_text("B architecture", encoding="utf-8")
+        task_root = workspace / "tasks" / "2026-06-08" / "source-analysis"
+        output_dir = task_root / "output"
+        work_dir = task_root / "work"
+        report_path = output_dir / "final_analysis_report.md"
+        backend = CoverageOnlyTaskOutputReportBackend(readme_a, readme_b, report_path)
+        contract = {
+            "schema_version": "delivery_contract.v1",
+            "artifacts": [],
+            "target_coverage_contract": {
+                "scope_label": "source projects",
+                "enforcement": "required",
+                "target_items": [
+                    {
+                        "target_id": "A-main",
+                        "source_ref": str(source_a),
+                        "coverage_kind": "source_file_under_dir",
+                        "min_read_count": 1,
+                    },
+                    {
+                        "target_id": "B-main",
+                        "source_ref": str(source_b),
+                        "coverage_kind": "source_file_under_dir",
+                        "min_read_count": 1,
+                    },
+                ],
+            },
+        }
+
+        result = _agent(workspace, backend, max_tool_rounds=6).run(
+            "读两个源码目录并写最终分析报告。",
+            params=RunParams(
+                save=False,
+                delivery_contract=contract,
+                task_attributes={
+                    "run_workspace": {
+                        "task_root": str(task_root),
+                        "output_dir": str(output_dir),
+                        "work_dir": str(work_dir),
+                    }
+                },
+            ),
+        )
+        report = _closeout_report(task_root)
+
+        assert backend.calls == 4
+        assert backend.saw_coverage_repair is True
+        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
+        assert report["ok"] is True
+        assert report["target_coverage_status"]["missing_count"] == 0
+        assert "B architecture" in report_path.read_text(encoding="utf-8")
 
 
 def test_tool_loop_does_not_block_immediately_on_malformed_validation_contract_with_artifact_target():
@@ -447,6 +561,72 @@ class NoContractTaskOutputReportBackend:
         if self.calls == 2:
             return ModelResponse(
                 text='[TOOL_CALL]\n{"tool":"submit_for_acceptance","note":"最终报告已写入 task output，提交验收。"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        return ModelResponse(text="不应该继续运行。", backend=self.name)
+
+
+class CoverageOnlyTaskOutputReportBackend:
+    name = "fake_coverage_only_task_output_report_backend"
+
+    def __init__(self, readme_a: Path, readme_b: Path, report_path: Path):
+        self.readme_a = readme_a
+        self.readme_b = readme_b
+        self.report_path = report_path
+        self.calls = 0
+        self.saw_coverage_repair = False
+
+    def generate(self, prompt: str, on_chunk=None):
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    + json.dumps({"tool": "read_file", "path": str(self.readme_a)}, ensure_ascii=False)
+                    + "\n[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        if self.calls == 2:
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    + json.dumps(
+                        {
+                            "tool": "write_file",
+                            "path": str(self.report_path),
+                            "content": "# 最终分析报告\n\nA architecture",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        if self.calls == 3:
+            self.saw_coverage_repair = "target_coverage_status" in prompt and "B-main" in prompt
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    + json.dumps({"tool": "read_file", "path": str(self.readme_b)}, ensure_ascii=False)
+                    + "\n[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        if self.calls == 4:
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    + json.dumps(
+                        {
+                            "tool": "write_file",
+                            "path": str(self.report_path),
+                            "content": "# 最终分析报告\n\nA architecture\n\nB architecture",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n[/TOOL_CALL]"
+                ),
                 backend=self.name,
             )
         return ModelResponse(text="不应该继续运行。", backend=self.name)

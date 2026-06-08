@@ -931,6 +931,80 @@ def test_compact_continue_packet_carries_read_coverage_beyond_clipped_tool_progr
     assert 'read_file(path="data/big.txt", offset=60000, max_chars=50000)' in packet["resume_focus"]["next_action"]
 
 
+def test_compact_continue_packet_prioritizes_incomplete_source_over_completed_primary() -> None:
+    packet = build_compact_continue_packet(
+        CompactContinuePacketRequest(
+            metadata={"apply_id": "apply-multi-source", "plan_id": "plan-multi-source"},
+            work_state={
+                "goal": "分析多个项目源码。",
+                "phase": "compact_apply",
+                "next_step": "继续分析剩余项目。",
+                "next_actions": ["继续分析剩余项目。"],
+                "read_coverage": _multi_source_read_coverage(),
+                "tool_progress": [],
+            },
+            consistency={"status": "ok"},
+            action_guard={"allowed_to_continue": True, "status": "allowed"},
+            handoff={},
+            recommended_read_paths=[],
+            next_actions=["继续分析剩余项目。"],
+            subagent_owner_refs={},
+            main_context_bundle={},
+        )
+    )
+
+    focus = packet["resume_focus"]
+    snapshot = packet["work_state_snapshot"]
+
+    assert snapshot["read_coverage"]["incomplete_source_count"] == 2
+    assert focus["captured_refs"]["incomplete_source_coverage"][0]["source_path"] == "/repo/project-b/core.py"
+    assert focus["next_action"].startswith("根据本轮工具读取账本继续 /repo/project-b/core.py")
+    assert 'read_file(path="/repo/project-b/core.py", offset=500, max_chars=50000)' in focus["next_action"]
+    assert "/repo/project-a/README.md" not in focus["next_action"]
+
+
+def _multi_source_read_coverage() -> dict[str, object]:
+    completed = _char_coverage_source("/repo/project-a/README.md", covered=1000, total=1000)
+    incomplete = [
+        _char_coverage_source("/repo/project-b/core.py", covered=500, total=2000),
+        _line_coverage_source("/repo/project-c/routes.py", covered=40, total=120),
+    ]
+    return {
+        "schema_version": 1,
+        "source_count": 3,
+        "incomplete_source_count": len(incomplete),
+        "primary": completed,
+        "sources": [completed, *incomplete],
+        "incomplete_sources": incomplete,
+    }
+
+
+def _char_coverage_source(source_path: str, *, covered: int, total: int) -> dict[str, object]:
+    return {
+        "kind": "char_window",
+        "source_path": source_path,
+        "covered_until": covered,
+        "covered_until_offset": covered,
+        "total": total,
+        "total_chars": total,
+        "next_offset": 0 if covered >= total else covered,
+        "complete": covered >= total,
+    }
+
+
+def _line_coverage_source(source_path: str, *, covered: int, total: int) -> dict[str, object]:
+    return {
+        "kind": "line_window",
+        "source_path": source_path,
+        "covered_until": covered,
+        "covered_until_line": covered,
+        "total": total,
+        "total_lines": total,
+        "next_start_line": 0 if covered >= total else covered + 1,
+        "complete": covered >= total,
+    }
+
+
 def test_compact_continue_packet_does_not_advance_cursor_for_failed_read(tmp_path: Path) -> None:
     first = tmp_path / "read-1.json"
     first.write_text(

@@ -333,7 +333,7 @@ def _hierarchical_schedule_tool_call_response(backend: str) -> ModelResponse:
             '"max_depth":3,'
             '"max_children":4,'
             '"children":[{'
-            '"role":"child_coordinator",'
+            '"role":"coordinator",'
             '"agent_name":"child-catalog",'
             '"goal":"作为主节点的下一层，继续拆分目录和条目列表实现任务",'
             '"allowed_tools":["schedule_child_subagents","dispatch_subagents","inspect_agent_tree","read_file","write_file"],'
@@ -365,7 +365,7 @@ def _hierarchical_schedule_result_response(backend: str) -> ModelResponse:
             "  ],\n"
             '  "patches": [],\n'
             '  "lessons": [],\n'
-            '  "next_actions": ["dispatch_child_coordinator_from_parent"],\n'
+            '  "next_actions": ["dispatch_coordinator_from_parent"],\n'
             '  "blocked_reason": "",\n'
             '  "failure_type": ""\n'
             "}\n"

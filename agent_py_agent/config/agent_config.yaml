@@ -99,7 +99,7 @@ auto_save_memory: true
 # - memory_resume_auto_context_limit 表示自动恢复最多拿多少条线索，范围 1-50。
 # - compact 提前提示优先读取当前模型后端暴露的真实上下文窗口；拿不到时按 200K 通用窗口估算。
 # - memory_compact_auto_trigger_percent 控制上下文使用到多少百分比时自动 compact：
-#   不写默认 50；0 表示 100；乱填回默认；大于100 => 100；小于50 => 50；50-100 => 按填写值。
+#   不写默认 70；0 表示 100；乱填回默认；大于100 => 100；小于50 => 50；50-100 => 按填写值。
 # - 保存型运行默认执行非破坏性 apply + auto resume + guard；save=false 时只生成计划，不写入 compact apply。
 # - 自动 compact 续接不再设最大深度；只要 compact 包可恢复，系统会继续同一个任务，不会因为普通任务缺少验收/测试备注而停车。
 # - 运行中 raw archive 和 runtime_fact 是 compact/resume 的基础事实源，随持久化运行默认启用，不提供单独关闭开关。
@@ -114,7 +114,7 @@ memory_rule_receipt_enabled: true
 memory_resume_auto_context_enabled: false
 memory_resume_auto_context_mode: "trigger"
 memory_resume_auto_context_limit: 5
-memory_compact_auto_trigger_percent: 50
+memory_compact_auto_trigger_percent: 70
 
 # Memory / compact / artifact 默认预算：
 # - 这些值只控制“默认读取多少、预览多少、扫描多少”，不是数据保留上限。

@@ -49,8 +49,9 @@
   不再作为当前 owner 的事实源。
 - `rollup_ledger.jsonl` 只在子代理状态签名变化时追加；心跳式保存不应制造新的 compact 包。
 - `read_file` / `read_artifact` 的恢复游标来自结构化工具记录；旧状态词、summary 和人工描述不能证明某段已经读过。
-- compact work-state 的 `read_coverage` 同时保留 `primary` 主游标和 `sources` 多源覆盖摘要；
-  多文件/多项目任务恢复时先看 `sources` 判断每个 source_path 的覆盖范围，不能只按一个最大文件游标续接。
+- compact work-state 的 `read_coverage` 同时保留 `primary` 主游标、`sources` 多源覆盖摘要和
+  `incomplete_sources` 未完成来源队列；多文件/多项目任务恢复时先从 `incomplete_sources`
+  续接下一段，再用 `sources` 审计每个 source_path 的覆盖范围，不能只按一个最大文件游标续接。
 - `list_files`、`find_files`、`search_text` 的分页续接来自结构化 `page_window`；
   `next_offset` 可以继续展示在工具正文里给人看，但 compact/resume 只能从 `page_window` 恢复下一页位置。
 - compact handoff 的 final/running/terminal 判断只读当前协议状态：`DONE` 是 final，

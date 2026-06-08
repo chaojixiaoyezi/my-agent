@@ -6,7 +6,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from ..subagents.models import SubAgentRunnerResult, SubAgentTask, TaskStatus
+from ..subagents.models import FailureType, SubAgentRunnerResult, SubAgentTask, TaskStatus
 
 
 @dataclass
@@ -93,7 +93,7 @@ class FailureAnalysisService:
     def analyze_timeout(self, task: SubAgentTask, runner_result: SubAgentRunnerResult) -> FailureAnalysis:
         if task.runner_attempts >= self.max_retry_attempts:
             return FailureAnalysis(
-                failure_type="runner_timeout",
+                failure_type=FailureType.RUNNER_TIMEOUT.value,
                 root_cause="task_too_large",
                 suggested_action="split_task",
                 details={"attempts": task.runner_attempts, "runner_last_error": task.runner_last_error},
@@ -104,7 +104,7 @@ class FailureAnalysisService:
         current_timeout = _get_current_timeout(task)
         if current_timeout >= self.max_timeout:
             return FailureAnalysis(
-                failure_type="runner_timeout",
+                failure_type=FailureType.RUNNER_TIMEOUT.value,
                 root_cause="task_too_large",
                 suggested_action="split_task",
                 details={"current_timeout": current_timeout, "max_timeout": self.max_timeout, "attempts": task.runner_attempts},
@@ -114,7 +114,7 @@ class FailureAnalysisService:
             )
         new_timeout = min(current_timeout * 1.5, self.max_timeout)
         return FailureAnalysis(
-            failure_type="runner_timeout",
+            failure_type=FailureType.RUNNER_TIMEOUT.value,
             root_cause="timeout",
             suggested_action="increase_timeout_and_retry",
             details={"current_timeout": current_timeout, "new_timeout": new_timeout, "attempts": task.runner_attempts},
@@ -126,7 +126,7 @@ class FailureAnalysisService:
     def analyze_capability(self, task: SubAgentTask, runner_result: SubAgentRunnerResult) -> FailureAnalysis:
         if task.capability_grants:
             return FailureAnalysis(
-                failure_type="capability_request",
+                failure_type=FailureType.CAPABILITY_REQUEST.value,
                 root_cause="insufficient_grant",
                 suggested_action="manual_review",
                 details={"grant_count": len(task.capability_grants), "request_count": len(task.capability_requests)},
@@ -134,7 +134,7 @@ class FailureAnalysisService:
                 split_suggestions=[], relevant_memories=[],
             )
         return FailureAnalysis(
-            failure_type="capability_request",
+            failure_type=FailureType.CAPABILITY_REQUEST.value,
             root_cause="capability_missing",
             suggested_action="manual_capability_grant",
             details={"open_requests": len(task.capability_requests)},
@@ -145,7 +145,7 @@ class FailureAnalysisService:
     def analyze_parse_error(self, task: SubAgentTask, runner_result: SubAgentRunnerResult) -> FailureAnalysis:
         if task.runner_attempts < self.max_retry_attempts:
             return FailureAnalysis(
-                failure_type="structured_output_parse_error",
+                failure_type=FailureType.STRUCTURED_OUTPUT_PARSE_ERROR.value,
                 root_cause="parse_error",
                 suggested_action="retry_with_same_timeout",
                 details={"parse_error": runner_result.structured_parse_error, "attempts": task.runner_attempts},
@@ -153,7 +153,7 @@ class FailureAnalysisService:
                 split_suggestions=[], relevant_memories=[],
             )
         return FailureAnalysis(
-            failure_type="structured_output_parse_error",
+            failure_type=FailureType.STRUCTURED_OUTPUT_PARSE_ERROR.value,
             root_cause="persistent_parse_error",
             suggested_action="manual_review",
             details={"parse_error": runner_result.structured_parse_error, "attempts": task.runner_attempts},
@@ -164,7 +164,7 @@ class FailureAnalysisService:
     def analyze_tool_failure(self, task: SubAgentTask, runner_result: SubAgentRunnerResult) -> FailureAnalysis:
         if task.runner_attempts < self.max_retry_attempts:
             return FailureAnalysis(
-                failure_type=task.failure_type or "tool_failure",
+                failure_type=task.failure_type or FailureType.TOOL_FAILURE.value,
                 root_cause="tool_transient_error",
                 suggested_action="retry_with_same_timeout",
                 details={"runner_last_error": task.runner_last_error, "attempts": task.runner_attempts},
@@ -172,7 +172,7 @@ class FailureAnalysisService:
                 split_suggestions=[], relevant_memories=[],
             )
         return FailureAnalysis(
-            failure_type=task.failure_type or "tool_failure",
+            failure_type=task.failure_type or FailureType.TOOL_FAILURE.value,
             root_cause="persistent_tool_error",
             suggested_action="manual_review",
             details={"runner_last_error": task.runner_last_error, "attempts": task.runner_attempts},
@@ -183,7 +183,7 @@ class FailureAnalysisService:
     def analyze_model_error(self, task: SubAgentTask, runner_result: SubAgentRunnerResult) -> FailureAnalysis:
         if task.runner_attempts < self.max_retry_attempts:
             return FailureAnalysis(
-                failure_type=task.failure_type or "model_error",
+                failure_type=task.failure_type or FailureType.MODEL_ERROR.value,
                 root_cause="model_transient_error",
                 suggested_action="retry_with_same_timeout",
                 details={"runner_last_error": task.runner_last_error, "attempts": task.runner_attempts},
@@ -191,7 +191,7 @@ class FailureAnalysisService:
                 split_suggestions=[], relevant_memories=[],
             )
         return FailureAnalysis(
-            failure_type=task.failure_type or "model_error",
+            failure_type=task.failure_type or FailureType.MODEL_ERROR.value,
             root_cause="persistent_model_error",
             suggested_action="manual_review",
             details={"runner_last_error": task.runner_last_error, "attempts": task.runner_attempts},
@@ -201,7 +201,7 @@ class FailureAnalysisService:
 
     def analyze_channel_broken(self, task: SubAgentTask, runner_result: SubAgentRunnerResult) -> FailureAnalysis:
         return FailureAnalysis(
-            failure_type="channel_broken",
+            failure_type=FailureType.CHANNEL_BROKEN.value,
             root_cause="channel_broken",
             suggested_action="manual_channel_repair",
             details={"channel_status": task.channel_status, "channel_checks": task.channel_checks},
@@ -211,7 +211,7 @@ class FailureAnalysisService:
 
     def analyze_verification_failed(self, task: SubAgentTask, runner_result: SubAgentRunnerResult) -> FailureAnalysis:
         return FailureAnalysis(
-            failure_type="verification_failed",
+            failure_type=FailureType.VERIFICATION_FAILED.value,
             root_cause="quality_issue",
             suggested_action="manual_review",
             details={"evidence_count": len(task.evidence), "runner_last_error": task.runner_last_error},
@@ -250,15 +250,15 @@ class SubAgentFailureAnalyzer:
     ) -> FailureAnalysis:
         failure_type = task.failure_type or ""
 
-        if failure_type == "runner_timeout":
+        if failure_type == FailureType.RUNNER_TIMEOUT.value:
             return self._service.analyze_timeout(task, runner_result)
-        if failure_type == "capability_request":
+        if failure_type == FailureType.CAPABILITY_REQUEST.value:
             return self._service.analyze_capability(task, runner_result)
-        if failure_type == "structured_output_parse_error":
+        if failure_type == FailureType.STRUCTURED_OUTPUT_PARSE_ERROR.value:
             return self._service.analyze_parse_error(task, runner_result)
-        if failure_type in {"tool_result_missing", "tool_error"}:
+        if failure_type in {FailureType.TOOL_RESULT_MISSING.value, FailureType.TOOL_ERROR.value}:
             return self._service.analyze_tool_failure(task, runner_result)
-        if failure_type in {"model_error", "api_error"}:
+        if failure_type in {FailureType.MODEL_ERROR.value, FailureType.API_ERROR.value}:
             return self._service.analyze_model_error(task, runner_result)
         if task.channel_status == "BROKEN":
             return self._service.analyze_channel_broken(task, runner_result)
@@ -358,7 +358,7 @@ def should_auto_split(task: SubAgentTask, max_depth: int = 2) -> bool:
         return False
     if len(task.plan) <= 3:
         return False
-    return task.failure_type == "runner_timeout" and task.runner_attempts >= 2
+    return task.failure_type == FailureType.RUNNER_TIMEOUT.value and task.runner_attempts >= 2
 
 
 def estimate_split_count(task: SubAgentTask) -> int:

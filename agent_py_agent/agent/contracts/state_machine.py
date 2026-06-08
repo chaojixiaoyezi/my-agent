@@ -25,7 +25,38 @@ VERIFIED_STATES = {"VERIFIED"}
 VERIFICATION_STATES = {"UNVERIFIED", "VERIFIED", "FAILED"}
 HEALTHY_CHANNEL_STATES = {"", "OK", "UNKNOWN"}
 CHANNEL_STATES = {"", "OK", "UNKNOWN", "BROKEN"}
+INVALID_STATUS_FALLBACK = "BLOCKED"
+INVALID_VERIFICATION_FALLBACK = "UNVERIFIED"
+INVALID_CHANNEL_FALLBACK = "BROKEN"
 LOGGER = logging.getLogger(__name__)
+_BLOCKED_REASON_BY_FAILURE = {
+    "TOOL_UNAVAILABLE": "blocked_tool_unavailable",
+    "WRITE_FORBIDDEN": "blocked_write_forbidden",
+    "PATH_OUTSIDE_WORKSPACE": "blocked_path_outside_workspace",
+}
+_STATUS_REASON_BY_STATE = {
+    "PLANNING": "planning",
+    "PENDING": "pending",
+    "RUNNING": "running",
+    "WAITING_FOR_TOOL": "waiting_for_tool",
+    "WAITING_FOR_CHILD": "waiting_for_child",
+    "WAITING_FOR_USER": "waiting_for_user",
+    "REPAIRING": "repairing",
+    "TAKING_OVER": "taking_over",
+    "VERIFYING": "verifying",
+    "BLOCKED": "blocked",
+    "DONE": "done",
+    "FAILED": "failed",
+    "CANCELLED": "cancelled",
+    "ABANDONED": "abandoned",
+    "TIMEOUT": "timeout",
+    "CHANNEL_ERROR": "channel_error",
+}
+_STATE_PROTOCOL_ERROR_CODES = {
+    "STATE_STATUS_INVALID",
+    "STATE_VERIFICATION_STATUS_INVALID",
+    "STATE_CHANNEL_STATUS_INVALID",
+}
 
 
 @dataclass(frozen=True)
@@ -56,21 +87,21 @@ def normalize_status(value: object) -> str:
     text = str(value or "").strip()
     if not text:
         return "PLANNING"
-    return text if text in REGISTERED_STATES else text
+    return text if text in REGISTERED_STATES else INVALID_STATUS_FALLBACK
 
 
 def normalize_verification(value: object) -> str:
     text = str(value or "").strip()
     if not text:
         return "UNVERIFIED"
-    return text if text in VERIFICATION_STATES else text
+    return text if text in VERIFICATION_STATES else INVALID_VERIFICATION_FALLBACK
 
 
 def normalize_channel(value: object) -> str:
     text = str(value or "").strip()
     if not text:
         return "UNKNOWN"
-    return text if text in CHANNEL_STATES else text
+    return text if text in CHANNEL_STATES else INVALID_CHANNEL_FALLBACK
 
 
 def can_dispatch(facts: RunStateFacts, *, force: bool = False) -> bool:
@@ -163,9 +194,17 @@ def lifecycle_phase(facts: RunStateFacts) -> str:
 
 
 def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
+    failure = str(facts.failure_type or "").upper()
+    if _status_protocol_error(facts.status):
+        return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, "invalid_state_status_protocol")
+    if _verification_protocol_error(facts.verification_status):
+        return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, "invalid_verification_status_protocol")
+    if _channel_protocol_error(facts.channel_status):
+        return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, "invalid_channel_status_protocol")
+    if failure in _STATE_PROTOCOL_ERROR_CODES:
+        return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, f"invalid_{failure.lower()}")
     status = normalize_status(facts.status)
     channel = normalize_channel(facts.channel_status)
-    failure = str(facts.failure_type or "").upper()
     if can_closeout(facts):
         return RecoveryDecision(RecoveryAction.CLOSEOUT, False, "done_verified")
     if channel == "BROKEN":
@@ -174,7 +213,7 @@ def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
         return RecoveryDecision(RecoveryAction.REPAIR, False, "repairable_failure")
     if waiting_reason(facts) == "acceptance":
         return RecoveryDecision(RecoveryAction.WAIT_FOR_ACCEPTANCE, False, "done_unverified")
-    if failure == "NO_PROGRESS":
+    if failure in {"NO_PROGRESS", "NO_PROGRESS_FUSE"}:
         return RecoveryDecision(RecoveryAction.CHANGE_STRATEGY, False, "no_progress", RecoveryAction.STOP)
     if failure == "APPROVAL_REQUIRED":
         return RecoveryDecision(RecoveryAction.REQUEST_APPROVAL, False, "approval_required", RecoveryAction.STOP)
@@ -186,26 +225,39 @@ def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
         return RecoveryDecision(RecoveryAction.WAIT, False, "already_active")
     if status == "BLOCKED" and failure in {"TOOL_UNAVAILABLE", "WRITE_FORBIDDEN", "PATH_OUTSIDE_WORKSPACE"}:
         if can_repair(facts):
-            return RecoveryDecision(RecoveryAction.REQUEST_CAPABILITY, False, f"blocked_{failure.lower()}")
+            return RecoveryDecision(RecoveryAction.REQUEST_CAPABILITY, False, _BLOCKED_REASON_BY_FAILURE[failure])
         return RecoveryDecision(RecoveryAction.TAKEOVER, True, "attempts_exhausted", RecoveryAction.STOP)
     if status == "BLOCKED" and _structured_repair_action(failure):
         if can_repair(facts):
-            return RecoveryDecision(_structured_repair_action(failure), False, f"blocked_{failure.lower()}")
+            return RecoveryDecision(_structured_repair_action(failure), False, _recovery_reason("blocked", failure))
         return RecoveryDecision(RecoveryAction.TAKEOVER, True, "attempts_exhausted", RecoveryAction.STOP)
     if can_repair(facts):
         return RecoveryDecision(RecoveryAction.REPAIR, False, "repairable_failure")
     if status in {"BLOCKED", "FAILED"}:
         return RecoveryDecision(RecoveryAction.TAKEOVER, True, "attempts_exhausted", RecoveryAction.STOP)
     LOGGER.warning("unhandled recovery state: status=%s failure=%s", status, failure)
-    return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, f"unhandled_state_{status.lower()}")
+    return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, _recovery_reason("unhandled_state", status))
 
 
 def run_state_snapshot_from_task(task: object) -> dict[str, object]:
+    raw_status = str(getattr(task, "status", "") or "").strip()
+    raw_verification = str(getattr(task, "verification_status", "") or "").strip()
+    raw_channel = str(getattr(task, "channel_status", "") or "").strip()
+    status_error = _status_protocol_error(raw_status)
+    verification_error = _verification_protocol_error(raw_verification)
+    channel_error = _channel_protocol_error(raw_channel)
+    failure_type = _failure_type_from_task(task)
+    if status_error:
+        failure_type = status_error
+    elif verification_error:
+        failure_type = verification_error
+    elif channel_error:
+        failure_type = channel_error
     facts = RunStateFacts(
-        status=normalize_status(getattr(task, "status", "")),
-        verification_status=normalize_verification(getattr(task, "verification_status", "")),
-        channel_status=normalize_channel(getattr(task, "channel_status", "")),
-        failure_type=_failure_type_from_task(task),
+        status=normalize_status(raw_status),
+        verification_status=normalize_verification(raw_verification),
+        channel_status=normalize_channel(raw_channel),
+        failure_type=failure_type,
         attempts=_int_attr(task, "runner_attempts"),
         max_attempts=_int_attr(task, "runner_max_attempts"),
         has_progress=bool(getattr(task, "has_progress", True)),
@@ -217,6 +269,12 @@ def run_state_snapshot_from_task(task: object) -> dict[str, object]:
         "status": normalize_status(facts.status),
         "verification_status": normalize_verification(facts.verification_status),
         "channel_status": normalize_channel(facts.channel_status),
+        "raw_status": raw_status,
+        "raw_verification_status": raw_verification,
+        "raw_channel_status": raw_channel,
+        "status_protocol_error": status_error,
+        "verification_protocol_error": verification_error,
+        "channel_protocol_error": channel_error,
         "lifecycle_phase": lifecycle_phase(facts),
         "waiting_reason": waiting_reason(facts),
         "terminal_outcome": terminal_outcome(facts),
@@ -242,6 +300,21 @@ def _failure_type_from_task(task: object) -> str:
     return "UNKNOWN_ERROR"
 
 
+def _status_protocol_error(value: object) -> str:
+    text = str(value or "").strip()
+    return "" if not text or text in REGISTERED_STATES else "STATE_STATUS_INVALID"
+
+
+def _verification_protocol_error(value: object) -> str:
+    text = str(value or "").strip()
+    return "" if not text or text in VERIFICATION_STATES else "STATE_VERIFICATION_STATUS_INVALID"
+
+
+def _channel_protocol_error(value: object) -> str:
+    text = str(value or "").strip()
+    return "" if not text or text in CHANNEL_STATES else "STATE_CHANNEL_STATUS_INVALID"
+
+
 def _int_attr(task: object, name: str) -> int:
     try:
         return int(getattr(task, name, 0) or 0)
@@ -260,6 +333,13 @@ def _structured_repair_action(failure: str) -> str:
     if contract.category in {"artifact", "evidence", "tool", "path", "acceptance", "compact", "model", "orchestration"}:
         return contract.recommended_action
     return ""
+
+
+def _recovery_reason(prefix: str, code: str) -> str:
+    contract_code = error_contract(code).code
+    if contract_code != "UNKNOWN_ERROR":
+        return f"{prefix}_{contract_code.lower()}"
+    return f"{prefix}_{_STATUS_REASON_BY_STATE.get(code, 'unknown')}"
 
 
 __all__ = [

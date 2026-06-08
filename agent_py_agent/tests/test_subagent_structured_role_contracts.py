@@ -48,4 +48,4 @@ def test_scheduled_child_role_uses_tool_grants_not_goal_keywords():
     )
 
     assert scheduled_child_role(parent, natural_spec, goal=natural_spec.goal) == "worker"
-    assert scheduled_child_role(parent, coordinator_spec, goal=coordinator_spec.goal) == "child_coordinator"
+    assert scheduled_child_role(parent, coordinator_spec, goal=coordinator_spec.goal) == "coordinator"

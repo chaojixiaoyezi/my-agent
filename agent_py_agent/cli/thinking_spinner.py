@@ -76,7 +76,7 @@ class ThinkingSpinner:
     def _emit_frame(self, idx: int) -> None:
         elapsed = time.perf_counter() - self._start_time
         char = _SPINNER_CHARS[idx % len(_SPINNER_CHARS)]
-        frame = f"\r╭ 蛐蛐人：{self._phrase}... {char} {elapsed:.1f}s"
+        frame = f"\r╭ 处理中：{self._phrase}... {char} {elapsed:.1f}s"
         if self._on_update is not None:
             self._on_update(frame.lstrip("\r"))
             return

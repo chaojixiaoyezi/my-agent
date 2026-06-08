@@ -36,6 +36,7 @@ from .tool_stream import (
     ToolBoundaryChunkFilter,
     cut_response_after_first_complete_tool_call,
     long_write_abort_response,
+    long_write_response_abort,
     malformed_tool_protocol_abort_response,
 )
 
@@ -160,8 +161,9 @@ def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationSta
 
 
 def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerationState, response):
-    record_model_call_finished(state.ledger, state.call_id, response)
     state.chunk_filter.finish()
+    response = _recover_unclosed_long_write_response(request, response)
+    record_model_call_finished(state.ledger, state.call_id, response)
     response = _apply_tool_boundary_cut(request, response)
     trace_runner_model_response_received(
         RunnerModelStageTraceRequest(
@@ -175,10 +177,22 @@ def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerati
     return response
 
 
+def _recover_unclosed_long_write_response(request: ModelGenerateParams, response):
+    text = str(getattr(response, "text", "") or "")
+    abort = long_write_response_abort(
+        text,
+        max_inline_content_chars=_tool_write_inline_max_chars(request) or 0,
+    )
+    if abort is None:
+        return response
+    backend = str(getattr(response, "backend", "") or getattr(request.agent.backend, "name", "") or "")
+    return long_write_abort_response(abort, backend=backend)
+
+
 def _build_tool_boundary_chunk_filter(request: ModelGenerateParams) -> ToolBoundaryChunkFilter:
     return ToolBoundaryChunkFilter(
         request.params.effective_on_chunk,
-        max_inline_content_chars=_tool_write_inline_max_chars(request.agent),
+        max_inline_content_chars=_tool_write_inline_max_chars(request),
     )
 
 
@@ -297,5 +311,5 @@ def _generate_backend_response(request: ModelGenerateParams, on_chunk, timeout: 
         backend.request_timeout = original
 
 
-def _tool_write_inline_max_chars(agent: object) -> int | None:
-    return getattr(getattr(agent, "config", None), "tool_write_inline_max_chars", None)
+def _tool_write_inline_max_chars(request: ModelGenerateParams) -> int | None:
+    return getattr(getattr(request.agent, "config", None), "tool_write_inline_max_chars", None)

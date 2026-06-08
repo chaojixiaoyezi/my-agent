@@ -97,7 +97,7 @@ def test_preflight_allows_one_digest_turn_for_fresh_tool_results() -> None:
         context_scope="default",
         live_archive_state={"pending_tool_context_digest": True},
     )
-    request = SimpleNamespace(agent=agent, params=params, prompt="系统上下文" * 120, tool_rounds=3)
+    request = SimpleNamespace(agent=agent, params=params, prompt="系统上下文" * 160, tool_rounds=3)
 
     response = preflight_context_pressure_response(request)
 

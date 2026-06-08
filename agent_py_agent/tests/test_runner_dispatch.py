@@ -443,7 +443,7 @@ class TestRunnerTaskTimeout:
 
         assert get_task_timeout(task, 0.0, config) == 180.0
 
-    def test_role_timeout_worker_alias_matches_leaf_worker(self):
+    def test_role_timeout_worker_alias_matches_worker(self):
         from agent_py_agent.agent.agent_core.runner.gate import get_task_timeout
 
         config = self._timeout_config("off")
@@ -453,7 +453,7 @@ class TestRunnerTaskTimeout:
         task.id = "leaf-run"
         task.root_id = "root-run"
         task.parent_id = "root-run"
-        task.role = "leaf_worker"
+        task.role = "worker"
         task.attributes = {}
         task.goal = "写一个页面。"
         task.plan = []
@@ -470,7 +470,7 @@ class TestRunnerTaskTimeout:
         task.id = "takeover-run"
         task.root_id = "root-run"
         task.parent_id = "root-run"
-        task.role = "leaf_worker"
+        task.role = "worker"
         task.attributes = {"takeover_source_run_id": "old-run"}
         task.goal = "接管一个失败 worker。"
         task.plan = []

@@ -19,7 +19,7 @@ def test_markdown_artifact_requires_declared_sections_and_size(tmp_path: Path) -
         )
     )
 
-    assert result.ok is True
+    assert result.ok is False
     assert [item.code for item in result.findings] == [
         "ARTIFACT_TOO_SMALL",
         "MARKDOWN_REQUIRED_SECTION_MISSING",

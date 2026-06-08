@@ -1,6 +1,6 @@
 """CLI 子代理子命令测试。
 
-测试 agent_py_agent/cli/subcommands_agents.py 中的子命令注册函数。
+测试 agent_py_agent/cli/subagents.py 中的子命令注册函数。
 验证子代理相关命令（list、show、run、workflow）参数解析正确。
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ class TestSubagentsSubcommandRegistration:
 
         验证所有子代理子命令都能被正确注册到解析器。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -54,7 +54,7 @@ class TestSubagentsSubcommandRegistration:
 
         验证 goal 参数被正确添加。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -68,7 +68,7 @@ class TestSubagentsSubcommandRegistration:
 
         验证 count 参数默认交给运行时配置决定。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -80,7 +80,7 @@ class TestSubagentsSubcommandRegistration:
 
     def test_spawn_subagents_has_role_arguments(self):
         """spawn-subagents 支持显式创建 coordinator/root 入口。"""
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -104,7 +104,7 @@ class TestSubagentsSubcommandRegistration:
 
         验证 limit 参数正确工作。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -118,7 +118,7 @@ class TestSubagentsSubcommandRegistration:
 
         验证 --all 标志正确工作。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -132,7 +132,7 @@ class TestSubagentsSubcommandRegistration:
 
         验证 dry-run 标志正确工作。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -146,7 +146,7 @@ class TestSubagentsSubcommandRegistration:
 
         验证 apply 标志正确工作。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -160,7 +160,7 @@ class TestSubagentsSubcommandRegistration:
 
         验证 run_id 参数正确工作。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -174,7 +174,7 @@ class TestSubagentsSubcommandRegistration:
 
         验证 run_id 参数正确工作。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -188,7 +188,7 @@ class TestSubagentsSubcommandRegistration:
 
         验证可以传入多个 run_id。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -210,7 +210,7 @@ class TestSubagentsReviewCommandRegistration:
 
         验证 goal 参数正确工作。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -224,7 +224,7 @@ class TestSubagentsReviewCommandRegistration:
 
         验证 capability-config 参数被正确添加。
         """
-        from agent_py_agent.cli.subcommands_agents import _add_capability_config_arg
+        from agent_py_agent.cli.subagents import _add_capability_config_arg
 
         parser = argparse.ArgumentParser()
         _add_capability_config_arg(parser)
@@ -236,7 +236,7 @@ class TestSubagentsReviewCommandRegistration:
 
     def test_subagents_tests_has_view_and_rerun_args(self):
         """测试 subagents-tests 命令有查看和显式重跑参数。"""
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -257,7 +257,7 @@ class TestSubagentsReviewCommandRegistration:
 
         验证 mutually exclusive group 正确工作。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -280,7 +280,7 @@ class TestSubagentWorkflowPlanCommand:
 
         验证 --template-id 参数正确工作。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -298,7 +298,7 @@ class TestSubagentWorkflowPlanCommand:
 
         验证 --output-dir 参数正确工作。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")
@@ -316,7 +316,7 @@ class TestSubagentWorkflowPlanCommand:
 
         验证 --json 标志正确工作。
         """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+        from agent_py_agent.cli.subagents import add_subagents_subcommands
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="subcommand")

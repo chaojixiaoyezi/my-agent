@@ -13,8 +13,6 @@ from ...contracts.delivery_contract_doctor import (
     validate_delivery_contract,
 )
 from .._runtime_params import ToolLoopExecuteParams
-from ..main_agent_delivery_progress_ledger import append_delivery_progress_event
-from ..main_agent_delivery_tool_failure_recovery import attach_tool_failure_recovery_actions
 from ..run_task_workspace_writer import (
     current_run_task_workspace_root,
     sync_run_task_workspace_closeout,
@@ -29,13 +27,14 @@ from .artifacts import (
     _validate_contract_artifacts,
     _write_report,
 )
-from .gate_recovery import failed_gate_payloads
 from .gates import CloseoutGateRequest, attach_closeout_gates
 from .progress import (
     DeliveryProgressContext,
     _enrich_delivery_progress,
     _should_block_on_no_progress,
+    append_delivery_progress_event,
 )
+from .recovery import attach_tool_failure_recovery_actions, failed_gate_payloads
 from .task_progress_gate import task_progress_repair_message
 from .uncontracted import (
     _current_run_task_output_artifacts,
@@ -96,6 +95,10 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     contract = dict(doctor.normalized_contract or contract)
     artifacts = _required_artifacts(contract)
     if not artifacts:
+        if _coverage_contract_present(contract) and _current_run_task_output_artifacts(request.params, workspace_root=workspace_root):
+            if response := uncontracted_task_output_closeout_response(request, workspace_root):
+                return response
+            return None
         return _no_artifact_closeout_response(request, contract, workspace_root)
     report = _delivery_report(request, contract, artifacts, workspace_root)
     report_ref = _write_report(workspace_root, report)
@@ -144,6 +147,11 @@ def _all_gates_allowed(decisions: list[Any]) -> bool:
     return all(bool(getattr(decision, "allowed", False)) for decision in decisions)
 
 
+def _coverage_contract_present(contract: dict[str, Any]) -> bool:
+    coverage = contract.get("target_coverage_contract")
+    return isinstance(coverage, dict) and isinstance(coverage.get("target_items"), list)
+
+
 def _delivery_report(
     closeout: MainAgentDeliveryCloseoutRequest,
     contract: dict[str, Any],
@@ -157,6 +165,7 @@ def _delivery_report(
             workspace_root=workspace_root,
             params=closeout.params,
             archive_tool_calls=_closeout_archive_tool_calls(closeout),
+            coverage_workspace_root=_coverage_workspace_root(closeout.agent),
         )
     )
     enriched = _enrich_delivery_progress(
@@ -278,7 +287,7 @@ def _read_tool_output_index(path: Path) -> list[dict[str, Any]]:
 
 def _unique_archive_tool_calls(records: list[dict[str, Any]]) -> list[Any]:
     unique: list[Any] = []
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: dict[tuple[str, str, str, str], int] = {}
     for record in records:
         key = (
             str(record.get("run_id") or ""),
@@ -289,10 +298,23 @@ def _unique_archive_tool_calls(records: list[dict[str, Any]]) -> list[Any]:
         if not any(key):
             continue
         if key in seen:
+            unique[seen[key]] = _merge_archive_record(unique[seen[key]], record)
             continue
-        seen.add(key)
-        unique.append(record)
+        seen[key] = len(unique)
+        unique.append(dict(record))
     return unique
+
+
+def _merge_archive_record(existing: Any, incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    for key, value in incoming.items():
+        if _archive_value_missing(merged.get(key)) and not _archive_value_missing(value):
+            merged[key] = value
+    return merged
+
+
+def _archive_value_missing(value: object) -> bool:
+    return value is None or value == "" or value == [] or value == {}
 
 
 def _failed_delivery_response(
@@ -402,6 +424,7 @@ def _append_failed_contract_context(params: ToolLoopExecuteParams, report: dict[
                 "failed_artifacts": [item for item in report.get("artifacts", []) if isinstance(item, dict) and not item.get("ok")],
                 "failed_gates": failed_gate_payloads(report),
                 "target_coverage_status": report.get("target_coverage_status", {}),
+                "target_coverage_freshness_status": report.get("target_coverage_freshness_status", {}),
                 "contract_recovery": report.get("contract_recovery", {}),
                 "delivery_progress": report.get("delivery_progress", {}),
                 "repair_guidance": _repair_guidance(report),
@@ -418,6 +441,7 @@ def _repair_guidance(report: dict[str, Any]) -> dict[str, Any]:
     actions = progress.get("recovery_actions") if isinstance(progress, dict) else []
     task_progress_message = task_progress_repair_message(report)
     coverage_message = _target_coverage_repair_message(report)
+    freshness_message = _target_coverage_freshness_repair_message(report)
     final_artifact_paths = _final_artifact_paths(report)
     if str(report.get("reason") or "") == "required_artifacts_missing":
         message = (
@@ -427,6 +451,8 @@ def _repair_guidance(report: dict[str, Any]) -> dict[str, Any]:
         )
     elif coverage_message:
         message = coverage_message
+    elif freshness_message:
+        message = freshness_message
     else:
         message = (
             "请根据 failed_artifacts、failed_gates 和 required_actions 自主选择下一步修复方式。"
@@ -478,9 +504,25 @@ def _target_coverage_repair_message(report: dict[str, Any]) -> str:
     return (
         "当前验收失败是因为任务要求完整覆盖源材料，但 coverage ledger 还没有连续 read_file 覆盖证明。"
         "grep、awk、search_text、run_command 只能辅助定位或统计，不能替代完整阅读证明。"
-        "下一步必须按 target_coverage_status.repair_hints 里的 recommended_tool_call 继续 read_file；"
-        "读到 total_lines/total_chars 覆盖完成后，再更新最终产物并调用 submit_for_acceptance。"
+        "下一步必须按 target_coverage_status.repair_hints 里的 recommended_tool_call 继续补覆盖；"
+        "缺目录覆盖时先 list_files 找候选文件，缺长文件覆盖时继续 read_file 游标。"
+        "覆盖完成后，再更新最终产物并调用 submit_for_acceptance。"
         f" 当前可执行游标：{hint_text}"
+    )
+
+
+def _target_coverage_freshness_repair_message(report: dict[str, Any]) -> str:
+    status = report.get("target_coverage_freshness_status")
+    if not isinstance(status, dict) or status.get("should_block") is not True:
+        return ""
+    stale = status.get("stale_artifacts") if isinstance(status.get("stale_artifacts"), list) else []
+    stale_text = json.dumps(stale[:5], ensure_ascii=False, sort_keys=True)
+    latest = str(status.get("latest_required_coverage_created_at") or "")
+    return (
+        "当前验收失败是因为最终交付物早于最后一次必要源码覆盖读取。"
+        "这说明你已经补到了新证据，但还没有把最终报告/交付物更新到最新证据之后。"
+        "下一步不要继续重复读取；请更新最终交付物，把已读证据汇总进去，然后重新调用 submit_for_acceptance。"
+        f" latest_required_coverage_created_at={latest}; stale_artifacts={stale_text}"
     )
 
 
@@ -491,6 +533,7 @@ def _closeout_text(report: dict[str, Any]) -> str:
         "report_ref": report.get("report_ref", ""),
         "artifacts": [_closeout_artifact_payload(item) for item in report["artifacts"]],
         "target_coverage_status": report.get("target_coverage_status", {}),
+        "target_coverage_freshness_status": report.get("target_coverage_freshness_status", {}),
     }
     return (
         "[MAIN_AGENT_DELIVERY_COMPLETE]\n"
@@ -540,6 +583,11 @@ def _workspace_root(agent: object, params: object | None = None) -> Path:
         return task_root
     root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", ".")
     return Path(root).expanduser().resolve()
+
+
+def _coverage_workspace_root(agent: object) -> Path:
+    root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", ".")
+    return Path(root).expanduser().resolve(strict=False)
 
 
 def _write_contract_doctor_report(workspace_root: Path, report: ContractDoctorReport) -> Path:

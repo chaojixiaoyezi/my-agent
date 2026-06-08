@@ -111,7 +111,7 @@ def test_cancel_subagents_tool_reports_list_runs_failure_for_tree_filters(tmp_pa
     assert "state index unreadable" in payload["error"]["message"]
 
 
-def test_cancel_subagents_tool_recovers_from_corrupt_locator(tmp_path):
+def test_cancel_subagents_tool_reports_corrupt_locator_without_private_recovery(tmp_path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
@@ -131,17 +131,15 @@ def test_cancel_subagents_tool_recovers_from_corrupt_locator(tmp_path):
         {
             "tool": "cancel_subagents",
             "run_id": task.id,
-            "reason": "恢复取消",
+            "reason": "取消腐坏账本",
         }
     )
     payload = json.loads(result.output)
-    loaded = agent.subagents.load(task.id)
 
-    assert result.ok is True
-    assert payload["cancelled"][0]["run_id"] == task.id
-    assert loaded.status == "ABANDONED"
-    assert loaded.attributes["cancel_subagents"]["recovery"]["status"] == "recovered_from_canonical"
-    assert json.loads(task_json.read_text(encoding="utf-8"))["status_mirror"] == "ABANDONED"
+    assert result.ok is False
+    assert payload["failed"][0]["run_id"] == task.id
+    assert payload["failed"][0]["error"]["context"] == "cancel_subagents.load"
+    assert payload["cancelled"] == []
 
 
 def _create_cancel_tree(agent):

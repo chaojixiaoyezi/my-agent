@@ -19,6 +19,18 @@ from .workflow_records import build_workflow_records
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
+_CAPABILITY_ROUTE_ACTIONS = {
+    "WOULD_GRANT": "would_grant",
+    "GRANTED": "granted",
+    "WOULD_GAP": "would_gap",
+    "GAP": "gap",
+}
+_PATCH_REVIEW_ACTIONS = {
+    "APPROVE": "approve",
+    "REJECT": "reject",
+    "NO_PATCHES": "no_patches",
+}
+
 
 # ---------------------------------------------------------------------------
 # Step record builders
@@ -147,7 +159,7 @@ def make_capability_route_records(agent: Any, ctx: Any, *, mutate_state: bool | 
             agent.subagents.dispatch.make_dispatch_record(
                 params=DispatchRecordParams(
                     step="capability_route",
-                    action=item.status.lower(),
+                    action=_capability_route_action(item.status),
                     run_id=item.run_id,
                     dry_run=item.dry_run,
                     applied=not item.dry_run,
@@ -188,7 +200,7 @@ def make_patch_review_records(agent: Any, patch_run_ids: list[str], params: Any)
             agent.subagents.dispatch.make_dispatch_record(
                 params=DispatchRecordParams(
                     step="patch_review",
-                    action=item.decision.lower(),
+                    action=_patch_review_action(item.decision),
                     run_id=item.run_id,
                     dry_run=item.dry_run,
                     applied=item.applied,
@@ -199,6 +211,14 @@ def make_patch_review_records(agent: Any, patch_run_ids: list[str], params: Any)
             )
         )
     return records
+
+
+def _capability_route_action(status: object) -> str:
+    return _CAPABILITY_ROUTE_ACTIONS.get(str(status or "").strip(), "unknown")
+
+
+def _patch_review_action(decision: object) -> str:
+    return _PATCH_REVIEW_ACTIONS.get(str(decision or "").strip(), "unknown")
 
 
 # ---------------------------------------------------------------------------

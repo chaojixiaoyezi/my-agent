@@ -14,6 +14,7 @@ from .runtime_errors import DataCorruptionError, runtime_error_report
 _SCHEMA_VERSION = "task_progress.v1"
 TASK_PROGRESS_KNOWN_STATUSES = ("pending", "in_progress", "done", "skipped", "blocked")
 TASK_PROGRESS_CLOSED_STATUSES = frozenset({"done", "skipped"})
+TASK_PROGRESS_STATUS_INVALID = "TASK_PROGRESS_STATUS_INVALID"
 _FACT_FIELDS = ("id", "title", "status", "notes", "result", "outcome", "conclusion", "decision", "summary")
 _RESULT_FIELDS = ("result", "outcome", "conclusion", "decision", "summary")
 _EXPLICIT_OVERWRITE_KEYS = ("correction", "overwrite", "replace")
@@ -68,7 +69,7 @@ def invalid_item_statuses(update: dict[str, Any]) -> list[dict[str, str]]:
         raw_status = str(item.get("status") or "").strip()
         if not raw_status:
             continue
-        if normalize_task_progress_status(raw_status) in TASK_PROGRESS_KNOWN_STATUSES:
+        if task_progress_status_is_known(raw_status):
             continue
         invalid.append(
             {
@@ -78,6 +79,61 @@ def invalid_item_statuses(update: dict[str, Any]) -> list[dict[str, str]]:
             }
         )
     return invalid
+
+
+def invalid_coverage_statuses(update: dict[str, Any]) -> list[dict[str, str]]:
+    invalid: list[dict[str, str]] = []
+    coverage = update.get("coverage")
+    targets = coverage.get("targets") if isinstance(coverage, dict) else None
+    for target_index, target in enumerate(_list(targets)):
+        if not isinstance(target, dict):
+            continue
+        target_id = str(target.get("id") or target.get("title") or "").strip()
+        _append_invalid_status(
+            invalid,
+            target.get("status"),
+            field=f"coverage.targets[{target_index}].status",
+            target_id=target_id,
+            check_name="",
+            allow_empty=True,
+        )
+        checks = target.get("checks")
+        if not isinstance(checks, dict):
+            continue
+        for check_name, status in checks.items():
+            _append_invalid_status(
+                invalid,
+                status,
+                field=f"coverage.targets[{target_index}].checks.{check_name}",
+                target_id=target_id,
+                check_name=str(check_name),
+                allow_empty=False,
+            )
+    return invalid
+
+
+def _append_invalid_status(
+    invalid: list[dict[str, str]],
+    value: object,
+    *,
+    field: str,
+    target_id: str,
+    check_name: str,
+    allow_empty: bool,
+) -> None:
+    raw_status = str(value or "").strip()
+    if not raw_status and allow_empty:
+        return
+    if raw_status in TASK_PROGRESS_KNOWN_STATUSES:
+        return
+    invalid.append(
+        {
+            "field": field,
+            "id": target_id,
+            "check": check_name,
+            "status": raw_status,
+        }
+    )
 
 
 def task_progress_summary(progress: dict[str, Any]) -> dict[str, Any]:
@@ -467,7 +523,9 @@ def _normalize_item(value: object) -> dict[str, Any]:
     item = dict(value) if isinstance(value, dict) else {"title": str(value or "").strip()}
     item_id = str(item.get("id") or item.get("title") or "").strip()
     title = str(item.get("title") or item_id).strip()
-    status = normalize_task_progress_status(item.get("status") or "pending")
+    raw_status = str(item.get("status") or "").strip()
+    stored_raw_status = str(item.get("raw_status") or "").strip()
+    status = normalize_task_progress_status(raw_status or "pending")
     result = {
         "id": item_id or _safe_id(title) or "item",
         "title": title,
@@ -476,6 +534,10 @@ def _normalize_item(value: object) -> dict[str, Any]:
         "next": str(item.get("next") or "").strip(),
         "evidence": string_list(item.get("evidence")),
     }
+    raw_status_for_metadata = stored_raw_status or raw_status
+    if raw_status_for_metadata and not task_progress_status_is_known(raw_status_for_metadata):
+        result["raw_status"] = raw_status_for_metadata
+        result["status_protocol_error"] = TASK_PROGRESS_STATUS_INVALID
     for key in ("result", "outcome", "conclusion", "decision", "summary"):
         text = str(item.get(key) or "").strip()
         if text:
@@ -519,6 +581,9 @@ def _merge_items(existing: list[dict[str, Any]], incoming: list[dict[str, Any]])
 
 def _merge_item_overlay(previous: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     merged = {**previous, **{key: value for key, value in incoming.items() if value not in ("", [], None)}}
+    if "status" in incoming and "raw_status" not in incoming:
+        merged.pop("raw_status", None)
+        merged.pop("status_protocol_error", None)
     if incoming.get("evidence") or previous.get("evidence"):
         merged["evidence"] = dedupe_strings([*string_list(previous.get("evidence")), *string_list(incoming.get("evidence"))])
     return merged
@@ -568,7 +633,11 @@ def task_progress_status_is_done(value: object) -> bool:
 
 def normalize_task_progress_status(value: object) -> str:
     text = str(value or "").strip()
-    return text if text in TASK_PROGRESS_KNOWN_STATUSES else text or "pending"
+    return text if task_progress_status_is_known(text) else "pending"
+
+
+def task_progress_status_is_known(value: object) -> bool:
+    return str(value or "").strip() in TASK_PROGRESS_KNOWN_STATUSES
 
 
 def _merge_key(item: dict[str, Any]) -> str:
@@ -639,5 +708,6 @@ __all__ = [
     "read_task_progress_report",
     "task_progress_summary",
     "invalid_item_statuses",
+    "invalid_coverage_statuses",
     "write_task_progress",
 ]

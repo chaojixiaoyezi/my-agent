@@ -217,7 +217,32 @@ def _build_ask_request(context: _AskRequestContext) -> dict:
         "source": f"http:{context.channel}",
         "submitted_at": time.time(),
         "user_id": context.user_id,
+        "conversation": _http_conversation_payload(context),
     }
+
+
+def _http_conversation_payload(context: _AskRequestContext) -> dict:
+    conversation_id = _http_conversation_id(context.body)
+    return {
+        "channel": str(context.channel or "http"),
+        "channel_conversation_id": conversation_id,
+        "channel_user_id": str(context.user_id or "anonymous"),
+        "canonical_user_id": str(context.user_id or "anonymous"),
+    }
+
+
+def _http_conversation_id(body: dict) -> str:
+    for key in ("conversation_id", "session_id", "thread_id", "channel_conversation_id"):
+        value = str(body.get(key) or "").strip()
+        if value:
+            return value
+    metadata = body.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("conversation_id", "session_id", "thread_id", "channel_conversation_id"):
+            value = str(metadata.get(key) or "").strip()
+            if value:
+                return value
+    return "default"
 
 
 def handle_stop(handler, server) -> None:

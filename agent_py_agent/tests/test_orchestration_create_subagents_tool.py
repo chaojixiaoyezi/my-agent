@@ -181,6 +181,7 @@ class TestCreateSubagentsToolExecute:
 
         mock_agent = _mock_create_items_agent(task_count=2)
         mock_agent.config.config_path = "/tmp/my-agent-config.yaml"
+        mock_agent.root = Path("/tmp/actual-task-workspace")
         request = _BackgroundDispatchRequest(
             agent=mock_agent,
             run_ids=["run_a", "run_b"],
@@ -195,6 +196,7 @@ class TestCreateSubagentsToolExecute:
         assert command[1:4] == ["-u", "-m", "agent_py_agent"]
         assert command[command.index("--config") + 1] == "/tmp/my-agent-config.yaml"
         assert "subagents-dispatch" in command
+        assert command[command.index("--workspace-root") + 1] == str(Path("/tmp/actual-task-workspace").resolve())
         assert "--watch" not in command
         assert "--advance" not in command
         assert "--interval" not in command

@@ -83,7 +83,7 @@ def test_root_with_coordinators_can_still_create_direct_leaf(tmp_path):
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             child_specs=[
-                HierarchyChildSpec(goal="write auth page", agent_name="auth-leaf", role="leaf_worker")
+                HierarchyChildSpec(goal="write auth page", agent_name="auth-leaf", role="worker")
             ],
             apply=True,
         )
@@ -189,8 +189,8 @@ def test_explicit_run_ids_keep_named_upstream_output_refs_in_same_wave(tmp_path)
 
 def test_progress_payload_surfaces_blocked_children():
     tasks = [
-        _runner_task("done", "leaf_worker"),
-        _runner_task("blocked", "leaf_worker"),
+        _runner_task("done", "worker"),
+        _runner_task("blocked", "worker"),
     ]
     tasks[0].status = "DONE"
     tasks[0].verification_status = "VERIFIED"

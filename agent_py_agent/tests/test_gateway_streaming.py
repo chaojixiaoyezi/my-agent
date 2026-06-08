@@ -9,7 +9,10 @@ from agent_py_agent.agent.gateway_parts.paths import (
     gateway_chunk_path,
     gateway_chunk_path_candidates,
 )
-from agent_py_agent.agent.gateway_parts.request_execution import close_chunk_stream
+from agent_py_agent.agent.gateway_parts.request_execution import (
+    BufferedChunkStreamWriter,
+    close_chunk_stream,
+)
 
 
 def _make_paths(tmp_path: Path) -> GatewayPaths:
@@ -88,3 +91,32 @@ def test_close_chunk_stream_keeps_file_for_late_pollers(tmp_path):
     close_chunk_stream(chunk_path)
 
     assert chunk_path.exists()
+
+
+def test_buffered_chunk_stream_writer_coalesces_small_deltas(tmp_path):
+    paths = _make_paths(tmp_path)
+    chunk_path = gateway_chunk_path(paths, "test-req")
+    writer = BufferedChunkStreamWriter(chunk_path, flush_interval_seconds=999, flush_chars=10)
+
+    writer.write("你")
+    writer.write("好")
+    assert not chunk_path.exists()
+    writer.write("，世界很大")
+    writer.close()
+
+    lines = chunk_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["text"] == "你好，世界很大"
+
+
+def test_buffered_chunk_stream_writer_flushes_tail_on_close(tmp_path):
+    paths = _make_paths(tmp_path)
+    chunk_path = gateway_chunk_path(paths, "test-req")
+    writer = BufferedChunkStreamWriter(chunk_path, flush_interval_seconds=999, flush_chars=999)
+
+    writer.write("最后一点")
+    writer.close()
+
+    lines = chunk_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["text"] == "最后一点"

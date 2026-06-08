@@ -26,30 +26,31 @@ def test_role_normalization_does_not_map_legacy_names():
     assert normalize_subagent_role("custom-reviewer") == "custom-reviewer"
 
 
-def test_structured_hierarchy_role_aliases_resolve_to_template_ids():
-    assert role_template_id_for_role("child_coordinator") == "coordinator"
-    assert role_template_id_for_role("grandchild-coordinator") == "coordinator"
-    assert role_template_id_for_role("leaf_worker") == "worker"
+def test_structured_hierarchy_role_ids_do_not_use_legacy_aliases():
+    assert role_template_id_for_role("coordinator") == "coordinator"
+    assert role_template_id_for_role("worker") == "worker"
+    assert role_template_id_for_role("coordinator_alias") == ""
+    assert role_template_id_for_role("worker_alias") == ""
     assert role_template_id_for_role("qa_tester") == ""
 
 
-def test_create_run_uses_template_defaults_after_structured_role_alias(tmp_path):
+def test_create_run_uses_template_defaults_for_explicit_role(tmp_path):
     manager = SubAgentManager(tmp_path)
 
     task = manager.create_run(
         goal="继续拆分示例网站条目目录任务",
         thought="coordinate",
         plan=["split", "dispatch"],
-        role="child_coordinator",
+        role="coordinator",
     )
 
-    assert task.role == "child_coordinator"
+    assert task.role == "coordinator"
     assert "schedule_child_subagents" in task.allowed_tools
     assert "send_guidance" in task.allowed_tools
     assert any("协调子代理" in check for check in task.acceptance_checks)
 
 
-def test_unknown_llm_role_falls_back_to_worker_template(tmp_path):
+def test_unknown_llm_role_keeps_base_tools_without_template_fallback(tmp_path):
     manager = SubAgentManager(tmp_path)
 
     task = manager.create_run(
@@ -62,7 +63,7 @@ def test_unknown_llm_role_falls_back_to_worker_template(tmp_path):
     assert task.role == "frontend_footer_builder"
     assert "read_file" in task.allowed_tools
     assert "write_file" in task.allowed_tools
-    assert any("执行子代理" in check for check in task.acceptance_checks)
+    assert not any("执行子代理" in check for check in task.acceptance_checks)
 
 
 def test_create_run_applies_reporter_contract(tmp_path):

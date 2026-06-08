@@ -22,8 +22,6 @@ _RAW_MACHINE_BLOCK_PATTERNS = (
     re.compile(r"\[WRITE_FILE_RAW[^\]]*\].*?\[/WRITE_FILE_RAW\]", re.DOTALL),
 )
 _MAX_UNCLOSED_TOOL_START_MARKERS = 1
-_MAX_NEAR_TOOL_PROTOCOL_LINES = 7
-_NEAR_TOOL_PROTOCOL_LINE_RE = re.compile(r"(?m)^\s*(?:\[|<)?\s*TOOL(?:\b|_|\])")
 
 
 class MalformedToolProtocolStreamAbort(RuntimeError):
@@ -213,15 +211,8 @@ def _open_tool_start(text: str) -> tuple[int, str] | None:
 
 def malformed_tool_protocol_stream_abort(text: str) -> MalformedToolProtocolStreamAbort | None:
     start_info = _open_tool_start(text)
-    near_count = _near_tool_protocol_line_count(text)
     if start_info is None:
-        if _first_marker(text, _TOOL_START_MARKERS, 0) is not None or near_count <= _MAX_NEAR_TOOL_PROTOCOL_LINES:
-            return None
-        return MalformedToolProtocolStreamAbort(
-            start_marker="TOOL_PROTOCOL_LINE",
-            marker_count=near_count,
-            limit=_MAX_NEAR_TOOL_PROTOCOL_LINES,
-        )
+        return None
     start, marker = start_info
     first_end = _first_marker(text, _TOOL_END_MARKERS, start + len(marker))
     next_start = _first_marker(text, _TOOL_START_MARKERS, start + len(marker))
@@ -240,13 +231,7 @@ def malformed_tool_protocol_stream_abort(text: str) -> MalformedToolProtocolStre
             marker_count=count,
             limit=_MAX_UNCLOSED_TOOL_START_MARKERS,
         )
-    if near_count <= _MAX_NEAR_TOOL_PROTOCOL_LINES:
-        return None
-    return MalformedToolProtocolStreamAbort(
-        start_marker="TOOL_PROTOCOL_LINE",
-        marker_count=near_count,
-        limit=_MAX_NEAR_TOOL_PROTOCOL_LINES,
-    )
+    return None
 
 
 def _open_tool_start_count(text: str) -> int:
@@ -267,10 +252,6 @@ def _one_protocol_marker_count(text: str, marker: str, cursor: int) -> int:
             return count
         count += 1
         cursor = pos + len(marker)
-
-
-def _near_tool_protocol_line_count(text: str) -> int:
-    return len(_NEAR_TOOL_PROTOCOL_LINE_RE.findall(text))
 
 
 def malformed_tool_protocol_abort_response(
@@ -297,6 +278,15 @@ def malformed_tool_protocol_abort_response(
         f"{json.dumps(payload, ensure_ascii=False)}\n"
         "[/TOOL_CALL]",
         backend=backend,
+    )
+
+
+def long_write_response_abort(text: str, *, max_inline_content_chars: int) -> LongToolContentStreamAbort | None:
+    return long_write_stream_abort(
+        text,
+        max_chars=max_inline_content_chars,
+        start_info=_open_tool_start(text),
+        first_end_marker=lambda cursor: _first_marker(text, _TOOL_END_MARKERS, cursor),
     )
 
 

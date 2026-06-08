@@ -10,7 +10,7 @@ from pathlib import Path
 from ...settings import AgentConfig
 from ...settings.services.runtime_config_task import apply_task_runtime_config_overlay
 from ...subagents.manager_runner_result_payload import RecordRunnerResultParams
-from ...subagents.models import SubAgentRunnerResult
+from ...subagents.models import FailureType, SubAgentRunnerResult
 from ..subagent.params import SubagentRunParams
 from .session_pool import RunnerSessionPoolLease, runner_session_lease
 
@@ -152,7 +152,7 @@ def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams):
                 message=timeout_message,
                 status="TIMEOUT",
                 verification_status="UNVERIFIED",
-                failure_type="runner_timeout",
+                failure_type=FailureType.RUNNER_TIMEOUT.value,
             )
         )
         worker.subagents.lifecycle.abandon_runner_attempt(params.run_id, attempt_id, reason=timeout_message)

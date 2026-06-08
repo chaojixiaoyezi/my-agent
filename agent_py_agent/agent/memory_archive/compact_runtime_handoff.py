@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..subagents.models import TaskStatus, task_status_in
+from ..subagents.models import TaskStatus, task_status_in, task_status_reason_code
 
 
 def build_runtime_handoff(workspace: Path, ids: list[str]) -> dict[str, Any]:
@@ -240,7 +240,7 @@ def _agent_status_bucket(value: object) -> str:
         TaskStatus.TAKEN_OVER.value,
     })
     if task_status_in(status, bucket_statuses):
-        return status.lower()
+        return task_status_reason_code(status)
     return "unknown"
 
 

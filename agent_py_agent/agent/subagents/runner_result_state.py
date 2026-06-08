@@ -16,13 +16,16 @@ from .model_capabilities import (
 )
 from .models import (
     SUBAGENT_FAILURE_STATUSES,
+    FailureType,
     TaskStatus,
     VerificationStatus,
+    failure_type_from_task_status,
     normalize_task_status,
     normalize_verification_status,
     task_has_ended_status,
     task_has_failure_status,
     task_has_status,
+    task_status_reason_code,
 )
 from .policies import _status_from_structured_output, _verification_from_runner_status
 
@@ -83,7 +86,7 @@ def _runner_result_outcome(task, parsed, result_meta: dict, status_context: dict
         task.result = response or message
         return False, message
     if parsed.found and task_has_failure_status(task):
-        return False, parsed.blocked_reason or message or task.failure_type or task.status.lower()
+        return False, parsed.blocked_reason or message or task.failure_type or task_status_reason_code(task.status)
     if not parsed.found:
         _apply_unstructured_failure(task, ok, status_context["failure_type"])
         task.result = response or message or task.result
@@ -108,10 +111,10 @@ def _apply_status_fields(task, status_context, parsed) -> None:
             normalize_verification_status(verification_status) if verification_status else VerificationStatus.UNVERIFIED.value
         )
         if _has_open_capability_requests(task):
-            task.failure_type = failure_type or "capability_request"
+            task.failure_type = failure_type or FailureType.CAPABILITY_REQUEST.value
             _append_open_request_blocker(task)
         else:
-            task.failure_type = failure_type or "structured_output_parse_error"
+            task.failure_type = failure_type or FailureType.STRUCTURED_OUTPUT_PARSE_ERROR.value
         return
     if status:
         task.status = normalize_task_status(status)
@@ -126,21 +129,21 @@ def _apply_structured_failure_state(task, current_failure_type: str, parsed) -> 
         task.failure_type = current_failure_type
         return
     if is_pending_capability_status(str(getattr(parsed, "status", "") or "")):
-        task.failure_type = "capability_request"
+        task.failure_type = FailureType.CAPABILITY_REQUEST.value
         return
     if parsed.capability_requests:
-        task.failure_type = "capability_request"
+        task.failure_type = FailureType.CAPABILITY_REQUEST.value
         return
     if _should_resolve_stale_capability_requests(task):
         _resolve_stale_capability_requests(task)
     if _has_open_capability_requests(task):
         task.status = TaskStatus.BLOCKED.value
         task.verification_status = VerificationStatus.UNVERIFIED.value
-        task.failure_type = "capability_request"
+        task.failure_type = FailureType.CAPABILITY_REQUEST.value
         _append_open_request_blocker(task)
         return
     if task_has_failure_status(task):
-        task.failure_type = task.failure_type or task.status.lower()
+        task.failure_type = task.failure_type or failure_type_from_task_status(task.status)
         return
     task.failure_type = ""
     task.blockers = []
@@ -148,7 +151,7 @@ def _apply_structured_failure_state(task, current_failure_type: str, parsed) -> 
 
 
 def _should_resolve_stale_capability_requests(task) -> bool:
-    return str(getattr(task, "failure_type", "") or "") == "capability_request"
+    return str(getattr(task, "failure_type", "") or "") == FailureType.CAPABILITY_REQUEST.value
 
 
 def _has_open_capability_requests(task) -> bool:
@@ -178,7 +181,7 @@ def _apply_unstructured_failure(task, ok, failure_type: str) -> None:
     if failure_type:
         task.failure_type = failure_type
     elif not ok:
-        task.failure_type = task.failure_type or "runner_error"
+        task.failure_type = task.failure_type or FailureType.RUNNER_ERROR.value
 
 
 def _apply_runner_timestamps(task, now: float) -> None:

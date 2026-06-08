@@ -38,6 +38,17 @@ class CollaborationResponseStatus(str, Enum):
     WAITING = "waiting"
 
 
+class CollaborationPriority(str, Enum):
+    """Current collaboration priority values that carry runtime semantics."""
+
+    NORMAL = "normal"
+    URGENT = "urgent"
+
+
+COLLABORATION_CASE_STATUS_INVALID = "COLLABORATION_CASE_STATUS_INVALID"
+COLLABORATION_REQUEST_STATUS_INVALID = "COLLABORATION_REQUEST_STATUS_INVALID"
+
+
 def normalize_case_status(status: str) -> str:
     text = _status_text(status)
     return text if text in _CASE_STATUS_VALUES else ""
@@ -46,6 +57,43 @@ def normalize_case_status(status: str) -> str:
 def normalize_request_status(status: str) -> str:
     text = _status_text(status)
     return text if text in _REQUEST_STATUS_VALUES else ""
+
+
+def canonical_case_status_for_update(status: str) -> str:
+    return normalize_case_status(status) or CollaborationCaseStatus.OPEN.value
+
+
+def canonical_request_status_for_update(status: str) -> str:
+    return normalize_request_status(status) or CollaborationRequestStatus.PENDING.value
+
+
+def case_status_protocol_metadata(status: str) -> dict[str, str]:
+    text = _status_text(status)
+    if not text or normalize_case_status(text):
+        return {}
+    return {
+        "raw_case_status": text,
+        "case_status_protocol_error": COLLABORATION_CASE_STATUS_INVALID,
+    }
+
+
+def request_status_protocol_metadata(status: str) -> dict[str, str]:
+    text = _status_text(status)
+    if not text or normalize_request_status(text):
+        return {}
+    return {
+        "raw_request_status": text,
+        "request_status_protocol_error": COLLABORATION_REQUEST_STATUS_INVALID,
+    }
+
+
+def normalize_runtime_priority(priority: object) -> str:
+    text = _status_text(priority)
+    return text if text in _RUNTIME_PRIORITY_VALUES else CollaborationPriority.NORMAL.value
+
+
+def is_urgent_priority(priority: object) -> bool:
+    return normalize_runtime_priority(priority) == CollaborationPriority.URGENT.value
 
 
 def is_terminal_status(status: str) -> bool:
@@ -81,6 +129,7 @@ def _status_text(status: str) -> str:
 
 _CASE_STATUS_VALUES = frozenset(status.value for status in CollaborationCaseStatus)
 _REQUEST_STATUS_VALUES = frozenset(status.value for status in CollaborationRequestStatus)
+_RUNTIME_PRIORITY_VALUES = frozenset(status.value for status in CollaborationPriority)
 
 
 def request_is_effectively_timed_out(

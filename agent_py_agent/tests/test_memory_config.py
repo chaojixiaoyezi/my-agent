@@ -145,20 +145,20 @@ def test_memory_compact_trigger_percent_zero_and_large_values_fall_back_to_100()
     assert [item.field_name for item in large_warnings] == ["memory_compact_auto_trigger_percent"]
 
 
-def test_memory_compact_trigger_percent_default_is_50():
+def test_memory_compact_trigger_percent_default_is_70():
     settings, warnings = normalize_memory_settings({})
 
-    assert settings.memory_compact_auto_trigger_percent == 50
+    assert settings.memory_compact_auto_trigger_percent == 70
     assert warnings == []
 
 
 def test_runtime_compact_policy_percent_parser_matches_config_semantics():
-    assert compact_trigger_percent(None) == 50
-    assert compact_trigger_percent("abc") == 50
+    assert compact_trigger_percent(None) == 70
+    assert compact_trigger_percent("abc") == 70
     assert compact_trigger_percent(0) == 100
     assert compact_trigger_percent(40) == 50
     assert compact_trigger_percent(120) == 100
-    assert compact_trigger_tokens(200_000, 50) == 100_000
+    assert compact_trigger_tokens(200_000, 70) == 140_000
 
 
 def test_model_context_window_config_reaches_http_backend(tmp_path):

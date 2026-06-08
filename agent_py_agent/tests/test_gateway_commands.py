@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -347,6 +348,54 @@ class TestGatewayRunStateHelpers:
 
         assert command[-2:] == ["run", "--force-lock"]
         assert command[command.index("--config") + 1] == str(config.resolve())
+
+    def test_gateway_start_command_passes_workspace_root(self, tmp_path: Path):
+        from agent_py_agent.cli.gateway_process import _gateway_start_command
+        from agent_py_agent.cli.models import GatewayStartOptions
+
+        config = tmp_path / "config.yaml"
+        workspace = tmp_path / "all-agent"
+        command = _gateway_start_command(
+            GatewayStartOptions(config=config, force_lock=True, workspace_root=str(workspace))
+        )
+
+        assert command[command.index("--workspace-root") + 1] == str(workspace.resolve())
+        assert command[-1] == "--force-lock"
+
+    def test_gateway_worker_agent_reuses_context_workspace_root(self, tmp_path: Path):
+        from agent_py_agent.cli.gateway_loops import _gateway_agent_from_context
+        from agent_py_agent.cli.models import GatewayRunContext, GatewayRunOptions
+
+        workspace = tmp_path / "all-agent"
+        context = GatewayRunContext(
+            agent=SimpleNamespace(root=workspace),
+            paths=SimpleNamespace(),
+            options=GatewayRunOptions(
+                mutate_state=False,
+                start_runners=False,
+                planner=False,
+                interval=1.0,
+                max_runners=0,
+                limit=0,
+                max_cycles=0,
+                max_cards=0,
+                reviewer="",
+                instruction="",
+                probe=False,
+            ),
+            config_path=tmp_path / "config.yaml",
+            note="",
+            take_over_by="",
+            locked_files=[],
+            force_lock=False,
+        )
+
+        with patch("agent_py_agent.cli.gateway_loops.make_agent") as mock_make_agent:
+            _gateway_agent_from_context(context)
+
+        args = mock_make_agent.call_args.args[0]
+        assert args.config == str(tmp_path / "config.yaml")
+        assert args.workspace_root == str(workspace)
 
     def test_run_gateway_watch_uses_context_bundle(self):
         from agent_py_agent.cli.gateway_process import _run_gateway_watch

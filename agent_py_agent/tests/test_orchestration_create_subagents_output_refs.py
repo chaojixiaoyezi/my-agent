@@ -110,8 +110,26 @@ def test_repair_task_uses_required_read_target_as_product_root(tmp_path):
     result = CreateSubagentsTool(agent).execute({
         "goal": "修复示例站 index.html 的结构验证问题，并满足 required_dom_ids。",
         "agent_name": "小傻妞-验收修复",
-        "role": "repair_worker",
+        "role": "worker",
         "required_read_paths": [str(report), str(target)],
+        "context_packs": [
+            {
+                "kind": "repair_contract",
+                "summary": "根据验收报告修复目标文件",
+                "contract": {
+                    "schema": "subagent_repair_contract.v1",
+                    "failed_run_ids": ["child-a"],
+                    "required_read_paths": [str(report), str(target)],
+                    "target_artifact_refs": [str(target)],
+                },
+            }
+        ],
+        "repair_contract": {
+            "schema": "subagent_repair_contract.v1",
+            "failed_run_ids": ["child-a"],
+            "required_read_paths": [str(report), str(target)],
+            "target_artifact_refs": [str(target)],
+        },
     })
     payload = json.loads(result.output)
     task = agent.subagents.load(payload["created_run_ids"][0])
@@ -327,7 +345,7 @@ def test_items_without_output_files_get_task_local_child_output_ref(tmp_path):
     assert first.endswith("/work/child_outputs/01-ecc-analyzer-1.md")
     assert second.endswith("/work/child_outputs/02-pi-analyzer-2.md")
     assert payload["child_result_index"][0]["expected_outputs"] == [first]
-    assert payload["child_result_index"][0]["read_order"]
+    assert payload["child_result_index"][0]["read_order"] == []
     assert payload["child_output_read_order"][0]["expected_outputs"] == [first]
     assert payload["child_output_read_order"][0]["read_order"] == payload["child_result_index"][0]["read_order"]
     assert payload["status_tool_call"] == {"tool": "inspect_agent_tree", "params": {}}
@@ -367,6 +385,7 @@ def test_count_mode_shared_output_files_are_split_to_unique_child_refs(tmp_path)
     assert payload["child_result_index"][0]["expected_outputs"] == [first_output]
     assert payload["child_result_index"][1]["expected_outputs"] == [second_output]
     assert payload["child_output_read_order"][0]["read_order"] == payload["child_result_index"][0]["read_order"]
+    assert payload["child_output_read_order"][0]["read_order"] == []
 
 
 def test_same_output_without_structured_inputs_does_not_reuse_different_work(tmp_path):
@@ -402,12 +421,12 @@ def test_repair_goal_without_contract_does_not_guess_same_target(tmp_path):
     first = json.loads(tool.execute({
         "goal": f"修复 {artifact} 的 HTML 闭合标签，并验证页面完整。",
         "agent_name": "小傻妞-修复",
-        "role": "leaf_worker",
+        "role": "worker",
     }).output)
     second = json.loads(tool.execute({
         "goal": f"收尾修复文件：{artifact}，确保 </body></html> 是最后内容。",
         "agent_name": "小傻妞-收尾修复",
-        "role": "leaf_worker",
+        "role": "worker",
     }).output)
 
     assert first["created_run_ids"]
@@ -423,12 +442,12 @@ def test_repair_goal_without_contract_keeps_different_targets_separate(tmp_path)
     first = json.loads(tool.execute({
         "goal": f"修复 {tmp_path / 'index1.html'} 的锚点链接。",
         "agent_name": "小傻妞-修复",
-        "role": "leaf_worker",
+        "role": "worker",
     }).output)
     second = json.loads(tool.execute({
         "goal": f"修复 {tmp_path / 'index2.html'} 的 HTML 闭合标签。",
         "agent_name": "小傻妞-修复",
-        "role": "leaf_worker",
+        "role": "worker",
     }).output)
 
     assert first["created_run_ids"]

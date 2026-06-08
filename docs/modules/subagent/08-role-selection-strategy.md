@@ -31,7 +31,7 @@
 
 1. 先判断任务是不是单点小任务；如果是，root 可以直接派 `worker` / `writer`。
 2. 如果任务需要多人、多文件、多阶段或用户明确要求多层，就先派 `coordinator` / `lead`。
-3. 产出型工作先派 `worker` / `writer` / `leaf_worker`，不要先创建或执行 `tester`、`bug_finder`、`checker` 空转。
+3. 产出型工作先派 `worker` / `writer`，不要先创建或执行 `tester`、`bug_finder`、`checker` 空转。
 4. 事实不足时先派 `researcher`，再把研究结论交给 worker/writer。
 5. 产物出来后，可以让一个 `tester` 检查多个 worker 的结果。
 6. 风险较高或用户要求严格时，加一个或多个 `bug_finder` 找问题；它们可以横向检查多个产物。

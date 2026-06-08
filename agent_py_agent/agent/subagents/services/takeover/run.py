@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ....runtime_errors import runtime_error_report
-from ...models import SUBAGENT_HANDLED_TERMINAL_STATUSES, SubAgentTask, task_status_in
+from ...models import SUBAGENT_HANDLED_TERMINAL_STATUSES, FailureType, SubAgentTask, task_status_in
 from .refs import (
     default_takeover_plan,
     source_refs,
@@ -211,7 +211,7 @@ def _merge_attribute_handoff(target: SubAgentTask, source: SubAgentTask) -> bool
 
 def _chain_exhausted_result(manager: Any, source: SubAgentTask, chain_limit: int) -> TakeoverRunResult:
     source.status = "BLOCKED"
-    source.failure_type = "takeover_chain_exhausted"
+    source.failure_type = FailureType.TAKEOVER_CHAIN_EXHAUSTED.value
     source.blockers = unique_strings(
         [
             *source.blockers,

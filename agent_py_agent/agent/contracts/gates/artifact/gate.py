@@ -19,6 +19,9 @@ def evaluate_delivery_closeout_gate(report: dict[str, Any]) -> GateDecision:
     coverage_decision = _target_coverage_gate(report)
     if not coverage_decision.allowed:
         failed.append(coverage_decision)
+    freshness_decision = _target_coverage_freshness_gate(report)
+    if not freshness_decision.allowed:
+        failed.append(freshness_decision)
     if report.get("ok") is not True or failed:
         findings = [finding for decision in failed for finding in decision.findings]
         return GateDecision.repair(
@@ -53,6 +56,30 @@ def _target_coverage_gate(report: dict[str, Any]) -> GateDecision:
             "expected_count": int(status.get("expected_count") or 0),
             "covered_count": int(status.get("covered_count") or 0),
             "missing_count": int(status.get("missing_count") or 0),
+        },
+    )
+
+
+def _target_coverage_freshness_gate(report: dict[str, Any]) -> GateDecision:
+    status = report.get("target_coverage_freshness_status")
+    if not isinstance(status, dict) or status.get("should_block") is not True:
+        return GateDecision.allow("target_coverage_freshness", evidence={"skipped": "not_required_or_fresh"})
+    stale_artifacts = status.get("stale_artifacts")
+    stale_artifacts = stale_artifacts if isinstance(stale_artifacts, list) else []
+    return GateDecision.repair(
+        "target_coverage_freshness",
+        [
+            GateFinding(
+                "FINAL_ARTIFACT_STALE_AFTER_REQUIRED_COVERAGE",
+                evidence={
+                    "latest_required_coverage_created_at": str(status.get("latest_required_coverage_created_at") or ""),
+                    "stale_artifacts": stale_artifacts[:20],
+                },
+            )
+        ],
+        evidence={
+            "latest_required_coverage_created_at": str(status.get("latest_required_coverage_created_at") or ""),
+            "stale_count": len(stale_artifacts),
         },
     )
 

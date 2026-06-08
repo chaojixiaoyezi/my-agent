@@ -13,6 +13,7 @@ from agent_py_agent.agent.settings.config import (
     AgentConfig,
     load_simple_yaml,
 )
+from agent_py_agent.agent.settings.defaults import DEFAULT_MODEL_MAX_TOKENS
 from agent_py_agent.agent.settings.normalize import (
     normalize_agent_config,
     normalize_subagent_workflow_config,
@@ -75,7 +76,7 @@ class TestNormalizeAgentConfig:
         """验证无效的 max_tokens 回退。"""
         data = {"max_tokens": -100}
         normalized, warnings = normalize_agent_config(data)
-        assert normalized["max_tokens"] == 1024  # 默认值
+        assert normalized["max_tokens"] == DEFAULT_MODEL_MAX_TOKENS
         assert len(warnings) > 0
 
     def test_normalize_temperature_valid(self):

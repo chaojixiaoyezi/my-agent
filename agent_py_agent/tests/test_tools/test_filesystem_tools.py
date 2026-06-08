@@ -282,6 +282,27 @@ def test_read_file_routes_internal_agent_status_refs_to_agent_tree(tmp_path: Pat
     child_output.parent.mkdir(parents=True)
     internal.write_text("internal progress only", encoding="utf-8")
     child_output.write_text("declared child result", encoding="utf-8")
+    (internal.parent / "canonical_state.json").write_text(
+        json.dumps(
+            {
+                "status": "DONE",
+                "artifact_refs": [str(child_output)],
+                "attributes": {
+                    "output_files": [str(child_output)],
+                    "artifact_registry_refs": [
+                        {
+                            "artifact_id": "result-1",
+                            "path": str(child_output),
+                            "kind": "md",
+                            "status": "ready",
+                            "size_bytes": child_output.stat().st_size,
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     read_tool = ReadFileTool(workspace, max_chars=2000)
 
     internal_result = read_tool.execute({"path": str(internal)})
@@ -293,6 +314,19 @@ def test_read_file_routes_internal_agent_status_refs_to_agent_tree(tmp_path: Pat
     assert payload["error"] == "internal_agent_status_ref"
     assert payload["suggested_tool_call"]["tool"] == "inspect_agent_tree"
     assert payload["suggested_tool_call"]["run_id"] == "subagent-123"
+    assert payload["child_result_index_row"]["status"] == "DONE"
+    assert payload["child_result_index_row"]["read_order"] == [str(child_output)]
+    assert payload["child_result_index_row"]["primary_artifact_refs"] == [str(child_output)]
+    assert payload["child_result_index_row"]["primary_artifact_stats"] == [
+        {
+            "path": str(child_output),
+            "size_bytes": child_output.stat().st_size,
+            "line_count": 1,
+            "char_count": len("declared child result"),
+        }
+    ]
+    assert payload["child_result_index_row"]["expected_outputs"] == [str(child_output)]
+    assert payload["child_result_index_row"]["artifact_registry_refs"][0]["artifact_id"] == "result-1"
     assert output_result.ok is True
     assert "declared child result" in output_result.output
 
@@ -300,8 +334,20 @@ def test_read_file_routes_internal_agent_status_refs_to_agent_tree(tmp_path: Pat
 def test_list_files_routes_internal_agent_status_dirs_to_agent_tree(tmp_path: Path):
     workspace = tmp_path / "workspace"
     internal = workspace / "tasks" / "2026-06-06" / "demo" / "work" / "agents" / "subagent-123"
+    child_output = workspace / "tasks" / "2026-06-06" / "demo" / "work" / "child_outputs" / "subagent-123.md"
     internal.mkdir(parents=True)
-    (internal / "state.json").write_text('{"status":"RUNNING"}', encoding="utf-8")
+    child_output.parent.mkdir(parents=True)
+    child_output.write_text("declared child result", encoding="utf-8")
+    (internal / "state.json").write_text(
+        json.dumps(
+            {
+                "status": "DONE",
+                "artifact_refs": [str(child_output)],
+                "attributes": {"output_files": [str(child_output)]},
+            }
+        ),
+        encoding="utf-8",
+    )
     list_tool = ListFilesTool(workspace, max_entries=20)
 
     result = list_tool.execute({"path": str(internal)})
@@ -311,6 +357,7 @@ def test_list_files_routes_internal_agent_status_dirs_to_agent_tree(tmp_path: Pa
     assert result.error_code == "WRONG_STATUS_SURFACE"
     assert payload["suggested_tool_call"]["tool"] == "inspect_agent_tree"
     assert payload["suggested_tool_call"]["run_id"] == "subagent-123"
+    assert payload["child_result_index_row"]["read_order"] == [str(child_output)]
 
 
 def test_filesystem_tool_reports_missing_external_path_without_permission_claim():

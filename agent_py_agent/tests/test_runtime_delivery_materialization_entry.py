@@ -59,7 +59,7 @@ def test_cli_run_no_longer_retries_auto_materializer_provider_transient(monkeypa
         assert backend.materializer_calls == 0
 
 
-def test_runtime_materialization_entry_adds_explicit_output_contract_without_source_coverage() -> None:
+def test_runtime_materialization_repairs_explicit_output_contract_with_source_coverage() -> None:
     from agent_py_agent.agent.agent_core.runtime.run_params import (
         run_params_with_materialized_delivery_contract,
     )
@@ -79,23 +79,15 @@ def test_runtime_materialization_entry_adds_explicit_output_contract_without_sou
             RunParams(source="cli_run", save=False),
         )
 
-        assert backend.materializer_calls == 0
-        assert backend.prompts == []
-        assert params.delivery_contract == {
-            "schema_version": "delivery_contract.v1",
-            "artifacts": [
-                {
-                    "artifact_id": "user_requested_report_md",
-                    "preferred_path": "lab_outputs/compact-stress/report.md",
-                    "allowed_output_roots": ["lab_outputs/compact-stress"],
-                    "required": True,
-                    "kind": "md",
-                }
-            ],
-        }
+        assert backend.materializer_calls == 2
+        assert "source_paths" in backend.prompts[1]
+        assert params.delivery_contract["artifacts"][0]["preferred_path"] == "lab_outputs/compact-stress/report.md"
+        coverage = params.delivery_contract["target_coverage_contract"]
+        assert coverage["enforcement"] == "required"
+        assert coverage["target_items"][0]["source_path"] == "data/long_field_journal.txt"
 
 
-def test_runtime_materialization_entry_does_not_repair_structural_output_contracts() -> None:
+def test_runtime_materialization_repairs_structural_output_contracts_until_source_modeled() -> None:
     from agent_py_agent.agent.agent_core.runtime.run_params import (
         run_params_with_materialized_delivery_contract,
     )
@@ -115,9 +107,49 @@ def test_runtime_materialization_entry_does_not_repair_structural_output_contrac
             RunParams(source="cli_run", save=False),
         )
 
-        assert backend.materializer_calls == 0
-        assert backend.prompts == []
+        assert backend.materializer_calls == 3
         assert params.delivery_contract["artifacts"][0]["preferred_path"] == "lab_outputs/compact-stress/report.md"
+        assert params.delivery_contract["target_coverage_contract"]["target_items"][0]["source_path"] == (
+            "data/long_field_journal.txt"
+        )
+
+
+def test_runtime_materialization_uses_structural_directory_coverage_without_output_path() -> None:
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_materialized_delivery_contract,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        root = workspace / "all-agent"
+        ecc = root / "ECC-main"
+        pi = root / "pi-main"
+        ecc.mkdir(parents=True)
+        pi.mkdir()
+        (ecc / "README.md").write_text("ecc", encoding="utf-8")
+        (pi / "package.json").write_text("{}", encoding="utf-8")
+        backend = _MaterializingDeliveryBackend()
+        agent = SimpleNamespace(backend=backend, root=workspace, runtime_guard_policy=None)
+
+        params = run_params_with_materialized_delivery_contract(
+            agent,
+            f"请读 {root} 下面的项目，最后生成中文报告。",
+            RunParams(source="cli_run", save=False),
+        )
+
+        assert backend.materializer_calls == 0
+        assert params.delivery_contract["artifacts"] == [
+            {
+                "artifact_id": "final_report",
+                "kind": "md",
+                "allowed_output_roots": ["output"],
+                "required": True,
+            }
+        ]
+        assert [item["target_id"] for item in params.delivery_contract["target_coverage_contract"]["target_items"]] == [
+            "ECC-main",
+            "pi-main",
+        ]
 
 
 def test_runtime_materialization_skips_task_local_internal_prompt_paths() -> None:

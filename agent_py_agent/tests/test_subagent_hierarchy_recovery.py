@@ -139,7 +139,7 @@ def test_hierarchy_recovery_packet_includes_unfinished_child_after_parent_timeou
             parent_run_id=root.id,
             apply=True,
             child_specs=[
-                HierarchyChildSpec(goal="child waits for leaf", role="child_coordinator", agent_name="child"),
+                HierarchyChildSpec(goal="child waits for leaf", role="coordinator", agent_name="child"),
             ],
         )
     ).created_run_ids[0]
@@ -192,14 +192,14 @@ def test_hierarchy_recovery_packet_marks_failed_middle_leader_with_strategy(tmp_
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
             apply=True,
-            child_specs=[HierarchyChildSpec(goal="child lead", role="child_coordinator", agent_name="child")],
+            child_specs=[HierarchyChildSpec(goal="child lead", role="coordinator", agent_name="child")],
         )
     ).created_run_ids[0]
     grand = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child,
             apply=True,
-            child_specs=[HierarchyChildSpec(goal="grand lead", role="grandchild_coordinator", agent_name="grand")],
+            child_specs=[HierarchyChildSpec(goal="grand lead", role="coordinator", agent_name="grand")],
         )
     ).created_run_ids[0]
     leaf = manager.hierarchy.schedule_child_runs(

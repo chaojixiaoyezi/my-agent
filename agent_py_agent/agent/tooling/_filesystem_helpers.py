@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -153,7 +154,7 @@ def _internal_agent_status_payload(path: Path, run_id: str) -> dict[str, object]
     suggestion: dict[str, object] = {"tool": "inspect_agent_tree"}
     if run_id:
         suggestion["run_id"] = run_id
-    return {
+    payload: dict[str, object] = {
         "ok": False,
         "error": "internal_agent_status_ref",
         "message": "This path is an internal agent status surface. Use inspect_agent_tree for run status, then read child_result_index.read_order or declared output files for child results.",
@@ -162,6 +163,145 @@ def _internal_agent_status_payload(path: Path, run_id: str) -> dict[str, object]
         "suggested_tool_call": suggestion,
         "result_fields_to_read": ["child_result_index.read_order", "child_result_index.expected_outputs"],
     }
+    result_surface = _internal_agent_result_surface(path, run_id)
+    if result_surface:
+        payload["child_result_index_row"] = result_surface
+    return payload
+
+
+def _internal_agent_result_surface(path: Path, run_id: str) -> dict[str, object]:
+    run_dir = _internal_agent_run_dir(path, run_id)
+    if run_dir is None:
+        return {}
+    state = _read_json_object(run_dir / "canonical_state.json")
+    if not state:
+        state = _read_json_object(run_dir / "state.json")
+    if not state:
+        return {}
+    attrs = state.get("attributes") if isinstance(state.get("attributes"), dict) else {}
+    artifact_registry_refs = _artifact_registry_refs(attrs)
+    artifact_refs = _string_list(state.get("artifact_refs"))
+    declared_output_refs = _declared_output_refs(state, attrs)
+    primary_refs = _existing_ref_paths([
+        *[str(item.get("path") or "") for item in artifact_registry_refs],
+        *artifact_refs,
+        *declared_output_refs,
+    ])
+    return {
+        "run_id": run_id,
+        "status": _text(state.get("status")),
+        "verification_status": _text(state.get("verification_status")),
+        "read_order": primary_refs,
+        "primary_artifact_refs": primary_refs,
+        "primary_artifact_stats": _artifact_stats(primary_refs),
+        "expected_outputs": declared_output_refs,
+        "artifact_registry_refs": artifact_registry_refs,
+        "last_progress_summary": _text(state.get("last_progress_summary")),
+    }
+
+
+def _internal_agent_run_dir(path: Path, run_id: str) -> Path | None:
+    if not run_id:
+        return None
+    parts = path.parts
+    for index in range(len(parts) - 2):
+        if parts[index] == "work" and parts[index + 1] == "agents" and parts[index + 2] == run_id:
+            return Path(*parts[: index + 3])
+    return None
+
+
+def _read_json_object(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _artifact_registry_refs(attrs: object) -> list[dict[str, object]]:
+    if not isinstance(attrs, dict):
+        return []
+    rows = attrs.get("artifact_registry_refs")
+    if not isinstance(rows, list):
+        return []
+    result: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        path = _text(item.get("path"))
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        result.append({
+            "artifact_id": _text(item.get("artifact_id")),
+            "path": path,
+            "kind": _text(item.get("kind")),
+            "status": _text(item.get("status")),
+            "size_bytes": item.get("size_bytes") if isinstance(item.get("size_bytes"), int) else 0,
+        })
+    return result
+
+
+def _declared_output_refs(state: dict[str, object], attrs: object) -> list[str]:
+    refs: list[str] = []
+    for source in (state, attrs if isinstance(attrs, dict) else {}):
+        for key in ("declared_output_refs", "output_files", "output_refs", "artifact_refs"):
+            refs.extend(_string_list(source.get(key)))
+    return _unique_strings(refs)
+
+
+def _existing_ref_paths(paths: list[str]) -> list[str]:
+    refs: list[str] = []
+    for raw in paths:
+        text = _text(raw)
+        if not text:
+            continue
+        try:
+            if Path(text).expanduser().is_file():
+                refs.append(text)
+        except OSError:
+            continue
+    return _unique_strings(refs)
+
+
+def _artifact_stats(paths: list[str]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for raw in paths:
+        path = Path(raw).expanduser()
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        row: dict[str, object] = {"path": str(raw), "size_bytes": stat.st_size}
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            rows.append(row)
+            continue
+        row["line_count"] = len(text.splitlines())
+        row["char_count"] = len(text)
+        rows.append(row)
+    return rows
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list | tuple | set):
+        return []
+    return [_text(item) for item in value if _text(item)]
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = _text(value)
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _text(value: object) -> str:
+    return str(value or "").strip()
 
 
 def _is_under_any_root(path: Path, roots: list[Path]) -> bool:

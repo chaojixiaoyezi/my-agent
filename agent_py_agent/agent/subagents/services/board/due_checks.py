@@ -16,6 +16,7 @@ from ...models import (
     task_is_done_verified,
     task_is_handled_after_parent_timeout,
     task_status_in,
+    task_status_reason_code,
 )
 from ...policies import _is_active
 from ..recovery.strategy import SubagentRecoveryStrategyRequest, build_subagent_recovery_strategy
@@ -62,7 +63,7 @@ def _check_status_issues(ctx: DueInspectionContext):
             ctx,
             DueIssueSpec(
                 severity,
-                f"status_{status.lower()}",
+                f"status_{task_status_reason_code(status)}",
                 f"任务状态为 {status}，需要父代理确认原因，不能当作完成。",
                 action,
             ),

@@ -78,15 +78,15 @@ def _record_touches_run_scope(record: object) -> bool:
     run_id = str(getattr(record, "run_id", "") or "").strip()
     if not run_id:
         return False
-    step = str(getattr(record, "step", "") or "").strip().lower()
+    step = str(getattr(record, "step", "") or "").strip()
     return step in {"runner", "action_apply", "capability_route", "patch_review"}
 
 
 def _record_is_actual_runner_attempt(record: object) -> bool:
-    step = str(getattr(record, "step", "") or "").strip().lower()
+    step = str(getattr(record, "step", "") or "").strip()
     if step != "runner":
         return False
-    action = str(getattr(record, "action", "") or "").strip().lower()
+    action = str(getattr(record, "action", "") or "").strip()
     if action not in {"execute_runner", "retry_runner"}:
         return False
     if bool(getattr(record, "dry_run", False)):
@@ -139,6 +139,7 @@ def _child_result_index_hint(rows: list[dict[str, object]]) -> str:
         return ""
     return (
         "先核对 child_result_index 中每个 child 的 read_order、primary_artifact_refs 和 expected_outputs；"
+        "read_order/primary_artifact_refs 才是当前可读结果，expected_outputs 只是声明目标；"
         "如果协调汇总和 child 摘要冲突，先修复汇总或继续调度，不要只看输出目录或单个协调产物。"
     )
 

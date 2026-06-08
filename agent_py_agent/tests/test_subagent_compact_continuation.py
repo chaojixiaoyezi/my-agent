@@ -20,7 +20,7 @@ def test_subagent_save_writes_task_local_continue_packet(tmp_path: Path) -> None
         goal="继续实现 flow-b.html",
         thought="示例站 leaf 被 compact 后要能接着写。",
         plan=["恢复 checkpoint", "继续补测试"],
-        role="leaf_worker",
+        role="worker",
     )
     task.status = "BLOCKED"
     task.current_step = "等待父级授权后继续 checkout tests"
@@ -104,7 +104,7 @@ def test_runner_prompt_uses_generated_task_local_continue_packet(tmp_path: Path)
         goal="继续示例网站 leaf 任务",
         thought="需要从 task-local packet 接续。",
         plan=["读 checkpoint", "继续写验收证据"],
-        role="leaf_worker",
+        role="worker",
     )
     task.status = "RUNNING"
     task.current_step = "从 task-local packet 继续写验收证据"
@@ -162,7 +162,7 @@ def test_runner_prompt_uses_recovery_refs_when_continue_packet_is_corrupt(tmp_pa
         goal="继续恢复损坏 packet 的任务",
         thought="packet 坏了也要读 checkpoint。",
         plan=["读 checkpoint", "继续写结果"],
-        role="leaf_worker",
+        role="worker",
     )
     task.status = "RUNNING"
     task.current_step = "从 checkpoint 降级恢复"
@@ -218,7 +218,7 @@ def test_runner_prompt_uses_recovery_refs_when_continue_packet_is_stale(tmp_path
         goal="继续恢复过期 packet 的任务",
         thought="packet 过期时用 checkpoint。",
         plan=["读 checkpoint", "继续写结果"],
-        role="leaf_worker",
+        role="worker",
     )
     task.status = "RUNNING"
     task.current_step = "从 stale packet 降级恢复"
@@ -245,7 +245,7 @@ def test_runner_prompt_uses_checkpoint_when_continue_packet_is_missing(tmp_path:
         goal="继续恢复缺失 packet 的任务",
         thought="packet 不在时也要读 checkpoint。",
         plan=["读 checkpoint", "继续写结果"],
-        role="leaf_worker",
+        role="worker",
     )
     task.status = "RUNNING"
     task.current_step = "packet 缺失时读 checkpoint"

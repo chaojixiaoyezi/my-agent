@@ -132,6 +132,7 @@ def _request_status(request: ExternalizeToolOutputRequest) -> str:
 
 
 def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str, *, preview_chars: int) -> dict[str, Any]:
+    created_at = datetime.now(tz=timezone.utc).isoformat()
     record = {
         "version": TOOL_OUTPUT_RECORD_SCHEMA.version,
         "schema": runtime_memory_schema_payload(TOOL_OUTPUT_RECORD_SCHEMA),
@@ -150,6 +151,7 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
         "output_size_bytes": len(output.encode("utf-8")),
         "output_externalized": False,
         "output_path": "",
+        "created_at": created_at,
     }
     if read_window := _read_window_from_envelope(request.result_envelope):
         record["read_window"] = read_window
@@ -218,7 +220,7 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[str, Any], digest: str) -> None:
-    created_at = datetime.now(tz=timezone.utc).isoformat()
+    created_at = str(record.get("created_at") or datetime.now(tz=timezone.utc).isoformat())
     payload = {
         "version": TOOL_OUTPUT_INDEX_SCHEMA.version,
         "schema": runtime_memory_schema_payload(TOOL_OUTPUT_INDEX_SCHEMA),

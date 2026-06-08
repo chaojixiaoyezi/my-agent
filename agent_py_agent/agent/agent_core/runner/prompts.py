@@ -172,8 +172,6 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
     lines.extend(_collaboration_control_plane_lines(context))
     lines.extend(_controlled_exec_contract_lines(context))
     lines.extend(_current_role_template_lines(context))
-    if "leaf" in str(context.role or "").lower():
-        lines.append("- 叶子节点重点是交付产物、证据和测试建议；父级只负责读取结果并继续调度或汇总。")
     lines.extend(_root_execution_contract_lines(context))
     if _is_coordinator_context(context):
         lines.extend(_coordinator_execution_contract_lines())
@@ -349,11 +347,11 @@ def coordinator_execution_policy_lines() -> list[str]:
         "由真正需要该能力的 runner 正式申请，父级再 route grant 并继续推进。",
         "- 给 child 写 goal 时，不要要求它在产物目录写 output.json；"
         "如需结构化汇报，只能要求它写自己的 execution_context.output_json。",
-        "- coordinator/lead 可以继续创建 coordinator/child_coordinator/grandchild_coordinator 作为下一层领导节点；"
-        "需要多层协作时不要误以为只能创建 worker；父级要求 4 层链路时，深度未到孙孙层前先创建下一层 coordinator。",
+        "- coordinator 可以继续创建 coordinator 作为下一层领导节点；"
+        "需要多层协作时不要误以为只能创建 worker；父级要求多层链路时，深度未到目标层前先创建下一层 coordinator。",
         "- 如果父级目标或质量要求点名需要 tester、bug_finder、reviewer、找错或测试角色，"
         "必须创建真实 child run，并把 role/agent_name 写成对应角色；只在 goal、summary 或 evidence 里提到这些词不算角色覆盖。",
-        "- 当生产 child/leaf 已完成，但父级合同仍缺 tester/bug_finder 时，"
+        "- 当生产 child 已完成，但父级合同仍缺 tester/bug_finder 时，"
         "不要直接输出最终 SUBAGENT_RESULT；先调用 schedule_child_subagents 获取或执行 quality_advice，"
         "再由你按 ready refs、风险和 scope 选择 QA 数量、顺序和是否需要 repair。",
         '- schedule_child_subagents 的参数必须放在顶层，例如 {"tool":"schedule_child_subagents","dry_run":false,"children":[...]}；'
@@ -361,7 +359,7 @@ def coordinator_execution_policy_lines() -> list[str]:
         "- 不要让 worker/writer 代写 coordinator 自己的协调证据；需要共享时引用 artifact_refs/evidence_refs。",
         "- 创建 child/leaf 时必须原样传递父级指定的文件名、目录和质量要求，不要把 solution.py 改成别的模块名。",
         "- 同一次 schedule_child_subagents 可以混建 coordinator、worker 或 tester；调度层只返回创建、复用和待 dispatch 的状态，是否继续拆分或修正由你根据 tree/refs 判断。",
-        "- 创建 leaf 后使用 dispatch_subagents(dry_run=false, run_ids=[...]) 推进直接 child，并汇总 leaf 的产物 refs。",
+        "- 创建 worker 后使用 dispatch_subagents(dry_run=false, run_ids=[...]) 推进直接 child，并汇总 worker 的产物 refs。",
         "- 多个 child 同轮 dispatch 时不要写子任务专属 runner_instruction；需要专属补充就按单个 run_id 分多次 dispatch。",
         "- dispatch_subagents 返回 child test_failed 或 followup_action=plan_rescue 时，不要宣称完成；先汇报失败 refs 或安排修复。",
         "- dispatch_subagents 返回 direct_children.qa_repair_advice 或 needs_repair_wave 时，不要直接报完成；"
@@ -373,16 +371,8 @@ def coordinator_execution_policy_lines() -> list[str]:
 
 
 def _current_role_template_lines(context: SubAgentExecutionContext) -> list[str]:
-    if _is_leaf_worker_context(context):
-        return []
-    detail = role_template_detail_text(roles=[str(context.role or "")]).strip()
-    if not detail or _is_coordinator_context(context):
-        return []
-    return ["当前角色模板详情：", *[f"  {line}" for line in detail.splitlines()]]
-
-
-def _is_leaf_worker_context(context: SubAgentExecutionContext) -> bool:
-    return "leaf_worker" in str(context.role or "").lower()
+    del context
+    return []
 
 
 def _is_coordinator_context(context: SubAgentExecutionContext) -> bool:

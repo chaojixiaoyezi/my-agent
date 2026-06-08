@@ -54,7 +54,7 @@ def scheduled_child_role(
     if should_infer_leaf_coding_tools(
         LeafWriteIntentRequest(spec=spec, extra_write_roots=extra_write_roots or [], goal=goal)
     ):
-        return "leaf_worker"
+        return "worker"
     tools = set(getattr(spec, "allowed_tools", []) or [])
     if "schedule_child_subagents" not in tools and "dispatch_subagents" not in tools:
         return role
@@ -95,11 +95,6 @@ def _is_placeholder_suffix(value: str) -> bool:
 
 
 def _coordinator_role_for_depth(parent: SubAgentTask) -> str:
-    depth = int(parent.depth or 0) + 1
-    if depth == 1:
-        return "child_coordinator"
-    if depth == 2:
-        return "grandchild_coordinator"
     return "coordinator"
 
 

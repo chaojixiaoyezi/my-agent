@@ -7,6 +7,16 @@ from typing import Any
 
 from .contract_validation_recovery import recovery_for_findings
 
+_ALLOWED_RUNTIME_CONFIG_FIELDS = frozenset({
+    "allow_dangerous_actions",
+    "allow_shell",
+    "approval_required",
+    "artifact_dir",
+    "max_steps",
+    "tool_timeout",
+    "workspace_root",
+})
+
 
 @dataclass(frozen=True)
 class RuntimeConfigValidation:
@@ -18,6 +28,7 @@ class RuntimeConfigValidation:
 
 def validate_runtime_config(config: dict[str, Any]) -> RuntimeConfigValidation:
     findings: list[dict[str, str]] = []
+    _validate_known_fields(config, findings)
     _validate_required_text(config, "workspace_root", "CONFIG_WORKSPACE_ROOT_MISSING", findings)
     _validate_required_text(config, "artifact_dir", "CONFIG_ARTIFACT_DIR_MISSING", findings)
     _validate_positive_number(config, "tool_timeout", "CONFIG_TOOL_TIMEOUT", findings)
@@ -29,6 +40,12 @@ def validate_runtime_config(config: dict[str, Any]) -> RuntimeConfigValidation:
         findings=tuple(findings),
         recovery=recovery_for_findings("runtime_config", findings),
     )
+
+
+def _validate_known_fields(config: dict[str, Any], findings: list[dict[str, str]]) -> None:
+    for field in sorted(str(key) for key in config):
+        if field not in _ALLOWED_RUNTIME_CONFIG_FIELDS:
+            findings.append(_finding("CONFIG_UNKNOWN_FIELD", field, "unknown_runtime_config_field"))
 
 
 def _validate_required_text(

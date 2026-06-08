@@ -411,9 +411,48 @@ def test_agent_tree_result_index_prefers_declared_outputs_over_internal_final_re
 
     assert row["expected_outputs"] == [str(output)]
     assert row["primary_artifact_refs"] == [str(output)]
+    assert row["primary_artifact_stats"] == [
+        {
+            "path": str(output),
+            "size_bytes": len("result"),
+            "line_count": 1,
+            "char_count": len("result"),
+        }
+    ]
     assert row["read_order"][0] == str(output)
     assert row["final_report_ref"] == str(final_report)
     assert payload["nodes"][0]["evidence_layer"]["declared_output_refs"] == [str(output)]
+
+
+def test_agent_tree_result_index_does_not_read_missing_declared_outputs(tmp_path):
+    """只声明但尚未生成的产物不能进入父代理 read_order。"""
+
+    output = tmp_path / "work" / "pending_project_analysis.md"
+
+    class _Manager:
+        def kernel_snapshot(self, query):
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                scope=query.scope,
+                runs=[
+                    SubagentKernelRun(
+                        run_id="child-1",
+                        status="PLANNING",
+                        declared_output_refs=[str(output)],
+                    )
+                ],
+            )
+
+    class _Agent:
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent())
+    row = payload["child_result_index"][0]
+
+    assert row["expected_outputs"] == [str(output)]
+    assert row["primary_artifact_refs"] == []
+    assert row["read_order"] == []
+    assert row["readiness"] == "running_no_result_yet"
 
 
 def test_main_run_root_query_falls_back_to_visible_tree_when_no_subagent_root_matches():
@@ -551,13 +590,13 @@ def test_agent_tree_completion_buckets_require_exact_done_status():
     assert payload["coordination_advice"]["completed_child_run_ids"] == ["child-done"]
     rows = {row["run_id"]: row for row in payload["child_result_index"]}
     assert rows["child-completed"]["readiness"] == "not_ready"
-    assert rows["child-completed"]["not_done_reason"] == "completed"
+    assert rows["child-completed"]["not_done_reason"] == "raw_status:COMPLETED"
     assert rows["child-success"]["readiness"] == "not_ready"
-    assert rows["child-success"]["not_done_reason"] == "success"
+    assert rows["child-success"]["not_done_reason"] == "raw_status:SUCCESS"
 
 
-def test_child_result_index_keeps_progress_refs_for_running_child_without_artifacts():
-    """运行中的子代理即使还没有 artifact，也要给父代理可读的进度 refs。"""
+def test_child_result_index_keeps_progress_refs_out_of_read_order_for_running_child():
+    """运行中的子代理可展示进度 refs，但不能诱导父代理读取内部占位报告。"""
 
     class _Manager:
         def kernel_snapshot(self, query):
@@ -599,5 +638,6 @@ def test_child_result_index_keeps_progress_refs_for_running_child_without_artifa
     assert row["summary_ref"].endswith("/work/agents/child-running/summary.md")
     assert row["checkpoint_ref"].endswith("/work/agents/child-running/checkpoint.json")
     assert row["agent_work_dir"].endswith("/work/agents/child-running")
+    assert row["read_order"] == []
     assert row["readiness"] == "progress_refs_available"
     assert row["recent_tool_trace"] == [{"tool": "list_files", "ok": True, "summary": "最近成功调用工具: list_files"}]

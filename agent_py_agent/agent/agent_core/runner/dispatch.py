@@ -17,8 +17,11 @@ from ...settings.runtime_guard_config import runtime_guard_int
 from ...subagents import SubAgentTask
 from ...subagents.model_capabilities import capability_request_requires_parent_resolution
 from ...subagents.models import (
+    CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES,
+    RETRYABLE_RUNNER_FAILURE_TYPES,
     TaskStatus,
     VerificationStatus,
+    normalize_failure_type,
     normalize_verification_status,
     task_has_status,
     task_status_in,
@@ -29,25 +32,6 @@ from .worker import RunSubagentWorkerParams, _run_subagent_worker
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
-
-
-RETRYABLE_RUNNER_FAILURE_TYPES = {
-    "runner_error",
-    "structured_output_parse_error",
-    "tool_result_missing",
-    "model_error",
-    "api_error",
-    "transient_error",
-    "provider_timeout",
-    "runner_timeout",
-}
-
-CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES = {
-    "capability_request",
-    "permission_blocked",
-    "missing_capability",
-    "write_permission_blocked",
-}
 
 
 @dataclass(frozen=True)
@@ -113,7 +97,7 @@ def _same_run_redispatch_limit(value: object = None, *, runtime_policy: object =
 
 def _runner_failure_type(task: SubAgentTask) -> str:
 
-    return str(task.failure_type or "").strip().lower()
+    return normalize_failure_type(getattr(task, "failure_type", ""))
 
 
 def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:

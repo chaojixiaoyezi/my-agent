@@ -2,8 +2,10 @@ from __future__ import annotations
 
 """配置解析验证测试。"""
 
+from pathlib import Path
+
 from agent_py_agent.agent.settings import load_config
-from agent_py_agent.agent.settings.config import normalize_agent_config
+from agent_py_agent.agent.settings.config import AgentConfig, normalize_agent_config
 
 
 def _write_config(tmp_path, lines: list[str]):
@@ -29,6 +31,11 @@ def test_normalize_agent_config_valid():
     assert normalized["temperature"] == "0.7"
     assert normalized["gateway_heartbeat_interval"] == 10
     assert normalized["gateway_stale_seconds"] == 120
+
+
+def test_agent_config_default_max_tokens_matches_shipped_config():
+    shipped = load_config(Path(__file__).parents[1] / "config" / "agent_config.yaml")
+    assert AgentConfig().max_tokens == shipped.max_tokens
 
 
 def test_normalize_agent_config_type_coercion():

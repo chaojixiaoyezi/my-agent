@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ...runtime_errors import runtime_error_report
-from ...subagents.models import TaskStatus, task_status_in
+from ...subagents.models import (
+    FailureType,
+    TaskStatus,
+    failure_type_from_task_status,
+    task_status_in,
+)
 from .timeout_policy import get_task_timeout, resolve_runner_config
 
 if TYPE_CHECKING:
@@ -158,7 +163,7 @@ def _collect_runner_future_result(params: ConcurrentRunnerParams, future, run_id
                 message=f"runner worker failed: {exc}",
                 status="BLOCKED",
                 verification_status="UNVERIFIED",
-                failure_type="runner_worker_error",
+                failure_type=FailureType.RUNNER_WORKER_ERROR.value,
             )
         )
 
@@ -193,10 +198,10 @@ def _inject_failure_memories(params: RunnerFailureParams, failure_type: str) -> 
         task_context = {
             "task_id": params.run_id,
             "goal": getattr(params.before, "goal", ""),
-            "failure_type": failure_type.lower(),
+            "failure_type": failure_type_from_task_status(failure_type),
         }
         relevant_memories = push_relevant_memories(
-            params.agent, failure_type.lower(), task_context, limit=3
+            params.agent, failure_type_from_task_status(failure_type), task_context, limit=3
         )
         if relevant_memories:
             memory_hint = format_memories_for_injection(relevant_memories)
