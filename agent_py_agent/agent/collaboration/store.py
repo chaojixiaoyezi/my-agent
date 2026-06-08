@@ -52,8 +52,7 @@ from .request_status import (
     request_status_protocol_metadata,
     unavailable_target_agent_ids_by_request,
 )
-from .store_common import dict_items, now, read_jsonl_report, strings
-from .store_common import now as current_time
+from .store_common import dict_items, now, now as current_time, read_jsonl_report, strings
 
 
 # ---------------------------------------------------------------------------
