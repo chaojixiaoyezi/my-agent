@@ -13,7 +13,7 @@ from .request_status import (
     normalize_runtime_priority,
     request_has_required_evidence,
 )
-from .store_status import CollaborationStore
+from .store import CollaborationStore
 
 if TYPE_CHECKING:
     from ..conversation import ConversationStore

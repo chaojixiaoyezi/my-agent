@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ...common.value_parsing import dedupe_strings, string_list
-from ...conversation.store_guidance import normalize_guidance_target_type
+from ...conversation.models import normalize_guidance_target_type
 from ...runtime_errors import runtime_error_report
 from ...subagents.kernel import SubagentKernelQuery
 from ...tooling.models import BaseTool, ToolExecutionResult, ToolSpec

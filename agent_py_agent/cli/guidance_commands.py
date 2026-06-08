@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from ..agent.conversation.store_guidance import normalize_guidance_target_type
+from ..agent.conversation.models import normalize_guidance_target_type
 from .common import make_agent
 
 

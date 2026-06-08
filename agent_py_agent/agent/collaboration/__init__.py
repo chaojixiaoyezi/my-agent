@@ -10,7 +10,7 @@ from .models import (
     CollaborationRequest,
     EvidencePacket,
 )
-from .store_status import CollaborationStore
+from .store import CollaborationStore
 from .tools_case import InspectCollaborationTool, RaiseCollaborationTool, UpdateCollaborationTool
 from .tools_evidence import SubmitCollaborationResultTool
 

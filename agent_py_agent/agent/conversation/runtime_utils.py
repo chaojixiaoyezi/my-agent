@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from .models import ConversationThread, ObservationEvent, WakeSignal
-from .store_context import ConversationStore
+from .store import ConversationStore
 
 
 def background_prompt(reason: str) -> str:

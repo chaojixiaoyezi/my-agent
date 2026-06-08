@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..action_protocol_core import ArtifactRef
+from ..action_protocol import ArtifactRef
 from .contract_validation_recovery import recovery_for_findings
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..action_protocol_core import ArtifactRef
+from ..action_protocol import ArtifactRef
 from .error_taxonomy import ERROR_CONTRACTS, error_contract
 
 SCHEMA_VERSION = "tool_protocol.v2"

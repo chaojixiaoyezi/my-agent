@@ -21,7 +21,7 @@ from .runtime_tool_policy import (
     background_tool_policy_decision,
 )
 from .runtime_utils import json_block, pending_wake_payload
-from .store_context import ConversationStore
+from .store import ConversationStore
 
 
 @dataclass(frozen=True)

@@ -4,7 +4,7 @@ from __future__ import annotations
 from .models import ConversationThread
 from .runtime_utils import now as current_time
 from .runtime_worker import BackgroundMainAgentRuntime
-from .store_context import ConversationStore
+from .store import ConversationStore
 
 
 class ChannelMessageRuntime:

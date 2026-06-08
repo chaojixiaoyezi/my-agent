@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..action_protocol_core import ArtifactRef
+from ..action_protocol import ArtifactRef
 from .idempotency import idempotency_key as build_idempotency_key
 from .idempotency import operation_id as build_operation_id
 from .tool_protocol_v2_models import (
