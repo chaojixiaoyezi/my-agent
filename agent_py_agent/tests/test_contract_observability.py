@@ -57,7 +57,7 @@ def test_contract_trace_is_bounded() -> None:
 
 
 def test_staged_checkpoint_finding_includes_trace(tmp_path: Path) -> None:
-    from agent_py_agent.agent.contracts.staged_checkpoint_acceptance import (
+    from agent_py_agent.agent.contracts.staged_checkpoint import (
         one_staged_checkpoint_findings,
     )
 

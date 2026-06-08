@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +83,15 @@ _ENTRYLIKE_STEMS = {
 }
 _SOURCE_DIR_PARTS = {"app", "cmd", "crates", "lib", "packages", "src"}
 _ROOT_README_NAMES = {"README", "README.md", "README.rst"}
+
+
+@dataclass(frozen=True)
+class CoverageRecordMatchRequest:
+    record: dict[str, object]
+    item: dict[str, str]
+    item_keys: set[str]
+    contract: dict[str, Any]
+    base: Path | None
 
 
 def collect_target_coverage_records(
@@ -468,15 +479,17 @@ def _target_is_covered(
         return _source_file_under_dir_covered(item, records, base)
     item_keys = _target_keys(item, base)
     for record in records:
-        if not item_keys.intersection(_coverage_keys(record, base)):
-            continue
-        if _target_requires_full_source_read(item, contract):
-            if _full_source_read_record_counts(record):
-                return True
-            continue
-        if _record_counts_as_covered(record):
+        if _record_covers_target(CoverageRecordMatchRequest(record, item, item_keys, contract, base)):
             return True
     return False
+
+
+def _record_covers_target(request: CoverageRecordMatchRequest) -> bool:
+    if not request.item_keys.intersection(_coverage_keys(request.record, request.base)):
+        return False
+    if _target_requires_full_source_read(request.item, request.contract):
+        return _full_source_read_record_counts(request.record)
+    return _record_counts_as_covered(request.record)
 
 
 def _target_requires_full_source_read(item: dict[str, str], contract: dict[str, Any]) -> bool:
@@ -633,31 +646,47 @@ def _source_file_candidates_under_target(target: str, base: Path | None = None) 
     path = _local_path_from_ref(target, base)
     if path is None or not path.is_dir():
         return []
-    candidates: list[Path] = []
-    scanned = 0
-    try:
-        for root, dirs, files in os.walk(path):
-            dirs[:] = [
-                dirname
-                for dirname in dirs
-                if dirname not in _IGNORED_SOURCE_DIR_NAMES and not dirname.startswith(".")
-            ]
-            for name in files:
-                scanned += 1
-                if scanned > _MAX_SOURCE_CANDIDATE_SCAN:
-                    break
-                candidate = Path(root) / name
-                if _looks_like_source_candidate(candidate):
-                    candidates.append(candidate)
-            if scanned > _MAX_SOURCE_CANDIDATE_SCAN:
-                break
-    except OSError:
-        return []
     sorted_candidates = sorted(
-        candidates,
+        _source_candidate_paths(path),
         key=lambda candidate: _source_candidate_sort_key(candidate, path),
     )
     return [str(candidate.resolve(strict=False)) for candidate in sorted_candidates[:_MAX_SOURCE_CANDIDATES]]
+
+
+def _source_candidate_paths(path: Path) -> list[Path]:
+    with suppress(OSError):
+        return _source_candidate_paths_from_walk(path)
+    return []
+
+
+def _source_candidate_paths_from_walk(path: Path) -> list[Path]:
+    candidates: list[Path] = []
+    scanned = 0
+    for root, dirs, files in os.walk(path):
+        dirs[:] = _scan_source_dirnames(dirs)
+        scanned = _append_source_candidates(candidates, Path(root), files, scanned)
+        if scanned > _MAX_SOURCE_CANDIDATE_SCAN:
+            break
+    return candidates
+
+
+def _scan_source_dirnames(dirnames: list[str]) -> list[str]:
+    return [
+        dirname
+        for dirname in dirnames
+        if dirname not in _IGNORED_SOURCE_DIR_NAMES and not dirname.startswith(".")
+    ]
+
+
+def _append_source_candidates(candidates: list[Path], root: Path, files: list[str], scanned: int) -> int:
+    for name in files:
+        scanned += 1
+        if scanned > _MAX_SOURCE_CANDIDATE_SCAN:
+            break
+        candidate = root / name
+        if _looks_like_source_candidate(candidate):
+            candidates.append(candidate)
+    return scanned
 
 
 def _local_path_from_ref(value: object, base: Path | None = None) -> Path | None:
@@ -681,27 +710,31 @@ def _looks_like_source_candidate(path: Path) -> bool:
 
 
 def _source_candidate_sort_key(path: Path, root: Path) -> tuple[int, int, int, str]:
-    try:
-        relative = path.relative_to(root)
-        parts = relative.parts
-    except ValueError:
-        parts = path.parts
-    name = path.name
-    stem = path.stem
-    is_root_file = len(parts) == 1
-    if name in _ROOT_README_NAMES and is_root_file:
-        kind_rank = 0
-    elif name in {"package.json", "pyproject.toml", "go.mod", "Cargo.toml", "setup.py"}:
-        kind_rank = 1
-    elif path.suffix.lower() in _SOURCE_CANDIDATE_SUFFIXES - {".md", ".rst"}:
-        kind_rank = 2
-    elif name.startswith("README"):
-        kind_rank = 3
-    else:
-        kind_rank = 4
+    parts = _relative_parts(path, root)
+    kind_rank = _source_candidate_kind_rank(path, parts)
     source_part_rank = 0 if any(part in _SOURCE_DIR_PARTS for part in parts) else 1
-    entry_rank = 0 if stem in _ENTRYLIKE_STEMS else 1
+    entry_rank = 0 if path.stem in _ENTRYLIKE_STEMS else 1
     return (kind_rank, source_part_rank, entry_rank, "/".join(parts))
+
+
+def _relative_parts(path: Path, root: Path) -> tuple[str, ...]:
+    try:
+        return path.relative_to(root).parts
+    except ValueError:
+        return path.parts
+
+
+def _source_candidate_kind_rank(path: Path, parts: tuple[str, ...]) -> int:
+    name = path.name
+    if name in _ROOT_README_NAMES and len(parts) == 1:
+        return 0
+    if name in {"package.json", "pyproject.toml", "go.mod", "Cargo.toml", "setup.py"}:
+        return 1
+    if path.suffix.lower() in _SOURCE_CANDIDATE_SUFFIXES - {".md", ".rst"}:
+        return 2
+    if name.startswith("README"):
+        return 3
+    return 4
 
 
 def _repair_candidate_sort_key(value: str) -> tuple[int, str]:

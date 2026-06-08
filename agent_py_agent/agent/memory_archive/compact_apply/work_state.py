@@ -28,6 +28,26 @@ class WorkStateSnapshotRequest:
     plan_id: str
 
 
+@dataclass(frozen=True)
+class WorkStateToolState:
+    call_refs: list[dict[str, Any]]
+    artifact_refs: list[dict[str, Any]]
+    all_progress: list[dict[str, Any]]
+    read_coverage: dict[str, Any]
+    tool_progress: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class WorkStateSnapshotPayloadRequest:
+    snapshot: WorkStateSnapshotRequest
+    source_state: dict[str, Any]
+    field_sources: Any
+    tool_state: WorkStateToolState
+    goal: str
+    next_actions: list[str]
+    read_files: list[str]
+
+
 def build_work_state_snapshot(request: WorkStateSnapshotRequest) -> dict[str, Any]:
     from ..compact_work_state.archive import source_work_state
 
@@ -65,51 +85,82 @@ def _base_snapshot(request: WorkStateSnapshotRequest, source_state: dict[str, An
 
     field_sources = build_work_state_field_sources(WorkStateFieldSourceRequest(request.plan, source_state))
     goal = source_state["goal"] or field_sources.goal
-    call_refs = tool_call_refs(request.restore_refs)
-    artifact_refs = tool_output_artifact_refs(request.restore_refs)
-    all_tool_progress = _dedupe_tool_progress([
+    tool_state = _work_state_tool_state(request.restore_refs)
+    next_actions = _snapshot_next_actions(source_state, field_sources, tool_state)
+    read_files = _snapshot_read_files(field_sources, tool_state)
+    return _work_state_snapshot_payload(
+        WorkStateSnapshotPayloadRequest(request, source_state, field_sources, tool_state, goal, next_actions, read_files)
+    )
+
+
+def _work_state_tool_state(restore_refs: dict[str, Any]) -> WorkStateToolState:
+    call_refs = tool_call_refs(restore_refs)
+    artifact_refs = tool_output_artifact_refs(restore_refs)
+    all_progress = _dedupe_tool_progress([
         *_tool_progress_from_call_refs(call_refs),
         *_tool_progress_from_artifact_refs(artifact_refs),
     ], limit=0)
-    read_coverage = _read_coverage_payload(all_tool_progress)
-    tool_progress = _limited_tool_progress(all_tool_progress)
+    return WorkStateToolState(
+        call_refs=call_refs,
+        artifact_refs=artifact_refs,
+        all_progress=all_progress,
+        read_coverage=_read_coverage_payload(all_progress),
+        tool_progress=_limited_tool_progress(all_progress),
+    )
+
+
+def _snapshot_next_actions(
+    source_state: dict[str, Any],
+    field_sources: Any,
+    tool_state: WorkStateToolState,
+) -> list[str]:
     guidance_next = _runtime_guidance_next_action(field_sources.runtime_handoff)
     progress_next = _task_progress_next_action(field_sources.task_progress)
-    tool_next = _read_coverage_next_action(read_coverage) or _tool_progress_next_action(tool_progress)
-    next_actions = (
+    tool_next = _read_coverage_next_action(tool_state.read_coverage) or _tool_progress_next_action(tool_state.tool_progress)
+    return (
         ([guidance_next] if guidance_next else [])
         or ([tool_next] if tool_next else [])
         or ([progress_next] if progress_next else [])
         or source_state["next_actions"]
         or field_sources.next_actions
     )
-    read_files = dedupe_strings([
+
+
+def _snapshot_read_files(field_sources: Any, tool_state: WorkStateToolState) -> list[str]:
+    return dedupe_strings([
         *field_sources.read_files,
-        *_tool_read_files_from_progress(tool_progress),
+        *_tool_read_files_from_progress(tool_state.tool_progress),
     ])
+
+
+def _work_state_snapshot_payload(request: WorkStateSnapshotPayloadRequest) -> dict[str, Any]:
+    snapshot = request.snapshot
+    source_state = request.source_state
+    field_sources = request.field_sources
+    tool_state = request.tool_state
     return {
         "version": COMPACT_WORK_STATE_SNAPSHOT_SCHEMA.version,
         "schema": runtime_memory_schema_payload(COMPACT_WORK_STATE_SNAPSHOT_SCHEMA),
         "event_type": "compact_work_state_snapshot",
-        "apply_id": request.apply_id,
-        "plan_id": request.plan_id,
-        "workspace_root": request.plan["workspace_root"],
-        "scope": request.plan["scope"],
-        "created_at": request.now,
-        "goal": goal,
+        "apply_id": snapshot.apply_id,
+        "plan_id": snapshot.plan_id,
+        "workspace_root": snapshot.plan["workspace_root"],
+        "scope": snapshot.plan["scope"],
+        "created_at": snapshot.now,
+        "goal": request.goal,
         "phase": "compact_apply",
-        "next_step": next_actions[0] if next_actions else "",
-        "next_actions": next_actions,
+        "next_step": request.next_actions[0] if request.next_actions else "",
+        "next_actions": request.next_actions,
         "acceptance": field_sources.acceptance,
         "constraints": field_sources.constraints,
         "changed_files": [],
-        "read_files": read_files,
-        "read_coverage": read_coverage,
-        "tool_progress": tool_progress,
-        "pending_deferred_tool_calls": _pending_deferred_tool_calls(call_refs),
-        "artifact_refs": artifact_refs,
-        "restore_refs": _work_state_restore_refs(request.paths, request.restore_refs),
-        "refs": _work_state_refs(request.paths, request.restore_refs),
+        "read_files": request.read_files,
+        "read_coverage": tool_state.read_coverage,
+        "tool_progress": tool_state.tool_progress,
+        "pending_deferred_tool_calls": _pending_deferred_tool_calls(tool_state.call_refs),
+        "artifact_refs": tool_state.artifact_refs,
+        "restore_refs": _work_state_restore_refs(snapshot.paths, snapshot.restore_refs),
+        "refs": _work_state_refs(snapshot.paths, snapshot.restore_refs),
         "git_state": {"status": "not_captured", "changed_files": []},
         "latest_tests": field_sources.latest_tests,
         "task_progress": field_sources.task_progress,
@@ -162,16 +213,19 @@ def _dedupe_tool_progress(progress: list[dict[str, Any]], *, limit: int = 48) ->
             continue
         key = (tool, source_path, _tool_progress_dedupe_scope(item))
         if key in positions:
-            existing = deduped[positions[key]]
-            if not str(existing.get("scoped_call_id") or "").strip():
-                existing["scoped_call_id"] = str(item.get("scoped_call_id") or "").strip()
-            if not int(existing.get("size_bytes", 0) or 0):
-                existing["size_bytes"] = int(item.get("size_bytes", 0) or 0)
-            _merge_cursor_fields(existing, item)
+            _merge_tool_progress_item(deduped[positions[key]], item)
             continue
         positions[key] = len(deduped)
         deduped.append(dict(item))
     return _limited_tool_progress(deduped, limit=limit)
+
+
+def _merge_tool_progress_item(existing: dict[str, Any], item: dict[str, Any]) -> None:
+    if not str(existing.get("scoped_call_id") or "").strip():
+        existing["scoped_call_id"] = str(item.get("scoped_call_id") or "").strip()
+    if not int(existing.get("size_bytes", 0) or 0):
+        existing["size_bytes"] = int(item.get("size_bytes", 0) or 0)
+    _merge_cursor_fields(existing, item)
 
 
 def _limited_tool_progress(progress: list[dict[str, Any]], *, limit: int = 48) -> list[dict[str, Any]]:
@@ -601,25 +655,36 @@ def _page_resume_call(item: dict[str, Any], *, next_offset: int, limit: int) -> 
     if not source:
         return ""
     if tool == "list_files":
-        args = [f"path={_json_arg(source)}", f"offset={next_offset}", f"limit={limit}"]
-        for key in ("recursive", "max_depth", "file_glob", "include_dirs", "include_files", "include_ignored"):
-            if key in item:
-                args.append(f"{key}={_json_arg(item[key])}")
-        return f"list_files({', '.join(args)})"
+        return _page_resume_call_for_list_files(item, source, next_offset, limit)
     if tool == "find_files":
-        pattern = str(item.get("pattern") or "").strip()
-        args = [f"pattern={_json_arg(pattern)}", f"path={_json_arg(source)}", f"offset={next_offset}", f"limit={limit}"]
-        if "include_ignored" in item:
-            args.append(f"include_ignored={_json_arg(item['include_ignored'])}")
-        return f"find_files({', '.join(args)})"
+        return _page_resume_call_for_find_files(item, source, next_offset, limit)
     if tool == "search_text":
-        query = str(item.get("query") or "").strip()
-        args = [f"query={_json_arg(query)}", f"path={_json_arg(source)}", f"offset={next_offset}", f"limit={limit}"]
-        for key in ("output_mode", "file_glob", "literal", "ignore_case", "context", "include_ignored"):
-            if key in item:
-                args.append(f"{key}={_json_arg(item[key])}")
-        return f"search_text({', '.join(args)})"
+        return _page_resume_call_for_search_text(item, source, next_offset, limit)
     return ""
+
+
+def _page_resume_call_for_list_files(item: dict[str, Any], source: str, next_offset: int, limit: int) -> str:
+    args = [f"path={_json_arg(source)}", f"offset={next_offset}", f"limit={limit}"]
+    args.extend(_arg_items(item, ("recursive", "max_depth", "file_glob", "include_dirs", "include_files", "include_ignored")))
+    return f"list_files({', '.join(args)})"
+
+
+def _page_resume_call_for_find_files(item: dict[str, Any], source: str, next_offset: int, limit: int) -> str:
+    pattern = str(item.get("pattern") or "").strip()
+    args = [f"pattern={_json_arg(pattern)}", f"path={_json_arg(source)}", f"offset={next_offset}", f"limit={limit}"]
+    args.extend(_arg_items(item, ("include_ignored",)))
+    return f"find_files({', '.join(args)})"
+
+
+def _page_resume_call_for_search_text(item: dict[str, Any], source: str, next_offset: int, limit: int) -> str:
+    query = str(item.get("query") or "").strip()
+    args = [f"query={_json_arg(query)}", f"path={_json_arg(source)}", f"offset={next_offset}", f"limit={limit}"]
+    args.extend(_arg_items(item, ("output_mode", "file_glob", "literal", "ignore_case", "context", "include_ignored")))
+    return f"search_text({', '.join(args)})"
+
+
+def _arg_items(item: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
+    return [f"{key}={_json_arg(item[key])}" for key in keys if key in item]
 
 
 def _json_arg(value: object) -> str:

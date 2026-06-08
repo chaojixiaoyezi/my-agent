@@ -82,19 +82,21 @@ def _escape_invalid_json_string_backslashes(raw: str) -> str:
             index += 1
             continue
         if in_string and char == "\\":
-            next_char = raw[index + 1] if index + 1 < len(raw) else ""
-            if next_char and next_char in valid_simple_escapes:
-                chars.append(char)
-                chars.append(next_char)
-                index += 2
-                continue
-            chars.append("\\\\")
-            if next_char:
-                chars.append(next_char)
-                index += 2
-            else:
-                index += 1
+            index = _append_repaired_escape(raw, index, chars, valid_simple_escapes)
             continue
         chars.append(char)
         index += 1
     return "".join(chars)
+
+
+def _append_repaired_escape(raw: str, index: int, chars: list[str], valid_simple_escapes: set[str]) -> int:
+    next_char = raw[index + 1] if index + 1 < len(raw) else ""
+    if next_char and next_char in valid_simple_escapes:
+        chars.append(raw[index])
+        chars.append(next_char)
+        return index + 2
+    chars.append("\\\\")
+    if next_char:
+        chars.append(next_char)
+        return index + 2
+    return index + 1

@@ -47,12 +47,19 @@ def maybe_append_delivery_completion_soft_hint(
     produced_refs = _produced_refs(archive_record)
     if not target_paths and not produced_refs:
         return
-    payload = {
+    _append_delivery_hint_context(params, _delivery_hint_payload(ready_targets, produced_refs))
+
+
+def _delivery_hint_payload(ready_targets: list[str], produced_refs: list[str]) -> dict[str, object]:
+    return {
         "status": "delivery_artifacts_present",
         "ready_target_paths": ready_targets,
         "produced_refs": produced_refs,
         "next_step_hint": "final_check_then_submit_or_report",
     }
+
+
+def _append_delivery_hint_context(params: ToolLoopExecuteParams, payload: dict[str, object]) -> None:
     params.tool_context.append(
         "\n".join(
             [
@@ -184,16 +191,7 @@ def _task_output_dir(params: ToolLoopExecuteParams) -> Path | None:
 
 def _user_requested_output_targets(params: ToolLoopExecuteParams) -> list[dict[str, object]]:
     targets: list[dict[str, object]] = []
-    attrs = getattr(params, "task_attributes", None)
-    if isinstance(attrs, dict):
-        workspace = attrs.get("run_workspace")
-        if isinstance(workspace, dict):
-            dir_text = str(workspace.get("user_requested_output_dir") or "").strip()
-            if dir_text:
-                targets.append(_output_target_for_user_path(Path(dir_text).expanduser(), force_kind="dir"))
-            path_text = str(workspace.get("user_requested_output_path") or "").strip()
-            if path_text:
-                targets.append(_output_target_for_user_path(Path(path_text).expanduser()))
+    targets.extend(_user_requested_targets_from_workspace(_run_workspace_attrs(params)))
     prompt_text = "\n".join(
         text
         for text in (
@@ -206,6 +204,23 @@ def _user_requested_output_targets(params: ToolLoopExecuteParams) -> list[dict[s
     return _unique_targets(targets)
 
 
+def _run_workspace_attrs(params: ToolLoopExecuteParams) -> dict[str, object]:
+    attrs = getattr(params, "task_attributes", None)
+    workspace = attrs.get("run_workspace") if isinstance(attrs, dict) else {}
+    return dict(workspace) if isinstance(workspace, dict) else {}
+
+
+def _user_requested_targets_from_workspace(workspace: dict[str, object]) -> list[dict[str, object]]:
+    targets: list[dict[str, object]] = []
+    dir_text = str(workspace.get("user_requested_output_dir") or "").strip()
+    if dir_text:
+        targets.append(_output_target_for_user_path(Path(dir_text).expanduser(), force_kind="dir"))
+    path_text = str(workspace.get("user_requested_output_path") or "").strip()
+    if path_text:
+        targets.append(_output_target_for_user_path(Path(path_text).expanduser()))
+    return targets
+
+
 def _output_target_for_user_path(path: Path, *, force_kind: str | None = None) -> dict[str, object]:
     resolved = path.resolve(strict=False)
     kind = force_kind or ("file" if resolved.suffix else "dir")
@@ -214,19 +229,22 @@ def _output_target_for_user_path(path: Path, *, force_kind: str | None = None) -
 
 def _matches_any_target(path: Path, targets: list[dict[str, object]]) -> bool:
     for target in targets:
-        root = target.get("path")
-        if not isinstance(root, Path):
-            continue
-        if target.get("kind") == "file":
-            if path == root:
-                return True
-            continue
-        try:
-            path.relative_to(root)
-        except ValueError:
-            continue
-        return True
+        if _matches_target(path, target):
+            return True
     return False
+
+
+def _matches_target(path: Path, target: dict[str, object]) -> bool:
+    root = target.get("path")
+    if not isinstance(root, Path):
+        return False
+    if target.get("kind") == "file":
+        return path == root
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _is_supported_delivery_file(path: Path) -> bool:

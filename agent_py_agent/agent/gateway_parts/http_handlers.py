@@ -232,17 +232,20 @@ def _http_conversation_payload(context: _AskRequestContext) -> dict:
 
 
 def _http_conversation_id(body: dict) -> str:
-    for key in ("conversation_id", "session_id", "thread_id", "channel_conversation_id"):
-        value = str(body.get(key) or "").strip()
-        if value:
-            return value
+    if value := _first_conversation_id(body):
+        return value
     metadata = body.get("metadata")
     if isinstance(metadata, dict):
-        for key in ("conversation_id", "session_id", "thread_id", "channel_conversation_id"):
-            value = str(metadata.get(key) or "").strip()
-            if value:
-                return value
+        return _first_conversation_id(metadata) or "default"
     return "default"
+
+
+def _first_conversation_id(payload: dict) -> str:
+    for key in ("conversation_id", "session_id", "thread_id", "channel_conversation_id"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def handle_stop(handler, server) -> None:

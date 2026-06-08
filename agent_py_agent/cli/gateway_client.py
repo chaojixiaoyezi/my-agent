@@ -149,12 +149,7 @@ def _stream_chunk_lines(chunk_path: Path, chunks_printed: int, spinner, chunk_of
     if readable_chunk_path is None:
         return chunks_printed
     try:
-        with open(readable_chunk_path, encoding="utf-8") as f:
-            if chunk_offset_ref is not None:
-                f.seek(max(0, chunk_offset_ref[0]))
-            data = f.read()
-            if chunk_offset_ref is not None:
-                chunk_offset_ref[0] = f.tell()
+        data = _read_stream_chunk_data(readable_chunk_path, chunk_offset_ref)
     except OSError as exc:
         print(f"gateway stream chunk load_error path={readable_chunk_path} message={exc}", file=sys.stderr)
         return chunks_printed
@@ -162,6 +157,16 @@ def _stream_chunk_lines(chunk_path: Path, chunks_printed: int, spinner, chunk_of
     for line in lines:
         chunks_printed += _write_stream_chunk_line(line, chunks_printed, spinner)
     return chunks_printed
+
+
+def _read_stream_chunk_data(readable_chunk_path: Path, chunk_offset_ref: list[int] | None) -> str:
+    with open(readable_chunk_path, encoding="utf-8") as f:
+        if chunk_offset_ref is not None:
+            f.seek(max(0, chunk_offset_ref[0]))
+        data = f.read()
+        if chunk_offset_ref is not None:
+            chunk_offset_ref[0] = f.tell()
+        return data
 
 
 def _readable_chunk_path(chunk_path: Path) -> Path | None:

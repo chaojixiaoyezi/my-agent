@@ -56,10 +56,16 @@ def _read_tool_output_index(workspace: Path) -> list[dict[str, Any]]:
     for path in tool_output_index_paths_for_lookup(workspace):
         if not path.exists():
             continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if payload := _json_line(line):
-                rows.append(payload)
+        rows.extend(_read_tool_output_index_path(path))
     return rows
+
+
+def _read_tool_output_index_path(path: Path) -> list[dict[str, Any]]:
+    return [
+        payload
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if (payload := _json_line(line))
+    ]
 
 
 def _matches_scope(row: dict[str, Any], scope: dict[str, Any]) -> bool:

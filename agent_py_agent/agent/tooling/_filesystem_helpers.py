@@ -254,15 +254,19 @@ def _declared_output_refs(state: dict[str, object], attrs: object) -> list[str]:
 def _existing_ref_paths(paths: list[str]) -> list[str]:
     refs: list[str] = []
     for raw in paths:
-        text = _text(raw)
-        if not text:
-            continue
-        try:
-            if Path(text).expanduser().is_file():
-                refs.append(text)
-        except OSError:
-            continue
+        if text := _existing_ref_path(raw):
+            refs.append(text)
     return _unique_strings(refs)
+
+
+def _existing_ref_path(raw: object) -> str:
+    text = _text(raw)
+    if not text:
+        return ""
+    try:
+        return text if Path(text).expanduser().is_file() else ""
+    except OSError:
+        return ""
 
 
 def _artifact_stats(paths: list[str]) -> list[dict[str, object]]:

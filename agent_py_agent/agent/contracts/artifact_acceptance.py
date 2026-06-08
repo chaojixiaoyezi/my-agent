@@ -420,14 +420,16 @@ def _forbidden_regex_items(validation_contract: dict[str, object]) -> list[str]:
 def _string_items(validation_contract: dict[str, object], keys: tuple[str, ...]) -> list[str]:
     items: list[str] = []
     for key in keys:
-        value = validation_contract.get(key)
-        if isinstance(value, str):
-            if value.strip():
-                items.append(value)
-            continue
-        if isinstance(value, list | tuple | set):
-            items.extend(str(item) for item in value if str(item).strip())
+        items.extend(_string_items_value(validation_contract.get(key)))
     return list(dict.fromkeys(items))
+
+
+def _string_items_value(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list | tuple | set):
+        return [str(item) for item in value if str(item).strip()]
+    return []
 
 
 def _validate_xlsx(

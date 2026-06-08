@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,34 +30,26 @@ _PATH_TOKEN_RE = re.compile(
 )
 
 
+@dataclass(frozen=True)
+class ArtifactPayloadRequest:
+    record: dict[str, Any]
+    path: Path
+    target: dict[str, Any]
+    archive_tool_calls: list[Any]
+    workspace_root: Path | None
+
+
 def uncontracted_task_output_closeout_response(
     request: object,
     workspace_root: Path,
 ) -> ModelResponse | None:
-    artifacts = _current_run_task_output_artifacts(
-        getattr(request, "params", None),
-        workspace_root=_tool_workspace_root(getattr(request, "agent", None)),
-    )
-    if not artifacts:
-        artifacts = _current_run_task_output_artifacts(getattr(request, "params", None), workspace_root=workspace_root)
+    artifacts = _uncontracted_current_artifacts(request, workspace_root)
     if not artifacts:
         return None
     params = request.params
     artifacts = _registered_artifacts(artifacts, workspace_root, params)
     delivery_mode = _delivery_mode_for_artifacts(artifacts)
-    report = {
-        "schema_version": "main_agent_delivery_closeout.v1",
-        "ok": True,
-        "case_id": "",
-        "request_id": params.request_id,
-        "run_id": params.run_id,
-        "task_id": params.task_id,
-        "workspace_root": str(workspace_root),
-        "canonical_artifact_registry_ref": _relative_report_ref(registry_path(workspace_root), workspace_root),
-        "artifacts": artifacts,
-        "delivery_mode": delivery_mode,
-        "message_zh": _message_for_delivery_mode(delivery_mode),
-    }
+    report = _uncontracted_base_report(params, workspace_root, artifacts, delivery_mode)
     report_ref = _write_report(workspace_root, report)
     report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
     artifact_blocks = any(item.get("ok") is not True for item in artifacts)
@@ -85,6 +78,37 @@ def uncontracted_task_output_closeout_response(
     sync_run_task_workspace_closeout(request.agent, params, report)
     reset_local_progress_guard(request.agent, params)
     return ModelResponse(text=_uncontracted_closeout_text(report), backend=request.backend)
+
+
+def _uncontracted_current_artifacts(request: object, workspace_root: Path) -> list[dict[str, Any]]:
+    artifacts = _current_run_task_output_artifacts(
+        getattr(request, "params", None),
+        workspace_root=_tool_workspace_root(getattr(request, "agent", None)),
+    )
+    if artifacts:
+        return artifacts
+    return _current_run_task_output_artifacts(getattr(request, "params", None), workspace_root=workspace_root)
+
+
+def _uncontracted_base_report(
+    run_params: ToolLoopExecuteParams,
+    workspace_root: Path,
+    artifacts: list[dict[str, Any]],
+    delivery_mode: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "main_agent_delivery_closeout.v1",
+        "ok": True,
+        "case_id": "",
+        "request_id": run_params.request_id,
+        "run_id": run_params.run_id,
+        "task_id": run_params.task_id,
+        "workspace_root": str(workspace_root),
+        "canonical_artifact_registry_ref": _relative_report_ref(registry_path(workspace_root), workspace_root),
+        "artifacts": artifacts,
+        "delivery_mode": delivery_mode,
+        "message_zh": _message_for_delivery_mode(delivery_mode),
+    }
 
 
 def _append_uncontracted_repair_context(params: ToolLoopExecuteParams, report: dict[str, Any]) -> None:
@@ -272,7 +296,7 @@ def _task_output_artifacts_from_record(
     archive_tool_calls: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
     return [
-        _artifact_payload(record, path, target, archive_tool_calls=archive_tool_calls or [], workspace_root=workspace_root)
+        _artifact_payload(ArtifactPayloadRequest(record, path, target, archive_tool_calls or [], workspace_root))
         for path in _produced_paths(record, workspace_root=workspace_root)
         for target in targets
         if _is_task_output_file(path, target)
@@ -285,32 +309,30 @@ def _successful_write_records(records: object) -> list[dict[str, Any]]:
     return [record for record in records if isinstance(record, dict) and _successful_write_record(record)]
 
 
-def _artifact_payload(
-    record: dict[str, Any],
-    path: Path,
-    target: dict[str, Any],
-    *,
-    archive_tool_calls: list[Any],
-    workspace_root: Path | None,
-) -> dict[str, Any]:
-    acceptance_report = _artifact_acceptance_report(path, target)
+def _artifact_payload(request: ArtifactPayloadRequest) -> dict[str, Any]:
+    acceptance_report = _artifact_acceptance_report(request.path, request.target)
     findings = list(acceptance_report.get("findings") if isinstance(acceptance_report.get("findings"), list) else [])
-    if finding := _partial_unclosed_artifact_finding(record, path):
+    if finding := _partial_unclosed_artifact_finding(request.record, request.path):
         findings.append(finding)
-    if finding := _unrecovered_unclosed_write_finding(record, path, archive_tool_calls, workspace_root):
+    if finding := _unrecovered_unclosed_write_finding(
+        request.record,
+        request.path,
+        request.archive_tool_calls,
+        request.workspace_root,
+    ):
         findings.append(finding)
     ok = bool(acceptance_report.get("ok")) and not any(str(item.get("severity") or "") == "hard" for item in findings)
     acceptance_report = {**acceptance_report, "ok": ok}
     if findings:
         acceptance_report["findings"] = findings
     return {
-        "artifact_id": str(record.get("call_id") or path.name),
-        "kind": path.suffix.lower().lstrip(".") or "file",
-        "path": str(path),
+        "artifact_id": str(request.record.get("call_id") or request.path.name),
+        "kind": request.path.suffix.lower().lstrip(".") or "file",
+        "path": str(request.path),
         "ok": ok,
         "acceptance_report": acceptance_report,
         "source": "current_run_tool_output",
-        "output_scope": str(target["scope"]),
+        "output_scope": str(request.target["scope"]),
     }
 
 
@@ -405,16 +427,20 @@ def _canonical_path(path: Path, workspace_root: Path | None) -> str:
 
 
 def _max_recovery_chunk_chars(records: list[dict[str, Any]]) -> int:
-    values: list[int] = []
-    for record in records:
-        params = record.get("parameters")
-        recovery = params.get("write_recovery") if isinstance(params, dict) else None
-        if isinstance(recovery, dict):
-            try:
-                values.append(int(recovery.get("max_chunk_chars") or 0))
-            except (TypeError, ValueError):
-                pass
+    values = [_recovery_chunk_chars(record) for record in records]
+    values = [value for value in values if value > 0]
     return max(values) if values else 0
+
+
+def _recovery_chunk_chars(record: dict[str, Any]) -> int:
+    params = record.get("parameters")
+    recovery = params.get("write_recovery") if isinstance(params, dict) else None
+    if not isinstance(recovery, dict):
+        return 0
+    try:
+        return int(recovery.get("max_chunk_chars") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _task_output_dir(params: ToolLoopExecuteParams | None) -> Path | None:
@@ -517,14 +543,20 @@ def _produced_paths(record: dict[str, Any], *, workspace_root: Path | None = Non
     refs = _record_refs(record)
     paths: list[Path] = []
     for ref in dict.fromkeys(refs):
-        if "://" in ref:
-            continue
-        path = Path(ref).expanduser()
-        if path.is_absolute():
-            paths.append(path.resolve(strict=False))
-        elif workspace_root is not None:
-            paths.append((workspace_root / path).resolve(strict=False))
+        if path := _produced_path_from_ref(ref, workspace_root):
+            paths.append(path)
     return paths
+
+
+def _produced_path_from_ref(ref: str, workspace_root: Path | None) -> Path | None:
+    if "://" in ref:
+        return None
+    path = Path(ref).expanduser()
+    if path.is_absolute():
+        return path.resolve(strict=False)
+    if workspace_root is None:
+        return None
+    return (workspace_root / path).resolve(strict=False)
 
 
 def _record_refs(record: dict[str, Any]) -> list[str]:

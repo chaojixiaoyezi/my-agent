@@ -330,18 +330,20 @@ def _target_coverage_line(value: Any) -> str:
     if payload["enforcement"]:
         parts.append(f"enforcement={payload['enforcement']}")
     parts.append(f"targets={payload['target_count']}")
-    preview = payload.get("target_items_preview")
-    if isinstance(preview, list) and preview:
-        labels: list[str] = []
-        for item in preview[:3]:
-            if not isinstance(item, dict):
-                continue
-            label = str(item.get("target_id") or item.get("source_path") or item.get("source_ref") or item.get("path") or "")
-            if label:
-                labels.append(label)
-        if labels:
-            parts.append("preview=" + ", ".join(labels))
+    if labels := _target_preview_labels(payload.get("target_items_preview")):
+        parts.append("preview=" + ", ".join(labels))
     return "；".join(parts)
+
+
+def _target_preview_labels(preview: object) -> list[str]:
+    if not isinstance(preview, list):
+        return []
+    return [
+        label
+        for item in preview[:3]
+        if isinstance(item, dict)
+        if (label := str(item.get("target_id") or item.get("source_path") or item.get("source_ref") or item.get("path") or ""))
+    ]
 
 
 def _inline_items(value: Any) -> str:

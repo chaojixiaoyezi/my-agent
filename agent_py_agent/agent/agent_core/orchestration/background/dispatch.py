@@ -31,6 +31,15 @@ class _BackgroundDispatchRequest:
     backend_override: object | None = None
 
 
+@dataclass(frozen=True)
+class _ProcessStartupFailureRequest:
+    agent: object
+    dispatch: _BackgroundDispatchRequest
+    process: subprocess.Popen
+    returncode: int
+    mark_errors: list[dict[str, object]]
+
+
 def auto_start_tasks(agent, tasks: list, request_params: dict[str, object]) -> dict[str, object]:
     skipped_run_ids = [_safe_task_id(task) for task in tasks if _safe_task_id(task)]
     dispatchable = dispatchable_tasks(tasks)
@@ -83,38 +92,53 @@ def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
         return _start_inprocess_dispatch(agent, request, mark_errors)
     process = _spawn_background_dispatch_process(agent, request)
     if (returncode := process_startup_returncode(process)) is not None:
-        error = f"background dispatch process exited during startup returncode={returncode}"
-        mark_errors.extend(mark_background_start(request, status="failed", error=error))
-        mark_errors.extend(mark_background_channel_failure(request, error=error))
-        payload = {
-            "status": "failed",
-            "dispatch_mode": "background",
-            "background_backend": "process",
-            "failure_type": FailureType.BACKGROUND_DISPATCH_STARTUP.value,
-            "run_ids": run_ids,
-            "launch_id": launch_id,
-            "pid": process.pid,
-            "returncode": returncode,
-            "log_path": _background_log_path(agent, launch_id),
-            "summary": "subagent dispatch process exited before runner startup; affected tasks were marked channel failed",
-            "agent_tree": _safe_agent_tree(agent),
-        }
-        attach_mark_errors(payload, mark_errors)
-        return payload
+        return _background_process_startup_failure(
+            _ProcessStartupFailureRequest(agent, request, process, returncode, mark_errors)
+        )
     _remember_background_dispatch(agent, launch_id, run_ids, f"pid:{process.pid}")
+    payload = _background_process_started_payload(agent, request, process)
+    attach_mark_errors(payload, mark_errors)
+    return payload
+
+
+def _background_process_startup_failure(request: _ProcessStartupFailureRequest) -> dict[str, object]:
+    error = f"background dispatch process exited during startup returncode={request.returncode}"
+    dispatch = request.dispatch
+    request.mark_errors.extend(mark_background_start(dispatch, status="failed", error=error))
+    request.mark_errors.extend(mark_background_channel_failure(dispatch, error=error))
     payload = {
+        "status": "failed",
+        "dispatch_mode": "background",
+        "background_backend": "process",
+        "failure_type": FailureType.BACKGROUND_DISPATCH_STARTUP.value,
+        "run_ids": dispatch.run_ids,
+        "launch_id": dispatch.launch_id,
+        "pid": request.process.pid,
+        "returncode": request.returncode,
+        "log_path": _background_log_path(request.agent, dispatch.launch_id),
+        "summary": "subagent dispatch process exited before runner startup; affected tasks were marked channel failed",
+        "agent_tree": _safe_agent_tree(request.agent),
+    }
+    attach_mark_errors(payload, request.mark_errors)
+    return payload
+
+
+def _background_process_started_payload(
+    agent,
+    request: _BackgroundDispatchRequest,
+    process: subprocess.Popen,
+) -> dict[str, object]:
+    return {
         "status": "started",
         "dispatch_mode": "background",
         "background_backend": "process",
-        "run_ids": run_ids,
-        "launch_id": launch_id,
+        "run_ids": request.run_ids,
+        "launch_id": request.launch_id,
         "pid": process.pid,
-        "log_path": _background_log_path(agent, launch_id),
+        "log_path": _background_log_path(agent, request.launch_id),
         "summary": "subagent dispatch launched in a durable process; parent should inspect agent tree for progress",
         "agent_tree": _safe_agent_tree(agent),
     }
-    attach_mark_errors(payload, mark_errors)
-    return payload
 
 
 def _use_inprocess_autostart(agent) -> bool:
@@ -322,16 +346,25 @@ def _background_dispatch_worker(request: _BackgroundDispatchRequest) -> None:
         _remember_background_result(request.agent, request.launch_id, {"ok": False, "error": error})
         return
     finally:
-        if request.backend_override is not None:
-            if previous_present:
-                request.agent._subagent_worker_backend_override = previous_backend_override
-            else:
-                try:
-                    delattr(request.agent, "_subagent_worker_backend_override")
-                except AttributeError:
-                    pass
+        _restore_background_backend_override(request, previous_present, previous_backend_override)
     mark_background_start(request, status="finished")
     _remember_background_result(request.agent, request.launch_id, _auto_start_report(request.run_ids, report))
+
+
+def _restore_background_backend_override(
+    request: _BackgroundDispatchRequest,
+    previous_present: bool,
+    previous_backend_override: object,
+) -> None:
+    if request.backend_override is None:
+        return
+    if previous_present:
+        request.agent._subagent_worker_backend_override = previous_backend_override
+        return
+    try:
+        delattr(request.agent, "_subagent_worker_backend_override")
+    except AttributeError:
+        return
 
 
 def _remember_background_dispatch(agent, launch_id: str, run_ids: list[str], thread_name: str) -> None:

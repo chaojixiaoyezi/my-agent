@@ -23,7 +23,7 @@ class _BrokenBackgroundContextStore(ConversationStore):
 
 
 def test_background_context_reports_load_errors_without_hiding_state(tmp_path):
-    from agent_py_agent.agent.conversation.runtime_context import context_markdown
+    from agent_py_agent.agent.conversation.runtime import context_markdown
 
     store = _BrokenBackgroundContextStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(
@@ -48,7 +48,7 @@ def test_background_context_reports_load_errors_without_hiding_state(tmp_path):
 
 
 def test_background_context_reports_corrupt_jsonl_rows_without_dropping_good_rows(tmp_path):
-    from agent_py_agent.agent.conversation.runtime_context import context_markdown
+    from agent_py_agent.agent.conversation.runtime import context_markdown
 
     store = ConversationStore(tmp_path / "conversations")
     thread = _thread(store)
@@ -151,7 +151,7 @@ def _thread(store: ConversationStore):
 
 
 def _context_prompt(store: ConversationStore, thread, root) -> str:
-    from agent_py_agent.agent.conversation.runtime_context import context_markdown
+    from agent_py_agent.agent.conversation.runtime import context_markdown
 
     agent = SimpleNamespace(config=None, root=root)
     request = SimpleNamespace(reason="scheduled_progress_report", task_id="", wake_signal=None)

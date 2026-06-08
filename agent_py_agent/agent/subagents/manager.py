@@ -179,32 +179,7 @@ class SubAgentManager(SubagentKernelMixin):
         memory_delete_after_days: int = 0,
         destroy_summary_required: bool = True,
     ) -> SubAgentTask:
-        params = params or CreateRunParams(
-            goal=goal,
-            thought=thought,
-            plan=plan or [],
-            agent_name=agent_name,
-            role=role,
-            parent_id=parent_id,
-            root_id=root_id,
-            depth=depth,
-            allowed_skills=allowed_skills,
-            allowed_tools=allowed_tools,
-            owner=owner,
-            supervisor=supervisor,
-            final_owner=final_owner,
-            acceptance_checks=acceptance_checks,
-            quality_contract=quality_contract,
-            context_manifest=context_manifest,
-            context_packs=context_packs,
-            extra_write_roots=extra_write_roots,
-            workflow_mode=workflow_mode,
-            attributes=attributes,
-            parent_access_mode=parent_access_mode,
-            memory_retention_policy=memory_retention_policy,
-            memory_delete_after_days=memory_delete_after_days,
-            destroy_summary_required=destroy_summary_required,
-        )
+        params = params or _create_run_params_from_kwargs(locals())
         return self.base_service.create_run(params=params)
 
     def record_takeover(
@@ -286,6 +261,35 @@ def _init_params_from_kwargs(values: dict[str, object]) -> SubAgentManagerInitPa
         owner_id=str(values.get("owner_id") or ""),
         owner_home_dir=str(values.get("owner_home_dir") or ""),
         owner_policy_snapshot=values.get("owner_policy_snapshot"),
+    )
+
+
+def _create_run_params_from_kwargs(values: dict[str, object]) -> CreateRunParams:
+    return CreateRunParams(
+        goal=values.get("goal"),
+        thought=values.get("thought"),
+        plan=values.get("plan") or [],
+        agent_name=values.get("agent_name"),
+        role=values.get("role"),
+        parent_id=values.get("parent_id"),
+        root_id=values.get("root_id"),
+        depth=values.get("depth"),
+        allowed_skills=values.get("allowed_skills"),
+        allowed_tools=values.get("allowed_tools"),
+        owner=values.get("owner"),
+        supervisor=values.get("supervisor"),
+        final_owner=values.get("final_owner"),
+        acceptance_checks=values.get("acceptance_checks"),
+        quality_contract=values.get("quality_contract"),
+        context_manifest=values.get("context_manifest"),
+        context_packs=values.get("context_packs"),
+        extra_write_roots=values.get("extra_write_roots"),
+        workflow_mode=values.get("workflow_mode"),
+        attributes=values.get("attributes"),
+        parent_access_mode=values.get("parent_access_mode"),
+        memory_retention_policy=values.get("memory_retention_policy"),
+        memory_delete_after_days=values.get("memory_delete_after_days"),
+        destroy_summary_required=values.get("destroy_summary_required"),
     )
 
 

@@ -186,14 +186,19 @@ def _touch_active_heartbeat_chain(manager: Any, task: Any) -> Any:
         parent_id = str(getattr(current, "parent_id", "") or "").strip()
         if not parent_id:
             break
-        try:
-            current = manager.load(parent_id)
-        except Exception as exc:
-            if _is_external_parent_anchor(current, parent_id):
-                break
-            _warn_runner_trace_error(exc, context="runner_stage_trace.heartbeat.parent_load", run_id=parent_id)
+        current = _next_heartbeat_parent(manager, current, parent_id)
+        if current is None:
             break
     return latest_current
+
+
+def _next_heartbeat_parent(manager: Any, current: Any, parent_id: str) -> Any | None:
+    try:
+        return manager.load(parent_id)
+    except Exception as exc:
+        if not _is_external_parent_anchor(current, parent_id):
+            _warn_runner_trace_error(exc, context="runner_stage_trace.heartbeat.parent_load", run_id=parent_id)
+        return None
 
 
 def _warn_runner_trace_error(exc: Exception, *, context: str, run_id: str) -> None:

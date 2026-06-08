@@ -30,12 +30,49 @@ from .content_transport_policy import (
 )
 from .models import ToolExecutionResult, ToolSpec
 
+_WRITE_FILE_USE_CASES = [
+    "新建代码文件、配置文件、文档或二进制产物",
+    "已经明确要重写某个文件的完整内容",
+    "长报告可以先覆盖写入标题，再用 mode=append 分段追加后续章节",
+]
+_WRITE_FILE_PARAMETERS = {
+    "path": "要写入的文件路径",
+    "content": "完整文本内容；和 data_base64 二选一",
+    "data_base64": "完整二进制内容的 base64；和 content 二选一",
+    "mode": "可选。overwrite 覆盖写入（默认）或 append 追加到文件末尾",
+}
+_WRITE_FILE_EXAMPLES = [
+    '{"tool": "write_file", "path": "src/demo.py", "content": "print(\\"hello\\")\\n"}',
+    '{"tool": "write_file", "path": "output/report.md", "mode": "append", "content": "\\n## 下一节\\n..."}',
+    '{"tool": "write_file", "path": "output/report.pdf", "data_base64": "JVBERi0xLjQK..."}',
+]
+
 
 @dataclass(frozen=True)
 class WriteFileToolOptions:
     max_inline_content_chars: int | None = None
     access_options: FileSystemAccessOptions | None = None
     runtime_fact_roots: list[Path] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class WriteRequest:
+    raw_path: str
+    content: str | None
+    data: bytes
+    mode: str
+    target: Path
+    content_policy: Any | None
+
+
+@dataclass(frozen=True)
+class WriteOutputRequest:
+    display_path: str
+    target: Path
+    content: str | None
+    content_policy: Any | None
+    mode: str
+    implicit_append: bool = False
 
 
 class WriteFileTool(FileSystemTool):
@@ -60,22 +97,13 @@ class WriteFileTool(FileSystemTool):
             effect="mutating",
             requires_idempotency=True,
             description="原子写入或覆盖完整文件；支持文本 content 或二进制 data_base64，缺失父目录会自动创建。",
-            use_cases=[
-                "新建代码文件、配置文件、文档或二进制产物",
-                "已经明确要重写某个文件的完整内容",
-                "长报告可以先覆盖写入标题，再用 mode=append 分段追加后续章节",
-            ],
+            use_cases=_WRITE_FILE_USE_CASES,
             avoid_when=[
                 "只想局部改已有文件时优先用 apply_patch",
                 long_content_avoidance_rule(),
             ],
             keywords=["写文件", "生成代码", "创建文件", "覆盖", "save file", "write", "binary", "base64"],
-            parameters={
-                "path": "要写入的文件路径",
-                "content": "完整文本内容；和 data_base64 二选一",
-                "data_base64": "完整二进制内容的 base64；和 content 二选一",
-                "mode": "可选。overwrite 覆盖写入（默认）或 append 追加到文件末尾",
-            },
+            parameters=_WRITE_FILE_PARAMETERS,
             parameter_details={
                 "path": "相对工作区的目标文件路径；缺失父目录会自动创建。",
                 "content": write_file_content_parameter_detail(self.max_inline_content_chars),
@@ -83,32 +111,12 @@ class WriteFileTool(FileSystemTool):
                 "mode": "可选，精确值 overwrite 或 append。append 会原子地保留已有内容并把本次 payload 追加到末尾；不接受 completed/continue 等别名。当前 task output/work 下同一路径已存在且省略 mode 时，运行时会按续写保护追加；显式 mode=overwrite 才替换该任务产物文件。",
             },
             internal_parameters=["__implicit_task_artifact_append", "__partial_unclosed_write"],
-            examples=[
-                '{"tool": "write_file", "path": "src/demo.py", "content": "print(\\"hello\\")\\n"}',
-                '{"tool": "write_file", "path": "output/report.md", "mode": "append", "content": "\\n## 下一节\\n..."}',
-                '{"tool": "write_file", "path": "output/report.pdf", "data_base64": "JVBERi0xLjQK..."}',
-            ],
+            examples=_WRITE_FILE_EXAMPLES,
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
-            raw_path = _required_path(params.get("path"))
-            content, data = _write_payload(params)
-            write_mode = _write_mode(params)
-            content_policy = _content_policy(raw_path, content, self.max_inline_content_chars)
-            if content_policy and not content_policy.allowed:
-                return ToolExecutionResult("write_file", False, content_policy.message)
-            target = self.resolve_path(raw_path)
-            ledger_error = _system_ledger_write_error(target)
-            if ledger_error:
-                return ToolExecutionResult(
-                    "write_file",
-                    False,
-                    ledger_error,
-                    error_code="SYSTEM_LEDGER_WRITE_BLOCKED",
-                    retryable=True,
-                    recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
-                )
+            request = _write_request(self, params)
         except ValueError as exc:
             return ToolExecutionResult(
                 "write_file",
@@ -118,10 +126,14 @@ class WriteFileTool(FileSystemTool):
                 retryable=True,
                 recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
             )
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target = self.resolve_path(target)
+        if request.content_policy and not request.content_policy.allowed:
+            return ToolExecutionResult("write_file", False, request.content_policy.message)
+        ledger_error = _system_ledger_write_error(request.target)
+        if ledger_error:
+            return _system_ledger_write_blocked_result(ledger_error)
+        target = _prepare_write_target(self, request.target)
         try:
-            _atomic_write_bytes(target, data, mode=write_mode)
+            _atomic_write_bytes(target, request.data, mode=request.mode)
         except ValueError as exc:
             return ToolExecutionResult(
                 "write_file",
@@ -132,19 +144,50 @@ class WriteFileTool(FileSystemTool):
                 recommended_action=RecoveryAction.REWRITE_ARTIFACT_BYTES.value,
             )
         web_decision = check_web_project_post_write(target, self.workspace_root)
-        output = _write_output(
-            self.display_path(target),
-            target,
-            content,
-            content_policy,
-            mode=write_mode,
+        output = _write_output(WriteOutputRequest(
+            display_path=self.display_path(target),
+            target=target,
+            content=request.content,
+            content_policy=request.content_policy,
+            mode=request.mode,
             implicit_append=params.get("__implicit_task_artifact_append") is True,
-        )
+        ))
         output, feedback = _attach_reference_write_feedback(self.workspace_root, target, output, self.runtime_fact_roots)
         result = _write_result("write_file", target, output, web_decision)
         if feedback:
             result.result_envelope["soft_feedback"] = feedback
         return result
+
+
+def _write_request(tool: WriteFileTool, params: dict[str, Any]) -> WriteRequest:
+    raw_path = _required_path(params.get("path"))
+    content, data = _write_payload(params)
+    write_mode = _write_mode(params)
+    content_policy = _content_policy(raw_path, content, tool.max_inline_content_chars)
+    return WriteRequest(
+        raw_path=raw_path,
+        content=content,
+        data=data,
+        mode=write_mode,
+        target=tool.resolve_path(raw_path),
+        content_policy=content_policy,
+    )
+
+
+def _system_ledger_write_blocked_result(message: str) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        "write_file",
+        False,
+        message,
+        error_code="SYSTEM_LEDGER_WRITE_BLOCKED",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+    )
+
+
+def _prepare_write_target(tool: WriteFileTool, target: Path) -> Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return tool.resolve_path(target)
 
 
 def _write_result(tool: str, target: Path, output: str, web_decision: Any) -> ToolExecutionResult:
@@ -272,26 +315,18 @@ def _is_task_progress_ledger(parts: tuple[str, ...]) -> bool:
     return False
 
 
-def _write_output(
-    display_path: str,
-    target: Path,
-    content: str | None,
-    content_policy: Any | None,
-    *,
-    mode: str,
-    implicit_append: bool = False,
-) -> str:
-    action = "已追加文件" if mode == "append" else "已写入文件"
-    notes = [f"{action}: {display_path}"]
-    if implicit_append:
+def _write_output(request: WriteOutputRequest) -> str:
+    action = "已追加文件" if request.mode == "append" else "已写入文件"
+    notes = [f"{action}: {request.display_path}"]
+    if request.implicit_append:
         notes.append(
             "续写保护：当前 task output/work 中同一路径已存在且本次未显式传 mode，"
             "运行时已按 append 处理。若你要替换为干净最终版，请下一次显式传 mode=\"overwrite\"。"
         )
-    if content_policy and content_policy.message:
-        notes.append(content_policy.message)
-    if content is not None:
-        integrity_note = html_post_write_note(target, content)
+    if request.content_policy and request.content_policy.message:
+        notes.append(request.content_policy.message)
+    if request.content is not None:
+        integrity_note = html_post_write_note(request.target, request.content)
         if integrity_note:
             notes.append(integrity_note)
     return "\n".join(notes)
@@ -301,21 +336,34 @@ def _atomic_write_bytes(target: Path, data: bytes, *, mode: str = "overwrite") -
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=_temp_suffix_for(target), dir=str(target.parent))
     try:
-        with os.fdopen(fd, "wb") as file:
-            if mode == "append" and target.exists():
-                with target.open("rb") as existing:
-                    shutil.copyfileobj(existing, file)
-            file.write(data)
-            file.flush()
-            os.fsync(file.fileno())
+        _write_temp_bytes(fd, target, data, mode=mode)
         _validate_final_artifact_candidate(Path(tmp_name), target)
         os.replace(tmp_name, target)
     except Exception:
-        try:
-            os.unlink(tmp_name)
-        except FileNotFoundError:
-            pass
+        _unlink_temp_file(tmp_name)
         raise
+
+
+def _write_temp_bytes(fd: int, target: Path, data: bytes, *, mode: str) -> None:
+    with os.fdopen(fd, "wb") as file:
+        _copy_existing_for_append(file, target, mode)
+        file.write(data)
+        file.flush()
+        os.fsync(file.fileno())
+
+
+def _copy_existing_for_append(file: object, target: Path, mode: str) -> None:
+    if mode != "append" or not target.exists():
+        return
+    with target.open("rb") as existing:
+        shutil.copyfileobj(existing, file)
+
+
+def _unlink_temp_file(tmp_name: str) -> None:
+    try:
+        os.unlink(tmp_name)
+    except FileNotFoundError:
+        pass
 
 
 def _temp_suffix_for(target: Path) -> str:

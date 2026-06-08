@@ -50,6 +50,15 @@ class _ResolvedArtifactRef:
     status: str
 
 
+@dataclass(frozen=True)
+class _AllowedRootsRequest:
+    task: Any
+    task_dir: Path | None
+    task_workspace_root: Path
+    agent_run_workspace_root: Path
+    allowed_write_roots: list[str]
+
+
 def sync_artifact_manifests(
     request: SyncArtifactManifestsRequest | Any = None,
     *,
@@ -124,11 +133,13 @@ def _artifact_records(
         run_id=run_id,
         now=now,
         allowed_roots=_allowed_roots(
-            task,
-            task_dir,
-            task_workspace_root,
-            agent_run_workspace_root,
-            getattr(task, "allowed_write_roots", []) or [],
+            _AllowedRootsRequest(
+                task=task,
+                task_dir=task_dir,
+                task_workspace_root=task_workspace_root,
+                agent_run_workspace_root=agent_run_workspace_root,
+                allowed_write_roots=getattr(task, "allowed_write_roots", []) or [],
+            )
         ),
     )
     records: list[dict[str, object]] = []
@@ -204,24 +215,18 @@ def _path_status(path: Path) -> str:
     return "missing"
 
 
-def _allowed_roots(
-    task: Any,
-    task_dir: Path | None,
-    task_workspace_root: Path,
-    agent_run_workspace_root: Path,
-    allowed_write_roots: list[str],
-) -> tuple[Path, ...]:
+def _allowed_roots(request: _AllowedRootsRequest) -> tuple[Path, ...]:
     roots = [
         item
         for item in [
-            task_dir,
-            getattr(task, "task_workspace_dir", "") or None,
-            getattr(task, "output_dir", "") or None,
-            task_workspace_root,
-            task_workspace_root.parent,
-            task_workspace_root.parent / "output",
-            agent_run_workspace_root,
-            *[Path(str(root)) for root in allowed_write_roots if str(root or "").strip()],
+            request.task_dir,
+            getattr(request.task, "task_workspace_dir", "") or None,
+            getattr(request.task, "output_dir", "") or None,
+            request.task_workspace_root,
+            request.task_workspace_root.parent,
+            request.task_workspace_root.parent / "output",
+            request.agent_run_workspace_root,
+            *[Path(str(root)) for root in request.allowed_write_roots if str(root or "").strip()],
         ]
         if item is not None
     ]

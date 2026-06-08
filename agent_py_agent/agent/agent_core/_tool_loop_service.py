@@ -190,86 +190,65 @@ def _restore_tool_loop_params(agent, previous: object, sentinel: object) -> None
     agent._current_tool_loop_params = previous
 
 
+def execute_tool_loop(agent, params: ToolLoopExecuteParams):
+    return _execute_tool_loop_service(ToolLoopService(agent), params)
+
+
+def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecuteParams):
+    final_prompt = ""
+    final_response = None
+    tool_rounds = params.tool_rounds
+    repair_counters = ToolLoopRepairCounters()
+    empty_response_repairs = 0
+
+    while True:
+        pending_result = _drain_pending_deferred_tool_calls(service, params, tool_rounds)
+        if pending_result is not None and pending_result.final_response is None:
+            tool_rounds = pending_result.tool_rounds
+            continue
+        if pending_result is not None:
+            tool_rounds = pending_result.tool_rounds
+            final_response = pending_result.final_response
+            break
+        (
+            final_prompt,
+            final_response,
+            should_stop,
+            retry_after_empty,
+            empty_response_repairs,
+        ) = service._model_turn_or_retry(params, tool_rounds, empty_response_repairs)
+        if retry_after_empty:
+            continue
+        if should_stop:
+            break
+        repair_counters, action = _response_action(service._agent, params, final_response, repair_counters)
+        if action.action == "continue":
+            continue
+        if action.action == "break":
+            final_response = action.response
+            break
+        final_prompt, final_response, tool_rounds = _tool_step_or_limit(
+            service,
+            _ToolStepRequest(
+                params=params,
+                tool_rounds=tool_rounds,
+                action=action,
+                current_prompt=final_prompt,
+            ),
+        )
+        if final_response:
+            break
+
+    return final_prompt, final_response, tool_rounds
+
+
 class ToolLoopService:
 
     def __init__(self, agent):
         self._agent = agent
 
     def execute(self, params: ToolLoopExecuteParams):
-        final_prompt = ""
-        final_response = None
-        tool_rounds = params.tool_rounds
-        repair_counters = ToolLoopRepairCounters()
-        empty_response_repairs = 0
-
-        while True:
-            pending_result = self._drain_pending_deferred_tool_calls(params, tool_rounds)
-            if pending_result is not None:
-                tool_rounds = pending_result.tool_rounds
-                if pending_result.final_response is not None:
-                    final_response = pending_result.final_response
-                    break
-                continue
-            (
-                final_prompt,
-                final_response,
-                should_stop,
-                retry_after_empty,
-                empty_response_repairs,
-            ) = self._model_turn_or_retry(params, tool_rounds, empty_response_repairs)
-            if retry_after_empty:
-                continue
-            if should_stop:
-                break
-            repair_counters, action = self._response_action(
-                params,
-                final_response,
-                repair_counters,
-            )
-            if action.action == "continue":
-                continue
-            if action.action == "break":
-                final_response = action.response
-                break
-            final_prompt, final_response, tool_rounds = self._tool_step_or_limit(
-                _ToolStepRequest(
-                    params=params,
-                    tool_rounds=tool_rounds,
-                    action=action,
-                    current_prompt=final_prompt,
-                )
-            )
-            if final_response:
-                break
-
-        return final_prompt, final_response, tool_rounds
-
-    def _drain_pending_deferred_tool_calls(
-        self,
-        params: ToolLoopExecuteParams,
-        tool_rounds: int,
-    ) -> _PendingDeferredToolDrainResult | None:
-        pending_calls = _pop_pending_deferred_tool_calls(params)
-        if not pending_calls:
-            return None
-        if self._tool_round_limit_reached(params, tool_rounds):
-            final_prompt, final_response = self._final_response_after_tool_limit(params, tool_rounds)
-            del final_prompt
-            return _PendingDeferredToolDrainResult(tool_rounds, final_response)
-        next_round = tool_rounds + 1
-        next_round, final_response = self._run_tool_round(
-            ToolRoundExecutionRequest(
-                self._agent,
-                params,
-                next_round,
-                ModelResponse(text="[PENDING_DEFERRED_TOOL_CALLS]", backend="tool_loop"),
-                pending_calls,
-                self._execute_one_tool_call,
-                self._record_tool_call,
-                _deferred_drain_prompt(self._agent, params),
-            )
-        )
-        return _PendingDeferredToolDrainResult(next_round, final_response)
+        return _execute_tool_loop_service(self, params)
 
     def _model_turn_or_retry(
         self,
@@ -277,143 +256,185 @@ class ToolLoopService:
         tool_rounds: int,
         empty_response_repairs: int,
     ):
-        stale_message = stale_subagent_attempt_message(self._agent)
-        if stale_message is not None:
-            backend = str(getattr(getattr(self._agent, "backend", None), "name", "") or "")
-            return "", ModelResponse(text=stale_message, backend=backend), True, False, empty_response_repairs
-        try:
-            prompt, response = run_with_provider_transient_auto_resume(
-                lambda: next_tool_loop_model_response(self._agent, params, tool_rounds),
-                on_chunk=params.effective_on_chunk,
-                policy=getattr(self._agent, "runtime_guard_policy", None),
-            )
-            return prompt, response, False, False, empty_response_repairs
-        except Exception as exc:
-            if _should_retry_empty_model_response(params, exc, empty_response_repairs):
-                params.tool_context.append(_empty_model_response_retry_context(params))
-                return (
-                    build_tool_loop_prompt(self._agent, params),
-                    None,
-                    False,
-                    True,
-                    empty_response_repairs + 1,
-                )
-            raise
-
-    def _response_action(
-        self,
-        params: ToolLoopExecuteParams,
-        response,
-        repair_counters: ToolLoopRepairCounters,
-    ):
-        decision = tool_loop_response_decision(
-            ToolLoopResponseDecisionRequest(
-                self._agent,
-                params,
-                response,
-                repair_counters,
-            )
-        )
-        return decision.counters, decision
-
-    def _tool_step_or_limit(self, request: _ToolStepRequest):
-        if self._tool_round_limit_reached(request.params, request.tool_rounds):
-            final_prompt, final_response = self._final_response_after_tool_limit(
-                request.params,
-                request.tool_rounds,
-            )
-            return final_prompt, final_response, request.tool_rounds
-        next_round = request.tool_rounds + 1
-        next_round, final_response = self._run_tool_round(
-            ToolRoundExecutionRequest(
-                self._agent,
-                request.params,
-                next_round,
-                request.action.response,
-                request.action.calls,
-                self._execute_one_tool_call,
-                self._record_tool_call,
-                request.current_prompt,
-            )
-        )
-        return request.current_prompt, final_response, next_round
+        return _model_turn_or_retry(self._agent, params, tool_rounds, empty_response_repairs)
 
     def _run_tool_round(self, request: ToolRoundExecutionRequest):
-        before_executed_count = len(request.params.executed_tools)
-        subagent_output_written = execute_tool_round(request)
-        update_runtime_fact_progress_if_enabled(self._agent, request.params, tool_round=request.tool_rounds)
-        append_tool_guardrail_action_block_hint(request)
-        final_response = completion_response_after_tool_round(
-            ToolRoundCompletionRequest(
-                self._agent,
-                request.params,
-                request.response,
-                before_executed_count,
-                subagent_output_written,
-            )
-        )
-        return request.tool_rounds, final_response
+        return _run_tool_round(self._agent, request)
 
     def _tool_round_limit_reached(self, params: ToolLoopExecuteParams, tool_rounds: int) -> bool:
-        limit = _effective_max_tool_rounds(self._agent, params)
-        return limit > 0 and tool_rounds >= limit
+        return _tool_round_limit_reached(self._agent, params, tool_rounds)
 
     def _final_response_after_tool_limit(self, params: ToolLoopExecuteParams, tool_rounds: int):
-        params.tool_context.append("[tool-system]\n已达到最大工具轮数限制，停止继续调用工具。")
-        if _executed_subagent_orchestration(params):
-            params.tool_context.append("[tool-system]\n子代理调度状态请通过 dispatch_subagents/tree 状态结果继续查看；系统不再替主代理生成最终结论。")
-        final_prompt = build_tool_loop_prompt(self._agent, params)
-        final_response = generate_model_response(
-            ModelGenerateParams(
-                agent=self._agent,
-                params=params,
-                prompt=final_prompt,
-                tool_rounds=tool_rounds,
-            )
-        )
-        return final_prompt, without_tool_call_after_limit(self._agent, final_response)
+        return _final_response_after_tool_limit(self._agent, params, tool_rounds)
 
     def _execute_one_tool_call(self, request: ToolCallExecuteParams):
         return execute_one_tool_call(self._agent, request)
 
     def _record_tool_call(self, record: ToolCallRecordParams) -> None:
-        guardrail_hint = record_tool_guard_observation(self._agent, record.params, record.payload, record.result)
-        if record.result.ok and record.result.tool not in {"__parse_error__", "unknown"}:
-            record.params.executed_tools.append(record.result.tool)
-        archive_record = self._archive_tool_call_record(record)
-        archive_tool_call_if_enabled(
-            self._agent,
-            record.params,
-            archive_record,
-            tool_round=record.tool_rounds,
-            tool_index=record.idx,
-        )
-        persist_tool_runtime_ledger(self._agent, archive_record)
-        record.params.archive_tool_calls.append(archive_record)
-        update_runtime_fact_progress_if_enabled(self._agent, record.params, tool_round=record.tool_rounds)
-        refresh_parent_shared_context_cache(self._agent, record.params.archive_tool_calls)
-        refresh_parent_shared_context_from_tool_record(self._agent, record)
-        maybe_append_delivery_completion_soft_hint(
-            self._agent,
-            record.params,
-            archive_record,
-            tool_ok=bool(record.result.ok),
-        )
-        record.params.tool_context.append(
-            f"[tool-record round={record.tool_rounds} index={record.idx}]\n"
-            f"{render_tool_payload_for_live_prompt(record.payload)}\n"
-            f"[tool-output-record round={record.tool_rounds} index={record.idx}]\n"
-            f"{render_tool_result_for_live_prompt(record.result, archive_record)}"
-        )
-        if guardrail_hint:
-            record.params.tool_context.append(f"[tool-loop-guardrail-hint]\n{guardrail_hint}")
-        append_long_content_recovery_context(record)
-        progress = record_runtime_subagent_tool_progress(self._agent, record)
-        if progress:
-            record.params.tool_context.append(_task_local_progress_context(progress))
+        _record_tool_call(self._agent, record)
 
-    def _archive_tool_call_record(self, record: ToolCallRecordParams) -> dict[str, object]:
-        return archive_tool_call_record(self._agent, record)
+
+def _drain_pending_deferred_tool_calls(
+    service: ToolLoopService,
+    params: ToolLoopExecuteParams,
+    tool_rounds: int,
+) -> _PendingDeferredToolDrainResult | None:
+    pending_calls = _pop_pending_deferred_tool_calls(params)
+    if not pending_calls:
+        return None
+    if service._tool_round_limit_reached(params, tool_rounds):
+        final_prompt, final_response = service._final_response_after_tool_limit(params, tool_rounds)
+        del final_prompt
+        return _PendingDeferredToolDrainResult(tool_rounds, final_response)
+    next_round = tool_rounds + 1
+    next_round, final_response = service._run_tool_round(
+        ToolRoundExecutionRequest(
+            service._agent,
+            params,
+            next_round,
+            ModelResponse(text="[PENDING_DEFERRED_TOOL_CALLS]", backend="tool_loop"),
+            pending_calls,
+            service._execute_one_tool_call,
+            service._record_tool_call,
+            _deferred_drain_prompt(service._agent, params),
+        ),
+    )
+    return _PendingDeferredToolDrainResult(next_round, final_response)
+
+
+def _model_turn_or_retry(agent, loop_params: ToolLoopExecuteParams, tool_rounds: int, empty_response_repairs: int):
+    stale_message = stale_subagent_attempt_message(agent)
+    if stale_message is not None:
+        backend = str(getattr(getattr(agent, "backend", None), "name", "") or "")
+        return "", ModelResponse(text=stale_message, backend=backend), True, False, empty_response_repairs
+    try:
+        prompt, response = run_with_provider_transient_auto_resume(
+            lambda: next_tool_loop_model_response(agent, loop_params, tool_rounds),
+            on_chunk=loop_params.effective_on_chunk,
+            policy=getattr(agent, "runtime_guard_policy", None),
+        )
+        return prompt, response, False, False, empty_response_repairs
+    except Exception as exc:
+        if _should_retry_empty_model_response(loop_params, exc, empty_response_repairs):
+            loop_params.tool_context.append(_empty_model_response_retry_context(loop_params))
+            return (
+                build_tool_loop_prompt(agent, loop_params),
+                None,
+                False,
+                True,
+                empty_response_repairs + 1,
+            )
+        raise
+
+
+def _response_action(agent, loop_params: ToolLoopExecuteParams, response, repair_counters: ToolLoopRepairCounters):
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent,
+            loop_params,
+            response,
+            repair_counters,
+        )
+    )
+    return decision.counters, decision
+
+
+def _tool_step_or_limit(service: ToolLoopService, request: _ToolStepRequest):
+    if service._tool_round_limit_reached(request.params, request.tool_rounds):
+        final_prompt, final_response = service._final_response_after_tool_limit(
+            request.params,
+            request.tool_rounds,
+        )
+        return final_prompt, final_response, request.tool_rounds
+    next_round = request.tool_rounds + 1
+    next_round, final_response = service._run_tool_round(
+        ToolRoundExecutionRequest(
+            service._agent,
+            request.params,
+            next_round,
+            request.action.response,
+            request.action.calls,
+            service._execute_one_tool_call,
+            service._record_tool_call,
+            request.current_prompt,
+        ),
+    )
+    return request.current_prompt, final_response, next_round
+
+
+def _run_tool_round(agent, request: ToolRoundExecutionRequest):
+    before_executed_count = len(request.params.executed_tools)
+    subagent_output_written = execute_tool_round(request)
+    update_runtime_fact_progress_if_enabled(agent, request.params, tool_round=request.tool_rounds)
+    append_tool_guardrail_action_block_hint(request)
+    final_response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent,
+            request.params,
+            request.response,
+            before_executed_count,
+            subagent_output_written,
+        )
+    )
+    return request.tool_rounds, final_response
+
+
+def _tool_round_limit_reached(agent, params: ToolLoopExecuteParams, tool_rounds: int) -> bool:
+    limit = _effective_max_tool_rounds(agent, params)
+    return limit > 0 and tool_rounds >= limit
+
+
+def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_rounds: int):
+    params.tool_context.append("[tool-system]\n已达到最大工具轮数限制，停止继续调用工具。")
+    if _executed_subagent_orchestration(params):
+        params.tool_context.append("[tool-system]\n子代理调度状态请通过 dispatch_subagents/tree 状态结果继续查看；系统不再替主代理生成最终结论。")
+    final_prompt = build_tool_loop_prompt(agent, params)
+    final_response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt=final_prompt,
+            tool_rounds=tool_rounds,
+        )
+    )
+    return final_prompt, without_tool_call_after_limit(agent, final_response)
+
+
+def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
+    guardrail_hint = record_tool_guard_observation(agent, record.params, record.payload, record.result)
+    if record.result.ok and record.result.tool not in {"__parse_error__", "unknown"}:
+        record.params.executed_tools.append(record.result.tool)
+    archive_record = archive_tool_call_record(agent, record)
+    archive_tool_call_if_enabled(
+        agent,
+        record.params,
+        archive_record,
+        tool_round=record.tool_rounds,
+        tool_index=record.idx,
+    )
+    persist_tool_runtime_ledger(agent, archive_record)
+    record.params.archive_tool_calls.append(archive_record)
+    update_runtime_fact_progress_if_enabled(agent, record.params, tool_round=record.tool_rounds)
+    refresh_parent_shared_context_cache(agent, record.params.archive_tool_calls)
+    refresh_parent_shared_context_from_tool_record(agent, record)
+    maybe_append_delivery_completion_soft_hint(
+        agent,
+        record.params,
+        archive_record,
+        tool_ok=bool(record.result.ok),
+    )
+    record.params.tool_context.append(
+        f"[tool-record round={record.tool_rounds} index={record.idx}]\n"
+        f"{render_tool_payload_for_live_prompt(record.payload)}\n"
+        f"[tool-output-record round={record.tool_rounds} index={record.idx}]\n"
+        f"{render_tool_result_for_live_prompt(record.result, archive_record)}"
+    )
+    if guardrail_hint:
+        record.params.tool_context.append(f"[tool-loop-guardrail-hint]\n{guardrail_hint}")
+    append_long_content_recovery_context(record)
+    progress = record_runtime_subagent_tool_progress(agent, record)
+    if progress:
+        record.params.tool_context.append(_task_local_progress_context(progress))
 
 
 def _task_local_progress_context(progress: dict[str, object]) -> str:

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import fields, replace
+from dataclasses import dataclass, fields, replace
 
 from ...memory_archive import build_auto_resume_context, has_resume_trigger
 from ...memory_routing import RouteContextOptions, build_routed_memory_context
@@ -24,6 +24,15 @@ from .loop_models import (
 )
 
 _RUN_PARAM_FIELD_NAMES = tuple(field.name for field in fields(RunParams))
+
+
+@dataclass(frozen=True)
+class ToolSectionsRequest:
+    agent: object
+    user_prompt: str
+    inject: object
+    allowed_tools: list[str] | None
+    granted_capabilities: list[str] | None
 
 
 def run_params_from_values(
@@ -117,18 +126,21 @@ def _finalize_params(
     )
 
 
-def _resolve_tool_sections(agent, user_prompt: str, inject, allowed_tools, granted_capabilities):
+def _resolve_tool_sections(request: ToolSectionsRequest):
     runtime_capabilities = resolve_runtime_capabilities(
-        user_prompt, inject=inject, granted_capabilities=granted_capabilities,
+        request.user_prompt,
+        inject=request.inject,
+        granted_capabilities=request.granted_capabilities,
     )
-    if not agent.config.enable_tools:
+    if not request.agent.config.enable_tools:
         return "", ""
-    tool_catalog = agent.tools.render_catalog_section(
-        allowed_tools=allowed_tools, granted_capabilities=runtime_capabilities,
+    tool_catalog = request.agent.tools.render_catalog_section(
+        allowed_tools=request.allowed_tools,
+        granted_capabilities=runtime_capabilities,
     )
-    tool_recommendations = agent.tools.render_recommended_tools_section(
-        user_prompt,
-        allowed_tools=allowed_tools,
+    tool_recommendations = request.agent.tools.render_recommended_tools_section(
+        request.user_prompt,
+        allowed_tools=request.allowed_tools,
         granted_capabilities=runtime_capabilities,
     )
     return tool_catalog, tool_recommendations
@@ -271,13 +283,13 @@ def _runtime_injections_with_bundle(
 
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
-    tool_catalog_section, tool_recommendations_section = _resolve_tool_sections(
-        agent,
-        params.user_prompt,
-        params.runtime_injections,
-        params.allowed_tools,
-        params.granted_capabilities,
-    )
+    tool_catalog_section, tool_recommendations_section = _resolve_tool_sections(ToolSectionsRequest(
+        agent=agent,
+        user_prompt=params.user_prompt,
+        inject=params.runtime_injections,
+        allowed_tools=params.allowed_tools,
+        granted_capabilities=params.granted_capabilities,
+    ))
     compression = _execute_runtime_compression(agent, params)
     loop_params = _tool_loop_execute_params(
         agent,

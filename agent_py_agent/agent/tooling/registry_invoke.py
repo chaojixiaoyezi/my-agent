@@ -45,6 +45,14 @@ class AuthorizedToolDispatchRequest:
     write_boundary: dict[str, object] | None
 
 
+@dataclass(frozen=True)
+class BoundaryPathCopyRequest:
+    params: dict[str, Any]
+    boundary: dict[str, object]
+    target_key: str
+    source_key: str
+
+
 def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionResult:
     tool = request.tools.get(request.tool_name)
     if tool is None:
@@ -119,21 +127,31 @@ def _task_workspace_relative_path(raw: object, boundary: dict[str, object]) -> s
     while normalized.startswith("./"):
         normalized = normalized[2:]
     for prefix, root_key in (("output", "task_output_dir"), ("work", "task_work_dir")):
-        if normalized == prefix:
-            suffix = ""
-        elif normalized.startswith(prefix + "/"):
-            suffix = normalized[len(prefix) + 1 :]
-        else:
-            continue
-        root = str(boundary.get(root_key) or "").strip()
-        if not root:
-            return ""
-        try:
-            base = Path(root).expanduser().resolve(strict=False)
-        except OSError:
-            return ""
-        return str((base / suffix).resolve(strict=False)) if suffix else str(base)
+        if rewritten := _task_workspace_prefixed_path(normalized, prefix, boundary.get(root_key)):
+            return rewritten
     return ""
+
+
+def _task_workspace_prefixed_path(normalized: str, prefix: str, raw_root: object) -> str:
+    suffix = _task_workspace_path_suffix(normalized, prefix)
+    if suffix is None:
+        return ""
+    root = str(raw_root or "").strip()
+    if not root:
+        return ""
+    try:
+        base = Path(root).expanduser().resolve(strict=False)
+    except OSError:
+        return ""
+    return str((base / suffix).resolve(strict=False)) if suffix else str(base)
+
+
+def _task_workspace_path_suffix(normalized: str, prefix: str) -> str | None:
+    if normalized == prefix:
+        return ""
+    if normalized.startswith(prefix + "/"):
+        return normalized[len(prefix) + 1 :]
+    return None
 
 
 def _with_task_artifact_append_continuation(
@@ -319,14 +337,21 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
         if shell_mode:
             params["__access_mode"] = shell_mode
     if request.tool_name == "read_artifact":
-        _copy_boundary_path(params, request.write_boundary, "__task_work_dir", "task_work_dir")
+        _copy_boundary_path(
+            BoundaryPathCopyRequest(
+                params=params,
+                boundary=request.write_boundary,
+                target_key="__task_work_dir",
+                source_key="task_work_dir",
+            )
+        )
     return params
 
 
-def _copy_boundary_path(params: dict[str, Any], boundary: dict[str, object], target_key: str, source_key: str) -> None:
-    text = str(boundary.get(source_key) or "").strip()
+def _copy_boundary_path(request: BoundaryPathCopyRequest) -> None:
+    text = str(request.boundary.get(request.source_key) or "").strip()
     if text:
-        params[target_key] = text
+        request.params[request.target_key] = text
 
 
 def _format_tool_exception(exc: Exception) -> str:

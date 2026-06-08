@@ -9,7 +9,7 @@ from typing import Any
 from ...contracts.error_taxonomy import error_contract
 from ...contracts.gates import GateDecision, GateFinding, evaluate_fact_evidence_gate
 from ...contracts.recovery import RecoveryAction
-from ...contracts.staged_checkpoint_acceptance import (
+from ...contracts.staged_checkpoint import (
     StagedEvidenceRequest,
     staged_json_evidence_findings,
 )
@@ -176,38 +176,66 @@ def target_coverage_projection_decision(report: dict[str, Any]) -> GateDecision:
             "target_coverage_projection",
             evidence={"checked": False, "reason": "artifact_text_missing", "checked_items": len(items)},
         )
+    assessment = _coverage_projection_assessment(report, items, artifact_text)
+    if _coverage_projection_allows(assessment):
+        return _coverage_projection_allow_decision(assessment)
+    return _coverage_projection_repair_decision(assessment)
+
+
+def _coverage_projection_assessment(
+    report: dict[str, Any],
+    items: list[dict[str, object]],
+    artifact_text: str,
+) -> dict[str, Any]:
     missing = [item for item in items if not _any_projection_token_present(artifact_text, item["tokens"])]
     required_missing = [item for item in missing if item.get("required_projection") is True]
     block_threshold = max(3, (len(items) + 2) // 3)
-    evidence = {
-        "checked": True,
-        "checked_items": len(items),
-        "missing_count": len(missing),
-        "required_missing_count": len(required_missing),
+    return {
+        "missing": missing,
+        "required_missing": required_missing,
         "block_threshold": block_threshold,
-        "artifact_paths": _artifact_paths(report)[:12],
-        "missing_items": missing[:20],
-        "required_missing_items": required_missing[:20],
+        "evidence": {
+            "checked": True,
+            "checked_items": len(items),
+            "missing_count": len(missing),
+            "required_missing_count": len(required_missing),
+            "block_threshold": block_threshold,
+            "artifact_paths": _artifact_paths(report)[:12],
+            "missing_items": missing[:20],
+            "required_missing_items": required_missing[:20],
+        },
     }
-    if not required_missing and len(missing) < block_threshold:
-        findings = ()
-        if missing:
-            findings = (
-                GateFinding(
-                    "TARGET_COVERAGE_EVIDENCE_PARTIALLY_MISSING_FROM_ARTIFACT",
-                    "soft",
-                    message="最终交付物没有呈现一部分已读取源码证据；这是软提醒，不阻断验收。",
-                    evidence=evidence,
-                ),
-            )
-        return GateDecision(
-            "target_coverage_projection",
-            "ALLOW",
-            True,
-            findings,
-            RecoveryAction.CONTINUE.value,
-            evidence,
+
+
+def _coverage_projection_allows(assessment: dict[str, Any]) -> bool:
+    return not assessment["required_missing"] and len(assessment["missing"]) < int(assessment["block_threshold"])
+
+
+def _coverage_projection_allow_decision(assessment: dict[str, Any]) -> GateDecision:
+    evidence = assessment["evidence"]
+    findings = ()
+    if assessment["missing"]:
+        findings = (
+            GateFinding(
+                "TARGET_COVERAGE_EVIDENCE_PARTIALLY_MISSING_FROM_ARTIFACT",
+                "soft",
+                message="最终交付物没有呈现一部分已读取源码证据；这是软提醒，不阻断验收。",
+                evidence=evidence,
+            ),
         )
+    return GateDecision(
+        "target_coverage_projection",
+        "ALLOW",
+        True,
+        findings,
+        RecoveryAction.CONTINUE.value,
+        evidence,
+    )
+
+
+def _coverage_projection_repair_decision(assessment: dict[str, Any]) -> GateDecision:
+    missing = assessment["missing"]
+    evidence = assessment["evidence"]
     finding = GateFinding(
         "TARGET_COVERAGE_EVIDENCE_NOT_IN_ARTIFACT",
         "medium",
@@ -262,7 +290,19 @@ def source_fact_consistency_decision(report: dict[str, Any], *, workspace_root: 
             },
         )
     unsupported = [token for token in claimed if token not in evidence_tokens]
-    evidence = {
+    evidence = _source_fact_consistency_evidence(report, claimed, unsupported, records)
+    if not unsupported:
+        return GateDecision.allow("source_fact_consistency", evidence=evidence)
+    return _source_fact_consistency_repair_decision(evidence)
+
+
+def _source_fact_consistency_evidence(
+    report: dict[str, Any],
+    claimed: list[str],
+    unsupported: list[str],
+    records: list[dict[str, object]],
+) -> dict[str, Any]:
+    return {
         "checked": True,
         "claim_count": len(claimed),
         "supported_count": len(claimed) - len(unsupported),
@@ -271,8 +311,9 @@ def source_fact_consistency_decision(report: dict[str, Any], *, workspace_root: 
         "source_count": len(records),
         "artifact_paths": _artifact_paths(report)[:12],
     }
-    if not unsupported:
-        return GateDecision.allow("source_fact_consistency", evidence=evidence)
+
+
+def _source_fact_consistency_repair_decision(evidence: dict[str, Any]) -> GateDecision:
     finding = GateFinding(
         "SOURCE_CODE_IDENTIFIER_NOT_READ",
         "medium",
@@ -510,13 +551,17 @@ def _dedupe_projection_tokens(tokens: list[str]) -> list[str]:
 def _artifact_text(report: dict[str, Any]) -> str:
     parts: list[str] = []
     for path in _artifact_paths(report):
-        try:
-            item = Path(path)
-            if item.is_file():
-                parts.append(item.read_text(encoding="utf-8", errors="ignore")[:200_000])
-        except OSError:
-            continue
+        if text := _artifact_path_text(path):
+            parts.append(text)
     return "\n".join(parts)
+
+
+def _artifact_path_text(path: str) -> str:
+    try:
+        item = Path(path)
+        return item.read_text(encoding="utf-8", errors="ignore")[:200_000] if item.is_file() else ""
+    except OSError:
+        return ""
 
 
 def _artifact_paths(report: dict[str, Any]) -> list[str]:

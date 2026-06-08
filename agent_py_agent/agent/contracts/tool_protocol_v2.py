@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -7,6 +6,7 @@ from typing import Any
 from ..action_protocol import ArtifactRef
 from .idempotency import idempotency_key as build_idempotency_key
 from .idempotency import operation_id as build_operation_id
+from .protocol_status import TOOL_STATUS_FAILED
 from .tool_protocol_v2_models import (
     SCHEMA_VERSION,
     STATUSES,
@@ -106,7 +106,7 @@ def validate_tool_result(envelope: ToolResultEnvelope | dict[str, Any]) -> list[
         findings.append("idempotency_key_required")
     if result.status not in STATUSES:
         findings.append("status_invalid")
-    if result.status == "failed" and result.error is None:
+    if result.status == TOOL_STATUS_FAILED and result.error is None:
         findings.append("error_required_for_failed_result")
     findings.extend(_artifact_ref_findings(result.artifact_refs))
     return findings
@@ -184,7 +184,7 @@ def _result_idempotency_key(data: dict[str, Any], tool_name: str, operation_id: 
 
 def _result_error(data: dict[str, Any], status: str) -> ToolError | None:
     error_payload = data.get("error")
-    if error_payload is None and status == "failed":
+    if error_payload is None and status == TOOL_STATUS_FAILED:
         error_payload = {
             "error_type": data.get("error_type", ""),
             "message": data.get("message") or "",

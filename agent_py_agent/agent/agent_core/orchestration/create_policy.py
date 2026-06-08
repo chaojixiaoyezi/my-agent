@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, bool_value, string_list
@@ -21,6 +22,29 @@ from .create_conversation import add_current_conversation_attrs
 from .work_scope import add_work_scope_key
 
 
+@dataclass(frozen=True)
+class WorkflowDisableRequest:
+    raw_params: dict[str, object]
+    role: str
+    workflow_mode: str
+    role_template_dirs: object = None
+
+
+@dataclass(frozen=True)
+class RolePolicy:
+    role: str
+    allowed_tools: list[str] | None
+    workflow_mode: str
+
+
+@dataclass(frozen=True)
+class CreateRunBuildRequest:
+    agent: object
+    raw_params: dict[str, object]
+    goal: str
+    role_policy: RolePolicy
+
+
 def create_run_params(
     agent,
     raw_params: dict[str, object],
@@ -28,6 +52,16 @@ def create_run_params(
     allowed_tools: list[str] | None,
 ):
     raw_params = _params_with_task_output_defaults(raw_params, agent)
+    role_policy = _role_policy(agent, raw_params, goal, allowed_tools)
+    return _create_run_params_from_build(CreateRunBuildRequest(agent, raw_params, goal, role_policy))
+
+
+def _role_policy(
+    agent,
+    raw_params: dict[str, object],
+    goal: str,
+    allowed_tools: list[str] | None,
+) -> RolePolicy:
     workflow_mode = tool_workflow_mode(raw_params.get("workflow_mode"), agent.config.subagent_workflow_mode)
     role = _role_from_create_intent(raw_params, goal, agent)
     role_template_dirs = _role_template_dirs(agent)
@@ -35,35 +69,49 @@ def create_run_params(
     if is_explicit_root:
         workflow_mode = "off"
         allowed_tools = explicit_root_allowed_tools(allowed_tools)
-    elif _should_disable_generic_workflow_for_concrete_worker(raw_params, goal, role, workflow_mode, role_template_dirs):
+    elif _should_disable_generic_workflow_for_concrete_worker(WorkflowDisableRequest(
+        raw_params=raw_params,
+        role=role,
+        workflow_mode=workflow_mode,
+        role_template_dirs=role_template_dirs,
+    )):
         workflow_mode = "off"
-        if role != "worker":
-            role = "worker"
+        role = _direct_worker_role(role)
+    return RolePolicy(role=role, allowed_tools=allowed_tools, workflow_mode=workflow_mode)
+
+
+def _direct_worker_role(role: str) -> str:
+    return "worker" if role != "worker" else role
+
+
+def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunParams:
+    raw_params = request.raw_params
+    role_policy = request.role_policy
     return CreateRunParams(
-        goal=goal,
+        goal=request.goal,
         thought=str(raw_params.get("thought") or "根据父代理派工执行，并保留可验收证据。").strip(),
         plan=_create_plan(raw_params),
-        agent_name=_root_agent_name(raw_params, role),
-        role=role,
-        allowed_tools=allowed_tools,
-        owner=str(raw_params.get("owner") or _default_owner_id(agent)).strip(),
+        agent_name=_root_agent_name(raw_params, role_policy.role),
+        role=role_policy.role,
+        allowed_tools=role_policy.allowed_tools,
+        owner=str(raw_params.get("owner") or _default_owner_id(request.agent)).strip(),
         supervisor=str(raw_params.get("supervisor") or "parent").strip(),
         final_owner=str(raw_params.get("final_owner") or "").strip(),
         acceptance_checks=string_list(raw_params.get("acceptance_checks"), TOOL_TEXT_LIST_OPTIONS),
-        extra_write_roots=resolved_extra_write_roots(agent, raw_params, goal),
+        extra_write_roots=resolved_extra_write_roots(request.agent, raw_params, request.goal),
         context_manifest=create_context_manifest(raw_params),
         context_packs=create_context_packs(raw_params),
-        workflow_mode=workflow_mode,
-        attributes=_create_attributes(raw_params, agent),
-        **_lineage_fields(raw_params, agent),
-        parent_access_mode=_config_access_mode(agent),
+        workflow_mode=role_policy.workflow_mode,
+        attributes=_create_attributes(raw_params, request.agent),
+        **_lineage_fields(raw_params, request.agent),
+        parent_access_mode=_config_access_mode(request.agent),
         memory_retention_policy=_config_string(
-            agent,
+            request.agent,
             "subagent_memory_retention_policy",
             "parent_review_or_cleanup",
         ),
-        memory_delete_after_days=_config_int(agent, "subagent_memory_delete_after_days", 0),
-        destroy_summary_required=_config_bool(agent, "subagent_destroy_summary_required", True),
+        memory_delete_after_days=_config_int(request.agent, "subagent_memory_delete_after_days", 0),
+        destroy_summary_required=_config_bool(request.agent, "subagent_destroy_summary_required", True),
     )
 
 
@@ -164,20 +212,14 @@ def _config_bool(agent, key: str, default: bool) -> bool:
     return bool_value(value, default=default)
 
 
-def _should_disable_generic_workflow_for_concrete_worker(
-    raw_params: dict[str, object],
-    goal: str,
-    role: str,
-    workflow_mode: str,
-    role_template_dirs: object = None,
-) -> bool:
-    if workflow_mode != "auto":
+def _should_disable_generic_workflow_for_concrete_worker(request: WorkflowDisableRequest) -> bool:
+    if request.workflow_mode != "auto":
         return False
-    if not role_allows_direct_product_work(role, role_template_dirs):
+    if not role_allows_direct_product_work(request.role, request.role_template_dirs):
         return False
-    if _positive_int(raw_params.get("count"), default=1) <= 0:
+    if _positive_int(request.raw_params.get("count"), default=1) <= 0:
         return False
-    return bool(params_output_refs(raw_params))
+    return bool(params_output_refs(request.raw_params))
 
 
 def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
@@ -212,27 +254,41 @@ def _params_with_task_output_defaults(raw_params: dict[str, object], agent=None)
     updated = dict(raw_params)
     changed = False
     for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
-        if key not in updated:
-            continue
-        value, value_changed = _rebase_output_ref_value(updated.get(key), workspace_output_dir, task_output_dir)
-        if value_changed:
-            updated[key] = value
-            changed = True
-    attrs = updated.get("attributes")
-    if isinstance(attrs, dict):
-        next_attrs = dict(attrs)
-        attrs_changed = False
-        for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
-            if key not in next_attrs:
-                continue
-            value, value_changed = _rebase_output_ref_value(next_attrs.get(key), workspace_output_dir, task_output_dir)
-            if value_changed:
-                next_attrs[key] = value
-                attrs_changed = True
-        if attrs_changed:
-            updated["attributes"] = next_attrs
-            changed = True
+        changed = _rebase_output_ref_field(updated, key, workspace_output_dir, task_output_dir) or changed
+    attrs_changed = _rebase_attribute_output_refs(updated, workspace_output_dir, task_output_dir)
+    changed = changed or attrs_changed
     return updated if changed else raw_params
+
+
+def _rebase_attribute_output_refs(
+    updated: dict[str, object],
+    workspace_output_dir: Path,
+    task_output_dir: Path,
+) -> bool:
+    attrs = updated.get("attributes")
+    if not isinstance(attrs, dict):
+        return False
+    next_attrs = dict(attrs)
+    changed = False
+    for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
+        changed = _rebase_output_ref_field(next_attrs, key, workspace_output_dir, task_output_dir) or changed
+    if changed:
+        updated["attributes"] = next_attrs
+    return changed
+
+
+def _rebase_output_ref_field(
+    values: dict[str, object],
+    key: str,
+    workspace_output_dir: Path,
+    task_output_dir: Path,
+) -> bool:
+    if key not in values:
+        return False
+    value, changed = _rebase_output_ref_value(values.get(key), workspace_output_dir, task_output_dir)
+    if changed:
+        values[key] = value
+    return changed
 
 
 def _rebase_output_ref_value(value: object, workspace_output_dir: Path, task_output_dir: Path) -> tuple[object, bool]:

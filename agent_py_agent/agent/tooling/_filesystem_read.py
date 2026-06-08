@@ -31,6 +31,34 @@ _COMMON_FILE_DISCOVERY_IGNORES = frozenset(
     }
 )
 
+_READ_FILE_USE_CASES = [
+    "查看某个 Python 文件、配置文件或 Markdown 文档",
+    "定位报错后，按行阅读相关代码",
+    "读取工具返回的大输出保存路径或 tool-output artifact 包装路径",
+    "读取超大单行文本时，用 offset/max_chars 分段继续",
+    "大文件已用 search_text 定位章节/锚点后，读取锚点附近源片段作为事实证据",
+]
+_READ_FILE_PARAMETERS = {
+    "path": "要读取的文件路径",
+    "start_line": "起始行号，可选",
+    "end_line": "结束行号，可选",
+    "offset": "字符偏移，可选；用于超大单行或按字符分块读取",
+    "max_chars": "本次最多返回多少字符，可选；不会超过系统默认上限",
+}
+_READ_FILE_PARAMETER_DETAILS = {
+    "path": "相对工作区的文本文件路径，或系统返回的安全大输出路径；必须是文件而不是目录。",
+    "start_line": "从第几行开始读，默认从第 1 行开始。",
+    "end_line": "读到第几行结束，包含该行；不传时默认读到文件结尾。",
+    "offset": "当文件是一整行大文本或返回 next_offset 时，下一次传入 offset 继续读。",
+    "max_chars": "字符窗口大小；适合大文件分块阅读、摘要、再继续。",
+}
+_READ_FILE_EXAMPLES = [
+    '{"tool": "read_file", "path": "agent_py_agent/agent/core.py"}',
+    '{"tool": "read_file", "path": "agent_py_agent/agent/core.py", "start_line": 1, "end_line": 120}',
+    '{"tool": "read_file", "path": "large.log", "offset": 50000, "max_chars": 100000}',
+    '{"tool": "read_file", "path": "field_journal.txt", "start_line": 2053, "end_line": 2058}',
+]
+
 
 class FileSystemTool(BaseTool):
 
@@ -132,37 +160,14 @@ class ReadFileTool(FileSystemTool):
             category="filesystem",
             effect="read_only",
             description="读取文本文件内容；普通文件、大工具输出路径和历史产物路径都优先用这个入口。",
-            use_cases=[
-                "查看某个 Python 文件、配置文件或 Markdown 文档",
-                "定位报错后，按行阅读相关代码",
-                "读取工具返回的大输出保存路径或 tool-output artifact 包装路径",
-                "读取超大单行文本时，用 offset/max_chars 分段继续",
-                "大文件已用 search_text 定位章节/锚点后，读取锚点附近源片段作为事实证据",
-            ],
+            use_cases=_READ_FILE_USE_CASES,
             avoid_when=[
                 "只想知道关键字在哪些文件出现过时，先用 search_text 更省",
             ],
             keywords=["读文件", "查看文件", "代码", "配置", "文档", "cat", "open file"],
-            parameters={
-                "path": "要读取的文件路径",
-                "start_line": "起始行号，可选",
-                "end_line": "结束行号，可选",
-                "offset": "字符偏移，可选；用于超大单行或按字符分块读取",
-                "max_chars": "本次最多返回多少字符，可选；不会超过系统默认上限",
-            },
-            parameter_details={
-                "path": "相对工作区的文本文件路径，或系统返回的安全大输出路径；必须是文件而不是目录。",
-                "start_line": "从第几行开始读，默认从第 1 行开始。",
-                "end_line": "读到第几行结束，包含该行；不传时默认读到文件结尾。",
-                "offset": "当文件是一整行大文本或返回 next_offset 时，下一次传入 offset 继续读。",
-                "max_chars": "字符窗口大小；适合大文件分块阅读、摘要、再继续。",
-            },
-            examples=[
-                '{"tool": "read_file", "path": "agent_py_agent/agent/core.py"}',
-                '{"tool": "read_file", "path": "agent_py_agent/agent/core.py", "start_line": 1, "end_line": 120}',
-                '{"tool": "read_file", "path": "large.log", "offset": 50000, "max_chars": 100000}',
-                '{"tool": "read_file", "path": "field_journal.txt", "start_line": 2053, "end_line": 2058}',
-            ],
+            parameters=_READ_FILE_PARAMETERS,
+            parameter_details=_READ_FILE_PARAMETER_DETAILS,
+            examples=_READ_FILE_EXAMPLES,
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:

@@ -21,7 +21,7 @@ from ...contracts.artifact_acceptance import (
     validation_workspace_root_for_item,
 )
 from ...contracts.gates import artifact_provenance_from_archive
-from ...contracts.staged_checkpoint_acceptance import staged_checkpoint_findings
+from ...contracts.staged_checkpoint import staged_checkpoint_findings
 from .._runtime_params import ToolLoopExecuteParams
 from ..artifact_locator import locate_artifact
 from ..target_coverage_ledger import collect_target_coverage_records, target_coverage_status
@@ -67,6 +67,23 @@ class ArtifactValidationReportRequest:
     run_id: str
 
 
+@dataclass(frozen=True)
+class ArtifactItemValidationRequest:
+    item: dict[str, Any]
+    workspace_root: Path
+    archive_tool_calls: list[Any]
+    run_id: str
+    reference_roots: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class TargetCoverageReportRequest:
+    report: dict[str, Any]
+    validation: DeliveryContractValidationRequest
+    archive_tool_calls: list[Any]
+    results: list[dict[str, Any]]
+
+
 def _required_artifacts(contract: dict[str, Any]) -> list[dict[str, Any]]:
     raw = contract.get("artifacts")
     if not isinstance(raw, list):
@@ -104,11 +121,13 @@ def _validate_contract_artifacts(request: DeliveryContractValidationRequest) -> 
     reference_roots = _artifact_reference_roots(request)
     results = [
         _validate_artifact_item(
-            item,
-            request.workspace_root,
-            archive_tool_calls=archive_tool_calls,
-            run_id=str(getattr(request.params, "run_id", "") or ""),
-            reference_roots=reference_roots,
+            ArtifactItemValidationRequest(
+                item=item,
+                workspace_root=request.workspace_root,
+                archive_tool_calls=archive_tool_calls,
+                run_id=str(getattr(request.params, "run_id", "") or ""),
+                reference_roots=reference_roots,
+            )
         )
         for item in request.artifacts
     ]
@@ -129,23 +148,39 @@ def _validate_contract_artifacts(request: DeliveryContractValidationRequest) -> 
     registry_read_errors = registry_read_errors_from_artifacts(results)
     if registry_read_errors:
         report["registry_read_errors"] = registry_read_errors
-    coverage_contract = request.contract.get("target_coverage_contract")
-    if isinstance(coverage_contract, dict):
-        coverage_root = request.coverage_workspace_root or request.workspace_root
-        coverage_records = collect_target_coverage_records([
-            *archive_tool_calls,
-            *results,
-        ], workspace_root=coverage_root)
-        report["target_coverage_status"] = target_coverage_status(
-            coverage_contract,
-            coverage_records=coverage_records,
-            workspace_root=coverage_root,
+    _apply_target_coverage_report(
+        TargetCoverageReportRequest(
+            report=report,
+            validation=request,
+            archive_tool_calls=archive_tool_calls,
+            results=results,
         )
-        if freshness := _target_coverage_freshness_status(results, report["target_coverage_status"], coverage_records):
-            report["target_coverage_freshness_status"] = freshness
-            if freshness.get("should_block") is True:
-                report["ok"] = False
+    )
     return report
+
+
+def _apply_target_coverage_report(request: TargetCoverageReportRequest) -> None:
+    report = request.report
+    validation = request.validation
+    coverage_contract = validation.contract.get("target_coverage_contract")
+    if not isinstance(coverage_contract, dict):
+        return
+    coverage_root = validation.coverage_workspace_root or validation.workspace_root
+    coverage_records = collect_target_coverage_records(
+        [*request.archive_tool_calls, *request.results],
+        workspace_root=coverage_root,
+    )
+    report["target_coverage_status"] = target_coverage_status(
+        coverage_contract,
+        coverage_records=coverage_records,
+        workspace_root=coverage_root,
+    )
+    freshness = _target_coverage_freshness_status(request.results, report["target_coverage_status"], coverage_records)
+    if not freshness:
+        return
+    report["target_coverage_freshness_status"] = freshness
+    if freshness.get("should_block") is True:
+        report["ok"] = False
 
 
 def _target_coverage_freshness_status(
@@ -246,17 +281,22 @@ def _request_archive_tool_calls(request: DeliveryContractValidationRequest) -> l
 
 def _artifact_reference_roots(request: DeliveryContractValidationRequest) -> tuple[Path, ...]:
     roots: list[Path] = []
-    _append_reference_root(roots, request.coverage_workspace_root)
+    for value in _artifact_reference_root_values(request):
+        _append_reference_root(roots, value)
+    return tuple(roots)
+
+
+def _artifact_reference_root_values(request: DeliveryContractValidationRequest) -> list[object]:
+    values: list[object] = [request.coverage_workspace_root]
     task_workspace = request.contract.get("task_workspace")
     if isinstance(task_workspace, dict):
         for key in ("source_workspace_root", "relative_input_root"):
-            _append_reference_root(roots, task_workspace.get(key))
+            values.append(task_workspace.get(key))
     for key in ("source_roots", "reference_roots"):
-        values = request.contract.get(key)
-        if isinstance(values, list):
-            for value in values:
-                _append_reference_root(roots, value)
-    return tuple(roots)
+        raw_values = request.contract.get(key)
+        if isinstance(raw_values, list):
+            values.extend(raw_values)
+    return values
 
 
 def _append_reference_root(roots: list[Path], value: object) -> None:
@@ -305,14 +345,9 @@ def _existing_report(workspace_root: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _validate_artifact_item(
-    item: dict[str, Any],
-    workspace_root: Path,
-    *,
-    archive_tool_calls: list[Any] | None = None,
-    run_id: str = "",
-    reference_roots: tuple[Path, ...] = (),
-) -> dict[str, Any]:
+def _validate_artifact_item(request: ArtifactItemValidationRequest) -> dict[str, Any]:
+    item = request.item
+    workspace_root = request.workspace_root
     raw_path = str(item.get("preferred_path") or item.get("path") or "")
     registry_record, registry_read_errors = _registry_record_for_item(item, workspace_root)
     if registry_record and _is_registry_group(registry_record):
@@ -321,8 +356,8 @@ def _validate_artifact_item(
                 item=item,
                 record=registry_record,
                 workspace_root=workspace_root,
-                archive_tool_calls=archive_tool_calls,
-                run_id=run_id,
+                archive_tool_calls=request.archive_tool_calls,
+                run_id=request.run_id,
             )
         )
         return with_registry_read_errors(result, registry_read_errors)
@@ -344,11 +379,11 @@ def _validate_artifact_item(
             item=item,
             path=path,
             workspace_root=workspace_root,
-            reference_roots=reference_roots,
+            reference_roots=request.reference_roots,
             registry_record=registry_record,
             registry_read_errors=registry_read_errors,
-            archive_tool_calls=list(archive_tool_calls or []),
-            run_id=run_id,
+            archive_tool_calls=request.archive_tool_calls,
+            run_id=request.run_id,
         )
     )
 

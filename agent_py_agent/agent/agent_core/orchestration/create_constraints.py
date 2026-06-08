@@ -120,12 +120,17 @@ def _current_task_output_write_roots(agent: object, params: dict[str, object]) -
     task_output = (Path(task_root).expanduser() / "output").resolve(strict=False)
     roots: list[str] = []
     for ref in params_output_refs(params):
-        path = _output_ref_path(ref, task_output)
-        if path is not None and is_relative_to(path, task_output):
-            text = str(path.parent)
-            if text not in roots:
-                roots.append(text)
+        root = _task_output_root_for_ref(ref, task_output)
+        if root and root not in roots:
+            roots.append(root)
     return roots
+
+
+def _task_output_root_for_ref(ref: str, task_output: Path) -> str:
+    path = _output_ref_path(ref, task_output)
+    if path is None or not is_relative_to(path, task_output):
+        return ""
+    return str(path.parent)
 
 
 def _current_task_root(agent: object) -> str:

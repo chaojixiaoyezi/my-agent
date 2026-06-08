@@ -157,7 +157,10 @@ def test_agent_tree_exposes_pending_guidance_layer(tmp_path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
-    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", subagent_workspace="subs", my_agent_home=str(tmp_path / ".my-agent-home")),
+        tmp_path,
+    )
     child = agent.subagents.create_run(goal="child", thought="", plan=["child"])
     agent.conversation_store.append_guidance(
         {

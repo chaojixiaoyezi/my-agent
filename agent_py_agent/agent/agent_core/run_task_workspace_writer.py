@@ -139,9 +139,11 @@ def sync_run_task_workspace_closeout(agent, params: object, report: dict[str, An
     work_dir = root / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
     now = _now_iso()
-    _write_closeout_state(work_dir / "state.json", params, report, now)
-    _write_closeout_manifest(work_dir / "refs" / "artifacts" / "manifest.json", params, report, now)
-    _append_closeout_timeline(work_dir / "timeline.jsonl", params, report, now)
+    _write_closeout_state(_CloseoutWorkspaceSyncRequest(work_dir / "state.json", params, report, now))
+    _write_closeout_manifest(
+        _CloseoutWorkspaceSyncRequest(work_dir / "refs" / "artifacts" / "manifest.json", params, report, now)
+    )
+    _append_closeout_timeline(_CloseoutWorkspaceSyncRequest(work_dir / "timeline.jsonl", params, report, now))
     return str(root)
 
 
@@ -207,6 +209,14 @@ class _ExistingWorkspacePaths:
 class _SavedWorkspaceRef:
     root: Path
     work_dir: Path
+
+
+@dataclass(frozen=True)
+class _CloseoutWorkspaceSyncRequest:
+    path: Path
+    params: object
+    report: dict[str, Any]
+    now: str
 
 
 def _root_task_params(params: ArchiveRunParams) -> ArchiveRunParams:
@@ -326,69 +336,69 @@ def _workspace_work_dir_from_mapping(value: object, key: str) -> str:
     return str(Path(root) / "work") if root else ""
 
 
-def _write_closeout_state(path: Path, params: object, report: dict[str, Any], now: str) -> None:
-    state = _read_json(path)
-    artifacts = _closeout_artifacts(report)
+def _write_closeout_state(request: _CloseoutWorkspaceSyncRequest) -> None:
+    state = _read_json(request.path)
+    artifacts = _closeout_artifacts(request.report)
     artifact_refs = _unique_strings(
         [*list(state.get("artifact_refs", []) or []), *[str(item.get("path") or "") for item in artifacts]]
     )
-    evidence_refs = _unique_strings([*list(state.get("evidence_refs", []) or []), str(report.get("report_ref") or "")])
+    evidence_refs = _unique_strings([*list(state.get("evidence_refs", []) or []), str(request.report.get("report_ref") or "")])
     state.update(
         {
             "version": int(state.get("version") or 1),
-            "task_id": str(state.get("task_id") or getattr(params, "task_id", "") or getattr(params, "run_id", "") or ""),
+            "task_id": str(state.get("task_id") or getattr(request.params, "task_id", "") or getattr(request.params, "run_id", "") or ""),
             "primary_run_id": str(
-                state.get("primary_run_id") or getattr(params, "run_id", "") or getattr(params, "request_id", "") or ""
+                state.get("primary_run_id") or getattr(request.params, "run_id", "") or getattr(request.params, "request_id", "") or ""
             ),
-            "status": "DONE" if bool(report.get("ok")) else "FAILED",
-            "verification_status": "VERIFIED" if bool(report.get("ok")) else "FAILED",
-            "progress": 1.0 if bool(report.get("ok")) else float(state.get("progress") or 0.0),
-            "latest_summary": _closeout_summary(report),
+            "status": "DONE" if bool(request.report.get("ok")) else "FAILED",
+            "verification_status": "VERIFIED" if bool(request.report.get("ok")) else "FAILED",
+            "progress": 1.0 if bool(request.report.get("ok")) else float(state.get("progress") or 0.0),
+            "latest_summary": _closeout_summary(request.report),
             "artifact_refs": artifact_refs,
             "evidence_refs": evidence_refs,
             "delivery_closeout": {
-                "ok": bool(report.get("ok")),
-                "report_ref": str(report.get("report_ref") or ""),
+                "ok": bool(request.report.get("ok")),
+                "report_ref": str(request.report.get("report_ref") or ""),
                 "artifact_count": len(artifacts),
-                "run_id": str(getattr(params, "run_id", "") or ""),
-                "request_id": str(getattr(params, "request_id", "") or ""),
+                "run_id": str(getattr(request.params, "run_id", "") or ""),
+                "request_id": str(getattr(request.params, "request_id", "") or ""),
             },
-            "updated_at": now,
+            "updated_at": request.now,
         }
     )
-    write_json_file_atomic(path, state, sort_keys=False)
+    write_json_file_atomic(request.path, state, sort_keys=False)
 
 
-def _write_closeout_manifest(path: Path, params: object, report: dict[str, Any], now: str) -> None:
-    manifest = _read_json(path)
+def _write_closeout_manifest(request: _CloseoutWorkspaceSyncRequest) -> None:
+    manifest = _read_json(request.path)
     manifest.update(
         {
             "version": int(manifest.get("version") or 1),
-            "request_id": str(manifest.get("request_id") or getattr(params, "request_id", "") or ""),
-            "run_id": str(manifest.get("run_id") or getattr(params, "run_id", "") or ""),
-            "task_id": str(manifest.get("task_id") or getattr(params, "task_id", "") or ""),
-            "artifacts": [_manifest_artifact(item) for item in _closeout_artifacts(report)],
-            "closeout_report_ref": str(report.get("report_ref") or ""),
-            "updated_at": now,
+            "request_id": str(manifest.get("request_id") or getattr(request.params, "request_id", "") or ""),
+            "run_id": str(manifest.get("run_id") or getattr(request.params, "run_id", "") or ""),
+            "task_id": str(manifest.get("task_id") or getattr(request.params, "task_id", "") or ""),
+            "artifacts": [_manifest_artifact(item) for item in _closeout_artifacts(request.report)],
+            "closeout_report_ref": str(request.report.get("report_ref") or ""),
+            "updated_at": request.now,
         }
     )
-    write_json_file_atomic(path, manifest, sort_keys=False)
+    write_json_file_atomic(request.path, manifest, sort_keys=False)
 
 
-def _append_closeout_timeline(path: Path, params: object, report: dict[str, Any], now: str) -> None:
+def _append_closeout_timeline(request: _CloseoutWorkspaceSyncRequest) -> None:
     append_jsonl_records(
-        path,
+        request.path,
         [
             {
                 "event_type": "delivery_closeout_synced",
-                "request_id": str(getattr(params, "request_id", "") or ""),
-                "run_id": str(getattr(params, "run_id", "") or ""),
-                "task_id": str(getattr(params, "task_id", "") or ""),
-                "status": "DONE" if bool(report.get("ok")) else "FAILED",
-                "verification_status": "VERIFIED" if bool(report.get("ok")) else "FAILED",
-                "closeout_report_ref": str(report.get("report_ref") or ""),
-                "artifact_count": len(_closeout_artifacts(report)),
-                "created_at": now,
+                "request_id": str(getattr(request.params, "request_id", "") or ""),
+                "run_id": str(getattr(request.params, "run_id", "") or ""),
+                "task_id": str(getattr(request.params, "task_id", "") or ""),
+                "status": "DONE" if bool(request.report.get("ok")) else "FAILED",
+                "verification_status": "VERIFIED" if bool(request.report.get("ok")) else "FAILED",
+                "closeout_report_ref": str(request.report.get("report_ref") or ""),
+                "artifact_count": len(_closeout_artifacts(request.report)),
+                "created_at": request.now,
             }
         ],
         sort_keys=True,
@@ -550,20 +560,22 @@ def _user_requested_dir_from_roots(artifact: dict, paths, primary_workspace_root
     if not isinstance(roots, list):
         return ""
     for value in roots:
-        text = str(value or "").strip()
-        if not text:
-            continue
-        if not _is_absolute_or_home_path(text):
-            if directory := _relative_user_requested_dir(text, primary_workspace_root):
-                return directory
-            continue
-        try:
-            path = Path(text).expanduser()
-        except OSError:
-            continue
-        if not _same_or_inside(path, Path(paths.output_dir)):
-            return _output_dir_for_path_text(text)
+        directory = _user_requested_dir_from_root_text(str(value or "").strip(), paths, primary_workspace_root)
+        if directory:
+            return directory
     return ""
+
+
+def _user_requested_dir_from_root_text(text: str, paths, primary_workspace_root: Path | None) -> str:
+    if not text:
+        return ""
+    if not _is_absolute_or_home_path(text):
+        return _relative_user_requested_dir(text, primary_workspace_root)
+    try:
+        path = Path(text).expanduser()
+    except OSError:
+        return ""
+    return "" if _same_or_inside(path, Path(paths.output_dir)) else _output_dir_for_path_text(text)
 
 
 def _relative_user_requested_dir(text: str, primary_workspace_root: Path | None) -> str:

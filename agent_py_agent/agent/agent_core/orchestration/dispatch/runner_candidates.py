@@ -9,7 +9,7 @@ from ....subagents.models import (
     normalize_verification_status,
     task_status_in,
 )
-from ....subagents.services.recovery.modes import is_rerun_mode
+from ....subagents.services.recovery.modes import is_rerun_mode, recovery_mode_from_protocol_value
 from ...runner.dispatch import (
     RunnerCandidatePolicy,
     _dispatch_runner_candidates,
@@ -77,7 +77,7 @@ def _requested_candidate_tasks(
 def _is_explicit_recovery_dispatch(ctx: DispatchContext) -> bool:
     if not requested_include_ids(ctx):
         return False
-    return is_rerun_mode(str(getattr(ctx, "recovery_mode", "") or ""))
+    return is_rerun_mode(recovery_mode_from_protocol_value(getattr(ctx, "recovery_mode", "")))
 
 
 def _included_recovery_runner_tasks(tasks: list, ctx: DispatchContext) -> list:

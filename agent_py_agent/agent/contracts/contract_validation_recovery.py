@@ -3,8 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .recovery import RecoveryAction
-from .recovery import RecoveryEnvelopeRequest, recovery_envelope_from_gate_payload
+from .recovery import RecoveryAction, RecoveryEnvelopeRequest, recovery_envelope_from_gate_payload
 
 
 def recovery_for_findings(gate: str, findings: tuple[dict[str, object], ...] | list[dict[str, object]]) -> dict[str, object] | None:

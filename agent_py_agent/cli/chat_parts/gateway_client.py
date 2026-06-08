@@ -55,6 +55,15 @@ class GatewayTimingContext:
     use_gateway: bool
 
 
+@dataclass(frozen=True)
+class ChunkFilePollRequest:
+    chunk_path: Path
+    on_chunk: object
+    chunks_printed: int
+    visible_chunks: int
+    chunk_offset: int
+
+
 def submit_chat_request(
     paths,
     content: ChatRequestContent,
@@ -85,7 +94,7 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     response_poll_state = GatewayResponsePollState()
     while time.time() <= request.deadline:
         chunks_printed, visible_chunks, chunk_offset = _poll_chunk_file(
-            request.chunk_path, request.on_chunk, chunks_printed, visible_chunks, chunk_offset
+            ChunkFilePollRequest(request.chunk_path, request.on_chunk, chunks_printed, visible_chunks, chunk_offset)
         )
         response = read_gateway_response_file_when_ready(
             request.response_path,
@@ -94,7 +103,7 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
         )
         if response:
             chunks_printed, visible_chunks, chunk_offset = _poll_chunk_file(
-                request.chunk_path, request.on_chunk, chunks_printed, visible_chunks, chunk_offset
+                ChunkFilePollRequest(request.chunk_path, request.on_chunk, chunks_printed, visible_chunks, chunk_offset)
             )
             break
         time.sleep(0.1)
@@ -106,14 +115,11 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     return response
 
 
-def _poll_chunk_file(
-    chunk_path: Path,
-    on_chunk: callable,
-    chunks_printed: int,
-    visible_chunks: int,
-    chunk_offset: int,
-) -> tuple[int, int, int]:
-    readable_chunk_path = _readable_chunk_path(chunk_path)
+def _poll_chunk_file(request: ChunkFilePollRequest) -> tuple[int, int, int]:
+    chunks_printed = request.chunks_printed
+    visible_chunks = request.visible_chunks
+    chunk_offset = request.chunk_offset
+    readable_chunk_path = _readable_chunk_path(request.chunk_path)
     if readable_chunk_path is None:
         return chunks_printed, visible_chunks, chunk_offset
     try:
@@ -125,7 +131,7 @@ def _poll_chunk_file(
         print(f"gateway chat chunk load_error path={readable_chunk_path} message={exc}", file=sys.stderr)
         return chunks_printed, visible_chunks, 0
     for cline in data.splitlines():
-        consumed, visible = _emit_chunk_line(cline, on_chunk)
+        consumed, visible = _emit_chunk_line(cline, request.on_chunk)
         chunks_printed += consumed
         visible_chunks += visible
     return chunks_printed, visible_chunks, chunk_offset

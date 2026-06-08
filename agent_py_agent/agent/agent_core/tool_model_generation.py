@@ -257,22 +257,29 @@ def _generate_with_wall_timeout(
     started = time.monotonic()
     tool_block_completed_at: float | None = None
     while True:
-        now = time.monotonic()
-        remaining = timeout - (now - started)
+        remaining = timeout - (time.monotonic() - started)
         if remaining <= 0:
             raise ProviderTimeoutError(f"模型接口请求超时: request_timeout={timeout:g}s")
-        poll = min(_TOOL_STREAM_POLL_SECONDS, remaining)
-        try:
-            result = results.get(timeout=poll)
+        result, tool_block_completed_at = _poll_generation_result(results, state, tool_block_completed_at, remaining)
+        if result is not None:
             break
-        except Empty:
-            tool_block_completed_at = _tool_block_completed_at(state, tool_block_completed_at)
-            if _complete_tool_block_wait_elapsed(tool_block_completed_at):
-                return _complete_stream_tool_response(request, state)
-            continue
+        if _complete_tool_block_wait_elapsed(tool_block_completed_at):
+            return _complete_stream_tool_response(request, state)
     if result.exc is not None:
         raise result.exc
     return result.response
+
+
+def _poll_generation_result(
+    results: Queue[_BackendGenerateResult],
+    state: _ModelGenerationState,
+    tool_block_completed_at: float | None,
+    remaining: float,
+) -> tuple[_BackendGenerateResult | None, float | None]:
+    try:
+        return results.get(timeout=min(_TOOL_STREAM_POLL_SECONDS, remaining)), tool_block_completed_at
+    except Empty:
+        return None, _tool_block_completed_at(state, tool_block_completed_at)
 
 
 def _tool_block_completed_at(state: _ModelGenerationState, current: float | None) -> float | None:

@@ -155,19 +155,9 @@ def _captured_refs_section(payload: Any) -> str:
     refs = payload if isinstance(payload, dict) else {}
     lines = ["## Already Captured Refs"]
     coverage = refs.get("full_read_coverage") if isinstance(refs.get("full_read_coverage"), dict) else {}
-    if coverage:
-        source = str(coverage.get("source_path") or "").strip()
-        complete = coverage.get("complete")
-        if coverage.get("kind") == "line_window":
-            covered = coverage.get("covered_until_line")
-            total = coverage.get("total_lines")
-            if source and isinstance(covered, int) and isinstance(total, int):
-                lines.append(f"- full_read_coverage: source_path={source} covered_until_line={covered} total_lines={total} complete={complete}")
-        else:
-            covered = coverage.get("covered_until_offset", coverage.get("covered_until"))
-            total = coverage.get("total_chars")
-            if source and isinstance(covered, int) and isinstance(total, int):
-                lines.append(f"- full_read_coverage: source_path={source} covered_until={covered} total_chars={total} complete={complete}")
+    coverage_line = _full_read_coverage_line(coverage)
+    if coverage_line:
+        lines.append(coverage_line)
     lines.extend(_source_coverage_lines(refs, "incomplete_source_coverage"))
     lines.extend(_source_coverage_lines(refs, "source_coverage"))
     artifact_ref_count = refs.get("artifact_ref_count")
@@ -186,6 +176,32 @@ def _captured_refs_section(payload: Any) -> str:
     if len(lines) == 1:
         lines.append("- <none>")
     return "\n".join(lines)
+
+
+def _full_read_coverage_line(coverage: dict[str, Any]) -> str:
+    if not coverage:
+        return ""
+    source = str(coverage.get("source_path") or "").strip()
+    if not source:
+        return ""
+    complete = coverage.get("complete")
+    if coverage.get("kind") == "line_window":
+        covered = coverage.get("covered_until_line")
+        total = coverage.get("total_lines")
+        if isinstance(covered, int) and isinstance(total, int):
+            return (
+                f"- full_read_coverage: source_path={source} covered_until_line={covered} "
+                f"total_lines={total} complete={complete}"
+            )
+        return ""
+    covered = coverage.get("covered_until_offset", coverage.get("covered_until"))
+    total = coverage.get("total_chars")
+    if isinstance(covered, int) and isinstance(total, int):
+        return (
+            f"- full_read_coverage: source_path={source} covered_until={covered} "
+            f"total_chars={total} complete={complete}"
+        )
+    return ""
 
 
 def _source_coverage_lines(refs: dict[str, Any], key: str) -> list[str]:
@@ -264,24 +280,30 @@ def _task_progress_section(payload: Any) -> str | None:
 def _progress_rows(value: Any, *, limit: int) -> list[str]:
     rows: list[str] = []
     for item in value if isinstance(value, list | tuple) else []:
-        if not isinstance(item, dict):
-            text = str(item or "").strip()
-            if text:
-                rows.append(text)
-        else:
-            parts = []
-            for key in ("id", "title", "status", "notes", "next"):
-                text = str(item.get(key) or "").strip()
-                if text:
-                    parts.append(f"{key}={text}")
-            evidence = _items(item.get("evidence"))[:3]
-            if evidence:
-                parts.append("evidence=" + "; ".join(evidence))
-            if parts:
-                rows.append(" ".join(parts))
+        if row := _progress_row(item):
+            rows.append(row)
         if len(rows) >= limit:
             break
     return rows
+
+
+def _progress_row(item: Any) -> str:
+    if not isinstance(item, dict):
+        return str(item or "").strip()
+    parts = _progress_row_parts(item)
+    return " ".join(parts) if parts else ""
+
+
+def _progress_row_parts(item: dict[str, Any]) -> list[str]:
+    parts = [
+        f"{key}={text}"
+        for key in ("id", "title", "status", "notes", "next")
+        if (text := str(item.get(key) or "").strip())
+    ]
+    evidence = _items(item.get("evidence"))[:3]
+    if evidence:
+        parts.append("evidence=" + "; ".join(evidence))
+    return parts
 
 
 def _tool_output_index_section(tool_progress: Any, artifact_hints: Any) -> str | None:

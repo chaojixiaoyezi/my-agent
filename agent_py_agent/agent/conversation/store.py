@@ -1,10 +1,6 @@
 
-"""Conversation store — unified persistence layer for threads, messages, tasks,
-observations, guidance, wake signals, progress policies, and background claims.
-
-All store classes that were previously split across store_base / store_threads /
-store_messages / store_tasks / store_observations / store_guidance / store_wake /
-store_progress / store_claims / store_context are now in this single module.
+"""Conversation store for threads, messages, tasks, observations, guidance,
+wake signals, progress policies, and background claims.
 """
 
 from __future__ import annotations
@@ -33,7 +29,7 @@ from .models import (
 )
 
 # ---------------------------------------------------------------------------
-# common helpers (was store_common.py)
+# common helpers
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -136,7 +132,7 @@ def _jsonl_error(
 
 
 # ---------------------------------------------------------------------------
-# base store (was store_base.py)
+# shared layout
 # ---------------------------------------------------------------------------
 
 class ConversationBaseStore:
@@ -206,7 +202,7 @@ class ConversationBaseStore:
 
 
 # ---------------------------------------------------------------------------
-# thread store (was store_threads.py)
+# thread records
 # ---------------------------------------------------------------------------
 
 def _binding_key(channel: str, conversation_id: str, user_id: str) -> str:
@@ -433,7 +429,7 @@ class ConversationThreadStore(ConversationBaseStore):
 
 
 # ---------------------------------------------------------------------------
-# message store (was store_messages.py)
+# message records
 # ---------------------------------------------------------------------------
 
 def _message_entries(rows: list[dict[str, Any]]) -> tuple[list[MessageLogEntry], list[dict[str, Any]]]:
@@ -487,7 +483,7 @@ class ConversationMessageStore(ConversationThreadStore):
 
 
 # ---------------------------------------------------------------------------
-# task store (was store_tasks.py)
+# task links
 # ---------------------------------------------------------------------------
 
 def _thread_with_task(thread: ConversationThread, task_id: str, updated_at: float) -> ConversationThread:
@@ -584,7 +580,7 @@ class ConversationTaskStore(ConversationMessageStore):
 
 
 # ---------------------------------------------------------------------------
-# observation store (was store_observations.py)
+# observation records
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -718,7 +714,7 @@ class ConversationObservationStore(ConversationTaskStore):
 
 
 # ---------------------------------------------------------------------------
-# guidance store (was store_guidance.py)
+# guidance records
 # ---------------------------------------------------------------------------
 
 def _with_guidance_delivered_at(entry: GuidanceEntry, delivered: dict[str, float]) -> GuidanceEntry:
@@ -828,7 +824,7 @@ class ConversationGuidanceStore(ConversationObservationStore):
 
 
 # ---------------------------------------------------------------------------
-# wake store (was store_wake.py)
+# wake signals
 # ---------------------------------------------------------------------------
 
 def _wake_signal(thread_id: str, current: float, kwargs: dict[str, Any]) -> WakeSignal:
@@ -980,7 +976,7 @@ class ConversationWakeStore(ConversationGuidanceStore):
 
 
 # ---------------------------------------------------------------------------
-# progress store (was store_progress.py)
+# progress records
 # ---------------------------------------------------------------------------
 
 def _progress_policy_read_error(path: Path, exc: BaseException) -> dict[str, Any]:
@@ -1064,7 +1060,7 @@ class ConversationProgressStore(ConversationWakeStore):
 
 
 # ---------------------------------------------------------------------------
-# claim store (was store_claims.py)
+# background claims
 # ---------------------------------------------------------------------------
 
 _FINISH_STATUSES = {"finished", "failed", "cancelled"}
@@ -1123,7 +1119,7 @@ def _error_payload(value: object) -> dict[str, Any]:
 
 
 def _takeover_payload(status: str) -> dict[str, Any]:
-    if status == "failed":
+    if status == "failed":  # CLAIM_STATUS_FAILED
         return {"allowed": True, "reason": "runtime_failed"}
     if status == "cancelled":
         return {"allowed": True, "reason": "runtime_cancelled"}
@@ -1270,7 +1266,7 @@ class ConversationClaimStore(ConversationProgressStore):
 
 
 # ---------------------------------------------------------------------------
-# main public store (was store_context.py)
+# public conversation store
 # ---------------------------------------------------------------------------
 
 class ConversationStore(ConversationClaimStore):

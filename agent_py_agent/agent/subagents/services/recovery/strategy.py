@@ -26,14 +26,7 @@ from ...models import (
 from ...protocol import build_task_address, build_task_envelope
 from ...role_templates import role_template_snapshot_for_task
 from .modes import (
-    CLOSED,
-    LEADERSHIP_RECOVERY,
-    MANUAL_REVIEW_MISSING_REFS,
-    NO_PROGRESS_LIMIT_REACHED,
-    RERUN_FROM_CHECKPOINT,
-    RERUN_FROM_CONTINUE_PACKET,
-    TAKEOVER_FROM_CHECKPOINT,
-    TAKEOVER_FROM_CONTINUE_PACKET,
+    RecoveryMode,
     action_for_recovery_mode,
     mode_uses_continue_packet,
 )
@@ -56,7 +49,7 @@ class SubagentRecoveryStrategy:
     status: str
     role: str
     recommended_action: str
-    recovery_mode: str
+    recovery_mode: RecoveryMode
     packet_status: str
     packet_ref: str = ""
     uses_continue_packet: bool = False
@@ -78,7 +71,7 @@ class SubagentRecoveryStrategy:
             "status": self.status,
             "role": self.role,
             "recommended_action": self.recommended_action,
-            "recovery_mode": self.recovery_mode,
+            "recovery_mode": self.recovery_mode.value,
             "packet_status": self.packet_status,
             "packet_ref": self.packet_ref,
             "uses_continue_packet": self.uses_continue_packet,
@@ -126,7 +119,7 @@ def build_subagent_recovery_strategy(request: SubagentRecoveryStrategyRequest) -
         child_run_ids=task_list(task, "child_ids"),
         address=build_task_address(task, all_tasks=request.all_tasks).to_dict(),
         task_envelope=build_task_envelope(task, all_tasks=request.all_tasks).to_dict(),
-        leadership_recovery=recovery_mode == LEADERSHIP_RECOVERY,
+        leadership_recovery=recovery_mode == RecoveryMode.LEADERSHIP_RECOVERY,
         no_progress_fuse=no_progress_fuse,
         blocked_by=packet.blocked_by,
         runner_instruction=_runner_instruction(task, packet, recovery_refs, recovery_mode),
@@ -134,15 +127,15 @@ def build_subagent_recovery_strategy(request: SubagentRecoveryStrategyRequest) -
     )
 
 
-def _runner_instruction(task: Any, packet: Any, recovery_refs: list[str], recovery_mode: str) -> str:
-    if recovery_mode == NO_PROGRESS_LIMIT_REACHED:
+def _runner_instruction(task: Any, packet: Any, recovery_refs: list[str], recovery_mode: RecoveryMode) -> str:
+    if recovery_mode == RecoveryMode.NO_PROGRESS_LIMIT_REACHED:
         return "连续恢复没有进展：不要继续自动重试，也不要继续扩容；请汇总 refs 后等待父级/用户决策。"
-    if recovery_mode == LEADERSHIP_RECOVERY:
+    if recovery_mode == RecoveryMode.LEADERSHIP_RECOVERY:
         return (
             "coordinator/lead 已失联或失败：请调用 subagents-leadership-recovery-plan 选择新 leader，"
             "再分批接管其 child_run_ids，不要重复重启失联 coordinator。"
         )
-    if recovery_mode in {TAKEOVER_FROM_CONTINUE_PACKET, TAKEOVER_FROM_CHECKPOINT}:
+    if recovery_mode.is_takeover():
         return _takeover_instruction(task, packet, recovery_refs)
     if getattr(packet, "status", "") == "ready":
         return _packet_instruction(task, packet)
@@ -292,20 +285,20 @@ def _recovery_mode(
     packet: _PacketState,
     recovery_refs: list[str],
     no_progress_fuse: bool,
-) -> str:
+) -> RecoveryMode:
     if no_progress_fuse:
-        return NO_PROGRESS_LIMIT_REACHED
+        return RecoveryMode.NO_PROGRESS_LIMIT_REACHED
     if _needs_leadership_recovery(task):
-        return LEADERSHIP_RECOVERY
+        return RecoveryMode.LEADERSHIP_RECOVERY
     if _needs_takeover(task):
         return _takeover_mode(packet)
     if packet.status == "ready" and _is_recoverable(task):
-        return RERUN_FROM_CONTINUE_PACKET
+        return RecoveryMode.RERUN_FROM_CONTINUE_PACKET
     if recovery_refs and _is_recoverable(task):
-        return RERUN_FROM_CHECKPOINT
+        return RecoveryMode.RERUN_FROM_CHECKPOINT
     if _is_closed(task):
-        return CLOSED
-    return MANUAL_REVIEW_MISSING_REFS
+        return RecoveryMode.CLOSED
+    return RecoveryMode.MANUAL_REVIEW_MISSING_REFS
 
 
 def _packet_ref(task: SubAgentTask) -> str:
@@ -394,10 +387,10 @@ def _no_progress_fuse(task: SubAgentTask, attempt_limit: int) -> bool:
     return task_int(task, "runner_attempts") >= attempt_limit and _is_recoverable(task)
 
 
-def _takeover_mode(packet: _PacketState) -> str:
+def _takeover_mode(packet: _PacketState) -> RecoveryMode:
     if packet.status == "ready":
-        return TAKEOVER_FROM_CONTINUE_PACKET
-    return TAKEOVER_FROM_CHECKPOINT
+        return RecoveryMode.TAKEOVER_FROM_CONTINUE_PACKET
+    return RecoveryMode.TAKEOVER_FROM_CHECKPOINT
 
 
 __all__ = [

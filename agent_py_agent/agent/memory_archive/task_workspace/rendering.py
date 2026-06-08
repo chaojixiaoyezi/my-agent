@@ -8,31 +8,36 @@ These helpers keep task workspace orchestration focused on sync order while this
 file owns the small Markdown/YAML bodies written by the runtime memory adapter.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 
-def write_task_yaml(
-    path: Path,
-    task_id: str,
-    task: Any,
-    now: float,
-    *,
+@dataclass(frozen=True)
+class WriteTaskYamlRequest:
+    path: Path
+    task_id: str
+    task: Any
+    now: float
     primary_run_id: str | None = None,
-    parent_run_id: str | None = None,
-) -> None:
+    parent_run_id: str | None = None
+
+
+def write_task_yaml(request: WriteTaskYamlRequest) -> None:
     """Write the current task workspace identity file."""
 
+    path = request.path
+    task = request.task
     goal = str(getattr(task, "goal", ""))
-    primary = str(primary_run_id if primary_run_id is not None else getattr(task, "id", ""))
-    parent = str(parent_run_id if parent_run_id is not None else getattr(task, "parent_id", ""))
+    primary = str(request.primary_run_id if request.primary_run_id is not None else getattr(task, "id", ""))
+    parent = str(request.parent_run_id if request.parent_run_id is not None else getattr(task, "parent_id", ""))
     content = (
         "version: 1\n"
-        f'task_id: "{_yaml_quote(task_id)}"\n'
+        f'task_id: "{_yaml_quote(request.task_id)}"\n'
         f'primary_run_id: "{_yaml_quote(primary)}"\n'
         f'parent_run_id: "{_yaml_quote(parent)}"\n'
         f"depth: {int(getattr(task, 'depth', 0) or 0)}\n"
-        f'created_at: {float(getattr(task, "created_at", 0.0) or now)}\n'
+        f'created_at: {float(getattr(task, "created_at", 0.0) or request.now)}\n'
         "source: subagent_task_workspace\n"
         "objective: |-\n"
         f"{_indent_block(goal or '待填写')}\n"
@@ -93,6 +98,7 @@ def _indent_block(value: str) -> str:
 
 
 __all__ = [
+    "WriteTaskYamlRequest",
     "blackboard_content",
     "write_parent_summary_placeholder",
     "write_summary",

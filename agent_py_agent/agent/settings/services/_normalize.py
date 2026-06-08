@@ -215,11 +215,14 @@ _PROVIDER_SPACE_INT_FIELDS = (
 def _normalize_home_strings(out: dict[str, object], defaults: object) -> list[str]:
     warnings: list[str] = []
     for key in _HOME_STRING_FIELDS:
+        explicit = key in out
         raw = out.get(key, getattr(defaults, key))
         if isinstance(raw, str) and raw.strip():
             out[key] = raw.strip()
             continue
         out[key] = getattr(defaults, key)
+        if not explicit and str(raw or "").strip() == "":
+            continue
         warnings.append(f"{key}: expected a non-empty string, got {raw!r}; using default")
     return warnings
 

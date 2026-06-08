@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
 
 from ...backends import ModelResponse
@@ -32,6 +33,15 @@ _LOCAL_PROGRESS_TOOL_NAMES = {
 }
 _RUN_COMMAND_LOCAL_TOOLS = {"cp", "mkdir", "mv", "python", "python3", "touch"}
 _RUN_COMMAND_EXPLORATION_TOOLS = {"cat", "curl", "find", "grep", "ls", "pwd", "rg", "wget"}
+
+
+@dataclass(frozen=True)
+class _HintDeliveredRequest:
+    agent: object
+    state: dict[str, object]
+    config: ExplorationFuseConfig
+    hint_round: int
+    params: object | None = None
 
 
 def has_required_exploration_fuse(
@@ -75,7 +85,7 @@ def exploration_fuse_context(agent: object, redirects: int, params: object | Non
         "productive_tool_names": sorted(_LOCAL_PROGRESS_TOOL_NAMES),
     }
     message = _hint_message(config, count, hint_round, percent)
-    _mark_hint_delivered(agent, state, config, hint_round, params)
+    _mark_hint_delivered(_HintDeliveredRequest(agent, state, config, hint_round, params))
     return "\n".join(
         [
             "[tool-system exploration-fuse]",
@@ -207,18 +217,15 @@ def _state_with_count(state: dict[str, object], count: int) -> dict[str, object]
     return payload
 
 
-def _mark_hint_delivered(
-    agent: object,
-    state: dict[str, object],
-    config: ExplorationFuseConfig,
-    hint_round: int,
-    params: object | None = None,
-) -> None:
-    delivered = _delivered_hint_rounds(state)
-    delivered.update(item for item in exploration_fuse_hint_rounds(config) if item <= hint_round)
-    payload = _state_with_count(state, int(state.get("exploration_rounds_without_local_progress") or 0))
+def _mark_hint_delivered(request: _HintDeliveredRequest) -> None:
+    delivered = _delivered_hint_rounds(request.state)
+    delivered.update(item for item in exploration_fuse_hint_rounds(request.config) if item <= request.hint_round)
+    payload = _state_with_count(
+        request.state,
+        int(request.state.get("exploration_rounds_without_local_progress") or 0),
+    )
     payload["delivered_hint_rounds"] = sorted(delivered)
-    _write_state(agent, payload, params)
+    _write_state(request.agent, payload, request.params)
 
 
 def _delivered_hint_rounds(state: dict[str, object]) -> set[int]:

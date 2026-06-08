@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...contracts.staged_checkpoint_acceptance import json_checkpoint_status
+from ...contracts.staged_checkpoint import json_checkpoint_status
 from .artifacts import _artifact_path
 
 

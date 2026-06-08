@@ -17,6 +17,7 @@ from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 from agent_py_agent.agent.gateway_parts.request_execution import (
     _gateway_conversation_context,
     _gateway_injections,
+    _GatewayConversationLoadRequest,
     _root_user_prompt,
 )
 from agent_py_agent.agent.gateway_parts.request_worker import GatewayAskParams, submit_gateway_ask
@@ -75,7 +76,7 @@ def test_gateway_chat_followup_reuses_active_root_task_context(tmp_path):
         }
     }
 
-    first = _gateway_conversation_context(agent, request, "gw-first", "分析 all-agent 项目")
+    first = _conversation_context(agent, request, "gw-first", "分析 all-agent 项目")
     assert first.thread_id
     assert first.active_task_id == ""
     assert agent.conversation_store.thread_for_task("gw-first").thread_id == first.thread_id
@@ -98,7 +99,7 @@ def test_gateway_chat_followup_reuses_active_root_task_context(tmp_path):
         ),
     )
 
-    second = _gateway_conversation_context(agent, request, "gw-second", "后台还有人在跑吗")
+    second = _conversation_context(agent, request, "gw-second", "后台还有人在跑吗")
 
     assert second.thread_id == first.thread_id
     assert second.active_task_id == "gw-first"
@@ -119,7 +120,7 @@ def test_gateway_chat_followup_uses_thread_task_path_without_global_index(tmp_pa
             "canonical_user_id": "local-agent",
         }
     }
-    first = _gateway_conversation_context(agent, request, "gw-first", "分析 all-agent 项目")
+    first = _conversation_context(agent, request, "gw-first", "分析 all-agent 项目")
     workspace = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-03" / "analysis"
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
@@ -134,7 +135,7 @@ def test_gateway_chat_followup_uses_thread_task_path_without_global_index(tmp_pa
     )
     agent.home_paths.global_index_active_tasks_jsonl.write_text("{bad-json}\n", encoding="utf-8")
 
-    second = _gateway_conversation_context(agent, request, "gw-second", "后台还有人在跑吗")
+    second = _conversation_context(agent, request, "gw-second", "后台还有人在跑吗")
 
     assert second.active_task_id == "gw-first"
     assert second.task_workspace == str(workspace)
@@ -151,10 +152,10 @@ def test_gateway_chat_followup_does_not_treat_completed_alias_as_active_task(tmp
         }
     }
 
-    first = _gateway_conversation_context(agent, request, "gw-first", "分析 all-agent 项目")
+    first = _conversation_context(agent, request, "gw-first", "分析 all-agent 项目")
     agent.conversation_store.update_task_status({"task_id": "gw-first", "status": "completed"})
 
-    second = _gateway_conversation_context(agent, request, "gw-second", "继续吗")
+    second = _conversation_context(agent, request, "gw-second", "继续吗")
 
     assert second.thread_id == first.thread_id
     assert second.active_task_id == ""
@@ -171,7 +172,7 @@ def test_gateway_followup_preserves_current_user_prompt_with_active_task_context
             "canonical_user_id": "local-agent",
         }
     }
-    first = _gateway_conversation_context(agent, request, "gw-first", "分析 all-agent 项目")
+    first = _conversation_context(agent, request, "gw-first", "分析 all-agent 项目")
     assert first.thread_id
     workspace = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-03" / "analysis"
     (workspace / "output").mkdir(parents=True)
@@ -191,7 +192,7 @@ def test_gateway_followup_preserves_current_user_prompt_with_active_task_context
         ),
     )
 
-    followup = _gateway_conversation_context(agent, request, "gw-chat", "不着急，我只是聊天，不布置任务，原任务继续。")
+    followup = _conversation_context(agent, request, "gw-chat", "不着急，我只是聊天，不布置任务，原任务继续。")
 
     assert followup.thread_id == first.thread_id
     assert followup.active_task_id == "gw-first"
@@ -283,3 +284,7 @@ def test_gateway_followup_delivery_contract_uses_active_task_goal(tmp_path):
 
     coverage = params.delivery_contract["target_coverage_contract"]
     assert [item["target_id"] for item in coverage["target_items"]] == ["ECC-main", "pi-main"]
+
+
+def _conversation_context(agent: SimpleAgent, request: dict, request_id: str, prompt: str):
+    return _gateway_conversation_context(_GatewayConversationLoadRequest(agent, request, request_id, prompt))

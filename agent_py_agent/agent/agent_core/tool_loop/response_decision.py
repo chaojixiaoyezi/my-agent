@@ -338,16 +338,20 @@ def _has_missing_coverage_exploration_call(calls: list[dict[str, object]], statu
 def _missing_source_roots(status: dict[str, object]) -> set[str]:
     roots: set[str] = set()
     for key in ("missing_items", "repair_hints"):
-        items = status.get(key)
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            for field in ("source_ref", "source_path", "target_id"):
-                if path := _normalized_path_text(item.get(field)):
-                    roots.add(path)
+        roots.update(_source_roots_from_items(status.get(key)))
     return roots
+
+
+def _source_roots_from_items(items: object) -> set[str]:
+    if not isinstance(items, list):
+        return set()
+    return {
+        path
+        for item in items
+        if isinstance(item, dict)
+        for field in ("source_ref", "source_path", "target_id")
+        if (path := _normalized_path_text(item.get(field)))
+    }
 
 
 def _path_under_any(path: str, roots: set[str]) -> bool:

@@ -17,7 +17,7 @@ from ..evidence_contract import (
     EvidenceSourceRef,
     evaluate_evidence_contract,
 )
-from ..staged_checkpoint_evidence_payloads import claims, source_refs
+from ..staged_checkpoint import claims, source_refs
 from .models import GateDecision, GateFinding
 
 

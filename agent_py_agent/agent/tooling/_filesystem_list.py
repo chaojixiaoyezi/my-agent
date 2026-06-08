@@ -101,12 +101,14 @@ class ListFilesTool(FileSystemTool):
             "\n".join(entries) or "目录为空",
             result_envelope={
                 "page_window": _offset_page_window(
-                    tool="list_files",
-                    source_path=self.display_path(target),
-                    offset=request.offset,
-                    limit=request.limit,
-                    returned=returned,
-                    has_more=paged_notice_added,
+                    _OffsetPageWindowRequest(
+                        tool="list_files",
+                        source_path=self.display_path(target),
+                        offset=request.offset,
+                        limit=request.limit,
+                        returned=returned,
+                        has_more=paged_notice_added,
+                    )
                 )
             },
         )
@@ -146,6 +148,16 @@ class _ListFilesRequest:
     include_dirs: bool
     include_files: bool
     include_ignored: bool
+
+
+@dataclass(frozen=True)
+class _OffsetPageWindowRequest:
+    tool: str
+    source_path: str
+    offset: int
+    limit: int
+    returned: int
+    has_more: bool
 
 
 def _list_files_request_from_params(params: dict[str, Any], max_entries: int) -> _ListFilesRequest:
@@ -192,25 +204,17 @@ def _path_sort_key(path: Path) -> tuple[str, str]:
     return (text.lower(), text)
 
 
-def _offset_page_window(
-    *,
-    tool: str,
-    source_path: str,
-    offset: int,
-    limit: int,
-    returned: int,
-    has_more: bool,
-) -> dict[str, int | bool | str]:
-    next_offset = offset + returned if has_more else 0
+def _offset_page_window(request: _OffsetPageWindowRequest) -> dict[str, int | bool | str]:
+    next_offset = request.offset + request.returned if request.has_more else 0
     return {
         "kind": "offset_page",
-        "tool": tool,
-        "source_path": source_path,
-        "offset": offset,
-        "limit": limit,
-        "returned": returned,
+        "tool": request.tool,
+        "source_path": request.source_path,
+        "offset": request.offset,
+        "limit": request.limit,
+        "returned": request.returned,
         "next_offset": next_offset,
-        "complete": not has_more,
+        "complete": not request.has_more,
     }
 
 

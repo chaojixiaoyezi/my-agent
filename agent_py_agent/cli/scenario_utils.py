@@ -265,17 +265,24 @@ def _scenario_output_json_artifact_paths(task: SubAgentTask) -> list[Path]:
     for item in artifacts:
         if not isinstance(item, dict):
             continue
-        path_text = item.get("path")
-        if not isinstance(path_text, str) or not path_text.strip():
-            registry_ref = item.get("registry_ref")
-            if isinstance(registry_ref, dict):
-                path_text = registry_ref.get("path")
-        if not isinstance(path_text, str) or not path_text.strip():
+        path_text = _scenario_artifact_path_text(item)
+        if not path_text:
             continue
         candidate = Path(path_text)
         if candidate.suffix.lower() == ".md":
             paths.append(candidate)
     return paths
+
+
+def _scenario_artifact_path_text(item: dict[str, object]) -> str:
+    path_text = item.get("path")
+    if isinstance(path_text, str) and path_text.strip():
+        return path_text
+    registry_ref = item.get("registry_ref")
+    if not isinstance(registry_ref, dict):
+        return ""
+    path_text = registry_ref.get("path")
+    return path_text if isinstance(path_text, str) and path_text.strip() else ""
 
 
 def write_scenario_summary(

@@ -233,17 +233,20 @@ def test_plain_parallel_project_prompt_recommends_create_subagents(tmp_path):
 
 def test_runtime_tool_sections_use_user_prompt_for_orchestration_recommendations(tmp_path):
     """运行时推荐工具必须看用户原始任务，不能退化成空 query。"""
-    from agent_py_agent.agent.agent_core.runtime.loop_support import _resolve_tool_sections
+    from agent_py_agent.agent.agent_core.runtime.loop_support import (
+        ToolSectionsRequest,
+        _resolve_tool_sections,
+    )
 
     agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
 
-    _catalog, recommendations = _resolve_tool_sections(
-        agent,
-        "请让子代理分别去看不同项目，最后你汇总。",
-        [],
-        None,
-        None,
-    )
+    _catalog, recommendations = _resolve_tool_sections(ToolSectionsRequest(
+        agent=agent,
+        user_prompt="请让子代理分别去看不同项目，最后你汇总。",
+        inject=[],
+        allowed_tools=None,
+        granted_capabilities=None,
+    ))
 
     assert "create_subagents" in recommendations
 

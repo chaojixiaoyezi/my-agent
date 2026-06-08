@@ -117,12 +117,16 @@ def _declared_output_refs(task: SubAgentTask) -> list[str]:
         return []
     refs: list[str] = []
     for field in ("output_files", "output_refs"):
-        value = attrs.get(field)
-        if isinstance(value, str):
-            refs.append(value)
-        elif isinstance(value, list):
-            refs.extend(str(item or "") for item in value)
+        refs.extend(_declared_output_ref_values(attrs.get(field)))
     return list(dict.fromkeys(item.strip() for item in refs if item.strip()))
+
+
+def _declared_output_ref_values(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item or "") for item in value]
+    return []
 
 
 def _materializable_declared_output_path(task: SubAgentTask, ref: str) -> Path | None:

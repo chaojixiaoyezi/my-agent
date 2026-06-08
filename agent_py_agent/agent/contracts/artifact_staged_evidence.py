@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from .artifact_acceptance_models import ArtifactFinding
-from .staged_checkpoint_acceptance import (
+from .staged_checkpoint import (
     StagedEvidenceOptions,
     StagedEvidenceRequest,
     staged_json_evidence_findings,

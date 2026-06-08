@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 from ...contracts.error_taxonomy import error_contract
-from ...contracts.staged_checkpoint_acceptance import json_checkpoint_status
+from ...contracts.staged_checkpoint import json_checkpoint_status
 from .recovery_models import CheckpointQualityActionRequest
 
 

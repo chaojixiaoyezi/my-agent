@@ -1,5 +1,6 @@
-
 from __future__ import annotations
+
+from ..contracts.protocol_status import COMPACT_STATUS_READY_AFTER_ACTION_GUARD
 
 """safe coordinator for an automated compact/resume cycle."""
 
@@ -61,7 +62,7 @@ def run_memory_compact_auto_cycle(root: str | Path, options: MemoryCompactAutoCy
             resume_mode="auto",
         ),
     )
-    status = "ready_after_action_guard" if resume["action_guard"]["allowed_to_continue"] else "blocked_after_action_guard"
+    status = COMPACT_STATUS_READY_AFTER_ACTION_GUARD if resume["action_guard"]["allowed_to_continue"] else "blocked_after_action_guard"
     return _cycle_payload(
         _AutoCyclePayloadOptions(workspace, options, suggestion, status, apply_result=apply_result, resume=resume)
     )
@@ -124,7 +125,7 @@ def _next_action(status: str) -> str:
         return "continue_without_compact"
     if status == "needs_user_confirmation":
         return "ask_user_before_apply"
-    if status == "ready_after_action_guard":
+    if status == COMPACT_STATUS_READY_AFTER_ACTION_GUARD:
         return "continue_after_guard"
     return "stop_and_request_review"
 

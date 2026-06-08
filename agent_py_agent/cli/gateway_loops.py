@@ -90,33 +90,45 @@ def _gateway_request_worker_loop(
 
 def _gateway_background_main_loop(context: GatewayRunContext, stop_event: threading.Event) -> None:
     try:
-        agent = _gateway_agent_from_context(context)
-        runtime = BackgroundMainAgentRuntime(
-            agent=agent,
-            store=agent.conversation_store,
-            channels=FakeChannelHub(),
-        )
-        scheduler = BackgroundMainAgentScheduler(
-            {
-                "runtime": runtime,
-                "store": agent.conversation_store,
-                "collaboration_store": getattr(agent, "collaboration_store", None),
-            }
-        )
+        agent, scheduler = _background_main_agent_and_scheduler(context)
         poll_interval = _background_main_poll_interval(agent)
     except Exception as exc:
         _print_gateway_loop_error("gateway_background_main.initialize", "background-main", exc)
         return
 
     while not stop_event.is_set():
-        try:
-            reports = scheduler.tick()
-            if reports:
-                _record_background_main_reports(agent, reports)
-                continue
-        except Exception as exc:
-            _print_gateway_loop_error("gateway_background_main.iteration", "background-main", exc)
+        if _background_main_tick(agent, scheduler):
+            continue
         stop_event.wait(poll_interval)
+
+
+def _background_main_tick(agent: SimpleAgent, scheduler: BackgroundMainAgentScheduler) -> bool:
+    try:
+        reports = scheduler.tick()
+    except Exception as exc:
+        _print_gateway_loop_error("gateway_background_main.iteration", "background-main", exc)
+        return False
+    if not reports:
+        return False
+    _record_background_main_reports(agent, reports)
+    return True
+
+
+def _background_main_agent_and_scheduler(context: GatewayRunContext) -> tuple[SimpleAgent, BackgroundMainAgentScheduler]:
+    agent = _gateway_agent_from_context(context)
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=agent.conversation_store,
+        channels=FakeChannelHub(),
+    )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": runtime,
+            "store": agent.conversation_store,
+            "collaboration_store": getattr(agent, "collaboration_store", None),
+        }
+    )
+    return agent, scheduler
 
 
 def _record_background_main_reports(agent: SimpleAgent, reports: list[object]) -> None:

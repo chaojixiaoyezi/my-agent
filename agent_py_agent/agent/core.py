@@ -161,11 +161,16 @@ class SimpleAgent(
 
 
 def _resolve_home_paths(config: AgentConfig):
-    root = getattr(config, "my_agent_home", None)
+    root = _configured_home_root(config)
     paths = ensure_my_agent_home(root)
     owner = ensure_owner_home(paths.root, owner_identity_from_config(config))
     _register_owner_ref_if_possible(paths, owner)
     return home_paths_with_owner(paths, owner)
+
+
+def _configured_home_root(config: AgentConfig) -> str | None:
+    raw = str(getattr(config, "my_agent_home", "") or "").strip()
+    return raw or None
 
 
 def _register_owner_ref_if_possible(paths, owner) -> None:

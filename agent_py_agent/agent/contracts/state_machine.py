@@ -83,6 +83,17 @@ class RecoveryDecision:
             object.__setattr__(self, "secondary_action", recovery_action_value(self.secondary_action))
 
 
+@dataclass(frozen=True)
+class RawRunState:
+    status: str
+    verification_status: str
+    channel_status: str
+    status_error: str
+    verification_error: str
+    channel_error: str
+    failure_type: str
+
+
 def normalize_status(value: object) -> str:
     text = str(value or "").strip()
     if not text:
@@ -240,24 +251,12 @@ def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
 
 
 def run_state_snapshot_from_task(task: object) -> dict[str, object]:
-    raw_status = str(getattr(task, "status", "") or "").strip()
-    raw_verification = str(getattr(task, "verification_status", "") or "").strip()
-    raw_channel = str(getattr(task, "channel_status", "") or "").strip()
-    status_error = _status_protocol_error(raw_status)
-    verification_error = _verification_protocol_error(raw_verification)
-    channel_error = _channel_protocol_error(raw_channel)
-    failure_type = _failure_type_from_task(task)
-    if status_error:
-        failure_type = status_error
-    elif verification_error:
-        failure_type = verification_error
-    elif channel_error:
-        failure_type = channel_error
+    raw = _raw_run_state(task)
     facts = RunStateFacts(
-        status=normalize_status(raw_status),
-        verification_status=normalize_verification(raw_verification),
-        channel_status=normalize_channel(raw_channel),
-        failure_type=failure_type,
+        status=normalize_status(raw.status),
+        verification_status=normalize_verification(raw.verification_status),
+        channel_status=normalize_channel(raw.channel_status),
+        failure_type=raw.failure_type,
         attempts=_int_attr(task, "runner_attempts"),
         max_attempts=_int_attr(task, "runner_max_attempts"),
         has_progress=bool(getattr(task, "has_progress", True)),
@@ -269,12 +268,12 @@ def run_state_snapshot_from_task(task: object) -> dict[str, object]:
         "status": normalize_status(facts.status),
         "verification_status": normalize_verification(facts.verification_status),
         "channel_status": normalize_channel(facts.channel_status),
-        "raw_status": raw_status,
-        "raw_verification_status": raw_verification,
-        "raw_channel_status": raw_channel,
-        "status_protocol_error": status_error,
-        "verification_protocol_error": verification_error,
-        "channel_protocol_error": channel_error,
+        "raw_status": raw.status,
+        "raw_verification_status": raw.verification_status,
+        "raw_channel_status": raw.channel_status,
+        "status_protocol_error": raw.status_error,
+        "verification_protocol_error": raw.verification_error,
+        "channel_protocol_error": raw.channel_error,
         "lifecycle_phase": lifecycle_phase(facts),
         "waiting_reason": waiting_reason(facts),
         "terminal_outcome": terminal_outcome(facts),
@@ -291,6 +290,33 @@ def run_state_snapshot_from_task(task: object) -> dict[str, object]:
             "secondary_action": decision.secondary_action or "",
         },
     }
+
+
+def _raw_run_state(task: object) -> RawRunState:
+    status = str(getattr(task, "status", "") or "").strip()
+    verification = str(getattr(task, "verification_status", "") or "").strip()
+    channel = str(getattr(task, "channel_status", "") or "").strip()
+    status_error = _status_protocol_error(status)
+    verification_error = _verification_protocol_error(verification)
+    channel_error = _channel_protocol_error(channel)
+    return RawRunState(
+        status=status,
+        verification_status=verification,
+        channel_status=channel,
+        status_error=status_error,
+        verification_error=verification_error,
+        channel_error=channel_error,
+        failure_type=_failure_type_for_protocol_errors(task, status_error, verification_error, channel_error),
+    )
+
+
+def _failure_type_for_protocol_errors(
+    task: object,
+    status_error: str,
+    verification_error: str,
+    channel_error: str,
+) -> str:
+    return status_error or verification_error or channel_error or _failure_type_from_task(task)
 
 
 def _failure_type_from_task(task: object) -> str:

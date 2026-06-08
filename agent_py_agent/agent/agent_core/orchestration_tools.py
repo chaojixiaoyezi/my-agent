@@ -8,6 +8,7 @@ from __future__ import annotations
 """
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -67,6 +68,23 @@ _DEFAULT_MAX_SUBAGENTS = default_config_int("max_subagents")
 _DEFAULT_DEPTH = 1
 
 
+@dataclass(frozen=True)
+class CreatedItemsResultRequest:
+    agent: SimpleAgent
+    resolutions: list[CreateTaskResolution]
+    allowed_tool_values: list[list[str] | None]
+    request_params: dict[str, object]
+    capped_items: list[CreateSubagentItem]
+
+
+@dataclass(frozen=True)
+class ValidateSingleGoalRequest:
+    agent: SimpleAgent
+    params: dict[str, object]
+    goal: str
+    allowed_tools: list[str] | None
+
+
 def _indexed_count_params(run_params: CreateRunParams, *, index: int, count: int) -> CreateRunParams:
     task_goal = f"{run_params.goal} / 子任务{index}" if count > 1 else run_params.goal
     task_name = _indexed_agent_name(
@@ -115,200 +133,200 @@ class CreateSubagentsTool(BaseTool):
         self.spec = build_create_subagents_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
-        if not self.agent.config.enable_subagents:
-            return ToolExecutionResult("create_subagents", False, "配置已禁用 subagent。")
-
-        items_result = self._items_result(params)
-        if items_result is not None:
-            return items_result
-
-        prepared = self._prepare_count_mode(params)
-        if isinstance(prepared, ToolExecutionResult):
-            return prepared
-        goal, count, allowed_tools, run_params = prepared
-        task_params = self._count_run_params(count, run_params)
-        resolutions = self._resolve_task_params(task_params)
-        tasks = [item.task for item in resolutions]
-        attach_sibling_roster(self.agent.subagents, tasks)
-        replacement_records = record_create_replacements(self.agent, tasks)
-        lifecycle = publish_created_subagents(
-            CreatedSubagentLifecycleRequest(self.agent, tasks, params)
-        )
-        payload = create_subagents_payload(
-            CreateSubagentsPayloadInput(
-                agent=self.agent,
-                resolutions=resolutions,
-                allowed_tools=allowed_tools,
-                request_params=params,
-                auto_start=lifecycle.auto_start,
-                replacement_records=replacement_records,
-                conversation_bind_errors=lifecycle.conversation_bind_errors,
-            )
-        )
-        return ToolExecutionResult(
-            "create_subagents",
-            True,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-        )
-
-    def _items_result(self, params: dict[str, object]) -> ToolExecutionResult | None:
-        items = create_items_from_params(params)
-        if isinstance(items, str):
-            return ToolExecutionResult("create_subagents", False, items)
-        if items:
-            return self._execute_items(items, params)
-        return None
-
-    def _prepare_count_mode(
-        self, params: dict[str, object]
-    ) -> tuple[str, int, list[str] | None, CreateRunParams] | ToolExecutionResult:
-        params = append_parent_shared_context(self.agent, params)
-        goal = str(params.get("goal") or "").strip()
-        if not goal:
-            return ToolExecutionResult("create_subagents", False, "缺少必填参数 goal。")
-        count = self._requested_count(params)
-        if isinstance(count, ToolExecutionResult):
-            return count
-        allowed_tools = subagent_allowed_tools(params)
-        validation = self._validate_single_goal(params, goal, allowed_tools)
-        if validation:
-            return ToolExecutionResult("create_subagents", False, validation)
-        run_params = create_run_params(self.agent, params, goal, allowed_tools)
-        return goal, count, allowed_tools, run_params
-
-    def _execute_items(
-        self,
-        items: list[CreateSubagentItem],
-        request_params: dict[str, object],
-    ) -> ToolExecutionResult:
-        capped = self._items_with_parent_context(self._cap_items(items))
-        allowed_tool_values = [subagent_allowed_tools(item.params) for item in capped]
-        validation = self._validate_items(capped, allowed_tool_values)
-        if validation:
-            return ToolExecutionResult("create_subagents", False, validation)
-        run_params_by_item = self._indexed_item_run_params(capped)
-        resolutions = self._resolve_task_params(run_params_by_item)
-        tasks = [item.task for item in resolutions]
-        attach_sibling_roster(self.agent.subagents, tasks, save=False)
-        for task in tasks:
-            self.agent.subagents.save(task)
-        replacement_records = record_create_replacements(self.agent, tasks)
-        payload_request = self._items_payload_request(request_params, capped)
-        lifecycle = publish_created_subagents(
-            CreatedSubagentLifecycleRequest(self.agent, tasks, payload_request)
-        )
-        payload = create_subagents_payload(
-            CreateSubagentsPayloadInput(
-                agent=self.agent,
-                resolutions=resolutions,
-                allowed_tools=_payload_allowed_tools(allowed_tool_values),
-                request_params=payload_request,
-                auto_start=lifecycle.auto_start,
-                replacement_records=replacement_records,
-                conversation_bind_errors=lifecycle.conversation_bind_errors,
-            )
-        )
-        payload["batch_mode"] = "items"
-        return ToolExecutionResult(
-            "create_subagents",
-            True,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-        )
-
-    def _items_with_parent_context(self, items: list[CreateSubagentItem]) -> list[CreateSubagentItem]:
-        return [
-            CreateSubagentItem(
-                goal=item.goal,
-                params=append_parent_shared_context(self.agent, item.params),
-            )
-            for item in items
-        ]
-
-    def _validate_items(self, items: list[CreateSubagentItem], allowed_tool_values: list[list[str] | None]) -> str:
-        for item, allowed_tools in zip(items, allowed_tool_values, strict=True):
-            validation = self._validate_single_goal(item.params, item.goal, allowed_tools)
-            if validation:
-                return validation
-        return ""
-
-    def _indexed_item_run_params(self, items: list[CreateSubagentItem]) -> list[CreateRunParams]:
-        run_params_by_item: list[CreateRunParams] = []
-        for index, item in enumerate(items, start=1):
-            run_params = create_run_params(
-                self.agent,
-                item.params,
-                item.goal,
-                subagent_allowed_tools(item.params),
-            )
-            indexed = _indexed_item_params(run_params, index=index, total=len(items))
-            run_params_by_item.append(_with_default_child_output_ref(self.agent, indexed, index=index))
-        return run_params_by_item
-
-    def _items_payload_request(self, request_params: dict[str, object], items: list[CreateSubagentItem]) -> dict[str, object]:
-        payload_request = dict(request_params)
-        payload_request["items"] = [item.params for item in items]
-        return payload_request
+        return _execute_create_subagents(self.agent, params)
 
     def _cap_items(self, items: list[CreateSubagentItem]) -> list[CreateSubagentItem]:
-        max_subagents = _configured_max_subagents(self.agent)
-        if max_subagents > 0:
-            return items[:max_subagents]
-        return items
+        return _cap_items_for_agent(self.agent, items)
 
-    def _validate_single_goal(
-        self,
-        params: dict[str, object],
-        goal: str,
-        allowed_tools: list[str] | None,
-    ) -> str:
-        missing_write_root = explicit_root_missing_write_root_error(self.agent, params, goal)
-        if missing_write_root:
-            return missing_write_root
-        target_error = external_write_target_error(
-            ExternalWriteTargetRequest(
-                agent=self.agent,
-                allowed_tools=allowed_tools or CODING_SUBAGENT_TOOLS,
-                params=params,
-            )
-        )
-        if target_error:
-            return target_error
-        return ""
 
-    def _requested_count(self, params: dict[str, object]) -> int | ToolExecutionResult:
-        if _has_count_param(params):
-            count = _positive_int(params.get("count"), default=0)
-        else:
-            count = self._default_requested_count(params)
-        if count <= 0:
-            return ToolExecutionResult("create_subagents", False, "count 必须大于 0。")
-        max_subagents = _configured_max_subagents(self.agent)
-        if max_subagents > 0:
-            count = min(count, max_subagents)
+def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> ToolExecutionResult:
+    if not agent.config.enable_subagents:
+        return ToolExecutionResult("create_subagents", False, "配置已禁用 subagent。")
+    items_result = _items_result(agent, params)
+    if items_result is not None:
+        return items_result
+    prepared = _prepare_count_mode(agent, params)
+    if isinstance(prepared, ToolExecutionResult):
+        return prepared
+    count, allowed_tools, run_params = prepared
+    task_params = _count_run_params(agent, count, run_params)
+    return _created_tasks_result(agent, _resolve_task_params(agent, task_params), allowed_tools, params)
+
+
+def _items_result(agent: SimpleAgent, params: dict[str, object]) -> ToolExecutionResult | None:
+    items = create_items_from_params(params)
+    if isinstance(items, str):
+        return ToolExecutionResult("create_subagents", False, items)
+    if items:
+        return _execute_items(agent, items, params)
+    return None
+
+
+def _prepare_count_mode(
+    agent: SimpleAgent,
+    params: dict[str, object],
+) -> tuple[int, list[str] | None, CreateRunParams] | ToolExecutionResult:
+    params = append_parent_shared_context(agent, params)
+    goal = str(params.get("goal") or "").strip()
+    if not goal:
+        return ToolExecutionResult("create_subagents", False, "缺少必填参数 goal。")
+    count = _requested_count(agent, params)
+    if isinstance(count, ToolExecutionResult):
         return count
+    allowed_tools = subagent_allowed_tools(params)
+    validation = _validate_single_goal(ValidateSingleGoalRequest(agent, params, goal, allowed_tools))
+    if validation:
+        return ToolExecutionResult("create_subagents", False, validation)
+    return count, allowed_tools, create_run_params(agent, params, goal, allowed_tools)
 
-    def _default_requested_count(self, params: dict[str, object]) -> int:
-        replacement_count = len(_string_list(params.get("replacement_for_run_ids")))
-        if replacement_count:
-            return replacement_count
-        return 1
 
-    def _count_run_params(self, count: int, run_params: CreateRunParams) -> list[CreateRunParams]:
-        return [
-            _with_count_child_output_ref(
-                self.agent,
-                _indexed_count_params(run_params, index=index, count=count),
-                index=index,
-                count=count,
-            )
-            for index in range(1, count + 1)
-        ]
+def _created_tasks_result(
+    agent: SimpleAgent,
+    resolutions: list[CreateTaskResolution],
+    allowed_tools: list[str] | str | None,
+    request_params: dict[str, object],
+) -> ToolExecutionResult:
+    tasks = [item.task for item in resolutions]
+    attach_sibling_roster(agent.subagents, tasks)
+    replacement_records = record_create_replacements(agent, tasks)
+    lifecycle = publish_created_subagents(CreatedSubagentLifecycleRequest(agent, tasks, request_params))
+    payload = create_subagents_payload(
+        CreateSubagentsPayloadInput(
+            agent=agent,
+            resolutions=resolutions,
+            allowed_tools=allowed_tools,
+            request_params=request_params,
+            auto_start=lifecycle.auto_start,
+            replacement_records=replacement_records,
+            conversation_bind_errors=lifecycle.conversation_bind_errors,
+        )
+    )
+    return ToolExecutionResult("create_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
-    def _resolve_task_params(self, task_params: list[CreateRunParams]) -> list[CreateTaskResolution]:
-        resolutions: list[CreateTaskResolution] = []
-        for item in task_params:
-            resolutions.append(resolve_create_run(self.agent.subagents, item))
-        return resolutions
+
+def _execute_items(
+    agent: SimpleAgent,
+    items: list[CreateSubagentItem],
+    request_params: dict[str, object],
+) -> ToolExecutionResult:
+    capped = _items_with_parent_context(agent, _cap_items_for_agent(agent, items))
+    allowed_tool_values = [subagent_allowed_tools(item.params) for item in capped]
+    validation = _validate_items(agent, capped, allowed_tool_values)
+    if validation:
+        return ToolExecutionResult("create_subagents", False, validation)
+    resolutions = _resolve_task_params(agent, _indexed_item_run_params(agent, capped))
+    return _created_items_result(CreatedItemsResultRequest(
+        agent=agent,
+        resolutions=resolutions,
+        allowed_tool_values=allowed_tool_values,
+        request_params=request_params,
+        capped_items=capped,
+    ))
+
+
+def _created_items_result(request: CreatedItemsResultRequest) -> ToolExecutionResult:
+    tasks = [item.task for item in request.resolutions]
+    attach_sibling_roster(request.agent.subagents, tasks, save=False)
+    for task in tasks:
+        request.agent.subagents.save(task)
+    replacement_records = record_create_replacements(request.agent, tasks)
+    payload_request = _items_payload_request(request.request_params, request.capped_items)
+    lifecycle = publish_created_subagents(CreatedSubagentLifecycleRequest(request.agent, tasks, payload_request))
+    payload = create_subagents_payload(
+        CreateSubagentsPayloadInput(
+            agent=request.agent,
+            resolutions=request.resolutions,
+            allowed_tools=_payload_allowed_tools(request.allowed_tool_values),
+            request_params=payload_request,
+            auto_start=lifecycle.auto_start,
+            replacement_records=replacement_records,
+            conversation_bind_errors=lifecycle.conversation_bind_errors,
+        )
+    )
+    payload["batch_mode"] = "items"
+    return ToolExecutionResult("create_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _items_with_parent_context(agent: SimpleAgent, items: list[CreateSubagentItem]) -> list[CreateSubagentItem]:
+    return [
+        CreateSubagentItem(goal=item.goal, params=append_parent_shared_context(agent, item.params))
+        for item in items
+    ]
+
+
+def _validate_items(
+    agent: SimpleAgent,
+    items: list[CreateSubagentItem],
+    allowed_tool_values: list[list[str] | None],
+) -> str:
+    for item, allowed_tools in zip(items, allowed_tool_values, strict=True):
+        validation = _validate_single_goal(ValidateSingleGoalRequest(agent, item.params, item.goal, allowed_tools))
+        if validation:
+            return validation
+    return ""
+
+
+def _indexed_item_run_params(agent: SimpleAgent, items: list[CreateSubagentItem]) -> list[CreateRunParams]:
+    run_params_by_item: list[CreateRunParams] = []
+    for index, item in enumerate(items, start=1):
+        run_params = create_run_params(agent, item.params, item.goal, subagent_allowed_tools(item.params))
+        indexed = _indexed_item_params(run_params, index=index, total=len(items))
+        run_params_by_item.append(_with_default_child_output_ref(agent, indexed, index=index))
+    return run_params_by_item
+
+
+def _items_payload_request(request_params: dict[str, object], items: list[CreateSubagentItem]) -> dict[str, object]:
+    payload_request = dict(request_params)
+    payload_request["items"] = [item.params for item in items]
+    return payload_request
+
+
+def _cap_items_for_agent(agent: SimpleAgent, items: list[CreateSubagentItem]) -> list[CreateSubagentItem]:
+    max_subagents = _configured_max_subagents(agent)
+    return items[:max_subagents] if max_subagents > 0 else items
+
+
+def _validate_single_goal(request: ValidateSingleGoalRequest) -> str:
+    missing_write_root = explicit_root_missing_write_root_error(request.agent, request.params, request.goal)
+    if missing_write_root:
+        return missing_write_root
+    target_error = external_write_target_error(
+        ExternalWriteTargetRequest(
+            agent=request.agent,
+            allowed_tools=request.allowed_tools or CODING_SUBAGENT_TOOLS,
+            params=request.params,
+        )
+    )
+    return target_error or ""
+
+
+def _requested_count(agent: SimpleAgent, params: dict[str, object]) -> int | ToolExecutionResult:
+    count = _positive_int(params.get("count"), default=0) if _has_count_param(params) else _default_requested_count(params)
+    if count <= 0:
+        return ToolExecutionResult("create_subagents", False, "count 必须大于 0。")
+    max_subagents = _configured_max_subagents(agent)
+    return min(count, max_subagents) if max_subagents > 0 else count
+
+
+def _default_requested_count(params: dict[str, object]) -> int:
+    replacement_count = len(_string_list(params.get("replacement_for_run_ids")))
+    return replacement_count or 1
+
+
+def _count_run_params(agent: SimpleAgent, count: int, run_params: CreateRunParams) -> list[CreateRunParams]:
+    return [
+        _with_count_child_output_ref(
+            agent,
+            _indexed_count_params(run_params, index=index, count=count),
+            index=index,
+            count=count,
+        )
+        for index in range(1, count + 1)
+    ]
+
+
+def _resolve_task_params(agent: SimpleAgent, task_params: list[CreateRunParams]) -> list[CreateTaskResolution]:
+    return [resolve_create_run(agent.subagents, item) for item in task_params]
 
 
 def _payload_allowed_tools(values: list[list[str] | None]) -> list[str] | str | None:
@@ -410,11 +428,14 @@ def _output_slug(run_params: CreateRunParams) -> str:
     chars: list[str] = []
     last_dash = False
     for char in base:
-        if char.isalnum() or char in {"_", "-"}:
-            chars.append(char)
-            last_dash = False
-        elif not last_dash:
-            chars.append("-")
-            last_dash = True
+        replacement, last_dash = _slug_char(char, last_dash)
+        if replacement:
+            chars.append(replacement)
     slug = "".join(chars).strip("-_").lower()
     return (slug or "child")[:80]
+
+
+def _slug_char(char: str, last_dash: bool) -> tuple[str, bool]:
+    if char.isalnum() or char in {"_", "-"}:
+        return char, False
+    return ("", True) if last_dash else ("-", True)

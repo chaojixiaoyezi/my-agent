@@ -4,8 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .recovery import RecoveryAction
-from .recovery import RecoveryEnvelopeRequest, recovery_envelope_from_gate_payload
+from .recovery import RecoveryAction, RecoveryEnvelopeRequest, recovery_envelope_from_gate_payload
 
 UTC = timezone.utc
 

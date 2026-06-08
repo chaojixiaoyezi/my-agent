@@ -236,26 +236,19 @@ def test_chat_gateway_poll_drains_chunks_when_response_is_ready(tmp_path):
 
 def test_chat_gateway_chunk_poll_reads_only_new_tail(tmp_path):
     from agent_py_agent.cli.chat_parts import gateway_client as chat_gateway_client
+    from agent_py_agent.cli.chat_parts.gateway_client import ChunkFilePollRequest
 
     chunk_path = tmp_path / "req.chunks.jsonl"
     chunk_path.write_text(json.dumps({"text": "first"}) + "\n", encoding="utf-8")
     seen: list[str] = []
 
     chunks, visible, offset = chat_gateway_client._poll_chunk_file(
-        chunk_path,
-        lambda chunk: seen.append(chunk) or True,
-        0,
-        0,
-        0,
+        ChunkFilePollRequest(chunk_path, lambda chunk: seen.append(chunk) or True, 0, 0, 0)
     )
     with open(chunk_path, "a", encoding="utf-8") as f:
         f.write(json.dumps({"text": "second"}) + "\n")
     chunks, visible, offset = chat_gateway_client._poll_chunk_file(
-        chunk_path,
-        lambda chunk: seen.append(chunk) or True,
-        chunks,
-        visible,
-        offset,
+        ChunkFilePollRequest(chunk_path, lambda chunk: seen.append(chunk) or True, chunks, visible, offset)
     )
 
     assert seen == ["first", "second"]
@@ -265,6 +258,7 @@ def test_chat_gateway_chunk_poll_reads_only_new_tail(tmp_path):
 
 def test_chat_gateway_chunk_poll_reads_archived_tail(tmp_path):
     from agent_py_agent.cli.chat_parts import gateway_client as chat_gateway_client
+    from agent_py_agent.cli.chat_parts.gateway_client import ChunkFilePollRequest
 
     processing = tmp_path / "requests" / "processing"
     done = tmp_path / "requests" / "done"
@@ -275,11 +269,7 @@ def test_chat_gateway_chunk_poll_reads_archived_tail(tmp_path):
     seen: list[str] = []
 
     chunks, visible, offset = chat_gateway_client._poll_chunk_file(
-        chunk_path,
-        lambda chunk: seen.append(chunk) or True,
-        0,
-        0,
-        0,
+        ChunkFilePollRequest(chunk_path, lambda chunk: seen.append(chunk) or True, 0, 0, 0)
     )
 
     assert seen == ["archived"]

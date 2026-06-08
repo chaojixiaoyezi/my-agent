@@ -12,7 +12,7 @@ from .artifact_acceptance import (
 )
 from .artifact_candidate_paths import report_with_candidate_paths
 from .contract_validation_recovery import recovery_for_findings
-from .staged_checkpoint_acceptance import staged_checkpoint_findings
+from .staged_checkpoint import staged_checkpoint_findings
 
 
 @dataclass(frozen=True)

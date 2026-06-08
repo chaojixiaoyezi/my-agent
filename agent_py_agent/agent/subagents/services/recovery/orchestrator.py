@@ -9,7 +9,7 @@ from ....io import append_jsonl
 from ....runtime_errors import runtime_error_report
 from ...models import SUBAGENT_FAILURE_STATUSES, task_status_in
 from ..takeover.run import TakeoverRunRequest
-from .modes import CLOSED, LEADERSHIP_RECOVERY, is_rerun_mode, is_takeover_mode
+from .modes import RecoveryMode, is_rerun_mode, is_takeover_mode, recovery_mode_or_manual
 from .strategy import (
     SubagentRecoveryStrategy,
     SubagentRecoveryStrategyRequest,
@@ -128,14 +128,14 @@ def _step_for_strategy(
     strategy: SubagentRecoveryStrategy,
     request: RecoveryOrchestrationRequest,
 ) -> RecoveryOrchestrationStep:
-    mode = str(getattr(strategy, "recovery_mode", "") or "")
+    mode = recovery_mode_or_manual(getattr(strategy, "recovery_mode", None))
     if is_rerun_mode(mode):
         return _dispatch_step(strategy)
     if is_takeover_mode(mode):
         return _takeover_step(manager, strategy, request)
-    if mode == LEADERSHIP_RECOVERY:
+    if mode is RecoveryMode.LEADERSHIP_RECOVERY:
         return _leadership_step(strategy)
-    if mode == CLOSED:
+    if mode is RecoveryMode.CLOSED:
         return _noop_step(strategy)
     return _manual_step(strategy)
 

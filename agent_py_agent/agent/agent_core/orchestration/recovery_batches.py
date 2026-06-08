@@ -3,17 +3,17 @@ from __future__ import annotations
 from typing import Any
 
 from ...subagents.services.recovery.modes import (
-    LEADERSHIP_RECOVERY,
-    NO_PROGRESS_LIMIT_REACHED,
+    RecoveryMode,
     is_rerun_mode,
     is_takeover_mode,
+    recovery_mode_from_protocol_value,
 )
 
 
 def recovery_batches_from_strategies(strategies: list[dict[str, object]]) -> list[dict[str, object]]:
-    groups: dict[str, list[dict[str, object]]] = {}
+    groups: dict[RecoveryMode, list[dict[str, object]]] = {}
     for item in strategies:
-        mode = str(item.get("recovery_mode") or "manual_review_missing_recovery_refs")
+        mode = recovery_mode_from_protocol_value(item.get("recovery_mode"))
         groups.setdefault(mode, []).append(item)
     return [_batch_payload(mode, items) for mode, items in groups.items()]
 
@@ -26,21 +26,21 @@ def recovery_counts_by_field(strategies: list[dict[str, object]], field: str) ->
     return counts
 
 
-def _batch_payload(mode: str, items: list[dict[str, object]]) -> dict[str, object]:
+def _batch_payload(mode: RecoveryMode, items: list[dict[str, object]]) -> dict[str, object]:
     run_ids = _run_ids(items)
     action = _recommended_action(items)
     payload: dict[str, object] = {
-        "recovery_mode": mode,
+        "recovery_mode": mode.value,
         "recommended_action": action,
         "run_ids": run_ids,
         "count": len(run_ids),
         "execution_mode": _execution_mode(mode),
         "suggested_tool_call": _suggested_tool_call(mode, run_ids, items),
     }
-    if mode == LEADERSHIP_RECOVERY:
+    if mode is RecoveryMode.LEADERSHIP_RECOVERY:
         payload["requires_leader_selection"] = True
         payload["child_run_ids_by_leader"] = _child_run_ids_by_leader(items)
-    if mode == NO_PROGRESS_LIMIT_REACHED:
+    if mode is RecoveryMode.NO_PROGRESS_LIMIT_REACHED:
         payload["must_not_auto_retry"] = True
     return {key: value for key, value in payload.items() if value not in ({}, [], "")}
 
@@ -53,19 +53,19 @@ def _recommended_action(items: list[dict[str, object]]) -> str:
     return "manual_review"
 
 
-def _execution_mode(mode: str) -> str:
+def _execution_mode(mode: RecoveryMode) -> str:
     if is_rerun_mode(mode):
         return "rerun_original"
     if is_takeover_mode(mode):
         return "takeover_apply"
-    if mode == LEADERSHIP_RECOVERY:
+    if mode is RecoveryMode.LEADERSHIP_RECOVERY:
         return "leader_recovery"
-    if mode == NO_PROGRESS_LIMIT_REACHED:
+    if mode is RecoveryMode.NO_PROGRESS_LIMIT_REACHED:
         return "stop_and_report"
     return "manual_review"
 
 
-def _suggested_tool_call(mode: str, run_ids: list[str], items: list[dict[str, object]]) -> dict[str, object]:
+def _suggested_tool_call(mode: RecoveryMode, run_ids: list[str], items: list[dict[str, object]]) -> dict[str, object]:
     if is_rerun_mode(mode):
         return _rerun_tool_call(run_ids, items)
     if is_takeover_mode(mode):
@@ -75,9 +75,9 @@ def _suggested_tool_call(mode: str, run_ids: list[str], items: list[dict[str, ob
 
 def _rerun_tool_call(run_ids: list[str], items: list[dict[str, object]]) -> dict[str, object]:
     call = _dispatch_tool_call(run_ids, start_runners=True)
-    mode = str(items[0].get("recovery_mode") or "") if len(items) == 1 else ""
-    if mode:
-        call["recovery_mode"] = mode
+    mode = recovery_mode_from_protocol_value(items[0].get("recovery_mode")) if len(items) == 1 else None
+    if mode is not None:
+        call["recovery_mode"] = mode.value
     if len(run_ids) == 1 and len(items) == 1:
         instruction = str(items[0].get("runner_instruction") or "").strip()
         if instruction:

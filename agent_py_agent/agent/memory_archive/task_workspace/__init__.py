@@ -52,6 +52,7 @@ from .payloads import (
     write_json,
 )
 from .rendering import (
+    WriteTaskYamlRequest,
     write_parent_summary_placeholder,
     write_summary,
     write_task_yaml,
@@ -107,6 +108,15 @@ class _TaskWorkspacePathInputs:
     root: str | Path
     task_id: str
     run_id: str
+
+
+@dataclass(frozen=True)
+class _TaskWorkspaceIdentityRequest:
+    paths: TaskWorkspacePaths
+    task_id: str
+    run_id: str
+    task: Any
+    now: float
 
 
 @dataclass(frozen=True)
@@ -168,7 +178,7 @@ def ensure_subagent_task_workspace(
     now = float(getattr(inputs.task, "updated_at", 0.0) or time.time())
     paths = _paths_for(path_inputs)
     _ensure_directories(paths)
-    _sync_task_workspace_identity(paths, task_id, run_id, inputs.task, now)
+    _sync_task_workspace_identity(_TaskWorkspaceIdentityRequest(paths, task_id, run_id, inputs.task, now))
     write_json(
         paths.state_json,
         next_task_state(TaskStateMergeRequest(task_id, run_id, inputs.task, now, previous_state)),
@@ -206,13 +216,20 @@ def _workspace_task_id(
     return raw_task_id
 
 
-def _sync_task_workspace_identity(paths: TaskWorkspacePaths, task_id: str, run_id: str, task: Any, now: float) -> None:
+def _sync_task_workspace_identity(request: _TaskWorkspaceIdentityRequest) -> None:
+    paths = request.paths
+    task_id = request.task_id
+    run_id = request.run_id
     if run_id == task_id:
-        write_task_yaml(paths.task_yaml, task_id, task, now, primary_run_id=run_id)
+        write_task_yaml(
+            WriteTaskYamlRequest(paths.task_yaml, task_id, request.task, request.now, primary_run_id=run_id)
+        )
         return
     if paths.task_yaml.exists():
         return
-    write_task_yaml(paths.task_yaml, task_id, task, now, primary_run_id=task_id, parent_run_id="")
+    write_task_yaml(
+        WriteTaskYamlRequest(paths.task_yaml, task_id, request.task, request.now, primary_run_id=task_id, parent_run_id="")
+    )
 
 
 def _coerce_ensure_request(

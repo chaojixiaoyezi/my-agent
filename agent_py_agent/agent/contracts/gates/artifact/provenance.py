@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,16 @@ from ...recovery import RecoveryAction
 from ..models import GateDecision, GateFinding
 
 _WRITE_ARTIFACT_TOOLS = {"write_file"}
+
+
+@dataclass(frozen=True)
+class ArchiveProvenanceCollection:
+    artifact_path: Path
+    workspace_root: Path
+    run_id: str
+    current_run_writes: list[tuple[str, int, dict[str, Any]]]
+    current_run_matches: list[tuple[str, int, dict[str, Any]]]
+    old_run_match: dict[str, Any] | None
 
 
 def evaluate_artifact_provenance_gate(item: dict[str, Any], *, run_id: str = "") -> GateDecision:
@@ -107,30 +118,72 @@ def artifact_provenance_from_archive(
     current_run_writes: list[tuple[str, int, dict[str, Any]]] = []
     current_run_matches: list[tuple[str, int, dict[str, Any]]] = []
     for index, record in enumerate(archive_tool_calls):
-        if not isinstance(record, dict):
-            continue
-        if not _record_targets_artifact(record, artifact_path, workspace_root):
-            continue
-        if record.get("ok") is not True and not _record_materialized_artifact(record, artifact_path, workspace_root):
-            continue
-        provenance = _provenance_from_record(record, artifact_path=artifact_path, current_run_id=run_id)
-        if provenance.get("ok") is not True:
-            continue
-        if provenance.get("run_id") == run_id:
-            row = (str(record.get("created_at") or ""), index, provenance)
-            if _record_is_current_run_artifact_write(record, artifact_path=artifact_path, current_run_id=run_id):
-                current_run_writes.append(row)
-            else:
-                current_run_matches.append(row)
-            continue
-        old_run_match = old_run_match or provenance
-    if current_run_writes:
-        return max(current_run_writes, key=lambda row: (row[0], row[1]))[2]
-    if current_run_matches:
-        return max(current_run_matches, key=lambda row: (row[0], row[1]))[2]
+        old_run_match = _collect_archive_provenance(
+            record,
+            index,
+            ArchiveProvenanceCollection(
+                artifact_path=artifact_path,
+                workspace_root=workspace_root,
+                run_id=run_id,
+                current_run_writes=current_run_writes,
+                current_run_matches=current_run_matches,
+                old_run_match=old_run_match,
+            ),
+        )
+    if current := _latest_current_run_provenance(current_run_writes, current_run_matches):
+        return current
     if old_run_match:
         return {**old_run_match, "created_by_current_run": False, "code": "ARTIFACT_PROVENANCE_RUN_MISMATCH"}
     return {"ok": False, "code": "ARTIFACT_PROVENANCE_MISSING"}
+
+
+def _collect_archive_provenance(
+    record: Any,
+    index: int,
+    collection: ArchiveProvenanceCollection,
+) -> dict[str, Any] | None:
+    provenance = _matching_record_provenance(
+        record,
+        collection.artifact_path,
+        collection.workspace_root,
+        collection.run_id,
+    )
+    if not provenance:
+        return collection.old_run_match
+    if provenance.get("run_id") != collection.run_id:
+        return collection.old_run_match or provenance
+    row = (str(record.get("created_at") or ""), index, provenance) if isinstance(record, dict) else ("", index, provenance)
+    target = collection.current_run_writes if _record_is_current_run_artifact_write(
+        record,
+        artifact_path=collection.artifact_path,
+        current_run_id=collection.run_id,
+    ) else collection.current_run_matches
+    target.append(row)
+    return collection.old_run_match
+
+
+def _latest_current_run_provenance(
+    current_run_writes: list[tuple[str, int, dict[str, Any]]],
+    current_run_matches: list[tuple[str, int, dict[str, Any]]],
+) -> dict[str, Any]:
+    rows = current_run_writes or current_run_matches
+    return max(rows, key=lambda row: (row[0], row[1]))[2] if rows else {}
+
+
+def _matching_record_provenance(
+    record: Any,
+    artifact_path: Path,
+    workspace_root: Path,
+    run_id: str,
+) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        return {}
+    if not _record_targets_artifact(record, artifact_path, workspace_root):
+        return {}
+    if record.get("ok") is not True and not _record_materialized_artifact(record, artifact_path, workspace_root):
+        return {}
+    provenance = _provenance_from_record(record, artifact_path=artifact_path, current_run_id=run_id)
+    return provenance if provenance.get("ok") is True else {}
 
 
 def _hash_chain_findings(item: dict[str, Any], provenance: dict[str, Any]) -> list[GateFinding]:

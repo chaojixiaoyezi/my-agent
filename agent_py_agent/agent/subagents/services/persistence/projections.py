@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ....common.json_io import write_json_file_atomic
+from ....contracts.protocol_status import TOOL_STATUS_FAILED
 from ...models import SubAgentTask
 from ..agent_run_state import build_agent_run_state, build_owner_agent_projection
 from ..control_plane_projection import sync_subagent_control_plane_projection
@@ -191,7 +192,7 @@ def _write_projection_warnings(task_dir: Path, records: list[ProjectionRecord]) 
             "message": record.message,
         }
         for record in records
-        if record.status == "failed"
+        if record.status == TOOL_STATUS_FAILED
     ]
     if not warnings:
         try:

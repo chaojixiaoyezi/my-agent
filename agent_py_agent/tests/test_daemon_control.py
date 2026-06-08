@@ -163,7 +163,7 @@ def test_get_running_pid_invalid_pid_cleanup(mock_alive, tmp_pid_path):
 # ── Scoped Locks 测试 ─────────────────────────────────────────────────────
 
 
-@patch.object(dc, "_get_lock_dir")
+@patch("agent_py_agent.agent.gateway_parts.scoped_locks._get_lock_dir")
 def test_acquire_scoped_lock_success(mock_lock_dir, tmp_lock_dir):
     """测试成功获取 scoped lock。"""
     mock_lock_dir.return_value = tmp_lock_dir
@@ -172,7 +172,7 @@ def test_acquire_scoped_lock_success(mock_lock_dir, tmp_lock_dir):
     assert existing is None
 
 
-@patch.object(dc, "_get_lock_dir")
+@patch("agent_py_agent.agent.gateway_parts.scoped_locks._get_lock_dir")
 def test_acquire_scoped_lock_already_held_by_different_process(mock_lock_dir, tmp_lock_dir):
     """测试获取已被不同进程持有的 scoped lock 失败。"""
     mock_lock_dir.return_value = tmp_lock_dir
@@ -196,7 +196,7 @@ def test_acquire_scoped_lock_already_held_by_different_process(mock_lock_dir, tm
         assert acquired is True
 
 
-@patch.object(dc, "_get_lock_dir")
+@patch("agent_py_agent.agent.gateway_parts.scoped_locks._get_lock_dir")
 def test_acquire_scoped_lock_reports_corrupt_existing_lock(mock_lock_dir, tmp_lock_dir):
     """坏 scoped lock 文件不能被静默返回成空 existing。"""
     mock_lock_dir.return_value = tmp_lock_dir
@@ -214,7 +214,7 @@ def test_acquire_scoped_lock_reports_corrupt_existing_lock(mock_lock_dir, tmp_lo
     assert lock_path.exists()
 
 
-@patch.object(dc, "_get_lock_dir")
+@patch("agent_py_agent.agent.gateway_parts.scoped_locks._get_lock_dir")
 def test_release_scoped_lock(mock_lock_dir, tmp_lock_dir):
     """测试释放 scoped lock。"""
     mock_lock_dir.return_value = tmp_lock_dir

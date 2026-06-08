@@ -1,11 +1,6 @@
+"""Audit logging keeps request/response paths bundled around gateway events."""
 
 from __future__ import annotations
-
-"""audit logging keeps request/response paths bundled around gateway events.
-
-This module is derived from runtime.py split. It contains all audit-related
-logging functions that were previously in that file.
-"""
 
 import time
 from dataclasses import dataclass

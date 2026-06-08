@@ -7,6 +7,7 @@ from typing import Any
 
 from ..common.value_parsing import text_value as _text
 from ..contracts.gates.tool.effects import args_hash_for_call
+from ..contracts.protocol_status import TOOL_STATUS_DONE, TOOL_STATUS_FAILED
 from ..contracts.tool_protocol_v2 import normalize_tool_call
 from ..local_storage import RuntimeGateLedgerRecord
 from ..local_storage.control_plane_models import AgentEventInput
@@ -273,11 +274,11 @@ def _apply_rate_limit_record(row: dict[str, object], record: object) -> None:
     if timestamp > 0:
         row["attempt_timestamps"].append(timestamp)
     status = _text(getattr(record, "status", ""))
-    if status == "failed":
+    if status == TOOL_STATUS_FAILED:
         row["consecutive_failures"] = int(row["consecutive_failures"]) + 1
         row["total_failures"] = int(row["total_failures"]) + 1
         row["last_failure_at"] = timestamp
-    if status == "done":
+    if status == TOOL_STATUS_DONE:
         row["consecutive_failures"] = 0
         row["last_success_at"] = timestamp
 

@@ -79,12 +79,7 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     contract = _delivery_contract(request.params)
     workspace_root = _workspace_root(request.agent, request.params)
     if not contract:
-        if response := uncontracted_task_output_closeout_response(request, workspace_root):
-            return response
-        if _current_run_task_output_artifacts(request.params, workspace_root=workspace_root):
-            return None
-        write_non_terminal_closeout_report(request, workspace_root, reason="delivery_contract_missing")
-        return None
+        return _missing_contract_closeout_response(request, workspace_root)
     doctor = validate_delivery_contract(contract, workspace_root=workspace_root)
     _write_contract_doctor_report(workspace_root, doctor)
     if not doctor.ok:
@@ -95,11 +90,7 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     contract = dict(doctor.normalized_contract or contract)
     artifacts = _required_artifacts(contract)
     if not artifacts:
-        if _coverage_contract_present(contract) and _current_run_task_output_artifacts(request.params, workspace_root=workspace_root):
-            if response := uncontracted_task_output_closeout_response(request, workspace_root):
-                return response
-            return None
-        return _no_artifact_closeout_response(request, contract, workspace_root)
+        return _no_required_artifact_response(request, contract, workspace_root)
     report = _delivery_report(request, contract, artifacts, workspace_root)
     report_ref = _write_report(workspace_root, report)
     report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
@@ -115,6 +106,41 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     sync_run_task_workspace_closeout(request.agent, request.params, report)
     reset_local_progress_guard(request.agent, request.params)
     return ModelResponse(text=_closeout_text(report), backend=request.backend)
+
+
+def _missing_contract_closeout_response(
+    request: MainAgentDeliveryCloseoutRequest,
+    workspace_root: Path,
+) -> ModelResponse | None:
+    if response := uncontracted_task_output_closeout_response(request, workspace_root):
+        return response
+    if _current_run_task_output_artifacts(request.params, workspace_root=workspace_root):
+        return None
+    write_non_terminal_closeout_report(request, workspace_root, reason="delivery_contract_missing")
+    return None
+
+
+def _no_required_artifact_response(
+    request: MainAgentDeliveryCloseoutRequest,
+    contract: dict[str, Any],
+    workspace_root: Path,
+) -> ModelResponse | None:
+    if _coverage_contract_with_current_artifacts(request, contract, workspace_root):
+        if response := uncontracted_task_output_closeout_response(request, workspace_root):
+            return response
+        return None
+    return _no_artifact_closeout_response(request, contract, workspace_root)
+
+
+def _coverage_contract_with_current_artifacts(
+    request: MainAgentDeliveryCloseoutRequest,
+    contract: dict[str, Any],
+    workspace_root: Path,
+) -> bool:
+    return (
+        _coverage_contract_present(contract)
+        and bool(_current_run_task_output_artifacts(request.params, workspace_root=workspace_root))
+    )
 
 
 def _no_artifact_closeout_response(
@@ -439,31 +465,10 @@ def _append_failed_contract_context(params: ToolLoopExecuteParams, report: dict[
 def _repair_guidance(report: dict[str, Any]) -> dict[str, Any]:
     progress = report.get("delivery_progress")
     actions = progress.get("recovery_actions") if isinstance(progress, dict) else []
-    task_progress_message = task_progress_repair_message(report)
-    coverage_message = _target_coverage_repair_message(report)
-    freshness_message = _target_coverage_freshness_repair_message(report)
     final_artifact_paths = _final_artifact_paths(report)
-    if str(report.get("reason") or "") == "required_artifacts_missing":
-        message = (
-            "当前验收失败是因为没有 required artifact 可验收。请根据用户要求写出真实交付物文件，"
-            "优先写到 delivery contract 或用户指定的输出路径；如果合同漏掉了用户指定路径，请按用户原话的输出路径写入，"
-            "然后重新调用 submit_for_acceptance。"
-        )
-    elif coverage_message:
-        message = coverage_message
-    elif freshness_message:
-        message = freshness_message
-    else:
-        message = (
-            "请根据 failed_artifacts、failed_gates 和 required_actions 自主选择下一步修复方式。"
-            "如果还需要读取或搜索来确认上下文，可以继续做；但要尽快把结果落成可验收的本地产物，"
-            "然后调用 submit_for_acceptance 提交验收。"
-        )
-    path_message = _final_artifact_path_message(final_artifact_paths)
-    if path_message:
-        message = f"{path_message} {message}"
-    if task_progress_message:
-        message = f"{task_progress_message} {message}"
+    message = _repair_guidance_message(report)
+    message = _prepend_optional_message(message, _final_artifact_path_message(final_artifact_paths))
+    message = _prepend_optional_message(message, task_progress_repair_message(report))
     return {
         "mode": "closeout_rework",
         "required_actions": actions if isinstance(actions, list) else [],
@@ -471,6 +476,28 @@ def _repair_guidance(report: dict[str, Any]) -> dict[str, Any]:
         "message_zh": message,
         "submit_when_ready": "submit_for_acceptance",
     }
+
+
+def _repair_guidance_message(report: dict[str, Any]) -> str:
+    if str(report.get("reason") or "") == "required_artifacts_missing":
+        return (
+            "当前验收失败是因为没有 required artifact 可验收。请根据用户要求写出真实交付物文件，"
+            "优先写到 delivery contract 或用户指定的输出路径；如果合同漏掉了用户指定路径，请按用户原话的输出路径写入，"
+            "然后重新调用 submit_for_acceptance。"
+        )
+    if coverage_message := _target_coverage_repair_message(report):
+        return coverage_message
+    if freshness_message := _target_coverage_freshness_repair_message(report):
+        return freshness_message
+    return (
+        "请根据 failed_artifacts、failed_gates 和 required_actions 自主选择下一步修复方式。"
+        "如果还需要读取或搜索来确认上下文，可以继续做；但要尽快把结果落成可验收的本地产物，"
+        "然后调用 submit_for_acceptance 提交验收。"
+    )
+
+
+def _prepend_optional_message(message: str, prefix: str) -> str:
+    return f"{prefix} {message}" if prefix else message
 
 
 def _final_artifact_paths(report: dict[str, Any]) -> list[str]:

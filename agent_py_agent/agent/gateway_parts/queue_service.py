@@ -1,11 +1,9 @@
-
-from __future__ import annotations
-
 """Queue iteration and state management for gateway processing.
 
-This module is derived from runtime.py split. It contains queue scanning,
-file state transitions, and lease management that were previously in that file.
+The service owns queue scanning, file state transitions, and lease management.
 """
+
+from __future__ import annotations
 
 import json
 import threading

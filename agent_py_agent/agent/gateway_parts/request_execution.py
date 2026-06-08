@@ -128,6 +128,31 @@ class _GatewayConversationContext:
 
 
 @dataclass(frozen=True)
+class _GatewayConversationLoadRequest:
+    agent: SimpleAgent
+    request: dict
+    request_id: str
+    prompt: str
+
+
+@dataclass(frozen=True)
+class _GatewayRunParamsRequest:
+    request: dict
+    context: _GatewayAskRunContext
+    conversation: _GatewayConversationContext
+    prompt: str
+
+
+@dataclass(frozen=True)
+class _BindGatewayTaskRequest:
+    store: object
+    thread_id: str
+    request_id: str
+    prompt: str
+    load_errors: list[dict]
+
+
+@dataclass(frozen=True)
 class _GatewayLeaseStartContext:
 
     agent: SimpleAgent
@@ -204,24 +229,19 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
     prompt = str(request.get("prompt") or request.get("goal") or "").strip()
     if not prompt:
         raise ValueError(_EMPTY_PROMPT_MESSAGE)
-    conversation = _gateway_conversation_context(context.agent, request, context.request_id, prompt)
+    conversation = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(context.agent, request, context.request_id, prompt)
+    )
     return context.agent.run(
         prompt,
-        params=_gateway_run_params(
-            request,
-            context,
-            conversation,
-            prompt,
-        ),
+        params=_gateway_run_params(_GatewayRunParamsRequest(request, context, conversation, prompt)),
     )
 
 
-def _gateway_run_params(
-    request: dict,
-    context: _GatewayAskRunContext,
-    conversation: _GatewayConversationContext,
-    prompt: str,
-) -> RunParams:
+def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
+    request = inputs.request
+    context = inputs.context
+    conversation = inputs.conversation
     return RunParams(
         inject=_gateway_injections(request, conversation),
         prompt_files=[str(item) for item in request.get("prompt_files", [])],
@@ -236,7 +256,7 @@ def _gateway_run_params(
         ],
         recovery_content_paths=[str(context.request_path), str(context.response_path)],
         on_chunk=context.on_chunk,
-        root_user_prompt=_root_user_prompt(prompt, conversation),
+        root_user_prompt=_root_user_prompt(inputs.prompt, conversation),
     )
 
 
@@ -283,12 +303,11 @@ def _root_user_prompt(prompt: str, conversation: _GatewayConversationContext) ->
     return prompt
 
 
-def _gateway_conversation_context(
-    agent: SimpleAgent,
-    request: dict,
-    request_id: str,
-    prompt: str,
-) -> _GatewayConversationContext:
+def _gateway_conversation_context(inputs: _GatewayConversationLoadRequest) -> _GatewayConversationContext:
+    agent = inputs.agent
+    request = inputs.request
+    request_id = inputs.request_id
+    prompt = inputs.prompt
     spec = request.get("conversation")
     if not isinstance(spec, dict):
         return _GatewayConversationContext()
@@ -310,7 +329,7 @@ def _gateway_conversation_context(
         return _GatewayConversationContext(load_errors=(_conversation_error(exc, "gateway.conversation.thread"),))
     active_link = _active_thread_task(agent, thread.thread_id, request_id, load_errors)
     if active_link is None:
-        _bind_gateway_request_task(store, thread.thread_id, request_id, prompt, load_errors)
+        _bind_gateway_request_task(_BindGatewayTaskRequest(store, thread.thread_id, request_id, prompt, load_errors))
     workspace = _task_workspace_for(active_link)
     return _GatewayConversationContext(
         thread_id=thread.thread_id,
@@ -346,18 +365,18 @@ def _is_root_task_link(link, current_request_id: str) -> bool:
     return status == "active"
 
 
-def _bind_gateway_request_task(store, thread_id: str, request_id: str, prompt: str, load_errors: list[dict]) -> None:
+def _bind_gateway_request_task(inputs: _BindGatewayTaskRequest) -> None:
     try:
-        store.bind_task(
+        inputs.store.bind_task(
             {
-                "thread_id": thread_id,
-                "task_id": request_id,
-                "goal": prompt,
+                "thread_id": inputs.thread_id,
+                "task_id": inputs.request_id,
+                "goal": inputs.prompt,
                 "status": "active",
             }
         )
     except Exception as exc:
-        load_errors.append(_conversation_error(exc, "gateway.conversation.bind_request_task"))
+        inputs.load_errors.append(_conversation_error(exc, "gateway.conversation.bind_request_task"))
 
 
 def _task_workspace_for(active_link: object | None) -> Path | None:

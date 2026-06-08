@@ -5,8 +5,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .recovery import RecoveryAction
-from .recovery import RecoveryEnvelopeRequest, recovery_envelope_from_gate_payload
+from .recovery import RecoveryAction, RecoveryEnvelopeRequest, recovery_envelope_from_gate_payload
 from .tool_protocol_v2 import normalize_tool_call
 
 

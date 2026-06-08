@@ -1,8 +1,4 @@
-"""Recovery actions, models, classification, and envelope.
-
-Was split across recovery_actions / recovery_models / recovery_classification /
-recovery_envelope — now merged.
-"""
+"""Recovery actions, models, classification, and envelope."""
 
 from __future__ import annotations
 
@@ -11,9 +7,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-
 # ===========================================================================
-# recovery_actions (was recovery_actions.py)
+# recovery actions
 # ===========================================================================
 
 class RecoveryAction(str, Enum):
@@ -109,7 +104,7 @@ def known_recovery_action_values() -> tuple[str, ...]:
 
 
 # ===========================================================================
-# recovery_models (was recovery_models.py)
+# recovery models
 # ===========================================================================
 
 @dataclass(frozen=True)
@@ -151,7 +146,7 @@ class RecoveryEnvelope:
 
 
 # ===========================================================================
-# recovery_classification (was recovery_classification.py)
+# recovery classification
 # ===========================================================================
 
 _APPROVAL_WAIT_CODES = {"APPROVAL_REQUIRED", "APPROVAL_NOT_FOUND", "APPROVAL_PENDING"}
@@ -296,7 +291,7 @@ def _normalized_code(code: str) -> str:
 
 
 # ===========================================================================
-# recovery_envelope (was recovery_envelope.py)
+# recovery envelope
 # ===========================================================================
 
 def recovery_envelope_from_gate_payload(request: RecoveryEnvelopeRequest) -> RecoveryEnvelope | None:

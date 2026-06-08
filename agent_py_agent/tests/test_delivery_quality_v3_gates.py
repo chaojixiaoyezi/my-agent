@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 
 from agent_py_agent.agent.agent_core.delivery_closeout.artifacts import (
+    ArtifactItemValidationRequest,
     _validate_artifact_item,
 )
 from agent_py_agent.agent.contracts.artifact_acceptance import (
@@ -154,21 +155,24 @@ def test_closeout_artifact_validation_reports_v3_document_quality_as_warning(tmp
     report.write_text("# 摘要\n很好。\n\n# 结果\n__FILL__\n", encoding="utf-8")
 
     artifact = _validate_artifact_item(
-        {
-            "artifact_id": "handoff",
-            "kind": "md",
-            "path": "handoff.md",
-            "validation_contract": {
-                "document_quality_contract": {
-                    "required_sections": ["摘要", "结果"],
-                    "min_chars_per_section": 10,
-                    "max_placeholder_ratio": 0.05,
-                }
+        ArtifactItemValidationRequest(
+            item={
+                "artifact_id": "handoff",
+                "kind": "md",
+                "path": "handoff.md",
+                "validation_contract": {
+                    "document_quality_contract": {
+                        "required_sections": ["摘要", "结果"],
+                        "min_chars_per_section": 10,
+                        "max_placeholder_ratio": 0.05,
+                    }
+                },
             },
-        },
-        tmp_path,
-        archive_tool_calls=[],
-        run_id="run-closeout",
+            workspace_root=tmp_path,
+            archive_tool_calls=[],
+            run_id="run-closeout",
+            reference_roots=(),
+        )
     )
 
     assert artifact["ok"] is True

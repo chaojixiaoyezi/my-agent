@@ -21,13 +21,13 @@ def test_my_agent_home_uses_env_override(tmp_path: Path, monkeypatch):
     assert resolve_my_agent_home() == home.resolve()
 
 
-def test_my_agent_home_env_beats_config_value(tmp_path: Path):
+def test_my_agent_home_explicit_value_beats_env(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_layout import resolve_my_agent_home
 
     env_home = tmp_path / "env-home"
     config_home = tmp_path / "config-home"
 
-    assert resolve_my_agent_home(config_home, env={"MY_AGENT_HOME": str(env_home)}) == env_home.resolve()
+    assert resolve_my_agent_home(config_home, env={"MY_AGENT_HOME": str(env_home)}) == config_home.resolve()
 
 
 def test_task_workspace_path_template_sanitizes_task_name(tmp_path: Path):

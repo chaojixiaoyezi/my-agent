@@ -4,7 +4,7 @@ from pathlib import Path
 
 from agent_py_agent.agent.contracts.artifact_acceptance import validate_artifact
 from agent_py_agent.agent.contracts.artifact_acceptance_models import ArtifactAcceptanceRequest
-from agent_py_agent.agent.contracts.staged_checkpoint_acceptance import staged_checkpoint_findings
+from agent_py_agent.agent.contracts.staged_checkpoint import staged_checkpoint_findings
 from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
 

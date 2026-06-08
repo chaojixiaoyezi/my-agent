@@ -40,6 +40,14 @@ class RunKeywordFields:
     context_scope: str | None = None
 
 
+@dataclass(frozen=True)
+class StructuralContractRequest:
+    agent: object
+    contract_prompt: str
+    params: RunParams
+    structural_contract: dict
+
+
 def run_params_from_keywords(params: RunParams, fields: RunKeywordFields) -> RunParams:
     return run_params_from_values(
         params,
@@ -84,28 +92,37 @@ def run_params_with_materialized_delivery_contract(agent, user_prompt: str, para
         contract_prompt,
         workspace_root=getattr(agent, "root", None),
     )
-    if _has_materialized_runtime_contract(structural_contract):
-        if _should_repair_structural_contract(structural_contract):
-            repaired = _materialize_delivery_contract(agent, contract_prompt, params)
-            for _ in range(_MAX_MATERIALIZER_REPAIR_ATTEMPTS):
-                repair_feedback = materializer_repair_feedback(repaired)
-                if not repair_feedback:
-                    break
-                repaired = _materialize_delivery_contract(agent, contract_prompt, params, repair_feedback=repair_feedback)
-            if _has_materialized_runtime_contract(repaired):
-                return replace(params, delivery_contract=repaired)
-        return replace(params, delivery_contract=structural_contract)
+    if replacement := _structural_contract_params(
+        StructuralContractRequest(agent, contract_prompt, params, structural_contract)
+    ):
+        return replacement
     if not _should_materialize_delivery_contract(params):
         return params
+    contract = _materialized_contract_with_repairs(agent, contract_prompt, params)
+    if not _has_materialized_runtime_contract(contract):
+        return params
+    return replace(params, delivery_contract=contract)
+
+
+def _structural_contract_params(request: StructuralContractRequest) -> RunParams | None:
+    if not _has_materialized_runtime_contract(request.structural_contract):
+        return None
+    if not _should_repair_structural_contract(request.structural_contract):
+        return replace(request.params, delivery_contract=request.structural_contract)
+    repaired = _materialized_contract_with_repairs(request.agent, request.contract_prompt, request.params)
+    if _has_materialized_runtime_contract(repaired):
+        return replace(request.params, delivery_contract=repaired)
+    return replace(request.params, delivery_contract=request.structural_contract)
+
+
+def _materialized_contract_with_repairs(agent, contract_prompt: str, params: RunParams) -> dict:
     contract = _materialize_delivery_contract(agent, contract_prompt, params)
     for _ in range(_MAX_MATERIALIZER_REPAIR_ATTEMPTS):
         repair_feedback = materializer_repair_feedback(contract)
         if not repair_feedback:
             break
         contract = _materialize_delivery_contract(agent, contract_prompt, params, repair_feedback=repair_feedback)
-    if not _has_materialized_runtime_contract(contract):
-        return params
-    return replace(params, delivery_contract=contract)
+    return contract
 
 
 def _delivery_contract_prompt(user_prompt: str, params: RunParams) -> str:

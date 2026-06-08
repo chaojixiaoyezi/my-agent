@@ -289,13 +289,18 @@ def _declared_artifact_paths(artifacts: object) -> list[str]:
         return []
     paths: list[str] = []
     for artifact in artifacts:
-        if not isinstance(artifact, dict):
-            continue
-        for key in ("preferred_path", "path"):
-            value = str(artifact.get(key) or "").strip()
-            if value:
-                paths.append(value)
+        paths.extend(_declared_paths_from_artifact(artifact))
     return list(dict.fromkeys(paths))
+
+
+def _declared_paths_from_artifact(artifact: object) -> list[str]:
+    if not isinstance(artifact, dict):
+        return []
+    return [
+        value
+        for key in ("preferred_path", "path")
+        if (value := str(artifact.get(key) or "").strip())
+    ]
 
 
 def _artifact_path_already_declared(artifacts: list[object], path: str) -> bool:
@@ -769,11 +774,7 @@ def _derive_prompt_directory_coverage_contract(
         return
     items: list[dict[str, Any]] = []
     for root in _source_directories_from_prompt(user_prompt, contract.get("artifacts"), workspace_root):
-        children = _mentioned_child_directories(root, user_prompt) or _project_child_directories(root)
-        if children:
-            items.extend(_project_coverage_item(child.name, str(root)) for child in children)
-        elif not items:
-            items.append(_project_coverage_item(root.name, str(root.parent)))
+        items.extend(_prompt_directory_coverage_items(root, user_prompt, has_existing=bool(items)))
     if not items:
         return
     contract["target_coverage_contract"] = {
@@ -781,6 +782,13 @@ def _derive_prompt_directory_coverage_contract(
         "enforcement": "required",
         "target_items": items,
     }
+
+
+def _prompt_directory_coverage_items(root: Path, user_prompt: str, *, has_existing: bool) -> list[dict[str, Any]]:
+    children = _mentioned_child_directories(root, user_prompt) or _project_child_directories(root)
+    if children:
+        return [_project_coverage_item(child.name, str(root)) for child in children]
+    return [] if has_existing else [_project_coverage_item(root.name, str(root.parent))]
 
 
 def _source_directories_from_prompt(

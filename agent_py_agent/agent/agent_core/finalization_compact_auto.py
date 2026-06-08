@@ -1,6 +1,6 @@
-
 from __future__ import annotations
 
+from ..contracts.protocol_status import COMPACT_STATUS_READY_AFTER_ACTION_GUARD
 from ..memory_archive import run_memory_compact_auto_cycle
 from ..memory_archive.compact import MemoryCompactPlanOptions
 from ..memory_archive.compact_auto import MemoryCompactAutoCycleOptions
@@ -47,9 +47,23 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
     auto_continue = _should_auto_continue_after_cycle(ctx, trigger_payload, cycle)
     status = str(cycle["status"])
     next_action = str(cycle["next_action"])
-    if status == "ready_after_action_guard" and not auto_continue:
+    if status == COMPACT_STATUS_READY_AFTER_ACTION_GUARD and not auto_continue:
         status = "applied_return_result"
         next_action = "return_result_after_compact"
+    return _compact_auto_cycle_result_fields(
+        cycle,
+        trigger_payload,
+        {"status": status, "next_action": next_action, "auto_continue": auto_continue},
+    )
+
+
+def _compact_auto_cycle_result_fields(
+    cycle: dict[str, object],
+    trigger_payload: dict[str, object],
+    final_state: dict[str, object],
+) -> dict:
+    suggestion = cycle["suggestion"]
+    auto_continue = bool(final_state["auto_continue"])
     return {
         "memory_compact_suggested": bool(suggestion["should_prompt"]),
         "memory_compact_status": str(suggestion["status"]),
@@ -59,8 +73,8 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
         "memory_compact_trigger_reason": str(trigger_payload.get("reason") or "normal_threshold"),
         "memory_compact_trigger_source": str(trigger_payload.get("source") or "token_budget"),
         "memory_compact_trigger_forced": bool(trigger_payload.get("forced")),
-        "memory_compact_auto_status": status,
-        "memory_compact_auto_next_action": next_action,
+        "memory_compact_auto_status": str(final_state["status"]),
+        "memory_compact_auto_next_action": str(final_state["next_action"]),
         "memory_compact_auto_allowed_to_continue": auto_continue,
         "memory_compact_auto_tool_execution": str(cycle["automatic_tool_execution"]),
         "memory_compact_auto_apply_id": str(cycle["apply_id"]),

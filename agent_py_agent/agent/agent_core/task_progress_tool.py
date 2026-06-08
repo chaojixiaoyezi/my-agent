@@ -191,14 +191,19 @@ def _tool_path_index(archive_calls: list[dict[str, object]]) -> tuple[list[str],
     successful: list[str] = []
     failed: list[str] = []
     for record in archive_calls:
-        paths = _record_path_refs(record)
-        if not paths:
-            continue
-        if bool(record.get("ok")):
-            successful.extend(paths)
-        elif _path_failure(record):
-            failed.extend(paths)
+        record_successful, record_failed = _classified_record_paths(record)
+        successful.extend(record_successful)
+        failed.extend(record_failed)
     return _dedupe_texts(successful), _dedupe_texts(failed)
+
+
+def _classified_record_paths(record: dict[str, object]) -> tuple[list[str], list[str]]:
+    paths = _record_path_refs(record)
+    if not paths:
+        return [], []
+    if bool(record.get("ok")):
+        return paths, []
+    return ([], paths) if _path_failure(record) else ([], [])
 
 
 def _record_path_refs(record: dict[str, object]) -> list[str]:

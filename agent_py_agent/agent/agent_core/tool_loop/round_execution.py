@@ -93,6 +93,15 @@ class ToolRoundExecutionRequest:
     current_prompt: str = ""
 
 
+@dataclass(frozen=True)
+class ToolProgressEvent:
+    request: ToolRoundExecutionRequest
+    idx: int
+    payload: object
+    status: str
+    started_at: float | None = None
+
+
 def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     before_context_count = len(getattr(request.params, "tool_context", []) or [])
     _append_assistant_tool_round_context(request)
@@ -104,21 +113,21 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     for idx, payload in enumerate(calls, start=1):
         tool_name = _tool_name(payload)
         if _should_defer_for_compact_digest(request, tool_name):
-            _emit_tool_progress(request, idx, payload, "延后")
+            _emit_tool_progress(ToolProgressEvent(request, idx, payload, "延后"))
             result = _compact_deferred_result(tool_name)
             request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
             _append_compact_digest_deferred_notice(request, tool_name, idx)
             handled_count = idx
             break
         started_at = time.monotonic()
-        _emit_tool_progress(request, idx, payload, "开始")
+        _emit_tool_progress(ToolProgressEvent(request, idx, payload, "开始"))
         if stateful_orchestration_seen and tool_name in _DEPENDENT_ORCHESTRATION_TOOLS:
             result = _deferred_orchestration_result(tool_name)
         else:
             result = request.execute_one(
                 ToolCallExecuteParams(request.params, request.tool_rounds, idx, payload)
             )
-        _emit_tool_progress(request, idx, payload, _finished_status(result), started_at=started_at)
+        _emit_tool_progress(ToolProgressEvent(request, idx, payload, _finished_status(result), started_at))
         request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
         if result.ok and tool_name == "read_file":
             read_since_checkpoint.append(dict(payload) if isinstance(payload, dict) else {})
@@ -323,25 +332,21 @@ def _tool_name(payload: object) -> str:
     return str(payload.get("tool") or "").strip()
 
 
-def _emit_tool_progress(
-    request: ToolRoundExecutionRequest,
-    idx: int,
-    payload: object,
-    status: str,
-    *,
-    started_at: float | None = None,
-) -> None:
-    on_chunk = getattr(request.params, "effective_on_chunk", None)
+def _emit_tool_progress(event: ToolProgressEvent) -> None:
+    on_chunk = getattr(event.request.params, "effective_on_chunk", None)
     if not callable(on_chunk):
         return
-    tool_name = _tool_name(payload) or "unknown"
-    detail = _payload_progress_detail(payload)
+    tool_name = _tool_name(event.payload) or "unknown"
+    detail = _payload_progress_detail(event.payload)
     elapsed = ""
-    if started_at is not None:
-        elapsed = f" {max(0.0, time.monotonic() - started_at):.2f}s"
+    if event.started_at is not None:
+        elapsed = f" {max(0.0, time.monotonic() - event.started_at):.2f}s"
     suffix = f": {detail}" if detail else ""
     try:
-        on_chunk(f"\n[工具] round={request.tool_rounds} #{idx} {tool_name} {status}{elapsed}{suffix}\n")
+        on_chunk(
+            f"\n[工具] round={event.request.tool_rounds} "
+            f"#{event.idx} {tool_name} {event.status}{elapsed}{suffix}\n"
+        )
     except Exception:
         return
 

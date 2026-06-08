@@ -132,7 +132,7 @@ class RouteIndexTarget:
 def resolve_my_agent_home(value: str | Path | None = None, env: Mapping[str, str] | None = None) -> Path:
     source = env if env is not None else os.environ
     env_value = source.get("MY_AGENT_HOME")
-    raw = env_value if env_value else value if value is not None else "~/.my-agent"
+    raw = value if value is not None else env_value if env_value else "~/.my-agent"
     return Path(raw).expanduser().resolve()
 
 

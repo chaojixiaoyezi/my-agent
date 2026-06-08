@@ -67,7 +67,7 @@ _LOG_LEVELS = {
 
 @dataclass
 class _HomeProviderConfigFields:
-    my_agent_home: str = "~/.my-agent"
+    my_agent_home: str = ""
     my_agent_owner_provider: str = "local"
     my_agent_owner_kind: str = "main"
     my_agent_owner_id: str = "main"

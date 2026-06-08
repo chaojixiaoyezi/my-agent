@@ -1,14 +1,12 @@
-
-from __future__ import annotations
-
 """Response rendering and response-file polling for gateway CLI output.
 
-This module is derived from runtime.py split. It contains response display
-functions that were previously in that file. Human status lines show cumulative
-context pressure when available, while JSON mode preserves the raw fields.
-Client polling also lives here so chat/TUI/gateway ask share one response-file
-load-error path and one stat-based "read only when changed" check.
+Human status lines show cumulative context pressure when available, while JSON
+mode preserves the raw fields. Client polling also lives here so chat/TUI/gateway
+ask share one response-file load-error path and one stat-based "read only when
+changed" check.
 """
+
+from __future__ import annotations
 
 import json
 from dataclasses import dataclass

@@ -10,9 +10,11 @@ from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyScheduleRequest,
 )
 from agent_py_agent.agent.subagents.services.recovery.modes import (
+    RecoveryMode,
     action_for_recovery_mode,
     is_rerun_mode,
     is_takeover_mode,
+    recovery_mode_from_protocol_value,
 )
 from agent_py_agent.agent.subagents.services.recovery.strategy import (
     SubagentRecoveryStrategyRequest,
@@ -161,10 +163,10 @@ def test_recovery_strategy_suggests_leadership_recovery_for_failed_coordinator(t
 
 
 def test_recovery_mode_helpers_accept_only_current_structured_modes() -> None:
-    assert is_rerun_mode("rerun_from_continue_packet") is True
-    assert is_rerun_mode("rerun_from_checkpoint") is True
-    assert is_rerun_mode("rerun_from_old_alias") is False
-    assert is_takeover_mode("takeover_from_continue_packet") is True
-    assert is_takeover_mode("takeover_from_checkpoint") is True
-    assert is_takeover_mode("takeover_from_old_alias") is False
-    assert action_for_recovery_mode("rerun_from_old_alias") == "manual_review"
+    assert is_rerun_mode(RecoveryMode.RERUN_FROM_CONTINUE_PACKET) is True
+    assert is_rerun_mode(RecoveryMode.RERUN_FROM_CHECKPOINT) is True
+    assert is_takeover_mode(RecoveryMode.TAKEOVER_FROM_CONTINUE_PACKET) is True
+    assert is_takeover_mode(RecoveryMode.TAKEOVER_FROM_CHECKPOINT) is True
+    assert action_for_recovery_mode(RecoveryMode.RERUN_FROM_CONTINUE_PACKET) == "retry"
+    assert recovery_mode_from_protocol_value("rerun_from_continue_packet") is RecoveryMode.RERUN_FROM_CONTINUE_PACKET
+    assert recovery_mode_from_protocol_value("rerun_from_old_alias") is RecoveryMode.MANUAL_REVIEW_MISSING_REFS

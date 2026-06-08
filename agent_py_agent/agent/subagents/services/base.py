@@ -1,6 +1,4 @@
 
-from __future__ import annotations
-
 """base task creation and lifecycle service.
 
 这里承接子代理任务创建、分割、注册卡等基础能力。
@@ -8,8 +6,10 @@ SubAgentManager 通过当前服务组合调用这里。
 运行身份会写 memory scope 和 runtime config scope，供 worker 装载 task overlay。
 """
 
+from __future__ import annotations
+
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..effective_permissions import effective_permission_snapshot
@@ -270,13 +270,8 @@ class SubAgentBaseService:
         """Build SubAgentTask from params and prepared context."""
         run_id = prepared["run_id"]
         now = prepared["now"]
-        workflow_plan_dict = prepared["workflow_plan_dict"]
 
         parent_task = _load_parent_task(self.manager, params.parent_id)
-        task_attrs = {
-            **dict(params.attributes or {}),
-            **_manager_workspace_attrs(self.manager),
-        }
         task = SubAgentTask(
             id=run_id,
             goal=params.goal,
@@ -297,18 +292,14 @@ class SubAgentBaseService:
             quality_contract=_normalize_quality_contract(params.quality_contract),
             context_manifest=_normalize_context_manifest(params.context_manifest),
             context_packs=_normalize_context_packs(params.context_packs),
-            effective_permissions=effective_permission_snapshot(
-                parent_task=parent_task,
-                parent_access_mode=params.parent_access_mode,
-                owner_policy=getattr(self.manager, "owner_policy_snapshot", {}),
-            ),
+            effective_permissions=_task_permission_snapshot(self.manager, params, parent_task),
             created_at=now,
             updated_at=now,
             heartbeat_at=now,
             workflow_mode=prepared["normalized_workflow_mode"],
-            workflow_template_id=str((workflow_plan_dict or {}).get("selected_template_id") or ""),
-            workflow_plan=workflow_plan_dict or {},
-            attributes=task_attrs,
+            workflow_template_id=_workflow_template_id(prepared),
+            workflow_plan=_workflow_plan(prepared),
+            attributes=_task_attrs_for_create(self.manager, params),
             **prepared["paths"],
         )
         _apply_runtime_identity_and_memory_scope(task, params, parent_task=parent_task)
@@ -387,3 +378,27 @@ def _manager_workspace_attrs(manager: Any) -> dict[str, object]:
     if isinstance(roots, list):
         attrs["workspace_roots"] = [str(item) for item in roots if str(item or "").strip()]
     return attrs
+
+
+def _task_attrs_for_create(manager: Any, params: CreateRunParams) -> dict[str, object]:
+    return {
+        **dict(params.attributes or {}),
+        **_manager_workspace_attrs(manager),
+    }
+
+
+def _task_permission_snapshot(manager: Any, params: CreateRunParams, parent_task: Any | None) -> dict[str, object]:
+    return effective_permission_snapshot(
+        parent_task=parent_task,
+        parent_access_mode=params.parent_access_mode,
+        owner_policy=getattr(manager, "owner_policy_snapshot", {}),
+    )
+
+
+def _workflow_plan(prepared: dict[str, object]) -> dict[str, object]:
+    value = prepared.get("workflow_plan_dict")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _workflow_template_id(prepared: dict[str, object]) -> str:
+    return str(_workflow_plan(prepared).get("selected_template_id") or "")

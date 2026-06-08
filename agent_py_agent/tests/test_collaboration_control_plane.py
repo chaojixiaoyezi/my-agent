@@ -8,7 +8,10 @@ from agent_py_agent.agent.settings import AgentConfig
 
 
 def _agent_with_thread(tmp_path, *, goal: str = "线索协作"):
-    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl", my_agent_home=str(tmp_path / ".my-agent-home")),
+        tmp_path,
+    )
     thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
     agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': goal, 'now': 2.0})
     return agent, thread
@@ -344,7 +347,10 @@ def _submit_generic_miss_evidence(agent: SimpleAgent, case_id: str, request_id: 
 
 
 def test_raise_collaboration_tool_accepts_relative_deadline_seconds(tmp_path, monkeypatch) -> None:
-    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl", my_agent_home=str(tmp_path / ".my-agent-home")),
+        tmp_path,
+    )
     thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
     agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "短等待协作", 'now': 2.0})
     case_id = json.loads(
@@ -356,7 +362,7 @@ def test_raise_collaboration_tool_accepts_relative_deadline_seconds(tmp_path, mo
             }
         ).output
     )["case_id"]
-    monkeypatch.setattr("agent_py_agent.agent.collaboration.tool_values.time.time", lambda: 100.0)
+    monkeypatch.setattr("agent_py_agent.agent.collaboration.tools.time.time", lambda: 100.0)
 
     result = agent.tools.tools["raise_collaboration"].execute(
         {

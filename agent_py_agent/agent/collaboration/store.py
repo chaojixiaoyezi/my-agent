@@ -1,9 +1,5 @@
-"""Collaboration store — unified persistence for cases, requests, evidence,
-participants, decisions, and agent capabilities.
-
-All store classes that were previously split across store_base / store_evidence /
-store_capabilities / store_cases / store_requests / store_status are now in this
-single module.
+"""Collaboration store for cases, requests, evidence, participants,
+decisions, and agent capabilities.
 """
 
 from __future__ import annotations
@@ -19,8 +15,8 @@ from ..runtime_errors import runtime_error_report
 from .coverage import case_response_coverage
 from .identity import agent_identity_keys, request_update_targets
 from .models import (
-    AgentCapability,
     AGENT_CAPABILITY_STATUS_AVAILABLE,
+    AgentCapability,
     CaseDecision,
     CaseParticipant,
     CollaborationCase,
@@ -32,13 +28,13 @@ from .models import (
     new_request_id,
 )
 from .request_status import (
+    CollaborationRequestStatus,
     canonical_case_status_for_update,
     canonical_request_status_for_update,
     case_overview_row,
     case_status_protocol_metadata,
     case_status_text,
     case_window_status,
-    CollaborationRequestStatus,
     evidence_sources_by_request,
     is_blocked_request_status,
     is_completed_request_status,
@@ -52,11 +48,11 @@ from .request_status import (
     request_status_protocol_metadata,
     unavailable_target_agent_ids_by_request,
 )
-from .store_common import dict_items, now, now as current_time, read_jsonl_report, strings
-
+from .store_common import dict_items, now, read_jsonl_report, strings
+from .store_common import now as current_time
 
 # ---------------------------------------------------------------------------
-# base store (was store_base.py)
+# shared layout
 # ---------------------------------------------------------------------------
 
 class CollaborationBaseStore:
@@ -102,7 +98,7 @@ class CollaborationBaseStore:
 
 
 # ---------------------------------------------------------------------------
-# evidence store (was store_evidence.py)
+# evidence records
 # ---------------------------------------------------------------------------
 
 class CollaborationEvidenceStore(CollaborationBaseStore):
@@ -174,7 +170,7 @@ class CollaborationEvidenceStore(CollaborationBaseStore):
 
 
 # ---------------------------------------------------------------------------
-# capability store (was store_capabilities.py)
+# agent capabilities
 # ---------------------------------------------------------------------------
 
 def _capability_roster_load_error(path: Path, exc: BaseException) -> dict[str, Any]:
@@ -246,7 +242,7 @@ class CollaborationCapabilityStore(CollaborationEvidenceStore):
 
 
 # ---------------------------------------------------------------------------
-# case store (was store_cases.py)
+# collaboration cases
 # ---------------------------------------------------------------------------
 
 class CollaborationCaseStore(CollaborationCapabilityStore):
@@ -373,7 +369,7 @@ class CollaborationCaseStore(CollaborationCapabilityStore):
 
 
 # ---------------------------------------------------------------------------
-# request store (was store_requests.py)
+# collaboration requests
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -430,27 +426,6 @@ class CollaborationRequestStore(CollaborationCaseStore):
         self._add_request_participants(case_id, request, current)
         return request
 
-    def update_request_status(self, request_data: dict) -> CollaborationRequest:
-        case_id = str(request_data.get("case_id") or "")
-        self.load_case(case_id)
-        request_id = str(request_data.get("request_id") or "")
-        request = self._request_by_id(case_id, request_id)
-        status_text = str(request_data.get("status") or "").strip()
-        if not status_text:
-            raise ValueError("status_required")
-        kwargs = {
-            "summary": request_data.get("summary", ""),
-            "actor_agent_id": request_data.get("actor_agent_id", ""),
-            "target_agent_ids": request_data.get("target_agent_ids") or [],
-            "now": request_data.get("now"),
-            "metadata": request_data.get("metadata") or {},
-        }
-        updated = self._updated_request_snapshot(request, status_text, kwargs)
-        append_jsonl(self._requests_path(case_id), updated.to_dict(), sort_keys=True)
-        self._add_rerouted_participants(case_id, request, updated, kwargs)
-        self._append_request_status_decision(case_id, updated, kwargs)
-        return updated
-
     def case_requests(self, case_id: str) -> list[CollaborationRequest]:
         requests, _load_errors = self.case_requests_report(case_id)
         return requests
@@ -471,24 +446,6 @@ class CollaborationRequestStore(CollaborationCaseStore):
     def case_request_history_report(self, case_id: str) -> tuple[list[CollaborationRequest], list[dict[str, Any]]]:
         report = read_jsonl_report(self._requests_path(case_id), context="collaboration.requests.read")
         return [CollaborationRequest.from_dict(row) for row in report.rows], report.load_errors
-
-    def pending_requests_for_agent(
-        self, *, agent_id: str, agent_name: str = "", agent_role: str = "", limit: int = 10
-    ) -> list[dict[str, Any]]:
-        rows, _load_errors = self.pending_requests_for_agent_report(
-            agent_id=agent_id, agent_name=agent_name, agent_role=agent_role, limit=limit,
-        )
-        return rows
-
-    def pending_requests_for_agent_report(
-        self, *, agent_id: str, agent_name: str = "", agent_role: str = "", limit: int = 10
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        identities = self.agent_identity_keys((agent_id, agent_name, agent_role))
-        rows, load_errors = (
-            self._pending_request_rows_for_identities_report(identities) if identities else ([], [])
-        )
-        rows.sort(key=lambda item: (str(item.get("priority") or ""), float(item.get("created_at") or 0.0)))
-        return (rows if limit <= 0 else rows[:limit]), load_errors
 
     def _request_targets(self, required: tuple[str, ...], kwargs: dict[str, Any]) -> tuple[str, ...]:
         return self._request_targets_report(required, kwargs).targets
@@ -519,6 +476,29 @@ class CollaborationRequestStore(CollaborationCaseStore):
                 "requested_capabilities": request.required_capabilities,
                 "now": current,
             })
+
+
+class CollaborationRequestStatusStore(CollaborationRequestStore):
+    def update_request_status(self, request_data: dict) -> CollaborationRequest:
+        case_id = str(request_data.get("case_id") or "")
+        self.load_case(case_id)
+        request_id = str(request_data.get("request_id") or "")
+        request = self._request_by_id(case_id, request_id)
+        status_text = str(request_data.get("status") or "").strip()
+        if not status_text:
+            raise ValueError("status_required")
+        kwargs = {
+            "summary": request_data.get("summary", ""),
+            "actor_agent_id": request_data.get("actor_agent_id", ""),
+            "target_agent_ids": request_data.get("target_agent_ids") or [],
+            "now": request_data.get("now"),
+            "metadata": request_data.get("metadata") or {},
+        }
+        updated = self._updated_request_snapshot(request, status_text, kwargs)
+        append_jsonl(self._requests_path(case_id), updated.to_dict(), sort_keys=True)
+        self._add_rerouted_participants(case_id, request, updated, kwargs)
+        self._append_request_status_decision(case_id, updated, kwargs)
+        return updated
 
     def _request_by_id(self, case_id: str, request_id: str) -> CollaborationRequest:
         request_id_text = str(request_id or "").strip()
@@ -629,6 +609,26 @@ class CollaborationRequestStore(CollaborationCaseStore):
             )
         )
 
+
+class CollaborationPendingRequestStore(CollaborationRequestStatusStore):
+    def pending_requests_for_agent(
+        self, *, agent_id: str, agent_name: str = "", agent_role: str = "", limit: int = 10
+    ) -> list[dict[str, Any]]:
+        rows, _load_errors = self.pending_requests_for_agent_report(
+            agent_id=agent_id, agent_name=agent_name, agent_role=agent_role, limit=limit,
+        )
+        return rows
+
+    def pending_requests_for_agent_report(
+        self, *, agent_id: str, agent_name: str = "", agent_role: str = "", limit: int = 10
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        identities = self.agent_identity_keys((agent_id, agent_name, agent_role))
+        rows, load_errors = (
+            self._pending_request_rows_for_identities_report(identities) if identities else ([], [])
+        )
+        rows.sort(key=lambda item: (str(item.get("priority") or ""), float(item.get("created_at") or 0.0)))
+        return (rows if limit <= 0 else rows[:limit]), load_errors
+
     def _pending_request_rows_for_identities(self, identities: set[str]) -> list[dict[str, Any]]:
         rows, _load_errors = self._pending_request_rows_for_identities_report(identities)
         return rows
@@ -672,7 +672,7 @@ class CollaborationRequestStore(CollaborationCaseStore):
 
 
 # ---------------------------------------------------------------------------
-# main public store (was store_status.py)
+# public collaboration store
 # ---------------------------------------------------------------------------
 
 class _CaseSnapshot:
@@ -914,7 +914,7 @@ def _readiness(blockers: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-class CollaborationStore(CollaborationRequestStore):
+class CollaborationStore(CollaborationPendingRequestStore):
     """Public collaboration store — the single entry point."""
 
     def overview(self) -> dict[str, Any]:

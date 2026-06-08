@@ -5,6 +5,7 @@ import hashlib
 import os
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,21 +19,23 @@ _ARTIFACT_SUBDIR = Path("blobs") / "tool_outputs"
 _PRESERVE_PROMPT_OUTPUT_TOOLS = frozenset({"read_file"})
 
 
-def resilient_tool_invoke(
-    *,
-    invoke: Callable[[], ToolExecutionResult],
-    spec: ToolSpec,
-    payload: dict[str, Any],
-    workspace_root: Path,
-    write_boundary: dict[str, object] | None = None,
-) -> ToolExecutionResult:
-    result = invoke()
+@dataclass(frozen=True)
+class ResilientToolInvokeRequest:
+    invoke: Callable[[], ToolExecutionResult]
+    spec: ToolSpec
+    payload: dict[str, Any]
+    workspace_root: Path
+    write_boundary: dict[str, object] | None = None
+
+
+def resilient_tool_invoke(request: ResilientToolInvokeRequest) -> ToolExecutionResult:
+    result = request.invoke()
     retry_attempts = 0
-    if _should_retry_result(result, spec, payload):
+    if _should_retry_result(result, request.spec, request.payload):
         retry_attempts = _MAX_RETRY_ATTEMPTS
-        result = invoke()
+        result = request.invoke()
     _attach_resilience_facts(result, retry_attempts)
-    _apply_large_output_policy(result, workspace_root, write_boundary)
+    _apply_large_output_policy(result, request.workspace_root, request.write_boundary)
     return result
 
 
@@ -146,4 +149,4 @@ def _truncated_output(text: str, *, artifact_ref: str, original_chars: int) -> s
     )
 
 
-__all__ = ["resilient_tool_invoke"]
+__all__ = ["ResilientToolInvokeRequest", "resilient_tool_invoke"]

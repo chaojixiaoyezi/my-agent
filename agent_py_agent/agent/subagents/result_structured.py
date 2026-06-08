@@ -179,34 +179,13 @@ def _process_structured_output(
     now: float,
     actual_tools: list[str] | None,
 ) -> dict[str, object]:
-    allowed_tools = set(task.allowed_tools)
-    allowed_skills = set(task.allowed_skills)
-    used_tools, ignored_tools, used_skills, ignored_skills = _split_tools_and_skills(
-        parsed, allowed_tools, allowed_skills
-    )
-    if actual_tools is not None:
-        ignored_tools = _merge_task_tools(
-            MergeTaskToolsParams(task, used_tools, used_skills, actual_tools, parsed.used_tools, now)
-        )
-    else:
-        task.used_tools = _merge_list(task.used_tools, used_tools)
-    task.used_skills = _merge_list(task.used_skills, used_skills)
-
+    ignored_tools, ignored_skills = _merge_structured_tools(task, parsed, now, actual_tools)
     structured_evidence_count = process_evidence_items(parsed, task, now)
     evidence_packets = process_evidence_packets(parsed, task, now)
     findings = _process_findings_and_coverage(parsed, task, now)
     structured_request_count, created_request_ids = _create_capability_requests_from_parsed(task, parsed, now)
-    normalized = _normalize_parsed_fields(parsed)
-    normalized["artifacts"] = normalize_artifact_items(task, normalized["artifacts"])
-    normalized["artifacts"].extend(
-        materialize_missing_declared_output_artifacts(task, parsed, normalized["artifacts"])
-    )
-    evidence_packets = merge_artifact_evidence(
-        task,
-        normalized["artifacts"],
-        evidence_packets,
-        now,
-    )
+    normalized = _normalized_structured_artifacts(task, parsed)
+    evidence_packets = merge_artifact_evidence(task, normalized["artifacts"], evidence_packets, now)
     task.blockers = _merge_list(task.blockers, [parsed.blocked_reason] if parsed.blocked_reason else [])
     return {
         "ignored_tools": ignored_tools,
@@ -222,6 +201,35 @@ def _process_structured_output(
         "lessons": normalized["lessons"],
         "next_actions": normalized["next_actions"],
     }
+
+
+def _merge_structured_tools(
+    task: SubAgentTask,
+    parsed: SubAgentParsedOutput,
+    now: float,
+    actual_tools: list[str] | None,
+) -> tuple[list[str], list[str]]:
+    used_tools, ignored_tools, used_skills, ignored_skills = _split_tools_and_skills(
+        parsed,
+        set(task.allowed_tools),
+        set(task.allowed_skills),
+    )
+    if actual_tools is not None:
+        ignored_tools = _merge_task_tools(
+            MergeTaskToolsParams(task, used_tools, used_skills, actual_tools, parsed.used_tools, now)
+        )
+    else:
+        task.used_tools = _merge_list(task.used_tools, used_tools)
+    task.used_skills = _merge_list(task.used_skills, used_skills)
+    return ignored_tools, ignored_skills
+
+
+def _normalized_structured_artifacts(task: SubAgentTask, parsed: SubAgentParsedOutput) -> dict[str, object]:
+    normalized = _normalize_parsed_fields(parsed)
+    artifacts = normalize_artifact_items(task, normalized["artifacts"])
+    artifacts.extend(materialize_missing_declared_output_artifacts(task, parsed, artifacts))
+    normalized["artifacts"] = artifacts
+    return normalized
 
 
 def _process_findings_and_coverage(parsed, task: SubAgentTask, now: float) -> list[dict[str, object]]:

@@ -52,7 +52,7 @@ from .registry_payload_normalize import (
 from .registry_payload_normalize import (
     tool_name as normalize_tool_name,
 )
-from .registry_resilience import resilient_tool_invoke
+from .registry_resilience import ResilientToolInvokeRequest, resilient_tool_invoke
 from .registry_runtime_gate_pipeline import tool_call_gate_decision
 
 _PARSE_RETRY_HINT = (
@@ -642,11 +642,13 @@ def _invoke_registry_with_envelope(
     )
     return attach_result_envelope(
         resilient_tool_invoke(
-            invoke=lambda: invoke_registry_tool(request),
-            spec=call.tools[tool_name].spec,
-            payload=payload,
-            workspace_root=call.workspace_root,
-            write_boundary=call.write_boundary,
+            ResilientToolInvokeRequest(
+                invoke=lambda: invoke_registry_tool(request),
+                spec=call.tools[tool_name].spec,
+                payload=payload,
+                workspace_root=call.workspace_root,
+                write_boundary=call.write_boundary,
+            )
         ),
         envelope,
     )

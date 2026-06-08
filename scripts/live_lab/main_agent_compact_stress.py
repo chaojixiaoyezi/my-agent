@@ -201,14 +201,20 @@ def _missing_section_facts(
 ) -> list[str]:
     missing: list[str] = []
     for fact in facts:
-        section = f"{fact.section:03d}"
-        values = [section, fact.city, fact.decision, fact.risk]
-        if include_checkpoint:
-            values.append(fact.checkpoint)
-        for value in values:
-            if value.casefold() not in lowered_content:
-                missing.append(f"section_{section}:{value}")
+        missing.extend(_missing_fact_values(lowered_content, fact, include_checkpoint=include_checkpoint))
     return missing
+
+
+def _missing_fact_values(lowered_content: str, fact: StressFact, *, include_checkpoint: bool) -> list[str]:
+    section = f"{fact.section:03d}"
+    values = [section, fact.city, fact.decision, fact.risk]
+    if include_checkpoint:
+        values.append(fact.checkpoint)
+    return [
+        f"section_{section}:{value}"
+        for value in values
+        if value.casefold() not in lowered_content
+    ]
 
 
 def _compact_cycle_count(home: Path) -> int:

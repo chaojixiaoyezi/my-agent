@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,15 @@ from ...task_progress import (
     task_progress_status_is_done,
     task_progress_summary,
 )
+
+
+@dataclass(frozen=True)
+class ArtifactEvidenceProjectionRequest:
+    report: dict[str, Any]
+    progress: dict[str, Any]
+    run_id: str
+    path: Path
+    summary: dict[str, Any]
 
 
 def evaluate_task_progress_closeout_gate(closeout: object, report: dict[str, Any] | None = None) -> GateDecision:
@@ -28,7 +38,9 @@ def evaluate_task_progress_closeout_gate(closeout: object, report: dict[str, Any
     open_items = _open_items(progress)
     if open_items:
         return _open_progress_decision(open_items, run_id, path, summary)
-    evidence_decision = _artifact_evidence_projection_decision(report or {}, progress, run_id, path, summary)
+    evidence_decision = _artifact_evidence_projection_decision(
+        ArtifactEvidenceProjectionRequest(report or {}, progress, run_id, path, summary)
+    )
     if evidence_decision is not None:
         return evidence_decision
     return _closed_progress_decision(run_id, path, summary, progress)
@@ -41,14 +53,21 @@ def task_progress_repair_message(report: dict[str, Any]) -> str:
     message = str(payload.get("model_message") or "").strip()
     if message:
         return message
-    findings = payload.get("findings")
-    if isinstance(findings, list):
-        for finding in findings:
-            if isinstance(finding, dict):
-                text = str(finding.get("message") or "").strip()
-                if text:
-                    return text
-    return ""
+    return _first_finding_message(payload.get("findings"))
+
+
+def _first_finding_message(findings: object) -> str:
+    if not isinstance(findings, list):
+        return ""
+    return next(
+        (
+            text
+            for finding in findings
+            if isinstance(finding, dict)
+            and (text := str(finding.get("message") or "").strip())
+        ),
+        "",
+    )
 
 
 def _unchecked_progress_decision(reason: str, run_id: str = "") -> GateDecision:
@@ -123,26 +142,32 @@ def _open_progress_decision(
     )
 
 
-def _artifact_evidence_projection_decision(
-    report: dict[str, Any],
-    progress: dict[str, Any],
-    run_id: str,
-    path: Path,
-    summary: dict[str, Any],
-) -> GateDecision | None:
-    item_tokens = _done_item_evidence_tokens(progress)
+def _artifact_evidence_projection_decision(request: ArtifactEvidenceProjectionRequest) -> GateDecision | None:
+    item_tokens = _done_item_evidence_tokens(request.progress)
     if len(_unique_projected_tokens(item_tokens)) < 3:
         return None
-    artifact_text = _artifact_text(report)
+    artifact_text = _artifact_text(request.report)
     if not artifact_text.strip():
         return None
-    missing = [
+    missing = _missing_projected_evidence_items(item_tokens, artifact_text)
+    if not missing:
+        return None
+    return _artifact_evidence_projection_repair(request, item_tokens, missing)
+
+
+def _missing_projected_evidence_items(item_tokens: list[tuple[str, list[str]]], artifact_text: str) -> list[dict[str, Any]]:
+    return [
         {"id": item_id, "evidence_tokens": tokens[:8]}
         for item_id, tokens in item_tokens
         if not _any_token_present(artifact_text, tokens)
     ]
-    if not missing:
-        return None
+
+
+def _artifact_evidence_projection_repair(
+    request: ArtifactEvidenceProjectionRequest,
+    item_tokens: list[tuple[str, list[str]]],
+    missing: list[dict[str, Any]],
+) -> GateDecision:
     finding = GateFinding(
         "TASK_PROGRESS_EVIDENCE_NOT_IN_ARTIFACT",
         "medium",
@@ -151,13 +176,13 @@ def _artifact_evidence_projection_decision(
             "请把对应文件、模块或来源引用写进最终报告后再提交。"
         ),
         evidence={
-            "run_id": run_id,
-            "progress_ref": str(path),
+            "run_id": request.run_id,
+            "progress_ref": str(request.path),
             "missing_count": len(missing),
             "checked_done_items": len(item_tokens),
             "missing_items": missing[:20],
-            "artifact_paths": _artifact_paths(report)[:12],
-            "counts": summary.get("counts", {}),
+            "artifact_paths": _artifact_paths(request.report)[:12],
+            "counts": request.summary.get("counts", {}),
         },
     )
     return GateDecision.repair(
@@ -166,8 +191,8 @@ def _artifact_evidence_projection_decision(
         recommended_action=RecoveryAction.CONTINUE.value,
         evidence={
             "checked": True,
-            "run_id": run_id,
-            "progress_ref": str(path),
+            "run_id": request.run_id,
+            "progress_ref": str(request.path),
             "missing_evidence_projection_count": len(missing),
             "checked_done_items": len(item_tokens),
             "required_actions": [
@@ -266,12 +291,19 @@ def _unique_projected_tokens(item_tokens: list[tuple[str, list[str]]]) -> list[s
 def _artifact_text(report: dict[str, Any]) -> str:
     parts: list[str] = []
     for path in _artifact_paths(report):
-        try:
-            if Path(path).is_file():
-                parts.append(Path(path).read_text(encoding="utf-8", errors="ignore")[:200_000])
-        except OSError:
-            continue
+        text = _artifact_file_text(Path(path))
+        if text:
+            parts.append(text)
     return "\n".join(parts)
+
+
+def _artifact_file_text(path: Path) -> str:
+    try:
+        if not path.is_file():
+            return ""
+        return path.read_text(encoding="utf-8", errors="ignore")[:200_000]
+    except OSError:
+        return ""
 
 
 def _artifact_paths(report: dict[str, Any]) -> list[str]:

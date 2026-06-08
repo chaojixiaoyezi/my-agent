@@ -5,6 +5,7 @@ import json
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,15 @@ TASK_PROGRESS_STATUS_INVALID = "TASK_PROGRESS_STATUS_INVALID"
 _FACT_FIELDS = ("id", "title", "status", "notes", "result", "outcome", "conclusion", "decision", "summary")
 _RESULT_FIELDS = ("result", "outcome", "conclusion", "decision", "summary")
 _EXPLICIT_OVERWRITE_KEYS = ("correction", "overwrite", "replace")
+
+
+@dataclass(frozen=True)
+class _StatusValidationRequest:
+    value: object
+    field: str
+    target_id: str
+    check_name: str
+    allow_empty: bool
 
 
 def progress_path(root: str | Path, run_id: str) -> Path:
@@ -91,11 +101,13 @@ def invalid_coverage_statuses(update: dict[str, Any]) -> list[dict[str, str]]:
         target_id = str(target.get("id") or target.get("title") or "").strip()
         _append_invalid_status(
             invalid,
-            target.get("status"),
-            field=f"coverage.targets[{target_index}].status",
-            target_id=target_id,
-            check_name="",
-            allow_empty=True,
+            _StatusValidationRequest(
+                value=target.get("status"),
+                field=f"coverage.targets[{target_index}].status",
+                target_id=target_id,
+                check_name="",
+                allow_empty=True,
+            ),
         )
         checks = target.get("checks")
         if not isinstance(checks, dict):
@@ -103,34 +115,28 @@ def invalid_coverage_statuses(update: dict[str, Any]) -> list[dict[str, str]]:
         for check_name, status in checks.items():
             _append_invalid_status(
                 invalid,
-                status,
-                field=f"coverage.targets[{target_index}].checks.{check_name}",
-                target_id=target_id,
-                check_name=str(check_name),
-                allow_empty=False,
+                _StatusValidationRequest(
+                    value=status,
+                    field=f"coverage.targets[{target_index}].checks.{check_name}",
+                    target_id=target_id,
+                    check_name=str(check_name),
+                    allow_empty=False,
+                ),
             )
     return invalid
 
 
-def _append_invalid_status(
-    invalid: list[dict[str, str]],
-    value: object,
-    *,
-    field: str,
-    target_id: str,
-    check_name: str,
-    allow_empty: bool,
-) -> None:
-    raw_status = str(value or "").strip()
-    if not raw_status and allow_empty:
+def _append_invalid_status(invalid: list[dict[str, str]], request: _StatusValidationRequest) -> None:
+    raw_status = str(request.value or "").strip()
+    if not raw_status and request.allow_empty:
         return
     if raw_status in TASK_PROGRESS_KNOWN_STATUSES:
         return
     invalid.append(
         {
-            "field": field,
-            "id": target_id,
-            "check": check_name,
+            "field": request.field,
+            "id": request.target_id,
+            "check": request.check_name,
             "status": raw_status,
         }
     )
@@ -613,14 +619,20 @@ def _summary_item(item: dict[str, Any], *, include_facts: bool = False) -> dict[
         "next": str(item.get("next") or ""),
     }
     if include_facts:
-        for key in ("notes", "result", "outcome", "conclusion", "decision", "summary"):
-            text = str(item.get(key) or "").strip()
-            if text:
-                summary[key] = text
-        evidence = string_list(item.get("evidence"))[:8]
-        if evidence:
-            summary["evidence"] = evidence
+        summary.update(_summary_item_facts(item))
     return summary
+
+
+def _summary_item_facts(item: dict[str, Any]) -> dict[str, Any]:
+    facts = {
+        key: text
+        for key in ("notes", "result", "outcome", "conclusion", "decision", "summary")
+        if (text := str(item.get(key) or "").strip())
+    }
+    evidence = string_list(item.get("evidence"))[:8]
+    if evidence:
+        facts["evidence"] = evidence
+    return facts
 
 
 def task_progress_status_is_closed(value: object) -> bool:

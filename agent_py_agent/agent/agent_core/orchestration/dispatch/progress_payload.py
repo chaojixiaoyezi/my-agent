@@ -12,7 +12,7 @@ from ....subagents.services.hierarchy.qa_scheduler import (
     qa_orchestration_advice,
     quality_advice_payload,
 )
-from ....subagents.services.recovery.modes import is_rerun_mode
+from ....subagents.services.recovery.modes import is_rerun_mode, recovery_mode_from_protocol_value
 from ....subagents.services.recovery.strategy import (
     SubagentRecoveryStrategyRequest,
     build_subagent_recovery_strategy,
@@ -199,10 +199,10 @@ def _recovery_dispatch_tool_call(
     call = _dispatch_tool_call(run_ids)
     if len([item for item in run_ids if item]) != 1 or not primary_strategy:
         return call
-    recovery_mode = str(primary_strategy.get("recovery_mode") or "")
+    recovery_mode = recovery_mode_from_protocol_value(primary_strategy.get("recovery_mode"))
     if not is_rerun_mode(recovery_mode):
         return call
-    call["recovery_mode"] = recovery_mode
+    call["recovery_mode"] = recovery_mode.value
     instruction = str(primary_strategy.get("runner_instruction") or "").strip()
     if instruction:
         call["runner_instruction"] = instruction

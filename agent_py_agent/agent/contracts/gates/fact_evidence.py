@@ -6,7 +6,7 @@ from typing import Any
 from ...common.value_parsing import sequence_strings
 from ...common.value_parsing import text_value as _text
 from ..evidence_contract import EvidenceContractRequest, evaluate_evidence_contract
-from ..staged_checkpoint_evidence_payloads import claims, source_refs
+from ..staged_checkpoint import claims, source_refs
 from .models import GateDecision, GateFinding
 
 

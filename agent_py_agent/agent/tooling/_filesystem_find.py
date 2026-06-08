@@ -90,11 +90,13 @@ class FindFilesTool(FileSystemTool):
                 self.display_path(target),
                 result_envelope={
                     "page_window": _offset_page_window(
-                        source_path=self.display_path(target),
-                        offset=request.offset,
-                        limit=request.limit,
-                        returned=1,
-                        has_more=False,
+                        _OffsetPageWindowRequest(
+                            source_path=self.display_path(target),
+                            offset=request.offset,
+                            limit=request.limit,
+                            returned=1,
+                            has_more=False,
+                        )
                     )
                 },
             )
@@ -104,64 +106,108 @@ class FindFilesTool(FileSystemTool):
             "没有找到匹配文件",
             result_envelope={
                 "page_window": _offset_page_window(
-                    source_path=self.display_path(target),
-                    offset=request.offset,
-                    limit=request.limit,
-                    returned=0,
-                    has_more=False,
-                )
-            },
-        )
-
-    def _find_in_directory(self, target: Path, request: _FindFilesRequest) -> ToolExecutionResult:
-        results: list[str] = []
-        seen = 0
-        limit_reached = False
-        for item in _iter_find_candidates(target, include_ignored=request.include_ignored):
-            rel = self.display_path(item)
-            if not _matches_find_pattern(rel, item.name, request.pattern):
-                continue
-            if seen < request.offset:
-                seen += 1
-                continue
-            if len(results) >= request.limit:
-                limit_reached = True
-                break
-            results.append(rel)
-            seen += 1
-        if not results:
-            return ToolExecutionResult(
-                "find_files",
-                True,
-                "没有找到匹配文件",
-                result_envelope={
-                    "page_window": _offset_page_window(
+                    _OffsetPageWindowRequest(
                         source_path=self.display_path(target),
                         offset=request.offset,
                         limit=request.limit,
                         returned=0,
                         has_more=False,
                     )
-                },
-            )
-        if limit_reached:
-            results.append(
-                f"... 已截断，next_offset={seen} limit={request.limit}；继续查找请再次调用 find_files 并传入 offset={seen}"
-            )
-        return ToolExecutionResult(
-            "find_files",
-            True,
-            "\n".join(results),
-            result_envelope={
-                "page_window": _offset_page_window(
-                    source_path=self.display_path(target),
-                    offset=request.offset,
-                    limit=request.limit,
-                    returned=seen - request.offset,
-                    has_more=limit_reached,
                 )
             },
         )
+
+    def _find_in_directory(self, target: Path, request: _FindFilesRequest) -> ToolExecutionResult:
+        results, seen, limit_reached = _find_directory_matches(self, target, request)
+        return _find_directory_result(
+            _FindDirectoryResultRequest(self, target, request, results, seen, limit_reached)
+        )
+
+
+@dataclass(frozen=True)
+class _FindDirectoryResultRequest:
+    tool: FindFilesTool
+    target: Path
+    request: _FindFilesRequest
+    results: list[str]
+    seen: int
+    limit_reached: bool
+
+
+@dataclass(frozen=True)
+class _OffsetPageWindowRequest:
+    source_path: str
+    offset: int
+    limit: int
+    returned: int
+    has_more: bool
+
+
+def _find_directory_matches(
+    tool: FindFilesTool,
+    target: Path,
+    request: _FindFilesRequest,
+) -> tuple[list[str], int, bool]:
+    results: list[str] = []
+    seen = 0
+    limit_reached = False
+    for item in _iter_find_candidates(target, include_ignored=request.include_ignored):
+        rel = tool.display_path(item)
+        if not _matches_find_pattern(rel, item.name, request.pattern):
+            continue
+        if seen < request.offset:
+            seen += 1
+            continue
+        if len(results) >= request.limit:
+            limit_reached = True
+            break
+        results.append(rel)
+        seen += 1
+    return results, seen, limit_reached
+
+
+def _find_directory_result(result: _FindDirectoryResultRequest) -> ToolExecutionResult:
+    if not result.results:
+        return _find_directory_empty_result(result.tool, result.target, result.request)
+    if result.limit_reached:
+        result.results.append(
+            f"... 已截断，next_offset={result.seen} limit={result.request.limit}；继续查找请再次调用 find_files 并传入 offset={result.seen}"
+        )
+    return ToolExecutionResult(
+        "find_files",
+        True,
+        "\n".join(result.results),
+        result_envelope={
+            "page_window": _offset_page_window(
+                _OffsetPageWindowRequest(
+                    source_path=result.tool.display_path(result.target),
+                    offset=result.request.offset,
+                    limit=result.request.limit,
+                    returned=result.seen - result.request.offset,
+                    has_more=result.limit_reached,
+                )
+            )
+        },
+    )
+
+
+def _find_directory_empty_result(tool: FindFilesTool, target: Path, request: _FindFilesRequest) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        "find_files",
+        True,
+        "没有找到匹配文件",
+        result_envelope={
+            "page_window": _offset_page_window(
+                _OffsetPageWindowRequest(
+                    source_path=tool.display_path(target),
+                    offset=request.offset,
+                    limit=request.limit,
+                    returned=0,
+                    has_more=False,
+                )
+            )
+        },
+    )
 
 
 @dataclass(frozen=True)
@@ -205,21 +251,14 @@ def _matches_find_pattern(display_path: str, basename: str, pattern: str) -> boo
     return fnmatch.fnmatch(display_path, pattern) or fnmatch.fnmatch(basename, pattern)
 
 
-def _offset_page_window(
-    *,
-    source_path: str,
-    offset: int,
-    limit: int,
-    returned: int,
-    has_more: bool,
-) -> dict[str, int | bool | str]:
+def _offset_page_window(request: _OffsetPageWindowRequest) -> dict[str, int | bool | str]:
     return {
         "kind": "offset_page",
         "tool": "find_files",
-        "source_path": source_path,
-        "offset": offset,
-        "limit": limit,
-        "returned": returned,
-        "next_offset": offset + returned if has_more else 0,
-        "complete": not has_more,
+        "source_path": request.source_path,
+        "offset": request.offset,
+        "limit": request.limit,
+        "returned": request.returned,
+        "next_offset": request.offset + request.returned if request.has_more else 0,
+        "complete": not request.has_more,
     }

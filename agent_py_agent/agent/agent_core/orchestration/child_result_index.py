@@ -1,11 +1,25 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from ...model_visible_refs import current_model_ref, current_model_ref_list
 from ...runtime_errors import runtime_error_report
 from ...subagents.models import TaskStatus, task_status_in
+
+
+@dataclass(frozen=True)
+class ChildResultNodeRefs:
+    registry_refs: list[dict[str, object]]
+    expected_outputs: list[str]
+    primary_refs: list[str]
+    workspace_refs: dict[str, object]
+    recovery_refs: dict[str, object]
+    progress_layer: dict[str, object]
+    final_report_ref: str
+    summary_ref: str
+    checkpoint_ref: str
 
 
 def child_result_index(agent: object, tasks: list[object]) -> list[dict[str, object]]:
@@ -53,19 +67,7 @@ def _child_result_row(task: object) -> dict[str, object]:
 
 
 def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
-    registry_refs = _dict_list(node.get("artifact_registry_refs"))
-    artifact_refs = _string_items(node.get("artifact_refs"))
-    expected_outputs = _node_expected_outputs(node)
-    workspace_refs = dict(node.get("workspace_refs") or {}) if isinstance(node.get("workspace_refs"), dict) else {}
-    recovery_refs = dict(node.get("recovery_refs") or {}) if isinstance(node.get("recovery_refs"), dict) else {}
-    progress_layer = dict(node.get("progress_layer") or {}) if isinstance(node.get("progress_layer"), dict) else {}
-    primary_refs = [ref for item in registry_refs if (ref := current_model_ref(item.get("path")))]
-    primary_refs.extend(current_model_ref_list(artifact_refs))
-    primary_refs.extend(ref for ref in expected_outputs if _looks_like_existing_path(ref))
-    primary_refs = list(dict.fromkeys(primary_refs))
-    final_report_ref = current_model_ref(workspace_refs.get("final_report"))
-    summary_ref = current_model_ref(recovery_refs.get("summary"))
-    checkpoint_ref = current_model_ref(recovery_refs.get("checkpoint"))
+    refs = _child_node_refs(node)
     status = str(node.get("status") or "").strip()
     return {
         "run_id": str(node.get("run_id") or "").strip(),
@@ -76,30 +78,67 @@ def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
         "status": status,
         "verification_status": str(node.get("verification_status") or "").strip(),
         "work_scope_key": str(node.get("work_scope_key") or "").strip(),
-        "expected_outputs": expected_outputs,
-        "primary_artifact_refs": primary_refs,
-        "primary_artifact_stats": _artifact_stats(primary_refs),
-        "artifact_registry_refs": _current_registry_refs(registry_refs),
-        "final_report_ref": final_report_ref,
-        "summary_ref": summary_ref,
-        "checkpoint_ref": checkpoint_ref,
+        "expected_outputs": refs.expected_outputs,
+        "primary_artifact_refs": refs.primary_refs,
+        "primary_artifact_stats": _artifact_stats(refs.primary_refs),
+        "artifact_registry_refs": _current_registry_refs(refs.registry_refs),
+        "final_report_ref": refs.final_report_ref,
+        "summary_ref": refs.summary_ref,
+        "checkpoint_ref": refs.checkpoint_ref,
         "read_order": _read_order(
-            primary_refs,
-            summary_ref if task_status_in(status, {TaskStatus.DONE.value}) else "",
-            final_report_ref if task_status_in(status, {TaskStatus.DONE.value}) else "",
+            refs.primary_refs,
+            refs.summary_ref if task_status_in(status, {TaskStatus.DONE.value}) else "",
+            refs.final_report_ref if task_status_in(status, {TaskStatus.DONE.value}) else "",
         ),
-        "task_root": current_model_ref(workspace_refs.get("task_root")),
-        "agent_work_dir": current_model_ref(workspace_refs.get("agent_work_dir")),
+        "task_root": current_model_ref(refs.workspace_refs.get("task_root")),
+        "agent_work_dir": current_model_ref(refs.workspace_refs.get("agent_work_dir")),
         "progress": node.get("progress", 0.0),
         "current_tool": str(node.get("current_tool") or "").strip(),
-        "latest_summary": str(node.get("latest_summary") or progress_layer.get("latest_summary") or "").strip(),
+        "latest_summary": str(node.get("latest_summary") or refs.progress_layer.get("latest_summary") or "").strip(),
         "last_progress_summary": str(
-            node.get("last_progress_summary") or progress_layer.get("last_progress_summary") or ""
+            node.get("last_progress_summary") or refs.progress_layer.get("last_progress_summary") or ""
         ).strip(),
         "not_done_reason": str(node.get("not_done_reason") or "").strip(),
         "recent_tool_trace": _dict_list(node.get("recent_tool_trace"))[-5:],
-        "readiness": _readiness_label(str(node.get("status") or ""), primary_refs, final_report_ref, summary_ref),
+        "readiness": _readiness_label(str(node.get("status") or ""), refs.primary_refs, refs.final_report_ref, refs.summary_ref),
     }
+
+
+def _child_node_refs(node: dict[str, object]) -> ChildResultNodeRefs:
+    registry_refs = _dict_list(node.get("artifact_registry_refs"))
+    artifact_refs = _string_items(node.get("artifact_refs"))
+    expected_outputs = _node_expected_outputs(node)
+    workspace_refs = _dict_field(node, "workspace_refs")
+    recovery_refs = _dict_field(node, "recovery_refs")
+    progress_layer = _dict_field(node, "progress_layer")
+    primary_refs = _node_primary_refs(registry_refs, artifact_refs, expected_outputs)
+    return ChildResultNodeRefs(
+        registry_refs=registry_refs,
+        expected_outputs=expected_outputs,
+        primary_refs=primary_refs,
+        workspace_refs=workspace_refs,
+        recovery_refs=recovery_refs,
+        progress_layer=progress_layer,
+        final_report_ref=current_model_ref(workspace_refs.get("final_report")),
+        summary_ref=current_model_ref(recovery_refs.get("summary")),
+        checkpoint_ref=current_model_ref(recovery_refs.get("checkpoint")),
+    )
+
+
+def _node_primary_refs(
+    registry_refs: list[dict[str, object]],
+    artifact_refs: list[str],
+    expected_outputs: list[str],
+) -> list[str]:
+    primary_refs = [ref for item in registry_refs if (ref := current_model_ref(item.get("path")))]
+    primary_refs.extend(current_model_ref_list(artifact_refs))
+    primary_refs.extend(ref for ref in expected_outputs if _looks_like_existing_path(ref))
+    return list(dict.fromkeys(primary_refs))
+
+
+def _dict_field(node: dict[str, object], key: str) -> dict[str, object]:
+    value = node.get(key)
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _readiness_label(status: str, primary_refs: list[str], final_report_ref: str, summary_ref: str) -> str:

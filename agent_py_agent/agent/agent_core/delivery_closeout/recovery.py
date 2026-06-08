@@ -6,7 +6,7 @@ from typing import Any
 
 from ...contracts.error_taxonomy import error_contract
 from ...contracts.recovery import recovery_actions_from_gate_decisions
-from ...contracts.staged_checkpoint_acceptance import json_checkpoint_status
+from ...contracts.staged_checkpoint import json_checkpoint_status
 from .artifact_repair import (
     append_artifact_finding_repair_actions,
     failed_findings,

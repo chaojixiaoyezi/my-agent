@@ -100,6 +100,14 @@ class PlannerLLMResult:
     runtime_error: dict[str, object] | None = None
 
 
+@dataclass(frozen=True)
+class StructuredRunnerOutputRequest:
+    agent: object
+    params: SubagentFinalizeParams
+    structured: object
+    repair_state: dict[str, object]
+
+
 def _initial_repair_state(result) -> dict[str, object]:
     return {
         "prompt_for_log": result.prompt,
@@ -175,91 +183,16 @@ class _SubagentLifecycleBase:
         return self._get_subagent_lifecycle_service().run_subagent(options)
 
     def _build_subagent_prompt(self, run_id, max_cards, instruction):
-        context = self.subagents.runner_context.write_execution_context(run_id, max_cards=max_cards)
-        prompt = _build_subagent_runner_prompt(context, instruction)
-        return context, prompt
+        return _build_subagent_prompt(self, run_id, max_cards, instruction)
 
     def _record_subagent_dry_run(self, run_id, active_attempt_id, prompt):
-        return self.subagents.runner_result.record_runner_result(
-            RecordRunnerResultParams(
-                run_id=run_id,
-                attempt_id=active_attempt_id,
-                dry_run=True,
-                ok=True,
-                message="dry-run: 已生成执行上下文和 runner prompt，未调用模型。",
-                prompt=prompt,
-            )
-        )
+        return _record_subagent_dry_run(self, run_id, active_attempt_id, prompt)
 
     def _probe_subagent_channel(self, params: SubagentProbeParams):
-        if not params.probe:
-            return None
-        probe_result = self.subagents.channel_probe.probe_channel(params.run_id)
-        if probe_result.channel_status != "BROKEN":
-            return None
-        context, prompt = self._build_subagent_prompt(
-            params.run_id, params.max_cards, params.instruction
-        )
-        return self.subagents.runner_result.record_runner_result(
-            RecordRunnerResultParams(
-                run_id=params.run_id,
-                attempt_id=params.active_attempt_id,
-                dry_run=False,
-                ok=False,
-                message="通道健康检查为 BROKEN，未启动模型执行。",
-                prompt=prompt,
-                status="CHANNEL_ERROR",
-                verification_status="UNVERIFIED",
-                failure_type=FailureType.CHANNEL.value,
-            )
-        )
+        return _probe_subagent_channel(self, params)
 
     def _handle_subagent_repair(self, params: SubagentRepairParams):
-        structured_repair_ok = False
-        structured_repair_error = ""
-
-        repair_prompt = _build_subagent_runner_repair_prompt(
-            params.context,
-            original_prompt=params.result.prompt,
-            original_response=params.result.response,
-            parse_error=params.structured.parse_error,
-        )
-        try:
-            repair_response = run_with_provider_transient_auto_resume(
-                lambda: self.backend.generate(repair_prompt),
-                policy=getattr(self, "runtime_guard_policy", None),
-            )
-        except Exception as exc:
-            return _repair_failure_tuple(params, exc)
-
-        repaired = parse_subagent_runner_output(repair_response.text)
-        prompt_for_log = _append_runner_repair_prompt(params.result.prompt, repair_prompt)
-        response_for_log = _append_runner_repair_response(params.result.response, repair_response.text)
-        backend_name = repair_response.backend or params.result.backend
-        structured = params.structured
-        message = params.message
-
-        if repaired.found and repaired.ok:
-            structured = repaired
-            structured_repair_ok = True
-            message = "runner 已完成模型调用，并已修复结构化结果，等待独立验收。"
-        elif not structured.found and repaired.found:
-            structured = repaired
-            structured_repair_error = repaired.parse_error
-        else:
-            structured_repair_error = (
-                repaired.parse_error or "repair response still missing structured output"
-            )
-
-        return (
-            structured,
-            structured_repair_ok,
-            structured_repair_error,
-            backend_name,
-            prompt_for_log,
-            response_for_log,
-            message,
-        )
+        return _handle_subagent_repair(self, params)
 
     def _write_subagent_recovery_snapshot(
         self,
@@ -273,87 +206,199 @@ class _SubagentLifecycleBase:
         error_code: str = "",
         tool_calls: list[dict] | None = None,
     ) -> None:
-
-        if not bool(getattr(self.config, "memory_hook_enabled", True)):
-            return
-        snapshot = _recovery_snapshot_params(
-            params,
-            run_id=run_id,
-            user_prompt=user_prompt,
-            response_text=response_text,
-            backend=backend,
-            status=status,
-            error_code=error_code,
-            tool_calls=tool_calls,
-        )
-        try:
-            task = self.subagents.load(snapshot.run_id)
-        except (FileNotFoundError, TypeError):
-            task = None
-        write_recovery_snapshot(
-            _subagent_recovery_snapshot_root(self, task),
-            params=_recovery_snapshot_input(self, snapshot, _recovery_content_paths(task)),
+        _write_subagent_recovery_snapshot(
+            self,
+            _recovery_snapshot_params(
+                params,
+                run_id=run_id,
+                user_prompt=user_prompt,
+                response_text=response_text,
+                backend=backend,
+                status=status,
+                error_code=error_code,
+                tool_calls=tool_calls,
+            ),
         )
 
     def _handle_subagent_run_failure(self, params: SubagentRunFailureParams):
-        failure_type = _subagent_run_failure_type(params.exc)
-        failed_result = self.subagents.runner_result.record_runner_result(
-            RecordRunnerResultParams(
-                run_id=params.run_id,
-                attempt_id=params.active_attempt_id,
-                dry_run=False,
-                ok=False,
-                message=f"runner 执行失败: {params.exc}",
-                prompt=params.prompt,
-                status="BLOCKED",
-                verification_status="UNVERIFIED",
-                failure_type=failure_type,
-            )
-        )
-        self._write_subagent_recovery_snapshot(
-            params=RecoverySnapshotParams(
-                run_id=params.run_id,
-                user_prompt=params.context.goal,
-                response_text=failed_result.message,
-                backend="",
-                status=failed_result.status,
-                error_code=failure_type,
-                tool_calls=[],
-            )
-        )
-        return failed_result
+        return _handle_subagent_run_failure(self, params)
 
     def _finalize_subagent_run(self, params: SubagentFinalizeParams):
-        structured = parse_subagent_runner_output(params.result.response)
-        repair_state = _initial_repair_state(params.result)
-        if not (structured.found and structured.ok):
-            delivery_structured = parsed_output_from_delivery_complete_response(params.result.response)
-            if delivery_structured is not None:
-                structured = delivery_structured
-                repair_state["message"] = "runner 已完成模型调用，运行时 delivery closeout 已通过。"
-        if not (structured.found and structured.ok):
-            repair_state = self._handle_subagent_repair(
-                SubagentRepairParams(
-                    context=params.context,
-                    result=params.result,
-                    structured=structured,
-                    prompt_for_log=repair_state["prompt_for_log"],
-                    response_for_log=repair_state["response_for_log"],
-                    backend_name=repair_state["backend_name"],
-                    message=repair_state["message"],
-                )
-            )
-            structured = repair_state[0]
-            repair_state = _tuple_repair_state(repair_state)
-
-        runner_result = record_finalized_runner_result(
-            FinalizedRunnerRecordRequest(self, params, structured, repair_state)
-        )
-        write_finalized_recovery_snapshot(FinalizedRecoverySnapshotRequest(self, params, runner_result, repair_state))
-        return runner_result
+        return _finalize_subagent_run(self, params)
 
     def run_parent_planner(self, params: RunParentPlannerParams) -> ParentPlannerRecord:
         return _run_parent_planner(self, params)
+
+
+def _build_subagent_prompt(agent, run_id, max_cards, instruction):
+    context = agent.subagents.runner_context.write_execution_context(run_id, max_cards=max_cards)
+    prompt = _build_subagent_runner_prompt(context, instruction)
+    return context, prompt
+
+
+def _record_subagent_dry_run(agent, run_id, active_attempt_id, prompt):
+    return agent.subagents.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=run_id,
+            attempt_id=active_attempt_id,
+            dry_run=True,
+            ok=True,
+            message="dry-run: 已生成执行上下文和 runner prompt，未调用模型。",
+            prompt=prompt,
+        )
+    )
+
+
+def _probe_subagent_channel(agent, params: SubagentProbeParams):
+    if not params.probe:
+        return None
+    probe_result = agent.subagents.channel_probe.probe_channel(params.run_id)
+    if probe_result.channel_status != "BROKEN":
+        return None
+    context, prompt = agent._build_subagent_prompt(params.run_id, params.max_cards, params.instruction)
+    return agent.subagents.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=params.run_id,
+            attempt_id=params.active_attempt_id,
+            dry_run=False,
+            ok=False,
+            message="通道健康检查为 BROKEN，未启动模型执行。",
+            prompt=prompt,
+            status="CHANNEL_ERROR",
+            verification_status="UNVERIFIED",
+            failure_type=FailureType.CHANNEL.value,
+        )
+    )
+
+
+def _handle_subagent_repair(agent, params: SubagentRepairParams):
+    repair_prompt = _build_subagent_runner_repair_prompt(
+        params.context,
+        original_prompt=params.result.prompt,
+        original_response=params.result.response,
+        parse_error=params.structured.parse_error,
+    )
+    try:
+        repair_response = run_with_provider_transient_auto_resume(
+            lambda: agent.backend.generate(repair_prompt),
+            policy=getattr(agent, "runtime_guard_policy", None),
+        )
+    except Exception as exc:
+        return _repair_failure_tuple(params, exc)
+    return _subagent_repair_tuple(params, repair_prompt, repair_response)
+
+
+def _subagent_repair_tuple(params: SubagentRepairParams, repair_prompt: str, repair_response):
+    repaired = parse_subagent_runner_output(repair_response.text)
+    prompt_for_log = _append_runner_repair_prompt(params.result.prompt, repair_prompt)
+    response_for_log = _append_runner_repair_response(params.result.response, repair_response.text)
+    backend_name = repair_response.backend or params.result.backend
+    structured = params.structured
+    message = params.message
+    structured_repair_ok = False
+    structured_repair_error = ""
+
+    if repaired.found and repaired.ok:
+        structured = repaired
+        structured_repair_ok = True
+        message = "runner 已完成模型调用，并已修复结构化结果，等待独立验收。"
+    elif not structured.found and repaired.found:
+        structured = repaired
+        structured_repair_error = repaired.parse_error
+    else:
+        structured_repair_error = repaired.parse_error or "repair response still missing structured output"
+
+    return (
+        structured,
+        structured_repair_ok,
+        structured_repair_error,
+        backend_name,
+        prompt_for_log,
+        response_for_log,
+        message,
+    )
+
+
+def _write_subagent_recovery_snapshot(agent, snapshot: RecoverySnapshotParams) -> None:
+    if not bool(getattr(agent.config, "memory_hook_enabled", True)):
+        return
+    try:
+        task = agent.subagents.load(snapshot.run_id)
+    except (FileNotFoundError, TypeError):
+        task = None
+    write_recovery_snapshot(
+        _subagent_recovery_snapshot_root(agent, task),
+        params=_recovery_snapshot_input(agent, snapshot, _recovery_content_paths(task)),
+    )
+
+
+def _handle_subagent_run_failure(agent, params: SubagentRunFailureParams):
+    failure_type = _subagent_run_failure_type(params.exc)
+    failed_result = agent.subagents.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=params.run_id,
+            attempt_id=params.active_attempt_id,
+            dry_run=False,
+            ok=False,
+            message=f"runner 执行失败: {params.exc}",
+            prompt=params.prompt,
+            status="BLOCKED",
+            verification_status="UNVERIFIED",
+            failure_type=failure_type,
+        )
+    )
+    agent._write_subagent_recovery_snapshot(
+        params=RecoverySnapshotParams(
+            run_id=params.run_id,
+            user_prompt=params.context.goal,
+            response_text=failed_result.message,
+            backend="",
+            status=failed_result.status,
+            error_code=failure_type,
+            tool_calls=[],
+        )
+    )
+    return failed_result
+
+
+def _finalize_subagent_run(agent, params: SubagentFinalizeParams):
+    structured = parse_subagent_runner_output(params.result.response)
+    repair_state = _initial_repair_state(params.result)
+    structured, repair_state = _structured_or_repaired_runner_output(StructuredRunnerOutputRequest(
+        agent=agent,
+        params=params,
+        structured=structured,
+        repair_state=repair_state,
+    ))
+    runner_result = record_finalized_runner_result(
+        FinalizedRunnerRecordRequest(agent, params, structured, repair_state)
+    )
+    write_finalized_recovery_snapshot(FinalizedRecoverySnapshotRequest(agent, params, runner_result, repair_state))
+    return runner_result
+
+
+def _structured_or_repaired_runner_output(request: StructuredRunnerOutputRequest):
+    structured = request.structured
+    repair_state = request.repair_state
+    if not (structured.found and structured.ok):
+        delivery_structured = parsed_output_from_delivery_complete_response(request.params.result.response)
+        if delivery_structured is not None:
+            structured = delivery_structured
+            repair_state["message"] = "runner 已完成模型调用，运行时 delivery closeout 已通过。"
+    if structured.found and structured.ok:
+        return structured, repair_state
+    repaired = request.agent._handle_subagent_repair(
+        SubagentRepairParams(
+            context=request.params.context,
+            result=request.params.result,
+            structured=structured,
+            prompt_for_log=repair_state["prompt_for_log"],
+            response_for_log=repair_state["response_for_log"],
+            backend_name=repair_state["backend_name"],
+            message=repair_state["message"],
+        )
+    )
+    return repaired[0], _tuple_repair_state(repaired)
 
 
 class SimpleAgentSubagentMixin(_SubagentLifecycleBase):
