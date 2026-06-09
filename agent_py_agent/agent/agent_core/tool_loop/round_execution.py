@@ -316,6 +316,8 @@ def _read_call_pointer(payload: dict[str, object]) -> str:
 def _round_context_over_compact_budget(request: ToolRoundExecutionRequest, before_context_count: int) -> bool:
     if not str(request.current_prompt or ""):
         return False
+    if not _persistent_compact_enabled(request.agent, request.params):
+        return False
     policy = runtime_compact_policy(request.agent, save=True)
     threshold = int(policy.trigger_tokens or 0)
     if threshold <= 0:
@@ -324,6 +326,13 @@ def _round_context_over_compact_budget(request: ToolRoundExecutionRequest, befor
     new_context = tool_context[before_context_count:]
     prompt_tokens = estimate_tokens(request.current_prompt) + estimate_tokens(new_context)
     return prompt_tokens >= threshold
+
+
+def _persistent_compact_enabled(agent: object, params: object) -> bool:
+    save = getattr(params, "save", None)
+    if save is not None:
+        return bool(save)
+    return bool(getattr(getattr(agent, "config", None), "auto_save_memory", True))
 
 
 def _tool_name(payload: object) -> str:

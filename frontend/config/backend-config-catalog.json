@@ -3104,7 +3104,7 @@
           {
             "key": "runner_failure_policy",
             "label": "runner_failure_policy（runner failure policy）",
-            "description": "runner_failure_policy 控制 runner 临时失败后的总尝试次数： - \"auto\": 当前等价于最多 2 次，也就是首次失败后下一轮 dispatch 再试一次 - \"off\" / \"none\" / \"disabled\": 不自动重试，总尝试次数为 1 - \"3\" 这类数字字符串：最多尝试 3 次 只重试 runner_error、structured_output_parse_error、tool_result_missing、provider_timeout 这类“执行通道/格式/临时工具结果/模型服务临时超时”问题；能力缺口、验收失败、通道 BROKEN 不自动重跑。",
+            "description": "runner_failure_policy 控制 runner 临时失败后的总尝试次数： - \"auto\": 当前等价于最多 2 次，也就是首次失败后下一轮 dispatch 再试一次 - \"off\" 或 \"0\": 不自动重试，总尝试次数为 1 - \"3\" 这类数字字符串：最多尝试 3 次 只重试 runner_error、structured_output_parse_error、tool_result_missing、provider_timeout 这类“执行通道/格式/临时工具结果/模型服务临时超时”问题；能力缺口、验收失败、通道 BROKEN 不自动重跑。",
             "type": "choice",
             "defaultValue": "auto",
             "currentValue": "auto",
@@ -3120,8 +3120,7 @@
             "choices": [
               "auto",
               "off",
-              "none",
-              "disabled"
+              "0"
             ]
           },
           {
@@ -3189,7 +3188,7 @@
           {
             "key": "runner_timeout_seconds",
             "label": "runner_timeout_seconds（runner timeout seconds）",
-            "description": "create_subagents 自动启动时会用 watch/advance 推进本批 runner。 runner_start_rate 只限制每个调度切片启动多少个，后台会继续扫本批剩余项，不应让主代理立刻退出等人。 runner_timeout_seconds 控制单个 runner 的外层总时长保护： - \"off\" / \"none\" / \"disabled\": 默认，不套外层总时长闹钟；长任务靠心跳、状态、取消/接管工具治理。 - \"auto\": 按任务文本和角色动态计算超时，适合压测或需要自动抢救卡死 runner 的场景。 - \"120\" 这类数字字符串：固定 120 秒。",
+            "description": "create_subagents 自动启动时会用 watch/advance 推进本批 runner。 runner_start_rate 只限制每个调度切片启动多少个，后台会继续扫本批剩余项，不应让主代理立刻退出等人。 runner_timeout_seconds 控制单个 runner 的外层总时长保护： - \"off\" 或 \"0\": 默认，不套外层总时长闹钟；长任务靠心跳、状态、取消/接管工具治理。 - \"auto\": 按任务文本和角色动态计算超时，适合压测或需要自动抢救卡死 runner 的场景。 - \"120\" 这类数字字符串：固定 120 秒。",
             "type": "choice",
             "defaultValue": "off",
             "currentValue": "off",

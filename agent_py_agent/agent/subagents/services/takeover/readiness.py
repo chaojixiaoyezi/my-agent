@@ -133,15 +133,12 @@ def _checkpoint_refs(task: SubAgentTask) -> dict[str, str]:
 
 
 def _context_bundle_refs(task: SubAgentTask) -> dict[str, str]:
+    agent_run_root = Path(task.agent_run_workspace_dir) if task.agent_run_workspace_dir else None
     return {
-        "task_context_bundle": str(Path(task.task_dir) / "context_bundle.json") if task.task_dir else "",
-        "task_context_bundle_md": str(Path(task.task_dir) / "CONTEXT_BUNDLE.md") if task.task_dir else "",
-        "agent_run_context_bundle": str(Path(task.agent_run_workspace_dir) / "context_bundle.json")
-        if task.agent_run_workspace_dir
-        else "",
-        "agent_run_context_bundle_md": str(Path(task.agent_run_workspace_dir) / "CONTEXT_BUNDLE.md")
-        if task.agent_run_workspace_dir
-        else "",
+        "task_context_bundle": str(agent_run_root / "context_bundle.json") if agent_run_root else "",
+        "task_context_bundle_md": str(agent_run_root / "CONTEXT_BUNDLE.md") if agent_run_root else "",
+        "agent_run_context_bundle": str(agent_run_root / "context_bundle.json") if agent_run_root else "",
+        "agent_run_context_bundle_md": str(agent_run_root / "CONTEXT_BUNDLE.md") if agent_run_root else "",
     }
 
 

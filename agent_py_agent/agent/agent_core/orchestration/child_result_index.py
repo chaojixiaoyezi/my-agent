@@ -39,7 +39,6 @@ def _child_result_row(task: object) -> dict[str, object]:
     expected_outputs = _expected_outputs(attrs)
     output_payload, output_error = _output_payload(task)
     primary_artifact_refs = _primary_artifact_refs(output_payload, artifacts, expected_outputs)
-    final_report_ref = current_model_ref(_task_text(task, "agent_run_final_report_md") or _task_text(task, "output_json"))
     status = _task_text(task, "status")
     row: dict[str, object] = {
         "run_id": _task_text(task, "id"),
@@ -53,12 +52,7 @@ def _child_result_row(task: object) -> dict[str, object]:
         "primary_artifact_refs": primary_artifact_refs,
         "primary_artifact_stats": _artifact_stats(primary_artifact_refs),
         "artifact_registry_refs": artifacts,
-        "final_report_ref": final_report_ref,
-        "read_order": _read_order(
-            primary_artifact_refs,
-            "",
-            final_report_ref if task_status_in(status, {TaskStatus.DONE.value}) else "",
-        ),
+        "read_order": _read_order(primary_artifact_refs, ""),
         "task_root": current_model_ref(_task_text(task, "task_workspace_dir")),
     }
     if output_error is not None:
@@ -82,14 +76,9 @@ def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
         "primary_artifact_refs": refs.primary_refs,
         "primary_artifact_stats": _artifact_stats(refs.primary_refs),
         "artifact_registry_refs": _current_registry_refs(refs.registry_refs),
-        "final_report_ref": refs.final_report_ref,
         "summary_ref": refs.summary_ref,
         "checkpoint_ref": refs.checkpoint_ref,
-        "read_order": _read_order(
-            refs.primary_refs,
-            refs.summary_ref if task_status_in(status, {TaskStatus.DONE.value}) else "",
-            refs.final_report_ref if task_status_in(status, {TaskStatus.DONE.value}) else "",
-        ),
+        "read_order": _read_order(refs.primary_refs, refs.summary_ref if task_status_in(status, {TaskStatus.DONE.value}) else ""),
         "task_root": current_model_ref(refs.workspace_refs.get("task_root")),
         "agent_work_dir": current_model_ref(refs.workspace_refs.get("agent_work_dir")),
         "progress": node.get("progress", 0.0),
@@ -100,7 +89,7 @@ def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
         ).strip(),
         "not_done_reason": str(node.get("not_done_reason") or "").strip(),
         "recent_tool_trace": _dict_list(node.get("recent_tool_trace"))[-5:],
-        "readiness": _readiness_label(str(node.get("status") or ""), refs.primary_refs, refs.final_report_ref, refs.summary_ref),
+        "readiness": _readiness_label(str(node.get("status") or ""), refs.primary_refs, refs.summary_ref),
     }
 
 
@@ -141,12 +130,12 @@ def _dict_field(node: dict[str, object], key: str) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _readiness_label(status: str, primary_refs: list[str], final_report_ref: str, summary_ref: str) -> str:
+def _readiness_label(status: str, primary_refs: list[str], summary_ref: str) -> str:
     if task_status_in(status, {TaskStatus.DONE.value}):
-        return "result_ready" if (primary_refs or final_report_ref or summary_ref) else "done_without_refs"
+        return "result_ready" if (primary_refs or summary_ref) else "done_without_refs"
     if primary_refs:
         return "partial_artifacts_available"
-    if final_report_ref or summary_ref:
+    if summary_ref:
         return "progress_refs_available"
     if task_status_in(status, {TaskStatus.RUNNING.value, TaskStatus.PLANNING.value}):
         return "running_no_result_yet"
@@ -172,13 +161,10 @@ def _node_expected_outputs(node: dict[str, object]) -> list[str]:
 def _read_order(
     primary_refs: list[str],
     summary_ref: str,
-    final_report_ref: str,
 ) -> list[str]:
     refs = [*primary_refs]
     if not refs and summary_ref:
         refs.append(summary_ref)
-    if not refs and final_report_ref:
-        refs.append(final_report_ref)
     return list(dict.fromkeys(refs))
 
 

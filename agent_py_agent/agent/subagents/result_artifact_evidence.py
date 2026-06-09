@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..artifacts.registry import ArtifactRegistration, register_artifact
+from ..model_visible_refs import has_placeholder_path_segment
 from ..runtime_errors import runtime_error_report
 from .models import EvidencePacket, SubAgentTask
 from .result_artifact_roots import (
@@ -55,21 +56,45 @@ def materialize_missing_declared_output_artifacts(
         if target is None or target.exists() or str(target) in existing_refs:
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_render_declared_output_markdown(task, parsed, ref), encoding="utf-8")
+        source = _copyable_text_artifact_source(target, artifacts)
+        if source is not None:
+            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            summary = "copied subagent text artifact into declared output"
+        else:
+            target.write_text(_render_declared_output_markdown(task, parsed, ref), encoding="utf-8")
+            summary = "materialized structured subagent result for declared output"
         materialized.append(
             {
                 "path": str(target),
                 "kind": "md",
-                "summary": "materialized structured subagent result for declared output",
+                "summary": summary,
             }
         )
     return materialized
+
+
+def _copyable_text_artifact_source(target: Path, artifacts: list[dict[str, object]]) -> Path | None:
+    candidates = [_existing_local_path(artifact_ref(item)) for item in artifacts]
+    candidates = [path for path in candidates if path is not None and path != target]
+    text_candidates = [path for path in candidates if _text_artifact_suffix(path.suffix)]
+    if not text_candidates:
+        return None
+    target_suffix = target.suffix.lower()
+    same_kind = [path for path in text_candidates if path.suffix.lower() == target_suffix]
+    selected = same_kind or text_candidates
+    return selected[0] if len(selected) == 1 else None
+
+
+def _text_artifact_suffix(suffix: str) -> bool:
+    return suffix.lower() in {".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".csv"}
 
 
 def _normalized_artifact_item(task: SubAgentTask, item: object) -> dict[str, object] | None:
     if not isinstance(item, dict):
         return None
     copied = dict(item)
+    if has_placeholder_path_segment(copied.get("path")):
+        return None
     resolved = normalize_artifact_ref(task, copied.get("path"))
     if resolved:
         copied["path"] = resolved
@@ -118,7 +143,7 @@ def _declared_output_refs(task: SubAgentTask) -> list[str]:
     refs: list[str] = []
     for field in ("output_files", "output_refs"):
         refs.extend(_declared_output_ref_values(attrs.get(field)))
-    return list(dict.fromkeys(item.strip() for item in refs if item.strip()))
+    return list(dict.fromkeys(item.strip() for item in refs if item.strip() and not has_placeholder_path_segment(item)))
 
 
 def _declared_output_ref_values(value: object) -> list[str]:
@@ -130,7 +155,7 @@ def _declared_output_ref_values(value: object) -> list[str]:
 
 
 def _materializable_declared_output_path(task: SubAgentTask, ref: str) -> Path | None:
-    if not ref or "://" in ref:
+    if not ref or "://" in ref or has_placeholder_path_segment(ref):
         return None
     try:
         path = Path(ref).expanduser()
@@ -231,7 +256,7 @@ def _registry_workspace_root(task: SubAgentTask, path: Path | None) -> Path | No
 
 def normalize_artifact_ref(task: SubAgentTask, value: object) -> str:
     text = str(value or "").strip()
-    if not text or "://" in text:
+    if not text or "://" in text or has_placeholder_path_segment(text):
         return text
     try:
         path = Path(text).expanduser()

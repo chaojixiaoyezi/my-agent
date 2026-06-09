@@ -62,6 +62,26 @@ class GatewayPollRequest:
     stream_output: bool
 
 
+@dataclass(frozen=True)
+class GatewayPollResult:
+    payload: dict[str, Any]
+    streamed_text: bool
+
+
+@dataclass(frozen=True)
+class GatewaySubmittedAsk:
+    request_id: str
+    request_path: object
+    response_path: object
+
+
+@dataclass
+class GatewayStreamState:
+    chunks_printed: int = 0
+    chunk_offset: int = 0
+    visible_chunks: int = 0
+
+
 def cmd_gateway(args) -> int:
 
     print("请指定 gateway 子命令：start / supervisor-start / status / stop / restart / logs / ask / result / start-all。", file=sys.stderr)
@@ -144,28 +164,38 @@ def _handle_active_work_prompt(agent) -> int | None:
     return None
 
 
-def _stream_chunk_lines(chunk_path: Path, chunks_printed: int, spinner, chunk_offset_ref: list[int] | None = None) -> int:
+def _stream_chunk_lines(
+    chunk_path: Path,
+    spinner,
+    state: GatewayStreamState | None = None,
+) -> int:
     readable_chunk_path = _readable_chunk_path(chunk_path)
     if readable_chunk_path is None:
-        return chunks_printed
+        return state.chunks_printed if state else 0
     try:
-        data = _read_stream_chunk_data(readable_chunk_path, chunk_offset_ref)
+        data = _read_stream_chunk_data(readable_chunk_path, state)
     except OSError as exc:
         print(f"gateway stream chunk load_error path={readable_chunk_path} message={exc}", file=sys.stderr)
-        return chunks_printed
-    lines = data.splitlines() if chunk_offset_ref is not None else data.splitlines()[chunks_printed:]
+        return state.chunks_printed if state else 0
+    chunks_printed = state.chunks_printed if state else 0
+    lines = data.splitlines() if state is not None else data.splitlines()[chunks_printed:]
     for line in lines:
-        chunks_printed += _write_stream_chunk_line(line, chunks_printed, spinner)
+        consumed, visible = _write_stream_chunk_line(line, chunks_printed, spinner)
+        chunks_printed += consumed
+        if visible and state is not None:
+            state.visible_chunks += 1
+    if state is not None:
+        state.chunks_printed = chunks_printed
     return chunks_printed
 
 
-def _read_stream_chunk_data(readable_chunk_path: Path, chunk_offset_ref: list[int] | None) -> str:
+def _read_stream_chunk_data(readable_chunk_path: Path, state: GatewayStreamState | None) -> str:
     with open(readable_chunk_path, encoding="utf-8") as f:
-        if chunk_offset_ref is not None:
-            f.seek(max(0, chunk_offset_ref[0]))
+        if state is not None:
+            f.seek(max(0, state.chunk_offset))
         data = f.read()
-        if chunk_offset_ref is not None:
-            chunk_offset_ref[0] = f.tell()
+        if state is not None:
+            state.chunk_offset = f.tell()
         return data
 
 
@@ -176,9 +206,9 @@ def _readable_chunk_path(chunk_path: Path) -> Path | None:
     return None
 
 
-def _write_stream_chunk_line(line: str, chunks_printed: int, spinner) -> int:
+def _write_stream_chunk_line(line: str, chunks_printed: int, spinner) -> tuple[int, bool]:
     if not line.strip():
-        return 1
+        return 1, False
     try:
         obj = json.loads(line)
     except json.JSONDecodeError as exc:
@@ -187,58 +217,58 @@ def _write_stream_chunk_line(line: str, chunks_printed: int, spinner) -> int:
             f"line={chunks_printed + 1} category=json_decode message={exc}",
             file=sys.stderr,
         )
-        return 1
+        return 1, False
     if not isinstance(obj, dict):
         print(
             "gateway stream chunk load_error "
             f"line={chunks_printed + 1} category=non_object_root",
             file=sys.stderr,
         )
-        return 1
-    if obj.get("text"):
+        return 1, False
+    visible = bool(obj.get("text"))
+    if visible:
         spinner.stop()
     sys.stdout.write(str(obj.get("text", "")))
     sys.stdout.flush()
-    return 1
+    return 1, visible
 
 
-def _flush_stream_chunks(request: GatewayPollRequest, chunks_printed: int, chunk_offset_ref: list[int]) -> int:
+def _flush_stream_chunks(request: GatewayPollRequest, state: GatewayStreamState) -> int:
     if not request.stream_output:
-        return chunks_printed
-    return _stream_chunk_lines(request.chunk_path, chunks_printed, request.spinner, chunk_offset_ref)
+        return state.chunks_printed
+    return _stream_chunk_lines(request.chunk_path, request.spinner, state)
 
 
-def _wait_for_gateway_response(request: GatewayPollRequest) -> dict[str, Any]:
-    chunks_printed = 0
-    chunk_offset_ref = [0]
+def _wait_for_gateway_response(request: GatewayPollRequest) -> GatewayPollResult:
+    stream_state = GatewayStreamState()
     response: dict[str, Any] = {}
     response_poll_state = GatewayResponsePollState()
 
     while time.time() <= request.deadline:
-        chunks_printed = _flush_stream_chunks(request, chunks_printed, chunk_offset_ref)
+        _flush_stream_chunks(request, stream_state)
         response = read_gateway_response_file_when_ready(
             request.response_path,
             state=response_poll_state,
             context="gateway.cli.response.read",
         )
         if response:
-            _flush_stream_chunks(request, chunks_printed, chunk_offset_ref)
+            _flush_stream_chunks(request, stream_state)
             break
         time.sleep(0.1)
 
-    return response
+    return GatewayPollResult(response, bool(stream_state.visible_chunks))
 
 
-def _poll_gateway_response(ctx: GatewayAskContext) -> dict[str, Any]:
+def _poll_gateway_response(ctx: GatewayAskContext) -> GatewayPollResult:
     chunk_path = gateway_chunk_path(ctx.paths, ctx.request_id)
     spinner = ThinkingSpinner()
     if ctx.stream_output:
         spinner.start()
     deadline = time.time() + max(0.0, ctx.timeout)
-    response = _wait_for_gateway_response(GatewayPollRequest(chunk_path, ctx.response_path, deadline, spinner, ctx.stream_output))
+    result = _wait_for_gateway_response(GatewayPollRequest(chunk_path, ctx.response_path, deadline, spinner, ctx.stream_output))
     if ctx.stream_output:
         spinner.stop()
-    return response
+    return result
 
 
 def _handle_gateway_timeout(ctx: GatewayAskContext) -> int:
@@ -262,18 +292,7 @@ def _handle_gateway_timeout(ctx: GatewayAskContext) -> int:
     return 2
 
 
-def cmd_gateway_ask(args) -> int:
-
-    agent = make_agent(args)
-    paths = gateway_paths(agent)
-    pid, alive = wait_for_gateway_running(
-        paths,
-        timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 10) or 10),
-    )
-    if not alive:
-        print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
-        return 2
-
+def _submit_gateway_ask(args, agent, paths) -> GatewaySubmittedAsk:
     request_id, request_path, response_path = submit_gateway_ask(
         paths,
         params=GatewayAskParams(
@@ -286,28 +305,54 @@ def cmd_gateway_ask(args) -> int:
             agent=agent,
         ),
     )
-    if args.no_wait:
-        print(f"queued request_id={request_id}")
-        print(f"request: {request_path}")
-        print(f"response: {response_path}")
-        return 0
+    return GatewaySubmittedAsk(request_id, request_path, response_path)
 
-    # Synchronous mode: poll for streaming chunks and response file.
+
+def _gateway_ask_context(args, agent, paths, submitted: GatewaySubmittedAsk) -> GatewayAskContext:
     timeout = args.timeout if args.timeout is not None else agent.config.gateway_request_timeout
-    ask_ctx = GatewayAskContext(
+    return GatewayAskContext(
         agent,
         paths,
-        request_id,
-        request_path,
-        response_path,
+        submitted.request_id,
+        submitted.request_path,
+        submitted.response_path,
         timeout,
         stream_output=not args.json,
     )
-    response = _poll_gateway_response(ask_ctx)
+
+
+def cmd_gateway_ask(args) -> int:
+
+    agent = make_agent(args)
+    paths = gateway_paths(agent)
+    pid, alive = wait_for_gateway_running(
+        paths,
+        timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 10) or 10),
+    )
+    if not alive:
+        print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
+        return 2
+
+    submitted = _submit_gateway_ask(args, agent, paths)
+    if args.no_wait:
+        print(f"queued request_id={submitted.request_id}")
+        print(f"request: {submitted.request_path}")
+        print(f"response: {submitted.response_path}")
+        return 0
+
+    # Synchronous mode: poll for streaming chunks and response file.
+    ask_ctx = _gateway_ask_context(args, agent, paths, submitted)
+    result = _poll_gateway_response(ask_ctx)
+    response = result.payload
 
     if not response:
         return _handle_gateway_timeout(ask_ctx)
-    return print_gateway_response(response, json_mode=args.json, show_prompt=args.show_prompt)
+    return print_gateway_response(
+        response,
+        json_mode=args.json,
+        show_prompt=args.show_prompt,
+        suppress_response=result.streamed_text,
+    )
 
 
 def cmd_gateway_result(args) -> int:

@@ -263,6 +263,7 @@ def build_status_suggestions(agent: SimpleAgent, payload: dict) -> list[str]:
     suggestions: list[str] = []
     gateway = payload["gateway"]
     counts = gateway["request_counts"]
+    archive_counts = gateway.get("archive_request_counts", {})
     local_store = payload["local_store"]
     hot_count = int(payload["subagents"]["hot_count"])
     if gateway["status"] == "stopped" and (counts.get("pending", 0) or counts.get("processing", 0)):
@@ -273,7 +274,7 @@ def build_status_suggestions(agent: SimpleAgent, payload: dict) -> list[str]:
         suggestions.append("gateway heartbeat 已过期：运行 `my-agent gateway restart --force`。")
     if counts.get("failed", 0):
         suggestions.append("gateway failed 队列非空：运行 `my-agent gateway logs` 和 `my-agent timeline --source-type gateway_request` 排查。")
-    if local_store["record_count"] == 0 and (_memory_record_count(agent) or agent.subagents.list_runs() or any(counts.values())):
+    if local_store["record_count"] == 0 and (_memory_record_count(agent) or agent.subagents.list_runs() or any(counts.values()) or any(archive_counts.values())):
         suggestions.append("LocalStore 为空但已有文件事实源：运行 `my-agent local-rebuild`。")
     if hot_count:
         suggestions.append("存在红灯 subagent：运行 `my-agent subagents-due-check`，必要时再 `my-agent subagents-dispatch --apply`。")

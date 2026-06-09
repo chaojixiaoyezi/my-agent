@@ -63,6 +63,15 @@ def test_tool_effect_gate_requires_approval_for_dangerous_real_actions():
     assert real_with_approval.allowed is True
 
 
+def test_tool_effect_gate_rejects_execution_mode_aliases():
+    for alias in ("plan", "preview", "dry-run", "execute", "apply", "real_run"):
+        decision = evaluate_tool_effect_gate(
+            ToolEffectFacts("write_file", effect="mutating", mode=alias, idempotency_key=f"idem-{alias}")
+        )
+
+        assert decision.finding_codes == ("TOOL_MODE_INVALID",)
+
+
 def test_tool_manifest_gate_requires_effect_schema_and_idempotency_contract():
     missing_effect = evaluate_tool_manifest_gate(ToolManifestFacts("write_file", parameters={"path": "string"}))
     missing_schema = evaluate_tool_manifest_gate(ToolManifestFacts("write_file", effect="mutating"))

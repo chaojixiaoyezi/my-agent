@@ -194,7 +194,7 @@ class TestValidateWriteBoundaryAllowedRoots:
         )
         assert result == ""
 
-    def test_path_outside_allowed_roots_no_longer_blocks(self, tmp_path):
+    def test_path_outside_allowed_roots_blocks_when_scope_is_declared(self, tmp_path):
         allowed = tmp_path / "allowed"
         allowed.mkdir()
         result = validate_write_boundary(
@@ -203,7 +203,7 @@ class TestValidateWriteBoundaryAllowedRoots:
             workspace_root=tmp_path,
             write_boundary={"allowed_write_roots": [str(allowed)]},
         )
-        assert result == ""
+        assert "不在 allowed_write_roots 内" in result
 
     def test_path_inside_allowed_roots(self, tmp_path):
         allowed = tmp_path / "allowed"
@@ -443,6 +443,18 @@ class TestValidateWriteBoundaryEdgeCases:
             write_boundary={"allowed_write_roots": [str(extra)]},
         )
         assert result == ""
+
+    def test_sibling_task_date_directory_is_not_allowed_by_current_task_scope(self, tmp_path):
+        current_task = tmp_path / "tasks" / "2026-06-09" / "task-1"
+        sibling_date = tmp_path / "tasks" / "2026-09-09" / "task-1"
+        current_task.mkdir(parents=True)
+        result = validate_write_boundary(
+            "write_file",
+            {"path": str(sibling_date / "output" / "report.md")},
+            workspace_root=tmp_path,
+            write_boundary={"allowed_write_roots": [str(current_task)]},
+        )
+        assert "不在 allowed_write_roots 内" in result
 
     def test_all_write_tools_validated(self, tmp_path):
         allowed = tmp_path / "allowed"

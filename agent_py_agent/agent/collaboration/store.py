@@ -29,9 +29,8 @@ from .models import (
 )
 from .request_status import (
     CollaborationRequestStatus,
-    canonical_case_status_for_update,
-    canonical_request_status_for_update,
     case_overview_row,
+    case_status_for_update,
     case_status_protocol_metadata,
     case_status_text,
     case_window_status,
@@ -45,6 +44,7 @@ from .request_status import (
     request_has_required_evidence,
     request_is_effectively_timed_out,
     request_response_status,
+    request_status_for_update,
     request_status_protocol_metadata,
     unavailable_target_agent_ids_by_request,
 )
@@ -302,7 +302,7 @@ class CollaborationCaseStore(CollaborationCapabilityStore):
         next_metadata.update(case_status_protocol_metadata(raw_status))
         updated = replace(
             case,
-            status=canonical_case_status_for_update(raw_status),
+            status=case_status_for_update(raw_status, case.status),
             updated_at=now if now is not None else __import__("time").time(),
             metadata=next_metadata,
         )
@@ -322,7 +322,8 @@ class CollaborationCaseStore(CollaborationCapabilityStore):
             "metadata": request.get("metadata") or {},
             "now": request.get("now"),
         }
-        canonical_status = canonical_case_status_for_update(status_text)
+        case = self.load_case(case_id)
+        canonical_status = case_status_for_update(status_text, case.status)
         protocol_metadata = case_status_protocol_metadata(status_text)
         kwargs["metadata"] = {**kwargs["metadata"], **protocol_metadata}
         self._validate_terminal_case_status(case_id, canonical_status, kwargs)
@@ -515,7 +516,7 @@ class CollaborationRequestStatusStore(CollaborationRequestStore):
     ) -> CollaborationRequest:
         current = current_time(kwargs.get("now"))
         metadata = self._next_request_metadata(request, status_text, kwargs)
-        canonical_status = canonical_request_status_for_update(status_text)
+        canonical_status = request_status_for_update(status_text, request.status)
         targets = request_update_targets(
             explicit_targets=kwargs.get("target_agent_ids"),
             metadata=kwargs.get("metadata") or {},

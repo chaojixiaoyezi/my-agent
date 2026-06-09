@@ -348,11 +348,31 @@ def test_items_without_output_files_get_task_local_child_output_ref(tmp_path):
     assert payload["child_result_index"][0]["read_order"] == []
     assert payload["child_output_read_order"][0]["expected_outputs"] == [first]
     assert payload["child_output_read_order"][0]["read_order"] == payload["child_result_index"][0]["read_order"]
-    assert payload["status_tool_call"] == {"tool": "inspect_agent_tree", "params": {}}
+    assert payload["status_tool_call"]["tool"] == "wait"
     assert payload["wait_tool_call"]["tool"] == "wait"
     assert "subagent_workspace" not in payload
     assert "agent_work_dir" not in payload["tasks"][0]
     assert payload["tasks"][0]["attributes"]["system_default_output_ref"] is True
+
+
+def test_output_prefixed_task_output_file_does_not_duplicate_output_dir(tmp_path):
+    """output/foo.md 已经是任务 output 下路径，不能再拼成 output/output/foo.md。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    task_root = tmp_path / "tasks" / "2026-06-09" / "path-normalization"
+    agent._current_run_task_workspace = str(task_root)
+    tool = CreateSubagentsTool(agent)
+
+    payload = json.loads(tool.execute({
+        "goal": "写一份摘要。",
+        "role": "worker",
+        "output_files": ["output/report.md"],
+    }).output)
+
+    output_ref = payload["tasks"][0]["attributes"]["output_files"][0]
+    assert output_ref == str((task_root / "output" / "report.md").resolve(strict=False))
+    assert "/output/output/" not in output_ref
 
 
 def test_count_mode_shared_output_files_are_split_to_unique_child_refs(tmp_path):
@@ -379,8 +399,13 @@ def test_count_mode_shared_output_files_are_split_to_unique_child_refs(tmp_path)
     assert first_output != second_output
     assert first_output.endswith("/work/child_outputs/01-agent-d1-worker-1.md")
     assert second_output.endswith("/work/child_outputs/02-agent-d1-worker-2.md")
-    assert first_attrs["shared_requested_output_files"] == ["scenario_outputs/SUBAGENT_RESULT.md"]
-    assert second_attrs["shared_requested_output_files"] == ["scenario_outputs/SUBAGENT_RESULT.md"]
+    expected_shared = str(
+        (tmp_path / "tasks" / "2026-06-07" / "scenario" / "output" / "scenario_outputs" / "SUBAGENT_RESULT.md").resolve(
+            strict=False
+        )
+    )
+    assert first_attrs["shared_requested_output_files"] == [expected_shared]
+    assert second_attrs["shared_requested_output_files"] == [expected_shared]
     assert first_attrs["shared_output_split_policy"] == "count_mode_task_local_child_outputs"
     assert payload["child_result_index"][0]["expected_outputs"] == [first_output]
     assert payload["child_result_index"][1]["expected_outputs"] == [second_output]

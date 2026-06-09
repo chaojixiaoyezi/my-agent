@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
-from .content_checks import CatContentCheckRequest, normalize_cat_content_check
 from .inferred_content_items import (
     ContentCheckInferenceRequest,
     inferred_content_check_items,
@@ -43,6 +42,17 @@ class TestItemPreparationContext:
     artifact_expected_content: dict[Path, str]
     default_dir: Path | None
     workspace_root: Path
+
+
+@dataclass(frozen=True)
+class CatContentCheckRequest:
+    """Bundle inputs used to normalize one cat-style content assertion."""
+
+    __test__: ClassVar[bool] = False
+
+    item: dict[str, Any]
+    workspace_root: Path
+    artifact_expected_content: dict[Path, str]
 
 
 def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, Any]]:
@@ -135,6 +145,61 @@ def _normalize_leading_cd_command(item: dict[str, Any], workspace_root: Path) ->
     item["command"] = command
     if not str(item.get("working_dir") or item.get("cwd") or "").strip():
         item["working_dir"] = _relative_or_absolute(working_dir, workspace_root)
+
+
+def normalize_cat_content_check(request: CatContentCheckRequest) -> dict[str, Any]:
+    """Return a normalized item when a cat command can be represented as content_check."""
+
+    item = dict(request.item)
+    method = str(item.get("validation_method") or "command").strip().lower() or "command"
+    if method != "command":
+        return item
+    path = _cat_command_path(str(item.get("command") or ""), request.workspace_root)
+    if path is None:
+        return item
+    expected = _expected_content_for_cat_item(item, path, request.artifact_expected_content)
+    if not expected:
+        return item
+    item["validation_method"] = "content_check"
+    item["file_path"] = _relative_or_absolute(path, request.workspace_root)
+    item["content_equals"] = expected
+    item["match_mode"] = "exact"
+    return item
+
+
+def _cat_command_path(command: str, workspace_root: Path) -> Path | None:
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return None
+    if len(argv) != 2 or Path(argv[0]).name.lower() != "cat":
+        return None
+    return _workspace_path(argv[1], workspace_root)
+
+
+def _expected_content_for_cat_item(
+    item: dict[str, Any],
+    path: Path,
+    artifact_expected_content: dict[Path, str],
+) -> str:
+    for key in ("content_equals", "expected_content", "content_pattern", "expected_stdout", "expected_output"):
+        value = str(item.get(key) or "").strip()
+        if _usable_expected_literal(value, path):
+            return value
+    expected = artifact_expected_content.get(path, "")
+    return expected if _usable_expected_literal(expected, path) else ""
+
+
+def _usable_expected_literal(value: str, path: Path) -> bool:
+    value = value.strip()
+    if not value or len(value) > 200:
+        return False
+    if "/" in value or "\\" in value or value == path.name:
+        return False
+    lowered = value.lower()
+    if lowered.endswith((".txt", ".py", ".md", ".json", ".html", ".css", ".js")):
+        return False
+    return True
 
 
 def _safe_leading_cd_command(command: str, workspace_root: Path) -> tuple[Path, str] | None:

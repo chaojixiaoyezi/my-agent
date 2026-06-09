@@ -19,7 +19,7 @@ def test_takeover_readiness_packet_collects_refs_without_reading_artifact_body(t
         thought="接管者需要先读 refs，不要直接读完整正文。",
         plan=["写 artifact", "失败交接", "等待接管"],
     )
-    artifact_path = tmp_path / task.id / "reports" / "blackbox.txt"
+    artifact_path = Path(task.reports_dir) / "blackbox.txt"
     artifact_path.write_text("VERY_LARGE_ARTIFACT_BODY_SHOULD_NOT_APPEAR_IN_PACKET\n", encoding="utf-8")
     task.status = "FAILED"
     task.failure_type = "tool_output_context_overflow"
@@ -41,7 +41,7 @@ def test_takeover_readiness_packet_collects_refs_without_reading_artifact_body(t
     assert packet["run"]["run_id"] == task.id
     assert packet["run"]["root_id"] == task.root_id
     assert packet["failure_handoff_ref"] == loaded.failure_handoff_json
-    assert packet["context_bundle_refs"]["task_context_bundle"] == str(Path(loaded.task_dir) / "context_bundle.json")
+    assert packet["context_bundle_refs"]["task_context_bundle"] == str(Path(loaded.agent_run_workspace_dir) / "context_bundle.json")
     assert packet["context_bundle_refs"]["agent_run_context_bundle"] == (
         str(Path(loaded.agent_run_workspace_dir) / "context_bundle.json")
     )
@@ -93,7 +93,7 @@ def test_rescue_context_refs_use_takeover_readiness_read_order_without_artifact_
         thought="rescue should inspect refs, not large artifact bodies",
         plan=["write artifact", "block", "handoff"],
     )
-    artifact_path = Path(task.task_dir) / "reports" / "blackbox.txt"
+    artifact_path = Path(task.reports_dir) / "blackbox.txt"
     artifact_path.write_text("DO_NOT_PULL_ARTIFACT_BODY_INTO_RESCUE_CONTEXT\n", encoding="utf-8")
     task.status = "BLOCKED"
     task.failure_type = "tool_output_context_overflow"
@@ -135,7 +135,7 @@ def test_rescue_packet_records_refs_only_policy_and_escalation_without_artifact_
         thought="rescue packet should stay metadata-only",
         plan=["write artifact", "block"],
     )
-    artifact_path = Path(task.task_dir) / "reports" / "blackbox.txt"
+    artifact_path = Path(task.reports_dir) / "blackbox.txt"
     artifact_path.write_text("DO_NOT_PULL_ARTIFACT_BODY_INTO_RESCUE_PACKET\n", encoding="utf-8")
     task.status = "FAILED"
     task.failure_type = "tool_output_context_overflow"

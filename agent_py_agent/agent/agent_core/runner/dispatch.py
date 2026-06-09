@@ -21,7 +21,7 @@ from ...subagents.models import (
     RETRYABLE_RUNNER_FAILURE_TYPES,
     TaskStatus,
     VerificationStatus,
-    normalize_failure_type,
+    known_failure_type,
     normalize_verification_status,
     task_has_status,
     task_status_in,
@@ -78,7 +78,7 @@ def _runner_max_attempts(policy: str, *, runtime_policy: object = None) -> int:
     value = str(policy).strip().lower()
     if value in {"", "auto"}:
         return runtime_guard_int("runner_failure_retry_limit", 2, policy=runtime_policy)
-    if value in {"off", "none", "disabled", "false", "no"}:
+    if value in {"off", "0"}:
         return 0
     try:
         return max(0, int(value))
@@ -97,7 +97,7 @@ def _same_run_redispatch_limit(value: object = None, *, runtime_policy: object =
 
 def _runner_failure_type(task: SubAgentTask) -> str:
 
-    return normalize_failure_type(getattr(task, "failure_type", ""))
+    return known_failure_type(getattr(task, "failure_type", ""))
 
 
 def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:

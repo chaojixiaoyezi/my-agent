@@ -64,8 +64,8 @@ def materialized_delivery_contract(
     _normalize_delivery_quality_contract(contract)
     _derive_fact_evidence_contract(contract)
     _derive_user_requested_output_artifacts(contract, user_prompt)
+    _drop_prompt_source_path_artifacts(contract, user_prompt)
     _derive_prompt_directory_coverage_contract(contract, user_prompt, workspace_root)
-    _derive_prompt_report_artifact_contract(contract, user_prompt)
     _normalize_target_coverage_contract(contract, user_prompt, workspace_root)
     _preserve_explicit_bootstrap_contract(contract)
     _attach_source_contract_repair_diagnostics(contract, user_prompt)
@@ -124,7 +124,6 @@ def delivery_contract_from_user_prompt_structure(
     if not contract:
         contract = {"schema_version": SCHEMA_VERSION, "artifacts": []}
         _derive_prompt_directory_coverage_contract(contract, user_prompt, workspace_root)
-        _derive_prompt_report_artifact_contract(contract, user_prompt)
         if not isinstance(contract.get("target_coverage_contract"), dict):
             return {}
     doctor = validate_delivery_contract(contract, workspace_root=workspace_root)
@@ -209,12 +208,34 @@ def _looks_like_output_path(path: str) -> bool:
     name = pure.name.lower()
     parent = pure.parent.name.lower()
     output_markers = {"output", "outputs", "result", "results", "report", "reports", "dist", "build", "lab_outputs"}
-    if any(marker in parent or marker in name for marker in output_markers):
+    if any(marker in parent for marker in output_markers):
+        return True
+    if _output_file_name_has_marker(name):
         return True
     parts = [part.lower() for part in pure.parts if part not in ("/", "\\")]
     if parts and not _is_absolute_or_home_path(path) and parts[0] in output_markers:
         return True
     return any(part in output_markers for part in parts[-4:-1])
+
+
+def _output_file_name_has_marker(name: str) -> bool:
+    stem = _pure_path(name).stem.lower()
+    if stem in {"output", "outputs", "result", "results", "report", "reports"}:
+        return True
+    return stem.endswith((
+        "-output",
+        "_output",
+        "-outputs",
+        "_outputs",
+        "-result",
+        "_result",
+        "-results",
+        "_results",
+        "-report",
+        "_report",
+        "-reports",
+        "_reports",
+    ))
 
 
 def _looks_like_user_work_artifact_path(path: str) -> bool:
@@ -253,6 +274,41 @@ def _derive_user_requested_output_artifacts(contract: dict[str, Any], user_promp
         if _promote_output_path_to_existing_artifact(artifacts, path):
             continue
         artifacts.append(_user_requested_output_artifact(path))
+
+
+def _drop_prompt_source_path_artifacts(contract: dict[str, Any], user_prompt: str) -> None:
+    artifacts = contract.get("artifacts")
+    if not isinstance(artifacts, list):
+        return
+    source_paths = set(_prompt_source_path_candidates(user_prompt))
+    if not source_paths:
+        return
+    kept = [
+        artifact
+        for artifact in artifacts
+        if not (
+            isinstance(artifact, dict)
+            and str(artifact.get("preferred_path") or artifact.get("path") or "").strip() in source_paths
+        )
+    ]
+    if len(kept) != len(artifacts):
+        contract["artifacts"] = kept
+
+
+def _prompt_source_path_candidates(user_prompt: str) -> list[str]:
+    output_paths = set(_structural_output_path_candidates(user_prompt))
+    if not output_paths:
+        return []
+    paths: list[str] = []
+    for path in _path_candidates(str(user_prompt or "")):
+        if path in output_paths:
+            continue
+        if _looks_like_output_path(path) or _looks_like_user_work_artifact_path(path):
+            continue
+        if _looks_like_internal_agent_work_path(path):
+            continue
+        paths.append(path)
+    return list(dict.fromkeys(paths))
 
 
 def _structural_output_path_candidates(user_prompt: str) -> list[str]:
@@ -390,26 +446,6 @@ def _user_requested_output_artifact(path: str) -> dict[str, Any]:
     return artifact
 
 
-def _derive_prompt_report_artifact_contract(contract: dict[str, Any], user_prompt: str) -> None:
-    artifacts = contract.get("artifacts")
-    if isinstance(artifacts, list):
-        if any(_is_report_artifact(artifact) for artifact in artifacts):
-            return
-    if not _prompt_requests_final_report(user_prompt):
-        return
-    if not isinstance(artifacts, list):
-        artifacts = []
-        contract["artifacts"] = artifacts
-    artifacts.append(
-        {
-            "artifact_id": "final_report",
-            "kind": "md",
-            "allowed_output_roots": ["output"],
-            "required": True,
-        }
-    )
-
-
 def _is_report_artifact(value: object) -> bool:
     if not isinstance(value, dict):
         return False
@@ -418,11 +454,6 @@ def _is_report_artifact(value: object) -> bool:
         return True
     path = str(value.get("preferred_path") or value.get("path") or "").strip().lower()
     return path.endswith((".md", ".markdown", ".txt", ".docx", ".pdf", ".html", ".htm"))
-
-
-def _prompt_requests_final_report(user_prompt: str) -> bool:
-    text = str(user_prompt or "")
-    return bool(re.search(r"(?:最后|最终|生成|输出|写(?:成|出)?|整理(?:成)?)\S{0,20}报告", text))
 
 
 def _artifact_id_from_output_path(path: str) -> str:

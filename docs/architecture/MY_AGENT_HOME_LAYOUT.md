@@ -104,4 +104,6 @@ workspace/runtime/workspaces/<workspace-scope>/
 - global index 和 owner projection 可重建，不替代正文事实。
 - raw audit 和 tool output 只给审计、恢复和检索，不直接进入 prompt 大正文。
 - `output/` 放最终交付；`work/` 放过程、日志、compact、子代理和验收记录。
-- dangerous roots 继续由安全策略拦截；普通用户指定输出目录不靠 allowed-write-roots 白名单兜住。
+- dangerous roots 继续由安全策略拦截；普通用户指定输出目录不靠 broad allowed-write-roots
+  白名单兜住。子代理 runner 或内部工具调用一旦显式传入 `allowed_write_roots`，该字段就是
+  当前 run 的正向写入边界，用户指定输出目录需要被明确放入边界后才能写。

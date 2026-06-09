@@ -11,6 +11,7 @@ from ..contracts.protocol_status import TOOL_STATUS_DONE, TOOL_STATUS_FAILED
 from ..contracts.tool_protocol_v2 import normalize_tool_call
 from ..local_storage import RuntimeGateLedgerRecord
 from ..local_storage.control_plane_models import AgentEventInput
+from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_records
 
 
@@ -83,6 +84,7 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     boundary = getattr(params, "write_boundary", None)
     merged = dict(boundary) if isinstance(boundary, dict) else {}
     _attach_task_workspace_roots(merged, params)
+    _attach_active_child_output_locks(merged, agent, params)
     guardrail_rows = tool_guardrail_records(agent)
     if guardrail_rows:
         merged["tool_guardrail_records"] = _merged_tool_guardrail_rows(
@@ -120,10 +122,77 @@ def _attach_task_workspace_roots(boundary: dict[str, object], params: object) ->
         text = _text(workspace.get(source_key))
         if text and not _text(boundary.get(target_key)):
             boundary[target_key] = text
-    for key in ("output_dir", "work_dir"):
-        text = _text(workspace.get(key))
-        if text:
-            _append_boundary_path(boundary, "allowed_write_roots", text)
+
+
+def _attach_active_child_output_locks(boundary: dict[str, object], agent: object, params: object) -> None:
+    locks = _active_child_output_refs(agent, params)
+    if not locks:
+        return
+    existing = _string_list(boundary.get("locked_files"))
+    boundary["locked_files"] = [*existing, *(item for item in locks if item not in existing)]
+
+
+def _active_child_output_refs(agent: object, params: object) -> list[str]:
+    subagents = getattr(agent, "subagents", None)
+    if not hasattr(subagents, "list_runs"):
+        return []
+    try:
+        tasks = subagents.list_runs()
+    except (OSError, RuntimeError, ValueError):
+        return []
+    current_ids = _current_task_ids(params)
+    refs: list[str] = []
+    for task in tasks:
+        _append_active_child_output_refs(refs, task, current_ids)
+    return refs
+
+
+def _append_active_child_output_refs(refs: list[str], task: object, current_ids: set[str]) -> None:
+    if not _is_active_child_for_current_run(task, current_ids):
+        return
+    for ref in _declared_output_refs(task):
+        if ref not in refs:
+            refs.append(ref)
+
+
+def _current_task_ids(params: object) -> set[str]:
+    values = {
+        _text(getattr(params, "run_id", "")),
+        _text(getattr(params, "task_id", "")),
+    }
+    attrs = getattr(params, "task_attributes", None)
+    if isinstance(attrs, dict):
+        values.add(_text(attrs.get("conversation_task_id")))
+    return {value for value in values if value}
+
+
+def _is_active_child_for_current_run(task: object, current_ids: set[str]) -> bool:
+    if not current_ids:
+        return False
+    if task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES):
+        return False
+    return _text(getattr(task, "parent_id", "")) in current_ids or _text(getattr(task, "root_id", "")) in current_ids
+
+
+def _declared_output_refs(task: object) -> list[str]:
+    attrs = getattr(task, "attributes", None)
+    refs: list[str] = []
+    if isinstance(attrs, dict):
+        for key in ("output_files", "output_refs", "artifact_refs"):
+            refs.extend(_string_list(attrs.get(key)))
+    for key in ("output_files", "output_refs", "artifact_refs"):
+        refs.extend(_string_list(getattr(task, key, None)))
+    return list(dict.fromkeys(ref for ref in refs if ref))
+
+
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, list | tuple | set):
+        raw_items = value
+    else:
+        return []
+    return [str(item).strip() for item in raw_items if str(item).strip()]
 
 
 def _run_workspace(params: object) -> dict[str, object]:
@@ -134,14 +203,6 @@ def _run_workspace(params: object) -> dict[str, object]:
     if isinstance(contract, dict) and isinstance(contract.get("task_workspace"), dict):
         return dict(contract["task_workspace"])
     return {}
-
-
-def _append_boundary_path(boundary: dict[str, object], key: str, path: str) -> None:
-    existing = boundary.get(key)
-    values = [str(item) for item in existing] if isinstance(existing, list) else []
-    if path not in values:
-        values.append(path)
-    boundary[key] = values
 
 
 def runtime_gate_ledger_record_from_archive(archive_record: dict[str, object]) -> RuntimeGateLedgerRecord | None:

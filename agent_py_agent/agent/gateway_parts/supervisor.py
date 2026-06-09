@@ -1,11 +1,33 @@
 # Gateway supervisor health reporting
 from __future__ import annotations
 
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
+from .daemon_control import (
+    GATEWAY_SERVICE_RESTART_EXIT_CODE,
+    WriteRuntimeStatusParams,
+    acquire_scoped_lock,
+    get_running_pid,
+    get_running_pid_report,
+    read_pid_file,
+    read_runtime_status,
+    release_scoped_lock,
+    remove_pid_file,
+    write_pid_file,
+    write_runtime_status,
+)
 from .io import read_json_file_report
+from .paths import gateway_paths
+from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
 
 
 @dataclass(frozen=True)
@@ -45,26 +67,6 @@ def record_health_load_error(
         f"path={load_error.get('path', '')} "
         f"error={load_error.get('message', '')}"
     )
-
-# Gateway supervisor runtime operations
-"""Runtime operations used by GatewaySupervisor."""
-
-import json
-import os
-import signal
-import subprocess
-import sys
-import time
-from pathlib import Path
-
-from .daemon_control import (
-    WriteRuntimeStatusParams,
-    get_running_pid,
-    write_pid_file,
-    write_runtime_status,
-)
-from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
-
 
 def start_gateway(supervisor) -> int | None:
     supervisor._resolve_agent_and_paths()
@@ -250,38 +252,6 @@ def _finish_supervisor_run(supervisor, supervisor_pid_path: Path) -> None:
         )
     )
     supervisor._log_info("Supervisor stopped")
-
-# Gateway supervisor facade class
-"""gateway watchdog supervisor — monitors gateway health and auto-restarts on crash.
-
-这个文件实现一个独立的后台监督进程，负责监控 gateway 是否崩溃，并在崩溃后自动拉起。
-不依赖 systemd，在 macOS/Linux 上都能跑。
-"""
-
-import json
-import os
-import signal
-import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
-
-from .daemon_control import (
-    GATEWAY_SERVICE_RESTART_EXIT_CODE,
-    WriteRuntimeStatusParams,
-    acquire_scoped_lock,
-    get_running_pid,
-    get_running_pid_report,
-    read_pid_file,
-    read_runtime_status,
-    release_scoped_lock,
-    remove_pid_file,
-    write_pid_file,
-    write_runtime_status,
-)
-from .paths import gateway_paths
-from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
-
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()

@@ -145,6 +145,53 @@ def test_non_file_hard_findings_still_block_strict() -> None:
     assert [(finding.kind, finding.name) for finding in blockers] == [("function", "too_long")]
 
 
+def test_test_file_hard_findings_do_not_block_strict() -> None:
+    findings = [
+        Finding(
+            "function",
+            "agent_py_agent/tests/test_example.py",
+            "large_test",
+            120,
+            100,
+            "hard",
+            "function too long",
+        ),
+        Finding(
+            "function",
+            "scripts/tests/test_release_check.py",
+            "large_script_test",
+            120,
+            100,
+            "hard",
+            "function too long",
+        ),
+        Finding(
+            "function",
+            "tests/test_root_level.py",
+            "large_root_test",
+            120,
+            100,
+            "hard",
+            "function too long",
+        ),
+        Finding(
+            "function",
+            "scripts/release_check.py",
+            "too_long",
+            120,
+            100,
+            "hard",
+            "function too long",
+        ),
+    ]
+
+    blockers = check_code_size.compute_strict_blockers(findings, baseline=None)
+
+    assert [(finding.path, finding.name) for finding in blockers] == [
+        ("scripts/release_check.py", "too_long")
+    ]
+
+
 def test_report_surfaces_high_risk_near_soft_findings(tmp_path) -> None:
     report = tmp_path / "CODE_SIZE_REPORT.md"
     findings = [
@@ -162,7 +209,30 @@ def test_report_surfaces_high_risk_near_soft_findings(tmp_path) -> None:
     write_report(report, findings, ReportRenderContext("strict", False, None, False))
 
     text = report.read_text(encoding="utf-8")
-    assert "- high_risk_findings: 1" in text
+    assert "- strict_scope_high_risk_findings: 1" in text
     assert "## 6. High-risk / near-soft Top 100" in text
     assert "| high-risk | function |" in text
     assert "- blocked: False" in text
+
+
+def test_report_keeps_test_findings_advisory(tmp_path) -> None:
+    report = tmp_path / "CODE_SIZE_REPORT.md"
+    findings = [
+        Finding(
+            "function",
+            "agent_py_agent/tests/test_example.py",
+            "large_test",
+            120,
+            100,
+            "hard",
+            "function too long",
+        )
+    ]
+
+    write_report(report, findings, ReportRenderContext("strict", False, None, False))
+
+    text = report.read_text(encoding="utf-8")
+    assert "- strict_scope_hard_findings: 0" in text
+    assert "- test_advisory_findings: 1" in text
+    assert "## 11. Test Advisory Findings Top 100" in text
+    assert "`agent_py_agent/tests/test_example.py`" in text

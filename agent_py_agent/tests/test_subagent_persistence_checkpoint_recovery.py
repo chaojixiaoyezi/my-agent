@@ -32,7 +32,7 @@ def _create_checkpoint_recovery_task(manager: SubAgentManager, tmp_path: Path):
         ],
         "next_actions": ["补证据链"],
     }
-    (tmp_path / task.id / "output.json").write_text(json.dumps(output_payload), encoding="utf-8")
+    Path(task.output_json).write_text(json.dumps(output_payload), encoding="utf-8")
     task.status = "BLOCKED"
     task.progress = 0.4
     task.current_step = "等待证据"
@@ -43,11 +43,11 @@ def _create_checkpoint_recovery_task(manager: SubAgentManager, tmp_path: Path):
     return task
 
 
-def _assert_checkpoint_recovery_artifacts(tmp_path: Path, task) -> None:
-    checkpoint = json.loads((tmp_path / task.id / "reports" / "checkpoint.json").read_text(encoding="utf-8"))
-    failing_tests = json.loads((tmp_path / task.id / "reports" / "failing_tests.json").read_text(encoding="utf-8"))
-    next_actions = json.loads((tmp_path / task.id / "reports" / "next_actions.json").read_text(encoding="utf-8"))
-    progress_md = (tmp_path / task.id / "reports" / "progress.md").read_text(encoding="utf-8")
+def _assert_checkpoint_recovery_artifacts(task) -> None:
+    checkpoint = json.loads(Path(task.checkpoint_json).read_text(encoding="utf-8"))
+    failing_tests = json.loads(Path(task.failing_tests_json).read_text(encoding="utf-8"))
+    next_actions = json.loads(Path(task.next_actions_json).read_text(encoding="utf-8"))
+    progress_md = Path(task.progress_md).read_text(encoding="utf-8")
 
     assert checkpoint["run_id"] == task.id
     assert checkpoint["status"] == "BLOCKED"
@@ -76,5 +76,6 @@ def test_subagent_persistence_writes_checkpoint_recovery_artifacts(tmp_path) -> 
     manager = SubAgentManager(tmp_path)
     task = _create_checkpoint_recovery_task(manager, tmp_path)
     manager.save(task)
+    loaded = manager.load(task.id)
 
-    _assert_checkpoint_recovery_artifacts(tmp_path, task)
+    _assert_checkpoint_recovery_artifacts(loaded)

@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..model_visible_refs import has_placeholder_path_segment
+
 _ROOT_ATTRIBUTES = (
     "output_dir",
     "reports_dir",
@@ -38,14 +40,34 @@ def artifact_suffix_roots(task: Any) -> list[Path]:
 
 
 def _root_values(task: Any) -> list[object]:
-    values = [getattr(task, name, "") for name in _ROOT_ATTRIBUTES]
-    values.extend(getattr(task, "allowed_write_roots", []) or [])
+    values = [getattr(task, name, "") for name in _ROOT_ATTRIBUTES if _include_root_attribute(task, name)]
+    values.extend(_filtered_allowed_write_roots(task))
     return values
+
+
+def _include_root_attribute(task: Any, name: str) -> bool:
+    if name != "task_dir":
+        return True
+    return not str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
+
+
+def _filtered_allowed_write_roots(task: Any) -> list[object]:
+    roots: list[object] = []
+    locator = _resolved_text(getattr(task, "task_dir", ""))
+    canonical = _resolved_text(getattr(task, "agent_run_workspace_dir", ""))
+    for value in getattr(task, "allowed_write_roots", []) or []:
+        if has_placeholder_path_segment(value):
+            continue
+        resolved = _resolved_text(value)
+        if canonical and locator and resolved and (resolved == locator or resolved.startswith(f"{locator}/")):
+            continue
+        roots.append(value)
+    return roots
 
 
 def _append_existing_root(roots: list[Path], value: object) -> None:
     text = str(value or "").strip()
-    if not text:
+    if not text or has_placeholder_path_segment(text):
         return
     try:
         path = Path(text).expanduser()
@@ -77,3 +99,13 @@ def _path(value: object) -> Path | None:
         return Path(text).expanduser().resolve(strict=False)
     except (OSError, RuntimeError):
         return None
+
+
+def _resolved_text(value: object) -> str:
+    text = str(value or "").strip()
+    if not text or has_placeholder_path_segment(text):
+        return ""
+    try:
+        return str(Path(text).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError):
+        return ""

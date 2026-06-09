@@ -39,7 +39,6 @@ from ..agent.gateway_parts.daemon_control import (
     _utc_now_iso,
     get_running_pid,
     read_pid_record,
-    read_runtime_status,
     remove_pid_file_if_owned,
     write_pid_record,
 )
@@ -251,6 +250,29 @@ def _write_gateway_start_files(paths, *, pid: int, command: list[str]) -> None:
     )
 
 
+def _gateway_ready_for_pid(paths: GatewayPaths, pid: int) -> bool:
+    for path, context in (
+        (paths.state, "gateway.start.state.read"),
+        (paths.heartbeat, "gateway.start.heartbeat.read"),
+    ):
+        report = read_json_file_report(path, context=context)
+        payload = report.payload
+        if int(payload.get("pid") or 0) == pid and str(payload.get("status") or "") == "running":
+            return True
+    return False
+
+
+def _wait_for_gateway_start_ready(paths: GatewayPaths, process, *, timeout: float) -> bool:
+    deadline = time.time() + max(0.0, timeout)
+    while time.time() <= deadline:
+        if _gateway_ready_for_pid(paths, int(process.pid)):
+            return True
+        if process.poll() is not None:
+            return False
+        time.sleep(0.2)
+    return _gateway_ready_for_pid(paths, int(process.pid))
+
+
 def _cmd_gateway_run_setup(agent, paths):
     for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         path.mkdir(parents=True, exist_ok=True)
@@ -264,6 +286,19 @@ def _cmd_gateway_run_setup(agent, paths):
     requeued = recovery["requeued"]
     pid = os.getpid()
     write_pid_record(paths.pid)
+    write_json_file(
+        paths.state,
+        {
+            "status": "starting",
+            "pid": pid,
+            "gateway_workspace": str(paths.root),
+            "subagent_workspace": str(agent.subagents.workspace),
+            "requeued_requests": requeued,
+            "failed_processing_requests": recovery["failed"],
+            "started_at": time.time(),
+        },
+    )
+    print(f"[gateway-run] status=starting pid={pid}", flush=True)
     log_gateway_event(
         agent,
         "gateway_run_started",
@@ -304,11 +339,17 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
     background_thread.start()
     http_server: GatewayHTTPServer | None = None
     http_port = request.http_port
+    pid = os.getpid()
     if http_port > 0:
         http_server = start_http_server(http_port, paths)
-        pid = os.getpid()
-        write_json_file(paths.state, _build_run_state(request, pid))
-        log_gateway_event(agent, "gateway_run_running", _build_run_payload(request, pid))
+    write_json_file(paths.state, _build_run_state(request, pid))
+    log_gateway_event(agent, "gateway_run_running", _build_run_payload(request, pid))
+    print(
+        "[gateway-run] "
+        f"status=running pid={pid} request_workers={max(1, int(agent.config.gateway_request_workers or 1))} "
+        f"http_port={http_port}",
+        flush=True,
+    )
     return stop_event, heartbeat_thread, request_thread, background_thread, http_server
 
 
@@ -337,6 +378,7 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest):
         "gateway_run_cleanup",
         {"status": "cleanup", "pid": request.pid, "updated_at": time.time()},
     )
+    print(f"[gateway-run] status=stopped pid={request.pid}", flush=True)
 
 
 def _run_gateway_watch(context: GatewayRunContext):
@@ -433,10 +475,17 @@ def cmd_gateway_start(args) -> int:
     command = _gateway_start_command(_gateway_start_options_from_args(args, workspace_root=agent.root))
     process = _spawn_gateway_process(paths, command, cwd=ROOT.parent)
     _write_gateway_start_files(paths, pid=process.pid, command=command)
-    wait_for_gateway_running(paths, timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 10) or 10))
+    ready = _wait_for_gateway_start_ready(
+        paths,
+        process,
+        timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 10) or 10),
+    )
     print(f"gateway starting pid={process.pid}")
     print(f"state: {paths.state}")
     print(f"log: {paths.log}")
+    if not ready:
+        print("gateway started but did not become ready before timeout", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -513,10 +562,13 @@ def cmd_gateway_status(args) -> int:
     if state:
         print(f"  status_detail={json.dumps(_gateway_state_detail_for_display(running, state), ensure_ascii=False)}")
 
-    runtime = read_runtime_status(paths.state)
-    if runtime:
-        print(f"  last_heartbeat={runtime.get('updated_at', 'none')}")
-        print(f"  last_status={_gateway_state_status_for_display(running, runtime)}")
+    heartbeat_report = read_json_file_report(paths.heartbeat, context="gateway.cli.status.heartbeat.read")
+    heartbeat = heartbeat_report.payload
+    if heartbeat:
+        print(f"  last_heartbeat={heartbeat.get('updated_at', 'none')}")
+        print(f"  last_status={_gateway_state_status_for_display(running, heartbeat)}")
+    if heartbeat_report.load_error:
+        print("  heartbeat_load_error=" + json.dumps(heartbeat_report.load_error, ensure_ascii=False, sort_keys=True))
     return 0
 
 
@@ -610,9 +662,21 @@ def cmd_gateway_logs(args) -> int:
     if not paths.log.exists():
         print("没有日志文件")
         return 1
-    lines = tail_lines(paths.log, args.lines or 50)
-    print(lines)
+    lines = _current_gateway_log_lines(paths.log, args.lines or 50)
+    for line in lines:
+        print(line)
     return 0
+
+
+def _current_gateway_log_lines(path: Path, line_count: int) -> list[str]:
+    lines = tail_lines(path, 0)
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].startswith("[gateway-run] status=starting"):
+            lines = lines[index:]
+            break
+    if line_count <= 0:
+        return lines
+    return lines[-line_count:]
 
 
 __all__ = [
@@ -630,7 +694,6 @@ __all__ = [
     "make_agent",
     "read_json_file",
     "read_pid_record",
-    "read_runtime_status",
     "remove_pid_file_if_owned",
     "terminate_pid",
     "wait_for_gateway_running",

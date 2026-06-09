@@ -179,10 +179,10 @@ def test_non_protocol_request_status_is_metadata_not_machine_status(tmp_path) ->
     updated = store.update_request_status({'case_id': case.case_id, 'request_id': request.request_id, 'status': "COMPLETED", 'actor_agent_id': "source-b", 'summary': "大写完成不属于协议状态。", 'now': 12.0})
     status = store.case_status(case.case_id)
 
-    assert updated.status == "pending"
+    assert updated.status == "open"
     assert updated.metadata["raw_request_status"] == "COMPLETED"
     assert updated.metadata["request_status_protocol_error"] == "COLLABORATION_REQUEST_STATUS_INVALID"
-    assert status["requests"][0]["status"] == "pending"
+    assert status["requests"][0]["status"] == "open"
     assert status["completed_request_count"] == 0
     assert status["pending_request_count"] == 1
 

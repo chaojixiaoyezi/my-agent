@@ -584,6 +584,30 @@ class TestInspectAgentTreeTool:
         assert payload["next_action"] == "inspect_after_wait"
         assert sleeps == [60]
 
+    def test_wait_tool_returns_early_when_watched_run_is_done(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.runtime import wait_tool
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        sleeps: list[float] = []
+        monkeypatch.setattr(wait_tool.time, "sleep", sleeps.append)
+        monkeypatch.setattr(
+            wait_tool,
+            "agent_tree_status_payload",
+            lambda _agent, _params: {"nodes": [{"run_id": "child-1", "status": "DONE"}]},
+        )
+        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+        agent._current_run_params = SimpleNamespace(source="cli_run", task_id="task-cli-wait")
+
+        payload = json.loads(agent.tools.tools["wait"].execute({"seconds": 60, "run_id": "child-1"}).output)
+
+        assert payload["mode"] == "blocking_sleep"
+        assert payload["slept_seconds"] == 0.0
+        assert payload["wake_reason"] == "watch_tree_ready"
+        assert sleeps == []
+
     def test_tree_inspection_cooldown_can_be_disabled(self, tmp_path):
         import json
 

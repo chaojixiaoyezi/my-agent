@@ -83,7 +83,7 @@ def test_gateway_json_polling_suppresses_stream_chunks(tmp_path, capsys):
     response_path = paths.responses / f"{request_id}.json"
     response_path.write_text(json.dumps({"ok": True, "response": "DONE"}), encoding="utf-8")
 
-    payload = gateway_client._poll_gateway_response(
+    result = gateway_client._poll_gateway_response(
         gateway_client.GatewayAskContext(
             agent=object(),
             paths=paths,
@@ -94,8 +94,10 @@ def test_gateway_json_polling_suppresses_stream_chunks(tmp_path, capsys):
             stream_output=False,
         )
     )
+    payload = result.payload
 
     assert payload["response"] == "DONE"
+    assert result.streamed_text is False
     assert capsys.readouterr().out == ""
 
 
@@ -121,7 +123,7 @@ def test_gateway_poll_reports_bad_response_json(tmp_path):
     response_path = paths.responses / f"{request_id}.json"
     response_path.write_text("{bad json", encoding="utf-8")
 
-    payload = gateway_client._poll_gateway_response(
+    result = gateway_client._poll_gateway_response(
         gateway_client.GatewayAskContext(
             agent=object(),
             paths=paths,
@@ -132,6 +134,7 @@ def test_gateway_poll_reports_bad_response_json(tmp_path):
             stream_output=False,
         )
     )
+    payload = result.payload
 
     assert payload["error_code"] == "GATEWAY_RESPONSE_LOAD_ERROR"
     assert payload["response_load_error"]["context"] == "gateway.cli.response.read"
@@ -178,7 +181,7 @@ def test_gateway_stream_chunk_skips_bad_line_and_continues(tmp_path, capsys):
         encoding="utf-8",
     )
 
-    consumed = gateway_client._stream_chunk_lines(chunk_path, 0, Spinner())
+    consumed = gateway_client._stream_chunk_lines(chunk_path, Spinner())
 
     captured = capsys.readouterr()
     assert consumed == 2
@@ -198,7 +201,8 @@ def test_gateway_stream_reads_archived_chunk_file(tmp_path, capsys):
     archived_chunk_path = done / "req.chunks.jsonl"
     archived_chunk_path.write_text(json.dumps({"text": "ARCHIVED"}) + "\n", encoding="utf-8")
 
-    consumed = gateway_client._stream_chunk_lines(chunk_path, 0, Spinner(), [0])
+    state = gateway_client.GatewayStreamState()
+    consumed = gateway_client._stream_chunk_lines(chunk_path, Spinner(), state)
 
     captured = capsys.readouterr()
     assert consumed == 1

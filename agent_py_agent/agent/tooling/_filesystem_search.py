@@ -94,6 +94,25 @@ class RgHitAppendRequest:
     output_mode: str
 
 
+@dataclass(frozen=True)
+class MatchingLineRequest:
+    path: Path
+    rel: str
+    search: SearchRequest
+    matcher: SearchMatcher
+    include_context: bool
+
+
+@dataclass(frozen=True)
+class AppendItemHitsRequest:
+    item: Path
+    search: SearchRequest
+    matcher: SearchMatcher
+    hits: list[SearchHit]
+    seen_files: set[str]
+    hit_budget: int
+
+
 def build_search_text_spec() -> ToolSpec:
     return ToolSpec(
         name="search_text",
@@ -208,26 +227,43 @@ class SearchTextTool(FileSystemTool):
         seen_files: set[str] = set()
         hit_budget = request.offset + request.limit + 1
         for item in self._iter_search_candidates(target, request):
-            if request.file_glob and not self._matches_file_glob(item, request.file_glob):
+            if not self._should_search_item(item, request):
                 continue
-            for hit in self._iter_search_item_hits(item, request, matcher):
-                if request.output_mode == "files_with_matches":
-                    if hit.rel in seen_files:
-                        continue
-                    seen_files.add(hit.rel)
-                hits.append(hit)
-                if len(hits) >= hit_budget:
-                    return hits
+            if self._append_item_hits(AppendItemHitsRequest(
+                item=item,
+                search=request,
+                matcher=matcher,
+                hits=hits,
+                seen_files=seen_files,
+                hit_budget=hit_budget,
+            )):
+                return hits
         return hits
+
+    def _append_item_hits(self, request: AppendItemHitsRequest) -> bool:
+        for hit in self._iter_search_item_hits(request.item, request.search, request.matcher):
+            if not _append_search_hit(RgHitAppendRequest(
+                hits=request.hits,
+                seen_files=request.seen_files,
+                hit=hit,
+                output_mode=request.search.output_mode,
+            )):
+                continue
+            if len(request.hits) >= request.hit_budget:
+                return True
+        return False
 
     def _collect_counts(self, target: Path, request: SearchRequest, matcher: SearchMatcher) -> dict[str, int]:
         counts: dict[str, int] = {}
         for item in self._iter_search_candidates(target, request):
-            if request.file_glob and not self._matches_file_glob(item, request.file_glob):
+            if not self._should_search_item(item, request):
                 continue
             for hit in self._iter_search_item_hits(item, request, matcher, include_context=False):
                 counts[hit.rel] = counts.get(hit.rel, 0) + 1
         return counts
+
+    def _should_search_item(self, item: Path, request: SearchRequest) -> bool:
+        return not request.file_glob or self._matches_file_glob(item, request.file_glob)
 
     def _iter_search_item_hits(
         self,
@@ -243,16 +279,13 @@ class SearchTextTool(FileSystemTool):
             return
         rel = _item_relative_path(self, item, safe_item)
         try:
-            with safe_item.open("r", encoding="utf-8") as handle:
-                for idx, line in enumerate(handle, start=1):
-                    line = line.rstrip("\n")
-                    if matcher.matches(line):
-                        yield SearchHit(
-                            rel=rel,
-                            line_number=idx,
-                            line=line,
-                            context_lines=_line_window(safe_item, idx, request.context) if include_context else (),
-                        )
+            yield from _iter_matching_lines(MatchingLineRequest(
+                path=safe_item,
+                rel=rel,
+                search=request,
+                matcher=matcher,
+                include_context=include_context,
+            ))
         except UnicodeDecodeError:
             return
         except OSError:
@@ -304,6 +337,43 @@ def _append_search_match(match: SearchMatch, matches: list[str]) -> None:
         if idx == match.line_number:
             continue
         matches.append(f"{match.rel}:{idx}: {_make_snippet(line)}")
+
+
+def _append_search_hit(request: RgHitAppendRequest) -> bool:
+    if request.output_mode != "files_with_matches":
+        request.hits.append(request.hit)
+        return True
+    if request.hit.rel in request.seen_files:
+        return False
+    request.seen_files.add(request.hit.rel)
+    request.hits.append(request.hit)
+    return True
+
+
+def _iter_matching_lines(request: MatchingLineRequest):
+    with request.path.open("r", encoding="utf-8") as handle:
+        yield from _non_null_hits(
+            _matching_line_hit(request, idx, raw_line)
+            for idx, raw_line in enumerate(handle, start=1)
+        )
+
+
+def _non_null_hits(hits):
+    for hit in hits:
+        if hit is not None:
+            yield hit
+
+
+def _matching_line_hit(request: MatchingLineRequest, idx: int, raw_line: str) -> SearchHit | None:
+    line = raw_line.rstrip("\n")
+    if not request.matcher.matches(line):
+        return None
+    return SearchHit(
+        rel=request.rel,
+        line_number=idx,
+        line=line,
+        context_lines=_line_window(request.path, idx, request.search.context) if request.include_context else (),
+    )
 
 
 def _make_snippet(line: str) -> str:
@@ -385,7 +455,7 @@ def _read_rg_hits(
             return [], True
         if hit is None:
             continue
-        if not _append_rg_hit(RgHitAppendRequest(
+        if not _append_search_hit(RgHitAppendRequest(
             hits=hits,
             seen_files=seen_files,
             hit=hit,
@@ -396,17 +466,6 @@ def _read_rg_hits(
             _stop_process(process)
             return hits, True
     return hits, False
-
-
-def _append_rg_hit(request: RgHitAppendRequest) -> bool:
-    if request.output_mode != "files_with_matches":
-        request.hits.append(request.hit)
-        return True
-    if request.hit.rel in request.seen_files:
-        return False
-    request.seen_files.add(request.hit.rel)
-    request.hits.append(request.hit)
-    return True
 
 
 def _rg_counts_from_process(

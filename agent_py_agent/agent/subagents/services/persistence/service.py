@@ -20,6 +20,7 @@ from ....common.value_parsing import sequence_strings
 from ....runtime_errors import runtime_error_report
 from ....user_space.task_compact_rollup import sync_task_compact_rollup
 from ...models import (
+    SUBAGENT_FAILED_RESULT_STATUSES,
     CapabilityGap,
     CapabilityGrant,
     CapabilityRequest,
@@ -31,7 +32,12 @@ from ...models import (
     StatusReport,
     SubAgentTask,
     TakeoverRecord,
+    TaskStatus,
     VerificationEvidence,
+    failure_type_from_task_status,
+    task_has_failure_status,
+    task_has_status,
+    task_status_in,
 )
 from ...utils import _apply_missing_paths
 from ..agent_run_state import (
@@ -43,7 +49,6 @@ from ..agent_run_state import (
 )
 from ..checkpoint_artifacts import build_checkpoint_artifact_payloads
 from ..compact_continue_packet import SubagentContinuePacketRequest, write_subagent_continue_packet
-from ..failure_handoff import refresh_failure_handoff
 from ..takeover.readiness import write_takeover_readiness_files
 from ..task_workspace_adapter import sync_task_workspace_fields
 from .model_normalizers import (
@@ -57,6 +62,8 @@ from .model_normalizers import (
     _normalize_status_report,
 )
 from .projections import sync_derived_projections
+
+_HIGH_RISK_FAILURE_TYPES = {"tool_output_context_overflow", "context_overflow", "blackbox_output_overflow"}
 
 
 @dataclass(frozen=True)
@@ -171,6 +178,7 @@ def _prepare_and_write_state(
     service: SubAgentPersistenceService,
     task: SubAgentTask,
 ) -> tuple[Path, dict[str, Any]]:
+    sync_task_workspace_fields(service.workspace, task)
     task_dir = Path(task.task_dir)
     task_dir.mkdir(parents=True, exist_ok=True)
     service.manager._ensure_work_order_files(task)
@@ -193,7 +201,6 @@ def _prepare_and_write_state(
     checkpoint_artifacts = build_checkpoint_artifact_payloads(task, output_payload)
     if output_report and output_report.load_error:
         append_checkpoint_load_error(checkpoint_artifacts, output_report.load_error)
-    sync_task_workspace_fields(service.workspace, task)
     _sync_task_rollup_if_possible(task)
     if output_report and output_report.load_error:
         append_agent_run_checkpoint_load_error(task, output_report.load_error)
@@ -204,6 +211,10 @@ def _prepare_and_write_state(
     state = build_agent_run_state(task)
     write_agent_run_state(state)
     locator_payload = build_agent_state_locator(task, state)
+    locator_dir = service.workspace / task.id
+    locator_dir.mkdir(parents=True, exist_ok=True)
+    write_json_file_atomic(locator_dir / "task.json", locator_payload)
+    write_json_file_atomic(locator_dir / "run.json", locator_payload)
     write_json_file_atomic(task_dir / "task.json", locator_payload)
     write_json_file_atomic(task_dir / "run.json", locator_payload)
     return task_dir, build_owner_agent_projection(task, state)
@@ -293,6 +304,63 @@ def normalize_failure_handoff(value: object) -> FailureHandoff:
         payload[key] = sequence_strings(payload.get(key), allow_scalar=True)
     payload["created_at"] = _safe_float(payload.get("created_at"))
     return FailureHandoff(**payload)
+
+
+def refresh_failure_handoff(task: SubAgentTask) -> FailureHandoff:
+    if not should_write_failure_handoff(task):
+        task.failure_handoff = FailureHandoff()
+        return task.failure_handoff
+    task.failure_handoff = FailureHandoff(
+        run_id=task.id,
+        status=task.status,
+        failure_type=task.failure_type or failure_type_from_task_status(task.status),
+        risk_level=_failure_handoff_risk_level(task),
+        warning=task.latest_summary or _default_failure_warning(task),
+        last_safe_checkpoint_ref=task.checkpoint_json or task.checkpoint_ref,
+        artifact_refs=list(dict.fromkeys(task.artifact_refs)),
+        evidence_refs=list(dict.fromkeys(task.evidence_refs)),
+        avoid_next_time=_avoid_next_time(task),
+        recommended_next_action=_recommended_next_action(task),
+        auto_rescue=False,
+        created_at=task.updated_at or task.heartbeat_at or task.created_at or time.time(),
+    )
+    return task.failure_handoff
+
+
+def should_write_failure_handoff(task: SubAgentTask) -> bool:
+    return task_has_failure_status(task) or bool(task.failure_type)
+
+
+def _failure_handoff_risk_level(task: SubAgentTask) -> str:
+    if task.failure_type in _HIGH_RISK_FAILURE_TYPES:
+        return "high"
+    if task_status_in(task.status, SUBAGENT_FAILED_RESULT_STATUSES):
+        return "high"
+    if task_has_status(task, TaskStatus.BLOCKED):
+        return "medium"
+    return "low"
+
+
+def _default_failure_warning(task: SubAgentTask) -> str:
+    if task.failure_type in _HIGH_RISK_FAILURE_TYPES:
+        return "黑盒或工具输出存在撑爆上下文风险，已停止继续展开。"
+    return "子代理未能正常完成，后续接管前请先读取 checkpoint 和 evidence refs。"
+
+
+def _avoid_next_time(task: SubAgentTask) -> list[str]:
+    avoid = ["不要机械重试同一工具调用；先读取 checkpoint、artifact manifest 和失败交接记录。"]
+    if task.failure_type in _HIGH_RISK_FAILURE_TYPES:
+        avoid.append("不要把黑盒大输出直接塞回 prompt；先外置文件，再读取摘要或切片。")
+    avoid.extend(f"先处理 blocker: {item}" for item in task.blockers)
+    return list(dict.fromkeys(avoid))
+
+
+def _recommended_next_action(task: SubAgentTask) -> str:
+    if task.failure_type in _HIGH_RISK_FAILURE_TYPES:
+        return "先外置黑盒输出，再让接管代理读取摘要和 checkpoint。"
+    if task.blockers:
+        return f"先解决阻塞项：{task.blockers[0]}"
+    return "读取 checkpoint、failure_handoff 和 evidence refs 后再决定是否接管。"
 
 
 def write_failure_handoff(task: SubAgentTask) -> None:

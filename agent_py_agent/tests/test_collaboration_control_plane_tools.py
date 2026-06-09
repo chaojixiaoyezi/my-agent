@@ -417,7 +417,7 @@ def test_update_collaboration_request_keeps_update_when_overview_fails(tmp_path,
     payload = json.loads(result.output)
 
     assert result.ok is True
-    assert payload["request"]["status"] == "pending"
+    assert payload["request"]["status"] == "open"
     assert payload["request"]["metadata"]["raw_request_status"] == "working"
     assert payload["request"]["metadata"]["request_status_protocol_error"] == "COLLABORATION_REQUEST_STATUS_INVALID"
     assert payload["overview"]["overview_load_error"]["context"] == "update_collaboration.case_status"
@@ -603,6 +603,66 @@ def test_collaboration_status_aliases_do_not_trigger_machine_semantics(tmp_path)
     assert normalize_case_status("resolved") == ""
     assert normalize_request_status("completed") == "completed"
     assert normalize_request_status("done") == ""
+
+
+def test_collaboration_invalid_status_preserves_current_machine_state(tmp_path) -> None:
+    from agent_py_agent.agent.collaboration import CollaborationStore
+
+    store = CollaborationStore(tmp_path / "collaboration")
+    case = store.open_case({
+        'thread_id': "thread-1",
+        'task_id': "task-1",
+        'title': "协议状态 case",
+        'summary': "验证 invalid 状态不回退。",
+        'created_by': "agent-a",
+        'now': 10.0,
+    })
+    request = store.request_collaboration({
+        'case_id': case.case_id,
+        'requester_agent_id': "agent-a",
+        'target_agent_ids': ("agent-b",),
+        'question': "请补证据。",
+        'now': 11.0,
+    })
+    store.update_request_status({
+        'case_id': case.case_id,
+        'request_id': request.request_id,
+        'status': "completed",
+        'actor_agent_id': "agent-b",
+        'summary': "已完成。",
+        'now': 12.0,
+    })
+    store.record_case_status({
+        'case_id': case.case_id,
+        'status': "closed",
+        'actor_agent_id': "agent-a",
+        'summary': "明确关闭。",
+        'decision_type': "closed_by_main_agent",
+        'now': 13.0,
+    })
+
+    invalid_case = store.record_case_status({
+        'case_id': case.case_id,
+        'status': "resolved",
+        'actor_agent_id': "agent-a",
+        'summary': "这不是协议状态。",
+        'now': 14.0,
+    })
+    invalid_request = store.update_request_status({
+        'case_id': case.case_id,
+        'request_id': request.request_id,
+        'status': "working",
+        'actor_agent_id': "agent-b",
+        'summary': "这不是协议状态。",
+        'now': 15.0,
+    })
+
+    assert invalid_case.status == "closed"
+    assert invalid_case.metadata["raw_case_status"] == "resolved"
+    assert invalid_case.metadata["case_status_protocol_error"] == "COLLABORATION_CASE_STATUS_INVALID"
+    assert invalid_request.status == "completed"
+    assert invalid_request.metadata["raw_request_status"] == "working"
+    assert invalid_request.metadata["request_status_protocol_error"] == "COLLABORATION_REQUEST_STATUS_INVALID"
 
 
 def _assert_empty_close_rejected(store, case_id: str) -> None:

@@ -30,7 +30,12 @@ SimpleAgent orchestration tool
 ## 状态和路径
 
 - 权威状态：当前 task workspace 的 `work/agents/<run_id>/canonical_state.json`。
+- 模型可见的子代理工作根：当前 task workspace 的 `work/agents/<run_id>/`。旧
+  `.my_agent/subagents/<run_id>` 只做 locator / owner projection / 查找索引，不是
+  `task_dir`、write root 或 artifact root。
 - 状态机：完成只写 `DONE`；失败/阻塞只写当前协议枚举，不把旧标签、大小写变体或自然语言别名提升为机器状态。
+  `failure_type` 也一样：runner/action 原始结果可以留作审计文本，但写入 `task.failure_type`、
+  重试、恢复和验收前必须是当前已知枚举；未知值不能靠小写化或旧标签兼容变成机器状态。
 - 状态判断走 canonical state 和 `subagents.models` 中的 `TaskStatus` /
   `VerificationStatus` helper；旧 `subagents/state_machine.py` 私有转换表已删除，
   避免 `WAIT_CHILD` 等历史状态绕过当前协议。
@@ -49,10 +54,19 @@ SimpleAgent orchestration tool
   `GRANTED` 代表已授权且可避免重复申请，`GAP` 和 `CLOSED` 是当前终态；旧
   `RESOLVED`、`APPROVED`、`REJECTED` 不再被 kernel、protocol、runner、board 或
   runner context 静默当成当前终态。
+- capability route 自动匹配只读结构化能力字段：`needed_capability`、requested tool/skill/mcp/
+  command、constraints 和 scope。任务目标、问题描述、期望输出、证据摘要这类自然语言
+  只用于人类审计和模型理解，不能参与自动 grant query。
 - 子代理过程文件：`work/agents/<run_id>/...`。
 - 用户最终交付：主代理汇总后写当前 task `output/`，或用户显式指定的输出目录。
+- 当前 run 没有用户显式指定输出目录时，`output_files` / `output_refs` / `artifact_refs`
+  里的相对路径默认归一到当前 task `output/`；项目文件写入必须来自明确项目路径、
+  修复合同、目标 refs 或 `extra_write_roots` 等结构化授权。
 - owner projection：`owner_home/agents/<run_id>/` 只保存 refs，用于 tree、compact、恢复和跨 session 查找。
 - task rollup：`work/compact/task_rollup.json` 汇总子代理状态和 refs，父代理恢复时先读这里。
+- 输出路径合同只接受真实结构化路径。`[name]/file.md` 或 `【name】/file.md`
+  这类括号占位符路径段会被过滤出 required refs、declared refs、write roots 和 artifact
+  roots；普通自然语言说明可以留给模型阅读，但不能成为机器写入授权。
 - `agent_name` 是展示名，不是层级或角色事实。默认展示名使用 `agent-d<depth>-<role>-<index>`；
   深度、权限、模板和状态仍只读结构化字段，不能从显示名、中文叫法或英文别名里反推。
 - `role` 选择角色模板时只认明确模板 id；不做“字符串里包含 tester/worker 就套模板”的宽匹配，

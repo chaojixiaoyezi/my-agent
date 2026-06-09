@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from .daemon_control import get_running_pid, get_running_pid_report
 from .io import gateway_request_counts, read_json_file_report
-from .paths import GatewayPaths
+from .paths import GatewayPaths, gateway_chunk_path
 
 if TYPE_CHECKING:
     from ...core import SimpleAgent
@@ -95,6 +95,7 @@ def _gateway_status(
 
 
 def _base_status_lines(context: GatewayStatusRenderContext) -> list[str]:
+    now = time.time()
     lines = [
         f"gateway status={context.status} "
         f"pid={context.running_report.pid if context.running_report.pid else '-'} "
@@ -104,7 +105,73 @@ def _base_status_lines(context: GatewayStatusRenderContext) -> list[str]:
     ]
     if context.heartbeat_at:
         lines.append(f"gateway heartbeat_age_seconds={context.heartbeat_age_seconds:.1f}")
+    _append_processing_request_lines(lines, context.paths, now)
     return lines
+
+
+def _append_processing_request_lines(lines: list[str], paths: GatewayPaths, now: float) -> None:
+    active_requests, load_errors, omitted_count = _processing_request_facts(paths, now)
+    if active_requests:
+        lines.append("gateway active_requests=" + _json_list(active_requests))
+    if omitted_count:
+        lines.append(f"gateway active_requests_omitted={omitted_count}")
+    for load_error in load_errors:
+        lines.append("gateway processing_load_error=" + _json(load_error))
+
+
+def _processing_request_facts(paths: GatewayPaths, now: float) -> tuple[list[dict], list[dict], int]:
+    active_requests: list[dict] = []
+    load_errors: list[dict] = []
+    request_paths = sorted(paths.processing.glob("*.json"))
+    for request_path in request_paths[:5]:
+        report = read_json_file_report(request_path, context="gateway.status.processing.read")
+        if report.load_error:
+            load_errors.append(report.load_error)
+            continue
+        active_requests.append(_processing_request_row(paths, request_path.stem, report.payload, now))
+    return active_requests, load_errors, max(0, len(request_paths) - 5)
+
+
+def _processing_request_row(
+    paths: GatewayPaths,
+    request_id: str,
+    payload: dict,
+    now: float,
+) -> dict:
+    resolved_id = str(payload.get("id") or request_id)
+    row = {
+        "id": resolved_id,
+        "status": str(payload.get("status") or ""),
+        "lease_owner": str(payload.get("lease_owner") or ""),
+        "attempts": _int_value(payload.get("attempts")),
+    }
+    _add_age(row, "lease_age_seconds", payload.get("lease_started_at"), now)
+    _add_age(row, "lease_heartbeat_age_seconds", payload.get("lease_heartbeat_at"), now)
+    _add_age(row, "updated_age_seconds", payload.get("updated_at"), now)
+    chunk_path = gateway_chunk_path(paths, resolved_id)
+    if chunk_path.exists():
+        row["chunk_stream_path"] = str(chunk_path)
+    return row
+
+
+def _add_age(row: dict, key: str, timestamp: object, now: float) -> None:
+    timestamp_value = _float_value(timestamp)
+    if timestamp_value:
+        row[key] = round(max(0.0, now - timestamp_value), 1)
+
+
+def _float_value(value: object) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _int_value(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _append_status_load_errors(
@@ -122,4 +189,8 @@ def _append_status_load_errors(
 
 
 def _json(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _json_list(payload: list[dict]) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)

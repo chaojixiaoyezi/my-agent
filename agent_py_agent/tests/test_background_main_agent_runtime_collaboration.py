@@ -100,12 +100,12 @@ class _PlainLanguageCollaborationBackend:
                 text=(
                     '[TOOL_CALL]\n'
                     f'{{"tool":"update_collaboration","case_id":"{self.case_id}",'
-                    '"status":"needs_replan","summary":"已看到阻塞请求，下一步需要换来源或补派代理。"}'
+                    '"status":"open","summary":"已看到阻塞请求，下一步需要换来源或补派代理。"}'
                     "\n[/TOOL_CALL]"
                 ),
                 backend=self.name,
             )
-        assert "needs_replan" in prompt
+        assert "open" in prompt
         return ModelResponse(text="我已经看到阻塞点，会换来源或补派代理继续推进。", backend=self.name)
 
 
@@ -281,5 +281,5 @@ def test_plain_language_background_scenario_can_rework_blocked_collaboration(tmp
     assert reports[0].response == "我已经看到阻塞点，会换来源或补派代理继续推进。"
     updated_case = agent.collaboration_store.load_case(case.case_id)
     assert updated_case.status == "open"
-    assert updated_case.metadata["raw_case_status"] == "needs_replan"
-    assert updated_case.metadata["case_status_protocol_error"] == "COLLABORATION_CASE_STATUS_INVALID"
+    assert "raw_case_status" not in updated_case.metadata
+    assert "case_status_protocol_error" not in updated_case.metadata

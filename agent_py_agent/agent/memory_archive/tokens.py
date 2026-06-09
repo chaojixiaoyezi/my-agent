@@ -88,16 +88,13 @@ def estimate_tokens(payload: Any) -> int:
     if not text:
         return 1
 
-    cjk_chars = sum(1 for char in text if _is_cjk(char))
-    non_cjk_chars = len(text) - cjk_chars
     utf8_bytes = len(text.encode("utf-8"))
     structured_overhead = _structured_overhead(payload)
 
-    cjk_estimate = cjk_chars + math.ceil(non_cjk_chars / 4)
     byte_estimate = math.ceil(utf8_bytes / 3)
     dense_text_estimate = math.ceil(len(text) / 3)
 
-    return max(1, cjk_estimate, byte_estimate, dense_text_estimate) + structured_overhead
+    return max(1, byte_estimate, dense_text_estimate) + structured_overhead
 
 
 def token_ledger_dir(root: str | Path) -> Path:
@@ -170,12 +167,3 @@ def _structured_overhead(payload: Any) -> int:
         return max(1, len(payload) // 4)
     return 0
 
-
-def _is_cjk(char: str) -> bool:
-
-    codepoint = ord(char)
-    return (
-        0x3400 <= codepoint <= 0x4DBF
-        or 0x4E00 <= codepoint <= 0x9FFF
-        or 0xF900 <= codepoint <= 0xFAFF
-    )

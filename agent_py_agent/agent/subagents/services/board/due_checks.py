@@ -7,6 +7,10 @@ from __future__ import annotations
 状态检查只走当前 TaskStatus/VerificationStatus helper，未知原文只保留为审计数据。
 """
 
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
 from ...model_capabilities import capability_request_counts_as_open
 from ...models import (
     SUBAGENT_FAILURE_STATUSES,
@@ -18,14 +22,100 @@ from ...models import (
     task_status_in,
     task_status_reason_code,
 )
-from ...policies import _is_active
-from ..recovery.strategy import SubagentRecoveryStrategyRequest, build_subagent_recovery_strategy
-from .due_models import (
-    DueInspectionContext,
-    DueIssueSpec,
-    InspectTaskDueRequest,
-    _single_issue,
+from ...policies import (
+    ACTION_CLASSIFY_BLOCKER,
+    ACTION_INSPECT_CHANNEL_PROBE,
+    ACTION_RECOVER_CHILD_AFTER_PARENT_TIMEOUT,
+    ACTION_RECOVER_COORDINATOR_LEADERSHIP,
+    ACTION_REPAIR_WORK_ORDER,
+    ACTION_ROUTE_CAPABILITY_REQUEST,
+    ACTION_STOP_NO_PROGRESS_AND_ESCALATE,
+    ACTION_TRIAGE_CAPABILITY_GAP,
+    ISSUE_CHANNEL_BROKEN,
+    ISSUE_CHANNEL_DEGRADED,
+    ISSUE_CHANNEL_PROBE_MISSING,
+    ISSUE_COORDINATOR_HEARTBEAT_STALE,
+    ISSUE_COORDINATOR_NEEDS_LEADERSHIP_RECOVERY,
+    ISSUE_FAKE_DONE_RISK,
+    ISSUE_HEARTBEAT_STALE,
+    ISSUE_MISSING_WORK_ORDER_FILES,
+    ISSUE_NO_PROGRESS_FUSE,
+    ISSUE_OPEN_CAPABILITY_GAP,
+    ISSUE_OPEN_CAPABILITY_REQUEST,
+    ISSUE_PARENT_TIMEOUT_WITH_UNFINISHED_CHILDREN,
+    ISSUE_RUN_TIMEOUT,
+    ISSUE_UNVERIFIED_DONE,
+    MakeDueIssueParams,
+    _is_active,
+    _make_due_issue,
 )
+from ..recovery.strategy import SubagentRecoveryStrategyRequest, build_subagent_recovery_strategy
+
+
+@dataclass(frozen=True)
+class DueCheckSettings:
+    """Runtime thresholds for one due-check pass."""
+
+    now: float
+    heartbeat_timeout: float
+    run_timeout: float
+    min_evidence: int
+    no_progress_attempt_limit: int = 4
+
+
+@dataclass(frozen=True)
+class DueInspectionContext:
+    """Shared values used by all due-check predicates for one task."""
+
+    task: Any
+    task_index: dict[str, Any] | None
+    risk_flags: list[str]
+    open_request_count: int
+    open_gap_count: int
+    age_seconds: float
+    stale_seconds: float
+
+
+@dataclass(frozen=True)
+class DueIssueSpec:
+    """One due-check issue template."""
+
+    severity: str
+    kind: str
+    message: str
+    action: str
+    related_refs: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class InspectTaskDueRequest:
+    """Bundle for inspecting one task for due-check issues."""
+
+    manager: Any
+    task: Any
+    settings: DueCheckSettings
+    risk_flags_builder: Callable[[Any, int, int], list[str]]
+    task_index: dict[str, Any] | None = None
+
+
+def _issue_params(ctx: DueInspectionContext, spec: DueIssueSpec):
+    return MakeDueIssueParams(
+        task=ctx.task,
+        severity=spec.severity,
+        kind=spec.kind,
+        message=spec.message,
+        suggested_action=spec.action,
+        risk_flags=ctx.risk_flags,
+        open_request_count=ctx.open_request_count,
+        open_gap_count=ctx.open_gap_count,
+        age_seconds=ctx.age_seconds,
+        stale_seconds=ctx.stale_seconds,
+        related_refs=spec.related_refs,
+    )
+
+
+def _single_issue(ctx: DueInspectionContext, spec: DueIssueSpec):
+    return _make_due_issue(params=_issue_params(ctx, spec))
 
 
 def _check_work_order_issues(ctx: DueInspectionContext, validation):
@@ -37,9 +127,9 @@ def _check_work_order_issues(ctx: DueInspectionContext, validation):
             ctx,
             DueIssueSpec(
                 "P0",
-                "missing_work_order_files",
+                ISSUE_MISSING_WORK_ORDER_FILES,
                 f"工单目录缺少 {len(validation.missing)} 个关键路径，后续接管和验收不可靠。",
-                "repair_work_order",
+                ACTION_REPAIR_WORK_ORDER,
             ),
         )
     ]
@@ -90,12 +180,12 @@ def _check_no_progress_fuse_issues(ctx: DueInspectionContext, attempt_limit: int
             ctx,
             DueIssueSpec(
                 "P0",
-                "no_progress_fuse",
+                ISSUE_NO_PROGRESS_FUSE,
                 (
                     f"任务已连续尝试 {ctx.task.runner_attempts} 次，达到无进展熔断阈值 {attempt_limit}；"
                     "停止自动重试和扩容，改为汇总 refs 后等待父级/用户决策。"
                 ),
-                "stop_no_progress_and_escalate",
+                ACTION_STOP_NO_PROGRESS_AND_ESCALATE,
                 related_refs=list(dict.fromkeys(ref for ref in refs if ref)),
             ),
         )
@@ -120,12 +210,12 @@ def _check_leadership_recovery_issues(ctx: DueInspectionContext, attempt_limit: 
             ctx,
             DueIssueSpec(
                 "P0",
-                "coordinator_needs_leadership_recovery",
+                ISSUE_COORDINATOR_NEEDS_LEADERSHIP_RECOVERY,
                 (
                     f"协调节点状态为 {ctx.task.status}，旗下仍有 {len(strategy.child_run_ids)} 个子任务；"
                     "必须先把子树交给新 leader，不能按普通 worker 新建 takeover run。"
                 ),
-                "recover_coordinator_leadership",
+                ACTION_RECOVER_COORDINATOR_LEADERSHIP,
                 related_refs=list(dict.fromkeys(ref for ref in refs if ref)),
             ),
         )
@@ -141,7 +231,7 @@ def _check_channel_broken_issues(ctx: DueInspectionContext):
             ctx,
             DueIssueSpec(
                 "P0",
-                "channel_broken",
+                ISSUE_CHANNEL_BROKEN,
                 "最近一次通道检查为 BROKEN，优先修复 runtime / workdir / JSON 现场。",
                 "run_channel_probe_and_fix_runtime",
             ),
@@ -158,9 +248,9 @@ def _check_channel_degraded_issues(ctx: DueInspectionContext):
             ctx,
             DueIssueSpec(
                 "P1",
-                "channel_degraded",
+                ISSUE_CHANNEL_DEGRADED,
                 "最近一次通道检查为 DEGRADED，建议先修复弱项再继续派工。",
-                "inspect_channel_probe_evidence",
+                ACTION_INSPECT_CHANNEL_PROBE,
             ),
         )
     ]
@@ -176,7 +266,7 @@ def _check_probe_missing_issues(ctx: DueInspectionContext):
             ctx,
             DueIssueSpec(
                 "P0",
-                "channel_probe_missing",
+                ISSUE_CHANNEL_PROBE_MISSING,
                 "任务状态为 CHANNEL_ERROR，但还没有 probe 证据。",
                 "run_channel_probe",
             ),
@@ -194,7 +284,7 @@ def _check_done_evidence_issues(ctx: DueInspectionContext, min_evidence):
             ctx,
             DueIssueSpec(
                 "P0",
-                "fake_done_risk",
+                ISSUE_FAKE_DONE_RISK,
                 f"DONE 任务只有 {len(task.evidence)} 条证据，少于配置要求的 {min_evidence} 条。",
                 "require_evidence_or_reopen",
             ),
@@ -211,7 +301,7 @@ def _check_done_verification_issues(ctx: DueInspectionContext):
             ctx,
             DueIssueSpec(
                 "P1",
-                "unverified_done",
+                ISSUE_UNVERIFIED_DONE,
                 "任务已标记 DONE，但 verification_status 还不是 VERIFIED。",
                 "reopen_for_evidence_or_assign_reviewer",
             ),
@@ -228,9 +318,9 @@ def _check_capability_request_issues(ctx: DueInspectionContext):
             ctx,
             DueIssueSpec(
                 "P1",
-                "open_capability_request",
+                ISSUE_OPEN_CAPABILITY_REQUEST,
                 f"存在 {ctx.open_request_count} 条未处理能力请求。",
-                "route_capability_request",
+                ACTION_ROUTE_CAPABILITY_REQUEST,
             ),
         )
     ]
@@ -245,9 +335,9 @@ def _check_capability_gap_issues(ctx: DueInspectionContext):
             ctx,
             DueIssueSpec(
                 "P2",
-                "open_capability_gap",
+                ISSUE_OPEN_CAPABILITY_GAP,
                 f"存在 {ctx.open_gap_count} 条未关闭能力缺口。",
-                "triage_gap_for_learning_or_tooling",
+                ACTION_TRIAGE_CAPABILITY_GAP,
             ),
         )
     ]
@@ -266,12 +356,12 @@ def check_parent_timeout_child_issues(ctx: DueInspectionContext):
             ctx,
             DueIssueSpec(
                 "P1",
-                "parent_timeout_with_unfinished_children",
+                ISSUE_PARENT_TIMEOUT_WITH_UNFINISHED_CHILDREN,
                 (
                     "父节点已经 TIMEOUT，但仍有未完成子任务需要重新指定领导者或验收入口："
                     f"{_child_ref_summary(unfinished)}。"
                 ),
-                "recover_child_after_parent_timeout",
+                ACTION_RECOVER_CHILD_AFTER_PARENT_TIMEOUT,
                 related_refs=[f"unfinished_child:{ref}" for ref in unfinished],
             ),
         )
@@ -314,7 +404,7 @@ def check_heartbeat_timeout_issues(ctx: DueInspectionContext, heartbeat_timeout)
             ctx,
             DueIssueSpec(
                 severity,
-                "heartbeat_stale",
+                ISSUE_HEARTBEAT_STALE,
                 f"心跳已停滞 {ctx.stale_seconds:.0f}s，超过配置阈值 {heartbeat_timeout}s。",
                 "check_runtime_or_takeover",
             ),
@@ -336,12 +426,12 @@ def check_coordinator_heartbeat_issues(ctx: DueInspectionContext, heartbeat_time
             ctx,
             DueIssueSpec(
                 severity,
-                "coordinator_heartbeat_stale",
+                ISSUE_COORDINATOR_HEARTBEAT_STALE,
                 (
                     f"协调节点心跳已停滞 {ctx.stale_seconds:.0f}s，旗下还有 {child_count} 个子任务，"
                     "需要父代理确认是否重新指定 leader。"
                 ),
-                "recover_coordinator_leadership",
+                ACTION_RECOVER_COORDINATOR_LEADERSHIP,
             ),
         )
     ]
@@ -355,7 +445,7 @@ def check_run_timeout_issues(ctx: DueInspectionContext, run_timeout):
             ctx,
             DueIssueSpec(
                 "P0",
-                "run_timeout",
+                ISSUE_RUN_TIMEOUT,
                 f"任务已运行 {ctx.age_seconds:.0f}s，超过配置阈值 {run_timeout}s。",
                 "shrink_scope_reassign_or_takeover",
             ),

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,6 +19,9 @@ from .subagents.models import SubAgentBoardOptions, TaskStatus, task_status_in
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
+
+_ACTIVE_WORK_RECENT_SECONDS = 72 * 60 * 60
+_RECENT_TASK_GOAL_PREVIEW_CHARS = 160
 
 
 @dataclass
@@ -76,12 +80,17 @@ def _detect_active_tasks(agent, summary):
             TaskStatus.CANCELLED.value,
             TaskStatus.TIMEOUT.value,
         })
-        active_tasks = [item for item in board.hot_list if not task_status_in(item.status, final_statuses)]
+        now = time.time()
+        active_tasks = [
+            item for item in board.hot_list
+            if not task_status_in(item.status, final_statuses) and is_recent_board_item(item, now=now)
+        ]
         summary.active_task_count = len(active_tasks)
         summary.recent_tasks = [
             {
                 "id": item.id,
-                "goal": item.goal,
+                "goal": _task_goal_preview(item.goal),
+                "goal_truncated": _goal_is_truncated(item.goal),
                 "status": item.status,
                 "verification_status": item.verification_status,
                 "created_at": item.created_at,
@@ -122,6 +131,32 @@ def _detect_dispatch_status(agent, summary):
 
 def _append_detection_error(summary, exc: BaseException, context: str) -> None:
     summary.detection_errors.append(runtime_error_report(exc, context=context))
+
+
+def is_recent_board_item(item, *, now: float) -> bool:
+    progress_age = _float_attr(item, "seconds_since_progress")
+    if progress_age > _ACTIVE_WORK_RECENT_SECONDS:
+        return False
+    updated_at = _float_attr(item, "updated_at")
+    return not updated_at or now - updated_at <= _ACTIVE_WORK_RECENT_SECONDS
+
+
+def _float_attr(item, name: str) -> float:
+    try:
+        return float(getattr(item, name, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _task_goal_preview(goal: object) -> str:
+    text = str(goal or "").replace("\n", " ").strip()
+    if len(text) <= _RECENT_TASK_GOAL_PREVIEW_CHARS:
+        return text
+    return text[:_RECENT_TASK_GOAL_PREVIEW_CHARS].rstrip() + "..."
+
+
+def _goal_is_truncated(goal: object) -> bool:
+    return len(str(goal or "").replace("\n", " ").strip()) > _RECENT_TASK_GOAL_PREVIEW_CHARS
 
 
 def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
@@ -219,4 +254,5 @@ __all__ = [
     "detect_active_work",
     "format_active_work_summary",
     "has_active_work",
+    "is_recent_board_item",
 ]

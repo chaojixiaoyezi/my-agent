@@ -4,7 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..model_visible_refs import current_model_ref, current_model_text
+from ..model_visible_refs import clean_path_contract_refs, current_model_text
+from .context_bundle_contracts import (
+    allowed_write_roots as contract_allowed_write_roots,
+)
 from .context_bundle_contracts import (
     output_contract,
     render_output_contract_lines,
@@ -324,27 +327,13 @@ def _constraints(task: SubAgentTask) -> dict[str, object]:
 
 
 def _allowed_write_roots(task: SubAgentTask) -> list[str]:
-    roots: list[str] = []
-    for raw in (
-        safe_string_ref(task, "task_workspace_dir"),
-        safe_string_ref(task, "agent_run_workspace_dir"),
-        *list(task.allowed_write_roots or []),
-    ):
-        text = current_model_ref(raw)
-        if text and text not in roots:
-            roots.append(text)
-    return roots
+    return contract_allowed_write_roots(task)
 
 
 def _path_terms(value: object) -> list[str]:
     if not isinstance(value, list | tuple | set):
         return []
-    terms: list[str] = []
-    for item in value:
-        text = current_model_ref(item)
-        if text and text not in terms:
-            terms.append(text)
-    return terms
+    return clean_path_contract_refs(value)
 
 
 def _runner_recovery_preflight(task: SubAgentTask) -> dict[str, object]:

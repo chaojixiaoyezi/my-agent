@@ -14,9 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..effective_permissions import effective_permission_snapshot
 from ..models import SubAgentTask
-from .collaboration_registry import register_collaboration_agent_capability
 from .inheritance_manifest import build_inheritance_manifest
-from .output_ref_rebinding import rebind_task_output_refs_to_run
 from .persistence.model_normalizers import (
     _normalize_context_manifest,
     _normalize_context_packs,
@@ -58,6 +56,16 @@ class CreateRunParams:
     destroy_summary_required: bool = True
 
 
+@dataclass(frozen=True)
+class OutputRefRebinding:
+    field: str
+    from_ref: str
+    to_ref: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"field": self.field, "from": self.from_ref, "to": self.to_ref}
+
+
 def _load_parent_task(manager: Any, parent_id: str):
     if not parent_id:
         return None
@@ -77,6 +85,85 @@ def _session_identity_fields(run_id: str, parent_task: Any | None) -> dict[str, 
         "parent_subagent_session_id": parent_session,
         "root_subagent_session_id": root_session,
     }
+
+
+def register_collaboration_agent_capability(manager: Any, task: Any) -> None:
+    store = getattr(manager, "collaboration_store", None)
+    if store is None or not hasattr(store, "register_agent"):
+        return
+    try:
+        from ...collaboration import AgentCapability
+
+        store.register_agent(
+            AgentCapability(
+                agent_id=str(getattr(task, "id", "") or ""),
+                role=str(getattr(task, "role", "") or ""),
+                capabilities=tuple(collaboration_capabilities_for_task(task)),
+                sources=tuple(collaboration_sources_for_task(task)),
+                status="available",
+                load=0.0,
+                updated_at=time.time(),
+                metadata={
+                    "agent_name": str(getattr(task, "agent_name", "") or ""),
+                    "run_id": str(getattr(task, "id", "") or ""),
+                    "depth": int(getattr(task, "depth", 0) or 0),
+                },
+            )
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
+        return
+
+
+def collaboration_capabilities_for_task(task: Any) -> list[str]:
+    capabilities: list[str] = []
+    attrs = getattr(task, "attributes", {}) if isinstance(getattr(task, "attributes", {}), dict) else {}
+    for value in _capability_sources(task, attrs):
+        _extend_capabilities(capabilities, value)
+    for tool in _string_items(getattr(task, "allowed_tools", [])):
+        _add_capability(capabilities, tool)
+    return capabilities
+
+
+def _capability_sources(task: Any, attrs: dict[str, object]) -> tuple[object, ...]:
+    return (
+        getattr(task, "role", ""),
+        getattr(task, "agent_name", ""),
+        attrs.get("capabilities"),
+        attrs.get("collaboration_capabilities"),
+        attrs.get("provided_capabilities"),
+        attrs.get("required_capabilities"),
+    )
+
+
+def collaboration_sources_for_task(task: Any) -> list[str]:
+    attrs = getattr(task, "attributes", {}) if isinstance(getattr(task, "attributes", {}), dict) else {}
+    sources: list[str] = []
+    for key in ("sources", "source_ids", "source_refs"):
+        _extend_capabilities(sources, attrs.get(key))
+    return sources
+
+
+def _extend_capabilities(target: list[str], value: object) -> None:
+    for item in _string_items(value):
+        _add_capability(target, item)
+
+
+def _add_capability(target: list[str], value: object) -> None:
+    text = str(value or "").strip()
+    if not text:
+        return
+    for candidate in (text, text.lower()):
+        if candidate and candidate not in target:
+            target.append(candidate)
+
+
+def _string_items(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item or "").strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
 
 
 def _create_run_route_attrs(params: CreateRunParams) -> dict[str, object]:
@@ -163,6 +250,67 @@ def runtime_config_scope(task: Any) -> dict[str, object]:
         "promotion_policy": identity.config_promotion_policy,
         "loaded_as": "run_layer" if identity.config_overlay_ref else "base_config",
     }
+
+
+def rebind_task_output_refs_to_run(task: SubAgentTask) -> list[OutputRefRebinding]:
+    rewrites: list[OutputRefRebinding] = []
+    task.attributes = _rewrite_attribute_output_refs(task.attributes, task.id, rewrites)
+    if rewrites:
+        _store_rebindings(task, rewrites)
+    return rewrites
+
+
+def _rewrite_attribute_output_refs(
+    attributes: dict[str, object],
+    run_id: str,
+    rewrites: list[OutputRefRebinding],
+) -> dict[str, object]:
+    attrs = dict(attributes or {})
+    for field in ("output_refs", "output_files", "artifact_refs"):
+        if field in attrs:
+            attrs[field] = _rewrite_attribute_value(field, attrs.get(field), run_id, rewrites)
+    return attrs
+
+
+def _rewrite_attribute_value(
+    field: str,
+    value: object,
+    run_id: str,
+    rewrites: list[OutputRefRebinding],
+) -> object:
+    if isinstance(value, list):
+        return [_rewrite_attribute_value(field, item, run_id, rewrites) for item in value]
+    if not isinstance(value, str):
+        return value
+    rebound = _rebound_subagent_ref(value, run_id)
+    if rebound and rebound != value:
+        rewrites.append(OutputRefRebinding(field, value, rebound))
+        return rebound
+    return value
+
+
+def _rebound_subagent_ref(ref: str, run_id: str) -> str:
+    parts = str(ref or "").split("/")
+    for index, part in enumerate(parts[:-1]):
+        if part != "subagents":
+            continue
+        next_index = index + 1
+        if next_index >= len(parts) or not parts[next_index].startswith("subagent-"):
+            continue
+        if parts[next_index] == run_id:
+            return ""
+        parts[next_index] = run_id
+        return "/".join(parts)
+    return ""
+
+
+def _store_rebindings(task: SubAgentTask, rewrites: list[OutputRefRebinding]) -> None:
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    existing = attrs.get("output_ref_rebindings")
+    records = list(existing) if isinstance(existing, list) else []
+    records.extend(item.to_dict() for item in rewrites)
+    attrs["output_ref_rebindings"] = records
+    task.attributes = attrs
 
 
 class SubAgentBaseService:

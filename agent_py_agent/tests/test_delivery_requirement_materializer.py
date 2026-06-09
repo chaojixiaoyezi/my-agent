@@ -207,6 +207,44 @@ def test_materialized_delivery_contract_derives_user_requested_output_path_from_
     assert "data/long_field_journal.txt" in materializer_repair_feedback(contract)
 
 
+def test_materialized_delivery_contract_drops_prompt_source_path_from_model_artifacts():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+        materializer_repair_feedback,
+    )
+
+    source_path = "agent_py_agent/agent/agent_core/orchestration/child_result_index.py"
+    output_path = "output/subagent-child-result-index-smoke.md"
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [
+                {
+                    "artifact_id": "user_requested_child_result_index_py",
+                    "preferred_path": source_path,
+                    "kind": "py",
+                    "required": True,
+                }
+            ]
+        },
+        user_prompt=(
+            f"请找一个帮手读 {source_path}，重点看父代理应该读取哪些子代理结果引用。"
+            f"让帮手把结论写成一份简短报告，文件放到 {output_path}。"
+        ),
+    )
+
+    assert contract["artifacts"] == [
+        {
+            "artifact_id": "user_requested_subagent_child_result_index_smoke_md",
+            "preferred_path": output_path,
+            "allowed_output_roots": ["output"],
+            "required": True,
+            "kind": "md",
+        }
+    ]
+    assert source_path in materializer_repair_feedback(contract)
+
+
 def test_structural_user_requested_output_contract_flags_source_coverage_missing():
     from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
         delivery_contract_from_user_requested_outputs,
@@ -317,14 +355,7 @@ def test_prompt_structure_derives_project_collection_coverage_without_output_pat
         workspace_root=root,
     )
 
-    assert contract["artifacts"] == [
-        {
-            "artifact_id": "final_report",
-            "kind": "md",
-            "allowed_output_roots": ["output"],
-            "required": True,
-        }
-    ]
+    assert contract["artifacts"] == []
     assert contract["target_coverage_contract"]["enforcement"] == "required"
     assert contract["target_coverage_contract"]["target_items"] == [
         {
@@ -363,11 +394,7 @@ def test_prompt_structure_keeps_report_dimensions_as_soft_content_intent(tmp_pat
         workspace_root=root,
     )
 
-    artifact = contract["artifacts"][0]
-    assert artifact["artifact_id"] == "final_report"
-    assert artifact["kind"] == "md"
-    assert artifact["allowed_output_roots"] == ["output"]
-    assert "validation_contract" not in artifact
+    assert contract["artifacts"] == []
 
 
 def test_materialized_delivery_contract_derives_user_requested_work_artifact_path_from_prompt():

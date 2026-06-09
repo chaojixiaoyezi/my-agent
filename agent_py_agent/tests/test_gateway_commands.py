@@ -32,6 +32,7 @@ class TestCmdGatewayStart:
         mock_paths = MagicMock()
         mock_paths.root = tmp_path
         mock_paths.state = tmp_path / "state.json"
+        mock_paths.heartbeat = tmp_path / "heartbeat.json"
         mock_paths.pid = tmp_path / "gateway.pid"
         mock_paths.stop_request = tmp_path / "stop.json"
         mock_paths.log = tmp_path / "gateway.log"
@@ -73,7 +74,7 @@ class TestCmdGatewayStart:
              patch("agent_py_agent.cli.gateway_process.is_pid_alive", return_value=True), \
              patch("agent_py_agent.cli.gateway_process.wait_for_pid_exit", return_value=True), \
              patch("agent_py_agent.cli.gateway_process.terminate_pid"), \
-             patch("agent_py_agent.cli.gateway_process.wait_for_gateway_running", return_value=(12345, True)), \
+             patch("agent_py_agent.cli.gateway_process._wait_for_gateway_start_ready", return_value=True), \
              patch("agent_py_agent.cli.gateway_process.write_json_file"), \
              patch("subprocess.Popen", return_value=mock_process), \
              patch("agent_py_agent.agent.gateway_parts.daemon_control._get_process_start_time", return_value="2026-01-01T00:00:00"), \
@@ -157,20 +158,17 @@ class TestCmdGatewayStatus:
         mock_paths = MagicMock()
         mock_paths.root = tmp_path
         mock_paths.pid = tmp_path / "gateway.pid"
-        mock_paths.state = MagicMock()
-        mock_paths.heartbeat = MagicMock()
+        mock_paths.state = tmp_path / "gateway_state.json"
+        mock_paths.heartbeat = tmp_path / "gateway_heartbeat.json"
         mock_paths.log = tmp_path / "gateway.log"
-        mock_paths.state.exists = MagicMock(return_value=False)
 
         with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths), \
              patch("agent_py_agent.cli.gateway_process.read_pid_record", return_value=None), \
-             patch("agent_py_agent.cli.gateway_process.read_runtime_status", return_value={}) as mock_runtime_status, \
              patch("agent_py_agent.cli.gateway_process.gateway_running", return_value=(None, False)), \
              patch("agent_py_agent.cli.gateway_process.gateway_request_counts", return_value={}):
             result = cmd_gateway_status(args)
             assert result == 0
-            mock_runtime_status.assert_called_once_with(mock_paths.state)
 
     def test_gateway_status_reports_bad_state_json(self, tmp_path: Path, capsys):
         from agent_py_agent.cli.gateway_process import cmd_gateway_status
@@ -183,12 +181,16 @@ class TestCmdGatewayStatus:
         mock_agent = MagicMock()
         mock_agent.config = MagicMock()
         type(mock_agent.config).gateway_port = PropertyMock(return_value=0)
-        mock_paths = MagicMock(root=tmp_path, pid=tmp_path / "gateway.pid", state=state_path)
+        mock_paths = MagicMock(
+            root=tmp_path,
+            pid=tmp_path / "gateway.pid",
+            state=state_path,
+            heartbeat=tmp_path / "gateway_heartbeat.json",
+        )
 
         with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths), \
              patch("agent_py_agent.cli.gateway_process.read_pid_record", return_value=None), \
-             patch("agent_py_agent.cli.gateway_process.read_runtime_status", return_value={}), \
              patch("agent_py_agent.cli.gateway_process.gateway_running", return_value=(None, False)), \
              patch("agent_py_agent.cli.gateway_process.gateway_request_counts", return_value={}):
             assert cmd_gateway_status(args) == 0
@@ -206,12 +208,16 @@ class TestCmdGatewayStatus:
         mock_agent = MagicMock()
         mock_agent.config = MagicMock()
         type(mock_agent.config).gateway_port = PropertyMock(return_value=0)
-        mock_paths = MagicMock(root=tmp_path, pid=tmp_path / "gateway.pid", state=state_path)
+        mock_paths = MagicMock(
+            root=tmp_path,
+            pid=tmp_path / "gateway.pid",
+            state=state_path,
+            heartbeat=tmp_path / "gateway_heartbeat.json",
+        )
 
         with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths), \
              patch("agent_py_agent.cli.gateway_process.read_pid_record", return_value=None), \
-             patch("agent_py_agent.cli.gateway_process.read_runtime_status", return_value={}), \
              patch("agent_py_agent.cli.gateway_process.gateway_running", return_value=(None, False)), \
              patch("agent_py_agent.cli.gateway_process.gateway_request_counts", return_value={}):
             assert cmd_gateway_status(args) == 0
@@ -239,15 +245,19 @@ class TestCmdGatewayStatus:
         mock_agent = MagicMock()
         mock_agent.config = MagicMock()
         type(mock_agent.config).gateway_port = PropertyMock(return_value=0)
-        mock_paths = MagicMock(root=tmp_path, pid=tmp_path / "gateway.pid", state=state_path)
+        mock_paths = MagicMock(
+            root=tmp_path,
+            pid=tmp_path / "gateway.pid",
+            state=state_path,
+            heartbeat=tmp_path / "gateway_heartbeat.json",
+        )
         mock_paths.inbox = inbox
         mock_paths.processing = processing
 
         with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths), \
              patch("agent_py_agent.cli.gateway_process.read_pid_record", return_value={"pid": 123}), \
-             patch("agent_py_agent.cli.gateway_process.is_pid_alive", return_value=True), \
-             patch("agent_py_agent.cli.gateway_process.read_runtime_status", return_value={}):
+             patch("agent_py_agent.cli.gateway_process.is_pid_alive", return_value=True):
             assert cmd_gateway_status(args) == 0
 
         out = capsys.readouterr().out
@@ -308,7 +318,6 @@ class TestCmdGatewayRestart:
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths), \
              patch("agent_py_agent.cli.gateway_process.read_pid_record", return_value=None), \
              patch("agent_py_agent.cli.gateway_process.read_json_file", return_value={}), \
-             patch("agent_py_agent.cli.gateway_process.read_runtime_status", return_value={}), \
              patch("agent_py_agent.cli.gateway_process.gateway_running", return_value=(None, False)), \
              patch("agent_py_agent.cli.gateway_process.gateway_request_counts", return_value={}), \
              patch("agent_py_agent.cli.gateway_process.get_running_pid", return_value=None), \

@@ -100,12 +100,5 @@ def test_structured_tool_and_contract_fixtures_use_neutral_sample_terms() -> Non
     assert findings == []
 
 
-def test_hierarchy_domain_stopwords_are_user_and_task_neutral() -> None:
-    from agent_py_agent.agent.subagents.services.hierarchy.domain_terms import DOMAIN_STOPWORDS
-
-    assert "xiaoyezi" not in DOMAIN_STOPWORDS
-    assert "shop" not in DOMAIN_STOPWORDS
-
-
 def test_default_forbidden_write_roots_do_not_hardcode_reference_project_dirs() -> None:
     assert all(not str(root).endswith(".openclaw") for root in policy_roots())

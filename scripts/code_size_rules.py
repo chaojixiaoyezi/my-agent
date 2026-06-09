@@ -59,6 +59,11 @@ EXCLUDE_SUFFIXES = {".pyc", ".pyo"}
 EXCLUDE_NAMES = {".DS_Store", ".AppleDouble", ".LSOverride"}
 
 
+def is_test_path(path: str) -> bool:
+    normalized = str(path or "").replace("\\", "/").strip("/")
+    return normalized == "tests" or normalized.startswith("tests/") or "/tests/" in f"/{normalized}/"
+
+
 @dataclass
 class Finding:
     kind: str

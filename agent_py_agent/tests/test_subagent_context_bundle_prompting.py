@@ -257,6 +257,48 @@ def test_write_execution_context_persists_context_bundle_files(tmp_path) -> None
     assert context.context_bundle["gate"]["ok"] is True
 
 
+def test_execution_context_uses_canonical_agent_workspace_for_model_boundary(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
+    task_root = tmp_path / "owners" / "local" / "main" / "tasks" / "2026-06-09" / "inspect-project"
+    task = manager.create_run(
+        goal="读项目并写报告。",
+        thought="子代理应该只看到当前任务 workspace 的工作区。",
+        plan=["读源码", "写报告"],
+        role="worker",
+        attributes={
+            "run_workspace": {"task_root": str(task_root)},
+            "output_files": ["[任务目录]/helper_report.md"],
+        },
+    )
+    old_locator = str(manager.workspace / task.id)
+    task.allowed_write_roots = [
+        old_locator,
+        str(tmp_path / "fixture_project" / "[任务目录]"),
+    ]
+    manager.save(task)
+
+    context = manager.runner_context.build_execution_context(task.id)
+
+    old_path = Path(old_locator)
+    canonical_agent_dir = manager.load(task.id).agent_run_workspace_dir
+    assert context.task_dir == canonical_agent_dir
+    assert context.execution_context_file == str(Path(canonical_agent_dir) / "EXECUTION_CONTEXT.md")
+    assert context.execution_context_json == str(Path(canonical_agent_dir) / "execution_context.json")
+    assert context.context_bundle_file == str(Path(canonical_agent_dir) / "CONTEXT_BUNDLE.md")
+    assert context.context_bundle_json == str(Path(canonical_agent_dir) / "context_bundle.json")
+    assert context.write_boundary["task_dir"] == canonical_agent_dir
+    assert old_locator not in context.write_boundary["allowed_write_roots"]
+    assert all("[任务目录]" not in root for root in context.write_boundary["allowed_write_roots"])
+    assert "[任务目录]" not in json.dumps(context.context_bundle, ensure_ascii=False)
+    assert (old_path / "task.json").exists()
+    assert (old_path / "run.json").exists()
+    assert not (old_path / "STATUS.md").exists()
+    assert not (old_path / "thought.md").exists()
+    assert not (old_path / "projection_ledger.jsonl").exists()
+    assert not (old_path / "output.json").exists()
+    assert not (old_path / "reports" / "runner_result.json").exists()
+
+
 def test_context_gate_prompt_lines_block_missing_required_fields(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(goal="", thought="", plan=[])

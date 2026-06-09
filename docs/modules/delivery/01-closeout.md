@@ -72,9 +72,10 @@
 
 - delivery materializer 只能把明确的输出文件路径放进 `artifacts`；用户要求阅读、参考、
   检查或提到的源码/草稿路径不是交付物。
-- 如果用户明确要求最终报告但没有指定输出路径，报告 artifact 默认在当前 task workspace
-  的 `output/` 下定位。用户用普通自然语言列出的报告维度、分析角度和对比口径是内容意图，
-  不会自动升级成 `validation_contract.required_sections`。
+- 如果用户明确给出输出文件路径，该路径会成为 artifact；如果只用普通自然语言说“生成报告”
+  但没有指定路径，运行时不再自动创建 required report artifact。模型仍应按用户意图写报告，
+  但这不会变成隐藏的 closeout 硬门。用户用普通自然语言列出的报告维度、分析角度和对比口径
+  是内容意图，不会自动升级成 `validation_contract.required_sections`。
 - `validation_contract.required_sections` 和 `validation_contract.min_size` 只来自结构化产物合同；
   Markdown 最终交付物缺少结构化合同明确要求的章节或尺寸不足时，closeout 必须返工。
   `document_quality_contract` 仍然是内容质量 advisory，不和这些确定性格式要求混在一起。

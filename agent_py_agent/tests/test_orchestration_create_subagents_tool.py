@@ -170,7 +170,7 @@ class TestCreateSubagentsToolExecute:
         assert payload["auto_start"]["status"] == "started"
         assert payload["auto_start"]["dispatch_mode"] == "background"
         assert "agent_tree" not in payload["auto_start"]
-        assert payload["next_action"]["tool"] == "inspect_agent_tree"
+        assert payload["next_action"]["tool"] == "wait"
 
     def test_auto_start_process_command_runs_direct_dispatch_for_created_run_ids(self):
         """真实后台进程只跑精确 run_id 的一轮 dispatch，不再抢父进程 watch lock。"""
@@ -391,8 +391,8 @@ class TestCreateSubagentsToolTemplatePolicy:
         assert call_kwargs["params"].role == "worker"
         assert result.ok is True
 
-    def test_explicit_tool_preset_read_only_keeps_baseline_write_tools(self):
-        """显式 read_only 只表达职责偏好，不能让子代理失去基础读写能力。"""
+    def test_explicit_tool_preset_read_only_uses_read_tools_only(self):
+        """显式 read_only 是结构化工具边界，不保留写入工具。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -412,8 +412,10 @@ class TestCreateSubagentsToolTemplatePolicy:
 
         call_kwargs = mock_agent.subagents.create_run.call_args[1]
         assert "read_file" in call_kwargs["params"].allowed_tools
-        assert "write_file" in call_kwargs["params"].allowed_tools
-        assert "apply_patch" in call_kwargs["params"].allowed_tools
+        assert "search_text" in call_kwargs["params"].allowed_tools
+        assert "write_file" not in call_kwargs["params"].allowed_tools
+        assert "apply_patch" not in call_kwargs["params"].allowed_tools
+        assert "run_command" not in call_kwargs["params"].allowed_tools
 
     def test_tool_preset_none_does_not_create_toolless_subagent(self):
         """模型传 tool_preset=none 时回退自动策略，不创建空工具子代理。"""
@@ -467,8 +469,8 @@ class TestCreateSubagentsToolTemplatePolicy:
         assert "run_command" in params.allowed_tools
         assert params.role == "coordinator"
 
-    def test_frontend_preset_completes_partial_explicit_tool_list(self):
-        """frontend-dev 这类写页面预设会补齐 append/replace，避免模型少填工具后卡住。"""
+    def test_unknown_tool_preset_keeps_baseline_when_explicit_tools_are_partial(self):
+        """未知 tool_preset 不创建新分支；显式工具列表仍补基础工具。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()

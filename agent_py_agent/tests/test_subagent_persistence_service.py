@@ -40,7 +40,6 @@ def test_subagent_persistence_service_round_trips_task(tmp_path) -> None:
     assert loaded.goal == "治理持久化边界"
     assert any(item.id == task.id for item in runs)
     assert (tmp_path / task.id / "task.json").exists()
-    assert (tmp_path / task.id / "thought.md").exists()
     canonical_state = Path(loaded.agent_run_workspace_dir) / "canonical_state.json"
     assert canonical_state.exists()
     canonical_payload = json.loads(canonical_state.read_text(encoding="utf-8"))
@@ -49,13 +48,13 @@ def test_subagent_persistence_service_round_trips_task(tmp_path) -> None:
     assert canonical_payload["attributes"]["canonical_state_ref"] == str(canonical_state)
     assert loaded.latest_status_report.run_id == task.id
     assert loaded.latest_status_report.state == "DONE"
-    assert (tmp_path / task.id / "reports" / "status_report.json").exists()
-    assert (tmp_path / task.id / "reports" / "checkpoint.json").exists()
-    assert (tmp_path / task.id / "reports" / "decision_ledger.json").exists()
-    assert (tmp_path / task.id / "reports" / "progress.md").exists()
-    assert (tmp_path / task.id / "reports" / "failing_tests.json").exists()
-    assert (tmp_path / task.id / "reports" / "next_actions.json").exists()
-    assert (tmp_path / task.id / "SKILL_SPARKS.md").exists()
+    assert (Path(loaded.reports_dir) / "status_report.json").exists()
+    assert (Path(loaded.reports_dir) / "checkpoint.json").exists()
+    assert (Path(loaded.reports_dir) / "decision_ledger.json").exists()
+    assert (Path(loaded.reports_dir) / "progress.md").exists()
+    assert (Path(loaded.reports_dir) / "failing_tests.json").exists()
+    assert (Path(loaded.reports_dir) / "next_actions.json").exists()
+    assert Path(loaded.skill_sparks_file).exists()
     assert loaded.checkpoint_ref == loaded.checkpoint_json
     assert loaded.skill_sparks_file.endswith("SKILL_SPARKS.md")
     _assert_runtime_workspace_paths(loaded, tmp_path / "tasks" / task.root_id, task.id)
@@ -84,11 +83,11 @@ def test_subagent_save_keeps_canonical_state_when_projection_fails(tmp_path) -> 
     loaded = manager.load(task.id)
     assert loaded.status == "RUNNING"
 
-    warnings_path = tmp_path / task.id / "projection_warnings.json"
+    warnings_path = Path(loaded.agent_run_workspace_dir) / "projection_warnings.json"
     warnings = json.loads(warnings_path.read_text(encoding="utf-8"))
     assert warnings["warnings"][0]["step"] == "local_store_projection"
     assert warnings["warnings"][0]["error_type"] == "RuntimeError"
-    ledger_path = tmp_path / task.id / "projection_ledger.jsonl"
+    ledger_path = Path(loaded.agent_run_workspace_dir) / "projection_ledger.jsonl"
     ledger = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
     assert any(item["step"] == "local_store_projection" and item["status"] == "failed" for item in ledger)
 
@@ -141,7 +140,7 @@ def test_subagent_projection_rebuild_replays_from_canonical_state(tmp_path) -> N
     task.status = "RUNNING"
     manager.save(task)
 
-    thought_path = tmp_path / task.id / "thought.md"
+    thought_path = Path(task.agent_run_workspace_dir) / "thought.md"
     thought_path.unlink()
 
     records = rebuild_derived_projections(manager, task.id)
@@ -150,7 +149,7 @@ def test_subagent_projection_rebuild_replays_from_canonical_state(tmp_path) -> N
     assert any(record.step == "thought_markdown" and record.status == "ok" for record in records)
     ledger = [
         json.loads(line)
-        for line in (tmp_path / task.id / "projection_ledger.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (Path(task.agent_run_workspace_dir) / "projection_ledger.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert any(item["step"] == "thought_markdown" and item["status"] == "ok" for item in ledger)
 
@@ -488,7 +487,7 @@ def test_subagent_persistence_writes_artifact_manifests(tmp_path) -> None:
         thought="manifest 只记录摘要、hash 和路径，不复制输出正文。",
         plan=["写 artifact", "保存 manifest"],
     )
-    artifact_path = tmp_path / task.id / "reports" / "demo.txt"
+    artifact_path = Path(task.reports_dir) / "demo.txt"
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
     artifact_path.write_text("artifact body\n", encoding="utf-8")
     task.artifact_refs = ["reports/demo.txt", "missing.log"]
@@ -555,6 +554,49 @@ def test_runner_result_materializes_missing_declared_child_output(tmp_path) -> N
     assert "已完成源码项目分析" in body
     assert str(declared_output) in loaded.artifact_refs
     assert output_payload["artifacts"][0]["path"] == str(declared_output)
+
+
+def test_runner_result_copies_single_text_artifact_into_declared_child_output(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    declared_output = tmp_path / "tasks" / "root-run" / "work" / "child_outputs" / "01-worker.md"
+    task = manager.create_run(
+        params=CreateRunParams(
+            goal="分析源码并交回报告",
+            thought="真实报告已经由模型写入 work，再同步到父级声明 output。",
+            plan=["阅读", "写报告"],
+            root_id="root-run",
+            attributes={"output_files": [str(declared_output)]},
+        )
+    )
+    source_report = Path(task.agent_run_workspace_dir) / "analysis_draft.md"
+    source_report.parent.mkdir(parents=True, exist_ok=True)
+    source_report.write_text("# 源码分析\n\n父代理应读取 read_order 中的主引用。\n", encoding="utf-8")
+
+    result = manager.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=task.id,
+            dry_run=False,
+            ok=True,
+            message="done",
+            structured_output=SubAgentParsedOutput(
+                found=True,
+                ok=True,
+                status="DONE",
+                summary="源码分析已完成。",
+                artifacts=[{"path": str(source_report), "kind": "md"}],
+            ),
+        )
+    )
+
+    loaded = manager.load(task.id)
+    output_payload = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
+
+    assert result.ok is True
+    assert declared_output.read_text(encoding="utf-8") == source_report.read_text(encoding="utf-8")
+    assert not declared_output.read_text(encoding="utf-8").startswith("# Subagent Result")
+    assert str(declared_output) in loaded.artifact_refs
+    assert output_payload["artifacts"][1]["path"] == str(declared_output)
+    assert output_payload["artifacts"][1]["summary"] == "copied subagent text artifact into declared output"
 
 
 def test_subagent_persistence_writes_compact_checkpoint_chain(tmp_path) -> None:

@@ -67,7 +67,7 @@ def _create_task_with_memory_gate_candidates(manager: SubAgentManager, tmp_path:
         "status": "DONE",
         "lessons": ["先核验证据链，再把经验作为候选提交 review"],
     }
-    (tmp_path / task.id / "output.json").write_text(json.dumps(output_payload), encoding="utf-8")
+    Path(task.output_json).write_text(json.dumps(output_payload), encoding="utf-8")
     task.status = "DONE"
     task.current_step = "等待 review"
     task.latest_summary = "已产出经验候选。"
@@ -121,4 +121,3 @@ def _candidate_by_id(candidates, candidate_id: str) -> dict[str, object]:
 
 def _read_jsonl(path: str) -> list[dict[str, object]]:
     return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
-

@@ -55,8 +55,10 @@ class TestCapabilityRequestQuery:
 
         result = _capability_request_query(task, request)
 
-        assert result is not None
-        assert len(result) > 0
+        assert "file_search" in result
+        assert "测试目标" not in result
+        assert "缺少文件搜索能力" not in result
+        assert "搜索结果列表" not in result
 
 
 class TestSelectCapabilityHits:

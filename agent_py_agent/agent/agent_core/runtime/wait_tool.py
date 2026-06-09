@@ -3,12 +3,20 @@ from __future__ import annotations
 import json
 import time
 
+from ...subagents.models import (
+    SUBAGENT_FAILED_RESULT_STATUSES,
+    SUBAGENT_RESOLVED_TERMINAL_STATUSES,
+    TaskStatus,
+    task_status_in,
+)
 from ...tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ..agent_tree.status import agent_tree_status_payload
 from ..runner.context import current_subagent_run_id
 
 _TOOL_NAME = "wait"
 _MIN_SECONDS = 60
 _MAX_SECONDS = 7200
+_POLL_SECONDS = 5
 
 
 class WaitTool(BaseTool):
@@ -57,10 +65,11 @@ class WaitTool(BaseTool):
             ),
         }
         if _should_sleep_current_turn(self.agent):
-            time.sleep(policy.interval_seconds)
-            payload["slept_seconds"] = policy.interval_seconds
+            slept_seconds, wake_reason = _sleep_current_turn(self.agent, params, policy.interval_seconds)
+            payload["slept_seconds"] = slept_seconds
+            payload["wake_reason"] = wake_reason
             payload["next_action"] = "inspect_after_wait"
-            payload["guidance"] = "已等待指定时间；现在可以重新查看子代理状态、读取产物或继续收口。"
+            payload["guidance"] = "等待已返回；现在可以重新查看子代理状态、读取产物或继续收口。"
         return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -142,6 +151,74 @@ def _should_sleep_current_turn(agent: object) -> bool:
 def _current_source(agent: object) -> str:
     current = getattr(agent, "_current_run_params", None)
     return str(getattr(current, "source", "") or "").strip()
+
+
+def _sleep_current_turn(agent: object, params: dict[str, object], interval_seconds: int) -> tuple[float, str]:
+    if _watch_tree_ready(agent, params):
+        return 0.0, "watch_tree_ready"
+    if not _watch_tree_available(agent, params):
+        time.sleep(interval_seconds)
+        return float(interval_seconds), "timer_elapsed"
+    slept = 0.0
+    while slept < interval_seconds:
+        step = min(float(_POLL_SECONDS), float(interval_seconds) - slept)
+        time.sleep(step)
+        slept += step
+        if _watch_tree_ready(agent, params):
+            return round(slept, 3), "watch_tree_ready"
+    return round(slept, 3), "timer_elapsed"
+
+
+def _watch_tree_ready(agent: object, params: dict[str, object]) -> bool:
+    payload = _watch_tree_payload(agent, params)
+    nodes = _payload_nodes(payload)
+    if not nodes:
+        return False
+    target_run_id = str(params.get("run_id") or params.get("root_id") or "").strip()
+    if target_run_id:
+        node = _target_node(nodes, target_run_id)
+        return _node_terminal(node) if node is not None else False
+    return all(_node_terminal(node) for node in nodes)
+
+
+def _target_node(nodes: list[dict[str, object]], run_id: str) -> dict[str, object] | None:
+    return next((node for node in nodes if str(node.get("run_id") or "") == run_id), None)
+
+
+def _watch_tree_available(agent: object, params: dict[str, object]) -> bool:
+    return bool(_payload_nodes(_watch_tree_payload(agent, params)))
+
+
+def _watch_tree_payload(agent: object, params: dict[str, object]) -> dict[str, object] | None:
+    try:
+        return agent_tree_status_payload(agent, _watch_tree_params(params))
+    except Exception:
+        return None
+
+
+def _watch_tree_params(params: dict[str, object]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key in ("run_id", "root_id", "scope"):
+        value = params.get(key)
+        if value:
+            result[key] = value
+    return result
+
+
+def _payload_nodes(payload: dict[str, object] | None) -> list[dict[str, object]]:
+    nodes = payload.get("nodes") if isinstance(payload, dict) else []
+    return [node for node in nodes if isinstance(node, dict)]
+
+
+def _node_terminal(node: dict[str, object]) -> bool:
+    terminal_statuses = frozenset(
+        {
+            TaskStatus.DONE.value,
+            *SUBAGENT_RESOLVED_TERMINAL_STATUSES,
+            *SUBAGENT_FAILED_RESULT_STATUSES,
+        }
+    )
+    return task_status_in(node.get("status"), terminal_statuses)
 
 
 def _target(agent: object, params: dict[str, object]) -> tuple[str, str] | ToolExecutionResult:

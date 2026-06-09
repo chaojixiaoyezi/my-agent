@@ -638,6 +638,18 @@ from typing import TYPE_CHECKING
 from ..agent_core.agent_tree.status import agent_tree_status_payload
 from ..settings.defaults import default_config_int
 from .models import BackgroundMainAgentReport, ObservationEvent, ProgressPolicy, WakeSignal
+
+_TASK_LINK_TERMINAL_STATUSES = frozenset({
+    "ABANDONED",
+    "CANCELLED",
+    "CHANNEL_ERROR",
+    "DONE",
+    "FAILED",
+    "TAKEN_OVER",
+    "TIMEOUT",
+})
+_MIN_PROGRESS_POLICY_CATCHUP_SECONDS = 7200
+_MAX_PROGRESS_POLICY_CATCHUP_INTERVALS = 4
 from .store import ConversationStore
 
 if TYPE_CHECKING:
@@ -664,6 +676,7 @@ class BackgroundMainAgentScheduler:
             configured_interval_seconds=configured_claim_heartbeat_interval_seconds,
         )
         self.last_progress_policy_load_errors: list[dict[str, object]] = []
+        self.last_progress_policy_suppressed: list[dict[str, object]] = []
 
     def tick(self, *, now: float | None = None) -> list[BackgroundMainAgentReport]:
         current = now if now is not None else __import__("time").time()
@@ -712,7 +725,10 @@ class BackgroundMainAgentScheduler:
     def _run_due_policies(self, reports: list[BackgroundMainAgentReport], reported: set[str], current: float) -> None:
         policies, load_errors = self.store.due_progress_policies_report(now=current)
         self.last_progress_policy_load_errors = load_errors
-        for policy in policies:
+        self.last_progress_policy_suppressed = []
+        runnable, suppressed = _runnable_due_policies(self.store, policies, now=current)
+        self.last_progress_policy_suppressed = _snooze_suppressed_policies(self.store, suppressed, now=current)
+        for policy in runnable:
             if policy.thread_id in reported:
                 continue
             if report := self._run_due_policy(policy, now=current):
@@ -796,7 +812,91 @@ class BackgroundMainAgentScheduler:
             "last_progress_summary": str(getattr(agent, "_last_progress_summary", "") or ""),
             "tree_status_buckets": tree.get("status_buckets") if isinstance(tree.get("status_buckets"), dict) else {},
             "progress_policy_load_errors": list(self.last_progress_policy_load_errors),
+            "progress_policy_suppressed": list(self.last_progress_policy_suppressed),
         }
+
+
+def _prefer_progress_policy(first: ProgressPolicy, second: ProgressPolicy) -> ProgressPolicy:
+    first_score = (first.last_report_at, first.next_due_at, first.policy_id)
+    second_score = (second.last_report_at, second.next_due_at, second.policy_id)
+    return second if second_score > first_score else first
+
+
+def _runnable_due_policies(
+    store,
+    policies: list[ProgressPolicy],
+    *,
+    now: float,
+) -> tuple[list[ProgressPolicy], list[tuple[ProgressPolicy, str]]]:
+    selected_by_key: dict[tuple[str, str, str, str], ProgressPolicy] = {}
+    suppressed: list[tuple[ProgressPolicy, str]] = []
+    for policy in policies:
+        reason = _progress_policy_suppression_reason(store, policy, now=now)
+        if reason:
+            suppressed.append((policy, reason))
+            continue
+        key = (policy.thread_id, policy.task_id, policy.route_channel, policy.route_target)
+        existing = selected_by_key.get(key)
+        if existing is None:
+            selected_by_key[key] = policy
+            continue
+        selected = _prefer_progress_policy(existing, policy)
+        skipped = existing if selected is policy else policy
+        selected_by_key[key] = selected
+        suppressed.append((skipped, "duplicate_policy"))
+    return list(selected_by_key.values()), suppressed
+
+
+def _progress_policy_suppression_reason(store, policy: ProgressPolicy, *, now: float) -> str:
+    if _policy_task_link_is_terminal(store, policy):
+        return "terminal_task_link"
+    if _progress_policy_is_stale(policy, now=now):
+        return "stale_missed_interval"
+    return ""
+
+
+def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
+    if not policy.task_id:
+        return False
+    try:
+        links = store.task_links(policy.thread_id)
+    except Exception:
+        return False
+    for link in links:
+        if link.task_id == policy.task_id and str(link.status or "").upper() in _TASK_LINK_TERMINAL_STATUSES:
+            return True
+    return False
+
+
+def _snooze_suppressed_policies(
+    store,
+    suppressed: list[tuple[ProgressPolicy, str]],
+    *,
+    now: float,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for policy, reason in suppressed:
+        rows.append(
+            {
+                "policy_id": policy.policy_id,
+                "thread_id": policy.thread_id,
+                "task_id": policy.task_id,
+                "reason": reason,
+            }
+        )
+        try:
+            store.mark_progress_reported(policy.policy_id, now=now)
+        except Exception:
+            pass
+    return rows
+
+
+def _progress_policy_is_stale(policy: ProgressPolicy, *, now: float) -> bool:
+    if policy.next_due_at <= 0:
+        return False
+    interval = max(1, int(policy.interval_seconds or 1))
+    catchup_window = max(_MIN_PROGRESS_POLICY_CATCHUP_SECONDS, interval * _MAX_PROGRESS_POLICY_CATCHUP_INTERVALS)
+    return now - policy.next_due_at > catchup_window
 
 
 def _agent_config_int(config: object | None, key: str) -> int:

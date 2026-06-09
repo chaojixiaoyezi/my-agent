@@ -125,16 +125,22 @@ modules = ["agent_py_agent"]
 # 1. 工具名检查: write_file、apply_patch 和授权命令写入都会走写入边界
 # 2. 路径规范化: 去除控制字符、限制长度(4096字符)
 # 3. 统一路径策略: normal 模式只拒绝 path_dangerous_roots，full 模式路径全开
-# 4. 显式禁止目录检查: 仍尊重 forbidden_write_roots
-# 5. 锁定文件检查: 不能修改被 locked_files 标记的文件
+# 4. 显式 allowed_write_roots 检查: 字段存在且非空时，目标必须落在其中一个 root 内
+# 5. 显式禁止目录检查: 仍尊重 forbidden_write_roots
+# 6. 锁定文件检查: 不能修改被 locked_files 标记的文件
 ```
+
+`allowed_write_roots` 不是普通主任务的全局白名单牢笼；没有声明时，普通用户指定输出目录仍由
+`path_access_mode` / `path_dangerous_roots` 等安全策略控制。但在子代理 runner、授权工具或任何
+显式传入 write boundary 的场景里，它就是当前 run 的正向授权边界：模型写错日期、同名 sibling task
+或符号链接逃逸到未授权目录，都必须被工具层阻止。
 
 ### 2.3 Write Rules by Module / 各模块写入规则
 
 | 模块 | 可写入位置 | 不可写入位置 |
 |---|---|---|
 | `memory_store/` | `owner_home/memory/long_term/`, `owner_home/memory/daily/` | 任何其他路径 |
-| `subagents/services/persistence/` | 保存型 root run 下的子代理详细状态写 task-local `work/agents/<run_id>/canonical_state.json`；默认 locator 写 `owner_home/workspace/runtime/workspaces/<workspace-scope>/subagents/`；refs-only 投影写 `owner_home/agents/` | 任何其他路径 |
+| `subagents/services/persistence/` | 保存型 root run 下的子代理详细状态写 task-local `work/agents/<run_id>/canonical_state.json`；locator 只写 `owner_home/workspace/runtime/workspaces/<workspace-scope>/subagents/` 供索引查找；refs-only 投影写 `owner_home/agents/` | 任何其他路径 |
 | `memory_archive/` | `owner_home/memory/`, `owner_home/memory_archive/`, task-local `work/compact/` | 任何其他路径 |
 | `audit/` | 默认 `owner_home/logs/audit/`；显式非默认 audit 路径可覆盖 | 任何其他路径 |
 | `local_storage/` | 默认 `owner_home/workspace/runtime/workspaces/<workspace-scope>/local_store/`；显式非默认 local_store 路径可覆盖 | 任何其他路径 |
@@ -196,7 +202,7 @@ config/local*.json
 
 文件行数不再是硬门。为了让主链路清楚、调用更直接，可以合并文件；为了让职责更清楚，也可以拆分文件。判断标准是调用路径、职责边界和排查成本，不是固定行数。
 
-`scripts/check_code_size.py` 会刷新 `CODE_SIZE_REPORT.md`，用于观察趋势；文件总行数不阻断合并。函数、类、参数、嵌套、星号导入、语法错误和新增垃圾文件名仍然可以在 strict 模式阻断。
+`scripts/check_code_size.py` 会刷新 `CODE_SIZE_REPORT.md`，用于观察趋势；文件总行数不阻断合并。生产代码和脚本里的函数、类、参数、嵌套、星号导入、语法错误和新增垃圾文件名仍然可以在 strict 模式阻断。`agent_py_agent/tests/` 下的测试规模只作为 advisory 展示，不参与 strict 阻断。
 
 ### 3.2 Consolidation Direction / 合并方向
 
@@ -207,7 +213,7 @@ config/local*.json
 
 ### 3.3 Local Complexity / 局部复杂度
 
-函数长度、嵌套、参数数量和类大小仍是硬门。看到复杂度问题时，优先修主链结构，而不是为了满足文件行数数字继续加转发壳。
+生产代码和脚本里的函数长度、嵌套、参数数量和类大小仍是硬门。测试文件的规模信号只做报告提示。看到复杂度问题时，优先修主链结构，而不是为了满足文件行数数字继续加转发壳。
 
 ### 3.4 Manager Shape / Manager 形态
 
@@ -308,7 +314,7 @@ class DispatchMixin:
 
 | 边界 | 说明 |
 |---|---|
-| 文件系统 | 子代理默认写入当前 owner/workspace 范围内的 `owner_home/data/workspaces/<workspace-scope>/subagents/{run_id}/`；父级可通过 `owner_home/agents/{run_id}/` refs-only 投影和 task-local `work/agents/{run_id}/` 查看 |
+| 文件系统 | 子代理默认写入当前 task workspace 的 `tasks/<date>/<task-slug>/work/agents/{run_id}/`；`owner_home/agents/{run_id}/` refs-only 投影和 runtime locator 只用于索引查找，不能作为模型写入根 |
 | 工具访问 | 子代理只能使用白名单中的工具 |
 | 模型访问 | 子代理使用受限的 runner prompt，不能访问系统提示词 |
 | 网络访问 | 子代理的 Web 工具受 `allowed_domains` 限制 |

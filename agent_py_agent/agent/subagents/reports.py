@@ -87,6 +87,7 @@ class SubAgentBoardItem:
     final_report_ref: str
     task_work_dir: str = ""
     task_output_dir: str = ""
+    created_at: float = 0.0
     agent_work_dir: str = ""
     checkpoint_ref: str = ""
     summary_ref: str = ""

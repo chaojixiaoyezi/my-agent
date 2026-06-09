@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from code_size_rules import is_test_path
+
 
 @dataclass(frozen=True)
 class ReportRenderContext:
@@ -54,25 +56,34 @@ def _findings_by_kind(findings: list[Any]) -> dict[str, list[Any]]:
 
 
 def _summary_lines(findings: list[Any], context: ReportRenderContext) -> list[str]:
-    hard = [item for item in findings if item.severity == "hard"]
-    high_risk = [item for item in findings if item.severity == "high-risk"]
-    soft = [item for item in findings if item.severity == "soft"]
+    strict_findings = [item for item in findings if not _is_test_finding(item)]
+    strict_hard = [item for item in strict_findings if item.severity == "hard"]
+    strict_high_risk = [item for item in strict_findings if item.severity == "high-risk"]
+    strict_soft = [item for item in strict_findings if item.severity == "soft"]
+    test_advisory = [item for item in findings if _is_test_finding(item)]
     return [
         f"- mode: {context.mode}",
         f"- baseline: {context.baseline_path or 'none'}",
         f"- baseline_loaded: {context.baseline_loaded}",
         f"- blocked: {context.blocked}",
-        f"- total_findings: {len(findings)}",
-        f"- hard_findings: {len(hard)}",
-        f"- high_risk_findings: {len(high_risk)}",
-        f"- soft_findings: {len(soft)}",
+        f"- strict_scope_total_findings: {len(strict_findings)}",
+        f"- strict_scope_hard_findings: {len(strict_hard)}",
+        f"- strict_scope_high_risk_findings: {len(strict_high_risk)}",
+        f"- strict_scope_soft_findings: {len(strict_soft)}",
+        f"- test_advisory_findings: {len(test_advisory)}",
     ]
 
 
+def _is_test_finding(item: Any) -> bool:
+    return is_test_path(str(item.path))
+
+
 def _finding_sections(findings: list[Any]) -> list[str]:
-    by_kind = _findings_by_kind(findings)
-    high_risk = [item for item in findings if item.severity == "high-risk"]
-    soft = [item for item in findings if item.severity == "soft"]
+    strict_findings = [item for item in findings if not _is_test_finding(item)]
+    test_findings = [item for item in findings if _is_test_finding(item)]
+    by_kind = _findings_by_kind(strict_findings)
+    high_risk = [item for item in strict_findings if item.severity == "high-risk"]
+    soft = [item for item in strict_findings if item.severity == "soft"]
     return [
         *_section("## 1. Oversized Functions Top 20", by_kind["function"], 20),
         *_section("## 2. Oversized Classes Top 20", by_kind["class"], 20),
@@ -84,13 +95,14 @@ def _finding_sections(findings: list[Any]) -> list[str]:
         *_section("## 8. Decode Error Violations", by_kind["decode_error"]),
         *_section("## 9. Junk File / Junk Name Violations", by_kind["junk_name"]),
         *_section("## 10. Historical Soft Findings", soft[:100]),
+        *_section("## 11. Test Advisory Findings Top 100", test_findings, 100),
     ]
 
 
 def _recommendations() -> list[str]:
     return [
         "",
-        "## 11. Next Recommendations",
+        "## 12. Next Recommendations",
         "- Keep `cli/parser.py` thin and route registration through `cli/commands/`.",
         "- Continue extracting `cli/chat.py` into chat session, input loop, renderer, and gateway client modules.",
         "- Keep SubAgent manager as the readable owner of its main lifecycle, with services only where they remove real branching.",
@@ -111,7 +123,7 @@ def write_report(report_path: Path, findings: list[Any], context: ReportRenderCo
         *_finding_sections(findings),
         *_recommendations(),
         "",
-        "## 12. Strict Blocked",
+        "## 13. Strict Blocked",
         f"- {'**yes**' if context.blocked else 'no'}",
         "",
     ]

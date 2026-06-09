@@ -47,14 +47,15 @@ def _assert_allowed_write(registry, task_dir, boundary) -> None:
     assert (task_dir / "output.md").read_text(encoding="utf-8") == "ok"
 
 
-def _assert_allowed_outside_allowed_roots(registry, workspace, boundary) -> None:
+def _assert_blocked_outside_allowed_roots(registry, workspace, boundary) -> None:
     result = registry.execute_call(
         {"tool": "write_file", "path": "README.md", "content": "bad"},
         allowed_tools=["write_file"],
         write_boundary=boundary,
     )
-    assert result.ok
-    assert (workspace / "README.md").read_text(encoding="utf-8") == "bad"
+    assert not result.ok
+    assert "allowed_write_roots" in result.output
+    assert not (workspace / "README.md").exists()
 
 
 def _assert_blocked_forbidden_root(registry, task_dir, boundary) -> None:
@@ -74,6 +75,7 @@ def _assert_blocked_locked_file(registry, task_dir, boundary) -> None:
         write_boundary=boundary,
     )
     assert not locked.ok
+    assert locked.error_code == "WRITE_FORBIDDEN"
     assert "locked_files" in locked.output
     locked_child = registry.execute_call(
         {"tool": "write_file", "path": "subs/run-1/LOCKED.md/child.txt", "content": "bad"},
@@ -81,6 +83,7 @@ def _assert_blocked_locked_file(registry, task_dir, boundary) -> None:
         write_boundary=boundary,
     )
     assert not locked_child.ok
+    assert locked_child.error_code == "WRITE_FORBIDDEN"
     assert "locked_files" in locked_child.output
     assert not (task_dir / "LOCKED.md").exists()
 
@@ -95,13 +98,13 @@ def _assert_blocked_non_string_path(registry, boundary) -> None:
     assert "allowed_write_roots" in result.output or "path 参数必须是字符串路径" in result.output
 
 
-def test_write_boundary_keeps_forbidden_and_locked_but_not_allowed_root_hard_gate():
-    """LLM: allowed_write_roots are context now; forbidden/locked paths still block."""
+def test_write_boundary_enforces_declared_allowed_roots_for_write_tools():
+    """LLM: declared allowed_write_roots are the positive write boundary."""
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         registry, task_dir, boundary = _write_boundary_test_registry(workspace)
         _assert_allowed_write(registry, task_dir, boundary)
-        _assert_allowed_outside_allowed_roots(registry, workspace, boundary)
+        _assert_blocked_outside_allowed_roots(registry, workspace, boundary)
         _assert_blocked_forbidden_root(registry, task_dir, boundary)
         _assert_blocked_locked_file(registry, task_dir, boundary)
         _assert_blocked_non_string_path(registry, boundary)
@@ -161,11 +164,11 @@ def test_write_boundary_extends_read_tools_to_explicit_product_root():
         assert "hello product" in result.output
 
 
-def test_write_boundary_allows_symlink_escape_to_non_dangerous_root():
-    """LLM: symlink escapes are allowed when the resolved target is not dangerous.
+def test_write_boundary_blocks_symlink_escape_outside_declared_allowed_roots():
+    """LLM: resolved symlink targets must still remain inside declared write roots.
 
     新手说明:
-    在允许的目录下创建指向普通外部目录的符号链接，不再因为工作区白名单被拦截。
+    如果父级已经给了 allowed_write_roots，符号链接解析后的真实路径也必须还在授权范围内。
     """
     with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside_td:
         workspace = Path(td)
@@ -185,8 +188,9 @@ def test_write_boundary_allows_symlink_escape_to_non_dangerous_root():
             write_boundary={"allowed_write_roots": [str(task_dir)]},
         )
 
-        assert result.ok
-        assert (outside / "escape.txt").read_text(encoding="utf-8") == "bad"
+        assert not result.ok
+        assert "allowed_write_roots" in result.output
+        assert not (outside / "escape.txt").exists()
 
 
 def test_write_and_apply_patch_tools():
@@ -358,6 +362,51 @@ def test_list_files_routes_internal_agent_status_dirs_to_agent_tree(tmp_path: Pa
     assert payload["suggested_tool_call"]["tool"] == "inspect_agent_tree"
     assert payload["suggested_tool_call"]["run_id"] == "subagent-123"
     assert payload["child_result_index_row"]["read_order"] == [str(child_output)]
+
+
+def test_list_files_hides_internal_agent_status_refs_when_listing_task_root(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    task_root = workspace / "tasks" / "2026-06-06" / "demo"
+    internal = task_root / "work" / "agents" / "subagent-123"
+    child_output = task_root / "work" / "child_outputs" / "subagent-123.md"
+    final_output = task_root / "output" / "report.md"
+    (internal / "compactions").mkdir(parents=True)
+    child_output.parent.mkdir(parents=True)
+    final_output.parent.mkdir(parents=True)
+    (internal / "canonical_state.json").write_text("{}", encoding="utf-8")
+    (internal / "compactions" / "latest_summary.md").write_text("internal", encoding="utf-8")
+    child_output.write_text("declared child result", encoding="utf-8")
+    final_output.write_text("final", encoding="utf-8")
+    list_tool = ListFilesTool(workspace, max_entries=50)
+
+    result = list_tool.execute({"path": str(task_root), "recursive": True})
+
+    assert result.ok is True
+    assert "work/agents" not in result.output
+    assert "canonical_state.json" not in result.output
+    assert "latest_summary.md" not in result.output
+    assert "work/child_outputs/subagent-123.md" in result.output
+    assert "output/report.md" in result.output
+
+
+def test_read_file_reports_active_child_declared_output_not_ready(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    output = workspace / "tasks" / "2026-06-06" / "demo" / "output" / "child.md"
+    output.parent.mkdir(parents=True)
+    registry = make_tool_registry(workspace)
+
+    result = registry.execute_call(
+        {"tool": "read_file", "path": str(output)},
+        allowed_tools=["read_file"],
+        write_boundary={"locked_files": [str(output)]},
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert result.error_code == "PATH_NOT_FOUND"
+    assert payload["error"] == "active_child_output_not_ready"
+    assert payload["suggested_tool_call"]["tool"] == "wait"
+    assert payload["status_tool_call"]["tool"] == "inspect_agent_tree"
 
 
 def test_filesystem_tool_reports_missing_external_path_without_permission_claim():

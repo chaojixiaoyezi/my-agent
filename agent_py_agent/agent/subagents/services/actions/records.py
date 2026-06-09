@@ -8,6 +8,20 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ...policies import (
+    ACTION_CLASSIFY_BLOCKER,
+    ACTION_INSPECT_CHANNEL_PROBE,
+    ACTION_INSPECT_FAILURE,
+    ACTION_PROBE_OR_REPAIR_CHANNEL,
+    ACTION_RECOVER_CHILD_AFTER_PARENT_TIMEOUT,
+    ACTION_RECOVER_COORDINATOR_LEADERSHIP,
+    ACTION_REOPEN_FOR_EVIDENCE,
+    ACTION_REPAIR_WORK_ORDER,
+    ACTION_ROUTE_CAPABILITY_REQUEST,
+    ACTION_STOP_NO_PROGRESS_AND_ESCALATE,
+    ACTION_TAKEOVER_OR_REASSIGN,
+    ACTION_TRIAGE_CAPABILITY_GAP,
+)
 from ..indexing.records import LocalRecordParams
 from ..rescue_policy import action_rescue_record_fields
 from .handlers import (
@@ -27,18 +41,18 @@ if TYPE_CHECKING:
 
 
 ACTION_DISPATCH = {
-    "probe_or_repair_channel": apply_probe_or_repair_channel,
-    "inspect_channel_probe": apply_probe_or_repair_channel,
-    "repair_work_order": apply_repair_work_order,
-    "reopen_for_evidence": apply_reopen_for_evidence,
-    "takeover_or_reassign": apply_takeover_or_reassign,
-    "recover_coordinator_leadership": apply_recover_coordinator_leadership,
-    "recover_child_after_parent_timeout": apply_record_only_action,
-    "route_capability_request": apply_record_only_action,
-    "triage_capability_gap": apply_record_only_action,
-    "inspect_failure": apply_record_only_action,
-    "classify_blocker": apply_record_only_action,
-    "stop_no_progress_and_escalate": apply_stop_no_progress_and_escalate,
+    ACTION_PROBE_OR_REPAIR_CHANNEL: apply_probe_or_repair_channel,
+    ACTION_INSPECT_CHANNEL_PROBE: apply_probe_or_repair_channel,
+    ACTION_REPAIR_WORK_ORDER: apply_repair_work_order,
+    ACTION_REOPEN_FOR_EVIDENCE: apply_reopen_for_evidence,
+    ACTION_TAKEOVER_OR_REASSIGN: apply_takeover_or_reassign,
+    ACTION_RECOVER_COORDINATOR_LEADERSHIP: apply_recover_coordinator_leadership,
+    ACTION_RECOVER_CHILD_AFTER_PARENT_TIMEOUT: apply_record_only_action,
+    ACTION_ROUTE_CAPABILITY_REQUEST: apply_record_only_action,
+    ACTION_TRIAGE_CAPABILITY_GAP: apply_record_only_action,
+    ACTION_INSPECT_FAILURE: apply_record_only_action,
+    ACTION_CLASSIFY_BLOCKER: apply_record_only_action,
+    ACTION_STOP_NO_PROGRESS_AND_ESCALATE: apply_stop_no_progress_and_escalate,
 }
 
 

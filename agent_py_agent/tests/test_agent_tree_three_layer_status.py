@@ -423,7 +423,7 @@ def test_agent_tree_result_index_prefers_declared_outputs_over_internal_final_re
         }
     ]
     assert row["read_order"][0] == str(output)
-    assert row["final_report_ref"] == str(final_report)
+    assert "final_report_ref" not in row
     assert payload["nodes"][0]["evidence_layer"]["declared_output_refs"] == [str(output)]
 
 
@@ -637,7 +637,7 @@ def test_child_result_index_keeps_progress_refs_out_of_read_order_for_running_ch
     row = payload["child_result_index"][0]
 
     assert row["primary_artifact_refs"] == []
-    assert row["final_report_ref"].endswith("/work/agents/child-running/final_report.md")
+    assert "final_report_ref" not in row
     assert row["summary_ref"].endswith("/work/agents/child-running/summary.md")
     assert row["checkpoint_ref"].endswith("/work/agents/child-running/checkpoint.json")
     assert row["agent_work_dir"].endswith("/work/agents/child-running")

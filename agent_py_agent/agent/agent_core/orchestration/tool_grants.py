@@ -23,22 +23,16 @@ CODING_SUBAGENT_TOOLS = [
     "update_collaboration",
     "capability_request",
 ]
-READ_ONLY_SUBAGENT_TOOLS = list(CODING_SUBAGENT_TOOLS)
-_CODING_TOOL_PRESETS = {
-    "coding",
-    "coder",
-    "frontend-dev",
-    "frontend",
-    "web",
-    "web-dev",
-    "file-edit",
-    "edit",
-    "research",
-    "researcher",
-    "writer",
-    "tester",
-    "worker",
-}
+READ_ONLY_SUBAGENT_TOOLS = [
+    "list_files",
+    "read_file",
+    "search_text",
+    "read_artifact",
+    "web_search",
+    "web_fetch",
+    "inspect_agent_tree",
+]
+_CODING_TOOL_PRESETS = {"coding"}
 
 
 def subagent_allowed_tools(params: dict[str, object]) -> list[str] | None:

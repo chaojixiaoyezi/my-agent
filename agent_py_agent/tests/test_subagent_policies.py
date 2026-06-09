@@ -358,8 +358,11 @@ def test_capability_request_query_basic():
         constraints={},
     )
     query = _capability_request_query(task, request)
-    assert "分析销售数据" in query
     assert "数据分析" in query
+    assert "分析销售数据" not in query
+    assert "需要统计" not in query
+    assert "报表" not in query
+    assert "尝试A" not in query
 
 
 def test_capability_request_query_excludes_empty():
@@ -381,9 +384,9 @@ def test_capability_request_query_excludes_empty():
         constraints={},
     )
     query = _capability_request_query(task, request)
-    # 只有 goal 和 needed_capability 有值
+    # 只有结构化 capability 字段参与机器匹配；goal 是人工上下文。
     lines = [l for l in query.split("\n") if l]
-    assert len(lines) == 2
+    assert lines == ["能力"]
 
 
 # ── _capability_hit_is_confident 测试 ──────────────────────────────────────

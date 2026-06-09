@@ -260,9 +260,20 @@ def _tool_output_index_paths(agent: object, seed_records: list[dict[str, Any]]) 
     task_root = current_run_task_workspace_root(agent)
     if task_root is not None:
         paths.append(task_root / "work" / "blobs" / "tool_outputs" / "index.jsonl")
+        paths.extend(_task_agent_tool_output_index_paths(task_root))
     for root in runtime_archive_roots(agent):
         paths.append(Path(root) / "blobs" / "tool_outputs" / "index.jsonl")
     return _unique_existing_paths(paths)
+
+
+def _task_agent_tool_output_index_paths(task_root: Path) -> list[Path]:
+    agents_root = task_root / "work" / "agents"
+    if not agents_root.is_dir():
+        return []
+    try:
+        return sorted(agents_root.glob("*/blobs/tool_outputs/index.jsonl"))
+    except OSError:
+        return []
 
 
 def _index_path_from_artifact_ref(value: object) -> list[Path]:

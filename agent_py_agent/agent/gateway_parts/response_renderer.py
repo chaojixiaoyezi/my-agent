@@ -45,7 +45,13 @@ def _int_value(payload: Any, key: str) -> int:
         return 0
 
 
-def print_gateway_response(payload: dict, *, json_mode: bool = False, show_prompt: bool = False) -> int:
+def print_gateway_response(
+    payload: dict,
+    *,
+    json_mode: bool = False,
+    show_prompt: bool = False,
+    suppress_response: bool = False,
+) -> int:
     if json_mode:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 0 if payload.get("ok") else 2
@@ -55,11 +61,12 @@ def print_gateway_response(payload: dict, *, json_mode: bool = False, show_promp
         print(payload.get("prompt", ""))
         print("===== RESPONSE =====")
 
-    response = str(payload.get("response", "") or "")
-    if response:
-        print(response)
-    else:
-        print(str(payload.get("error", "gateway 请求没有返回内容。") or "gateway 请求没有返回内容。"))
+    if not suppress_response:
+        response = str(payload.get("response", "") or "")
+        if response:
+            print(response)
+        else:
+            print(str(payload.get("error", "gateway 请求没有返回内容。") or "gateway 请求没有返回内容。"))
 
     # Human CLI status uses cumulative context pressure; JSON mode keeps both token fields.
     status_line = (

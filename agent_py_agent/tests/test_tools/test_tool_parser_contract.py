@@ -287,6 +287,33 @@ def test_tool_call_parser_keeps_valid_json_escapes_unchanged():
     assert calls == [{"tool": "write_file", "path": "out.txt", "content": "line 1\nline 2"}]
 
 
+def test_tool_call_parser_accepts_inline_closing_marker_after_complete_json():
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL]\n{"tool":"create_subagents","items":[{"goal":"读源码","role":"worker"}]}[/TOOL_CALL]'
+    )
+
+    assert calls == [{"tool": "create_subagents", "items": [{"goal": "读源码", "role": "worker"}]}]
+
+
+def test_tool_call_parser_ignores_inline_closing_marker_inside_json_string():
+    registry = make_tool_registry(Path.cwd())
+    payload = {
+        "tool": "write_file",
+        "path": "report.md",
+        "content": "正文里提到 [/TOOL_CALL] 只是文本",
+    }
+
+    calls = registry.parse_tool_calls(
+        "[TOOL_CALL]\n"
+        f"{json.dumps(payload, ensure_ascii=False)}\n"
+        "[/TOOL_CALL]"
+    )
+
+    assert calls == [payload]
+
+
 def test_tool_call_parser_does_not_canonicalize_conflicting_aliases():
     registry = make_tool_registry(Path.cwd())
 

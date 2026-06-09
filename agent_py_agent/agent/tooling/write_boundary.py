@@ -82,6 +82,9 @@ def validate_write_boundary(
         access_decision = path_policy.check(target)
         if not access_decision.allowed:
             return f"写入被阻止: {access_decision.message}"
+        allowed_error = _allowed_boundary_error(target, allowed_roots, workspace_root)
+        if allowed_error:
+            return allowed_error
         internal_output_error = _internal_output_json_error(target, write_boundary, workspace_root, roots)
         if internal_output_error:
             return internal_output_error
@@ -153,6 +156,19 @@ def _internal_output_json_error(
         "不能写进用户产物目录，避免污染 deliverables。"
         f" target={_display_path(target, workspace_root)} "
         f"execution_context.output_json={output_refs[0]}"
+    )
+
+
+def _allowed_boundary_error(target: Path, allowed_roots: list[Path], workspace_root: Path) -> str:
+    if not allowed_roots:
+        return ""
+    if any(_is_relative_to(target, root) for root in allowed_roots):
+        return ""
+    allowed = ", ".join(_display_path(root, workspace_root) for root in allowed_roots[:5])
+    suffix = "" if len(allowed_roots) <= 5 else f" 等 {len(allowed_roots)} 个"
+    return (
+        "写入被阻止: 目标路径不在 allowed_write_roots 内。"
+        f" target={_display_path(target, workspace_root)} allowed={allowed}{suffix}"
     )
 
 

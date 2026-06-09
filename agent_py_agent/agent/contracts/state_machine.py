@@ -146,7 +146,7 @@ def can_repair(facts: RunStateFacts) -> bool:
 def waiting_reason(facts: RunStateFacts) -> str:
     status = normalize_status(facts.status)
     verification = normalize_verification(facts.verification_status)
-    failure = str(facts.failure_type or "").upper()
+    failure = _failure_contract_code(facts.failure_type)
     if failure == "APPROVAL_REQUIRED":
         return "approval"
     if status == "WAITING_FOR_USER":
@@ -205,7 +205,7 @@ def lifecycle_phase(facts: RunStateFacts) -> str:
 
 
 def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
-    failure = str(facts.failure_type or "").upper()
+    failure = _failure_contract_code(facts.failure_type)
     if _status_protocol_error(facts.status):
         return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, "invalid_state_status_protocol")
     if _verification_protocol_error(facts.verification_status):
@@ -324,6 +324,10 @@ def _failure_type_from_task(task: object) -> str:
     if raw:
         return error_contract(raw).code
     return "UNKNOWN_ERROR"
+
+
+def _failure_contract_code(value: object) -> str:
+    return error_contract(str(value or "")).code
 
 
 def _status_protocol_error(value: object) -> str:

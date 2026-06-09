@@ -131,6 +131,8 @@ class ListFilesTool(FileSystemTool):
                 return False
             if depth > request.max_depth:
                 return False
+        if _internal_agent_status_ref(item, include_agent_directory=True):
+            return False
         if not request.file_glob:
             return True
         display = self.display_path(item)

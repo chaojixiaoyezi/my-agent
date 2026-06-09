@@ -3,6 +3,7 @@ from __future__ import annotations
 """Shared progress helpers for CLI status surfaces."""
 
 import json
+import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -10,12 +11,12 @@ from typing import Any
 from ..agent.common.json_io import read_json_object_report
 from ..agent.common.value_parsing import string_list
 from ..agent.local_storage import AgentRuntimeQueryContext
+from ..agent.startup_recovery import is_recent_board_item
+
+_SHARED_PROGRESS_ROOT_LIMIT = 8
 
 
 def shared_progress_for_board(agent: Any, board: Any, *, purpose: str) -> list[dict[str, Any]]:
-    existing = getattr(board, "shared_progress", None)
-    if isinstance(existing, list):
-        return existing
     panels = _query_panels(agent, _root_ids_from_board(board), purpose)
     try:
         board.shared_progress = panels
@@ -91,10 +92,14 @@ def _query_panels(agent: Any, root_ids: list[str], purpose: str) -> list[dict[st
 
 def _root_ids_from_board(board: Any) -> list[str]:
     roots: list[str] = []
-    for item in [*list(getattr(board, "hot_list", []) or []), *list(getattr(board, "recent", []) or [])]:
+    now = time.time()
+    hot = [item for item in list(getattr(board, "hot_list", []) or []) if is_recent_board_item(item, now=now)]
+    for item in [*hot, *list(getattr(board, "recent", []) or [])]:
         root_id = str(getattr(item, "root_id", "") or getattr(item, "id", ""))
         if root_id and root_id not in roots:
             roots.append(root_id)
+        if len(roots) >= _SHARED_PROGRESS_ROOT_LIMIT:
+            break
     return roots
 
 

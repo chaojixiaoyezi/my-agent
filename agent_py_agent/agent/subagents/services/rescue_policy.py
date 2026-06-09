@@ -3,10 +3,15 @@ from __future__ import annotations
 
 """rescue/escalation annotations for due-check action plans."""
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ...common.value_parsing import sequence_strings
+from ..policies import (
+    ACTION_INSPECT_MANUALLY,
+    RESCUE_POLICIES,
+)
 from .takeover.readiness import takeover_readiness_ref_order
 
 if TYPE_CHECKING:
@@ -57,23 +62,9 @@ def action_rescue_record_fields(action) -> dict[str, object]:
 
 
 def _strategy_and_target(kind: str, action: str) -> tuple[str, str]:
-    if kind in {"run_timeout", "heartbeat_stale", "status_timeout"}:
-        return "takeover_or_shrink_scope_before_retry", "parent"
-    if kind == "parent_timeout_with_unfinished_children":
-        return "recover_unfinished_children_after_parent_timeout", "parent"
-    if kind in {"status_failed", "status_blocked"}:
-        return "inspect_failure_then_rescue_or_escalate", "parent"
-    if kind in {"channel_broken", "channel_probe_missing", "status_channel_error"}:
-        return "repair_channel_before_retry", "runtime_owner"
-    if kind == "open_capability_request":
-        return "route_capability_request_before_retry", "capability_router"
-    if kind == "open_capability_gap":
-        return "escalate_capability_gap_for_tooling_or_learning", "capability_owner"
-    if kind == "fake_done_risk":
-        return "reopen_and_request_missing_evidence", "parent"
-    if kind == "missing_work_order_files":
-        return "repair_work_order_before_any_retry", "parent"
-    return action or "inspect_manually", "parent"
+    if policy := RESCUE_POLICIES.get(kind):
+        return policy.strategy, policy.target
+    return action or ACTION_INSPECT_MANUALLY, "parent"
 
 
 def _context_refs(issue: DueCheckIssue) -> list[str]:
@@ -96,10 +87,23 @@ def _context_refs(issue: DueCheckIssue) -> list[str]:
 def _readiness_refs_for_issue(issue: DueCheckIssue) -> list[str]:
     if not issue.task_dir:
         return []
-    path = Path(issue.task_dir) / "reports" / "takeover_readiness.json"
-    if not path.exists():
-        return []
-    return takeover_readiness_ref_order(str(path))
+    for path in _readiness_candidate_paths(Path(issue.task_dir)):
+        if path.exists():
+            return takeover_readiness_ref_order(str(path))
+    return []
+
+
+def _readiness_candidate_paths(task_dir: Path) -> list[Path]:
+    candidates = [task_dir / "reports" / "takeover_readiness.json"]
+    locator = task_dir / "task.json"
+    try:
+        payload = json.loads(locator.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return candidates
+    agent_workspace = str(payload.get("agent_run_workspace_dir") or "").strip()
+    if agent_workspace:
+        candidates.insert(0, Path(agent_workspace) / "reports" / "takeover_readiness.json")
+    return candidates
 
 
 def _build_rescue_packet(

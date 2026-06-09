@@ -31,7 +31,7 @@
   这类状态词不再变成工具成功/失败事实。
 - task progress 的 items、coverage 和 soft quality hints 已收回 `task_progress.py` 单入口。
   进度状态只认结构化 `pending/in_progress/done/skipped/blocked`；未知值保留为普通状态文本并归入
-  `other`，不会被多语言自然词猜成已完成或阻塞。
+  `unknown`，不会被多语言自然词猜成待处理、已完成或阻塞。
 - task compact rollup 复用当前 `TaskStatus` 协议分组；`CANCELLED`、`ABANDONED`、
   `TAKEN_OVER` 只计入状态统计和审计，不再进入 `pending_run_ids` 或 continue packet
   `pending_work`。

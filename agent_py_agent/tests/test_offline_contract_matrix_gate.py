@@ -21,7 +21,7 @@ def test_offline_contract_matrix_gate_reports_missing_files(tmp_path: Path) -> N
     from scripts.check_offline_contract_matrix import check_offline_contract_matrix
 
     (tmp_path / "CODE_SIZE_REPORT.md").write_text(
-        "- high_risk_findings: 0\n- soft_findings: 0\n",
+        "- strict_scope_high_risk_findings: 0\n- strict_scope_soft_findings: 0\n- test_advisory_findings: 9\n",
         encoding="utf-8",
     )
 
@@ -40,7 +40,9 @@ def test_offline_contract_matrix_gate_reports_code_size_findings(tmp_path: Path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("# placeholder\n", encoding="utf-8")
     (tmp_path / "CODE_SIZE_REPORT.md").write_text(
-        "- high_risk_findings: 1\n- soft_findings: 2\n",
+        "- strict_scope_high_risk_findings: 1\n"
+        "- strict_scope_soft_findings: 2\n"
+        "- test_advisory_findings: 99\n",
         encoding="utf-8",
     )
 

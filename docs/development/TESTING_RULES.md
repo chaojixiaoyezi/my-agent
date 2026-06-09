@@ -150,7 +150,7 @@ blocked by billing, or intentionally deferred until the next quota cycle.
 推送远端分支、更新远端 PR、或合并到 `main` 前，必须跑下面的本地严格 gate。GitHub Actions 被关闭、被账单阻塞、或计划下个月再开时，也不能跳过这一步。
 
 Remote `main` pushes should be batched by one-sided churn: push only when the
-current diff has more than 5000 insertions or more than 5000 deletions. Do not
+current diff has more than 8000 insertions or more than 8000 deletions. Do not
 add insertions and deletions together to satisfy this threshold.
 
 ```bash

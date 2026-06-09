@@ -195,6 +195,45 @@ def test_scheduler_records_bad_progress_policy_without_blocking_due_policy(tmp_p
     assert channels.adapter("internal").sent_messages
 
 
+def test_scheduler_snoozes_stale_missed_progress_policy_without_model_call(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = ConversationStore(tmp_path / "conversations")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
+    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "陈年提醒不追补", 'now': 11.0})
+    policy = store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 12.0})
+
+    reports = scheduler.tick(now=12.0 + 7200 + 61)
+
+    assert reports == []
+    assert backend.prompts == []
+    assert scheduler.last_progress_policy_suppressed[0]["policy_id"] == policy.policy_id
+    assert scheduler.last_progress_policy_suppressed[0]["reason"] == "stale_missed_interval"
+    assert store.get_progress_policy(policy.policy_id).next_due_at > 7200
+
+
+def test_scheduler_runs_one_duplicate_progress_policy_per_target(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = ConversationStore(tmp_path / "conversations")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
+    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "重复提醒只跑一次", 'now': 11.0})
+    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 12.0})
+    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 13.0})
+
+    reports = scheduler.tick(now=73.0)
+
+    assert len(reports) == 1
+    assert len(backend.prompts) == 1
+    assert [item["reason"] for item in scheduler.last_progress_policy_suppressed] == ["duplicate_policy"]
+
+
 def test_urgent_wake_uses_full_background_tool_profile(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()

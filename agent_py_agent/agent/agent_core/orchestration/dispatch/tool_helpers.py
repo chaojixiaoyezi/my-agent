@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agent_py_agent.agent.capability.config import CapabilityConfig
 
+from ....agent_core.runner.timeout_policy import runner_timeout_disabled
 from ....capability.runtime_config_reload import (
     default_capability_config_path,
     load_capability_config_snapshot,
@@ -43,13 +44,7 @@ def _capability_config_load_error(path: Path, exc: BaseException) -> dict[str, o
 
 
 def _runner_timeouts_disabled(config: object) -> bool:
-    raw = getattr(config, "runner_timeout_seconds", "off")
-    if isinstance(raw, str):
-        return raw.strip().lower() in {"off", "none", "disabled", "false", "no", "0"}
-    try:
-        return float(raw) == 0.0
-    except (TypeError, ValueError):
-        return False
+    return runner_timeout_disabled(config)
 
 
 def _run_ids_for_scope(params: dict[str, object], report, agent: object | None = None) -> list[str]:

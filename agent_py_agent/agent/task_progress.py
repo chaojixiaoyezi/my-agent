@@ -14,6 +14,8 @@ from .runtime_errors import DataCorruptionError, runtime_error_report
 
 _SCHEMA_VERSION = "task_progress.v1"
 TASK_PROGRESS_KNOWN_STATUSES = ("pending", "in_progress", "done", "skipped", "blocked")
+TASK_PROGRESS_UNKNOWN_STATUS = "unknown"
+TASK_PROGRESS_COUNT_STATUSES = (*TASK_PROGRESS_KNOWN_STATUSES, TASK_PROGRESS_UNKNOWN_STATUS)
 TASK_PROGRESS_CLOSED_STATUSES = frozenset({"done", "skipped"})
 TASK_PROGRESS_STATUS_INVALID = "TASK_PROGRESS_STATUS_INVALID"
 _FACT_FIELDS = ("id", "title", "status", "notes", "result", "outcome", "conclusion", "decision", "summary")
@@ -323,15 +325,19 @@ def _normalize_coverage_target(value: object) -> dict[str, Any]:
     item = dict(value)
     target_id = str(item.get("id") or "").strip()
     title = str(item.get("title") or target_id).strip()
+    raw_status = str(item.get("status") or "").strip()
     result = {
         "id": target_id or _safe_id(title) or "target",
         "title": title,
-        "status": str(item.get("status") or "pending").strip() or "pending",
+        "status": normalize_task_progress_status(raw_status or "pending"),
         "checks": _normalize_target_checks(item),
         "evidence": string_list(item.get("evidence")),
         "notes": str(item.get("notes") or "").strip(),
         "next": str(item.get("next") or "").strip(),
     }
+    if raw_status and not task_progress_status_is_known(raw_status):
+        result["raw_status"] = raw_status
+        result["status_protocol_error"] = TASK_PROGRESS_STATUS_INVALID
     for key in ("owner", "priority", "updated_at", "coverage_kind", "source_ref"):
         if key in item:
             result[key] = item[key]
@@ -346,7 +352,7 @@ def _normalize_checks(value: object) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
     return {
-        str(key).strip(): str(status or "pending").strip() or "pending"
+        str(key).strip(): normalize_task_progress_status(str(status or "").strip() or "pending")
         for key, status in value.items()
         if str(key).strip()
     }
@@ -645,7 +651,7 @@ def task_progress_status_is_done(value: object) -> bool:
 
 def normalize_task_progress_status(value: object) -> str:
     text = str(value or "").strip()
-    return text if task_progress_status_is_known(text) else "pending"
+    return text if task_progress_status_is_known(text) else TASK_PROGRESS_UNKNOWN_STATUS
 
 
 def task_progress_status_is_known(value: object) -> bool:
@@ -668,7 +674,7 @@ def _counts(items: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {"total": len(items)}
     for item in items:
         status = str(item.get("status") or "pending").strip() or "pending"
-        key = status if status in TASK_PROGRESS_KNOWN_STATUSES else "other"
+        key = status if status in TASK_PROGRESS_COUNT_STATUSES else "other"
         counts[key] = counts.get(key, 0) + 1
     return counts
 

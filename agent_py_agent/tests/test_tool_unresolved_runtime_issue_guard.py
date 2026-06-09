@@ -79,7 +79,7 @@ def test_runtime_status_response_breaks_before_repair_redirects(tmp_path: Path):
     assert params.tool_context == []
 
 
-def test_unresolved_runtime_issue_repair_context_does_not_hard_block(tmp_path: Path):
+def test_unresolved_runtime_issue_repair_context_redirects_once_then_allows_report(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_guard import unresolved_runtime_issue as guard
     from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
         ToolLoopRepairCounters,
@@ -109,10 +109,10 @@ def test_unresolved_runtime_issue_repair_context_does_not_hard_block(tmp_path: P
         )
     )
 
-    assert decision.action == "continue"
-    assert decision.response is None
-    assert decision.counters.unresolved_runtime_issue_redirects == 4
-    assert any("repair_revalidate_or_report_real_blocker" in item for item in params.tool_context)
+    assert decision.action == "break"
+    assert decision.response.text == "已经完成了。"
+    assert decision.counters.unresolved_runtime_issue_redirects == 3
+    assert not any("repair_revalidate_or_report_real_blocker" in item for item in params.tool_context)
 
 
 def test_no_tool_final_allows_after_artifact_integrity_issue_is_cleared(tmp_path: Path):

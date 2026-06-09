@@ -54,7 +54,11 @@ def test_task_envelope_v1_contains_address_tool_write_and_acceptance(tmp_path: P
     assert payload["tool_contract"]["allowed_tools"] == ["read_file", "write_file", "controlled_exec"]
     assert payload["tool_contract"]["controlled_exec_grant_ids"] == ["grant-exec"]
     assert payload["write_contract"]["product_write_roots"] == [str(tmp_path / "build")]
-    assert payload["write_contract"]["allowed_write_roots"] == [str(tmp_path / "build")]
+    assert payload["write_contract"]["allowed_write_roots"] == [
+        leaf.task_workspace_dir,
+        leaf.agent_run_workspace_dir,
+        str(tmp_path / "build"),
+    ]
     assert payload["write_contract"]["forbidden_write_roots"] == ["/System"]
     assert payload["acceptance"]["checks"] == ["index.html 存在", "页面没有空链接"]
 
@@ -85,7 +89,8 @@ def test_task_envelope_write_contract_includes_granted_filesystem_roots(tmp_path
     payload = build_task_envelope(manager.load(task.id), all_tasks=manager.list_runs()).to_dict()
 
     assert payload["write_contract"]["allowed_write_roots"] == [
-        task.task_dir,
+        task.task_workspace_dir,
+        task.agent_run_workspace_dir,
         str(product_root),
     ]
     assert payload["write_contract"]["product_write_roots"] == [str(product_root)]

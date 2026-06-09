@@ -46,7 +46,7 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         assert payload["auto_start"]["status"] == "started"
         assert payload["auto_start"]["run_ids"] == ["run_0", "run_1"]
         assert payload["dispatch_run_ids"] == []
-        assert payload["next_action"]["tool"] == "inspect_agent_tree"
+        assert payload["next_action"]["tool"] == "wait"
 
     def test_items_mode_does_not_infer_sibling_output_dependencies(self):
         """items 不再根据 sibling 输出自动制造等待；显式读线索原样保留。"""
@@ -221,6 +221,122 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
         )
 
         expected = str((task_root / "output" / "codex-analysis.md").resolve(strict=False))
+        assert params.attributes["output_refs"] == [expected]
+        assert params.extra_write_roots == [str((task_root / "output").resolve(strict=False))]
+
+    def test_normalizes_workspace_relative_current_task_output_refs(self, tmp_path):
+        from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        workspace = tmp_path / "fixture"
+        workspace.mkdir()
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", my_agent_home=str(workspace / ".my_agent" / "home"), subagent_workspace="subs"),
+            workspace,
+        )
+        task_root = (
+            workspace
+            / ".my_agent"
+            / "home"
+            / "owners"
+            / "local"
+            / "main"
+            / "tasks"
+            / "2026-06-09"
+            / "gwreq-current"
+        )
+        agent._current_run_task_workspace = str(task_root)
+
+        params = create_run_params(
+            agent,
+            {
+                "role": "worker",
+                "output_files": [
+                    ".my_agent/home/owners/local/main/tasks/2026-06-09/gwreq-current/output/helper1.md",
+                    "my_agent/home/owners/local/main/tasks/2026-06-09/gwreq-current/output/helper2.md",
+                ],
+            },
+            "写两份报告",
+            ["read_file", "write_file"],
+        )
+
+        assert params.attributes["output_refs"] == [
+            str((task_root / "output" / "helper1.md").resolve(strict=False)),
+            str((task_root / "output" / "helper2.md").resolve(strict=False)),
+        ]
+        assert all("/.my_agent/home/" in ref for ref in params.attributes["output_refs"])
+        assert all("/output/" in ref for ref in params.attributes["output_refs"])
+
+    def test_normalizes_workspace_relative_current_task_work_refs_without_output_nesting(self, tmp_path):
+        from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        workspace = tmp_path / "fixture"
+        workspace.mkdir()
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", my_agent_home=str(workspace / ".my_agent" / "home"), subagent_workspace="subs"),
+            workspace,
+        )
+        task_root = (
+            workspace
+            / ".my_agent"
+            / "home"
+            / "owners"
+            / "local"
+            / "main"
+            / "tasks"
+            / "2026-06-09"
+            / "gwreq-current"
+        )
+        agent._current_run_task_workspace = str(task_root)
+
+        params = create_run_params(
+            agent,
+            {
+                "role": "worker",
+                "output_files": [
+                    ".my_agent/home/owners/local/main/tasks/2026-06-09/gwreq-current/work/helper1.md",
+                    "my_agent/home/owners/local/main/tasks/2026-06-09/gwreq-current/work/helper2.md",
+                ],
+            },
+            "写两份内部报告",
+            ["read_file", "write_file"],
+        )
+
+        assert params.attributes["output_refs"] == [
+            str((task_root / "work" / "helper1.md").resolve(strict=False)),
+            str((task_root / "work" / "helper2.md").resolve(strict=False)),
+        ]
+        assert not any("/output/.my_agent/" in ref for ref in params.attributes["output_refs"])
+
+    def test_normalizes_bare_relative_output_refs_to_current_task_output(self, tmp_path):
+        from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        workspace = tmp_path / "fixture_project"
+        workspace.mkdir()
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"),
+            workspace,
+        )
+        task_root = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-09" / "gwreq-current"
+        agent._current_run_task_workspace = str(task_root)
+
+        params = create_run_params(
+            agent,
+            {
+                "role": "worker",
+                "output_files": ["report_by_helper1.md"],
+                "required_read_paths": ["README.md"],
+            },
+            "读 README 并写报告",
+            ["read_file", "write_file"],
+        )
+
+        expected = str((task_root / "output" / "report_by_helper1.md").resolve(strict=False))
         assert params.attributes["output_refs"] == [expected]
         assert params.extra_write_roots == [str((task_root / "output").resolve(strict=False))]
 

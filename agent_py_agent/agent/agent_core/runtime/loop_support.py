@@ -2,15 +2,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, fields, replace
 
+from ...log_analysis.capabilities import has_security_tool_capability
 from ...memory_archive import build_auto_resume_context, has_resume_trigger
 from ...memory_routing import RouteContextOptions, build_routed_memory_context
 from ...runtime_errors import runtime_error_report
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
 from ...user_space.home_layout import runtime_route_root_and_index
 from .._runtime_params import CompressionContext, ToolLoopExecuteParams
-from .capabilities import resolve_runtime_capabilities
 from .live_archive import write_runtime_fact_start_if_enabled
 from .loop_models import (
     CompressionLoopResult,
@@ -24,6 +25,7 @@ from .loop_models import (
 )
 
 _RUN_PARAM_FIELD_NAMES = tuple(field.name for field in fields(RunParams))
+SECURITY_RUNTIME_CAPABILITY = "logs/security"
 
 
 @dataclass(frozen=True)
@@ -144,6 +146,34 @@ def _resolve_tool_sections(request: ToolSectionsRequest):
         granted_capabilities=runtime_capabilities,
     )
     return tool_catalog, tool_recommendations
+
+
+def resolve_runtime_capabilities(
+    user_prompt: str,
+    *,
+    inject: Iterable[str] | None = None,
+    granted_capabilities: Iterable[str] | None = None,
+) -> list[str]:
+    capabilities = _normalize_capabilities(granted_capabilities)
+    if has_security_tool_capability(capabilities):
+        return capabilities
+
+    _ = user_prompt
+    if has_security_tool_capability(_normalize_capabilities(inject)):
+        capabilities.append(SECURITY_RUNTIME_CAPABILITY)
+    return capabilities
+
+
+def _normalize_capabilities(capabilities: Iterable[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in capabilities or []:
+        item = str(raw).strip()
+        key = item.lower()
+        if item and key not in seen:
+            normalized.append(item)
+            seen.add(key)
+    return normalized
 
 
 def _prepare_runtime_context(agent, request: RuntimeContextRequest):

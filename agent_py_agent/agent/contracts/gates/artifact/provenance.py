@@ -10,6 +10,16 @@ from ...recovery import RecoveryAction
 from ..models import GateDecision, GateFinding
 
 _WRITE_ARTIFACT_TOOLS = {"write_file"}
+_READ_ONLY_ARTIFACT_TOOLS = {
+    "find_files",
+    "http_get",
+    "list_files",
+    "memory_artifact_read",
+    "read_artifact",
+    "read_file",
+    "search_files",
+    "web_fetch",
+}
 
 
 @dataclass(frozen=True)
@@ -29,7 +39,8 @@ def evaluate_artifact_provenance_gate(item: dict[str, Any], *, run_id: str = "")
     if not _has_accepted_provenance(provenance):
         return _missing_provenance_decision()
     provenance_run_id = str(provenance.get("run_id") or "").strip()
-    if run_id and provenance_run_id != run_id:
+    provenance_task_id = str(provenance.get("task_id") or "").strip()
+    if run_id and provenance_run_id != run_id and provenance_task_id != run_id:
         return _run_mismatch_decision(provenance_run_id, run_id)
     findings = _hash_chain_findings(item, provenance)
     if findings:
@@ -150,14 +161,15 @@ def _collect_archive_provenance(
     )
     if not provenance:
         return collection.old_run_match
-    if provenance.get("run_id") != collection.run_id:
-        return collection.old_run_match or provenance
-    row = (str(record.get("created_at") or ""), index, provenance) if isinstance(record, dict) else ("", index, provenance)
-    target = collection.current_run_writes if _record_is_current_run_artifact_write(
+    is_current_task_write = _record_is_current_run_artifact_write(
         record,
         artifact_path=collection.artifact_path,
         current_run_id=collection.run_id,
-    ) else collection.current_run_matches
+    )
+    row = (str(record.get("created_at") or ""), index, provenance) if isinstance(record, dict) else ("", index, provenance)
+    if provenance.get("run_id") != collection.run_id and not is_current_task_write:
+        return collection.old_run_match or provenance
+    target = collection.current_run_writes if is_current_task_write else collection.current_run_matches
     target.append(row)
     return collection.old_run_match
 
@@ -296,6 +308,8 @@ def _provenance_from_record(
         return {"ok": False, "code": "ARTIFACT_TOOL_GATE_MISSING"}
     run_id = str(record.get("run_id") or "").strip()
     tool_name = str(evidence.get("tool_name") or "").strip()
+    if tool_name in _READ_ONLY_ARTIFACT_TOOLS:
+        return {"ok": False, "code": "ARTIFACT_READ_ONLY_TOOL_PROVENANCE"}
     return {
         "ok": True,
         "artifact_ref": str(artifact_path),
@@ -316,7 +330,11 @@ def _record_is_current_run_artifact_write(
     artifact_path: Path,
     current_run_id: str,
 ) -> bool:
-    if not current_run_id or str(record.get("run_id") or "").strip() != current_run_id:
+    if not current_run_id:
+        return False
+    record_run_id = str(record.get("run_id") or "").strip()
+    record_task_id = str(record.get("task_id") or "").strip()
+    if record_run_id != current_run_id and record_task_id != current_run_id:
         return False
     if str(record.get("tool") or "").strip() not in _WRITE_ARTIFACT_TOOLS:
         return False

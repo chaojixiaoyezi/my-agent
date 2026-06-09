@@ -132,6 +132,7 @@ def test_raise_event_thread_binding_error_is_structured(tmp_path, monkeypatch) -
     payload = json.loads(result.output)
 
     assert result.ok is False
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
     assert payload["error"] == "task_thread_lookup_failed"
     assert payload["load_error"]["context"] == "raise_event.thread_for_task"
     assert payload["load_error"]["category"] == "data_parse"

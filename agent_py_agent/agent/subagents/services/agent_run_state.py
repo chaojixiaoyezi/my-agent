@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ...common.json_io import write_json_file_atomic
+from ...model_visible_refs import has_placeholder_path_segment
 from ..models import SubAgentTask
 
 CANONICAL_STATE_FILENAME = "canonical_state.json"
@@ -138,7 +139,7 @@ def _declared_output_refs(task: SubAgentTask) -> list[str]:
         for key in ("output_refs", "output_files", "artifact_refs"):
             refs.extend(_string_list(attrs.get(key)))
     refs.extend(str(item) for item in getattr(task, "artifact_refs", []) or [])
-    return list(dict.fromkeys(item for item in refs if item))
+    return list(dict.fromkeys(item for item in refs if item and not has_placeholder_path_segment(item)))
 
 
 def _latest_tool_progress_ref(task: SubAgentTask) -> str:

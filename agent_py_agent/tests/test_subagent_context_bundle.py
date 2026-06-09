@@ -148,7 +148,7 @@ def _assert_workspace_context_bundle(bundle, task, tmp_path: Path) -> None:
     assert bundle.task_packet["tool_contract"]["allowed_tools"] == ["read_file", "write_file"]
     write_roots = bundle.task_packet["write_contract"]["allowed_write_roots"]
     assert write_roots[:2] == [bundle.workspace_refs["task_root"], bundle.workspace_refs["agent_work_dir"]]
-    assert str(tmp_path / task.id / "artifacts") in write_roots
+    assert str(tmp_path / task.id / "artifacts") not in write_roots
     assert "task.goal" in bundle.source_refs["goal"]
     assert "task.acceptance_checks" in bundle.source_refs["acceptance_checks"]
 
@@ -220,6 +220,30 @@ def test_context_bundle_keeps_logical_output_refs_out_of_required_files(tmp_path
         "subagent_summary",
     ]
     assert bundle.task_packet["file_contract"]["required_file_refs"] == []
+
+
+def test_context_bundle_ignores_placeholder_output_path_refs(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
+    task = manager.create_run(
+        goal="读取资料并写子代理报告。",
+        thought="父级用了人类占位符描述输出位置。",
+        plan=["读资料", "写摘要"],
+        role="worker",
+        attributes={"output_files": ["[任务目录]/helper_report.md"]},
+    )
+    task.allowed_write_roots = [
+        task.task_dir,
+        str(tmp_path / "fixture_project" / "[任务目录]"),
+    ]
+    manager.save(task)
+
+    bundle = build_context_bundle(manager.load(task.id))
+    payload = json.dumps(asdict(bundle), ensure_ascii=False)
+
+    assert "[任务目录]" not in payload
+    assert bundle.output_contract["declared_output_refs"] == []
+    assert bundle.output_contract["required_file_refs"] == []
+    assert str(tmp_path / "fixture_project" / "[任务目录]") not in bundle.task_packet["write_contract"]["allowed_write_roots"]
 
 
 def test_context_bundle_strips_product_root_basename_from_required_ref(tmp_path) -> None:

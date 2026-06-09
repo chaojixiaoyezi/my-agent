@@ -401,6 +401,31 @@ def test_tool_gateway_continues_existing_task_work_when_mode_is_omitted(tmp_path
     assert (task_work / "facts.md").read_text(encoding="utf-8") == "# Facts\n- detail\n"
 
 
+def test_tool_gateway_overwrites_execution_output_json_when_mode_is_omitted(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    task_output = tmp_path / "home" / "tasks" / "today" / "task" / "output"
+    task_work = task_output.parent / "work"
+    output_json = task_work / "agents" / "run-1" / "output.json"
+    output_json.parent.mkdir(parents=True)
+    output_json.write_text('{"status":"PLANNING"}', encoding="utf-8")
+    workspace.mkdir()
+    registry = _registry(workspace)
+    boundary = {
+        "task_output_dir": str(task_output),
+        "task_work_dir": str(task_work),
+        "output_json": str(output_json),
+    }
+
+    result = registry.execute_call(
+        {"tool": "write_file", "path": str(output_json), "content": '{"status":"DONE"}'},
+        write_boundary=boundary,
+    )
+
+    assert result.ok is True
+    assert "续写保护" not in result.output
+    assert output_json.read_text(encoding="utf-8") == '{"status":"DONE"}'
+
+
 def test_tool_gateway_explicit_overwrite_still_replaces_task_output(tmp_path: Path):
     workspace = tmp_path / "workspace"
     task_output = tmp_path / "home" / "tasks" / "today" / "task" / "output"

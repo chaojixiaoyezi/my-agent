@@ -425,16 +425,16 @@ class TestTaskProgressContinuationAndAliases:
 
         payload = read_task_progress(tmp_path, "run-main")
 
-        assert payload["counts"] == {"total": 8, "pending": 8}
+        assert payload["counts"] == {"total": 8, "unknown": 8}
         assert [item["status"] for item in payload["items"]] == [
-            "pending",
-            "pending",
-            "pending",
-            "pending",
-            "pending",
-            "pending",
-            "pending",
-            "pending",
+            "unknown",
+            "unknown",
+            "unknown",
+            "unknown",
+            "unknown",
+            "unknown",
+            "unknown",
+            "unknown",
         ]
         assert [item["raw_status"] for item in payload["items"]] == [
             "completed",
@@ -852,6 +852,46 @@ class TestTaskProgressQualityHints:
         assert [item["status"] for item in invalid] == ["已完成", "DONE"]
         assert invalid[0]["field"] == "coverage.targets[0].status"
         assert invalid[1]["field"] == "coverage.targets[0].checks.读取"
+
+    def test_task_progress_legacy_coverage_status_aliases_become_unknown(self, tmp_path):
+        """旧账本里的 coverage 状态别名只进 unknown，不补猜成完成。"""
+        from agent_py_agent.agent.task_progress import read_task_progress
+
+        progress_path = tmp_path / "memory_archive" / "task_progress" / "run-main" / "progress.json"
+        progress_path.parent.mkdir(parents=True)
+        progress_path.write_text(
+            json.dumps(
+                {
+                    "run_id": "run-main",
+                    "coverage": {
+                        "targets": [
+                            {
+                                "id": "paper-1",
+                                "status": "DONE",
+                                "checks": {"读取": "已完成", "翻译": "done"},
+                            }
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        payload = read_task_progress(tmp_path, "run-main")
+        target = payload["coverage"]["targets"][0]
+
+        assert target["status"] == "unknown"
+        assert target["raw_status"] == "DONE"
+        assert target["status_protocol_error"] == "TASK_PROGRESS_STATUS_INVALID"
+        assert target["checks"] == {"读取": "unknown", "翻译": "done"}
+        assert payload["coverage"]["counts"] == {
+            "targets_total": 1,
+            "targets_done": 0,
+            "targets_incomplete": 1,
+            "checks_total": 2,
+            "checks_done": 1,
+            "checks_incomplete": 1,
+        }
 
     def test_update_soft_feedback_marks_failed_or_unseen_evidence_refs(self, tmp_path):
         """已写进进度的本地证据应能对上本轮工具事实，但只给软提醒。"""

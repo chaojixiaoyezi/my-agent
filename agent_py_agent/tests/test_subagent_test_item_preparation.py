@@ -4,10 +4,6 @@ from agent_py_agent.agent.subagents.execution.test_items import (
     TestItemPreparationRequest,
     prepare_test_items,
 )
-from agent_py_agent.agent.subagents.static_required_files import (
-    required_static_dom_ids_from_texts,
-    static_required_files_from_texts,
-)
 
 
 def test_prepare_test_items_infers_single_artifact_working_dir(tmp_path):
@@ -327,15 +323,6 @@ def test_prepare_test_items_infers_static_site_check_with_required_dom_ids(tmp_p
     }]
 
 
-def test_required_static_dom_ids_from_structured_acceptance_text():
-    ids = required_static_dom_ids_from_texts([
-        "required_dom_ids: register, login, cart, checkout, order-confirmation",
-        "其他说明不应该被当成 id",
-    ])
-
-    assert ids == ["register", "login", "cart", "checkout", "order-confirmation"]
-
-
 def test_prepare_test_items_merges_task_required_static_files(tmp_path):
     site_dir = tmp_path / "deliverables" / "shop" / "build"
     auth = site_dir / "auth"
@@ -373,33 +360,6 @@ def test_prepare_test_items_merges_task_required_static_files(tmp_path):
         ],
         "require_complete_html": True,
     }]
-
-
-def test_static_required_files_from_texts_reads_structured_file_contract():
-    files = static_required_files_from_texts([
-        "required_files: index.html, items.html, item-detail.html, flow-a.html, flow-b.html",
-        "required_files: style.css, app.js",
-        "forbidden_files: product.html, old-product.html, stale.html",
-    ])
-
-    assert files == [
-        "index.html",
-        "items.html",
-        "item-detail.html",
-        "flow-a.html",
-        "flow-b.html",
-        "style.css",
-        "app.js",
-    ]
-
-
-def test_static_required_files_from_texts_ignores_natural_language():
-    files = static_required_files_from_texts([
-        "必须生成 index.html, items.html，还要有 style.css 和 app.js。",
-        "不要创建 stale.html。",
-    ])
-
-    assert files == []
 
 
 def test_prepare_test_items_keeps_malformed_check_without_machine_fallback(tmp_path):

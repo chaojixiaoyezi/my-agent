@@ -21,12 +21,11 @@ from ..subagents.models import (
 )
 from ..subagents.parsing import parse_parent_planner_output, parse_subagent_runner_output
 from ..subagents.services.dispatch.params import ParentPlannerRecordParams
-from .planner_service import PlannerPromptParams
+from .planner_service import PARENT_PLANNER_SYSTEM_PROMPT, PlannerPromptParams
 from .planner_service import (
     build_parent_planner_prompt as _build_parent_planner_prompt,
 )
 from .planner_service import build_parent_planner_state as _build_parent_planner_state
-from .planner_templates import PARENT_PLANNER_SYSTEM_PROMPT
 from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
 from .runner.prompts import (
     _append_runner_repair_failure,

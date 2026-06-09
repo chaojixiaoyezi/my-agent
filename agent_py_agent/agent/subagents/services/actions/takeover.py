@@ -9,6 +9,7 @@ from ...models import (
     known_failure_type,
     task_status_in,
 )
+from ...policies import TIMEOUT_ISSUE_KINDS
 from ...role_templates import role_template_snapshot_for_task
 from ..takeover.readiness import takeover_readiness_ref_order
 from .handlers import (
@@ -145,7 +146,7 @@ def _needs_coordinator_handoff_action(task) -> bool:
 
 def _should_create_takeover_run(action, task) -> bool:
     triggers = {item for item in str(getattr(action, "rescue_trigger", "") or "").split(",") if item}
-    if triggers & {"run_timeout", "heartbeat_stale", "status_timeout"}:
+    if triggers & TIMEOUT_ISSUE_KINDS:
         return True
     failure_type = known_failure_type(getattr(task, "failure_type", ""))
     return task_status_in(getattr(task, "status", ""), SUBAGENT_DEAD_STATUSES) or failure_type in SUBAGENT_DEAD_FAILURE_TYPES

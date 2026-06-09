@@ -37,7 +37,7 @@ def first_complete_tool_call_cut_index(text: str) -> int | None:
     if start_info is None:
         return None
     start, marker = start_info
-    end_info = _first_marker(text, _TOOL_END_MARKERS, start + len(marker))
+    end_info = _first_tool_end_marker(text, start + len(marker))
     if end_info is None:
         return None
     end, end_marker = end_info
@@ -77,7 +77,7 @@ def _complete_tool_call_block_ranges(text: str) -> list[tuple[int, int]]:
             return ranges
         start, start_marker = start_info
         body_start = start + len(start_marker)
-        end_info = _first_marker(text, _TOOL_END_MARKERS, body_start)
+        end_info = _first_tool_end_marker(text, body_start)
         if end_info is None:
             return ranges
         end, end_marker = end_info
@@ -116,7 +116,7 @@ class ToolBoundaryChunkFilter:
             self._text,
             max_chars=self.max_inline_content_chars,
             start_info=start_info,
-            first_end_marker=lambda cursor: _first_marker(self._text, _TOOL_END_MARKERS, cursor),
+            first_end_marker=lambda cursor: _first_tool_end_marker(self._text, cursor),
         )
         if abort is not None:
             raise abort
@@ -163,6 +163,16 @@ def _first_marker(text: str, markers: tuple[str, ...], cursor: int) -> tuple[int
     return min(hits, key=lambda item: item[0]) if hits else None
 
 
+def _first_tool_end_marker(text: str, body_start: int) -> tuple[int, str] | None:
+    hits = [
+        (pos, marker)
+        for marker in _TOOL_END_MARKERS
+        for pos in [_first_protocol_end_marker_pos(text, marker, body_start)]
+        if pos != -1
+    ]
+    return min(hits, key=lambda item: item[0]) if hits else None
+
+
 def _last_marker(text: str, markers: tuple[str, ...]) -> tuple[int, str] | None:
     hits = [
         (pos, marker)
@@ -181,6 +191,28 @@ def _first_protocol_marker_pos(text: str, marker: str, cursor: int) -> int:
         if _marker_starts_protocol_line(text, pos):
             return pos
         cursor = pos + len(marker)
+
+
+def _first_protocol_end_marker_pos(text: str, marker: str, body_start: int) -> int:
+    cursor = body_start
+    while True:
+        pos = text.find(marker, cursor)
+        if pos == -1:
+            return -1
+        if _marker_starts_protocol_line(text, pos) or _inline_json_tool_end_marker_valid(text, body_start, pos):
+            return pos
+        cursor = pos + len(marker)
+
+
+def _inline_json_tool_end_marker_valid(text: str, body_start: int, marker_pos: int) -> bool:
+    raw = text[body_start:marker_pos].strip().strip("`")
+    if not raw:
+        return False
+    try:
+        parsed, end = json.JSONDecoder().raw_decode(raw)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and not raw[end:].strip()
 
 
 def _last_protocol_marker_pos(text: str, marker: str) -> int:
@@ -204,7 +236,7 @@ def _open_tool_start(text: str) -> tuple[int, str] | None:
     if start_info is None:
         return None
     start, marker = start_info
-    if _first_marker(text, _TOOL_END_MARKERS, start + len(marker)) is not None:
+    if _first_tool_end_marker(text, start + len(marker)) is not None:
         return None
     return start_info
 
@@ -214,7 +246,7 @@ def malformed_tool_protocol_stream_abort(text: str) -> MalformedToolProtocolStre
     if start_info is None:
         return None
     start, marker = start_info
-    first_end = _first_marker(text, _TOOL_END_MARKERS, start + len(marker))
+    first_end = _first_tool_end_marker(text, start + len(marker))
     next_start = _first_marker(text, _TOOL_START_MARKERS, start + len(marker))
     if next_start is not None and (first_end is None or next_start[0] < first_end[0]):
         return MalformedToolProtocolStreamAbort(
@@ -286,7 +318,7 @@ def long_write_response_abort(text: str, *, max_inline_content_chars: int) -> Lo
         text,
         max_chars=max_inline_content_chars,
         start_info=_open_tool_start(text),
-        first_end_marker=lambda cursor: _first_marker(text, _TOOL_END_MARKERS, cursor),
+        first_end_marker=lambda cursor: _first_tool_end_marker(text, cursor),
     )
 
 

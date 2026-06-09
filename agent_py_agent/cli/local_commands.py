@@ -63,7 +63,8 @@ def cmd_status(args) -> int:
     gateway_status, heartbeat_age, state_load_error, heartbeat_load_error = _gateway_status_from_files(agent, paths, alive)
 
     active_work_summary = _detect_active_work_summary(agent)
-    request_counts = gateway_request_counts(paths)
+    request_counts = gateway_request_counts(paths, include_archives=False)
+    archive_request_counts = gateway_request_counts(paths, include_archives=True)
     payload_ctx = StatusPayloadContext(
         agent,
         paths,
@@ -76,6 +77,7 @@ def cmd_status(args) -> int:
         heartbeat_age,
         active_work_summary,
         request_counts,
+        archive_request_counts,
         state_load_error,
         heartbeat_load_error,
     )
@@ -87,7 +89,7 @@ def cmd_status(args) -> int:
 
     print_ctx = StatusPrintContext(
         agent, paths, local_stats, board, timeline, gateway_status, pid, alive, heartbeat_age, active_work_summary,
-        request_counts, payload["suggestions"], state_load_error, heartbeat_load_error,
+        request_counts, archive_request_counts, payload["suggestions"], state_load_error, heartbeat_load_error,
     )
     print_status_human(print_ctx)
     return 0

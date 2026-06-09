@@ -111,7 +111,7 @@ def build_scenario_runner_instruction() -> str:
         "[/TOOL_CALL]\n"
         "2. 收到 read_file 成功结果后，从执行上下文 JSON 找到自己的 run_id、task_dir 和 allowed_write_roots。\n"
         "3. 第二轮回复只能调用 write_file，path 必须落在 allowed_write_roots 里面，推荐使用 "
-        ".my_agent/subagents/<run_id>/scenario_outputs/<run_id>.md；content 写一份 3-6 行中文报告，"
+        "task_dir/scenario_outputs/<run_id>.md；content 写一份 3-6 行中文报告，"
         "说明已读取 README.md，并注明这是隔离测试和 task_dir 内产物。\n"
         "4. 只有在你已经看到 write_file 成功结果后，才允许输出最终 [SUBAGENT_RESULT]。\n"
         "5. 最终回复只能包含一个 [SUBAGENT_RESULT] JSON 结果块，不要输出 Markdown 代码围栏。\n"
@@ -241,8 +241,6 @@ def _scenario_report_candidates(tasks: list[SubAgentTask], fixture_root: Path) -
     candidates = list((fixture_root / "scenario_outputs").glob("*.md"))
     for task in tasks:
         candidates.extend(_scenario_output_json_artifact_paths(task))
-        task_dir = Path(task.task_dir)
-        candidates.extend((task_dir / "scenario_outputs").glob("*.md"))
         if task.agent_run_workspace_dir:
             candidates.extend((Path(task.agent_run_workspace_dir) / "scenario_outputs").glob("*.md"))
         if task.task_workspace_dir:

@@ -167,14 +167,6 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
     "agent_py_agent/agent/agent_core/spawn_role_seed.py": [
         "_extract_write_dirs",
     ],
-    "agent_py_agent/agent/subagents/services/output_ref_rebinding.py": [
-        "_OUTPUT_CONTEXT_MARKERS",
-        "_INPUT_CONTEXT_MARKERS",
-        "_line_has_output_field_label",
-        "_rewrite_list_field",
-        "_rewrite_field",
-        "_file_refs",
-    ],
     "agent_py_agent/agent/agent_core/orchestration_delegation_intent.py": [
         "_mentions_delegate_actor",
         "_mentions_delegation_action",
@@ -230,32 +222,9 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
         "request.goal == task.goal",
         "goal_output_refs(request.goal)",
     ],
-    "agent_py_agent/agent/subagents/services/acceptance_findings.py": [
-        "_child_spawn_required_from_text",
-        "_child_spawn_text",
-        "required_child_depth:",
-    ],
-    "agent_py_agent/agent/subagents/execution/content_checks.py": [
-        "_expected_literal_from_text",
-        "item.get(\"summary\")",
-        "item.get(\"name\")",
-        "内容应为",
-        "must be|should be",
-    ],
     "agent_py_agent/agent/subagents/execution/test_items.py": [
         "artifact_summaries",
         "_artifact_summaries_by_path",
-    ],
-    "agent_py_agent/agent/subagents/required_file_terms.py": [
-        "labeled_required_file_terms_from_text",
-        "task_contract_required_file_terms_from_text",
-        "task_contract_forbidden_file_terms_from_text",
-        "_LABELED_REQUIRED_FIELDS",
-        "_LABELED_FORBIDDEN_FIELDS",
-        "_terms_from_labeled_fields",
-    ],
-    "agent_py_agent/agent/subagents/static_required_files.py": [
-        "labeled_required_file_terms_from_text",
     ],
 }
 

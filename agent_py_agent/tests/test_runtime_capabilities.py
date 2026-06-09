@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from agent_py_agent.agent.agent_core.runtime.capabilities import (
+from agent_py_agent.agent.agent_core.runtime.loop_support import (
     SECURITY_RUNTIME_CAPABILITY,
     _normalize_capabilities,
     resolve_runtime_capabilities,

@@ -26,7 +26,7 @@ _CREATE_PARAMETERS = {
     "count": "创建多少个同目标子代理；不同切片请用 items",
     "role": "子代理角色模板 id，默认 worker",
     "agent_name": "可选展示名；只影响状态树和报告里的名字，不改变权限",
-    "tool_preset": "工具预设；通常省略，让系统按角色和目标决定",
+    "tool_preset": "工具预设；通常省略。有效值：coding/read_only/none",
     "allowed_tools": "工具偏好提示；通常省略，基础读写工具会自动补齐",
     "acceptance_checks": "父代理后续判断完成的标准",
     "plan": "子代理初始步骤",
@@ -42,7 +42,7 @@ _CREATE_PARAMETER_DETAILS = {
     "items": "推荐批量入口；资料线索放 item.input_refs；默认创建后立刻启动，只有 defer_start=true 才只建任务记录。",
     "role": "优先用模板角色。可用角色模板索引：\n{role_template_index}",
     "agent_name": "展示名不是角色；需要职责差异时仍应使用 role 或 goal 表达。",
-    "tool_preset": "省略时自动；none 只表示不覆盖自动策略。",
+    "tool_preset": "省略时自动；coding 给基础读写工具；read_only 只给读取/搜索/查看工具；none 只表示不覆盖自动策略。",
     "allowed_tools": "一般省略；不完整列表不会剥夺子代理基础读写能力。",
     "input_refs": "这是交给子代理的资料线索；单个子代理自己的输入放在对应 item.input_refs。",
     "output_files": (

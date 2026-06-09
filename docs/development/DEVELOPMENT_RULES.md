@@ -54,6 +54,10 @@ before changing code.
 - 输入工作区和任务产物目录必须分开。用户给的相对源码/资料/输入路径默认相对真实
   workspace/cwd；task workspace 的 `task_root`、`output_dir`、`work_dir` 只负责本轮
   交付物、草稿、审计和子代理过程文件，不能变成普通输入路径的默认根。
+- 当前 run 没有用户显式指定输出目录时，`output_files` / `output_refs` /
+  `artifact_refs` 的相对路径默认归一到当前 task `output/`。要写项目文件，必须使用
+  明确项目路径、修复合同、目标 refs 或 `extra_write_roots` 等结构化授权；不能靠
+  裸相对交付文件名把报告写到项目根目录。
 - 不同时保留新旧两套路由。旧字段、旧目录、旧 facade、旧 fallback 确认不用就删；
   迁移必须短期、显式、有删除条件。
 - 配置必须单一来源。用户配置、默认 YAML、dataclass 默认值和测试覆盖不能互相打架；
@@ -71,17 +75,24 @@ before changing code.
 - 不同结构化协议之间可以做显式映射，但映射源必须是当前协议枚举。例如 subagent
   `failure_type=runner_timeout` 可以映射到 error taxonomy 的 `RUNNER_TIMEOUT`；
   `runner_last_error`、stdout/stderr、报告正文和用户提示词不能参与这个映射。
+- `failure_type` 进入任务状态前必须经过当前枚举校验。模型结果包、action envelope、
+  runner response 可以保留原始 `failure_type` 供审计，但 `task.failure_type`、重试策略、
+  恢复策略和验收只能消费 `known_failure_type()` 认可的当前协议值；未知值按无结构化失败类型处理。
 - recovery mode 和 capability status 只认当前协议枚举，不能用字符串前缀、英文词片段、
   中文词片段或旧别名来触发自动重跑、接管、授权和 closeout 行为。
 - collaboration case/request status 也只走当前协议枚举和 normalize helper；`resolved`、
   `done`、`rejected` 这类展示词只能保留为文本，不能驱动关闭、完成、阻塞或唤醒。
   写入协作账本时，非协议状态只能落到 metadata 的 raw/status_protocol_error 字段，
-  `case.status` / `request.status` 必须保持 `open` / `pending` 等协议值；底层 store
-  update 方法也不能绕过这条规则。
+  `case.status` / `request.status` 必须保持当前协议值不变；想 reopen 或完成必须显式
+  写 `open` / `completed` 等当前协议值。底层 store update 方法也不能绕过这条规则。
 - owner capability request 的状态只认当前协议值；未知值必须报结构化错误，不能自动兜底成
   `closed` / `expired` / `approved` 这类终态。
 - runtime capability 只能从 `granted_capabilities` 或明确的系统注入 capability token
   进入；用户 prompt 里的普通文本、协议样短语或工具名都不能自动扩权。
+- capability request 的自动路由只能消费结构化能力字段，例如 `needed_capability`、
+  `requested_tools`、`requested_skills`、`requested_mcp_tools`、`requested_commands`、
+  `constraints`。`task.goal`、`problem`、`expected_output`、summary、evidence 文本可以给
+  父代理阅读和审计，但不能混进自动 grant 的匹配 query。
 - 错误要显性，不要糊成“还能跑”。启动失败、通道断开、子代理挂掉、artifact 丢失、
   config 未生效，都应暴露 typed failure，而不是伪装成 planning/running。
 - 工具不要重复造。已有工具能表达的能力，优先修底层语义或扩展明确参数；只有交互模式
@@ -172,9 +183,10 @@ before changing code.
   keep growing, split those values into a named dataclass bundle instead of
   raising limits. Recent examples include `ResumeGuidanceRequest`,
   `ProviderTrashRequest`, and chat/TUI render request objects.
-- The same rule applies to tests: split near-soft test files into focused files
-  or named assertion helpers. Do not treat test bloat as harmless, because it
-  hides behavior boundaries from later humans and LLM agents.
+- Test files are report-only for strict code-size: test findings may remain as
+  advisory signals, but they must not create strict blockers or hard/high-risk
+  pressure. Any path with a `tests/` segment is test scope for this gate. Clean
+  test structure when it helps readability, not to satisfy the strict gate.
 - Service-facing APIs should accept one typed dataclass bundle, usually named
   `Params`, `Options`, `Context`, `Request`, `Command`, or `Query` according to
   intent.
@@ -232,6 +244,11 @@ before changing code.
   absolute user output paths are allowed unless they fall under
   `path_dangerous_roots` while `path_access_mode=normal`.  See
   `FILE_WRITING_RULES.md` for the full policy.
+- When a runner, subagent, or internal caller supplies non-empty
+  `allowed_write_roots`, those roots are an execution boundary, not just prompt
+  context. Writes outside them, including sibling task/date directories reached
+  through an absolute path or symlink, must be rejected. User-requested output
+  directories remain valid by being explicitly included in that boundary.
 - Agent shell access should use the single model-facing `run_command` tool.
   Command permissions come from the runtime `access_mode` config, not from
   model-authored `grant_id`, `command_allowlist`, `path_scope`, `apply`, or output
@@ -298,7 +315,7 @@ before changing code.
   values such as `done`, `completed`, `succeeded`, or `ok`. Do not call
   `.upper()` or `.lower()` to make a status participate in completion,
   recovery, dispatch, compact resume, or closeout decisions.
-  Unknown task-progress status values normalize to `pending` and preserve the
+  Unknown task-progress status values normalize to `unknown` and preserve the
   original text only in `raw_status` / `status_protocol_error`.
 - Cleanup is allowed inside authorized workspaces when it matches the task:
   temporary files, task trash, generated artifacts, task-local memory, drafts,
@@ -451,7 +468,8 @@ before changing code.
 - `task_progress.items[].status` 是机器状态字段。工具入口只接受
   `pending` / `in_progress` / `done` / `skipped` / `blocked`；`completed`、
   “已完成”“已验收”“read”“ok”这类自然语言或自定义标签必须写到
-  `notes` / `summary`，不能写入 `status`。
+  `notes` / `summary`，不能写入 `status`。读取旧账本时，非协议值会进入
+  `unknown` 统计桶并保留 `raw_status`，不会被补猜成 pending 或 done。
 - `task_progress.action` 是工具协议字段，只接受 `read` / `update`；不能把
   `create` / `init` / `begin` / `write` 等旧别名自动兜底成写入。
 - 当本轮存在结构化来源覆盖合同时，closeout 可以对最终产物里的机器型 ID 做来源一致性
@@ -608,7 +626,7 @@ do_write()
   smaller local checklist appropriate to the change risk.
 - Do not push small cleanup slices to remote `main` just because combined churn
   is large. A remote push is allowed only when the current diff has more than
-  5000 insertions or more than 5000 deletions as separate counters; additions
+  8000 insertions or more than 8000 deletions as separate counters; additions
   and deletions must not be added together to meet this threshold. User
   overrides and urgent fixes still require the strict remote-submit profile.
 - Runtime, memory, compact, tool, orchestration, contract, or subagent behavior

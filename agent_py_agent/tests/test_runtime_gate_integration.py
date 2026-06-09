@@ -107,6 +107,41 @@ def test_finalization_delivery_record_requires_explicit_ok() -> None:
     assert _has_successful_delivery_record(source_read) is False
 
 
+def test_delivery_closeout_rejects_read_file_as_artifact_provenance(tmp_path):
+    output = tmp_path / "out.txt"
+    output.write_text("existing input, not produced", encoding="utf-8")
+    params = _delivery_closeout_params(
+        archive_tool_calls=[
+            {
+                "tool": "read_file",
+                "run_id": "run-1",
+                "task_id": "task-1",
+                "ok": True,
+                "parameters": {"tool": "read_file", "path": "out.txt"},
+                "runtime_gate": {
+                    "allowed": True,
+                    "status": "ALLOW",
+                    "evidence": {
+                        "tool_name": "read_file",
+                        "operation_id": "op-read-1",
+                        "idempotency_key": "idem-read-1",
+                    },
+                },
+            }
+        ]
+    )
+    agent = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(workspace_root=tmp_path))
+
+    response = main_agent_delivery_closeout_response(
+        MainAgentDeliveryCloseoutRequest(agent=agent, params=params, backend="test")
+    )
+    report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+
+    assert response is None
+    assert report["artifacts"][0]["provenance"]["code"] == "ARTIFACT_PROVENANCE_MISSING"
+    assert report["runtime_gate"]["allowed"] is False
+
+
 def test_registry_execution_blocks_when_runtime_rate_limit_is_exhausted(tmp_path):
     payload = {"tool": "echo", "value": 1}
     result = execute_registry_call(
@@ -338,6 +373,42 @@ def test_delivery_closeout_rejects_preexisting_artifact_without_current_run_prov
     assert report["runtime_gate"]["status"] == "NEED_REPAIR"
     assert report["runtime_gate"]["findings"][0]["code"] == "ARTIFACT_PROVENANCE_MISSING"
     assert report["final_closeout_gate"]["status"] == "NEED_REPAIR"
+
+
+def test_delivery_closeout_prefers_child_write_over_parent_read_provenance(tmp_path):
+    output = tmp_path / "out.txt"
+    output.write_text("finished artifact", encoding="utf-8")
+    child_write = {
+        "tool": "write_file",
+        "run_id": "subagent-1",
+        "task_id": "run-1",
+        "ok": True,
+        "created_at": "2026-06-09T00:00:01+00:00",
+        "call_id": "child-write-1",
+        "parameters": {"tool": "write_file", "path": "out.txt"},
+    }
+    parent_read = {
+        "tool": "read_file",
+        "run_id": "run-1",
+        "task_id": "run-1",
+        "ok": True,
+        "created_at": "2026-06-09T00:00:02+00:00",
+        "call_id": "parent-read-1",
+        "parameters": {"tool": "read_file", "path": "out.txt"},
+    }
+    params = _delivery_closeout_params(archive_tool_calls=[child_write, parent_read])
+    agent = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(workspace_root=tmp_path))
+
+    response = main_agent_delivery_closeout_response(
+        MainAgentDeliveryCloseoutRequest(agent=agent, params=params, backend="test")
+    )
+    report = json.loads((Path(tmp_path) / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+
+    assert response is not None
+    provenance = report["artifacts"][0]["provenance"]
+    assert provenance["tool_name"] == "write_file"
+    assert provenance["run_id"] == "subagent-1"
+    assert provenance["task_id"] == "run-1"
 
 
 def test_tool_round_auto_closeout_after_delivery_completion_hint(tmp_path):

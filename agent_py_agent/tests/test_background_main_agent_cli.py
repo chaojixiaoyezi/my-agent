@@ -211,9 +211,10 @@ def test_background_main_agent_service_runs_bounded_cycles(tmp_path, capsys) -> 
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _BackgroundCliBackend()
     agent.backend = backend
-    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "巡检", 'now': 2.0})
-    agent.conversation_store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 1, 'route_channel': "internal", 'route_target': "thread-1", 'now': 3.0})
+    current = time.time()
+    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': current - 3})
+    agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "巡检", 'now': current - 2})
+    agent.conversation_store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 1, 'route_channel': "internal", 'route_target': "thread-1", 'now': current - 2})
     args = SimpleNamespace(
         config=str(tmp_path / "config.yaml"),
         interval=0.0,

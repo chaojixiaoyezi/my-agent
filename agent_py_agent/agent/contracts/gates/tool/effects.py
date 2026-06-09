@@ -115,10 +115,8 @@ def mode_for_call(payload: object, tool_name: str, tool_modes: Mapping[str, obje
 
 def normalized_tool_mode(mode: object, effect: object) -> str:
     value = str(mode or "").strip().lower()
-    if value in {"plan", "preview", "dry-run"}:
-        return "dry_run"
-    if value in {"execute", "apply", "real_run"}:
-        return "real"
+    if value in {"read_only", "dry_run", "real"}:
+        return value
     if value:
         return value
     return "read_only" if str(effect or "").strip().lower() == "read_only" else "real"

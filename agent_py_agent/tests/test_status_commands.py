@@ -144,6 +144,47 @@ class TestCmdStatus:
         assert payload["gateway"]["state_load_error"]["context"] == "cli.status.gateway_state.read"
         assert payload["gateway"]["heartbeat_load_error"]["context"] == "cli.status.gateway_heartbeat.read"
 
+    def test_status_json_truncates_subagent_goals(self, tmp_path: Path):
+        from agent_py_agent.cli.local_commands import cmd_status
+
+        long_goal = "读取很多项目并输出详细报告。" * 80
+        mock_agent = _status_mock_agent(tmp_path)
+        mock_agent.subagents.board.build_board.return_value = MagicMock(
+            summary={"total": 1},
+            hot_list=[],
+            recent=[
+                SimpleNamespace(
+                    id="sub-long",
+                    status="DONE",
+                    verification_status="VERIFIED",
+                    goal=long_goal,
+                    artifact_registry_refs=[{"path": "/tmp/full-registry-entry.json"}],
+                    artifact_refs=["/tmp/a.md", "/tmp/b.md", "/tmp/c.md", "/tmp/d.md"],
+                    updated_at=1.0,
+                    seconds_since_progress=1.0,
+                )
+            ],
+        )
+        stdout = StringIO()
+        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
+             patch(
+                 "agent_py_agent.cli.local_commands.gateway_paths",
+                 return_value=MagicMock(root=tmp_path, state=tmp_path / "state.json", heartbeat=tmp_path / "heartbeat.json"),
+             ), \
+             patch("agent_py_agent.cli.local_commands.gateway_running", return_value=(None, False)), \
+             patch("agent_py_agent.cli.local_commands.gateway_request_counts", return_value={}), \
+             patch("agent_py_agent.cli.local_commands.build_status_suggestions", return_value=[]), \
+             redirect_stdout(stdout):
+            result = cmd_status(_status_args(tmp_path, json_mode=True))
+
+        assert result == 0
+        item = json.loads(stdout.getvalue())["subagents"]["recent"][0]
+        assert item["goal_truncated"] is True
+        assert len(item["goal"]) < len(long_goal)
+        assert item["goal"].endswith("...")
+        assert "artifact_registry_refs" not in item
+        assert item["artifact_refs"] == ["/tmp/a.md", "/tmp/b.md", "/tmp/c.md"]
+
     def test_status_with_recent_flag(self, tmp_path: Path):
         """带 --recent 标志显示最近项。"""
         from agent_py_agent.cli.local_commands import cmd_status

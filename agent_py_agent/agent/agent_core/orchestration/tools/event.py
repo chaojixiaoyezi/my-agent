@@ -215,7 +215,7 @@ def _event_error(
     payload = {"ok": False, "error": code, "message": message}
     if load_error:
         payload["load_error"] = load_error
-    return ToolExecutionResult(tool, False, json.dumps(payload, ensure_ascii=False, indent=2))
+    return ToolExecutionResult(tool, False, json.dumps(payload, ensure_ascii=False, indent=2), error_code="TOOL_INVALID_ARGUMENTS")
 
 
 def _load_error(exc: BaseException, context: str) -> dict[str, object]:

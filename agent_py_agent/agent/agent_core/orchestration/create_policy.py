@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -247,17 +248,274 @@ def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, o
 
 
 def _params_with_task_output_defaults(raw_params: dict[str, object], agent=None) -> dict[str, object]:
+    task_root = _current_task_root_path(agent)
     task_output_dir = _current_task_output_dir(agent)
     workspace_output_dir = _primary_workspace_output_dir(agent)
-    if not task_output_dir or not workspace_output_dir or _has_user_requested_output_dir(raw_params, agent):
+    workspace_root = _primary_workspace_root(agent)
+    if not task_output_dir or _has_user_requested_output_dir(raw_params, agent):
         return raw_params
     updated = dict(raw_params)
     changed = False
+    if task_root:
+        changed = _normalize_current_task_workspace_refs(updated, task_root) or changed
+    if workspace_root:
+        changed = _normalize_current_task_output_refs(updated, workspace_root, task_output_dir) or changed
+    changed = _normalize_relative_task_output_refs(updated, task_output_dir) or changed
+    if not workspace_output_dir:
+        return updated if changed else raw_params
     for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
         changed = _rebase_output_ref_field(updated, key, workspace_output_dir, task_output_dir) or changed
     attrs_changed = _rebase_attribute_output_refs(updated, workspace_output_dir, task_output_dir)
     changed = changed or attrs_changed
     return updated if changed else raw_params
+
+
+def _normalize_current_task_workspace_refs(
+    updated: dict[str, object],
+    task_root: Path,
+) -> bool:
+    changed = False
+    for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
+        changed = _normalize_current_task_workspace_ref_field(updated, key, task_root) or changed
+    attrs = updated.get("attributes")
+    if isinstance(attrs, dict):
+        next_attrs = dict(attrs)
+        attrs_changed = False
+        for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
+            attrs_changed = _normalize_current_task_workspace_ref_field(next_attrs, key, task_root) or attrs_changed
+        if attrs_changed:
+            updated["attributes"] = next_attrs
+            changed = True
+    return changed
+
+
+def _normalize_current_task_workspace_ref_field(
+    values: dict[str, object],
+    key: str,
+    task_root: Path,
+) -> bool:
+    if key not in values:
+        return False
+    value, changed = _normalize_current_task_workspace_ref_value(values.get(key), task_root)
+    if changed:
+        values[key] = value
+    return changed
+
+
+def _normalize_current_task_workspace_ref_value(value: object, task_root: Path) -> tuple[object, bool]:
+    return _map_output_ref_value(value, lambda text: _current_task_workspace_ref_text(text, task_root))
+
+
+def _current_task_workspace_ref_text(text: str, task_root: Path) -> str | None:
+    candidate = _current_task_workspace_ref(text, task_root)
+    return str(candidate) if candidate is not None else None
+
+
+def _current_task_workspace_ref(text: str, task_root: Path) -> Path | None:
+    if not text or "://" in text:
+        return None
+    try:
+        resolved_task_root = task_root.expanduser().resolve(strict=False)
+    except OSError:
+        return None
+    try:
+        path = Path(text).expanduser()
+    except OSError:
+        return None
+    if path.is_absolute():
+        return None
+    normalized_parts = _slash_path_parts(text)
+    if not normalized_parts:
+        return None
+    root_task_parts = _task_suffix_parts(resolved_task_root)
+    if not root_task_parts:
+        return None
+    for index, part in enumerate(normalized_parts):
+        if part != "tasks":
+            continue
+        task_parts = normalized_parts[index + 1 :]
+        if len(task_parts) <= len(root_task_parts):
+            continue
+        if task_parts[: len(root_task_parts)] != root_task_parts:
+            continue
+        suffix_parts = task_parts[len(root_task_parts) :]
+        if suffix_parts[0] not in {"output", "work"}:
+            continue
+        try:
+            candidate = (resolved_task_root / Path(*suffix_parts)).resolve(strict=False)
+        except OSError:
+            continue
+        if _same_or_inside(candidate, resolved_task_root):
+            return candidate
+    return None
+
+
+def _task_suffix_parts(task_root: Path) -> list[str]:
+    parts = _slash_path_parts(str(task_root))
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index] == "tasks":
+            return parts[index + 1 :]
+    return []
+
+
+def _slash_path_parts(text: str) -> list[str]:
+    normalized = text.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return [part for part in normalized.split("/") if part not in {"", "."}]
+
+
+def _normalize_current_task_output_refs(
+    updated: dict[str, object],
+    workspace_root: Path,
+    task_output_dir: Path,
+) -> bool:
+    changed = False
+    for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
+        changed = _normalize_current_task_output_ref_field(updated, key, workspace_root, task_output_dir) or changed
+    attrs = updated.get("attributes")
+    if isinstance(attrs, dict):
+        next_attrs = dict(attrs)
+        attrs_changed = False
+        for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
+            attrs_changed = (
+                _normalize_current_task_output_ref_field(next_attrs, key, workspace_root, task_output_dir)
+                or attrs_changed
+            )
+        if attrs_changed:
+            updated["attributes"] = next_attrs
+            changed = True
+    return changed
+
+
+def _normalize_relative_task_output_refs(
+    updated: dict[str, object],
+    task_output_dir: Path,
+) -> bool:
+    changed = False
+    for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
+        changed = _normalize_relative_task_output_ref_field(updated, key, task_output_dir) or changed
+    attrs = updated.get("attributes")
+    if isinstance(attrs, dict):
+        next_attrs = dict(attrs)
+        attrs_changed = False
+        for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
+            attrs_changed = _normalize_relative_task_output_ref_field(next_attrs, key, task_output_dir) or attrs_changed
+        if attrs_changed:
+            updated["attributes"] = next_attrs
+            changed = True
+    return changed
+
+
+def _normalize_relative_task_output_ref_field(
+    values: dict[str, object],
+    key: str,
+    task_output_dir: Path,
+) -> bool:
+    if key not in values:
+        return False
+    value, changed = _normalize_relative_task_output_ref_value(values.get(key), task_output_dir)
+    if changed:
+        values[key] = value
+    return changed
+
+
+def _normalize_relative_task_output_ref_value(value: object, task_output_dir: Path) -> tuple[object, bool]:
+    return _map_output_ref_value(value, lambda text: _relative_task_output_ref(text, task_output_dir))
+
+
+def _relative_task_output_ref(text: str, task_output_dir: Path) -> str | None:
+    if not text or "://" in text:
+        return None
+    try:
+        path = _task_output_relative_path(text)
+    except OSError:
+        return None
+    if path.is_absolute():
+        return None
+    try:
+        candidate = (task_output_dir / path).resolve(strict=False)
+    except OSError:
+        return None
+    if not _same_or_inside(candidate, task_output_dir):
+        return None
+    return str(candidate)
+
+
+def _task_output_relative_path(text: str) -> Path:
+    path = Path(text).expanduser()
+    normalized = text.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if normalized == "output":
+        return Path()
+    if normalized.startswith("output/"):
+        return Path(normalized[len("output/") :])
+    return path
+
+
+def _normalize_current_task_output_ref_field(
+    values: dict[str, object],
+    key: str,
+    workspace_root: Path,
+    task_output_dir: Path,
+) -> bool:
+    if key not in values:
+        return False
+    value, changed = _normalize_current_task_output_ref_value(values.get(key), workspace_root, task_output_dir)
+    if changed:
+        values[key] = value
+    return changed
+
+
+def _normalize_current_task_output_ref_value(
+    value: object,
+    workspace_root: Path,
+    task_output_dir: Path,
+) -> tuple[object, bool]:
+    return _map_output_ref_value(
+        value,
+        lambda text: _workspace_relative_task_output_ref_text(text, workspace_root, task_output_dir),
+    )
+
+
+def _workspace_relative_task_output_ref_text(
+    text: str,
+    workspace_root: Path,
+    task_output_dir: Path,
+) -> str | None:
+    if not text or "://" in text:
+        return None
+    try:
+        path = Path(text).expanduser()
+    except OSError:
+        return None
+    if path.is_absolute():
+        return None
+    candidate = _workspace_relative_task_output_ref(text, workspace_root, task_output_dir)
+    if candidate is None:
+        return None
+    return str(candidate)
+
+
+def _workspace_relative_task_output_ref(text: str, workspace_root: Path, task_output_dir: Path) -> Path | None:
+    for relative in _workspace_relative_candidates(text):
+        try:
+            candidate = (workspace_root / relative).expanduser().resolve(strict=False)
+        except OSError:
+            continue
+        if _same_or_inside(candidate, task_output_dir):
+            return candidate
+    return None
+
+
+def _workspace_relative_candidates(text: str) -> list[Path]:
+    path = Path(text)
+    candidates = [path]
+    parts = path.parts
+    if parts and parts[0] == "my_agent":
+        candidates.append(Path(".my_agent", *parts[1:]))
+    return candidates
 
 
 def _rebase_attribute_output_refs(
@@ -292,45 +550,88 @@ def _rebase_output_ref_field(
 
 
 def _rebase_output_ref_value(value: object, workspace_output_dir: Path, task_output_dir: Path) -> tuple[object, bool]:
+    return _map_output_ref_value(
+        value,
+        lambda text: _rebased_task_output_ref(text, workspace_output_dir, task_output_dir),
+    )
+
+
+def _rebased_task_output_ref(text: str, workspace_output_dir: Path, task_output_dir: Path) -> str | None:
+    if not text:
+        return None
+    try:
+        path = Path(text).expanduser()
+    except OSError:
+        return None
+    if not path.is_absolute():
+        return None
+    resolved = path.resolve(strict=False)
+    if not _same_or_inside(resolved, workspace_output_dir):
+        return None
+    suffix = resolved.relative_to(workspace_output_dir)
+    return str((task_output_dir / suffix).resolve(strict=False))
+
+
+def _map_output_ref_value(
+    value: object,
+    map_text: Callable[[str], str | None],
+) -> tuple[object, bool]:
     if isinstance(value, list):
         changed = False
         items: list[object] = []
         for item in value:
-            next_item, item_changed = _rebase_output_ref_value(item, workspace_output_dir, task_output_dir)
+            next_item, item_changed = _map_output_ref_value(item, map_text)
             items.append(next_item)
+            changed = changed or item_changed
+        return items, changed
+    if isinstance(value, tuple):
+        items, changed = _map_output_ref_value(list(value), map_text)
+        return tuple(items) if isinstance(items, list) else items, changed
+    if isinstance(value, Mapping):
+        changed = False
+        items: dict[object, object] = {}
+        for item_key, item_value in value.items():
+            next_value, item_changed = _map_output_ref_value(item_value, map_text)
+            items[item_key] = next_value
             changed = changed or item_changed
         return items, changed
     if not isinstance(value, str):
         return value, False
     text = value.strip()
-    if not text:
-        return value, False
-    try:
-        path = Path(text).expanduser()
-    except OSError:
-        return value, False
-    if not path.is_absolute():
-        return value, False
-    resolved = path.resolve(strict=False)
-    if not _same_or_inside(resolved, workspace_output_dir):
-        return value, False
-    suffix = resolved.relative_to(workspace_output_dir)
-    return str((task_output_dir / suffix).resolve(strict=False)), True
+    mapped = map_text(text)
+    return (mapped, True) if mapped is not None else (value, False)
 
 
 def _current_task_output_dir(agent) -> Path | None:
+    task_root = _current_task_root_path(agent)
+    if task_root is None:
+        return None
+    return (task_root / "output").resolve(strict=False)
+
+
+def _current_task_root_path(agent) -> Path | None:
     task_root = _current_task_root(agent)
     if not task_root:
         return None
-    return (Path(task_root).expanduser() / "output").resolve(strict=False)
+    try:
+        return Path(task_root).expanduser().resolve(strict=False)
+    except OSError:
+        return None
 
 
 def _primary_workspace_output_dir(agent) -> Path | None:
+    root = _primary_workspace_root(agent)
+    if root is None:
+        return None
+    return (root / "output").resolve(strict=False)
+
+
+def _primary_workspace_root(agent) -> Path | None:
     root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", "")
     if not isinstance(root, (str, Path)) or not str(root).strip():
         return None
     try:
-        return (Path(root).expanduser().resolve(strict=False) / "output").resolve(strict=False)
+        return Path(root).expanduser().resolve(strict=False)
     except OSError:
         return None
 

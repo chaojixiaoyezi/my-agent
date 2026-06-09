@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ....common.value_parsing import text_or_sequence_strings
+from ....model_visible_refs import clean_path_contract_refs, is_non_model_visible_locator_root
 from ...controlled_exec_gateway import controlled_exec_grant_refs
 from ...manager_collaboration_context import collaboration_context_payload
 from ...model_capabilities import capability_request_counts_as_open
@@ -77,13 +78,11 @@ class SubAgentRunnerContextService:
         controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
         grant_write_roots = _granted_filesystem_write_roots(task)
         read_roots = _task_required_read_roots(task)
+        allowed_write_roots = _model_allowed_write_roots(task, grant_write_roots, report_roots)
         return {
-            "task_dir": task.task_dir,
+            "task_dir": _model_task_dir(task),
             "role": task.role,
-            "allowed_write_roots": _merge_list(
-                _merge_list(task.allowed_write_roots, grant_write_roots),
-                report_roots,
-            ),
+            "allowed_write_roots": allowed_write_roots,
             "allowed_read_roots": read_roots,
             "product_write_roots": product_roots,
             "product_write_policy": task_product_write_policy(task, product_roots),
@@ -154,8 +153,8 @@ class SubAgentRunnerContextService:
             context_manifest=task.context_manifest,
             context_packs=task.context_packs,
             context_bundle=context_bundle,
-            context_bundle_file=str(Path(task.task_dir) / "CONTEXT_BUNDLE.md"),
-            context_bundle_json=str(Path(task.task_dir) / "context_bundle.json"),
+            context_bundle_file=str(Path(_model_task_dir(task)) / "CONTEXT_BUNDLE.md"),
+            context_bundle_json=str(Path(_model_task_dir(task)) / "context_bundle.json"),
             role_template=role_template_snapshot_for_task(task),
             write_boundary=self._build_write_boundary(task),
             pending_requests=[
@@ -198,6 +197,7 @@ class SubAgentRunnerContextService:
 
 
 def _execution_context_task_fields(task: SubAgentTask) -> dict[str, object]:
+    task_dir = _model_task_dir(task)
     return {
         "run_id": task.id,
         "generated_at": time.time(),
@@ -221,10 +221,33 @@ def _execution_context_task_fields(task: SubAgentTask) -> dict[str, object]:
         "agent_thread_id": _task_text_field(task, "agent_thread_id"),
         "parent_subagent_session_id": _task_text_field(task, "parent_subagent_session_id"),
         "root_subagent_session_id": _task_text_field(task, "root_subagent_session_id"),
-        "task_dir": task.task_dir,
+        "task_dir": task_dir,
         "execution_context_file": task.execution_context_file,
         "execution_context_json": task.execution_context_json,
     }
+
+
+def _model_task_dir(task: SubAgentTask) -> str:
+    return str(getattr(task, "agent_run_workspace_dir", "") or getattr(task, "task_dir", "") or "").strip()
+
+
+def _model_allowed_write_roots(
+    task: SubAgentTask,
+    grant_write_roots: list[str],
+    report_roots: list[str],
+) -> list[str]:
+    canonical_roots = [
+        getattr(task, "task_workspace_dir", ""),
+        getattr(task, "agent_run_workspace_dir", ""),
+    ]
+    raw_roots = [*canonical_roots, *list(task.allowed_write_roots or []), *grant_write_roots, *report_roots]
+    roots: list[str] = []
+    for root in clean_path_contract_refs(raw_roots):
+        if is_non_model_visible_locator_root(task, root):
+            continue
+        if root not in roots:
+            roots.append(root)
+    return roots
 
 
 def _task_text_field(task: object, name: str) -> str:

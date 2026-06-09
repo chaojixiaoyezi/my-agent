@@ -59,12 +59,22 @@ def normalize_request_status(status: str) -> str:
     return text if text in _REQUEST_STATUS_VALUES else ""
 
 
-def canonical_case_status_for_update(status: str) -> str:
-    return normalize_case_status(status) or CollaborationCaseStatus.OPEN.value
+def case_status_for_update(status: str, current_status: str) -> str:
+    """Return an exact protocol status, preserving current state for invalid text."""
+    return (
+        normalize_case_status(status)
+        or normalize_case_status(current_status)
+        or CollaborationCaseStatus.OPEN.value
+    )
 
 
-def canonical_request_status_for_update(status: str) -> str:
-    return normalize_request_status(status) or CollaborationRequestStatus.PENDING.value
+def request_status_for_update(status: str, current_status: str) -> str:
+    """Return an exact protocol status, preserving current state for invalid text."""
+    return (
+        normalize_request_status(status)
+        or normalize_request_status(current_status)
+        or CollaborationRequestStatus.PENDING.value
+    )
 
 
 def case_status_protocol_metadata(status: str) -> dict[str, str]:

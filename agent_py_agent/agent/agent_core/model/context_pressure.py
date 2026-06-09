@@ -12,13 +12,13 @@ _DIGEST_PROMPT_CEILING_PERCENT = 90
 def preflight_context_pressure_response(request: object) -> ModelResponse | None:
     if _uses_task_local_compact(request):
         return None
-    policy = runtime_compact_policy(getattr(request, "agent", None), save=True)
+    policy = runtime_compact_policy(getattr(request, "agent", None), save=_request_save_enabled(request))
     window = policy.context_window_tokens
     if window <= 0:
         return None
     prompt = str(getattr(request, "prompt", "") or "")
     prompt_tokens = estimate_tokens(prompt)
-    if overflow := _tool_context_window_overflow(request):
+    if policy.allow_persistent_apply and (overflow := _tool_context_window_overflow(request)):
         return context_pressure_response(
             request,
             source="preflight",
@@ -30,6 +30,8 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
             ),
         )
     threshold = policy.trigger_tokens
+    if not policy.allow_persistent_apply:
+        threshold = window
     if prompt_tokens < threshold and prompt_tokens < window:
         return None
     if _can_run_tool_context_digest_turn(request, prompt_tokens=prompt_tokens, window=window):
@@ -41,6 +43,15 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
         prompt_tokens=prompt_tokens,
         detail=f"prompt_tokens={prompt_tokens} context_window={window} compact_threshold={threshold}",
     )
+
+
+def _request_save_enabled(request: object) -> bool:
+    params = getattr(request, "params", None)
+    save = getattr(params, "save", None)
+    if save is not None:
+        return bool(save)
+    config = getattr(getattr(request, "agent", None), "config", None)
+    return bool(getattr(config, "auto_save_memory", True))
 
 
 def _uses_task_local_compact(request: object) -> bool:
@@ -69,6 +80,8 @@ def mark_tool_context_digest_inflight(params: object) -> None:
 
 
 def should_compact_before_more_tool_output(agent: object, params: object, current_prompt: str) -> bool:
+    if not _params_save_enabled(agent, params):
+        return False
     if _has_pending_tool_context_digest(params):
         return False
     if not _has_previous_tool_context(params):
@@ -78,6 +91,13 @@ def should_compact_before_more_tool_output(agent: object, params: object, curren
     if threshold <= 0:
         return False
     return estimate_tokens(str(current_prompt or "")) >= threshold
+
+
+def _params_save_enabled(agent: object, params: object) -> bool:
+    save = getattr(params, "save", None)
+    if save is not None:
+        return bool(save)
+    return bool(getattr(getattr(agent, "config", None), "auto_save_memory", True))
 
 
 def _can_run_tool_context_digest_turn(request: object, *, prompt_tokens: int, window: int) -> bool:

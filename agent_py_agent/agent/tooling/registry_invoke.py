@@ -3,6 +3,7 @@ from __future__ import annotations
 
 """Execute an authorized registry tool after parsing and auth checks."""
 
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -65,6 +66,9 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
     if partial_error:
         return ToolExecutionResult(request.tool_name, False, partial_error, error_code="TOOL_INVALID_ARGUMENTS")
     tool_params = _without_internal_partial_write_marker(tool_params)
+    not_ready = _active_child_output_not_ready_result(request, tool_params)
+    if not_ready is not None:
+        return not_ready
     workspace_roots = _workspace_roots_for_invocation(request)
     boundary_error = validate_write_boundary(
         request.tool_name,
@@ -76,7 +80,7 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
         write_boundary=request.write_boundary,
     )
     if boundary_error:
-        return ToolExecutionResult(request.tool_name, False, boundary_error)
+        return ToolExecutionResult(request.tool_name, False, boundary_error, error_code="WRITE_FORBIDDEN")
 
     return _execute_with_temporary_tool_context(
         tool,
@@ -175,6 +179,9 @@ def _with_task_artifact_append_continuation(
     ]
     if target is None or not any(_is_relative_to(target, root) for root in artifact_roots):
         return params
+    output_json = _resolved_boundary_path(request.write_boundary.get("output_json"), request.workspace_root)
+    if output_json is not None and _is_same_path(target, output_json):
+        return params
     if not target.exists() or not target.is_file():
         return params
     return {**params, "mode": "append", "__implicit_task_artifact_append": True}
@@ -193,6 +200,44 @@ def _without_internal_partial_write_marker(params: dict[str, Any]) -> dict[str, 
     if "__partial_unclosed_write" not in params:
         return params
     return {key: value for key, value in params.items() if key != "__partial_unclosed_write"}
+
+
+def _active_child_output_not_ready_result(
+    request: RegistryToolInvokeRequest,
+    params: dict[str, Any],
+) -> ToolExecutionResult | None:
+    if request.tool_name != "read_file" or not isinstance(request.write_boundary, dict):
+        return None
+    target = _resolved_invocation_path(params.get("path"), request.workspace_root)
+    if target is None or target.exists():
+        return None
+    if not _path_matches_boundary_refs(target, request.write_boundary.get("locked_files"), request.workspace_root):
+        return None
+    payload = {
+        "ok": False,
+        "error": "active_child_output_not_ready",
+        "message": "Requested path is a declared output for a currently active child agent and is not ready yet.",
+        "path": str(target),
+        "suggested_tool_call": {"tool": "wait", "seconds": 60, "reason": "wait for active child output"},
+        "status_tool_call": {"tool": "inspect_agent_tree", "params": {}},
+        "result_fields_to_read": ["child_result_index.read_order", "child_result_index.primary_artifact_refs"],
+    }
+    return ToolExecutionResult(
+        request.tool_name,
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code="PATH_NOT_FOUND",
+        result_envelope=payload,
+    )
+
+
+def _path_matches_boundary_refs(target: Path, refs: object, workspace_root: Path) -> bool:
+    values = refs if isinstance(refs, list) else []
+    for ref in values:
+        resolved = _resolved_boundary_path(ref, workspace_root)
+        if resolved is not None and _is_same_path(target, resolved):
+            return True
+    return False
 
 
 def _resolved_invocation_path(raw: object, workspace_root: Path) -> Path | None:
@@ -227,6 +272,10 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _is_same_path(left: Path, right: Path) -> bool:
+    return left.resolve(strict=False) == right.resolve(strict=False)
 
 
 def _is_absolute_or_home_path(text: str) -> bool:

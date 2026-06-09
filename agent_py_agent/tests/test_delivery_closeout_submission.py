@@ -1165,7 +1165,7 @@ def test_acceptance_submit_requires_canonical_done_status_for_completed_items(tm
     assert report["ok"] is False
     assert report["task_progress_closeout_gate"]["allowed"] is False
     assert report["task_progress_closeout_gate"]["status"] == "NEED_REPAIR"
-    assert report["task_progress_closeout_gate"]["evidence"]["counts"] == {"total": 2, "pending": 2}
+    assert report["task_progress_closeout_gate"]["evidence"]["counts"] == {"total": 2, "unknown": 2}
     assert "TASK_PROGRESS_OPEN_ITEMS" in {
         finding["code"] for finding in report["task_progress_closeout_gate"]["findings"]
     }

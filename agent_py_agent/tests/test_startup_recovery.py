@@ -3,6 +3,7 @@
 测试 detect_active_work() 函数、status 命令显示和配置项。
 """
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -83,18 +84,19 @@ def mock_paths(tmp_path):
 @pytest.fixture
 def sample_board():
     board = Mock()
+    now = time.time()
 
     # 模拟活跃任务
     board.hot_list = [
-        _board_item(("sub-001", "测试任务1", "RUNNING", "UNVERIFIED", 1234567890.0, 1234567891.0, ["timeout"])),
-        _board_item(("sub-002", "测试任务2", "BLOCKED", "FAILED", 1234567892.0, 1234567893.0, [])),
+        _board_item(("sub-001", "测试任务1", "RUNNING", "UNVERIFIED", now - 20.0, now - 10.0, ["timeout"])),
+        _board_item(("sub-002", "测试任务2", "BLOCKED", "FAILED", now - 18.0, now - 8.0, [])),
     ]
 
     # 模拟最近任务
     board.recent = [
-        _board_item(("sub-003", "测试任务3", "DONE", "VERIFIED", 1234567880.0, 1234567895.0, [])),
-        _board_item(("sub-004", "测试任务4", "FAILED", "FAILED", 1234567885.0, 1234567898.0, [])),
-        _board_item(("sub-005", "测试任务5", "PLANNING", "UNVERIFIED", 1234567890.0, 1234567900.0, ["new"])),
+        _board_item(("sub-003", "测试任务3", "DONE", "VERIFIED", now - 30.0, now - 7.0, [])),
+        _board_item(("sub-004", "测试任务4", "FAILED", "FAILED", now - 25.0, now - 5.0, [])),
+        _board_item(("sub-005", "测试任务5", "PLANNING", "UNVERIFIED", now - 20.0, now - 3.0, ["new"])),
     ]
 
     board.summary = {

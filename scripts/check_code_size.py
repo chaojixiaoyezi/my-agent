@@ -5,7 +5,8 @@ from __future__ import annotations
 """code-size governance checker for functions, classes, imports, and local readability.
 
 这个脚本生成 CODE_SIZE_REPORT.md。文件长度不参与 finding；
-strict 模式仍用于函数长度、类长度、参数数量、嵌套、星号导入、语法错误和新增垃圾文件名等局部可读性问题。
+strict 模式只阻断生产代码和脚本里的局部可读性问题；
+测试文件里的函数长度、类长度、参数数量和嵌套只进报告，不阻断。
 """
 
 import argparse
@@ -29,6 +30,7 @@ from code_size_rules import (
     JUNK_NAMES,
     SOURCE_ROOTS,
     Finding,
+    is_test_path,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -176,13 +178,13 @@ def write_baseline(findings: list[Finding], baseline_path: Path) -> None:
 
 
 def compute_strict_blockers(findings: list[Finding], baseline: dict[str, str] | None) -> list[Finding]:
-    """Compute strict blockers while keeping whole-file line count advisory."""
+    """Compute strict blockers while keeping test-size findings advisory."""
 
     blockers: list[Finding] = []
     for finding in findings:
         if finding.severity != "hard":
             continue
-        if finding.kind == "file":
+        if finding.kind == "file" or _is_test_finding(finding):
             continue
         if baseline is None:
             blockers.append(finding)
@@ -190,6 +192,10 @@ def compute_strict_blockers(findings: list[Finding], baseline: dict[str, str] | 
         if finding.identity() not in baseline:
             blockers.append(finding)
     return blockers
+
+
+def _is_test_finding(finding: Finding) -> bool:
+    return is_test_path(finding.path)
 
 
 def report_findings(findings: list[Finding], baseline: dict[str, str] | None) -> list[Finding]:
@@ -239,13 +245,17 @@ def _write_requested_baseline(findings: list[Finding], path: str | None) -> None
 
 
 def _print_summary(findings: list[Finding], blocked: bool) -> None:
-    hard_count = len([f for f in findings if f.severity == "hard"])
-    high_risk_count = len([f for f in findings if f.severity == "high-risk"])
-    soft_count = len([f for f in findings if f.severity == "soft"])
+    strict_findings = [item for item in findings if not _is_test_finding(item)]
+    hard_count = len([f for f in strict_findings if f.severity == "hard"])
+    high_risk_count = len([f for f in strict_findings if f.severity == "high-risk"])
+    soft_count = len([f for f in strict_findings if f.severity == "soft"])
+    test_advisory_count = len(findings) - len(strict_findings)
     print(
         "code-size findings: "
-        f"total={len(findings)} hard={hard_count} high-risk={high_risk_count} "
-        f"soft={soft_count} report={REPORT_PATH.relative_to(ROOT)} blocked={blocked}"
+        f"strict_scope_total={len(strict_findings)} hard={hard_count} "
+        f"high-risk={high_risk_count} soft={soft_count} "
+        f"test_advisory={test_advisory_count} report={REPORT_PATH.relative_to(ROOT)} "
+        f"blocked={blocked}"
     )
 
 

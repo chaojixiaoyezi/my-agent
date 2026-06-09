@@ -178,7 +178,7 @@ def next_tool_block_end(text: str, start_at: int) -> tuple[int, str] | None:
     ends = [
         (pos, marker)
         for marker in _END_MARKERS
-        for pos in [_next_protocol_marker_pos(text, marker, start_at)]
+        for pos in [_next_protocol_end_marker_pos(text, marker, start_at)]
         if pos != -1
     ]
     return min(ends, key=lambda item: item[0]) if ends else None
@@ -192,6 +192,24 @@ def _next_protocol_marker_pos(text: str, marker: str, cursor: int) -> int:
         if _marker_starts_protocol_line(text, pos):
             return pos
         cursor = pos + len(marker)
+
+
+def _next_protocol_end_marker_pos(text: str, marker: str, cursor: int) -> int:
+    while True:
+        pos = text.find(marker, cursor)
+        if pos == -1:
+            return -1
+        if _marker_starts_protocol_line(text, pos) or _inline_tool_end_marker_valid(text, cursor, pos):
+            return pos
+        cursor = pos + len(marker)
+
+
+def _inline_tool_end_marker_valid(text: str, body_start: int, marker_pos: int) -> bool:
+    raw = text[body_start:marker_pos].strip().strip("`")
+    if not raw:
+        return False
+    payload = parse_tool_block_payload(raw)
+    return payload.get("tool") != "__parse_error__"
 
 
 def _marker_starts_protocol_line(text: str, pos: int) -> bool:

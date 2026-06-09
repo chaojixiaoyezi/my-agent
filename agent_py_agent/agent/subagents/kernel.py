@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..model_visible_refs import has_placeholder_path_segment
 from .context_bundle_refs import workspace_refs as model_workspace_refs
 from .model_capabilities import capability_request_counts_as_open
 from .models import (
@@ -312,7 +313,7 @@ def _declared_output_refs(task: SubAgentTask) -> list[str]:
         value = attrs.get(key)
         if isinstance(value, list):
             refs.extend(str(item).strip() for item in value if str(item or "").strip())
-    return list(dict.fromkeys(refs))
+    return list(dict.fromkeys(ref for ref in refs if not has_placeholder_path_segment(ref)))
 
 
 def _recent_tool_trace(task: SubAgentTask) -> list[dict[str, object]]:

@@ -138,14 +138,7 @@ def test_runtime_materialization_uses_structural_directory_coverage_without_outp
         )
 
         assert backend.materializer_calls == 0
-        assert params.delivery_contract["artifacts"] == [
-            {
-                "artifact_id": "final_report",
-                "kind": "md",
-                "allowed_output_roots": ["output"],
-                "required": True,
-            }
-        ]
+        assert params.delivery_contract["artifacts"] == []
         assert [item["target_id"] for item in params.delivery_contract["target_coverage_contract"]["target_items"]] == [
             "ECC-main",
             "pi-main",

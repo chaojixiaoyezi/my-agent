@@ -6,12 +6,15 @@ import re
 from pathlib import Path
 from typing import NamedTuple
 
-from ..model_visible_refs import current_model_ref, current_model_text
+from ..model_visible_refs import (
+    clean_path_contract_ref,
+    current_model_ref,
+    current_model_text,
+    has_placeholder_path_segment,
+    is_non_model_visible_locator_root,
+)
 from .context_bundle_refs import safe_string_ref, workspace_refs
 from .models import SubAgentTask
-from .required_file_terms import (
-    clean_file_contract_term,
-)
 
 _SAFE_FILE_SUFFIX_RE = re.compile(r"^\.[a-z0-9][a-z0-9._+-]{0,63}$")
 
@@ -95,11 +98,17 @@ def allowed_write_roots(task: SubAgentTask) -> list[str]:
         safe_string_ref(task, "agent_run_workspace_dir"),
         *list(task.allowed_write_roots or []),
     ):
-        text = str(raw or "").strip()
-        text = current_model_ref(text)
+        text = _model_visible_write_root(task, raw)
         if text and text not in roots:
             roots.append(text)
     return roots
+
+
+def _model_visible_write_root(task: SubAgentTask, value: object) -> str:
+    text = clean_path_contract_ref(value)
+    if not text or is_non_model_visible_locator_root(task, text):
+        return ""
+    return text
 
 
 def task_contract_components(task: SubAgentTask) -> _TaskContractComponents:
@@ -127,7 +136,7 @@ def product_write_roots(task: SubAgentTask) -> list[str]:
     internal_roots = internal_root_texts(task)
     roots: list[str] = []
     for raw in getattr(task, "allowed_write_roots", []) or []:
-        text = current_model_ref(raw)
+        text = _model_visible_write_root(task, raw)
         if not text or path_is_internal(text, internal_roots):
             continue
         if text not in roots:
@@ -246,7 +255,12 @@ def _file_contract_list(value: object) -> list[str]:
     if isinstance(value, list | tuple):
         return _dedupe_file_terms([term for item in value for term in _file_contract_list(item)])
     term = clean_file_contract_term(value)
-    return [term] if term else []
+    return [term] if term and not has_placeholder_path_segment(term) else []
+
+
+def clean_file_contract_term(value: object) -> str:
+    text = str(value or "").strip().strip("`'\".,;:，。；：、").replace("\\", "/")
+    return text[2:] if text.startswith("./") else text
 
 
 def _structured_file_ref_value(value: object) -> object:
@@ -390,4 +404,6 @@ def _model_visible_file_terms(value: object) -> list[str]:
 
 def _model_visible_file_term(value: object) -> str:
     text = str(value or "").strip()
+    if has_placeholder_path_segment(text):
+        return ""
     return current_model_ref(text) if text else ""

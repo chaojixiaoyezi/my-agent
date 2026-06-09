@@ -106,12 +106,13 @@ class TestRunnerMaxAttempts:
         assert _runner_max_attempts(None) == 2
 
     def test_off_policy_returns_1(self):
-        """off 策略返回 0 次补跑（不自动重试）。"""
+        """只有 off/0 显式关闭补跑；旧别名不再改变机器语义。"""
         from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
 
         assert _runner_max_attempts("off") == 0
-        assert _runner_max_attempts("none") == 0
-        assert _runner_max_attempts("disabled") == 0
+        assert _runner_max_attempts("0") == 0
+        assert _runner_max_attempts("none") == 2
+        assert _runner_max_attempts("disabled") == 2
 
     def test_numeric_policy_returns_value(self):
         """数字策略返回对应失败后重试次数。"""
@@ -182,14 +183,14 @@ class TestRunnerMaxAttempts:
 class TestRunnerFailureType:
     """测试 _runner_failure_type() 函数。"""
 
-    def test_normalizes_failure_type(self):
-        """验证 failure_type 被标准化为小写。"""
+    def test_ignores_unknown_failure_type(self):
+        """未知 failure_type 不进入 runner 重试策略。"""
         from agent_py_agent.agent.agent_core.runner.dispatch import _runner_failure_type
 
         mock_task = MagicMock()
         mock_task.failure_type = "TIMEOUT"
 
-        assert _runner_failure_type(mock_task) == "timeout"
+        assert _runner_failure_type(mock_task) == ""
 
     def test_strips_whitespace(self):
         """验证前后空格被去除。"""

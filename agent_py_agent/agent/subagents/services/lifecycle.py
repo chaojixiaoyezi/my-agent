@@ -21,6 +21,7 @@ from ..models import (
     CapabilityRequest,
     SubAgentTask,
     VerificationEvidence,
+    known_failure_type,
     normalize_task_status,
     task_status_in,
 )
@@ -234,8 +235,9 @@ class SubAgentLifecycleService:
         task.status = normalized
         if status_params.result:
             task.result = status_params.result
-        if status_params.failure_type:
-            task.failure_type = status_params.failure_type
+        known_failure = known_failure_type(status_params.failure_type)
+        if known_failure:
+            task.failure_type = known_failure
         if task_status_in(normalized, SUBAGENT_WAKE_STATUSES):
             task.ended_at = time.time()
         task.updated_at = time.time()

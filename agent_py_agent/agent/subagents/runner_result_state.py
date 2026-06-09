@@ -20,6 +20,7 @@ from .models import (
     TaskStatus,
     VerificationStatus,
     failure_type_from_task_status,
+    known_failure_type,
     normalize_task_status,
     normalize_verification_status,
     task_has_ended_status,
@@ -96,14 +97,15 @@ def _runner_result_outcome(task, parsed, result_meta: dict, status_context: dict
 def _apply_status_fields(task, status_context, parsed) -> None:
     status = status_context["status"]
     verification_status = status_context["verification_status"]
-    failure_type = status_context["failure_type"]
+    failure_type = known_failure_type(status_context["failure_type"])
+    parsed_failure_type = known_failure_type(getattr(parsed, "failure_type", ""))
     # Explicit runner statuses fail closed instead of translating unknown raw text.
     if parsed.found and parsed.ok:
         task.status = normalize_task_status(status or _status_from_structured_output(parsed))
         task.verification_status = _normalized_verification_status(
             verification_status or _verification_from_runner_status(task.status)
         )
-        _apply_structured_failure_state(task, failure_type or parsed.failure_type, parsed)
+        _apply_structured_failure_state(task, failure_type or parsed_failure_type, parsed)
         return
     if parsed.found and not parsed.ok:
         task.status = normalize_task_status(status) if status else TaskStatus.BLOCKED.value
@@ -111,10 +113,10 @@ def _apply_status_fields(task, status_context, parsed) -> None:
             normalize_verification_status(verification_status) if verification_status else VerificationStatus.UNVERIFIED.value
         )
         if _has_open_capability_requests(task):
-            task.failure_type = failure_type or FailureType.CAPABILITY_REQUEST.value
+            task.failure_type = failure_type or parsed_failure_type or FailureType.CAPABILITY_REQUEST.value
             _append_open_request_blocker(task)
         else:
-            task.failure_type = failure_type or FailureType.STRUCTURED_OUTPUT_PARSE_ERROR.value
+            task.failure_type = failure_type or parsed_failure_type or FailureType.STRUCTURED_OUTPUT_PARSE_ERROR.value
         return
     if status:
         task.status = normalize_task_status(status)
@@ -178,8 +180,9 @@ def _normalized_verification_status(value: object) -> str:
 
 
 def _apply_unstructured_failure(task, ok, failure_type: str) -> None:
-    if failure_type:
-        task.failure_type = failure_type
+    known = known_failure_type(failure_type)
+    if known:
+        task.failure_type = known
     elif not ok:
         task.failure_type = task.failure_type or FailureType.RUNNER_ERROR.value
 

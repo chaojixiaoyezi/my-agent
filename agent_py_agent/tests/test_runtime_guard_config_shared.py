@@ -106,6 +106,21 @@ def test_runtime_guard_file_contains_tool_loop_and_runner_defaults():
     assert _same_run_redispatch_limit(None) == int(defaults["same_run_redispatch_limit"])
 
 
+def test_runner_retry_limit_only_uses_off_or_zero_to_disable():
+    from agent_py_agent.agent.agent_core.runner.dispatch import _runner_max_attempts
+    from agent_py_agent.agent.settings.config_io import load_simple_yaml
+    from agent_py_agent.agent.settings.runtime_guard_config import (
+        DEFAULT_RUNTIME_GUARD_CONFIG_PATH,
+    )
+
+    default_limit = int(load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)["runner_failure_retry_limit"])
+
+    assert _runner_max_attempts("off") == 0
+    assert _runner_max_attempts("0") == 0
+    for old_alias in ("none", "disabled", "false", "no"):
+        assert _runner_max_attempts(old_alias) == default_limit
+
+
 def test_agent_config_blank_tool_rounds_disables_hidden_runtime_default():
     from types import SimpleNamespace
 

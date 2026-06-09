@@ -482,6 +482,8 @@ def unresolved_runtime_issue_no_tool_call_decision(
 ) -> UnresolvedRuntimeIssueDecision | None:
     if not has_unresolved_runtime_issues(request.params):
         return None
+    if request.counters.unresolved_runtime_issue_redirects >= 1:
+        return UnresolvedRuntimeIssueDecision("break", request.response, [], request.counters)
     repair_context = unresolved_runtime_issue_context(
         request.params,
         request.counters.unresolved_runtime_issue_redirects,

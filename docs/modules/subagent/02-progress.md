@@ -1,5 +1,18 @@
 # Subagent Progress
 
+## 2026-06-09 状态投影降噪
+
+- `status --json` 的 `subagents.hot` 只显示当前可行动的近期风险项；超过 72 小时没有更新或进展的
+  风险项计入 `historical_hot_count`，不再占满默认状态输出。
+- 历史风险项不被删除，仍可通过 subagent board、`subagents --all` 和审计文件查看。这个变化只影响
+  人和 gateway/chat 默认状态投影，不改变子代理调度、验收或历史记录。
+- `SubAgentBoardItem` 现在携带结构化 `created_at`，启动恢复检测不再因为缺字段把 active work
+  误报为 0；如果检测失败，`status --json.active_work.detection_errors` 会显式暴露结构化错误。
+- `status` 展示层会截断长 goal，并拆出 `current_summary` / `history_summary`；
+  原始 goal 和完整历史仍在 task/board/detail 事实源里，状态页不再承担大报告或历史审计职责。
+- `subagents` 默认命令同样只展示当前 hot 或最近项；历史 hot 只计入 `historical_hot`。
+  需要看完整历史时显式使用 `--all` 或 status/owner/root 过滤。
+
 ## 2026-06-07 真实 all-agent 子代理对照
 
 - 真实运行目录：
@@ -36,6 +49,19 @@
     `[MAIN_AGENT_DELIVERY_COMPLETE]` 成功块：如果 runtime closeout 已经验收 task
     output 产物，就合成标准 `DONE` / `VERIFIED` 子代理结果，不再进入
     `SUBAGENT_RESULT` repair 轮把 task output 误判成源目录缺文件。
+
+## 2026-06-09 子代理路径合同收敛
+
+- 真实 live lab 暴露子代理执行上下文同时暴露旧 `.my_agent/subagents/<run_id>` locator
+  和当前 task workspace，导致模型把旧目录当自己的 `task_dir`，artifact 聚合也会接受旧目录产物。
+- 当前修复把模型可见 `task_dir`、write boundary 和 protocol write contract 收敛到
+  `tasks/<date>/<task>/work/agents/<run_id>/`。旧 locator 只保留为 owner/index 查找面，
+  不再作为模型写入根或 artifact 候选根。
+- `output_files` / `output_refs` 中带括号占位符路径段的值，例如 `[任务目录]/report.md`
+  或 `[workspace]/report.md`，会被视为非真实文件合同；不会进入 required refs、
+  allowed write roots、declared output refs 或自动物化路径。
+- 这不是按中文词判断，而是结构规则：括号占位符路径段不是当前 run 的真实文件路径。
+  真正的输出目录仍必须来自结构化参数、当前 task workspace、授权写入根或用户明确给出的普通路径。
 
 ## 2026-06-06 主链路小跳转清理
 

@@ -104,10 +104,6 @@ def test_owner_agent_projection_surfaces_result_refs(tmp_path) -> None:
     task.verification_status = "VERIFIED"
     task.artifact_refs = ["reports/final.md"]
     task.attributes = {"output_refs": ["reports/final.md"]}
-    task.output_json = str(tmp_path / "subagents" / task.id / "output.json")
-    task.runner_result_json = str(tmp_path / "subagents" / task.id / "reports" / "runner_result.json")
-    task.runner_result_file = str(tmp_path / "subagents" / task.id / "RUNNER_RESULT.md")
-    task.agent_run_final_report_md = str(tmp_path / "subagents" / task.id / "final_report.md")
 
     manager.save(task)
 
@@ -117,9 +113,9 @@ def test_owner_agent_projection_surfaces_result_refs(tmp_path) -> None:
     assert projection["status"] == "DONE"
     assert projection["artifact_refs"] == ["reports/final.md"]
     assert projection["declared_output_refs"] == ["reports/final.md"]
-    assert projection["runner_result_ref"].endswith("reports/runner_result.json")
+    assert projection["runner_result_ref"].endswith("runner_result.json")
     assert projection["output_json_ref"].endswith("output.json")
-    assert refs["runner_result"].endswith("reports/runner_result.json")
+    assert refs["runner_result"].endswith("runner_result.json")
     assert refs["artifact_refs"] == ["reports/final.md"]
 
 

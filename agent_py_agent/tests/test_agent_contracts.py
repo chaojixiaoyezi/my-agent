@@ -195,6 +195,10 @@ def test_run_state_snapshot_keeps_structured_subagent_failure_types() -> None:
     assert no_progress.action == "change_strategy"
     assert no_progress.secondary_action == "stop"
 
+    free_text = recovery_decision(RunStateFacts(status="BLOCKED", failure_type="please approve this run"))
+    assert free_text.action == "repair"
+    assert free_text.reason == "repairable_failure"
+
 
 def test_idempotency_contract_stable_keys_and_operation_shapes() -> None:
     from agent_py_agent.agent.contracts.idempotency import idempotency_key, operation_id

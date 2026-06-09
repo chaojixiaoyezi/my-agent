@@ -17,10 +17,17 @@ from typing import Any
 
 from ....common.json_io import write_json_file_atomic
 from ....contracts.protocol_status import TOOL_STATUS_FAILED
+from ....user_space.home_indexes import (
+    AgentIndexRef,
+    RunIndexRef,
+    TaskIndexRef,
+    register_agent_ref,
+    register_run_ref,
+    register_task_ref,
+)
 from ...models import SubAgentTask
 from ..agent_run_state import build_agent_run_state, build_owner_agent_projection
 from ..control_plane_projection import sync_subagent_control_plane_projection
-from ..owner_indexes import register_owner_runtime_indexes
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,7 @@ def sync_derived_projections(
     owner_projection: dict[str, Any],
 ) -> tuple[ProjectionRecord, ...]:
     records: list[ProjectionRecord] = []
+    projection_dir = _projection_dir(task, task_dir)
 
     def run_step(name: str, action: Callable[[], None]) -> None:
         try:
@@ -71,15 +79,24 @@ def sync_derived_projections(
     run_step("status_report", lambda: _write_status_report(task))
     run_step(
         "thought_markdown",
-        lambda: (task_dir / "thought.md").write_text(render_thought_markdown(task), encoding="utf-8"),
+        lambda: (projection_dir / "thought.md").write_text(render_thought_markdown(task), encoding="utf-8"),
     )
     run_step("owner_agent_projection", lambda: _write_owner_agent_projection(manager, task, owner_projection))
     run_step("owner_runtime_indexes", lambda: register_owner_runtime_indexes(manager, task))
     run_step("manager_index", lambda: manager.indexing.index_task(task))
     run_step("local_store_projection", lambda: _sync_local_store_projection(manager, task))
-    _append_projection_ledger(task_dir, records)
-    _write_projection_warnings(task_dir, records)
+    _append_projection_ledger(projection_dir, records)
+    _write_projection_warnings(projection_dir, records)
     return tuple(records)
+
+
+def _projection_dir(task: SubAgentTask, task_dir: Path) -> Path:
+    raw = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
+    if raw:
+        path = Path(raw)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    return task_dir
 
 
 def rebuild_derived_projections(manager: Any, run_id: str) -> tuple[ProjectionRecord, ...]:
@@ -162,6 +179,51 @@ def _write_owner_agent_projection(manager: Any, task: SubAgentTask, projection: 
         "updated_at": task.updated_at,
     }
     write_json_file_atomic(root / "refs.json", refs)
+
+
+def register_owner_runtime_indexes(manager: Any, task: SubAgentTask) -> None:
+    home_paths = getattr(manager, "home_paths", None)
+    if home_paths is None:
+        return
+    owner_id = str(getattr(home_paths, "owner_id", "") or task.owner or getattr(manager, "owner_id", "") or "")
+    task_id = str(task.root_id or task.id)
+    task_path = str(getattr(task, "task_workspace_dir", "") or "").strip()
+    run_path = str(getattr(task, "agent_run_workspace_dir", "") or task.task_dir or "").strip()
+    try:
+        if task_path:
+            register_task_ref(
+                home_paths,
+                TaskIndexRef(
+                    owner_id=owner_id,
+                    task_id=task_id,
+                    task_path=task_path,
+                    status=task.status,
+                    title=task.goal,
+                ),
+            )
+        if run_path:
+            register_run_ref(
+                home_paths,
+                RunIndexRef(
+                    owner_id=owner_id,
+                    run_id=task.id,
+                    task_id=task_id,
+                    run_path=run_path,
+                    status=task.status,
+                ),
+            )
+        register_agent_ref(
+            home_paths,
+            AgentIndexRef(
+                owner_id=owner_id,
+                agent_id=task.id,
+                task_id=task_id,
+                run_path=run_path,
+                status=task.status,
+            ),
+        )
+    except OSError:
+        return
 
 
 def _append_projection_ledger(task_dir: Path, records: list[ProjectionRecord]) -> None:

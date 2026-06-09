@@ -120,6 +120,29 @@ def test_tool_boundary_stops_stream_inspection_after_complete_tool_call() -> Non
     assert "".join(forwarded) == '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
 
 
+def test_tool_boundary_accepts_inline_closing_marker_after_complete_json() -> None:
+    forwarded: list[str] = []
+    boundary = ToolBoundaryChunkFilter(forwarded.append)
+
+    text = '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}[/TOOL_CALL]'
+    boundary(text)
+    boundary("\n普通解释不应继续进入机器块")
+
+    assert boundary.complete_tool_text() == text
+    assert "".join(forwarded) == text
+
+
+def test_tool_boundary_ignores_inline_closing_marker_inside_json_string() -> None:
+    payload = {
+        "tool": "write_file",
+        "path": "report.md",
+        "content": "正文里提到 [/TOOL_CALL] 只是文本",
+    }
+    text = "[TOOL_CALL]\n" + json.dumps(payload, ensure_ascii=False) + "\n[/TOOL_CALL]"
+
+    assert complete_machine_block_text(text) == text
+
+
 def test_tool_boundary_ignores_near_tool_protocol_lines_without_exact_marker() -> None:
     boundary = ToolBoundaryChunkFilter(None)
 

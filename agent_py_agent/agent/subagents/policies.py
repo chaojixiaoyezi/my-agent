@@ -22,6 +22,168 @@ from .models import (
 )
 from .reports import ActionPlanItem, DueCheckIssue, SubAgentBoardItem
 
+ISSUE_MISSING_WORK_ORDER_FILES = "missing_work_order_files"
+ISSUE_FAKE_DONE_RISK = "fake_done_risk"
+ISSUE_RUN_TIMEOUT = "run_timeout"
+ISSUE_NO_PROGRESS_FUSE = "no_progress_fuse"
+ISSUE_COORDINATOR_NEEDS_LEADERSHIP_RECOVERY = "coordinator_needs_leadership_recovery"
+ISSUE_HEARTBEAT_STALE = "heartbeat_stale"
+ISSUE_CHANNEL_BROKEN = "channel_broken"
+ISSUE_STATUS_FAILED = "status_failed"
+ISSUE_STATUS_TIMEOUT = "status_timeout"
+ISSUE_STATUS_CHANNEL_ERROR = "status_channel_error"
+ISSUE_PARENT_TIMEOUT_WITH_UNFINISHED_CHILDREN = "parent_timeout_with_unfinished_children"
+ISSUE_COORDINATOR_HEARTBEAT_STALE = "coordinator_heartbeat_stale"
+ISSUE_STATUS_BLOCKED = "status_blocked"
+ISSUE_CHANNEL_PROBE_MISSING = "channel_probe_missing"
+ISSUE_UNVERIFIED_DONE = "unverified_done"
+ISSUE_CHANNEL_DEGRADED = "channel_degraded"
+ISSUE_OPEN_CAPABILITY_REQUEST = "open_capability_request"
+ISSUE_OPEN_CAPABILITY_GAP = "open_capability_gap"
+
+ACTION_PROBE_OR_REPAIR_CHANNEL = "probe_or_repair_channel"
+ACTION_INSPECT_CHANNEL_PROBE = "inspect_channel_probe"
+ACTION_REPAIR_WORK_ORDER = "repair_work_order"
+ACTION_REOPEN_FOR_EVIDENCE = "reopen_for_evidence"
+ACTION_TAKEOVER_OR_REASSIGN = "takeover_or_reassign"
+ACTION_STOP_NO_PROGRESS_AND_ESCALATE = "stop_no_progress_and_escalate"
+ACTION_RECOVER_COORDINATOR_LEADERSHIP = "recover_coordinator_leadership"
+ACTION_RECOVER_CHILD_AFTER_PARENT_TIMEOUT = "recover_child_after_parent_timeout"
+ACTION_INSPECT_FAILURE = "inspect_failure"
+ACTION_CLASSIFY_BLOCKER = "classify_blocker"
+ACTION_ROUTE_CAPABILITY_REQUEST = "route_capability_request"
+ACTION_TRIAGE_CAPABILITY_GAP = "triage_capability_gap"
+ACTION_INSPECT_MANUALLY = "inspect_manually"
+
+RISK_FLAG_FAILED = "failed"
+RISK_FLAG_TIMEOUT = "timeout"
+RISK_FLAG_CHANNEL_ERROR = "channel_error"
+RISK_FLAG_BLOCKED = "blocked"
+RISK_FLAG_CHANNEL_BROKEN = "channel_broken"
+RISK_FLAG_MISSING_WORK_ORDER_FILES = ISSUE_MISSING_WORK_ORDER_FILES
+RISK_FLAG_DONE_WITHOUT_EVIDENCE = "done_without_evidence"
+RISK_FLAG_DONE_WITHOUT_VERIFICATION = "done_without_verification"
+RISK_FLAG_CHANNEL_DEGRADED = "channel_degraded"
+RISK_FLAG_OPEN_CAPABILITY_GAP = ISSUE_OPEN_CAPABILITY_GAP
+RISK_FLAG_OPEN_CAPABILITY_REQUEST = ISSUE_OPEN_CAPABILITY_REQUEST
+RISK_FLAG_TAKEN_OVER = "taken_over"
+
+SEVERITY_WEIGHTS = {
+    "P0": 1000,
+    "P1": 500,
+    "P2": 100,
+}
+
+RISK_FLAG_WEIGHTS = {
+    RISK_FLAG_FAILED: 100,
+    RISK_FLAG_TIMEOUT: 95,
+    RISK_FLAG_CHANNEL_ERROR: 90,
+    RISK_FLAG_BLOCKED: 80,
+    RISK_FLAG_CHANNEL_BROKEN: 75,
+    RISK_FLAG_MISSING_WORK_ORDER_FILES: 70,
+    RISK_FLAG_DONE_WITHOUT_EVIDENCE: 60,
+    RISK_FLAG_DONE_WITHOUT_VERIFICATION: 55,
+    RISK_FLAG_CHANNEL_DEGRADED: 52,
+    RISK_FLAG_OPEN_CAPABILITY_GAP: 50,
+    RISK_FLAG_OPEN_CAPABILITY_REQUEST: 40,
+    RISK_FLAG_TAKEN_OVER: 30,
+}
+
+ISSUE_WEIGHTS = {
+    ISSUE_MISSING_WORK_ORDER_FILES: 90,
+    ISSUE_FAKE_DONE_RISK: 85,
+    ISSUE_RUN_TIMEOUT: 80,
+    ISSUE_NO_PROGRESS_FUSE: 78,
+    ISSUE_COORDINATOR_NEEDS_LEADERSHIP_RECOVERY: 77,
+    ISSUE_HEARTBEAT_STALE: 70,
+    ISSUE_CHANNEL_BROKEN: 68,
+    ISSUE_STATUS_FAILED: 65,
+    ISSUE_STATUS_TIMEOUT: 65,
+    ISSUE_STATUS_CHANNEL_ERROR: 60,
+    ISSUE_PARENT_TIMEOUT_WITH_UNFINISHED_CHILDREN: 59,
+    ISSUE_COORDINATOR_HEARTBEAT_STALE: 58,
+    ISSUE_STATUS_BLOCKED: 50,
+    ISSUE_CHANNEL_PROBE_MISSING: 48,
+    ISSUE_UNVERIFIED_DONE: 45,
+    ISSUE_CHANNEL_DEGRADED: 42,
+    ISSUE_OPEN_CAPABILITY_REQUEST: 40,
+    ISSUE_OPEN_CAPABILITY_GAP: 20,
+}
+
+TIMEOUT_ISSUE_KINDS = frozenset({
+    ISSUE_RUN_TIMEOUT,
+    ISSUE_HEARTBEAT_STALE,
+    ISSUE_STATUS_TIMEOUT,
+})
+PROBE_ACTIONS = frozenset({
+    ACTION_PROBE_OR_REPAIR_CHANNEL,
+    ACTION_INSPECT_CHANNEL_PROBE,
+    ACTION_REPAIR_WORK_ORDER,
+    ACTION_TAKEOVER_OR_REASSIGN,
+})
+RECOVERY_TREE_ACTIONS = frozenset({
+    ACTION_RECOVER_COORDINATOR_LEADERSHIP,
+    ACTION_RECOVER_CHILD_AFTER_PARENT_TIMEOUT,
+})
+
+
+@dataclass(frozen=True)
+class DueActionPolicy:
+    action: str
+    priority: int
+    would_change_status_to: str = ""
+
+
+ACTION_POLICIES = {
+    ISSUE_CHANNEL_BROKEN: DueActionPolicy(ACTION_PROBE_OR_REPAIR_CHANNEL, 980, "CHANNEL_ERROR"),
+    ISSUE_CHANNEL_PROBE_MISSING: DueActionPolicy(ACTION_PROBE_OR_REPAIR_CHANNEL, 980, "CHANNEL_ERROR"),
+    ISSUE_STATUS_CHANNEL_ERROR: DueActionPolicy(ACTION_PROBE_OR_REPAIR_CHANNEL, 980, "CHANNEL_ERROR"),
+    ISSUE_CHANNEL_DEGRADED: DueActionPolicy(ACTION_INSPECT_CHANNEL_PROBE, 780),
+    ISSUE_MISSING_WORK_ORDER_FILES: DueActionPolicy(ACTION_REPAIR_WORK_ORDER, 960, "BLOCKED"),
+    ISSUE_FAKE_DONE_RISK: DueActionPolicy(ACTION_REOPEN_FOR_EVIDENCE, 940, "BLOCKED"),
+    ISSUE_UNVERIFIED_DONE: DueActionPolicy(ACTION_REOPEN_FOR_EVIDENCE, 760, "BLOCKED"),
+    ISSUE_RUN_TIMEOUT: DueActionPolicy(ACTION_TAKEOVER_OR_REASSIGN, 900, "TIMEOUT"),
+    ISSUE_HEARTBEAT_STALE: DueActionPolicy(ACTION_TAKEOVER_OR_REASSIGN, 900, "TIMEOUT"),
+    ISSUE_STATUS_TIMEOUT: DueActionPolicy(ACTION_TAKEOVER_OR_REASSIGN, 900, "TIMEOUT"),
+    ISSUE_NO_PROGRESS_FUSE: DueActionPolicy(ACTION_STOP_NO_PROGRESS_AND_ESCALATE, 990),
+    ISSUE_COORDINATOR_NEEDS_LEADERSHIP_RECOVERY: DueActionPolicy(ACTION_RECOVER_COORDINATOR_LEADERSHIP, 930),
+    ISSUE_PARENT_TIMEOUT_WITH_UNFINISHED_CHILDREN: DueActionPolicy(ACTION_RECOVER_CHILD_AFTER_PARENT_TIMEOUT, 830),
+    ISSUE_COORDINATOR_HEARTBEAT_STALE: DueActionPolicy(ACTION_RECOVER_COORDINATOR_LEADERSHIP, 820),
+    ISSUE_STATUS_FAILED: DueActionPolicy(ACTION_INSPECT_FAILURE, 860),
+    ISSUE_STATUS_BLOCKED: DueActionPolicy(ACTION_CLASSIFY_BLOCKER, 740),
+    ISSUE_OPEN_CAPABILITY_REQUEST: DueActionPolicy(ACTION_ROUTE_CAPABILITY_REQUEST, 700),
+    ISSUE_OPEN_CAPABILITY_GAP: DueActionPolicy(ACTION_TRIAGE_CAPABILITY_GAP, 420),
+}
+
+
+@dataclass(frozen=True)
+class RescuePolicy:
+    strategy: str
+    target: str
+
+
+RESCUE_POLICIES = {
+    ISSUE_RUN_TIMEOUT: RescuePolicy("takeover_or_shrink_scope_before_retry", "parent"),
+    ISSUE_HEARTBEAT_STALE: RescuePolicy("takeover_or_shrink_scope_before_retry", "parent"),
+    ISSUE_STATUS_TIMEOUT: RescuePolicy("takeover_or_shrink_scope_before_retry", "parent"),
+    ISSUE_PARENT_TIMEOUT_WITH_UNFINISHED_CHILDREN: RescuePolicy(
+        "recover_unfinished_children_after_parent_timeout",
+        "parent",
+    ),
+    ISSUE_STATUS_FAILED: RescuePolicy("inspect_failure_then_rescue_or_escalate", "parent"),
+    ISSUE_STATUS_BLOCKED: RescuePolicy("inspect_failure_then_rescue_or_escalate", "parent"),
+    ISSUE_CHANNEL_BROKEN: RescuePolicy("repair_channel_before_retry", "runtime_owner"),
+    ISSUE_CHANNEL_PROBE_MISSING: RescuePolicy("repair_channel_before_retry", "runtime_owner"),
+    ISSUE_STATUS_CHANNEL_ERROR: RescuePolicy("repair_channel_before_retry", "runtime_owner"),
+    ISSUE_OPEN_CAPABILITY_REQUEST: RescuePolicy("route_capability_request_before_retry", "capability_router"),
+    ISSUE_OPEN_CAPABILITY_GAP: RescuePolicy(
+        "escalate_capability_gap_for_tooling_or_learning",
+        "capability_owner",
+    ),
+    ISSUE_FAKE_DONE_RISK: RescuePolicy("reopen_and_request_missing_evidence", "parent"),
+    ISSUE_MISSING_WORK_ORDER_FILES: RescuePolicy("repair_work_order_before_any_retry", "parent"),
+}
+
 
 def filter_board_items(
     items: list[SubAgentBoardItem],
@@ -44,21 +206,7 @@ def filter_board_items(
         result = [item for item in result if item.root_id == root_id]
     return result
 def _risk_weight(flags: list[str]) -> int:
-    weights = {
-        "failed": 100,
-        "timeout": 95,
-        "channel_error": 90,
-        "blocked": 80,
-        "channel_broken": 75,
-        "missing_work_order_files": 70,
-        "done_without_evidence": 60,
-        "done_without_verification": 55,
-        "channel_degraded": 52,
-        "open_capability_gap": 50,
-        "open_capability_request": 40,
-        "taken_over": 30,
-    }
-    return max((weights.get(item, 1) for item in flags), default=0)
+    return max((RISK_FLAG_WEIGHTS.get(item, 1) for item in flags), default=0)
 @dataclass(frozen=True)
 class MakeDueIssueParams:
     task: SubAgentTask
@@ -107,73 +255,21 @@ def _make_due_issue(*, params: MakeDueIssueParams) -> DueCheckIssue:
     )
 def _issue_weight(issue: DueCheckIssue) -> int:
     severity_weight = _severity_weight(issue.severity)
-    kind_weight = {
-        "missing_work_order_files": 90,
-        "fake_done_risk": 85,
-        "run_timeout": 80,
-        "no_progress_fuse": 78,
-        "coordinator_needs_leadership_recovery": 77,
-        "heartbeat_stale": 70,
-        "channel_broken": 68,
-        "status_failed": 65,
-        "status_timeout": 65,
-        "status_channel_error": 60,
-        "parent_timeout_with_unfinished_children": 59,
-        "coordinator_heartbeat_stale": 58,
-        "status_blocked": 50,
-        "channel_probe_missing": 48,
-        "unverified_done": 45,
-        "channel_degraded": 42,
-        "open_capability_request": 40,
-        "open_capability_gap": 20,
-    }.get(issue.kind, 1)
+    kind_weight = ISSUE_WEIGHTS.get(issue.kind, 1)
     return severity_weight + kind_weight
 def _severity_weight(severity: str) -> int:
-    return {"P0": 1000, "P1": 500, "P2": 100}.get(severity, 0)
+    return SEVERITY_WEIGHTS.get(severity, 0)
 def _action_for_issue(issue: DueCheckIssue) -> tuple[str, int, str]:
-    kind = issue.kind
-    if kind in {"channel_broken", "channel_probe_missing", "status_channel_error"}:
-        return "probe_or_repair_channel", 980, "CHANNEL_ERROR"
-    if kind == "channel_degraded":
-        return "inspect_channel_probe", 780, ""
-    if kind == "missing_work_order_files":
-        return "repair_work_order", 960, "BLOCKED"
-    if kind == "fake_done_risk":
-        return "reopen_for_evidence", 940, "BLOCKED"
-    if kind == "unverified_done":
-        return "reopen_for_evidence", 760, "BLOCKED"
-    if kind in {"run_timeout", "heartbeat_stale", "status_timeout"}:
-        return "takeover_or_reassign", 900, "TIMEOUT"
-    if kind == "no_progress_fuse":
-        return "stop_no_progress_and_escalate", 990, ""
-    if kind == "coordinator_needs_leadership_recovery":
-        return "recover_coordinator_leadership", 930, ""
-    if kind == "parent_timeout_with_unfinished_children":
-        return "recover_child_after_parent_timeout", 830, ""
-    if kind == "coordinator_heartbeat_stale":
-        return "recover_coordinator_leadership", 820, ""
-    if kind == "status_failed":
-        return "inspect_failure", 860, ""
-    if kind == "status_blocked":
-        return "classify_blocker", 740, ""
-    if kind == "open_capability_request":
-        return "route_capability_request", 700, ""
-    if kind == "open_capability_gap":
-        return "triage_capability_gap", 420, ""
-    return issue.suggested_action or "inspect_manually", 100, ""
+    if policy := ACTION_POLICIES.get(issue.kind):
+        return policy.action, policy.priority, policy.would_change_status_to
+    return issue.suggested_action or ACTION_INSPECT_MANUALLY, 100, ""
 def _commands_for_action(action: str, run_id: str) -> list[str]:
     cli = "my-agent"
-    probe_actions = {
-        "probe_or_repair_channel",
-        "inspect_channel_probe",
-        "repair_work_order",
-        "takeover_or_reassign",
-    }
-    if action == "stop_no_progress_and_escalate":
+    if action == ACTION_STOP_NO_PROGRESS_AND_ESCALATE:
         return [f"{cli} subagent {run_id}", f"{cli} subagents-recovery-tree {run_id} --hide-healthy"]
-    if action in probe_actions:
+    if action in PROBE_ACTIONS:
         return [f"{cli} subagents-probe {run_id}", f"{cli} subagent {run_id}"]
-    if action in {"recover_coordinator_leadership", "recover_child_after_parent_timeout"}:
+    if action in RECOVERY_TREE_ACTIONS:
         return [f"{cli} subagents-recovery-tree {run_id} --hide-healthy", f"{cli} subagent {run_id}"]
     return [f"{cli} subagent {run_id}"]
 def _filter_action_plan_items(
@@ -194,13 +290,8 @@ def _filter_action_plan_items(
 def _capability_request_query(task: SubAgentTask, request: CapabilityRequest) -> str:
     scoped_type = "" if request.capability_type == "generic" else request.capability_type
     parts = [
-        task.goal,
         request.needed_capability,
-        request.problem,
-        request.expected_output,
         scoped_type,
-        " ".join(request.tried),
-        " ".join(request.evidence),
         " ".join(request.requested_tools),
         " ".join(request.requested_skills),
         " ".join(request.requested_mcp_tools),

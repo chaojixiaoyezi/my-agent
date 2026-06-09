@@ -16,7 +16,12 @@ from ...models import (
     task_is_handled_after_parent_timeout,
     task_status_in,
 )
-from ...policies import _is_active
+from ...policies import (
+    ACTION_TAKEOVER_OR_REASSIGN,
+    ISSUE_HEARTBEAT_STALE,
+    ISSUE_RUN_TIMEOUT,
+    _is_active,
+)
 from ..recovery.strategy import SubagentRecoveryStrategyRequest, build_subagent_recovery_strategy
 
 RECOVERY_STATUSES = SUBAGENT_FAILURE_STATUSES
@@ -249,7 +254,7 @@ def _recommended_command(task: SubAgentTask, reason: str) -> str:
         return f"my-agent subagents-recovery-tree {root_id} --hide-healthy"
     if reason.startswith("due:"):
         return (
-            "my-agent subagents-apply-actions --apply --action takeover_or_reassign "
+            f"my-agent subagents-apply-actions --apply --action {ACTION_TAKEOVER_OR_REASSIGN} "
             f"--run-id {task.id} --take-over-by <agent>"
         )
     return f"my-agent subagents-tests-plan {task.id} --followup"
@@ -265,7 +270,7 @@ def _active_stale_reasons(task: SubAgentTask, request: HierarchyRecoveryRequest)
     stale_seconds = max(0.0, now - float(task.heartbeat_at or task.updated_at or now))
     age_seconds = max(0.0, now - float(task.created_at or now))
     if request.heartbeat_timeout > 0 and stale_seconds > request.heartbeat_timeout:
-        reasons.append("heartbeat_stale")
+        reasons.append(ISSUE_HEARTBEAT_STALE)
     if request.run_timeout > 0 and age_seconds > request.run_timeout:
-        reasons.append("run_timeout")
+        reasons.append(ISSUE_RUN_TIMEOUT)
     return reasons

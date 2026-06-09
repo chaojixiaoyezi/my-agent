@@ -55,7 +55,7 @@ def test_items_mode_preserves_absolute_path_dependencies():
     ]
 
 
-def test_researcher_preset_gets_web_tools_by_default():
+def test_researcher_role_gets_web_tools_by_default():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     mock_agent = _mock_items_agent(task_count=1)
@@ -66,7 +66,6 @@ def test_researcher_preset_gets_web_tools_by_default():
                 "goal": "查 代码平台 项目并用 web_fetch 验证页面可访问。",
                 "agent_name": "小傻妞-数据收集",
                 "role": "researcher",
-                "tool_preset": "researcher",
             }
         ]
     })
