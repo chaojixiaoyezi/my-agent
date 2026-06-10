@@ -17,6 +17,7 @@ from .adapter import (
 from .daemon_control import get_running_pid, read_pid_record
 from .io import (
     append_gateway_history,
+    gateway_queue_ages,
     gateway_request_counts,
     gateway_response_path,
     new_gateway_request_id,
@@ -61,6 +62,7 @@ from .recovery import (
 )
 from .request_worker import (
     GatewayAskParams,
+    GatewayInboxScanGate,
     _handle_gateway_request,
     _process_gateway_requests,
     submit_gateway_ask,
@@ -78,6 +80,7 @@ __all__ = [
     "gateway_paths",
     "gateway_chunk_path",
     "gateway_chunk_path_candidates",
+    "gateway_queue_ages",
     "gateway_request_counts",
     "gateway_response_path",
     "gateway_running",
@@ -107,5 +110,6 @@ __all__ = [
     "write_gateway_request",
     "write_json_file",
     "_handle_gateway_request",
+    "GatewayInboxScanGate",
     "_process_gateway_requests",
 ]

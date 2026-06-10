@@ -230,6 +230,26 @@ def gateway_request_counts(paths: GatewayPaths, *, include_archives: bool = True
     return counts
 
 
+def gateway_queue_ages(paths: GatewayPaths) -> dict[str, float]:
+    """结构化队列年龄观测：最老 pending 等待秒数与最老 processing lease 年龄。
+
+    只用文件 mtime（结构化事实），不读文件内容；供 heartbeat / status 展示，
+    不参与任何调度或恢复决策。"""
+    now = time.time()
+
+    def oldest_age(path: Path) -> float:
+        try:
+            mtimes = [item.stat().st_mtime for item in path.glob("*.json") if item.is_file()]
+        except OSError:
+            return 0.0
+        return round(now - min(mtimes), 3) if mtimes else 0.0
+
+    return {
+        "oldest_pending_age_seconds": oldest_age(paths.inbox),
+        "oldest_processing_age_seconds": oldest_age(paths.processing),
+    }
+
+
 def write_gateway_request(paths: GatewayPaths, payload: dict) -> Path:
 
     request_id = str(payload["id"])

@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 from ..agent.conversation import (
@@ -22,8 +23,10 @@ from ..agent.conversation import (
 )
 from ..agent.core import SimpleAgent
 from ..agent.gateway_parts import (
+    GatewayInboxScanGate,
     GatewayPaths,
     _process_gateway_requests,
+    gateway_queue_ages,
     gateway_request_counts,
     log_gateway_event,
     recover_gateway_processing_requests,
@@ -76,16 +79,43 @@ def _gateway_request_worker_loop(
         return
 
     poll_interval = _gateway_request_poll_interval(agent)
+    worker = _WorkerLoopContext(
+        agent=agent,
+        paths=paths,
+        worker_index=worker_index,
+        scan_gate=GatewayInboxScanGate(),
+        recover_throttle=_RecoverThrottle(agent),
+    )
     while not stop_event.is_set():
-        try:
-            _recover_gateway_requests_if_primary(agent, paths, worker_index)
-            processed = _process_gateway_requests(agent, paths, worker_id=f"gw-worker-{worker_index}")
-        except Exception as exc:
-            _print_gateway_loop_error("gateway_request_worker.iteration", str(worker_index), exc)
-            processed = 0
-        if processed:
+        if _worker_iteration(worker):
             continue
         stop_event.wait(poll_interval)
+
+
+@dataclass(frozen=True)
+class _WorkerLoopContext:
+    """单个 request worker 的循环上下文：扫描门与恢复节流随 worker 存活。"""
+
+    agent: SimpleAgent
+    paths: GatewayPaths
+    worker_index: int
+    scan_gate: GatewayInboxScanGate
+    recover_throttle: _RecoverThrottle
+
+
+def _worker_iteration(worker: _WorkerLoopContext) -> int:
+    try:
+        if worker.worker_index == 0 and worker.recover_throttle.due():
+            _recover_gateway_requests_if_primary(worker.agent, worker.paths, worker.worker_index)
+        return _process_gateway_requests(
+            worker.agent,
+            worker.paths,
+            worker_id=f"gw-worker-{worker.worker_index}",
+            scan_gate=worker.scan_gate,
+        )
+    except Exception as exc:
+        _print_gateway_loop_error("gateway_request_worker.iteration", str(worker.worker_index), exc)
+        return 0
 
 
 def _gateway_background_main_loop(context: GatewayRunContext, stop_event: threading.Event) -> None:
@@ -167,6 +197,25 @@ def _float_config(agent: SimpleAgent, key: str, *, default: float) -> float:
         return default
 
 
+class _RecoverThrottle:
+    """worker-0 的 stale lease 恢复扫描节流：按 processing 超时的 1/3（至少 2 秒）执行。
+
+    恢复扫描要遍历 processing 目录并逐文件读 JSON，原来每个轮询周期（0.2s）都跑，
+    空闲时是主要的无效 IO；节流后检测延迟上界仍远小于 lease 超时。"""
+
+    def __init__(self, agent: SimpleAgent) -> None:
+        timeout = _float_config(agent, "gateway_processing_timeout_seconds", default=120.0)
+        self._interval = max(2.0, timeout / 3.0 if timeout > 0 else 30.0)
+        self._next_at = 0.0
+
+    def due(self) -> bool:
+        now = time.monotonic()
+        if now < self._next_at:
+            return False
+        self._next_at = now + self._interval
+        return True
+
+
 def _recover_gateway_requests_if_primary(agent: SimpleAgent, paths: GatewayPaths, worker_index: int) -> None:
     if worker_index != 0:
         return
@@ -212,6 +261,7 @@ def _write_gateway_heartbeat(
             "max_runners": options.max_runners,
             "max_cycles": options.max_cycles,
             "request_counts": gateway_request_counts(paths, include_archives=False),
+            "queue_ages": gateway_queue_ages(paths),
         },
     )
 

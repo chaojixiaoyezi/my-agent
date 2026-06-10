@@ -1,5 +1,15 @@
 # Gateway Progress
 
+## 2026-06-10 空闲扫描门 + recover 节流 + 队列年龄观测
+
+- 空闲 gateway 的每 0.2s 轮询不再做 inbox 全量 glob 和 processing 恢复扫描（mtime 门 + 节流）；
+  请求拾取延迟上界不变（mtime 变化即扫描）。
+- heartbeat 增加 queue_ages 结构化观测；jsonl 路径锁内存泄漏修复（引用计数回收）。
+- chat 消息读取改尾部倒读（conversation/store.py `read_jsonl_tail_report`），5000 行账本取最近
+  20 条实测 41x 提速、结果与全量读逐位一致。
+- 评估后推迟：subagent tree 投影缓存（≤10 子代理的真实场景全量扫描仅数毫秒，待 R2 真实并发
+  测出瓶颈再做，避免给可变 task 对象引入缓存别名风险）；lane 化并发同理待 R2 数据。
+
 ## 2026-06-09 Gateway ready、日志和后台提醒降噪
 
 - `gateway start` 不再只等 PID 文件出现；启动确认会等当前 pid 对应的 `gateway_state.json`

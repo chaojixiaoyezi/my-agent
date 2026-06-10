@@ -63,3 +63,15 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
 - 多 chat/gateway client 共享同一队列时，本地 IO 不应成为瓶颈；慢点应主要来自模型或外部服务。
 - processing 目录只表示当前正在处理的 request；完成后的 request JSON 和 chunk stream 都必须进入
   done/failed 归档，便于多客户端观察和后续排障。
+
+## 2026-06-10 空闲 IO 与队列观测
+
+- `GatewayInboxScanGate`（gateway_parts/request_worker.py）：inbox 目录 mtime 未变且上轮扫描为空时
+  跳过 glob+逐文件读；带 2 秒粗粒度文件系统保护与 deferred（not_before_at）例外。每个 worker
+  持有自己的门，空闲时单轮成本从全目录扫描降为一次 stat。
+- worker-0 的 stale lease 恢复扫描改为按 `gateway_processing_timeout_seconds/3`（至少 2 秒）节流
+  （cli/gateway_loops.py `_RecoverThrottle`），不再每个轮询周期全量扫 processing 目录。
+- heartbeat 新增 `queue_ages`（gateway_parts/io.py `gateway_queue_ages`）：最老 pending 等待秒数、
+  最老 processing lease 年龄，只读文件 mtime，仅用于观测展示，不参与调度或恢复决策。
+- `agent/io/jsonl.py` 路径锁改为引用计数 + 容量水位回收，长驻 gateway 进程不再无限增长；
+  Windows（无 fcntl）下线程锁仍是唯一互斥，引用计数保证不会出现双锁并行写。

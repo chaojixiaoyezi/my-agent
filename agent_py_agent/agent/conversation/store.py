@@ -61,6 +61,47 @@ def read_jsonl_report(path: Path, *, context: str) -> JsonlReadReport:
     return JsonlReadReport(rows, errors)
 
 
+def _read_tail_bytes(path: Path, limit: int) -> tuple[bytes, int]:
+    """按 64KB 块从文件尾部倒读，直到覆盖 limit+1 个换行或到达文件头。"""
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        pos = handle.tell()
+        block = 64 * 1024
+        data = b""
+        while pos > 0 and data.count(b"\n") <= limit:
+            step = min(block, pos)
+            pos -= step
+            handle.seek(pos)
+            data = handle.read(step) + data
+    return data, pos
+
+
+def read_jsonl_tail_report(path: Path, *, context: str, limit: int) -> JsonlReadReport:
+    """从文件尾部按块倒读最后 limit 条记录，避免大账本全量加载。
+
+    跨块边界可能截断的首行会被丢弃（它属于更早的记录）；limit<=0 退回全量读取。"""
+    if limit <= 0:
+        return read_jsonl_report(path, context=context)
+    try:
+        data, pos = _read_tail_bytes(path, limit)
+    except OSError as exc:
+        return JsonlReadReport([], [_jsonl_error(exc, context, path=path)])
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if pos > 0 and lines:
+        lines = lines[1:]
+    selected = [line for line in lines if line.strip()][-limit:]
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for line in selected:
+        row, error = _json_row(line, context=context, path=path, line_number=0)
+        if error is not None:
+            errors.append(error)
+            continue
+        if row is not None:
+            rows.append(row)
+    return JsonlReadReport(rows, errors)
+
+
 def now(value: float | None = None) -> float:
     return float(time.time() if value is None else value)
 
@@ -473,9 +514,12 @@ class ConversationMessageStore(ConversationThreadStore):
         *,
         limit: int = 20,
     ) -> tuple[list[MessageLogEntry], list[dict[str, Any]]]:
-        report = read_jsonl_report(
+        # 尾部倒读：limit>0 时只解析最后一段，长会话不再全量加载。
+        # 多读一倍冗余行，留给 _message_entries 过滤非消息行后仍能凑满 limit。
+        report = read_jsonl_tail_report(
             self._message_path(thread_id),
             context="conversation.messages.read",
+            limit=0 if limit <= 0 else max(limit * 2, limit + 8),
         )
         entries, parse_errors = _message_entries(report.rows)
         selected = entries if limit <= 0 else entries[-limit:]

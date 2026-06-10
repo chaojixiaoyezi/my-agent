@@ -16,8 +16,19 @@ except ImportError:  # pragma: no cover - Windows import guard.
     fcntl = None
 
 
-_LOCKS: dict[str, threading.Lock] = {}
+class _PathLockEntry:
+    """带引用计数的路径锁；归零且超出容量水位时回收，长驻进程不再无限增长。"""
+
+    __slots__ = ("lock", "refs")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.refs = 0
+
+
+_LOCKS: dict[str, _PathLockEntry] = {}
 _LOCKS_GUARD = threading.Lock()
+_LOCKS_CAPACITY_WATERMARK = 512
 
 
 def append_jsonl(path: str | Path, payload: dict[str, Any], *, sort_keys: bool = False) -> None:
@@ -50,25 +61,36 @@ def append_line_locked(path: str | Path, line: str) -> None:
 def _locked_text_file(path: Path) -> Iterator[TextIO]:
     """Open an append target after taking both thread and OS file locks."""
 
-    process_lock = _thread_lock_for(path)
-    with process_lock, ExitStack() as stack:
-        lock_path = path.with_name(path.name + ".lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_handle = stack.enter_context(lock_path.open("a+", encoding="utf-8"))
-        _lock_os_file(lock_handle)
-        stack.callback(_unlock_os_file, lock_handle)
-        target = stack.enter_context(path.open("a", encoding="utf-8"))
-        yield target
-
-
-def _thread_lock_for(path: Path) -> threading.Lock:
     resolved = str(path.resolve())
+    entry = _acquire_lock_entry(resolved)
+    try:
+        with entry.lock, ExitStack() as stack:
+            lock_path = path.with_name(path.name + ".lock")
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_handle = stack.enter_context(lock_path.open("a+", encoding="utf-8"))
+            _lock_os_file(lock_handle)
+            stack.callback(_unlock_os_file, lock_handle)
+            target = stack.enter_context(path.open("a", encoding="utf-8"))
+            yield target
+    finally:
+        _release_lock_entry(resolved, entry)
+
+
+def _acquire_lock_entry(resolved: str) -> _PathLockEntry:
     with _LOCKS_GUARD:
-        lock = _LOCKS.get(resolved)
-        if lock is None:
-            lock = threading.Lock()
-            _LOCKS[resolved] = lock
-        return lock
+        entry = _LOCKS.get(resolved)
+        if entry is None:
+            entry = _PathLockEntry()
+            _LOCKS[resolved] = entry
+        entry.refs += 1
+        return entry
+
+
+def _release_lock_entry(resolved: str, entry: _PathLockEntry) -> None:
+    with _LOCKS_GUARD:
+        entry.refs -= 1
+        if entry.refs <= 0 and len(_LOCKS) > _LOCKS_CAPACITY_WATERMARK and _LOCKS.get(resolved) is entry:
+            del _LOCKS[resolved]
 
 
 def _lock_os_file(handle: TextIO) -> None:

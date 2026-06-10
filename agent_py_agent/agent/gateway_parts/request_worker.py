@@ -69,6 +69,39 @@ class _PendingGatewayRequest:
     payload: dict
 
 
+class GatewayInboxScanGate:
+    """inbox 空闲扫描门：目录 mtime 没变且上轮扫描为空时跳过 glob。
+
+    粗粒度文件系统（mtime 秒级）保护：mtime 距今不足 2 秒时不跳过，
+    避免同一秒内新写入的请求被漏掉。上轮存在 deferred（not_before_at）
+    请求时也不跳过，保证延迟请求到点被处理。"""
+
+    _COARSE_MTIME_GUARD_SECONDS = 2.0
+
+    def __init__(self) -> None:
+        self._last_mtime_ns: int | None = None
+        self._scan_required = True
+
+    def should_scan(self, inbox: Path) -> bool:
+        if self._scan_required:
+            return True
+        mtime_ns = self._inbox_mtime_ns(inbox)
+        if mtime_ns is None or mtime_ns != self._last_mtime_ns:
+            return True
+        return (time.time() - mtime_ns / 1e9) < self._COARSE_MTIME_GUARD_SECONDS
+
+    def record_scan(self, inbox: Path, *, processed: int, deferred_present: bool) -> None:
+        self._last_mtime_ns = self._inbox_mtime_ns(inbox)
+        self._scan_required = bool(processed or deferred_present or self._last_mtime_ns is None)
+
+    @staticmethod
+    def _inbox_mtime_ns(inbox: Path) -> int | None:
+        try:
+            return inbox.stat().st_mtime_ns
+        except OSError:
+            return None
+
+
 def submit_gateway_ask(
     paths: GatewayPaths,
     *,
@@ -130,14 +163,26 @@ def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: flo
     return {}
 
 
-def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths, *, worker_id: str = "gw-worker") -> int:
+def _process_gateway_requests(
+    agent: SimpleAgent,
+    paths: GatewayPaths,
+    *,
+    worker_id: str = "gw-worker",
+    scan_gate: GatewayInboxScanGate | None = None,
+) -> int:
     ensure_gateway_folders(paths)
+    if scan_gate is not None and not scan_gate.should_scan(paths.inbox):
+        return 0
     processed = 0
+    deferred_present = False
     for request in _iter_pending_requests(paths):
         if _request_deferred_until_later(request):
+            deferred_present = True
             continue
         if _process_gateway_request_path(agent, paths, request.path, worker_id):
             processed += 1
+    if scan_gate is not None:
+        scan_gate.record_scan(paths.inbox, processed=processed, deferred_present=deferred_present)
     return processed
 
 
