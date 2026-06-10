@@ -208,6 +208,7 @@ class SimpleAgentRuntimeMixin:
             main_context_bundle_path=params.main_context_bundle_path,
             main_context_bundle_markdown_path=params.main_context_bundle_markdown_path,
             delivery_contract=rp.delivery_contract,
+            context_scope=str(getattr(rp, "context_scope", "default") or "default"),
         )
 
     def remember(self, content: str, *, kind: str = "note"):

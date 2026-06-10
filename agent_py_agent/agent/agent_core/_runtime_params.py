@@ -38,6 +38,8 @@ class FinalizeContext:
     main_context_bundle_path: str = ""
     main_context_bundle_markdown_path: str = ""
     delivery_contract: dict | None = None
+    # 子代理 task_local 回合的 compact 阈值覆盖依赖这个字段；来源是 run params 的 context_scope。
+    context_scope: str = "default"
 
 
 @dataclass(frozen=True)

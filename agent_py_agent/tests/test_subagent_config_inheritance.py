@@ -95,3 +95,53 @@ def test_capability_config_rejects_unknown_fields(tmp_path):
         assert "未知字段" in str(exc)
     else:
         raise AssertionError("未知字段应当报错")
+
+
+def test_finalize_context_carries_context_scope_for_compact_policy():
+    """R0 真实任务回归钉子：finalization compact 链路要求 FinalizeContext 携带
+    context_scope；这条属性在本机环境失败集掩盖下曾漏检，单独钉死。"""
+    from dataclasses import fields
+
+    from agent_py_agent.agent.agent_core._runtime_params import FinalizeContext
+
+    names = {f.name for f in fields(FinalizeContext)}
+    assert "context_scope" in names
+    assert "do_save" in names
+
+
+def test_compact_auto_cycle_fields_reads_finalize_context_scope(tmp_path):
+    """compact_auto_cycle_fields 必须能在最小 FinalizeContext 上运行（属性级回归）。"""
+    from agent_py_agent.agent.agent_core._runtime_params import FinalizeContext
+    from agent_py_agent.agent.agent_core.finalization_compact_auto import compact_auto_cycle_fields
+
+    class _Resp:
+        text = "done"
+        runtime_status = ""
+        runtime_reason = ""
+        runtime_source = ""
+
+    class _Cfg:
+        memory_compact_auto_trigger_percent = 70
+        model_context_window_tokens = 200_000
+        agent_name = "test"
+        auto_save_memory = False
+
+    class _Agent:
+        config = _Cfg()
+        root = None
+        session_id = "s"
+
+    agent = _Agent()
+    agent.root = tmp_path
+    ctx = FinalizeContext(
+        user_prompt="p", final_prompt="p", final_response=_Resp(), memories=[],
+        executed_tools=[], archive_tool_calls=[], routed_context=None,
+        resume_context_result=None, runtime_injections=[],
+        compression_snapshot_id="", compression_snapshot_path="",
+        compression_applied=False, request_id="r", run_id="", task_id="",
+        source="run", do_save=False, task_attributes=None, recovery_task_refs=None,
+        recovery_content_paths=None, recovery_next_actions=None,
+        context_scope="task_local",
+    )
+    payload = compact_auto_cycle_fields(agent, ctx, {"turn": 10, "active": 10})
+    assert "memory_compact_auto_status" in payload
