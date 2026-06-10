@@ -34,7 +34,6 @@ def _entry_file_status(home: MyAgentHomePaths) -> dict[str, dict[str, Any]]:
         "agents_md": _path_status(home.agents_md),
         "memory_md": _path_status(home.memory_md),
         "memory_hot_md": _path_status(home.memory_hot_md),
-        "memory_route_index": _path_status(home.memory_routing_index_md),
     }
 
 
@@ -49,12 +48,6 @@ def _owner_identity(home: MyAgentHomePaths) -> dict[str, str]:
 
 def _directory_status(home: MyAgentHomePaths) -> dict[str, dict[str, Any]]:
     return {
-        "memory_daily": _path_status(home.memory_daily_dir),
-        "memory_raw": _path_status(home.memory_raw_dir),
-        "memory_hooks": _path_status(home.memory_hooks_dir),
-        "memory_lessons": _path_status(home.memory_lessons_dir),
-        "memory_routing": _path_status(home.memory_routing_dir),
-        "memory_indexes": _path_status(home.memory_indexes_dir),
         "workspace_tasks": _path_status(home.workspace_tasks_dir),
         "scripts": _path_status(home.scripts_dir),
         "role_templates": _path_status(home.role_templates_dir),

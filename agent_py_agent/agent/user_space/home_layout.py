@@ -30,14 +30,6 @@ class MyAgentHomePaths:
     scripts_dir: Path
     workspace_dir: Path
     workspace_tasks_dir: Path
-    memory_dir: Path
-    memory_daily_dir: Path
-    memory_raw_dir: Path
-    memory_hooks_dir: Path
-    memory_lessons_dir: Path
-    memory_routing_dir: Path
-    memory_routing_index_md: Path
-    memory_indexes_dir: Path
     data_dir: Path
     providers_dir: Path
     memory_archive_dir: Path
@@ -146,7 +138,6 @@ def home_paths(root: str | Path | None = None) -> MyAgentHomePaths:
 
 
 def _root_home_path_fields(home: Path) -> dict[str, Path]:
-    memory_dir = home / "memory"
     workspace_dir = home / "workspace"
     return {
         "soul_md": home / "SOUL.md",
@@ -158,14 +149,6 @@ def _root_home_path_fields(home: Path) -> dict[str, Path]:
         "scripts_dir": home / "scripts",
         "workspace_dir": workspace_dir,
         "workspace_tasks_dir": workspace_dir / "tasks",
-        "memory_dir": memory_dir,
-        "memory_daily_dir": memory_dir / "daily",
-        "memory_raw_dir": memory_dir / "raw",
-        "memory_hooks_dir": memory_dir / "hooks",
-        "memory_lessons_dir": memory_dir / "lessons",
-        "memory_routing_dir": memory_dir / "routing",
-        "memory_routing_index_md": memory_dir / "routing" / "INDEX.md",
-        "memory_indexes_dir": memory_dir / "indexes",
         "data_dir": home / "data",
         "providers_dir": home / "providers",
         "memory_archive_dir": home / "memory_archive",
@@ -189,9 +172,9 @@ def ensure_my_agent_home(root: str | Path | None = None) -> MyAgentHomePaths:
     _write_seed_file(paths.agents_md, "# AGENTS\n\n")
     _write_seed_file(paths.memory_md, default_memory_md())
     _write_seed_file(paths.memory_hot_md, default_memory_hot_md())
-    _write_seed_file(paths.memory_routing_index_md, default_memory_route_index_md())
+    _write_seed_file(paths.owner_memory_routing_index_md, default_memory_route_index_md())
     for lesson_name, lesson_content in default_memory_lessons().items():
-        _write_seed_file(paths.memory_lessons_dir / lesson_name, lesson_content)
+        _write_seed_file(paths.owner_memory_lessons_dir / lesson_name, lesson_content)
     for path, content in v2_seed_files(paths):
         _write_seed_file(path, content)
     for path, payload in v2_seed_jsons(paths):
@@ -203,11 +186,6 @@ def _HOME_DIRECTORIES(paths: MyAgentHomePaths) -> tuple[Path, ...]:
     return (
         paths.config_dir,
         paths.scripts_dir,
-        paths.memory_daily_dir,
-        paths.memory_hooks_dir,
-        paths.memory_lessons_dir,
-        paths.memory_routing_dir,
-        paths.memory_indexes_dir,
         paths.data_dir,
         paths.providers_dir,
         paths.memory_archive_dir / "artifacts",

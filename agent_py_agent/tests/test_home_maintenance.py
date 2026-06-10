@@ -34,8 +34,9 @@ def test_home_doctor_reports_dangling_index_and_retention_advice(tmp_path: Path)
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
     home = ensure_my_agent_home(tmp_path)
-    home.memory_raw_dir.mkdir(parents=True, exist_ok=True)
-    (home.memory_raw_dir / "2026-05-01.jsonl").write_text("{}\n", encoding="utf-8")
+    legacy_raw_dir = home.root / "memory" / "raw"
+    legacy_raw_dir.mkdir(parents=True, exist_ok=True)
+    (legacy_raw_dir / "2026-05-01.jsonl").write_text("{}\n", encoding="utf-8")
     register_task_ref(home, TaskIndexRef(owner_id=home.owner_id, task_id="missing-task", task_path=home.owner_tasks_dir / "missing", status="running"))
 
     old_cache = home.owner_cache_dir / "old.tmp"

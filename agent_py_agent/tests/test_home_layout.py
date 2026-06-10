@@ -168,7 +168,6 @@ def test_home_paths_exposes_core_dirs_without_creating(tmp_path: Path):
 
     assert paths.config_dir == tmp_path / "config"
     assert paths.scripts_dir == tmp_path / "scripts"
-    assert paths.memory_daily_dir == tmp_path / "memory" / "daily"
     assert paths.providers_dir == tmp_path / "providers"
     assert paths.shared_skills_dir == tmp_path / "shared" / "skills"
     assert paths.owner_home_dir == tmp_path / "owners" / "local" / "main"
@@ -191,9 +190,7 @@ def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Pa
     assert paths.config_dir.is_dir()
     assert paths.scripts_dir.is_dir()
     assert not paths.workspace_tasks_dir.exists()
-    assert paths.memory_daily_dir.is_dir()
-    assert paths.memory_lessons_dir.is_dir()
-    assert paths.memory_routing_dir.is_dir()
+    assert not (tmp_path / "memory" / "daily").exists()
     assert paths.providers_dir.is_dir()
     assert paths.shared_indexes_dir.is_dir()
     assert paths.owner_tasks_dir.is_dir()
@@ -207,9 +204,9 @@ def test_ensure_my_agent_home_creates_dirs_and_keeps_existing_files(tmp_path: Pa
     assert paths.soul_md.read_text(encoding="utf-8") == "custom soul\n"
     assert paths.agents_md.exists()
     assert paths.memory_hot_md.exists()
-    assert paths.memory_routing_index_md.exists()
-    assert (paths.memory_lessons_dir / "real-tests.md").exists()
-    assert (paths.memory_lessons_dir / "compact.md").exists()
+    assert paths.owner_memory_routing_index_md.exists()
+    assert (paths.owner_memory_lessons_dir / "real-tests.md").exists()
+    assert (paths.owner_memory_lessons_dir / "compact.md").exists()
 
 
 def test_ensure_my_agent_home_creates_v2_owner_and_system_files(tmp_path: Path):

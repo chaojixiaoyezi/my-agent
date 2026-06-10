@@ -24,7 +24,7 @@ def staged_checkpoint_contexts(
     refs = staging.get("checkpoint_refs") if isinstance(staging, dict) else None
     if not isinstance(contract, dict) or not isinstance(staging, dict) or not isinstance(refs, list):
         return []
-    source_ref = str(staging.get("source_json_ref") or staging.get("source_ref") or "").strip()
+    source_ref = str(staging.get("source_json_ref") or "").strip()
     return [
         StagedCheckpointContext(
             ref=ref_text,

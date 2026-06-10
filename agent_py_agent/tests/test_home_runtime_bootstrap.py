@@ -17,8 +17,8 @@ def test_simple_agent_initializes_my_agent_home(tmp_path: Path):
     assert agent.home_paths.root == home.resolve()
     assert agent.home_paths.config_dir.is_dir()
     assert not agent.home_paths.workspace_tasks_dir.exists()
-    assert agent.home_paths.memory_daily_dir.is_dir()
-    assert agent.home_paths.memory_lessons_dir.is_dir()
+    assert agent.home_paths.owner_memory_daily_dir.is_dir()
+    assert agent.home_paths.owner_memory_lessons_dir.is_dir()
     assert agent.home_paths.soul_md.exists()
     assert agent.home_paths.memory_md.exists()
 

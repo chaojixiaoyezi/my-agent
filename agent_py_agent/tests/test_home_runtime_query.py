@@ -378,11 +378,12 @@ def test_memory_doctor_reports_home_runtime_status(tmp_path: Path, capsys):
     assert code == 0
     assert payload["home"]["root"] == str(home.resolve())
     assert payload["home"]["entry_files"]["memory_md"]["exists"] is True
-    assert payload["home"]["directories"]["memory_daily"]["exists"] is True
+    assert "memory_daily" not in payload["home"]["directories"]
     assert payload["home"]["owner"]["tasks"]["exists"] is True
     assert payload["home"]["directories"]["workspace_tasks"]["exists"] is False
     assert payload["routing"]["index"]["path"] == str(home.resolve() / "owners" / "local" / "main" / "memory" / "routing" / "INDEX.md")
-    assert payload["routing"]["route_count"] == 0
+    # owner 路由索引现在播种默认路由表（原来播在被忽略的根索引，等于死配置）
+    assert payload["routing"]["route_count"] > 0
     assert payload["ok"] is True
 
 

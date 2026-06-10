@@ -388,7 +388,7 @@ class TestBuildPromptFilesParam:
             user_md=home / "USER.md",
             memory_md=home / "memory.md",
             memory_hot_md=hot,
-            memory_lessons_dir=lessons,
+            owner_memory_lessons_dir=lessons,
         )
         config = AgentConfig(system_prompt="System", prompt_files=[str(global_prompt)], home_context_enabled=True)
         builder = PromptBuilder(config, tmp_path, home_paths=home_paths)
@@ -443,7 +443,7 @@ class TestBuildPromptFilesParam:
             user_md=home / "USER.md",
             memory_md=home / "memory.md",
             memory_hot_md=hot,
-            memory_lessons_dir=home / "lessons",
+            owner_memory_lessons_dir=home / "lessons",
         )
         config = AgentConfig(system_prompt="System", prompt_files=[str(global_prompt)], home_context_enabled=True)
         builder = PromptBuilder(config, tmp_path, home_paths=home_paths)

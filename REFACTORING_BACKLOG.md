@@ -15,6 +15,19 @@ LLM: keep this file current. Do not copy old split plans back in.
 
 ## Completed Cleanup
 
+- 2026-06-10: 阶段5 旧兼容审计与收尾（逐项核对写入方后处置，未盲删）。
+  - 已删：home_layout 8 个旧根 memory 字段（memory_dir/daily/raw/hooks/lessons/routing/
+    routing_index_md/indexes），bootstrap 不再创建旧根目录；默认路由表与默认 lessons 播种
+    迁到 owner 权威位置（原来播在被查询忽略的根索引=死配置，现在真实生效）；
+    staged_checkpoint 的 `staging.source_ref` 死臂（全仓无写入方）。
+  - 核对后判定非旧兼容、保留：task_progress 的 `id or title`（工具 schema 明确声明两字段）；
+    content_recovery 的 source_tool/tool_name/tool（write-abort 与 tool-call 两种活协议形态）；
+    collaboration updated_at→created_at（时间戳数据卫生）。
+  - 显式推迟（有删除条件）：agent_work_dir/agent_run_workspace 双键（存量 compact 续接包
+    在用旧键，删除条件=续接包数据迁移完成）；registry member rows 的 path→relative_path
+    （删除条件=确认无旧 group 记录需要重验）；delivery doctor 的 output_mode 同义键与
+    offline 合同 id/path 别名（删除条件=prompt 合同文档明确唯一键后）。
+
 - 2026-06-10: 阶段3 gateway/chat 性能可观测 + 阶段4 coverage 补全。
   - gateway：inbox mtime 扫描门（空闲不再每 0.2s 全量 glob）、worker-0 恢复扫描节流
     （timeout/3）、heartbeat 新增 queue_ages 观测；jsonl 路径锁引用计数回收。
