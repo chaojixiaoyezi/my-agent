@@ -1,5 +1,31 @@
 # STATUS
 
+## 2026-06-10 大重构阶段1-6完成（本地，待推送）
+
+六个重构阶段全部完成，5 个本地提交待攒批推送（推送门槛：累计 diff ≥8000 行 + 远端 CI 绿）：
+
+1. **阶段1 文件合并**：gates 五个子包打平、subagents/services 三个单模块包打平、
+   delivery_closeout 三组合并、orchestration create_* 8→4、compact_context_bundle 包→模块；
+   全包模块级真循环清零（6 处）。主包源文件 969→943。
+2. **阶段2 字符串判断清零**：recovery 五组前缀规则收敛为单一 CodePolicy 注册表
+   （187码×13状态等价校验 0 差异）、state_machine 谓词 fail-closed、新钉子测试
+   `test_recovery_code_policy.py`。
+3. **阶段6 子代理参数统一**：runner 复用父 agent 对象合同化、模板单一权威、
+   capability 配置新增 `subagent_compact_trigger_percent`（0=继承）。
+4. **阶段3 gateway/chat 性能**：inbox mtime 扫描门、recover 节流、chat 尾部倒读（41x）、
+   jsonl 锁引用计数、heartbeat queue_ages 观测。
+5. **阶段4 coverage**：`directory_tree` 覆盖类型（ratio/截断显式）、shell 中段截断保尾。
+6. **阶段5 旧兼容审计**：home_layout 旧根 memory 布局退役（默认路由表/lessons 播种迁到
+   owner 权威位置）；多个调研标记的"fallback"核对后确认为活协议，保留并记录。
+
+验证基线：本机全量快速套件有 141 个机器环境失败（时区/环境，远端 CI 绿），六个阶段
+全程保持与主线基线逐位一致（零新增失败）；code-size strict 全程 0 hard / 0 high-risk。
+
+真实任务轮：R0（all-agent 分析冒烟，真实 MiniMax-M2.7）运行中，产物目录
+`live-agent-runs/r0-refactor-smoke-allagent-20260610-1830/`。
+详细清单见 `REFACTORING_BACKLOG.md`。
+
+
 ## 2026-05-03 最新恢复入口
 
 如果下次换电脑、换会话、换 IDE，先看这一段和模块文档。
