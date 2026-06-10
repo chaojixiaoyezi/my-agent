@@ -15,6 +15,23 @@ LLM: keep this file current. Do not copy old split plans back in.
 
 ## Completed Cleanup
 
+- 2026-06-10: 阶段2 字符串判断清零 + 阶段6 子代理参数统一。
+  - `contracts/recovery.py`：5 组散落的错误码前缀规则（repairable/recovering/hard_stop/
+    category/recommended_action）收敛为单一 `CodePolicy` 注册表（精确码 > 最长家族前缀 >
+    fail-closed），187 码 × 13 状态等价校验 0 差异；finding 显式声明的 recommended_action/
+    category（当前协议枚举值）优先于推导；信封全 blocked 时不再被门状态兜成 repair_required。
+  - `contracts/state_machine.py`：can_dispatch/can_repair/can_closeout 对协议错误状态
+    fail-closed（未知状态不再是"可修复的 BLOCKED"）。
+  - 新钉子测试 `test_recovery_code_policy.py`：未知码 fail-closed、精确码优先、声明覆盖、
+    classify_error 仅限自检模块、协作 raw_* 审计字段只写不读。
+  - 阶段6：子代理 runner 复用主代理同一 agent 对象（合同测试钉死，禁自建 backend/config）；
+    thought/plan 默认模板归一到 `runner/prompts.py` 单一权威；新增 capability 配置
+    `subagent_compact_trigger_percent`（0=继承主代理，>0 仅作用于 task_local 回合）。
+  - 评估后保留：`explicit_root_allowed_tools`（spawn 时增补）与 `allowed_tool_set`
+    （runtime 集合化）属不同层职责，非重复实现；`recovery_mode_from_protocol_value`
+    未知值→MANUAL_REVIEW 是正确的 fail-closed；collaboration `_unavailable_reason`
+    比较的是协议常量。
+
 - 2026-06-10: 第二批 facade/碎片合并（阶段1，详见 docs/modules/*/04-structure.md）。
   - `contracts/gates/` 打平：command/artifact/network/document/tool 五个子包并入单层模块
     （`command_policy.py`、`artifact_gate.py`、`artifact_provenance.py`、`network_safety.py`、

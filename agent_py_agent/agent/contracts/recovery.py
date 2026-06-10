@@ -148,92 +148,162 @@ class RecoveryEnvelope:
 # ===========================================================================
 # recovery classification
 # ===========================================================================
+#
+# 错误码是结构化协议常量（如 ARTIFACT_EMPTY），第一段命名空间即"家族"。
+# 全部分类事实集中在这一张策略表里：精确码优先，其次最长家族前缀，
+# 未知码 fail-closed（不可修复、不可恢复 -> blocked / REPORT_BLOCKER）。
+# finding payload 里显式声明的 recommended_action / category 优先于本表推导。
 
-_APPROVAL_WAIT_CODES = {"APPROVAL_REQUIRED", "APPROVAL_NOT_FOUND", "APPROVAL_PENDING"}
+@dataclass(frozen=True)
+class CodePolicy:
+    """单个错误码（或家族）的恢复处置事实。"""
+
+    category: str
+    disposition: str = ""  # "repairable" / "recovering" / "hard_stop" / ""
+    repair_action: str = ""
+
+
+_EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
+    # 审批等待（需要用户输入）
+    "APPROVAL_REQUIRED": CodePolicy("approval", "wait_user"),
+    "APPROVAL_NOT_FOUND": CodePolicy("approval", "wait_user"),
+    "APPROVAL_PENDING": CodePolicy("approval", "wait_user"),
+    "TOOL_NOT_ALLOWED": CodePolicy("tool", "wait_user", "repair_tool_arguments"),
+    # 硬停（不可自动继续）
+    "APPROVAL_ALREADY_USED": CodePolicy("approval", "hard_stop"),
+    "APPROVAL_BINDING_MISMATCH": CodePolicy("approval", "hard_stop"),
+    "APPROVAL_EXPIRED": CodePolicy("approval", "hard_stop"),
+    "APPROVAL_REJECTED": CodePolicy("approval", "hard_stop"),
+    "APPROVER_NOT_AUTHORIZED": CodePolicy("approval", "hard_stop"),
+    "STATE_CHECKSUM_MISMATCH": CodePolicy("state", "hard_stop", "rerun_acceptance_after_repair"),
+    "USER_CANCELLED": CodePolicy("approval", "hard_stop"),
+    # 恢复类（先恢复账本/checkpoint）
+    "REQUEST_ID_MISSING": CodePolicy("recovery", "recovering"),
+    "RUN_ID_MISSING": CodePolicy("recovery", "recovering"),
+    "STATE_CORRUPT": CodePolicy("state", "recovering"),
+    "TASK_ID_MISSING": CodePolicy("recovery", "recovering"),
+    "WORKSPACE_ROOT_MISSING": CodePolicy("recovery", "recovering"),
+    "EFFECTIVE_CONTRACT_HASH_MISSING": CodePolicy("contract", "recovering"),
+    "EFFECTIVE_CONTRACT_REF_MISSING": CodePolicy("contract", "recovering"),
+    "TOOL_MANIFEST_REF_MISSING": CodePolicy("tool", "recovering"),
+    "REVALIDATE_ARTIFACT_BEFORE_RERUN": CodePolicy("artifact", "recovering"),
+    # 可修复的精确码
+    "CLOSEOUT_ARTIFACTS_MISSING": CodePolicy("contract", "repairable", "repair_against_contract_findings"),
+    "CLOSEOUT_REPORT_REF_MISSING": CodePolicy("contract", "repairable", "repair_against_contract_findings"),
+    "CONTRACT_SCHEMA_INVALID": CodePolicy("contract", "repairable", "repair_effective_contract"),
+    "EFFECTIVE_CONTRACT_ARTIFACTS_INVALID": CodePolicy("contract", "repairable", "repair_effective_contract"),
+    "EFFECTIVE_CONTRACT_MISSING": CodePolicy("contract", "repairable", "repair_effective_contract"),
+    "UNKNOWN_VERIFIER": CodePolicy("contract", "repairable", "repair_effective_contract"),
+    "TOOL_NOT_REGISTERED": CodePolicy("tool", "repairable", "choose_registered_tool"),
+    "TOOL_MANIFEST_EFFECT_MISSING": CodePolicy("tool", "repairable", "choose_registered_tool"),
+    # 修复动作特例
+    "TARGET_COVERAGE_MISSING": CodePolicy("evidence", "repairable", "continue"),
+    "TASK_PROGRESS_OPEN_ITEMS": CodePolicy("evidence", "repairable", "continue"),
+}
+
+# 家族前缀策略：按最长前缀优先匹配（前缀即错误码协议的结构化命名空间）。
+_FAMILY_POLICIES: tuple[tuple[str, CodePolicy], ...] = tuple(
+    sorted(
+        [
+            # artifact 家族
+            ("ARTIFACT_", CodePolicy("artifact", "repairable", "repair_artifact_against_findings")),
+            ("BUILDER_", CodePolicy("artifact", "repairable", "repair_artifact_against_findings")),
+            ("DOCUMENT_", CodePolicy("artifact", "repairable", "repair_artifact_against_findings")),
+            ("DOCX_", CodePolicy("artifact", "repairable", "repair_artifact_against_findings")),
+            ("HTML_", CodePolicy("artifact", "repairable", "repair_artifact_against_findings")),
+            ("XLSX_", CodePolicy("artifact", "repairable", "repair_artifact_against_findings")),
+            ("CSV_", CodePolicy("artifact", "repairable", "repair_artifact_against_findings")),
+            ("JSON_", CodePolicy("artifact", "repairable", "repair_artifact_against_findings")),
+            ("PDF_", CodePolicy("artifact", "repairable", "repair_artifact_against_findings")),
+            ("MARKDOWN_", CodePolicy("artifact", "repairable", "repair_artifact_against_findings")),
+            ("STATIC_SITE_", CodePolicy("artifact", "repairable", "repair_artifact_against_findings")),
+            ("SPREADSHEET_", CodePolicy("artifact", "repairable", "repair_structured_checkpoint_json")),
+            ("STAGED_", CodePolicy("contract", "repairable", "repair_structured_checkpoint_json")),
+            # evidence 家族
+            ("EVIDENCE_", CodePolicy("evidence", "repairable", "repair_evidence_refs")),
+            ("FACT_", CodePolicy("evidence", "repairable", "repair_evidence_refs")),
+            ("SOURCE_", CodePolicy("evidence", "repairable", "repair_evidence_refs")),
+            ("TASK_PROGRESS_", CodePolicy("evidence", "repairable", "repair_evidence_refs")),
+            ("TARGET_COVERAGE_", CodePolicy("evidence", "repairable")),
+            ("METRIC_", CodePolicy("evidence", "repairable", "repair_structured_checkpoint_json")),
+            ("LANGUAGE_", CodePolicy("evidence", "repairable", "repair_structured_checkpoint_json")),
+            ("COLLECTION_", CodePolicy("evidence", "repairable", "repair_structured_checkpoint_json")),
+            ("COLLABORATION_", CodePolicy("evidence", "repairable", "continue_collaboration")),
+            # tool 家族
+            ("TOOL_PROTOCOL_", CodePolicy("tool", "repairable", "repair_tool_call")),
+            ("TOOL_MANIFEST_", CodePolicy("tool", "repairable", "choose_registered_tool")),
+            ("TOOL_INVALID_", CodePolicy("tool", "repairable", "repair_tool_arguments")),
+            ("TOOL_", CodePolicy("tool", "", "repair_tool_arguments")),
+            # path / approval
+            ("PATH_", CodePolicy("path", "repairable", "fix_path_within_allowed_roots")),
+            ("APPROVAL_", CodePolicy("approval", "")),
+            ("USER_", CodePolicy("approval", "")),
+            # recovery 家族
+            ("AUDIT_", CodePolicy("recovery", "recovering")),
+            ("RECOVERY_", CodePolicy("recovery", "recovering")),
+            ("RUNLOG_", CodePolicy("recovery", "recovering")),
+            ("SCOPE_", CodePolicy("contract", "recovering")),
+            # state / closeout / acceptance 家族
+            ("STATE_TRANSITION_", CodePolicy("state", "repairable", "rerun_acceptance_after_repair")),
+            ("STATE_", CodePolicy("state", "", "rerun_acceptance_after_repair")),
+            ("FINAL_CLOSEOUT_", CodePolicy("state", "repairable", "rerun_acceptance_after_repair")),
+            ("ACCEPTANCE_", CodePolicy("state", "repairable", "rerun_acceptance_after_repair")),
+            # delivery / contract 家族
+            ("DELIVERY_", CodePolicy("contract", "repairable", "repair_against_contract_findings")),
+            ("CONTRACT_", CodePolicy("contract", "", "repair_effective_contract")),
+            ("EFFECTIVE_CONTRACT_", CodePolicy("contract", "", "repair_effective_contract")),
+        ],
+        key=lambda item: len(item[0]),
+        reverse=True,
+    )
+)
+
+_FAIL_CLOSED_POLICY = CodePolicy("contract", "")
+
+
+def code_policy(code: str) -> CodePolicy:
+    """查询错误码的恢复处置事实；未知码 fail-closed。"""
+    normalized = _normalized_code(code)
+    exact = _EXACT_CODE_POLICIES.get(normalized)
+    if exact is not None:
+        return exact
+    for prefix, policy in _FAMILY_POLICIES:
+        if normalized.startswith(prefix):
+            return policy
+    return _FAIL_CLOSED_POLICY
 
 
 def action_status(status: str, code: str) -> str:
     protocol_status = str(status or "").strip()
-    normalized_code = _normalized_code(code)
-    if hard_stop_code(normalized_code):
+    policy = code_policy(code)
+    if policy.disposition == "hard_stop":
         return "blocked"
-    if (
-        normalized_code in _APPROVAL_WAIT_CODES
-        or normalized_code == "TOOL_NOT_ALLOWED"
-        or protocol_status in {"NEED_APPROVAL", "WAITING_HUMAN"}
-    ):
+    if policy.disposition == "wait_user" or protocol_status in {"NEED_APPROVAL", "WAITING_HUMAN"}:
         return "needs_user_input"
-    if protocol_status == "RECOVERING" or recovering_code(normalized_code):
+    if protocol_status == "RECOVERING" or policy.disposition == "recovering":
         return "recovering"
-    if protocol_status in {"NEED_REPAIR", "DENY", "BLOCKED"} and repairable_code(normalized_code):
+    if protocol_status in {"NEED_REPAIR", "DENY", "BLOCKED"} and policy.disposition == "repairable":
         return "repair_required"
     return "blocked"
 
 
 def repairable_code(code: str) -> bool:
-    code = _normalized_code(code)
-    return code.startswith(
-        (
-            "ACCEPTANCE_", "ARTIFACT_", "BUILDER_", "COLLABORATION_",
-            "COLLECTION_", "CSV_", "DELIVERY_", "DOCUMENT_", "DOCX_",
-            "EVIDENCE_", "FACT_", "FINAL_CLOSEOUT_", "HTML_", "JSON_",
-            "LANGUAGE_", "MARKDOWN_", "METRIC_", "PATH_", "PDF_",
-            "SPREADSHEET_", "SOURCE_", "STAGED_", "STATE_TRANSITION_",
-            "TASK_PROGRESS_", "TARGET_COVERAGE_", "STATIC_SITE_",
-            "TOOL_PROTOCOL_", "TOOL_INVALID_", "TOOL_NOT_REGISTERED",
-            "TOOL_MANIFEST_", "XLSX_",
-        )
-    ) or code in {
-        "CLOSEOUT_ARTIFACTS_MISSING", "CLOSEOUT_REPORT_REF_MISSING",
-        "CONTRACT_SCHEMA_INVALID", "EFFECTIVE_CONTRACT_ARTIFACTS_INVALID",
-        "EFFECTIVE_CONTRACT_MISSING", "UNKNOWN_VERIFIER",
-    }
+    return code_policy(code).disposition == "repairable"
 
 
 def recovering_code(code: str) -> bool:
-    code = _normalized_code(code)
-    return code.startswith(("AUDIT_", "RECOVERY_", "RUNLOG_", "SCOPE_")) or code in {
-        "REQUEST_ID_MISSING", "RUN_ID_MISSING", "STATE_CORRUPT",
-        "TASK_ID_MISSING", "WORKSPACE_ROOT_MISSING",
-        "EFFECTIVE_CONTRACT_HASH_MISSING", "EFFECTIVE_CONTRACT_REF_MISSING",
-        "TOOL_MANIFEST_REF_MISSING", "REVALIDATE_ARTIFACT_BEFORE_RERUN",
-    }
+    return code_policy(code).disposition == "recovering"
 
 
 def hard_stop_code(code: str) -> bool:
-    code = _normalized_code(code)
-    return code in {
-        "APPROVAL_ALREADY_USED", "APPROVAL_BINDING_MISMATCH",
-        "APPROVAL_EXPIRED", "APPROVAL_REJECTED", "APPROVER_NOT_AUTHORIZED",
-        "STATE_CHECKSUM_MISMATCH", "USER_CANCELLED",
-    }
+    return code_policy(code).disposition == "hard_stop"
 
 
 def recovery_category(code: str) -> str:
-    code = _normalized_code(code)
-    if code.startswith(("ARTIFACT_", "BUILDER_", "DOCUMENT_", "DOCX_", "HTML_",
-                         "XLSX_", "CSV_", "JSON_", "PDF_", "MARKDOWN_",
-                         "SPREADSHEET_", "STATIC_SITE_")):
-        return "artifact"
-    if code.startswith(("EVIDENCE_", "FACT_", "METRIC_", "LANGUAGE_",
-                         "COLLABORATION_", "COLLECTION_", "SOURCE_",
-                         "TASK_PROGRESS_", "TARGET_COVERAGE_")):
-        return "evidence"
-    if code.startswith(("TOOL_", "TOOL_PROTOCOL_")):
-        return "tool"
-    if code.startswith("PATH_"):
-        return "path"
-    if code.startswith(("APPROVAL_", "USER_")):
-        return "approval"
-    if code.startswith(("AUDIT_", "RUNLOG_", "RECOVERY_")):
-        return "recovery"
-    if code.startswith(("STATE_", "FINAL_CLOSEOUT_", "ACCEPTANCE_")):
-        return "state"
-    return "contract"
+    return code_policy(code).category
 
 
 def recommended_action(code: str, status: str) -> str:
-    code = _normalized_code(code)
     status = str(status or "").strip()
     if status == "needs_user_input":
         return RecoveryAction.REQUEST_USER_INPUT.value
@@ -241,36 +311,9 @@ def recommended_action(code: str, status: str) -> str:
         return RecoveryAction.RECOVER_FROM_CHECKPOINT.value
     if status == "blocked":
         return RecoveryAction.REPORT_BLOCKER.value
-    if code.startswith("COLLABORATION_"):
-        return RecoveryAction.CONTINUE_COLLABORATION.value
-    if code == "TARGET_COVERAGE_MISSING":
-        return RecoveryAction.CONTINUE.value
-    if code == "TASK_PROGRESS_OPEN_ITEMS":
-        return RecoveryAction.CONTINUE.value
-    if code.startswith("TASK_PROGRESS_"):
-        return RecoveryAction.REPAIR_EVIDENCE_REFS.value
-    if code.startswith(("METRIC_", "LANGUAGE_", "COLLECTION_")):
-        return RecoveryAction.REPAIR_STRUCTURED_CHECKPOINT_JSON.value
-    if code.startswith(("EVIDENCE_", "FACT_", "SOURCE_")):
-        return RecoveryAction.REPAIR_EVIDENCE_REFS.value
-    if code.startswith(("ARTIFACT_", "BUILDER_", "DOCUMENT_", "DOCX_", "HTML_",
-                         "XLSX_", "CSV_", "JSON_", "PDF_", "MARKDOWN_", "STATIC_SITE_")):
-        return RecoveryAction.REPAIR_ARTIFACT_AGAINST_FINDINGS.value
-    if code.startswith(("STAGED_", "SPREADSHEET_")):
-        return RecoveryAction.REPAIR_STRUCTURED_CHECKPOINT_JSON.value
-    if code.startswith("PATH_"):
-        return RecoveryAction.FIX_PATH_WITHIN_ALLOWED_ROOTS.value
-    if code.startswith("TOOL_PROTOCOL_"):
-        return RecoveryAction.REPAIR_TOOL_CALL.value
-    if (code in {"TOOL_NOT_REGISTERED", "TOOL_MANIFEST_EFFECT_MISSING"}
-            or code.startswith("TOOL_MANIFEST_")):
-        return RecoveryAction.CHOOSE_REGISTERED_TOOL.value
-    if code.startswith("TOOL_"):
-        return RecoveryAction.REPAIR_TOOL_ARGUMENTS.value
-    if code.startswith(("CONTRACT_", "EFFECTIVE_CONTRACT_", "UNKNOWN_VERIFIER")):
-        return RecoveryAction.REPAIR_EFFECTIVE_CONTRACT.value
-    if code.startswith(("STATE_", "FINAL_CLOSEOUT_", "ACCEPTANCE_")):
-        return RecoveryAction.RERUN_ACCEPTANCE_AFTER_REPAIR.value
+    policy = code_policy(code)
+    if policy.repair_action:
+        return policy.repair_action
     return RecoveryAction.REPAIR_AGAINST_CONTRACT_FINDINGS.value
 
 
@@ -359,21 +402,29 @@ def _append_unique_action(
 
 def _finding_payload(item: dict[str, Any]) -> dict[str, Any]:
     evidence = item.get("evidence")
-    return {
+    payload = {
         "code": str(item.get("code") or "").strip() or "CONTRACT_FINDING",
         "severity": str(item.get("severity") or "P1").strip(),
         "message": str(item.get("message") or "").strip(),
         "evidence": dict(evidence) if isinstance(evidence, dict) else {},
     }
+    # 开放世界：finding 可以显式声明结构化恢复字段，声明优先于注册表推导。
+    declared_action = str(item.get("recommended_action") or "").strip()
+    if declared_action:
+        payload["recommended_action"] = declared_action
+    declared_category = str(item.get("category") or "").strip()
+    if declared_category:
+        payload["category"] = declared_category
+    return payload
 
 
 def _recovery_action(gate: str, status: str, finding: dict[str, Any]) -> dict[str, Any]:
     original_code = str(finding.get("code") or "CONTRACT_FINDING").upper()
     evidence = dict(finding.get("evidence") or {})
     code = _primary_code(original_code, evidence)
-    category = recovery_category(code)
+    category = str(finding.get("category") or "").strip() or recovery_category(code)
     classified = action_status(status, code)
-    action = recommended_action(code, classified)
+    action = _declared_action(finding) or recommended_action(code, classified)
     return {
         "code": code,
         "source_code": original_code,
@@ -392,6 +443,14 @@ def _recovery_action(gate: str, status: str, finding: dict[str, Any]) -> dict[st
     }
 
 
+def _declared_action(finding: dict[str, Any]) -> str:
+    """finding 显式声明的恢复动作；非当前协议枚举值一律忽略（不做别名兼容）。"""
+    declared = str(finding.get("recommended_action") or "").strip()
+    if declared and declared in known_recovery_action_values():
+        return declared
+    return ""
+
+
 def _primary_code(code: str, evidence: dict[str, Any]) -> str:
     child_code = str(evidence.get("child_code") or "").strip().upper()
     if child_code and code.startswith(("FINAL_CLOSEOUT_", "ACCEPTANCE_")):
@@ -407,6 +466,9 @@ def _envelope_status(status: str, actions: tuple[dict[str, Any], ...]) -> str:
         return "repair_required"
     if "RECOVERING" in statuses:
         return "recovering"
+    if statuses and statuses <= {"BLOCKED"}:
+        # 所有 finding 动作都已判定 blocked 时，信封不允许再被门状态兜成可修复。
+        return "blocked"
     normalized = str(status or "").strip().upper()
     if normalized == "NEED_APPROVAL":
         return "needs_user_input"

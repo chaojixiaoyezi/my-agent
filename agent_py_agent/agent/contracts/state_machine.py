@@ -116,6 +116,8 @@ def normalize_channel(value: object) -> str:
 
 
 def can_dispatch(facts: RunStateFacts, *, force: bool = False) -> bool:
+    if _status_protocol_error(facts.status):
+        return False
     status = normalize_status(facts.status)
     if status in DISPATCHABLE_STATES:
         return True
@@ -125,6 +127,8 @@ def can_dispatch(facts: RunStateFacts, *, force: bool = False) -> bool:
 
 
 def can_closeout(facts: RunStateFacts) -> bool:
+    if _status_protocol_error(facts.status):
+        return False
     return (
         normalize_status(facts.status) == "DONE"
         and normalize_verification(facts.verification_status) in VERIFIED_STATES
@@ -133,6 +137,10 @@ def can_closeout(facts: RunStateFacts) -> bool:
 
 
 def can_repair(facts: RunStateFacts) -> bool:
+    # 未知状态值不是"可修复的 BLOCKED"；协议错误一律 fail-closed，交给
+    # recovery_decision 的 MANUAL_REVIEW 路径处理。
+    if _status_protocol_error(facts.status):
+        return False
     status = normalize_status(facts.status)
     if normalize_channel(facts.channel_status) == "BROKEN":
         return _attempts_available(facts)

@@ -129,6 +129,11 @@ COLLABORATION_TOOL_HINTS = (
 )
 
 
+# 子代理默认 thought / plan 模板的权威位置；create_policy 派工链路只引用不复制。
+SUBAGENT_DEFAULT_THOUGHT = "根据父代理派工执行，并保留可验收证据。"
+SUBAGENT_DEFAULT_PLAN: tuple[str, ...] = ("理解目标", "执行任务", "产出证据", "交回真实结果和证据")
+
+
 def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
     return (
         "你是 my-agent 的子代理 runner，不是顶层 root 主代理。"

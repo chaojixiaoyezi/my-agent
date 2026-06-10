@@ -318,7 +318,10 @@ def _round_context_over_compact_budget(request: ToolRoundExecutionRequest, befor
         return False
     if not _persistent_compact_enabled(request.agent, request.params):
         return False
-    policy = runtime_compact_policy(request.agent, save=True)
+    policy = runtime_compact_policy(
+        request.agent, save=True,
+        context_scope=str(getattr(request.params, "context_scope", "default") or "default"),
+    )
     threshold = int(policy.trigger_tokens or 0)
     if threshold <= 0:
         return False

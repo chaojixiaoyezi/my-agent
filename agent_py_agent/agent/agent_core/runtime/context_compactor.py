@@ -16,15 +16,56 @@ class RuntimeCompactPolicy:
     allow_persistent_apply: bool
 
 
-def runtime_compact_policy(agent: object, *, save: bool = True) -> RuntimeCompactPolicy:
+def runtime_compact_policy(
+    agent: object, *, save: bool = True, context_scope: str = "default"
+) -> RuntimeCompactPolicy:
     window = resolve_model_context_window_tokens(agent)
     percent = compact_trigger_percent(getattr(getattr(agent, "config", None), "memory_compact_auto_trigger_percent", None))
+    if context_scope == "task_local":
+        # 子代理回合默认继承主代理触发点；capability_config 显式 >0 时才覆盖。
+        override = _subagent_trigger_percent_override(agent)
+        if override > 0:
+            percent = compact_trigger_percent(override)
     return RuntimeCompactPolicy(
         context_window_tokens=window,
         trigger_percent=percent,
         trigger_tokens=compact_trigger_tokens(window, percent),
         allow_persistent_apply=bool(save),
     )
+
+
+def _subagent_trigger_percent_override(agent: object) -> int:
+    snapshot = getattr(agent, "_capability_config_runtime_snapshot", None)
+    config = getattr(snapshot, "config", None)
+    if config is None:
+        config = _load_capability_config_cached(agent)
+    try:
+        return int(getattr(config, "subagent_compact_trigger_percent", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _load_capability_config_cached(agent: object):
+    from pathlib import Path
+
+    from ....agent.capability.runtime_config_reload import (
+        default_capability_config_path,
+        load_capability_config_snapshot,
+    )
+
+    path = Path(
+        getattr(agent, "capability_config_path", "")
+        or default_capability_config_path(getattr(agent, "root", "."))
+    )
+    try:
+        snapshot = load_capability_config_snapshot(path)
+    except (FileNotFoundError, OSError, TypeError, ValueError):
+        return None
+    try:
+        agent._capability_config_runtime_snapshot = snapshot
+    except AttributeError:
+        pass
+    return snapshot.config
 
 
 def compact_trigger_percent(value: object) -> int:

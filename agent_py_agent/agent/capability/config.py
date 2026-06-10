@@ -31,6 +31,9 @@ class CapabilityConfig:
     subagent_due_check_interval: int = 0
     subagent_min_evidence_for_done: int = 1
     subagent_no_progress_attempt_limit: int = 4
+    # 子代理 task-local 回合的 compact 触发百分比；0 表示继承主代理
+    # memory_compact_auto_trigger_percent，不另起一套默认值。
+    subagent_compact_trigger_percent: int = 0
     capability_request_max_tried_items: int = 0
     capability_request_max_evidence_items: int = 0
     capability_request_max_per_task: int = 0

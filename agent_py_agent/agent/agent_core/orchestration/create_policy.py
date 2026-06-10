@@ -14,6 +14,7 @@ from ...subagents.role_templates import COORDINATOR_TOOLS, role_template_snapsho
 from ...subagents.services.base import CreateRunParams
 from ...subagents.services.workflow import tool_workflow_mode
 from ..parameters import _bool_param, _positive_int
+from ..runner.prompts import SUBAGENT_DEFAULT_PLAN, SUBAGENT_DEFAULT_THOUGHT
 from ..runner.ref_fields import params_input_refs, params_output_refs
 from ..spawn_role_seed import is_explicit_root_role
 from .create_constraints import (
@@ -91,7 +92,7 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
     role_policy = request.role_policy
     return CreateRunParams(
         goal=request.goal,
-        thought=str(raw_params.get("thought") or "根据父代理派工执行，并保留可验收证据。").strip(),
+        thought=str(raw_params.get("thought") or SUBAGENT_DEFAULT_THOUGHT).strip(),
         plan=_create_plan(raw_params),
         agent_name=_root_agent_name(raw_params, role_policy.role),
         role=role_policy.role,
@@ -779,7 +780,7 @@ def _create_plan(raw_params: dict[str, object]) -> list[str]:
             "汇总下级结果、证据 refs 和阻塞项",
             "交回真实结果和证据",
         ]
-    return ["理解目标", "执行任务", "产出证据", "交回真实结果和证据"]
+    return list(SUBAGENT_DEFAULT_PLAN)
 
 
 def _child_task_hint_plan(value: object) -> list[str]:
