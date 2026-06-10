@@ -37,7 +37,7 @@ _CREATE_PARAMETERS = {
     "defer_start": "true 表示只建不跑；默认创建后启动",
 }
 _CREATE_PARAMETER_DETAILS = {
-    "goal": "写清子代理要交付什么，保留用户原始硬约束。",
+    "goal": "写清子代理要交付什么，保留用户原始硬约束；用户声明的产物格式要求（输出路径、最少字数、文件路径:行号引用、必含章节）要原样写进相关子代理 goal，汇总时保留这些格式要素。",
     "count": "不同工作切片不要用 count 复制同一个 goal；优先传 items。",
     "items": "推荐批量入口；资料线索放 item.input_refs；默认创建后立刻启动，只有 defer_start=true 才只建任务记录。",
     "role": "优先用模板角色。可用角色模板索引：\n{role_template_index}",
