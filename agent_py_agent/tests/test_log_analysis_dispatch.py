@@ -3,10 +3,10 @@ from __future__ import annotations
 from agent_py_agent.agent.log_analysis.agents.contracts import (
     AnalystReport,
     ContractValidationError,
-    review_analyst_report,
     validate_analyst_input,
     validate_analyst_report,
 )
+from agent_py_agent.agent.log_analysis.agents.contracts_review import review_analyst_report
 from agent_py_agent.agent.log_analysis.agents.prompts import (
     SecurityPromptConfig,
     SecurityPromptScope,

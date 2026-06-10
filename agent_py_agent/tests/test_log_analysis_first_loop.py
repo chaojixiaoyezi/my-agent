@@ -18,7 +18,7 @@ from agent_py_agent.agent.log_analysis.bounded_query import (
     BoundedQueryConfig,
     BoundedQueryError,
 )
-from agent_py_agent.agent.log_analysis.models import QueryResult
+from agent_py_agent.agent.log_analysis.models_work_orders import QueryResult
 from agent_py_agent.agent.subagents.models import SubAgentTask
 
 

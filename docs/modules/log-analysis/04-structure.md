@@ -102,3 +102,11 @@ agent_py_agent/agent/log_analysis/
 ## 2026-06-02 contract comment cleanup
 - 中文说明：`agents/contracts.py` 的 analyst/reviewer 合同继续作为 LOG 子任务输入输出的结构边界；本轮只清理生成式模板注释，并把内部 helper 名字改成 `_compact_string_list`，表示它会裁剪、规范化列表输入。
 - Public LOG analyst/reviewer payload shape stays stable: `case_id`、`summary`、`evidence_refs`、facts/inferences/gaps、review decision fields and validation errors keep the same serialized meaning.
+
+## 2026-06-10 循环导入清理
+
+- `models.py` 尾部对 `models_work_orders` 的 re-export 删除：`LogWorkOrder` / `QueryResult` / `SecurityCase`
+  的权威位置是 `models_work_orders.py`，`log_analysis/__init__` 与调用方直接从该模块导入。
+- `agents/contracts.py` 尾部对 `contracts_review.review_analyst_report` 的 re-export 删除；
+  `dispatch/engine.py` 与 `agents/__init__` 直连 `contracts_review`。
+- `services/__init__.py` 清空 re-export；`normalization.py` / `coercion.py` 为权威实现模块。

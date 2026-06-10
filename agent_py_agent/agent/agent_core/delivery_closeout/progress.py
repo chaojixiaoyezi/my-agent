@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import CLOSEOUT_DIR, _artifact_path
-from .config import delivery_closeout_config
+from .models import delivery_closeout_config
 from .recovery import _recovery_actions, failed_gate_payloads
 
 PROGRESS_LEDGER = "progress_ledger.jsonl"

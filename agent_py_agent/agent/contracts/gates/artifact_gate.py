@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..models import GateDecision, GateFinding
-from .provenance import evaluate_artifact_provenance_gate
+from .artifact_provenance import evaluate_artifact_provenance_gate
+from .models import GateDecision, GateFinding
 
 
 def evaluate_delivery_closeout_gate(report: dict[str, Any]) -> GateDecision:

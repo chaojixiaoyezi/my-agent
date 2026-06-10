@@ -5,8 +5,8 @@ import hashlib
 import json
 from typing import Any
 
-from ...contracts.gates.tool.effects import args_hash_for_call
-from ...contracts.gates.tool.guardrail import (
+from ...contracts.gates.tool_effects import args_hash_for_call
+from ...contracts.gates.tool_guardrail import (
     ToolGuardrailConfig,
     ToolGuardrailFacts,
     evaluate_tool_guardrail_gate,

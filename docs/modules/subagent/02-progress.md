@@ -1,5 +1,12 @@
 # Subagent Progress
 
+## 2026-06-10 服务层 facade 清理与链路拉直
+
+- 删除 `services/__init__.py` 的 11 个 service re-export；manager 与调用方全部直连实现模块，导入链不再经过包枢纽。
+- `services/capabilities|runner_context|runner_result/` 三个单模块包打平为同级 `*_service.py` 文件，相对导入深度同步减一。
+- `parsing/__init__.py` 尾部对 `envelope` 的反向 re-export 删除，`services/hierarchy/__init__.py` 清空转发；两处模块级循环导入消除（AST 级检测确认全包无真循环）。
+- 行为不变：仅导入路径调整，focused tests（manager/board/hierarchy/parsing/capability requests）全绿。
+
 ## 2026-06-09 状态投影降噪
 
 - `status --json` 的 `subagents.hot` 只显示当前可行动的近期风险项；超过 72 小时没有更新或进展的

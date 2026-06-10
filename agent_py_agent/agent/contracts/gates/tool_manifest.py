@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from ..models import GateDecision, GateFinding
+from .models import GateDecision, GateFinding
 
 VALID_TOOL_EFFECTS = {"read_only", "mutating", "dangerous"}
 SIDE_EFFECT_TOOL_EFFECTS = {"mutating", "dangerous"}

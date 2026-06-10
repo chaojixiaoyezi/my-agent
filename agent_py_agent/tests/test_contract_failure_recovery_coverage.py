@@ -12,7 +12,7 @@ from agent_py_agent.agent.contracts.effective_contract_snapshot import (
     validate_replay_effective_contract,
 )
 from agent_py_agent.agent.contracts.evidence_contract import EvidenceContractReport
-from agent_py_agent.agent.contracts.gates import GateDecision, GateFinding
+from agent_py_agent.agent.contracts.gates.models import GateDecision, GateFinding
 from agent_py_agent.agent.contracts.main_agent_task_acceptance import (
     TaskRunAcceptanceReport,
 )

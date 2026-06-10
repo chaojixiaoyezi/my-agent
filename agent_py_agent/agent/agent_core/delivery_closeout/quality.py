@@ -5,13 +5,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ...contracts.gates import (
+from ...contracts.gates.delivery_quality import (
     DeliveryQualityTraceScope,
-    GateDecision,
-    GateFinding,
     append_delivery_quality_gate_trace,
     evaluate_delivery_quality_gate,
 )
+from ...contracts.gates.models import GateDecision, GateFinding
 from ...contracts.recovery import RecoveryAction
 from .artifacts import _required_artifacts
 

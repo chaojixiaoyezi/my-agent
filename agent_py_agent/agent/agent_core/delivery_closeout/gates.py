@@ -5,12 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...contracts.gates import (
+from ...contracts.gates.adapters import evaluate_state_transition_gate
+from ...contracts.gates.artifact_gate import evaluate_delivery_closeout_gate
+from ...contracts.gates.run_contract import evaluate_run_contract_gate
+from ...contracts.gates.runtime_reports import (
     evaluate_acceptance_closeout_gate,
-    evaluate_delivery_closeout_gate,
     evaluate_final_closeout_gate,
-    evaluate_run_contract_gate,
-    evaluate_state_transition_gate,
 )
 from .evidence import (
     fact_evidence_decision,

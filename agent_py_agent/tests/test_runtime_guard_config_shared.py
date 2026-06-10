@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def test_runtime_guard_configs_share_one_default_file():
-    from agent_py_agent.agent.agent_core.delivery_closeout.config import (
+    from agent_py_agent.agent.agent_core.delivery_closeout.models import (
         DEFAULT_DELIVERY_CLOSEOUT_CONFIG_PATH,
     )
     from agent_py_agent.agent.agent_core.exploration_fuse_config import (

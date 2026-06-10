@@ -15,8 +15,8 @@ from ...planner_service import combine_runner_instruction
 from ...runner.dispatch import (
     _dispatch_patch_review_run_ids,
 )
-from ...services import notify_completed_tasks
-from ...services import watch_subagents as _watch_subagents
+from ...services.notification_service import notify_completed_tasks
+from ...services.watch_service import watch_subagents as _watch_subagents
 from .capability_followup import (
     run_post_runner_capability_followup,
 )

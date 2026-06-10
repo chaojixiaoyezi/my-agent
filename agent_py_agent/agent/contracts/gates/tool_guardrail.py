@@ -6,8 +6,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from ...recovery import RecoveryAction
-from ..models import GateDecision, GateFinding
+from ..recovery import RecoveryAction
+from .models import GateDecision, GateFinding
 
 
 @dataclass(frozen=True)

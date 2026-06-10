@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from ..models import GateDecision
+from .models import GateDecision
 
 
 @dataclass(frozen=True)

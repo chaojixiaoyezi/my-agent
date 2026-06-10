@@ -21,18 +21,18 @@ from .services.actions import SubAgentActionService
 from .services.base import CreateRunParams, SubAgentBaseService
 from .services.board.service import SubAgentBoardService
 from .services.budget import SubAgentBudgetService
-from .services.capabilities import SubAgentCapabilityService
+from .services.capability_service import SubAgentCapabilityService
 from .services.channel_probe import SubAgentChannelProbeService
 from .services.dispatch import SubAgentDispatchService, SubAgentParentPlannerService
-from .services.hierarchy import SubAgentHierarchyService
+from .services.hierarchy.service import SubAgentHierarchyService
 from .services.indexing import SubAgentIndexingService
 from .services.indexing.records import LocalRecordParams
 from .services.learning import SubAgentLearningService
 from .services.lifecycle import SubAgentLifecycleService
 from .services.memory_gate import SubAgentMemoryGateService
 from .services.persistence import SubAgentPersistenceService
-from .services.runner_context import SubAgentRunnerContextService
-from .services.runner_result import SubAgentRunnerResultService
+from .services.runner_context_service import SubAgentRunnerContextService
+from .services.runner_result_service import SubAgentRunnerResultService
 from .services.takeover.run import SubAgentTakeoverRunService
 from .services.workflow import SubAgentWorkflowService
 from .utils import _new_id

@@ -6,7 +6,7 @@
 
 | Area | Primary Files | Purpose |
 | --- | --- | --- |
-| Tool gateway | `agent_py_agent/agent/contracts/gates/tool/`, `agent_py_agent/agent/tooling/` | 工具调用、路径、命令和副作用检查 |
+| Tool gateway | `agent_py_agent/agent/contracts/gates/tool_*.py`, `agent_py_agent/agent/tooling/` | 工具调用、路径、命令和副作用检查 |
 | Delivery closeout | `agent_py_agent/agent/agent_core/delivery_closeout/` | 收口验收、产物证明、子代理聚合状态 |
 | Task workspace | `agent_py_agent/agent/memory_archive/task_workspace/` | 当前 run 的 output/work 目录、索引和验收记录 |
 | Owner home | `agent_py_agent/agent/user_space/` | `~/.my-agent/owners/...` 布局、owner identity、运行路径 |

@@ -16,7 +16,11 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from ..contracts.gates import NetworkResolver, NetworkSafetyFacts, evaluate_network_safety_gate
+from ..contracts.gates.network_safety import (
+    NetworkResolver,
+    NetworkSafetyFacts,
+    evaluate_network_safety_gate,
+)
 from .models import ToolExecutionResult
 from .web_fetch_tools import WebFetchTool as _WebFetchTool
 from .web_fetch_tools import WebRuntimeDeps

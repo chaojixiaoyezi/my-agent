@@ -21,15 +21,13 @@ from .models import (
     EvidenceRef,
     Finding,
     JsonRoundTripMixin,
-    LogWorkOrder,
     NormalizedEvent,
-    QueryResult,
     RawBatch,
     SecurityAlertV1,
-    SecurityCase,
     SourceSpec,
     utc_now_iso,
 )
+from .models_work_orders import LogWorkOrder, QueryResult, SecurityCase
 from .work_order import work_order_to_subagent_task
 
 __all__ = [

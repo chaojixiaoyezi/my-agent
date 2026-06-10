@@ -8,7 +8,7 @@ from ..recovery import RecoveryAction
 from ..state_machine_transitions import transition_contract
 from ..tool_protocol_v2 import normalize_tool_call, validate_tool_call
 from .models import GateDecision, GateFinding
-from .tool.effects import ToolGatePolicy, tool_effect_decision
+from .tool_effects import ToolGatePolicy, tool_effect_decision
 
 _SUGGESTION_THRESHOLD = 0.74
 

@@ -1,3 +1,1 @@
-from .status import agent_tree_status_payload
-
-__all__ = ["agent_tree_status_payload"]
+"""Agent tree 状态投影包。实现见 status.py / node_rendering.py / scope_filter.py。"""

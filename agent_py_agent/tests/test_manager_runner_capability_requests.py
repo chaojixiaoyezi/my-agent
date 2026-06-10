@@ -22,7 +22,9 @@ from agent_py_agent.agent.subagents.models import (
     SubAgentTask,
 )
 from agent_py_agent.agent.subagents.parsing import parse_subagent_runner_output
-from agent_py_agent.agent.subagents.services.runner_result import SubAgentRunnerResultService
+from agent_py_agent.agent.subagents.services.runner_result_service import (
+    SubAgentRunnerResultService,
+)
 
 
 def _rrr(run_id: str, **kwargs) -> RecordRunnerResultParams:

@@ -1,5 +1,10 @@
 # Memory Progress
 
+## 2026-06-10 compact_context_bundle 包→单模块
+
+- 3 文件（match/refs/init 转发）合并为 1 个 `compact_context_bundle.py`，删除一跳 facade；
+  compact_apply / compact_resume 的导入路径不变，行为不变，focused compact 测试全绿。
+
 ## 2026-06-07 恢复模式结构化边界
 
 - 长 `write_file.content` 流式中断由 tool-stream 边界写结构化

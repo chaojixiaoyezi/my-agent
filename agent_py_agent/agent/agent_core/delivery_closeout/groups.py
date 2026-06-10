@@ -11,7 +11,7 @@ from ...artifacts.registry import (
     register_artifact_group,
 )
 from ...contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
-from ...contracts.gates import artifact_provenance_from_archive
+from ...contracts.gates.artifact_provenance import artifact_provenance_from_archive
 
 
 @dataclass(frozen=True)

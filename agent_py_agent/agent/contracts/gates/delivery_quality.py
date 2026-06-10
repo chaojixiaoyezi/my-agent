@@ -15,9 +15,10 @@ from ..evidence_contract import (
     EvidenceClaim,
     EvidenceContractRequest,
     EvidenceSourceRef,
+    claims,
     evaluate_evidence_contract,
+    source_refs,
 )
-from ..staged_checkpoint import claims, source_refs
 from .models import GateDecision, GateFinding
 
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ...path_access_policy import PathAccessPolicy
 from ..runner.ref_fields import params_output_refs
-from .create_target_roots import (
+from .create_context import (
     agent_workspace_roots,
 )
 

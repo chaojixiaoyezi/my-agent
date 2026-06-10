@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from ...recovery import RecoveryAction
-from ..models import GateDecision
-from .manifest import SIDE_EFFECT_TOOL_EFFECTS
+from ..recovery import RecoveryAction
+from .models import GateDecision
+from .tool_manifest import SIDE_EFFECT_TOOL_EFFECTS
 
 _DONE_STATUSES = {"DONE"}
 _IN_FLIGHT_STATUSES = {"RUNNING", "PENDING", "WAITING_FOR_TOOL", "DISPATCHED"}

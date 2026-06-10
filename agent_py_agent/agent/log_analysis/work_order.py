@@ -8,7 +8,8 @@ from typing import Any
 
 from agent_py_agent.agent.subagents.models import SubAgentTask
 
-from .models import LogWorkOrder, utc_now_iso
+from .models import utc_now_iso
+from .models_work_orders import LogWorkOrder
 
 
 @dataclass

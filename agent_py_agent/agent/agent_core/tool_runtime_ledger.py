@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..common.value_parsing import text_value as _text
-from ..contracts.gates.tool.effects import args_hash_for_call
+from ..contracts.gates.tool_effects import args_hash_for_call
 from ..contracts.protocol_status import TOOL_STATUS_DONE, TOOL_STATUS_FAILED
 from ..contracts.tool_protocol_v2 import normalize_tool_call
 from ..local_storage import RuntimeGateLedgerRecord

@@ -1,9 +1,9 @@
 from agent_py_agent.agent.action_protocol import RunScope, SubagentResultEnvelope
-from agent_py_agent.agent.subagents.parsing import (
+from agent_py_agent.agent.subagents.parsing import parse_subagent_runner_output
+from agent_py_agent.agent.subagents.parsing.envelope import (
+    SubagentResultEnvelopeParseRequest,
     parse_subagent_result_envelope,
-    parse_subagent_runner_output,
 )
-from agent_py_agent.agent.subagents.parsing.envelope import SubagentResultEnvelopeParseRequest
 
 
 def test_subagent_result_text_converts_to_typed_envelope():

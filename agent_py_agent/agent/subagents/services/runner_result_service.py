@@ -6,15 +6,15 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from ...manager_runner_result_payload import (
+from ..manager_runner_result_payload import (
     BuildAndPersistContext,
     RecordRunnerResultParams,
     _ApplyStatusParams,
     _ExtractedOutput,
     apply_status_and_build_payload,
 )
-from ...models import SubAgentParsedOutput, SubAgentRunnerResult, SubAgentTask
-from ...result_processors import (
+from ..models import SubAgentParsedOutput, SubAgentRunnerResult, SubAgentTask
+from ..result_processors import (
     RunnerResultContext,
     _append_runner_debrief_content,
     _build_runner_result,
@@ -22,9 +22,9 @@ from ...result_processors import (
     _write_runner_result_files,
     merge_actual_tools_for_unparsed,
 )
-from ...runner_rendering import render_runner_result_markdown
-from ...utils import _apply_missing_paths
-from ..subagent_session_compact import (
+from ..runner_rendering import render_runner_result_markdown
+from ..utils import _apply_missing_paths
+from .subagent_session_compact import (
     SubagentSessionCompactRequest,
     write_subagent_session_compact,
 )
@@ -221,8 +221,8 @@ class SubAgentRunnerResultService:
         )
         if session_refs:
             self.manager.save(task)
-        from ...debug_trace import SubAgentRunnerTraceRequest, trace_runner_result
-        from ...runner_completion_wake import notify_parent_on_runner_result
+        from ..debug_trace import SubAgentRunnerTraceRequest, trace_runner_result
+        from ..runner_completion_wake import notify_parent_on_runner_result
 
         trace_runner_result(SubAgentRunnerTraceRequest(self.manager, task, result, params))
         notify_parent_on_runner_result(self.manager, task, result, output_payload)

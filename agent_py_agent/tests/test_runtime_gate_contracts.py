@@ -2,24 +2,28 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_py_agent.agent.contracts.gates import (
-    GateContext,
-    GateDecision,
-    GateFinding,
-    GateRegistry,
-    evaluate_acceptance_closeout_gate,
-    evaluate_artifact_provenance_gate,
-    evaluate_artifact_report_gate,
-    evaluate_delivery_closeout_gate,
-    evaluate_final_closeout_gate,
-    evaluate_recovery_lineage_gate,
-    evaluate_recovery_replay_gate,
-    evaluate_run_contract_gate,
-    evaluate_runtime_audit_gate,
-    evaluate_state_event_ledger_gate,
+from agent_py_agent.agent.contracts.gates.adapters import (
     evaluate_state_transition_gate,
     evaluate_tool_call_gate,
 )
+from agent_py_agent.agent.contracts.gates.artifact_gate import (
+    evaluate_artifact_report_gate,
+    evaluate_delivery_closeout_gate,
+)
+from agent_py_agent.agent.contracts.gates.artifact_provenance import (
+    evaluate_artifact_provenance_gate,
+)
+from agent_py_agent.agent.contracts.gates.models import GateContext, GateDecision, GateFinding
+from agent_py_agent.agent.contracts.gates.registry import GateRegistry
+from agent_py_agent.agent.contracts.gates.run_contract import evaluate_run_contract_gate
+from agent_py_agent.agent.contracts.gates.runtime_reports import (
+    evaluate_acceptance_closeout_gate,
+    evaluate_final_closeout_gate,
+    evaluate_recovery_lineage_gate,
+    evaluate_recovery_replay_gate,
+    evaluate_runtime_audit_gate,
+)
+from agent_py_agent.agent.contracts.gates.state_event_ledger import evaluate_state_event_ledger_gate
 
 
 def test_gate_registry_blocks_when_any_required_gate_denies():
@@ -278,7 +282,9 @@ def test_artifact_provenance_accepts_materialized_write_record_with_failed_post_
 
 
 def test_artifact_provenance_prefers_latest_current_run_write_over_read(tmp_path: Path):
-    from agent_py_agent.agent.contracts.gates import artifact_provenance_from_archive
+    from agent_py_agent.agent.contracts.gates.artifact_provenance import (
+        artifact_provenance_from_archive,
+    )
 
     artifact_path = tmp_path / "output" / "final_report.md"
     artifact_path.parent.mkdir()
@@ -520,7 +526,9 @@ def _artifact_provenance(path: str, *, run_id: str = "run-1") -> dict[str, objec
 
 
 def _artifact_provenance_from_archive_row(root: Path, written_path: Path) -> dict[str, object]:
-    from agent_py_agent.agent.contracts.gates import artifact_provenance_from_archive
+    from agent_py_agent.agent.contracts.gates.artifact_provenance import (
+        artifact_provenance_from_archive,
+    )
 
     return artifact_provenance_from_archive(
         {"path": str(written_path.parent), "ok": True},

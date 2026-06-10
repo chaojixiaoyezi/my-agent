@@ -29,13 +29,13 @@ agent_py_agent/
 |   |   |   |-- base.py                 # create_run/split/owner/runtime config scope
 |   |   |   |-- persistence/            # canonical state、projection、index 同步
 |   |   |   |-- dispatch/               # dispatch/watch/parent planner 报告
-|   |   |   |-- runner_context/         # 执行上下文和边界文件
-|   |   |   |-- runner_result/          # runner result 写回和副作用
+|   |   |   |-- runner_context_service.py # 执行上下文和边界文件
+|   |   |   |-- runner_result_service.py # runner result 写回和副作用
 |   |   |   |-- board/                  # board、due-check、action-plan
 |   |   |   |-- actions/                # action-plan 应用、取消/接管动作
 |   |   |   |-- hierarchy/              # 多层调度和恢复包
 |   |   |   |-- patch_apply/            # patch review/apply/report
-|   |   |   |-- capabilities/           # 能力请求、grant、gap、路由
+|   |   |   |-- capability_service.py   # 能力请求、grant、gap、路由
 |   |   |   `-- memory_gate/           # task-local 经验候选审核
 |   |   |-- patch/                     # patch review/apply 底层实现
 |   |   |-- execution/                 # 测试执行和记录

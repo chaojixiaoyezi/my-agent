@@ -1,12 +1,9 @@
 
 from __future__ import annotations
 
-from ..contracts.gates import (
-    GateDecision,
-    ToolGatePolicy,
-    evaluate_tool_manifest_gate,
-    tool_manifest_from_spec,
-)
+from ..contracts.gates.models import GateDecision
+from ..contracts.gates.tool_effects import ToolGatePolicy
+from ..contracts.gates.tool_manifest import evaluate_tool_manifest_gate, tool_manifest_from_spec
 from .models import BaseTool
 
 

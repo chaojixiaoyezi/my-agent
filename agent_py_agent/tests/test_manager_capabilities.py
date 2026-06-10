@@ -12,7 +12,7 @@ import pytest
 
 
 def _capability_service(tmp_path: Path, selected_runs=None):
-    from agent_py_agent.agent.subagents.services.capabilities import SubAgentCapabilityService
+    from agent_py_agent.agent.subagents.services.capability_service import SubAgentCapabilityService
 
     class MockManager:
         def __init__(self):

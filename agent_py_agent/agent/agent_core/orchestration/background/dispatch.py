@@ -15,7 +15,7 @@ from ....subagents.models import FailureType
 from ...agent_tree.status import agent_tree_status_payload
 from ...parameters import _bool_param
 from ...runner.context import current_subagent_run_id
-from ..create_idempotency import dispatchable_tasks
+from ..create_constraints import dispatchable_tasks
 from ..dispatch.params import DispatchExecutionPlan, DispatchParams
 from ..dispatch.tool_helpers import _dispatch_capability_config
 

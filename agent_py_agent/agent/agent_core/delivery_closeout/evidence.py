@@ -7,17 +7,18 @@ from pathlib import Path
 from typing import Any
 
 from ...contracts.error_taxonomy import error_contract
-from ...contracts.gates import GateDecision, GateFinding, evaluate_fact_evidence_gate
+from ...contracts.gates.fact_evidence import evaluate_fact_evidence_gate
+from ...contracts.gates.models import GateDecision, GateFinding
 from ...contracts.recovery import RecoveryAction
 from ...contracts.staged_checkpoint import (
     StagedEvidenceRequest,
     staged_json_evidence_findings,
 )
-from .quality import workspace_relative_json_path
-from .recovery_models import (
+from .models import (
     RecoveryActionLedger,
     StagedEvidenceActionRequest,
 )
+from .quality import workspace_relative_json_path
 
 _INLINE_CODE_SPAN_RE = re.compile(r"`([^`\n]{1,220})`")
 _CALL_IDENTIFIER_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{3,})\s*\(")

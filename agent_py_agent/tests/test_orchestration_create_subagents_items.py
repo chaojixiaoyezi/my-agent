@@ -128,7 +128,7 @@ class TestCreateSubagentsItemsMode:
         """轻量配置对象缺少 max_subagents 时，也使用 AgentConfig 默认值。"""
         from types import SimpleNamespace
 
-        from agent_py_agent.agent.agent_core.orchestration.create_items import CreateSubagentItem
+        from agent_py_agent.agent.agent_core.orchestration.create_payload import CreateSubagentItem
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
         from agent_py_agent.agent.settings import AgentConfig
 

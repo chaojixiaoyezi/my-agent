@@ -21,13 +21,13 @@
 | `agent/subagents/services/base.py` | 创建子代理 run、继承 owner/runtime config、生成 task identity | 看板、调度结果、patch |
 | `agent/subagents/services/persistence/` | 读写 canonical state，同步 owner projection/global index/LocalStore 投影 | 决定业务是否完成 |
 | `agent/subagents/services/dispatch/` | dispatch/watch/parent planner 报告和日志 | 启动模型 worker 的底层 runner |
-| `agent/subagents/services/runner_context/` | 构造子代理执行上下文、写 boundary 和 config scope | 解析模型最终报告 |
-| `agent/subagents/services/runner_result/` | 写 runner result、状态、产物引用和后续副作用 | 创建子代理 |
+| `agent/subagents/services/runner_context_service.py` | 构造子代理执行上下文、写 boundary 和 config scope | 解析模型最终报告 |
+| `agent/subagents/services/runner_result_service.py` | 写 runner result、状态、产物引用和后续副作用 | 创建子代理 |
 | `agent/subagents/services/board/` | board、due-check、action-plan 的只读投影和报告 | canonical state 权威保存 |
 | `agent/subagents/services/actions/` | 应用 action-plan、取消/接管相关动作记录 | 新建调度树 |
 | `agent/subagents/services/hierarchy/` | 多层子代理调度、恢复包、leadership recovery | 普通 dispatch/watch 报告 |
 | `agent/subagents/services/patch_apply/` | patch review/apply/report/rollback/test command 校验 | 子代理基础生命周期 |
-| `agent/subagents/services/capabilities/` | 能力请求上抛/授权/缺口记录和路由报告 | owner 永久策略变更 |
+| `agent/subagents/services/capability_service.py` | 能力请求上抛/授权/缺口记录和路由报告 | owner 永久策略变更 |
 | `agent/subagents/services/memory_gate/` | 子代理 task-local 经验候选审阅和导出 | 自动写长期记忆 |
 | `agent/subagents/services/workflow.py` | workflow mode、模板计划和 worker tools 选择 | 模型执行 |
 

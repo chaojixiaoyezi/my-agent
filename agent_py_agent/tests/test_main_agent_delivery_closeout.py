@@ -10,7 +10,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from agent_py_agent.agent.agent_core.delivery_closeout.config import DeliveryCloseoutConfig
+from agent_py_agent.agent.agent_core.delivery_closeout.models import DeliveryCloseoutConfig
 from agent_py_agent.agent.agent_core.exploration_fuse_config import ExplorationFuseConfig
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root

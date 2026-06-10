@@ -8,7 +8,8 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from ..agents.contracts import normalize_evidence_refs, review_analyst_report
+from ..agents.contracts import normalize_evidence_refs
+from ..agents.contracts_review import review_analyst_report
 from ..agents.summaries import render_case_summary, summarize_case
 from .budgets import DispatchBudget
 from .health import build_health_summary

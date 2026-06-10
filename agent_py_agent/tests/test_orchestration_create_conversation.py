@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.orchestration.create_conversation import (
+from agent_py_agent.agent.agent_core.orchestration.create_policy import (
     add_current_conversation_attrs,
 )
 from agent_py_agent.agent.agent_core.orchestration.lifecycle import (

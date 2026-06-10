@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from agent_py_agent.agent.contracts.gates.command.policy import (
+from agent_py_agent.agent.contracts.gates.command_policy import (
     CommandPolicyDecision,
     command_name,
     evaluate_command_policy,

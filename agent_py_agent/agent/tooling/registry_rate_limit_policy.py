@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..contracts.gates import ToolRateLimitPolicy
+from ..contracts.gates.tool_rate_limit import ToolRateLimitPolicy
 from ..settings.runtime_guard_config import (
     runtime_guard_data,
     runtime_guard_float_tuple,

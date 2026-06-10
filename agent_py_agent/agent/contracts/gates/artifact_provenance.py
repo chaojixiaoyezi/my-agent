@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...recovery import RecoveryAction
-from ..models import GateDecision, GateFinding
+from ..recovery import RecoveryAction
+from .models import GateDecision, GateFinding
 
 _WRITE_ARTIFACT_TOOLS = {"write_file"}
 _READ_ONLY_ARTIFACT_TOOLS = {

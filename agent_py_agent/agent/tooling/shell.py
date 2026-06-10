@@ -17,7 +17,7 @@ from agent_py_agent.agent.artifacts.shell_protection import (
     shell_artifact_protection_note,
     snapshot_ready_artifacts,
 )
-from agent_py_agent.agent.contracts.gates.command.policy import (
+from agent_py_agent.agent.contracts.gates.command_policy import (
     evaluate_command_policy,
 )
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy

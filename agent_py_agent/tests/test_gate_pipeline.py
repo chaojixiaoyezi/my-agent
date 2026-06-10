@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-from agent_py_agent.agent.contracts.gates import (
-    GateContext,
-    GateDecision,
-    GateFinding,
-    GateRegistry,
-)
 from agent_py_agent.agent.contracts.gates.gate_pipeline import (
     GatePipeline,
     GatePipelineSpec,
     GatePipelineStep,
 )
+from agent_py_agent.agent.contracts.gates.models import GateContext, GateDecision, GateFinding
+from agent_py_agent.agent.contracts.gates.registry import GateRegistry
 
 
 def test_gate_pipeline_runs_phase_action_gates_in_declared_order():

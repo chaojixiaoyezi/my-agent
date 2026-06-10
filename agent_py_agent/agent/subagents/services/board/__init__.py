@@ -1,5 +1,1 @@
-"""Subagent board service package."""
-
-from .service import SubAgentBoardService
-
-__all__ = ["SubAgentBoardService"]
+"""Subagent board 服务包。实现见 service.py / items.py / due_checks.py。"""

@@ -15,6 +15,23 @@ LLM: keep this file current. Do not copy old split plans back in.
 
 ## Completed Cleanup
 
+- 2026-06-10: 第二批 facade/碎片合并（阶段1，详见 docs/modules/*/04-structure.md）。
+  - `contracts/gates/` 打平：command/artifact/network/document/tool 五个子包并入单层模块
+    （`command_policy.py`、`artifact_gate.py`、`artifact_provenance.py`、`network_safety.py`、
+    `document_content.py`、`tool_*.py`），positions/address_projection/content_extractors 并入唯一消费者；
+    `gates/__init__.py` 155 行转发枢纽清空，15 个调用方直连权威模块。
+  - `subagents/services/` 三个单模块包打平为 `capability_service.py` / `runner_context_service.py` /
+    `runner_result_service.py`；`services/__init__.py` 11 个 re-export 删除。
+  - `delivery_closeout/`：三个 `*_repair.py` 并入 `repairs.py`；`recovery_models.py`+`config.py` 并入
+    `models.py`；`source_checkpoint.py` 并入唯一消费者 `staging_recovery.py`。
+  - `orchestration/`：create_target_roots→create_context、create_idempotency→create_constraints、
+    create_items→create_payload、create_conversation→create_policy（8 文件→4）；顶层 init 枢纽清空。
+  - `memory_archive/compact_context_bundle/` 包并入单模块，导入路径不变。
+  - 模块级真循环清零：gates.delivery_quality↔staged_checkpoint（claims/source_refs 归位
+    evidence_contract）、log_analysis models/contracts 尾部 re-export、parsing/hierarchy/services
+    init 转发，共 6 处。
+  - 已验证：focused pytest、compileall、doc sync、offline contract matrix、code-size strict 0 hard/0 high-risk。
+
 - 2026-06-06: 删除第一批只转发/影子入口。
   - `delivery_contract_prompting_recovery_bool.py` 并入唯一调用方 `delivery_contract_prompting_staged.py`。
   - `coordinator_seed_tools.py` 并入 `orchestration/create_policy.py`。

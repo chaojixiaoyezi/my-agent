@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from agent_py_agent.agent.contracts.gates.tool.guardrail import (
+from agent_py_agent.agent.contracts.gates.tool_guardrail import (
     ToolGuardrailConfig,
     ToolGuardrailFacts,
     args_hash_for_guardrail,

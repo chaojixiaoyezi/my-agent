@@ -5,7 +5,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_py_agent.agent.contracts.gates.command.policy import command_name
+from agent_py_agent.agent.contracts.gates.command_policy import command_name
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 
 

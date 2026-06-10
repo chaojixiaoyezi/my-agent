@@ -7,20 +7,20 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from ....common.value_parsing import text_or_sequence_strings
-from ....model_visible_refs import clean_path_contract_refs, is_non_model_visible_locator_root
-from ...controlled_exec_gateway import controlled_exec_grant_refs
-from ...manager_collaboration_context import collaboration_context_payload
-from ...model_capabilities import capability_request_counts_as_open
-from ...models import SubAgentExecutionContext, SubAgentTask
-from ...policies import (
+from ...common.value_parsing import text_or_sequence_strings
+from ...model_visible_refs import clean_path_contract_refs, is_non_model_visible_locator_root
+from ..controlled_exec_gateway import controlled_exec_grant_refs
+from ..manager_collaboration_context import collaboration_context_payload
+from ..model_capabilities import capability_request_counts_as_open
+from ..models import SubAgentExecutionContext, SubAgentTask
+from ..policies import (
     _dedupe_granted_cards,
     _execution_context_instructions,
 )
-from ...role_templates import is_self_authorized_root_task, role_template_snapshot_for_task
-from ...runner_context_bundle_files import execution_context_bundle, write_context_bundle_files
-from ...runner_rendering import render_execution_context_markdown
-from ...utils import (
+from ..role_templates import is_self_authorized_root_task, role_template_snapshot_for_task
+from ..runner_context_bundle_files import execution_context_bundle, write_context_bundle_files
+from ..runner_rendering import render_execution_context_markdown
+from ..utils import (
     _apply_missing_paths,
     _merge_list,
 )

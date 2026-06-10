@@ -3,11 +3,11 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from agent_py_agent.agent.agent_core.delivery_closeout.artifact_repair import (
-    append_artifact_finding_repair_actions,
-)
-from agent_py_agent.agent.agent_core.delivery_closeout.recovery_models import (
+from agent_py_agent.agent.agent_core.delivery_closeout.models import (
     RecoveryActionLedger,
+)
+from agent_py_agent.agent.agent_core.delivery_closeout.repairs import (
+    append_artifact_finding_repair_actions,
 )
 from agent_py_agent.tests.test_main_agent_delivery_closeout_staged import _enriched_report
 

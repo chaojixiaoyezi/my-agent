@@ -16,7 +16,7 @@ from agent_py_agent.agent.agent_core.tool_loop.completion import (
     completion_response_after_tool_round,
 )
 from agent_py_agent.agent.backends import ModelResponse
-from agent_py_agent.agent.contracts.gates.tool.effects import args_hash_for_call
+from agent_py_agent.agent.contracts.gates.tool_effects import args_hash_for_call
 from agent_py_agent.agent.contracts.tool_protocol_v2 import normalize_tool_call
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig

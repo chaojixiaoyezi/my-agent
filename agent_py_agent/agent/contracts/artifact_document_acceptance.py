@@ -10,7 +10,7 @@ from .artifact_acceptance_models import (
     ArtifactFinding,
     advisory_artifact_findings,
 )
-from .gates.document.content_quality import document_content_quality_findings
+from .gates.document_content import document_content_quality_findings
 
 
 def validate_docx_artifact(

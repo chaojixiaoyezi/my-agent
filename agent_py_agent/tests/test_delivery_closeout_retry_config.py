@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_py_agent.agent.agent_core.delivery_closeout.config import load_delivery_closeout_config
+from agent_py_agent.agent.agent_core.delivery_closeout.models import load_delivery_closeout_config
 
 
 def test_delivery_closeout_retry_config_defaults_to_unlimited_rework():

@@ -11,10 +11,10 @@ from .contracts import (
     ReviewerInput,
     normalize_evidence_refs,
     require_evidence_refs,
-    review_analyst_report,
     validate_analyst_input,
     validate_analyst_report,
 )
+from .contracts_review import review_analyst_report
 from .prompts import (
     SECURITY_PROMPT_MODES,
     SECURITY_SUBAGENT_ROLES,

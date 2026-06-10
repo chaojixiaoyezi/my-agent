@@ -84,3 +84,9 @@
 - memory 只提供事实和检索，不做任务质量硬门。
 - 状态别名必须 fail closed；需要迁移旧数据时写显式迁移记录，不在 compact 读取链路里临时猜。
 - main context bundle 的结构化验收字段只认 `acceptance`、`constraints`、`latest_tests`；中文字段名和旧别名只作为普通用户文本保留，不进入机器验收合同。
+
+## 2026-06-10 compact_context_bundle 合并
+
+- `memory_archive/compact_context_bundle/`（match.py / refs.py / `__init__` 转发）合并为单模块
+  `memory_archive/compact_context_bundle.py`；对外导入路径不变（`from ..compact_context_bundle import ...`），
+  匹配判定与 refs 读取在同一权威文件内。

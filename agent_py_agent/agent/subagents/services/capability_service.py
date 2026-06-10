@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.config import CapabilityConfig
 
-from ...capability_route_service import (
+from ..capability_route_service import (
     CapabilityNoHitsParams,
     ExistingCapabilityGrantParams,
     RouteCapabilityApplyParams,
@@ -20,11 +20,11 @@ from ...capability_route_service import (
     route_would_capability_grant,
     write_capability_route_report_files,
 )
-from ...capability_scope import existing_delete_trash_grant
-from ...model_capabilities import capability_request_counts_as_open
-from ...models import CapabilityRequest, SubAgentCapabilityRouteOptions, SubAgentTask
-from ...policies import _capability_request_query, _select_capability_hits
-from ...reports import CapabilityRouteRecord, CapabilityRouteReport
+from ..capability_scope import existing_delete_trash_grant
+from ..model_capabilities import capability_request_counts_as_open
+from ..models import CapabilityRequest, SubAgentCapabilityRouteOptions, SubAgentTask
+from ..policies import _capability_request_query, _select_capability_hits
+from ..reports import CapabilityRouteRecord, CapabilityRouteReport
 
 if TYPE_CHECKING:
     from agent_py_agent.agent.capability import CapabilitySearchHit

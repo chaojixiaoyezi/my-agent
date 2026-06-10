@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_py_agent.agent.contracts.gates.command.policy import evaluate_command_policy
+from agent_py_agent.agent.contracts.gates.command_policy import evaluate_command_policy
 
 
 @pytest.mark.parametrize(

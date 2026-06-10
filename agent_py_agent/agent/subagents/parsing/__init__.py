@@ -276,6 +276,3 @@ def _extract_first_json_object_text(text: str) -> str:
         if isinstance(payload, dict):
             return text[index : index + end]
     return ""
-
-
-from .envelope import SubagentResultEnvelopeParseRequest, parse_subagent_result_envelope

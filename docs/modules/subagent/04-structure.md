@@ -10,7 +10,7 @@ SimpleAgent orchestration tool
   -> services/base.py creates SubAgentTask
   -> services/persistence writes canonical state
   -> runner worker runs model/tool loop
-  -> services/runner_result records result/artifacts/status
+  -> services/runner_result_service.py records result/artifacts/status
   -> parent inspects tree / cancels / takes over / summarizes
 ```
 
@@ -81,13 +81,13 @@ SimpleAgent orchestration tool
 | `base.py` | create_run/split、owner 继承、runtime config scope |
 | `persistence/` | canonical state 读写、projection、global index、LocalStore 投影 |
 | `dispatch/` | dispatch/watch/parent planner 报告 |
-| `runner_context/` | 执行上下文、写入边界、任务配置、runtime guidance、runner allowed tools |
-| `runner_result/` | runner 输出解析、状态和 artifact refs 写回 |
-| `board/` | board、due-check、action-plan |
+| `runner_context_service.py` | 执行上下文、写入边界、任务配置、runtime guidance、runner allowed tools |
+| `runner_result_service.py` | runner 输出解析、状态和 artifact refs 写回 |
+| `board/` | board、due-check、action-plan（直接导入 `board.service` 等实现模块） |
 | `actions/` | action-plan 应用、取消、接管动作记录 |
-| `hierarchy/` | 多层级 child scheduling、recovery packet、leadership recovery |
+| `hierarchy/` | 多层级 child scheduling、recovery packet、leadership recovery（直接导入 `hierarchy.service` 等实现模块，包 `__init__` 不再转发） |
 | `patch_apply/` | patch review/apply/report/rollback |
-| `capabilities/` | capability request/grant/gap 路由 |
+| `capability_service.py` | capability request/grant/gap 路由 |
 | `memory_gate/` | 子代理 task-local 候选经验，不自动写长期记忆 |
 | `workflow.py` | workflow mode、模板计划、worker tool 选择 |
 
@@ -134,3 +134,9 @@ artifact refs。创建任务时给子代理的 `output_files` 是目标路径合
 并给每个 child 分配 task-local `work/child_outputs/...` 独立目标，避免多个 worker
 覆盖同一个文件。需要多个 child 精确写不同业务文件时，优先用 `items` 给每个 child
 显式声明自己的输出路径。
+
+## 2026-06-10 Facade 清理
+
+- `services/__init__.py` 不再 re-export 各 service 类；`SubAgentManager` 与所有调用方直接导入实现模块。
+- 单模块包 `services/capabilities|runner_context|runner_result/` 打平为 `capability_service.py` / `runner_context_service.py` / `runner_result_service.py`。
+- `services/board/__init__.py`、`services/hierarchy/__init__.py`、`parsing/__init__.py` 尾部 re-export 删除；envelope/hierarchy 调用方直连实现模块，消除模块级循环导入。

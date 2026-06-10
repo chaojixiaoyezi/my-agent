@@ -289,7 +289,3 @@ def validate_analyst_report(payload: AnalystReport | Mapping[str, Any]) -> Analy
         payload.validate()
         return payload
     return AnalystReport.from_mapping(payload)
-
-
-
-from .contracts_review import review_analyst_report

@@ -1,8 +1,1 @@
-from .closeout import MainAgentDeliveryCloseoutRequest, main_agent_delivery_closeout_response
-from .config import DeliveryCloseoutConfig
-
-__all__ = [
-    "DeliveryCloseoutConfig",
-    "MainAgentDeliveryCloseoutRequest",
-    "main_agent_delivery_closeout_response",
-]
+"""交付收尾包。入口见 closeout.py，配置与数据模型见 models.py，修复合同见 repairs.py。"""

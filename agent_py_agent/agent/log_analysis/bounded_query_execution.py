@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .bounded_query_models import BoundedQueryConfig, BoundedQueryError
-from .models import QueryResult
+from .models_work_orders import QueryResult
 
 
 @dataclass(frozen=True)

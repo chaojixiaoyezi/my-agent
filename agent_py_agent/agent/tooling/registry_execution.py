@@ -17,7 +17,7 @@ from ..action_protocol import (
     RunScope,
     ToolCallEnvelope,
 )
-from ..contracts.gates import GateDecision
+from ..contracts.gates.models import GateDecision
 from .content_transport_policy import (
     RECOMMENDED_WRITE_CHUNK_CHARS,
     RECOVERY_WRITE_CHUNK_CHARS,

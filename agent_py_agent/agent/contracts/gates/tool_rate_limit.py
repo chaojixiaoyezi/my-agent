@@ -4,8 +4,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from ...recovery import RecoveryAction
-from ..models import GateDecision
+from ..recovery import RecoveryAction
+from .models import GateDecision
 
 _CLOSED = "closed"
 _OPEN = "open"

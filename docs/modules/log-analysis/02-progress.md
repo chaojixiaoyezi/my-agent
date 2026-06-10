@@ -5,6 +5,11 @@
 - Current strict code-size gate reports `hard=0`, `soft=0`; near-soft items are now visible as high-risk warnings.
 # Log Analysis：开发推进记录
 
+## 2026-06-10 模块级循环导入清零
+
+- 删除三处尾部/包级 re-export（models→models_work_orders、agents/contracts→contracts_review、services init），
+  调用方改为直连权威模块；AST 检测确认 log_analysis 不再存在模块级循环导入。行为不变，first-loop 测试全绿。
+
 ## 已完成
 
 - 2026-06-07：删除旧 `log_analysis/tools_plugin.py` facade，LOG 工具只保留当前 registry/tool class 主链路。

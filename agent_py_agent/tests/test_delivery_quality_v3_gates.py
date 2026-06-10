@@ -12,11 +12,11 @@ from agent_py_agent.agent.contracts.artifact_acceptance import (
     validate_artifact,
 )
 from agent_py_agent.agent.contracts.artifact_collection_mapping import mapping_findings
-from agent_py_agent.agent.contracts.gates.artifact.gate import evaluate_delivery_closeout_gate
-from agent_py_agent.agent.contracts.gates.artifact.provenance import (
+from agent_py_agent.agent.contracts.gates.artifact_gate import evaluate_delivery_closeout_gate
+from agent_py_agent.agent.contracts.gates.artifact_provenance import (
     evaluate_artifact_provenance_gate,
 )
-from agent_py_agent.agent.contracts.gates.document.content_quality import (
+from agent_py_agent.agent.contracts.gates.document_content import (
     evaluate_document_content_quality_gate,
 )
 

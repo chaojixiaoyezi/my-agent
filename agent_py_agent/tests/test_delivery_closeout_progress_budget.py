@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.delivery_closeout.config import DeliveryCloseoutConfig
+from agent_py_agent.agent.agent_core.delivery_closeout.models import DeliveryCloseoutConfig
 from agent_py_agent.agent.agent_core.delivery_closeout.progress import (
     _no_progress_block_threshold,
 )

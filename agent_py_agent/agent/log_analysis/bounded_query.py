@@ -11,7 +11,7 @@ from typing import Any
 
 from .bounded_query_execution import execute_file_tail, validate_time_window
 from .bounded_query_models import BoundedQueryConfig, BoundedQueryError
-from .models import QueryResult
+from .models_work_orders import QueryResult
 
 # 全局默认配置
 default_config = BoundedQueryConfig()

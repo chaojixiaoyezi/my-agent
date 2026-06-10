@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 from ...common.value_parsing import text_value as _text
 from ...path_access_policy import PathAccessPolicy
-from .command.policy import evaluate_command_policy
+from .command_policy import evaluate_command_policy
 from .models import GateDecision, GateFinding
 
 _PATH_KEYS = {"path", "file_path", "target_path", "output_path", "working_dir", "cwd", "directory"}

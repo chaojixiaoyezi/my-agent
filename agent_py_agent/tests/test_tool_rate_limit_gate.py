@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def test_same_tool_args_rate_limit_blocks_after_budget() -> None:
-    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
         ToolRateLimitPolicy,
@@ -20,7 +20,7 @@ def test_same_tool_args_rate_limit_blocks_after_budget() -> None:
 
 
 def test_zero_max_calls_is_unlimited() -> None:
-    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
         ToolRateLimitPolicy,
@@ -34,7 +34,7 @@ def test_zero_max_calls_is_unlimited() -> None:
 
 
 def test_rate_limit_uses_args_hash_as_part_of_key() -> None:
-    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
         ToolRateLimitPolicy,
@@ -51,7 +51,7 @@ def test_rate_limit_uses_args_hash_as_part_of_key() -> None:
 
 
 def test_consecutive_failures_open_circuit_for_same_key() -> None:
-    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
         ToolRateLimitPolicy,
@@ -72,7 +72,7 @@ def test_consecutive_failures_open_circuit_for_same_key() -> None:
 
 
 def test_zero_failure_threshold_disables_circuit() -> None:
-    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
         ToolRateLimitPolicy,
@@ -91,7 +91,7 @@ def test_zero_failure_threshold_disables_circuit() -> None:
 
 
 def test_circuit_backoff_increases_after_half_open_failure() -> None:
-    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
         ToolRateLimitPolicy,
@@ -116,7 +116,7 @@ def test_circuit_backoff_increases_after_half_open_failure() -> None:
 
 
 def test_success_closes_circuit_and_resets_backoff() -> None:
-    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
         ToolRateLimitPolicy,
@@ -139,7 +139,7 @@ def test_success_closes_circuit_and_resets_backoff() -> None:
 
 
 def test_missing_rate_limit_identity_denies_closed() -> None:
-    from agent_py_agent.agent.contracts.gates.tool.rate_limit import (
+    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
         ToolRateLimitFacts,
         ToolRateLimitLedger,
     )

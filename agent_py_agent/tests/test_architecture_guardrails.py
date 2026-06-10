@@ -145,6 +145,9 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
         "_CONCRETE_FILE_TARGET_RE",
         "getattr(agent, \"_current_user_prompt\"",
         "_structured_parent_constraints(user_text)",
+        "_normalized_goal",
+        "goal_output_refs(params.goal)",
+        "goal_output_refs(candidate.goal)",
     ],
     "agent_py_agent/agent/agent_core/orchestration/write_guard.py": [
         "_goal_has_write_intent",
@@ -211,11 +214,6 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
     "agent_py_agent/agent/subagents/services/acceptance_controlled_exec_findings.py": [
         "getattr(task, \"goal\", \"\")",
         "for item in task.acceptance_checks",
-    ],
-    "agent_py_agent/agent/agent_core/orchestration/create_idempotency.py": [
-        "_normalized_goal",
-        "goal_output_refs(params.goal)",
-        "goal_output_refs(candidate.goal)",
     ],
     "agent_py_agent/agent/subagents/services/hierarchy/schedule_idempotency.py": [
         "_normalized_goal",

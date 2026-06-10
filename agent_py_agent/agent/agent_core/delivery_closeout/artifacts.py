@@ -20,7 +20,7 @@ from ...contracts.artifact_acceptance import (
     validate_artifact,
     validation_workspace_root_for_item,
 )
-from ...contracts.gates import artifact_provenance_from_archive
+from ...contracts.gates.artifact_provenance import artifact_provenance_from_archive
 from ...contracts.staged_checkpoint import staged_checkpoint_findings
 from .._runtime_params import ToolLoopExecuteParams
 from ..artifact_locator import locate_artifact
