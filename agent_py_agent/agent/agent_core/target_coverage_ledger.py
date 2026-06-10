@@ -221,7 +221,10 @@ def _target_item_row(item: object) -> dict[str, str]:
         return {}
     target_id = str(item.get("target_id") or "").strip()
     row = {"target_id": target_id, "label": str(item.get("label") or target_id)} if target_id else {}
-    for key in ("source_path", "artifact_ref", "source_ref", "coverage_kind", "enforcement", "scope", "min_read_count"):
+    for key in (
+        "source_path", "artifact_ref", "source_ref", "coverage_kind", "enforcement",
+        "scope", "min_read_count", "min_read_ratio", "max_candidates",
+    ):
         text = str(item.get(key) or "").strip()
         if text:
             row[key] = text
@@ -477,6 +480,8 @@ def _target_is_covered(
 ) -> bool:
     if _target_requires_source_file_under_dir(item):
         return _source_file_under_dir_covered(item, records, base)
+    if _target_requires_directory_tree(item):
+        return _directory_tree_covered(item, records, base)
     item_keys = _target_keys(item, base)
     for record in records:
         if _record_covers_target(CoverageRecordMatchRequest(record, item, item_keys, contract, base)):
@@ -513,6 +518,67 @@ def _source_file_under_dir_covered(
         return False
     target = _canonical_ref(source, base)
     return len(_read_files_under_target(target, records, base)) >= _effective_min_read_count(item, target, base)
+
+
+def _target_requires_directory_tree(item: dict[str, str]) -> bool:
+    return str(item.get("coverage_kind") or "").strip() == "directory_tree"
+
+
+def _directory_tree_covered(
+    item: dict[str, str],
+    records: list[dict[str, object]],
+    base: Path | None,
+) -> bool:
+    """目录树级覆盖：候选源文件中已读比例达到 min_read_ratio（默认 1.0 全读）。
+
+    候选集合来自源文件扫描（带上限）；合同可用 max_candidates 显式扩大上限。
+    候选为空（目录没有源文件）按已覆盖处理，但 hint 会暴露 candidate_scan_truncated。"""
+    source = str(item.get("source_ref") or item.get("source_path") or item.get("target_id") or "").strip()
+    if not source:
+        return False
+    target = _canonical_ref(source, base)
+    candidates, _truncated = _directory_tree_candidates(item, target, base)
+    if not candidates:
+        return True
+    read_files = _read_files_under_target(target, records, base)
+    required = _directory_tree_required_count(item, len(candidates))
+    return len(read_files.intersection(candidates)) >= required
+
+
+def _directory_tree_candidates(
+    item: dict[str, str],
+    target: str,
+    base: Path | None,
+) -> tuple[set[str], bool]:
+    max_candidates = _declared_positive_int(item.get("max_candidates"), default=_MAX_SOURCE_CANDIDATES)
+    candidates = _source_file_candidates_under_target(target, base, max_candidates=max_candidates)
+    truncated = len(candidates) >= max_candidates
+    return set(candidates), truncated
+
+
+def _directory_tree_required_count(item: dict[str, str], candidate_count: int) -> int:
+    ratio = _declared_ratio(item.get("min_read_ratio"), default=1.0)
+    from math import ceil
+
+    return max(1, min(candidate_count, ceil(candidate_count * ratio)))
+
+
+def _declared_positive_int(value: object, *, default: int) -> int:
+    try:
+        parsed = int(str(value or "").strip())
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _declared_ratio(value: object, *, default: float) -> float:
+    try:
+        parsed = float(str(value or "").strip())
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0 or parsed > 1:
+        return default
+    return parsed
 
 
 def _read_files_under_target(
@@ -595,6 +661,9 @@ def _repair_hints(
         if hint := _source_file_under_dir_hint(item, coverage_records, base):
             hints.append(hint)
             continue
+        if hint := _directory_tree_hint(item, coverage_records, base):
+            hints.append(hint)
+            continue
         if hint := _partial_read_hint(item, coverage_records, base):
             hints.append(hint)
     return hints
@@ -642,7 +711,49 @@ def _source_file_under_dir_hint(
     }
 
 
-def _source_file_candidates_under_target(target: str, base: Path | None = None) -> list[str]:
+def _directory_tree_hint(
+    item: dict[str, str],
+    coverage_records: list[dict[str, object]],
+    base: Path | None = None,
+) -> dict[str, object]:
+    if not _target_requires_directory_tree(item):
+        return {}
+    source = str(item.get("source_ref") or item.get("source_path") or item.get("target_id") or "").strip()
+    if not source:
+        return {}
+    target = _canonical_ref(source, base)
+    candidates, truncated = _directory_tree_candidates(item, target, base)
+    read_files = _read_files_under_target(target, coverage_records, base)
+    missing = sorted(candidates - read_files)
+    required = _directory_tree_required_count(item, len(candidates)) if candidates else 0
+    needed = max(0, required - len(read_files.intersection(candidates)))
+    recommended_read_calls = [
+        {"tool": "read_file", "path": candidate} for candidate in missing[:needed]
+    ]
+    return {
+        "target_id": str(item.get("target_id") or ""),
+        "source_ref": source,
+        "coverage_kind": "directory_tree",
+        "candidate_count": len(candidates),
+        "candidate_scan_truncated": truncated,
+        "read_count": len(read_files.intersection(candidates)),
+        "required_read_count": required,
+        "missing_files": missing[:20],
+        "recommended_tool_call": (
+            recommended_read_calls[0]
+            if recommended_read_calls
+            else {"tool": "list_files", "path": source, "recursive": True, "limit": 50}
+        ),
+        "recommended_tool_calls": recommended_read_calls,
+    }
+
+
+def _source_file_candidates_under_target(
+    target: str,
+    base: Path | None = None,
+    *,
+    max_candidates: int = _MAX_SOURCE_CANDIDATES,
+) -> list[str]:
     path = _local_path_from_ref(target, base)
     if path is None or not path.is_dir():
         return []
@@ -650,7 +761,7 @@ def _source_file_candidates_under_target(target: str, base: Path | None = None) 
         _source_candidate_paths(path),
         key=lambda candidate: _source_candidate_sort_key(candidate, path),
     )
-    return [str(candidate.resolve(strict=False)) for candidate in sorted_candidates[:_MAX_SOURCE_CANDIDATES]]
+    return [str(candidate.resolve(strict=False)) for candidate in sorted_candidates[:max_candidates]]
 
 
 def _source_candidate_paths(path: Path) -> list[Path]:

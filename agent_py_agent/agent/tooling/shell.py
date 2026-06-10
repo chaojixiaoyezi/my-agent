@@ -280,11 +280,16 @@ def _working_dir_from_params(
 
 
 def _bounded_output(text: str, max_chars: int) -> tuple[str, bool]:
+    """超限时保留头部+尾部、省略中段（构建/测试输出的结论通常在尾部）。"""
     if max_chars <= 0:
         return "", bool(text)
     if len(text) <= max_chars:
         return text, False
-    return text[:max_chars], True
+    head_chars = max(1, int(max_chars * 0.6))
+    tail_chars = max(1, max_chars - head_chars)
+    omitted = len(text) - head_chars - tail_chars
+    marker = f"\n...[中段省略 {omitted} 字符，完整输出共 {len(text)} 字符 / {text.count(chr(10)) + 1} 行]...\n"
+    return text[:head_chars] + marker + text[-tail_chars:], True
 
 
 def _format_process_result(result: subprocess.CompletedProcess[str], max_output_chars: int) -> str:
@@ -294,7 +299,8 @@ def _format_process_result(result: subprocess.CompletedProcess[str], max_output_
     stderr_preview, stderr_truncated = _bounded_output(stderr, max_output_chars)
     return (
         f"return_code={result.returncode}\n"
-        f"stdout_chars={len(stdout)} stdout_preview_chars={len(stdout_preview)} "
+        f"stdout_chars={len(stdout)} stdout_lines={stdout.count(chr(10)) + (1 if stdout else 0)} "
+        f"stdout_preview_chars={len(stdout_preview)} "
         f"stdout_truncated={stdout_truncated}\n"
         f"stdout={stdout_preview}\n"
         f"stderr_chars={len(stderr)} stderr_preview_chars={len(stderr_preview)} "

@@ -15,6 +15,18 @@ LLM: keep this file current. Do not copy old split plans back in.
 
 ## Completed Cleanup
 
+- 2026-06-10: 阶段3 gateway/chat 性能可观测 + 阶段4 coverage 补全。
+  - gateway：inbox mtime 扫描门（空闲不再每 0.2s 全量 glob）、worker-0 恢复扫描节流
+    （timeout/3）、heartbeat 新增 queue_ages 观测；jsonl 路径锁引用计数回收。
+  - chat：`read_jsonl_tail_report` 尾部倒读（5000 行账本取 20 条实测 41x，逐位一致）。
+  - coverage：新增 `directory_tree` 覆盖类型（min_read_ratio / max_candidates 合同可声明、
+    候选截断显式暴露、修复提示带 missing_files）；shell 输出改中段截断（保头+保尾+
+    省略标记+总行数），结论不再被截掉。
+  - 核实后跳过：list_files 分页早已存在（offset/next_offset/page_window）；registry↔ledger
+    打通已存在（metadata.coverage_items）；"artifact 声明覆盖源文件"不做——会成为模型
+    自证通道，违反"模型输出不能自己证明自己"。
+  - 推迟（待 R2 实测）：subagent tree 投影缓存、lane 化并发。
+
 - 2026-06-10: 阶段2 字符串判断清零 + 阶段6 子代理参数统一。
   - `contracts/recovery.py`：5 组散落的错误码前缀规则（repairable/recovering/hard_stop/
     category/recommended_action）收敛为单一 `CodePolicy` 注册表（精确码 > 最长家族前缀 >

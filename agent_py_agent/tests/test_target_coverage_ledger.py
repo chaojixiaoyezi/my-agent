@@ -716,3 +716,54 @@ def test_full_source_read_matches_relative_read_file_against_workspace_root(tmp_
     assert status["covered_count"] == 1
     assert status["missing_count"] == 0
     assert status["should_block"] is False
+
+
+def test_directory_tree_coverage_requires_candidate_ratio(tmp_path):
+    """directory_tree：候选源文件按 min_read_ratio 比例读够才覆盖；缺口给出结构化修复提示。"""
+    from agent_py_agent.agent.agent_core.target_coverage_ledger import target_coverage_status
+
+    src = tmp_path / "src"
+    src.mkdir()
+    files = []
+    for index in range(5):
+        target = src / f"mod{index}.py"
+        target.write_text(f"# module {index}\n", encoding="utf-8")
+        files.append(str(target.resolve()))
+    contract = {
+        "target_items": [
+            {
+                "target_id": "tree",
+                "source_ref": str(src),
+                "coverage_kind": "directory_tree",
+                "enforcement": "required",
+            }
+        ]
+    }
+
+    def record(path: str) -> dict:
+        return {
+            "tool": "read_file",
+            "source_ref": path,
+            "coverage_kind": "char_window",
+            "status": "covered",
+            "target_id": path,
+        }
+
+    partial = target_coverage_status(
+        contract, coverage_records=[record(p) for p in files[:3]], workspace_root=tmp_path
+    )
+    assert partial["missing_count"] == 1
+    hints = [h for h in partial["repair_hints"] if h.get("coverage_kind") == "directory_tree"]
+    assert hints and hints[0]["candidate_count"] == 5 and hints[0]["read_count"] == 3
+    assert hints[0]["missing_files"] and hints[0]["recommended_tool_calls"]
+
+    full = target_coverage_status(
+        contract, coverage_records=[record(p) for p in files], workspace_root=tmp_path
+    )
+    assert full["missing_count"] == 0
+
+    contract["target_items"][0]["min_read_ratio"] = "0.6"
+    ratio = target_coverage_status(
+        contract, coverage_records=[record(p) for p in files[:3]], workspace_root=tmp_path
+    )
+    assert ratio["missing_count"] == 0
