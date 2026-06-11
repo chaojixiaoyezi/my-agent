@@ -38,7 +38,7 @@ from .logs import (
     cmd_logs_status,
     cmd_logs_trace_case,
 )
-from .scenario import cmd_scenario_test
+from .scenario import cmd_scenario_test, scenario_case_choices
 from .supervisor import (
     cmd_start_all,
     cmd_supervisor_run,
@@ -141,20 +141,8 @@ def add_scenario_subcommand(sub: argparse._SubParsersAction) -> None:
     _add_capability_config_arg(scenario)
     scenario.add_argument(
         "--case",
-        choices=[
-            "happy",
-            "verification",
-            "gateway-restart",
-            "gateway-cross-day-resume",
-            "gateway-delayed-response",
-            "gateway-multi-worker",
-            "gateway-stale-lease",
-            "parent-subagent-cross-day-resume",
-            "real-model-recovery",
-            "structured-repair",
-            "runner-retry",
-            "all",
-        ],
+        # choices 从 case runner 注册表派生，新增 case 不需要同步这里
+        choices=scenario_case_choices(),
         default="happy",
         help="场景类型：happy 跑真实全流程；verification 测验收防作弊；gateway-restart 测重启恢复；gateway-cross-day-resume 测真实 gateway 请求跨天恢复；gateway-delayed-response 测响应先到后请求副本归档；gateway-multi-worker 测多 request worker 并发抢占；gateway-stale-lease 测 processing stale lease 重排恢复；parent-subagent-cross-day-resume 测真实 runner 写回后的跨天恢复；real-model-recovery 测真实模型 API 的 parent/subagent 跨天恢复；structured-repair 测坏结构化输出修复；runner-retry 测 runner 失败重试；all 连续运行",
     )

@@ -43,10 +43,11 @@ class ProcessingStopVerifyRequest:
     request_id: str
     requeued: int
     processed: int
-    after_requeue_processing: object
-    after_requeue_pending: object
+    after_requeue_processing_existed: bool
+    after_requeue_pending_existed: bool
     done_payload: dict
     verify: ProcessingVerifyResults
+    throttled_processed: int = 0
 
 
 @dataclass
@@ -54,6 +55,9 @@ class ProcessingRequeueResult:
     requeued: int
     pending_path: object
     processing_path: object
+    # 重排完成瞬间的存在性快照；验收时文件已流转到 done，不能再查 exists()
+    pending_exists_after_requeue: bool = False
+    processing_exists_after_requeue: bool = True
 
 
 @dataclass
@@ -61,6 +65,7 @@ class ProcessingCompletionResult:
     processed: int
     done_payload: dict
     verify: ProcessingVerifyResults
+    throttled_processed: int = 0
 
 
 def _processing_stop_setup(args):
@@ -125,8 +130,9 @@ def _processing_stop_verify_results(request: ProcessingStopVerifyRequest):
     verify = request.verify
     final_ok = (
         request.requeued == 1
-        and not request.after_requeue_processing.exists()
-        and request.after_requeue_pending.exists()
+        and not request.after_requeue_processing_existed
+        and request.after_requeue_pending_existed
+        and request.throttled_processed == 0
         and request.processed == 1
         and verify.done_path.exists()
         and verify.final_response.get("ok") is True
@@ -160,14 +166,30 @@ def _processing_stop_requeue(gpaths, processing_path) -> ProcessingRequeueResult
     requeued = requeue_gateway_processing_requests(gpaths)
     after_requeue_pending = gpaths.inbox / processing_path.name
     after_requeue_processing = gpaths.processing / processing_path.name
+    pending_exists = after_requeue_pending.exists()
+    processing_exists = after_requeue_processing.exists()
     print(f"requeued={requeued}")
-    print(f"after_requeue_pending={after_requeue_pending.exists()}")
-    print(f"after_requeue_processing={after_requeue_processing.exists()}")
-    return ProcessingRequeueResult(requeued, after_requeue_pending, after_requeue_processing)
+    print(f"after_requeue_pending={pending_exists}")
+    print(f"after_requeue_processing={processing_exists}")
+    return ProcessingRequeueResult(
+        requeued,
+        after_requeue_pending,
+        after_requeue_processing,
+        pending_exists_after_requeue=pending_exists,
+        processing_exists_after_requeue=processing_exists,
+    )
 
 
 def _processing_stop_complete(agent, gpaths, processing_path, response_path) -> ProcessingCompletionResult:
     print_scenario_step(4, "Let a new worker pick up the requeued request and complete it")
+    # 重启重排带 10s 节流（not_before_at），先钉住"窗口内不处理"，再把窗口拨到过去验证完成。
+    throttled = _process_gateway_requests(agent, gpaths, worker_id="scenario-recovery-worker-after-stop")
+    print(f"throttled_window_processed={throttled} (expected 0: requeued request defers within not_before_at)")
+    pending_path = gpaths.inbox / processing_path.name
+    pending_payload = read_json_file(pending_path)
+    if throttled == 0 and float(pending_payload.get("not_before_at") or 0.0) > time.time():
+        pending_payload["not_before_at"] = time.time() - 1
+        write_json_file(pending_path, pending_payload)
     processed = _process_gateway_requests(agent, gpaths, worker_id="scenario-recovery-worker-after-stop")
     done_path = gpaths.done / processing_path.name
     done_payload = read_json_file(done_path)
@@ -176,6 +198,7 @@ def _processing_stop_complete(agent, gpaths, processing_path, response_path) -> 
     print(f"done_path={done_path} exists={done_path.exists()}")
     print(f"response_path={response_path} exists={response_path.exists()} ok={final_response.get('ok')}")
     return ProcessingCompletionResult(
+        throttled_processed=throttled,
         processed=processed,
         done_payload=done_payload,
         verify=ProcessingVerifyResults(
@@ -189,11 +212,10 @@ def _processing_stop_complete(agent, gpaths, processing_path, response_path) -> 
 
 def _response_json_valid(final_response: dict) -> bool:
     print_scenario_step(5, "Verify no half-written JSON, no lost requests")
-    try:
-        json.loads(final_response.get("response", "{}") or "{}")
-        return True
-    except json.JSONDecodeError:
-        return False
+    # 响应信封能被 read_json_file 解析即证明文件不是半写状态；
+    # response 字段是模型自然语言回答（真实模型下是 markdown 文本），只要求非空。
+    response_text = final_response.get("response")
+    return bool(final_response.get("id")) and isinstance(response_text, str) and bool(response_text.strip())
 
 
 def run_scenario_gateway_processing_stop_case(args) -> int:
@@ -210,8 +232,9 @@ def run_scenario_gateway_processing_stop_case(args) -> int:
             request_id=request_id,
             requeued=requeue.requeued,
             processed=completion.processed,
-            after_requeue_processing=requeue.processing_path,
-            after_requeue_pending=requeue.pending_path,
+            throttled_processed=completion.throttled_processed,
+            after_requeue_processing_existed=requeue.processing_exists_after_requeue,
+            after_requeue_pending_existed=requeue.pending_exists_after_requeue,
             done_payload=completion.done_payload,
             verify=completion.verify,
         )

@@ -246,6 +246,12 @@ def _cmd_scenario_verify_files(agent, args, paths, final_ok):
     return final_ok
 
 
+def scenario_case_choices() -> list[str]:
+    """scenario-test --case 的合法值：happy/verification + runner 注册表 + all，单一事实来源。"""
+    registered = [name for name in _scenario_case_runners() if name not in {"happy", "verification"}]
+    return ["happy", "verification", *registered, "all"]
+
+
 def cmd_scenario_test(args) -> int:
 
     if args.case == "all":

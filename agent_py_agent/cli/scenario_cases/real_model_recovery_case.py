@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from ...agent.backends import ModelResponse
 from ...agent.backends.base import get_backend
@@ -148,7 +149,7 @@ def _real_model_recovery_setup(args):
 
 
 def _real_model_recovery_resume(paths, agent, task, loaded):
-    _append_parent_subagent_cross_day_resume_clues(agent.root, loaded)
+    _append_parent_subagent_cross_day_resume_clues(Path(agent.home_paths.owner_home_dir), loaded)
     reloaded_agent = load_scenario_agent(paths.config)
     reloaded_task = reloaded_agent.subagents.load(task.id)
     print(f"reloaded_status={reloaded_task.status} task_dir={reloaded_task.task_dir}")
