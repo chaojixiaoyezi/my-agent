@@ -1,5 +1,10 @@
 # Subagent Progress
 
+## 2026-06-10 合约身份 helper 去重
+
+- 幂等/修复合约身份两个文件合一，消除 3 个逐字重复的私有 helper；纯内部去重，
+  公开入口函数名和行为不变，focused 合约测试全绿。
+
 ## 2026-06-10 服务层 facade 清理与链路拉直
 
 - 删除 `services/__init__.py` 的 11 个 service re-export；manager 与调用方全部直连实现模块，导入链不再经过包枢纽。

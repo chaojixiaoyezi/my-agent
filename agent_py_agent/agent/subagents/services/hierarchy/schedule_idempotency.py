@@ -9,8 +9,10 @@ from typing import Any
 from ....common.value_parsing import text_value
 from ...models import SUBAGENT_DISPATCH_READY_STATUSES, SUBAGENT_REUSABLE_STATUSES, task_status_in
 from ..base import CreateRunParams
-from ..idempotency_contract_identity import idempotency_contract_identity_from_context_packs
-from ..repair_contract_identity import repair_contract_identity_from_context_packs
+from ..contract_identity import (
+    idempotency_contract_identity_from_context_packs,
+    repair_contract_identity_from_context_packs,
+)
 
 
 @dataclass(frozen=True)

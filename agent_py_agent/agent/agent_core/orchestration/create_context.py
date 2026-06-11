@@ -8,9 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
-from ...subagents.services.idempotency_contract_identity import (
-    idempotency_contract_identity_from_context_packs,
-)
+from ...subagents.services.contract_identity import idempotency_contract_identity_from_context_packs
 from ..runner.ref_fields import (
     _file_refs_from_value,
     _manifest_input_refs,

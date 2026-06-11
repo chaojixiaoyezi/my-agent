@@ -140,3 +140,12 @@ artifact refs。创建任务时给子代理的 `output_files` 是目标路径合
 - `services/__init__.py` 不再 re-export 各 service 类；`SubAgentManager` 与所有调用方直接导入实现模块。
 - 单模块包 `services/capabilities|runner_context|runner_result/` 打平为 `capability_service.py` / `runner_context_service.py` / `runner_result_service.py`。
 - `services/board/__init__.py`、`services/hierarchy/__init__.py`、`parsing/__init__.py` 尾部 re-export 删除；envelope/hierarchy 调用方直连实现模块，消除模块级循环导入。
+
+## 2026-06-10 合约身份去重合并
+
+- `idempotency_contract_identity.py` 与 `repair_contract_identity.py` 合并为
+  `contract_identity.py`：两类合约共用同一套 pack 遍历与字符串归一化 helper
+  （`_iter_packs` / `_string_tuple` / `_normalized_path`），原来逐字重复三份；
+  合并后各自身份计算用 `_idempotency_identity` / `_repair_identity` 区分，
+  共享 helper 留一份。调用方（create_context / create_constraints /
+  hierarchy/schedule_idempotency）改导入合并后模块，行为不变。

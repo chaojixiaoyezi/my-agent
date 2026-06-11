@@ -13,10 +13,8 @@ from ...contracts.state_machine import RunStateFacts, can_dispatch
 from ...subagents.models import SUBAGENT_REUSABLE_STATUSES, task_status_in
 from ...subagents.role_templates import role_template_snapshot_for_role
 from ...subagents.services.base import CreateRunParams
-from ...subagents.services.idempotency_contract_identity import (
+from ...subagents.services.contract_identity import (
     idempotency_contract_identity_from_context_packs,
-)
-from ...subagents.services.repair_contract_identity import (
     repair_contract_identity_from_context_packs,
 )
 from ..runner.ref_fields import params_output_refs

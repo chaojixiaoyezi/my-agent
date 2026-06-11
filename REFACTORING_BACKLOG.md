@@ -15,6 +15,21 @@ LLM: keep this file current. Do not copy old split plans back in.
 
 ## Completed Cleanup
 
+- 2026-06-10: 第三批合并（严格按"为可维护性合并、不为减文件数合并"原则）。
+  - contracts/：tool_protocol_v2_models→tool_protocol_v2、llm_activation_(models/fixtures/timeout_budget)→llm_activation_readiness、artifact_xlsx_reader→artifact_xlsx_contract。
+    都是"数据模型/读取器拆分自唯一逻辑父文件"的 facade 形态，类型在前逻辑在后读起来更顺。
+  - subagents/services/：idempotency_contract_identity + repair_contract_identity → contract_identity，
+    去重 3 个逐字相同的私有 helper（_iter_packs/_string_tuple/_normalized_path），两个身份计算改名区分。
+  - 清理阶段1遗留的空目录 compact_context_bundle/。
+  - 合计 −6 个源文件，纯结构整理零行为变化。
+  - 严格评估后**保留不合**（按原则该留）：lifecycle_runner_attempts/lifecycle_capability_records
+    （两件不相关职责）、_memory_types（2 消费者共享类型）、control_plane_codec（序列化层）、
+    web_markdown（HTML→MD 转换器）、filesystem_structured_read、home_runtime_compact_refs、
+    registry_auth（并进 704 行 execution 更难读）、artifact_* 格式验证器族、offline_* 合约族。
+    这些是命名自解释、职责单一的内聚文件，合进大文件降可读性。
+  - 验证：编译、ruff、focused tests、doc sync、offline matrix、code-size strict 0/0；
+    全量快速套件失败集是基线子集（仅 2 个基线既有失败，零新增）。
+
 - 2026-06-10: 阶段5 旧兼容审计与收尾（逐项核对写入方后处置，未盲删）。
   - 已删：home_layout 8 个旧根 memory 字段（memory_dir/daily/raw/hooks/lessons/routing/
     routing_index_md/indexes），bootstrap 不再创建旧根目录；默认路由表与默认 lessons 播种
