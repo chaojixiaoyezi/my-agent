@@ -32,7 +32,8 @@ jobs:
           python3 -m pip install -e ".[dev]"
 
       - name: Run all tests
-        run: python3 -m pytest -q --tb=short --timeout=120
+        # slow 测试有专门步骤（300s 限时）；这里排除，避免压力测试在 120s 限时下双跑超时
+        run: python3 -m pytest -q -m "not slow" --tb=short --timeout=120
 
       - name: Run slow tests
         run: python3 -m pytest -q -m slow --tb=short --timeout=300
