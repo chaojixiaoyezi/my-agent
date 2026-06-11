@@ -5,7 +5,6 @@ import json
 import re
 from collections.abc import Callable
 from pathlib import Path
-from zipfile import BadZipFile, ZipFile
 
 from .artifact_acceptance_models import (
     ArtifactAcceptanceReport,
@@ -17,24 +16,31 @@ from .artifact_acceptance_models import (
 )
 from .artifact_capabilities import artifact_capability
 from .artifact_collection_contract import collection_contract_findings
-from .artifact_csv_acceptance import validate_csv_artifact
-from .artifact_document_acceptance import (
-    document_quality_artifact_findings,
-    validate_docx_artifact,
-    validate_text_artifact,
-)
 from .artifact_html_contract import html_contract_findings, record_resource_ref
 from .artifact_html_refs import image_ref_findings, scan_html_refs
+from .artifact_openers import (
+    JsonView,
+    TabularView,
+    open_csv,
+    open_docx,
+    open_json,
+    open_pdf,
+    open_xlsx,
+)
 from .artifact_staged_evidence import staged_source_evidence_findings
 from .artifact_static_site_contract import validate_static_site_artifact
 from .artifact_structured_contracts import (
+    csv_contract_findings,
     json_contract_findings,
     markdown_integrity_findings,
     markdown_local_reference_findings,
     markdown_section_findings,
     text_size_findings,
 )
-from .artifact_xlsx_contract import xlsx_contract_findings
+from .artifact_xlsx_contract import (
+    required_columns_with_blank_values,
+)
+from .gates.document_content import document_content_quality_findings
 
 ArtifactValidator = Callable[[ArtifactAcceptanceRequest], ArtifactAcceptanceReport]
 
@@ -227,11 +233,56 @@ def _validate_markdown_request(request: ArtifactAcceptanceRequest) -> ArtifactAc
 
 
 def _validate_text_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
-    return validate_text_artifact(Path(request.path), request.validation_contract, workspace_root=request.workspace_root)
+    path = Path(request.path)
+    if path.stat().st_size <= 0:
+        return _report_with_finding(path, "txt", ArtifactFinding("ARTIFACT_EMPTY", "hard", "Artifact is empty."))
+    findings = document_quality_artifact_findings(
+        path, request.validation_contract, workspace_root=request.workspace_root or path.parent
+    )
+    return ArtifactAcceptanceReport(ok=True, artifact_ref=str(path), artifact_kind="txt", findings=findings)
 
 
 def _validate_csv_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
-    return validate_csv_artifact(Path(request.path), request.validation_contract)
+    return _validate_csv(Path(request.path), request.validation_contract)
+
+
+def _validate_csv(path: Path, validation_contract: dict[str, object] | None = None) -> ArtifactAcceptanceReport:
+    contract = validation_contract or {}
+    opened = open_csv(path)
+    if opened.finding is not None:
+        return _report_with_finding(path, "csv", opened.finding)
+    rows = opened.view.rows if isinstance(opened.view, TabularView) else []
+    if not rows or not any(cell.strip() for cell in rows[0]):
+        finding = ArtifactFinding(
+            code="CSV_HEADER_MISSING",
+            severity="hard",
+            message="CSV must include a non-empty header row.",
+        )
+        return _report_with_finding(path, "csv", finding)
+    data_rows = [row for row in rows[1:] if any(cell.strip() for cell in row)]
+    min_data_rows = _csv_min_data_rows(contract)
+    if len(data_rows) < min_data_rows:
+        finding = ArtifactFinding(
+            code="CSV_INSUFFICIENT_DATA_ROWS",
+            severity="hard",
+            message="CSV data row count is below validation_contract.min_data_rows.",
+            value=f"{len(data_rows)}<{min_data_rows}",
+        )
+        return _report_with_finding(path, "csv", finding)
+    findings = csv_contract_findings(path, rows, contract)
+    return ArtifactAcceptanceReport(
+        ok=not any(item.severity == "hard" for item in findings),
+        artifact_ref=str(path),
+        artifact_kind="csv",
+        findings=findings,
+    )
+
+
+def _csv_min_data_rows(validation_contract: dict[str, object]) -> int:
+    try:
+        return max(0, int(validation_contract.get("min_data_rows", 1)))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _validate_xlsx_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
@@ -247,7 +298,14 @@ def _validate_pdf_request(request: ArtifactAcceptanceRequest) -> ArtifactAccepta
 
 
 def _validate_docx_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
-    return validate_docx_artifact(Path(request.path), request.validation_contract, workspace_root=request.workspace_root)
+    path = Path(request.path)
+    opened = open_docx(path)
+    if opened.finding is not None:
+        return _report_with_finding(path, "docx", opened.finding)
+    findings = document_quality_artifact_findings(
+        path, request.validation_contract, workspace_root=request.workspace_root or path.parent
+    )
+    return ArtifactAcceptanceReport(ok=True, artifact_ref=str(path), artifact_kind="docx", findings=findings)
 
 
 def _validate_generic_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
@@ -255,23 +313,10 @@ def _validate_generic_request(request: ArtifactAcceptanceRequest) -> ArtifactAcc
 
 
 def _validate_json(path: Path, validation_contract: dict[str, object] | None = None) -> ArtifactAcceptanceReport:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        finding = ArtifactFinding(
-            code="JSON_INVALID",
-            severity="hard",
-            message=f"Invalid JSON: {exc.msg}",
-            location=str(exc.pos),
-        )
-        return _report_with_finding(path, "json", finding)
-    if not isinstance(value, (dict, list)):
-        finding = ArtifactFinding(
-            code="JSON_UNEXPECTED_TOP_LEVEL",
-            severity="hard",
-            message="JSON top-level must be object or array.",
-        )
-        return _report_with_finding(path, "json", finding)
+    opened = open_json(path)
+    if opened.finding is not None:
+        return _report_with_finding(path, "json", opened.finding)
+    value = opened.view.value if isinstance(opened.view, JsonView) else None
     findings = json_contract_findings(path, value, validation_contract or {})
     return ArtifactAcceptanceReport(
         ok=not any(item.severity == "hard" for item in findings),
@@ -438,26 +483,12 @@ def _validate_xlsx(
     *,
     workspace_root: Path | None = None,
 ) -> ArtifactAcceptanceReport:
-    try:
-        with ZipFile(path) as workbook:
-            names = set(workbook.namelist())
-    except (BadZipFile, OSError) as exc:
-        finding = ArtifactFinding(code="XLSX_INVALID", severity="hard", message=f"Invalid XLSX package: {exc}")
-        return _report_with_finding(path, "xlsx", finding)
-    missing_parts = _missing_xlsx_parts(names)
-    if missing_parts:
-        finding = ArtifactFinding(
-            code="XLSX_INVALID_PACKAGE",
-            severity="hard",
-            message="XLSX package is missing required workbook parts.",
-            value=",".join(missing_parts),
-        )
-        return _report_with_finding(path, "xlsx", finding)
-    open_finding = _xlsx_open_finding(path)
-    if open_finding is not None:
-        return _report_with_finding(path, "xlsx", open_finding)
+    opened = open_xlsx(path)
+    if opened.finding is not None:
+        return _report_with_finding(path, "xlsx", opened.finding)
+    view = opened.view if isinstance(opened.view, TabularView) else TabularView()
     findings = advisory_artifact_findings([
-        *xlsx_contract_findings(path, validation_contract),
+        *_xlsx_structure_findings(path, view, validation_contract or {}),
         *staged_source_evidence_findings(validation_contract or {}, workspace_root or path.parent),
         *collection_contract_findings(validation_contract or {}, workspace_root or path.parent),
     ])
@@ -469,20 +500,65 @@ def _validate_xlsx(
     )
 
 
+def _xlsx_structure_findings(path: Path, view: TabularView, contract: dict[str, object]) -> list[ArtifactFinding]:
+    findings: list[ArtifactFinding] = []
+    required_sheets = _positive_int(contract.get("required_sheets_min"))
+    if required_sheets > 0:
+        actual = len([name for name in view.names if name.startswith("xl/worksheets/") and name.endswith(".xml")])
+        if actual < required_sheets:
+            findings.append(ArtifactFinding(
+                code="XLSX_TOO_FEW_SHEETS",
+                severity="hard",
+                message=f"Workbook has {actual} sheets, expected at least {required_sheets}.",
+                location=str(path),
+                value=str(actual),
+            ))
+    required_columns = _required_columns(contract.get("required_columns"))
+    if required_columns:
+        missing = [column for column in required_columns if column not in view.text]
+        if missing:
+            findings.append(ArtifactFinding(
+                code="XLSX_MISSING_REQUIRED_COLUMNS",
+                severity="hard",
+                message="Workbook is missing required columns.",
+                location=str(path),
+                value=",".join(missing),
+            ))
+        blank_columns = required_columns_with_blank_values(view.tables, required_columns)
+        if blank_columns:
+            findings.append(ArtifactFinding(
+                code="XLSX_REQUIRED_COLUMN_EMPTY_VALUES",
+                severity="hard",
+                message="Workbook has blank values in required columns.",
+                location=str(path),
+                value=",".join(blank_columns),
+            ))
+    return findings
+
+
+def _required_columns(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
+def _positive_int(value: object) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
+
+
 def _validate_pdf(
     path: Path,
     validation_contract: dict[str, object] | None = None,
     *,
     workspace_root: Path | None = None,
 ) -> ArtifactAcceptanceReport:
-    data = path.read_bytes()
-    if not data.startswith(b"%PDF-") or b"%%EOF" not in data[-2048:]:
-        finding = ArtifactFinding(
-            code="PDF_INVALID_SIGNATURE",
-            severity="hard",
-            message="PDF is missing %PDF header or EOF marker.",
-        )
-        return _report_with_finding(path, "pdf", finding)
+    opened = open_pdf(path)
+    if opened.finding is not None:
+        return _report_with_finding(path, "pdf", opened.finding)
     findings = advisory_artifact_findings([
         *collection_contract_findings(validation_contract or {}, workspace_root or path.parent),
         *document_quality_artifact_findings(path, validation_contract, workspace_root=workspace_root or path.parent),
@@ -493,38 +569,6 @@ def _validate_pdf(
         artifact_kind="pdf",
         findings=findings,
     )
-
-
-def _missing_xlsx_parts(names: set[str]) -> list[str]:
-    missing: list[str] = []
-    if "[Content_Types].xml" not in names:
-        missing.append("[Content_Types].xml")
-    if "xl/workbook.xml" not in names:
-        missing.append("xl/workbook.xml")
-    if not any(name.startswith("xl/worksheets/") and name.endswith(".xml") for name in names):
-        missing.append("xl/worksheets/*.xml")
-    return missing
-
-
-def _xlsx_open_finding(path: Path) -> ArtifactFinding | None:
-    try:
-        from openpyxl import load_workbook
-    except ImportError:
-        return None
-    try:
-        workbook = load_workbook(path, read_only=True, data_only=True)
-        try:
-            if not workbook.sheetnames:
-                return ArtifactFinding("XLSX_NO_VISIBLE_SHEETS", "hard", "XLSX workbook has no visible sheets.")
-        finally:
-            workbook.close()
-    except Exception as exc:
-        return ArtifactFinding(
-            code="XLSX_INVALID_PACKAGE",
-            severity="hard",
-            message=f"XLSX cannot be opened by the workbook reader: {exc}",
-        )
-    return None
 
 
 def _validate_generic(path: Path) -> ArtifactAcceptanceReport:
@@ -556,6 +600,41 @@ def binary_signature_finding(path: Path) -> ArtifactFinding | None:
         location=str(path),
         value=kind_for_path(path),
     )
+
+
+def document_quality_artifact_findings(
+    path: Path,
+    validation_contract: dict[str, object] | None,
+    *,
+    workspace_root: Path,
+) -> list[ArtifactFinding]:
+    contract = _document_quality_contract(validation_contract)
+    if not contract:
+        return []
+    return advisory_artifact_findings([
+        ArtifactFinding(
+            code=finding.code,
+            severity="hard",
+            message=finding.message or "Document quality contract failed.",
+            location=_finding_location(finding.evidence),
+            value=json.dumps(finding.evidence, ensure_ascii=False, sort_keys=True),
+        )
+        for finding in document_content_quality_findings(path, workspace_root=workspace_root, contract=contract)
+    ])
+
+
+def _document_quality_contract(validation_contract: dict[str, object] | None) -> dict[str, object]:
+    if not isinstance(validation_contract, dict):
+        return {}
+    value = validation_contract.get("document_quality_contract")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _finding_location(evidence: dict[str, object]) -> str:
+    location = evidence.get("location")
+    if isinstance(location, dict):
+        return json.dumps(location, ensure_ascii=False, sort_keys=True)
+    return ""
 
 
 def _report_with_finding(path: Path, kind: str, finding: ArtifactFinding) -> ArtifactAcceptanceReport:

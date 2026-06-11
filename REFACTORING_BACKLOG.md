@@ -15,6 +15,26 @@ LLM: keep this file current. Do not copy old split plans back in.
 
 ## Completed Cleanup
 
+- 2026-06-10: 产物格式验证器重构为"打开器注册表 + 通用检查器"两层（先看 终端应用/
+  长期助手/会话运行时/工具运行时 实证：四家都是"打开⊥验证正交 + 薄注册表 + 格式专属校验单独层"，
+  没有一家把格式专属逻辑塞进一个通用检查器）。
+  - 新增 `artifact_openers.py`（第 1 层薄注册表）：`OPENERS = {格式: 打开器}`，每个打开器只
+    把 bytes 变结构化视图或返回"打不开"finding（XLSX_INVALID/CSV_INVALID/PDF_INVALID_SIGNATURE/
+    DOCX_INVALID/JSON_* 等逐字保留），不做内容校验。未登记格式没有打开器 → 落第 0 层
+    （存在/非空/残桩，格式无关），守"开放世界禁止封闭枚举"。
+  - 第 0 层（存在/非空/残桩）已存在；第 2 层结构校验改为吃打开器产出的视图，不再重复打开。
+  - 删 `artifact_csv_acceptance.py`、`artifact_document_acceptance.py`：打开逻辑进 openers，
+    csv header/min_rows、docx/txt/pdf quality 校验进 artifact_acceptance.py。
+  - `artifact_xlsx_contract.py` 退化为纯 xlsx 解析模块（workbook_text/worksheet_tables/
+    required_columns_with_blank_values，供打开器用）；死的 xlsx_contract_findings 块删除，
+    xlsx 结构校验（TOO_FEW_SHEETS/MISSING_REQUIRED_COLUMNS/REQUIRED_COLUMN_EMPTY_VALUES）
+    移入 acceptance 的 `_xlsx_structure_findings`，吃视图不重开。
+  - 新增格式成本：简单格式≈OPENERS 注册一行（落通用校验）；带专属结构校验≈再加一薄函数。
+  - static_site 不并：它委托 subagents/static_site/validator.py 做多文件跨文件 DOM/JS 校验，
+    是子系统不是单文件格式打开器，按"职责清晰不硬并"保留。
+  - 逐位不变：47 个格式验收测试全过，全量快速套件失败集是基线子集（零新增），
+    code-size strict 0/0、doc sync、offline matrix、replay 全过。
+
 - 2026-06-10: 第三批合并（严格按"为可维护性合并、不为减文件数合并"原则）。
   - contracts/：tool_protocol_v2_models→tool_protocol_v2、llm_activation_(models/fixtures/timeout_budget)→llm_activation_readiness、artifact_xlsx_reader→artifact_xlsx_contract。
     都是"数据模型/读取器拆分自唯一逻辑父文件"的 facade 形态，类型在前逻辑在后读起来更顺。
