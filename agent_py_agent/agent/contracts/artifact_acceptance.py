@@ -23,9 +23,11 @@ from .artifact_openers import (
     TabularView,
     open_csv,
     open_docx,
+    open_fallback,
     open_json,
     open_pdf,
     open_xlsx,
+    opener_for,
 )
 from .artifact_staged_evidence import staged_source_evidence_findings
 from .artifact_static_site_contract import validate_static_site_artifact
@@ -309,7 +311,105 @@ def _validate_docx_request(request: ArtifactAcceptanceRequest) -> ArtifactAccept
 
 
 def _validate_generic_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
-    return _validate_generic(Path(request.path))
+    path = Path(request.path)
+    kind = _request_capability(request).kind or kind_for_path(path)
+    contract = request.validation_contract or {}
+    # 运行时发现的插件打开器优先（不改源码、不重启即可深度校验新格式）。
+    plugin_opener = opener_for(kind)
+    if plugin_opener is not None and kind not in _BUILTIN_OPENER_KINDS:
+        return _validate_via_plugin_opener(path, kind, plugin_opener, contract)
+    # 合同声明了结构要求时，用通用兜底打开器按"长相"尽量检查；否则回第 0 层。
+    if _has_generic_structure_requirements(contract):
+        return _validate_generic_structure(path, kind, contract)
+    return _validate_generic(path)
+
+
+_BUILTIN_OPENER_KINDS = {"csv", "xlsx", "pdf", "docx", "json"}
+
+
+def _has_generic_structure_requirements(contract: dict[str, object]) -> bool:
+    return any(
+        contract.get(key)
+        for key in ("min_size", "required_sections", "required_strings", "required_regex", "required_files")
+    )
+
+
+def _validate_via_plugin_opener(path: Path, kind: str, opener, contract: dict[str, object]) -> ArtifactAcceptanceReport:
+    try:
+        opened = opener(path)
+    except Exception as exc:  # 插件打开器异常隔离为结构化打不开 finding
+        finding = ArtifactFinding(code="ARTIFACT_OPENER_FAILED", severity="hard", message=f"opener for {kind} failed: {exc}")
+        return _report_with_finding(path, kind, finding)
+    if getattr(opened, "finding", None) is not None:
+        return _report_with_finding(path, kind, opened.finding)
+    findings = _generic_view_findings(path, getattr(opened, "view", None), contract)
+    return ArtifactAcceptanceReport(
+        ok=not any(item.severity == "hard" for item in findings),
+        artifact_ref=str(path),
+        artifact_kind=kind,
+        findings=findings,
+    )
+
+
+def _validate_generic_structure(path: Path, kind: str, contract: dict[str, object]) -> ArtifactAcceptanceReport:
+    if path.stat().st_size <= 0:
+        return _report_with_finding(path, kind, ArtifactFinding("ARTIFACT_EMPTY", "hard", "Artifact is empty."))
+    opened = open_fallback(path)
+    findings = _generic_view_findings(path, opened.view, contract)
+    return ArtifactAcceptanceReport(
+        ok=not any(item.severity == "hard" for item in findings),
+        artifact_ref=str(path),
+        artifact_kind=kind,
+        findings=findings,
+    )
+
+
+def _generic_view_findings(path: Path, view: object, contract: dict[str, object]) -> list[ArtifactFinding]:
+    """格式无关的声明字段校验：吃任意打开器视图的文本/zip 成员，永不随格式增长。"""
+    text = _view_text(view)
+    zip_names = _view_zip_names(view)
+    findings: list[ArtifactFinding] = []
+    findings.extend(text_size_findings(path, text, contract))
+    findings.extend(markdown_section_findings(path, text, contract))
+    findings.extend(_required_text_findings(path, text, contract))
+    findings.extend(_forbidden_text_findings(path, text, contract))
+    findings.extend(_required_member_findings(path, zip_names, contract))
+    return findings
+
+
+def _view_text(view: object) -> str:
+    for attr in ("text",):
+        value = getattr(view, attr, None)
+        if isinstance(value, str):
+            return value
+    rows = getattr(view, "rows", None)
+    if isinstance(rows, list):
+        return "\n".join("\t".join(str(cell) for cell in row) for row in rows)
+    return ""
+
+
+def _view_zip_names(view: object) -> set[str]:
+    for attr in ("zip_names", "names"):
+        value = getattr(view, attr, None)
+        if isinstance(value, set):
+            return value
+    return set()
+
+
+def _required_member_findings(path: Path, zip_names: set[str], contract: dict[str, object]) -> list[ArtifactFinding]:
+    required = contract.get("required_files")
+    if not isinstance(required, list) or not zip_names:
+        return []
+    missing = [str(name) for name in required if str(name) and str(name) not in zip_names]
+    if not missing:
+        return []
+    return [ArtifactFinding(
+        code="ARTIFACT_REQUIRED_MEMBER_MISSING",
+        severity="hard",
+        message="Archive is missing required members.",
+        location=str(path),
+        value=",".join(missing),
+    )]
 
 
 def _validate_json(path: Path, validation_contract: dict[str, object] | None = None) -> ArtifactAcceptanceReport:

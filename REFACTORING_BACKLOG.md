@@ -15,6 +15,19 @@ LLM: keep this file current. Do not copy old split plans back in.
 
 ## Completed Cleanup
 
+- 2026-06-10: 产物验收的"运行时遇到未登记格式"能力补齐（先实证 长期助手/工具运行时/
+  终端应用 三家都是"通用兜底降级 + 插件热加载"，会话运行时 偏严格拒绝；按三家做法补齐）。
+  - 通用兜底打开器 `open_fallback`：未登记格式按"长相"产 GenericView（文本/zip 成员），
+    让未知格式也能跑声明字段校验（required_strings/required_sections/min_size/required_files），
+    格式无关、永不随格式增长；无声明则落第 0 层放行，不拒绝（守开放世界铁律）。
+  - 打开器热加载：`~/.my-agent/openers/`（或 MY_AGENT_OPENERS_DIR）目录扫描，丢一个十几行
+    打开器脚本即可支持新格式深度校验，不改主代码、不重启。坏脚本隔离加载（异常只记
+    OPENER_LOAD_ERRORS、不打断主链路、好打开器不丢）；内置格式不可被插件覆盖。
+  - 钉子测试 test_artifact_openers_fallback.py（6 项）：未知格式兜底/放行/zip成员/热加载/
+    坏脚本隔离/内置不可覆盖。文档 docs/modules/contracts/artifact-openers.md。
+  - 47 个格式验收测试仍逐位过；全量快速套件失败集是基线子集（零新增）；
+    code-size strict 0/0、doc sync、offline matrix 全过。
+
 - 2026-06-10: 产物格式验证器重构为"打开器注册表 + 通用检查器"两层（先看 终端应用/
   长期助手/会话运行时/工具运行时 实证：四家都是"打开⊥验证正交 + 薄注册表 + 格式专属校验单独层"，
   没有一家把格式专属逻辑塞进一个通用检查器）。
