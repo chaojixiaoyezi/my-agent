@@ -466,3 +466,20 @@ class TestConfigWarnings:
         data = {"model_backend": "bad"}
         normalized, warnings = normalize_agent_config(data)
         assert any("echo" in w for w in warnings)
+
+
+class TestNormalizeGatewayWorkers:
+    """R2 真实场景抓到的回归：worker 数下限误写成默认值 3，2 被静默钳回 3。"""
+
+    def test_normalize_gateway_request_workers_accepts_small_counts(self):
+        """1 和 2 都是合法 worker 数，不允许被钳到默认值。"""
+        for value in (1, 2):
+            normalized, warnings = normalize_agent_config({"gateway_request_workers": value})
+            assert normalized["gateway_request_workers"] == value
+            assert len(warnings) == 0
+
+    def test_normalize_gateway_request_workers_rejects_zero(self):
+        """0 个 worker 无法处理请求，回退默认并告警。"""
+        normalized, warnings = normalize_agent_config({"gateway_request_workers": 0})
+        assert normalized["gateway_request_workers"] == 3
+        assert len(warnings) > 0
