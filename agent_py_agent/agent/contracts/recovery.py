@@ -195,6 +195,8 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
     "EFFECTIVE_CONTRACT_MISSING": CodePolicy("contract", "repairable", "repair_effective_contract"),
     "UNKNOWN_VERIFIER": CodePolicy("contract", "repairable", "repair_effective_contract"),
     "TOOL_NOT_REGISTERED": CodePolicy("tool", "repairable", "choose_registered_tool"),
+    "TOOL_NOT_FOUND": CodePolicy("tool", "repairable", "choose_registered_tool"),
+    "TOOL_NAME_REQUIRED": CodePolicy("tool", "repairable", "repair_tool_call"),
     "TOOL_MANIFEST_EFFECT_MISSING": CodePolicy("tool", "repairable", "choose_registered_tool"),
     # 修复动作特例
     "TARGET_COVERAGE_MISSING": CodePolicy("evidence", "repairable", "continue"),
@@ -233,6 +235,8 @@ _FAMILY_POLICIES: tuple[tuple[str, CodePolicy], ...] = tuple(
             ("TOOL_PROTOCOL_", CodePolicy("tool", "repairable", "repair_tool_call")),
             ("TOOL_MANIFEST_", CodePolicy("tool", "repairable", "choose_registered_tool")),
             ("TOOL_INVALID_", CodePolicy("tool", "repairable", "repair_tool_arguments")),
+            # 模型自己可改正的调用形错误（缺参/类型错/参数被拦），修参数后重试
+            ("TOOL_PARAMETER_", CodePolicy("tool", "repairable", "repair_tool_arguments")),
             ("TOOL_", CodePolicy("tool", "", "repair_tool_arguments")),
             # path / approval
             ("PATH_", CodePolicy("path", "repairable", "fix_path_within_allowed_roots")),
