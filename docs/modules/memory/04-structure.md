@@ -64,6 +64,9 @@
 - compact apply 的 id、metadata、restore refs、bundle、ledger、self-check 和 context markdown 属于同一条
   apply 链路，集中在 `compact_apply/__init__.py`；`compact_apply/work_state.py` 只负责构建续接所需的
   work-state snapshot。
+- compact 连续失败熔断在 `compact_circuit_breaker.py`：状态持久化在
+  `workspace/compact/circuit_breaker.json`，连续失败达阈值即 open，冷却期内 `run_memory_compact_auto_cycle`
+  跳过 apply 返回 `blocked_circuit_open`，避免 thrash loop 空烧；一次成功清零回 closed。
 - compact resume 的入口集中组装 consistency、recommended paths、handoff、completion prompt 和 continue
   packet；`completion.py`、`handoff.py`、`focus.py`、`failsafe.py`、`blocked.py`、`io.py` 分别保留为真实职责边界。
 - `compact_resume/focus.py`、`compact_state.py` 和 `compact_work_state/archive.py` 只消费结构化工具记录、

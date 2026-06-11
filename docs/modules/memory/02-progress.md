@@ -1,5 +1,14 @@
 # Memory Progress
 
+## 2026-06-11 compact 连续失败熔断（防 thrash）
+
+- 新增 `compact_circuit_breaker.py`：compact 连续失败达阈值（默认 3）即 open，
+  冷却期（默认 300s）内 `run_memory_compact_auto_cycle` 跳过 apply 返回
+  `blocked_circuit_open`，避免反复失败空烧 API（参考 终端交互 circuit breaker，
+  实测 thrash 可日烧 250K calls）。冷却过后 half-open 放行重试；一次成功清零回 closed。
+- 状态持久化 `workspace/compact/circuit_breaker.json`，跨 turn 生效；`now` 可注入便于测试。
+- 钉子测试 `test_compact_circuit_breaker.py`（7 项：阈值/开合/冷却/清零/集成跳过）。
+
 ## 2026-06-10 compact_context_bundle 包→单模块
 
 - 3 文件（match/refs/init 转发）合并为 1 个 `compact_context_bundle.py`，删除一跳 facade；

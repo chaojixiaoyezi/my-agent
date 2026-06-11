@@ -10,6 +10,11 @@ from typing import Any
 
 from .compact import MemoryCompactPlanOptions
 from .compact_apply import MemoryCompactApplyOptions, apply_memory_compact
+from .compact_circuit_breaker import (
+    compact_circuit_open,
+    read_compact_circuit,
+    record_compact_outcome,
+)
 from .compact_resume import MemoryCompactResumeOptions, build_memory_compact_resume
 from .compact_suggest import MemoryCompactSuggestOptions, build_memory_compact_suggestion
 from .schema import (
@@ -33,6 +38,7 @@ class MemoryCompactAutoCycleOptions:
     trigger_reason: str = "normal_threshold"
     trigger_source: str = "token_budget"
     force_trigger: bool = False
+    now: float = 0.0  # 熔断时间基准；0 表示用真实 time.time()（仅测试注入）
 
 
 @dataclass(frozen=True)
@@ -52,6 +58,10 @@ def run_memory_compact_auto_cycle(root: str | Path, options: MemoryCompactAutoCy
         return _cycle_payload(_AutoCyclePayloadOptions(workspace, options, suggestion, "skipped_below_threshold"))
     if not options.allow_apply:
         return _cycle_payload(_AutoCyclePayloadOptions(workspace, options, suggestion, "needs_user_confirmation"))
+    now = options.now or _compact_now()
+    if compact_circuit_open(read_compact_circuit(workspace), now=now):
+        # 连续失败熔断中：跳过自动 compact，让上层 stop_and_request_review，不空烧重试。
+        return _cycle_payload(_AutoCyclePayloadOptions(workspace, options, suggestion, "blocked_circuit_open"))
     apply_result = apply_memory_compact(workspace, MemoryCompactApplyOptions(plan_options=options.plan_options))
     resume = build_memory_compact_resume(
         workspace,
@@ -63,9 +73,16 @@ def run_memory_compact_auto_cycle(root: str | Path, options: MemoryCompactAutoCy
         ),
     )
     status = COMPACT_STATUS_READY_AFTER_ACTION_GUARD if resume["action_guard"]["allowed_to_continue"] else "blocked_after_action_guard"
+    record_compact_outcome(workspace, ok=not str(status).startswith("blocked"), status=status, now=now)
     return _cycle_payload(
         _AutoCyclePayloadOptions(workspace, options, suggestion, status, apply_result=apply_result, resume=resume)
     )
+
+
+def _compact_now() -> float:
+    import time
+
+    return time.time()
 
 
 def _suggestion(workspace: Path, options: MemoryCompactAutoCycleOptions) -> dict[str, Any]:
@@ -90,7 +107,7 @@ def _cycle_payload(request: _AutoCyclePayloadOptions) -> dict[str, Any]:
     return {
         "version": COMPACT_AUTO_CYCLE_SCHEMA.version,
         "schema": runtime_memory_schema_payload(COMPACT_AUTO_CYCLE_SCHEMA),
-        "ok": request.status not in {"blocked_after_action_guard"},
+        "ok": not str(request.status).startswith("blocked"),
         "event_type": "compact_auto_cycle",
         "mode": "auto_cycle",
         "status": request.status,
