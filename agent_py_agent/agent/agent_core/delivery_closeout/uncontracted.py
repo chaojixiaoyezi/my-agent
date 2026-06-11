@@ -583,6 +583,12 @@ def _first_record_ref(item: dict[str, Any], keys: tuple[str, ...]) -> str:
     return ""
 
 
+# 明显非交付物的临时/锁/缓存后缀：这些即使写在输出目录也不当作交付候选。
+_NON_DELIVERABLE_SUFFIXES = frozenset(
+    {".lock", ".tmp", ".temp", ".swp", ".swo", ".part", ".crdownload", ".pyc", ".pyo"}
+)
+
+
 def _is_task_output_file(path: Path, target: dict[str, Any]) -> bool:
     output_root = target.get("path")
     if not isinstance(output_root, Path):
@@ -597,7 +603,13 @@ def _is_task_output_file(path: Path, target: dict[str, Any]) -> bool:
             return False
     if not path.is_file():
         return False
-    return path.suffix.lower() in {".md", ".txt", ".json", ".html", ".csv", ".xlsx", ".docx", ".pptx"}
+    # 开放世界：输出目录里成功写出的文件都算候选交付物，交给验收层按格式核验
+    # （已登记格式走 opener，未登记走通用兜底 + 第 0 层）。只排除明显的临时/锁/缓存
+    # 与隐藏文件——不用封闭格式白名单，否则主代理声称交付的 .pdf 等格式会被无声忽略，
+    # 连被验收的机会都没有（R3 实测：markdown 改名成 .pdf 蒙混过关）。
+    if path.name.startswith("."):
+        return False
+    return path.suffix.lower() not in _NON_DELIVERABLE_SUFFIXES
 
 
 def _delivery_mode_for_artifacts(artifacts: list[dict[str, Any]]) -> str:

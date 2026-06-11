@@ -688,6 +688,62 @@ def test_uncontracted_task_output_blocks_markdown_trailing_heading(tmp_path: Pat
     assert "MARKDOWN_TRAILING_EMPTY_HEADING" in {finding["code"] for finding in findings}
 
 
+def test_uncontracted_task_output_collects_pdf_and_blocks_fake_pdf(tmp_path: Path):
+    """R3 实测回归：markdown 改名成 .pdf 应被收集并验收失败，不再被无声忽略。"""
+    from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import (
+        _current_run_task_output_artifacts,
+    )
+
+    task_root, output_dir, work_dir = _make_task_workspace(tmp_path)
+    artifact = output_dir / "report.pdf"
+    artifact.write_text("# Report\n\n这其实是 markdown，不是 PDF。\n", encoding="utf-8")
+    write_record = _write_file_archive_record()
+    write_record["call_id"] = "fake-pdf"
+    write_record["parameters"] = {
+        "tool": "write_file",
+        "path": str(artifact),
+        "content": artifact.read_text(encoding="utf-8"),
+    }
+    params = replace(
+        _delivery_params(archive_tool_calls=[write_record]),
+        task_attributes={"run_workspace": _workspace_attrs(task_root, output_dir, work_dir)},
+    )
+
+    artifacts = _current_run_task_output_artifacts(params, workspace_root=tmp_path)
+
+    assert len(artifacts) == 1
+    assert artifacts[0]["ok"] is False
+    findings = artifacts[0]["acceptance_report"]["findings"]
+    assert "PDF_INVALID_SIGNATURE" in {finding["code"] for finding in findings}
+
+
+def test_uncontracted_task_output_skips_temp_and_lock_files(tmp_path: Path):
+    """临时/锁文件即使写在输出目录也不算交付候选。"""
+    from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import (
+        _current_run_task_output_artifacts,
+    )
+
+    task_root, output_dir, work_dir = _make_task_workspace(tmp_path)
+    report = _write_task_report(output_dir)
+    lock = output_dir / "report.md.lock"
+    lock.write_text("", encoding="utf-8")
+    records = []
+    for call_id, path in (("report", report), ("lockfile", lock)):
+        record = _write_file_archive_record()
+        record["call_id"] = call_id
+        record["parameters"] = {"tool": "write_file", "path": str(path)}
+        records.append(record)
+    params = replace(
+        _delivery_params(archive_tool_calls=records),
+        task_attributes={"run_workspace": _workspace_attrs(task_root, output_dir, work_dir)},
+    )
+
+    artifacts = _current_run_task_output_artifacts(params, workspace_root=tmp_path)
+
+    paths = {Path(a["path"]).name for a in artifacts}
+    assert "report.md.lock" not in paths
+
+
 def test_uncontracted_task_output_blocks_short_overwrite_after_unclosed_write_recovery(tmp_path: Path):
     from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import (
         _current_run_task_output_artifacts,
