@@ -13,6 +13,38 @@ LLM: keep this file current. Do not copy old split plans back in.
 
 ## Active Items
 
+### 多代理产物交付链路系统性脱节（R4 实测挖出，待专项修复）
+
+R2/R3/R4 真实任务轮串出同一条主线：子代理产出 → 主代理汇总 → 最终交付
+这条链路有系统性脱节。R4（GoAttack 复刻）最典型：3 个子代理因写权限被锁
+全部阻塞、提交 capability_request，主代理未处理、9 轮草草交付 1 个
+requirements.txt 却判 ok=true。拆解为四个独立可修子项（详见
+docs/audits/R4-goattack-20260611.md）：
+
+1. **子代理产物路径对齐写权限边界**：派工时 output_files 应解析到子代理的
+   allowed_write_roots 内（如 work/agents/<id>/output/），而非 workspace 根；
+   路径声明统一相对化。根因见 subagents/context_bundle_contracts.py:94。
+2. **capability_request 在 run 模式的主代理处理回路**：未决请求必须触发解锁
+   或显式拒绝，不允许被静默跳过（R4 中主代理全程无处理痕迹）。
+3. **交付验收增加"声明产物对账"**：声明的 output_files 缺失应 block/标记
+   （R4 声明 ~40 实交 1 仍 ok=true）。与 R3 的"验收覆盖实际文件"互补——
+   R3 修了"实际文件要验"，这里缺"声明文件要在"。
+4. **主代理汇总子代理产出到最终交付位置**应是可靠收尾步骤，缺失时 block。
+
+### compact 工程鲁棒性补强（终端交互/终端应用 双源码印证，待实现）
+
+三方对比（docs/audits/，my-agent vs 终端交互 源码 vs 终端应用）显示
+my-agent 的 compact 设计领先（结构化续接 + 决策点推 + 主子代理分层），
+但缺三样 终端交互 和 终端应用 共同具备的鲁棒性机制，有现成蓝本可参考：
+
+1. **microcompact / tool-result 细粒度清理**：保留近 N 个 tool result、清理
+   更早的。蓝本 终端交互 src/services/compact/microCompact.ts + apiMicrocompact.ts。
+2. **thrash circuit breaker**：连续 N 次 compact 失败就停并报错。蓝本
+   终端交互 autoCompact.ts:257-265（3-strike，附 BQ 数据：thrash 浪费
+   250K API calls/天）。
+3. **单轮内 PTL retry**：单轮 context 溢出时丢最老 API round 重试。蓝本
+   终端交互 truncateHeadForPTLRetry。
+
 ## Completed Cleanup
 
 - 2026-06-10: 产物验收的"运行时遇到未登记格式"能力补齐（先实证 长期助手/工具运行时/
