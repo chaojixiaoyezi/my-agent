@@ -657,11 +657,31 @@ def _task_output_dir(params: ToolLoopExecuteParams | None) -> Path | None:
     return Path(text).expanduser().resolve(strict=False) if text else None
 
 
+# LLM: 任务过程区 work/(batch1 G1 实锤:写代码任务模型在 work/ 反复迭代调试代码
+#   28 次,最后只把 README 放 output/,代码这个主交付物滞留 work/,closeout 凭
+#   README 误判完成)。my-agent 的 output/work 二分本是组织约定,但对"代码既是
+#   过程又是成品"的任务,模型按开发习惯在 work/ 写完未必移交——与其用更硬的约定
+#   逼模型(加限制),不如让交付识别也认 work/ 顶层的模型成品(交付事实优先于
+#   位置,减少约定的认知负担)。只认顶层直接子文件、只走写入记录(系统状态文件
+#   不是模型 write_file 写的,天然不入;agents/compact/shared 等系统子目录排除)。
+# 函数用途: 取本 run 的过程区 work/ 目录(用于认其中模型写的顶层成品)。
+def _task_work_dir(params: ToolLoopExecuteParams | None) -> Path | None:
+    attrs = params.task_attributes if params is not None and isinstance(params.task_attributes, dict) else {}
+    workspace = attrs.get("run_workspace")
+    if not isinstance(workspace, dict):
+        return None
+    text = str(workspace.get("work_dir") or "").strip()
+    return Path(text).expanduser().resolve(strict=False) if text else None
+
+
 def _accepted_output_targets(params: ToolLoopExecuteParams) -> list[dict[str, Any]]:
     targets: list[dict[str, Any]] = []
     task_output = _task_output_dir(params)
     if task_output is not None:
         targets.append({"path": task_output, "kind": "dir", "scope": "task_output"})
+    work_dir = _task_work_dir(params)
+    if work_dir is not None:
+        targets.append({"path": work_dir, "kind": "work_area", "scope": "task_work_area"})
     targets.extend(_user_requested_output_targets(params))
     return _unique_targets(targets)
 
@@ -794,18 +814,26 @@ _NON_DELIVERABLE_SUFFIXES = frozenset(
 )
 
 
+# 函数用途: 判断写入路径是否落在某交付区(work_area=顶层直接子文件;file=精确;
+#   dir=区内递归)。从 _is_task_output_file 抽出以降嵌套。
+def _path_within_target(path: Path, output_root: Path, kind: str) -> bool:
+    if kind == "work_area":
+        return path.parent == output_root
+    if kind == "file":
+        return path == output_root
+    try:
+        path.relative_to(output_root)
+    except ValueError:
+        return False
+    return True
+
+
 def _is_task_output_file(path: Path, target: dict[str, Any]) -> bool:
     output_root = target.get("path")
     if not isinstance(output_root, Path):
         return False
-    if target.get("kind") == "file":
-        if path != output_root:
-            return False
-    else:
-        try:
-            path.relative_to(output_root)
-        except ValueError:
-            return False
+    if not _path_within_target(path, output_root, str(target.get("kind") or "")):
+        return False
     if not path.is_file():
         return False
     # 开放世界：输出目录里成功写出的文件都算候选交付物，交给验收层按格式核验
@@ -851,7 +879,7 @@ def _unique_targets(targets: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not isinstance(path, Path):
             continue
         kind = str(target.get("kind") or "")
-        if kind not in {"file", "dir"}:
+        if kind not in {"file", "dir", "work_area"}:
             continue
         key = (str(path), kind)
         if key in seen:

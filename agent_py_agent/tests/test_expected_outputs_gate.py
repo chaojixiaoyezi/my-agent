@@ -370,3 +370,32 @@ def test_self_declared_gap_gets_single_rework_then_passes(tmp_path: Path) -> Non
     report = json.loads((task_root / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
     assert report["ok"] is True
     assert report.get("quality_advisories"), "缺口事实保留给把关者"
+
+
+def test_workarea_top_level_products_recognized_as_delivery(tmp_path):
+    """batch1 G1 实锤:写代码任务模型在 work/ 迭代代码、最后只把 README 放 output/,
+    代码主交付物滞留 work/,closeout 凭 README 误判完成。修复:交付识别认 work/
+    顶层模型成品(交付事实优先位置),但排除 agents/compact 等系统子目录。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.delivery_closeout.uncontracted import (
+        _accepted_output_targets,
+        _is_task_output_file,
+    )
+
+    root = tmp_path.resolve()
+    (root / "output").mkdir()
+    (root / "work" / "agents").mkdir(parents=True)
+    (root / "work" / "tool.py").write_text("print('hi')\n", encoding="utf-8")
+    (root / "work" / "agents" / "canonical_state.json").write_text("{}", encoding="utf-8")
+    (root / "output" / "README.md").write_text("# doc", encoding="utf-8")
+    params = SimpleNamespace(
+        task_attributes={"run_workspace": {"output_dir": str(root / "output"), "work_dir": str(root / "work")}}
+    )
+    targets = _accepted_output_targets(params)
+    assert "task_work_area" in {t["scope"] for t in targets}, "work 区应进交付候选(否则代码留 work 漏认)"
+    assert any(_is_task_output_file(root / "work" / "tool.py", t) for t in targets), "work 顶层代码被认作交付"
+    assert not any(
+        _is_task_output_file(root / "work" / "agents" / "canonical_state.json", t) for t in targets
+    ), "work 系统子目录文件不认(只认顶层成品)"
+    assert any(_is_task_output_file(root / "output" / "README.md", t) for t in targets), "output 区识别不受影响"
