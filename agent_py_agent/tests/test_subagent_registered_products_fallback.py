@@ -6,7 +6,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.subagent_mixin import (
+    _is_self_negated_block,
     _ready_product_entry,
+    _recover_with_registered_products,
     _registered_ready_products,
     _structured_from_registered_products,
 )
@@ -14,6 +16,7 @@ from agent_py_agent.agent.artifacts.registry import (
     ArtifactRegistration,
     register_artifact,
 )
+from agent_py_agent.agent.subagents.model_runtime import SubAgentParsedOutput
 
 
 def _make_agent(run_id: str, workspace) -> SimpleNamespace:
@@ -114,3 +117,80 @@ def test_structured_from_registered_products_none_without_products(tmp_path):
         _make_agent("sub-3", workspace), SimpleNamespace(run_id="sub-3")
     )
     assert out is None
+
+
+# --- 自我否定兜底(g4w 实锤:子代理声明 BLOCKED 却已写 ready 产物) ---
+
+
+def test_is_self_negated_block_true_for_block_without_request():
+    s = SubAgentParsedOutput(found=True, ok=True, status="BLOCKED", capability_requests=[])
+    assert _is_self_negated_block(s) is True
+
+
+def test_is_self_negated_block_false_with_capability_request():
+    s = SubAgentParsedOutput(found=True, ok=True, status="BLOCKED", capability_requests=[{"need": "x"}])
+    assert _is_self_negated_block(s) is False
+
+
+def test_is_self_negated_block_false_for_done():
+    assert _is_self_negated_block(SubAgentParsedOutput(found=True, ok=True, status="DONE")) is False
+
+
+def test_recover_upgrades_self_negated_block_with_products(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _register_ready_product(workspace, "sub-b")
+    structured = SubAgentParsedOutput(
+        found=True, ok=True, status="BLOCKED", blocked_reason="缺少核心交付物", capability_requests=[]
+    )
+    out = _recover_with_registered_products(
+        _make_agent("sub-b", workspace), SimpleNamespace(run_id="sub-b"), structured
+    )
+    assert out.status == "DONE"
+    assert "声明阻塞" in out.summary  # 保留 caveat 留痕
+
+
+def test_recover_keeps_block_without_products(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    structured = SubAgentParsedOutput(found=True, ok=True, status="BLOCKED", capability_requests=[])
+    out = _recover_with_registered_products(
+        _make_agent("sub-c", workspace), SimpleNamespace(run_id="sub-c"), structured
+    )
+    assert out.status == "BLOCKED"  # 无 ready 产物 → 尊重真失败
+
+
+def test_recover_respects_capability_request_block(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _register_ready_product(workspace, "sub-d")
+    structured = SubAgentParsedOutput(
+        found=True, ok=True, status="BLOCKED", capability_requests=[{"need": "x"}]
+    )
+    out = _recover_with_registered_products(
+        _make_agent("sub-d", workspace), SimpleNamespace(run_id="sub-d"), structured
+    )
+    assert out.status == "BLOCKED"  # 正当求助即便有产物也不覆盖
+
+
+def test_recover_no_interfere_with_normal_done(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _register_ready_product(workspace, "sub-e")
+    structured = SubAgentParsedOutput(found=True, ok=True, status="DONE", summary="原始")
+    out = _recover_with_registered_products(
+        _make_agent("sub-e", workspace), SimpleNamespace(run_id="sub-e"), structured
+    )
+    assert out.status == "DONE"
+    assert out.summary == "原始"  # 正常 DONE 原样返回,不触碰
+
+
+def test_recover_parse_failure_with_products(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _register_ready_product(workspace, "sub-f")
+    structured = SubAgentParsedOutput(found=False, ok=False)  # 无可解析结果块
+    out = _recover_with_registered_products(
+        _make_agent("sub-f", workspace), SimpleNamespace(run_id="sub-f"), structured
+    )
+    assert out.status == "DONE"  # 原兜底场景仍生效

@@ -406,11 +406,10 @@ def _finalize_subagent_run(agent, params: SubagentFinalizeParams):
         structured=structured,
         repair_state=repair_state,
     ))
-    if not (structured.found and structured.ok):
-        recovered = _structured_from_registered_products(agent, params)
-        if recovered is not None:
-            structured = recovered
-            repair_state["message"] = recovered.summary
+    recovered = _recover_with_registered_products(agent, params, structured)
+    if recovered is not structured:
+        repair_state["message"] = recovered.summary
+        structured = recovered
     runner_result = record_finalized_runner_result(
         FinalizedRunnerRecordRequest(agent, params, structured, repair_state)
     )
@@ -440,6 +439,36 @@ def _structured_or_repaired_runner_output(request: StructuredRunnerOutputRequest
         )
     )
     return repaired[0], _tuple_repair_state(repaired)
+
+
+def _recover_with_registered_products(agent, params: SubagentFinalizeParams, structured):
+    """产出事实兜底(C3/G4 实锤):两类形式问题不该埋没已落地的合格产物——
+    ①无可解析结果块(parse/delivery/repair 全失败);②子代理幻觉式自我否定
+    (输出了有效结果块但 status=BLOCKED,blocked_reason 却与产出事实矛盾,如声称
+    "缺少核心交付物"而 registry 已登记)。两种情况若 registry 有 ready 产物
+    (通过 validate 的合格交付)即据产出收尾 DONE。带 open capability_request 的
+    阻塞是正当求助(交父代理 resolve),不在此列。无 ready 产物则尊重原判
+    (真失败/真未完成不会被误判 DONE)。"""
+    if structured.found and structured.ok and not _is_self_negated_block(structured):
+        return structured
+    recovered = _structured_from_registered_products(agent, params)
+    if recovered is None:
+        return structured
+    if structured.found and structured.blocked_reason:
+        recovered.summary = (
+            f"{recovered.summary}（子代理曾声明阻塞:{str(structured.blocked_reason)[:80]}，"
+            "但 registry 产出事实推翻该判断）"
+        )
+    return recovered
+
+
+def _is_self_negated_block(structured) -> bool:
+    """子代理输出了有效结果块但 status=BLOCKED 且无 open capability_request——
+    基于自我评估声明阻塞,可能与产出事实矛盾。带 capability_request 的阻塞是正当
+    求助,排除在外(尊重模型,交父代理 resolve)。"""
+    if str(getattr(structured, "status", "") or "").strip().upper() != "BLOCKED":
+        return False
+    return not (getattr(structured, "capability_requests", None) or [])
 
 
 def _structured_from_registered_products(agent, params: SubagentFinalizeParams):
