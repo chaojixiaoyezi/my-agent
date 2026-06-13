@@ -153,6 +153,9 @@ class WriteFileTool(FileSystemTool):
             implicit_append=params.get("__implicit_task_artifact_append") is True,
         ))
         output, feedback = _attach_reference_write_feedback(self.workspace_root, target, output, self.runtime_fact_roots)
+        caveat = _closeout_dir_write_caveat(target, self.workspace_root)
+        if caveat:
+            output = f"{output}\n{caveat}"
         result = _write_result("write_file", target, output, web_decision)
         if feedback:
             result.result_envelope["soft_feedback"] = feedback
@@ -183,6 +186,28 @@ def _system_ledger_write_blocked_result(message: str) -> ToolExecutionResult:
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
     )
+
+
+# 落点纠偏(codetask 实锤:主代理把交付物写进 .agent_delivery/——望文生义 "delivery"
+# 当成交付区,实为 closeout 账本/系统状态目录,产物落这里不进交付区也不被验收,主代理
+# 自认完成退出而交付区为空)。系统自身写 closeout 账本不经本工具,故此提示只命中模型
+# 误写产物的情况。只加软提示纠正落点,不阻断(让模型自行改对,不限制)。
+_CLOSEOUT_DIR_NAME = ".agent_delivery"  # 同 delivery_closeout.artifacts.CLOSEOUT_DIR
+
+
+def _closeout_dir_write_caveat(target: Path, workspace_root: object) -> str:
+    try:
+        root = Path(str(workspace_root)).expanduser().resolve(strict=False)
+        rel = target.expanduser().resolve(strict=False).relative_to(root)
+    except (ValueError, OSError, TypeError):
+        return ""
+    if rel.parts and rel.parts[0] == _CLOSEOUT_DIR_NAME:
+        return (
+            "⚠️ 落点提醒:.agent_delivery/ 是系统内部状态目录(closeout 账本),写到这里的"
+            "文件不会进入交付区、不会被验收为交付物。最终交付物请写到任务交付目录"
+            "(output_dir,见任务提示里的 output_dir 路径)。"
+        )
+    return ""
 
 
 def _prepare_write_target(tool: WriteFileTool, target: Path) -> Path:
