@@ -87,3 +87,33 @@ def test_misplaced_products_no_dir(tmp_path):
     )
 
     assert _misplaced_products_in_closeout_dir(tmp_path) is False
+
+
+# --- implicit append 排除 materialize 占位(第5问题:结果块混入正文)---
+
+
+def test_placeholder_detected_skips_append(tmp_path):
+    from agent_py_agent.agent.tooling.registry_invoke import _target_is_materialize_placeholder
+
+    ph = tmp_path / "report.md"
+    ph.write_text("# Subagent Result\n\n- run_id: x\n## Summary\n", encoding="utf-8")
+    assert _target_is_materialize_placeholder(ph) is True  # 占位 → 跳过 append(覆盖)
+
+
+def test_real_report_allows_append(tmp_path):
+    from agent_py_agent.agent.tooling.registry_invoke import _target_is_materialize_placeholder
+
+    rp = tmp_path / "report.md"
+    rp.write_text("# codex-main 架构分析报告\n\n## 一、总览\n", encoding="utf-8")
+    assert _target_is_materialize_placeholder(rp) is False  # 真报告 → 正常 append
+
+
+def test_placeholder_detection_robust(tmp_path):
+    from agent_py_agent.agent.tooling.registry_invoke import _target_is_materialize_placeholder
+
+    # 不存在的文件不抛异常
+    assert _target_is_materialize_placeholder(tmp_path / "ghost.md") is False
+    # 前导空白后仍识别
+    leading = tmp_path / "lead.md"
+    leading.write_text("\n  # Subagent Result\n", encoding="utf-8")
+    assert _target_is_materialize_placeholder(leading) is True

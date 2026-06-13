@@ -206,7 +206,23 @@ def _with_task_artifact_append_continuation(
         return params
     if not target.exists() or not target.is_file():
         return params
+    if _target_is_materialize_placeholder(target):
+        return params
     return {**params, "mode": "append", "__implicit_task_artifact_append": True}
+
+
+def _target_is_materialize_placeholder(target: Path) -> bool:
+    """materialize 兜底写的占位由 _render_declared_output_markdown 渲染,固定以
+    "# Subagent Result" 开头(gc-test 实锤:子代理声明产物→materialize 先写结果块
+    占位→子代理写真报告时 target 已存在→implicit append 把正文追加到占位结果块后,
+    结果块元数据混入交付正文)。占位应被子代理真产物覆盖而非追加,故 implicit append
+    跳过它(回退覆盖写)。子代理真报告以 "# <主题>" 开头,不会误判。"""
+    try:
+        with target.open("r", encoding="utf-8") as handle:
+            head = handle.read(64)
+    except (OSError, UnicodeError):
+        return False
+    return head.lstrip().startswith("# Subagent Result")
 
 
 def _partial_unclosed_write_error(params: dict[str, Any], request: RegistryToolInvokeRequest) -> str:
