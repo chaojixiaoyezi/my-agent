@@ -406,6 +406,11 @@ def _finalize_subagent_run(agent, params: SubagentFinalizeParams):
         structured=structured,
         repair_state=repair_state,
     ))
+    if not (structured.found and structured.ok):
+        recovered = _structured_from_registered_products(agent, params)
+        if recovered is not None:
+            structured = recovered
+            repair_state["message"] = recovered.summary
     runner_result = record_finalized_runner_result(
         FinalizedRunnerRecordRequest(agent, params, structured, repair_state)
     )
@@ -435,6 +440,64 @@ def _structured_or_repaired_runner_output(request: StructuredRunnerOutputRequest
         )
     )
     return repaired[0], _tuple_repair_state(repaired)
+
+
+def _structured_from_registered_products(agent, params: SubagentFinalizeParams):
+    """产出事实兜底(C3/G4 实锤):runner 没产出可解析结果块(parse/delivery/repair
+    全失败),但子代理已在 artifact_registry 登记 ready 产物(通过 validate 的合格文件)。
+    据已登记产物收尾为 DONE,不把真实产出埋没成 BLOCKED、不让父代理空等或重做——
+    结果块是形式,落地的合格产物才是交付事实。"""
+    products = _registered_ready_products(agent, str(getattr(params, "run_id", "") or "").strip())
+    if not products:
+        return None
+    from ..subagents.model_runtime import SubAgentParsedOutput
+
+    names = "、".join(str(p["name"]) for p in products[:5])
+    return SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        status="DONE",
+        summary=f"runner 未输出可解析结果块,据 artifact_registry 已登记的 {len(products)} 个 ready 产物收尾:{names}",
+        evidence=[{"kind": "registered_artifact", "path": p["path"], "bytes": p["bytes"]} for p in products],
+    )
+
+
+def _registered_ready_products(agent, run_id: str) -> list[dict[str, object]]:
+    if not run_id:
+        return []
+    workspace = _subagent_workspace_dir(agent, run_id)
+    if not workspace:
+        return []
+    from ..artifacts.registry import latest_artifact_records
+
+    products: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for record in latest_artifact_records(workspace).values():
+        product = _ready_product_entry(record, seen)
+        if product is not None:
+            products.append(product)
+    return products
+
+
+def _subagent_workspace_dir(agent, run_id: str) -> str:
+    try:
+        task = agent.subagents.load(run_id)
+    except (FileNotFoundError, TypeError):
+        return ""
+    return str(getattr(task, "task_workspace_dir", "") or "").strip()
+
+
+def _ready_product_entry(record, seen: set[str]) -> dict[str, object] | None:
+    if str(getattr(record, "status", "") or "").strip() != "ready":
+        return None
+    path = str(getattr(record, "path", "") or "").strip()
+    if not path or path in seen:
+        return None
+    file_path = Path(path)
+    if not file_path.is_file():
+        return None
+    seen.add(path)
+    return {"path": path, "name": file_path.name, "bytes": file_path.stat().st_size}
 
 
 class SimpleAgentSubagentMixin(_SubagentLifecycleBase):
