@@ -360,9 +360,11 @@ def _copy_existing_for_append(file: object, target: Path, mode: str) -> None:
 
 
 def _unlink_temp_file(tmp_name: str) -> None:
+    # 兜全部 OSError:此函数在原子写的异常清理路径被调,清理失败绝不能
+    # 二次抛异常掩盖真正的写入错误(临时文件残留由进程退出/系统清理兜底)。
     try:
         os.unlink(tmp_name)
-    except FileNotFoundError:
+    except OSError:
         pass
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..common.value_parsing import dedupe_strings
@@ -94,6 +95,10 @@ class CapabilityCard:
             lines.append(f"  不适用：{'; '.join(self.not_when_to_use[:2])}")
         if self.side_effects:
             lines.append(f"  副作用：{', '.join(self.side_effects)}")
+        # skill 渐进加载的关键一行:卡片只是索引,正文在 path——模型看到推荐后
+        # 用 read_file 读 SKILL.md 才拿到真正的方法/工具链知识(通道运行时 同款形态)。
+        if self.kind == "skill" and self.path:
+            lines.append(f"  正文：read_file {self.path}")
         text = "\n".join(lines)
         if max_chars and len(text) > max_chars:
             return text[:max_chars] + "\n  ... 已截断"
@@ -107,6 +112,30 @@ class CapabilitySearchHit:
     card: CapabilityCard
     score: float
     reasons: list[str]
+
+
+# LLM: 内置 skill 注册表的默认构造(零配置生效)。目录=仓库 agent_py_agent/skills/
+#   builtin(AGENTS.md 约定的"内置 skill,随仓库发布"位置)。目录缺失/扫描异常
+#   返回 None(router 照常工作,skill 推荐缺席不报错)。结果模块级缓存——skill
+#   是只读知识,重复磁盘扫描没有意义。
+# 函数用途: 让每个 CapabilityRouter 默认认识仓库自带的知识型 skill。
+def _default_builtin_skill_registry() -> SkillRegistry | None:
+    global _BUILTIN_SKILL_REGISTRY
+    if _BUILTIN_SKILL_REGISTRY is not _UNSET:
+        return _BUILTIN_SKILL_REGISTRY
+    builtin_dir = Path(__file__).resolve().parents[2] / "skills" / "builtin"
+    try:
+        registry = SkillRegistry([builtin_dir]) if builtin_dir.is_dir() else None
+        if registry is not None:
+            registry.scan()
+    except Exception:
+        registry = None
+    _BUILTIN_SKILL_REGISTRY = registry
+    return registry
+
+
+_UNSET = object()
+_BUILTIN_SKILL_REGISTRY: SkillRegistry | None | object = _UNSET
 
 
 class CapabilityRouter:
@@ -125,6 +154,12 @@ class CapabilityRouter:
     ):
         self.config = config or CapabilityConfig()
         self._cards: dict[str, CapabilityCard] = {}
+        # skill 体系激活(稳而不管 2-2,2026-06-12):未显式传 registry 时默认挂
+        # 仓库内置 skill 目录——SkillRegistry/渐进加载骨架早已就绪,此前无人构造
+        # ("接好插座没插电器"),内置知识型 skill(深度分析方法/PDF 翻译工具链)
+        # 从未到达模型。知识进 skill 按需召回,正是对照组的质量来源形态。
+        if skill_registry is None:
+            skill_registry = _default_builtin_skill_registry()
         if skill_registry is not None:
             for card in skill_registry.cards():
                 self.register(from_skill_card(card))
@@ -147,6 +182,25 @@ class CapabilityRouter:
         if kinds is None:
             return cards
         return [card for card in cards if card.kind in kinds]
+
+    # LLM: skill 树的类目索引(千级地基):prompt 常驻成本=每类一行,与 skill
+    #   总数解耦——千个 skill 也只占类目数行。聚合描述取该类第一张卡的描述
+    #   截断(类目自身无描述文件时的合理默认)。
+    # 函数用途: 给模型一张"技能书架的目录页":有哪些类、各几本、大概讲什么。
+    def render_category_index(self) -> str:
+        skills = [card for card in self._cards.values() if card.kind == "skill"]
+        if not skills:
+            return ""
+        by_category: dict[str, list[CapabilityCard]] = {}
+        for card in skills:
+            category = str(card.metadata.get("category") or "general")
+            by_category.setdefault(category, []).append(card)
+        lines = ["# Skill Categories（用 skill_search 按需检索正文）"]
+        for category in sorted(by_category):
+            cards = by_category[category]
+            sample = cards[0].description[:40]
+            lines.append(f"- {category}（{len(cards)} 个）：{sample}…" if len(cards) > 1 else f"- {category}：{sample}")
+        return "\n".join(lines)
 
     def search(
         self,
@@ -206,6 +260,8 @@ def from_skill_card(card: SkillCard) -> CapabilityCard:
         path=str(card.path),
         metadata={
             "scope": card.scope,
+            "category": card.category,
+            "platforms": card.platforms,
             "tools_required": card.tools_required,
         },
     )

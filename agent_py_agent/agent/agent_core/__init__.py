@@ -17,6 +17,7 @@ from .orchestration_tools import (
     DispatchSubagentsTool,
     InspectAgentTreeTool,
     RaiseEventTool,
+    ResolveCapabilityRequestsTool,
 )
 from .runtime.guidance_tool import SendGuidanceTool
 from .runtime.wait_tool import WaitTool
@@ -28,6 +29,7 @@ __all__ = [
     "AgentRunResult",
     "CapabilityRequestTool",
     "CancelSubagentsTool",
+    "ResolveCapabilityRequestsTool",
     "CreateSubagentsTool",
     "DispatchSubagentsTool",
     "InspectAgentTreeTool",

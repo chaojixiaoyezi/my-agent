@@ -29,6 +29,9 @@ class RecordRunnerResultParams:
     failure_type: str = ""
     structured_output: SubAgentParsedOutput | None = None
     actual_tools: list[str] | None = None
+    # 系统级工具失败账本(A1):来自 archive_tool_calls 的 ok=False 摘要。
+    # None=本轮拿不到系统数据(超时/worker 异常),[]=系统确认零工具失败。
+    tool_failures: list[dict[str, str]] | None = None
     structured_repair_attempted: bool = False
     structured_repair_ok: bool = False
     structured_repair_error: str = ""

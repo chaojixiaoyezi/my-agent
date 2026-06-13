@@ -34,6 +34,11 @@ class CapabilityConfig:
     # 子代理 task-local 回合的 compact 触发百分比；0 表示继承主代理
     # memory_compact_auto_trigger_percent，不另起一套默认值。
     subagent_compact_trigger_percent: int = 0
+    # 失败自省自动拆分：should_split + 拆分建议存在时自动 split_task 重新派工。
+    # 默认关闭——拆分会创建新任务并改变原任务状态，需用户显式开启。
+    subagent_failure_auto_split_enabled: bool = False
+    # 失败自省自动拆分的最大深度；0 表示不限制（统一约定）。
+    subagent_failure_split_max_depth: int = 2
     capability_request_max_tried_items: int = 0
     capability_request_max_evidence_items: int = 0
     capability_request_max_per_task: int = 0

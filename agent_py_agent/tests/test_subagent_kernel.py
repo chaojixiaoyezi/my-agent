@@ -261,3 +261,32 @@ def test_runtime_tool_progress_reports_status_save_error(tmp_path) -> None:
 
     assert progress["status_save_error"]["context"] == "subagent_tool_progress.subagents.save"
     assert progress["status_save_error"]["message"] == "state locked"
+
+
+def test_tree_snapshot_carries_capreq_guidance_when_open(tmp_path):
+    """P4-1 引导前移钉子:存在 OPEN capreq 时,树快照 tool_contract 直接带
+    recommended_tool 与可传参的 request id;无 OPEN 时不带(零噪声)。"""
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+    from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityRequestParams
+
+    manager = SubAgentManager(workspace=tmp_path / "ws")
+    task = manager.create_run(
+        params=CreateRunParams(goal="引导前移钉子", thought="t", plan=["p"], role="worker")
+    )
+    snapshot_before = manager.kernel_snapshot(SubagentKernelQuery(root_id=task.id))
+    contract_before = snapshot_before.runs[0].tool_contract
+    assert "recommended_tool" not in contract_before
+
+    request = manager.lifecycle.record_capability_request(
+        task.id,
+        RecordCapabilityRequestParams(
+            problem="读不到材料",
+            needed_capability="read_source_tree",
+            capability_type="filesystem",
+        ),
+    )
+    snapshot = manager.kernel_snapshot(SubagentKernelQuery(root_id=task.id))
+    contract = snapshot.runs[0].tool_contract
+    assert contract["recommended_tool"] == "resolve_capability_requests"
+    assert request.id in contract["open_capability_request_ids"]

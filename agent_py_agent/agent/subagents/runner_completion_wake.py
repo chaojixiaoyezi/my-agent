@@ -73,6 +73,84 @@ def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict
     }
 
 
+# LLM: R4 子项②的提交端推送：子代理记录 capability_request 后立刻向父级线程发
+#   observation + wake signal（requires_main_agent=True），主代理在 run 循环里会被
+#   推到这个决策点，再用 resolve_capability_requests 显式 grant/deny。失败只记账不抛，
+#   不能因为通知失败把子代理的申请也丢掉。
+# 函数用途: 子代理提交能力申请时通知主代理，修"主代理全程不知道有请求"的静默断链。
+def notify_parent_on_capability_request(manager: Any, task: Any, request: Any) -> None:
+    store = getattr(manager, "conversation_store", None)
+    if store is None:
+        return
+    run_id = str(getattr(task, "id", "") or "").strip()
+    request_id = str(getattr(request, "id", "") or "").strip()
+    if not run_id or not request_id:
+        return
+    try:
+        thread = store.thread_for_task(run_id)
+        if thread is None:
+            return
+        observation = store.append_observation(_capability_open_observation(thread, task, request))
+        store.raise_wake_signal(_capability_open_signal(thread, task, request_id, observation))
+    except Exception as exc:
+        attrs = dict(getattr(task, "attributes", {}) or {})
+        attrs["capability_request_notify_error"] = runtime_error_report(
+            exc, context="subagent_capability_request.notify_parent"
+        )
+        task.attributes = attrs
+        try:
+            manager.save(task)
+        except Exception:
+            _LOGGER.warning("capability request notify error could not be saved for %s", run_id)
+
+
+# 函数用途: 构造"能力申请待处理"的 observation payload（requires_main_agent=True）。
+def _capability_open_observation(thread: Any, task: Any, request: Any) -> dict[str, object]:
+    run_id = str(getattr(task, "id", "") or "")
+    request_id = str(getattr(request, "id", "") or "")
+    return {
+        "thread_id": thread.thread_id,
+        "event_type": "subagent_capability_request_open",
+        "summary": (
+            f"子代理 {run_id} 提交了能力申请 {request_id}"
+            f"（{str(getattr(request, 'needed_capability', '') or '')[:80]}），等待父级 grant/deny；"
+            "父代理用 resolve_capability_requests 处理，不要放着不管。"
+        ),
+        "urgency": "high",
+        "source_agent_id": run_id,
+        "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
+        "root_task_id": str(getattr(task, "root_id", "") or run_id),
+        "requires_main_agent": True,
+        "metadata": {
+            "run_id": run_id,
+            "request_id": request_id,
+            "capability_type": str(getattr(request, "capability_type", "") or ""),
+            "path_scope": list(getattr(request, "path_scope", []) or []),
+        },
+    }
+
+
+# 函数用途: 构造"能力申请待处理"的 wake signal payload（高优先级 + 去重键）。
+def _capability_open_signal(
+    thread: Any,
+    task: Any,
+    request_id: str,
+    observation: Any,
+) -> dict[str, object]:
+    run_id = str(getattr(task, "id", "") or "")
+    return {
+        "thread_id": thread.thread_id,
+        "observation": observation,
+        "urgency": "high",
+        "reason": "subagent_capability_request_open",
+        "source_agent_id": run_id,
+        "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
+        "root_task_id": str(getattr(task, "root_id", "") or run_id),
+        "dedupe_key": f"capability-open:{run_id}:{request_id}",
+        "metadata": {"run_id": run_id, "request_id": request_id},
+    }
+
+
 def _record_wake_error(manager: Any, task: Any, result: Any, exc: BaseException) -> None:
     status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").strip()
     attrs = dict(getattr(task, "attributes", {}) or {})
@@ -90,4 +168,4 @@ def _record_wake_error(manager: Any, task: Any, result: Any, exc: BaseException)
         _LOGGER.warning("subagent runner completion wake error could not be saved: %s", report)
 
 
-__all__ = ["notify_parent_on_runner_result"]
+__all__ = ["notify_parent_on_capability_request", "notify_parent_on_runner_result"]

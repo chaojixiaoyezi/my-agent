@@ -476,7 +476,19 @@ def test_auto_compact_uses_local_prompt_estimate_when_provider_underreports(tmp_
 
 
 def test_run_auto_compact_apply_can_repeat_when_continuation_makes_tool_progress(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", enable_tools=True, my_agent_home=str(tmp_path / "home")), tmp_path)
+    # 本测试构造"连续两次 compact 续接"的压力剧本；显式关闭单轮 PTL retry，
+    # 否则第二次溢出会被 PTL 轻量自救（回收旧工具结果重试成功），走不到第二次
+    # compact——那是 PTL 的预期收益，但本测试要验证的是 compact 连续续接能力本身
+    # （PTL 救不回的场景仍依赖它），PTL 行为由 test_tool_context_ptl_retry.py 覆盖。
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            enable_tools=True,
+            my_agent_home=str(tmp_path / "home"),
+            tool_context_ptl_retry_max=0,
+        ),
+        tmp_path,
+    )
     backend = RepeatingContextOverflowBackend()
     agent.backend = backend
 

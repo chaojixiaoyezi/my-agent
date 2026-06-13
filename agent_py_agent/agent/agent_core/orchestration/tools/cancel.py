@@ -3,16 +3,16 @@ from __future__ import annotations
 """cancel_subagents control tool with TaskStatus-backed status filters."""
 
 import json
-import os
-import signal
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ....runtime_errors import runtime_error_report
 from ....subagents.models import FailureType, normalize_task_status, task_status_in
+from ....subagents.process_control import terminate_pid_with_escalation
 from ....tooling.models import BaseTool, ToolExecutionResult
 from ...agent_tree.status import agent_tree_status_payload
+from ....concurrency.interrupt import interrupt_by_name
 from ..tool_specs import build_cancel_subagents_spec
 
 if TYPE_CHECKING:
@@ -258,6 +258,9 @@ def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, obj
     now = time.time()
     attrs = dict(getattr(task, "attributes", {}) or {})
     pid_report = _terminate_task_pid(task, bool(params.get("kill_process", True)))
+    if pid_report.get("status") == "no_pid":
+        # 线程形态没有 pid 可杀:走协作中断,工具循环在下个安全点体面收工。
+        pid_report["thread_interrupt"] = _interrupt_dispatch_thread(agent, task.id)
     attrs["cancel_subagents"] = {
         "cancel_status": "CANCELLED",
         "reason": reason,
@@ -284,17 +287,29 @@ def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, obj
     }
 
 
+# LLM: 进程终止统一走 subagents/process_control 的两阶段原语(SIGTERM 组→宽限→
+#   SIGKILL 升级),与出口孤儿回收同一手法;本函数只负责"要不要杀"的参数裁决。
+# 函数用途: 取消任务时按 kill_process 参数决定是否连后台进程一起收掉。
+# 函数用途: 按 run_id 找到 in-process 派工线程的登记名并递中断旗;
+#   返回 signaled/not_found(没登记=不是线程形态或线程已结束,无害)。
+def _interrupt_dispatch_thread(agent: SimpleAgent, run_id: str) -> str:
+    registry = getattr(agent, "_background_subagent_dispatches", None)
+    if not isinstance(registry, dict):
+        return "not_found"
+    for entry in registry.values():
+        data = entry if isinstance(entry, dict) else {}
+        if run_id in (data.get("run_ids") or []) and interrupt_by_name(str(data.get("thread_name") or "")):
+            return "signaled"
+    return "not_found"
+
+
 def _terminate_task_pid(task: SubAgentTask, kill_process: bool) -> dict[str, object]:
     pid = _task_pid(task)
     if not pid:
         return {"status": "no_pid"}
     if not kill_process:
         return {"status": "skipped", "pid": pid}
-    if not _is_pid_alive(pid):
-        return {"status": "not_alive", "pid": pid}
-    _terminate_pid(pid)
-    exited = _wait_for_pid_exit(pid, 1.0)
-    return {"status": "terminated" if exited else "terminate_sent", "pid": pid, "exited": exited}
+    return terminate_pid_with_escalation(pid)
 
 
 def _task_pid(task: SubAgentTask) -> int:
@@ -331,34 +346,6 @@ def _dedupe(values: list[str]) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
-
-
-def _is_pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
-
-
-def _terminate_pid(pid: int) -> None:
-    if pid <= 0:
-        return
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError:
-        return
-
-
-def _wait_for_pid_exit(pid: int, timeout: float) -> bool:
-    deadline = time.time() + max(0.0, timeout)
-    while time.time() < deadline:
-        if not _is_pid_alive(pid):
-            return True
-        time.sleep(0.2)
-    return not _is_pid_alive(pid)
 
 
 def _compact_agent_tree(payload: dict[str, object]) -> dict[str, object]:

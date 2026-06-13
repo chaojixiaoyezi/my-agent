@@ -227,3 +227,20 @@ def test_ensure_my_agent_home_creates_v2_owner_and_system_files(tmp_path: Path):
     assert paths.shared_indexes_skills_jsonl.exists()
     assert paths.linked_identities_jsonl.exists()
     assert paths.global_index_active_agents_jsonl.exists()
+
+
+def test_concise_task_title_does_not_mistake_inline_slash_for_path():
+    """R5c/R7c slug 实锤钉子:中文并列词"成功/失败统计"不是路径,任务目录名
+    必须取任务主题而非 prompt 尾部碎词;真路径与词内斜杠两形态都要正确。"""
+    from agent_py_agent.agent.user_space.task_title import concise_task_title
+
+    prompt = (
+        "请把 DeepSeek（深度求索）2026 年以来发布的每一篇论文找出来，翻译成中文。\n"
+        "8. 最后汇报时写清交付目录的绝对路径、论文清单、每篇的处理结果和成功/失败统计。\n"
+    )
+    slug = concise_task_title(prompt)
+    assert slug != "失败统计" and "deepseek" in slug, f"主题丢失: {slug}"
+    # 真路径仍走路径标题分支
+    assert "all-agent" in concise_task_title("请分析 /Users/example/study-agent/all-agent 的架构并出报告")
+    # 词内斜杠(A/B)不误判为路径
+    assert "a-b" in concise_task_title("做一个 A/B 测试方案对比转化率")

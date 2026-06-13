@@ -17,8 +17,10 @@ from .evidence import (
     source_fact_consistency_decision,
     target_coverage_projection_decision,
 )
+from .expected_outputs_gate import evaluate_expected_outputs_gate
 from .quality import delivery_quality_decision
 from .recovery import attach_contract_recovery
+from .source_volume import attach_source_volume_observation
 from .subagent_aggregation import evaluate_subagent_aggregation_gate
 from .task_progress_gate import evaluate_task_progress_closeout_gate
 
@@ -39,6 +41,7 @@ def attach_closeout_gates(request: CloseoutGateRequest) -> list[Any]:
     coverage_projection_decision = _attach_target_coverage_projection_gate(request)
     source_fact_decision = _attach_source_fact_consistency_gate(request)
     task_progress_decision = _attach_task_progress_closeout_gate(request)
+    expected_outputs_decision = _attach_expected_outputs_gate(request)
     subagent_decision = _attach_subagent_aggregation_gate(request)
     acceptance_decision = _attach_acceptance_gate(request, gate_decision)
     final_decision = evaluate_final_closeout_gate(request.report)
@@ -52,6 +55,7 @@ def attach_closeout_gates(request: CloseoutGateRequest) -> list[Any]:
         coverage_projection_decision,
         source_fact_decision,
         task_progress_decision,
+        expected_outputs_decision,
         subagent_decision,
         acceptance_decision,
         final_decision,
@@ -129,6 +133,15 @@ def _attach_subagent_aggregation_gate(request: CloseoutGateRequest) -> Any:
 def _attach_task_progress_closeout_gate(request: CloseoutGateRequest) -> Any:
     decision = evaluate_task_progress_closeout_gate(request.closeout, request.report)
     request.report["task_progress_closeout_gate"] = decision.to_dict()
+    return decision
+
+
+# 函数用途: 产物类型/数量对账门(声明驱动):核对 expected_outputs 声明与交付区实存。
+def _attach_expected_outputs_gate(request: CloseoutGateRequest) -> Any:
+    decision = evaluate_expected_outputs_gate(request.closeout)
+    request.report["expected_outputs_gate"] = decision.to_dict()
+    # 来源比例观测(R8b 隐蔽编造实锤):检索量 vs 交付量并排数字,纯观测零判定。
+    attach_source_volume_observation(request.closeout, request.report)
     return decision
 
 

@@ -1,5 +1,242 @@
 # Subagent Progress
 
+## 2026-06-12 来源比例观测 + 启动孤儿检测(backlog Active 清零)
+
+- **来源比例观测**(R8b 隐蔽编造实锤:静态列表复用 24 周+公式造数,验收照过):
+  `delivery_closeout/source_volume.py`——closeout 报告新增
+  `source_volume_observation`(网络成功调用数/交付文件数与字节/声明 min_count
+  总数并排),挂双路径。检索侧按 `ToolSpec.category=="web"` 结构化判定零白名单;
+  **设计裁决:纯观测零 finding**——"数据类 vs 分析类产物"是机器判不了的内容
+  语义,任何阈值必误伤零网络的本地分析任务;比例判断留给把关者。钉子 4 条。
+- **启动孤儿检测**(异常崩溃兜底,孤儿回收第二期):`startup_recovery.
+  _detect_orphan_processes`——任务终态+落盘 pid 进程仍活+cmdline 含本系统特征
+  (防 pid 复用误报)三条件才报告;observability 先行绝不自动 kill,启动文案
+  提示用户手动处置。钉子 5 条(含防误杀三连)。
+
+## 2026-06-12 交付写权限墙:声明产物目录围栏直授 + 拒因账本留痕(R8a 实锤)
+
+- **实锤与取证**:R8a 主跑+接力共 17 次"子代理写自己声明的交付文件"被系统
+  WRITE_FORBIDDEN(A1 账本铁证非幻觉),同子代理同文件"先拒后成"(capreq grant
+  救场)证明拒因是瞬态边界状态;canonical 终态重放(含清空 grant)一律 ALLOWED
+  ——瞬态不可复现,暴露"边界决策不留痕"根缺口。可控对照实验实锤独立通用缺陷:
+  `delivery_root` 只认环境字段(attrs.run_workspace 等),创建链未透传时(worker
+  孙派/CLI/gateway 等任何非主 run 上下文)为空 → **写边界不含声明位置,声明驱动
+  语义断裂**——"output_files 声明了产物在哪,哪里却不可写"。
+- **修复①声明目录围栏直授**:`output_alignment.declared_output_write_roots`——
+  output_files/output_refs 声明的绝对路径父目录,过围栏(task_workspace_dir/
+  task_dir/manager workspace 根,与 capability grant `_safe_grant_roots` 同款
+  基准)后并入写边界(`_build_write_boundary` 接线);围栏外声明不自动授权
+  (防自我扩权,仍走 capreq)。声明驱动的对偶:声明交付到哪,哪里就可写——
+  不再依赖任何环境字段透传。
+- **修复②拒因原文留痕**:A1 失败账本条目新增 `message`(系统拒绝/错误原文
+  截断 240 字)。决策时刻的拒因(边界/锁/危险目录)随账本落盘,下次此类取证
+  直读账本,不再终态重放考古。
+- 钉子:test_subagent_output_alignment 增 2、test_subagent_tool_failure_ledger
+  增 1(既有全字典断言按新契约更新 2)。
+
+## 2026-06-11 R7 真实轮四通用缺陷修复（交付链路与孤儿回收的实战补强）
+
+R7 三任务（写死产物要求）实锤暴露并当轮修复，详见
+docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
+
+- **①pid 保留权威化**：`process_control.build_background_start_record`
+  （BackgroundStartUpdate 入参包）成为 background_start 记录构造唯一权威，
+  agent 侧与 CLI 侧（cli/dispatch_background）共用——CLI 手写 dict 抹 pid 的
+  问题根治，孤儿回收进程层恢复弹药。
+- **②合同空壳回落**：closeout 的 `_no_required_artifact_response` 在合同零
+  required artifact 时,有真实产物即回落 uncontracted 验收链（gate 全跑,
+  含 expected_outputs 对账门）,真零产物才打回。
+- **③单次运行环境事实**：`_workspace_prompt_section(single_shot=True)` 对
+  source=cli_run 注入"中途请示无人应答、不要以提问收尾、结束前交付或写
+  不可行报告"软约束；gateway/chat 不注入。
+- **④产物候选扫描兜底（最重）**：`_current_run_task_output_artifacts` 在写入
+  记录为空时回落任务交付目录文件系统扫描（仅 task_output scope、上限 200、
+  每文件照常过 validate_artifact）；出口合同 `_has_final_closeout_candidate`
+  contract 分支同步回落同一产物事实链。修复 compact 后/run_command 生成文件
+  对 closeout 完全不可见的问题（r7b：24 个真实 xlsx 曾全链路失明）。
+- 钉子：test_exit_orphan_recovery +2、test_expected_outputs_gate +2、
+  test_run_task_workspace_writer +1。
+
+## 2026-06-11 检索完备性软引导：同工具连续失败即引导枚举未试渠道（R5b/R6c 实锤专项）
+
+- **实锤**：R5b web_search 系统失败 2 次（TOOL_UNAVAILABLE×2，A1 账本确认真失败）
+  后，模型断言"数据根本不存在"口头放弃——把关者核验 OSS Insight 等渠道实可得；
+  R6c 同构（单一查询口径失败即下绝对结论）。
+- **落地（纯软提示，零硬门零拦截）**：`tool_guard/loop_hints.py` 新增
+  `append_tool_failure_channel_hint`：
+  - 触发（全结构化）：同一工具的 archive ok=false 累计 ≥
+    `tool_failure_channel_hint_threshold`（主配置三同步，默认 2，0=关闭）。
+    按 tool name 通用计数，零工具类型枚举；`__parse_error__` 不计；只认系统事实
+    （与 A1 失败账本同源），绝不解析模型文本。
+  - 动作：tool_context 注入一条枚举引导——下"数据不存在/不可行/找不到"绝对结论
+    之前，先枚举已试渠道（含失败证据）与已知未试渠道（其他工具/数据源/查询字段），
+    换渠道再验证；确认不可行则把枚举写进结构化不可行报告
+    （tried_channels/untried_channels_known，与 P5-1 schema 同语义）。
+  - 幂等：每工具最多提示一次（tool_context 标记去重）。
+  - 接线：`_tool_loop_service._run_tool_round`（与 guardrail 拦截回显并排），
+    主代理与 worker 子代理共用此链路，子代理同样受益（R5b 失败发生在子代理）。
+- **边界诚实声明**：R6c"检索成功但只用单一署名字段"的形态，机制层无法结构化判定
+  （判断查询参数的语义完备性=解析自然语言，违铁律）；这部分留给教训记忆
+  （P5-2 trigger_conditions）与把关层。
+- 钉子：`test_tool_failure_channel_hint.py` 5 条（阈值触发/分工具计数/幂等/
+  关闭开关/成功与解析错误不计数）。
+
+## 2026-06-11 产物类型/数量对账门：声明驱动核对交付区实存（R6b/R6c 实锤专项）
+
+- **实锤**：R6c prompt 要求"每篇论文一个 PDF"，实交 0 PDF（仅 1 个 md 检索报告）；
+  R6b 要求 1–24 周每周一份，实交 1 份——closeout 只查"有没有产物文件"，两案均
+  ok=true。缺口：声明的**类型与数量**无人对账。
+- **设计（纯声明驱动，守三条铁律）**：自然语言产物要求不进机器决策——模型负责把
+  prompt 要求翻译成结构化声明（spec 引导），机制只对账声明 vs 文件系统实存：
+  - 声明侧：`task_progress` 新增 `expected_outputs` 字段（`{pattern, min_count,
+    note}`）。pattern 是相对任务交付目录的文件名或 glob（`*.pdf`），扩展名天然
+    携带类型（开放世界：不写任何格式专项分支）；min_count 声明数量（默认 1）。
+    归一化（坏条目/路径逃逸丢弃）、合并（同 pattern 覆盖、新 pattern 追加、
+    不带声明的更新不丢已有声明）、summary 投影见
+    `task_progress.normalize_expected_outputs`。
+  - 对账侧：新增 `delivery_closeout/expected_outputs_gate.py`——closeout 时逐条
+    glob 交付区，实存文件数（目录不算）< min_count 即
+    `EXPECTED_OUTPUTS_MISSING`（medium，**repair 非硬卡死**，附 declared/actual
+    对照与 required_actions）。挂 contract 路径（gates.attach_closeout_gates，
+    报告字段 expected_outputs_gate）与 uncontracted 路径双入口。
+  - 零声明零影响（unchecked allow 带原因）；交付要求中途变化时更新声明即可
+    （同 pattern 覆盖语义）。
+- 钉子：`test_expected_outputs_gate.py` 9 条（R6c 类型错配形态 / R6b 数量缺口形态 /
+  目录不算交付物 / 声明持久化与合并 / 坏条目丢弃 / uncontracted 端到端打回 + 补齐
+  放行）。
+- 对真实任务的使用提示：测试 prompt 应把产物要求写死（"必须 .xlsx / 每篇一个
+  .pdf / 共 N 份"），模型把要求声明进 expected_outputs 后，对账门才有声明可对。
+
+## 2026-06-11 孤儿子代理回收：主代理退出前回收后台派工进程（R6a 实锤专项）
+
+- **根因实锤**：真实模型路径的子代理派工是 `subprocess.Popen(start_new_session=True)`
+  独立进程（durable 设计，`orchestration/background/dispatch.py`），不随主代理 run
+  进程退出而停止——R6a 主代理 12:39 RUN_EXIT 后，后台 dispatch 进程活到 13:00
+  （+21 分钟）继续往交付区写占位符。两处观测断链：①pid 只进内存 registry，落盘的
+  `background_start` 属性无 pid（cancel_subagents 已预留的 `background_start.pid`
+  终止路径永远 no_pid）；②CLI dispatch 进程从不更新 background_start.status
+  （永远 launching），进程死活只能验 pid 不能信 status。
+- **对照组**：通道运行时（级联 kill+SIGTERM→SIGKILL）/ 长期助手（ProcessRegistry pid
+  落盘+kill -0 活性探测+树形终止）/ 会话运行时（SIGTERM→2s 宽限→SIGKILL 升级+进程组）
+  三家全部显式 kill，不靠自然死亡。
+- **落地**：
+  - `subagents/process_control.py`（新）：进程治理原语唯一权威——`is_pid_alive`
+    （kill -0 + 先非阻塞 reap 自己的僵尸子进程，防 zombie 误判活）、
+    `terminate_pid_with_escalation`（SIGTERM 进程组优先→宽限→SIGKILL，结构化报告
+    永不抛异常）。cancel_subagents 工具同步收敛到此原语（删三个私有重复，获得
+    SIGKILL 升级能力）。
+  - pid 落盘：`mark_background_start` 加 pid 字段——进程确认启动后写
+    `background_start.pid`（status=running），后续无 pid 的 mark 不抹掉已落盘 pid。
+  - `agent_core/tool_loop/exit_orphan_recovery.py`（新）：出口回收——任务工作区第一
+    层子代理 + manager BFS 子树（覆盖孙代理自己 spawn 的进程）→ 非终态任务收集
+    pid 去重终止（同 launch 共享进程只杀一次）→ **仅 RUNNING 任务** requeue
+    （abandon attempt → PENDING，保住 resume 可重派；ABANDONED 终态会让 dispatch
+    默认不捡）→ `orphan_recovery` 属性留痕（previous_status/pid_report/requeued）
+    + background_start.status=terminated + work log。BLOCKED/WAITING 等状态语义与
+    进程无关，只留痕不动状态。
+  - 出口合同接线：`_unfinished_exit_response`（闸断放行+确有未收口）先回收再追加
+    RUN_UNFINISHED_EXIT，resume 块带 `orphan_recovery` 报告；修正旧文案"进程退出后
+    运行中的子代理会停止"（与事实相反）。新增 `unfinished_exit_passthrough` 直通口
+    覆盖**非 break 系统截停出口**（工具轮数耗尽，R5a 形态）——不续航但同样回收+
+    带 RUN_UNFINISHED_EXIT。
+  - 配置三同步：`run_exit_orphan_recovery_enabled`（默认 true；false=不动进程且
+    退出声明如实标注"后台进程仍在运行"）。
+- 钉子：`test_exit_orphan_recovery.py` 15 条（真实 sleep 进程终止/zombie 容错/
+  requeue 语义/BLOCKED 不动/孙代理子树/共享 pid 杀一次/出口接线开关双路/轮数耗尽
+  直通/pid 落盘+保留）。
+
+## 2026-06-11 锁生命周期 + 读边界 grant 闭环 + 引导前移 + 占位符明示（任务完成力底座第二/三批）
+
+- **P3-1 锁生命周期**（R5a 实锤：23 次 WRITE_FORBIDDEN 锁的是子代理自己的交付目标）：
+  `output_alignment.sanitize_self_locked_delivery_targets`——save 唯一权威口
+  （persistence.save）统一剔除"锁住自己声明交付目标"的派工矛盾（含目录覆盖形态），
+  结构化留痕 `attributes.locked_files_sanitized`；`record_locked_files_change` 给锁
+  增删记流水账 `locked_files_changes`（R5a"中途谁动了锁"取证盲区的修复）。
+  与自身目标无关的锁（兄弟产物/敏感文件）原样保留。锁来源无论模型参数
+  （dispatch_subagents 的 locked_files）、takeover 透传还是 save 合并，一律过此口。
+- **P3-2 读边界 grant 闭环**（R5a 实锤：子代理读不到分析材料、grant 后读边界不扩）：
+  capability grant 的 path_scope 一律并入 `allowed_read_roots`（读是 grant 的最低
+  权限；目录条目经执行端 workspace_roots 子树语义天然授权整棵树）。
+- **P4-1 引导前移**（R5 三案实锤：A3 引导挂 closeout 不提交就看不到）：kernel 树
+  快照的 `tool_contract` 存在 OPEN capreq 时直接带
+  `recommended_tool="resolve_capability_requests"` + `open_capability_request_ids`，
+  主代理在 inspect_agent_tree/watch 运行中即可照做。
+- **P2-2 占位符明示**（R5a 实锤：交付区多数"分析文件"是兜底摘要占位）：
+  materialize 兜底渲染的产物带 `placeholder: true` + 独立账本
+  `attributes.placeholder_artifacts`；closeout 投影单列 `placeholder_artifact_count`。
+  只观测明示，不改对账判定。
+- 钉子：`test_subagent_lock_lifecycle.py`（5 条）+ capability 闭环测试读边界对偶断言
+  + kernel 引导钉子 + 占位符投影钉子。
+
+## 2026-06-11 run 出口合同：口头放弃走门 + 修复续航 + 空交付门（任务完成力底座第一批）
+
+- **P2-1 出口走门**：新增 `agent_core/tool_loop/final_exit_contract.py`——模型给最终
+  回复（主循环 break）时，存在未收口任务态（非终态子代理 / open capreq / 派过子代理
+  / 产物可验）即先走 delivery closeout；触发条件全部是结构化事实，纯问答 run 零影响。
+  修复 uncontracted 的"零产物无条件早退"（R5b/R5c 口头放弃绕过所有 gate 的根因）与
+  `_missing_contract_closeout_response` 用 non_terminal 报告覆盖完整阻断报告的问题。
+- **P1-1 修复续航**：closeout 阻断（rework 已注入 tool_context）时在双闸内打回模型
+  继续修——预算 `run_repair_max_continuations`（主配置三同步，默认 3，0=关闭）+
+  进展签名闸（open 子代理数/open capreq 数/progress open 计数完全不变即停，防死循环）。
+  续航状态挂 ToolLoopService 实例（每 run 新建，天然隔离）。
+- **P1-2 余留合同**：REWORK 最终回复必带结构化 `resume` 块（task_root/progress_ref/
+  open_count/恢复入口命令），非终态退出不再只有一段口头返工文本。
+- **P5-1 空交付门**：派过子代理但交付区零产物 → `UNCONTRACTED_EMPTY_DELIVERY`
+  阻断（产物存在性客观门，走返工非终态），返工指引含结构化不可行报告 schema
+  （tried_channels[]/untried_channels_known[]——用字段倒逼探索完备性，零语言解析）。
+- 行为变化：出口检查会让"未收口即收尾"的 run 多一轮续航（两个既有 closeout 测试的
+  backend.calls 断言 3→4，已按新语义更新注明）。
+- 钉子：`test_final_exit_contract.py` 8 条（纯问答零影响/口头放弃被抓/双闸/空交付/
+  写报告后放行/resume 块）。
+
+## 2026-06-11 确定性优先三件套：系统级工具失败账本 + 写边界一致性钉子 + capability 软引导（开发计划 A1-A3）
+
+- **A1 系统级工具失败账本**（根治 R4b 模型归因幻觉）：新增
+  `subagents/tool_failure_ledger.py`——子代理一轮 `agent.run` 的
+  `archive_tool_calls`（registry 层 ToolExecutionResult 的 ok/error_code，系统事实）
+  提取 ok=False 摘要（tool/call_id/error_code/target），经
+  `RecordRunnerResultParams.tool_failures` 写进
+  `task.attributes["tool_failure_ledger"]`。语义：`[]`=系统确认零失败（强事实，
+  拆穿模型口头归因），`None`（超时/worker 异常拿不到数据）不覆盖旧账本。closeout
+  的 `unresolved_children` 投影新增 `tool_failure_codes`（error_code→次数）——模型
+  summary 声称 WRITE_FORBIDDEN 而系统账本为空时，矛盾在报告里直接可见。
+  纯观测，不做硬门。钉子：`test_subagent_tool_failure_ledger.py`（11 条，含 R4b
+  幻觉对照形态）。
+- **A2 写边界一致性钉子**：`test_subagent_output_alignment.py` 增三条——R4b
+  "祖先级 forbidden（/Users/<user>）不拦已授权交付区 + allowed 内 forbidden 子树
+  必须收窄"双向钉死 narrowing 语义；boundary 的 forbidden/locked 恒等于 task
+  字段（同源无漂移）；首轮 attempt 零 grant 即含交付区且重复构造稳定（排除
+  时序窗口）。
+- **A3 capability 闭环结构化软引导**（R4b 主代理 0 次调用 resolve 的针对性修复）：
+  `SUBAGENTS_CAPABILITY_REQUESTS_OPEN` finding 的 evidence 新增
+  `recommended_tool="resolve_capability_requests"` + `open_capability_request_ids`
+  （主代理直接拿去调用，不必从文本猜）；`required_actions` 里的
+  `resolve_open_capability_requests` 改为真实工具名（防诱导调用不存在的工具）。
+  软引导，不拦主链路。
+
+## 2026-06-11 失败自省 split 建议生产→消费打通（自动拆分闭环）
+
+- 打通点：`FailureIntrospector` 产出的 `split_suggestions` 此前无人消费（死路）。
+  现在 `_handle_failure_introspection` 在调参后调用新增的 `_apply_introspection_split`：
+  `should_split` + 建议非空 + 配置开启 + 深度未超限时，复用
+  `failure_analysis_service.split_task` 把失败任务真实拆成子任务（子任务 PLANNING
+  先落盘、原任务 TAKEN_OVER 后落盘），拆分账本记进
+  `failure_introspection_data.split_applied/split_into`，跳过原因结构化记录在
+  `split_skipped_reason`（auto_split_disabled / depth_limit:N）。
+- 配置（capability_config 三同步）：`subagent_failure_auto_split_enabled`（默认 false，
+  拆分会创建新任务需显式开启）+ `subagent_failure_split_max_depth`（默认 2；0=不限制）。
+  运行时读取统一走新增的 `capability.runtime_config_reload.capability_config_for_agent`
+  （快照→缓存加载的唯一权威；context_compactor 原私有重复实现已收敛到它）。
+- 消费 key 与生产端对齐：`new_timeout_seconds`（已有钉子）、`max_tool_rounds`
+  （消费链真实存在，留给 LLM 自省/人工注入）；删除 `split_goal` 字符串拼接分支——
+  它是无人生产的影子拆分路径，拆分唯一权威是 split_task 子任务。
+- 自省吞异常修复：load 失败仅日志；apply 段失败把 `runtime_error_report` 写进
+  `task.attributes["failure_introspection_error"]` 并补落盘，留痕再失败才降级日志；
+  任何情况不向 runner 主链路抛异常。
+- 钉子：`test_real_class_integration.py` 两条真实链路钉子（开关开→子任务真实落盘
+  可派工；默认关→只记 skip 原因行为不变）；`test_dispatch_mixin.py` 两条留痕钉子
+  + 救活 4 个曾被错误缩进成嵌套 def 的死测试（pytest 收集数 1→23）。
+
 ## 2026-06-10 合约身份 helper 去重
 
 - 幂等/修复合约身份两个文件合一，消除 3 个逐字重复的私有 helper；纯内部去重，
@@ -198,3 +435,49 @@
   不再塞 `inherited_parent_context=true` 这类内部机器标记。
 - capability request/grant/gap 是可观察工作项，不是默认阻断任务的硬门。
 - workflow mode 是显式配置能力，不应该替普通中文任务自动加限制。
+
+## 2026-06-11 R4 交付链路四子项落地
+
+- 执行合同产物落点对齐（R4 子项①）：attributes 里的 `output_files`/`output_refs`
+  保持"最终交付意图"不动；`services/output_alignment.py` 投影层把执行合同
+  （task_packet/output_contract）的目标 refs 翻译成子代理自己 `output_dir` 下的可写
+  落点，`write_contract.output_delivery_map`（落点→意图位置）渲染进 runner prompt；
+  落点被 locked_files 盖住记结构化 `OUTPUT_TARGET_LOCKED` warning，不静默。
+- capability 处理回路（子项②）：新增模型工具 `resolve_capability_requests`
+  （grant/deny 显式裁决；grant 落 path_scope+写工具即时生效到写边界，目录围栏=
+  任务工作区+主代理 workspace，越界结构化拒绝；deny 走协议终态 CLOSED+
+  denial_reason）；`capability_request` 提交后立刻向父级线程发 requires_main_agent
+  观察+wake（`runner_completion_wake.notify_parent_on_capability_request`）。
+- 声明产物对账（子项③）：closeout 的 subagent_aggregation gate 新增
+  `SUBAGENTS_DECLARED_OUTPUTS_MISSING`——DONE 子代理声明产物在声明位置缺失即
+  NEED_REPAIR；同时修复 gate 把 runner 自己算成未完成子代理的自指拦截
+  （评估时排除 closeout 当事人 run_id）。
+- 汇总搬运（子项④）：runner result 写回时 `deliver_anchored_outputs_to_declared`
+  按 delivery_map 把锚定落点的真实产物搬到声明位置（先于 summary 物化），结果进
+  `attributes.output_delivery_results`（delivered/skipped_existing/source_missing/
+  target_outside_workspace）。
+
+## 2026-06-11 产物落点改回家目录交付区方案
+
+按用户确认调整子项①的落点方向：默认交付区 = 任务工作区/output（用户主目录下
+tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理家 work/agents/<id>/output。
+- `output_alignment.delivery_root(task)`：优先 attributes.run_workspace.output_dir
+  （主代理/用户显式指定），否则 task_workspace_dir/output。
+- `output_write_grant_roots(task)`：交付区授权进真实写边界
+  （runner_context_service._build_write_boundary）和模型可见 allowed_write_roots
+  （context_bundle_contracts.allowed_write_roots），子代理直接写交付区、用户拿走即可。
+- delivery_map 收窄：只记"声明落在交付区外、被重定位"的条目（reason=relocated_*）；
+  相对声明锚到交付区、已指向交付区的绝对声明都不进 delivery_map、无需搬运。
+- 搬运（deliver_anchored_outputs_to_declared）降级为兜底，只处理任务外/任务内非
+  交付区的少数声明；锁冲突 OUTPUT_TARGET_LOCKED 警告与声明对账全部保留。
+
+## 2026-06-11 声明对账加结构化豁免出口
+
+- `resolve_capability_requests` 复用扩展第三个 decision `accept_output_gaps`（不新增
+  工具，按参数复用）：把声明产物缺失豁免登记到子代理
+  attributes.output_delivery_exemptions（{ref, reason, accepted_by, at}）。
+  exempt_refs 指定具体声明，缺省登记通配 "*"（整体豁免，用于纯汇报任务/已确认接受）。
+- closeout 的 `_missing_declared_refs` 先扣除豁免再算缺失：通配 "*" 直接返回空缺失；
+  具体 ref 豁免逐条扣除。SUBAGENTS_DECLARED_OUTPUTS_MISSING 拦截因此可被显式解除。
+- 豁免是结构化、可审计记录，不是静默放水、不中断任务；gate 文案与 required_actions
+  指向 resolve_capability_requests(decision=accept_output_gaps)。

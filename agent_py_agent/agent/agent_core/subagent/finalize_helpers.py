@@ -11,6 +11,7 @@ from ...subagents.models import SubAgentParsedOutput
 from ...subagents.services.subagent_session_compact import (
     subagent_session_compact_payload_from_result,
 )
+from ...subagents.tool_failure_ledger import tool_failures_from_archive
 from .params import RecoverySnapshotParams, SubagentFinalizeParams
 
 
@@ -74,6 +75,10 @@ def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
     params = request.params
     structured = request.structured
     repair_state = request.repair_state
+    # 系统级工具失败账本(A1)的来源裁决:archive 为 None(result 缺字段/异常路径
+    # 未填)= 拿不到系统数据,必须传 None 不覆盖旧账本;archive 是 list(正常轮,
+    # 含空 list)才提取失败摘要,[] = 系统确认零失败。两个语义不可混淆。
+    archive_calls = getattr(params.result, "archive_tool_calls", None)
     return request.agent.subagents.runner_result.record_runner_result(
         RecordRunnerResultParams(
             run_id=params.run_id,
@@ -89,6 +94,9 @@ def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
             verification_status="" if structured.found else "VERIFIED",
             structured_output=structured,
             actual_tools=params.result.executed_tools or [],
+            tool_failures=(
+                None if archive_calls is None else tool_failures_from_archive(archive_calls)
+            ),
             structured_repair_attempted=repair_state["attempted"],
             structured_repair_ok=repair_state["ok"],
             structured_repair_error=repair_state["error"],

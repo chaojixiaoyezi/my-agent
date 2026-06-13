@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from ...backends import ModelResponse
+from ...concurrency.interrupt import is_interrupted
 from ...memory_archive import estimate_tokens
 from ...tooling.models import ToolExecutionResult
 from .._runtime_params import ToolLoopExecuteParams
@@ -112,6 +113,11 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     read_since_checkpoint: list[dict[str, object]] = []
     for idx, payload in enumerate(calls, start=1):
         tool_name = _tool_name(payload)
+        # 协作中断安全点(批3):本线程被取消就不再开新工具,已完成的照常留痕。
+        if is_interrupted():
+            _record_interrupted_call(request, idx, payload)
+            handled_count = idx
+            break
         if _should_defer_for_compact_digest(request, tool_name):
             _emit_tool_progress(ToolProgressEvent(request, idx, payload, "延后"))
             result = _compact_deferred_result(tool_name)
@@ -129,10 +135,7 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
             )
         _emit_tool_progress(ToolProgressEvent(request, idx, payload, _finished_status(result), started_at))
         request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
-        if result.ok and tool_name == "read_file":
-            read_since_checkpoint.append(dict(payload) if isinstance(payload, dict) else {})
-        if result.ok and tool_name in _CHECKPOINT_TOOLS:
-            read_since_checkpoint.clear()
+        _track_read_checkpoint(read_since_checkpoint, tool_name, payload, result)
         mark_tool_context_digest_pending(request.params)
         handled_count = idx
         subagent_output_written = subagent_output_written or is_subagent_output_json_write(
@@ -146,7 +149,72 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
             break
     _append_long_read_fact_reminder(request, read_since_checkpoint)
     _append_deferred_tool_call_notice(request, handled_count=handled_count)
+    _enforce_turn_context_budget(request.params, before_context_count)
     return subagent_output_written
+
+
+# 函数用途: 簿记"自上个 checkpoint 工具以来读了哪些文件"(长读提醒用)。
+def _track_read_checkpoint(
+    read_since_checkpoint: list[dict[str, object]], tool_name: str, payload: object, result: ToolExecutionResult
+) -> None:
+    if not result.ok:
+        return
+    if tool_name == "read_file":
+        read_since_checkpoint.append(dict(payload) if isinstance(payload, dict) else {})
+    if tool_name in _CHECKPOINT_TOOLS:
+        read_since_checkpoint.clear()
+
+
+# 函数用途: 中断时给本工具留一条结构化"已中断"记录(进度+留痕一并处理)。
+def _record_interrupted_call(request: ToolRoundExecutionRequest, idx: int, payload: object) -> None:
+    _emit_tool_progress(ToolProgressEvent(request, idx, payload, "中断"))
+    result = _interrupted_result(_tool_name(payload))
+    request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
+
+
+# 函数用途: 中断时给本工具一条结构化"已中断"结果(模型可读懂并收尾)。
+def _interrupted_result(tool_name: str) -> ToolExecutionResult:
+    payload = json.dumps(
+        {"error": "任务已被取消,本工具未执行。", "hint": "停止派发新动作,保存已有进展后收尾。"},
+        ensure_ascii=False,
+    )
+    return ToolExecutionResult(tool_name, False, payload, error_code="CANCELLED")
+
+
+# LLM: 单回合聚合预算。
+#   既有防线只管"单个结果过大就外置";本防线兜"单个都不大、本轮累计巨大"
+#   (几十个中型 read/search 同轮返回)。超预算时从最大段开始截断到安全份额,
+#   截口落在换行处,并注明恢复路径(重新调用工具/读档案)。纯框架层,模型无感。
+_TURN_TOOL_CONTEXT_BUDGET_CHARS = 200_000
+_TURN_BUDGET_KEEP_CHARS = 20_000
+
+
+# 函数用途: 本轮工具输出总量超预算时,把最大的几段裁到安全大小(裁口带提示)。
+def _enforce_turn_context_budget(params: ToolLoopExecuteParams, before_context_count: int) -> None:
+    context = getattr(params, "tool_context", None)
+    if not isinstance(context, list) or len(context) <= before_context_count:
+        return
+    indexed = list(enumerate(context))[before_context_count:]
+    total = sum(len(str(text)) for _, text in indexed)
+    for idx, text in sorted(indexed, key=lambda item: len(str(item[1])), reverse=True):
+        if total <= _TURN_TOOL_CONTEXT_BUDGET_CHARS:
+            return
+        body = str(text)
+        if len(body) <= _TURN_BUDGET_KEEP_CHARS:
+            return
+        context[idx] = _clip_at_newline(body, _TURN_BUDGET_KEEP_CHARS) + (
+            "\n... [本轮工具输出总量超预算,此结果已截断;"
+            "需要完整内容请用更窄的参数重新调用该工具,或按上方锚点读取档案。]"
+        )
+        total -= len(body) - len(context[idx])
+
+
+# 函数用途: 把文本裁到限长,裁口尽量落在换行符上(避免半行残句)。
+def _clip_at_newline(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    cut = text.rfind("\n", max_chars // 2, max_chars)
+    return text[: cut if cut > 0 else max_chars]
 
 
 def _should_defer_for_compact_digest(request: ToolRoundExecutionRequest, tool_name: str) -> bool:

@@ -88,7 +88,11 @@ def test_saved_run_uses_prompt_slug_when_only_machine_ids_are_available(tmp_path
     assert workspace["run_id"] == "run-456"
 
 
-def test_same_prompt_new_run_gets_separate_task_workspace(tmp_path: Path):
+def test_same_prompt_new_run_reuses_task_workspace_with_timeline(tmp_path: Path):
+    """R8 接力实锤后的语义裁决:同一 prompt 的新 run 复用同一任务目录接续
+    (配置注释承诺"同一 prompt 会复用同一个任务目录,并用 work/timeline.jsonl
+    记录多次 run";旧断言"各开一个目录"钉的是实现缺陷——接力会变重做,
+    原 progress/产物/expected_outputs 声明全部失效)。"""
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
@@ -100,16 +104,15 @@ def test_same_prompt_new_run_gets_separate_task_workspace(tmp_path: Path):
 
     date_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat()
     task_dirs = sorted(item for item in date_root.iterdir() if item.is_dir())
-    workspaces = [json.loads((item / "work" / "run_workspace.json").read_text(encoding="utf-8")) for item in task_dirs]
-    timelines = [(item / "work" / "timeline.jsonl").read_text(encoding="utf-8").splitlines() for item in task_dirs]
-    assert len(task_dirs) == 2
+    assert len(task_dirs) == 1, "同 prompt 接力必须复用同一任务目录"
     assert task_dirs[0].name == "分析-all-agent-项目并写中文报告"
-    assert task_dirs[1].name == "分析-all-agent-项目并写中文报告-run-two"
-    assert [workspace["run_id"] for workspace in workspaces] == ["run-one", "run-two"]
-    assert all(workspace["prompt_fingerprint"] for workspace in workspaces)
-    assert all(len(timeline) == 1 for timeline in timelines)
-    assert any('"run_id": "run-one"' in line for line in timelines[0])
-    assert any('"run_id": "run-two"' in line for line in timelines[1])
+    workspace = json.loads((task_dirs[0] / "work" / "run_workspace.json").read_text(encoding="utf-8"))
+    timeline = (task_dirs[0] / "work" / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
+    assert workspace["run_id"] == "run-two", "工作区身份随最新 run 更新"
+    assert workspace["prompt_fingerprint"]
+    assert len(timeline) == 2, "timeline 记录每一次 run 的接力痕迹"
+    assert any('"run_id": "run-one"' in line for line in timeline)
+    assert any('"run_id": "run-two"' in line for line in timeline)
 
 
 def test_workspace_identity_does_not_reuse_old_state_json(tmp_path: Path):
@@ -321,9 +324,12 @@ def test_memory_add_writes_owner_memory_and_ignores_legacy_memory_path(tmp_path:
 
 
 def test_prompt_builder_reads_key_memory_and_matching_lessons(tmp_path: Path):
+    # 批2 新语义:lesson 召回=路由索引关键词(主路)∪ 文件名 stem(兜底)。
+    # "派工"命中播种索引的 lessons.subagents 段(索引路),"subagent"命中
+    # 手写文件 stem(兜底路),两路并集都进 prompt;无关 lesson 不进。
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(my_agent_home=str(home), prompt_files=[], home_lesson_auto_read_limit=1)
+    cfg = AgentConfig(my_agent_home=str(home), prompt_files=[], home_lesson_auto_read_limit=2)
     agent = SimpleAgent(cfg, repo)
     agent.home_paths.owner_memory_md.write_text("记住：产物目录必须干净。\n", encoding="utf-8")
     (agent.home_paths.owner_memory_lessons_dir / "subagent.md").write_text("子代理教训：路径必须由上层传递。\n", encoding="utf-8")
@@ -332,7 +338,8 @@ def test_prompt_builder_reads_key_memory_and_matching_lessons(tmp_path: Path):
     prompt = agent.prompts.build("测试 subagent 派工")
 
     assert "记住：产物目录必须干净。" in prompt
-    assert "子代理教训：路径必须由上层传递。" in prompt
+    assert "lessons/subagents.md" in prompt, "索引路:'派工'应召回播种的子代理协作权威 lesson"
+    assert "子代理教训：路径必须由上层传递。" in prompt, "兜底路:未登记索引的手写 lesson 仍按 stem 召回"
     assert "视频教训：不用读。" not in prompt
 
 

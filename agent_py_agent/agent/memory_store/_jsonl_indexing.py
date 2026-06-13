@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
@@ -55,7 +56,9 @@ class JsonlMemoryIndexMixin:
         try:
             self._index_record(record)
         except Exception:
-            # 记忆 JSONL 是主流水，索引失败不能让 chat/runner 主链路中断。
+            # 记忆 JSONL 是主流水，索引失败不能让 chat/runner 主链路中断;
+            # 但失败必须可观测,否则索引静默腐化、检索悄悄变差(体检实锤)。
+            logging.getLogger(__name__).debug("memory index write failed", exc_info=True)
             return
 
     def _index_record(self, record: MemoryRecord) -> None:

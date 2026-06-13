@@ -21,6 +21,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `cli/gateway_service.py`：systemd/launchd service unit 生成和安装/卸载入口；不再拆成私有 facade helper。
 - `agent/gateway_parts/process_control.py`：进程存活、终止和等待退出的唯一进程控制模块。
   `daemon_control.py` 只处理 PID record、后台化、锁和 shutdown request，不再作为进程控制转口。
+- `agent/gateway_parts/scoped_locks.py`：机器级【进程单例】锁（pid+进程启动时间判归属，
+  长期助手 风格）。用于"同一台机器同一 scope+identity 只有一个活进程持有"的网关身份独占；
+  持有进程重复 acquire = 刷新心跳，死进程残留锁自动接管。`daemon_control.py` 是它的
+  公共 API 转口。
 
 ## 路径
 
@@ -42,6 +46,12 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
 
 ## 规则
 
+- `scoped_locks.py` 只提供进程对进程互斥，【不提供】进程内线程互斥：同进程任意线程
+  acquire 同一把锁都是持有者重入（刷新心跳），任意线程 release 都按进程维度删锁。
+  单进程多线程的临界区（如 request worker 池内共享状态）禁止复用这把锁，应使用
+  `threading.Lock`（参考 `agent/io/jsonl.py` 的"线程锁 + flock"双层模式；对照组
+  长期助手 ProcessRegistry 同样将进程身份锁与线程互斥锁语义分离）。钉子：
+  `tests/test_real_io_concurrency.py::test_scoped_lock_process_singleton_reentrant_threads_and_cross_process_mutex`。
 - request/response/history 损坏要显式报告 load_error，不能渲染成“没有记录”。
 - status/doctor 要能看到当前 processing request 的结构化租约事实，包括 request id、
   lease owner、attempts、lease/heartbeat/update age 和 chunk stream 路径；这些只用于观察，

@@ -41,6 +41,8 @@ _CLOSEOUT_GATE_KEYS = (
     "target_coverage_projection_gate",
     "source_fact_consistency_gate",
     "task_progress_closeout_gate",
+    "expected_outputs_gate",
+    "subagent_aggregation_gate",
     "acceptance_gate",
     "final_closeout_gate",
 )

@@ -133,9 +133,9 @@ def test_attach_run_task_workspace_context_no_save_still_creates_task_workspace(
     assert Path(workspace["work_dir"]).name == "work"
     injection = "\n".join(updated.inject)
     assert "# Current Task Workspace" in injection
-    assert f"source_workspace_root: {tmp_path}" in injection
     assert f"relative_input_root: {tmp_path}" in injection
-    assert "不是相对输入路径的默认根" in injection
+    # 稳而不管减负:注入段只留目录事实+一句定位;目录使用教学收编 lessons/workspace.md
+    assert "输入目录不是交付目录" in injection
 
 
 def test_attach_run_task_workspace_context_preserves_user_requested_output_root(tmp_path):
@@ -332,3 +332,77 @@ def test_attach_run_task_workspace_context_rewrites_relative_output_contract_to_
     artifact = updated.delivery_contract["artifacts"][0]
     assert artifact["preferred_path"] == str(Path(workspace["output_dir"]) / "项目分析报告.md")
     assert artifact["allowed_output_roots"] == [workspace["output_dir"]]
+
+
+def test_single_shot_environment_fact_only_for_cli_run(tmp_path):
+    """R7c 实锤钉子(缺陷③):cli_run 单次运行必须注入"请示无人应答"环境事实;
+    gateway(有 guidance 渠道)不注入,避免误导可交互形态。"""
+    from dataclasses import replace
+
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        attach_run_task_workspace_context,
+    )
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    base = RunParams(save=True, request_id="req-ss", run_id="run-ss", task_id="task-ss")
+
+    cli = attach_run_task_workspace_context(agent, replace(base, source="cli_run"), "做一个任务")
+    cli_section = next(item for item in cli.inject if "# Current Task Workspace" in str(item))
+    assert "单次运行" in cli_section and "不会有任何回复" in cli_section
+
+    gateway = attach_run_task_workspace_context(agent, replace(base, source="gateway"), "做一个任务")
+    gateway_section = next(item for item in gateway.inject if "# Current Task Workspace" in str(item))
+    assert "单次运行" not in gateway_section, "gateway 有 guidance 补发渠道,不得注入单次事实"
+
+
+def test_same_prompt_relay_reuses_task_workspace(tmp_path):
+    """R8 接力实锤钉子:同 prompt 的新 run(三个机器 ID 全新)必须复用同一任务
+    目录接续,而不是开 -run-<ns> 新目录把接力变重做;不同 prompt 不得误复用。"""
+    from agent_py_agent.agent.user_space.run_workspace import (
+        EnsureRunWorkspaceRequest,
+        ensure_run_workspace,
+    )
+
+    def request(prompt, rid):
+        return EnsureRunWorkspaceRequest(
+            home=tmp_path / "home",
+            template="tasks/{date}/{task_slug}",
+            task_name=prompt,
+            user_prompt=prompt,
+            request_id=f"req-{rid}",
+            run_id=f"run-{rid}",
+            task_id=f"run-{rid}",
+        )
+
+    first = ensure_run_workspace(request("帮我做一份周榜任务,共 24 周。", "1781000000001"))
+    relay = ensure_run_workspace(request("帮我做一份周榜任务,共 24 周。", "1781000000002"))
+    other = ensure_run_workspace(request("另一个完全不同的任务。", "1781000000003"))
+
+    assert relay.root == first.root, "同 prompt 接力必须复用同一任务目录"
+    assert other.root != first.root, "不同 prompt 不得误复用"
+
+
+def test_relay_legacy_outputs_projected_on_reused_workspace(tmp_path):
+    """R11a 接力倒退钉子:接力轮(timeline≥2)注入上轮子代理产出清单;
+    首轮/无遗产不注入。纯事实投影零指令。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _workspace_prompt_section
+
+    root = tmp_path / "task"
+    work = root / "work"
+    agents = work / "agents" / "subagent-x1"
+    agents.mkdir(parents=True)
+    (work / "timeline.jsonl").write_text('{"run":1}\n{"run":2}\n', encoding="utf-8")
+    (agents / "runner_response.md").write_text("深度分析" * 3000, encoding="utf-8")
+    paths = SimpleNamespace(root=root, output_dir=root / "output", work_dir=work)
+
+    section = _workspace_prompt_section(paths, primary_workspace_root=tmp_path)
+    assert "- relay_legacy_outputs:" in section and "subagent-x1" in section, "接力轮必须看到遗产清单"
+
+    (work / "timeline.jsonl").write_text('{"run":1}\n', encoding="utf-8")
+    first_round = _workspace_prompt_section(paths, primary_workspace_root=tmp_path)
+    assert "- relay_legacy_outputs:" not in first_round, "首轮不注入"

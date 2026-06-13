@@ -39,6 +39,74 @@ def normalize_artifact_items(task: SubAgentTask, artifacts: list[dict[str, objec
     return normalized
 
 
+# LLM: R4 子项④的搬运步骤，在 materialize 之前执行：把子代理锚定落点（output_alignment
+#   的 delivery_map.from）的真实产物复制到声明意图位置（.to）。目标必须通过
+#   _materializable_declared_output_path 的工作区围栏；已存在非空目标不覆盖。
+#   搬运结果结构化记入 task.attributes["output_delivery_results"]，交付对账消费。
+# 函数用途: 子代理 runner 结果写回时，把真实产物送到主代理声明的最终位置。
+def deliver_anchored_outputs_to_declared(
+    task: SubAgentTask,
+    artifacts: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    from .services.output_alignment import anchored_output_refs
+
+    delivery_map = anchored_output_refs(task).delivery_map
+    if not delivery_map:
+        return []
+    existing_refs = {artifact_ref(item) for item in artifacts}
+    delivered: list[dict[str, object]] = []
+    results: list[dict[str, str]] = []
+    for entry in delivery_map:
+        source_text = str(entry.get("from") or "")
+        declared_text = str(entry.get("to") or "")
+        target = _materializable_declared_output_path(task, declared_text)
+        if target is None:
+            results.append({"from": source_text, "to": declared_text, "status": "target_outside_workspace"})
+            continue
+        source = _existing_local_path(source_text)
+        if source is None or not source.is_file():
+            results.append({"from": source_text, "to": str(target), "status": "source_missing"})
+            continue
+        if target.resolve(strict=False) == source.resolve(strict=False):
+            continue
+        if target.exists() and target.stat().st_size > 0:
+            results.append({"from": source_text, "to": str(target), "status": "skipped_existing"})
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        import shutil
+
+        shutil.copyfile(source, target)
+        results.append({"from": source_text, "to": str(target), "status": "delivered"})
+        if str(target) not in existing_refs:
+            delivered.append(
+                {
+                    "path": str(target),
+                    "kind": target.suffix.lstrip(".") or "file",
+                    "summary": "delivered subagent output to declared location",
+                    "source_ref": source_text,
+                }
+            )
+    _record_delivery_results(task, results)
+    return delivered
+
+
+# 函数用途: 把搬运结果按结构化账本追加到 task.attributes（去重保序）。
+def _record_delivery_results(task: SubAgentTask, results: list[dict[str, str]]) -> None:
+    if not results:
+        return
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    existing = attrs.get("output_delivery_results")
+    records = list(existing) if isinstance(existing, list) else []
+    seen = {(str(r.get("from")), str(r.get("to")), str(r.get("status"))) for r in records if isinstance(r, dict)}
+    for item in results:
+        key = (item["from"], item["to"], item["status"])
+        if key not in seen:
+            records.append(item)
+            seen.add(key)
+    attrs["output_delivery_results"] = records
+    task.attributes = attrs
+
+
 def materialize_missing_declared_output_artifacts(
     task: SubAgentTask,
     parsed: Any,
@@ -60,17 +128,38 @@ def materialize_missing_declared_output_artifacts(
         if source is not None:
             target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
             summary = "copied subagent text artifact into declared output"
+            placeholder = False
         else:
             target.write_text(_render_declared_output_markdown(task, parsed, ref), encoding="utf-8")
             summary = "materialized structured subagent result for declared output"
-        materialized.append(
-            {
-                "path": str(target),
-                "kind": "md",
-                "summary": summary,
-            }
-        )
+            # P2-2(R5a 实锤:交付区里多数"分析文件"是结构化摘要占位符,名义上
+            # 占了交付位):兜底渲染的摘要不是真产物,带结构化标记供对账/报告单列,
+            # 不允许冒充真交付。复制真实文本产物的不算占位符。
+            placeholder = True
+        entry: dict[str, object] = {
+            "path": str(target),
+            "kind": "md",
+            "summary": summary,
+        }
+        if placeholder:
+            entry["placeholder"] = True
+            _record_placeholder_artifact(task, str(target))
+        materialized.append(entry)
     return materialized
+
+
+# LLM: P2-2 占位符账本:登记链只保留固定键,故占位事实独立记在
+#   attributes.placeholder_artifacts(去重,环形上限 50),供 closeout 的
+#   unresolved/open 投影单列与用户报告明示。只观测,不改对账判定。
+# 函数用途: 记下"这个交付位放的是兜底摘要,不是真产物"。
+def _record_placeholder_artifact(task: SubAgentTask, path_text: str) -> None:
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    entries = attrs.get("placeholder_artifacts")
+    entries = entries if isinstance(entries, list) else []
+    if path_text not in entries:
+        entries.append(path_text)
+    attrs["placeholder_artifacts"] = entries[-50:]
+    task.attributes = attrs
 
 
 def _copyable_text_artifact_source(target: Path, artifacts: list[dict[str, object]]) -> Path | None:

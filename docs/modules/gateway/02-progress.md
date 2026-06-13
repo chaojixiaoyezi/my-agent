@@ -1,5 +1,21 @@
 # Gateway Progress
 
+## 2026-06-11 scoped lock 语义定性：进程级单例，非线程互斥（方案A）
+
+- 全仓调用点排查实锤：`acquire_scoped_lock`/`release_scoped_lock` 生产代码零运行时调用
+  （`daemon_control.py` 仅作公共 API 转口；`supervisor.py` 的 import 是死引用，已删；
+  CLI/scripts/动态引用为零）；gateway 单进程多线程路径（heartbeat/request/background/
+  worker 池）均未把它当临界区用，无存量数据竞争。
+- 对照组核查（长期助手 ProcessRegistry）：进程内并发一律 `threading.Lock`，pid+start_time
+  只做进程身份。据此定性"同进程线程重入=刷新心跳"是契约特性而非缺陷，采用方案A：
+  文档化语义 + 模块注释禁止线程临界区用法；不给锁记录加 thread id（方案B 会破坏
+  supervisor 重入刷新），也不新增无调用方的线程锁原语（线程互斥直接用
+  `threading.Lock`，参考 `agent/io/jsonl.py` 双层锁先例）。
+- 原 strict xfail 钉子（8 线程计数互斥）按正确语义改写为
+  `test_scoped_lock_process_singleton_reentrant_threads_and_cross_process_mutex`：
+  锁定同进程线程重入刷新、真实子进程抢锁必败、非持有进程 release 不误删、
+  release 后干净重持有四条契约。`scoped_locks.py` 补齐 LLM/人类双层中文注释。
+
 ## 2026-06-10 空闲扫描门 + recover 节流 + 队列年龄观测
 
 - 空闲 gateway 的每 0.2s 轮询不再做 inbox 全量 glob 和 processing 恢复扫描（mtime 门 + 节流）；

@@ -165,11 +165,22 @@ def test_score_card_capabilities_match():
 
 # ── CapabilityRouter 测试 ──────────────────────────────────────────────────
 
-def test_capability_router_empty():
-    """测试路由器默认带内置 Playwright 能力。"""
+def test_capability_router_default_cards():
+    """默认 router=内置 Playwright 能力 + 仓库内置知识型 skill(稳而不管 2-2:
+    SkillRegistry 默认接电,skills/builtin 零配置生效)。"""
     router = CapabilityRouter()
-    cards = router.cards()
-    assert [card.id for card in cards] == ["builtin:playwright-browser-testing"]
+    ids = {card.id for card in router.cards()}
+    assert "builtin:playwright-browser-testing" in ids
+    assert "skill:deep-code-analysis" in ids
+    assert "skill:pdf-translate-toolchain" in ids
+
+
+def test_capability_router_explicit_empty_registry():
+    """显式传空 registry 时不带任何 skill 卡(测试/隔离场景的逃生门)。"""
+    from agent_py_agent.agent.capability import SkillRegistry
+
+    router = CapabilityRouter(skill_registry=SkillRegistry([]))
+    assert [card.id for card in router.cards()] == ["builtin:playwright-browser-testing"]
 
 
 def test_capability_router_register():
@@ -210,8 +221,9 @@ def test_capability_router_filter_by_kind():
     router.register(CapabilityCard(id="tool-2", kind="tool", name="工具2", description=""))
 
     skill_cards = router.cards(kinds={"skill"})
-    assert len(skill_cards) == 1
-    assert skill_cards[0].kind == "skill"
+    # 1 个手注册 + 2 个仓库内置知识型 skill(默认接电)
+    assert len(skill_cards) == 3
+    assert all(card.kind == "skill" for card in skill_cards)
 
     tool_cards = router.cards(kinds={"tool"})
     assert len(tool_cards) == 3

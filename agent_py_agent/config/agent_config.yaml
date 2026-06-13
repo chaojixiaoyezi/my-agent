@@ -40,10 +40,13 @@ my_agent_owner_id: "main"
 # - SimpleAgent 启动时固定创建 ~/.my-agent owner home 基础目录和 SOUL/USER/AGENTS/memory 入口文件。
 # - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。
 # - home_lesson_auto_read_limit: 每轮最多自动读取多少个匹配 lesson 文件；0 表示不自动读 lesson。
+# - home_lesson_stale_caveat_days: 召回的 lesson 超过多少天未更新就附加"记忆可能过期"提示；0 表示不加提示。
+#   防止把陈旧记忆当现状：记忆反映写入时的事实，与当前代码/状态冲突时以现状为准。
 # - daily_memory_mirror_enabled: 写长期记忆时，同时按天追加一份到 owner memory/daily/YYYY-MM-DD.jsonl。
 # - run_task_workspace_enabled: 保存 run 在第一轮模型调用前自动创建 tasks/date/task_slug/output 和 work 等目录，并把路径作为软运行状态提示给模型。
 home_context_enabled: true
 home_lesson_auto_read_limit: 3
+home_lesson_stale_caveat_days: 7
 daily_memory_mirror_enabled: true
 run_task_workspace_enabled: true
 
@@ -520,6 +523,27 @@ max_tool_calls_per_round:
 tool_agent_budget_window_seconds:
 tool_agent_budget_max_calls:
 
+# run 出口合同的修复续航预算（任务完成力底座）：
+# - 主代理给最终回复时若交付验收（closeout）被阻断，系统最多把它打回去继续修几轮。
+# - 配合"进展签名"闸：连续两次未收口状态完全没变化就停止续航，防止死循环。
+# - 0 表示关闭续航：验收阻断即按旧行为退出（最终回复为返工说明）。
+run_repair_max_continuations: 3
+
+# run 出口的孤儿子代理回收：
+# - 后台派工是独立进程（durable），不会随主代理 run 进程退出而停止；主代理带着
+#   未收口子代理退出时，若不回收，它们会继续消耗资源并往交付区写无人验收的产物。
+# - true：退出前终止未收口子代理的后台进程（先 SIGTERM 给清理宽限，仍不退再
+#   SIGKILL），把被打断的 RUNNING 任务放回 PENDING 等待重新派工，全程留结构化痕迹。
+# - false：不回收；退出声明里会如实标注"后台子代理进程仍在运行"。
+run_exit_orphan_recovery_enabled: true
+
+# 检索完备性软引导：
+# - 同一个工具在本轮累计系统失败达到此阈值时，向模型注入一次软提示：在下
+#   "数据不存在/不可行"这类绝对结论之前，先枚举已试渠道与未试渠道，换渠道再验证。
+# - 只是软提示（每个工具最多提示一次），不拦截任何调用、不做硬门。
+# - 0 表示关闭。
+tool_failure_channel_hint_threshold: 2
+
 # 单个代理滚动 artifact 正文读取预算（下面两个参数必须一起看）：
 # - window_seconds=600 + max_chars=240000 表示单个 run_id 最近 10 分钟最多读取 240000 字符正文。
 # - 任一配置为 0 表示关闭这个 artifact 正文读取预算。
@@ -533,6 +557,22 @@ tool_artifact_read_budget_max_chars: 240000
 # - tool_payload_*: 只限制模型发来的单次工具调用 JSON 形状，防止坏 payload 撑爆上下文；不是业务字段枚举。
 tool_output_externalize_min_chars: 20000
 tool_output_preview_chars: 4000
+
+# 工具上下文回溯回收（microcompact）：
+# - 渲染 prompt 时，把窗口外的旧工具结果正文换成 artifact 锚点占位（read_artifact 可取回完整），
+#   只保留最近 N 个完整结果；解决"单条结果不大、但几十轮累积撑满 context"的问题。
+# - 只回收带可取回锚点且正文足够大的条目；系统提示、近窗口结果、无锚点条目原样保留。
+# - tool_context_microcompact_keep_recent: 保留最近多少个完整工具结果；0 表示关闭回收。
+# - tool_context_microcompact_min_chars: 正文达到多少字符才回收，低于该值的条目原样保留。
+tool_context_microcompact_keep_recent: 8
+tool_context_microcompact_min_chars: 1500
+
+# 单轮 PTL（prompt-too-long）重试：
+# - 模型接口实报"上下文超限"时，先回收最老 20% 工具结果正文直接重试本轮，
+#   轻量自救成功就不触发重量级 compact/resume；救不回再走原有 compact 路径。
+# - tool_context_ptl_retry_max: 单轮最多重试几次；0 表示关闭，直接走 compact。
+tool_context_ptl_retry_max: 3
+
 tool_payload_max_fields: 64
 tool_payload_max_field_name_chars: 128
 tool_payload_max_name_chars: 128

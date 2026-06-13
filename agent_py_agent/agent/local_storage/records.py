@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import write_text_file_atomic
 from .models import PREVIEW_CHARS, LocalSearchResult
 
 
@@ -149,7 +150,8 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
         clean_record_id = params.record_id or self.make_record_id(clean_source_type, clean_source_id)
         content_path = self._content_file(clean_record_id)
         content_path.parent.mkdir(parents=True, exist_ok=True)
-        content_path.write_text(params.content, encoding="utf-8")
+        # 原子写:blob 内容半写即损坏(体检实锤),统一走 json_io 原子文本写。
+        write_text_file_atomic(content_path, params.content)
         metadata = params.metadata or {}
         return _PreparedRecord(
             record_id=clean_record_id,

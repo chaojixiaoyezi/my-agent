@@ -117,7 +117,7 @@ class PromptBuilder:
         dynamic = _dynamic_prompt_text(self, request, task_local)
         injected = "\n".join(request.inject or [])
         workspace_context = _workspace_context_text(self)
-        task_and_transcript = _task_and_transcript_section(request.user_prompt, _tools.tool_context or [])
+        task_and_transcript = _task_and_transcript_section(self.config, request.user_prompt, _tools.tool_context or [])
         default_tools = "# Tools\n（当前未启用工具）"
         default_recommendations = "# Recommended Tools\n（当前无候选工具详情）"
         return (
@@ -135,7 +135,14 @@ class PromptBuilder:
         if not self.home_paths or not bool(getattr(self.config, "home_context_enabled", True)):
             return []
         chunks = _home_entry_context_chunks(self.home_paths)
-        chunks.extend(_matching_lesson_chunks(self.home_paths, user_prompt, _lesson_limit(self.config)))
+        chunks.extend(
+            _matching_lesson_chunks(
+                self.home_paths,
+                user_prompt,
+                _lesson_limit(self.config),
+                stale_days=float(getattr(self.config, "home_lesson_stale_caveat_days", _LESSON_STALE_DAYS) or 0),
+            )
+        )
         return chunks
 
 
@@ -170,8 +177,42 @@ def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, is
     chunks = [
         *builder.read_prompt_files(request.prompt_files, include_config=not isolated),
         *([] if isolated else builder.read_home_context(request.user_prompt)),
+        *([] if isolated else _skill_context_chunks(builder, request.user_prompt)),
     ]
     return "\n".join(chunks)
+
+
+# LLM: skill 树进主 run prompt(断链③修复,R10 实锤:skill 推荐只在派工场景用,
+#   主代理任务里模型从没见过技能书架)。稳而不管口径:①类目索引常驻=每类一行,
+#   与 skill 总数解耦(千级不膨胀);②具体技能卡只在本轮 query 命中时注入
+#   (limit 2,卡片自带正文路径供 read_file 跟进);③这些是知识线索不是流程
+#   指令。router 缺席(子代理隔离/异常)时整段缺席,零影响主链路。
+# 函数用途: 让模型每轮都知道"有技能书架可查",相关时直接把书递到手边。
+# 注卡分数门:长 prompt 全文检索会撞出大量边缘 n-gram 命中(R11 预检实锤:
+# 周榜任务对两张无关卡打 8.5-13 分,真命中 49-56 分)。低于此线的卡不注——
+# "命中才注"指真命中;边缘相关交给类目索引+skill_search 冷路,不占 prompt。
+_SKILL_INJECT_MIN_SCORE = 20.0
+
+
+def _skill_context_chunks(builder: PromptBuilder, user_prompt: str) -> list[str]:
+    router = getattr(builder, "capability_router", None)
+    if router is None:
+        return []
+    try:
+        index = router.render_category_index()
+        if not index:
+            return []
+        hits = [
+            hit
+            for hit in router.search(str(user_prompt or ""), limit=2, kinds={"skill"})
+            if hit.score >= _SKILL_INJECT_MIN_SCORE
+        ]
+        chunks = [index]
+        if hits:
+            chunks.append("# Matched Skills\n" + "\n".join(hit.card.render_compact() for hit in hits))
+        return chunks
+    except Exception:
+        return []
 
 
 def _workspace_context_text(builder: PromptBuilder) -> str:
@@ -206,8 +247,22 @@ def _workspace_context_text(builder: PromptBuilder) -> str:
     ])
 
 
-def _task_and_transcript_section(user_prompt: str, tool_context: list[str]) -> str:
-    tools_history = "\n\n".join(tool_context)
+def _task_and_transcript_section(config: AgentConfig, user_prompt: str, tool_context: list[str]) -> str:
+    from ..agent_core.tool_context.microcompact import (
+        DEFAULT_MICROCOMPACT_KEEP_RECENT,
+        DEFAULT_MICROCOMPACT_MIN_CHARS,
+        microcompact_tool_context,
+    )
+
+    # 渲染 prompt 时回收窗口外的旧工具结果正文（保留 read_artifact 锚点），省 context；
+    # 不改累积的 tool_context 历史本身。keep_recent 配置为 0 表示关闭回收。
+    tools_history = "\n\n".join(
+        microcompact_tool_context(
+            tool_context,
+            keep_recent=int(getattr(config, "tool_context_microcompact_keep_recent", DEFAULT_MICROCOMPACT_KEEP_RECENT) or 0),
+            min_chars=int(getattr(config, "tool_context_microcompact_min_chars", DEFAULT_MICROCOMPACT_MIN_CHARS) or 0),
+        )
+    )
     if not tools_history:
         return "# Tool Transcript\n（无）\n\n" f"# User Task\n{user_prompt}"
     return (
@@ -255,9 +310,42 @@ def _owner_paths(home_paths: Any, owner_attr: str) -> tuple[Path, ...]:
     return (owner_path,) if owner_path else ()
 
 
-def _matching_lesson_chunks(home_paths: Any, user_prompt: str, limit: int) -> list[str]:
+_LESSON_STALE_DAYS = 7.0
+
+
+def _lesson_age_caveat(path: Path, now: float, stale_days: float = _LESSON_STALE_DAYS) -> str:
+    """召回的 lesson 超过 stale_days 天未更新就加陈旧提示。
+
+    防止把陈旧记忆当现状——记忆反映写入时的事实，与当前代码/状态冲突时应以现状为准。
+    stale_days<=0 表示关闭提示（对应配置 home_lesson_stale_caveat_days=0）。
+    """
+    if stale_days <= 0:
+        return ""
+    try:
+        mtime = float(path.stat().st_mtime)
+    except OSError:
+        return ""
+    age_days = (now - mtime) / 86400.0
+    if age_days < stale_days:
+        return ""
+    return (
+        f"\n[memory-age-caveat] 这条记忆约 {int(age_days)} 天未更新，是当时的事实，"
+        "可能已过期；与当前代码/状态冲突时以现状为准。"
+    )
+
+
+def _matching_lesson_chunks(
+    home_paths: Any,
+    user_prompt: str,
+    limit: int,
+    *,
+    stale_days: float = _LESSON_STALE_DAYS,
+) -> list[str]:
     if limit <= 0:
         return []
+    import time
+
+    now = time.time()
     prompt_text = str(user_prompt or "").casefold()
     chunks: list[str] = []
     for path in _matching_lesson_paths(home_paths, prompt_text):
@@ -265,16 +353,60 @@ def _matching_lesson_chunks(home_paths: Any, user_prompt: str, limit: int) -> li
             return chunks
         content = _read_text_if_nonempty(path)
         if content:
-            chunks.append(f"# Home Lesson: {path}\n{content}")
+            chunks.append(f"# Home Lesson: {path}\n{content}{_lesson_age_caveat(path, now, stale_days)}")
     return chunks
 
 
+# LLM: lesson 召回的匹配权威(批 2 断链①修复,R10 实锤:旧算法要求英文文件名
+#   作为子串出现在用户 prompt 里——中文任务 prompt 永远零命中,种了 lessons
+#   从未被看到)。新算法:读 owner 路由索引(memory/routing/INDEX.md,播种时
+#   每个 lesson 段都带中文 trigger_keywords)——任一关键词命中 prompt 即召回该
+#   段 authority_path 指向的 lesson。"一个概念一个权威位置":索引就是召回路由,
+#   匹配函数终于读它。stem 匹配保留为并集兜底而非回退分支——索引是加速器
+#   不是封闭白名单,未登记进索引的手写 lesson 仍可按文件名命中(开放世界)。
+# 函数用途: 按用户这句话的内容,从经验笔记里挑出真正相关的几篇。
 def _matching_lesson_paths(home_paths: Any, prompt_text: str) -> list[Path]:
-    paths: list[Path] = []
+    candidates: list[Path] = []
     for lessons_dir in _owner_paths(home_paths, "owner_memory_lessons_dir"):
         if lessons_dir.exists():
-            paths.extend(path for path in sorted(lessons_dir.glob("*.md")) if path.stem.casefold() in prompt_text)
-    return paths
+            candidates += _routing_index_matches(lessons_dir, prompt_text)
+            candidates += _stem_matches(lessons_dir, prompt_text)
+    return [path for path in dict.fromkeys(candidates) if path.is_file()]
+
+
+# 函数用途: stem 兜底——文件名(不含扩展名)直接出现在 prompt 里的 lesson。
+def _stem_matches(lessons_dir: Path, prompt_text: str) -> list[Path]:
+    return [path for path in sorted(lessons_dir.glob("*.md")) if path.stem.casefold() in prompt_text]
+
+
+# 函数用途: 解析路由索引(lessons 上级 memory/routing/INDEX.md)的各段,
+#   trigger_keywords 任一命中 prompt 即返回该段 authority_path 对应的 lesson 文件。
+def _routing_index_matches(lessons_dir: Path, prompt_text: str) -> list[Path]:
+    index_path = lessons_dir.parent / "routing" / "INDEX.md"
+    text = _read_text_if_nonempty(index_path)
+    if not text:
+        return []
+    matches: list[Path] = []
+    for section in text.split("\n## ")[1:]:
+        keywords = _index_field(section, "trigger_keywords")
+        authority = _index_field(section, "authority_path")
+        if not keywords or not authority:
+            continue
+        terms = [term.strip().casefold() for term in keywords.split(",") if term.strip()]
+        if not any(term and term in prompt_text for term in terms):
+            continue
+        candidate = (lessons_dir.parent.parent / authority).resolve(strict=False)
+        if candidate.suffix == ".md" and "lessons" in candidate.parts:
+            matches.append(candidate)
+    return matches
+
+
+# 函数用途: 从索引段里取一个"key: value"字段的值(没有返回空串)。
+def _index_field(section: str, key: str) -> str:
+    for line in section.splitlines():
+        if line.strip().startswith(f"{key}:"):
+            return line.split(":", 1)[1].strip()
+    return ""
 
 
 def _lesson_limit(config: AgentConfig) -> int:

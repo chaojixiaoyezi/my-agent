@@ -12,21 +12,31 @@ agent_py_agent/
 |   |-- home_runtime_commands.py        # owner home 状态、daily/task workspace/index 维护命令
 |   |-- gateway_process.py              # gateway 进程入口
 |   `-- _*.py                           # CLI 子命令实现
+|-- skills/builtin/<category>/<name>/   # 内置知识型 skill 树：目录即分类（research/documents/…），递归扫描，类目索引常驻 prompt，skill_search 工具按需检索（千级地基）
 |-- agent/
 |   |-- core.py                         # SimpleAgent 组合入口
 |   |-- agent_core/                     # 主代理运行时、工具循环、编排工具、closeout
 |   |   |-- runtime/                    # guidance、wait policy、loop support
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复、完成判断
+|   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
 |   |   |-- orchestration/              # create/dispatch/cancel/inspect 子代理工具实现
 |   |   |-- delivery_closeout/          # 交付验收和收口
+|   |   |-- delivery_closeout/expected_outputs_gate.py # 产物类型/数量对账门：声明驱动核对交付区实存
+|   |   |-- delivery_closeout/source_volume.py # 来源比例观测：检索量 vs 交付量并排数字（纯观测零判定）
+|   |   |-- tool_loop/final_exit_contract.py # run 出口合同：未收口任务态必走 closeout+续航双闸
+|   |   |-- run_learning_review.py     # run 收尾自学习复盘钩子（教训进 drafts 待审，默认关闭）
+|   |   |-- tool_loop/exit_orphan_recovery.py # 出口孤儿回收：未收口退出前终止后台子代理进程并 requeue
 |   |   `-- runner/                     # 子代理 runner prompt/worker/session/timeout
 |   |-- subagents/
 |   |   |-- manager.py                  # 子代理 root manager：初始化、基础生命周期、服务组合
 |   |   |-- kernel.py                   # 子代理树快照
 |   |   |-- manager_work_orders.py      # 工单路径、默认文件、校验
 |   |   |-- models.py                   # 子代理数据模型
+|   |   |-- process_control.py          # 后台进程治理原语：存活探测/两阶段终止（SIGTERM→SIGKILL）
+|   |   |-- tool_failure_ledger.py      # 系统级工具失败账本：archive ok=False 摘要 -> attributes/对账投影
 |   |   |-- services/                   # 子代理业务服务
 |   |   |   |-- base.py                 # create_run/split/owner/runtime config scope
+|   |   |   |-- output_alignment.py    # 声明产物 -> 子代理可写落点投影 + delivery_map
 |   |   |   |-- persistence/            # canonical state、projection、index 同步
 |   |   |   |-- dispatch/               # dispatch/watch/parent planner 报告
 |   |   |   |-- runner_context_service.py # 执行上下文和边界文件
@@ -46,9 +56,11 @@ agent_py_agent/
 |   |-- local_storage/                 # SQLite/FTS/文件事实源
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
-|   |-- contracts/                     # 稳定协议、错误分类、验收合同
-|   |-- tooling/                       # 工具注册、执行、写入边界
-|   |-- capability/                    # 能力配置、技能、路由
+|   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io（原子写+mtime 行缓存）
+|   |-- concurrency/                   # 重试/退避（jittered backoff）、锁、per-thread 协作中断
+|   |-- contracts/                     # 稳定协议、错误分类（taxonomy+provider 九类分类器）、验收合同
+|   |-- tooling/                       # 工具注册、执行、写入边界、结构化错误出口
+|   |-- capability/                    # 能力配置、技能树扫描/路由、skill_search 工具
 |   |-- prompting_parts/               # prompt 构造
 |   |-- backends/                      # 模型后端适配
 |   `-- log_analysis/                  # 日志分析子域

@@ -49,6 +49,9 @@ from .orchestration.tool_grants import (
 )
 from .orchestration.tool_specs import build_create_subagents_spec
 from .orchestration.tools.cancel import CancelSubagentsTool as CancelSubagentsTool
+from .orchestration.tools.capability import (
+    ResolveCapabilityRequestsTool as ResolveCapabilityRequestsTool,
+)
 from .orchestration.tools.event import RaiseEventTool as RaiseEventTool
 from .orchestration.tools.status import InspectAgentTreeTool as InspectAgentTreeTool
 from .orchestration.work_scope import add_work_scope_key

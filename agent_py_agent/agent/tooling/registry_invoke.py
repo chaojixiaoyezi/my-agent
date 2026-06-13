@@ -54,10 +54,40 @@ class BoundaryPathCopyRequest:
     source_key: str
 
 
+# 函数用途: 组一条结构化工具错误(批3 长期助手 范式):error 说出了什么错,
+#   hint 给可操作下一步,JSON 形态便于模型解析,不再裸文本。
+def structured_tool_error(tool_name: str, error: str, hint: str, *, error_code: str) -> ToolExecutionResult:
+    payload = json.dumps({"error": error, "hint": hint}, ensure_ascii=False)
+    return ToolExecutionResult(tool_name, False, payload, error_code=error_code)
+
+
+# 函数用途: 写边界校验(越界返回拒绝结果,合规返回 None)。
+def _write_boundary_denied(
+    request: RegistryToolInvokeRequest, tool_params: dict[str, Any], workspace_roots: tuple[Path, ...]
+) -> ToolExecutionResult | None:
+    boundary_error = validate_write_boundary(
+        request.tool_name,
+        tool_params,
+        workspace_root=request.workspace_root,
+        workspace_roots=workspace_roots,
+        path_access_mode=request.path_access_mode,
+        path_dangerous_roots=request.path_dangerous_roots,
+        write_boundary=request.write_boundary,
+    )
+    if not boundary_error:
+        return None
+    return ToolExecutionResult(request.tool_name, False, boundary_error, error_code="WRITE_FORBIDDEN")
+
+
 def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionResult:
     tool = request.tools.get(request.tool_name)
     if tool is None:
-        return ToolExecutionResult(request.tool_name, False, f"未知工具: {request.tool_name}")
+        return structured_tool_error(
+            request.tool_name,
+            f"未知工具: {request.tool_name}",
+            "查看本轮工具目录,使用其中列出的工具名;不要凭记忆猜测工具名。",
+            error_code="TOOL_UNAVAILABLE",
+        )
 
     tool_params = _tool_params_for_execution(request.payload, request.tool_name, request.allowed_tools)
     tool_params = _with_task_workspace_relative_path(tool_params, request)
@@ -70,17 +100,9 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
     if not_ready is not None:
         return not_ready
     workspace_roots = _workspace_roots_for_invocation(request)
-    boundary_error = validate_write_boundary(
-        request.tool_name,
-        tool_params,
-        workspace_root=request.workspace_root,
-        workspace_roots=workspace_roots,
-        path_access_mode=request.path_access_mode,
-        path_dangerous_roots=request.path_dangerous_roots,
-        write_boundary=request.write_boundary,
-    )
-    if boundary_error:
-        return ToolExecutionResult(request.tool_name, False, boundary_error, error_code="WRITE_FORBIDDEN")
+    boundary_denied = _write_boundary_denied(request, tool_params, workspace_roots)
+    if boundary_denied is not None:
+        return boundary_denied
 
     return _execute_with_temporary_tool_context(
         tool,
@@ -374,7 +396,12 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolExecu
     try:
         return request.tool.execute(_tool_params_with_runtime_boundary(request))
     except Exception as exc:
-        return ToolExecutionResult(request.tool_name, False, _format_tool_exception(exc))
+        return structured_tool_error(
+            request.tool_name,
+            _format_tool_exception(exc),
+            "检查参数后重试;若反复失败,换一种方法或工具完成同一目标。",
+            error_code="TOOL_ERROR",
+        )
 
 
 def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -> dict[str, Any]:

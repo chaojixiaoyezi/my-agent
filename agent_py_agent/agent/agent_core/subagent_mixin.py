@@ -21,7 +21,11 @@ from ..subagents.models import (
 )
 from ..subagents.parsing import parse_parent_planner_output, parse_subagent_runner_output
 from ..subagents.services.dispatch.params import ParentPlannerRecordParams
-from .planner_service import PARENT_PLANNER_SYSTEM_PROMPT, PlannerPromptParams
+from .planner_service import (
+    PARENT_PLANNER_SYSTEM_PROMPT,
+    PlannerPromptParams,
+    append_planner_memory_hint,
+)
 from .planner_service import (
     build_parent_planner_prompt as _build_parent_planner_prompt,
 )
@@ -282,9 +286,42 @@ def _handle_subagent_repair(agent, params: SubagentRepairParams):
             lambda: agent.backend.generate(repair_prompt),
             policy=getattr(agent, "runtime_guard_policy", None),
         )
+        truncated = _is_truncated_result_failure(parse_subagent_runner_output(repair_response.text))
+        if truncated and (compact_result := _compact_retry_on_truncation(agent, params, repair_prompt)) is not None:
+            return compact_result
     except Exception as exc:
         return _repair_failure_tuple(params, exc)
     return _subagent_repair_tuple(params, repair_prompt, repair_response)
+
+
+# LLM: 截断特征专项二试(R11a 实锤:正文很长时模型连修复轮也把结果块输出到
+#   max_tokens 截断——旧链 repair 仅一次机会,两次截断即 BLOCKED 终判,干完的
+#   活被状态掩埋。仅"块开了头但没闭合/JSON 不完整"的截断特征触发,追加硬约束
+#   让模型给极简块;其他失败形态不重试,保持保守)。
+# 函数用途: 修复轮又被截断时,再给一次"只许极简块"的机会;救回返回 tuple,
+#   救不回返回 None 交回原链。
+def _compact_retry_on_truncation(agent, params: SubagentRepairParams, repair_prompt: str):
+    compact_prompt = repair_prompt + (
+        "\n\n## Retry Constraint\n你上一次的修复输出又被长度截断。这次必须极简:"
+        "summary 不超过 100 字;evidence/artifacts/tests/lessons 各最多 2 条;"
+        "绝不复述正文内容,只输出结果块本身。\n"
+    )
+    retry_response = run_with_provider_transient_auto_resume(
+        lambda: agent.backend.generate(compact_prompt),
+        policy=getattr(agent, "runtime_guard_policy", None),
+    )
+    retried = parse_subagent_runner_output(retry_response.text)
+    if retried.found and retried.ok:
+        return _subagent_repair_tuple(params, compact_prompt, retry_response)
+    return None
+
+
+# 函数用途: 这次解析失败像不像"输出被截断"?(块开了头没闭合,或 JSON 没读完)
+def _is_truncated_result_failure(parsed) -> bool:
+    if not parsed.found or parsed.ok:
+        return False
+    error = str(getattr(parsed, "parse_error", "") or "")
+    return ("结束标记" in error) or ("Unterminated" in error) or ("Expecting" in error)
 
 
 def _subagent_repair_tuple(params: SubagentRepairParams, repair_prompt: str, repair_response):
@@ -481,6 +518,8 @@ def _execute_planner_llm(agent, params: PlannerLLMParams):
             params.runner_instruction,
         ),
     )
+    # 记忆推模式(B1):planner 决策点自动注入相关教训(软注入,失败不阻断)。
+    prompt = append_planner_memory_hint(agent, params.state, prompt)
     agent.subagents.parent_planner.write_parent_planner_exchange(prompt)
     try:
         response = agent.run(

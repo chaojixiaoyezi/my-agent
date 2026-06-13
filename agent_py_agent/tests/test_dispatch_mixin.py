@@ -132,6 +132,36 @@ class TestDispatchMixinFailureIntrospection:
         # 不应抛出异常
         mixin._handle_failure_introspection("test-task-1", sample_task, sample_result)
 
+    def test_handle_failure_introspection_apply_error_recorded_structured(
+        self, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult
+    ) -> None:
+        """apply 段失败不能只吞日志：结构化错误必须写进 attributes 并补一次落盘。"""
+        mixin = SimpleAgentDispatchMixin()
+        mixin.subagents = MagicMock()
+        sample_task.attributes = {}
+        mixin.subagents.load.return_value = sample_task
+        # 第一次 save（正常落盘）抛错 → 进入 _record_introspection_error 补救 save。
+        mixin.subagents.save.side_effect = [RuntimeError("save 失败"), None]
+
+        mixin._handle_failure_introspection("test-task-1", sample_task, sample_result)
+
+        report = sample_task.attributes["failure_introspection_error"]
+        assert report["context"] == "dispatch.failure_introspection"
+        assert report["error_type"] == "RuntimeError"
+        assert mixin.subagents.save.call_count == 2
+
+    def test_handle_failure_introspection_record_error_double_failure_does_not_raise(
+        self, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult
+    ) -> None:
+        """留痕 save 也失败时只降级日志，绝不向 runner 主链路抛异常。"""
+        mixin = SimpleAgentDispatchMixin()
+        mixin.subagents = MagicMock()
+        sample_task.attributes = {}
+        mixin.subagents.load.return_value = sample_task
+        mixin.subagents.save.side_effect = RuntimeError("save 永远失败")
+
+        mixin._handle_failure_introspection("test-task-1", sample_task, sample_result)
+
     def test_notify_completed_tasks_defaults_to_agent_config_enabled(self, monkeypatch) -> None:
         """缺少 notification_enabled 字段时，通知开关应回退到 AgentConfig 默认值。"""
         from agent_py_agent.agent.agent_core.services import notification_service
@@ -180,6 +210,25 @@ def test_planner_dispatch_overrides_use_structured_runner_instruction_field() ->
     assert "structured follow-up" in instruction
     assert max_runners == 2
 
+
+class TestApplyIntrospectionParams:
+    """_apply_introspection_params 的消费 key 行为。
+
+    历史教训：这些用例曾被错误缩进成上面模块级函数体内的嵌套 def，
+    pytest 从不收集（死测试）。挪回类里救活；split_goal 用例随影子拆分
+    分支一并删除（拆分唯一权威是 split_task 子任务路径）。
+    """
+
+    @pytest.fixture
+    def sample_task(self) -> SubAgentTask:
+        """创建示例任务。"""
+        return SubAgentTask(
+            id="test-apply-1",
+            goal="测试任务",
+            thought="测试思考",
+            plan=["步骤1", "步骤2"],
+        )
+
     def test_apply_introspection_params_timeout(self, sample_task: SubAgentTask) -> None:
         """测试应用超参数调整。"""
         mixin = SimpleAgentDispatchMixin()
@@ -194,13 +243,14 @@ def test_planner_dispatch_overrides_use_structured_runner_instruction_field() ->
         result = mixin._apply_introspection_params(sample_task, params)
         assert result.attributes.get("max_tool_rounds") == 50
 
-    def test_apply_introspection_params_split_goal(self, sample_task: SubAgentTask) -> None:
-        """测试应用 goal 拆分。"""
+    def test_apply_introspection_params_ignores_removed_split_goal_key(
+        self, sample_task: SubAgentTask
+    ) -> None:
+        """split_goal 影子拆分分支已删除：传入该 key 不得再改写 goal。"""
         mixin = SimpleAgentDispatchMixin()
         sample_task.goal = "原始目标"
-        params = {"split_goal": "拆分的子目标"}
-        result = mixin._apply_introspection_params(sample_task, params)
-        assert "拆分的子目标" in result.goal
+        result = mixin._apply_introspection_params(sample_task, {"split_goal": "拆分的子目标"})
+        assert result.goal == "原始目标"
 
     def test_apply_introspection_params_multiple(self, sample_task: SubAgentTask) -> None:
         """测试应用多个参数调整。"""

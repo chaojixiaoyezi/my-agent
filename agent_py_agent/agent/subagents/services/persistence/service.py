@@ -49,6 +49,10 @@ from ..agent_run_state import (
 )
 from ..checkpoint_artifacts import build_checkpoint_artifact_payloads
 from ..compact_continue_packet import SubagentContinuePacketRequest, write_subagent_continue_packet
+from ..output_alignment import (
+    record_locked_files_change,
+    sanitize_self_locked_delivery_targets,
+)
 from ..takeover.readiness import write_takeover_readiness_files
 from ..task_workspace_adapter import sync_task_workspace_fields
 from .model_normalizers import (
@@ -167,9 +171,15 @@ class SubAgentPersistenceService:
         """Persist a task as JSON plus human-readable Markdown."""
 
         _apply_missing_paths(task, self.manager._build_work_order_paths(task.id, task.task_dir or None))
+        previous_locked = _existing_locked_files(self, task)
         if preserve_child_links:
             _merge_existing_child_links(self, task)
             _merge_existing_takeover_state(self, task)
+        # P3-1 锁生命周期(R5a 实锤):save 是落盘唯一权威口——无论锁来自模型参数、
+        # takeover 透传还是合并,这里统一剔除"锁住自己交付目标"的派工矛盾并记账。
+        now = time.time()
+        sanitize_self_locked_delivery_targets(task, now)
+        record_locked_files_change(task, previous_locked, now)
         task_dir, owner_projection = _prepare_and_write_state(self, task)
         sync_derived_projections(self.manager, task, task_dir, owner_projection)
 
@@ -484,6 +494,15 @@ def _merge_existing_child_links(service: SubAgentPersistenceService, task: SubAg
     except (FileNotFoundError, json.JSONDecodeError, TypeError):
         return
     task.child_ids = _unique_strings([*existing.child_ids, *task.child_ids])
+
+
+# 函数用途: 读上一份落盘状态的 locked_files(锁变更账本的对比基准;首存返回 None)。
+def _existing_locked_files(service: SubAgentPersistenceService, task: SubAgentTask) -> list[str] | None:
+    try:
+        existing = service.load(task.id)
+    except (FileNotFoundError, json.JSONDecodeError, TypeError):
+        return None
+    return list(existing.locked_files or [])
 
 
 def _merge_existing_takeover_state(service: SubAgentPersistenceService, task: SubAgentTask) -> None:

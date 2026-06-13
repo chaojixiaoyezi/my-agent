@@ -15,12 +15,10 @@ from pathlib import Path
 from .daemon_control import (
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
     WriteRuntimeStatusParams,
-    acquire_scoped_lock,
     get_running_pid,
     get_running_pid_report,
     read_pid_file,
     read_runtime_status,
-    release_scoped_lock,
     remove_pid_file,
     write_pid_file,
     write_runtime_status,

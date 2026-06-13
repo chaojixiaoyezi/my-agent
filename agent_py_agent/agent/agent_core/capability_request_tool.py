@@ -44,6 +44,14 @@ class CapabilityRequestTool(BaseTool):
             record = self.agent.subagents.lifecycle.record_capability_request(request.run_id, request.params)
         except FileNotFoundError:
             return _capability_error(f"run_id 不存在: {request.run_id}")
+        # R4 子项②：提交即推送父级（observation + wake），主代理不再对未决请求失明。
+        from ..subagents.runner_completion_wake import notify_parent_on_capability_request
+
+        notify_parent_on_capability_request(
+            self.agent.subagents,
+            self.agent.subagents.load(request.run_id),
+            record,
+        )
         payload = {
             "request_id": record.id,
             "run_id": request.run_id,

@@ -23,6 +23,7 @@ from ..result_processors import (
     merge_actual_tools_for_unparsed,
 )
 from ..runner_rendering import render_runner_result_markdown
+from ..tool_failure_ledger import record_tool_failure_ledger
 from ..utils import _apply_missing_paths
 from .subagent_session_compact import (
     SubagentSessionCompactRequest,
@@ -205,6 +206,9 @@ class SubAgentRunnerResultService:
         self.manager.save(task)
         now = time.time()
 
+        # 系统级工具失败账本(A1):在解析模型输出之前先落系统事实,
+        # 后续 build/persist 链路会随任务一起落盘。None(超时/异常)不覆盖旧账本。
+        record_tool_failure_ledger(task, params.tool_failures, now)
         extracted = self._extract_parsed_output(task, params.structured_output, now, params.actual_tools)
         output_payload, build_ctx = self._runner_result_build_context(
             _RunnerResultBuildParams(params, extracted, now),

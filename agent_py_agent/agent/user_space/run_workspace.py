@@ -231,6 +231,14 @@ def _resolve_run_workspace_root(request: EnsureRunWorkspaceRequest) -> Path:
     return _next_available_workspace(candidate)
 
 
+# LLM: 任务目录复用判定(R8 接力实锤修复:此前只按 request_id/run_id/task_id
+#   三个机器 ID 匹配,新 run 三 ID 全新永不命中,同 prompt 接力被迫开
+#   "-run-<ns>" 新目录——接力变重做,原 progress/产物/expected_outputs 声明全部
+#   失效,违背配置注释"同一 prompt 会复用同一个任务目录"的承诺)。补
+#   prompt_fingerprint 匹配:逐字相同的 prompt 即同一任务(resume 语义),复用
+#   同目录接续;fingerprint 已随 _workspace_identity_payload 落盘多轮,旧目录
+#   天然可比。机器 ID 匹配保留在前(同 run 重入最强证据)。
+# 函数用途: 判断"这个已存在的任务目录就是本次请求要的那个吗"。
 def _workspace_matches_request(root: Path, request: EnsureRunWorkspaceRequest) -> bool:
     if not root.exists():
         return True
@@ -246,7 +254,9 @@ def _workspace_matches_request(root: Path, request: EnsureRunWorkspaceRequest) -
     for key, value in request_values.items():
         if value and state_values.get(key) == value:
             return True
-    return False
+    request_fingerprint = prompt_fingerprint(request.user_prompt)
+    state_fingerprint = str(state.get("prompt_fingerprint") or "").strip()
+    return bool(request_fingerprint and state_fingerprint and request_fingerprint == state_fingerprint)
 
 
 def _workspace_identity(root: Path) -> dict[str, object]:

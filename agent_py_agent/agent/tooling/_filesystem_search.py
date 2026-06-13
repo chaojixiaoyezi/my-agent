@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import logging
 import os
 import shutil
 import signal
@@ -81,6 +82,8 @@ _SEARCH_TEXT_EXAMPLES = [
     '{"tool": "search_text", "query": "TODO", "output_mode": "files_with_matches"}',
 ]
 
+
+_LOGGER = logging.getLogger(__name__)
 
 class MalformedRgOutput(Exception):
     pass
@@ -418,6 +421,7 @@ def _start_rg_process(
             text=True,
         )
     except Exception:
+        _LOGGER.debug("rg spawn failed; falling back to python search", exc_info=True)
         return None
 
 
@@ -430,6 +434,7 @@ def _rg_hits_from_process(
         hits, stopped_early = _read_rg_hits(tool, process, request)
         return_code = process.wait(timeout=2)
     except Exception:
+        _LOGGER.debug("rg hits read failed; falling back to python search", exc_info=True)
         _stop_process(process)
         return None
     if stopped_early or return_code == 1:
@@ -477,6 +482,7 @@ def _rg_counts_from_process(
         counts = _read_rg_counts(tool, process, request)
         return_code = process.wait(timeout=2)
     except Exception:
+        _LOGGER.debug("rg counts read failed; falling back to python search", exc_info=True)
         _stop_process(process)
         return None
     if return_code == 1:

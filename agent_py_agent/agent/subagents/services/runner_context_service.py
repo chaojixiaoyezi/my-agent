@@ -24,6 +24,7 @@ from ..utils import (
     _apply_missing_paths,
     _merge_list,
 )
+from .output_alignment import declared_output_write_roots, output_write_grant_roots
 
 
 @dataclass(frozen=True)
@@ -77,8 +78,25 @@ class SubAgentRunnerContextService:
         product_roots = task_product_write_roots(task, report_roots)
         controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
         grant_write_roots = _granted_filesystem_write_roots(task)
-        read_roots = _task_required_read_roots(task)
-        allowed_write_roots = _model_allowed_write_roots(task, grant_write_roots, report_roots)
+        # P3-2:grant 的 path_scope 同时开放读取(中途求读权限的 capreq 闭环)。
+        read_roots = _merge_list(_task_required_read_roots(task), _granted_filesystem_read_roots(task))
+        # 任务交付区（tasks/<日期>/<任务>/output）必须可写：子代理直接把声明产物写到
+        # 交付区，用户拿走即可（见 output_alignment）。显式并入，不依赖 task_workspace_dir
+        # 是否被 locator 过滤，也修 R4 那种"主代理只给 output 子目录、没给交付区根"的形态。
+        # R8 接力实锤补强：delivery_root 的环境字段缺失时（创建链未透传 run_workspace
+        # 等），声明产物目录过围栏（与 capability grant 同款基准）后直接授权——
+        # 声明驱动的对偶，子代理写自己声明的交付位置不再被自家边界拦。
+        fence_roots = [
+            str(getattr(task, "task_workspace_dir", "") or ""),
+            str(getattr(task, "task_dir", "") or ""),
+            str(getattr(self.manager, "workspace_root", "") or ""),
+            str(getattr(self.manager, "workspace", "") or ""),
+        ]
+        delivery_grant_roots = [
+            *output_write_grant_roots(task),
+            *declared_output_write_roots(task, fence_roots),
+        ]
+        allowed_write_roots = _model_allowed_write_roots(task, [*grant_write_roots, *delivery_grant_roots], report_roots)
         return {
             "task_dir": _model_task_dir(task),
             "role": task.role,
@@ -264,6 +282,18 @@ def _granted_filesystem_write_roots(task: object) -> list[str]:
         tools = {str(item or "").strip() for item in getattr(grant, "tools", []) or []}
         if not tools & _FILESYSTEM_WRITE_GRANT_TOOLS:
             continue
+        roots = _merge_list(roots, text_or_sequence_strings(getattr(grant, "path_scope", []) or []))
+    return roots
+
+
+# LLM: 任务完成力底座 P3-2(R5a 实锤:子代理读不到分析材料、grant 后读边界也不扩,
+#   "扩展 allowed_read_roots"走投无路)。规则:capability grant 的 path_scope 一律
+#   并入读根——grant 是父代理显式授权的路径,读取是其中的最低权限(能写必能读),
+#   不按工具类型过滤。目录条目天然授权整个子树(执行端 workspace_roots 子树语义)。
+# 函数用途: 把父代理 grant 过的路径范围开放给子代理"读",中途求读权限从此有用。
+def _granted_filesystem_read_roots(task: object) -> list[str]:
+    roots: list[str] = []
+    for grant in getattr(task, "capability_grants", []) or []:
         roots = _merge_list(roots, text_or_sequence_strings(getattr(grant, "path_scope", []) or []))
     return roots
 

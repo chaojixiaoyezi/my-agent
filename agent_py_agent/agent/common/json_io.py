@@ -86,6 +86,20 @@ def write_json_file(path: Path, payload: object, *, sort_keys: bool = True) -> N
     )
 
 
+def write_text_file_atomic(path: Path, content: str) -> None:
+    """原子写任意文本:temp+replace,与 JSON 原子写同一把 per-path 锁。
+    LocalStore blob 等"半写即损坏"的内容写入统一走这里(体检实锤:records
+    的 write_text 非原子,崩溃可留半截内容文件)。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    with _locked_json_path(path):
+        try:
+            tmp.write_text(content, encoding="utf-8")
+            _replace_with_retry(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
 def write_json_file_atomic(path: Path, payload: object, *, sort_keys: bool = True) -> None:
     """Write JSON payloads via temp-file replace under a per-path lock."""
 
@@ -226,3 +240,31 @@ def _unlink_tmp_file(tmp: Path) -> None:
         tmp.unlink()
     except OSError:
         pass
+
+
+# LLM: mtime+size 守门的整文件行缓存(批4 性能小修,gateway inbox mtime 门
+#   同一手法)。契约:①签名 (st_mtime_ns, st_size) 任一变化即重读——本仓写
+#   路径全是 append/原子 replace,size 必变,双保险;②缓存值是 tuple[str]
+#   不可变行,跨调用方共享零污染;③FileNotFoundError/OSError 与 read_text
+#   同语义上抛,调用方既有异常处理形态不变;④容量上限 FIFO 逐出,防长跑进程
+#   缓存无界膨胀。高频轮询的 jsonl 台账(协作收件箱/产物注册表)读路径用它。
+# 函数用途: 反复读同一个没变过的台账文件时,直接给上次的解析行,不再碰磁盘。
+_TEXT_LINES_CACHE: dict[str, tuple[tuple[int, int], tuple[str, ...]]] = {}
+_TEXT_LINES_CACHE_GUARD = threading.Lock()
+_TEXT_LINES_CACHE_MAX = 64
+
+
+def read_text_lines_cached(path: Path) -> tuple[str, ...]:
+    stat = path.stat()
+    signature = (stat.st_mtime_ns, stat.st_size)
+    key = str(path)
+    with _TEXT_LINES_CACHE_GUARD:
+        hit = _TEXT_LINES_CACHE.get(key)
+        if hit is not None and hit[0] == signature:
+            return hit[1]
+    lines = tuple(path.read_text(encoding="utf-8").splitlines())
+    with _TEXT_LINES_CACHE_GUARD:
+        while len(_TEXT_LINES_CACHE) >= _TEXT_LINES_CACHE_MAX:
+            _TEXT_LINES_CACHE.pop(next(iter(_TEXT_LINES_CACHE)))
+        _TEXT_LINES_CACHE[key] = (signature, lines)
+    return lines

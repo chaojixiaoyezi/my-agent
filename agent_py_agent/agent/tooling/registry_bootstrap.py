@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ._filesystem_edit import EditFileTool
 from ._filesystem_find import FindFilesTool
 from ._filesystem_list import ListFilesTool
 from ._filesystem_patch import ApplyPatchTool
@@ -118,6 +119,7 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
         )
     )
     registry.register(ApplyPatchTool(registry.workspace_root, workspace_roots, access_options))
+    registry.register(EditFileTool(registry.workspace_root, workspace_roots, access_options))
 
 
 def _register_network_tools(registry: Any, params: Any) -> None:

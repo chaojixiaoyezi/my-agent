@@ -315,6 +315,46 @@ def _subprocess_text_env() -> dict[str, str]:
     return env
 
 
+# 函数用途: 判断 run_command 是否请求后台模式(布尔或 "true"/"1"/"yes" 字符串)。
+def _wants_background(params: dict[str, Any]) -> bool:
+    value = params.get("run_in_background")
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "1", "yes"}
+
+
+# 函数用途: 独立会话启动后台进程,stdout/stderr 合并写入给定日志句柄。
+def _spawn_background_process(command: str, target: Path, handle: Any) -> subprocess.Popen:
+    if os.name == "nt":
+        return subprocess.Popen(  # noqa: S602 - 工作区内受控 shell,与同步路径同策略
+            ["powershell.exe", "-NoProfile", "-Command", command],
+            cwd=str(target),
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            env=_subprocess_text_env(),
+        )
+    return subprocess.Popen(  # noqa: S602
+        command,
+        shell=True,
+        cwd=str(target),
+        stdout=handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        env=_subprocess_text_env(),
+    )
+
+
+# 函数用途: 把后台任务登记到 .background_jobs/registry.jsonl(供观测/孤儿排查;
+#   纯辅助,登记失败不影响进程已启动的事实)。
+def _record_background_job(jobs_dir: Path, pid: int, command: str, log_path: Path) -> None:
+    record = {"pid": pid, "command": command[:200], "output_file": str(log_path)}
+    try:
+        with (jobs_dir / "registry.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_chars: int) -> ToolSpec:
     return ToolSpec(
         name="run_command",
@@ -326,6 +366,7 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
             "Run a project build script such as make or npm run.",
             "Inspect processes, ports, network state, or other system information.",
             "Execute a one-off script or command-line tool.",
+            "脚本里需要调用 LLM（翻译/摘要/分类等）时：子进程环境自带 AGENT_API_KEY、AGENT_API_BASE、AGENT_MODEL_NAME（与本代理同款 anthropic 兼容端点），直接用它们初始化客户端，不要猜测其他服务商端点。",
         ],
         avoid_when=[
             "Use read_file / write_file when only file IO is needed.",
@@ -338,6 +379,7 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
             "command": "Shell command string to execute.",
             "timeout": f"Timeout in seconds; default {default_timeout}.",
             "working_dir": "Execution directory; defaults to the workspace root.",
+            "run_in_background": "可选。true 时命令在后台运行,立即返回 pid 与 output_file,不阻塞工具循环;适合耗时长的下载/构建/批处理。",
         },
         parameter_details={
             "command": "Required. Full command string, for example 'ls -la' or 'python build.py'.",
@@ -345,11 +387,13 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
             "working_dir": "Optional. In restricted/workspace-write mode it must stay inside workspace roots.",
             "access_mode": f"Runtime policy is configured outside the tool as access_mode={access_mode}.",
             "output": f"Stdout/stderr are bounded previews; each stream preview defaults to {max_output_chars} chars.",
+            "run_in_background": "可选布尔,默认 false。后台模式不等待结束:用 read_file 读 output_file 看进度,完成后用 run_command 执行 kill <pid> 收尾。",
         },
         examples=[
             '{"tool": "run_command", "command": "ls -la"}',
             '{"tool": "run_command", "command": "python --version", "working_dir": "."}',
             '{"tool": "run_command", "command": "make build", "timeout": 60}',
+            '{"tool": "run_command", "command": "python download_all.py", "run_in_background": true}',
         ],
     )
 
@@ -413,6 +457,8 @@ class ShellTool(BaseTool):
         target = self._execution_target(params, command)
         if isinstance(target, ToolExecutionResult):
             return target
+        if _wants_background(params):
+            return self._start_background_command(command, target)
         return self._execute_with_artifact_protection(command, target, timeout)
 
     def _execution_target(
@@ -490,6 +536,37 @@ class ShellTool(BaseTool):
             return f"TOOL_TIMEOUT: 命令执行超时 timeout ({timeout}s): {command[:100]}...", False, "TOOL_TIMEOUT"
         except OSError as exc:
             return f"COMMAND_FAILED: 命令执行失败: {exc}", False, "COMMAND_FAILED"
+
+    # LLM: 后台执行(P0-2 对照能力补齐:对照组 3/5 有持久/后台 shell,my-agent
+    #   run_command 此前只能一次性阻塞执行,跑不了长任务而不卡住工具循环)。
+    #   契约:Popen 独立会话启动(start_new_session,与子代理后台进程同款,出口
+    #   孤儿回收能发现),stdout/stderr 合并落工作区 .background_jobs/ 日志文件,
+    #   立即返回 pid + output_file;模型用 read_file 读进度、kill <pid> 收尾。
+    #   不做交互式 stdin(那是 P0-2b,需 PTY 会话池),先覆盖最高频的"长任务
+    #   后台化"。
+    # 函数用途: 把命令丢到后台跑,马上回 pid 和日志路径,不等它结束。
+    def _start_background_command(self, command: str, target: Path) -> ToolExecutionResult:
+        try:
+            jobs_dir = self.workspace_root / ".background_jobs"
+            jobs_dir.mkdir(parents=True, exist_ok=True)
+            log_path = jobs_dir / f"job-{time.time_ns()}.log"
+            handle = log_path.open("wb")
+        except OSError as exc:
+            return ToolExecutionResult(self.spec.name, False, f"COMMAND_FAILED: 后台日志创建失败: {exc}", error_code="COMMAND_FAILED")
+        try:
+            process = _spawn_background_process(command, target, handle)
+        except OSError as exc:
+            handle.close()
+            return ToolExecutionResult(self.spec.name, False, f"COMMAND_FAILED: 后台启动失败: {exc}", error_code="COMMAND_FAILED")
+        handle.close()  # 子进程已持有 fd 副本,父进程关闭自己的句柄避免泄漏
+        _record_background_job(jobs_dir, process.pid, command, log_path)
+        payload = {
+            "status": "started",
+            "pid": process.pid,
+            "output_file": str(log_path),
+            "hint": "命令已在后台运行。用 read_file 读 output_file 看进度与结果;需要终止时用 run_command 执行 kill <pid>。",
+        }
+        return ToolExecutionResult(self.spec.name, True, json.dumps(payload, ensure_ascii=False))
 
     def _parse_command(self, params: dict[str, Any]) -> str | ToolExecutionResult:
         try:

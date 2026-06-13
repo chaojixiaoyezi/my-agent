@@ -4,6 +4,8 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+
+from ....concurrency.interrupt import register_interruptible
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,6 +97,10 @@ def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
         return _background_process_startup_failure(
             _ProcessStartupFailureRequest(agent, request, process, returncode, mark_errors)
         )
+    # 孤儿回收前提:pid 必须落盘到任务权威记录(R6a 实锤:此前 pid 只进内存
+    # registry,主代理退出后无人能定位后台进程;cancel_subagents 的
+    # background_start.pid 终止路径因此永远 no_pid)。
+    mark_errors.extend(mark_background_start(request, status="running", pid=process.pid))
     _remember_background_dispatch(agent, launch_id, run_ids, f"pid:{process.pid}")
     payload = _background_process_started_payload(agent, request, process)
     attach_mark_errors(payload, mark_errors)
@@ -234,15 +240,32 @@ def mark_background_channel_failure(request: _BackgroundDispatchRequest, *, erro
     return mark_errors
 
 
+# LLM: background_start 是每个被派任务上的后台启动权威记录(任务 attributes 内,
+#   随 manager.save 落盘)。记录构造统一走 process_control.
+#   build_background_start_record(R7a 实锤:CLI 侧 mark_background_launch 曾手写
+#   dict 抹掉 pid,孤儿回收进程层失效)——pid 是孤儿回收与 cancel_subagents 终止
+#   路径的定位事实,任何状态更新不得抹掉。注意:subprocess 路径的 dispatch CLI
+#   进程会经 cli/dispatch_background 更新此状态(running/finished/failed),
+#   消费方判断进程死活仍只能验 pid 活性,不能信 status 字段。
+# 函数用途: 把"这批任务的后台派工进行到哪一步了"写进每个任务的属性里,失败的
+#   写不进去的逐个记错误返回,不打断其他任务。
 def mark_background_start(
     request: _BackgroundDispatchRequest,
     *,
     status: str,
     error: str = "",
+    pid: int = 0,
 ) -> list[dict[str, object]]:
-    now = time.time()
+    from ....subagents.process_control import BackgroundStartUpdate, build_background_start_record
+
     manager = getattr(getattr(request, "agent", None), "subagents", None)
     mark_errors: list[dict[str, object]] = []
+    update = BackgroundStartUpdate(
+        launch_id=str(getattr(request, "launch_id", "") or ""),
+        status=status,
+        error=error,
+        pid=pid,
+    )
     for run_id in list(getattr(request, "run_ids", []) or []):
         try:
             task = manager.load(run_id)
@@ -252,12 +275,7 @@ def mark_background_start(
         if getattr(task, "id", "") != run_id:
             continue
         attrs = dict(getattr(task, "attributes", {}) or {})
-        attrs["background_start"] = {
-            "launch_id": str(getattr(request, "launch_id", "") or ""),
-            "status": status,
-            "updated_at": now,
-            "error": error,
-        }
+        attrs["background_start"] = build_background_start_record(attrs.get("background_start"), update)
         task.attributes = attrs
         try:
             manager.save(task)
@@ -333,6 +351,13 @@ def _background_log_path(agent, launch_id: str) -> str:
 
 
 def _background_dispatch_worker(request: _BackgroundDispatchRequest) -> None:
+    # 协作中断(批3):以线程名登记,cancel_subagents 可按名递中断旗;
+    # finally 自动清旗,线程复用不带脏状态。
+    with register_interruptible(f"my-agent-{request.launch_id}"):
+        _background_dispatch_worker_inner(request)
+
+
+def _background_dispatch_worker_inner(request: _BackgroundDispatchRequest) -> None:
     previous_backend_override = getattr(request.agent, "_subagent_worker_backend_override", None)
     previous_present = hasattr(request.agent, "_subagent_worker_backend_override")
     if request.backend_override is not None:

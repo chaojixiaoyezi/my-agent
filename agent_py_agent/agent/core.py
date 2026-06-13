@@ -1,10 +1,14 @@
 
 from __future__ import annotations
 
+import os
+
 """composition root for SimpleAgent runtime, tools, memory, gateway, and subagents."""
 
 from pathlib import Path
 
+from .capability import CapabilityRouter
+from .capability.skill_search_tool import SkillSearchTool
 from .agent_core import (
     AgentRunResult,
     CancelSubagentsTool,
@@ -13,6 +17,7 @@ from .agent_core import (
     DispatchSubagentsTool,
     InspectAgentTreeTool,
     RaiseEventTool,
+    ResolveCapabilityRequestsTool,
     ScheduleChildSubagentsTool,
     SendGuidanceTool,
     SimpleAgentDispatchMixin,
@@ -109,6 +114,22 @@ def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -
     return resolved
 
 
+# LLM: 模型端点环境事实(R13c 实锤:任务里需要 LLM 子调用〔翻译/摘要〕时,
+#   模型知道 AGENT_API_KEY 在环境里,却不知道配套端点——把多家第三方服务商
+#   端点猜了个遍全 401,最后写了"声称产物存在"的清单提前交付。把本代理自用的
+#   api_base/model_name 以 AGENT_API_BASE/AGENT_MODEL_NAME 暴露进进程环境,
+#   run_command 子进程自然继承,脚本可用同一套凭据+端点完成 LLM 子调用。
+#   setdefault:用户显式设置的同名变量优先;非敏感信息(key 本就在环境)。
+# 函数用途: 让"帮手脚本也能调到模型"不再靠猜端点。
+def _export_model_endpoint_env(config) -> None:
+    api_base = str(getattr(config, "api_base", "") or "").strip()
+    model_name = str(getattr(config, "model_name", "") or "").strip()
+    if api_base:
+        os.environ.setdefault("AGENT_API_BASE", api_base)
+    if model_name:
+        os.environ.setdefault("AGENT_MODEL_NAME", model_name)
+
+
 class SimpleAgent(
     SimpleAgentRuntimeMixin,
     SimpleAgentSubagentMixin,
@@ -127,6 +148,7 @@ class SimpleAgent(
         最后把"创建子代理、看板、dispatch"这三个编排工具也注册进去。
         """
         self.config = config
+        _export_model_endpoint_env(config)
         self.runtime_guard_policy = runtime_guard_policy()
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -152,6 +174,10 @@ class SimpleAgent(
             daily_mirror_dir=_daily_memory_dir(config, self.home_paths),
         )
         self.prompts = PromptBuilder(config, self.root, home_paths=self.home_paths)
+        # skill 树第一期:主代理常驻一个能力路由器(默认带 builtin skills),
+        # prompt 层类目索引/命中卡与 skill_search 工具共用同一实例。
+        self.capability_router = CapabilityRouter()
+        self.prompts.capability_router = self.capability_router
         self.backend = get_backend(config.model_backend, config)
         self.conversation_store = ConversationStore(paths["conversation_workspace"])
         self.collaboration_store = CollaborationStore(paths["collaboration_workspace"])
@@ -251,6 +277,8 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CapabilityRequestTool(agent))
     agent.tools.register(RaiseEventTool(agent))
     agent.tools.register(TaskProgressTool(agent))
+    # skill 树第一期:skill_search 检索台(千级冷路,prompt 零索引成本)。
+    agent.tools.register(SkillSearchTool(agent))
     agent.tools.register(RaiseCollaborationTool(agent))
     agent.tools.register(InspectCollaborationTool(agent))
     agent.tools.register(SubmitCollaborationResultTool(agent))
@@ -263,6 +291,7 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(WaitTool(agent))
     agent.tools.register(SendGuidanceTool(agent))
     agent.tools.register(DispatchSubagentsTool(agent))
+    agent.tools.register(ResolveCapabilityRequestsTool(agent))
     agent.tools.register(ScheduleChildSubagentsTool(agent))
 
 
@@ -270,6 +299,7 @@ __all__ = [
     "AgentRunResult",
     "CapabilityRequestTool",
     "CancelSubagentsTool",
+    "ResolveCapabilityRequestsTool",
     "CODING_SUBAGENT_TOOLS",
     "CreateSubagentsTool",
     "DispatchSubagentsTool",

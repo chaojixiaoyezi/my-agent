@@ -135,10 +135,59 @@ def push_relevant_memories_report(
         query = _build_memory_query(trigger_type, context)
         records, search_errors = _search_memory_records_report(agent.memory, query, top_k=limit * 2)
         load_errors.extend(search_errors)
+        # P5-2:结构化触发条件匹配提权——声明了 trigger_conditions 且与当前上下文
+        # 事实匹配的记忆排到最前(软提权,不过滤未声明条件的记忆)。
+        records = _prioritize_by_trigger_conditions(records, trigger_type, context)
         memories_text = _collect_memory_texts(records, trigger_type, limit)
     except Exception as exc:
         load_errors.append(runtime_error_report(exc, context="memory_push.search"))
     return memories_text[:limit], load_errors
+
+
+# LLM: P5-2 结构化触发条件匹配(唯一消费方,守"绝不解析自然语言"铁律)。
+#   conditions 是开放 dict,逐键对照 context 的结构化事实:
+#   ①键值为 list → context 同键值命中任一即满足;②键名带 min_ 前缀 → context
+#   对应数值 ≥ 阈值;③其余 → 字符串相等。全部声明键满足才算 matched。
+#   trigger_type 键名特殊:对照本次推送的 trigger_type。匹配只做排序提权,
+#   绝不淘汰未声明条件的记忆(软语义,零硬门)。
+# 函数用途: 让"写明了适用场景"的教训在场景真出现时排到最前面。
+def trigger_conditions_match(conditions: object, trigger_type: str, context: dict) -> bool:
+    if not isinstance(conditions, dict) or not conditions:
+        return False
+    facts = {**(context or {}), "trigger_type": trigger_type}
+    return all(_condition_satisfied(str(key), expected, facts) for key, expected in conditions.items())
+
+
+# 函数用途: 单个触发条件键的判定(min_ 前缀=数值阈值,列表=任一命中,标量=相等)。
+def _condition_satisfied(key: str, expected: object, facts: dict) -> bool:
+    if key.startswith("min_"):
+        try:
+            return float(facts.get(key.removeprefix("min_")) or 0) >= float(expected)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return False
+    actual = str(facts.get(key) or "")
+    if isinstance(expected, list):
+        return actual in {str(item) for item in expected}
+    return actual == str(expected)
+
+
+# 函数用途: 把条件匹配的记忆排到前面(稳定排序,其余相对顺序不变)。
+def _prioritize_by_trigger_conditions(records: list, trigger_type: str, context: dict) -> list:
+    matched: list = []
+    rest: list = []
+    for record in records:
+        conditions = _record_trigger_conditions(record)
+        (matched if trigger_conditions_match(conditions, trigger_type, context) else rest).append(record)
+    return [*matched, *rest]
+
+
+# 函数用途: 从记忆记录的结构化扩展位读出触发条件(没有就空)。
+def _record_trigger_conditions(record) -> dict:
+    attributes = getattr(record, "attributes", None)
+    if not isinstance(attributes, dict):
+        return {}
+    conditions = attributes.get("trigger_conditions")
+    return conditions if isinstance(conditions, dict) else {}
 
 
 def _search_memory_records_report(memory, query: str, *, top_k: int) -> tuple[list, list[dict]]:
@@ -177,15 +226,18 @@ def _memory_text_from_record(record, trigger_type: str) -> str:
     return _extract_memory_text(entry, trigger_type)
 
 
+# LLM: 检索词构造的唯一权威。历史缺陷(B1 修复):曾写成 len(goal)>50 才把 goal
+#   加进查询——中文短 goal(常态)被整个丢弃,查询只剩英文 trigger 词,中文教训
+#   永远搜不到,推模式形同虚设。现在 goal 非空即入查询、超长才截断。
+# 函数用途: 把触发类型和任务上下文拼成记忆检索词。
 def _build_memory_query(trigger_type: str, context: dict) -> str:
-    """Build search query from trigger type and context."""
     query_parts = [trigger_type]
     if context.get("task_id"):
         query_parts.append(context["task_id"])
     if context.get("failure_type"):
         query_parts.append(context["failure_type"])
-    goal = context.get("goal", "")
-    if len(goal) > 50:
+    goal = str(context.get("goal", "") or "").strip()
+    if goal:
         query_parts.append(goal[:50])
     return " ".join(query_parts)
 
@@ -277,15 +329,26 @@ def write_memory_with_type(
     if ctx.mem_type.value:
         all_tags.append(ctx.mem_type.value)
 
-    # 写入记忆
-    record = memory.add(
+    # 写入记忆(P5-2:trigger_conditions 作为结构化扩展字段随主事实持久化,
+    # 决策端 trigger_conditions_match 按字段匹配提权,绝不解析正文)
+    if ctx.trigger_conditions:
+        from .memory_store.jsonl import MemoryRecord
+
+        return memory.add_record(
+            MemoryRecord(
+                role=ctx.role,
+                content=extended_content,
+                kind=ctx.mem_type.value,
+                tags=all_tags,
+                attributes={"trigger_conditions": dict(ctx.trigger_conditions)},
+            )
+        )
+    return memory.add(
         role=ctx.role,
         content=extended_content,
         kind=ctx.mem_type.value,
         tags=all_tags,
     )
-
-    return record
 
 
 def format_memories_for_injection(memories: list[str]) -> str:

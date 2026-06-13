@@ -23,5 +23,17 @@
 - Memory：`docs/modules/memory/04-structure.md`
 - Gateway：`docs/modules/gateway/04-structure.md`
 - 代码尺寸报告：`CODE_SIZE_REPORT.md`
+- 待实施开发计划（确定性优先 + 缺口补齐）：`docs/design/PLAN-stability-and-gaps-20260611.md`
+  （统领原则=同输入结果可重复；优先级 模型行为+观测性 → 记忆推模式 → 失败自省 → 多通道/多租户）
+- 待实施开发计划（任务完成力底座，R5 三案→通用）：
+  `docs/design/PLAN-foundation-task-completion-20260611.md`
+  （五支柱：坚持力 run 续航/交付纪律 出口走门/边界正确性 锁与读边界/协作闭环
+  引导前移/结论完备性 证据契约；R6 同 prompt 重跑三任务总验收）
+- 方向修正纲领（R9 质量退化复盘 → 稳而不管）：
+  `docs/design/PLAN-stability-not-control-20260612.md`
+  （流程复杂性藏框架层模型无感；质量靠 skill 知识非验收门；测试 prompt 永远
+  普通用户自然语言。2026-06-12 四批落地：底座修复/召回接通+skill 树千级地基/
+  长期助手 工程移植〔退避抖动/错误分类/结构化错误/per-thread 中断/turn 预算〕/
+  性能缓存，明细见 REFACTORING_BACKLOG 同日条目）
 
 以后新增长期设计，只写摘要和链接，不再把完整方案塞回这个文件。

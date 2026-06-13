@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -264,6 +265,56 @@ def task_state_for_planner(task) -> dict[str, Any]:
 
 
 _task_state_for_planner = task_state_for_planner
+
+
+# LLM: 记忆推模式(开发计划 B1)在 planner 决策点的注入入口。契约:软注入——
+#   检索失败/无记忆时原样返回 prompt,绝不阻断 planner;同一 hint 已在 prompt 里
+#   时不重复追加(B2 幂等)。查询上下文取 due_issues/active_tasks 第一条 goal
+#   (planner 做全局规划,无单一任务 goal)。与 runner 失败点注入
+#   (runner/gate._inject_failure_memories)同源复用 memory_push,不另起机制。
+#   改动时同步检查 tests/test_memory_push_decision_points.py。
+# 函数用途: 父代理 planner 出决策前,自动把相关历史教训附到 prompt 末尾,
+#   不依赖模型"想起来"主动查记忆。
+def append_planner_memory_hint(agent: Any, state: dict[str, Any], prompt: str) -> str:
+    from ..memory_push import format_memories_for_injection, push_relevant_memories
+
+    try:
+        memories = push_relevant_memories(
+            agent,
+            "planning",
+            {"task_id": "", "goal": _planner_memory_goal(state)},
+            limit=3,
+        )
+        hint = format_memories_for_injection(memories)
+    except Exception as exc:
+        from ..runtime_errors import runtime_error_report
+
+        report = runtime_error_report(exc, context="memory_push.planner")
+        logging.getLogger(__name__).warning(f"Planner memory push failed: {report.get('message', exc)}")
+        return prompt
+    if not hint or hint in prompt:
+        return prompt
+    return f"{prompt}\n\n{hint}"
+
+
+# 函数用途: 从 planner 状态快照里取一条最有代表性的 goal 文本做记忆查询词。
+def _planner_memory_goal(state: dict[str, Any]) -> str:
+    for key in ("due_issues", "active_tasks"):
+        goal = _first_goal_text(state.get(key))
+        if goal:
+            return goal
+    return ""
+
+
+# 函数用途: 从条目列表里取第一条非空 goal（脏数据条目直接跳过）。
+def _first_goal_text(items: object) -> str:
+    if not isinstance(items, list):
+        return ""
+    for item in items:
+        goal = str(item.get("goal") or "").strip() if isinstance(item, dict) else ""
+        if goal:
+            return goal
+    return ""
 
 
 def build_parent_planner_prompt(

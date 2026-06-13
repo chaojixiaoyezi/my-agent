@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import read_text_lines_cached
 from ..runtime_errors import runtime_error_report
 
 
@@ -38,7 +39,8 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 def read_jsonl_report(path: Path, *, context: str) -> JsonlReadReport:
     """Read JSONL rows and report dirty rows without hiding valid rows."""
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        # mtime+size 守门缓存(批4):轮询场景文件多数时刻没变,免重复磁盘读。
+        lines = read_text_lines_cached(path)
     except FileNotFoundError:
         return JsonlReadReport([], [])
     except OSError as exc:

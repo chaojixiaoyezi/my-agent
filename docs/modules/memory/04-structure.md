@@ -30,6 +30,20 @@
 - `memory-hot.md` 只放极短规则，避免长期 JSONL 或 lessons 被整个塞进 prompt。
 - `memory.md` 可以作为入口和索引，引用更具体的 lesson 或 routing 条目。
 
+### MemoryRecord 行结构（P5-2 扩展）
+
+- 基础键：`role / content / kind / tags / created_at`。
+- 可选 `attributes`：开放结构化扩展位——教训记忆的 `trigger_conditions`
+  （结构化触发条件）挂在这里。旧行没有该键，读取按空处理；空 attributes 不写键，
+  旧行格式不变。
+- 写入口：`JsonlMemory.add`（便捷封装，不带 attributes）与 `add_record`
+  （底层唯一落盘口，带扩展字段的记忆构造 MemoryRecord 走这里）。
+- 消费：`memory_push.trigger_conditions_match` 按结构化事实匹配
+  （列表=任一命中 / `min_` 前缀=数值阈值 / 标量=相等），匹配的教训在推送时
+  排到最前（软提权，不淘汰未声明条件的记忆，绝不解析正文）。
+- 生产端：失败自省调参后自动写一条带条件教训（failure_type + min_attempts），
+  同型失败再现时自动提权注入。
+
 ## 子代理记忆
 
 子代理不写长期记忆。它只在自己的任务周期内写：

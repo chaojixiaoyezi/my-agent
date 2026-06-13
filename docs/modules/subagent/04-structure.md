@@ -149,3 +149,14 @@ artifact refs。创建任务时给子代理的 `output_files` 是目标路径合
   合并后各自身份计算用 `_idempotency_identity` / `_repair_identity` 区分，
   共享 helper 留一份。调用方（create_context / create_constraints /
   hierarchy/schedule_idempotency）改导入合并后模块，行为不变。
+
+## 2026-06-11 产物落点投影层
+
+- 新增 `services/output_alignment.py`：纯投影、不改 task。`anchored_output_refs(task)`
+  产出 OutputAnchoring（anchored_refs / delivery_map / warnings）；
+  `anchor_refs_for_execution(task, refs)` 给合同投影层批量翻译目标 refs。
+  消费方：`context_bundle_contracts.task_packet/output_contract`（执行合同）、
+  `result_artifact_evidence.deliver_anchored_outputs_to_declared`（收尾搬运）、
+  `delivery_closeout/subagent_aggregation`（声明对账复用 looks_like_output_path）。
+- `agent_core/orchestration/tools/capability.py`：`resolve_capability_requests` 工具
+  实现（grant/deny + 安全围栏 + wake）；注册链 core.py → orchestration_tools.py。

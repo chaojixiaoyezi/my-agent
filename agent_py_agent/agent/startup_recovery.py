@@ -37,6 +37,7 @@ class ActiveWorkSummary:
     pending_notifications: int = 0
     dispatch_pending: bool = False
     dispatch_rounds: int = 0
+    orphan_processes: list[dict] = None
     detection_errors: list[dict] = None
 
     def __post_init__(self) -> None:
@@ -44,6 +45,8 @@ class ActiveWorkSummary:
             self.recent_tasks = []
         if self.processing_requests is None:
             self.processing_requests = []
+        if self.orphan_processes is None:
+            self.orphan_processes = []
         if self.detection_errors is None:
             self.detection_errors = []
 
@@ -133,6 +136,74 @@ def _append_detection_error(summary, exc: BaseException, context: str) -> None:
     summary.detection_errors.append(runtime_error_report(exc, context=context))
 
 
+# 孤儿进程身份特征:cmdline 必须含任一特征才认作本系统的后台派工进程
+# (通道运行时"kill 前验证进程身份"同款,防 pid 复用误报别人家进程)。
+_ORPHAN_CMDLINE_MARKERS = ("agent_py_agent", "subagents-dispatch")
+
+
+# LLM: 启动时孤儿进程检测(REFACTORING_BACKLOG"启动时孤儿进程检测",孤儿回收
+#   第二期)。出口回收只覆盖结构化退出点;run 进程异常崩溃(kill -9/断电)时后台
+#   dispatch 进程漏网。本检测=observability 先行:扫描任务落盘的
+#   background_start.pid(权威事实源,CLI 抹 pid 缺陷已修),进程活着 + cmdline
+#   含本系统特征 + 任务已终态 → 报告为孤儿;**绝不自动杀**(回收命令提示用户)。
+#   非终态任务的活进程视为可能在干活,不报。任何读取异常记 detection_errors。
+# 函数用途: 开机巡检"有没有上次崩溃留下的、还在后台空转的派工进程"。
+def _detect_orphan_processes(agent, summary) -> None:
+    from .contracts.state_machine import TERMINAL_STATES, normalize_status
+    from .subagents.process_control import is_pid_alive
+
+    try:
+        tasks = list(agent.subagents.list_runs() or [])
+    except Exception as exc:
+        _append_detection_error(summary, exc, "startup_recovery.orphan_processes")
+        return
+    seen_pids: set[int] = set()
+    for task in tasks:
+        attrs = getattr(task, "attributes", {}) or {}
+        background = attrs.get("background_start") if isinstance(attrs, dict) else None
+        if not isinstance(background, dict):
+            continue
+        try:
+            pid = int(background.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0 or pid in seen_pids:
+            continue
+        if normalize_status(getattr(task, "status", "")) not in TERMINAL_STATES:
+            continue
+        if not is_pid_alive(pid):
+            continue
+        cmdline = _process_cmdline(pid)
+        if not any(marker in cmdline for marker in _ORPHAN_CMDLINE_MARKERS):
+            continue
+        seen_pids.add(pid)
+        summary.orphan_processes.append(
+            {
+                "pid": pid,
+                "launch_id": str(background.get("launch_id") or ""),
+                "run_id": str(getattr(task, "id", "") or ""),
+                "task_status": str(getattr(task, "status", "") or ""),
+                "cmdline_preview": cmdline[:160],
+            }
+        )
+
+
+# 函数用途: 读进程命令行(ps 跨 darwin/linux;读不到返回空串=身份验证不过,不报)。
+def _process_cmdline(pid: int) -> str:
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (result.stdout or "").strip()
+
+
 def is_recent_board_item(item, *, now: float) -> bool:
     progress_age = _float_attr(item, "seconds_since_progress")
     if progress_age > _ACTIVE_WORK_RECENT_SECONDS:
@@ -178,6 +249,7 @@ def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
     _detect_active_tasks(agent, summary)
     _detect_pending_notifications(agent, summary)
     _detect_dispatch_status(agent, summary)
+    _detect_orphan_processes(agent, summary)
 
     return summary
 
@@ -216,6 +288,12 @@ def format_active_work_summary(summary: ActiveWorkSummary) -> str:
         lines.append(f"⚠ 有未完成的 dispatch 循环（已运行 {summary.dispatch_rounds} 轮）")
         lines.append("  是否继续？使用 my-agent daemon --continue 继续调度")
 
+    if summary.orphan_processes:
+        lines.append(f"⚠ 发现 {len(summary.orphan_processes)} 个孤儿派工进程（任务已终态但进程仍在运行，疑似上次异常退出遗留）")
+        for orphan in summary.orphan_processes[:3]:
+            lines.append(f"  - pid={orphan['pid']} run={orphan['run_id']} status={orphan['task_status']}")
+        lines.append("  确认后可手动终止（kill <pid>），系统不会自动回收。")
+
     if summary.detection_errors:
         lines.append(f"⚠ 启动恢复检测有 {len(summary.detection_errors)} 个读取错误")
         for error in summary.detection_errors[:3]:
@@ -246,6 +324,7 @@ def has_active_work(summary: ActiveWorkSummary) -> bool:
         summary.active_task_count > 0
         or summary.stale_request_count > 0
         or summary.dispatch_pending
+        or bool(summary.orphan_processes)
     )
 
 

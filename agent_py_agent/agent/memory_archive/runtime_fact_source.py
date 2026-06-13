@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..common.safe_id import safe_id
 from ..common.value_parsing import dedupe_strings
 from ..run_intent import build_run_intent, run_intent_payload
 from .runtime_workspace_outputs import run_intent_has_desired_outputs, runtime_desired_outputs
@@ -230,7 +231,7 @@ def _looks_like_test_command(text: str) -> bool:
 
 
 def _safe_id(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-") or "run"
+    return safe_id(value, default="run")
 
 
 __all__ = [

@@ -57,3 +57,25 @@ class _ConflictRetryPolicy:
 
 
 __all__ = ["retry_on_conflict"]
+
+
+# LLM: jittered 指数退避(参数原样:
+#   base 5s/上限 120s/抖动 0-50%)。分布式友好:多 worker 同时撞限频时抖动
+#   错峰,避免雪崩式同步重试。纯函数,provider 重试链与未来一切退避统一用它。
+# 函数用途: 第 N 次重试该睡多久——指数翻倍封顶两分钟,再加一点随机错峰。
+def jittered_backoff(
+    attempt: int,
+    *,
+    base_delay: float = 5.0,
+    max_delay: float = 120.0,
+    jitter_ratio: float = 0.5,
+) -> float:
+    delay = min(base_delay * (2 ** max(0, attempt - 1)), max_delay)
+    return apply_retry_jitter(delay, jitter_ratio=jitter_ratio)
+
+
+# 函数用途: 给一个既定延迟叠加 0~ratio 的随机抖动(配置阶梯保持可调,
+#   抖动只负责错峰——provider 重试链等"延迟序列来自配置"的场景用这个)。
+def apply_retry_jitter(delay: float, *, jitter_ratio: float = 0.5) -> float:
+    base = max(0.0, float(delay))
+    return base + random.uniform(0, base * max(0.0, jitter_ratio))

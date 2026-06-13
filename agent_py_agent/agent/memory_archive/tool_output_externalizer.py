@@ -297,7 +297,10 @@ def _preview(output: str, max_chars: int) -> str:
         return ""
     if len(output) <= max_chars:
         return output
-    return output[:max_chars] + f"\n... [truncated {len(output) - max_chars} chars]"
+    cut = output.rfind("\n", max_chars // 2, max_chars)
+    if cut < 0:
+        cut = max_chars
+    return output[:cut] + f"\n... [truncated {len(output) - cut} chars]"
 
 
 def _sha256_text(text: str) -> str:

@@ -15,6 +15,12 @@ from ..model_visible_refs import (
 )
 from .context_bundle_refs import safe_string_ref, workspace_refs
 from .models import SubAgentTask
+from .services.output_alignment import (
+    OutputAnchoring,
+    anchor_refs_for_execution,
+    anchored_output_refs,
+    output_write_grant_roots,
+)
 
 _SAFE_FILE_SUFFIX_RE = re.compile(r"^\.[a-z0-9][a-z0-9._+-]{0,63}$")
 
@@ -29,14 +35,20 @@ class _TaskContractComponents(NamedTuple):
 
 def output_contract(task: SubAgentTask) -> dict[str, object]:
     components = task_contract_components(task)
+    # R4 修复：执行合同里的目标 refs 必须翻译成子代理可写落点（声明意图位置保留在
+    # declared_output_refs / output_delivery_map，由主代理收尾时按 map 汇总搬运）。
+    anchoring = anchored_output_refs(task)
+    anchored_required = _merged_anchored_required(task, components.required_file_refs, anchoring)
     return {
         "product_write_roots": components.product_roots,
-        "required_file_refs": components.required_file_refs,
-        "final_report_ref": _preferred_final_report_ref(task, components.required_file_refs),
+        "required_file_refs": anchored_required,
+        "final_report_ref": _preferred_final_report_ref(task, anchored_required),
         "agent_run_final_report_ref": safe_string_ref(task, "agent_run_final_report_md") or safe_string_ref(task, "debrief_file"),
         "runner_result_ref": safe_string_ref(task, "runner_result_json"),
         "run_closeout_ref": safe_string_ref(task, "output_json"),
         "declared_output_refs": declared_output_refs(task),
+        "output_delivery_map": anchoring.delivery_map,
+        "write_contract_warnings": anchoring.warnings,
         "required_files": components.required_files,
         "forbidden_files": components.forbidden_files,
         "file_contract_source": components.source,
@@ -49,6 +61,10 @@ def output_contract(task: SubAgentTask) -> dict[str, object]:
 def task_packet(task: SubAgentTask) -> dict[str, object]:
     refs = workspace_refs(task)
     components = task_contract_components(task)
+    # R4 修复：file/write contract 给子代理的目标 refs 用可写落点；
+    # output_delivery_map 记录 落点→声明意图位置，收尾汇总按它搬运。
+    anchoring = anchored_output_refs(task)
+    anchored_required = _merged_anchored_required(task, components.required_file_refs, anchoring)
     return {
         "schema_version": "subagent_task_packet.v1",
         "run_id": task.id,
@@ -62,15 +78,17 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
         "acceptance_checks": [current_model_text(item) for item in list(task.acceptance_checks or [])],
         "file_contract": {
             "required_files": components.required_files,
-            "required_file_refs": components.required_file_refs,
+            "required_file_refs": anchored_required,
             "declared_output_refs": declared_output_refs(task),
             "forbidden_files": components.forbidden_files,
             "source": components.source,
         },
         "write_contract": {
             "product_write_roots": components.product_roots,
-            "required_file_refs": components.required_file_refs,
+            "required_file_refs": anchored_required,
             "declared_output_refs": declared_output_refs(task),
+            "output_delivery_map": anchoring.delivery_map,
+            "write_contract_warnings": anchoring.warnings,
             "allowed_write_roots": allowed_write_roots(task),
             "forbidden_write_roots": _model_visible_file_terms(task.forbidden_write_roots),
             "locked_files": _model_visible_file_terms(task.locked_files),
@@ -91,11 +109,27 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
 }
 
 
+# LLM: 执行合同 required_file_refs 的组装权威：现有 product_roots 解析结果走锚定翻译，
+#   并补上声明产物的锚定落点（product_roots 为空时相对声明也有可写目标）。
+# 函数用途: 合出子代理执行视角的完整目标 refs 列表。
+def _merged_anchored_required(
+    task: SubAgentTask,
+    required_file_refs: list[str],
+    anchoring: OutputAnchoring,
+) -> list[str]:
+    merged = anchor_refs_for_execution(task, required_file_refs)
+    for ref in anchoring.anchored_refs:
+        if ref and ref not in merged:
+            merged.append(ref)
+    return merged
+
+
 def allowed_write_roots(task: SubAgentTask) -> list[str]:
     roots: list[str] = []
     for raw in (
         safe_string_ref(task, "task_workspace_dir"),
         safe_string_ref(task, "agent_run_workspace_dir"),
+        *output_write_grant_roots(task),
         *list(task.allowed_write_roots or []),
     ):
         text = _model_visible_write_root(task, raw)
@@ -227,8 +261,21 @@ def render_task_packet_lines(packet: dict[str, object]) -> list[str]:
         f"- forbidden_files: {_compact_list(file_contract.get('forbidden_files'))}",
         f"- product_write_roots: {_compact_list(write_contract.get('product_write_roots'))}",
         f"- allowed_write_roots: {_compact_list(write_contract.get('allowed_write_roots'))}",
+        f"- output_delivery_map: {_compact_delivery_map(write_contract.get('output_delivery_map'))}",
         f"- allowed_tools: {_compact_list(tool_contract.get('allowed_tools'))}",
     ]
+
+
+# 函数用途: 把 delivery_map 渲染成 runner prompt 里的紧凑单行（落点 => 最终位置）。
+def _compact_delivery_map(value: object) -> str:
+    if not isinstance(value, list) or not value:
+        return "none"
+    pairs = [
+        f"{item.get('from')} => {item.get('to')}"
+        for item in value
+        if isinstance(item, dict) and item.get("from") and item.get("to")
+    ]
+    return "; ".join(pairs) if pairs else "none"
 
 
 def _context_bundle_json_ref(refs: dict[str, str]) -> str:

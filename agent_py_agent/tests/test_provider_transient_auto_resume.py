@@ -48,9 +48,12 @@ def test_provider_transient_model_turn_retries_with_configured_schedule(
 
     assert result.response == "已继续完成。"
     assert agent.backend.calls == 3
-    assert sleeps == [10.0, 25.0]
-    assert "等待 10 秒后自动重试" in "".join(chunks)
-    assert "等待 25 秒后自动重试" in "".join(chunks)
+    assert len(sleeps) == 2, "重试次数仍由配置阶梯决定"
+    for base, actual in zip((10.0, 25.0), sleeps):
+        assert base <= actual <= base * 1.5, f"睡眠应为配置值+抖动: base={base} actual={actual}"
+    joined = "".join(chunks)
+    assert "attempt=1/5" in joined and "attempt=2/5" in joined
+    assert "秒后自动重试当前模型回合" in joined, "通知文本展示实际等待秒数(含抖动)"
 
 
 def test_provider_transient_model_turn_raises_after_schedule_exhausted(
@@ -82,7 +85,9 @@ def test_provider_transient_model_turn_raises_after_schedule_exhausted(
         raise AssertionError("provider transient errors must surface after retry schedule is exhausted")
 
     assert agent.backend.calls == 3
-    assert sleeps == [10.0, 25.0]
+    assert len(sleeps) == 2, "重试次数仍由配置阶梯决定"
+    for base, actual in zip((10.0, 25.0), sleeps):
+        assert base <= actual <= base * 1.5, f"睡眠应为配置值+抖动: base={base} actual={actual}"
 
 
 def test_provider_transient_empty_schedule_disables_auto_resume(

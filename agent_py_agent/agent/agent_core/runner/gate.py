@@ -214,7 +214,15 @@ def _inject_failure_memories(params: RunnerFailureParams, failure_type: str) -> 
     return effective_instruction
 
 
+# LLM: 记忆注入幂等(B2):同一 dispatch 轮内任务反复失败时,handle_runner_failure
+#   会被多次调用并不断在 effective_instruction 上追加;同一批教训文本已在
+#   instruction 里就不再堆叠,防止重试循环把 prompt 撑爆。
+# 函数用途: 把记忆提示追加到派工指令尾部(已存在同样提示时原样返回)。
 def _append_memory_hint(effective_instruction: str, memory_hint: str) -> str:
+    if not memory_hint:
+        return effective_instruction
+    if memory_hint in effective_instruction:
+        return effective_instruction
     if effective_instruction:
         return f"{effective_instruction}\n\n{memory_hint}"
     return memory_hint

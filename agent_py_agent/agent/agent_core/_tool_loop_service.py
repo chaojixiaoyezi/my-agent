@@ -35,8 +35,17 @@ from .tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .tool_context.reducer import render_tool_result_for_live_prompt
 from .tool_context.window import window_tool_context_params
 from .tool_guard.call_guardrail import record_tool_guard_observation
-from .tool_guard.loop_hints import append_tool_guardrail_action_block_hint
+from .tool_guard.loop_hints import (
+    append_tool_failure_channel_hint,
+    append_tool_guardrail_action_block_hint,
+)
 from .tool_loop.completion import ToolRoundCompletionRequest, completion_response_after_tool_round
+from .tool_loop.final_exit_contract import (
+    FinalExitRequest,
+    FinalExitState,
+    final_exit_closeout_decision,
+    unfinished_exit_passthrough,
+)
 from .tool_loop.recovery import (
     append_long_content_recovery_context,
     payload_with_runtime_scope,
@@ -150,7 +159,49 @@ def next_tool_loop_model_response(agent, params: ToolLoopExecuteParams, tool_rou
             tool_rounds=tool_rounds,
         )
     )
+    return _retry_after_provider_context_overflow(agent, params, tool_rounds, first=(prompt, response))
+
+
+# LLM: 单轮 PTL retry（compact 三件套之三，蓝本 终端交互 truncateHeadForPTLRetry）。
+#   只接 provider 实报的 context_overflow（runtime_source=provider_error）；preflight
+#   预测溢出仍走 compact，不抢跑。每次回收最老 20% 工具结果正文后重拼 prompt 重试，
+#   上限 tool_context_ptl_retry_max（0=关闭）；无可回收或仍溢出时返回最后的溢出响应，
+#   落回原有 compact/resume 路径，保证永不卡死。
+# 函数用途: 模型报"上下文超限"时先丢最老工具输出做轻量重试，省一次重量级 compact。
+def _retry_after_provider_context_overflow(
+    agent,
+    params: ToolLoopExecuteParams,
+    tool_rounds: int,
+    *,
+    first: tuple[str, object],
+):
+    from .tool_context.ptl_retry import DEFAULT_PTL_RETRY_MAX, reclaim_oldest_tool_results_for_ptl
+
+    prompt, response = first
+    retry_max = int(getattr(getattr(agent, "config", None), "tool_context_ptl_retry_max", DEFAULT_PTL_RETRY_MAX) or 0)
+    retries = 0
+    while retries < retry_max and _is_provider_context_overflow(response):
+        if not reclaim_oldest_tool_results_for_ptl(params.tool_context):
+            break
+        retries += 1
+        prompt = build_tool_loop_prompt(agent, params)
+        response = generate_model_response(
+            ModelGenerateParams(
+                agent=agent,
+                params=params,
+                prompt=prompt,
+                tool_rounds=tool_rounds,
+            )
+        )
     return prompt, response
+
+
+# 函数用途: 判定响应是不是 provider 实报的上下文超限（排除 preflight 预测）。
+def _is_provider_context_overflow(response) -> bool:
+    return (
+        str(getattr(response, "runtime_status", "") or "") == "context_overflow"
+        and str(getattr(response, "runtime_source", "") or "") == "provider_error"
+    )
 
 
 def execute_one_tool_call(agent, request: ToolCallExecuteParams):
@@ -195,20 +246,16 @@ def execute_tool_loop(agent, params: ToolLoopExecuteParams):
 
 
 def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecuteParams):
-    final_prompt = ""
-    final_response = None
+    final_prompt, final_response = "", None
     tool_rounds = params.tool_rounds
-    repair_counters = ToolLoopRepairCounters()
-    empty_response_repairs = 0
+    repair_counters, empty_response_repairs = ToolLoopRepairCounters(), 0
 
     while True:
-        pending_result = _drain_pending_deferred_tool_calls(service, params, tool_rounds)
-        if pending_result is not None and pending_result.final_response is None:
-            tool_rounds = pending_result.tool_rounds
+        tool_rounds, pending_final, drained = _pending_drain_outcome(service, params, tool_rounds)
+        if drained and pending_final is None:
             continue
-        if pending_result is not None:
-            tool_rounds = pending_result.tool_rounds
-            final_response = pending_result.final_response
+        if drained:
+            final_response = pending_final
             break
         (
             final_prompt,
@@ -222,10 +269,11 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
         if should_stop:
             break
         repair_counters, action = _response_action(service._agent, params, final_response, repair_counters)
-        if action.action == "continue":
+        verdict, routed_response = _routed_action_step(service, params, action)
+        if verdict == "continue":
             continue
-        if action.action == "break":
-            final_response = action.response
+        if verdict == "stop":
+            final_response = routed_response if routed_response is not None else final_response
             break
         final_prompt, final_response, tool_rounds = _tool_step_or_limit(
             service,
@@ -242,10 +290,53 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
     return final_prompt, final_response, tool_rounds
 
 
+# LLM: 主循环对非工具 action 的归一路由:continue 原样续;break 先过 run 出口合同
+#   (P2-1+P1-1,见 _final_exit_or_break);其余交回工具步。返回 (verdict, response),
+#   verdict ∈ {continue, stop, tools}。
+# 函数用途: 把模型响应的"继续/结束/执行工具"三岔路收成一次裁决,主循环保持扁平。
+def _routed_action_step(service, params, action):
+    if action.action == "continue":
+        return "continue", None
+    if action.action != "break":
+        return "tools", None
+    keep_going, response = _final_exit_or_break(
+        service,
+        FinalExitRequest(service._agent, params, action.response, service._final_exit_state),
+    )
+    if keep_going:
+        return "continue", None
+    return "stop", response
+
+
+# 函数用途: 把 pending 延迟工具调用的双分支收成一次裁决,返回(轮数, 最终回复, 是否命中)。
+def _pending_drain_outcome(service, params, tool_rounds):
+    pending = _drain_pending_deferred_tool_calls(service, params, tool_rounds)
+    if pending is None:
+        return tool_rounds, None, False
+    return pending.tool_rounds, pending.final_response, True
+
+
+# LLM: run 出口合同(P2-1+P1-1)在主循环 break 分支的接线:模型给最终回复时,
+#   若存在未收口任务态先走 closeout;失败则在双闸(续航预算+进展签名)内打回
+#   继续修(rework 指令已由 closeout 链注入 tool_context),闸断才放行
+#   (finalize 兜底 REWORK+resume)。
+# 函数用途: 替主循环判定"这次 break 是放行退出还是打回续修",返回(是否续, 最终回复)。
+def _final_exit_or_break(service, request: FinalExitRequest):
+    decision = final_exit_closeout_decision(request)
+    if decision.should_continue:
+        return True, request.final_response
+    if decision.response is not None:
+        return False, decision.response
+    return False, request.final_response
+
+
 class ToolLoopService:
 
+    # LLM: _final_exit_state 是 run 出口合同的续航状态;ToolLoopService 每次
+    #   execute_tool_loop 都新建实例,状态天然按 run 隔离。
     def __init__(self, agent):
         self._agent = agent
+        self._final_exit_state = FinalExitState()
 
     def execute(self, params: ToolLoopExecuteParams):
         return _execute_tool_loop_service(self, params)
@@ -367,6 +458,8 @@ def _run_tool_round(agent, request: ToolRoundExecutionRequest):
     subagent_output_written = execute_tool_round(request)
     update_runtime_fact_progress_if_enabled(agent, request.params, tool_round=request.tool_rounds)
     append_tool_guardrail_action_block_hint(request)
+    # 检索完备性软引导(R5b/R6c 实锤):同一工具系统失败达阈值即提醒枚举未试渠道。
+    append_tool_failure_channel_hint(request)
     final_response = completion_response_after_tool_round(
         ToolRoundCompletionRequest(
             agent,
@@ -384,6 +477,10 @@ def _tool_round_limit_reached(agent, params: ToolLoopExecuteParams, tool_rounds:
     return limit > 0 and tool_rounds >= limit
 
 
+# LLM: 工具轮数耗尽的系统截停出口:模型生成纯文本总结后,必须过余留合同直通口
+#   (unfinished_exit_passthrough)——R5a 形态的孤儿子代理在此出口同样要被回收、
+#   未收口退出同样要带 RUN_UNFINISHED_EXIT+resume;无未收口事实时原样放行。
+# 函数用途: 轮数到顶时让模型只做总结不再用工具,并按出口合同清场留痕。
 def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_rounds: int):
     params.tool_context.append("[tool-system]\n已达到最大工具轮数限制，停止继续调用工具。")
     if _executed_subagent_orchestration(params):
@@ -397,7 +494,10 @@ def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_
             tool_rounds=tool_rounds,
         )
     )
-    return final_prompt, without_tool_call_after_limit(agent, final_response)
+    final_response = unfinished_exit_passthrough(
+        agent, params, without_tool_call_after_limit(agent, final_response)
+    )
+    return final_prompt, final_response
 
 
 def _record_tool_call(agent, record: ToolCallRecordParams) -> None:

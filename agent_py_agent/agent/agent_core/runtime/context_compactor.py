@@ -34,38 +34,17 @@ def runtime_compact_policy(
     )
 
 
+# LLM: 读 capability 配置统一走 capability_config_for_agent（唯一权威，含快照缓存）；
+#   这里只做 subagent_compact_trigger_percent 的取值与容错。
+# 函数用途: 取子代理 compact 触发百分比覆盖值；<=0 表示继承主代理配置。
 def _subagent_trigger_percent_override(agent: object) -> int:
-    snapshot = getattr(agent, "_capability_config_runtime_snapshot", None)
-    config = getattr(snapshot, "config", None)
-    if config is None:
-        config = _load_capability_config_cached(agent)
+    from ....agent.capability.runtime_config_reload import capability_config_for_agent
+
+    config = capability_config_for_agent(agent)
     try:
         return int(getattr(config, "subagent_compact_trigger_percent", 0) or 0)
     except (TypeError, ValueError):
         return 0
-
-
-def _load_capability_config_cached(agent: object):
-    from pathlib import Path
-
-    from ....agent.capability.runtime_config_reload import (
-        default_capability_config_path,
-        load_capability_config_snapshot,
-    )
-
-    path = Path(
-        getattr(agent, "capability_config_path", "")
-        or default_capability_config_path(getattr(agent, "root", "."))
-    )
-    try:
-        snapshot = load_capability_config_snapshot(path)
-    except (FileNotFoundError, OSError, TypeError, ValueError):
-        return None
-    try:
-        agent._capability_config_runtime_snapshot = snapshot
-    except AttributeError:
-        pass
-    return snapshot.config
 
 
 def compact_trigger_percent(value: object) -> int:

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from ..backends import is_provider_transient_error
+from ..concurrency.retry import apply_retry_jitter
 from ..settings.runtime_guard_config import RuntimeGuardPolicy, runtime_guard_data
 
 _T = TypeVar("_T")
@@ -58,13 +59,25 @@ def run_with_provider_transient_auto_resume(
             return operation()
         except Exception as exc:
             _raise_unless_provider_transient(exc)
-            _wait_before_retry(on_chunk, _RetryNotice(attempt, len(delays), delay, exc))
+            # 配置阶梯+随机抖动(批3):多实例同撞限流时错峰重试,防共振雪崩。
+            _wait_before_retry(on_chunk, _RetryNotice(attempt, len(delays), apply_retry_jitter(delay), exc))
     return operation()
 
 
+# LLM: 可重试判定升级(批3 2-1 收口):typed transient 之外,经分类器
+#   (contracts/provider_error_classifier,长期助手 蓝本)判为 rate_limit/
+#   overloaded/server_error/timeout 的裸异常同样进入重试;auth/billing/format/
+#   context_overflow/unknown 照旧上抛(context_overflow 由上层 ptl_retry 链
+#   接手压缩,unknown 保守快速浮出)。模型全程无感。
+# 函数用途: 这个错值不值得原地重试?值得就放行去等待,不值得立刻抛给上层。
 def _raise_unless_provider_transient(exc: Exception) -> None:
-    if not is_provider_transient_error(exc):
-        raise exc
+    if is_provider_transient_error(exc):
+        return
+    from ..contracts.provider_error_classifier import classify_provider_error
+
+    if classify_provider_error(exc).retryable:
+        return
+    raise exc
 
 
 def _wait_before_retry(on_chunk: Callable[[str], object] | None, notice: _RetryNotice) -> None:

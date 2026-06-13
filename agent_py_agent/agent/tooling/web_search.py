@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import urllib.error
@@ -84,6 +85,81 @@ class DuckDuckGoHtmlProvider(WebSearchProvider):
             }
             for item in _dedupe_search_results(parser.results, limit)
         ]
+
+
+# LLM: Bing HTML 搜索后端(R12-R15 实锤:唯一后端 DuckDuckGo 在常见网络环境
+#   对脚本返回 202 反爬挑战页〔0 结果〕→ web_search 全程 TOOL_UNAVAILABLE → 模型
+#   被迫退化成抓页面/瞎推断。Bing HTML 在同环境稳定返回真结果,免 API key)。
+#   解析按 b_algo 结果块逐块进行——块内取 h2>a(标题+跳转链接)与块内 snippet,
+#   保证标题/URL/摘要一一对应,不会跨结果错位(github 产物错位病的同源教训)。
+#   provider 插槽设计不变,本类与 DuckDuckGo 并列,_search_with_providers 按序
+#   fallback,任一可用即可。
+class BingHtmlProvider(WebSearchProvider):
+    """Built-in Bing HTML provider that needs no external API key."""
+
+    name = "bing_html"
+
+    def __init__(self, *, timeout: int):
+        self.timeout = timeout
+
+    def search(self, query: str, limit: int) -> list[dict[str, str]]:
+        url = "https://www.bing.com/search?" + urllib.parse.urlencode({"q": query, "setlang": "en"})
+        req = urllib.request.Request(
+            url,
+            method="GET",
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+        return _parse_bing_results(body, limit)
+
+
+# 函数用途: Bing 的结果链接是 /ck/a 跳转(真实 URL 在 u 参数,a1+base64url),
+#   解出真实 URL;非跳转链接原样返回;解不出返回空串(由调用方丢弃)。
+def _decode_bing_redirect(href: str) -> str:
+    href = unescape(href or "").strip()
+    if "bing.com/ck/a" not in href:
+        return href
+    encoded = urllib.parse.parse_qs(urllib.parse.urlsplit(href).query).get("u", [""])[0]
+    if not encoded.startswith("a1"):
+        return ""
+    payload = encoded[2:]
+    try:
+        return base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)).decode("utf-8", "replace")
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+
+# 函数用途: 把 Bing 结果页按 b_algo 块切开,块内提取标题/真实URL/摘要(逐块对应,
+#   绝不跨结果错位);URL 过 _normalize_url 安全校验,解不出的块跳过。
+def _parse_bing_results(html: str, limit: int) -> list[dict[str, str]]:
+    starts = [m.start() for m in re.finditer(r'<li class="b_algo"', html)]
+    rows: list[dict[str, str]] = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(html)
+        block = html[start:end]
+        link = re.search(r'<h2[^>]*>\s*<a[^>]*?href="([^"]+)"[^>]*>(.*?)</a>', block, re.DOTALL)
+        if not link:
+            continue
+        url = _decode_bing_redirect(link.group(1))
+        try:
+            url = _normalize_url(url) if url else ""
+        except ValueError:
+            url = ""
+        title = _clean_search_text(re.sub(r"<[^>]+>", " ", link.group(2)))
+        if not url or not title:
+            continue
+        snippet_match = re.search(
+            r'<p class="b_lineclamp[^"]*"[^>]*>(.*?)</p>', block, re.DOTALL
+        ) or re.search(r'<div class="b_caption"[^>]*>.*?<p[^>]*>(.*?)</p>', block, re.DOTALL)
+        snippet = _clean_search_text(re.sub(r"<[^>]+>", " ", snippet_match.group(1))) if snippet_match else ""
+        rows.append({"source": "bing_html", "title": title, "url": url, "snippet": snippet})
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 class _DuckDuckGoHtmlResultParser(HTMLParser):
@@ -227,7 +303,11 @@ class WebSearchTool(BaseTool):
     def __init__(self, *, max_results: int = 5, timeout: int, providers: list[WebSearchProvider] | None = None):
         self.max_results = max(1, min(_MAX_SEARCH_RESULTS, max_results))
         self.timeout = timeout
-        self.providers = providers or [DuckDuckGoHtmlProvider(timeout=timeout)]
+        # 多后端冗余(Bing 首选,DuckDuckGo 兜底):任一可用即可,告别单点故障。
+        self.providers = providers or [
+            BingHtmlProvider(timeout=timeout),
+            DuckDuckGoHtmlProvider(timeout=timeout),
+        ]
         self.spec = ToolSpec(
             name="web_search",
             category="web",

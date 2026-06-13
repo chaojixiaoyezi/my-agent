@@ -1,5 +1,22 @@
 # Memory Progress
 
+## 2026-06-11 记忆推模式扩展到 planner 决策点 + 注入幂等 + 中文短 goal 检索修复（开发计划 B1/B2）
+
+- **B1 planner 注入**：父代理 planner 出决策前自动注入 planning 类教训——
+  `planner_service.append_planner_memory_hint`（查询上下文取 due_issues/active_tasks
+  首条 goal），接线在 `_execute_planner_llm` 的 prompt 构造后。软注入：无 memory/
+  检索异常一律原样返回，绝不阻断 planner。注入点覆盖从"仅 runner 失败点
+  （runner/gate）"扩展到 planner 决策点；dispatch 本身无独立 LLM 决策面
+  （planner 即其决策面），机器路径不注入。
+- **B1 生产端缺陷修复**：`memory_push._build_memory_query` 曾写成 `len(goal)>50`
+  才把 goal 加入查询——中文短 goal（常态）被整个丢弃，查询只剩英文 trigger 词，
+  中文教训永远搜不到，推模式形同虚设（失败点注入同样受害）。现在 goal 非空即入
+  查询、超 50 字才截断。
+- **B2 注入幂等**：planner 注入与 runner 失败注入（`_append_memory_hint`）都做
+  "同一 hint 已存在则不堆叠"——失败重试循环不再把同批教训反复追加进派工指令。
+- 钉子：`test_memory_push_decision_points.py`（9 条：注入命中/软容错/异常容错/
+  goal 提取/双路径幂等）。
+
 ## 2026-06-11 compact 连续失败熔断（防 thrash）
 
 - 新增 `compact_circuit_breaker.py`：compact 连续失败达阈值（默认 3）即 open，

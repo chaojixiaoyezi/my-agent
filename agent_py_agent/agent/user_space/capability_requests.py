@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from ..common.json_io import read_json_object_report
+from ..common.safe_id import safe_id
 from .home_layout import MyAgentHomePaths
 
 CAPABILITY_REQUEST_STATUSES = frozenset({"open", "approved", "denied", "expired", "cancelled", "closed"})
@@ -138,9 +139,8 @@ def _read_payload_report(path: Path) -> tuple[dict[str, Any], dict[str, object] 
 
 
 def _safe_id(value: object) -> str:
-    text = str(value or "").strip()
-    result = "".join(char if char.isalnum() or char in {"_", "-"} else "-" for char in text)
-    return result.strip("-_") or "unknown"
+    # 体检收敛:唯一权威 common/safe_id(语义=默认 unknown)。
+    return safe_id(value, default="unknown")
 
 
 def _validated_status(value: object) -> str:

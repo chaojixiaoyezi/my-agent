@@ -271,16 +271,26 @@ def _recovery_refs(task: SubAgentTask) -> dict[str, str]:
 
 
 def _tool_contract(task: SubAgentTask) -> dict[str, object]:
-    return {
+    open_requests = _open_capability_requests(task)
+    contract: dict[str, object] = {
         "allowed_tools": list(task.allowed_tools),
         "used_tools": list(task.used_tools),
-        "open_request_count": len(_open_capability_requests(task)),
+        "open_request_count": len(open_requests),
         "grant_count": len(task.capability_grants),
         "gap_count": len(task.capability_gaps),
         "controlled_exec_grant_ids": [
             grant.id for grant in task.capability_grants if "controlled_exec" in list(getattr(grant, "tools", []) or [])
         ],
     }
+    # P4-1 引导前移(R5 三案实锤:A3 引导只挂 closeout finding,不提交 closeout 就
+    # 永远看不到)。运行中树快照存在 OPEN capreq 时直接带结构化引导,主代理在
+    # inspect_agent_tree/watch 里即可照着调用,不必等 closeout。软引导,不拦路。
+    if open_requests:
+        contract["recommended_tool"] = "resolve_capability_requests"
+        contract["open_capability_request_ids"] = [
+            str(getattr(item, "id", "") or "") for item in open_requests[:20]
+        ]
+    return contract
 
 
 def _artifact_registry_refs(task: SubAgentTask, *, limit: int = 12) -> list[dict[str, object]]:

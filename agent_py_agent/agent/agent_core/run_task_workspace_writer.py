@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -114,6 +115,9 @@ def _sync_conversation_task_workspace(agent, run_params, task_id: str, task_root
         try:
             thread = store.thread_for_task(str(task_id))
         except Exception:
+            # 绑定线索失败只降级(任务工作区不依赖会话线索),但要留观测——
+            # 静默丢元数据会让跨通道接续悄悄断链(体检实锤)。
+            logging.getLogger(__name__).debug("thread_for_task lookup failed", exc_info=True)
             thread = None
         thread_id = str(getattr(thread, "thread_id", "") or "").strip()
     if not thread_id:
@@ -152,7 +156,14 @@ def attach_run_task_workspace_context(agent, params, user_prompt: str):
         return params
     result = _ensure_workspace_for_run(agent, params, user_prompt)
     primary_workspace_root = _primary_workspace_root(agent)
-    injection = _workspace_prompt_section(result, primary_workspace_root=primary_workspace_root)
+    injection = _workspace_prompt_section(
+        result,
+        primary_workspace_root=primary_workspace_root,
+        # R7c 实锤(单次 run"请示退出"形态):cli_run 是一次性非交互运行,中途请示
+        # 无人应答——这个环境事实必须告知模型;gateway 有 guidance 补发渠道、chat
+        # 可多轮,不注入。
+        single_shot=str(getattr(params, "source", "") or "").strip() == "cli_run",
+    )
     next_inject = _append_once(list(getattr(params, "inject", None) or []), injection)
     next_attrs = _task_attributes_with_workspace(getattr(params, "task_attributes", None), result)
     next_contract = _delivery_contract_with_workspace(
@@ -456,28 +467,60 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _workspace_prompt_section(paths, *, primary_workspace_root: Path) -> str:
+# LLM: run 任务工作区的软运行状态提示(纯自然语言软约束,不做机器决策)。
+#   single_shot=True(cli_run)时附加"单次运行无人应答"环境事实——R7c 实锤:
+#   模型把单次 run 当可交互会话,零产物即"请指示如何继续"退出;这不是模型的错,
+#   是运行时没把交互形态告诉它。gateway(有 guidance 渠道)/chat(多轮)不附加。
+# 函数用途: 告诉模型本轮的工作区位置、产物去向,以及"这次没人会中途回复你"。
+# LLM: 任务工作区注入段(稳而不管减负,2026-06-12,PLAN-stability-not-control):
+#   从 18 行教学文案瘦身为"事实 + 两句定位"——对照组实证(长期助手 三层提示)
+#   表明每轮注入的指挥性内容会挤占模型的任务注意力(R9 取证:单篇产出缩水
+#   4 倍)。被砍的目录使用知识(输入目录≠交付目录、旧报告只当线索、收口整理等)
+#   收编进 lessons/workspace.md,按需召回而非每轮灌输。改动时同步检查
+#   home_memory_seeds 的 workspace lesson 与 tests/test_run_task_workspace_writer。
+# 函数用途: 告诉模型本轮任务的目录事实(在哪读、往哪交),一眼看完不啰嗦。
+def _workspace_prompt_section(paths, *, primary_workspace_root: Path, single_shot: bool = False) -> str:
+    single_shot_line = (
+        ["- 单次运行：提问或请示不会有任何回复；自行决策推进到底，结束前把交付物（或不可行说明）写进 output_dir。"]
+        if single_shot
+        else []
+    )
     return "\n".join(
         [
             "# Current Task Workspace",
-            f"- source_workspace_root: {primary_workspace_root}",
-            f"- relative_input_root: {primary_workspace_root}",
-            "- 本轮任务已有独立任务目录；没有用户明确指定其他输出目录时，最终交付物写到 output_dir。",
-            "- output_dir 可以作为协作时的共享产物区；代码、报告分片、子代理阶段产物可以先放这里方便联调和汇总。",
-            "- 收口前请整理 output_dir：最终只保留用户需要看的交付物；明显的草稿、日志、子代理分报告和临时材料挪到 work_dir 或在最终报告里做索引。",
-            "- work_dir 用于草稿、日志、中间材料和过程文件，也适合保存被挪走的过程产物。",
-            "- 用户给的相对输入路径、源码路径和资料路径默认相对 relative_input_root 读取。",
-            "- task_root/output_dir/work_dir 是任务产物和过程文件位置，不是相对输入路径的默认根。",
-            "- 用户让你阅读、分析、扫描的项目/源码/资料目录是输入目录，不是默认交付目录。",
-            "- 不要因为输入目录下面可以新建 output/，就把它当成本轮输出目录。",
-            "- 输入目录里的 output/、reports/ 或旧报告只能当线索；除非用户明确要求复用，不能当成本轮已完成证据。",
-            "- 即使读到旧报告，也要重新读取当前源码或文件，并把本轮产物登记/写入本轮 output_dir 或 work_dir。",
-            "- 如果用户只要求聊天回答、不需要文件，可以正常直接回答，不必强行落盘。",
+            f"- relative_input_root: {primary_workspace_root}（用户给的相对路径从这里读）",
             f"- task_root: {paths.root}",
-            f"- output_dir: {paths.output_dir}",
-            f"- work_dir: {paths.work_dir}",
+            f"- output_dir: {paths.output_dir}（最终交付物写这里；用户让你读的输入目录不是交付目录）",
+            f"- work_dir: {paths.work_dir}（草稿与过程文件）",
+            *single_shot_line,
+            *_relay_legacy_lines(paths),
         ]
     )
+
+
+# LLM: 接力遗产清单(R11a 接力倒退实锤:上轮 5 个子代理产出 345KB 深度内容
+#   躺在 work/agents/*/runner_response.md 与 draft 文件里,接力轮模型看不到这笔
+#   资产,重新派工又没干完——交付区反而被新一层浅文件覆盖)。任务目录复用
+#   (timeline 多于一行=接力轮)时,把上轮遗留的子代理产出档案按"份数+大小+
+#   路径"投影成结构化事实。纯事实零指令:用不用、怎么用由模型决定。
+# 函数用途: 接力时告诉模型"上一轮帮手已经写了多少东西、在哪",别当无事发生。
+def _relay_legacy_lines(paths) -> list[str]:
+    try:
+        timeline = paths.work_dir / "timeline.jsonl"
+        if not timeline.is_file() or len(timeline.read_text(encoding="utf-8").splitlines()) < 2:
+            return []
+        responses = sorted((paths.work_dir / "agents").glob("*/runner_response.md"))
+        sized = [(p, p.stat().st_size) for p in responses if p.is_file()]
+        total_kb = sum(size for _, size in sized) // 1024
+        if not sized or total_kb <= 0:
+            return []
+    except OSError:
+        return []
+    listing = "; ".join(f"{p.parent.name}:{size // 1024}KB" for p, size in sized[:8])
+    return [
+        f"- relay_legacy_outputs: 上一轮遗留 {len(sized)} 份子代理产出档案共 {total_kb}KB"
+        f"（work/agents/<run_id>/runner_response.md，明细: {listing}）",
+    ]
 
 
 def _append_once(items: list[str], injection: str) -> list[str]:

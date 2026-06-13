@@ -347,15 +347,24 @@ def _tool_loop_params_from_finalize_context(ctx: FinalizeContext) -> ToolLoopExe
     )
 
 
+# LLM: 出口/收尾是否存在"可走 closeout 的产物候选"的唯一判定。contract 分支的
+#   写入记录判定(_has_successful_delivery_record)只看内存 archive——R7b 实锤:
+#   长任务 compact 后记录丢失、run_command 生成文件无路径 ref,真实交付对此判定
+#   不可见;故记录为空时回落与 uncontracted 分支同源的交付区产物事实
+#   (_current_run_task_output_artifacts 已带 task_output 目录扫描兜底)。
+# 函数用途: 回答"这轮有没有值得走验收门的交付迹象",记录丢了就直接看交付区。
 def _has_final_closeout_candidate(params: ToolLoopExecuteParams, agent: object) -> bool:
+    workspace_root = Path(getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", "."))
+    workspace_root = workspace_root.expanduser().resolve(strict=False)
     if _delivery_contract_present(params):
         if target_coverage_blocks_delivery_auto_closeout(agent, params):
             return False
         if not _required_delivery_artifacts_present(params, agent):
             return False
-        return _has_successful_delivery_record(params)
-    workspace_root = Path(getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", "."))
-    return bool(_current_run_task_output_artifacts(params, workspace_root=workspace_root.expanduser().resolve(strict=False)))
+        if _has_successful_delivery_record(params):
+            return True
+        return bool(_current_run_task_output_artifacts(params, workspace_root=workspace_root))
+    return bool(_current_run_task_output_artifacts(params, workspace_root=workspace_root))
 
 
 def _failed_final_closeout_response(
@@ -382,6 +391,9 @@ def _failed_final_closeout_response(
             if isinstance(value, dict) and value.get("allowed") is False
         },
         "contract_recovery": report.get("contract_recovery", {}),
+        # 余留合同(任务完成力底座 P1-2):非终态退出必带结构化恢复入口,
+        # 用户和下一轮 agent 都能据此接力,不靠口头描述。
+        "resume": _unfinished_run_resume_block(agent, params, report),
     }
     return ModelResponse(
         text=(
@@ -389,9 +401,38 @@ def _failed_final_closeout_response(
             + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
             + "\n[/MAIN_AGENT_DELIVERY_REWORK_REQUIRED]\n"
             "交付验收未通过。本轮不能声明任务完成；请按 failed_artifacts、failed_gates 或 contract_recovery 修复后重新提交验收。"
+            "任务处于可恢复状态：resume 字段给出任务根、进度账本与恢复方式。"
         ),
         backend=backend,
     )
+
+
+# LLM: P1-2 余留合同的 resume 块:全部取自结构化事实(closeout 报告/任务根),
+#   不生成自然语言计划。how_to_continue 是固定的结构化入口说明(同一进程再次
+#   run 会经 startup_recovery/任务账本接力;dispatch 命令可直接续派子代理)。
+# 函数用途: 任务没做完时,把"从哪继续"打包成机器可读的恢复入口。
+def _unfinished_run_resume_block(agent: object, params: ToolLoopExecuteParams, report: dict) -> dict:
+    root = current_run_task_workspace_root(agent, params)
+    gate = report.get("task_progress_closeout_gate")
+    evidence = gate.get("evidence") if isinstance(gate, dict) else None
+    progress_ref = ""
+    open_count = -1
+    if isinstance(evidence, dict):
+        progress_ref = str(evidence.get("progress_ref") or "")
+        try:
+            open_count = int(evidence.get("open_count"))
+        except (TypeError, ValueError):
+            open_count = -1
+    return {
+        "task_root": str(root or ""),
+        "progress_ref": progress_ref,
+        "open_count": open_count,
+        "how_to_continue": [
+            "再次对同一任务发起 run（启动检测会带出未完成任务）",
+            "my-agent subagents-dispatch --apply --start-runners 续派未完成子代理",
+            "my-agent task-list / task-show <id> 查看任务状态",
+        ],
+    }
 
 
 def _latest_closeout_report(agent: object, params: ToolLoopExecuteParams) -> dict[str, object]:

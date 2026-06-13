@@ -74,6 +74,7 @@ class _HomeProviderConfigFields:
     workspace_task_path_template: str = "tasks/{date}/{task_slug}"
     home_context_enabled: bool = True
     home_lesson_auto_read_limit: int = 3
+    home_lesson_stale_caveat_days: int = 7
     daily_memory_mirror_enabled: bool = True
     run_task_workspace_enabled: bool = True
     external_knowledge_index_file_name: str = "MY_AGENT_INDEX.md"
@@ -91,12 +92,25 @@ class _ToolConfigFields:
     enable_tools: bool = True
     max_tool_rounds: int | None = None
     max_tool_calls_per_round: int | None = None
+    # run 出口合同(任务完成力底座 P1-1)的修复续航预算:closeout 阻断后最多打回
+    # 模型继续修几轮;0=关闭续航(阻断即退出,旧行为)。另有进展签名闸防死循环。
+    run_repair_max_continuations: int = 3
+    # run 出口的孤儿子代理回收(R6a 实锤:后台 dispatch 进程不随主代理退出而停止):
+    # 带未收口子代理退出前终止其后台进程并把 RUNNING 任务放回 PENDING;false=不回收
+    # (退出声明会如实标注后台进程仍在运行)。
+    run_exit_orphan_recovery_enabled: bool = True
+    # 检索完备性软引导(R5b/R6c 实锤:单一渠道失败即下"不存在"绝对结论):同一工具
+    # 系统失败累计达此阈值时注入"枚举未试渠道再下结论"软提示(每工具一次);0=关闭。
+    tool_failure_channel_hint_threshold: int = 2
     tool_agent_budget_window_seconds: int | None = None
     tool_agent_budget_max_calls: int | None = None
     tool_artifact_read_budget_window_seconds: int = 600
     tool_artifact_read_budget_max_chars: int = 240_000
     tool_output_externalize_min_chars: int = 20_000
     tool_output_preview_chars: int = 4_000
+    tool_context_microcompact_keep_recent: int = 8
+    tool_context_microcompact_min_chars: int = 1500
+    tool_context_ptl_retry_max: int = 3
     tool_payload_max_fields: int = 64
     tool_payload_max_field_name_chars: int = 128
     tool_payload_max_name_chars: int = 128

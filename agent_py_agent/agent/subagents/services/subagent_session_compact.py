@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...common.safe_id import safe_id
 from ...common.value_parsing import sequence_strings
 from ..models import SubAgentTask
 from .compact_continue_packet import (
@@ -196,8 +197,8 @@ def _float_value(value: object) -> float:
 
 
 def _safe_id(value: str) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(value or "run"))
-    return cleaned[:48] or "run"
+    # 体检收敛:唯一权威 common/safe_id(语义=截断 48、默认 run)。
+    return safe_id(value, max_len=48, default="run")
 
 
 __all__ = [

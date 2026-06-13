@@ -25,6 +25,10 @@ class SkillCard:
     description: str
     path: Path
     when_to_use: str = ""
+    # skill 树第一期(千级地基):category 来自目录层级推导(skills/<类目>/<名>/
+    # SKILL.md),frontmatter 显式声明可覆盖;platforms 供平台过滤(空=全平台)。
+    category: str = "general"
+    platforms: list[str] = field(default_factory=list)
     scope: str = "workspace"
     tags: list[str] = field(default_factory=list)
     capabilities: list[str] = field(default_factory=list)
@@ -78,10 +82,14 @@ class SkillRegistry:
         self._cards = cards
         return self.cards()
 
+    # LLM: skill 树扫描(千级地基):递归发现任意深度的 <...>/<skill名>/SKILL.md,
+    #   category=skill 目录相对扫描根的父链(长期助手 "目录即分类"形态,零 frontmatter
+    #   负担);平铺旧布局(根下直接 <名>/SKILL.md)自动归 "general",完全兼容。
+    # 函数用途: 把一个 skill 根目录下的所有技能(含子类目)扫成索引卡。
     def _scan_skill_dir(self, skill_dir: Path, cards: dict[str, SkillCard]) -> None:
         if not skill_dir.exists():
             return
-        for skill_file in sorted(skill_dir.glob("*/SKILL.md")):
+        for skill_file in sorted(skill_dir.glob("**/SKILL.md")):
             self._register_skill_file(skill_dir, skill_file, cards)
 
     def _register_skill_file(self, skill_dir: Path, skill_file: Path, cards: dict[str, SkillCard]) -> None:
@@ -90,6 +98,10 @@ class SkillRegistry:
         if self.enforce_guard and not decision.allowed:
             return
         card = parse_skill_file(skill_file, source=str(skill_dir))
+        if card.category == "general":
+            derived = _derived_category(skill_dir, skill_file)
+            if derived:
+                card.category = derived
         cards[card.name] = card
         self._gate_decisions[card.name] = decision.to_dict()
 
@@ -150,6 +162,8 @@ def parse_skill_file(path: str | Path, *, source: str = "workspace") -> SkillCar
         description=description,
         path=skill_path,
         when_to_use=str(meta.get("when_to_use", "")).strip(),
+        category=str(meta.get("category", "")).strip() or "general",
+        platforms=_as_list(meta.get("platforms")),
         scope=str(meta.get("scope", "workspace")).strip() or "workspace",
         tags=_as_list(meta.get("tags")),
         capabilities=_as_list(meta.get("capabilities")),
@@ -157,6 +171,15 @@ def parse_skill_file(path: str | Path, *, source: str = "workspace") -> SkillCar
         risk_level=str(meta.get("risk_level", "low")).strip() or "low",
         source=source,
     )
+
+
+# 函数用途: 从相对路径推导类目链("research/code" 形态);平铺(无中间层)返回空。
+def _derived_category(skill_dir: Path, skill_file: Path) -> str:
+    try:
+        parts = skill_file.parent.relative_to(skill_dir).parts[:-1]
+    except ValueError:
+        return ""
+    return "/".join(parts)
 
 
 def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:

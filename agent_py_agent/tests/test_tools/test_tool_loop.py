@@ -494,7 +494,10 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
             {"tool": "dispatch_subagents", "start_runners": True, "dry_run": True}
         )
 
-        assert result.response == "已创建子代理任务并等待调度。"
+        # run 出口合同(R6a 修复)生效:存在未收口子代理时,最终回复保留模型原文
+        # 并追加 [RUN_UNFINISHED_EXIT] 结构化未完成声明+resume 入口。
+        assert result.response.startswith("已创建子代理任务并等待调度。")
+        assert "[RUN_UNFINISHED_EXIT]" in result.response
         assert result.tool_rounds == 1
         assert len(tasks) == 2
         assert all("write_file" in task.allowed_tools for task in tasks)
@@ -554,7 +557,9 @@ def test_repeated_orchestration_tool_call_is_not_executed_twice():
         result = agent.run("请只创建一个子代理", save=False)
         tasks = agent.subagents.list_runs()
 
-        assert result.response == "重复派工已被拦截并收口。"
+        # 出口合同同款:未收口子代理存在时原文+RUN_UNFINISHED_EXIT 结构块。
+        assert result.response.startswith("重复派工已被拦截并收口。")
+        assert "[RUN_UNFINISHED_EXIT]" in result.response
         assert result.tool_rounds == 2
         assert len(tasks) == 1
 

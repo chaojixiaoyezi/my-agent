@@ -45,6 +45,10 @@ class MemoryRecord:
     kind: str = "dialogue"
     tags: list[str] | None = None
     created_at: float = 0.0
+    # 开放结构化扩展位(P5-2):上层语义字段挂这里,例如教训记忆的
+    # trigger_conditions(结构化触发条件,决策端按字段匹配提权,不解析正文)。
+    # 旧 JSONL 行没有此键,读取时按空 dict 兼容;空 dict 不写入 JSON 行(省字节)。
+    attributes: dict | None = None
 
     def to_json(self) -> str:
         """把当前记忆转成一行 UTF-8 JSON 字符串。
@@ -62,7 +66,7 @@ class MemoryRecord:
 
         if not self.created_at:
             self.created_at = time.time()
-        return json.dumps(asdict(self), ensure_ascii=False)
+        return json.dumps(_record_payload(self), ensure_ascii=False)
 
 
 class JsonlMemory(JsonlMemoryIndexMixin):
@@ -111,6 +115,8 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         新手说明:
         这是写入记忆的主入口。先构造 MemoryRecord，再写入 JSONL，最后尝试写索引。
         索引失败不会让记忆写入失败，因为 JSONL 才是主事实流水。
+        需要带结构化扩展字段（attributes，如教训的 trigger_conditions）时，
+        自行构造 MemoryRecord 走 add_record。
 
         role: 记忆来源角色，例如 user 或 assistant。
         content: 记忆正文。
@@ -123,14 +129,24 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         副作用说明:
         会追加写入 JSONL 文件；如果 local_store 存在，会尝试 upsert 一条索引记录。"""
 
-        record = MemoryRecord(
-            role=role,
-            content=content,
-            kind=kind,
-            tags=tags or [],
-            created_at=time.time(),
+        return self.add_record(
+            MemoryRecord(
+                role=role,
+                content=content,
+                kind=kind,
+                tags=tags or [],
+                created_at=time.time(),
+            )
         )
-        append_jsonl(self.path, asdict(record))
+
+    # LLM: 记忆写入的底层唯一落盘口(add 是它的便捷封装)。接受完整 MemoryRecord,
+    #   attributes 等扩展字段(P5-2 trigger_conditions)由调用方在 record 上携带。
+    #   副作用:JSONL 追加 + daily mirror + LocalStore 索引(索引失败不打断)。
+    # 函数用途: 想写带结构化扩展字段的记忆时,构造好 MemoryRecord 从这里进。
+    def add_record(self, record: MemoryRecord) -> MemoryRecord:
+        if not record.created_at:
+            record.created_at = time.time()
+        append_jsonl(self.path, _record_payload(record))
         self._append_daily_mirror(record)
         self._try_index_record(record)
         return record
@@ -140,7 +156,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
             return
         for daily_dir in self.daily_mirror_dirs:
             path = daily_dir / f"{date.fromtimestamp(record.created_at).isoformat()}.jsonl"
-            append_jsonl(path, asdict(record))
+            append_jsonl(path, _record_payload(record))
 
     def all(self) -> list[MemoryRecord]:
         """从 JSONL 文件读取全部记忆记录。
@@ -243,6 +259,14 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         for path in self._daily_mirror_files():
             records.extend(self._read_memory_file(path))
         return _search_memory_records(records, query, top_k)
+
+# 函数用途: MemoryRecord → JSONL 行字典;attributes 为空时不写该键,旧行格式不变。
+def _record_payload(record: MemoryRecord) -> dict:
+    payload = asdict(record)
+    if not payload.get("attributes"):
+        payload.pop("attributes", None)
+    return payload
+
 
 def _memory_record_key(record: MemoryRecord) -> tuple[str, str, str, float]:
     return (record.role, record.kind, record.content, float(record.created_at or 0.0))

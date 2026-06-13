@@ -6,6 +6,8 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from ..common.json_io import read_text_lines_cached
 from typing import Any
 
 from ..runtime_errors import runtime_error_report
@@ -31,7 +33,8 @@ def latest_records_with_errors(
     if not path.exists():
         return context.latest, context.errors
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        # mtime+size 守门缓存(批4):注册表反复 lookup 时免整文件重读。
+        lines = read_text_lines_cached(path)
     except (OSError, UnicodeError) as exc:
         context.errors.append(_error_report(exc, context="artifact_registry.read", path=path))
         return context.latest, context.errors

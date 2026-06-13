@@ -16,8 +16,10 @@ from ..target_coverage_ledger import collect_target_coverage_records, target_cov
 from ..tool_guard.local_progress import reset_local_progress_guard
 from .artifacts import _relative_report_ref, _write_report
 from .evidence import target_coverage_projection_decision, target_coverage_projection_repair_message
+from .expected_outputs_gate import evaluate_expected_outputs_gate
 from .recovery import attach_contract_recovery, failed_gate_payloads
-from .subagent_aggregation import evaluate_subagent_aggregation_gate
+from .source_volume import attach_source_volume_observation
+from .subagent_aggregation import append_subagent_rework_context, evaluate_subagent_aggregation_gate
 from .task_progress_gate import evaluate_task_progress_closeout_gate, task_progress_repair_message
 
 _PATH_TOKEN_RE = re.compile(
@@ -44,7 +46,11 @@ def uncontracted_task_output_closeout_response(
     workspace_root: Path,
 ) -> ModelResponse | None:
     artifacts = _uncontracted_current_artifacts(request, workspace_root)
-    if not artifacts:
+    # 出口合同(P2-1/P5-1):零产物不再无条件早退——派过子代理的任务必须走完
+    # closeout(让 SUBAGENTS_* gate 拦未收口、让空交付门要求结果文件),
+    # 否则"口头放弃"零留档绕过所有门(R5b/R5c 实锤形态)。
+    children_present = _spawned_children_present(request)
+    if not artifacts and not children_present:
         return None
     params = request.params
     artifacts = _registered_artifacts(artifacts, workspace_root, params)
@@ -53,31 +59,111 @@ def uncontracted_task_output_closeout_response(
     report_ref = _write_report(workspace_root, report)
     report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
     artifact_blocks = any(item.get("ok") is not True for item in artifacts)
-    coverage_status = _uncontracted_target_coverage_status(request, workspace_root)
-    if coverage_status:
+    if coverage_status := _uncontracted_target_coverage_status(request, workspace_root):
         report["target_coverage_status"] = coverage_status
     projection_decision = target_coverage_projection_decision(report)
     report["target_coverage_projection_gate"] = projection_decision.to_dict()
     task_progress_decision = evaluate_task_progress_closeout_gate(request, report)
     report["task_progress_closeout_gate"] = task_progress_decision.to_dict()
+    expected_outputs_decision = _attach_declared_reconciliation(request, report)
     decision = evaluate_subagent_aggregation_gate(request)
     report["subagent_aggregation_gate"] = decision.to_dict()
-    decisions = [projection_decision, task_progress_decision, decision]
+    decisions = [projection_decision, task_progress_decision, expected_outputs_decision, decision]
     coverage_blocks = coverage_status.get("should_block") is True if coverage_status else False
+    # P5-1 空交付门:派过子代理但交付区零产物是客观事实——至少要交一份结果文件
+    # (完成则交结果/汇总;不可行则交结构化不可行报告)。走返工,不是终态卡死。
+    empty_delivery_blocks = children_present and not artifacts
+    if empty_delivery_blocks:
+        _attach_empty_delivery_recovery(report)
     if coverage_blocks:
         _attach_uncontracted_target_coverage_recovery(report)
     if artifact_blocks:
         _attach_uncontracted_artifact_recovery(report)
-    if artifact_blocks or coverage_blocks or not all(item.allowed for item in decisions):
-        report["ok"] = False
-        attach_contract_recovery(report, decisions, contract={})
-        _write_report(workspace_root, report)
-        _append_uncontracted_repair_context(params, report)
+    # 稳而不管(2026-06-12,PLAN-stability-not-control):阻断打回只守客观事实——
+    # 产物打不开(artifact_blocks)/派过人零产物(empty_delivery)/未终态子代理与
+    # open capreq(subagent gate)。质量与进度类 finding(task_progress open、
+    # expected_outputs 数量、coverage 投影)照常写进报告供把关,但不再阻断退出:
+    # R9 取证实锤,数量类打回驱动模型"凑数过门",单篇质量缩水 4 倍。
+    if artifact_blocks or empty_delivery_blocks or not decision.allowed:
+        _block_with_objective_rework(request, report, decisions)
         return None
+    if _declared_gap_rework(params, report, expected_outputs_decision):
+        return None
+    if coverage_blocks or not all(item.allowed for item in decisions):
+        # 质量类未满足:ok 仍为 true 放行,报告里保留全部 gate 事实与 advisory。
+        report["quality_advisories"] = failed_gate_payloads(report)
     _write_report(workspace_root, report)
     sync_run_task_workspace_closeout(request.agent, params, report)
     reset_local_progress_guard(request.agent, params)
+    # 自学习复盘钩子(稳而不管 2-3,enable_self_learning 才跑):成功收口也回头
+    # 看一眼,有可复用经验就记成待审草稿。
+    from ..run_learning_review import maybe_run_learning_review
+
+    maybe_run_learning_review(request.agent, params, report)
     return ModelResponse(text=_uncontracted_closeout_text(report), backend=request.backend)
+
+
+# 函数用途: 客观事实阻断的统一收尾:报告标失败、附恢复动作、注入返工指令。
+#   decisions 末位约定为 subagent gate(其 rework 注入有专用渲染)。
+def _block_with_objective_rework(request: object, report: dict[str, Any], decisions: list[Any]) -> None:
+    subagent_decision = decisions[-1]
+    report["ok"] = False
+    attach_contract_recovery(report, decisions, contract={})
+    _write_report(Path(report["workspace_root"]), report)
+    if not subagent_decision.allowed:
+        append_subagent_rework_context(request.params, subagent_decision, report)
+    _append_uncontracted_repair_context(request.params, report)
+
+
+# LLM: 自我承诺单次提醒(R14c 实锤:模型自己声明 expected_outputs cn.pdf
+#   min_count=1,两轮都在 0 实存时提前收口——quality_advisory 形态把关者可见
+#   但模型收不到)。与 R9 凑数反噬的区别:①数量是模型自我声明非外部写死;
+#   ②仅打回一次(幂等,二次同缺口放行进 advisories);③注入明确给双出口——
+#   补齐,或用 task_progress 更新声明并说明原因(改声明合法,漂移留痕由对账
+#   历史负责)。帮模型守自己的承诺,不替它选哪条路。
+# 函数用途: 自我声明缺口且本 run 提醒额度未用 → 写报告打回(True);否则 False。
+def _declared_gap_rework(params, report: dict[str, Any], decision) -> bool:
+    if decision.allowed or not _declared_gap_rework_pending(params):
+        return False
+    _append_declared_gap_rework_context(params, report)
+    report["ok"] = False
+    _write_report(Path(report["workspace_root"]), report)
+    return True
+
+
+_DECLARED_GAP_MARKER = "[declared-outputs-rework]"
+
+
+# 函数用途: 本 run 是否还没用过"自我声明缺口"的那一次提醒机会。
+def _declared_gap_rework_pending(params) -> bool:
+    context = getattr(params, "tool_context", None)
+    if not isinstance(context, list):
+        return False
+    return not any(_DECLARED_GAP_MARKER in str(item) for item in context)
+
+
+# 函数用途: 把"你自己声明的交付还差什么"连同双出口写给模型(只一次)。
+def _append_declared_gap_rework_context(params, report: dict[str, Any]) -> None:
+    gate = report.get("expected_outputs_gate")
+    findings = gate.get("findings", []) if isinstance(gate, dict) else []
+    import json as _json
+
+    params.tool_context.append(
+        f"{_DECLARED_GAP_MARKER}\n"
+        + _json.dumps({"unmet_declarations": findings[:8]}, ensure_ascii=False)
+        + "\n这是你自己通过 task_progress 声明的交付承诺,当前交付区还没满足。"
+        "二选一后再提交:①把缺的产物补齐;②如果确实无法完成,用 task_progress 更新"
+        " expected_outputs 声明,并在交付报告里写明原因。不要在未兑现也未改声明的情况下收尾。"
+    )
+
+
+# 函数用途: 声明侧对账两件套:expected_outputs 对账门(声明驱动)+ 来源比例观测
+#   (R8b 隐蔽编造实锤,检索量 vs 交付量并排数字,纯观测零判定)。
+def _attach_declared_reconciliation(request: object, report: dict[str, Any]):
+    expected_outputs_decision = evaluate_expected_outputs_gate(request)
+    report["expected_outputs_gate"] = expected_outputs_decision.to_dict()
+    attach_source_volume_observation(request, report)
+    return expected_outputs_decision
 
 
 def _uncontracted_current_artifacts(request: object, workspace_root: Path) -> list[dict[str, Any]]:
@@ -213,6 +299,62 @@ def _attach_uncontracted_artifact_recovery(report: dict[str, Any]) -> None:
     recovery["required_actions"] = actions
 
 
+# LLM: P5-1 空交付门的事实判定:当前任务工作区是否真的派过子代理(work/agents 下
+#   有 canonical)。只读文件系统事实,复用 subagent_aggregation 的 task_root 解析
+#   与 open_task_state_summary(同一权威)。
+# 函数用途: 回答"这轮任务到底有没有派过帮手"——派过就不允许零产物口头收尾。
+def _spawned_children_present(request: object) -> bool:
+    from .subagent_aggregation import _child_states, _current_task_root
+
+    task_root = _current_task_root(request)
+    if task_root is None:
+        return False
+    return bool(_child_states(task_root))
+
+
+# LLM: P5-1 空交付门的返工指引(结构化,通用,零任务专项):任务完成→交结果文件;
+#   不可行→交结构化不可行报告,schema 字段 tried_channels[](channel/evidence_ref/
+#   failure_reason)+ untried_channels_known[](channel/why_not_tried)。让模型填
+#   "已知未试渠道"这个字段本身倒逼探索完备性思考(R5b/R5c 绝对化结论的针对修复),
+#   不解析自然语言、不做终态硬卡(走 rework)。
+# 函数用途: 派过子代理却零产物时,告诉主代理"至少交一份结果文件,不可行也要留档"。
+def _attach_empty_delivery_recovery(report: dict[str, Any]) -> None:
+    report["empty_delivery_gate"] = {
+        "allowed": False,
+        "finding": "UNCONTRACTED_EMPTY_DELIVERY",
+        "message_zh": (
+            "本任务派过子代理，但交付区没有任何产物文件；不允许只用口头结论收尾。"
+            "请至少交付一份结果文件：任务完成则写结果/汇总文件；任务无法完成则写"
+            "结构化不可行报告（按 infeasibility_report_schema 填已试渠道与证据、"
+            "已知但未试的渠道及原因），落到任务交付目录后重新提交验收。"
+        ),
+        "infeasibility_report_schema": {
+            "tried_channels": [
+                {"channel": "渠道/方法名", "evidence_ref": "证据文件或调用记录引用", "failure_reason": "失败原因"}
+            ],
+            "untried_channels_known": [
+                {"channel": "已知但未尝试的渠道", "why_not_tried": "未尝试原因"}
+            ],
+        },
+    }
+    recovery = report.setdefault("contract_recovery", {})
+    if not isinstance(recovery, dict):
+        recovery = {}
+        report["contract_recovery"] = recovery
+    actions = recovery.get("required_actions")
+    if not isinstance(actions, list):
+        actions = []
+    actions.extend(
+        action
+        for action in (
+            "write_result_or_infeasibility_report_into_task_output",
+            "submit_for_acceptance_after_result_file_exists",
+        )
+        if action not in actions
+    )
+    recovery["required_actions"] = actions
+
+
 def _uncontracted_target_coverage_repair_message(report: dict[str, Any]) -> str:
     status = report.get("target_coverage_status")
     if not isinstance(status, dict) or status.get("should_block") is not True:
@@ -227,6 +369,15 @@ def _uncontracted_target_coverage_repair_message(report: dict[str, Any]) -> str:
     )
 
 
+# LLM: 当前 run 产物候选的唯一收集口(uncontracted closeout 与出口合同
+#   _has_final_closeout_candidate 共用)。两层:①写入记录路径(archive 里成功
+#   write/run_command 记录的路径 refs,可附带 partial-write 检查);②交付目录
+#   文件系统扫描兜底(R7b 实锤:长任务 compact 后内存 archive 丢失写入记录、
+#   run_command 生成的文件记录里本就没有路径 ref → 24 个真实 xlsx 对 closeout
+#   完全不可见,产物存在性本是文件系统客观事实)。扫描兜底只覆盖 task_output
+#   scope(系统创建的任务交付目录)——绝不反向扫描 user_requested 目标(它们
+#   提取自 prompt 文本,可能指向任意大目录,如把分析对象目录当交付物)。
+# 函数用途: 回答"这轮任务到底交付了什么文件",记录看不见时直接看交付区。
 def _current_run_task_output_artifacts(
     params: ToolLoopExecuteParams | None,
     *,
@@ -248,7 +399,61 @@ def _current_run_task_output_artifacts(
                 archive_tool_calls=archive_tool_calls,
             )
         )
-    return _unique_artifact_payloads(artifacts)
+    # 记录产物 ∪ 扫描产物的并集(R13c 实锤:write_file 只写了 1 个 md 清单,
+    # 3 个 curl 下载的 PDF 因"已有记录产物"被旧的 if/else 短路,closeout 只见
+    # 1/4 文件——交付目录里真实存在的文件就是交付事实,记录只是加速器不是
+    # 封闭白名单,与 lesson 召回的并集修复同一设计裁决)。同路径记录优先。
+    recorded = _unique_artifact_payloads(artifacts)
+    recorded_paths = {str(item.get("path") or "") for item in recorded}
+    scanned = [
+        item
+        for item in _artifacts_from_task_output_scan(targets)
+        if str(item.get("path") or "") not in recorded_paths
+    ]
+    return recorded + scanned
+
+
+# 交付区扫描的防御上限:超过即截断,防止异常交付区把 closeout 报告撑爆。
+_OUTPUT_SCAN_MAX_FILES = 200
+
+
+# LLM: 交付目录文件系统扫描(产物候选第②层,只走 task_output scope)。每个实存
+#   文件照常过 validate_artifact(R3"md 改名 .pdf"形态仍被 opener 链拦),
+#   payload 形态与记录路径产物一致,source 标 task_output_scan 以便审计区分。
+# 函数用途: 写入记录丢了没关系——交付目录里真实存在的文件就是交付事实。
+def _artifacts_from_task_output_scan(targets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    for target in targets:
+        if str(target.get("scope") or "") != "task_output":
+            continue
+        root = target.get("path")
+        if not isinstance(root, Path) or not root.is_dir():
+            continue
+        _scan_target_dir(root, target, artifacts)
+        if len(artifacts) >= _OUTPUT_SCAN_MAX_FILES:
+            break
+    return artifacts
+
+
+# 函数用途: 扫描单个交付目录,把合格实存文件追加进产物列表(带防御上限)。
+def _scan_target_dir(root: Path, target: dict[str, Any], artifacts: list[dict[str, Any]]) -> None:
+    for path in sorted(root.rglob("*")):
+        if len(artifacts) >= _OUTPUT_SCAN_MAX_FILES:
+            return
+        if not path.is_file() or not _is_task_output_file(path, target):
+            continue
+        acceptance = _artifact_acceptance_report(path, target)
+        artifacts.append(
+            {
+                "artifact_id": path.name,
+                "kind": path.suffix.lower().lstrip(".") or "file",
+                "path": str(path),
+                "ok": bool(acceptance.get("ok")),
+                "acceptance_report": acceptance,
+                "source": "task_output_scan",
+                "output_scope": str(target.get("scope") or ""),
+            }
+        )
 
 
 def _registered_artifacts(

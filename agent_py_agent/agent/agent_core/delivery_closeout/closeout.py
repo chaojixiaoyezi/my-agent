@@ -38,6 +38,7 @@ from .recovery import attach_tool_failure_recovery_actions, failed_gate_payloads
 from .task_progress_gate import task_progress_repair_message
 from .uncontracted import (
     _current_run_task_output_artifacts,
+    _spawned_children_present,
     uncontracted_task_output_closeout_response,
 )
 
@@ -116,31 +117,31 @@ def _missing_contract_closeout_response(
         return response
     if _current_run_task_output_artifacts(request.params, workspace_root=workspace_root):
         return None
+    # 出口合同(P2-1/P5-1):派过子代理的任务,uncontracted 已经跑完完整 gate 并
+    # 写出阻断报告(返回 None=阻断已注入);这里不得用 non_terminal 报告覆盖它。
+    if _spawned_children_present(request):
+        return None
     write_non_terminal_closeout_report(request, workspace_root, reason="delivery_contract_missing")
     return None
 
 
+# LLM: 合同未声明任何 required artifact 时的分流(R7a 实锤:路由注入的空壳合同
+#   曾压制 15 个真实产物——模型被"请先写出交付物"误导性打回,uncontracted 验收
+#   链与 expected_outputs 对账门全被短路)。规则:存在当前 run 真实产物(写入
+#   记录或交付区扫描,见 uncontracted 收集口)→ 回落 uncontracted 验收链,gate
+#   全跑;真零产物 → 维持 required_artifacts_missing 打回。合同有无 coverage
+#   不再影响这条分流(coverage gate 在 uncontracted 链内照常评估)。
+# 函数用途: 合同是空壳时别拿合同压人——交付区有真货就正常验收,真没货才打回。
 def _no_required_artifact_response(
     request: MainAgentDeliveryCloseoutRequest,
     contract: dict[str, Any],
     workspace_root: Path,
 ) -> ModelResponse | None:
-    if _coverage_contract_with_current_artifacts(request, contract, workspace_root):
+    if _current_run_task_output_artifacts(request.params, workspace_root=workspace_root):
         if response := uncontracted_task_output_closeout_response(request, workspace_root):
             return response
         return None
     return _no_artifact_closeout_response(request, contract, workspace_root)
-
-
-def _coverage_contract_with_current_artifacts(
-    request: MainAgentDeliveryCloseoutRequest,
-    contract: dict[str, Any],
-    workspace_root: Path,
-) -> bool:
-    return (
-        _coverage_contract_present(contract)
-        and bool(_current_run_task_output_artifacts(request.params, workspace_root=workspace_root))
-    )
 
 
 def _no_artifact_closeout_response(
@@ -171,11 +172,6 @@ def _no_artifact_closeout_response(
 
 def _all_gates_allowed(decisions: list[Any]) -> bool:
     return all(bool(getattr(decision, "allowed", False)) for decision in decisions)
-
-
-def _coverage_contract_present(contract: dict[str, Any]) -> bool:
-    coverage = contract.get("target_coverage_contract")
-    return isinstance(coverage, dict) and isinstance(coverage.get("target_items"), list)
 
 
 def _delivery_report(

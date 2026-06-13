@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+import json
+
 """SimpleAgent parent-dispatch and watch-loop orchestration."""
 
 from collections.abc import Mapping
@@ -10,6 +12,7 @@ from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.config import CapabilityConfig
 
 from ....subagents import DispatchReport, DispatchWatchReport
+from ....subagents.models import TaskStatus
 from ...failure_analysis_service import FailureIntrospector
 from ...planner_service import combine_runner_instruction
 from ...runner.dispatch import (
@@ -83,34 +86,101 @@ class _DispatchWatchMixin:
         return _watch_subagents(self, router=router, capability_config=capability_config, params=watch_params)
 
 
+# LLM: runner 失败自省的应用层。链路：runner/gate.py handle_runner_failure →
+#   _handle_failure_introspection →（规则分析 SubAgentFailureAnalyzer + 自省
+#   FailureIntrospector）→ _apply_introspection_params（调参落 attributes）+
+#   _apply_introspection_split（自动拆分，受 capability_config 的
+#   subagent_failure_auto_split_enabled / subagent_failure_split_max_depth 控制）。
+#   契约：自省是软增强，任何一步失败不得阻断 runner 主链路；但失败必须结构化留痕
+#   （task.attributes["failure_introspection_error"]），不允许只吞日志。
+#   suggested_params 的生产端在 failure_analysis_service._suggest_params_from_analysis，
+#   改动消费 key 时必须保持两端对齐。改动时同步检查
+#   tests/test_real_class_integration.py、tests/test_dispatch_mixin.py。
+# 类用途: 子代理 runner 失败后的"自省→调参→自动拆分"落地；失败原因分析逻辑在
+#   failure_analysis_service，这里只负责把建议真正写回任务、拆出子任务并落盘。
 class _DispatchFailureMixin:
+    # LLM: 唯一入口；load 失败只能日志，load 之后的失败写 failure_introspection_error
+    #   并尽力落盘。不抛异常（软增强契约）。副作用：保存任务与拆分出的子任务。
+    # 函数用途: runner 失败后做一次自省，把调参/拆分建议真正应用到任务上。
     def _handle_failure_introspection(self, run_id, task_before, runner_result):
         try:
-            from ...failure_analysis_service import SubAgentFailureAnalyzer
-
             task = self.subagents.load(run_id)
-            analyzer = SubAgentFailureAnalyzer()
-            failure_analysis = analyzer.analyze(task, runner_result)
-
-            introspector = FailureIntrospector()
-            introspection = introspector.introspect(task, runner_result, failure_analysis)
-
-            task.attributes["failure_introspection_data"] = {
-                "analysis_reason": introspection.analysis_reason,
-                "root_cause": introspection.root_cause,
-                "suggested_params": introspection.suggested_params,
-                "should_retry": introspection.should_retry,
-                "should_split": introspection.should_split,
-                "confidence": introspection.confidence,
-            }
-            if introspection.suggested_params:
-                self._apply_introspection_params(task, introspection.suggested_params)
+        except Exception as exc:
+            _log_introspection_failure(run_id, exc, stage="load")
+            return
+        try:
+            self._run_failure_introspection(task, runner_result)
             self.subagents.save(task)
         except Exception as exc:
+            _log_introspection_failure(run_id, exc, stage="apply")
+            self._record_introspection_error(task, exc)
+
+    # LLM: 自省主体：分析→自省→记录结构化结果→调参→自动拆分。拆分必须在
+    #   introspection 数据写入 attributes 之后调用（拆分结果会补记进同一条记录）。
+    # 函数用途: 跑完整自省链路并把结果写进 task.attributes（不落盘，由调用方 save）。
+    def _run_failure_introspection(self, task, runner_result) -> None:
+        from ...failure_analysis_service import SubAgentFailureAnalyzer
+
+        analyzer = SubAgentFailureAnalyzer()
+        failure_analysis = analyzer.analyze(task, runner_result)
+
+        introspector = FailureIntrospector()
+        introspection = introspector.introspect(task, runner_result, failure_analysis)
+
+        task.attributes["failure_introspection_data"] = {
+            "analysis_reason": introspection.analysis_reason,
+            "root_cause": introspection.root_cause,
+            "suggested_params": introspection.suggested_params,
+            "should_retry": introspection.should_retry,
+            "should_split": introspection.should_split,
+            "confidence": introspection.confidence,
+        }
+        if introspection.suggested_params:
+            self._apply_introspection_params(task, introspection.suggested_params)
+            self._record_introspection_lesson(task, introspection)
+        self._apply_introspection_split(task, introspection)
+
+    # LLM: P5-2 教训生产端(自省→带结构化触发条件的教训记忆)。自省真调了参数时,
+    #   把"什么场景下该这样调"写成 LESSON_TASK:trigger_conditions 全部是结构化
+    #   事实(failure_type / min_attempts),推送端 trigger_conditions_match 在同型
+    #   失败再现时把这条教训提权注入。失败静默(教训写不进不能打断自省主链)。
+    # 函数用途: 这次失败学到的调参经验,记下来让下次同样的失败自动想起。
+    def _record_introspection_lesson(self, task, introspection) -> None:
+        memory = getattr(self, "memory", None)
+        if memory is None:
+            return
+        from ....memory_push import MemoryType, MemoryWriteContext, write_memory_with_type
+
+        failure_type = str(getattr(task, "failure_type", "") or "")
+        params_text = json.dumps(introspection.suggested_params, ensure_ascii=False, sort_keys=True)
+        try:
+            write_memory_with_type(
+                memory,
+                MemoryWriteContext(
+                    content=f"failure introspection adjusted params for {failure_type or 'failure'}",
+                    mem_type=MemoryType.LESSON_TASK,
+                    trigger_type="failure",
+                    tags=["introspection", failure_type] if failure_type else ["introspection"],
+                    lesson=f"同型失败({failure_type})自省后调参 {params_text} 曾被采用;再次出现时优先考虑同类调整。",
+                    action=params_text,
+                    trigger_conditions={
+                        "trigger_type": ["failure", "timeout"],
+                        "failure_type": failure_type,
+                        "min_attempts": max(1, int(getattr(task, "runner_attempts", 0) or 0)),
+                    },
+                ),
+            )
+        except Exception:
             import logging
 
-            logging.getLogger(__name__).warning(f"Failure introspection failed: {exc}")
+            logging.getLogger(__name__).warning("introspection lesson write failed", exc_info=True)
 
+    # LLM: 消费 key 必须与生产端对齐：new_timeout_seconds（runner 超时，读取方
+    #   get_task_timeout）、max_tool_rounds（工具轮上限，读取方 _effective_max_tool_rounds；
+    #   规则自省暂不产出，保留给 LLM 自省/人工注入）。split_suggestions 不在这里消费，
+    #   走 _apply_introspection_split。已删除的 split_goal 字符串拼接分支不得回加
+    #   （拆分的唯一权威是 split_task 子任务，不允许影子拆分路径）。
+    # 函数用途: 把自省建议的数值参数写进任务 attributes（不落盘，由调用方 save）。
     def _apply_introspection_params(self, task, params):
         applied = []
         if "new_timeout_seconds" in params:
@@ -119,19 +189,87 @@ class _DispatchFailureMixin:
         if "max_tool_rounds" in params:
             task.attributes["max_tool_rounds"] = int(params["max_tool_rounds"])
             applied.append(f"max_tool_rounds={params['max_tool_rounds']}")
-        if "split_goal" in params:
-            split_goal = str(params["split_goal"])
-            if split_goal and task.goal:
-                task.goal = f"{task.goal} | {split_goal}"
-                applied.append(f"goal_adjustment={split_goal}")
         if applied:
             import logging
 
             logging.getLogger(__name__).info(f"Applied failure introspection params to {task.id}: {applied}")
         return task
 
+    # LLM: split_suggestions 的唯一消费方。决策全部基于结构化字段：should_split、
+    #   split_suggestions、task.depth、capability_config 开关；跳过原因结构化记录在
+    #   failure_introspection_data.split_skipped_reason。拆分动作复用
+    #   failure_analysis_service.split_task（原任务转 TAKEN_OVER + split_into）。
+    #   子任务先落盘、原任务后落盘（崩溃时宁可残留可重拆的失败任务，不可出现
+    #   "原任务已接管但子任务丢失"）。副作用：保存子任务。
+    # 函数用途: 自省判定该拆分时，把失败任务拆成子任务重新派工；返回拆出的子任务。
+    def _apply_introspection_split(self, task, introspection) -> list:
+        suggestions = [
+            str(item) for item in (introspection.suggested_params or {}).get("split_suggestions") or [] if str(item).strip()
+        ]
+        record = task.attributes.get("failure_introspection_data")
+        record = record if isinstance(record, dict) else {}
+        if not introspection.should_split or not suggestions:
+            return []
+        enabled, max_depth = _failure_auto_split_settings(self)
+        if not enabled:
+            record["split_applied"] = False
+            record["split_skipped_reason"] = "auto_split_disabled"
+            return []
+        if max_depth and int(getattr(task, "depth", 0) or 0) >= max_depth:
+            record["split_applied"] = False
+            record["split_skipped_reason"] = f"depth_limit:{max_depth}"
+            return []
+        from ...failure_analysis_service import split_task
+
+        subtasks = split_task(task, suggestions)
+        for subtask in subtasks:
+            subtask.status = TaskStatus.PLANNING.value
+            self.subagents.save(subtask)
+        record["split_applied"] = True
+        record["split_into"] = [subtask.id for subtask in subtasks]
+        return subtasks
+
+    # LLM: 自省 apply 段失败的结构化留痕；留痕本身再失败时只能降级日志（不抛）。
+    # 函数用途: 把自省失败原因写进任务 attributes 并尽力落盘，供后续排查。
+    def _record_introspection_error(self, task, exc) -> None:
+        try:
+            from ....runtime_errors import runtime_error_report
+
+            task.attributes["failure_introspection_error"] = runtime_error_report(
+                exc, context="dispatch.failure_introspection"
+            )
+            self.subagents.save(task)
+        except Exception as save_exc:
+            _log_introspection_failure(getattr(task, "id", ""), save_exc, stage="record_error")
+
     def _update_pending_work_state(self) -> None:
         self._has_pending_work = update_pending_work_state(self)
+
+
+# LLM: 自省失败日志的统一出口；stage 取 load/apply/record_error，方便日志检索。
+# 函数用途: 打一条带阶段标记的自省失败 warning 日志。
+def _log_introspection_failure(run_id: str, exc: BaseException, *, stage: str) -> None:
+    import logging
+
+    logging.getLogger(__name__).warning(
+        f"Failure introspection {stage} failed for {run_id}: {exc.__class__.__name__}: {exc}"
+    )
+
+
+# LLM: 失败自省自动拆分的配置读取；配置来源唯一权威是
+#   capability.runtime_config_reload.capability_config_for_agent（快照→缓存加载）。
+#   返回 (enabled, max_depth)；max_depth=0 表示不限制（项目统一约定）。
+# 函数用途: 读"自动拆分开关 + 拆分深度上限"两个 capability 配置项。
+def _failure_auto_split_settings(agent) -> tuple[bool, int]:
+    from ....capability.runtime_config_reload import capability_config_for_agent
+
+    config = capability_config_for_agent(agent)
+    enabled = bool(getattr(config, "subagent_failure_auto_split_enabled", False))
+    try:
+        max_depth = int(getattr(config, "subagent_failure_split_max_depth", 2) or 0)
+    except (TypeError, ValueError):
+        max_depth = 2
+    return enabled, max_depth
 
 
 class _DispatchCollectionBase:
