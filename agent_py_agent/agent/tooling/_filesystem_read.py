@@ -159,7 +159,7 @@ class ReadFileTool(FileSystemTool):
             name="read_file",
             category="filesystem",
             effect="read_only",
-            description="读取文本文件内容；普通文件、大工具输出路径和历史产物路径都优先用这个入口。",
+            description="读取文本文件内容；普通文件、大工具输出路径和历史产物路径都优先用这个入口。可直接读任意绝对路径，包括 workspace 外、用户在任务里指定的输入目录/文件，无需 shell 或额外授权——不要为读取输入文件提 capability_request。",
             use_cases=_READ_FILE_USE_CASES,
             avoid_when=[
                 "只想知道关键字在哪些文件出现过时，先用 search_text 更省",

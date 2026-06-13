@@ -225,7 +225,7 @@ def build_list_files_spec() -> ToolSpec:
         name="list_files",
         category="filesystem",
         effect="read_only",
-        description="列出目录中的文件和子目录，适合先摸清项目结构。",
+        description="列出目录中的文件和子目录，适合先摸清项目结构。可直接列任意绝对路径，包括 workspace 外、用户在任务里指定的输入目录，无需 shell 或额外授权——不要为查看输入目录提 capability_request。",
         use_cases=[
             "刚接手一个项目，先看看目录树大概长什么样",
             "不知道文件放在哪，先按目录层级摸排",
