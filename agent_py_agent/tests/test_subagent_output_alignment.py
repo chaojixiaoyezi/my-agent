@@ -366,3 +366,35 @@ def test_declared_output_roots_outside_fence_not_granted(tmp_path):
 
     assert not any(str(outside.parent) == root for root in boundary["allowed_write_roots"]), \
         "围栏外的声明目录不得自动进写边界"
+
+
+def test_product_write_roots_fallback_when_only_agent_dir(tmp_path: Path) -> None:
+    """batch3 C3/G4 实锤:子代理 allowed_write_roots 只含自己 agent 目录(没声明
+    产物落点)时,product_write_roots 过滤掉自己目录后为空 → tool_preflight 报
+    missing_allowed_write_roots → 子代理写不了产物 → BLOCKED → 主代理空等未收口。
+    修复:回退到任务工作区 output/work,子代理总能写产物(交付事实优先,围栏内安全)。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.subagents.services.runner_context_service import (
+        task_product_write_roots,
+    )
+
+    ws = str(tmp_path / "tasks" / "demo")
+    only_self = SimpleNamespace(
+        task_dir=f"{ws}/work/agents/sub-1",
+        allowed_write_roots=[f"{ws}/work/agents/sub-1"],
+        task_workspace_dir=ws,
+    )
+    roots = task_product_write_roots(only_self, [])
+    assert roots, "只有自己 agent 目录的子代理也要有产物写区(否则写不了→BLOCKED)"
+    assert any(r.endswith("/output") for r in roots) and any(r.endswith("/work") for r in roots)
+
+    declared = SimpleNamespace(
+        task_dir=f"{ws}/work/agents/sub-2",
+        allowed_write_roots=[f"{ws}/work/agents/sub-2", f"{ws}/output"],
+        task_workspace_dir=ws,
+    )
+    assert task_product_write_roots(declared, []) == [f"{ws}/output"], "有声明产物区时用声明的,不回退"
+
+    no_ws = SimpleNamespace(task_dir="/x/agents/s", allowed_write_roots=["/x/agents/s"], task_workspace_dir="")
+    assert task_product_write_roots(no_ws, []) == [], "无任务工作区时不崩(返回空)"

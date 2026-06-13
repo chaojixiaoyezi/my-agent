@@ -369,7 +369,25 @@ def task_product_write_roots(task: SubAgentTask, report_roots: list[str]) -> lis
             continue
         if text not in roots:
             roots.append(text)
+    if not roots:
+        roots = _task_workspace_fallback_roots(task)
     return roots
+
+
+# LLM: 子代理产物写区兜底(batch3 C3/G4 实锤:子代理 allowed_write_roots 只含
+#   自己的 agent 目录〔没声明 output_files,declared_output_write_roots 没生效〕,
+#   过滤掉自己目录后 product_write_roots 为空 → tool_preflight 报 missing_allowed_
+#   write_roots → 子代理写不了产物 → BLOCKED → 主代理空等未收口)。my-agent 的
+#   "必须先声明产物落点才有写区"是对模型的过度约束(对照组子代理直接写工作区)。
+#   兜底:product_write_roots 为空时回退到任务工作区的 output/work——子代理总能
+#   写产物(交付事实优先),且围栏在本任务工作区内(非任意位置),安全。
+# 函数用途: 子代理没有任何声明产物写区时,给它任务工作区的 output 和 work 兜底。
+def _task_workspace_fallback_roots(task: SubAgentTask) -> list[str]:
+    workspace = str(getattr(task, "task_workspace_dir", "") or "").strip()
+    if not workspace:
+        return []
+    base = Path(workspace)
+    return [str(base / "output"), str(base / "work")]
 
 
 def task_product_write_policy(task: SubAgentTask, product_roots: list[str]) -> str:

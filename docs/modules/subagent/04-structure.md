@@ -160,3 +160,6 @@ artifact refs。创建任务时给子代理的 `output_files` 是目标路径合
   `delivery_closeout/subagent_aggregation`（声明对账复用 looks_like_output_path）。
 - `agent_core/orchestration/tools/capability.py`：`resolve_capability_requests` 工具
   实现（grant/deny + 安全围栏 + wake）；注册链 core.py → orchestration_tools.py。
+- `services/runner_context_service.py`:`task_product_write_roots` 子代理产物写区
+  (过滤自己 agent 目录与 report 区);为空时 `_task_workspace_fallback_roots`
+  回退任务工作区 output/work,保证子代理总能写产物(batch3 C3/G4 修复)。

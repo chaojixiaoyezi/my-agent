@@ -481,3 +481,15 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
   具体 ref 豁免逐条扣除。SUBAGENTS_DECLARED_OUTPUTS_MISSING 拦截因此可被显式解除。
 - 豁免是结构化、可审计记录，不是静默放水、不中断任务；gate 文案与 required_actions
   指向 resolve_capability_requests(decision=accept_output_gaps)。
+
+## 子代理产物写区兜底(batch3 C3/G4 实锤,2026-06-13)
+
+- 实锤:子代理 `allowed_write_roots` 只含自己的 agent 目录(没声明 output_files、
+  declared_output_write_roots 未生效)时,`task_product_write_roots` 过滤掉自己
+  目录后为空 → `run_tool_preflight` 报 `missing_allowed_write_roots` → 子代理
+  写不了产物 → BLOCKED → 主代理空等、未收口(C3 主代理 112 轮 0 write)。
+- 修复:`runner_context_service.task_product_write_roots` 在结果为空时回退到任务
+  工作区 `task_workspace_dir/{output,work}`——子代理总有产物写区(交付事实优先,
+  减少"必须先声明才能写"的过度约束),围栏在本任务工作区内、安全。
+- 钉子:test_subagent_output_alignment.test_product_write_roots_fallback_when_only_agent_dir
+  (只自己目录→回退 / 有声明→用声明不回退 / 无工作区→空不崩)。
