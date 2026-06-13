@@ -52,3 +52,38 @@ def test_write_file_tool_attaches_caveat(tmp_path):
     )
     assert result.ok
     assert ".agent_delivery" in result.output or "output_dir" in result.output
+
+
+# --- 产出意图兜底:误写 .agent_delivery 的产物也触发 closeout(治本第6) ---
+
+
+def test_misplaced_products_detects_model_artifact(tmp_path):
+    from agent_py_agent.agent.agent_core._finalization_service import (
+        _misplaced_products_in_closeout_dir,
+    )
+
+    cd = tmp_path / ".agent_delivery"
+    cd.mkdir()
+    (cd / "closeout.json").write_text("{}", encoding="utf-8")
+    assert _misplaced_products_in_closeout_dir(tmp_path) is False  # 只有系统账本
+    (cd / "calculator.py").write_text("x", encoding="utf-8")
+    assert _misplaced_products_in_closeout_dir(tmp_path) is True  # 模型误写产物
+
+
+def test_misplaced_products_ignores_ledger_jsonl(tmp_path):
+    from agent_py_agent.agent.agent_core._finalization_service import (
+        _misplaced_products_in_closeout_dir,
+    )
+
+    cd = tmp_path / ".agent_delivery"
+    cd.mkdir()
+    (cd / "delivery_quality_gate.jsonl").write_text("{}\n", encoding="utf-8")
+    assert _misplaced_products_in_closeout_dir(tmp_path) is False
+
+
+def test_misplaced_products_no_dir(tmp_path):
+    from agent_py_agent.agent.agent_core._finalization_service import (
+        _misplaced_products_in_closeout_dir,
+    )
+
+    assert _misplaced_products_in_closeout_dir(tmp_path) is False

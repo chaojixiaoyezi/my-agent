@@ -356,6 +356,11 @@ def _tool_loop_params_from_finalize_context(ctx: FinalizeContext) -> ToolLoopExe
 def _has_final_closeout_candidate(params: ToolLoopExecuteParams, agent: object) -> bool:
     workspace_root = Path(getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", "."))
     workspace_root = workspace_root.expanduser().resolve(strict=False)
+    # 产出意图兜底(codetask 实锤):主代理把交付物误写进 .agent_delivery/(系统账本
+    # 目录),交付区因此为空、closeout 静默不触发、主代理自认完成退出。误写产物也算
+    # closeout candidate——让 closeout 触发并提示落点,而非放任空交付静默成功。
+    has_output = bool(_current_run_task_output_artifacts(params, workspace_root=workspace_root))
+    candidate = has_output or _misplaced_products_in_closeout_dir(workspace_root)
     if _delivery_contract_present(params):
         if target_coverage_blocks_delivery_auto_closeout(agent, params):
             return False
@@ -363,8 +368,27 @@ def _has_final_closeout_candidate(params: ToolLoopExecuteParams, agent: object) 
             return False
         if _has_successful_delivery_record(params):
             return True
-        return bool(_current_run_task_output_artifacts(params, workspace_root=workspace_root))
-    return bool(_current_run_task_output_artifacts(params, workspace_root=workspace_root))
+        return candidate
+    return candidate
+
+
+_CLOSEOUT_SYSTEM_SUFFIXES = (".json", ".jsonl")
+
+
+def _is_misplaced_product_file(item: Path) -> bool:
+    return item.is_file() and not item.name.endswith(_CLOSEOUT_SYSTEM_SUFFIXES)
+
+
+def _misplaced_products_in_closeout_dir(workspace_root: Path) -> bool:
+    """.agent_delivery/ 里若有非系统账本文件(系统账本都是 .json/.jsonl),即主代理
+    误写的交付物——视为 closeout candidate,触发交付验收以提示落点纠偏。"""
+    closeout_dir = workspace_root / ".agent_delivery"
+    if not closeout_dir.is_dir():
+        return False
+    try:
+        return any(_is_misplaced_product_file(item) for item in closeout_dir.rglob("*"))
+    except OSError:
+        return False
 
 
 def _failed_final_closeout_response(
