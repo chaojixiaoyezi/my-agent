@@ -7,8 +7,6 @@ import os
 
 from pathlib import Path
 
-from .capability import CapabilityRouter
-from .capability.skill_search_tool import SkillSearchTool
 from .agent_core import (
     AgentRunResult,
     CancelSubagentsTool,
@@ -74,7 +72,9 @@ from .agent_core.runner.prompts import (
 )
 from .agent_core.runtime.owner_roots import runtime_owner_root
 from .backends import get_backend
+from .capability import CapabilityRouter
 from .capability.runtime_config_reload import default_capability_config_path
+from .capability.skill_search_tool import SkillSearchTool
 from .collaboration import (
     CollaborationStore,
     InspectCollaborationTool,

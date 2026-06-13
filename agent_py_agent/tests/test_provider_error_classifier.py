@@ -65,3 +65,20 @@ def test_retry_delays_get_jitter_but_stay_config_driven() -> None:
     assert all(10.0 <= s <= 15.0 for s in samples), "抖动范围 [delay, delay*1.5]"
     assert len({round(s, 6) for s in samples}) > 1, "确实在抖,不是常数"
     assert apply_retry_jitter(0.0) == 0.0
+
+
+def test_typed_timeout_error_fast_fails_not_retried() -> None:
+    """CI 回归钉子:typed ProviderTimeoutError 必须快速上抛,不被文本分类器
+    误判 TIMEOUT/retryable 进入重试循环(my-agent 的 request_timeout 是回合
+    超时,重试每次同样超时,只拖垮续航)。文本分类器只兜非 typed 裸异常。"""
+    import pytest
+
+    from agent_py_agent.agent.agent_core.provider_transient_auto_resume import (
+        _raise_unless_provider_transient,
+    )
+    from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+
+    with pytest.raises(ProviderTimeoutError):
+        _raise_unless_provider_transient(ProviderTimeoutError("模型接口请求超时: request_timeout=17s"))
+    # 裸异常(无 typed 形态)仍走文本分类器:rate_limit 放行重试
+    _raise_unless_provider_transient(RuntimeError("429 rate limit"))

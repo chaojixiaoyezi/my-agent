@@ -4,14 +4,13 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
-
-from ....concurrency.interrupt import register_interruptible
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from agent_py_agent.agent.capability import CapabilityRouter
 
+from ....concurrency.interrupt import register_interruptible
 from ....runtime_errors import runtime_error_report
 from ....subagents.models import FailureType
 from ...agent_tree.status import agent_tree_status_payload

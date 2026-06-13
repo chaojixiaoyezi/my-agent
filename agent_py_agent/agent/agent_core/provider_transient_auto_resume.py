@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeVar
 
-from ..backends import is_provider_transient_error
+from ..backends import is_provider_recoverable_error, is_provider_transient_error
 from ..concurrency.retry import apply_retry_jitter
 from ..settings.runtime_guard_config import RuntimeGuardPolicy, runtime_guard_data
 
@@ -73,6 +73,13 @@ def run_with_provider_transient_auto_resume(
 def _raise_unless_provider_transient(exc: Exception) -> None:
     if is_provider_transient_error(exc):
         return
+    # typed provider 错误语义明确,只信 is_provider_transient_error,不再用文本
+    # 分类器二次放大重试面(CI 回归实锤:ProviderTimeoutError 的 str 含 "timeout",
+    # 会被分类器误判 TIMEOUT/retryable 进入重试循环——但 my-agent 的 request_timeout
+    # 是整个模型回合的超时,重试每次都会同样超时,只会拖垮续航;原设计就是快速失败)。
+    # 文本分类器只兜"没有 typed 形态的裸异常"(如裸 RuntimeError("429"))。
+    if is_provider_recoverable_error(exc):
+        raise exc
     from ..contracts.provider_error_classifier import classify_provider_error
 
     if classify_provider_error(exc).retryable:

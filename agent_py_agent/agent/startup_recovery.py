@@ -193,8 +193,12 @@ def _process_cmdline(pid: int) -> str:
     import subprocess
 
     try:
+        # -ww 禁用按列宽截断:无终端环境(CI / daemon / systemd 服务,COLUMNS 未设)
+        # 下 ps 默认把 command 列截到 ~80 字符,会把孤儿身份特征
+        # (subagents-dispatch / agent_py_agent)截掉 → 真实孤儿漏报。my-agent 正以
+        # 后台 daemon 形态运行(无终端),这是生产可观测性缺陷,非仅测试问题。
         result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
             capture_output=True,
             text=True,
             timeout=5,

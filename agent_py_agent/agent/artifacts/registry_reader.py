@@ -6,10 +6,9 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-
-from ..common.json_io import read_text_lines_cached
 from typing import Any
 
+from ..common.json_io import read_text_lines_cached
 from ..runtime_errors import runtime_error_report
 
 

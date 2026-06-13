@@ -343,11 +343,16 @@ class TestFormatLocalTime:
 
     def test_format_local_time_valid(self):
         """测试有效时间戳格式化。"""
+        import re
+
         from agent_py_agent.cli.common import format_local_time
 
         result = format_local_time(1704067200.0)
         assert result != "-"
-        assert "2024" in result
+        # 断言日期格式而非具体年份:format_local_time 用运行时本地时区,时间戳
+        # 1704067200(2024-01-01 00:00 UTC)在 UTC 以西时区会落到 2023-12-31,
+        # 硬断言 "2024" 会随运行时区漂移误失败(CI=UTC 过、本地非 UTC 挂)。
+        assert re.match(r"\d{4}-\d{2}-\d{2}", result), f"应格式化为日期: {result}"
 
     def test_format_local_time_zero(self):
         """测试零时间戳。"""

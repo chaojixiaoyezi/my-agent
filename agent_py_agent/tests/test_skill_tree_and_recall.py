@@ -86,7 +86,8 @@ def test_category_index_decoupled_from_skill_count(tmp_path: Path) -> None:
         _make_skill(tmp_path, "research", f"s{i:02d}", f"技能{i}")
     for i in range(30):
         _make_skill(tmp_path, "devops", f"d{i:02d}", f"运维{i}")
-    reg = SkillRegistry([tmp_path]); reg.scan()
+    reg = SkillRegistry([tmp_path])
+    reg.scan()
     router = CapabilityRouter(skill_registry=reg)
     index = router.render_category_index()
     assert index.count("\n") <= 4, "60 个 skill 的索引仍只有类目行数(与总数解耦)"
@@ -97,7 +98,8 @@ def test_two_hundred_cards_scan_and_search_fast(tmp_path: Path) -> None:
     for i in range(200):
         _make_skill(tmp_path, f"cat{i % 8}", f"skill-{i:03d}", f"测试技能 数据处理 第{i}号")
     start = time.monotonic()
-    reg = SkillRegistry([tmp_path]); reg.scan()
+    reg = SkillRegistry([tmp_path])
+    reg.scan()
     router = CapabilityRouter(skill_registry=reg)
     hits = router.search("数据处理", kinds={"skill"})
     elapsed = time.monotonic() - start

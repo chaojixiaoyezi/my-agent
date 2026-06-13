@@ -7,12 +7,12 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ....concurrency.interrupt import interrupt_by_name
 from ....runtime_errors import runtime_error_report
 from ....subagents.models import FailureType, normalize_task_status, task_status_in
 from ....subagents.process_control import terminate_pid_with_escalation
 from ....tooling.models import BaseTool, ToolExecutionResult
 from ...agent_tree.status import agent_tree_status_payload
-from ....concurrency.interrupt import interrupt_by_name
 from ..tool_specs import build_cancel_subagents_spec
 
 if TYPE_CHECKING:
