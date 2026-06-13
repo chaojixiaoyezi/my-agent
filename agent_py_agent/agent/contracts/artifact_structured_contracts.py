@@ -88,10 +88,22 @@ def markdown_section_findings(path: Path, text: str, contract: dict[str, object]
     ]
 
 
+def _has_body_beyond_headings(text: str) -> bool:
+    """是否含标题之外的正文行。纯标题/大纲/搬运的单标题短笔记(如 "# TODO: 修登录bug"
+    整文件就一行,标题即完整内容)不算"末尾空标题"——organize 整理任务实锤:模型把
+    原始单标题行文件分类搬运,内容未改,却被 MARKDOWN_TRAILING_EMPTY_HEADING hard 拦,
+    误伤完整交付。只有"有正文段落且末尾停在空标题"才是真问题。"""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and not re.match(r"^\s{0,3}#{1,6}\s", line):
+            return True
+    return False
+
+
 def markdown_integrity_findings(path: Path, text: str) -> list[ArtifactFinding]:
     findings: list[ArtifactFinding] = []
     tail = _last_significant_line(text)
-    if tail and re.match(r"^\s{0,3}#{1,6}\s+\S.*$", tail):
+    if tail and re.match(r"^\s{0,3}#{1,6}\s+\S.*$", tail) and _has_body_beyond_headings(text):
         findings.append(
             ArtifactFinding(
                 code="MARKDOWN_TRAILING_EMPTY_HEADING",
