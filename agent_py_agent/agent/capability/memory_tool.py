@@ -70,11 +70,11 @@ class RememberTool(BaseTool):
         tags = _normalize_tags(params.get("tags"))
         try:
             memory.add("user", content, kind="preference", tags=tags)
-        except (OSError, ValueError, TypeError) as exc:
+        except Exception as exc:  # noqa: BLE001 — 任何写入异常(含首次索引时序)都要返回明确可重试码,不能逃逸成 UNKNOWN_ERROR
             return ToolExecutionResult(
                 "remember",
                 False,
-                json.dumps({"error": f"写入失败: {exc}"}, ensure_ascii=False),
+                json.dumps({"error": f"写入失败: {exc}", "hint": "长期记忆写入异常,可原样重试一次"}, ensure_ascii=False),
                 error_code="TOOL_EXECUTION_FAILED",
             )
         payload = {"ok": True, "remembered": content, "kind": "preference", "tags": tags,
