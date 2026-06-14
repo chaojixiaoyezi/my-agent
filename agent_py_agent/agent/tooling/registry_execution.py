@@ -189,9 +189,23 @@ def _next_protocol_marker_pos(text: str, marker: str, cursor: int) -> int:
         pos = text.find(marker, cursor)
         if pos == -1:
             return -1
-        if _marker_starts_protocol_line(text, pos):
+        body_start = pos + len(marker)
+        if _marker_starts_protocol_line(text, pos) or _inline_tool_start_marker_valid(text, body_start):
             return pos
-        cursor = pos + len(marker)
+        cursor = body_start
+
+
+def _inline_tool_start_marker_valid(text: str, body_start: int) -> bool:
+    # 对称于 _inline_tool_end_marker_valid:开始标记 [TOOL_CALL] 即使不在行首(前面有正文),
+    # 只要其后内容像工具调用(strip 后以 { 开头的 JSON)就识别——否则模型把工具调用接在
+    # 正文同一行(如 "...印证。[TOOL_CALL]\n{json}\n[/TOOL_CALL]")时整块被静默丢弃,
+    # 工具不执行也不报错(minimax-M3 实测暴露:tool_rounds=0、无 error_code、run 空转结束)。
+    # 用"以 { 开头"而非"能解析出合法 payload"做判据:这样即使内容坏了(如一个块塞多个
+    # JSON、结束标记残缺),也会被识别并走正常块解析报 TOOL_CALL_JSON_INVALID 引导模型修正,
+    # 而不是静默丢弃整块。正文偶然提到 [TOOL_CALL] 后面不是 { 不会误触发。
+    end = text.find("[/TOOL_CALL]", body_start)
+    raw = text[body_start : end if end != -1 else len(text)].strip().strip("`")
+    return raw.startswith("{")
 
 
 def _next_protocol_end_marker_pos(text: str, marker: str, cursor: int) -> int:

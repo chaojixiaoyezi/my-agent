@@ -647,6 +647,96 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.WRITE_NON_EMPTY_MARKDOWN_SOURCE.value,
         recovery_hint="Markdown 源文档为空；补齐正文后再用通用代码生成目标文档。",
     ),
+    # —— 工具调用形/格式错误（模型自己可改正：重出一个完整合法的工具调用，修后重试）——
+    # 这些码此前未注册 → error_contract fallback 成 UNKNOWN_ERROR(retryable=False/report_blocker)，
+    # 反而误导模型“放弃/报阻塞”而非“修正格式重试”——是 草草完成/幻觉归因 的底座诱因之一。
+    "TOOL_CALL_MARKER_MALFORMED": ErrorContract(
+        code="TOOL_CALL_MARKER_MALFORMED",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="工具调用标记损坏（标签/分隔符不完整或未闭合）；重新输出一个完整、闭合的工具调用，JSON 之外不要混入正文。",
+    ),
+    "TOOL_CALL_JSON_INVALID": ErrorContract(
+        code="TOOL_CALL_JSON_INVALID",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="工具调用 JSON 无法解析（语法错误或被截断）；重新输出语法完整的 JSON，确保引号、括号、转义都正确。",
+    ),
+    "TOOL_CALL_JSON_NOT_OBJECT": ErrorContract(
+        code="TOOL_CALL_JSON_NOT_OBJECT",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="工具调用 JSON 顶层不是对象；用 {\"tool\":...,参数...} 形式的 JSON 对象重新表达，不要用数组或裸值。",
+    ),
+    "TOOL_CALL_PAYLOAD_INVALID": ErrorContract(
+        code="TOOL_CALL_PAYLOAD_INVALID",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="工具调用 payload 结构不合法（缺 tool 名或字段类型错）；按工具 schema 重新构造一个完整调用。",
+    ),
+    "WRITE_FILE_RAW_INVALID": ErrorContract(
+        code="WRITE_FILE_RAW_INVALID",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="WRITE_FILE_RAW 原文块格式无效；重新输出带完整 header 与结束标记的 raw block，或改用 write_file 小块续写。",
+    ),
+    "TOOL_EXECUTION_FAILED": ErrorContract(
+        code="TOOL_EXECUTION_FAILED",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="工具执行时发生可恢复异常；可原样重试一次，连续失败则换工具或换参数。",
+    ),
+    # —— 模型/上下文 ——
+    "MODEL_CONTEXT_WINDOW_EXCEEDED": ErrorContract(
+        code="MODEL_CONTEXT_WINDOW_EXCEEDED",
+        category="model",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="上下文超出模型窗口；先压缩/归档历史或拆小任务范围，再继续，不要原样重发整段历史。",
+    ),
+    "MODEL_EMPTY_RESPONSE": ErrorContract(
+        code="MODEL_EMPTY_RESPONSE",
+        category="model",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="模型返回空响应；可重试一次，连续为空时换后端或缩小单轮输出规模。",
+    ),
+    # —— 产物 ——
+    "ARTIFACT_TOO_LARGE": ErrorContract(
+        code="ARTIFACT_TOO_LARGE",
+        category="artifact",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="目标内容超出大小上限；缩小抓取/写入范围、分块处理，或只保留必要部分。",
+    ),
+    "ARTIFACT_VALIDATION_FAILED": ErrorContract(
+        code="ARTIFACT_VALIDATION_FAILED",
+        category="artifact",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_ARTIFACT_AGAINST_FINDINGS.value,
+        recovery_hint="产物未通过校验；按校验 findings 修正内容或格式后重写产物。",
+    ),
+    "ARTIFACT_BACKUP_FAILED": ErrorContract(
+        code="ARTIFACT_BACKUP_FAILED",
+        category="artifact",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="写入前备份原文件失败；可重试，持续失败时检查磁盘空间或目标路径权限。",
+    ),
+    # —— 命令策略（不可原样重试：换安全命令或专用工具）——
+    "COMMAND_POLICY_BLOCKED": ErrorContract(
+        code="COMMAND_POLICY_BLOCKED",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="该 shell 命令被安全策略拦截；不要原样重试，换用专用工具或不触发策略的安全命令。",
+    ),
     "UNKNOWN_ERROR": ErrorContract(
         code="UNKNOWN_ERROR",
         category="unknown",

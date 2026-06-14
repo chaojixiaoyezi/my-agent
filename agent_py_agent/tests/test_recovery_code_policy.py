@@ -168,3 +168,31 @@ def test_raw_collaboration_status_metadata_is_write_only():
         elif pattern.search(text):
             offenders.append(str(p.relative_to(REPO_ROOT)) + " (reads raw_*)")
     assert offenders == [], f"raw 状态审计字段被消费: {offenders}"
+
+
+def test_all_used_error_codes_are_registered():
+    """所有 error_code="XXX" 字面量必须在 ERROR_CONTRACTS 注册。
+
+    未注册的码经 error_contract() 会 fallback 成 UNKNOWN_ERROR
+    (category=unknown / retryable=False / recommended_action=report_blocker)，
+    把"模型自己可改正的工具调用格式错误"误导成"放弃并报阻塞"，而不是"修正格式重试"——
+    这是 草草完成 / 幻觉归因 的底座诱因之一(deepseek-v4-pro 实测在并行工具调用里暴露:
+    TOOL_CALL_MARKER_MALFORMED 此前未注册 → 显示 UNKNOWN_ERROR)。
+
+    这条钉子守住"用了就必须注册"，杜绝再次回归。
+    """
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    pattern = re.compile(r"""error_code\s*=\s*["']([A-Z_]+)["']""")
+    used: set[str] = set()
+    for path in _production_files():
+        for match in pattern.finditer(path.read_text(encoding="utf-8")):
+            used.add(match.group(1))
+    # error_contract(code).code == code 当且仅当精确命中注册表(未命中则返回 UNKNOWN_ERROR)
+    missing = sorted(
+        code for code in used if code != "UNKNOWN_ERROR" and error_contract(code).code != code
+    )
+    assert not missing, (
+        "这些 error_code 在生产代码中使用但未在 ERROR_CONTRACTS 注册，"
+        f"会 fallback 成 UNKNOWN_ERROR(误导模型放弃而非修正重试): {missing}"
+    )
