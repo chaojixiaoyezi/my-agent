@@ -47,7 +47,7 @@ SUBAGENT_RESULT_TEMPLATE = (
     '  "patches": [\n'
     '    {"path": "改动文件", "status": "applied|planned|blocked", "summary": "改了什么或准备改什么"}\n'
     "  ],\n"
-    '  "lessons": ["可沉淀经验，适合未来变成 skill 或规则"],\n'
+    '  "lessons": ["<把你这次任务真正踩到的坑/学到的可复用经验写成一句话；没有就给空数组 []，不要照抄本提示>"],\n'
     '  "next_actions": ["建议父代理下一步动作"],\n'
     '  "blocked_reason": "",\n'
     '  "failure_type": ""\n'
