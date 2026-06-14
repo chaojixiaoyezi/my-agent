@@ -143,8 +143,13 @@ _UNFINISHED_MARKERS = ("待完成后填写",)
 
 
 def _unfinished_placeholder_marker(text: str) -> bool:
-    """产物是"未完成占位"判定:含明确占位短语,且去掉标题/元数据/占位行后实质正文极少。
-    双条件避免误判正常长报告里偶尔出现的"待补充"一词。"""
+    """产物是"系统兜底占位"判定,hard 拦两类零实质产出的死交付:
+    ① 产物文件以"# Subagent Result"开头——子代理声明 output_ref 却没真写,系统把
+       结果元数据块 materialize 成了产物本身(真领域产物绝不会以结果元数据块开头);
+    ② 含 Final Report 兜底专用短语"待完成后填写"且去标题/元数据后实质正文极少。
+    刻意不含 __FILL__/TODO 等通用占位(归 document_quality 软门 warning)。"""
+    if text.lstrip()[:64].startswith("# Subagent Result"):
+        return True
     if not any(marker in text for marker in _UNFINISHED_MARKERS):
         return False
     substantive = 0

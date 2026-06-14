@@ -66,6 +66,20 @@ def test_short_real_report_not_flagged_as_placeholder():
     assert "MARKDOWN_UNFINISHED_PLACEHOLDER" not in _codes(markdown_integrity_findings(Path("r.md"), short))
 
 
+def test_subagent_result_stub_flagged():
+    # r19 多子代理实锤:子代理声明 output_ref 却没真写,系统把"# Subagent Result"结果
+    # 元数据块 materialize 成产物本身、当 ok=true 交付。真领域报告绝不会这样开头 → hard 拦。
+    stub = (
+        "# Subagent Result\n\n- run_id: subagent-x\n- status: DONE\n"
+        "- declared_output_ref: output/sqlite-research.md\n\n## Summary\n\n"
+        "runner 未输出可解析结果块,据 artifact_registry 已登记的 1 个 ready 产物收尾:output.json\n"
+    )
+    assert "MARKDOWN_UNFINISHED_PLACEHOLDER" in _codes(markdown_integrity_findings(Path("sqlite.md"), stub))
+    # 真领域报告(以正常标题开头,即使提到 "result" 一词)不误判
+    real = "# SQLite 研究报告\n\nSQLite 是嵌入式数据库,单文件、零配置,适合本地存储。" * 2 + "\n"
+    assert "MARKDOWN_UNFINISHED_PLACEHOLDER" not in _codes(markdown_integrity_findings(Path("real.md"), real))
+
+
 def test_generic_placeholder_words_not_hard_flagged():
     # 通用占位词(__FILL__/待补充/TODO)归 document_quality 软门(warning)管,不触发本 hard 门——
     # 即使内容很短(handoff 实锤:# 摘要/很好。/# 结果/__FILL__ 该是 warning 不是 hard,不阻断交付)。
