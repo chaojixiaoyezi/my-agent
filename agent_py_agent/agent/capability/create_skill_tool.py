@@ -1,10 +1,12 @@
-# LLM: create_skill 模型工具。
-#   my-agent 原有 lessons→memory 是"经验复用",这里补"方法→skill 沉淀":agent 做对
-#   一件有方法论价值的事,主动把可复用方法写成 SKILL.md 存进 owner skill 库,未来任务
-#   用 skill_search 检索复用。契约:①写到 owner skills(隔离 home,不污染项目 builtin);
-#   ②写后立即 register 进 router(本 run 即可召回);③owner skills 也进 router 扫描
-#   (跨 run 持久,见 core.py wire)。改动时同步 tests/test_create_skill_tool.py。
-# 模块用途: 让 agent 把"这次真正验证有效的方法"沉淀成技能,越用越会。
+# LLM: create_skill 模型工具——agent 把"这次验证有效的成体系方法"提议成一个 skill。
+#   严格遵守 AGENTS.md 自学习约束(项目刻意比 长期助手 更保守):
+#   ① 只在 enable_self_learning=true 时可用(默认关闭=零打扰零越权);
+#   ② agent 绝不直接写正式 skill 库,只产"skill 草稿"落 data/skill_drafts/,
+#      与 lesson 草稿同一"产草稿→用户审核"通道(learning_drafts 的兄弟);
+#   ③ 正式 owner skills 库只由用户确认后写入,启动由 register_owner_skills 加载召回。
+#   对标 长期助手 自动创建 skill 的能力,但落点是草稿而非正式库——这是 my-agent 的
+#   保守确认机制。改动时同步 tests/test_create_skill_tool.py。
+# 模块用途: 让 agent 把可复用方法提议成待确认的 skill 草稿,而不是擅自改正式技能库。
 from __future__ import annotations
 
 import json
@@ -24,15 +26,20 @@ def build_create_skill_spec() -> ToolSpec:
         category="capability",
         effect="write",
         description=(
-            "把你这次任务真正验证有效、有复用价值的方法/工具链沉淀成一个 skill(SKILL.md),"
-            "供未来任务用 skill_search 检索复用。这是自学习:做对了一件有方法论价值的事就把方法存下来。"
+            "把你这次任务真正验证有效、成体系且有复用价值的方法/工具链,提议沉淀成一个 skill 草稿。"
+            "这是自学习:做对了一件有方法论价值的事就把方法记下来供未来检索。"
+            "注意:产出的是【待用户确认的草稿】,不会立刻生效(本项目不允许 agent 直接改正式技能库);"
+            "且仅在 enable_self_learning 开启时可用。"
         ),
         use_cases=[
-            "完成一个有复用价值的方法(某类分析/某工具链的正确用法),想让未来任务检索到",
-            "踩坑后总结出可复用的正确做法,沉淀成技能",
+            "完成一个有复用价值的成体系方法(某类分析/某工具链的正确用法),想提议存成 skill",
+            "踩坑后总结出可复用的正确做法,提议沉淀成技能草稿等用户确认",
         ],
-        avoid_when=["一次性琐碎、无复用价值的操作不必创建 skill"],
-        keywords=["创建技能", "沉淀方法", "自学习", "create skill", "学到的方法"],
+        avoid_when=[
+            "一次性琐碎、无复用价值的操作不必创建 skill",
+            "只是一句话经验(那是 lessons 的范畴,不必动用 skill 草稿)",
+        ],
+        keywords=["创建技能", "沉淀方法", "自学习", "create skill", "学到的方法", "skill 草稿"],
         parameters={
             "name": "必填。skill 短名(kebab-case,如 arxiv-paper-fetch)。",
             "category": "必填。类目(如 research/documents/general)。",
@@ -49,12 +56,25 @@ def build_create_skill_spec() -> ToolSpec:
 
 
 class CreateSkillTool(BaseTool):
-    # 类用途: 把"沉淀方法成 skill"暴露成模型可调用工具,写 owner skill 库并即时注册到 router。
+    # 类用途: 把"提议沉淀方法成 skill"暴露成模型工具;受 enable_self_learning gate,只写草稿区。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.spec = build_create_skill_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+        if not _self_learning_enabled(self.agent):
+            return ToolExecutionResult(
+                "create_skill",
+                False,
+                json.dumps(
+                    {
+                        "error": "自学习未启用",
+                        "hint": "create_skill 需 enable_self_learning=true;默认关闭以遵守自学习约束(agent 不直接改正式 skill)。",
+                    },
+                    ensure_ascii=False,
+                ),
+                error_code="TOOL_UNAVAILABLE",
+            )
         name = _slug(params.get("name"))
         category = _slug(params.get("category")) or "general"
         description = str(params.get("description") or "").strip()
@@ -68,21 +88,34 @@ class CreateSkillTool(BaseTool):
                 json.dumps({"error": f"缺少必填: {', '.join(missing)}", "hint": "name/description/body 必填"}, ensure_ascii=False),
                 error_code="TOOL_INVALID_ARGUMENTS",
             )
-        skills_root = runtime_owner_root(self.agent) / "skills"
-        target = skills_root / category / name / "SKILL.md"
-        target.parent.mkdir(parents=True, exist_ok=True)
         fields = {"name": name, "description": description, "when_to_use": when_to_use, "category": category}
-        target.write_text(_render_skill_md(fields, body), encoding="utf-8")
-        registered = _register_to_router(self.agent, target, skills_root)
+        draft_path = _skill_drafts_dir(self.agent) / category / name / "SKILL.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text(_render_skill_md(fields, body), encoding="utf-8")
+        official_target = runtime_owner_root(self.agent) / "skills" / category / name / "SKILL.md"
         payload = {
             "ok": True,
             "skill": name,
             "category": category,
-            "path": str(target),
-            "registered": registered,
-            "hint": "已沉淀为 skill;未来任务可用 skill_search 检索复用。",
+            "status": "draft",
+            "draft_path": str(draft_path),
+            "hint": (
+                f"已存为 skill 草稿(尚未生效)。请用户审核;确认无误后把草稿移到正式库 {official_target} "
+                "即可被 skill_search 检索复用。agent 不直接写正式 skill(AGENTS.md 自学习约束)。"
+            ),
         }
         return ToolExecutionResult("create_skill", True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _self_learning_enabled(agent: object) -> bool:
+    return bool(getattr(getattr(agent, "config", None), "enable_self_learning", False))
+
+
+def _skill_drafts_dir(agent: object):
+    from pathlib import Path
+
+    root = getattr(agent, "root", None) or "."
+    return Path(root) / "data" / "skill_drafts"
 
 
 def _slug(value: object) -> str:
@@ -94,23 +127,10 @@ def _render_skill_md(fields: dict[str, str], body: str) -> str:
     return "\n".join(front) + body.rstrip() + "\n"
 
 
-def _register_to_router(agent: object, target: object, source_root: object) -> bool:
-    try:
-        from .router import CapabilityRouter, from_skill_card
-        from .skills import parse_skill_file
-
-        router = getattr(agent, "capability_router", None)
-        if not isinstance(router, CapabilityRouter):
-            return False
-        router.register(from_skill_card(parse_skill_file(target, source=str(source_root))))
-        return True
-    except (OSError, ValueError, TypeError, KeyError):
-        return False
-
-
 def register_owner_skills(router: object, agent: object) -> int:
-    """启动时把 owner skills 目录(含 create_skill 历次沉淀的 SKILL.md)扫进 router,实现跨 run 持久。
-    builtin registry 有模块级缓存、不能污染(多 agent 共享),故此处 per-agent 补扫 owner 库。"""
+    """启动时把【用户已确认的】正式 owner skills 库扫进 router,实现跨 run 召回。
+    builtin registry 有模块级缓存、不能污染(多 agent 共享),故此处 per-agent 补扫 owner 库。
+    注意:owner skills 库只由用户确认后写入;create_skill 只产草稿、绝不直接写这里。"""
     from .router import CapabilityRouter, from_skill_card
     from .skills import SkillRegistry
 

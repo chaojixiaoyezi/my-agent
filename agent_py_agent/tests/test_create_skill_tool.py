@@ -1,5 +1,7 @@
-"""create_skill 自学习工具钉子(对标 长期助手 自动创建 skill):agent 把可复用方法
-写成 SKILL.md 进 owner skill 库,写后立即注册到 router、本 run 即可 skill_search 召回。"""
+"""create_skill 自学习工具钉子。严守 AGENTS.md 自学习约束:
+① 仅 enable_self_learning=true 可用(默认关闭就禁用);
+② agent 绝不直接写正式 skill 库,只产 data/skill_drafts/ 下的草稿、不 register;
+③ 正式 owner skills 库只由用户确认后写入,启动由 register_owner_skills 扫描召回。"""
 
 from __future__ import annotations
 
@@ -12,6 +14,14 @@ from agent_py_agent.agent.capability.create_skill_tool import (
     _slug,
 )
 from agent_py_agent.agent.capability.router import CapabilityRouter
+
+
+def _agent(tmp_path, *, enabled=True, router=None):
+    return SimpleNamespace(
+        config=SimpleNamespace(enable_self_learning=enabled),
+        root=tmp_path,
+        capability_router=router or CapabilityRouter(),
+    )
 
 
 def test_slug_normalizes():
@@ -34,18 +44,31 @@ def test_render_skill_md_frontmatter():
     assert "# 方法" in md
 
 
+def test_disabled_when_self_learning_off(tmp_path, monkeypatch):
+    """enable_self_learning 默认关闭时 create_skill 直接禁用,不写任何东西(零越权)。"""
+    monkeypatch.setattr(mod, "runtime_owner_root", lambda agent: tmp_path / "owner")
+    tool = CreateSkillTool(_agent(tmp_path, enabled=False))
+    result = tool.execute(
+        {"name": "x", "category": "research", "description": "d", "when_to_use": "w", "body": "# b"}
+    )
+    assert result.ok is False
+    assert result.error_code == "TOOL_UNAVAILABLE"
+    assert not (tmp_path / "data" / "skill_drafts").exists()
+
+
 def test_missing_required_returns_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(mod, "runtime_owner_root", lambda agent: tmp_path)
-    tool = CreateSkillTool(SimpleNamespace(capability_router=CapabilityRouter()))
+    monkeypatch.setattr(mod, "runtime_owner_root", lambda agent: tmp_path / "owner")
+    tool = CreateSkillTool(_agent(tmp_path))
     result = tool.execute({"name": "", "description": "", "body": ""})
     assert result.ok is False
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
 
 
-def test_create_skill_writes_and_registers(tmp_path, monkeypatch):
-    monkeypatch.setattr(mod, "runtime_owner_root", lambda agent: tmp_path)
+def test_create_skill_writes_draft_not_official(tmp_path, monkeypatch):
+    """enable 后:写到 data/skill_drafts/ 草稿区,绝不写正式 owner skills 库,也不 register 到 router。"""
+    monkeypatch.setattr(mod, "runtime_owner_root", lambda agent: tmp_path / "owner")
     router = CapabilityRouter()
-    tool = CreateSkillTool(SimpleNamespace(capability_router=router))
+    tool = CreateSkillTool(_agent(tmp_path, router=router))
     result = tool.execute(
         {
             "name": "arxiv-fetch",
@@ -56,39 +79,36 @@ def test_create_skill_writes_and_registers(tmp_path, monkeypatch):
         }
     )
     assert result.ok
-    # SKILL.md 落到 owner skills 目录
-    target = tmp_path / "skills" / "research" / "arxiv-fetch" / "SKILL.md"
-    assert target.is_file()
-    assert "arXiv" in target.read_text(encoding="utf-8")
-    # 写后立即注册到 router,本 run 即可召回
-    hits = router.search("arxiv 检索论文", limit=5, kinds={"skill"})
-    assert any(h.card.name == "arxiv-fetch" for h in hits)
+    # 草稿落 skill_drafts,不落正式库
+    draft = tmp_path / "data" / "skill_drafts" / "research" / "arxiv-fetch" / "SKILL.md"
+    assert draft.is_file()
+    assert "arXiv" in draft.read_text(encoding="utf-8")
+    official = tmp_path / "owner" / "skills" / "research" / "arxiv-fetch" / "SKILL.md"
+    assert not official.exists()
+    # 不 register:本 run 的 router 检索不到(未经用户确认绝不生效)
+    assert not any(h.card.name == "arxiv-fetch" for h in router.search("arxiv 检索论文", limit=5, kinds={"skill"}))
 
 
-def test_register_owner_skills_cross_run(tmp_path, monkeypatch):
-    """跨 run 持久:run1 create_skill 落 owner 库,run2 全新 router 经
-    register_owner_skills 补扫 owner 库即可召回(否则下次启动就'忘了',自学习无意义)。"""
-    monkeypatch.setattr(mod, "runtime_owner_root", lambda agent: tmp_path)
-    # run1:沉淀一个 skill
-    CreateSkillTool(SimpleNamespace(capability_router=CapabilityRouter())).execute(
-        {
-            "name": "log-triage",
-            "category": "ops",
-            "description": "大日志三段定位法",
-            "when_to_use": "排查大日志找错误时",
-            "body": "# 步骤\n1. grep ERROR\n2. 看前后文",
-        }
+def test_register_owner_skills_cross_run(tmp_path):
+    """正式 owner skills 库(用户确认后写入的)在启动时被 register_owner_skills 扫进 router 召回。"""
+    owner = tmp_path / "owner"
+    skill = owner / "skills" / "ops" / "log-triage" / "SKILL.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    skill.write_text(
+        _render_skill_md(
+            {"name": "log-triage", "description": "大日志三段定位法", "when_to_use": "排查大日志找错误时", "category": "ops"},
+            "# 步骤\n1. grep ERROR\n2. 看前后文",
+        ),
+        encoding="utf-8",
     )
-    # run2:全新 router(默认只扫 builtin),启动补扫 owner 库
     fresh = CapabilityRouter()
     assert not any(h.card.name == "log-triage" for h in fresh.search("日志 定位", limit=5, kinds={"skill"}))
-    count = mod.register_owner_skills(fresh, SimpleNamespace())
+    count = mod.register_owner_skills(fresh, SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=str(owner))))
     assert count >= 1
-    hits = fresh.search("大日志 排查错误", limit=5, kinds={"skill"})
-    assert any(h.card.name == "log-triage" for h in hits)
+    assert any(h.card.name == "log-triage" for h in fresh.search("大日志 排查错误", limit=5, kinds={"skill"}))
 
 
-def test_register_owner_skills_no_dir_safe(tmp_path, monkeypatch):
-    """owner skills 目录不存在(全新用户)时静默返回 0,不崩。"""
-    monkeypatch.setattr(mod, "runtime_owner_root", lambda agent: tmp_path / "nope")
-    assert mod.register_owner_skills(CapabilityRouter(), SimpleNamespace()) == 0
+def test_register_owner_skills_no_dir_safe(tmp_path):
+    """owner skills 库不存在(全新用户)时静默返回 0,不崩。"""
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=str(tmp_path / "nope")))
+    assert mod.register_owner_skills(CapabilityRouter(), agent) == 0

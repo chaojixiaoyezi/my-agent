@@ -281,8 +281,10 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(TaskProgressTool(agent))
     # skill 树第一期:skill_search 检索台(千级冷路,prompt 零索引成本)。
     agent.tools.register(SkillSearchTool(agent))
-    # 自学习 skill(对标 长期助手):agent 把验证有效的可复用方法主动沉淀成 owner skill。
-    agent.tools.register(CreateSkillTool(agent))
+    # 自学习 skill 草稿(对标 长期助手,但更保守):仅 enable_self_learning 时暴露——默认关闭=零打扰,
+    # 且 agent 只产 data/skill_drafts 草稿、绝不直接改正式 skill 库(AGENTS.md 自学习约束)。
+    if bool(getattr(getattr(agent, "config", None), "enable_self_learning", False)):
+        agent.tools.register(CreateSkillTool(agent))
     agent.tools.register(RaiseCollaborationTool(agent))
     agent.tools.register(InspectCollaborationTool(agent))
     agent.tools.register(SubmitCollaborationResultTool(agent))
