@@ -122,7 +122,42 @@ def markdown_integrity_findings(path: Path, text: str) -> list[ArtifactFinding]:
                 location=str(path),
             )
         )
+    if _unfinished_placeholder_marker(text):
+        findings.append(
+            ArtifactFinding(
+                code="MARKDOWN_UNFINISHED_PLACEHOLDER",
+                severity="hard",
+                message="Markdown artifact is an unfinished placeholder (待完成/待填写 with no substantive body).",
+                location=str(path),
+            )
+        )
     return findings
+
+
+# 未完成占位符标记:仅匹配 my-agent 系统【兜底生成】的"产物未生成"专用签名
+# (agent_run_workspace 在子代理没真产出时写的 Final Report 占位)。刻意不含
+# __FILL__/TODO/待填写 等通用占位符——那些属于"文档质量低"范畴,由 document_quality
+# 软门按 warning 处理(不阻断),保持"让模型发挥不强行卡"。这里只 hard 拦"整篇就是
+# 系统兜底占位、零实质产出"的死交付。
+_UNFINISHED_MARKERS = ("待完成后填写",)
+
+
+def _unfinished_placeholder_marker(text: str) -> bool:
+    """产物是"未完成占位"判定:含明确占位短语,且去掉标题/元数据/占位行后实质正文极少。
+    双条件避免误判正常长报告里偶尔出现的"待补充"一词。"""
+    if not any(marker in text for marker in _UNFINISHED_MARKERS):
+        return False
+    substantive = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or re.match(r"^#{1,6}\s", stripped):
+            continue
+        if re.match(r"^[-*]\s*\S+\s*[:：]", stripped):  # 元数据列表项 (- key: value)
+            continue
+        if any(marker in stripped for marker in _UNFINISHED_MARKERS):
+            continue
+        substantive += len(stripped)
+    return substantive < 80
 
 
 def markdown_local_reference_findings(
