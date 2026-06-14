@@ -74,6 +74,7 @@ from .agent_core.runtime.owner_roots import runtime_owner_root
 from .backends import get_backend
 from .capability import CapabilityRouter
 from .capability.create_skill_tool import CreateSkillTool, register_owner_skills
+from .capability.memory_tool import RememberTool
 from .capability.runtime_config_reload import default_capability_config_path
 from .capability.skill_search_tool import SkillSearchTool
 from .collaboration import (
@@ -281,6 +282,8 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(TaskProgressTool(agent))
     # skill 树第一期:skill_search 检索台(千级冷路,prompt 零索引成本)。
     agent.tools.register(SkillSearchTool(agent))
+    # 长期记忆写入:用户明确要求记住偏好/事实时落 owner memory(对标 长期助手 memory_tool)。
+    agent.tools.register(RememberTool(agent))
     # 自学习 skill 草稿(对标 长期助手,但更保守):仅 enable_self_learning 时暴露——默认关闭=零打扰,
     # 且 agent 只产 data/skill_drafts 草稿、绝不直接改正式 skill 库(AGENTS.md 自学习约束)。
     if bool(getattr(getattr(agent, "config", None), "enable_self_learning", False)):
