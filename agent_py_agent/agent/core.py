@@ -73,6 +73,7 @@ from .agent_core.runner.prompts import (
 from .agent_core.runtime.owner_roots import runtime_owner_root
 from .backends import get_backend
 from .capability import CapabilityRouter
+from .capability.create_skill_tool import CreateSkillTool, register_owner_skills
 from .capability.runtime_config_reload import default_capability_config_path
 from .capability.skill_search_tool import SkillSearchTool
 from .collaboration import (
@@ -177,6 +178,7 @@ class SimpleAgent(
         # skill 树第一期:主代理常驻一个能力路由器(默认带 builtin skills),
         # prompt 层类目索引/命中卡与 skill_search 工具共用同一实例。
         self.capability_router = CapabilityRouter()
+        register_owner_skills(self.capability_router, self)
         self.prompts.capability_router = self.capability_router
         self.backend = get_backend(config.model_backend, config)
         self.conversation_store = ConversationStore(paths["conversation_workspace"])
@@ -279,6 +281,8 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(TaskProgressTool(agent))
     # skill 树第一期:skill_search 检索台(千级冷路,prompt 零索引成本)。
     agent.tools.register(SkillSearchTool(agent))
+    # 自学习 skill(对标 长期助手):agent 把验证有效的可复用方法主动沉淀成 owner skill。
+    agent.tools.register(CreateSkillTool(agent))
     agent.tools.register(RaiseCollaborationTool(agent))
     agent.tools.register(InspectCollaborationTool(agent))
     agent.tools.register(SubmitCollaborationResultTool(agent))
