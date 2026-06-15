@@ -213,6 +213,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="主机解析失败；可稍后重试，或换成可解析的公开来源。",
     ),
+    "NETWORK_REQUEST_FAILED": ErrorContract(
+        code="NETWORK_REQUEST_FAILED",
+        category="network",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="网络请求失败（连接被拒/不可达/链路错误，非超时）；退避后重试，或换可达的公网来源。",
+    ),
     "NETWORK_RESOLVED_IP_INVALID": ErrorContract(
         code="NETWORK_RESOLVED_IP_INVALID",
         category="network",

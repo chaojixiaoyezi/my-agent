@@ -63,18 +63,8 @@ class CreateSkillTool(BaseTool):
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         if not _self_learning_enabled(self.agent):
-            return ToolExecutionResult(
-                "create_skill",
-                False,
-                json.dumps(
-                    {
-                        "error": "自学习未启用",
-                        "hint": "create_skill 需 enable_self_learning=true;默认关闭以遵守自学习约束(agent 不直接改正式 skill)。",
-                    },
-                    ensure_ascii=False,
-                ),
-                error_code="TOOL_UNAVAILABLE",
-            )
+            return _fail("TOOL_UNAVAILABLE", "自学习未启用",
+                         "create_skill 需 enable_self_learning=true;默认关闭以遵守自学习约束(agent 不直接改正式 skill)。")
         name = _slug(params.get("name"))
         category = _slug(params.get("category")) or "general"
         description = str(params.get("description") or "").strip()
@@ -82,29 +72,30 @@ class CreateSkillTool(BaseTool):
         body = str(params.get("body") or "").strip()
         missing = [k for k, v in (("name", name), ("description", description), ("body", body)) if not v]
         if missing:
-            return ToolExecutionResult(
-                "create_skill",
-                False,
-                json.dumps({"error": f"缺少必填: {', '.join(missing)}", "hint": "name/description/body 必填"}, ensure_ascii=False),
-                error_code="TOOL_INVALID_ARGUMENTS",
-            )
+            return _fail("TOOL_INVALID_ARGUMENTS", f"缺少必填: {', '.join(missing)}", "name/description/body 必填")
         fields = {"name": name, "description": description, "when_to_use": when_to_use, "category": category}
-        draft_path = _skill_drafts_dir(self.agent) / category / name / "SKILL.md"
-        draft_path.parent.mkdir(parents=True, exist_ok=True)
-        draft_path.write_text(_render_skill_md(fields, body), encoding="utf-8")
-        official_target = runtime_owner_root(self.agent) / "skills" / category / name / "SKILL.md"
+        try:
+            draft_path = _skill_drafts_dir(self.agent) / category / name / "SKILL.md"
+            draft_path.parent.mkdir(parents=True, exist_ok=True)
+            draft_path.write_text(_render_skill_md(fields, body), encoding="utf-8")
+            official_target = runtime_owner_root(self.agent) / "skills" / category / name / "SKILL.md"
+        except Exception as exc:  # noqa: BLE001 — 写草稿任何异常都返回明确可重试码,不逃逸成 UNKNOWN_ERROR(对标 remember 健壮性)
+            return _fail("TOOL_EXECUTION_FAILED", f"skill 草稿写入失败: {exc}",
+                         "可重试一次;持续失败则检查 category/name 是否含非法路径字符或目标目录是否可写")
         payload = {
-            "ok": True,
-            "skill": name,
-            "category": category,
-            "status": "draft",
-            "draft_path": str(draft_path),
+            "ok": True, "skill": name, "category": category, "status": "draft", "draft_path": str(draft_path),
             "hint": (
                 f"已存为 skill 草稿(尚未生效)。请用户审核;确认无误后把草稿移到正式库 {official_target} "
                 "即可被 skill_search 检索复用。agent 不直接写正式 skill(AGENTS.md 自学习约束)。"
             ),
         }
         return ToolExecutionResult("create_skill", True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _fail(code: str, error: str, hint: str) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        "create_skill", False, json.dumps({"error": error, "hint": hint}, ensure_ascii=False), error_code=code
+    )
 
 
 def _self_learning_enabled(agent: object) -> bool:

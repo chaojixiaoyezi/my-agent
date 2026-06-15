@@ -67,8 +67,16 @@ def fetch_raw_response(request: FetchRawRequest, *, format_http_error) -> RawRes
             return _raw_response_from_http_response(request, resp)
     except urllib.error.HTTPError as exc:
         return format_http_error(request.tool, exc, _MIN_RESPONSE_PREVIEW_CHARS)
-    except (urllib.error.URLError, TimeoutError) as exc:
-        return ToolExecutionResult(request.tool, False, f"请求失败: {exc.__class__.__name__}")
+    except TimeoutError as exc:
+        # 网络失败带可重试错误码,否则无码 → fallback UNKNOWN_ERROR(retryable=False/report_blocker)
+        # 会误导模型"放弃报阻塞",而网络问题通常应退避重试或换源(mimo-v2.5-pro 实测暴露)。
+        return ToolExecutionResult(
+            request.tool, False, f"请求超时: {exc.__class__.__name__}", error_code="TOOL_TIMEOUT"
+        )
+    except urllib.error.URLError as exc:
+        return ToolExecutionResult(
+            request.tool, False, f"请求失败: {exc.__class__.__name__}", error_code="NETWORK_REQUEST_FAILED"
+        )
 
 
 def _raw_response_from_http_response(request: FetchRawRequest, resp: Any) -> RawResponseParts | ToolExecutionResult:
