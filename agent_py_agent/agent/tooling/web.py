@@ -96,7 +96,11 @@ def _format_http_error(tool: str, exc: urllib.error.HTTPError, max_chars: int) -
     )
     if len(detail) > max_chars:
         result += "\n... 已截断"
-    return ToolExecutionResult(tool, False, result)
+    # HTTP 状态错误带明确码,否则无码→fallback UNKNOWN_ERROR 误导模型放弃:
+    # 5xx/408/429 是服务器侧临时错误→可退避重试;4xx 是请求/URL 问题→改 URL/参数再试。
+    retryable_status = exc.code >= 500 or exc.code in (408, 429)
+    code = "NETWORK_REQUEST_FAILED" if retryable_status else "TOOL_INVALID_ARGUMENTS"
+    return ToolExecutionResult(tool, False, result, error_code=code)
 
 
 def _response_preview_chars(params: dict[str, Any], configured_max: int) -> int:
