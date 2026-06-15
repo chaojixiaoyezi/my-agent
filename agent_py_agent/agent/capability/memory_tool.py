@@ -20,7 +20,8 @@ def build_remember_spec() -> ToolSpec:
     return ToolSpec(
         name="remember",
         category="capability",
-        effect="write",
+        effect="mutating",
+        requires_idempotency=True,
         description=(
             "当用户明确要求记住一个【长期】偏好/事实/约定(如'记住我喜欢X''以后都Y''我的Z是W')时,"
             "把它写进长期记忆,未来会话可检索复用。这是执行用户的直接指令,不是自学习。"

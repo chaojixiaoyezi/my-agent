@@ -196,3 +196,26 @@ def test_all_used_error_codes_are_registered():
         "这些 error_code 在生产代码中使用但未在 ERROR_CONTRACTS 注册，"
         f"会 fallback 成 UNKNOWN_ERROR(误导模型放弃而非修正重试): {missing}"
     )
+
+
+def test_all_tool_effects_are_valid():
+    """所有工具 spec 的 effect 必须是合法值(read_only/mutating/dangerous)。
+
+    无效 effect(如曾经的 effect="write")会被 tool_manifest gate 判 TOOL_MANIFEST_EFFECT_INVALID
+    → DENY，工具【从未能执行】(create_skill/remember 曾因此对强模型完全不可用,直到 effect
+    改 mutating + requires_idempotency=True 才修通)。现有工具单测直接调 execute 绕过了 gate，
+    抓不到这类 spec 错误——这条钉子用静态扫描守住"effect 写对值"。
+    """
+    from agent_py_agent.agent.contracts.gates.tool_manifest import VALID_TOOL_EFFECTS
+
+    pattern = re.compile(r"""effect\s*=\s*["']([a-z_]+)["']""")
+    invalid: dict[str, list[str]] = {}
+    for path in _production_files():
+        for match in pattern.finditer(path.read_text(encoding="utf-8")):
+            value = match.group(1)
+            if value not in VALID_TOOL_EFFECTS:
+                invalid.setdefault(value, []).append(path.name)
+    assert not invalid, (
+        f"这些 effect 值不合法(只允许 {sorted(VALID_TOOL_EFFECTS)}),"
+        f"会被 tool_manifest gate 拦死导致工具不可用: {invalid}"
+    )

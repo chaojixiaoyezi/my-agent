@@ -24,7 +24,8 @@ def build_create_skill_spec() -> ToolSpec:
     return ToolSpec(
         name="create_skill",
         category="capability",
-        effect="write",
+        effect="mutating",
+        requires_idempotency=True,
         description=(
             "把你这次任务真正验证有效、成体系且有复用价值的方法/工具链,提议沉淀成一个 skill 草稿。"
             "这是自学习:做对了一件有方法论价值的事就把方法记下来供未来检索。"
