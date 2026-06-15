@@ -76,7 +76,7 @@ class WebFetchTool(BaseTool):
                 return self._execute_extract(params, max_chars)
             request = self._request_parts(params, mode, max_chars)
         except ValueError as exc:
-            return ToolExecutionResult("web_fetch", False, str(exc))
+            return ToolExecutionResult("web_fetch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         network_error = self._network_error(request.url)
         if network_error:
             return network_error

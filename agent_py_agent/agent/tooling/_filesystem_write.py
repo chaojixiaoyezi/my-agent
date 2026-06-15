@@ -131,22 +131,16 @@ class WriteFileTool(FileSystemTool):
                 recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
             )
         if request.content_policy and not request.content_policy.allowed:
-            return ToolExecutionResult("write_file", False, request.content_policy.message)
+            return ToolExecutionResult(
+                "write_file", False, request.content_policy.message, error_code="ARTIFACT_VALIDATION_FAILED",
+            )
         ledger_error = _system_ledger_write_error(request.target)
         if ledger_error:
             return _system_ledger_write_blocked_result(ledger_error)
         target = _prepare_write_target(self, request.target)
-        try:
-            _atomic_write_bytes(target, request.data, mode=request.mode)
-        except ValueError as exc:
-            return ToolExecutionResult(
-                "write_file",
-                False,
-                str(exc),
-                error_code="ARTIFACT_VALIDATION_FAILED",
-                retryable=True,
-                recommended_action=RecoveryAction.REWRITE_ARTIFACT_BYTES.value,
-            )
+        write_error = _atomic_write_or_error(target, request)
+        if write_error is not None:
+            return write_error
         web_decision = check_web_project_post_write(target, self.workspace_root)
         output = _write_output(WriteOutputRequest(
             display_path=self.display_path(target),
@@ -161,9 +155,30 @@ class WriteFileTool(FileSystemTool):
         if caveat:
             output = f"{output}\n{caveat}"
         result = _write_result("write_file", target, output, web_decision)
+        result.result_envelope["bytes_written"] = len(request.data)
         if feedback:
             result.result_envelope["soft_feedback"] = feedback
         return result
+
+
+def _atomic_write_or_error(target: Path, request: WriteRequest) -> ToolExecutionResult | None:
+    """执行原子写入；失败返回 ToolExecutionResult，成功返回 None。从 execute 抽出以控行数。"""
+    try:
+        _atomic_write_bytes(target, request.data, mode=request.mode)
+    except ValueError as exc:
+        return ToolExecutionResult(
+            "write_file",
+            False,
+            str(exc),
+            error_code="ARTIFACT_VALIDATION_FAILED",
+            retryable=True,
+            recommended_action=RecoveryAction.REWRITE_ARTIFACT_BYTES.value,
+        )
+    except OSError as exc:
+        return ToolExecutionResult(
+            "write_file", False, f"写入失败: {exc}", error_code="TOOL_EXECUTION_FAILED",
+        )
+    return None
 
 
 def _write_request(tool: WriteFileTool, params: dict[str, Any]) -> WriteRequest:

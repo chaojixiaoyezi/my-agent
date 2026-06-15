@@ -69,16 +69,16 @@ class ControlledExecTool(BaseTool):
     )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        return ToolExecutionResult(self.spec.name, False, "controlled_exec requires registry write_boundary")
+        return ToolExecutionResult(self.spec.name, False, "controlled_exec requires registry write_boundary", error_code="TOOL_EXECUTION_FAILED")
 
 
 def execute_controlled_exec_tool(request: ControlledExecToolRequest) -> ToolExecutionResult:
     grant_ref, grant_error = _select_controlled_exec_grant(request.params, request.write_boundary)
     if grant_error:
-        return ToolExecutionResult("controlled_exec", False, grant_error)
+        return ToolExecutionResult("controlled_exec", False, grant_error, error_code="WRITE_FORBIDDEN")
     command = request.params.get("command")
     if command is None:
-        return ToolExecutionResult("controlled_exec", False, "controlled_exec requires command")
+        return ToolExecutionResult("controlled_exec", False, "controlled_exec requires command", error_code="TOOL_INVALID_ARGUMENTS")
     grant = _grant_from_ref(grant_ref)
     exec_request = ControlledExecRequest(
         command=command,

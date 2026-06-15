@@ -335,7 +335,7 @@ class WebSearchTool(BaseTool):
         try:
             request = _search_request_from_params(params, self.max_results)
         except ValueError as exc:
-            return ToolExecutionResult("web_search", False, str(exc))
+            return ToolExecutionResult("web_search", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
 
         provider_result = _search_with_providers(self.providers, request.query, request.limit)
         if not provider_result.rows:

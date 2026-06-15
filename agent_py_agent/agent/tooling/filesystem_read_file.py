@@ -67,7 +67,7 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecu
         raw_path = _required_path(params.get("path"))
         target = tool.resolve_path(raw_path)
     except ValueError as exc:
-        return ToolExecutionResult("read_file", False, str(exc))
+        return ToolExecutionResult("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
     return _execute_read_file_request(ReadFileRequest(
         tool=tool,
         params=params,
@@ -115,7 +115,7 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolExecutionResult:
     try:
         content = target.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        return ToolExecutionResult("read_file", False, "文件不是有效 UTF-8 文本，无法读取。")
+        return ToolExecutionResult("read_file", False, "文件不是有效 UTF-8 文本，无法读取。", error_code="TOOL_EXECUTION_FAILED")
     summary = structured_read_summary(target, content, request.params)
     if summary:
         return ToolExecutionResult("read_file", True, summary)
@@ -138,7 +138,7 @@ def _not_file_result(tool, target: Path) -> ToolExecutionResult:
             json.dumps(payload, ensure_ascii=False, indent=2),
             error_code="PATH_IS_DIRECTORY",
         )
-    return ToolExecutionResult("read_file", False, f"目标不是文件: {tool.display_path(target)}")
+    return ToolExecutionResult("read_file", False, f"目标不是文件: {tool.display_path(target)}", error_code="PATH_INVALID")
 
 
 def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) -> ToolExecutionResult:
@@ -161,10 +161,10 @@ def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) 
         )
         line_max_chars = _line_max_chars(params, max_chars)
     except ValueError as exc:
-        return ToolExecutionResult("read_file", False, str(exc))
+        return ToolExecutionResult("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
     error = _line_range_error(lines, start_line, end_line, raw_end_line)
     if error:
-        return ToolExecutionResult("read_file", False, error)
+        return ToolExecutionResult("read_file", False, error, error_code="TOOL_INVALID_ARGUMENTS")
     if not lines:
         return ToolExecutionResult("read_file", True, "(空文件)")
     result, read_window = _render_numbered_read_lines(NumberedReadLinesRequest(
@@ -217,7 +217,7 @@ def _char_window_result(content: str, params: dict[str, Any], default_max_chars:
             min_value=1,
         )
     except ValueError as exc:
-        return ToolExecutionResult("read_file", False, str(exc))
+        return ToolExecutionResult("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
     if offset >= len(content):
         return _offset_out_of_range_result(offset, len(content))
     window = content[offset : offset + min(limit, default_max_chars)]
@@ -259,11 +259,11 @@ def _char_window_file_result(request: CharWindowFileRequest) -> ToolExecutionRes
             limit=min(limit, request.default_max_chars),
         )
     except ValueError as exc:
-        return ToolExecutionResult("read_file", False, str(exc))
+        return ToolExecutionResult("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
     except UnicodeDecodeError:
-        return ToolExecutionResult("read_file", False, "文件不是有效 UTF-8 文本，无法读取。")
+        return ToolExecutionResult("read_file", False, "文件不是有效 UTF-8 文本，无法读取。", error_code="TOOL_EXECUTION_FAILED")
     except OSError as exc:
-        return ToolExecutionResult("read_file", False, f"读取文件失败: {exc}")
+        return ToolExecutionResult("read_file", False, f"读取文件失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
     return _char_window_view_result(CharWindowView(
         offset=offset,
         window=window,

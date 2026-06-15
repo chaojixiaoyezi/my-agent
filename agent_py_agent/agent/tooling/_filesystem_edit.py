@@ -82,9 +82,17 @@ class EditFileTool(FileSystemTool):
             updated, strategy, count = _replace_in_content(content, old, new, replace_all=replace_all)
         except ValueError as exc:
             return ToolExecutionResult("edit_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
-        _atomic_write_bytes(target, updated.encode("utf-8"))
+        try:
+            _atomic_write_bytes(target, updated.encode("utf-8"))
+        except (OSError, UnicodeError) as exc:
+            return ToolExecutionResult("edit_file", False, f"写入失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
         note = "" if strategy == "exact" else f"（{strategy} 容错匹配）"
-        return ToolExecutionResult("edit_file", True, f"已编辑 {self.display_path(target)}：替换 {count} 处{note}")
+        return ToolExecutionResult(
+            "edit_file",
+            True,
+            f"已编辑 {self.display_path(target)}：替换 {count} 处{note}",
+            result_envelope={"replacement_count": count, "strategy": strategy},
+        )
 
 
 # 函数用途: 在文件内容里定位并替换 old→new,精确优先,失配按三级容错降级。

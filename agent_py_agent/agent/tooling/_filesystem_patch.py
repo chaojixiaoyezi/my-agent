@@ -55,8 +55,15 @@ class ApplyPatchTool(FileSystemTool):
             changes = _parse_simple_patch(patch)
             touched = _apply_simple_patch(changes, self)
         except ValueError as exc:
-            return ToolExecutionResult("apply_patch", False, str(exc))
-        return ToolExecutionResult("apply_patch", True, "已应用补丁: " + ", ".join(touched))
+            return ToolExecutionResult("apply_patch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+        except OSError as exc:
+            return ToolExecutionResult("apply_patch", False, f"补丁写入失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
+        return ToolExecutionResult(
+            "apply_patch",
+            True,
+            "已应用补丁: " + ", ".join(touched),
+            result_envelope={"files_modified": list(touched)},
+        )
 
 
 def _parse_simple_patch(patch: str) -> list[dict[str, Any]]:

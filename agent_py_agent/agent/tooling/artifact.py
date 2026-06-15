@@ -120,7 +120,7 @@ class ReadArtifactTool(BaseTool):
             )
         )
         if budget_error:
-            return ToolExecutionResult(self.spec.name, False, budget_error)
+            return ToolExecutionResult(self.spec.name, False, budget_error, error_code="QUOTA_EXCEEDED")
         payload = read_tool_output_artifact(request)
         if payload.get("ok"):
             self.read_budget.commit(request.run_id, int(payload.get("content_chars") or 0))
