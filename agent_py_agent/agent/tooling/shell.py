@@ -389,6 +389,11 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
             "output": f"Stdout/stderr are bounded previews; each stream preview defaults to {max_output_chars} chars.",
             "run_in_background": "可选布尔,默认 false。后台模式不等待结束:用 read_file 读 output_file 看进度,完成后用 run_command 执行 kill <pid> 收尾。",
         },
+        parameter_schema={
+            "timeout": {"type": "integer", "minimum": 0},
+            "run_in_background": {"type": "boolean"},
+        },
+        required_parameters=["command"],
         examples=[
             '{"tool": "run_command", "command": "ls -la"}',
             '{"tool": "run_command", "command": "python --version", "working_dir": "."}',

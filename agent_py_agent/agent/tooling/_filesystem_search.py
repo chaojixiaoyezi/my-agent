@@ -127,6 +127,15 @@ def build_search_text_spec() -> ToolSpec:
         keywords=["搜索", "查找", "关键字", "grep", "rg", "全文检索", "文本匹配"],
         parameters=_SEARCH_TEXT_PARAMETERS,
         parameter_details=_SEARCH_TEXT_PARAMETER_DETAILS,
+        parameter_schema={
+            "limit": {"type": "integer", "minimum": 1},
+            "offset": {"type": "integer", "minimum": 0},
+            "context": {"type": "integer", "minimum": 0},
+            "literal": {"type": "boolean"},
+            "ignore_case": {"type": "boolean"},
+            "include_ignored": {"type": "boolean"},
+        },
+        required_parameters=["query"],
         examples=_SEARCH_TEXT_EXAMPLES,
     )
 

@@ -167,6 +167,13 @@ class ReadFileTool(FileSystemTool):
             keywords=["读文件", "查看文件", "代码", "配置", "文档", "cat", "open file"],
             parameters=_READ_FILE_PARAMETERS,
             parameter_details=_READ_FILE_PARAMETER_DETAILS,
+            parameter_schema={
+                "start_line": {"type": "integer", "minimum": 1},
+                "end_line": {"type": "integer", "minimum": 1},
+                "offset": {"type": "integer", "minimum": 0},
+                "max_chars": {"type": "integer", "minimum": 1},
+            },
+            required_parameters=["path"],
             examples=_READ_FILE_EXAMPLES,
         )
 

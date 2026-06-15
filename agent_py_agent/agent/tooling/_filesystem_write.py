@@ -110,6 +110,10 @@ class WriteFileTool(FileSystemTool):
                 "data_base64": "可选。用于 PDF、XLSX、图片、压缩包等二进制文件；传入后按原始字节写入。",
                 "mode": "可选，精确值 overwrite 或 append。append 会原子地保留已有内容并把本次 payload 追加到末尾；不接受 completed/continue 等别名。当前 task output/work 下同一路径已存在且省略 mode 时，运行时会按续写保护追加；显式 mode=overwrite 才替换该任务产物文件。",
             },
+            parameter_schema={
+                "mode": {"type": "string", "enum": ["overwrite", "append"]},
+            },
+            required_parameters=["path"],
             internal_parameters=["__implicit_task_artifact_append", "__partial_unclosed_write"],
             examples=_WRITE_FILE_EXAMPLES,
         )
