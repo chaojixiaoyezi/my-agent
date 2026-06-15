@@ -21,6 +21,48 @@ from ._filesystem_read import (
 from .models import ToolExecutionResult, ToolSpec
 
 
+def _build_find_files_spec() -> ToolSpec:
+    return ToolSpec(
+        name="find_files",
+        category="filesystem",
+        effect="read_only",
+        description="按 glob 查找文件路径，适合不知道文件具体位置但知道文件名模式时使用。",
+        use_cases=[
+            "找所有 Python、Markdown、配置或测试文件",
+            "按文件名模式定位候选文件，再用 read_file 阅读",
+        ],
+        avoid_when=[
+            "只是想看某个目录下一层有什么时，用目录查看工具",
+            "想搜索文件正文内容时，用正文搜索工具",
+        ],
+        keywords=["find", "glob", "文件查找", "按模式找文件", "找文件", "文件名"],
+        parameters={
+            "pattern": "glob 模式，例如 *.py、**/*.md、src/**/*.ts",
+            "path": "从哪个目录开始找，默认工作区根目录",
+            "limit": "本次最多返回多少个文件，默认使用工具配置上限",
+            "offset": "跳过前多少个结果，用于分页，默认 0",
+            "include_ignored": "是否包含常见噪声目录，如 .git/node_modules，默认 false",
+        },
+        parameter_details={
+            "pattern": "必填；匹配工作区相对路径或文件名。不是正文搜索，不会打开文件内容。",
+            "path": "可选；把范围缩小到某个目录会更快。",
+            "limit": "分页大小；结果很多时先看一小页，再用 next_offset 继续。",
+            "offset": "上一页返回 next_offset 后，下一次传入这里继续看。",
+            "include_ignored": "默认跳过 .git、node_modules 和常见缓存目录；确实要找这些目录里的文件时传 true。",
+        },
+        parameter_schema={
+            "limit": {"type": "integer", "minimum": 1},
+            "offset": {"type": "integer", "minimum": 0},
+            "include_ignored": {"type": "boolean"},
+        },
+        required_parameters=["pattern"],
+        examples=[
+            '{"tool": "find_files", "pattern": "**/*.py"}',
+            '{"tool": "find_files", "pattern": "*.md", "path": "docs", "limit": 50}',
+        ],
+    )
+
+
 class FindFilesTool(FileSystemTool):
 
     def __init__(
@@ -36,39 +78,7 @@ class FindFilesTool(FileSystemTool):
             access_options,
         )
         self.max_matches = max_matches
-        self.spec = ToolSpec(
-            name="find_files",
-            category="filesystem",
-            effect="read_only",
-            description="按 glob 查找文件路径，适合不知道文件具体位置但知道文件名模式时使用。",
-            use_cases=[
-                "找所有 Python、Markdown、配置或测试文件",
-                "按文件名模式定位候选文件，再用 read_file 阅读",
-            ],
-            avoid_when=[
-                "只是想看某个目录下一层有什么时，用目录查看工具",
-                "想搜索文件正文内容时，用正文搜索工具",
-            ],
-            keywords=["find", "glob", "文件查找", "按模式找文件", "找文件", "文件名"],
-            parameters={
-                "pattern": "glob 模式，例如 *.py、**/*.md、src/**/*.ts",
-                "path": "从哪个目录开始找，默认工作区根目录",
-                "limit": "本次最多返回多少个文件，默认使用工具配置上限",
-                "offset": "跳过前多少个结果，用于分页，默认 0",
-                "include_ignored": "是否包含常见噪声目录，如 .git/node_modules，默认 false",
-            },
-            parameter_details={
-                "pattern": "必填；匹配工作区相对路径或文件名。不是正文搜索，不会打开文件内容。",
-                "path": "可选；把范围缩小到某个目录会更快。",
-                "limit": "分页大小；结果很多时先看一小页，再用 next_offset 继续。",
-                "offset": "上一页返回 next_offset 后，下一次传入这里继续看。",
-                "include_ignored": "默认跳过 .git、node_modules 和常见缓存目录；确实要找这些目录里的文件时传 true。",
-            },
-            examples=[
-                '{"tool": "find_files", "pattern": "**/*.py"}',
-                '{"tool": "find_files", "pattern": "*.md", "path": "docs", "limit": 50}',
-            ],
-        )
+        self.spec = _build_find_files_spec()
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:

@@ -58,6 +58,9 @@ class ControlledExecTool(BaseTool):
             "apply": "Optional. False returns dry-run plan; true runs only after grant checks pass.",
             "delete": "rm/rmdir/unlink intentionally stay out of shell allowlists; with apply=true they route to task_trash and return trash_manifest_ref.",
         },
+        parameter_schema={
+            "apply": {"type": "boolean"},
+        },
         internal_parameters=["command_allowlist", "path_scope"],
         examples=[
             '{"tool":"controlled_exec","apply":true,"command":"pwd","cwd":"."}',

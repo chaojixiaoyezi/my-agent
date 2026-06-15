@@ -54,3 +54,33 @@ def test_write_file_mode_is_enum():
     schema = tool_spec_to_input_schema(WriteFileTool(Path("/tmp")).spec)
     assert schema["properties"]["mode"]["enum"] == ["overwrite", "append"]
     assert schema["required"] == ["path"]
+
+
+def test_list_files_numeric_and_bool_params_precise():
+    from agent_py_agent.agent.tooling._filesystem_list import build_list_files_spec
+
+    p = _props(build_list_files_spec())
+    assert p["recursive"]["type"] == "boolean"
+    assert p["limit"]["type"] == "integer"
+    assert p["max_depth"]["type"] == "integer"
+    assert p["include_ignored"]["type"] == "boolean"
+
+
+def test_find_files_params_precise_and_required_pattern():
+    from agent_py_agent.agent.tooling._filesystem_find import FindFilesTool
+
+    schema = tool_spec_to_input_schema(FindFilesTool(Path("/tmp"), 100).spec)
+    p = schema["properties"]
+    assert p["limit"]["type"] == "integer"
+    assert p["offset"]["type"] == "integer"
+    assert p["include_ignored"]["type"] == "boolean"
+    assert schema["required"] == ["pattern"]
+
+
+def test_controlled_exec_apply_boolean_command_stays_string():
+    from agent_py_agent.agent.tooling.controlled_exec import ControlledExecTool
+
+    p = _props(ControlledExecTool.spec)
+    assert p["apply"]["type"] == "boolean"
+    # command 可接受 string 或 argv 数组，保守保留 string 回退（不误拦数组用法）
+    assert p["command"]["type"] == "string"

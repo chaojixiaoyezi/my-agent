@@ -246,6 +246,15 @@ def build_list_files_spec() -> ToolSpec:
             "include_ignored": "是否包含常见噪声目录，如 .git/node_modules，默认 false",
         },
         parameter_details=_list_files_parameter_details(),
+        parameter_schema={
+            "recursive": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 1},
+            "offset": {"type": "integer", "minimum": 0},
+            "max_depth": {"type": "integer", "minimum": 0},
+            "include_dirs": {"type": "boolean"},
+            "include_files": {"type": "boolean"},
+            "include_ignored": {"type": "boolean"},
+        },
         examples=[
             '{"tool": "list_files", "path": "."}',
             '{"tool": "list_files", "path": "agent_py_agent/agent", "recursive": true, "limit": 50, "offset": 0}',
