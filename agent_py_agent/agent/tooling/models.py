@@ -3,6 +3,7 @@ from __future__ import annotations
 
 """Defines stable tool metadata, retrieval hits, and base execution contracts."""
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -117,7 +118,8 @@ class ToolExecutionResult:
             self.recommended_action = ""
             self.recovery_hint = ""
             return
-        contract = error_contract(self.error_code) if self.error_code else error_contract("UNKNOWN_ERROR")
+        code = self.error_code or _error_code_from_output(self.output)
+        contract = error_contract(code) if code else error_contract("UNKNOWN_ERROR")
         self.error_code = contract.code
         self.error_category = contract.category
         self.retryable = contract.retryable
@@ -131,6 +133,27 @@ class ToolExecutionResult:
         if not self.ok and self.error_code:
             fields = f"{fields}; error_code={self.error_code}; recommended_action={self.recommended_action}"
         return f"[{fields}]\n{self.output}"
+
+
+def _error_code_from_output(output: str) -> str:
+    """工具失败时若没显式传 error_code，从其 JSON output 里兜底提取一个。
+
+    许多工具把含 error_code 的错误 payload json.dumps 进 output 字符串，却忘了
+    同时传 error_code= 给构造函数，导致 __post_init__ 兜底成 UNKNOWN_ERROR
+    （retryable=False）误导模型放弃。这里通用地把它捞回来——error_contract 对
+    返回值做大小写归一化，所以 reader 的小写语义码（如 artifact_not_registered）
+    也能命中其已注册的大写契约。提取不到合法 dict.error_code 时返回 ""，保持原有
+    UNKNOWN_ERROR 兜底，未注册的码也会被 error_contract 自然回落到 UNKNOWN_ERROR。
+    """
+    if not output:
+        return ""
+    try:
+        payload = json.loads(output)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return ""
+    if isinstance(payload, dict):
+        return str(payload.get("error_code") or "").strip()
+    return ""
 
 
 @dataclass
