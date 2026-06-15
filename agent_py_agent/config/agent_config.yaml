@@ -677,6 +677,11 @@ tool_retrieval_limit: 3
 # 当前代码已经把接口留好了；未接真实向量索引前仍以关键词检索为主
 tool_vector_search_enabled: true
 
+# 工具调用协议：text=现有 [TOOL_CALL] 文本协议（默认，保证回退）；
+# native=在 anthropic_compatible 端点用模型原生 tool_use（传 tools schema、收结构化块）。
+# native 仅在 model_backend=anthropic_compatible 时生效，其余后端自动回退 text。
+tool_protocol: "text"
+
 # Chat / CLI 默认展示和读取预算：
 # - 这些配置控制命令默认显示多少、交互历史带多少、长文本折叠多少。
 # - 后续前端配置页也应读取这些真实后端字段，而不是另写一套默认值。

@@ -9,10 +9,16 @@ from typing import Any
 
 @dataclass(frozen=True)
 class StreamEvent:
-    """One normalized stream event with optional visible text and usage metadata."""
+    """One normalized stream event with optional visible text and usage metadata.
+
+    ``tool_use_block`` is populated only on the Anthropic native tool_use path,
+    once a tool_use content block has finished accumulating its input JSON; it
+    holds ``{"id","name","input"}``. Text/usage consumers ignore it.
+    """
 
     content: str = ""
     usage: dict[str, Any] | None = None
+    tool_use_block: dict[str, Any] | None = None
 
 
 def openai_stream_contents(lines: Iterable[str]) -> Iterator[str]:
@@ -44,6 +50,7 @@ def anthropic_stream_contents(lines: Iterable[str]) -> Iterator[str]:
 
 
 def anthropic_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
+    tool_acc = _AnthropicToolUseAccumulator()
     for line in lines:
         obj = json_object_or_none(line)
         if obj is None:
@@ -51,10 +58,77 @@ def anthropic_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
         event_type = obj.get("type", "")
         if event_type == "message_stop":
             break
+        block = tool_acc.consume(event_type, obj)
+        if block is not None:
+            yield StreamEvent(tool_use_block=block)
+            continue
         text = obj.get("delta", {}).get("text", "") if event_type == "content_block_delta" else ""
         usage = _anthropic_usage(obj, event_type)
         if text or usage:
             yield StreamEvent(content=str(text or ""), usage=usage or None)
+
+
+class _AnthropicToolUseAccumulator:
+    """Accumulates Anthropic streamed tool_use blocks across SSE events.
+
+    A tool_use block arrives as ``content_block_start`` (carries id/name),
+    one or more ``content_block_delta`` with ``input_json_delta.partial_json``
+    fragments, then ``content_block_stop``. We buffer the partial JSON and
+    parse it on stop, returning the finished ``{"id","name","input"}`` block.
+    """
+
+    def __init__(self) -> None:
+        self._index: int | None = None
+        self._id: str = ""
+        self._name: str = ""
+        self._buffer: str = ""
+
+    def consume(self, event_type: str, obj: dict[str, Any]) -> dict[str, Any] | None:
+        if event_type == "content_block_start":
+            self._on_start(obj)
+            return None
+        if event_type == "content_block_delta":
+            self._on_delta(obj)
+            return None
+        if event_type == "content_block_stop":
+            return self._on_stop(obj)
+        return None
+
+    def _on_start(self, obj: dict[str, Any]) -> None:
+        block = obj.get("content_block")
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            self._index = None
+            return
+        self._index = obj.get("index")
+        self._id = str(block.get("id", "") or "")
+        self._name = str(block.get("name", "") or "")
+        self._buffer = ""
+
+    def _on_delta(self, obj: dict[str, Any]) -> None:
+        if self._index is None:
+            return
+        delta = obj.get("delta")
+        if isinstance(delta, dict) and delta.get("type") == "input_json_delta":
+            self._buffer += str(delta.get("partial_json", "") or "")
+
+    def _on_stop(self, obj: dict[str, Any]) -> dict[str, Any] | None:
+        if self._index is None or obj.get("index") != self._index:
+            return None
+        block = {"id": self._id, "name": self._name, "input": _parse_tool_input(self._buffer)}
+        self._index = None
+        self._buffer = ""
+        return block
+
+
+def _parse_tool_input(buffer: str) -> dict[str, Any]:
+    text = buffer.strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def json_object_or_none(line: str) -> dict[str, Any] | None:

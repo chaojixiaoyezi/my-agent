@@ -39,7 +39,44 @@ def collect_anthropic_stream(
     lines: Iterable[str],
     on_chunk: Callable[[str], None] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    return _collect_stream_events(anthropic_stream_events(lines), on_chunk)
+    text, usage, _blocks = collect_anthropic_stream_with_tools(lines, on_chunk)
+    return text, usage
+
+
+def collect_anthropic_stream_with_tools(
+    lines: Iterable[str],
+    on_chunk: Callable[[str], None] | None = None,
+) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+    """Collect Anthropic SSE into (text, usage, tool_use_blocks).
+
+    Native tool_use path: streamed tool_use blocks are accumulated into the
+    third return value while text/usage collection stays identical to the
+    text-protocol path.
+    """
+    parts: list[str] = []
+    accumulated = ""
+    previous_raw = ""
+    usage: dict[str, Any] = {}
+    blocks: list[dict[str, Any]] = []
+    for event in anthropic_stream_events(lines):
+        block = getattr(event, "tool_use_block", None)
+        if block is not None:
+            blocks.append(block)
+            continue
+        event_usage = getattr(event, "usage", None)
+        if event_usage:
+            usage = merge_usage(usage, event_usage)
+        content = str(getattr(event, "content", "") or "")
+        if not content:
+            continue
+        chunk = _stream_delta(previous_raw, content)
+        previous_raw = content
+        if not chunk:
+            continue
+        parts.append(chunk)
+        accumulated += chunk
+        _emit_chunk(on_chunk, chunk)
+    return accumulated, usage, blocks
 
 
 def _collect_stream_events(

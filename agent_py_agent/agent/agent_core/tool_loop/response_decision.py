@@ -153,7 +153,7 @@ def tool_loop_response_decision(
         final = _disabled_tools_response(request.response, has_protected_marker)
         return ToolLoopResponseDecision("break", final, [], request.counters)
 
-    calls = request.agent.tools.parse_tool_calls(request.response.text)
+    calls = _tool_calls_from_response(request)
     if calls:
         return _tool_calls_decision(request, calls)
 
@@ -166,6 +166,33 @@ def tool_loop_response_decision(
             has_protected_marker,
         )
     )
+
+
+def _tool_calls_from_response(
+    request: ToolLoopResponseDecisionRequest,
+) -> list[dict[str, object]]:
+    """Resolve this turn's tool calls, preferring native tool_use blocks.
+
+    tool_protocol=native: the backend already emitted structured
+    ``tool_use_blocks`` ({id,name,input}); flatten each to the existing
+    ``{"tool": name, **input}`` dict so all downstream gates/execution stay
+    unchanged. Otherwise fall back to parsing the [TOOL_CALL] text protocol.
+    """
+    blocks = getattr(request.response, "tool_use_blocks", None)
+    if blocks:
+        return [_flatten_tool_use_block(block) for block in blocks]
+    return request.agent.tools.parse_tool_calls(request.response.text)
+
+
+def _flatten_tool_use_block(block: dict[str, object]) -> dict[str, object]:
+    tool_input = block.get("input")
+    flattened: dict[str, object] = dict(tool_input) if isinstance(tool_input, dict) else {}
+    # tool name must win even if the model put a stray "tool" key in input.
+    flattened["tool"] = str(block.get("name", "") or "")
+    call_id = str(block.get("id", "") or "")
+    if call_id:
+        flattened.setdefault("call_id", call_id)
+    return flattened
 
 
 def contains_protected_tool_marker(text: str) -> bool:

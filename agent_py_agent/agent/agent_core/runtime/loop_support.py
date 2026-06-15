@@ -139,6 +139,7 @@ def _resolve_tool_sections(request: ToolSectionsRequest):
     tool_catalog = request.agent.tools.render_catalog_section(
         allowed_tools=request.allowed_tools,
         granted_capabilities=runtime_capabilities,
+        tool_protocol=str(getattr(request.agent.config, "tool_protocol", "text") or "text"),
     )
     tool_recommendations = request.agent.tools.render_recommended_tools_section(
         request.user_prompt,

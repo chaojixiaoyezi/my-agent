@@ -18,7 +18,7 @@ from ..settings.defaults import DEFAULT_MODEL_MAX_TOKENS
 from .errors import ProviderResponseError
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
 from .usage_metadata import (
-    collect_anthropic_stream,
+    collect_anthropic_stream_with_tools,
     collect_openai_stream,
     openai_stream_payload,
     usage_dict,
@@ -35,6 +35,9 @@ class ModelResponse:
     runtime_reason: str = ""
     runtime_source: str = ""
     usage: dict[str, Any] = field(default_factory=dict)
+    # 原生 tool_use 协议(tool_protocol=native)下，从结构化响应抽出的工具调用块，
+    # 每块形如 {"id","name","input"}。文本协议下恒为空，不影响现有行为。
+    tool_use_blocks: list[dict[str, Any]] = field(default_factory=list)
 
 @dataclass(frozen=True)
 class BackendOptions:
@@ -56,9 +59,17 @@ class BaseBackend:
     name = "base"
 
     def generate(
-        self, prompt: str, on_chunk: Callable[[str], None] | None = None
+        self,
+        prompt: str,
+        on_chunk: Callable[[str], None] | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
-        """Generate one assistant response for the supplied prompt."""
+        """Generate one assistant response for the supplied prompt.
+
+        ``tools`` carries an Anthropic-style tools schema for native tool_use
+        (tool_protocol=native). Backends that do not support it ignore it and
+        keep the text protocol; bypass callers omit it for unchanged behavior.
+        """
         raise NotImplementedError
 
 
@@ -68,8 +79,12 @@ class EchoBackend(BaseBackend):
     name = "echo"
 
     def generate(
-        self, prompt: str, on_chunk: Callable[[str], None] | None = None
+        self,
+        prompt: str,
+        on_chunk: Callable[[str], None] | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
+        del tools  # echo backend never speaks native tool_use
         lines = [line.strip() for line in prompt.splitlines() if line.strip()]
         if "# User Task" in prompt:
             task = prompt.split("# User Task", 1)[-1]
@@ -147,9 +162,13 @@ class OpenAICompatibleBackend(HttpBackend):
     name = "openai_compatible"
 
     def generate(
-        self, prompt: str, on_chunk: Callable[[str], None] | None = None
+        self,
+        prompt: str,
+        on_chunk: Callable[[str], None] | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
         """Call the OpenAI-compatible chat completion endpoint."""
+        del tools  # native tool_use is only wired for anthropic_compatible (阶段1)
         payload = {
             "model": self.model_name,
             "messages": [{"role": "user", "content": prompt}],
@@ -198,15 +217,20 @@ class AnthropicCompatibleBackend(HttpBackend):
         self.anthropic_version = anthropic_version
 
     def generate(
-        self, prompt: str, on_chunk: Callable[[str], None] | None = None
+        self,
+        prompt: str,
+        on_chunk: Callable[[str], None] | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
         """Call the Anthropic-compatible messages endpoint."""
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.model_name,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
             "messages": [{"role": "user", "content": prompt}],
         }
+        if tools:
+            payload["tools"] = tools
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
@@ -214,22 +238,33 @@ class AnthropicCompatibleBackend(HttpBackend):
         }
         if self.stream_enabled:
             return self._generate_stream(payload, headers, on_chunk=on_chunk)
+        return self._generate_non_stream(payload, headers)
+
+    def _generate_non_stream(self, payload: dict[str, Any], headers: dict[str, str]) -> ModelResponse:
         obj: dict[str, Any] = {}
         text = ""
+        blocks: list[dict[str, Any]] = []
         for attempt in range(2):
             obj = self.request_json("/v1/messages", payload, headers)
             try:
                 text = _anthropic_text_from_response(obj)
+                blocks = _anthropic_tool_use_blocks(obj)
             except Exception as exc:
                 raise ProviderResponseError(f"无法解析 Anthropic-compatible 响应: {_response_preview(obj)}") from exc
-            if text or attempt > 0 or not _anthropic_has_thinking_without_text(obj):
+            if text or blocks or attempt > 0 or not _anthropic_has_thinking_without_text(obj):
                 break
-        if not text:
+        # 原生 tool_use 下模型可能只回 tool_use 块、没有文本，这种是合法的，不报空响应。
+        if not text and not blocks:
             raise ProviderResponseError(
                 f"Anthropic-compatible 响应没有文本内容: {_response_preview(obj)}",
                 error_code="MODEL_EMPTY_RESPONSE",
             )
-        return ModelResponse(text=text, backend=self.name, usage=usage_dict(obj.get("usage")))
+        return ModelResponse(
+            text=text,
+            backend=self.name,
+            usage=usage_dict(obj.get("usage")),
+            tool_use_blocks=blocks,
+        )
 
     def _generate_stream(
         self,
@@ -238,25 +273,29 @@ class AnthropicCompatibleBackend(HttpBackend):
         on_chunk: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Parse Anthropic SSE and retry the same stream path once when no text is visible."""
+        text, usage, blocks = "", {}, []
         for attempt in range(2):
-            text, usage = self._stream_text_once(payload, headers, on_chunk)
-            if text or attempt > 0:
+            text, usage, blocks = self._stream_text_once(payload, headers, on_chunk)
+            if text or blocks or attempt > 0:
                 break
-        if not text:
+        # 同非流式：只回 tool_use 块、无文本也合法，不报空响应。
+        if not text and not blocks:
             raise ProviderResponseError(
                 "Anthropic-compatible 流式响应没有文本内容",
                 error_code="MODEL_EMPTY_RESPONSE",
             )
-        return ModelResponse(text=text, backend=self.name, usage=usage)
+        return ModelResponse(text=text, backend=self.name, usage=usage, tool_use_blocks=blocks)
 
     def _stream_text_once(
         self,
         payload: dict[str, Any],
         headers: dict[str, str],
         on_chunk: Callable[[str], None] | None,
-    ) -> tuple[str, dict[str, Any]]:
+    ) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
-        return collect_anthropic_stream(lines("/v1/messages", payload, headers), on_chunk=on_chunk)
+        return collect_anthropic_stream_with_tools(
+            lines("/v1/messages", payload, headers), on_chunk=on_chunk
+        )
 
 def _anthropic_text_from_response(obj: dict[str, Any]) -> str:
     parts = obj.get("content", [])
@@ -268,6 +307,30 @@ def _anthropic_text_from_response(obj: dict[str, Any]) -> str:
     if not text and "completion" in obj:
         text = obj["completion"]
     return str(text or "")
+
+
+def _anthropic_tool_use_blocks(obj: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract type==tool_use blocks from a non-stream Anthropic response.
+
+    Each block is normalized to ``{"id","name","input"}``; ``input`` defaults
+    to an empty dict when absent or malformed.
+    """
+    parts = obj.get("content", [])
+    if not isinstance(parts, list):
+        return []
+    blocks: list[dict[str, Any]] = []
+    for part in parts:
+        if not isinstance(part, dict) or part.get("type") != "tool_use":
+            continue
+        tool_input = part.get("input")
+        blocks.append(
+            {
+                "id": str(part.get("id", "") or ""),
+                "name": str(part.get("name", "") or ""),
+                "input": tool_input if isinstance(tool_input, dict) else {},
+            }
+        )
+    return blocks
 
 
 def _anthropic_has_thinking_without_text(obj: dict[str, Any]) -> bool:

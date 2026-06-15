@@ -373,6 +373,12 @@ def _normalize_tool_catalog_fields(out: dict[str, object], defaults: object) -> 
     )
     out["tool_catalog_mode"] = mode
     _append_warning(warnings, warn)
+    protocol, protocol_warn = CoercionService.coerce_choice(
+        "tool_protocol", out.get("tool_protocol"), defaults.tool_protocol,
+        choices=("text", "native"),
+    )
+    out["tool_protocol"] = protocol
+    _append_warning(warnings, protocol_warn)
     out["tool_catalog_categories"] = _normalize_string_list(
         out.get("tool_catalog_categories", defaults.tool_catalog_categories)
     )

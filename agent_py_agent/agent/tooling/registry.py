@@ -196,6 +196,7 @@ class ToolRegistry:
         *,
         allowed_tools: list[str] | None = None,
         granted_capabilities: list[str] | None = None,
+        tool_protocol: str = "text",
     ) -> str:
 
         specs = self.specs(
@@ -207,6 +208,7 @@ class ToolRegistry:
         return _render_tool_catalog_section(
             entries,
             tool_content_transport_protocol(self._write_inline_max_chars()),
+            tool_protocol=tool_protocol,
         )
 
     def _catalog_render_config(self) -> CatalogRenderConfig:
@@ -314,11 +316,16 @@ class ToolRegistry:
         )
 
 
-def _render_tool_catalog_section(entries: list[str], content_transport_protocol: str) -> str:
+def _render_tool_catalog_section(
+    entries: list[str],
+    content_transport_protocol: str,
+    *,
+    tool_protocol: str = "text",
+) -> str:
     if not entries:
         entries = ["- none：当前执行上下文没有授权任何工具；缺能力时请上抛 capability_request。"]
     return (
-        _tool_call_protocol()
+        _tool_call_protocol(tool_protocol)
         + "\n\n"
         + content_transport_protocol
         + "\n\n"
@@ -327,7 +334,9 @@ def _render_tool_catalog_section(entries: list[str], content_transport_protocol:
     )
 
 
-def _tool_call_protocol() -> str:
+def _tool_call_protocol(tool_protocol: str = "text") -> str:
+    if str(tool_protocol or "").strip().lower() == "native":
+        return _native_tool_call_protocol()
     return (
         "# Tools\n"
         "当你需要看文件、改代码、查网页或测接口时，可以调用工具。\n"
@@ -338,6 +347,16 @@ def _tool_call_protocol() -> str:
         "必须把工具参数直接放在同一个 JSON 对象里；不要写 param_name、args、arguments 或其他包裹参数。\n"
         "必须使用 Tool Catalog 里该工具自己的参数名；不要把 path 当作所有工具的默认参数。\n"
         "可以连续写多个 [TOOL_CALL] 块。拿到工具结果后，再输出最终答案，不要把工具调用块留在最后回复里。"
+    )
+
+
+def _native_tool_call_protocol() -> str:
+    # native 协议下模型直接用结构化 tool_use 调工具，不需要教它写 [TOOL_CALL] 文本格式。
+    return (
+        "# Tools\n"
+        "当你需要看文件、改代码、查网页或测接口时，可以调用工具。\n"
+        "本会话已启用原生工具调用：直接发起结构化工具调用即可，参数按下方 Tool Catalog 中各工具的参数名填写。\n"
+        "拿到工具结果后再输出最终答案。"
     )
 
 

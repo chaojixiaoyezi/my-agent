@@ -24,6 +24,7 @@ from .model.context_pressure import (
     mark_tool_context_digest_consumed,
     preflight_context_pressure_response,
 )
+from .native_tool_protocol import resolve_native_tools
 from .runner.stage_trace import (
     RunnerModelStageTraceRequest,
     trace_runner_model_request_failed,
@@ -74,6 +75,8 @@ class _ModelGenerationState:
     call_id: str
     first_token_timeout_seconds: float
     on_chunk: object
+    # 原生 tool_use 协议下传给 backend.generate 的 tools schema；text 协议为 None。
+    tools: list[dict] | None = None
 
 
 def generate_model_response(request: ModelGenerateParams):
@@ -157,6 +160,7 @@ def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationSta
         call_id=call_id,
         first_token_timeout_seconds=first_token_estimate.timeout_seconds,
         on_chunk=on_chunk,
+        tools=resolve_native_tools(request.agent, request.params),
     )
 
 
@@ -238,7 +242,7 @@ def _generate_with_wall_timeout(
 ):
     timeout = _effective_model_request_timeout_seconds(request.agent, first_token_timeout_seconds)
     if timeout <= 0:
-        return request.agent.backend.generate(request.prompt, on_chunk=state.on_chunk)
+        return _invoke_backend_generate(request.agent.backend, request.prompt, state.on_chunk, state.tools)
 
     results: Queue[_BackendGenerateResult] = Queue(maxsize=1)
 
@@ -246,7 +250,7 @@ def _generate_with_wall_timeout(
         try:
             results.put(
                 _BackendGenerateResult(
-                    response=_generate_backend_response(request, state.on_chunk, timeout)
+                    response=_generate_backend_response(request, state, timeout)
                 )
             )
         except BaseException as exc:  # pragma: no cover - exercised through queue result.
@@ -302,20 +306,27 @@ def _complete_stream_tool_response(request: ModelGenerateParams, state: _ModelGe
     return ModelResponse(text=text, backend=backend)
 
 
-def _generate_backend_response(request: ModelGenerateParams, on_chunk, timeout: float):
+def _generate_backend_response(request: ModelGenerateParams, state: _ModelGenerationState, timeout: float):
     backend = request.agent.backend
     original = getattr(backend, "request_timeout", None)
     if timeout <= 0 or original is None:
-        return backend.generate(request.prompt, on_chunk=on_chunk)
+        return _invoke_backend_generate(backend, request.prompt, state.on_chunk, state.tools)
     try:
         effective = max(float(original), float(timeout))
     except (TypeError, ValueError):
         effective = float(timeout)
     try:
         backend.request_timeout = effective
-        return backend.generate(request.prompt, on_chunk=on_chunk)
+        return _invoke_backend_generate(backend, request.prompt, state.on_chunk, state.tools)
     finally:
         backend.request_timeout = original
+
+
+def _invoke_backend_generate(backend, prompt: str, on_chunk, tools):
+    # text 协议(tools 为 None)保持原调用形态，不传 tools 关键字，旁路/伪后端零改动。
+    if tools is None:
+        return backend.generate(prompt, on_chunk=on_chunk)
+    return backend.generate(prompt, on_chunk=on_chunk, tools=tools)
 
 
 def _tool_write_inline_max_chars(request: ModelGenerateParams) -> int | None:

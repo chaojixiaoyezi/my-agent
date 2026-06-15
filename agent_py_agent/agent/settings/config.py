@@ -139,6 +139,10 @@ class _ToolConfigFields:
     tool_detail_max_chars: int = 4000
     tool_retrieval_limit: int = 3
     tool_vector_search_enabled: bool = True
+    # 工具调用协议：text=现有 [TOOL_CALL] 文本协议(默认，保证回退)；
+    # native=在 anthropic_compatible 端点用原生 tool_use(传 tools schema、收结构化块)。
+    # native 仅在 backend 为 anthropic_compatible 时生效，其余后端自动回退 text。
+    tool_protocol: str = "text"
 
 
 @dataclass
