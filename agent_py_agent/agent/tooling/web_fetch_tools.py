@@ -243,6 +243,15 @@ def _web_fetch_spec() -> ToolSpec:
             "body": "可选，请求体会按 utf-8 文本发送。",
             "max_chars": "只限制返回给模型的预览，不影响 artifact 保存。",
         },
+        parameter_schema={
+            "url": {"type": "string"},
+            "urls": {"type": "array", "items": {"type": "string"}},
+            "mode": {"type": "string", "enum": ["auto", "markdown", "text", "html", "json", "raw", "extract"]},
+            "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"]},
+            "headers": {"type": "object"},
+            "body": {"type": "string"},
+            "max_chars": {"type": "integer"},
+        },
         examples=[
             '{"tool": "web_fetch", "url": "https://example.com/docs", "mode": "markdown"}',
             '{"tool": "web_fetch", "urls": ["https://example.com/a", "https://example.com/b"], "mode": "extract"}',

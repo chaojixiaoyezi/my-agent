@@ -22,6 +22,11 @@ class ToolSpec:
     keywords: list[str]
     parameters: dict[str, str]
     parameter_details: dict[str, str] = field(default_factory=dict)
+    # 可选精确 JSON Schema 片段：{参数名: {"type": "array", "items": {...}, "enum": [...]}}。
+    # 声明了的参数走精确类型（消除 native tool_use 弱推导致的 TOOL_INVALID_ARGUMENTS），
+    # 未声明的回退到全 string 弱推导；required_parameters 列出必填参数名。
+    parameter_schema: dict[str, Any] = field(default_factory=dict)
+    required_parameters: list[str] = field(default_factory=list)
     internal_parameters: list[str] = field(default_factory=list)
     examples: list[str] = field(default_factory=list)
     effect: str = ""

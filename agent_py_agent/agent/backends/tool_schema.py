@@ -16,17 +16,29 @@ if TYPE_CHECKING:
 
 
 def tool_spec_to_input_schema(spec: ToolSpec) -> dict[str, Any]:
-    """Derive a conservative JSON Schema for one tool's parameters.
+    """Build a JSON Schema for one tool's parameters.
 
-    Every parameter becomes ``{"type": "string", "description": <中文描述>}`` and
-    ``required`` is intentionally omitted (all optional) because the source specs
-    carry no type or required-ness metadata.
+    优先采用 ``spec.parameter_schema`` 为某参数声明的精确片段（type/enum/items/...），
+    据此消除 native tool_use 弱推导导致的 TOOL_INVALID_ARGUMENTS；未声明精确 schema 的
+    参数回退到保守的 ``{"type": "string", "description": <中文描述>}``。
+    ``spec.required_parameters`` 映射到 schema 的 ``required``（仅保留真实存在的参数）。
     """
 
+    overrides = getattr(spec, "parameter_schema", None) or {}
     properties: dict[str, Any] = {}
     for name, description in spec.parameters.items():
-        properties[name] = {"type": "string", "description": str(description or "")}
-    return {"type": "object", "properties": properties}
+        override = overrides.get(name)
+        if isinstance(override, dict) and override:
+            prop = dict(override)
+            prop.setdefault("description", str(description or ""))
+            properties[name] = prop
+        else:
+            properties[name] = {"type": "string", "description": str(description or "")}
+    schema: dict[str, Any] = {"type": "object", "properties": properties}
+    required = [name for name in (getattr(spec, "required_parameters", None) or []) if name in properties]
+    if required:
+        schema["required"] = required
+    return schema
 
 
 def tool_spec_to_anthropic_tool(spec: ToolSpec) -> dict[str, Any]:
