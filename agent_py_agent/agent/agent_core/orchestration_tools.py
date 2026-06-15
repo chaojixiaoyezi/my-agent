@@ -143,7 +143,7 @@ class CreateSubagentsTool(BaseTool):
 
 def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> ToolExecutionResult:
     if not agent.config.enable_subagents:
-        return ToolExecutionResult("create_subagents", False, "配置已禁用 subagent。")
+        return ToolExecutionResult("create_subagents", False, "配置已禁用 subagent。", error_code="TOOL_UNAVAILABLE")
     items_result = _items_result(agent, params)
     if items_result is not None:
         return items_result
@@ -158,7 +158,7 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
 def _items_result(agent: SimpleAgent, params: dict[str, object]) -> ToolExecutionResult | None:
     items = create_items_from_params(params)
     if isinstance(items, str):
-        return ToolExecutionResult("create_subagents", False, items)
+        return ToolExecutionResult("create_subagents", False, items, error_code="TOOL_INVALID_ARGUMENTS")
     if items:
         return _execute_items(agent, items, params)
     return None
@@ -171,14 +171,14 @@ def _prepare_count_mode(
     params = append_parent_shared_context(agent, params)
     goal = str(params.get("goal") or "").strip()
     if not goal:
-        return ToolExecutionResult("create_subagents", False, "缺少必填参数 goal。")
+        return ToolExecutionResult("create_subagents", False, "缺少必填参数 goal。", error_code="TOOL_INVALID_ARGUMENTS")
     count = _requested_count(agent, params)
     if isinstance(count, ToolExecutionResult):
         return count
     allowed_tools = subagent_allowed_tools(params)
     validation = _validate_single_goal(ValidateSingleGoalRequest(agent, params, goal, allowed_tools))
     if validation:
-        return ToolExecutionResult("create_subagents", False, validation)
+        return ToolExecutionResult("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
     return count, allowed_tools, create_run_params(agent, params, goal, allowed_tools)
 
 
@@ -215,7 +215,7 @@ def _execute_items(
     allowed_tool_values = [subagent_allowed_tools(item.params) for item in capped]
     validation = _validate_items(agent, capped, allowed_tool_values)
     if validation:
-        return ToolExecutionResult("create_subagents", False, validation)
+        return ToolExecutionResult("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
     resolutions = _resolve_task_params(agent, _indexed_item_run_params(agent, capped))
     return _created_items_result(CreatedItemsResultRequest(
         agent=agent,
@@ -305,7 +305,7 @@ def _validate_single_goal(request: ValidateSingleGoalRequest) -> str:
 def _requested_count(agent: SimpleAgent, params: dict[str, object]) -> int | ToolExecutionResult:
     count = _positive_int(params.get("count"), default=0) if _has_count_param(params) else _default_requested_count(params)
     if count <= 0:
-        return ToolExecutionResult("create_subagents", False, "count 必须大于 0。")
+        return ToolExecutionResult("create_subagents", False, "count 必须大于 0。", error_code="TOOL_INVALID_ARGUMENTS")
     max_subagents = _configured_max_subagents(agent)
     return min(count, max_subagents) if max_subagents > 0 else count
 

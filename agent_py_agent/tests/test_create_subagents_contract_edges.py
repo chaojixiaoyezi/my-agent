@@ -74,3 +74,25 @@ def test_researcher_role_gets_web_tools_by_default():
     assert result.ok is True
     assert "web_search" in params.allowed_tools
     assert "web_fetch" in params.allowed_tools
+
+
+def test_invalid_items_returns_precise_code_not_unknown():
+    # 真实任务回归(realtask-07 子代理协作, M3 实测): items 传错格式(非 JSON 数组/空)时
+    # create_subagents 失败必须返回 TOOL_INVALID_ARGUMENTS, 不能漏 error_code 而 fallback 成
+    # UNKNOWN_ERROR(retryable=False)误导弱模型放弃派工。是 read_artifact UNKNOWN_ERROR 同族。
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    result = CreateSubagentsTool(_mock_items_agent()).execute({"items": []})
+    assert result.ok is False
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+
+
+def test_disabled_subagents_returns_tool_unavailable():
+    # 禁用 subagent 时是"能力不可用"而非参数错; 也不能 fallback 成 UNKNOWN_ERROR。
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    mock_agent = _mock_items_agent()
+    mock_agent.config.enable_subagents = False
+    result = CreateSubagentsTool(mock_agent).execute({"goal": "x"})
+    assert result.ok is False
+    assert result.error_code == "TOOL_UNAVAILABLE"

@@ -91,8 +91,8 @@ class ScheduleChildSubagentsTool(BaseTool):
         )
 
 
-def _schedule_error(message: str) -> ToolExecutionResult:
-    return ToolExecutionResult("schedule_child_subagents", False, message)
+def _schedule_error(message: str, code: str = "TOOL_INVALID_ARGUMENTS") -> ToolExecutionResult:
+    return ToolExecutionResult("schedule_child_subagents", False, message, error_code=code)
 
 
 def _schedule_validation_error_message(exc: Exception) -> str:
