@@ -536,6 +536,11 @@ class ShellTool(BaseTool):
             result = self._run_command(command, target, timeout)
             output = _format_process_result(result, self.max_output_chars)
             ok = result.returncode == 0
+            if not ok:
+                output += (
+                    f"\n[note] 命令已成功执行,退出码 {result.returncode} 非零。若是测试/检查/grep/diff 类命令,"
+                    "非零退出通常表示用例失败或无匹配,而非命令本身故障——请看上方 stdout/stderr 定位并修正,不要当作工具不可用。"
+                )
             return output, ok, "" if ok else "COMMAND_FAILED"
         except subprocess.TimeoutExpired:
             return f"TOOL_TIMEOUT: 命令执行超时 timeout ({timeout}s): {command[:100]}...", False, "TOOL_TIMEOUT"
