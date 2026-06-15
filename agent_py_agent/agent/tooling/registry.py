@@ -352,10 +352,14 @@ def _tool_call_protocol(tool_protocol: str = "text") -> str:
 
 def _native_tool_call_protocol() -> str:
     # native 协议下模型直接用结构化 tool_use 调工具，不需要教它写 [TOOL_CALL] 文本格式。
+    # 明确禁止退回文本协议：弱模型有训练惯性，偶尔会在正文里写 [TOOL_CALL]{...} 文本而非发起
+    # 结构化调用，导致解析失败(TOOL_CALL_JSON_INVALID/UNCLOSED)。这条正向约束是低风险缓解，
+    # 治本需历史 messages 完全结构化(对标 长期助手，红线区大工程，单独立项)。
     return (
         "# Tools\n"
         "当你需要看文件、改代码、查网页或测接口时，可以调用工具。\n"
         "本会话已启用原生工具调用：直接发起结构化工具调用即可，参数按下方 Tool Catalog 中各工具的参数名填写。\n"
+        "重要：必须用原生工具调用机制发起调用；不要把工具调用写成正文里的文本 JSON 块，那样不会被执行。\n"
         "拿到工具结果后再输出最终答案。"
     )
 

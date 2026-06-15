@@ -95,6 +95,42 @@ class TestWebSearchTool:
         assert result.ok is False
         assert "query" in result.output
 
+    def test_web_search_provider_failures_return_unavailable(self, tmp_path: Path):
+        """所有 provider 抛异常(反爬/网络)→ TOOL_UNAVAILABLE，明确是工具失败。"""
+        from agent_py_agent.agent.tooling.web_search import WebSearchProvider, WebSearchTool
+
+        class BrokenProvider(WebSearchProvider):
+            name = "broken"
+
+            def search(self, query: str, limit: int):
+                raise RuntimeError("provider down")
+
+        tool = WebSearchTool(max_results=5, timeout=10, providers=[BrokenProvider()])
+        result = tool.execute({"query": "anything", "limit": 3})
+
+        assert result.ok is False
+        assert result.error_code == "TOOL_UNAVAILABLE"
+        assert json.loads(result.output)["provider_failures"]
+
+    def test_web_search_empty_results_without_failures_is_ok(self, tmp_path: Path):
+        """provider 正常响应但无匹配→ ok=True 空结果+引导，不误判为工具不可用。"""
+        from agent_py_agent.agent.tooling.web_search import WebSearchProvider, WebSearchTool
+
+        class EmptyProvider(WebSearchProvider):
+            name = "empty"
+
+            def search(self, query: str, limit: int):
+                return []
+
+        tool = WebSearchTool(max_results=5, timeout=10, providers=[EmptyProvider()])
+        result = tool.execute({"query": "veryrarequerynohits", "limit": 3})
+
+        assert result.ok is True
+        payload = json.loads(result.output)
+        assert payload["results"] == []
+        assert payload["provider_failures"] == []
+        assert "note" in payload
+
     @patch("urllib.request.urlopen")
     def test_web_search_filters_allowed_domains(self, mock_urlopen, tmp_path: Path):
         """搜索结果应支持结构化域名过滤，避免只靠提示词约束来源。"""

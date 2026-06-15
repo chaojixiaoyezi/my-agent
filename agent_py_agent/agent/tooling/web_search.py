@@ -340,7 +340,13 @@ class WebSearchTool(BaseTool):
         provider_result = _search_with_providers(self.providers, request.query, request.limit)
         if not provider_result.rows:
             payload = {"query": request.query, "provider_failures": provider_result.failures}
-            return ToolExecutionResult("web_search", False, json.dumps(payload, ensure_ascii=False), error_code="TOOL_UNAVAILABLE")
+            if provider_result.failures:
+                # 所有 provider 都抛异常(网络/HTTP/反爬挑战)→ 工具暂时不可用,可重试或改用 web_fetch
+                return ToolExecutionResult("web_search", False, json.dumps(payload, ensure_ascii=False), error_code="TOOL_UNAVAILABLE")
+            # provider 正常响应但查询无匹配→不是工具故障,是"搜索无结果";ok=True 避免被当成工具坏了而放弃
+            payload["results"] = []
+            payload["note"] = "搜索无匹配结果(也可能是来源限流返回空)。换更具体/不同关键词重试,或改用 web_fetch 直接抓已知 URL。"
+            return ToolExecutionResult("web_search", True, json.dumps(payload, ensure_ascii=False, sort_keys=True))
         results = _normalized_provider_results(provider_result)
         results = _filter_search_results(results, allowed_domains=request.allowed_domains, blocked_domains=request.blocked_domains)
         payload = _search_payload(provider_result, request, _dedupe_search_results(results, request.limit))
