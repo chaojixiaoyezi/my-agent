@@ -344,7 +344,32 @@ def _declared_ref_missing(text: str, workspace_root: str) -> bool:
         if not workspace_root:
             return False
         path = Path(workspace_root) / path
-    return not path.exists()
+    if path.exists():
+        return False
+    # 兜底对账(R4 子项③韧性): 声明路径不存在时,用其尾部(父目录段+文件名)在该子代理
+    # workspace_root 内做后缀匹配——命中说明"声明路径前缀打错字(如用户名/深目录拼写错)但产物
+    # 真写出来了",不记缺失,避免一个拼写错让交付死循环 rework(违背永不停机)。用后缀匹配(非纯
+    # basename)避免 requirements.txt 等常见名跨目录误命中;找不到才是真缺失(护"声明40实交1")。
+    return not _declared_product_in_workspace(path, workspace_root)
+
+
+# 函数用途: 用声明路径尾部(父目录段+basename)在 workspace_root 内做后缀匹配(兜底对账,
+#   比纯 basename 严,避免常见文件名跨目录误命中)。
+def _declared_product_in_workspace(declared: Path, workspace_root: str) -> bool:
+    root = Path(workspace_root)
+    if not workspace_root or not root.is_dir():
+        return False
+    try:
+        candidates = list(root.rglob(declared.name))
+    except OSError:
+        return False
+    parent_name = declared.parent.name
+    return any(_product_suffix_matches(found, parent_name) for found in candidates)
+
+
+# 函数用途: 判断候选文件是否匹配声明产物尾部(是文件且父目录段一致/无父目录段约束)。
+def _product_suffix_matches(found: Path, parent_name: str) -> bool:
+    return found.is_file() and (not parent_name or found.parent.name == parent_name)
 
 
 def _has_open_capability_request(item: dict[str, Any]) -> bool:
