@@ -207,7 +207,12 @@ class LogOpsStore:
         if not self.candidates_path.exists():
             return []
         stop = None if limit is None else offset + limit
-        with self.candidates_path.open("r", encoding="utf-8") as handle:
+        # errors="ignore":daemon 是并发单写者,poll 读到的可能是一条多字节字符刚写一半的
+        # 行(O_APPEND 单次 write 对 >PIPE_BUF 的 blob 仍可能被读者看到截断尾)。严格 utf-8
+        # 会抛 UnicodeDecodeError,无 error_code 逃逸成 UNKNOWN_ERROR(retryable=False)误导
+        # 模型放弃值班(2 小时真机实锤);忽略坏字节只损这一行的尾巴,与"坏行跳过"同口径,
+        # 下一拍 daemon 写完整后再 poll 即完整,不丢候选(count 同样按 \n 数,游标对得上)。
+        with self.candidates_path.open("r", encoding="utf-8", errors="ignore") as handle:
             window = islice(handle, offset, stop)
             return [payload for line in window if (payload := _parse_jsonl_line(line)) is not None]
 

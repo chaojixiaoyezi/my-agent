@@ -231,3 +231,57 @@ def test_sources_coercion_from_json_string(tmp_path: Path) -> None:
     assert _coerce_sources('["/a.log", "/b.log"]') == ["/a.log", "/b.log"]
     assert _coerce_sources("/a.log, /b.log") == ["/a.log", "/b.log"]
     assert _coerce_sources(["/a.log"]) == ["/a.log"]
+
+
+# ----------------------- 失败路径:精确错误码,绝不逃逸成 UNKNOWN_ERROR -----------------------
+
+
+def test_alert_poll_tolerates_partial_multibyte_candidate_line(tmp_path: Path) -> None:
+    # 根因实锤:并发 daemon 写候选时 poll 读到半截多字节/非法 utf-8 行,严格 utf-8 会抛
+    # UnicodeDecodeError 逃逸成 UNKNOWN_ERROR(retryable=False)误导模型放弃值班。读容错后:
+    # 坏行被跳过,好行照常返回,ok=True,不报错。
+    store = LogOpsStore(tmp_path / ".log_ops", "default")
+    store.ensure_dirs()
+    store.candidates_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(store.candidates_path, "wb") as handle:
+        handle.write(b'{"alert_id": "A1"}\n')
+        handle.write(b"\xff\xfe partial multibyte tail \n")  # 坏字节行
+        handle.write(b'{"alert_id": "A2"}\n')
+    result = LogAlertPollTool(tmp_path).execute({"limit": 10})
+    assert result.ok is True
+    assert result.error_code is None or result.error_code == ""
+    payload = json.loads(result.output)
+    assert [a["alert_id"] for a in payload["alerts"]] == ["A1", "A2"]
+
+
+def test_alert_poll_first_poll_empty_is_ok_not_error(tmp_path: Path) -> None:
+    # 首次 poll(还没起过 daemon、无候选文件)是正常空返回,不是错误。
+    result = LogAlertPollTool(tmp_path).execute({})
+    assert result.ok is True
+    payload = json.loads(result.output)
+    assert payload["returned"] == 0
+    assert payload["candidates_total"] == 0
+
+
+def test_log_ops_tool_runtime_exception_gets_precise_code_not_unknown(tmp_path: Path) -> None:
+    # 任何从业务逻辑逃逸的运行时异常都被基类收口成精确可重试码(TOOL_EXECUTION_FAILED),
+    # 而不是裸异常 → 框架兜底 UNKNOWN_ERROR(retryable=False)。
+    class _BoomPoll(LogAlertPollTool):
+        def _run(self, params):
+            raise OSError("simulated disk failure mid-poll")
+
+    result = _BoomPoll(tmp_path).execute({})
+    assert result.ok is False
+    assert result.error_code == "TOOL_EXECUTION_FAILED"
+    assert result.error_code != "UNKNOWN_ERROR"
+
+
+def test_log_ops_tool_lookup_error_maps_to_invalid_arguments(tmp_path: Path) -> None:
+    # 入参类异常(KeyError/ValueError/TypeError)归一到 TOOL_INVALID_ARGUMENTS(改参可重试)。
+    class _BoomPoll(LogAlertPollTool):
+        def _run(self, params):
+            raise KeyError("missing required key")
+
+    result = _BoomPoll(tmp_path).execute({})
+    assert result.ok is False
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"

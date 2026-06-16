@@ -80,13 +80,42 @@ def _err(tool: str, code: str, message: str, extra: dict[str, Any] | None = None
 
 
 class _LogOpsTool(BaseTool):
-    """共享 workspace_root + store 派生的基类。"""
+    """共享 workspace_root + store 派生的基类。
+
+    execute 是统一的「带精确错误码」入口:子类只实现 _run(纯业务),任何从 _run 逃逸
+    的异常都在这里收口成已注册的精确码,绝不让裸异常回落到 UNKNOWN_ERROR(retryable=False)。
+    根因(log_alert_poll 2 小时真机实锤):并发 daemon 写候选时 poll 读到半截多字节行 →
+    UnicodeDecodeError 逃逸 → 无 error_code → 框架兜底 UNKNOWN_ERROR(不可重试)误导模型
+    放弃值班。store 层已让读容错(errors="ignore"),这里再兜底所有 IO/状态类异常:
+    LookupError/ValueError/TypeError 多半是入参问题 → TOOL_INVALID_ARGUMENTS(改参可重试);
+    其余(OSError/解码/JSON 等运行时异常)→ TOOL_EXECUTION_FAILED(原样可重试)。两者都
+    retryable=True,模型会重试而非放弃。
+    """
 
     def __init__(self, workspace_root: Path):
         self.workspace_root = Path(workspace_root).resolve()
 
     def store(self, params: dict[str, Any]) -> LogOpsStore:
         return _store(self.workspace_root, _monitor_id(params))
+
+    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+        try:
+            return self._run(params if isinstance(params, dict) else {})
+        except (LookupError, ValueError, TypeError) as exc:
+            return _err(
+                self.spec.name,
+                "TOOL_INVALID_ARGUMENTS",
+                f"{self.spec.name} 参数无效或缺失:{exc}",
+            )
+        except Exception as exc:  # noqa: BLE001 — 任何运行时异常都给精确可重试码,不逃逸成 UNKNOWN_ERROR
+            return _err(
+                self.spec.name,
+                "TOOL_EXECUTION_FAILED",
+                f"{self.spec.name} 执行时发生可恢复异常:{exc}",
+            )
+
+    def _run(self, params: dict[str, Any]) -> ToolExecutionResult:
+        raise NotImplementedError
 
 
 class LogMonitorStartTool(_LogOpsTool):
@@ -130,7 +159,7 @@ class LogMonitorStartTool(_LogOpsTool):
         ],
     )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _run(self, params: dict[str, Any]) -> ToolExecutionResult:
         sources = _coerce_sources(params.get("sources"))
         if not sources:
             return _err(
@@ -172,7 +201,7 @@ class LogMonitorStatusTool(_LogOpsTool):
         examples=['{"tool": "log_monitor_status"}'],
     )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _run(self, params: dict[str, Any]) -> ToolExecutionResult:
         store = self.store(params)
         liveness = manager.daemon_liveness(store)
         recon = manager.reconciliation(store)
@@ -237,7 +266,7 @@ class LogAlertPollTool(_LogOpsTool):
         examples=['{"tool": "log_alert_poll", "limit": 20}'],
     )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _run(self, params: dict[str, Any]) -> ToolExecutionResult:
         store = self.store(params)
         limit = _coerce_int(params.get("limit"), default=_DEFAULT_POLL_LIMIT, lo=1, hi=_MAX_POLL_LIMIT)
         peek = _coerce_bool(params.get("peek"), default=False)
@@ -310,7 +339,7 @@ class LogSourceQueryTool(_LogOpsTool):
         ],
     )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _run(self, params: dict[str, Any]) -> ToolExecutionResult:
         source = str(params.get("source") or "").strip()
         pattern = str(params.get("pattern") or "")
         if not source or not pattern:
@@ -351,7 +380,7 @@ class LogArchiveStatsTool(_LogOpsTool):
         examples=['{"tool": "log_archive_stats"}'],
     )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _run(self, params: dict[str, Any]) -> ToolExecutionResult:
         store = self.store(params)
         recon = manager.reconciliation(store)
         payload = {
@@ -387,7 +416,7 @@ class LogMonitorStopTool(_LogOpsTool):
         examples=['{"tool": "log_monitor_stop"}'],
     )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _run(self, params: dict[str, Any]) -> ToolExecutionResult:
         result = manager.stop_daemon(self.store(params))
         return _ok(self.spec.name, result)
 
