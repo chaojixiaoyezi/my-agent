@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..common.json_io import locked_json_path, write_json_file_atomic_unlocked
 from .exceptions import ConcurrencyConflictError
 
 if TYPE_CHECKING:
@@ -30,7 +31,11 @@ class OptimisticLock:
 
     def acquire(self, task_id: str) -> int:
         lock_path = self._get_lock_path(task_id)
+        return self._read_version(lock_path)
 
+    def _read_version(self, lock_path: Path) -> int:
+        """读当前版本号(缺失/损坏 → 1)。在 flock 临界区内复用,保证读到的是
+        没有被其它进程写到一半的完整记录。"""
         if lock_path.exists():
             try:
                 data = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -49,21 +54,25 @@ class OptimisticLock:
         lock_path = self._get_lock_path(task_id)
         self._ensure_task_dir(task_id)
 
-        current_version = self.acquire(task_id)
-        if current_version != expected_version:
-            raise ConcurrencyConflictError(
-                task_id=task_id,
-                expected_version=expected_version,
-                actual_version=current_version,
-            )
+        # 读-查-写整体套 flock(LOCK_EX),真正的 CAS:两进程同读 version=N 时,
+        # 后到者必然在 acquire 同一把 OS 锁后才能进来,届时读到的已是 N+1,
+        # 校验失败抛冲突——杜绝"两边都自以为成功"的丢更新(H4)。
+        with locked_json_path(lock_path):
+            current_version = self._read_version(lock_path)
+            if current_version != expected_version:
+                raise ConcurrencyConflictError(
+                    task_id=task_id,
+                    expected_version=expected_version,
+                    actual_version=current_version,
+                )
 
-        new_version = expected_version + 1
-        data = {
-            "version": new_version,
-            "updated_at": time.time(),
-        }
-        lock_path.write_text(json.dumps(data), encoding="utf-8")
-        return new_version
+            new_version = expected_version + 1
+            data = {
+                "version": new_version,
+                "updated_at": time.time(),
+            }
+            write_json_file_atomic_unlocked(lock_path, data)
+            return new_version
 
     def get_version(self, task_id: str) -> int:
         return self.acquire(task_id)
@@ -76,7 +85,10 @@ class OptimisticLock:
             "version": version,
             "updated_at": time.time(),
         }
-        lock_path.write_text(json.dumps(data), encoding="utf-8")
+        # 与 release 同一把锁,原子落盘:set_version 是无条件覆写,但仍走原子
+        # temp+replace,避免写一半被并发读到半截 JSON(acquire 读会判损坏退化为 1)。
+        with locked_json_path(lock_path):
+            write_json_file_atomic_unlocked(lock_path, data)
 
     def remove_lock(self, task_id: str) -> bool:
         lock_path = self._get_lock_path(task_id)

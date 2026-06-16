@@ -17,7 +17,7 @@ from .io import (
     append_gateway_history,
     gateway_response_path,
     read_json_file_report,
-    write_json_file,
+    write_json_file_atomic,
 )
 from .lease_service import is_heartbeat_alive_for_request
 from .logging import GatewayIndexPayloadOptions, _index_gateway_payload
@@ -252,5 +252,5 @@ def materialize_missing_archive(target_folder: Path, request_id: str, response: 
         "completed_at": response.get("ended_at", time.time()),
         "archive_note": "request file was already moved or removed before final archive",
     }
-    write_json_file(target, payload)
+    write_json_file_atomic(target, payload)
     return target

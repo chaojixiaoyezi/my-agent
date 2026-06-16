@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..io import append_jsonl
 from ..runtime_errors import runtime_error_report
 from .paths import resolve_audit_paths
 from .records import (
@@ -84,9 +85,11 @@ class AuditLogger:
         )
 
     def _write_to_file(self, entry: AuditEntry) -> None:
-        line = json.dumps(entry.to_dict(), ensure_ascii=False)
-        with open(self._audit_file, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        # H5:裸 open("a")+write 无锁,两线程/进程并发 log 会行内交错出半行 JSON。
+        # 改走 io.jsonl.append_jsonl(threading.Lock + fcntl.flock LOCK_EX 双层),
+        # 每条记录作为完整一行落盘。格式不变:ensure_ascii=False、不排序键、一行一条
+        # (append_jsonl 默认 sort_keys=False),与原 json.dumps(...) 完全一致。
+        append_jsonl(self._audit_file, entry.to_dict())
 
     def _write_to_local_store(self, entry: AuditEntry) -> None:
         try:

@@ -17,7 +17,7 @@ from .io import (
     append_gateway_history,
     gateway_response_path,
     read_json_file_report,
-    write_json_file,
+    write_json_file_atomic,
 )
 from .logging import _report_gateway_side_effect_error, log_gateway_payload
 from .paths import GatewayPaths
@@ -302,7 +302,7 @@ def _requeue_stale_processing(
         }
     )
     try:
-        write_json_file(request_path, payload)
+        write_json_file_atomic(request_path, payload)
         request_path.replace(paths.inbox / request_path.name)
     except OSError as exc:
         _report_gateway_side_effect_error("requeue_gateway_request", request_path.stem, exc)
@@ -356,7 +356,7 @@ def _write_gateway_failure_response(
         response["request_load_error"] = context["request_load_error"]
     response_path = gateway_response_path(paths, request_id)
     if not response_path.exists():
-        write_json_file(response_path, response)
+        write_json_file_atomic(response_path, response)
     append_gateway_history(paths, response)
     agent = context.get("agent")
     if agent:

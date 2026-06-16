@@ -103,17 +103,28 @@ def write_text_file_atomic(path: Path, content: str) -> None:
 def write_json_file_atomic(path: Path, payload: object, *, sort_keys: bool = True) -> None:
     """Write JSON payloads via temp-file replace under a per-path lock."""
 
+    with _locked_json_path(path):
+        write_json_file_atomic_unlocked(path, payload, sort_keys=sort_keys)
+
+
+def write_json_file_atomic_unlocked(path: Path, payload: object, *, sort_keys: bool = True) -> None:
+    """temp+replace 原子写,但【不】自己取 per-path 锁。
+
+    用途:调用方已经通过 locked_json_path(path) 持有同一把锁,需要在一个更大的
+    读-改-写临界区里复用原子落盘(例如 OptimisticLock 的 CAS)。threading.Lock
+    不可重入,所以临界区内严禁再调 write_json_file_atomic(会自死锁),改调本函数。
+    """
+
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    with _locked_json_path(path):
-        try:
-            tmp.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=sort_keys) + "\n",
-                encoding="utf-8",
-            )
-            _replace_with_retry(tmp, path)
-        finally:
-            _unlink_tmp_file(tmp)
+    try:
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=sort_keys) + "\n",
+            encoding="utf-8",
+        )
+        _replace_with_retry(tmp, path)
+    finally:
+        _unlink_tmp_file(tmp)
 
 
 def read_jsonl_objects(path: Path) -> list[dict[str, Any]]:
@@ -190,6 +201,18 @@ def _path_lock(path: Path) -> threading.Lock:
             lock = threading.Lock()
             _JSON_FILE_LOCKS[key] = lock
         return lock
+
+
+@contextmanager
+def locked_json_path(path: Path):
+    """公开的"线程锁 + fcntl.flock(LOCK_EX)"双层临界区(与 io/jsonl.py 同手法)。
+
+    供需要把 读-改-写 整段做成原子的调用方使用(如 OptimisticLock 的 CAS):
+    进入即对 path 的 per-path 线程锁 + 同名 .lock 文件的 OS 排他锁双重持有,
+    退出释放。临界区内落盘请用 write_json_file_atomic_unlocked(锁已持有)。"""
+
+    with _locked_json_path(path):
+        yield
 
 
 @contextmanager
