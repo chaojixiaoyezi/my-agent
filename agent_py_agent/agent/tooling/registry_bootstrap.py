@@ -24,6 +24,7 @@ from .models import (
 )
 from .process_tools import KillProcessTool, ListProcessesTool, ProcessStatusTool
 from .shell import ShellTool, ShellToolOptions
+from .vision_tools import AnalyzeImageTool, VisionModelConfig
 from .web import WebFetchTool
 from .web_search import WebSearchTool
 
@@ -88,8 +89,19 @@ def build_tool_retriever(params: Any) -> HybridToolRetriever:
 def register_base_tools(registry: Any, params: Any) -> None:
     _register_filesystem_tools(registry, params)
     _register_network_tools(registry, params)
+    _register_vision_tools(registry, params)
     registry.register(SubmitForAcceptanceTool())
     _register_security_tools(registry)
+
+
+def _register_vision_tools(registry: Any, params: Any) -> None:
+    """注册看图工具 analyze_image(短板6 视觉理解)。
+
+    视觉是可选加法:vision_config 为 None 时给一个空 VisionModelConfig,工具照常注册,
+    但调用时返回 TOOL_UNAVAILABLE 带配置指引——没配视觉模型对现有流程零影响、不崩。
+    """
+    vision_config = getattr(params, "vision_config", None) or VisionModelConfig()
+    registry.register(AnalyzeImageTool(vision_config))
 
 
 def _register_filesystem_tools(registry: Any, params: Any) -> None:

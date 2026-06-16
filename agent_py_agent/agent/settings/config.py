@@ -148,6 +148,18 @@ class _ToolConfigFields:
     #   {server_name: {command: str, args: [..], env: {..}, timeout: int, connect_timeout: int}}
     # 默认空 = 不连任何 server、不起任何子进程(零开销)。仅 stdio 传输(JSON-RPC over stdio)。
     mcp_servers: dict[str, Any] = field(default_factory=dict)
+    # 视觉理解(短板6)：辅助视觉模型配置,让 analyze_image 工具能看图(分析图片内容)。
+    # my-agent 主模型不一定支持视觉,所以走独立的 anthropic_compatible 视觉端点:把图片转成
+    # anthropic image block 调它返回分析。默认全空 = 未配视觉模型 → analyze_image 返回
+    # TOOL_UNAVAILABLE(可选加法,零默认影响,不影响任何现有工具)。
+    # vision_api_base + vision_model_name 都非空才算"已配";vision_api_key 空则复用主模型 api_key
+    # (视觉模型与主模型常同源同 key);vision_anthropic_version 空则复用主模型 anthropic_version。
+    vision_api_base: str = ""
+    vision_api_key: str = ""
+    vision_model_name: str = ""
+    vision_anthropic_version: str = ""
+    vision_request_timeout: int = 120
+    vision_max_tokens: int = 1024
 
 
 @dataclass

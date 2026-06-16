@@ -98,6 +98,9 @@ class ToolRegistryParams:
     runtime_guard_policy: object | None = None
     # MCP 客户端(短板6)：要连接的外部 MCP server 声明。默认空 = 不连、不起子进程(零开销)。
     mcp_servers: dict[str, Any] | None = None
+    # 视觉理解(短板6)：辅助视觉模型配置(VisionModelConfig)。默认 None = 未配视觉模型,
+    # analyze_image 注册但调用时返回 TOOL_UNAVAILABLE(可选加法,零默认影响)。
+    vision_config: Any | None = None
 
 
 class ListToolsTool(BaseTool):

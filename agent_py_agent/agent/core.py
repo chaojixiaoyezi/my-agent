@@ -94,6 +94,7 @@ from .settings.runtime_guard_config import runtime_guard_policy
 from .subagents.manager import SubAgentManager
 from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .tooling.registry_payload_normalize import tool_payload_limits_from_config
+from .tooling.vision_tools import vision_config_from_agent_config
 from .user_space.home_indexes import register_owner_ref
 from .user_space.home_layout import ensure_my_agent_home, home_paths
 from .user_space.owner_policy import resolve_effective_owner_policy
@@ -274,6 +275,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             artifact_root=runtime_owner_root(agent),
             runtime_guard_policy=getattr(agent, "runtime_guard_policy", None),
             mcp_servers=dict(getattr(config, "mcp_servers", {}) or {}),
+            vision_config=vision_config_from_agent_config(config),
         )
     )
 

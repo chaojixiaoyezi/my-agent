@@ -717,6 +717,25 @@ tool_protocol: "native"
 #   mcp_servers: {"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}, "timeout": 120}}
 mcp_servers: {}
 
+# 视觉理解（短板6）：辅助视觉模型配置，让 analyze_image 工具能看图（分析图片内容）。
+# my-agent 主模型（MiniMax-M2.7）不一定支持视觉，所以走一个独立的 anthropic_compatible 视觉端点：
+# analyze_image 把图片（本地路径或 http/https URL）转成 anthropic image block 调它，返回内容分析。
+# - URL 取图复用 web_fetch/browser 同一套 SSRF 防护，默认拒私网/内网/云 metadata 地址。
+# - 仅识别真实 PNG/JPEG/WebP/GIF（按文件二进制头判定，与扩展名无关），有 10 MB 大小上限。
+# - 可选加法：vision_api_base 与 vision_model_name 都填了才算“已配”；二者任一为空 = 未配视觉模型，
+#   analyze_image 仍注册但调用时返回 TOOL_UNAVAILABLE（带配置指引），对现有流程零影响、不崩。
+# - vision_api_key 留空则复用上面的主模型 api_key（视觉模型与主模型常同源同一把 key）；
+#   vision_anthropic_version 留空则复用主模型 anthropic_version。
+# 例（MiniMax 视觉模型，和主模型同源时只需填 base + model_name）：
+#   vision_api_base: "https://api.minimaxi.com/anthropic"
+#   vision_model_name: "MiniMax-VL-01"
+vision_api_base: ""
+vision_api_key: ""
+vision_model_name: ""
+vision_anthropic_version: ""
+vision_request_timeout: 120
+vision_max_tokens: 1024
+
 # Chat / CLI 默认展示和读取预算：
 # - 这些配置控制命令默认显示多少、交互历史带多少、长文本折叠多少。
 # - 后续前端配置页也应读取这些真实后端字段，而不是另写一套默认值。
