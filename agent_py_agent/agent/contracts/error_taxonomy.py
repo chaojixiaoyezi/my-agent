@@ -136,6 +136,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="shell 命令返回非零状态；读取 stdout/stderr，修正命令或换成更可靠的专用工具。",
     ),
+    "COMMAND_TOO_LONG": ErrorContract(
+        code="COMMAND_TOO_LONG",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="run_command 命令字符串超出长度上限；命令本身合法，拆成多条 run_command 分别执行，或改用 write_file 写文件，不要改参数格式。",
+    ),
     "USE_WAIT_FOR_DELAY": ErrorContract(
         code="USE_WAIT_FOR_DELAY",
         category="tool",

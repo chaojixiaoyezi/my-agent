@@ -54,6 +54,15 @@ def _is_dangerous_command(command: str) -> bool:
     return not evaluate_command_policy(command, allow_shell_operators=True).allowed
 
 
+class CommandTooLongError(ValueError):
+    """command 超过 _MAX_COMMAND_CHARS：命令本身合法，只是太长，不是参数格式错。
+
+    专门区分于"空 command"(那才是参数无效 TOOL_INVALID_ARGUMENTS)，让 _parse_command
+    给出 COMMAND_TOO_LONG，引导模型拆成多条命令/改用 write_file，而不是误以为参数 schema 写错。
+    仍继承 ValueError，既有 except ValueError 调用方与 match="过长" 测试不受影响。
+    """
+
+
 def _validate_command(command: str) -> str:
     if not command:
         raise ValueError("command 不能为空")
@@ -61,8 +70,25 @@ def _validate_command(command: str) -> str:
     if not text:
         raise ValueError("command 不能为空或仅包含空白字符")
     if len(text) > _MAX_COMMAND_CHARS:
-        raise ValueError(f"command 过长，最多 {_MAX_COMMAND_CHARS} 个字符")
+        raise CommandTooLongError(
+            f"command 过长({len(text)} 字符)，最多 {_MAX_COMMAND_CHARS} 个字符；"
+            "命令本身没问题,拆成多条 run_command 分别执行,或改用 write_file 写文件。"
+        )
     return text
+
+
+def _parsed_command_or_error(tool_name: str, raw_command: object) -> str | ToolExecutionResult:
+    """校验 command,合法返回字符串,否则返回带精确 error_code 的失败结果。
+
+    too-long 走 COMMAND_TOO_LONG(命令合法但太长→拆条/换 write_file),空/空白走
+    TOOL_INVALID_ARGUMENTS(真缺必填参数)。两者分流,避免超长被误标成"参数格式错"。
+    """
+    try:
+        return _validate_command(str(raw_command or ""))
+    except CommandTooLongError as exc:
+        return ToolExecutionResult(tool_name, False, str(exc), error_code="COMMAND_TOO_LONG")
+    except ValueError as exc:
+        return ToolExecutionResult(tool_name, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
 
 
 def _pure_delay_seconds(command: str) -> int | None:
@@ -576,10 +602,7 @@ class ShellTool(BaseTool):
         return ToolExecutionResult(self.spec.name, True, json.dumps(payload, ensure_ascii=False))
 
     def _parse_command(self, params: dict[str, Any]) -> str | ToolExecutionResult:
-        try:
-            return _validate_command(str(params.get("command", "")))
-        except ValueError as exc:
-            return ToolExecutionResult(self.spec.name, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+        return _parsed_command_or_error(self.spec.name, params.get("command", ""))
 
     def _run_command(
         self,

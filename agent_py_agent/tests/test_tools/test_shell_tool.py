@@ -173,6 +173,33 @@ def test_shell_tool_command_too_long_rejected(shell_tool: ShellTool) -> None:
     assert "过长" in result.output
 
 
+def test_shell_tool_command_too_long_uses_command_too_long_code(shell_tool: ShellTool) -> None:
+    """超长命令的 error_code 应是 COMMAND_TOO_LONG 而非 TOOL_INVALID_ARGUMENTS。
+
+    真实任务回归(M3 用 run_command 跑 7 条 `cp ... && cp ...` 的链,命令字符串 2187 字符,
+    超 _MAX_COMMAND_CHARS=2000):旧实现一律 TOOL_INVALID_ARGUMENTS(暗示"参数格式错、改参数"),
+    误导模型；命令本身合法,只是太长,应给 COMMAND_TOO_LONG(change_strategy:拆条/换 write_file)。
+    """
+    result = shell_tool.execute({"command": "a" * 5000})
+    assert result.ok is False
+    assert result.error_code == "COMMAND_TOO_LONG"
+    assert result.recommended_action == "change_strategy"
+
+
+def test_shell_tool_empty_command_keeps_invalid_arguments_code(shell_tool: ShellTool) -> None:
+    """空 command 仍应是 TOOL_INVALID_ARGUMENTS(真的缺必填参数),不被 too-long 改动波及。"""
+    result = shell_tool.execute({"command": ""})
+    assert result.ok is False
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+
+
+def test_shell_tool_failing_command_keeps_command_failed_code(shell_tool: ShellTool) -> None:
+    """合法但退出非零的命令仍是 COMMAND_FAILED,与 too-long(命令没执行)区分清楚。"""
+    result = shell_tool.execute({"command": "cp /nonexistent/src /nonexistent/dst"})
+    assert result.ok is False
+    assert result.error_code == "COMMAND_FAILED"
+
+
 def test_validate_command_accepts_valid() -> None:
     """Test _validate_command accepts valid commands."""
     assert _validate_command("ls -la") == "ls -la"
