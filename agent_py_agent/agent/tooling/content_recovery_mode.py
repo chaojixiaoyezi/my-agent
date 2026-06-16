@@ -114,7 +114,7 @@ def long_content_recovery_block_context(
         f"- 输出 1 个完整闭合的机器写入块，正文建议不超过 {state.max_chunk_chars} 字符，硬上限 {hard_limit} 字符。",
         "- 优先用独立成行的 WRITE_FILE_RAW 原文块；也可以用 write_file JSON 小块。",
         "- 第一块可用 mode=\"overwrite\" 重启同一路径，后续块必须用 mode=\"append\"。",
-        "- 每块闭合 [/TOOL_CALL] 后等待工具结果，不要一次塞完整报告正文。",
+        "- 每块完整闭合后（WRITE_FILE_RAW 用 [/WRITE_FILE_RAW] 收尾；JSON write_file 是一个完整工具调用）等待工具结果，不要一次塞完整报告正文。",
     ]
     return "\n".join(lines)
 

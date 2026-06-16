@@ -162,7 +162,9 @@ class SearchTextTool(FileSystemTool):
             request = search_request_from_params(params, self.max_matches)
             target = self.resolve_path(request.raw_path)
         except ValueError as exc:
-            return ToolExecutionResult("search_text", False, str(exc))
+            # 参数/路径解析失败→TOOL_INVALID_ARGUMENTS(改参可修)；漏码会兜底 UNKNOWN_ERROR
+            # (retryable=False)误导模型放弃。not-found 走下面 missing_path_result(PATH_NOT_FOUND)。
+            return ToolExecutionResult("search_text", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         if not target.exists():
             return missing_path_result(MissingPathRequest(
                 tool_name="search_text",
@@ -179,7 +181,9 @@ class SearchTextTool(FileSystemTool):
         try:
             matcher = SearchMatcher.from_request(request)
         except ValueError as exc:
-            return ToolExecutionResult("search_text", False, str(exc))
+            # 无效正则/匹配参数→TOOL_INVALID_ARGUMENTS(改 pattern 可修)；漏码兜底 UNKNOWN_ERROR
+            # (retryable=False)会让模型放弃整个搜索而非修正 query/pattern。
+            return ToolExecutionResult("search_text", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         if request.output_mode == "count":
             counts = _collect_counts_with_rg(self, target, request)
             if counts is None:

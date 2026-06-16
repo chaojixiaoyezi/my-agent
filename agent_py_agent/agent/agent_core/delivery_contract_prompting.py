@@ -81,8 +81,8 @@ def _artifact_guidance_lines(contract: dict[str, object]) -> list[str]:
     lines.append("- 如果 required artifact 还不存在，优先对该 artifact 的目标路径动手：创建目录、开始写入或补齐阶段产物。")
     lines.append("- 可以继续必要的检索，但应同步留下本地草稿、数据或阶段产物，避免只读检查长期空转。")
     lines.append(
-        "- 普通报告用 write_file.content 完整写入；超长文本可在 [TOOL_CALL] 外使用 "
-        "独立成行的 [WRITE_FILE_RAW path=\"...\"]...[/WRITE_FILE_RAW] 原文块，不要把 WRITE_FILE_RAW 当 JSON tool 名。"
+        "- 普通报告用 write_file.content 完整写入；超长文本可以用 "
+        "独立成行的 [WRITE_FILE_RAW path=\"...\"]...[/WRITE_FILE_RAW] 原文块（独立原文块，不要写进任何工具调用的参数里，也不要把 WRITE_FILE_RAW 当 JSON tool 名）。"
         "二进制产物用脚本生成后通过 write_file.data_base64 写入。"
     )
     lines.append("- 当你确认交付物已经准备好时，调用 submit_for_acceptance 提交验收；普通最终回复不会触发验收。")

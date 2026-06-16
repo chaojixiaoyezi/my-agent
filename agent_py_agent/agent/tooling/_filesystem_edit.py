@@ -20,6 +20,7 @@ from typing import Any
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _text_param
 from ._filesystem_read import FileSystemAccessOptions, FileSystemTool
 from ._filesystem_write import _atomic_write_bytes
+from .filesystem_path_recovery import MissingPathRequest, missing_path_result
 from .models import ToolExecutionResult, ToolSpec
 
 
@@ -87,8 +88,23 @@ class EditFileTool(FileSystemTool):
             replace_all = bool(params.get("replace_all"))
             if old == new:
                 raise ValueError("old_string 与 new_string 相同，无需编辑")
-            if not target.exists():
-                raise ValueError(f"文件不存在: {self.display_path(target)}")
+        except ValueError as exc:
+            return ToolExecutionResult("edit_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+        # 文件不存在是路径/状态问题，不是"改 old_string/new_string 格式"能修的：
+        # 旧实现把它和参数错混在一个 except 里报 TOOL_INVALID_ARGUMENTS，会让模型
+        # 反复纠结 old_string 是否匹配，而真正该做的是先创建文件(write_file)或改对路径。
+        # 分流到 PATH_NOT_FOUND(retryable，引导 list_files/search_text 重新定位)。
+        if not target.exists():
+            return missing_path_result(MissingPathRequest(
+                tool_name="edit_file",
+                raw_path=self.display_path(target),
+                target=target,
+                workspace_roots=self.workspace_roots,
+                display_path=self.display_path(target),
+                expected_kind="file",
+                retry_tool="read_file",
+            ))
+        try:
             content = target.read_text(encoding="utf-8")
             updated, strategy, count = _replace_in_content(content, old, new, replace_all=replace_all)
         except ValueError as exc:

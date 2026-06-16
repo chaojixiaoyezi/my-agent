@@ -290,8 +290,8 @@ def _write_payload(params: dict[str, Any]) -> tuple[str | None, bytes]:
     if has_text == has_base64:
         raise ValueError(
             "write_file 的 content 和 data_base64 必须二选一，且只能提供其中一个。"
-            "写普通文本报告时用 content；超长文本可在 [TOOL_CALL] 外使用 "
-            "独立成行的 [WRITE_FILE_RAW path=\"...\"]...[/WRITE_FILE_RAW] 原文块，不要把 WRITE_FILE_RAW 当 JSON tool 名。"
+            "写普通文本报告时用 content；超长文本可以用 "
+            "独立成行的 [WRITE_FILE_RAW path=\"...\"]...[/WRITE_FILE_RAW] 原文块（独立原文块，不要写进任何工具调用的参数里，也不要把 WRITE_FILE_RAW 当 JSON tool 名）。"
         )
     if has_base64:
         raw = _text_param(params.get("data_base64"), name="data_base64", max_chars=_MAX_WRITE_TEXT_CHARS)

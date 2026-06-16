@@ -10,6 +10,15 @@ from ._filesystem_write import _atomic_write_bytes
 from .models import ToolExecutionResult, ToolSpec
 
 
+class PatchTargetMissingError(ValueError):
+    """apply_patch 的 Update/Delete 目标文件不存在：是路径/状态问题，不是补丁格式错。
+
+    专门区分于补丁解析错/上下文未命中(那些才是 TOOL_INVALID_ARGUMENTS，改补丁文本可修)。
+    分流到 PATH_NOT_FOUND，引导模型先确认路径或用 read_file/list_files 定位，而不是
+    反复重写补丁文本。仍继承 ValueError，既有 except ValueError 调用方不受影响。
+    """
+
+
 def _build_apply_patch_spec() -> ToolSpec:
     return ToolSpec(
         name="apply_patch",
@@ -60,6 +69,10 @@ class ApplyPatchTool(FileSystemTool):
             patch = _text_param(params.get("patch"), name="patch", max_chars=_MAX_WRITE_TEXT_CHARS)
             changes = _parse_simple_patch(patch)
             touched = _apply_simple_patch(changes, self)
+        except PatchTargetMissingError as exc:
+            # 目标文件不存在(Update/Delete)→PATH_NOT_FOUND(改路径/先定位)，而非
+            # TOOL_INVALID_ARGUMENTS——后者会让模型反复重写补丁文本而非确认路径。
+            return ToolExecutionResult("apply_patch", False, str(exc), error_code="PATH_NOT_FOUND")
         except ValueError as exc:
             return ToolExecutionResult("apply_patch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         except OSError as exc:
@@ -189,7 +202,7 @@ def _apply_add_patch(
 
 def _apply_delete_patch(target: Path, tool: FileSystemTool, touched: list[str]) -> None:
     if not target.exists():
-        raise ValueError(f"删除文件不存在: {tool.display_path(target)}")
+        raise PatchTargetMissingError(f"删除文件不存在: {tool.display_path(target)}")
     if not target.is_file():
         raise ValueError(f"删除目标不是文件: {tool.display_path(target)}")
     target.unlink()
@@ -203,7 +216,7 @@ def _apply_update_patch(
     touched: list[str],
 ) -> None:
     if not target.exists():
-        raise ValueError(f"更新文件不存在: {tool.display_path(target)}")
+        raise PatchTargetMissingError(f"更新文件不存在: {tool.display_path(target)}")
     content = target.read_text(encoding="utf-8")
     old, new = _replacement_text(change, content, tool.display_path(target))
     updated = content.replace(old, new, 1)

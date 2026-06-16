@@ -148,7 +148,9 @@ def tool_loop_response_decision(
 ) -> ToolLoopResponseDecision:
     has_protected_marker = contains_protected_tool_marker(request.response.text)
     if has_protected_marker:
-        request.params.tool_context.append(protected_tool_marker_repair_context())
+        request.params.tool_context.append(
+            protected_tool_marker_repair_context(native=_native_tool_use_active(request.agent))
+        )
 
     if not request.agent.config.enable_tools:
         final = _disabled_tools_response(request.response, has_protected_marker)
@@ -215,25 +217,41 @@ def contains_protected_tool_marker(text: str) -> bool:
     return any(marker in lowered for marker in _PROTECTED_TOOL_MARKERS)
 
 
-def sanitize_protected_tool_marker_response(response: ModelResponse) -> ModelResponse:
+def sanitize_protected_tool_marker_response(
+    response: ModelResponse, *, native: bool = False
+) -> ModelResponse:
     if not contains_protected_tool_marker(response.text):
         return response
+    # native 下系统执行的是结构化 tool_use，不是文本 [TOOL_CALL] 块；说成「只执行真实
+    # [TOOL_CALL] 块」会把 native 模型往回引到已废弃的文本协议（弱模型有训练惯性）。
+    execution_note = (
+        "系统只会执行结构化工具调用（tool_use）。"
+        if native
+        else "系统只会执行真实 [TOOL_CALL] 块。"
+    )
     return ModelResponse(
         text=(
             "[assistant-response-omitted]\n"
             "模型回复包含系统内部的 tool-record/tool-output-record 标记，"
-            "该回复正文不进入后续 live prompt；系统只会执行真实 [TOOL_CALL] 块。"
+            f"该回复正文不进入后续 live prompt；{execution_note}"
         ),
         backend=response.backend,
     )
 
 
-def protected_tool_marker_repair_context() -> str:
+def protected_tool_marker_repair_context(*, native: bool = False) -> str:
+    # native 下纠偏措辞要指向结构化工具调用，不能教模型再写文本 [TOOL_CALL]（治根护栏：
+    # 原生协议禁止退回文本协议，纠错提示更不能反向把它带回去）。
+    reissue = (
+        "请改用结构化工具调用（tool_use）请求工具，或只基于已经存在的真实工具回执总结。"
+        if native
+        else "请改用真实 `[TOOL_CALL]...[/TOOL_CALL]` 请求工具，或只基于已经存在的真实工具回执总结。"
+    )
     return (
         "[tool-system]\n"
         "上一轮模型回复包含系统内部的 `[tool-record]` / `[tool-output-record]` 标记。"
         "这些标记只能由工具循环在真实工具执行后写入，模型不能自行书写、复制或假装工具成功。"
-        "请改用真实 `[TOOL_CALL]...[/TOOL_CALL]` 请求工具，或只基于已经存在的真实工具回执总结。"
+        f"{reissue}"
     )
 
 
@@ -273,7 +291,9 @@ def _tool_calls_decision(
     exploration_fuse = exploration_fuse_tool_call_decision(_exploration_request(request, calls))
     if exploration_fuse is not None:
         return _exploration_decision(exploration_fuse)
-    clean_response = sanitize_protected_tool_marker_response(request.response)
+    clean_response = sanitize_protected_tool_marker_response(
+        request.response, native=_native_tool_use_active(request.agent)
+    )
     return ToolLoopResponseDecision("run_tools", clean_response, calls, request.counters)
 
 

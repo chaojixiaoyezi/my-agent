@@ -55,9 +55,15 @@ from .registry_payload_normalize import (
 from .registry_resilience import ResilientToolInvokeRequest, resilient_tool_invoke
 from .registry_runtime_gate_pipeline import tool_call_gate_decision
 
+# 措辞同时适用文本协议与原生 tool_use：文本协议下重发 [TOOL_CALL]{json}[/TOOL_CALL] 块，
+# 原生协议下直接发起结构化工具调用。绝不能只教文本 [TOOL_CALL] 写法——native 模型偶尔
+# 因训练惯性写出残缺的文本 [TOOL_CALL] 才走到这条解析失败提示，再叫它写 [TOOL_CALL]
+# 文本只会把它越带越偏（治根护栏：原生协议禁止退回文本协议）。
 _PARSE_RETRY_HINT = (
-    "请重新输出标准工具调用格式：[TOOL_CALL] 后跟一个 JSON 对象，再用 [/TOOL_CALL] 结束；"
-    "不要混用未闭合的 XML 标签，也不要在 JSON 外追加正文。"
+    "请重新发起一个标准工具调用：参数放在一个 JSON 对象里，不要在 JSON 外追加正文，"
+    "也不要混用未闭合的 XML 标签。"
+    "若本会话用文本协议，写成 [TOOL_CALL] 后跟该 JSON 对象、再用 [/TOOL_CALL] 闭合；"
+    "若已启用原生工具调用，直接用结构化工具调用发起，不要把调用写成正文里的文本块。"
 )
 _PROTECTED_MARKER_PAIRS = (
     ("[SUBAGENT_RESULT]", "[/SUBAGENT_RESULT]"),
@@ -72,8 +78,8 @@ _TRUNCATED_WRITE_HINT = (
     "下一轮只输出 1 个完整机器写入块，优先用独立成行的 WRITE_FILE_RAW mode=\"append\" 原文块；"
     "如果继续用 JSON write_file，先用 mode=\"overwrite\" 写第一小块，再用同一路径 mode=\"append\" 逐块追加；"
     f"正常分块时单次 content 建议 {RECOMMENDED_WRITE_CHUNK_CHARS} 字符。"
-    "如果已经连续解析失败，下一轮只能输出 1 个 write_file 工具调用，"
-    f"content 降到不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符，闭合 [/TOOL_CALL] 后再继续下一块。"
+    "如果已经连续解析失败，下一轮只发 1 个 write_file 工具调用，"
+    f"content 降到不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符，等这个调用完整发出、拿到工具结果后再继续下一块。"
     "只有内容能完整闭合时才使用 WRITE_FILE_RAW 原文块；不要把 WRITE_FILE_RAW 当 JSON tool 名。"
 )
 _MALFORMED_OPENERS = ("[TOOL_CALL",)

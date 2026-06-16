@@ -18,6 +18,7 @@ from ._filesystem_read import (
     FileSystemAccessOptions,
     FileSystemTool,
 )
+from .filesystem_path_recovery import MissingPathRequest, missing_path_result
 from .models import ToolExecutionResult, ToolSpec
 
 
@@ -85,9 +86,21 @@ class FindFilesTool(FileSystemTool):
             request = _find_files_request_from_params(params, self.max_matches)
             target = self.resolve_path(request.raw_path)
         except ValueError as exc:
-            return ToolExecutionResult("find_files", False, str(exc))
+            # 参数/路径解析失败→TOOL_INVALID_ARGUMENTS(改参可修)；漏码会兜底 UNKNOWN_ERROR
+            # (retryable=False)误导模型放弃而非按 schema 改参重试。
+            return ToolExecutionResult("find_files", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         if not target.exists():
-            return ToolExecutionResult("find_files", False, f"路径不存在: {self.display_path(target)}")
+            # 目标路径不存在是状态问题，应带 PATH_NOT_FOUND + candidate_paths(与 list/search 一致)，
+            # 而非无码兜底 UNKNOWN_ERROR——后者让模型放弃，前者引导改用候选路径或先 list_files 定位。
+            return missing_path_result(MissingPathRequest(
+                tool_name="find_files",
+                raw_path=request.raw_path,
+                target=target,
+                workspace_roots=self.workspace_roots,
+                display_path=self.display_path(target),
+                expected_kind="any",
+                retry_tool="find_files",
+            ))
         if target.is_file():
             return self._find_in_single_file(target, request)
         return self._find_in_directory(target, request)

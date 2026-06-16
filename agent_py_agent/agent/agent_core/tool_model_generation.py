@@ -194,8 +194,34 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     # 整段丢掉——不接回来，native 模型永远收不到打回理由（弱模型写完 output 即停手、
     # closeout 判完成、续修轮蒙眼重复的根因）。孤儿净化只管 tool 块，指引在其后单独
     # 成一条 user 文本消息，Anthropic 允许连续 user 消息（合并为一轮）。
-    messages = append_runtime_guidance_user_message(messages, getattr(params, "tool_context", None))
+    # 用跨轮持有的 seen 去重集合（存 live_archive_state，随 params 在工具循环里复用同一
+    # 实例）走「全表未转发」口径：不只转发尾部，**夹在工具往返中间**、被后续 [tool-record]
+    # 越过的指引（delivery 软提醒/护栏/进度/deferred 通知/closeout 打回……）也能到达
+    # native 模型，靠精确文本去重保证每条只发一次，绝不逐轮重复。
+    messages = append_runtime_guidance_user_message(
+        messages,
+        getattr(params, "tool_context", None),
+        seen=_forwarded_guidance_seen(params),
+    )
     return messages or None
+
+
+def _forwarded_guidance_seen(params: object) -> set:
+    """返回跨轮持有的「已转发运行时指引」去重集合，挂在 ``live_archive_state`` 上。
+
+    ``live_archive_state`` 是 ``ToolLoopExecuteParams`` 里 ``default_factory=dict`` 的
+    可变字段，整个工具循环复用同一 params 实例，因此这个集合天然跨轮存活、无需新增
+    dataclass 字段。拿不到 dict（伪 params/旧调用方）时退回一个一次性空集合——此时退化为
+    单轮「全表未转发=全表」，仍不会重复，只是不跨轮记忆。
+    """
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return set()
+    seen = state.get("_forwarded_runtime_guidance")
+    if not isinstance(seen, set):
+        seen = set()
+        state["_forwarded_runtime_guidance"] = seen
+    return seen
 
 
 def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerationState, response):

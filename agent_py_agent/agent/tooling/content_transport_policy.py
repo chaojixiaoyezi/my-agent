@@ -69,7 +69,7 @@ def tool_content_transport_protocol(max_inline_chars: int = MAX_INLINE_WRITE_CON
         "<!doctype html>\n"
         "...\n"
         "[/WRITE_FILE_RAW]\n"
-        "- 注意：这是 [TOOL_CALL] 外的原文块协议，opener 和 closer 必须独立成行；它不是 JSON 工具名，普通文本报告优先用 write_file.content。\n"
+        "- 注意：这是独立的原文块协议，opener 和 closer 必须各自独立成行；它不是 JSON 工具名，也不要写进任何工具调用的参数里，普通文本报告优先用 write_file.content。\n"
         "- WRITE_FILE_RAW 会被系统转换成 write_file；正文只按机器 marker 边界读取，不做自然语言判断。\n"
         "- WRITE_FILE_RAW 也支持结构化属性 mode=\"append\"，用于把长文件分块追加到同一路径。\n"
         "- PDF、XLSX、图片、压缩包等二进制产物用脚本生成后，通过 write_file.data_base64 写入最终文件。\n"

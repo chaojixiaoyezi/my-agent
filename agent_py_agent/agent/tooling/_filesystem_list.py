@@ -46,7 +46,10 @@ class ListFilesTool(FileSystemTool):
             request = _list_files_request_from_params(params, self.max_entries)
             target = self.resolve_path(request.raw_path)
         except ValueError as exc:
-            return ToolExecutionResult("list_files", False, str(exc))
+            # 参数/路径解析失败是"改参数可修"，必须带 TOOL_INVALID_ARGUMENTS；
+            # 漏传 error_code 会被 ToolExecutionResult 兜底成 UNKNOWN_ERROR(retryable=False)，
+            # 误导模型"放弃报阻塞"而非按 schema 改参后重试。
+            return ToolExecutionResult("list_files", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         if not target.exists():
             return missing_path_result(MissingPathRequest(
                 tool_name="list_files",

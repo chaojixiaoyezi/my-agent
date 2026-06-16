@@ -232,10 +232,18 @@ def _node_terminal(node: dict[str, object]) -> bool:
 def _target(agent: object, params: dict[str, object]) -> tuple[str, str] | ToolExecutionResult:
     store = getattr(agent, "conversation_store", None)
     if store is None or not callable(getattr(store, "set_progress_policy", None)):
-        return _error("conversation_store_unavailable", "当前运行时没有会话调度存储，无法登记非阻塞提醒。")
+        return _error(
+            "conversation_store_unavailable",
+            "当前运行时没有会话调度存储，无法登记非阻塞提醒。",
+            error_code="TOOL_UNAVAILABLE",
+        )
     task_id = _task_id(agent, params)
     if not task_id:
-        return _error("task_id_required", "缺少 task_id/run_id；无法知道要稍后查看哪棵代理树。")
+        return _error(
+            "task_id_required",
+            "缺少 task_id/run_id；无法知道要稍后查看哪棵代理树。",
+            error_code="TOOL_PARAMETER_REQUIRED",
+        )
     thread_id = str(params.get("thread_id") or "").strip()
     thread = None
     if not thread_id:
@@ -271,9 +279,17 @@ def _task_id(agent: object, params: dict[str, object]) -> str:
     return str(current_subagent_run_id(agent) or getattr(agent, "_main_agent_run_id", "") or "").strip()
 
 
-def _error(code: str, message: str) -> ToolExecutionResult:
+def _error(code: str, message: str, *, error_code: str | None = None) -> ToolExecutionResult:
+    # code 是给人/日志看的语义标签(写进 payload.error)；error_code 必须是 taxonomy 已注册码，
+    # 否则 ToolExecutionResult 会把未注册的小写 code 兜底成 UNKNOWN_ERROR(retryable=False)，
+    # 误导模型"放弃报阻塞"，而 store 缺失/缺 task_id 其实是可换工具/补参数修复的。
     payload = {"ok": False, "error": code, "message": message}
-    return ToolExecutionResult(_TOOL_NAME, False, json.dumps(payload, ensure_ascii=False, indent=2), error_code=code)
+    return ToolExecutionResult(
+        _TOOL_NAME,
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code=error_code or code,
+    )
 
 
 __all__ = ["WaitTool", "build_wait_spec"]
