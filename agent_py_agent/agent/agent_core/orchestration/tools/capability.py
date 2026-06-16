@@ -63,7 +63,10 @@ class ResolveCapabilityRequestsTool(BaseTool):
         decision = str(params.get("decision") or "").strip().lower()
         reason = str(params.get("reason") or "").strip()
         if not run_id or decision not in _DECISIONS or not reason:
-            return _error_result("缺少 run_id / decision(grant|deny|accept_output_gaps) / reason。")
+            return _error_result(
+                "缺少 run_id / decision(grant|deny|accept_output_gaps) / reason。",
+                error_code="TOOL_PARAMETER_REQUIRED",
+            )
         try:
             task = self.agent.subagents.load(run_id)
         except FileNotFoundError:
@@ -360,9 +363,9 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
-# 函数用途: 统一的参数错误响应。
-def _error_result(message: str) -> ToolExecutionResult:
-    return ToolExecutionResult("resolve_capability_requests", False, message)
+# 函数用途: 统一的参数错误响应（带准确分类码，避免无码兜底成 UNKNOWN_ERROR 误导模型放弃）。
+def _error_result(message: str, *, error_code: str = "TOOL_INVALID_ARGUMENTS") -> ToolExecutionResult:
+    return ToolExecutionResult("resolve_capability_requests", False, message, error_code=error_code)
 
 
 __all__ = ["ResolveCapabilityRequestsTool"]

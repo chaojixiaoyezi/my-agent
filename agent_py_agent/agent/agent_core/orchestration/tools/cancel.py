@@ -65,22 +65,17 @@ class CancelSubagentsTool(BaseTool):
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         run_ids_result = _resolve_run_ids(self.agent, params)
         if not run_ids_result.ok:
-            return ToolExecutionResult(
-                "cancel_subagents",
-                False,
-                json.dumps(run_ids_result.error_payload, ensure_ascii=False, indent=2),
-            )
+            payload = run_ids_result.error_payload
+            return _cancel_failure(json.dumps(payload, ensure_ascii=False, indent=2), _cancel_error_code(payload))
         run_ids = run_ids_result.run_ids
         if not run_ids:
-            return ToolExecutionResult("cancel_subagents", False, "缺少 run_id/run_ids/root_id/status，未取消任何子代理。")
+            # 缺必填参数(补 run_id/run_ids/root_id/status 任一后重试)，不是无码兜底成 UNKNOWN_ERROR。
+            return _cancel_failure("缺少 run_id/run_ids/root_id/status，未取消任何子代理。", "TOOL_PARAMETER_REQUIRED")
         dry_run = bool(params.get("dry_run"))
         status_filter_result = _status_filter(params.get("status"))
         if not status_filter_result.ok:
-            return ToolExecutionResult(
-                "cancel_subagents",
-                False,
-                json.dumps(status_filter_result.error_payload, ensure_ascii=False, indent=2),
-            )
+            payload = status_filter_result.error_payload
+            return _cancel_failure(json.dumps(payload, ensure_ascii=False, indent=2), _cancel_error_code(payload))
         status_filter = status_filter_result.statuses
         targets = _filter_existing_targets(self.agent, run_ids, status_filter)
         if dry_run:
@@ -163,6 +158,21 @@ def _explicit_run_ids(params: dict[str, object]) -> list[str]:
     elif isinstance(raw_many, list):
         ids.extend(str(part).strip() for part in raw_many)
     return [item for item in ids if item]
+
+
+def _cancel_failure(output: str, error_code: str) -> ToolExecutionResult:
+    return ToolExecutionResult("cancel_subagents", False, output, error_code=error_code)
+
+
+def _cancel_error_code(error_payload: dict[str, object]) -> str:
+    """把 resolve/status 错误 payload 映射到准确分类码（避免无码兜底成 UNKNOWN_ERROR）。
+
+    - invalid_status_filter：status 取值非法，改参数可修 → TOOL_INVALID_ARGUMENTS。
+    - 其余（list_runs 抛错产出的 runtime_error_report）：运行时查询异常 → TOOL_EXECUTION_FAILED(可重试)。
+    """
+    if str(error_payload.get("error") or "") == "invalid_status_filter":
+        return "TOOL_INVALID_ARGUMENTS"
+    return "TOOL_EXECUTION_FAILED"
 
 
 def _status_filter(value: object) -> _StatusFilterResult:

@@ -220,3 +220,215 @@ def test_wait_missing_task_id_is_parameter_required():
     assert result.error_code == "TOOL_PARAMETER_REQUIRED", result.error_code
     assert result.error_code != "UNKNOWN_ERROR"
     assert result.retryable is True
+
+
+# ============================================================================
+# ntu-stage2 收口轮：编排工具族 / web HTTP / registry 畸形 payload 的错误码语义
+# （第二批"误导模型"剩余项；参照上面 read/edit/wait 同一修法）
+# ============================================================================
+
+import urllib.error  # noqa: E402
+
+from agent_py_agent.agent.core import SimpleAgent  # noqa: E402
+from agent_py_agent.agent.settings import AgentConfig  # noqa: E402
+
+
+def _agent(tmp_path: Path) -> SimpleAgent:
+    return SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+
+
+# ---- web_fetch HTTP 4xx 细分：401/403 鉴权→PERMISSION_BLOCKED(不可重试,别空转改 URL) ----
+
+
+def _http_error_result(status: int):
+    from agent_py_agent.agent.tooling.web import _format_http_error
+
+    err = urllib.error.HTTPError(url="https://api.example.com", code=status, msg="x", hdrs={}, fp=None)
+    err.read = lambda *_a, **_k: b"body"  # type: ignore[assignment]
+    return _format_http_error("web_fetch", err, 1000)
+
+
+def test_web_fetch_401_is_permission_blocked():
+    r = _http_error_result(401)
+    assert r.error_code == "PERMISSION_BLOCKED", r.error_code
+    # 鉴权失败不可重试：避免模型反复改 URL/header 空转。
+    assert r.retryable is False
+
+
+def test_web_fetch_403_is_permission_blocked():
+    r = _http_error_result(403)
+    assert r.error_code == "PERMISSION_BLOCKED", r.error_code
+    assert r.retryable is False
+
+
+def test_web_fetch_404_stays_invalid_arguments():
+    # 404 用 TOOL_INVALID_ARGUMENTS(改 URL)，不用 PATH_NOT_FOUND(其 hint 指向文件系统会误导)。
+    r = _http_error_result(404)
+    assert r.error_code == "TOOL_INVALID_ARGUMENTS", r.error_code
+
+
+def test_web_fetch_400_and_422_stay_invalid_arguments():
+    for status in (400, 422):
+        r = _http_error_result(status)
+        assert r.error_code == "TOOL_INVALID_ARGUMENTS", (status, r.error_code)
+
+
+def test_web_fetch_5xx_and_429_stay_retryable_network():
+    for status in (500, 503, 408, 429):
+        r = _http_error_result(status)
+        assert r.error_code == "NETWORK_REQUEST_FAILED", (status, r.error_code)
+        assert r.retryable is True
+
+
+# ---- raise_event：运行时 lookup/load 异常→TOOL_EXECUTION_FAILED；缺参→TOOL_PARAMETER_REQUIRED ----
+
+
+def test_raise_event_runtime_lookup_failure_is_execution_failed(tmp_path: Path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
+
+    agent = _agent(tmp_path)
+
+    def boom(_task_id):
+        raise ValueError("index broken")
+
+    monkeypatch.setattr(agent.conversation_store, "thread_for_task", boom)
+    r = RaiseEventTool(agent).execute({"task_id": "task-x", "summary": "s"})
+    assert r.ok is False
+    assert r.error_code == "TOOL_EXECUTION_FAILED", r.error_code
+    assert r.error_code != "TOOL_INVALID_ARGUMENTS"
+    assert r.retryable is True
+
+
+def test_raise_event_missing_thread_is_parameter_required(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
+
+    # 既无 thread_id 也无 task_id → 缺必填参数(不是参数无效，更不是 UNKNOWN_ERROR)。
+    r = RaiseEventTool(_agent(tmp_path)).execute({"summary": "s"})
+    assert r.ok is False
+    assert r.error_code == "TOOL_PARAMETER_REQUIRED", r.error_code
+    assert r.retryable is True
+
+
+# ---- cancel_subagents：缺选择器→TOOL_PARAMETER_REQUIRED；status 非法→TOOL_INVALID_ARGUMENTS ----
+
+
+def test_cancel_subagents_no_selector_is_parameter_required(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CancelSubagentsTool
+
+    r = CancelSubagentsTool(_agent(tmp_path)).execute({})
+    assert r.ok is False
+    assert r.error_code == "TOOL_PARAMETER_REQUIRED", r.error_code
+    assert r.error_code != "UNKNOWN_ERROR"
+
+
+def test_cancel_subagents_invalid_status_is_invalid_arguments(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CancelSubagentsTool
+
+    r = CancelSubagentsTool(_agent(tmp_path)).execute({"status": "not_a_real_status"})
+    assert r.ok is False
+    assert r.error_code == "TOOL_INVALID_ARGUMENTS", r.error_code
+    assert r.error_code != "UNKNOWN_ERROR"
+
+
+# ---- dispatch_subagents：不支持的执行开关→TOOL_INVALID_ARGUMENTS（不是 UNKNOWN_ERROR） ----
+
+
+def test_dispatch_unsupported_exec_param_is_invalid_arguments(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+    r = DispatchSubagentsTool(_agent(tmp_path)).execute({"apply": True})
+    assert r.ok is False
+    assert r.error_code == "TOOL_INVALID_ARGUMENTS", r.error_code
+    assert r.error_code != "UNKNOWN_ERROR"
+
+
+# ---- resolve_capability_requests：缺参→TOOL_PARAMETER_REQUIRED；run_id 不存在→TOOL_INVALID_ARGUMENTS ----
+
+
+def test_resolve_capability_missing_params_is_parameter_required(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import ResolveCapabilityRequestsTool
+
+    r = ResolveCapabilityRequestsTool(_agent(tmp_path)).execute({})
+    assert r.ok is False
+    assert r.error_code == "TOOL_PARAMETER_REQUIRED", r.error_code
+    assert r.error_code != "UNKNOWN_ERROR"
+
+
+def test_resolve_capability_missing_run_is_invalid_arguments(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import ResolveCapabilityRequestsTool
+
+    r = ResolveCapabilityRequestsTool(_agent(tmp_path)).execute(
+        {"run_id": "ghost-run", "decision": "grant", "reason": "ok"}
+    )
+    assert r.ok is False
+    assert r.error_code == "TOOL_INVALID_ARGUMENTS", r.error_code
+    assert r.error_code != "UNKNOWN_ERROR"
+
+
+# ---- send_guidance：缺 message/target→TOOL_PARAMETER_REQUIRED；scope 非法→TOOL_INVALID_ARGUMENTS ----
+
+
+def test_send_guidance_missing_message_is_parameter_required(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import SendGuidanceTool
+
+    r = SendGuidanceTool(_agent(tmp_path)).execute({"target_type": "agent_run", "target_id": "r1"})
+    assert r.ok is False
+    assert r.error_code == "TOOL_PARAMETER_REQUIRED", r.error_code
+    assert r.error_code != "UNKNOWN_ERROR"
+
+
+def test_send_guidance_unknown_scope_is_invalid_arguments(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import SendGuidanceTool
+
+    # target_scope 取值非法(不是 children/descendants)→改参数可修。
+    r = SendGuidanceTool(_agent(tmp_path)).execute({"message": "hi", "target_scope": "bogus_scope"})
+    assert r.ok is False
+    assert r.error_code == "TOOL_INVALID_ARGUMENTS", r.error_code
+    assert r.error_code != "UNKNOWN_ERROR"
+
+
+# ---- registry execute_call：畸形 tool 名 / payload 结构错→TOOL_CALL_PAYLOAD_INVALID(非 UNKNOWN_ERROR) ----
+
+
+def _exec_registry(tmp_path: Path, payload):
+    from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=tmp_path,
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            shell_tool_timeout=30,
+            shell_tool_output_max_chars=200,
+        )
+    )
+    return registry.execute_call(payload)
+
+
+def test_registry_empty_tool_name_is_payload_invalid(tmp_path: Path):
+    # native 下 _flatten_tool_use_block 可能产出空 tool 名(block.name 缺失) → normalize_tool_name
+    # 抛 ValueError。以前无码兜底 UNKNOWN_ERROR(告知放弃)；现在 TOOL_CALL_PAYLOAD_INVALID(重构调用)。
+    r = _exec_registry(tmp_path, {"tool": "", "x": 1})
+    assert r.ok is False
+    assert r.error_code == "TOOL_CALL_PAYLOAD_INVALID", r.error_code
+    assert r.error_code != "UNKNOWN_ERROR"
+
+
+def test_registry_control_char_tool_name_is_payload_invalid(tmp_path: Path):
+    r = _exec_registry(tmp_path, {"tool": "read\x00file"})
+    assert r.ok is False
+    assert r.error_code == "TOOL_CALL_PAYLOAD_INVALID", r.error_code
+
+
+def test_registry_non_object_payload_is_payload_invalid(tmp_path: Path):
+    # payload 不是 JSON 对象(裸列表)→结构错→TOOL_CALL_PAYLOAD_INVALID,不是 UNKNOWN_ERROR。
+    r = _exec_registry(tmp_path, ["not", "an", "object"])
+    assert r.ok is False
+    assert r.error_code == "TOOL_CALL_PAYLOAD_INVALID", r.error_code
+    assert r.error_code != "UNKNOWN_ERROR"

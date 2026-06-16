@@ -205,6 +205,23 @@ def _event_lineage_defaults(agent: SimpleAgent, task_id: str) -> dict[str, objec
     }
 
 
+# 内部失败 code（如 thread_lookup_failed）→ 错误分类码的分流：硬编码 TOOL_INVALID_ARGUMENTS
+# 会把运行时 lookup/load 异常说成"参数不合法"，把模型引去反复改参数而非重试/补必填参数。
+# 缺省回落 TOOL_INVALID_ARGUMENTS（真参数无效语义，retryable + 修参数）。
+_EVENT_ERROR_CODE_BY_INTERNAL: dict[str, str] = {
+    # 运行时写入/查找/加载异常（账本写失败、thread_for_task/subagents.load/load_thread 抛错）→
+    # 可恢复执行异常，应重试，而非纠结参数格式。
+    "observation_write_failed": "TOOL_EXECUTION_FAILED",
+    "task_thread_lookup_failed": "TOOL_EXECUTION_FAILED",
+    "thread_lookup_failed": "TOOL_EXECUTION_FAILED",
+    "subagent_task_load_failed": "TOOL_EXECUTION_FAILED",
+    # 既没有 thread_id 也没有可绑定的 task_id → 缺必填参数，补 thread_id/task_id 后重试。
+    "thread_required": "TOOL_PARAMETER_REQUIRED",
+    # 提供了 thread_id 但解析不到对应会话线程 → 改用正确 thread_id 可修（真参数无效语义）。
+    "unknown_thread": "TOOL_INVALID_ARGUMENTS",
+}
+
+
 def _event_error(
     tool: str,
     code: str,
@@ -215,7 +232,8 @@ def _event_error(
     payload = {"ok": False, "error": code, "message": message}
     if load_error:
         payload["load_error"] = load_error
-    return ToolExecutionResult(tool, False, json.dumps(payload, ensure_ascii=False, indent=2), error_code="TOOL_INVALID_ARGUMENTS")
+    error_code = _EVENT_ERROR_CODE_BY_INTERNAL.get(code, "TOOL_INVALID_ARGUMENTS")
+    return ToolExecutionResult(tool, False, json.dumps(payload, ensure_ascii=False, indent=2), error_code=error_code)
 
 
 def _load_error(exc: BaseException, context: str) -> dict[str, object]:

@@ -96,10 +96,19 @@ def _format_http_error(tool: str, exc: urllib.error.HTTPError, max_chars: int) -
     )
     if len(detail) > max_chars:
         result += "\n... 已截断"
-    # HTTP 状态错误带明确码,否则无码→fallback UNKNOWN_ERROR 误导模型放弃:
-    # 5xx/408/429 是服务器侧临时错误→可退避重试;4xx 是请求/URL 问题→改 URL/参数再试。
-    retryable_status = exc.code >= 500 or exc.code in (408, 429)
-    code = "NETWORK_REQUEST_FAILED" if retryable_status else "TOOL_INVALID_ARGUMENTS"
+    # HTTP 状态错误带明确码,否则无码→fallback UNKNOWN_ERROR 误导模型放弃。分流:
+    #   5xx/408/429 服务器侧临时错误→可退避重试(NETWORK_REQUEST_FAILED);
+    #   401/403 鉴权/授权失败→改 URL/参数也修不了，应走授权或换来源(PERMISSION_BLOCKED,
+    #     不可重试);否则让模型反复改 URL/header 空转;
+    #   其余 4xx(400/404/422 等)请求/URL 问题→改 URL/参数再试(TOOL_INVALID_ARGUMENTS)。
+    #   404 不用 PATH_NOT_FOUND:其 recovery_hint 指向 list_files/candidate_paths 等文件系统语义,
+    #     在 web 上下文会误导;改 URL(TOOL_INVALID_ARGUMENTS)才是 404 的正确恢复。
+    if exc.code >= 500 or exc.code in (408, 429):
+        code = "NETWORK_REQUEST_FAILED"
+    elif exc.code in (401, 403):
+        code = "PERMISSION_BLOCKED"
+    else:
+        code = "TOOL_INVALID_ARGUMENTS"
     return ToolExecutionResult(tool, False, result, error_code=code)
 
 

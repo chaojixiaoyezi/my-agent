@@ -112,7 +112,7 @@ def build_send_guidance_spec() -> ToolSpec:
 def _guidance_requests(agent: object, params: dict[str, object]) -> list[GuidanceToolRequest] | ToolExecutionResult:
     message = str(params.get("message") or "").strip()
     if not message:
-        return _guidance_error("缺少 message；send_guidance 只记录具体补充提示。")
+        return _guidance_error("缺少 message；send_guidance 只记录具体补充提示。", error_code="TOOL_PARAMETER_REQUIRED")
     run_ids = _target_run_ids(agent, params)
     if isinstance(run_ids, ToolExecutionResult):
         return run_ids
@@ -141,9 +141,9 @@ def _guidance_request(agent: object, params: dict[str, object]) -> GuidanceToolR
     target_type, target_id = _target_from_params(params)
     message = str(params.get("message") or "").strip()
     if not target_type or not target_id:
-        return _guidance_error("缺少 target；请提供 target:{type,id}，或 target_type + target_id。")
+        return _guidance_error("缺少 target；请提供 target:{type,id}，或 target_type + target_id。", error_code="TOOL_PARAMETER_REQUIRED")
     if not message:
-        return _guidance_error("缺少 message；send_guidance 只记录具体补充提示。")
+        return _guidance_error("缺少 message；send_guidance 只记录具体补充提示。", error_code="TOOL_PARAMETER_REQUIRED")
     sender = str(params.get("sender") or current_subagent_run_id(agent) or "main_agent").strip()
     metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
     return GuidanceToolRequest(
@@ -195,7 +195,11 @@ def _target_scope_rows(agent: object, params: dict[str, object], scope: str) -> 
             "target_scope": scope,
             "load_error": runtime_error_report(exc, context="send_guidance.target_scope"),
         }
-        return ToolExecutionResult(_TOOL_NAME, False, json.dumps(payload, ensure_ascii=False, indent=2))
+        # kernel_snapshot 运行时异常 → 可恢复执行失败(可重试/改用显式 run_ids)，
+        # 不是参数不合法；无码会兜底成 UNKNOWN_ERROR(retryable=False)误导模型放弃。
+        return ToolExecutionResult(
+            _TOOL_NAME, False, json.dumps(payload, ensure_ascii=False, indent=2), error_code="TOOL_EXECUTION_FAILED"
+        )
     return rows, anchor
 
 
@@ -236,6 +240,8 @@ def _target_from_params(params: dict[str, object]) -> tuple[str, str]:
     )
 
 
-def _guidance_error(message: str) -> ToolExecutionResult:
+def _guidance_error(message: str, *, error_code: str = "TOOL_INVALID_ARGUMENTS") -> ToolExecutionResult:
+    # 带准确分类码：缺必填参数(message/target)给 TOOL_PARAMETER_REQUIRED，取值非法给
+    # TOOL_INVALID_ARGUMENTS；无码会兜底成 UNKNOWN_ERROR(retryable=False)误导模型放弃。
     payload = {"ok": False, "error": "invalid_guidance_request", "message": message}
-    return ToolExecutionResult(_TOOL_NAME, False, json.dumps(payload, ensure_ascii=False, indent=2))
+    return ToolExecutionResult(_TOOL_NAME, False, json.dumps(payload, ensure_ascii=False, indent=2), error_code=error_code)

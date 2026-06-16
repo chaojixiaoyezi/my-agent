@@ -90,7 +90,11 @@ class DispatchSubagentsTool(BaseTool):
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         unsupported_error = _unsupported_execution_param_error(params)
         if unsupported_error:
-            return ToolExecutionResult("dispatch_subagents", False, unsupported_error)
+            # 模型传了不支持的执行开关(apply/start_runners/execute_runners) → 改参数可修，
+            # 给精确码而非无码兜底成 UNKNOWN_ERROR(否则模型以为该放弃而非移除多余参数重发)。
+            return ToolExecutionResult(
+                "dispatch_subagents", False, unsupported_error, error_code="TOOL_INVALID_ARGUMENTS"
+            )
         request = self._request(params)
         guidance_ids, guidance_errors = _persist_dispatch_guidance(self.agent, request.dispatch_params)
         cfg, router = self._router()

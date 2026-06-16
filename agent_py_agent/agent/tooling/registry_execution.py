@@ -429,7 +429,11 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     try:
         tool_name = normalize_tool_name(normalized_payload.get("tool"), limits=call.payload_limits)
     except ValueError as exc:
-        return attach_result_envelope(ToolExecutionResult("unknown", False, str(exc)), envelope)
+        # tool 名缺失/类型错/过长/含控制字符(native 下空 name 也会到这) → 调用 payload 结构错，
+        # 给精确码而非无码兜底成 UNKNOWN_ERROR(否则模型被告知"放弃"而非"重构一个完整调用")。
+        return attach_result_envelope(
+            ToolExecutionResult("unknown", False, str(exc), error_code="TOOL_CALL_PAYLOAD_INVALID"), envelope
+        )
     auth_error = _registry_auth_error(tool_name, call)
     if auth_error:
         code = _registry_auth_error_code(tool_name, call)
@@ -493,7 +497,9 @@ def _prepare_tool_payload(
         payload = payload_from_tool_call_envelope(payload)
     normalized_payload, payload_error = normalize_tool_payload(payload, limits=limits)
     if payload_error:
-        return ToolExecutionResult("unknown", False, payload_error)
+        # payload 不是合法 JSON 对象/字段名超限/含控制字符等结构错 → 给精确码而非无码兜底成
+        # UNKNOWN_ERROR(否则模型被告知"放弃"而非"按 schema 重构一个完整调用")。
+        return ToolExecutionResult("unknown", False, payload_error, error_code="TOOL_CALL_PAYLOAD_INVALID")
     assert normalized_payload is not None
     return normalized_payload
 
