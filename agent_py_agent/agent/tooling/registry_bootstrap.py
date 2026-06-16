@@ -21,6 +21,7 @@ from .models import (
     ToolSpec,
     VectorToolSearchProvider,
 )
+from .process_tools import KillProcessTool, ListProcessesTool, ProcessStatusTool
 from .shell import ShellTool, ShellToolOptions
 from .web import WebFetchTool
 from .web_search import WebSearchTool
@@ -139,6 +140,11 @@ def _register_network_tools(registry: Any, params: Any) -> None:
             ),
         )
     )
+    # 后台进程管理:管住 run_command(run_in_background=true) 起的后台进程
+    # (注册表 + 列表/查状态/杀进程组),让模型不再只剩日志文件管不了进程。
+    registry.register(ListProcessesTool())
+    registry.register(ProcessStatusTool())
+    registry.register(KillProcessTool())
     # controlled_exec is an internal tool used by capability grants.
     # flows, but ToolRegistry hides it from the default model-facing catalog.
     registry.register(ControlledExecTool())

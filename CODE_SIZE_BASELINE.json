@@ -1,7 +1,14 @@
 {
-  "generated_at": "2026-05-27T23:24:44.949623+00:00",
-  "total_findings": 38,
+  "generated_at": "2026-06-16T13:46:28.002217+00:00",
+  "total_findings": 43,
   "findings": [
+    {
+      "identity": "class:agent_py_agent/agent/tooling/shell.py:ShellTool",
+      "severity": "high-risk",
+      "kind": "class",
+      "path": "agent_py_agent/agent/tooling/shell.py",
+      "name": "ShellTool"
+    },
     {
       "identity": "file:agent_py_agent/agent/agent_core/delivery_requirement_materializer.py:delivery_requirement_materializer.py",
       "severity": "high-risk",
@@ -192,6 +199,27 @@
       "name": "_walk_candidate_items"
     },
     {
+      "identity": "nesting:agent_py_agent/agent/tooling/process_registry.py:_read_log_tail",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/tooling/process_registry.py",
+      "name": "_read_log_tail"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/tooling/process_registry.py:_wait_process_gone",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/tooling/process_registry.py",
+      "name": "_wait_process_gone"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/tooling/process_registry.py:kill",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/tooling/process_registry.py",
+      "name": "kill"
+    },
+    {
       "identity": "params:agent_py_agent/agent/contracts/artifact_collection_mapping.py:_coverage_depth_finding",
       "severity": "high-risk",
       "kind": "params",
@@ -218,6 +246,13 @@
       "kind": "params",
       "path": "agent_py_agent/agent/tooling/filesystem_path_recovery.py",
       "name": "suggest_missing_path_candidates"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/tooling/process_registry.py:register",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/tooling/process_registry.py",
+      "name": "register"
     },
     {
       "identity": "params:agent_py_agent/agent/tooling/registry_invoke.py:_execute_with_temporary_tool_context",

@@ -23,6 +23,7 @@ from agent_py_agent.agent.contracts.gates.command_policy import (
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 
 from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .process_registry import process_registry
 from .shell_delete_policy import DeleteAccessRequest, delete_target_access_error
 
 _MAX_COMMAND_CHARS = 2000
@@ -413,7 +414,7 @@ def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_ch
             "working_dir": "Optional. In restricted/workspace-write mode it must stay inside workspace roots.",
             "access_mode": f"Runtime policy is configured outside the tool as access_mode={access_mode}.",
             "output": f"Stdout/stderr are bounded previews; each stream preview defaults to {max_output_chars} chars.",
-            "run_in_background": "可选布尔,默认 false。后台模式不等待结束:用 read_file 读 output_file 看进度,完成后用 run_command 执行 kill <pid> 收尾。",
+            "run_in_background": "可选布尔,默认 false。后台模式不等待结束,立即返回 session_id+pid+output_file:用 process_status 查状态+输出、list_processes 看全部、kill_process 终止(杀整个进程组);也可 read_file 读 output_file 看完整日志。",
         },
         parameter_schema={
             "timeout": {"type": "integer", "minimum": 0},
@@ -593,11 +594,25 @@ class ShellTool(BaseTool):
             return ToolExecutionResult(self.spec.name, False, f"COMMAND_FAILED: 后台启动失败: {exc}", error_code="COMMAND_FAILED")
         handle.close()  # 子进程已持有 fd 副本,父进程关闭自己的句柄避免泄漏
         _record_background_job(jobs_dir, process.pid, command, log_path)
+        # 登记进进程内注册表,模型可用 list_processes/process_status/kill_process
+        # 按 session_id 查状态、收割、按进程组杀(避免只剩日志文件管不了进程)。
+        record = process_registry.register(
+            command=command,
+            pid=process.pid,
+            output_file=str(log_path),
+            process=process,
+            cwd=str(target),
+        )
         payload = {
             "status": "started",
+            "session_id": record.session_id,
             "pid": process.pid,
             "output_file": str(log_path),
-            "hint": "命令已在后台运行。用 read_file 读 output_file 看进度与结果;需要终止时用 run_command 执行 kill <pid>。",
+            "hint": (
+                "命令已在后台运行。用 process_status 传 session_id 查状态+最近输出,"
+                "list_processes 看所有后台进程,kill_process 传 session_id 终止(会杀整个进程组)。"
+                "也可以用 read_file 直接读 output_file 看完整日志。"
+            ),
         }
         return ToolExecutionResult(self.spec.name, True, json.dumps(payload, ensure_ascii=False))
 

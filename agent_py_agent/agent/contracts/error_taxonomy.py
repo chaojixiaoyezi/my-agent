@@ -150,6 +150,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.WAIT.value,
         recovery_hint="纯延迟等待不要通过 shell 执行；使用 wait 登记进度查看提醒，避免本地进程阻塞。",
     ),
+    "PROCESS_NOT_FOUND": ErrorContract(
+        code="PROCESS_NOT_FOUND",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="没有这个 session_id 的后台进程；先用 list_processes 查当前后台进程及其 session_id，再用正确的 session_id 调 process_status/kill_process。",
+    ),
     "WRONG_STATUS_SURFACE": ErrorContract(
         code="WRONG_STATUS_SURFACE",
         category="orchestration",
