@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING
 
@@ -256,6 +257,8 @@ def _clear_pending_work(agent) -> None:
     try:
         agent._has_pending_work = False
     except Exception:
+        # 容忍:仅是清 pending-work 标志的尽力而为收尾,失败不阻塞分发收口;但不再无声。
+        logging.getLogger(__name__).warning("dispatch_loop._clear_pending_work failed", exc_info=True)
         return
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time as time_module
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -398,6 +399,11 @@ def _failed_final_closeout_response(
     backend: str,
 ) -> ModelResponse | None:
     report = _latest_closeout_report(agent, params)
+    load_error = report.get("_load_error") if isinstance(report, dict) else None
+    if load_error:
+        # closeout 状态未知(文件损坏/不可读):绝不当"无需收口"放行完成。
+        # 退一步出"返工/无法确认收口"的非终态响应,把读取错误透传给模型与用户。
+        return _closeout_status_unknown_response(load_error, backend=backend)
     if not report or report.get("ok") is not False:
         return None
     payload = {
@@ -426,6 +432,31 @@ def _failed_final_closeout_response(
             + "\n[/MAIN_AGENT_DELIVERY_REWORK_REQUIRED]\n"
             "交付验收未通过。本轮不能声明任务完成；请按 failed_artifacts、failed_gates 或 contract_recovery 修复后重新提交验收。"
             "任务处于可恢复状态：resume 字段给出任务根、进度账本与恢复方式。"
+        ),
+        backend=backend,
+    )
+
+
+# 函数用途: closeout.json 损坏/不可读(状态未知)时,产出非终态"无法确认收口"响应,
+#   绝不让损坏的收口账本被误判成"无需收口=已完成"。
+def _closeout_status_unknown_response(
+    load_error: object,
+    *,
+    backend: str,
+) -> ModelResponse:
+    payload = {
+        "ok": False,
+        "report_ref": ".agent_delivery/closeout.json",
+        "closeout_status": "unknown",
+        "load_error": load_error,
+    }
+    return ModelResponse(
+        text=(
+            "[MAIN_AGENT_DELIVERY_REWORK_REQUIRED]\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n[/MAIN_AGENT_DELIVERY_REWORK_REQUIRED]\n"
+            "无法读取交付收口账本(.agent_delivery/closeout.json 损坏或不可读)，收口状态未知。"
+            "本轮不能声明任务完成；请修复/重建该账本后重新提交验收。"
         ),
         backend=backend,
     )
@@ -464,9 +495,31 @@ def _latest_closeout_report(agent: object, params: ToolLoopExecuteParams) -> dic
     path = root / ".agent_delivery" / "closeout.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except FileNotFoundError:
+        # closeout.json 不存在 = 合法的"无 closeout",静默返回 {}。
         return {}
-    return payload if isinstance(payload, dict) else {}
+    except (OSError, json.JSONDecodeError) as exc:
+        # 损坏/不可读 ≠ 无 closeout:状态未知,绝不能让调用方把它当"无需收口"
+        # 而误判完成。返回带结构化错误的标记,调用方据 _load_error 走"状态未知"分支。
+        from ..runtime_errors import runtime_error_report
+
+        logging.getLogger(__name__).warning(
+            "closeout.json load failed (status unknown): path=%s", path, exc_info=True
+        )
+        return {
+            "_load_error": runtime_error_report(
+                exc, context="finalization._latest_closeout_report"
+            )
+        }
+    if not isinstance(payload, dict):
+        return {
+            "_load_error": {
+                "category": "data_corruption",
+                "context": "finalization._latest_closeout_report",
+                "message": f"closeout.json 顶层非 JSON 对象 (type={type(payload).__name__})",
+            }
+        }
+    return payload
 
 
 def _failed_final_artifacts(report: dict[str, object]) -> list[dict[str, object]]:

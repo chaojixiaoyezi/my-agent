@@ -360,7 +360,7 @@ def _looks_like_protocol_envelope(data: dict[str, Any]) -> bool:
 
 def _loads_if_json(payload: Any) -> dict[str, Any]:
     if isinstance(payload, bytes):
-        payload = payload.decode("utf-8")
+        payload = payload.decode("utf-8", "replace")
     if isinstance(payload, str):
         try:
             value = json.loads(payload)

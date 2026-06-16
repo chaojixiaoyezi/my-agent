@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -287,6 +288,13 @@ def _wake_subagent(agent: Any, ctx: _ResolveContext) -> None:
         try:
             agent.subagents.save(ctx.task)
         except Exception:
+            # 容忍:这是 wake 失败后"把错误注记落盘"的尽力而为二次保存,主错误已记入
+            # attributes;再崩会在错误处理里制造更严重的崩溃。不再无声——记日志可查。
+            logging.getLogger(__name__).warning(
+                "capability wake-error attribute save failed (run_id=%s)",
+                str(getattr(ctx.task, "id", "") or ""),
+                exc_info=True,
+            )
             return
 
 
@@ -338,6 +346,16 @@ def _record_resolution_wake(agent: Any, ctx: _ResolveContext, *, status: str, wa
     try:
         agent.subagents.save(ctx.task)
     except Exception:
+        # capability 裁决账本是授权决策的权威记录,丢失要可查(error 级)。in-memory
+        # attribute 已先写,这里只是持久化失败;不抛——本函数也用于 wake 成功后落账,
+        # 抛出会把已成功的唤醒回滚成整体失败。
+        logging.getLogger(__name__).error(
+            "capability_resolution_wake ledger save failed (run_id=%s decision=%s status=%s)",
+            str(getattr(ctx.task, "id", "") or ""),
+            ctx.decision,
+            status,
+            exc_info=True,
+        )
         return
 
 

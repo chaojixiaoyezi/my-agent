@@ -155,7 +155,7 @@ class FeishuAdapter(BaseChannelAdapter):
             },
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            return json.loads(resp.read().decode("utf-8", "replace"))
 
     def _get_tenant_access_token(self) -> str | None:
         now = time.time()
@@ -177,7 +177,7 @@ class FeishuAdapter(BaseChannelAdapter):
         payload = json.dumps({"app_id": self.app_id, "app_secret": self.app_secret}).encode("utf-8")
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            return json.loads(resp.read().decode("utf-8", "replace"))
 
 
     def verify_feishu_signature(self, token: str, timestamp: str, signature: str) -> bool:
@@ -204,7 +204,7 @@ class _FeishuCallbackHandler(BaseHTTPRequestHandler):
             return
 
         content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length).decode("utf-8")
+        body = self.rfile.read(content_length).decode("utf-8", "replace")
 
         try:
             payload = json.loads(body)

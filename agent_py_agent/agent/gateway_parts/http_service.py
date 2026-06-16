@@ -77,7 +77,7 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         if content_length == 0:
             return {}
         body = self.rfile.read(content_length)
-        return json.loads(body.decode("utf-8"))
+        return json.loads(body.decode("utf-8", "replace"))
 
     def do_GET(self) -> None:
         self._inject_auth_middleware()

@@ -189,11 +189,16 @@ def _stream_chunk_lines(
     return chunks_printed
 
 
+# 单次读取上限:流式 chunk 文件可能很大,整体 f.read() 无上限会 MemoryError;
+# 按上限分块读,剩余部分下一拍轮询继续(state.chunk_offset 已推进)。
+_MAX_CHUNK_READ_BYTES = 8 * 1024 * 1024
+
+
 def _read_stream_chunk_data(readable_chunk_path: Path, state: GatewayStreamState | None) -> str:
     with open(readable_chunk_path, encoding="utf-8") as f:
         if state is not None:
             f.seek(max(0, state.chunk_offset))
-        data = f.read()
+        data = f.read(_MAX_CHUNK_READ_BYTES)
         if state is not None:
             state.chunk_offset = f.tell()
         return data

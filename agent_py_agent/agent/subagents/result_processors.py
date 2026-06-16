@@ -3,11 +3,11 @@ from __future__ import annotations
 
 """Runner result processing helpers."""
 
-import json
 import time
 from dataclasses import asdict
 from pathlib import Path
 
+from ..common.json_io import write_json_file_atomic, write_text_file_atomic
 from .models import SubAgentParsedOutput, SubAgentRunnerResult, SubAgentTask
 from .parsing import _dict_list
 from .policies import (
@@ -146,18 +146,14 @@ def _write_runner_result_files(
 ) -> None:
     """Write runner result JSON, markdown, and prompt/response files."""
 
+    # 原子写(temp+replace,同短板4):runner 结果"半写即损坏",崩溃中断不能留半截
+    # JSON/文本文件,否则下一轮聚合读到坏文件。sort_keys=False 保持既有字段顺序。
     if prompt:
-        Path(task.runner_prompt_file).write_text(prompt, encoding="utf-8")
+        write_text_file_atomic(Path(task.runner_prompt_file), prompt)
     if response:
-        Path(task.runner_response_file).write_text(response, encoding="utf-8")
-    Path(task.output_json).write_text(
-        json.dumps(output_payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    Path(task.runner_result_json).write_text(
-        json.dumps(asdict(result), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+        write_text_file_atomic(Path(task.runner_response_file), response)
+    write_json_file_atomic(Path(task.output_json), output_payload, sort_keys=False)
+    write_json_file_atomic(Path(task.runner_result_json), asdict(result), sort_keys=False)
 
 
 def _append_runner_debrief_content(

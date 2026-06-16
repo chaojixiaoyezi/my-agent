@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Process-level runner session heartbeat governance."""
 
+import logging
 import os
 import threading
 import time
@@ -97,6 +98,15 @@ def _record_runner_session(
         task.updated_at = now
         lease.manager.save(task)
     except Exception:
+        # 容忍:这是周期性 heartbeat,在后台线程里跑;单次 load/save 失败不能传播——
+        # 否则会打死 heartbeat 线程/整轮 run,下一拍会重试。但不再无声:记日志可查
+        # "session 元数据为何没更新"(续跑断链排障入口)。
+        logging.getLogger(__name__).warning(
+            "runner session metadata save failed (run_id=%s status=%s)",
+            lease.run_id,
+            status,
+            exc_info=True,
+        )
         return
 
 

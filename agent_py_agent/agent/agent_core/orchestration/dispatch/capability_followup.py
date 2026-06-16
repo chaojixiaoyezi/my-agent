@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ....runtime_errors import runtime_error_report
@@ -158,9 +159,19 @@ def _record_grant_wake(agent: Any, task: Any, wake_signal_id: str) -> None:
 
 
 def _record_grant_wake_error(agent: Any, run_id: str, exc: BaseException) -> None:
+    # grant-wake 已失败,这里尽力把错误注记落到子代理 task;原始 grant-wake 错误先记日志,
+    # 否则它"无处查"(即便后续 load/save 也失败也不至于彻底无声)。
+    logging.getLogger(__name__).warning(
+        "capability grant-wake failed (run_id=%s): %s", run_id, exc, exc_info=True
+    )
     try:
         task = agent.subagents.load(run_id)
     except Exception:
+        logging.getLogger(__name__).warning(
+            "capability grant-wake-error annotate skipped: load failed (run_id=%s)",
+            run_id,
+            exc_info=True,
+        )
         return
     attrs = dict(getattr(task, "attributes", {}) or {})
     attrs["capability_grant_wake_error"] = runtime_error_report(exc, context="dispatch_capability_followup.grant_wake")
@@ -168,6 +179,11 @@ def _record_grant_wake_error(agent: Any, run_id: str, exc: BaseException) -> Non
     try:
         agent.subagents.save(task)
     except Exception:
+        logging.getLogger(__name__).warning(
+            "capability grant-wake-error attribute save failed (run_id=%s)",
+            run_id,
+            exc_info=True,
+        )
         return
 
 

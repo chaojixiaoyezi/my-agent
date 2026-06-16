@@ -130,7 +130,7 @@ class QQWebSocketClient:
             self._connected = False
             return None
         if opcode == WebSocketFrame.OPCODE_TEXT:
-            return payload.decode("utf-8")
+            return payload.decode("utf-8", "replace")
         if opcode == WebSocketFrame.OPCODE_PING:
             self._send_pong()
         return None

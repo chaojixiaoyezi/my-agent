@@ -120,7 +120,7 @@ class ChannelManager:
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
+            result = json.loads(resp.read().decode("utf-8", "replace"))
         request_id = result.get("request_id", "")
         if not request_id:
             logger.error(f"gateway /ask 未返回 request_id: {result}")
@@ -164,7 +164,7 @@ class ChannelManager:
             url = f"http://127.0.0.1:{self.gateway_port}/result/{request_id}"
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=5) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
+                body = json.loads(resp.read().decode("utf-8", "replace"))
             if resp.status == 200 and body.get("ok"):
                 return body.get("response", "")
             if resp.status == 200 and "error" in body:

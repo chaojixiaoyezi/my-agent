@@ -115,6 +115,10 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     return response
 
 
+# 单次读取上限:流式 chunk 文件可能很大,整体 f.read() 无上限会 MemoryError。
+_MAX_CHUNK_READ_BYTES = 8 * 1024 * 1024
+
+
 def _poll_chunk_file(request: ChunkFilePollRequest) -> tuple[int, int, int]:
     chunks_printed = request.chunks_printed
     visible_chunks = request.visible_chunks
@@ -125,7 +129,9 @@ def _poll_chunk_file(request: ChunkFilePollRequest) -> tuple[int, int, int]:
     try:
         with open(readable_chunk_path, encoding="utf-8") as f:
             f.seek(max(0, chunk_offset))
-            data = f.read()
+            # 单次读取上限,防止超大 chunk 文件整体读入触发 MemoryError;
+            # 剩余部分下一拍轮询继续(chunk_offset 已推进)。
+            data = f.read(_MAX_CHUNK_READ_BYTES)
             chunk_offset = f.tell()
     except OSError as exc:
         print(f"gateway chat chunk load_error path={readable_chunk_path} message={exc}", file=sys.stderr)

@@ -11,7 +11,12 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from .errors import ProviderContextWindowError, ProviderTimeoutError, ProviderTransientError
+from .errors import (
+    ProviderContextWindowError,
+    ProviderResponseError,
+    ProviderTimeoutError,
+    ProviderTransientError,
+)
 
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 409, 425, 429, 502, 503, 504, 529})
 _RETRYABLE_HTTP_DELAYS_SECONDS = (2.0, 5.0, 15.0)
@@ -74,11 +79,18 @@ def post_json(
     _require_api_key(request.api_key)
     try:
         with _open_gateway_request(request) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            raw = resp.read()
     except urllib.error.HTTPError as exc:
         raise _runtime_http_error(exc) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise _runtime_network_error(exc, request) from exc
+    # decode/loads 在 with 外做:坏字节(非 UTF-8)或非 JSON 响应体不能漏出去崩整轮,
+    # 归一为可恢复的 ProviderResponseError(适配器无法解析,不是任务本身的 bug)。
+    try:
+        text = raw.decode("utf-8", "replace")
+        return json.loads(text)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _runtime_decode_error(exc, request) from exc
 
 
 def post_stream(
@@ -197,6 +209,19 @@ def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
     return RuntimeError(f"HTTP {exc.code}: {detail}")
 
 
+def _runtime_decode_error(exc: BaseException, request: GatewayRequest) -> ProviderResponseError:
+    """Normalize undecodable / non-JSON provider response bodies into a recoverable error.
+
+    坏字节(非 UTF-8)或非 JSON 响应体不是任务本身的 bug:归一为 ProviderResponseError
+    (可恢复),携带 error_code 便于上游识别,而不是让 UnicodeDecodeError/JSONDecodeError
+    裸奔崩掉整轮。"""
+    return ProviderResponseError(
+        "模型接口返回了无法解码或非 JSON 的响应体: "
+        f"url={request.url} 底层错误: {type(exc).__name__}: {exc}",
+        error_code="MODEL_RESPONSE_NOT_DECODABLE",
+    )
+
+
 def _runtime_network_error(exc: BaseException, request: GatewayRequest) -> RuntimeError:
     """Classify network exceptions into timeout, transient provider flake, or config failure."""
     parsed = urllib.parse.urlparse(request.url)
@@ -274,7 +299,9 @@ def _iter_sse_data_lines(response, *, deadline: float, timeout: int, url: str) -
                 "模型接口流式响应超时: "
                 f"request_timeout={timeout}s url={url}"
             )
-        line = raw_line.decode("utf-8").strip()
+        # provider 流里可能混入坏字节/非 UTF-8 切片(分块边界把多字节字符截断),
+        # 用 errors="replace" 兜底,不让单行解码异常崩掉整条流式响应。
+        line = raw_line.decode("utf-8", "replace").strip()
         if _is_sse_data_line(line):
             yield line[5:].strip()
 

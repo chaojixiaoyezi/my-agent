@@ -53,7 +53,7 @@ def _qq_send_message(self, user_id: str, message: OutgoingMessage) -> bool:
 
 def _qq_send_request(req: urllib.request.Request) -> tuple[bool, dict[str, Any]]:
     with urllib.request.urlopen(req, timeout=10) as resp:
-        result = json.loads(resp.read().decode("utf-8"))
+        result = json.loads(resp.read().decode("utf-8", "replace"))
         return result.get("code") == 0 or resp.status == 200, result
 
 def _parse_ws_payload(raw: str) -> dict[str, Any] | None:
@@ -100,7 +100,7 @@ def _qq_request_token(app_id: str, app_secret: str) -> dict[str, Any]:
         headers={"Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        return json.loads(resp.read().decode("utf-8", "replace"))
 
 def _qq_fetch_gateway_url(self, token: str) -> str | None:
     try:
@@ -109,7 +109,7 @@ def _qq_fetch_gateway_url(self, token: str) -> str | None:
             headers={"Authorization": f"QQBot {token}"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
+            result = json.loads(resp.read().decode("utf-8", "replace"))
             return result.get("url")
     except Exception as exc:
         logger.error(f"获取 QQ gateway URL 失败: {exc}")

@@ -805,6 +805,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="模型返回空响应；可重试一次，连续为空时换后端或缩小单轮输出规模。",
     ),
+    "MODEL_RESPONSE_NOT_DECODABLE": ErrorContract(
+        code="MODEL_RESPONSE_NOT_DECODABLE",
+        category="model",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="模型接口返回了无法解码或非 JSON 的响应体（常为网关/代理临时返回错误页或坏字节）；可重试，持续出现则换后端或检查 api_base/代理。",
+    ),
     # —— 产物 ——
     "ARTIFACT_TOO_LARGE": ErrorContract(
         code="ARTIFACT_TOO_LARGE",

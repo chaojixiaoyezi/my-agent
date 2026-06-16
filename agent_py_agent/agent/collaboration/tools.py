@@ -1128,6 +1128,8 @@ def _is_known_subagent_run(agent: SimpleAgent, run_id: str) -> bool:
     try:
         return any(str(getattr(task, "id", "") or "") == run_id for task in manager.list_runs())
     except Exception:
+        # list_runs 失败是"系统不可用",回退 False 但不能无声(否则被当成"无此 run")。
+        _LOGGER.warning("list_runs failed in _is_known_subagent_run (run_id=%s)", run_id, exc_info=True)
         return False
 
 
@@ -1138,6 +1140,8 @@ def _has_any_subagent_runs(agent: SimpleAgent) -> bool:
     try:
         return bool(list(manager.list_runs()))
     except Exception:
+        # 同上:list_runs 故障回退 False,但记日志避免"系统不可用"被伪装成"无任何 run"。
+        _LOGGER.warning("list_runs failed in _has_any_subagent_runs", exc_info=True)
         return False
 
 
