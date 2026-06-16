@@ -591,12 +591,20 @@ def _record_tool_call_ir_if_native(
     合成 id）→ 兜底 ``payload["call_id"]``，保证出站 tool_result 的 tool_use_id 与
     assistant tool_use.id 配对。结果 content 复用与文本链路同源的 ``result_rendered``，
     两轨「给模型看到的结果」口径一致。
+
+    Step 5 韧性补缺：文本兜底（漏成正文的 [TOOL_CALL]）若在执行前就被某道 guard 短路
+    （agent budget / 一次性去重 / stale subagent），结果是 guard 直接产的，``call_id``
+    为空、payload 也无 call_id。此时回填一个与 ``execute_traced_tool_call`` 同约定的
+    确定性合成 id ``round-{N}-tool-{idx}``，绝不让空 id 的 tool_use/tool_result 进 IR
+    （空 id 对会被出站孤儿净化拆成悬空 tool_use → Anthropic 400）。
     """
     if not native_tool_use_active(agent):
         return
     call_id = str(getattr(record.result, "call_id", "") or "")
     if not call_id and isinstance(record.payload, dict):
         call_id = str(record.payload.get("call_id") or "")
+    if not call_id:
+        call_id = f"round-{record.tool_rounds}-tool-{record.idx}"
     record_tool_call_ir(
         record.params,
         tool_rounds=record.tool_rounds,

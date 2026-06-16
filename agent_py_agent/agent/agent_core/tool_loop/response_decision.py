@@ -27,6 +27,7 @@ from ..tool_guard.unresolved_runtime_issue import (
     has_unresolved_runtime_issues,
     unresolved_runtime_issue_context,
 )
+from .text_tool_call_promotion import promote_text_tool_calls_if_native
 
 _PROTECTED_TOOL_MARKERS = (
     "[tool-record",
@@ -177,11 +178,25 @@ def _tool_calls_from_response(
     ``tool_use_blocks`` ({id,name,input}); flatten each to the existing
     ``{"tool": name, **input}`` dict so all downstream gates/execution stay
     unchanged. Otherwise fall back to parsing the [TOOL_CALL] text protocol.
+
+    Step 5 修复网：native 下若本轮**没有**结构化 block 但模型把调用漏成了正文
+    ``[TOOL_CALL]`` 文本，文本解析结果要过一道严格门控的提升闸（见
+    ``promote_text_tool_calls_if_native``）才放行——只在全部调用都精确命中已注册工具时
+    才当真实调用，避免把模型正文里的散文/拼错块误当工具调用。text 协议不进这道闸。
     """
     blocks = getattr(request.response, "tool_use_blocks", None)
     if blocks:
         return [_flatten_tool_use_block(block) for block in blocks]
-    return request.agent.tools.parse_tool_calls(request.response.text)
+    parsed = request.agent.tools.parse_tool_calls(request.response.text)
+    if not _native_tool_use_active(request.agent):
+        return parsed
+    return promote_text_tool_calls_if_native(request.agent, request.response, parsed)
+
+
+def _native_tool_use_active(agent: object) -> bool:
+    from ..native_tool_protocol import native_tool_use_active
+
+    return native_tool_use_active(agent)
 
 
 def _flatten_tool_use_block(block: dict[str, object]) -> dict[str, object]:
