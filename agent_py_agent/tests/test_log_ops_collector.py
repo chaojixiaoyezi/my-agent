@@ -48,7 +48,8 @@ def test_file_incremental_resume_no_dup_no_loss(tmp_path: Path) -> None:
 def test_file_partial_last_line_not_emitted_until_complete(tmp_path: Path) -> None:
     src = tmp_path / "p.log"
     src.write_text("done1\npartial-no-newline", encoding="utf-8")
-    res = collect_file(str(src), {})
+    # 活跃文件(now 锚定到写入时刻,未触发静默兜底):末尾无换行的残行这轮不采,等写完整。
+    res = collect_file(str(src), {}, now=src.stat().st_mtime)
     # 只采完整行;没有换行结尾的残行这轮不采。
     assert res.new_lines == ["done1"]
 
@@ -121,6 +122,87 @@ def test_folder_missing_dir_no_error(tmp_path: Path) -> None:
     assert res.new_lines == []
     assert res.error == ""
     assert res.state == {"processed": {}}
+
+
+# ----------------------- 静默文件尾段兜底(修复"写完即固定、最后一行无换行→永久丢") -----------------------
+
+
+def test_file_idle_flushes_trailing_line_without_newline(tmp_path: Path) -> None:
+    """文件已静默(写完即固定)且最后一行无换行 → 该尾段是完整的最后一行,必须采(否则永久丢)。"""
+    src = tmp_path / "done.log"
+    src.write_text("l1\nl2\nLAST-no-newline", encoding="utf-8")
+    mtime = src.stat().st_mtime
+    # now 远超 mtime + 阈值 → 判定静默 → 采最后一行。
+    res = collect_file(str(src), {}, now=mtime + 100.0)
+    assert res.new_lines == ["l1", "l2", "LAST-no-newline"]
+    # offset 已推到 EOF,再采无新行(不重复)。
+    again = collect_file(str(src), res.state, now=mtime + 100.0)
+    assert again.new_lines == []
+
+
+def test_file_idle_single_line_no_newline_flushed(tmp_path: Path) -> None:
+    """整个静默文件只有一行且无换行 → 也要采(否则整文件丢)。"""
+    src = tmp_path / "one.log"
+    src.write_text("only-line-no-newline", encoding="utf-8")
+    mtime = src.stat().st_mtime
+    res = collect_file(str(src), {}, now=mtime + 100.0)
+    assert res.new_lines == ["only-line-no-newline"]
+
+
+def test_file_active_still_protects_partial_last_line(tmp_path: Path) -> None:
+    """文件仍活跃(刚写、未静默)且最后一行无换行 → 仍当残行保护,不采(避免把半行当完整行)。"""
+    src = tmp_path / "live.log"
+    src.write_text("l1\nl2\nhalf-written", encoding="utf-8")
+    mtime = src.stat().st_mtime
+    # now≈mtime(刚写) → 未达静默阈值 → 残行保护,只采完整行。
+    res = collect_file(str(src), {}, now=mtime)
+    assert res.new_lines == ["l1", "l2"]
+
+
+def test_file_active_then_idle_flushes_tail_no_dup_no_loss(tmp_path: Path) -> None:
+    """活跃时留残行,文件静默后补采最后一行 —— offset 续接,不重不丢。"""
+    src = tmp_path / "evolve.log"
+    src.write_text("a\nb\nTAIL-no-newline", encoding="utf-8")
+    mtime = src.stat().st_mtime
+    # 第一拍:活跃 → 只采 a,b,残行留着,offset 停在最后换行处。
+    first = collect_file(str(src), {}, now=mtime)
+    assert first.new_lines == ["a", "b"]
+    # 第二拍:已静默 → 从 offset 续读补采最后一行,不重复给 a,b。
+    second = collect_file(str(src), first.state, now=mtime + 100.0)
+    assert second.new_lines == ["TAIL-no-newline"]
+
+
+def test_file_idle_all_newline_terminated_no_double_emit(tmp_path: Path) -> None:
+    """每行都有换行的静默文件 → 尾段为空,正常采,不因兜底逻辑重复末行。"""
+    src = tmp_path / "clean.log"
+    src.write_text("x1\nx2\nx3\n", encoding="utf-8")
+    mtime = src.stat().st_mtime
+    res = collect_file(str(src), {}, now=mtime + 100.0)
+    assert res.new_lines == ["x1", "x2", "x3"]
+
+
+def test_folder_idle_subfile_last_line_no_newline_recovered(tmp_path: Path) -> None:
+    """复现并锁定本次真 bug:folder 子文件最后一行无换行(写完即固定)→ 修复后被采到,不丢。"""
+    folder = tmp_path / "slices"
+    folder.mkdir()
+    # 模拟器风格:整文件一次写完,最后一行无换行结尾(真实日志切片常见)。
+    (folder / "slice1.log").write_text("ok1\nok2\nALERT-LAST", encoding="utf-8")
+    mtime = (folder / "slice1.log").stat().st_mtime
+    res = collect_folder(str(folder), {}, now=mtime + 100.0)
+    assert res.new_lines == ["ok1", "ok2", "ALERT-LAST"]
+    # 该文件已采完,下一拍无新行(不重复)。
+    res2 = collect_folder(str(folder), res.state, now=mtime + 100.0)
+    assert res2.new_lines == []
+
+
+def test_collect_source_folder_passes_now_through(tmp_path: Path) -> None:
+    """collect_source 把 now 透传到 folder→file,静默兜底端到端生效。"""
+    folder = tmp_path / "src"
+    folder.mkdir()
+    (folder / "f.log").write_text("p\nq\nNO-NL-TAIL", encoding="utf-8")
+    mtime = (folder / "f.log").stat().st_mtime
+    res = collect_source("folder", str(folder), {}, now=mtime + 100.0)
+    assert res.new_lines == ["p", "q", "NO-NL-TAIL"]
 
 
 # ----------------------- API 源(本地 http server) -----------------------

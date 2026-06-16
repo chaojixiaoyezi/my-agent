@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -28,6 +29,10 @@ _API_MAX_LINES_PER_POLL = 100_000
 _API_TIMEOUT_SECONDS = 10.0
 # 文件夹一轮最多新处理多少个文件,防突发海量新文件单轮卡死;剩下的下一轮继续(不丢)。
 _FOLDER_MAX_NEW_FILES_PER_ROUND = 2000
+# 文件 mtime 静默超过此秒数 → 视为"已写完",末尾无换行的尾段按完整最后一行采集(不再当残行丢掉)。
+# 救的是"写完即固定、最后一行无换行"的文件(如日志切片/cp 来的片段/folder 子文件);对持续 append
+# 的活跃文件,正常每行带换行→尾段为空→此逻辑不触发,残行保护照旧。阈值取得比典型写入间隔大,避免误判。
+_TRAILING_FLUSH_IDLE_SECONDS = 2.0
 
 
 @dataclass
@@ -53,13 +58,22 @@ class CollectResult:
         return None
 
 
-def collect_file(locator: str, state: dict[str, Any]) -> CollectResult:
+def collect_file(
+    locator: str,
+    state: dict[str, Any],
+    *,
+    now: float | None = None,
+    idle_flush_seconds: float = _TRAILING_FLUSH_IDLE_SECONDS,
+) -> CollectResult:
     """文件源增量采集。state: {offset:int, size:int, inode:int}。
 
     不丢/不重要点:
       - 从 offset 续读到文件当前末尾,offset 推进到新末尾。
       - 轮转检测:当前 size < 记录的 size(文件被截断/换了同名新文件)→ offset 归零从头读,
         避免漏掉轮转后的新内容,也避免 seek 到超出文件尾读不到。
+      - 残行保护 + 静默兜底:末尾没 \n 的尾段默认当"还没写完的残行"不采(避免把半行当一行);
+        但当文件 mtime 已静默超过 idle_flush_seconds(写完即固定、最后一行就是没换行)→ 该尾段
+        是完整的最后一行,必须采,否则像 folder 子文件那样永久丢最后一行。now 可注入便于测试。
       - 文件还不存在:返回空结果保持原状态(daemon 可能起在源之前),不报错不丢。
     """
     path = Path(locator)
@@ -74,6 +88,7 @@ def collect_file(locator: str, state: dict[str, Any]) -> CollectResult:
 
     size = stat.st_size
     inode = getattr(stat, "st_ino", 0)
+    mtime = float(getattr(stat, "st_mtime", 0.0) or 0.0)
     start = prev_offset
     # 轮转/截断:文件变小了,从头读(否则 seek 越界 + 漏新内容)。
     if size < prev_size or (prev_offset > size):
@@ -89,17 +104,12 @@ def collect_file(locator: str, state: dict[str, Any]) -> CollectResult:
     except OSError as exc:
         return CollectResult(new_lines=[], state=dict(state), error=f"read_failed: {exc}")
 
-    # 只取完整行:最后一段没 \n 的残行不算(等下次它被写完整再采),避免把半行当一行。
     text = raw.decode("utf-8", errors="replace")
     if text:
-        last_nl = text.rfind("\n")
-        if last_nl == -1:
-            # 整段都没有换行 → 全是未完成的残行,这轮不采,offset 不前进。
-            consumed = 0
-        else:
-            complete = text[: last_nl + 1]
-            consumed = len(complete.encode("utf-8"))
-            new_lines = [line for line in complete.splitlines() if line.strip()]
+        now_ts = time.time() if now is None else now
+        # 文件一段时间没动 = 写完了:此时末尾无换行的尾段是完整最后一行(不是残行),要采。
+        file_idle = (now_ts - mtime) >= idle_flush_seconds
+        new_lines, consumed = _split_collectable_lines(text, flush_trailing=file_idle)
         new_offset = start + consumed
 
     return CollectResult(
@@ -108,13 +118,42 @@ def collect_file(locator: str, state: dict[str, Any]) -> CollectResult:
     )
 
 
-def collect_folder(locator: str, state: dict[str, Any]) -> CollectResult:
+def _split_collectable_lines(text: str, *, flush_trailing: bool) -> tuple[list[str], int]:
+    """把这轮读到的 text 切成「要采的完整行」+「消费的字节数」。
+
+    末尾无换行的尾段两种处理:
+      - flush_trailing=False(文件还活跃/在写):当未写完的残行,不采,offset 只推到最后一个换行处,
+        尾段留到下次写完再采(避免把半行当完整行)。
+      - flush_trailing=True(文件已静默/写完):尾段是完整的最后一行,连同前面完整行一起采,offset 推到 EOF
+        (救"写完即固定、最后一行无换行"的文件,否则永久丢最后一行)。
+    """
+    last_nl = text.rfind("\n")
+    if last_nl == -1:
+        # 整段无换行:静默→是完整最后一行采;活跃→残行不采,offset 不前进。
+        if flush_trailing and text.strip():
+            return [line for line in text.splitlines() if line.strip()], len(text.encode("utf-8"))
+        return [], 0
+    trailing = text[last_nl + 1 :]
+    if flush_trailing and trailing.strip():
+        return [line for line in text.splitlines() if line.strip()], len(text.encode("utf-8"))
+    complete = text[: last_nl + 1]
+    return [line for line in complete.splitlines() if line.strip()], len(complete.encode("utf-8"))
+
+
+def collect_folder(
+    locator: str,
+    state: dict[str, Any],
+    *,
+    now: float | None = None,
+) -> CollectResult:
     """文件夹源增量采集。state: {processed: {filename: offset}}。
 
     不丢/不重要点:
       - 列目录下所有 *.log(及无扩展名文件),对每个文件记一个 offset(当文件源增量读)。
       - 新文件:processed 里没有的,从 offset 0 整文件读,记进 processed。
       - 已处理文件仍在 append:从记录的 offset 续读增量,不重复给老行。
+      - 子文件写完即固定、最后一行无换行:经 collect_file 的静默兜底采到(否则永久丢最后一行)。
+        每轮都重扫已知文件,所以刚写完时残行留到下轮静默后补采,不丢。
       - 已消失的文件:保留其 processed 记录(避免它再出现时被当新文件重读);不报错。
     """
     folder = Path(locator)
@@ -131,7 +170,7 @@ def collect_folder(locator: str, state: dict[str, Any]) -> CollectResult:
     for entry in _entries_within_new_file_budget(entries, processed):
         name = entry.name
         prev_offset = int(processed.get(name, 0) or 0)
-        sub = collect_file(str(entry), {"offset": prev_offset, "size": prev_offset})
+        sub = collect_file(str(entry), {"offset": prev_offset, "size": prev_offset}, now=now)
         new_lines.extend(sub.new_lines)
         processed[name] = int(sub.state.get("offset", prev_offset) or prev_offset)
 
@@ -183,12 +222,18 @@ def collect_api(locator: str, state: dict[str, Any]) -> CollectResult:
     return CollectResult(new_lines=new_lines, state={"cursor": next_cursor})
 
 
-def collect_source(kind: str, locator: str, state: dict[str, Any]) -> CollectResult:
-    """按源类型分发到对应采集器。未知类型返回空结果 + error(不崩 daemon)。"""
+def collect_source(
+    kind: str,
+    locator: str,
+    state: dict[str, Any],
+    *,
+    now: float | None = None,
+) -> CollectResult:
+    """按源类型分发到对应采集器。未知类型返回空结果 + error(不崩 daemon)。now 透传便于测试静默兜底。"""
     if kind == "file":
-        return collect_file(locator, state)
+        return collect_file(locator, state, now=now)
     if kind == "folder":
-        return collect_folder(locator, state)
+        return collect_folder(locator, state, now=now)
     if kind == "api":
         return collect_api(locator, state)
     return CollectResult(new_lines=[], state=dict(state), error=f"unknown_source_kind: {kind}")

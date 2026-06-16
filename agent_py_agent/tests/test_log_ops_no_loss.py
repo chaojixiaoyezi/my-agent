@@ -8,6 +8,8 @@ from __future__ import annotations
 """
 
 import json
+import os
+import time
 from pathlib import Path
 
 from agent_py_agent.agent.tooling.log_ops.daemon import run_collection_cycle
@@ -172,6 +174,38 @@ def test_no_loss_three_sources_mixed(tmp_path: Path) -> None:
     assert store.count_archive_lines(folder_sid) == 2
     ids = sorted({c["alert_id"] for c in store.read_candidates() if c["alert_id"]})
     assert ids == ["ALERT-000001", "ALERT-000002"]
+
+
+def test_no_loss_folder_subfile_last_line_without_newline(tmp_path: Path) -> None:
+    """端到端复现并锁定真 bug:folder 子文件最后一行无换行(写完即固定,模拟器 "\\n".join 风格),
+    daemon 一拍后 archive + 候选都必须含最后一行的 ALERT-ID(否则像实测那样永久丢最后一行)。
+
+    用 os.utime 把 mtime 推到过去 → daemon 用真实 time.time() 判定文件已静默 → 采尾段(不改 daemon 签名)。
+    """
+    folder_src = tmp_path / "slices"
+    folder_src.mkdir()
+    sub = folder_src / "slice1.log"
+    # 最后一行是告警且无换行结尾 —— 正是实测中被永久跳过的那 18 条的形态。
+    sub.write_text(
+        "2026-06-16T00:00:00 INFO ok1\n2026-06-16T00:00:01 INFO ok2\n"
+        "2026-06-16T00:00:02 ALERT ALERT-000099 reverse shell /dev/tcp/9.9.9.9/4444",
+        encoding="utf-8",
+    )
+    old = time.time() - 100.0  # 文件已静默(远超兜底阈值)。
+    os.utime(sub, (old, old))
+
+    store = _store(tmp_path)
+    specs = build_source_specs([str(folder_src)])
+    run_collection_cycle(store, specs)
+
+    folder_sid = source_id_for("folder", str(folder_src))
+    # 3 行全进存档(含最后一行无换行的告警),一条不丢。
+    assert store.count_archive_lines(folder_sid) == 3
+    archive_text = store.archive_path(folder_sid).read_text(encoding="utf-8")
+    assert "ALERT-000099" in archive_text, "最后一行(无换行)的告警丢在存档外"
+    # 候选队列也必须含它(否则 LLM 永远研判不到这条真威胁)。
+    candidate_ids = {c["alert_id"] for c in store.read_candidates() if c["alert_id"]}
+    assert "ALERT-000099" in candidate_ids, "最后一行告警没产候选"
 
 
 # ----------------------- 状态文件原子 + 续接 -----------------------
