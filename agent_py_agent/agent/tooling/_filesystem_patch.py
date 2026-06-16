@@ -10,6 +10,37 @@ from ._filesystem_write import _atomic_write_bytes
 from .models import ToolExecutionResult, ToolSpec
 
 
+def _build_apply_patch_spec() -> ToolSpec:
+    return ToolSpec(
+        name="apply_patch",
+        category="filesystem",
+        effect="mutating",
+        requires_idempotency=True,
+        description="应用结构化文本补丁，适合局部修改、新增、删除或移动文本文件。",
+        use_cases=[
+            "局部修改已有代码、配置或文档",
+            "一次补丁里处理多个相关文件",
+        ],
+        avoid_when=[
+            "要完整重写一个文件时用 write_file",
+            "要写 PDF、XLSX、图片等二进制文件时用 write_file 的 data_base64",
+        ],
+        keywords=["patch", "apply patch", "修改文件", "局部编辑", "新增文件", "删除文件"],
+        parameters={"patch": "以 *** Begin Patch 开始、*** End Patch 结束的补丁文本"},
+        parameter_details={
+            "patch": (
+                "支持 *** Add File、*** Update File、*** Delete File、*** Move to。"
+                "新增行用 +，删除行用 -，上下文行用空格。"
+            )
+        },
+        parameter_schema={"patch": {"type": "string"}},
+        required_parameters=["patch"],
+        examples=[
+            '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Add File: notes.txt\\n+hello\\n*** End Patch\\n"}',
+        ],
+    )
+
+
 class ApplyPatchTool(FileSystemTool):
     def __init__(
         self,
@@ -22,32 +53,7 @@ class ApplyPatchTool(FileSystemTool):
             workspace_roots,
             access_options,
         )
-        self.spec = ToolSpec(
-            name="apply_patch",
-            category="filesystem",
-            effect="mutating",
-            requires_idempotency=True,
-            description="应用结构化文本补丁，适合局部修改、新增、删除或移动文本文件。",
-            use_cases=[
-                "局部修改已有代码、配置或文档",
-                "一次补丁里处理多个相关文件",
-            ],
-            avoid_when=[
-                "要完整重写一个文件时用 write_file",
-                "要写 PDF、XLSX、图片等二进制文件时用 write_file 的 data_base64",
-            ],
-            keywords=["patch", "apply patch", "修改文件", "局部编辑", "新增文件", "删除文件"],
-            parameters={"patch": "以 *** Begin Patch 开始、*** End Patch 结束的补丁文本"},
-            parameter_details={
-                "patch": (
-                    "支持 *** Add File、*** Update File、*** Delete File、*** Move to。"
-                    "新增行用 +，删除行用 -，上下文行用空格。"
-                )
-            },
-            examples=[
-                '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Add File: notes.txt\\n+hello\\n*** End Patch\\n"}',
-            ],
-        )
+        self.spec = _build_apply_patch_spec()
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:

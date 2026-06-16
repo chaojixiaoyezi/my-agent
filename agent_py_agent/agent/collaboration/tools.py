@@ -155,6 +155,99 @@ _REROUTE_REQUEST_PARAMETERS = {
     "metadata": "可选结构化补充信息；开放世界，不写死字段",
 }
 
+# 精确 JSON Schema 片段（native tool_use 弱推导消歧）；按各 *_PARAMETERS 同样的合并方式拼装。
+# 只声明类型明确、execute 会按该类型解析的参数（列表/布尔/对象/数值）；开放世界标量留 string 回退。
+_CASE_PARAMETER_SCHEMA = {
+    "thread_id": {"type": "string"},
+    "task_id": {"type": "string"},
+    "title": {"type": "string"},
+    "summary": {"type": "string"},
+    "priority": {"type": "string"},
+    "created_by": {"type": "string"},
+    "required_capabilities": {"type": "array", "items": {"type": "string"}},
+    "entities": {"type": "object"},
+}
+_REQUEST_PARAMETER_SCHEMA = {
+    "case_id": {"type": "string"},
+    "requester_agent_id": {"type": "string"},
+    "target_agent_ids": {"type": "array", "items": {"type": "string"}},
+    "required_capabilities": {"type": "array", "items": {"type": "string"}},
+    "question": {"type": "string"},
+    "entities": {"type": "object"},
+    "problem_statement": {"type": "string"},
+    "observed_facts": {"type": "array", "items": {"type": "object"}},
+    "query_intent": {"type": "object"},
+    "query_hints": {"type": "array", "items": {"type": "string"}},
+    "routing_requirements": {"type": "object"},
+    "response_contract": {"type": "object"},
+    "context_refs": {"type": "array", "items": {"type": "string"}},
+    "deadline_at": {"type": "number"},
+    "deadline_seconds": {"type": "number"},
+    "priority": {"type": "string"},
+}
+_RAISE_EVENT_PARAMETER_SCHEMA = {
+    "thread_id": {"type": "string"},
+    "task_id": {"type": "string"},
+    "title": {"type": "string"},
+    "summary": {"type": "string"},
+    "priority": {"type": "string"},
+    "created_by": {"type": "string"},
+    "requester_agent_id": {"type": "string"},
+    "target_agent_ids": {"type": "array", "items": {"type": "string"}},
+    "required_capabilities": {"type": "array", "items": {"type": "string"}},
+    "entities": {"type": "object"},
+    "question": {"type": "string"},
+    "problem_statement": {"type": "string"},
+    "observed_facts": {"type": "array", "items": {"type": "object"}},
+    "query_intent": {"type": "object"},
+    "query_hints": {"type": "array", "items": {"type": "string"}},
+    "routing_requirements": {"type": "object"},
+    "response_contract": {"type": "object"},
+    "context_refs": {"type": "array", "items": {"type": "string"}},
+    "deadline_at": {"type": "number"},
+    "deadline_seconds": {"type": "number"},
+    "metadata": {"type": "object"},
+}
+_LIST_REQUESTS_PARAMETER_SCHEMA = {
+    "agent_id": {"type": "string"},
+    "agent_name": {"type": "string"},
+    "agent_role": {"type": "string"},
+    "limit": {"type": "integer", "minimum": 0},
+}
+_EVIDENCE_PARAMETER_SCHEMA = {
+    "case_id": {"type": "string"},
+    "request_id": {"type": "string"},
+    "source_agent_id": {"type": "string"},
+    "matched": {"type": "boolean"},
+    "summary": {"type": "string"},
+    "evidence_refs": {"type": "array", "items": {"type": "string"}},
+    "queried_scopes": {"type": "array", "items": {"type": "string"}},
+    "used_query_hints": {"type": "array", "items": {"type": "string"}},
+    "miss_reason": {"type": "string"},
+    "response_facts": {"type": "array", "items": {"type": "object"}},
+    "followup_suggestions": {"type": "array", "items": {"type": "object"}},
+    "query_actions": {"type": "array", "items": {"type": "object"}},
+    "confidence": {"type": "number"},
+    "limitations": {"type": "array", "items": {"type": "string"}},
+}
+_UPDATE_STATUS_PARAMETER_SCHEMA = {
+    "case_id": {"type": "string"},
+    "status": {"type": "string"},
+    "actor_agent_id": {"type": "string"},
+    "summary": {"type": "string"},
+    "decision_type": {"type": "string"},
+    "evidence_ids": {"type": "array", "items": {"type": "string"}},
+}
+_UPDATE_REQUEST_PARAMETER_SCHEMA = {
+    "case_id": {"type": "string"},
+    "request_id": {"type": "string"},
+    "status": {"type": "string"},
+    "actor_agent_id": {"type": "string"},
+    "summary": {"type": "string"},
+    "target_agent_ids": {"type": "array", "items": {"type": "string"}},
+    "metadata": {"type": "object"},
+}
+
 
 def build_raise_collaboration_spec() -> ToolSpec:
     return ToolSpec(
@@ -170,6 +263,7 @@ def build_raise_collaboration_spec() -> ToolSpec:
         avoid_when=[],
         keywords=["协作", "case", "补证据", "联合判断", "collaboration", "coordination"],
         parameters={**_CASE_PARAMETERS, **_REQUEST_PARAMETERS, **_RAISE_EVENT_PARAMETERS},
+        parameter_schema={**_CASE_PARAMETER_SCHEMA, **_REQUEST_PARAMETER_SCHEMA, **_RAISE_EVENT_PARAMETER_SCHEMA},
         examples=[],
     )
 
@@ -184,6 +278,7 @@ def build_inspect_collaboration_spec() -> ToolSpec:
         avoid_when=["不要用它查看普通 agent/subagent run 的执行状态；run 状态请用 inspect_agent_tree。"],
         keywords=["协作状态", "协作待办", "pending collaboration", "case status", "request discovery"],
         parameters={"case_id": "可选协作 case ID；有则查看 case 状态", **_LIST_REQUESTS_PARAMETERS},
+        parameter_schema={"case_id": {"type": "string"}, **_LIST_REQUESTS_PARAMETER_SCHEMA},
         examples=[],
     )
 
@@ -199,6 +294,7 @@ def build_submit_collaboration_result_spec() -> ToolSpec:
         avoid_when=[],
         keywords=["证据", "evidence", "refs", "协作响应", "result"],
         parameters=_EVIDENCE_PARAMETERS,
+        parameter_schema=_EVIDENCE_PARAMETER_SCHEMA,
         examples=[],
     )
 
@@ -214,6 +310,7 @@ def build_update_collaboration_spec() -> ToolSpec:
         avoid_when=[],
         keywords=["case update", "request update", "reroute", "换路", "关闭协作", "状态推进"],
         parameters={**_UPDATE_STATUS_PARAMETERS, **_UPDATE_REQUEST_PARAMETERS},
+        parameter_schema={**_UPDATE_STATUS_PARAMETER_SCHEMA, **_UPDATE_REQUEST_PARAMETER_SCHEMA},
         examples=[],
     )
 

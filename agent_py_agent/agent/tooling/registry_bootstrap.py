@@ -43,6 +43,7 @@ class SubmitForAcceptanceTool(BaseTool):
         ],
         keywords=["submit", "acceptance", "final", "done", "验收", "提交", "交付", "完成"],
         parameters={"note": "可选。简短说明你认为可以验收的内容；系统不会把 note 当作通过依据。"},
+        parameter_schema={"note": {"type": "string"}},
         parameter_details={
             "note": (
                 "可选字符串。只作为交接说明，真正验收只读取产物、工具记录、合同和运行事实。"

@@ -36,6 +36,12 @@ def build_skill_search_spec() -> ToolSpec:
             "category": "可选。限定类目（见 Skill Categories 索引）。",
             "limit": "可选。最多返回几条，默认 5。",
         },
+        parameter_schema={
+            "query": {"type": "string"},
+            "category": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1},
+        },
+        required_parameters=["query"],
         examples=[
             '{"tool":"skill_search","query":"把一份英文资料翻译成中文文档"}',
             '{"tool":"skill_search","query":"深入分析一个代码项目的架构","category":"research"}',

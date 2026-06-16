@@ -82,6 +82,8 @@ def build_capability_request_spec() -> ToolSpec:
         keywords=["capability", "request", "grant", "tool", "skill", "shell", "MCP", "能力申请", "授权"],
         parameters=_capability_request_parameters(),
         parameter_details=_capability_request_parameter_details(),
+        parameter_schema=_capability_request_parameter_schema(),
+        required_parameters=["problem"],
         examples=[
             (
                 '{"tool":"capability_request","problem":"当前工具无法访问必要的内部系统查询结果",'
@@ -211,6 +213,19 @@ def _capability_request_parameter_details() -> dict[str, str]:
         "requested_mcp_tools": "只列需要父级接入的外部工具；不知道名称时在 problem 里说明需要什么能力即可。",
         "expected_output": "说明父级处理后应该返回什么，例如文件路径、查询结果、审批结果或失败原因。",
         "risk_level": "涉及删除、网络写入、大量输出或跨目录访问时至少 medium。",
+    }
+
+
+def _capability_request_parameter_schema() -> dict[str, object]:
+    return {
+        "problem": {"type": "string"},
+        "needed_capability": {"type": "string"},
+        "capability_type": {"type": "string"},
+        "requested_tools": {"type": "array", "items": {"type": "string"}},
+        "requested_skills": {"type": "array", "items": {"type": "string"}},
+        "requested_mcp_tools": {"type": "array", "items": {"type": "string"}},
+        "expected_output": {"type": "string"},
+        "risk_level": {"type": "string", "enum": ["low", "medium", "high"]},
     }
 
 

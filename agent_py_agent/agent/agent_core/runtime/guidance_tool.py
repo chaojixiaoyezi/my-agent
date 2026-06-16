@@ -89,6 +89,18 @@ def build_send_guidance_spec() -> ToolSpec:
             "priority": "软优先级文本，默认 normal",
             "delivery": "投递方式提示，默认 next_turn",
         },
+        parameter_schema={
+            "target": {"type": "object"},
+            "target_type": {"type": "string", "enum": ["agent_run", "thread", "task", "case"]},
+            "target_id": {"type": "string"},
+            "run_ids": {"type": "array", "items": {"type": "string"}},
+            "target_scope": {"type": "string", "enum": ["children", "descendants"]},
+            "root_id": {"type": "string"},
+            "message": {"type": "string"},
+            "priority": {"type": "string"},
+            "delivery": {"type": "string"},
+        },
+        required_parameters=["message"],
         examples=[
             '{"tool":"send_guidance","target":{"type":"agent_run","id":"child-1"},"message":"换一个数据来源核对，不要重复查同一个页面。"}',
             '{"tool":"send_guidance","target_scope":"children","root_id":"parent-1","message":"按用户补充要求补证据，完成后继续原任务。"}',

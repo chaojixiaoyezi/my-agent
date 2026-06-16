@@ -20,6 +20,14 @@ from .tool_spec_data import (
     _SCHEDULE_CHILD_PARAMETERS,
     _SCHEDULE_CHILD_USE_CASES,
 )
+from .tool_spec_schemas import (
+    _CREATE_PARAMETER_SCHEMA,
+    _DISPATCH_PARAMETER_SCHEMA,
+    _INSPECT_TREE_PARAMETER_SCHEMA,
+    _OBSERVATION_PARAMETER_SCHEMA,
+    _RESOLVE_CAPABILITY_PARAMETER_SCHEMA,
+    _SCHEDULE_CHILD_PARAMETER_SCHEMA,
+)
 
 
 def build_create_subagents_spec() -> ToolSpec:
@@ -34,6 +42,7 @@ def build_create_subagents_spec() -> ToolSpec:
         keywords=_CREATE_KEYWORDS,
         parameters=_CREATE_PARAMETERS,
         parameter_details=_with_role_template_index(_CREATE_PARAMETER_DETAILS),
+        parameter_schema=_CREATE_PARAMETER_SCHEMA,
         internal_parameters=["dry_run", "extra_write_roots"],
         examples=_CREATE_EXAMPLES,
     )
@@ -52,6 +61,7 @@ def build_inspect_agent_tree_spec() -> ToolSpec:
         ],
         keywords=["代理树", "状态树", "看一眼", "子代理状态", "孙代理", "inspect", "agent tree"],
         parameters=_INSPECT_TREE_PARAMETERS,
+        parameter_schema=_INSPECT_TREE_PARAMETER_SCHEMA,
         examples=[
             '{"tool":"inspect_agent_tree"}',
             '{"tool":"inspect_agent_tree","root_id":"subagent-123"}',
@@ -75,6 +85,7 @@ def build_raise_event_spec() -> ToolSpec:
         avoid_when=["只是给当前模型自己看的临时想法，不需要主代理或用户知道时不要调用"],
         keywords=["观察", "事件", "进展", "阻塞", "上报", "observation", "event", "wake", "urgent"],
         parameters=_OBSERVATION_PARAMETERS,
+        parameter_schema=_OBSERVATION_PARAMETER_SCHEMA,
         examples=[
             '{"tool":"raise_event","task_id":"task-1","event_type":"progress",'
             '"summary":"子代理完成一轮检查，发现一个待复核现象","requires_main_agent":true}',
@@ -108,6 +119,15 @@ def build_task_progress_spec() -> ToolSpec:
             "coverage": "可选。覆盖账本，含 goal/dimensions/targets；targets 每项使用 id/title/status/checks/evidence/notes/next。",
             "expected_outputs": "可选。最终交付产物声明列表，每条 {pattern, min_count, note}；pattern 是相对任务交付目录的文件名或 glob（如 *.pdf），min_count 是该 pattern 至少应有的文件数（默认 1）。",
         },
+        parameter_schema={
+            "action": {"type": "string", "enum": ["read", "update"]},
+            "run_id": {"type": "string"},
+            "summary": {"type": "string"},
+            "next_action": {"type": "string"},
+            "items": {"type": "array", "items": {"type": "object"}},
+            "coverage": {"type": "object"},
+            "expected_outputs": {"type": "array", "items": {"type": "object"}},
+        },
         parameter_details={
             "items": "这是开放清单，不是业务模板。status 只用 pending/in_progress/done/skipped/blocked；completed/read/ok 这类说明写 notes/summary，不要写进 status。长文、长清单、逐章/逐项任务里，优先每个对象写一个 item；notes 写真实读到的短事实，evidence 写文件、offset/行号、artifact_ref 或来源说明。不要只写“章节001-012已覆盖”来代替逐项事实。",
             "coverage": "这是开放世界覆盖清单，不限定对象类型。targets 可以是项目、论文、API、日志源、文件、模块或任何当前任务对象；checks 必须是对象映射，键由当前任务自己定义，值只写 pending/in_progress/done/skipped/blocked。长任务里建议边读、边分析、边写报告时更新，不要最后一次性随便打钩；范围进度和逐项事实最好分开写。",
@@ -134,6 +154,7 @@ def build_dispatch_subagents_spec() -> ToolSpec:
         keywords=["调度", "推进", "运行", "验收", "派工", "dispatch", "subagent", "acceptance"],
         parameters=_DISPATCH_PARAMETERS,
         parameter_details=_DISPATCH_PARAMETER_DETAILS,
+        parameter_schema=_DISPATCH_PARAMETER_SCHEMA,
         internal_parameters=["apply", "start_runners", "execute_runners", "no_probe"],
         examples=[
             '{"tool":"dispatch_subagents","dry_run":true,"max_runners":1}',
@@ -165,6 +186,14 @@ def build_cancel_subagents_spec() -> ToolSpec:
             "reason": "可选。取消原因，会写入子代理 work log 和审计字段。",
             "kill_process": "可选。默认 true；如果任务记录里有关联 pid，会尝试 terminate。",
             "dry_run": "可选。默认 false；true 时只返回会取消哪些 run_id，不改状态。",
+        },
+        parameter_schema={
+            "run_id": {"type": "string"},
+            "run_ids": {"type": "array", "items": {"type": "string"}},
+            "root_id": {"type": "string"},
+            "reason": {"type": "string"},
+            "kill_process": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
         },
         parameter_details={
             "root_id": "root_id 会匹配 root 自己以及 child_ids 递归子树；如果没有 run_id/run_ids/root_id/status，工具会返回错误，避免误取消全部。",
@@ -206,6 +235,8 @@ def build_resolve_capability_requests_spec() -> ToolSpec:
             "tools": "可选。grant 时附加授权的工具名列表；缺省用请求自带 requested_tools。",
             "exempt_refs": "可选。accept_output_gaps 时豁免的具体声明产物路径列表；缺省豁免该子代理全部缺失（通配）。",
         },
+        parameter_schema=_RESOLVE_CAPABILITY_PARAMETER_SCHEMA,
+        required_parameters=["run_id", "decision", "reason"],
         parameter_details={
             "write_roots": "目录必须落在当前任务工作区或主代理 workspace 内；越界条目会被结构化拒绝，不会静默放行。",
             "decision": "deny 会把请求置为 CLOSED 并唤醒子代理按现有权限调整方案；不会终止子代理。accept_output_gaps 把豁免登记到子代理 output_delivery_exemptions，解除 closeout 缺失拦截。",
@@ -232,6 +263,7 @@ def build_schedule_child_subagents_spec() -> ToolSpec:
         keywords=_SCHEDULE_CHILD_KEYWORDS,
         parameters=_SCHEDULE_CHILD_PARAMETERS,
         parameter_details=_with_role_template_index(_SCHEDULE_CHILD_PARAMETER_DETAILS),
+        parameter_schema=_SCHEDULE_CHILD_PARAMETER_SCHEMA,
         examples=_SCHEDULE_CHILD_EXAMPLES,
     )
 

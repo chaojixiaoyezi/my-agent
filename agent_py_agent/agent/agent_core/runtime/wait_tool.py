@@ -97,6 +97,14 @@ def build_wait_spec() -> ToolSpec:
             "scope": "可选，查看范围提示，默认 own_task_tree",
             "reason": "可选，为什么等待，便于审计和日志理解",
         },
+        parameter_schema={
+            "seconds": {"type": "integer", "minimum": 0},
+            "run_id": {"type": "string"},
+            "task_id": {"type": "string"},
+            "thread_id": {"type": "string"},
+            "scope": {"type": "string"},
+            "reason": {"type": "string"},
+        },
         examples=[
             '{"tool":"wait","seconds":120,"reason":"刚启动子代理，稍后看一次进度"}',
             '{"tool":"wait","seconds":240,"run_id":"child-1","reason":"等待子代理和孙代理产出新进展"}',

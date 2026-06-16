@@ -23,6 +23,52 @@ from ._filesystem_write import _atomic_write_bytes
 from .models import ToolExecutionResult, ToolSpec
 
 
+def _build_edit_file_spec() -> ToolSpec:
+    return ToolSpec(
+        name="edit_file",
+        category="filesystem",
+        effect="mutating",
+        requires_idempotency=True,
+        description="把已有文本文件里的 old_string 精确替换成 new_string（带空白容错匹配）。改几行时首选，比 write_file 省、比 apply_patch 简单。",
+        use_cases=[
+            "修改已有代码/配置/文档里的一处或几处文本",
+            "把 new_string 设为空串即可删除 old_string 这段",
+        ],
+        avoid_when=[
+            "新建文件用 write_file",
+            "整文件重写用 write_file",
+            "一次要改很多文件用 apply_patch",
+        ],
+        keywords=["编辑", "替换", "改文件", "edit", "str_replace", "局部修改"],
+        parameters={
+            "path": "要编辑的文件路径",
+            "old_string": "文件中要被替换的原文（需足够唯一以精确定位）",
+            "new_string": "替换成的新文本（空串=删除 old_string）",
+            "replace_all": "可选，true 时替换所有匹配处（默认只换唯一一处）",
+        },
+        parameter_details={
+            "old_string": (
+                "必须能在文件中唯一定位；若只给一行而文件多处相同会报错，"
+                "这时多带几行上下文，或设 replace_all=true。"
+                "缩进/行首尾空白和文件略有出入也能容错命中（按真实文本替换）。"
+            ),
+            "new_string": "允许空串（删除）；保持与 old_string 一致的缩进风格。",
+            "replace_all": "布尔，默认 false。",
+        },
+        parameter_schema={
+            "path": {"type": "string"},
+            "old_string": {"type": "string"},
+            "new_string": {"type": "string"},
+            "replace_all": {"type": "boolean"},
+        },
+        required_parameters=["path", "old_string", "new_string"],
+        examples=[
+            '{"tool": "edit_file", "path": "app.py", "old_string": "timeout = 30", "new_string": "timeout = 60"}',
+            '{"tool": "edit_file", "path": "config.yaml", "old_string": "debug: true", "new_string": "debug: false", "replace_all": true}',
+        ],
+    )
+
+
 class EditFileTool(FileSystemTool):
     def __init__(
         self,
@@ -31,42 +77,7 @@ class EditFileTool(FileSystemTool):
         access_options: FileSystemAccessOptions | None = None,
     ):
         super().__init__(workspace_root, workspace_roots, access_options)
-        self.spec = ToolSpec(
-            name="edit_file",
-            category="filesystem",
-            effect="mutating",
-            requires_idempotency=True,
-            description="把已有文本文件里的 old_string 精确替换成 new_string（带空白容错匹配）。改几行时首选，比 write_file 省、比 apply_patch 简单。",
-            use_cases=[
-                "修改已有代码/配置/文档里的一处或几处文本",
-                "把 new_string 设为空串即可删除 old_string 这段",
-            ],
-            avoid_when=[
-                "新建文件用 write_file",
-                "整文件重写用 write_file",
-                "一次要改很多文件用 apply_patch",
-            ],
-            keywords=["编辑", "替换", "改文件", "edit", "str_replace", "局部修改"],
-            parameters={
-                "path": "要编辑的文件路径",
-                "old_string": "文件中要被替换的原文（需足够唯一以精确定位）",
-                "new_string": "替换成的新文本（空串=删除 old_string）",
-                "replace_all": "可选，true 时替换所有匹配处（默认只换唯一一处）",
-            },
-            parameter_details={
-                "old_string": (
-                    "必须能在文件中唯一定位；若只给一行而文件多处相同会报错，"
-                    "这时多带几行上下文，或设 replace_all=true。"
-                    "缩进/行首尾空白和文件略有出入也能容错命中（按真实文本替换）。"
-                ),
-                "new_string": "允许空串（删除）；保持与 old_string 一致的缩进风格。",
-                "replace_all": "布尔，默认 false。",
-            },
-            examples=[
-                '{"tool": "edit_file", "path": "app.py", "old_string": "timeout = 30", "new_string": "timeout = 60"}',
-                '{"tool": "edit_file", "path": "config.yaml", "old_string": "debug: true", "new_string": "debug: false", "replace_all": true}',
-            ],
-        )
+        self.spec = _build_edit_file_spec()
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:

@@ -328,6 +328,13 @@ class WebSearchTool(BaseTool):
                 "allowed_domains": "可选字符串数组，例如 [\"github.com\"]；和 blocked_domains 不能同时使用。",
                 "blocked_domains": "可选字符串数组，例如 [\"example.com\"]；和 allowed_domains 不能同时使用。",
             },
+            parameter_schema={
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1},
+                "allowed_domains": {"type": "array", "items": {"type": "string"}},
+                "blocked_domains": {"type": "array", "items": {"type": "string"}},
+            },
+            required_parameters=["query"],
             examples=['{"tool": "web_search", "query": "open model reasoning paper arxiv", "limit": 5}', '{"tool": "web_search", "query": "project weekly ranking 20260105", "allowed_domains": ["example.com"]}'],
         )
 

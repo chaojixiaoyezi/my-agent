@@ -88,6 +88,17 @@ class ReadArtifactTool(BaseTool):
             "task_id": "可选；读取短 call_id 时用于限制当前任务作用域，通常由系统自动注入",
             "request_id": "可选；读取短 call_id 时用于限制当前请求作用域，通常由系统自动注入",
         },
+        parameter_schema={
+            "artifact_ref": {"type": "string"},
+            "offset": {"type": "integer", "minimum": 0},
+            "max_chars": {"type": "integer", "minimum": 0},
+            "mode": {"type": "string", "enum": ["slice", "head", "tail", "search"]},
+            "query": {"type": "string"},
+            "run_id": {"type": "string"},
+            "task_id": {"type": "string"},
+            "request_id": {"type": "string"},
+        },
+        required_parameters=["artifact_ref"],
         examples=[
             '{"tool": "read_artifact", "artifact_ref": "run-123:2-1", "offset": 0, "max_chars": 4000}',
         ],

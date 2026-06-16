@@ -48,6 +48,14 @@ def build_create_skill_spec() -> ToolSpec:
             "when_to_use": "必填。什么场景该用它。",
             "body": "必填。完整的方法/步骤/工具链正文(markdown)。",
         },
+        parameter_schema={
+            "name": {"type": "string"},
+            "category": {"type": "string"},
+            "description": {"type": "string"},
+            "when_to_use": {"type": "string"},
+            "body": {"type": "string"},
+        },
+        required_parameters=["name", "description", "body"],
         examples=[
             '{"tool":"create_skill","name":"arxiv-paper-fetch","category":"research",'
             '"description":"从 arXiv 全字段+日期倒序检索最新论文","when_to_use":"找特定主题最新论文时",'

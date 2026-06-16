@@ -39,6 +39,11 @@ def build_remember_spec() -> ToolSpec:
             "content": "必填。要长期记住的一句话(偏好/事实/约定),具体、自包含。",
             "tags": "可选。标签列表(如 ['preference','format']),便于未来检索。",
         },
+        parameter_schema={
+            "content": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+        },
+        required_parameters=["content"],
         examples=[
             '{"tool":"remember","content":"用户看技术简报偏好\'结论先行+要点列表\'风格","tags":["preference","format"]}',
         ],
