@@ -21,6 +21,7 @@ from .recovery import attach_contract_recovery, failed_gate_payloads
 from .source_volume import attach_source_volume_observation
 from .subagent_aggregation import append_subagent_rework_context, evaluate_subagent_aggregation_gate
 from .task_progress_gate import evaluate_task_progress_closeout_gate, task_progress_repair_message
+from .verification_evidence_gate import verification_evidence_rework
 
 _PATH_TOKEN_RE = re.compile(
     r"(?P<path>"
@@ -87,7 +88,7 @@ def uncontracted_task_output_closeout_response(
     if artifact_blocks or empty_delivery_blocks or not decision.allowed:
         _block_with_objective_rework(request, report, decisions)
         return None
-    if _declared_gap_rework(params, report, expected_outputs_decision):
+    if _one_shot_rework_blocks(request, report, expected_outputs_decision):
         return None
     if coverage_blocks or not all(item.allowed for item in decisions):
         # 质量类未满足:ok 仍为 true 放行,报告里保留全部 gate 事实与 advisory。
@@ -101,6 +102,16 @@ def uncontracted_task_output_closeout_response(
 
     maybe_run_learning_review(request.agent, params, report)
     return ModelResponse(text=_uncontracted_closeout_text(report), backend=request.backend)
+
+
+# LLM: 一次性提醒类打回的归并入口(都幂等、二次放行,绝不卡死):①模型自我声明的
+#   expected_outputs 缺口(_declared_gap_rework);②任务要求真实跑测试却零测试执行证据
+#   且交了代码产物(verification_evidence_rework,native 回归修复)。任一命中即打回。
+# 函数用途: 跑完客观事实门后,再过一遍"温和提醒一次"的软门,命中则打回(True)。
+def _one_shot_rework_blocks(request: object, report: dict[str, Any], expected_outputs_decision) -> bool:
+    if _declared_gap_rework(getattr(request, "params", None), report, expected_outputs_decision):
+        return True
+    return verification_evidence_rework(request, report)
 
 
 # 函数用途: 客观事实阻断的统一收尾:报告标失败、附恢复动作、注入返工指令。

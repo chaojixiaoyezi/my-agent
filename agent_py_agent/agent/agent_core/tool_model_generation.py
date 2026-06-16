@@ -25,6 +25,7 @@ from .model.context_pressure import (
     preflight_context_pressure_response,
 )
 from .native_tool_protocol import native_tool_use_active, resolve_native_tools
+from .tool_ir_guidance import append_runtime_guidance_user_message
 from .runner.stage_trace import (
     RunnerModelStageTraceRequest,
     trace_runner_model_request_failed,
@@ -187,6 +188,13 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     # Anthropic 对孤儿一律 HTTP 400，这道 sweep 给孤儿 tool_use 补 stub、剔除孤儿
     # tool_result，保证出站永不带孤儿。
     messages = strip_orphaned_tool_blocks(messages)
+    # native 回归修复：把 tool_context 里「系统注入的运行时指引」（closeout 打回 /
+    # 出口合同续修 / delivery 软提醒 / 问句逃逸守卫……）作为收尾 user 文本消息接到
+    # 末尾。这类指引不是工具调用、不进 IR，又被 builder 的 native 旁路从 prompt 里
+    # 整段丢掉——不接回来，native 模型永远收不到打回理由（弱模型写完 output 即停手、
+    # closeout 判完成、续修轮蒙眼重复的根因）。孤儿净化只管 tool 块，指引在其后单独
+    # 成一条 user 文本消息，Anthropic 允许连续 user 消息（合并为一轮）。
+    messages = append_runtime_guidance_user_message(messages, getattr(params, "tool_context", None))
     return messages or None
 
 
