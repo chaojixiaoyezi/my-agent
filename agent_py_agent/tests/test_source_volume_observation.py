@@ -20,6 +20,7 @@ import pytest
 
 from agent_py_agent.agent.agent_core.delivery_closeout.source_volume import (
     source_volume_observation,
+    url_authenticity_observation,
     web_category_tool_names,
 )
 
@@ -126,3 +127,105 @@ def test_uncontracted_closeout_report_carries_observation(tmp_path: Path) -> Non
     assert obs["network_success_calls"] == 1
     assert obs["delivered_files"] >= 1
     assert obs["delivered_bytes"] > 0
+
+
+# ---- 子项3: URL 真实性软观测(防编造) ----
+
+
+def test_url_authenticity_flags_cited_but_not_fetched(tmp_path: Path) -> None:
+    """报告引用的 URL 不在本会话实际 fetch 集里 → 软标记为未验证。"""
+    report = tmp_path / "report.md"
+    report.write_text(
+        "参考来源:\n- https://really-fetched.example/a 见正文\n"
+        "- https://made-up-official.example/spec 官方文档\n",
+        encoding="utf-8",
+    )
+    archive = [
+        {"tool": "web_fetch", "ok": True, "parameters": {"url": "https://really-fetched.example/a"}},
+        {"tool": "web_fetch", "ok": False, "parameters": {"url": "https://failed.example/x"}},  # 失败不算验证
+    ]
+    obs = url_authenticity_observation(
+        archive, [str(report)], web_tool_names=frozenset({"web_fetch", "web_search"})
+    )
+    assert obs["verified_fetch_url_count"] == 1
+    assert obs["cited_url_count"] == 2
+    assert obs["unverified_url_count"] == 1
+    assert obs["unverified_urls"] == ["https://made-up-official.example/spec"]
+    assert "allowed" not in obs and "finding" not in obs, "软标记非硬拦,不携带判定字段"
+
+
+def test_url_authenticity_normalizes_trailing_slash_and_fragment(tmp_path: Path) -> None:
+    """fetch 'a/' vs 报告写 'a' 不算不一致;fragment 差异也归一,避免伪标记。"""
+    report = tmp_path / "r.md"
+    report.write_text("见 https://x.example/doc#section 和 https://x.example/path", encoding="utf-8")
+    archive = [
+        {"tool": "web_fetch", "ok": True, "parameters": {"url": "https://x.example/doc"}},
+        {"tool": "web_fetch", "ok": True, "parameters": {"urls": ["https://x.example/path/"]}},
+    ]
+    obs = url_authenticity_observation(archive, [str(report)], web_tool_names=frozenset({"web_fetch"}))
+    assert obs["unverified_url_count"] == 0, f"归一后不应误标: {obs['unverified_urls']}"
+
+
+def test_url_authenticity_empty_when_no_urls_cited(tmp_path: Path) -> None:
+    """产物不引用任何 URL → 零未验证,note 走正向文案。"""
+    report = tmp_path / "r.md"
+    report.write_text("# 本地分析报告\n纯本地任务,无外部引用。", encoding="utf-8")
+    obs = url_authenticity_observation([], [str(report)], web_tool_names=frozenset({"web_fetch"}))
+    assert obs["cited_url_count"] == 0
+    assert obs["unverified_url_count"] == 0
+
+
+def test_url_authenticity_extract_mode_urls_count_as_verified(tmp_path: Path) -> None:
+    """extract 模式用 urls 数组 fetch,这些 URL 也算本会话验证过。"""
+    report = tmp_path / "r.md"
+    report.write_text("来源 https://a.example/1 https://b.example/2", encoding="utf-8")
+    archive = [
+        {"tool": "web_fetch", "ok": True,
+         "parameters": {"urls": ["https://a.example/1", "https://b.example/2"], "mode": "extract"}},
+    ]
+    obs = url_authenticity_observation(archive, [str(report)], web_tool_names=frozenset({"web_fetch"}))
+    assert obs["verified_fetch_url_count"] == 2
+    assert obs["unverified_url_count"] == 0
+
+
+def test_url_authenticity_carried_in_closeout_report(tmp_path: Path) -> None:
+    """端到端:closeout 报告必带 url_authenticity_observation。"""
+    from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
+    from agent_py_agent.agent.agent_core.tool_loop.final_exit_contract import (
+        FinalExitRequest,
+        FinalExitState,
+        final_exit_closeout_decision,
+    )
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    task_root = tmp_path / "tasks" / "t-url"
+    output = task_root / "output"
+    output.mkdir(parents=True)
+    report_file = output / "报告.md"
+    report_file.write_text("参考 https://unfetched.example/x 官方说明。", encoding="utf-8")
+    agent = SimpleNamespace(
+        config=AgentConfig(),
+        tools=SimpleNamespace(workspace_root=tmp_path, specs=lambda: [_spec("web_fetch", "web")]),
+        root=tmp_path,
+    )
+    params = ToolLoopExecuteParams(
+        user_prompt="测试", memories=[], runtime_injections=[], prompt_files=[],
+        tool_catalog_section="", tool_recommendations_section="", tool_context=[],
+        effective_on_chunk=None, allowed_tools=None, granted_capabilities=None,
+        write_boundary=None,
+        task_attributes={"run_workspace": {
+            "task_root": str(task_root), "output_dir": str(output), "work_dir": str(task_root / "work")}},
+        request_id="req-url", run_id="run-url", task_id="run-url",
+        one_shot_tool_calls=set(), executed_tools=[],
+        archive_tool_calls=[
+            {"tool": "write_file", "call_id": "1-1", "ok": True,
+             "parameters": {"path": str(report_file)}, "output": "written"},
+        ],
+    )
+    final_exit_closeout_decision(
+        FinalExitRequest(agent, params, SimpleNamespace(text="完成。", backend="echo"), FinalExitState())
+    )
+    report = json.loads((task_root / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    url_obs = report["url_authenticity_observation"]
+    assert url_obs["cited_url_count"] == 1
+    assert url_obs["unverified_url_count"] == 1, "报告引用了从未 fetch 的 URL,应软标记"

@@ -14,11 +14,20 @@
 #   一眼能看出"交付 480 个数据点但只查了 19 次"这类比例异常,机器自己不下结论。
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 # 单文件字节统计的安全上限:超大文件按上限计,防止 stat 异常值撑爆报告语义。
 _MAX_FILE_BYTES_COUNTED = 100 * 1024 * 1024
+
+# 交付产物里抓 http(s) URL 的轻量正则(到空白/常见包裹符/中文标点截断)。
+_URL_RE = re.compile(r"https?://[^\s\"'<>)\]}，。；、）】>]+", re.IGNORECASE)
+# 单个产物读取上限(对齐 evidence._artifact_path_text 口径),防超大文件撑爆。
+_MAX_ARTIFACT_SCAN_CHARS = 200_000
+# 报告里 URL 数量上限(防一份链接墙把观测撑爆),软标记够用即可。
+_MAX_CITED_URLS = 200
 
 
 # LLM: 观测构造唯一入口。纯函数(只读 archive 与文件系统 stat),永不抛异常,
@@ -46,6 +55,138 @@ def source_volume_observation(
             "取决于任务性质（本地分析类任务零网络调用是正常形态），由把关者判断。"
         ),
     }
+
+
+# LLM: URL 真实性软观测(防编造/防幻觉,实锤 mimo 编造官方 URL 无人拦)。设计裁决:
+#   ① 软标记非硬拦:报告里的 URL 若【不在】本 run 实际成功 fetch 过的 URL 集里,只标
+#      "未经本会话验证的引用"(让幻觉对模型/把关者可见),绝不 block——模型从训练知识写出的
+#      真实 URL(如官网首页)合法且常见,硬拦必误伤;判定权交给把关者。
+#   ② 验证集口径 = 本 run archive 里 ok=true 的 web 类工具调用的 url/urls 参数
+#      (web_fetch_runtime 真实 fetch 过的入口;与 source_volume 同源,零新增账本)。
+#   ③ 比对做归一(去 fragment、去末尾斜杠、host 小写),避免 "/x" vs "/x/" 这类伪不一致;
+#      纯观测零异常:读不到产物/无 URL/registry 缺失一律计空,绝不打断验收。
+# 函数用途: 交付收口时核对"报告里引用的 URL"是否都"本会话真的访问过",不一致的软标记。
+def url_authenticity_observation(
+    archive_tool_calls: list | None,
+    artifact_paths: list[str],
+    *,
+    web_tool_names: frozenset[str],
+) -> dict[str, Any]:
+    fetched = _verified_fetch_urls(archive_tool_calls, web_tool_names)
+    cited = _cited_urls_in_artifacts(artifact_paths)
+    fetched_keys = {_url_compare_key(u) for u in fetched}
+    unverified = [u for u in cited if _url_compare_key(u) not in fetched_keys]
+    return {
+        "schema_version": "url_authenticity_observation.v1",
+        "verified_fetch_url_count": len(fetched),
+        "cited_url_count": len(cited),
+        "unverified_url_count": len(unverified),
+        "unverified_urls": unverified[:_MAX_CITED_URLS],
+        "note_zh": (
+            "软标记非硬拦:下列 URL 出现在交付产物里,但本会话没有实际成功访问过它们,"
+            "属于'未经本会话验证的引用'(可能是模型从训练知识写出的真实链接,也可能是编造)。"
+            "请把关者核对其真实性;不构成判定,不阻断交付。"
+            if unverified else
+            "交付产物里引用的 URL 均能对应到本会话实际成功访问过的来源(或产物未引用任何 URL)。"
+        ),
+    }
+
+
+# 函数用途: 收集本 run 真实成功访问过的 URL 集(archive ok=true 的 web 类工具的 url/urls 参数)。
+def _verified_fetch_urls(archive_tool_calls: list | None, web_tool_names: frozenset[str]) -> list[str]:
+    if not web_tool_names:
+        return []
+    accumulator = _OrderedUrls()
+    for record in archive_tool_calls or []:
+        for raw in _verified_record_url_values(record, web_tool_names):
+            accumulator.add(str(raw or "").strip())
+    return accumulator.values
+
+
+# 函数用途: 单条 archive 记录(须 ok=true 且 web 类工具)里的 url/urls 候选,否则空。
+def _verified_record_url_values(record: object, web_tool_names: frozenset[str]) -> list[str]:
+    if not isinstance(record, dict) or record.get("ok") is not True:
+        return []
+    if str(record.get("tool") or "").strip() not in web_tool_names:
+        return []
+    params = record.get("parameters")
+    return _params_url_values(params) if isinstance(params, dict) else []
+
+
+# 函数用途: 从一个工具调用 parameters 里取 url + urls(数组)两处候选。
+def _params_url_values(params: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    single = params.get("url")
+    if isinstance(single, str):
+        values.append(single)
+    many = params.get("urls")
+    if isinstance(many, str):
+        values.append(many)
+    elif isinstance(many, list):
+        values.extend(str(item) for item in many if isinstance(item, str))
+    return values
+
+
+# 函数用途: 扫交付产物文本,抽出其中出现的 http(s) URL(去重,保序,设上限)。
+def _cited_urls_in_artifacts(artifact_paths: list[str]) -> list[str]:
+    accumulator = _OrderedUrls(limit=_MAX_CITED_URLS)
+    for raw in artifact_paths or []:
+        _collect_urls_from_text(_artifact_scan_text(Path(str(raw or "")).expanduser()), accumulator)
+        if accumulator.full:
+            break
+    return accumulator.values
+
+
+# 函数用途: 把一段文本里的 http(s) URL(去尾随句读)加进累加器,满则停。
+def _collect_urls_from_text(text: str, accumulator: _OrderedUrls) -> None:
+    for match in _URL_RE.findall(text):
+        if accumulator.full:
+            return
+        accumulator.add(match.rstrip(".,;:!?"))  # 尾随句读不属于 URL
+
+
+# 函数用途: 保序去重的 URL 累加器,可选上限,把"去重+保序+截断"从循环体里收成一处。
+class _OrderedUrls:
+    def __init__(self, limit: int | None = None) -> None:
+        self._values: list[str] = []
+        self._seen: set[str] = set()
+        self._limit = limit
+
+    def add(self, url: str) -> None:
+        if not url or url in self._seen or self.full:
+            return
+        self._seen.add(url)
+        self._values.append(url)
+
+    @property
+    def full(self) -> bool:
+        return self._limit is not None and len(self._values) >= self._limit
+
+    @property
+    def values(self) -> list[str]:
+        return self._values
+
+
+# 函数用途: 安全读单个产物文本(非文件/读失败返回空,设字符上限),对齐 evidence 口径。
+def _artifact_scan_text(path: Path) -> str:
+    try:
+        if not path.is_file():
+            return ""
+        return path.read_text(encoding="utf-8", errors="ignore")[:_MAX_ARTIFACT_SCAN_CHARS]
+    except OSError:
+        return ""
+
+
+# 函数用途: URL 比对归一键(scheme/host 小写、去 fragment、去末尾斜杠),消除伪不一致。
+def _url_compare_key(url: str) -> str:
+    try:
+        parts = urlsplit(str(url or "").strip())
+    except ValueError:
+        return str(url or "").strip().lower()
+    if not parts.scheme or not parts.netloc:
+        return str(url or "").strip().lower()
+    path = parts.path.rstrip("/") or "/"
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
 
 
 # LLM: 检索侧计数:archive ok=true 且 tool 名属于 web 类 spec 集合(调用方从
@@ -117,15 +258,24 @@ def attach_source_volume_observation(closeout: Any, report: dict[str, Any]) -> N
             for item in (report.get("artifacts") or [])
             if isinstance(item, dict) and item.get("ok") is True
         ]
+        archive_tool_calls = list(getattr(getattr(closeout, "params", None), "archive_tool_calls", []) or [])
+        web_tool_names = web_category_tool_names(getattr(closeout, "agent", None))
         report["source_volume_observation"] = source_volume_observation(
-            list(getattr(getattr(closeout, "params", None), "archive_tool_calls", []) or []),
+            archive_tool_calls,
             artifact_paths,
-            web_tool_names=web_category_tool_names(getattr(closeout, "agent", None)),
+            web_tool_names=web_tool_names,
             declared_min_count_total=_declared_min_count_total(closeout),
+        )
+        # URL 真实性软观测(防编造):报告里引用但本会话没真访问过的 URL 标"未经本会话验证"。
+        report["url_authenticity_observation"] = url_authenticity_observation(
+            archive_tool_calls, artifact_paths, web_tool_names=web_tool_names,
         )
     except Exception:
         report["source_volume_observation"] = source_volume_observation(
             [], [], web_tool_names=frozenset(), declared_min_count_total=0
+        )
+        report["url_authenticity_observation"] = url_authenticity_observation(
+            [], [], web_tool_names=frozenset(),
         )
 
 
@@ -148,5 +298,6 @@ def _declared_min_count_total(closeout: Any) -> int:
 __all__ = [
     "attach_source_volume_observation",
     "source_volume_observation",
+    "url_authenticity_observation",
     "web_category_tool_names",
 ]

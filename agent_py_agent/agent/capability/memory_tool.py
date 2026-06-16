@@ -11,6 +11,7 @@ import json
 from typing import TYPE_CHECKING
 
 from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from .memory_threat_scan import scan_memory_content
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -64,6 +65,24 @@ class RememberTool(BaseTool):
                 False,
                 json.dumps({"error": "content 必填", "hint": "给一句具体、自包含的要记住的话"}, ensure_ascii=False),
                 error_code="TOOL_INVALID_ARGUMENTS",
+            )
+        # 写入前威胁扫描:长期记忆跨会话持久,是注入长效攻击面(未来会话检索回来当可信
+        #   上下文)。命中提示注入/凭证外泄特征即拒绝(对标 长期助手 写入前 scope 扫描)。
+        #   防误伤中文:模式全锚定 ASCII 攻击语料,正常中文偏好/事实永不命中。
+        scan = scan_memory_content(content)
+        if not scan.safe:
+            return ToolExecutionResult(
+                "remember",
+                False,
+                json.dumps(
+                    {
+                        "error": scan.reason(),
+                        "hint": "若确为正常长期偏好/事实,改写成不含可执行指令/凭证语义的纯描述再记;"
+                                "外部网页/工具输出不要原样落库。",
+                    },
+                    ensure_ascii=False,
+                ),
+                error_code="MEMORY_INJECTION_BLOCKED",
             )
         memory = getattr(self.agent, "memory", None)
         if memory is None or not hasattr(memory, "add"):
