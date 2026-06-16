@@ -58,6 +58,11 @@ def test_all_tools_have_precise_schema_and_examples(tmp_path: Path) -> None:
         spec = tool.spec
         assert spec.category == "log_ops"
         assert spec.effect in {"read_only", "mutating"}
+        # side-effecting(mutating)工具必须声明 requires_idempotency=True,否则 tool_manifest 门
+        # 会在 execute 之前 0.00s 判 TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING 拦成 UNKNOWN_ERROR
+        # (log_alert_poll 2 小时真机实锤的根因)。read_only 工具不要求。
+        if spec.effect == "mutating":
+            assert spec.requires_idempotency is True, f"{spec.name} mutating 必须 requires_idempotency"
         assert spec.examples, spec.name
         # 每个声明的 required 参数都有精确 schema 片段。
         for req in spec.required_parameters:

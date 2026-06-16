@@ -198,6 +198,43 @@ def test_all_used_error_codes_are_registered():
     )
 
 
+def test_tool_execution_gate_finding_codes_are_registered():
+    """工具执行门(manifest/effect/mode/idempotency)产出的 finding code 也必须在 ERROR_CONTRACTS 注册。
+
+    根因实锤(日志运营 2 小时):这些码由 GateFinding("XXX") / deny("gate","XXX") 产出,
+    不是 error_code="XXX" 字面量——上面那条钉子(只扫 error_code= 字面量)抓不到它们。但工具
+    被门拦时,runtime_gate_block_result 会把 decision.finding_codes[0] 当成 error_code,未注册
+    照样 fallback 成 UNKNOWN_ERROR(retryable=False)误导主代理放弃整轮长任务(log_alert_poll
+    被 tool_manifest 门拦成 TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING→UNKNOWN_ERROR 即此)。
+    这条钉子把"门产出的 finding code 必须注册"也守住,补上扫描盲区。
+
+    扫描范围限定在工具执行门会经过的 gate 模块(tool_manifest / tool_effects),只看这几支里
+    GateFinding(...) / deny(...,...) 的码——这些一定会变成工具的 error_code。
+    """
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    gate_files = [
+        AGENT_ROOT / "contracts" / "gates" / "tool_manifest.py",
+        AGENT_ROOT / "contracts" / "gates" / "tool_effects.py",
+    ]
+    code_patterns = (
+        re.compile(r"""GateFinding\(\s*["']([A-Z_]+)["']"""),
+        re.compile(r"""\.deny\(\s*["'][a-z_]+["']\s*,\s*["']([A-Z_]+)["']"""),
+    )
+    used: set[str] = set()
+    for path in gate_files:
+        text = path.read_text(encoding="utf-8")
+        for pattern in code_patterns:
+            used.update(match.group(1) for match in pattern.finditer(text))
+    missing = sorted(
+        code for code in used if code != "UNKNOWN_ERROR" and error_contract(code).code != code
+    )
+    assert not missing, (
+        "这些工具执行门 finding code 未在 ERROR_CONTRACTS 注册，工具被门拦时会 fallback 成 "
+        f"UNKNOWN_ERROR(retryable=False)误导模型放弃: {missing}"
+    )
+
+
 def test_all_tool_effects_are_valid():
     """所有工具 spec 的 effect 必须是合法值(read_only/mutating/dangerous)。
 

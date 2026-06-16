@@ -22,14 +22,21 @@ from agent_py_agent.agent.agent_core.delivery_closeout.duration_vigil_gate impor
 )
 
 
-def _request(prompt: str, tool_context: list | None = None):
+def _request(prompt: str, tool_context: list | None = None, archive_tool_calls: list | None = None):
     return SimpleNamespace(
         params=SimpleNamespace(
             root_user_prompt=prompt,
             user_prompt=prompt,
             tool_context=tool_context if tool_context is not None else [],
+            archive_tool_calls=archive_tool_calls if archive_tool_calls is not None else [],
         ),
     )
+
+
+def _vigil_calls(n: int) -> list:
+    """造 n 条成功的「值守进展」工具调用(wait/poll 等),用来驱动节流逻辑。"""
+    tools = ["wait", "log_alert_poll", "log_source_query", "log_monitor_status"]
+    return [{"tool": tools[i % len(tools)], "ok": True} for i in range(n)]
 
 
 def _report(workspace_root: Path) -> dict:
@@ -79,19 +86,67 @@ def test_minutes_unit_required_duration(tmp_path):
     assert duration_vigil_rework(req, report) is True
 
 
-# --- idempotent: never deadlocks ----------------------------------------------
+# --- 持续拦(时长未达就每次都拦)+ 防紧密循环节流 -------------------------------
 
 
-def test_second_pass_allows_after_hint_already_emitted(tmp_path):
+def test_persistently_blocks_while_under_duration_with_new_progress(tmp_path):
+    # 时长未达 + 主代理被拦后正经做了新值守动作(wait/poll 累计涨了) → 继续拦,把它留在岗位上。
     _seed_timeline(tmp_path, started_minutes_ago=13)
+    # 第一次拦时已有 2 次值守进展,标记里记 progress_at_block=2。
+    marker = (
+        "[duration-vigil-rework]\n"
+        + json.dumps({"progress_at_block": 2, "finding": "VIGIL_DURATION_NOT_REACHED"}, sort_keys=True)
+        + "\n继续值班循环。"
+    )
+    # 现在累计 4 次值守进展(>2)→ 说明被拦后又 wait→poll 了 → 应继续拦(不放行)。
     req = _request(
         "持续监控研判,运营至少 2 小时",
-        tool_context=["[duration-vigil-rework]\n{...}\n继续值班循环。"],
+        tool_context=[marker],
+        archive_tool_calls=_vigil_calls(4),
     )
     report = _report(tmp_path)
-    # already nudged once → allow (no deadlock even if the model insists on finishing)
+    assert duration_vigil_rework(req, report) is True
+    assert report["ok"] is False
+
+
+def test_throttle_allows_when_no_new_progress_since_last_block(tmp_path):
+    # 防紧密循环烧 token:被拦后**没干任何新值守活**就又想交付(累计进展没涨) → 放行,不陪空转。
+    _seed_timeline(tmp_path, started_minutes_ago=13)
+    marker = (
+        "[duration-vigil-rework]\n"
+        + json.dumps({"progress_at_block": 4, "finding": "VIGIL_DURATION_NOT_REACHED"}, sort_keys=True)
+        + "\n继续值班循环。"
+    )
+    # 累计仍是 4(== progress_at_block)→ 紧密空转 → 安全阀放行。
+    req = _request(
+        "持续监控研判,运营至少 2 小时",
+        tool_context=[marker],
+        archive_tool_calls=_vigil_calls(4),
+    )
+    report = _report(tmp_path)
     assert duration_vigil_rework(req, report) is False
     assert report["ok"] is True
+
+
+def test_first_block_records_progress_baseline_in_marker(tmp_path):
+    # 第一次拦截要把当前值守进展次数写进标记的 progress_at_block,供下次节流对比。
+    _seed_timeline(tmp_path, started_minutes_ago=13)
+    req = _request("持续监控研判,运营至少 2 小时", archive_tool_calls=_vigil_calls(3))
+    report = _report(tmp_path)
+    assert duration_vigil_rework(req, report) is True
+    marker = next(item for item in req.params.tool_context if "[duration-vigil-rework]" in str(item))
+    payload = json.loads(str(marker)[str(marker).find("{"): str(marker).find("}") + 1])
+    assert payload["progress_at_block"] == 3
+
+
+def test_guidance_demands_wait_to_throttle_token_burn(tmp_path):
+    # 引导话术必须明确要求"先用 wait 等待再继续",这样低频值守不烧 token。
+    _seed_timeline(tmp_path, started_minutes_ago=13)
+    req = _request("持续监控研判,运营至少 2 小时", archive_tool_calls=_vigil_calls(1))
+    report = _report(tmp_path)
+    assert duration_vigil_rework(req, report) is True
+    joined = "\n".join(str(item) for item in req.params.tool_context)
+    assert "wait" in joined and "周期性" in joined
 
 
 # --- duration satisfied → allow -----------------------------------------------

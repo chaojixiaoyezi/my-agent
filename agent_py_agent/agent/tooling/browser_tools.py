@@ -226,7 +226,10 @@ class BrowserClickTool(_BrowserToolBase):
         name="browser_click",
         category="web",
         effect="mutating",
-        requires_idempotency=False,
+        # side-effecting 工具按 manifest 契约必须声明幂等策略,否则 tool_manifest 门会在
+        # execute 之前 0.00s 判 TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING 拦死(框架自动派生
+        # idempotency_key,模型无需手填)。与 log_alert_poll 同根因(见 log_ops/tools.py)。
+        requires_idempotency=True,
         description=(
             "点击当前页面上的一个元素,用 browser_snapshot/browser_navigate 返回的 ref(如 e5)"
             "或 CSS selector 定位。点击后返回更新的页面快照。"
@@ -282,7 +285,9 @@ class BrowserTypeTool(_BrowserToolBase):
         name="browser_type",
         category="web",
         effect="mutating",
-        requires_idempotency=False,
+        # 同 browser_click:side-effecting 必须声明幂等策略,否则被 tool_manifest 门
+        # 0.00s 拦成 TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING(框架自动派生 key)。
+        requires_idempotency=True,
         description=(
             "往当前页面的输入框/文本域填入文字,用 ref(如 e3)或 CSS selector 定位。"
             "会先清空再输入。填完返回更新的页面快照。"

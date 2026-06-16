@@ -232,7 +232,13 @@ class LogAlertPollTool(_LogOpsTool):
         name="log_alert_poll",
         category="log_ops",
         effect="mutating",
-        requires_idempotency=False,
+        # poll 推进「已读游标」是有副作用的（mutating），按 manifest 契约必须声明幂等策略：
+        # side-effecting(mutating/dangerous)工具 requires_idempotency 必须为 True,否则
+        # tool_manifest 门会判 TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING **在 execute 之前**
+        # 0.00s 拦死(该码此前未注册 → 兜底成 UNKNOWN_ERROR/retryable=False,误导主代理
+        # 以为核心循环被永久阻塞而停手——日志运营 2 小时真机实锤)。框架对 mutating 工具
+        # 会自动派生 idempotency_key,模型无需手填;同 offset 重读天然幂等,语义正确。
+        requires_idempotency=True,
         description=(
             "拉取新的候选告警(确定性初筛命中的真实日志行)给你研判。拉过的会标记已读,下次只给更新的,"
             "不重复。每条候选带:原始日志行全文、命中的规则、源标识、行号、时间戳、唯一指纹。"

@@ -804,6 +804,92 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="工具执行时发生可恢复异常；可原样重试一次，连续失败则换工具或换参数。",
     ),
+    # —— 运行时门(tool_manifest / tool_effect / tool_mode / idempotency)拦截码 ——
+    # 这些是工具被调用「之前」、在 execute_registry_call 的 gate pipeline 里产出的拦截码，
+    # 此前**全部未注册** → error_contract 回落成 UNKNOWN_ERROR(retryable=False/report_blocker)。
+    # 实锤(日志运营 2 小时):log_alert_poll 声明 mutating 却漏 requires_idempotency,被
+    # tool_manifest 门 0.00s 判 TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING,兜底成 UNKNOWN_ERROR,
+    # 主代理误以为核心循环被永久阻塞而诚实停手。根因(工具 spec)已修;这里再补防御纵深:
+    # 即便将来又有工具 spec 配错被门拦,也给精确码 + CHANGE_STRATEGY(换 peek/换工具/换参数继续),
+    # 而非 report_blocker(放弃)——既准确归因、又不让一个工具的门拦塌掉整轮长任务。
+    "TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING": ErrorContract(
+        code="TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="该工具的清单未声明幂等策略被运行时门拦下(工具配置问题,非你的参数错)；"
+        "不要放弃整个任务,换一个等价工具或换参数继续推进(只读类可加 peek=true 预览)。",
+    ),
+    "TOOL_MANIFEST_EFFECT_MISSING": ErrorContract(
+        code="TOOL_MANIFEST_EFFECT_MISSING",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="该工具清单缺少 effect 声明被运行时门拦下(工具配置问题)；换等价工具或换参数继续,不要放弃任务。",
+    ),
+    "TOOL_MANIFEST_EFFECT_INVALID": ErrorContract(
+        code="TOOL_MANIFEST_EFFECT_INVALID",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="该工具清单 effect 取值非法被运行时门拦下(工具配置问题)；换等价工具或换参数继续,不要放弃任务。",
+    ),
+    "TOOL_MANIFEST_SCHEMA_MISSING": ErrorContract(
+        code="TOOL_MANIFEST_SCHEMA_MISSING",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="该工具清单缺少参数 schema 被运行时门拦下(工具配置问题)；换等价工具或换参数继续,不要放弃任务。",
+    ),
+    "TOOL_MANIFEST_TIMEOUT_INVALID": ErrorContract(
+        code="TOOL_MANIFEST_TIMEOUT_INVALID",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="该工具清单 timeout 非法被运行时门拦下(工具配置问题)；换等价工具或换参数继续,不要放弃任务。",
+    ),
+    "TOOL_MANIFEST_NAME_MISSING": ErrorContract(
+        code="TOOL_MANIFEST_NAME_MISSING",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="该工具清单缺少名称被运行时门拦下(工具配置问题)；换等价工具或换参数继续,不要放弃任务。",
+    ),
+    "TOOL_EFFECT_MISSING": ErrorContract(
+        code="TOOL_EFFECT_MISSING",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="工具 effect 声明缺失被效果门拦下(工具配置问题)；换等价工具或换参数继续,不要放弃任务。",
+    ),
+    "TOOL_EFFECT_INVALID": ErrorContract(
+        code="TOOL_EFFECT_INVALID",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="工具 effect 取值非法被效果门拦下(工具配置问题)；换等价工具或换参数继续,不要放弃任务。",
+    ),
+    "TOOL_MODE_INVALID": ErrorContract(
+        code="TOOL_MODE_INVALID",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="工具执行模式(mode)取值非法；改用 read_only/dry_run/real 之一,或省略 mode 让框架按 effect 取默认。",
+    ),
+    "TOOL_IDEMPOTENCY_KEY_MISSING": ErrorContract(
+        code="TOOL_IDEMPOTENCY_KEY_MISSING",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="副作用工具缺少 idempotency_key 被效果门拦下；补一个稳定的 idempotency_key 再重试(同一意图复用同一个 key 以去重)。",
+    ),
+    "RUNTIME_GATE_DENIED": ErrorContract(
+        code="RUNTIME_GATE_DENIED",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="工具调用被某个运行时门拦下；查看 findings 看具体原因,换等价工具/换参数继续,不要因单次被拦就放弃整个任务。",
+    ),
     # —— 模型/上下文 ——
     "MODEL_CONTEXT_WINDOW_EXCEEDED": ErrorContract(
         code="MODEL_CONTEXT_WINDOW_EXCEEDED",

@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-"""持续值守类长任务的「时长未达即引导继续」软门(uncontracted 路径专用,保守、幂等)。
+"""持续值守类长任务的「时长未达即持续拦」软门(uncontracted 路径专用,保守、带防紧密循环节流)。
 
 实锤背景(日志运营 2 小时真机测试):给主代理「用 log_ops 持续监控研判,运营至少 2 小时,
 每隔约 5 分钟 wait→log_alert_poll 拉候选研判,持续到约 2 小时后再收尾」这类**无终点、靠
@@ -10,23 +10,32 @@ work/,就被 uncontracted closeout「见产物可打开即判完成」判完成�
 COMPLETE] 提前退出——只跑了约 5 轮 13 分钟,根本没撑到 2 小时。确定性 daemon 工作完美(不丢),
 问题纯在 LLM 主代理这层撑不住持续值守。
 
-本门只做一件很窄的事——当且仅当三件事同时成立时,**引导一次**让模型继续值班循环:
+本门只做一件很窄的事——当且仅当三件事同时成立时,**持续引导**让模型继续值班循环:
   ①任务 prompt 里有明确的**持续值守意图**(持续/值班/监控/运营/盯着/keep monitoring /
     on duty / continuously 等),不是泛泛提一句"监控"——要带「持续值守」语气;
   ②任务 prompt 里给了明确的**时长要求**(至少 N 小时 / N 小时 / for N hours / N 分钟 ...),
     能解析出一个目标秒数;
   ③本 run 实际运行时长**远未达到**要求时长(默认达到 90% 即视为够了,放行)。
 
-与 verification_evidence_gate 同款语义:引导是**幂等一次**——注入一条「继续值班」提醒后,
-本 run 第二次到达 closeout 直接放行(写进 advisories 供把关)。这样即便运行时长取不到、
-或主代理坚持要收尾,也绝不会卡死,最多多提醒一轮。**软引导**:它不阻断 uncontracted 的
-其它客观事实门,只在那些都放行后、模型想提前交付时,把「这是持续值守任务、还没到时长、
-继续 wait→poll→研判→status 循环、不要提前写交付报告」喂回去,让模型「想提前交付→被引导
-继续→继续值班循环」。
+与上一版(幂等一次,引导后第二次想交付就放行)的关键区别——**持续拦**:
+持续值守任务的本质是「靠时长驱动、没到点就不算完成」,引导一次就放行等于纵容提前退出。
+所以只要「实际运行时长 < 要求时长」就**每次想 DELIVERY_COMPLETE 都拦+引导**,直到时长达标
+才放行。**这不是死循环**——时间在持续流逝,最终一定达标放行。
+
+**但要防紧密循环烧 token**(核心安全阀):若主代理被拦后**没有取得任何新的值守进展**就立即
+重试交付(典型表现:被拦→不 wait/不 poll→马上又想交付,如此空转狂刷),则放它通过,不再
+重复拦截。判据=两次拦截之间「值守动作」(wait / log_alert_poll / log_source_query /
+log_monitor_status)的累计次数有没有增加:
+  - 增加了 → 主代理在正经周期性值守(wait→poll→研判),继续拦,把它留在岗位上;
+  - 没增加 → 主代理在紧密空转(没干值守活就想退),放行,绝不陪它烧 token。
+引导话术明确要求「用 wait 工具等待 N 分钟再继续」(值班是周期性的,不是连续狂跑),
+这样配合节流:正常低频值守(每轮都先 wait 再 poll)会被持续留岗直到时长达标;一旦退化成
+紧密空转,安全阀立刻放行。务实地兼顾了「拦住提前退出」与「不烧 token」。
 
 边界(关键,绝不误伤):①必须同时命中持续值守意图**和**可解析时长才可能触发——普通一次性
 任务(写报告/改代码/查资料)既无值守意图也无"运营 N 小时"时长,永不触发;②时长够了(达到
-目标的 90%)立即放行;③幂等一次,提醒过即放行。纯加法、零配置;text/native 路径同样适用。
+目标的 90%)立即放行;③紧密空转(无新值守进展)放行;④取不到起跑点保守放行。纯加法、零配置;
+text/native 路径同样适用。
 
 运行时长怎么取:run 工作区 work/timeline.jsonl 的首条 created_at(run_workspace_saved 事件,
 任务首次落盘即写,compact 续跑复用同目录不覆盖首条 → 跨续跑就是任务真正的起跑点)。取不到
@@ -67,6 +76,13 @@ _DURATION_SATISFIED_RATIO = 0.9
 
 _VIGIL_GAP_MARKER = "[duration-vigil-rework]"
 
+# 「值守进展」工具:两次拦截之间这些工具的累计调用次数有没有增加,决定是否还继续拦(节流)。
+# wait(周期性等待)+ 三个真正在值班循环里推进研判的 log_ops 工具。log_monitor_start/stop
+# 不算(起停只一次性,不代表持续值守动作);写笔记 write_file 也不算(写笔记≠值守研判)。
+_VIGIL_PROGRESS_TOOLS = frozenset(
+    {"wait", "log_alert_poll", "log_source_query", "log_monitor_status"}
+)
+
 
 def duration_vigil_rework(
     request: object,
@@ -74,14 +90,13 @@ def duration_vigil_rework(
     *,
     now: Callable[[], float] | None = None,
 ) -> bool:
-    """持续值守任务 + 有时长要求 + 实际运行远未达标 → 引导继续一次(返回 True)。
+    """持续值守任务 + 有时长要求 + 实际运行远未达标 → 持续引导继续(返回 True),直到时长达标放行。
 
-    幂等:本 run 已引导过则直接 False(放行)。非值守/无时长/取不到起跑点/已达标都 False。
+    防紧密循环节流:两次拦截之间若无新的值守进展(wait/poll/query/status 累计次数没增加),
+    则放行(False),不陪空转烧 token。非值守/无时长/取不到起跑点/已达标都 False(放行)。
     """
     params = getattr(request, "params", None)
     if params is None:
-        return False
-    if _rework_already_emitted(params):
         return False
     if not _task_is_vigil_with_intent(params):
         return False
@@ -93,6 +108,12 @@ def duration_vigil_rework(
         return False
     if elapsed >= required_seconds * _DURATION_SATISFIED_RATIO:
         return False
+    # 时长未达标:本应持续拦。但先过节流闸——若上次拦截后没有任何新的值守进展(紧密空转),
+    # 就放行不再拦,避免烧 token。第一次进来(还没拦过)progress_at_last_block 为 None,直接拦。
+    progress_now = _vigil_progress_count(params)
+    progress_at_last_block = _last_block_progress_count(params)
+    if progress_at_last_block is not None and progress_now <= progress_at_last_block:
+        return False
     required_minutes = round(required_seconds / 60.0, 1)
     elapsed_minutes = round(elapsed / 60.0, 1)
     report["duration_vigil_gate"] = {
@@ -102,14 +123,16 @@ def duration_vigil_rework(
         "elapsed_seconds": round(elapsed, 1),
         "required_minutes": required_minutes,
         "elapsed_minutes": elapsed_minutes,
+        "vigil_progress_calls": progress_now,
         "message_zh": (
             "这是持续值守类任务(要求持续监控/值班/运营一段明确时长),当前实际运行时长"
             f"约 {elapsed_minutes} 分钟,远未达到要求的约 {required_minutes} 分钟。"
-            "请不要提前交付或写交付报告,继续值班循环:wait 一段时间 → log_alert_poll 拉新候选研判 → "
+            "请不要提前交付或写交付报告,继续值班循环:先用 wait 工具等待约 5 分钟(值班是周期性的,"
+            "不要连续狂跑不 wait)→ log_alert_poll 拉新候选研判 → "
             "必要时 log_source_query 交叉验证 → log_monitor_status 看不丢对账,如此往复直到达到要求时长。"
         ),
     }
-    _append_vigil_rework_context(params, report)
+    _append_vigil_rework_context(params, report, progress_now)
     report["ok"] = False
     from .artifacts import _write_report
 
@@ -117,11 +140,53 @@ def duration_vigil_rework(
     return True
 
 
-def _rework_already_emitted(params: object) -> bool:
+def _last_block_progress_count(params: object) -> int | None:
+    """读取上一次拦截时写进 tool_context 的「值守进展累计次数」;从未拦过则 None。
+
+    取最后一条 vigil 标记里的 progress_at_block 数字。容错:解析失败按 0 计(视为拦过一次、
+    基线为 0),这样只要之后有任何值守进展就继续拦,无进展就放行——仍满足节流语义。
+    """
     context = getattr(params, "tool_context", None)
     if not isinstance(context, list):
-        return False
-    return any(_VIGIL_GAP_MARKER in str(item) for item in context)
+        return None
+    latest: int | None = None
+    for item in context:
+        text = str(item)
+        if _VIGIL_GAP_MARKER not in text:
+            continue
+        latest = _extract_progress_at_block(text)
+    return latest
+
+
+def _extract_progress_at_block(marker_text: str) -> int:
+    """从一条 vigil 标记文本里抽出 JSON 的 progress_at_block(解析失败按 0)。"""
+    start = marker_text.find("{")
+    end = marker_text.find("}", start)
+    if start == -1 or end == -1:
+        return 0
+    try:
+        payload = _json.loads(marker_text[start : end + 1])
+    except _json.JSONDecodeError:
+        return 0
+    if isinstance(payload, dict):
+        try:
+            return int(payload.get("progress_at_block", 0))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _vigil_progress_count(params: object) -> int:
+    """本 run 至今累计的「值守进展」工具成功调用次数(wait/poll/query/status)。"""
+    count = 0
+    for record in getattr(params, "archive_tool_calls", []) or []:
+        if not isinstance(record, dict):
+            continue
+        if record.get("ok") is False:
+            continue
+        if str(record.get("tool") or "").strip() in _VIGIL_PROGRESS_TOOLS:
+            count += 1
+    return count
 
 
 def _task_is_vigil_with_intent(params: object) -> bool:
@@ -221,7 +286,7 @@ def _parse_iso_epoch(text: str) -> float | None:
     return parsed.timestamp()
 
 
-def _append_vigil_rework_context(params: object, report: dict[str, Any]) -> None:
+def _append_vigil_rework_context(params: object, report: dict[str, Any], progress_now: int) -> None:
     context = getattr(params, "tool_context", None)
     if not isinstance(context, list):
         return
@@ -236,6 +301,9 @@ def _append_vigil_rework_context(params: object, report: dict[str, Any]) -> None
                 "finding": "VIGIL_DURATION_NOT_REACHED",
                 "required_minutes": required_minutes,
                 "elapsed_minutes": elapsed_minutes,
+                # 节流基线:记下本次拦截时已累计的值守进展次数。下次 closeout 时若这个数没涨
+                # (说明被拦后没干值守活就又想交付),安全阀放行不再拦,避免紧密循环烧 token。
+                "progress_at_block": progress_now,
                 "report_ref": report.get("report_ref", ""),
             },
             ensure_ascii=False,
@@ -243,9 +311,10 @@ def _append_vigil_rework_context(params: object, report: dict[str, Any]) -> None
         )
         + "\n这是一个**持续值守类**任务(要求持续监控/值班/运营一段明确时长),不是写一份产物就算完成。"
         f"当前实际运行约 {elapsed_minutes} 分钟,远没到要求的约 {required_minutes} 分钟。"
-        "请**不要**现在就交付或写交付报告——继续值班循环:用 wait 等一段时间(如约 5 分钟)→ "
-        "log_alert_poll 拉新候选逐条研判 → 需要时 log_source_query 交叉验证 → log_monitor_status 看不丢对账,"
-        "如此 wait→poll→研判→status 往复,把值班坚持到要求的时长后再收尾交付。"
+        "请**不要**现在就交付或写交付报告——继续值班循环,而且**每一轮都要先用 wait 工具等待一段时间"
+        "(如约 5 分钟)再继续**(值班是周期性的,不是连续不停狂跑;不 wait 直接空转重试交付不会让你提前完成)。"
+        "一轮的标准节奏:wait 约 5 分钟 → log_alert_poll 拉新候选逐条研判 → 需要时 log_source_query 交叉验证 → "
+        "log_monitor_status 看不丢对账,如此 wait→poll→研判→status 往复,把值班坚持到要求的时长后再收尾交付。"
         "(中途可把阶段性研判写进值班笔记,但写笔记不等于任务完成。)"
     )
 

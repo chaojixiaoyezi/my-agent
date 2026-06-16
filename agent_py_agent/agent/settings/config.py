@@ -127,7 +127,7 @@ class _ToolConfigFields:
     tool_shell_timeout: int = 240
     tool_shell_output_max_chars: int = 12_000
     stream_enabled: bool = True
-    tool_catalog_limit: int = 30
+    tool_catalog_limit: int = 80
     tool_catalog_mode: str = "compact"
     tool_catalog_offset: int = 0
     tool_catalog_categories: list[str] = field(default_factory=list)
