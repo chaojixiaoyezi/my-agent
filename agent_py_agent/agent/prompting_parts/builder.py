@@ -30,6 +30,9 @@ class ToolSections:
     tool_catalog_section: str = ""
     tool_recommendations_section: str = ""
     tool_context: list[str] | None = None
+    # native tool_use 下工具往返由原生 messages 携带，prompt 不再折入 tool_context 文本
+    # （避免文本+原生双份重复）。text 协议默认 False，行为不变。
+    native_tool_use: bool = False
 
 
 @dataclass
@@ -117,7 +120,9 @@ class PromptBuilder:
         dynamic = _dynamic_prompt_text(self, request, task_local)
         injected = "\n".join(request.inject or [])
         workspace_context = _workspace_context_text(self)
-        task_and_transcript = _task_and_transcript_section(self.config, request.user_prompt, _tools.tool_context or [])
+        task_and_transcript = _task_and_transcript_section(
+            self.config, request.user_prompt, _transcript_tool_context(_tools)
+        )
         default_tools = "# Tools\n（当前未启用工具）"
         default_recommendations = "# Recommended Tools\n（当前无候选工具详情）"
         return (
@@ -245,6 +250,11 @@ def _workspace_context_text(builder: PromptBuilder) -> str:
         "把正文路径放进子代理任务的 input_refs/context_manifest，交给对应子代理读取分析。",
         "- 除非用户明确要求主代理亲自验收正文，否则不要在派工前把所有长文档、数据表或产物正文都读进 root 上下文。",
     ])
+
+
+def _transcript_tool_context(tools: ToolSections) -> list[str]:
+    # native 下工具往返由原生 messages 携带，prompt 旁路 tool_context 文本（不双份重复）。
+    return [] if tools.native_tool_use else (tools.tool_context or [])
 
 
 def _task_and_transcript_section(config: AgentConfig, user_prompt: str, tool_context: list[str]) -> str:

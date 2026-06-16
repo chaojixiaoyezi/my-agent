@@ -24,7 +24,7 @@ from .model.context_pressure import (
     mark_tool_context_digest_consumed,
     preflight_context_pressure_response,
 )
-from .native_tool_protocol import resolve_native_tools
+from .native_tool_protocol import native_tool_use_active, resolve_native_tools
 from .runner.stage_trace import (
     RunnerModelStageTraceRequest,
     trace_runner_model_request_failed,
@@ -77,6 +77,8 @@ class _ModelGenerationState:
     on_chunk: object
     # 原生 tool_use 协议下传给 backend.generate 的 tools schema；text 协议为 None。
     tools: list[dict] | None = None
+    # native 下由 IR 历史翻出的厂商原生 messages；text 协议为 None（走单条 user prompt）。
+    messages: list[dict] | None = None
 
 
 def generate_model_response(request: ModelGenerateParams):
@@ -161,7 +163,26 @@ def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationSta
         first_token_timeout_seconds=first_token_estimate.timeout_seconds,
         on_chunk=on_chunk,
         tools=resolve_native_tools(request.agent, request.params),
+        messages=_native_provider_messages(request.agent, request.params),
     )
+
+
+def _native_provider_messages(agent: object, params: object) -> list[dict] | None:
+    """native 下把 IR 历史翻成厂商原生 messages；text 协议或空历史时返回 None。
+
+    返回 None 时 backend 走单条 user=prompt 的旧路径（文本协议零改动）。native 的
+    第一轮还没有任何工具往返时 IR 历史为空，也返回 None——此时整段 prompt 仍作为
+    单条 user 消息发出，与现状一致；有往返后才切到结构化 messages。
+    """
+    if not native_tool_use_active(agent):
+        return None
+    history = getattr(params, "tool_ir_history", None)
+    if not history:
+        return None
+    from ..backends.message_adapter import AnthropicMessageAdapter
+
+    messages = AnthropicMessageAdapter().to_provider_messages(history)
+    return messages or None
 
 
 def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerationState, response):
@@ -242,7 +263,7 @@ def _generate_with_wall_timeout(
 ):
     timeout = _effective_model_request_timeout_seconds(request.agent, first_token_timeout_seconds)
     if timeout <= 0:
-        return _invoke_backend_generate(request.agent.backend, request.prompt, state.on_chunk, state.tools)
+        return _invoke_backend_generate(request.agent.backend, request.prompt, state)
 
     results: Queue[_BackendGenerateResult] = Queue(maxsize=1)
 
@@ -310,23 +331,28 @@ def _generate_backend_response(request: ModelGenerateParams, state: _ModelGenera
     backend = request.agent.backend
     original = getattr(backend, "request_timeout", None)
     if timeout <= 0 or original is None:
-        return _invoke_backend_generate(backend, request.prompt, state.on_chunk, state.tools)
+        return _invoke_backend_generate(backend, request.prompt, state)
     try:
         effective = max(float(original), float(timeout))
     except (TypeError, ValueError):
         effective = float(timeout)
     try:
         backend.request_timeout = effective
-        return _invoke_backend_generate(backend, request.prompt, state.on_chunk, state.tools)
+        return _invoke_backend_generate(backend, request.prompt, state)
     finally:
         backend.request_timeout = original
 
 
-def _invoke_backend_generate(backend, prompt: str, on_chunk, tools):
-    # text 协议(tools 为 None)保持原调用形态，不传 tools 关键字，旁路/伪后端零改动。
-    if tools is None:
-        return backend.generate(prompt, on_chunk=on_chunk)
-    return backend.generate(prompt, on_chunk=on_chunk, tools=tools)
+def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState):
+    # text 协议(tools/messages 均为 None)保持原调用形态，不传新关键字，旁路/伪后端零改动。
+    if state.tools is None and state.messages is None:
+        return backend.generate(prompt, on_chunk=state.on_chunk)
+    kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
+    if state.tools is not None:
+        kwargs["tools"] = state.tools
+    if state.messages is not None:
+        kwargs["messages"] = state.messages
+    return backend.generate(prompt, **kwargs)
 
 
 def _tool_write_inline_max_chars(request: ModelGenerateParams) -> int | None:

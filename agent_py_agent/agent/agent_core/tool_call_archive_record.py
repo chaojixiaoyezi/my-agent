@@ -6,6 +6,7 @@ from pathlib import Path
 from ..artifacts.registry import ArtifactRegistration, register_artifact
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..settings.defaults import default_config_int
+from .native_tool_protocol import native_tool_use_active
 from .run_task_workspace_writer import current_run_task_work_dir, current_run_task_workspace_root
 from .runtime.owner_roots import runtime_owner_root
 from .tool_loop.recovery import runtime_run_id, runtime_run_scope
@@ -14,7 +15,7 @@ from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 
 
 def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dict[str, object]:
-    call_id = f"{record.tool_rounds}-{record.idx}"
+    call_id = _tool_call_archive_call_id(agent, record)
     request = ExternalizeToolOutputRequest(
         root=_tool_output_archive_root(agent, record.params),
         tool=record.result.tool,
@@ -37,6 +38,37 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
     _attach_gate_and_refs(output_record, record.result)
     _register_tool_result_artifacts(agent, output_record, record)
     return output_record
+
+
+def _tool_call_archive_call_id(agent: object, record: ToolCallRecordParams) -> str:
+    """选用这次工具记录的 call_id。
+
+    text 协议：沿用合成 ``round-idx``（既有外置/锚点/账本口径不变）。
+    native 协议：优先用模型返回的真实 provider tool_use id（``payload["call_id"]``，
+    由 ``_flatten_tool_use_block`` 注入），使出站 tool_result 的 ``tool_use_id`` 能与
+    assistant ``tool_use.id`` 配对；同时把它回写到 ``result.call_id``，让 IR 历史
+    （``record_tool_call_ir``）拿到同一个真实 id。真实 id 缺失时回退合成 id，永不空。
+    """
+    synthetic = f"{record.tool_rounds}-{record.idx}"
+    if not native_tool_use_active(agent):
+        return synthetic
+    provider_id = ""
+    if isinstance(record.payload, dict):
+        provider_id = str(record.payload.get("call_id") or "")
+    if not provider_id:
+        provider_id = str(getattr(record.result, "call_id", "") or "")
+    call_id = provider_id or synthetic
+    _stamp_result_call_id(record.result, call_id)
+    return call_id
+
+
+def _stamp_result_call_id(result: object, call_id: str) -> None:
+    if not call_id or str(getattr(result, "call_id", "") or "") == call_id:
+        return
+    try:
+        result.call_id = call_id  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):
+        return
 
 
 def _config_int(agent: object, key: str) -> int:

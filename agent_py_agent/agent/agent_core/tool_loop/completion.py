@@ -32,7 +32,7 @@ def completion_response_after_tool_round(
     if _round_requested_soft_wait(request) and _soft_wait_can_finish_turn(request):
         return _soft_wait_response(request)
     if request.subagent_output_written:
-        return subagent_output_json_response(request.agent, request.response)
+        return subagent_output_json_response(request.agent, request.response, request.params)
     if _is_task_local_round(request):
         if progress_response := subagent_progress_closeout_response(request.agent, request.response):
             return progress_response

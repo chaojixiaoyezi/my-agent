@@ -20,14 +20,15 @@ class SubagentOutputWriteCheck:
     result: ToolExecutionResult
 
 
-def subagent_output_json_response(agent, base_response: ModelResponse) -> ModelResponse:
+def subagent_output_json_response(
+    agent, base_response: ModelResponse, params: object | None = None
+) -> ModelResponse:
     run_id = current_subagent_run_id(agent)
     try:
         task = agent.subagents.load(run_id)
     except Exception as exc:
-        return ModelResponse(
-            text=_subagent_output_load_error_text(run_id, exc),
-            backend=base_response.backend,
+        return _subagent_terminal_response(
+            agent, params, _subagent_output_load_error_text(run_id, exc), base_response
         )
     report = read_json_object_report(
         Path(task.output_json),
@@ -35,9 +36,8 @@ def subagent_output_json_response(agent, base_response: ModelResponse) -> ModelR
         context="subagent_output_json.output_json",
     )
     if report.load_error:
-        return ModelResponse(
-            text=_subagent_output_json_load_error_text(task.output_json, report.load_error),
-            backend=base_response.backend,
+        return _subagent_terminal_response(
+            agent, params, _subagent_output_json_load_error_text(task.output_json, report.load_error), base_response
         )
     payload = report.payload
     payload = _enrich_subagent_output_payload(payload, task)
@@ -47,7 +47,34 @@ def subagent_output_json_response(agent, base_response: ModelResponse) -> ModelR
         "[/SUBAGENT_RESULT]\n\n"
         "系统检测到当前子代理已写出 output.json，已结束工具循环并交回父级汇总。"
     )
+    return _subagent_terminal_response(agent, params, text, base_response)
+
+
+def _subagent_terminal_response(
+    agent, loop_params: object | None, text: str, base_response: ModelResponse
+) -> ModelResponse:
+    """构造子代理收口的终止响应；native 下同时把它落进结构化 IR 历史。
+
+    这条 ``[SUBAGENT_RESULT]`` 是子代理工具循环的最终 assistant 输出（写出 output.json
+    后系统接管收口、结束循环）。text 协议无变化；native 下追加为 IR 历史的收尾
+    AssistantTurn（write_file 的调用+结果已先以 ToolResult 对入历史），让 resume/compact
+    回放的结构化对话与文本轨一致，不把子代理收口漏在原生 messages 之外。
+    """
+    _record_subagent_result_ir_if_native(agent, loop_params, text)
     return ModelResponse(text=text, backend=base_response.backend)
+
+
+def _record_subagent_result_ir_if_native(agent, loop_params: object | None, text: str) -> None:
+    if loop_params is None:
+        return
+    from ..native_tool_protocol import native_tool_use_active
+    from ..tool_ir_history import native_tool_ir_history
+
+    if not native_tool_use_active(agent):
+        return
+    from ...backends.tool_ir import AssistantTurn
+
+    native_tool_ir_history(loop_params).append(AssistantTurn(text=text))
 
 
 def is_subagent_output_json_write(check: SubagentOutputWriteCheck) -> bool:

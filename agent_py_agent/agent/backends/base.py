@@ -63,12 +63,18 @@ class BaseBackend:
         prompt: str,
         on_chunk: Callable[[str], None] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        messages: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
         """Generate one assistant response for the supplied prompt.
 
         ``tools`` carries an Anthropic-style tools schema for native tool_use
         (tool_protocol=native). Backends that do not support it ignore it and
         keep the text protocol; bypass callers omit it for unchanged behavior.
+
+        ``messages`` carries a provider-native structured conversation (native
+        tool_use IR translated to Anthropic ``messages``). When supplied it
+        replaces the single ``{"role":"user","content":prompt}`` turn; ``prompt``
+        still feeds the system/task instructions. Text-protocol callers omit it.
         """
         raise NotImplementedError
 
@@ -83,8 +89,9 @@ class EchoBackend(BaseBackend):
         prompt: str,
         on_chunk: Callable[[str], None] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        messages: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
-        del tools  # echo backend never speaks native tool_use
+        del tools, messages  # echo backend never speaks native tool_use
         lines = [line.strip() for line in prompt.splitlines() if line.strip()]
         if "# User Task" in prompt:
             task = prompt.split("# User Task", 1)[-1]
@@ -166,9 +173,10 @@ class OpenAICompatibleBackend(HttpBackend):
         prompt: str,
         on_chunk: Callable[[str], None] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        messages: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
         """Call the OpenAI-compatible chat completion endpoint."""
-        del tools  # native tool_use is only wired for anthropic_compatible (阶段1)
+        del tools, messages  # native tool_use is only wired for anthropic_compatible (阶段1)
         payload = {
             "model": self.model_name,
             "messages": [{"role": "user", "content": prompt}],
@@ -221,14 +229,26 @@ class AnthropicCompatibleBackend(HttpBackend):
         prompt: str,
         on_chunk: Callable[[str], None] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        messages: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
-        """Call the Anthropic-compatible messages endpoint."""
+        """Call the Anthropic-compatible messages endpoint.
+
+        text 协议（``messages`` 为 None）：单条 ``user`` 消息承载整段 prompt，行为不变。
+        native 协议（``messages`` 非空）：用结构化 IR 翻出的 assistant(tool_use)/
+        user(tool_result) 序列做对话主体，``prompt`` 移入 ``system`` 承载系统人格/任务说明/
+        工具目录，工具结果不再以文本折进 prompt（避免文本+原生双份重复）。
+        """
         payload: dict[str, Any] = {
             "model": self.model_name,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
-            "messages": [{"role": "user", "content": prompt}],
         }
+        if messages:
+            payload["messages"] = messages
+            if prompt:
+                payload["system"] = prompt
+        else:
+            payload["messages"] = [{"role": "user", "content": prompt}]
         if tools:
             payload["tools"] = tools
         headers = {

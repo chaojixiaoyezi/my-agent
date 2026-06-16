@@ -234,12 +234,28 @@ def _append_assistant_tool_round_context(request: ToolRoundExecutionRequest) -> 
     request.params.tool_context.append(
         f"[assistant-tool-round-{request.tool_rounds}]\n{rendered}"
     )
+    # 灰度双轨：native 下先为本轮开一条 AssistantTurn 并落定其可见文本（取该轮真实
+    # ModelResponse.text）；同轮工具结果随后由 _record_tool_call 追加进这条 turn。
+    _open_assistant_turn_ir_if_native(request)
     archive_assistant_tool_round_if_enabled(
         request.agent,
         request.params,
         tool_round=request.tool_rounds,
         response_text=request.response.text,
         tool_calls=request.calls,
+    )
+
+
+def _open_assistant_turn_ir_if_native(request: ToolRoundExecutionRequest) -> None:
+    from ..native_tool_protocol import native_tool_use_active
+    from ..tool_ir_history import open_assistant_turn_ir
+
+    if not native_tool_use_active(request.agent):
+        return
+    open_assistant_turn_ir(
+        request.params,
+        tool_rounds=request.tool_rounds,
+        response_text=str(getattr(request.response, "text", "") or ""),
     )
 
 

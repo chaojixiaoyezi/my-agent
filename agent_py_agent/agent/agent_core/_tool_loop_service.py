@@ -12,6 +12,7 @@ from ..subagents.services.session_progress import record_runtime_subagent_tool_p
 from ._runtime_params import ToolLoopExecuteParams
 from .delivery_completion_soft_hint import maybe_append_delivery_completion_soft_hint
 from .delivery_contract_prompting import render_delivery_contract_section
+from .native_tool_protocol import native_tool_use_active
 from .orchestration.shared_context import (
     refresh_parent_shared_context_cache,
     refresh_parent_shared_context_from_tool_record,
@@ -39,6 +40,7 @@ from .tool_guard.loop_hints import (
     append_tool_failure_channel_hint,
     append_tool_guardrail_action_block_hint,
 )
+from .tool_ir_history import record_tool_call_ir
 from .tool_loop.completion import ToolRoundCompletionRequest, completion_response_after_tool_round
 from .tool_loop.final_exit_contract import (
     FinalExitRequest,
@@ -139,6 +141,8 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
             tool_catalog_section=params.tool_catalog_section,
             tool_recommendations_section=params.tool_recommendations_section,
             tool_context=params.tool_context,
+            # native 下工具往返由原生 messages 携带，prompt 旁路 tool_context 文本折入。
+            native_tool_use=native_tool_use_active(agent),
         ),
     )
 
@@ -523,18 +527,50 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
         archive_record,
         tool_ok=bool(record.result.ok),
     )
+    result_rendered = render_tool_result_for_live_prompt(record.result, archive_record)
     record.params.tool_context.append(
         f"[tool-record round={record.tool_rounds} index={record.idx}]\n"
         f"{render_tool_payload_for_live_prompt(record.payload)}\n"
         f"[tool-output-record round={record.tool_rounds} index={record.idx}]\n"
-        f"{render_tool_result_for_live_prompt(record.result, archive_record)}"
+        f"{result_rendered}"
     )
+    # 灰度双轨：native 下同时把这次「调用+结果」记进结构化 IR 历史（与上面的文本
+    # tool_context 共存），供出站翻成原生 messages；text 协议下完全不走这里。
+    _record_tool_call_ir_if_native(agent, record, archive_record, result_rendered)
     if guardrail_hint:
         record.params.tool_context.append(f"[tool-loop-guardrail-hint]\n{guardrail_hint}")
     append_long_content_recovery_context(record)
     progress = record_runtime_subagent_tool_progress(agent, record)
     if progress:
         record.params.tool_context.append(_task_local_progress_context(progress))
+
+
+def _record_tool_call_ir_if_native(
+    agent,
+    record: ToolCallRecordParams,
+    archive_record: dict[str, object],
+    result_rendered: str,
+) -> None:
+    """native 下把这次工具调用的「调用+结果」记进结构化 IR 历史（text 协议跳过）。
+
+    真实 provider tool_use id 取自 ``result.call_id``（archive 已用真实入站 id 覆盖
+    合成 id）→ 兜底 ``payload["call_id"]``，保证出站 tool_result 的 tool_use_id 与
+    assistant tool_use.id 配对。结果 content 复用与文本链路同源的 ``result_rendered``，
+    两轨「给模型看到的结果」口径一致。
+    """
+    if not native_tool_use_active(agent):
+        return
+    call_id = str(getattr(record.result, "call_id", "") or "")
+    if not call_id and isinstance(record.payload, dict):
+        call_id = str(record.payload.get("call_id") or "")
+    record_tool_call_ir(
+        record.params,
+        tool_rounds=record.tool_rounds,
+        payload=record.payload,
+        call_id=call_id,
+        result_content=result_rendered,
+        is_error=not record.result.ok,
+    )
 
 
 def _task_local_progress_context(progress: dict[str, object]) -> str:
