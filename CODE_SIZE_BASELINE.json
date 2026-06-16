@@ -1,6 +1,6 @@
 {
   "generated_at": "2026-06-16T13:46:28.002217+00:00",
-  "total_findings": 44,
+  "total_findings": 52,
   "findings": [
     {
       "identity": "class:agent_py_agent/agent/settings/config.py:AgentConfig",
@@ -8,6 +8,13 @@
       "kind": "class",
       "path": "agent_py_agent/agent/settings/config.py",
       "name": "AgentConfig"
+    },
+    {
+      "identity": "class:agent_py_agent/agent/tooling/mcp_client.py:MCPStdioClient",
+      "severity": "high-risk",
+      "kind": "class",
+      "path": "agent_py_agent/agent/tooling/mcp_client.py",
+      "name": "MCPStdioClient"
     },
     {
       "identity": "class:agent_py_agent/agent/tooling/shell.py:ShellTool",
@@ -129,6 +136,13 @@
       "name": "_board_item_payload"
     },
     {
+      "identity": "function:agent_py_agent/agent/tooling/mcp_client.py:start",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/agent/tooling/mcp_client.py",
+      "name": "start"
+    },
+    {
       "identity": "function:agent_py_agent/agent/tooling/write_boundary.py:validate_write_boundary",
       "severity": "high-risk",
       "kind": "function",
@@ -204,6 +218,48 @@
       "kind": "nesting",
       "path": "agent_py_agent/agent/tooling/filesystem_path_recovery.py",
       "name": "_walk_candidate_items"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/tooling/mcp_client.py:_await_response",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/tooling/mcp_client.py",
+      "name": "_await_response"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/tooling/mcp_client.py:_kill_process",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/tooling/mcp_client.py",
+      "name": "_kill_process"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/tooling/mcp_client.py:_read_loop",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/tooling/mcp_client.py",
+      "name": "_read_loop"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/tooling/mcp_client.py:drain",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/tooling/mcp_client.py",
+      "name": "drain"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/tooling/mcp_client.py:stop",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/tooling/mcp_client.py",
+      "name": "stop"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/tooling/mcp_registration.py:input_schema_to_parameters",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/tooling/mcp_registration.py",
+      "name": "input_schema_to_parameters"
     },
     {
       "identity": "nesting:agent_py_agent/agent/tooling/process_registry.py:_read_log_tail",

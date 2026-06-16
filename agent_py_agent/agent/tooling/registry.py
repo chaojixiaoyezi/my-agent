@@ -96,6 +96,8 @@ class ToolRegistryParams:
     artifact_root: Path | None = None
     runtime_fact_roots: list[Path] | None = None
     runtime_guard_policy: object | None = None
+    # MCP 客户端(短板6)：要连接的外部 MCP server 声明。默认空 = 不连、不起子进程(零开销)。
+    mcp_servers: dict[str, Any] | None = None
 
 
 class ListToolsTool(BaseTool):
@@ -160,10 +162,22 @@ class ToolRegistry:
         self.retriever = build_tool_retriever(params)
         register_base_tools(self, params)
         self.register(ListToolsTool(self))
+        # MCP 客户端(短板6)：连接配置的外部 MCP server，把其工具动态注册成 mcp__* 前缀工具。
+        # mcp_servers 为空时此调用零开销返回(不起任何子进程)；任一 server 连不上只记日志跳过。
+        self._mcp_clients = _connect_mcp_servers(self, params.mcp_servers)
 
     def register(self, tool: BaseTool) -> None:
 
         self.tools[tool.spec.name] = tool
+
+    def close_mcp_clients(self) -> None:
+        """关闭所有已连接的 MCP server 子进程(进程生命周期收尾)。幂等。"""
+        for client in getattr(self, "_mcp_clients", ()) or ():
+            try:
+                client.stop()
+            except Exception:  # 关闭尽力而为，单个失败不阻断其余清理。
+                pass
+        self._mcp_clients = []
 
     def specs(
         self,
@@ -314,6 +328,26 @@ class ToolRegistry:
                 runtime_guard_policy=self.runtime_guard_policy,
             )
         )
+
+
+def _connect_mcp_servers(registry: "ToolRegistry", mcp_servers: dict[str, Any] | None) -> list[Any]:
+    """惰性连接 MCP server 并注册其工具；返回已连接 client 列表(供 close 清理)。
+
+    惰性 import ``mcp_registration``：mcp_servers 为空(默认)时连模块都不导入，零开销；
+    且把 MCP 子系统与核心 registry 解耦。整个连接过程被 try 兜底——MCP 是可选加法，
+    任何异常都不许阻断 registry 构造(主流程)。
+    """
+    if not mcp_servers:
+        return []
+    try:
+        from .mcp_registration import register_mcp_servers
+
+        return register_mcp_servers(registry, mcp_servers)
+    except Exception:  # 兜底：连接子系统整体异常也不崩主流程。
+        import logging
+
+        logging.getLogger(__name__).exception("MCP server 连接子系统初始化失败，已跳过")
+        return []
 
 
 def _render_tool_catalog_section(

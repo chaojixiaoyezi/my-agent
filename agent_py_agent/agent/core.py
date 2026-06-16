@@ -273,6 +273,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             disabled_tools=list(getattr(agent.owner_policy, "disabled_tools", ())),
             artifact_root=runtime_owner_root(agent),
             runtime_guard_policy=getattr(agent, "runtime_guard_policy", None),
+            mcp_servers=dict(getattr(config, "mcp_servers", {}) or {}),
         )
     )
 

@@ -143,6 +143,11 @@ class _ToolConfigFields:
     # native=在 anthropic_compatible 端点用原生 tool_use(传 tools schema、收结构化块)。
     # native 仅在 backend 为 anthropic_compatible 时生效，其余后端自动回退 text。
     tool_protocol: str = "text"
+    # MCP 客户端(短板6)：声明要连接的外部 MCP server，把社区现成工具(GitHub/DB/Slack 等)
+    # 动态注册成 mcp__<server>__<tool> 前缀的工具。结构：
+    #   {server_name: {command: str, args: [..], env: {..}, timeout: int, connect_timeout: int}}
+    # 默认空 = 不连任何 server、不起任何子进程(零开销)。仅 stdio 传输(JSON-RPC over stdio)。
+    mcp_servers: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

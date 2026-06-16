@@ -701,6 +701,22 @@ tool_vector_search_enabled: true
 # native 仅在 model_backend=anthropic_compatible 时生效，其余后端自动回退 text。
 tool_protocol: "native"
 
+# MCP 客户端（短板6）：连接外部 MCP server（Model Context Protocol，JSON-RPC over stdio），
+# 把社区现成工具（GitHub/数据库/Slack 等）动态注册成 mcp__<server>__<tool> 前缀的工具，
+# 模型可像内置工具一样调用，调用时转发给对应 server 的 tools/call。
+# - 仅 stdio 传输：用 command + args 启动 server 子进程（标准库 subprocess 实现，零新增依赖）。
+# - env：显式传给该 server 的额外环境变量（如凭证）；默认只继承 PATH/HOME 等安全基线，
+#   不会把父进程其他敏感变量漏给 server 子进程。日志里 secret 键值自动脱敏。
+# - timeout：单次 tools/call 超时（秒，默认 60）；connect_timeout：握手/发现超时（秒，默认 30）。
+# - 默认空 = 不连任何 server、不启动任何子进程（零开销）。某 server 连不上只记日志跳过，
+#   不影响其他工具与主流程。
+# 注意：本仓配置用的是精简 YAML 解析器，dict 值必须写成单行 inline（flow）形式，
+#   不支持多行缩进块写法。示例（默认空，要用时替换 {} 为下面这种单行 dict）：
+#   mcp_servers: {"filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]}}
+#   带凭证的 server（凭证经 env 显式传入，日志自动脱敏）：
+#   mcp_servers: {"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}, "timeout": 120}}
+mcp_servers: {}
+
 # Chat / CLI 默认展示和读取预算：
 # - 这些配置控制命令默认显示多少、交互历史带多少、长文本折叠多少。
 # - 后续前端配置页也应读取这些真实后端字段，而不是另写一套默认值。
