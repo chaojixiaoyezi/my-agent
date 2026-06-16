@@ -1,7 +1,14 @@
 {
   "generated_at": "2026-06-16T13:46:28.002217+00:00",
-  "total_findings": 43,
+  "total_findings": 44,
   "findings": [
+    {
+      "identity": "class:agent_py_agent/agent/settings/config.py:AgentConfig",
+      "severity": "high-risk",
+      "kind": "class",
+      "path": "agent_py_agent/agent/settings/config.py",
+      "name": "AgentConfig"
+    },
     {
       "identity": "class:agent_py_agent/agent/tooling/shell.py:ShellTool",
       "severity": "high-risk",

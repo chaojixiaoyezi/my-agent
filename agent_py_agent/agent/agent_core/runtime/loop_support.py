@@ -398,7 +398,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     #   - executed_tools：归零 → 重试守卫/完成软提醒看不到历史，会重复劝退或重复读。
     #   - tool_context：归零 → 历史轨迹丢失（_has_previous_tool_context 等守卫失明）。
     # 这是已有 pending_deferred 重建（_live_archive_state_from_carried_archive_tool_calls）的同源补全。
-    reconstructed = _reconstructed_runtime_state(archive_tool_calls)
+    reconstructed = _reconstructed_runtime_state(archive_tool_calls, agent=agent)
     tool_context: list[str] = reconstructed.tool_context
     tool_rounds = reconstructed.tool_rounds
     one_shot_tool_calls: set[str] = reconstructed.one_shot_tool_calls
@@ -444,7 +444,9 @@ class _ReconstructedRuntimeState:
     executed_tools: list[str]
 
 
-def _reconstructed_runtime_state(records: list[dict[str, object]]) -> _ReconstructedRuntimeState:
+def _reconstructed_runtime_state(
+    records: list[dict[str, object]], *, agent: object = None
+) -> _ReconstructedRuntimeState:
     """从 carried 的 archive 记录重建 compact 续跑要保留的四项运行时状态（H1）。
 
     - executed_tools：成功且工具名真实（非解析错误/unknown）的记录，按顺序回填工具名——口径
@@ -459,14 +461,55 @@ def _reconstructed_runtime_state(records: list[dict[str, object]]) -> _Reconstru
       刻意不重建 ``tool_ir_history``，避免与 IR 双轨冲突、避免把 compact 刚卸掉的历史又塞回原生
       messages），但它仍喂给重试守卫/digest 守卫（``_has_previous_tool_context``）等。文本体量由
       每轮 prompt 构建时既有的 ``window_tool_context_params`` 自动窗口化兜底，不会再撑爆上下文。
+
+    语义摘要增强（短板6）：``tool_context`` 默认仍是逐条机械重建（上面这条契约不变），但当
+    ``agent`` 带可用 backend 且配置开启时，会对**中段**记录调一次摘要模型，用一条
+    ``[compact-semantic-summary]`` 折叠掉中段、保护首尾——把机械截断换成语义叙述，长任务续跑
+    少丢上下文。这是**纯增强**：只动 ``tool_context``（不碰事实源/IR 历史/可恢复性），且摘要
+    关闭、记录太少、无 backend、调用失败/超时任意一种都回退到逐条机械列表（行为与改动前一致）。
     """
     valid_records = [record for record in records if isinstance(record, dict)]
+    mechanical_entries = [_reconstructed_tool_context_entry(record) for record in valid_records]
     return _ReconstructedRuntimeState(
-        tool_context=[_reconstructed_tool_context_entry(record) for record in valid_records],
+        tool_context=_tool_context_with_optional_semantic_summary(valid_records, mechanical_entries, agent),
         tool_rounds=len(valid_records),
         one_shot_tool_calls={key for record in valid_records if (key := _carried_one_shot_key(record))},
         executed_tools=[name for record in valid_records if (name := _carried_executed_tool_name(record))],
     )
+
+
+def _tool_context_with_optional_semantic_summary(
+    records: list[dict[str, object]], mechanical_entries: list[str], agent: object
+) -> list[str]:
+    """中段语义摘要的薄接线：可用则折叠中段，否则原样返回机械逐条列表（失败必回退）。
+
+    刻意把决策/调用/兜底全压进 ``memory_archive.compact_semantic_summary``——这里只负责"试一下、
+    不行就用机械的"，保证 ``_reconstructed_runtime_state`` 的 H1 契约（tool_rounds/one_shot/
+    executed_tools）与机械重建路径在摘要失效时**逐字节不变**。
+    """
+    if agent is None or not mechanical_entries:
+        return mechanical_entries
+    from ...memory_archive.compact_semantic_summary import (
+        SemanticSummaryRequest,
+        semantic_summary_config,
+        summarize_carried_tool_context,
+    )
+
+    config = semantic_summary_config(agent)
+    if not config.enabled:
+        return mechanical_entries
+    outcome = summarize_carried_tool_context(
+        SemanticSummaryRequest(
+            records=records,
+            mechanical_entries=mechanical_entries,
+            config=config,
+            backend=getattr(agent, "backend", None),
+        )
+    )
+    if outcome is None:
+        return mechanical_entries
+    summarized_entries, _stats = outcome
+    return summarized_entries
 
 
 def _carried_executed_tool_name(record: dict[str, object]) -> str:

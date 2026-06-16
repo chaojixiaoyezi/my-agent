@@ -121,6 +121,19 @@ memory_compact_auto_trigger_percent: 70
 # 单次 run 内 compact→自动续跑的绝对深度硬顶（与「连续无工具进展」软顶并存）。达到即强制
 # return 当前结果，防止持续高于阈值且每轮都调工具的任务无限 compact/续跑（H2）。
 memory_compact_auto_continue_max_depth: 50
+# compact 续跑时对卸掉的“中段历史”做一次 LLM 语义摘要：
+# - 续跑靠 carried archive 记录逐条重建工具历史；默认会对中段记录调一次摘要模型，用一条语义摘要
+#   折叠中段、原样保留首尾，把机械截断换成“这段做了什么/学到什么”的叙述，长任务续跑少丢上下文。
+# - 这是纯增强：只改续跑提示里的工具历史文本，不碰 raw archive / runtime_fact / work_state /
+#   artifact 等事实源，也不碰 native IR 历史；compact 包可恢复性不受影响。
+# - enabled=false 完全关闭（走纯机械重建）；摘要失败/超时/无可用后端时一律静默回退机械重建，
+#   绝不因摘要失败而让 compact 续跑崩。timeout=0 表示不设线程超时（不建议）。
+memory_compact_semantic_summary_enabled: true
+memory_compact_semantic_summary_protect_head: 2
+memory_compact_semantic_summary_protect_tail: 6
+memory_compact_semantic_summary_min_middle: 4
+memory_compact_semantic_summary_timeout_seconds: 20.0
+memory_compact_semantic_summary_max_input_chars: 12000
 
 # Memory / compact / artifact 默认预算：
 # - 这些值只控制“默认读取多少、预览多少、扫描多少”，不是数据保留上限。

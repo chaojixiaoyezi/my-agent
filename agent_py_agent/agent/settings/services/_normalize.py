@@ -576,6 +576,10 @@ _TIMEOUT_INT_FIELDS = (
     ("memory_archive_preview_level_2_chars", 0, None),
     ("memory_archive_preview_level_3_chars", 0, None),
     ("memory_archive_summary_chars", 0, None),
+    ("memory_compact_semantic_summary_protect_head", 0, None),
+    ("memory_compact_semantic_summary_protect_tail", 0, None),
+    ("memory_compact_semantic_summary_min_middle", 1, None),
+    ("memory_compact_semantic_summary_max_input_chars", 0, None),
     ("memory_archive_search_file_limit", 0, None),
     ("memory_query_default_limit", 0, None),
     ("memory_query_default_page_size", 1, None),
@@ -703,6 +707,15 @@ class TimeoutFieldsService:
             defaults.runner_timeout_seconds,
         )
         out["runner_timeout_seconds"] = value
+        if warn:
+            warnings.append(warn)
+        value, warn = CoercionService.coerce_float(
+            "memory_compact_semantic_summary_timeout_seconds",
+            out.get("memory_compact_semantic_summary_timeout_seconds"),
+            defaults.memory_compact_semantic_summary_timeout_seconds,
+            min_val=0.0, max_val=None,
+        )
+        out["memory_compact_semantic_summary_timeout_seconds"] = value
         if warn:
             warnings.append(warn)
         return out, warnings
