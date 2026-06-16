@@ -87,8 +87,18 @@ def generate_model_response(request: ModelGenerateParams):
         return preflight
     _trace_model_start(request)
     state = _start_model_generation(request)
-    response = _generate_or_recover_context_pressure(request, state)
-    return _finish_model_generation(request, state, response)
+    # H3：digest 轮在 prompt 逼近窗口 90% 时由 preflight 触发，并把 live_archive_state 里的
+    # digest_inflight/pending 标记置真。该轮若在生成中抛 ProviderTimeoutError 或一般异常，原先
+    # 直接 re-raise、跳过 _finish_model_generation 里的 mark_tool_context_digest_consumed，标记
+    # 永不清除→_has_pending_tool_context_digest 一直真→preflight 永远走 digest 分支、再不发
+    # context_overflow→compact 永久卡死。这里用 try/finally 保证任何退出路径（含异常）都清理。
+    # mark_tool_context_digest_consumed 本身以 inflight 标记为门：非 digest 轮它是 no-op，绝不
+    # 误清正常轮，所以无条件兜底清理是安全的。
+    try:
+        response = _generate_or_recover_context_pressure(request, state)
+        return _finish_model_generation(request, state, response)
+    finally:
+        mark_tool_context_digest_consumed(request.params)
 
 
 def _generate_or_recover_context_pressure(request: ModelGenerateParams, state: _ModelGenerationState):

@@ -1303,3 +1303,208 @@ def test_run_auto_compact_normal_final_returns_without_auto_continuation(tmp_pat
     assert result.memory_compact_auto_next_action == "return_result_after_compact"
     assert result.memory_compact_auto_allowed_to_continue is False
     assert result.memory_compact_auto_continued is False
+
+
+# ---------------------------------------------------------------------------
+# H1: compact 续跑必须从 carried archive 记录重建运行时状态（one_shot/tool_rounds/
+# tool_context/executed_tools），否则续跑「失忆重来」会重复创建子代理、重置工具预算。
+# ---------------------------------------------------------------------------
+
+
+def _seed_for_carried(carried: list[dict[str, object]]):
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeLoopParams, RuntimeToolLoopSeed
+
+    loop_params = RuntimeLoopParams(
+        user_prompt="继续做当前任务",
+        root_user_prompt="继续做当前任务",
+        memories=[],
+        runtime_injections=[],
+        routed_context=None,
+        resume_context_section="",
+        carried_archive_tool_calls=carried,
+    )
+    return RuntimeToolLoopSeed(
+        params=loop_params,
+        memories=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+    )
+
+
+def test_compact_continuation_rebuilds_runtime_state_from_carried_records():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
+
+    create_payload = {"tool": "create_subagents", "count": 2, "task": "分析 X 项目"}
+    carried = [
+        {"tool": "create_subagents", "ok": True, "parameters": create_payload},
+        {
+            "tool": "read_file",
+            "ok": True,
+            "parameters": {"tool": "read_file", "path": "/src/a.py"},
+            "output_preview": "def a(): ...",
+            "scoped_call_id": "run-1:1-2",
+        },
+        # 失败/解析错误记录：不计入 executed_tools、不进 one_shot，但仍占一轮预算。
+        {"tool": "__parse_error__", "ok": False, "parameters": {"tool": "__parse_error__"}},
+    ]
+
+    loop_params = _tool_loop_execute_params(SimpleNamespace(), _seed_for_carried(carried))
+
+    # executed_tools：只回填成功且工具名真实的，顺序保持。
+    assert loop_params.executed_tools == ["create_subagents", "read_file"]
+    # tool_rounds：用记录数作保守代理，绝不归零（否则 max_tool_rounds 预算每次续跑重置）。
+    assert loop_params.tool_rounds == 3
+    # tool_context：按 [tool-record]/[tool-output-record] 格式重建，且能被守卫识别为历史。
+    assert loop_params.tool_context
+    assert all(entry.startswith("[tool-record") for entry in loop_params.tool_context)
+    assert any("output_preview: def a(): ..." in entry for entry in loop_params.tool_context)
+
+
+def test_compact_continuation_rebuilt_one_shot_blocks_duplicate_subagent_creation():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.parameters import _one_shot_tool_call_key
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
+
+    create_payload = {"tool": "create_subagents", "count": 2, "task": "分析 X 项目"}
+    carried = [{"tool": "create_subagents", "ok": True, "parameters": create_payload}]
+
+    loop_params = _tool_loop_execute_params(SimpleNamespace(), _seed_for_carried(carried))
+
+    # 续跑后，去重 gate 用的 one_shot key 必须已重建，且与 live gate 用同一把钥匙——
+    # 这样续跑里模型再发同一份 create_subagents（payload 相同），去重 gate 会拦住，不会
+    # 重复创建子代理（真副作用）。
+    live_key = _one_shot_tool_call_key(create_payload)
+    assert live_key in loop_params.one_shot_tool_calls
+
+    from agent_py_agent.agent.agent_core.tool_call_runtime import guarded_tool_call_result
+    from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallExecuteParams
+    from agent_py_agent.agent.agent_core.runner.stage_trace import RunnerToolStageTraceRequest
+    from agent_py_agent.agent.agent_core.tool_call_runtime import ToolCallRuntimeRequest
+
+    agent = SimpleNamespace(_current_subagent_run_id="")
+    exec_params = ToolCallExecuteParams(loop_params, 4, 1, dict(create_payload))
+    trace_request = RunnerToolStageTraceRequest(
+        agent=agent, params=loop_params, tool_rounds=4, idx=1, payload=dict(create_payload)
+    )
+    guarded = guarded_tool_call_result(
+        ToolCallRuntimeRequest(agent, exec_params, dict(create_payload), trace_request)
+    )
+
+    assert guarded is not None
+    assert guarded.ok is False
+    assert "重复" in guarded.output
+
+
+def test_compact_continuation_does_not_rebuild_native_ir_history():
+    # native 双轨：续跑刻意不从 archive 重建 tool_ir_history（避免与 IR 双轨冲突、避免把
+    # compact 刚卸掉的历史又塞回原生 messages）。IR 历史保持空，由 compact 注入承载上下文。
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
+
+    carried = [
+        {
+            "tool": "read_file",
+            "ok": True,
+            "parameters": {"tool": "read_file", "path": "/src/a.py", "call_id": "toolu_abc"},
+            "output_preview": "x",
+        }
+    ]
+
+    loop_params = _tool_loop_execute_params(SimpleNamespace(), _seed_for_carried(carried))
+
+    assert loop_params.tool_ir_history == []
+    # 文本轨仍重建（喂守卫），但不发往 native provider（builder 旁路 tool_context）。
+    assert loop_params.tool_context
+
+
+# ---------------------------------------------------------------------------
+# H2: compact 续跑必须有绝对深度硬顶，防止「持续高于阈值且每轮都调工具」的任务无限续跑。
+# ---------------------------------------------------------------------------
+
+
+def test_compact_auto_continuation_hard_cap_forces_return(tmp_path):
+    from agent_py_agent.agent.agent_core.finalization_compact_auto import (
+        _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH,
+        _max_compact_auto_continue_depth,
+    )
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent.backend.context_window_tokens = 20_000
+
+    # 软顶清零（每轮都有工具进展），但 depth 已达硬顶：必须强制 return，不再 compact。
+    ctx = replace(
+        _finalize_context_for_continuation(tool_rounds=5, executed_tools=["read_file", "write_file"]),
+        compact_auto_continue_depth=_max_compact_auto_continue_depth(agent),
+        compact_auto_no_tool_continue_depth=0,
+        final_response=ModelResponse(
+            text="还在继续读材料。",
+            backend="test",
+            usage={"input_tokens": 19_000, "output_tokens": 100},
+        ),
+    )
+
+    fields = compact_auto_cycle_fields(agent, ctx, {"turn": 19_100, "active": 19_100})
+
+    assert fields["memory_compact_auto_status"] == "returned_after_depth_cap"
+    assert fields["memory_compact_auto_allowed_to_continue"] is False
+    assert fields["memory_compact_auto_continue_ready"] is False
+    assert fields["memory_compact_auto_continue_packet"] == {}
+    assert str(_DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH) in fields["memory_compact_message"]
+
+
+def test_compact_auto_continuation_under_hard_cap_still_compacts(tmp_path):
+    from agent_py_agent.agent.agent_core.finalization_compact_auto import _max_compact_auto_continue_depth
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent.backend.context_window_tokens = 20_000
+
+    # depth 仍在硬顶以下、每轮有工具进展：硬顶不触发，正常进 compact 周期（不是 depth_cap）。
+    ctx = replace(
+        _finalize_context_for_continuation(tool_rounds=5, executed_tools=["read_file"]),
+        compact_auto_continue_depth=_max_compact_auto_continue_depth(agent) - 1,
+        compact_auto_no_tool_continue_depth=0,
+        final_response=ModelResponse(
+            text="还在继续读材料。",
+            backend="test",
+            usage={"input_tokens": 19_000, "output_tokens": 100},
+        ),
+    )
+
+    fields = compact_auto_cycle_fields(agent, ctx, {"turn": 19_100, "active": 19_100})
+
+    assert fields["memory_compact_auto_status"] != "returned_after_depth_cap"
+
+
+def test_compact_auto_continuation_hard_cap_is_configurable(tmp_path):
+    from agent_py_agent.agent.agent_core.finalization_compact_auto import _max_compact_auto_continue_depth
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            memory_compact_auto_continue_max_depth=7,
+        ),
+        tmp_path,
+    )
+    agent.backend.context_window_tokens = 20_000
+
+    assert _max_compact_auto_continue_depth(agent) == 7
+
+    ctx = replace(
+        _finalize_context_for_continuation(tool_rounds=5, executed_tools=["read_file"]),
+        compact_auto_continue_depth=7,
+        compact_auto_no_tool_continue_depth=0,
+        final_response=ModelResponse(
+            text="还在继续读材料。",
+            backend="test",
+            usage={"input_tokens": 19_000, "output_tokens": 100},
+        ),
+    )
+
+    fields = compact_auto_cycle_fields(agent, ctx, {"turn": 19_100, "active": 19_100})
+
+    assert fields["memory_compact_auto_status"] == "returned_after_depth_cap"

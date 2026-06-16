@@ -104,7 +104,7 @@ auto_save_memory: true
 # - memory_compact_auto_trigger_percent 控制上下文使用到多少百分比时自动 compact：
 #   不写默认 70；0 表示 100；乱填回默认；大于100 => 100；小于50 => 50；50-100 => 按填写值。
 # - 保存型运行默认执行非破坏性 apply + auto resume + guard；save=false 时只生成计划，不写入 compact apply。
-# - 自动 compact 续接不再设最大深度；只要 compact 包可恢复，系统会继续同一个任务，不会因为普通任务缺少验收/测试备注而停车。
+# - 自动 compact 续接有绝对深度硬顶（见下方 memory_compact_auto_continue_max_depth，防无限续跑 H2）；未达硬顶时只要 compact 包可恢复就继续同一任务，不会因普通任务缺少验收/测试备注而停车。
 # - 运行中 raw archive 和 runtime_fact 是 compact/resume 的基础事实源，随持久化运行默认启用，不提供单独关闭开关。
 memory_archive_level: 3
 memory_hook_enabled: true
@@ -118,6 +118,9 @@ memory_resume_auto_context_enabled: false
 memory_resume_auto_context_mode: "trigger"
 memory_resume_auto_context_limit: 5
 memory_compact_auto_trigger_percent: 70
+# 单次 run 内 compact→自动续跑的绝对深度硬顶（与「连续无工具进展」软顶并存）。达到即强制
+# return 当前结果，防止持续高于阈值且每轮都调工具的任务无限 compact/续跑（H2）。
+memory_compact_auto_continue_max_depth: 50
 
 # Memory / compact / artifact 默认预算：
 # - 这些值只控制“默认读取多少、预览多少、扫描多少”，不是数据保留上限。

@@ -194,6 +194,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
     memory_compact_auto_trigger_percent: int = 70
+    # 单次 run 内 compact→自动续跑的绝对深度硬顶（与 no-tool 软顶并存）。达到即强制 return，
+    # 防止持续高于阈值且每轮都调工具的任务无限 compact/续跑（H2）。0 表示沿用内置默认。
+    memory_compact_auto_continue_max_depth: int = 50
     memory_artifact_default_read_chars: int = 4000
     memory_archive_preview_level_0_chars: int = 2048
     memory_archive_preview_level_1_chars: int = 1024

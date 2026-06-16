@@ -17,11 +17,17 @@ _CONTEXT_OVERFLOW_REASONS = {
 }
 _DELIVERY_COMPLETE_MARKER = "[MAIN_AGENT_DELIVERY_COMPLETE]"
 _MAX_CONSECUTIVE_NO_TOOL_PREFLIGHT_CONTINUATIONS = 3
+# H2 绝对硬顶：单次 run 内 compact→自动续跑的最大深度。no-tool 软顶只数「连续无工具进展」的
+# 续跑（某轮调了工具就清零），无法拦住「持续高于阈值且每轮都调工具」的任务无限续跑——depth 一路
+# 加、永不触顶。这个绝对硬顶与软顶并存：depth 到顶即强制 return，给清晰终止响应而非静默卡死。
+_DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH = 50
 
 
 def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[str, int], *, request_id: str = "") -> dict:
     if _delivery_complete(ctx.final_response):
         return _compact_auto_delivery_complete_fields()
+    if _compact_auto_continue_depth_exhausted(agent, ctx):
+        return _compact_auto_continuation_depth_cap_fields(_max_compact_auto_continue_depth(agent))
     trigger = _compact_trigger_from_runtime(ctx)
     if _should_return_after_continuation(ctx, trigger):
         return _compact_auto_continuation_return_fields()
@@ -83,6 +89,23 @@ def _compact_auto_cycle_result_fields(
     }
 
 
+def _max_compact_auto_continue_depth(agent: object) -> int:
+    config = getattr(agent, "config", None)
+    raw = getattr(config, "memory_compact_auto_continue_max_depth", None)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 0
+    return value if value > 0 else _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH
+
+
+def _compact_auto_continue_depth_exhausted(agent: object, ctx: FinalizeContext) -> bool:
+    # 只在「已经在续跑链里」（depth>=1）才考虑硬顶；首轮（depth=0）永不触顶。续跑链每加一层
+    # depth+1（见 runtime_mixin._compact_auto_continue_params），达到上限即强制收口。
+    depth = int(ctx.compact_auto_continue_depth or 0)
+    return depth >= _max_compact_auto_continue_depth(agent)
+
+
 def _should_return_after_continuation(ctx: FinalizeContext, trigger: dict[str, object]) -> bool:
     if int(ctx.compact_auto_continue_depth or 0) <= 0:
         return False
@@ -137,6 +160,30 @@ def _compact_auto_continuation_return_fields() -> dict:
         "memory_compact_trigger_source": "auto_compact",
         "memory_compact_trigger_forced": False,
         "memory_compact_auto_status": "returned_after_continuation",
+        "memory_compact_auto_next_action": "return_result",
+        "memory_compact_auto_allowed_to_continue": False,
+        "memory_compact_auto_tool_execution": "none",
+        "memory_compact_auto_apply_id": "",
+        "memory_compact_auto_continue_ready": False,
+        "memory_compact_auto_continue_packet": {},
+    }
+
+
+def _compact_auto_continuation_depth_cap_fields(max_depth: int) -> dict:
+    return {
+        "memory_compact_suggested": False,
+        "memory_compact_status": "ok",
+        "memory_compact_ratio": 0.0,
+        "memory_compact_message": (
+            f"compact auto continuation reached the absolute depth cap ({max_depth}); "
+            "returning the current result instead of compacting again. "
+            "如需继续，请基于已落盘的进展和恢复引用发起新的一轮。"
+        ),
+        "memory_compact_commands": [],
+        "memory_compact_trigger_reason": "continuation_depth_cap_reached",
+        "memory_compact_trigger_source": "auto_compact",
+        "memory_compact_trigger_forced": False,
+        "memory_compact_auto_status": "returned_after_depth_cap",
         "memory_compact_auto_next_action": "return_result",
         "memory_compact_auto_allowed_to_continue": False,
         "memory_compact_auto_tool_execution": "none",

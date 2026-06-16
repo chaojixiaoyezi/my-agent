@@ -12,6 +12,7 @@ from ...runtime_errors import runtime_error_report
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
 from ...user_space.home_layout import runtime_route_root_and_index
 from .._runtime_params import CompressionContext, ToolLoopExecuteParams
+from ..parameters import _one_shot_tool_call_key
 from .live_archive import write_runtime_fact_start_if_enabled
 from .loop_models import (
     CompressionLoopResult,
@@ -388,11 +389,20 @@ def _is_dialogue_memory(memory: object) -> bool:
 
 def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParams:
     params = seed.params
-    tool_context: list[str] = []
-    tool_rounds = 0
-    one_shot_tool_calls: set[str] = set()
-    executed_tools: list[str] = []
     archive_tool_calls: list[dict[str, object]] = list(params.carried_archive_tool_calls or [])
+    # H1：compact 自动续跑会重建一个全新的 ToolLoopExecuteParams。除了已重建的 pending_deferred，
+    # 还必须从 carried 的 archive 记录里重建这四项运行时状态，否则续跑相当于「失忆重来」：
+    #   - one_shot_tool_calls：一次性编排工具（create_subagents/schedule_child_subagents）的去重集合
+    #     丢失 → tool_call_runtime 的去重 gate 失效 → 同 payload 续跑会**重复创建子代理**（真副作用）。
+    #   - tool_rounds：归零 → max_tool_rounds 预算每次续跑重置 → 长任务可借续跑无限放大工具预算。
+    #   - executed_tools：归零 → 重试守卫/完成软提醒看不到历史，会重复劝退或重复读。
+    #   - tool_context：归零 → 历史轨迹丢失（_has_previous_tool_context 等守卫失明）。
+    # 这是已有 pending_deferred 重建（_live_archive_state_from_carried_archive_tool_calls）的同源补全。
+    reconstructed = _reconstructed_runtime_state(archive_tool_calls)
+    tool_context: list[str] = reconstructed.tool_context
+    tool_rounds = reconstructed.tool_rounds
+    one_shot_tool_calls: set[str] = reconstructed.one_shot_tool_calls
+    executed_tools: list[str] = reconstructed.executed_tools
     live_archive_state = _live_archive_state_from_carried_archive_tool_calls(archive_tool_calls)
     return ToolLoopExecuteParams(
         user_prompt=params.user_prompt,
@@ -423,6 +433,89 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         save=params.save,
         live_archive_state=live_archive_state,
         context_scope=params.context_scope,
+    )
+
+
+@dataclass(frozen=True)
+class _ReconstructedRuntimeState:
+    tool_context: list[str]
+    tool_rounds: int
+    one_shot_tool_calls: set[str]
+    executed_tools: list[str]
+
+
+def _reconstructed_runtime_state(records: list[dict[str, object]]) -> _ReconstructedRuntimeState:
+    """从 carried 的 archive 记录重建 compact 续跑要保留的四项运行时状态（H1）。
+
+    - executed_tools：成功且工具名真实（非解析错误/unknown）的记录，按顺序回填工具名——口径
+      与 ``_record_tool_call`` 里 ``record.params.executed_tools.append`` 完全一致。
+    - one_shot_tool_calls：成功的一次性编排工具记录，用 ``_one_shot_tool_call_key`` 从记录的
+      ``parameters``（即原始 payload）回填——与 live 去重 gate（``tool_call_runtime``）同一把钥匙，
+      所以 live 会拦的同 payload，续跑也会拦，去重不破。
+    - tool_rounds：archive 记录不存轮号，用记录数作保守代理（轮数 ≤ 调用数），保证续跑不把
+      ``max_tool_rounds`` 预算清零（宁可略高估、绝不低估，预算只会更紧不会被放大）。
+    - tool_context：按 ``_record_tool_call`` 的 ``[tool-record]/[tool-output-record]`` 文本格式
+      逐条重建。native 下这段文本**不发往 provider**（builder 旁路，IR messages 才发；这里也
+      刻意不重建 ``tool_ir_history``，避免与 IR 双轨冲突、避免把 compact 刚卸掉的历史又塞回原生
+      messages），但它仍喂给重试守卫/digest 守卫（``_has_previous_tool_context``）等。文本体量由
+      每轮 prompt 构建时既有的 ``window_tool_context_params`` 自动窗口化兜底，不会再撑爆上下文。
+    """
+    valid_records = [record for record in records if isinstance(record, dict)]
+    return _ReconstructedRuntimeState(
+        tool_context=[_reconstructed_tool_context_entry(record) for record in valid_records],
+        tool_rounds=len(valid_records),
+        one_shot_tool_calls={key for record in valid_records if (key := _carried_one_shot_key(record))},
+        executed_tools=[name for record in valid_records if (name := _carried_executed_tool_name(record))],
+    )
+
+
+def _carried_executed_tool_name(record: dict[str, object]) -> str:
+    """成功且工具名真实的记录返回工具名，否则空串——口径同 ``_record_tool_call``。"""
+    if not bool(record.get("ok")):
+        return ""
+    tool_name = str(record.get("tool") or "").strip()
+    return tool_name if tool_name and tool_name not in {"__parse_error__", "unknown"} else ""
+
+
+def _carried_one_shot_key(record: dict[str, object]) -> str:
+    """成功的一次性编排工具记录返回其去重 key，否则空串。"""
+    if not bool(record.get("ok")):
+        return ""
+    params = record.get("parameters")
+    if not isinstance(params, dict):
+        return ""
+    payload = dict(params)
+    # archive 的 parameters 即原始 payload（含 "tool" 控制键）；缺失时用记录顶层 tool 兜底，
+    # 让 _one_shot_tool_call_key 能识别这是不是一次性编排工具。
+    payload.setdefault("tool", str(record.get("tool") or ""))
+    return _one_shot_tool_call_key(payload)
+
+
+def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
+    payload = record.get("parameters")
+    payload = payload if isinstance(payload, dict) else {"tool": str(record.get("tool") or "")}
+    status = "ok" if record.get("ok") else "error"
+    tool_name = str(record.get("tool") or payload.get("tool") or "unknown")
+    payload_lines = "\n".join(
+        f"- {key}: {value}"
+        for key, value in payload.items()
+        if key not in {"tool", "call_id"} and str(value).strip()
+    )
+    result_lines = [f"[tool={tool_name}; status={status}]"]
+    preview = str(record.get("output_preview") or "").strip()
+    if preview:
+        result_lines.append(f"- output_preview: {preview}")
+    for key in ("scoped_call_id", "artifact_ref", "output_path", "output_hash", "error_code"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            result_lines.append(f"- {key}: {value}")
+    return "\n".join(
+        [
+            f"[tool-record carried tool={tool_name}]",
+            payload_lines or f"- tool: {tool_name}",
+            "[tool-output-record carried]",
+            *result_lines,
+        ]
     )
 
 
