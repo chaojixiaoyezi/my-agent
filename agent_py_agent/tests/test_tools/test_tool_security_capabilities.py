@@ -21,7 +21,9 @@ def _make_tool_registry(workspace: Path) -> ToolRegistry:
             max_matches=50,
             web_max_chars=12000,
             http_timeout=30,
-            catalog_limit=20,
+            # 限额给足:本测试只验证"安全工具授权后可见",不测分页。工具总数(含浏览器/
+            # 进程工具 + 授权后的安全工具)已超 20,用 20 会让 security_query 被分页挤出。
+            catalog_limit=100,
             retrieval_limit=3,
             vector_search_enabled=False,
         )

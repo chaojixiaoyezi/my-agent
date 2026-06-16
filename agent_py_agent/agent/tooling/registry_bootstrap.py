@@ -12,6 +12,7 @@ from ._filesystem_read import ReadFileTool, filesystem_access_options
 from ._filesystem_search import SearchTextTool
 from ._filesystem_write import WriteFileTool, WriteFileToolOptions
 from .artifact import ReadArtifactTool
+from .browser_tools import browser_tools
 from .controlled_exec import ControlledExecTool
 from .models import (
     BaseTool,
@@ -145,6 +146,10 @@ def _register_network_tools(registry: Any, params: Any) -> None:
     registry.register(ListProcessesTool())
     registry.register(ProcessStatusTool())
     registry.register(KillProcessTool())
+    # 浏览器自动化:补 web_fetch 抓不到的 JS 渲染/SPA/需点击填表的动态页面
+    # (惰性启动 headless Chromium,导航走 SSRF 防护,a11y 快照给无视觉模型用)。
+    for browser_tool in browser_tools():
+        registry.register(browser_tool)
     # controlled_exec is an internal tool used by capability grants.
     # flows, but ToolRegistry hides it from the default model-facing catalog.
     registry.register(ControlledExecTool())
