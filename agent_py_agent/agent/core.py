@@ -76,6 +76,7 @@ from .capability import CapabilityRouter
 from .capability.create_skill_tool import CreateSkillTool, register_owner_skills
 from .capability.memory_tool import RememberTool
 from .capability.runtime_config_reload import default_capability_config_path
+from .capability.session_search_tool import SessionSearchTool
 from .capability.skill_search_tool import SkillSearchTool
 from .collaboration import (
     CollaborationStore,
@@ -282,6 +283,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(TaskProgressTool(agent))
     # skill 树第一期:skill_search 检索台(千级冷路,prompt 零索引成本)。
     agent.tools.register(SkillSearchTool(agent))
+    # 历史检索台(对标 长期助手 session_search 三模式):封装 LocalStore 的 FTS5/最近列表/
+    # 时间窗,让模型能查/翻本地历史记录(记忆、产物、归档),零 LLM 成本纯读。
+    agent.tools.register(SessionSearchTool(agent))
     # 长期记忆写入:用户明确要求记住偏好/事实时落 owner memory(对标 长期助手 memory_tool)。
     agent.tools.register(RememberTool(agent))
     # 自学习 skill 草稿(对标 长期助手,但更保守):仅 enable_self_learning 时暴露——默认关闭=零打扰,

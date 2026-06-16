@@ -228,8 +228,18 @@ def _memory_text_from_record(record, trigger_type: str) -> str:
 
 # LLM: 检索词构造的唯一权威。历史缺陷(B1 修复):曾写成 len(goal)>50 才把 goal
 #   加进查询——中文短 goal(常态)被整个丢弃,查询只剩英文 trigger 词,中文教训
-#   永远搜不到,推模式形同虚设。现在 goal 非空即入查询、超长才截断。
-# 函数用途: 把触发类型和任务上下文拼成记忆检索词。
+#   永远搜不到,推模式形同虚设。现在 goal 非空即入查询。
+# 第二层缺陷(本次修):底层检索按空格分词(_search_jsonl 走 query.split(),FTS5 走
+#   词/子串),中文 goal 是一整段无空格汉字 → 整段当一个词,只有完全包含才命中,
+#   部分重合的相关记忆全漏。修法:把 goal 里的中文串切成 2-4 gram(复用
+#   memory_routing.matcher._chinese_ngrams,与 skill/路由检索同一套切词)并空格拼进
+#   查询 → JSONL 端每个 gram 独立打分、FTS5 端每个 gram 独立 OR 命中,中文召回打通。
+#   截断从 50 放宽到 80(留住更多语义),n-gram 单独限量防查询爆炸。
+# 函数用途: 把触发类型和任务上下文拼成记忆检索词(含中文 n-gram 展开)。
+_GOAL_MAX_CHARS = 80
+_GOAL_NGRAM_MAX = 24
+
+
 def _build_memory_query(trigger_type: str, context: dict) -> str:
     query_parts = [trigger_type]
     if context.get("task_id"):
@@ -238,8 +248,23 @@ def _build_memory_query(trigger_type: str, context: dict) -> str:
         query_parts.append(context["failure_type"])
     goal = str(context.get("goal", "") or "").strip()
     if goal:
-        query_parts.append(goal[:50])
+        clipped = goal[:_GOAL_MAX_CHARS]
+        query_parts.append(clipped)
+        query_parts.extend(_goal_chinese_ngrams(clipped))
     return " ".join(query_parts)
+
+
+def _goal_chinese_ngrams(goal: str) -> list[str]:
+    """对 goal 里的中文连续串做 n-gram 展开(复用路由器同款切词,不另写一套)。"""
+    import re
+
+    from .common.value_parsing import dedupe_strings
+    from .memory_routing.matcher import _chinese_ngrams
+
+    grams: list[str] = []
+    for run in re.findall(r"[一-鿿]+", goal):
+        grams.extend(_chinese_ngrams(run))
+    return dedupe_strings(grams)[:_GOAL_NGRAM_MAX]
 
 
 def _extract_memory_text(entry: MemoryEntry, trigger_type: str) -> str:
