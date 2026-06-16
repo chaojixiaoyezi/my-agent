@@ -40,6 +40,11 @@ from .tool_guard.loop_hints import (
     append_tool_failure_channel_hint,
     append_tool_guardrail_action_block_hint,
 )
+from .tool_context.window import tool_context_window_max_chars
+from .tool_ir_compact import (
+    compact_native_ir_to_char_budget,
+    reclaim_oldest_native_ir_pairs,
+)
 from .tool_ir_history import record_tool_call_ir
 from .tool_loop.completion import ToolRoundCompletionRequest, completion_response_after_tool_round
 from .tool_loop.final_exit_contract import (
@@ -130,6 +135,10 @@ def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
 def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     inject_pending_guidance(agent, params)
     window_tool_context_params(agent, params)
+    # native 下文本 tool_context 不发往 provider（IR messages 才发），所以上面的文本
+    # 窗口只是为旁路口径；真正决定发出去多大上下文的是 IR。这里按同样的字符预算对 IR
+    # 整对窗口化——绝不能只挖结果留 tool_use 头（那就是 Anthropic 400 的孤儿）。
+    _window_native_ir_to_budget(agent, params)
     return agent.prompts.build(
         params.user_prompt,
         params.memories,
@@ -145,6 +154,18 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
             native_tool_use=native_tool_use_active(agent),
         ),
     )
+
+
+def _window_native_ir_to_budget(agent, params: ToolLoopExecuteParams) -> None:
+    """native 下把 IR 历史按字符预算整对窗口化（text 协议跳过，行为零变）。
+
+    复用 ``tool_context_window_max_chars`` 的预算口径（与文本 window 同源），从最旧
+    工具往返开始整对摘除直到落进预算。``drop_tool_call_pairs`` 保证摘的是「ToolCall +
+    配对 ToolResult」整对，出站 messages 不留孤儿。
+    """
+    if not native_tool_use_active(agent):
+        return
+    compact_native_ir_to_char_budget(params, max_chars=tool_context_window_max_chars(agent))
 
 
 def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams) -> list:
@@ -179,13 +200,13 @@ def _retry_after_provider_context_overflow(
     *,
     first: tuple[str, object],
 ):
-    from .tool_context.ptl_retry import DEFAULT_PTL_RETRY_MAX, reclaim_oldest_tool_results_for_ptl
+    from .tool_context.ptl_retry import DEFAULT_PTL_RETRY_MAX
 
     prompt, response = first
     retry_max = int(getattr(getattr(agent, "config", None), "tool_context_ptl_retry_max", DEFAULT_PTL_RETRY_MAX) or 0)
     retries = 0
     while retries < retry_max and _is_provider_context_overflow(response):
-        if not reclaim_oldest_tool_results_for_ptl(params.tool_context):
+        if not _ptl_reclaim_oldest(agent, params):
             break
         retries += 1
         prompt = build_tool_loop_prompt(agent, params)
@@ -206,6 +227,19 @@ def _is_provider_context_overflow(response) -> bool:
         str(getattr(response, "runtime_status", "") or "") == "context_overflow"
         and str(getattr(response, "runtime_source", "") or "") == "provider_error"
     )
+
+
+# LLM: PTL 单步回收的协议分流。native 下 provider 看到的是 IR 翻出的 messages（不是
+#   文本 tool_context），所以必须丢 IR 整对（drop_tool_call_pairs，无孤儿）才真的瘦身；
+#   text 协议保持原样丢文本正文。两侧都返回「是否还有可回收」，无可回收即停止 PTL 重试、
+#   落回重量级 compact/resume。
+# 函数用途: PTL 重试前按协议给「真正发往 provider 的上下文」瘦身一步。
+def _ptl_reclaim_oldest(agent, params: ToolLoopExecuteParams) -> bool:
+    from .tool_context.ptl_retry import _PTL_DROP_FRACTION, reclaim_oldest_tool_results_for_ptl
+
+    if native_tool_use_active(agent):
+        return reclaim_oldest_native_ir_pairs(params, fraction=_PTL_DROP_FRACTION) > 0
+    return reclaim_oldest_tool_results_for_ptl(params.tool_context) > 0
 
 
 def execute_one_tool_call(agent, request: ToolCallExecuteParams):

@@ -66,12 +66,21 @@ def window_tool_context_params(agent: object, params: object) -> None:
         _record_tool_context_window_overflow(params, result)
 
 
-def _tool_context_window_max_chars(agent: object) -> int:
+def tool_context_window_max_chars(agent: object) -> int:
+    """本轮 tool_context/IR 窗口的字符预算（按 compact 触发 token 数换算）。
+
+    native 的 IR 窗口（``tool_ir_compact``）复用这同一口径，保证文本旁路与真正发往
+    provider 的 IR 用同一个预算，不漂移。
+    """
     policy = runtime_compact_policy(agent, save=True)
     trigger_tokens = int(policy.trigger_tokens or 0)
     if trigger_tokens <= 0:
         return _DEFAULT_MAX_CHARS
     return max(_DEFAULT_MAX_CHARS, trigger_tokens * _CHARS_PER_TOKEN_WINDOW)
+
+
+# 历史内部名保留为别名，避免改动现有调用点。
+_tool_context_window_max_chars = tool_context_window_max_chars
 
 
 def _persistent_compact_enabled(agent: object, params: object) -> bool:

@@ -179,9 +179,14 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     history = getattr(params, "tool_ir_history", None)
     if not history:
         return None
-    from ..backends.message_adapter import AnthropicMessageAdapter
+    from ..backends.message_adapter import AnthropicMessageAdapter, strip_orphaned_tool_blocks
 
     messages = AnthropicMessageAdapter().to_provider_messages(history)
+    # Step 4 最后防线：发请求前再扫一遍孤儿（Step3 的整对回收漏了截断/异常中断/subagent
+    # 提前结束/resume 等边界时，IR 仍可能残留「有 tool_use 无配对 tool_result」或反之）。
+    # Anthropic 对孤儿一律 HTTP 400，这道 sweep 给孤儿 tool_use 补 stub、剔除孤儿
+    # tool_result，保证出站永不带孤儿。
+    messages = strip_orphaned_tool_blocks(messages)
     return messages or None
 
 

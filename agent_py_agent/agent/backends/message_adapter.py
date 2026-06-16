@@ -68,6 +68,9 @@ class AnthropicMessageAdapter(MessageAdapter):
             _flush_results(messages, pending_results)
             _append_assistant(messages, item)
         _flush_results(messages, pending_results)
+        # 注意：这里是「纯翻译」——逐项把 IR 映射成 messages，不做孤儿净化（孤儿净化是
+        # 发请求前的最后防线，见 strip_orphaned_tool_blocks，由出站边界
+        # _native_provider_messages 调用）。保持本方法纯翻译，便于按片段单测。
         return messages
 
     def tool_calls_from_response(self, response: object) -> list[ToolCall]:
@@ -142,8 +145,113 @@ def _tool_call_from_block(block: dict[str, Any]) -> ToolCall:
     )
 
 
+# tool_use 缺配对结果时补的合成占位（参照标杆 长期助手 _strip_orphaned_tool_blocks /
+# 通道运行时 transform-messages：宁可补合成结果也别删 assistant 文本）。
+_ORPHAN_TOOL_RESULT_STUB = "[结果已在上下文压缩中回收]"
+
+
+def strip_orphaned_tool_blocks(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """净化出站 messages，保证 tool_use / tool_result 一一配对（Anthropic 强约束）。
+
+    Anthropic ``/v1/messages`` 对孤儿一律 HTTP 400：assistant 的每个 ``tool_use`` 必须在
+    后续 user 消息里有同 id 的 ``tool_result``；每个 ``tool_result`` 必须指向前面某个
+    ``tool_use``。本函数两类孤儿分别处理：
+
+    - **孤儿 tool_use**（有调用、无配对结果）：**补 stub tool_result**，不删 assistant
+      消息——assistant 里可能还带模型文本/推理，删了等于丢内容；补一条
+      ``{"type":"tool_result","tool_use_id":id,"content":stub,"is_error":true}`` 更安全。
+      stub 紧跟在该 assistant 消息后（新插一条 user 消息，承载该轮所有缺失结果）。
+    - **孤儿 tool_result**（结果指向不存在的 tool_use）：**剔除**该 block——没有可补的
+      调用头，且这种残留只会触发 400；剔空后该 user 消息若没 block 了，整条删掉。
+
+    纯函数：返回新 list，不改入参。非 native/无工具 block 的 messages 原样返回。
+    """
+    if not messages:
+        return list(messages)
+    tool_use_ids = _collect_block_ids(messages, "tool_use", "id")
+    result_ids = _collect_block_ids(messages, "tool_result", "tool_use_id")
+    swept: list[dict[str, Any]] = []
+    for message in messages:
+        kept = _message_without_orphan_results(message, tool_use_ids)
+        if kept is not None:
+            swept.append(kept)
+        _append_stub_for_orphan_tool_use(swept, message, result_ids)
+    return swept
+
+
+def _collect_block_ids(messages: list[dict[str, Any]], block_type: str, id_key: str) -> set[str]:
+    ids = {
+        str(block.get(id_key, "") or "")
+        for message in messages
+        for block in _content_blocks(message)
+        if block.get("type") == block_type
+    }
+    ids.discard("")
+    return ids
+
+
+def _message_without_orphan_results(
+    message: dict[str, Any], tool_use_ids: set[str]
+) -> dict[str, Any] | None:
+    """剔除指向不存在 tool_use 的 tool_result block；若该消息因此空了返回 None。"""
+    blocks = _content_blocks(message)
+    if not blocks:
+        return message
+    kept = [
+        block
+        for block in blocks
+        if not (
+            block.get("type") == "tool_result"
+            and str(block.get("tool_use_id", "") or "") not in tool_use_ids
+        )
+    ]
+    if len(kept) == len(blocks):
+        return message
+    if not kept:
+        return None
+    return {**message, "content": kept}
+
+
+def _append_stub_for_orphan_tool_use(
+    swept: list[dict[str, Any]], message: dict[str, Any], result_ids: set[str]
+) -> None:
+    """这条 assistant 消息里的 tool_use 若没配对结果，补一条 user(stub tool_result)。"""
+    if message.get("role") != "assistant":
+        return
+    missing = [
+        str(block.get("id", "") or "")
+        for block in _content_blocks(message)
+        if block.get("type") == "tool_use" and str(block.get("id", "") or "") not in result_ids
+    ]
+    missing = [call_id for call_id in missing if call_id]
+    if not missing:
+        return
+    swept.append(
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": call_id,
+                    "content": _ORPHAN_TOOL_RESULT_STUB,
+                    "is_error": True,
+                }
+                for call_id in missing
+            ],
+        }
+    )
+
+
+def _content_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [block for block in content if isinstance(block, dict)]
+
+
 __all__ = [
     "AnthropicMessageAdapter",
     "HistoryItem",
     "MessageAdapter",
+    "strip_orphaned_tool_blocks",
 ]
