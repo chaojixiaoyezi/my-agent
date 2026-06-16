@@ -6,6 +6,7 @@ from difflib import SequenceMatcher
 
 from ..recovery import RecoveryAction
 from ..state_machine_transitions import transition_contract
+from ..tool_call_policy import ToolCallPolicy, validate_tool_call_policy
 from ..tool_protocol_v2 import normalize_tool_call, validate_tool_call
 from .models import GateDecision, GateFinding
 from .tool_effects import ToolGatePolicy, tool_effect_decision
@@ -48,6 +49,38 @@ def evaluate_tool_call_gate(
             "idempotency_key": call.idempotency_key,
             "schema_version": call.schema_version,
         },
+    )
+
+
+_PARAMETER_ERROR_CODES = {"TOOL_PARAMETER_REQUIRED", "TOOL_PARAMETER_TYPE_INVALID"}
+
+
+def evaluate_tool_call_parameter_gate(
+    payload: object,
+    tool_call_policy: ToolCallPolicy | None,
+) -> GateDecision:
+    """灰度 required + 顶层 type 校验：缺参/类型错 -> repair(精确 code + findings)。
+
+    与结构校验 evaluate_tool_call_gate 同处 tool_call 门位置（manifest/effect/execute 之前），
+    native 与 text 两条入口都经此（payload 先归一为 v2 envelope）。
+    只对 _PARAMETER_ERROR_CODES 生效（required/顶层 type）；不碰 enum/minimum，
+    也不重复 policy 内的 available/allowed（那两条由 evaluate_tool_call_gate 负责）。
+    policy 为 None 或无声明时直接 allow（零开销、零误拒）。
+    """
+    if tool_call_policy is None:
+        return GateDecision.allow("tool_call")
+    call = normalize_tool_call(_payload_for_tool_protocol(payload))
+    decision = validate_tool_call_policy(call, tool_call_policy)
+    if decision.ok or decision.error_code not in _PARAMETER_ERROR_CODES:
+        return GateDecision.allow("tool_call")
+    finding = GateFinding(
+        decision.error_code,
+        evidence={"tool_name": decision.tool_name, "fields": list(decision.findings)},
+    )
+    return GateDecision.repair(
+        "tool_call",
+        (finding,),
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
     )
 
 
@@ -144,4 +177,8 @@ def _normalized_tool_key(value: str) -> str:
     return value.strip().lower().replace("-", "_").replace(".", "_").replace("/", "_")
 
 
-__all__ = ["evaluate_state_transition_gate", "evaluate_tool_call_gate"]
+__all__ = [
+    "evaluate_state_transition_gate",
+    "evaluate_tool_call_gate",
+    "evaluate_tool_call_parameter_gate",
+]

@@ -5,7 +5,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..contracts.gates.adapters import evaluate_tool_call_gate
+from ..contracts.gates.adapters import (
+    evaluate_tool_call_gate,
+    evaluate_tool_call_parameter_gate,
+)
 from ..contracts.gates.command_policy import command_name
 from ..contracts.gates.gate_pipeline import GatePipeline
 from ..contracts.gates.models import GateContext, GateDecision
@@ -29,6 +32,7 @@ from .registry_gate_policy import (
     boundary_path_roots,
     boundary_strings,
     boundary_text,
+    tool_call_policy_for_spec,
     tool_gate_policy,
     tool_manifest_decision,
 )
@@ -75,6 +79,13 @@ def _tool_execution_pipeline(payload: dict[str, Any], call: object, tool_name: s
             available_tools=tools.keys(),
             allowed_tools=getattr(call, "allowed_tools", None),
             policy=None,
+        ),
+    )
+    pipeline.register(
+        "tool_call",
+        lambda _context: evaluate_tool_call_parameter_gate(
+            payload,
+            tool_call_policy_for_spec(tools.get(tool_name)),
         ),
     )
     pipeline.register("tool_manifest", lambda _context: tool_manifest_decision(tool_name, tools))

@@ -80,6 +80,20 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="工具参数不合法；按工具 schema 修参数后可重试。",
     ),
+    "TOOL_PARAMETER_REQUIRED": ErrorContract(
+        code="TOOL_PARAMETER_REQUIRED",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="缺少必填参数；按 findings 里列出的参数名补齐后重试。",
+    ),
+    "TOOL_PARAMETER_TYPE_INVALID": ErrorContract(
+        code="TOOL_PARAMETER_TYPE_INVALID",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="参数类型不符；按 findings 里的 名:期望类型 改成正确类型后重试。",
+    ),
     "TOOL_CALL_UNCLOSED": ErrorContract(
         code="TOOL_CALL_UNCLOSED",
         category="tool",
