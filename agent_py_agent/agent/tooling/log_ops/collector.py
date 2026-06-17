@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .splitter import LineSplitter, RecordSplitter
+
 # API 轮询单次最多取多少行进内存,防一次返回过大撑爆;够大不影响吞吐。
 _API_MAX_LINES_PER_POLL = 100_000
 _API_TIMEOUT_SECONDS = 10.0
@@ -33,6 +35,8 @@ _FOLDER_MAX_NEW_FILES_PER_ROUND = 2000
 # 救的是"写完即固定、最后一行无换行"的文件(如日志切片/cp 来的片段/folder 子文件);对持续 append
 # 的活跃文件,正常每行带换行→尾段为空→此逻辑不触发,残行保护照旧。阈值取得比典型写入间隔大,避免误判。
 _TRAILING_FLUSH_IDLE_SECONDS = 2.0
+# 默认切割器:按行(历来行为)。源有 profile.splitter 时由 daemon 传入对应切割器。
+_DEFAULT_SPLITTER = LineSplitter()
 
 
 @dataclass
@@ -63,7 +67,7 @@ def collect_file(
     state: dict[str, Any],
     *,
     now: float | None = None,
-    idle_flush_seconds: float = _TRAILING_FLUSH_IDLE_SECONDS,
+    splitter: RecordSplitter | None = None,
 ) -> CollectResult:
     """文件源增量采集。state: {offset:int, size:int, inode:int}。
 
@@ -107,9 +111,10 @@ def collect_file(
     text = raw.decode("utf-8", errors="replace")
     if text:
         now_ts = time.time() if now is None else now
-        # 文件一段时间没动 = 写完了:此时末尾无换行的尾段是完整最后一行(不是残行),要采。
-        file_idle = (now_ts - mtime) >= idle_flush_seconds
-        new_lines, consumed = _split_collectable_lines(text, flush_trailing=file_idle)
+        # 文件一段时间没动 = 写完了:末尾无闭合边界的尾段是完整记录(不是残行),要采。
+        file_idle = (now_ts - mtime) >= _TRAILING_FLUSH_IDLE_SECONDS
+        active_splitter = splitter if splitter is not None else _DEFAULT_SPLITTER
+        new_lines, consumed = active_splitter.split(text, flush_trailing=file_idle)
         new_offset = start + consumed
 
     return CollectResult(
@@ -118,33 +123,12 @@ def collect_file(
     )
 
 
-def _split_collectable_lines(text: str, *, flush_trailing: bool) -> tuple[list[str], int]:
-    """把这轮读到的 text 切成「要采的完整行」+「消费的字节数」。
-
-    末尾无换行的尾段两种处理:
-      - flush_trailing=False(文件还活跃/在写):当未写完的残行,不采,offset 只推到最后一个换行处,
-        尾段留到下次写完再采(避免把半行当完整行)。
-      - flush_trailing=True(文件已静默/写完):尾段是完整的最后一行,连同前面完整行一起采,offset 推到 EOF
-        (救"写完即固定、最后一行无换行"的文件,否则永久丢最后一行)。
-    """
-    last_nl = text.rfind("\n")
-    if last_nl == -1:
-        # 整段无换行:静默→是完整最后一行采;活跃→残行不采,offset 不前进。
-        if flush_trailing and text.strip():
-            return [line for line in text.splitlines() if line.strip()], len(text.encode("utf-8"))
-        return [], 0
-    trailing = text[last_nl + 1 :]
-    if flush_trailing and trailing.strip():
-        return [line for line in text.splitlines() if line.strip()], len(text.encode("utf-8"))
-    complete = text[: last_nl + 1]
-    return [line for line in complete.splitlines() if line.strip()], len(complete.encode("utf-8"))
-
-
 def collect_folder(
     locator: str,
     state: dict[str, Any],
     *,
     now: float | None = None,
+    splitter: RecordSplitter | None = None,
 ) -> CollectResult:
     """文件夹源增量采集。state: {processed: {filename: offset}}。
 
@@ -170,7 +154,7 @@ def collect_folder(
     for entry in _entries_within_new_file_budget(entries, processed):
         name = entry.name
         prev_offset = int(processed.get(name, 0) or 0)
-        sub = collect_file(str(entry), {"offset": prev_offset, "size": prev_offset}, now=now)
+        sub = collect_file(str(entry), {"offset": prev_offset, "size": prev_offset}, now=now, splitter=splitter)
         new_lines.extend(sub.new_lines)
         processed[name] = int(sub.state.get("offset", prev_offset) or prev_offset)
 
@@ -227,13 +211,17 @@ def collect_source(
     locator: str,
     state: dict[str, Any],
     *,
-    now: float | None = None,
+    splitter: RecordSplitter | None = None,
 ) -> CollectResult:
-    """按源类型分发到对应采集器。未知类型返回空结果 + error(不崩 daemon)。now 透传便于测试静默兜底。"""
+    """按源类型分发到对应采集器。未知类型返回空结果 + error(不崩 daemon)。
+
+    splitter 透传:文件/文件夹按 splitter 切逻辑记录(默认按行);api 返回的已是切好的行,不过切割器。
+    daemon 生产路径用真实时间;要注入 now 测静默兜底就直接测 collect_file/collect_folder。
+    """
     if kind == "file":
-        return collect_file(locator, state, now=now)
+        return collect_file(locator, state, splitter=splitter)
     if kind == "folder":
-        return collect_folder(locator, state, now=now)
+        return collect_folder(locator, state, splitter=splitter)
     if kind == "api":
         return collect_api(locator, state)
     return CollectResult(new_lines=[], state=dict(state), error=f"unknown_source_kind: {kind}")

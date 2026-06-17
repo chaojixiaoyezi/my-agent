@@ -195,14 +195,14 @@ def test_folder_idle_subfile_last_line_no_newline_recovered(tmp_path: Path) -> N
     assert res2.new_lines == []
 
 
-def test_collect_source_folder_passes_now_through(tmp_path: Path) -> None:
-    """collect_source 把 now 透传到 folder→file,静默兜底端到端生效。"""
+def test_collect_source_folder_dispatches(tmp_path: Path) -> None:
+    """collect_source 把 folder 分发到 collect_folder,正常采到完整行(每行带换行,不依赖静默)。
+    folder 子文件的静默兜底端到端由 test_folder_idle_subfile_last_line_no_newline_recovered 覆盖。"""
     folder = tmp_path / "src"
     folder.mkdir()
-    (folder / "f.log").write_text("p\nq\nNO-NL-TAIL", encoding="utf-8")
-    mtime = (folder / "f.log").stat().st_mtime
-    res = collect_source("folder", str(folder), {}, now=mtime + 100.0)
-    assert res.new_lines == ["p", "q", "NO-NL-TAIL"]
+    (folder / "f.log").write_text("p\nq\nr\n", encoding="utf-8")
+    res = collect_source("folder", str(folder), {})
+    assert sorted(res.new_lines) == ["p", "q", "r"]
 
 
 # ----------------------- API 源(本地 http server) -----------------------

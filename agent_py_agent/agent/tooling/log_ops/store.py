@@ -113,12 +113,14 @@ class LogOpsStore:
         self.candidates_path = self.root / "candidates.jsonl"
         self.poll_cursor_path = self.root / "poll_cursor.json"
         self.metrics_path = self.root / "metrics.json"
+        self.profiles_dir = self.root / "profiles"
 
     # ---- 目录 ----
     def ensure_dirs(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
+        self.profiles_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- config(sources) ----
     def write_config(self, specs: list[SourceSpec], *, poll_interval_seconds: float) -> None:
@@ -157,6 +159,28 @@ class LogOpsStore:
     def write_state(self, source_id: str, state: dict[str, Any]) -> None:
         self.ensure_dirs()
         write_json_file_atomic(self.state_path(source_id), state)
+
+    # ---- 每源监控方案 SourceProfile(原子;LLM 探查产出,daemon 读它切割+初筛) ----
+    def profile_path(self, source_id: str) -> Path:
+        safe = _SOURCE_ID_SAFE_RE.sub("-", source_id)
+        return self.profiles_dir / f"{safe}.json"
+
+    def read_profile(self, source_id: str) -> dict[str, Any]:
+        """读某源 SourceProfile(splitter/rules/triage_hint/reporting/fields...);没有返回空 dict(走默认)。"""
+        return read_json_object(self.profile_path(source_id))
+
+    def write_profile(self, source_id: str, profile: dict[str, Any]) -> None:
+        self.ensure_dirs()
+        write_json_file_atomic(self.profile_path(source_id), profile)
+
+    def all_profiles(self) -> dict[str, dict[str, Any]]:
+        """读出所有已登记源的 profile(供 status/总览;无 profile 的源不在结果里)。"""
+        out: dict[str, dict[str, Any]] = {}
+        for spec in self.source_specs():
+            profile = self.read_profile(spec.source_id)
+            if profile:
+                out[spec.source_id] = profile
+        return out
 
     # ---- 全量存档(append-only) ----
     def archive_path(self, source_id: str) -> Path:
