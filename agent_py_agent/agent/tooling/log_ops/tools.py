@@ -294,22 +294,23 @@ class LogAlertPollTool(_LogOpsTool):
         peek = _coerce_bool(params.get("peek"), default=False)
         cursor = store.read_poll_cursor()
         total = store.count_candidates()
-        # 优先扫描窗口:在 cursor 前方更大范围里挑 novel/高危优先返回(对抗 low 误报膨胀把真威胁埋在 FIFO 队列深处——
-        # 实测 unusual-ssh-user 类宽规则误报可占候选 74%)。cursor 仍按 FIFO 推进 limit,未返回的下次再选,不漏。
+        # 扫描窗口取 cursor 前方 limit*3(控制窗口内 high 不超 limit 以免漏真威胁),按 novel/severity 优先取 top limit 研判;
+        # 窗口剩余多为 low 误报(unusual-ssh-user 类宽规则占 74%),随 cursor 整窗推进跳过——不让海量误报把 poll 拖死、真威胁饿死。
         _sev_rank = {"critical": 0, "high": 0, "medium": 1, "low": 2}
-        window = store.read_candidates(offset=cursor, limit=max(limit * 8, 500))
-        novelty.annotate_novelty(store, window, persist=False)  # 标 novel 仅供排序;未返回的不持久,下次仍可被选中研判
+        window = store.read_candidates(offset=cursor, limit=max(limit * 3, 120))
+        novelty_info = novelty.annotate_novelty(store, window, persist=not peek)  # 整窗标记+持久(都已被看过判定),novel 优先全落入 batch
         window.sort(key=lambda c: (0 if c.get("novel") else 1, _sev_rank.get(str(c.get("severity", "")).lower(), 2)))
         batch = window[:limit]
-        new_cursor = cursor + min(limit, len(window))
-        if batch and not peek:
+        skipped_low = max(0, len(window) - len(batch))
+        new_cursor = cursor + len(window)  # 整窗推进:top limit 研判,剩余 low 误报跳过(已判 low,不值得逐条占 LLM)
+        if window and not peek:
             store.write_poll_cursor(new_cursor)
-        # 仅对实际返回研判的候选并入已见集(未返回的留待后续 poll 仍算 novel,不漏)。
-        novelty_info = novelty.annotate_novelty(store, batch, persist=not peek)
         payload = {
             "ok": True,
             "monitor_id": store.monitor_id,
             "returned": len(batch),
+            "scanned": len(window),
+            "skipped_low_severity": skipped_low,
             "candidates_total": total,
             "cursor_before": cursor,
             "cursor_after": (cursor if peek else new_cursor),
