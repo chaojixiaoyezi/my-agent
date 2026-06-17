@@ -305,3 +305,53 @@ def test_uncontracted_closeout_allows_normal_task_no_false_positive(tmp_path):
     assert response is not None
     assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in response.text
     assert not any("[duration-vigil-rework]" in str(item) for item in params.tool_context)
+
+
+# --- 无限期值守(没时间预算,只认喊停) ---
+
+
+def test_indefinite_blocks_regardless_of_elapsed(tmp_path):
+    # 无限期值守:即使跑了 10 小时,没喊停就继续拦(没有时长目标可达标)。
+    _seed_timeline(tmp_path, started_minutes_ago=600)
+    req = _request("用 log_ops 长期持续值守监控这些源,没有期限,一直盯到我喊停为止,发现威胁就汇报")
+    report = _report(tmp_path)
+    assert duration_vigil_rework(req, report) is True
+    assert report["duration_vigil_gate"]["finding"] == "VIGIL_INDEFINITE_NOT_STOPPED"
+    assert report["duration_vigil_gate"]["mode"] == "indefinite"
+
+
+def test_indefinite_intent_without_duration_still_blocks(tmp_path):
+    # 无限期(无明确时长)也拦 —— 扩展了原"值守但无可解析时长→放行"的逻辑。
+    _seed_timeline(tmp_path, started_minutes_ago=5)
+    req = _request("帮我无限期持续盯着这些日志源,直到我说停")
+    report = _report(tmp_path)
+    assert duration_vigil_rework(req, report) is True
+    assert report["duration_vigil_gate"]["mode"] == "indefinite"
+
+
+def test_indefinite_released_on_stop_signal(tmp_path):
+    # 无限期 + 用户喊停标记(网关写 work/stop_vigil.flag)→ 放行优雅收尾。
+    _seed_timeline(tmp_path, started_minutes_ago=30)
+    (tmp_path / "work").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "work" / "stop_vigil.flag").write_text("stop", encoding="utf-8")
+    req = _request("用 log_ops 长期值守监控,没有期限,一直盯到我喊停")
+    report = _report(tmp_path)
+    assert duration_vigil_rework(req, report) is False  # 喊停 → 放行
+
+
+def test_stop_signal_also_releases_duration_mode(tmp_path):
+    # 喊停对有时长模式也尊重:用户中途喊停,即使没到时长也放行。
+    _seed_timeline(tmp_path, started_minutes_ago=13)
+    (tmp_path / "work").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "work" / "stop_vigil.flag").write_text("stop", encoding="utf-8")
+    req = _request("用 log_ops 持续监控研判,运营至少 2 小时,每隔约 5 分钟 wait 然后 log_alert_poll")
+    report = _report(tmp_path)
+    assert duration_vigil_rework(req, report) is False  # 喊停 → 放行
+
+
+def test_duration_mode_not_misdetected_as_indefinite(tmp_path):
+    # 有明确时长的值守不被误判为无限期(走时长模式,达标即放行,而非永久拦)。
+    _seed_timeline(tmp_path, started_minutes_ago=200)  # 200 分钟 >> 2 小时*0.9=108
+    req = _request("用 log_ops 持续监控研判,运营至少 2 小时,每隔约 5 分钟 wait 然后 log_alert_poll")
+    report = _report(tmp_path)
+    assert duration_vigil_rework(req, report) is False  # 时长达标放行,不是无限期永久拦

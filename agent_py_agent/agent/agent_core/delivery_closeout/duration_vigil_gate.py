@@ -74,6 +74,21 @@ _DURATION_PATTERNS = (
 # 达到目标时长的这个比例即视为「够了」,放行(留 10% 余量,避免临界反复引导)。
 _DURATION_SATISFIED_RATIO = 0.9
 
+# 「无限期值守」信号:没有固定时长、没时间预算,要一直盯到用户喊停。区别于"值守 N 小时"(有预算到点收尾)。
+# 无限期模式下时长门**永不因达标放行**,只认喊停信号(_stop_signal)才放行。
+_INDEFINITE_PATTERNS = (
+    r"(长期|无限期|无限制)",
+    r"没有?\s*(时间|时长)?\s*(预算|期限|终点|结束|限制)",
+    r"直到(我|用户|你)?(喊停|叫停|说停|改目标|换任务|让你停|不需要)",
+    r"(一直|持续).{0,6}(到|至).{0,4}(喊停|叫停|改目标|换任务)",
+    r"(until|till)\s+(i|you|user|we)\b",
+    r"\bindefinit(e|ely)\b",
+    r"\bno\s+(time\s+)?(budget|deadline|end|limit)\b",
+)
+
+# 喊停标记文件相对路径(网关收到用户"停/换任务/改目标"时写它);存在即放行,优雅收尾。
+_STOP_FLAG_REL = ("work", "stop_vigil.flag")
+
 _VIGIL_GAP_MARKER = "[duration-vigil-rework]"
 
 # 「值守进展」工具:两次拦截之间这些工具的累计调用次数有没有增加,决定是否还继续拦(节流)。
@@ -100,43 +115,28 @@ def duration_vigil_rework(
         return False
     if not _task_is_vigil_with_intent(params):
         return False
+    indefinite = _is_indefinite_vigil(params)
     required_seconds = _required_duration_seconds(params)
-    if required_seconds <= 0:
-        return False
+    if not indefinite and required_seconds <= 0:
+        return False  # 既无明确时长又非无限期 → 本门不管
+    if _stop_signal(report):
+        return False  # 用户喊停(网关写标记)→ 优雅放行收尾(无限期模式靠它退出)
     elapsed = _elapsed_run_seconds(report, now=now)
-    if elapsed is None:
-        return False
-    if elapsed >= required_seconds * _DURATION_SATISFIED_RATIO:
-        return False
-    # 时长未达标:本应持续拦。但先过节流闸——若上次拦截后没有任何新的值守进展(紧密空转),
-    # 就放行不再拦,避免烧 token。第一次进来(还没拦过)progress_at_last_block 为 None,直接拦。
+    if not indefinite:
+        # 有明确时长:取不到起跑点保守放行,或已达 90% 放行(原逻辑)。
+        if elapsed is None or elapsed >= required_seconds * _DURATION_SATISFIED_RATIO:
+            return False
+    # 走到这:无限期未喊停,或有时长未达标。先过节流闸——若上次拦截后无新值守进展(紧密空转)就放行,
+    # 不烧 token。第一次进来(还没拦过)progress_at_last_block 为 None,直接拦。
     progress_now = _vigil_progress_count(params)
     progress_at_last_block = _last_block_progress_count(params)
     if progress_at_last_block is not None and progress_now <= progress_at_last_block:
         return False
-    required_minutes = round(required_seconds / 60.0, 1)
-    elapsed_minutes = round(elapsed / 60.0, 1)
-    report["duration_vigil_gate"] = {
-        "allowed": False,
-        "finding": "VIGIL_DURATION_NOT_REACHED",
-        "required_seconds": round(required_seconds, 1),
-        "elapsed_seconds": round(elapsed, 1),
-        "required_minutes": required_minutes,
-        "elapsed_minutes": elapsed_minutes,
-        "vigil_progress_calls": progress_now,
-        "message_zh": (
-            "这是持续值守类任务(要求持续监控/值班/运营一段明确时长),当前实际运行时长"
-            f"约 {elapsed_minutes} 分钟,远未达到要求的约 {required_minutes} 分钟。"
-            "请不要提前交付或写交付报告,继续值班循环:先用 wait 工具等待约 5 分钟(值班是周期性的,"
-            "不要连续狂跑不 wait)→ log_alert_poll 拉新候选研判 → "
-            "必要时 log_source_query 交叉验证 → log_monitor_status 看不丢对账,如此往复直到达到要求时长。"
-        ),
-    }
-    _append_vigil_rework_context(params, report, progress_now)
-    report["ok"] = False
-    from .artifacts import _write_report
-
-    _write_report(_report_root(report), report)
+    _write_vigil_block(
+        params,
+        report,
+        {"indefinite": indefinite, "required_seconds": required_seconds, "elapsed": elapsed, "progress_now": progress_now},
+    )
     return True
 
 
@@ -321,6 +321,58 @@ def _append_vigil_rework_context(params: object, report: dict[str, Any], progres
 
 def _report_root(report: dict[str, Any]) -> Path:
     return Path(str(report.get("workspace_root") or "."))
+
+
+def _is_indefinite_vigil(params: object) -> bool:
+    """无限期值守:在已确认值守意图的前提下,prompt 还含"长期/没期限/直到喊停"信号(无固定时长)。"""
+    text = _prompt_text(params)
+    if not text:
+        return False
+    lowered = text.casefold()
+    return any(re.search(pattern, lowered) for pattern in _INDEFINITE_PATTERNS)
+
+
+def _stop_signal(report: dict[str, Any]) -> bool:
+    """用户喊停标记(网关收到"停/换任务/改目标"写 work/stop_vigil.flag);存在即放行,优雅收尾。"""
+    flag = _report_root(report).joinpath(*_STOP_FLAG_REL)
+    try:
+        return flag.is_file()
+    except OSError:
+        return False
+
+
+def _write_vigil_block(params: object, report: dict[str, Any], ctx: dict[str, Any]) -> None:
+    """写拦截报告 + 注入返工引导。ctx={indefinite,required_seconds,elapsed,progress_now};无限期与有时长两套话术。"""
+    indefinite = bool(ctx.get("indefinite"))
+    required_seconds = float(ctx.get("required_seconds") or 0.0)
+    elapsed = ctx.get("elapsed")
+    progress_now = int(ctx.get("progress_now") or 0)
+    elapsed_minutes = round((elapsed or 0.0) / 60.0, 1)
+    gate: dict[str, Any] = {"allowed": False, "elapsed_minutes": elapsed_minutes, "vigil_progress_calls": progress_now}
+    if indefinite:
+        gate["finding"] = "VIGIL_INDEFINITE_NOT_STOPPED"
+        gate["mode"] = "indefinite"
+        gate["message_zh"] = (
+            f"这是**无限期**持续值守任务(没有固定时长、没时间预算,要一直盯到用户喊停)。已运行约 {elapsed_minutes} "
+            "分钟。请不要提前交付或收尾,继续值班循环:wait 约5分钟 → log_alert_poll 研判 → log_monitor_status "
+            "看对账,如此往复,直到用户明确说'停/换任务/改目标'为止。"
+        )
+    else:
+        required_minutes = round(required_seconds / 60.0, 1)
+        gate["finding"] = "VIGIL_DURATION_NOT_REACHED"
+        gate["mode"] = "duration"
+        gate["required_minutes"] = required_minutes
+        gate["message_zh"] = (
+            f"这是持续值守类任务,当前实际运行约 {elapsed_minutes} 分钟,远未达到要求的约 {required_minutes} 分钟。"
+            "请不要提前交付,继续值班循环:wait 约5分钟 → log_alert_poll 研判 → 必要时 log_source_query 交叉验证 → "
+            "log_monitor_status 看不丢对账,如此往复直到达到要求时长。"
+        )
+    report["duration_vigil_gate"] = gate
+    _append_vigil_rework_context(params, report, progress_now)
+    report["ok"] = False
+    from .artifacts import _write_report
+
+    _write_report(_report_root(report), report)
 
 
 __all__ = ["duration_vigil_rework"]
