@@ -1,0 +1,155 @@
+
+from __future__ import annotations
+
+"""log_ops 编排层 LLM 工具 —— 多层代理(主→子→孙)值守的职责台账接口。
+
+- log_assign:主代理派子代理/孙代理盯某些源,登记进职责台账(谁/盯哪些/上级/owner)。
+- log_heartbeat:被派的代理周期写心跳+进度(我还活着、研判到哪、发现多少)。
+- log_duty_roster:查台账全局视图——每源谁在盯、哪个代理心跳停(挂)、哪些源没人认领(漏)。
+
+审计性 + 续接的闭环:派活→心跳→看门狗据 roster 的 stalled/gaps 重派接管。复用 DutyRegistry(纯落盘)。
+"""
+
+from pathlib import Path
+from typing import Any
+
+from ..models import BaseTool, ToolSpec
+from .duty_registry import Assignment, DutyRegistry
+from .query import resolve_source_id
+from .tools import _coerce_sources, _err, _LogOpsTool, _ok
+
+
+def _registry(tool: _LogOpsTool, params: dict[str, Any]) -> DutyRegistry:
+    return DutyRegistry(tool.store(params).root)
+
+
+class LogAssignTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_assign",
+        category="log_ops",
+        effect="mutating",
+        requires_idempotency=True,
+        description=(
+            "派一个子代理/孙代理去盯某些源,登记进职责台账。台账是多层代理值守的审计+续接地基:"
+            "记下谁盯哪些源、上级是谁、属于哪个用户(owner)。同一 agent_id 重复 assign 是更新(幂等)。"
+        ),
+        use_cases=["主代理把某几个源的监控派给一个子代理", "子代理再把细分面派给孙代理"],
+        avoid_when=["代理写自己的进度用 log_heartbeat", "查全局谁盯啥用 log_duty_roster"],
+        keywords=["派活", "分派", "assign", "职责", "台账", "子代理", "孙代理", "盯", "duty"],
+        parameters={
+            "agent_id": "被派代理的标识(同时作台账条目 id;同 id 重派=更新)",
+            "targets": "盯哪些源(source_id 或 locator 数组)",
+            "role": "可选。child(子代理,默认) | grandchild(孙代理)",
+            "parent_agent_id": "可选。上级代理标识(主代理/子代理)",
+            "owner": "可选。所属用户(IM 私聊身份),默认 local",
+            "monitor_id": "可选,默认 default",
+        },
+        parameter_details={"agent_id": "必填。", "targets": "必填数组。", "role": "可选。", "owner": "可选,多主代理隔离用。"},
+        parameter_schema={
+            "agent_id": {"type": "string"},
+            "targets": {"type": "array", "items": {"type": "string"}},
+            "role": {"type": "string", "enum": ["child", "grandchild"]},
+            "parent_agent_id": {"type": "string"},
+            "owner": {"type": "string"},
+            "monitor_id": {"type": "string"},
+        },
+        required_parameters=["agent_id", "targets"],
+        examples=['{"tool": "log_assign", "agent_id": "child-api1", "targets": ["http://127.0.0.1:9001/poll"], "role": "child", "parent_agent_id": "main"}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        agent_id = str(params.get("agent_id") or "").strip()
+        targets_raw = _coerce_sources(params.get("targets"))
+        if not agent_id or not targets_raw:
+            return _err(self.spec.name, "TOOL_INVALID_ARGUMENTS", "log_assign 需要 agent_id 和非空 targets。")
+        store = self.store(params)
+        targets = [resolve_source_id(store, t) for t in targets_raw]  # locator/source_id 统一成 source_id,与台账巡检一致
+        role = str(params.get("role") or "child").strip() or "child"
+        assignment = Assignment(
+            assignment_id=agent_id,
+            agent_id=agent_id,
+            targets=targets,
+            role=role,
+            parent_agent_id=str(params.get("parent_agent_id") or "").strip(),
+            owner=str(params.get("owner") or "local").strip() or "local",
+        )
+        DutyRegistry(store.root).register(assignment)
+        return _ok(self.spec.name, {"assignment_id": agent_id, "targets": targets, "role": role, "message": f"已登记:{agent_id} 盯 {len(targets)} 个源。代理请周期 log_heartbeat 写心跳。"})
+
+
+class LogHeartbeatTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_heartbeat",
+        category="log_ops",
+        effect="mutating",
+        requires_idempotency=True,
+        description=(
+            "被派的代理周期写心跳 + 进度到职责台账(我还活着、研判到哪、发现多少告警)。看门狗据心跳判断"
+            "代理是否卡死/挂了——所以值班代理要规律调用,别让心跳停。台账里没这条 assignment 则返回未登记。"
+        ),
+        use_cases=["子代理/孙代理每轮值班后写一次心跳+进度", "汇报研判进度(poll_cursor/发现告警数)"],
+        avoid_when=["登记新职责用 log_assign", "查全局用 log_duty_roster"],
+        keywords=["心跳", "heartbeat", "进度", "存活", "alive", "值班", "台账"],
+        parameters={
+            "assignment_id": "自己的职责条目 id(= 被 assign 时的 agent_id)",
+            "progress": "可选。进度对象,如 {poll_cursor, candidates_seen, alerts_found}",
+            "monitor_id": "可选,默认 default",
+        },
+        parameter_details={"assignment_id": "必填。", "progress": "可选对象,合并进台账。"},
+        parameter_schema={
+            "assignment_id": {"type": "string"},
+            "progress": {"type": "object"},
+            "monitor_id": {"type": "string"},
+        },
+        required_parameters=["assignment_id"],
+        examples=['{"tool": "log_heartbeat", "assignment_id": "child-api1", "progress": {"poll_cursor": 1200, "alerts_found": 4}}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        assignment_id = str(params.get("assignment_id") or "").strip()
+        if not assignment_id:
+            return _err(self.spec.name, "TOOL_INVALID_ARGUMENTS", "log_heartbeat 需要 assignment_id。")
+        progress = params.get("progress") if isinstance(params.get("progress"), dict) else {}
+        ok = _registry(self, params).heartbeat(assignment_id, progress)
+        if not ok:
+            return _err(self.spec.name, "TOOL_INVALID_ARGUMENTS", f"台账里没有 {assignment_id} 这条职责,请先 log_assign 登记。")
+        return _ok(self.spec.name, {"assignment_id": assignment_id, "recorded": True, "message": "心跳已记。"})
+
+
+class LogDutyRosterTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_duty_roster",
+        category="log_ops",
+        effect="read_only",
+        description=(
+            "查职责台账全局视图:总数/活跃/卡住(心跳超时)的代理,每条职责的代理+心跳年龄+进度,以及"
+            "没被任何代理认领的源(漏检)。主代理巡检多层代理值守、看门狗判断谁挂了/哪漏了据此。"
+        ),
+        use_cases=["主代理巡检:每个源都有人盯吗?有代理挂了吗?", "看门狗检测 stalled/漏检"],
+        avoid_when=["派活用 log_assign", "写心跳用 log_heartbeat"],
+        keywords=["台账", "巡检", "roster", "全局", "谁盯", "漏检", "卡住", "审计", "值守"],
+        parameters={"monitor_id": "可选,默认 default"},
+        parameter_details={"monitor_id": "可选。"},
+        parameter_schema={"monitor_id": {"type": "string"}},
+        required_parameters=[],
+        examples=['{"tool": "log_duty_roster"}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        store = self.store(params)
+        source_ids = [spec.source_id for spec in store.source_specs()]
+        return _ok(self.spec.name, DutyRegistry(store.root).roster(source_ids))
+
+
+def orchestration_tools(workspace_root: Path) -> list[BaseTool]:
+    """编排层 3 个职责台账工具实例。"""
+    return [
+        LogAssignTool(workspace_root),
+        LogHeartbeatTool(workspace_root),
+        LogDutyRosterTool(workspace_root),
+    ]
+
+
+ORCHESTRATION_TOOL_NAMES = ("log_assign", "log_heartbeat", "log_duty_roster")
+
+__all__ = ["ORCHESTRATION_TOOL_NAMES", "orchestration_tools"]

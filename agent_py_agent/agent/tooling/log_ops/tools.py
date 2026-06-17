@@ -517,6 +517,7 @@ def _preinit_api_range(store: LogOpsStore, sources: list[str], api_fetch_mode: A
 def log_ops_tools(workspace_root: Path) -> list[BaseTool]:
     """构造全部 log_ops 工具实例(6 核心 + 5 自适应层),供 registry 注册。"""
     from .tools_adaptive import adaptive_tools  # 延迟 import 破循环(tools_adaptive 顶层 import 本模块)
+    from .tools_orchestration import orchestration_tools
 
     return [
         LogMonitorStartTool(workspace_root),
@@ -526,6 +527,7 @@ def log_ops_tools(workspace_root: Path) -> list[BaseTool]:
         LogArchiveStatsTool(workspace_root),
         LogMonitorStopTool(workspace_root),
         *adaptive_tools(workspace_root),
+        *orchestration_tools(workspace_root),
     ]
 
 
@@ -541,6 +543,9 @@ LOG_OPS_TOOL_NAMES = (
     "log_profile_get",
     "log_report",
     "log_cross_query",
+    "log_assign",
+    "log_heartbeat",
+    "log_duty_roster",
 )
 
 

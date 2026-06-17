@@ -81,3 +81,39 @@ def test_roster_global_view(tmp_path: Path) -> None:
 
 def test_all_empty(tmp_path: Path) -> None:
     assert _reg(tmp_path).all() == []
+
+
+# --- 编排工具端到端(log_assign / log_heartbeat / log_duty_roster) ---
+
+import json  # noqa: E402
+
+from agent_py_agent.agent.tooling.log_ops.store import LogOpsStore, build_source_specs  # noqa: E402
+from agent_py_agent.agent.tooling.log_ops.tools_orchestration import (  # noqa: E402
+    LogAssignTool,
+    LogDutyRosterTool,
+    LogHeartbeatTool,
+)
+
+
+def test_orchestration_assign_heartbeat_roster(tmp_path: Path) -> None:
+    ws = tmp_path
+    store = LogOpsStore(ws / ".log_ops", "default")
+    specs = build_source_specs(["http://127.0.0.1:9001/poll", "http://127.0.0.1:9002/poll"])
+    store.write_config(specs, poll_interval_seconds=2.0)
+    sid0, sid1 = specs[0].source_id, specs[1].source_id
+
+    r = json.loads(
+        LogAssignTool(ws)
+        .execute({"agent_id": "child-1", "targets": ["http://127.0.0.1:9001/poll"], "role": "child", "parent_agent_id": "main", "owner": "userA"})
+        .output
+    )
+    assert r["assignment_id"] == "child-1"
+
+    hb = json.loads(LogHeartbeatTool(ws).execute({"assignment_id": "child-1", "progress": {"alerts_found": 3}}).output)
+    assert hb["recorded"] is True
+    assert LogHeartbeatTool(ws).execute({"assignment_id": "nope"}).ok is False  # 未登记的职责
+
+    roster = json.loads(LogDutyRosterTool(ws).execute({}).output)
+    assert roster["total"] == 1
+    assert sid1 in roster["coverage_gaps"]  # 9002 没人盯 = 漏检
+    assert sid0 not in roster["coverage_gaps"]  # 9001 有 child-1 盯
