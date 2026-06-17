@@ -25,6 +25,19 @@ def _registry(tool: _LogOpsTool, params: dict[str, Any]) -> DutyRegistry:
     return DutyRegistry(tool.store(params).root)
 
 
+def _correlate_lead(store: Any, ioc: str, min_sources: int) -> dict[str, Any] | None:
+    """对一个 IOC 跨所有源查,跨 ≥min_sources 源则返回攻击链 dict,否则 None。"""
+    result = query.query_multi(store, ["*"], query.QueryRequest(source="", pattern=re.escape(ioc), limit=50))
+    if int(result.get("sources_with_hits", 0)) >= min_sources:
+        return {
+            "ioc": ioc,
+            "sources_with_hits": result["sources_with_hits"],
+            "total_matched": result["total_matched"],
+            "per_source": result["per_source"],
+        }
+    return None
+
+
 class LogAssignTool(_LogOpsTool):
     spec = ToolSpec(
         name="log_assign",
@@ -244,9 +257,9 @@ class LogCorrelateTool(_LogOpsTool):
             if not ioc or ioc in seen:
                 continue
             seen.add(ioc)
-            result = query.query_multi(store, ["*"], query.QueryRequest(source="", pattern=re.escape(ioc), limit=50))
-            if int(result.get("sources_with_hits", 0)) >= min_sources:
-                chains.append({"ioc": ioc, "sources_with_hits": result["sources_with_hits"], "total_matched": result["total_matched"], "per_source": result["per_source"]})
+            chain = _correlate_lead(store, ioc, min_sources)
+            if chain is not None:
+                chains.append(chain)
         return _ok(self.spec.name, {"leads_total": len(leads), "unique_iocs": len(seen), "attack_chains": chains})
 
 
