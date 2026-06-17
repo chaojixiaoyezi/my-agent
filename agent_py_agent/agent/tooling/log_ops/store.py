@@ -196,11 +196,7 @@ class LogOpsStore:
         """追加一条分级汇报到审计流(全量留存,不在写入层抑制;抑制只体现在"是否推送用户")。"""
         self.ensure_dirs()
         blob = json.dumps(report, ensure_ascii=False, sort_keys=True) + "\n"
-        fd = os.open(self.reports_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        try:
-            os.write(fd, blob.encode("utf-8"))
-        finally:
-            os.close(fd)
+        _atomic_append(self.reports_path, blob)
 
     def read_reports(self, *, min_level: str = "") -> list[dict[str, Any]]:
         """读汇报审计流。min_level 非空时只返回 >= 该级别的(用户只看够级别的那些,不被噪声淹没)。"""
@@ -216,11 +212,7 @@ class LogOpsStore:
         """子代理把可疑 IOC 线索 append 线索池(它只盯单源不自己跨源查,跨源串联归上层)。"""
         self.ensure_dirs()
         blob = json.dumps(lead, ensure_ascii=False, sort_keys=True) + "\n"
-        fd = os.open(self.leads_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        try:
-            os.write(fd, blob.encode("utf-8"))
-        finally:
-            os.close(fd)
+        _atomic_append(self.leads_path, blob)
 
     def read_leads(self) -> list[dict[str, Any]]:
         if not self.leads_path.exists():
@@ -243,12 +235,7 @@ class LogOpsStore:
         blob = "".join(
             line.replace("\r\n", " ").replace("\n", " ").replace("\r", " ") + "\n" for line in lines
         )
-        # O_APPEND 单次 write:多写者也不会交错撕行(本场景是单 daemon 单写者,双保险)。
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        try:
-            os.write(fd, blob.encode("utf-8"))
-        finally:
-            os.close(fd)
+        _atomic_append(path, blob)  # 单 daemon 单写者,O_APPEND 双保险
         return len(lines)
 
     def count_archive_lines(self, source_id: str) -> int:
@@ -261,11 +248,7 @@ class LogOpsStore:
         path = self.candidates_path
         path.parent.mkdir(parents=True, exist_ok=True)
         blob = "".join(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n" for item in candidates)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        try:
-            os.write(fd, blob.encode("utf-8"))
-        finally:
-            os.close(fd)
+        _atomic_append(path, blob)
         return len(candidates)
 
     def count_candidates(self) -> int:
@@ -278,11 +261,7 @@ class LogOpsStore:
             return 0
         self.urgent_path.parent.mkdir(parents=True, exist_ok=True)
         blob = "".join(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n" for item in candidates)
-        fd = os.open(self.urgent_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        try:
-            os.write(fd, blob.encode("utf-8"))
-        finally:
-            os.close(fd)
+        _atomic_append(self.urgent_path, blob)
         return len(candidates)
 
     def count_urgent(self) -> int:
@@ -408,6 +387,15 @@ def level_rank(level: str) -> int:
 def _report_passes_floor(report: dict[str, Any], floor: int) -> bool:
     """汇报是否达到阈值(floor==0 表示不过滤,全要)。"""
     return floor == 0 or level_rank(str(report.get("level") or "")) >= floor
+
+
+def _atomic_append(path: Path, blob: str) -> None:
+    """O_APPEND 单次 write 原子追加(POSIX 下对 <PIPE_BUF 的写不撕行;多写者也不交错撕行)。"""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, blob.encode("utf-8"))
+    finally:
+        os.close(fd)
 
 
 def _parse_jsonl_line(line: str) -> dict[str, Any] | None:
