@@ -294,15 +294,18 @@ class LogAlertPollTool(_LogOpsTool):
         peek = _coerce_bool(params.get("peek"), default=False)
         cursor = store.read_poll_cursor()
         total = store.count_candidates()
-        batch = store.read_candidates(offset=cursor, limit=limit)
-        new_cursor = cursor + len(batch)
+        # 优先扫描窗口:在 cursor 前方更大范围里挑 novel/高危优先返回(对抗 low 误报膨胀把真威胁埋在 FIFO 队列深处——
+        # 实测 unusual-ssh-user 类宽规则误报可占候选 74%)。cursor 仍按 FIFO 推进 limit,未返回的下次再选,不漏。
+        _sev_rank = {"critical": 0, "high": 0, "medium": 1, "low": 2}
+        window = store.read_candidates(offset=cursor, limit=max(limit * 8, 500))
+        novelty.annotate_novelty(store, window, persist=False)  # 标 novel 仅供排序;未返回的不持久,下次仍可被选中研判
+        window.sort(key=lambda c: (0 if c.get("novel") else 1, _sev_rank.get(str(c.get("severity", "")).lower(), 2)))
+        batch = window[:limit]
+        new_cursor = cursor + min(limit, len(window))
         if batch and not peek:
             store.write_poll_cursor(new_cursor)
-        # 新颖性检测:标出本批"首次出现的攻击者 IOC",对抗弱模型把新攻击者当已知坍缩漏报(每条带 novel 标记)。
+        # 仅对实际返回研判的候选并入已见集(未返回的留待后续 poll 仍算 novel,不漏)。
         novelty_info = novelty.annotate_novelty(store, batch, persist=not peek)
-        # 新攻击者 + 高危排到批次前部(海量候选下重点别被埋在后面、被弱模型忽略)。cursor 仍按 FIFO 推进,不重不漏。
-        _sev_rank = {"critical": 0, "high": 0, "medium": 1, "low": 2}
-        batch.sort(key=lambda c: (0 if c.get("novel") else 1, _sev_rank.get(str(c.get("severity", "")).lower(), 1)))
         payload = {
             "ok": True,
             "monitor_id": store.monitor_id,
