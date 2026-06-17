@@ -111,6 +111,7 @@ class LogOpsStore:
         self.config_path = self.root / "config.json"
         self.daemon_path = self.root / "daemon.json"
         self.candidates_path = self.root / "candidates.jsonl"
+        self.urgent_path = self.root / "urgent.jsonl"
         self.poll_cursor_path = self.root / "poll_cursor.json"
         self.metrics_path = self.root / "metrics.json"
         self.profiles_dir = self.root / "profiles"
@@ -251,6 +252,23 @@ class LogOpsStore:
 
     def count_candidates(self) -> int:
         return _count_file_lines(self.candidates_path)
+
+    # ---- 紧急信号队列(高危候选;故障即时上报,供按需唤醒秒级拉研判,不等周期) ----
+    def append_urgent(self, candidates: list[dict[str, Any]]) -> int:
+        """高危候选 append 紧急队列(append-only,与候选队列同结构)。返回写入数。"""
+        if not candidates:
+            return 0
+        self.urgent_path.parent.mkdir(parents=True, exist_ok=True)
+        blob = "".join(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n" for item in candidates)
+        fd = os.open(self.urgent_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            os.write(fd, blob.encode("utf-8"))
+        finally:
+            os.close(fd)
+        return len(candidates)
+
+    def count_urgent(self) -> int:
+        return _count_file_lines(self.urgent_path)
 
     def read_candidates(self, *, offset: int = 0, limit: int | None = None) -> list[dict[str, Any]]:
         """从候选队列读 [offset, offset+limit) 行,解析成 dict 列表。坏行跳过。

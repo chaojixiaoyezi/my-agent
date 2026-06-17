@@ -78,6 +78,9 @@ def _collect_one_source(
     candidates = _triage_new_lines(spec, new_lines, base_line_no, active_rules)
     if candidates:
         store.append_candidates(candidates)
+        urgent = [c for c in candidates if c.get("severity") == "high"]
+        if urgent:
+            store.append_urgent(urgent)  # 高危 → 紧急队列,供按需唤醒秒级拉研判,不等周期
 
     # ③ 原子写该源断点状态(在存档之后,保证"宁可重不可丢")。
     if new_lines or result.state != prev_state:

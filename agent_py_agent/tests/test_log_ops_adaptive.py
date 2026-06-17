@@ -179,3 +179,15 @@ def test_preinit_api_range_only_api_sources(tmp_path: Path) -> None:
     api_st = store.read_state(source_id_for("api", "http://127.0.0.1:9001/poll"))
     assert api_st.get("mode") == "range" and api_st.get("cursor") == 0
     assert store.read_state(source_id_for("file", "/file.log")) == {}  # 文件源不受 range 影响
+
+
+def test_daemon_high_severity_to_urgent(tmp_path: Path) -> None:
+    # daemon 对 high severity 候选(reverse shell)写紧急队列(故障即时上报),medium(port scan)不进。
+    src = tmp_path / "s.log"
+    src.write_text("INFO ok\nreverse shell /dev/tcp/1.2.3.4/4444\nnmap port scan detected\n", encoding="utf-8")
+    store = _store(tmp_path)
+    run_collection_cycle(store, build_source_specs([str(src)]))
+    assert store.count_urgent() >= 1
+    urgent = [json.loads(line) for line in open(store.urgent_path, encoding="utf-8")]
+    assert all(u["severity"] == "high" for u in urgent)  # 紧急队列只收 high
+    assert any("reverse_shell" in u["matched_rules"] for u in urgent)
