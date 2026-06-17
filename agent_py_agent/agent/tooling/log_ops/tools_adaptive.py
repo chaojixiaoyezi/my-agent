@@ -15,6 +15,7 @@ from typing import Any
 
 from ..models import BaseTool, ToolSpec
 from . import query
+from .log_template import mine_templates
 from .store import level_rank
 from .triage import compile_profile_rules
 from .tools import (
@@ -36,8 +37,8 @@ class LogSourceSampleTool(_LogOpsTool):
         category="log_ops",
         effect="read_only",
         description=(
-            "采样某源存档的真实记录(头部 + 尾部各若干条),看清这个源的数据格式/字段/正常长相,"
-            "用于'备课'阶段分析每个源、定监控方案(profile)。只读,不影响采集与游标。"
+            "采样某源存档:返回头部+尾部真实记录,**外加 ML 模板挖掘**(把日志无监督聚类成最多 30 种模板+各占比,"
+            "变化字段用 <*> 占位)。备课时看'模板+占比'比只看几条样本更全更准:既看清格式,又看出哪种模板最多/可疑。只读。"
         ),
         use_cases=["接入新源后先采样,搞清它的格式和字段再定方案", "复核某源最近在吐什么样的数据"],
         avoid_when=["要拉初筛候选研判时用 log_alert_poll", "要按模式检索时用 log_source_query"],
@@ -61,7 +62,8 @@ class LogSourceSampleTool(_LogOpsTool):
             return _ok(self.spec.name, {"source_id": sid, "samples_head": [], "samples_tail": [], "message": "该源还没存档(daemon 未起或尚未采到);稍等几秒再采样。"})
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         tail = lines[-limit:] if len(lines) > limit else []
-        return _ok(self.spec.name, {"source_id": sid, "total_archived": len(lines), "samples_head": lines[:limit], "samples_tail": tail})
+        templates = mine_templates(lines[-5000:], max_templates=30)  # ML前期:压成模板+占比,看清格式/分布
+        return _ok(self.spec.name, {"source_id": sid, "total_archived": len(lines), "samples_head": lines[:limit], "samples_tail": tail, "templates": templates})
 
 
 class LogProfileSetTool(_LogOpsTool):
