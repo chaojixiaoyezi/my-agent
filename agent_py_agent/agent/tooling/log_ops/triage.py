@@ -69,6 +69,44 @@ def _compile_rules() -> list[TriageRule]:
 # 进程内编译一次复用(daemon 长跑,别每行重编译)。
 DEFAULT_RULES: list[TriageRule] = _compile_rules()
 
+# 正则安全(防 LLM 生成的 per-源规则 ReDoS / 坏正则把 daemon 卡死或崩):
+_MAX_PATTERN_LEN = 500
+_MATCH_INPUT_CAP = 4096  # 匹配前把超长记录截断,大幅降低灾难性回溯风险(日志行通常远短于此)
+# 嵌套量词(易 ReDoS):(x+)+ (x*)* (x{n,})+ 等,命中即拒绝该规则。
+_REDOS_RISK_RE = re.compile(r"\([^)]*[+*][^)]*\)[+*?]|\([^)]*\{\d+,\}[^)]*\)[+*?]")
+
+
+def compile_profile_rules(rule_defs: list[dict[str, Any]]) -> list[TriageRule]:
+    """把 profile 里 LLM 写的规则 dict 编译成 TriageRule,带正则安全校验。
+
+    跳过(不崩 daemon)的情形:缺 name/pattern、pattern 超长、含 ReDoS 风险嵌套量词、正则非法。
+    pattern 对整条记录(可能多行)做大小写不敏感匹配。severity 缺省 medium。
+    """
+    rules: list[TriageRule] = []
+    for item in rule_defs or []:
+        rule = _compile_one_profile_rule(item)
+        if rule is not None:
+            rules.append(rule)
+    return rules
+
+
+def _compile_one_profile_rule(item: Any) -> TriageRule | None:
+    if not isinstance(item, dict):
+        return None
+    name = str(item.get("name") or "").strip()
+    pattern = str(item.get("pattern") or "")
+    if not name or not pattern or len(pattern) > _MAX_PATTERN_LEN:
+        return None
+    if _REDOS_RISK_RE.search(pattern):
+        return None  # 危险量词嵌套,拒绝(防 ReDoS 灾难性回溯)
+    try:
+        compiled = re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        return None
+    severity = str(item.get("severity") or "medium").strip() or "medium"
+    return TriageRule(name=name, severity=severity, pattern=compiled)
+
+
 # ALERT-NNNNNN 形式的唯一告警 ID(模拟器格式),抽出来放进候选,便于"一条不丢"校验。
 _ALERT_ID_RE = re.compile(r"\bALERT-\d{4,}\b")
 
@@ -87,9 +125,10 @@ def extract_alert_id(raw_line: str) -> str:
 
 
 def match_rules(raw_line: str, rules: list[TriageRule] | None = None) -> list[TriageRule]:
-    """返回该行命中的所有规则(可叠加)。无命中返回空列表。"""
+    """返回该行命中的所有规则(可叠加)。无命中返回空列表。超长记录先截断,降 ReDoS 风险。"""
     active = rules if rules is not None else DEFAULT_RULES
-    return [rule for rule in active if rule.pattern.search(raw_line)]
+    capped = raw_line[:_MATCH_INPUT_CAP]
+    return [rule for rule in active if rule.pattern.search(capped)]
 
 
 def triage_line(

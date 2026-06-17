@@ -26,8 +26,9 @@ from pathlib import Path
 from typing import Any
 
 from .collector import collect_source
+from .splitter import build_splitter
 from .store import CollectMetrics, LogOpsStore, SourceSpec, SourceTick
-from .triage import DEFAULT_RULES, TriageRule, triage_line
+from .triage import DEFAULT_RULES, TriageRule, compile_profile_rules, triage_line
 
 _HEARTBEAT_KEY = "heartbeat_at"
 _DEFAULT_POLL_INTERVAL = 2.0
@@ -60,9 +61,13 @@ def _collect_one_source(
     rules: list[TriageRule],
     acc: CollectMetrics,
 ) -> None:
-    """采集单个源一拍:采集→落存档→初筛产候选→写断点状态→累加计数。顺序保证"宁可重不可丢"。"""
+    """采集单个源一拍:采集→落存档→初筛产候选→写断点状态→累加计数。顺序保证"宁可重不可丢"。
+
+    按该源 profile 执行:profile.splitter 决定切割方式,profile.rules 决定初筛规则(没 profile 走默认)。
+    """
     prev_state = store.read_state(spec.source_id)
-    result = collect_source(spec.kind, spec.locator, prev_state)
+    splitter, active_rules = _profile_collect_config(store.read_profile(spec.source_id), rules)
+    result = collect_source(spec.kind, spec.locator, prev_state, splitter=splitter)
     new_lines = result.new_lines
 
     # ① 先全量落存档(不丢的根本保证 —— 即便后面 triage/状态写挂了,原始行也在档里)。
@@ -70,7 +75,7 @@ def _collect_one_source(
 
     # ② 逐行确定性初筛,命中产候选。行号 = 该源存档里的累计行号(1-based,可回查)。
     base_line_no = _archive_base_line_no(store, spec.source_id, archived)
-    candidates = _triage_new_lines(spec, new_lines, base_line_no, rules)
+    candidates = _triage_new_lines(spec, new_lines, base_line_no, active_rules)
     if candidates:
         store.append_candidates(candidates)
 
@@ -110,6 +115,25 @@ def _triage_new_lines(
         if candidate is not None:
             candidates.append(candidate)
     return candidates
+
+
+def _profile_collect_config(
+    profile: dict[str, Any], default_rules: list[TriageRule]
+) -> tuple[Any, list[TriageRule]]:
+    """从该源 profile 取(切割器, 初筛规则)。
+
+    profile 有 splitter → 按它切;没有 → None(collector 用默认按行)。
+    profile 有有效 rules → 编译+安全校验后用 profile 的;没有/全被安全校验拦掉 → 用 default_rules。
+    """
+    if not profile:
+        return None, default_rules
+    splitter = build_splitter(profile.get("splitter"))
+    rule_defs = profile.get("rules")
+    if isinstance(rule_defs, list) and rule_defs:
+        compiled = compile_profile_rules(rule_defs)
+        if compiled:
+            return splitter, compiled
+    return splitter, default_rules
 
 
 class _StopFlag:

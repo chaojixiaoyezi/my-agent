@@ -188,12 +188,15 @@ class LogOpsStore:
         return self.archive_dir / f"{safe}.log"
 
     def append_archive(self, source_id: str, lines: list[str]) -> int:
-        """把若干原始日志行 append 到该源的存档文件,返回写入行数。每行确保以 \\n 结尾。"""
+        """把若干记录 append 到该源存档,返回写入记录数。每条记录压平成一行(内部换行→空格)再确保
+        \\n 结尾,使 archive 严格一行一记录(count_archive_lines 对账才准,对多行切割的记录也成立)。"""
         if not lines:
             return 0
         path = self.archive_path(source_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        blob = "".join(line if line.endswith("\n") else line + "\n" for line in lines)
+        blob = "".join(
+            line.replace("\r\n", " ").replace("\n", " ").replace("\r", " ") + "\n" for line in lines
+        )
         # O_APPEND 单次 write:多写者也不会交错撕行(本场景是单 daemon 单写者,双保险)。
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
         try:
