@@ -12,6 +12,7 @@ from __future__ import annotations
 """
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -216,12 +217,17 @@ class LogMonitorStatusTool(_LogOpsTool):
         recon = manager.reconciliation(store)
         daemon_record = store.read_daemon()
         unread = max(0, store.count_candidates() - store.read_poll_cursor())
+        started = daemon_record.get("started_at")
+        uptime = (time.time() - float(started)) if started else None
         payload = {
             "ok": True,
             "monitor_id": store.monitor_id,
             "daemon_alive": liveness["alive"],
             "daemon_pid": liveness.get("pid", 0),
             "daemon_reason": liveness.get("reason", ""),
+            # 确定的物理运行时长 —— 值守任务判断"已盯了多久"必须用它,别靠数轮次/感觉估(弱模型易高估早退)。
+            "daemon_uptime_seconds": round(uptime, 1) if uptime is not None else None,
+            "daemon_uptime_minutes": round(uptime / 60, 1) if uptime is not None else None,
             "heartbeat_age_seconds": liveness.get("heartbeat_age"),
             "cycles": daemon_record.get("cycles", 0),
             "poll_interval_seconds": daemon_record.get("poll_interval_seconds"),
