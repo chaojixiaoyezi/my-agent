@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..models import BaseTool, ToolExecutionResult, ToolSpec
-from . import manager, query
+from . import manager, novelty, query
 from .store import LogOpsStore
 from .triage import rule_catalog
 
@@ -256,8 +256,9 @@ class LogAlertPollTool(_LogOpsTool):
         requires_idempotency=True,
         description=(
             "拉取新的候选告警(确定性初筛命中的真实日志行)给你研判。拉过的会标记已读,下次只给更新的,"
-            "不重复。每条候选带:原始日志行全文、命中的规则、源标识、行号、时间戳、唯一指纹。"
-            "研判必须基于这些真实返回的证据,不要凭空判断。"
+            "不重复。每条候选带:原始日志行全文、命中规则、源标识、行号、时间戳、指纹,以及提取的攻击者 IOC 和 "
+            "novel 标记。返回里 novel_attackers 列出本批**首次出现的攻击者来源**——是新攻击实体,务必逐个研判上报,"
+            "别被'手法眼熟'骗成已知漏掉(海量候选长期值守下,新攻击者被当已知坍缩是头号漏报源)。研判须基于真实证据。"
         ),
         use_cases=[
             "周期性拉新候选告警来逐条研判是真威胁还是误报",
@@ -297,6 +298,8 @@ class LogAlertPollTool(_LogOpsTool):
         new_cursor = cursor + len(batch)
         if batch and not peek:
             store.write_poll_cursor(new_cursor)
+        # 新颖性检测:标出本批"首次出现的攻击者 IOC",对抗弱模型把新攻击者当已知坍缩漏报(每条带 novel 标记)。
+        novelty_info = novelty.annotate_novelty(store, batch, persist=not peek)
         payload = {
             "ok": True,
             "monitor_id": store.monitor_id,
@@ -306,8 +309,17 @@ class LogAlertPollTool(_LogOpsTool):
             "cursor_after": (cursor if peek else new_cursor),
             "remaining_unread": max(0, total - (cursor if peek else new_cursor)),
             "peek": peek,
+            "novel_attacker_count": novelty_info["novel_count"],
+            "novel_attackers": novelty_info["novel_attackers"][:30],
             "alerts": batch,
         }
+        if novelty_info["novel_count"]:
+            payload["novelty_alert"] = (
+                f"⚠️ 本批有 {novelty_info['novel_count']} 个首次出现的攻击者 IOC:"
+                f"{', '.join(novelty_info['novel_attackers'][:20])}。这些是新攻击来源(此前没见过),"
+                f"每条带 novel=true 的候选务必逐个研判——别因为'攻击手法眼熟'就归为已知忽略,"
+                f"新 IOC = 新攻击实体,不同攻击者各自定级上报。"
+            )
         if not batch:
             payload["message"] = "暂无新候选告警(已读到队尾)。可稍后再 poll,或先 log_monitor_status 看 daemon 是否在采。"
         return _ok(self.spec.name, payload)

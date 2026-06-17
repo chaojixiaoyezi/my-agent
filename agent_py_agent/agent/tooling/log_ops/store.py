@@ -118,6 +118,7 @@ class LogOpsStore:
         self.reports_path = self.root / "reports.jsonl"
         self.leads_path = self.root / "leads.jsonl"
         self.review_path = self.root / "review.json"  # 研判侧跨 run 游标(按需唤醒续接:研判到哪/上次研判时间)
+        self.seen_iocs_path = self.root / "seen_iocs.json"  # 已见攻击者 IOC 集(新颖性检测:对抗"新攻击者被当已知"坍缩漏报)
 
     # ---- 目录 ----
     def ensure_dirs(self) -> None:
