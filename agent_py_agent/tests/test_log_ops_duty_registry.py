@@ -157,3 +157,25 @@ def test_watchdog_tool_emits_alert(tmp_path: Path) -> None:
     res = json.loads(LogWatchdogScanTool(tmp_path).execute({}).output)  # 没派代理 → 漏检 → 不健康
     assert res["healthy"] is False
     assert any(r.get("source") == "watchdog" for r in store.read_reports(min_level="P1"))  # 自动告警
+
+
+# --- 联合查询责任(log_lead 上报线索 / log_correlate 跨源拼链) ---
+
+from agent_py_agent.agent.tooling.log_ops.tools_orchestration import LogCorrelateTool, LogLeadTool  # noqa: E402
+
+
+def test_lead_and_correlate_attack_chain(tmp_path: Path) -> None:
+    ws = tmp_path
+    store = LogOpsStore(ws / ".log_ops", "default")
+    specs = build_source_specs(["/a.log", "/b.log", "/c.log"])
+    store.write_config(specs, poll_interval_seconds=2.0)
+    store.append_archive(specs[0].source_id, ["evil 1.2.3.4 ssh brute"])  # IP 跨 a,b 两源=链
+    store.append_archive(specs[1].source_id, ["1.2.3.4 db dump"])
+    store.append_archive(specs[2].source_id, ["9.9.9.9 single probe"])  # 只在 c 一源=非链
+    LogLeadTool(ws).execute({"ioc": "1.2.3.4", "ioc_type": "ip", "source": "a"})  # 子代理上报线索
+    LogLeadTool(ws).execute({"ioc": "9.9.9.9", "source": "c"})
+    res = json.loads(LogCorrelateTool(ws).execute({}).output)  # 主代理跨源串链
+    assert res["unique_iocs"] == 2
+    chains = res["attack_chains"]
+    assert len(chains) == 1 and chains[0]["ioc"] == "1.2.3.4"  # 只有跨2源的成链
+    assert chains[0]["sources_with_hits"] == 2

@@ -547,6 +547,8 @@ LOG_OPS_TOOL_NAMES = (
     "log_heartbeat",
     "log_duty_roster",
     "log_watchdog_scan",
+    "log_lead",
+    "log_correlate",
 )
 
 

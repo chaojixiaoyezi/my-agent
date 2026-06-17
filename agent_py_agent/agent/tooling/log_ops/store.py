@@ -116,6 +116,7 @@ class LogOpsStore:
         self.metrics_path = self.root / "metrics.json"
         self.profiles_dir = self.root / "profiles"
         self.reports_path = self.root / "reports.jsonl"
+        self.leads_path = self.root / "leads.jsonl"
 
     # ---- 目录 ----
     def ensure_dirs(self) -> None:
@@ -209,6 +210,23 @@ class LogOpsStore:
         with self.reports_path.open("r", encoding="utf-8", errors="ignore") as handle:
             parsed = [_parse_jsonl_line(line) for line in handle]
         return [r for r in parsed if r is not None and _report_passes_floor(r, floor)]
+
+    # ---- 关联线索池(子代理上报可疑 IOC 线索;主代理/关联代理读它跨源拼链。联合查询责任分工) ----
+    def append_lead(self, lead: dict[str, Any]) -> None:
+        """子代理把可疑 IOC 线索 append 线索池(它只盯单源不自己跨源查,跨源串联归上层)。"""
+        self.ensure_dirs()
+        blob = json.dumps(lead, ensure_ascii=False, sort_keys=True) + "\n"
+        fd = os.open(self.leads_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            os.write(fd, blob.encode("utf-8"))
+        finally:
+            os.close(fd)
+
+    def read_leads(self) -> list[dict[str, Any]]:
+        if not self.leads_path.exists():
+            return []
+        with self.leads_path.open("r", encoding="utf-8", errors="ignore") as handle:
+            return [lead for line in handle if (lead := _parse_jsonl_line(line)) is not None]
 
     # ---- 全量存档(append-only) ----
     def archive_path(self, source_id: str) -> Path:

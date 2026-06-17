@@ -10,11 +10,12 @@ from __future__ import annotations
 审计性 + 续接的闭环:派活→心跳→看门狗据 roster 的 stalled/gaps 重派接管。复用 DutyRegistry(纯落盘)。
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
 from ..models import BaseTool, ToolSpec
-from . import watchdog
+from . import query, watchdog
 from .duty_registry import Assignment, DutyRegistry
 from .query import resolve_source_id
 from .tools import _coerce_sources, _err, _LogOpsTool, _ok
@@ -179,16 +180,88 @@ class LogWatchdogScanTool(_LogOpsTool):
         return _ok(self.spec.name, result.to_dict())
 
 
+class LogLeadTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_lead",
+        category="log_ops",
+        effect="mutating",
+        requires_idempotency=True,
+        description=(
+            "子代理发现可疑 IOC(IP/域名/文件 hash 等)上报一条线索到关联池。**子代理只盯自己单源、视野单一,发现可疑"
+            "只负责上报+丢进线索池,不自己跨源查**——跨源串联是主代理/关联代理的活(谁发现谁上报,串联归上层)。"
+        ),
+        use_cases=["子代理在自己源里发现可疑 IP/域名,上报线索等主代理跨源串联", "记录待关联的 IOC"],
+        avoid_when=["跨源拼链用 log_correlate(主代理的活)", "确认威胁直接报用户用 log_report"],
+        keywords=["线索", "lead", "IOC", "可疑", "上报", "关联池", "子代理"],
+        parameters={"ioc": "可疑指标(IP/域名/hash)", "ioc_type": "可选 ip/domain/hash/user", "source": "可选,在哪个源发现", "note": "可选上下文", "agent_id": "可选,上报代理", "monitor_id": "可选"},
+        parameter_details={"ioc": "必填。", "ioc_type": "可选。"},
+        parameter_schema={"ioc": {"type": "string"}, "ioc_type": {"type": "string"}, "source": {"type": "string"}, "note": {"type": "string"}, "agent_id": {"type": "string"}, "monitor_id": {"type": "string"}},
+        required_parameters=["ioc"],
+        examples=['{"tool": "log_lead", "ioc": "198.51.100.7", "ioc_type": "ip", "source": "api-9005", "note": "SSH爆破来源"}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        ioc = str(params.get("ioc") or "").strip()
+        if not ioc:
+            return _err(self.spec.name, "TOOL_INVALID_ARGUMENTS", "log_lead 需要 ioc。")
+        self.store(params).append_lead({
+            "ioc": ioc,
+            "ioc_type": str(params.get("ioc_type") or ""),
+            "source": str(params.get("source") or ""),
+            "note": str(params.get("note") or ""),
+            "agent_id": str(params.get("agent_id") or ""),
+        })
+        return _ok(self.spec.name, {"recorded": True, "ioc": ioc, "message": "线索已入池,主代理用 log_correlate 跨源串联。"})
+
+
+class LogCorrelateTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_correlate",
+        category="log_ops",
+        effect="read_only",
+        description=(
+            "主代理/关联代理读关联线索池,对每个可疑 IOC 跨所有源查一遍,拼出攻击链(同一 IOC 在哪几个源出现、各几次)。"
+            "**跨源串联是主代理的活**——子代理只用 log_lead 上报线索不串联。跨 ≥min_sources(默认2)源的 IOC 即一条协同攻击链。"
+        ),
+        use_cases=["主代理周期把线索池里的 IOC 跨源串成攻击链", "判断某可疑 IP 是不是协同攻击(多源都有)"],
+        avoid_when=["子代理上报单线索用 log_lead", "查单个已知 pattern 用 log_cross_query"],
+        keywords=["关联", "串联", "correlate", "攻击链", "线索池", "跨源", "主代理"],
+        parameters={"min_sources": "可选,算攻击链的最少源数,默认 2", "monitor_id": "可选"},
+        parameter_details={"min_sources": "可选整数,默认 2。"},
+        parameter_schema={"min_sources": {"type": "integer", "minimum": 1}, "monitor_id": {"type": "string"}},
+        required_parameters=[],
+        examples=['{"tool": "log_correlate"}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        store = self.store(params)
+        min_sources = max(1, int(params.get("min_sources") or 2))
+        leads = store.read_leads()
+        chains: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for lead in leads:
+            ioc = str(lead.get("ioc") or "").strip()
+            if not ioc or ioc in seen:
+                continue
+            seen.add(ioc)
+            result = query.query_multi(store, ["*"], query.QueryRequest(source="", pattern=re.escape(ioc), limit=50))
+            if int(result.get("sources_with_hits", 0)) >= min_sources:
+                chains.append({"ioc": ioc, "sources_with_hits": result["sources_with_hits"], "total_matched": result["total_matched"], "per_source": result["per_source"]})
+        return _ok(self.spec.name, {"leads_total": len(leads), "unique_iocs": len(seen), "attack_chains": chains})
+
+
 def orchestration_tools(workspace_root: Path) -> list[BaseTool]:
-    """编排层 4 个工具实例(职责台账 3 + 看门狗 1)。"""
+    """编排层 6 个工具实例(职责台账 3 + 看门狗 1 + 关联 2)。"""
     return [
         LogAssignTool(workspace_root),
         LogHeartbeatTool(workspace_root),
         LogDutyRosterTool(workspace_root),
         LogWatchdogScanTool(workspace_root),
+        LogLeadTool(workspace_root),
+        LogCorrelateTool(workspace_root),
     ]
 
 
-ORCHESTRATION_TOOL_NAMES = ("log_assign", "log_heartbeat", "log_duty_roster", "log_watchdog_scan")
+ORCHESTRATION_TOOL_NAMES = ("log_assign", "log_heartbeat", "log_duty_roster", "log_watchdog_scan", "log_lead", "log_correlate")
 
 __all__ = ["ORCHESTRATION_TOOL_NAMES", "orchestration_tools"]
