@@ -185,4 +185,56 @@ def _in_time_range(line: str, start_ts: str, end_ts: str) -> bool:
     return True
 
 
-__all__ = ["QueryRequest", "query_archive", "resolve_source_id"]
+def query_multi(store: LogOpsStore, sources: list[str], request: QueryRequest) -> dict[str, Any]:
+    """跨多源查 request.pattern(request.source 被 sources 覆盖),汇总命中供联合分析拼事件链。
+
+    sources=源标识列表;含 '*' 查所有已登记源。对每源跑 query_archive,按源分组返回有命中的源,
+    便于"同一 IP/IOC 在哪几个源出现过、各几次"这类跨源关联研判。
+    """
+    target_ids = _resolve_target_ids(store, sources)
+    if not target_ids:
+        return {"ok": False, "error": "no_sources", "message": "没有可查的源(给源列表或 '*')。"}
+    per_source: dict[str, Any] = {}
+    total = 0
+    for sid in target_ids:
+        req = QueryRequest(
+            source=sid,
+            pattern=request.pattern,
+            time_range=request.time_range,
+            limit=request.limit,
+            case_sensitive=request.case_sensitive,
+        )
+        res = query_archive(store, req)
+        matched = int(res.get("matched", 0) or 0)
+        if matched > 0:
+            per_source[sid] = {
+                "matched": matched,
+                "matches": res.get("matches", []),
+                "truncated": res.get("truncated", False),
+            }
+            total += matched
+    return {
+        "ok": True,
+        "pattern": request.pattern,
+        "sources_queried": len(target_ids),
+        "sources_with_hits": len(per_source),
+        "total_matched": total,
+        "per_source": per_source,
+    }
+
+
+def _resolve_target_ids(store: LogOpsStore, sources: list[str]) -> list[str]:
+    """把 sources(列表,可能含 '*' 或 source_id/locator)解析成 source_id 列表(去重保序)。"""
+    if any(str(item).strip() == "*" for item in sources):
+        return [spec.source_id for spec in store.source_specs()]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in sources:
+        sid = resolve_source_id(store, str(item))
+        if sid and sid not in seen:
+            seen.add(sid)
+            out.append(sid)
+    return out
+
+
+__all__ = ["QueryRequest", "query_archive", "query_multi", "resolve_source_id"]

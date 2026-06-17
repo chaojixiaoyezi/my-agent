@@ -139,18 +139,24 @@ class LogMonitorStartTool(_LogOpsTool):
         ],
         keywords=["日志", "监控", "采集", "log", "monitor", "daemon", "start", "安全", "告警", "常驻", "ingest"],
         parameters={
-            "sources": "要监控的源列表。每项是文件路径、文件夹路径或 API URL(http(s)://...?since=N 轮询)。",
+            "sources": "要监控的源列表。每项是文件路径、文件夹路径或 API URL。",
             "poll_interval_seconds": "可选。采集循环间隔秒数,默认 2 秒。",
+            "api_fetch_mode": "可选。API 采集方式:since(默认,?since=cursor)或 range(?start=N&end=M 按编号区间分页)。",
+            "report_floor": "可选。分级汇报阈值 P0/P1/P2/P3(默认 P1):低于此级别的 log_report 只记审计不推送用户。",
             "monitor_id": "可选。监控实例标识,默认 default。多套独立监控用不同 id 隔离。",
         },
         parameter_details={
-            "sources": "必填。字符串数组,如 ['/var/log/a.log','/var/log/dir','http://127.0.0.1:9001/poll']。文件夹会监控其下新文件;API 按 ?since=cursor 轮询。",
+            "sources": "必填。字符串数组,如 ['/var/log/a.log','/var/log/dir','http://127.0.0.1:9001/poll']。文件夹监控其下新文件;API 按所选模式轮询。",
             "poll_interval_seconds": "可选数字。两轮采集之间 sleep 多少秒,默认 2。源更新快可调小。",
+            "api_fetch_mode": "可选字符串 since|range,默认 since。range 适合带递增编号、要按 [start,end] 区间查的 API。",
+            "report_floor": "可选字符串 P0-P3,默认 P1。控制'什么级别才推送用户',防告警风暴。",
             "monitor_id": "可选字符串。同一 workspace 下多个独立监控用不同 id;同 id 重复 start 是幂等的。",
         },
         parameter_schema={
             "sources": {"type": "array", "items": {"type": "string"}},
             "poll_interval_seconds": {"type": "number"},
+            "api_fetch_mode": {"type": "string", "enum": ["since", "range"]},
+            "report_floor": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
             "monitor_id": {"type": "string"},
         },
         required_parameters=["sources"],
@@ -168,9 +174,12 @@ class LogMonitorStartTool(_LogOpsTool):
                 "log_monitor_start 需要非空 sources(文件路径/文件夹路径/API URL 列表)。",
             )
         interval = _coerce_float(params.get("poll_interval_seconds"), default=2.0)
-        result = manager.start_daemon(self.store(params), sources, poll_interval_seconds=interval)
+        store = self.store(params)
+        _preinit_api_range(store, sources, params.get("api_fetch_mode"))
+        result = manager.start_daemon(store, sources, poll_interval_seconds=interval)
         if not result.get("ok", False):
             return _err(self.spec.name, "LOG_OPS_DAEMON_ERROR", str(result.get("message") or "启动失败"), extra=result)
+        store.update_config_field("report_floor", _norm_report_floor(params.get("report_floor")))
         result.setdefault(
             "hint",
             "daemon 已在后台采集。用 log_monitor_status 查不丢对账,log_alert_poll 拉新候选告警来研判。",
@@ -482,8 +491,27 @@ def _time_range_from_str(text: str) -> list[Any]:
     return [chunk.strip() for chunk in text.split(",")]
 
 
+def _norm_report_floor(value: Any) -> str:
+    """规范化分级汇报阈值;非法 → P1(默认)。"""
+    floor = str(value or "P1").strip().upper()
+    return floor if floor in ("P0", "P1", "P2", "P3") else "P1"
+
+
+def _preinit_api_range(store: LogOpsStore, sources: list[str], api_fetch_mode: Any) -> None:
+    """api_fetch_mode==range 时预写 api 源的 range 断点(start_daemon 的 _preinit 不覆盖已存在 state)。"""
+    if str(api_fetch_mode or "").strip() != "range":
+        return
+    from .store import build_source_specs
+
+    for spec in build_source_specs(sources):
+        if spec.kind == "api" and not store.state_path(spec.source_id).exists():
+            store.write_state(spec.source_id, {"cursor": 0, "mode": "range", "batch": 100})
+
+
 def log_ops_tools(workspace_root: Path) -> list[BaseTool]:
-    """构造全部 6 个 log_ops 工具实例,供 registry 注册。"""
+    """构造全部 log_ops 工具实例(6 核心 + 5 自适应层),供 registry 注册。"""
+    from .tools_adaptive import adaptive_tools  # 延迟 import 破循环(tools_adaptive 顶层 import 本模块)
+
     return [
         LogMonitorStartTool(workspace_root),
         LogMonitorStatusTool(workspace_root),
@@ -491,6 +519,7 @@ def log_ops_tools(workspace_root: Path) -> list[BaseTool]:
         LogSourceQueryTool(workspace_root),
         LogArchiveStatsTool(workspace_root),
         LogMonitorStopTool(workspace_root),
+        *adaptive_tools(workspace_root),
     ]
 
 
@@ -501,6 +530,11 @@ LOG_OPS_TOOL_NAMES = (
     "log_source_query",
     "log_archive_stats",
     "log_monitor_stop",
+    "log_source_sample",
+    "log_profile_set",
+    "log_profile_get",
+    "log_report",
+    "log_cross_query",
 )
 
 

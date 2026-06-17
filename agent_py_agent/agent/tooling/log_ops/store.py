@@ -114,6 +114,7 @@ class LogOpsStore:
         self.poll_cursor_path = self.root / "poll_cursor.json"
         self.metrics_path = self.root / "metrics.json"
         self.profiles_dir = self.root / "profiles"
+        self.reports_path = self.root / "reports.jsonl"
 
     # ---- 目录 ----
     def ensure_dirs(self) -> None:
@@ -135,6 +136,12 @@ class LogOpsStore:
 
     def read_config(self) -> dict[str, Any]:
         return read_json_object(self.config_path)
+
+    def update_config_field(self, key: str, value: Any) -> None:
+        """原子 patch config 的单个字段(不动 sources;monitor 级设置如 report_floor 用)。"""
+        config = self.read_config()
+        config[str(key)] = value
+        write_json_file_atomic(self.config_path, config)
 
     def source_specs(self) -> list[SourceSpec]:
         config = self.read_config()
@@ -181,6 +188,26 @@ class LogOpsStore:
             if profile:
                 out[spec.source_id] = profile
         return out
+
+    # ---- 分级汇报(append-only 审计全量;读时按级别过滤,只把够级别的给用户) ----
+    def append_report(self, report: dict[str, Any]) -> None:
+        """追加一条分级汇报到审计流(全量留存,不在写入层抑制;抑制只体现在"是否推送用户")。"""
+        self.ensure_dirs()
+        blob = json.dumps(report, ensure_ascii=False, sort_keys=True) + "\n"
+        fd = os.open(self.reports_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            os.write(fd, blob.encode("utf-8"))
+        finally:
+            os.close(fd)
+
+    def read_reports(self, *, min_level: str = "") -> list[dict[str, Any]]:
+        """读汇报审计流。min_level 非空时只返回 >= 该级别的(用户只看够级别的那些,不被噪声淹没)。"""
+        if not self.reports_path.exists():
+            return []
+        floor = level_rank(min_level) if min_level else 0
+        with self.reports_path.open("r", encoding="utf-8", errors="ignore") as handle:
+            parsed = [_parse_jsonl_line(line) for line in handle]
+        return [r for r in parsed if r is not None and _report_passes_floor(r, floor)]
 
     # ---- 全量存档(append-only) ----
     def archive_path(self, source_id: str) -> Path:
@@ -333,6 +360,20 @@ def _coerce_per_source(per_source: Any) -> dict[str, dict[str, Any]]:
     return {str(sid): dict(entry) for sid, entry in per_source.items() if isinstance(entry, dict)}
 
 
+# 分级汇报级别:P0 最高(紧急,如攻击得手/数据外泄),P3 最低(噪声)。数字越大越该立即推送用户。
+_LEVEL_RANK = {"P0": 4, "P1": 3, "P2": 2, "P3": 1, "": 0}
+
+
+def level_rank(level: str) -> int:
+    """汇报级别 → 数字优先级(P0>P1>P2>P3);无法识别按 0。用于"只把够级别的给用户"。"""
+    return _LEVEL_RANK.get(str(level or "").strip().upper(), 0)
+
+
+def _report_passes_floor(report: dict[str, Any], floor: int) -> bool:
+    """汇报是否达到阈值(floor==0 表示不过滤,全要)。"""
+    return floor == 0 or level_rank(str(report.get("level") or "")) >= floor
+
+
 def _parse_jsonl_line(line: str) -> dict[str, Any] | None:
     """解析一行 JSONL;空行/坏行/非对象返回 None(调用方跳过)。"""
     text = line.strip()
@@ -370,6 +411,7 @@ __all__ = [
     "SourceTick",
     "build_source_specs",
     "classify_source",
+    "level_rank",
     "sanitize_monitor_id",
     "source_id_for",
 ]

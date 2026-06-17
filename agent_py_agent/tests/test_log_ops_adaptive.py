@@ -105,3 +105,77 @@ def test_compile_profile_rules_safety() -> None:
 def test_compile_profile_rules_severity_default() -> None:
     rules = compile_profile_rules([{"name": "r", "pattern": "x"}])
     assert rules[0].severity == "medium"
+
+
+# ----------------------- 块C/E/F 工具端到端 -----------------------
+
+import json  # noqa: E402
+
+from agent_py_agent.agent.tooling.log_ops.store import source_id_for  # noqa: E402
+from agent_py_agent.agent.tooling.log_ops.tools import _preinit_api_range  # noqa: E402
+from agent_py_agent.agent.tooling.log_ops.tools_adaptive import (  # noqa: E402
+    LogCrossQueryTool,
+    LogProfileGetTool,
+    LogProfileSetTool,
+    LogReportTool,
+)
+
+
+def _seed_config(tmp_path: Path, sources: list[str]):
+    store = _store(tmp_path)
+    specs = build_source_specs(sources)
+    store.write_config(specs, poll_interval_seconds=2.0)
+    return store, specs
+
+
+def test_tool_profile_set_get_roundtrip(tmp_path: Path) -> None:
+    _seed_config(tmp_path, ["http://127.0.0.1:9001/poll"])
+    out = json.loads(
+        LogProfileSetTool(tmp_path).execute(
+            {
+                "source": "http://127.0.0.1:9001/poll",
+                "monitor_id": "m",
+                "rules": [{"name": "r", "severity": "high", "pattern": "attack"}],
+                "triage_hint": "看 attack",
+            }
+        ).output
+    )
+    assert out["valid_rules"] == 1 and out["version"] == 1
+    prof = json.loads(
+        LogProfileGetTool(tmp_path).execute({"source": "http://127.0.0.1:9001/poll", "monitor_id": "m"}).output
+    )["profile"]
+    assert prof["triage_hint"] == "看 attack"
+    assert prof["rules"][0]["name"] == "r"
+
+
+def test_tool_report_grading_suppresses_low_level(tmp_path: Path) -> None:
+    store, _ = _seed_config(tmp_path, ["/x.log"])
+    store.update_config_field("report_floor", "P1")
+    tool = LogReportTool(tmp_path)
+    r0 = json.loads(tool.execute({"level": "P0", "title": "urgent", "monitor_id": "m"}).output)
+    assert r0["pushed"] is True
+    r2 = json.loads(tool.execute({"level": "P2", "title": "minor", "monitor_id": "m"}).output)
+    assert r2["pushed"] is False  # P2 < 阈值 P1 → 不推送
+    # 用户按阈值只看到够级别的(P0),P2 噪声被抑制。
+    assert [r["level"] for r in store.read_reports(min_level="P1")] == ["P0"]
+    # 但审计流全量留存(P0+P2 都在)。
+    assert len(store.read_reports()) == 2
+
+
+def test_tool_cross_query_correlates_across_sources(tmp_path: Path) -> None:
+    store, specs = _seed_config(tmp_path, ["/a.log", "/b.log"])
+    store.append_archive(specs[0].source_id, ["evil 1.2.3.4 here", "normal line"])
+    store.append_archive(specs[1].source_id, ["also 1.2.3.4 there"])
+    res = json.loads(
+        LogCrossQueryTool(tmp_path).execute({"sources": ["*"], "pattern": "1\\.2\\.3\\.4", "monitor_id": "m"}).output
+    )
+    assert res["sources_with_hits"] == 2  # 同一 IP 跨两源出现
+    assert res["total_matched"] == 2
+
+
+def test_preinit_api_range_only_api_sources(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _preinit_api_range(store, ["http://127.0.0.1:9001/poll", "/file.log"], "range")
+    api_st = store.read_state(source_id_for("api", "http://127.0.0.1:9001/poll"))
+    assert api_st.get("mode") == "range" and api_st.get("cursor") == 0
+    assert store.read_state(source_id_for("file", "/file.log")) == {}  # 文件源不受 range 影响
