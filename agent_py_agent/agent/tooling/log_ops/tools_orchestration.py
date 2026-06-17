@@ -38,6 +38,27 @@ def _correlate_lead(store: Any, ioc: str, min_sources: int) -> dict[str, Any] | 
     return None
 
 
+def _quota_denied(name: str, registry: DutyRegistry, params: dict[str, Any]) -> Any | None:
+    """新派活时查资源配额,超额返回 _ok(assigned False) 拒派;更新已有/未设配额返回 None 放行。"""
+    agent_id = str(params.get("agent_id") or "").strip()
+    owner = str(params.get("owner") or "local").strip() or "local"
+    max_per_owner = max(0, int(params.get("max_per_owner") or 0))
+    max_global = max(0, int(params.get("max_global") or 0))
+    if registry.get(agent_id) is not None or not (max_per_owner or max_global):
+        return None  # 重派已有(幂等)不占新额度;没设配额=不限
+    q = registry.quota_check(owner, max_per_owner=max_per_owner, max_global=max_global)
+    if q["allowed"]:
+        return None
+    return _ok(name, {
+        "assigned": False,
+        "quota_exceeded": True,
+        "reason": q["reason"],
+        "global_active": q["global_active"],
+        "owner_active": q["owner_active"],
+        "message": f"资源配额超额({q['reason']}),未派。全局活跃 {q['global_active']}/{max_global or '∞'}、owner {owner} 活跃 {q['owner_active']}/{max_per_owner or '∞'}。等闲代理 done 或调高配额再派。",
+    })
+
+
 class LogAssignTool(_LogOpsTool):
     spec = ToolSpec(
         name="log_assign",
@@ -57,15 +78,19 @@ class LogAssignTool(_LogOpsTool):
             "role": "可选。child(子代理,默认) | grandchild(孙代理)",
             "parent_agent_id": "可选。上级代理标识(主代理/子代理)",
             "owner": "可选。所属用户(IM 私聊身份),默认 local",
+            "max_per_owner": "可选。该 owner 活跃职责上限(0=不限),超额不派(多主代理别挤垮机器)",
+            "max_global": "可选。全局活跃职责上限(0=不限),跨所有 owner",
             "monitor_id": "可选,默认 default",
         },
-        parameter_details={"agent_id": "必填。", "targets": "必填数组。", "role": "可选。", "owner": "可选,多主代理隔离用。"},
+        parameter_details={"agent_id": "必填。", "targets": "必填数组。", "role": "可选。", "owner": "可选,多主代理隔离用。", "max_per_owner": "可选资源配额。"},
         parameter_schema={
             "agent_id": {"type": "string"},
             "targets": {"type": "array", "items": {"type": "string"}},
             "role": {"type": "string", "enum": ["child", "grandchild"]},
             "parent_agent_id": {"type": "string"},
             "owner": {"type": "string"},
+            "max_per_owner": {"type": "integer", "minimum": 0},
+            "max_global": {"type": "integer", "minimum": 0},
             "monitor_id": {"type": "string"},
         },
         required_parameters=["agent_id", "targets"],
@@ -78,18 +103,22 @@ class LogAssignTool(_LogOpsTool):
         if not agent_id or not targets_raw:
             return _err(self.spec.name, "TOOL_INVALID_ARGUMENTS", "log_assign 需要 agent_id 和非空 targets。")
         store = self.store(params)
+        registry = DutyRegistry(store.root)
+        owner = str(params.get("owner") or "local").strip() or "local"
+        denied = _quota_denied(self.spec.name, registry, params)
+        if denied is not None:
+            return denied  # 资源配额超额:不派,返回 assigned False 让上层排队
         targets = [resolve_source_id(store, t) for t in targets_raw]  # locator/source_id 统一成 source_id,与台账巡检一致
         role = str(params.get("role") or "child").strip() or "child"
-        assignment = Assignment(
+        registry.register(Assignment(
             assignment_id=agent_id,
             agent_id=agent_id,
             targets=targets,
             role=role,
             parent_agent_id=str(params.get("parent_agent_id") or "").strip(),
-            owner=str(params.get("owner") or "local").strip() or "local",
-        )
-        DutyRegistry(store.root).register(assignment)
-        return _ok(self.spec.name, {"assignment_id": agent_id, "targets": targets, "role": role, "message": f"已登记:{agent_id} 盯 {len(targets)} 个源。代理请周期 log_heartbeat 写心跳。"})
+            owner=owner,
+        ))
+        return _ok(self.spec.name, {"assigned": True, "assignment_id": agent_id, "targets": targets, "role": role, "owner": owner, "message": f"已登记:{agent_id} 盯 {len(targets)} 个源。代理请周期 log_heartbeat 写心跳。"})
 
 
 class LogHeartbeatTool(_LogOpsTool):
@@ -143,17 +172,18 @@ class LogDutyRosterTool(_LogOpsTool):
         use_cases=["主代理巡检:每个源都有人盯吗?有代理挂了吗?", "看门狗检测 stalled/漏检"],
         avoid_when=["派活用 log_assign", "写心跳用 log_heartbeat"],
         keywords=["台账", "巡检", "roster", "全局", "谁盯", "漏检", "卡住", "审计", "值守"],
-        parameters={"monitor_id": "可选,默认 default"},
-        parameter_details={"monitor_id": "可选。"},
-        parameter_schema={"monitor_id": {"type": "string"}},
+        parameters={"owner": "可选。只看该主代理(IM 用户)的职责(多主代理隔离);空=全局", "monitor_id": "可选,默认 default"},
+        parameter_details={"owner": "可选,多主代理隔离用。", "monitor_id": "可选。"},
+        parameter_schema={"owner": {"type": "string"}, "monitor_id": {"type": "string"}},
         required_parameters=[],
-        examples=['{"tool": "log_duty_roster"}'],
+        examples=['{"tool": "log_duty_roster"}', '{"tool": "log_duty_roster", "owner": "userA"}'],
     )
 
     def _run(self, params: dict[str, Any]) -> Any:
         store = self.store(params)
         source_ids = [spec.source_id for spec in store.source_specs()]
-        return _ok(self.spec.name, DutyRegistry(store.root).roster(source_ids))
+        owner = str(params.get("owner") or "").strip()
+        return _ok(self.spec.name, DutyRegistry(store.root).roster(source_ids, owner=owner))
 
 
 class LogWatchdogScanTool(_LogOpsTool):
@@ -170,25 +200,28 @@ class LogWatchdogScanTool(_LogOpsTool):
         use_cases=["定时巡检多层代理值守健康度", "发现挂掉的代理并拿到重派动作(含断点续接依据)"],
         avoid_when=["只看不处理用 log_duty_roster(只读,不标记不告警)"],
         keywords=["看门狗", "watchdog", "巡检", "重派", "续接", "挂了", "漏检", "健康", "故障", "接管"],
-        parameters={"monitor_id": "可选,默认 default"},
-        parameter_details={"monitor_id": "可选。"},
-        parameter_schema={"monitor_id": {"type": "string"}},
+        parameters={"owner": "可选。只扫该主代理(IM 用户)的职责(多主代理隔离:A 的看门狗只重派 A);空=全局", "monitor_id": "可选,默认 default"},
+        parameter_details={"owner": "可选,多主代理隔离用。", "monitor_id": "可选。"},
+        parameter_schema={"owner": {"type": "string"}, "monitor_id": {"type": "string"}},
         required_parameters=[],
-        examples=['{"tool": "log_watchdog_scan"}'],
+        examples=['{"tool": "log_watchdog_scan"}', '{"tool": "log_watchdog_scan", "owner": "userA"}'],
     )
 
     def _run(self, params: dict[str, Any]) -> Any:
         store = self.store(params)
-        result = watchdog.scan(store)
+        owner = str(params.get("owner") or "").strip()
+        result = watchdog.scan(store, owner=owner)
         if not result.healthy:
+            scope = f"[{owner}] " if owner else ""
             store.append_report({
                 "level": "P1",
-                "title": f"看门狗:{len(result.stalled)} 个代理心跳停、{len(result.coverage_gaps)} 个源漏检",
+                "title": f"看门狗{scope}:{len(result.stalled)} 个代理心跳停、{len(result.coverage_gaps)} 个源漏检",
                 "detail": f"stalled={result.stalled} gaps={result.coverage_gaps}",
                 "evidence": [],
                 "sources": result.coverage_gaps,
                 "pushed": True,
                 "source": "watchdog",
+                "owner": owner,
             })
         return _ok(self.spec.name, result.to_dict())
 

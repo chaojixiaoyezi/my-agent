@@ -35,12 +35,13 @@ class WatchdogResult:
         }
 
 
-def scan(store: LogOpsStore, *, now: float | None = None, stall_seconds: float = _DEFAULT_STALL_SECONDS) -> WatchdogResult:
-    """扫一遍台账:超时代理标记 stalled + 产出重派动作(带断点续接依据),漏检源产出补派动作。"""
+def scan(store: LogOpsStore, *, now: float | None = None, stall_seconds: float = _DEFAULT_STALL_SECONDS, owner: str = "") -> WatchdogResult:
+    """扫一遍台账:超时代理标记 stalled + 产出重派动作(带断点续接依据),漏检源产出补派动作。
+    owner 非空时只扫该主代理的职责(多主代理隔离:A 的看门狗只重派 A 挂掉的代理,不碰 B/C/D)。"""
     registry = DutyRegistry(store.root)
     source_ids = [spec.source_id for spec in store.source_specs()]
-    stalled = registry.stalled(now=now, stall_seconds=stall_seconds)
-    gaps = registry.coverage_gaps(source_ids)
+    stalled = registry.stalled(now=now, stall_seconds=stall_seconds, owner=owner)
+    gaps = registry.coverage_gaps(source_ids, owner=owner)
     actions: list[dict[str, Any]] = []
     for assignment in stalled:
         registry.mark_stalled(assignment.assignment_id)

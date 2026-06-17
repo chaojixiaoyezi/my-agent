@@ -179,3 +179,63 @@ def test_lead_and_correlate_attack_chain(tmp_path: Path) -> None:
     chains = res["attack_chains"]
     assert len(chains) == 1 and chains[0]["ioc"] == "1.2.3.4"  # 只有跨2源的成链
     assert chains[0]["sources_with_hits"] == 2
+
+
+# --- 多主代理隔离(owner 维度过滤 + 资源配额) ---
+
+from agent_py_agent.agent.tooling.log_ops.tools_orchestration import LogAssignTool  # noqa: E402
+
+
+def test_owner_isolation_in_registry(tmp_path: Path) -> None:
+    """A/B 两主代理职责同台账,owner 维度过滤:A 的视角只看 A 的(stalled/gaps/roster 都隔离)。"""
+    reg = _reg(tmp_path)
+    reg.register(Assignment("a1", "c1", ["api-9001"], owner="A"), now=100.0)  # A 心跳停在100
+    reg.register(Assignment("b1", "c2", ["api-9002"], owner="B"), now=100.0)
+    reg.heartbeat("b1", {}, now=1000.0)  # B 心跳新
+    assert [a.assignment_id for a in reg.stalled(now=1000.0, owner="A")] == ["a1"]  # A 超时
+    assert reg.stalled(now=1000.0, owner="B") == []  # B 不算
+    assert reg.coverage_gaps(["api-9001", "api-9002"], owner="A") == ["api-9002"]  # A 只盯9001
+    roster_a = reg.roster(["api-9001", "api-9002"], now=1000.0, owner="A")
+    assert roster_a["total"] == 1 and [e["assignment_id"] for e in roster_a["assignments"]] == ["a1"]
+
+
+def test_quota_check(tmp_path: Path) -> None:
+    """资源配额:单 owner / 全局活跃职责上限,0=不限。"""
+    reg = _reg(tmp_path)
+    reg.register(Assignment("a1", "c1", ["s1"], owner="A"), now=100.0)
+    reg.register(Assignment("a2", "c2", ["s2"], owner="A"), now=100.0)
+    reg.register(Assignment("b1", "c3", ["s3"], owner="B"), now=100.0)
+    assert reg.quota_check("A", max_per_owner=2, max_global=10)["reason"] == "owner_quota_exceeded"
+    assert reg.quota_check("A", max_per_owner=5, max_global=3)["reason"] == "global_quota_exceeded"
+    assert reg.quota_check("A", max_per_owner=5, max_global=10)["allowed"] is True
+    assert reg.quota_check("A")["allowed"] is True  # 0=不限
+
+
+def test_assign_tool_quota_blocks_new_but_allows_update(tmp_path: Path) -> None:
+    """LogAssignTool 配额超额拒派新代理(assigned False),但重派已有(幂等更新)不占新额度。"""
+    ws = tmp_path
+    store = LogOpsStore(ws / ".log_ops", "default")
+    store.write_config(build_source_specs(["/s1.log", "/s2.log", "/s3.log"]), poll_interval_seconds=2.0)
+    r1 = json.loads(LogAssignTool(ws).execute({"agent_id": "c1", "targets": ["/s1.log"], "owner": "A", "max_per_owner": 1}).output)
+    assert r1["assigned"] is True
+    r2 = json.loads(LogAssignTool(ws).execute({"agent_id": "c2", "targets": ["/s2.log"], "owner": "A", "max_per_owner": 1}).output)
+    assert r2["assigned"] is False and r2["quota_exceeded"] is True  # 同 owner 第2个新代理超额
+    r3 = json.loads(LogAssignTool(ws).execute({"agent_id": "c1", "targets": ["/s1.log", "/s3.log"], "owner": "A", "max_per_owner": 1}).output)
+    assert r3["assigned"] is True  # 重派 c1 是更新,不受配额限
+    r4 = json.loads(LogAssignTool(ws).execute({"agent_id": "d1", "targets": ["/s2.log"], "owner": "B", "max_per_owner": 1}).output)
+    assert r4["assigned"] is True  # 不同 owner 不受 A 占用影响
+
+
+def test_watchdog_owner_scoped(tmp_path: Path) -> None:
+    """看门狗 owner 维度:A 的看门狗只标 A 挂掉的代理,不碰 B(多主代理互不干扰)。"""
+    store = LogOpsStore(tmp_path / ".log_ops", "default")
+    specs = build_source_specs(["http://127.0.0.1:9001/poll", "http://127.0.0.1:9002/poll"])
+    store.write_config(specs, poll_interval_seconds=2.0)
+    sid0, sid1 = specs[0].source_id, specs[1].source_id
+    reg = DutyRegistry(store.root)
+    reg.register(Assignment("a1", "a1", [sid0], owner="A"), now=100.0)  # A 心跳停
+    reg.register(Assignment("b1", "b1", [sid1], owner="B"), now=1000.0)  # B 心跳新
+    res = watchdog.scan(store, now=1000.0, stall_seconds=180.0, owner="A")
+    assert res.stalled == ["a1"]  # 只标 A 的
+    assert reg.get("b1").status == "active"  # B 没被碰
+    assert sid1 in res.coverage_gaps  # A 视角:sid1 非 A 覆盖 = A 的 gap

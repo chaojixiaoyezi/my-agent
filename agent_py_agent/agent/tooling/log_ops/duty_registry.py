@@ -115,33 +115,57 @@ class DutyRegistry:
                 out.append(Assignment.from_dict(data))
         return out
 
-    def stalled(self, *, now: float | None = None, stall_seconds: float = _STALL_SECONDS) -> list[Assignment]:
-        """心跳超时(挂了/卡住)的活跃职责 —— 看门狗据此重派接管。"""
+    def _by_owner(self, owner: str = "") -> list[Assignment]:
+        """全部职责;owner 非空时只取该主代理的(多主代理隔离:A 的看门狗/台账只管 A,不串 B/C/D)。"""
+        items = self.all()
+        return items if not owner else [a for a in items if a.owner == owner]
+
+    def stalled(self, *, now: float | None = None, stall_seconds: float = _STALL_SECONDS, owner: str = "") -> list[Assignment]:
+        """心跳超时(挂了/卡住)的活跃职责 —— 看门狗据此重派接管。owner 非空时只看该主代理(隔离)。"""
         current = time.time() if now is None else now
         return [
             a
-            for a in self.all()
+            for a in self._by_owner(owner)
             if a.status == "active" and a.heartbeat_at and (current - a.heartbeat_at) >= stall_seconds
         ]
 
-    def coverage_gaps(self, all_source_ids: list[str]) -> list[str]:
-        """没被任何 active 职责覆盖的源(漏检)—— 主代理据此补派。"""
+    def coverage_gaps(self, all_source_ids: list[str], *, owner: str = "") -> list[str]:
+        """没被任何 active 职责覆盖的源(漏检)—— 主代理据此补派。owner 非空时只看该主代理的覆盖。"""
         covered: set[str] = set()
-        for a in self.all():
+        for a in self._by_owner(owner):
             if a.status != "done":
                 covered.update(a.targets)
         return [sid for sid in all_source_ids if sid not in covered]
 
-    def roster(self, all_source_ids: list[str], *, now: float | None = None) -> dict[str, Any]:
-        """全局审计视图:总数/活跃/卡住/漏检源,每条职责的代理+心跳年龄+进度。一眼看清谁盯啥、哪挂了、哪漏了。"""
+    def load(self, owner: str = "") -> dict[str, int]:
+        """某 owner(空=全局)当前负载:活跃/卡住/总数。资源配额(多主代理别挤垮机器)据此判超额。"""
+        items = self._by_owner(owner)
+        return {
+            "total": len(items),
+            "active": sum(1 for a in items if a.status == "active"),
+            "stalled": sum(1 for a in items if a.status == "stalled"),
+        }
+
+    def quota_check(self, owner: str, *, max_per_owner: int = 0, max_global: int = 0) -> dict[str, Any]:
+        """派新活前查配额:全局/单 owner 活跃职责数是否还有额度(0=不限)。超额→allowed False,调用方排队/拒。"""
+        glob, own = self.load(), self.load(owner)
+        info = {"global_active": glob["active"], "owner_active": own["active"], "max_global": max_global, "max_per_owner": max_per_owner}
+        if max_global > 0 and glob["active"] >= max_global:
+            return {"allowed": False, "reason": "global_quota_exceeded", **info}
+        if max_per_owner > 0 and own["active"] >= max_per_owner:
+            return {"allowed": False, "reason": "owner_quota_exceeded", **info}
+        return {"allowed": True, **info}
+
+    def roster(self, all_source_ids: list[str], *, now: float | None = None, owner: str = "") -> dict[str, Any]:
+        """全局审计视图:总数/活跃/卡住/漏检源,每条职责的代理+心跳年龄+进度。owner 非空时只看该主代理(隔离)。"""
         current = time.time() if now is None else now
-        items = self.all()
-        stalled_ids = {a.assignment_id for a in self.stalled(now=current)}
+        items = self._by_owner(owner)
+        stalled_ids = {a.assignment_id for a in self.stalled(now=current, owner=owner)}
         return {
             "total": len(items),
             "active": sum(1 for a in items if a.status == "active" and a.assignment_id not in stalled_ids),
             "stalled": sorted(stalled_ids),
-            "coverage_gaps": self.coverage_gaps(all_source_ids),
+            "coverage_gaps": self.coverage_gaps(all_source_ids, owner=owner),
             "assignments": [
                 {
                     "assignment_id": a.assignment_id,
