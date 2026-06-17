@@ -63,3 +63,16 @@ def test_alert_poll_flags_novel_attackers(tmp_path: Path) -> None:
     assert "45.137.21.9" in res["novel_attackers"]
     assert "novelty_alert" in res  # 有新攻击者 → 高亮提示
     assert res["alerts"][0]["novel"] is True and res["alerts"][1]["novel"] is False
+
+
+def test_alert_poll_prioritizes_novel_high(tmp_path: Path) -> None:
+    """海量候选下,novel 攻击者 + 高危排到批次最前,不被普通候选埋(cursor 仍 FIFO 不重不漏)。"""
+    ws = tmp_path
+    store = _store(ws)
+    store.append_candidates([
+        {"raw_line": "normal from 10.0.0.5", "severity": "low", "matched_rules": []},
+        {"raw_line": "ssh brute from 45.137.21.9", "severity": "high", "matched_rules": ["x"]},
+        {"raw_line": "internal from 10.0.0.6", "severity": "medium", "matched_rules": []},
+    ])
+    res = json.loads(LogAlertPollTool(ws).execute({"monitor_id": "m"}).output)
+    assert res["alerts"][0]["novel"] is True and "45.137.21.9" in res["alerts"][0]["raw_line"]  # novel高危排第一

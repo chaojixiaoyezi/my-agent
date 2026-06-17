@@ -300,6 +300,9 @@ class LogAlertPollTool(_LogOpsTool):
             store.write_poll_cursor(new_cursor)
         # 新颖性检测:标出本批"首次出现的攻击者 IOC",对抗弱模型把新攻击者当已知坍缩漏报(每条带 novel 标记)。
         novelty_info = novelty.annotate_novelty(store, batch, persist=not peek)
+        # 新攻击者 + 高危排到批次前部(海量候选下重点别被埋在后面、被弱模型忽略)。cursor 仍按 FIFO 推进,不重不漏。
+        _sev_rank = {"critical": 0, "high": 0, "medium": 1, "low": 2}
+        batch.sort(key=lambda c: (0 if c.get("novel") else 1, _sev_rank.get(str(c.get("severity", "")).lower(), 1)))
         payload = {
             "ok": True,
             "monitor_id": store.monitor_id,
