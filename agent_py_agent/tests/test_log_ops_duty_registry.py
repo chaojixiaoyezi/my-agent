@@ -117,3 +117,43 @@ def test_orchestration_assign_heartbeat_roster(tmp_path: Path) -> None:
     assert roster["total"] == 1
     assert sid1 in roster["coverage_gaps"]  # 9002 没人盯 = 漏检
     assert sid0 not in roster["coverage_gaps"]  # 9001 有 child-1 盯
+
+
+# --- 看门狗(扫台账→标记挂了的+重派/补派动作) ---
+
+from agent_py_agent.agent.tooling.log_ops import watchdog  # noqa: E402
+from agent_py_agent.agent.tooling.log_ops.tools_orchestration import LogWatchdogScanTool  # noqa: E402
+
+
+def test_watchdog_scan_stalled_and_gaps(tmp_path: Path) -> None:
+    store = LogOpsStore(tmp_path / ".log_ops", "default")
+    specs = build_source_specs(["http://127.0.0.1:9001/poll", "http://127.0.0.1:9002/poll"])
+    store.write_config(specs, poll_interval_seconds=2.0)
+    sid0, sid1 = specs[0].source_id, specs[1].source_id
+    reg = DutyRegistry(store.root)
+    reg.register(Assignment("child-1", "child-1", [sid0], progress={"poll_cursor": 800}), now=100.0)  # 心跳停100
+    result = watchdog.scan(store, now=1000.0, stall_seconds=180.0)
+    assert not result.healthy
+    assert result.stalled == ["child-1"]
+    assert result.coverage_gaps == [sid1]  # sid1 没人盯
+    reassign = next(a for a in result.actions if a["action"] == "reassign")
+    assert reassign["agent_id"] == "child-1" and reassign["resume_from"] == {"poll_cursor": 800}  # 断点续接依据
+    assert any(a["action"] == "assign_new" and a["target"] == sid1 for a in result.actions)
+    assert reg.get("child-1").status == "stalled"  # 被标记
+
+
+def test_watchdog_healthy(tmp_path: Path) -> None:
+    store = LogOpsStore(tmp_path / ".log_ops", "default")
+    specs = build_source_specs(["http://127.0.0.1:9001/poll"])
+    store.write_config(specs, poll_interval_seconds=2.0)
+    DutyRegistry(store.root).register(Assignment("c1", "c1", [specs[0].source_id]), now=1000.0)
+    result = watchdog.scan(store, now=1000.0, stall_seconds=180.0)  # 心跳刚写,全覆盖
+    assert result.healthy and result.actions == []
+
+
+def test_watchdog_tool_emits_alert(tmp_path: Path) -> None:
+    store = LogOpsStore(tmp_path / ".log_ops", "default")
+    store.write_config(build_source_specs(["http://127.0.0.1:9001/poll"]), poll_interval_seconds=2.0)
+    res = json.loads(LogWatchdogScanTool(tmp_path).execute({}).output)  # 没派代理 → 漏检 → 不健康
+    assert res["healthy"] is False
+    assert any(r.get("source") == "watchdog" for r in store.read_reports(min_level="P1"))  # 自动告警

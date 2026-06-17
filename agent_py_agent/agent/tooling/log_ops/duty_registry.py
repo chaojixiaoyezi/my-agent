@@ -91,6 +91,16 @@ class DutyRegistry:
         write_json_file_atomic(self._path(assignment_id), record.to_dict())
         return True
 
+    def mark_stalled(self, assignment_id: str) -> bool:
+        """把某职责标记为 stalled(看门狗发现心跳超时时调;不动心跳,等代理回来 heartbeat 自动复活)。"""
+        existing = read_json_object(self._path(assignment_id))
+        if not existing:
+            return False
+        record = Assignment.from_dict(existing)
+        record.status = "stalled"
+        write_json_file_atomic(self._path(assignment_id), record.to_dict())
+        return True
+
     def get(self, assignment_id: str) -> Assignment | None:
         data = read_json_object(self._path(assignment_id))
         return Assignment.from_dict(data) if data else None

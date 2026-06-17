@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..models import BaseTool, ToolSpec
+from . import watchdog
 from .duty_registry import Assignment, DutyRegistry
 from .query import resolve_source_id
 from .tools import _coerce_sources, _err, _LogOpsTool, _ok
@@ -141,15 +142,53 @@ class LogDutyRosterTool(_LogOpsTool):
         return _ok(self.spec.name, DutyRegistry(store.root).roster(source_ids))
 
 
+class LogWatchdogScanTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_watchdog_scan",
+        category="log_ops",
+        effect="mutating",
+        requires_idempotency=True,
+        description=(
+            "看门狗扫一遍职责台账:心跳停的代理(挂了)标记 stalled 并产出'重派接管(带断点 resume_from 续接)'动作,"
+            "没人盯的源产出'补派'动作;不健康时自动记一条 P1 告警推送你。主代理巡检或定时调,据返回 actions 重派/"
+            "补派,保证几个月值守不断档——挂了立即有人接、漏了立即补,不靠 LLM 死盯。"
+        ),
+        use_cases=["定时巡检多层代理值守健康度", "发现挂掉的代理并拿到重派动作(含断点续接依据)"],
+        avoid_when=["只看不处理用 log_duty_roster(只读,不标记不告警)"],
+        keywords=["看门狗", "watchdog", "巡检", "重派", "续接", "挂了", "漏检", "健康", "故障", "接管"],
+        parameters={"monitor_id": "可选,默认 default"},
+        parameter_details={"monitor_id": "可选。"},
+        parameter_schema={"monitor_id": {"type": "string"}},
+        required_parameters=[],
+        examples=['{"tool": "log_watchdog_scan"}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        store = self.store(params)
+        result = watchdog.scan(store)
+        if not result.healthy:
+            store.append_report({
+                "level": "P1",
+                "title": f"看门狗:{len(result.stalled)} 个代理心跳停、{len(result.coverage_gaps)} 个源漏检",
+                "detail": f"stalled={result.stalled} gaps={result.coverage_gaps}",
+                "evidence": [],
+                "sources": result.coverage_gaps,
+                "pushed": True,
+                "source": "watchdog",
+            })
+        return _ok(self.spec.name, result.to_dict())
+
+
 def orchestration_tools(workspace_root: Path) -> list[BaseTool]:
-    """编排层 3 个职责台账工具实例。"""
+    """编排层 4 个工具实例(职责台账 3 + 看门狗 1)。"""
     return [
         LogAssignTool(workspace_root),
         LogHeartbeatTool(workspace_root),
         LogDutyRosterTool(workspace_root),
+        LogWatchdogScanTool(workspace_root),
     ]
 
 
-ORCHESTRATION_TOOL_NAMES = ("log_assign", "log_heartbeat", "log_duty_roster")
+ORCHESTRATION_TOOL_NAMES = ("log_assign", "log_heartbeat", "log_duty_roster", "log_watchdog_scan")
 
 __all__ = ["ORCHESTRATION_TOOL_NAMES", "orchestration_tools"]
