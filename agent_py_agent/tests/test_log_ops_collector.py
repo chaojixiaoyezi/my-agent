@@ -288,3 +288,75 @@ def test_collect_source_dispatch_unknown_kind(tmp_path: Path) -> None:
     res = collect_source("weird", "x", {"k": 1})
     assert res.new_lines == []
     assert "unknown_source_kind" in res.error
+
+
+# ----------------------- API range 模式(按编号区间 ?start&end) -----------------------
+
+
+class _RangeHandler(BaseHTTPRequestHandler):
+    """range 协议:GET ?start=N&end=M → {"lines": 编号在 [N,M] 的记录, "latest": 当前最大编号}。"""
+
+    records: list[str] = []
+
+    def do_GET(self) -> None:  # noqa: N802
+        params = parse_qs(urlparse(self.path).query)
+        start = int((params.get("start", ["1"])[0]) or 1)
+        end = int((params.get("end", ["0"])[0]) or 0)
+        all_rec = type(self).records
+        latest = len(all_rec)
+        lines = all_rec[start - 1 : min(end, latest)] if start <= latest else []
+        body = json.dumps({"lines": lines, "latest": latest}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args) -> None:
+        return
+
+
+@pytest.fixture
+def range_server():
+    handler = type("RH", (_RangeHandler,), {"records": []})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    try:
+        yield f"http://{host}:{port}/poll", handler
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_api_range_catches_up_no_loss(range_server) -> None:
+    url, handler = range_server
+    handler.records = [f"r{i}" for i in range(1, 251)]  # 250 条;batch 100 → 一拍连拉 3 个区间追上
+    res = collect_api(url, {"cursor": 0, "mode": "range", "batch": 100})
+    assert res.new_lines == [f"r{i}" for i in range(1, 251)]
+    assert res.state["cursor"] == 250
+    # 没新数据 → 空,cursor 不动。
+    res2 = collect_api(url, res.state)
+    assert res2.new_lines == []
+    assert res2.state["cursor"] == 250
+    # 新增 → 只拉新编号(不重不丢)。
+    handler.records.extend([f"r{i}" for i in range(251, 260)])
+    res3 = collect_api(url, res2.state)
+    assert res3.new_lines == [f"r{i}" for i in range(251, 260)]
+    assert res3.state["cursor"] == 259
+
+
+def test_api_range_no_data_yet(range_server) -> None:
+    url, handler = range_server
+    handler.records = []
+    res = collect_api(url, {"cursor": 0, "mode": "range", "batch": 100})
+    assert res.new_lines == []
+    assert res.state["cursor"] == 0
+
+
+def test_api_range_network_error_preserves_cursor() -> None:
+    res = collect_api("http://127.0.0.1:9/poll", {"cursor": 50, "mode": "range", "batch": 100})
+    assert res.new_lines == []
+    assert res.state["cursor"] == 50
+    assert "api_request_failed" in res.error

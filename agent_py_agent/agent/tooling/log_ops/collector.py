@@ -35,6 +35,8 @@ _FOLDER_MAX_NEW_FILES_PER_ROUND = 2000
 # 救的是"写完即固定、最后一行无换行"的文件(如日志切片/cp 来的片段/folder 子文件);对持续 append
 # 的活跃文件,正常每行带换行→尾段为空→此逻辑不触发,残行保护照旧。阈值取得比典型写入间隔大,避免误判。
 _TRAILING_FLUSH_IDLE_SECONDS = 2.0
+# range 模式一拍最多连续拉多少个编号区间(防单拍拉太多卡死),够追上快速吐数据的 API。
+_API_RANGE_MAX_PAGES_PER_CYCLE = 50
 # 默认切割器:按行(历来行为)。源有 profile.splitter 时由 daemon 传入对应切割器。
 _DEFAULT_SPLITTER = LineSplitter()
 
@@ -177,7 +179,10 @@ def collect_api(locator: str, state: dict[str, Any]) -> CollectResult:
     协议(对齐模拟器):GET <locator>?since=<cursor> → JSON {"next": <new_cursor>, "lines": [...]}。
     不丢要点:把返回的 next 记成新 cursor,下轮带上;next 没变 → 没新数据,cursor 不动。
     locator 已带 query 时用 & 续接,否则用 ?。网络错误返回原状态 + error,不丢(下轮重试同 cursor)。
+    range 模式(state.mode=="range"):改按编号区间 ?start=N&end=M 分页拉,见 _collect_api_range。
     """
+    if str(state.get("mode") or "") == "range":
+        return _collect_api_range(locator, state)
     cursor = state.get("cursor", 0)
     if cursor is None:
         cursor = 0
@@ -204,6 +209,58 @@ def collect_api(locator: str, state: dict[str, Any]) -> CollectResult:
     if next_cursor is None:
         next_cursor = cursor
     return CollectResult(new_lines=new_lines, state={"cursor": next_cursor})
+
+
+def _collect_api_range(locator: str, state: dict[str, Any]) -> CollectResult:
+    """按编号区间分页拉:每拍连续取 (cursor, cursor+batch] 直到追上服务器最新编号。
+
+    不丢=编号连续无缺口。API 协议:GET ?start=N&end=M → {"lines":[...], "latest": 当前最大编号}。
+    一拍拉多个区间(每个区间一次 HTTP,符合"按编号区间查"),封顶 _API_RANGE_MAX_PAGES_PER_CYCLE
+    防快速吐数据时单拍卡死;没追上的下一拍继续(不丢)。
+    """
+    cursor = int(state.get("cursor", 0) or 0)
+    batch = max(1, int(state.get("batch", 100) or 100))
+    collected: list[str] = []
+    for _ in range(_API_RANGE_MAX_PAGES_PER_CYCLE):
+        lines, latest, error = _fetch_api_range(locator, cursor + 1, cursor + batch)
+        if error:
+            return CollectResult(
+                new_lines=collected,
+                state={"cursor": cursor, "mode": "range", "batch": batch},
+                error=error,
+            )
+        collected.extend(lines)
+        if latest <= cursor:
+            break  # 服务器没有更新的编号了
+        cursor = min(cursor + batch, latest)
+        if cursor >= latest:
+            break  # 追上最新编号
+    return CollectResult(
+        new_lines=collected[:_API_MAX_LINES_PER_POLL],
+        state={"cursor": cursor, "mode": "range", "batch": batch},
+    )
+
+
+def _fetch_api_range(locator: str, start: int, end: int) -> tuple[list[str], int, str]:
+    """拉单个编号区间 [start,end]。返回 (记录行, 服务器最大编号 latest, 错误串)。"""
+    sep = "&" if ("?" in locator) else "?"
+    url = f"{locator}{sep}start={start}&end={end}"
+    try:
+        request = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(request, timeout=_API_TIMEOUT_SECONDS) as response:  # noqa: S310
+            body = response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, OSError) as exc:
+        return [], 0, f"api_request_failed: {exc}"
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        return [], 0, f"api_bad_json: {exc}"
+    if not isinstance(payload, dict):
+        return [], 0, "api_bad_shape"
+    raw = payload.get("lines", []) or []
+    lines = [str(item) for item in raw if str(item).strip()]
+    latest = int(payload.get("latest", 0) or 0)
+    return lines, latest, ""
 
 
 def collect_source(
