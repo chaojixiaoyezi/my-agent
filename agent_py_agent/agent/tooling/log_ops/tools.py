@@ -549,6 +549,8 @@ LOG_OPS_TOOL_NAMES = (
     "log_watchdog_scan",
     "log_lead",
     "log_correlate",
+    "log_wake_check",
+    "log_wake_ack",
 )
 
 

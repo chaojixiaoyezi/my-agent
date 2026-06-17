@@ -11,11 +11,12 @@ from __future__ import annotations
 """
 
 import re
+import time
 from pathlib import Path
 from typing import Any
 
 from ..models import BaseTool, ToolSpec
-from . import query, watchdog
+from . import query, wake, watchdog
 from .duty_registry import Assignment, DutyRegistry
 from .query import resolve_source_id
 from .tools import _coerce_sources, _err, _LogOpsTool, _ok
@@ -296,8 +297,88 @@ class LogCorrelateTool(_LogOpsTool):
         return _ok(self.spec.name, {"leads_total": len(leads), "unique_iocs": len(seen), "attack_chains": chains})
 
 
+class LogWakeCheckTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_wake_check",
+        category="log_ops",
+        effect="read_only",
+        description=(
+            "按需唤醒门控:确定性判断现在是否该拉起 LLM 研判(不靠常驻 LLM 几月烧死)。返回 should_wake + 原因"
+            "(urgent_signal 高危秒级 / batch_full 候选攒够 / idle_timeout 保底 / no_work 没事)。cron 周期调:should_wake "
+            "false 就退(省烧),true 才拉短命 run 研判候选→log_report 上报→log_wake_ack 推进游标→退。无限期值守靠它省烧。"
+        ),
+        use_cases=["cron/gateway 周期检查是否有事要唤醒 LLM 研判", "无限期值守省烧:有事才醒,没事不烧"],
+        avoid_when=["研判完推进游标用 log_wake_ack", "直接看候选/状态用 log_monitor_status"],
+        keywords=["唤醒", "wake", "按需", "门控", "省烧", "cron", "研判", "调度", "常驻", "醒"],
+        parameters={
+            "batch_threshold": "可选,未研判候选攒够多少就唤醒,默认 20",
+            "max_idle_seconds": "可选,有候选时距上次研判多久必唤醒(保底),默认 900",
+            "monitor_id": "可选,默认 default",
+        },
+        parameter_details={"batch_threshold": "可选整数。", "max_idle_seconds": "可选秒数。"},
+        parameter_schema={
+            "batch_threshold": {"type": "integer", "minimum": 1},
+            "max_idle_seconds": {"type": "number", "minimum": 0},
+            "monitor_id": {"type": "string"},
+        },
+        required_parameters=[],
+        examples=['{"tool": "log_wake_check"}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        store = self.store(params)
+        kw: dict[str, Any] = {}
+        if params.get("batch_threshold") is not None:
+            kw["batch_threshold"] = max(1, int(params["batch_threshold"]))
+        if params.get("max_idle_seconds") is not None:
+            kw["max_idle_seconds"] = max(0.0, float(params["max_idle_seconds"]))
+        return _ok(self.spec.name, wake.evaluate_wake(store, **kw).to_dict())
+
+
+class LogWakeAckTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_wake_ack",
+        category="log_ops",
+        effect="mutating",
+        requires_idempotency=True,
+        description=(
+            "研判 run 处理完候选后推进研判游标(跨 run 续接的关键:下次 log_wake_check 不会重复唤醒同一批)。"
+            "不传 reviewed_through 则推进到当前全部候选已研判;同时清空紧急队列(已处理)、记上次研判时间,然后可优雅退出。"
+        ),
+        use_cases=["短命研判 run 上报完后推进游标+记时间+清紧急,优雅退出", "标记某批候选已研判"],
+        avoid_when=["只查是否要唤醒用 log_wake_check", "上报告警用 log_report"],
+        keywords=["唤醒", "确认", "ack", "游标", "研判", "推进", "续接", "退出", "清紧急"],
+        parameters={
+            "reviewed_through": "可选,已研判到第几条候选(默认=当前全部候选)",
+            "reported": "可选,本次上报条数(累计进总数)",
+            "clear_urgent": "可选,是否清空紧急队列,默认 true",
+            "monitor_id": "可选,默认 default",
+        },
+        parameter_details={"reviewed_through": "可选整数。", "reported": "可选整数。", "clear_urgent": "可选布尔。"},
+        parameter_schema={
+            "reviewed_through": {"type": "integer", "minimum": 0},
+            "reported": {"type": "integer", "minimum": 0},
+            "clear_urgent": {"type": "boolean"},
+            "monitor_id": {"type": "string"},
+        },
+        required_parameters=[],
+        examples=['{"tool": "log_wake_ack", "reported": 3}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        store = self.store(params)
+        total = store.count_candidates()
+        through = params.get("reviewed_through")
+        cursor = max(0, min(int(through), total)) if through is not None else total
+        prev = wake.read_review_state(store)
+        reported = int(params.get("reported") or 0) + int(prev.get("reported") or 0)
+        wake.write_review_state(store, cursor=cursor, reported=reported, at=time.time())
+        cleared = wake.clear_urgent(store) if params.get("clear_urgent", True) else 0
+        return _ok(self.spec.name, {"review_cursor": cursor, "reported": reported, "urgent_cleared": cleared, "total_candidates": total, "message": f"研判游标推进到 {cursor}/{total},紧急队列清 {cleared} 条,可优雅退出。"})
+
+
 def orchestration_tools(workspace_root: Path) -> list[BaseTool]:
-    """编排层 6 个工具实例(职责台账 3 + 看门狗 1 + 关联 2)。"""
+    """编排层 8 个工具实例(职责台账 3 + 看门狗 1 + 关联 2 + 按需唤醒 2)。"""
     return [
         LogAssignTool(workspace_root),
         LogHeartbeatTool(workspace_root),
@@ -305,9 +386,11 @@ def orchestration_tools(workspace_root: Path) -> list[BaseTool]:
         LogWatchdogScanTool(workspace_root),
         LogLeadTool(workspace_root),
         LogCorrelateTool(workspace_root),
+        LogWakeCheckTool(workspace_root),
+        LogWakeAckTool(workspace_root),
     ]
 
 
-ORCHESTRATION_TOOL_NAMES = ("log_assign", "log_heartbeat", "log_duty_roster", "log_watchdog_scan", "log_lead", "log_correlate")
+ORCHESTRATION_TOOL_NAMES = ("log_assign", "log_heartbeat", "log_duty_roster", "log_watchdog_scan", "log_lead", "log_correlate", "log_wake_check", "log_wake_ack")
 
 __all__ = ["ORCHESTRATION_TOOL_NAMES", "orchestration_tools"]
