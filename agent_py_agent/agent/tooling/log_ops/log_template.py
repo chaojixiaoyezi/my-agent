@@ -34,6 +34,30 @@ def _merge(template: list[str], tokens: list[str]) -> list[str]:
     return [tok if tok == new else _WILDCARD for tok, new in zip(template, tokens)]
 
 
+def _best_cluster(clusters: list[dict[str, Any]], tokens: list[str], threshold: float) -> dict[str, Any] | None:
+    """找同位置匹配率最高且达阈值的 cluster;没有达标的返回 None(调用方开新模板)。"""
+    best: dict[str, Any] | None = None
+    best_sim = threshold
+    for cluster in clusters:
+        sim = _similarity(cluster["tokens"], tokens)
+        if sim >= best_sim:
+            best, best_sim = cluster, sim
+    return best
+
+
+def _ingest_line(clusters: list[dict[str, Any]], raw: str, threshold: float, cap: int) -> None:
+    """把一行吸收进现有模板(达阈值则归并),否则在配额内开新模板。"""
+    tokens = _tokenize(raw.strip())
+    if not tokens:
+        return
+    best = _best_cluster(clusters, tokens, threshold)
+    if best is not None:
+        best["tokens"] = _merge(best["tokens"], tokens)
+        best["count"] += 1
+    elif len(clusters) < cap:
+        clusters.append({"tokens": list(tokens), "count": 1, "example": raw.strip()})
+
+
 def mine_templates(
     lines: list[str], *, max_templates: int = 50, sim_threshold: float = 0.5
 ) -> list[dict[str, Any]]:
@@ -44,20 +68,7 @@ def mine_templates(
     clusters: list[dict[str, Any]] = []
     cap = max(max_templates * 4, max_templates)  # 过程中允许超量,最后按 count 截断
     for raw in lines:
-        tokens = _tokenize(raw.strip())
-        if not tokens:
-            continue
-        best: dict[str, Any] | None = None
-        best_sim = sim_threshold
-        for cluster in clusters:
-            sim = _similarity(cluster["tokens"], tokens)
-            if sim >= best_sim:
-                best, best_sim = cluster, sim
-        if best is not None:
-            best["tokens"] = _merge(best["tokens"], tokens)
-            best["count"] += 1
-        elif len(clusters) < cap:
-            clusters.append({"tokens": list(tokens), "count": 1, "example": raw.strip()})
+        _ingest_line(clusters, raw, sim_threshold, cap)
     clusters.sort(key=lambda c: c["count"], reverse=True)
     total = sum(c["count"] for c in clusters) or 1
     return [
