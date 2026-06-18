@@ -31,11 +31,37 @@ from ...common.json_io import (
     read_json_object,
     write_json_file_atomic,
 )
+from ...common.resilience import BurstTracker, CircuitBreaker
+from ...common.rotating_log import (
+    RotatePolicy,
+    append_with_rotation,
+    iter_all_lines,
+    total_line_count,
+)
 
 # monitor_id 只允许这些字符,避免路径穿越/怪字符进文件名。
 _MONITOR_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 # source_id 由源类型+源定位算出来,稳定且文件名安全。
 _SOURCE_ID_SAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+# archive(全量存档)轮转策略:单段 64MB、在线留 30 段、老段 gzip、总预算 4GB、保留 30 天。
+# 默认偏宽(存档是"一条不丢"的根本,优先全留);真超预算/超龄才删最老段,删量记 sidecar 不破对账。
+_ARCHIVE_ROTATE = RotatePolicy(
+    max_bytes=64 * 1024 * 1024,
+    backup_count=30,
+    compress=True,
+    retention_seconds=30 * 86400,
+    max_total_bytes=4 * 1024 * 1024 * 1024,
+)
+
+# 源采集断路器:连续失败 _SOURCE_FAIL_THRESHOLD 拍即熔断,冷却 _SOURCE_COOLDOWN 秒内跳过该源
+# (不反复失败烧资源),冷却到自动 half-open 试探一次。借鉴 长期助手/终端交互 断路器。
+_SOURCE_FAIL_THRESHOLD = 3
+_SOURCE_COOLDOWN = 120.0
+
+# 速率突变检测:同一实体(IP)在最近 _BURST_WINDOW 次实体出现里达 _BURST_THRESHOLD 次 = 突发(暴力破解/扫描)。
+_BURST_WINDOW = 200
+_BURST_THRESHOLD = 30
 
 
 def sanitize_monitor_id(monitor_id: str) -> str:
@@ -233,16 +259,23 @@ class LogOpsStore:
         \\n 结尾,使 archive 严格一行一记录(count_archive_lines 对账才准,对多行切割的记录也成立)。"""
         if not lines:
             return 0
-        path = self.archive_path(source_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
         blob = "".join(
             line.replace("\r\n", " ").replace("\n", " ").replace("\r", " ") + "\n" for line in lines
         )
-        _atomic_append(path, blob)  # 单 daemon 单写者,O_APPEND 双保险
+        # 走通用轮转:超段大小→gzip 老段,超总预算/超龄→删最老段(删量入 sidecar,对账仍准)。
+        append_with_rotation(
+            self.archive_path(source_id), blob, _ARCHIVE_ROTATE, line_count=len(lines)
+        )
         return len(lines)
 
     def count_archive_lines(self, source_id: str) -> int:
-        return _count_file_lines(self.archive_path(source_id))
+        """累计落盘行数(含已轮转/已删段)。轮转后不再等于当前单文件行数,但等于"曾经落盘的
+        总量",no_loss 对账口径(collected==archived==此值)与候选全局行号都不变。"""
+        return total_line_count(self.archive_path(source_id))
+
+    def iter_archive_lines(self, source_id: str):
+        """按时间顺序(最老→最新)遍历该源所有在线存档行(含历史段/.gz)。供 query 全量扫描。"""
+        return iter_all_lines(self.archive_path(source_id))
 
     # ---- 候选告警队列(append-only JSONL) ----
     def append_candidates(self, candidates: list[dict[str, Any]]) -> int:
@@ -331,6 +364,30 @@ class CollectMetrics:
     archived_lines: int = 0
     candidates: int = 0
     per_source: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # per-source 断路器(内存态,不落盘;daemon 重启则重置为 closed,可接受)。
+    breakers: dict[str, CircuitBreaker] = field(default_factory=dict, repr=False, compare=False)
+    # per-source 速率突变追踪器(内存态,不落盘)。
+    burst_trackers: dict[str, BurstTracker] = field(default_factory=dict, repr=False, compare=False)
+
+    def breaker_for(self, source_id: str) -> CircuitBreaker:
+        return self.breakers.setdefault(
+            source_id, CircuitBreaker(threshold=_SOURCE_FAIL_THRESHOLD, cooldown_seconds=_SOURCE_COOLDOWN)
+        )
+
+    def burst_tracker_for(self, source_id: str) -> BurstTracker:
+        return self.burst_trackers.setdefault(
+            source_id, BurstTracker(window=_BURST_WINDOW, threshold=_BURST_THRESHOLD)
+        )
+
+    def note_source_health(self, source_id: str, error: str, now: float) -> bool:
+        """记录该源本拍采集成败到断路器,刷新 metrics 里的 circuit 快照。
+        返回 True 当本拍【刚熔断】(连续失败到阈值),供调用方主动告警一次。"""
+        breaker = self.breaker_for(source_id)
+        tripped = breaker.on_failure(now=now) if error else False
+        if not error:
+            breaker.on_success()
+        self.per_source.setdefault(source_id, {})["circuit"] = breaker.snapshot()
+        return tripped
 
     def bump_source(self, source_id: str, tick: SourceTick) -> None:
         entry = self.per_source.setdefault(

@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ...common import heartbeat
 from .store import (
     CollectMetrics,
     LogOpsStore,
@@ -141,13 +142,30 @@ def daemon_liveness(store: LogOpsStore) -> dict[str, Any]:
         return {"alive": False, "pid": 0, "reason": "no_pid", "status": status}
     if status == "stopped":
         return {"alive": False, "pid": pid, "reason": "stopped", "status": status}
-    if not _pid_alive(pid):
+    if not heartbeat.process_alive(pid, start_time=record.get("start_time")):
         return {"alive": False, "pid": pid, "reason": "process_gone", "status": status}
-    heartbeat = float(record.get("heartbeat_at", 0) or 0)
-    age = time.time() - heartbeat if heartbeat else None
+    hb_ts = float(record.get("heartbeat_at", 0) or 0)
+    age = time.time() - hb_ts if hb_ts else None
     if age is not None and age > _HEARTBEAT_STALE_SECONDS:
         return {"alive": True, "pid": pid, "reason": "stale_heartbeat", "status": status, "heartbeat_age": age}
     return {"alive": True, "pid": pid, "reason": "ok", "status": status, "heartbeat_age": age}
+
+
+def ensure_daemon_alive(store: LogOpsStore) -> dict[str, Any]:
+    """看门狗自愈:曾起过的 daemon 进程异常消失(process_gone)就自动重拉,撑住"崩溃不中断采集"。
+    保守边界:尊重用户主动 stop(stopped 不复活)、从没起过(no_pid)不擅自起、心跳僵死(stale)只提示不强杀。
+    返回 {restarted, alive, ...}。借鉴 会话运行时 update_loop / 通道运行时 launchd KeepAlive 的进程自愈。"""
+    live = daemon_liveness(store)
+    if live["alive"]:
+        return {"restarted": False, "alive": True, "pid": live.get("pid", 0), "reason": live.get("reason", "ok")}
+    if live.get("reason") != "process_gone":
+        return {"restarted": False, "alive": False, "reason": live.get("reason", "not_recoverable")}
+    if not store.source_specs():
+        return {"restarted": False, "alive": False, "reason": "never_configured"}
+    process = _spawn_daemon(store, sys.executable)
+    if process is None:
+        return {"restarted": False, "alive": False, "reason": "respawn_failed"}
+    return {"restarted": True, "alive": True, "pid": process.pid, "recovered_from": "process_gone"}
 
 
 def reconciliation(store: LogOpsStore) -> dict[str, Any]:
@@ -184,6 +202,7 @@ def reconciliation(store: LogOpsStore) -> dict[str, Any]:
             "cursor": entry.get("cursor"),
             "consistent": consistent,
             "last_error": entry.get("last_error", ""),
+            "circuit": (entry.get("circuit") or {}).get("state", "closed"),
         }
 
     return {
@@ -193,6 +212,7 @@ def reconciliation(store: LogOpsStore) -> dict[str, Any]:
         "total_archive_file_lines": total_archive_file_lines,
         "total_candidates": store.count_candidates(),
         "per_source": per_source,
+        "sources_circuit_open": [sid for sid, ps in per_source.items() if ps.get("circuit") == "open"],
     }
 
 

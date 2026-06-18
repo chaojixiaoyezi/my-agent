@@ -21,6 +21,7 @@ _KV = re.compile(r'"?([A-Za-z_][\w.]*)"?\s*[=:]\s*"?([^\s",}\]]+)"?')  # 兼容 
 _VALUES_CAP = 256  # 每字段最多记多少不同值(防高基数字段把基线撑爆)
 _HIGH_CARD_RATIO = 0.6  # distinct/total 超过此值 = 高基数字段(时间戳/id),跳过新实体检测
 _RARE_RATIO = 0.01  # 值出现占比低于此 = 罕见值
+_DECAY_WINDOW = 100_000  # 超过这么多条记录没再出现的值从基线淘汰(正常模式漂移适应 + 攻击污染可恢复)
 _TS_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?")  # 抹时间戳,免 T11:23 误当 kv
 
 
@@ -41,15 +42,34 @@ def extract_entities(raw_line: str) -> dict[str, str]:
 
 @dataclass
 class _FieldStat:
-    """一个字段的统计:见过的值 -> 计数(基数受 _VALUES_CAP 限),以及总观测数。"""
+    """一个字段的统计:见过的值 -> 计数(基数受 _VALUES_CAP 限) + 每值最后出现的记录序号(衰减用) + 总观测数。"""
 
     values: dict[str, int] = field(default_factory=dict)
     total: int = 0
+    last_seen: dict[str, int] = field(default_factory=dict)  # 值 -> 最后出现的记录序号(LRU/TTL 衰减用)
 
-    def observe(self, value: str) -> None:
+    def observe(self, value: str, seq: int) -> None:
         self.total += 1
-        if value in self.values or len(self.values) < _VALUES_CAP:
-            self.values[value] = self.values.get(value, 0) + 1
+        if value in self.values:
+            self.values[value] += 1
+        elif len(self.values) < _VALUES_CAP:
+            self.values[value] = 1
+        else:
+            # 满 cap:淘汰最久未见的值(LRU;旧基线无 last_seen 的老值优先淘汰),给新值腾位。
+            # 让基线随"正常"漂移——旧值(含被误学的攻击实体)不永久占位,正常新实体也进得来不被永久误报。
+            oldest = min(self.values, key=lambda v: self.last_seen.get(v, -1))
+            self.values.pop(oldest, None)
+            self.last_seen.pop(oldest, None)
+            self.values[value] = 1
+        self.last_seen[value] = seq
+
+    def decay(self, now_seq: int, window: int) -> int:
+        """淘汰 window 条记录内没再出现的值(正常漂移适应 + 攻击污染可恢复)。返回淘汰数。"""
+        stale = [v for v, seq in self.last_seen.items() if now_seq - seq > window]
+        for v in stale:
+            self.values.pop(v, None)
+            self.last_seen.pop(v, None)
+        return len(stale)
 
     def is_high_card(self) -> bool:
         """高基数字段(几乎每条都不同,如时间戳/uuid/pid):不适合做新实体检测。
@@ -69,19 +89,30 @@ class SourceBaseline:
         """用一条正常流量更新基线(daemon 持续学,滑动地认识"正常")。"""
         self.records += 1
         for key, val in extract_entities(raw_line).items():
-            self.fields.setdefault(key, _FieldStat()).observe(val)
+            self.fields.setdefault(key, _FieldStat()).observe(val, self.records)
+
+    def decay(self, window: int = _DECAY_WINDOW) -> int:
+        """周期调用:淘汰各字段 window 条记录内未再现的值,适应正常漂移、让攻击污染可恢复。返回总淘汰数。"""
+        return sum(fs.decay(self.records, window) for fs in self.fields.values())
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "records": self.records,
-            "fields": {k: {"values": fs.values, "total": fs.total} for k, fs in self.fields.items()},
+            "fields": {
+                k: {"values": fs.values, "total": fs.total, "last_seen": fs.last_seen}
+                for k, fs in self.fields.items()
+            },
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SourceBaseline":
         obj = cls(records=int(data.get("records") or 0))
         for key, fdict in (data.get("fields") or {}).items():
-            obj.fields[key] = _FieldStat(values=dict(fdict.get("values") or {}), total=int(fdict.get("total") or 0))
+            obj.fields[key] = _FieldStat(
+                values=dict(fdict.get("values") or {}),
+                total=int(fdict.get("total") or 0),
+                last_seen={k: int(v) for k, v in (fdict.get("last_seen") or {}).items()},
+            )
         return obj
 
 

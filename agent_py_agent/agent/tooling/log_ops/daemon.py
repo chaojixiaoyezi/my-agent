@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...common import heartbeat
 from . import baseline
 from .collector import collect_source
 from .splitter import build_splitter
@@ -66,6 +67,9 @@ def _collect_one_source(
 
     按该源 profile 执行:profile.splitter 决定切割方式,profile.rules 决定初筛规则(没 profile 走默认)。
     """
+    now = time.time()
+    if not acc.breaker_for(spec.source_id).allow(now=now):
+        return  # 该源连续失败已熔断且冷却未到:本拍跳过,不反复失败烧资源;冷却到自动 half-open 试探
     prev_state = store.read_state(spec.source_id)
     splitter, active_rules = _profile_collect_config(store.read_profile(spec.source_id), rules)
     baseline_model = baseline.load_baseline(store, spec.source_id)
@@ -77,13 +81,15 @@ def _collect_one_source(
 
     # ② 逐行确定性初筛:正则命中 OR 统计异常(数据驱动)产候选。行号 = 该源存档累计行号(1-based,可回查)。
     base_line_no = _archive_base_line_no(store, spec.source_id, archived)
-    candidates = _triage_new_lines(_TriageCtx(spec, active_rules, baseline_model), new_lines, base_line_no)
+    ctx = _TriageCtx(spec, active_rules, baseline_model, acc.burst_tracker_for(spec.source_id))
+    candidates = _triage_new_lines(ctx, new_lines, base_line_no)
     if candidates:
         store.append_candidates(candidates)
         urgent = [c for c in candidates if c.get("severity") == "high"]
         if urgent:
             store.append_urgent(urgent)  # 高危 → 紧急队列,供按需唤醒秒级拉研判,不等周期
     if new_lines:
+        baseline_model.decay()  # 周期淘汰长期(默认 10 万条记录)未再现的值:适应正常漂移、让攻击污染可恢复
         baseline.save_baseline(store, spec.source_id, baseline_model)  # 持久化本拍学到的"正常",跨拍/重启续学
 
     # ③ 原子写该源断点状态(在存档之后,保证"宁可重不可丢")。
@@ -95,6 +101,8 @@ def _collect_one_source(
         spec.source_id,
         SourceTick(len(new_lines), archived, len(candidates), result.cursor_repr()),
     )
+    # 记录采集成败到该源断路器(连续失败→熔断,下拍起冷却期跳过;成功→复位)。circuit 快照入 metrics 供 status 见。
+    acc.note_source_health(spec.source_id, result.error, now)
     if result.error:
         acc.per_source.setdefault(spec.source_id, {})["last_error"] = result.error
 
@@ -112,25 +120,36 @@ def _archive_base_line_no(store: LogOpsStore, source_id: str, archived: int) -> 
 
 @dataclass
 class _TriageCtx:
-    """逐行初筛的不变上下文:源、初筛规则、该源统计基线(收成一个对象,降参数数)。"""
+    """逐行初筛的不变上下文:源、初筛规则、该源统计基线、速率突变追踪器(收成一个对象,降参数数)。"""
 
     spec: SourceSpec
     rules: list[TriageRule]
     baseline_model: baseline.SourceBaseline
+    burst_tracker: Any  # resilience.BurstTracker:同实体滑窗高频检测
 
 
 def _triage_new_lines(ctx: _TriageCtx, new_lines: list[str], base_line_no: int) -> list[dict[str, Any]]:
-    """逐行初筛:正则命中 或 统计异常都产候选。先用当前基线判异常(旧基线),再只用"正常"行(没命中规则、
-    anomaly 低)更新基线——威胁/异常行不学,避免攻击数据污染基线、把攻击者实体洗成"已知"。"""
+    """逐行初筛:正则命中 或 统计异常(新实体/罕见值/速率突变)都产候选。先用当前基线判异常(旧基线),
+    再只用"正常"行更新基线——威胁/异常行不学,避免攻击数据污染基线、把攻击者实体洗成"已知"。"""
     candidates: list[dict[str, Any]] = []
     for idx, raw_line in enumerate(new_lines):
         score, reasons = baseline.score_anomaly(ctx.baseline_model, raw_line)
+        burst_ip = _burst_entity(ctx.burst_tracker, raw_line)  # 速率突变:同 IP 滑窗内高频(暴力破解/扫描)
+        if burst_ip:
+            score = max(score, 0.7)  # 突发并入统计异常信号(高分),即便基线判它"已知"也要浮出
+            reasons = [*reasons, f"速率突变({burst_ip} 短时高频)"]
         candidate = triage_line(ctx.spec, TriageInput(base_line_no + idx, raw_line, (score, reasons)), rules=ctx.rules)
         if candidate is None:
             ctx.baseline_model.observe_line(raw_line)  # 只学正常行,威胁不污染基线
         else:
             candidates.append(candidate)
     return candidates
+
+
+def _burst_entity(tracker: Any, raw_line: str) -> str | None:
+    """提取首个 IP 喂给速率突变追踪器,返回该 IP 当它在滑动窗口内达突发阈值(否则 None)。"""
+    ip = baseline.extract_entities(raw_line).get("ip")
+    return ip if (ip and tracker.observe(ip)) else None
 
 
 def _profile_collect_config(
@@ -232,13 +251,16 @@ def _install_signal_handlers(flag: _StopFlag) -> None:
 
 
 def _write_daemon_record(run: _DaemonRunState, status: str, *, last_error: str = "") -> None:
+    prev = run.store.read_daemon()
     payload: dict[str, Any] = {
         "status": status,
         "pid": run.pid,
+        # 启动指纹:首拍取一次后复用(避免每拍调 ps),让 liveness 能识破 PID 复用(老 daemon 死、同号被顶替)。
+        "start_time": prev.get("start_time") or heartbeat.process_start_time(run.pid),
         "poll_interval_seconds": run.interval,
         "cycles": run.cycles,
         _HEARTBEAT_KEY: time.time(),
-        "started_at": run.store.read_daemon().get("started_at", time.time()),
+        "started_at": prev.get("started_at", time.time()),
     }
     if last_error:
         payload["last_error"] = last_error

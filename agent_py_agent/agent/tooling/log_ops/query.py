@@ -82,15 +82,15 @@ def query_archive(store: LogOpsStore, request: QueryRequest) -> dict[str, Any]:
     source_id = resolve_source_id(store, request.source)
     if not source_id:
         return {"ok": False, "error": "missing_source", "message": "source 不能为空。"}
-    archive_path = store.archive_path(source_id)
-    if not archive_path.exists():
+    # 存档可能已轮转(主文件 + 历史段/.gz);按累计行数判有无档,iter_archive_lines 读全量(最老→最新)。
+    if store.count_archive_lines(source_id) <= 0:
         return _empty_query_result(source_id)
 
     capped = max(1, min(int(request.limit or 100), _MAX_MATCHES))
     start_ts, end_ts = (request.time_range or ("", ""))
     line_filter = _LineFilter(_build_matcher(request.pattern, request.case_sensitive), start_ts, end_ts)
     try:
-        scan = _scan_archive(archive_path, line_filter, capped)
+        scan = _scan_archive(store.iter_archive_lines(source_id), line_filter, capped)
     except OSError as exc:
         return {"ok": False, "error": "read_failed", "source_id": source_id, "message": str(exc)}
 
@@ -118,13 +118,12 @@ def _empty_query_result(source_id: str) -> dict[str, Any]:
     }
 
 
-def _scan_archive(archive_path: Any, line_filter: _LineFilter, capped: int) -> _ScanResult:
-    """扫存档文件,返回命中行 + 扫描计数。命中达 capped 或扫满扫描上限即停。"""
+def _scan_archive(lines: Any, line_filter: _LineFilter, capped: int) -> _ScanResult:
+    """扫存档行流(已含所有历史段,最老→最新),返回命中行 + 扫描计数。命中达 capped 或扫满即停。"""
     counter = _ScanCounter()
-    with archive_path.open("r", encoding="utf-8", errors="replace") as handle:
-        numbered = enumerate(counter.tap(islice(handle, _MAX_SCAN_LINES)), start=1)
-        hits = (_scan_one_line(line_no, raw, line_filter) for line_no, raw in numbered)
-        matches = list(islice((hit for hit in hits if hit is not None), capped))
+    numbered = enumerate(counter.tap(islice(lines, _MAX_SCAN_LINES)), start=1)
+    hits = (_scan_one_line(line_no, raw, line_filter) for line_no, raw in numbered)
+    matches = list(islice((hit for hit in hits if hit is not None), capped))
     scan_truncated = counter.count >= _MAX_SCAN_LINES and len(matches) < capped
     return _ScanResult(matches, counter.count, scan_truncated)
 

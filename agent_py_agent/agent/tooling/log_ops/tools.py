@@ -213,6 +213,7 @@ class LogMonitorStatusTool(_LogOpsTool):
 
     def _run(self, params: dict[str, Any]) -> ToolExecutionResult:
         store = self.store(params)
+        recovery = manager.ensure_daemon_alive(store)  # 看门狗自愈:进程异常消失则自动重拉(尊重喊停/不擅起)
         liveness = manager.daemon_liveness(store)
         recon = manager.reconciliation(store)
         daemon_record = store.read_daemon()
@@ -244,6 +245,15 @@ class LogMonitorStatusTool(_LogOpsTool):
             )
         if not recon["no_loss"]:
             payload["warning"] = "存在源 collected!=archived!=存档行数,疑似采集异常,请核查 per_source.last_error。"
+        if recon.get("sources_circuit_open"):
+            payload["circuit_alert"] = (
+                f"数据源 {recon['sources_circuit_open']} 连续采集失败已熔断(疑似失联/被攻击者打掉/网络故障),"
+                f"冷却期内暂停采集以免空烧;请核查这些源连通性并向用户报告。"
+            )
+        if recovery.get("restarted"):
+            payload["daemon_recovered"] = (
+                f"检测到 daemon 进程异常消失,看门狗已自动重拉(新 pid={recovery['pid']});采集已恢复,期间未采的会从断点续上。"
+            )
         return _ok(self.spec.name, payload)
 
 
