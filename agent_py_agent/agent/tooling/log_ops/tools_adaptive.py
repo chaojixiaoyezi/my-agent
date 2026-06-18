@@ -15,6 +15,7 @@ from typing import Any
 
 from ..models import BaseTool, ToolSpec
 from . import query
+from . import baseline
 from .log_template import mine_templates
 from .store import level_rank
 from .triage import compile_profile_rules
@@ -31,14 +32,24 @@ _PROFILE_FIELDS = ("splitter", "rules", "triage_hint", "reporting", "fields", "f
 _LEVELS = ("P0", "P1", "P2", "P3")
 
 
+def _summarize_baseline(model: baseline.SourceBaseline) -> dict[str, Any]:
+    """把统计基线压成给 LLM 备课看的字段画像:每字段正常值数、是否高基数(异常检测会跳过)、几个常见值。"""
+    out: dict[str, Any] = {}
+    for key, fstat in model.fields.items():
+        top = sorted(fstat.values.items(), key=lambda kv: -kv[1])[:5]
+        out[key] = {"distinct_values": len(fstat.values), "high_cardinality": fstat.is_high_card(), "common_values": [v for v, _ in top]}
+    return out
+
+
 class LogSourceSampleTool(_LogOpsTool):
     spec = ToolSpec(
         name="log_source_sample",
         category="log_ops",
         effect="read_only",
         description=(
-            "采样某源存档:返回头部+尾部真实记录,**外加 ML 模板挖掘**(把日志无监督聚类成最多 30 种模板+各占比,"
-            "变化字段用 <*> 占位)。备课时看'模板+占比'比只看几条样本更全更准:既看清格式,又看出哪种模板最多/可疑。只读。"
+            "采样某源存档:返回头部+尾部真实记录、**ML 模板挖掘**(无监督聚类成最多 30 种模板+占比)、**字段正常值画像 "
+            "field_baseline**(各字段正常值集合/是否高基数)。备课时:看模板+占比搞清格式;看 field_baseline 知道哪些字段"
+            "的新值系统会自动统计异常检测(不用你定宽规则,见 baseline_hint),规则只留给明确威胁特征。只读。"
         ),
         use_cases=["接入新源后先采样,搞清它的格式和字段再定方案", "复核某源最近在吐什么样的数据"],
         avoid_when=["要拉初筛候选研判时用 log_alert_poll", "要按模式检索时用 log_source_query"],
@@ -62,8 +73,19 @@ class LogSourceSampleTool(_LogOpsTool):
             return _ok(self.spec.name, {"source_id": sid, "samples_head": [], "samples_tail": [], "message": "该源还没存档(daemon 未起或尚未采到);稍等几秒再采样。"})
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         tail = lines[-limit:] if len(lines) > limit else []
-        templates = mine_templates(lines[-5000:], max_templates=30)  # ML前期:压成模板+占比,看清格式/分布
-        return _ok(self.spec.name, {"source_id": sid, "total_archived": len(lines), "samples_head": lines[:limit], "samples_tail": tail, "templates": templates})
+        recent = lines[-5000:]
+        templates = mine_templates(recent, max_templates=30)  # ML前期:压成模板+占比,看清格式/分布
+        field_baseline = _summarize_baseline(baseline.build_baseline(recent))  # 各字段正常值画像,指导少定宽规则
+        return _ok(self.spec.name, {
+            "source_id": sid, "total_archived": len(lines), "samples_head": lines[:limit], "samples_tail": tail,
+            "templates": templates, "field_baseline": field_baseline,
+            "baseline_hint": (
+                "field_baseline 是各字段正常值画像。**low-cardinality 字段(high_cardinality=false,如 user/status/action)的"
+                "新值/罕见值,系统已自动统计异常检测(daemon 层),不用为它们定'未见过就告警'类宽规则**——那种规则极易误报"
+                "淹没(实测可占候选 74%)。规则只留给明确威胁特征(反弹shell/SQL注入/已知恶意域名/敏感文件访问等)。"
+                "high_cardinality 字段(时间戳/id)异常检测会跳过,也别为它们定规则。"
+            ),
+        })
 
 
 class LogProfileSetTool(_LogOpsTool):
