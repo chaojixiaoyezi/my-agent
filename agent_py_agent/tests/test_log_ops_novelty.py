@@ -77,3 +77,12 @@ def test_alert_poll_prioritizes_novel_high(tmp_path: Path) -> None:
     ])
     res = json.loads(LogAlertPollTool(ws).execute({"monitor_id": "m"}).output)
     assert res["alerts"][0]["novel"] is True and "45.137.21.9" in res["alerts"][0]["raw_line"]  # novel高危排第一
+
+
+def test_alert_poll_backlog_hint_anti_fake_stop(tmp_path: Path) -> None:
+    """积压锚定(计划3 防假停):大量未研判候选时 alert_poll 返回 backlog_hint,提示别 poll 一两批就觉得看完了。"""
+    ws = tmp_path
+    store = _store(ws)
+    store.append_candidates([{"raw_line": f"threat-{i} from 45.1.2.{i % 200}", "severity": "high", "matched_rules": ["x"]} for i in range(100)])
+    poll = json.loads(LogAlertPollTool(ws).execute({"limit": 5, "monitor_id": "m"}).output)
+    assert poll["remaining_unread"] > 50 and "backlog_hint" in poll  # 积压大 → 提示别假停

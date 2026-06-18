@@ -237,6 +237,11 @@ class LogMonitorStatusTool(_LogOpsTool):
             "reconciliation": recon,
             "root": str(store.root),
         }
+        if unread > 50:
+            payload["backlog_hint"] = (
+                f"还有 {unread} 条候选未研判。值守是清积压的活,积压未清就不算值守到位——别因'感觉盯了一阵'就收尾,"
+                f"继续 log_alert_poll 把积压研判下去(或交给唤醒器下一轮)。"
+            )
         if not recon["no_loss"]:
             payload["warning"] = "存在源 collected!=archived!=存档行数,疑似采集异常,请核查 per_source.last_error。"
         return _ok(self.spec.name, payload)
@@ -343,6 +348,11 @@ class LogAlertPollTool(_LogOpsTool):
                 f"{', '.join(novelty_info['novel_attackers'][:20])}。这些是新攻击来源(此前没见过),"
                 f"每条带 novel=true 的候选务必逐个研判——别因为'攻击手法眼熟'就归为已知忽略,"
                 f"新 IOC = 新攻击实体,不同攻击者各自定级上报。"
+            )
+        if payload["remaining_unread"] > limit and not peek:
+            payload["backlog_hint"] = (
+                f"还有 {payload['remaining_unread']} 条候选未研判(本批取了 {len(batch)} 条)。值守的本质是清积压——"
+                f"别 poll 一两批就觉得'看完了/无新威胁'而收尾,继续 log_alert_poll 把积压研判到接近清空,再交给下一轮。"
             )
         if not batch:
             payload["message"] = "暂无新候选告警(已读到队尾)。可稍后再 poll,或先 log_monitor_status 看 daemon 是否在采。"
