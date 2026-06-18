@@ -10,12 +10,14 @@ from __future__ import annotations
 复用 tools.py 的 _LogOpsTool 基类(统一精确错误码收口)与 _coerce_* 入参强健化。
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
 from ..models import BaseTool, ToolSpec
 from . import query
 from . import baseline
+from . import novelty
 from .log_template import mine_templates
 from .store import level_rank
 from .triage import compile_profile_rules
@@ -167,6 +169,34 @@ class LogProfileGetTool(_LogOpsTool):
         return _ok(self.spec.name, {"profiles": store.all_profiles()})
 
 
+_ALERT_RE = re.compile(r"ALERT-\d+")
+
+
+def _recent_alert_ids(store: Any) -> set[str]:
+    """最近候选的 alert_id 集(evidence 真实性抽查:evidence 引用的 ALERT 编号该是真实候选的)。"""
+    total = store.count_candidates()
+    recent = store.read_candidates(offset=max(0, total - 3000), limit=3000)
+    return {aid for cand in recent if (aid := cand.get("alert_id"))}
+
+
+def _verify_evidence(store: Any, level: str, claim_text: str, evidence: list) -> tuple[str, list[str]]:
+    """证据强绑定校验(借鉴 agent_claw,对抗 detail 编造日志没有的情节):①结论里的攻击者 IP 必须在 evidence 有
+    支撑 ②P0/P1 高危结论必须有 evidence ③evidence 引用的 ALERT 编号必须是真实候选的。返回 (status, issues);
+    warning 不阻断(避免误伤),但回灌提示让模型补强证据或下调结论。"""
+    issues: list[str] = []
+    ev_text = " ".join(str(e) for e in evidence)
+    unsupported = [ioc for ioc in novelty.extract_attacker_iocs(claim_text) if ioc not in ev_text]
+    if unsupported:
+        issues.append(f"结论里的攻击者 {unsupported[:5]} 在 evidence 找不到支撑(别下没有证据的判断)")
+    if level in ("P0", "P1") and not evidence:
+        issues.append(f"{level} 高危结论必须附真实日志行作 evidence")
+    cand_ids = _recent_alert_ids(store) if evidence else set()
+    fabricated = [e for e in evidence if (a := _ALERT_RE.findall(str(e))) and not any(x in cand_ids for x in a)]
+    if fabricated:
+        issues.append(f"{len(fabricated)} 条 evidence 引用的 ALERT 编号不在真实候选里(疑似编造)")
+    return ("warning", issues) if issues else ("verified", [])
+
+
 class LogReportTool(_LogOpsTool):
     spec = ToolSpec(
         name="log_report",
@@ -174,9 +204,10 @@ class LogReportTool(_LogOpsTool):
         effect="mutating",
         requires_idempotency=True,
         description=(
-            "向用户提交一条**分级**汇报。level:P0(紧急——攻击得手/数据外泄/在线失陷,需立即处置)、"
-            "P1(重要——确认的攻击尝试)、P2(一般——可疑/扫描/探测)、P3(噪声)。系统按约定的汇报阈值"
-            "决定是否推送用户:低于阈值的只记审计、不打扰用户。**不要什么都报 P0**,按证据严肃定级。"
+            "向用户提交一条**分级**汇报。level:P0(紧急——攻击得手/数据外泄/在线失陷)、P1(重要——确认的攻击尝试)、"
+            "P2(一般——可疑/扫描/探测)、P3(噪声)。系统按汇报阈值决定是否推送用户。**不要什么都报 P0**,按证据严肃定级。"
+            "**evidence 必须放真实日志行(P0/P1 尤其必填):系统会校验你结论里的攻击者 IP 是否在 evidence 有支撑、"
+            "evidence 引用的 ALERT 编号是否真实——别报日志里没有的情节(脑补'内网N台失陷/全网扩散'会被证据校验打回)。**"
         ),
         use_cases=["研判确认一个真实威胁,按严重度分级汇报给用户", "把一组关联事件作为一条 P0/P1 上报"],
         avoid_when=["还没研判清楚/只是猜测时别报", "低价值噪声别硬报高级别凑数"],
@@ -212,16 +243,23 @@ class LogReportTool(_LogOpsTool):
             return _err(self.spec.name, "TOOL_INVALID_ARGUMENTS", "log_report 需要 title。")
         floor = str(store.read_config().get("report_floor") or "P1")
         pushed = level_rank(level) >= level_rank(floor)
+        detail = str(params.get("detail") or "")
+        evidence = params.get("evidence") or []
+        ev_status, ev_issues = _verify_evidence(store, level, f"{title} {detail}", evidence)
         store.append_report({
             "level": level,
             "title": title,
-            "detail": str(params.get("detail") or ""),
-            "evidence": params.get("evidence") or [],
+            "detail": detail,
+            "evidence": evidence,
             "sources": params.get("sources") or [],
             "pushed": pushed,
+            "evidence_status": ev_status,
+            "evidence_issues": ev_issues,
         })
-        msg = f"已推送用户(level {level} ≥ 阈值 {floor})。" if pushed else f"已记入审计但未推送用户(level {level} < 阈值 {floor},避免噪声打扰)。"
-        return _ok(self.spec.name, {"recorded": True, "level": level, "pushed": pushed, "report_floor": floor, "message": msg})
+        msg = f"已推送用户(level {level} ≥ 阈值 {floor})。" if pushed else f"已记入审计但未推送(level {level} < 阈值 {floor})。"
+        if ev_issues:
+            msg += " ⚠️ 证据校验未通过:" + ";".join(ev_issues) + "。报告已记但请补强 evidence 或下调结论,别报没有证据支撑的事。"
+        return _ok(self.spec.name, {"recorded": True, "level": level, "pushed": pushed, "report_floor": floor, "evidence_status": ev_status, "evidence_issues": ev_issues, "message": msg})
 
 
 class LogCrossQueryTool(_LogOpsTool):

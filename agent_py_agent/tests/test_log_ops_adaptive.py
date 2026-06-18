@@ -162,6 +162,21 @@ def test_tool_report_grading_suppresses_low_level(tmp_path: Path) -> None:
     assert len(store.read_reports()) == 2
 
 
+def test_report_evidence_verification(tmp_path: Path) -> None:
+    """证据强绑定(对抗幻觉):①声称IP无evidence支撑→warning ②P0无evidence→warning ③假ALERT→warning ④真证据→verified。"""
+    store, _ = _seed_config(tmp_path, ["/a.log"])
+    store.append_candidates([{"raw_line": "evil 45.1.2.3 ALERT-000123 ssh brute", "alert_id": "ALERT-000123", "severity": "high"}])
+    tool = LogReportTool(tmp_path)
+    r1 = json.loads(tool.execute({"level": "P1", "title": "攻击者 45.1.2.3 爆破", "evidence": ["unrelated log"], "monitor_id": "m"}).output)
+    assert r1["evidence_status"] == "warning" and any("45.1.2.3" in i for i in r1["evidence_issues"])  # 声称IP无支撑
+    r2 = json.loads(tool.execute({"level": "P0", "title": "数据外泄", "monitor_id": "m"}).output)
+    assert r2["evidence_status"] == "warning"  # P0 无 evidence
+    r3 = json.loads(tool.execute({"level": "P1", "title": "x", "evidence": ["fake ALERT-999999 made up"], "monitor_id": "m"}).output)
+    assert r3["evidence_status"] == "warning" and any("编造" in i for i in r3["evidence_issues"])  # 假 ALERT
+    r4 = json.loads(tool.execute({"level": "P1", "title": "攻击者 45.1.2.3", "evidence": ["evil 45.1.2.3 ALERT-000123 ssh brute"], "monitor_id": "m"}).output)
+    assert r4["evidence_status"] == "verified"  # 真IP+真ALERT 都对得上
+
+
 def test_tool_cross_query_correlates_across_sources(tmp_path: Path) -> None:
     store, specs = _seed_config(tmp_path, ["/a.log", "/b.log"])
     store.append_archive(specs[0].source_id, ["evil 1.2.3.4 here", "normal line"])
