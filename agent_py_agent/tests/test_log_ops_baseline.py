@@ -63,3 +63,12 @@ def test_baseline_roundtrip() -> None:
     b = baseline.build_baseline(["user=alice ip=10.0.0.1"] * 50)
     b2 = baseline.SourceBaseline.from_dict(b.to_dict())
     assert b2.records == 50 and b2.fields["user"].values["alice"] == 50
+
+
+def test_numeric_measure_field_skipped() -> None:
+    """纯数值度量字段(ms/rows/port 延迟计数)不做实体检测——每个值本就不同,新值/罕见值无安全意义。"""
+    lines = [f"path=/api ms={i % 200} status=200" for i in range(300)]
+    b = baseline.build_baseline(lines)
+    assert baseline.score_anomaly(b, "path=/api ms=999 status=200", min_records=100)[0] == 0.0  # 新 ms 值(数值)不报
+    s2, r2 = baseline.score_anomaly(b, "path=/etc/shadow ms=50 status=200", min_records=100)
+    assert s2 > 0 and any("path" in x for x in r2)  # 新 path(类别)仍报

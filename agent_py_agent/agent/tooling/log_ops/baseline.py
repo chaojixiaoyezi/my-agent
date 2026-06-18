@@ -93,8 +93,20 @@ def build_baseline(lines: list[str]) -> SourceBaseline:
     return baseline
 
 
+def _is_numeric(value: str) -> bool:
+    try:
+        float(value)
+        return True
+    except ValueError:
+        return False
+
+
 def _score_one_field(field_stat: _FieldStat, value: str) -> str | None:
-    """单字段判定:没见过的值=新实体,见过但占比极低=罕见值;否则正常返回 None。"""
+    """单字段判定:没见过的值=新实体,见过但占比极低=罕见值;否则 None。
+    纯数值度量(ms/rows/port/bytes 等延迟/计数)跳过——它们是度量不是实体,每个值本就不同,新值/罕见值无安全
+    意义(数值类威胁如拖库行数、异常延迟靠正则规则/阈值抓,不靠新实体检测)。"""
+    if _is_numeric(value):
+        return None
     if value not in field_stat.values:
         return "新实体"
     if field_stat.values[value] / max(field_stat.total, 1) < _RARE_RATIO:
