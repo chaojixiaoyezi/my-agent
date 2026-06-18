@@ -56,3 +56,19 @@ def test_ensure_restarts_process_gone(tmp_path, monkeypatch):
     assert result["restarted"] is True
     assert result["pid"] == 312345
     assert result["recovered_from"] == "process_gone"
+
+
+def test_daemon_record_uses_own_start_time_not_inherited(tmp_path):
+    """[R1-T 回归]重启后新 daemon 写自己的 start_time,绝不继承 daemon.json 里旧进程的指纹。
+    否则新 daemon 顶着死进程指纹,liveness 拿真实指纹一比就误判 PID 复用→反复误重启。"""
+    from agent.tooling.log_ops.daemon import _DaemonRunState, _write_daemon_record
+    store = LogOpsStore(tmp_path, "m5")
+    store.ensure_dirs()
+    # 旧 daemon 残留记录(旧 pid + 旧指纹 + 监控起始时间)
+    store.write_daemon({"status": "running", "pid": 11111, "start_time": "OLD-fp", "started_at": 100.0})
+    # 新 daemon 启动,带自己的真实指纹
+    run = _DaemonRunState(store=store, interval=1.0, pid=22222, start_time="NEW-fp")
+    _write_daemon_record(run, "running")
+    rec = store.read_daemon()
+    assert rec["start_time"] == "NEW-fp"  # 用新进程的指纹,不继承旧的(修复反复误重启)
+    assert rec["started_at"] == 100.0  # started_at 仍继承(监控会话连续性,uptime 不清零)

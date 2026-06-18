@@ -183,11 +183,12 @@ class _StopFlag:
 
 @dataclass
 class _DaemonRunState:
-    """daemon 主循环的运行态(pid/间隔/已跑拍数),收敛成一个对象传给心跳记录函数。"""
+    """daemon 主循环的运行态(pid/启动指纹/间隔/已跑拍数),收敛成一个对象传给心跳记录函数。"""
 
     store: LogOpsStore
     interval: float
     pid: int
+    start_time: str | None = None  # 本进程启动指纹(serve 启动时取一次),防 PID 复用误判
     cycles: int = 0
 
 
@@ -207,7 +208,8 @@ def serve(
     _install_signal_handlers(flag)
     interval = max(_MIN_POLL_INTERVAL, float(poll_interval_seconds or _DEFAULT_POLL_INTERVAL))
     metrics = CollectMetrics.from_dict(store.read_metrics())
-    run = _DaemonRunState(store=store, interval=interval, pid=os.getpid())
+    pid = os.getpid()
+    run = _DaemonRunState(store=store, interval=interval, pid=pid, start_time=heartbeat.process_start_time(pid))
     _write_daemon_record(run, "running")
 
     while not flag.stop:
@@ -255,8 +257,9 @@ def _write_daemon_record(run: _DaemonRunState, status: str, *, last_error: str =
     payload: dict[str, Any] = {
         "status": status,
         "pid": run.pid,
-        # 启动指纹:首拍取一次后复用(避免每拍调 ps),让 liveness 能识破 PID 复用(老 daemon 死、同号被顶替)。
-        "start_time": prev.get("start_time") or heartbeat.process_start_time(run.pid),
+        # 启动指纹用本进程自己的(serve 启动时取一次存 run.start_time),绝不继承 daemon.json 里的旧值——
+        # 否则重启后新 daemon 顶着死进程的指纹,liveness 拿新进程真实指纹一比对就误判 PID 复用、反复自愈重启。
+        "start_time": run.start_time,
         "poll_interval_seconds": run.interval,
         "cycles": run.cycles,
         _HEARTBEAT_KEY: time.time(),
