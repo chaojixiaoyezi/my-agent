@@ -25,10 +25,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import baseline
 from .collector import collect_source
 from .splitter import build_splitter
 from .store import CollectMetrics, LogOpsStore, SourceSpec, SourceTick
-from .triage import DEFAULT_RULES, TriageRule, compile_profile_rules, triage_line
+from .triage import DEFAULT_RULES, TriageInput, TriageRule, compile_profile_rules, triage_line
 
 _HEARTBEAT_KEY = "heartbeat_at"
 _DEFAULT_POLL_INTERVAL = 2.0
@@ -67,20 +68,23 @@ def _collect_one_source(
     """
     prev_state = store.read_state(spec.source_id)
     splitter, active_rules = _profile_collect_config(store.read_profile(spec.source_id), rules)
+    baseline_model = baseline.load_baseline(store, spec.source_id)
     result = collect_source(spec.kind, spec.locator, prev_state, splitter=splitter)
     new_lines = result.new_lines
 
     # ① 先全量落存档(不丢的根本保证 —— 即便后面 triage/状态写挂了,原始行也在档里)。
     archived = store.append_archive(spec.source_id, new_lines) if new_lines else 0
 
-    # ② 逐行确定性初筛,命中产候选。行号 = 该源存档里的累计行号(1-based,可回查)。
+    # ② 逐行确定性初筛:正则命中 OR 统计异常(数据驱动)产候选。行号 = 该源存档累计行号(1-based,可回查)。
     base_line_no = _archive_base_line_no(store, spec.source_id, archived)
-    candidates = _triage_new_lines(spec, new_lines, base_line_no, active_rules)
+    candidates = _triage_new_lines(_TriageCtx(spec, active_rules, baseline_model), new_lines, base_line_no)
     if candidates:
         store.append_candidates(candidates)
         urgent = [c for c in candidates if c.get("severity") == "high"]
         if urgent:
             store.append_urgent(urgent)  # 高危 → 紧急队列,供按需唤醒秒级拉研判,不等周期
+    if new_lines:
+        baseline.save_baseline(store, spec.source_id, baseline_model)  # 持久化本拍学到的"正常",跨拍/重启续学
 
     # ③ 原子写该源断点状态(在存档之后,保证"宁可重不可丢")。
     if new_lines or result.state != prev_state:
@@ -106,16 +110,25 @@ def _archive_base_line_no(store: LogOpsStore, source_id: str, archived: int) -> 
     return max(1, total - archived + 1)
 
 
-def _triage_new_lines(
-    spec: SourceSpec,
-    new_lines: list[str],
-    base_line_no: int,
-    rules: list[TriageRule],
-) -> list[dict[str, Any]]:
+@dataclass
+class _TriageCtx:
+    """逐行初筛的不变上下文:源、初筛规则、该源统计基线(收成一个对象,降参数数)。"""
+
+    spec: SourceSpec
+    rules: list[TriageRule]
+    baseline_model: baseline.SourceBaseline
+
+
+def _triage_new_lines(ctx: _TriageCtx, new_lines: list[str], base_line_no: int) -> list[dict[str, Any]]:
+    """逐行初筛:正则命中 或 统计异常都产候选。先用当前基线判异常(旧基线),再只用"正常"行(没命中规则、
+    anomaly 低)更新基线——威胁/异常行不学,避免攻击数据污染基线、把攻击者实体洗成"已知"。"""
     candidates: list[dict[str, Any]] = []
     for idx, raw_line in enumerate(new_lines):
-        candidate = triage_line(spec, line_no=base_line_no + idx, raw_line=raw_line, rules=rules)
-        if candidate is not None:
+        score, reasons = baseline.score_anomaly(ctx.baseline_model, raw_line)
+        candidate = triage_line(ctx.spec, TriageInput(base_line_no + idx, raw_line, (score, reasons)), rules=ctx.rules)
+        if candidate is None:
+            ctx.baseline_model.observe_line(raw_line)  # 只学正常行,威胁不污染基线
+        else:
             candidates.append(candidate)
     return candidates
 

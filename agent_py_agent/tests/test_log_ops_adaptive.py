@@ -191,3 +191,23 @@ def test_daemon_high_severity_to_urgent(tmp_path: Path) -> None:
     urgent = [json.loads(line) for line in open(store.urgent_path, encoding="utf-8")]
     assert all(u["severity"] == "high" for u in urgent)  # 紧急队列只收 high
     assert any("reverse_shell" in u["matched_rules"] for u in urgent)
+
+
+from agent_py_agent.agent.tooling.log_ops import baseline  # noqa: E402
+
+
+def test_daemon_statistical_anomaly_new_entity(tmp_path: Path) -> None:
+    """daemon 数据驱动异常:学够正常(user=alice)后,没见过的 user=mallory(正则不命中)也被统计异常抓成候选。
+    初筛从死正则升级到'偏离正常'的关键——新攻击者/新操作不靠人预先猜规则。"""
+    src = tmp_path / "auth.log"
+    lines = ["user=alice action=read"] * 150 + ["user=mallory action=read"]
+    src.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    store = _store(tmp_path)
+    run_collection_cycle(store, build_source_specs([str(src)]))
+    cands = store.read_candidates()
+    anomaly = [c for c in cands if "statistical_anomaly" in c.get("matched_rules", [])]
+    assert len(anomaly) >= 1 and any("mallory" in c["raw_line"] for c in anomaly)  # 新实体被抓
+    assert anomaly[0].get("anomaly_score", 0) > 0
+    assert not any("alice" in c["raw_line"] for c in cands)  # 正常 alice 不误报
+    sid = build_source_specs([str(src)])[0].source_id
+    assert baseline.load_baseline(store, sid).records >= 150  # 基线落盘续学

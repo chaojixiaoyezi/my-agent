@@ -62,7 +62,8 @@ def test_alert_poll_flags_novel_attackers(tmp_path: Path) -> None:
     assert res["novel_attacker_count"] == 1  # 只有外部 45.x 算新攻击者,内网 10.x 不算
     assert "45.137.21.9" in res["novel_attackers"]
     assert "novelty_alert" in res  # 有新攻击者 → 高亮提示
-    assert res["alerts"][0]["novel"] is True and res["alerts"][1]["novel"] is False
+    assert res["alerts"][0]["novel"] is True  # 45.x 新攻击者被研判
+    assert res["skipped_low_severity"] >= 1  # 内网 low 噪声被跳过,不占研判带宽
 
 
 def test_alert_poll_prioritizes_novel_high(tmp_path: Path) -> None:

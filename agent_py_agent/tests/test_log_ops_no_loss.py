@@ -21,6 +21,7 @@ from agent_py_agent.agent.tooling.log_ops.store import (
     source_id_for,
 )
 from agent_py_agent.agent.tooling.log_ops.triage import (
+    TriageInput,
     extract_alert_id,
     match_rules,
     triage_line,
@@ -58,15 +59,13 @@ def _ref(source_id: str = "s", kind: str = "file", locator: str = "/x.log") -> S
 
 def test_triage_benign_line_no_candidate() -> None:
     assert triage_line(
-        _ref(locator="x"), line_no=1,
-        raw_line="2026-06-16T00:00:01 INFO user alice login ok",
+        _ref(locator="x"), TriageInput(1, "2026-06-16T00:00:01 INFO user alice login ok"),
     ) is None
 
 
 def test_triage_candidate_structure_and_alert_id() -> None:
     cand = triage_line(
-        _ref(), line_no=42,
-        raw_line="2026-06-16T17:44:27.367997+00:00 ALERT ALERT-000003 Reverse shell: /dev/tcp/1.2.3.4/4444",
+        _ref(), TriageInput(42, "2026-06-16T17:44:27.367997+00:00 ALERT ALERT-000003 Reverse shell: /dev/tcp/1.2.3.4/4444"),
     )
     assert cand is not None
     assert cand["alert_id"] == "ALERT-000003"

@@ -1,0 +1,144 @@
+
+from __future__ import annotations
+
+"""统计基线 + 数据驱动异常检测 —— 初筛不只靠死正则,补"偏离正常"判据(新实体 / 罕见值)。
+
+安全初筛纯正则的根本短板:规则定太宽就误报淹没(实测 unusual-ssh-user 占候选 74%),定太窄又漏新型。
+数据驱动做法:先学每源的"正常长相"(各低基数字段的正常值集合),再标"没见过的实体 / 罕见值"——新攻击者、
+新用户、罕见操作天然浮出,不靠人猜规则。高基数字段(时间戳 / 唯一 id)自动识别并跳过(每条都新,无意义)。
+这是 UEBA(用户实体行为分析)的最小内核:实体首现检测 + 罕见度,启发式起步,不上重模型,符合长跑轻量。
+"""
+
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+from ...common.json_io import read_json_object, write_json_file_atomic
+from .store import LogOpsStore
+
+_IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_KV = re.compile(r'([A-Za-z_][\w.]*)\s*[=:]\s*"?([^\s",}\]]+)"?')
+_VALUES_CAP = 256  # 每字段最多记多少不同值(防高基数字段把基线撑爆)
+_HIGH_CARD_RATIO = 0.6  # distinct/total 超过此值 = 高基数字段(时间戳/id),跳过新实体检测
+_RARE_RATIO = 0.01  # 值出现占比低于此 = 罕见值
+
+
+def extract_entities(raw_line: str) -> dict[str, str]:
+    """提取关键实体字段:首个 IP(归 ip 字段) + 所有 key=value / key:value 对。用于新实体 / 罕见值检测。"""
+    ents: dict[str, str] = {}
+    ips = _IPV4.findall(raw_line)
+    if ips:
+        ents["ip"] = ips[0]
+    for key, val in _KV.findall(raw_line):
+        low = key.lower()
+        if low not in ents:  # 同名字段取首个值
+            ents[low] = val
+    return ents
+
+
+@dataclass
+class _FieldStat:
+    """一个字段的统计:见过的值 -> 计数(基数受 _VALUES_CAP 限),以及总观测数。"""
+
+    values: dict[str, int] = field(default_factory=dict)
+    total: int = 0
+
+    def observe(self, value: str) -> None:
+        self.total += 1
+        if value in self.values or len(self.values) < _VALUES_CAP:
+            self.values[value] = self.values.get(value, 0) + 1
+
+    def is_high_card(self) -> bool:
+        """高基数字段(几乎每条都不同,如时间戳/uuid/pid):不适合做新实体检测。"""
+        return self.total >= 20 and len(self.values) / self.total > _HIGH_CARD_RATIO
+
+
+@dataclass
+class SourceBaseline:
+    """一个源的统计基线:各关键字段的正常值集合 + 计数。学正常 → 判偏离。"""
+
+    fields: dict[str, _FieldStat] = field(default_factory=dict)
+    records: int = 0
+
+    def observe_line(self, raw_line: str) -> None:
+        """用一条正常流量更新基线(daemon 持续学,滑动地认识"正常")。"""
+        self.records += 1
+        for key, val in extract_entities(raw_line).items():
+            self.fields.setdefault(key, _FieldStat()).observe(val)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "records": self.records,
+            "fields": {k: {"values": fs.values, "total": fs.total} for k, fs in self.fields.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SourceBaseline":
+        obj = cls(records=int(data.get("records") or 0))
+        for key, fdict in (data.get("fields") or {}).items():
+            obj.fields[key] = _FieldStat(values=dict(fdict.get("values") or {}), total=int(fdict.get("total") or 0))
+        return obj
+
+
+def build_baseline(lines: list[str]) -> SourceBaseline:
+    """从一批样本(探查/备课采样)建初始基线。"""
+    baseline = SourceBaseline()
+    for line in lines:
+        baseline.observe_line(line)
+    return baseline
+
+
+def _score_one_field(field_stat: _FieldStat, value: str) -> str | None:
+    """单字段判定:没见过的值=新实体,见过但占比极低=罕见值;否则正常返回 None。"""
+    if value not in field_stat.values:
+        return "新实体"
+    if field_stat.values[value] / max(field_stat.total, 1) < _RARE_RATIO:
+        return "罕见值"
+    return None
+
+
+def score_anomaly(baseline: SourceBaseline, raw_line: str, *, min_records: int = 100) -> tuple[float, list[str]]:
+    """对一条记录评异常分数 + 原因。判据:低基数字段出现新实体 / 罕见值。
+    基线样本不足 min_records 时返回 (0,[]) —— 冷启动只学不判,避免一开始把什么都当新。"""
+    if baseline.records < min_records:
+        return 0.0, []
+    reasons: list[str] = []
+    checked = 0
+    for key, val in extract_entities(raw_line).items():
+        field_stat = baseline.fields.get(key)
+        if field_stat is None or field_stat.is_high_card():
+            continue  # 无基线 or 高基数字段(时间戳/id)不做新实体检测
+        checked += 1
+        verdict = _score_one_field(field_stat, val)
+        if verdict is not None:
+            reasons.append(f"{key}={verdict}({val})")
+    if not reasons or not checked:
+        return 0.0, []
+    score = min(1.0, 0.4 + len(reasons) / checked)  # 命中即给 0.4 基础分,按命中字段占比叠加
+    return round(score, 3), reasons
+
+
+_SAFE_SOURCE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def load_baseline(store: LogOpsStore, source_id: str) -> SourceBaseline:
+    """读该源落盘基线(没有则空基线,从头学)。"""
+    path = store.baseline_dir / f"{_SAFE_SOURCE.sub('-', source_id)}.json"
+    return SourceBaseline.from_dict(read_json_object(path))
+
+
+def save_baseline(store: LogOpsStore, source_id: str, model: SourceBaseline) -> None:
+    """落盘该源基线(daemon 每拍学完持久化,跨重启续学)。"""
+    store.baseline_dir.mkdir(parents=True, exist_ok=True)
+    path = store.baseline_dir / f"{_SAFE_SOURCE.sub('-', source_id)}.json"
+    write_json_file_atomic(path, model.to_dict())
+
+
+__all__ = [
+    "extract_entities",
+    "SourceBaseline",
+    "build_baseline",
+    "score_anomaly",
+    "load_baseline",
+    "save_baseline",
+]

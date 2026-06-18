@@ -131,46 +131,59 @@ def match_rules(raw_line: str, rules: list[TriageRule] | None = None) -> list[Tr
     return [rule for rule in active if rule.pattern.search(capped)]
 
 
-def triage_line(
-    source: SourceRefLike,
-    *,
-    line_no: int,
-    raw_line: str,
-    rules: list[TriageRule] | None = None,
-) -> dict[str, Any] | None:
-    """对单行初筛:命中任一规则就产候选告警 dict,否则返回 None。
+def _anomaly_severity(score: float) -> str:
+    """统计异常分数 → 严重度。"""
+    if score >= 0.7:
+        return "high"
+    return "medium" if score >= 0.4 else "low"
 
-    候选结构(下游 log_alert_poll 原样给 LLM 研判):
-      fingerprint    唯一指纹(去重/不丢校验)
-      source_id/source_kind/source_locator  源标识(交叉验证用)
-      line_no        在该源存档里的行号(1-based,可回查)
-      raw_line       原始日志行全文(研判证据,不截断)
-      matched_rules  命中的规则名列表
-      severity       命中规则里的最高严重度
-      alert_id       若行内有 ALERT-NNNNNN 则带上(便于一条不丢校验)
-      timestamp      行内 ISO 时间(若能抽到)
-      detected_at    被初筛器处理的 epoch 秒
+
+@dataclass
+class TriageInput:
+    """一条待初筛的行 + 可选统计异常信号(收成对象,把 triage_line 参数压到 ≤4 避免膨胀)。"""
+
+    line_no: int
+    raw_line: str
+    anomaly: tuple[float, list[str]] | None = None
+
+
+def triage_line(source: SourceRefLike, probe: TriageInput, *, rules: list[TriageRule] | None = None) -> dict[str, Any] | None:
+    """对单行初筛:命中任一规则 **或** 统计异常(probe.anomaly 分数>0)就产候选,否则 None。
+
+    数据驱动补正则:正则靠人猜易宽易漏,统计异常(新实体/罕见值)让没见过的攻击者/操作天然浮出。候选结构
+    (下游 log_alert_poll 原样给 LLM):fingerprint/source_*/line_no/raw_line/matched_rules(异常带
+    statistical_anomaly)/severity(规则与异常取最高)/alert_id/timestamp/detected_at;异常另带 anomaly_score+reasons。
     """
-    stripped = raw_line.rstrip("\n")
+    stripped = probe.raw_line.rstrip("\n")
     if not stripped.strip():
         return None
     matched = match_rules(stripped, rules)
-    if not matched:
-        return None
-    severity = max((rule.severity for rule in matched), key=lambda sev: _SEVERITY_RANK.get(sev, 0))
-    return {
-        "fingerprint": line_fingerprint(source.source_id, line_no, stripped),
+    anomaly_score = probe.anomaly[0] if probe.anomaly else 0.0
+    has_anomaly = anomaly_score > 0
+    if not matched and not has_anomaly:
+        return None  # 正则没命中且无统计异常 → 不是候选
+    sevs = [rule.severity for rule in matched]
+    if has_anomaly:
+        sevs.append(_anomaly_severity(anomaly_score))
+    severity = max(sevs, key=lambda sev: _SEVERITY_RANK.get(sev, 0))
+    rule_names = [rule.name for rule in matched] + (["statistical_anomaly"] if has_anomaly else [])
+    candidate = {
+        "fingerprint": line_fingerprint(source.source_id, probe.line_no, stripped),
         "source_id": source.source_id,
         "source_kind": source.kind,
         "source_locator": source.locator,
-        "line_no": line_no,
+        "line_no": probe.line_no,
         "raw_line": stripped,
-        "matched_rules": [rule.name for rule in matched],
+        "matched_rules": rule_names,
         "severity": severity,
         "alert_id": extract_alert_id(stripped),
         "timestamp": _extract_iso_timestamp(stripped),
         "detected_at": time.time(),
     }
+    if has_anomaly:
+        candidate["anomaly_score"] = round(anomaly_score, 3)
+        candidate["anomaly_reasons"] = list(probe.anomaly[1] if probe.anomaly else [])
+    return candidate
 
 
 _ISO_TS_RE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?)")

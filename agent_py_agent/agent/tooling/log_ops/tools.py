@@ -242,6 +242,23 @@ class LogMonitorStatusTool(_LogOpsTool):
         return _ok(self.spec.name, payload)
 
 
+def _select_poll_batch(window: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, Any]], int, int]:
+    """从候选窗口顺序选 ≤limit 个值得研判的(非 low-only 误报),途中跳过 low 误报(消费但不研判,不让噪声拖死
+    poll);选够 limit 就停,剩余"值得研判的"留给下次,不丢真威胁。返回 (batch, consumed=cursor推进量, skipped_low)。"""
+    batch: list[dict[str, Any]] = []
+    consumed = skipped = 0
+    for cand in window:
+        is_noise = str(cand.get("severity", "")).lower() == "low" and not cand.get("novel")
+        if len(batch) >= limit and not is_noise:
+            break  # 已选够,遇到下一个该研判的就停 → 留给下次,不丢
+        consumed += 1
+        if is_noise:
+            skipped += 1
+        else:
+            batch.append(cand)
+    return batch, consumed, skipped
+
+
 class LogAlertPollTool(_LogOpsTool):
     spec = ToolSpec(
         name="log_alert_poll",
@@ -294,17 +311,17 @@ class LogAlertPollTool(_LogOpsTool):
         peek = _coerce_bool(params.get("peek"), default=False)
         cursor = store.read_poll_cursor()
         total = store.count_candidates()
-        # 扫描窗口取 cursor 前方 limit*3(控制窗口内 high 不超 limit 以免漏真威胁),按 novel/severity 优先取 top limit 研判;
-        # 窗口剩余多为 low 误报(unusual-ssh-user 类宽规则占 74%),随 cursor 整窗推进跳过——不让海量误报把 poll 拖死、真威胁饿死。
+        # 扫描窗口,顺序选值得研判的候选,途中跳过 low 误报(消费但不研判)——不让海量误报(实测 unusual-ssh-user 类
+        # 宽规则占 74%)把 poll 拖死、真威胁饿死;选够 limit 就停,剩余真候选留下次,不丢(整窗推进会漏 high,已弃)。
         _sev_rank = {"critical": 0, "high": 0, "medium": 1, "low": 2}
-        window = store.read_candidates(offset=cursor, limit=max(limit * 3, 120))
-        novelty_info = novelty.annotate_novelty(store, window, persist=not peek)  # 整窗标记+持久(都已被看过判定),novel 优先全落入 batch
-        window.sort(key=lambda c: (0 if c.get("novel") else 1, _sev_rank.get(str(c.get("severity", "")).lower(), 2)))
-        batch = window[:limit]
-        skipped_low = max(0, len(window) - len(batch))
-        new_cursor = cursor + len(window)  # 整窗推进:top limit 研判,剩余 low 误报跳过(已判 low,不值得逐条占 LLM)
-        if window and not peek:
+        window = store.read_candidates(offset=cursor, limit=max(limit * 5, 200))
+        novelty.annotate_novelty(store, window, persist=False)  # 先标 novel(选择时豁免 novel 的 low),仅返回的持久
+        batch, consumed, skipped_low = _select_poll_batch(window, limit)
+        new_cursor = cursor + consumed
+        if consumed and not peek:
             store.write_poll_cursor(new_cursor)
+        batch.sort(key=lambda c: (0 if c.get("novel") else 1, _sev_rank.get(str(c.get("severity", "")).lower(), 2)))
+        novelty_info = novelty.annotate_novelty(store, batch, persist=not peek)  # 仅返回研判的并入已见集
         payload = {
             "ok": True,
             "monitor_id": store.monitor_id,
