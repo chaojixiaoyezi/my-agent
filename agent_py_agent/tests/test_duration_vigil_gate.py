@@ -71,6 +71,24 @@ def test_blocks_when_vigil_intent_and_duration_and_elapsed_too_short(tmp_path):
     assert "持续值守" in joined and "wait" in joined
 
 
+def test_briefing_prompt_not_gated(tmp_path):
+    """备课 prompt(含'长期持续监控'但本轮'先不要值班、等我确认')是一次性备课/汇报 run,门必须放行,
+    不能把备课逼进值守循环(实测曾误判卡死 161 分钟)。"""
+    _seed_timeline(tmp_path, started_minutes_ago=5)
+    req = _request("我有10个API要做长期持续监控。先一起分析每个API、定好方案,汇报给我等我确认。这一轮先不要进入长时间值班。")
+    report = _report(tmp_path)
+    assert duration_vigil_rework(req, report) is False  # 备课不被误判为值守
+    assert "duration_vigil_gate" not in report  # 没拦,不写拦截报告
+
+
+def test_real_vigil_still_gated_despite_briefing_words(tmp_path):
+    """真值守 prompt(直接'现在开始持续值班至少2小时')不含'先备课/等确认'否定信号,门照常拦。"""
+    _seed_timeline(tmp_path, started_minutes_ago=10)
+    req = _request("现在正式开始持续值班,运营至少 2 小时,每隔约5分钟 wait 然后 log_alert_poll 研判,坚持到2小时再收尾")
+    report = _report(tmp_path)
+    assert duration_vigil_rework(req, report) is True  # 真值守仍拦
+
+
 def test_english_on_duty_phrasing_triggers(tmp_path):
     _seed_timeline(tmp_path, started_minutes_ago=5)
     req = _request("Keep monitoring the logs and stay on duty for 2 hours, poll every 5 minutes.")

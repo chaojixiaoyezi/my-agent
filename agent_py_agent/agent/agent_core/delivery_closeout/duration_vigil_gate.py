@@ -86,6 +86,15 @@ _INDEFINITE_PATTERNS = (
     r"\bno\s+(time\s+)?(budget|deadline|end|limit)\b",
 )
 
+# 「本轮暂不值守」信号:备课 / 先分析 / 等确认再正式值班——本轮是一次性任务(备课 / 汇报),不是持续值守 run,
+# 门不该拦它交付(否则备课 prompt 里一句"长期持续监控"会把备课 run 逼进值守循环出不来,实测卡死 161 分钟)。
+_DEFER_VIGIL_PATTERNS = (
+    r"(这一?轮|本轮|这次)\s*(先|暂)?\s*(不要?|别|不|无需)\s*(进入|开始|正式)?\s*(长时间|长期)?\s*值",
+    r"(等|待)\s*(我|你|用户)?\s*(确认|看过|审核|同意|没问题)",
+    r"先.{0,15}(分析|采样|备课|摸清|定好?方案|确认).{0,10}(再|然后|之后).{0,8}(值|盯|监控|开始)",
+    r"先别\s*(急着)?\s*(盯|值|监控)",
+)
+
 # 喊停标记文件相对路径(网关收到用户"停/换任务/改目标"时写它);存在即放行,优雅收尾。
 _STOP_FLAG_REL = ("work", "stop_vigil.flag")
 
@@ -115,6 +124,8 @@ def duration_vigil_rework(
         return False
     if not _task_is_vigil_with_intent(params):
         return False
+    if _task_defers_vigil(params):
+        return False  # 本轮明确"先备课/等确认",是一次性任务不是值守 run → 放行,别把备课逼进值守循环
     indefinite = _is_indefinite_vigil(params)
     required_seconds = _required_duration_seconds(params)
     if not indefinite and required_seconds <= 0:
@@ -195,6 +206,16 @@ def _task_is_vigil_with_intent(params: object) -> bool:
         return False
     lowered = text.casefold()
     return any(re.search(pattern, lowered) for pattern in _VIGIL_INTENT_PATTERNS)
+
+
+def _task_defers_vigil(params: object) -> bool:
+    """本轮明确「先不值守」(备课 / 先分析 / 等确认再正式值班):这是一次性备课 / 汇报 run,不是持续值守,
+    门不该拦它交付。区别于真值守 prompt(直接"现在开始持续值班")。"""
+    text = _prompt_text(params)
+    if not text:
+        return False
+    lowered = text.casefold()
+    return any(re.search(pattern, lowered) for pattern in _DEFER_VIGIL_PATTERNS)
 
 
 def _prompt_text(params: object) -> str:
