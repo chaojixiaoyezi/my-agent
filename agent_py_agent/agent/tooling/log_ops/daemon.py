@@ -280,9 +280,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("root", help="`.log_ops` 根目录")
     parser.add_argument("--monitor-id", default="default")
     parser.add_argument("--max-cycles", type=int, default=None, help="跑几拍后退出(测试用,默认无限)")
+    parser.add_argument("--watchdog", action="store_true", help="主动看门狗模式:周期检测 daemon 心跳,异常死亡则重拉")
     args = parser.parse_args(argv)
 
     store = LogOpsStore(Path(args.root), args.monitor_id)
+    if args.watchdog:
+        from .manager import watchdog_serve  # 函数内 import 避免与 manager 循环依赖
+        watchdog_serve(store, max_cycles=args.max_cycles)
+        return 0
     config = store.read_config()
     interval = float(config.get("poll_interval_seconds", _DEFAULT_POLL_INTERVAL) or _DEFAULT_POLL_INTERVAL)
     serve(store, poll_interval_seconds=interval, max_cycles=args.max_cycles)

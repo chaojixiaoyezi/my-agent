@@ -72,3 +72,35 @@ def test_daemon_record_uses_own_start_time_not_inherited(tmp_path):
     rec = store.read_daemon()
     assert rec["start_time"] == "NEW-fp"  # 用新进程的指纹,不继承旧的(修复反复误重启)
     assert rec["started_at"] == 100.0  # started_at 仍继承(监控会话连续性,uptime 不清零)
+
+
+def test_watchdog_serve_respects_stopped(tmp_path, monkeypatch):
+    """[R2]daemon 被 stop → 主动看门狗一同退(尊重喊停),不重拉。"""
+    store = LogOpsStore(tmp_path, "wd1")
+    store.ensure_dirs()
+    store.write_daemon({"status": "stopped", "pid": os.getpid()})
+    calls = []
+    monkeypatch.setattr(mgr, "ensure_daemon_alive", lambda s: calls.append(1))
+    assert mgr.watchdog_serve(store, max_cycles=5, interval=0) == 0  # status stopped 立即退
+    assert calls == []  # 不重拉
+
+
+def test_watchdog_serve_revives_dead_daemon(tmp_path, monkeypatch):
+    """[R2]daemon 进程死了 → 看门狗主动 ensure_daemon_alive 重拉(无需等 agent 查 status)。"""
+    store = LogOpsStore(tmp_path, "wd2")
+    store.ensure_dirs()
+    store.write_daemon({"status": "running", "pid": 2_000_000_000, "start_time": None, "heartbeat_at": 1})
+    calls = []
+    monkeypatch.setattr(mgr, "ensure_daemon_alive", lambda s: calls.append(1))
+    mgr.watchdog_serve(store, max_cycles=2, interval=0)
+    assert len(calls) >= 1  # 检测到死,主动重拉
+
+
+def test_watchdog_singleton(tmp_path, monkeypatch):
+    """[R2]已有活看门狗 → 新看门狗单例退出,不重复守护。"""
+    store = LogOpsStore(tmp_path, "wd3")
+    store.ensure_dirs()
+    from agent.common.json_io import write_json_file_atomic
+    write_json_file_atomic(store.watchdog_path, {"pid": 88888, "start_time": "fp", "heartbeat_at": time.time()})
+    monkeypatch.setattr(mgr.heartbeat, "process_alive", lambda pid, **k: True)
+    assert mgr.watchdog_serve(store, max_cycles=3, interval=0) == 0  # 已有活看门狗,单例退

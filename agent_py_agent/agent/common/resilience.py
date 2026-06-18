@@ -30,21 +30,32 @@ class CircuitBreaker:
 
     threshold: int = 3              # 连续失败几次后熔断(open)
     cooldown_seconds: float = 60.0  # open 后多久允许 half-open 试探
+    success_threshold: int = 1      # half_open 需连续几次成功才完全恢复(closed),默认1向后兼容
     consecutive_failures: int = 0   # 当前连续失败数(成功即清零)
     total_failures: int = 0         # 累计失败数(不清零,供观测/告警文案)
     state: str = "closed"           # closed(正常) / open(熔断) / half_open(试探)
     opened_at: float = 0.0          # 最近一次熔断的时刻
+    half_open_successes: int = 0    # half_open 下累计成功次数(达 success_threshold 才 closed)
 
     def on_success(self) -> None:
-        """一次成功:清零连续失败,回到 closed。"""
-        self.consecutive_failures = 0
-        self.state = "closed"
+        """一次成功。half_open 下需连续 success_threshold 次成功才完全恢复(closed),避免刚试探恢复
+        就被单次偶然成功骗回 closed、紧接着又失败反复抖动(借鉴调研的 success_threshold 渐进恢复)。"""
+        if self.state == "half_open":
+            self.half_open_successes += 1
+            if self.half_open_successes >= self.success_threshold:
+                self.state = "closed"
+                self.consecutive_failures = 0
+                self.half_open_successes = 0
+        else:
+            self.consecutive_failures = 0
+            self.state = "closed"
 
     def on_failure(self, *, now: float) -> bool:
         """记一次失败。返回 True 当且仅当这次失败【刚好】触发熔断(closed/half_open → open),
         供调用方"刚熔断"时主动告警一次(避免每拍重复告警)。"""
         self.consecutive_failures += 1
         self.total_failures += 1
+        self.half_open_successes = 0  # 半开期间一旦失败,清零成功累计(恢复需重新连续成功)
         if self.state != "open" and self.consecutive_failures >= self.threshold:
             self.state = "open"
             self.opened_at = now
@@ -52,9 +63,10 @@ class CircuitBreaker:
         return False
 
     def allow(self, *, now: float) -> bool:
-        """现在是否允许尝试。open 且冷却已到→转 half_open 放一次试探;open 且冷却未到→False(快速失败)。"""
+        """现在是否允许尝试。open 且冷却已到→转 half_open 放试探;open 且冷却未到→False(快速失败)。"""
         if self.state == "open" and now - self.opened_at >= self.cooldown_seconds:
             self.state = "half_open"
+            self.half_open_successes = 0
         return self.state != "open"
 
     def snapshot(self) -> dict[str, object]:
@@ -64,6 +76,7 @@ class CircuitBreaker:
             "consecutive_failures": self.consecutive_failures,
             "total_failures": self.total_failures,
             "opened_at": self.opened_at,
+            "half_open_successes": self.half_open_successes,
         }
 
 

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from ...common import heartbeat
+from ...common.json_io import read_json_object, write_json_file_atomic
 from .store import (
     CollectMetrics,
     LogOpsStore,
@@ -78,6 +79,7 @@ def start_daemon(
             "cycles": 0,
         }
     )
+    _spawn_watchdog(store, python_executable or sys.executable)  # 同时起主动看门狗(单例),daemon 崩了不必等查 status
     return {
         "ok": True,
         "status": "started",
@@ -165,7 +167,49 @@ def ensure_daemon_alive(store: LogOpsStore) -> dict[str, Any]:
     process = _spawn_daemon(store, sys.executable)
     if process is None:
         return {"restarted": False, "alive": False, "reason": "respawn_failed"}
+    _spawn_watchdog(store, sys.executable)  # 自愈后确保看门狗也在(单例,已在则不重起)
     return {"restarted": True, "alive": True, "pid": process.pid, "recovered_from": "process_gone"}
+
+
+# ---- 主动看门狗(R2:补 R1 被动自愈缺口——daemon 崩了不必等 agent 查 status) ----
+_WATCHDOG_INTERVAL = 15.0  # 看门狗检测周期(秒)
+_WATCHDOG_STALE = 90.0     # daemon 心跳超过此秒数没刷新即判异常死亡
+_WATCHDOG_FRESH = 120.0    # 看门狗自身心跳新鲜阈值(单例判活)
+
+
+def _watchdog_alive(store: LogOpsStore) -> bool:
+    """已有活看门狗在守护?(进程在 + 启动指纹符 + 心跳新鲜)。"""
+    rec = read_json_object(store.watchdog_path)
+    pid = int(rec.get("pid", 0) or 0)
+    if pid <= 0 or pid == os.getpid():
+        return False
+    if not heartbeat.process_alive(pid, start_time=rec.get("start_time")):
+        return False
+    return (time.time() - float(rec.get("heartbeat_at", 0) or 0)) < _WATCHDOG_FRESH
+
+
+def watchdog_serve(store: LogOpsStore, *, max_cycles: int | None = None, interval: float | None = None) -> int:
+    """主动看门狗常驻循环:周期检测 daemon 心跳,异常死亡(进程没了/指纹不符/心跳僵死)就主动重拉,
+    无需等 agent 查 status。单例(已有活看门狗则退);daemon 被 stop 则一同退(尊重喊停)。返回跑的拍数。
+    对照 工具运行时 后台心跳检测 + 会话运行时 update_loop,补 R1 看门狗只被动触发的缺口。"""
+    if _watchdog_alive(store):
+        return 0  # 单例:已有看门狗守护中
+    pid = os.getpid()
+    start_time = heartbeat.process_start_time(pid)
+    sleep_s = _WATCHDOG_INTERVAL if interval is None else interval
+    cycles = 0
+    while max_cycles is None or cycles < max_cycles:
+        write_json_file_atomic(store.watchdog_path, {"pid": pid, "start_time": start_time, "heartbeat_at": time.time()})
+        record = store.read_daemon()
+        if str(record.get("status")) == "stopped":
+            break  # 用户喊停,看门狗一同退
+        if heartbeat.is_dead(record, now=time.time(), max_age=_WATCHDOG_STALE):
+            ensure_daemon_alive(store)  # 主动重拉(幂等:daemon 已活则不动)
+        cycles += 1
+        if max_cycles is None or cycles < max_cycles:
+            time.sleep(sleep_s)
+    write_json_file_atomic(store.watchdog_path, {"pid": 0, "heartbeat_at": time.time()})
+    return cycles
 
 
 def reconciliation(store: LogOpsStore) -> dict[str, Any]:
@@ -229,48 +273,47 @@ def _initial_state_for(spec: SourceSpec) -> dict[str, Any]:
     return {}
 
 
-def _spawn_daemon(store: LogOpsStore, python_executable: str) -> subprocess.Popen | None:
-    """以独立会话(start_new_session)拉起 daemon 子进程,stdout/stderr 落 daemon.out 日志。
+def _spawn_bg_process(
+    store: LogOpsStore, python_executable: str, extra_args: list[str], log_name: str
+) -> subprocess.Popen | None:
+    """fork 一个 log_ops 后台进程(daemon/watchdog),独立会话(start_new_session)detached,输出落 log_name。
 
-    独立会话 = agent 退出不连带杀 daemon(撑长跑);与 shell 后台进程同款机制。
+    独立会话 = agent 退出不连带杀它(撑长跑);与 shell 后台进程同款机制。
     """
-    log_path = store.root / "daemon.out.log"
     cmd = [
-        python_executable,
-        "-m",
-        "agent_py_agent.agent.tooling.log_ops.daemon",
-        str(store.root.parent),  # root 根目录(store.root 已含 monitor_id 子目录)
-        "--monitor-id",
-        store.monitor_id,
+        python_executable, "-m", "agent_py_agent.agent.tooling.log_ops.daemon",
+        str(store.root.parent), "--monitor-id", store.monitor_id, *extra_args,
     ]
     repo_root = _repo_root()
     env = dict(os.environ)
     # 保证子进程能 import agent_py_agent(把仓库根放进 PYTHONPATH 头部)。
     env["PYTHONPATH"] = os.pathsep.join([str(repo_root), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
     try:
-        handle = log_path.open("ab")
+        handle: Any = (store.root / log_name).open("ab")
     except OSError:
-        handle = subprocess.DEVNULL  # type: ignore[assignment]
+        handle = subprocess.DEVNULL
+    kwargs: dict[str, Any] = {"cwd": str(repo_root), "stdout": handle, "stderr": subprocess.STDOUT, "env": env}
+    if not _IS_WINDOWS:
+        kwargs["start_new_session"] = True
     try:
-        if _IS_WINDOWS:
-            process = subprocess.Popen(  # noqa: S603
-                cmd, cwd=str(repo_root), stdout=handle, stderr=subprocess.STDOUT, env=env
-            )
-        else:
-            process = subprocess.Popen(  # noqa: S603
-                cmd,
-                cwd=str(repo_root),
-                stdout=handle,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                env=env,
-            )
+        return subprocess.Popen(cmd, **kwargs)  # noqa: S603
     except OSError:
         return None
     finally:
-        if hasattr(handle, "close"):
+        if handle is not subprocess.DEVNULL and hasattr(handle, "close"):
             handle.close()
-    return process
+
+
+def _spawn_daemon(store: LogOpsStore, python_executable: str) -> subprocess.Popen | None:
+    """以独立会话拉起 daemon 子进程,输出落 daemon.out.log。"""
+    return _spawn_bg_process(store, python_executable, [], "daemon.out.log")
+
+
+def _spawn_watchdog(store: LogOpsStore, python_executable: str) -> None:
+    """fork 主动看门狗子进程(detached)。单例:已有活看门狗则不起(watchdog_serve 自身也会单例退出)。"""
+    if _watchdog_alive(store):
+        return
+    _spawn_bg_process(store, python_executable, ["--watchdog"], "watchdog.out.log")
 
 
 def _repo_root() -> Path:

@@ -136,6 +136,7 @@ class LogOpsStore:
         self.archive_dir = self.root / "archive"
         self.config_path = self.root / "config.json"
         self.daemon_path = self.root / "daemon.json"
+        self.watchdog_path = self.root / "watchdog.json"  # 主动看门狗进程的单例锁 + 心跳
         self.candidates_path = self.root / "candidates.jsonl"
         self.urgent_path = self.root / "urgent.jsonl"
         self.poll_cursor_path = self.root / "poll_cursor.json"

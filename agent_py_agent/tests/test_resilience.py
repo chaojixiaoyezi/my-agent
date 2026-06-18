@@ -54,6 +54,31 @@ def test_circuit_breaker_snapshot_serializable():
     assert snap["opened_at"] == 5
 
 
+def test_circuit_breaker_gradual_recovery_needs_consecutive_successes():
+    """[R2]success_threshold=2:half_open 需连续2次成功才完全 closed(防恢复抖动)。"""
+    cb = CircuitBreaker(threshold=2, cooldown_seconds=60, success_threshold=2)
+    cb.on_failure(now=0)
+    cb.on_failure(now=0)
+    cb.allow(now=100)  # → half_open
+    cb.on_success()  # 第1次成功,未达阈值
+    assert cb.state == "half_open"
+    cb.on_success()  # 第2次成功
+    assert cb.state == "closed"  # 连续2次才恢复
+
+
+def test_circuit_breaker_half_open_failure_reopens_and_resets():
+    """[R2]half_open 中途失败→清零成功计数 + 重新 open(恢复需重新连续成功)。"""
+    cb = CircuitBreaker(threshold=2, cooldown_seconds=60, success_threshold=2)
+    cb.on_failure(now=0)
+    cb.on_failure(now=0)
+    cb.allow(now=100)  # half_open
+    cb.on_success()
+    assert cb.half_open_successes == 1
+    cb.on_failure(now=101)  # 失败→重新 open
+    assert cb.state == "open"
+    assert cb.half_open_successes == 0
+
+
 # ---- RateWindow ----
 def test_rate_window_counts_within_window():
     rw = RateWindow(window_seconds=10)
