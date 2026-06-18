@@ -173,10 +173,10 @@ _ALERT_RE = re.compile(r"ALERT-\d+")
 
 
 def _recent_alert_ids(store: Any) -> set[str]:
-    """最近候选的 alert_id 集(evidence 真实性抽查:evidence 引用的 ALERT 编号该是真实候选的)。"""
+    """全部候选的 alert_id 集(evidence 真实性校验:evidence 引用的 ALERT 编号该是真实候选的)。
+    必须查全量——只查最近窗口会把模型引用的早先真 ALERT 误判成编造(实测长跑候选涨到几万后 warning 误判爆炸)。"""
     total = store.count_candidates()
-    recent = store.read_candidates(offset=max(0, total - 3000), limit=3000)
-    return {aid for cand in recent if (aid := cand.get("alert_id"))}
+    return {aid for cand in store.read_candidates(offset=0, limit=total) if (aid := cand.get("alert_id"))}
 
 
 def _verify_evidence(store: Any, level: str, claim_text: str, evidence: list) -> tuple[str, list[str]]:
