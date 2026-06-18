@@ -29,6 +29,23 @@ def test_high_cardinality_field_skipped() -> None:
     assert s == 0.0  # 新 ts 不算异常(高基数跳过), user 已知 → 无异常
 
 
+def test_high_cardinality_via_cap_overflow() -> None:
+    """字段值种类超过 cap(时间戳/id)即使 distinct/total 被大 total 稀释成假低基数,也判高基数跳过(修 cap bug,
+    否则每个新值都误报,实测把候选撑到 200 万)。"""
+    lines = [f"sid=s{i} user=alice" for i in range(300)] + ["sid=s0 user=alice"] * 5000
+    b = baseline.build_baseline(lines)
+    assert b.fields["sid"].is_high_card()  # 300>cap256 种值 → 高基数
+    s, _ = baseline.score_anomaly(b, "sid=sNEW user=alice", min_records=100)
+    assert s == 0.0  # 新 sid 不误报(高基数跳过)
+
+
+def test_extract_strips_timestamp_and_json() -> None:
+    web = baseline.extract_entities('10.0.5.1 - - [2026-06-18T11:23:45+00:00] "GET /x HTTP/1.1" 200')
+    assert "t11" not in web and web.get("ip") == "10.0.5.1"  # 时间戳碎片不入字段
+    js = baseline.extract_entities('{"ts":"2026-06-18T11:23:45+00:00","user":"alice","result":"ok"}')
+    assert js.get("user") == "alice" and js.get("result") == "ok"  # JSON "key":"value" 提取
+
+
 def test_cold_start_no_judgment() -> None:
     b = baseline.build_baseline(["user=alice"] * 10)
     s, r = baseline.score_anomaly(b, "user=mallory", min_records=100)

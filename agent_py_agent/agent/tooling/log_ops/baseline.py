@@ -17,19 +17,22 @@ from ...common.json_io import read_json_object, write_json_file_atomic
 from .store import LogOpsStore
 
 _IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-_KV = re.compile(r'([A-Za-z_][\w.]*)\s*[=:]\s*"?([^\s",}\]]+)"?')
+_KV = re.compile(r'"?([A-Za-z_][\w.]*)"?\s*[=:]\s*"?([^\s",}\]]+)"?')  # 兼容 key=value 和 JSON "key":"value"
 _VALUES_CAP = 256  # 每字段最多记多少不同值(防高基数字段把基线撑爆)
 _HIGH_CARD_RATIO = 0.6  # distinct/total 超过此值 = 高基数字段(时间戳/id),跳过新实体检测
 _RARE_RATIO = 0.01  # 值出现占比低于此 = 罕见值
+_TS_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?")  # 抹时间戳,免 T11:23 误当 kv
 
 
 def extract_entities(raw_line: str) -> dict[str, str]:
-    """提取关键实体字段:首个 IP(归 ip 字段) + 所有 key=value / key:value 对。用于新实体 / 罕见值检测。"""
+    """提取关键实体字段:首个 IP(归 ip 字段) + key=value / key:value 对。先抹掉时间戳,避免 '...T11:23:45' 被
+    误当 kv(t11=23) 制造高基数噪声(实测把候选撑到 200 万)。用于新实体 / 罕见值检测。"""
+    cleaned = _TS_PATTERN.sub(" ", raw_line)
     ents: dict[str, str] = {}
-    ips = _IPV4.findall(raw_line)
+    ips = _IPV4.findall(cleaned)
     if ips:
         ents["ip"] = ips[0]
-    for key, val in _KV.findall(raw_line):
+    for key, val in _KV.findall(cleaned):
         low = key.lower()
         if low not in ents:  # 同名字段取首个值
             ents[low] = val
@@ -49,8 +52,10 @@ class _FieldStat:
             self.values[value] = self.values.get(value, 0) + 1
 
     def is_high_card(self) -> bool:
-        """高基数字段(几乎每条都不同,如时间戳/uuid/pid):不适合做新实体检测。"""
-        return self.total >= 20 and len(self.values) / self.total > _HIGH_CARD_RATIO
+        """高基数字段(几乎每条都不同,如时间戳/uuid/pid):不适合做新实体检测。
+        关键:值种类达到 cap 必判高基数——否则 cap 把 distinct 钉在上限,distinct/total 被大 total 稀释成假低基数,
+        导致每个新时间戳都被当'新实体'误报(实测时间戳类误报占候选 99%+,把候选撑到 200 万)。"""
+        return len(self.values) >= _VALUES_CAP or (self.total >= 20 and len(self.values) / self.total > _HIGH_CARD_RATIO)
 
 
 @dataclass
