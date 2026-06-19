@@ -7,6 +7,7 @@ skills or write long-term memory directly.
 """
 
 import json
+import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -40,6 +41,11 @@ class LearningCandidateListReport:
 
 def _candidate_confidence(occurrence_count: int) -> float:
     return round(min(0.95, 0.45 + max(0, occurrence_count - 1) * 0.12), 2)
+
+
+def _lesson_slug(text: str) -> str:
+    """从 lesson 文本取文件名安全、含关键词的 slug(文件名会进 _stem_matches/_ngram_hit 召回)。"""
+    return re.sub(r"[^\w一-鿿-]+", "-", str(text or "").strip())[:40].strip("-")
 
 
 def _normalize_candidate(payload: dict[str, object]) -> LearningCandidate:
@@ -149,7 +155,30 @@ class SubAgentLearningService:
         candidate = self.load_learning_candidate(candidate_id)
         candidate.status = normalized
         candidate.updated_at = time.time()
-        return self.save_learning_candidate(candidate)
+        saved = self.save_learning_candidate(candidate)
+        if normalized == "accepted":
+            self._promote_to_lesson(saved)  # L8:接通自学习"沉淀→召回"闭环,accept 落成 lesson 文件
+        return saved
+
+    def _promote_to_lesson(self, candidate: LearningCandidate) -> Path | None:
+        """accept 的候选落成 lesson .md,文件名含关键词便于召回;lessons 目录与 builder 召回同源
+        (owner_home_dir/memory/lessons)。owner_home 缺失/lesson 空则跳过(返回 None,不阻断 accept)。"""
+        home = str(getattr(self.manager, "owner_home_dir", "") or "").strip()
+        if not home or not candidate.lesson.strip():
+            return None
+        lessons_dir = Path(home) / "memory" / "lessons"
+        lessons_dir.mkdir(parents=True, exist_ok=True)
+        path = lessons_dir / f"{_lesson_slug(candidate.lesson) or candidate.id}.md"
+        details = (
+            str(it.get("detail") or it.get("text") or it.get("quote") or "").strip()
+            for it in candidate.evidence
+        )
+        evidence = [detail for detail in details if detail]
+        lines = [f"# {candidate.lesson}", "", candidate.lesson]
+        if evidence:
+            lines += ["", "## 证据"] + [f"- {detail}" for detail in evidence[:5]]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
 
     def learning_stats(self) -> dict[str, object]:
         report = self.list_learning_candidates_report()

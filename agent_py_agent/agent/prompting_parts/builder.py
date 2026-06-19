@@ -209,12 +209,14 @@ def _skill_context_chunks(builder: PromptBuilder, user_prompt: str) -> list[str]
             return []
         hits = [
             hit
-            for hit in router.search(str(user_prompt or ""), limit=2, kinds={"skill"})
+            for hit in router.search(str(user_prompt or ""), limit=4, kinds={"skill"})
             if hit.score >= _SKILL_INJECT_MIN_SCORE
         ]
         chunks = [index]
         if hits:
-            chunks.append("# Matched Skills\n" + "\n".join(hit.card.render_compact() for hit in hits))
+            chunks.append(
+                "# Matched Skills\n" + "\n".join(hit.card.render_compact() for hit in hits[:3])
+            )
         return chunks
     except Exception:
         return []
@@ -384,9 +386,26 @@ def _matching_lesson_paths(home_paths: Any, prompt_text: str) -> list[Path]:
     return [path for path in dict.fromkeys(candidates) if path.is_file()]
 
 
-# 函数用途: stem 兜底——文件名(不含扩展名)直接出现在 prompt 里的 lesson。
+# 函数用途: 中文模糊召回——needle(lesson 文件名/触发词)去分隔符拆 3-gram,与 prompt 有 >= min_grams 个
+#   公共 3-gram(≥4 字连续重叠)即算相关。补"完全子串匹配"对中文词序差异/部分提及召回不到的洞(R7 头号
+#   短板:检索偏窄)。用绝对公共 gram 数而非占比——长文件名只要其中一段关键词出现在 prompt 就召回,
+#   又因要 ≥4 字连续重叠而控噪不滥召。
+def _ngram_hit(needle: str, prompt_text: str, *, min_grams: int = 2) -> bool:
+    s = needle.casefold().replace("-", "").replace("_", "").replace(" ", "")
+    if len(s) < 3:
+        return s in prompt_text  # 短词回退完全子串
+    grams = [s[idx:idx + 3] for idx in range(len(s) - 2)]
+    hits = sum(1 for gram in grams if gram in prompt_text)
+    return hits >= min(min_grams, len(grams))
+
+
+# 函数用途: stem 兜底——文件名直接出现 或 中文 3-gram 模糊命中 prompt 的 lesson。
 def _stem_matches(lessons_dir: Path, prompt_text: str) -> list[Path]:
-    return [path for path in sorted(lessons_dir.glob("*.md")) if path.stem.casefold() in prompt_text]
+    return [
+        path
+        for path in sorted(lessons_dir.glob("*.md"))
+        if path.stem.casefold() in prompt_text or _ngram_hit(path.stem, prompt_text)
+    ]
 
 
 # 函数用途: 解析路由索引(lessons 上级 memory/routing/INDEX.md)的各段,
@@ -403,7 +422,7 @@ def _routing_index_matches(lessons_dir: Path, prompt_text: str) -> list[Path]:
         if not keywords or not authority:
             continue
         terms = [term.strip().casefold() for term in keywords.split(",") if term.strip()]
-        if not any(term and term in prompt_text for term in terms):
+        if not any(term and (term in prompt_text or _ngram_hit(term, prompt_text)) for term in terms):
             continue
         candidate = (lessons_dir.parent.parent / authority).resolve(strict=False)
         if candidate.suffix == ".md" and "lessons" in candidate.parts:
