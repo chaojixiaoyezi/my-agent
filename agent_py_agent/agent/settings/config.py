@@ -139,10 +139,10 @@ class _ToolConfigFields:
     tool_detail_max_chars: int = 4000
     tool_retrieval_limit: int = 3
     tool_vector_search_enabled: bool = True
-    # 工具调用协议：text=现有 [TOOL_CALL] 文本协议(默认，保证回退)；
-    # native=在 anthropic_compatible 端点用原生 tool_use(传 tools schema、收结构化块)。
-    # native 仅在 backend 为 anthropic_compatible 时生效，其余后端自动回退 text。
-    tool_protocol: str = "text"
+    # 工具调用协议：native=在 anthropic_compatible 端点用原生 tool_use(传 tools schema、收结构化块，默认，治本根因)；
+    # text=回退到现有 [TOOL_CALL] 文本协议。native 仅在 backend 为 anthropic_compatible 时生效，其余后端自动回退 text。
+    # 切默认 native 依据:Step0-5 迁移完成 + R1-T(56min值守)/R2-T(编码14测试)真机验证 + 集成测试全过;text 保留为回退安全网。
+    tool_protocol: str = "native"
     # MCP 客户端(短板6)：声明要连接的外部 MCP server，把社区现成工具(GitHub/DB/Slack 等)
     # 动态注册成 mcp__<server>__<tool> 前缀的工具。结构：
     #   {server_name: {command: str, args: [..], env: {..}, timeout: int, connect_timeout: int}}
