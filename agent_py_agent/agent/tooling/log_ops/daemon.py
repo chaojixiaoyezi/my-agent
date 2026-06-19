@@ -29,11 +29,13 @@ from ...common import heartbeat, schema_version
 from . import baseline
 from .collector import collect_source
 from .splitter import build_splitter
-from .store import CollectMetrics, LogOpsStore, SourceSpec, SourceTick
+from .store import CollectMetrics, LogOpsStore, SourceSpec, SourceTick, compact_candidates
 from .triage import DEFAULT_RULES, TriageInput, TriageRule, compile_profile_rules, triage_line
 
 _HEARTBEAT_KEY = "heartbeat_at"
 _DAEMON_SCHEMA_VERSION = 1  # daemon.json schema 版本
+_CANDIDATES_COMPACT_EVERY = 200       # 每多少拍检查一次候选队列轮转
+_CANDIDATES_COMPACT_THRESHOLD = 5000  # 已研判候选(cursor)超过此数就轮转归档
 _DEFAULT_POLL_INTERVAL = 2.0
 _MIN_POLL_INTERVAL = 0.05
 
@@ -193,6 +195,12 @@ class _DaemonRunState:
     cycles: int = 0
 
 
+def _maybe_compact_candidates(store: LogOpsStore) -> None:
+    """周期检查:已研判候选(cursor)积累多了就轮转归档,防 candidates 队列无限增长(对称 archive)。"""
+    if store.read_poll_cursor() >= _CANDIDATES_COMPACT_THRESHOLD:
+        compact_candidates(store)
+
+
 def serve(
     store: LogOpsStore,
     *,
@@ -216,6 +224,8 @@ def serve(
     while not flag.stop:
         error = _run_one_cycle(run, metrics, rules)
         run.cycles += 1
+        if run.cycles % _CANDIDATES_COMPACT_EVERY == 0:
+            _maybe_compact_candidates(store)  # 周期轮转候选队列,防无限增长
         _write_daemon_record(run, "running", last_error=error)
         if max_cycles is not None and run.cycles >= max_cycles:
             break

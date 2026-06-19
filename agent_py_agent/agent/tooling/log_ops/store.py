@@ -63,6 +63,15 @@ _ARCHIVE_ROTATE = RotatePolicy(
     max_total_bytes=_env_int("LOGOPS_ARCHIVE_MAX_TOTAL_BYTES", 4 * 1024 * 1024 * 1024),
 )
 
+# candidates 已研判段归档轮转(对称 archive retention,防候选队列无限增长):16MB/段、gzip、总预算 256MB、7天。
+_CANDIDATES_ARCHIVE_ROTATE = RotatePolicy(
+    max_bytes=_env_int("LOGOPS_CAND_ARCHIVE_MAX_BYTES", 16 * 1024 * 1024),
+    backup_count=10,
+    compress=True,
+    retention_seconds=7 * 86400,
+    max_total_bytes=_env_int("LOGOPS_CAND_ARCHIVE_MAX_TOTAL_BYTES", 256 * 1024 * 1024),
+)
+
 # 源采集断路器(可被 LOGOPS_SOURCE_* 覆盖):连续失败 N 拍即熔断,冷却期跳过该源不烧资源,冷却到 half-open 试探。
 _SOURCE_FAIL_THRESHOLD = _env_int("LOGOPS_SOURCE_FAIL_THRESHOLD", 3)
 _SOURCE_COOLDOWN = float(_env_int("LOGOPS_SOURCE_COOLDOWN", 120))
@@ -446,6 +455,29 @@ class SourceTick:
     archived: int
     candidates: int
     cursor: Any
+
+
+def compact_candidates(store: LogOpsStore) -> dict[str, int]:
+    """候选队列轮转(对称 archive retention,防无限增长):cursor 之前的已研判候选归档到
+    candidates.archive.jsonl(带轮转),candidates.jsonl 只留 cursor 之后未研判行,游标重置 0。
+    daemon 单写者拍内调用。安全顺序:先 cursor=0(崩在此后 poll 从头重读未研判、宁重不丢),再原子重写。"""
+    cursor = store.read_poll_cursor()
+    if cursor <= 0 or not store.candidates_path.exists():
+        return {"pruned": 0, "kept": store.count_candidates()}
+    with store.candidates_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        lines = handle.readlines()
+    pruned, kept = lines[:cursor], lines[cursor:]
+    if not pruned:
+        return {"pruned": 0, "kept": len(kept)}
+    append_with_rotation(
+        store.root / "candidates.archive.jsonl", "".join(pruned),
+        _CANDIDATES_ARCHIVE_ROTATE, line_count=len(pruned),
+    )
+    store.write_poll_cursor(0)  # 先清零:崩在此后 poll 从头重读未研判,宁重不丢
+    tmp = store.candidates_path.with_name(store.candidates_path.name + ".tmp")
+    tmp.write_text("".join(kept), encoding="utf-8")
+    os.replace(tmp, store.candidates_path)
+    return {"pruned": len(pruned), "kept": len(kept)}
 
 
 def _coerce_per_source(per_source: Any) -> dict[str, dict[str, Any]]:
