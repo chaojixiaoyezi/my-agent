@@ -125,6 +125,10 @@ def materialize_missing_declared_output_artifacts(
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         source = _copyable_text_artifact_source(target, artifacts)
+        if source is None:
+            # 回退(修 T5 实测:子代理把 declared 同名文件写到自己 work 目录、没落共享 output,
+            # 致 declared 槽只能放 placeholder、主代理读桩瞎找 16 轮):扫 work 捞回同名文件。
+            source = _recover_same_name_artifact_from_work(task, target)
         if source is not None:
             target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
             summary = "copied subagent text artifact into declared output"
@@ -176,6 +180,22 @@ def _copyable_text_artifact_source(target: Path, artifacts: list[dict[str, objec
 
 def _text_artifact_suffix(suffix: str) -> bool:
     return suffix.lower() in {".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".csv"}
+
+
+def _recover_same_name_artifact_from_work(task: SubAgentTask, target: Path) -> Path | None:
+    """子代理把 declared output 同名文件写到了自己 work 目录(没落共享 output)时回退捞回。
+    只认 basename 完全同名(强信号)+唯一+文本后缀,避免误取模板/状态文件;找不到唯一同名则
+    返回 None(保持 placeholder、不瞎猜)。仅在声明 artifacts 里找不到可复制源时兜底调用。"""
+    root = _path_or_none(getattr(task, "task_workspace_dir", ""))
+    if root is None or not root.is_dir():
+        return None
+    matches = [
+        path
+        for path in root.rglob(target.name)
+        if path.is_file() and path != target and _text_artifact_suffix(path.suffix)
+    ]
+    unique = list({path.resolve() for path in matches})
+    return matches[0] if len(unique) == 1 else None
 
 
 def _normalized_artifact_item(task: SubAgentTask, item: object) -> dict[str, object] | None:
