@@ -157,7 +157,7 @@ def _internal_agent_status_payload(path: Path, run_id: str) -> dict[str, object]
     payload: dict[str, object] = {
         "ok": False,
         "error": "internal_agent_status_ref",
-        "message": "This path is an internal agent status surface. Use inspect_agent_tree for run status, then read child_result_index.read_order or declared output files for child results.",
+        "message": "This path is an internal agent status surface; do not list_files/copy it directly. The child's real output files are listed in child_result_index_row.read_order below — read_file those paths directly. Use inspect_agent_tree only for run status.",
         "run_id": run_id,
         "path": str(path),
         "suggested_tool_call": suggestion,
