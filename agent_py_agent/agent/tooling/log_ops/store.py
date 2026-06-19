@@ -31,6 +31,7 @@ from ...common.json_io import (
     read_json_object,
     write_json_file_atomic,
 )
+from ...common import schema_version
 from ...common.resilience import BurstTracker, CircuitBreaker
 from ...common.rotating_log import (
     RotatePolicy,
@@ -62,6 +63,10 @@ _SOURCE_COOLDOWN = 120.0
 # 速率突变检测:同一实体(IP)在最近 _BURST_WINDOW 次实体出现里达 _BURST_THRESHOLD 次 = 突发(暴力破解/扫描)。
 _BURST_WINDOW = 200
 _BURST_THRESHOLD = 30
+
+# metrics.json schema 版本(改字段时 +1 并在 _METRICS_MIGRATIONS 挂 v→v+1 迁移函数)。
+_METRICS_SCHEMA_VERSION = 1
+_METRICS_MIGRATIONS: dict[int, schema_version.Migration] = {}
 
 
 def sanitize_monitor_id(monitor_id: str) -> str:
@@ -403,15 +408,21 @@ class CollectMetrics:
         self.candidates += tick.candidates
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "collected_lines": self.collected_lines,
-            "archived_lines": self.archived_lines,
-            "candidates": self.candidates,
-            "per_source": self.per_source,
-        }
+        return schema_version.stamp(
+            {
+                "collected_lines": self.collected_lines,
+                "archived_lines": self.archived_lines,
+                "candidates": self.candidates,
+                "per_source": self.per_source,
+            },
+            _METRICS_SCHEMA_VERSION,
+        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CollectMetrics:
+        data = schema_version.migrate(
+            dict(data), current_version=_METRICS_SCHEMA_VERSION, migrations=_METRICS_MIGRATIONS
+        )
         metrics = cls()
         metrics.collected_lines = int(data.get("collected_lines", 0) or 0)
         metrics.archived_lines = int(data.get("archived_lines", 0) or 0)

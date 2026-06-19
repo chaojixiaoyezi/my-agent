@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...common import heartbeat
+from ...common import heartbeat, schema_version
 from . import baseline
 from .collector import collect_source
 from .splitter import build_splitter
@@ -33,6 +33,7 @@ from .store import CollectMetrics, LogOpsStore, SourceSpec, SourceTick
 from .triage import DEFAULT_RULES, TriageInput, TriageRule, compile_profile_rules, triage_line
 
 _HEARTBEAT_KEY = "heartbeat_at"
+_DAEMON_SCHEMA_VERSION = 1  # daemon.json schema 版本
 _DEFAULT_POLL_INTERVAL = 2.0
 _MIN_POLL_INTERVAL = 0.05
 
@@ -267,7 +268,7 @@ def _write_daemon_record(run: _DaemonRunState, status: str, *, last_error: str =
     }
     if last_error:
         payload["last_error"] = last_error
-    run.store.write_daemon(payload)
+    run.store.write_daemon(schema_version.stamp(payload, _DAEMON_SCHEMA_VERSION))
 
 
 def main(argv: list[str] | None = None) -> int:

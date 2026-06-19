@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from ...common import schema_version
 from ...common.json_io import read_json_object, write_json_file_atomic
 from .store import LogOpsStore
 
@@ -22,6 +23,9 @@ _VALUES_CAP = 256  # 每字段最多记多少不同值(防高基数字段把基�
 _HIGH_CARD_RATIO = 0.6  # distinct/total 超过此值 = 高基数字段(时间戳/id),跳过新实体检测
 _RARE_RATIO = 0.01  # 值出现占比低于此 = 罕见值
 _DECAY_WINDOW = 100_000  # 超过这么多条记录没再出现的值从基线淘汰(正常模式漂移适应 + 攻击污染可恢复)
+# baseline schema 版本(v1=带 last_seen 衰减字段;无戳的旧基线视为 v0,from_dict 兜底 last_seen 为空)。
+_BASELINE_SCHEMA_VERSION = 1
+_BASELINE_MIGRATIONS: dict[int, schema_version.Migration] = {}
 _TS_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?")  # 抹时间戳,免 T11:23 误当 kv
 
 
@@ -96,16 +100,22 @@ class SourceBaseline:
         return sum(fs.decay(self.records, window) for fs in self.fields.values())
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "records": self.records,
-            "fields": {
-                k: {"values": fs.values, "total": fs.total, "last_seen": fs.last_seen}
-                for k, fs in self.fields.items()
+        return schema_version.stamp(
+            {
+                "records": self.records,
+                "fields": {
+                    k: {"values": fs.values, "total": fs.total, "last_seen": fs.last_seen}
+                    for k, fs in self.fields.items()
+                },
             },
-        }
+            _BASELINE_SCHEMA_VERSION,
+        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SourceBaseline":
+        data = schema_version.migrate(
+            dict(data), current_version=_BASELINE_SCHEMA_VERSION, migrations=_BASELINE_MIGRATIONS
+        )
         obj = cls(records=int(data.get("records") or 0))
         for key, fdict in (data.get("fields") or {}).items():
             obj.fields[key] = _FieldStat(
