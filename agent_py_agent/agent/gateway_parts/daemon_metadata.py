@@ -97,6 +97,9 @@ def _flocked_sidecar(path: Path):
 
 def _flock(handle, *, exclusive: bool) -> None:
     if fcntl is None:
+        if exclusive:
+            from ..common.file_lock_support import warn_file_lock_unavailable_once
+            warn_file_lock_unavailable_once()
         return
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_UN)
 

@@ -96,6 +96,9 @@ def _release_lock_entry(resolved: str, entry: _PathLockEntry) -> None:
 def _lock_os_file(handle: TextIO) -> None:
     if fcntl is not None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    else:
+        from ..common.file_lock_support import warn_file_lock_unavailable_once
+        warn_file_lock_unavailable_once()
 
 
 def _unlock_os_file(handle: TextIO) -> None:

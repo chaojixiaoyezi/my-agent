@@ -244,6 +244,9 @@ def _locked_file_path(path: Path):
 def _flock_exclusive(handle) -> None:
     if fcntl is not None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    else:
+        from .file_lock_support import warn_file_lock_unavailable_once
+        warn_file_lock_unavailable_once()
 
 
 def _flock_unlock(handle) -> None:
