@@ -45,24 +45,31 @@ _MONITOR_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 # source_id 由源类型+源定位算出来,稳定且文件名安全。
 _SOURCE_ID_SAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
-# archive(全量存档)轮转策略:单段 64MB、在线留 30 段、老段 gzip、总预算 4GB、保留 30 天。
+def _env_int(name: str, default: int) -> int:
+    """从环境变量读整数阈值,便于真机测试/调优临时覆盖(不改代码、不动生产默认);缺失/非法用默认。"""
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+# archive 轮转策略(可被 LOGOPS_ARCHIVE_* 环境变量覆盖):单段 64MB、在线 30 段、gzip、总预算 4GB、保留 30 天。
 # 默认偏宽(存档是"一条不丢"的根本,优先全留);真超预算/超龄才删最老段,删量记 sidecar 不破对账。
 _ARCHIVE_ROTATE = RotatePolicy(
-    max_bytes=64 * 1024 * 1024,
-    backup_count=30,
+    max_bytes=_env_int("LOGOPS_ARCHIVE_MAX_BYTES", 64 * 1024 * 1024),
+    backup_count=_env_int("LOGOPS_ARCHIVE_BACKUP_COUNT", 30),
     compress=True,
-    retention_seconds=30 * 86400,
-    max_total_bytes=4 * 1024 * 1024 * 1024,
+    retention_seconds=_env_int("LOGOPS_ARCHIVE_RETENTION_SECONDS", 30 * 86400),
+    max_total_bytes=_env_int("LOGOPS_ARCHIVE_MAX_TOTAL_BYTES", 4 * 1024 * 1024 * 1024),
 )
 
-# 源采集断路器:连续失败 _SOURCE_FAIL_THRESHOLD 拍即熔断,冷却 _SOURCE_COOLDOWN 秒内跳过该源
-# (不反复失败烧资源),冷却到自动 half-open 试探一次。借鉴 长期助手/终端交互 断路器。
-_SOURCE_FAIL_THRESHOLD = 3
-_SOURCE_COOLDOWN = 120.0
+# 源采集断路器(可被 LOGOPS_SOURCE_* 覆盖):连续失败 N 拍即熔断,冷却期跳过该源不烧资源,冷却到 half-open 试探。
+_SOURCE_FAIL_THRESHOLD = _env_int("LOGOPS_SOURCE_FAIL_THRESHOLD", 3)
+_SOURCE_COOLDOWN = float(_env_int("LOGOPS_SOURCE_COOLDOWN", 120))
 
-# 速率突变检测:同一实体(IP)在最近 _BURST_WINDOW 次实体出现里达 _BURST_THRESHOLD 次 = 突发(暴力破解/扫描)。
-_BURST_WINDOW = 200
-_BURST_THRESHOLD = 30
+# 速率突变检测(可被 LOGOPS_BURST_* 覆盖):同一 IP 在最近 _BURST_WINDOW 次出现里达 _BURST_THRESHOLD 次 = 突发。
+_BURST_WINDOW = _env_int("LOGOPS_BURST_WINDOW", 200)
+_BURST_THRESHOLD = _env_int("LOGOPS_BURST_THRESHOLD", 30)
 
 # metrics.json schema 版本(改字段时 +1 并在 _METRICS_MIGRATIONS 挂 v→v+1 迁移函数)。
 _METRICS_SCHEMA_VERSION = 1

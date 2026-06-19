@@ -9,6 +9,7 @@ from __future__ import annotations
 这是 UEBA(用户实体行为分析)的最小内核:实体首现检测 + 罕见度,启发式起步,不上重模型,符合长跑轻量。
 """
 
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,7 +23,16 @@ _KV = re.compile(r'"?([A-Za-z_][\w.]*)"?\s*[=:]\s*"?([^\s",}\]]+)"?')  # 兼容 
 _VALUES_CAP = 256  # 每字段最多记多少不同值(防高基数字段把基线撑爆)
 _HIGH_CARD_RATIO = 0.6  # distinct/total 超过此值 = 高基数字段(时间戳/id),跳过新实体检测
 _RARE_RATIO = 0.01  # 值出现占比低于此 = 罕见值
-_DECAY_WINDOW = 100_000  # 超过这么多条记录没再出现的值从基线淘汰(正常模式漂移适应 + 攻击污染可恢复)
+def _env_int(name: str, default: int) -> int:
+    """环境变量读整数阈值(测试/调优临时覆盖,不改代码);缺失/非法用默认。"""
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+# 超过这么多条记录没再出现的值从基线淘汰(漂移适应 + 攻击污染可恢复)。可被 LOGOPS_DECAY_WINDOW 覆盖。
+_DECAY_WINDOW = _env_int("LOGOPS_DECAY_WINDOW", 100_000)
 # baseline schema 版本(v1=带 last_seen 衰减字段;无戳的旧基线视为 v0,from_dict 兜底 last_seen 为空)。
 _BASELINE_SCHEMA_VERSION = 1
 _BASELINE_MIGRATIONS: dict[int, schema_version.Migration] = {}
