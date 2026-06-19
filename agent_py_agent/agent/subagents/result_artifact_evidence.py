@@ -117,11 +117,13 @@ def materialize_missing_declared_output_artifacts(
     declared = _declared_output_refs(task)
     if not declared:
         return []
-    existing_refs = {artifact_ref(item) for item in artifacts}
     materialized: list[dict[str, object]] = []
     for ref in declared:
         target = _materializable_declared_output_path(task, ref)
-        if target is None or target.exists() or str(target) in existing_refs:
+        # target 存在就跳过(已有真文件);不存在则即使被"声明"过也要兜底——子代理声明 artifact
+        # path 指向 output ≠ 真写到了那(T5 实测:子代理声明在 output、实际写在 work,旧
+        # existing_refs 检查让这种"声明但没落"漏过兜底、output 遂为空、主代理读扑空瞎找)。
+        if target is None or target.exists():
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         source = _copyable_text_artifact_source(target, artifacts)

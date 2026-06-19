@@ -66,3 +66,18 @@ def test_placeholder_when_multiple_same_name_ambiguous(tmp_path):
 
     assert len(out) == 1
     assert out[0].get("placeholder") is True  # 多个同名歧义 → 不瞎猜
+
+
+def test_recovers_when_declared_claimed_but_not_written(tmp_path):
+    """A1:子代理声明 artifact path 在 output 但实际没写到那(写在 work)→ 不被 existing_refs
+    跳过(声明≠真写到),回退扫 work 捞回真内容(修 T5 schema-version 子代理读扑空瞎找)。"""
+    sub = tmp_path / "agents" / "sub-1"
+    sub.mkdir(parents=True)
+    (sub / "report.md").write_text("真实报告(子代理写在 work)", encoding="utf-8")
+    claimed = [{"path": str(tmp_path / "report.md"), "kind": "md"}]  # 声明在 output 但没真写
+
+    out = materialize_missing_declared_output_artifacts(_task(tmp_path), _parsed(), claimed)
+
+    declared = tmp_path / "report.md"
+    assert declared.exists()
+    assert "真实报告" in declared.read_text(encoding="utf-8")  # 声明但没写 → 仍捞回填入
