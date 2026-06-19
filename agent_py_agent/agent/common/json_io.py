@@ -183,14 +183,20 @@ def write_jsonl_records(path: Path, records: list[dict[str, object]], *, sort_ke
 
 
 def append_jsonl_records(path: Path, records: list[dict[str, object]], *, sort_keys: bool = True) -> None:
-    """Append JSONL records, doing nothing for an empty batch."""
+    """并发安全地 append 一批 JSONL 记录(空批不操作)。
 
+    并发加固(C2/C3,修 H5 审计裸写/H8 非原子):整批先拼成一个 blob、再在 per-path 线程锁 +
+    fcntl 排他锁内一次写入——多进程/多线程同时 append 同一审计/记录文件时不再撕行/交错。
+    """
     if not records:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=sort_keys) + "\n")
+    blob = "".join(
+        json.dumps(record, ensure_ascii=False, sort_keys=sort_keys) + "\n" for record in records
+    )
+    with locked_json_path(path):
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(blob)
 
 
 def _path_lock(path: Path) -> threading.Lock:

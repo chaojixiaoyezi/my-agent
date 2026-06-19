@@ -74,6 +74,19 @@ class OptimisticLock:
             write_json_file_atomic_unlocked(lock_path, data)
             return new_version
 
+    def cas_update(self, task_id: str, mutate, *, max_retries: int = 3) -> int:
+        """乐观锁 CAS 自动重试(C4):读版本 → 调 mutate()(幂等业务变更)→ release;版本冲突则重读重做。
+        mutate 是无参回调,冲突重试时会被重跑、必须幂等。超 max_retries 仍冲突则抛 ConcurrencyConflictError。"""
+        last_exc = None
+        for _ in range(max(1, max_retries)):
+            version = self.acquire(task_id)
+            mutate()
+            try:
+                return self.release(task_id, version)
+            except ConcurrencyConflictError as exc:
+                last_exc = exc
+        raise last_exc  # type: ignore[misc]
+
     def get_version(self, task_id: str) -> int:
         return self.acquire(task_id)
 
