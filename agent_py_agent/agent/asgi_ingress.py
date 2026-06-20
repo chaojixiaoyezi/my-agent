@@ -17,6 +17,7 @@ import json
 from dataclasses import dataclass
 
 from agent_py_agent.agent.adapter import feishu_crypto
+from agent_py_agent.agent.graceful import DrainState
 from agent_py_agent.agent.ingress_queue import IngressQueue, QueueBackpressure
 from agent_py_agent.agent.observability.metrics import Counter, MetricsRegistry
 
@@ -82,8 +83,8 @@ def _enqueue_event(queue: IngressQueue, inner: dict, events: Counter) -> "Respon
     return Response('{"code":0}', media_type="application/json")  # 立即 ack,LLM 留 worker
 
 
-def create_ingress_app(queue: IngressQueue, config: FeishuIngressConfig, registry: MetricsRegistry | None = None):
-    """造异步入站 ASGI app(FastAPI)。queue=入站队列,config=飞书凭据,registry=指标(默认新建)。"""
+def create_ingress_app(queue: IngressQueue, config: FeishuIngressConfig, registry: MetricsRegistry | None = None, drain: DrainState | None = None):
+    """造异步入站 ASGI app(FastAPI)。queue=入站队列,config=飞书凭据,registry=指标,drain=退出漏排门。"""
     if not _HAS_FASTAPI:
         raise RuntimeError("ASGI 入站层需 fastapi/uvicorn:pip install 'my-agent[scale]'")
     reg = registry or MetricsRegistry()
@@ -107,6 +108,8 @@ def create_ingress_app(queue: IngressQueue, config: FeishuIngressConfig, registr
 
     @app.get("/readyz")
     async def readyz() -> Response:  # noqa: ANN202
+        if drain is not None and drain.is_draining():  # 退出漏排:转 503 让 LB/Service 摘流量(零停机滚动)
+            return Response('{"status":"draining"}', status_code=503, media_type="application/json")
         try:
             queue.stats()  # 探 DB/队列可达
         except Exception:

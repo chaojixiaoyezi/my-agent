@@ -1,0 +1,76 @@
+# Tier 5: worker 层(无状态消费者,按队列深度扩缩)。Deployment + KEDA ScaledObject + PDB。
+# worker 不收 HTTP、纯消费队列(SKIP-LOCKED 分发),可横向加副本 —— 无状态是 my-agent 能多副本的根因。
+# 扩缩信号 = 队列待处理积压(IO/LLM-bound 负载,CPU 不准),研究核验三家都没做队列深度 HPA。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-agent-worker
+  labels: { app: my-agent, tier: worker }
+spec:
+  replicas: 2   # 实际副本数由下方 KEDA ScaledObject 接管
+  selector:
+    matchLabels: { app: my-agent, tier: worker }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 50% }
+  template:
+    metadata:
+      labels: { app: my-agent, tier: worker }
+    spec:
+      # LLM turn 可能数十秒;给在途消息跑完的余量(配 worker 池 SIGTERM→停领新活、心跳续租跑完在途)
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: my-agent:latest
+          command: ["python", "-m", "agent_py_agent.agent.worker_entry"]
+          env:
+            - { name: DATABASE_URL, valueFrom: { secretKeyRef: { name: my-agent-db, key: url } } }
+            - { name: WORKER_CONCURRENCY, value: "4" }
+            - { name: WORKER_HANDLER, value: "agent_py_agent.agent.worker_handler:handle" }
+          resources:
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits: { cpu: "2", memory: "1Gi" }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+---
+# KEDA 用 PostgreSQL scaler 直接读队列表的待处理积压做扩缩(零额外埋点)
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: my-agent-db-auth
+spec:
+  secretTargetRef:
+    - { parameter: connection, name: my-agent-db, key: url }
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: my-agent-worker
+spec:
+  scaleTargetRef:
+    name: my-agent-worker
+  minReplicaCount: 2
+  maxReplicaCount: 100
+  cooldownPeriod: 120
+  triggers:
+    - type: postgresql
+      metadata:
+        targetQueryValue: "20"   # 目标:每副本约 20 条待处理积压;积压涨则扩副本
+        query: "SELECT count(*) FROM ingress_messages WHERE status = 'pending'"
+      authenticationRef:
+        name: my-agent-db-auth
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: my-agent-worker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: my-agent, tier: worker }

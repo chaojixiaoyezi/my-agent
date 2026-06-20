@@ -1,0 +1,93 @@
+# Tier 5: ASGI 入站层(无状态,按 RPS/CPU 扩缩)。Deployment + Service + HPA + PDB。
+# 零停机滚动:maxUnavailable:0(新 pod 就绪前不减旧)+ readyz 就绪门 + preStop 漏排。
+# my-agent 入站无状态(状态在 PG/队列),故可真 RollingUpdate —— 解掉了 通道运行时 Recreate+单副本约束。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-agent-ingress
+  labels: { app: my-agent, tier: ingress }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: my-agent, tier: ingress }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0      # 旧 pod 在新 pod 就绪前不下线 → 容量不掉 → 零停机
+      maxSurge: 25%
+  template:
+    metadata:
+      labels: { app: my-agent, tier: ingress }
+    spec:
+      terminationGracePeriodSeconds: 60   # 给在途 HTTP + 就绪门摘流量留时间(研究:三家都没配)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: ingress
+          image: my-agent:latest
+          command: ["python", "-m", "agent_py_agent.agent.asgi_entry"]
+          ports: [{ containerPort: 8080, name: http }]
+          env:
+            - { name: DATABASE_URL, valueFrom: { secretKeyRef: { name: my-agent-db, key: url } } }
+            - { name: FEISHU_ENCRYPT_KEY, valueFrom: { secretKeyRef: { name: my-agent-feishu, key: encrypt_key } } }
+          # liveness:进程活着即可(卡死才重启);readiness:探队列 + 退出漏排门(503 即摘流量)
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            periodSeconds: 5
+            failureThreshold: 2
+          lifecycle:
+            preStop:
+              exec: { command: ["sleep", "5"] }   # 等 Service endpoint 摘除传播,避免新流量打到将退的 pod
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits: { cpu: "1", memory: "512Mi" }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-agent-ingress
+  labels: { app: my-agent, tier: ingress }
+spec:
+  selector: { app: my-agent, tier: ingress }
+  ports: [{ port: 80, targetPort: 8080, name: http }]
+---
+# 入站按 CPU 扩缩(HTTP 校验/解密是 CPU-bound);稳定窗口防抖动
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: my-agent-ingress
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-agent-ingress
+  minReplicas: 3
+  maxReplicas: 50
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300   # 缩容慢(防抖)
+---
+# 防节点维护/滚动时把入站副本一次全干掉(研究:三家都没 PDB)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: my-agent-ingress
+spec:
+  minAvailable: 50%
+  selector:
+    matchLabels: { app: my-agent, tier: ingress }
