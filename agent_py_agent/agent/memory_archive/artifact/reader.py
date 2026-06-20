@@ -47,7 +47,20 @@ def read_tool_output_artifact(request: ReadToolOutputArtifactRequest) -> dict[st
     record = _find_index_record(root, artifact_ref, request)
     if record is None:
         return _error_payload("artifact_not_registered", artifact_ref, "artifact ref was not found in tool output index")
-    path = Path(str(record.get("path", "") or "")).expanduser().resolve(strict=False)
+    registered_path = str(record.get("path", "") or "").strip()
+    if not registered_path:
+        # 记录命中(scoped_call_id 在 index 里)但 path 为空 —— 该工具输出从未外置成可读 blob
+        # (compaction 期间 output_externalized=false / CONTEXT_COMPACT_DEFERRED,或低于外置阈值)。
+        # 旧逻辑让空 path 落成 Path("")→cwd→误报 artifact_path_outside_tool_outputs,模型照
+        # reducer policy"use scoped_call_id for read_artifact"反复重试同一个读不到的 ref。改为返回
+        # 明确语义 + 原始来源,让模型直接 read_file 源(真机 stage4:每 compaction 周期省 ~3 轮瞎试)。
+        source = _record_source_hint(record)
+        message = (
+            "该工具输出未外置成可读 artifact(output_externalized=false);"
+            + (f"直接 read_file 原始来源:{source}" if source else "请改用直接读取(read_file/重跑工具)推进,勿重试该 ref")
+        )
+        return _error_payload("artifact_not_externalized", artifact_ref, message)
+    path = Path(registered_path).expanduser().resolve(strict=False)
     allowed_roots = _tool_output_roots(root)
     if not any(_is_under_allowed_root(path, allowed_root) for allowed_root in allowed_roots):
         return _error_payload("artifact_path_outside_tool_outputs", artifact_ref, "registered path is outside tool_outputs")
@@ -245,6 +258,18 @@ def _index_records(index_path: Path) -> list[dict[str, Any]]:
         if isinstance(record, dict):
             records.append(record)
     return records
+
+
+def _record_source_hint(record: dict[str, Any]) -> str:
+    # 未外置记录里仍留着"这条 tool output 当初读/跑的是什么"——优先 source_input,其次原始
+    # 参数里的 path,给模型一个能直接 read_file 的具体来源,免去 compaction 后瞎找。
+    params = record.get("parameters") if isinstance(record.get("parameters"), dict) else {}
+    return str(
+        record.get("source_input")
+        or record.get("source_path")
+        or (params.get("path") if isinstance(params, dict) else "")
+        or ""
+    ).strip()
 
 
 def _error_payload(error_code: str, artifact_ref: str, message: str) -> dict[str, Any]:

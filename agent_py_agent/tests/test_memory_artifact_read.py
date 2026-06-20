@@ -473,6 +473,73 @@ def test_read_artifact_finds_task_work_index_from_owner_root(tmp_path: Path) -> 
     assert not (owner / "blobs" / "tool_outputs" / "index.jsonl").exists()
 
 
+def _write_unexternalized_stub_record(root: Path, *, scoped_call_id: str, source: str = "") -> None:
+    # 模拟 compaction 期间被 deferred、未外置成 blob 的 tool output 在 index 里留下的 stub:
+    # scoped_call_id 在、path 为空(真机 stage4 实测 40 条里 37 条如此)。
+    index_dir = root / "blobs" / "tool_outputs"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "schema": {"name": "tool_output_index", "version": 2},
+        "kind": "tool_call",
+        "tool": "read_file",
+        "call_id": scoped_call_id.split(":", 1)[-1],
+        "scoped_call_id": scoped_call_id,
+        "run_id": scoped_call_id.split(":", 1)[0],
+        "request_id": scoped_call_id.split(":", 1)[0],
+        "task_id": scoped_call_id.split(":", 1)[0],
+        "output_externalized": False,
+        "error_code": "CONTEXT_COMPACT_DEFERRED",
+        "path": "",
+        "source_input": source,
+        "size_bytes": 131,
+    }
+    (index_dir / "index.jsonl").write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def test_read_artifact_empty_path_record_reports_not_externalized_with_source(tmp_path: Path) -> None:
+    """compaction 期间未外置的 tool output 在 index 里是 path 为空的 stub。read_artifact 命中它时,
+    旧逻辑让空 path 落成 Path("")→cwd→误报 artifact_path_outside_tool_outputs,模型照 reducer policy
+    反复重试同一个读不到的 ref(stage4 真机每 compaction 周期浪费 ~3 轮)。修复后:返回明确的
+    artifact_not_externalized + 原始来源,让模型直接 read_file 源、不再瞎试。"""
+    scoped = "run-1781948513617517000:call_function_vk8xqz6x7b4m_2"
+    source = "/repo/agent_py_agent/agent/agent_core/tool_context/microcompact.py"
+    _write_unexternalized_stub_record(tmp_path, scoped_call_id=scoped, source=source)
+
+    from agent_py_agent.agent.memory_archive.artifact.reader import (
+        ReadToolOutputArtifactRequest,
+        read_tool_output_artifact,
+    )
+
+    payload = read_tool_output_artifact(
+        ReadToolOutputArtifactRequest(root=tmp_path, artifact_ref=scoped, run_id="run-1781948513617517000")
+    )
+
+    assert payload["ok"] is False
+    assert payload["error_code"] == "artifact_not_externalized"          # 明确语义
+    assert payload["error_code"] != "artifact_path_outside_tool_outputs"  # 不再误报越界
+    assert source in payload["message"]                                   # 给了来源,模型可直接读
+    assert "content" not in payload
+
+
+def test_read_artifact_empty_path_without_source_still_not_externalized(tmp_path: Path) -> None:
+    """空 path 且无 source_input → 仍返回 artifact_not_externalized(非 outside),给兜底指引。"""
+    scoped = "run-x:call_function_nosrc_1"
+    _write_unexternalized_stub_record(tmp_path, scoped_call_id=scoped, source="")
+
+    from agent_py_agent.agent.memory_archive.artifact.reader import (
+        ReadToolOutputArtifactRequest,
+        read_tool_output_artifact,
+    )
+
+    payload = read_tool_output_artifact(
+        ReadToolOutputArtifactRequest(root=tmp_path, artifact_ref=scoped, run_id="run-x")
+    )
+
+    assert payload["ok"] is False
+    assert payload["error_code"] == "artifact_not_externalized"
+    assert "read_file" in payload["message"] or "直接读取" in payload["message"]
+
+
 def _write_externalized_tool_output(
     root: Path,
     *,

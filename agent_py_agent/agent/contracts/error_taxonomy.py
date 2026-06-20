@@ -332,6 +332,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="已注册路径在 tool_outputs 之外，不能经 read_artifact 读；改用 read_file 读该文件。",
     ),
+    "ARTIFACT_NOT_EXTERNALIZED": ErrorContract(
+        code="ARTIFACT_NOT_EXTERNALIZED",
+        category="artifact",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="该工具输出未外置成可读 blob（compaction 期间 deferred 或低于阈值，index 记录 path 为空）；别重试该 ref，直接按 message 里的 source 用 read_file 读原始来源。",
+    ),
     "ARTIFACT_UNREADABLE": ErrorContract(
         code="ARTIFACT_UNREADABLE",
         category="artifact",
