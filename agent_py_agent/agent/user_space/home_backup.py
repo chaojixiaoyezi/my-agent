@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -76,8 +77,64 @@ def create_home_backup_snapshot(home: MyAgentHomePaths, *, reason: str = "") -> 
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
         copied.append(str(rel))
-    _update_manifest(manifest.manifest_path, {"mode": "snapshot", "copied_roots": copied})
+    # Phase 4B(学 claw):存每文件 sha256+字节数清单,供恢复前完整性校验(防备份损坏/被篡改)。
+    _update_manifest(
+        manifest.manifest_path,
+        {"mode": "snapshot", "copied_roots": copied, "checksums": _compute_checksums(files_root)},
+    )
     return manifest
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _compute_checksums(files_root: Path) -> dict[str, dict[str, object]]:
+    """备份区每文件 → {sha256, size}(相对 files_root 的路径为键)。"""
+    out: dict[str, dict[str, object]] = {}
+    for path in _snapshot_files(files_root):
+        out[str(path.relative_to(files_root))] = {"sha256": _file_sha256(path), "size": path.stat().st_size}
+    return out
+
+
+@dataclass(frozen=True)
+class HomeBackupVerifyResult:
+    backup_dir: Path
+    ok: bool
+    checked: int
+    mismatches: tuple[str, ...]  # 哈希/大小不符或缺失的文件相对路径
+
+
+def verify_home_backup_snapshot(backup_dir: str | Path) -> HomeBackupVerifyResult:
+    """恢复前完整性校验:重算备份区每文件 sha256/size 与 manifest 比对(学 claw 恢复前校验)。"""
+    root = Path(backup_dir)
+    files_root = root / "files"
+    manifest = read_json_object(root / "manifest.json")
+    recorded = manifest.get("checksums") if isinstance(manifest, dict) else {}
+    recorded = recorded if isinstance(recorded, dict) else {}
+    mismatches: list[str] = []
+    for rel, meta in recorded.items():
+        target = files_root / rel
+        if not target.is_file():
+            mismatches.append(rel)
+            continue
+        if not isinstance(meta, dict) or _file_sha256(target) != str(meta.get("sha256", "")):
+            mismatches.append(rel)
+    return HomeBackupVerifyResult(
+        backup_dir=root, ok=not mismatches, checked=len(recorded), mismatches=tuple(mismatches)
+    )
+
+
+def restore_home_backup_snapshot_checked(home: MyAgentHomePaths, backup_dir: str | Path) -> HomeBackupRestoreResult:
+    """先完整性校验、通过才恢复(fail-closed:校验不过抛 ValueError,绝不用损坏备份覆盖现状)。"""
+    verdict = verify_home_backup_snapshot(backup_dir)
+    if not verdict.ok:
+        raise ValueError(f"备份完整性校验未通过,拒绝恢复;问题文件:{list(verdict.mismatches)[:5]}")
+    return restore_home_backup_snapshot(home, backup_dir)
 
 
 def restore_home_backup_snapshot(home: MyAgentHomePaths, backup_dir: str | Path) -> HomeBackupRestoreResult:
@@ -173,10 +230,13 @@ __all__ = [
     "HomeBackupSnapshotsReport",
     "HomeBackupRestoreResult",
     "HomeBackupRestorePlan",
+    "HomeBackupVerifyResult",
     "create_home_backup_manifest",
     "create_home_backup_snapshot",
     "latest_home_backup_snapshots",
     "latest_home_backup_snapshots_report",
     "plan_home_backup_restore",
     "restore_home_backup_snapshot",
+    "restore_home_backup_snapshot_checked",
+    "verify_home_backup_snapshot",
 ]
