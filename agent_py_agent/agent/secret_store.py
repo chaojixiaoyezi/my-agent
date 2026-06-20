@@ -22,6 +22,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .common.json_io import locked_json_path
+
 try:  # 唯一的"借库"且可选:加密原语(stdlib 无 AES,不能自建)
     from cryptography.fernet import Fernet, InvalidToken
 
@@ -30,6 +32,10 @@ except ImportError:  # 没装也能用,降级到 0o600+base64 并诚实标注未
     _HAS_CRYPTO = False
 
 _REF_PREFIX = "sec_"
+
+
+class SecretStoreError(RuntimeError):
+    """密钥库操作错误(如文件损坏时拒绝写入,防覆盖销毁其余密钥)。"""
 
 
 @dataclass(frozen=True)
@@ -106,6 +112,18 @@ class SecretStore:
             return {}
         return data if isinstance(data, dict) else {}
 
+    def _read_for_mutation(self) -> dict[str, dict[str, object]]:
+        """写路径专用:文件不存在 → {};存在但损坏 → 抛错(绝不当空,防被一条 register 覆盖销毁其余密钥)。"""
+        if not self._store_path.exists():
+            return {}
+        try:
+            data = json.loads(self._store_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SecretStoreError(f"密钥库文件损坏,拒绝写入以免覆盖销毁其余密钥: {type(exc).__name__}") from exc
+        if not isinstance(data, dict):
+            raise SecretStoreError("密钥库文件根不是对象,拒绝写入以免覆盖")
+        return data
+
     def _write(self, data: dict[str, dict[str, object]]) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
         tmp = self._store_path.with_name(self._store_path.name + ".tmp")
@@ -122,9 +140,10 @@ class SecretStore:
             raise ValueError("secret value required")
         ref = _REF_PREFIX + _stdlib_secrets.token_hex(12)
         payload, encrypted = self._seal(value)
-        data = self._read()
-        data[ref] = {"name": name, "ciphertext": payload, "encrypted": encrypted, "created_at": time.time()}
-        self._write(data)
+        with locked_json_path(self._store_path):  # 线程锁+flock:读改写原子,防并发丢密钥
+            data = self._read_for_mutation()  # 损坏则抛,不覆盖销毁
+            data[ref] = {"name": name, "ciphertext": payload, "encrypted": encrypted, "created_at": time.time()}
+            self._write(data)
         return ref
 
     def exists(self, ref: str) -> bool:
@@ -150,11 +169,12 @@ class SecretStore:
         )
 
     def remove(self, ref: str) -> bool:
-        data = self._read()
-        if ref not in data:
-            return False
-        del data[ref]
-        self._write(data)
+        with locked_json_path(self._store_path):  # 与 register 同一把锁,读改写原子
+            data = self._read_for_mutation()
+            if ref not in data:
+                return False
+            del data[ref]
+            self._write(data)
         return True
 
     def resolve_plaintext_for_gateway(self, ref: str) -> str:
