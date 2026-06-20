@@ -328,10 +328,8 @@ def _build_gateway_auth_middleware(config) -> AuthMiddleware | None:
     """
     if not getattr(config, "auth_enabled", True):
         return None
-    return AuthMiddleware(AuthManager(
-        admin_user_id=getattr(config, "admin_user_id", "admin"),
-        auth_enabled=True,
-    ))
+    manager = AuthManager(admin_user_id=getattr(config, "admin_user_id", "admin"), auth_enabled=True)
+    return AuthMiddleware(manager, auth_token=getattr(config, "gateway_auth_token", ""))
 
 
 def _cmd_gateway_run_threads(request: GatewayThreadsRequest):

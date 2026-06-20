@@ -350,6 +350,10 @@ gateway_port: 8420
 # (防"绑 0.0.0.0 + 无鉴权 = 任意网络客户端被当 admin 驱动 agent")。
 gateway_bind_host: "127.0.0.1"
 
+# 网关局部信任 token(暴露部署用)。默认空 = 只靠回环来源信任(本机适配器/CLI 走 127.0.0.1)。
+# 非空时,非回环来源的请求必须携带匹配的 X-Gateway-Token 头才被信任(否则降为匿名 USER、绝不 admin)。
+gateway_auth_token: ""
+
 # 外部聊天工具 / TUI 文件适配器工作区。
 # 第一版 adapter file 会从 inbox 读 JSON 消息，把结果写到 outbox。
 adapter_workspace: ""

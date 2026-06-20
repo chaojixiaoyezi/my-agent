@@ -114,10 +114,17 @@ class ChannelManager:
         import urllib.request
 
         payload = _gateway_ask_payload(msg)
+        # 转发真实渠道身份(走 127.0.0.1 回环=网关可信来源):渠道用户拿到自己的身份/USER 角色,
+        # 不再因"缺头"被当本机终端 admin(审计 #2:渠道用户全跑成 admin)。
+        headers = {"Content-Type": "application/json"}
+        if msg.user_id:
+            headers["X-User-Id"] = str(msg.user_id)
+        if msg.channel:
+            headers["X-Channel"] = str(msg.channel)
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.gateway_port}/ask",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode("utf-8", "replace"))

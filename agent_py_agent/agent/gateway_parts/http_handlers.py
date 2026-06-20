@@ -9,8 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ..auth.middleware import require_admin_handler, require_permission
-from ..auth.models import Action
+from ..auth.middleware import _handler_peer_ip, require_admin_handler, require_trusted_source
 from ..runtime_errors import runtime_error_report
 from .io import gateway_request_counts
 
@@ -37,15 +36,16 @@ def _request_identity(handler) -> tuple[str, Any]:
     mw = getattr(handler, "_auth_middleware", None)
     if mw is None:
         return "admin", None
-    user_id, _ = mw.extract_identity(dict(handler.headers))
-    return user_id, mw.get_permission(dict(handler.headers))
+    peer_ip = _handler_peer_ip(handler)
+    user_id, _ = mw.extract_identity(dict(handler.headers), peer_ip)
+    return user_id, mw.get_permission(dict(handler.headers), peer_ip)
 
 
 def _request_channel(handler) -> tuple[str, str]:
     mw = getattr(handler, "_auth_middleware", None)
     if mw is None:
         return "admin", "chat"
-    return mw.extract_identity(dict(handler.headers))
+    return mw.extract_identity(dict(handler.headers), _handler_peer_ip(handler))
 
 
 def _can_read_payload(payload: dict, user_id: str, permission: Any) -> bool:
@@ -177,8 +177,8 @@ def _payload_load_error(path, exc: BaseException, context: str) -> dict[str, Any
 
 
 def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
-    if require_permission(handler, Action.WRITE_TASK):
-        return  # 无权派工:已发 403(鉴权未接线时返回 False,回环本机请求放行)
+    if require_trusted_source(handler):
+        return  # 不可信来源(远程无 token)拒绝派工:已发 403(回环本机/单机放行,渠道用户经适配器可提交)
     try:
         body = handler._read_json()
     except json.JSONDecodeError as exc:

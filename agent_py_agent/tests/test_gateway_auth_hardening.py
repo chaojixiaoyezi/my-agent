@@ -93,15 +93,16 @@ def test_nonloopback_with_auth_starts(tmp_path) -> None:
         server.stop()
 
 
-def test_unauthenticated_write_rejected_when_auth_on(tmp_path) -> None:
+def test_trusted_channel_user_can_submit_but_not_admin(tmp_path) -> None:
+    # #2 修正:回环本机 = 可信来源,渠道用户(经适配器转发)可提交自己的任务(202),
+    # 但不是 admin —— 停网关被 403。远程不可信来源的拒绝在 test_gateway_identity_trust 的中间件级真测。
     port = _free_port()
     server = GatewayHTTPServer(port, _Paths(tmp_path), params=GatewayHTTPServerParams(auth_middleware=_auth_mw()))
     server.start()
     try:
-        # 伪造非管理员外部通道身份 → USER 角色无 WRITE_TASK → 403(不让随便派工跑 shell)
-        status = _post(port, "/ask", headers={"X-Channel": "feishu", "X-User-Id": "attacker"},
-                       body={"kind": "ask", "goal": "rm -rf /"})
-        assert status == 403
+        assert _post(port, "/ask", headers={"X-Channel": "feishu", "X-User-Id": "bob"},
+                     body={"kind": "ask", "goal": "hello"}) == 202  # 可信渠道用户可派工
+        assert _post(port, "/stop", headers={"X-Channel": "feishu", "X-User-Id": "bob"}) == 403  # 但非管理员
     finally:
         server.stop()
 
