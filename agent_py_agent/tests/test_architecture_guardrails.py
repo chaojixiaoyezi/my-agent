@@ -41,6 +41,10 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
         "HTTP server logging override accepts formatter arguments; "
         "not a product service parameter entry point."
     ),
+    "agent_py_agent/agent/web/dashboard.py:log_message": (
+        "Web dashboard HTTP handler logging override accepts formatter arguments; "
+        "not a product service parameter entry point (same as http_service/feishu)."
+    ),
     "agent_py_agent/agent/log_analysis/agents/contracts.py:_first_evidence_ref": (
         "Local field-selection helper accepts candidate keys; no service boundary."
     ),
