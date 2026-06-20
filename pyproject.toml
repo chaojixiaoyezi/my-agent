@@ -27,6 +27,12 @@ dev = [
 secrets = [
   "cryptography>=42.0",
 ]
+# Tier 0 企业规模化:存储抽象(SQLite↔PostgreSQL)。多 dialect 难自建得稳→借 SQLAlchemy(稳定性第一);
+# psycopg 是 PostgreSQL 驱动(不能自建)。不装则用现有 raw-sqlite3 local_storage,本扩展不影响现状。
+scale = [
+  "sqlalchemy>=2.0",
+  "psycopg[binary]>=3.1",
+]
 
 [project.scripts]
 my-agent = "agent_py_agent.__main__:main"

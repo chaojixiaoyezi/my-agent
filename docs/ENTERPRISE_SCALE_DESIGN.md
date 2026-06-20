@@ -1,0 +1,93 @@
+# my-agent 企业级规模化设计(10k–100k 并发)· 调查 + 方案 + 资源预计
+
+> 目标:支撑 10,000–100,000 并发企业用户。原则:**能自建就自建、不能的才借库;稳定性第一**。
+> 现状(实测):SQLite+WAL(单写)/ 文件锁 fcntl·flock(单机)/ ThreadingHTTPServer(线程每请求,~千级耗尽)/ 无 redis·异步·分布式。**实测承载约低千级并发,离 10 万差 1–2 个数量级。**
+
+---
+
+## 0. 总判断
+my-agent 架构的**形是企业级**(Gateway 中心 / 多租户 / 队列 / 审计 / 限流概念),但**基座是单机单进程**。到 10 万并发是**地基级 re-platforming**,Tier 0 是物理墙。
+**关键经济学结论(资源预计先行)**:10 万并发下 **LLM API 成本与 provider 限流是绑定约束,不是 Python 基座**——基座是入场券,Tier 3(LLM 层)才是规模经济所在。
+
+---
+
+## 1. 自建 vs 借库 决策表(按你"能自建就自建"原则逐项定夺)
+
+| 维度 | 决策 | 理由(稳定性第一) |
+|---|---|---|
+| 存储 SQLite↔PostgreSQL 抽象 | **借 SQLAlchemy Core** | 多 dialect 差异(自增/参数风格/UPSERT/事务)难自建得稳;SQLAlchemy 自动处理、claw 已验证。这是"难自建得稳→借库"的正当 case |
+| Postgres 驱动 | **借 psycopg(v3)** | 驱动不能自建 |
+| 连接池 | **借 pgbouncer**(进程外)或 SQLAlchemy pool | 10 万用户≠10 万连接,池化必需 |
+| 异步 HTTP serving | **asyncio(stdlib 自建事件循环)+ 借 uvicorn**(生产 ASGI) | asyncio 是 stdlib;HTTP/1.1 解析/keepalive 的生产级服务器借 uvicorn 更稳 |
+| 分布式锁 | **自建**(PG advisory lock 薄封装)/ 备选 Redis | PG advisory lock 是 SQL,薄封装可自建;已上 PG 就不引 Redis |
+| 缓存 | **借 Redis**(client 库)| 分布式缓存/计数/去重不能自建;但 client 是薄层 |
+| 分布式队列 | **自建**(PG `FOR UPDATE SKIP LOCKED`,学 claw)| 入站队列用 PG 行锁自建,claw 实测 4204/秒;量级真撑不住再上 Redis Streams/MQ |
+| 向量 ANN | **借 pgvector**(PG 扩展)| 百万级向量 ANN 索引不能自建得好;pgvector 复用 PG,不引 Milvus 服务 |
+| 限流/熔断/背压 | **自建**(my-agent 已有 28 文件基础)| 算法经典,已有基础,自建 |
+| 可观测 指标/追踪 | **借 prometheus_client + OpenTelemetry SDK** | 标准协议,SDK 是薄层 |
+| 容器/编排 | **借 Docker + K8s** | 不是代码,是部署基础设施 |
+| 密钥 | Phase1 文件级 → **借 KMS/Vault 接口**(规模隔离) | 真多租户密钥隔离需 KMS(claw 自己也这么说) |
+
+**新增必需依赖估计**:SQLAlchemy、psycopg、redis、uvicorn、prometheus_client、opentelemetry(+ 可选 pgvector/KMS)。从当前 2 个 → ~8 个。**这是规模化的必要代价**(全是"难自建得稳"的标准件,符合原则)。
+
+---
+
+## 2. 分层路线(按"不做就到不了"排序)
+
+### Tier 0 · 硬阻塞(物理墙)
+- **0.1 存储抽象 + PostgreSQL**:引入 `StorageBackend` 抽象(SQLAlchemy Core),SQLite=本地/开发默认、PostgreSQL=规模。**稳定性第一→增量可回退:先建抽象seam不动现有逻辑,逐仓储迁移,SQLite 路径永不破。** 编码 claw 的并发血泪教训(`BEGIN IMMEDIATE`/busy_timeout/WAL 重试)。
+- **0.2 异步 HTTP/ASGI**:gateway HTTP 层 ThreadingHTTPServer → asyncio+uvicorn;请求路径异步化。**可回退:保留同步 gateway,新增 ASGI 入口并行灰度。**
+- **0.3 分布式锁**:文件锁 → PG advisory lock 薄封装;锁接口抽象,单机回退文件锁。
+
+### Tier 1 · 水平扩展使能
+- **1.1 无状态 worker**(12-factor:状态全进 PG/Redis,本地零状态)
+- **1.2 分布式入站队列**(PG SKIP LOCKED,claim/lease/lane/去重/死信跨实例)
+- **1.3 Redis 缓存层**(session/限流计数/去重热数据)
+- **1.4 负载均衡 + 健康检查 + 优雅停机**(滚动部署)
+
+### Tier 2 · 规模化记忆/检索
+- **2.1 向量库 → pgvector ANN**(我 Phase 2 暴力 cosine 接口已留好,平滑换后端)
+- **2.2 多租户硬隔离 + 资源配额**(命名空间/配额/防噪声邻居)
+
+### Tier 3 · LLM 层(规模经济核心)
+- **3.1 LLM 请求队列/批处理/每租户限流/连接池/退避**
+- **3.2 每租户 token 预算 + 成本控制 + 计量计费**
+
+### Tier 4 · 可观测/可运维
+- **4.1 指标(Prometheus)+ 分布式追踪(OTel)+ 日志聚合**
+- **4.2 自动伸缩** · **4.3 密钥 KMS/Vault**
+
+### Tier 5 · 部署
+- **5.1 容器化 + K8s** · **5.2 零停机 DB 迁移**
+
+---
+
+## 3. 资源预计(10 万并发"在线"用户)
+**关键假设**:并发"在线"≠并发"在跑";活跃发请求约 ~10% → **~1 万在飞请求/任务**;agent 任务 **LLM-bound**(每轮数秒,等 LLM)→ 并发由在飞 LLM 调用主导,是 I/O-bound(异步擅长)。
+
+| 层 | 估算 | 说明 |
+|---|---|---|
+| API/HTTP(ASGI) | **8–16 实例 × 4–8 核** | 异步单 worker 顶数千连接;10 万持久连接 + 1 万在飞轻松 |
+| Agent worker | **20–50 实例** | LLM-bound,一个 worker 异步持多个在飞 LLM 调用 |
+| PostgreSQL | **主 1 + 读副本 2–4 + pgbouncer** | 池化到数百后端连接;写峰 1–5 万/秒→需分区/按租户分片(高端) |
+| Redis | **集群 3–6 节点** | 热路径 session/限流/去重 |
+| 向量(pgvector) | **随 PG 或独立 PG** | 百万级向量 ANN |
+| **基座月成本(粗)** | **~$20k–80k/月** | 计算+DB+Redis+网络+K8s |
+| **LLM API 月成本** | **可能 $100k–$1M+/月** | ⭐ **绑定约束**:1 万持续在飞 × token 量,远超基座成本 |
+
+→ **资源预计头号结论**:**基座成本可控,LLM 成本是数量级更大的真约束**。所以 Tier 3(每租户 token 预算/限流/成本控制)不仅是工程、更是**生意能否成立**的关键,优先级应提前。
+
+---
+
+## 4. 三家参考(claw / 长期助手 / 通道运行时)
+> 研究子代理深挖中(存储/锁/队列/飞书/可观测/部署),回来补此节的代码级证据 + 最优方案。
+> 已确认:claw `storage/db.py` = SQLAlchemy Core 抽象 + `BEGIN IMMEDIATE`/busy_timeout/WAL 重试(注释明引"长期助手 ★4 / 通道运行时 教训")。
+
+---
+
+## 5. 执行顺序建议
+**Tier 0.1 存储抽象(增量可回退 seam)→ 真机接 PostgreSQL 测 → 0.2 异步 → 0.3 锁 → Tier 1 …**
+每步:稳定性第一(可回退、SQLite 路径不破)、真实测试(含真 PostgreSQL)、不破现有全量。
+
+---
+*调查来源:claw 源码、SQLAlchemy/Uvicorn 官方与社区最佳实践(见对话 web 调查)、研究子代理三家深析。*
