@@ -81,3 +81,23 @@ def test_recovers_when_declared_claimed_but_not_written(tmp_path):
     declared = tmp_path / "report.md"
     assert declared.exists()
     assert "真实报告" in declared.read_text(encoding="utf-8")  # 声明但没写 → 仍捞回填入
+
+
+def test_recovers_same_name_from_declared_output_subdir(tmp_path):
+    """#3 子目录偏移:声明 out/report.md 顶层、实际写在声明目录的规范子目录 out/sub/report.md
+    → 扫 declared 父目录树捞回到声明位置(work 目录不含此文件,证明 target.parent 扫描独立生效)。"""
+    work = tmp_path / "work"
+    work.mkdir()
+    out = tmp_path / "out"
+    (out / "sub").mkdir(parents=True)
+    (out / "sub" / "report.md").write_text("子目录里的真报告", encoding="utf-8")
+    task = SimpleNamespace(
+        attributes={"output_files": [str(out / "report.md")]},
+        task_workspace_dir=str(work),
+        agent_run_workspace_dir=str(out),
+        task_dir="", id="run-1", root_id="task-1",
+    )
+    materialize_missing_declared_output_artifacts(task, _parsed(), [])
+    declared = out / "report.md"
+    assert declared.exists()
+    assert "子目录里的真报告" in declared.read_text(encoding="utf-8")

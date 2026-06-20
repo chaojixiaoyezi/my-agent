@@ -49,6 +49,26 @@ class _ResolveContext:
     reason: str
 
 
+def _resolve_param_error(run_id: str, decision: str, reason: str) -> ToolExecutionResult | None:
+    # 精准报缺哪个参数(修 T5-deliver 阶段3:旧版把 run_id/decision/reason 笼统列一起,
+    # M2.7 只缺 reason 却误判成别的参数、试 18 轮没搞清)。reason 仍必填,此处给示例引导。
+    if not run_id:
+        return _error_result("缺少 run_id(子代理 run_id)。", error_code="TOOL_PARAMETER_REQUIRED")
+    if decision not in _DECISIONS:
+        return _error_result(
+            "缺少或非法 decision,须为 grant|deny|accept_output_gaps 之一。",
+            error_code="TOOL_PARAMETER_REQUIRED",
+        )
+    if not reason:
+        return _error_result(
+            '缺少 reason(裁决原因,写入审计;收口也要一句话)。示例:'
+            'decision="deny",reason="按现有权限写自己的 output 目录即可";'
+            'decision="accept_output_gaps",reason="纯汇报任务,产物已在最终报告无需文件"。',
+            error_code="TOOL_PARAMETER_REQUIRED",
+        )
+    return None
+
+
 class ResolveCapabilityRequestsTool(BaseTool):
     # 类用途: 主代理模型处理子代理能力申请的唯一显式入口；grant/deny 都唤醒子代理。
     def __init__(self, agent: SimpleAgent):
@@ -63,11 +83,9 @@ class ResolveCapabilityRequestsTool(BaseTool):
         run_id = str(params.get("run_id") or "").strip()
         decision = str(params.get("decision") or "").strip().lower()
         reason = str(params.get("reason") or "").strip()
-        if not run_id or decision not in _DECISIONS or not reason:
-            return _error_result(
-                "缺少 run_id / decision(grant|deny|accept_output_gaps) / reason。",
-                error_code="TOOL_PARAMETER_REQUIRED",
-            )
+        invalid = _resolve_param_error(run_id, decision, reason)
+        if invalid is not None:
+            return invalid
         try:
             task = self.agent.subagents.load(run_id)
         except FileNotFoundError:

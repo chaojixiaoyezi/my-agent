@@ -185,14 +185,23 @@ def _text_artifact_suffix(suffix: str) -> bool:
 
 
 def _recover_same_name_artifact_from_work(task: SubAgentTask, target: Path) -> Path | None:
-    """子代理把 declared output 同名文件写到了自己 work 目录(没落共享 output)时回退捞回。
+    """子代理把 declared output 同名文件写到了自己 work 目录(没落共享 output),或写进声明
+    output 目录的规范子目录(声明 out/x.md、实际落 out/sub/x.md)时回退捞回。
     只认 basename 完全同名(强信号)+唯一+文本后缀,避免误取模板/状态文件;找不到唯一同名则
     返回 None(保持 placeholder、不瞎猜)。仅在声明 artifacts 里找不到可复制源时兜底调用。"""
-    root = _path_or_none(getattr(task, "task_workspace_dir", ""))
-    if root is None or not root.is_dir():
-        return None
+    roots: list[Path] = []
+    work = _path_or_none(getattr(task, "task_workspace_dir", ""))
+    if work is not None and work.is_dir():
+        roots.append(work)
+    # #3 子目录偏移:也扫"声明 output 文件所在目录"的子树——子代理常把文件写进声明位置的规范
+    # 子目录(声明 out/report.md、实际落 out/reports/report.md)。这是该 artifact 的声明 output
+    # 区(非共享 work 根,无跨子代理污染),配唯一性守卫安全;多个同名→歧义→保持 placeholder。
+    declared_dir = target.parent
+    if declared_dir.is_dir() and declared_dir not in roots:
+        roots.append(declared_dir)
     matches = [
         path
+        for root in roots
         for path in root.rglob(target.name)
         if path.is_file() and path != target and _text_artifact_suffix(path.suffix)
     ]

@@ -236,7 +236,7 @@ def build_resolve_capability_requests_spec() -> ToolSpec:
             "exempt_refs": "可选。accept_output_gaps 时豁免的具体声明产物路径列表；缺省豁免该子代理全部缺失（通配）。",
         },
         parameter_schema=_RESOLVE_CAPABILITY_PARAMETER_SCHEMA,
-        required_parameters=["run_id", "decision", "reason"],
+        required_parameters=["run_id", "decision"],  # reason 仍必填,但由 execute 精准校验+示例引导(不走 policy/schema 笼统报错,避免弱模型瞎猜缺哪个参数)
         parameter_details={
             "write_roots": "目录必须落在当前任务工作区或主代理 workspace 内；越界条目会被结构化拒绝，不会静默放行。",
             "decision": "deny 会把请求置为 CLOSED 并唤醒子代理按现有权限调整方案；不会终止子代理。accept_output_gaps 把豁免登记到子代理 output_delivery_exemptions，解除 closeout 缺失拦截。",
