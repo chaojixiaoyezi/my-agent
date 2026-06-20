@@ -314,19 +314,23 @@ def _tool_output_index_section(tool_progress: Any, artifact_hints: Any) -> str |
         return None
     lines = [
         "## Exact Tool Output Index",
-        "- 精确字段、编号、SECRET、checksum、引用和清单不能凭 compact 摘要填写；需要时读取 artifact_ref 或重新读取 source_path。",
+        "- 精确字段、编号、SECRET、checksum、引用和清单不能凭 compact 摘要填写；列出 artifact_ref 的条目可用 read_artifact 读回，未列 artifact_ref 的条目直接按 source_path 重新读取（不要去猜 ref）。",
     ]
     for row in rows[:40]:
         parts = []
         tool = str(row.get("tool") or "").strip()
         source = str(row.get("source_path") or "").strip()
         artifact_ref = str(row.get("artifact_ref") or row.get("scoped_call_id") or "").strip()
+        externalized = bool(row.get("externalized"))
         size = row.get("size_bytes")
         if tool:
             parts.append(f"tool={tool}")
         if source:
             parts.append(f"source_path={source}")
-        if artifact_ref:
+        # Fix B(阶段4):只有确认外置成可读 blob 的条目才把 artifact_ref 当 read_artifact 入口喂
+        # 模型;未外置的(compaction deferred、index path 空,read_artifact 读它必报
+        # not_externalized)不喂 ref、只留 source_path,从源头免去模型对读不到的 ref 瞎试。
+        if artifact_ref and externalized:
             parts.append(f"artifact_ref={artifact_ref}")
         if isinstance(size, int) and size > 0:
             parts.append(f"size_bytes={size}")
@@ -355,6 +359,7 @@ def _tool_output_rows(value: Any) -> list[dict[str, Any]]:
                 "source_path": source,
                 "artifact_ref": artifact_ref,
                 "size_bytes": _positive_int(item.get("size_bytes")),
+                "externalized": bool(item.get("externalized")),
             }
         )
     return rows
@@ -373,6 +378,9 @@ def _tool_output_rows_from_hints(value: Any) -> list[dict[str, Any]]:
                 "source_path": str(item.get("source_path") or "").strip(),
                 "artifact_ref": str(item.get("artifact_ref") or "").strip(),
                 "size_bytes": _positive_int(item.get("size_bytes")),
+                # 显式 read_hints 是系统给的读回建议(已外置导向),保留喂 ref 旧行为;
+                # 万一含未外置的,Fix A 的 not_externalized 明确错误会兜底纠偏。
+                "externalized": True,
             }
         )
     return rows

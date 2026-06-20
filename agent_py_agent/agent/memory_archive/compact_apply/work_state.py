@@ -191,6 +191,10 @@ def _tool_progress_from_artifact_refs(refs: list[dict[str, Any]]) -> list[dict[s
     progress: list[dict[str, Any]] = []
     for ref in refs:
         if item := _tool_progress_item(ref):
+            # 来自已外置 artifact_refs → 这条 tool output 真有可读 blob。打标记供渲染层(Fix B,
+            # 阶段4)决定是否把 scoped_call_id 当 read_artifact 入口喂模型;未外置的(只在 call_refs
+            # 里、无此标记)渲染层不喂,免得模型对读不到的 ref 瞎试(read_artifact 会报 not_externalized)。
+            item["externalized"] = True
             progress.append(item)
     return progress
 
@@ -225,6 +229,10 @@ def _merge_tool_progress_item(existing: dict[str, Any], item: dict[str, Any]) ->
         existing["scoped_call_id"] = str(item.get("scoped_call_id") or "").strip()
     if not int(existing.get("size_bytes", 0) or 0):
         existing["size_bytes"] = int(item.get("size_bytes", 0) or 0)
+    if item.get("externalized"):
+        # call_ref(无标记,排前先入)与 artifact_ref(已外置,排后)同 key 合并时,
+        # 把"已外置"传播到留存项 → 渲染层据此放心喂 artifact_ref。
+        existing["externalized"] = True
     _merge_cursor_fields(existing, item)
 
 

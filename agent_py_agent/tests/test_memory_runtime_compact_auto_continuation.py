@@ -1508,3 +1508,41 @@ def test_compact_auto_continuation_hard_cap_is_configurable(tmp_path):
     fields = compact_auto_cycle_fields(agent, ctx, {"turn": 19_100, "active": 19_100})
 
     assert fields["memory_compact_auto_status"] == "returned_after_depth_cap"
+
+
+def test_tool_output_index_hides_artifact_ref_for_non_externalized() -> None:
+    """Fix B(阶段4):未外置 tool output(无 externalized 标记)在 Exact Tool Output Index 里
+    不喂 artifact_ref、只给 source_path,免得模型对读不到的 scoped_call_id 瞎试(read_artifact
+    读它必报 not_externalized);已外置(externalized=True)的正常喂 ref。"""
+    packet = {
+        "apply_id": "apply-fixb",
+        "continue_mode": "automated_guarded",
+        "guard": {"status": "allowed"},
+        "next_actions": ["继续合并报告"],
+        "work_state_snapshot": {
+            "goal": "g",
+            "tool_progress": [
+                {
+                    "tool": "read_file",
+                    "source_path": "src/deferred.py",
+                    "artifact_ref": "run-x:call_function_deferred_1",
+                    "size_bytes": 131,
+                },
+                {
+                    "tool": "read_file",
+                    "source_path": "src/externalized.py",
+                    "artifact_ref": "run-x:call_function_ext_1",
+                    "size_bytes": 4096,
+                    "externalized": True,
+                },
+            ],
+        },
+    }
+
+    rendered = build_compact_auto_continue_injection(packet)
+
+    assert "## Exact Tool Output Index" in rendered
+    assert "source_path=src/deferred.py" in rendered
+    assert "artifact_ref=run-x:call_function_deferred_1" not in rendered
+    assert "source_path=src/externalized.py" in rendered
+    assert "artifact_ref=run-x:call_function_ext_1" in rendered
