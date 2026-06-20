@@ -72,8 +72,11 @@ class FeishuAdapter(BaseChannelAdapter):
             return
         try:
             self._server.serve_forever()
-        except Exception:
-            pass
+        except Exception as exc:
+            # 原 except:pass 把异常静默吞掉 + _running 仍 True → 通道无声死亡而健康探测/supervisor 误判在线
+            # (审计 #15)。记录异常并置 _running=False,让 running/状态检查感知它已死、可触发重启。
+            logger.error(f"飞书回调服务器异常退出(通道已死,需重启): {type(exc).__name__}: {exc}")
+            self._running = False
 
     def stop(self) -> None:
         if not self._running:
