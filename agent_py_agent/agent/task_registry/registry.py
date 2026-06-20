@@ -23,6 +23,27 @@ class RegisterTaskParams:
     user_id: str | None = None
 
 
+# 终态(不可复活):一旦进入,不允许被改回非终态(防"终态被并发/迟到写复活"=双花/重复对外动作)。
+# 注意 failed/timeout/blocked 不在此列——它们可重试(failed→running 是合法重跑),只锁真正的"完结"态。
+_FINAL_TASK_STATUSES = frozenset(
+    {"done", "completed", "succeeded", "cancelled", "canceled", "abandoned", "closed", "resolved", "finished"}
+)
+
+
+def _status_write_guard(new_status: str, expected_status: str | None) -> tuple[str, list[str]]:
+    """组装防丢更新/防终态复活的 WHERE 子句 + 参数(审计 #6)。"""
+    clauses: list[str] = []
+    params: list[str] = []
+    if new_status not in _FINAL_TASK_STATUSES:
+        marks = ",".join("?" for _ in _FINAL_TASK_STATUSES)
+        clauses.append(f"status NOT IN ({marks})")  # 当前若是终态、且新状态非终态 → 不改(终态不复活)
+        params.extend(sorted(_FINAL_TASK_STATUSES))
+    if expected_status is not None:
+        clauses.append("status = ?")  # CAS:仅当前状态匹配预期才改(防并发/迟到写覆盖)
+        params.append(expected_status)
+    return ("".join(f" AND {c}" for c in clauses), params)
+
+
 class TaskRegistry:
 
     def __init__(self, store: LocalStore) -> None:
@@ -129,13 +150,15 @@ class TaskRegistry:
             conn.execute("DELETE FROM task_registry WHERE task_id = ?", (task_id,))
             conn.commit()
 
-    def update_task_status(self, task_id: str, status: str) -> bool:
-
+    def update_task_status(self, task_id: str, status: str, *, expected_status: str | None = None) -> bool:
+        """原子改状态。expected_status 给定时做 CAS(仅当前状态匹配才改,防丢更新/迟到写覆盖);
+        并默认拒绝把终态(done/cancelled/abandoned…)改回非终态(防终态被复活)。返回是否真改了。"""
         now = time.time()
+        guard_sql, guard_params = _status_write_guard(status, expected_status)
         with self._store._connection() as conn:
             cursor = conn.execute(
-                "UPDATE task_registry SET status = ?, updated_at = ? WHERE task_id = ?",
-                (status, now, task_id),
+                f"UPDATE task_registry SET status = ?, updated_at = ? WHERE task_id = ?{guard_sql}",
+                (status, now, task_id, *guard_params),
             )
             conn.commit()
             return cursor.rowcount > 0
