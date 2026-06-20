@@ -113,9 +113,9 @@ class StorageBackend:
     def table_names(self) -> list[str]:
         return sorted(inspect(self.engine).get_table_names())
 
-    def scalar(self, sql: str, **params: Any) -> Any:
+    def scalar(self, sql: str, params: dict[str, Any] | None = None) -> Any:
         with self.engine.connect() as conn:
-            return conn.execute(text(sql), params).scalar()
+            return conn.execute(text(sql), params or {}).scalar()
 
     def dispose(self) -> None:
         self.engine.dispose()
