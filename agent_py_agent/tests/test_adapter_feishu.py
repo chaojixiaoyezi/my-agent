@@ -46,6 +46,15 @@ class TestFeishuSignatureVerification:
         )
         assert adapter.verify_feishu_signature("wrong_token", "123", "any_sig") is False
 
+    def test_verify_fail_closed_when_unconfigured(self) -> None:
+        # #4 fail-closed:既无 verification_token 也无 encrypt_key → 拒绝一切(不处理无验证事件)
+        adapter = FeishuAdapter(
+            config={"feishu_app_id": "app_id", "feishu_app_secret": "secret"},
+            callback_port=8421,
+        )
+        assert adapter.verify_feishu_signature("anything", "123", "sig") is False
+        assert adapter.verify_feishu_signature("", "", "") is False  # 缺 token 头也不放行
+
     def test_verify_with_encrypt_key(self) -> None:
         adapter = FeishuAdapter(
             config={

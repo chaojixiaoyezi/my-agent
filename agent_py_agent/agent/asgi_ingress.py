@@ -13,6 +13,7 @@ worker 池自建(stdlib + 队列)。须 ``scale`` extra(fastapi/uvicorn)。
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from dataclasses import dataclass
 
@@ -35,8 +36,17 @@ class FeishuIngressConfig:
     verification_token: str = ""
 
 
+def _verification_token_ok(outer: dict, expected: str) -> bool:
+    """校验飞书事件里的 verification token(url_verification 在顶层、v2 事件在 header.token)。常数时间比。"""
+    header = outer.get("header") if isinstance(outer.get("header"), dict) else {}
+    token = str(outer.get("token") or header.get("token") or "")
+    return bool(expected) and hmac.compare_digest(token, expected)
+
+
 def _verify_and_decode(request: "Request", body: bytes, config: FeishuIngressConfig) -> dict | None:
-    """验签(配了 encrypt_key 才验)+ 解密(有 encrypt 字段)+ 解析。失败返回 None(fail-closed)。"""
+    """fail-closed 验签 + 解密 + 解析。未配置任何验证手段、或验签/验 token 失败 → 返回 None(拒绝)。"""
+    if not config.encrypt_key and not config.verification_token:
+        return None  # fail-closed:未配置 encrypt_key 也未配 verification_token → 不跑无验证的公网 webhook
     if config.encrypt_key:
         parts = feishu_crypto.FeishuSignParts(
             request.headers.get("X-Lark-Request-Timestamp", ""),
@@ -52,6 +62,8 @@ def _verify_and_decode(request: "Request", body: bytes, config: FeishuIngressCon
         return None
     if not isinstance(outer, dict):
         return None
+    if not config.encrypt_key and not _verification_token_ok(outer, config.verification_token):
+        return None  # 仅 token 模式(无 encrypt_key):必须校验 body 里的 verification token
     if "encrypt" not in outer:
         return outer
     try:

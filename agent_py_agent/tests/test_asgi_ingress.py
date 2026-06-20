@@ -21,10 +21,13 @@ from agent_py_agent.agent.ingress_queue import IngressQueue, QueueConfig  # noqa
 from agent_py_agent.agent.storage_backend import StorageBackend  # noqa: E402
 
 
+_VTOKEN = "test-verification-token"  # #4 fail-closed:默认配 verification_token,事件须带 token
+
+
 def _app(config: FeishuIngressConfig | None = None, qcfg: QueueConfig | None = None):
     queue = IngressQueue(StorageBackend.in_memory(), qcfg or QueueConfig(lane_cap=2))
     queue.ensure_schema()
-    return TestClient(create_ingress_app(queue, config or FeishuIngressConfig())), queue
+    return TestClient(create_ingress_app(queue, config or FeishuIngressConfig(verification_token=_VTOKEN))), queue
 
 
 def test_healthz_liveness() -> None:
@@ -46,23 +49,39 @@ def test_metrics_prometheus() -> None:
 
 def test_feishu_challenge_echo() -> None:
     client, _ = _app()
-    r = client.post("/api/im/feishu/events", json={"type": "url_verification", "challenge": "abc123"})
+    r = client.post("/api/im/feishu/events", json={"type": "url_verification", "challenge": "abc123", "token": _VTOKEN})
     assert r.status_code == 200 and r.json()["challenge"] == "abc123"
 
 
 def test_feishu_plaintext_event_enqueued() -> None:
     client, queue = _app()
-    body = {"header": {"event_id": "evt-1"}, "event": {"message": {"chat_id": "c1"}}}
+    body = {"token": _VTOKEN, "header": {"event_id": "evt-1"}, "event": {"message": {"chat_id": "c1"}}}
     assert client.post("/api/im/feishu/events", json=body).status_code == 200
     assert queue.stats().get("pending") == 1  # 入队但 HTTP 立即 ack(不内联 LLM)
 
 
 def test_feishu_dedup_same_event_id() -> None:
     client, queue = _app()
-    body = {"header": {"event_id": "evt-dup"}, "event": {}}
+    body = {"token": _VTOKEN, "header": {"event_id": "evt-dup"}, "event": {}}
     client.post("/api/im/feishu/events", json=body)
     client.post("/api/im/feishu/events", json=body)  # 同 event_id → 墓碑去重
     assert queue.stats().get("pending") == 1
+
+
+def test_unconfigured_webhook_rejects_all() -> None:
+    # #4 fail-closed:既无 encrypt_key 也无 verification_token → 拒绝一切事件(不跑无验证公网 webhook)
+    client, queue = _app(FeishuIngressConfig())
+    body = {"header": {"event_id": "x"}, "event": {"message": {"chat_id": "c"}}}
+    assert client.post("/api/im/feishu/events", json=body).status_code == 403
+    assert queue.stats().get("pending", 0) == 0
+
+
+def test_forged_or_missing_token_rejected() -> None:
+    # #4:配了 verification_token,但事件 token 错/缺 → 403(伪造事件被拦)
+    client, queue = _app()
+    assert client.post("/api/im/feishu/events", json={"header": {"event_id": "f"}, "token": "wrong"}).status_code == 403
+    assert client.post("/api/im/feishu/events", json={"header": {"event_id": "g"}, "event": {}}).status_code == 403
+    assert queue.stats().get("pending", 0) == 0
 
 
 def test_feishu_encrypted_event_verified_and_enqueued() -> None:
@@ -102,7 +121,7 @@ def test_per_lane_backpressure_returns_429() -> None:
     client, _ = _app(qcfg=QueueConfig(lane_cap=1))
 
     def evt(i: int) -> dict:
-        return {"header": {"event_id": f"e{i}"}, "event": {"message": {"chat_id": "hot"}}}
+        return {"token": _VTOKEN, "header": {"event_id": f"e{i}"}, "event": {"message": {"chat_id": "hot"}}}
 
     assert client.post("/api/im/feishu/events", json=evt(0)).status_code == 200
     assert client.post("/api/im/feishu/events", json=evt(1)).status_code == 429  # 同 lane 满 → 429 让平台重投

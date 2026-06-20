@@ -181,10 +181,13 @@ class FeishuAdapter(BaseChannelAdapter):
 
 
     def verify_feishu_signature(self, token: str, timestamp: str, signature: str) -> bool:
-        if not self.encrypt_key:
-            return token == self.verification_token
         import secrets
 
+        # fail-closed:未配置任何验证手段时拒绝(不处理无验证事件,防伪造 webhook 驱动 agent)
+        if not self.encrypt_key and not self.verification_token:
+            return False
+        if not self.encrypt_key:
+            return secrets.compare_digest(token, self.verification_token)  # 常数时间比,防时序侧信道
         source = f"{self.encrypt_key}{timestamp}{token}"
         expected = hmac.new(source.encode(), b"", hashlib.sha256).hexdigest()
         return secrets.compare_digest(signature, expected)
@@ -231,7 +234,8 @@ class _FeishuCallbackHandler(BaseHTTPRequestHandler):
         token = self.headers.get("X-Lark-Verification-Token", "")
         timestamp = self.headers.get("X-Lark-Request-Timestamp", "")
         signature = self.headers.get("X-Lark-Signature", "")
-        if token and not adapter.verify_feishu_signature(token, timestamp, signature):
+        # 始终验签(原 `if token and` 在缺 token 头时会跳过验证 → 伪造事件可未认证驱动 agent)
+        if not adapter.verify_feishu_signature(token, timestamp, signature):
             self.send_response(403)
             self.end_headers()
             self.wfile.write(b'{"error": "signature mismatch"}')

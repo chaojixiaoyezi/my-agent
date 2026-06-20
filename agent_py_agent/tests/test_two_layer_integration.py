@@ -19,6 +19,8 @@ from agent_py_agent.agent.ingress_queue import IngressQueue, QueueConfig  # noqa
 from agent_py_agent.agent.queue_worker import WorkerPool  # noqa: E402
 from agent_py_agent.agent.storage_backend import StorageBackend  # noqa: E402
 
+_VTOK = "e2e-verification-token"  # #4 fail-closed:webhook 须配验证 token,事件须带 token
+
 
 def test_feishu_ingress_to_worker_end_to_end(tmp_path) -> None:
     # 文件 SQLite(WAL,worker 线程并发安全);ASGI app 与 worker 池共享同一队列
@@ -35,8 +37,8 @@ def test_feishu_ingress_to_worker_end_to_end(tmp_path) -> None:
     pool = WorkerPool(queue, handler, workers=2)
     pool.start()
     try:
-        client = TestClient(create_ingress_app(queue, FeishuIngressConfig()))
-        event = {"header": {"event_id": "e2e-1"}, "event": {"message": {"chat_id": "c1", "content": "你好"}}}
+        client = TestClient(create_ingress_app(queue, FeishuIngressConfig(verification_token=_VTOK)))
+        event = {"token": _VTOK, "header": {"event_id": "e2e-1"}, "event": {"message": {"chat_id": "c1", "content": "你好"}}}
         resp = client.post("/api/im/feishu/events", json=event)
         assert resp.status_code == 200  # HTTP 立即 ack(不内联跑 LLM)
         assert done.wait(5.0) is True  # worker 异步消费到
@@ -57,8 +59,8 @@ def test_backpressure_then_drains_through_worker(tmp_path) -> None:
         gate.wait(2.0)  # 卡住第一条,制造 lane 占用
         processed.append(payload)
 
-    client = TestClient(create_ingress_app(queue, FeishuIngressConfig()))
-    assert client.post("/api/im/feishu/events", json={"header": {"event_id": "a"}, "event": {"message": {"chat_id": "L"}}}).status_code == 200
+    client = TestClient(create_ingress_app(queue, FeishuIngressConfig(verification_token=_VTOK)))
+    assert client.post("/api/im/feishu/events", json={"token": _VTOK, "header": {"event_id": "a"}, "event": {"message": {"chat_id": "L"}}}).status_code == 200
     pool = WorkerPool(queue, handler, workers=1)
     pool.start()
     try:
@@ -74,6 +76,6 @@ def test_backpressure_then_drains_through_worker(tmp_path) -> None:
             time.sleep(0.05)
         assert deadline_ok  # 第一条被消费完
         # lane 腾空后新事件可入队
-        assert client.post("/api/im/feishu/events", json={"header": {"event_id": "b"}, "event": {"message": {"chat_id": "L"}}}).status_code == 200
+        assert client.post("/api/im/feishu/events", json={"token": _VTOK, "header": {"event_id": "b"}, "event": {"message": {"chat_id": "L"}}}).status_code == 200
     finally:
         pool.stop()
