@@ -21,7 +21,7 @@ def _public_resolver(_host: str) -> tuple[str, ...]:
 class TestWebFetchTool:
     """测试 WebFetchTool 发送 HTTP 请求。"""
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
     def test_web_fetch_get(self, mock_urlopen, tmp_path: Path):
         """发送 GET 请求。"""
         from agent_py_agent.agent.tooling.web import WebFetchTool
@@ -32,7 +32,7 @@ class TestWebFetchTool:
         mock_response.read.return_value = b'{"status": "ok"}'
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_response
+        mock_urlopen.return_value = (MagicMock(), mock_response)
 
         tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://api.example.com/health"})
@@ -40,7 +40,7 @@ class TestWebFetchTool:
         assert result.ok is True
         assert "status=200" in result.output
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
     def test_web_fetch_accepts_per_call_max_chars(self, mock_urlopen, tmp_path: Path):
         """web_fetch API 也支持按次缩小返回预览。"""
         from agent_py_agent.agent.tooling.web import WebFetchTool
@@ -51,7 +51,7 @@ class TestWebFetchTool:
         mock_response.read.return_value = b"b" * 1000
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_response
+        mock_urlopen.return_value = (MagicMock(), mock_response)
 
         tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://api.example.com/large", "max_chars": 300})
@@ -61,7 +61,7 @@ class TestWebFetchTool:
         assert body == "b" * 300
         assert "已截断" in result.output
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
     def test_web_fetch_post(self, mock_urlopen, tmp_path: Path):
         """发送 POST 请求。"""
         from agent_py_agent.agent.tooling.web import WebFetchTool
@@ -72,7 +72,7 @@ class TestWebFetchTool:
         mock_response.read.return_value = b'{"id": 123}'
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_response
+        mock_urlopen.return_value = (MagicMock(), mock_response)
 
         tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({
@@ -84,7 +84,7 @@ class TestWebFetchTool:
         assert result.ok is True
         assert "status=201" in result.output
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
     def test_web_fetch_mutating_method_returns_advisory_not_hard_block(self, mock_urlopen, tmp_path: Path):
         """变更类 HTTP 请求应给结构化提醒，但不靠硬门直接断掉普通任务。"""
         from agent_py_agent.agent.tooling.web import WebFetchTool
@@ -95,7 +95,7 @@ class TestWebFetchTool:
         mock_response.read.return_value = b'{"ok": true}'
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_response
+        mock_urlopen.return_value = (MagicMock(), mock_response)
 
         tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://api.example.com/items/1", "method": "DELETE"})
@@ -129,7 +129,7 @@ class TestHttpRequestValidation:
         # 不需要真正发送请求，只需验证参数解析不报错
         # headers 参数会在内部标准化
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
     def test_web_fetch_with_headers_json_string(self, mock_urlopen, tmp_path: Path):
         """JSON 字符串格式请求头。"""
         from agent_py_agent.agent.tooling.web import WebFetchTool
@@ -140,7 +140,7 @@ class TestHttpRequestValidation:
         mock_response.read.return_value = b'{"ok": true}'
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_response
+        mock_urlopen.return_value = (MagicMock(), mock_response)
 
         tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({
@@ -163,7 +163,7 @@ class TestHttpRequestValidation:
         assert result.ok is False
         assert "JSON" in result.output
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
     def test_web_fetch_body_too_large(self, mock_urlopen, tmp_path: Path):
         """请求体过大被拒绝。"""
         from agent_py_agent.agent.tooling.web import WebFetchTool
@@ -191,7 +191,7 @@ class TestHttpRequestValidation:
         assert result.ok is False
         assert "字段过多" in result.output
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
     def test_web_fetch_blocks_private_dns_before_request(self, mock_urlopen, tmp_path: Path):
         """通用 HTTP 请求也必须经过 DNS 网络安全门。"""
         from agent_py_agent.agent.tooling.web import WebFetchTool
@@ -204,7 +204,7 @@ class TestHttpRequestValidation:
         assert result.result_envelope["network_safety_gate"]["gate"] == "network_safety"
         mock_urlopen.assert_not_called()
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
     def test_web_fetch_blocks_metadata_even_with_private_resolution_opt_in(self, mock_urlopen, tmp_path: Path):
         """metadata/link-local 是安全底线，结构化私网解析授权也不能放行。"""
         from agent_py_agent.agent.tooling.web import WebFetchTool
@@ -221,7 +221,7 @@ class TestHttpRequestValidation:
         assert result.error_code == "NETWORK_ALWAYS_BLOCKED_IP"
         mock_urlopen.assert_not_called()
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
     def test_web_fetch_env_private_resolution_requires_explicit_true(self, mock_urlopen, monkeypatch):
         """私网解析放行的 env 开关只接受明确 true/1，不接受 yes/on 这类普通词。"""
         from agent_py_agent.agent.tooling.web import WebFetchTool
@@ -241,7 +241,7 @@ class TestHttpRequestValidation:
         mock_response.read.return_value = b"ok"
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_response
+        mock_urlopen.return_value = (MagicMock(), mock_response)
 
         allowed = tool.execute({"url": "https://api.public.example.test/items"})
 
@@ -260,22 +260,17 @@ class TestHttpRequestValidation:
 
         assert result.ok is False
 
-    @patch("urllib.request.urlopen")
+    @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
     def test_web_fetch_http_error_response(self, mock_urlopen, tmp_path: Path):
-        """HTTP 错误响应处理。"""
-        import urllib.error
-
+        """HTTP 错误响应处理:5xx 是正常响应(非异常),由 _finalize_hop 转 HTTP 500 报错。"""
         from agent_py_agent.agent.tooling.web import WebFetchTool
 
-        mock_error = urllib.error.HTTPError(
-            url="https://api.example.com",
-            code=500,
-            msg="Internal Server Error",
-            hdrs={},
-            fp=None,
-        )
-        mock_error.read.return_value = b"Server Error"
-        mock_urlopen.side_effect = mock_error
+        resp = MagicMock()
+        resp.status = 500
+        resp.reason = "Internal Server Error"
+        resp.headers = {"Content-Type": "text/plain"}
+        resp.read.return_value = b"Server Error"
+        mock_urlopen.return_value = (MagicMock(), resp)
 
         tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://api.example.com"})

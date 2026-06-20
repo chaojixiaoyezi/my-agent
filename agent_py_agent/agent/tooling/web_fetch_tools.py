@@ -6,11 +6,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 from .web_fetch_runtime import (
     FetchFormatRequest,
     FetchRawRequest,
+    PinResult,
     RawResponseParts,
     default_artifact_root,
     fetch_raw_response,
@@ -77,9 +79,8 @@ class WebFetchTool(BaseTool):
             request = self._request_parts(params, mode, max_chars)
         except ValueError as exc:
             return ToolExecutionResult("web_fetch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
-        network_error = self._network_error(request.url)
-        if network_error:
-            return network_error
+        # 网络安全门已下沉到 _resolve_pin(逐跳:初始 URL + 每个重定向都校验+pin)。不再单独 pre-check——
+        # 否则一次 execute 内 pre-check 与 resolve_pin 二次解析,对 DNS 翻转的判定会不一致。
         return self._execute_single_request(request, max_chars)
 
     def _execute_single_request(self, request: _WebFetchRequest, max_chars: int) -> ToolExecutionResult:
@@ -111,14 +112,22 @@ class WebFetchTool(BaseTool):
         ))
         return result
 
-    def _network_error(self, url: str) -> ToolExecutionResult | None:
-        return self.network_safety_error(
-            "web_fetch",
-            url,
-            self.resolver,
-            self.allowed_private_hosts,
-            self.allow_private_resolution,
+    def _resolve_pin(self, url: str) -> PinResult:
+        """解析一次主机 → 用这"固定 IP 列表"过网关(避免与连接层二次解析的 TOCTOU)→ 返回校验过的 IP 来 pin。
+
+        每个重定向跳也调本函数重新过网关,故内网/metadata 跳转会被拒。
+        """
+        host = urlsplit(url).hostname or ""
+        try:
+            resolved = tuple(str(ip) for ip in self.resolver(host))
+        except Exception:
+            resolved = ()
+        err = self.network_safety_error(
+            "web_fetch", url, lambda _h: resolved, self.allowed_private_hosts, self.allow_private_resolution
         )
+        if err is not None:
+            return PinResult(None, err)
+        return PinResult(resolved[0] if resolved else None, None)
 
     def _fetch_raw_request(self, request: _WebFetchRequest) -> RawResponseParts | ToolExecutionResult:
         return fetch_raw_response(
@@ -131,6 +140,7 @@ class WebFetchTool(BaseTool):
                 timeout=self.timeout,
             ),
             format_http_error=self.format_http_error,
+            resolve_pin=self._resolve_pin,
         )
 
     def _request_parts(self, params: dict[str, Any], mode: str, max_chars: int) -> _WebFetchRequest:
@@ -175,6 +185,7 @@ class WebFetchTool(BaseTool):
                     timeout=self.timeout,
                 ),
                 format_http_error=self.format_http_error,
+                resolve_pin=self._resolve_pin,
             )
             if isinstance(response, ToolExecutionResult):
                 failures.append({"url": url, "error_code": response.error_code, "error": response.output})

@@ -1,14 +1,18 @@
 
 from __future__ import annotations
 
+import http.client
+import io
 import os
 import re
+import socket
+import ssl
 import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 from .models import ToolExecutionResult
 from .web_html_preview import is_html_response, visible_html_text
@@ -55,40 +59,150 @@ class FetchFormatRequest:
     cache_hit: bool
 
 
-def fetch_raw_response(request: FetchRawRequest, *, format_http_error) -> RawResponseParts | ToolExecutionResult:
-    req = urllib.request.Request(
-        request.url,
-        data=request.data,
-        method=request.method,
-        headers=request.headers,
-    )
+_MAX_REDIRECTS = 5
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+
+
+@dataclass(frozen=True)
+class PinResult:
+    """resolve_pin 的结果:ip=网关校验并固定的连接 IP;error=网关拒绝(初始或某重定向目标不安全)。"""
+
+    ip: str | None
+    error: ToolExecutionResult | None
+
+
+@dataclass(frozen=True)
+class _Target:
+    scheme: str
+    host: str
+    port: int
+    ip: str
+
+
+@dataclass(frozen=True)
+class _HopReq:
+    target: _Target
+    request: FetchRawRequest
+    url: str
+    body: bytes | None
+
+
+@dataclass(frozen=True)
+class _HopOutcome:
+    redirect_to: str
+    result: RawResponseParts | ToolExecutionResult | None
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """连到网关校验过的 IP,但 Host 头/TLS SNI 用原主机名——杜绝连接层重解析 DNS(防 rebinding/TOCTOU)。"""
+
+    def __init__(self, target: _Target, timeout: int, context: ssl.SSLContext) -> None:
+        super().__init__(target.host, target.port, timeout=timeout, context=context)
+        self._pin_ip = target.ip
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self._pin_ip, self.port), self.timeout)
+        if self._tunnel_host:
+            self._tunnel()
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, target: _Target, timeout: int) -> None:
+        super().__init__(target.host, target.port, timeout=timeout)
+        self._pin_ip = target.ip
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self._pin_ip, self.port), self.timeout)
+        if self._tunnel_host:
+            self._tunnel()
+
+
+def _target_for(url: str, pin_ip: str) -> _Target:
+    parts = urlsplit(url)
+    scheme = (parts.scheme or "http").lower()
+    port = parts.port or (443 if scheme == "https" else 80)
+    return _Target(scheme, parts.hostname or "", port, pin_ip)
+
+
+def _request_path(url: str) -> str:
+    parts = urlsplit(url)
+    path = parts.path or "/"
+    return f"{path}?{parts.query}" if parts.query else path
+
+
+def _open_pinned(target: _Target, timeout: int) -> http.client.HTTPConnection:
+    if target.scheme == "https":
+        return _PinnedHTTPSConnection(target, timeout, ssl.create_default_context())
+    return _PinnedHTTPConnection(target, timeout)
+
+
+def _redirect_target(resp: Any, url: str) -> str:
+    if resp.status not in _REDIRECT_STATUSES:
+        return ""
+    location = resp.getheader("Location") or ""
+    return urljoin(url, location) if location else ""
+
+
+def _network_failure(tool: str, exc: BaseException) -> ToolExecutionResult:
+    if isinstance(exc, TimeoutError):
+        # 网络失败带可重试错误码;无码会 fallback UNKNOWN_ERROR 误导模型"放弃报阻塞"(实测暴露)。
+        return ToolExecutionResult(tool, False, f"请求超时: {exc.__class__.__name__}", error_code="TOOL_TIMEOUT")
+    return ToolExecutionResult(tool, False, f"请求失败: {exc.__class__.__name__}", error_code="NETWORK_REQUEST_FAILED")
+
+
+def fetch_raw_response(request: FetchRawRequest, *, format_http_error, resolve_pin) -> RawResponseParts | ToolExecutionResult:
+    """逐跳:每个 URL(含每个重定向目标)先过 resolve_pin(网关校验+取固定 IP),再 pin 到该 IP 连接。
+
+    杜绝 SSRF 两条绕过:(1) DNS rebinding/TOCTOU——不让连接层重解析,连的就是网关校验过的 IP;
+    (2) 重定向绕过——每个 3xx 目标重新过网关,不安全则拒,绝不盲目跟随到内网/云 metadata。
+    """
+    url, body = request.url, request.data
+    for _hop in range(_MAX_REDIRECTS + 1):
+        pin = resolve_pin(url)
+        if pin.error is not None:
+            return pin.error  # 初始或某重定向目标没过网关
+        if not pin.ip:
+            return ToolExecutionResult(request.tool, False, "主机解析失败", error_code="NETWORK_REQUEST_FAILED")
+        outcome = _do_hop(_HopReq(_target_for(url, pin.ip), request, url, body), format_http_error)
+        if outcome.redirect_to:
+            url, body = outcome.redirect_to, None
+            continue
+        return outcome.result
+    return ToolExecutionResult(request.tool, False, "重定向次数过多", error_code="TOO_MANY_REDIRECTS")
+
+
+def _do_hop(hop: _HopReq, format_http_error) -> _HopOutcome:
     try:
-        with urllib.request.urlopen(req, timeout=request.timeout) as resp:
-            return _raw_response_from_http_response(request, resp)
-    except urllib.error.HTTPError as exc:
-        return format_http_error(request.tool, exc, _MIN_RESPONSE_PREVIEW_CHARS)
-    except TimeoutError as exc:
-        # 网络失败带可重试错误码,否则无码 → fallback UNKNOWN_ERROR(retryable=False/report_blocker)
-        # 会误导模型"放弃报阻塞",而网络问题通常应退避重试或换源(mimo-v2.5-pro 实测暴露)。
-        return ToolExecutionResult(
-            request.tool, False, f"请求超时: {exc.__class__.__name__}", error_code="TOOL_TIMEOUT"
-        )
-    except urllib.error.URLError as exc:
-        return ToolExecutionResult(
-            request.tool, False, f"请求失败: {exc.__class__.__name__}", error_code="NETWORK_REQUEST_FAILED"
-        )
+        conn, resp = _send_pinned(hop)
+    except (TimeoutError, OSError, ssl.SSLError) as exc:
+        return _HopOutcome("", _network_failure(hop.request.tool, exc))
+    try:
+        location = _redirect_target(resp, hop.url)
+        if location:
+            resp.read()  # 排空再换下一跳
+            return _HopOutcome(location, None)
+        return _HopOutcome("", _finalize_hop(hop, resp, format_http_error))
+    finally:
+        conn.close()
 
 
-def _raw_response_from_http_response(request: FetchRawRequest, resp: Any) -> RawResponseParts | ToolExecutionResult:
-    body = resp.read(request.max_bytes + 1)
-    if len(body) > request.max_bytes:
-        return ToolExecutionResult(
-            request.tool,
-            False,
-            f"响应体过大，最多 {request.max_bytes} 字节",
-            error_code="ARTIFACT_TOO_LARGE",
-        )
-    return RawResponseParts(resp.status, resp.headers, body, request.url)
+def _send_pinned(hop: _HopReq) -> tuple[Any, Any]:
+    conn = _open_pinned(hop.target, hop.request.timeout)
+    headers = dict(hop.request.headers)
+    headers.setdefault("Host", hop.target.host)
+    conn.request(hop.request.method, _request_path(hop.url), body=hop.body, headers=headers)
+    return conn, conn.getresponse()
+
+
+def _finalize_hop(hop: _HopReq, resp: Any, format_http_error) -> RawResponseParts | ToolExecutionResult:
+    body = resp.read(hop.request.max_bytes + 1)
+    if len(body) > hop.request.max_bytes:
+        return ToolExecutionResult(hop.request.tool, False, f"响应体过大，最多 {hop.request.max_bytes} 字节", error_code="ARTIFACT_TOO_LARGE")
+    if resp.status >= 400:
+        err = urllib.error.HTTPError(hop.url, resp.status, resp.reason or "", resp.headers, io.BytesIO(body))
+        return format_http_error(hop.request.tool, err, _MIN_RESPONSE_PREVIEW_CHARS)
+    return RawResponseParts(resp.status, resp.headers, body, hop.url)
 
 
 def format_fetch_result(request: FetchFormatRequest) -> ToolExecutionResult:

@@ -38,7 +38,7 @@ def _public_html_response() -> MagicMock:
     return resp
 
 
-@patch("urllib.request.urlopen")
+@patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
 def test_file_scheme_blocked_before_request(mock_urlopen, tmp_path: Path) -> None:
     tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_resolver_to("8.8.8.8"), artifact_root=tmp_path)
     result = tool.execute({"url": "file:///etc/passwd"})
@@ -49,7 +49,7 @@ def test_file_scheme_blocked_before_request(mock_urlopen, tmp_path: Path) -> Non
     mock_urlopen.assert_not_called()
 
 
-@patch("urllib.request.urlopen")
+@patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
 @pytest.mark.parametrize("scheme_url", ["ftp://internal/x", "gopher://x/", "dict://localhost:11211/"])
 def test_non_http_schemes_blocked(mock_urlopen, scheme_url: str, tmp_path: Path) -> None:
     tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_resolver_to("8.8.8.8"), artifact_root=tmp_path)
@@ -58,7 +58,7 @@ def test_non_http_schemes_blocked(mock_urlopen, scheme_url: str, tmp_path: Path)
     mock_urlopen.assert_not_called()
 
 
-@patch("urllib.request.urlopen")
+@patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
 def test_cloud_metadata_ip_blocked(mock_urlopen, tmp_path: Path) -> None:
     tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_resolver_to("169.254.169.254"), artifact_root=tmp_path)
     result = tool.execute({"url": "http://metadata.example.test/latest/meta-data/"})
@@ -67,7 +67,7 @@ def test_cloud_metadata_ip_blocked(mock_urlopen, tmp_path: Path) -> None:
     mock_urlopen.assert_not_called()
 
 
-@patch("urllib.request.urlopen")
+@patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
 def test_metadata_google_internal_host_blocked(mock_urlopen, tmp_path: Path) -> None:
     tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_resolver_to("8.8.8.8"), artifact_root=tmp_path)
     result = tool.execute({"url": "http://metadata.google.internal/computeMetadata/v1/"})
@@ -76,7 +76,7 @@ def test_metadata_google_internal_host_blocked(mock_urlopen, tmp_path: Path) -> 
     mock_urlopen.assert_not_called()
 
 
-@patch("urllib.request.urlopen")
+@patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
 @pytest.mark.parametrize(
     "private_ip",
     ["10.0.0.5", "172.16.0.1", "172.31.255.254", "192.168.1.1", "127.0.0.1", "0.0.0.0", "::1"],
@@ -89,16 +89,16 @@ def test_private_and_loopback_ranges_blocked_after_dns(mock_urlopen, private_ip:
     mock_urlopen.assert_not_called()
 
 
-@patch("urllib.request.urlopen")
+@patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
 def test_public_url_is_allowed(mock_urlopen, tmp_path: Path) -> None:
-    mock_urlopen.return_value = _public_html_response()
+    mock_urlopen.return_value = (MagicMock(), _public_html_response())
     tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_resolver_to("93.184.216.34"), artifact_root=tmp_path)
     result = tool.execute({"url": "https://example.com/page", "format": "text"})
     assert result.ok is True
     mock_urlopen.assert_called_once()
 
 
-@patch("urllib.request.urlopen")
+@patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
 def test_gate_re_resolves_every_call_so_later_private_answer_is_blocked(mock_urlopen, tmp_path: Path) -> None:
     # 工具边界保证:每次 execute 都重新解析并校验,DNS 之后翻转到私网的请求会被拦
     #   (取数前必有一次私网拦截)。跨调用的 previous_resolved_ips 重绑定专项判定在
@@ -108,7 +108,7 @@ def test_gate_re_resolves_every_call_so_later_private_answer_is_blocked(mock_url
     def resolver(_host: str) -> tuple[str, ...]:
         return answers.pop(0) if answers else ("127.0.0.1",)
 
-    mock_urlopen.return_value = _public_html_response()
+    mock_urlopen.return_value = (MagicMock(), _public_html_response())
     tool = WebFetchTool(max_chars=10000, timeout=10, resolver=resolver, artifact_root=tmp_path)
     first = tool.execute({"url": "https://flip.example.test/x", "method": "POST", "body": "{}"})
     assert first.ok is True  # 首次解到公网,放行

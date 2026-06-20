@@ -262,6 +262,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHOOSE_VALID_PUBLIC_URL.value,
         recovery_hint="DNS 返回值不是有效 IP；换可信公开 URL，不要继续请求。",
     ),
+    "TOO_MANY_REDIRECTS": ErrorContract(
+        code="TOO_MANY_REDIRECTS",
+        category="network",
+        retryable=False,
+        recommended_action=RecoveryAction.CHOOSE_VALID_PUBLIC_URL.value,
+        recovery_hint="重定向次数过多（疑似重定向环或绕过企图）；换直达的可信公开 URL，不要继续跟随。",
+    ),
     "MEMORY_INJECTION_BLOCKED": ErrorContract(
         code="MEMORY_INJECTION_BLOCKED",
         category="tool",
