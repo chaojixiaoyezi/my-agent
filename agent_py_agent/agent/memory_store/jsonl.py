@@ -19,6 +19,17 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..common.json_io import read_jsonl_objects_report
+
+
+def _memory_record_from_obj(obj: dict) -> MemoryRecord | None:
+    """dict → MemoryRecord:过滤未知顶层字段(旧版本读新字段记录不崩),构造失败返回 None(跳过坏记录)。"""
+    known = set(MemoryRecord.__dataclass_fields__)
+    try:
+        return MemoryRecord(**{k: v for k, v in obj.items() if k in known})
+    except (TypeError, ValueError):
+        return None
+
 from ..io import append_jsonl
 from ._jsonl_indexing import JsonlMemoryIndexMixin
 
@@ -246,12 +257,14 @@ class JsonlMemory(JsonlMemoryIndexMixin):
     def _read_memory_file(self, path: Path) -> list[MemoryRecord]:
         if not path.exists():
             return []
+        # 逐行容错:坏 JSON 行跳过并上报(复用 json_io 健壮读取器),未知顶层字段过滤——
+        # 单坏行/旧版本写的新字段记录不再崩掉整条记忆召回(审计 #11,多版本滚动升级的数据可用性)。
+        report = read_jsonl_objects_report(path, context="memory_store.read_memory_file")
         records: list[MemoryRecord] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            obj = json.loads(line)
-            records.append(MemoryRecord(**obj))
+        for obj in report.records:
+            record = _memory_record_from_obj(obj)
+            if record is not None:
+                records.append(record)
         return records
 
     def _search_daily_mirror(self, query: str, top_k: int) -> list[MemoryRecord]:
