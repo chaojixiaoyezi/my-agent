@@ -22,6 +22,7 @@ from typing import Any, Protocol, runtime_checkable
 from agent_py_agent.agent.retrieval.lexical import tokenize
 
 DEFAULT_EMBED_DIM = 256
+_EMBED_TIMEOUT = 30.0
 
 
 @runtime_checkable
@@ -98,22 +99,12 @@ class OpenAICompatibleEmbedder:
     **零外部库**:用 stdlib ``urllib`` 自建客户端。失败抛 ``EmbeddingError``,调用方降级 BM25。
     """
 
-    def __init__(
-        self,
-        *,
-        api_base: str,
-        model: str,
-        api_key: str = "",
-        dim: int = DEFAULT_EMBED_DIM,
-        timeout: float = 30.0,
-        normalize: bool = True,
-    ) -> None:
+    def __init__(self, *, api_base: str, model: str, api_key: str = "", dim: int = DEFAULT_EMBED_DIM) -> None:
         self._api_base = api_base.rstrip("/")
         self._model = model
         self._api_key = api_key
         self._dim = int(dim)
-        self._timeout = timeout
-        self._normalize = normalize
+        self._timeout = _EMBED_TIMEOUT
 
     @property
     def dim(self) -> int:
@@ -133,17 +124,24 @@ class OpenAICompatibleEmbedder:
         except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
             raise EmbeddingError(f"embedding 端点调用失败:{type(exc).__name__}") from exc
         vectors = [list(map(float, item.get("embedding") or [])) for item in data]
-        if self._normalize:
-            vectors = [l2_normalize(v) for v in vectors]
-        return vectors
+        return [l2_normalize(v) for v in vectors]  # 总是 L2 归一(cosine 假设归一向量)
+
+
+def _resolve_api_key(source: str, secret_resolver: Any) -> str:
+    """经 secret_resolver(接 Phase 1 SecretStore.resolve_source)解析密钥;失败/无解析器 → 空。"""
+    if not source or not callable(secret_resolver):
+        return ""
+    try:
+        return str(secret_resolver(source))
+    except Exception:
+        return ""
 
 
 def build_embedder(config: dict[str, Any] | None, *, secret_resolver: Any = None) -> EmbeddingProvider | None:
     """按配置造 embedder。返回 None = 未配置 → 上层走纯 BM25 词面召回。
 
     provider: ``local``(确定性本地,无需端点)| ``openai_compatible``(配 api_base/model/
-    api_key_source)。密钥经 secret_resolver 解析(接 Phase 1 SecretStore.resolve_source,by-ref/env,
-    不落明文)。配置非法/缺字段 → None。
+    api_key_source)。密钥经 secret_resolver 解析(by-ref/env,不落明文)。配置非法/缺字段 → None。
     """
     if not isinstance(config, dict):
         return None
@@ -151,17 +149,11 @@ def build_embedder(config: dict[str, Any] | None, *, secret_resolver: Any = None
     dim = int(config.get("dim") or DEFAULT_EMBED_DIM)
     if provider == "local":
         return LocalHashingEmbedder(dim=dim)
-    if provider in ("openai_compatible", "openai", "http"):
-        api_base = str(config.get("api_base") or "").strip()
-        model = str(config.get("model") or "").strip()
-        if not api_base or not model:
-            return None
-        api_key = ""
-        source = str(config.get("api_key_source") or "")
-        if source and callable(secret_resolver):
-            try:
-                api_key = str(secret_resolver(source))
-            except Exception:
-                api_key = ""
-        return OpenAICompatibleEmbedder(api_base=api_base, model=model, api_key=api_key, dim=dim)
-    return None
+    if provider not in ("openai_compatible", "openai", "http"):
+        return None
+    api_base = str(config.get("api_base") or "").strip()
+    model = str(config.get("model") or "").strip()
+    if not api_base or not model:
+        return None
+    api_key = _resolve_api_key(str(config.get("api_key_source") or ""), secret_resolver)
+    return OpenAICompatibleEmbedder(api_base=api_base, model=model, api_key=api_key, dim=dim)

@@ -18,6 +18,12 @@ def test_ngram_hit_short_word_fallback_to_substring():
     assert _ngram_hit("ab", "xyz") is False
 
 
+def test_ngram_hit_bigram_recall_for_word_order_diff():
+    # Phase 2 增量:3-gram 对中文词序差异会漏,接检索子系统的 CJK-bigram 词元重叠补召(只增召回)
+    assert _ngram_hit("压缩续航", "这个续航压缩方案不错") is True  # 词序反,3-gram 漏、bigram 补召
+    assert _ngram_hit("压缩续航", "今天天气很好") is False          # 真无关仍不滥召(阈值控噪)
+
+
 def test_stem_matches_ngram_recall(tmp_path):
     (tmp_path / "日志运营值守.md").write_text("lesson", encoding="utf-8")
     (tmp_path / "无关主题abc.md").write_text("lesson", encoding="utf-8")

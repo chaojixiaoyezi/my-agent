@@ -396,7 +396,18 @@ def _ngram_hit(needle: str, prompt_text: str, *, min_grams: int = 2) -> bool:
         return s in prompt_text  # 短词回退完全子串
     grams = [s[idx:idx + 3] for idx in range(len(s) - 2)]
     hits = sum(1 for gram in grams if gram in prompt_text)
-    return hits >= min(min_grams, len(grams))
+    if hits >= min(min_grams, len(grams)):
+        return True
+    # Phase 2 增量补召(只增不减):3-gram 对中文词序差异/部分提及会漏,用检索子系统的 CJK-bigram
+    # 词元重叠兜底。加严控噪:needle 与 prompt 的 bigram 词元交集 >= 2 且 needle 本身 >= 2 个 bigram。
+    from agent_py_agent.agent.retrieval.lexical import tokenize
+
+    needle_grams = {t for t in tokenize(needle) if len(t) >= 2}
+    if len(needle_grams) >= 2:
+        prompt_grams = {t for t in tokenize(prompt_text) if len(t) >= 2}
+        if len(needle_grams & prompt_grams) >= 2:
+            return True
+    return False
 
 
 # 函数用途: stem 兜底——文件名直接出现 或 中文 3-gram 模糊命中 prompt 的 lesson。

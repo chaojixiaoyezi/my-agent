@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+from typing import NamedTuple
 
 _WORD_RE = re.compile(r"[a-z0-9_]+")
 _CJK_RE = re.compile(r"[一-鿿]+")
@@ -33,6 +34,28 @@ def tokenize(text: str) -> list[str]:
     return tokens
 
 
+class _BM25Stats(NamedTuple):
+    document_frequency: dict[str, int]
+    total: int
+    avg_len: float
+
+
+def _doc_bm25(doc: list[str], query_tokens: set[str], stats: _BM25Stats) -> float:
+    """单文档对 query 的 BM25 分(抽出来降主循环嵌套,保持复杂度纪律)。"""
+    if not doc:
+        return 0.0
+    length_norm = K1 * (1 - B + B * (len(doc) / stats.avg_len if stats.avg_len else 1.0))
+    score = 0.0
+    for token in query_tokens:
+        term_frequency = doc.count(token)
+        if not term_frequency:
+            continue
+        df = stats.document_frequency.get(token, 0)
+        idf = math.log(1.0 + (stats.total - df + 0.5) / (df + 0.5))
+        score += idf * (term_frequency * (K1 + 1)) / (term_frequency + length_norm)
+    return score
+
+
 def bm25_scores(query: str, docs_tokens: list[list[str]], raw_lines: list[str]) -> list[float]:
     """对每个候选文档算 BM25 相关分(含精确短语加成)。返回与 docs_tokens 等长的分数列表。"""
     query_tokens = set(tokenize(query))
@@ -45,19 +68,11 @@ def bm25_scores(query: str, docs_tokens: list[list[str]], raw_lines: list[str]) 
         for token in set(doc) & query_tokens:
             document_frequency[token] = document_frequency.get(token, 0) + 1
 
+    stats = _BM25Stats(document_frequency, total, avg_len)
     needle = " ".join(query.lower().split())
     scores: list[float] = []
     for index, doc in enumerate(docs_tokens):
-        score = 0.0
-        if doc:
-            length_norm = K1 * (1 - B + B * (len(doc) / avg_len if avg_len else 1.0))
-            for token in query_tokens:
-                term_frequency = doc.count(token)
-                if not term_frequency:
-                    continue
-                df = document_frequency.get(token, 0)
-                idf = math.log(1.0 + (total - df + 0.5) / (df + 0.5))
-                score += idf * (term_frequency * (K1 + 1)) / (term_frequency + length_norm)
+        score = _doc_bm25(doc, query_tokens, stats)
         if needle and index < len(raw_lines) and needle in raw_lines[index].lower():
             score += PHRASE_BONUS
         scores.append(score)
