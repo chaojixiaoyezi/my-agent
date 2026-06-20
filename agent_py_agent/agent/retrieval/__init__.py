@@ -18,6 +18,7 @@ from agent_py_agent.agent.retrieval.embedding import (
     l2_normalize,
 )
 from agent_py_agent.agent.retrieval.hybrid import HybridRetriever
+from agent_py_agent.agent.retrieval.pgvector_store import PgVectorStore
 from agent_py_agent.agent.retrieval.lexical import (
     bm25_scores,
     rank,
@@ -33,6 +34,7 @@ __all__ = [
     "HybridRetriever",
     "LocalHashingEmbedder",
     "OpenAICompatibleEmbedder",
+    "PgVectorStore",
     "VectorHit",
     "VectorStore",
     "bm25_scores",
