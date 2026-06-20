@@ -63,6 +63,12 @@ class StorageBackend:
         if url.startswith("sqlite"):
             # Gateway 多线程(web/IM worker)共享;sqlite3 默认拒绝跨线程,故关掉该检查 + 给等待窗。
             kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+            if ":memory:" in url:
+                # :memory: 默认每连接一个独立空 db(多线程各看各的)→ 用 StaticPool 单连接共享,
+                # 一个逻辑库跨线程/连接持久(否则 ASGI handler 线程看不到建好的表)。
+                from sqlalchemy.pool import StaticPool
+
+                kwargs["poolclass"] = StaticPool
         else:
             # PG 连接池调优(研究发现 claw `db.py` 零调优、默认仅 5+10,撑不住 10k-100k):每实例池 +
             # 溢出 + pre_ping 预检活连接(防 PgBouncer/PG 掐死的陈连接复用直接报错)。前面再放 PgBouncer。
