@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -343,6 +345,37 @@ def _subprocess_text_env() -> dict[str, str]:
     return env
 
 
+logger = logging.getLogger(__name__)
+
+_MAX_BG_LOG_BYTES = 1_000_000_000  # 后台命令日志字节上限(1GB);超限杀进程组,防失控/恶意命令写满磁盘(审计 #16)
+_BG_WATCHDOG_INTERVAL = 2.0
+
+
+class _LogSizeWatchdog(threading.Thread):
+    """监控后台进程日志大小,超上限 killpg 杀整组(终端交互 sizeWatchdog 范式)。进程退出即自停。"""
+
+    def __init__(self, proc: "subprocess.Popen", log_path: Path, *, max_bytes: int = _MAX_BG_LOG_BYTES, interval: float = _BG_WATCHDOG_INTERVAL) -> None:
+        super().__init__(daemon=True)
+        self._proc = proc
+        self._log_path = log_path
+        self._max = max_bytes
+        self._interval = interval
+
+    def run(self) -> None:
+        while self._proc.poll() is None:
+            if self._over_limit():
+                _kill_process_group(self._proc)
+                logger.error(f"后台命令日志超 {self._max} 字节上限,已杀进程组防写满磁盘: {self._log_path}")
+                return
+            time.sleep(self._interval)
+
+    def _over_limit(self) -> bool:
+        try:
+            return self._log_path.stat().st_size > self._max
+        except OSError:
+            return False
+
+
 def _kill_process_group(proc: "subprocess.Popen") -> None:
     """超时杀整个进程组(SIGTERM→3s 宽限→SIGKILL),消除孙进程孤儿。禁直接 SIGKILL(进程树终止规范)。"""
     try:
@@ -613,6 +646,7 @@ class ShellTool(BaseTool):
             return ToolExecutionResult(self.spec.name, False, f"COMMAND_FAILED: 后台启动失败: {exc}", error_code="COMMAND_FAILED")
         handle.close()  # 子进程已持有 fd 副本,父进程关闭自己的句柄避免泄漏
         _record_background_job(jobs_dir, process.pid, command, log_path)
+        _LogSizeWatchdog(process, log_path).start()  # 日志超上限即杀进程组,防写满磁盘
         # 登记进进程内注册表,模型可用 list_processes/process_status/kill_process
         # 按 session_id 查状态、收割、按进程组杀(避免只剩日志文件管不了进程)。
         record = process_registry.register(
