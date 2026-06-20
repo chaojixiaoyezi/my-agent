@@ -22,6 +22,11 @@ dev = [
   "pytest-cov>=5",
   "ruff>=0.8",
 ]
+# Phase 1 加密密钥库:at-rest 加密的唯一外部库(stdlib 无 AES、密码学不能自建)。
+# 可选——不装则 SecretStore 降级到 0o600+base64 并诚实标注 encrypted=false。
+secrets = [
+  "cryptography>=42.0",
+]
 
 [project.scripts]
 my-agent = "agent_py_agent.__main__:main"
