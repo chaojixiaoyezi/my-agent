@@ -35,6 +35,32 @@ def _audit_enabled(config: AgentConfig) -> bool:
     return bool(raw_value)
 
 
+# 审计 details 里键名命中这些词的值一律脱敏(防 secret/口令/凭据落审计文件造成二次泄漏,审计 #13)。
+# 学 claw AuditLedger 禁用键 + 通道运行时 redactSensitiveText 默认开。command/output/path 属审计价值,不脱敏。
+_FORBIDDEN_AUDIT_KEY_PARTS = (
+    "secret", "token", "password", "passwd", "api_key", "apikey", "access_key", "secret_key",
+    "private_key", "credential", "authorization", "ciphertext", "session_key",
+)
+
+
+def _is_forbidden_audit_key(key: object) -> bool:
+    low = str(key).lower()
+    return any(part in low for part in _FORBIDDEN_AUDIT_KEY_PARTS)
+
+
+def _redact_audit_value(key: object, value: object) -> object:
+    if _is_forbidden_audit_key(key):
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return _redact_audit_details(value)  # 嵌套 dict 递归脱敏
+    return value
+
+
+def _redact_audit_details(details: dict) -> dict:
+    """脱敏审计 details:键名命中敏感词的值替换为 [REDACTED](嵌套 dict 递归)。"""
+    return {key: _redact_audit_value(key, value) for key, value in (details or {}).items()}
+
+
 class AuditLogger:
 
     def __init__(self, config: AgentConfig, local_store: LocalStore | None = None):
@@ -79,7 +105,7 @@ class AuditLogger:
             target_type=log_params.target_type,
             target_id=log_params.target_id,
             status=enum_value(log_params.status),
-            details=log_params.details or {},
+            details=_redact_audit_details(log_params.details or {}),  # 脱敏:密钥/口令不落审计文件(审计 #13)
             ip_address=log_params.ip_address,
             user_agent=log_params.user_agent,
         )
