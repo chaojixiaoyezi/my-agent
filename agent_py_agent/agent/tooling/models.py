@@ -252,7 +252,8 @@ def _truncate_rendered_tool_entry(text: str, *, max_chars: int, label: str) -> s
 def _tokenize(text: str) -> list[str]:
 
     lowered = (text or "").lower()
-    tokens = re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]+", lowered)
+    # [^\W\u4e00-\u9fff]+ = \u4efb\u610f\u811a\u672c\u8bcd\u5b57\u7b26(\u9664 CJK)\u2192 \u975e\u4e2d\u82f1\u8bed\u8a00\u4e0d\u518d\u96f6 token(\u5ba1\u8ba1 #7);CJK \u4ecd\u5355\u5217\u8d70 subtoken
+    tokens = re.findall(r"[^\W\u4e00-\u9fff]+|[\u4e00-\u9fff]+", lowered)
     expanded: list[str] = []
     for token in tokens:
         expanded.append(token)

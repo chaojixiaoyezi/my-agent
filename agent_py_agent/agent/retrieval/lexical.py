@@ -9,10 +9,31 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from typing import NamedTuple
 
-_WORD_RE = re.compile(r"[a-z0-9_]+")
-_CJK_RE = re.compile(r"[一-鿿]+")
+# 任意脚本的字母/数字/下划线连续块(\w 在 Python re 对 str 默认 Unicode):覆盖拉丁含重音、西里尔、
+# 阿拉伯、天城文(印地)、谚文(韩)等有空格脚本——修旧 [a-z0-9_] 对非拉丁零 token(审计 #7)。
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+# 无空格分词的脚本(按字符 bigram 切,否则整段一个 token 召回差):CJK 表意 + 兼容 + 扩展、
+# 日文平/片假名、泰文、Lao、Myanmar、Khmer。旧实现只认基本 CJK [一-鿿],丢日文假名/泰文等。
+_NO_SPACE_RANGES = (
+    (0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF), (0x20000, 0x2EBEF),  # CJK
+    (0x3040, 0x30FF), (0x31F0, 0x31FF),  # 日文假名
+    (0x0E00, 0x0EFF), (0x1000, 0x109F), (0x1780, 0x17FF),  # 泰/Lao、Myanmar、Khmer
+)
+
+
+def _is_no_space(ch: str) -> bool:
+    cp = ord(ch)
+    return any(lo <= cp <= hi for lo, hi in _NO_SPACE_RANGES)
+
+
+def _char_ngrams(run: str) -> list[str]:
+    if len(run) == 1:
+        return [run]
+    return [run[i : i + 2] for i in range(len(run) - 1)]
 
 # BM25 标准参数(Robertson/Sparck-Jones 经典默认)。
 K1 = 1.2
@@ -23,14 +44,15 @@ PHRASE_BONUS = 2.0
 
 
 def tokenize(text: str) -> list[str]:
-    """小写化;英文/数字按词,中文按相邻双字(bigram);孤立单字保留自身。"""
-    lowered = text.lower()
-    tokens = _WORD_RE.findall(lowered)
-    for run in _CJK_RE.findall(lowered):
-        if len(run) == 1:
-            tokens.append(run)
+    """Unicode 脚本感知分词:NFKC 规范化 + casefold;有空格脚本(拉丁含重音/西里尔/阿拉伯/天城/谚文…)
+    按词,无空格脚本(CJK/日文假名/泰…)按相邻双字 bigram。修"非中英语言检索零召回"(审计 #7)。"""
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    tokens: list[str] = []
+    for run in _WORD_RE.findall(normalized):
+        if any(_is_no_space(ch) for ch in run):
+            tokens.extend(_char_ngrams(run))  # CJK/日/泰 等按字符 bigram
         else:
-            tokens.extend(run[i : i + 2] for i in range(len(run) - 1))
+            tokens.append(run)  # 有空格脚本按整词
     return tokens
 
 

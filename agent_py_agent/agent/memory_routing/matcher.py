@@ -237,7 +237,8 @@ def _normalize(text: str) -> str:
 
 def _tokens(text: str) -> list[str]:
     normalized = _normalize(text)
-    raw_tokens = re.findall(r"[a-z0-9_./-]+|[\u4e00-\u9fff]+", normalized)
+    # \u4efb\u610f\u811a\u672c\u8bcd\u5b57\u7b26(\u9664 CJK)+ ./- \u8def\u5f84\u5b57\u7b26 \u2192 \u975e\u4e2d\u82f1\u8bed\u8a00\u4e0d\u518d\u96f6 token(\u5ba1\u8ba1 #7);CJK \u4ecd\u5355\u5217
+    raw_tokens = re.findall(r"(?:[^\W\u4e00-\u9fff]|[./-])+|[\u4e00-\u9fff]+", normalized)
     expanded: list[str] = []
     for token in raw_tokens:
         expanded.append(token)
