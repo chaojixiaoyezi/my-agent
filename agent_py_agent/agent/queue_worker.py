@@ -29,7 +29,10 @@ class _Heartbeat(threading.Thread):
     def run(self) -> None:
         interval = max(1.0, self._lease / 2)
         while not self._stop.wait(interval):
-            self._queue.heartbeat(self._token, lease_seconds=self._lease)
+            try:
+                self._queue.heartbeat(self._token, lease_seconds=self._lease)
+            except Exception:
+                pass  # 瞬时 DB 错误不杀心跳——否则 lease 过期,在途消息被 recover_stale 误回收→重复处理(破坏 exactly-once)
 
     def stop(self) -> None:
         self._stop.set()
@@ -92,3 +95,26 @@ class WorkerPool:
         for t in self._threads:
             t.join(timeout=timeout)
         self._threads = []
+
+
+class StaleReaper(threading.Thread):
+    """周期回收崩溃 worker 的租约(审计 #5):worker 崩在多步 LLM turn 中途时,消息永停 status='claimed',
+    _select_claimable 用 busy_lanes 排除整条 lane → 该会话后续消息永久无法领取。必须有 reaper 周期调
+    recover_stale 把过期租约退回 pending(或毒丸转 failed)。robust:瞬时 DB 错误不杀线程,下周期再试。
+    """
+
+    def __init__(self, queue: IngressQueue, *, interval: float = 30.0) -> None:
+        super().__init__(daemon=True)
+        self._queue = queue
+        self._interval = interval
+        self._stop = threading.Event()
+
+    def run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                self._queue.recover_stale()
+            except Exception:
+                pass  # 瞬时 DB 错误不杀 reaper(下周期再试)
+
+    def stop(self) -> None:
+        self._stop.set()

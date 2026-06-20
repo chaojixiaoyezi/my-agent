@@ -17,7 +17,7 @@ import os
 from agent_py_agent.agent.asgi_entry import backend_from_env
 from agent_py_agent.agent.graceful import DrainState, install_sigterm_drain
 from agent_py_agent.agent.ingress_queue import IngressQueue
-from agent_py_agent.agent.queue_worker import Handler, WorkerPool
+from agent_py_agent.agent.queue_worker import Handler, StaleReaper, WorkerPool
 from agent_py_agent.agent.storage_backend import StorageBackend
 
 
@@ -45,9 +45,16 @@ def build_pool(handler: Handler, backend: StorageBackend | None = None) -> tuple
 
 def serve() -> None:  # pragma: no cover - 真进程入口(容器内跑)
     drain = DrainState()
-    pool, _queue = build_pool(load_handler())
-    install_sigterm_drain(drain, on_drain=pool.stop)  # SIGTERM → 停领新活、在途跑完
+    pool, queue = build_pool(load_handler())
+    reaper = StaleReaper(queue)  # 周期回收崩溃 worker 的租约,防会话永久卡死
+
+    def _stop_all() -> None:
+        pool.stop()
+        reaper.stop()
+
+    install_sigterm_drain(drain, on_drain=_stop_all)  # SIGTERM → 停领新活、停 reaper、在途跑完
     pool.start()
+    reaper.start()
     drain.wait()  # 挂起到退出信号
 
 
