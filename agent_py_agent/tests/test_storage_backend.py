@@ -76,3 +76,18 @@ def test_portability_same_code_both_backends() -> None:
     sqlite_result = _crud_roundtrip(StorageBackend.in_memory())
     pg_result = _crud_roundtrip(_pg_backend())  # 无 PG 会在此 skip
     assert sqlite_result == pg_result == [(1, "alice"), (2, "bob")]
+
+
+def test_postgres_pool_is_tuned_real() -> None:
+    """PG 连接池按参数调优(研究发现 claw 零调优默认仅 5;10 万并发必须可调)。"""
+    url = os.environ.get("TEST_POSTGRES_URL", "postgresql+psycopg://localhost:5432/postgres")
+    try:
+        db = StorageBackend(url, pool_size=7, max_overflow=12)
+        with db.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as exc:
+        pytest.skip(f"无可用 PostgreSQL: {type(exc).__name__}")
+    try:
+        assert db.engine.pool.size() == 7  # 池大小生效(非 SQLAlchemy 默认 5)
+    finally:
+        db.dispose()

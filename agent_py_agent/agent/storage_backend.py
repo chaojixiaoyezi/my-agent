@@ -56,15 +56,18 @@ class StorageBackend:
             conn.execute(text("SELECT ..."))
     """
 
-    def __init__(self, url: str, *, echo: bool = False) -> None:
+    def __init__(self, url: str, *, echo: bool = False, pool_size: int = 10, max_overflow: int = 20) -> None:
         _require_sqlalchemy()
         self.url = url
-        connect_args: dict[str, Any] = {}
+        kwargs: dict[str, Any] = {"echo": echo, "connect_args": {}}
         if url.startswith("sqlite"):
             # Gateway 多线程(web/IM worker)共享;sqlite3 默认拒绝跨线程,故关掉该检查 + 给等待窗。
-            connect_args["check_same_thread"] = False
-            connect_args["timeout"] = 30
-        self.engine: Engine = create_engine(url, echo=echo, connect_args=connect_args)
+            kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+        else:
+            # PG 连接池调优(研究发现 claw `db.py` 零调优、默认仅 5+10,撑不住 10k-100k):每实例池 +
+            # 溢出 + pre_ping 预检活连接(防 PgBouncer/PG 掐死的陈连接复用直接报错)。前面再放 PgBouncer。
+            kwargs.update(pool_size=pool_size, max_overflow=max_overflow, pool_pre_ping=True)
+        self.engine: Engine = create_engine(url, **kwargs)
         if self.is_sqlite:
             event.listen(self.engine, "connect", _sqlite_on_connect)
             event.listen(self.engine, "begin", _sqlite_emit_begin)

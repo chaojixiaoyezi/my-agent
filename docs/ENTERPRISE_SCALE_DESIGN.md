@@ -79,9 +79,24 @@ my-agent 架构的**形是企业级**(Gateway 中心 / 多租户 / 队列 / 审�
 
 ---
 
-## 4. 三家参考(claw / 长期助手 / 通道运行时)
-> 研究子代理深挖中(存储/锁/队列/飞书/可观测/部署),回来补此节的代码级证据 + 最优方案。
-> 已确认:claw `storage/db.py` = SQLAlchemy Core 抽象 + `BEGIN IMMEDIATE`/busy_timeout/WAL 重试(注释明引"长期助手 ★4 / 通道运行时 教训")。
+## 4. 三家参考(claw / 长期助手 / 通道运行时)· 研究子代理实读源码结论(均附文件:行号)
+
+**定位**:**claw = 规模化的 my-agent 蓝本**(它已 FastAPI/uvicorn+SQLAlchemy+PG SKIP-LOCKED,`db.py:66,89` 注释自承"学 长期助手 ★4 / 通道运行时 教训")→ 地基 = 移植 claw + 补缺口。长期助手=单机 SQLite 并发调参/优雅停机最佳范本;通道运行时=飞书 CardKit 流式 + readiness/云原生最佳范本。
+
+| 维度 | 最优来源 | my-agent 决策 |
+|---|---|---|
+| 1 存储 | claw(唯一真双后端) | 借 SQLAlchemy Core;**补 claw 缺的 PG 池调优(pool_size/max_overflow/pre_ping)+ PgBouncer** |
+| 2 锁 | claw(PG SKIP-LOCKED+advisory) | 自建 DB 原语;**移植 长期助手 jitter 重试到 SQLite 默认抗 convoy** |
+| 3 HTTP | claw(异步接入+DB队列+无状态worker两层) | 借 uvicorn+自建 worker;CPU 密集步骤挪进程(GIL) |
+| 4 入站队列 | claw `IngressQueue`(持久+多实例+lease/墓碑/lane) | 自建;移植 通道运行时 timeout 驱逐 |
+| 5 飞书 | 通道运行时(CardKit sequence 流式+持久 dedup)+ claw(双传输+AES 解密) | 借 lark_oapi WS+自建逻辑;移植 通道运行时 流式卡片+长期助手 自适应退避 |
+| 6 限流/熔断 | claw(熔断+两级背压)**但缺 RPS 限流** | 熔断自建;**借 Redis 共享态令牌桶补 RPS 限流**(进程内限流跨副本失效) |
+| 7 可观测 | claw(`/metrics` 手写)+ 通道运行时(W3C trace) | 指标自建;借 OTel SDK 追踪;补 RED 指标+per-session 日志 |
+| 8 部署 | 通道运行时(readiness 503+云原生)+长期助手(60s drain) | 自建+借 tini/K8s;补 readiness 探针+用户感知 drain |
+
+**4 件"三家都没有、必须从零建"**(真 re-platforming 工作量):① Redis 共享态限流器 ② 真数据面多租户隔离 ③ K8s/Helm + readiness-gated 滚动 ④ 在线 expand-contract 零停机迁移。
+
+**纠正**:claw 宣称的 "4204/秒 exactly-once" 是**单机 SQLite 基准**,非 PG 吞吐。
 
 ---
 
