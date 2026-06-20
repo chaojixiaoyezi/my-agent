@@ -301,6 +301,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_processing_timeout_seconds: int = 900
     gateway_request_max_attempts: int = 2
     gateway_port: int = 8420
+    # 网关 HTTP 绑定地址:默认 loopback,仅本机可达。绑非 loopback(暴露到网络)时强制要求鉴权,
+    # 否则 fail-closed 拒绝启动(防"绑 0.0.0.0 + 无鉴权 = 未认证远程命令执行")。默认仅监听回环地址。
+    gateway_bind_host: str = "127.0.0.1"
     gateway_worker_join_timeout_seconds: int = 2
     gateway_ready_timeout_seconds: int = 10
     gateway_service_command_timeout_seconds: int = 30

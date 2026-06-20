@@ -45,6 +45,16 @@ class GatewayHTTPServerParams:
     cross_channel: CrossChannelSession | None = None
     admin_query: AdminCrossChannelQuery | None = None
     auth_middleware: AuthMiddleware | None = None
+    bind_host: str = "127.0.0.1"  # 默认仅本机可达;暴露到网络须配鉴权(见 _guard_network_exposure)
+
+
+# 回环地址:仅本机可达。空串/0.0.0.0/::/LAN IP 一律判非回环(=暴露到网络,须鉴权)。默认仅监听回环地址。
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"}
+
+
+def _is_loopback_host(host: str) -> bool:
+    h = (host or "").strip().lower().strip("[]")
+    return h in _LOOPBACK_HOSTS or h.startswith("127.")
 
 
 def _generate_request_id() -> str:
@@ -148,17 +158,27 @@ class GatewayHTTPServer:
         self.cross_channel = server_params.cross_channel
         self.admin_query = server_params.admin_query
         self.auth_middleware = server_params.auth_middleware
+        self.bind_host = server_params.bind_host
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self.last_error_report: dict[str, Any] | None = None
 
+    def _guard_network_exposure(self) -> None:
+        """fail-closed:绑非 loopback(暴露到网络)却没接鉴权中间件时拒绝启动,杜绝未认证远程入口。"""
+        if not _is_loopback_host(self.bind_host) and self.auth_middleware is None:
+            raise RuntimeError(
+                f"网关拒绝启动:bind_host={self.bind_host!r} 非回环(暴露到网络)却未配置鉴权。"
+                "请置 auth_enabled=True,或把 gateway_bind_host 设回 127.0.0.1。"
+            )
+
     def start(self) -> None:
+        self._guard_network_exposure()  # fail-closed 必须先于任何全局副作用(拒绝时不污染 _server_instance)
         global _server_instance
         _server_instance = self
         self.last_error_report = None
 
-        self.server = ThreadingHTTPServer(("", self.port), GatewayHTTPHandler)
+        self.server = ThreadingHTTPServer((self.bind_host, self.port), GatewayHTTPHandler)
         self.server.server_version = "MyAgentGateway/1.0"
         self.server.handler_class = GatewayHTTPHandler
 

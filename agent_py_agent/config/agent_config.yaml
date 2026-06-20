@@ -345,6 +345,11 @@ gateway_service_stop_timeout_seconds: 90
 # - 设置为 0 则禁用 HTTP 服务
 gateway_port: 8420
 
+# 网关 HTTP 绑定地址。默认 127.0.0.1(仅本机可达)。
+# 改成 0.0.0.0 等非回环地址会把网关暴露到网络,此时必须 auth_enabled=true,否则 fail-closed 拒绝启动
+# (防"绑 0.0.0.0 + 无鉴权 = 任意网络客户端被当 admin 驱动 agent")。
+gateway_bind_host: "127.0.0.1"
+
 # 外部聊天工具 / TUI 文件适配器工作区。
 # 第一版 adapter file 会从 inbox 读 JSON 消息，把结果写到 outbox。
 adapter_workspace: ""

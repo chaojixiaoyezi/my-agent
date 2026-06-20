@@ -42,7 +42,13 @@ from ..agent.gateway_parts.daemon_control import (
     remove_pid_file_if_owned,
     write_pid_record,
 )
-from ..agent.gateway_parts.http_service import GatewayHTTPServer, start_http_server
+from ..agent.auth.manager import AuthManager
+from ..agent.auth.middleware import AuthMiddleware
+from ..agent.gateway_parts.http_service import (
+    GatewayHTTPServer,
+    GatewayHTTPServerParams,
+    start_http_server,
+)
 from ..agent.gateway_parts.io import read_json_file, read_json_file_report
 from .common import ROOT, make_agent, make_capability_router
 from .daemon import _resolve_daemon_options
@@ -314,6 +320,20 @@ def _cmd_gateway_run_setup(agent, paths):
     return requeued, pid
 
 
+def _build_gateway_auth_middleware(config) -> AuthMiddleware | None:
+    """按 config 接线鉴权:auth_enabled 时返回强制鉴权的中间件;关闭则返回 None。
+
+    返回 None 时,网关只允许绑回环(http_service._guard_network_exposure fail-closed),
+    不会出现"绑 0.0.0.0 + 无鉴权"的未认证远程入口。每个请求均经过鉴权校验。
+    """
+    if not getattr(config, "auth_enabled", True):
+        return None
+    return AuthMiddleware(AuthManager(
+        admin_user_id=getattr(config, "admin_user_id", "admin"),
+        auth_enabled=True,
+    ))
+
+
 def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
     context = request.context
     paths = context.paths
@@ -341,7 +361,11 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
     http_port = request.http_port
     pid = os.getpid()
     if http_port > 0:
-        http_server = start_http_server(http_port, paths)
+        http_params = GatewayHTTPServerParams(
+            auth_middleware=_build_gateway_auth_middleware(agent.config),
+            bind_host=getattr(agent.config, "gateway_bind_host", "127.0.0.1"),
+        )
+        http_server = start_http_server(http_port, paths, params=http_params)
     write_json_file(paths.state, _build_run_state(request, pid))
     log_gateway_event(agent, "gateway_run_running", _build_run_payload(request, pid))
     print(

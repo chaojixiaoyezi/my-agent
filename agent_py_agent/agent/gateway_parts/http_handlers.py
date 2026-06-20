@@ -9,6 +9,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ..auth.middleware import require_admin_handler, require_permission
+from ..auth.models import Action
 from ..runtime_errors import runtime_error_report
 from .io import gateway_request_counts
 
@@ -175,6 +177,8 @@ def _payload_load_error(path, exc: BaseException, context: str) -> dict[str, Any
 
 
 def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
+    if require_permission(handler, Action.WRITE_TASK):
+        return  # 无权派工:已发 403(鉴权未接线时返回 False,回环本机请求放行)
     try:
         body = handler._read_json()
     except json.JSONDecodeError as exc:
@@ -249,6 +253,8 @@ def _first_conversation_id(payload: dict) -> str:
 
 
 def handle_stop(handler, server) -> None:
+    if require_admin_handler(handler):
+        return  # 停网关需管理员:已发 403(鉴权未接线时返回 False,回环本机请求放行)
     if server is None:
         handler._send_json(500, {"error": "server not initialized"})
         return
