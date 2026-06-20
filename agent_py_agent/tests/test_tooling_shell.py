@@ -230,61 +230,61 @@ class TestShellToolDangerousCommands:
 class TestShellToolTimeout:
     """测试超时控制。"""
 
-    @patch("subprocess.run")
-    def test_custom_timeout(self, mock_run, tmp_path: Path):
-        """自定义超时时间。"""
+    @patch("subprocess.Popen")
+    def test_custom_timeout(self, mock_popen, tmp_path: Path):
+        """自定义超时时间(POSIX 改 Popen+killpg 后,超时值传给 communicate)。"""
+        import subprocess
+
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
-        mock_run.side_effect = TimeoutError()
+        proc = mock_popen.return_value
+        proc.pid = 999999  # 不存在的 PID → 超时杀进程组逻辑干净返回
+        proc.communicate.side_effect = subprocess.TimeoutExpired("cmd", 5)
 
         tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
-        result = tool.execute({
-            "command": _python_sleep_command(100),
-            "timeout": 5,
-        })
+        tool.execute({"command": _python_sleep_command(100), "timeout": 5})
 
-        # 验证 subprocess.run 被调用时使用了正确的超时
-        mock_run.assert_called()
-        call_args = mock_run.call_args
-        assert call_args.kwargs.get("timeout") == 5
+        assert proc.communicate.call_args_list[0].kwargs.get("timeout") == 5
 
-    @patch("subprocess.run")
-    def test_default_timeout_used(self, mock_run, tmp_path: Path):
+    @patch("subprocess.Popen")
+    def test_default_timeout_used(self, mock_popen, tmp_path: Path):
         """未指定超时使用默认值。"""
+        import subprocess
+
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
-        mock_run.side_effect = TimeoutError()
+        proc = mock_popen.return_value
+        proc.pid = 999999
+        proc.communicate.side_effect = subprocess.TimeoutExpired("cmd", 30)
 
         tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
-        result = tool.execute({"command": _python_sleep_command(100)})
+        tool.execute({"command": _python_sleep_command(100)})
 
-        call_args = mock_run.call_args
-        assert call_args.kwargs.get("timeout") == 30
+        assert proc.communicate.call_args_list[0].kwargs.get("timeout") == 30
 
-    @patch("subprocess.run")
-    def test_invalid_timeout_uses_default(self, mock_run, tmp_path: Path):
+    @patch("subprocess.Popen")
+    def test_invalid_timeout_uses_default(self, mock_popen, tmp_path: Path):
         """无效超时值使用默认值。"""
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        proc = mock_popen.return_value
+        proc.pid = 999999
+        proc.communicate.return_value = ("", "")
+        proc.returncode = 0
 
         tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
-        result = tool.execute({
-            "command": "echo hello",
-            "timeout": -5,
-        })
+        tool.execute({"command": "echo hello", "timeout": -5})
 
-        call_args = mock_run.call_args
-        assert call_args.kwargs.get("timeout") == 30  # 回退到默认值
+        assert proc.communicate.call_args_list[0].kwargs.get("timeout") == 30  # 回退到默认值
 
     def test_timeout_returns_error(self, tmp_path: Path):
         """超时时应返回错误。"""
@@ -390,15 +390,15 @@ class TestShellToolEdgeCases:
         assert result.ok is False
         assert result.error_code == "PATH_NOT_FOUND"
 
-    @patch("subprocess.run")
-    def test_os_error_handled(self, mock_run, tmp_path: Path):
-        """OSError 错误处理。"""
+    @patch("subprocess.Popen")
+    def test_os_error_handled(self, mock_popen, tmp_path: Path):
+        """OSError 错误处理(Popen 启动失败抛 OSError,上层转 COMMAND_FAILED)。"""
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
-        mock_run.side_effect = OSError("Command not found")
+        mock_popen.side_effect = OSError("Command not found")
 
         tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
         result = tool.execute({"command": "nonexistent_command"})
@@ -421,22 +421,25 @@ class TestShellToolEdgeCases:
         assert result.ok is True
         assert str(external) in result.output
 
-    @patch("subprocess.run")
-    def test_full_access_allows_external_working_dir(self, mock_run, tmp_path: Path):
-        """full-access 允许显式使用工作区外的已有目录。"""
+    @patch("subprocess.Popen")
+    def test_full_access_allows_external_working_dir(self, mock_popen, tmp_path: Path):
+        """full-access 允许显式使用工作区外的已有目录(cwd 现传给 Popen)。"""
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
         workspace = tmp_path / "workspace"
         external = tmp_path / "external"
         workspace.mkdir()
         external.mkdir()
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        proc = mock_popen.return_value
+        proc.pid = 999999
+        proc.communicate.return_value = ("", "")
+        proc.returncode = 0
 
         tool = ShellTool(workspace, options=ShellToolOptions(access_mode="full-access", default_timeout=30))
         result = tool.execute({"command": "pwd", "working_dir": str(external)})
 
         assert result.ok is True
-        assert mock_run.call_args.kwargs["cwd"] == str(external)
+        assert mock_popen.call_args.kwargs["cwd"] == str(external)
 
     def test_full_access_still_rejects_last_resort_dangerous_commands(self, tmp_path: Path):
         """full-access 也不等于可以执行 rm -rf / 这类系统级破坏命令。"""

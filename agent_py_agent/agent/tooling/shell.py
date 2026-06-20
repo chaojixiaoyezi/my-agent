@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -342,6 +343,24 @@ def _subprocess_text_env() -> dict[str, str]:
     return env
 
 
+def _kill_process_group(proc: "subprocess.Popen") -> None:
+    """超时杀整个进程组(SIGTERM→3s 宽限→SIGKILL),消除孙进程孤儿。禁直接 SIGKILL(进程树终止规范)。"""
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, OSError):
+        return  # 进程组已不在
+    try:
+        proc.wait(timeout=3)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        pass
+
+
 # 函数用途: 判断 run_command 是否请求后台模式(布尔或 "true"/"1"/"yes" 字符串)。
 def _wants_background(params: dict[str, Any]) -> bool:
     value = params.get("run_in_background")
@@ -636,14 +655,24 @@ class ShellTool(BaseTool):
                 env=_subprocess_text_env(),
                 timeout=timeout,
             )
-        return subprocess.run(
+        # POSIX:独立会话启动(start_new_session)→ 超时时可杀整个进程组,消除孙进程(make/npm/编译器)孤儿。
+        # 原 subprocess.run(timeout=) 超时只 SIGKILL 直接 shell,孙进程成孤儿累积耗尽 PID/CPU(审计 #14)。
+        proc = subprocess.Popen(
             command,
             shell=True,
             cwd=str(target),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
             env=_subprocess_text_env(),
-            timeout=timeout,
+            start_new_session=True,
         )
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)  # 杀整组(SIGTERM→宽限→SIGKILL),再回收,然后照常抛给上层
+            proc.communicate()
+            raise
+        return subprocess.CompletedProcess(command, proc.returncode, out, err)
