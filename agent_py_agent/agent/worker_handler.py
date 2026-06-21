@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 
 from agent_py_agent.agent.llm_scale import (
@@ -41,7 +42,10 @@ def _build_admission() -> LLMAdmission:
 
 
 _ADMISSION = _build_admission()
-_REJECTED: list[tuple[str, str]] = []  # 被准入挡下的 (tenant, reason),供指标/测试观察
+# 被准入挡下的 (tenant, reason),供指标/测试观察。有界环(只留最近 N 条):限流热路径每拒一条 append
+# 一条,用 list 会随拒绝事件无界增长(审计 #16);deque(maxlen) 自动丢最旧,内存恒定。
+_REJECTED_MAX = 1000
+_REJECTED: deque[tuple[str, str]] = deque(maxlen=_REJECTED_MAX)
 
 
 def set_downstream(fn: Downstream | None) -> None:

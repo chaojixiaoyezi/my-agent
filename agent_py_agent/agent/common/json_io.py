@@ -6,6 +6,7 @@ import json
 import threading
 import time
 import uuid
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +19,24 @@ try:
 except ImportError:  # pragma: no cover - Windows import guard.
     fcntl = None
 
-_JSON_FILE_LOCKS: dict[str, threading.Lock] = {}
+
+class _PathLock:
+    """可弱引用的 per-path 锁包装。
+
+    threading.Lock 是 C 级对象不能被弱引用,故包一层暴露 __weakref__。语义:只要还有
+    线程在临界区内、或在等这把锁,就持有本对象的强引用(见 _locked_json_path),弱字典不会
+    回收它——互斥语义绝不破;一旦没人用了,GC 自动回收,锁表不再每见一个新文件就永久泄漏一把锁。
+    """
+
+    __slots__ = ("lock", "__weakref__")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+
+
+# 弱值字典:某路径的锁无任何线程持有/等待时被 GC 自动摘除 → 长跑进程锁表只随"活跃文件数"而非
+# "历史见过的文件数"增长,根治无界泄漏(审计 #16,对照 _TEXT_LINES_CACHE 的 FIFO 上限同理)。
+_JSON_FILE_LOCKS: weakref.WeakValueDictionary[str, _PathLock] = weakref.WeakValueDictionary()
 _JSON_FILE_LOCKS_GUARD = threading.Lock()
 
 
@@ -199,14 +217,14 @@ def append_jsonl_records(path: Path, records: list[dict[str, object]], *, sort_k
             handle.write(blob)
 
 
-def _path_lock(path: Path) -> threading.Lock:
+def _path_lock(path: Path) -> _PathLock:
     key = str(path.resolve())
     with _JSON_FILE_LOCKS_GUARD:
-        lock = _JSON_FILE_LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _JSON_FILE_LOCKS[key] = lock
-        return lock
+        handle = _JSON_FILE_LOCKS.get(key)
+        if handle is None:
+            handle = _PathLock()
+            _JSON_FILE_LOCKS[key] = handle
+        return handle
 
 
 @contextmanager
@@ -223,8 +241,8 @@ def locked_json_path(path: Path):
 
 @contextmanager
 def _locked_json_path(path: Path):
-    lock = _path_lock(path)
-    with lock:
+    handle = _path_lock(path)  # 持 _PathLock 强引用直到临界区结束 → 持锁期间弱字典绝不回收它
+    with handle.lock:
         with _locked_file_path(path):
             yield
 

@@ -9,10 +9,17 @@ token 扣权重),够则放行。注入时钟 → 确定性测试(不靠真实 sl
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+# 租户桶字典水位:超过即先回收"已回满令牌"的惰性桶(重建状态完全等价,绝不放宽在途限流),
+# 防长跑进程随历史租户数无界增长(审计 #16)。真·活跃且在限流中的租户是工作集不是泄漏,保留。
+_MAX_TENANTS = 50_000
 
 
 def _now_ms() -> int:
@@ -49,6 +56,12 @@ class TokenBucket:
             self._refill_locked()
             return self._state.tokens
 
+    def is_full(self) -> bool:
+        """令牌已回满(该租户近期未消费)。此时逐出再惰性重建状态完全等价,可安全回收。"""
+        with self._lock:
+            self._refill_locked()
+            return self._state.tokens >= self._cap
+
     def _refill_locked(self) -> None:
         now = self._clock()
         elapsed_ms = now - self._state.last_refill_ms
@@ -62,11 +75,14 @@ class TokenBucket:
 class TenantRateLimiter:
     """每租户一个独立令牌桶:租户隔离限流。首见租户惰性建桶(共享 rps/burst 配置)。"""
 
-    def __init__(self, rps: float, burst: float, *, clock: Callable[[], int] | None = None) -> None:
+    def __init__(
+        self, rps: float, burst: float, *, clock: Callable[[], int] | None = None, max_tenants: int = _MAX_TENANTS
+    ) -> None:
         self._rps = float(rps)
         self._burst = float(burst)
         self._clock = clock
         self._buckets: dict[str, TokenBucket] = {}
+        self._max_tenants = max(1, int(max_tenants))
         self._lock = threading.Lock()
 
     def allow(self, tenant: str, tokens: float = 1.0) -> bool:
@@ -84,6 +100,24 @@ class TenantRateLimiter:
         with self._lock:
             bucket = self._buckets.get(tenant)
             if bucket is None:
-                bucket = TokenBucket(self._burst, self._rps, clock=self._clock)
-                self._buckets[tenant] = bucket
+                bucket = self._make_bucket_locked(tenant)  # 提取建桶路径,扁平化嵌套(体量闸)
             return bucket
+
+    def _make_bucket_locked(self, tenant: str) -> TokenBucket:
+        """惰性建桶(持 self._lock 调用):到水位先回收惰性桶,再建新桶登记。"""
+        if len(self._buckets) >= self._max_tenants:
+            self._evict_full_locked()
+        bucket = TokenBucket(self._burst, self._rps, clock=self._clock)
+        self._buckets[tenant] = bucket
+        return bucket
+
+    def _evict_full_locked(self) -> None:
+        """水位到顶:逐出已回满令牌的惰性桶(重建等价,不放宽在途限流)。持 self._lock 调用。
+
+        全是活跃在限流的桶时无可回收(那是真实工作集),此时放行增长但告警一次,不静默撑爆。
+        """
+        idle = [name for name, bucket in list(self._buckets.items()) if bucket.is_full()]
+        for name in idle:
+            del self._buckets[name]
+        if not idle:
+            logger.warning("限流器租户桶达水位 %d 且全部在途限流,无可回收(真实活跃工作集)", self._max_tenants)
