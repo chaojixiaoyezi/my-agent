@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ...common.display_width import pad_display, truncate_display
+
 
 def format_archive_record(record: dict[str, Any]) -> str:
 
@@ -46,14 +48,18 @@ def format_archive_records_table(records: list[dict[str, Any]]) -> str:
     lines.append("-" * 100)
 
     for record in records[:50]:
-        timestamp = record.get("created_at", "")[:19]
-        kind = record.get("kind", "")[:12]
-        speaker = record.get("speaker", "")[:10]
-        action = record.get("action", "")[:8]
-        status = record.get("status", "")[:6]
-        preview = record.get("content_preview", "")[:40].replace("\n", " ")
+        # 显示列宽截断 + 对齐(审计 #22):CJK/全角内容不再因码点≠列宽撑错列、不切碎 emoji/组合字形
+        timestamp = truncate_display(record.get("created_at", ""), 19)
+        kind = truncate_display(record.get("kind", ""), 12)
+        speaker = truncate_display(record.get("speaker", ""), 10)
+        action = truncate_display(record.get("action", ""), 8)
+        status = truncate_display(record.get("status", ""), 6)
+        preview = truncate_display(record.get("content_preview", "").replace("\n", " "), 40)
 
-        lines.append(f"{timestamp:<20} {kind:<14} {speaker:<12} {action:<10} {status:<8} {preview}")
+        lines.append(
+            f"{pad_display(timestamp, 20)} {pad_display(kind, 14)} {pad_display(speaker, 12)} "
+            f"{pad_display(action, 10)} {pad_display(status, 8)} {preview}"
+        )
 
     if len(records) > 50:
         lines.append(f"\n... and {len(records) - 50} more records")

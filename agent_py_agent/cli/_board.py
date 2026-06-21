@@ -7,6 +7,7 @@ import time
 from dataclasses import asdict, is_dataclass
 
 from ..agent.agent_core.subagent import SpawnSubagentsParams
+from ..agent.common.display_width import display_width, truncate_display
 from ..agent.startup_recovery import is_recent_board_item
 from ..agent.subagents.models import SubAgentBoardOptions
 from .common import make_agent
@@ -120,9 +121,10 @@ def _visible_summary(items: list) -> dict:
 
 def _goal_preview(value: object) -> str:
     text = str(value or "").replace("\n", " ").strip()
-    if len(text) <= _BOARD_GOAL_PREVIEW_CHARS:
+    # 预算按显示列宽 + 字形簇边界截断(审计 #22):CJK 预览不再忽长忽短,emoji/组合字形不被切碎
+    if display_width(text) <= _BOARD_GOAL_PREVIEW_CHARS:
         return text
-    return text[:_BOARD_GOAL_PREVIEW_CHARS].rstrip() + "..."
+    return truncate_display(text, _BOARD_GOAL_PREVIEW_CHARS).rstrip() + "..."
 
 
 def cmd_subagent_detail(args) -> int:
