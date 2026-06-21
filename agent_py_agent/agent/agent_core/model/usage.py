@@ -36,4 +36,14 @@ def _first_positive_int(values: tuple[object, ...]) -> int | None:
     return None
 
 
-__all__ = ["input_token_usage", "output_token_usage", "response_usage"]
+def response_cost_usd(model: str, response: object) -> float:
+    """按模型单价把一次响应的 input/output token 换算成 USD 成本(审计 #19)。
+
+    token 缺失按 0;单价表见 llm_scale.model_pricing(未知模型保守默认,不低估)。供成本审计/计费累加。
+    """
+    from ...llm_scale.model_pricing import cost_usd
+
+    return cost_usd(model, input_token_usage(response) or 0, output_token_usage(response) or 0)
+
+
+__all__ = ["input_token_usage", "output_token_usage", "response_usage", "response_cost_usd"]
