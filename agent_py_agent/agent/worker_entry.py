@@ -14,7 +14,7 @@ from __future__ import annotations
 import importlib
 import os
 
-from agent_py_agent.agent.asgi_entry import backend_from_env
+from agent_py_agent.agent.asgi_entry import backend_from_env, env_int
 from agent_py_agent.agent.graceful import DrainState, install_sigterm_drain
 from agent_py_agent.agent.ingress_queue import IngressQueue
 from agent_py_agent.agent.queue_worker import Handler, StaleReaper, WorkerPool
@@ -39,7 +39,7 @@ def build_pool(handler: Handler, backend: StorageBackend | None = None) -> tuple
     backend = backend or backend_from_env()
     queue = IngressQueue(backend)
     queue.ensure_schema()
-    workers = int(os.environ.get("WORKER_CONCURRENCY", "4"))
+    workers = env_int("WORKER_CONCURRENCY", 4)
     return WorkerPool(queue, handler, workers=workers), queue
 
 

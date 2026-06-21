@@ -17,6 +17,22 @@ from agent_py_agent.agent.ingress_queue import IngressQueue
 from agent_py_agent.agent.storage_backend import StorageBackend, sqlite_url
 
 
+def env_int(name: str, default: int) -> int:
+    """从环境变量读整数,缺失/非法用默认(防运维误配空格/非数字值打挂入口进程,审计 #24)。"""
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError, TypeError):
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    """从环境变量读浮点,缺失/非法用默认。"""
+    try:
+        return float(os.environ[name])
+    except (KeyError, ValueError, TypeError):
+        return default
+
+
 def backend_from_env() -> StorageBackend:
     url = os.environ.get("DATABASE_URL") or sqlite_url(os.environ.get("INGRESS_DB", "/tmp/my_agent_ingress.db"))
     return StorageBackend(url)
@@ -40,7 +56,7 @@ def serve() -> None:  # pragma: no cover - 真进程入口(容器内跑,单测�
 
     app, drain = build_app()
     install_sigterm_drain(drain)  # SIGTERM → 就绪门转 503 → 摘流量优雅退出
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
+    uvicorn.run(app, host="0.0.0.0", port=env_int("PORT", 8080))
 
 
 if __name__ == "__main__":  # pragma: no cover

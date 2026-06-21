@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 
 from agent_py_agent.agent.llm_scale import (
@@ -21,6 +20,7 @@ from agent_py_agent.agent.llm_scale import (
     TenantRateLimiter,
     TokenBudget,
 )
+from agent_py_agent.agent.asgi_entry import env_float, env_int
 from agent_py_agent.agent.observability.tracing import Span, TraceContext, child_context, extract, new_trace
 
 # 下游真实 agent 调用:Callable[[payload, trace_ctx], int] 返回真实消耗 token 数。None=未接入(默认)。
@@ -31,11 +31,12 @@ _SLOT_TIMEOUT = 30.0
 
 
 def _build_admission() -> LLMAdmission:
-    rps = float(os.environ.get("LLM_TENANT_RPS", "5"))
-    burst = float(os.environ.get("LLM_TENANT_BURST", "10"))
-    budget = int(os.environ.get("LLM_TENANT_TOKEN_BUDGET", "1000000"))
-    window = float(os.environ.get("LLM_BUDGET_WINDOW_SEC", "3600"))
-    max_inflight = int(os.environ.get("LLM_MAX_INFLIGHT", "32"))
+    # 入口配额从 env 读,误配非法值用默认而非崩进程(审计 #24)
+    rps = env_float("LLM_TENANT_RPS", 5)
+    burst = env_float("LLM_TENANT_BURST", 10)
+    budget = env_int("LLM_TENANT_TOKEN_BUDGET", 1_000_000)
+    window = env_float("LLM_BUDGET_WINDOW_SEC", 3600)
+    max_inflight = env_int("LLM_MAX_INFLIGHT", 32)
     return LLMAdmission(TenantRateLimiter(rps, burst), TokenBudget(budget, window), ConcurrencyLimiter(max_inflight))
 
 
