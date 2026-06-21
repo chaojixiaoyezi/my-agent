@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..common.encoding_detect import decode_bytes
 from ..path_recovery_hints import suggest_workspace_typo_target
 from ._filesystem_helpers import (
     _int_param,
@@ -113,9 +114,11 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolExecutionResult:
             default_max_chars=request.max_chars,
         ))
     try:
-        content = target.read_text(encoding="utf-8")
+        # 编码探测(审计 #23):BOM→UTF-8→charset-normalizer,Shift-JIS/GBK/Latin-1/带 BOM 文件可读,
+        # 不再因非 UTF-8 硬失败;真二进制/测不出仍抛 UnicodeDecodeError 维持"无法读取"语义。
+        content, _encoding = decode_bytes(target.read_bytes())
     except UnicodeDecodeError:
-        return ToolExecutionResult("read_file", False, "文件不是有效 UTF-8 文本，无法读取。", error_code="TOOL_EXECUTION_FAILED")
+        return ToolExecutionResult("read_file", False, "文件不是有效文本（编码探测失败），无法读取。", error_code="TOOL_EXECUTION_FAILED")
     summary = structured_read_summary(target, content, request.params)
     if summary:
         return ToolExecutionResult("read_file", True, summary)

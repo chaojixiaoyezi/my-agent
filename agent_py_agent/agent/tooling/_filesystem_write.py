@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..common.encoding_detect import detect_encoding, detect_line_ending, encode_text
 from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from ..contracts.recovery import RecoveryAction
 from ..run_intent import reference_write_feedback
@@ -185,15 +186,33 @@ def _write_request(tool: WriteFileTool, params: dict[str, Any]) -> WriteRequest:
     raw_path = _required_path(params.get("path"))
     content, data = _write_payload(params)
     write_mode = _write_mode(params)
+    target = tool.resolve_path(raw_path)
+    if content is not None:  # 文本写入:写既有文件时保留其原编码/换行,不静默改成 utf-8/LF(审计 #23)
+        data = _preserve_existing_encoding(target, content, write_mode, data)
     content_policy = _content_policy(raw_path, content, tool.max_inline_content_chars)
     return WriteRequest(
         raw_path=raw_path,
         content=content,
         data=data,
         mode=write_mode,
-        target=tool.resolve_path(raw_path),
+        target=target,
         content_policy=content_policy,
     )
+
+
+def _preserve_existing_encoding(target: Path, content: str, mode: str, default_data: bytes) -> bytes:
+    """写既有文本文件时按其原编码+原换行写回(审计 #23):非 UTF-8/CRLF 文件不被静默改坏。
+
+    仅当覆盖/追加且目标已存在才探测;新文件/读不到时用默认 utf-8。Shift-JIS/GBK/Latin-1、带 BOM、
+    CRLF 文件写回保持原格式,不污染 diff、不坏构建。原编码表示不了新内容时 encode_text 退 utf-8。
+    """
+    if mode not in ("overwrite", "append") or not target.exists():
+        return default_data
+    try:
+        raw = target.read_bytes()
+    except OSError:
+        return default_data
+    return encode_text(content, detect_encoding(raw), detect_line_ending(raw))
 
 
 def _system_ledger_write_blocked_result(message: str) -> ToolExecutionResult:

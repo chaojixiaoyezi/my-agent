@@ -13,6 +13,7 @@ dependencies = [
   "openpyxl>=3.1",
   "prompt_toolkit>=3.0",
   "tzdata>=2024.1",  # IANA 时区数据兜底(审计 #21):无系统 zoneinfo 的 Linux/容器也能解析用户时区
+  "charset-normalizer>=3.3",  # 文件编码探测(审计 #23):读 Shift-JIS/GBK/Latin-1 等非 UTF-8 企业文件
 ]
 
 [project.optional-dependencies]
