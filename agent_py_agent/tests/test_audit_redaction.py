@@ -45,3 +45,10 @@ def test_secret_value_not_in_audit_file(tmp_path) -> None:
     audit_text = (tmp_path / "audit" / "audit.jsonl").read_text(encoding="utf-8")
     assert "super-secret-value-123" not in audit_text  # 密钥明文不落审计文件
     assert "resolve" in audit_text  # 非密钥审计信息保留
+
+
+def test_audit_entry_ids_unique_under_high_frequency(tmp_path) -> None:
+    # #16:原 2 字节随机+秒级戳同秒高频碰撞;改 UUID4 后大批量同秒生成全唯一
+    logger = AuditLogger(_Cfg(str(tmp_path / "audit")))
+    ids = {logger._generate_entry_id() for _ in range(5000)}
+    assert len(ids) == 5000  # 无碰撞(溯源不串号)

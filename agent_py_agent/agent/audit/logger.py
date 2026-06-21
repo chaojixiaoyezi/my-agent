@@ -74,12 +74,14 @@ class AuditLogger:
             self._audit_root.mkdir(parents=True, exist_ok=True)
 
     def _generate_entry_id(self) -> str:
-        """生成条目 ID。"""
-        import secrets
+        """生成条目 ID:秒级戳(可读/可排序)+ UUID4(122 位,无碰撞)。
 
-        timestamp = int(time.time())
-        random_part = secrets.token_hex(2)
-        return f"audit_{timestamp}_{random_part}"
+        原 2 字节随机(16 位)+ 秒级戳在同秒高频审计下生日碰撞概率高(~256 条/秒即约 50%),
+        导致审计条目 ID 重复、溯源串号(审计 #16)。改 UUID4 彻底消除碰撞。
+        """
+        import uuid
+
+        return f"audit_{int(time.time())}_{uuid.uuid4().hex}"
 
     def log(
         self,
