@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 
 from ..tooling.models import ToolExecutionResult
+from .audit_dispatch import audit_privileged_tool_call
 from .parameters import _one_shot_tool_call_key
 from .runner.stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_finished
 from .subagent.attempt_guard import stale_subagent_attempt_result
@@ -53,6 +54,7 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         granted_capabilities=runtime_request.request.params.granted_capabilities,
         write_boundary=write_boundary_with_runtime_ledger(runtime_request.agent, runtime_request.request.params),
     )
+    audit_privileged_tool_call(runtime_request.agent, executable_payload, result)  # 特权动作落审计(审计 #13)
     if one_shot_key and _one_shot_result_consumes_key(result):
         runtime_request.request.params.one_shot_tool_calls.add(one_shot_key)
     trace_runner_tool_call_finished(_finished_trace_request(runtime_request, result))
