@@ -385,6 +385,13 @@ provider_space_max_download_file_mb: 200
 provider_space_trash_retention_days: 30
 provider_space_destructive_actions_use_trash: true
 
+# 时区与周历（审计 #21，面向几十国用户按本地时区渲染日期/时间/本周范围）：
+# - timezone: IANA 时区名（如 Asia/Shanghai、America/New_York、Europe/London）；留空=服务器本地时间。
+#   也可用环境变量 AGENT_TIMEZONE 覆盖（优先级最高）。非法时区串只告警并回退，不会崩。
+# - week_start: 周起始（monday/sunday/saturday）；美国/中东常用 sunday/saturday，影响“本周”范围计算。
+timezone: ""
+week_start: "monday"
+
 # 会话工作区：
 # - 会话持久化目录，存储 session.json 和会话级别的上下文文件
 # - 每个会话对应一个目录：<session_workspace>/{session_id}/

@@ -12,6 +12,7 @@ license = { file = "LICENSE" }
 dependencies = [
   "openpyxl>=3.1",
   "prompt_toolkit>=3.0",
+  "tzdata>=2024.1",  # IANA 时区数据兜底(审计 #21):无系统 zoneinfo 的 Linux/容器也能解析用户时区
 ]
 
 [project.optional-dependencies]

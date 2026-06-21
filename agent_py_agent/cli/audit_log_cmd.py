@@ -22,7 +22,7 @@ def _show_recent_users(query: AuditQuery, args) -> int:
     print()
 
     for i, u in enumerate(users, 1):
-        last_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(u["last_action_time"]))
+        last_time = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(u["last_action_time"]))
         print(f"{i}. {u['user_id']}", file=sys.stdout)
         print(f"   最后活动: {last_time}", file=sys.stdout)
         print()
@@ -48,7 +48,7 @@ def _show_summary(query: AuditQuery, args) -> int:
             print(f"    {status}: {count}", file=sys.stdout)
 
     if stats["last_action_time"]:
-        last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stats["last_action_time"]))
+        last_str = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(stats["last_action_time"]))
         print(f"  最后操作: {last_str}", file=sys.stdout)
 
     return 0
@@ -88,7 +88,7 @@ def _audit_action_from_args(args) -> AuditAction | None:
 
 
 def _print_audit_entry(entry) -> None:
-    time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(entry.timestamp))
+    time_str = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(entry.timestamp))
     print(f"[{entry.status.upper()}] {entry.action} - {entry.user_id}", file=sys.stdout)
     print(f"  时间: {time_str}", file=sys.stdout)
     print(f"  通道: {entry.channel}", file=sys.stdout)

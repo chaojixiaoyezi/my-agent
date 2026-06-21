@@ -46,11 +46,11 @@ def get_task_summary(store: LocalStore, task_id: str) -> str:
 
     # 添加创建和更新时间
     if task_info["created_at"]:
-        created_time = time.strftime("%Y-%m-%d %H:%M", time.localtime(task_info["created_at"]))
+        created_time = time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(task_info["created_at"]))
         lines.append(f"创建时间: {created_time}")
 
     if task_info["updated_at"] and task_info["updated_at"] != task_info["created_at"]:
-        updated_time = time.strftime("%Y-%m-%d %H:%M", time.localtime(task_info["updated_at"]))
+        updated_time = time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(task_info["updated_at"]))
         lines.append(f"最后更新: {updated_time}")
 
     # 添加会话和用户信息

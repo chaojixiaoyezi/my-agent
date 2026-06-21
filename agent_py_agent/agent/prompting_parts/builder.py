@@ -15,10 +15,11 @@ from __future__ import annotations
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from ..common import agent_time
 from ..memory_store import MemoryRecord
 from ..settings import AgentConfig
 
@@ -224,9 +225,10 @@ def _skill_context_chunks(builder: PromptBuilder, user_prompt: str) -> list[str]
 
 def _workspace_context_text(builder: PromptBuilder) -> str:
     root = Path(builder.root).resolve()
-    now = datetime.now().astimezone()
+    # 按用户配置时区渲染(审计 #21):env AGENT_TIMEZONE > config.timezone > 服务器本地;周起始随 locale。
+    now = agent_time.now(getattr(builder.config, "timezone", "") or "")
     today = now.date()
-    current_week_start = today - timedelta(days=today.weekday())
+    current_week_start = agent_time.week_start_date(today, getattr(builder.config, "week_start", "monday") or "monday")
     current_week_end = current_week_start + timedelta(days=6)
     last_7_days_start = today - timedelta(days=6)
     return "\n".join([

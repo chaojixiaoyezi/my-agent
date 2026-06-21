@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from .models import SpeedProfile, SpeedSample
@@ -43,9 +43,9 @@ def run_speed_benchmark(
     effective_backend = values.backend or config.model_backend
     effective_model = values.model or config.model_name
 
-    from ..backends import create_backend
+    from ..backends import get_backend  # 修正死导入:模块导出名是 get_backend 不是 create_backend
 
-    backend_instance = create_backend(effective_backend, config)
+    backend_instance = get_backend(effective_backend, config)
     samples = [
         sample
         for input_tokens in input_sizes
@@ -55,7 +55,7 @@ def run_speed_benchmark(
     return SpeedProfile(
         backend=effective_backend,
         model=effective_model,
-        tested_at=datetime.utcnow().isoformat() + "Z",
+        tested_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),  # 弃用 utcnow→tz-aware(审计 #21)
         samples=samples,
         interpolation_method="log_linear",
     )

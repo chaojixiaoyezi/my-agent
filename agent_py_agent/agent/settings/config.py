@@ -85,6 +85,8 @@ class _HomeProviderConfigFields:
     provider_space_max_download_file_mb: int = 200
     provider_space_trash_retention_days: int = 30
     provider_space_destructive_actions_use_trash: bool = True
+    timezone: str = ""  # IANA 时区名(如 Asia/Shanghai、America/New_York);空=服务器本地(审计 #21)
+    week_start: str = "monday"  # 周起始 locale:monday/sunday/saturday,影响"本周"范围计算
 
 
 @dataclass
