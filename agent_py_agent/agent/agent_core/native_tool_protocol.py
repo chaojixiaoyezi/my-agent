@@ -23,7 +23,21 @@ def native_tool_use_active(agent: object) -> bool:
     if not bool(getattr(config, "enable_tools", False)):
         return False
     backend = getattr(agent, "backend", None)
-    return str(getattr(backend, "name", "") or "") == _NATIVE_BACKEND
+    if str(getattr(backend, "name", "") or "") != _NATIVE_BACKEND:
+        return False
+    return _model_supports_native(config)  # 按模型能力降级(审计 #8):非 native 模型强制回退 text
+
+
+def _model_supports_native(config: object) -> bool:
+    """当前模型是否走 native:命中 tool_protocol_text_models 任一子串则强制回退 text(防非 native 模型静默失效)。"""
+    model = str(getattr(config, "model_name", "") or "").strip().lower()
+    if not model:
+        return True
+    for pattern in getattr(config, "tool_protocol_text_models", None) or []:
+        token = str(pattern).strip().lower()
+        if token and token in model:
+            return False
+    return True
 
 
 def native_tool_protocol_value(tool_protocol: object) -> str:

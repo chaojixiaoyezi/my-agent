@@ -716,6 +716,10 @@ tool_vector_search_enabled: true
 # text=旧 [TOOL_CALL] 文本协议（保底回退，出问题可改回 text）。
 # native 仅在 model_backend=anthropic_compatible 时生效，其余后端自动回退 text。
 tool_protocol: "native"
+# 按模型能力降级（审计 #8）：列出"不支持 native tool_use"的模型名子串，命中即对该模型强制回退 text
+# 协议，防自选非 reasoning 模型上 native 静默失效（0 工具调用 + 幻觉完成）。空=不降级（默认行为不变）。
+# 例：tool_protocol_text_models: ["text-01", "minimax"]
+tool_protocol_text_models: []
 
 # MCP 客户端（短板6）：连接外部 MCP server（Model Context Protocol，JSON-RPC over stdio），
 # 把社区现成工具（GitHub/数据库/Slack 等）动态注册成 mcp__<server>__<tool> 前缀的工具，

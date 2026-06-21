@@ -145,6 +145,10 @@ class _ToolConfigFields:
     # text=回退到现有 [TOOL_CALL] 文本协议。native 仅在 backend 为 anthropic_compatible 时生效，其余后端自动回退 text。
     # 切默认 native 依据:Step0-5 迁移完成 + R1-T(56min值守)/R2-T(编码14测试)真机验证 + 集成测试全过;text 保留为回退安全网。
     tool_protocol: str = "native"
+    # 按模型能力降级(审计 #8):列出"不支持 native tool_use"的模型名子串,命中即对该模型强制回退 text
+    # 协议——防自选非 reasoning 模型(如某些 anthropic 兼容端点的 Text-01)上 native 静默失效(0 工具+幻觉)。
+    # 空=不降级(默认行为不变)。匹配:大小写无关子串命中 model_name。
+    tool_protocol_text_models: list[str] = field(default_factory=list)
     # MCP 客户端(短板6)：声明要连接的外部 MCP server，把社区现成工具(GitHub/DB/Slack 等)
     # 动态注册成 mcp__<server>__<tool> 前缀的工具。结构：
     #   {server_name: {command: str, args: [..], env: {..}, timeout: int, connect_timeout: int}}
