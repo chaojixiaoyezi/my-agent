@@ -7,6 +7,7 @@ from agent_py_agent.agent.observability.metrics import (
     Gauge,
     Histogram,
     MetricsRegistry,
+    default_registry,
 )
 
-__all__ = ["Counter", "Gauge", "Histogram", "MetricsRegistry"]
+__all__ = ["Counter", "Gauge", "Histogram", "MetricsRegistry", "default_registry"]

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from agent_py_agent.agent.adapter import feishu_crypto
 from agent_py_agent.agent.graceful import DrainState
 from agent_py_agent.agent.ingress_queue import IngressQueue, QueueBackpressure
-from agent_py_agent.agent.observability.metrics import Counter, MetricsRegistry
+from agent_py_agent.agent.observability.metrics import Counter, MetricsRegistry, default_registry
 
 try:
     from fastapi import FastAPI, Request, Response
@@ -99,7 +99,7 @@ def create_ingress_app(queue: IngressQueue, config: FeishuIngressConfig, registr
     """造异步入站 ASGI app(FastAPI)。queue=入站队列,config=飞书凭据,registry=指标,drain=退出漏排门。"""
     if not _HAS_FASTAPI:
         raise RuntimeError("ASGI 入站层需 fastapi/uvicorn:pip install 'my-agent[scale]'")
-    reg = registry or MetricsRegistry()
+    reg = registry or default_registry()  # 默认用全局 registry,/metrics 同时暴露 agent_core 热路径指标(审计 #19)
     events = reg.counter("ingress_events_total", "入站事件总数(按结果标签)")
     app = FastAPI()
 

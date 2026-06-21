@@ -393,6 +393,22 @@ def _generate_backend_response(request: ModelGenerateParams, state: _ModelGenera
 
 
 def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState):
+    # LLM 热路径 RED + token 埋点(审计 #19):计时 + 成败 + token 发到默认 registry,/metrics 暴露。
+    # record_llm_call 内部异常隔离,绝不影响下面真实调用。
+    from .model.llm_metrics import record_llm_call
+
+    start = time.monotonic()
+    label = type(backend).__name__
+    try:
+        response = _do_backend_generate(backend, prompt, state)
+    except Exception:
+        record_llm_call(label, time.monotonic() - start, None, ok=False)
+        raise
+    record_llm_call(label, time.monotonic() - start, response, ok=True)
+    return response
+
+
+def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     # text 协议(tools/messages 均为 None)保持原调用形态，不传新关键字，旁路/伪后端零改动。
     if state.tools is None and state.messages is None:
         return backend.generate(prompt, on_chunk=state.on_chunk)

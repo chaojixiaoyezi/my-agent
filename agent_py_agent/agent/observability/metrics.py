@@ -143,3 +143,25 @@ class MetricsRegistry:
         for metric in self._metrics:
             out.extend(metric.render())
         return "\n".join(out) + "\n"
+
+
+_DEFAULT_REGISTRY: MetricsRegistry | None = None
+_DEFAULT_REGISTRY_LOCK = threading.Lock()
+
+
+def default_registry() -> MetricsRegistry:
+    """进程级默认指标注册表(审计 #19):agent_core 热路径往它发指标,/metrics 暴露它——无需把
+    registry 穿透核心循环。懒创建,线程安全。asgi_ingress 未显式传 registry 时也默认用它,
+    于是 LLM/工具热路径指标与入站指标合并暴露在同一个 /metrics。"""
+    global _DEFAULT_REGISTRY
+    with _DEFAULT_REGISTRY_LOCK:
+        if _DEFAULT_REGISTRY is None:
+            _DEFAULT_REGISTRY = MetricsRegistry()
+        return _DEFAULT_REGISTRY
+
+
+def reset_default_registry_for_test() -> None:
+    """测试钩子:清空全局默认 registry(下次 default_registry() 重建)。"""
+    global _DEFAULT_REGISTRY
+    with _DEFAULT_REGISTRY_LOCK:
+        _DEFAULT_REGISTRY = None
