@@ -20,6 +20,7 @@ from agent_py_agent.agent.artifacts.shell_protection import (
     shell_artifact_protection_note,
     snapshot_ready_artifacts,
 )
+from agent_py_agent.agent.common.json_io import append_jsonl_capped
 from agent_py_agent.agent.contracts.gates.command_policy import (
     evaluate_command_policy,
 )
@@ -423,13 +424,17 @@ def _spawn_background_process(command: str, target: Path, handle: Any) -> subpro
     )
 
 
+# background_jobs 登记台账上限:后台任务每启一个登记一条,原裸 append 永不回收 → 长跑无界增长
+# (审计 #16)。有界 append 只留最近 N 条(纯观测/孤儿排查用,丢最旧可接受),磁盘恒定。
+_MAX_BACKGROUND_JOB_RECORDS = 1000
+
+
 # 函数用途: 把后台任务登记到 .background_jobs/registry.jsonl(供观测/孤儿排查;
 #   纯辅助,登记失败不影响进程已启动的事实)。
 def _record_background_job(jobs_dir: Path, pid: int, command: str, log_path: Path) -> None:
     record = {"pid": pid, "command": command[:200], "output_file": str(log_path)}
     try:
-        with (jobs_dir / "registry.jsonl").open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        append_jsonl_capped(jobs_dir / "registry.jsonl", record, max_records=_MAX_BACKGROUND_JOB_RECORDS)
     except OSError:
         pass
 

@@ -217,6 +217,33 @@ def append_jsonl_records(path: Path, records: list[dict[str, object]], *, sort_k
             handle.write(blob)
 
 
+def append_jsonl_capped(path: Path, record: dict[str, object], *, max_records: int) -> None:
+    """有界 append:追加一条后仅保留最近 max_records 条,防 append-only 台账无界增长(审计 #16)。
+
+    全程持同一把 per-path 锁做读-改-写,与并发 append/trim 串行不丢记录不撕行;旧文件损坏行被
+    跳过(read_jsonl_objects_report 容错语义)。max_records<=0 退化为不裁剪的整文件重写。
+    background_jobs 登记等"只增不回收"的观测台账走这里,长跑磁盘恒定。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _locked_json_path(path):
+        records = read_jsonl_objects_report(path).records
+        records.append(record)
+        if max_records > 0:
+            records = records[-max_records:]
+        content = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in records)
+        _atomic_write_text_unlocked(path, content)
+
+
+def _atomic_write_text_unlocked(path: Path, content: str) -> None:
+    """temp+replace 原子写文本,不自取锁(调用方已持 _locked_json_path,锁不可重入)。"""
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        _replace_with_retry(tmp, path)
+    finally:
+        _unlink_tmp_file(tmp)
+
+
 def _path_lock(path: Path) -> _PathLock:
     key = str(path.resolve())
     with _JSON_FILE_LOCKS_GUARD:
