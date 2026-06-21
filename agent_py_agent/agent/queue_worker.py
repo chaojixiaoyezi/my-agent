@@ -99,23 +99,44 @@ class WorkerPool:
 
 
 class StaleReaper(threading.Thread):
-    """周期回收崩溃 worker 的租约(审计 #5):worker 崩在多步 LLM turn 中途时,消息永停 status='claimed',
-    _select_claimable 用 busy_lanes 排除整条 lane → 该会话后续消息永久无法领取。必须有 reaper 周期调
-    recover_stale 把过期租约退回 pending(或毒丸转 failed)。robust:瞬时 DB 错误不杀线程,下周期再试。
+    """周期队列维护(审计 #5/#16):
+
+    ① recover_stale:worker 崩在多步 LLM turn 中途时,消息永停 status='claimed',_select_claimable
+       用 busy_lanes 排除整条 lane → 该会话后续消息永久无法领取;周期把过期租约退回 pending(或毒丸转
+       failed),防会话永久卡死。每个节拍都跑。
+    ② purge_old:按更慢的子节拍(默认每小时)清理超保留期的 completed/failed 终结行,防 ingress 表
+       无界膨胀。robust:瞬时 DB 错误不杀线程,下周期再试。
     """
 
-    def __init__(self, queue: IngressQueue, *, interval: float = 30.0) -> None:
+    def __init__(
+        self, queue: IngressQueue, *, interval: float = 30.0, purge_interval: float = 3600.0, retention_days: float = 7.0
+    ) -> None:
         super().__init__(daemon=True)
         self._queue = queue
         self._interval = interval
+        self._purge_every = max(1, round(purge_interval / max(1.0, interval)))  # 多少个节拍跑一次 purge
+        self._retention_ms = int(retention_days * 86_400_000)
         self._stop = threading.Event()
+        self._tick = 0
 
     def run(self) -> None:
         while not self._stop.wait(self._interval):
-            try:
-                self._queue.recover_stale()
-            except Exception:
-                pass  # 瞬时 DB 错误不杀 reaper(下周期再试)
+            self._tick += 1
+            self._safe_recover()
+            if self._tick % self._purge_every == 0:
+                self._safe_purge()
+
+    def _safe_recover(self) -> None:
+        try:
+            self._queue.recover_stale()
+        except Exception:
+            pass  # 瞬时 DB 错误不杀线程(下周期再试)
+
+    def _safe_purge(self) -> None:
+        try:
+            self._queue.purge_old(retention_ms=self._retention_ms)
+        except Exception:
+            pass  # 清理失败不杀线程,积压留到下个 purge 节拍
 
     def stop(self) -> None:
         self._stop.set()

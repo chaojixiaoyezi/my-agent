@@ -31,6 +31,7 @@ try:
         Table,
         Text,
         and_,
+        delete,
         func,
         insert,
         inspect,
@@ -103,6 +104,42 @@ class IngressQueue:
     def ensure_schema(self) -> None:
         self._meta.create_all(self._backend.engine)
         self._ensure_columns()
+        self._ensure_indexes()
+
+    def _ensure_indexes(self) -> None:
+        """幂等建 claim 复合索引(status, next_visible_at, created_at)。
+
+        claim 热路径按 status='pending' + next_visible_at<=now 过滤再按 created_at 排序;原表除
+        dedup_key 外零索引,扫描随表线性退化、PG 上 autovacuum 膨胀(审计 #16)。CREATE INDEX
+        IF NOT EXISTS 两端(SQLite/PG)都支持,老客户库再 ensure_schema 也会补上(create_all
+        不给已存在表补索引,#10 教训)。"""
+        sql = (
+            "CREATE INDEX IF NOT EXISTS ix_ingress_status_visible "
+            "ON ingress_messages (status, next_visible_at, created_at)"
+        )
+        with self._backend.begin() as conn:
+            conn.execute(text(sql))
+
+    def purge_old(self, *, retention_ms: int, now_ms: int = 0, limit: int = 10_000) -> int:
+        """清理已终结(completed/failed)且 created_at 超保留期的旧行,防 ingress 表无界增长(审计 #16)。
+
+        保留近 retention_ms 的终结行做墓碑去重(平台重投窗口内仍去重),更老的删;pending/claimed
+        在途行永不删(哪怕 created_at 很老)。分批 limit 上限防大事务长锁;返回本次删除行数,
+        可循环调至 0 清完积压。后台由 StaleReaper 按慢节拍调用。"""
+        now = now_ms or _now_ms()
+        cutoff = now - max(0, retention_ms)
+        with self._backend.begin() as conn:
+            ids = [
+                r.id for r in conn.execute(
+                    select(self._t.c.id).where(and_(
+                        self._t.c.status.in_(("completed", "failed")),
+                        self._t.c.created_at < cutoff,
+                    )).limit(limit)
+                ).all()
+            ]
+            if ids:
+                conn.execute(delete(self._t).where(self._t.c.id.in_(ids)))
+        return len(ids)
 
     def _ensure_columns(self) -> None:
         """对已存在的旧表幂等补列(create_all 不给已存在表加列,#10 教训):next_visible_at / last_error。"""
