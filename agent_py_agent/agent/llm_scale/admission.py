@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from agent_py_agent.agent.llm_scale.concurrency import ConcurrencyLimiter
 from agent_py_agent.agent.llm_scale.rate_limiter import TenantRateLimiter
 from agent_py_agent.agent.llm_scale.token_budget import TokenBudget
+from agent_py_agent.agent.llm_scale.usd_budget import UsdBudget
 
 
 @dataclass(frozen=True)
@@ -37,17 +38,27 @@ class AdmissionResult:
 class LLMAdmission:
     """三关合一准入:限流 + 预算(precheck)+ 并发(slot)。稳定性 + 成本双闸。"""
 
-    def __init__(self, rate_limiter: TenantRateLimiter, budget: TokenBudget, concurrency: ConcurrencyLimiter) -> None:
+    def __init__(
+        self,
+        rate_limiter: TenantRateLimiter,
+        budget: TokenBudget,
+        concurrency: ConcurrencyLimiter,
+        *,
+        usd_budget: UsdBudget | None = None,
+    ) -> None:
         self._rate = rate_limiter
         self._budget = budget
         self._conc = concurrency
+        self._usd_budget = usd_budget  # 可选 USD 预算闸(审计 #19);None 或未配上限=不改现有行为
 
-    def precheck(self, tenant: str, estimated_tokens: int = 1) -> AdmissionResult:
-        """限流 + 预算预扣。任一关不过返回 admitted=False 与原因(不占并发槽)。"""
+    def precheck(self, tenant: str, estimated_tokens: int = 1, *, estimated_cost_usd: float = 0.0) -> AdmissionResult:
+        """限流 + token 预算预扣 + 可选 USD 预算预扣。任一关不过返回 admitted=False 与原因(不占并发槽)。"""
         if not self._rate.allow(tenant):
             return AdmissionResult(False, "rate_limited", self._budget.remaining(tenant))
         if not self._budget.try_charge(tenant, estimated_tokens):
             return AdmissionResult(False, "budget_exceeded", self._budget.remaining(tenant))
+        if self._usd_budget is not None and not self._usd_budget.try_charge(tenant, estimated_cost_usd):
+            return AdmissionResult(False, "usd_budget_exceeded", self._budget.remaining(tenant))
         return AdmissionResult(True, "ok", self._budget.remaining(tenant))
 
     @contextmanager
@@ -59,3 +70,8 @@ class LLMAdmission:
     def settle(self, tenant: str, estimated: int, actual: int) -> None:
         """调用后用真实 token 校正预算预扣(估算与实际有出入时纠偏)。"""
         self._budget.settle(tenant, estimated, actual)
+
+    def settle_usd(self, tenant: str, estimated_usd: float, actual_usd: float) -> None:
+        """调用后用真实 USD 成本校正 USD 预算预扣(审计 #19)。未配 USD 预算则无操作。"""
+        if self._usd_budget is not None:
+            self._usd_budget.settle(tenant, estimated_usd, actual_usd)
