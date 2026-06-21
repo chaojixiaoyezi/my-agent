@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..common.json_io import read_jsonl_objects_report
+from ..common.text_norm import fold_key, nfc
 
 
 def _memory_record_from_obj(obj: dict) -> MemoryRecord | None:
@@ -282,11 +283,13 @@ def _record_payload(record: MemoryRecord) -> dict:
 
 
 def _memory_record_key(record: MemoryRecord) -> tuple[str, str, str, float]:
-    return (record.role, record.kind, record.content, float(record.created_at or 0.0))
+    # content 走 nfc 规范化(审计 #20):NFD/NFC 等价的同一条记忆(macOS 文件名/不同输入法)归一后
+    # 同键去重,不再因码点形式差异重复堆积。用 nfc 而非 fold_key——内容去重保大小写/全角语义,只统一编码形式。
+    return (record.role, record.kind, nfc(record.content), float(record.created_at or 0.0))
 
 
 def _search_memory_records(records: list[MemoryRecord], query: str, top_k: int) -> list[MemoryRecord]:
-    query_terms = {term.lower() for term in query.split() if term.strip()}
+    query_terms = {term for term in fold_key(query).split() if term}  # 统一规范化(审计 #20)
     scored: list[tuple[int, float, MemoryRecord]] = []
     for record in records:
         score = _memory_search_score(record, query, query_terms)
@@ -297,9 +300,10 @@ def _search_memory_records(records: list[MemoryRecord], query: str, top_k: int) 
 
 
 def _memory_search_score(record: MemoryRecord, query: str, query_terms: set[str]) -> int:
-    text = record.content.lower()
+    text = fold_key(record.content)  # 与 query_terms 同走统一规范化(审计 #20):全角/NFD/大小写不漏命中
     score = sum(1 for term in query_terms if term in text)
-    if query and query.lower() in text:
+    folded_query = fold_key(query)
+    if folded_query and folded_query in text:
         score += 3
     return score
 

@@ -5,6 +5,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from ..common.text_norm import fold_key
 from ..common.value_parsing import dedupe_strings
 from .models import MemoryPathResolution, MemoryReadReceipt, MemoryRoute, MemoryRouteMatch
 
@@ -232,7 +233,10 @@ def _limit_matches(hits: list[MemoryRouteMatch], limit: int | None) -> list[Memo
 
 
 def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text.lower()).strip()
+    # 统一规范化层(审计 #20):NFKC(全角→半角)+ casefold(跨语言大小写)+ 去零宽噪声 + 折叠空白
+    # (含全角空格 U+3000/NBSP)。原 re.sub(\s+).lower() 不折全角/不规范 NFD/不去零宽,致 CJK 输入法
+    # 全角空格、跨平台 NFD 文件名、夹零宽字符的同一查询匹配静默失效(MEMORY 记载的中文输入匹配缺陷)。
+    return fold_key(text)
 
 
 def _tokens(text: str) -> list[str]:
