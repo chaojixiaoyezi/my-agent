@@ -33,7 +33,7 @@ def test_run_once_empty_returns_false() -> None:
     assert QueueWorker(_queue(), lambda _p: None).run_once() is False
 
 
-def test_handler_exception_marks_failed_not_stuck() -> None:
+def test_handler_exception_requeues_for_retry_not_stuck() -> None:
     q = _queue()
     q.enqueue("e1", "L", {})
 
@@ -41,8 +41,10 @@ def test_handler_exception_marks_failed_not_stuck() -> None:
         raise RuntimeError("handler 炸了")
 
     assert QueueWorker(q, boom).run_once() is True
-    assert q.stats().get("failed") == 1  # 标 failed,不卡 lane
+    # #17:可重试失败 → 退避重投(回 pending),不卡 lane、不一次就死信
     assert q.stats().get("claimed", 0) == 0
+    assert q.stats().get("pending") == 1  # 重投待重试
+    assert q.stats().get("failed", 0) == 0
 
 
 def test_worker_pool_concurrently_processes_all(tmp_path) -> None:

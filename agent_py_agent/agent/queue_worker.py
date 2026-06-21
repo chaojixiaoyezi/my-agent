@@ -62,8 +62,9 @@ class QueueWorker:
         try:
             self._handler(msg.payload)
             self._queue.complete(msg.claim_token)
-        except Exception:
-            self._queue.fail(msg.claim_token)  # handler 失败 → 标 failed,不卡队列/lane
+        except Exception as exc:
+            # handler 失败 → 退避重投(未达上限)或死信(达上限),不卡队列/lane(审计 #17)
+            self._queue.fail(msg.claim_token, error=f"{type(exc).__name__}: {exc}")
         finally:
             hb.stop()
 

@@ -33,7 +33,9 @@ try:
         and_,
         func,
         insert,
+        inspect,
         select,
+        text,
         update,
     )
 
@@ -63,12 +65,23 @@ def _messages_table(meta: Any) -> Any:
         Column("dedup_key", String(200), nullable=False, unique=True),
         Column("lane", String(200), nullable=False),
         Column("payload", Text, nullable=False),
-        Column("status", String(20), nullable=False),  # pending / claimed / completed / failed
+        Column("status", String(20), nullable=False),  # pending / claimed / completed / failed(=死信)
         Column("attempts", Integer, nullable=False),
         Column("claim_token", String(64), nullable=True),
         Column("lease_until", BigInteger, nullable=True),  # epoch ms
         Column("created_at", BigInteger, nullable=False),  # epoch ms
+        Column("next_visible_at", BigInteger, nullable=False, default=0),  # 退避延迟可见:到点才可被领(审计 #17)
+        Column("last_error", Text, nullable=True),  # 末次失败原因(死信排查用)
     )
+
+
+_BASE_BACKOFF_MS = 1000
+_MAX_BACKOFF_MS = 300_000  # 退避上限 5 分钟
+
+
+def _backoff_ms(attempts: int) -> int:
+    """指数退避(确定性可测):attempts=1→1s, 2→2s, 3→4s…封顶 5min。瞬时失败退避后重投而非永久丢。"""
+    return min(_MAX_BACKOFF_MS, _BASE_BACKOFF_MS * (2 ** max(0, attempts - 1)))
 
 
 @dataclass(frozen=True)
@@ -89,6 +102,24 @@ class IngressQueue:
 
     def ensure_schema(self) -> None:
         self._meta.create_all(self._backend.engine)
+        self._ensure_columns()
+
+    def _ensure_columns(self) -> None:
+        """对已存在的旧表幂等补列(create_all 不给已存在表加列,#10 教训):next_visible_at / last_error。"""
+        existing = {c["name"] for c in inspect(self._backend.engine).get_columns("ingress_messages")}
+        adds = []
+        if "next_visible_at" not in existing:
+            adds.append("ADD COLUMN next_visible_at BIGINT NOT NULL DEFAULT 0")
+        if "last_error" not in existing:
+            adds.append("ADD COLUMN last_error TEXT")
+        self._apply_alters(adds)
+
+    def _apply_alters(self, adds: list[str]) -> None:
+        if not adds:
+            return
+        with self._backend.begin() as conn:
+            for clause in adds:
+                conn.execute(text(f"ALTER TABLE ingress_messages {clause}"))
 
     # --- 入站(webhook 调用,立即返回)---
     def enqueue(self, dedup_key: str, lane: str, payload: dict[str, Any], *, now_ms: int = 0) -> bool:
@@ -122,7 +153,7 @@ class IngressQueue:
         """原子领取下一条 pending(其 lane 当前无在飞消息=lane 串行)。PG SKIP LOCKED;SQLite 写锁串行。"""
         now = now_ms or _now_ms()
         with self._backend.begin() as conn:
-            row = self._select_claimable(conn)
+            row = self._select_claimable(conn, now)
             if row is None:
                 return None
             token = uuid.uuid4().hex
@@ -133,11 +164,15 @@ class IngressQueue:
             )
             return ClaimedMessage(int(row.id), str(row.lane), json.loads(row.payload), token, int(row.attempts) + 1)
 
-    def _select_claimable(self, conn: Any) -> Any:
+    def _select_claimable(self, conn: Any, now: int) -> Any:
         busy_lanes = select(self._t.c.lane).where(self._t.c.status == "claimed")
         stmt = (
             select(self._t.c.id, self._t.c.lane, self._t.c.payload, self._t.c.attempts)
-            .where(and_(self._t.c.status == "pending", self._t.c.lane.notin_(busy_lanes)))
+            .where(and_(
+                self._t.c.status == "pending",
+                self._t.c.lane.notin_(busy_lanes),
+                self._t.c.next_visible_at <= now,  # 退避中的消息(next_visible_at 在未来)暂不可领
+            ))
             .order_by(self._t.c.created_at, self._t.c.id)
             .limit(1)
         )
@@ -148,8 +183,35 @@ class IngressQueue:
     def complete(self, claim_token: str) -> bool:
         return self._finish(claim_token, "completed")
 
-    def fail(self, claim_token: str) -> bool:
-        return self._finish(claim_token, "failed")
+    def fail(self, claim_token: str, *, retryable: bool = True, error: str = "", now_ms: int = 0) -> bool:
+        """handler 失败处理(审计 #17):可重试且未达上限 → 退避重投(回 pending,next_visible_at 延迟可见);
+        否则 → 死信(status='failed',留 last_error)。瞬时 provider 故障不再一次失败就永久丢。"""
+        now = now_ms or _now_ms()
+        with self._backend.begin() as conn:
+            row = conn.execute(
+                select(self._t.c.id, self._t.c.attempts).where(self._t.c.claim_token == claim_token)
+            ).first()
+            if row is None:
+                return False
+            if retryable and int(row.attempts) < self._cfg.max_attempts:
+                values = {"status": "pending", "claim_token": None, "lease_until": None,
+                          "next_visible_at": now + _backoff_ms(int(row.attempts)), "last_error": error[:500]}
+            else:
+                values = {"status": "failed", "claim_token": None, "last_error": error[:500]}  # 死信
+            conn.execute(update(self._t).where(self._t.c.id == row.id).values(**values))
+        return True
+
+    def requeue_dead(self, *, limit: int = 100) -> int:
+        """死信重放:把 failed 改回 pending 重新可领(人工补偿/批量重放,运维入口)。返回重放数。"""
+        with self._backend.begin() as conn:
+            ids = [r.id for r in conn.execute(
+                select(self._t.c.id).where(self._t.c.status == "failed").limit(limit)
+            ).all()]
+            if ids:
+                conn.execute(update(self._t).where(self._t.c.id.in_(ids)).values(
+                    status="pending", attempts=0, claim_token=None, lease_until=None, next_visible_at=0, last_error=None,
+                ))
+        return len(ids)
 
     def _finish(self, claim_token: str, status: str) -> bool:
         with self._backend.begin() as conn:
