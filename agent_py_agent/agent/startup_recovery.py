@@ -38,6 +38,7 @@ class ActiveWorkSummary:
     dispatch_pending: bool = False
     dispatch_rounds: int = 0
     orphan_processes: list[dict] = None
+    crashed_tasks: list[dict] = None  # 非终态但进程已退出的崩溃卡死任务(审计 #18)
     detection_errors: list[dict] = None
 
     def __post_init__(self) -> None:
@@ -47,6 +48,8 @@ class ActiveWorkSummary:
             self.processing_requests = []
         if self.orphan_processes is None:
             self.orphan_processes = []
+        if self.crashed_tasks is None:
+            self.crashed_tasks = []
         if self.detection_errors is None:
             self.detection_errors = []
 
@@ -188,6 +191,69 @@ def _detect_orphan_processes(agent, summary) -> None:
         )
 
 
+def _task_background_pid(task: object) -> int:
+    """取任务后台进程 pid(background_start.pid,权威事实源);无记录返回 0。"""
+    attrs = getattr(task, "attributes", {}) or {}
+    background = attrs.get("background_start") if isinstance(attrs, dict) else None
+    if not isinstance(background, dict):
+        return 0
+    try:
+        return int(background.get("pid") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _detect_crashed_running_tasks(agent, summary) -> None:
+    """检测崩溃卡死任务(审计 #18):非终态任务但其后台进程 pid 已不存活 = run 崩了、任务仍卡 RUNNING。
+
+    与孤儿检测(终态任务 + 进程活着)互补,补上原本完全不可见、不告警的"崩溃后永久卡 RUNNING"。
+    安全:pid 复用时 is_pid_alive=True 被跳过 → 不误伤(宁可漏报);无记录 pid 也跳过(无法确认崩溃)。
+    本函数只检测+上报,不动任务状态(尊重现有"提示用户、不自动回收"策略);自动调和见下面 opt-in。
+    """
+    from .contracts.state_machine import TERMINAL_STATES, normalize_status
+    from .subagents.process_control import is_pid_alive
+
+    try:
+        tasks = list(agent.subagents.list_runs() or [])
+    except Exception as exc:
+        _append_detection_error(summary, exc, "startup_recovery.crashed_tasks")
+        return
+    for task in tasks:
+        pid = _task_background_pid(task)
+        if pid <= 0 or normalize_status(getattr(task, "status", "")) in TERMINAL_STATES or is_pid_alive(pid):
+            continue
+        summary.crashed_tasks.append(
+            {"run_id": str(getattr(task, "id", "") or ""), "pid": pid, "status": str(getattr(task, "status", "") or "")}
+        )
+
+
+def _maybe_reconcile_crashed_tasks(agent, summary) -> None:
+    """opt-in(默认关):配 startup_auto_reconcile_crashed_tasks=true 时把崩溃卡死任务自动调和到 ABANDONED。
+
+    只改任务状态(进程已死,不杀任何进程,不违背"绝不自动杀");默认关 = 现有"提示用户"行为完全不变。
+    """
+    if not bool(getattr(getattr(agent, "config", None), "startup_auto_reconcile_crashed_tasks", False)):
+        return
+    for crashed in summary.crashed_tasks:
+        _reconcile_one_crashed(agent, summary, crashed)
+
+
+def _reconcile_one_crashed(agent, summary, crashed: dict) -> None:
+    run_id = str(crashed.get("run_id") or "")
+    if not run_id:
+        return
+    try:
+        agent.subagents.lifecycle.set_status(
+            run_id,
+            TaskStatus.ABANDONED.value,
+            result="进程已退出(pid 不存活),启动恢复自动调和到 ABANDONED",
+            failure_type="background_dispatch_startup",
+        )
+        crashed["reconciled"] = True
+    except Exception as exc:
+        _append_detection_error(summary, exc, "startup_recovery.reconcile_crashed")
+
+
 # 函数用途: 读进程命令行(ps 跨 darwin/linux;读不到返回空串=身份验证不过,不报)。
 def _process_cmdline(pid: int) -> str:
     import subprocess
@@ -254,8 +320,35 @@ def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
     _detect_pending_notifications(agent, summary)
     _detect_dispatch_status(agent, summary)
     _detect_orphan_processes(agent, summary)
+    _detect_crashed_running_tasks(agent, summary)  # 审计 #18:崩溃后卡 RUNNING 的任务(原本不可见)
+    _maybe_reconcile_crashed_tasks(agent, summary)  # opt-in(默认关):自动调和到 ABANDONED
 
     return summary
+
+
+def _render_orphan_processes(summary: ActiveWorkSummary) -> list[str]:
+    """渲染孤儿派工进程段(任务已终态但进程仍活)。无则空。从 format 抽出以控行数。"""
+    if not summary.orphan_processes:
+        return []
+    lines = [f"⚠ 发现 {len(summary.orphan_processes)} 个孤儿派工进程（任务已终态但进程仍在运行，疑似上次异常退出遗留）"]
+    for orphan in summary.orphan_processes[:3]:
+        lines.append(f"  - pid={orphan['pid']} run={orphan['run_id']} status={orphan['task_status']}")
+    lines.append("  确认后可手动终止（kill <pid>），系统不会自动回收。")
+    return lines
+
+
+def _render_crashed_tasks(summary: ActiveWorkSummary) -> list[str]:
+    """渲染崩溃卡死任务段(审计 #18)。无则空。从 format 抽出以控行数。"""
+    if not summary.crashed_tasks:
+        return []
+    reconciled = sum(1 for crashed in summary.crashed_tasks if crashed.get("reconciled"))
+    lines = [f"⚠ 发现 {len(summary.crashed_tasks)} 个崩溃卡死任务（非终态但进程已退出，疑似 run 崩溃/OOM/断电）"]
+    for crashed in summary.crashed_tasks[:3]:
+        mark = " → 已自动调和 ABANDONED" if crashed.get("reconciled") else ""
+        lines.append(f"  - run={crashed['run_id']} status={crashed['status']} pid={crashed['pid']}（已退出）{mark}")
+    if reconciled < len(summary.crashed_tasks):
+        lines.append("  这些任务会永久卡 RUNNING；配 startup_auto_reconcile_crashed_tasks=true 可自动调和到 ABANDONED。")
+    return lines
 
 
 def format_active_work_summary(summary: ActiveWorkSummary) -> str:
@@ -292,11 +385,8 @@ def format_active_work_summary(summary: ActiveWorkSummary) -> str:
         lines.append(f"⚠ 有未完成的 dispatch 循环（已运行 {summary.dispatch_rounds} 轮）")
         lines.append("  是否继续？使用 my-agent daemon --continue 继续调度")
 
-    if summary.orphan_processes:
-        lines.append(f"⚠ 发现 {len(summary.orphan_processes)} 个孤儿派工进程（任务已终态但进程仍在运行，疑似上次异常退出遗留）")
-        for orphan in summary.orphan_processes[:3]:
-            lines.append(f"  - pid={orphan['pid']} run={orphan['run_id']} status={orphan['task_status']}")
-        lines.append("  确认后可手动终止（kill <pid>），系统不会自动回收。")
+    lines.extend(_render_orphan_processes(summary))
+    lines.extend(_render_crashed_tasks(summary))
 
     if summary.detection_errors:
         lines.append(f"⚠ 启动恢复检测有 {len(summary.detection_errors)} 个读取错误")
@@ -329,6 +419,7 @@ def has_active_work(summary: ActiveWorkSummary) -> bool:
         or summary.stale_request_count > 0
         or summary.dispatch_pending
         or bool(summary.orphan_processes)
+        or bool(summary.crashed_tasks)
     )
 
 
