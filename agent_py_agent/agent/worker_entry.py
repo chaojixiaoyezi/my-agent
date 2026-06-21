@@ -44,6 +44,9 @@ def build_pool(handler: Handler, backend: StorageBackend | None = None) -> tuple
 
 
 def serve() -> None:  # pragma: no cover - 真进程入口(容器内跑)
+    from agent_py_agent.agent.common.thread_hooks import install_thread_excepthook
+
+    install_thread_excepthook()  # 后台线程(worker/reaper)未捕获异常落日志可告警,不静默死(审计 #19)
     drain = DrainState()
     pool, queue = build_pool(load_handler())
     reaper = StaleReaper(queue)  # 周期回收崩溃 worker 的租约,防会话永久卡死

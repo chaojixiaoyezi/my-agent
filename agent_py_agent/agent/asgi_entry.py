@@ -54,6 +54,9 @@ def build_app(backend: StorageBackend | None = None, drain: DrainState | None = 
 def serve() -> None:  # pragma: no cover - 真进程入口(容器内跑,单测不起 uvicorn)
     import uvicorn
 
+    from agent_py_agent.agent.common.thread_hooks import install_thread_excepthook
+
+    install_thread_excepthook()  # 后台线程未捕获异常落日志可告警,不静默死(审计 #19)
     app, drain = build_app()
     install_sigterm_drain(drain)  # SIGTERM → 就绪门转 503 → 摘流量优雅退出
     uvicorn.run(app, host="0.0.0.0", port=env_int("PORT", 8080))
