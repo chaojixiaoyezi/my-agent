@@ -96,6 +96,10 @@ def generate_model_response(request: ModelGenerateParams):
     # 误清正常轮，所以无条件兜底清理是安全的。
     try:
         response = _generate_or_recover_context_pressure(request, state)
+        # 审计 #8:跟踪 native 空转(工具供给但 0 tool_use),连续 K 次自动降级 text(内部异常隔离)
+        from .native_tool_protocol import record_native_turn
+
+        record_native_turn(request.agent, bool(getattr(state, "tools", None)), response)
         return _finish_model_generation(request, state, response)
     finally:
         mark_tool_context_digest_consumed(request.params)
