@@ -22,8 +22,9 @@ def _fresh() -> None:
 
 
 class _FakeBackend:
-    def __init__(self, response: object) -> None:
+    def __init__(self, response: object, model_name: str = "claude-opus-4-8") -> None:
         self._response = response
+        self.model_name = model_name
 
     def generate(self, prompt: str, **kwargs: object) -> object:
         return self._response
@@ -82,6 +83,29 @@ def test_seam_emits_error_and_reraises() -> None:
     with pytest.raises(RuntimeError, match="backend boom"):
         tool_model_generation._invoke_backend_generate(_RaisingBackend(), "hi", _state())  # 异常仍传播
     assert 'outcome="error"' in default_registry().render()  # 失败计入 RED
+
+
+def test_record_llm_cost_emits_to_metrics() -> None:
+    _fresh()
+    resp = SimpleNamespace(usage={"input_tokens": 100, "output_tokens": 50})
+    llm_metrics.record_llm_cost("claude-opus-4-8", resp)  # opus 15/75 per Mtok → 0.0015 + 0.00375
+    text = default_registry().render()
+    assert 'agent_llm_cost_usd_total{model="claude-opus-4-8"} 0.00525' in text  # 真实 USD 成本可观测
+
+
+def test_record_llm_cost_noop_without_model() -> None:
+    _fresh()
+    llm_metrics.record_llm_cost("", SimpleNamespace(usage={"input_tokens": 100}))  # 无 model → 不计
+    llm_metrics.record_llm_cost("claude-opus-4-8", None)  # 无响应 → 不计
+    assert "agent_llm_cost_usd_total" not in default_registry().render()
+
+
+def test_seam_emits_cost_for_model() -> None:
+    _fresh()
+    resp = SimpleNamespace(usage={"input_tokens": 1_000_000, "output_tokens": 0})
+    tool_model_generation._invoke_backend_generate(_FakeBackend(resp, model_name="claude-sonnet-4-6"), "hi", _state())
+    text = default_registry().render()
+    assert 'agent_llm_cost_usd_total{model="claude-sonnet-4-6"} 3' in text  # sonnet 3/Mtok in × 1M = $3
 
 
 def test_default_registry_singleton_and_reset() -> None:

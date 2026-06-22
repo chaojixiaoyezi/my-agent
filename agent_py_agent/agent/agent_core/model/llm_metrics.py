@@ -22,6 +22,7 @@ class _LlmMetrics:
     duration: object    # Histogram:调用耗时秒
     input_tokens: object   # Counter:输入 token 累计
     output_tokens: object  # Counter:输出 token 累计
+    cost: object        # Counter:累计 USD 成本(按 model,审计 #19 残余)
 
 
 _METRICS: _LlmMetrics | None = None
@@ -40,6 +41,7 @@ def _metrics() -> _LlmMetrics:
                 duration=reg.histogram("agent_llm_duration_seconds", "LLM 调用耗时(秒)"),
                 input_tokens=reg.counter("agent_llm_input_tokens_total", "LLM 输入 token 累计"),
                 output_tokens=reg.counter("agent_llm_output_tokens_total", "LLM 输出 token 累计"),
+                cost=reg.counter("agent_llm_cost_usd_total", "LLM 累计 USD 成本(按 model)"),
             )
         return _METRICS
 
@@ -65,6 +67,24 @@ def _record_tokens(metrics: _LlmMetrics, labels: dict, response: object) -> None
         metrics.input_tokens.inc(inp, labels=labels)
     if out:
         metrics.output_tokens.inc(out, labels=labels)
+
+
+def record_llm_cost(model: str, response: object) -> None:
+    """按模型单价算这次响应的真实 USD 成本,累计到 agent_llm_cost_usd_total{model}(审计 #19 残余)。
+
+    接 LLM 热路径,让"花了多少钱"在 /metrics 可观测可告警。异常隔离:埋点失败只吞不冒泡。
+    按 model 维度(seam 处可达 backend.model_name);按租户/run 累计需请求上下文穿透,留专项。
+    """
+    if not model or response is None:
+        return
+    try:
+        from ...llm_scale.model_pricing import cost_usd
+
+        cost = cost_usd(model, input_token_usage(response) or 0, output_token_usage(response) or 0)
+        if cost > 0:
+            _metrics().cost.inc(cost, labels={"model": model})
+    except Exception:
+        pass  # 成本埋点绝不影响 LLM 调用
 
 
 def reset_for_test() -> None:

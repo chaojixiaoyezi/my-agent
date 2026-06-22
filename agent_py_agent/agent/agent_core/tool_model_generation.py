@@ -393,18 +393,20 @@ def _generate_backend_response(request: ModelGenerateParams, state: _ModelGenera
 
 
 def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState):
-    # LLM 热路径 RED + token 埋点(审计 #19):计时 + 成败 + token 发到默认 registry,/metrics 暴露。
-    # record_llm_call 内部异常隔离,绝不影响下面真实调用。
-    from .model.llm_metrics import record_llm_call
+    # LLM 热路径 RED + token + USD 成本埋点(审计 #19):计时 + 成败 + token + cost 发到默认
+    # registry,/metrics 暴露。record_llm_call/record_llm_cost 内部异常隔离,绝不影响下面真实调用。
+    from .model.llm_metrics import record_llm_call, record_llm_cost
 
     start = time.monotonic()
     label = type(backend).__name__
+    model = str(getattr(backend, "model_name", "") or "")
     try:
         response = _do_backend_generate(backend, prompt, state)
     except Exception:
         record_llm_call(label, time.monotonic() - start, None, ok=False)
         raise
     record_llm_call(label, time.monotonic() - start, response, ok=True)
+    record_llm_cost(model, response)  # 真实 USD 成本按 model 累计(审计 #19 残余)
     return response
 
 
