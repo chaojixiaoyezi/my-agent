@@ -72,6 +72,32 @@ def test_l2_normalize_zero_vector() -> None:
     assert l2_normalize([0.0, 0.0]) == [0.0, 0.0]
 
 
+def test_mean_center_suppresses_common_direction() -> None:
+    """mean centering 去"通用方向偏置":两文档共享强通用分量时,去偏置后让真正匹配特征的文档凸显。
+
+    真机实测:真实 embedding 下某文档(部署密钥)和所有不相关查询都高相似,去均值后被压到负、相关项升到 @1。
+    """
+    from agent_py_agent.agent.retrieval.embedding import mean_center
+
+    doc_a = l2_normalize([3.0, 1.0, 0.0])  # 通用方向(维0)+ 特征A(维1)
+    doc_b = l2_normalize([3.0, 0.0, 1.0])  # 通用方向 + 特征B(维2)
+    query = l2_normalize([3.0, 1.0, 0.0])  # 含通用 + 特征A → 本应更像 doc_a
+    raw_gap = cosine(query, doc_a) - cosine(query, doc_b)  # 通用方向掩盖差异,gap 小
+    cq, cdocs = mean_center(query, [doc_a, doc_b])
+    cen_gap = cosine(cq, cdocs[0]) - cosine(cq, cdocs[1])  # 去通用方向后 gap 放大
+    assert cen_gap > raw_gap  # 区分度提升
+
+
+def test_mean_center_single_doc_is_noop() -> None:
+    """<2 文档时均值无意义,原样返回(不破坏单文档检索)。"""
+    from agent_py_agent.agent.retrieval.embedding import mean_center
+
+    q = [1.0, 0.0]
+    docs = [[0.5, 0.5]]
+    cq, cdocs = mean_center(q, docs)
+    assert cq == q and cdocs == docs
+
+
 # --- 向量库 ---
 def test_vector_store_upsert_search_persist(tmp_path: Path) -> None:
     emb = LocalHashingEmbedder(dim=128)

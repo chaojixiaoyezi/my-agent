@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from agent_py_agent.agent.retrieval.embedding import EmbeddingError, EmbeddingProvider, cosine
+from agent_py_agent.agent.retrieval.embedding import EmbeddingError, EmbeddingProvider, cosine, mean_center
 from agent_py_agent.agent.retrieval.lexical import rank as bm25_rank
 from agent_py_agent.agent.retrieval.lexical import reciprocal_rank_fusion
 
@@ -46,5 +46,7 @@ class HybridRetriever:
             doc_vecs = self._embedder.embed(texts)
         except (EmbeddingError, IndexError):
             return None  # 端点抖动 → 降级纯 BM25
+        # 去"通用方向偏置"(某些文档和所有查询都高相似→干扰召回),提升语义召回区分度;通道运行时 也没做这步
+        query_vec, doc_vecs = mean_center(query_vec, doc_vecs)
         sims = [(ids[i], cosine(query_vec, doc_vecs[i])) for i in range(min(len(ids), len(doc_vecs)))]
         return [id for id, score in sorted(sims, key=lambda kv: (-kv[1], kv[0])) if score > 0.0]
