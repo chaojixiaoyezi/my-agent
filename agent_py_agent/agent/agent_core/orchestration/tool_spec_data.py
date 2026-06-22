@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 _CREATE_USE_CASES = [
-    "需要把任务拆给多个子代理并行处理",
+    "目标能拆成 2+ 个可并行的独立子任务时,优先一次用 items 创建多个、各管一块并行推进(更快、也省主代理上下文)",
     "需要不同角色分别研究、实现、检查或汇总",
 ]
 _CREATE_KEYWORDS = [

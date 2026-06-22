@@ -38,7 +38,11 @@ def build_create_subagents_spec() -> ToolSpec:
         requires_idempotency=True,
         description="创建一个或多个子代理并默认立刻启动。不同工作切片优先用 items；相对时间要沿用当前日期/年份；只有 defer_start=true 才只建不跑。",
         use_cases=_CREATE_USE_CASES,
-        avoid_when=["只是解释思路、不需要真正创建任务时，不要调用；先直接回答即可"],
+        avoid_when=[
+            "只是解释思路、不需要真正创建任务时，不要调用；先直接回答即可",
+            "单步机械活或一两次工具调用就能完成的简单任务,自己直接做、别拆",
+            "别把整个目标原样转给单个子代理(无谓套娃,没真正切分就没价值)",
+        ],
         keywords=_CREATE_KEYWORDS,
         parameters=_CREATE_PARAMETERS,
         parameter_details=_with_role_template_index(_CREATE_PARAMETER_DETAILS),
