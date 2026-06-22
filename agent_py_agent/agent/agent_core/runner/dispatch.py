@@ -277,7 +277,11 @@ def _is_dispatch_runner_candidate(
             effective_policy.runner_max_attempts,
             effective_policy.same_run_redispatch_limit,
         )
-    return task_has_status(task, TaskStatus.PLANNING)
+    # 续派候选兜底：PLANNING/PENDING 同为"待启动 runner"的可派工态(对齐 state_machine.DISPATCHABLE_STATES)。
+    # PENDING 是子代理被 background 启动后 runner 进程被回收(orphan)留下的停滞孤儿态——原先只认 PLANNING,
+    # 导致这类孤儿永不被续派、多子代理任务死循环卡死。正在启动中的 PENDING 已被本函数开头的
+    # runner_launch_in_progress 排除,故这里只会捞起真正停滞的孤儿,不会重复派正在跑的。
+    return task_status_in(task.status, {TaskStatus.PLANNING.value, TaskStatus.PENDING.value})
 
 
 def _task_verification_status(task: SubAgentTask) -> str:

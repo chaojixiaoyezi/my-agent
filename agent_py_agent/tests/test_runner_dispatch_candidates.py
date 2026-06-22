@@ -98,6 +98,40 @@ class TestIsDispatchRunnerCandidate:
 
         assert _is_dispatch_runner_candidate(mock_task) is True
 
+    def test_pending_stalled_orphan_is_candidate(self):
+        """PENDING 停滞孤儿(runner 被 orphan 回收、background_start 已 terminated)应被续派。
+
+        多子代理任务死循环卡死的核心修复:原先 candidate 兜底只认 PLANNING,被 background 启动后
+        进程被回收留下的 PENDING 孤儿永不续派。现在 PENDING 与 PLANNING 同等可派(对齐 can_dispatch)。
+        """
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
+
+        mock_task = MagicMock()
+        mock_task.status = "PENDING"
+        mock_task.runner_active_attempt_id = ""  # 无活跃 attempt
+        mock_task.attributes = {"background_start": {"status": "terminated"}}  # 进程已被回收
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.channel_status = "OK"
+        mock_task.capability_requests = []
+        mock_task.capability_gaps = []
+
+        assert _is_dispatch_runner_candidate(mock_task) is True
+
+    def test_pending_launching_in_progress_not_candidate(self):
+        """PENDING 但 runner 正在启动中(background_start=running)不重复派——不和在途 runner 撞车。"""
+        from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
+
+        mock_task = MagicMock()
+        mock_task.status = "PENDING"
+        mock_task.runner_active_attempt_id = ""
+        mock_task.attributes = {"background_start": {"status": "running"}}  # 正在跑
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.channel_status = "OK"
+        mock_task.capability_requests = []
+        mock_task.capability_gaps = []
+
+        assert _is_dispatch_runner_candidate(mock_task) is False
+
     def test_failed_with_retryable_reason(self):
         """可重试失败类型的 FAILED 任务是候选。"""
         from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
