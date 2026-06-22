@@ -200,6 +200,9 @@ Ctrl+C
 | `subagent-run` | 按执行上下文运行一个 subagent | 是 | 只有 `--execute` 会调用 |
 | `subagent` | 查看单个 subagent 详情 | 否 | 否 |
 | `audit-log` | 查询审计日志 | `--cleanup` 时写回 | 否 |
+| `update` | 自更新:git pull 最新代码 + pip 刷依赖(像 通道运行时 update) | 否 | 否 |
+| `config-set` | 设置一个配置项(白名单内,如飞书凭证),保留注释原子写回 | 是(写配置文件) | 否 |
+| `config-get` | 读取一个配置项当前值(敏感字段脱敏) | 否 | 否 |
 
 ## `status`
 
@@ -1910,6 +1913,48 @@ my-agent audit-log --cleanup --days 90
 | `--summary` | `false` | 显示审计统计摘要 |
 | `--cleanup` | `false` | 清理旧审计条目 |
 | `--days <n>` | `90` | cleanup 时清理多少天前的记录 |
+
+## `update`
+
+自更新命令(像 通道运行时 update):从当前 git 检出拉最新代码并刷新依赖,普通用户/agent 一条命令就能升级。
+
+```powershell
+my-agent update            # 拉取最新代码 + pip 刷依赖
+my-agent update --check    # 只检查有没有更新,不实际改动
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--check` | `false` | 只 fetch 并报告落后远端多少提交,不执行 pull / 装依赖 |
+
+行为约定:
+
+- 仅对 **git 检出安装**(install.sh 的 git clone 路径)有效;pip 包或本地源码(rsync)安装会给出明确指引而不瞎跑。
+- `update` 走 `git pull --ff-only origin`——origin 指向哪个可达 remote(GitHub / Gitee / 局域网)就从哪更新,不绑死某个托管。
+- 拉取失败(本地有改动 / 分叉)或依赖刷新失败都返回非 0 并提示手动处理,不会留下半更新的静默状态。
+
+## `config-set` / `config-get`
+
+让普通用户或 agent 用一条命令可靠地设 / 读配置项(尤其飞书通道凭证),不必手撕带注释的简化 yaml。
+写回是**行级原地替换**:只动目标顶层 key 那一行,保留注释和其余配置,临时文件 + 原子替换落盘。
+
+```powershell
+my-agent config-set feishu_app_id cli_xxx       # 设置(白名单内字段)
+my-agent config-set feishu_app_secret <secret>  # 敏感字段:写入成功,回显脱敏
+my-agent config-get feishu_app_id               # 读取当前值(敏感字段脱敏)
+```
+
+| 位置参数 | 说明 |
+|------|------|
+| `key` | 配置键名,如 `feishu_app_id` |
+| `value` | 要设置的值(仅 `config-set`) |
+
+约定:
+
+- **白名单**:当前只允许设置飞书通道字段(`feishu_app_id` / `feishu_app_secret` / `feishu_verification_token` / `feishu_encrypt_key` / `feishu_callback_port`)。其他字段(尤其 path/access 等安全相关项)请手动编辑配置,防误改。
+- **脱敏**:secret / token / encrypt_key 等敏感字段回显一律打码,不把明文打回终端或日志。
+- **不写坏**:值含引号或换行时拒绝写入(这套"够用版" yaml 不解析转义),提示手动编辑。
+- 这是"小白 CLI 对话 → my-agent 自助接飞书"的关键一环:agent 用 shell 调 `config-set` 把用户给的凭证可靠写进配置,再 `adapter start --channel feishu` 起通道。
 
 ## 安全约定
 

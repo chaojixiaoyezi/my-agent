@@ -20,6 +20,7 @@ from .commands import (
     add_task_subcommands,
 )
 from .common import DEFAULT_CONFIG, configure_stdio
+from .config_cmd import add_config_subcommands
 from .contracts_commands import add_contracts_subcommand
 from .gateway_client import cmd_default
 from .real_e2e_commands import add_real_e2e_subcommand
@@ -36,6 +37,7 @@ from .subcommands_gateway import (
     add_logs_subcommands,
     add_scenario_subcommand,
 )
+from .update import add_update_subcommand
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -75,6 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_real_e2e_subcommand(subparsers)
     add_background_main_agent_subcommands(subparsers)
     add_collaboration_subcommands(subparsers)
+    add_update_subcommand(subparsers)
+    add_config_subcommands(subparsers)
 
     return parser
 

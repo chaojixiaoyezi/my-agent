@@ -95,3 +95,46 @@ def _handle_yaml_mapping_line(data: dict[str, Any], current_key: str | None, lin
         return key
     data[key] = parse_scalar(value)
     return None
+
+
+def _format_yaml_scalar(value: str) -> str:
+    """把字符串值格式化成 mini-yaml 标量:纯整数原样;其余双引号包裹。
+
+    含双/单引号或换行的值会写坏这套"够用版"yaml(parse_scalar 只剥外层引号、不解析转义),
+    直接拒绝并让调用方提示手动编辑——宁可不写,也不写出半个坏配置。
+    """
+    if value != "" and value.lstrip("-").isdigit():
+        return value
+    if '"' in value or "'" in value or "\n" in value:
+        raise ValueError("值含引号或换行,这套简化 yaml 写回不安全,请手动编辑配置文件。")
+    return f'"{value}"'
+
+
+def _replace_top_level_line(lines: list[str], key: str, new_line: str) -> str | None:
+    """就地把首个顶层 `key:` 行换成 new_line,返回其旧值文本;没有这行返回 None。
+
+    只认顶层标量行(行首无缩进、非注释、含冒号),不碰缩进行/注释/列表项。
+    """
+    for i, raw in enumerate(lines):
+        if raw.startswith((" ", "\t")) or raw.lstrip().startswith("#") or ":" not in raw:
+            continue
+        if raw.split(":", 1)[0].strip() == key:
+            lines[i] = new_line
+            return raw.split(":", 1)[1].strip()
+    return None
+
+
+def set_simple_yaml_value(path: Path, key: str, value: str) -> tuple[str | None, str]:
+    """把顶层 key 设为 value,保留注释与其余行(标准库,无 PyYAML)。返回 (旧值文本或 None, 新行)。
+
+    找不到该顶层 key 则在末尾追加。写回走"同目录临时文件 + 原子替换",避免写一半把配置文件弄残。
+    """
+    new_line = f"{key}: {_format_yaml_scalar(value)}"
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    old = _replace_top_level_line(lines, key, new_line)
+    if old is None:
+        lines.append(new_line)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return old, new_line
