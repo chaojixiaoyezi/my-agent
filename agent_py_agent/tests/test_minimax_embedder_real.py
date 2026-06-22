@@ -78,3 +78,34 @@ def test_real_empty_and_oversized_inputs_dont_crash() -> None:
             assert not vecs or all(len(v) == 1536 for v in vecs)  # 有效则必 1536 维
         except EmbeddingError:
             pass  # 端点拒绝边界输入 → 抛错供上层降级 BM25,符合预期
+
+
+def test_real_medium_batch_aligns() -> None:
+    """中等批量 N 进 N 出对齐(后续批量重建索引会用到):32 条一次,逐条 1536 维不串位。"""
+    vecs = _embedder().embed([f"测试记忆条目编号 {i} 内容各不相同" for i in range(32)])
+    assert len(vecs) == 32 and all(len(v) == 1536 for v in vecs)
+
+
+def test_real_agent_semantic_recall_end_to_end(tmp_path) -> None:
+    """最终生产路径:config→SimpleAgent→memory→MiniMax,通过真实 agent 接口换词召回打通。"""
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.retrieval.embedding import MiniMaxEmbedder
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            memory_semantic_recall=True,
+            memory_embedding_model="embo-01",
+            memory_embedding_api_base=_API_BASE,
+            api_key=os.environ["AGENT_API_KEY"],
+        ),
+        tmp_path,
+    )
+    assert isinstance(agent.memory._embedder, MiniMaxEmbedder)  # 真实 agent 接线建出 MiniMax embedder
+    agent.memory.add("user", "客户要求本季度内完成支付系统的迁移")
+    for distractor in ("团建活动定在下周五", "发布说明需要补截图", "报销流程改线上"):
+        agent.memory.add("user", distractor)
+    hits = agent.memory.search("付款模块大概什么时候搬完", top_k=2)
+    assert any("支付系统" in r.content for r in hits)  # ⭐ 通过真实 SimpleAgent 的换词召回端到端打通

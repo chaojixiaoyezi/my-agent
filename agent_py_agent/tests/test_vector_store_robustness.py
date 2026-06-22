@@ -56,6 +56,26 @@ def test_empty_query_and_empty_store_are_graceful(tmp_path) -> None:
     assert vs.search([], top_k=5) == []  # 空 query 向量(维度 0)→ 全不匹配,不崩不误召回
 
 
+def test_search_at_scale_stays_correct_and_fast(tmp_path) -> None:
+    """千级规模:暴力 cosine 仍把目标顶第一、延迟可接受——验证"百~千条够用,不必上 ANN"的设计判断。"""
+    import time
+
+    from agent_py_agent.agent.retrieval.embedding import LocalHashingEmbedder
+
+    emb = LocalHashingEmbedder(dim=256)
+    vs = VectorStore(tmp_path / "v.json")
+    rows = [(f"m{i}", emb.embed([f"无关记忆条目{i}内容各异随机"])[0], f"d{i}", {"i": i}) for i in range(2000)]
+    vs.upsert_many(rows)  # 一次 flush 灌 2000 条
+    target = "支付系统迁移预算五十万这是独一无二的目标句"
+    vs.upsert("TARGET", emb.embed([target])[0], text=target, metadata={"t": True})
+
+    t0 = time.perf_counter()
+    hits = vs.search(emb.embed([target])[0], top_k=3)
+    dt = time.perf_counter() - t0
+    assert hits[0].id == "TARGET"  # ⭐ 2001 条暴力扫仍正确命中目标
+    assert dt < 2.0, f"千级暴力 cosine 延迟过高:{dt:.3f}s"  # 延迟可接受
+
+
 def test_concurrent_upsert_and_search_no_corruption(tmp_path) -> None:
     path = tmp_path / "v.json"
     vs = VectorStore(path)
