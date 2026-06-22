@@ -90,6 +90,94 @@ def test_load_exactly_once_and_lane_serial_under_concurrency() -> None:
     assert stats.get("completed") == total and not stats.get("pending") and not stats.get("claimed")  # 无残留
 
 
+def test_load_retry_and_dlq_under_concurrent_failures() -> None:
+    """高并发下 handler 失败的两条归宿都成立:瞬时失败退避重投终成功、永久失败达上限进死信,一条不丢。"""
+    queue = _fresh_queue(QueueConfig(global_cap=100_000, lane_cap=10_000, max_attempts=2))
+    total, lanes = 300, 30
+    poison = {i for i in range(total) if i % 10 == 0}  # 10% 永久失败 → 死信
+    transient = {i for i in range(total) if i % 10 == 1}  # 10% 首次失败、重投后成功
+
+    seen: dict[int, int] = defaultdict(int)
+    succeeded: list[int] = []
+    lock = threading.Lock()
+
+    def handler(payload: dict) -> None:
+        mid = int(payload["mid"])
+        with lock:
+            seen[mid] += 1
+            attempt = seen[mid]
+        if mid in poison:
+            raise RuntimeError("permanent failure")  # 每次都崩 → 达上限进死信
+        if mid in transient and attempt == 1:
+            raise RuntimeError("transient blip")  # 仅首次崩 → 退避重投后成功
+        with lock:
+            succeeded.append(mid)
+
+    for i in range(total):
+        queue.enqueue(f"rt-{i}", f"lane-{i % lanes}", {"mid": i, "lane": f"lane-{i % lanes}"})
+
+    pool = WorkerPool(queue, handler, workers=8, lease_seconds=30)
+    pool.start()
+    drained = _wait_until(lambda: sum(queue.stats().get(k, 0) for k in ("completed", "failed")) >= total, timeout=90.0)
+    pool.stop()
+
+    assert drained, f"未在超时内 drain:{queue.stats()}"
+    stats = queue.stats()
+    assert stats.get("completed") == total - len(poison)  # 干净+瞬时(重投后)都完成
+    assert stats.get("failed") == len(poison)  # 永久失败的恰好进死信,无误判
+    assert not stats.get("pending") and not stats.get("claimed")  # 无残留
+    assert len(succeeded) == total - len(poison) and len(set(succeeded)) == len(succeeded)  # ⭐ 成功侧精确一次
+
+
+def test_load_crash_recovery_exactly_once_under_concurrency() -> None:
+    """worker 崩溃(认领后既不 complete 也不 fail)在高并发下被 reaper 回收重投,最终每条精确一次完成。"""
+    queue = _fresh_queue(QueueConfig(global_cap=100_000, lane_cap=10_000, max_attempts=5))
+    total, lanes = 200, 20
+    for i in range(total):
+        queue.enqueue(f"cr-{i}", f"lane-{i % lanes}", {"mid": i})
+
+    completed: set[int] = set()
+    lock = threading.Lock()
+    stop = threading.Event()
+
+    def reaper() -> None:
+        while not stop.is_set():
+            try:
+                queue.recover_stale()
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+    def flaky_worker() -> None:
+        while not stop.is_set():
+            msg = queue.claim(lease_seconds=1)
+            if msg is None:
+                time.sleep(0.03)
+                continue
+            mid = int(msg.payload["mid"])
+            if mid % 3 == 0 and msg.attempts == 1:
+                continue  # 模拟崩溃:认领后进程死,租约(1s)过期等 reaper 回收重投
+            if queue.complete(msg.claim_token):  # token 守卫:陈旧 token 的 complete 是 no-op(防回收后双完成)
+                with lock:
+                    completed.add(mid)
+
+    rt = threading.Thread(target=reaper, daemon=True)
+    rt.start()
+    workers = [threading.Thread(target=flaky_worker, daemon=True) for _ in range(8)]
+    for w in workers:
+        w.start()
+    ok = _wait_until(lambda: len(completed) >= total, timeout=90.0)
+    stop.set()
+    for w in workers:
+        w.join(timeout=5)
+    rt.join(timeout=5)
+
+    assert ok, f"未在超时内 drain:completed={len(completed)}/{total}"
+    assert len(completed) == total  # ⭐ 崩溃消息被回收重投,最终全部完成
+    stats = queue.stats()
+    assert stats.get("completed") == total and not stats.get("pending") and not stats.get("claimed")  # 精确一次,无残留
+
+
 def test_load_backpressure_rejects_when_full() -> None:
     queue = _fresh_queue(QueueConfig(global_cap=50, lane_cap=50, max_attempts=5))
     accepted = 0
