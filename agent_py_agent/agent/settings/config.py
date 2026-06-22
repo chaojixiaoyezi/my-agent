@@ -213,7 +213,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 不碰共享向量库、per-用户隔离)。需配 memory_embedding_model(走 agent 同款 api);没配则自动只走
     # 关键词(不崩不退化)。
     memory_semantic_recall: bool = False
-    memory_embedding_model: str = ""  # 语义召回用的 embedding 模型名(空=不启用语义,仅关键词)
+    memory_embedding_model: str = ""  # 语义召回用的 embedding 模型名(空=不启用语义,仅关键词);embo* 走 MiniMax 原生协议
+    memory_embedding_api_base: str = ""  # embedding 端点 base(缺省沿用 api_base);MiniMax 填 https://api.minimaxi.com/v1
     memory_archive_level: int = 3
     memory_hook_enabled: bool = True
     memory_hook_archive_level: int = 3

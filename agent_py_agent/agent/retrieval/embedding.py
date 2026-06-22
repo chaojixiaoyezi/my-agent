@@ -127,6 +127,47 @@ class OpenAICompatibleEmbedder:
         return [l2_normalize(v) for v in vectors]  # 总是 L2 归一(cosine 假设归一向量)
 
 
+class MiniMaxEmbedder:
+    """MiniMax 原生 ``/embeddings`` 端点的语义 embedder(国际站 ``api.minimaxi.com/v1``)。
+
+    ⚠️ MiniMax **非 OpenAI 兼容**:请求体是 ``{model, texts:[...], type}``(字段叫 ``texts`` 不是
+    ``input``),响应是 ``{vectors:[[...]], base_resp:{status_code}}``(不是 OpenAI 的
+    ``data[].embedding``)。故单独适配,同 ``EmbeddingProvider`` 协议、可直接替换。零外部库(stdlib
+    ``urllib`` 自建)。失败/``status_code`` 非 0 抛 ``EmbeddingError``,调用方降级 BM25,绝不让检索崩。
+    ``type`` 固定 ``"db"``(存储语义);查询侧 MiniMax 推荐 ``"query"``,留作后续按 kind 细分的优化。
+    embo-01 维度 1536。真机已验:Bearer key 直连、无需 GroupId(国际站比国内站简单)。
+    """
+
+    def __init__(self, *, api_base: str, model: str = "embo-01", api_key: str = "", dim: int = 1536) -> None:
+        self._api_base = api_base.rstrip("/")
+        self._model = model
+        self._api_key = api_key
+        self._dim = int(dim)
+        self._timeout = _EMBED_TIMEOUT
+
+    @property
+    def dim(self) -> int:
+        return self._dim
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        body = json.dumps({"model": self._model, "texts": list(texts), "type": "db"}).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        req = urllib.request.Request(f"{self._api_base}/embeddings", data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
+            raise EmbeddingError(f"MiniMax embedding 端点调用失败:{type(exc).__name__}") from exc
+        if (payload.get("base_resp") or {}).get("status_code") not in (0, None):
+            raise EmbeddingError(f"MiniMax embedding 返回错误:{(payload.get('base_resp') or {}).get('status_msg')}")
+        vectors = [list(map(float, v or [])) for v in (payload.get("vectors") or [])]
+        return [l2_normalize(v) for v in vectors]  # 总是 L2 归一(cosine 假设归一向量)
+
+
 def _resolve_api_key(source: str, secret_resolver: Any) -> str:
     """经 secret_resolver(接 Phase 1 SecretStore.resolve_source)解析密钥;失败/无解析器 → 空。"""
     if not source or not callable(secret_resolver):
@@ -149,11 +190,13 @@ def build_embedder(config: dict[str, Any] | None, *, secret_resolver: Any = None
     dim = int(config.get("dim") or DEFAULT_EMBED_DIM)
     if provider == "local":
         return LocalHashingEmbedder(dim=dim)
-    if provider not in ("openai_compatible", "openai", "http"):
+    if provider not in ("openai_compatible", "openai", "http", "minimax"):
         return None
     api_base = str(config.get("api_base") or "").strip()
     model = str(config.get("model") or "").strip()
     if not api_base or not model:
         return None
     api_key = _resolve_api_key(str(config.get("api_key_source") or ""), secret_resolver)
+    if provider == "minimax":  # MiniMax 原生协议(texts/type/vectors),非 OpenAI 兼容
+        return MiniMaxEmbedder(api_base=api_base, model=model, api_key=api_key, dim=int(config.get("dim") or 1536))
     return OpenAICompatibleEmbedder(api_base=api_base, model=model, api_key=api_key, dim=dim)

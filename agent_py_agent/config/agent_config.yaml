@@ -88,7 +88,8 @@ auto_save_memory: true
 # RRF 融合，治"换词就召不回"。向量只存各 owner 自己 home 本地文件（零依赖、不碰共享向量库、按用户隔离）。
 # 需配 memory_embedding_model（走 agent 同款 api 端点）；没配自动只走关键词，不崩不退化。
 memory_semantic_recall: false
-memory_embedding_model: ""
+memory_embedding_model: ""  # embedding 模型名；embo* 自动走 MiniMax 原生协议（texts/type/vectors）
+memory_embedding_api_base: ""  # embedding 端点 base，缺省沿用 api_base；MiniMax 填 https://api.minimaxi.com/v1
 
 # Memory 新架构安全配置（第一版骨架）：
 # - 这些字段先定义“开关、等级、保留天数和规则路由模式”，具体 hook/routing 业务后续再接。

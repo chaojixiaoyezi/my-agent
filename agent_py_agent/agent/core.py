@@ -204,12 +204,16 @@ def _build_memory_embedder(config: AgentConfig):
     if not model:
         return None
     try:
-        from .retrieval.embedding import OpenAICompatibleEmbedder
+        from .retrieval.embedding import MiniMaxEmbedder, OpenAICompatibleEmbedder
 
         api_key = str(getattr(config, "api_key", "") or "") or os.environ.get(
             str(getattr(config, "api_key_env", "AGENT_API_KEY") or "AGENT_API_KEY"), ""
         )
-        return OpenAICompatibleEmbedder(api_base=str(getattr(config, "api_base", "") or ""), model=model, api_key=api_key)
+        # embedding 端点常与聊天端点不同(MiniMax 聊天走 /anthropic、embedding 走 /v1);独立配置,缺省沿用主 api_base
+        api_base = str(getattr(config, "memory_embedding_api_base", "") or "") or str(getattr(config, "api_base", "") or "")
+        if model.startswith("embo"):  # MiniMax 原生 embedding(非 OpenAI 兼容,单独适配器)
+            return MiniMaxEmbedder(api_base=api_base, model=model, api_key=api_key)
+        return OpenAICompatibleEmbedder(api_base=api_base, model=model, api_key=api_key)
     except Exception:
         return None
 
