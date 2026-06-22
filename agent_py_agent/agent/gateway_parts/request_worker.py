@@ -3,6 +3,7 @@ from __future__ import annotations
 
 """Request execution and handling for gateway."""
 
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -242,6 +243,76 @@ def _request_deferred_until_later(request: _PendingGatewayRequest) -> bool:
     return bool(not_before and time.time() < not_before)
 
 
+_OWNER_POOL_LOCK = threading.Lock()
+
+
+def _resolve_request_agent(agent, request_payload: dict):
+    """按请求 owner 取作用域 agent(多用户飞书 per-用户隔离)。
+
+    config 开关默认关、或解析不出 owner(匿名/无 channel)、或池出错 → 回退基础 agent(绝不让请求挂、
+    不破现有单机/单 owner 行为)。开启后:飞书用户 A/B 各跑在自己 owner 作用域的 agent 上,home/记忆/
+    数据/成本/审计天然隔离。
+    """
+    if not bool(getattr(getattr(agent, "config", None), "gateway_per_user_owner_scoping", False)):
+        return agent
+    owner = _owner_from_request(agent, request_payload)
+    if owner is None:
+        return agent
+    try:
+        return _owner_pool(agent).get(owner)
+    except Exception:
+        return agent
+
+
+def _owner_from_request(agent, request_payload: dict):
+    """从请求体取 user_id(顶层/metadata)+ channel(metadata)构造 per-用户 owner;匿名/缺字段返回 None。
+
+    用 OwnerIdentity.provider_user(channel, user_id) 确定性构造(每个飞书用户=自己的 owner 作用域,
+    无需预注册);区别于 resolve_owner_from_provider_identity(那是查已注册绑定的,未注册返 None)。
+    身份绑定(如管理员绑定到 main)是后续细化,这里先做"每用户独立作用域"的基本隔离。
+    """
+    meta = request_payload.get("metadata") if isinstance(request_payload.get("metadata"), dict) else {}
+    user_id = str(request_payload.get("user_id") or meta.get("user_id") or "").strip()
+    channel = str(meta.get("channel") or "").strip()
+    if not user_id or user_id == "anonymous" or not channel:
+        return None
+    from ..user_space.owner_resolver import OwnerIdentity
+
+    return OwnerIdentity.provider_user(channel, user_id)
+
+
+def _config_without_runtime_paths(agent):
+    """克隆基础 config 但把已解析的 owner 运行时路径字段(local_store_path/memory_path 等)清空。
+
+    基础 agent 的 __init__ 把这些字段写成了基础 owner(main)的路径,且 resolve_runtime_paths 把"已有值"
+    当 override 不再重解析。若池直接克隆这份已固化的 config,作用域 agent 会沿用 main 的 local_store/记忆
+    → 不隔离。清空它们,作用域 agent 才会按各自 owner 的 home 重新解析(真隔离)。my_agent_home 是输入
+    不在解析字段里,不动。
+    """
+    import dataclasses
+
+    fields = getattr(getattr(agent, "runtime_path_resolution", None), "paths", {}) or {}
+    resets = {name: "" for name in fields if hasattr(agent.config, name)}
+    return dataclasses.replace(agent.config, **resets)
+
+
+def _owner_pool(agent):
+    """懒建并缓存挂在基础 agent 上的 owner 池(线程安全双检;多 worker 首次并发只建一个)。"""
+    pool = getattr(agent, "_owner_pool", None)
+    if pool is not None:
+        return pool
+    with _OWNER_POOL_LOCK:
+        pool = getattr(agent, "_owner_pool", None)
+        if pool is None:
+            from ..owner_scoped_pool import OwnerScopedAgentPool
+
+            pool = OwnerScopedAgentPool(
+                _config_without_runtime_paths(agent), agent.root, workspace_roots=getattr(agent, "workspace_roots", None)
+            )
+            agent._owner_pool = pool
+        return pool
+
+
 def _process_gateway_request_path(
     agent: SimpleAgent,
     paths: GatewayPaths,
@@ -267,7 +338,10 @@ def _process_gateway_request_path(
         archive_request(processing_path, paths.done, request_id)
         return True
     response = _process_claimed_gateway_request(
-        _ClaimedGatewayRequestContext(agent, processing_path, request_payload, request_id, worker_id)
+        _ClaimedGatewayRequestContext(
+            _resolve_request_agent(agent, request_payload),  # 多用户飞书:在请求 owner 作用域的 agent 上跑
+            processing_path, request_payload, request_id, worker_id,
+        )
     )
     _finish_claimed_gateway_request(paths, processing_path, request_id, response)
     return True

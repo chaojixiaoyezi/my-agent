@@ -310,6 +310,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_processing_timeout_seconds: int = 900
     gateway_request_max_attempts: int = 2
     gateway_port: int = 8420
+    # 多用户飞书 per-用户隔离(默认关=现状不变):开后网关按每条请求的 X-User-Id/channel 解析 owner,
+    # 在该用户作用域的 agent(独立 home/记忆/数据/成本/审计)上跑,防多用户串户;解析不出 owner(匿名/
+    # 无 channel)回退基础 agent。单机/CLI 无 provider 身份永远走 main。学 owner-scoped agent 池。
+    gateway_per_user_owner_scoping: bool = False
     # 网关 HTTP 绑定地址:默认 loopback,仅本机可达。绑非 loopback(暴露到网络)时强制要求鉴权,
     # 否则 fail-closed 拒绝启动(防"绑 0.0.0.0 + 无鉴权 = 未认证远程命令执行")。默认仅监听回环地址。
     gateway_bind_host: str = "127.0.0.1"
