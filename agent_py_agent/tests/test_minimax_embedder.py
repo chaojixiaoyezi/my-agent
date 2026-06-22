@@ -244,3 +244,41 @@ def test_embedding_key_precedence_direct_over_env_over_chat(monkeypatch) -> None
 
     fallback = _build_memory_embedder(AgentConfig(**common, api_key="k-chat"))
     assert fallback._api_key == "k-chat"  # 都不配 → 回退聊天 key(向后兼容)
+
+
+def test_embedding_key_env_set_but_missing_falls_back(monkeypatch) -> None:
+    """配了 embedding key 的环境变量名、但该变量不存在 → 优雅回退聊天 key(不会拿到空 key)。"""
+    from agent_py_agent.agent.core import _build_memory_embedder
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    monkeypatch.delenv("AGENT_API_KEY", raising=False)
+    monkeypatch.delenv("MISSING_EMB_KEY", raising=False)
+    emb = _build_memory_embedder(
+        AgentConfig(
+            memory_semantic_recall=True,
+            memory_embedding_model="embo-01",
+            memory_embedding_api_base="https://api.minimaxi.com/v1",
+            memory_embedding_api_key_env="MISSING_EMB_KEY",
+            api_key="k-chat",
+        )
+    )
+    assert emb._api_key == "k-chat"  # env 名配了但变量缺失 → 回退聊天 key,不静默拿空 key
+
+
+def test_new_embedding_fields_survive_normalize(monkeypatch) -> None:
+    """新配置字段经 normalize_agent_config(yaml→config 的真实归一管线)不被丢/不被改——
+
+    否则用户在 yaml 里写了开关也静默不生效(归一若有字段白名单会吞掉新字段)。
+    """
+    from agent_py_agent.agent.settings.normalize import normalize_agent_config
+
+    raw = {
+        "memory_semantic_recall": True,
+        "memory_embedding_model": "embo-01",
+        "memory_embedding_api_base": "https://api.minimaxi.com/v1",
+        "memory_embedding_api_key_env": "MY_EMB_KEY",
+        "gateway_per_user_owner_scoping": True,
+    }
+    normalized, _warnings = normalize_agent_config(raw)
+    for key, value in raw.items():
+        assert normalized.get(key) == value, f"normalize 丢了/改了新字段 {key}"

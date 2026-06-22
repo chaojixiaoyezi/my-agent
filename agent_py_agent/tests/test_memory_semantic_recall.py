@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
 from agent_py_agent.agent.retrieval.embedding import LocalHashingEmbedder
 
@@ -88,6 +90,33 @@ def test_search_time_endpoint_failure_degrades_to_keyword(tmp_path) -> None:
     emb.fail = True  # 查询时端点故障
     hits = mem.search("支付服务", top_k=3)
     assert any("支付" in r.content for r in hits)  # 不崩,关键词兜底
+
+
+def test_concurrent_memory_writes_same_owner_no_loss(tmp_path) -> None:
+    """同 owner 并发写记忆(JSONL 追加 + 向量 upsert 一起):不崩、不丢、JSONL 与向量库条数一致、可召回。
+
+    比单独测 VectorStore 并发更进一层——走完整 add_record 写路径(同会话本应被队列串行,但底座要自洽)。
+    """
+    mem = JsonlMemory(tmp_path / "mem.jsonl", embedder=LocalHashingEmbedder(dim=128))
+    errors: list[Exception] = []
+
+    def writer(w: int) -> None:
+        try:
+            for j in range(10):
+                mem.add("user", f"记忆条目 owner-write {w}-{j} 各异内容")
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(w,)) for w in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"并发写记忆不应出错:{errors[:3]}"
+    assert len(mem.all()) == 120  # 12×10 全部落 JSONL,无丢(并发 append 不串行损坏)
+    assert len(mem._vector_store()) == 120  # 向量库与 JSONL 一致(每条都 embed-on-write 进库)
+    assert any("5-3" in r.content for r in mem.search("owner-write 5-3", top_k=5))  # 抽样可召回
 
 
 def test_fusion_dedups_record_hit_by_both_channels(tmp_path) -> None:
