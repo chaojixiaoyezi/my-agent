@@ -105,8 +105,13 @@ class NotificationRouter:
             self._manager.mark_stored(notification_id)
             return False, "无可用通道，已存储"
 
-        # 实际投递（这里是模拟，实际由适配器处理）
-        success = self._do_deliver(notification, target_channel)
+        # 实际投递（这里是模拟，实际由适配器处理）。适配器抛异常不该让 deliver 崩 →
+        # 记失败返回(一个通道的适配器炸了,通知系统不连带崩,也不阻塞别的通知)。
+        try:
+            success = self._do_deliver(notification, target_channel)
+        except Exception as exc:
+            self._manager.mark_failed(notification_id, f"投递异常: {type(exc).__name__}")
+            return False, f"投递异常: {type(exc).__name__}"
 
         if success:
             self._manager.mark_delivered(notification_id, target_channel)
