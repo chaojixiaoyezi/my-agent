@@ -92,6 +92,28 @@ class LocalHashingEmbedder:
         return l2_normalize(vec)
 
 
+def _one_vector(v: object) -> list[float]:
+    """单条返回向量 → L2 归一;非 list / 含非数值都抛 EmbeddingError(供调用方降级,不裸崩)。"""
+    if not isinstance(v, list):
+        raise EmbeddingError(f"embedding 响应含非向量元素:{type(v).__name__}")
+    try:
+        return l2_normalize([float(x) for x in v])
+    except (TypeError, ValueError) as exc:
+        raise EmbeddingError(f"embedding 响应含非数值向量:{type(exc).__name__}") from exc
+
+
+def _parse_vectors(raw: object, expected: int) -> list[list[float]]:
+    """把端点返回的向量数组解析+L2归一;数量/形状不符一律抛 EmbeddingError(供降级),不让坏响应裸崩。
+
+    数量守卫(len 必须等于请求条数)堵住"批量少返回→静默错位";逐条非 list/非数值也抛错而非裸异常——
+    兑现"端点异常→EmbeddingError→调用方降级 BM25"的契约(此前解析在 try 外,坏 200 响应会裸崩)。
+    """
+    if not isinstance(raw, list) or len(raw) != expected:
+        got = len(raw) if isinstance(raw, list) else type(raw).__name__
+        raise EmbeddingError(f"embedding 响应向量数不符:期望 {expected} 得 {got}")
+    return [_one_vector(v) for v in raw]
+
+
 class OpenAICompatibleEmbedder:
     """调 OpenAI 兼容 ``/embeddings`` 端点的语义 embedder(生产路径)。
 
@@ -120,11 +142,11 @@ class OpenAICompatibleEmbedder:
         req = urllib.request.Request(f"{self._api_base}/embeddings", data=body, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8")).get("data") or []
+                data = json.loads(resp.read().decode("utf-8")).get("data")
         except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
             raise EmbeddingError(f"embedding 端点调用失败:{type(exc).__name__}") from exc
-        vectors = [list(map(float, item.get("embedding") or [])) for item in data]
-        return [l2_normalize(v) for v in vectors]  # 总是 L2 归一(cosine 假设归一向量)
+        rows = data if isinstance(data, list) else []
+        return _parse_vectors([item.get("embedding") if isinstance(item, dict) else None for item in rows], len(texts))
 
 
 class MiniMaxEmbedder:
@@ -164,8 +186,7 @@ class MiniMaxEmbedder:
             raise EmbeddingError(f"MiniMax embedding 端点调用失败:{type(exc).__name__}") from exc
         if (payload.get("base_resp") or {}).get("status_code") not in (0, None):
             raise EmbeddingError(f"MiniMax embedding 返回错误:{(payload.get('base_resp') or {}).get('status_msg')}")
-        vectors = [list(map(float, v or [])) for v in (payload.get("vectors") or [])]
-        return [l2_normalize(v) for v in vectors]  # 总是 L2 归一(cosine 假设归一向量)
+        return _parse_vectors(payload.get("vectors"), len(texts))  # 守卫:数量/形状不符→EmbeddingError
 
 
 def _resolve_api_key(source: str, secret_resolver: Any) -> str:

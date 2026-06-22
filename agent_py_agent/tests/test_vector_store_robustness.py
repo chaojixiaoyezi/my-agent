@@ -56,6 +56,25 @@ def test_empty_query_and_empty_store_are_graceful(tmp_path) -> None:
     assert vs.search([], top_k=5) == []  # 空 query 向量(维度 0)→ 全不匹配,不崩不误召回
 
 
+def test_upsert_same_id_overwrites_not_duplicates(tmp_path) -> None:
+    """同 id 重嵌(换模型/内容更新)= 覆盖,不重复——这是换模型时旧维度向量被新维度顶替的机制。"""
+    vs = VectorStore(tmp_path / "v.json")
+    vs.upsert("m1", [1.0, 0.0], text="old")
+    vs.upsert("m1", [0.0, 1.0], text="new")
+    assert len(vs) == 1  # 覆盖,不堆积
+    hits = vs.search([0.0, 1.0], top_k=1)
+    assert hits[0].text == "new"  # 新向量+新文本生效
+
+
+def test_min_score_filters_dissimilar(tmp_path) -> None:
+    """min_score 过滤:负相似度(方向相反)的向量不进结果。"""
+    vs = VectorStore(tmp_path / "v.json")
+    vs.upsert("same", [1.0, 0.0])
+    vs.upsert("opposite", [-1.0, 0.0])  # cosine = -1
+    hits = vs.search([1.0, 0.0], top_k=5, min_score=0.0)
+    assert [h.id for h in hits] == ["same"]  # 负分(<0)被 min_score=0 过滤掉
+
+
 def test_search_at_scale_stays_correct_and_fast(tmp_path) -> None:
     """千级规模:暴力 cosine 仍把目标顶第一、延迟可接受——验证"百~千条够用,不必上 ANN"的设计判断。"""
     import time

@@ -90,6 +90,16 @@ def test_search_time_endpoint_failure_degrades_to_keyword(tmp_path) -> None:
     assert any("支付" in r.content for r in hits)  # 不崩,关键词兜底
 
 
+def test_fusion_dedups_record_hit_by_both_channels(tmp_path) -> None:
+    """同一条记录同时被关键词路和语义路命中,RRF 融合后只出现一次(_record_vec_id 跨两路对齐去重)。"""
+    mem = JsonlMemory(tmp_path / "mem.jsonl", embedder=LocalHashingEmbedder(dim=128))
+    mem.add("user", "alpha beta gamma 支付系统迁移计划")
+    mem.add("user", "delta epsilon 完全无关的内容")
+    results = mem.search("支付系统迁移", top_k=5)
+    contents = [r.content for r in results]
+    assert contents.count("alpha beta gamma 支付系统迁移计划") == 1  # ⭐ 双路命中不重复计入
+
+
 def test_build_memory_embedder_gating(tmp_path) -> None:
     from agent_py_agent.agent.core import _build_memory_embedder
     from agent_py_agent.agent.settings.config import AgentConfig

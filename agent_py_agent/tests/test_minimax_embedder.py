@@ -63,6 +63,84 @@ def test_minimax_empty_input_is_noop() -> None:
     assert MiniMaxEmbedder(api_base="https://x/v1", model="embo-01").embed([]) == []
 
 
+def _stub(payload: dict, monkeypatch) -> None:
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _FakeResp(payload))
+
+
+def test_minimax_partial_count_mismatch_raises(monkeypatch) -> None:
+    _stub({"vectors": [[1.0, 0.0]], "base_resp": {"status_code": 0}}, monkeypatch)  # 发2回1
+    try:
+        MiniMaxEmbedder(api_base="https://x/v1", model="embo-01").embed(["a", "b"])
+        raise AssertionError("数量不符应抛 EmbeddingError(防批量静默错位)")
+    except EmbeddingError:
+        pass
+
+
+def test_minimax_nonnumeric_or_missing_vectors_raise(monkeypatch) -> None:
+    for bad in ({"vectors": [["a", "b"]], "base_resp": {"status_code": 0}}, {"base_resp": {"status_code": 0}}):
+        _stub(bad, monkeypatch)
+        try:
+            MiniMaxEmbedder(api_base="https://x/v1", model="embo-01").embed(["a"])
+            raise AssertionError("非数值/缺 vectors 应抛 EmbeddingError 而非裸崩")
+        except EmbeddingError:
+            pass
+
+
+def test_openai_compatible_malformed_or_partial_raise(monkeypatch) -> None:
+    from agent_py_agent.agent.retrieval.embedding import OpenAICompatibleEmbedder
+
+    emb = OpenAICompatibleEmbedder(api_base="https://x/v1", model="m")
+    _stub({"data": [{"embedding": ["x"]}]}, monkeypatch)  # 非数值
+    try:
+        emb.embed(["a"])
+        raise AssertionError("非数值 embedding 应抛 EmbeddingError")
+    except EmbeddingError:
+        pass
+    _stub({"data": [{"embedding": [1.0, 0.0]}]}, monkeypatch)  # 发2回1
+    try:
+        emb.embed(["a", "b"])
+        raise AssertionError("数量不符应抛 EmbeddingError")
+    except EmbeddingError:
+        pass
+
+
+def test_openai_compatible_real_http_roundtrip() -> None:
+    """真实本地 HTTP 往返(不 monkeypatch urlopen):验 OpenAICompatibleEmbedder 真能打 OpenAI 兼容
+    /embeddings(等价于指向本地 llama-server)——请求路径/体/鉴权头 + 响应解析全链路真走一遍。"""
+    import http.server
+    import threading
+
+    from agent_py_agent.agent.retrieval.embedding import OpenAICompatibleEmbedder
+
+    captured: dict = {}
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            captured.update(path=self.path, input=body["input"], auth=self.headers.get("Authorization"))
+            out = json.dumps({"data": [{"embedding": [1.0, 0.0]} for _ in body["input"]]}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a) -> None:
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        emb = OpenAICompatibleEmbedder(api_base=f"http://127.0.0.1:{srv.server_address[1]}/v1", model="m", api_key="k")
+        out = emb.embed(["hello", "world"])
+    finally:
+        srv.shutdown()
+
+    assert captured["path"] == "/v1/embeddings"  # 真实请求路径
+    assert captured["input"] == ["hello", "world"] and captured["auth"] == "Bearer k"  # 请求体 + 鉴权头
+    assert len(out) == 2 and len(out[0]) == 2  # 响应解析 + 归一,N 进 N 出
+
+
 def test_minimax_multi_text_keeps_order_and_count(monkeypatch) -> None:
     captured: dict = {}
 
