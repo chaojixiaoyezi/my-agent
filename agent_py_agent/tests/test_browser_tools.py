@@ -257,6 +257,39 @@ class TestBrowserUnavailable:
         assert result.error_code == "TOOL_TIMEOUT"
 
 
+class TestSessionLifecycleRobustness:
+    """会话生命周期健壮性(mock playwright 层,不需要真浏览器)。"""
+
+    def test_session_creation_failure_closes_context_no_leak(self):
+        """page 建失败时已建的 context 被关闭——不泄露浏览器资源(否则反复失败累积泄露 context)。"""
+        from unittest.mock import MagicMock
+
+        mgr = BrowserSessionManager()
+        fake_context = MagicMock()
+        fake_context.new_page.side_effect = RuntimeError("page creation failed")
+        mgr._browser = MagicMock()  # 绕过真实启动(_ensure_browser_locked 见 _browser 非 None 即返回)
+        mgr._browser.new_context.return_value = fake_context
+
+        with pytest.raises(RuntimeError):
+            mgr._get_or_create_session_locked("s1")
+
+        fake_context.close.assert_called_once()  # ⭐ context 被关,不泄露
+        assert "s1" not in mgr._sessions  # 半建会话不留痕,下次重试干净
+
+    def test_successful_session_does_not_close_context(self):
+        """正常路径不误关 context(回归保护:别让修复把成功路径也关了)。"""
+        from unittest.mock import MagicMock
+
+        mgr = BrowserSessionManager()
+        fake_context = MagicMock()
+        mgr._browser = MagicMock()
+        mgr._browser.new_context.return_value = fake_context
+
+        session = mgr._get_or_create_session_locked("s1")
+        fake_context.close.assert_not_called()  # 成功路径不关
+        assert mgr._sessions.get("s1") is session  # 会话被缓存,复用
+
+
 class TestToolSpecs:
     def test_precise_schema_and_required_params(self):
         nav = BrowserNavigateTool().spec

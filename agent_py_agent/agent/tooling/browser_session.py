@@ -159,9 +159,13 @@ class BrowserSessionManager:
             return session
         self._ensure_browser_locked()
         context = self._browser.new_context()
-        context.set_default_timeout(DEFAULT_ACTION_TIMEOUT_MS)
-        context.set_default_navigation_timeout(DEFAULT_NAV_TIMEOUT_MS)
-        page = context.new_page()
+        try:
+            context.set_default_timeout(DEFAULT_ACTION_TIMEOUT_MS)
+            context.set_default_navigation_timeout(DEFAULT_NAV_TIMEOUT_MS)
+            page = context.new_page()
+        except Exception:
+            _safe_close_context(context)  # page 建失败 → 关掉已建的 context,不泄露浏览器资源(否则反复失败累积泄露)
+            raise
         session = _Session(session_id=session_id, context=context, page=page)
         self._sessions[session_id] = session
         return session
