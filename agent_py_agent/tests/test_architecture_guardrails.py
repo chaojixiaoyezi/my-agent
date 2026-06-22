@@ -45,6 +45,12 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
         "Web dashboard HTTP handler logging override accepts formatter arguments; "
         "not a product service parameter entry point (same as http_service/feishu)."
     ),
+    "agent_py_agent/agent/tooling/vision_tools.py:redirect_request": (
+        "urllib HTTPRedirectHandler.redirect_request override has a fixed 6-positional signature "
+        "(req, fp, code, msg, headers, newurl) invoked positionally by urllib; cannot use a typed "
+        "bundle. *args forwards through to re-check each redirect hop against the SSRF gate "
+        "(same stdlib-handler-override category as the log_message entries)."
+    ),
     "agent_py_agent/agent/log_analysis/agents/contracts.py:_first_evidence_ref": (
         "Local field-selection helper accepts candidate keys; no service boundary."
     ),
