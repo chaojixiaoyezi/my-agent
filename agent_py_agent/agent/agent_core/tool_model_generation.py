@@ -100,9 +100,20 @@ def generate_model_response(request: ModelGenerateParams):
         from .native_tool_protocol import record_native_turn
 
         record_native_turn(request.agent, bool(getattr(state, "tools", None)), response)
+        _record_run_cost(request, response)  # 审计 #19/#2:真实 USD 成本累计到 owner/run 维度
         return _finish_model_generation(request, state, response)
     finally:
         mark_tool_context_digest_consumed(request.params)
+
+
+def _record_run_cost(request: ModelGenerateParams, response: object) -> None:
+    """采集 owner(config)/run_id(params)/model(backend),记真实 USD 成本到全局台账(审计 #19/#2)。"""
+    from .model.llm_metrics import record_run_cost
+
+    owner = str(getattr(getattr(request.agent, "config", None), "my_agent_owner_id", "") or "")
+    run_id = str(getattr(request.params, "run_id", "") or "")
+    model = str(getattr(getattr(request.agent, "backend", None), "model_name", "") or "")
+    record_run_cost(owner, run_id, model, response)
 
 
 def _generate_or_recover_context_pressure(request: ModelGenerateParams, state: _ModelGenerationState):

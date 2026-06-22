@@ -45,3 +45,24 @@ class CostLedger:
     def total_cost(self) -> float:
         with self._lock:
             return sum(self._tenant_usd.values())
+
+
+_GLOBAL_LEDGER: CostLedger | None = None
+_GLOBAL_LOCK = threading.Lock()
+
+
+def global_cost_ledger() -> CostLedger:
+    """进程级全局成本台账(审计 #19/#2):agent_core 热路径与 worker 平面都往它记真实 USD 成本,
+    统一回答"某租户/run 花了多少钱"。懒创建,线程安全。"""
+    global _GLOBAL_LEDGER
+    with _GLOBAL_LOCK:
+        if _GLOBAL_LEDGER is None:
+            _GLOBAL_LEDGER = CostLedger()
+        return _GLOBAL_LEDGER
+
+
+def reset_global_cost_ledger_for_test() -> None:
+    """测试钩子:清空全局成本台账。"""
+    global _GLOBAL_LEDGER
+    with _GLOBAL_LOCK:
+        _GLOBAL_LEDGER = None

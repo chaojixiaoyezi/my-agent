@@ -69,6 +69,25 @@ def _record_tokens(metrics: _LlmMetrics, labels: dict, response: object) -> None
         metrics.output_tokens.inc(out, labels=labels)
 
 
+def record_run_cost(owner: str, run_id: str, model: str, response: object) -> None:
+    """按真实 token 算成本,累计到全局台账的 tenant(owner)/run 维度(审计 #19/#2:成本接到 run 层)。
+
+    在 generate_model_response 层调用——那里有 owner(config)+run_id(params)+model(backend),
+    无需把上下文穿透到 worker 线程里的深层 seam。异常隔离:埋点失败只吞不冒泡。
+    """
+    if not model or response is None:
+        return
+    try:
+        from ...llm_scale.cost_ledger import global_cost_ledger
+        from ...llm_scale.model_pricing import cost_usd
+
+        cost = cost_usd(model, input_token_usage(response) or 0, output_token_usage(response) or 0)
+        if cost > 0:
+            global_cost_ledger().record(cost, tenant=owner or "", run_id=run_id or "")
+    except Exception:
+        pass  # 成本记账绝不影响 LLM 调用
+
+
 def record_llm_cost(model: str, response: object) -> None:
     """按模型单价算这次响应的真实 USD 成本,累计到 agent_llm_cost_usd_total{model}(审计 #19 残余)。
 
