@@ -146,6 +146,42 @@ class _LoadedImage:
     media_type: str
 
 
+class _RedirectBlocked(Exception):
+    """重定向目标未过 SSRF 网关时抛出,携带网关原始拒绝结果供 _download 透出具体 error_code。"""
+
+    def __init__(self, blocked: ToolExecutionResult) -> None:
+        super().__init__("redirect blocked by SSRF gate")
+        self.blocked = blocked
+
+
+class _SSRFGuardingRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """跟随重定向前对每个 3xx 目标重新过 SSRF 网关 —— 堵"首跳公网、跳转到内网/云 metadata"的绕过。
+
+    原 _download 用默认 opener 盲目跟随重定向:首 URL 过了网关,但 3xx 跳转目标不再校验,
+    可被引到 169.254.169.254 等内网/云 metadata(凭据外泄)。这里对齐 web_fetch 的逐跳校验。
+    """
+
+    def __init__(self, tool_name: str, resolver: Any) -> None:
+        self._tool_name = tool_name
+        self._resolver = resolver
+
+    def redirect_request(self, *args):  # type: ignore[override]
+        # stdlib 固定签名 (req, fp, code, msg, headers, newurl);用 *args 透传,newurl 是末位
+        newurl = args[5]
+        blocked = self._gate_target(newurl)
+        if blocked is not None:
+            raise _RedirectBlocked(blocked)
+        return super().redirect_request(*args)
+
+    def _gate_target(self, newurl: str) -> ToolExecutionResult | None:
+        """对重定向目标过网关:非 http(s) 直接拒;否则复用 _network_safety_error 逐跳校验。"""
+        if not str(newurl).lower().startswith(("http://", "https://")):
+            return ToolExecutionResult(
+                self._tool_name, False, "重定向到非 http(s) 目标被拒", error_code="NETWORK_REQUEST_FAILED"
+            )
+        return _network_safety_error(self._tool_name, newurl, self._resolver)
+
+
 class AnalyzeImageTool(BaseTool):
     """看图工具:本地路径/URL 图片 → base64 → 辅助视觉模型分析,返回内容描述。"""
 
@@ -221,9 +257,13 @@ class AnalyzeImageTool(BaseTool):
 
     def _download(self, url: str) -> bytes | ToolExecutionResult:
         req = urllib.request.Request(url, headers={"User-Agent": "MyAgent-Vision/1.0", "Accept": "image/*,*/*;q=0.8"})
+        # 带 SSRF 守卫的 opener:每个重定向目标都重新过网关,堵"首跳公网→跳转内网/云 metadata"的绕过
+        opener = urllib.request.build_opener(_SSRFGuardingRedirectHandler(self.spec.name, self._resolver))
         try:
-            with urllib.request.urlopen(req, timeout=self.vision_config.timeout) as resp:
+            with opener.open(req, timeout=self.vision_config.timeout) as resp:
                 body = resp.read(_MAX_IMAGE_BYTES + 1)
+        except _RedirectBlocked as exc:
+            return exc.blocked  # 透出 SSRF 网关对该重定向目标的具体拒绝码
         except urllib.error.HTTPError as exc:
             return ToolExecutionResult(
                 self.spec.name, False, f"下载图片失败: HTTP {exc.code}", error_code="NETWORK_REQUEST_FAILED"

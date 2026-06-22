@@ -137,25 +137,29 @@ def test_url_cloud_metadata_blocked() -> None:
     mock_urlopen.assert_not_called()
 
 
+def _download_opener(body: bytes):
+    """造一个假 opener:其 .open 返回带 body 的响应(下载路径走 build_opener().open,非 urlopen)。"""
+
+    def build(*handlers):
+        resp = MagicMock()
+        resp.read.return_value = body
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=False)
+        opener = MagicMock()
+        opener.open.return_value = resp
+        return opener
+
+    return build
+
+
 def test_public_url_downloads_and_analyzes() -> None:
     tool = AnalyzeImageTool(_configured(), resolver=_resolver_to("93.184.216.34"))
-    calls: list[str] = []
-
-    def fake_urlopen(req, timeout=None):
-        calls.append("download" if req.full_url.endswith(".png") else "vision")
-        if req.full_url.endswith(".png"):
-            download = MagicMock()
-            download.read.return_value = _PNG_1x1_BYTES
-            download.__enter__ = MagicMock(return_value=download)
-            download.__exit__ = MagicMock(return_value=False)
-            return download
-        return _vision_response("Public image described.")
-
-    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-        result = tool.execute({"image": "https://example.com/pic.png", "question": "?"})
+    # 下载走带 SSRF 守卫的 opener(build_opener),视觉模型调用走 urlopen —— 分别 mock
+    with patch("urllib.request.build_opener", side_effect=_download_opener(_PNG_1x1_BYTES)):
+        with patch("urllib.request.urlopen", side_effect=lambda req, timeout=None: _vision_response("Public image described.")):
+            result = tool.execute({"image": "https://example.com/pic.png", "question": "?"})
     assert result.ok is True
     assert json.loads(result.output)["analysis"] == "Public image described."
-    assert calls == ["download", "vision"]
 
 
 # --- 4. 非 http(s) scheme 被拒 ---------------------------------------------
@@ -256,17 +260,10 @@ def test_url_download_too_large_rejected() -> None:
     from agent_py_agent.agent.tooling import vision_tools as vt
 
     tool = AnalyzeImageTool(_configured(), resolver=_resolver_to("93.184.216.34"))
-
-    def fake_urlopen(req, timeout=None):
-        download = MagicMock()
-        # 返回超过上限的字节（读 max+1 暴露超限）。
-        download.read.return_value = b"\x89PNG\r\n\x1a\n" + b"X" * 50
-        download.__enter__ = MagicMock(return_value=download)
-        download.__exit__ = MagicMock(return_value=False)
-        return download
-
+    # 返回超过上限的字节（读 max+1 暴露超限）；下载走 build_opener().open。
+    oversized = b"\x89PNG\r\n\x1a\n" + b"X" * 50
     with patch.object(vt, "_MAX_IMAGE_BYTES", 16):
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("urllib.request.build_opener", side_effect=_download_opener(oversized)):
             result = tool.execute({"image": "https://example.com/big.png"})
     assert result.ok is False
     assert result.error_code == "ARTIFACT_TOO_LARGE"
@@ -454,3 +451,82 @@ def test_vision_config_empty_not_configured() -> None:
 
     vc = vision_config_from_agent_config(Cfg())
     assert vc.configured is False
+
+
+# --- 11. 重定向 SSRF 防护(此前缺口:默认 opener 盲跟随重定向到内网/云 metadata)-------------
+
+import email.message  # noqa: E402
+import urllib.request  # noqa: E402
+
+from agent_py_agent.agent.tooling.models import ToolExecutionResult  # noqa: E402
+from agent_py_agent.agent.tooling.vision_tools import (  # noqa: E402
+    _RedirectBlocked,
+    _SSRFGuardingRedirectHandler,
+)
+
+
+def _redirect(handler, newurl: str):
+    req = urllib.request.Request("http://public.example/start")
+    return handler.redirect_request(req, MagicMock(), 302, "Found", email.message.Message(), newurl)
+
+
+def test_redirect_to_cloud_metadata_is_blocked() -> None:
+    """首跳公网、302 跳转到云 metadata IP → 被网关拦,绝不跟随(堵重定向 SSRF 凭据外泄)。"""
+    handler = _SSRFGuardingRedirectHandler("analyze_image", _resolver_to("169.254.169.254"))
+    with pytest.raises(_RedirectBlocked) as exc:
+        _redirect(handler, "http://metadata.internal.test/latest/meta-data/iam/creds")
+    assert exc.value.blocked.error_code in {"NETWORK_ALWAYS_BLOCKED_IP", "NETWORK_PRIVATE_IP_BLOCKED"}
+
+
+def test_redirect_to_private_ip_is_blocked() -> None:
+    handler = _SSRFGuardingRedirectHandler("analyze_image", _resolver_to("10.0.0.5"))
+    with pytest.raises(_RedirectBlocked):
+        _redirect(handler, "http://intranet.test/secret.png")
+
+
+def test_redirect_to_non_http_scheme_is_blocked() -> None:
+    handler = _SSRFGuardingRedirectHandler("analyze_image", _resolver_to("93.184.216.34"))
+    with pytest.raises(_RedirectBlocked):
+        _redirect(handler, "ftp://host.test/x.png")  # 跳转换协议也拒
+
+
+def test_redirect_to_public_ip_is_allowed() -> None:
+    handler = _SSRFGuardingRedirectHandler("analyze_image", _resolver_to("93.184.216.34"))
+    new_req = _redirect(handler, "http://cdn.public.test/img.png")
+    assert isinstance(new_req, urllib.request.Request)  # 公网跳转放行(不过度拦)
+
+
+def test_download_builds_ssrf_guarding_opener() -> None:
+    """_download 真的用带 SSRF 守卫重定向 handler 的 opener(接线正确,不是默认盲跟随)。"""
+    tool = AnalyzeImageTool(_configured(), resolver=_resolver_to("93.184.216.34"))
+    captured: dict = {}
+
+    def spy_build_opener(*handlers):
+        captured["handlers"] = handlers
+        opener = MagicMock()
+        resp = MagicMock()
+        resp.read.return_value = _PNG_1x1_BYTES
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=False)
+        opener.open.return_value = resp
+        return opener
+
+    with patch("urllib.request.build_opener", side_effect=spy_build_opener):
+        body = tool._download("https://example.com/img.png")
+    assert isinstance(body, bytes)
+    assert any(isinstance(h, _SSRFGuardingRedirectHandler) for h in captured["handlers"])
+
+
+def test_download_surfaces_redirect_ssrf_rejection() -> None:
+    """重定向被网关拦时,_download 把网关的具体拒绝码原样透出(不吞成泛化错误)。"""
+    tool = AnalyzeImageTool(_configured(), resolver=_resolver_to("93.184.216.34"))
+    blocked = ToolExecutionResult("analyze_image", False, "blocked", error_code="NETWORK_PRIVATE_IP_BLOCKED")
+
+    def spy_build_opener(*handlers):
+        opener = MagicMock()
+        opener.open.side_effect = _RedirectBlocked(blocked)
+        return opener
+
+    with patch("urllib.request.build_opener", side_effect=spy_build_opener):
+        result = tool._download("https://example.com/img.png")
+    assert result is blocked

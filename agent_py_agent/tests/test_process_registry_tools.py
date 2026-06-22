@@ -255,6 +255,101 @@ class TestRegistryUnit:
         assert summary["status"] == "running"
 
 
+class TestKillSafety:
+    """杀进程的安全性(blast radius):升级硬杀、不误伤无关进程、不对 pid<=0 发信号。"""
+
+    @_POSIX_ONLY
+    def test_escalates_to_sigkill_when_sigterm_ignored(self, monkeypatch, tmp_path: Path):
+        """进程忽略 SIGTERM(杀不干净)→ 宽限后升级 SIGKILL 硬杀,确实杀死,不留命。"""
+        import subprocess
+
+        from agent_py_agent.agent.tooling import process_registry as mod
+
+        monkeypatch.setattr(mod, "_KILL_GRACE_SECONDS", 0.3)  # 缩短宽限加速
+        ready = tmp_path / "ready"
+        # 装好 SIG_IGN 后再落 ready 文件 —— 避免 SIGTERM 在 handler 装好前到达的竞态
+        body = (
+            "import signal,time,pathlib; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            f"pathlib.Path({str(ready)!r}).write_text('1'); time.sleep(60)"
+        )
+        proc = subprocess.Popen([sys.executable, "-c", body], start_new_session=True)
+        try:
+            assert _wait_until(lambda: ready.exists(), timeout=5), "子进程未装好 SIGTERM 忽略"
+            result = mod._terminate_process_tree(proc.pid, proc)
+            assert result == "SIGTERM->SIGKILL"  # ⭐ SIGTERM 被忽略 → 升级 SIGKILL
+            proc.wait(timeout=3)
+            assert proc.poll() is not None  # 进程确实死了(SIGKILL 无法被忽略)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+    def test_kill_does_not_touch_unrelated_process(self, shell: ShellTool):
+        """杀 A 不影响无关的 B —— 只动注册 pid 的进程组,不误伤(杀错进程的核心防线)。"""
+        a = _start_background(shell, _py_command("import time; time.sleep(30)"))
+        b = _start_background(shell, _py_command("import time; time.sleep(30)"))
+        KillProcessTool().execute({"session_id": a["session_id"]})
+        assert _wait_until(lambda: (process_registry.status(a["session_id"]) or {}).get("status") == "killed")
+        assert (process_registry.status(b["session_id"]) or {}).get("status") == "running"  # ⭐ B 毫发无伤
+
+    def test_terminate_nonpositive_pid_is_noop(self):
+        """pid<=0 → noop,绝不 os.killpg(0)(那会杀掉调用方自己的整个进程组,灾难性)。"""
+        from agent_py_agent.agent.tooling.process_registry import _terminate_process_tree
+
+        assert _terminate_process_tree(0, None) == "noop"
+        assert _terminate_process_tree(-5, None) == "noop"
+
+    def test_pid_alive_rejects_nonpositive(self):
+        from agent_py_agent.agent.tooling.process_registry import _pid_alive
+
+        assert _pid_alive(0) is False and _pid_alive(-1) is False
+
+
+class TestRegistryConcurrency:
+    def test_concurrent_register_list_status_kill_threadsafe(self):
+        """run_command 登记与查/杀工具并发(类文档承诺线程安全):锁下不崩、不损坏。
+
+        全用 pid=0(不存活探测、kill 时 refresh 先标 exited 故不发任何真实信号)——纯压注册表的锁。
+        """
+        import threading
+
+        reg = ProcessRegistry()
+        errors: list[Exception] = []
+        sids: list[str] = []
+        guard = threading.Lock()
+
+        def register_worker(w: int) -> None:
+            try:
+                for j in range(20):
+                    rec = reg.register(command=f"c{w}-{j}", pid=0, output_file="")
+                    with guard:
+                        sids.append(rec.session_id)
+            except Exception as exc:
+                errors.append(exc)
+
+        def query_worker() -> None:
+            try:
+                for _ in range(40):
+                    reg.list()
+                    with guard:
+                        recent = sids[-5:]
+                    for sid in recent:
+                        reg.status(sid)
+                        reg.kill(sid)  # pid=0 → already_exited,不发信号
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=register_worker, args=(w,)) for w in range(10)]
+        threads += [threading.Thread(target=query_worker) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"并发操作不应出错:{errors[:3]}"
+        for entry in reg.list():  # 注册表自洽:无半损坏记录
+            assert entry["session_id"] and "status" in entry
+
+
 class TestToolSpecs:
     def test_specs_have_precise_schema(self):
         """三个工具的 schema 对齐原生 tool_use 规范:必填参数声明 + 精确类型。"""
