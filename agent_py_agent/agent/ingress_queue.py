@@ -78,6 +78,8 @@ def _messages_table(meta: Any) -> Any:
 
 _BASE_BACKOFF_MS = 1000
 _MAX_BACKOFF_MS = 300_000  # 退避上限 5 分钟
+# lane advisory 锁的命名空间(int4 classid):与共享 DB 里别的产品的 advisory 锁隔开,绝不串号互锁。
+_LANE_LOCK_NS = 0x6D796167  # "myag"
 
 
 def _backoff_ms(attempts: int) -> int:
@@ -187,12 +189,16 @@ class IngressQueue:
 
     # --- worker 拉取 ---
     def claim(self, lease_seconds: int = 120, *, now_ms: int = 0) -> ClaimedMessage | None:
-        """原子领取下一条 pending(其 lane 当前无在飞消息=lane 串行)。PG SKIP LOCKED;SQLite 写锁串行。"""
+        """原子领取下一条 pending(其 lane 当前无在飞消息=lane 串行)。PG SKIP LOCKED+lane advisory 锁;SQLite 写锁串行。"""
         now = now_ms or _now_ms()
         with self._backend.begin() as conn:
             row = self._select_claimable(conn, now)
             if row is None:
                 return None
+            if not self._lock_lane(conn, str(row.lane)):
+                return None  # 该 lane 正被别的 worker 认领 → 本轮退避(防 SKIP LOCKED 下两 worker 各领同 lane 不同行)
+            if self._lane_busy(conn, str(row.lane)):
+                return None  # 拿锁后复查:select 与拿锁之间的 MVCC 窗口里,别的 worker 可能刚认领了本 lane
             token = uuid.uuid4().hex
             conn.execute(
                 update(self._t)
@@ -200,6 +206,26 @@ class IngressQueue:
                 .values(status="claimed", claim_token=token, lease_until=now + lease_seconds * 1000, attempts=row.attempts + 1)
             )
             return ClaimedMessage(int(row.id), str(row.lane), json.loads(row.payload), token, int(row.attempts) + 1)
+
+    def _lock_lane(self, conn: Any, lane: str) -> bool:
+        """PG:非阻塞 advisory xact 锁,序列化"同 lane 并发认领"——SKIP LOCKED 会让两 worker 跳过彼此锁住的行
+        各领同 lane 不同行,破坏 lane 串行;此锁堵上这个竞态窗口。锁随事务提交释放,而 claimed 状态同事务
+        落库 → 释放即 lane busy,无缝衔接 busy_lanes 排他。命名空间键(_LANE_LOCK_NS)把锁与共享 DB 里别的
+        产品的 advisory 锁隔开,绝不互相干扰。SQLite:BEGIN IMMEDIATE 已全序列化 claim,无需。"""
+        if not self._backend.is_postgres:
+            return True
+        locked = conn.execute(
+            text("SELECT pg_try_advisory_xact_lock(:ns, hashtext(:lane))"),
+            {"ns": _LANE_LOCK_NS, "lane": lane},
+        ).scalar()
+        return bool(locked)
+
+    def _lane_busy(self, conn: Any, lane: str) -> bool:
+        """该 lane 当前是否有在飞(claimed)消息。拿到 lane advisory 锁后做新鲜读,看见已提交的认领,
+        堵上"select 时没看见、拿锁后别人已提交"的 MVCC 竞态窗口(与 _lock_lane 合起来才保证 lane 串行)。"""
+        return conn.execute(
+            select(self._t.c.id).where(and_(self._t.c.lane == lane, self._t.c.status == "claimed")).limit(1)
+        ).first() is not None
 
     def _select_claimable(self, conn: Any, now: int) -> Any:
         busy_lanes = select(self._t.c.lane).where(self._t.c.status == "claimed")
