@@ -485,3 +485,97 @@ def test_content_block_rendering_and_normalize():
     )
     assert "a\nb" in norm["content"]  # 文本块拼接,非文本块不进正文
     assert _normalize_call_result("garbage") == {"content": "", "isError": False}  # 非 dict → 安全默认
+
+
+# ---------------------------------------------------------------------------
+# 资源上限:内容截断(防挤爆上下文)+ 单行上限(防 OOM)
+# ---------------------------------------------------------------------------
+
+# tools/call 返回一大坨文本(远超内容上限,但在单行上限内)。
+_BIG_CONTENT_SERVER = textwrap.dedent(
+    '''
+    import json, sys
+
+    def send(msg):
+        sys.stdout.write(json.dumps(msg) + "\\n"); sys.stdout.flush()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        req = json.loads(line); m = req.get("method"); rid = req.get("id")
+        if m == "initialize":
+            send({"jsonrpc": "2.0", "id": rid, "result": {"capabilities": {}, "serverInfo": {}}})
+        elif m == "notifications/initialized":
+            pass
+        elif m == "tools/list":
+            send({"jsonrpc": "2.0", "id": rid, "result": {"tools": [
+                {"name": "big", "description": "", "inputSchema": {}}]}})
+        elif m == "tools/call":
+            send({"jsonrpc": "2.0", "id": rid, "result": {
+                "content": [{"type": "text", "text": "Y" * 100000}], "isError": False}})
+    '''
+)
+
+
+def test_oversized_content_is_truncated():
+    """工具结果文本超内容上限 → 截断带标记(模型上下文有限,过长结果只会挤爆上下文)。"""
+    client = MCPStdioClient(_config(_BIG_CONTENT_SERVER, name="big"))  # 默认内容上限 16KB
+    try:
+        client.start()
+        result = client.call_tool("big", {})
+        assert len(result["content"]) <= 16 * 1024 + 80  # 截到 ~16KB(+ 标记)
+        assert "已截断" in result["content"]  # 带截断标记,模型知道被截
+    finally:
+        client.stop()
+
+
+# tools/call: size=huge → 一行超大文本(触发单行上限);否则 → 正常小结果。
+_MIXED_SIZE_SERVER = textwrap.dedent(
+    '''
+    import json, sys
+
+    def send(msg):
+        sys.stdout.write(json.dumps(msg) + "\\n"); sys.stdout.flush()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        req = json.loads(line); m = req.get("method"); rid = req.get("id")
+        if m == "initialize":
+            send({"jsonrpc": "2.0", "id": rid, "result": {"capabilities": {}, "serverInfo": {}}})
+        elif m == "notifications/initialized":
+            pass
+        elif m == "tools/list":
+            send({"jsonrpc": "2.0", "id": rid, "result": {"tools": [
+                {"name": "sized", "description": "", "inputSchema": {}}]}})
+        elif m == "tools/call":
+            size = (req.get("params") or {}).get("arguments", {}).get("size")
+            text = "X" * 60000 if size == "huge" else "ok-small"
+            send({"jsonrpc": "2.0", "id": rid, "result": {
+                "content": [{"type": "text", "text": text}], "isError": False}})
+    '''
+)
+
+
+def test_oversized_line_dropped_and_client_survives():
+    """单行超上限 → 丢弃该消息(不 OOM、不崩、不挂);reader 存活,后续正常调用照常。"""
+    config = _config(_MIXED_SIZE_SERVER, name="sized", timeout=2.0, max_line_chars=50_000)
+    client = MCPStdioClient(config)
+    try:
+        client.start()
+        with pytest.raises(MCPError) as exc:
+            client.call_tool("sized", {"size": "huge"})  # 60KB 行 > 50KB 上限 → 丢弃 → 该调用超时
+        assert exc.value.code == "MCP_TIMEOUT"
+        # ⭐ reader 没崩:后续正常调用照常工作
+        assert client.call_tool("sized", {"size": "small"})["content"] == "ok-small"
+    finally:
+        client.stop()
+
+
+def test_config_parses_size_caps():
+    cfg = MCPServerConfig.from_mapping("c", {"command": "x", "max_content_chars": 1000, "max_line_chars": 5000})
+    assert cfg.max_content_chars == 1000 and cfg.max_line_chars == 5000  # config 可调
+    bad = MCPServerConfig.from_mapping("c", {"command": "x", "max_content_chars": "nope", "max_line_chars": -1})
+    assert bad.max_content_chars == 16 * 1024 and bad.max_line_chars == 1024 * 1024  # 非法 → sane 默认

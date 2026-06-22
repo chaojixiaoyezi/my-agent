@@ -45,6 +45,12 @@ MCP_PROTOCOL_VERSION = "2024-11-05"
 _DEFAULT_CONNECT_TIMEOUT = 30.0  # initialize 握手超时（秒）
 _DEFAULT_TOOL_TIMEOUT = 60.0     # 单次 tools/call 超时（秒）
 _STOP_GRACE_SECONDS = 5.0        # 关闭时等子进程优雅退出的宽限期
+# 单条工具结果喂给模型的文本上限（≈4K token）。模型上下文才 1M token，一个工具结果再大也消化不了、
+# 反而挤爆上下文，超了就截断带标记。对齐 codebase 其他工具输出量级（快照 8K / 进程 4K）。
+_DEFAULT_MAX_CONTENT_CHARS = 16 * 1024
+# 读 server stdout 的单行字符上限（纯防 OOM 安全底线）。话痨/失控/被入侵的 server 吐一行超大 JSON
+# 时，readline 会无上限读进内存；这里超限即丢弃该消息，绝不让一行把 agent 内存撑爆。
+_DEFAULT_MAX_LINE_CHARS = 1024 * 1024
 
 # 只放行给 stdio 子进程的安全基线环境变量（显式安全环境名单）：
 # 不把父进程里的 API key/token 等敏感变量整盘漏给 MCP server 子进程。
@@ -138,6 +144,8 @@ class MCPServerConfig:
     timeout: float = _DEFAULT_TOOL_TIMEOUT
     connect_timeout: float = _DEFAULT_CONNECT_TIMEOUT
     cwd: str = ""
+    max_content_chars: int = _DEFAULT_MAX_CONTENT_CHARS  # 工具结果喂模型的文本上限,超截断
+    max_line_chars: int = _DEFAULT_MAX_LINE_CHARS        # 读 stdout 单行字符上限,超丢弃(防 OOM)
 
     @classmethod
     def from_mapping(cls, name: str, raw: object) -> "MCPServerConfig":
@@ -167,6 +175,8 @@ class MCPServerConfig:
             timeout=_coerce_timeout(raw.get("timeout"), _DEFAULT_TOOL_TIMEOUT),
             connect_timeout=_coerce_timeout(raw.get("connect_timeout"), _DEFAULT_CONNECT_TIMEOUT),
             cwd=str(raw.get("cwd") or "").strip(),
+            max_content_chars=_coerce_positive_int(raw.get("max_content_chars"), _DEFAULT_MAX_CONTENT_CHARS),
+            max_line_chars=_coerce_positive_int(raw.get("max_line_chars"), _DEFAULT_MAX_LINE_CHARS),
         )
 
 
@@ -181,6 +191,15 @@ def _coerce_timeout(value: object, default: float) -> float:
     if result <= 0:
         return default
     return result
+
+
+def _coerce_positive_int(value: object, default: int) -> int:
+    """把 config 里可能是字符串/None 的字符上限安全转成正整数,非法/非正回退默认。"""
+    try:
+        result = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return result if result > 0 else default
 
 
 def _render_content_block(block: object) -> str:
@@ -211,18 +230,25 @@ def _unwrap_jsonrpc(server_name: str, payload: dict[str, Any], method: str) -> A
     )
 
 
-def _normalize_call_result(result: object) -> dict[str, Any]:
-    """把 MCP CallToolResult 的 content 块归一化成纯文本 + 错误标志。"""
+def _normalize_call_result(result: object, max_chars: int = _DEFAULT_MAX_CONTENT_CHARS) -> dict[str, Any]:
+    """把 MCP CallToolResult 的 content 块归一化成纯文本 + 错误标志;文本超 max_chars 截断带标记。"""
     if not isinstance(result, dict):
         return {"content": "", "isError": False}
     parts = [text for block in (result.get("content") or []) if (text := _render_content_block(block))]
     normalized: dict[str, Any] = {
-        "content": "\n".join(parts),
+        "content": _truncate_content("\n".join(parts), max_chars),
         "isError": bool(result.get("isError")),
     }
     if result.get("structuredContent") is not None:
         normalized["structuredContent"] = result["structuredContent"]
     return normalized
+
+
+def _truncate_content(content: str, max_chars: int) -> str:
+    """工具结果文本超上限就截断带标记(模型上下文有限,过长结果只会挤爆上下文)。"""
+    if max_chars <= 0 or len(content) <= max_chars:
+        return content
+    return content[:max_chars] + f"\n…[MCP 结果过长,已截断到 {max_chars} 字符]"
 
 
 class MCPStdioClient:
@@ -405,7 +431,7 @@ class MCPStdioClient:
             {"name": tool_name, "arguments": arguments or {}},
             timeout=self.config.timeout,
         )
-        return _normalize_call_result(result)
+        return _normalize_call_result(result, self.config.max_content_chars)
 
     def _request(self, method: str, params: dict[str, Any], *, timeout: float) -> Any:
         """发一条 JSON-RPC 请求并阻塞等结果（按 server 超时）。"""
@@ -465,24 +491,20 @@ class MCPStdioClient:
     # -- 后台读 / stderr -----------------------------------------------------
 
     def _read_loop(self) -> None:
-        """后台线程：逐行读 stdout，解析 JSON-RPC 消息并按 id 投递。"""
+        """后台线程：逐行读 stdout（单行有上限,防 OOM），解析 JSON-RPC 消息并按 id 投递。"""
         proc = self._proc
         if proc is None or proc.stdout is None:
             self._reader_done.set()
             return
+        cap = self.config.max_line_chars
         try:
-            for line in proc.stdout:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    message = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    # 非 JSON 行（有些 server 会往 stdout 混日志）：跳过，留痕诊断。
-                    logger.debug("MCP server '%s' stdout 非 JSON 行已忽略: %.200s",
-                                 self.config.name, line)
-                    continue
-                self._dispatch_message(message)
+            while True:
+                raw = proc.stdout.readline(cap + 1)  # 至多读 cap+1 字符或到换行,不无上限读进内存
+                if raw == "":
+                    break  # EOF：子进程退出
+                if self._line_over_cap(raw, proc.stdout, cap):
+                    continue  # 超长行已丢弃,跳过该消息(防话痨 server 撑爆内存)
+                self._handle_line(raw.strip())
         except (OSError, ValueError):
             pass
         finally:
@@ -490,6 +512,28 @@ class MCPStdioClient:
             with self._responses_cv:
                 self._reader_done.set()
                 self._responses_cv.notify_all()
+
+    def _line_over_cap(self, raw: str, stream: Any, cap: int) -> bool:
+        """raw 未到换行且已达上限 → 超长行:吞掉本行剩余(到换行/EOF)并返回 True。"""
+        if raw.endswith("\n") or len(raw) <= cap:
+            return False
+        while True:
+            extra = stream.readline(cap + 1)
+            if extra == "" or extra.endswith("\n"):
+                break
+        logger.warning("MCP server '%s' 单行超 %d 字符上限,已丢弃该消息(防 OOM)", self.config.name, cap)
+        return True
+
+    def _handle_line(self, line: str) -> None:
+        """解析一行 JSON-RPC 并投递;非 JSON 行(有些 server 往 stdout 混日志)跳过留痕。"""
+        if not line:
+            return
+        try:
+            message = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            logger.debug("MCP server '%s' stdout 非 JSON 行已忽略: %.200s", self.config.name, line)
+            return
+        self._dispatch_message(message)
 
     def _dispatch_message(self, message: object) -> None:
         """把一条解析好的消息投递：有 id 的是响应；无 id 的是通知（仅记录）。"""
