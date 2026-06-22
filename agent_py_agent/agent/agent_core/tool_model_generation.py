@@ -107,12 +107,17 @@ def generate_model_response(request: ModelGenerateParams):
 
 
 def _record_run_cost(request: ModelGenerateParams, response: object) -> None:
-    """采集 owner(config)/run_id(params)/model(backend),记真实 USD 成本到全局台账(审计 #19/#2)。"""
+    """采集 owner(config)/run_id(params)/model,记真实 USD 成本到全局台账(审计 #19/#2)。
+
+    model 优先取 backend.model_name,缺则回退 config.model_name(部分后端不暴露 model_name 但 config 有)。
+    """
     from .model.llm_metrics import record_run_cost
 
-    owner = str(getattr(getattr(request.agent, "config", None), "my_agent_owner_id", "") or "")
+    config = getattr(request.agent, "config", None)
+    owner = str(getattr(config, "my_agent_owner_id", "") or "")
     run_id = str(getattr(request.params, "run_id", "") or "")
-    model = str(getattr(getattr(request.agent, "backend", None), "model_name", "") or "")
+    backend_model = getattr(getattr(request.agent, "backend", None), "model_name", "")
+    model = str(backend_model or getattr(config, "model_name", "") or "")
     record_run_cost(owner, run_id, model, response)
 
 
