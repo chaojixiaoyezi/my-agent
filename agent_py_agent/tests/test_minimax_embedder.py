@@ -141,3 +141,28 @@ def test_build_embedder_factory_minimax_provider() -> None:
     emb = build_embedder({"provider": "minimax", "api_base": "https://api.minimaxi.com/v1", "model": "embo-01"})
     assert isinstance(emb, MiniMaxEmbedder) and emb.dim == 1536  # 工厂按 provider=minimax 造原生适配器
     assert build_embedder({"provider": "minimax", "model": "embo-01"}) is None  # 缺 api_base → None(不半配)
+
+
+def test_embedding_key_precedence_direct_over_env_over_chat(monkeypatch) -> None:
+    """embedding 独立 key 解析:直配 > 独立 env > 回退聊天 key(默认零配置沿用聊天 key,不破现状)。"""
+    from agent_py_agent.agent.core import _build_memory_embedder
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    common = dict(
+        memory_semantic_recall=True,
+        memory_embedding_model="embo-01",
+        memory_embedding_api_base="https://api.minimaxi.com/v1",
+    )
+    monkeypatch.delenv("AGENT_API_KEY", raising=False)  # 隔离真实环境里的 key,断言纯靠配置
+
+    direct = _build_memory_embedder(AgentConfig(**common, memory_embedding_api_key="k-direct", api_key="k-chat"))
+    assert direct._api_key == "k-direct"  # 直配优先
+
+    monkeypatch.setenv("EMB_KEY_X", "k-env")
+    via_env = _build_memory_embedder(
+        AgentConfig(**common, memory_embedding_api_key_env="EMB_KEY_X", api_key="k-chat")
+    )
+    assert via_env._api_key == "k-env"  # 直配空 → 读独立 env 变量
+
+    fallback = _build_memory_embedder(AgentConfig(**common, api_key="k-chat"))
+    assert fallback._api_key == "k-chat"  # 都不配 → 回退聊天 key(向后兼容)

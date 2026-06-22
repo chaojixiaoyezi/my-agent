@@ -192,6 +192,23 @@ class SimpleAgent(
         _register_orchestration_tools(self)
 
 
+def _embedding_api_key(config: AgentConfig) -> str:
+    """embedding 端点的 key:独立直配 > 独立 env 变量 > 回退聊天后端 key。
+
+    独立字段让 embedding 用与聊天不同厂的 key(如聊天 MiniMax、embedding 另一家);都不配则零配置
+    沿用聊天 key(同厂/本地无 key 场景)。_env 路径让生产把密钥放环境变量而非 yaml(免明文入库)。
+    """
+    direct = str(getattr(config, "memory_embedding_api_key", "") or "")
+    if direct:
+        return direct
+    env_name = str(getattr(config, "memory_embedding_api_key_env", "") or "")
+    if env_name and os.environ.get(env_name):
+        return os.environ[env_name]
+    return str(getattr(config, "api_key", "") or "") or os.environ.get(
+        str(getattr(config, "api_key_env", "AGENT_API_KEY") or "AGENT_API_KEY"), ""
+    )
+
+
 def _build_memory_embedder(config: AgentConfig):
     """记忆语义召回的 embedder(检索拓宽 #1):默认关 / 没配 embedding 模型 → None(纯关键词,不变)。
 
@@ -206,9 +223,7 @@ def _build_memory_embedder(config: AgentConfig):
     try:
         from .retrieval.embedding import MiniMaxEmbedder, OpenAICompatibleEmbedder
 
-        api_key = str(getattr(config, "api_key", "") or "") or os.environ.get(
-            str(getattr(config, "api_key_env", "AGENT_API_KEY") or "AGENT_API_KEY"), ""
-        )
+        api_key = _embedding_api_key(config)
         # embedding 端点常与聊天端点不同(MiniMax 聊天走 /anthropic、embedding 走 /v1);独立配置,缺省沿用主 api_base
         api_base = str(getattr(config, "memory_embedding_api_base", "") or "") or str(getattr(config, "api_base", "") or "")
         if model.startswith("embo"):  # MiniMax 原生 embedding(非 OpenAI 兼容,单独适配器)
