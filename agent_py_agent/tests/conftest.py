@@ -14,6 +14,20 @@ from agent_py_agent.agent.log_analysis.models import CaseRecord, EvidenceRef, Fi
 from agent_py_agent.agent.log_analysis.security.attack_chain import AttackChainStep
 from agent_py_agent.agent.subagents.models import SubAgentTask
 
+
+@pytest.fixture(autouse=True)
+def _isolate_my_agent_home(tmp_path_factory, monkeypatch):
+    """默认把每个测试的 MY_AGENT_HOME 隔离到临时目录。
+
+    防两件事:① 测试污染用户真实 ~/.my-agent(测试不该写用户数据)② runtime workspace 在全局 home
+    累积泄漏(实测曾累积 16 万目录、拖垮 collaboration 测试)。
+    显式传 home/my_agent_home 的测试不受影响——resolve_my_agent_home 里 value 优先于 env;
+    需要特定 MY_AGENT_HOME 的用例可在测试体内 monkeypatch 覆盖(后设生效)。
+    """
+    home = tmp_path_factory.mktemp("ma_home")
+    monkeypatch.setenv("MY_AGENT_HOME", str(home))
+
+
 # ---------------------------------------------------------------------------
 # Finding / Evidence fixtures
 # ---------------------------------------------------------------------------
