@@ -97,6 +97,8 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         path: str | Path,
         local_store: LocalStore | None = None,
         daily_mirror_dir: str | Path | None = None,
+        *,
+        embedder: object | None = None,
     ):
         """初始化 JSONL 记忆文件位置，并确保父目录存在。
 
@@ -113,6 +115,8 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         self.daily_mirror_dirs = _daily_mirror_dirs(daily_mirror_dir)
         self.daily_mirror_dir = self.daily_mirror_dirs[0] if self.daily_mirror_dirs else None
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._embedder = embedder  # 配了 → 记忆召回加一路语义向量(检索拓宽 #1);None → 纯关键词
+        self._vector_store_cache = None
 
     def add(
         self,
@@ -161,7 +165,42 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         append_jsonl(self.path, _record_payload(record))
         self._append_daily_mirror(record)
         self._try_index_record(record)
+        self._index_vector(record)  # 语义召回:embed-on-write 到本地向量库(检索拓宽 #1)
         return record
+
+    def _vector_store(self):
+        """本地 per-owner 向量库(memory_vectors.json,在 owner home 内)。无 embedder 返回 None。
+
+        只用本地文件,绝不碰共享向量库(零外部依赖、按 owner 天然隔离)。懒建缓存。
+        """
+        if self._embedder is None:
+            return None
+        if self._vector_store_cache is None:
+            from ..retrieval.vector_store import VectorStore
+
+            self._vector_store_cache = VectorStore(self.path.parent / "memory_vectors.json")
+        return self._vector_store_cache
+
+    def _index_vector(self, record: MemoryRecord) -> None:
+        store = self._vector_store()
+        if store is None:
+            return
+        try:
+            vector = self._embedder.embed([record.content])[0]
+            store.upsert(_record_vec_id(record), vector, text=record.content, metadata=_record_payload(record))
+        except Exception:
+            pass  # 向量索引失败不打断记忆写入(JSONL 才是事实源)
+
+    def _semantic_records(self, query: str, top_k: int) -> list[MemoryRecord]:
+        store = self._vector_store()
+        if store is None:
+            return []
+        try:
+            query_vec = self._embedder.embed([query])[0]
+            hits = store.search(query_vec, top_k=top_k)
+        except Exception:
+            return []
+        return [rec for hit in hits if (rec := _memory_record_from_obj(hit.metadata)) is not None]
 
     def _append_daily_mirror(self, record: MemoryRecord) -> None:
         if not self.daily_mirror_dirs:
@@ -204,7 +243,24 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         返回 MemoryRecord 列表。LocalStore 是检索索引，JSONL 是正式记忆源。"""
 
         records, _load_errors = self.search_report(query, top_k=top_k)
-        return records
+        if self._embedder is None:
+            return records  # 无 embedder → 纯关键词(现状不变)
+        return self._fuse_semantic(query, records, top_k)
+
+    def _fuse_semantic(self, query: str, keyword_records: list[MemoryRecord], top_k: int) -> list[MemoryRecord]:
+        """关键词召回 + 语义召回 RRF 融合(检索拓宽 #1)。语义为空则退回纯关键词(不崩不退化)。"""
+        semantic = self._semantic_records(query, top_k)
+        if not semantic:
+            return keyword_records[:top_k]
+        from ..retrieval.lexical import reciprocal_rank_fusion
+
+        by_id: dict[str, MemoryRecord] = {}
+        for record in [*keyword_records, *semantic]:
+            by_id.setdefault(_record_vec_id(record), record)
+        fused = reciprocal_rank_fusion(
+            [[_record_vec_id(r) for r in keyword_records], [_record_vec_id(r) for r in semantic]]
+        )
+        return [by_id[doc_id] for doc_id, _score in fused if doc_id in by_id][:top_k]
 
     def search_report(self, query: str, top_k: int = 5) -> tuple[list[MemoryRecord], list[dict]]:
         """搜索记忆并保留可恢复的索引读取错误。
@@ -280,6 +336,14 @@ def _record_payload(record: MemoryRecord) -> dict:
     if not payload.get("attributes"):
         payload.pop("attributes", None)
     return payload
+
+
+def _record_vec_id(record: MemoryRecord) -> str:
+    """记忆的稳定向量 id(按 role+kind+nfc(content) 哈希,跨关键词/语义两路对齐做 RRF 融合)。"""
+    import hashlib
+
+    key = f"{record.role}\x00{record.kind}\x00{nfc(record.content)}"
+    return hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def _memory_record_key(record: MemoryRecord) -> tuple[str, str, str, float]:

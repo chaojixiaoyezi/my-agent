@@ -176,6 +176,7 @@ class SimpleAgent(
             paths["memory_path"],
             local_store=self.local_store,
             daily_mirror_dir=_daily_memory_dir(config, self.home_paths),
+            embedder=_build_memory_embedder(config),  # 记忆语义召回(检索拓宽 #1);默认关返 None
         )
         self.prompts = PromptBuilder(config, self.root, home_paths=self.home_paths)
         # skill 树第一期:主代理常驻一个能力路由器(默认带 builtin skills),
@@ -189,6 +190,28 @@ class SimpleAgent(
         self.subagents = _build_subagent_manager(self, paths)
         self.tools = _build_tool_registry(self, config)
         _register_orchestration_tools(self)
+
+
+def _build_memory_embedder(config: AgentConfig):
+    """记忆语义召回的 embedder(检索拓宽 #1):默认关 / 没配 embedding 模型 → None(纯关键词,不变)。
+
+    配了 memory_semantic_recall=true + memory_embedding_model 才建,走 agent 同款 api_base/key
+    (OpenAI 兼容 /embeddings)。建失败/未配一律 None,记忆召回降级纯关键词不崩。
+    """
+    if not getattr(config, "memory_semantic_recall", False):
+        return None
+    model = str(getattr(config, "memory_embedding_model", "") or "").strip()
+    if not model:
+        return None
+    try:
+        from .retrieval.embedding import OpenAICompatibleEmbedder
+
+        api_key = str(getattr(config, "api_key", "") or "") or os.environ.get(
+            str(getattr(config, "api_key_env", "AGENT_API_KEY") or "AGENT_API_KEY"), ""
+        )
+        return OpenAICompatibleEmbedder(api_base=str(getattr(config, "api_base", "") or ""), model=model, api_key=api_key)
+    except Exception:
+        return None
 
 
 def _resolve_home_paths(config: AgentConfig):

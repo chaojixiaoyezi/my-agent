@@ -208,6 +208,12 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_path: str = ""
     memory_top_k: int = 5
     auto_save_memory: bool = True
+    # 记忆语义召回(检索拓宽 #1,默认关=现状纯关键词):开后记忆召回在关键词(FTS5/BM25)外再加一路
+    # 语义向量召回,RRF 融合,治"换词就召不回"。向量只存各 owner 自己 home 的本地文件(零外部依赖、
+    # 不碰共享向量库、per-用户隔离)。需配 memory_embedding_model(走 agent 同款 api);没配则自动只走
+    # 关键词(不崩不退化)。
+    memory_semantic_recall: bool = False
+    memory_embedding_model: str = ""  # 语义召回用的 embedding 模型名(空=不启用语义,仅关键词)
     memory_archive_level: int = 3
     memory_hook_enabled: bool = True
     memory_hook_archive_level: int = 3
