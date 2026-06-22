@@ -115,6 +115,9 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
         owner_kind=owner.identity.owner_kind,
         owner_id=owner.owner_id,
         owner_home_dir=owner.home_dir,
+        # owner_sessions_dir 必须按 scoped owner 重设(OwnerHomeResult 没有 sessions_dir 字段,曾被漏掉→
+        # 所有用户的会话落到 base owner 的 sessions,跨用户会话泄露)。按 home_dir/sessions 派生,与 base 布局一致。
+        owner_sessions_dir=owner.home_dir / "sessions",
         owner_soul_md=owner.soul_md,
         owner_user_md=owner.user_md,
         owner_agents_md=owner.agents_md,
