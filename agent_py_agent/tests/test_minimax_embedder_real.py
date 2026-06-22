@@ -52,3 +52,29 @@ def test_real_memory_paraphrase_recall(tmp_path) -> None:
     # query 全换词:付款≈支付、模块≈系统、搬完≈迁移——与目标零共享关键词,纯 BM25 召不回
     hits = mem.search("付款模块大概什么时候能搬完", top_k=2)
     assert any("支付系统" in r.content for r in hits)  # ⭐ 换词 query 也能召回目标(语义路生效)
+
+
+def test_real_i18n_batch_robust() -> None:
+    """服务几十国语言:多语言 + emoji + 混排 批量 embed,N 进 N 出、全 1536 维,不崩不串位。"""
+    texts = [
+        "项目上线 🚀 deadline is Q3",
+        "日本語のテストです",
+        "한국어 메모 테스트",
+        "Café résumé naïve façade",
+        "混合中英文 mixed text 123 🎉",
+        "Здравствуйте мир",
+    ]
+    vecs = _embedder().embed(texts)
+    assert len(vecs) == len(texts) and all(len(v) == 1536 for v in vecs)  # ⭐ 多语言/emoji 批量稳健
+
+
+def test_real_empty_and_oversized_inputs_dont_crash() -> None:
+    """边界输入(空 / 纯空白 / 超长超 token 上限):要么有效向量、要么抛 EmbeddingError 供降级,绝不挂死/崩。"""
+    from agent_py_agent.agent.retrieval.embedding import EmbeddingError
+
+    for text in ["", "   ", "支付系统迁移" * 5000]:  # 超长 ≈ 远超 embo-01 token 上限
+        try:
+            vecs = _embedder().embed([text])
+            assert not vecs or all(len(v) == 1536 for v in vecs)  # 有效则必 1536 维
+        except EmbeddingError:
+            pass  # 端点拒绝边界输入 → 抛错供上层降级 BM25,符合预期

@@ -63,6 +63,35 @@ def test_minimax_empty_input_is_noop() -> None:
     assert MiniMaxEmbedder(api_base="https://x/v1", model="embo-01").embed([]) == []
 
 
+def test_minimax_multi_text_keeps_order_and_count(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["texts"] = json.loads(req.data.decode("utf-8"))["texts"]
+        # 按请求顺序返回各自向量(N 进 N 出,逐条对齐)
+        return _FakeResp({"vectors": [[1.0, 0.0], [0.0, 2.0], [0.0, 0.0, 0.0]], "base_resp": {"status_code": 0}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    out = MiniMaxEmbedder(api_base="https://x/v1", model="embo-01").embed(["a", "b", "c"])
+    assert captured["texts"] == ["a", "b", "c"]  # 批量原样送
+    assert len(out) == 3  # N 进 N 出,不串位
+    assert abs(out[0][0] - 1.0) < 1e-9 and abs(out[1][1] - 1.0) < 1e-9  # 各自归一,顺序对齐
+
+
+def test_minimax_http_error_degrades_to_embedding_error(monkeypatch) -> None:
+    import urllib.error
+
+    def rate_limited(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", rate_limited)
+    try:
+        MiniMaxEmbedder(api_base="https://x/v1", model="embo-01").embed(["x"])
+        raise AssertionError("429/5xx 应抛 EmbeddingError(供上层降级 BM25)")
+    except EmbeddingError:
+        pass  # 限流/服务端错误 → 降级而非崩
+
+
 def test_minimax_network_error_degrades_not_crash(monkeypatch) -> None:
     def boom(req, timeout=None):
         raise OSError("connection refused")
@@ -104,3 +133,11 @@ def test_build_memory_embedder_non_embo_stays_openai_compatible() -> None:
         )
     )
     assert isinstance(emb, OpenAICompatibleEmbedder)  # 非 embo 仍走 OpenAI 兼容,不误判
+
+
+def test_build_embedder_factory_minimax_provider() -> None:
+    from agent_py_agent.agent.retrieval.embedding import build_embedder
+
+    emb = build_embedder({"provider": "minimax", "api_base": "https://api.minimaxi.com/v1", "model": "embo-01"})
+    assert isinstance(emb, MiniMaxEmbedder) and emb.dim == 1536  # 工厂按 provider=minimax 造原生适配器
+    assert build_embedder({"provider": "minimax", "model": "embo-01"}) is None  # 缺 api_base → None(不半配)

@@ -54,6 +54,42 @@ def test_embedder_failure_degrades_to_keyword(tmp_path) -> None:
     assert any("deploy" in r.content for r in results)
 
 
+def test_model_switch_skips_old_dim_then_new_writes_recall(tmp_path) -> None:
+    """换 embedding 模型(维度变)后:旧维度向量被守卫跳过,不崩不垃圾召回;新写入按新维度正常语义召回。"""
+    path = tmp_path / "mem.jsonl"
+    old = JsonlMemory(path, embedder=LocalHashingEmbedder(dim=64))
+    old.add("user", "支付系统迁移计划下季度启动")  # 内容含"支付系统迁移"子串,供关键词兜底命中
+    old.add("user", "团建活动定在周五下午")
+
+    new = JsonlMemory(path, embedder=LocalHashingEmbedder(dim=256))  # 换模型,同一 memory_vectors.json
+    hits = new.search("支付系统迁移", top_k=3)  # 不崩
+    assert hits and hits[0].content.startswith("支付系统迁移")  # 旧 64 维被跳(不截断成垃圾分把"团建"顶上来),关键词兜底命中目标
+
+    new.add("user", "客户本季度预算大约五十万元")  # 新模型新写入 → 256 维
+    hits2 = new.search("预算五十万", top_k=3)
+    assert any("五十万" in r.content for r in hits2)  # ⭐ 新维度向量语义召回正常(关键词子串不命中,纯语义路捞回)
+
+
+def test_search_time_endpoint_failure_degrades_to_keyword(tmp_path) -> None:
+    """写入时 embed 正常、查询时端点挂掉(429/超时):语义路抛错被吞,降级纯关键词,不崩。"""
+
+    class _FlakyEmbedder:
+        def __init__(self) -> None:
+            self.fail = False
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            if self.fail:
+                raise RuntimeError("embeddings endpoint down at query time")
+            return [[1.0, 0.0] for _ in texts]
+
+    emb = _FlakyEmbedder()
+    mem = JsonlMemory(tmp_path / "mem.jsonl", embedder=emb)
+    mem.add("user", "把支付服务部署到生产环境")  # 写时正常 embed
+    emb.fail = True  # 查询时端点故障
+    hits = mem.search("支付服务", top_k=3)
+    assert any("支付" in r.content for r in hits)  # 不崩,关键词兜底
+
+
 def test_build_memory_embedder_gating(tmp_path) -> None:
     from agent_py_agent.agent.core import _build_memory_embedder
     from agent_py_agent.agent.settings.config import AgentConfig
