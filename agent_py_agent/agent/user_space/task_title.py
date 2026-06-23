@@ -4,6 +4,8 @@ import hashlib
 import re
 from pathlib import PurePosixPath, PureWindowsPath
 
+from ..common.display_width import truncate_display
+
 # R5c/R7c slug 实锤修复:Unix 绝对路径分支必须负向后顾——斜杠前是字母数字或
 # 汉字时(如"成功/失败统计""A/B 测试")是词内并列语义,不是路径起点;误判会让
 # 路径标题分支压过任务主题,目录名取成 prompt 尾部碎词("失败统计")。
@@ -37,7 +39,10 @@ def concise_task_title(text: str) -> str:
     first = _replace_paths_with_names(first)
     first = re.sub(r"\s+", "-", first)
     first = collapse_dashes("".join(workspace_slug_char(char) for char in first.lower())).strip("-_")
-    return (first[:32].strip("-_") or "task")
+    # 按显示宽度(CJK 算 2)截断,而非字符数:32 个中文字符≈64 列的目录段会让子代理写 path
+    # 时丢前导 / 被 dangerous_roots 拦(实测拦 31 次致其卡死)。32 列对 ASCII 无变化、中文减半。
+    # 复用 common.display_width.truncate_display(按字形簇切,不切碎 emoji/组合序列)。
+    return (truncate_display(first, 32).strip("-_") or "task")
 
 
 def looks_like_machine_id(value: str) -> bool:
