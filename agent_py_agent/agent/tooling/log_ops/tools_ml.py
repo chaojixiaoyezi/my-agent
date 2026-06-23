@@ -151,16 +151,19 @@ class LogRuleAuthorTool(_LogOpsTool):
         requires_idempotency=True,
         description=(
             "现编一条**声明式检测规则**监控某种情况,不写代码:group_by(按字段分组)× aggregate(count/distinct/"
-            "sum/rate)× window_seconds × threshold。几十上百种都能表达——横向扫描={group_by:[ip],aggregate:"
-            "distinct,agg_field:dst,threshold:50};数据外泄={group_by:[ip],aggregate:sum,agg_field:bytes,"
-            "window_seconds:300,threshold:1000000000};暴力破解={group_by:[ip],match_any:[auth_failure_burst],"
-            "aggregate:count,threshold:20}。默认先回测(拿历史候选估命中量,命中太多说明阈值偏低易误报)再部署。规则私有(owner 隔离)。"
+            "sum/rate)× window_seconds × threshold × 判据[绝对阈值 | baseline_deviation 偏离自己基线倍数]。"
+            "几十上百种都能表达——横向扫描={group_by:[ip],aggregate:distinct,agg_field:dst,threshold:50};"
+            "数据外泄={group_by:[ip],aggregate:sum,agg_field:bytes,window_seconds:300,threshold:1000000000};"
+            "暴力破解={group_by:[ip],match_any:[auth_failure_burst],aggregate:count,threshold:20};"
+            "**突增类**用 baseline_deviation:true(threshold 变'偏离自己基线的倍数',不同源各按自己基线)——"
+            "流量突增={group_by:[ip],aggregate:count,baseline_deviation:true,threshold:3};用户数据突增="
+            "{group_by:[user],aggregate:sum,agg_field:bytes,baseline_deviation:true,threshold:5}。默认先回测再部署,规则私有(owner 隔离)。"
         ),
         use_cases=["预设规则盖不住的新情况,agent 现编一条检测规则部署监控", "调某检测的分组/阈值/时窗"],
         avoid_when=["查已有规则命中用 log_rule_eval", "明确威胁特征(注入/反弹shell)用 log_profile_set 正则规则"],
         keywords=["检测规则", "现编", "声明式", "rule_author", "监控", "扇出", "外泄", "暴力破解", "聚合", "阈值"],
         parameters={
-            "rule": "规则声明对象:{name, group_by:[字段], aggregate:count/distinct/sum/rate, agg_field, window_seconds, threshold, match_any:[规则名], severity}",
+            "rule": "规则声明对象:{name, group_by:[字段], aggregate:count/distinct/sum/rate, agg_field, window_seconds, threshold, match_any:[规则名], severity, baseline_deviation:bool(true=threshold是偏离自己基线的倍数,用于突增类)}",
             "backtest": "可选,默认 true:先拿历史候选回测估命中量",
             "monitor_id": "可选,默认 default",
         },

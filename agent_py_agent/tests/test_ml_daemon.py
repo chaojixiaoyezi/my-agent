@@ -31,11 +31,12 @@ def test_ml_detection_pass_reports_and_dedupes(tmp_path: Path) -> None:
     store.ensure_dirs()
     _deploy(store, {"rule_id": "r-scan", "name": "扫描", "group_by": ["ip"], "aggregate": "distinct", "agg_field": "dst", "threshold": 50})
     store.append_candidates(_scan_cands(60))
-    seen: set[str] = set()
-    daemon_mod._run_ml_detection_pass(store, seen)
+    from agent_py_agent.agent.ml_engine.detection import MetricBaseline
+    seen, baseline = set(), MetricBaseline()
+    daemon_mod._run_ml_detection_pass(store, seen, baseline)
     ml_reports = [r for r in store.read_reports() if r.get("ml_detection")]
     assert len(ml_reports) == 1 and "扫描" in ml_reports[0]["title"]
-    daemon_mod._run_ml_detection_pass(store, seen)  # 再跑
+    daemon_mod._run_ml_detection_pass(store, seen, baseline)  # 再跑
     assert len([r for r in store.read_reports() if r.get("ml_detection")]) == 1  # 去重,不重复报
 
 

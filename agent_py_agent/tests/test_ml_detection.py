@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_py_agent.agent.ml_engine import detection, rule_store
-from agent_py_agent.agent.ml_engine.detection import DetectionRule
+from agent_py_agent.agent.ml_engine.detection import DetectionRule, MetricBaseline
 from agent_py_agent.agent.tooling.log_ops.tools import _store
 from agent_py_agent.agent.tooling.log_ops.tools_ml import LogRuleAuthorTool, LogRuleEvalTool
 
@@ -100,3 +100,39 @@ def test_log_rule_author_and_eval_tools(tmp_path: Path) -> None:
     assert author.ok and author.result_envelope["backtest"]["hits"] == 1
     ev = LogRuleEvalTool(tmp_path).execute({})
     assert ev.ok and ev.result_envelope["rules"] == 1 and ev.result_envelope["hit_count"] == 1
+
+
+# ---- deviation 模式(M3-1):"偏离自己基线"是声明式引擎的通用模式,不是专门模块 ----
+
+def test_deviation_traffic_spike_is_just_a_declared_rule() -> None:
+    """流量突增 = count by ip + baseline_deviation,偏离自己基线>3倍命中;冷启动只学不判,适应不重复。"""
+    rule = detection.parse_rule({"name": "突增", "group_by": ["ip"], "aggregate": "count", "window_seconds": 60, "threshold": 3, "baseline_deviation": True})
+    assert isinstance(rule, DetectionRule) and rule.baseline_deviation
+    baseline = MetricBaseline()
+    for w in range(5):  # 训基线≈10/窗
+        assert detection.evaluate_rule(rule, [_rec("1.1.1.1", ts=float(w * 60)) for _ in range(10)], baseline) == []
+    hits = detection.evaluate_rule(rule, [_rec("1.1.1.1", ts=300.0) for _ in range(100)], baseline)  # 突增10倍
+    assert len(hits) == 1 and hits[0].deviation >= 3.0
+    assert detection.evaluate_rule(rule, [_rec("1.1.1.1", ts=360.0) for _ in range(100)], baseline) == []  # 适应不重复
+
+
+def test_deviation_generalizes_beyond_ip_rate() -> None:
+    """偏离模式通用:sum(bytes) by user 偏离基线——证明不是为'ip 速率'特化,任意实体任意指标都行。"""
+    rule = detection.parse_rule({"name": "数据突增", "group_by": ["user"], "aggregate": "sum", "agg_field": "bytes", "window_seconds": 60, "threshold": 3, "baseline_deviation": True})
+    baseline = MetricBaseline()
+    for w in range(5):
+        detection.evaluate_rule(rule, [{"entities": {"user": "alice", "bytes": "1000"}, "detected_at": float(w * 60), "fingerprint": f"f{w}"}], baseline)
+    hits = detection.evaluate_rule(rule, [{"entities": {"user": "alice", "bytes": "100000"}, "detected_at": 300.0, "fingerprint": "big"}], baseline)
+    assert len(hits) == 1 and hits[0].deviation >= 3.0
+
+
+def test_deviation_cold_start_no_report() -> None:
+    rule = detection.parse_rule({"name": "突增", "group_by": ["ip"], "aggregate": "count", "threshold": 3, "baseline_deviation": True})
+    assert detection.evaluate_rule(rule, [_rec("new", ts=0.0) for _ in range(1000)], MetricBaseline()) == []
+
+
+def test_metric_baseline_roundtrip() -> None:
+    baseline = MetricBaseline()
+    baseline.observe("k", 50.0)
+    restored = MetricBaseline.from_dict(baseline.to_dict())
+    assert restored.values["k"] == 50.0 and restored.counts["k"] == 1
