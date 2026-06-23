@@ -31,6 +31,8 @@ from .collector import collect_source
 from .splitter import build_splitter
 from .store import CollectMetrics, LogOpsStore, SourceSpec, SourceTick, compact_candidates
 from .triage import DEFAULT_RULES, TriageInput, TriageRule, compile_profile_rules, triage_line
+from ...ml_engine import rule_store as ml_rule_store
+from ...ml_engine.detection import evaluate_rule
 
 _HEARTBEAT_KEY = "heartbeat_at"
 _DAEMON_SCHEMA_VERSION = 1  # daemon.json schema 版本
@@ -38,6 +40,7 @@ _CANDIDATES_COMPACT_EVERY = 200       # 每多少拍检查一次候选队列轮�
 _CANDIDATES_COMPACT_THRESHOLD = 5000  # 已研判候选(cursor)超过此数就轮转归档
 _DEFAULT_POLL_INTERVAL = 2.0
 _MIN_POLL_INTERVAL = 0.05
+_ML_EVAL_WINDOW = 20000  # ML 检测 pass 每拍评估最近多少条候选(确定性,零 LLM)
 
 
 def run_collection_cycle(
@@ -201,6 +204,44 @@ def _maybe_compact_candidates(store: LogOpsStore) -> None:
         compact_candidates(store)
 
 
+def _report_ml_hit_once(store: LogOpsStore, hit: Any, seen: set[str]) -> None:
+    """同一(规则,分组,时窗)命中只报一次(去重,防每拍重复报告淹没)。"""
+    signature = f"{hit.rule_id}|{hit.group_key}|{int(hit.window_start // 60)}"
+    if signature in seen:
+        return
+    seen.add(signature)
+    store.append_report({
+        "level": "P2",
+        "title": f"[ML检测] 规则「{hit.rule_name}」命中 {hit.group_key}",
+        "detail": f"聚合值 {hit.agg_value} 超阈值 {hit.threshold}",
+        "evidence": list(hit.evidence_refs),
+        "sources": [],
+        "pushed": False,
+        "ml_detection": True,
+    })
+
+
+def _run_ml_detection_pass(store: LogOpsStore, seen: set[str]) -> None:
+    """daemon 每拍对最近候选跑 agent 现编的声明式检测规则,新命中写报告(确定性,零 LLM)。
+    ml_engine_enabled 关时根本不进这里;开了也只读规则 + 评估,不碰原始采集/不丢流程。"""
+    rules = ml_rule_store.read_rules(store.root)
+    if not rules:
+        return
+    total = store.count_candidates()
+    candidates = store.read_candidates(offset=max(0, total - _ML_EVAL_WINDOW), limit=_ML_EVAL_WINDOW)
+    for rule in rules:
+        for hit in evaluate_rule(rule, candidates):
+            _report_ml_hit_once(store, hit, seen)
+
+
+def _safe_ml_pass(store: LogOpsStore, seen: set[str]) -> None:
+    """ML 检测 pass 包一层吞异常:检测失败绝不拖垮采集主循环(daemon 永不停机)。"""
+    try:
+        _run_ml_detection_pass(store, seen)
+    except Exception:  # noqa: BLE001 — ML 检测是旁路增强,任何异常不影响确定性采集
+        pass
+
+
 def serve(
     store: LogOpsStore,
     *,
@@ -220,9 +261,12 @@ def serve(
     pid = os.getpid()
     run = _DaemonRunState(store=store, interval=interval, pid=pid, start_time=heartbeat.process_start_time(pid))
     _write_daemon_record(run, "running")
+    ml_seen: set[str] = set()
 
     while not flag.stop:
         error = _run_one_cycle(run, metrics, rules)
+        if bool(store.read_config().get("ml_engine_enabled", False)):  # 每拍读:默认关零影响,支持运行中开关
+            _safe_ml_pass(store, ml_seen)
         run.cycles += 1
         if run.cycles % _CANDIDATES_COMPACT_EVERY == 0:
             _maybe_compact_candidates(store)  # 周期轮转候选队列,防无限增长

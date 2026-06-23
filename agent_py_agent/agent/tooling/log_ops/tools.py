@@ -144,6 +144,7 @@ class LogMonitorStartTool(_LogOpsTool):
             "poll_interval_seconds": "可选。采集循环间隔秒数,默认 2 秒。",
             "api_fetch_mode": "可选。API 采集方式:since(默认,?since=cursor)或 range(?start=N&end=M 按编号区间分页)。",
             "report_floor": "可选。分级汇报阈值 P0/P1/P2/P3(默认 P1):低于此级别的 log_report 只记审计不推送用户。",
+            "ml_engine": "可选布尔。开启后 daemon 每拍自动跑 ML 声明式检测规则(log_rule_author 现编的),命中写报告;默认关,零影响现有规则采集。",
             "monitor_id": "可选。监控实例标识,默认 default。多套独立监控用不同 id 隔离。",
         },
         parameter_details={
@@ -158,6 +159,7 @@ class LogMonitorStartTool(_LogOpsTool):
             "poll_interval_seconds": {"type": "number"},
             "api_fetch_mode": {"type": "string", "enum": ["since", "range"]},
             "report_floor": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+            "ml_engine": {"type": "boolean"},
             "monitor_id": {"type": "string"},
         },
         required_parameters=["sources"],
@@ -181,6 +183,8 @@ class LogMonitorStartTool(_LogOpsTool):
         if not result.get("ok", False):
             return _err(self.spec.name, "LOG_OPS_DAEMON_ERROR", str(result.get("message") or "启动失败"), extra=result)
         store.update_config_field("report_floor", _norm_report_floor(params.get("report_floor")))
+        if params.get("ml_engine") is not None:
+            store.update_config_field("ml_engine_enabled", bool(params.get("ml_engine")))
         result.setdefault(
             "hint",
             "daemon 已在后台采集。用 log_monitor_status 查不丢对账,log_alert_poll 拉新候选告警来研判。",
