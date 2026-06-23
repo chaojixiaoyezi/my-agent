@@ -622,6 +622,8 @@ LOG_OPS_TOOL_NAMES = (
     "log_rule_feedback",
     "log_rule_tune",
     "log_attack_chains",
+    "log_federation_contribute",
+    "log_federation_sync",
 )
 
 

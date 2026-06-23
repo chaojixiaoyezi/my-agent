@@ -11,13 +11,15 @@ from __future__ import annotations
 复用 tools.py 的 _LogOpsTool 基类(统一精确错误码)。
 """
 
+import hashlib
+import os
 import time
 from pathlib import Path
 from typing import Any
 
 from ..models import BaseTool, ToolSpec
 from .tools import _LogOpsTool, _coerce_int, _err, _ok
-from ...ml_engine import correlation, detection, engine, experience, feedback, rule_feedback, rule_store
+from ...ml_engine import correlation, detection, engine, experience, federation, feedback, rule_feedback, rule_store
 from ...ml_engine.models import AnomalyBand, OutcomeLabel, SignalOutcome
 from ...ml_engine.reducer import reduce_by_entity, reduce_candidates
 
@@ -443,8 +445,94 @@ class LogAttackChainsTool(_LogOpsTool):
         return _ok(self.spec.name, {"ok": True, "chains": len(chains), "attack_chains": [c.to_dict() for c in chains[:50]]})
 
 
+_FEDERATION_ENV = "MY_AGENT_FEDERATION_ROOT"  # 跨用户联邦共享路径(部署配,未配=联邦未启用)
+
+
+def _federation_root() -> str:
+    return os.environ.get(_FEDERATION_ENV, "").strip()
+
+
+def _contributor_id(workspace_root: Path) -> str:
+    """匿名贡献者标识:workspace 路径 hash,只用于 k-匿名计数,不可追溯到人。"""
+    return "c-" + hashlib.sha1(str(workspace_root).encode()).hexdigest()[:12]
+
+
+class LogFederationContributeTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_federation_contribute",
+        category="log_ops",
+        effect="mutating",
+        requires_idempotency=True,
+        description=(
+            "把某领域的私有经验包**脱敏贡献到联邦共享层**(opt-in),供跨用户聚合复用。贡献的是规则签名/权重/脱敏"
+            "指纹(不含原始日志/具体值/你的身份,contributor 匿名化)。需部署配共享路径(MY_AGENT_FEDERATION_ROOT),"
+            "未配=联邦未启用、经验仅本地私有。聚合时 k-匿名(≥k 贡献者才入)+中位数权重(抗投毒),单用户特征不被反推。"
+        ),
+        use_cases=["授权把本领域积累的检测经验贡献给同类用户共享(隐私保护聚合)"],
+        avoid_when=["不想跨用户共享就别调(默认私有)", "只在本地复用用 log_experience_export/load"],
+        keywords=["联邦", "federation", "贡献", "共享", "跨用户", "隐私", "聚合", "opt-in"],
+        parameters={"domain": "逻辑领域名(与 export 时一致)", "monitor_id": "可选,默认 default"},
+        parameter_details={"domain": "必填。", "monitor_id": "可选。"},
+        parameter_schema={"domain": {"type": "string"}, "monitor_id": {"type": "string"}},
+        required_parameters=["domain"],
+        examples=['{"tool": "log_federation_contribute", "domain": "web_api_logs"}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        domain = str(params.get("domain") or "").strip()
+        if not domain:
+            return _err(self.spec.name, "TOOL_INVALID_ARGUMENTS", "log_federation_contribute 需要 domain。")
+        root = _federation_root()
+        if not root:
+            return _ok(self.spec.name, {"ok": True, "contributed": False, "message": f"联邦未启用(需部署配 {_FEDERATION_ENV});经验仅本地私有。"})
+        pack = experience.load_pack(self.workspace_root / _EXPERIENCE_SUBDIR, domain)
+        if pack is None:
+            return _ok(self.spec.name, {"ok": True, "contributed": False, "message": f"领域 {domain} 还没本地经验包,先 log_experience_export。"})
+        federation.append_contribution(Path(root), federation.contribution_from_pack(_contributor_id(self.workspace_root), pack))
+        return _ok(self.spec.name, {"ok": True, "contributed": True, "domain": domain,
+                                    "rules": len(pack.detection_rules), "message": f"已脱敏贡献领域 {domain} 到联邦共享层。"})
+
+
+class LogFederationSyncTool(_LogOpsTool):
+    spec = ToolSpec(
+        name="log_federation_sync",
+        category="log_ops",
+        effect="mutating",
+        requires_idempotency=True,
+        description=(
+            "从联邦共享层**拉取某领域的聚合经验包**应用到本地:k-匿名(≥k 贡献者都有的规则/指纹才入)+中位数权重"
+            "(抗投毒)。新用户冷启动用同类用户的群体经验起步,不从零、不泄露任何人原始数据。需配 MY_AGENT_FEDERATION_ROOT。"
+        ),
+        use_cases=["新接手某领域监控,从联邦层拉同类用户聚合经验冷启动"],
+        avoid_when=["只用本地经验用 log_experience_load", "联邦未配时无效"],
+        keywords=["联邦同步", "federation_sync", "拉取", "聚合", "跨用户", "冷启动", "k-匿名"],
+        parameters={"domain": "逻辑领域名", "k_anonymity": "可选,默认 2:规则/指纹要≥这么多贡献者才入(隐私护栏)", "monitor_id": "可选,默认 default"},
+        parameter_details={"domain": "必填。", "k_anonymity": "可选整数,默认 2。", "monitor_id": "可选。"},
+        parameter_schema={"domain": {"type": "string"}, "k_anonymity": {"type": "integer", "minimum": 1, "maximum": 100}, "monitor_id": {"type": "string"}},
+        required_parameters=["domain"],
+        examples=['{"tool": "log_federation_sync", "domain": "web_api_logs"}'],
+    )
+
+    def _run(self, params: dict[str, Any]) -> Any:
+        domain = str(params.get("domain") or "").strip()
+        if not domain:
+            return _err(self.spec.name, "TOOL_INVALID_ARGUMENTS", "log_federation_sync 需要 domain。")
+        root = _federation_root()
+        if not root:
+            return _ok(self.spec.name, {"ok": True, "synced": False, "message": f"联邦未启用(需配 {_FEDERATION_ENV})。"})
+        k = _coerce_int(params.get("k_anonymity"), default=2, lo=1, hi=100)
+        contribs = federation.read_contributions(Path(root), domain)
+        pack = federation.aggregate_contributions(contribs, k_anonymity=k)
+        store = self.store(params)
+        store.ensure_dirs()
+        applied = _apply_pack_rules(store, experience.rules_from_pack(pack))
+        return _ok(self.spec.name, {"ok": True, "synced": True, "domain": domain, "contributors": len(contribs),
+                                    "applied_rules": applied, "fusion_weights": pack.fusion_weights,
+                                    "message": f"从联邦层拉领域 {domain} 聚合经验(k={k}):{applied} 规则应用,{len(contribs)} 贡献者。"})
+
+
 def ml_tools(workspace_root: Path) -> list[BaseTool]:
-    """ML 引擎工具实例(评级 + 标注 + 现编检测 + 规则评估 + 经验沉淀/加载 + 规则反馈/调优 + 攻击链)。"""
+    """ML 引擎工具实例(评级/标注/现编检测/规则评估/经验沉淀加载/规则反馈调优/攻击链/联邦贡献同步)。"""
     return [
         LogMlAnalyzeTool(workspace_root),
         LogMlLabelTool(workspace_root),
@@ -455,12 +543,15 @@ def ml_tools(workspace_root: Path) -> list[BaseTool]:
         LogRuleFeedbackTool(workspace_root),
         LogRuleTuneTool(workspace_root),
         LogAttackChainsTool(workspace_root),
+        LogFederationContributeTool(workspace_root),
+        LogFederationSyncTool(workspace_root),
     ]
 
 
 ML_TOOL_NAMES = (
     "log_ml_analyze", "log_ml_label", "log_rule_author", "log_rule_eval",
     "log_experience_export", "log_experience_load", "log_rule_feedback", "log_rule_tune", "log_attack_chains",
+    "log_federation_contribute", "log_federation_sync",
 )
 
 
