@@ -30,16 +30,26 @@ def _sigmoid(z: float) -> float:
     return 1.0 / (1.0 + math.exp(-z))
 
 
+def _clamp01(x: float) -> float:
+    """脏特征(NaN/inf/负/超界,来自日志解析错误、上游脏数据或 LLM 幻觉)夹到 [0,1]:否则单个 NaN/inf
+    特征会经梯度下降把整个 LR 模型权重/偏置污染成 NaN、毁掉所有预测(数值投毒)。"""
+    if math.isnan(x):
+        return 0.0
+    return max(0.0, min(1.0, x))  # ±inf 被 max/min 自然夹到 [0,1]
+
+
 def _normalize(feature: MLFeatureVector) -> dict[str, float]:
-    """MLFeatureVector → 归一化特征 dict(各特征压到 ~0–1)。"""
+    """MLFeatureVector → 归一化特征 dict(各特征夹到 0–1)。全经 _clamp01 防脏值污染模型;count 先确保
+    有限非负,否则 log1p 对 count≤-1 直接 ValueError(math domain error)崩。"""
+    count = feature.count if math.isfinite(feature.count) and feature.count >= 0 else 0.0
     return {
-        "severity": min(1.0, feature.severity / 5),
-        "count": min(1.0, math.log1p(feature.count) / math.log1p(1000)),
-        "confidence": feature.confidence,
-        "count_per_minute": min(1.0, feature.count_per_minute / 50),
-        "cardinality": min(1.0, feature.cardinality / 100),
-        "fan_out": min(1.0, feature.fan_out / 50),
-        "statistical_anomaly": feature.statistical_anomaly,
+        "severity": _clamp01(feature.severity / 5),
+        "count": _clamp01(math.log1p(count) / math.log1p(1000)),
+        "confidence": _clamp01(feature.confidence),
+        "count_per_minute": _clamp01(feature.count_per_minute / 50),
+        "cardinality": _clamp01(feature.cardinality / 100),
+        "fan_out": _clamp01(feature.fan_out / 50),
+        "statistical_anomaly": _clamp01(feature.statistical_anomaly),
     }
 
 

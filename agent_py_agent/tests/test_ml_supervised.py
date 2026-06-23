@@ -77,3 +77,19 @@ def test_log_ml_label_train_end_to_end(tmp_path: Path) -> None:
     assert result.ok
     training = result.result_envelope["training"]
     assert training["trained"] and training["samples"] == 2  # 2 个有标注的簇配对
+
+
+def test_train_robust_to_dirty_features() -> None:
+    """脏特征(NaN/inf/负 count,来自日志解析错误、上游脏数据或 LLM 幻觉)不能崩 log1p、不能把整个 LR
+    模型权重污染成 NaN(单个脏样本毁掉所有预测的数值投毒;回归:dogfooding 压 ML 引擎逮到)。"""
+    import math
+
+    dirty_count = MLFeatureVector("c", "d", "f", "alert", 1, -5, 0.8, 60.0, 5.0, 5, 5, 0.0, 0.0)  # count=-5 原 log1p ValueError
+    dirty_nan = MLFeatureVector("c", "d", "f", "alert", 1, 10, float("nan"), 60.0, 5.0, 5, 5, 0.0, float("nan"))
+    dirty_inf = MLFeatureVector("c", "d", "f", "alert", float("inf"), 10, 0.8, 60.0, 5.0, 5, 5, 0.0, 0.0)
+    samples = [(dirty_count, 1), (dirty_nan, 0), (dirty_inf, 1), (_threat(), 1), (_benign(), 0)]
+    model = supervised_model.train(samples, epochs=50)  # 不崩
+    assert all(math.isfinite(w) for w in model.weights.values()) and math.isfinite(model.bias)  # 脏样本不污染权重
+    assert math.isfinite(model.predict(_threat()))  # 预测仍有限
+    norm = supervised_model._normalize(MLFeatureVector("c", "d", "f", "alert", -100, -2, 5.0, 60.0, 999.0, 999, 999, 0.0, -3.0))
+    assert all(0.0 <= v <= 1.0 for v in norm.values())  # 负/超界特征全夹到合法 [0,1] 区间
