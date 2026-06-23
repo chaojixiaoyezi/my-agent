@@ -79,6 +79,11 @@ def _unsupervised_anomaly(feature: MLFeatureVector) -> float:
     return round(max(stat, fanout_signal), 4)
 
 
+def supervised_baseline(feature: MLFeatureVector) -> float:
+    """确定性监督 baseline(影子对比 M3-5 用,= 现确定性加权)。LR 达标后由 model.predict 替换。"""
+    return _supervised_risk(feature)
+
+
 def score_feature(feature: MLFeatureVector, weights: dict[str, float]) -> MLScoreBreakdown:
     """三路融合评分。无监督=统计异常+UEBA 扇出,关联=M1 占位 0。"""
     supervised = _supervised_risk(feature)

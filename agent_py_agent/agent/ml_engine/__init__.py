@@ -8,7 +8,7 @@ from __future__ import annotations
 MLSignalAssessment 契约稳定)。默认关(ml_engine_enabled),不破现有规则 triage 路径。
 """
 
-from . import coordination, correlation, detection, engine, experience, explain, federation, feedback, reducer, rule_feedback, rule_store
+from . import coordination, correlation, detection, engine, experience, explain, federation, feedback, reducer, rule_feedback, rule_store, supervised_model
 from .models import (
     AnomalyBand,
     CoordinationRoute,
@@ -34,6 +34,7 @@ __all__ = [
     "reducer",
     "rule_feedback",
     "rule_store",
+    "supervised_model",
     "AnomalyBand",
     "CoordinationRoute",
     "SignalCluster",

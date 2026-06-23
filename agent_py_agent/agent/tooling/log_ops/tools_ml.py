@@ -19,7 +19,7 @@ from typing import Any
 
 from ..models import BaseTool, ToolSpec
 from .tools import _LogOpsTool, _coerce_int, _err, _ok
-from ...ml_engine import correlation, detection, engine, experience, federation, feedback, rule_feedback, rule_store
+from ...ml_engine import correlation, detection, engine, experience, federation, feedback, rule_feedback, rule_store, supervised_model
 from ...ml_engine.models import AnomalyBand, OutcomeLabel, SignalOutcome
 from ...ml_engine.reducer import reduce_by_entity, reduce_candidates
 
@@ -106,7 +106,8 @@ class LogMlLabelTool(_LogOpsTool):
         description=(
             "给一个信号簇打 outcome 标注(success 已得手 / attempt 企图 / failure 被挡 / other),回流驯化 ML "
             "引擎:下次 log_ml_analyze 的三路融合权重据标注自适应(真威胁多→更敏感抓行为异常;误报多→更依赖规则"
-            "严重度)。可选 corrected_band 覆盖 ML 评级、rationale 写明理由。标注**私有(owner 隔离),不跨用户**。"
+            "严重度)。可选 corrected_band 覆盖 ML 评级、rationale 写明理由。**train=true 时标注后顺便用全部标注"
+            "训练监督模型(纯内置LR+影子对比,更准才启用),攒够标注时用**。标注私有(owner 隔离),不跨用户。"
         ),
         use_cases=["研判完一个簇,把结论(成功/企图/误报)回流让引擎学", "ML 评级偏了,用 corrected_band 纠正并留痕"],
         avoid_when=["还没研判清楚别乱标(标错会带歪引擎)", "查评级用 log_ml_analyze"],
@@ -116,14 +117,16 @@ class LogMlLabelTool(_LogOpsTool):
             "outcome": "success/attempt/failure/other",
             "corrected_band": "可选,覆盖评级 critical/high/medium/low",
             "rationale": "可选,标注理由",
+            "train": "可选布尔:标注后顺便用全部标注训练监督模型(纯内置LR+影子对比,更准才启用),攒够标注时用",
             "monitor_id": "可选,默认 default",
         },
-        parameter_details={"cluster_id": "必填。", "outcome": "必填,四选一。", "corrected_band": "可选。"},
+        parameter_details={"cluster_id": "必填。", "outcome": "必填,四选一。", "corrected_band": "可选。", "train": "可选布尔。"},
         parameter_schema={
             "cluster_id": {"type": "string"},
             "outcome": {"type": "string", "enum": ["success", "attempt", "failure", "other"]},
             "corrected_band": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
             "rationale": {"type": "string"},
+            "train": {"type": "boolean"},
             "monitor_id": {"type": "string"},
         },
         required_parameters=["cluster_id", "outcome"],
@@ -140,11 +143,14 @@ class LogMlLabelTool(_LogOpsTool):
         feedback.append_label(store.root, _build_label(cluster_id, outcome, params))
         labels = feedback.read_labels(store.root)
         weights = feedback.learn_weights(engine.DEFAULT_FUSION_WEIGHTS, labels)
-        return _ok(self.spec.name, {
+        payload: dict[str, Any] = {
             "ok": True, "cluster_id": cluster_id, "outcome": outcome,
             "label_count": len(labels), "adjusted_weights": weights,
             "message": f"已标注,私有标注库现 {len(labels)} 条;下次评级融合权重已自适应。",
-        })
+        }
+        if params.get("train"):
+            payload["training"] = _train_supervised(store, labels)
+        return _ok(self.spec.name, payload)
 
 
 class LogRuleAuthorTool(_LogOpsTool):
@@ -531,8 +537,42 @@ class LogFederationSyncTool(_LogOpsTool):
                                     "message": f"从联邦层拉领域 {domain} 聚合经验(k={k}):{applied} 规则应用,{len(contribs)} 贡献者。"})
 
 
+_THREAT_OUTCOMES = {SignalOutcome.SUCCESS, SignalOutcome.ATTEMPT}
+
+
+def _training_samples(clusters: list[Any], labels: list[Any]) -> list[tuple[Any, int]]:
+    """配对:有 outcome 标注的簇 → (feature, label)。label:威胁(success/attempt)=1,良性=0。"""
+    label_map = {lb.cluster_id: lb.outcome for lb in labels}
+    samples: list[tuple[Any, int]] = []
+    for cluster in clusters:
+        outcome = label_map.get(cluster.cluster_id)
+        if outcome is not None:
+            samples.append((engine.build_feature(cluster), 1 if outcome in _THREAT_OUTCOMES else 0))
+    return samples
+
+
+def _train_supervised(store: Any, labels: list[Any]) -> dict[str, Any]:
+    """用候选簇+标注配对训练监督 LR + 影子对比;更准才落盘启用。
+
+    合并进 log_ml_label 的 train 参数(不单列 log_ml_train 工具)——避免工具膨胀撑大工具 catalog。
+    纯内置梯度下降(无 numpy/sklearn);影子模式:LR 与确定性 baseline 比标注样本准确率,更准才切。
+    """
+    candidates = store.read_candidates(offset=0, limit=200000)
+    samples = _training_samples(reduce_candidates(candidates) + reduce_by_entity(candidates), labels)
+    if len(samples) < 2:
+        return {"trained": False, "samples": len(samples)}
+    model = supervised_model.train(samples)
+    shadow = supervised_model.shadow_compare(model, engine.supervised_baseline, samples)
+    if shadow.model_better:
+        supervised_model.save_model(store.root, model)
+    return {
+        "trained": True, "samples": len(samples), "model_accuracy": shadow.model_accuracy,
+        "baseline_accuracy": shadow.baseline_accuracy, "activated": shadow.model_better,
+    }
+
+
 def ml_tools(workspace_root: Path) -> list[BaseTool]:
-    """ML 引擎工具实例(评级/标注/现编检测/规则评估/经验沉淀加载/规则反馈调优/攻击链/联邦贡献同步)。"""
+    """ML 引擎工具实例(评级/标注/现编检测/规则评估/经验沉淀加载/规则反馈调优/攻击链/联邦贡献同步/训练)。"""
     return [
         LogMlAnalyzeTool(workspace_root),
         LogMlLabelTool(workspace_root),
