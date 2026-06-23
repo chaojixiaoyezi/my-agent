@@ -68,6 +68,13 @@ class PathAccessPolicy:
             resolved = Path(path).expanduser().resolve(strict=False)
         except (OSError, RuntimeError):
             return PathAccessDecision(False, "PATH_RESOLUTION_FAILED", "路径解析失败，请检查路径是否有效。")
+        # my-agent 自己的数据目录(home,默认 ~/.my-agent,可经 MY_AGENT_HOME 覆盖)豁免 dangerous_roots:
+        # agent 写自己的产物/记忆/审计天经地义。否则 root 用户场景下 /root 被列危险目录,会误伤
+        # /root/.my-agent/.../output(agent 自己的产物目录)。豁免精确到 home 子树——/root/.ssh 等敏感
+        # 目录不在 my-agent home 下,仍被 dangerous_roots 拦截,口子不扩大(resolve 已展开 .. 防逃逸)。
+        home_root = _my_agent_home_root()
+        if home_root is not None and _is_relative_to(resolved, home_root):
+            return PathAccessDecision(True)
         for root in self.dangerous_roots:
             if _is_relative_to(resolved, root):
                 return PathAccessDecision(
@@ -90,6 +97,16 @@ def _normalized_root(value: object) -> Path | None:
         return None
     try:
         return Path(text).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _my_agent_home_root() -> Path | None:
+    """my-agent 数据目录根(默认 ~/.my-agent,可经 MY_AGENT_HOME 覆盖)。agent 写自己 home 子树
+    豁免 dangerous_roots——修 root 用户场景下 /root 被列危险目录误伤 /root/.my-agent 产物的问题。"""
+    raw = os.environ.get("MY_AGENT_HOME", "").strip() or "~/.my-agent"
+    try:
+        return Path(os.path.expandvars(raw)).expanduser().resolve(strict=False)
     except (OSError, RuntimeError):
         return None
 
