@@ -136,9 +136,19 @@ class _Bucket:
 _VALID_AGG = {op.value for op in AggregateOp}
 
 
+def _coerce_str_list(value: object) -> list[str]:
+    """容错:LLM 把"单值 list 字段"误写成裸字符串(group_by='ip' 而非 ['ip'])时包成单元素 list。
+    否则 for-in 会把字符串按字符拆(group_by='ip'→('i','p')),规则静默失效、永不命中且不报错。"""
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
 def parse_rule(data: dict[str, Any]) -> DetectionRule | str:
     """把 agent 的 JSON 声明解析成 DetectionRule;非法返回错误串(可读,给 agent 改)。"""
-    group_by = tuple(str(g).strip() for g in (data.get("group_by") or []) if str(g).strip())
+    group_by = tuple(_coerce_str_list(data.get("group_by")))
     agg = str(data.get("aggregate") or "").strip().lower()
     agg_field = str(data.get("agg_field") or "").strip()
     if not group_by:
@@ -156,7 +166,7 @@ def parse_rule(data: dict[str, Any]) -> DetectionRule | str:
         group_by=group_by, aggregate=AggregateOp(agg), agg_field=agg_field,
         window_seconds=max(1, int(_to_float(data.get("window_seconds")) or 60)),
         threshold=threshold,
-        match_any=tuple(str(m).strip() for m in (data.get("match_any") or []) if str(m).strip()),
+        match_any=tuple(_coerce_str_list(data.get("match_any"))),
         severity=str(data.get("severity") or "high").strip() or "high",
         baseline_deviation=bool(data.get("baseline_deviation")),
         version=max(1, int(_to_float(data.get("version")) or 1)),

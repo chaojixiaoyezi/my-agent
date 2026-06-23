@@ -136,3 +136,15 @@ def test_metric_baseline_roundtrip() -> None:
     baseline.observe("k", 50.0)
     restored = MetricBaseline.from_dict(baseline.to_dict())
     assert restored.values["k"] == 50.0 and restored.counts["k"] == 1
+
+
+def test_group_by_string_coerced_not_split_by_char() -> None:
+    """健壮性:LLM 把 group_by/match_any 误写成裸字符串 'ip'(而非 ['ip'])时容错成单元素 list,
+    而非被 for-in 按字符拆成 ('i','p') 致规则静默失效(真机 dogfooding 压 ML 引擎逮到)。"""
+    rule = detection.parse_rule({"name": "扫描", "group_by": "ip", "aggregate": "count", "window_seconds": 60, "threshold": 3})
+    assert isinstance(rule, DetectionRule)
+    assert rule.group_by == ("ip",)  # 不是 ('i','p')
+    hits = detection.evaluate_rule(rule, [_rec("1.1.1.1") for _ in range(5)])
+    assert len(hits) == 1 and hits[0].agg_value == 5  # 规则正常命中,没静默失效
+    rule2 = detection.parse_rule({"name": "x", "group_by": ["ip"], "aggregate": "count", "threshold": 1, "match_any": "sql_injection"})
+    assert isinstance(rule2, DetectionRule) and rule2.match_any == ("sql_injection",)
