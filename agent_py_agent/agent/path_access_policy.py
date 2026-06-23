@@ -59,7 +59,13 @@ class PathAccessPolicy:
     ) -> PathAccessPolicy:
         normalized_mode = normalize_path_access_mode(mode)
         roots = tuple(_normalized_root(item) for item in (dangerous_roots or DEFAULT_DANGEROUS_PATH_ROOTS))
-        return cls(mode=normalized_mode, dangerous_roots=tuple(root for root in roots if root is not None))
+        home = _current_user_home()
+        # 当前用户自己的 home 不整个列危险目录:root 用户场景 /root==home 会把 /root/my-agent-src 等
+        # 源码/工作目录的 read 操作(list_files/find_files/read_file)也误伤拦掉,逼 agent 改用 run_command 绕。
+        # 移除 ==home 的项后,home 下单独列的敏感子目录(~/.ssh/~/.aws 等)仍在 dangerous_roots 生效;
+        # 非 root 用户 /root!=home 仍保留拦截(不碰别人的 root 目录),/etc 等系统目录也不受影响。
+        roots = tuple(root for root in roots if root is not None and root != home)
+        return cls(mode=normalized_mode, dangerous_roots=roots)
 
     def check(self, path: str | Path) -> PathAccessDecision:
         if self.mode == PATH_ACCESS_MODE_FULL:
@@ -97,6 +103,13 @@ def _normalized_root(value: object) -> Path | None:
         return None
     try:
         return Path(text).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _current_user_home() -> Path | None:
+    try:
+        return Path.home().resolve(strict=False)
     except (OSError, RuntimeError):
         return None
 

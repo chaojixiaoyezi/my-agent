@@ -43,15 +43,48 @@ def test_home_escape_via_dotdot_still_blocked(monkeypatch, tmp_path) -> None:
     assert not decision.allowed
 
 
-def test_default_home_when_env_unset(monkeypatch) -> None:
-    """MY_AGENT_HOME 未设时默认 ~/.my-agent 豁免;但 ~ 下其他文件仍拦。"""
+def test_default_home_when_env_unset(monkeypatch, tmp_path) -> None:
+    """MY_AGENT_HOME 未设 + home 过滤:当前 home 整个不拦(默认 ~/.my-agent 数据目录、普通工作
+    文件都放行),但 home 下单独列的敏感子目录(.ssh 等)仍拦。这是修 read 工具对 home 误伤后的
+    新行为,与非 root 用户(home 本就不在 dangerous_roots)一致。"""
     monkeypatch.delenv("MY_AGENT_HOME", raising=False)
-    home = Path("~/.my-agent").expanduser().resolve()
-    policy = PathAccessPolicy.from_values(mode="normal", dangerous_roots=[str(home.parent)])
-    assert policy.check(str(home / "output/f.py")).allowed  # ~/.my-agent 子树放行
-    assert not policy.check(str(home.parent / "other_secret.txt")).allowed  # ~ 下非 home 文件仍拦
+    home = tmp_path / "uhome"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    (home / ".my-agent").mkdir()
+    (home / ".ssh").mkdir()
+    policy = PathAccessPolicy.from_values(mode="normal", dangerous_roots=[str(home), str(home / ".ssh")])
+    assert policy.check(str(home / ".my-agent" / "output" / "f.py")).allowed  # 数据目录放行
+    assert policy.check(str(home / "anyfile.txt")).allowed  # home 下普通文件放行
+    assert not policy.check(str(home / ".ssh" / "k")).allowed  # 敏感子目录仍拦
 
 
 def test_full_mode_unaffected() -> None:
     """full 模式本就全放行,豁免逻辑不影响它。"""
     assert PathAccessPolicy.from_values(mode="full", dangerous_roots=["/etc"]).check("/etc/passwd").allowed
+
+
+def test_current_home_not_blocked_whole_but_sensitive_subdirs_still_blocked(monkeypatch, tmp_path) -> None:
+    """root 用户场景(home==dangerous_root):home 整个不拦→源码/工作目录的 read(list_files/
+    read_file)可读;但 home 下单独列的敏感子目录(.ssh 等)仍拦,/etc 系统目录不受影响。
+    修真机 dogfooding:list_files/find_files/read_file 对 /root/my-agent-src 被拦、逼 agent 用 run_command 绕。"""
+    home = tmp_path / "roothome"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    (home / "my-agent-src").mkdir()
+    (home / ".ssh").mkdir()
+    policy = PathAccessPolicy.from_values(
+        mode="normal", dangerous_roots=[str(home), str(home / ".ssh"), "/etc"],
+    )
+    assert policy.check(str(home / "my-agent-src" / "a.py")).allowed  # home 下源码可读
+    assert policy.check(str(home / "work.txt")).allowed  # home 下工作文件可读
+    assert not policy.check(str(home / ".ssh" / "id_rsa")).allowed  # home 下 .ssh 仍拦
+    assert not policy.check("/etc/passwd").allowed  # 系统目录仍拦
+
+
+def test_other_users_home_root_still_blocked(monkeypatch, tmp_path) -> None:
+    """非 root 用户(home != /root):/root 是别人的目录,仍拦(home 过滤只移除自己的 home)。"""
+    monkeypatch.setenv("HOME", str(tmp_path / "homeuser"))
+    policy = PathAccessPolicy.from_values(mode="normal", dangerous_roots=["/root", "/etc"])
+    assert not policy.check("/root/secret").allowed
+    assert not policy.check("/etc/passwd").allowed
