@@ -9,6 +9,7 @@ as warnings instead of corrupting or blocking the canonical save.
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from dataclasses import asdict, dataclass, field
@@ -88,6 +89,10 @@ class SubAgentPersistenceService:
 
     def __init__(self, manager: Any):
         self.manager = manager
+        # mtime 缓存:子代理 task.json 未变时复用已解析对象,避免每轮 dispatch 全量重读+重解析。
+        # 大量历史 DONE 子代理累积时(实测 600 个全量 745ms)命中后只 stat。返回 deepcopy 副本,
+        # 调用方改了也不污染缓存(无需逐一审 33 处调用方是否只读)。
+        self._run_cache: dict[str, tuple[float, SubAgentTask]] = {}
 
     @property
     def workspace(self) -> Path:
@@ -152,20 +157,43 @@ class SubAgentPersistenceService:
         return self.list_runs_report().runs
 
     def list_runs_report(self) -> SubAgentListRunsReport:
-        """Scan task records and preserve per-record load failures."""
+        """Scan task records and preserve per-record load failures.
+
+        mtime 缓存:task.json 未变(mtime 相同)就复用上次解析的对象、只 stat 不重读重解析。
+        大量历史 DONE 子代理累积时(实测 600 个全量 read+parse 745ms),命中后降到 stat(17ms)+
+        deepcopy(82ms)。返回 deepcopy 副本,保证缓存对象不被任何调用方修改污染。
+        """
 
         runs: list[SubAgentTask] = []
         load_errors: list[dict[str, Any]] = []
+        seen: set[str] = set()
         for task_file in sorted(self.workspace.glob("*/task.json")):
+            run_id = task_file.parent.name
+            seen.add(run_id)
             try:
-                runs.append(self.load(task_file.parent.name))
+                runs.append(self._cached_run_copy(run_id, task_file))
             except Exception as exc:
                 report = runtime_error_report(exc, context="subagents.load")
-                report["run_id"] = task_file.parent.name
+                report["run_id"] = run_id
                 report["path"] = str(task_file)
                 load_errors.append(report)
+        self._evict_run_cache(seen)
         runs.sort(key=lambda item: item.updated_at or item.created_at, reverse=True)
         return SubAgentListRunsReport(runs=runs, load_errors=load_errors)
+
+    def _cached_run_copy(self, run_id: str, task_file: Path) -> SubAgentTask:
+        """命中(mtime 未变)→复用缓存解析结果;未命中→读盘并缓存。一律返回 deepcopy 副本。"""
+        mtime = task_file.stat().st_mtime
+        cached = self._run_cache.get(run_id)
+        if cached is None or cached[0] != mtime:
+            self._run_cache[run_id] = (mtime, self.load(run_id))
+        return copy.deepcopy(self._run_cache[run_id][1])
+
+    def _evict_run_cache(self, seen: set[str]) -> None:
+        """清理已从磁盘消失的 run 的缓存项,防内存随历史增长泄漏。"""
+        if len(self._run_cache) > len(seen):
+            for stale in [rid for rid in self._run_cache if rid not in seen]:
+                self._run_cache.pop(stale, None)
 
     def save(self, task: SubAgentTask, *, preserve_child_links: bool = True) -> None:
         """Persist a task as JSON plus human-readable Markdown."""
