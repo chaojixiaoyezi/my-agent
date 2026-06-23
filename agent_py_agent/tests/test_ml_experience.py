@@ -46,6 +46,17 @@ def test_pack_cross_environment_reuse_and_desensitized(tmp_path: Path) -> None:
     assert not any("api1" in fp for fp in loaded.known_fingerprints)     # 不含 domain 源标识
 
 
+def test_fingerprint_desensitize_robust_when_domain_prefix_missing() -> None:
+    """脱敏护栏对任意 cluster_id 格式都不能漏出原始实体值:domain 前缀缺失时(entity:IP 2 段,LLM 直接
+    抄簇 fingerprint=entity:IP 标注就会这样)绝不能把 entity 当 domain 剥掉、漏出明文 IP/邮箱到联邦共享层
+    (回归:dogfooding 压 ML 引擎逮到 _fingerprint_part 假设第一段必是 domain)。"""
+    pack = experience.export_pack("web", [], {}, ["entity:1.2.3.4", "entity:user@mail.com", "web:entity:10.0.0.5"])
+    assert pack.known_fingerprints == ("entity",)  # 三者全脱成 entity 并去重
+    assert not any("1.2.3.4" in fp or "@" in fp for fp in pack.known_fingerprints)  # 绝无明文 IP/邮箱漏出
+    pack2 = experience.export_pack("web", [], {}, ["web:sql_injection", "web:entityscan"])
+    assert set(pack2.known_fingerprints) == {"sql_injection", "entityscan"}  # 规则指纹保留,entityscan 不被误脱
+
+
 def test_merge_packs_unions_rules_and_takes_new_weights() -> None:
     base = experience.export_pack("d", [_rule("r1")], {"supervised": 0.5}, ["d:a"])
     overlay = experience.export_pack("d", [_rule("r2")], {"supervised": 0.3}, ["d:b"])

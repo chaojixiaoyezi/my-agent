@@ -53,10 +53,16 @@ class DomainExperiencePack:
 
 
 def _fingerprint_part(cluster_id: str) -> str:
-    """从 cluster_id(domain:fingerprint) 取规则指纹,剥离 domain 源标识;entity:IP → entity(脱敏)。"""
-    parts = cluster_id.split(":", 1)
-    tail = parts[1] if len(parts) > 1 else cluster_id
-    return "entity" if tail.startswith("entity") else tail
+    """从 cluster_id 取规则指纹做共享标识,剥 domain 源标识;entity 簇(含原始实体值)整体脱成 entity。
+    脱敏护栏必须对任意输入鲁棒:cluster_id 由 LLM/上游自由传入,格式不受控(可能 domain:entity:IP 3 段,
+    也可能 entity:IP 2 段)——绝不能假设第一段一定是可丢弃的 domain 前缀,否则 domain 缺失时会把 entity
+    当 domain 剥掉、漏出后面的明文 IP/邮箱(联邦共享层泄露原始实体值)。按段精确匹配 entity,顺带不再
+    把 'entityscan' 这类规则名误当 entity。"""
+    parts = cluster_id.split(":")
+    if "entity" in parts:  # entity 簇:任意段是 entity → 脱成 entity,后面的原始实体值(IP/邮箱)绝不漏出
+        return "entity"
+    _, sep, tail = cluster_id.partition(":")  # 规则簇 domain:rule_fingerprint → 剥 domain,留规则指纹
+    return tail if sep else cluster_id
 
 
 def export_pack(domain_id: str, rules: list[DetectionRule], weights: dict[str, float], label_cluster_ids: list[str]) -> DomainExperiencePack:
