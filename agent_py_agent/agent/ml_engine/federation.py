@@ -58,6 +58,8 @@ def _rule_signature(rule: dict[str, Any]) -> str:
 def _contrib_rules_by_sig(contrib: Contribution) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for rule in contrib.detection_rules:
+        if not isinstance(rule, dict):  # 跨用户共享层可能被坏贡献写脏数据(非 dict),跳过而非崩掉整个聚合
+            continue
         out.setdefault(_rule_signature(rule), rule)
     return out
 
@@ -76,10 +78,11 @@ def _k_anon_rules(contributions: list[Contribution], k: int) -> list[dict[str, A
 
 
 def _median_weights(contributions: list[Contribution]) -> dict[str, float]:
-    """各路权重取中位数(抗异常/投毒:单个恶意贡献拉不动中位数)。"""
+    """各路权重取中位数(抗异常/投毒:单个恶意贡献拉不动中位数)。只取真数字:跨用户共享层可能被坏贡献
+    写入非数字权重(LLM 幻觉/损坏 jsonl),否则 median 比较 str<float 崩掉整个聚合(类型投毒 DoS)。"""
     out: dict[str, float] = {}
     for key in _WEIGHT_KEYS:
-        vals = [c.fusion_weights.get(key, 0.0) for c in contributions if key in c.fusion_weights]
+        vals = [v for c in contributions if isinstance((v := c.fusion_weights.get(key)), (int, float)) and not isinstance(v, bool)]
         out[key] = round(statistics.median(vals), 4) if vals else 0.0
     return out
 
@@ -88,7 +91,7 @@ def _k_anon_fingerprints(contributions: list[Contribution], k: int) -> tuple[str
     counts: dict[str, set[str]] = defaultdict(set)
     for contrib in contributions:
         for fingerprint in contrib.known_fingerprints:
-            counts[fingerprint].add(contrib.contributor_id)
+            counts[str(fingerprint)].add(contrib.contributor_id)  # 规范成 str:防共享层脏数据混类型致 sorted 崩
     return tuple(sorted(fp for fp, who in counts.items() if len(who) >= k))
 
 

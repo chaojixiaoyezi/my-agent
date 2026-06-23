@@ -96,3 +96,16 @@ def test_k_anon_rules_count_distinct_contributors_not_instances() -> None:
     pack2 = federation.aggregate_contributions(
         [_contrib("u1", [_rule("ip")], {}, []), _contrib("u2", [_rule("ip")], {}, [])], k_anonymity=2)
     assert [r["group_by"][0] for r in pack2.detection_rules] == ["ip"]  # 2 个独立贡献者,正常入
+
+
+def test_aggregate_survives_type_poisoned_contribution() -> None:
+    """跨用户共享层鲁棒:坏贡献写脏数据(非 dict 规则/非数字权重/非字符串指纹)绝不能崩掉整个联邦聚合
+    ——一个坏苹果不能毁整筐(类型投毒 DoS;回归:dogfooding 顺'假设输入格式良好'共性根因审计逮到。
+    federation 原只抗数值投毒(中位数),没抗类型投毒)。"""
+    good = [_contrib("u1", [_rule("ip")], {"supervised": 0.5}, ["sql_injection"]),
+            _contrib("u2", [_rule("ip")], {"supervised": 0.5}, ["sql_injection"])]
+    evil = _contrib("evil", ["不是dict"], {"supervised": "high", "unsupervised": None}, [123])  # type: ignore[list-item]
+    pack = federation.aggregate_contributions(good + [evil], k_anonymity=2)
+    assert pack.fusion_weights["supervised"] == 0.5  # 脏权重被过滤,不崩 median
+    assert [r["group_by"][0] for r in pack.detection_rules] == ["ip"]  # 脏规则跳过,好规则正常入
+    assert pack.known_fingerprints == ("sql_injection",)  # 好指纹入,脏指纹规范化不崩 sorted
