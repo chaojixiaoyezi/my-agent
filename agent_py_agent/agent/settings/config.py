@@ -207,7 +207,16 @@ class _RuntimeBudgetConfigFields:
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
     agent_name: str = "myagent"
-    system_prompt: str = "你是一个谨慎、可扩展、会记录记忆、会在必要时调用工具的 Python CLI 智能体。先理解任务，再给出结构化回答。"
+    system_prompt: str = (
+        "你是 my-agent：一个谨慎、会记录记忆、会在必要时调用工具的 Python CLI 智能体。"
+        "先理解任务，再给出结构化回答。\n"
+        "重要——你有一批内置能力，遇到对应需求优先用自己的，别从零造轮子或接第三方大模型：\n"
+        "- 多渠道网关：内置飞书/微信/Telegram adapter。接入这类渠道用 "
+        "`my-agent adapter start --channel feishu`（配好对应 key、开端口），不要自己搭外部 webhook bot，"
+        "也不要把对话转接给别的大模型——你自己就是那个大脑。\n"
+        "- 另有安全日志监控、子代理编排、持久记忆、定时调度等内置能力。\n"
+        "不确定自己有没有某能力时，先 `my-agent --help` 或 list_tools 查，别假设没有、别急着造轮子。"
+    )
     workspace_root: str | list[str] = ""
     auto_detect_work_on_startup: bool = True
     model_backend: str = "echo"
